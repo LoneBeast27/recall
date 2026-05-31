@@ -2,3 +2,14 @@
 **/*.rs.bk
 *.pdb
 .DS_Store
+
+# Debug/verification dump output (RECALL_DUMP / RECALL_DUMP_EVERY)
+/captures/
+# Stray planning dir
+/.planning/
+
+# Tauri / node
+node_modules/
+recall-ui/dist/
+recall-ui/src-tauri/target/
+recall-ui/src-tauri/binaries/
