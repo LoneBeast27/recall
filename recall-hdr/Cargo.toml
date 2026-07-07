@@ -35,3 +35,5 @@ toml = "0.8"
 # and the two CSC IDs are NOT in any public NVIDIA header (ledoge reverse-
 # engineered them), so a typed crate buys us nothing -- we hand-roll with libloading.
 libloading = "0.8"
+tray-icon = "0.24.1"
+global-hotkey = "0.8.0"

@@ -14,18 +14,21 @@
 // dead-code warnings until those land rather than littering per-item attributes.
 #![allow(dead_code)]
 
+mod app;
 mod clamp;
 mod config;
 mod display;
 mod edid;
 mod guard;
 mod hdr;
+mod hotkey;
 mod journal;
 mod logging;
 mod matrix;
 mod rules;
 mod state;
 mod supervisor;
+mod tray;
 mod types;
 mod watcher;
 
