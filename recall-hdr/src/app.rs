@@ -176,6 +176,9 @@ struct App {
 
     /// Cached status line so we only push tray updates on change.
     last_status: String,
+
+    /// Debounce for the save-clip hotkey (R10: re-presses must not dupe clips).
+    last_save_press: Option<Instant>,
 }
 
 // ===========================================================================
@@ -230,9 +233,15 @@ pub fn run() -> i32 {
             return 1;
         }
     };
-    let hotkey = crate::hotkey::Hotkey::register(&cfg.hotkey.toggle_hdr)
+    let hotkey = crate::hotkey::Hotkey::register(&cfg.hotkey.toggle_hdr, Some(&cfg.hotkey.save_clip))
         .map_err(|e| log!("app: hotkey register failed ({e}); continuing without a global hotkey"))
-        .ok();
+        .ok()
+        .map(|(hk, save_warn)| {
+            if let Some(w) = save_warn {
+                log!("app: save-clip hotkey unavailable ({w}); HDR toggle still active");
+            }
+            hk
+        });
 
     let (tx, watch_rx) = channel::<WatchEvent>();
     let watcher = match Watcher::install(tx, target_monitor) {
@@ -260,6 +269,7 @@ pub fn run() -> i32 {
         session_handle: None,
         liveness_wait_failed_logged: false,
         last_status: String::new(),
+        last_save_press: None,
         target,
         cfg,
     };
@@ -344,9 +354,13 @@ impl App {
                 }
             }
 
-            // (e) Hotkey fired -> same as ToggleHdrNow.
-            if hotkey.map(|h| h.poll()).unwrap_or(false) {
+            // (e) Hotkeys fired -> HDR toggle / replay save.
+            let fired = hotkey.map(|h| h.poll()).unwrap_or_default();
+            if fired.toggle_hdr {
                 self.toggle_hdr_now();
+            }
+            if fired.save_clip {
+                self.save_clip_now(supervisor);
             }
 
             // (f) Session liveness: has the tracked game process exited?
@@ -702,6 +716,24 @@ impl App {
         log!("app: manual HDR pin -> {on}");
         // No direct execute() here: the pump's `reconciler.poll(now)` on this same
         // loop iteration emits the converging actions through the journalled path.
+    }
+
+    /// Save-clip hotkey: debounce re-presses (2s) then forward `save_clip` to
+    /// the supervised engine over its stdin protocol. The engine's Saved /
+    /// SaveFailed events (surfaced by the supervisor reader + beep) are the
+    /// user-visible outcome.
+    fn save_clip_now(&mut self, supervisor: &Supervisor) {
+        let now = Instant::now();
+        if self
+            .last_save_press
+            .is_some_and(|t| now.duration_since(t) < Duration::from_secs(2))
+        {
+            log!("app: save_clip hotkey debounced");
+            return;
+        }
+        self.last_save_press = Some(now);
+        log!("app: save_clip hotkey -> engine");
+        supervisor.send_save_clip();
     }
 
     /// Upsert an override for the last focused stem to `kind`, then save.

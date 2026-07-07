@@ -29,7 +29,23 @@ pub enum Outbound {
         width: u32,
         height: u32,
         fps: u32,
+        /// Seconds of replay currently buffered (0.0 when encode is off/down).
+        buffer_secs: f32,
+        /// "h264_nvenc" | "libx264" | "off" | "failed".
+        encoder: String,
     },
+    /// A `save_clip` completed: the clip is on disk.
+    Saved {
+        path: String,
+        seconds: f32,
+        frames: u64,
+        bytes: u64,
+        elapsed_ms: u64,
+    },
+    /// A `save_clip` failed.
+    SaveFailed { reason: String },
+    /// Encoder lifecycle/diagnostic line (machine-readable log).
+    EncoderLog { message: String },
 }
 
 #[derive(Serialize)]
@@ -47,6 +63,8 @@ pub struct MonitorInfo {
 pub enum Command {
     /// value: "auto" | "sdr" | "hdr"
     SetMode { value: String },
+    /// Save the last N seconds of the replay buffer (default: full buffer).
+    SaveClip { seconds: Option<u32> },
     /// Ask the engine to exit cleanly.
     Quit,
 }

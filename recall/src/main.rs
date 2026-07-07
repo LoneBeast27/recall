@@ -8,16 +8,24 @@
 //! sidecar via `--json` (machine protocol: JSON status on stdout, commands on
 //! stdin). See `protocol.rs`.
 
+#[cfg(feature = "encode")]
+mod audio;
 mod border;
 mod capture;
 mod debug_dump;
+#[cfg(feature = "encode")]
+mod encoder;
 mod gpu;
+#[cfg(feature = "encode")]
+mod moments;
 mod hdr;
+mod pacer;
 mod protocol;
+mod ring;
 mod source;
 
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use winit::application::ApplicationHandler;
@@ -53,6 +61,9 @@ fn parse_args() -> Config {
     cfg
 }
 
+/// Stdin-thread hook that triggers a replay save (None when encode is off).
+type SaveHook = Box<dyn Fn(Option<u32>) + Send>;
+
 #[derive(Default)]
 struct App {
     config: Config,
@@ -61,9 +72,16 @@ struct App {
     shared: Option<Arc<CaptureShared>>,
     capture: Option<CaptureControlHandle>,
     source_name: String,
+    /// Source name mirror for the stdin thread's save-path naming.
+    source_shared: Arc<Mutex<String>>,
     poll_counter: u32,
     last_hdr: Option<bool>,
     max_nits: f32,
+    // replay encode
+    pacer: Option<pacer::Pacer>,
+    enc_fps: u32,
+    #[cfg(feature = "encode")]
+    encoder: Option<encoder::EncoderHandle>,
     // fps tracking
     fps_count: u32,
     fps_last: Option<Instant>,
@@ -112,13 +130,61 @@ impl ApplicationHandler for App {
             shared.set_select(v);
         }
 
+        // Replay encoder (feature `encode`): continuous NVENC into a RAM ring.
+        let mut save_hook: Option<SaveHook> = None;
+        self.enc_fps = std::env::var("RECALL_FPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(60);
+        #[cfg(feature = "encode")]
+        {
+            let buffer_secs: u32 = std::env::var("RECALL_BUFFER_SECS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(60);
+            let out_dir = std::env::var("RECALL_OUT_DIR")
+                .unwrap_or_else(|_| r"V:\ALL RECORDINGS".to_string());
+            let json = self.config.json;
+            let tracks = audio::start(buffer_secs, |msg| {
+                if json {
+                    protocol::emit(&protocol::Outbound::EncoderLog { message: msg });
+                } else {
+                    eprintln!("[recall] {msg}");
+                }
+            });
+            let handle = encoder::spawn(
+                encoder::Config {
+                    fps: self.enc_fps,
+                    buffer_secs,
+                    bitrate: std::env::var("RECALL_BITRATE")
+                        .ok()
+                        .and_then(|v| v.parse().ok())
+                        .unwrap_or(25_000_000),
+                    json: self.config.json,
+                },
+                tracks,
+            );
+            let cmds = handle.commands.clone();
+            let src = self.source_shared.clone();
+            save_hook = Some(Box::new(move |secs: Option<u32>| {
+                let name = src.lock().map(|s| s.clone()).unwrap_or_default();
+                let path = encoder::clip_path(&out_dir, &name);
+                let _ = cmds.send(encoder::SaveRequest {
+                    path,
+                    seconds: secs.unwrap_or(buffer_secs),
+                });
+            }));
+            self.encoder = Some(handle);
+            self.pacer = Some(pacer::Pacer::new(self.enc_fps));
+        }
+
         // Announce version + monitors before capture starts (sidecar mode).
         if self.config.json {
             protocol::emit(&protocol::Outbound::Hello {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 monitors: capture::list_monitors(),
             });
-            spawn_stdin_reader(shared.clone());
+            spawn_stdin_reader(shared.clone(), save_hook);
         }
 
         self.source_name = INITIAL_TITLE.trim_end_matches(" SDR").to_string();
@@ -152,6 +218,8 @@ impl ApplicationHandler for App {
                 if let Some(gpu) = &mut self.gpu {
                     gpu.render();
                 }
+                #[cfg(feature = "encode")]
+                self.encode_tick();
                 self.tick_fps();
                 self.periodic_update();
                 if let Some(w) = &self.window {
@@ -164,6 +232,39 @@ impl ApplicationHandler for App {
 }
 
 impl App {
+    /// Pace + feed the replay encoder: when one or more CFR indices are due,
+    /// tonemap-readback ONE frame and emit it under every due index (dup-fill).
+    #[cfg(feature = "encode")]
+    fn encode_tick(&mut self) {
+        let Some(enc) = &self.encoder else { return };
+        let Some(gpu) = &mut self.gpu else { return };
+        if gpu.source_size().is_none() {
+            return; // no captured frame yet -- don't burn pacer indices
+        }
+        let Some(pacer) = &mut self.pacer else { return };
+        let due: Vec<u64> = pacer.due(Instant::now()).collect();
+        if due.is_empty() {
+            return;
+        }
+        let Some((w, h, mut rgba)) = gpu.encode_frame() else {
+            return;
+        };
+        let last = due.len() - 1;
+        for (i, idx) in due.into_iter().enumerate() {
+            let data = if i == last {
+                std::mem::take(&mut rgba)
+            } else {
+                rgba.clone()
+            };
+            let _ = enc.frames.send(encoder::PacedFrame {
+                idx,
+                width: w,
+                height: h,
+                rgba: data,
+            });
+        }
+    }
+
     fn tick_fps(&mut self) {
         self.fps_count += 1;
         let now = Instant::now();
@@ -192,6 +293,9 @@ impl App {
         if let Some(name) = source::captured_source() {
             if name != self.source_name {
                 self.source_name = name.clone();
+                if let Ok(mut s) = self.source_shared.lock() {
+                    *s = name.clone();
+                }
                 let title = format!("{name} SDR");
                 if let Some(w) = &self.window {
                     w.set_title(&title);
@@ -244,6 +348,7 @@ impl App {
         } else {
             "passthrough"
         };
+        let (buffer_secs, encoder_label) = self.encoder_status();
         protocol::emit(&protocol::Outbound::Status {
             display: if self.last_hdr == Some(true) { "hdr" } else { "sdr" }.to_string(),
             max_nits: self.max_nits,
@@ -253,12 +358,36 @@ impl App {
             width,
             height,
             fps: self.fps,
+            buffer_secs,
+            encoder: encoder_label,
         });
+    }
+
+    #[cfg(feature = "encode")]
+    fn encoder_status(&self) -> (f32, String) {
+        let Some(enc) = &self.encoder else {
+            return (0.0, "off".to_string());
+        };
+        use std::sync::atomic::Ordering::Relaxed as R;
+        let frames = enc.stats.buffered_frames.load(R);
+        let label = match enc.stats.backend.load(R) {
+            1 => "h264_nvenc",
+            2 => "libx264",
+            3 => "failed",
+            _ => "starting",
+        };
+        (frames as f32 / self.enc_fps.max(1) as f32, label.to_string())
+    }
+
+    #[cfg(not(feature = "encode"))]
+    fn encoder_status(&self) -> (f32, String) {
+        (0.0, "off".to_string())
     }
 }
 
-/// Read newline-delimited JSON commands from stdin and apply them to shared state.
-fn spawn_stdin_reader(shared: Arc<CaptureShared>) {
+/// Read newline-delimited JSON commands from stdin and apply them to shared
+/// state. `save` triggers a replay-buffer save (None when encode is off).
+fn spawn_stdin_reader(shared: Arc<CaptureShared>, save: Option<SaveHook>) {
     std::thread::spawn(move || {
         use std::io::BufRead;
         let stdin = std::io::stdin();
@@ -270,6 +399,12 @@ fn spawn_stdin_reader(shared: Arc<CaptureShared>) {
             }
             match serde_json::from_str::<protocol::Command>(line) {
                 Ok(protocol::Command::SetMode { value }) => shared.set_select(&value),
+                Ok(protocol::Command::SaveClip { seconds }) => match &save {
+                    Some(hook) => hook(seconds),
+                    None => protocol::emit(&protocol::Outbound::SaveFailed {
+                        reason: "engine built without the encode feature".to_string(),
+                    }),
+                },
                 Ok(protocol::Command::Quit) => {
                     shared.quit.store(true, Relaxed);
                     break;

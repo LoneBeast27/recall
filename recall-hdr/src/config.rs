@@ -81,6 +81,15 @@ pub struct BehaviorCfg {
 pub struct HotkeyCfg {
     /// Accelerator that toggles Windows HDR on the target display.
     pub toggle_hdr: String,
+    /// Accelerator that saves the engine's replay buffer (`save_clip`).
+    /// serde-defaulted so configs written before this field still parse
+    /// (an unparseable config gets quarantined to .bad + silent defaults).
+    #[serde(default = "default_save_clip_accel")]
+    pub save_clip: String,
+}
+
+fn default_save_clip_accel() -> String {
+    "Ctrl+Alt+S".into()
 }
 
 /// `[startup]` -- run-at-login behavior, mirrored to the HKCU Run key on save.
@@ -233,6 +242,7 @@ impl Default for HotkeyCfg {
     fn default() -> Self {
         HotkeyCfg {
             toggle_hdr: "Ctrl+Alt+H".into(),
+            save_clip: default_save_clip_accel(),
         }
     }
 }

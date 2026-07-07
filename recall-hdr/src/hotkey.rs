@@ -32,16 +32,23 @@ use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 pub struct Hotkey {
     manager: GlobalHotKeyManager,
     hotkey: HotKey,
+    /// Optional second accelerator: save the engine's replay buffer.
+    save: Option<HotKey>,
+}
+
+/// What fired since the last poll (drained from ONE shared channel — never
+/// instantiate two `Hotkey`s, they would steal each other's events).
+#[derive(Default, Clone, Copy)]
+pub struct Fired {
+    pub toggle_hdr: bool,
+    pub save_clip: bool,
 }
 
 impl Hotkey {
-    /// Parse `accel` (e.g. `"Ctrl+Alt+H"`, `"Win+Shift+F1"`) and register it as a
-    /// system-wide hotkey.
-    ///
-    /// Returns `Err(String)` (never panics) on a malformed accelerator, on manager
-    /// creation failure, or if the OS refuses the registration (e.g. the combo is
-    /// already owned by another app). Must be called on the message-pump thread.
-    pub fn register(accel: &str) -> Result<Hotkey, String> {
+    /// Parse + register the toggle accelerator (hard error) and, optionally, a
+    /// save-clip accelerator (best-effort: failure is returned as a warning so
+    /// the toggle still works). Must be called on the message-pump thread.
+    pub fn register(accel: &str, save_accel: Option<&str>) -> Result<(Hotkey, Option<String>), String> {
         let hotkey = parse_accel(accel)?;
 
         let manager = GlobalHotKeyManager::new()
@@ -51,23 +58,41 @@ impl Hotkey {
             .register(hotkey)
             .map_err(|e| format!("register hotkey '{accel}' failed: {e}"))?;
 
-        Ok(Hotkey { manager, hotkey })
+        let (save, warn) = match save_accel {
+            None => (None, None),
+            Some(s) => match parse_accel(s).and_then(|hk| {
+                manager
+                    .register(hk)
+                    .map(|_| hk)
+                    .map_err(|e| format!("register hotkey '{s}' failed: {e}"))
+            }) {
+                Ok(hk) => (Some(hk), None),
+                Err(e) => (None, Some(e)),
+            },
+        };
+
+        Ok((Hotkey { manager, hotkey, save }, warn))
     }
 
-    /// Drain the process-global hotkey event channel and report whether our toggle
-    /// fired since the last poll.
+    /// Drain the process-global hotkey event channel and report which of our
+    /// accelerators fired since the last poll.
     ///
     /// Non-blocking: uses `try_recv` until the channel is empty. Only
-    /// [`HotKeyState::Pressed`] events matching our registered id count; the paired
-    /// `Released` event and any (currently none) foreign ids are discarded. If the
-    /// key was pressed multiple times between polls it still reports a single
-    /// `true` -- the toggle is level-triggered, not a counter.
-    pub fn poll(&self) -> bool {
-        let mut fired = false;
+    /// [`HotKeyState::Pressed`] events matching our registered ids count; the
+    /// paired `Released` events and foreign ids are discarded. Level-triggered:
+    /// multiple presses between polls still report a single `true`.
+    pub fn poll(&self) -> Fired {
+        let mut fired = Fired::default();
         let rx = GlobalHotKeyEvent::receiver();
         while let Ok(event) = rx.try_recv() {
-            if event.id == self.hotkey.id() && event.state == HotKeyState::Pressed {
-                fired = true;
+            if event.state != HotKeyState::Pressed {
+                continue;
+            }
+            if event.id == self.hotkey.id() {
+                fired.toggle_hdr = true;
+            }
+            if self.save.is_some_and(|hk| hk.id() == event.id) {
+                fired.save_clip = true;
             }
         }
         fired
@@ -84,6 +109,9 @@ impl Drop for Hotkey {
         // Best-effort: a failed unregister on teardown is not actionable and must
         // not panic in a Drop.
         let _ = self.manager.unregister(self.hotkey);
+        if let Some(save) = self.save {
+            let _ = self.manager.unregister(save);
+        }
     }
 }
 
