@@ -13,3 +13,6 @@ node_modules/
 recall-ui/dist/
 recall-ui/src-tauri/target/
 recall-ui/src-tauri/binaries/
+
+# generator binary (CI prebuilt, re-downloadable)
+tools/hdr-gamma-fix/bin/

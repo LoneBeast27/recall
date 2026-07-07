@@ -1,0 +1,14 @@
+﻿# HDR Gamma Fix — Rollback Snapshot
+# Captured: 2026-07-07T19:13:03.2281954+05:30
+# Target display: PG27AQDP  DISPLAY\AUS2740\5&14c483c&0&UID4357_0  (device instance key 0011)
+
+## ICM ProfileAssociations (HKCU) — full pre-change state
+[instance 0006]
+  UsePerUserProfiles = 1
+  ICMProfileAC = HDR Calibrated Profile 5-25-2025 153429.icc
+[instance 0011]
+  UsePerUserProfiles = 1
+  ICMProfileAC = HDR Calibrated Profile 5-29-2026 53217.icc; HDR Calibrated Profile 5-31-2026 85134.icc
+[instance MDM0]
+  UsePerUserProfiles = 1
+  ICMProfileAC = HDR Calibrated Profile 5-25-2025 153429.icc
