@@ -1,0 +1,1 @@
+L:\Projects\recall\tools\hdr-testcard\target\debug\hdr-testcard.exe: L:\Projects\recall\tools\hdr-testcard\src\config.rs L:\Projects\recall\tools\hdr-testcard\src\gpu.rs L:\Projects\recall\tools\hdr-testcard\src\main.rs L:\Projects\recall\tools\hdr-testcard\src\solid.wgsl

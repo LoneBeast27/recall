@@ -1,0 +1,22 @@
+# HDR Testcard — a digital-colourimeter reference source for the Recall test rig.
+#
+# Standalone crate: the empty [workspace] table below detaches it from the root
+# `L:\Projects\recall\Cargo.toml` workspace (whose members list is owned by a
+# different session). Without this, cargo would try to fold this crate into the
+# root workspace and fail because it is not listed there. Do NOT remove it.
+[workspace]
+
+[package]
+name = "hdr-testcard"
+version = "0.1.0"
+edition = "2021"
+description = "HDR test-card / digital-colourimeter reference source for Recall's display-manager test rig"
+
+[dependencies]
+# Pinned to the SAME versions the Recall capture engine uses (recall/Cargo.toml)
+# so the winit-0.30 ApplicationHandler + wgpu-29 surface API match exactly.
+winit = "0.30"
+wgpu = "29"
+pollster = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
