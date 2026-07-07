@@ -23,7 +23,11 @@ mod hdr;
 mod journal;
 mod logging;
 mod matrix;
+mod rules;
+mod state;
+mod supervisor;
 mod types;
+mod watcher;
 
 use std::thread::sleep;
 use std::time::Duration;
