@@ -20,10 +20,10 @@
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE, POINT, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, POINT, WAIT_FAILED, WAIT_OBJECT_0};
 use windows::Win32::Graphics::Gdi::{MonitorFromPoint, HMONITOR, MONITOR_DEFAULTTOPRIMARY};
 use windows::Win32::System::Threading::{
-    OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION,
+    OpenProcess, WaitForSingleObject, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     DispatchMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW, TranslateMessage, MSG,
@@ -169,6 +169,10 @@ struct App {
     /// Kept-open liveness handle for the current session pid (`None` when on the
     /// baseline). Re-opened when the session pid changes.
     session_handle: Option<(u32, HANDLE)>,
+    /// Whether we've already logged a `WaitForSingleObject` failure for the
+    /// *current* session handle (one line per session, not per 250ms tick).
+    /// Reset whenever a new session handle is opened.
+    liveness_wait_failed_logged: bool,
 
     /// Cached status line so we only push tray updates on change.
     last_status: String,
@@ -254,6 +258,7 @@ pub fn run() -> i32 {
         auto_enabled: true,
         last_stem: None,
         session_handle: None,
+        liveness_wait_failed_logged: false,
         last_status: String::new(),
         target,
         cfg,
@@ -438,10 +443,33 @@ impl App {
         // Session ended (or replaced): close a stale handle.
         match (&self.session_handle, session_pid) {
             (Some((held, h)), Some(pid)) if *held == pid => {
-                // Same session -> poll liveness on the held handle.
-                let exited = unsafe { WaitForSingleObject(*h, 0) } == WAIT_OBJECT_0;
-                if exited {
-                    log!("app: session pid {pid} exited");
+                // Same session -> poll liveness on the held handle. The handle is
+                // opened with SYNCHRONIZE (see `open_session_handle`), so a normal
+                // `WaitForSingleObject(0)` returns WAIT_OBJECT_0 once the process
+                // exits and WAIT_TIMEOUT while it lives.
+                let wait = unsafe { WaitForSingleObject(*h, 0) };
+                // FAIL-SAFE: if the wait itself fails (WAIT_FAILED -- e.g. the
+                // handle somehow lacks SYNCHRONIZE, or the OS revoked the wait), the
+                // liveness instrument can no longer read the process. A liveness
+                // probe that can't read MUST NOT strand HDR/clamp on: treat an
+                // unreadable session as EXITED so the display always reverts, rather
+                // than silently trusting a broken probe forever. Log once per
+                // session (this fires every ~250ms tick) so a real regression is
+                // visible without flooding the log.
+                let exited = wait == WAIT_OBJECT_0;
+                let wait_failed = wait == WAIT_FAILED;
+                if wait_failed && !self.liveness_wait_failed_logged {
+                    self.liveness_wait_failed_logged = true;
+                    log!(
+                        "app: session pid {pid} liveness WaitForSingleObject failed \
+                         ({:?}); treating session as exited (fail-safe -- never strand HDR)",
+                        std::io::Error::last_os_error()
+                    );
+                }
+                if exited || wait_failed {
+                    if exited {
+                        log!("app: session pid {pid} exited");
+                    }
                     self.close_session_handle();
                     self.reconciler.on_session_exit(pid, Instant::now());
                 }
@@ -460,7 +488,13 @@ impl App {
     }
 
     fn open_session_handle(&mut self, pid: u32) {
-        match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+        // PROCESS_SYNCHRONIZE is REQUIRED for WaitForSingleObject to signal on exit.
+        // With PROCESS_QUERY_LIMITED_INFORMATION alone the wait returns WAIT_FAILED
+        // (ACCESS_DENIED), so the exit branch never fires and HDR/clamp is never
+        // reverted live. QLI is kept for the process-identity query rights.
+        let rights = PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE;
+        self.liveness_wait_failed_logged = false; // fresh session -> fresh log budget
+        match unsafe { OpenProcess(rights, false, pid) } {
             Ok(h) if !h.is_invalid() => {
                 self.session_handle = Some((pid, h));
             }
@@ -480,6 +514,7 @@ impl App {
                 let _ = CloseHandle(h);
             }
         }
+        self.liveness_wait_failed_logged = false;
     }
 
     // -- executor -----------------------------------------------------------
@@ -544,7 +579,38 @@ impl App {
                 b.hdr_original = original;
             })?;
         }
-        display::set_hdr_state(&self.target, false)
+        display::set_hdr_state(&self.target, false)?;
+
+        // Returning to the HDR-OFF baseline un-owes the restore for the facets a
+        // live HDR session touched -- WITHOUT this the journal is stranded dirty
+        // after every clean live revert (it never auto-clears in `execute`, and a
+        // later clean launch runs a spurious startup "repair"). We un-touch AFTER
+        // the HDR flip succeeds (mutate-then-journal for the un-touch) so the
+        // journal never under-claims a LIVE mutation: a crash before these records
+        // just leaves now-moot flags that `--restore` harmlessly re-asserts (the
+        // pre-fix behavior, HDR already off / SDR-white a no-op).
+        //
+        //  * SDR-white is an HDR-MODE property (Windows applies the SDR-content
+        //    white level only while HDR is on); with HDR off it owes nothing. This
+        //    mirrors the reconciler, whose `confirm(DisableHdr)` resets its
+        //    SDR-white model to the "unset" sentinel.
+        //  * HDR is un-touched ONLY when we returned it to its recorded original
+        //    (`hdr_original == false`, the HDR-off baseline this revert targets).
+        //    If the user's original was HDR-ON (`hdr_original == true`) a restore
+        //    is still genuinely owed, so we KEEP `hdr_touched` and let the journal
+        //    stay dirty for that real repair.
+        let base = self.journal.baseline();
+        let untouch_hdr = base.hdr_touched && !base.hdr_original;
+        if untouch_hdr || base.sdr_white_touched {
+            self.journal.record(|b| {
+                if untouch_hdr {
+                    b.hdr_touched = false;
+                }
+                b.sdr_white_touched = false;
+                b.sdr_white_original = 0;
+            })?;
+        }
+        Ok(())
     }
 
     fn exec_set_clamp(&mut self, mode: ClampMode) -> Result<(), String> {
