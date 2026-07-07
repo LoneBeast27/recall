@@ -30,8 +30,10 @@ mod logging;
 mod matrix;
 mod rules;
 mod state;
+mod control;
 mod supervisor;
 mod tray;
+mod wcs;
 mod types;
 mod watcher;
 

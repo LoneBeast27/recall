@@ -132,6 +132,18 @@ impl Supervisor {
         self.shared.send_line(r#"{"cmd":"save_clip"}"#);
     }
 
+    /// Forward an arbitrary engine protocol command line (control-pipe path).
+    pub fn send_engine_line(&self, line: &str) {
+        self.shared.send_line(line);
+    }
+
+    /// Attach the control-pipe hub; engine stdout lines get re-broadcast to it.
+    pub fn attach_hub(&self, hub: std::sync::Arc<crate::control::PipeHub>) {
+        if let Ok(mut g) = self.shared.hub.lock() {
+            *g = Some(hub);
+        }
+    }
+
     pub fn shutdown(mut self, grace: Duration) {
         self.shared.request_stop(grace);
         if let Some(handle) = self.handle.take() {
@@ -171,6 +183,8 @@ struct Shared {
     /// Count of `hello` messages parsed across the child's lifetime. Test-visible
     /// proof that spawn->protocol actually happened.
     hello_count: std::sync::atomic::AtomicU32,
+    /// Control-pipe hub: engine protocol lines are re-broadcast to hub clients.
+    hub: Mutex<Option<std::sync::Arc<crate::control::PipeHub>>>,
 }
 
 impl Shared {
@@ -181,6 +195,16 @@ impl Shared {
             grace_ms: Mutex::new(0),
             child_stdin: Mutex::new(None),
             hello_count: std::sync::atomic::AtomicU32::new(0),
+            hub: Mutex::new(None),
+        }
+    }
+
+    /// Re-broadcast one engine protocol line to control-pipe clients (if any).
+    fn hub_engine_event(&self, line: &str) {
+        if let Ok(g) = self.hub.lock() {
+            if let Some(h) = g.as_ref() {
+                h.event("engine", line);
+            }
         }
     }
 
@@ -586,6 +610,7 @@ fn read_protocol(shared: &Arc<Shared>, stdout: std::process::ChildStdout) {
         let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
             continue; // ignore non-JSON / malformed lines
         };
+        shared.hub_engine_event(line);
         match val.get("type").and_then(|t| t.as_str()) {
             Some("hello") => {
                 let version = val.get("version").and_then(|v| v.as_str()).unwrap_or("?");
