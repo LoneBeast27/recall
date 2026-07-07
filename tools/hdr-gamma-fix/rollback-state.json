@@ -1,11 +1,15 @@
-﻿{
+{
     "CapturedUtc":  "2026-07-07T13:45:50.7603144Z",
     "TargetInstance":  "0011",
-    "TargetDisplayId":  "DISPLAY\\AUS2740\\5\u002614c483c\u00260\u0026UID4357_0",
+    "TargetDisplayId":  "DISPLAY\\AUS2740\\5&14c483c&0&UID4357_0",
     "AcmKey":  "HKCU:\\SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\ICM\\ProfileAssociations\\Display\\{4d36e96e-e325-11ce-bfc1-08002be10318}\\0011",
     "ICMProfileAC":  [
                          "HDR Calibrated Profile 5-29-2026 53217.icc",
                          "HDR Calibrated Profile 5-31-2026 85134.icc"
                      ],
-    "InstalledProfile":  "PG27AQDP_sRGB-to-Gamma2.2_MHC2.icm"
+    "ManagedProfiles":  [
+                            "PG27AQDP_sRGB-to-Gamma2.2_MHC2.icm",
+                            "PG27AQDP_Punchy-Gamma2.2_MHC2.icm"
+                        ],
+    "InstalledProfile":  "PG27AQDP_Punchy-Gamma2.2_MHC2.icm"
 }
