@@ -1,0 +1,3 @@
+# Transient harness scratch: dump PNGs, oracle stderr captures, saved config,
+# per-run logs. Regenerated on every run; never committed.
+.work/
