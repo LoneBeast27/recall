@@ -91,6 +91,16 @@ pub struct Reconciler {
     /// The committed live game session, if any. `None` == on the desktop baseline.
     session: Option<Session>,
 
+    /// A user's manual HDR pin (tray "Toggle HDR now" / hotkey), `None` == no pin.
+    /// A desired-state override, NOT an executor bypass: it feeds [`desired`] so the
+    /// reconcile/journal/confirm machinery applies it and, crucially, does NOT undo
+    /// it on the next tick (the self-cancel bug this field fixes). A **game session
+    /// outranks the pin** so the game experience is never held hostage by a stale
+    /// pin; committing a new session clears it (see [`commit`]). Normalized so
+    /// `Some(false)` with no session collapses to `None` (a pin equal to the HDR-off
+    /// baseline is not a pin) -- see [`toggle_manual_hdr`].
+    manual_hdr: Option<bool>,
+
     /// A foreground event awaiting its debounce deadline. Replaced by any newer
     /// event; consumed (committed or discarded) by [`poll`] once the deadline
     /// passes.
@@ -119,6 +129,7 @@ impl Reconciler {
             debounce,
             sdr_white,
             session: None,
+            manual_hdr: None,
             pending: None,
             actual: DesiredDisplay {
                 hdr: false,
@@ -167,6 +178,45 @@ impl Reconciler {
     /// yet the session and is not returned here.)
     pub fn session_pid(&self) -> Option<u32> {
         self.session.map(|s| s.pid)
+    }
+
+    /// Manual HDR toggle (tray "Toggle HDR now" / hotkey). Flips the pin relative to
+    /// the CURRENT effective desired HDR (`new = !desired().hdr`), stores it, and
+    /// returns the new HDR intent for the caller to log / surface in the status line.
+    ///
+    /// This is a **desired-state** override, not an executor bypass: the pin feeds
+    /// [`desired`], so the very next [`poll`] emits the converging actions through
+    /// the normal journal/confirm path and -- because `desired()` now reflects the
+    /// pin -- the reconciler will NOT diff it back out on the following tick (the
+    /// self-cancel bug). It acts immediately on the next poll; no debounce (that is a
+    /// noise filter for foreground events, not deliberate user intent).
+    ///
+    /// Precedence: a live game session outranks the pin (see [`desired`]), so
+    /// toggling while a game holds the display flips relative to the game's desired
+    /// HDR but is inert until the session ends; the common case (on the desktop) is
+    /// the whole point -- a manual HDR-on that STAYS on.
+    ///
+    /// Normalization: a pin equal to the HDR-off baseline (`Some(false)` with no
+    /// session) is stored as `None` -- it is not a pin, just baseline. `pin on ->
+    /// off` therefore returns `false` and clears the pin.
+    pub fn toggle_manual_hdr(&mut self) -> bool {
+        let new_pin = !self.desired().hdr;
+        // Some(false) == the no-session baseline; normalize to None (not a pin).
+        self.manual_hdr = if new_pin { Some(true) } else { None };
+        new_pin
+    }
+
+    /// Whether a manual HDR pin is currently in effect (introspection for the status
+    /// line, so the user sees *why* HDR is on -- "HDR (manual)").
+    pub fn manual_pinned(&self) -> bool {
+        self.manual_hdr.is_some()
+    }
+
+    /// Drop any manual HDR pin (RestoreNow / shutdown, so the restore isn't
+    /// immediately re-asserted by a stale pin). The next [`poll`] reconciles from the
+    /// session-derived desired state alone.
+    pub fn clear_manual(&mut self) {
+        self.manual_hdr = None;
     }
 
     /// When the message loop should next wake to call [`poll`]: the pending
@@ -233,6 +283,11 @@ impl Reconciler {
                     pid: p.pid,
                     clamp: p.clamp,
                 });
+                // A new game takes over the display: drop any manual pin so that on
+                // this session's exit we return to the TRUE HDR-off baseline, not a
+                // stale pre-game pin. (Session exit does NOT resurrect the pin --
+                // it was cleared here, at session start.)
+                self.manual_hdr = None;
             }
             AppKind::NonGame => {
                 // Alt-tab blip. If a session is live it PERSISTS (HDR stays on, no
@@ -265,11 +320,24 @@ impl Reconciler {
                 sdr_white: Self::SDR_WHITE_UNSET,
             },
             // A committed NonGame session is never stored, so this arm is the
-            // no-session baseline.
-            _ => DesiredDisplay {
-                hdr: false,
-                clamp: ClampMode::Off,
-                sdr_white: Self::SDR_WHITE_UNSET,
+            // no-session baseline -- where a manual HDR pin (if any) applies. The
+            // pin outranks nothing here (there is no session), and a game session in
+            // the arms above outranks it: the game experience is never held hostage
+            // by a stale pin. The pin only affects HDR (+ SDR-white asserted when HDR
+            // is on, exactly like an HdrGame session); it never touches the clamp.
+            // `manual_hdr` is normalized so only `Some(true)` reaches here as a real
+            // override (`Some(false)`/`None` == the HDR-off baseline).
+            _ => match self.manual_hdr {
+                Some(true) => DesiredDisplay {
+                    hdr: true,
+                    clamp: ClampMode::Off,
+                    sdr_white: self.sdr_white,
+                },
+                _ => DesiredDisplay {
+                    hdr: false,
+                    clamp: ClampMode::Off,
+                    sdr_white: Self::SDR_WHITE_UNSET,
+                },
             },
         }
     }
@@ -605,5 +673,156 @@ mod tests {
             actions,
             vec![Action::ClearClamp, Action::EnableHdr, Action::SetSdrWhite(SDR_WHITE)]
         );
+    }
+
+    // -- manual HDR pin (tray "Toggle HDR now" / hotkey) ---------------------
+
+    #[test]
+    fn manual_pin_on_emits_hdr_and_persists_across_polls_no_self_cancel() {
+        // The core regression: a manual toggle-on must ENABLE HDR and STAY on --
+        // no DisableHdr on any subsequent poll (the ~290ms self-cancel bug).
+        let mut r = rec();
+        let base = t0();
+
+        let on = r.toggle_manual_hdr();
+        assert!(on, "toggle from baseline pins HDR on");
+        assert!(r.manual_pinned());
+
+        // First poll applies the pin: EnableHdr + SetSdrWhite (same shape as a game).
+        let first = r.poll(base);
+        assert_eq!(first, vec![Action::EnableHdr, Action::SetSdrWhite(SDR_WHITE)]);
+        for a in &first {
+            r.confirm(*a);
+        }
+        assert!(r.actual().hdr, "HDR is on after the pin applied");
+
+        // Multiple later polls must be EMPTY -- the pin holds, nothing undoes it.
+        for k in 1..=5 {
+            let later = r.poll(base + Duration::from_millis(300 * k));
+            assert_eq!(later, vec![], "poll #{k} after pin must NOT self-cancel HDR");
+        }
+        assert!(r.actual().hdr, "HDR stayed on the whole time");
+    }
+
+    #[test]
+    fn manual_pin_toggle_again_disables_hdr() {
+        // Pin on, then toggle again -> HDR back off, pin cleared (normalized).
+        let mut r = rec();
+        let base = t0();
+        assert!(r.toggle_manual_hdr());
+        for a in &r.poll(base) {
+            r.confirm(*a);
+        }
+        assert!(r.actual().hdr);
+
+        let on = r.toggle_manual_hdr();
+        assert!(!on, "second toggle intends HDR off");
+        assert!(!r.manual_pinned(), "Some(false) normalizes to None -- not a pin");
+        let off = r.poll(base + Duration::from_millis(100));
+        assert_eq!(off, vec![Action::DisableHdr]);
+        for a in &off {
+            r.confirm(*a);
+        }
+        assert!(!r.actual().hdr, "HDR is back off");
+    }
+
+    #[test]
+    fn game_session_commit_clears_manual_pin_and_drives_its_own_class() {
+        // A pin is live (HDR on) on the desktop; then an SDR game settles. The game
+        // OUTRANKS the pin: it clears the pin and drives its own class (HDR off +
+        // clamp). The pin must not survive to fight the game.
+        let mut r = rec();
+        let base = t0();
+        assert!(r.toggle_manual_hdr());
+        for a in &r.poll(base) {
+            r.confirm(*a);
+        }
+        assert!(r.actual().hdr && r.manual_pinned());
+
+        // An SDR game settles -> replacement of the pin by a real session.
+        let actions = settle(&mut r, AppKind::SdrGame, 7, ClampMode::Accurate, base + Duration::from_secs(2));
+        assert!(!r.manual_pinned(), "committing a game clears the pin");
+        // Leaving HDR (from the pin) before setting the SDR clamp -- ordering honored.
+        assert_eq!(actions, vec![Action::DisableHdr, Action::SetClamp(ClampMode::Accurate)]);
+        assert!(!r.actual().hdr);
+        assert_eq!(r.actual().clamp, ClampMode::Accurate);
+    }
+
+    #[test]
+    fn session_exit_returns_to_baseline_not_the_stale_pin() {
+        // Pin HDR on, a game commits (clearing the pin) and its own HDR settles,
+        // then the game exits. We must land on the TRUE baseline (HDR off), NOT
+        // resurrect the pre-game pin.
+        let mut r = rec();
+        let base = t0();
+        assert!(r.toggle_manual_hdr());
+        for a in &r.poll(base) {
+            r.confirm(*a);
+        }
+        // HDR game settles (pin cleared; game's own HDR persists -> no visible flip).
+        let commit = settle(&mut r, AppKind::HdrGame, 9, ClampMode::Off, base + Duration::from_secs(2));
+        assert_eq!(commit, vec![], "pin-on HDR == game HDR: nothing to change on commit");
+        assert!(!r.manual_pinned());
+
+        // Game exits -> revert to baseline HDR-off (the stale pin is NOT resurrected).
+        r.on_session_exit(9, base + Duration::from_secs(5));
+        let revert = r.poll(base + Duration::from_secs(5));
+        assert_eq!(revert, vec![Action::DisableHdr], "exit reverts to baseline, not the pin");
+        for a in &revert {
+            r.confirm(*a);
+        }
+        assert!(!r.actual().hdr);
+    }
+
+    #[test]
+    fn clear_manual_reverts_the_pin() {
+        // clear_manual (RestoreNow / shutdown) drops the pin so the next poll
+        // reconciles back to baseline.
+        let mut r = rec();
+        let base = t0();
+        assert!(r.toggle_manual_hdr());
+        for a in &r.poll(base) {
+            r.confirm(*a);
+        }
+        assert!(r.actual().hdr && r.manual_pinned());
+
+        r.clear_manual();
+        assert!(!r.manual_pinned());
+        let revert = r.poll(base + Duration::from_millis(100));
+        assert_eq!(revert, vec![Action::DisableHdr], "cleared pin reverts to baseline");
+    }
+
+    #[test]
+    fn pin_acts_immediately_no_debounce_needed() {
+        // A foreground debounce is pending (a game candidate not yet at deadline).
+        // A manual pin must still apply on the very next poll -- it is deliberate
+        // user intent, not a noisy foreground event, so it bypasses the debounce
+        // window entirely (the pin lives outside `pending`).
+        let mut r = rec();
+        let base = t0();
+        r.on_foreground(AppKind::SdrGame, 3, ClampMode::Accurate, base); // deadline = base + DEBOUNCE
+        assert!(r.toggle_manual_hdr());
+        // Poll BEFORE the debounce deadline: the pending game hasn't committed, but
+        // the pin is already effective -> HDR on now, no waiting.
+        let acted = r.poll(base + Duration::from_millis(10));
+        assert_eq!(acted, vec![Action::EnableHdr, Action::SetSdrWhite(SDR_WHITE)]);
+        assert_eq!(r.session_pid(), None, "the game candidate has NOT committed yet");
+    }
+
+    #[test]
+    fn pin_off_while_game_session_holds_flips_relative_to_game_but_is_inert() {
+        // Toggling while a game holds the display: the pin flips relative to the
+        // game's desired HDR, but a session OUTRANKS the pin, so nothing changes on
+        // the display until the session ends.
+        let mut r = rec();
+        let base = t0();
+        settle(&mut r, AppKind::HdrGame, 1, ClampMode::Off, base);
+        assert!(r.actual().hdr, "game drove HDR on");
+
+        // Toggle: desired().hdr is currently true (the game), so new pin intends off
+        // -> normalizes to None. Either way, the session still wins: no actions.
+        let _ = r.toggle_manual_hdr();
+        assert_eq!(r.poll(base + Duration::from_secs(1)), vec![], "session outranks the pin");
+        assert!(r.actual().hdr, "game HDR is untouched by the pin");
     }
 }
