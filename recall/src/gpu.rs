@@ -225,6 +225,11 @@ impl Gpu {
         self.surface.configure(&self.device, &self.config);
     }
 
+    /// Resolution of the currently uploaded captured frame, if any.
+    pub fn source_size(&self) -> Option<(u32, u32)> {
+        self.source.as_ref().map(|s| (s.width, s.height))
+    }
+
     /// (Re)create the source texture + bind group for a given capture resolution.
     fn ensure_source(&mut self, width: u32, height: u32) {
         if matches!(&self.source, Some(s) if s.width == width && s.height == height) {

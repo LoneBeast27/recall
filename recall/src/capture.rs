@@ -6,8 +6,10 @@
 //! the simple/debuggable Phase-0 path; zero-copy D3D11->D3D12 interop is the
 //! deferred optimization.
 
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::{Arc, Mutex};
+
+use crate::protocol::MonitorInfo;
 
 use windows_capture::capture::{
     CaptureControl, Context, GraphicsCaptureApiError, GraphicsCaptureApiHandler,
@@ -35,19 +37,70 @@ pub struct FrameData {
 pub struct CaptureShared {
     /// Most recent frame; render thread `take()`s it. None until first frame.
     pub latest: Mutex<Option<FrameData>>,
-    /// Current tonemap mode (set by HDR/SDR auto-detect later; tonemap for now).
+    /// Effective tonemap mode (MODE_PASSTHROUGH / MODE_TONEMAP).
     pub mode: AtomicU32,
+    /// When true, HDR auto-detect drives `mode`. When false, `mode` is forced.
+    pub auto: AtomicBool,
+    /// Set by a `quit` command to ask the event loop to exit.
+    pub quit: AtomicBool,
 }
 
 impl CaptureShared {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             latest: Mutex::new(None),
-            // Default to passthrough: correct/readable for SDR sources. HDR
-            // auto-detect flips this to tonemap once the display is known.
             mode: AtomicU32::new(MODE_PASSTHROUGH),
+            auto: AtomicBool::new(true),
+            quit: AtomicBool::new(false),
         })
     }
+
+    /// Mode selector label for status: "auto" | "sdr" | "hdr".
+    pub fn select_label(&self) -> &'static str {
+        use std::sync::atomic::Ordering::Relaxed;
+        if self.auto.load(Relaxed) {
+            "auto"
+        } else if self.mode.load(Relaxed) == MODE_TONEMAP {
+            "hdr"
+        } else {
+            "sdr"
+        }
+    }
+
+    /// Apply a `set_mode` command ("auto" | "sdr" | "hdr").
+    pub fn set_select(&self, value: &str) {
+        use std::sync::atomic::Ordering::Relaxed;
+        match value {
+            "sdr" => {
+                self.auto.store(false, Relaxed);
+                self.mode.store(MODE_PASSTHROUGH, Relaxed);
+            }
+            "hdr" => {
+                self.auto.store(false, Relaxed);
+                self.mode.store(MODE_TONEMAP, Relaxed);
+            }
+            _ => self.auto.store(true, Relaxed),
+        }
+    }
+}
+
+/// Enumerate monitors for the Hello message.
+pub fn list_monitors() -> Vec<MonitorInfo> {
+    let mut out = Vec::new();
+    let primary_idx = Monitor::primary().ok().and_then(|m| m.index().ok());
+    if let Ok(monitors) = Monitor::enumerate() {
+        for m in monitors {
+            let index = m.index().unwrap_or(0);
+            out.push(MonitorInfo {
+                index,
+                name: m.name().unwrap_or_else(|_| format!("Display {index}")),
+                width: m.width().unwrap_or(0),
+                height: m.height().unwrap_or(0),
+                primary: Some(index) == primary_idx,
+            });
+        }
+    }
+    out
 }
 
 type CaptureError = Box<dyn std::error::Error + Send + Sync>;
@@ -156,7 +209,8 @@ impl GraphicsCaptureApiHandler for Handler {
 
 /// Start capturing the primary monitor on its own thread. The returned
 /// `CaptureControl` keeps the capture alive — drop or `.stop()` it to end.
-pub fn start_primary_monitor(
+pub fn start_monitor(
+    index: Option<usize>,
     shared: Arc<CaptureShared>,
 ) -> Result<CaptureControlHandle, CaptureError> {
     // Ask for borderless access first so the session's IsBorderRequired(false)
@@ -164,7 +218,10 @@ pub fn start_primary_monitor(
     // the Windows capture border.
     crate::border::request_borderless();
 
-    let monitor = Monitor::primary()?;
+    let monitor = match index {
+        Some(i) => Monitor::from_index(i)?,
+        None => Monitor::primary()?,
+    };
     let settings = Settings::new(
         monitor,
         CursorCaptureSettings::WithoutCursor,
