@@ -15,8 +15,12 @@
 #![allow(dead_code)]
 
 mod clamp;
+mod config;
+mod display;
 mod edid;
+mod guard;
 mod hdr;
+mod journal;
 mod logging;
 mod matrix;
 mod types;
