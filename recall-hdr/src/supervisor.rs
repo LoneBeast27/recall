@@ -125,6 +125,13 @@ impl Supervisor {
     ///
     /// Ordering assumption: the app layer has already restored the display before
     /// calling this -- the capture engine has no say in display safety.
+    /// Ask the live engine to save its replay buffer (hotkey path). Best-effort:
+    /// silently a no-op when no engine is running (the engine's own Saved /
+    /// SaveFailed events are the user-visible outcome).
+    pub fn send_save_clip(&self) {
+        self.shared.send_line(r#"{"cmd":"save_clip"}"#);
+    }
+
     pub fn shutdown(mut self, grace: Duration) {
         self.shared.request_stop(grace);
         if let Some(handle) = self.handle.take() {
@@ -211,6 +218,17 @@ impl Shared {
     fn set_child_stdin(&self, stdin: Option<std::process::ChildStdin>) {
         if let Ok(mut g) = self.child_stdin.lock() {
             *g = stdin;
+        }
+    }
+
+    /// Send one JSON command line to the child if we hold its stdin. Best-effort.
+    fn send_line(&self, line: &str) {
+        if let Ok(mut g) = self.child_stdin.lock() {
+            if let Some(stdin) = g.as_mut() {
+                let _ = stdin.write_all(line.as_bytes());
+                let _ = stdin.write_all(b"\n");
+                let _ = stdin.flush();
+            }
         }
     }
 
@@ -597,8 +615,35 @@ fn read_protocol(shared: &Arc<Shared>, stdout: std::process::ChildStdout) {
                     last = Some(digest);
                 }
             }
+            Some("saved") => {
+                let path = field(&val, "path");
+                let secs = val.get("seconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
+                let ms = val.get("elapsed_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                log!("supervisor: clip SAVED ({secs:.1}s, {ms}ms) -> {path}");
+                beep(0x00); // MB_OK -- R10 instant success feedback
+            }
+            Some("save_failed") => {
+                let reason = field(&val, "reason");
+                log!("supervisor: clip save FAILED -- {reason}");
+                beep(0x10); // MB_ICONHAND -- unmistakably different from success
+            }
+            Some("encoder_log") => {
+                log!("supervisor: engine encoder -- {}", field(&val, "message"));
+            }
             _ => {} // unknown message types are ignored
         }
+    }
+}
+
+/// user32 MessageBeep, linked directly (windows-rs keeps relocating it across
+/// releases; the raw import is version-proof). Async, non-blocking.
+fn beep(utype: u32) {
+    #[link(name = "user32")]
+    extern "system" {
+        fn MessageBeep(utype: u32) -> i32;
+    }
+    unsafe {
+        let _ = MessageBeep(utype);
     }
 }
 

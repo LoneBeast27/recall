@@ -4,7 +4,20 @@ version = "0.0.1"
 edition = "2021"
 description = "Lean HDR-aware clip recorder + live HDR->SDR source (Windows)"
 
+[features]
+default = ["encode"]
+# Video encode + mux via libav (ffmpeg-next). Build needs:
+#   FFMPEG_DIR    -> tools/ffmpeg-dev/ffmpeg-n7.1-latest-win64-gpl-shared-7.1
+#   LIBCLANG_PATH -> a dir containing libclang.dll (pip package `libclang` works)
+# Runtime needs the FFmpeg bin/ DLLs next to recall.exe or on PATH.
+encode = ["dep:ffmpeg-next", "dep:rusqlite", "dep:uuid", "dep:wasapi"]
+
 [dependencies]
+ffmpeg-next = { version = "7.1", optional = true }
+rusqlite = { version = "0.32", features = ["bundled"], optional = true }
+wasapi = { version = "0.19", optional = true }
+uuid = { version = "1", features = ["v4"], optional = true }
+chrono = "0.4"
 winit = "0.30"
 wgpu = "29"
 pollster = "0.4"

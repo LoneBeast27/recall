@@ -16,3 +16,8 @@ recall-ui/src-tauri/binaries/
 
 # generator binary (CI prebuilt, re-downloadable)
 tools/hdr-gamma-fix/bin/
+
+# dev-iteration target dir (daily-driver exe stays locked in target/)
+target-dev/
+# FFmpeg dev libs + runtime DLLs (re-downloadable BtbN build)
+tools/ffmpeg-dev/
