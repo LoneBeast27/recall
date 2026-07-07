@@ -1,0 +1,36 @@
+[package]
+name = "recall-hdr"
+version = "0.0.1"
+edition = "2021"
+description = "HDR display-manager companion for Recall: auto HDR toggle + NvAPI sRGB gamut clamp (Windows, RTX 5090)"
+
+[[bin]]
+name = "recall-hdr"
+path = "src/main.rs"
+
+[dependencies]
+# Windows surface for HDR-state detection (DXGI), display enumeration, registry
+# EDID reads, and (Wave 3) the tray/message loop. Feature set is pinned to what
+# Wave 0/1 actually touch; tray-icon/global-hotkey are deliberately NOT added yet.
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Devices_Display",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Accessibility",
+    "Win32_System_Registry",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+] }
+
+# Config + rule persistence (Wave 1+) and structured log lines.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+
+# The entire NvAPI CSC surface is reached through nvapi64.dll's single exported
+# `nvapi_QueryInterface` entry point + magic function IDs. The typed `Csc` struct
+# and the two CSC IDs are NOT in any public NVIDIA header (ledoge reverse-
+# engineered them), so a typed crate buys us nothing -- we hand-roll with libloading.
+libloading = "0.8"
