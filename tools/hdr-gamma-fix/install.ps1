@@ -1,28 +1,46 @@
 <#
-    install.ps1 — HDR SDR-gamma fix for ASUS PG27AQDP (AUS2740)
+    install.ps1 — HDR SDR-gamma fix for ASUS PG27AQDP (AUS2740), two-variant
 
-    Installs the gamma-2.2 MHC2 ICC profile into the Windows color store and
-    associates it as the Advanced-Color (HDR) profile for the PG27AQDP, so that
-    in HDR mode Windows decodes SDR-composited content with a pure gamma-2.2 EOTF
-    instead of the sRGB piecewise curve (which lifts shadows / washes SDR).
+    Installs BOTH MHC2 gamma-2.2 ICC profiles into the Windows color store and
+    associates the CHOSEN one as the active Advanced-Color (HDR) profile for the
+    PG27AQDP. In HDR mode Windows then decodes SDR-composited content with a pure
+    gamma-2.2 EOTF instead of the sRGB piecewise curve (which lifts shadows / washes
+    SDR). Both variants keep the SAME pure gamma-2.2 transfer fix and an identity
+    MHC2 matrix (HDR/PQ-native content is untouched). They differ ONLY in the gamut
+    Windows ACM believes the panel has:
 
-    REVERSIBLE. Before touching anything it snapshots the current ICMProfileAC
-    association for the target display; rollback.ps1 restores it exactly.
+      accurate  (PG27AQDP_sRGB-to-Gamma2.2_MHC2.icm)
+                colorants = panel NATIVE wide gamut. ACM gamut-maps sRGB content to
+                the native primaries -> colorimetrically correct sRGB (true, but
+                reads as less saturated to someone used to the native stretch).
 
-    Route: dantmnf/MHC2Gen  sdr-acm --calibrate-transfer --i-really-want-gamma-2.2
-    Source: the machine's OWN newest Windows HDR Calibration profile
-            (HDR Calibrated Profile 5-31-2026 85134.icc, 1300 nits).
+      punchy    (PG27AQDP_Punchy-Gamma2.2_MHC2.icm)   [DEFAULT]
+                colorants = sRGB primaries. ACM sees "sRGB display" -> NO gamut
+                compression -> sRGB code values land directly on the panel's native
+                wide primaries = the familiar punchy native-gamut stretch.
+
+    Switch variants with ONE command:
+        .\install.ps1 -Variant punchy      # native-gamut stretch (active by default)
+        .\install.ps1 -Variant accurate    # colorimetric sRGB
+    Both profiles stay in the store; only the active association changes.
+
+    REVERSIBLE. The FIRST run snapshots the true pre-fix ICMProfileAC association
+    (the plain HDR Calibrated profiles, no MHC2) to rollback-state.json. Subsequent
+    runs (including variant switches) NEVER overwrite a good pre-fix snapshot, and
+    the installer refuses to let any MHC2 profile leak into the rollback target, so
+    rollback.ps1 always restores the genuine pre-fix state.
 
     Run in a normal (non-elevated) PowerShell — the association is per-user (HKCU)
-    and InstallColorProfileW writes to the shared store which is user-writable for
-    the color spool dir. If store install fails with access denied, re-run elevated.
-
-    Idempotent: safe to run twice; it will not duplicate the association.
+    and the color spool dir is user-writable. If store install fails with access
+    denied, re-run elevated. Idempotent: safe to run repeatedly.
 #>
 
 [CmdletBinding()]
 param(
-    [string]$ProfileName = 'PG27AQDP_sRGB-to-Gamma2.2_MHC2.icm',
+    [ValidateSet('punchy','accurate')]
+    [string]$Variant = 'punchy',
+    [string]$AccurateProfile = 'PG27AQDP_sRGB-to-Gamma2.2_MHC2.icm',
+    [string]$PunchyProfile   = 'PG27AQDP_Punchy-Gamma2.2_MHC2.icm',
     # Target display device-instance key under ICM\ProfileAssociations. 0011 = PG27AQDP/AUS2740 on this machine.
     [string]$TargetInstance = '0011',
     [string]$TargetDisplayId = 'DISPLAY\AUS2740\5&14c483c&0&UID4357_0'
@@ -30,72 +48,116 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$srcIcm = Join-Path $here $ProfileName
-if (-not (Test-Path $srcIcm)) { throw "Profile not found next to script: $srcIcm" }
+
+# both profiles this installer manages (so rollback / snapshotting can recognize them)
+$managedProfiles = @($AccurateProfile, $PunchyProfile)
+$activeProfile = if ($Variant -eq 'punchy') { $PunchyProfile } else { $AccurateProfile }
 
 $colorDir = Join-Path $env:SystemRoot 'System32\spool\drivers\color'
-$destIcm  = Join-Path $colorDir $ProfileName
 $acmKey   = "HKCU:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ICM\ProfileAssociations\Display\{4d36e96e-e325-11ce-bfc1-08002be10318}\$TargetInstance"
 
-Write-Host "== HDR gamma-2.2 fix installer ==" -ForegroundColor Cyan
+Write-Host "== HDR gamma-2.2 fix installer (two-variant) ==" -ForegroundColor Cyan
 Write-Host "Target display : $TargetDisplayId (instance $TargetInstance)"
-Write-Host "Profile        : $ProfileName"
+Write-Host "Variant        : $Variant  ->  $activeProfile"
 
-# --- 0. sanity: target association key must exist (proves the display slot is real) ---
+# --- 0. sanity: both profile files present next to script; target key exists ---
+foreach ($p in $managedProfiles) {
+    $src = Join-Path $here $p
+    if (-not (Test-Path $src)) { throw "Profile not found next to script: $src" }
+}
 if (-not (Test-Path $acmKey)) {
     throw "ACM association key not found: $acmKey`nThe PG27AQDP HDR profile slot does not exist. Re-run Windows HDR Calibration first, or pass the correct -TargetInstance."
 }
 
-# --- 1. snapshot current AC association for rollback (written next to script) ---
+# --- 1. snapshot the TRUE pre-fix AC association (once) ---
+# Only capture a snapshot if none exists yet, OR the existing one is invalid. Never
+# overwrite a good pre-fix snapshot on a variant switch. Also strip any managed MHC2
+# profile from a freshly-captured list so the rollback target can never contain one.
 $before = (Get-ItemProperty -Path $acmKey -Name 'ICMProfileAC' -ErrorAction SilentlyContinue).ICMProfileAC
-$snapshot = [ordered]@{
-    CapturedUtc     = (Get-Date).ToUniversalTime().ToString('o')
-    TargetInstance  = $TargetInstance
-    TargetDisplayId = $TargetDisplayId
-    AcmKey          = $acmKey
-    ICMProfileAC    = @($before)     # array; last element = active default
-    InstalledProfile = $ProfileName
-}
 $snapPath = Join-Path $here 'rollback-state.json'
-$snapshot | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 $snapPath
-Write-Host "[1] Rollback state saved -> $snapPath"
-Write-Host "    prior ICMProfileAC = $($before -join '; ')"
 
-# --- 2. install the profile into the color store ---
-if (Test-Path $destIcm) {
-    Write-Host "[2] Profile already present in store (overwriting file bytes to ensure latest)."
-    Copy-Item -Path $srcIcm -Destination $destIcm -Force
+$haveGoodSnapshot = $false
+if (Test-Path $snapPath) {
+    try {
+        $existing = Get-Content -Raw $snapPath | ConvertFrom-Json
+        $existingList = @($existing.ICMProfileAC | Where-Object { $_ })
+        $containsManaged = $false
+        foreach ($e in $existingList) { if ($managedProfiles -contains $e) { $containsManaged = $true } }
+        if ($existingList.Count -gt 0 -and -not $containsManaged) { $haveGoodSnapshot = $true }
+    } catch { $haveGoodSnapshot = $false }
+}
+
+if ($haveGoodSnapshot) {
+    Write-Host "[1] Existing pre-fix snapshot is valid; preserving it (no re-snapshot on variant switch)."
+    Write-Host "    snapshot ICMProfileAC = $((Get-Content -Raw $snapPath | ConvertFrom-Json).ICMProfileAC -join '; ')"
 } else {
-    Add-Type -Namespace Mscms -Name Api -MemberDefinition @'
+    # Build a clean pre-fix list from the current registry value, dropping any managed MHC2 profiles.
+    $preFix = @()
+    if ($before) { $preFix = @($before | Where-Object { $_ -and ($managedProfiles -notcontains $_) }) }
+    $snapshot = [ordered]@{
+        CapturedUtc      = (Get-Date).ToUniversalTime().ToString('o')
+        TargetInstance   = $TargetInstance
+        TargetDisplayId  = $TargetDisplayId
+        AcmKey           = $acmKey
+        ICMProfileAC     = @($preFix)     # array; last element = active pre-fix default
+        ManagedProfiles  = @($managedProfiles)
+        InstalledProfile = $activeProfile
+    }
+    $snapshot | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 $snapPath
+    Write-Host "[1] Rollback state saved -> $snapPath"
+    Write-Host "    captured pre-fix ICMProfileAC = $($preFix -join '; ')"
+}
+
+# --- 2. install BOTH profiles into the color store ---
+Add-Type -Namespace Mscms -Name Api -MemberDefinition @'
 [DllImport("mscms.dll", CharSet=CharSet.Unicode, SetLastError=true)]
 public static extern bool InstallColorProfileW(string pMachineName, string pProfileName);
-'@
-    $ok = [Mscms.Api]::InstallColorProfileW($null, $srcIcm)
-    if (-not $ok) {
-        $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
-        # Fallback: direct copy (store dir is usually user-writable)
-        Write-Host "    InstallColorProfileW failed (err $err); falling back to file copy."
-        Copy-Item -Path $srcIcm -Destination $destIcm -Force
+'@ -ErrorAction SilentlyContinue
+
+foreach ($p in $managedProfiles) {
+    $src  = Join-Path $here $p
+    $dest = Join-Path $colorDir $p
+    if (Test-Path $dest) {
+        Copy-Item -Path $src -Destination $dest -Force   # refresh bytes
+        Write-Host "[2] Present in store (bytes refreshed): $p"
+    } else {
+        $ok = [Mscms.Api]::InstallColorProfileW($null, $src)
+        if (-not $ok) {
+            $err = [System.Runtime.InteropServices.Marshal]::GetLastWin32Error()
+            Write-Host "    InstallColorProfileW failed for $p (err $err); falling back to file copy."
+            Copy-Item -Path $src -Destination $dest -Force
+        }
+        Write-Host "[2] Installed to store: $p"
     }
-    Write-Host "[2] Profile installed to store -> $destIcm"
 }
 
-# --- 3. associate as the Advanced-Color (HDR) default for the target display ---
+# --- 3. associate the CHOSEN variant as the Advanced-Color (HDR) default ---
 # ICMProfileAC is a REG_MULTI_SZ; the LAST entry is the active default that DWM/ACM uses.
-# We remove any prior copy of our profile, then append it so it becomes the active default.
+# Keep any non-managed (real HDR Calibrated) profiles, plus the *other* managed variant
+# present-but-not-last (so both remain available), then append the active one last.
 $list = @()
-if ($before) { $list = @($before | Where-Object { $_ -and $_ -ne $ProfileName }) }
-$newList = @($list + $ProfileName)
+if ($before) { $list = @($before | Where-Object { $_ }) }
+# drop both managed profiles, then re-add: the inactive variant first, active variant last.
+$list = @($list | Where-Object { $managedProfiles -notcontains $_ })
+$inactiveProfile = if ($Variant -eq 'punchy') { $AccurateProfile } else { $PunchyProfile }
+$newList = @($list + $inactiveProfile + $activeProfile)
 Set-ItemProperty -Path $acmKey -Name 'ICMProfileAC' -Value ([string[]]$newList) -Type MultiString
-# make sure per-user profiles are honored (so HKCU association is the one used)
 Set-ItemProperty -Path $acmKey -Name 'UsePerUserProfiles' -Value 1 -Type DWord
-Write-Host "[3] Associated as Advanced-Color default. New ICMProfileAC = $($newList -join '; ')"
+Write-Host "[3] Associated '$Variant' as the active Advanced-Color default."
+Write-Host "    New ICMProfileAC = $($newList -join '; ')"
 
 Write-Host ""
-Write-Host "Done. The profile is installed and set as the active HDR/Advanced-Color profile." -ForegroundColor Green
-Write-Host "It takes effect the next time the display enters HDR mode (toggle HDR OFF->ON, or"
-Write-Host "sign out/in). SDR mode is unaffected (this profile only changes SDR-in-HDR decoding)."
+Write-Host "Done. Both variants are in the store; '$Variant' is the active HDR/Advanced-Color profile." -ForegroundColor Green
+Write-Host "Takes effect on the next HDR entry (toggle HDR OFF->ON, or sign out/in). SDR mode is unaffected."
 Write-Host ""
-Write-Host "Eyeball test: in HDR mode, a black-to-dark-grey gradient / dark UI should have"
-Write-Host "deeper, non-milky shadows than before; mid-greys should look the same as SDR mode."
-Write-Host "To revert: run rollback.ps1"
+if ($Variant -eq 'punchy') {
+    Write-Host "Eyeball test (punchy): in HDR mode, saturated content (a bright red/green, game HUD,"
+    Write-Host "vivid photo) should look PUNCHIER / more vivid than the accurate profile — matching the"
+    Write-Host "native-wide-gamut look of SDR desktop mode. Shadows stay deep (gamma-2.2 fix intact)."
+} else {
+    Write-Host "Eyeball test (accurate): saturated content should look colorimetrically correct / true sRGB"
+    Write-Host "(a touch less vivid than punchy). Shadows stay deep (gamma-2.2 fix intact)."
+}
+Write-Host ""
+Write-Host "Switch:   .\install.ps1 -Variant punchy   |   .\install.ps1 -Variant accurate"
+Write-Host "Revert:   .\rollback.ps1   (restores the true pre-fix state, removes both MHC2 profiles)"
