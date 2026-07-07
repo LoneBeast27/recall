@@ -687,17 +687,21 @@ impl App {
         false
     }
 
-    /// Manual HDR flip: toggle Windows HDR on the target now, journalling first.
-    /// Documented: this is a *direct* override; auto may reconcile it back on the
-    /// next foreground event (acceptable for v1).
+    /// Manual HDR flip (tray "Toggle HDR now" / Ctrl+Alt+H): set a reconciler-level
+    /// desired-state PIN, not a direct executor call.
+    ///
+    /// The pin feeds `desired()`, so the normal poll/executor path applies it
+    /// (journalled + confirmed + failure-capped -- all the existing machinery) AND,
+    /// critically, the reconciler does NOT diff it back out on the next tick. The old
+    /// implementation called `execute(EnableHdr)` directly while `desired()` was still
+    /// the HDR-off baseline, so the very next ~250ms poll emitted DisableHdr and the
+    /// manual toggle self-cancelled in ~290ms. The pin fixes that at the source.
+    /// A live game session still outranks the pin (see `Reconciler::desired`).
     fn toggle_hdr_now(&mut self) {
-        let current = display::get_hdr_state(&self.target).unwrap_or(false);
-        let want = !current;
-        log!("app: manual toggle HDR -> {want}");
-        let action = if want { Action::EnableHdr } else { Action::DisableHdr };
-        // Route through the executor path so it's journalled + confirmed identically
-        // to an auto action (keeps `actual` honest for the next reconcile).
-        self.execute(action);
+        let on = self.reconciler.toggle_manual_hdr();
+        log!("app: manual HDR pin -> {on}");
+        // No direct execute() here: the pump's `reconciler.poll(now)` on this same
+        // loop iteration emits the converging actions through the journalled path.
     }
 
     /// Upsert an override for the last focused stem to `kind`, then save.
@@ -735,6 +739,9 @@ impl App {
     /// so it re-diffs from a clean baseline (recreate it, per the spec).
     fn restore_now(&mut self, run_restore: &std::sync::Arc<OnceRestore>) {
         log!("app: RestoreNow");
+        // Drop any manual HDR pin FIRST so the reconciler (recreated below) does not
+        // immediately re-assert HDR after we restore to baseline.
+        self.reconciler.clear_manual();
         // The shared OnceRestore has already-fired semantics; RestoreNow must be
         // repeatable, so drive a fresh AppRestore directly rather than the once-cell.
         match AppRestore::new(&self.cfg) {
@@ -769,10 +776,22 @@ impl App {
             None => "desktop".to_string(),
         };
         let health = health_summary(supervisor.health());
+        // Reflect a manual pin so the user sees WHY HDR is on ("HDR (manual)") when
+        // no game is driving it. A game session's own HDR takes the plain "HDR"
+        // label (the session, not the pin, owns the display then).
+        let hdr_label = if actual.hdr {
+            if self.reconciler.manual_pinned() && self.reconciler.session_pid().is_none() {
+                "HDR (manual)"
+            } else {
+                "HDR"
+            }
+        } else {
+            "SDR"
+        };
         let line = format!(
             "{}: {} · {} · engine {}",
             self.target.name(),
-            if actual.hdr { "HDR" } else { "SDR" },
+            hdr_label,
             session_desc,
             health,
         );
