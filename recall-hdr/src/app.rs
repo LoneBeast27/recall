@@ -252,8 +252,11 @@ pub fn run() -> i32 {
         }
     };
 
-    // 4. The supervised capture engine.
+    // 4. The supervised capture engine + the hub control pipe.
     let supervisor = Supervisor::start();
+    let (ctl_tx, ctl_rx) = channel::<String>();
+    let control_hub = crate::control::PipeHub::start(ctl_tx);
+    supervisor.attach_hub(control_hub.clone());
 
     // 5. App state.
     let mut app = App {
@@ -275,7 +278,15 @@ pub fn run() -> i32 {
     };
 
     log!("app: entering message pump");
-    let code = app.pump(&mut tray, hotkey.as_ref(), &watch_rx, &supervisor, &run_restore);
+    let code = app.pump(
+        &mut tray,
+        hotkey.as_ref(),
+        &watch_rx,
+        &supervisor,
+        &run_restore,
+        &control_hub,
+        &ctl_rx,
+    );
 
     // 7. Shutdown ordering: watcher off first, then restore, then engine, then
     //    journal.clear (if clean), then disarm the guard.
@@ -328,6 +339,8 @@ impl App {
         watch_rx: &Receiver<WatchEvent>,
         supervisor: &Supervisor,
         run_restore: &std::sync::Arc<OnceRestore>,
+        hub: &std::sync::Arc<crate::control::PipeHub>,
+        ctl_rx: &Receiver<String>,
     ) -> i32 {
         loop {
             // (a) Wait until a deadline, a message, or the wait cap. Cap so polls
@@ -363,6 +376,11 @@ impl App {
                 self.save_clip_now(supervisor);
             }
 
+            // (e2) Hub control-pipe commands (executed here, on the pump thread).
+            while let Ok(line) = ctl_rx.try_recv() {
+                self.handle_control_cmd(&line, supervisor, hub);
+            }
+
             // (f) Session liveness: has the tracked game process exited?
             self.check_session_liveness();
 
@@ -373,7 +391,7 @@ impl App {
             }
 
             // (h) Status line + tray checks (cheap; only on change).
-            self.update_status(tray, supervisor);
+            self.update_status(tray, supervisor, Some(hub));
         }
     }
 
@@ -798,10 +816,101 @@ impl App {
         }
     }
 
+    // -- control pipe ---------------------------------------------------------
+
+    /// Execute one hub command line ON THE PUMP THREAD (display state is
+    /// single-threaded by design; the pipe threads only queue lines).
+    fn handle_control_cmd(
+        &mut self,
+        line: &str,
+        supervisor: &Supervisor,
+        hub: &std::sync::Arc<crate::control::PipeHub>,
+    ) {
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+            return;
+        };
+        match val.get("cmd").and_then(|c| c.as_str()) {
+            Some("save_clip") => {
+                log!("app: control save_clip -> engine");
+                match val.get("seconds").and_then(|s| s.as_u64()) {
+                    Some(s) => supervisor
+                        .send_engine_line(&format!(r#"{{"cmd":"save_clip","seconds":{s}}}"#)),
+                    None => supervisor.send_save_clip(),
+                }
+            }
+            Some("toggle_hdr") => {
+                log!("app: control toggle_hdr");
+                self.toggle_hdr_now();
+            }
+            Some("set_mode") => {
+                if let Some(v) = val.get("value").and_then(|v| v.as_str()) {
+                    if matches!(v, "auto" | "sdr" | "hdr") {
+                        supervisor
+                            .send_engine_line(&format!(r#"{{"cmd":"set_mode","value":"{v}"}}"#));
+                    }
+                }
+            }
+            Some("status") => {
+                // On-demand snapshot for a client that just connected.
+                hub.event("hdr", &self.hdr_status_json(supervisor));
+            }
+            Some("set_ac_profile") => {
+                let profile = match val.get("variant").and_then(|v| v.as_str()) {
+                    Some("punchy") => "PG27AQDP_Punchy-Gamma2.2_MHC2.icm",
+                    Some("accurate") => "PG27AQDP_sRGB-to-Gamma2.2_MHC2.icm",
+                    _ => {
+                        log!("app: control set_ac_profile -- unknown variant");
+                        return;
+                    }
+                };
+                let target = self.cfg.display.target_friendly_name.clone();
+                match crate::wcs::set_advanced_color_default(&target, profile) {
+                    Ok(()) => {
+                        log!("app: control set_ac_profile -> {profile} (next HDR entry)");
+                        hub.event(
+                            "hdr",
+                            &format!(r#"{{"type":"ac_profile","profile":"{profile}","ok":true}}"#),
+                        );
+                    }
+                    Err(e) => {
+                        log!("app: control set_ac_profile FAILED: {e}");
+                        hub.event(
+                            "hdr",
+                            &format!(r#"{{"type":"ac_profile","ok":false,"error":"{e}"}}"#),
+                        );
+                    }
+                }
+            }
+            _ => log!("app: control -- unknown command line ignored"),
+        }
+    }
+
+    /// Structured HDR/daemon state for hub clients.
+    fn hdr_status_json(&self, supervisor: &Supervisor) -> String {
+        let actual = self.reconciler.actual();
+        format!(
+            r#"{{"type":"status","target":"{}","hdr":{},"manual_pin":{},"session_pid":{},"auto":{},"engine_health":"{}"}}"#,
+            self.target.name(),
+            actual.hdr,
+            self.reconciler.manual_pinned(),
+            self.reconciler
+                .session_pid()
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "null".to_string()),
+            self.auto_enabled,
+            health_summary(supervisor.health()),
+        )
+    }
+
     // -- status -------------------------------------------------------------
 
     /// Recompute the status line + tray checks and push them only on change.
-    fn update_status(&mut self, tray: &mut Tray, supervisor: &Supervisor) {
+    fn update_status(
+        &mut self,
+        tray: &mut Tray,
+        supervisor: &Supervisor,
+        hub: Option<&std::sync::Arc<crate::control::PipeHub>>,
+    ) {
         let actual = self.reconciler.actual();
         let session_desc = match self.reconciler.session_pid() {
             Some(pid) => format!("game (pid {pid})"),
@@ -835,6 +944,9 @@ impl App {
                 self.cfg.behavior.default_clamp,
             );
             self.last_status = line;
+            if let Some(hub) = hub {
+                hub.event("hdr", &self.hdr_status_json(supervisor));
+            }
         }
     }
 }
