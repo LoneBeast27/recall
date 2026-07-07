@@ -1,10 +1,13 @@
 //! recall-hdr: HDR display-manager companion for Recall (Windows, RTX 5090).
 //!
-//! Wave 0/1 CLI entry point. Three commands, all safe by construction:
-//! - `--probe`      (default): read-only NvAPI CSC reachability probe.
-//! - `--clamp-test`: apply the sRGB clamp for ~3s, then reset. Prints GET state
+//! Entry point. The default (no args) launches the tray application
+//! ([`app::run`]); the diagnostic subcommands remain, all safe by construction:
+//! - (no args)      : run the tray app -- auto HDR/SDR-by-game + clamp + hotkey.
+//! - `--probe`      : read-only NvAPI CSC reachability probe.
+//! - `--clamp-test` : apply the sRGB clamp for ~3s, then reset. Prints GET state
 //!   before / mid / after and guarantees a reset on every exit path.
-//! - `--restore`   : (stub) will reset the display to the user's baseline.
+//! - `--restore`    : reset the display to the user's journalled baseline (repairs
+//!   a prior hard-kill) via the same [`app::AppRestore`] the tray app uses.
 //!
 //! Design invariant: **we never leave the clamp applied on exit.** `--clamp-test`
 //! resets in-line and `main` never returns while a clamp is live.
@@ -41,15 +44,19 @@ use types::ClampMode;
 fn main() {
     logging::init();
 
-    let arg = std::env::args().nth(1).unwrap_or_else(|| "--probe".into());
-    log!("command: {arg}");
+    // Default (no args) launches the tray application. The subcommands are
+    // explicit diagnostics / one-shots.
+    let arg = std::env::args().nth(1);
+    let arg = arg.as_deref().unwrap_or("");
+    log!("command: {}", if arg.is_empty() { "(run tray app)" } else { arg });
 
-    let code = match arg.as_str() {
+    let code = match arg {
+        "" => app::run(),
         "--probe" => cmd_probe(),
         "--clamp-test" => cmd_clamp_test(),
         "--restore" => cmd_restore(),
         other => {
-            log!("unknown arg '{other}'. usage: recall-hdr [--probe|--clamp-test|--restore]");
+            log!("unknown arg '{other}'. usage: recall-hdr [--probe|--clamp-test|--restore] (no args = run tray app)");
             2
         }
     };
@@ -151,24 +158,40 @@ fn cmd_clamp_test() -> i32 {
     }
 }
 
-/// Restore the display to the user's baseline. Wave 1 will read the persisted
-/// baseline and reconcile; for now it just clears any active clamp so the stub
-/// is genuinely safe to run.
+/// Restore the display to the user's journalled baseline. Reads the persisted
+/// `state.json` and reconciles HDR / clamp / SDR-white through the SAME
+/// [`app::AppRestore`] the tray app uses, so a hard-kill left-over is repaired
+/// identically whether the tray relaunches or the user runs `--restore` by hand.
+///
+/// A clean journal (nothing touched) is the common case and reports success with
+/// nothing to do. On a partial failure the journal is left dirty for a retry.
 fn cmd_restore() -> i32 {
-    log!("--- RESTORE (stub) ---");
-    log!("TODO(Wave1): read persisted baseline + reconcile HDR/clamp/sdr-white.");
-    match NvApiClamp::init() {
-        Ok(mut nv) => {
-            if let Err(e) = nv.reset() {
-                log!("baseline clamp reset failed: {e}");
-                return 1;
-            }
-            log!("cleared any active gamut clamp (native gamut restored).");
+    log!("--- RESTORE (journal-backed) ---");
+
+    let cfg = config::Config::load_or_default();
+    let mut ops = match app::AppRestore::new(&cfg) {
+        Ok(o) => o,
+        Err(e) => {
+            log!("RESTORE: cannot build restore ops ({e}); nothing restored.");
+            // Not fatal: if we can't even resolve the display there's nothing we
+            // could have safely restored. Exit 0 so a login-time `--restore` never
+            // blocks boot on a transiently-absent panel.
+            return 0;
+        }
+    };
+
+    match journal::restore_with(&mut ops) {
+        Ok(true) => {
+            log!("RESTORE: journalled baseline reapplied; journal cleared.");
+            0
+        }
+        Ok(false) => {
+            log!("RESTORE: journal clean -- nothing to restore.");
             0
         }
         Err(e) => {
-            log!("NvAPI unavailable ({e}); nothing to restore.");
-            0
+            log!("RESTORE: incomplete ({e}); journal left dirty for the next attempt.");
+            1
         }
     }
 }
