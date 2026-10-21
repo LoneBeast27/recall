@@ -26,7 +26,7 @@ use ffmpeg_next as ff;
 
 use crate::audio::TrackRing;
 use crate::ring::{EncodedPacket, PacketRing};
-use frame_fit::normalize_small_size_jitter;
+use frame_fit::{fill_rgbz, normalize_small_size_jitter};
 use mux::OwnedParams;
 use saver::{ms, RawFrame, SaveJob, SaverControl, SaverQueue, Timing, VideoSrc};
 use settings::{Codec, Quality};
@@ -298,17 +298,6 @@ fn open_encoder(
         session_id: uuid::Uuid::new_v4().to_string(),
     };
     Ok((enc, opened.fallback))
-}
-
-/// Copy tightly packed RGBA into an RGBZ video frame, honoring the stride.
-fn fill_rgbz(vf: &mut ff::frame::Video, w: u32, h: u32, rgba: &[u8]) {
-    let stride = vf.stride(0);
-    let src_row = (w * 4) as usize;
-    let dst = vf.data_mut(0);
-    for y in 0..h as usize {
-        let n = src_row.min(rgba.len() - y * src_row);
-        dst[y * stride..y * stride + n].copy_from_slice(&rgba[y * src_row..y * src_row + n]);
-    }
 }
 
 fn try_open(cfg: &Config, codec: Codec, w: u32, h: u32) -> Result<ff::encoder::Video, String> {
