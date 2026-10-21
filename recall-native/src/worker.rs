@@ -17,7 +17,7 @@ use std::{
 
 use crate::{
     backend::{self, ClipEntry, ExportSummary, PreparedClip, StorageReport},
-    edit_model::{ClipInfo, EditPlan},
+    edit_model::{ClipInfo, EditPlan, ExportSettings},
     services::{
         library::{self, MetaStore},
         storage::{self, CacheKind, PrefetchClip, PrefetchEvent, Priority},
@@ -28,10 +28,10 @@ pub enum Job {
     List,
     Prepare(u64, String),
     /// Autosave: working copy on the SSD (`Done::Saved`).
-    SaveProject(ClipInfo, EditPlan, u32),
+    SaveProject(ClipInfo, EditPlan, u32, ExportSettings),
     /// Leave / close / export: the sidecar beside the clip, only if it changed (`Done::Flushed`).
-    FlushProject(ClipInfo, EditPlan, u32),
-    Export(ClipInfo, EditPlan, u32),
+    FlushProject(ClipInfo, EditPlan, u32, ExportSettings),
+    Export(ClipInfo, EditPlan, u32, ExportSettings),
     Delete(Vec<PathBuf>),
     /// Drive types + cache usage for Settings (`Done::Storage`).
     StorageReport,
@@ -130,9 +130,9 @@ fn run_job(job: Job, tx: &Sender<Done>) -> Done {
             Done::Clips(result)
         }
         Job::Prepare(generation, path) => Done::Prepared(generation, backend::prepare_clip(&path)),
-        Job::SaveProject(info, plan, fps) => Done::Saved(backend::save_project(&info, &plan, fps)),
-        Job::FlushProject(info, plan, fps) => Done::Flushed(backend::flush_project(&info, &plan, fps)),
-        Job::Export(info, plan, fps) => Done::Exported(backend::export_clip(&info, &plan, fps)),
+        Job::SaveProject(info, plan, fps, export) => Done::Saved(backend::save_project(&info, &plan, fps, &export)),
+        Job::FlushProject(info, plan, fps, export) => Done::Flushed(backend::flush_project(&info, &plan, fps, &export)),
+        Job::Export(info, plan, fps, export) => Done::Exported(backend::export_clip(&info, &plan, fps, &export)),
         Job::Delete(paths) => Done::Deleted(library::delete_to_recycle_bin(&paths)),
         Job::StorageReport => Done::Storage(backend::storage_report(None)),
         Job::ClearCache(kind) => {

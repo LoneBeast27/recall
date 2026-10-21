@@ -459,7 +459,7 @@ impl Root {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .child(div().font_weight(FontWeight::MEDIUM).child(format!("Exported · {} fps", summary.fps)))
+                            .child(div().font_weight(FontWeight::MEDIUM).child(match summary.fps { Some(fps) => format!("Exported · {fps} fps"), None => "Exported · lossless".to_owned() }))
                             .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(format!("{} frames · {}", summary.frames, library::format_duration(summary.seconds)))),
                     )
                     .child(icon(Icon::Folder, 15., theme::MUTED))

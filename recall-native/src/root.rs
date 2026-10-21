@@ -163,6 +163,9 @@ impl Root {
         if self.daemon.revision() != self.daemon_rev {
             self.daemon_rev = self.daemon.revision();
             self.snap = self.daemon.snapshot();
+            // Background cache filling pauses while a game is being recorded.
+            let busy = self.snap.session.as_ref().is_some_and(|s| s.state == "recording" || s.state == "starting");
+            crate::services::storage::set_recorder_busy(busy);
             for event in self.daemon.drain_events() {
                 self.on_daemon_event(event);
             }
@@ -176,6 +179,7 @@ impl Root {
         changed |= self.lib.fit_columns();
         if self.route == Route::Library {
             self.lib.queue_visible(&self.workers);
+            self.lib.note_scroll_depth();
         }
         self.lib.flush_meta_if_due();
         // Opening Recall means recording: start the recorder once if it isn't running.
@@ -204,7 +208,16 @@ impl Root {
                 self.lib.loading = false;
                 self.lib.error = Some(error);
             }
-            Done::Prepared(generation, result) => self.ed.apply_prepared(generation, result),
+            Done::Prepared(generation, result) => {
+                self.ed.apply_prepared(generation, result);
+                // Clips on a hard drive get an SSD copy in the background; playback swaps to it.
+                if let Some(info) = self.ed.info.as_ref() {
+                    let on_hdd = crate::services::storage::drive_kind(std::path::Path::new(&info.path)).is_hdd();
+                    if on_hdd && self.ed.playback_path.as_deref() == Some(info.path.as_str()) {
+                        self.workers.asset(crate::worker::AssetJob::CacheVideo(info.path.clone()));
+                    }
+                }
+            }
             Done::Saved(result) => self.ed.on_saved(result),
             Done::Exported(result) => {
                 if let Err(error) = &result {
@@ -231,13 +244,27 @@ impl Root {
                 self.lib.on_scrub(path, result);
             }
             // Storage-tier results; compile shim until the UI wires them (see worker.rs).
-            Done::VideoCached(..) | Done::Flushed(..) | Done::Storage(..) => {}
+            Done::VideoCached(clip, Ok(copy)) => self.ed.on_video_cached(&clip, &copy),
+            Done::VideoCached(_, Err(_)) => {} // keeps playing from the clip drive
+            Done::Flushed(Ok(sidecar)) => {
+                if !sidecar.is_empty() {
+                    self.lib.mark_edited_by_sidecar(&sidecar);
+                }
+            }
+            Done::Flushed(Err(error)) => self.show_toast(ToastKind::Bad, "Couldn't save edits beside the clip", Some(error)),
+            Done::Storage(report) => {
+                if let Some(notice) = report.notice {
+                    self.show_toast(ToastKind::Info, notice, None);
+                }
+                self.cache.refresh();
+            }
         }
     }
 
     fn on_daemon_event(&mut self, event: DaemonEvent) {
         match event {
             DaemonEvent::Saved { path, seconds, .. } => {
+                crate::services::storage::record_interaction(crate::services::storage::Interaction::Saved(path.clone()));
                 let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned());
                 let game = name.as_deref().and_then(|n| n.split("__").next()).map(|g| crate::services::library::normalize_game(g).1);
                 self.show_toast(
@@ -275,6 +302,7 @@ impl Root {
 
     pub fn go(&mut self, route: Route) {
         if self.route == Route::Editor && route != Route::Editor {
+            self.ed.flush(&self.workers);
             self.ed.pause();
             self.ed.hide_preview();
         }
@@ -295,6 +323,7 @@ impl Root {
     }
 
     pub fn open_clip(&mut self, path: String) {
+        crate::services::storage::record_interaction(crate::services::storage::Interaction::Opened(path.clone()));
         if !self.ed.is_open(&path) {
             self.ed.open(path, &self.workers);
         }
@@ -485,5 +514,12 @@ pub fn parent_hwnd(window: &Window) -> Result<isize, String> {
     match handle.as_raw() {
         RawWindowHandle::Win32(raw) => Ok(raw.hwnd.get() as isize),
         _ => Err("Recall needs a Win32 window".into()),
+    }
+}
+
+impl Drop for Root {
+    /// Closing the window writes pending edits beside the clip (the worker may not outlive it).
+    fn drop(&mut self) {
+        self.ed.flush_now();
     }
 }

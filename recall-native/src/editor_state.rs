@@ -44,6 +44,12 @@ pub struct EditorState {
     pub export_settings: ExportSettings,
     /// Bookmarks (seconds from clip start) from `<clip>.recall-marks.json`.
     pub marks: Vec<f64>,
+    /// The file the preview plays (an SSD copy when the video tier has one).
+    pub playback_path: Option<String>,
+    /// Seek to apply once a re-opened preview is ready (SSD swap keeps the position).
+    pending_seek: Option<f64>,
+    /// The open clip was changed since the sidecar was last written beside it.
+    needs_flush: bool,
     pub status: String,
     /// One-shot error for a toast (taken by Root).
     pub last_error: Option<String>,
@@ -86,6 +92,9 @@ impl EditorState {
             fps: 60,
             export_settings: ExportSettings::default(),
             marks: Vec::new(),
+            playback_path: None,
+            pending_seek: None,
+            needs_flush: false,
             status,
             last_error: None,
             warning: None,
@@ -118,6 +127,7 @@ impl EditorState {
     }
 
     pub fn open(&mut self, path: String, workers: &Workers) {
+        self.flush(workers);
         self.pause();
         self.hide_preview();
         self.info = None;
@@ -147,6 +157,7 @@ impl EditorState {
         self.plan = match prepared.project {
             Some(project) => {
                 self.fps = project.export_fps.max(1);
+                self.export_settings = project.export.clone();
                 project.plan
             }
             None => EditPlan {
@@ -167,8 +178,11 @@ impl EditorState {
         self.gain_spans = (0..info.audio.len()).map(|_| Rc::new(Cell::new(None))).collect();
         let tracks = self.preview_tracks(&info);
         self.status = "Loading preview…".into();
+        let source = prepared.playback.clone().unwrap_or_else(|| info.path.clone());
+        self.playback_path = Some(source.clone());
+        self.needs_flush = false;
         if let Some(preview) = self.preview.as_mut() {
-            if let Err(error) = preview.open(&info.path, &tracks) {
+            if let Err(error) = preview.open(&source, &tracks) {
                 self.status = error;
             }
         }
@@ -218,6 +232,13 @@ impl EditorState {
                 }
             }
         }
+        if let Some(at) = self.pending_seek {
+            if self.preview.as_ref().is_some_and(|p| p.is_ready()) {
+                self.pending_seek = None;
+                self.seek(at);
+                changed = true;
+            }
+        }
         if self.playing {
             changed |= self.follow_playback();
         }
@@ -227,7 +248,7 @@ impl EditorState {
                 if let Some(info) = self.info.clone() {
                     self.saving = true;
                     self.dirty_since = None;
-                    workers.job(Job::SaveProject(info, self.plan.clone(), self.fps));
+                    workers.job(Job::SaveProject(info, self.plan.clone(), self.fps, self.export_settings.clone()));
                 }
             }
         }
@@ -306,10 +327,52 @@ impl EditorState {
             return;
         }
         if let Some(info) = self.info.clone() {
+            crate::services::storage::record_interaction(crate::services::storage::Interaction::Exported(info.path.clone()));
             self.exporting = true;
             self.exported = None;
             self.export_error = None;
-            workers.job(Job::Export(info, self.plan.clone(), self.fps));
+            self.flush(workers);
+            workers.job(Job::Export(info, self.plan.clone(), self.fps, self.export_settings.clone()));
+        }
+    }
+
+    /// Writes the edit file beside the clip (HDD) when the open clip changed since the last
+    /// flush. Autosave only touches the SSD working copy; this runs on leave / switch / export / close.
+    pub fn flush(&mut self, workers: &Workers) {
+        if !self.needs_flush {
+            return;
+        }
+        if let Some(info) = self.info.clone() {
+            self.needs_flush = false;
+            workers.job(Job::FlushProject(info, self.plan.clone(), self.fps, self.export_settings.clone()));
+        }
+    }
+
+    /// Synchronous flush for app close (the worker thread may not outlive the window).
+    pub fn flush_now(&mut self) {
+        if !self.needs_flush {
+            return;
+        }
+        if let Some(info) = self.info.as_ref() {
+            self.needs_flush = false;
+            let _ = crate::backend::flush_project(info, &self.plan, self.fps, &self.export_settings);
+        }
+    }
+
+    /// The SSD copy of the open clip is ready: switch playback to it, keeping the position.
+    pub fn on_video_cached(&mut self, clip: &str, copy: &str) {
+        let Some(info) = self.info.clone() else { return };
+        if info.path != clip || self.playback_path.as_deref() == Some(copy) || self.playing {
+            return;
+        }
+        let at = self.position();
+        let tracks = self.preview_tracks(&info);
+        if let Some(preview) = self.preview.as_mut() {
+            if preview.open(copy, &tracks).is_ok() {
+                self.playback_path = Some(copy.to_owned());
+                self.applied_rect = (0, 0, 0, 0);
+                self.pending_seek = Some(at);
+            }
         }
     }
 
@@ -432,6 +495,7 @@ impl EditorState {
     // ---- edits ----------------------------------------------------------
 
     fn touch(&mut self) {
+        self.needs_flush = true;
         self.saved = false;
         self.dirty_since = Some(Instant::now());
     }
