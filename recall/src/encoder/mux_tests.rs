@@ -1,5 +1,6 @@
-//! CPU-only mux integration: libx264 stands in for NVENC with the same
-//! stream-copy shape (µs time base, bf=0, global header). No GPU work.
+//! CPU-only mux integration: libx264 / libx265 / libaom-av1 stand in for
+//! h264_nvenc / hevc_nvenc / av1_nvenc with the same stream-copy shape
+//! (µs time base, bf=0, global header). No GPU work.
 
 use super::*;
 use crate::encoder::saver::{part_path, write_now};
@@ -9,8 +10,10 @@ use std::sync::Arc;
 
 const US: ff::Rational = ff::Rational(1, 1_000_000);
 
-fn open_x264(w: u32, h: u32, gop: u32) -> Option<ff::encoder::Video> {
-    let codec = ff::encoder::find_by_name("libx264")?;
+/// A CPU encoder opened in the live NVENC stream shape. `None` when this
+/// FFmpeg build lacks it (tests then say so and skip).
+fn open_cpu(name: &str, w: u32, h: u32, gop: u32) -> Option<ff::encoder::Video> {
+    let codec = ff::encoder::find_by_name(name)?;
     let mut ctx = ff::codec::context::Context::new_with_codec(codec)
         .encoder()
         .video()
@@ -25,10 +28,28 @@ fn open_x264(w: u32, h: u32, gop: u32) -> Option<ff::encoder::Video> {
     ctx.set_bit_rate(500_000);
     ctx.set_flags(ff::codec::Flags::GLOBAL_HEADER);
     let mut opts = ff::Dictionary::new();
-    opts.set("preset", "ultrafast");
-    opts.set("tune", "zerolatency");
-    opts.set("bf", "0");
-    Some(ctx.open_with(opts).expect("open libx264"))
+    match name {
+        "libaom-av1" => {
+            opts.set("usage", "realtime");
+            opts.set("cpu-used", "8");
+            opts.set("lag-in-frames", "0");
+        }
+        "libx265" => {
+            opts.set("preset", "ultrafast");
+            opts.set("tune", "zerolatency");
+            opts.set("x265-params", "log-level=error");
+        }
+        _ => {
+            opts.set("preset", "ultrafast");
+            opts.set("tune", "zerolatency");
+            opts.set("bf", "0");
+        }
+    }
+    Some(ctx.open_with(opts).unwrap_or_else(|e| panic!("open {name}: {e}")))
+}
+
+fn open_x264(w: u32, h: u32, gop: u32) -> Option<ff::encoder::Video> {
+    open_cpu("libx264", w, h, gop)
 }
 
 /// Same rule as `Enc::drain`: the next PTS refines the previous duration.
@@ -74,8 +95,13 @@ fn pcm(name: &'static str, secs: f64, tone: bool) -> AudioPcm {
 
 /// Encode a VFR libx264 stream into a ring and return its save window.
 fn x264_window() -> Option<(Vec<EncodedPacket>, OwnedParams)> {
+    cpu_window("libx264")
+}
+
+/// Encode a VFR stream with CPU encoder `name` into a ring; its save window.
+fn cpu_window(name: &str) -> Option<(Vec<EncodedPacket>, OwnedParams)> {
     ff::init().unwrap();
-    let mut enc = open_x264(64, 64, 4)?;
+    let mut enc = open_cpu(name, 64, 64, 4)?;
     let params = OwnedParams::from_encoder(&enc);
     let mut ring = PacketRing::new(10_000_000);
     let pts_list = [
@@ -110,7 +136,11 @@ fn window_job(path: &str, packets: Vec<EncodedPacket>, params: OwnedParams, secs
         secs,
         video: VideoSrc::Window { packets, params },
         backend: "libx264",
-        audio: vec![pcm("Game", secs, true), pcm("Mic", secs, false)],
+        audio: vec![
+            pcm("Game", secs, true),
+            pcm("Mic", secs, false),
+            pcm("Voice", secs, true),
+        ],
         thumb: None,
         width: 64,
         height: 64,
@@ -120,16 +150,28 @@ fn window_job(path: &str, packets: Vec<EncodedPacket>, params: OwnedParams, secs
     }
 }
 
-#[test]
-fn cpu_window_muxes_to_mp4_with_vfr_timing_and_two_aac_tracks() {
-    let Some((window, params)) = x264_window() else {
-        eprintln!("libx264 missing in this FFmpeg build; skipped");
+fn tag_text(tag: u32) -> String {
+    String::from_utf8_lossy(&tag.to_le_bytes()).into_owned()
+}
+
+/// Mux a CPU-encoded window with Game/Mic/Voice tracks through the saver's
+/// production path, then check codec, sample-entry tag, VFR timing and
+/// track labels on the file FFmpeg reads back.
+fn assert_clip_roundtrip(encoder: &str, id: ff::codec::Id, tag: &str) {
+    let Some((window, params)) = cpu_window(encoder) else {
+        eprintln!("{encoder} missing in this FFmpeg build; skipped");
         return;
     };
     assert!(window[0].keyframe && pts_strictly_increase(&window));
     let secs = window_secs(&window);
-    let (dir, path) = temp_clip("ok");
-    let muxed = write_now(&window_job(&path, window.clone(), params, secs)).unwrap();
+    let (dir, path) = temp_clip(encoder);
+    let mut job = window_job(&path, window.clone(), params, secs);
+    job.backend = match encoder {
+        "libx265" => "libx265",
+        "libaom-av1" => "libaom-av1",
+        _ => "libx264",
+    };
+    let muxed = write_now(&job).unwrap();
     assert_eq!(muxed.frames, window.len() as u64);
     assert!((muxed.secs as f64 - secs).abs() < 1e-6);
     assert!(!part_path(&path).exists(), ".part must be renamed away");
@@ -140,9 +182,33 @@ fn cpu_window_muxes_to_mp4_with_vfr_timing_and_two_aac_tracks() {
         .map(|s| (s.parameters().id(), s.time_base()))
         .collect();
     let ids: Vec<ff::codec::Id> = streams.iter().map(|s| s.0).collect();
-    assert_eq!(ids, vec![ff::codec::Id::H264, ff::codec::Id::AAC, ff::codec::Id::AAC]);
+    let aac = ff::codec::Id::AAC;
+    assert_eq!(ids, vec![id, aac, aac, aac], "{encoder}");
+    let video_stream = ictx.stream(0).unwrap();
+    // SAFETY: reading a plain field of a live stream's codecpar.
+    let read_tag = unsafe { (*video_stream.parameters().as_ptr()).codec_tag };
+    assert_eq!(tag_text(read_tag), tag, "{encoder} sample entry");
+    // FFmpeg reads the label back from the `hdlr` box as `handler_name`. The
+    // `title` is written too (track `udta/name`, for MP4Box/MediaInfo-style
+    // readers) but FFmpeg 7.1's MP4 demuxer does not surface it.
+    let handlers: Vec<String> = ictx
+        .streams()
+        .skip(1)
+        .map(|s| s.metadata().get("handler_name").unwrap_or("<missing>").to_string())
+        .collect();
+    let titles = ["Game", "Microphone", "Voice chat"];
+    assert_eq!(handlers, titles, "{encoder} audio handler_name");
+    let bytes = std::fs::read(&path).unwrap();
+    for title in titles {
+        let name_box = [b"name".as_slice(), title.as_bytes()].concat();
+        assert!(
+            bytes.windows(name_box.len()).any(|w| w == name_box),
+            "{encoder}: no udta/name box for {title}"
+        );
+    }
+
     let mut video = Vec::new();
-    let mut audio = [0usize; 2];
+    let mut audio = [0usize; 3];
     for (stream, pkt) in ictx.packets() {
         let tb = streams[stream.index()].1;
         if stream.index() == 0 {
@@ -157,12 +223,35 @@ fn cpu_window_muxes_to_mp4_with_vfr_timing_and_two_aac_tracks() {
         .iter()
         .map(|p| (p.frame_idx, p.duration_us, p.keyframe))
         .collect();
-    assert_eq!(video, expected, "VFR pts/durations/keyframes must survive the mux");
+    assert_eq!(video, expected, "{encoder}: VFR pts/durations/keyframes must survive the mux");
     // ~secs of 1024-sample AAC frames per track (plus encoder priming).
     let min_frames = (secs * 48_000.0 / 1024.0) as usize;
     assert!(audio.iter().all(|&n| n >= min_frames), "{audio:?} < {min_frames}");
     drop(ictx);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn h264_window_muxes_avc1_with_vfr_timing_and_three_titled_tracks() {
+    assert_clip_roundtrip("libx264", ff::codec::Id::H264, "avc1");
+}
+
+#[test]
+fn hevc_window_muxes_as_hvc1_for_media_foundation() {
+    assert_clip_roundtrip("libx265", ff::codec::Id::HEVC, "hvc1");
+}
+
+#[test]
+fn av1_window_muxes_as_av01() {
+    assert_clip_roundtrip("libaom-av1", ff::codec::Id::AV1, "av01");
+}
+
+#[test]
+fn mp4_tag_is_forced_only_for_hevc_and_av1() {
+    let tag = |id| mp4_video_tag(id).map(tag_text);
+    assert_eq!(tag(ff::codec::Id::HEVC).as_deref(), Some("hvc1"));
+    assert_eq!(tag(ff::codec::Id::AV1).as_deref(), Some("av01"));
+    assert_eq!(tag(ff::codec::Id::H264), None, "H.264 keeps FFmpeg's avc1");
 }
 
 #[test]
@@ -245,7 +334,8 @@ fn bench_live_shaped_save_cpu_cost() {
         .join(format!("save-bench-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&bench_dir).unwrap();
     let path = bench_dir.join("bench.mp4").to_string_lossy().into_owned();
-    let job = window_job(&path, window, params, secs);
+    let mut job = window_job(&path, window, params, secs);
+    job.audio.truncate(2); // the live clip this mirrors had Game + Mic only
     let mut timing = Timing::default();
     let started = Instant::now();
     let muxed = crate::encoder::saver::write_clip(

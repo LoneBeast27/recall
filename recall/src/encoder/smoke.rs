@@ -1,5 +1,7 @@
 //! `--encoder-smoke`: real NVENC encode + the saver's mux path, synchronously,
-//! without WGC or audio. GPU work: the caller owns resource admission.
+//! without WGC or audio. Honours `RECALL_CODEC` / `RECALL_QUALITY`, so each
+//! codec (and its fallback) can be checked on its own. GPU work: the caller
+//! owns resource admission.
 
 use std::time::Instant;
 
@@ -16,9 +18,22 @@ pub fn smoke_test(out_dir: &std::path::Path) -> Result<String, String> {
         fps: 60,
         buffer_secs: 2,
         bitrate: 2_000_000,
-        json: false,
+        ..Config::from_env(false)
     };
-    let mut enc = open_encoder(&cfg, 256, 256)?;
+    for note in &cfg.notes {
+        eprintln!("smoke: {note}");
+    }
+    let (mut enc, fallback) = open_encoder(&cfg, cfg.codec, 256, 256)?;
+    if let Some(note) = fallback {
+        eprintln!("smoke: {note}");
+    }
+    eprintln!(
+        "smoke codec: requested {} -> recording {} ({}), quality {}",
+        cfg.codec.label(),
+        enc.codec.label(),
+        enc.backend,
+        cfg.quality.label()
+    );
     let stats = EncStats::default();
     for pts in [0_u64, 16_000, 63_000, 97_000, 180_000] {
         let mut rgba = vec![0_u8; 256 * 256 * 4];
