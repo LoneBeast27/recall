@@ -147,6 +147,11 @@ impl IMFPMediaPlayerCallback_Impl for MediaCallback_Impl {
         let Some(event) = (unsafe { event.as_ref() }) else {
             return;
         };
+        // A pause that lands after the session stopped at end of stream is harmless.
+        const MF_E_SESSION_PAUSEWHILESTOPPED: i32 = 0xC00D36FC_u32 as i32;
+        if event.hrEvent.0 == MF_E_SESSION_PAUSEWHILESTOPPED {
+            return;
+        }
         if event.hrEvent.is_err() || event.eEventType == MFP_EVENT_TYPE_ERROR {
             self.status
                 .ready
@@ -560,8 +565,13 @@ impl NativePreview {
             if self.has_audio {
                 self.audio.pause()?;
             }
-            unsafe { player.Pause() }
-                .map_err(|error| format!("could not pause native video: {error}"))?;
+            // At end of stream MFPlay stops by itself; pausing a stopped session fails
+            // with MF_E_SESSION_PAUSEWHILESTOPPED, so only pause a playing player.
+            let state = unsafe { player.GetState() }.unwrap_or(MFP_MEDIAPLAYER_STATE_PLAYING);
+            if state == MFP_MEDIAPLAYER_STATE_PLAYING {
+                unsafe { player.Pause() }
+                    .map_err(|error| format!("could not pause native video: {error}"))?;
+            }
             if self.has_audio {
                 set_player_position(player, self.audio.position())?;
             }
