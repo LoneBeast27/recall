@@ -10,8 +10,14 @@
 
 #[cfg(feature = "encode")]
 mod audio;
+mod bookmarks;
 mod border;
 mod capture;
+mod engine_extras;
+#[cfg(feature = "encode")]
+mod longrec;
+mod naming;
+mod screenshot;
 mod debug_dump;
 mod edit_model;
 #[cfg(feature = "encode")]
@@ -112,6 +118,11 @@ struct App {
     buffer_capacity_secs: u32,
     #[cfg(feature = "encode")]
     encoder: Option<encoder::EncoderHandle>,
+    /// Hotkey features: screenshot requests (fulfilled on this thread) and
+    /// the long-recording writer (finalized at quit).
+    shots: Option<Arc<screenshot::Screenshots>>,
+    #[cfg(feature = "encode")]
+    longrec: Option<Arc<longrec::LongRec>>,
     // fps tracking
     fps_count: u32,
     fps_last: Option<Instant>,
@@ -161,6 +172,11 @@ impl ApplicationHandler for App {
             shared.set_select(v);
         }
 
+        // Bookmarks are held for the replay window (see `bookmarks`).
+        let marks = Arc::new(bookmarks::Bookmarks::new(
+            std::env::var("RECALL_BUFFER_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(60),
+        ));
+
         // Replay encoder (feature `encode`): continuous NVENC into a RAM ring.
         #[cfg(feature = "encode")]
         let save_hook: Option<SaveHook>;
@@ -191,6 +207,12 @@ impl ApplicationHandler for App {
                     eprintln!("[recall] {msg}");
                 }
             });
+            let track_infos = tracks
+                .iter()
+                .map(|t| longrec::TrackInfo { name: t.name, rate: t.rate, channels: t.channels })
+                .collect();
+            self.longrec = Some(Arc::new(longrec::spawn(out_dir.clone(), json, track_infos)));
+            longrec::recover_parts(out_dir.clone(), json);
             let handle = encoder::spawn(
                 encoder::Config {
                     fps: self.enc_fps,
@@ -206,13 +228,18 @@ impl ApplicationHandler for App {
             let cmds = handle.commands.clone();
             let src = self.source_shared.clone();
             let timeline = shared.clone();
+            let save_marks = marks.clone();
             save_hook = Some(Box::new(move |secs: Option<u32>| {
                 let name = src.lock().map(|s| s.clone()).unwrap_or_default();
                 let path = encoder::clip_path(&out_dir, &name);
+                let end_us = timeline.recording_now_us();
+                if let Some(end) = end_us {
+                    save_marks.note_save(&path, end);
+                }
                 let _ = cmds.send(encoder::SaveRequest {
                     path,
                     seconds: secs.unwrap_or(buffer_secs),
-                    end_us: timeline.recording_now_us(),
+                    end_us,
                     requested: Instant::now(),
                 });
             }));
@@ -220,13 +247,28 @@ impl ApplicationHandler for App {
             export_hook = Some(spawn_export_worker(self.config.json));
         }
 
+        // Hotkey features: marks sidecar on `Saved`, screenshots, long recording.
+        let sidecar_marks = marks.clone();
+        protocol::set_observer(move |msg| bookmarks::on_emit(&sidecar_marks, msg));
+        let shots = screenshot::spawn(naming::out_dir(), self.config.json);
+        self.shots = Some(shots.clone());
+        let extras = engine_extras::Extras {
+            shared: shared.clone(),
+            source: self.source_shared.clone(),
+            bookmarks: marks,
+            shots,
+            #[cfg(feature = "encode")]
+            longrec: self.longrec.clone(),
+            json: self.config.json,
+        };
+
         // Announce version + monitors before capture starts (sidecar mode).
         if self.config.json {
             protocol::emit(&protocol::Outbound::Hello {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 monitors: capture::list_monitors(),
             });
-            spawn_stdin_reader(shared.clone(), save_hook, export_hook);
+            spawn_stdin_reader(shared.clone(), save_hook, export_hook, extras);
         }
 
         self.source_name = std::env::var("RECALL_CAPTURE_NAME").unwrap_or_else(|_| INITIAL_TITLE.trim_end_matches(" SDR").to_string());
@@ -266,6 +308,7 @@ impl ApplicationHandler for App {
                 }
                 #[cfg(feature = "encode")]
                 self.encode_tick();
+                self.screenshot_tick();
                 self.tick_fps();
                 self.periodic_update();
                 if let Some(w) = &self.window {
@@ -306,6 +349,19 @@ impl App {
             if let Ok(mut error) = enc.stats.error.lock() {
                 *error = Some("NVENC recording thread stopped; restart Recall".into());
             }
+        }
+    }
+
+    /// A pending screenshot reads the current frame back once (the same
+    /// tonemapped RGBA the encoder gets) and hands it to the PNG thread.
+    fn screenshot_tick(&mut self) {
+        let Some(shots) = &self.shots else { return };
+        if !shots.take_request() {
+            return;
+        }
+        match self.gpu.as_mut().and_then(|g| g.encode_frame()) {
+            Some((w, h, rgba)) => shots.submit(w, h, rgba, &self.source_name),
+            None => shots.fail("no captured frame yet"),
         }
     }
 
@@ -480,6 +536,7 @@ fn spawn_stdin_reader(
     shared: Arc<CaptureShared>,
     save: Option<SaveHook>,
     export: Option<ExportHook>,
+    extras: engine_extras::Extras,
 ) {
     std::thread::spawn(move || {
         use std::io::BufRead;
@@ -512,6 +569,15 @@ fn spawn_stdin_reader(
                 Ok(protocol::Command::SetMicMute { muted }) => {
                     #[cfg(feature="encode")]
                     { audio::set_mic_muted(muted); protocol::emit(&protocol::Outbound::MicMuted { muted }); }
+                }
+                Ok(
+                    cmd @ (protocol::Command::Bookmark
+                    | protocol::Command::Screenshot
+                    | protocol::Command::RecordStart
+                    | protocol::Command::RecordStop
+                    | protocol::Command::RecordToggle),
+                ) => {
+                    extras.handle(&cmd);
                 }
                 Ok(protocol::Command::Quit) => {
                     shared.quit.store(true, Relaxed);
@@ -583,8 +649,13 @@ fn main() {
         ..Default::default()
     };
     event_loop.run_app(&mut app).expect("run app");
-    // Quit: let an in-flight save finish (or remove its .part) inside the
-    // supervisor's 4 s grace instead of dying mid-mux.
+    // Quit: finalize a running long recording first (a kill after this point
+    // leaves a `.part` that the next start recovers), then let an in-flight
+    // save finish (or remove its .part) inside the supervisor's grace.
+    #[cfg(feature = "encode")]
+    if let Some(longrec) = app.longrec.take() {
+        longrec.shutdown(std::time::Duration::from_millis(1500));
+    }
     #[cfg(feature = "encode")]
     if let Some(encoder) = app.encoder.take() {
         encoder.shutdown(std::time::Duration::from_secs(3));

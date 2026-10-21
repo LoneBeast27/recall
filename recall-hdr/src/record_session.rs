@@ -1,7 +1,7 @@
 //! `--record-tray-smoke`: the recording tray + its real native menu on a small
 //! host window, with NO capture, hotkeys, supervisor, overlay, display code,
 //! registry writes or GPU work. The live record mode is `record_app`.
-use crate::record_tray::{diagnostic, RecallUi, RecordingTray, RecordingTrayCmd};
+use crate::record_tray::{diagnostic, RecallUi, RecordingTray, RecordingTrayCmd, MENU_ITEMS};
 use crate::supervisor::EngineHealth;
 use std::time::{Duration, Instant};
 use windows::core::w;
@@ -14,11 +14,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WS_OVERLAPPEDWINDOW, WS_VISIBLE,
 };
 
-const MENU_ITEMS: &str = "status,open,save,autostart,quit";
-
-/// Smoke-only dispatch: Open is real (focus/launch the native UI); Save and
-/// Start-with-Windows are logged, never executed. Returns `true` on Quit.
-fn dispatch_tray_command(command: RecordingTrayCmd, ui: &mut RecallUi, scope: &str) -> bool {
+/// Smoke-only dispatch: Open is real (focus/launch the native UI); the pause
+/// toggle only flips the tray's own text + icon (no engine). Returns `true` on Quit.
+fn dispatch_tray_command(command: RecordingTrayCmd, ui: &mut RecallUi, tray: &mut RecordingTray, paused: &mut bool, scope: &str) -> bool {
     diagnostic(&format!("{scope} command={command:?}"));
     match command {
         RecordingTrayCmd::Open => {
@@ -27,12 +25,11 @@ fn dispatch_tray_command(command: RecordingTrayCmd, ui: &mut RecallUi, scope: &s
             crate::log!("{scope}: tray open, matched UI windows={}", matched.len());
             false
         }
-        RecordingTrayCmd::SaveNow => {
-            crate::log!("{scope}: tray save (smoke: no engine, nothing saved)");
-            false
-        }
-        RecordingTrayCmd::SetAutostart(on) => {
-            crate::log!("{scope}: tray start-with-windows -> {on} (smoke: registry untouched)");
+        RecordingTrayCmd::TogglePause => {
+            *paused = !*paused;
+            tray.set_paused(*paused);
+            tray.set_status(if *paused { "Recording paused" } else { "Waiting for a game" });
+            crate::log!("{scope}: tray pause toggle -> paused={paused} (smoke: no engine)");
             false
         }
         RecordingTrayCmd::Quit => true,
@@ -66,7 +63,7 @@ unsafe extern "system" fn smoke_window_proc(
 /// Native tray/menu smoke seam. It never starts capture, hotkeys, the supervisor,
 /// overlay, display code, or GPU work; it times out after 180 seconds.
 pub fn run_tray_smoke() -> i32 {
-    let mut tray = match RecordingTray::build(false) {
+    let mut tray = match RecordingTray::build() {
         Ok(value) => value,
         Err(e) => {
             crate::log!("record-tray-smoke: tray unavailable: {e}");
@@ -143,6 +140,7 @@ pub fn run_tray_smoke() -> i32 {
         let _ = ShowWindow(host, SW_SHOWNOACTIVATE);
     }
     let mut ui = RecallUi::from_current_exe();
+    let mut paused = false;
     let deadline = Instant::now() + Duration::from_secs(180);
     let mut message = MSG::default();
     let shutdown_reason = loop {
@@ -167,10 +165,10 @@ pub fn run_tray_smoke() -> i32 {
         if window_closed {
             break "window-close";
         }
-        if tray
-            .poll()
+        let commands = tray.poll();
+        if commands
             .into_iter()
-            .any(|command| dispatch_tray_command(command, &mut ui, "smoke"))
+            .any(|command| dispatch_tray_command(command, &mut ui, &mut tray, &mut paused, "smoke"))
         {
             break "menu-quit";
         }

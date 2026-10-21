@@ -5,7 +5,12 @@
 //! |---|---|---|
 //! | `status` | | session status + cached engine hello/status (+ legacy `hdr` status) to the caller |
 //! | `quit` | | stop recording and exit |
-//! | `save_clip` | `seconds?` | engine save (default = `recording.buffer_secs`); no engine -> `engine` `save_failed` |
+//! | `save_clip` | `seconds?` | engine save (default = `recording.buffer_secs`); no engine / paused -> `engine` `save_failed` |
+//! | `bookmark` | | engine bookmark (marks land in the next saves' `.recall-marks.json`) |
+//! | `screenshot` | | engine PNG -> `engine` `screenshot{path}`; refused -> `screenshot_failed` |
+//! | `record_start` / `record_stop` / `record_toggle` | | manual long recording -> `engine` `recording_started{path}` / `recording_stopped{path,seconds,bytes}` / `recording_failed{reason,path}` |
+//! | `pause` / `resume` / `toggle_pause` | | stop the engine and ignore games until resume (runtime only); status `state:"paused"` |
+//! | `storage_clean` | | run the storage cap now -> `session` `storage_cleaned{removed,freed_bytes}` |
 //! | `export_clip` | unchanged engine shape | forwarded; engine off -> `engine` `export_failed` |
 //! | `set_mic_mute` | `muted: bool` | enforced on this and every later engine |
 //! | `toggle_mic_mute` | | flips the enforced state |
@@ -27,7 +32,7 @@ use crate::log;
 use crate::record_app::{apply_affinity, Controller};
 use crate::record_config::{apply_patch, parse_cpu_mask};
 use crate::record_status::{config_event, error_event, status_json, tray_line, StatusInputs};
-use crate::record_engine::EngineTarget;
+use crate::record_engine::{capture_refusal, engine_settings_changed};
 
 impl Controller {
     /// Execute one pipe command on the pump thread.
@@ -52,6 +57,22 @@ impl Controller {
                 },
             },
             "export_clip" => self.export_clip(&val),
+            "bookmark" => self.engine_command("bookmark", client),
+            "screenshot" => self.engine_command("screenshot", client),
+            "record_start" => self.engine_command("record_start", client),
+            "record_stop" => self.engine_command("record_stop", client),
+            "record_toggle" => self.engine_command("record_toggle", client),
+            "pause" => self.set_paused(true),
+            "resume" => self.set_paused(false),
+            "toggle_pause" => self.set_paused(!self.paused),
+            "storage_clean" => {
+                let (dir, cap) = (self.cfg.recording.output_dir.clone(), self.cfg.storage.cap_gb);
+                if cap == 0 {
+                    self.reply_error(client, "storage.cap_gb is 0 (auto-clean off)");
+                } else {
+                    self.janitor.run_now(&dir, cap, std::time::Instant::now());
+                }
+            }
             "set_mic_mute" => match val.get("muted").and_then(Value::as_bool) {
                 Some(muted) => self.set_mic(muted),
                 None => self.reply_error(client, "set_mic_mute needs \"muted\": true|false"),
@@ -89,22 +110,17 @@ impl Controller {
         }
     }
 
-    /// Save the replay buffer (hotkey, tray, pipe). With no engine to ask, the
-    /// failure is surfaced the way an engine failure is (overlay toast + beep).
+    /// Save the replay buffer (hotkeys, chord, pipe). Paused or with no engine
+    /// to ask, the failure is surfaced the way an engine failure is (overlay
+    /// toast + beep).
     pub(crate) fn save_clip(&mut self, seconds: Option<u32>) {
         let secs = seconds.unwrap_or(self.cfg.recording.buffer_secs);
-        if self.engine_running() {
-            log!("record: save last {secs}s");
-            self.supervisor.send_engine_line(&json!({"cmd": "save_clip", "seconds": secs}).to_string());
-            return;
+        if let Some(reason) = capture_refusal(self.paused, self.engine_running(), &self.wanted()) {
+            return self.refuse_capture("save_clip", reason);
         }
-        let reason = match self.wanted() {
-            EngineTarget::Off => "Recall is waiting for a game; nothing is being recorded",
-            _ => "the recording engine is still starting; try again in a moment",
-        };
-        log!("record: save refused -- {reason}");
-        self.hub.event("engine", &json!({"type": "save_failed", "reason": reason}).to_string());
-        crate::supervisor::beep_failure();
+        log!("record: save last {secs}s");
+        self.activity.save_sent(std::time::Instant::now());
+        self.supervisor.send_engine_line(&json!({"cmd": "save_clip", "seconds": secs}).to_string());
     }
 
     fn export_clip(&mut self, val: &Value) {
@@ -186,7 +202,6 @@ impl Controller {
                 Ok(()) => log!("record: start with Windows -> {}", new.startup.autostart),
                 Err(e) => self.reply_error(None, &format!("autostart registry update failed: {e}")),
             }
-            self.tray.set_autostart_checked(new.startup.autostart);
         }
         if old.behavior.hdr_auto != new.behavior.hdr_auto {
             if new.behavior.hdr_auto {
@@ -199,8 +214,12 @@ impl Controller {
         }
         let (o, n) = (&old.recording, &new.recording);
         if old.behavior.hdr_auto != new.behavior.hdr_auto
-            || o.save_hotkey != n.save_hotkey
+            || o.save_hotkeys != n.save_hotkeys
             || o.mic_hotkey != n.mic_hotkey
+            || o.bookmark_hotkey != n.bookmark_hotkey
+            || o.screenshot_hotkey != n.screenshot_hotkey
+            || o.record_hotkey != n.record_hotkey
+            || old.hotkeys != new.hotkeys
             || old.hotkey.toggle_hdr != new.hotkey.toggle_hdr
         {
             self.rebind_hotkeys();
@@ -210,9 +229,12 @@ impl Controller {
                 self.applied_mask = apply_affinity(mask);
             }
         }
-        if o.buffer_secs != n.buffer_secs || o.output_dir != n.output_dir || o.cpu_mask != n.cpu_mask {
-            log!("record: engine settings changed; restarting the engine (the replay buffer restarts)");
-            self.restart_engine_for_settings();
+        if engine_settings_changed(o, n) {
+            self.request_engine_restart();
+        }
+        if old.storage.cap_gb != new.storage.cap_gb || o.output_dir != n.output_dir {
+            log!("record: storage cap -> {} GiB", new.storage.cap_gb);
+            self.janitor.run_now(&n.output_dir, new.storage.cap_gb, std::time::Instant::now());
         }
         if old.behavior.sdr_white_nits != new.behavior.sdr_white_nits || old.behavior.debounce_ms != new.behavior.debounce_ms {
             log!("record: sdr_white_nits / debounce_ms apply the next time HDR management starts");
@@ -236,6 +258,10 @@ impl Controller {
             mic_muted: self.mic_muted,
             overlay_running: self.overlay.running(),
             hdr: &hdr,
+            paused: self.paused,
+            long_recording: self.activity.long_recording_json(),
+            pending_restart: self.pending_restart,
+            leader_label: &self.leader_label,
         })
     }
 
@@ -251,6 +277,7 @@ impl Controller {
         let line = status.to_string();
         if line != self.last_session {
             let state = status["state"].as_str().unwrap_or("waiting").to_string();
+            self.tray.set_paused(self.paused);
             self.tray.set_status(&tray_line(&state, &self.wanted()));
             self.hub.event("session", &line);
             self.last_session = line;

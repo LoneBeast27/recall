@@ -1,13 +1,19 @@
-//! The record mode's notification-area UI: a status line ("Recording VALORANT"
-//! / "Waiting for a game"), Open Recall (focus or launch `recall-native.exe`),
-//! Save replay now, Start with Windows, Quit Recall. It performs none of the
-//! actions itself -- [`RecordingTray::poll`] returns commands for the pump.
+//! The record mode's notification-area UI (user ruling 2026-10-22, 03:41 IST:
+//! "confirm recall system tray utility too. for start record stop record and
+//! quit"). The menu is exactly: status line (disabled: "Recording VALORANT" /
+//! "Waiting for a game" / "Recording paused") · Open Recall (focus or launch
+//! `recall-native.exe`) · Stop recording / Start recording (pause toggle) ·
+//! separator · Quit Recall. Double-click opens Recall. Saving and Start with
+//! Windows live in the app. The icon is the Recall mark (ring + red dot while
+//! recording, grey dot while paused; `assets/tray-*.rgba`, 32x32 RGBA). It
+//! performs none of the actions itself -- [`RecordingTray::poll`] returns
+//! commands for the pump.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use tray_icon::menu::{CheckMenuItem, ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows::core::{BOOL, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
@@ -25,17 +31,22 @@ use crate::supervisor::EngineHealth;
 
 const ID_STATUS: &str = "record_status";
 const ID_OPEN: &str = "record_open";
-const ID_SAVE: &str = "record_save";
-const ID_AUTOSTART: &str = "record_autostart";
+const ID_PAUSE: &str = "record_pause";
 const ID_QUIT: &str = "record_quit";
+
+/// The menu as shipped (ids, in order); the smoke host logs it.
+pub const MENU_ITEMS: &str = "status,open,pause,separator,quit";
+
+const ICON_SIZE: u32 = 32;
+static ICON_RECORDING: &[u8] = include_bytes!("../assets/tray-recording.rgba");
+static ICON_PAUSED: &[u8] = include_bytes!("../assets/tray-paused.rgba");
 
 /// Commands emitted by the recording tray. Dispatch lives in the pump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingTrayCmd {
     Open,
-    SaveNow,
-    /// "Start with Windows" toggled to this (post-click) value.
-    SetAutostart(bool),
+    /// "Stop recording" (pause) / "Start recording" (resume).
+    TogglePause,
     Quit,
 }
 
@@ -44,38 +55,33 @@ pub struct RecordingTray {
     tray: TrayIcon,
     menu: Menu,
     status: MenuItem,
-    autostart: CheckMenuItem,
+    pause: MenuItem,
+    paused: bool,
     last_line: Option<String>,
 }
 
 impl RecordingTray {
-    pub fn build(autostart_on: bool) -> Result<Self, String> {
+    pub fn build() -> Result<Self, String> {
         let status = MenuItem::with_id(ID_STATUS, "Recall: starting", false, None);
         let open = MenuItem::with_id(ID_OPEN, "Open Recall", true, None);
-        let save = MenuItem::with_id(ID_SAVE, "Save replay now", true, None);
-        let autostart = CheckMenuItem::with_id(ID_AUTOSTART, "Start with Windows", true, autostart_on, None);
+        let pause = MenuItem::with_id(ID_PAUSE, pause_label(false), true, None);
         let quit = MenuItem::with_id(ID_QUIT, "Quit Recall", true, None);
-        let menu = Menu::with_items(&[&status, &open, &save, &autostart, &PredefinedMenuItem::separator(), &quit])
+        let menu = Menu::with_items(&[&status, &open, &pause, &PredefinedMenuItem::separator(), &quit])
             .map_err(|e| format!("build recording tray menu: {e}"))?;
-        let (rgba, width, height) = recording_icon_rgba();
-        let icon = Icon::from_rgba(rgba, width, height)
-            .map_err(|e| format!("build recording icon: {e}"))?;
         let tray = TrayIconBuilder::new()
             .with_tooltip("Recall: starting")
             .with_menu(Box::new(menu.clone()) as Box<dyn ContextMenu>)
-            .with_icon(icon)
+            .with_icon(tray_icon(false)?)
             .build()
             .map_err(|e| format!("build recording tray icon: {e}"))?;
-        Ok(Self { tray, menu, status, autostart, last_line: None })
+        Ok(Self { tray, menu, status, pause, paused: false, last_line: None })
     }
 
     /// Non-blocking drain of only this component's process-global menu events.
     pub fn poll(&self) -> Vec<RecordingTrayCmd> {
         let mut commands = Vec::new();
         while let Ok(event) = MenuEvent::receiver().try_recv() {
-            // muda flips a CheckMenuItem before emitting, so is_checked() is
-            // the post-click value.
-            if let Some(command) = map_id(event.id.as_ref(), self.autostart.is_checked()) {
+            if let Some(command) = map_id(event.id.as_ref()) {
                 commands.push(command);
             }
         }
@@ -101,10 +107,15 @@ impl RecordingTray {
         self.set_status(&health_line(health));
     }
 
-    /// Reflect the config's autostart flag (e.g. changed from the app).
-    pub fn set_autostart_checked(&self, on: bool) {
-        if self.autostart.is_checked() != on {
-            self.autostart.set_checked(on);
+    /// Reflect the pause state: menu toggle text + icon (only on change).
+    pub fn set_paused(&mut self, paused: bool) {
+        if self.paused == paused {
+            return;
+        }
+        self.paused = paused;
+        self.pause.set_text(pause_label(paused));
+        if let Ok(icon) = tray_icon(paused) {
+            let _ = self.tray.set_icon(Some(icon));
         }
     }
 
@@ -124,11 +135,19 @@ impl RecordingTray {
     }
 }
 
-fn map_id(id: &str, autostart_now: bool) -> Option<RecordingTrayCmd> {
+/// The pause toggle's text: what clicking it does.
+pub fn pause_label(paused: bool) -> &'static str {
+    if paused {
+        "Start recording"
+    } else {
+        "Stop recording"
+    }
+}
+
+fn map_id(id: &str) -> Option<RecordingTrayCmd> {
     Some(match id {
         ID_OPEN => RecordingTrayCmd::Open,
-        ID_SAVE => RecordingTrayCmd::SaveNow,
-        ID_AUTOSTART => RecordingTrayCmd::SetAutostart(autostart_now),
+        ID_PAUSE => RecordingTrayCmd::TogglePause,
         ID_QUIT => RecordingTrayCmd::Quit,
         _ => return None,
     })
@@ -145,32 +164,15 @@ fn health_line(health: EngineHealth) -> String {
     }
 }
 
-const ICON_SIZE: u32 = 32;
-/// A monochrome white `R` mark with transparent surroundings.
-pub fn recording_icon_rgba() -> (Vec<u8>, u32, u32) {
-    let mut rgba = vec![0; (ICON_SIZE * ICON_SIZE * 4) as usize];
-    for y in 5..27 {
-        for x in 6..10 {
-            set_pixel(&mut rgba, x, y);
-        }
-    }
-    for x in 9..23 {
-        set_pixel(&mut rgba, x, 5);
-        set_pixel(&mut rgba, x, 15);
-    }
-    for y in 6..15 {
-        for x in 20..24 {
-            set_pixel(&mut rgba, x, y);
-        }
-    }
-    for p in 0..14 {
-        set_pixel(&mut rgba, 10 + p, 15 + p);
-    }
-    (rgba, ICON_SIZE, ICON_SIZE)
+/// The Recall mark for the tray: (RGBA, width, height).
+pub fn icon_rgba(paused: bool) -> (Vec<u8>, u32, u32) {
+    let bytes = if paused { ICON_PAUSED } else { ICON_RECORDING };
+    (bytes.to_vec(), ICON_SIZE, ICON_SIZE)
 }
-fn set_pixel(rgba: &mut [u8], x: u32, y: u32) {
-    let i = ((y * ICON_SIZE + x) * 4) as usize;
-    rgba[i..i + 4].copy_from_slice(&[255, 255, 255, 255]);
+
+fn tray_icon(paused: bool) -> Result<Icon, String> {
+    let (rgba, w, h) = icon_rgba(paused);
+    Icon::from_rgba(rgba, w, h).map_err(|e| format!("build tray icon: {e}"))
 }
 
 /// Matches top-level windows owned by exact candidate executable paths, including hidden windows.
@@ -386,20 +388,39 @@ mod tests {
     use super::*;
     #[test]
     fn command_ids_map_only_to_recording_commands() {
-        assert_eq!(map_id(ID_OPEN, false), Some(RecordingTrayCmd::Open));
-        assert_eq!(map_id(ID_SAVE, false), Some(RecordingTrayCmd::SaveNow));
-        assert_eq!(map_id(ID_AUTOSTART, true), Some(RecordingTrayCmd::SetAutostart(true)));
-        assert_eq!(map_id(ID_AUTOSTART, false), Some(RecordingTrayCmd::SetAutostart(false)));
-        assert_eq!(map_id(ID_QUIT, false), Some(RecordingTrayCmd::Quit));
-        assert_eq!(map_id(ID_STATUS, false), None);
+        assert_eq!(map_id(ID_OPEN), Some(RecordingTrayCmd::Open));
+        assert_eq!(map_id(ID_PAUSE), Some(RecordingTrayCmd::TogglePause));
+        assert_eq!(map_id(ID_QUIT), Some(RecordingTrayCmd::Quit));
+        assert_eq!(map_id(ID_STATUS), None);
+        assert_eq!(map_id("record_save"), None, "Save replay now left the tray");
+        assert_eq!(map_id("record_autostart"), None, "Start with Windows left the tray");
+        assert_eq!(MENU_ITEMS, "status,open,pause,separator,quit");
     }
     #[test]
-    fn icon_buffer_is_rgba_and_monochrome() {
-        let (rgba, w, h) = recording_icon_rgba();
-        assert_eq!(rgba.len(), (w * h * 4) as usize);
-        for p in rgba.chunks_exact(4) {
-            assert!(p == [0, 0, 0, 0] || p == [255, 255, 255, 255]);
+    fn pause_toggle_says_what_a_click_does() {
+        assert_eq!(pause_label(false), "Stop recording");
+        assert_eq!(pause_label(true), "Start recording");
+    }
+    #[test]
+    fn tray_icons_are_the_committed_32px_rgba_marks() {
+        for paused in [false, true] {
+            let (rgba, w, h) = icon_rgba(paused);
+            assert_eq!((w, h), (32, 32));
+            assert_eq!(rgba.len(), (w * h * 4) as usize);
+            assert!(rgba.chunks_exact(4).any(|p| p[3] == 255), "has opaque pixels");
+            assert!(rgba.chunks_exact(4).any(|p| p[3] == 0), "has a transparent background");
         }
+        assert_ne!(icon_rgba(false).0, icon_rgba(true).0, "paused looks different");
+        // Recording dot is red, paused dot is grey (the centre pixel).
+        let centre = |paused| {
+            let (rgba, w, h) = icon_rgba(paused);
+            let i = ((h / 2 * w + w / 2) * 4) as usize;
+            [rgba[i], rgba[i + 1], rgba[i + 2]]
+        };
+        let [r, g, b] = centre(false);
+        assert!(r > 200 && g < 120 && b < 120, "recording centre {:?}", centre(false));
+        let [r, g, b] = centre(true);
+        assert!(r.abs_diff(g) < 20 && g.abs_diff(b) < 20, "paused centre is grey {:?}", centre(true));
     }
     #[test]
     fn candidate_paths_are_native_only_in_documented_order() {

@@ -76,13 +76,16 @@ impl EnvOverrides {
         }
     }
 
-    /// Drop every override whose leaf key `patch` sets.
+    /// Drop every override whose leaf key `patch` sets. Setting the save
+    /// presets (`save_hotkeys`) also retires a `RECALL_SAVE_HOTKEY` override.
     pub fn forget(&mut self, patch: &Value) {
         let Value::Object(p) = patch else { return };
         for (section, keys) in p {
             let Some(Value::Object(sec)) = self.0.get_mut(section) else { continue };
             match keys {
-                Value::Object(k) => sec.retain(|name, _| !k.contains_key(name)),
+                Value::Object(k) => sec.retain(|name, _| {
+                    !k.contains_key(name) && !(name == "save_hotkey" && k.contains_key("save_hotkeys"))
+                }),
                 _ => sec.clear(),
             }
         }
@@ -122,6 +125,17 @@ mod tests {
         assert_eq!(eff.recording.output_dir, r"D:\Clips", "other overrides remain");
         env.forget(&json!({"recording":{"output_dir":"x","save_hotkey":"x","cpu_mask":"x"},"overlay":{"enabled":false}}));
         assert!(env.is_empty(), "emptied sections are pruned");
+    }
+
+    #[test]
+    fn env_save_hotkey_moves_the_full_buffer_preset_until_presets_are_patched() {
+        let mut env = EnvOverrides::from_lookup(|k| (k == "RECALL_SAVE_HOTKEY").then(|| "Ctrl+F9".into()));
+        let file = Config::default();
+        let eff = env.apply(&file);
+        assert_eq!(eff.recording.save_hotkeys[0].hotkey, "Ctrl+F9");
+        assert_eq!(eff.recording.save_hotkey, "Ctrl+F9");
+        env.forget(&json!({"recording":{"save_hotkeys":[{"hotkey":"Alt+N","seconds":0}]}}));
+        assert!(env.is_empty(), "a presets patch retires the legacy override");
     }
 
     #[test]
