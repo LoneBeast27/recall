@@ -32,6 +32,11 @@ pub enum DaemonCommand {
     /// Stop capturing entirely until Resume (runtime only).
     Pause,
     Resume,
+    /// Marks this moment; the next save carries the bookmark.
+    Bookmark,
+    Screenshot,
+    /// Starts or stops the manual long recording.
+    RecordToggle,
     ToggleHdr,
     /// "auto" | "sdr" | "hdr"
     SetMode(String),
@@ -84,6 +89,27 @@ pub struct SessionStatus {
     pub overlay: OverlayStatus,
     pub autostart: bool,
     pub hdr: HdrStatus,
+    pub paused: bool,
+    pub bookmark_hotkey: String,
+    pub screenshot_hotkey: String,
+    pub record_hotkey: String,
+    /// Two-step shortcuts (leader, then 1-4).
+    pub advanced_enabled: bool,
+    /// "Alt `" (physical key left of 1).
+    pub leader_label: String,
+    pub chord_save_seconds: u32,
+    pub long_recording: LongRecording,
+    /// A setting change waits for a save or long recording to finish.
+    pub pending_restart: bool,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LongRecording {
+    pub active: bool,
+    pub path: Option<String>,
+    /// Unix seconds.
+    pub started_secs: f64,
 }
 
 /// `engine` status (about once per second while the recorder runs).
@@ -98,6 +124,8 @@ pub struct EngineStatus {
     pub buffer_secs: f32,
     /// "h264_nvenc" | "starting" | "off" | "failed"
     pub encoder: String,
+    /// "h264" | "hevc" | "av1": what is recording (H.264 after a fallback).
+    pub codec: String,
     pub encoder_error: Option<String>,
     pub mic_muted: bool,
     /// "hdr" | "sdr"
@@ -135,6 +163,14 @@ pub enum DaemonEvent {
     Exported { source: String, path: String, fps: u32, frames: u64, seconds: f64 },
     ExportFailed { source: String, reason: String },
     AcProfile { ok: bool, profile: Option<String>, error: Option<String> },
+    Bookmarked,
+    Screenshot { path: String },
+    ScreenshotFailed { reason: String },
+    RecordingStarted,
+    RecordingStopped { path: String, seconds: f64 },
+    RecordingFailed { reason: String },
+    /// Storage limit moved old clips to the Recycle Bin.
+    StorageCleaned { removed: u64, freed_bytes: u64 },
     Error(String),
 }
 

@@ -13,7 +13,7 @@ use crate::{
     library_state::LibraryState,
     media::NativePreview,
     services::{
-        daemon::{DaemonClient, DaemonCommand, DaemonEvent, DaemonSnapshot},
+        daemon::{DaemonClient, DaemonCommand, DaemonSnapshot},
         meters::Meters,
         midi::Midi,
     },
@@ -86,6 +86,9 @@ pub struct Root {
     controller_check_at: Option<Instant>,
     pub frame_at: Instant,
 }
+
+#[path = "root_events.rs"]
+mod events;
 
 impl Root {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -262,34 +265,6 @@ impl Root {
                 }
                 self.cache.refresh();
             }
-        }
-    }
-
-    fn on_daemon_event(&mut self, event: DaemonEvent) {
-        match event {
-            DaemonEvent::Saved { path, seconds, .. } => {
-                crate::services::storage::record_interaction(crate::services::storage::Interaction::Saved(path.clone()));
-                let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned());
-                let game = name.as_deref().and_then(|n| n.split("__").next()).map(|g| crate::services::library::normalize_game(g).1);
-                self.show_toast(
-                    ToastKind::Good,
-                    format!("Clip saved · {}", crate::services::library::format_duration(seconds as f64)),
-                    game,
-                );
-                self.workers.job(Job::List);
-            }
-            DaemonEvent::SaveFailed { reason } => self.show_toast(ToastKind::Bad, "Save failed", Some(reason)),
-            DaemonEvent::ExportFailed { reason, .. } => self.show_toast(ToastKind::Bad, "Export failed", Some(reason)),
-            DaemonEvent::AcProfile { ok, profile, error } => {
-                if ok {
-                    self.ac_profile = profile;
-                    self.show_toast(ToastKind::Good, "Colour profile set", Some("Applies the next time HDR turns on".into()));
-                } else {
-                    self.show_toast(ToastKind::Bad, "Colour profile failed", error);
-                }
-            }
-            DaemonEvent::Error(message) => self.show_toast(ToastKind::Bad, "Recorder", Some(message)),
-            DaemonEvent::MicMuted(_) | DaemonEvent::ExportStarted { .. } | DaemonEvent::Exported { .. } => {}
         }
     }
 

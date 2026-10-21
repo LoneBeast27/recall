@@ -52,6 +52,7 @@ impl Root {
                     .justify_end()
                     .gap(px(8.))
                     .child(div().flex_1().h_full().window_control_area(WindowControlArea::Drag))
+                    .child(self.render_record_button(cx))
                     .child(self.render_save_button(cx))
                     .child(
                         div()
@@ -208,6 +209,49 @@ impl Root {
                     })
                     .when(mic_muted, |d| d.child(icon(Icon::MicOff, 14., theme::TERTIARY))),
             )
+            .into_any_element()
+    }
+
+    /// Manual long recording: a record dot while idle; the running time while recording.
+    fn render_record_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let session = self.snap.session.as_ref();
+        let long = session.map(|s| s.long_recording.clone()).unwrap_or_default();
+        let ready = self.snap.replay_ready();
+        let toggle = cx.listener(move |this, _, _, cx| {
+            if ready || long.active {
+                this.send(DaemonCommand::RecordToggle);
+            } else {
+                this.show_toast(ToastKind::Info, "Nothing to record yet", Some("Start a game, then record it in full.".into()));
+            }
+            cx.notify();
+        });
+        if long.active {
+            let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
+            let elapsed = (now - long.started_secs).max(0.0);
+            return ui::button("long-rec", Variant::Secondary)
+                .h(px(30.))
+                .gap(px(8.))
+                .border_color(c(theme::SIGNAL))
+                .child(div().size(px(9.)).rounded(px(2.)).bg(c(theme::SIGNAL)))
+                .child(div().font_family(theme::mono()).text_size(px(12.)).text_color(c(theme::SIGNAL)).child(library::format_duration(elapsed)))
+                .on_click(toggle)
+                .into_any_element();
+        }
+        div()
+            .id("long-rec")
+            .size(px(30.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(6.))
+            .border_1()
+            .border_color(c(theme::BORDER))
+            .bg(c(theme::RAISED))
+            .cursor_pointer()
+            .hover(|s| s.bg(c(theme::OVERLAY)).border_color(c(theme::BORDER_STRONG)))
+            .when(!ready, |b| b.opacity(0.45))
+            .child(ui::dot(theme::SIGNAL, 10.))
+            .on_click(toggle)
             .into_any_element()
     }
 
