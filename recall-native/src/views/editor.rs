@@ -174,10 +174,16 @@ impl Root {
             .flex_none()
             .flex()
             .flex_col()
-            .child(self.render_audio_tracks(cx))
-            .child(ui::hairline())
-            .child(self.render_export_options(window, cx))
-            .child(div().flex_1())
+            .child(
+                div()
+                    .id("inspector-scroll")
+                    .flex_1()
+                    .min_h_0()
+                    .overflow_y_scroll()
+                    .child(self.render_audio_tracks(cx))
+                    .child(ui::hairline())
+                    .child(self.render_export_options(window, cx)),
+            )
             .child(self.render_export_footer(cx))
             .into_any_element()
     }
