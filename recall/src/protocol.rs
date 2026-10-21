@@ -79,6 +79,38 @@ pub enum Outbound {
     EncoderLog {
         message: String,
     },
+    /// A `bookmark` landed at this capture-clock time (seconds since capture
+    /// start). Saved clips covering it get `<stem>.recall-marks.json`.
+    Bookmarked {
+        at_secs: f64,
+    },
+    /// A `screenshot` PNG is on disk.
+    Screenshot {
+        path: String,
+    },
+    ScreenshotFailed {
+        reason: String,
+    },
+    /// A manual long recording is writing; `path` is the final name (the file
+    /// is `<path>.part` until it stops).
+    RecordingStarted {
+        path: String,
+    },
+    RecordingStopped {
+        path: String,
+        seconds: f64,
+        bytes: u64,
+    },
+    /// `path`: the partial recording that was kept (renamed to its final name),
+    /// or null when nothing was written.
+    RecordingFailed {
+        reason: String,
+        path: Option<String>,
+    },
+    /// A long recording left as `.part` by a crash was renamed into place.
+    RecordingRecovered {
+        path: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -110,13 +142,43 @@ pub enum Command {
         #[serde(default)]
         edit: Option<crate::edit_model::EditPlan>,
     },
+    /// Mark "now" for the clips saved later (bookmark hotkey).
+    Bookmark,
+    /// PNG of the next rendered capture frame into `<out_dir>\screenshots\`.
+    Screenshot,
+    /// Start / stop / toggle the manual long recording.
+    RecordStart,
+    RecordStop,
+    RecordToggle,
     /// Ask the engine to exit cleanly.
     Quit,
 }
 
+type Observer = Box<dyn Fn(&Outbound) + Send + Sync>;
+static OBSERVER: std::sync::OnceLock<Observer> = std::sync::OnceLock::new();
+
+/// Install the one in-process listener that sees every message just before it
+/// is printed (the bookmark sidecar is written off `Saved` this way, so the
+/// file exists by the time a client reads the event). Later calls are ignored.
+pub fn set_observer(observer: impl Fn(&Outbound) + Send + Sync + 'static) {
+    let _ = OBSERVER.set(Box::new(observer));
+}
+
 /// Serialize and print one outbound message as a JSON line.
 pub fn emit(msg: &Outbound) {
+    if let Some(observer) = OBSERVER.get() {
+        observer(msg);
+    }
     if let Ok(line) = serde_json::to_string(msg) {
         println!("{line}");
+    }
+}
+
+/// `emit` in sidecar (`--json`) mode, else a human `[recall]` line on stderr.
+pub fn emit_or_log(json: bool, msg: &Outbound, human: impl FnOnce() -> String) {
+    if json {
+        emit(msg);
+    } else {
+        eprintln!("[recall] {}", human());
     }
 }

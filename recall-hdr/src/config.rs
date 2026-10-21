@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::log;
-use crate::record_config::{OverlayCfg, RecordingCfg};
+use crate::record_config::{HotkeysCfg, OverlayCfg, RecordingCfg, StorageCfg};
 use crate::types::{ClampMode, RuleKind};
 
 // ---------------------------------------------------------------------------
@@ -52,6 +52,12 @@ pub struct Config {
     /// `[overlay]` -- the controller-owned in-game toast process.
     #[serde(default)]
     pub overlay: OverlayCfg,
+    /// `[storage]` -- clip-folder size cap + auto-clean (`record_storage`).
+    #[serde(default)]
+    pub storage: StorageCfg,
+    /// `[hotkeys]` -- the advanced chord (leader + one key; `record_chord`).
+    #[serde(default)]
+    pub hotkeys: HotkeysCfg,
     /// Per-exe rule overrides. Exe stems are matched case-insensitively.
     #[serde(default, rename = "overrides")]
     pub overrides: Vec<Override>,
@@ -276,6 +282,8 @@ impl Default for Config {
             startup: StartupCfg::default(),
             recording: RecordingCfg::default(),
             overlay: OverlayCfg::default(),
+            storage: StorageCfg::default(),
+            hotkeys: HotkeysCfg::default(),
             // The hdr-testcard entry is our live test target; ship it by default.
             overrides: vec![Override {
                 exe: "hdr-testcard".into(),
@@ -380,7 +388,11 @@ pub(crate) fn load_from(path: &std::path::Path) -> Config {
     };
 
     match toml::from_str::<Config>(&text) {
-        Ok(cfg) => cfg,
+        Ok(mut cfg) => {
+            // Legacy single `save_hotkey` -> `save_hotkeys` presets.
+            crate::record_hotkeys::migrate_loaded(&mut cfg.recording, &text);
+            cfg
+        }
         Err(e) => {
             log!("config: parse {} failed: {e}; backing up + using defaults", path.display());
             let bad = path.with_extension("toml.bad");

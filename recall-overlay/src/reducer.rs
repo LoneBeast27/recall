@@ -7,6 +7,10 @@ pub const STALE_AFTER: Duration = Duration::from_millis(2_500);
 const SAVED_FOR: Duration = Duration::from_secs(3);
 const FAILURE_FOR: Duration = Duration::from_secs(4);
 const MIC_FOR: Duration = Duration::from_secs(2);
+const MARK_FOR: Duration = Duration::from_millis(1_500);
+/// The advanced-shortcut hint lives as long as the chord window (the
+/// controller's `active:false` closes it earlier).
+const CHORD_FOR: Duration = Duration::from_millis(1_500);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -32,6 +36,10 @@ struct Transient {
     primary: String,
     text: String,
     until: Instant,
+    /// Replaces the metrics line while shown (the chord hint's first row).
+    metrics: Option<String>,
+    /// The advanced-shortcut hint (closed by `chord` `active:false`).
+    chord: bool,
 }
 
 #[derive(Debug)]
@@ -42,6 +50,8 @@ pub struct Reducer {
     encoder_error: Option<String>,
     last_status: Option<Instant>,
     transient: Option<Transient>,
+    /// The metrics line the last status produced (restored after a hint).
+    status_metrics: String,
 }
 
 impl Reducer {
@@ -60,6 +70,7 @@ impl Reducer {
             encoder_error: None,
             last_status: None,
             transient: None,
+            status_metrics: "Waiting for Recall".into(),
         }
     }
 
@@ -94,13 +105,44 @@ impl Reducer {
     }
 
     pub fn apply_envelope(&mut self, value: &Value, now: Instant) -> bool {
-        if value.get("mod").and_then(Value::as_str) != Some("engine") {
-            return false;
-        }
         let Some(event) = value.get("event") else {
             return false;
         };
-        self.apply_engine_event(event, now)
+        match value.get("mod").and_then(Value::as_str) {
+            Some("engine") => self.apply_engine_event(event, now),
+            Some("session") if event.get("type").and_then(Value::as_str) == Some("chord") => self.apply_chord(event, now),
+            _ => false,
+        }
+    }
+
+    /// `{"type":"chord","active":true,"options":[{"key":"1","label":"Bookmark"},...]}`:
+    /// "Recall" over "1 Bookmark · 2 Save 30 s" / "3 Screenshot · 4 Record".
+    pub fn apply_chord(&mut self, event: &Value, now: Instant) -> bool {
+        if event.get("active").and_then(Value::as_bool) != Some(true) {
+            if !self.transient.as_ref().is_some_and(|t| t.chord) {
+                return false; // an action's toast already replaced the hint
+            }
+            return self.expire_transient();
+        }
+        let options: Vec<String> = event
+            .get("options")
+            .and_then(Value::as_array)
+            .map(|list| {
+                list.iter()
+                    .filter_map(|o| Some(format!("{} {}", o.get("key")?.as_str()?, o.get("label")?.as_str()?)))
+                    .collect()
+            })
+            .unwrap_or_default();
+        let split = options.len().div_ceil(2);
+        let (first, second) = (options[..split].join(" · "), options[split..].join(" · "));
+        let changed = self.set_transient("Recall", second, now + CHORD_FOR);
+        if let Some(t) = self.transient.as_mut() {
+            t.metrics = Some(first.clone());
+            t.chord = true;
+        }
+        let metrics_changed = self.view.metrics != first;
+        self.view.metrics = first;
+        changed || metrics_changed
     }
 
     pub fn apply_engine_event(&mut self, event: &Value, now: Instant) -> bool {
@@ -134,23 +176,51 @@ impl Reducer {
                     now + FAILURE_FOR,
                 )
             }
+            Some("bookmarked") => self.set_transient("Bookmark added", "Marked in the clips you save next".into(), now + MARK_FOR),
+            Some("screenshot") => {
+                let text = format!("Saved {}", file_name(event));
+                self.set_transient("Screenshot saved", text, now + SAVED_FOR)
+            }
+            Some("recording_started") => {
+                let text = format!("Writing {}", file_name(event));
+                self.set_transient("Recording started", text, now + SAVED_FOR)
+            }
+            Some("recording_stopped") => {
+                let secs = event.get("seconds").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64;
+                let text = format!("{} · {}:{:02}", file_name(event), secs / 60, secs % 60);
+                self.set_transient("Recording saved", truncate(&text, 48), now + SAVED_FOR)
+            }
+            Some(kind @ ("screenshot_failed" | "recording_failed")) => {
+                let reason = event.get("reason").and_then(Value::as_str).unwrap_or("unknown error");
+                let title = if kind == "screenshot_failed" { "Screenshot failed" } else { "Recording failed" };
+                self.set_transient(title, truncate(reason, 48), now + FAILURE_FOR)
+            }
             _ => false,
         }
+    }
+
+    /// Hide the current toast / hint and restore the resting lines.
+    fn expire_transient(&mut self) -> bool {
+        let Some(transient) = self.transient.take() else { return false };
+        self.view.visible = false;
+        self.view.primary = match self.view.state {
+            RecorderState::Ready => "Replay ready",
+            RecorderState::Starting => "Starting",
+            RecorderState::Failed => "Encoder failed",
+            RecorderState::Stopped => "Recorder stopped",
+        }
+        .into();
+        self.view.secondary = self.source_text();
+        if transient.metrics.is_some() {
+            self.view.metrics = self.status_metrics.clone();
+        }
+        true
     }
 
     pub fn tick(&mut self, now: Instant) -> bool {
         let mut changed = false;
         if self.transient.as_ref().is_some_and(|transient| now >= transient.until) {
-            self.transient = None;
-            self.view.visible = false;
-            self.view.primary = match self.view.state {
-                RecorderState::Ready => "Replay ready",
-                RecorderState::Starting => "Starting",
-                RecorderState::Failed => "Encoder failed",
-                RecorderState::Stopped => "Recorder stopped",
-            }.into();
-            self.view.secondary = self.source_text();
-            changed = true;
+            changed = self.expire_transient();
         }
         if self.last_status.is_some_and(|last| now.saturating_duration_since(last) > STALE_AFTER) {
             changed |= self.mark_stale(now);
@@ -204,8 +274,13 @@ impl Reducer {
         } else {
             encoder
         };
-        let metrics = format!("{buffer}s buffer · Capture {fps} FPS · {encoder_label}");
+        self.status_metrics = format!("{buffer}s buffer · Capture {fps} FPS · {encoder_label}");
         let notification = self.active_transient(now);
+        let metrics = self
+            .transient
+            .as_ref()
+            .and_then(|t| t.metrics.clone())
+            .unwrap_or_else(|| self.status_metrics.clone());
         let secondary = notification.clone()
             .or_else(|| encoder_error.map(|error| truncate(error, 48)))
             .unwrap_or_else(|| self.source_text());
@@ -221,7 +296,11 @@ impl Reducer {
     }
 
     fn set_transient(&mut self, primary: &str, text: String, until: Instant) -> bool {
-        self.transient = Some(Transient { primary: primary.into(), text: text.clone(), until });
+        let had_metrics = self.transient.as_ref().is_some_and(|t| t.metrics.is_some());
+        if had_metrics {
+            self.view.metrics = self.status_metrics.clone(); // a toast replaces the hint
+        }
+        self.transient = Some(Transient { primary: primary.into(), text: text.clone(), until, metrics: None, chord: false });
         if self.last_status.is_none() {
             self.view.connected = true;
         }
@@ -266,6 +345,17 @@ impl Reducer {
     }
 }
 
+/// The event's `path` file name, shortened for the card.
+fn file_name(event: &Value) -> String {
+    let name = event
+        .get("path")
+        .and_then(Value::as_str)
+        .and_then(|p| Path::new(p).file_name())
+        .and_then(|p| p.to_str())
+        .unwrap_or("file");
+    truncate(name, 40)
+}
+
 fn source_line(source: &str) -> String {
     if source.trim().is_empty() {
         "Waiting for a capture source".into()
@@ -284,162 +374,5 @@ pub fn truncate(text: &str, max_chars: usize) -> String {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn status(encoder: &str) -> Value {
-        json!({"mod":"engine","event":{"type":"status","source":"Elden Ring","fps":117,"buffer_secs":59.6,"encoder":encoder,"encoder_error":null}})
-    }
-
-    #[test]
-    fn normal_status_never_shows_the_overlay() {
-        let now = Instant::now();
-        let mut reducer = Reducer::new();
-        assert!(!reducer.view().visible);
-        for second in 0..8 {
-            reducer.apply_envelope(&status("h264_nvenc"), now + Duration::from_secs(second));
-            assert!(!reducer.view().visible);
-        }
-    }
-
-    #[test]
-    fn saved_notification_hides_on_deadline_despite_status_updates() {
-        let now = Instant::now();
-        let mut reducer = Reducer::new();
-        reducer.apply_envelope(&status("h264_nvenc"), now);
-        reducer.apply_engine_event(&json!({"type":"saved","path":"clip.mp4"}), now);
-        assert!(reducer.view().visible);
-        assert_eq!(reducer.view().primary, "Clip saved");
-        reducer.apply_envelope(&status("h264_nvenc"), now + SAVED_FOR - Duration::from_millis(1));
-        assert!(reducer.view().visible);
-        reducer.tick(now + SAVED_FOR);
-        assert!(!reducer.view().visible);
-        reducer.apply_envelope(&status("h264_nvenc"), now + Duration::from_secs(8));
-        assert!(!reducer.view().visible);
-    }
-
-    #[test]
-    fn mic_feedback_hides_even_while_mic_remains_muted() {
-        let now = Instant::now();
-        let mut reducer = Reducer::new();
-        reducer.apply_envelope(&status("h264_nvenc"), now);
-        reducer.apply_engine_event(&json!({"type":"mic_muted","muted":true}), now);
-        assert!(reducer.view().visible);
-        assert_eq!(reducer.view().primary, "Microphone muted");
-        reducer.tick(now + MIC_FOR);
-        assert!(!reducer.view().visible);
-        assert!(reducer.mic_muted);
-    }
-
-    #[test]
-    fn repeated_encoder_failure_status_does_not_keep_overlay_visible() {
-        let now = Instant::now();
-        let mut reducer = Reducer::new();
-        let failed = json!({"type":"status","encoder":"failed","encoder_error":"driver failed"});
-        reducer.apply_engine_event(&failed, now);
-        assert!(reducer.view().visible);
-        reducer.apply_engine_event(&failed, now + FAILURE_FOR);
-        assert!(!reducer.view().visible);
-        reducer.apply_engine_event(&failed, now + FAILURE_FOR + Duration::from_secs(1));
-        assert!(!reducer.view().visible);
-    }
-
-    #[test]
-    fn a_new_failure_after_expiry_requests_native_visibility_sync() {
-        let now = Instant::now();
-        let mut reducer = Reducer::new();
-        let first = json!({"type":"status","encoder":"failed","encoder_error":"first failure"});
-        let second = json!({"type":"status","encoder":"failed","encoder_error":"second failure"});
-        reducer.apply_engine_event(&first, now);
-        reducer.apply_engine_event(&first, now + FAILURE_FOR);
-        assert!(!reducer.view().visible);
-        assert!(reducer.apply_engine_event(&second, now + FAILURE_FOR + Duration::from_secs(1)));
-        assert!(reducer.view().visible);
-    }
-
-    #[test]
-    fn stale_feed_does_not_cut_short_saved_notification() {
-        let now = Instant::now();
-        let mut reducer = Reducer::new();
-        reducer.apply_envelope(&status("h264_nvenc"), now);
-        reducer.apply_engine_event(&json!({"type":"saved","path":"clip.mp4"}), now);
-        reducer.tick(now + STALE_AFTER + Duration::from_millis(1));
-        assert!(reducer.view().visible);
-        reducer.tick(now + SAVED_FOR);
-        assert!(!reducer.view().visible);
-    }
-
-    #[test]
-    fn ready_status_is_truthful_and_labels_capture_fps() {
-        let now = Instant::now();
-        let mut reducer = Reducer::new();
-        assert!(reducer.apply_envelope(&status("h264_nvenc"), now));
-        assert_eq!(reducer.view().state, RecorderState::Ready);
-        assert_eq!(reducer.view().primary, "Replay ready");
-        assert!(reducer.view().metrics.contains("Capture 117 FPS"));
-        assert!(reducer.view().metrics.contains("60s buffer"));
-        assert_eq!(reducer.view().secondary, "Source: Elden Ring");
-    }
-
-    #[test]
-    fn stale_status_can_never_remain_ready() {
-        let now = Instant::now();
-        let mut reducer = Reducer::new();
-        reducer.apply_envelope(&status("h264_nvenc"), now);
-        assert!(reducer.tick(now + STALE_AFTER + Duration::from_millis(1)));
-        assert_eq!(reducer.view().state, RecorderState::Stopped);
-        assert_eq!(reducer.view().metrics, "Status feed stale");
-    }
-
-    #[test]
-    fn saved_feedback_expires_back_to_source() {
-        let now = Instant::now();
-        let mut reducer = Reducer::new();
-        reducer.apply_envelope(&status("h264_nvenc"), now);
-        reducer.apply_envelope(
-            &json!({"mod":"engine","event":{"type":"saved","path":"V:\\clips\\Rocket-League__2026-06-06__11-17-50.mp4","seconds":118.8}}),
-            now,
-        );
-        assert_eq!(reducer.view().secondary, "Rocket League · 1:59");
-        reducer.apply_envelope(&status("h264_nvenc"), now + Duration::from_secs(2));
-        assert!(reducer.tick(now + SAVED_FOR));
-        assert_eq!(reducer.view().secondary, "Source: Elden Ring");
-    }
-
-    #[test]
-    fn failed_encoder_surfaces_reason() {
-        let now = Instant::now();
-        let mut reducer = Reducer::new();
-        let value = json!({"mod":"engine","event":{"type":"status","source":"","fps":0,"buffer_secs":0,"encoder":"failed","encoder_error":"NVENC initialization failed"}});
-        reducer.apply_envelope(&value, now);
-        assert_eq!(reducer.view().state, RecorderState::Failed);
-        assert_eq!(reducer.view().primary, "Encoder failed");
-        assert_eq!(reducer.view().secondary, "NVENC initialization failed");
-    }
-
-    #[test]
-    fn save_failure_surfaces_short_feedback() {
-        let now = Instant::now();
-        let mut reducer = Reducer::new();
-        reducer.apply_envelope(&status("h264_nvenc"), now);
-        reducer.apply_envelope(
-            &json!({"mod":"engine","event":{"type":"save_failed","reason":"the output folder is unavailable"}}),
-            now,
-        );
-        assert_eq!(
-            reducer.view().secondary,
-            "Save failed: the output folder is unavailable"
-        );
-    }
-
-    #[test]
-    fn disconnect_clears_ready_state_immediately() {
-        let now = Instant::now();
-        let mut reducer = Reducer::new();
-        reducer.apply_envelope(&status("h264_nvenc"), now);
-        assert!(reducer.disconnected());
-        assert_eq!(reducer.view().state, RecorderState::Stopped);
-        assert!(!reducer.view().connected);
-    }
-}
+#[path = "reducer_tests.rs"]
+mod tests;
