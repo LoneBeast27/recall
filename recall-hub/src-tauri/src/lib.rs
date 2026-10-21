@@ -4,6 +4,9 @@
 //! all real state — the hub renders it.
 
 mod meters;
+mod editor_media;
+mod editor_export;
+mod overlay;
 mod midi;
 
 use std::io::{BufRead, BufReader, Write};
@@ -33,7 +36,7 @@ fn daemon_send(state: tauri::State<PipeState>, line: String) -> Result<(), Strin
 
 /// Newest clips in the recordings dir (name, mtime seconds, size, thumb path).
 #[tauri::command]
-fn list_clips(limit: usize) -> Vec<serde_json::Value> {
+fn list_clips(app: AppHandle, limit: usize) -> Vec<serde_json::Value> {
     let dir = std::env::var("RECALL_OUT_DIR").unwrap_or_else(|_| r"V:\ALL RECORDINGS".into());
     let mut clips: Vec<(std::time::SystemTime, serde_json::Value)> = Vec::new();
     let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -45,6 +48,7 @@ fn list_clips(limit: usize) -> Vec<serde_json::Value> {
             continue;
         }
         let Ok(meta) = e.metadata() else { continue };
+        if !meta.is_file() { continue; }
         let modified = meta.modified().unwrap_or(std::time::UNIX_EPOCH);
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("").to_string();
         // Thumb convention: thumbs\<stem>-<epoch>-thumb.jpg (epoch unknown -> glob by prefix).
@@ -72,7 +76,15 @@ fn list_clips(limit: usize) -> Vec<serde_json::Value> {
         ));
     }
     clips.sort_by(|a, b| b.0.cmp(&a.0));
-    clips.into_iter().take(limit).map(|(_, v)| v).collect()
+    clips.into_iter().take(limit.min(500)).map(|(_, value)| {
+        if let Some(path) = value.get("path").and_then(serde_json::Value::as_str) {
+            let _ = app.asset_protocol_scope().allow_file(path);
+        }
+        if let Some(path) = value.get("thumb").and_then(serde_json::Value::as_str) {
+            let _ = app.asset_protocol_scope().allow_file(path);
+        }
+        value
+    }).collect()
 }
 
 /// Reveal a clip in Explorer.
@@ -127,15 +139,23 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(PipeState(Mutex::new(None)))
+        .manage(overlay::OverlayState::default())
         .manage(midi::MidiState(Mutex::new(None)))
         .invoke_handler(tauri::generate_handler![
             daemon_send,
             list_clips,
+            editor_media::prepare_editor,
+            editor_export::export_editor,
+            overlay::overlay_status,
+            overlay::overlay_configure,
+            editor_media::load_editor_project,
+            editor_media::save_editor_project,
             show_in_folder,
             midi::midi_ports,
             midi::midi_send
         ])
         .setup(|app| {
+            overlay::initialize(app.handle());
             let handle = app.handle().clone();
             std::thread::spawn(move || pipe_client_loop(handle));
             meters::spawn_meters(app.handle().clone());

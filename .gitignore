@@ -21,3 +21,8 @@ tools/hdr-gamma-fix/bin/
 target-dev/
 # FFmpeg dev libs + runtime DLLs (re-downloadable BtbN build)
 tools/ffmpeg-dev/
+
+# Disposable local build tooling and probes
+/.tmp/
+
+/target-gpui/

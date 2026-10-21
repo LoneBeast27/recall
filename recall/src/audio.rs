@@ -11,9 +11,27 @@
 //! the ring (~23MB / 60s / stereo track).
 
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use wasapi::{DeviceCollection, Direction, SampleType, StreamMode, WaveFormat};
+
+static MIC_MUTED: AtomicBool = AtomicBool::new(false);
+
+/// Set whether newly captured microphone samples enter the replay buffer as silence.
+pub fn set_mic_muted(muted: bool) {
+    MIC_MUTED.store(muted, Ordering::Relaxed);
+}
+
+/// Toggle microphone capture muting and return the new state.
+pub fn toggle_mic_mute() -> bool {
+    MIC_MUTED.fetch_xor(true, Ordering::Relaxed) ^ true
+}
+
+/// Return whether newly captured microphone samples are muted.
+pub fn mic_muted() -> bool {
+    MIC_MUTED.load(Ordering::Relaxed)
+}
 
 /// Selection preference for one track: substring matched against endpoint
 /// friendly names (case-insensitive); falls back to the default endpoint.
@@ -75,9 +93,12 @@ impl TrackRing {
         out
     }
 
-    fn push(&self, data: &[f32]) {
+    /// Append captured samples. Muting is applied only to microphone samples
+    /// entering the ring, so existing replay history is never changed.
+    fn push_capture(&self, data: &[f32], mute_mic: bool) {
         let mut buf = self.samples.lock().expect("ring lock");
         for &s in data {
+            let s = if mute_mic && self.name == "Mic" { 0.0 } else { s };
             buf.push_back(s);
         }
         let over = buf.len().saturating_sub(self.capacity);
@@ -165,6 +186,30 @@ fn pick_device(spec: &TrackSpec) -> Result<(wasapi::Device, String), String> {
     Ok((dev, format!("{name} (default fallback)")))
 }
 
+/// Resolve the opt-in process-loopback target for Game capture. A supplied
+/// value deliberately never falls back to endpoint capture: that could record
+/// the wrong audio source while appearing to work.
+fn game_process_loopback_pid(spec: &TrackSpec) -> Result<Option<u32>, String> {
+    if spec.name != "Game" {
+        return Ok(None);
+    }
+    let value = match std::env::var("RECALL_AUDIO_GAME_PID") {
+        Ok(value) => value,
+        Err(std::env::VarError::NotPresent) => return Ok(None),
+        Err(std::env::VarError::NotUnicode(_)) => {
+            return Err("RECALL_AUDIO_GAME_PID is not valid Unicode".into());
+        }
+    };
+    let pid = value
+        .trim()
+        .parse::<u32>()
+        .map_err(|_| format!("RECALL_AUDIO_GAME_PID must be a positive process ID, got {value:?}"))?;
+    if pid == 0 {
+        return Err("RECALL_AUDIO_GAME_PID must be a positive process ID, got 0".into());
+    }
+    Ok(Some(pid))
+}
+
 /// Spawn the capture thread for one track. ALL WASAPI/COM objects are created
 /// on the capture thread (they are !Send); init success/failure is reported
 /// back over a channel before this returns.
@@ -203,8 +248,6 @@ fn capture_thread(
     let init = || -> Result<_, String> {
         // Per-thread COM init; already-initialized is fine.
         let _ = wasapi::initialize_mta();
-        let (device, endpoint) = pick_device(spec)?;
-        let mut client = device.get_iaudioclient().map_err(|e| e.to_string())?;
         let format = WaveFormat::new(
             32,
             32,
@@ -213,10 +256,26 @@ fn capture_thread(
             ring.channels as usize,
             None,
         );
-        let (_def_period, min_period) = client.get_device_period().map_err(|e| e.to_string())?;
+        let (mut client, endpoint, buffer_duration_hns) = match game_process_loopback_pid(spec)? {
+            Some(pid) => (
+                wasapi::AudioClient::new_application_loopback_client(pid, true)
+                    .map_err(|e| format!("process loopback for PID {pid}: {e}"))?,
+                format!("process {pid} (include tree)"),
+                // Process-loopback clients do not support get_device_period.
+                // 20 ms is the wasapi example's documented safe event period.
+                200_000,
+            ),
+            None => {
+                let (device, endpoint) = pick_device(spec)?;
+                let mut client = device.get_iaudioclient().map_err(|e| e.to_string())?;
+                let (_def_period, min_period) =
+                    client.get_device_period().map_err(|e| e.to_string())?;
+                (client, endpoint, min_period)
+            }
+        };
         let mode = StreamMode::EventsShared {
             autoconvert: true,
-            buffer_duration_hns: min_period,
+            buffer_duration_hns,
         };
         // Loopback = a RENDER endpoint's client initialized Capture-direction.
         client
@@ -260,6 +319,39 @@ fn capture_thread(
         for chunk in bytes.chunks_exact(4) {
             samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
         }
-        ring.push(&samples);
+        ring.push_capture(&samples, mic_muted());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TrackRing;
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    fn test_ring(name: &'static str) -> TrackRing {
+        TrackRing {
+            name,
+            endpoint: Mutex::new(String::new()),
+            rate: 1,
+            channels: 1,
+            samples: Mutex::new(VecDeque::new()),
+            capacity: 16,
+        }
+    }
+
+    #[test]
+    fn microphone_mute_silences_only_future_microphone_samples() {
+        let mic = test_ring("Mic");
+        let game = test_ring("Game");
+
+        mic.push_capture(&[1.0, 2.0], false);
+        game.push_capture(&[3.0, 4.0], false);
+        mic.push_capture(&[5.0, 6.0], true);
+        game.push_capture(&[7.0, 8.0], true);
+        mic.push_capture(&[9.0], false);
+
+        assert_eq!(mic.snapshot(5.0), vec![1.0, 2.0, 0.0, 0.0, 9.0]);
+        assert_eq!(game.snapshot(4.0), vec![3.0, 4.0, 7.0, 8.0]);
     }
 }

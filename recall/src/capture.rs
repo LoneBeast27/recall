@@ -28,6 +28,8 @@ pub const MODE_TONEMAP: u32 = 1;
 
 /// A captured frame, tightly packed f16 RGBA (8 bytes/pixel), ready to upload.
 pub struct FrameData {
+    /// Native WGC timestamp, rebased to the first capture, in microseconds.
+    pub pts_us: u64,
     pub width: u32,
     pub height: u32,
     pub bytes: Vec<u8>,
@@ -37,6 +39,7 @@ pub struct FrameData {
 pub struct CaptureShared {
     /// Most recent frame; render thread `take()`s it. None until first frame.
     pub latest: Mutex<Option<FrameData>>,
+    timeline: Mutex<Option<(u64, std::time::Instant)>>,
     /// Effective tonemap mode (MODE_PASSTHROUGH / MODE_TONEMAP).
     pub mode: AtomicU32,
     /// When true, HDR auto-detect drives `mode`. When false, `mode` is forced.
@@ -49,10 +52,19 @@ impl CaptureShared {
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             latest: Mutex::new(None),
+            timeline: Mutex::new(None),
             mode: AtomicU32::new(MODE_PASSTHROUGH),
             auto: AtomicBool::new(true),
             quit: AtomicBool::new(false),
         })
+    }
+
+    /// Current capture timeline, including time since the latest delivered frame.
+    pub fn recording_now_us(&self) -> Option<u64> {
+        self.timeline
+            .lock()
+            .ok()
+            .and_then(|t| t.map(|(pts, at)| pts.saturating_add(at.elapsed().as_micros() as u64)))
     }
 
     /// Mode selector label for status: "auto" | "sdr" | "hdr".
@@ -117,6 +129,7 @@ pub struct Handler {
     shared: Arc<CaptureShared>,
     scratch: Vec<u8>,
     frame_count: u64,
+    timestamp_origin: Option<i64>,
     /// When set (via `RECALL_DUMP`), write one verification PNG then clear it.
     dump_path: Option<String>,
     /// When set (via `RECALL_DUMP_EVERY=<secs>`), write a sequenced PNG every
@@ -147,6 +160,7 @@ impl GraphicsCaptureApiHandler for Handler {
             shared: ctx.flags,
             scratch: Vec::new(),
             frame_count: 0,
+            timestamp_origin: None,
             dump_path,
             dump_every,
             last_dump: std::time::Instant::now(),
@@ -160,6 +174,12 @@ impl GraphicsCaptureApiHandler for Handler {
         _capture_control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
         let (width, height) = (frame.width(), frame.height());
+        let timestamp = frame.timestamp()?.Duration;
+        let origin = *self.timestamp_origin.get_or_insert(timestamp);
+        let pts_us = (timestamp.saturating_sub(origin).max(0) as u64) / 10;
+        if let Ok(mut timeline) = self.shared.timeline.lock() {
+            *timeline = Some((pts_us, std::time::Instant::now()));
+        }
 
         // CPU readback: maps a staging copy; `as_nopadding_buffer` strips the
         // D3D row-pitch padding into `scratch` (handles Rgba16F = 8 bytes/px).
@@ -167,6 +187,7 @@ impl GraphicsCaptureApiHandler for Handler {
         let packed = fb.as_nopadding_buffer(&mut self.scratch);
 
         let data = FrameData {
+            pts_us,
             width,
             height,
             bytes: packed.to_vec(),
@@ -239,4 +260,17 @@ pub fn start_monitor(
 /// Flatten the capture-start error into our boxed error type.
 fn box_start_err(e: GraphicsCaptureApiError<CaptureError>) -> CaptureError {
     Box::new(std::io::Error::other(e.to_string()))
+}
+
+/// Capture an explicitly selected game window through the supported WGC API.
+pub fn start_window(hwnd: usize, shared: Arc<CaptureShared>) -> Result<CaptureControlHandle, CaptureError> {
+    if hwnd == 0 { return Err(std::io::Error::other("capture window handle is null").into()); }
+    crate::border::request_borderless();
+    let window = windows_capture::window::Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
+    let settings = Settings::new(
+        window, CursorCaptureSettings::WithoutCursor, DrawBorderSettings::WithoutBorder,
+        SecondaryWindowSettings::Default, MinimumUpdateIntervalSettings::Default,
+        DirtyRegionSettings::Default, ColorFormat::Rgba16F, shared,
+    );
+    Handler::start_free_threaded(settings).map_err(box_start_err)
 }

@@ -78,6 +78,7 @@ pub struct Gpu {
     uniform: wgpu::Buffer,
     encode_uniform: wgpu::Buffer,
     source: Option<Source>,
+    source_pts_us: Option<u64>,
     encode: Option<EncodeTarget>,
     shared: Arc<CaptureShared>,
     /// Kept last so it drops after the surface that borrows from it.
@@ -264,6 +265,7 @@ impl Gpu {
             uniform,
             encode_uniform,
             source: None,
+            source_pts_us: None,
             encode: None,
             shared,
             _window: window,
@@ -282,6 +284,11 @@ impl Gpu {
     /// Resolution of the currently uploaded captured frame, if any.
     pub fn source_size(&self) -> Option<(u32, u32)> {
         self.source.as_ref().map(|s| (s.width, s.height))
+    }
+
+    /// Capture timestamp of the uploaded source; repeated redraws keep the same value.
+    pub fn source_pts_us(&self) -> Option<u64> {
+        self.source_pts_us
     }
 
     /// (Re)create the source texture + bind group for a given capture resolution.
@@ -336,13 +343,19 @@ impl Gpu {
             return;
         };
         self.ensure_source(data.width, data.height);
+        self.source_pts_us = Some(data.pts_us);
 
         let params = Params {
             mode: self.shared.mode.load(Ordering::Relaxed),
             sdr_white: 1.0,
             hdr_white: 6.0,
             _pad0: 0.0,
-            scale: aspect_scale(data.width, data.height, self.config.width, self.config.height),
+            scale: aspect_scale(
+                data.width,
+                data.height,
+                self.config.width,
+                self.config.height,
+            ),
             _pad1: [0.0, 0.0],
         };
         self.queue

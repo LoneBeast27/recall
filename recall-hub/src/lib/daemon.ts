@@ -2,7 +2,8 @@
 // Stores hold the latest state per module; commands go back via daemon_send.
 import { listen } from '@tauri-apps/api/event';
 import { invoke } from '@tauri-apps/api/core';
-import { writable } from 'svelte/store';
+import { get, writable } from 'svelte/store';
+import type { EditPlan } from '$lib/editor';
 
 export interface EngineStatus {
   display: string;
@@ -15,6 +16,10 @@ export interface EngineStatus {
   fps: number;
   buffer_secs: number;
   encoder: string;
+  /** Native capture timestamps are retained in saved recordings. */
+  recording_mode?: 'vfr' | string;
+  /** Present when the NVENC encoder could not initialize or continue. */
+  encoder_error?: string | null;
 }
 
 export interface HdrStatus {
@@ -35,13 +40,34 @@ export interface SavedEvent {
   at: number;
 }
 
+export interface ExportStartedEvent {
+  path: string;
+  source: string;
+  fps: number;
+  at: number;
+}
+
+export interface ExportedEvent {
+  path: string;
+  source: string;
+  fps: number;
+  frames: number;
+  seconds: number;
+  elapsed_ms: number;
+  at: number;
+}
+
 export const connected = writable(false);
 export const engine = writable<EngineStatus | null>(null);
 export const hdr = writable<HdrStatus | null>(null);
 export const lastSaved = writable<SavedEvent | null>(null);
 export const saveError = writable<string | null>(null);
+export const exportStarted = writable<ExportStartedEvent | null>(null);
+export const lastExported = writable<ExportedEvent | null>(null);
+export const exportError = writable<string | null>(null);
 
 let started = false;
+let localExport = false;
 
 /** Wire the event stream once (idempotent; called from the layout). */
 export async function startDaemonFeed() {
@@ -66,7 +92,13 @@ export async function startDaemonFeed() {
     if (msg.mod !== 'hub' || type !== 'disconnected') connected.set(true);
     switch (msg.mod) {
       case 'hub':
-        if (type === 'disconnected') connected.set(false);
+        if (type === 'disconnected') {
+          connected.set(false);
+          if (get(exportStarted) && !localExport) {
+            exportStarted.set(null);
+            exportError.set('Connection lost while exporting. Check the output folder before retrying.');
+          }
+        }
         if (type === 'connected') requestSnapshot();
         break;
       case 'engine':
@@ -76,6 +108,19 @@ export async function startDaemonFeed() {
           saveError.set(null);
         }
         if (type === 'save_failed') saveError.set(String(ev.reason ?? 'unknown'));
+        if (type === 'export_started') {
+          exportStarted.set({ ...(ev as unknown as Omit<ExportStartedEvent, 'at'>), at: Date.now() });
+          exportError.set(null);
+        }
+        if (type === 'exported') {
+          lastExported.set({ ...(ev as unknown as Omit<ExportedEvent, 'at'>), at: Date.now() });
+          exportStarted.set(null);
+          exportError.set(null);
+        }
+        if (type === 'export_failed') {
+          exportStarted.set(null);
+          exportError.set(String(ev.reason ?? 'unknown'));
+        }
         break;
       case 'hdr':
         if (type === 'status') hdr.set(ev as unknown as HdrStatus);
@@ -89,6 +134,18 @@ const send = (cmd: Record<string, unknown>) =>
 
 export const saveClip = (seconds?: number) =>
   send(seconds ? { cmd: 'save_clip', seconds } : { cmd: 'save_clip' });
+export const exportClip = async (path: string, fps = 60, edit?: EditPlan) => {
+  if (!edit) return send({ cmd: 'export_clip', path, fps });
+  localExport = true;
+  try {
+    const result = await invoke<Omit<ExportedEvent, 'at'>>('export_editor', { path, fps, plan: edit });
+    lastExported.set({ ...result, at: Date.now() });
+    exportError.set(null);
+  } finally {
+    localExport = false;
+    exportStarted.set(null);
+  }
+};
 export const toggleHdr = () => send({ cmd: 'toggle_hdr' });
 export const setMode = (value: 'auto' | 'sdr' | 'hdr') => send({ cmd: 'set_mode', value });
 export const setAcProfile = (variant: 'punchy' | 'accurate') =>
