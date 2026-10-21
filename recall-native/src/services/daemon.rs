@@ -3,8 +3,24 @@
 //! A background thread connects, reconnects every second, parses newline JSON
 //! `{"mod":ns,"event":{..}}` messages into a shared snapshot plus a queue of
 //! one-shot events. The UI polls `revision()` / `snapshot()` / `drain_events()`.
+use std::io::{BufRead, BufReader, Write};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::mpsc::{self, Sender};
+use std::sync::{Arc, Mutex};
+use std::time::Duration;
+
+use interprocess::local_socket::traits::Stream as _;
+use interprocess::local_socket::{GenericNamespaced, Stream, ToNsName};
 use serde::Deserialize;
 use serde_json::Value;
+
+mod controller;
+mod protocol;
+#[cfg(test)]
+mod tests;
+
+const PIPE_NAME: &str = "recall-hdr-control";
+const RECONNECT: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone)]
 pub enum DaemonCommand {
@@ -120,32 +136,136 @@ pub enum DaemonEvent {
 }
 
 pub struct DaemonClient {
-    _private: (),
+    shared: Arc<Shared>,
+}
+
+/// State shared between the UI-facing client and the connection threads.
+struct Shared {
+    state: Mutex<protocol::State>,
+    revision: AtomicU64,
+    /// Line sender of the live connection's writer thread (None while disconnected).
+    writer: Mutex<Option<Sender<String>>>,
+    stop: AtomicBool,
+}
+
+impl Shared {
+    fn new() -> Self {
+        Self { state: Mutex::new(protocol::State::default()), revision: AtomicU64::new(0), writer: Mutex::new(None), stop: AtomicBool::new(false) }
+    }
+
+    fn update(&self, apply: impl FnOnce(&mut protocol::State) -> bool) {
+        let changed = match self.state.lock() {
+            Ok(mut state) => apply(&mut state),
+            Err(poisoned) => apply(&mut poisoned.into_inner()),
+        };
+        if changed {
+            self.revision.fetch_add(1, Ordering::AcqRel);
+        }
+    }
+
+    fn read<T>(&self, read: impl FnOnce(&mut protocol::State) -> T) -> T {
+        match self.state.lock() {
+            Ok(mut state) => read(&mut state),
+            Err(poisoned) => read(&mut poisoned.into_inner()),
+        }
+    }
+
+    fn set_writer(&self, writer: Option<Sender<String>>) {
+        match self.writer.lock() {
+            Ok(mut slot) => *slot = writer,
+            Err(poisoned) => *poisoned.into_inner() = writer,
+        }
+    }
 }
 
 impl DaemonClient {
     /// Starts the background connection thread. Never blocks.
     pub fn spawn() -> Self {
-        Self { _private: () }
+        Self::spawn_on(PIPE_NAME)
+    }
+
+    /// `spawn` against any pipe name (tests use a private one).
+    fn spawn_on(pipe: &str) -> Self {
+        let shared = Arc::new(Shared::new());
+        let worker = shared.clone();
+        let pipe = pipe.to_owned();
+        let spawned = std::thread::Builder::new().name("recall-daemon-pipe".into()).spawn(move || connection_loop(&worker, &pipe));
+        if let Err(error) = spawned {
+            eprintln!("Recall native: controller pipe thread failed to start: {error}");
+        }
+        Self { shared }
     }
     /// Queues a command; returns false when not connected (the command is dropped).
-    pub fn send(&self, _command: DaemonCommand) -> bool {
-        false
+    pub fn send(&self, command: DaemonCommand) -> bool {
+        let line = protocol::command_line(&command);
+        let Ok(writer) = self.shared.writer.lock() else { return false };
+        writer.as_ref().is_some_and(|tx| tx.send(line).is_ok())
     }
     /// Increments whenever the snapshot changes or an event arrives.
     pub fn revision(&self) -> u64 {
-        0
+        self.shared.revision.load(Ordering::Acquire)
     }
     pub fn snapshot(&self) -> DaemonSnapshot {
-        DaemonSnapshot::default()
+        self.shared.read(|state| state.snapshot.clone())
     }
     pub fn drain_events(&self) -> Vec<DaemonEvent> {
-        Vec::new()
+        self.shared.read(|state| state.events.drain(..).collect())
+    }
+}
+
+impl Drop for DaemonClient {
+    fn drop(&mut self) {
+        // The reader exits at its next line or disconnect; the writer when its sender drops.
+        self.shared.stop.store(true, Ordering::Release);
+        self.shared.set_writer(None);
+    }
+}
+
+/// Connect, serve until EOF/error, mark disconnected, retry every second.
+fn connection_loop(shared: &Shared, pipe: &str) {
+    while !shared.stop.load(Ordering::Acquire) {
+        if let Ok(name) = pipe.to_ns_name::<GenericNamespaced>()
+            && let Ok(stream) = Stream::connect(name)
+        {
+            serve(shared, stream);
+        }
+        shared.set_writer(None);
+        shared.update(|state| state.set_connected(false));
+        std::thread::sleep(RECONNECT);
+    }
+}
+
+/// One connection: a writer thread drains a channel (UI sends never block), this
+/// thread reads lines until EOF or error.
+fn serve(shared: &Shared, stream: Stream) {
+    let (reader, mut writer) = stream.split();
+    let (tx, rx) = mpsc::channel::<String>();
+    // Asked once per connect, queued ahead of anything the UI sends.
+    let _ = tx.send(protocol::command_line(&DaemonCommand::Status));
+    let _ = tx.send(protocol::command_line(&DaemonCommand::GetConfig));
+    let spawned = std::thread::Builder::new().name("recall-daemon-pipe-writer".into()).spawn(move || {
+        for line in rx {
+            if writer.write_all(format!("{line}\n").as_bytes()).is_err() {
+                break;
+            }
+        }
+    });
+    if spawned.is_err() {
+        return;
+    }
+    shared.set_writer(Some(tx));
+    shared.update(|state| state.set_connected(true));
+    for line in BufReader::new(reader).lines() {
+        let Ok(line) = line else { break };
+        if shared.stop.load(Ordering::Acquire) {
+            break;
+        }
+        shared.update(|state| state.apply_line(&line));
     }
 }
 
 /// Launches the controller (`recall-hdr.exe --record`, hidden, CCD1 affinity inherited)
 /// when no controller is running. Ok(false) when one is already running.
 pub fn start_controller() -> Result<bool, String> {
-    Err("controller launch not implemented".into())
+    controller::start()
 }
