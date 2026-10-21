@@ -9,6 +9,7 @@ mod library_state;
 mod media;
 mod root;
 mod services;
+mod shell;
 mod theme;
 mod ui;
 mod views;
