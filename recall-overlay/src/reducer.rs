@@ -398,10 +398,10 @@ mod tests {
         let mut reducer = Reducer::new();
         reducer.apply_envelope(&status("h264_nvenc"), now);
         reducer.apply_envelope(
-            &json!({"mod":"engine","event":{"type":"saved","path":"V:\\clips\\clip.mp4"}}),
+            &json!({"mod":"engine","event":{"type":"saved","path":"V:\\clips\\Rocket-League__2026-06-06__11-17-50.mp4","seconds":118.8}}),
             now,
         );
-        assert_eq!(reducer.view().secondary, "Saved clip.mp4");
+        assert_eq!(reducer.view().secondary, "Rocket League · 1:59");
         reducer.apply_envelope(&status("h264_nvenc"), now + Duration::from_secs(2));
         assert!(reducer.tick(now + SAVED_FOR));
         assert_eq!(reducer.view().secondary, "Source: Elden Ring");
