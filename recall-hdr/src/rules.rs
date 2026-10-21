@@ -74,7 +74,7 @@ fn rule_to_app(kind: RuleKind) -> AppKind {
 }
 
 /// True if `stem` is on the deny-list (case-insensitive).
-fn is_denied(stem: &str) -> bool {
+pub(crate) fn is_denied(stem: &str) -> bool {
     DENY_STEMS
         .iter()
         .any(|d| d.eq_ignore_ascii_case(stem))
@@ -88,7 +88,7 @@ fn is_denied(stem: &str) -> bool {
 /// `rule_for` folds a miss into `default_game_class`, which would make a windowed
 /// unknown indistinguishable from an explicit-`none` override -- and the decision
 /// table needs to tell those apart (#3 vs #5).
-fn override_kind(cfg: &Config, stem: &str) -> Option<RuleKind> {
+pub(crate) fn override_kind(cfg: &Config, stem: &str) -> Option<RuleKind> {
     cfg.overrides
         .iter()
         .find(|o| o.exe.eq_ignore_ascii_case(stem))
@@ -157,6 +157,7 @@ mod tests {
                 default_clamp: ClampMode::Punchy,
                 sdr_white_nits: 220,
                 debounce_ms: 400,
+                hdr_auto: false,
             },
             ..Config::default()
         }

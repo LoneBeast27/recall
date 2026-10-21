@@ -1,0 +1,184 @@
+//! What the capture engine should record, and when to (re)start it.
+//!
+//! - [`wanted`]: an env-pinned window wins, then the auto-detected game (if
+//!   `auto_record`), then the idle desktop (if `record_desktop_when_idle`).
+//! - [`EnginePlanner`]: when the game goes away the engine -- and its replay
+//!   ring -- is kept for [`EXIT_LINGER`], so a save pressed right after the
+//!   final round still works. A new game retargets immediately.
+//! - [`engine_env`]: the per-spawn environment the engine reads at startup.
+
+use std::time::{Duration, Instant};
+
+use crate::record_config::RecordingCfg;
+use crate::record_target::{Target, DESKTOP_NAME};
+
+/// How long the engine outlives its game so a late save still has a buffer.
+pub const EXIT_LINGER: Duration = Duration::from_secs(30);
+
+/// What the engine should be capturing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EngineTarget {
+    /// No engine (state "waiting").
+    Off,
+    Window(Target),
+    /// Primary-monitor capture named [`DESKTOP_NAME`].
+    Desktop,
+}
+
+/// Resolve the wanted engine target (see the module docs).
+pub fn wanted(detected: Option<&Target>, pinned: Option<&Target>, rec: &RecordingCfg) -> EngineTarget {
+    if let Some(p) = pinned {
+        return EngineTarget::Window(p.clone());
+    }
+    if rec.auto_record {
+        if let Some(t) = detected {
+            return EngineTarget::Window(t.clone());
+        }
+    }
+    if rec.record_desktop_when_idle {
+        EngineTarget::Desktop
+    } else {
+        EngineTarget::Off
+    }
+}
+
+/// Turns the wanted target into engine (re)starts, holding a game's engine for
+/// the linger window after the game goes away.
+pub struct EnginePlanner {
+    applied: EngineTarget,
+    lost_since: Option<Instant>,
+    linger: Duration,
+}
+
+impl EnginePlanner {
+    pub fn new(linger: Duration) -> Self {
+        EnginePlanner { applied: EngineTarget::Off, lost_since: None, linger }
+    }
+
+    pub fn applied(&self) -> &EngineTarget {
+        &self.applied
+    }
+
+    /// When the current linger ends (for the pump's wait timeout).
+    pub fn linger_deadline(&self) -> Option<Instant> {
+        self.lost_since.map(|t| t + self.linger)
+    }
+
+    /// `Some(new)` when the engine must be retargeted now.
+    pub fn update(&mut self, wanted: &EngineTarget, now: Instant) -> Option<EngineTarget> {
+        if *wanted == self.applied {
+            self.lost_since = None;
+            return None;
+        }
+        let game_went_away = matches!(self.applied, EngineTarget::Window(_))
+            && !matches!(wanted, EngineTarget::Window(_));
+        if game_went_away {
+            let since = *self.lost_since.get_or_insert(now);
+            if now.duration_since(since) < self.linger {
+                return None;
+            }
+        }
+        self.lost_since = None;
+        self.applied = wanted.clone();
+        Some(wanted.clone())
+    }
+
+    /// Record that `target` was just applied out of band (a settings change
+    /// restarted the engine with the wanted target, ending any linger).
+    pub fn force(&mut self, target: EngineTarget) {
+        self.applied = target;
+        self.lost_since = None;
+    }
+}
+
+/// Environment for one engine spawn: `Some` sets, `None` removes. Every target
+/// variable is set or removed explicitly so values the controller inherited
+/// (e.g. from `Start-Recall.ps1`) never leak into a different target.
+///
+/// `cpu_mask` is passed only when the controller applied it to itself: the
+/// engine exits if it cannot apply `RECALL_CPU_MASK`, and without it the
+/// engine still inherits the controller's affinity + priority.
+pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&str>) -> Vec<(String, Option<String>)> {
+    let mut env = vec![
+        ("RECALL_BUFFER_SECS".to_string(), Some(rec.buffer_secs.to_string())),
+        ("RECALL_OUT_DIR".to_string(), Some(rec.output_dir.clone())),
+        ("RECALL_CPU_MASK".to_string(), cpu_mask.map(str::to_owned)),
+    ];
+    let (hwnd, name, pid) = match target {
+        EngineTarget::Window(t) => (
+            Some((t.hwnd as usize).to_string()),
+            Some(t.name.clone()),
+            Some(t.pid.to_string()),
+        ),
+        EngineTarget::Desktop => (None, Some(DESKTOP_NAME.to_string()), None),
+        EngineTarget::Off => (None, None, None),
+    };
+    env.push(("RECALL_CAPTURE_HWND".into(), hwnd));
+    env.push(("RECALL_CAPTURE_NAME".into(), name));
+    env.push(("RECALL_AUDIO_GAME_PID".into(), pid));
+    env
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn target(pid: u32, hwnd: isize, name: &str) -> Target {
+        Target { hwnd, pid, name: name.into(), exe: format!("{name}.exe") }
+    }
+
+    #[test]
+    fn wanted_prefers_pin_then_game_then_desktop() {
+        let mut rec = RecordingCfg::default();
+        let game = target(1, 1, "A");
+        let pin = target(9, 9, "VALORANT");
+        assert_eq!(wanted(Some(&game), Some(&pin), &rec), EngineTarget::Window(pin.clone()));
+        assert_eq!(wanted(Some(&game), None, &rec), EngineTarget::Window(game.clone()));
+        assert_eq!(wanted(None, None, &rec), EngineTarget::Off);
+        rec.record_desktop_when_idle = true;
+        assert_eq!(wanted(None, None, &rec), EngineTarget::Desktop);
+        rec.auto_record = false;
+        assert_eq!(wanted(Some(&game), None, &rec), EngineTarget::Desktop, "auto_record off ignores games");
+    }
+
+    #[test]
+    fn planner_lingers_after_game_exit_but_retargets_new_games_now() {
+        let t0 = Instant::now();
+        let mut p = EnginePlanner::new(EXIT_LINGER);
+        let a = EngineTarget::Window(target(1, 1, "A"));
+        assert_eq!(p.update(&a, t0), Some(a.clone()));
+        assert_eq!(p.update(&a, t0 + Duration::from_secs(1)), None, "steady state is a no-op");
+        // The game exits: the engine is kept for the linger window.
+        assert_eq!(p.update(&EngineTarget::Off, t0 + Duration::from_secs(10)), None);
+        assert_eq!(p.update(&EngineTarget::Off, t0 + Duration::from_secs(39)), None);
+        assert!(p.linger_deadline().is_some());
+        assert_eq!(p.update(&EngineTarget::Off, t0 + Duration::from_secs(40)), Some(EngineTarget::Off));
+        // A new game during a linger retargets immediately.
+        p.update(&a, t0 + Duration::from_secs(50));
+        p.update(&EngineTarget::Desktop, t0 + Duration::from_secs(51));
+        let b = EngineTarget::Window(target(2, 2, "B"));
+        assert_eq!(p.update(&b, t0 + Duration::from_secs(52)), Some(b.clone()));
+        assert!(p.linger_deadline().is_none());
+        // Off -> Desktop needs no linger.
+        let mut q = EnginePlanner::new(EXIT_LINGER);
+        assert_eq!(q.update(&EngineTarget::Desktop, t0), Some(EngineTarget::Desktop));
+    }
+
+    #[test]
+    fn engine_env_sets_or_removes_every_target_variable() {
+        let rec = RecordingCfg::default();
+        let get = |env: &[(String, Option<String>)], k: &str| env.iter().find(|(n, _)| n == k).unwrap().1.clone();
+        let win = engine_env(&EngineTarget::Window(target(42, 0x1234, "VALORANT")), &rec, Some("ffff0000"));
+        assert_eq!(get(&win, "RECALL_CPU_MASK").as_deref(), Some("ffff0000"));
+        assert_eq!(get(&win, "RECALL_CAPTURE_HWND").as_deref(), Some("4660"));
+        assert_eq!(get(&win, "RECALL_CAPTURE_NAME").as_deref(), Some("VALORANT"));
+        assert_eq!(get(&win, "RECALL_AUDIO_GAME_PID").as_deref(), Some("42"));
+        assert_eq!(get(&win, "RECALL_BUFFER_SECS").as_deref(), Some("120"));
+        assert_eq!(get(&win, "RECALL_OUT_DIR").as_deref(), Some(r"V:\ALL RECORDINGS"));
+        let desk = engine_env(&EngineTarget::Desktop, &rec, None);
+        assert_eq!(get(&desk, "RECALL_CPU_MASK"), None, "unapplied mask is not passed (engine would exit)");
+        assert_eq!(get(&desk, "RECALL_CAPTURE_HWND"), None, "removed, not inherited");
+        assert_eq!(get(&desk, "RECALL_AUDIO_GAME_PID"), None);
+        assert_eq!(get(&desk, "RECALL_CAPTURE_NAME").as_deref(), Some("Desktop"));
+    }
+}

@@ -15,11 +15,12 @@
 //!   (best-effort -- a registry failure is logged, not fatal to the save).
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
 use crate::log;
+use crate::record_config::{OverlayCfg, RecordingCfg};
 use crate::types::{ClampMode, RuleKind};
 
 // ---------------------------------------------------------------------------
@@ -45,6 +46,12 @@ pub struct Config {
     pub hotkey: HotkeyCfg,
     #[serde(default)]
     pub startup: StartupCfg,
+    /// `[recording]` -- the unified record mode (see `record_config`).
+    #[serde(default)]
+    pub recording: RecordingCfg,
+    /// `[overlay]` -- the controller-owned in-game toast process.
+    #[serde(default)]
+    pub overlay: OverlayCfg,
     /// Per-exe rule overrides. Exe stems are matched case-insensitively.
     #[serde(default, rename = "overrides")]
     pub overrides: Vec<Override>,
@@ -74,6 +81,11 @@ pub struct BehaviorCfg {
     pub sdr_white_nits: u32,
     /// Foreground-change debounce (ms) before the reconciler acts.
     pub debounce_ms: u32,
+    /// Unified record mode only: drive HDR/clamp/SDR-white automatically by game
+    /// (the legacy reconciler). `false` (default) = the recorder never changes a
+    /// display setting. The legacy `--legacy-hdr` mode ignores this flag.
+    #[serde(default)]
+    pub hdr_auto: bool,
 }
 
 /// `[hotkey]` -- user-facing accelerators (parsed by the tray layer, not here).
@@ -234,6 +246,7 @@ impl Default for BehaviorCfg {
             default_clamp: ClampMode::Punchy,
             sdr_white_nits: 220,
             debounce_ms: 400,
+            hdr_auto: false,
         }
     }
 }
@@ -261,6 +274,8 @@ impl Default for Config {
             behavior: BehaviorCfg::default(),
             hotkey: HotkeyCfg::default(),
             startup: StartupCfg::default(),
+            recording: RecordingCfg::default(),
+            overlay: OverlayCfg::default(),
             // The hdr-testcard entry is our live test target; ship it by default.
             overrides: vec![Override {
                 exe: "hdr-testcard".into(),
@@ -298,31 +313,38 @@ impl Config {
     }
 
     /// Serialize + atomically persist to [`Config::path`], then mirror the
-    /// autostart flag into the registry (best-effort).
-    ///
-    /// Atomicity: we write to `config.toml.tmp` and rename over the target, so a
-    /// crash mid-write can never truncate the live config.
+    /// autostart flag into the registry (best-effort). This is the legacy
+    /// (`--legacy-hdr`) tray's save path, so its Run value relaunches that mode.
     pub fn save(&self) -> Result<(), String> {
-        let path = Self::path();
+        self.save_to(&Self::path())?;
+        // Mirror autostart. Best-effort: a registry failure must not fail a save
+        // that already succeeded on disk.
+        if let Err(e) = sync_autostart(self.startup.autostart, LEGACY_RUN_ARG) {
+            log!("config: autostart sync failed (non-fatal): {e}");
+        }
+        Ok(())
+    }
+
+    /// Serialize + atomically persist to `path` with NO registry side effect
+    /// (the unified record mode syncs the Run key only when autostart changes).
+    ///
+    /// Atomicity: we write to `<path>.tmp` and rename over the target, so a
+    /// crash mid-write can never truncate the live config.
+    pub fn save_to(&self, path: &Path) -> Result<(), String> {
         let toml_str =
             toml::to_string_pretty(self).map_err(|e| format!("serialize config: {e}"))?;
-
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
         let tmp = path.with_extension("toml.tmp");
         fs::write(&tmp, toml_str.as_bytes())
             .map_err(|e| format!("write {}: {e}", tmp.display()))?;
         // rename is atomic on the same volume; on Windows it replaces the target.
-        fs::rename(&tmp, &path).map_err(|e| {
+        fs::rename(&tmp, path).map_err(|e| {
             // Best-effort cleanup so a failed rename doesn't strand the .tmp.
             let _ = fs::remove_file(&tmp);
             format!("rename {} -> {}: {e}", tmp.display(), path.display())
-        })?;
-
-        // Mirror autostart. Best-effort: a registry failure must not fail a save
-        // that already succeeded on disk.
-        if let Err(e) = sync_autostart(self.startup.autostart) {
-            log!("config: autostart sync failed (non-fatal): {e}");
-        }
-        Ok(())
+        })
     }
 
     /// Resolve the (rule, clamp) pair for a foreground exe stem.
@@ -345,7 +367,7 @@ impl Config {
 }
 
 /// Load a config from an explicit path (testable without touching `%APPDATA%`).
-fn load_from(path: &std::path::Path) -> Config {
+pub(crate) fn load_from(path: &std::path::Path) -> Config {
     let text = match fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
@@ -383,23 +405,38 @@ const RUN_SUBKEY: &str = r"Software\Microsoft\Windows\CurrentVersion\Run";
 /// The value name we own under [`RUN_SUBKEY`].
 const RUN_VALUE_NAME: &str = "recall-hdr";
 
-/// Mirror `startup.autostart` into `HKCU\...\Run`.
+/// Run-key argument that relaunches the unified record mode at login.
+pub const RECORD_RUN_ARG: &str = "--record";
+/// Run-key argument that relaunches the legacy HDR-only tray at login.
+pub const LEGACY_RUN_ARG: &str = "--legacy-hdr";
+
+/// The exact `REG_SZ` data written under the Run key: the quoted exe path plus
+/// the mode argument, e.g. `"C:\Recall\recall-hdr.exe" --record`. Pure so the
+/// string is unit-tested without touching the registry.
+pub fn run_value(exe: &str, arg: &str) -> String {
+    if arg.is_empty() {
+        format!("\"{exe}\"")
+    } else {
+        format!("\"{exe}\" {arg}")
+    }
+}
+
+/// Mirror an autostart flag into `HKCU\...\Run`.
 ///
 /// Idempotent:
-/// - `enabled == true`  -> set `recall-hdr` = `"<quoted current_exe path>"`.
+/// - `enabled == true`  -> set `recall-hdr` = [`run_value`]`(current_exe, arg)`.
 /// - `enabled == false` -> delete the value if present (absent is success).
 ///
 /// Uses the `windows-rs` `Win32::System::Registry` surface
-/// (`RegCreateKeyExW` / `RegSetValueExW` / `RegDeleteValueW`). Errors are
+/// (`RegCreateKeyW` / `RegSetValueExW` / `RegDeleteValueW`). Errors are
 /// returned as strings so the caller can log-and-continue.
-pub fn sync_autostart(enabled: bool) -> Result<(), String> {
+pub fn sync_autostart(enabled: bool, arg: &str) -> Result<(), String> {
     if enabled {
         let exe = std::env::current_exe()
             .map_err(|e| format!("current_exe: {e}"))?
             .to_string_lossy()
             .into_owned();
-        let quoted = format!("\"{exe}\"");
-        set_run_value(&quoted)
+        set_run_value(&run_value(&exe, arg))
     } else {
         delete_run_value()
     }
@@ -717,28 +754,28 @@ clamp = "off"
         );
 
         // 1. Enable -> value written.
-        sync_autostart(true).expect("sync_autostart(true) should write the Run value");
+        sync_autostart(true, RECORD_RUN_ARG).expect("sync_autostart(true) should write the Run value");
 
-        // 2. Read it back and confirm it is our quoted current_exe.
-        let expected = format!(
-            "\"{}\"",
-            std::env::current_exe().unwrap().to_string_lossy()
+        // 2. Read it back and confirm it is our quoted current_exe + --record.
+        let expected = run_value(
+            &std::env::current_exe().unwrap().to_string_lossy(),
+            RECORD_RUN_ARG,
         );
         let got = read_run_value_live().expect("Run value must exist after enable");
         assert_eq!(got, expected, "Run value must be the quoted current exe path");
         println!("autostart live: wrote + read back Run value = {got}");
 
         // 3. Idempotency: enabling again is a no-op that still leaves the value.
-        sync_autostart(true).expect("second enable should be idempotent");
+        sync_autostart(true, RECORD_RUN_ARG).expect("second enable should be idempotent");
         assert_eq!(read_run_value_live().as_deref(), Some(expected.as_str()));
 
         // 4. Disable -> value deleted.
-        sync_autostart(false).expect("sync_autostart(false) should delete the Run value");
+        sync_autostart(false, RECORD_RUN_ARG).expect("sync_autostart(false) should delete the Run value");
         assert_eq!(read_run_value_live(), None, "Run value must be gone after disable");
         println!("autostart live: deleted Run value; registry left clean");
 
         // 5. Idempotency: disabling again when already absent is success.
-        sync_autostart(false).expect("second disable should be a no-op success");
+        sync_autostart(false, RECORD_RUN_ARG).expect("second disable should be a no-op success");
 
         // Local reader used only by this live test.
         fn read_run_value_live() -> Option<String> {
