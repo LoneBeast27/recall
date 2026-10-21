@@ -172,34 +172,9 @@ impl Root {
             div()
                 .text_size(px(12.))
                 .text_color(c(theme::TERTIARY))
-                .child("Recorder shortcuts work in every game, even when Recall is closed.")
+                .child("These work in every game, even when Recall is closed.")
                 .into_any_element(),
-            group("Recorder", vec![("Save replay", save), ("Mute microphone in clips", mic)]),
-            group(
-                "Library",
-                vec![
-                    ("Search", "Ctrl+K".into()),
-                    ("Select several clips", "Ctrl+Click / Shift+Click".into()),
-                    ("Select all", "Ctrl+A".into()),
-                    ("Delete selected", "Del".into()),
-                    ("Clear selection", "Esc".into()),
-                    ("Rename", "Double-click".into()),
-                ],
-            ),
-            group(
-                "Editor",
-                vec![
-                    ("Play / pause", "Space".into()),
-                    ("Set in / set out", "I / O".into()),
-                    ("Split", "C".into()),
-                    ("Delete segment", "Del".into()),
-                    ("Undo / redo", "Ctrl+Z / Ctrl+Y".into()),
-                    ("Step a frame", "← / →".into()),
-                    ("Jump 1 second", "Shift+← / Shift+→".into()),
-                    ("Back / forward 5 s", "J / L".into()),
-                    ("Back to library", "Esc".into()),
-                ],
-            ),
+            group("While you play", vec![("Save replay", save), ("Mute microphone in clips", mic)]),
         ]
     }
 }
