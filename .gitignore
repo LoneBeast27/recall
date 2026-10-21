@@ -26,3 +26,6 @@ tools/ffmpeg-dev/
 /.tmp/
 
 /target-gpui/
+
+# Claude Code agent worktrees
+/.claude/
