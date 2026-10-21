@@ -36,7 +36,7 @@ use std::sync::{Mutex, OnceLock};
 use windows::core::PWSTR;
 use windows::Win32::Foundation::{CloseHandle, HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+    GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
 };
 use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
@@ -45,8 +45,9 @@ use windows::Win32::UI::Accessibility::{
     HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, EVENT_SYSTEM_FOREGROUND,
-    WINEVENT_OUTOFCONTEXT, WINEVENT_SKIPOWNPROCESS,
+    GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
+    GetWindowThreadProcessId, IsWindow, IsZoomed, EVENT_SYSTEM_FOREGROUND, GWL_STYLE, WINEVENT_OUTOFCONTEXT,
+    WINEVENT_SKIPOWNPROCESS, WS_CAPTION,
 };
 
 use crate::log;
@@ -71,9 +72,14 @@ pub struct WatchEvent {
     pub pid: u32,
     /// Executable file stem (lower-case not forced -- callers denylist-compare).
     pub exe_stem: String,
+    /// Executable file name with extension (e.g. `VALORANT-Win64-Shipping.exe`).
+    pub exe_name: String,
     /// The window's title text (may be empty).
     pub title: String,
-    /// True iff the window is on the managed monitor AND covers it fully.
+    /// True iff the window is fullscreen/borderless on ITS OWN monitor (any
+    /// display) -- the record mode's "is this a game?" geometry signal.
+    pub fullscreen: bool,
+    /// True iff `fullscreen` AND that monitor is the managed one (HDR rules).
     pub fullscreen_on_target: bool,
     /// Raw `HWND` as an `isize` (not a live handle; re-wrap before use).
     pub hwnd: isize,
@@ -213,38 +219,9 @@ unsafe extern "system" fn foreground_hook(
 /// `unsafe extern` shim tiny). Prefer the event's `hwnd` -- it is exactly the
 /// window that just came to the foreground, so we skip a `GetForegroundWindow`.
 fn handle_foreground(hwnd: HWND) {
-    // Cheap reject: no window handle.
-    if hwnd.0.is_null() {
-        return;
-    }
-
-    // PID + exe stem. Skip windows with no resolvable owning process.
-    let mut pid = 0u32;
-    // SAFETY: `hwnd` is the live foreground window from the event.
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-    if pid == 0 {
-        return;
-    }
-    let exe_stem = match exe_stem(pid) {
-        Some(s) => s,
-        None => return, // no stem -> not a real app window we can classify
-    };
-    if exe_stem.trim().is_empty() {
-        return;
-    }
-
-    // Our own pid: WINEVENT_SKIPOWNPROCESS already filters these at the OS level,
-    // but re-check defensively so a mis-flagged event never round-trips a self-
-    // event to the reconciler.
-    if pid == std::process::id() {
-        return;
-    }
-
-    let title = window_title(hwnd);
-
-    // Read the managed monitor + compute the fullscreen flag under one lock, then
-    // release it before sending (never hold the lock across `tx.send`).
-    let (fullscreen_on_target, tx) = {
+    // Read the managed monitor + sender under one lock, then release it before
+    // probing/sending (never hold the lock across Win32 calls or `tx.send`).
+    let (target_monitor, tx) = {
         let guard = match state().lock() {
             Ok(g) => g,
             Err(_) => return, // poisoned: drop this event rather than panic
@@ -252,54 +229,92 @@ fn handle_foreground(hwnd: HWND) {
         let Some(st) = guard.as_ref() else {
             return; // uninstalled between the OS event and now
         };
-        let fs = is_fullscreen_on_target(hwnd, st.target_monitor);
-        (fs, st.tx.clone())
+        (st.target_monitor, st.tx.clone())
     };
-
-    let event = WatchEvent {
-        pid,
-        exe_stem,
-        title,
-        fullscreen_on_target,
-        hwnd: hwnd.0 as isize,
-    };
-    // A closed receiver just means the reconciler shut down; drop the event.
-    let _ = tx.send(event);
+    if let Some(event) = build_event(hwnd, target_monitor) {
+        // A closed receiver just means the reconciler shut down; drop the event.
+        let _ = tx.send(event);
+    }
 }
 
-/// True iff `hwnd`'s nearest monitor is the managed one AND the window rect covers
-/// that monitor's full bounds (within [`FULLSCREEN_TOL`] px per edge).
+/// Probe the CURRENT foreground window once (startup + the record mode's 1 s
+/// re-probe, which catches games that go fullscreen after taking focus -- no
+/// `EVENT_SYSTEM_FOREGROUND` fires for that). Same filtering as the hook.
+pub fn probe_foreground(target_monitor: isize) -> Option<WatchEvent> {
+    // SAFETY: plain query; a null result is handled by `build_event`.
+    let hwnd = unsafe { GetForegroundWindow() };
+    build_event(hwnd, target_monitor)
+}
+
+/// Turn a window into a [`WatchEvent`], or `None` for non-candidates (null hwnd,
+/// no resolvable process / stem, our own process).
+fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
+    // Cheap reject: no window handle.
+    if hwnd.0.is_null() {
+        return None;
+    }
+
+    // PID + exe identity. Skip windows with no resolvable owning process.
+    let mut pid = 0u32;
+    // SAFETY: `hwnd` is a live top-level window from the event / probe.
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    // Our own pid: WINEVENT_SKIPOWNPROCESS already filters these at the OS level,
+    // but re-check defensively so a self-event never reaches the reconciler.
+    if pid == 0 || pid == std::process::id() {
+        return None;
+    }
+    let (exe_stem, exe_name) = exe_identity(pid)?;
+    if exe_stem.trim().is_empty() {
+        return None; // no stem -> not a real app window we can classify
+    }
+
+    let (fullscreen, monitor) = fullscreen_on_own_monitor(hwnd);
+    Some(WatchEvent {
+        pid,
+        exe_stem,
+        exe_name,
+        title: window_title(hwnd),
+        fullscreen,
+        fullscreen_on_target: fullscreen && monitor == target_monitor,
+        hwnd: hwnd.0 as isize,
+    })
+}
+
+/// Whether `hwnd` is fullscreen/borderless on the monitor it mostly occupies,
+/// plus that monitor (as `isize`) for the managed-display attribution.
 ///
 /// Uses `MONITOR_DEFAULTTONEAREST` so a window straddling monitors is attributed
 /// to the one it mostly occupies -- matching how the OS treats "which display is
-/// this fullscreen game on".
-fn is_fullscreen_on_target(hwnd: HWND, target_monitor: isize) -> bool {
-    // SAFETY: `hwnd` is the live foreground window; MonitorFromWindow can't fail
-    // for a valid window (falls back to the nearest monitor).
+/// this fullscreen game on". A maximized window that still has a caption is a
+/// normal app window, not a game: on a monitor without a taskbar its rect can
+/// equal the monitor (custom-frame apps), so it is excluded explicitly.
+fn fullscreen_on_own_monitor(hwnd: HWND) -> (bool, isize) {
+    // SAFETY: `hwnd` is live; MonitorFromWindow falls back to the nearest monitor.
     let mon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
-    if mon.0 as isize != target_monitor {
-        return false;
-    }
-
-    // Monitor bounds.
     let mut mi = MONITORINFO {
         cbSize: std::mem::size_of::<MONITORINFO>() as u32,
         ..Default::default()
     };
     // SAFETY: `mon` is a valid HMONITOR just returned above; `mi.cbSize` is set.
-    let got_mi = unsafe { GetMonitorInfoW(HMONITOR(target_monitor as *mut _), &mut mi) };
-    if !got_mi.as_bool() {
-        return false;
+    if !unsafe { GetMonitorInfoW(mon, &mut mi) }.as_bool() {
+        return (false, mon.0 as isize);
     }
-
-    // Window bounds.
     let mut wr = RECT::default();
-    // SAFETY: `hwnd` is the live foreground window.
+    // SAFETY: `hwnd` is live.
     if unsafe { GetWindowRect(hwnd, &mut wr) }.is_err() {
-        return false;
+        return (false, mon.0 as isize);
     }
+    // SAFETY: style/zoom reads on a live window.
+    let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
+    let zoomed = unsafe { IsZoomed(hwnd) }.as_bool();
+    let captioned = style & WS_CAPTION.0 == WS_CAPTION.0;
+    (is_fullscreen_geometry(&mi.rcMonitor, &wr, zoomed, captioned), mon.0 as isize)
+}
 
-    rect_covers(&mi.rcMonitor, &wr, FULLSCREEN_TOL)
+/// Pure fullscreen decision: the window covers its monitor (within
+/// [`FULLSCREEN_TOL`]) and is not a maximized captioned app window.
+pub(crate) fn is_fullscreen_geometry(mon: &RECT, win: &RECT, zoomed: bool, captioned: bool) -> bool {
+    rect_covers(mon, win, FULLSCREEN_TOL) && !(zoomed && captioned)
 }
 
 /// Whether `win` covers `mon` on all four edges within `tol` px. The window is
@@ -319,6 +334,11 @@ fn rect_covers(mon: &RECT, win: &RECT, tol: i32) -> bool {
 // PROCESS_QUERY_LIMITED_INFORMATION + QueryFullProcessImageNameW, then take the
 // file stem. Kept local to avoid a cross-crate dependency for two small helpers.
 fn exe_stem(pid: u32) -> Option<String> {
+    exe_identity(pid).map(|(stem, _)| stem)
+}
+
+/// `(file stem, file name)` of `pid`'s executable image.
+fn exe_identity(pid: u32) -> Option<(String, String)> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; 260];
@@ -328,13 +348,31 @@ fn exe_stem(pid: u32) -> Option<String> {
         let _ = CloseHandle(handle);
         res.ok()?;
         let path = String::from_utf16_lossy(&buf[..len as usize]);
-        Some(
-            std::path::Path::new(&path)
-                .file_stem()?
-                .to_string_lossy()
-                .into_owned(),
-        )
+        let path = std::path::Path::new(&path);
+        Some((
+            path.file_stem()?.to_string_lossy().into_owned(),
+            path.file_name()?.to_string_lossy().into_owned(),
+        ))
     }
+}
+
+/// Whether `hwnd` still names a live window.
+pub fn window_alive(hwnd: isize) -> bool {
+    // SAFETY: IsWindow tolerates any handle value.
+    unsafe { IsWindow(Some(HWND(hwnd as *mut _))) }.as_bool()
+}
+
+/// Public identity lookup for env-pinned capture targets (`Start-Recall.ps1`).
+pub fn window_identity(hwnd: isize) -> Option<(u32, String, String, String)> {
+    let hwnd = HWND(hwnd as *mut _);
+    let mut pid = 0u32;
+    // SAFETY: GetWindowThreadProcessId tolerates a stale handle (pid stays 0).
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    if pid == 0 {
+        return None;
+    }
+    let (stem, name) = exe_identity(pid)?;
+    Some((pid, stem, name, window_title(hwnd)))
 }
 
 // vendored from recall/src/source.rs (window_title): GetWindowTextW into a fixed
@@ -416,6 +454,28 @@ mod tests {
         // A window at the primary's origin does NOT cover the secondary.
         let primary_win = RECT { left: 0, top: 0, right: 3840, bottom: 2160 };
         assert!(!rect_covers(&mon, &primary_win, FULLSCREEN_TOL));
+    }
+
+    #[test]
+    fn fullscreen_geometry_on_a_secondary_monitor_counts() {
+        // The record mode attributes fullscreen to the window's OWN monitor: a
+        // borderless game on the right-hand display is fullscreen there.
+        let secondary = RECT { left: 2560, top: 0, right: 5120, bottom: 1440 };
+        assert!(is_fullscreen_geometry(&secondary, &secondary, false, false));
+        // Exclusive/borderless games are WS_POPUP: a non-captioned window that
+        // happens to be maximized still counts.
+        assert!(is_fullscreen_geometry(&secondary, &secondary, true, false));
+    }
+
+    #[test]
+    fn maximized_captioned_app_is_not_fullscreen() {
+        // Custom-frame apps (Electron, Chrome) maximized on a taskbar-less monitor
+        // have rect == monitor; they are app windows, not games.
+        let mon = RECT { left: 0, top: 0, right: 2560, bottom: 1440 };
+        assert!(!is_fullscreen_geometry(&mon, &mon, true, true));
+        // A windowed (non-covering) window is never fullscreen.
+        let win = RECT { left: 100, top: 100, right: 1200, bottom: 800 };
+        assert!(!is_fullscreen_geometry(&mon, &win, false, false));
     }
 
     // --- single-instance install semantics -----------------------------------

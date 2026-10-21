@@ -115,11 +115,85 @@ impl Drop for Hotkey {
     }
 }
 
+/// What the record mode's accelerators reported since the last poll.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct RecordFired {
+    pub save: bool,
+    pub mic: bool,
+    pub hdr: bool,
+}
+
+/// The unified record mode's accelerators (save replay, toggle mic, and the HDR
+/// toggle only while HDR management is on), re-bindable at runtime on ONE
+/// manager. Same pump-thread / single-instance contract as [`Hotkey`] -- the
+/// two are never alive at once (they belong to different modes).
+pub struct RecordHotkeys {
+    manager: GlobalHotKeyManager,
+    save: Option<HotKey>,
+    mic: Option<HotKey>,
+    hdr: Option<HotKey>,
+}
+
+impl RecordHotkeys {
+    pub fn new() -> Result<Self, String> {
+        let manager = GlobalHotKeyManager::new().map_err(|e| format!("global-hotkey manager init failed: {e}"))?;
+        Ok(RecordHotkeys { manager, save: None, mic: None, hdr: None })
+    }
+
+    /// Replace every binding. Returns one warning per accelerator that could not
+    /// be parsed/registered (the others still work).
+    pub fn bind(&mut self, save: &str, mic: &str, hdr: Option<&str>) -> Vec<String> {
+        for hk in [self.save.take(), self.mic.take(), self.hdr.take()].into_iter().flatten() {
+            let _ = self.manager.unregister(hk);
+        }
+        let mut warnings = Vec::new();
+        let mut reg = |accel: &str| match parse_accel(accel).and_then(|hk| {
+            self.manager.register(hk).map(|_| hk).map_err(|e| format!("register hotkey '{accel}' failed: {e}"))
+        }) {
+            Ok(hk) => Some(hk),
+            Err(e) => {
+                warnings.push(e);
+                None
+            }
+        };
+        let save_hk = reg(save);
+        let mic_hk = reg(mic);
+        let hdr_hk = hdr.and_then(&mut reg);
+        self.save = save_hk;
+        self.mic = mic_hk;
+        self.hdr = hdr_hk;
+        warnings
+    }
+
+    /// Drain the process-global hotkey channel (non-blocking, presses only).
+    pub fn poll(&self) -> RecordFired {
+        let mut fired = RecordFired::default();
+        while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
+            if event.state != HotKeyState::Pressed {
+                continue;
+            }
+            let is = |hk: Option<HotKey>| hk.is_some_and(|h| h.id() == event.id);
+            fired.save |= is(self.save);
+            fired.mic |= is(self.mic);
+            fired.hdr |= is(self.hdr);
+        }
+        fired
+    }
+}
+
+impl Drop for RecordHotkeys {
+    fn drop(&mut self) {
+        for hk in [self.save, self.mic, self.hdr].into_iter().flatten() {
+            let _ = self.manager.unregister(hk);
+        }
+    }
+}
+
 /// Parse an accelerator string into a [`HotKey`], normalizing `Win` -> `Super`.
 ///
 /// Split out from [`Hotkey::register`] so it is unit-testable without touching the
 /// OS (the `GlobalHotKeyManager` needs a real message loop / thread affinity).
-fn parse_accel(accel: &str) -> Result<HotKey, String> {
+pub(crate) fn parse_accel(accel: &str) -> Result<HotKey, String> {
     let normalized = normalize_win(accel);
     HotKey::from_str(&normalized).map_err(|e| format!("invalid accelerator '{accel}': {e}"))
 }
@@ -210,5 +284,14 @@ mod tests {
     fn default_config_hotkey_parses() {
         // The shipped default accelerator (config::HotkeyCfg::default) must be valid.
         assert!(parse_accel("Ctrl+Alt+H").is_ok());
+    }
+
+    #[test]
+    fn record_mode_default_hotkeys_parse() {
+        let save = parse_accel("Alt+N").expect("Alt+N");
+        let mic = parse_accel("Alt+M").expect("Alt+M");
+        assert_eq!(save.key, Code::KeyN);
+        assert_eq!(mic.key, Code::KeyM);
+        assert_ne!(save.id(), mic.id(), "distinct ids so poll can tell them apart");
     }
 }
