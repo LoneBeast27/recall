@@ -37,7 +37,7 @@ const METERS: [(&str, bool, &str); 6] = [
 ];
 const FLOOR_DB: f32 = -90.0;
 const RETRY: Duration = Duration::from_secs(3);
-const UPDATE: Duration = Duration::from_millis(100);
+const UPDATE: Duration = Duration::from_millis(16);
 
 pub struct Meters {
     shared: Arc<Shared>,

@@ -19,7 +19,21 @@ const GAP: f32 = 16.0;
 const CONTENT_PAD: f32 = 24.0;
 
 impl Root {
-    pub fn render_library_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// Fixed frame for every non-editor page: the same sidebar and the same panel,
+    /// so navigation never moves; only the panel content changes.
+    pub fn render_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let content = match self.route {
+            Route::Hdr => self.render_hdr(window, cx),
+            Route::Audio => self.render_audio(window, cx),
+            Route::Settings => self.render_settings(window, cx),
+            _ => div()
+                .size_full()
+                .flex()
+                .flex_col()
+                .child(self.render_library_header(window, cx))
+                .child(self.render_library_body(cx))
+                .into_any_element(),
+        };
         div()
             .flex_1()
             .min_w_0()
@@ -27,15 +41,7 @@ impl Root {
             .pr(px(8.))
             .pb(px(8.))
             .child(self.render_sidebar(cx))
-            .child(
-                ui::panel()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(self.render_library_header(window, cx))
-                    .child(self.render_library_body(cx)),
-            )
+            .child(ui::panel().flex_1().min_w_0().flex().flex_col().child(content))
             .into_any_element()
     }
 
@@ -441,10 +447,12 @@ impl Root {
     }
 
     fn render_sidebar(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let scope = self.lib.scope();
+        let on_library = self.route == Route::Library;
+        let scope = if on_library { Some(self.lib.scope()) } else { None };
+        let route = self.route;
         let games_shown = if self.lib.show_all_games { self.lib.games.len() } else { self.lib.games.len().min(10) };
         let games: Vec<_> = self.lib.games.iter().take(games_shown).cloned().collect();
-        let selected_game = self.lib.filter.game_key.clone();
+        let selected_game = if on_library { self.lib.filter.game_key.clone() } else { None };
         div()
             .w(px(232.))
             .flex_none()
@@ -454,16 +462,18 @@ impl Root {
             .pt(px(4.))
             .pb(px(4.))
             .gap(px(2.))
-            .child(nav_row("nav-all", Icon::Grid, "All clips", Some(thousands(self.lib.records.len())), scope == crate::library_state::Scope::All).on_click(
+            .child(nav_row("nav-all", Icon::Grid, "All clips", Some(thousands(self.lib.records.len())), scope == Some(crate::library_state::Scope::All)).on_click(
                 cx.listener(|this, _, _, cx| {
+                    this.go(Route::Library);
                     this.lib.filter.game_key = None;
                     this.lib.filter.favourites_only = false;
                     this.lib.refilter();
                     cx.notify();
                 }),
             ))
-            .child(nav_row("nav-fav", Icon::Star, "Favourites", Some(thousands(self.lib.favourites)), scope == crate::library_state::Scope::Favourites).on_click(
+            .child(nav_row("nav-fav", Icon::Star, "Favourites", Some(thousands(self.lib.favourites)), scope == Some(crate::library_state::Scope::Favourites)).on_click(
                 cx.listener(|this, _, _, cx| {
+                    this.go(Route::Library);
                     this.lib.filter.game_key = None;
                     this.lib.filter.favourites_only = true;
                     this.lib.refilter();
@@ -484,6 +494,7 @@ impl Root {
                         let key = game.key.clone();
                         let active = selected_game.as_deref() == Some(game.key.as_str());
                         game_row(&game.key, &game.name, game.count, active).on_click(cx.listener(move |this, _, _, cx| {
+                            this.go(Route::Library);
                             this.lib.filter.favourites_only = false;
                             this.lib.filter.game_key = Some(key.clone());
                             this.lib.refilter();
@@ -514,15 +525,15 @@ impl Root {
             .child(div().flex_1())
             .child(div().mx(px(-12.)).child(ui::hairline()))
             .child(div().pt(px(8.)))
-            .child(nav_row("nav-hdr", Icon::Sun, "Display & HDR", None, false).on_click(cx.listener(|this, _, _, cx| {
+            .child(nav_row("nav-hdr", Icon::Sun, "Display & HDR", None, route == Route::Hdr).on_click(cx.listener(|this, _, _, cx| {
                 this.go(Route::Hdr);
                 cx.notify();
             })))
-            .child(nav_row("nav-audio", Icon::AudioLines, "Audio", None, false).on_click(cx.listener(|this, _, _, cx| {
+            .child(nav_row("nav-audio", Icon::AudioLines, "Audio", None, route == Route::Audio).on_click(cx.listener(|this, _, _, cx| {
                 this.go(Route::Audio);
                 cx.notify();
             })))
-            .child(nav_row("nav-settings", Icon::Settings, "Settings", None, false).on_click(cx.listener(|this, _, _, cx| {
+            .child(nav_row("nav-settings", Icon::Settings, "Settings", None, route == Route::Settings).on_click(cx.listener(|this, _, _, cx| {
                 this.go(Route::Settings);
                 cx.notify();
             })))
