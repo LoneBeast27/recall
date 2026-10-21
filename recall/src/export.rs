@@ -87,3 +87,20 @@ pub(crate) fn export_edited_with(
         ExportMode::Lossless => lossless::export(input, temp, plan),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::ff;
+
+    #[test]
+    fn receive_classifier_only_accepts_eagain_and_eof() {
+        assert!(super::receive_is_drained(&ff::Error::Eof));
+        assert!(super::receive_is_drained(&ff::Error::Other {
+            errno: ff::error::EAGAIN,
+        }));
+        assert!(!super::receive_is_drained(&ff::Error::InvalidData));
+        assert!(!super::receive_is_drained(&ff::Error::Other {
+            errno: ff::error::EIO,
+        }));
+    }
+}
