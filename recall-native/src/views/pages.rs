@@ -1,0 +1,416 @@
+//! Display & HDR, Audio and Settings pages.
+use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Window, div, prelude::*, px, relative};
+use serde_json::{Value, json};
+
+use crate::{
+    root::{Root, Route, ToastKind},
+    services::{
+        daemon::{self, DaemonCommand},
+        meters::{MeterState, bar_fraction},
+    },
+    theme::{self, c},
+    ui::{self, Icon, Variant, icon},
+};
+
+impl Root {
+    fn page_shell(&self, title: &str, subtitle: &str, back: bool, body: Vec<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .flex_1()
+            .min_w_0()
+            .flex()
+            .px(px(8.))
+            .pb(px(8.))
+            .child(
+                ui::panel().flex_1().min_w_0().flex().flex_col().child(
+                    div()
+                        .id("page-scroll")
+                        .flex_1()
+                        .min_h_0()
+                        .overflow_y_scroll()
+                        .flex()
+                        .justify_center()
+                        .child(
+                            div()
+                                .w_full()
+                                .max_w(px(760.))
+                                .px(px(24.))
+                                .py(px(24.))
+                                .flex()
+                                .flex_col()
+                                .gap(px(20.))
+                                .child(
+                                    div()
+                                        .flex()
+                                        .items_center()
+                                        .gap(px(10.))
+                                        .when(back, |d| {
+                                            d.child(ui::icon_button("page-back", Icon::ChevronLeft, 30., theme::MUTED, false).on_click(cx.listener(|this, _, _, cx| {
+                                                this.go(Route::Library);
+                                                cx.notify();
+                                            })))
+                                        })
+                                        .child(
+                                            div()
+                                                .flex()
+                                                .flex_col()
+                                                .child(div().text_size(px(20.)).line_height(px(28.)).font_weight(FontWeight::SEMIBOLD).child(title.to_owned()))
+                                                .child(div().text_color(c(theme::TERTIARY)).child(subtitle.to_owned())),
+                                        ),
+                                )
+                                .children(body),
+                        ),
+                ),
+            )
+            .into_any_element()
+    }
+
+    fn offline_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.snap.connected {
+            return None;
+        }
+        Some(
+            card()
+                .flex_row()
+                .items_center()
+                .gap(px(12.))
+                .child(ui::dot(theme::DISABLED, 8.))
+                .child(div().flex_1().flex().flex_col().child(div().font_weight(FontWeight::MEDIUM).child("The recorder is off")).child(
+                    div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child("Start it to see live status and change these settings."),
+                ))
+                .child(ui::button("start-recorder", Variant::Primary).child("Start recorder").on_click(cx.listener(|this, _, _, cx| {
+                    match daemon::start_controller() {
+                        Ok(_) => this.show_toast(ToastKind::Info, "Starting the recorder…", None),
+                        Err(error) => this.show_toast(ToastKind::Bad, "Couldn't start the recorder", Some(error)),
+                    }
+                    cx.notify();
+                })))
+                .into_any_element(),
+        )
+    }
+
+    fn config_value(&self, section: &str, key: &str) -> Option<&Value> {
+        self.snap.config.as_ref()?.get(section)?.get(key)
+    }
+
+    fn config_bool(&self, section: &str, key: &str) -> bool {
+        self.config_value(section, key).and_then(Value::as_bool).unwrap_or(false)
+    }
+
+    fn set_config(&mut self, section: &str, key: &str, value: Value) {
+        let mut patch = serde_json::Map::new();
+        patch.insert(section.into(), json!({ key: value }));
+        self.send(DaemonCommand::SetConfig(Value::Object(patch)));
+        self.send(DaemonCommand::GetConfig);
+    }
+
+    // ---- Display & HDR ----------------------------------------------------
+
+    pub fn render_hdr(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let session = self.snap.session.clone().unwrap_or_default();
+        let hdr = session.hdr.clone();
+        let select = self.snap.engine.as_ref().map(|e| e.select.clone()).unwrap_or_else(|| "auto".into());
+        let auto = self.config_bool("behavior", "hdr_auto");
+        let display = hdr.display.clone().unwrap_or_else(|| "Managed display".into());
+        let owner = if hdr.manual_pin {
+            "Pinned by hand · Toggle HDR again to release".to_owned()
+        } else if let Some(target) = session.target.as_ref().filter(|_| hdr.auto) {
+            format!("{} owns the display", target.name)
+        } else if hdr.auto {
+            "Automatic: HDR games turn HDR on".to_owned()
+        } else {
+            "Automatic switching is off".to_owned()
+        };
+        let mut body = vec![];
+        body.extend(self.offline_banner(cx));
+        body.push(
+            card()
+                .flex_row()
+                .items_center()
+                .gap(px(16.))
+                .child(icon(Icon::Sun, 28., if hdr.hdr_on { theme::TEXT } else { theme::DISABLED }))
+                .child(
+                    div()
+                        .flex_1()
+                        .flex()
+                        .flex_col()
+                        .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(if !hdr.available {
+                            "Display not found".to_owned()
+                        } else if hdr.hdr_on {
+                            format!("HDR is on · {display}")
+                        } else {
+                            format!("HDR is off · {display}")
+                        }))
+                        .child(div().text_color(c(theme::TERTIARY)).child(if hdr.available { owner } else { "Recall manages HDR on the PG27AQDP. Connect it to use these controls.".into() })),
+                )
+                .child(ui::button("toggle-hdr", Variant::Secondary).when(!hdr.available, |b| b.opacity(0.4)).child("Toggle HDR now").on_click(cx.listener(|this, _, _, cx| {
+                    this.send(DaemonCommand::ToggleHdr);
+                    cx.notify();
+                })))
+                .into_any_element(),
+        );
+        body.push(
+            setting_row("Switch HDR for HDR games", "Turns HDR on while an HDR game is in front, and off afterwards. Off leaves the display alone.")
+                .child(ui::switch("hdr-auto", auto).on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_config("behavior", "hdr_auto", json!(!auto));
+                    cx.notify();
+                })))
+                .into_any_element(),
+        );
+        let modes = [("auto", "Auto"), ("sdr", "Force SDR"), ("hdr", "Force tone map")];
+        let mut mode_track = ui::segment_track().w(px(320.));
+        for (value, label) in modes {
+            mode_track = mode_track.child(ui::segment(SharedString::from(format!("mode-{value}")), label, select == value).on_click(cx.listener(move |this, _, _, cx| {
+                this.send(DaemonCommand::SetMode(value.into()));
+                cx.notify();
+            })));
+        }
+        body.push(setting_row("Recording tone mapping", "How HDR games are converted for SDR clips. Auto follows the display.").child(mode_track).into_any_element());
+        let profile = self.ac_profile.clone().unwrap_or_default().to_lowercase();
+        let mut profile_track = ui::segment_track().w(px(220.));
+        for (value, label) in [("punchy", "Punchy"), ("accurate", "Accurate")] {
+            profile_track = profile_track.child(ui::segment(SharedString::from(format!("ac-{value}")), label, profile.contains(value)).on_click(cx.listener(move |this, _, _, cx| {
+                this.send(DaemonCommand::SetAcProfile(value.into()));
+                cx.notify();
+            })));
+        }
+        body.push(setting_row("Desktop colour in HDR", "Gamma for SDR apps while HDR is on. Applies the next time HDR turns on.").child(profile_track).into_any_element());
+        self.page_shell("Display & HDR", "HDR switching for the PG27AQDP", true, body, cx)
+    }
+
+    // ---- Audio ------------------------------------------------------------
+
+    pub fn render_audio(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let readings = self.meters.as_ref().map(|m| m.snapshot()).unwrap_or_default();
+        let strips = readings.into_iter().map(|r| {
+            let live = r.state == MeterState::Live;
+            let rms = bar_fraction(r.rms_db);
+            let peak = bar_fraction(r.peak_db);
+            let clipping = live && r.peak_db > -1.0;
+            div()
+                .flex_1()
+                .flex()
+                .flex_col()
+                .items_center()
+                .gap(px(10.))
+                .when(!live, |d| d.opacity(0.45))
+                .child(
+                    div()
+                        .w(px(14.))
+                        .h(px(160.))
+                        .relative()
+                        .rounded(px(4.))
+                        .bg(c(theme::RAISED))
+                        .border_1()
+                        .border_color(c(theme::BORDER_SUBTLE))
+                        .child(div().absolute().bottom_0().left_0().right_0().h(relative(rms)).rounded(px(3.)).bg(c(theme::MUTED)))
+                        .when(live, |d| d.child(div().absolute().left_0().right_0().bottom(relative(peak)).h(px(2.)).bg(c(if clipping { theme::SIGNAL } else { theme::TEXT })))),
+                )
+                .child(div().font_weight(FontWeight::MEDIUM).child(r.label.clone()))
+                .child(div().font_family(theme::MONO).text_size(px(11.)).text_color(c(theme::TERTIARY)).child(match &r.state {
+                    MeterState::Live => format!("{:.0} dB", r.rms_db.max(-90.0)),
+                    MeterState::Missing => "Not found".into(),
+                    MeterState::Error(_) => "Error".into(),
+                }))
+        });
+        let midi = self.midi.as_ref();
+        let port = midi.and_then(|m| m.monitored_port());
+        let outputs = midi.map(|m| m.ports().outputs).unwrap_or_default();
+        let recent = midi.map(|m| m.recent()).unwrap_or_default();
+        let mut body = vec![
+            card()
+                .gap(px(16.))
+                .child(ui::heading("RØDECaster levels", "Live, about 10 updates a second"))
+                .child(div().flex().gap(px(8.)).children(strips))
+                .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child("Monitoring only. Clips record the Game and Microphone tracks."))
+                .into_any_element(),
+        ];
+        body.push(
+            card()
+                .gap(px(14.))
+                .child(ui::heading("MIDI console", port.clone().map_or_else(|| "RØDECaster port not found".into(), |p| format!("Listening on {p}"))))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(10.))
+                        .child(ui::button("midi-test", Variant::Secondary).child(icon(Icon::Play, 13., theme::TEXT)).child("Send test note").on_click(cx.listener(|this, _, _, cx| {
+                            let result = this.midi.as_ref().map_or(Err("MIDI is not running".to_owned()), |m| {
+                                let target = m.ports().outputs.into_iter().find(|o| !o.to_lowercase().contains("wavetable")).unwrap_or_default();
+                                m.send(&target, &[0x90, 60, 127]).map(|_| target)
+                            });
+                            if let Some(midi) = this.midi.as_ref() {
+                                if let Ok(target) = &result {
+                                    std::thread::sleep(std::time::Duration::from_millis(120));
+                                    let _ = midi.send(target, &[0x80, 60, 0]);
+                                }
+                            }
+                            this.midi_result = Some(result);
+                            cx.notify();
+                        })))
+                        .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(match &self.midi_result {
+                            Some(Ok(target)) => format!("Sent to {target}"),
+                            Some(Err(error)) => error.clone(),
+                            None => format!("{} output ports", outputs.len()),
+                        })),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(2.))
+                        .font_family(theme::MONO)
+                        .text_size(px(12.))
+                        .child(div().font_family(theme::SANS).text_color(c(theme::TERTIARY)).pb(px(4.)).child("Incoming"))
+                        .when(recent.is_empty(), |d| d.child(div().text_color(c(theme::DISABLED)).child("No messages yet. Press a pad on the RØDECaster.")))
+                        .children(recent.into_iter().map(|m| {
+                            let bytes: Vec<String> = m.bytes.iter().map(|b| format!("{b:02X}")).collect();
+                            div()
+                                .flex()
+                                .gap(px(16.))
+                                .child(div().w(px(80.)).text_color(c(theme::TERTIARY)).child(format!("{:.1} s", m.at_ms as f64 / 1000.0)))
+                                .child(div().child(bytes.join(" ")))
+                        })),
+                )
+                .into_any_element(),
+        );
+        self.page_shell("Audio", "RØDECaster meters and MIDI", true, body, cx)
+    }
+
+    // ---- Settings ---------------------------------------------------------
+
+    pub fn render_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let session = self.snap.session.clone().unwrap_or_default();
+        let auto_record = self.config_value("recording", "auto_record").and_then(Value::as_bool).unwrap_or(session.auto_record);
+        let desktop = self.config_bool("recording", "record_desktop_when_idle");
+        let buffer = self.config_value("recording", "buffer_secs").and_then(Value::as_u64).unwrap_or(session.save_seconds.max(1) as u64);
+        let overlay_on = self.config_value("overlay", "enabled").and_then(Value::as_bool).unwrap_or(session.overlay.enabled);
+        let corner = self.config_value("overlay", "corner").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| session.overlay.corner.clone());
+        let autostart = self.config_value("startup", "autostart").and_then(Value::as_bool).unwrap_or(session.autostart);
+        let out_dir = self
+            .config_value("recording", "output_dir")
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+            .or_else(|| std::env::var("RECALL_OUT_DIR").ok())
+            .unwrap_or_else(|| r"V:\ALL RECORDINGS".into());
+        let mut body = vec![];
+        body.extend(self.offline_banner(cx));
+        body.push(section_title("Recording"));
+        body.push(
+            setting_row("Record games automatically", "Recording starts when a fullscreen game is in front and stops when it closes.")
+                .child(ui::switch("auto-record", auto_record).on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_config("recording", "auto_record", json!(!auto_record));
+                    cx.notify();
+                })))
+                .into_any_element(),
+        );
+        body.push(
+            setting_row("Record the desktop when no game runs", "Keeps a replay of your main screen between games.")
+                .child(ui::switch("desktop-idle", desktop).on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_config("recording", "record_desktop_when_idle", json!(!desktop));
+                    cx.notify();
+                })))
+                .into_any_element(),
+        );
+        let mut lengths = ui::segment_track().w(px(300.));
+        for (secs, label) in [(30u64, "30 s"), (60, "1 min"), (120, "2 min"), (300, "5 min")] {
+            lengths = lengths.child(ui::segment(("len", secs as usize), label, buffer == secs).on_click(cx.listener(move |this, _, _, cx| {
+                this.set_config("recording", "buffer_secs", json!(secs));
+                cx.notify();
+            })));
+        }
+        body.push(setting_row("Replay length", "How much the save hotkey keeps. Longer uses more memory.").child(lengths).into_any_element());
+        body.push(
+            setting_row("Hotkeys", "Work in every game.")
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .gap(px(6.))
+                        .items_end()
+                        .child(hotkey_line("Save replay", &session.save_hotkey, "Alt+N"))
+                        .child(hotkey_line("Mute mic in clips", &session.mic_hotkey, "Alt+M")),
+                )
+                .into_any_element(),
+        );
+        body.push(section_title("Overlay"));
+        body.push(
+            setting_row("Show a notice on save", "A small corner card for 3 seconds. Hidden from your own captures.")
+                .child(ui::switch("overlay-on", overlay_on).on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_config("overlay", "enabled", json!(!overlay_on));
+                    cx.notify();
+                })))
+                .into_any_element(),
+        );
+        let mut corners = ui::segment_track().w(px(360.));
+        for (value, label) in [("top-left", "Top left"), ("top-right", "Top right"), ("bottom-left", "Bottom left"), ("bottom-right", "Bottom right")] {
+            corners = corners.child(ui::segment(SharedString::from(format!("corner-{value}")), label, corner == value).on_click(cx.listener(move |this, _, _, cx| {
+                this.set_config("overlay", "corner", json!(value));
+                cx.notify();
+            })));
+        }
+        body.push(setting_row("Corner", "").child(corners).into_any_element());
+        body.push(section_title("System"));
+        body.push(
+            setting_row("Start with Windows", "Recall starts in the tray when you sign in and records your games.")
+                .child(ui::switch("autostart", autostart).on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_config("startup", "autostart", json!(!autostart));
+                    cx.notify();
+                })))
+                .into_any_element(),
+        );
+        let folder = out_dir.clone();
+        body.push(
+            setting_row("Clip folder", &out_dir)
+                .child(ui::button("open-folder", Variant::Secondary).child(icon(Icon::Folder, 14., theme::TEXT)).child("Open").on_click(cx.listener(move |_, _, _, _| {
+                    let _ = std::process::Command::new("explorer.exe").arg(&folder).spawn();
+                })))
+                .into_any_element(),
+        );
+        body.push(
+            setting_row("Quit Recall", "Stops recording and closes the tray icon.")
+                .child(ui::button("quit-recorder", Variant::Ghost).border_1().border_color(c(theme::BORDER)).child(icon(Icon::Power, 14., theme::MUTED)).child("Stop recorder").on_click(cx.listener(|this, _, _, cx| {
+                    this.send(DaemonCommand::Quit);
+                    cx.notify();
+                })))
+                .into_any_element(),
+        );
+        self.page_shell("Settings", "Recording, overlay and startup", true, body, cx)
+    }
+}
+
+fn card() -> Div {
+    div().p(px(16.)).rounded(px(10.)).bg(c(theme::RAISED)).border_1().border_color(c(theme::BORDER_SUBTLE)).flex().flex_col()
+}
+
+fn section_title(text: &str) -> AnyElement {
+    div().pt(px(8.)).child(ui::caption(text.to_owned())).into_any_element()
+}
+
+fn setting_row(title: &str, detail: &str) -> Div {
+    div()
+        .flex()
+        .items_center()
+        .gap(px(24.))
+        .py(px(4.))
+        .child(
+            div()
+                .flex_1()
+                .min_w_0()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(div().font_weight(FontWeight::MEDIUM).child(title.to_owned()))
+                .when(!detail.is_empty(), |d| d.child(div().text_size(px(12.)).line_height(px(16.)).text_color(c(theme::TERTIARY)).child(detail.to_owned()))),
+        )
+}
+
+fn hotkey_line(label: &str, value: &str, fallback: &str) -> AnyElement {
+    let keys = if value.is_empty() { fallback } else { value };
+    div()
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(label.to_owned()))
+        .child(ui::kbd(keys.replace('+', " ")))
+        .into_any_element()
+}

@@ -1,12 +1,18 @@
 mod app;
+mod assets;
 mod audio;
 mod backend;
 #[path = "../../recall/src/edit_model.rs"]
 mod edit_model;
-mod icons;
+mod editor_state;
+mod library_state;
 mod media;
+mod root;
 mod services;
 mod theme;
+mod ui;
+mod views;
+mod worker;
 fn main() {
     if let Ok(mask) = std::env::var("RECALL_CPU_MASK") {
         use windows::Win32::System::Threading::{

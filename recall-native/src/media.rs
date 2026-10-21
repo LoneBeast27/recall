@@ -54,6 +54,7 @@ struct MediaStatus {
 struct PreviewWindowState {
     player: Mutex<Option<IMFPMediaPlayer>>,
     presentable: AtomicBool,
+    updating: AtomicBool,
     previous_proc: AtomicIsize,
     paint_count: AtomicU64,
     update_count: AtomicU64,
@@ -65,12 +66,16 @@ impl PreviewWindowState {
         if !self.presentable.load(Ordering::Acquire) {
             return;
         }
-        let result = self
-            .player
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .as_ref()
-            .map(|player| unsafe { player.UpdateVideo() });
+        // UpdateVideo is a cross-apartment COM call whose modal wait pumps messages and
+        // can deliver WM_PAINT back into this window re-entrantly. Never hold the lock
+        // across it (std Mutex is not re-entrant: that deadlocked the UI thread), and
+        // drop nested repaints while one is in flight.
+        if self.updating.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        let player = self.player.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        let result = player.map(|player| unsafe { player.UpdateVideo() });
+        self.updating.store(false, Ordering::Release);
         if let Some(result) = result {
             match result {
                 Ok(()) => {
