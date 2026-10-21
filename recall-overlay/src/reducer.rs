@@ -118,7 +118,10 @@ impl Reducer {
                     .and_then(|p| Path::new(p).file_name())
                     .and_then(|p| p.to_str())
                     .unwrap_or("clip");
-                self.set_transient("Clip saved", format!("Saved {filename}"), now + SAVED_FOR)
+                let game = filename.split("__").next().unwrap_or(filename).replace(['-', '_'], " ");
+                let secs = event.get("seconds").and_then(Value::as_f64).unwrap_or(0.0).round() as u64;
+                let detail = if secs > 0 { format!("{game} · {}:{:02}", secs / 60, secs % 60) } else { game };
+                self.set_transient("Clip saved", detail, now + SAVED_FOR)
             }
             Some("save_failed") => {
                 let reason = event
