@@ -126,21 +126,8 @@ impl Root {
     }
 
     fn settings_media(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let out_dir = self
-            .config_value("recording", "output_dir")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| std::env::var("RECALL_OUT_DIR").ok())
-            .unwrap_or_else(|| r"V:\ALL RECORDINGS".into());
-        let folder = out_dir.clone();
-        let mut items = vec![
-            section_title("Clips"),
-            setting_row("Clip folder", &out_dir)
-                .child(ui::button("open-folder", Variant::Secondary).child(icon(Icon::Folder, 14., theme::TEXT)).child("Open").on_click(cx.listener(move |_, _, _, _| {
-                    let _ = std::process::Command::new("explorer.exe").arg(&folder).spawn();
-                })))
-                .into_any_element(),
-        ];
+        let mut items = self.render_folder_section(cx);
+        items.push(section_title("SSD cache"));
         items.extend(self.render_storage_section(cx));
         items
     }

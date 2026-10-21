@@ -5,7 +5,9 @@
 //! autosave writes the working project to the SSD and the sidecar beside the clip is only
 //! written by [`flush_project`].
 use crate::edit_model::{ClipInfo, EditPlan, ExportMode, ExportSettings};
+use crate::services::library::folders::{self, Folders};
 use crate::services::storage::{self, Priority, ProjectSource};
+use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -16,7 +18,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 mod visual_assets;
 
 #[derive(Clone, Debug, Serialize)]
-pub struct ClipEntry { pub name:String, pub path:String, pub bytes:u64, pub mtime:u64, pub thumb:Option<String> }
+pub struct ClipEntry {
+    pub name:String, pub path:String, pub bytes:u64, pub mtime:u64, pub thumb:Option<String>,
+    /// Folder holding an imported clip that sits in a per-game subfolder (ShadowPlay, Medal).
+    pub folder:Option<String>,
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project { pub version:u32,pub source_path:String,pub source_bytes:u64,pub source_modified_ms:u64,pub plan:EditPlan,pub export_fps:u32,#[serde(default)] pub export:ExportSettings }
 #[derive(Clone,Debug,Default)]
@@ -49,23 +55,38 @@ pub fn cache_dir()->Result<PathBuf,String>{
     std::fs::create_dir_all(&root).map_err(|e|format!("create editor cache: {e}"))?;Ok(root)
 }
 fn tmp_dir()->Result<PathBuf,String>{let root=storage::cache_root().join("tmp");std::fs::create_dir_all(&root).map_err(|e|format!("create cache temp: {e}"))?;Ok(root)}
-/// `RECALL_OUT_DIR`, else `V:\ALL RECORDINGS`.
-pub fn library_dir()->PathBuf{std::env::var_os("RECALL_OUT_DIR").map(PathBuf::from).unwrap_or_else(||PathBuf::from(r"V:\ALL RECORDINGS"))}
-/// One listing of the library folder plus one of the SSD thumbnail tier; a clip's `thumb`
-/// is set only when its thumbnail is already on the SSD (misses are filled by `AssetJob::Thumb`
-/// and idle prefetch through the disk lane).
+/// `RECALL_OUT_DIR`, else the recorder's output folder (last reported, kept in
+/// `folders.json`), else `V:\ALL RECORDINGS`.
+pub fn library_dir()->PathBuf{
+    if let Some(dir)=std::env::var_os("RECALL_OUT_DIR"){return PathBuf::from(dir);}
+    Folders::load().recordings.filter(|r|!r.trim().is_empty()).map(PathBuf::from).unwrap_or_else(||PathBuf::from(r"V:\ALL RECORDINGS"))
+}
+/// The recordings folder (one listing) plus every imported folder (searched a few levels
+/// deep), and one listing of the SSD thumbnail tier; a clip's `thumb` is set only when its
+/// thumbnail is already on the SSD (misses are filled by `AssetJob::Thumb` and idle prefetch
+/// through the disk lane). A clip reachable from two folders is listed once.
 pub fn list_clips()->Result<Vec<ClipEntry>,String>{
     let dir=library_dir();
-    if !dir.exists(){return Ok(Vec::new());}
     let thumbs=storage::thumb_index();
     let mut clips=Vec::new();
-    for e in std::fs::read_dir(&dir).map_err(|e|format!("read clips: {e}"))?.flatten(){
-        let path=e.path();if !path.extension().is_some_and(|e|e.eq_ignore_ascii_case("mp4")){continue;}
-        let Ok(m)=e.metadata()else{continue};if !m.is_file(){continue;}
-        let name=e.file_name().to_string_lossy().into_owned();
-        let mtime=m.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
-        let thumb=thumbs.lookup(&name,m.len(),mtime).map(|p|p.to_string_lossy().into_owned());
-        clips.push(ClipEntry{name,path:path.to_string_lossy().into_owned(),bytes:m.len(),mtime,thumb});
+    let mut seen=HashSet::new();
+    let mut push=|path:PathBuf,bytes:u64,mtime:u64,folder:Option<String>|{
+        if !seen.insert(path.to_string_lossy().to_lowercase()){return;}
+        let name=path.file_name().map(|n|n.to_string_lossy().into_owned()).unwrap_or_default();
+        let thumb=thumbs.lookup(&name,bytes,mtime).map(|p|p.to_string_lossy().into_owned());
+        clips.push(ClipEntry{name,path:path.to_string_lossy().into_owned(),bytes,mtime,thumb,folder});
+    };
+    if dir.exists(){
+        for e in std::fs::read_dir(&dir).map_err(|e|format!("read clips: {e}"))?.flatten(){
+            let path=e.path();if !folders::is_clip(&path){continue;}
+            let Ok(m)=e.metadata()else{continue};if !m.is_file(){continue;}
+            let mtime=m.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+            push(path,m.len(),mtime,None);
+        }
+    }
+    let skip=[storage::cache_root()];
+    for root in Folders::load().imported{
+        for clip in folders::scan_imported(Path::new(&root),&skip){push(clip.path,clip.bytes,clip.mtime,clip.folder);}
     }
     clips.sort_by(|a,b|b.mtime.cmp(&a.mtime));Ok(clips)
 }

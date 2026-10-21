@@ -80,6 +80,8 @@ pub struct Root {
     /// Settings → Storage state (cache size slider, usage).
     pub cache: crate::views::storage_settings::CacheView,
     pub settings_tab: crate::views::settings::SettingsTab,
+    /// Recordings folder (last reported) + imported folders of old clips.
+    pub folders: crate::services::library::folders::Folders,
     /// When to check whether the recorder is running and start it (once per launch).
     controller_check_at: Option<Instant>,
     pub frame_at: Instant,
@@ -115,6 +117,7 @@ impl Root {
             drag_origin: None,
             cache: crate::views::storage_settings::CacheView::new(),
             settings_tab: Default::default(),
+            folders: crate::services::library::folders::Folders::load(),
             controller_check_at: std::env::var_os("RECALL_NO_CONTROLLER").is_none().then(|| Instant::now() + Duration::from_millis(1500)),
             frame_at: Instant::now(),
         };
@@ -166,6 +169,7 @@ impl Root {
             // Background cache filling pauses while a game is being recorded.
             let busy = self.snap.session.as_ref().is_some_and(|s| s.state == "recording" || s.state == "starting");
             crate::services::storage::set_recorder_busy(busy);
+            self.sync_recordings_folder();
             for event in self.daemon.drain_events() {
                 self.on_daemon_event(event);
             }

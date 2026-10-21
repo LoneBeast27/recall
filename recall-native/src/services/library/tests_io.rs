@@ -227,7 +227,7 @@ fn build_records_reads_names_store_and_sidecars() {
     std::fs::write(dir.join("Rocket-League®__2026-10-16__10-00-00.recall-edit.json"), b"{}").unwrap();
     let entries: Vec<ClipEntry> = names
         .iter()
-        .map(|name| ClipEntry { name: (*name).into(), path: dir.join(name).to_string_lossy().into_owned(), bytes: 1000, mtime: 1_792_256_671, thumb: None })
+        .map(|name| ClipEntry { name: (*name).into(), path: dir.join(name).to_string_lossy().into_owned(), bytes: 1000, mtime: 1_792_256_671, thumb: None, folder: None })
         .collect();
     let mut store = MetaStore::default();
     store.set_favourite(names[1], true).unwrap();

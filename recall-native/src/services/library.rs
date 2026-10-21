@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::backend::ClipEntry;
 
 mod calendar;
+pub mod folders;
 mod mp4;
 mod names;
 mod scrub;
@@ -118,9 +119,8 @@ pub fn build_records(entries: &[ClipEntry], store: &MetaStore) -> Vec<ClipRecord
     entries
         .iter()
         .map(|entry| {
-            let (prefix, started) = parse_file_name(&entry.name)
-                .unwrap_or_else(|| (names::fallback_prefix(&entry.name).to_owned(), local_from_unix(entry.mtime)));
-            let (game_key, game) = normalize_game(&prefix);
+            let (game_key, game) = normalize_game(&game_prefix(entry));
+            let started = parse_file_name(&entry.name).map_or_else(|| local_from_unix(entry.mtime), |(_, s)| s);
             let meta = store.meta(&entry.name);
             ClipRecord {
                 path: entry.path.clone(),
@@ -138,6 +138,16 @@ pub fn build_records(entries: &[ClipEntry], store: &MetaStore) -> Vec<ClipRecord
             }
         })
         .collect()
+}
+
+/// Game for a clip: the dated file-name prefix, else (imported clips in a per-game folder,
+/// e.g. ShadowPlay or Medal) the folder name, else the undated file stem.
+fn game_prefix(entry: &ClipEntry) -> String {
+    match parse_file_name(&entry.name) {
+        Some((prefix, _)) if !prefix.is_empty() => prefix,
+        Some(_) => entry.folder.clone().unwrap_or_default(),
+        None => entry.folder.clone().unwrap_or_else(|| names::fallback_prefix(&entry.name).to_owned()),
+    }
 }
 
 /// The editor writes `<file>.recall-edit.json` (backend `save_project`); `<stem>.recall-edit.json`
