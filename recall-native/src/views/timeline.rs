@@ -100,6 +100,7 @@ impl Root {
                 })),
             )
             .child(div().flex_1())
+            .when(self.ed.info.is_some(), |d| d.child(self.render_speed(cx)))
             .child(
                 div()
                     .flex()
@@ -198,6 +199,41 @@ impl Root {
         }
         for (start, end) in cuts.iter().copied() {
             tracks = tracks.child(cut_region(frac(start), frac(end), lanes_top, end - start));
+        }
+        if self.ed.lossless() {
+            for i in 0..ranges.len() {
+                if let Some(snapped) = self.ed.snapped_start(i).filter(|s| *s < ranges[i].start - 0.01) {
+                    tracks = tracks.child(
+                        div()
+                            .absolute()
+                            .top(px(lanes_top))
+                            .h(px(VIDEO_H))
+                            .left(relative(frac(snapped)))
+                            .w(relative(frac(ranges[i].start) - frac(snapped)))
+                            .bg(ca(theme::WARNING, 0.16))
+                            .border_l_1()
+                            .border_color(c(theme::WARNING)),
+                    );
+                }
+            }
+        }
+        for r in ranges.iter().filter(|r| (r.speed - 1.0).abs() > 1e-6) {
+            tracks = tracks.child(
+                div()
+                    .absolute()
+                    .top(px(lanes_top + 4.))
+                    .left(relative(frac(r.start)))
+                    .ml(px(6.))
+                    .px(px(5.))
+                    .h(px(16.))
+                    .flex()
+                    .items_center()
+                    .rounded(px(4.))
+                    .bg(ca(theme::WINDOW, 0.82))
+                    .text_size(px(11.))
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .child(speed_label(r.speed)),
+            );
         }
         for (i, r) in ranges.iter().enumerate() {
             if i != selected {
@@ -473,5 +509,40 @@ fn short_name(name: &str) -> String {
         "Microphone" => "Mic".into(),
         "Voice chat" => "Voice".into(),
         other => other.to_owned(),
+    }
+}
+
+impl Root {
+    /// Speed of the selected segment (re-encode exports only).
+    fn render_speed(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let lossless = self.ed.lossless();
+        let current = self.ed.plan.ranges.get(self.ed.selected).map_or(1.0, |r| r.speed);
+        let mut track = ui::segment_track().w(px(230.));
+        for speed in [0.25, 0.5, 1.0, 2.0, 4.0] {
+            let selected = (current - speed).abs() < 1e-6;
+            track = track.child(ui::segment(gpui::SharedString::from(format!("speed-{speed}")), speed_label(speed), selected).on_click(cx.listener(move |this, _, _, cx| {
+                if !this.ed.lossless() {
+                    this.ed.set_speed(speed);
+                }
+                cx.notify();
+            })));
+        }
+        div()
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .mr(px(14.))
+            .when(lossless, |d| d.opacity(0.35))
+            .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child("Speed"))
+            .child(track)
+            .into_any_element()
+    }
+}
+
+fn speed_label(speed: f64) -> String {
+    match speed {
+        s if (s - 0.25).abs() < 1e-6 => "¼×".into(),
+        s if (s - 0.5).abs() < 1e-6 => "½×".into(),
+        s => format!("{s}×"),
     }
 }

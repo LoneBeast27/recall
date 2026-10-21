@@ -1,10 +1,11 @@
 //! Editor page: native preview stage + transport, inspector (audio, export), timeline.
 use gpui::{
-    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, Window, canvas, div, prelude::*,
-    px,
+    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, Window, canvas, div,
+    prelude::*, px,
 };
 
 use crate::{
+    edit_model::ExportMode,
     editor_state::{Drag, FPS_PRESETS, GAIN_MAX, GAIN_MIN, timecode},
     root::Root,
     services::library,
@@ -324,46 +325,77 @@ impl Root {
             window.focus(&this.fps_field.focus);
             cx.notify();
         })));
-        div()
+        let lossless = self.ed.lossless();
+        let height = self.ed.export_settings.height;
+        let cap = self.ed.export_settings.max_bytes;
+        let mut method = ui::segment_track();
+        for (label, mode) in [("Re-encode", ExportMode::Reencode), ("Lossless", ExportMode::Lossless)] {
+            method = method.child(ui::segment(SharedString::from(format!("mode-{label}")), label, self.ed.export_settings.mode == mode).on_click(cx.listener(move |this, _, _, cx| {
+                this.ed.set_export_mode(mode);
+                cx.notify();
+            })));
+        }
+        let mut sizes = ui::segment_track();
+        for (label, value) in [("Original", None), ("1080p", Some(1080u32)), ("720p", Some(720u32))] {
+            sizes = sizes.child(ui::segment(SharedString::from(format!("h-{label}")), label, height == value).on_click(cx.listener(move |this, _, _, cx| {
+                this.ed.set_height(value);
+                cx.notify();
+            })));
+        }
+        let mut caps = ui::segment_track();
+        for (label, value) in [("No limit", None), ("10 MB", Some(10_000_000u64)), ("50 MB", Some(50_000_000u64)), ("500 MB", Some(500_000_000u64))] {
+            caps = caps.child(ui::segment(SharedString::from(format!("cap-{label}")), label, cap == value).on_click(cx.listener(move |this, _, _, cx| {
+                this.ed.set_max_bytes(value);
+                cx.notify();
+            })));
+        }
+        let field = |label: &str, control: gpui::AnyElement| {
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(6.))
+                .child(div().text_size(px(12.)).text_color(c(theme::MUTED)).child(label.to_owned()))
+                .child(control)
+        };
+        let note = |text: String| div().text_size(px(11.)).line_height(px(15.)).text_color(c(theme::TERTIARY)).child(text);
+        let mut column = div()
             .p(px(16.))
             .flex()
             .flex_col()
             .gap(px(12.))
-            .child(ui::heading("Export", "H.264 · NVENC"))
-            .child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(6.))
-                    .child(div().text_size(px(12.)).text_color(c(theme::MUTED)).child("Frame rate"))
-                    .child(track)
-                    .when(custom, |d| {
-                        d.child(
-                            div()
-                                .h(px(30.))
-                                .px(px(10.))
-                                .flex()
-                                .items_center()
-                                .gap(px(6.))
-                                .rounded(px(6.))
-                                .bg(c(theme::RAISED))
-                                .border_1()
-                                .border_color(c(if self.fps_field.is_focused(window) { theme::BORDER_STRONG } else { theme::BORDER }))
-                                .child(self.fps_field.render("fps-input", window).flex_1().on_click(cx.listener(|this, _, window, cx| {
-                                    window.focus(&this.fps_field.focus);
-                                    cx.notify();
-                                })))
-                                .child(div().text_color(c(theme::TERTIARY)).child("fps")),
-                        )
-                    })
-                    .child(
-                        div()
-                            .text_size(px(11.))
-                            .line_height(px(15.))
-                            .text_color(c(theme::TERTIARY))
-                            .child(format!("Constant {fps} fps. Gaps hold the last captured frame.")),
-                    ),
-            )
+            .child(ui::heading("Export", if lossless { "Stream copy" } else { "NVENC" }))
+            .child(field("Method", method.into_any_element()));
+        if lossless {
+            column = column.child(note("Copies the video untouched, in seconds. Each cut starts at the nearest earlier keyframe (shaded on the timeline). Frame rate, size and speed stay as recorded.".into()));
+        } else {
+            column = column
+                .child(
+                    field("Frame rate", track.into_any_element())
+                        .when(custom, |d| {
+                            d.child(
+                                div()
+                                    .h(px(30.))
+                                    .px(px(10.))
+                                    .flex()
+                                    .items_center()
+                                    .gap(px(6.))
+                                    .rounded(px(6.))
+                                    .bg(c(theme::RAISED))
+                                    .border_1()
+                                    .border_color(c(if self.fps_field.is_focused(window) { theme::BORDER_STRONG } else { theme::BORDER }))
+                                    .child(self.fps_field.render("fps-input", window).flex_1().on_click(cx.listener(|this, _, window, cx| {
+                                        window.focus(&this.fps_field.focus);
+                                        cx.notify();
+                                    })))
+                                    .child(div().text_color(c(theme::TERTIARY)).child("fps")),
+                            )
+                        })
+                        .child(note(format!("Constant {fps} fps. Gaps hold the last captured frame."))),
+                )
+                .child(field("Resolution", sizes.into_any_element()))
+                .child(field("Size limit", caps.into_any_element()));
+        }
+        column
             .child(
                 div()
                     .flex()
