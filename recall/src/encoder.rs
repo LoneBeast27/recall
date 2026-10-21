@@ -191,6 +191,7 @@ fn run(
                 if enc.is_none() && failed_resolution != Some((frame.width, frame.height)) {
                     enc = match open_encoder(&cfg, frame.width, frame.height) {
                         Ok(e) => {
+                            crate::longrec::tap::on_encoder_open(&e.encoder); // long-recording hook
                             stats.backend.store(1, Relaxed);
                             *stats.error.lock().unwrap_or_else(|e| e.into_inner()) = None;
                             report(
@@ -341,12 +342,14 @@ impl Enc {
                     self.ring.set_last_duration_us(pts - previous_pts);
                 }
             }
+            // The one payload copy; save windows share it by refcount.
+            let data: Arc<[u8]> = Arc::from(data);
+            crate::longrec::tap::tap_packet(pts, pkt.is_key(), &data); // long-recording hook
             self.ring.push(EncodedPacket {
                 frame_idx: pts,
                 duration_us: (1_000_000 / self.nominal_fps.max(1) as u64).max(1),
                 keyframe: pkt.is_key(),
-                // The one payload copy; save windows share it by refcount.
-                data: Arc::from(data),
+                data,
             });
             stats.encoded_frames.fetch_add(1, Relaxed);
         }

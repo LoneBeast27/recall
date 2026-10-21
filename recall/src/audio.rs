@@ -137,6 +137,7 @@ impl TrackRing {
     /// Append captured samples. Muting is applied only to microphone samples
     /// entering the ring, so existing replay history is never changed.
     fn push_capture(&self, data: &[f32], mute_mic: bool) {
+        crate::longrec::tap::tap_audio(self.name, data, mute_mic && self.name == "Mic"); // long-recording hook
         let mut buf = self.samples.lock().expect("ring lock");
         for &s in data {
             let s = if mute_mic && self.name == "Mic" { 0.0 } else { s };
