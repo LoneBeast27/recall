@@ -190,6 +190,8 @@ impl Root {
             Done::Scrub(path, result) => {
                 self.lib.on_scrub(path, result);
             }
+            // Storage-tier results; compile shim until the UI wires them (see worker.rs).
+            Done::VideoCached(..) | Done::Flushed(..) | Done::Storage(..) => {}
         }
     }
 

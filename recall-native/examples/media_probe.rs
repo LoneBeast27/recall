@@ -3,6 +3,9 @@
 mod audio;
 #[path = "../src/backend.rs"]
 mod backend;
+#[path = "../src/services/mod.rs"]
+#[allow(dead_code)]
+mod services;
 #[path = "../../recall/src/edit_model.rs"]
 mod edit_model;
 #[path = "../src/media.rs"]

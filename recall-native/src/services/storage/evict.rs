@@ -1,0 +1,114 @@
+//! Eviction plan for the one cache budget, plus `storage.json` settings.
+//!
+//! User rulings (2026-10-22): one budget for everything (default 2 GiB); video copies take
+//! at most half of it; the lowest-score clips lose their cache first, and for a given clip
+//! the costliest-to-hold / cheapest-to-skip tier goes first (video copy, then editor media,
+//! then hover frames); library thumbnails go only when they alone exceed the budget.
+use std::collections::BTreeMap;
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+
+pub const DEFAULT_CACHE_BUDGET: u64 = 2 << 30;
+
+/// Evictable tiers, in per-clip eviction order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub(super) enum Tier {
+    Video,
+    EditorMedia,
+    Scrub,
+    Thumb,
+}
+
+impl Tier {
+    /// Keep weight: a unit's keep value is `clip score × weight`, evicted lowest first.
+    /// Hover frames are cheap to hold and slow to miss, so they outlast editor media,
+    /// which outlasts video copies.
+    fn keep_weight(self) -> f64 {
+        match self {
+            Tier::Video => 1.0,
+            Tier::EditorMedia => 2.0,
+            Tier::Scrub => 4.0,
+            Tier::Thumb => f64::INFINITY,
+        }
+    }
+}
+
+/// One evictable unit: a video copy, an editor-media folder, one clip's frames, a thumbnail.
+#[derive(Debug, Clone, PartialEq)]
+pub(super) struct Unit {
+    pub tier: Tier,
+    /// Stable key, e.g. `video/<id>.mp4`, `editor/<key>`, `visuals/<id>#editor`, `visuals/<id>#scrub`.
+    pub name: String,
+    pub bytes: u64,
+    /// Unix milliseconds of the last use (tie-break).
+    pub last_used: u64,
+    /// The owning clip's smart-cache score (0 for clips no longer listed).
+    pub score: f64,
+}
+
+/// Units to delete so the video tier plus `incoming_video` fits `video_cap` and everything
+/// (`fixed` never-evicted bytes included) plus `incoming_video` fits `budget`. Thumbnails
+/// are taken only after every other unit; `keep` is never chosen.
+pub(super) fn plan(units: &[Unit], fixed: u64, budget: u64, video_cap: u64, incoming_video: u64, keep: &[String]) -> Vec<String> {
+    let order = |a: &&Unit, b: &&Unit| {
+        let thumbs = (a.tier == Tier::Thumb).cmp(&(b.tier == Tier::Thumb));
+        let value = |u: &Unit| if u.tier == Tier::Thumb { u.score } else { u.score * u.tier.keep_weight() };
+        thumbs
+            .then(value(a).total_cmp(&value(b)))
+            .then(a.tier.cmp(&b.tier))
+            .then(a.last_used.cmp(&b.last_used))
+            .then_with(|| a.name.cmp(&b.name))
+    };
+    let mut candidates: Vec<&Unit> = units.iter().filter(|u| !keep.contains(&u.name)).collect();
+    candidates.sort_by(order);
+    let mut evict = Vec::new();
+    let mut video = units.iter().filter(|u| u.tier == Tier::Video).map(|u| u.bytes).sum::<u64>().saturating_add(incoming_video);
+    let mut total = units.iter().map(|u| u.bytes).sum::<u64>().saturating_add(fixed).saturating_add(incoming_video);
+    // Video cap first: lowest-score copies go until the tier fits.
+    for unit in candidates.iter().filter(|u| u.tier == Tier::Video) {
+        if video <= video_cap {
+            break;
+        }
+        video = video.saturating_sub(unit.bytes);
+        total = total.saturating_sub(unit.bytes);
+        evict.push(unit.name.clone());
+    }
+    for unit in candidates {
+        if total <= budget {
+            break;
+        }
+        if evict.contains(&unit.name) {
+            continue;
+        }
+        total = total.saturating_sub(unit.bytes);
+        evict.push(unit.name.clone());
+    }
+    evict
+}
+
+/// `{ "<key>": value }` index files (`video/lru.json`, `media.json` sections).
+pub(super) fn read_index(path: &Path) -> BTreeMap<String, u64> {
+    std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+}
+
+pub(super) fn write_index(path: &Path, index: &BTreeMap<String, u64>) -> Result<(), String> {
+    let bytes = serde_json::to_vec(index).map_err(|error| error.to_string())?;
+    super::projects::write_atomic(path, &bytes)
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub(super) struct Settings {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_budget_bytes: Option<u64>,
+}
+
+pub(super) fn read_settings(root: &Path) -> Settings {
+    std::fs::read(root.join("storage.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+}
+
+pub(super) fn write_settings(root: &Path, settings: &Settings) -> Result<(), String> {
+    let bytes = serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
+    super::projects::write_atomic(&root.join("storage.json"), &bytes)
+}
