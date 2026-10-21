@@ -1,0 +1,130 @@
+//! Editor persistence and export: save/export results, flushing the edit file beside
+//! the clip, the SSD playback swap, and export settings.
+use super::EditorState;
+use crate::{
+    backend::ExportSummary,
+    edit_model::ExportMode,
+    worker::{Job, Workers},
+};
+
+impl EditorState {
+    pub fn on_saved(&mut self, result: Result<String, String>) {
+        self.saving = false;
+        match result {
+            Ok(_) => {
+                self.saved = self.dirty_since.is_none();
+                self.save_error = None;
+            }
+            Err(error) => self.save_error = Some(error),
+        }
+    }
+
+    pub fn on_exported(&mut self, result: Result<ExportSummary, String>) {
+        self.exporting = false;
+        match result {
+            Ok(summary) => {
+                self.exported = Some(summary);
+                self.export_error = None;
+            }
+            Err(error) => self.export_error = Some(error),
+        }
+    }
+
+    pub fn export(&mut self, workers: &Workers) {
+        if self.exporting {
+            return;
+        }
+        if let Some(info) = self.info.clone() {
+            crate::services::storage::record_interaction(crate::services::storage::Interaction::Exported(info.path.clone()));
+            self.exporting = true;
+            self.exported = None;
+            self.export_error = None;
+            self.flush(workers);
+            workers.job(Job::Export(info, self.plan.clone(), self.fps, self.export_settings.clone()));
+        }
+    }
+
+    /// Writes the edit file beside the clip (HDD) when the open clip changed since the last
+    /// flush. Autosave only touches the SSD working copy; this runs on leave / switch / export / close.
+    pub fn flush(&mut self, workers: &Workers) {
+        if !self.needs_flush {
+            return;
+        }
+        if let Some(info) = self.info.clone() {
+            self.needs_flush = false;
+            workers.job(Job::FlushProject(info, self.plan.clone(), self.fps, self.export_settings.clone()));
+        }
+    }
+
+    /// Synchronous flush for app close (the worker thread may not outlive the window).
+    pub fn flush_now(&mut self) {
+        if !self.needs_flush {
+            return;
+        }
+        if let Some(info) = self.info.as_ref() {
+            self.needs_flush = false;
+            let _ = crate::backend::flush_project(info, &self.plan, self.fps, &self.export_settings);
+        }
+    }
+
+    /// The SSD copy of the open clip is ready: switch playback to it, keeping the position.
+    pub fn on_video_cached(&mut self, clip: &str, copy: &str) {
+        let Some(info) = self.info.clone() else { return };
+        if info.path != clip || self.playback_path.as_deref() == Some(copy) || self.playing {
+            return;
+        }
+        let at = self.position();
+        let tracks = self.preview_tracks(&info);
+        if let Some(preview) = self.preview.as_mut() {
+            if preview.open(copy, &tracks).is_ok() {
+                self.playback_path = Some(copy.to_owned());
+                self.applied_rect = (0, 0, 0, 0);
+                self.pending_seek = Some(at);
+            }
+        }
+    }
+
+    pub fn lossless(&self) -> bool {
+        self.export_settings.mode == ExportMode::Lossless
+    }
+
+    pub fn set_export_mode(&mut self, mode: ExportMode) {
+        if self.export_settings.mode != mode {
+            self.export_settings.mode = mode;
+            self.touch();
+        }
+    }
+
+    pub fn set_max_bytes(&mut self, max_bytes: Option<u64>) {
+        self.export_settings.max_bytes = max_bytes;
+        self.touch();
+    }
+
+    pub fn set_height(&mut self, height: Option<u32>) {
+        self.export_settings.height = height;
+        self.touch();
+    }
+
+    /// Playback speed of the selected segment in the export (0.25–4×).
+    pub fn set_speed(&mut self, speed: f64) {
+        let Some(current) = self.plan.ranges.get(self.selected).map(|r| r.speed) else { return };
+        if (current - speed).abs() > f64::EPSILON {
+            self.revise();
+            self.plan.ranges[self.selected].speed = speed.clamp(0.25, 4.0);
+        }
+    }
+
+    /// Where the selected cut actually starts in a lossless export.
+    pub fn snapped_start(&self, index: usize) -> Option<f64> {
+        let info = self.info.as_ref()?;
+        let range = self.plan.ranges.get(index)?;
+        (!info.keyframes.is_empty()).then(|| info.snap_to_keyframe(range.start))
+    }
+
+    pub fn set_fps(&mut self, fps: u32) {
+        if fps > 0 && fps != self.fps {
+            self.fps = fps;
+            self.touch();
+        }
+    }
+}
