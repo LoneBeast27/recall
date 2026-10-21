@@ -119,8 +119,8 @@ impl Root {
                     .flex()
                     .items_baseline()
                     .gap(px(6.))
-                    .child(div().font_family(theme::MONO).text_size(px(15.)).line_height(px(20.)).child(timecode(edited)))
-                    .child(div().font_family(theme::MONO).text_size(px(12.)).text_color(c(theme::TERTIARY)).child(format!("/ {}", timecode(total)))),
+                    .child(div().font_family(theme::mono()).text_size(px(15.)).line_height(px(20.)).child(timecode(edited)))
+                    .child(div().font_family(theme::mono()).text_size(px(12.)).text_color(c(theme::TERTIARY)).child(format!("/ {}", timecode(total)))),
             )
             .child(
                 div()
@@ -163,7 +163,7 @@ impl Root {
                     .text_size(px(12.))
                     .text_color(c(theme::TERTIARY))
                     .child("Source")
-                    .child(div().font_family(theme::MONO).text_color(c(theme::MUTED)).child(timecode(pos))),
+                    .child(div().font_family(theme::mono()).text_color(c(theme::MUTED)).child(timecode(pos))),
             )
             .into_any_element()
     }
@@ -282,7 +282,7 @@ impl Root {
                                 div()
                                     .w(px(58.))
                                     .text_right()
-                                    .font_family(theme::MONO)
+                                    .font_family(theme::mono())
                                     .text_size(px(12.))
                                     .child(format_db(gain)),
                             ),
@@ -455,7 +455,7 @@ fn detail_row(label: &str, value: String, mono: bool) -> AnyElement {
         .justify_between()
         .gap(px(16.))
         .child(div().text_color(c(theme::TERTIARY)).child(label.to_owned()))
-        .child(div().min_w_0().truncate().when(mono, |d| d.font_family(theme::MONO)).child(value))
+        .child(div().min_w_0().truncate().when(mono, |d| d.font_family(theme::mono())).child(value))
         .into_any_element()
 }
 

@@ -14,7 +14,15 @@ pub fn run() -> Result<(), String> {
             Cow::Borrowed(include_bytes!("../assets/fonts/Outfit-Regular.ttf")),
             Cow::Borrowed(include_bytes!("../assets/fonts/Outfit-Medium.ttf")),
             Cow::Borrowed(include_bytes!("../assets/fonts/Outfit-SemiBold.ttf")),
-            Cow::Borrowed(include_bytes!("../assets/fonts/Lilex-Regular.ttf")),
+            Cow::Borrowed(include_bytes!("../assets/fonts/geist-400.ttf")),
+            Cow::Borrowed(include_bytes!("../assets/fonts/geist-500.ttf")),
+            Cow::Borrowed(include_bytes!("../assets/fonts/geist-600.ttf")),
+            Cow::Borrowed(include_bytes!("../assets/fonts/manrope-400.ttf")),
+            Cow::Borrowed(include_bytes!("../assets/fonts/manrope-500.ttf")),
+            Cow::Borrowed(include_bytes!("../assets/fonts/manrope-600.ttf")),
+            Cow::Borrowed(include_bytes!("../assets/fonts/instrument-sans-400.ttf")),
+            Cow::Borrowed(include_bytes!("../assets/fonts/instrument-sans-500.ttf")),
+            Cow::Borrowed(include_bytes!("../assets/fonts/instrument-sans-600.ttf")),
         ]) {
             eprintln!("load Recall fonts: {error}");
         }

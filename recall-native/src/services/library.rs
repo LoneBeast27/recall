@@ -248,7 +248,15 @@ pub fn format_duration(secs: f64) -> String {
 /// "6.4 MB", "364 MB", "1.87 GB".
 pub fn format_bytes(bytes: u64) -> String {
     let mb = bytes as f64 / 1_000_000.0;
-    if mb >= 1000.0 { format!("{:.2} GB", mb / 1000.0) } else if mb >= 100.0 { format!("{mb:.0} MB") } else { format!("{mb:.1} MB") }
+    if mb >= 1_000_000.0 {
+        format!("{:.2} TB", mb / 1_000_000.0)
+    } else if mb >= 1000.0 {
+        format!("{:.2} GB", mb / 1000.0)
+    } else if mb >= 100.0 {
+        format!("{mb:.0} MB")
+    } else {
+        format!("{mb:.1} MB")
+    }
 }
 
 /// Persistent per-clip metadata at `%APPDATA%\Recall\library.json` (atomic writes).

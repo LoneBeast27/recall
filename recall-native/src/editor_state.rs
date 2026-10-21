@@ -580,15 +580,16 @@ pub const GAIN_MAX: f64 = 12.0;
 
 /// "00:34.50"
 pub fn timecode(seconds: f64) -> String {
-    let s = seconds.max(0.0);
+    // `> 0.0` also folds -0.0 and NaN to zero (they printed as "00:-0.00").
+    let s = if seconds > 0.0 { seconds } else { 0.0 };
     let minutes = (s / 60.0).floor() as u64;
-    let rest = s - minutes as f64 * 60.0;
+    let rest = (s - minutes as f64 * 60.0).max(0.0);
     format!("{minutes:02}:{rest:05.2}")
 }
 
 /// "0:52.30" for ruler tags.
 pub fn short_timecode(seconds: f64) -> String {
-    let s = seconds.max(0.0);
+    let s = if seconds > 0.0 { seconds } else { 0.0 };
     let minutes = (s / 60.0).floor() as u64;
-    format!("{minutes}:{:05.2}", s - minutes as f64 * 60.0)
+    format!("{minutes}:{:05.2}", (s - minutes as f64 * 60.0).max(0.0))
 }
