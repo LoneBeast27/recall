@@ -170,16 +170,12 @@ impl ApplicationHandler for App {
         let export_hook: Option<ExportHook>;
         #[cfg(not(feature = "encode"))]
         let export_hook: Option<ExportHook> = None;
-        self.enc_fps = std::env::var("RECALL_FPS")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(60);
         #[cfg(feature = "encode")]
         {
-            let buffer_secs: u32 = std::env::var("RECALL_BUFFER_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(60);
+            // RECALL_CODEC/_QUALITY/_BITRATE/_FPS/_BUFFER_SECS: encoder/settings.rs.
+            let enc_cfg = encoder::Config::from_env(self.config.json);
+            self.enc_fps = enc_cfg.fps;
+            let buffer_secs = enc_cfg.buffer_secs;
             self.buffer_capacity_secs = buffer_secs;
             let out_dir = std::env::var("RECALL_OUT_DIR")
                 .unwrap_or_else(|_| r"V:\ALL RECORDINGS".to_string());
@@ -191,18 +187,7 @@ impl ApplicationHandler for App {
                     eprintln!("[recall] {msg}");
                 }
             });
-            let handle = encoder::spawn(
-                encoder::Config {
-                    fps: self.enc_fps,
-                    buffer_secs,
-                    bitrate: std::env::var("RECALL_BITRATE")
-                        .ok()
-                        .and_then(|v| v.parse().ok())
-                        .unwrap_or(25_000_000),
-                    json: self.config.json,
-                },
-                tracks,
-            );
+            let handle = encoder::spawn(enc_cfg, tracks);
             let cmds = handle.commands.clone();
             let src = self.source_shared.clone();
             let timeline = shared.clone();
@@ -416,7 +401,7 @@ impl App {
         } else {
             "passthrough"
         };
-        let (buffer_secs, encoder_label, encoder_error) = self.encoder_status();
+        let (buffer_secs, encoder_label, encoder_error, codec) = self.encoder_status();
         protocol::emit(&protocol::Outbound::Status {
             display: if self.last_hdr == Some(true) {
                 "hdr"
@@ -434,17 +419,22 @@ impl App {
             buffer_secs,
             encoder: encoder_label,
             encoder_error,
+            codec,
             recording_mode: "vfr".to_string(),
             mic_muted: { #[cfg(feature="encode")] { audio::mic_muted() } #[cfg(not(feature="encode"))] { false } },
         });
     }
 
+    /// (buffer seconds, encoder label, encoder error, codec).
     #[cfg(feature = "encode")]
-    fn encoder_status(&self) -> (f32, String, Option<String>) {
+    fn encoder_status(&self) -> (f32, String, Option<String>, String) {
         let Some(enc) = &self.encoder else {
-            return (0.0, "off".into(), None);
+            return (0.0, "off".into(), None, "off".into());
         };
+        let codec = enc.stats.codec().label().to_string();
         let label = match enc.stats.backend.load(Relaxed) {
+            // Kept as the "replay ready" token for every codec: the overlay,
+            // native app and hub compare it literally; the codec is `codec`.
             1 => "h264_nvenc",
             3 => "failed",
             _ => "starting",
@@ -462,12 +452,12 @@ impl App {
         } else {
             0
         };
-        (elapsed_us as f32 / 1_000_000.0, label.into(), error)
+        (elapsed_us as f32 / 1_000_000.0, label.into(), error, codec)
     }
 
     #[cfg(not(feature = "encode"))]
-    fn encoder_status(&self) -> (f32, String, Option<String>) {
-        (0.0, "off".into(), None)
+    fn encoder_status(&self) -> (f32, String, Option<String>, String) {
+        (0.0, "off".into(), None, "off".into())
     }
 }
 

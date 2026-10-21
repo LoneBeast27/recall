@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use super::mux::OwnedParams;
+use super::StillSpec;
 use crate::audio::AudioPcm;
 use crate::protocol::Outbound;
 use crate::ring::EncodedPacket;
@@ -36,12 +37,9 @@ pub(crate) enum VideoSrc {
         packets: Vec<EncodedPacket>,
         params: OwnedParams,
     },
-    /// Quiet tail: the saver encodes this frame as a fresh keyframe-only still.
-    Still {
-        frame: RawFrame,
-        fps: u32,
-        bitrate: usize,
-    },
+    /// Quiet tail: the saver encodes this frame as a fresh keyframe-only still
+    /// with the live encoder's codec and quality.
+    Still { frame: RawFrame, spec: StillSpec },
 }
 
 /// Everything one save needs, detached from the live encoder and rings.

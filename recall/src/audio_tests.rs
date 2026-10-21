@@ -30,6 +30,47 @@ fn microphone_mute_silences_only_future_microphone_samples() {
     assert_eq!(game.snapshot(4.0), vec![3.0, 4.0, 7.0, 8.0]);
 }
 
+#[test]
+fn voice_track_ignores_microphone_mute() {
+    let voice = test_ring("Voice");
+    voice.push_capture(&[1.0, 2.0], true);
+    voice.push_capture(&[3.0], false);
+    assert_eq!(voice.snapshot(3.0), vec![1.0, 2.0, 3.0]);
+}
+
+#[test]
+fn every_track_has_an_editor_title_and_only_voice_is_process_only() {
+    use super::{track_title, ProcessSource, TRACKS};
+    let rows: Vec<(&str, &str, ProcessSource)> =
+        TRACKS.iter().map(|t| (t.name, t.title, t.process)).collect();
+    assert_eq!(
+        rows,
+        vec![
+            ("Game", "Game", ProcessSource::GamePid),
+            ("Mic", "Microphone", ProcessSource::None),
+            ("Voice", "Voice chat", ProcessSource::VoiceApp),
+        ]
+    );
+    assert_eq!(track_title("Mic"), "Microphone");
+    assert_eq!(track_title("Voice"), "Voice chat");
+    assert_eq!(track_title("Other"), "Other", "unknown names pass through");
+    // The native editor labels lanes by these substrings (views/editor.rs).
+    for (title, needle) in [("Game", "game"), ("Microphone", "mic"), ("Voice chat", "voice")] {
+        assert!(title.to_lowercase().contains(needle));
+    }
+}
+
+#[test]
+fn pid_values_must_be_positive_integers() {
+    use super::parse_pid;
+    assert_eq!(parse_pid("K", " 77 "), Ok(77));
+    assert_eq!(parse_pid("K", "0").unwrap_err(), "K must be a positive process ID, got 0");
+    assert_eq!(
+        parse_pid("K", "-3").unwrap_err(),
+        "K must be a positive process ID, got \"-3\""
+    );
+}
+
 /// The pre-memcpy implementation, kept verbatim as the reference.
 fn old_snapshot(ring: &TrackRing, secs: f64) -> Vec<f32> {
     let want = (secs * ring.rate as f64) as usize * ring.channels as usize;

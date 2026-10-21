@@ -30,6 +30,8 @@ impl OwnedParams {
 /// the muxer can copy its codec parameters (incl. AudioSpecificConfig).
 pub(crate) struct AacTrack {
     rate: u32,
+    /// Stream `title` + `handler_name` ("Game", "Microphone", "Voice chat").
+    title: &'static str,
     encoder: ff::encoder::Audio,
     /// (pts in 1/rate, packet payload)
     packets: Vec<(i64, Vec<u8>)>,
@@ -44,17 +46,13 @@ pub(crate) fn produce(
     timing: &mut Timing,
 ) -> Result<Muxed, String> {
     let still;
-    let (packets, params) = match &job.video {
-        VideoSrc::Window { packets, params } => (packets.as_slice(), params),
-        VideoSrc::Still {
-            frame,
-            fps,
-            bitrate,
-        } => {
+    let (packets, params, backend) = match &job.video {
+        VideoSrc::Window { packets, params } => (packets.as_slice(), params, job.backend),
+        VideoSrc::Still { frame, spec } => {
             let started = Instant::now();
-            still = super::encode_still(frame, *fps, *bitrate, job.seconds)?;
+            still = super::encode_still(frame, *spec, job.seconds)?;
             timing.still_ms = ms(started.elapsed());
-            (still.0.as_slice(), &still.1)
+            (still.0.as_slice(), &still.1, still.2)
         }
     };
     if packets.is_empty() {
@@ -76,7 +74,7 @@ pub(crate) fn produce(
     }
     timing.aac_ms = ms(started.elapsed());
 
-    let (mux_ms, trailer_ms) = mux_mp4(part, params, job.backend, packets, &tracks, abort)?;
+    let (mux_ms, trailer_ms) = mux_mp4(part, params, backend, packets, &tracks, abort)?;
     timing.mux_ms = mux_ms;
     timing.trailer_ms = trailer_ms;
     Ok(Muxed {
@@ -155,6 +153,7 @@ pub(crate) fn encode_aac(pcm: &AudioPcm, abort: &AtomicBool) -> Result<AacTrack,
 
     Ok(AacTrack {
         rate: pcm.rate,
+        title: crate::audio::track_title(pcm.name),
         encoder: enc,
         packets,
     })
@@ -166,8 +165,34 @@ pub(crate) fn pts_strictly_increase(video: &[EncodedPacket]) -> bool {
     video.windows(2).all(|w| w[0].frame_idx < w[1].frame_idx)
 }
 
+const fn fourcc(tag: &[u8; 4]) -> u32 {
+    u32::from_le_bytes(*tag)
+}
+
+/// MP4 sample-entry tag forced for a video codec. HEVC must be `hvc1`
+/// (parameter sets in the sample entry): FFmpeg's default `hev1` does not
+/// play through Windows Media Foundation. AV1 has only `av01`; H.264 keeps
+/// FFmpeg's `avc1` default.
+pub(crate) fn mp4_video_tag(id: ff::codec::Id) -> Option<u32> {
+    match id {
+        ff::codec::Id::HEVC => Some(fourcc(b"hvc1")),
+        ff::codec::Id::AV1 => Some(fourcc(b"av01")),
+        _ => None,
+    }
+}
+
+/// Stream metadata editors label tracks by: `title` (FFmpeg / the native
+/// editor) and `handler_name` (the MP4 `hdlr` name most NLEs show).
+fn track_metadata(title: &str) -> ff::Dictionary<'static> {
+    let mut meta = ff::Dictionary::new();
+    meta.set("title", title);
+    meta.set("handler_name", title);
+    meta
+}
+
 /// Mux a rebased video window (stream copy, 1/1_000_000) plus one AAC stream
 /// per track into `path` as MP4. Returns (header+packets ms, trailer ms).
+/// Codec-agnostic: the codec comes from `params` (H.264, HEVC or AV1).
 pub(crate) fn mux_mp4(
     path: &Path,
     params: &OwnedParams,
@@ -188,12 +213,18 @@ pub(crate) fn mux_mp4(
     let mut ost = octx.add_stream(vcodec).map_err(|e| e.to_string())?;
     ost.set_parameters(params.0.clone());
     ost.set_time_base(ff::Rational(1, 1_000_000));
+    if let Some(tag) = mp4_video_tag(params.0.id()) {
+        // SAFETY: `ost` is a live stream of `octx`; avformat_new_stream
+        // allocated its codecpar, which set_parameters just filled.
+        unsafe { (*(*ost.as_mut_ptr()).codecpar).codec_tag = tag };
+    }
     for t in tracks {
         let mut ast = octx
             .add_stream(ff::encoder::find(ff::codec::Id::AAC))
             .map_err(|e| e.to_string())?;
         ast.set_parameters(&t.encoder);
         ast.set_time_base(ff::Rational(1, t.rate as i32));
+        ast.set_metadata(track_metadata(t.title));
     }
     octx.write_header()
         .map_err(|e| format!("write_header: {e}"))?;
