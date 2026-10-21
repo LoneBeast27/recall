@@ -49,6 +49,7 @@ impl State {
         match (namespace, kind) {
             ("session", "status") => self.merge_session(event),
             ("session", "config") => self.snapshot.config = Some(config_of(event)),
+            ("session", "storage_cleaned") => self.push(DaemonEvent::StorageCleaned { removed: u64_of(event, "removed"), freed_bytes: u64_of(event, "freed_bytes") }),
             ("engine", "status") => self.engine_status(event),
             ("engine", "hello") => self.snapshot.engine = Some(EngineStatus { encoder: "starting".into(), ..EngineStatus::default() }),
             ("hdr", "status") => self.hdr_status(event),
@@ -91,6 +92,12 @@ impl State {
             "export_started" => DaemonEvent::ExportStarted { source: source(), path: path(), fps: fps() },
             "exported" => DaemonEvent::Exported { source: source(), path: path(), fps: fps(), frames: u64_of(event, "frames"), seconds: f64_of(event, "seconds") },
             "export_failed" => DaemonEvent::ExportFailed { source: source(), reason: string_of(event, "reason").unwrap_or_else(|| "Export failed.".into()) },
+            "bookmarked" => DaemonEvent::Bookmarked,
+            "screenshot" => DaemonEvent::Screenshot { path: path() },
+            "screenshot_failed" => DaemonEvent::ScreenshotFailed { reason: string_of(event, "reason").unwrap_or_else(|| "Screenshot failed.".into()) },
+            "recording_started" => DaemonEvent::RecordingStarted,
+            "recording_stopped" => DaemonEvent::RecordingStopped { path: path(), seconds: f64_of(event, "seconds") },
+            "recording_failed" => DaemonEvent::RecordingFailed { reason: string_of(event, "reason").unwrap_or_else(|| "Recording failed.".into()) },
             // encoder_log and unknown engine lines carry nothing the UI shows.
             _ => return,
         };
@@ -219,6 +226,9 @@ pub(super) fn command_line(command: &DaemonCommand) -> String {
         DaemonCommand::ToggleMicMute => json!({"cmd": "toggle_mic_mute"}),
         DaemonCommand::Pause => json!({"cmd": "pause"}),
         DaemonCommand::Resume => json!({"cmd": "resume"}),
+        DaemonCommand::Bookmark => json!({"cmd": "bookmark"}),
+        DaemonCommand::Screenshot => json!({"cmd": "screenshot"}),
+        DaemonCommand::RecordToggle => json!({"cmd": "record_toggle"}),
         DaemonCommand::ToggleHdr => json!({"cmd": "toggle_hdr"}),
         DaemonCommand::SetMode(mode) => json!({"cmd": "set_mode", "value": mode}),
         DaemonCommand::SetAcProfile(variant) => json!({"cmd": "set_ac_profile", "variant": variant}),

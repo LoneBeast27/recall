@@ -102,6 +102,32 @@ fn legacy_hdr_status_maps_into_session() {
 }
 
 #[test]
+fn hotkey_and_recording_events_and_session_fields() {
+    let mut state = connected();
+    apply(&mut state, json!({"mod":"engine","event":{"type":"bookmarked","at_secs":12.5}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"screenshot","path":"V:/shots/a.png"}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_started","path":"V:/rec.mp4"}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_stopped","path":"V:/rec.mp4","seconds":61.0,"bytes":9}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"storage_cleaned","removed":3,"freed_bytes":1000}}));
+    assert_eq!(
+        state.events,
+        vec![
+            DaemonEvent::Bookmarked,
+            DaemonEvent::Screenshot { path: "V:/shots/a.png".into() },
+            DaemonEvent::RecordingStarted,
+            DaemonEvent::RecordingStopped { path: "V:/rec.mp4".into(), seconds: 61.0 },
+            DaemonEvent::StorageCleaned { removed: 3, freed_bytes: 1000 },
+        ]
+    );
+    apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"recording","paused":false,"advanced_enabled":true,
+        "leader_label":"Alt `","chord_save_seconds":30,"long_recording":{"active":true,"path":"V:/rec.mp4","started_secs":1792621900.0}}}));
+    let session = state.snapshot.session.clone().unwrap();
+    assert!(session.advanced_enabled && session.long_recording.active);
+    assert_eq!(session.leader_label, "Alt `");
+    assert_eq!(session.chord_save_seconds, 30);
+}
+
+#[test]
 fn engine_one_shot_events_queue_in_order() {
     let mut state = connected();
     apply(&mut state, json!({"mod":"engine","event":{"type":"saved","path":"V:\\clip.mp4","seconds":119.5,"frames":7000,"bytes":123456,"elapsed_ms":850}}));
@@ -173,6 +199,9 @@ fn commands_serialize_to_controller_json() {
         (DaemonCommand::SaveClip { seconds: Some(30) }, json!({"cmd":"save_clip","seconds":30})),
         (DaemonCommand::SetMicMute(true), json!({"cmd":"set_mic_mute","muted":true})),
         (DaemonCommand::ToggleMicMute, json!({"cmd":"toggle_mic_mute"})),
+        (DaemonCommand::Bookmark, json!({"cmd":"bookmark"})),
+        (DaemonCommand::Screenshot, json!({"cmd":"screenshot"})),
+        (DaemonCommand::RecordToggle, json!({"cmd":"record_toggle"})),
         (DaemonCommand::Pause, json!({"cmd":"pause"})),
         (DaemonCommand::Resume, json!({"cmd":"resume"})),
         (DaemonCommand::ToggleHdr, json!({"cmd":"toggle_hdr"})),

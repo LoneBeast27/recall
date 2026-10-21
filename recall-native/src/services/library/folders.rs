@@ -29,8 +29,8 @@ pub struct FoundClip {
     pub path: PathBuf,
     pub bytes: u64,
     pub mtime: u64,
-    /// Name of the folder holding the clip when it sits in a subfolder of an imported
-    /// folder (ShadowPlay / Medal keep one folder per game).
+    /// Name of the folder holding the clip: the game for ShadowPlay / Medal (one folder per
+    /// game), else the imported folder's own name ("Old Valorant clips").
     pub folder: Option<String>,
 }
 
@@ -118,7 +118,7 @@ pub fn scan_imported(root: &Path, skip: &[PathBuf]) -> Vec<FoundClip> {
                 continue;
             }
             let mtime = meta.modified().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs());
-            let folder = (depth > 0).then(|| dir.file_name().map(|n| n.to_string_lossy().into_owned())).flatten();
+            let folder = dir.file_name().map(|n| n.to_string_lossy().into_owned());
             found.push(FoundClip { path, bytes: meta.len(), mtime, folder });
             if found.len() >= MAX_FILES {
                 return found;
@@ -194,7 +194,7 @@ mod tests {
         let found = scan_imported(&dir, &[]);
         assert_eq!(found.len(), 2);
         let by_name = |name: &str| found.iter().find(|f| f.path.file_name().is_some_and(|n| n == name)).unwrap();
-        assert_eq!(by_name("loose.mp4").folder, None);
+        assert_eq!(by_name("loose.mp4").folder.as_deref(), dir.file_name().and_then(|n| n.to_str()));
         assert_eq!(by_name("goal.MKV").folder.as_deref(), Some("Rocket League"));
         assert_eq!(by_name("goal.MKV").bytes, 2);
         let _ = std::fs::remove_dir_all(&dir);

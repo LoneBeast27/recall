@@ -52,7 +52,7 @@ impl Root {
             SettingsTab::General => self.settings_general(cx),
             SettingsTab::Clip => self.settings_clip(cx),
             SettingsTab::Media => self.settings_media(cx),
-            SettingsTab::Shortcuts => self.settings_shortcuts(),
+            SettingsTab::Shortcuts => self.settings_shortcuts(cx),
         });
         self.page_shell_tabs("Settings", "", Some(tabs.into_any_element()), body)
     }
@@ -123,16 +123,20 @@ impl Root {
                 .into_any_element(),
             setting_row("Replay length", "How much a save keeps. Longer uses more memory.").child(lengths).into_any_element(),
         ]
+        .into_iter()
+        .chain(self.render_video_section(cx))
+        .collect()
     }
 
     fn settings_media(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut items = self.render_folder_section(cx);
+        items.extend(self.render_storage_limit(cx));
         items.push(section_title("SSD cache"));
         items.extend(self.render_storage_section(cx));
         items
     }
 
-    fn settings_shortcuts(&self) -> Vec<AnyElement> {
+    fn settings_shortcuts(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let session = self.snap.session.clone().unwrap_or_default();
         let group = |title: &str, rows: Vec<(&str, String)>| -> AnyElement {
             div()
@@ -155,13 +159,52 @@ impl Root {
         };
         let save = if session.save_hotkey.is_empty() { "Alt+N".to_owned() } else { session.save_hotkey.clone() };
         let mic = if session.mic_hotkey.is_empty() { "Alt+M".to_owned() } else { session.mic_hotkey.clone() };
+        let mut direct = vec![("Save replay", save), ("Mute microphone in clips", mic)];
+        for (label, keys) in [("Bookmark", &session.bookmark_hotkey), ("Screenshot", &session.screenshot_hotkey), ("Start or stop a recording", &session.record_hotkey)] {
+            if !keys.is_empty() {
+                direct.push((label, keys.clone()));
+            }
+        }
+        let advanced = self.config_value("hotkeys", "advanced_enabled").and_then(Value::as_bool).unwrap_or(session.advanced_enabled);
+        let leader = if session.leader_label.is_empty() { "Alt `".to_owned() } else { session.leader_label.clone() };
+        let chord_detail = format!("Press {leader} (the key left of 1), then a number. The game never sees the number.");
+        let chord_secs = self.config_value("hotkeys", "save_seconds").and_then(Value::as_u64).unwrap_or(if session.chord_save_seconds > 0 { session.chord_save_seconds as u64 } else { 30 });
+        let save_label = format!("Save the last {}", short_length(chord_secs));
         vec![
             div()
                 .text_size(px(12.))
                 .text_color(c(theme::TERTIARY))
                 .child("These work in every game, even when Recall is closed.")
                 .into_any_element(),
-            group("While you play", vec![("Save replay", save), ("Mute microphone in clips", mic)]),
+            group("While you play", direct),
+            section_title("Two-step shortcuts"),
+            setting_row("Use two-step shortcuts", &chord_detail)
+                .child(ui::switch("advanced-shortcuts", advanced).on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_config("hotkeys", "advanced_enabled", json!(!advanced));
+                    cx.notify();
+                })))
+                .into_any_element(),
+            div()
+                .when(!advanced, |d| d.opacity(0.4))
+                .child(group(
+                    "Then press",
+                    vec![
+                        ("Bookmark this moment", "1".to_owned()),
+                        (save_label.as_str(), "2".to_owned()),
+                        ("Screenshot", "3".to_owned()),
+                        ("Start or stop a recording", "4".to_owned()),
+                    ],
+                ))
+                .into_any_element(),
         ]
+    }
+}
+
+/// "30 s", "2 min", "1:30".
+fn short_length(secs: u64) -> String {
+    match secs {
+        s if s < 60 => format!("{s} s"),
+        s if s % 60 == 0 => format!("{} min", s / 60),
+        s => format!("{}:{:02}", s / 60, s % 60),
     }
 }

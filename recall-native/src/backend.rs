@@ -20,7 +20,7 @@ mod visual_assets;
 #[derive(Clone, Debug, Serialize)]
 pub struct ClipEntry {
     pub name:String, pub path:String, pub bytes:u64, pub mtime:u64, pub thumb:Option<String>,
-    /// Folder holding an imported clip that sits in a per-game subfolder (ShadowPlay, Medal).
+    /// Folder holding an imported clip: names the game when the file name does not.
     pub folder:Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]

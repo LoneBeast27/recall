@@ -126,9 +126,8 @@ impl LibraryState {
         self.entries = entries;
         self.loading = false;
         self.today = library::today();
-        if let Some(first) = self.entries.first() {
-            self.drive = Path::new(&first.path).parent().and_then(library::drive_space);
-        }
+        // The meter shows the recordings drive, not whichever drive the newest import is on.
+        self.drive = library::drive_space(&crate::backend::library_dir());
         self.rebuild_records();
     }
 
