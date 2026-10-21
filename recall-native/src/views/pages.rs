@@ -13,52 +13,28 @@ use crate::{
 };
 
 impl Root {
-    fn page_shell(&self, title: &str, subtitle: &str, back: bool, body: Vec<AnyElement>, cx: &mut Context<Self>) -> AnyElement {
+    /// Page content inside the shell panel: a header aligned with the library header,
+    /// then a scrolling, left-aligned column.
+    fn page_shell(&self, title: &str, subtitle: &str, body: Vec<AnyElement>) -> AnyElement {
         div()
-            .flex_1()
-            .min_w_0()
+            .size_full()
             .flex()
-            .px(px(8.))
-            .pb(px(8.))
+            .flex_col()
             .child(
-                ui::panel().flex_1().min_w_0().flex().flex_col().child(
-                    div()
-                        .id("page-scroll")
-                        .flex_1()
-                        .min_h_0()
-                        .overflow_y_scroll()
-                        .flex()
-                        .justify_center()
-                        .child(
-                            div()
-                                .w_full()
-                                .max_w(px(760.))
-                                .px(px(24.))
-                                .py(px(24.))
-                                .flex()
-                                .flex_col()
-                                .gap(px(20.))
-                                .child(
-                                    div()
-                                        .flex()
-                                        .items_center()
-                                        .gap(px(10.))
-                                        .when(back, |d| {
-                                            d.child(ui::icon_button("page-back", Icon::ChevronLeft, 30., theme::MUTED, false).on_click(cx.listener(|this, _, _, cx| {
-                                                this.go(Route::Library);
-                                                cx.notify();
-                                            })))
-                                        })
-                                        .child(
-                                            div()
-                                                .flex()
-                                                .flex_col()
-                                                .child(div().text_size(px(20.)).line_height(px(28.)).font_weight(FontWeight::SEMIBOLD).child(title.to_owned()))
-                                                .child(div().text_color(c(theme::TERTIARY)).child(subtitle.to_owned())),
-                                        ),
-                                )
-                                .children(body),
-                        ),
+                div()
+                    .flex_none()
+                    .flex()
+                    .items_baseline()
+                    .gap(px(12.))
+                    .px(px(24.))
+                    .pt(px(20.))
+                    .pb(px(16.))
+                    .child(div().text_size(px(20.)).line_height(px(28.)).font_weight(FontWeight::SEMIBOLD).child(title.to_owned()))
+                    .child(div().text_size(px(14.)).text_color(c(theme::TERTIARY)).child(subtitle.to_owned())),
+            )
+            .child(
+                div().id("page-scroll").flex_1().min_h_0().overflow_y_scroll().child(
+                    div().max_w(px(760.)).px(px(24.)).pb(px(24.)).flex().flex_col().gap(px(20.)).children(body),
                 ),
             )
             .into_any_element()
@@ -133,14 +109,16 @@ impl Root {
                         .flex_1()
                         .flex()
                         .flex_col()
-                        .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(if !hdr.available {
+                        .child(div().text_size(px(16.)).font_weight(FontWeight::SEMIBOLD).child(if !self.snap.connected {
+                            "HDR status unavailable".to_owned()
+                        } else if !hdr.available {
                             "Display not found".to_owned()
                         } else if hdr.hdr_on {
                             format!("HDR is on · {display}")
                         } else {
                             format!("HDR is off · {display}")
                         }))
-                        .child(div().text_color(c(theme::TERTIARY)).child(if hdr.available { owner } else { "Recall manages HDR on the PG27AQDP. Connect it to use these controls.".into() })),
+                        .child(div().text_color(c(theme::TERTIARY)).child(if !self.snap.connected { "Start the recorder to read and switch HDR.".to_owned() } else if hdr.available { owner } else { "Recall manages HDR on the PG27AQDP. Connect it to use these controls.".into() })),
                 )
                 .child(ui::button("toggle-hdr", Variant::Secondary).when(!hdr.available, |b| b.opacity(0.4)).child("Toggle HDR now").on_click(cx.listener(|this, _, _, cx| {
                     this.send(DaemonCommand::ToggleHdr);
@@ -174,18 +152,19 @@ impl Root {
             })));
         }
         body.push(setting_row("Desktop colour in HDR", "Gamma for SDR apps while HDR is on. Applies the next time HDR turns on.").child(profile_track).into_any_element());
-        self.page_shell("Display & HDR", "HDR switching for the PG27AQDP", true, body, cx)
+        self.page_shell("Display & HDR", "HDR switching for the PG27AQDP", body)
     }
 
     // ---- Audio ------------------------------------------------------------
 
     pub fn render_audio(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let readings = self.meters.as_ref().map(|m| m.snapshot()).unwrap_or_default();
-        let strips = readings.into_iter().map(|r| {
+        let shown = self.meter_ballistics(&readings);
+        let strips = readings.into_iter().zip(shown).map(|(r, (rms_db, hold_db))| {
             let live = r.state == MeterState::Live;
-            let rms = bar_fraction(r.rms_db);
-            let peak = bar_fraction(r.peak_db);
-            let clipping = live && r.peak_db > -1.0;
+            let rms = bar_fraction(rms_db);
+            let peak = bar_fraction(hold_db);
+            let clipping = live && hold_db > -1.0;
             div()
                 .flex_1()
                 .flex()
@@ -219,7 +198,7 @@ impl Root {
         let mut body = vec![
             card()
                 .gap(px(16.))
-                .child(ui::heading("RØDECaster levels", "Live, about 10 updates a second"))
+                .child(ui::heading("RØDECaster levels", "Live"))
                 .child(div().flex().gap(px(8.)).children(strips))
                 .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child("Monitoring only. Clips record the Game and Microphone tracks."))
                 .into_any_element(),
@@ -273,7 +252,7 @@ impl Root {
                 )
                 .into_any_element(),
         );
-        self.page_shell("Audio", "RØDECaster meters and MIDI", true, body, cx)
+        self.page_shell("Audio", "RØDECaster meters and MIDI", body)
     }
 
     // ---- Settings ---------------------------------------------------------
@@ -374,7 +353,7 @@ impl Root {
                 })))
                 .into_any_element(),
         );
-        self.page_shell("Settings", "Recording, overlay and startup", true, body, cx)
+        self.page_shell("Settings", "Recording, overlay and startup", body)
     }
 }
 
@@ -413,4 +392,37 @@ fn hotkey_line(label: &str, value: &str, fallback: &str) -> AnyElement {
         .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(label.to_owned()))
         .child(ui::kbd(keys.replace('+', " ")))
         .into_any_element()
+}
+
+impl Root {
+    /// Meter ballistics per frame: fast rise (~30 ms), 26 dB/s fall, 0.8 s peak hold
+    /// then 18 dB/s fall. Returns (displayed RMS dB, displayed peak dB) per meter.
+    fn meter_ballistics(&mut self, readings: &[crate::services::meters::MeterReading]) -> Vec<(f32, f32)> {
+        let now = std::time::Instant::now();
+        let dt = now.duration_since(self.frame_at).as_secs_f32().min(0.1);
+        self.frame_at = now;
+        if self.meter_display.len() != readings.len() {
+            self.meter_display = readings.iter().map(|_| (-90.0, -90.0, now)).collect();
+        }
+        readings
+            .iter()
+            .zip(self.meter_display.iter_mut())
+            .map(|(r, (rms, hold, at))| {
+                let target = if r.state == MeterState::Live { r.rms_db.max(-90.0) } else { -90.0 };
+                if target > *rms {
+                    *rms += (target - *rms) * (dt / 0.03).min(1.0);
+                } else {
+                    *rms = (*rms - 26.0 * dt).max(target);
+                }
+                let peak = if r.state == MeterState::Live { r.peak_db.max(-90.0) } else { -90.0 };
+                if peak >= *hold {
+                    *hold = peak;
+                    *at = now;
+                } else if now.duration_since(*at).as_secs_f32() > 0.8 {
+                    *hold = (*hold - 18.0 * dt).max(*rms).max(-90.0);
+                }
+                (*rms, *hold)
+            })
+            .collect()
+    }
 }

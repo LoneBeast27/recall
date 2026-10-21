@@ -73,6 +73,9 @@ pub struct Root {
     pub toast: Option<Toast>,
     pub sort_open: bool,
     pub corner_open: bool,
+    /// Displayed meter levels with ballistics: (rms dB, peak-hold dB, peak time).
+    pub meter_display: Vec<(f32, f32, Instant)>,
+    pub frame_at: Instant,
 }
 
 impl Root {
@@ -100,9 +103,18 @@ impl Root {
             toast: None,
             sort_open: false,
             corner_open: false,
+            meter_display: Vec::new(),
+            frame_at: Instant::now(),
         };
         if let Some(path) = std::env::var_os("RECALL_NATIVE_CLIP") {
             root.open_clip(path.to_string_lossy().into_owned());
+        }
+        // Layout checks: RECALL_NATIVE_ROUTE=hdr|audio|settings opens that page.
+        match std::env::var("RECALL_NATIVE_ROUTE").as_deref() {
+            Ok("hdr") => root.go(Route::Hdr),
+            Ok("audio") => root.go(Route::Audio),
+            Ok("settings") => root.go(Route::Settings),
+            _ => {}
         }
         window.focus(&root.focus);
         root
@@ -145,9 +157,6 @@ impl Root {
             self.lib.queue_visible(&self.workers);
         }
         self.lib.flush_meta_if_due();
-        if self.route == Route::Audio {
-            changed = true; // meters animate at the poll rate
-        }
         if self.toast.as_ref().is_some_and(|t| Instant::now() >= t.until) {
             self.toast = None;
             changed = true;
@@ -378,12 +387,13 @@ impl Root {
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Meters and playback animate at the display refresh rate, not the 30 ms poll.
+        if self.route == Route::Audio || (self.route == Route::Editor && self.ed.playing) {
+            window.request_animation_frame();
+        }
         let body = match self.route {
-            Route::Library => self.render_library_page(window, cx),
             Route::Editor => self.render_editor(window, cx),
-            Route::Hdr => self.render_hdr(window, cx),
-            Route::Audio => self.render_audio(window, cx),
-            Route::Settings => self.render_settings(window, cx),
+            _ => self.render_shell(window, cx),
         };
         let hole = self.ed.hole.clone();
         let backdrop = canvas(
