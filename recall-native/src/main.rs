@@ -5,6 +5,7 @@ mod backend;
 mod edit_model;
 mod icons;
 mod media;
+mod services;
 mod theme;
 fn main() {
     if let Ok(mask) = std::env::var("RECALL_CPU_MASK") {
