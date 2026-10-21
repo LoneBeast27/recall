@@ -1,0 +1,439 @@
+//! The single top-level view: routes between Library, Editor, HDR, Audio and Settings,
+//! owns services and workers, and runs the 30 ms poll loop.
+use std::time::{Duration, Instant};
+
+use gpui::{
+    Bounds, Context, Entity, FocusHandle, KeyDownEvent, Render, Timer, Window, canvas, div, fill, point,
+    prelude::*, px, size,
+};
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+use crate::{
+    editor_state::EditorState,
+    library_state::LibraryState,
+    media::NativePreview,
+    services::{
+        daemon::{DaemonClient, DaemonCommand, DaemonEvent, DaemonSnapshot},
+        meters::Meters,
+        midi::Midi,
+    },
+    theme::{self, c},
+    ui::{FieldEvent, TextField},
+    worker::{Done, Job, Workers},
+};
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Route {
+    Library,
+    Editor,
+    Hdr,
+    Audio,
+    Settings,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ToastKind {
+    Good,
+    Info,
+    Bad,
+}
+
+pub struct Toast {
+    pub text: String,
+    pub detail: Option<String>,
+    pub kind: ToastKind,
+    pub until: Instant,
+}
+
+/// Which text field currently receives keys.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Field {
+    Search,
+    Rename,
+    Fps,
+}
+
+pub struct Root {
+    pub route: Route,
+    pub focus: FocusHandle,
+    pub workers: Workers,
+    pub daemon: DaemonClient,
+    daemon_rev: u64,
+    pub snap: DaemonSnapshot,
+    pub lib: LibraryState,
+    pub ed: EditorState,
+    pub search: TextField,
+    pub rename: TextField,
+    pub fps_field: TextField,
+    pub fps_custom: bool,
+    pub meters: Option<Meters>,
+    pub midi: Option<Midi>,
+    pub midi_result: Option<Result<String, String>>,
+    pub ac_profile: Option<String>,
+    pub toast: Option<Toast>,
+    pub sort_open: bool,
+    pub corner_open: bool,
+}
+
+impl Root {
+    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let preview = parent_hwnd(window).and_then(NativePreview::new);
+        let workers = Workers::spawn();
+        workers.job(Job::List);
+        let mut root = Self {
+            route: Route::Library,
+            focus: cx.focus_handle(),
+            workers,
+            daemon: DaemonClient::spawn(),
+            daemon_rev: u64::MAX,
+            snap: DaemonSnapshot::default(),
+            lib: LibraryState::new(),
+            ed: EditorState::new(preview),
+            search: TextField::new(cx, "Search clips", 80),
+            rename: TextField::new(cx, "Clip title", 80),
+            fps_field: TextField::new(cx, "fps", 7),
+            fps_custom: false,
+            meters: None,
+            midi: None,
+            midi_result: None,
+            ac_profile: None,
+            toast: None,
+            sort_open: false,
+            corner_open: false,
+        };
+        if let Some(path) = std::env::var_os("RECALL_NATIVE_CLIP") {
+            root.open_clip(path.to_string_lossy().into_owned());
+        }
+        window.focus(&root.focus);
+        root
+    }
+
+    pub fn start_polling(entity: Entity<Self>, window: &mut Window, cx: &mut gpui::App) {
+        window
+            .spawn(cx, async move |cx| {
+                loop {
+                    Timer::after(Duration::from_millis(30)).await;
+                    if entity.update(cx, |this, cx| this.poll(cx)).is_err() {
+                        break;
+                    }
+                }
+            })
+            .detach();
+    }
+
+    fn poll(&mut self, cx: &mut Context<Self>) {
+        let mut changed = false;
+        while let Ok(done) = self.workers.done.try_recv() {
+            changed = true;
+            self.on_done(done);
+        }
+        if self.daemon.revision() != self.daemon_rev {
+            self.daemon_rev = self.daemon.revision();
+            self.snap = self.daemon.snapshot();
+            for event in self.daemon.drain_events() {
+                self.on_daemon_event(event);
+            }
+            changed = true;
+        }
+        changed |= self.ed.tick(self.route == Route::Editor, &self.workers);
+        if let Some(error) = self.ed.last_error.take() {
+            self.show_toast(ToastKind::Bad, "Preview", Some(error));
+            changed = true;
+        }
+        changed |= self.lib.fit_columns();
+        if self.route == Route::Library {
+            self.lib.queue_visible(&self.workers);
+        }
+        self.lib.flush_meta_if_due();
+        if self.route == Route::Audio {
+            changed = true; // meters animate at the poll rate
+        }
+        if self.toast.as_ref().is_some_and(|t| Instant::now() >= t.until) {
+            self.toast = None;
+            changed = true;
+        }
+        if changed {
+            cx.notify();
+        }
+    }
+
+    fn on_done(&mut self, done: Done) {
+        match done {
+            Done::Clips(Ok(entries)) => self.lib.set_entries(entries),
+            Done::Clips(Err(error)) => {
+                self.lib.loading = false;
+                self.lib.error = Some(error);
+            }
+            Done::Prepared(generation, result) => self.ed.apply_prepared(generation, result),
+            Done::Saved(result) => self.ed.on_saved(result),
+            Done::Exported(result) => {
+                if let Err(error) = &result {
+                    self.show_toast(ToastKind::Bad, "Export failed", Some(error.clone()));
+                } else {
+                    self.show_toast(ToastKind::Good, "Export finished", None);
+                }
+                self.ed.on_exported(result);
+            }
+            Done::Deleted(Ok(count)) => {
+                let paths = self.lib.selected_paths();
+                self.lib.forget(&paths);
+                let noun = if count == 1 { "clip" } else { "clips" };
+                self.show_toast(ToastKind::Info, format!("Moved {count} {noun} to the Recycle Bin"), None);
+            }
+            Done::Deleted(Err(error)) => self.show_toast(ToastKind::Bad, "Delete failed", Some(error)),
+            Done::Thumb(path, result) => {
+                self.lib.on_thumb(path, result);
+            }
+            Done::Duration(path, secs) => {
+                self.lib.on_duration(path, secs);
+            }
+            Done::Scrub(path, result) => {
+                self.lib.on_scrub(path, result);
+            }
+        }
+    }
+
+    fn on_daemon_event(&mut self, event: DaemonEvent) {
+        match event {
+            DaemonEvent::Saved { path, seconds, .. } => {
+                let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned());
+                let game = name.as_deref().and_then(|n| n.split("__").next()).map(|g| crate::services::library::normalize_game(g).1);
+                self.show_toast(
+                    ToastKind::Good,
+                    format!("Clip saved · {}", crate::services::library::format_duration(seconds as f64)),
+                    game,
+                );
+                self.workers.job(Job::List);
+            }
+            DaemonEvent::SaveFailed { reason } => self.show_toast(ToastKind::Bad, "Save failed", Some(reason)),
+            DaemonEvent::ExportFailed { reason, .. } => self.show_toast(ToastKind::Bad, "Export failed", Some(reason)),
+            DaemonEvent::AcProfile { ok, profile, error } => {
+                if ok {
+                    self.ac_profile = profile;
+                    self.show_toast(ToastKind::Good, "Colour profile set", Some("Applies the next time HDR turns on".into()));
+                } else {
+                    self.show_toast(ToastKind::Bad, "Colour profile failed", error);
+                }
+            }
+            DaemonEvent::Error(message) => self.show_toast(ToastKind::Bad, "Recorder", Some(message)),
+            DaemonEvent::MicMuted(_) | DaemonEvent::ExportStarted { .. } | DaemonEvent::Exported { .. } => {}
+        }
+    }
+
+    pub fn show_toast(&mut self, kind: ToastKind, text: impl Into<String>, detail: Option<String>) {
+        let secs = if kind == ToastKind::Bad { 6 } else { 3 };
+        self.toast = Some(Toast { text: text.into(), detail, kind, until: Instant::now() + Duration::from_secs(secs) });
+    }
+
+    pub fn send(&mut self, command: DaemonCommand) {
+        if !self.daemon.send(command) {
+            self.show_toast(ToastKind::Bad, "Recorder is off", Some("Start it from the status pill".into()));
+        }
+    }
+
+    pub fn go(&mut self, route: Route) {
+        if self.route == Route::Editor && route != Route::Editor {
+            self.ed.pause();
+            self.ed.hide_preview();
+        }
+        if route == Route::Audio {
+            self.meters.get_or_insert_with(Meters::spawn);
+            self.midi.get_or_insert_with(Midi::spawn);
+        }
+        if route == Route::Settings || route == Route::Hdr {
+            self.daemon.send(DaemonCommand::GetConfig);
+            self.daemon.send(DaemonCommand::Status);
+        }
+        self.sort_open = false;
+        self.corner_open = false;
+        self.route = route;
+    }
+
+    pub fn open_clip(&mut self, path: String) {
+        if !self.ed.is_open(&path) {
+            self.ed.open(path, &self.workers);
+        }
+        self.fps_custom = !crate::editor_state::FPS_PRESETS.contains(&self.ed.fps);
+        self.go(Route::Editor);
+    }
+
+    // ---- keyboard ---------------------------------------------------------
+
+    pub fn focused_field(&self, window: &Window) -> Option<Field> {
+        if self.search.is_focused(window) {
+            Some(Field::Search)
+        } else if self.rename.is_focused(window) {
+            Some(Field::Rename)
+        } else if self.fps_field.is_focused(window) {
+            Some(Field::Fps)
+        } else {
+            None
+        }
+    }
+
+    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
+        if let Some(field) = self.focused_field(window) {
+            self.field_key(field, event, clipboard, window);
+            cx.notify();
+            return;
+        }
+        let k = &event.keystroke;
+        let ctrl = k.modifiers.control;
+        let shift = k.modifiers.shift;
+        let key = k.key.as_str();
+        match self.route {
+            Route::Editor => match key {
+                "space" => self.ed.toggle_play(),
+                "i" => self.ed.set_in(),
+                "o" => self.ed.set_out(),
+                "c" | "s" if !ctrl => self.ed.split(),
+                "delete" | "backspace" => self.ed.delete_selected(),
+                "z" if ctrl && shift => self.ed.redo(),
+                "z" if ctrl => self.ed.undo(),
+                "y" if ctrl => self.ed.redo(),
+                "left" => self.ed.nudge(if shift { -1.0 } else { -1.0 / 60.0 }),
+                "right" => self.ed.nudge(if shift { 1.0 } else { 1.0 / 60.0 }),
+                "j" => self.ed.nudge(-5.0),
+                "l" => self.ed.nudge(5.0),
+                "k" => self.ed.pause(),
+                "home" => self.ed.seek(self.ed.plan.ranges.first().map_or(0.0, |r| r.start)),
+                "end" => self.ed.seek(self.ed.plan.ranges.last().map_or(0.0, |r| r.end)),
+                "escape" => self.go(Route::Library),
+                _ => return,
+            },
+            Route::Library => match key {
+                "k" if ctrl => window.focus(&self.search.focus),
+                "/" => window.focus(&self.search.focus),
+                "f" if ctrl => window.focus(&self.search.focus),
+                "escape" => self.lib.clear_selection(),
+                "delete" if !self.lib.selection.is_empty() => self.lib.confirm_delete = true,
+                "a" if ctrl => {
+                    self.lib.selection = self.lib.groups.iter().flat_map(|g| g.items.iter()).map(|i| self.lib.records[*i].path.clone()).collect();
+                }
+                _ => return,
+            },
+            _ => match key {
+                "escape" => self.go(Route::Library),
+                _ => return,
+            },
+        }
+        cx.notify();
+    }
+
+    fn field_key(&mut self, field: Field, event: &KeyDownEvent, clipboard: Option<String>, window: &mut Window) {
+        match field {
+            Field::Search => match self.search.key_down(event, clipboard) {
+                FieldEvent::Changed => {
+                    self.lib.filter.query = self.search.value.clone();
+                    self.lib.refilter();
+                }
+                FieldEvent::Cancel => {
+                    self.search.value.clear();
+                    self.lib.filter.query.clear();
+                    self.lib.refilter();
+                    window.focus(&self.focus);
+                }
+                FieldEvent::Submit => window.focus(&self.focus),
+                FieldEvent::None => {}
+            },
+            Field::Rename => match self.rename.key_down(event, clipboard) {
+                FieldEvent::Submit => {
+                    if let Some(path) = self.lib.renaming.take() {
+                        let title = self.rename.value.clone();
+                        self.lib.rename(&path, &title);
+                    }
+                    window.focus(&self.focus);
+                }
+                FieldEvent::Cancel => {
+                    self.lib.renaming = None;
+                    window.focus(&self.focus);
+                }
+                _ => {}
+            },
+            Field::Fps => match self.fps_field.key_down(event, clipboard.map(|t| t.chars().filter(char::is_ascii_digit).collect())) {
+                FieldEvent::Changed | FieldEvent::Submit => {
+                    if let Ok(fps) = self.fps_field.value.parse::<u32>() {
+                        if (1..=i32::MAX as u32).contains(&fps) {
+                            self.ed.set_fps(fps);
+                        }
+                    }
+                    if matches!(event.keystroke.key.as_str(), "enter") {
+                        window.focus(&self.focus);
+                    }
+                }
+                FieldEvent::Cancel => window.focus(&self.focus),
+                FieldEvent::None => {}
+            },
+        }
+    }
+
+    pub fn begin_rename(&mut self, path: String, window: &mut Window) {
+        let current = self.lib.record(&path).map(|r| r.display_title().to_owned()).unwrap_or_default();
+        self.rename.set(current);
+        self.lib.renaming = Some(path);
+        window.focus(&self.rename.focus);
+    }
+}
+
+impl Render for Root {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let body = match self.route {
+            Route::Library => self.render_library_page(window, cx),
+            Route::Editor => self.render_editor(window, cx),
+            Route::Hdr => self.render_hdr(window, cx),
+            Route::Audio => self.render_audio(window, cx),
+            Route::Settings => self.render_settings(window, cx),
+        };
+        let hole = self.ed.hole.clone();
+        let backdrop = canvas(
+            |_, _, _| {},
+            move |bounds, _, window, _| {
+                let color = c(theme::WINDOW);
+                let Some((x, y, w, h)) = hole.get() else {
+                    window.paint_quad(fill(bounds, color));
+                    return;
+                };
+                // Paint around the native video window so it shows through.
+                let s = window.scale_factor();
+                let (hx, hy, hw, hh) = (x as f32 / s, y as f32 / s, w as f32 / s, h as f32 / s);
+                let (bx, by) = (f32::from(bounds.origin.x), f32::from(bounds.origin.y));
+                let (bw, bh) = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+                let rect = |x0: f32, y0: f32, x1: f32, y1: f32| {
+                    Bounds::new(point(px(x0), px(y0)), size(px((x1 - x0).max(0.0)), px((y1 - y0).max(0.0))))
+                };
+                window.paint_quad(fill(rect(bx, by, bx + bw, hy), color));
+                window.paint_quad(fill(rect(bx, hy + hh, bx + bw, by + bh), color));
+                window.paint_quad(fill(rect(bx, hy, hx, hy + hh), color));
+                window.paint_quad(fill(rect(hx + hw, hy, bx + bw, hy + hh), color));
+            },
+        )
+        .absolute()
+        .inset_0();
+        div()
+            .id("root")
+            .key_context("Recall")
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(Self::on_key))
+            .size_full()
+            .relative()
+            .flex()
+            .flex_col()
+            .child(backdrop)
+            .font_family(theme::SANS)
+            .text_size(px(13.))
+            .line_height(px(18.))
+            .text_color(c(theme::TEXT))
+            .child(self.render_titlebar(window, cx))
+            .child(div().flex_1().min_h_0().flex().child(body))
+            .children(self.render_toast())
+    }
+}
+
+pub fn parent_hwnd(window: &Window) -> Result<isize, String> {
+    let handle = HasWindowHandle::window_handle(window).map_err(|e| e.to_string())?;
+    match handle.as_raw() {
+        RawWindowHandle::Win32(raw) => Ok(raw.hwnd.get() as isize),
+        _ => Err("Recall needs a Win32 window".into()),
+    }
+}
