@@ -1,10 +1,13 @@
 //! Compressed-packet replay ring, bounded by elapsed capture time.
 //!
 //! `frame_idx` deliberately retains its historic field name for callers, but
-//! is now a microsecond PTS in the video 1/1_000_000 time base. Packets are
-//! copied out with rebased PTS while retaining their VFR durations.
+//! is now a microsecond PTS in the video 1/1_000_000 time base. Save windows
+//! copy packet headers out with rebased PTS while retaining their VFR
+//! durations; payloads are shared (`Arc`), so a window costs a refcount bump
+//! per packet instead of a deep copy of the whole replay.
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct EncodedPacket {
@@ -13,7 +16,8 @@ pub struct EncodedPacket {
     /// Packet duration in microseconds.
     pub duration_us: u64,
     pub keyframe: bool,
-    pub data: Vec<u8>,
+    /// Immutable encoded payload, shared between the ring and save windows.
+    pub data: Arc<[u8]>,
 }
 
 /// A keyframe-aligned packet ring spanning approximately `capacity_us`.
@@ -150,7 +154,7 @@ impl PacketRing {
                     p.duration_us
                 },
                 keyframe: p.keyframe,
-                data: p.data.clone(),
+                data: Arc::clone(&p.data),
             })
             .collect()
     }
@@ -164,8 +168,63 @@ mod tests {
             frame_idx: pts,
             duration_us,
             keyframe,
-            data: vec![0; 4],
+            data: Arc::from(vec![0; 4]),
         }
+    }
+
+    /// A packet whose payload is unique to its PTS, so byte checks are meaningful.
+    fn tagged(pts: u64, duration_us: u64, keyframe: bool) -> EncodedPacket {
+        let tag = (pts / 1_000) as u8;
+        EncodedPacket {
+            frame_idx: pts,
+            duration_us,
+            keyframe,
+            data: Arc::from(vec![tag, tag ^ 0x5a, tag.wrapping_add(1)]),
+        }
+    }
+
+    #[test]
+    fn window_shares_payloads_and_survives_eviction_and_tail_fixups() {
+        let mut ring = PacketRing::new(200_000);
+        for i in 0..6u64 {
+            ring.push(tagged(i * 40_000, 40_000, i % 2 == 0));
+        }
+        let window = ring.save_window_at(120_000, 240_000);
+        assert!(!window.is_empty());
+        // Every window payload is the ring's own allocation, not a copy.
+        for w in &window {
+            assert!(
+                ring.packets.iter().any(|r| Arc::ptr_eq(&r.data, &w.data)),
+                "window payload at {} was deep-copied",
+                w.frame_idx
+            );
+        }
+        let frozen: Vec<(u64, u64, bool, Vec<u8>)> = window
+            .iter()
+            .map(|p| (p.frame_idx, p.duration_us, p.keyframe, p.data.to_vec()))
+            .collect();
+        let first_payload = Arc::clone(&window[0].data);
+
+        // The next packet refines the ring tail's duration (the window's last
+        // packet), then later pushes evict every GOP the window came from.
+        ring.set_last_duration_us(7);
+        for i in 6..20u64 {
+            if let Some(prev) = ring.last_pts_us() {
+                ring.set_last_duration_us(i * 40_000 - prev);
+            }
+            ring.push(tagged(i * 40_000, 40_000, i % 2 == 0));
+        }
+        assert!(!ring
+            .packets
+            .iter()
+            .any(|r| Arc::ptr_eq(&r.data, &first_payload)));
+        let after: Vec<(u64, u64, bool, Vec<u8>)> = window
+            .iter()
+            .map(|p| (p.frame_idx, p.duration_us, p.keyframe, p.data.to_vec()))
+            .collect();
+        assert_eq!(after, frozen);
+        // Only the window (and this test's extra handle) keep the evicted payload.
+        assert_eq!(Arc::strong_count(&first_payload), 2);
     }
 
     #[test]
