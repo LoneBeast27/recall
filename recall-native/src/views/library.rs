@@ -2,8 +2,8 @@
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, FontWeight, MouseMoveEvent, ObjectFit, Window, canvas, div, img, list,
-    prelude::*, px,
+    AnyElement, ClickEvent, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Window, canvas,
+    div, img, list, prelude::*, px,
 };
 
 use crate::{
@@ -179,6 +179,11 @@ impl Root {
             .child(ui::button("sel-fav", Variant::Secondary).child(icon(Icon::Star, 15., theme::TEXT)).child("Favourite").on_click(cx.listener(|this, _, _, cx| {
                 let paths: Vec<String> = this.lib.selected_paths().iter().map(|p| p.to_string_lossy().into_owned()).collect();
                 this.lib.toggle_favourite(&paths);
+                cx.notify();
+            })))
+            .child(ui::button("sel-copy", Variant::Secondary).child(icon(Icon::Copy, 15., theme::TEXT)).child("Copy").on_click(cx.listener(|this, _, _, cx| {
+                let paths: Vec<String> = this.lib.selected_paths().iter().map(|p| p.to_string_lossy().into_owned()).collect();
+                this.copy_clips(paths);
                 cx.notify();
             })))
             .child(ui::button("sel-delete", Variant::Secondary).child(icon(Icon::Trash, 15., theme::TEXT)).child("Delete").on_click(cx.listener(|this, _, _, cx| {
@@ -374,6 +379,7 @@ impl Root {
         };
         let open_path = path.clone();
         let hover_path = path.clone();
+        let drag_path = path.clone();
         div()
             .id(("tile", index))
             .w(px(w))
@@ -389,7 +395,20 @@ impl Root {
                 }
                 cx.notify();
             }))
+            .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, _| {
+                this.drag_origin = Some((drag_path.clone(), f32::from(event.position.x), f32::from(event.position.y)));
+            }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                if event.pressed_button == Some(MouseButton::Left) {
+                    if let Some((path, x0, y0)) = this.drag_origin.clone() {
+                        let (x, y) = (f32::from(event.position.x), f32::from(event.position.y));
+                        if (x - x0).abs() + (y - y0).abs() > 8.0 {
+                            this.drag_origin = None;
+                            this.start_drag(path, cx);
+                        }
+                    }
+                    return;
+                }
                 if let Some((left, width)) = this.lib.hover_span.get() {
                     let frac = ((f32::from(event.position.x) - left) / width.max(1.0)).clamp(0.0, 0.999);
                     if (frac - this.lib.hover_frac).abs() > 0.004 {
@@ -423,6 +442,7 @@ impl Root {
         let fav_path = path.to_owned();
         let folder_path = path.to_owned();
         let rename_path = path.to_owned();
+        let copy_path = path.to_owned();
         div()
             .absolute()
             .top(px(6.))
@@ -436,6 +456,11 @@ impl Root {
             })))
             .child(tile_action("tile-rename", Icon::Pencil).on_click(cx.listener(move |this, _, window, cx| {
                 this.begin_rename(rename_path.clone(), window);
+                cx.stop_propagation();
+                cx.notify();
+            })))
+            .child(tile_action("tile-copy", Icon::Copy).on_click(cx.listener(move |this, _, _, cx| {
+                this.copy_clips(vec![copy_path.clone()]);
                 cx.stop_propagation();
                 cx.notify();
             })))
@@ -654,4 +679,38 @@ pub fn thousands(n: usize) -> String {
         out.push(ch);
     }
     out
+}
+
+impl Root {
+    /// Puts clips on the clipboard as files (paste into Discord, Explorer, chats).
+    pub fn copy_clips(&mut self, paths: Vec<String>) {
+        let count = paths.len();
+        match crate::shell::copy_files(&paths) {
+            Ok(()) => {
+                let what = if count == 1 { "Clip copied".to_owned() } else { format!("{count} clips copied") };
+                self.show_toast(crate::root::ToastKind::Good, what, Some("Paste it into Discord or a folder".into()));
+            }
+            Err(error) => self.show_toast(crate::root::ToastKind::Bad, "Couldn't copy", Some(error)),
+        }
+    }
+
+    /// Drags a clip (or the whole selection when the tile is selected) out of Recall.
+    /// The OLE modal loop runs in a spawned task, outside any GPUI state borrow.
+    pub fn start_drag(&mut self, path: String, cx: &mut Context<Self>) {
+        let paths: Vec<String> = if self.lib.selection.contains(&path) {
+            self.lib.selected_paths().iter().map(|p| p.to_string_lossy().into_owned()).collect()
+        } else {
+            vec![path]
+        };
+        cx.spawn(async move |this, cx| {
+            let result = crate::shell::drag_files(&paths);
+            let _ = this.update(cx, |this, cx| {
+                if let Err(error) = result {
+                    this.show_toast(crate::root::ToastKind::Bad, "Couldn't drag", Some(error));
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
 }

@@ -75,11 +75,14 @@ pub struct Root {
     pub corner_open: bool,
     /// Displayed meter levels with ballistics: (rms dB, peak-hold dB, peak time).
     pub meter_display: Vec<(f32, f32, Instant)>,
+    /// Tile press that may become a drag-out: (path, window x, y).
+    pub drag_origin: Option<(String, f32, f32)>,
     pub frame_at: Instant,
 }
 
 impl Root {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        crate::shell::init_ole();
         let preview = parent_hwnd(window).and_then(NativePreview::new);
         let workers = Workers::spawn();
         workers.job(Job::List);
@@ -104,6 +107,7 @@ impl Root {
             sort_open: false,
             corner_open: false,
             meter_display: Vec::new(),
+            drag_origin: None,
             frame_at: Instant::now(),
         };
         if let Some(path) = std::env::var_os("RECALL_NATIVE_CLIP") {

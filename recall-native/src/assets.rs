@@ -12,7 +12,7 @@ macro_rules! icons {
 }
 
 icons!(
-    "alert", "audio-lines", "back-5", "check", "chevron-down", "chevron-left", "chevron-right",
+    "alert", "audio-lines", "copy", "back-5", "check", "chevron-down", "chevron-left", "chevron-right",
     "dot", "drive", "external", "film", "folder", "forward-5", "fullscreen", "gamepad", "grid",
     "keyboard", "mic", "mic-off", "minus", "more", "overlay", "pause", "pencil", "play", "plus",
     "power", "redo", "refresh", "repeat", "scissors", "search", "set-in", "set-out", "settings",
