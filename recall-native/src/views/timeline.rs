@@ -253,6 +253,28 @@ impl Root {
         if let Some(r) = ranges.get(selected).filter(|_| has_clip) {
             tracks = tracks.child(selected_segment(frac(r.start), frac(r.end), lanes_top, tracks_h - lanes_top, selected, cx));
         }
+        for (n, mark) in self.ed.marks.clone().into_iter().enumerate() {
+            tracks = tracks.child(
+                div()
+                    .id(("mark", n))
+                    .absolute()
+                    .top(px(RULER_H - 9.))
+                    .left(relative(frac(mark)))
+                    .ml(px(-5.))
+                    .size(px(10.))
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .cursor_pointer()
+                    .child(div().size(px(7.)).rounded(px(1.5)).bg(c(theme::TEXT)))
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, _: &MouseDownEvent, _, cx| {
+                        this.ed.seek(mark);
+                        this.ed.select_at(mark);
+                        cx.stop_propagation();
+                        cx.notify();
+                    })),
+            );
+        }
         if has_clip {
             tracks = tracks.child(playhead_marker(frac(playhead), playhead, tracks_h));
         }
