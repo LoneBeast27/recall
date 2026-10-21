@@ -1,0 +1,249 @@
+//! Smart cache: score ordering on synthetic histories, score-based eviction under budget
+//! pressure, the 95% fill gate, interaction persistence, pausing while the recorder works.
+use std::collections::VecDeque;
+use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant, SystemTime};
+
+use super::evict::{Tier, Unit, plan as evict_plan};
+use super::history::{History, Interaction};
+use super::lane::{IdleSource, Lane, Priority, Task};
+use super::prefetch::{Gate, Step, estimate, recorder_busy, set_recorder_busy};
+use super::score::{ClipFacts, Weights, score_all};
+use super::*;
+
+const DAY: u64 = 86_400_000;
+const NOW: u64 = 1_800_000_000_000;
+
+fn facts(name: &str, game: &str, age_days: f64) -> ClipFacts {
+    ClipFacts { name: name.into(), game: game.into(), mtime_ms: NOW - (age_days * DAY as f64) as u64, favourite: false, edited: false }
+}
+
+/// Clip path whose file name parses to `game` (recorder naming).
+fn path(game: &str, n: u32) -> String {
+    format!("V:\\ALL RECORDINGS\\{game}__2026-10-{:02}__10-00-00-000__abcdef0123456789abcdef01234567{n:02}.mp4", 1 + n % 28)
+}
+
+fn name_of(path: &str) -> String {
+    std::path::Path::new(path).file_name().unwrap().to_string_lossy().to_lowercase()
+}
+
+fn rank(clips: &[ClipFacts], history: &History) -> Vec<String> {
+    let scores = score_all(clips, history, NOW, &Weights::default());
+    let mut order: Vec<usize> = (0..clips.len()).collect();
+    order.sort_by(|a, b| scores[*b].total_cmp(&scores[*a]));
+    order.into_iter().map(|i| clips[i].name.clone()).collect()
+}
+
+#[test]
+fn newer_clips_rank_higher_when_nothing_else_differs() {
+    let clips = [facts("old", "a", 30.0), facts("new", "a", 1.0), facts("mid", "a", 7.0)];
+    assert_eq!(rank(&clips, &History::default()), ["new", "mid", "old"]);
+}
+
+#[test]
+fn a_fresh_save_outranks_everything_else() {
+    let mut clips = [facts("fresh", "a", 0.003), facts("yesterday", "a", 1.0)];
+    clips[1].favourite = true;
+    clips[1].edited = true;
+    assert_eq!(rank(&clips, &History::default())[0], "fresh", "~4 minutes old");
+}
+
+#[test]
+fn game_affinity_and_own_interactions_lift_older_clips() {
+    let w = Weights::default();
+    let mut history = History::default();
+    let played = (0..6).map(|n| path("Rocket-League", n)).collect::<Vec<_>>();
+    for (i, clip) in played.iter().enumerate() {
+        history.apply(&Interaction::Opened(clip.clone()), NOW - (i as u64 + 1) * DAY, &w);
+    }
+    let rl = played[0].clone();
+    let rl_name = name_of(&path("Rocket-League", 20));
+    let other = facts("valorant-new", "valorant", 3.0);
+    // An unopened Rocket League clip a few days older still beats a never-touched game.
+    assert_eq!(rank(&[other.clone(), facts(&rl_name, "rocketleague", 5.0)], &history)[0], rl_name);
+    // A clip opened several times beats a slightly newer, unopened clip of the same game.
+    history.apply(&Interaction::Exported(rl.clone()), NOW - DAY, &w);
+    let opened = facts(&name_of(&rl), "rocketleague", 10.0);
+    let unopened = facts(&rl_name, "rocketleague", 8.0);
+    assert_eq!(rank(&[unopened, opened], &history)[0], name_of(&rl));
+    assert_eq!(history.favoured_games(NOW, &w, 2), ["Rocket League"]);
+}
+
+#[test]
+fn browse_depth_and_favourites_shift_the_ranking() {
+    let w = Weights::default();
+    let shallow = History::default();
+    let mut deep = History::default();
+    deep.apply(&Interaction::ScrolledTo { days_back: 40 }, NOW - DAY, &w);
+    let score = |history: &History, clip: &ClipFacts| score_all(std::slice::from_ref(clip), history, NOW, &w)[0];
+    let month_old = facts("month", "a", 30.0);
+    assert!(score(&deep, &month_old) > score(&shallow, &month_old) + 0.3, "a user who scrolls back a month keeps month-old clips warm");
+    let mut favourite = facts("fav", "a", 20.0);
+    favourite.favourite = true;
+    assert_eq!(rank(&[facts("plain", "a", 15.0), favourite], &shallow)[0], "fav");
+}
+
+#[test]
+fn interest_decays_with_a_two_week_half_life() {
+    let w = Weights::default();
+    let mut history = History::default();
+    history.apply(&Interaction::Opened(path("Game", 1)), NOW - 14 * DAY, &w);
+    let memory = &history.clips[&name_of(&path("Game", 1))];
+    let now_value = memory.interest.value_at(NOW, w.memory_half_life_ms());
+    assert!((now_value - w.open_event / 2.0).abs() < 1e-9, "{now_value}");
+    history.prune(NOW + 400 * DAY, &w);
+    assert!(history.clips.is_empty() && history.games.is_empty(), "decayed memories are dropped");
+}
+
+#[test]
+fn interactions_round_trip_through_the_history_file() {
+    let w = Weights::default();
+    let mut history = History::default();
+    let clip = path("VALORANT", 3);
+    for event in [
+        Interaction::Opened(clip.clone()),
+        Interaction::Hovered(clip.clone()),
+        Interaction::Exported(clip.clone()),
+        Interaction::Favourited(clip.clone()),
+        Interaction::Saved(path("VALORANT", 4)),
+        Interaction::ScrolledTo { days_back: 12 },
+    ] {
+        history.apply(&event, NOW, &w);
+    }
+    let memory = &history.clips[&name_of(&clip)];
+    assert!(memory.favourite);
+    assert!((memory.interest.value - (w.open_event + w.hover_event + w.export_event + w.favourite_event)).abs() < 1e-9);
+    assert_eq!(history.clips[&name_of(&path("VALORANT", 4))].saved_at_ms, Some(NOW));
+    assert_eq!(history.browse_days.value, 12.0);
+    let file = std::env::temp_dir().join(format!("recall-history-{}-{}.json", std::process::id(), NOW));
+    history.save(&file).unwrap();
+    assert_eq!(History::load(&file), history);
+    assert!(std::fs::metadata(&file).unwrap().len() < 2048, "small file");
+    let _ = std::fs::remove_file(file);
+    assert_eq!(History::load(&PathBuf::from("Z:\\missing\\interactions.json")), History::default());
+}
+
+fn unit(tier: Tier, name: &str, mb: u64, score: f64) -> Unit {
+    Unit { tier, name: name.into(), bytes: mb << 20, last_used: 0, score }
+}
+
+#[test]
+fn eviction_drops_lowest_scores_first_and_thumbnails_last() {
+    let units = [
+        unit(Tier::Thumb, "thumbs/low.jpg", 1, 0.1),
+        unit(Tier::Scrub, "visuals/low#scrub", 1, 0.1),
+        unit(Tier::EditorMedia, "editor/low", 40, 0.1),
+        unit(Tier::Video, "video/low.mp4", 300, 0.1),
+        unit(Tier::Scrub, "visuals/high#scrub", 1, 3.0),
+        unit(Tier::EditorMedia, "editor/high", 40, 3.0),
+        unit(Tier::Video, "video/high.mp4", 300, 3.0),
+        unit(Tier::Thumb, "thumbs/high.jpg", 1, 3.0),
+    ];
+    let order = evict_plan(&units, 0, 0, u64::MAX, 0, &[]);
+    assert_eq!(
+        order,
+        [
+            "video/low.mp4",
+            "editor/low",
+            "visuals/low#scrub",
+            "video/high.mp4",
+            "editor/high",
+            "visuals/high#scrub",
+            "thumbs/low.jpg",
+            "thumbs/high.jpg"
+        ],
+        "low-score clip loses everything (costliest first) before a high-score clip loses anything; thumbnails last"
+    );
+    // Budget pressure of 300 MB: only the low-score video copy goes.
+    let total: u64 = units.iter().map(|u| u.bytes).sum();
+    assert_eq!(evict_plan(&units, 0, total - (300 << 20), u64::MAX, 0, &[]), ["video/low.mp4"]);
+    // Video cap: copies beyond half the budget go even when the total fits.
+    assert_eq!(evict_plan(&units, 0, u64::MAX, 400 << 20, 0, &[]), ["video/low.mp4"]);
+    // The open clip is kept whole.
+    let keep = ["video/low.mp4".to_string(), "editor/low".to_string()];
+    assert_eq!(evict_plan(&units, 0, total - (300 << 20), u64::MAX, 0, &keep), ["visuals/low#scrub", "video/high.mp4"]);
+}
+
+#[test]
+fn fill_stops_at_95_percent_of_the_budget() {
+    let budget = 1000u64;
+    let gate = Gate::new(budget, 900, 0);
+    assert!(gate.admit(Step::Scrub, 50), "900 + 50 = 950 = 95%");
+    gate.add(Step::Scrub, 50);
+    assert!(!gate.admit(Step::Scrub, 1), "full at 95%");
+    assert!(!gate.admit(Step::Editor, 1));
+    assert!(gate.admit(Step::Thumb, 30) && gate.admit(Step::Duration, 0), "thumbnails / durations always fill");
+    assert_eq!(gate.used(), 950);
+    let video = Gate::new(budget, 0, 400);
+    assert!(video.admit(Step::Video, 100), "400 + 100 = half the budget");
+    assert!(!video.admit(Step::Video, 101), "never past half the budget");
+    let mut clip = super::tests::clip("x.mp4", true, true);
+    clip.duration = Some(100.0);
+    assert_eq!(estimate(Step::Editor, &clip), 28_800_000 + (200 << 10));
+    assert_eq!(estimate(Step::Video, &clip), clip.bytes);
+}
+
+struct BusyAware(Mutex<VecDeque<Task>>);
+impl IdleSource for BusyAware {
+    fn next_task(&self) -> Option<Task> {
+        self.0.lock().unwrap().pop_front()
+    }
+    fn paused(&self) -> bool {
+        recorder_busy()
+    }
+}
+
+#[test]
+fn planner_pauses_while_the_recorder_is_busy() {
+    let lane = Lane::spawn("test-lane-busy", false, Duration::from_millis(40));
+    let ran = Arc::new(Mutex::new(Vec::<&'static str>::new()));
+    set_recorder_busy(true);
+    let log = ran.clone();
+    lane.set_idle(Some(Arc::new(BusyAware(Mutex::new(VecDeque::from([Box::new(move || log.lock().unwrap().push("fill")) as Task]))))));
+    let demand = ran.clone();
+    lane.submit(Priority::Interactive, Box::new(move || demand.lock().unwrap().push("on-demand")));
+    std::thread::sleep(Duration::from_millis(400));
+    assert_eq!(*ran.lock().unwrap(), ["on-demand"], "on-demand work runs, the fill waits");
+    set_recorder_busy(false);
+    let start = Instant::now();
+    while ran.lock().unwrap().len() < 2 {
+        assert!(start.elapsed() < Duration::from_secs(5), "fill never resumed");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(*ran.lock().unwrap(), ["on-demand", "fill"]);
+}
+
+#[test]
+fn inventory_classifies_tiers_and_enforcement_frees_on_disk() {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let root = std::env::temp_dir().join(format!("recall-smart-{}-{nonce}", std::process::id()));
+    let write = |rel: &str, len: usize| {
+        let path = root.join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, vec![1u8; len]).unwrap();
+    };
+    write("video/aaaa.mp4", 5000);
+    write("editor/k1/audio-0.wav", 3000);
+    write("editor/k1/clip.json", 200);
+    write("visuals/aaaa/poster.jpg", 300);
+    write("visuals/aaaa/frame-0.jpg", 300);
+    write("visuals/aaaa/scrub-0.jpg", 400);
+    write("thumbs/aaaa.jpg", 250);
+    write("projects/aaaa.json", 100);
+    std::fs::write(root.join("media.json"), br#"{"owners":{"k1":"aaaa"}}"#).unwrap();
+    let inventory = budget::inventory(&root, &|id| if id == "aaaa" { 2.0 } else { 0.0 });
+    let tier = |t: Tier| inventory.tier_bytes(t);
+    assert_eq!((tier(Tier::Video), tier(Tier::EditorMedia), tier(Tier::Scrub), tier(Tier::Thumb)), (5000, 3800, 400, 250));
+    assert!(inventory.units.iter().all(|u| u.score == 2.0), "every unit maps to its clip, the engine folder via media.json owners");
+    assert_eq!(inventory.projects, 100);
+    let usage = tiers::usage_in(&root);
+    assert_eq!(usage.total(), inventory.total());
+    assert_eq!(usage.video_cap, usage.budget / 2);
+    // Budget just above the thumbnail + project + bookkeeping bytes: everything else goes.
+    let freed = budget::enforce(&root, 250 + 100 + inventory.other + 10, 0);
+    assert_eq!(freed, 5000 + 3800 + 400);
+    assert!(root.join("thumbs/aaaa.jpg").exists() && root.join("projects/aaaa.json").exists());
+    assert!(!root.join("editor/k1").exists() && !root.join("video/aaaa.mp4").exists());
+    let _ = std::fs::remove_dir_all(root);
+}

@@ -3,6 +3,9 @@
 mod edit_model;
 #[path = "../src/backend.rs"]
 mod backend;
+#[path = "../src/services/mod.rs"]
+#[allow(dead_code)]
+mod services;
 use std::time::Instant;
 
 fn main() {
