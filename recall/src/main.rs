@@ -532,13 +532,10 @@ fn main() {
     }
     #[cfg(feature = "encode")]
     if let Some((ref input, ref output, fps, ref project)) = config.export_edit {
-        let plan = std::fs::read_to_string(project).map_err(|e| e.to_string()).and_then(|s| {
-            let value: serde_json::Value = serde_json::from_str(&s).map_err(|e| e.to_string())?;
-            serde_json::from_value::<edit_model::EditPlan>(value.get("plan").cloned().unwrap_or(value)).map_err(|e| e.to_string())
-        });
-        let plan = match plan { Ok(p) => p, Err(e) => { eprintln!("editor project: {e}"); std::process::exit(1); } };
+        let project = std::fs::read_to_string(project).map_err(|e| e.to_string()).and_then(|s| export::parse_project(&s));
+        let (plan, settings) = match project { Ok(p) => p, Err(e) => { eprintln!("editor project: {e}"); std::process::exit(1); } };
         let request = export::ExportRequest { input: input.clone(), output: output.clone(), fps };
-        if run_export(&request, Some(&plan), config.json).is_err() { std::process::exit(1); }
+        if run_export(&request, Some((&plan, &settings)), config.json).is_err() { std::process::exit(1); }
         return;
     }
     #[cfg(feature = "encode")]
@@ -589,8 +586,9 @@ fn spawn_export_worker(json: bool) -> ExportHook {
     std::thread::Builder::new()
         .name("recall-export".into())
         .spawn(move || {
+            let settings = edit_model::ExportSettings::default();
             while let Ok(job) = rx.recv() {
-                let _ = run_export(&job.request, job.edit.as_ref(), json);
+                let _ = run_export(&job.request, job.edit.as_ref().map(|plan| (plan, &settings)), json);
             }
         })
         .expect("spawn export worker");
@@ -639,7 +637,7 @@ fn export_failure(json: bool, source: &str, reason: &str) {
 }
 
 #[cfg(feature = "encode")]
-fn run_export(request: &export::ExportRequest, edit: Option<&edit_model::EditPlan>, json: bool) -> Result<(), String> {
+fn run_export(request: &export::ExportRequest, edit: Option<(&edit_model::EditPlan, &edit_model::ExportSettings)>, json: bool) -> Result<(), String> {
     let start = Instant::now();
     if json {
         protocol::emit(&protocol::Outbound::ExportStarted {
@@ -648,7 +646,14 @@ fn run_export(request: &export::ExportRequest, edit: Option<&edit_model::EditPla
             fps: request.fps,
         });
     }
-    let result = match edit { Some(plan) => export::export_edited(request, plan), None => export::export_cfr(request) };
+    let result = match edit {
+        Some((plan, settings)) => export::export_edited(request, plan, settings).map(|report| {
+            if json { println!("{}", report.report_line(&request.input, &request.output)); }
+            else { println!("[recall] {:?} export: {} bytes, {}x{}, ranges {:?}", report.mode, report.bytes, report.width, report.height, report.ranges.iter().map(|r| (r.start, r.end, r.speed)).collect::<Vec<_>>()); }
+            report.summary()
+        }),
+        None => export::export_cfr(request),
+    };
     match result {
         Ok(result) => {
             if json {
