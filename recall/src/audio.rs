@@ -1,8 +1,14 @@
 //! WASAPI endpoint capture for the replay buffer (feature `encode`).
 //!
-//! Endpoint/virtual-cable model (PRD §9): a track = one audio ENDPOINT.
-//! - "Game": LOOPBACK capture of a render endpoint (Sonar Gaming preferred).
-//! - "Mic": normal capture of a capture endpoint (Sonar Microphone preferred).
+//! Endpoint/virtual-cable model (PRD §9): a track = one audio ENDPOINT or one
+//! process tree.
+//! - "Game": process loopback of `RECALL_AUDIO_GAME_PID` (incl. children), else
+//!   LOOPBACK capture of a render endpoint ("Game (RØDECaster)" preferred).
+//! - "Mic": normal capture of a capture endpoint (RØDECaster Chat preferred).
+//! - "Voice": opt-in process loopback of a voice-chat app's process tree
+//!   (`RECALL_AUDIO_VOICE_PID`, or `RECALL_AUDIO_VOICE_EXE` e.g. `Discord.exe`);
+//!   no track when neither is set or the app is not running. Mic mute never
+//!   touches it.
 //! App→cable routing stays the user's/Windows' job; we only read endpoints.
 //!
 //! Each track runs its own capture thread pushing interleaved f32 samples into
@@ -15,6 +21,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use wasapi::{DeviceCollection, Direction, SampleType, StreamMode, WaveFormat};
+
+mod voice;
 
 static MIC_MUTED: AtomicBool = AtomicBool::new(false);
 
@@ -33,29 +41,47 @@ pub fn mic_muted() -> bool {
     MIC_MUTED.load(Ordering::Relaxed)
 }
 
+/// Where a track's process-loopback target comes from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessSource {
+    /// Endpoint capture only.
+    None,
+    /// `RECALL_AUDIO_GAME_PID`'s process tree when set, else the endpoint.
+    GamePid,
+    /// The voice-chat app's process tree only; no track when unresolved.
+    VoiceApp,
+}
+
 /// Selection preference for one track: substring matched against endpoint
 /// friendly names (case-insensitive); falls back to the default endpoint.
 pub struct TrackSpec {
+    /// Internal name (Moments `audio_tracks`, mute rule, thread name).
     pub name: &'static str,
+    /// Saved as the stream's `title` and `handler_name`.
+    pub title: &'static str,
     pub direction: Direction,
-    /// Env var holding a name-substring override.
+    /// Env var holding a name-substring override (endpoint tracks only).
     pub env: &'static str,
     /// Default name-substring preferences, tried in order.
     pub prefer: &'static [&'static str],
+    pub process: ProcessSource,
 }
 
-pub static TRACKS: [TrackSpec; 2] = [
+pub static TRACKS: [TrackSpec; 3] = [
     TrackSpec {
         name: "Game",
+        title: "Game",
         direction: Direction::Render, // loopback
         env: "RECALL_AUDIO_GAME",
         // Token-AND matching: every whitespace-separated token must appear in
         // the friendly name. This machine's cable set is the RØDECaster
         // virtual suite (probed 2026-07-08): games route to "Game (RØDECaster)".
         prefer: &["game rødecaster", "game rodecaster", "sonar gaming"],
+        process: ProcessSource::GamePid,
     },
     TrackSpec {
         name: "Mic",
+        title: "Microphone",
         direction: Direction::Capture,
         env: "RECALL_AUDIO_MIC",
         prefer: &[
@@ -63,8 +89,35 @@ pub static TRACKS: [TrackSpec; 2] = [
             "microphone rødecaster chat",
             "sonar microphone",
         ],
+        process: ProcessSource::None,
+    },
+    TrackSpec {
+        name: "Voice",
+        title: "Voice chat",
+        direction: Direction::Render,
+        env: "",
+        prefer: &[],
+        process: ProcessSource::VoiceApp,
     },
 ];
+
+/// Stream title for a track name ("Mic" -> "Microphone"); unknown names pass
+/// through unchanged.
+pub fn track_title(name: &str) -> &str {
+    TRACKS
+        .iter()
+        .find(|t| t.name == name)
+        .map(|t| t.title)
+        .unwrap_or(name)
+}
+
+/// A process tree captured by process loopback (include-tree mode).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LoopbackTarget {
+    pub pid: u32,
+    /// Shown as the track's "endpoint" in logs.
+    pub label: String,
+}
 
 /// One track's PCM captured for a save: interleaved f32, front-padded to the
 /// clip length. Owned and `Send`, so the saver thread encodes it off-ring.
@@ -157,9 +210,37 @@ pub fn start(buffer_secs: u32, mut report: impl FnMut(String)) -> Vec<Arc<TrackR
         list_endpoints(&Direction::Render),
         list_endpoints(&Direction::Capture)
     ));
+    let game_pid = game_process_loopback_pid();
     let mut out = Vec::new();
     for spec in &TRACKS {
-        match start_track(spec, buffer_secs) {
+        let target = match spec.process {
+            ProcessSource::None => None,
+            ProcessSource::GamePid => match &game_pid {
+                Ok(pid) => pid.map(|pid| LoopbackTarget {
+                    pid,
+                    label: format!("process {pid} (include tree)"),
+                }),
+                Err(e) => {
+                    report(format!("audio track '{}' UNAVAILABLE: {e}", spec.name));
+                    continue;
+                }
+            },
+            ProcessSource::VoiceApp => {
+                match voice::resolve_from_env(game_pid.clone().ok().flatten()) {
+                    Ok(voice::Resolved::Target(target)) => Some(target),
+                    // Not an error: the voice track is opt-in.
+                    Ok(voice::Resolved::Off(reason)) => {
+                        report(format!("audio track '{}' off: {reason}", spec.name));
+                        continue;
+                    }
+                    Err(e) => {
+                        report(format!("audio track '{}' UNAVAILABLE: {e}", spec.name));
+                        continue;
+                    }
+                }
+            }
+        };
+        match start_track(spec, buffer_secs, target) {
             Ok(ring) => {
                 report(format!(
                     "audio track '{}' up: {} ({} Hz, {} ch)",
@@ -230,31 +311,34 @@ fn pick_device(spec: &TrackSpec) -> Result<(wasapi::Device, String), String> {
 /// Resolve the opt-in process-loopback target for Game capture. A supplied
 /// value deliberately never falls back to endpoint capture: that could record
 /// the wrong audio source while appearing to work.
-fn game_process_loopback_pid(spec: &TrackSpec) -> Result<Option<u32>, String> {
-    if spec.name != "Game" {
-        return Ok(None);
-    }
-    let value = match std::env::var("RECALL_AUDIO_GAME_PID") {
-        Ok(value) => value,
-        Err(std::env::VarError::NotPresent) => return Ok(None),
+fn game_process_loopback_pid() -> Result<Option<u32>, String> {
+    match std::env::var("RECALL_AUDIO_GAME_PID") {
+        Ok(value) => parse_pid("RECALL_AUDIO_GAME_PID", &value).map(Some),
+        Err(std::env::VarError::NotPresent) => Ok(None),
         Err(std::env::VarError::NotUnicode(_)) => {
-            return Err("RECALL_AUDIO_GAME_PID is not valid Unicode".into());
+            Err("RECALL_AUDIO_GAME_PID is not valid Unicode".into())
         }
-    };
-    let pid = value
-        .trim()
-        .parse::<u32>()
-        .map_err(|_| format!("RECALL_AUDIO_GAME_PID must be a positive process ID, got {value:?}"))?;
-    if pid == 0 {
-        return Err("RECALL_AUDIO_GAME_PID must be a positive process ID, got 0".into());
     }
-    Ok(Some(pid))
+}
+
+/// A positive process ID from an env value named `key`.
+fn parse_pid(key: &str, value: &str) -> Result<u32, String> {
+    match value.trim().parse::<u32>() {
+        Ok(0) => Err(format!("{key} must be a positive process ID, got 0")),
+        Ok(pid) => Ok(pid),
+        Err(_) => Err(format!("{key} must be a positive process ID, got {value:?}")),
+    }
 }
 
 /// Spawn the capture thread for one track. ALL WASAPI/COM objects are created
 /// on the capture thread (they are !Send); init success/failure is reported
-/// back over a channel before this returns.
-fn start_track(spec: &'static TrackSpec, buffer_secs: u32) -> Result<Arc<TrackRing>, String> {
+/// back over a channel before this returns. `target` selects process loopback
+/// instead of the spec's endpoint.
+fn start_track(
+    spec: &'static TrackSpec,
+    buffer_secs: u32,
+    target: Option<LoopbackTarget>,
+) -> Result<Arc<TrackRing>, String> {
     // Fixed 48k stereo f32 for every track; WASAPI autoconverts from the
     // endpoint's native mix format.
     let (rate, channels) = (48_000u32, 2u16);
@@ -271,7 +355,7 @@ fn start_track(spec: &'static TrackSpec, buffer_secs: u32) -> Result<Arc<TrackRi
     let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::Builder::new()
         .name(format!("recall-audio-{}", spec.name))
-        .spawn(move || capture_thread(spec, tring, init_tx))
+        .spawn(move || capture_thread(spec, tring, init_tx, target))
         .map_err(|e| e.to_string())?;
 
     match init_rx.recv_timeout(std::time::Duration::from_secs(5)) {
@@ -285,6 +369,7 @@ fn capture_thread(
     spec: &'static TrackSpec,
     ring: Arc<TrackRing>,
     init_tx: std::sync::mpsc::Sender<Result<(), String>>,
+    target: Option<LoopbackTarget>,
 ) {
     let init = || -> Result<_, String> {
         // Per-thread COM init; already-initialized is fine.
@@ -297,11 +382,11 @@ fn capture_thread(
             ring.channels as usize,
             None,
         );
-        let (mut client, endpoint, buffer_duration_hns) = match game_process_loopback_pid(spec)? {
-            Some(pid) => (
-                wasapi::AudioClient::new_application_loopback_client(pid, true)
+        let (mut client, endpoint, buffer_duration_hns) = match &target {
+            Some(LoopbackTarget { pid, label }) => (
+                wasapi::AudioClient::new_application_loopback_client(*pid, true)
                     .map_err(|e| format!("process loopback for PID {pid}: {e}"))?,
-                format!("process {pid} (include tree)"),
+                label.clone(),
                 // Process-loopback clients do not support get_device_period.
                 // 20 ms is the wasapi example's documented safe event period.
                 200_000,

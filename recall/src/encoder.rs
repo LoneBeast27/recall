@@ -1,8 +1,9 @@
 //! Continuous NVENC VFR encode thread + replay ring + save hand-off (feature `encode`).
 //!
 //! The render loop feeds RGBA8 frames with capture-time microsecond PTS values;
-//! this thread encodes them with `h264_nvenc` (pix_fmt RGB0 — NVENC ingests
-//! RGBA directly, alpha ignored, no swscale stage) into a `PacketRing` holding
+//! this thread encodes them with `h264_nvenc`, `hevc_nvenc` or `av1_nvenc`
+//! (`RECALL_CODEC`, see `settings.rs`; pix_fmt RGB0 — NVENC ingests RGBA
+//! directly, alpha ignored, no swscale stage) into a `PacketRing` holding
 //! the last N seconds. A `SaveRequest` is turned into a self-contained
 //! `SaveJob` here in milliseconds (shared packet window + PCM snapshot) and
 //! written by the `recall-saver` thread (`saver.rs`, `mux.rs`), so a long save
@@ -12,7 +13,9 @@
 mod frame_fit;
 mod mux;
 mod saver;
+pub mod settings;
 mod smoke;
+mod still;
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
@@ -23,11 +26,15 @@ use ffmpeg_next as ff;
 
 use crate::audio::TrackRing;
 use crate::ring::{EncodedPacket, PacketRing};
-use frame_fit::normalize_small_size_jitter;
+use frame_fit::{fill_rgbz, normalize_small_size_jitter};
 use mux::OwnedParams;
 use saver::{ms, RawFrame, SaveJob, SaverControl, SaverQueue, Timing, VideoSrc};
+use settings::{Codec, Quality};
+use still::encode_still;
+pub(crate) use still::StillSpec;
 
 pub use saver::clip_path;
+pub use settings::Config;
 pub use smoke::smoke_test;
 
 /// One capture frame from the render thread. `idx` is capture PTS in microseconds.
@@ -59,6 +66,9 @@ pub struct EncStats {
     pub encoded_frames: AtomicU64,
     /// 0 = not initialized, 1 = nvenc, 3 = failed.
     pub backend: AtomicU64,
+    /// `Codec::index`: the requested codec until an encoder opens, then the
+    /// one actually recording (H.264 after a fallback).
+    pub codec: AtomicU64,
     /// Most recent initialization/reconfiguration failure for status consumers.
     pub error: Mutex<Option<String>>,
 }
@@ -68,6 +78,13 @@ pub struct EncoderHandle {
     pub commands: Sender<SaveRequest>,
     pub stats: Arc<EncStats>,
     saver: SaverControl,
+}
+
+impl EncStats {
+    /// Codec for `status.codec`: active once open, requested before that.
+    pub fn codec(&self) -> Codec {
+        Codec::from_index(self.codec.load(Relaxed))
+    }
 }
 
 impl EncoderHandle {
@@ -87,14 +104,6 @@ impl EncoderHandle {
     }
 }
 
-pub struct Config {
-    pub fps: u32,
-    pub buffer_secs: u32,
-    pub bitrate: usize,
-    /// Emit machine JSON events (Saved/SaveFailed) instead of human logs.
-    pub json: bool,
-}
-
 /// Spawn the encoder thread and its saver. Initialization is lazy (first frame
 /// carries the resolution); failures are logged and saves report SaveFailed.
 /// `audio` rings are snapshotted at save time and muxed as one AAC track each.
@@ -103,6 +112,7 @@ pub fn spawn(cfg: Config, audio: Vec<Arc<TrackRing>>) -> EncoderHandle {
     let (ftx, frx) = sync_channel::<PacedFrame>(3);
     let (ctx, crx) = channel::<SaveRequest>();
     let stats = Arc::new(EncStats::default());
+    stats.codec.store(cfg.codec.index(), Relaxed);
     let tstats = stats.clone();
     let (queue, saver) = saver::spawn_default(saver::Events::new(cfg.json));
     std::thread::Builder::new()
@@ -124,6 +134,8 @@ struct Enc {
     ring: PacketRing,
     nominal_fps: u32,
     bitrate: usize,
+    codec: Codec,
+    quality: Quality,
     width: u32,
     height: u32,
     backend: &'static str,
@@ -152,8 +164,15 @@ fn run(
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason);
         return;
     }
+    report(cfg.json, &cfg.summary());
+    for note in &cfg.notes {
+        report(cfg.json, note);
+    }
     let mut enc: Option<Enc> = None;
     let mut failed_resolution: Option<(u32, u32)> = None;
+    // After one fallback the engine stays on H.264: reopening on a resolution
+    // change must not flap codecs or re-log the same failure.
+    let mut want = cfg.codec;
 
     loop {
         // Saves first: they're rare and user-facing latency matters (R10).
@@ -189,8 +208,13 @@ fn run(
                     stats.buffered_bytes.store(0, Relaxed);
                 }
                 if enc.is_none() && failed_resolution != Some((frame.width, frame.height)) {
-                    enc = match open_encoder(&cfg, frame.width, frame.height) {
-                        Ok(e) => {
+                    enc = match open_encoder(&cfg, want, frame.width, frame.height) {
+                        Ok((e, fallback)) => {
+                            if let Some(note) = fallback {
+                                report(cfg.json, &note);
+                                want = e.codec;
+                            }
+                            stats.codec.store(e.codec.index(), Relaxed);
                             stats.backend.store(1, Relaxed);
                             *stats.error.lock().unwrap_or_else(|e| e.into_inner()) = None;
                             report(
@@ -244,42 +268,42 @@ fn run(
     }
 }
 
-/// Open mandatory h264_nvenc for even-cropped `w`x`h` RGB0 input.
-fn open_encoder(cfg: &Config, w: u32, h: u32) -> Result<Enc, String> {
+/// Open `codec` (falling back to h264_nvenc) for even-cropped `w`x`h` RGB0
+/// input. The second value is the fallback line to log, if one happened.
+fn open_encoder(
+    cfg: &Config,
+    codec: Codec,
+    w: u32,
+    h: u32,
+) -> Result<(Enc, Option<String>), String> {
     let (w, h) = (w & !1, h & !1);
     if w == 0 || h == 0 {
         return Err("NVENC cannot open a zero-sized capture".into());
     }
-    let encoder = try_open(cfg, "h264_nvenc", w, h)
-        .map_err(|e| format!("h264_nvenc initialization failed: {e}"))?;
-    Ok(Enc {
+    let opened = settings::open_with_fallback(codec, |c| try_open(cfg, c, w, h))?;
+    let encoder = opened.value;
+    let enc = Enc {
         params: OwnedParams::from_encoder(&encoder),
         encoder,
         ring: PacketRing::new(cfg.buffer_secs as u64 * 1_000_000),
         nominal_fps: cfg.fps,
         bitrate: cfg.bitrate,
+        codec: opened.codec,
+        quality: cfg.quality,
         width: w,
         height: h,
-        backend: "h264_nvenc",
+        backend: opened.codec.nvenc(),
         last_frame: None,
         last_input_pts: None,
         session_id: uuid::Uuid::new_v4().to_string(),
-    })
+    };
+    Ok((enc, opened.fallback))
 }
 
-/// Copy tightly packed RGBA into an RGBZ video frame, honoring the stride.
-fn fill_rgbz(vf: &mut ff::frame::Video, w: u32, h: u32, rgba: &[u8]) {
-    let stride = vf.stride(0);
-    let src_row = (w * 4) as usize;
-    let dst = vf.data_mut(0);
-    for y in 0..h as usize {
-        let n = src_row.min(rgba.len() - y * src_row);
-        dst[y * stride..y * stride + n].copy_from_slice(&rgba[y * src_row..y * src_row + n]);
-    }
-}
-
-fn try_open(cfg: &Config, name: &str, w: u32, h: u32) -> Result<ff::encoder::Video, String> {
-    let codec = ff::encoder::find_by_name(name).ok_or_else(|| format!("codec {name} not found"))?;
+fn try_open(cfg: &Config, codec: Codec, w: u32, h: u32) -> Result<ff::encoder::Video, String> {
+    let name = codec.nvenc();
+    let codec = ff::encoder::find_by_name(name)
+        .ok_or_else(|| format!("{name} is not in this FFmpeg build"))?;
     let mut ctx = ff::codec::context::Context::new_with_codec(codec)
         .encoder()
         .video()
@@ -296,12 +320,13 @@ fn try_open(cfg: &Config, name: &str, w: u32, h: u32) -> Result<ff::encoder::Vid
     ctx.set_max_b_frames(0);
     ctx.set_bit_rate(cfg.bitrate);
     ctx.set_max_bit_rate(cfg.bitrate * 2);
-    ctx.set_flags(ff::codec::Flags::GLOBAL_HEADER); // SPS/PPS in extradata for mp4
+    // Parameter sets (SPS/PPS, HEVC VPS, AV1 sequence header) go to extradata
+    // for the mp4 sample entry instead of being repeated in-band.
+    ctx.set_flags(ff::codec::Flags::GLOBAL_HEADER);
     let mut opts = ff::Dictionary::new();
-    opts.set("preset", "p5");
-    opts.set("tune", "hq");
-    opts.set("rc", "vbr");
-    opts.set("bf", "0");
+    for (key, value) in cfg.quality.nvenc_options() {
+        opts.set(key, value);
+    }
     ctx.open_with(opts).map_err(|e| e.to_string())
 }
 
@@ -394,8 +419,12 @@ impl Enc {
                 .ok_or("no frame available for static save")?;
             let still = VideoSrc::Still {
                 frame,
-                fps: self.nominal_fps,
-                bitrate: self.bitrate,
+                spec: StillSpec {
+                    fps: self.nominal_fps,
+                    bitrate: self.bitrate,
+                    codec: self.codec,
+                    quality: self.quality,
+                },
             };
             (still, want_us.max(1) as f64 / 1_000_000.0)
         } else {
@@ -427,35 +456,6 @@ impl Enc {
             timing,
         })
     }
-}
-
-/// Encode one raw frame as a fresh keyframe-only NVENC stream lasting
-/// `seconds` (quiet-tail saves). Runs on the saver thread with its own
-/// session; the live encoder and its replay ring are untouched.
-fn encode_still(
-    frame: &RawFrame,
-    fps: u32,
-    bitrate: usize,
-    seconds: u32,
-) -> Result<(Vec<EncodedPacket>, OwnedParams), String> {
-    let (width, height, rgba) = frame;
-    let cfg = Config {
-        fps,
-        buffer_secs: seconds.max(1),
-        bitrate,
-        json: false,
-    };
-    let mut still = open_encoder(&cfg, *width, *height)?;
-    let stats = EncStats::default();
-    still.send_rgba(0, *width, rgba)?;
-    still.drain(&stats)?;
-    still
-        .encoder
-        .send_eof()
-        .map_err(|e| format!("NVENC still flush: {e}"))?;
-    still.drain(&stats)?;
-    let want_us = seconds as u64 * 1_000_000;
-    Ok((still.ring.save_window_at(want_us, want_us), still.params.clone()))
 }
 
 /// Encoder-thread half of a save: build the job and queue it. Never muxes;
