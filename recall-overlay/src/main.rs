@@ -19,6 +19,7 @@ use windows::Win32::Foundation::{
     WPARAM,
 };
 use windows::Win32::Graphics::Gdi::{
+    AddFontMemResourceEx, CreateRoundRectRgn, FrameRgn, SetWindowRgn, FW_MEDIUM,
     BeginPaint, CreateCompatibleDC, CreateDIBSection, CreateFontW, CreateSolidBrush, DeleteDC,
     DeleteObject, DrawTextW, Ellipse, EndPaint, FillRect, GetMonitorInfoW, GetTextFaceW,
     InvalidateRect, MonitorFromPoint, SelectObject, SetBkMode, SetTextColor, BITMAPINFO,
@@ -133,6 +134,7 @@ fn main() {
 }
 
 fn run() -> Result<(), String> {
+    load_fonts();
     let options = parse_args()?;
     if options.parent.is_none() && options.smoke_state.is_none() {
         return Err("--parent PID is required outside --smoke-state test mode".into());
@@ -204,6 +206,10 @@ fn run() -> Result<(), String> {
             SWP_NOACTIVATE,
         )
         .map_err(|e| format!("position overlay: {e}"))?;
+        // Rounded card to match the app's 10 px panels.
+        let radius = 10 * GetDpiForWindow(hwnd).max(96) as i32 / 96;
+        let region = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2);
+        let _ = SetWindowRgn(hwnd, Some(region), false);
         SetTimer(Some(hwnd), TIMER_ID, TICK_MS, None);
     }
     sync_visibility(hwnd);
@@ -523,29 +529,15 @@ unsafe fn draw_overlay(
     dpi: i32,
     view: &OverlayView,
 ) -> (String, String) {
+    // Recall design system: raised card #121212, #282828 hairline, Geist type,
+    // safety-colour dot, tertiary detail line. Two lines: what happened + detail.
     let scale = |dip: i32| dip * dpi / 96;
-    let canvas = CreateSolidBrush(rgb(0x0a, 0x0a, 0x0a));
-    let panel = CreateSolidBrush(rgb(0x12, 0x12, 0x12));
-    FillRect(
-        hdc,
-        &RECT {
-            left: 0,
-            top: 0,
-            right: width,
-            bottom: height,
-        },
-        canvas,
-    );
-    FillRect(
-        hdc,
-        &RECT {
-            left: 0,
-            top: 0,
-            right: scale(4),
-            bottom: height,
-        },
-        panel,
-    );
+    let card = CreateSolidBrush(rgb(0x12, 0x12, 0x12));
+    let edge = CreateSolidBrush(rgb(0x28, 0x28, 0x28));
+    FillRect(hdc, &RECT { left: 0, top: 0, right: width, bottom: height }, card);
+    let radius = scale(10);
+    let outline = CreateRoundRectRgn(0, 0, width + 1, height + 1, radius * 2, radius * 2);
+    let _ = FrameRgn(hdc, outline, edge, 1, 1);
     let dot_color = match view.state {
         RecorderState::Ready => rgb(0x81, 0xc9, 0x95),
         RecorderState::Starting => rgb(0xfd, 0xd6, 0x63),
@@ -554,85 +546,39 @@ unsafe fn draw_overlay(
     };
     let dot = CreateSolidBrush(dot_color);
     let old_brush = SelectObject(hdc, HGDIOBJ(dot.0));
-    let _ = Ellipse(hdc, scale(14), scale(12), scale(22), scale(20));
+    let mid = height / 2;
+    let _ = Ellipse(hdc, scale(15), mid - scale(13), scale(22), mid - scale(6));
     SelectObject(hdc, old_brush);
     SetBkMode(hdc, TRANSPARENT);
-    let title_font = CreateFontW(
-        -scale(14),
-        0,
-        0,
-        0,
-        FW_SEMIBOLD.0 as i32,
-        0,
-        0,
-        0,
-        DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY,
-        DEFAULT_PITCH.0 as u32,
-        w!("Segoe UI"),
-    );
-    let body_font = CreateFontW(
-        -scale(12),
-        0,
-        0,
-        0,
-        FW_NORMAL.0 as i32,
-        0,
-        0,
-        0,
-        DEFAULT_CHARSET,
-        OUT_DEFAULT_PRECIS,
-        CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY,
-        DEFAULT_PITCH.0 as u32,
-        w!("Segoe UI"),
-    );
+    let font = |px: i32, weight: i32| {
+        CreateFontW(-scale(px), 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            CLEARTYPE_QUALITY, DEFAULT_PITCH.0 as u32, w!("Geist"))
+    };
+    let title_font = font(14, FW_SEMIBOLD.0 as i32);
+    let body_font = font(12, FW_MEDIUM.0 as i32);
     let original_font = SelectObject(hdc, HGDIOBJ(title_font.0));
     let title_face = selected_font_face(hdc);
-    draw_text(
-        hdc,
-        &view.primary,
-        RECT {
-            left: scale(30),
-            top: scale(5),
-            right: width - scale(12),
-            bottom: scale(25),
-        },
-        rgb(0xed, 0xed, 0xed),
-    );
+    let left = scale(30);
+    draw_text(hdc, &view.primary, RECT { left, top: mid - scale(20), right: width - scale(14), bottom: mid + scale(1) }, rgb(0xed, 0xed, 0xed));
     SelectObject(hdc, HGDIOBJ(body_font.0));
     let body_face = selected_font_face(hdc);
-    draw_text(
-        hdc,
-        &view.metrics,
-        RECT {
-            left: scale(14),
-            top: scale(24),
-            right: width - scale(12),
-            bottom: scale(45),
-        },
-        rgb(0xa3, 0xa3, 0xa3),
-    );
-    draw_text(
-        hdc,
-        &view.secondary,
-        RECT {
-            left: scale(14),
-            top: scale(43),
-            right: width - scale(12),
-            bottom: height - scale(4),
-        },
-        rgb(0xa3, 0xa3, 0xa3),
-    );
+    draw_text(hdc, &view.secondary, RECT { left, top: mid + scale(1), right: width - scale(14), bottom: mid + scale(20) }, rgb(0x8f, 0x8f, 0x8f));
     SelectObject(hdc, original_font);
-    let _ = DeleteObject(HGDIOBJ(canvas.0));
-    let _ = DeleteObject(HGDIOBJ(panel.0));
-    let _ = DeleteObject(HGDIOBJ(dot.0));
-    let _ = DeleteObject(HGDIOBJ(title_font.0));
-    let _ = DeleteObject(HGDIOBJ(body_font.0));
+    for object in [HGDIOBJ(card.0), HGDIOBJ(edge.0), HGDIOBJ(dot.0), HGDIOBJ(title_font.0), HGDIOBJ(body_font.0), HGDIOBJ(outline.0)] {
+        let _ = DeleteObject(object);
+    }
     (title_face, body_face)
+}
+
+/// Loads Geist (OFL, shared with the app) as process-private fonts for GDI.
+fn load_fonts() {
+    for bytes in [
+        include_bytes!("../../recall-native/assets/fonts/geist-500.ttf").as_slice(),
+        include_bytes!("../../recall-native/assets/fonts/geist-600.ttf").as_slice(),
+    ] {
+        let mut installed = 0u32;
+        unsafe { AddFontMemResourceEx(bytes.as_ptr().cast(), bytes.len() as u32, None, &mut installed) };
+    }
 }
 
 unsafe fn selected_font_face(hdc: HDC) -> String {
