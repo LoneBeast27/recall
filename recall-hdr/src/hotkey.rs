@@ -26,6 +26,8 @@ use std::str::FromStr;
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
 
+use crate::record_hotkeys::{split_conflicts, Binding, HotkeyAction};
+
 /// A registered global toggle hotkey. Holds the manager alive (dropping it
 /// unregisters) and remembers the parsed `HotKey` so [`poll`](Hotkey::poll) can
 /// filter the shared event stream down to our own id.
@@ -115,76 +117,102 @@ impl Drop for Hotkey {
     }
 }
 
-/// What the record mode's accelerators reported since the last poll.
-#[derive(Default, Clone, Copy, Debug)]
-pub struct RecordFired {
-    pub save: bool,
-    pub mic: bool,
-    pub hdr: bool,
-}
-
-/// The unified record mode's accelerators (save replay, toggle mic, and the HDR
-/// toggle only while HDR management is on), re-bindable at runtime on ONE
-/// manager. Same pump-thread / single-instance contract as [`Hotkey`] -- the
-/// two are never alive at once (they belong to different modes).
+/// The unified record mode's accelerators (save presets, mic, bookmark,
+/// screenshot, long recording, and the HDR toggle only while HDR management
+/// is on), re-bindable at runtime on ONE manager. Same pump-thread /
+/// single-instance contract as [`Hotkey`] -- the two are never alive at once
+/// (they belong to different modes).
 pub struct RecordHotkeys {
     manager: GlobalHotKeyManager,
-    save: Option<HotKey>,
-    mic: Option<HotKey>,
-    hdr: Option<HotKey>,
+    bound: Vec<(HotKey, HotkeyAction)>,
 }
 
 impl RecordHotkeys {
     pub fn new() -> Result<Self, String> {
         let manager = GlobalHotKeyManager::new().map_err(|e| format!("global-hotkey manager init failed: {e}"))?;
-        Ok(RecordHotkeys { manager, save: None, mic: None, hdr: None })
+        Ok(RecordHotkeys { manager, bound: Vec::new() })
     }
 
-    /// Replace every binding. Returns one warning per accelerator that could not
-    /// be parsed/registered (the others still work).
-    pub fn bind(&mut self, save: &str, mic: &str, hdr: Option<&str>) -> Vec<String> {
-        for hk in [self.save.take(), self.mic.take(), self.hdr.take()].into_iter().flatten() {
+    /// Replace every binding with `list`. Returns one warning per accelerator
+    /// that is invalid, collides with an earlier one, or the OS refused (held
+    /// by another app); every other binding still works. The chord leader
+    /// follows the physical key left of 1 on this thread's layout.
+    pub fn bind(&mut self, list: Vec<Binding>) -> Vec<String> {
+        for (hk, _) in self.bound.drain(..) {
             let _ = self.manager.unregister(hk);
         }
-        let mut warnings = Vec::new();
-        let mut reg = |accel: &str| match parse_accel(accel).and_then(|hk| {
-            self.manager.register(hk).map(|_| hk).map_err(|e| format!("register hotkey '{accel}' failed: {e}"))
-        }) {
-            Ok(hk) => Some(hk),
-            Err(e) => {
-                warnings.push(e);
-                None
+        let (keep, mut warnings) = split_conflicts(list, crate::record_chord::win::left_of_one_vk());
+        for (b, hk) in keep {
+            match self.manager.register(hk) {
+                Ok(()) => self.bound.push((hk, b.action)),
+                Err(e) => warnings.push(format!(
+                    "{} hotkey '{}' could not be registered (another app may own it): {e}",
+                    b.label, b.accel
+                )),
             }
-        };
-        let save_hk = reg(save);
-        let mic_hk = reg(mic);
-        let hdr_hk = hdr.and_then(&mut reg);
-        self.save = save_hk;
-        self.mic = mic_hk;
-        self.hdr = hdr_hk;
+        }
         warnings
     }
 
+    /// The actions now registered (for the log).
+    pub fn bound(&self) -> Vec<HotkeyAction> {
+        self.bound.iter().map(|(_, a)| *a).collect()
+    }
+
+    /// The registered accelerator for `action` (the leader resolved to the
+    /// physical key).
+    pub fn bound_hotkey(&self, action: HotkeyAction) -> Option<HotKey> {
+        self.bound.iter().find(|(_, a)| *a == action).map(|(hk, _)| *hk)
+    }
+
     /// Drain the process-global hotkey channel (non-blocking, presses only).
-    pub fn poll(&self) -> RecordFired {
-        let mut fired = RecordFired::default();
+    /// Each action is reported once however often it fired; ids that are not
+    /// bound actions (the chord's temporary keys) come back as `Other`.
+    pub fn poll(&self) -> Vec<Pressed> {
+        let mut fired = Vec::new();
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.state != HotKeyState::Pressed {
                 continue;
             }
-            let is = |hk: Option<HotKey>| hk.is_some_and(|h| h.id() == event.id);
-            fired.save |= is(self.save);
-            fired.mic |= is(self.mic);
-            fired.hdr |= is(self.hdr);
+            let pressed = match action_for(&self.bound, event.id) {
+                Some(action) => Pressed::Action(action),
+                None => Pressed::Other(event.id),
+            };
+            if !fired.contains(&pressed) {
+                fired.push(pressed);
+            }
         }
         fired
     }
 }
 
+/// One press drained by [`RecordHotkeys::poll`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Pressed {
+    Action(HotkeyAction),
+    /// A registered id with no bound action (a chord follow-up key).
+    Other(u32),
+}
+
+/// The chord registers its temporary keys on the same manager.
+impl crate::record_chord::Registrar for RecordHotkeys {
+    fn register(&mut self, hk: HotKey) -> Result<(), String> {
+        self.manager.register(hk).map_err(|e| format!("register {hk:?}: {e}"))
+    }
+    fn unregister(&mut self, hk: HotKey) {
+        let _ = self.manager.unregister(hk);
+    }
+}
+
+/// The action bound to accelerator `id`, if any.
+fn action_for(bound: &[(HotKey, HotkeyAction)], id: u32) -> Option<HotkeyAction> {
+    bound.iter().find(|(hk, _)| hk.id() == id).map(|(_, a)| *a)
+}
+
 impl Drop for RecordHotkeys {
     fn drop(&mut self) {
-        for hk in [self.save, self.mic, self.hdr].into_iter().flatten() {
-            let _ = self.manager.unregister(hk);
+        for (hk, _) in &self.bound {
+            let _ = self.manager.unregister(*hk);
         }
     }
 }
@@ -293,5 +321,17 @@ mod tests {
         assert_eq!(save.key, Code::KeyN);
         assert_eq!(mic.key, Code::KeyM);
         assert_ne!(save.id(), mic.id(), "distinct ids so poll can tell them apart");
+    }
+
+    #[test]
+    fn poll_maps_each_accelerator_id_to_its_action() {
+        let bound = vec![
+            (parse_accel("Alt+N").unwrap(), HotkeyAction::Save { seconds: 0 }),
+            (parse_accel("Alt+B").unwrap(), HotkeyAction::Save { seconds: 30 }),
+            (parse_accel("Alt+R").unwrap(), HotkeyAction::Record),
+        ];
+        assert_eq!(action_for(&bound, parse_accel("Alt+B").unwrap().id()), Some(HotkeyAction::Save { seconds: 30 }));
+        assert_eq!(action_for(&bound, parse_accel("Alt+R").unwrap().id()), Some(HotkeyAction::Record));
+        assert_eq!(action_for(&bound, parse_accel("Alt+Q").unwrap().id()), None);
     }
 }

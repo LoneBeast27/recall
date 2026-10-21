@@ -151,6 +151,14 @@ impl Supervisor {
         }
     }
 
+    /// Also hand the controller the engine events it acts on
+    /// ([`FORWARDED_EVENTS`]: saves, long recording, screenshots, bookmarks).
+    pub fn attach_events(&self, tx: std::sync::mpsc::Sender<serde_json::Value>) {
+        if let Ok(mut g) = self.shared.events.lock() {
+            *g = Some(tx);
+        }
+    }
+
     /// Clean shutdown: signal the manager to stop, send `{"cmd":"quit"}` to the
     /// child's stdin, wait up to `grace` for a clean exit, then hard-kill any
     /// survivor and join the manager thread.
@@ -201,7 +209,22 @@ struct Shared {
     cache: Mutex<EngineCache>,
     /// Control-pipe hub: engine protocol lines are re-broadcast to hub clients.
     hub: Mutex<Option<Arc<crate::control::PipeHub>>>,
+    /// The controller's engine-event channel (record mode).
+    events: Mutex<Option<std::sync::mpsc::Sender<serde_json::Value>>>,
 }
+
+/// Engine event types handed to the controller via `attach_events`.
+pub const FORWARDED_EVENTS: [&str; 9] = [
+    "saved",
+    "save_failed",
+    "recording_started",
+    "recording_stopped",
+    "recording_failed",
+    "recording_recovered",
+    "screenshot",
+    "screenshot_failed",
+    "bookmarked",
+];
 
 impl Shared {
     fn new(initial: Option<EngineSpec>) -> Shared {
@@ -216,6 +239,20 @@ impl Shared {
             spawn_count: AtomicU32::new(0),
             cache: Mutex::new(EngineCache::default()),
             hub: Mutex::new(None),
+            events: Mutex::new(None),
+        }
+    }
+
+    /// Forward one parsed engine event to the controller (if attached).
+    fn forward_event(&self, val: &serde_json::Value) {
+        let kind = val.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if !FORWARDED_EVENTS.contains(&kind) {
+            return;
+        }
+        if let Ok(g) = self.events.lock() {
+            if let Some(tx) = g.as_ref() {
+                let _ = tx.send(val.clone());
+            }
         }
     }
 
@@ -601,6 +638,7 @@ fn read_protocol(shared: &Arc<Shared>, stdout: std::process::ChildStdout) {
             continue; // ignore non-JSON / malformed lines
         };
         shared.hub_engine_event(line);
+        shared.forward_event(&val);
         match val.get("type").and_then(|t| t.as_str()) {
             Some("hello") => {
                 let version = val.get("version").and_then(|v| v.as_str()).unwrap_or("?");
@@ -652,6 +690,16 @@ fn read_protocol(shared: &Arc<Shared>, stdout: std::process::ChildStdout) {
             }
             Some("encoder_log") => {
                 log!("supervisor: engine encoder -- {}", field(&val, "message"));
+            }
+            Some(kind @ ("bookmarked" | "screenshot" | "recording_started" | "recording_stopped")) => {
+                log!("supervisor: engine {kind} -- {}", field(&val, "path"));
+                // Instant audible feedback; the overlay shows the details.
+                beep(if kind == "recording_stopped" { 0x00 } else { 0x40 });
+            }
+            Some("recording_recovered") => log!("supervisor: engine recovered a crashed long recording -> {}", field(&val, "path")),
+            Some(kind @ ("screenshot_failed" | "recording_failed")) => {
+                log!("supervisor: engine {kind} -- {}", field(&val, "reason"));
+                beep_failure();
             }
             _ => {} // unknown message types are ignored
         }
