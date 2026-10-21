@@ -21,8 +21,8 @@ pub fn run_hidden(command: &mut Command, lowered: bool) -> io::Result<Output> {
     io_priority::output(command, lowered)
 }
 
-/// `variable`, else `tools/ffmpeg-dev/*/bin/<executable>` or `bin/<executable>` above the
-/// crate or the running executable.
+/// `variable`, else `bin/<executable>` or `tools/ffmpeg-dev/*/bin/<executable>` above the
+/// running executable (an installed copy uses its own `bin`), then above the crate.
 pub fn binary(variable: &str, executable: &str) -> Result<PathBuf, String> {
     if let Some(value) = std::env::var_os(variable) {
         let path = PathBuf::from(value);
@@ -30,10 +30,8 @@ pub fn binary(variable: &str, executable: &str) -> Result<PathBuf, String> {
     }
     let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let running = std::env::current_exe().ok();
-    let mut roots: Vec<&Path> = manifest.ancestors().collect();
-    if let Some(path) = running.as_deref() {
-        roots.extend(path.ancestors());
-    }
+    let mut roots: Vec<&Path> = running.as_deref().map(|p| p.ancestors().collect()).unwrap_or_default();
+    roots.extend(manifest.ancestors());
     for root in roots {
         if let Ok(entries) = std::fs::read_dir(root.join("tools").join("ffmpeg-dev")) {
             for entry in entries.flatten() {

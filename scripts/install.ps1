@@ -14,11 +14,13 @@
     cache\              created by the app; capped (Settings → Storage)
 
   Usage (PowerShell):
-    powershell -NoProfile -File scripts\install.ps1 [-InstallDir <path on an SSD>] [-NoBuild] [-NoShortcut]
+    powershell -NoProfile -File scripts\install.ps1 [-InstallDir <path on an SSD>] [-NoBuild] [-NoShortcut] [-NoAutostart]
   Default install folder: %LOCALAPPDATA%\Programs\Recall (per-user, no admin rights).
+  After installing, the installed recorder starts and is set to start with Windows
+  (Settings > General turns that off; -NoAutostart skips it).
   Builds run through nice-build.ps1 (CCD1, BelowNormal) so a running game is not disturbed.
 #>
-param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut)
+param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$NoAutostart)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $stage = Join-Path $repo 'dist'
@@ -73,18 +75,21 @@ Get-ChildItem (Join-Path $ffmpegRoot 'bin\*.dll') | ForEach-Object {
 Copy-Item (Join-Path $ffmpegRoot 'bin\ffmpeg.exe'), (Join-Path $ffmpegRoot 'bin\ffprobe.exe') (Join-Path $stage 'bin') -Force
 Copy-Item (Join-Path $repo 'recall-native\assets\recall.ico') $stage -Force
 
-# 4. Stop an installed copy gracefully (controller quit closes engine, overlay and app).
-function Get-Installed { Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) } }
-if (Get-Installed) {
+# 4. Quit the running recorder gracefully, wherever it runs from (only one controller can run;
+#    its quit also stops the engine and overlay), and wait for the installed files to be free.
+function Send-Recorder([string]$line) {
   try {
     $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', 'recall-hdr-control', [IO.Pipes.PipeDirection]::Out)
-    $pipe.Connect(1500); $w = [IO.StreamWriter]::new($pipe); $w.AutoFlush = $true; $w.WriteLine('{"cmd":"quit"}'); $w.Dispose()
-  } catch { }
-  $deadline = (Get-Date).AddSeconds(8)
-  while ((Get-Date) -lt $deadline -and (Get-Installed)) { Start-Sleep -Milliseconds 300 }
-  $left = Get-Installed
-  if ($left) { throw ("Recall is still running (" + (($left | ForEach-Object { $_.Name }) -join ', ') + "). Quit it from the tray, then re-run.") }
+    $pipe.Connect(1500); $w = [IO.StreamWriter]::new($pipe); $w.AutoFlush = $true; $w.WriteLine($line); $w.Dispose(); $true
+  } catch { $false }
 }
+function Get-Installed { Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) } }
+function Get-Controller { Get-CimInstance Win32_Process -Filter "Name = 'recall-hdr.exe'" }
+if (Get-Controller) { [void](Send-Recorder '{"cmd":"quit"}') }
+$deadline = (Get-Date).AddSeconds(8)
+while ((Get-Date) -lt $deadline -and ((Get-Installed) -or (Get-Controller))) { Start-Sleep -Milliseconds 300 }
+$left = @(Get-Installed) + @(Get-Controller) | Where-Object { $_ }
+if ($left) { throw ("Recall is still running (" + (($left | ForEach-Object { $_.Name }) -join ', ') + "). Quit it from the tray, then re-run.") }
 
 # 5. Install (the cache folder is never touched).
 New-Item -ItemType Directory -Force -Path $InstallDir, (Join-Path $InstallDir 'bin') | Out-Null
@@ -102,5 +107,14 @@ if (-not $NoShortcut) {
   $s.Save()
   "Start menu shortcut: $lnk"
 }
+# 6. Start the installed recorder; it owns Start with Windows (the Run value names its own path).
+Start-Process -FilePath (Join-Path $InstallDir 'recall-hdr.exe') -ArgumentList '--record' -WorkingDirectory $InstallDir
+$deadline = (Get-Date).AddSeconds(10); $up = $false
+while (-not $up -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500; $up = Send-Recorder '{"cmd":"status"}' }
+if (-not $up) { Write-Warning 'The recorder did not answer on its control pipe; start Recall from the Start menu.' }
+elseif (-not $NoAutostart) {
+  [void](Send-Recorder '{"cmd":"set_config","patch":{"startup":{"autostart":true}}}')
+  'Recorder running; it starts with Windows (turn off in Settings > General).'
+} else { 'Recorder running.' }
 $size = (Get-ChildItem $InstallDir -Recurse -File -Exclude 'cache' | Where-Object { $_.FullName -notlike "*\cache\*" } | Measure-Object Length -Sum).Sum
 "Installed to $InstallDir ($([math]::Round($size / 1MB)) MB of program files; the cache is capped separately)."
