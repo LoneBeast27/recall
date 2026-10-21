@@ -420,7 +420,11 @@ impl Render for Root {
         )
         .absolute()
         .inset_0();
-        div()
+        let mut root = div();
+        // Tabular figures everywhere so timecodes, sizes and counters don't jitter.
+        root.text_style().get_or_insert_with(Default::default).font_features =
+            Some(gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)])));
+        root
             .id("root")
             .key_context("Recall")
             .track_focus(&self.focus)
@@ -430,7 +434,7 @@ impl Render for Root {
             .flex()
             .flex_col()
             .child(backdrop)
-            .font_family(theme::SANS)
+            .font_family(theme::sans())
             .text_size(px(13.))
             .line_height(px(18.))
             .text_color(c(theme::TEXT))

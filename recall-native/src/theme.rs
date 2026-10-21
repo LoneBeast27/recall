@@ -28,8 +28,21 @@ pub const ACTIVE: u32 = 0x81c995;
 pub const WARNING: u32 = 0xfdd663;
 pub const ERROR: u32 = 0xf28b82;
 
-pub const SANS: &str = "Outfit";
-pub const MONO: &str = "Lilex";
+/// UI typeface. `RECALL_FONT=outfit|geist|manrope|instrument` picks one for comparison.
+pub fn sans() -> &'static str {
+    static FONT: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    FONT.get_or_init(|| match std::env::var("RECALL_FONT").unwrap_or_default().to_lowercase().as_str() {
+        "geist" => "Geist",
+        "manrope" => "Manrope",
+        "instrument" => "Instrument Sans",
+        _ => "Outfit",
+    })
+}
+
+/// Numbers use the UI face with tabular figures (set on the root), not a coding font.
+pub fn mono() -> &'static str {
+    sans()
+}
 
 pub fn c(value: u32) -> Hsla {
     rgb(value).into()

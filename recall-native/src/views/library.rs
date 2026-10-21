@@ -345,7 +345,7 @@ impl Root {
                     .px(px(5.))
                     .rounded(px(4.))
                     .bg(ca(theme::WINDOW, 0.8))
-                    .font_family(theme::MONO)
+                    .font_family(theme::mono())
                     .text_size(px(11.))
                     .line_height(px(16.))
                     .child(b)
@@ -369,7 +369,7 @@ impl Root {
                 .justify_between()
                 .gap(px(8.))
                 .child(div().font_weight(FontWeight::MEDIUM).min_w_0().truncate().child(record.display_title().to_owned()))
-                .child(div().font_family(theme::MONO).text_size(px(11.)).text_color(c(theme::TERTIARY)).child(time))
+                .child(div().font_family(theme::mono()).text_size(px(11.)).text_color(c(theme::TERTIARY)).child(time))
                 .into_any_element()
         };
         let open_path = path.clone();

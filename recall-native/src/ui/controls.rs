@@ -79,7 +79,7 @@ pub fn kbd(text: impl Into<SharedString>) -> Div {
         .border_1()
         .border_color(c(theme::BORDER))
         .bg(c(theme::BASE))
-        .font_family(theme::MONO)
+        .font_family(theme::mono())
         .text_size(px(11.))
         .text_color(c(theme::MUTED))
         .child(text.into())

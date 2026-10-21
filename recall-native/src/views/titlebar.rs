@@ -185,12 +185,12 @@ impl Root {
                     })))
                     .child(
                         div()
-                            .font_family(theme::MONO)
+                            .font_family(theme::mono())
                             .text_size(px(12.))
                             .child(if ready { library::format_duration(buffered) } else { "Starting".into() }),
                     )
                     .when(fps > 0, |d| {
-                        d.child(div().font_family(theme::MONO).text_size(px(12.)).text_color(c(theme::TERTIARY)).child(format!("{fps} fps")))
+                        d.child(div().font_family(theme::mono()).text_size(px(12.)).text_color(c(theme::TERTIARY)).child(format!("{fps} fps")))
                     })
                     .when(mic_muted, |d| d.child(icon(Icon::MicOff, 14., theme::TERTIARY))),
             )

@@ -185,7 +185,7 @@ impl Root {
                         .when(live, |d| d.child(div().absolute().left_0().right_0().bottom(relative(peak)).h(px(2.)).bg(c(if clipping { theme::SIGNAL } else { theme::TEXT })))),
                 )
                 .child(div().font_weight(FontWeight::MEDIUM).child(r.label.clone()))
-                .child(div().font_family(theme::MONO).text_size(px(11.)).text_color(c(theme::TERTIARY)).child(match &r.state {
+                .child(div().font_family(theme::mono()).text_size(px(11.)).text_color(c(theme::TERTIARY)).child(match &r.state {
                     MeterState::Live => format!("{:.0} dB", r.rms_db.max(-90.0)),
                     MeterState::Missing => "Not found".into(),
                     MeterState::Error(_) => "Error".into(),
@@ -237,9 +237,9 @@ impl Root {
                         .flex()
                         .flex_col()
                         .gap(px(2.))
-                        .font_family(theme::MONO)
+                        .font_family(theme::mono())
                         .text_size(px(12.))
-                        .child(div().font_family(theme::SANS).text_color(c(theme::TERTIARY)).pb(px(4.)).child("Incoming"))
+                        .child(div().font_family(theme::sans()).text_color(c(theme::TERTIARY)).pb(px(4.)).child("Incoming"))
                         .when(recent.is_empty(), |d| d.child(div().text_color(c(theme::DISABLED)).child("No messages yet. Press a pad on the RØDECaster.")))
                         .children(recent.into_iter().map(|m| {
                             let bytes: Vec<String> = m.bytes.iter().map(|b| format!("{b:02X}")).collect();
