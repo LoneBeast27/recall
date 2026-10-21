@@ -1709,7 +1709,7 @@ impl Editor {
                             )
                             .on_mouse_down(
                                 MouseButton::Left,
-                                cx.listener(move |editor, event, _, cx| {
+                                cx.listener(move |editor, event: &gpui::MouseDownEvent, _, cx| {
                                     editor.scrub_from_x(f32::from(event.position.x));
                                     cx.notify();
                                 }),
