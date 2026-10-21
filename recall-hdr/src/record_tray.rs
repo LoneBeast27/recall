@@ -1,11 +1,13 @@
-//! Recording-only notification-area UI. This module deliberately knows nothing
-//! about HDR, display state, or capture control beyond the supervisor health.
+//! The record mode's notification-area UI: a status line ("Recording VALORANT"
+//! / "Waiting for a game"), Open Recall (focus or launch `recall-native.exe`),
+//! Save replay now, Start with Windows, Quit Recall. It performs none of the
+//! actions itself -- [`RecordingTray::poll`] returns commands for the pump.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use tray_icon::menu::{ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{CheckMenuItem, ContextMenu, Menu, MenuEvent, MenuItem, PredefinedMenuItem};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows::core::{BOOL, PWSTR};
 use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
@@ -15,22 +17,25 @@ use windows::Win32::System::Threading::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowLongPtrW, GetWindowThreadProcessId, IsWindowVisible, PostMessageW,
-    SetForegroundWindow, ShowWindow, GWL_EXSTYLE, GWL_STYLE, SW_HIDE, SW_RESTORE, WM_CLOSE,
-    WS_CAPTION, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    SetForegroundWindow, ShowWindow, GWL_EXSTYLE, GWL_STYLE, SW_RESTORE, WM_CLOSE, WS_CAPTION,
+    WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
 use crate::supervisor::EngineHealth;
 
 const ID_STATUS: &str = "record_status";
 const ID_OPEN: &str = "record_open";
-const ID_HIDE: &str = "record_hide";
+const ID_SAVE: &str = "record_save";
+const ID_AUTOSTART: &str = "record_autostart";
 const ID_QUIT: &str = "record_quit";
 
-/// Commands emitted by the recording-only tray. Keep dispatch in `record_session`.
+/// Commands emitted by the recording tray. Dispatch lives in the pump.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecordingTrayCmd {
     Open,
-    Hide,
+    SaveNow,
+    /// "Start with Windows" toggled to this (post-click) value.
+    SetAutostart(bool),
     Quit,
 }
 
@@ -39,45 +44,38 @@ pub struct RecordingTray {
     tray: TrayIcon,
     menu: Menu,
     status: MenuItem,
+    autostart: CheckMenuItem,
     last_line: Option<String>,
 }
 
 impl RecordingTray {
-    pub fn build() -> Result<Self, String> {
-        let status = MenuItem::with_id(ID_STATUS, "Recall: starting capture engine", false, None);
+    pub fn build(autostart_on: bool) -> Result<Self, String> {
+        let status = MenuItem::with_id(ID_STATUS, "Recall: starting", false, None);
         let open = MenuItem::with_id(ID_OPEN, "Open Recall", true, None);
-        let hide = MenuItem::with_id(ID_HIDE, "Hide Recall", true, None);
-        let quit = MenuItem::with_id(ID_QUIT, "Quit Recall (stop recording)", true, None);
-        let menu = Menu::with_items(&[
-            &status,
-            &open,
-            &hide,
-            &PredefinedMenuItem::separator(),
-            &quit,
-        ])
-        .map_err(|e| format!("build recording tray menu: {e}"))?;
+        let save = MenuItem::with_id(ID_SAVE, "Save replay now", true, None);
+        let autostart = CheckMenuItem::with_id(ID_AUTOSTART, "Start with Windows", true, autostart_on, None);
+        let quit = MenuItem::with_id(ID_QUIT, "Quit Recall", true, None);
+        let menu = Menu::with_items(&[&status, &open, &save, &autostart, &PredefinedMenuItem::separator(), &quit])
+            .map_err(|e| format!("build recording tray menu: {e}"))?;
         let (rgba, width, height) = recording_icon_rgba();
         let icon = Icon::from_rgba(rgba, width, height)
             .map_err(|e| format!("build recording icon: {e}"))?;
         let tray = TrayIconBuilder::new()
-            .with_tooltip("Recall: starting capture engine")
+            .with_tooltip("Recall: starting")
             .with_menu(Box::new(menu.clone()) as Box<dyn ContextMenu>)
             .with_icon(icon)
             .build()
             .map_err(|e| format!("build recording tray icon: {e}"))?;
-        Ok(Self {
-            tray,
-            menu,
-            status,
-            last_line: None,
-        })
+        Ok(Self { tray, menu, status, autostart, last_line: None })
     }
 
     /// Non-blocking drain of only this component's process-global menu events.
     pub fn poll(&self) -> Vec<RecordingTrayCmd> {
         let mut commands = Vec::new();
         while let Ok(event) = MenuEvent::receiver().try_recv() {
-            if let Some(command) = map_id(event.id.as_ref()) {
+            // muda flips a CheckMenuItem before emitting, so is_checked() is
+            // the post-click value.
+            if let Some(command) = map_id(event.id.as_ref(), self.autostart.is_checked()) {
                 commands.push(command);
             }
         }
@@ -89,14 +87,25 @@ impl RecordingTray {
         commands
     }
 
-    pub fn set_health(&mut self, health: EngineHealth) {
-        let line = health_line(health);
-        if self.last_line.as_deref() == Some(line.as_str()) {
+    /// Update the status line + tooltip (only on change).
+    pub fn set_status(&mut self, line: &str) {
+        if self.last_line.as_deref() == Some(line) {
             return;
         }
-        self.status.set_text(&line);
-        let _ = self.tray.set_tooltip(Some(&line));
-        self.last_line = Some(line);
+        self.status.set_text(line);
+        let _ = self.tray.set_tooltip(Some(line));
+        self.last_line = Some(line.to_string());
+    }
+
+    pub fn set_health(&mut self, health: EngineHealth) {
+        self.set_status(&health_line(health));
+    }
+
+    /// Reflect the config's autostart flag (e.g. changed from the app).
+    pub fn set_autostart_checked(&self, on: bool) {
+        if self.autostart.is_checked() != on {
+            self.autostart.set_checked(on);
+        }
     }
 
     /// Used only by the no-capture smoke host; this is muda's real native menu.
@@ -115,10 +124,11 @@ impl RecordingTray {
     }
 }
 
-fn map_id(id: &str) -> Option<RecordingTrayCmd> {
+fn map_id(id: &str, autostart_now: bool) -> Option<RecordingTrayCmd> {
     Some(match id {
         ID_OPEN => RecordingTrayCmd::Open,
-        ID_HIDE => RecordingTrayCmd::Hide,
+        ID_SAVE => RecordingTrayCmd::SaveNow,
+        ID_AUTOSTART => RecordingTrayCmd::SetAutostart(autostart_now),
         ID_QUIT => RecordingTrayCmd::Quit,
         _ => return None,
     })
@@ -266,7 +276,7 @@ pub fn diagnostic(line: &str) {
     }
 }
 
-/// Owns the bounded open/hide/close operations for only Recall's native or Hub UI.
+/// Owns the bounded open/close operations for only Recall's native UI.
 pub struct RecallUi {
     candidates: Vec<PathBuf>,
     launch_not_before: Option<Instant>,
@@ -275,8 +285,9 @@ pub struct RecallUi {
 impl RecallUi {
     pub fn from_current_exe() -> Self {
         let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from("recall-hdr.exe"));
+        let env_override = std::env::var_os("RECALL_NATIVE").map(PathBuf::from);
         Self {
-            candidates: ui_candidates(&exe),
+            candidates: ui_candidates(&exe, env_override),
             launch_not_before: None,
             spawned: None,
         }
@@ -325,18 +336,6 @@ impl RecallUi {
         }
         Vec::new()
     }
-    pub fn hide(&self) -> Vec<(u32, PathBuf, bool)> {
-        matching_windows(&self.candidates)
-            .into_iter()
-            .map(|(hwnd, pid, path)| {
-                unsafe {
-                    let _ = ShowWindow(hwnd, SW_HIDE);
-                }
-                let visible = unsafe { IsWindowVisible(hwnd).as_bool() };
-                (pid, path, visible)
-            })
-            .collect()
-    }
     pub fn close(&self) -> Vec<(u32, PathBuf, bool)> {
         matching_windows(&self.candidates)
             .into_iter()
@@ -351,24 +350,26 @@ impl RecallUi {
     }
 }
 
-fn ui_candidates(exe: &Path) -> Vec<PathBuf> {
+/// The native UI executables "Open Recall" focuses or launches, in order:
+/// 1. `RECALL_NATIVE` -- an explicit path to `recall-native.exe`;
+/// 2. `recall-native.exe` next to the controller exe (installed layout);
+/// 3. `<repo>/target-gpui/debug/recall-native.exe`;
+/// 4. `<repo>/target-gpui/release/recall-native.exe`,
+/// where `<repo>` is the nearest ancestor of the controller exe holding both
+/// `Cargo.toml` and `recall-hdr/Cargo.toml`. The first that exists is
+/// launched; a running window of ANY of them is focused instead.
+fn ui_candidates(exe: &Path, env_override: Option<PathBuf>) -> Vec<PathBuf> {
+    let mut candidates: Vec<PathBuf> = env_override.into_iter().collect();
     let Some(directory) = exe.parent() else {
-        return Vec::new();
+        return candidates;
     };
-    let mut candidates = vec![
-        directory.join("recall-native.exe"),
-        directory.join("recall-hub.exe"),
-    ];
-    // Installed sibling clients and this repository's own outputs are the only targets.
-    // Preserve native-first priority; sorting by path accidentally preferred the legacy Hub.
+    candidates.push(directory.join("recall-native.exe"));
     if let Some(root) = directory.ancestors().find(|root| {
         root.join("Cargo.toml").is_file() && root.join("recall-hdr/Cargo.toml").is_file()
     }) {
         candidates.extend([
             root.join("target-gpui/debug/recall-native.exe"),
             root.join("target-gpui/release/recall-native.exe"),
-            root.join("recall-hub/src-tauri/target/release/recall-hub.exe"),
-            root.join("recall-hub/src-tauri/target/debug/recall-hub.exe"),
         ]);
     }
     let mut unique = Vec::new();
@@ -385,10 +386,12 @@ mod tests {
     use super::*;
     #[test]
     fn command_ids_map_only_to_recording_commands() {
-        assert_eq!(map_id(ID_OPEN), Some(RecordingTrayCmd::Open));
-        assert_eq!(map_id(ID_HIDE), Some(RecordingTrayCmd::Hide));
-        assert_eq!(map_id(ID_QUIT), Some(RecordingTrayCmd::Quit));
-        assert_eq!(map_id(ID_STATUS), None);
+        assert_eq!(map_id(ID_OPEN, false), Some(RecordingTrayCmd::Open));
+        assert_eq!(map_id(ID_SAVE, false), Some(RecordingTrayCmd::SaveNow));
+        assert_eq!(map_id(ID_AUTOSTART, true), Some(RecordingTrayCmd::SetAutostart(true)));
+        assert_eq!(map_id(ID_AUTOSTART, false), Some(RecordingTrayCmd::SetAutostart(false)));
+        assert_eq!(map_id(ID_QUIT, false), Some(RecordingTrayCmd::Quit));
+        assert_eq!(map_id(ID_STATUS, false), None);
     }
     #[test]
     fn icon_buffer_is_rgba_and_monochrome() {
@@ -399,21 +402,21 @@ mod tests {
         }
     }
     #[test]
-    fn candidate_paths_keep_native_priority_inside_the_owning_project() {
+    fn candidate_paths_are_native_only_in_documented_order() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
-        let candidates = ui_candidates(&root.join("target-dev/debug/recall-hdr.exe"));
-        assert!(candidates.iter().all(|path| path.starts_with(root)));
-        let native = candidates
-            .iter()
-            .position(|path| path == &root.join("target-gpui/debug/recall-native.exe"))
-            .unwrap();
-        let hub = candidates
-            .iter()
-            .position(|path| {
-                path == &root.join("recall-hub/src-tauri/target/release/recall-hub.exe")
-            })
-            .unwrap();
-        assert!(native < hub);
+        let exe = root.join("target-dev/debug/recall-hdr.exe");
+        let pinned = PathBuf::from(r"D:\Apps\recall-native.exe");
+        let candidates = ui_candidates(&exe, Some(pinned.clone()));
+        assert_eq!(
+            candidates,
+            vec![
+                pinned,
+                root.join("target-dev/debug/recall-native.exe"),
+                root.join("target-gpui/debug/recall-native.exe"),
+                root.join("target-gpui/release/recall-native.exe"),
+            ]
+        );
+        assert!(ui_candidates(&exe, None).iter().all(|p| p.ends_with("recall-native.exe")), "never the Hub");
     }
 
     #[test]
