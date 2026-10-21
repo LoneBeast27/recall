@@ -144,7 +144,7 @@ impl EditorState {
                 project.plan
             }
             None => EditPlan {
-                ranges: vec![TimeRange { start: 0.0, end: info.duration }],
+                ranges: vec![TimeRange::new(0.0, info.duration)],
                 audio: info
                     .audio
                     .iter()
@@ -366,14 +366,15 @@ impl EditorState {
         self.seek(pos + delta);
     }
 
-    /// Source time → time in the edited output.
+    /// Source time → time in the edited output (slow/fast ranges count at their speed).
     pub fn edited_time(&self, source: f64) -> f64 {
         let mut total = 0.0;
         for range in &self.plan.ranges {
+            let speed = if range.speed > 0.0 { range.speed } else { 1.0 };
             if source >= range.end {
-                total += range.end - range.start;
+                total += (range.end - range.start) / speed;
             } else if source > range.start {
-                total += source - range.start;
+                total += (source - range.start) / speed;
             }
         }
         total
@@ -478,7 +479,7 @@ impl EditorState {
         self.revise();
         let range = self.plan.ranges[index].clone();
         self.plan.ranges[index].end = at;
-        self.plan.ranges.insert(index + 1, TimeRange { start: at, end: range.end });
+        self.plan.ranges.insert(index + 1, TimeRange { start: at, end: range.end, speed: range.speed });
         self.selected = index + 1;
     }
 
