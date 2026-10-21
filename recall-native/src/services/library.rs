@@ -1,8 +1,20 @@
 //! Clip library index: game names, day groups, search/sort, per-clip metadata
 //! (favourite, custom title, cached duration), Recycle Bin delete, hover-scrub frames.
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use crate::backend::ClipEntry;
+
+mod calendar;
+mod mp4;
+mod names;
+mod scrub;
+mod store;
+mod win;
+#[cfg(test)]
+mod tests;
+#[cfg(test)]
+mod tests_io;
 
 /// Local wall-clock time of a clip start (from the file name, else file mtime).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -86,28 +98,30 @@ pub struct Filter {
 /// Cleans a recorder file-name prefix into (merge key, display name).
 /// "Rocket-League®" → ("rocketleague", "Rocket League"); "DESKTOPCAPTURE" → ("desktop", "Desktop").
 pub fn normalize_game(prefix: &str) -> (String, String) {
-    let display = prefix.replace(['-', '_'], " ");
-    let key = display.chars().filter(|c| c.is_alphanumeric()).flat_map(char::to_lowercase).collect();
-    (key, display)
+    names::normalize(prefix)
 }
 
 /// Parses `GAME__YYYY-MM-DD__HH-MM-SS[-mmm][__hash].mp4` into (game prefix, local start).
-pub fn parse_file_name(_file_name: &str) -> Option<(String, LocalStamp)> {
-    None
+pub fn parse_file_name(file_name: &str) -> Option<(String, LocalStamp)> {
+    names::parse(file_name)
 }
 
 /// Converts Unix seconds to local wall-clock time.
-pub fn local_from_unix(_secs: u64) -> LocalStamp {
-    LocalStamp::default()
+pub fn local_from_unix(secs: u64) -> LocalStamp {
+    win::local_from_unix(secs)
 }
 
 /// Builds records from backend entries plus stored metadata. Cheap; no file reads
 /// except sidecar existence checks.
-pub fn build_records(entries: &[ClipEntry], _store: &MetaStore) -> Vec<ClipRecord> {
+pub fn build_records(entries: &[ClipEntry], store: &MetaStore) -> Vec<ClipRecord> {
+    let sidecars = sidecar_index(entries);
     entries
         .iter()
         .map(|entry| {
-            let (game_key, game) = normalize_game(entry.name.split("__").next().unwrap_or(&entry.name));
+            let (prefix, started) = parse_file_name(&entry.name)
+                .unwrap_or_else(|| (names::fallback_prefix(&entry.name).to_owned(), local_from_unix(entry.mtime)));
+            let (game_key, game) = normalize_game(&prefix);
+            let meta = store.meta(&entry.name);
             ClipRecord {
                 path: entry.path.clone(),
                 file_name: entry.name.clone(),
@@ -116,14 +130,45 @@ pub fn build_records(entries: &[ClipEntry], _store: &MetaStore) -> Vec<ClipRecor
                 thumb: entry.thumb.clone(),
                 game_key,
                 game,
-                started: local_from_unix(entry.mtime),
-                duration: None,
-                edited: false,
-                favourite: false,
-                title: None,
+                started,
+                duration: store.duration(&entry.name, entry.bytes, entry.mtime),
+                edited: sidecar_candidates(Path::new(&entry.path)).iter().any(|candidate| sidecars.contains(&sidecar_key(candidate))),
+                favourite: meta.is_some_and(|m| m.favourite),
+                title: meta.and_then(|m| m.title.clone()),
             }
         })
         .collect()
+}
+
+/// The editor writes `<file>.recall-edit.json` (backend `save_project`); `<stem>.recall-edit.json`
+/// is accepted too.
+pub(crate) fn sidecar_candidates(clip: &Path) -> Vec<PathBuf> {
+    let Some(name) = clip.file_name().map(|n| n.to_string_lossy().into_owned()) else { return Vec::new() };
+    let mut candidates = vec![clip.with_file_name(format!("{name}.recall-edit.json"))];
+    if let Some(stem) = clip.file_stem().map(|s| s.to_string_lossy().into_owned()) {
+        candidates.push(clip.with_file_name(format!("{stem}.recall-edit.json")));
+    }
+    candidates
+}
+
+fn sidecar_key(path: &Path) -> String {
+    path.to_string_lossy().to_lowercase()
+}
+
+/// One directory listing per clip folder instead of two stats per clip.
+fn sidecar_index(entries: &[ClipEntry]) -> HashSet<String> {
+    let folders: HashSet<PathBuf> = entries.iter().filter_map(|e| Path::new(&e.path).parent().map(Path::to_path_buf)).collect();
+    let mut index = HashSet::new();
+    for folder in folders {
+        let Ok(listing) = std::fs::read_dir(&folder) else { continue };
+        for item in listing.flatten() {
+            let name = item.file_name().to_string_lossy().to_lowercase();
+            if name.ends_with(".recall-edit.json") {
+                index.insert(sidecar_key(&folder.join(item.file_name())));
+            }
+        }
+    }
+    index
 }
 
 /// Games with counts, most clips first; variants merged by key.
@@ -141,27 +186,33 @@ pub fn game_counts(records: &[ClipRecord]) -> Vec<GameCount> {
 
 /// Applies the filter and sort; returns indices into `records`.
 pub fn filter_sort(records: &[ClipRecord], filter: &Filter, order: SortOrder) -> Vec<usize> {
-    let query = filter.query.to_lowercase();
+    let query = filter.query.trim().to_lowercase();
     let mut indices: Vec<usize> = records
         .iter()
         .enumerate()
         .filter(|(_, r)| filter.game_key.as_ref().is_none_or(|k| &r.game_key == k))
         .filter(|(_, r)| !filter.favourites_only || r.favourite)
-        .filter(|(_, r)| query.is_empty() || r.display_title().to_lowercase().contains(&query) || r.game.to_lowercase().contains(&query))
+        .filter(|(_, r)| {
+            query.is_empty()
+                || r.display_title().to_lowercase().contains(&query)
+                || r.game.to_lowercase().contains(&query)
+                || r.file_name.to_lowercase().contains(&query)
+        })
         .map(|(i, _)| i)
         .collect();
+    let newest = |a: &usize, b: &usize| records[*b].started.cmp(&records[*a].started).then_with(|| records[*a].file_name.cmp(&records[*b].file_name));
     match order {
-        SortOrder::Newest => indices.sort_by(|a, b| records[*b].started.cmp(&records[*a].started)),
-        SortOrder::Oldest => indices.sort_by(|a, b| records[*a].started.cmp(&records[*b].started)),
-        SortOrder::Longest => indices.sort_by(|a, b| records[*b].duration.unwrap_or(0.0).total_cmp(&records[*a].duration.unwrap_or(0.0))),
-        SortOrder::Largest => indices.sort_by(|a, b| records[*b].bytes.cmp(&records[*a].bytes)),
+        SortOrder::Newest => indices.sort_by(newest),
+        SortOrder::Oldest => indices.sort_by(|a, b| newest(b, a)),
+        SortOrder::Longest => indices.sort_by(|a, b| records[*b].duration.unwrap_or(0.0).total_cmp(&records[*a].duration.unwrap_or(0.0)).then_with(|| newest(a, b))),
+        SortOrder::Largest => indices.sort_by(|a, b| records[*b].bytes.cmp(&records[*a].bytes).then_with(|| newest(a, b))),
     }
     indices
 }
 
 /// Groups already-sorted indices by local day. `today` decides "Today"/"Yesterday".
 /// For Longest/Largest sorts the caller passes `by_day = false` and gets one group.
-pub fn group_by_day(records: &[ClipRecord], sorted: &[usize], _today: LocalStamp, by_day: bool) -> Vec<DayGroup> {
+pub fn group_by_day(records: &[ClipRecord], sorted: &[usize], today: LocalStamp, by_day: bool) -> Vec<DayGroup> {
     if !by_day {
         return vec![DayGroup {
             label: "All clips".into(),
@@ -175,7 +226,7 @@ pub fn group_by_day(records: &[ClipRecord], sorted: &[usize], _today: LocalStamp
     for &index in sorted {
         let date = records[index].started.date_key();
         if groups.last().is_none_or(|g| g.date != date) {
-            groups.push(DayGroup { label: format!("{}-{:02}-{:02}", date.0, date.1, date.2), date, items: vec![], total_secs: 0.0, durations_complete: true });
+            groups.push(DayGroup { label: calendar::day_label(date, today), date, items: vec![], total_secs: 0.0, durations_complete: true });
         }
         let group = groups.last_mut().expect("group pushed");
         group.items.push(index);
@@ -203,54 +254,38 @@ pub fn format_bytes(bytes: u64) -> String {
 /// Persistent per-clip metadata at `%APPDATA%\Recall\library.json` (atomic writes).
 #[derive(Debug, Default)]
 pub struct MetaStore {
-    _private: (),
-}
-
-impl MetaStore {
-    pub fn load() -> Self {
-        Self::default()
-    }
-    pub fn set_favourite(&mut self, _file_name: &str, _favourite: bool) -> Result<(), String> {
-        Err("metadata store not implemented".into())
-    }
-    /// `None` or empty clears the custom title.
-    pub fn set_title(&mut self, _file_name: &str, _title: Option<&str>) -> Result<(), String> {
-        Err("metadata store not implemented".into())
-    }
-    /// Cached duration keyed by (file name, bytes, mtime).
-    pub fn duration(&self, _file_name: &str, _bytes: u64, _mtime: u64) -> Option<f64> {
-        None
-    }
-    pub fn set_duration(&mut self, _file_name: &str, _bytes: u64, _mtime: u64, _secs: f64) {}
-    /// Persists pending duration-cache entries (debounced by the caller).
-    pub fn flush(&mut self) -> Result<(), String> {
-        Ok(())
-    }
+    /// None = in-memory only (a `Default` store, or a file that could not be read safely).
+    path: Option<PathBuf>,
+    clips: BTreeMap<String, store::ClipMeta>,
+    /// Unflushed duration-cache entries.
+    dirty: bool,
+    /// Why writes are refused (an unreadable existing file must not be overwritten).
+    write_block: Option<String>,
 }
 
 /// Reads an MP4's duration from its `moov/mvhd` box without decoding.
-pub fn mp4_duration(_path: &Path) -> Option<f64> {
-    None
+pub fn mp4_duration(path: &Path) -> Option<f64> {
+    mp4::duration(path)
 }
 
 /// Moves clips (plus their recorder thumbnail and edit sidecar) to the Recycle Bin.
 /// Returns how many clips moved.
-pub fn delete_to_recycle_bin(_clips: &[PathBuf]) -> Result<usize, String> {
-    Err("Recycle Bin delete not implemented".into())
+pub fn delete_to_recycle_bin(clips: &[PathBuf]) -> Result<usize, String> {
+    win::recycle(clips)
 }
 
 /// Eight low-resolution cached frames across the clip for hover-scrub.
 /// Blocking (ffmpeg); call from a worker thread.
-pub fn scrub_frames(_path: &str) -> Result<Vec<String>, String> {
-    Err("scrub frames not implemented".into())
+pub fn scrub_frames(path: &str) -> Result<Vec<String>, String> {
+    scrub::frames(path)
 }
 
 /// (free bytes, total bytes) of the volume holding `path`.
-pub fn drive_space(_path: &Path) -> Option<(u64, u64)> {
-    None
+pub fn drive_space(path: &Path) -> Option<(u64, u64)> {
+    win::drive_space(path)
 }
 
 /// Today's local date stamp.
 pub fn today() -> LocalStamp {
-    LocalStamp::default()
+    win::today()
 }
