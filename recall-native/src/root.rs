@@ -77,6 +77,8 @@ pub struct Root {
     pub meter_display: Vec<(f32, f32, Instant)>,
     /// Tile press that may become a drag-out: (path, window x, y).
     pub drag_origin: Option<(String, f32, f32)>,
+    /// When to check whether the recorder is running and start it (once per launch).
+    controller_check_at: Option<Instant>,
     pub frame_at: Instant,
 }
 
@@ -108,6 +110,7 @@ impl Root {
             corner_open: false,
             meter_display: Vec::new(),
             drag_origin: None,
+            controller_check_at: std::env::var_os("RECALL_NO_CONTROLLER").is_none().then(|| Instant::now() + Duration::from_millis(1500)),
             frame_at: Instant::now(),
         };
         if let Some(path) = std::env::var_os("RECALL_NATIVE_CLIP") {
@@ -161,6 +164,16 @@ impl Root {
             self.lib.queue_visible(&self.workers);
         }
         self.lib.flush_meta_if_due();
+        // Opening Recall means recording: start the recorder once if it isn't running.
+        if self.controller_check_at.is_some_and(|at| Instant::now() >= at) {
+            self.controller_check_at = None;
+            if !self.snap.connected {
+                if let Err(error) = crate::services::daemon::start_controller() {
+                    self.show_toast(ToastKind::Bad, "Couldn't start the recorder", Some(error));
+                    changed = true;
+                }
+            }
+        }
         if self.toast.as_ref().is_some_and(|t| Instant::now() >= t.until) {
             self.toast = None;
             changed = true;
