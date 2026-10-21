@@ -1,6 +1,20 @@
-//! Small capture-size jitter normalization (crop/pad, never scale).
+//! Small capture-size jitter normalization (crop/pad, never scale), and the
+//! RGBA -> RGB0 frame fill NVENC and the thumbnail scaler read from.
+
+use ffmpeg_next as ff;
 
 use super::PacedFrame;
+
+/// Copy tightly packed RGBA into an RGBZ video frame, honoring the stride.
+pub(super) fn fill_rgbz(vf: &mut ff::frame::Video, w: u32, h: u32, rgba: &[u8]) {
+    let stride = vf.stride(0);
+    let src_row = (w * 4) as usize;
+    let dst = vf.data_mut(0);
+    for y in 0..h as usize {
+        let n = src_row.min(rgba.len() - y * src_row);
+        dst[y * stride..y * stride + n].copy_from_slice(&rgba[y * src_row..y * src_row + n]);
+    }
+}
 
 /// Keep an initialized encoder stable across the few pixels of client-border
 /// jitter that WGC can report while a window gains or loses focus. This is
