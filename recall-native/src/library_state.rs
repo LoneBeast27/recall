@@ -139,8 +139,13 @@ impl LibraryState {
         self.refilter();
     }
 
+    /// By exact path, else by file name (the editor may hold a canonical `\\?\` path).
     pub fn record(&self, path: &str) -> Option<&ClipRecord> {
-        self.by_path.get(path).and_then(|i| self.records.get(*i))
+        if let Some(record) = self.by_path.get(path).and_then(|i| self.records.get(*i)) {
+            return Some(record);
+        }
+        let name = Path::new(path).file_name()?.to_string_lossy();
+        self.records.iter().find(|r| r.file_name == name)
     }
 
     pub fn refilter(&mut self) {
