@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["recall", "recall-hdr"]
+members = ["recall", "recall-hdr", "recall-overlay"]
 
 # recall-hdr (HDR display-manager companion utility) is added by a separate session;
 # see Agents/Claude/PRDs/recall-hdr-manager-build-brief.md

@@ -1,0 +1,21 @@
+const assert=require('node:assert/strict'), fs=require('node:fs'), path=require('node:path'),vm=require('node:vm'),ts=require('typescript');
+const source=fs.readFileSync(path.join(__dirname,'../src/lib/editor.ts'),'utf8');
+const compiled=ts.transpileModule(source,{compilerOptions:{module:ts.ModuleKind.CommonJS,target:ts.ScriptTarget.ES2022}}).outputText;
+const mod={exports:{}};vm.runInNewContext(compiled,{exports:mod.exports,module:mod,structuredClone,JSON});
+const api=mod.exports;
+const ranges=[{start:0,end:1},{start:2,end:4}];
+assert.equal(api.sourceToEdited(ranges,1.5),null);
+assert.equal(api.sourceToEdited(ranges,3),2);
+assert.equal(api.editedToSource(ranges,2),3);
+assert.equal(api.nextRetainedTime(ranges,1.5),2);
+assert.equal(api.splitAt(ranges,.5,4).length,3);
+assert.equal(api.cleanRanges([{start:-1,end:.5},{start:3,end:9}],4)[1].end,4);
+const proxied=new Proxy({ranges:[{start:0,end:4}],audio:[]},{});
+const history=api.makeHistory(proxied);
+history.push(new Proxy({ranges:[{start:1,end:4}],audio:[]},{}));
+assert.equal(history.canUndo,true);
+assert.equal(history.undo().ranges[0].start,0);
+assert.equal(history.canRedo,true);
+assert.equal(history.redo().ranges[0].start,1);
+console.log('PASS: source/edit mapping, gap skipping, splits, range bounds, and proxy-safe undo/redo.');
+

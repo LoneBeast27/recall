@@ -1,98 +1,117 @@
-//! Compressed-packet replay ring: holds the last N seconds of encoded video
-//! packets in RAM. The encoder pushes; `save_window` returns a clean packet
-//! run for muxing — always starting on a keyframe so the clip decodes from
-//! frame zero (the CFR-at-boundary requirement, R1).
+//! Compressed-packet replay ring, bounded by elapsed capture time.
+//!
+//! `frame_idx` deliberately retains its historic field name for callers, but
+//! is now a microsecond PTS in the video 1/1_000_000 time base. Packets are
+//! copied out with rebased PTS while retaining their VFR durations.
 
 use std::collections::VecDeque;
 
-/// One encoded frame out of the video encoder (h264_nvenc), annotated with the
-/// CFR frame index it was encoded at (PTS = index / fps, exact by construction).
 #[derive(Clone)]
 pub struct EncodedPacket {
-    /// Monotonic CFR frame index assigned by the pacer.
+    /// Capture PTS in microseconds.
     pub frame_idx: u64,
+    /// Packet duration in microseconds.
+    pub duration_us: u64,
     pub keyframe: bool,
     pub data: Vec<u8>,
 }
 
-/// Ring of encoded packets spanning at most `capacity_frames` + one GOP.
+/// A keyframe-aligned packet ring spanning approximately `capacity_us`.
 pub struct PacketRing {
     packets: VecDeque<EncodedPacket>,
-    capacity_frames: u64,
+    capacity_us: u64,
     bytes: usize,
 }
 
 impl PacketRing {
-    pub fn new(capacity_frames: u64) -> Self {
+    pub fn new(capacity_us: u64) -> Self {
         Self {
             packets: VecDeque::new(),
-            capacity_frames,
+            capacity_us,
             bytes: 0,
         }
     }
 
-    /// Current RAM footprint of buffered packet payloads.
     pub fn bytes(&self) -> usize {
         self.bytes
     }
 
-    /// Frames currently spanned (newest - oldest + 1), 0 when empty.
+    pub fn last_pts_us(&self) -> Option<u64> {
+        self.packets.back().map(|p| p.frame_idx)
+    }
+
+    /// PTS of the oldest decodable packet retained in the ring.
+    pub fn first_pts_us(&self) -> Option<u64> {
+        self.packets.front().map(|p| p.frame_idx)
+    }
+
+    /// Number of actual encoded packets, not a timestamp-derived frame count.
     pub fn span_frames(&self) -> u64 {
+        self.packets.len() as u64
+    }
+
+    /// Buffered elapsed time, including the duration of the newest packet.
+    pub fn span_us(&self) -> u64 {
         match (self.packets.front(), self.packets.back()) {
-            (Some(f), Some(b)) => b.frame_idx - f.frame_idx + 1,
+            (Some(first), Some(last)) => last
+                .frame_idx
+                .saturating_add(last.duration_us)
+                .saturating_sub(first.frame_idx),
             _ => 0,
         }
     }
 
-    /// Push a packet; evict whole leading GOPs once the span exceeds capacity.
-    /// Eviction is GOP-granular (front must stay a keyframe) so a save is
-    /// always decodable from its first packet.
+    /// Refine the newest packet when the next PTS arrives. This gives the
+    /// preceding packet its true capture interval without guessing from fps.
+    pub fn set_last_duration_us(&mut self, duration_us: u64) {
+        if let Some(last) = self.packets.back_mut() {
+            last.duration_us = duration_us.max(1);
+        }
+    }
+
+    /// Push a packet and evict complete leading GOPs once elapsed time exceeds
+    /// capacity. A save can consequently always begin with a decodable frame.
     pub fn push(&mut self, pkt: EncodedPacket) {
         self.bytes += pkt.data.len();
         self.packets.push_back(pkt);
-
-        while self.span_frames() > self.capacity_frames {
-            // Find the second keyframe; evict everything before it. If there
-            // is no second keyframe the single leading GOP is all we have —
-            // keep it (capacity is a target, not a hard invariant mid-GOP).
-            let Some(second_kf) = self
+        while self.span_us() > self.capacity_us {
+            let Some(second_keyframe) = self
                 .packets
                 .iter()
                 .enumerate()
                 .skip(1)
-                .find(|(_, p)| p.keyframe)
+                .find(|(_, packet)| packet.keyframe)
                 .map(|(i, _)| i)
             else {
                 break;
             };
-            // Only evict if doing so still leaves >= capacity worth of frames
-            // OR we are over budget by more than a GOP (keeps span tight).
-            let front_of_rest = self.packets[second_kf].frame_idx;
-            let back = self.packets.back().expect("non-empty").frame_idx;
-            if back - front_of_rest + 1 >= self.capacity_frames.min(back + 1) {
-                for _ in 0..second_kf {
-                    if let Some(p) = self.packets.pop_front() {
-                        self.bytes -= p.data.len();
-                    }
+            for _ in 0..second_keyframe {
+                if let Some(packet) = self.packets.pop_front() {
+                    self.bytes -= packet.data.len();
                 }
-            } else {
-                break;
             }
         }
     }
 
-    /// Packets for "save the last `want_frames`": from the newest keyframe at
-    /// or before (newest - want_frames + 1) — or the oldest keyframe if the
-    /// request exceeds what's buffered — through the newest packet.
-    /// Returns a PTS-rebased copy (first packet -> frame 0). Empty when no
-    /// keyframe is buffered yet.
-    pub fn save_window(&self, want_frames: u64) -> Vec<EncodedPacket> {
+    /// Return the last `want_us` of packets, expanded backwards to a keyframe.
+    /// Returned PTS values are rebased for a standalone container.
+    pub fn save_window(&self, want_us: u64) -> Vec<EncodedPacket> {
+        let end = self
+            .packets
+            .back()
+            .map(|p| p.frame_idx.saturating_add(p.duration_us))
+            .unwrap_or(0);
+        self.save_window_at(want_us, end)
+    }
+
+    /// As `save_window`, with an explicit capture-clock end point. This keeps
+    /// the newest still frame visible through a quiet tail before saving.
+    pub fn save_window_at(&self, want_us: u64, end_us: u64) -> Vec<EncodedPacket> {
         let Some(back) = self.packets.back() else {
             return Vec::new();
         };
-        let target_start = back.frame_idx.saturating_sub(want_frames.saturating_sub(1));
-
-        // Newest keyframe with frame_idx <= target_start; else oldest keyframe.
+        let end = end_us.max(back.frame_idx.saturating_add(back.duration_us));
+        let target_start = end.saturating_sub(want_us);
         let start_pos = self
             .packets
             .iter()
@@ -110,13 +129,26 @@ impl PacketRing {
         let Some(start_pos) = start_pos else {
             return Vec::new();
         };
-
         let base = self.packets[start_pos].frame_idx;
+        let last_pos = self.packets.len() - 1;
         self.packets
             .iter()
+            .enumerate()
             .skip(start_pos)
-            .map(|p| EncodedPacket {
-                frame_idx: p.frame_idx - base,
+            .map(|(pos, p)| EncodedPacket {
+                frame_idx: p.frame_idx.saturating_sub(base),
+                duration_us: if pos == last_pos {
+                    let held = end.saturating_sub(p.frame_idx).max(1);
+                    // A lone current keyframe may have been held for minutes. The
+                    // requested save window is then the desired still duration.
+                    if start_pos == last_pos {
+                        held.min(want_us.max(1))
+                    } else {
+                        held
+                    }
+                } else {
+                    p.duration_us
+                },
                 keyframe: p.keyframe,
                 data: p.data.clone(),
             })
@@ -127,74 +159,77 @@ impl PacketRing {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn kf(idx: u64) -> EncodedPacket {
+    fn packet(pts: u64, duration_us: u64, keyframe: bool) -> EncodedPacket {
         EncodedPacket {
-            frame_idx: idx,
-            keyframe: true,
-            data: vec![0u8; 100],
-        }
-    }
-    fn df(idx: u64) -> EncodedPacket {
-        EncodedPacket {
-            frame_idx: idx,
-            keyframe: false,
-            data: vec![0u8; 10],
-        }
-    }
-
-    /// Push `gops` GOPs of `gop` frames each, starting at frame 0.
-    fn fill(ring: &mut PacketRing, gops: u64, gop: u64) {
-        for g in 0..gops {
-            ring.push(kf(g * gop));
-            for i in 1..gop {
-                ring.push(df(g * gop + i));
-            }
+            frame_idx: pts,
+            duration_us,
+            keyframe,
+            data: vec![0; 4],
         }
     }
 
     #[test]
-    fn save_starts_on_keyframe_and_rebases() {
-        let mut ring = PacketRing::new(600);
-        fill(&mut ring, 5, 60); // frames 0..299
-        let w = ring.save_window(120); // want last 120 -> target_start 180
-        assert!(w[0].keyframe);
-        assert_eq!(w[0].frame_idx, 0); // rebased
-        assert_eq!(w.len(), 120); // kf at 180 exactly
+    fn irregular_pts_are_rebased_with_durations() {
+        let mut ring = PacketRing::new(10_000_000);
+        ring.push(packet(0, 16_000, true));
+        ring.push(packet(16_000, 52_000, false));
+        ring.push(packet(68_000, 33_000, false));
+        let saved = ring.save_window(100_000);
+        assert_eq!(
+            saved.iter().map(|p| p.frame_idx).collect::<Vec<_>>(),
+            vec![0, 16_000, 68_000]
+        );
+        assert_eq!(
+            saved.iter().map(|p| p.duration_us).collect::<Vec<_>>(),
+            vec![16_000, 52_000, 33_000]
+        );
+        assert_eq!(ring.span_us(), 101_000);
+        assert_eq!(ring.span_frames(), 3);
     }
 
     #[test]
-    fn save_clamps_to_buffered_history() {
-        let mut ring = PacketRing::new(600);
-        fill(&mut ring, 2, 60); // 120 frames buffered
-        let w = ring.save_window(100_000);
-        assert_eq!(w.len(), 120);
-        assert!(w[0].keyframe);
+    fn save_backs_up_to_keyframe_by_elapsed_time() {
+        let mut ring = PacketRing::new(10_000_000);
+        ring.push(packet(0, 40_000, true));
+        ring.push(packet(40_000, 40_000, false));
+        ring.push(packet(80_000, 40_000, true));
+        ring.push(packet(120_000, 80_000, false));
+        let saved = ring.save_window(90_000);
+        assert_eq!(saved[0].frame_idx, 0);
+        assert!(saved[0].keyframe);
+        assert_eq!(saved.len(), 2);
     }
 
     #[test]
-    fn eviction_keeps_front_keyframe_and_capacity() {
-        let mut ring = PacketRing::new(120); // 2 GOPs of 60
-        fill(&mut ring, 10, 60);
-        // Front must be a keyframe and span must be near capacity.
-        assert!(ring.packets.front().unwrap().keyframe);
-        assert!(ring.span_frames() <= 180); // capacity + <=1 GOP slack
-        assert!(ring.span_frames() >= 120);
+    fn capacity_evicts_whole_old_gop() {
+        let mut ring = PacketRing::new(100_000);
+        ring.push(packet(0, 40_000, true));
+        ring.push(packet(40_000, 40_000, false));
+        ring.push(packet(80_000, 40_000, true));
+        ring.push(packet(120_000, 40_000, false));
+        assert_eq!(ring.span_frames(), 2);
+        assert_eq!(ring.save_window(999_999)[0].frame_idx, 0);
     }
 
     #[test]
-    fn empty_ring_saves_nothing() {
-        let ring = PacketRing::new(600);
-        assert!(ring.save_window(60).is_empty());
+    fn static_tail_is_held_for_requested_window() {
+        let mut ring = PacketRing::new(10_000_000);
+        ring.push(packet(0, 16_000, true));
+        let saved = ring.save_window_at(60_000_000, 300_000_000);
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].duration_us, 60_000_000);
     }
 
     #[test]
-    fn mid_gop_save_backs_up_to_keyframe() {
-        let mut ring = PacketRing::new(600);
-        fill(&mut ring, 3, 60); // 0..179
-        // Want last 30 -> target_start 150 (mid-GOP) -> start at kf 120.
-        let w = ring.save_window(30);
-        assert!(w[0].keyframe);
-        assert_eq!(w.len(), 60); // from kf 120 through 179
+    fn multi_packet_static_tail_needs_a_fresh_still() {
+        let mut ring = PacketRing::new(10_000_000);
+        ring.push(packet(0, 1_000_000, true));
+        ring.push(packet(1_000_000, 16_000, false));
+        let saved = ring.save_window_at(60_000_000, 300_000_000);
+        // The ring cannot safely trim the inter-frame packet. Encoder save
+        // detects this shape and makes a fresh independent still keyframe.
+        assert_eq!(saved.len(), 2);
+        assert_eq!(saved.last().unwrap().duration_us, 299_000_000);
+        assert_eq!(ring.first_pts_us(), Some(0));
     }
 }

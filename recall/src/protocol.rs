@@ -31,8 +31,12 @@ pub enum Outbound {
         fps: u32,
         /// Seconds of replay currently buffered (0.0 when encode is off/down).
         buffer_secs: f32,
-        /// "h264_nvenc" | "libx264" | "off" | "failed".
+        /// "h264_nvenc" | "starting" | "off" | "failed".
         encoder: String,
+        encoder_error: Option<String>,
+        recording_mode: String,
+        /// Whether new microphone samples are entering the replay buffer as silence.
+        mic_muted: bool,
     },
     /// A `save_clip` completed: the clip is on disk.
     Saved {
@@ -43,9 +47,34 @@ pub enum Outbound {
         elapsed_ms: u64,
     },
     /// A `save_clip` failed.
-    SaveFailed { reason: String },
+    SaveFailed {
+        reason: String,
+    },
+    /// Sent after microphone capture muting changes.
+    MicMuted {
+        muted: bool,
+    },
+    ExportStarted {
+        source: String,
+        path: String,
+        fps: u32,
+    },
+    Exported {
+        source: String,
+        path: String,
+        fps: u32,
+        frames: u64,
+        seconds: f64,
+        elapsed_ms: u64,
+    },
+    ExportFailed {
+        source: String,
+        reason: String,
+    },
     /// Encoder lifecycle/diagnostic line (machine-readable log).
-    EncoderLog { message: String },
+    EncoderLog {
+        message: String,
+    },
 }
 
 #[derive(Serialize)]
@@ -65,6 +94,18 @@ pub enum Command {
     SetMode { value: String },
     /// Save the last N seconds of the replay buffer (default: full buffer).
     SaveClip { seconds: Option<u32> },
+    /// Set microphone capture muting for newly captured replay audio.
+    SetMicMute { muted: bool },
+    /// Toggle microphone capture muting for newly captured replay audio.
+    ToggleMicMute,
+    /// Export an existing VFR clip to a separate NVENC CFR file (60 fps default).
+    ExportClip {
+        path: String,
+        output: Option<String>,
+        fps: Option<u32>,
+        #[serde(default)]
+        edit: Option<crate::edit_model::EditPlan>,
+    },
     /// Ask the engine to exit cleanly.
     Quit,
 }

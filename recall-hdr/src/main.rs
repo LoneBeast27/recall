@@ -18,6 +18,8 @@
 #![allow(dead_code)]
 
 mod app;
+mod record_session;
+mod record_tray;
 mod clamp;
 mod config;
 mod display;
@@ -54,11 +56,13 @@ fn main() {
 
     let code = match arg {
         "" => app::run(),
+        "--record-only" => record_session::run(),
+        "--record-tray-smoke" => record_session::run_tray_smoke(),
         "--probe" => cmd_probe(),
         "--clamp-test" => cmd_clamp_test(),
         "--restore" => cmd_restore(),
         other => {
-            log!("unknown arg '{other}'. usage: recall-hdr [--probe|--clamp-test|--restore] (no args = run tray app)");
+            log!("unknown arg '{other}'. usage: recall-hdr [--record-only|--record-tray-smoke|--probe|--clamp-test|--restore] (no args = run tray app)");
             2
         }
     };

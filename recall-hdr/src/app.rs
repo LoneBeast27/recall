@@ -838,6 +838,16 @@ impl App {
                     None => supervisor.send_save_clip(),
                 }
             }
+            Some("export_clip") => {
+                if matches!(supervisor.health(), EngineHealth::Running { .. }) {
+                    supervisor.send_engine_line(&val.to_string());
+                } else {
+                    hub.event("engine", &serde_json::json!({
+                        "type": "export_failed", "source": val.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+                        "reason": "recording engine is offline; start Recall before exporting"
+                    }).to_string());
+                }
+            }
             Some("toggle_hdr") => {
                 log!("app: control toggle_hdr");
                 self.toggle_hdr_now();
