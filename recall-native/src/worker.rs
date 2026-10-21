@@ -1,29 +1,50 @@
 //! Background threads. The UI thread never blocks on disk, ffmpeg or the engine.
-//! `io`: list / prepare / save / export / delete (serial, in order).
-//! `assets`: thumbnails and durations (bulk). `scrub`: hover-scrub frames (latency-sensitive).
+//! `io`: list / prepare / save / flush / export / delete / storage (serial, in order).
+//! `assets`: thumbnails, durations, video copies. `scrub`: hover-scrub frames.
+//!
+//! Work that reads an HDD is routed onto that disk's I/O lane (`services::storage`): one
+//! reader per physical disk at very low I/O priority, hover-scrub ahead of visible
+//! thumbnails ahead of idle prefetch. SSD work runs directly on these threads.
 use std::{
-    path::PathBuf,
-    sync::mpsc::{self, Receiver, Sender},
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering},
+        mpsc::{self, Receiver, Sender},
+    },
     thread,
 };
 
 use crate::{
-    backend::{self, ClipEntry, ExportSummary, PreparedClip},
+    backend::{self, ClipEntry, ExportSummary, PreparedClip, StorageReport},
     edit_model::{ClipInfo, EditPlan},
-    services::library,
+    services::{
+        library::{self, MetaStore},
+        storage::{self, CacheKind, PrefetchClip, PrefetchEvent, Priority},
+    },
 };
 
 pub enum Job {
     List,
     Prepare(u64, String),
+    /// Autosave: working copy on the SSD (`Done::Saved`).
     SaveProject(ClipInfo, EditPlan, u32),
+    /// Leave / close / export: the sidecar beside the clip, only if it changed (`Done::Flushed`).
+    FlushProject(ClipInfo, EditPlan, u32),
     Export(ClipInfo, EditPlan, u32),
     Delete(Vec<PathBuf>),
+    /// Drive types + cache usage for Settings (`Done::Storage`).
+    StorageReport,
+    /// Settings "clear" for one tier, then a fresh report (`Done::Storage`, with a notice).
+    /// (Whole-cache clear / budget: `storage::clear()` / `storage::set_budget_bytes()`.)
+    ClearCache(CacheKind),
 }
 
 pub enum AssetJob {
     Thumb(String),
     Duration(String),
+    /// Copy the clip to the SSD video tier (`Done::VideoCached`).
+    CacheVideo(String),
 }
 
 pub enum Done {
@@ -35,6 +56,11 @@ pub enum Done {
     Thumb(String, Result<String, String>),
     Duration(String, Option<f64>),
     Scrub(String, Result<Vec<String>, String>),
+    /// (clip path, SSD copy path — or the clip itself when it already lives on an SSD).
+    VideoCached(String, Result<String, String>),
+    /// Sidecar path when current; "" when there was nothing to write.
+    Flushed(Result<String, String>),
+    Storage(StorageReport),
 }
 
 pub struct Workers {
@@ -54,14 +80,7 @@ impl Workers {
         let tx = done_tx.clone();
         spawn_named("recall-io", move || {
             while let Ok(job) = job_rx.recv() {
-                let done = match job {
-                    Job::List => Done::Clips(backend::list_clips()),
-                    Job::Prepare(generation, path) => Done::Prepared(generation, backend::prepare_clip(&path)),
-                    Job::SaveProject(info, plan, fps) => Done::Saved(backend::save_project(&info, &plan, fps)),
-                    Job::Export(info, plan, fps) => Done::Exported(backend::export_clip(&info, &plan, fps)),
-                    Job::Delete(paths) => Done::Deleted(library::delete_to_recycle_bin(&paths)),
-                };
-                if tx.send(done).is_err() {
+                if tx.send(run_job(job, &tx)).is_err() {
                     break;
                 }
             }
@@ -70,32 +89,18 @@ impl Workers {
         let tx = done_tx.clone();
         spawn_named("recall-assets", move || {
             while let Ok(job) = asset_rx.recv() {
-                let done = match job {
-                    AssetJob::Thumb(path) => {
-                        let result = backend::thumbnail(&path);
-                        Done::Thumb(path, result)
-                    }
-                    AssetJob::Duration(path) => {
-                        let secs = library::mp4_duration(std::path::Path::new(&path));
-                        Done::Duration(path, secs)
-                    }
-                };
-                if tx.send(done).is_err() {
-                    break;
-                }
+                route_asset(job, &tx);
             }
         });
 
         spawn_named("recall-scrub", move || {
             while let Ok(mut path) = scrub_rx.recv() {
-                // Only the latest hovered clip matters.
+                // The latest hover is urgent; earlier ones still get answered, at low priority.
                 while let Ok(newer) = scrub_rx.try_recv() {
+                    route_scrub(path, Priority::Background, &done_tx);
                     path = newer;
                 }
-                let result = library::scrub_frames(&path);
-                if done_tx.send(Done::Scrub(path, result)).is_err() {
-                    break;
-                }
+                route_scrub(path, Priority::Interactive, &done_tx);
             }
         });
 
@@ -113,6 +118,117 @@ impl Workers {
     pub fn scrub(&self, path: String) {
         let _ = self.scrub.send(path);
     }
+}
+
+fn run_job(job: Job, tx: &Sender<Done>) -> Done {
+    match job {
+        Job::List => {
+            let result = backend::list_clips();
+            if let Ok(entries) = &result {
+                prefetch(entries, tx.clone());
+            }
+            Done::Clips(result)
+        }
+        Job::Prepare(generation, path) => Done::Prepared(generation, backend::prepare_clip(&path)),
+        Job::SaveProject(info, plan, fps) => Done::Saved(backend::save_project(&info, &plan, fps)),
+        Job::FlushProject(info, plan, fps) => Done::Flushed(backend::flush_project(&info, &plan, fps)),
+        Job::Export(info, plan, fps) => Done::Exported(backend::export_clip(&info, &plan, fps)),
+        Job::Delete(paths) => Done::Deleted(library::delete_to_recycle_bin(&paths)),
+        Job::StorageReport => Done::Storage(backend::storage_report(None)),
+        Job::ClearCache(kind) => {
+            let notice = match storage::clear_kind(kind) {
+                Ok(freed) => format!("Cleared {} of {}.", library::format_bytes(freed), kind.label().to_lowercase()),
+                Err(error) => format!("Couldn't clear {}: {error}", kind.label().to_lowercase()),
+            };
+            Done::Storage(backend::storage_report(Some(notice)))
+        }
+    }
+}
+
+/// Thumbnails / durations are queued on the clip's disk lane at `Visible` priority (the
+/// assets thread never blocks on an HDD); video copies at `Interactive`.
+fn route_asset(job: AssetJob, tx: &Sender<Done>) {
+    let tx = tx.clone();
+    match job {
+        AssetJob::Thumb(path) => storage::submit_io(&PathBuf::from(&path), Priority::Visible, move || {
+            let result = backend::thumbnail(&path);
+            let _ = tx.send(Done::Thumb(path, result));
+        }),
+        AssetJob::Duration(path) => storage::submit_io(&PathBuf::from(&path), Priority::Visible, move || {
+            let secs = library::mp4_duration(Path::new(&path));
+            let _ = tx.send(Done::Duration(path, secs));
+        }),
+        AssetJob::CacheVideo(path) => {
+            // Runs on its own short-lived thread: cache_video waits on the lane, and a copy
+            // takes seconds; the assets thread keeps routing meanwhile.
+            spawn_named("recall-video-copy", move || {
+                let result = storage::cache_video(&path);
+                let _ = tx.send(Done::VideoCached(path, result));
+            });
+        }
+    }
+}
+
+static SCRUB_GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// Cached frames answer at once; misses go to the disk lane. An urgent request that is no
+/// longer the latest hover when its turn comes is re-queued behind visible work.
+fn route_scrub(path: String, priority: Priority, tx: &Sender<Done>) {
+    if let Some(frames) = library::cached_scrub_frames(&path) {
+        let _ = tx.send(Done::Scrub(path, Ok(frames)));
+        return;
+    }
+    let generation = SCRUB_GENERATION.fetch_add(1, Ordering::Relaxed) + 1;
+    let tx = tx.clone();
+    let lane_path = PathBuf::from(&path);
+    storage::submit_io(&lane_path.clone(), priority, move || {
+        if priority == Priority::Interactive && SCRUB_GENERATION.load(Ordering::Relaxed) != generation {
+            let tx = tx.clone();
+            let path = path.clone();
+            storage::submit_io(&lane_path, Priority::Background, move || send_scrub(path, &tx));
+            return;
+        }
+        send_scrub(path, &tx);
+    });
+}
+
+fn send_scrub(path: String, tx: &Sender<Done>) {
+    let result = library::scrub_frames(&path);
+    let _ = tx.send(Done::Scrub(path, result));
+}
+
+/// Smart-cache plan for the listed clips. Durations already in the metadata store are
+/// skipped; results arrive as ordinary `Done::Thumb` / `Duration` / `Scrub`.
+fn prefetch(entries: &[ClipEntry], tx: Sender<Done>) {
+    let store = MetaStore::load();
+    let records = library::build_records(entries, &store);
+    let clips = entries
+        .iter()
+        .zip(records)
+        .map(|(entry, record)| PrefetchClip {
+            path: entry.path.clone(),
+            name: entry.name.clone(),
+            bytes: entry.bytes,
+            mtime_secs: entry.mtime,
+            has_thumb: entry.thumb.is_some(),
+            duration: record.duration,
+            game_key: record.game_key,
+            favourite: record.favourite,
+            edited: record.edited,
+        })
+        .collect();
+    storage::start_prefetch(
+        clips,
+        Arc::new(move |event| {
+            let done = match event {
+                PrefetchEvent::Thumb(path, result) => Done::Thumb(path, result),
+                PrefetchEvent::Duration(path, secs) => Done::Duration(path, secs),
+                PrefetchEvent::Scrub(path, result) => Done::Scrub(path, result),
+            };
+            let _ = tx.send(done);
+        }),
+        backend::prefetch_editor_media,
+    );
 }
 
 fn spawn_named(name: &str, body: impl FnOnce() + Send + 'static) {
