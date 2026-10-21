@@ -21,8 +21,12 @@ fn job(path: &Path) -> SaveJob {
         secs: 1.5,
         video: VideoSrc::Still {
             frame: (2, 2, Arc::new(vec![0; 16])),
-            fps: 60,
-            bitrate: 1,
+            spec: StillSpec {
+                fps: 60,
+                bitrate: 1,
+                codec: crate::encoder::settings::Codec::H264,
+                quality: crate::encoder::settings::Quality::High,
+            },
         },
         backend: "test",
         audio: Vec::new(),

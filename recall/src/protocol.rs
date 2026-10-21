@@ -31,9 +31,13 @@ pub enum Outbound {
         fps: u32,
         /// Seconds of replay currently buffered (0.0 when encode is off/down).
         buffer_secs: f32,
-        /// "h264_nvenc" | "starting" | "off" | "failed".
+        /// "h264_nvenc" (replay ready, for every codec) | "starting" | "off" | "failed".
         encoder: String,
         encoder_error: Option<String>,
+        /// "h264" | "hevc" | "av1": the codec recording (H.264 after a
+        /// fallback), or the requested one before the encoder opens; "off"
+        /// without an encoder.
+        codec: String,
         recording_mode: String,
         /// Whether new microphone samples are entering the replay buffer as silence.
         mic_muted: bool,
