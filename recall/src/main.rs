@@ -213,6 +213,7 @@ impl ApplicationHandler for App {
                     path,
                     seconds: secs.unwrap_or(buffer_secs),
                     end_us: timeline.recording_now_us(),
+                    requested: Instant::now(),
                 });
             }));
             self.encoder = Some(handle);
@@ -579,6 +580,12 @@ fn main() {
         ..Default::default()
     };
     event_loop.run_app(&mut app).expect("run app");
+    // Quit: let an in-flight save finish (or remove its .part) inside the
+    // supervisor's 4 s grace instead of dying mid-mux.
+    #[cfg(feature = "encode")]
+    if let Some(encoder) = app.encoder.take() {
+        encoder.shutdown(std::time::Duration::from_secs(3));
+    }
 }
 
 /// A single bounded export worker keeps re-encoding separate from live recording.
