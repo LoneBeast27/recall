@@ -4,6 +4,8 @@
 //! `GAME__2026-06-02__10-01-55.mp4` (almost all), `GAME__2026-10-17__22-34-31-275__<32 hex>.mp4`
 //! (Recall), `GAME__…__13-06-02_trim.mp4`, `GAME__…__23-23-00 BLIND FUZE.mp4`,
 //! `Valorant_2023_01_27_10_10_11.mp4` (older capture tool), `lethal company moment.mp4` (no date).
+//! Imported folders add `Rocket League 2024.01.27 - 22.10.11.03.DVR.mp4` (ShadowPlay),
+//! `Rocket League 2024-01-27 22-10-11.mp4` (Game Bar), `2024-01-27 22-10-11.mkv` (OBS).
 use super::LocalStamp;
 use super::calendar::valid_date;
 
@@ -51,8 +53,8 @@ pub(super) fn fallback_prefix(file_name: &str) -> &str {
     stem.split("__").next().unwrap_or(stem)
 }
 
-/// Finds the first `YYYY?MM?DD` (separator `-` or `_`), then an optional `HH?MM?SS`
-/// after one or two `-`/`_`/space/`T` separators. The prefix is the text before the date.
+/// Finds the first `YYYY?MM?DD` (separator `-`, `_` or `.`), then an optional `HH?MM?SS`
+/// after one to three `-`/`_`/space/`T` separators. The prefix is the text before the date.
 pub(super) fn parse(file_name: &str) -> Option<(String, LocalStamp)> {
     let bytes = file_name.as_bytes();
     for start in 0..bytes.len() {
@@ -76,7 +78,7 @@ fn number(bytes: &[u8], at: usize, len: usize) -> Option<u32> {
 fn date_at(bytes: &[u8], i: usize) -> Option<((i32, u32, u32), usize)> {
     let year = number(bytes, i, 4)? as i32;
     let sep = *bytes.get(i + 4)?;
-    if !matches!(sep, b'-' | b'_') || bytes.get(i + 7) != Some(&sep) {
+    if !matches!(sep, b'-' | b'_' | b'.') || bytes.get(i + 7) != Some(&sep) {
         return None;
     }
     let month = number(bytes, i + 5, 2)?;
@@ -89,7 +91,7 @@ fn date_at(bytes: &[u8], i: usize) -> Option<((i32, u32, u32), usize)> {
 
 fn time_after(bytes: &[u8], mut j: usize) -> Option<(u32, u32, u32)> {
     let mut skipped = 0;
-    while skipped < 2 && bytes.get(j).is_some_and(|b| matches!(b, b'-' | b'_' | b' ' | b'T')) {
+    while skipped < 3 && bytes.get(j).is_some_and(|b| matches!(b, b'-' | b'_' | b' ' | b'T')) {
         j += 1;
         skipped += 1;
     }

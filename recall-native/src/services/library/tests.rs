@@ -79,6 +79,9 @@ fn parse_handles_every_shape_on_the_drive() {
         ("Overwatch®-2__2024-02-29__00-00-59.mp4", "Overwatch®-2", stamp(2024, 2, 29, 0, 0, 59)),
         ("Game__2026-10-17.mp4", "Game", stamp(2026, 10, 17, 0, 0, 0)),
         ("Game__2026-10-17__25-00-00.mp4", "Game", stamp(2026, 10, 17, 0, 0, 0)),
+        ("Rocket League 2024.01.27 - 22.10.11.03.DVR.mp4", "Rocket League", stamp(2024, 1, 27, 22, 10, 11)),
+        ("Rocket League 2024-01-27 22-10-11.mp4", "Rocket League", stamp(2024, 1, 27, 22, 10, 11)),
+        ("2024-01-27 22-10-11.mkv", "", stamp(2024, 1, 27, 22, 10, 11)),
     ];
     for (name, prefix, started) in cases {
         assert_eq!(parse_file_name(name), Some((prefix.to_owned(), started)), "{name}");
