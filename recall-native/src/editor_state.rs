@@ -42,6 +42,8 @@ pub struct EditorState {
     pub fps: u32,
     /// Lossless/re-encode, size cap and output height for the next export.
     pub export_settings: ExportSettings,
+    /// Bookmarks (seconds from clip start) from `<clip>.recall-marks.json`.
+    pub marks: Vec<f64>,
     pub status: String,
     /// One-shot error for a toast (taken by Root).
     pub last_error: Option<String>,
@@ -83,6 +85,7 @@ impl EditorState {
             playing: false,
             fps: 60,
             export_settings: ExportSettings::default(),
+            marks: Vec::new(),
             status,
             last_error: None,
             warning: None,
@@ -169,6 +172,7 @@ impl EditorState {
                 self.status = error;
             }
         }
+        self.marks = read_marks(&info.path);
         self.info = Some(info);
         self.visuals = prepared.visuals;
         self.applied_rect = (0, 0, 0, 0);
@@ -633,4 +637,35 @@ pub fn short_timecode(seconds: f64) -> String {
     let s = if seconds > 0.0 { seconds } else { 0.0 };
     let minutes = (s / 60.0).floor() as u64;
     format!("{minutes}:{:05.2}", (s - minutes as f64 * 60.0).max(0.0))
+}
+
+/// Reads bookmark times written by the recorder beside the clip:
+/// `<stem>.recall-marks.json` = `{"version":1,"marks":[seconds,...]}`. Missing → none.
+pub fn read_marks(clip: &str) -> Vec<f64> {
+    let path = std::path::Path::new(clip);
+    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { return Vec::new() };
+    let sidecar = path.with_file_name(format!("{stem}.recall-marks.json"));
+    let Ok(text) = std::fs::read_to_string(sidecar) else { return Vec::new() };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { return Vec::new() };
+    let mut marks: Vec<f64> = value
+        .get("marks")
+        .and_then(|m| m.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_f64()).filter(|t| t.is_finite() && *t >= 0.0).collect())
+        .unwrap_or_default();
+    marks.sort_by(f64::total_cmp);
+    marks
+}
+
+#[cfg(test)]
+mod marks_tests {
+    #[test]
+    fn reads_marks_sidecar_and_ignores_garbage() {
+        let dir = std::env::temp_dir().join(format!("recall-marks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip = dir.join("VALORANT__2026-10-22__01-02-03.mp4");
+        std::fs::write(dir.join("VALORANT__2026-10-22__01-02-03.recall-marks.json"), r#"{"version":1,"marks":[42.5,3.0,"x",-1]}"#).unwrap();
+        assert_eq!(super::read_marks(&clip.to_string_lossy()), vec![3.0, 42.5]);
+        assert!(super::read_marks(&dir.join("none.mp4").to_string_lossy()).is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
