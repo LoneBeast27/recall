@@ -4,7 +4,7 @@
 //! opening a clip copies it to the SSD video tier first and prepares from the copy;
 //! autosave writes the working project to the SSD and the sidecar beside the clip is only
 //! written by [`flush_project`].
-use crate::edit_model::{ClipInfo, EditPlan};
+use crate::edit_model::{ClipInfo, EditPlan, ExportMode, ExportSettings};
 use crate::services::storage::{self, Priority, ProjectSource};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -18,7 +18,7 @@ mod visual_assets;
 #[derive(Clone, Debug, Serialize)]
 pub struct ClipEntry { pub name:String, pub path:String, pub bytes:u64, pub mtime:u64, pub thumb:Option<String> }
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct Project { pub version:u32,pub source_path:String,pub source_bytes:u64,pub source_modified_ms:u64,pub plan:EditPlan,pub export_fps:u32 }
+pub struct Project { pub version:u32,pub source_path:String,pub source_bytes:u64,pub source_modified_ms:u64,pub plan:EditPlan,pub export_fps:u32,#[serde(default)] pub export:ExportSettings }
 #[derive(Clone,Debug,Default)]
 pub struct VisualAssets { pub poster:Option<String>,pub filmstrip:Vec<String> }
 #[derive(Clone,Debug)]
@@ -31,7 +31,7 @@ pub struct PreparedClip {
 #[derive(Clone,Debug)]
 pub struct StorageReport { pub library_drives:Vec<storage::DriveInfo>,pub cache_drive:Option<storage::DriveInfo>,pub cache:storage::CacheUsage,pub notice:Option<String> }
 #[derive(Clone,Debug,Serialize)]
-pub struct ExportSummary { pub path:String,pub fps:u32,pub frames:u64,pub seconds:f64 }
+pub struct ExportSummary { pub path:String,pub fps:Option<u32>,pub frames:u64,pub seconds:f64,pub bytes:u64,pub lossless:bool,pub width:u32,pub height:u32 }
 static EXPORTING:AtomicBool=AtomicBool::new(false);
 struct ExportGuard;
 impl Drop for ExportGuard { fn drop(&mut self){EXPORTING.store(false,Ordering::Release);} }
@@ -204,24 +204,24 @@ mod tests {
         assert_eq!(storage::recorder_thumb_stem("ordinary-name-thumb.jpg"),None);
     }
     #[test] fn only_real_edits_count_as_non_default_plans(){
-        let info=ClipInfo{path:"C:/clips/a.mp4".into(),duration:10.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![crate::edit_model::AudioTrackInfo{stream_index:1,name:"Game audio".into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new()}]};
-        let untouched=EditPlan{ranges:vec![crate::edit_model::TimeRange{start:0.0,end:10.0}],audio:vec![crate::edit_model::AudioSetting{stream_index:1,gain_db:0.0,muted:false}]};
+        let info=ClipInfo{path:"C:/clips/a.mp4".into(),duration:10.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![crate::edit_model::AudioTrackInfo{stream_index:1,name:"Game audio".into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new()}],keyframes:Vec::new()};
+        let untouched=EditPlan{ranges:vec![crate::edit_model::TimeRange::new(0.0,10.0)],audio:vec![crate::edit_model::AudioSetting{stream_index:1,gain_db:0.0,muted:false}]};
         assert!(plan_is_default(&untouched,&info));
         let mut trimmed=untouched.clone();trimmed.ranges[0].start=1.5;assert!(!plan_is_default(&trimmed,&info));
-        let mut split=untouched.clone();split.ranges=vec![crate::edit_model::TimeRange{start:0.0,end:4.0},crate::edit_model::TimeRange{start:4.0,end:10.0}];assert!(!plan_is_default(&split,&info));
+        let mut split=untouched.clone();split.ranges=vec![crate::edit_model::TimeRange::new(0.0,4.0),crate::edit_model::TimeRange::new(4.0,10.0)];assert!(!plan_is_default(&split,&info));
         let mut muted=untouched.clone();muted.audio[0].muted=true;assert!(!plan_is_default(&muted,&info));
     }
 }
 fn validate_fps(fps:u32)->Result<(),String>{if fps==0||fps>i32::MAX as u32{Err("Export rate must be a positive integer within the supported range.".into())}else{Ok(())}}
-fn project_bytes(info:&ClipInfo,plan:&EditPlan,fps:u32)->Result<Vec<u8>,String>{
+fn project_bytes(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->Result<Vec<u8>,String>{
     validate_fps(fps)?;plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())?;
-    let project=Project{version:1,source_path:info.path.clone(),source_bytes:info.source_bytes,source_modified_ms:info.source_modified_ms,plan:plan.clone(),export_fps:fps};
+    let project=Project{version:1,source_path:info.path.clone(),source_bytes:info.source_bytes,source_modified_ms:info.source_modified_ms,plan:plan.clone(),export_fps:fps,export:export.clone()};
     serde_json::to_vec_pretty(&project).map_err(|e|e.to_string())
 }
 /// Autosave: writes the working project to the SSD (`cache\projects\<id>.json`, atomic). Touches nothing
 /// on the library drive. Returns the working-copy path.
-pub fn save_project(info:&ClipInfo,plan:&EditPlan,fps:u32)->Result<String,String>{
-    let bytes=project_bytes(info,plan,fps)?;let path=working_path(info)?;
+pub fn save_project(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->Result<String,String>{
+    let bytes=project_bytes(info,plan,fps,export)?;let path=working_path(info)?;
     storage::write_atomic(&path,&bytes)?;Ok(path.to_string_lossy().into_owned())
 }
 /// Untouched plan: one full-length range and every track at 0 dB, unmuted.
@@ -232,8 +232,8 @@ fn plan_is_default(plan:&EditPlan,info:&ClipInfo)->bool{
 /// Leave / close / export: writes the `.recall-edit.json` sidecar beside the clip, through the clip's
 /// disk lane, only when its bytes would change (and, with no sidecar yet, only for real edits).
 /// Ok(sidecar path) when the sidecar is current; Ok("") when there was nothing to write.
-pub fn flush_project(info:&ClipInfo,plan:&EditPlan,fps:u32)->Result<String,String>{
-    validate_info(info)?;let bytes=project_bytes(info,plan,fps)?;
+pub fn flush_project(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->Result<String,String>{
+    validate_info(info)?;let bytes=project_bytes(info,plan,fps,export)?;
     let working=working_path(info)?;let working_exists=working.is_file();let default=plan_is_default(plan,info);
     let path=sidecar(&info.path)?;let lane_bytes=bytes.clone();
     let written=storage::run_io(Path::new(&info.path),Priority::Interactive,move||->Result<Option<String>,String>{
@@ -244,19 +244,21 @@ pub fn flush_project(info:&ClipInfo,plan:&EditPlan,fps:u32)->Result<String,Strin
     if written.is_some(){storage::write_atomic(&working,&bytes)?;}
     Ok(written.unwrap_or_default())
 }
-pub fn export_clip(info:&ClipInfo,plan:&EditPlan,fps:u32)->Result<ExportSummary,String>{
-    validate_info(info)?;validate_fps(fps)?;plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())?;
+pub fn export_clip(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->Result<ExportSummary,String>{
+    validate_info(info)?;validate_fps(fps)?;plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())?;export.validate(plan)?;
+    let lossless=export.mode==ExportMode::Lossless;
     if EXPORTING.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err(){return Err("Another export is running.".into());}
     let _guard=ExportGuard;
     let nonce=SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e|e.to_string())?.as_nanos();
     let source=Path::new(&info.path);let outdir=source.parent().ok_or("source has no directory")?.join("exports");
     std::fs::create_dir_all(&outdir).map_err(|e|format!("create export directory: {e}"))?;
-    let output=outdir.join(format!("{}-edited-{fps}fps-{nonce}.mp4",source.file_stem().and_then(|v|v.to_str()).unwrap_or("clip")));
+    let stem=source.file_stem().and_then(|v|v.to_str()).unwrap_or("clip");
+    let output=if lossless{outdir.join(format!("{stem}-trim-{nonce}.mp4"))}else{outdir.join(format!("{stem}-edited-{fps}fps-{nonce}.mp4"))};
     // Read the SSD copy when one exists; the output still lands beside the original.
     let input=storage::cached_video(&info.path).map(PathBuf::from).unwrap_or_else(||source.to_path_buf());
     let lowered=storage::drive_kind(&outdir).is_hdd()||storage::drive_kind(&input).is_hdd();
     let project=tmp_dir()?.join(format!("export-{}-{nonce}.json",std::process::id()));
-    std::fs::write(&project,serde_json::to_vec(plan).map_err(|e|e.to_string())?).map_err(|e|format!("write export plan: {e}"))?;
+    std::fs::write(&project,serde_json::to_vec(&serde_json::json!({"plan":plan,"export":export})).map_err(|e|e.to_string())?).map_err(|e|format!("write export plan: {e}"))?;
     let result=(||{
         let mut command=engine_command()?;command.arg("--export-edit").arg(&input).arg(&output).arg(fps.to_string()).arg(&project).arg("--json");
         // The export holds the output drive's lane: prefetch pauses instead of seeking against it.
@@ -264,7 +266,10 @@ pub fn export_clip(info:&ClipInfo,plan:&EditPlan,fps:u32)->Result<ExportSummary,
         let events:Vec<serde_json::Value>=String::from_utf8_lossy(&result.stdout).lines().filter_map(|l|serde_json::from_str(l).ok()).collect();
         if !result.status.success(){return Err(events.iter().find(|v|v["type"]=="export_failed").and_then(|v|v["reason"].as_str()).map(str::to_owned).unwrap_or_else(||format!("Export failed: {}",String::from_utf8_lossy(&result.stderr).trim())));}
         let done=events.iter().find(|v|v["type"]=="exported").ok_or("Recorder returned no completed export.")?;
-        Ok(ExportSummary{path:output.to_string_lossy().into_owned(),fps,frames:done["frames"].as_u64().ok_or("Missing frame count.")?,seconds:done["seconds"].as_f64().ok_or("Missing duration.")?})
+        let report=events.iter().find(|v|v["type"]=="export_report");
+        let field=|k:&str|report.and_then(|r|r[k].as_u64());
+        let bytes=field("bytes").or_else(||std::fs::metadata(&output).ok().map(|m|m.len())).unwrap_or(0);
+        Ok(ExportSummary{path:output.to_string_lossy().into_owned(),fps:if lossless{None}else{Some(fps)},frames:done["frames"].as_u64().ok_or("Missing frame count.")?,seconds:done["seconds"].as_f64().ok_or("Missing duration.")?,bytes,lossless,width:field("width").unwrap_or(0) as u32,height:field("height").unwrap_or(0) as u32})
     })();
     let _=std::fs::remove_file(&project);result
 }

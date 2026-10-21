@@ -69,6 +69,7 @@ pub struct LibraryState {
     pub drive: Option<(u64, u64)>,
     pub today: LocalStamp,
     meta_dirty_since: Option<Instant>,
+    deepest_scroll_days: u32,
 }
 
 impl LibraryState {
@@ -107,6 +108,7 @@ impl LibraryState {
             drive: None,
             today: library::today(),
             meta_dirty_since: None,
+            deepest_scroll_days: 0,
         }
     }
 
@@ -258,6 +260,7 @@ impl LibraryState {
         self.hovered = path.clone();
         self.hover_frac = 0.0;
         if let Some(path) = path {
+            interaction(crate::services::storage::Interaction::Hovered(path.clone()));
             if !self.scrub.contains_key(&path) && self.scrub_requested.insert(path.clone()) {
                 workers.scrub(path);
             }
@@ -329,7 +332,12 @@ impl LibraryState {
             let Some(index) = self.by_path.get(path).copied() else { continue };
             let name = self.records[index].file_name.clone();
             match self.store.set_favourite(&name, make) {
-                Ok(()) => self.records[index].favourite = make,
+                Ok(()) => {
+                    self.records[index].favourite = make;
+                    if make {
+                        interaction(crate::services::storage::Interaction::Favourited(path.clone()));
+                    }
+                }
                 Err(error) => self.notice = Some(format!("Couldn't save favourite: {error}")),
             }
         }
@@ -361,4 +369,49 @@ impl LibraryState {
         self.clear_selection();
         self.rebuild_records();
     }
+}
+
+fn interaction(event: crate::services::storage::Interaction) {
+    crate::services::storage::record_interaction(event);
+}
+
+impl LibraryState {
+    /// Records how far back in time the user browses (deepest day group reached), so the
+    /// smart cache knows how much history is worth keeping warm.
+    pub fn note_scroll_depth(&mut self) {
+        let top = self.list.logical_scroll_top().item_ix;
+        let group = match self.rows.get(top) {
+            Some(Row::Header { group, .. }) => *group,
+            Some(Row::Tiles(items)) => self.groups.iter().position(|g| items.first().is_some_and(|i| g.items.contains(i))).unwrap_or(0),
+            None => return,
+        };
+        let Some(first) = self.groups.get(group).and_then(|g| g.items.first()).map(|i| self.records[*i].started) else { return };
+        let days = days_between(first, self.today);
+        if days > self.deepest_scroll_days {
+            self.deepest_scroll_days = days;
+            interaction(crate::services::storage::Interaction::ScrolledTo { days_back: days });
+        }
+    }
+
+    /// Marks the clip whose edit sidecar was just written as edited.
+    pub fn mark_edited_by_sidecar(&mut self, sidecar: &str) {
+        let name = Path::new(sidecar).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let Some(stem) = name.strip_suffix(".recall-edit.json").map(|s| s.trim_end_matches(".mp4").to_owned()) else { return };
+        for record in &mut self.records {
+            let file_stem = Path::new(&record.file_name).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            if file_stem == stem {
+                record.edited = true;
+            }
+        }
+    }
+}
+
+/// Whole days from `earlier` to `later` (local calendar dates).
+fn days_between(earlier: LocalStamp, later: LocalStamp) -> u32 {
+    fn ordinal(s: LocalStamp) -> i64 {
+        let (y, m, d) = (s.year as i64, s.month as i64, s.day as i64);
+        let (y, m) = if m <= 2 { (y - 1, m + 12) } else { (y, m) };
+        365 * y + y / 4 - y / 100 + y / 400 + (153 * (m - 3) + 2) / 5 + d
+    }
+    (ordinal(later) - ordinal(earlier)).max(0) as u32
 }

@@ -15,7 +15,8 @@ use crate::{
 /// Slider stops in GB (snapping, evenly spaced on the track).
 pub const CACHE_STOPS_GB: [f64; 7] = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
 pub const DEFAULT_CACHE_GB: f64 = 2.0;
-const GB: f64 = 1_000_000_000.0;
+/// Cache sizes are binary gigabytes (the storage budget is 2 GiB = 2,147,483,648 bytes).
+const GB: f64 = 1_073_741_824.0;
 
 pub struct CacheView {
     pub root: PathBuf,
@@ -24,6 +25,7 @@ pub struct CacheView {
     /// (label, bytes) per kind of cached data.
     pub tiers: Vec<(&'static str, u64)>,
     pub ssd_free: Option<u64>,
+    pub smart: String,
     pub span: Rc<Cell<Option<(f32, f32)>>>,
     pub dragging: bool,
 }
@@ -38,6 +40,7 @@ impl CacheView {
             used_bytes: 0,
             tiers: Vec::new(),
             ssd_free,
+            smart: String::new(),
             span: Rc::new(Cell::new(None)),
             dragging: false,
         }
@@ -50,6 +53,7 @@ impl CacheView {
         self.tiers = usage;
         self.budget_bytes = crate::cache::budget_bytes();
         self.ssd_free = crate::services::library::drive_space(&self.root).map(|(free, _)| free);
+        self.smart = crate::cache::smart_status();
     }
 
     fn stop_index(&self) -> usize {
@@ -202,12 +206,13 @@ impl Root {
                             .child(div().text_color(c(theme::MUTED)).child(if view.used_bytes == 0 {
                                 "Nothing cached yet".to_owned()
                             } else {
-                                format!("{} used of {}", format_bytes(view.used_bytes), format_bytes(budget))
+                                format!("{} used of {}", format_bytes(view.used_bytes), gb_label(budget))
                             }))
                             .child(div().text_color(c(theme::TERTIARY)).child(free)),
                     )
                     .child(div().h(px(4.)).rounded(px(2.)).bg(c(theme::TOP)).child(div().h_full().rounded(px(2.)).w(relative(usage_fraction.clamp(0.0, 1.0))).bg(c(theme::MUTED))))
-                    .when(!tiers.is_empty(), |d| d.child(div().text_size(px(11.)).text_color(c(theme::TERTIARY)).child(tiers))),
+                    .when(!tiers.is_empty(), |d| d.child(div().text_size(px(11.)).text_color(c(theme::TERTIARY)).child(tiers)))
+                    .when(!view.smart.is_empty(), |d| d.child(div().flex().items_center().gap(px(6.)).text_size(px(11.)).text_color(c(theme::MUTED)).child(icon(Icon::Sun, 12., theme::MUTED)).child(view.smart.clone()))),
             );
 
         let location = div()
@@ -231,7 +236,10 @@ impl Root {
             })))
             .child(ui::button("cache-clear", Variant::Ghost).border_1().border_color(c(theme::BORDER)).child(icon(Icon::Trash, 14., theme::MUTED)).child("Clear").on_click(cx.listener(|this, _, _, cx| {
                 match crate::cache::clear() {
-                    Ok(freed) => this.show_toast(ToastKind::Good, "Cache cleared", Some(format!("{} freed; previews rebuild as you browse", format_bytes(freed)))),
+                    Ok(freed) => {
+                        this.show_toast(ToastKind::Good, "Cache cleared", Some(format!("{} freed; previews rebuild as you browse", format_bytes(freed))));
+                        this.workers.job(crate::worker::Job::List);
+                    }
                     Err(error) => this.show_toast(ToastKind::Bad, "Couldn't clear the cache", Some(error)),
                 }
                 this.cache.refresh();
@@ -240,4 +248,10 @@ impl Root {
 
         vec![size_card.into_any_element(), location.into_any_element()]
     }
+}
+
+/// "2 GB", "0.5 GB" in the slider's binary units.
+fn gb_label(bytes: u64) -> String {
+    let gb = bytes as f64 / GB;
+    if gb >= 1.0 && (gb - gb.round()).abs() < 0.05 { format!("{:.0} GB", gb.round()) } else { format!("{gb:.1} GB") }
 }
