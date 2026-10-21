@@ -1,5 +1,7 @@
 //! Read-only editor media preparation: cacheable PCM preview stems and peaks.
 use crate::edit_model::{AudioTrackInfo, ClipInfo};
+use crate::export::keyframes::{scan_keyframes, KeyframeScan};
+use crate::export::timeline::{timeline_duration_us, timeline_origin_us};
 use ff::Rescale;
 use ffmpeg_next as ff;
 use std::fs::{self, File};
@@ -33,12 +35,19 @@ pub fn prepare_clip(input: &str, cache_dir: &str) -> Result<ClipInfo, String> {
     let cache = root.join(&key);
     let manifest = cache.join("clip.json");
     if let Ok(text) = fs::read_to_string(&manifest) {
-        if let Ok(info) = serde_json::from_str::<ClipInfo>(&text) {
+        if let Ok(mut info) = serde_json::from_str::<ClipInfo>(&text) {
             if info.source_bytes == metadata.len()
                 && info.source_modified_ms == modified_ms
                 && info.path == source.to_string_lossy()
                 && valid_cache(&info)
             {
+                // Manifests written before keyframes existed: scan once, refresh the
+                // track names (handler_name), keep the stems.
+                if info.keyframes.is_empty() {
+                    info.keyframes = scan_keyframes(&source)?;
+                    refresh_track_names(&source, &mut info)?;
+                    let _ = rewrite_manifest(&manifest, &info);
+                }
                 return Ok(info);
             }
         }
@@ -104,12 +113,8 @@ fn prepare_uncached(
         .streams()
         .filter(|s| s.parameters().medium() == ff::media::Type::Audio)
         .map(|s| {
-            let title = s
-                .metadata()
-                .get("title")
-                .map(str::to_owned)
-                .or_else(|| s.metadata().get("language").map(str::to_owned))
-                .unwrap_or_else(|| format!("Audio {}", s.index() + 1));
+            let title =
+                track_name(&s.metadata()).unwrap_or_else(|| format!("Audio {}", s.index() + 1));
             TrackSpec {
                 index: s.index(),
                 name: title,
@@ -118,10 +123,13 @@ fn prepare_uncached(
             }
         })
         .collect();
+    // Keyframes ride along the first audio pass; a clip without audio gets its own scan.
+    let mut scan = KeyframeScan::for_input(&input);
     let mut audio = Vec::with_capacity(tracks.len());
     for (ordinal, track) in tracks.iter().enumerate() {
         let file = format!("audio-{ordinal}.wav");
-        let info = decode_track(source, track, duration, origin_us, &out.join(&file))?;
+        let keyframes = if ordinal == 0 { scan.as_mut() } else { None };
+        let info = decode_track(source, track, duration, origin_us, &out.join(&file), keyframes)?;
         audio.push(AudioTrackInfo {
             stream_index: track.index,
             name: track.name.clone(),
@@ -132,6 +140,10 @@ fn prepare_uncached(
         });
     }
     let _ = video_index; // kept as an explicit validation that a video stream was selected.
+    let keyframes = match (scan, tracks.is_empty()) {
+        (Some(scan), false) => scan.seconds(),
+        _ => scan_keyframes(source)?,
+    };
     Ok(ClipInfo {
         path: source.to_string_lossy().into_owned(),
         duration,
@@ -141,7 +153,36 @@ fn prepare_uncached(
         source_bytes: bytes,
         source_modified_ms: modified_ms,
         audio,
+        keyframes,
     })
+}
+
+/// Track label from stream metadata. MP4 keeps no readable per-track `title`,
+/// so Recall names tracks through `handler_name`; FFmpeg's placeholder
+/// handler ("SoundHandler") and blanks are skipped.
+pub(crate) fn track_name(metadata: &ff::DictionaryRef) -> Option<String> {
+    let usable = |value: &&str| !value.trim().is_empty();
+    metadata
+        .get("title")
+        .filter(usable)
+        .or_else(|| {
+            metadata
+                .get("handler_name")
+                .filter(usable)
+                .filter(|value| value.trim() != "SoundHandler")
+        })
+        .or_else(|| metadata.get("language").filter(usable))
+        .map(|value| value.trim().to_owned())
+}
+
+fn refresh_track_names(source: &Path, info: &mut ClipInfo) -> Result<(), String> {
+    let input = ff::format::input(source).map_err(|e| format!("open {}: {e}", source.display()))?;
+    for track in &mut info.audio {
+        if let Some(name) = input.stream(track.stream_index).and_then(|s| track_name(&s.metadata())) {
+            track.name = name;
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -162,6 +203,7 @@ fn decode_track(
     duration: f64,
     origin_us: i64,
     wav: &Path,
+    mut keyframes: Option<&mut KeyframeScan>,
 ) -> Result<Decoded, String> {
     // Each pass starts at the source: packet iterators consume their input context.
     let mut input =
@@ -200,6 +242,9 @@ fn decode_track(
     let mut next_source_sample = Some(0i64);
     let mut frame = ff::frame::Audio::empty();
     for (stream, packet) in input.packets() {
+        if let Some(scan) = keyframes.as_deref_mut() {
+            scan.observe(stream.index(), &packet);
+        }
         if stream.index() != track.index {
             continue;
         }
@@ -516,44 +561,15 @@ fn valid_cache(info: &ClipInfo) -> bool {
             .iter()
             .all(|a| a.waveform.len() == WAVE_BINS && Path::new(&a.preview_path).is_file())
 }
-fn timeline_origin_us(input: &ff::format::context::Input, video_index: usize) -> i64 {
-    let mut origin = None;
-    for stream in input.streams() {
-        let medium = stream.parameters().medium();
-        if stream.index() != video_index && medium != ff::media::Type::Audio {
-            continue;
-        }
-        let start = stream.start_time();
-        if start != ff::ffi::AV_NOPTS_VALUE {
-            let value = start.rescale(stream.time_base(), ff::rescale::TIME_BASE);
-            origin = Some(origin.map_or(value, |old: i64| old.min(value)));
-        }
-    }
-    origin.unwrap_or(0)
-}
-fn timeline_duration_us(input: &ff::format::context::Input, origin_us: i64) -> i64 {
-    let mut duration = input.duration().max(0);
-    for stream in input.streams() {
-        let medium = stream.parameters().medium();
-        if medium != ff::media::Type::Video && medium != ff::media::Type::Audio {
-            continue;
-        }
-        if stream.duration() <= 0 || stream.duration() == ff::ffi::AV_NOPTS_VALUE {
-            continue;
-        }
-        let start = if stream.start_time() == ff::ffi::AV_NOPTS_VALUE {
-            origin_us.rescale(ff::rescale::TIME_BASE, stream.time_base())
-        } else {
-            stream.start_time()
-        };
-        duration = duration.max(
-            start
-                .saturating_add(stream.duration())
-                .rescale(stream.time_base(), ff::rescale::TIME_BASE)
-                .saturating_sub(origin_us),
-        );
-    }
-    duration
+/// Replace a published manifest atomically (temp file + rename).
+fn rewrite_manifest(manifest: &Path, info: &ClipInfo) -> Result<(), String> {
+    let temp = manifest.with_extension(format!("json.{}.tmp", std::process::id()));
+    fs::write(&temp, serde_json::to_vec(info).map_err(|e| e.to_string())?)
+        .map_err(|e| format!("write cache manifest: {e}"))?;
+    fs::rename(&temp, manifest).map_err(|e| {
+        let _ = fs::remove_file(&temp);
+        format!("publish cache manifest: {e}")
+    })
 }
 fn create_work_dir(root: &Path, key: &str) -> Result<std::path::PathBuf, String> {
     for attempt in 0..32u32 {
