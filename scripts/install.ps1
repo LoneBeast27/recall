@@ -15,7 +15,8 @@ param([switch]$NoBuild, [switch]$NoShortcut)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $dist = Join-Path $repo 'dist'
-$ffmpegRoot = Join-Path $repo 'tools\ffmpeg-dev\ffmpeg-n7.1-latest-win64-gpl-shared-7.1'
+# Gyan FFmpeg 7.1.1 full shared build: same ABI as the 7.1 bindings, and it includes av1_nvenc.
+$ffmpegRoot = Join-Path $repo 'tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared'
 $nice = 'C:/Users/rohan/.claude/tools/nice-build.ps1'
 
 if (-not $NoBuild) {
