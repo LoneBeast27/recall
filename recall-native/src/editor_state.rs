@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     backend::{ExportSummary, PreparedClip, VisualAssets},
-    edit_model::{AudioSetting, ClipInfo, EditPlan, TimeRange},
+    edit_model::{AudioSetting, ClipInfo, EditPlan, ExportMode, ExportSettings, TimeRange},
     media::{NativePreview, PreviewTrack},
     worker::{Job, Workers},
 };
@@ -40,6 +40,8 @@ pub struct EditorState {
     pub preview: Option<NativePreview>,
     pub playing: bool,
     pub fps: u32,
+    /// Lossless/re-encode, size cap and output height for the next export.
+    pub export_settings: ExportSettings,
     pub status: String,
     /// One-shot error for a toast (taken by Root).
     pub last_error: Option<String>,
@@ -80,6 +82,7 @@ impl EditorState {
             preview,
             playing: false,
             fps: 60,
+            export_settings: ExportSettings::default(),
             status,
             last_error: None,
             warning: None,
@@ -304,6 +307,43 @@ impl EditorState {
             self.export_error = None;
             workers.job(Job::Export(info, self.plan.clone(), self.fps));
         }
+    }
+
+    pub fn lossless(&self) -> bool {
+        self.export_settings.mode == ExportMode::Lossless
+    }
+
+    pub fn set_export_mode(&mut self, mode: ExportMode) {
+        if self.export_settings.mode != mode {
+            self.export_settings.mode = mode;
+            self.touch();
+        }
+    }
+
+    pub fn set_max_bytes(&mut self, max_bytes: Option<u64>) {
+        self.export_settings.max_bytes = max_bytes;
+        self.touch();
+    }
+
+    pub fn set_height(&mut self, height: Option<u32>) {
+        self.export_settings.height = height;
+        self.touch();
+    }
+
+    /// Playback speed of the selected segment in the export (0.25–4×).
+    pub fn set_speed(&mut self, speed: f64) {
+        let Some(current) = self.plan.ranges.get(self.selected).map(|r| r.speed) else { return };
+        if (current - speed).abs() > f64::EPSILON {
+            self.revise();
+            self.plan.ranges[self.selected].speed = speed.clamp(0.25, 4.0);
+        }
+    }
+
+    /// Where the selected cut actually starts in a lossless export.
+    pub fn snapped_start(&self, index: usize) -> Option<f64> {
+        let info = self.info.as_ref()?;
+        let range = self.plan.ranges.get(index)?;
+        (!info.keyframes.is_empty()).then(|| info.snap_to_keyframe(range.start))
     }
 
     pub fn set_fps(&mut self, fps: u32) {
