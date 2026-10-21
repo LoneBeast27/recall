@@ -217,6 +217,8 @@ pub(super) fn command_line(command: &DaemonCommand) -> String {
         DaemonCommand::SaveClip { seconds: Some(seconds) } => json!({"cmd": "save_clip", "seconds": seconds}),
         DaemonCommand::SetMicMute(muted) => json!({"cmd": "set_mic_mute", "muted": muted}),
         DaemonCommand::ToggleMicMute => json!({"cmd": "toggle_mic_mute"}),
+        DaemonCommand::Pause => json!({"cmd": "pause"}),
+        DaemonCommand::Resume => json!({"cmd": "resume"}),
         DaemonCommand::ToggleHdr => json!({"cmd": "toggle_hdr"}),
         DaemonCommand::SetMode(mode) => json!({"cmd": "set_mode", "value": mode}),
         DaemonCommand::SetAcProfile(variant) => json!({"cmd": "set_ac_profile", "variant": variant}),

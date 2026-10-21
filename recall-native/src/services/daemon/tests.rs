@@ -173,6 +173,8 @@ fn commands_serialize_to_controller_json() {
         (DaemonCommand::SaveClip { seconds: Some(30) }, json!({"cmd":"save_clip","seconds":30})),
         (DaemonCommand::SetMicMute(true), json!({"cmd":"set_mic_mute","muted":true})),
         (DaemonCommand::ToggleMicMute, json!({"cmd":"toggle_mic_mute"})),
+        (DaemonCommand::Pause, json!({"cmd":"pause"})),
+        (DaemonCommand::Resume, json!({"cmd":"resume"})),
         (DaemonCommand::ToggleHdr, json!({"cmd":"toggle_hdr"})),
         (DaemonCommand::SetMode("hdr".into()), json!({"cmd":"set_mode","value":"hdr"})),
         (DaemonCommand::SetAcProfile("punchy".into()), json!({"cmd":"set_ac_profile","variant":"punchy"})),

@@ -146,6 +146,19 @@ impl Root {
                 }))
                 .into_any_element();
         }
+        if session.is_some_and(|s| s.state == "paused") {
+            return pill
+                .cursor_pointer()
+                .hover(|s| s.bg(c(theme::OVERLAY)))
+                .child(ui::dot(theme::DISABLED, 7.))
+                .child(div().text_color(c(theme::MUTED)).child("Recording paused"))
+                .child(div().text_color(c(theme::TEXT)).font_weight(FontWeight::MEDIUM).child("Resume"))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.send(DaemonCommand::Resume);
+                    cx.notify();
+                }))
+                .into_any_element();
+        }
         let failed = engine.is_some_and(|e| e.encoder == "failed" || e.encoder_error.is_some());
         let waiting = session.is_some_and(|s| s.state == "waiting") && !snap.replay_ready();
         let name = session

@@ -29,6 +29,9 @@ pub enum DaemonCommand {
     SaveClip { seconds: Option<u32> },
     SetMicMute(bool),
     ToggleMicMute,
+    /// Stop capturing entirely until Resume (runtime only).
+    Pause,
+    Resume,
     ToggleHdr,
     /// "auto" | "sdr" | "hdr"
     SetMode(String),
