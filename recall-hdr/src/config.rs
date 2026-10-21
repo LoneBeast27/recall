@@ -262,7 +262,7 @@ impl Default for HotkeyCfg {
 
 impl Default for StartupCfg {
     fn default() -> Self {
-        StartupCfg { autostart: true }
+        StartupCfg { autostart: false } // opt-in: nothing registers itself at login until the user turns it on
     }
 }
 
@@ -574,7 +574,7 @@ mod tests {
         assert_eq!(c.behavior.sdr_white_nits, 220);
         assert_eq!(c.behavior.debounce_ms, 400);
         assert_eq!(c.hotkey.toggle_hdr, "Ctrl+Alt+H");
-        assert!(c.startup.autostart);
+        assert!(!c.startup.autostart);
         assert_eq!(c.overrides.len(), 1);
         assert_eq!(c.overrides[0].exe, "hdr-testcard");
         assert_eq!(c.overrides[0].kind, RuleKind::HdrGame);

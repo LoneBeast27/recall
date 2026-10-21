@@ -68,7 +68,7 @@ impl Root {
             .px(px(CONTENT_PAD))
             .pt(px(20.))
             .pb(px(16.))
-            .child(div().text_size(px(20.)).line_height(px(28.)).font_weight(FontWeight::SEMIBOLD).child(title))
+            .child(div().font_family(theme::display()).text_size(px(22.)).line_height(px(28.)).font_weight(FontWeight::BOLD).child(title))
             .child(div().pt(px(2.)).text_size(px(14.)).text_color(c(theme::TERTIARY)).child(thousands(self.lib.visible_count)))
             .child(div().flex_1())
             .child(
@@ -174,7 +174,7 @@ impl Root {
                 })))
                 .into_any_element();
         }
-        bar.child(div().text_size(px(20.)).line_height(px(28.)).font_weight(FontWeight::SEMIBOLD).child(format!("{count} selected")))
+        bar.child(div().font_family(theme::display()).text_size(px(22.)).line_height(px(28.)).font_weight(FontWeight::BOLD).child(format!("{count} selected")))
             .child(div().flex_1())
             .child(ui::button("sel-fav", Variant::Secondary).child(icon(Icon::Star, 15., theme::TEXT)).child("Favourite").on_click(cx.listener(|this, _, _, cx| {
                 let paths: Vec<String> = this.lib.selected_paths().iter().map(|p| p.to_string_lossy().into_owned()).collect();
@@ -250,7 +250,7 @@ impl Root {
                     .flex()
                     .items_baseline()
                     .gap(px(10.))
-                    .child(div().text_size(px(14.)).line_height(px(20.)).font_weight(FontWeight::SEMIBOLD).child(g.label.clone()))
+                    .child(div().font_family(theme::display()).text_size(px(16.)).line_height(px(20.)).font_weight(FontWeight::BOLD).child(g.label.clone()))
                     .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(meta))
                     .into_any_element()
             }
@@ -630,7 +630,7 @@ pub fn empty_state(kind: Icon, title: &str, detail: Option<String>) -> AnyElemen
         .justify_center()
         .gap(px(10.))
         .child(icon(kind, 28., theme::DISABLED))
-        .child(div().text_size(px(15.)).font_weight(FontWeight::SEMIBOLD).child(title.to_owned()))
+        .child(div().font_family(theme::display()).text_size(px(17.)).font_weight(FontWeight::BOLD).child(title.to_owned()))
         .children(detail.map(|d| div().max_w(px(420.)).text_color(c(theme::TERTIARY)).text_center().child(d)))
         .into_any_element()
 }
