@@ -11,6 +11,12 @@
 //!   `record_hdr`); starts fine without the managed monitor.
 //! - Env vars still override config at startup (`Start-Recall.ps1`), and
 //!   `RECALL_CAPTURE_HWND` pins one window while its process lives.
+//! - Pause (tray "Stop recording" / pipe `pause`): the engine stops at once
+//!   (no linger), games are ignored and capture actions are refused until
+//!   resume; runtime only. Hotkeys + the advanced chord: `record_actions`,
+//!   `record_hotkeys`, `record_chord`. Saves / long recording in flight defer
+//!   settings restarts (`record_activity`); the storage cap runs in
+//!   `record_storage`.
 
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
@@ -29,10 +35,13 @@ use crate::hotkey::RecordHotkeys;
 use crate::liveness::ProcessWatch;
 use crate::log;
 use crate::overlay_proc::OverlayProc;
+use crate::record_activity::EngineActivity;
+use crate::record_chord::Chord;
 use crate::record_config::{parse_cpu_mask, ConfigStore};
 use crate::record_env::EnvOverrides;
 use crate::record_hdr::HdrManager;
 use crate::record_engine::{self, engine_env, EnginePlanner, EngineTarget, EXIT_LINGER};
+use crate::record_storage::Janitor;
 use crate::record_target::{classify_event, display_name, sanitize, Target, TargetTracker, TARGET_DEBOUNCE};
 use crate::record_tray::{RecallUi, RecordingTray, RecordingTrayCmd};
 use crate::supervisor::{EngineHealth, Supervisor};
@@ -45,8 +54,6 @@ const MAX_WAIT_MS: u32 = 50;
 const PROBE_EVERY: Duration = Duration::from_secs(1);
 /// Read-only HDR state refresh while HDR management is off.
 const HDR_REFRESH_EVERY: Duration = Duration::from_secs(5);
-const SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
-const MIC_DEBOUNCE: Duration = Duration::from_millis(250);
 const FALLBACK_CPU_MASK: usize = 0xffff_0000;
 
 /// The controller's state, owned by the pump thread. `record_cmds` adds the
@@ -80,14 +87,27 @@ pub struct Controller {
     pub(crate) hello_at_retarget: u32,
     pub(crate) last_session: String,
     pub(crate) last_hdr_event: String,
-    pub(crate) last_save: Option<Instant>,
-    pub(crate) last_mic: Option<Instant>,
+    /// Last time each hotkey action ran (per-action debounce).
+    pub(crate) last_fired: std::collections::HashMap<&'static str, Instant>,
     last_probe: Instant,
     last_hdr_refresh: Instant,
     /// (hwnd, is_target) of the last foreground fed to the tracker.
-    last_fed: Option<(isize, bool)>,
+    pub(crate) last_fed: Option<(isize, bool)>,
     target_monitor: isize,
     pub(crate) quit: bool,
+    /// Runtime pause (tray "Stop recording" / pipe `pause`): no engine, game
+    /// targets ignored, capture actions refused. A restart resumes.
+    pub(crate) paused: bool,
+    /// Saves / long recording in flight (from engine events).
+    pub(crate) activity: EngineActivity,
+    pub(crate) engine_events: Receiver<serde_json::Value>,
+    /// Engine settings changed while busy: restart once idle.
+    pub(crate) pending_restart: bool,
+    pub(crate) janitor: Janitor,
+    /// The advanced-shortcut chord window.
+    pub(crate) chord: Chord,
+    /// How the leader reads on this keyboard layout ("Alt `").
+    pub(crate) leader_label: String,
 }
 
 /// Entry point. Returns the process exit code.
@@ -103,7 +123,7 @@ pub fn run() -> i32 {
     let applied_mask = apply_niceness(&cfg.recording.cpu_mask);
     let pinned = pinned_target_from_env();
 
-    let tray = match RecordingTray::build(cfg.startup.autostart) {
+    let tray = match RecordingTray::build() {
         Ok(t) => t,
         Err(e) => {
             log!("record: FATAL -- tray unavailable: {e}");
@@ -119,6 +139,9 @@ pub fn run() -> i32 {
     let hub = PipeHub::start(ctl_tx);
     let supervisor = Supervisor::start_idle();
     supervisor.attach_hub(hub.clone());
+    let (engine_tx, engine_events) = channel::<serde_json::Value>();
+    supervisor.attach_events(engine_tx);
+    let janitor = Janitor::start(hub.clone());
     let mut hdr = HdrManager::probe(&cfg);
     if cfg.behavior.hdr_auto {
         if let Err(e) = hdr.activate(&cfg) {
@@ -153,24 +176,33 @@ pub fn run() -> i32 {
         hello_at_retarget: 0,
         last_session: String::new(),
         last_hdr_event: String::new(),
-        last_save: None,
-        last_mic: None,
+        last_fired: Default::default(),
         last_probe: now,
         last_hdr_refresh: now,
         last_fed: None,
         target_monitor,
         quit: false,
+        paused: false,
+        activity: EngineActivity::default(),
+        engine_events,
+        pending_restart: false,
+        janitor,
+        chord: Chord::new(Duration::from_millis(1_500), global_hotkey::hotkey::Modifiers::ALT),
+        leader_label: String::new(),
     };
     ctl.rebind_hotkeys();
     ctl.overlay.sync(&ctl.cfg.overlay);
     ctl.probe_foreground(now, true);
     log!(
-        "record: controller up (auto_record={}, buffer={}s, save={}, mic={}, out={:?})",
+        "record: controller up (auto_record={}, buffer={}s, save={}, mic={}, advanced={} via {}, out={:?}, storage cap={} GiB)",
         ctl.cfg.recording.auto_record,
         ctl.cfg.recording.buffer_secs,
         ctl.cfg.recording.save_hotkey,
         ctl.cfg.recording.mic_hotkey,
-        ctl.cfg.recording.output_dir
+        ctl.cfg.hotkeys.advanced_enabled,
+        ctl.leader_label,
+        ctl.cfg.recording.output_dir,
+        ctl.cfg.storage.cap_gb
     );
 
     let code = ctl.pump(&watch_rx, &ctl_rx);
@@ -217,10 +249,16 @@ impl Controller {
     }
 
     fn next_deadline(&self) -> Option<Instant> {
-        [self.tracker.next_deadline(), self.planner.linger_deadline(), self.hdr.next_deadline()]
-            .into_iter()
-            .flatten()
-            .min()
+        [
+            self.tracker.next_deadline(),
+            self.planner.linger_deadline(),
+            self.hdr.next_deadline(),
+            self.chord.deadline(),
+            self.janitor.next_deadline(),
+        ]
+        .into_iter()
+        .flatten()
+        .min()
     }
 
     fn on_foreground_event(&mut self, ev: &WatchEvent, now: Instant) {
@@ -232,7 +270,7 @@ impl Controller {
 
     /// Re-read the foreground; feed it only when (window, verdict) changed.
     /// Also drops a target / pin whose window no longer exists.
-    fn probe_foreground(&mut self, now: Instant, initial: bool) {
+    pub(crate) fn probe_foreground(&mut self, now: Instant, initial: bool) {
         self.last_probe = now;
         if let Some(t) = self.pinned.as_ref().filter(|t| !watcher::window_alive(t.hwnd)) {
             log!("record: pinned window {:#x} is gone; auto-detection resumes", t.hwnd);
@@ -256,11 +294,14 @@ impl Controller {
     }
 
     pub(crate) fn wanted(&self) -> EngineTarget {
-        record_engine::wanted(self.tracker.current(), self.pinned.as_ref(), &self.cfg.recording)
+        record_engine::wanted(self.tracker.current(), self.pinned.as_ref(), &self.cfg.recording, self.paused)
     }
 
-    /// Liveness -> target -> engine -> HDR -> fresh-engine intents -> overlay -> status.
+    /// Engine events -> chord -> liveness -> target -> engine -> HDR ->
+    /// fresh-engine intents -> deferred restart / storage -> overlay -> status.
     fn tick(&mut self, now: Instant) {
+        self.drain_engine_events(now);
+        self.chord_tick(now);
         if let Some(pid) = self.pin_watch.poll(self.pinned.as_ref().map(|t| t.pid)) {
             log!("record: pinned target's process {pid} exited; auto-detection resumes");
             self.pinned = None;
@@ -278,8 +319,10 @@ impl Controller {
         let hellos = self.supervisor.hello_count();
         if hellos != self.seen_hello {
             self.seen_hello = hellos;
+            self.activity.engine_restarted();
             self.reapply_engine_intents();
         }
+        self.activity_tick(now);
         self.overlay.sync(&self.cfg.overlay);
         if !self.hdr.is_active() && now.duration_since(self.last_hdr_refresh) >= HDR_REFRESH_EVERY {
             self.last_hdr_refresh = now;
@@ -291,6 +334,8 @@ impl Controller {
     /// Start, restart or stop the engine for `target` (an intended restart).
     pub(crate) fn apply_engine_target(&mut self, target: &EngineTarget) {
         self.hello_at_retarget = self.supervisor.hello_count();
+        // Any (re)start or stop picks up the current settings.
+        self.pending_restart = false;
         match target {
             EngineTarget::Off => {
                 log!("record: no target -> engine stopped (waiting for a game)");
@@ -335,26 +380,12 @@ impl Controller {
         matches!(self.supervisor.health(), EngineHealth::Running { pid } if pid != 0)
     }
 
-    /// (Re)register save / mic (+ HDR toggle while HDR management is on).
-    pub(crate) fn rebind_hotkeys(&mut self) {
+    /// The hotkey manager, created on first use (pump thread).
+    pub(crate) fn ensure_hotkeys(&mut self) -> Option<&mut RecordHotkeys> {
         if self.hotkeys.is_none() {
-            self.hotkeys = RecordHotkeys::new()
-                .map_err(|e| log!("record: hotkeys unavailable: {e}"))
-                .ok();
+            self.hotkeys = RecordHotkeys::new().map_err(|e| log!("record: hotkeys unavailable: {e}")).ok();
         }
-        let Some(hk) = self.hotkeys.as_mut() else { return };
-        let hdr_key = self.hdr.is_active().then(|| self.cfg.hotkey.toggle_hdr.clone());
-        let rec = &self.cfg.recording;
-        for warning in hk.bind(&rec.save_hotkey, &rec.mic_hotkey, hdr_key.as_deref()) {
-            log!("record: hotkey unavailable: {warning}");
-            self.hub.event("session", &crate::record_status::error_event(&warning));
-        }
-        log!(
-            "record: hotkeys save={} mic={} hdr={}",
-            rec.save_hotkey,
-            rec.mic_hotkey,
-            hdr_key.as_deref().unwrap_or("(off)")
-        );
+        self.hotkeys.as_mut()
     }
 
     fn on_tray(&mut self, cmd: RecordingTrayCmd) {
@@ -363,34 +394,10 @@ impl Controller {
                 let matched = self.ui.open();
                 log!("record: tray open, matched UI windows={}", matched.len());
             }
-            RecordingTrayCmd::SaveNow => self.save_clip(None),
-            RecordingTrayCmd::SetAutostart(on) => {
-                let patch = serde_json::json!({"startup": {"autostart": on}});
-                if !self.apply_config_patch(&patch, None) {
-                    self.tray.set_autostart_checked(self.cfg.startup.autostart);
-                }
-            }
+            RecordingTrayCmd::TogglePause => self.set_paused(!self.paused),
             RecordingTrayCmd::Quit => {
                 log!("record: tray quit");
                 self.quit = true;
-            }
-        }
-    }
-
-    fn on_hotkeys(&mut self, fired: crate::hotkey::RecordFired) {
-        let now = Instant::now();
-        if fired.save && self.last_save.is_none_or(|t| now.duration_since(t) >= SAVE_DEBOUNCE) {
-            self.last_save = Some(now);
-            log!("record: save hotkey");
-            self.save_clip(None);
-        }
-        if fired.mic && self.last_mic.is_none_or(|t| now.duration_since(t) >= MIC_DEBOUNCE) {
-            self.last_mic = Some(now);
-            self.set_mic(!self.mic_muted);
-        }
-        if fired.hdr {
-            if let Err(e) = self.hdr.toggle() {
-                log!("record: HDR hotkey ignored: {e}");
             }
         }
     }

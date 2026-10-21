@@ -20,6 +20,22 @@ pub const CORNERS: [&str; 4] = ["top-left", "top-right", "bottom-left", "bottom-
 /// Accepted replay-buffer lengths (seconds). The ring lives in RAM.
 pub const BUFFER_SECS_MIN: u32 = 10;
 pub const BUFFER_SECS_MAX: u32 = 600;
+/// `recording.codec` tokens (`RECALL_CODEC`).
+pub const CODECS: [&str; 3] = ["h264", "hevc", "av1"];
+/// `recording.quality` tokens (`RECALL_QUALITY`).
+pub const QUALITIES: [&str; 3] = ["performance", "balanced", "quality"];
+pub const FPS_MIN: u32 = 15;
+pub const FPS_MAX: u32 = 240;
+pub const BITRATE_MBPS_MIN: u32 = 1;
+pub const BITRATE_MBPS_MAX: u32 = 200;
+
+/// One save-length preset: `seconds` of the buffer (0 = all of it).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SaveHotkey {
+    pub hotkey: String,
+    #[serde(default)]
+    pub seconds: u32,
+}
 
 /// `[recording]` -- what the unified record mode captures and how.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -29,16 +45,38 @@ pub struct RecordingCfg {
     pub auto_record: bool,
     /// Folder the engine writes clips into (`RECALL_OUT_DIR`).
     pub output_dir: String,
-    /// Replay-buffer length in seconds; also the hotkey's save length.
+    /// Replay-buffer length in seconds; also the full-buffer save length.
     pub buffer_secs: u32,
-    /// Global accelerator that saves the replay buffer.
+    /// Legacy single save accelerator. Mirrors the first full-buffer entry of
+    /// `save_hotkeys`; setting it (patch, env, a config without
+    /// `save_hotkeys`) moves that entry (`record_hotkeys`).
     pub save_hotkey: String,
     /// Global accelerator that toggles the recorded microphone.
     pub mic_hotkey: String,
+    /// Mark "now" for the clips saved later ("" = off).
+    pub bookmark_hotkey: String,
+    /// PNG of the live frame into `<output_dir>\screenshots` ("" = off).
+    pub screenshot_hotkey: String,
+    /// Start / stop the manual long recording ("" = off).
+    pub record_hotkey: String,
+    /// `h264` | `hevc` | `av1` (`RECALL_CODEC`).
+    pub codec: String,
+    /// Nominal capture/encode rate (`RECALL_FPS`).
+    pub fps: u32,
+    /// Video bitrate in Mbit/s (`RECALL_BITRATE`, sent in bit/s).
+    pub bitrate_mbps: u32,
+    /// `performance` | `balanced` | `quality` (`RECALL_QUALITY`).
+    pub quality: String,
+    /// Exe captured as its own "Voice" track and kept out of Game, e.g.
+    /// `Discord.exe` ("" = off; `RECALL_AUDIO_VOICE_EXE`).
+    pub voice_app: String,
     /// Hex CPU affinity mask applied to the controller and every child.
     pub cpu_mask: String,
     /// With no game target, capture the primary monitor as "Desktop".
     pub record_desktop_when_idle: bool,
+    /// Save-length presets. Last field: TOML writes it as
+    /// `[[recording.save_hotkeys]]` tables after the plain keys.
+    pub save_hotkeys: Vec<SaveHotkey>,
 }
 
 impl Default for RecordingCfg {
@@ -49,10 +87,62 @@ impl Default for RecordingCfg {
             buffer_secs: 120,
             save_hotkey: "Alt+N".into(),
             mic_hotkey: "Alt+M".into(),
+            // Off by default: the advanced chord (`[hotkeys]`) carries these.
+            bookmark_hotkey: String::new(),
+            screenshot_hotkey: String::new(),
+            record_hotkey: String::new(),
+            codec: "h264".into(),
+            fps: 60,
+            bitrate_mbps: 25,
+            quality: "balanced".into(),
+            voice_app: String::new(),
             cpu_mask: "ffff0000".into(),
             record_desktop_when_idle: false,
+            save_hotkeys: crate::record_hotkeys::default_save_hotkeys(),
         }
     }
+}
+
+impl RecordingCfg {
+    /// Seconds a preset saves: 0 = the whole buffer, never more than it.
+    pub fn save_seconds(&self, preset: u32) -> u32 {
+        if preset == 0 {
+            self.buffer_secs
+        } else {
+            preset.min(self.buffer_secs)
+        }
+    }
+}
+
+pub const CHORD_WINDOW_MS_MIN: u32 = 500;
+pub const CHORD_WINDOW_MS_MAX: u32 = 5_000;
+
+/// `[hotkeys]` -- the advanced chord (`record_chord`): `leader`, then within
+/// `window_ms` one of 1 bookmark, 2 save the last `save_seconds`,
+/// 3 screenshot, 4 start/stop the long recording (Esc cancels). In `leader`,
+/// `Backquote` means the PHYSICAL key left of 1 on any layout.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct HotkeysCfg {
+    pub advanced_enabled: bool,
+    pub leader: String,
+    pub save_seconds: u32,
+    pub window_ms: u32,
+}
+
+impl Default for HotkeysCfg {
+    fn default() -> Self {
+        HotkeysCfg { advanced_enabled: true, leader: "Alt+Backquote".into(), save_seconds: 30, window_ms: 1_500 }
+    }
+}
+
+/// `[storage]` -- automatic clean-up of the clip folder (`record_storage`).
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct StorageCfg {
+    /// GiB of top-level `*.mp4` allowed in `recording.output_dir`; the oldest
+    /// unprotected clips go to the Recycle Bin past it. 0 = off.
+    pub cap_gb: u32,
 }
 
 /// `[overlay]` -- the controller-owned `recall-overlay.exe` toast process.
@@ -93,17 +183,38 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
         return Err("recording.output_dir must not be empty".into());
     }
     parse_cpu_mask(&rec.cpu_mask)?;
-    crate::hotkey::parse_accel(&rec.save_hotkey).map_err(|e| format!("recording.save_hotkey: {e}"))?;
-    crate::hotkey::parse_accel(&rec.mic_hotkey).map_err(|e| format!("recording.mic_hotkey: {e}"))?;
-    if rec.save_hotkey.trim().eq_ignore_ascii_case(rec.mic_hotkey.trim()) {
-        return Err("recording.save_hotkey and recording.mic_hotkey must differ".into());
-    }
+    crate::record_hotkeys::validate(rec, &cfg.hotkeys)?;
+    validate_quality(rec)?;
     if !CORNERS.contains(&cfg.overlay.corner.as_str()) {
         return Err(format!(
             "overlay.corner '{}' must be one of {}",
             cfg.overlay.corner,
             CORNERS.join(" | ")
         ));
+    }
+    Ok(())
+}
+
+/// Codec / rate / bitrate / quality tokens and the voice-chat exe name.
+fn validate_quality(rec: &RecordingCfg) -> Result<(), String> {
+    if !CODECS.contains(&rec.codec.as_str()) {
+        return Err(format!("recording.codec '{}' must be one of {}", rec.codec, CODECS.join(" | ")));
+    }
+    if !(FPS_MIN..=FPS_MAX).contains(&rec.fps) {
+        return Err(format!("recording.fps must be {FPS_MIN}..={FPS_MAX}, got {}", rec.fps));
+    }
+    if !(BITRATE_MBPS_MIN..=BITRATE_MBPS_MAX).contains(&rec.bitrate_mbps) {
+        return Err(format!(
+            "recording.bitrate_mbps must be {BITRATE_MBPS_MIN}..={BITRATE_MBPS_MAX}, got {}",
+            rec.bitrate_mbps
+        ));
+    }
+    if !QUALITIES.contains(&rec.quality.as_str()) {
+        return Err(format!("recording.quality '{}' must be one of {}", rec.quality, QUALITIES.join(" | ")));
+    }
+    let voice = rec.voice_app.trim();
+    if voice.len() > 64 || voice.chars().any(|c| matches!(c, '\\' | '/' | ':') || c.is_control()) {
+        return Err(format!("recording.voice_app '{voice}' must be an exe name like Discord.exe (no folders)"));
     }
     Ok(())
 }
@@ -194,9 +305,12 @@ pub fn apply_patch(base: &Config, patch: &Value) -> Result<PatchOutcome, String>
         return Err("config did not serialize to an object".into());
     };
     check_keys(schema, patch_map, "")?;
+    // A legacy `recording.save_hotkey` moves the full-buffer preset.
+    let patch = crate::record_hotkeys::rewrite_legacy_patch(&base.recording, patch);
     let mut merged = before.clone();
-    merge_json(&mut merged, patch);
-    let config: Config = serde_json::from_value(merged).map_err(|e| format!("invalid config: {e}"))?;
+    merge_json(&mut merged, &patch);
+    let mut config: Config = serde_json::from_value(merged).map_err(|e| format!("invalid config: {e}"))?;
+    config.recording.save_hotkey = crate::record_hotkeys::legacy_save_hotkey(&config.recording.save_hotkeys);
     validate(&config)?;
     let after = serde_json::to_value(&config).map_err(|e| format!("serialize config: {e}"))?;
     let mut changed = Vec::new();
@@ -239,172 +353,5 @@ impl ConfigStore {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::types::RuleKind;
-    use serde_json::json;
-
-    /// The user's real config shape (2026-10-22): autostart off, 360-nit SDR
-    /// white, a `brave -> none` override, comments, and no `[recording]` yet.
-    const USER_TOML: &str = r#"
-version = 1
-[display]
-target_friendly_name = "PG27AQDP"
-[behavior]
-default_game_class = "sdr_game"
-default_clamp = "punchy"
-# SDR-content white level comment
-sdr_white_nits = 360
-debounce_ms = 400
-[hotkey]
-toggle_hdr = "Ctrl+Alt+H"
-[startup]
-autostart = false
-[[overrides]]
-exe = "hdr-testcard"
-kind = "hdr_game"
-[[overrides]]
-exe = "brave"
-kind = "none"
-"#;
-
-    fn temp_store(tag: &str) -> ConfigStore {
-        let dir = std::env::temp_dir().join(format!(
-            "recall-hdr-reccfg-{tag}-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
-        std::fs::create_dir_all(&dir).unwrap();
-        ConfigStore::at(dir.join("config.toml"))
-    }
-
-    fn user_cfg() -> Config {
-        toml::from_str(USER_TOML).expect("user config parses")
-    }
-
-    #[test]
-    fn user_config_without_recording_sections_gets_defaults() {
-        let cfg = user_cfg();
-        assert_eq!(cfg.recording, RecordingCfg::default());
-        assert_eq!(cfg.overlay, OverlayCfg::default());
-        assert!(!cfg.behavior.hdr_auto, "hdr_auto defaults off");
-        assert_eq!(cfg.recording.output_dir, r"V:\ALL RECORDINGS");
-        assert_eq!(cfg.recording.buffer_secs, 120);
-        assert_eq!(cfg.recording.cpu_mask, "ffff0000");
-    }
-
-    #[test]
-    fn partial_recording_section_fills_missing_keys() {
-        let src = format!("{USER_TOML}\n[recording]\nbuffer_secs = 90\n");
-        // `[recording]` must precede `[[overrides]]` only for serializing; TOML
-        // allows it anywhere on load.
-        let cfg: Config = toml::from_str(&src).unwrap();
-        assert_eq!(cfg.recording.buffer_secs, 90);
-        assert_eq!(cfg.recording.save_hotkey, "Alt+N");
-        assert!(cfg.recording.auto_record);
-    }
-
-    #[test]
-    fn load_patch_save_reload_preserves_user_values() {
-        let store = temp_store("roundtrip");
-        std::fs::write(store.path(), USER_TOML).unwrap();
-        let loaded = store.load();
-        let out = apply_patch(
-            &loaded,
-            &json!({"overlay":{"enabled":true,"corner":"bottom-left"},"recording":{"buffer_secs":90}}),
-        )
-        .unwrap();
-        store.save(&out.config).unwrap();
-        let back = store.load();
-        // The patched values landed...
-        assert!(back.overlay.enabled);
-        assert_eq!(back.overlay.corner, "bottom-left");
-        assert_eq!(back.recording.buffer_secs, 90);
-        // ...and every user value survived the round trip.
-        assert!(!back.startup.autostart);
-        assert_eq!(back.behavior.sdr_white_nits, 360);
-        assert_eq!(back.overrides.len(), 2);
-        assert_eq!(back.overrides[1].exe, "brave");
-        assert_eq!(back.overrides[1].kind, RuleKind::None);
-        assert_eq!(back, out.config, "save -> load is identity");
-        let _ = std::fs::remove_dir_all(store.path().parent().unwrap());
-    }
-
-    #[test]
-    fn patch_reports_only_changed_leaves() {
-        let base = user_cfg();
-        let out = apply_patch(
-            &base,
-            &json!({"startup":{"autostart":true},"overlay":{"corner":"top-right"}}),
-        )
-        .unwrap();
-        assert_eq!(out.changed, vec!["startup.autostart".to_string()], "corner was already top-right");
-        assert!(out.touched("startup"));
-        assert!(!out.touched("overlay"));
-        assert!(!out.touched("start"), "prefix match is per path segment");
-    }
-
-    #[test]
-    fn patch_rejects_unknown_keys_bad_values_and_version() {
-        let base = user_cfg();
-        for (patch, needle) in [
-            (json!({"recording":{"bufer_secs":90}}), "unknown config key 'recording.bufer_secs'"),
-            (json!({"nope":1}), "unknown config key 'nope'"),
-            (json!({"recording":5}), "must be an object"),
-            (json!({"overlay":{"corner":"middle"}}), "overlay.corner"),
-            (json!({"recording":{"buffer_secs":5}}), "buffer_secs"),
-            (json!({"recording":{"cpu_mask":"0"}}), "cpu_mask"),
-            (json!({"recording":{"cpu_mask":"zz"}}), "cpu_mask"),
-            (json!({"recording":{"save_hotkey":"Ctrl+Nonsense"}}), "save_hotkey"),
-            (json!({"recording":{"save_hotkey":"Alt+M"}}), "must differ"),
-            (json!({"recording":{"buffer_secs":"ninety"}}), "invalid config"),
-            (json!({"version":2}), "read-only"),
-            (json!([1, 2]), "must be an object"),
-        ] {
-            let err = apply_patch(&base, &patch).expect_err(&format!("{patch} must be rejected"));
-            assert!(err.contains(needle), "{patch}: '{err}' lacks '{needle}'");
-        }
-    }
-
-    #[test]
-    fn patch_replaces_overrides_array_and_allows_optional_device_path() {
-        let base = user_cfg();
-        let out = apply_patch(
-            &base,
-            &json!({"overrides":[{"exe":"valorant","kind":"sdr_game"}],"display":{"target_device_path":"\\\\?\\DISPLAY#X"}}),
-        )
-        .unwrap();
-        assert_eq!(out.config.overrides.len(), 1);
-        assert_eq!(out.config.overrides[0].exe, "valorant");
-        assert!(out.config.display.target_device_path.is_some());
-        assert!(out.touched("overrides"));
-    }
-
-    #[test]
-    fn merge_json_merges_objects_and_replaces_everything_else() {
-        let mut base = json!({"a":{"x":1,"y":2},"list":[1,2],"s":"old"});
-        merge_json(&mut base, &json!({"a":{"y":3},"list":[9],"s":"new"}));
-        assert_eq!(base, json!({"a":{"x":1,"y":3},"list":[9],"s":"new"}));
-    }
-
-    #[test]
-    fn cpu_mask_parses_with_or_without_prefix() {
-        assert_eq!(parse_cpu_mask("ffff0000"), Ok(0xffff_0000));
-        assert_eq!(parse_cpu_mask("0xFFFF0000"), Ok(0xffff_0000));
-        assert!(parse_cpu_mask("0").is_err());
-        assert!(parse_cpu_mask("").is_err());
-    }
-
-    #[test]
-    fn config_json_has_every_section() {
-        let v = config_json(&user_cfg());
-        for key in ["display", "behavior", "hotkey", "startup", "recording", "overlay", "overrides"] {
-            assert!(v.get(key).is_some(), "config event lacks '{key}'");
-        }
-        assert_eq!(v["behavior"]["default_clamp"], "punchy", "snake_case tokens on the wire");
-        assert_eq!(v["recording"]["save_hotkey"], "Alt+N");
-    }
-}
+#[path = "record_config_tests.rs"]
+mod tests;
