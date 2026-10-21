@@ -1,0 +1,253 @@
+//! Source video probing, the pixel converter/downscaler, and the H.264 encoder
+//! used by re-encoding exports.
+//!
+//! Production always encodes with `h264_nvenc` (no CPU fallback). The encoder
+//! is a parameter so CPU-only tests can drive the identical pipeline with
+//! libx264; that variant only exists in test builds.
+
+use ffmpeg_next as ff;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum VideoBackend {
+    Nvenc,
+    #[cfg(test)]
+    X264,
+}
+
+impl VideoBackend {
+    fn codec_name(self) -> &'static str {
+        match self {
+            Self::Nvenc => "h264_nvenc",
+            #[cfg(test)]
+            Self::X264 => "libx264",
+        }
+    }
+
+    fn options(self) -> ff::Dictionary<'static> {
+        let mut options = ff::Dictionary::new();
+        match self {
+            Self::Nvenc => {
+                options.set("preset", "p5");
+                options.set("tune", "hq");
+                options.set("rc", "vbr");
+                options.set("bf", "0");
+            }
+            #[cfg(test)]
+            Self::X264 => {
+                options.set("preset", "veryfast");
+                options.set("bf", "0");
+            }
+        }
+        options
+    }
+
+    fn unavailable(self) -> String {
+        match self {
+            Self::Nvenc => {
+                "NVIDIA NVENC encoder h264_nvenc is unavailable; no CPU fallback is permitted".into()
+            }
+            #[cfg(test)]
+            Self::X264 => "libx264 is unavailable in this FFmpeg build".into(),
+        }
+    }
+}
+
+/// Average bitrate plus an optional VBV ceiling (`maxrate` over `bufsize`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RateControl {
+    pub bitrate: usize,
+    pub vbv: Option<Vbv>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Vbv {
+    pub maxrate: usize,
+    pub bufsize: usize,
+}
+
+impl RateControl {
+    pub fn quality(bitrate: usize) -> Self {
+        Self { bitrate, vbv: None }
+    }
+}
+
+/// Quality-oriented default bitrate: 0.1 bit per pixel, 4–120 Mbps.
+pub(crate) fn recommended_bitrate(width: u32, height: u32, fps: u32) -> usize {
+    let pixels_per_second = width as u128 * height as u128 * fps as u128;
+    let bits = (pixels_per_second / 10).clamp(4_000_000, 120_000_000);
+    bits as usize
+}
+
+pub(crate) struct SourceVideo {
+    pub index: usize,
+    pub time_base: ff::Rational,
+    pub params: ff::codec::Parameters,
+    pub width: u32,
+    pub height: u32,
+    pub format: ff::format::Pixel,
+    pub aspect: ff::Rational,
+}
+
+pub(crate) fn probe_video(ictx: &ff::format::context::Input) -> Result<SourceVideo, String> {
+    let stream = ictx
+        .streams()
+        .best(ff::media::Type::Video)
+        .ok_or_else(|| "input has no decodable video stream".to_string())?;
+    let decoder = open_decoder(stream.parameters())?;
+    if decoder.width() == 0 || decoder.height() == 0 {
+        return Err("input video has invalid zero dimensions".into());
+    }
+    Ok(SourceVideo {
+        index: stream.index(),
+        time_base: stream.time_base(),
+        params: stream.parameters(),
+        width: decoder.width(),
+        height: decoder.height(),
+        format: decoder.format(),
+        aspect: decoder.aspect_ratio(),
+    })
+}
+
+pub(crate) fn open_decoder(params: ff::codec::Parameters) -> Result<ff::decoder::Video, String> {
+    ff::codec::context::Context::from_parameters(params)
+        .map_err(|e| format!("create video decoder: {e}"))?
+        .decoder()
+        .video()
+        .map_err(|e| format!("open video decoder: {e}"))
+}
+
+/// Output size for an optional target height: never upscales, keeps the aspect
+/// ratio, and rounds both sides to even numbers (4:2:0 chroma needs them).
+pub(crate) fn output_dims(width: u32, height: u32, target_height: Option<u32>) -> (u32, u32) {
+    let even = |value: u32| (value & !1).max(2);
+    match target_height {
+        Some(target) if target < height => {
+            let out_height = even(target);
+            let out_width = (width as f64 * out_height as f64 / height as f64).round() as u32;
+            (even(out_width + (out_width & 1)), out_height)
+        }
+        _ => (even(width), even(height)),
+    }
+}
+
+/// Converts decoded frames to YUV 4:2:0 at the output size in one swscale pass.
+/// Bicubic when downscaling (sharper than bilinear at similar cost); bilinear
+/// for the same-size format conversion.
+pub(crate) fn scaler(
+    source: &SourceVideo,
+    width: u32,
+    height: u32,
+) -> Result<ff::software::scaling::Context, String> {
+    let flags = if width == source.width && height == source.height {
+        ff::software::scaling::Flags::BILINEAR
+    } else {
+        ff::software::scaling::Flags::BICUBIC
+    };
+    ff::software::scaling::Context::get(
+        source.format,
+        source.width,
+        source.height,
+        ff::format::Pixel::YUV420P,
+        width,
+        height,
+        flags,
+    )
+    .map_err(|e| format!("create video pixel converter: {e}"))
+}
+
+pub(crate) struct EncoderSpec {
+    pub backend: VideoBackend,
+    pub width: u32,
+    pub height: u32,
+    pub aspect: ff::Rational,
+    pub fps: u32,
+    pub rate: RateControl,
+}
+
+/// Open the H.264 encoder (CFR `1/fps` timebase, one keyframe per second, no
+/// B-frames, global headers for MP4).
+pub(crate) fn open_encoder(spec: &EncoderSpec) -> Result<(ff::encoder::Video, ff::Codec), String> {
+    let name = spec.backend.codec_name();
+    let codec = ff::encoder::find_by_name(name).ok_or_else(|| spec.backend.unavailable())?;
+    let mut context = ff::codec::context::Context::new_with_codec(codec)
+        .encoder()
+        .video()
+        .map_err(|e| format!("create {name} context: {e}"))?;
+    context.set_width(spec.width);
+    context.set_height(spec.height);
+    context.set_aspect_ratio(spec.aspect);
+    context.set_format(ff::format::Pixel::YUV420P);
+    context.set_time_base(ff::Rational(1, spec.fps as i32));
+    context.set_frame_rate(Some(ff::Rational(spec.fps as i32, 1)));
+    context.set_gop(spec.fps.max(1));
+    context.set_max_b_frames(0);
+    context.set_bit_rate(spec.rate.bitrate);
+    context.set_flags(ff::codec::Flags::GLOBAL_HEADER);
+    let mut options = spec.backend.options();
+    if let Some(vbv) = spec.rate.vbv {
+        options.set("maxrate", &vbv.maxrate.to_string());
+        options.set("bufsize", &vbv.bufsize.to_string());
+    }
+    let encoder = context.open_with(options).map_err(|e| match spec.backend {
+        VideoBackend::Nvenc => format!(
+            "open NVIDIA NVENC encoder h264_nvenc: {e}; no CPU fallback is permitted"
+        ),
+        #[cfg(test)]
+        VideoBackend::X264 => format!("open libx264: {e}"),
+    })?;
+    Ok((encoder, codec))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::output_dims;
+
+    #[test]
+    fn downscale_keeps_aspect_with_even_sides_and_never_upscales() {
+        assert_eq!(output_dims(2560, 1440, Some(1080)), (1920, 1080));
+        assert_eq!(output_dims(1920, 1080, Some(720)), (1280, 720));
+        assert_eq!(output_dims(3440, 1440, Some(1080)), (2580, 1080));
+        assert_eq!(output_dims(322, 240, Some(135)), (180, 134));
+        assert_eq!(output_dims(1920, 1080, Some(1080)), (1920, 1080));
+        assert_eq!(output_dims(1280, 720, Some(1080)), (1280, 720));
+        assert_eq!(output_dims(1920, 1080, None), (1920, 1080));
+    }
+
+    /// `cargo test bench_swscale -- --ignored --nocapture`: per-frame cost of the
+    /// decoded-frame conversion at the same size vs. downscaled (the measured
+    /// basis for scaling in swscale rather than adding a GPU scaler stage).
+    #[test]
+    #[ignore]
+    fn bench_swscale_downscale() {
+        use super::*;
+        ff::init().unwrap();
+        let (width, height) = (2560u32, 1440u32);
+        let mut source = ff::frame::Video::new(ff::format::Pixel::YUV420P, width, height);
+        for plane in 0..3 {
+            for (i, byte) in source.data_mut(plane).iter_mut().enumerate() {
+                *byte = (i * 31 % 251) as u8;
+            }
+        }
+        let probe = SourceVideo {
+            index: 0,
+            time_base: ff::Rational(1, 1_000_000),
+            params: ff::codec::Parameters::new(),
+            width,
+            height,
+            format: ff::format::Pixel::YUV420P,
+            aspect: ff::Rational(1, 1),
+        };
+        for target in [None, Some(1080), Some(720)] {
+            let (w, h) = output_dims(width, height, target);
+            let mut context = scaler(&probe, w, h).unwrap();
+            let mut out = ff::frame::Video::new(ff::format::Pixel::YUV420P, w, h);
+            let rounds = 120;
+            let started = std::time::Instant::now();
+            for _ in 0..rounds {
+                context.run(&source, &mut out).unwrap();
+            }
+            let per_frame = started.elapsed().as_secs_f64() * 1000.0 / rounds as f64;
+            eprintln!("swscale 2560x1440 -> {w}x{h}: {per_frame:.2} ms/frame");
+        }
+    }
+}
