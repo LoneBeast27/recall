@@ -2,5 +2,7 @@
 pub mod editor;
 pub mod library;
 pub mod pages;
+pub mod settings;
+pub mod storage_settings;
 pub mod timeline;
 pub mod titlebar;

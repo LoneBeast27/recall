@@ -3,7 +3,7 @@ use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Window, div, prel
 use serde_json::{Value, json};
 
 use crate::{
-    root::{Root, Route, ToastKind},
+    root::{Root, ToastKind},
     services::{
         daemon::{self, DaemonCommand},
         meters::{MeterState, bar_fraction},
@@ -15,7 +15,12 @@ use crate::{
 impl Root {
     /// Page content inside the shell panel: a header aligned with the library header,
     /// then a scrolling, left-aligned column.
-    fn page_shell(&self, title: &str, subtitle: &str, body: Vec<AnyElement>) -> AnyElement {
+    pub(crate) fn page_shell(&self, title: &str, subtitle: &str, body: Vec<AnyElement>) -> AnyElement {
+        self.page_shell_tabs(title, subtitle, None, body)
+    }
+
+    /// Header (+ optional fixed tab row) and a scrolling, left-aligned column.
+    pub(crate) fn page_shell_tabs(&self, title: &str, subtitle: &str, tabs: Option<AnyElement>, body: Vec<AnyElement>) -> AnyElement {
         div()
             .size_full()
             .flex()
@@ -32,6 +37,7 @@ impl Root {
                     .child(div().font_family(theme::display()).text_size(px(22.)).line_height(px(28.)).font_weight(FontWeight::BOLD).child(title.to_owned()))
                     .child(div().text_size(px(14.)).text_color(c(theme::TERTIARY)).child(subtitle.to_owned())),
             )
+            .children(tabs.map(|t| div().flex_none().px(px(24.)).pb(px(16.)).child(t)))
             .child(
                 div().id("page-scroll").flex_1().min_h_0().overflow_y_scroll().child(
                     div().max_w(px(760.)).px(px(24.)).pb(px(24.)).flex().flex_col().gap(px(20.)).children(body),
@@ -40,7 +46,7 @@ impl Root {
             .into_any_element()
     }
 
-    fn offline_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    pub(crate) fn offline_banner(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         if self.snap.connected {
             return None;
         }
@@ -64,15 +70,15 @@ impl Root {
         )
     }
 
-    fn config_value(&self, section: &str, key: &str) -> Option<&Value> {
+    pub(crate) fn config_value(&self, section: &str, key: &str) -> Option<&Value> {
         self.snap.config.as_ref()?.get(section)?.get(key)
     }
 
-    fn config_bool(&self, section: &str, key: &str) -> bool {
+    pub(crate) fn config_bool(&self, section: &str, key: &str) -> bool {
         self.config_value(section, key).and_then(Value::as_bool).unwrap_or(false)
     }
 
-    fn set_config(&mut self, section: &str, key: &str, value: Value) {
+    pub(crate) fn set_config(&mut self, section: &str, key: &str, value: Value) {
         let mut patch = serde_json::Map::new();
         patch.insert(section.into(), json!({ key: value }));
         self.send(DaemonCommand::SetConfig(Value::Object(patch)));
@@ -256,116 +262,17 @@ impl Root {
     }
 
     // ---- Settings ---------------------------------------------------------
-
-    pub fn render_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        let session = self.snap.session.clone().unwrap_or_default();
-        let auto_record = self.config_value("recording", "auto_record").and_then(Value::as_bool).unwrap_or(session.auto_record);
-        let desktop = self.config_bool("recording", "record_desktop_when_idle");
-        let buffer = self.config_value("recording", "buffer_secs").and_then(Value::as_u64).unwrap_or(session.save_seconds.max(1) as u64);
-        let overlay_on = self.config_value("overlay", "enabled").and_then(Value::as_bool).unwrap_or(session.overlay.enabled);
-        let corner = self.config_value("overlay", "corner").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| session.overlay.corner.clone());
-        let autostart = self.config_value("startup", "autostart").and_then(Value::as_bool).unwrap_or(session.autostart);
-        let out_dir = self
-            .config_value("recording", "output_dir")
-            .and_then(Value::as_str)
-            .map(str::to_owned)
-            .or_else(|| std::env::var("RECALL_OUT_DIR").ok())
-            .unwrap_or_else(|| r"V:\ALL RECORDINGS".into());
-        let mut body = vec![];
-        body.extend(self.offline_banner(cx));
-        body.push(section_title("Recording"));
-        body.push(
-            setting_row("Record games automatically", "Recording starts when a fullscreen game is in front and stops when it closes.")
-                .child(ui::switch("auto-record", auto_record).on_click(cx.listener(move |this, _, _, cx| {
-                    this.set_config("recording", "auto_record", json!(!auto_record));
-                    cx.notify();
-                })))
-                .into_any_element(),
-        );
-        body.push(
-            setting_row("Record the desktop when no game runs", "Keeps a replay of your main screen between games.")
-                .child(ui::switch("desktop-idle", desktop).on_click(cx.listener(move |this, _, _, cx| {
-                    this.set_config("recording", "record_desktop_when_idle", json!(!desktop));
-                    cx.notify();
-                })))
-                .into_any_element(),
-        );
-        let mut lengths = ui::segment_track().w(px(300.));
-        for (secs, label) in [(30u64, "30 s"), (60, "1 min"), (120, "2 min"), (300, "5 min")] {
-            lengths = lengths.child(ui::segment(("len", secs as usize), label, buffer == secs).on_click(cx.listener(move |this, _, _, cx| {
-                this.set_config("recording", "buffer_secs", json!(secs));
-                cx.notify();
-            })));
-        }
-        body.push(setting_row("Replay length", "How much the save hotkey keeps. Longer uses more memory.").child(lengths).into_any_element());
-        body.push(
-            setting_row("Hotkeys", "Work in every game.")
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(6.))
-                        .items_end()
-                        .child(hotkey_line("Save replay", &session.save_hotkey, "Alt+N"))
-                        .child(hotkey_line("Mute mic in clips", &session.mic_hotkey, "Alt+M")),
-                )
-                .into_any_element(),
-        );
-        body.push(section_title("Overlay"));
-        body.push(
-            setting_row("Show a notice on save", "A small corner card for 3 seconds. Hidden from your own captures.")
-                .child(ui::switch("overlay-on", overlay_on).on_click(cx.listener(move |this, _, _, cx| {
-                    this.set_config("overlay", "enabled", json!(!overlay_on));
-                    cx.notify();
-                })))
-                .into_any_element(),
-        );
-        let mut corners = ui::segment_track().w(px(360.));
-        for (value, label) in [("top-left", "Top left"), ("top-right", "Top right"), ("bottom-left", "Bottom left"), ("bottom-right", "Bottom right")] {
-            corners = corners.child(ui::segment(SharedString::from(format!("corner-{value}")), label, corner == value).on_click(cx.listener(move |this, _, _, cx| {
-                this.set_config("overlay", "corner", json!(value));
-                cx.notify();
-            })));
-        }
-        body.push(setting_row("Corner", "").child(corners).into_any_element());
-        body.push(section_title("System"));
-        body.push(
-            setting_row("Start with Windows", "Recall starts in the tray when you sign in and records your games.")
-                .child(ui::switch("autostart", autostart).on_click(cx.listener(move |this, _, _, cx| {
-                    this.set_config("startup", "autostart", json!(!autostart));
-                    cx.notify();
-                })))
-                .into_any_element(),
-        );
-        let folder = out_dir.clone();
-        body.push(
-            setting_row("Clip folder", &out_dir)
-                .child(ui::button("open-folder", Variant::Secondary).child(icon(Icon::Folder, 14., theme::TEXT)).child("Open").on_click(cx.listener(move |_, _, _, _| {
-                    let _ = std::process::Command::new("explorer.exe").arg(&folder).spawn();
-                })))
-                .into_any_element(),
-        );
-        body.push(
-            setting_row("Quit Recall", "Stops recording and closes the tray icon.")
-                .child(ui::button("quit-recorder", Variant::Ghost).border_1().border_color(c(theme::BORDER)).child(icon(Icon::Power, 14., theme::MUTED)).child("Stop recorder").on_click(cx.listener(|this, _, _, cx| {
-                    this.send(DaemonCommand::Quit);
-                    cx.notify();
-                })))
-                .into_any_element(),
-        );
-        self.page_shell("Settings", "Recording, overlay and startup", body)
-    }
 }
 
-fn card() -> Div {
+pub(crate) fn card() -> Div {
     div().p(px(16.)).rounded(px(10.)).bg(c(theme::RAISED)).border_1().border_color(c(theme::BORDER_SUBTLE)).flex().flex_col()
 }
 
-fn section_title(text: &str) -> AnyElement {
+pub(crate) fn section_title(text: &str) -> AnyElement {
     div().pt(px(8.)).child(ui::caption(text.to_owned())).into_any_element()
 }
 
-fn setting_row(title: &str, detail: &str) -> Div {
+pub(crate) fn setting_row(title: &str, detail: &str) -> Div {
     div()
         .flex()
         .items_center()
@@ -383,16 +290,6 @@ fn setting_row(title: &str, detail: &str) -> Div {
         )
 }
 
-fn hotkey_line(label: &str, value: &str, fallback: &str) -> AnyElement {
-    let keys = if value.is_empty() { fallback } else { value };
-    div()
-        .flex()
-        .items_center()
-        .gap(px(8.))
-        .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(label.to_owned()))
-        .child(ui::kbd(keys.replace('+', " ")))
-        .into_any_element()
-}
 
 impl Root {
     /// Meter ballistics per frame: fast rise (~30 ms), 26 dB/s fall, 0.8 s peak hold

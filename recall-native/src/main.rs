@@ -2,6 +2,7 @@ mod app;
 mod assets;
 mod audio;
 mod backend;
+mod cache;
 #[path = "../../recall/src/edit_model.rs"]
 mod edit_model;
 mod editor_state;

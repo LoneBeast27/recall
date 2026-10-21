@@ -77,6 +77,9 @@ pub struct Root {
     pub meter_display: Vec<(f32, f32, Instant)>,
     /// Tile press that may become a drag-out: (path, window x, y).
     pub drag_origin: Option<(String, f32, f32)>,
+    /// Settings → Storage state (cache size slider, usage).
+    pub cache: crate::views::storage_settings::CacheView,
+    pub settings_tab: crate::views::settings::SettingsTab,
     /// When to check whether the recorder is running and start it (once per launch).
     controller_check_at: Option<Instant>,
     pub frame_at: Instant,
@@ -110,6 +113,8 @@ impl Root {
             corner_open: false,
             meter_display: Vec::new(),
             drag_origin: None,
+            cache: crate::views::storage_settings::CacheView::new(),
+            settings_tab: Default::default(),
             controller_check_at: std::env::var_os("RECALL_NO_CONTROLLER").is_none().then(|| Instant::now() + Duration::from_millis(1500)),
             frame_at: Instant::now(),
         };
@@ -121,6 +126,15 @@ impl Root {
             Ok("hdr") => root.go(Route::Hdr),
             Ok("audio") => root.go(Route::Audio),
             Ok("settings") => root.go(Route::Settings),
+            Ok("settings-clip") | Ok("settings-media") | Ok("settings-shortcuts") => {
+                use crate::views::settings::SettingsTab;
+                root.settings_tab = match std::env::var("RECALL_NATIVE_ROUTE").as_deref() {
+                    Ok("settings-clip") => SettingsTab::Clip,
+                    Ok("settings-media") => SettingsTab::Media,
+                    _ => SettingsTab::Shortcuts,
+                };
+                root.go(Route::Settings);
+            }
             _ => {}
         }
         window.focus(&root.focus);
@@ -265,6 +279,9 @@ impl Root {
         if route == Route::Audio {
             self.meters.get_or_insert_with(Meters::spawn);
             self.midi.get_or_insert_with(Midi::spawn);
+        }
+        if route == Route::Settings {
+            self.cache.refresh();
         }
         if route == Route::Settings || route == Route::Hdr {
             self.daemon.send(DaemonCommand::GetConfig);
