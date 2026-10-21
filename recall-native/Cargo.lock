@@ -3655,6 +3655,7 @@ name = "recall-native"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "image",
  "interprocess",
  "midir",
  "raw-window-handle",

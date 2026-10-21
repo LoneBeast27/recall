@@ -10,6 +10,8 @@ description = "Recall native GPUI editor"
 gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Already in the tree via gpui (same features): in-process thumbnail resize.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
 raw-window-handle = "0.6"
 interprocess = "2.2"
 wasapi = "0.19"
@@ -17,9 +19,17 @@ midir = "0.10"
 windows-core = "0.62"
 windows = { version = "0.62", features = [
     "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_FileSystem",
-    "Win32_System_Diagnostics_ToolHelp", "Win32_System_Time", "Win32_UI_Shell",
+    "Win32_System_Diagnostics_ToolHelp", "Win32_System_IO", "Win32_System_Time", "Win32_UI_Shell",
     "Win32_Media_Audio", "Win32_Media_Multimedia", "Win32_Media_MediaFoundation",
     "Win32_System_Threading", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant",
     "Win32_UI_Shell_PropertiesSystem", "Win32_UI_WindowsAndMessaging",
 ] }
+
+# Thumbnail resize runs in-process; unoptimized JPEG code is ~10x slower in dev/test runs.
+[profile.dev.package.image]
+opt-level = 3
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+[profile.dev.package.zune-core]
+opt-level = 3
 
