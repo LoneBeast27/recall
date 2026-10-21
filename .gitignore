@@ -29,3 +29,6 @@ tools/ffmpeg-dev/
 
 # Claude Code agent worktrees
 /.claude/
+
+# Installed app (scripts/install.ps1)
+/dist/

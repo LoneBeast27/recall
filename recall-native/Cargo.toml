@@ -24,3 +24,5 @@ windows = { version = "0.62", features = [
     "Win32_System_Ole", "Win32_System_SystemServices", "Win32_UI_Shell_Common",
 ] }
 
+[build-dependencies]
+embed-resource = "3"
