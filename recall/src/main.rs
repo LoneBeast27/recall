@@ -348,7 +348,10 @@ impl App {
     }
 
     fn refresh_source_title(&mut self) {
-        if std::env::var_os("RECALL_CAPTURE_HWND").is_some() { return; }
+        // A controller-named source (a window target, or the idle "Desktop"
+        // capture) keeps its name; only an unnamed monitor capture follows the
+        // topmost window.
+        if std::env::var_os("RECALL_CAPTURE_HWND").is_some() || std::env::var_os("RECALL_CAPTURE_NAME").is_some() { return; }
         if let Some(name) = source::captured_source() {
             if name != self.source_name {
                 self.source_name = name.clone();
