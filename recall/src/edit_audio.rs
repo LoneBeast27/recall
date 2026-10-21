@@ -6,10 +6,7 @@ use ff::Rescale;
 use ffmpeg_next as ff;
 
 use crate::edit_model::{AudioSetting, EditPlan, TimeRange};
-
-/// Edited PCM is retained only until it is fed to AAC. Bound it so a malformed
-/// or unusually long project returns an error instead of risking process abort.
-const MAX_EDITED_PCM_BYTES_PER_TRACK: usize = 256 * 1024 * 1024;
+use crate::export::edit_pcm::{gain_multiplier, EditedPcm};
 
 pub(crate) struct EncodedAudioTrack {
     pub(crate) source_index: usize,
@@ -18,6 +15,7 @@ pub(crate) struct EncodedAudioTrack {
     pub(crate) packets: Vec<ff::Packet>,
 }
 
+/// Edit every audio stream of `input` (in stream order) per `plan`.
 pub(crate) fn encode_edited_audio(
     input: &Path,
     origin_us: i64,
@@ -31,9 +29,19 @@ pub(crate) fn encode_edited_audio(
         .map(|s| s.index())
         .collect();
     drop(probe);
+    encode_selected_audio(input, origin_us, plan, &indices)
+}
 
+/// Edit only the listed audio streams (each range time-stretched by its speed).
+pub(crate) fn encode_selected_audio(
+    input: &Path,
+    origin_us: i64,
+    plan: &EditPlan,
+    indices: &[usize],
+) -> Result<Vec<EncodedAudioTrack>, String> {
     indices
-        .into_iter()
+        .iter()
+        .copied()
         .map(|index| {
             let setting = plan
                 .audio
@@ -74,18 +82,8 @@ fn encode_track(
     }
     let channels = layout.channels().max(1) as usize;
     let sample_format = ff::format::Sample::F32(ff::format::sample::Type::Planar);
-    let bounds = range_sample_bounds(ranges, rate)?;
-    let total_samples = bounds.last().map(|bound| bound.output_end).unwrap_or(0);
-    let allocation = pcm_allocation_bytes(channels, total_samples)
-        .ok_or_else(|| format!("edited audio stream {stream_index} is too large"))?;
-    if allocation > MAX_EDITED_PCM_BYTES_PER_TRACK {
-        return Err(format!(
-            "edited audio stream {stream_index} requires {} MiB of PCM; the single-clip editor limit is 256 MiB per track",
-            allocation.div_ceil(1024 * 1024)
-        ));
-    }
-    let mut pcm = allocate_pcm(channels, total_samples, stream_index)?;
     let gain = setting.map_or(1.0, |value| gain_multiplier(value.gain_db, value.muted));
+    let mut pcm = EditedPcm::new(ranges, rate, channels, gain, stream_index)?;
     let origin_samples = origin_us.rescale(ff::rescale::TIME_BASE, ff::Rational(1, rate as i32));
     let mut next_source_sample = 0i64;
     let mut resampler: Option<ff::software::resampling::Context> = None;
@@ -101,13 +99,11 @@ fn encode_track(
             &mut decoder,
             &mut resampler,
             &mut pcm,
-            &bounds,
             layout,
             rate,
             sample_format,
             stream_tb,
             origin_samples,
-            gain,
             &mut next_source_sample,
             stream_index,
         )?;
@@ -119,71 +115,29 @@ fn encode_track(
         &mut decoder,
         &mut resampler,
         &mut pcm,
-        &bounds,
         layout,
         rate,
         sample_format,
         stream_tb,
         origin_samples,
-        gain,
         &mut next_source_sample,
         stream_index,
     )?;
-    flush_resampler(
-        &mut resampler,
-        &mut pcm,
-        &bounds,
-        gain,
-        &mut next_source_sample,
-        stream_index,
-    )?;
+    flush_resampler(&mut resampler, &mut pcm, &mut next_source_sample, stream_index)?;
 
-    encode_pcm(stream_index, rate, layout, pcm)
-}
-
-fn allocate_pcm(
-    channels: usize,
-    total_samples: usize,
-    stream_index: usize,
-) -> Result<Vec<Vec<f32>>, String> {
-    let mut pcm = Vec::new();
-    pcm.try_reserve_exact(channels).map_err(|error| {
-        format!("reserve edited PCM channels for audio stream {stream_index}: {error}")
-    })?;
-    for _ in 0..channels {
-        let mut channel = Vec::new();
-        channel.try_reserve_exact(total_samples).map_err(|error| {
-            format!(
-                "reserve {} MiB edited PCM for audio stream {stream_index}: {error}",
-                total_samples
-                    .saturating_mul(std::mem::size_of::<f32>())
-                    .div_ceil(1024 * 1024)
-            )
-        })?;
-        channel.resize(total_samples, 0.0);
-        pcm.push(channel);
-    }
-    Ok(pcm)
-}
-
-fn pcm_allocation_bytes(channels: usize, total_samples: usize) -> Option<usize> {
-    total_samples
-        .checked_mul(channels)
-        .and_then(|samples| samples.checked_mul(std::mem::size_of::<f32>()))
+    encode_pcm(stream_index, rate, layout, pcm.finish(rate, layout)?)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn receive_audio_frames(
     decoder: &mut ff::decoder::Audio,
     resampler: &mut Option<ff::software::resampling::Context>,
-    pcm: &mut [Vec<f32>],
-    bounds: &[SampleRange],
+    pcm: &mut EditedPcm,
     output_layout: ff::ChannelLayout,
     output_rate: u32,
     output_format: ff::format::Sample,
     stream_tb: ff::Rational,
     origin_samples: i64,
-    gain: f32,
     next_source_sample: &mut i64,
     stream_index: usize,
 ) -> Result<(), String> {
@@ -202,14 +156,7 @@ fn receive_audio_frames(
                         || current.input().rate != input_rate
                 });
                 if needs_new_resampler {
-                    flush_resampler(
-                        resampler,
-                        pcm,
-                        bounds,
-                        gain,
-                        next_source_sample,
-                        stream_index,
-                    )?;
+                    flush_resampler(resampler, pcm, next_source_sample, stream_index)?;
                     *resampler = Some(
                         ff::software::resampling::Context::get(
                             decoded.format(),
@@ -238,7 +185,7 @@ fn receive_audio_frames(
                             .saturating_sub(origin_samples)
                     })
                     .unwrap_or(*next_source_sample);
-                place_frame(pcm, bounds, &converted, source_start, gain);
+                pcm.place(&converted, source_start);
                 *next_source_sample = source_start.saturating_add(converted.samples() as i64);
             }
             Err(error) if crate::export::receive_is_drained(&error) => break,
@@ -254,9 +201,7 @@ fn receive_audio_frames(
 
 fn flush_resampler(
     resampler: &mut Option<ff::software::resampling::Context>,
-    pcm: &mut [Vec<f32>],
-    bounds: &[SampleRange],
-    gain: f32,
+    pcm: &mut EditedPcm,
     next_source_sample: &mut i64,
     stream_index: usize,
 ) -> Result<(), String> {
@@ -283,36 +228,10 @@ fn flush_resampler(
         if produced == 0 {
             break;
         }
-        place_frame(pcm, bounds, &delayed, *next_source_sample, gain);
+        pcm.place(&delayed, *next_source_sample);
         *next_source_sample = (*next_source_sample).saturating_add(produced as i64);
     }
     Ok(())
-}
-
-fn place_frame(
-    pcm: &mut [Vec<f32>],
-    bounds: &[SampleRange],
-    frame: &ff::frame::Audio,
-    source_start: i64,
-    gain: f32,
-) {
-    let source_end = source_start.saturating_add(frame.samples() as i64);
-    for range in bounds {
-        let copy_start = source_start.max(range.source_start);
-        let copy_end = source_end.min(range.source_end);
-        if copy_end <= copy_start {
-            continue;
-        }
-        let frame_offset = (copy_start - source_start) as usize;
-        let output_offset = range.output_start + (copy_start - range.source_start) as usize;
-        let count = (copy_end - copy_start) as usize;
-        for (channel, destination) in pcm.iter_mut().enumerate() {
-            let source = frame.plane::<f32>(channel);
-            for index in 0..count {
-                destination[output_offset + index] = source[frame_offset + index] * gain;
-            }
-        }
-    }
 }
 
 fn encode_pcm(
@@ -390,96 +309,4 @@ fn drain_packets(
         }
     }
     Ok(())
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct SampleRange {
-    source_start: i64,
-    source_end: i64,
-    output_start: usize,
-    output_end: usize,
-}
-
-fn range_sample_bounds(ranges: &[TimeRange], rate: u32) -> Result<Vec<SampleRange>, String> {
-    let mut output_start = 0usize;
-    ranges
-        .iter()
-        .map(|range| {
-            let source_start = seconds_to_samples(range.start, rate)?;
-            let source_end = seconds_to_samples(range.end, rate)?;
-            let count = usize::try_from(source_end.saturating_sub(source_start))
-                .map_err(|_| "edited audio range is too large".to_string())?;
-            let output_end = output_start
-                .checked_add(count)
-                .ok_or_else(|| "edited audio duration is too large".to_string())?;
-            let bound = SampleRange {
-                source_start,
-                source_end,
-                output_start,
-                output_end,
-            };
-            output_start = output_end;
-            Ok(bound)
-        })
-        .collect()
-}
-
-fn seconds_to_samples(seconds: f64, rate: u32) -> Result<i64, String> {
-    let value = seconds * rate as f64;
-    if !value.is_finite() || value < 0.0 || value > i64::MAX as f64 {
-        return Err("edited audio time is outside the supported range".into());
-    }
-    Ok(value.round() as i64)
-}
-
-fn gain_multiplier(gain_db: f64, muted: bool) -> f32 {
-    if muted {
-        0.0
-    } else {
-        10.0f64.powf(gain_db / 20.0) as f32
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{
-        gain_multiplier, pcm_allocation_bytes, range_sample_bounds, MAX_EDITED_PCM_BYTES_PER_TRACK,
-    };
-    use crate::edit_model::TimeRange;
-
-    #[test]
-    fn range_samples_concatenate_without_a_gap() {
-        let bounds = range_sample_bounds(
-            &[
-                TimeRange {
-                    start: 1.0,
-                    end: 1.5,
-                },
-                TimeRange {
-                    start: 3.0,
-                    end: 3.25,
-                },
-            ],
-            48_000,
-        )
-        .unwrap();
-        assert_eq!(bounds[0].source_start, 48_000);
-        assert_eq!(bounds[0].output_end, 24_000);
-        assert_eq!(bounds[1].output_start, 24_000);
-        assert_eq!(bounds[1].output_end, 36_000);
-    }
-
-    #[test]
-    fn mute_and_decibel_gain_are_linear() {
-        assert_eq!(gain_multiplier(12.0, true), 0.0);
-        assert!((gain_multiplier(-6.0, false) - 0.501_187_2).abs() < 0.000_001);
-        assert!((gain_multiplier(12.0, false) - 3.981_071_7).abs() < 0.000_001);
-    }
-
-    #[test]
-    fn pcm_allocation_is_bounded_and_overflow_checked() {
-        assert_eq!(pcm_allocation_bytes(2, 48_000 * 60), Some(23_040_000));
-        assert!(pcm_allocation_bytes(usize::MAX, 2).is_none());
-        assert!(pcm_allocation_bytes(2, 48_000 * 700).unwrap() > MAX_EDITED_PCM_BYTES_PER_TRACK);
-    }
 }
