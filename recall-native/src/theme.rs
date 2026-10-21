@@ -28,20 +28,22 @@ pub const ACTIVE: u32 = 0x81c995;
 pub const WARNING: u32 = 0xfdd663;
 pub const ERROR: u32 = 0xf28b82;
 
-/// UI typeface. `RECALL_FONT=outfit|geist|manrope|instrument` picks one for comparison.
+// Type (user pick 2026-10-22: "E · Bricolage + Geist"): Geist for everything you
+// read, Bricolage Grotesque for the wordmark, page titles and day headers.
+
+/// UI typeface.
 pub fn sans() -> &'static str {
-    static FONT: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    FONT.get_or_init(|| match std::env::var("RECALL_FONT").unwrap_or_default().to_lowercase().as_str() {
-        "geist" => "Geist",
-        "manrope" => "Manrope",
-        "instrument" => "Instrument Sans",
-        _ => "Outfit",
-    })
+    "Geist"
 }
 
 /// Numbers use the UI face with tabular figures (set on the root), not a coding font.
 pub fn mono() -> &'static str {
-    sans()
+    "Geist"
+}
+
+/// Headline typeface.
+pub fn display() -> &'static str {
+    "Bricolage Grotesque"
 }
 
 pub fn c(value: u32) -> Hsla {

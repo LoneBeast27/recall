@@ -29,7 +29,7 @@ impl Root {
                     .px(px(24.))
                     .pt(px(20.))
                     .pb(px(16.))
-                    .child(div().text_size(px(20.)).line_height(px(28.)).font_weight(FontWeight::SEMIBOLD).child(title.to_owned()))
+                    .child(div().font_family(theme::display()).text_size(px(22.)).line_height(px(28.)).font_weight(FontWeight::BOLD).child(title.to_owned()))
                     .child(div().text_size(px(14.)).text_color(c(theme::TERTIARY)).child(subtitle.to_owned())),
             )
             .child(

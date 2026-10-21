@@ -1,0 +1,2 @@
+Geist (Vercel) and Bricolage Grotesque (Mathieu Triay): SIL Open Font License 1.1.
+Files from Fontsource (latin subset). https://openfontlicense.org

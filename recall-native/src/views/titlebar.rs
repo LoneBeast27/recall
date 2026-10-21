@@ -73,8 +73,9 @@ impl Root {
     fn render_breadcrumb(&self, cx: &mut Context<Self>) -> AnyElement {
         if self.route != Route::Editor {
             return div()
-                .text_size(px(14.))
-                .font_weight(FontWeight::SEMIBOLD)
+                .font_family(theme::display())
+                .text_size(px(16.))
+                .font_weight(FontWeight::BOLD)
                 .child("Recall")
                 .into_any_element();
         }

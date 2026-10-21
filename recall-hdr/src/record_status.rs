@@ -159,7 +159,7 @@ mod tests {
                 "engine_health":"running","auto_record":true,
                 "save_hotkey":"Alt+N","mic_hotkey":"Alt+M","save_seconds":120,"mic_muted":true,
                 "overlay":{"enabled":false,"corner":"top-right","running":false},
-                "autostart":true,
+                "autostart":false,
                 "hdr":{"available":false,"display":null,"hdr_on":false,"manual_pin":false,"auto":false}
             })
         );

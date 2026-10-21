@@ -11,18 +11,11 @@ use crate::{assets::Assets, root::Root};
 pub fn run() -> Result<(), String> {
     Application::new().with_assets(Assets).run(|cx: &mut App| {
         if let Err(error) = cx.text_system().add_fonts(vec![
-            Cow::Borrowed(include_bytes!("../assets/fonts/Outfit-Regular.ttf")),
-            Cow::Borrowed(include_bytes!("../assets/fonts/Outfit-Medium.ttf")),
-            Cow::Borrowed(include_bytes!("../assets/fonts/Outfit-SemiBold.ttf")),
             Cow::Borrowed(include_bytes!("../assets/fonts/geist-400.ttf")),
             Cow::Borrowed(include_bytes!("../assets/fonts/geist-500.ttf")),
             Cow::Borrowed(include_bytes!("../assets/fonts/geist-600.ttf")),
-            Cow::Borrowed(include_bytes!("../assets/fonts/manrope-400.ttf")),
-            Cow::Borrowed(include_bytes!("../assets/fonts/manrope-500.ttf")),
-            Cow::Borrowed(include_bytes!("../assets/fonts/manrope-600.ttf")),
-            Cow::Borrowed(include_bytes!("../assets/fonts/instrument-sans-400.ttf")),
-            Cow::Borrowed(include_bytes!("../assets/fonts/instrument-sans-500.ttf")),
-            Cow::Borrowed(include_bytes!("../assets/fonts/instrument-sans-600.ttf")),
+            Cow::Borrowed(include_bytes!("../assets/fonts/bricolage-grotesque-600.ttf")),
+            Cow::Borrowed(include_bytes!("../assets/fonts/bricolage-grotesque-700.ttf")),
         ]) {
             eprintln!("load Recall fonts: {error}");
         }
