@@ -4,3 +4,10 @@ members = ["recall", "recall-hdr", "recall-overlay"]
 
 # recall-hdr (HDR display-manager companion utility) is added by a separate session;
 # see Agents/Claude/PRDs/recall-hdr-manager-build-brief.md
+
+# Dev builds: lightly optimize the engine crate itself (its save path's plane
+# fill / packet merge); FFmpeg is already a prebuilt optimized DLL. Measured
+# 2026-10-22 on a 119 s live-shaped save (CPU bench): writer 1690 -> 1554 ms,
+# incremental rebuild +0.3 s. opt-level 2 bought 2% more for +1 s per rebuild.
+[profile.dev.package.recall]
+opt-level = 1

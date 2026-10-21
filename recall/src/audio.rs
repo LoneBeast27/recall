@@ -66,6 +66,15 @@ pub static TRACKS: [TrackSpec; 2] = [
     },
 ];
 
+/// One track's PCM captured for a save: interleaved f32, front-padded to the
+/// clip length. Owned and `Send`, so the saver thread encodes it off-ring.
+pub struct AudioPcm {
+    pub name: &'static str,
+    pub rate: u32,
+    pub channels: u16,
+    pub samples: Vec<f32>,
+}
+
 /// Interleaved f32 ring + the format it was captured in.
 pub struct TrackRing {
     pub name: &'static str,
@@ -84,13 +93,45 @@ impl TrackRing {
 
     /// Snapshot the newest `secs` of audio, front-padded with silence to
     /// exactly `secs` so all tracks align at the clip start.
+    ///
+    /// The capture thread's `push_capture` shares this lock, so the critical
+    /// section is only the ring's two contiguous halves `memcpy`d into pages
+    /// that were allocated and faulted in before the lock was taken.
     pub fn snapshot(&self, secs: f64) -> Vec<f32> {
         let want = (secs * self.rate as f64) as usize * self.channels as usize;
+        // Zeroed allocation doubles as the silence padding. Touch one sample per
+        // page so the copy below never takes demand-zero page faults under the
+        // lock (black_box keeps the store from being elided as redundant).
+        let mut out = vec![0.0f32; want];
+        const PAGE_SAMPLES: usize = 4096 / std::mem::size_of::<f32>();
+        for i in (0..want).step_by(PAGE_SAMPLES) {
+            out[i] = std::hint::black_box(0.0);
+        }
         let buf = self.samples.lock().expect("ring lock");
         let have = buf.len().min(want);
-        let mut out = vec![0.0f32; want - have];
-        out.extend(buf.iter().skip(buf.len() - have));
+        let skip = buf.len() - have;
+        let (head, tail) = buf.as_slices();
+        let dst = &mut out[want - have..];
+        if skip < head.len() {
+            let from_head = &head[skip..];
+            dst[..from_head.len()].copy_from_slice(from_head);
+            dst[from_head.len()..].copy_from_slice(tail);
+        } else {
+            dst.copy_from_slice(&tail[skip - head.len()..]);
+        }
+        drop(buf);
         out
+    }
+
+    /// Snapshot `secs` of audio together with the format needed to encode it,
+    /// so the clip's audio is fixed at save-request time on the encoder thread.
+    pub fn snapshot_pcm(&self, secs: f64) -> AudioPcm {
+        AudioPcm {
+            name: self.name,
+            rate: self.rate,
+            channels: self.channels,
+            samples: self.snapshot(secs),
+        }
     }
 
     /// Append captured samples. Muting is applied only to microphone samples
@@ -324,34 +365,5 @@ fn capture_thread(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::TrackRing;
-    use std::collections::VecDeque;
-    use std::sync::Mutex;
-
-    fn test_ring(name: &'static str) -> TrackRing {
-        TrackRing {
-            name,
-            endpoint: Mutex::new(String::new()),
-            rate: 1,
-            channels: 1,
-            samples: Mutex::new(VecDeque::new()),
-            capacity: 16,
-        }
-    }
-
-    #[test]
-    fn microphone_mute_silences_only_future_microphone_samples() {
-        let mic = test_ring("Mic");
-        let game = test_ring("Game");
-
-        mic.push_capture(&[1.0, 2.0], false);
-        game.push_capture(&[3.0, 4.0], false);
-        mic.push_capture(&[5.0, 6.0], true);
-        game.push_capture(&[7.0, 8.0], true);
-        mic.push_capture(&[9.0], false);
-
-        assert_eq!(mic.snapshot(5.0), vec![1.0, 2.0, 0.0, 0.0, 9.0]);
-        assert_eq!(game.snapshot(4.0), vec![3.0, 4.0, 7.0, 8.0]);
-    }
-}
+#[path = "audio_tests.rs"]
+mod tests;
