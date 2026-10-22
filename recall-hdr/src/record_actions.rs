@@ -97,9 +97,17 @@ impl Controller {
                 self.save_clip(Some(self.cfg.recording.save_seconds(seconds)));
             }
             HotkeyAction::Mic => self.set_mic(!self.mic_muted),
-            HotkeyAction::Bookmark => self.engine_command("bookmark", None),
-            HotkeyAction::Screenshot => self.engine_command("screenshot", None),
-            HotkeyAction::Record => self.engine_command("record_toggle", None),
+            HotkeyAction::Bookmark | HotkeyAction::Screenshot | HotkeyAction::Record => {
+                let cmd = match action {
+                    HotkeyAction::Bookmark => "bookmark",
+                    HotkeyAction::Screenshot => "screenshot",
+                    _ => "record_toggle",
+                };
+                if self.engine_running() {
+                    crate::cues::tick();
+                }
+                self.engine_command(cmd, None);
+            }
             HotkeyAction::ToggleHdr => {
                 if let Err(e) = self.hdr.toggle() {
                     log!("record: HDR hotkey ignored: {e}");

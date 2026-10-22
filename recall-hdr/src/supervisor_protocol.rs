@@ -75,7 +75,7 @@ pub(super) fn read_protocol(shared: &Arc<Shared>, stdout: std::process::ChildStd
                 let secs = val.get("seconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let ms = val.get("elapsed_ms").and_then(|v| v.as_u64()).unwrap_or(0);
                 log!("supervisor: clip SAVED ({secs:.1}s, {ms}ms) -> {path}");
-                beep(0x00); // MB_OK -- R10 instant success feedback
+                crate::cues::saved();
             }
             Some("save_failed") => {
                 log!("supervisor: clip save FAILED -- {}", field(&val, "reason"));
@@ -86,8 +86,10 @@ pub(super) fn read_protocol(shared: &Arc<Shared>, stdout: std::process::ChildStd
             }
             Some(kind @ ("bookmarked" | "screenshot" | "recording_started" | "recording_stopped")) => {
                 log!("supervisor: engine {kind} -- {}", field(&val, "path"));
-                // Instant audible feedback; the overlay shows the details.
-                beep(if kind == "recording_stopped" { 0x00 } else { 0x40 });
+                // A long recording ending is a finished file; the others were cued on the press.
+                if kind == "recording_stopped" {
+                    crate::cues::saved();
+                }
             }
             Some("recording_recovered") => log!("supervisor: engine recovered a crashed long recording -> {}", field(&val, "path")),
             Some(kind @ ("screenshot_failed" | "recording_failed")) => {
@@ -99,21 +101,9 @@ pub(super) fn read_protocol(shared: &Arc<Shared>, stdout: std::process::ChildStd
     }
 }
 
-/// user32 MessageBeep, linked directly (windows-rs keeps relocating it across
-/// releases; the raw import is version-proof). Async, non-blocking.
-fn beep(utype: u32) {
-    #[link(name = "user32")]
-    extern "system" {
-        fn MessageBeep(utype: u32) -> i32;
-    }
-    unsafe {
-        let _ = MessageBeep(utype);
-    }
-}
-
-/// The save-failed sound (MB_ICONHAND), also used when no engine can save.
+/// The failure sound, also used when no engine can save.
 pub(crate) fn beep_failure() {
-    beep(0x10);
+    crate::cues::failed();
 }
 
 /// Pull a string field from a JSON object, defaulting to empty.
