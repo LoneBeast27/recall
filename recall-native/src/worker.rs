@@ -45,6 +45,8 @@ pub enum AssetJob {
     Duration(String),
     /// Copy the clip to the SSD video tier (`Done::VideoCached`).
     CacheVideo(String),
+    /// A 720p H.264 preview copy for a clip the player cannot open (`Done::Proxy`).
+    Proxy(String),
 }
 
 pub enum Done {
@@ -60,6 +62,8 @@ pub enum Done {
     VideoCached(String, Result<String, String>),
     /// Sidecar path when current; "" when there was nothing to write.
     Flushed(Result<String, String>),
+    /// (clip path, preview copy path).
+    Proxy(String, Result<String, String>),
     Storage(StorageReport),
 }
 
@@ -161,6 +165,10 @@ fn route_asset(job: AssetJob, tx: &Sender<Done>) {
         AssetJob::Duration(path) => storage::submit_io(&PathBuf::from(&path), Priority::Visible, move || {
             let secs = library::mp4_duration(Path::new(&path));
             let _ = tx.send(Done::Duration(path, secs));
+        }),
+        AssetJob::Proxy(path) => spawn_named("recall-preview-copy", move || {
+            let result = storage::proxy::preview_proxy(&path);
+            let _ = tx.send(Done::Proxy(path, result));
         }),
         AssetJob::CacheVideo(path) => {
             // Runs on its own short-lived thread: cache_video waits on the lane, and a copy
