@@ -167,7 +167,7 @@ pub fn run() -> i32 {
         w.uninstall(); // Drop -> UnhookWinEvent on this (install) thread.
     }
     run_restore.run(); // idempotent: display back to baseline via the OnceRestore.
-    supervisor.shutdown(Duration::from_secs(3));
+    supervisor.shutdown(crate::supervisor::QUIT_GRACE);
     if crate::journal::Journal::is_dirty() {
         if let Err(e) = app.exec.clear_journal() {
             log!("app: journal clear on shutdown failed: {e}");

@@ -2,8 +2,11 @@
 //! libx264 round trips through the real muxer (finished and abandoned files
 //! must both open and play). No GPU work.
 
+use super::writer::{FLUSH_AT, FLUSH_EVERY};
 use super::*;
+use std::io::Write;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 /// Records the size of every `write` call that reaches the "disk".
 #[derive(Clone, Default)]
@@ -38,6 +41,31 @@ fn writes_are_large_and_end_on_fragment_boundaries() {
     assert_eq!(writes[1] % (CHUNK + CHUNK / 2), 0, "ends exactly on a fragment boundary");
     let total = w.finish().unwrap();
     assert_eq!(total, 1000 + 5 * (CHUNK + CHUNK / 2) as u64);
+}
+
+#[test]
+fn a_quiet_stream_still_reaches_the_disk_every_few_seconds() {
+    let disk = Disk::default();
+    let mut w = FileWriter::new(disk.clone(), CHUNK);
+    let t0 = Instant::now();
+    w.push_at(&[0; 1000], t0); // header
+    w.flush_now();
+    let writes = || disk.0.lock().unwrap().clone();
+    // Small fragments (a static scene): far below 4 MiB, so only the timer
+    // sends them, at the first fragment boundary 5 s after the last write.
+    w.push_at(&[1; 300], t0 + Duration::from_secs(2));
+    w.push_at(&[2; 300], t0 + Duration::from_secs(4));
+    assert_eq!(writes(), vec![1000], "under 5 s: still buffered");
+    let tick = t0 + Duration::from_secs(1) + FLUSH_EVERY;
+    w.push_at(&[3; 300], tick);
+    assert_eq!(writes(), vec![1000, 900], "the boundary after 5 s writes everything so far");
+    w.push_at(&[4; 300], tick + Duration::from_secs(1));
+    assert_eq!(writes().len(), 2, "the timer restarts at each write");
+    // A full-buffer callback is mid-fragment: never written by the timer.
+    w.push_at(&vec![5; CHUNK], tick + FLUSH_EVERY * 2);
+    assert_eq!(writes().len(), 2, "mid-fragment: waits for the boundary");
+    w.push_at(&[6; 10], tick + FLUSH_EVERY * 2);
+    assert_eq!(writes(), vec![1000, 900, 300 + CHUNK + 10]);
 }
 
 #[test]

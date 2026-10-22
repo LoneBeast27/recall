@@ -1,17 +1,22 @@
-//! Storage cap + auto-clean (`[storage] cap_gb`, 0 = off). After each saved
-//! clip (debounced) and hourly, when the top-level `*.mp4` files in
-//! `recording.output_dir` total more than the cap, the OLDEST clips go to the
-//! Recycle Bin (`SHFileOperationW` + `FOF_ALLOWUNDO`, with their recorder
-//! thumbnails and `.recall-edit.json` / `.recall-marks.json` sidecars) until
-//! the folder is under the cap.
+//! Storage cap + auto-clean (`[storage] cap_gb`: 0 = off, else at least
+//! [`STORAGE_CAP_MIN_GB`]). After each saved clip (debounced) and hourly,
+//! when the top-level Recall clips in `recording.output_dir` total more than
+//! the cap, the OLDEST clips go to the Recycle Bin (`SHFileOperationW` +
+//! `FOF_ALLOWUNDO`, with their recorder thumbnails and `.recall-edit.json` /
+//! `.recall-marks.json` sidecars) until the folder is under the cap.
 //!
-//! Never touched: favourites (`%APPDATA%\Recall\library.json`, keyed by file
-//! name, `favourite: true`; `RECALL_LIBRARY_META` overrides the path), clips
-//! with an edit sidecar, anything in a subfolder (`exports\`, `screenshots\`,
-//! `thumbs\` except a removed clip's own thumbnails), and `.part` files. An
-//! unreadable or corrupt library file cancels the run (favourites unknown =
-//! delete nothing). `FOF_WANTNUKEWARNING` makes Windows ask before it would
-//! delete permanently (a clip bigger than the Recycle Bin), never silently.
+//! Only Recall-named clips count and can go ([`is_recall_clip`]:
+//! `<GAME>__YYYY-MM-DD__HH-MM-SS[...].mp4`, long recordings included); other
+//! videos in the folder are left alone. Never touched: the newest clip and any
+//! clip modified in the last [`RECENT_SECS`], favourites
+//! (`%APPDATA%\Recall\library.json`, keyed by file name, `favourite: true`;
+//! `RECALL_LIBRARY_META` overrides the path), clips with an edit sidecar,
+//! anything in a subfolder (`exports\`, `screenshots\`, `thumbs\` except a
+//! removed clip's own thumbnails), and `.part` files. An unreadable or
+//! corrupt library file -- or a missing one beside the app's quarantined
+//! `library.json.bad` -- cancels the run (favourites unknown = delete
+//! nothing). `FOF_WANTNUKEWARNING` makes Windows ask before it would delete
+//! permanently (a clip bigger than the Recycle Bin), never silently.
 //!
 //! Runs on its own background-I/O thread (the clip folder is an SMR HDD); one
 //! directory listing per run, no per-file stats. Results: a log line and
@@ -21,19 +26,23 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Sender};
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
 use crate::control::PipeHub;
 use crate::log;
+use crate::record_config::STORAGE_CAP_MIN_GB;
 
 pub const GIB: u64 = 1 << 30;
+/// A clip modified this recently (seconds) is never removed: a save, trim or
+/// export may still be landing, and the user has not seen it yet.
+pub const RECENT_SECS: u64 = 600;
 /// Wait after a save (bursts coalesce; thumbnails land first).
 pub const AFTER_SAVE: Duration = Duration::from_secs(5);
 pub const HOURLY: Duration = Duration::from_secs(3600);
 
-/// One top-level clip from the listing.
+/// One top-level Recall clip from the listing.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClipFile {
     pub name: String,
@@ -60,15 +69,36 @@ pub struct Plan {
     pub total: u64,
 }
 
+/// `<GAME>__YYYY-MM-DD__HH-MM-SS[...].mp4` (case-insensitive): replay clips
+/// (`...-275__<hex>.mp4`), trims, renamed takes and long recordings
+/// (`...__rec.mp4`, `...__rec-N.mp4`). Never a `.part`.
+pub fn is_recall_clip(name: &str) -> bool {
+    const SHAPE: &[u8] = b"__dddd-dd-dd__dd-dd-dd";
+    let lower = name.to_ascii_lowercase();
+    let Some(stem) = lower.strip_suffix(".mp4") else { return false };
+    let b = stem.as_bytes();
+    // From 1: the game prefix is never empty.
+    (1..b.len()).any(|i| {
+        b.len() >= i + SHAPE.len()
+            && SHAPE.iter().zip(&b[i..]).all(|(&s, &c)| if s == b'd' { c.is_ascii_digit() } else { s == c })
+    })
+}
+
 /// Indices of the clips to remove: oldest unprotected first, until the total
-/// is at or under `cap`. The total counts protected clips too.
-pub fn select_oldest(clips: &[ClipFile], cap: u64, protected: impl Fn(&ClipFile) -> bool) -> Vec<usize> {
+/// is at or under `cap`. The total counts protected clips too. Never picked:
+/// the newest clip, and clips modified less than [`RECENT_SECS`] before
+/// `now_unix` (or after it).
+pub fn select_oldest(clips: &[ClipFile], cap: u64, now_unix: u64, protected: impl Fn(&ClipFile) -> bool) -> Vec<usize> {
     let mut total: u64 = clips.iter().map(|c| c.bytes).sum();
     if cap == 0 || total <= cap {
         return Vec::new();
     }
-    let mut order: Vec<usize> = (0..clips.len()).filter(|&i| !protected(&clips[i])).collect();
-    order.sort_by(|&a, &b| clips[a].modified.cmp(&clips[b].modified).then_with(|| clips[a].name.cmp(&clips[b].name)));
+    let by_age = |a: &usize, b: &usize| clips[*a].modified.cmp(&clips[*b].modified).then_with(|| clips[*a].name.cmp(&clips[*b].name));
+    let newest = (0..clips.len()).max_by(by_age);
+    let settled = |c: &ClipFile| c.modified.saturating_add(RECENT_SECS) <= now_unix;
+    let mut order: Vec<usize> =
+        (0..clips.len()).filter(|&i| Some(i) != newest && settled(&clips[i]) && !protected(&clips[i])).collect();
+    order.sort_by(by_age);
     let mut out = Vec::new();
     for i in order {
         if total <= cap {
@@ -110,14 +140,14 @@ fn thumb_stem(name: &str) -> Option<String> {
     (!stem.is_empty() && epoch.len() >= 9 && epoch.chars().all(|c| c.is_ascii_digit())).then(|| stem.to_string())
 }
 
-/// Plan a run over `listing` with `favs` protected.
-pub fn plan(listing: &Listing, favs: &HashSet<String>, cap: u64) -> Plan {
+/// Plan a run over `listing` with `favs` protected, at Unix time `now_unix`.
+pub fn plan(listing: &Listing, favs: &HashSet<String>, cap: u64, now_unix: u64) -> Plan {
     let edits = edited(&listing.names);
     let protected = |c: &ClipFile| {
         let key = c.name.to_lowercase();
         favs.contains(&key) || edits.contains(&key)
     };
-    let picks = select_oldest(&listing.clips, cap, protected);
+    let picks = select_oldest(&listing.clips, cap, now_unix, protected);
     Plan {
         remove: picks.iter().map(|&i| listing.clips[i].name.clone()).collect(),
         freed: picks.iter().map(|&i| listing.clips[i].bytes).sum(),
@@ -142,8 +172,8 @@ pub fn companions(dir: &Path, clip: &str, listing: &Listing) -> Vec<PathBuf> {
     out
 }
 
-/// One listing of `dir` (top level + `thumbs\` names). Sizes and times come
-/// from the directory enumeration itself.
+/// One listing of `dir` (top level + `thumbs\` names); only Recall-named
+/// `.mp4`s are clips. Sizes and times come from the directory enumeration.
 pub fn scan(dir: &Path) -> std::io::Result<Listing> {
     let mut listing = Listing::default();
     for entry in std::fs::read_dir(dir)?.flatten() {
@@ -152,7 +182,7 @@ pub fn scan(dir: &Path) -> std::io::Result<Listing> {
             continue;
         }
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.to_lowercase().ends_with(".mp4") {
+        if is_recall_clip(&name) {
             let modified = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
             listing.clips.push(ClipFile { name: name.clone(), bytes: meta.len(), modified });
         }
@@ -172,13 +202,33 @@ pub fn library_path() -> Option<PathBuf> {
     std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Recall").join("library.json"))
 }
 
-/// Favourites from disk: a missing file means none; unreadable or corrupt
-/// cancels the run.
+/// Favourites from disk ([`favourites_at`] the [`library_path`]).
 fn load_favourites() -> Result<HashSet<String>, String> {
     let Some(path) = library_path() else { return Ok(HashSet::new()) };
-    match std::fs::read(&path) {
+    favourites_at(&path)
+}
+
+/// `library.json` -> `library.json.bad` (where the app moves a corrupt file).
+pub fn quarantine_path(path: &Path) -> PathBuf {
+    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_else(|| "library.json".into());
+    name.push(".bad");
+    path.with_file_name(name)
+}
+
+/// Favourites in the library file at `path`. Missing means none -- unless the
+/// app quarantined a corrupt copy beside it, which (like an unreadable or
+/// corrupt file) leaves favourites unknown, so the run is cancelled.
+pub fn favourites_at(path: &Path) -> Result<HashSet<String>, String> {
+    match std::fs::read(path) {
         Ok(bytes) => favourites(&bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(HashSet::new()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            let bad = quarantine_path(path);
+            match bad.try_exists() {
+                Ok(false) => Ok(HashSet::new()),
+                Ok(true) => Err(format!("{} is missing and {} holds a quarantined corrupt copy", path.display(), bad.display())),
+                Err(e) => Err(format!("{}: {e}", bad.display())),
+            }
+        }
         Err(e) => Err(format!("{}: {e}", path.display())),
     }
 }
@@ -227,9 +277,14 @@ pub struct Outcome {
 }
 
 fn run_once(dir: &Path, cap_gb: u32) -> Result<Outcome, String> {
+    if cap_gb < STORAGE_CAP_MIN_GB {
+        // `set_config` rejects this; a hand-edited config.toml does not.
+        return Err(format!("storage.cap_gb {cap_gb} is below the {STORAGE_CAP_MIN_GB} GiB minimum; nothing removed"));
+    }
     let favs = load_favourites().map_err(|e| format!("favourites unknown ({e}); nothing removed"))?;
     let listing = scan(dir).map_err(|e| format!("list {}: {e}", dir.display()))?;
-    let plan = plan(&listing, &favs, cap_gb as u64 * GIB);
+    let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let plan = plan(&listing, &favs, cap_gb as u64 * GIB, now_unix);
     if plan.remove.is_empty() {
         return Ok(Outcome { removed: 0, freed: 0 });
     }

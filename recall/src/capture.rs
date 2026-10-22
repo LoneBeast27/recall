@@ -61,10 +61,16 @@ impl CaptureShared {
 
     /// Current capture timeline, including time since the latest delivered frame.
     pub fn recording_now_us(&self) -> Option<u64> {
-        self.timeline
-            .lock()
-            .ok()
-            .and_then(|t| t.map(|(pts, at)| pts.saturating_add(at.elapsed().as_micros() as u64)))
+        self.recording_now().map(|(us, _)| us)
+    }
+
+    /// [`Self::recording_now_us`] and the `Instant` it was read at, from one
+    /// clock sample (the long recording maps capture time onto wall time).
+    pub fn recording_now(&self) -> Option<(u64, std::time::Instant)> {
+        let now = std::time::Instant::now();
+        self.timeline.lock().ok().and_then(|t| {
+            t.map(|(pts, at)| (pts.saturating_add(now.saturating_duration_since(at).as_micros() as u64), now))
+        })
     }
 
     /// Mode selector label for status: "auto" | "sdr" | "hdr".

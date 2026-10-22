@@ -11,9 +11,11 @@
 //!   a tick pads silent tracks (loopback delivers nothing while nothing plays)
 //!   so every track keeps pace with the video.
 //! - **Stop** flushes the held packet, finalizes the sink, renames `.part` to
-//!   the final name and writes the marks sidecar. A failing sink is abandoned:
-//!   the partial file is still renamed into place (a fragmented MP4 plays up to
-//!   its last complete fragment) and `Failed{kept}` names it.
+//!   the final name and writes the marks sidecar. A failing sink is abandoned
+//!   and closed: the partial file is still renamed into place (a fragmented
+//!   MP4 plays up to its last complete fragment) and `Failed{kept}` names it.
+//! - **Encoder reopened / failed**: the stream ends with its encoder; a
+//!   failure is reported as `Failed{kept}` naming the finished file.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -81,7 +83,8 @@ struct Active<S> {
 
 enum Phase<S> {
     Idle,
-    Armed { path: PathBuf, start_us: Option<u64>, requested: Instant },
+    /// `start`: (capture-clock µs, the `Instant` it was read at) of the request.
+    Armed { path: PathBuf, start: Option<(u64, Instant)>, requested: Instant },
     Recording(Box<Active<S>>),
 }
 
@@ -105,13 +108,14 @@ impl<F: SinkFactory> Recorder<F> {
         self.tracks.iter().position(|t| t.name == name)
     }
 
-    /// Arm a recording to `path` (its `.part` is written). `start_us` is the
-    /// capture clock at the request (None before the first frame).
-    pub fn start(&mut self, path: PathBuf, start_us: Option<u64>, now: Instant) -> Vec<Event> {
+    /// Arm a recording to `path` (its `.part` is written). `start` is the
+    /// capture clock at the request and the `Instant` it was sampled at (None
+    /// before the first frame); `now` starts the keyframe wait.
+    pub fn start(&mut self, path: PathBuf, start: Option<(u64, Instant)>, now: Instant) -> Vec<Event> {
         if self.is_active() {
             return vec![Event::Log("record_start ignored: a long recording is already running".into())];
         }
-        self.phase = Phase::Armed { path, start_us, requested: now };
+        self.phase = Phase::Armed { path, start, requested: now };
         Vec::new()
     }
 
@@ -132,6 +136,28 @@ impl<F: SinkFactory> Recorder<F> {
         let mut events = vec![Event::Log("capture resolution changed; the long recording ends here".into())];
         events.extend(self.stop());
         events
+    }
+
+    /// The live encoder failed for good: no more video will come. A running
+    /// recording is finished as it stands and reported as `Failed` naming the
+    /// saved file; an armed one fails.
+    pub fn encoder_failed(&mut self, reason: &str) -> Vec<Event> {
+        let reason = format!("the video encoder failed ({reason})");
+        match &self.phase {
+            Phase::Idle => Vec::new(),
+            Phase::Armed { .. } => {
+                self.phase = Phase::Idle;
+                vec![Event::Failed { reason, kept: None }]
+            }
+            Phase::Recording(_) => self
+                .stop()
+                .into_iter()
+                .map(|e| match e {
+                    Event::Stopped { path, .. } => Event::Failed { reason: format!("{reason}; saved up to here"), kept: Some(path) },
+                    other => other,
+                })
+                .collect(),
+        }
     }
 
     pub fn mark(&mut self, at_us: u64) {
@@ -176,14 +202,14 @@ impl<F: SinkFactory> Recorder<F> {
     }
 
     fn begin(&mut self, pts_us: u64, data: Arc<[u8]>, now: Instant) -> Vec<Event> {
-        let Phase::Armed { path, start_us, requested } = std::mem::replace(&mut self.phase, Phase::Idle) else {
+        let Phase::Armed { path, start, .. } = std::mem::replace(&mut self.phase, Phase::Idle) else {
             return Vec::new();
         };
         // The capture clock runs in real time: map this keyframe onto the
         // wall clock through the (capture time, Instant) pair of the request.
-        let wall_base = match start_us {
-            Some(s) if pts_us >= s => requested + Duration::from_micros(pts_us - s),
-            Some(s) => requested.checked_sub(Duration::from_micros(s - pts_us)).unwrap_or(requested),
+        let wall_base = match start {
+            Some((s, at)) if pts_us >= s => at + Duration::from_micros(pts_us - s),
+            Some((s, at)) => at.checked_sub(Duration::from_micros(s - pts_us)).unwrap_or(at),
             None => now,
         };
         let part = naming::part_of(&path);
@@ -319,17 +345,13 @@ fn finish<S: Sink>(mut a: Active<S>) -> Vec<Event> {
     if let Some((pts, key, payload)) = a.held.take() {
         let duration = a.last_duration.max(1);
         if let Err(reason) = a.write_video(pts, duration, key, &payload) {
-            a.sink.abandon();
-            return vec![Event::Failed { reason, kept: keep_partial(&a.part) }];
+            return vec![Event::Failed { reason, kept: abandon_and_keep(a.sink, &a.part) }];
         }
     }
     let seconds = a.last_pts.map(|p| (p + a.last_duration - a.base_us) as f64 / 1_000_000.0).unwrap_or(0.0);
     let bytes = match a.sink.finish() {
         Ok(b) => b,
-        Err(reason) => {
-            a.sink.abandon();
-            return vec![Event::Failed { reason, kept: keep_partial(&a.part) }];
-        }
+        Err(reason) => return vec![Event::Failed { reason, kept: abandon_and_keep(a.sink, &a.part) }],
     };
     drop(a.sink);
     let path = match std::fs::rename(&a.part, &a.path) {
@@ -345,6 +367,14 @@ fn finish<S: Sink>(mut a: Active<S>) -> Vec<Event> {
     }
     events.push(Event::Stopped { path, seconds, bytes, marks: rel.len() });
     events
+}
+
+/// Abandon `sink` and CLOSE it (the `.part` cannot be renamed while it is
+/// open), then keep the partial recording.
+fn abandon_and_keep<S: Sink>(mut sink: S, part: &Path) -> Option<PathBuf> {
+    sink.abandon();
+    drop(sink);
+    keep_partial(part)
 }
 
 /// Rename a partial recording into place; `None` when that fails too.

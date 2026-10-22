@@ -12,11 +12,12 @@
 //! - Env vars still override config at startup (`Start-Recall.ps1`), and
 //!   `RECALL_CAPTURE_HWND` pins one window while its process lives.
 //! - Pause (tray "Stop recording" / pipe `pause`): the engine stops at once
-//!   (no linger), games are ignored and capture actions are refused until
+//!   (no linger) -- after a running long recording is stopped and saved (up
+//!   to 10 s) -- games are ignored and capture actions are refused until
 //!   resume; runtime only. Hotkeys + the advanced chord: `record_actions`,
 //!   `record_hotkeys`, `record_chord`. Saves / long recording in flight defer
-//!   settings restarts (`record_activity`); the storage cap runs in
-//!   `record_storage`.
+//!   settings restarts and retargets (`record_activity`); the storage cap
+//!   runs in `record_storage`.
 
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
@@ -35,7 +36,7 @@ use crate::hotkey::RecordHotkeys;
 use crate::liveness::ProcessWatch;
 use crate::log;
 use crate::overlay_proc::OverlayProc;
-use crate::record_activity::EngineActivity;
+use crate::record_activity::{EngineActivity, PendingPause};
 use crate::record_chord::Chord;
 use crate::record_config::{parse_cpu_mask, ConfigStore};
 use crate::record_env::EnvOverrides;
@@ -103,6 +104,10 @@ pub struct Controller {
     pub(crate) engine_events: Receiver<serde_json::Value>,
     /// Engine settings changed while busy: restart once idle.
     pub(crate) pending_restart: bool,
+    /// A retarget fell due while busy (the planner holds it until idle).
+    pub(crate) retarget_held: bool,
+    /// Pause asked during a long recording: waiting for it to stop.
+    pub(crate) pending_pause: Option<PendingPause>,
     pub(crate) janitor: Janitor,
     /// The advanced-shortcut chord window.
     pub(crate) chord: Chord,
@@ -186,6 +191,8 @@ pub fn run() -> i32 {
         activity: EngineActivity::default(),
         engine_events,
         pending_restart: false,
+        retarget_held: false,
+        pending_pause: None,
         janitor,
         chord: Chord::new(Duration::from_millis(1_500), global_hotkey::hotkey::Modifiers::ALT),
         leader_label: String::new(),
@@ -311,10 +318,7 @@ impl Controller {
             self.tracker.on_process_exit(pid);
         }
         self.tracker.poll(now);
-        let wanted = self.wanted();
-        if let Some(target) = self.planner.update(&wanted, now) {
-            self.apply_engine_target(&target);
-        }
+        self.plan_engine(now);
         self.hdr.tick(now);
         let hellos = self.supervisor.hello_count();
         if hellos != self.seen_hello {
@@ -410,7 +414,7 @@ impl Controller {
         let matched = self.ui.close();
         log!("record: requested WM_CLOSE for {} Recall UI window(s)", matched.len());
         self.hotkeys = None;
-        self.supervisor.shutdown(Duration::from_secs(4));
+        self.supervisor.shutdown(crate::supervisor::QUIT_GRACE);
         log!("record: clean shutdown (pipe lines dropped for stalled clients: {})", self.hub.dropped());
     }
 }
