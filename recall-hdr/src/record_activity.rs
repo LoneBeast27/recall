@@ -1,7 +1,8 @@
 //! What the engine is busy with, from the controller's side: replay saves in
-//! flight and the manual long recording. Settings changes that need an engine
-//! restart wait until neither is running (`pending_restart` in the session
-//! status); engine events arrive through `Supervisor::attach_events`.
+//! flight and the manual long recording. Settings changes and retargets that
+//! need an engine restart wait until neither is running (`pending_restart` in
+//! the session status), and a pause first stops the long recording
+//! ([`PendingPause`]); engine events arrive through `Supervisor::attach_events`.
 
 use std::time::{Duration, Instant};
 
@@ -12,6 +13,8 @@ pub const SAVE_STALE: Duration = Duration::from_secs(120);
 /// A `record_start` with no `recording_started` / `_failed` after this is dropped
 /// (the engine's own keyframe wait is 30 s).
 pub const START_STALE: Duration = Duration::from_secs(35);
+/// How long a pause waits for the long recording to report stopping.
+pub const PAUSE_STOP_WAIT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LongRec {
@@ -113,9 +116,47 @@ impl EngineActivity {
     }
 }
 
+/// A pause held back while the long recording stops (its `record_stop` is
+/// sent): it applies once the engine reports `recording_stopped` /
+/// `recording_failed`, or after [`PAUSE_STOP_WAIT`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PendingPause {
+    deadline: Instant,
+}
+
+impl PendingPause {
+    /// `Some` when a pause asked at `now` must first stop the long recording
+    /// (starting or running).
+    pub fn needed(activity: &EngineActivity, now: Instant) -> Option<PendingPause> {
+        (activity.long != LongRec::Idle).then(|| PendingPause { deadline: now + PAUSE_STOP_WAIT })
+    }
+
+    /// The recording reported its end, or the wait ran out.
+    pub fn ready(&self, activity: &EngineActivity, now: Instant) -> bool {
+        activity.long == LongRec::Idle || now >= self.deadline
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_pause_waits_for_the_long_recording_to_stop_but_not_forever() {
+        let t0 = Instant::now();
+        let mut a = EngineActivity::default();
+        assert_eq!(PendingPause::needed(&a, t0), None, "nothing recording: pause at once");
+        a.record_requested(t0);
+        assert!(PendingPause::needed(&a, t0).is_some(), "a starting recording is stopped first too");
+        a.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
+        let wait = PendingPause::needed(&a, t0).expect("recording: stop first");
+        assert!(!wait.ready(&a, t0 + Duration::from_secs(1)));
+        a.on_event(&json!({"type":"recording_stopped","path":"p","seconds":1.0,"bytes":1}), 0.0);
+        assert!(wait.ready(&a, t0 + Duration::from_secs(1)), "stopped: pause now");
+        a.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
+        assert!(!wait.ready(&a, t0 + PAUSE_STOP_WAIT - Duration::from_millis(1)));
+        assert!(wait.ready(&a, t0 + PAUSE_STOP_WAIT), "an engine that never answers does not block the pause");
+    }
 
     #[test]
     fn saves_in_flight_block_restarts_until_reported_or_stale() {

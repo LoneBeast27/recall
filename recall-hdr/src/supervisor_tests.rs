@@ -188,3 +188,13 @@ fn live_spawn_hello_shutdown_no_orphan() {
     sup.shutdown(Duration::from_secs(3));
     assert!(wait_for(3, || !pid_alive(pid)), "orphan: engine pid {pid} still alive");
 }
+
+#[test]
+fn quit_grace_outlasts_the_engines_own_quit_path() {
+    // recall/src/main.rs: long recording finalize 1.5 s, then the in-flight
+    // save 3 s, plus the event loop's own exit.
+    let engine_quit = Duration::from_millis(1_500) + Duration::from_secs(3);
+    assert!(QUIT_GRACE >= engine_quit + Duration::from_secs(3), "{QUIT_GRACE:?}");
+    assert_eq!(RETARGET_GRACE, QUIT_GRACE, "a retarget never kills a save either");
+    assert_eq!(Shared::new(None).restart_grace(), QUIT_GRACE);
+}

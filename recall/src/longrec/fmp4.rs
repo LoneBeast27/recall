@@ -6,13 +6,17 @@
 //!
 //! I/O goes through a custom AVIO context into [`FileWriter`]: FFmpeg's
 //! buffer is larger than any fragment and `flush_packets` is on, so every
-//! short callback ends on a fragment boundary. The writer appends to RAM and
-//! hits the disk only in >= 4 MiB sequential writes (SMR-friendly), always
-//! ending on a fragment boundary, so a crash leaves a playable file.
+//! short callback ends on a fragment boundary. The writer (`fmp4_writer.rs`)
+//! appends to RAM and hits the disk in >= 4 MiB sequential writes
+//! (SMR-friendly) -- or at the first fragment boundary 5 s after the last
+//! write -- always ending on a fragment boundary, so a crash leaves a playable
+//! file missing at most a few seconds.
+
+#[path = "fmp4_writer.rs"]
+mod writer;
 
 use std::ffi::{c_int, c_void, CString};
 use std::fs::{File, OpenOptions};
-use std::io::Write;
 use std::path::Path;
 
 use ffmpeg_next as ff;
@@ -20,13 +24,10 @@ use ff::ffi;
 
 use super::machine::{Sink, SinkFactory};
 use super::{tap, TrackInfo};
+use writer::FileWriter;
 
 /// FFmpeg's I/O buffer: larger than a fragment at recording bitrates.
 const AVIO_BUFFER: usize = 16 << 20;
-/// Smallest disk write (except the header and the final tail).
-pub(crate) const FLUSH_AT: usize = 4 << 20;
-/// A single fragment bigger than this is written mid-fragment.
-const HARD_CAP: usize = 64 << 20;
 const MOVFLAGS: &str = "frag_keyframe+empty_moov+default_base_moof";
 const FRAG_DURATION_US: &str = "2000000";
 const US: ff::Rational = ff::Rational(1, 1_000_000);
@@ -34,114 +35,6 @@ const US: ff::Rational = ff::Rational(1, 1_000_000);
 const AVERROR_EIO: c_int = -5;
 /// `AVFMT_AVOID_NEG_TS_MAKE_ZERO`: AAC priming shifts every stream equally.
 const AVOID_NEG_TS_MAKE_ZERO: c_int = 2;
-
-/// Buffers FFmpeg's output and writes it out in large sequential chunks that
-/// end on fragment boundaries. Generic so the policy is unit-tested.
-pub(crate) struct FileWriter<W: Write> {
-    out: W,
-    buf: Vec<u8>,
-    /// `buf[..safe]` ends on a fragment boundary.
-    safe: usize,
-    bytes: u64,
-    error: Option<String>,
-    /// A callback this long was cut by a full buffer, not a flush point.
-    chunk: usize,
-}
-
-impl<W: Write> FileWriter<W> {
-    pub fn new(out: W, chunk: usize) -> Self {
-        FileWriter { out, buf: Vec::new(), safe: 0, bytes: 0, error: None, chunk }
-    }
-
-    /// One AVIO callback's bytes.
-    pub fn push(&mut self, data: &[u8]) {
-        if self.error.is_some() {
-            return;
-        }
-        self.buf.extend_from_slice(data);
-        if data.len() < self.chunk {
-            self.safe = self.buf.len();
-            if self.buf.len() >= FLUSH_AT {
-                self.write_out(self.buf.len());
-            }
-        } else if self.buf.len() >= HARD_CAP {
-            self.write_out(self.buf.len());
-        }
-    }
-
-    /// Write everything buffered now (the header, so a crash keeps it).
-    pub fn flush_now(&mut self) {
-        self.write_out(self.buf.len());
-    }
-
-    fn write_out(&mut self, n: usize) {
-        if n == 0 || self.error.is_some() {
-            return;
-        }
-        match self.out.write_all(&self.buf[..n]) {
-            Ok(()) => {
-                self.bytes += n as u64;
-                self.buf.drain(..n);
-                self.safe = self.safe.saturating_sub(n);
-            }
-            Err(e) => self.error = Some(format!("write recording: {e}")),
-        }
-    }
-
-    /// Finalize: the rest of the buffer, then flush. Returns bytes written.
-    pub fn finish(&mut self) -> Result<u64, String> {
-        self.flush_now();
-        if let Err(e) = self.out.flush() {
-            self.error.get_or_insert(format!("flush recording: {e}"));
-        }
-        match &self.error {
-            Some(e) => Err(e.clone()),
-            None => Ok(self.bytes),
-        }
-    }
-
-    /// Close early: keep only complete fragments.
-    pub fn abandon(&mut self) {
-        self.write_out(self.safe);
-        self.buf.clear();
-        self.safe = 0;
-        let _ = self.out.flush();
-    }
-
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
-    }
-
-    pub fn bytes(&self) -> u64 {
-        self.bytes
-    }
-
-    /// Bytes buffered but not yet written.
-    pub fn buffered(&self) -> &[u8] {
-        &self.buf
-    }
-
-    #[cfg(test)]
-    pub fn into_inner(self) -> W {
-        self.out
-    }
-}
-
-impl<W: Write + std::io::Seek> FileWriter<W> {
-    /// Overwrite `bytes` at `offset` of what is already written (one small
-    /// in-place write, used once per recording for the duration field).
-    pub fn patch(&mut self, offset: u64, bytes: &[u8]) -> Result<(), String> {
-        use std::io::SeekFrom;
-        if offset + bytes.len() as u64 > self.bytes {
-            return Err("patch beyond the written data".into());
-        }
-        self.out
-            .seek(SeekFrom::Start(offset))
-            .and_then(|_| self.out.write_all(bytes))
-            .and_then(|_| self.out.seek(SeekFrom::End(0)).map(|_| ()))
-            .map_err(|e| format!("patch recording header: {e}"))
-    }
-}
 
 /// (payload start, end) of the first `kind` box among the boxes in `data[start..end]`.
 fn child_box(data: &[u8], start: usize, end: usize, kind: &[u8; 4]) -> Option<(usize, usize)> {

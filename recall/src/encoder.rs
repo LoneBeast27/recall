@@ -246,6 +246,7 @@ fn run(
                     }
                 }
                 if let Some(reason) = fatal_encode_error {
+                    crate::longrec::tap::on_encoder_failed(&format!("NVENC encode failed: {reason}")); // long-recording hook
                     let failed = enc.as_ref().map(|e| (e.width, e.height));
                     enc = None;
                     failed_resolution = failed;

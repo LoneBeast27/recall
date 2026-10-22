@@ -1,7 +1,8 @@
 //! The record mode's user actions on the pump thread: hotkeys (direct combos
 //! and the advanced chord), the capture actions they and the pipe trigger
 //! (bookmark, screenshot, long recording), pause / resume, engine-event
-//! bookkeeping, deferred engine restarts and the storage schedule.
+//! bookkeeping, the engine plan with deferred restarts / retargets, and the
+//! storage schedule.
 
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -9,10 +10,10 @@ use serde_json::json;
 
 use crate::hotkey::Pressed;
 use crate::log;
-use crate::record_activity::Trigger;
+use crate::record_activity::{LongRec, PendingPause, Trigger, PAUSE_STOP_WAIT};
 use crate::record_app::Controller;
 use crate::record_chord::{self, ChordKey};
-use crate::record_engine::{capture_refusal, EngineTarget};
+use crate::record_engine::{capture_refusal, EngineTarget, Step};
 use crate::record_hotkeys::{bindings, HotkeyAction};
 use crate::record_status::error_event;
 
@@ -181,8 +182,29 @@ impl Controller {
     }
 
     /// Pause stops the engine now (no linger) and ignores games until resume;
-    /// resume re-reads the foreground so the current game starts at once.
+    /// resume re-reads the foreground so the current game starts at once. A
+    /// long recording is stopped (and saved) first: the pause applies when the
+    /// engine reports it ended, or after [`PAUSE_STOP_WAIT`]. Resume cancels a
+    /// pause still waiting.
     pub(crate) fn set_paused(&mut self, paused: bool) {
+        if !paused {
+            self.pending_pause = None;
+        } else if !self.paused && self.engine_running() {
+            if self.pending_pause.is_some() {
+                return; // already stopping the recording
+            }
+            if let Some(wait) = PendingPause::needed(&self.activity, Instant::now()) {
+                log!("record: pause -- stopping the long recording first (up to {} s)", PAUSE_STOP_WAIT.as_secs());
+                self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#);
+                self.pending_pause = Some(wait);
+                return;
+            }
+        }
+        self.apply_pause(paused);
+    }
+
+    fn apply_pause(&mut self, paused: bool) {
+        self.pending_pause = None;
         if self.paused == paused {
             return;
         }
@@ -236,8 +258,35 @@ impl Controller {
         self.restart_engine_for_settings();
     }
 
-    /// Deferred restart + storage schedule, every pump tick.
+    /// Planner -> engine, every pump tick. A retarget that falls due while a
+    /// save or the long recording is in flight waits (status
+    /// `pending_restart`) and applies on the first idle tick.
+    pub(crate) fn plan_engine(&mut self, now: Instant) {
+        let wanted = self.wanted();
+        let busy = self.activity.busy(now);
+        match self.planner.step(&wanted, now, busy) {
+            Step::Apply(target) => {
+                self.retarget_held = false;
+                self.apply_engine_target(&target);
+            }
+            Step::Held => {
+                if !self.retarget_held {
+                    log!("record: engine retarget deferred until the save / long recording ends");
+                }
+                self.retarget_held = true;
+            }
+            Step::Keep => self.retarget_held = false,
+        }
+    }
+
+    /// Pending pause + deferred restart + storage schedule, every pump tick.
     pub(crate) fn activity_tick(&mut self, now: Instant) {
+        if self.pending_pause.is_some_and(|p| p.ready(&self.activity, now)) {
+            if self.activity.long != LongRec::Idle {
+                log!("record: the long recording did not report stopping; pausing anyway");
+            }
+            self.apply_pause(true);
+        }
         if self.pending_restart && !self.activity.busy(now) {
             self.request_engine_restart();
         }

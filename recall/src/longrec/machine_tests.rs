@@ -1,110 +1,12 @@
 //! Long-recording state machine against a recording fake sink (no FFmpeg).
 
 use super::*;
-use std::sync::Mutex;
-
-#[derive(Debug, Clone, PartialEq)]
-enum Call {
-    Open(PathBuf),
-    Video { pts: u64, dur: u64, key: bool, tag: u8 },
-    Audio { track: usize, frames: usize },
-    Silence { track: usize, frames: u64 },
-    Finish,
-    Abandon,
-}
-
-#[derive(Clone, Default)]
-struct Log(Arc<Mutex<Vec<Call>>>);
-impl Log {
-    fn push(&self, c: Call) {
-        self.0.lock().unwrap().push(c);
-    }
-    fn calls(&self) -> Vec<Call> {
-        self.0.lock().unwrap().clone()
-    }
-    fn videos(&self) -> Vec<(u64, u64, bool, u8)> {
-        self.calls().into_iter().filter_map(|c| match c {
-            Call::Video { pts, dur, key, tag } => Some((pts, dur, key, tag)),
-            _ => None,
-        }).collect()
-    }
-    /// Frames per track in call order: positive = audio, negative = silence.
-    fn audio(&self, track: usize) -> Vec<i64> {
-        self.calls().into_iter().filter_map(|c| match c {
-            Call::Audio { track: t, frames } if t == track => Some(frames as i64),
-            Call::Silence { track: t, frames } if t == track => Some(-(frames as i64)),
-            _ => None,
-        }).collect()
-    }
-}
-
-struct FakeSink {
-    log: Log,
-    part: PathBuf,
-    fail_video_after: Option<usize>,
-    videos: usize,
-}
-
-impl Sink for FakeSink {
-    fn video(&mut self, pts_us: u64, duration_us: u64, keyframe: bool, data: &[u8]) -> Result<(), String> {
-        if self.fail_video_after.is_some_and(|n| self.videos >= n) {
-            return Err("disk full".into());
-        }
-        self.videos += 1;
-        self.log.push(Call::Video { pts: pts_us, dur: duration_us, key: keyframe, tag: data[0] });
-        Ok(())
-    }
-    fn audio(&mut self, track: usize, samples: &[f32]) -> Result<(), String> {
-        self.log.push(Call::Audio { track, frames: samples.len() / 2 });
-        Ok(())
-    }
-    fn silence(&mut self, track: usize, frames: u64) -> Result<(), String> {
-        self.log.push(Call::Silence { track, frames });
-        Ok(())
-    }
-    fn finish(&mut self) -> Result<u64, String> {
-        self.log.push(Call::Finish);
-        Ok(std::fs::metadata(&self.part).map(|m| m.len()).unwrap_or(0))
-    }
-    fn abandon(&mut self) {
-        self.log.push(Call::Abandon);
-    }
-}
-
-struct FakeFactory {
-    log: Log,
-    fail_open: bool,
-    fail_video_after: Option<usize>,
-}
-
-impl SinkFactory for FakeFactory {
-    type Sink = FakeSink;
-    fn open(&mut self, part: &Path, _tracks: &[TrackInfo]) -> Result<FakeSink, String> {
-        if self.fail_open {
-            return Err("no encoder parameters".into());
-        }
-        std::fs::write(part, b"fmp4").map_err(|e| e.to_string())?;
-        self.log.push(Call::Open(part.to_path_buf()));
-        Ok(FakeSink { log: self.log.clone(), part: part.to_path_buf(), fail_video_after: self.fail_video_after, videos: 0 })
-    }
-}
-
-const MS: u64 = 1_000;
-
-fn tracks() -> Vec<TrackInfo> {
-    vec![TrackInfo { name: "Game", rate: 48_000, channels: 2 }, TrackInfo { name: "Mic", rate: 48_000, channels: 2 }]
-}
+use crate::longrec::test_sink::{pkt, temp_dir, tracks, Call, FakeFactory, Log, MS};
 
 fn recorder(tag: &str) -> (Recorder<FakeFactory>, Log, PathBuf) {
-    let dir = std::env::temp_dir().join(format!("recall-longrec-{tag}-{}-{}", std::process::id(), uuid::Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
     let log = Log::default();
-    let rec = Recorder::new(FakeFactory { log: log.clone(), fail_open: false, fail_video_after: None }, tracks());
-    (rec, log, dir.join("G__2026-10-22__14-05-09__rec.mp4"))
-}
-
-fn pkt(tag: u8) -> Arc<[u8]> {
-    Arc::from(vec![tag])
+    let rec = Recorder::new(FakeFactory { log: log.clone(), ..Default::default() }, tracks());
+    (rec, log, temp_dir(tag).join("G__2026-10-22__14-05-09__rec.mp4"))
 }
 
 fn chunk(frames: usize) -> Vec<f32> {
@@ -115,7 +17,7 @@ fn chunk(frames: usize) -> Vec<f32> {
 fn waits_for_a_keyframe_then_writes_each_packet_one_step_late() {
     let (mut rec, log, path) = recorder("basic");
     let t0 = Instant::now();
-    assert!(rec.start(path.clone(), Some(1_000 * MS), t0).is_empty());
+    assert!(rec.start(path.clone(), Some((1_000 * MS, t0)), t0).is_empty());
     assert!(rec.is_active());
     assert!(rec.video(1_005 * MS, false, pkt(1), false, t0).is_empty(), "P-frame before a keyframe is dropped");
     assert_eq!(rec.video(1_020 * MS, true, pkt(2), false, t0), vec![Event::Started { path: path.clone() }]);
@@ -136,7 +38,7 @@ fn waits_for_a_keyframe_then_writes_each_packet_one_step_late() {
 fn dropped_packets_resync_at_the_next_keyframe_and_regressions_are_skipped() {
     let (mut rec, log, path) = recorder("gap");
     let t0 = Instant::now();
-    rec.start(path, Some(0), t0);
+    rec.start(path, Some((0, t0)), t0);
     rec.video(0, true, pkt(1), false, t0);
     rec.video(16 * MS, false, pkt(2), false, t0);
     rec.video(48 * MS, false, pkt(3), true, t0); // queue overflowed before this one
@@ -156,7 +58,7 @@ fn audio_is_placed_by_wall_clock_padded_and_trimmed() {
     let (mut rec, log, path) = recorder("audio");
     let t0 = Instant::now();
     // Request at capture 10 s; the keyframe is captured 40 ms later.
-    rec.start(path, Some(10_000 * MS), t0);
+    rec.start(path, Some((10_000 * MS, t0)), t0);
     rec.video(10_040 * MS, true, pkt(1), false, t0 + Duration::from_millis(45));
     let wall_base = t0 + Duration::from_millis(40);
     let at = |ms: u64| wall_base + Duration::from_millis(ms);
@@ -197,7 +99,7 @@ fn tick_pads_silent_tracks_and_times_out_an_armed_start() {
     rec.stop();
 
     let (mut rec, _log, path) = recorder("armtimeout");
-    rec.start(path, Some(0), t0);
+    rec.start(path, Some((0, t0)), t0);
     let events = rec.tick(t0 + ARM_TIMEOUT);
     assert!(matches!(&events[..], [Event::Failed { kept: None, .. }]), "{events:?}");
     assert!(!rec.is_active());
@@ -208,8 +110,8 @@ fn stop_or_start_in_the_wrong_phase_is_reported_not_fatal() {
     let (mut rec, _log, path) = recorder("phase");
     let t0 = Instant::now();
     assert!(matches!(&rec.stop()[..], [Event::Log(_)]));
-    rec.start(path.clone(), Some(0), t0);
-    assert!(matches!(&rec.start(path.clone(), Some(0), t0)[..], [Event::Log(_)]), "second start ignored");
+    rec.start(path.clone(), Some((0, t0)), t0);
+    assert!(matches!(&rec.start(path.clone(), Some((0, t0)), t0)[..], [Event::Log(_)]), "second start ignored");
     assert!(matches!(&rec.stop()[..], [Event::Failed { kept: None, .. }]), "stopped while armed");
     assert!(!naming::part_of(&path).exists());
 }
@@ -217,9 +119,9 @@ fn stop_or_start_in_the_wrong_phase_is_reported_not_fatal() {
 #[test]
 fn a_failing_sink_keeps_the_partial_recording() {
     let (_, log, path) = recorder("fail");
-    let mut rec = Recorder::new(FakeFactory { log: log.clone(), fail_open: false, fail_video_after: Some(2) }, tracks());
+    let mut rec = Recorder::new(FakeFactory { log: log.clone(), fail_video_after: Some(2), ..Default::default() }, tracks());
     let t0 = Instant::now();
-    rec.start(path.clone(), Some(0), t0);
+    rec.start(path.clone(), Some((0, t0)), t0);
     for i in 0..3u64 {
         assert!(rec.video(i * 16 * MS, i == 0, pkt(i as u8), false, t0).iter().all(|e| matches!(e, Event::Started { .. })));
     }
@@ -230,8 +132,8 @@ fn a_failing_sink_keeps_the_partial_recording() {
     assert!(!rec.is_active());
 
     let (_, log, path) = recorder("failopen");
-    let mut rec = Recorder::new(FakeFactory { log, fail_open: true, fail_video_after: None }, tracks());
-    rec.start(path.clone(), Some(0), t0);
+    let mut rec = Recorder::new(FakeFactory { log, fail_open: true, ..Default::default() }, tracks());
+    rec.start(path.clone(), Some((0, t0)), t0);
     let events = rec.video(0, true, pkt(1), false, t0);
     assert_eq!(events, vec![Event::Failed { reason: "no encoder parameters".into(), kept: None }]);
     assert!(!path.exists() && !naming::part_of(&path).exists());
@@ -241,7 +143,7 @@ fn a_failing_sink_keeps_the_partial_recording() {
 fn marks_land_in_the_recording_sidecar_and_a_reopen_ends_it() {
     let (mut rec, _log, path) = recorder("marks");
     let t0 = Instant::now();
-    rec.start(path.clone(), Some(0), t0);
+    rec.start(path.clone(), Some((0, t0)), t0);
     rec.mark(5 * MS); // before the first frame: ignored (armed)
     rec.video(100 * MS, true, pkt(1), false, t0);
     rec.mark(600 * MS);
@@ -253,4 +155,53 @@ fn marks_land_in_the_recording_sidecar_and_a_reopen_ends_it() {
     let sidecar = crate::bookmarks::sidecar_path(&path);
     assert_eq!(std::fs::read_to_string(sidecar).unwrap(), r#"{"version":1,"marks":[0.5,1.0]}"#);
     assert!(rec.encoder_reopened().is_empty(), "nothing to end when idle");
+}
+
+#[test]
+fn audio_timing_uses_the_instant_sampled_with_the_capture_clock() {
+    let (mut rec, log, path) = recorder("lateArm");
+    let t0 = Instant::now();
+    // The request is sampled at t0 (capture 10 s), but the writer only arms
+    // 2 s later (a sleeping HDD): the keyframe 40 ms after the request still
+    // maps to t0 + 40 ms, so a chunk ending 15 ms into the file lands at once.
+    let armed = t0 + Duration::from_secs(2);
+    rec.start(path, Some((10_000 * MS, t0)), armed);
+    rec.video(10_040 * MS, true, pkt(1), false, armed);
+    rec.audio(0, &chunk(480), t0 + Duration::from_millis(55));
+    assert_eq!(log.audio(0), vec![480], "no 2 s of silence first: audio does not lead video");
+    rec.stop();
+}
+
+#[test]
+fn a_failing_finish_closes_the_sink_before_keeping_the_partial() {
+    let (_, log, path) = recorder("failfinish");
+    let mut rec = Recorder::new(FakeFactory { log: log.clone(), fail_finish: true, ..Default::default() }, tracks());
+    let t0 = Instant::now();
+    rec.start(path.clone(), Some((0, t0)), t0);
+    rec.video(0, true, pkt(1), false, t0);
+    rec.video(16 * MS, false, pkt(2), false, t0);
+    let events = rec.stop();
+    assert_eq!(events, vec![Event::Failed { reason: "write trailer: disk full".into(), kept: Some(path.clone()) }]);
+    assert!(path.is_file() && !naming::part_of(&path).exists(), "the open .part was closed, then renamed");
+    assert!(log.calls().contains(&Call::Abandon));
+}
+
+#[test]
+fn a_failed_encoder_ends_the_recording_and_reports_the_saved_file() {
+    let (mut rec, log, path) = recorder("encfail");
+    let t0 = Instant::now();
+    assert!(rec.encoder_failed("x").is_empty(), "idle: nothing to end");
+    rec.start(path.clone(), Some((0, t0)), t0);
+    rec.video(0, true, pkt(1), false, t0);
+    rec.video(16 * MS, false, pkt(2), false, t0);
+    let events = rec.encoder_failed("NVENC encode failed: device lost");
+    let [Event::Failed { reason, kept }] = &events[..] else { panic!("{events:?}") };
+    assert!(reason.contains("device lost") && reason.contains("saved"), "{reason}");
+    assert_eq!(kept.as_ref(), Some(&path));
+    assert!(path.is_file() && !naming::part_of(&path).exists(), "finished cleanly");
+    assert_eq!(log.calls().iter().filter(|c| **c == Call::Finish).count(), 1);
+    assert!(!rec.is_active());
+    rec.start(path.clone(), Some((0, t0)), t0);
+    assert!(matches!(&rec.encoder_failed("x")[..], [Event::Failed { kept: None, .. }]), "armed: fails");
+    assert!(!rec.is_active());
 }
