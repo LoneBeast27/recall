@@ -174,6 +174,13 @@ pub struct NativePreview {
     has_audio: bool,
     com_initialized: bool,
     last_drift_check: Cell<Instant>,
+    /// Times the video was re-seeked to follow the audio clock (test trace).
+    pub(crate) drift_seeks: Cell<u32>,
+    /// Last audio-clock reading and when it last changed (stall detection while playing).
+    pub(crate) audio_seen: Cell<(f64, Instant)>,
+    pub(crate) audio_restarted: Cell<Instant>,
+    /// Times the audio clock stalled and was restarted at the video time (test trace).
+    pub(crate) audio_stalls: Cell<u32>,
     observed_media_ready: bool,
     observed_ready: bool,
     observed_error: Option<String>,
