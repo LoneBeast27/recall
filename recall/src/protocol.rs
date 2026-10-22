@@ -42,13 +42,34 @@ pub enum Outbound {
         /// Whether new microphone samples are entering the replay buffer as silence.
         mic_muted: bool,
     },
-    /// A `save_clip` completed: the clip is on disk.
+    /// A `save_clip` completed: the clip is on disk. `path` is always the
+    /// clip's FINAL place in the clip folder. With `staged: true` the finished
+    /// clip sits in `staged_path` (SSD staging) and a background move puts it
+    /// at `path`; `clip_moved` / `clip_move_failed` follow. With `staged:
+    /// false` (no `staged_path`) it was written to `path` directly.
     Saved {
         path: String,
         seconds: f32,
         frames: u64,
         bytes: u64,
         elapsed_ms: u64,
+        staged: bool,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        staged_path: Option<String>,
+    },
+    /// A staged clip is now at its final `path` (the staged copy is gone).
+    /// `elapsed_ms`: this move's copy + flush + rename time.
+    ClipMoved {
+        path: String,
+        elapsed_ms: u64,
+    },
+    /// A staged clip could not be moved to `path`; it stays complete in
+    /// `staged_path` and the move is retried (every 60 s, on the next save,
+    /// and at the next engine start).
+    ClipMoveFailed {
+        path: String,
+        staged_path: String,
+        reason: String,
     },
     /// A `save_clip` failed.
     SaveFailed {
@@ -180,5 +201,59 @@ pub fn emit_or_log(json: bool, msg: &Outbound, human: impl FnOnce() -> String) {
         emit(msg);
     } else {
         eprintln!("[recall] {}", human());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Outbound;
+
+    fn wire(msg: &Outbound) -> String {
+        serde_json::to_string(msg).unwrap()
+    }
+
+    #[test]
+    fn saved_keeps_its_fields_and_adds_staging() {
+        let staged = Outbound::Saved {
+            path: r"V:\ALL RECORDINGS\G__x.mp4".into(),
+            seconds: 120.0,
+            frames: 7200,
+            bytes: 400,
+            elapsed_ms: 812,
+            staged: true,
+            staged_path: Some(r"L:\Recall\cache\staging\G__x.mp4".into()),
+        };
+        assert_eq!(
+            wire(&staged),
+            r#"{"type":"saved","path":"V:\\ALL RECORDINGS\\G__x.mp4","seconds":120.0,"frames":7200,"bytes":400,"elapsed_ms":812,"staged":true,"staged_path":"L:\\Recall\\cache\\staging\\G__x.mp4"}"#
+        );
+        let direct = Outbound::Saved {
+            path: "a.mp4".into(),
+            seconds: 1.5,
+            frames: 3,
+            bytes: 10,
+            elapsed_ms: 5,
+            staged: false,
+            staged_path: None,
+        };
+        assert_eq!(
+            wire(&direct),
+            r#"{"type":"saved","path":"a.mp4","seconds":1.5,"frames":3,"bytes":10,"elapsed_ms":5,"staged":false}"#
+        );
+    }
+
+    #[test]
+    fn clip_move_events_match_the_wire_shape() {
+        let moved = Outbound::ClipMoved { path: r"V:\c\G.mp4".into(), elapsed_ms: 9549 };
+        assert_eq!(wire(&moved), r#"{"type":"clip_moved","path":"V:\\c\\G.mp4","elapsed_ms":9549}"#);
+        let failed = Outbound::ClipMoveFailed {
+            path: r"V:\c\G.mp4".into(),
+            staged_path: r"L:\s\G.mp4".into(),
+            reason: "disk full".into(),
+        };
+        assert_eq!(
+            wire(&failed),
+            r#"{"type":"clip_move_failed","path":"V:\\c\\G.mp4","staged_path":"L:\\s\\G.mp4","reason":"disk full"}"#
+        );
     }
 }

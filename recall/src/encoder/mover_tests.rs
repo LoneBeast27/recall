@@ -1,0 +1,199 @@
+//! The clip mover against temp dirs: copy, rename, cleanup, failure, retry,
+//! FIFO order, quit, and the background I/O priority it runs at.
+
+use super::*;
+use std::sync::Mutex;
+
+fn temp_dir(tag: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("recall-mover-{tag}-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn cfg(same_volume: VolumeCheck) -> Config {
+    Config {
+        chunk: 4096,
+        sync_every: 10_000,
+        retry_after: Duration::from_millis(50),
+        same_volume,
+        background: false,
+    }
+}
+
+const ACROSS: VolumeCheck = |_, _| false;
+
+/// A staged clip of `len` patterned bytes (chunk edges are visible if wrong).
+fn staged(dir: &Path, name: &str, len: usize) -> (PathBuf, Vec<u8>) {
+    let bytes: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+    let path = dir.join(name);
+    std::fs::write(&path, &bytes).unwrap();
+    (path, bytes)
+}
+
+fn text(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+fn lines(sink: &Arc<Mutex<Vec<String>>>) -> Vec<String> {
+    sink.lock().unwrap().clone()
+}
+
+fn of_type(sink: &Arc<Mutex<Vec<String>>>, ty: &str) -> Vec<serde_json::Value> {
+    let tag = format!("{{\"type\":\"{ty}\"");
+    lines(sink).iter().filter(|l| l.starts_with(&tag)).map(|l| serde_json::from_str(l).unwrap()).collect()
+}
+
+fn wait_for(sink: &Arc<Mutex<Vec<String>>>, ty: &str, n: usize) -> Vec<serde_json::Value> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let found = of_type(sink, ty);
+        if found.len() >= n {
+            return found;
+        }
+        assert!(Instant::now() < deadline, "no {ty}: {:?}", lines(sink));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn copy_lands_the_exact_bytes_under_the_final_name_and_cleans_up() {
+    let (stage, out) = (temp_dir("s"), temp_dir("o"));
+    let (src, bytes) = staged(&stage, "G.mp4", 100_003);
+    let dest = out.join("G.mp4");
+    // A `.part` left by an interrupted move (bigger than the clip) is overwritten.
+    std::fs::write(part_of(&dest), vec![9u8; 200_000]).unwrap();
+    let job = MoveJob { staged: src.clone(), dest: dest.clone() };
+    let moved = move_clip(&job, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
+    assert_eq!((moved.how, moved.bytes, moved.dest.clone()), ("copy", 100_003, dest.clone()));
+    assert!(moved.staged_kept.is_none());
+    assert_eq!(std::fs::read(&dest).unwrap(), bytes);
+    assert!(!src.exists(), "staged copy deleted");
+    assert!(!part_of(&dest).exists(), ".part renamed away");
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn quit_mid_move_removes_the_part_and_keeps_the_staged_copy() {
+    let (stage, out) = (temp_dir("s"), temp_dir("o"));
+    let (src, bytes) = staged(&stage, "G.mp4", 50_000);
+    let dest = out.join("G.mp4");
+    let job = MoveJob { staged: src.clone(), dest: dest.clone() };
+    assert_eq!(move_clip(&job, &cfg(ACROSS), &AtomicBool::new(true)).unwrap_err(), MoveError::Aborted);
+    assert!(!dest.exists(), "never a half file under the final name");
+    assert!(!part_of(&dest).exists());
+    assert_eq!(std::fs::read(&src).unwrap(), bytes, "staged copy kept for the next start");
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn existing_destinations_are_never_overwritten() {
+    let (stage, out) = (temp_dir("s"), temp_dir("o"));
+    // Same size: the rename landed before a crash kept the staged copy.
+    let (src, bytes) = staged(&stage, "A.mp4", 1000);
+    std::fs::write(out.join("A.mp4"), &bytes).unwrap();
+    let job = MoveJob { staged: src.clone(), dest: out.join("A.mp4") };
+    let moved = move_clip(&job, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
+    assert_eq!(moved.how, "already in place");
+    assert!(!src.exists());
+    // Different size: a different file owns the name, so land beside it.
+    let (src, bytes) = staged(&stage, "B.mp4", 1000);
+    std::fs::write(out.join("B.mp4"), b"someone else's").unwrap();
+    let job = MoveJob { staged: src.clone(), dest: out.join("B.mp4") };
+    let moved = move_clip(&job, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
+    assert_eq!(moved.dest, out.join("B-recovered.mp4"));
+    assert_eq!(std::fs::read(out.join("B-recovered.mp4")).unwrap(), bytes);
+    assert_eq!(std::fs::read(out.join("B.mp4")).unwrap(), b"someone else's");
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn same_volume_is_a_rename_and_a_missing_staged_file_is_dropped() {
+    let (stage, out) = (temp_dir("s"), temp_dir("o"));
+    let (src, bytes) = staged(&stage, "G.mp4", 3000);
+    let job = MoveJob { staged: src.clone(), dest: out.join("G.mp4") };
+    let moved = move_clip(&job, &cfg(|_, _| true), &AtomicBool::new(false)).unwrap();
+    assert_eq!(moved.how, "rename");
+    assert_eq!(std::fs::read(out.join("G.mp4")).unwrap(), bytes);
+    assert!(!src.exists());
+    assert_eq!(move_clip(&job, &cfg(ACROSS), &AtomicBool::new(false)).unwrap_err(), MoveError::Missing);
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn a_failed_move_keeps_the_staged_file_reports_once_and_retries() {
+    let (stage, root) = (temp_dir("s"), temp_dir("o"));
+    let out = root.join("not-yet"); // the clip folder is missing: create fails
+    let (src, bytes) = staged(&stage, "G.mp4", 20_000);
+    let (events, sink) = Events::capture(true);
+    let (queue, control) = spawn(events, cfg(ACROSS), Vec::new()).unwrap();
+    assert!(queue.submit(MoveJob { staged: src.clone(), dest: out.join("G.mp4") }));
+    let failed = wait_for(&sink, "clip_move_failed", 1);
+    assert_eq!(failed[0]["path"], text(&out.join("G.mp4")));
+    assert_eq!(failed[0]["staged_path"], text(&src));
+    assert!(failed[0]["reason"].as_str().unwrap().starts_with("create "), "{}", failed[0]);
+    assert!(src.exists(), "staged copy kept");
+    // Let at least one silent retry fail, then the folder comes back.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !lines(&sink).iter().any(|l| l.contains("clip move retry 2 failed")) {
+        assert!(Instant::now() < deadline, "{:?}", lines(&sink));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    std::fs::create_dir_all(&out).unwrap();
+    let moved = wait_for(&sink, "clip_moved", 1);
+    assert_eq!(moved[0]["path"], text(&out.join("G.mp4")));
+    assert_eq!(std::fs::read(out.join("G.mp4")).unwrap(), bytes);
+    assert!(!src.exists());
+    assert_eq!(of_type(&sink, "clip_move_failed").len(), 1, "one failure event per clip, not per retry");
+    assert!(control.shutdown(Duration::from_secs(1)));
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&root));
+}
+
+#[test]
+fn moves_run_fifo_recovered_ones_first() {
+    let (stage, out) = (temp_dir("s"), temp_dir("o"));
+    let names = ["R.mp4", "A.mp4", "B.mp4", "C.mp4"];
+    let jobs: Vec<MoveJob> = names
+        .iter()
+        .map(|n| MoveJob { staged: staged(&stage, n, 9000).0, dest: out.join(n) })
+        .collect();
+    let (events, sink) = Events::capture(true);
+    let (queue, control) = spawn(events, cfg(ACROSS), vec![jobs[0].clone()]).unwrap();
+    for job in &jobs[1..] {
+        assert!(queue.submit(job.clone()));
+    }
+    let moved = wait_for(&sink, "clip_moved", names.len());
+    let order: Vec<String> = moved.iter().map(|m| m["path"].as_str().unwrap().to_string()).collect();
+    let expected: Vec<String> = names.iter().map(|n| text(&out.join(n))).collect();
+    assert_eq!(order, expected);
+    assert_eq!(std::fs::read_dir(&stage).unwrap().count(), 0);
+    assert!(control.shutdown(Duration::from_secs(1)));
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn shutdown_stops_an_idle_mover_at_once_and_queued_moves_stay_staged() {
+    let (stage, out) = (temp_dir("s"), temp_dir("o"));
+    let (events, _sink) = Events::capture(true);
+    let (queue, control) = spawn(events, cfg(ACROSS), Vec::new()).unwrap();
+    let started = Instant::now();
+    assert!(control.shutdown(Duration::from_secs(1)));
+    assert!(started.elapsed() < Duration::from_millis(500));
+    let (src, _) = staged(&stage, "G.mp4", 100);
+    assert!(!queue.submit(MoveJob { staged: src.clone(), dest: out.join("G.mp4") }), "mover gone");
+    assert!(src.exists() && !out.join("G.mp4").exists());
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn background_mode_drops_this_threads_io_priority_to_very_low() {
+    let (before, after, cpu) = std::thread::spawn(|| {
+        let before = super::super::bg_io::thread_io_priority();
+        super::super::bg_io::enter_background().unwrap();
+        (before, super::super::bg_io::thread_io_priority(), super::super::bg_io::thread_priority())
+    })
+    .join()
+    .unwrap();
+    assert_eq!(before, Some(2), "a fresh thread starts at normal I/O priority");
+    assert_eq!(after, Some(0), "background mode = very low I/O priority");
+    assert!(cpu <= -1, "at or below THREAD_PRIORITY_BELOW_NORMAL, got {cpu}");
+}

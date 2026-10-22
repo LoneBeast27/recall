@@ -5,7 +5,10 @@
 //!
 //! A save is noted with its capture-clock end when it is requested; when the
 //! saver reports `Saved{path, seconds}` the clip spans
-//! `[end - seconds, end]`, so the marks inside that window are its marks. The
+//! `[end - seconds, end]`, so the marks inside that window are its marks.
+//! `path` is the clip's FINAL path even for a staged save (`encoder::staging`),
+//! so the sidecar is written straight into the clip folder and is there before
+//! the background move lands the clip beside it. The
 //! long recording keeps its own marks (`longrec`). MP4 chapters are not
 //! written: that would need the saver's muxer, and the sidecar carries the same
 //! data for the editor.
@@ -205,10 +208,21 @@ mod tests {
         b.add(10 * S);
         b.note_save(&with, 20 * S);
         b.note_save(&without, 40 * S);
-        let saved = |path: &str, seconds: f32| Outbound::Saved { path: path.into(), seconds, frames: 1, bytes: 1, elapsed_ms: 1 };
+        // A staged save: the sidecar goes beside the FINAL path, never into staging.
+        let staging = dir.join("staging");
+        let saved = |path: &str, seconds: f32| Outbound::Saved {
+            path: path.into(),
+            seconds,
+            frames: 1,
+            bytes: 1,
+            elapsed_ms: 1,
+            staged: true,
+            staged_path: Some(staging.join("A.mp4").to_string_lossy().into_owned()),
+        };
         on_emit(&b, &saved(&with, 15.0)); // [5 s, 20 s] holds the 10 s mark
         on_emit(&b, &saved(&without, 5.0)); // [35 s, 40 s] holds none
         on_emit(&b, &Outbound::EncoderLog { message: "ignored".into() });
+        assert!(!staging.exists(), "no sidecar in the staging folder");
         assert_eq!(std::fs::read_to_string(dir.join("A.recall-marks.json")).unwrap(), r#"{"version":1,"marks":[5.0]}"#);
         assert!(!dir.join("B.recall-marks.json").exists(), "no marks, no file");
         let _ = std::fs::remove_dir_all(&dir);
