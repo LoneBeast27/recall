@@ -9,6 +9,13 @@
 //! so a slow disk drops (and later resyncs) recording data but never stalls
 //! capture, encoding or replay saves.
 //!
+//! Every tapped packet carries its live-encoder generation: the first packet
+//! of a reopened encoder (new stream parameters) finishes the recording
+//! cleanly even if the `EncoderReopened` notice was dropped; stale packets of
+//! an older encoder are skipped. A live encoder that fails for good
+//! (`tap::on_encoder_failed`, polled, never dropped) finishes the recording
+//! and reports `recording_failed` naming the saved file.
+//!
 //! **Crash recovery.** Fragments are only ever written whole, so a `.part`
 //! left by a crash or a kill plays up to its last flushed fragment (at most a
 //! few seconds short). The next engine start renames every
@@ -20,6 +27,8 @@
 mod fmp4;
 mod machine;
 pub mod tap;
+#[cfg(test)]
+mod test_sink;
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender};
@@ -28,7 +37,7 @@ use std::time::{Duration, Instant};
 
 use crate::naming;
 use crate::protocol::{emit_or_log, Outbound};
-use machine::{Event, Recorder};
+use machine::{Event, Recorder, SinkFactory};
 
 /// Data items the writer may queue (~40 s of 60 fps video + 3 audio tracks).
 const DATA_QUEUE: usize = 16_384;
@@ -45,15 +54,20 @@ pub struct TrackInfo {
 
 /// Live-path items (from `tap`).
 pub(crate) enum Data {
-    Video { pts_us: u64, keyframe: bool, data: Arc<[u8]> },
+    /// `generation`: the live encoder that produced it (`tap::generation`).
+    Video { pts_us: u64, keyframe: bool, data: Arc<[u8]>, generation: u64 },
     Audio { track: &'static str, samples: Vec<f32>, at: Instant },
     EncoderReopened { generation: u64 },
 }
 
+/// A start's (capture-clock µs, `Instant` it was read at), sampled together
+/// on the command thread (`CaptureShared::recording_now`).
+pub type StartClock = Option<(u64, Instant)>;
+
 enum Control {
-    Start { source: String, start_us: Option<u64> },
+    Start { source: String, start: StartClock },
     Stop,
-    Toggle { source: String, start_us: Option<u64> },
+    Toggle { source: String, start: StartClock },
     Mark { at_us: u64 },
     Shutdown,
 }
@@ -82,16 +96,16 @@ pub fn spawn(out_dir: String, json: bool, tracks: Vec<TrackInfo>) -> LongRec {
 }
 
 impl LongRec {
-    pub fn start(&self, source: &str, start_us: Option<u64>) {
-        let _ = self.ctl.send(Control::Start { source: source.to_string(), start_us });
+    pub fn start(&self, source: &str, start: StartClock) {
+        let _ = self.ctl.send(Control::Start { source: source.to_string(), start });
     }
 
     pub fn stop(&self) {
         let _ = self.ctl.send(Control::Stop);
     }
 
-    pub fn toggle(&self, source: &str, start_us: Option<u64>) {
-        let _ = self.ctl.send(Control::Toggle { source: source.to_string(), start_us });
+    pub fn toggle(&self, source: &str, start: StartClock) {
+        let _ = self.ctl.send(Control::Toggle { source: source.to_string(), start });
     }
 
     /// A bookmark at capture time `at_us` (kept if a recording is running).
@@ -107,14 +121,15 @@ impl LongRec {
     }
 }
 
-struct Writer {
+struct Writer<F: SinkFactory> {
     out_dir: String,
     json: bool,
-    recorder: Recorder<fmp4::Fmp4Factory>,
+    recorder: Recorder<F>,
+    /// The live-encoder generation the current recording's packets come from.
     generation: u64,
 }
 
-impl Writer {
+impl<F: SinkFactory> Writer<F> {
     fn run(mut self, ctl: &Receiver<Control>, data: &Receiver<Data>) {
         loop {
             loop {
@@ -146,6 +161,7 @@ impl Writer {
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => return,
             }
+            self.check_encoder_failed(data);
             let events = self.recorder.tick(Instant::now());
             self.events(events);
         }
@@ -153,13 +169,13 @@ impl Writer {
 
     fn control(&mut self, c: Control, data: &Receiver<Data>) {
         match c {
-            Control::Start { source, start_us } => self.start(&source, start_us),
+            Control::Start { source, start } => self.start(&source, start),
             Control::Stop => self.stop(data),
-            Control::Toggle { source, start_us } => {
+            Control::Toggle { source, start } => {
                 if self.recorder.is_active() {
                     self.stop(data);
                 } else {
-                    self.start(&source, start_us);
+                    self.start(&source, start);
                 }
             }
             Control::Mark { at_us } => self.recorder.mark(at_us),
@@ -167,7 +183,7 @@ impl Writer {
         }
     }
 
-    fn start(&mut self, source: &str, start_us: Option<u64>) {
+    fn start(&mut self, source: &str, start: StartClock) {
         if self.recorder.is_active() {
             return self.events(vec![Event::Log("record_start ignored: a long recording is already running".into())]);
         }
@@ -175,7 +191,7 @@ impl Writer {
         if let Err(e) = std::fs::create_dir_all(&self.out_dir) {
             return self.events(vec![Event::Failed { reason: format!("output folder {}: {e}", self.out_dir), kept: None }]);
         }
-        let events = self.recorder.start(path, start_us, Instant::now());
+        let events = self.recorder.start(path, start, Instant::now());
         self.generation = tap::generation();
         tap::set_active(true);
         self.events(events);
@@ -193,20 +209,46 @@ impl Writer {
 
     fn data(&mut self, item: Data) {
         let events = match item {
-            Data::Video { pts_us, keyframe, data } => {
-                let gap = tap::take_gap();
-                self.recorder.video(pts_us, keyframe, data, gap, Instant::now())
+            Data::Video { pts_us, keyframe, data, generation } => {
+                let mut events = self.encoder_seen(generation);
+                if generation == self.generation {
+                    let gap = tap::take_gap();
+                    events.extend(self.recorder.video(pts_us, keyframe, data, gap, Instant::now()));
+                }
+                events
             }
             Data::Audio { track, samples, at } => match self.recorder.track_index(track) {
                 Some(i) => self.recorder.audio(i, &samples, at),
                 None => Vec::new(),
             },
-            Data::EncoderReopened { generation } if generation > self.generation => {
-                self.generation = generation;
-                self.recorder.encoder_reopened()
-            }
-            Data::EncoderReopened { .. } => Vec::new(),
+            Data::EncoderReopened { generation } => self.encoder_seen(generation),
         };
+        self.events(events);
+    }
+
+    /// An item from live encoder `generation`. A newer one changed the
+    /// stream's parameters: a running recording finishes here (older packets
+    /// are the caller's to skip).
+    fn encoder_seen(&mut self, generation: u64) -> Vec<Event> {
+        if generation <= self.generation {
+            return Vec::new();
+        }
+        self.generation = generation;
+        self.recorder.encoder_reopened()
+    }
+
+    /// The live encoder of this recording died for good: write what it
+    /// already queued, then finish and report the recording.
+    fn check_encoder_failed(&mut self, data: &Receiver<Data>) {
+        if !self.recorder.is_active() {
+            return;
+        }
+        let Some(reason) = tap::failure_of(self.generation) else { return };
+        tap::set_active(false);
+        while let Ok(item) = data.try_recv() {
+            self.data(item);
+        }
+        let events = self.recorder.encoder_failed(&reason);
         self.events(events);
     }
 
@@ -279,6 +321,67 @@ fn recover_in(dir: &Path) -> Vec<(PathBuf, std::io::Result<PathBuf>)> {
 mod tests {
     use super::*;
 
+    use std::sync::mpsc::sync_channel;
+    use test_sink::{pkt, temp_dir, tracks, FakeFactory, MS};
+
+    fn writer(tag: &str, generation: u64) -> (Writer<FakeFactory>, PathBuf) {
+        let dir = temp_dir(tag);
+        let recorder = Recorder::new(FakeFactory::default(), tracks());
+        (Writer { out_dir: dir.to_string_lossy().into_owned(), json: false, recorder, generation }, dir)
+    }
+
+    fn video(pts_ms: u64, keyframe: bool, generation: u64) -> Data {
+        Data::Video { pts_us: pts_ms * MS, keyframe, data: pkt(pts_ms as u8), generation }
+    }
+
+    /// The single finished recording in `dir` (and no `.part` left).
+    fn finished(dir: &Path) -> Vec<String> {
+        let names: Vec<String> = std::fs::read_dir(dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+        assert!(names.iter().all(|n| !n.ends_with(".part")), "{names:?}");
+        names
+    }
+
+    #[test]
+    fn a_reopened_encoders_first_packet_ends_the_recording_without_the_notice() {
+        let (mut w, dir) = writer("reopen", 0);
+        let (_tx, rx) = sync_channel::<Data>(4);
+        w.start("G", Some((0, Instant::now())));
+        w.generation = 3; // the encoder generation the recording started on
+        w.data(video(0, true, 3));
+        w.data(video(16, false, 3));
+        assert!(w.recorder.is_active());
+        w.data(video(20, false, 2)); // a stale packet of an older encoder: skipped
+        assert!(w.recorder.is_active());
+        // The EncoderReopened notice was dropped (queue full); the new
+        // encoder's first keyframe still ends the file cleanly.
+        w.data(video(33, true, 4));
+        assert!(!w.recorder.is_active(), "the recording ended at the stream change");
+        assert_eq!(w.generation, 4);
+        assert_eq!(finished(&dir).len(), 1, "finished and renamed into place");
+        w.check_encoder_failed(&rx); // idle: nothing to do
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_failed_encoder_ends_the_recording_after_its_queued_packets() {
+        // A generation no other test's writer uses (the failure is global).
+        let generation = u64::MAX - 7;
+        let (mut w, dir) = writer("encfail", generation);
+        let (tx, rx) = sync_channel::<Data>(4);
+        w.start("G", Some((0, Instant::now())));
+        w.generation = generation;
+        w.data(video(0, true, generation));
+        tx.send(video(16, false, generation)).unwrap();
+        w.check_encoder_failed(&rx);
+        assert!(w.recorder.is_active(), "no failure reported yet");
+        tap::on_encoder_failed_at(generation, "NVENC encode failed: device lost");
+        w.check_encoder_failed(&rx);
+        assert!(!w.recorder.is_active(), "the recording ended");
+        assert!(rx.try_recv().is_err(), "the queued packet was written first");
+        assert_eq!(finished(&dir).len(), 1, "the file was finished and kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     #[test]
     fn recovery_renames_only_long_recording_parts_and_skips_open_files() {
         use std::os::windows::fs::OpenOptionsExt;
@@ -287,14 +390,16 @@ mod tests {
         let crashed = dir.join("G__2026-10-22__14-05-09__rec.mp4.part");
         let live = dir.join("G__2026-10-22__15-00-00__rec.mp4.part");
         let replay = dir.join("G__2026-10-22__14-05-09-275__ab12.mp4.part");
-        for p in [&crashed, &live, &replay] {
+        let second = dir.join("G__2026-10-22__14-05-09__rec-2.mp4.part");
+        for p in [&crashed, &live, &replay, &second] {
             std::fs::write(p, b"x").unwrap();
         }
         // A recorder holds `live` open the way Fmp4Sink does (no delete sharing).
         let _held = std::fs::OpenOptions::new().write(true).share_mode(0x1).open(&live).unwrap();
         let results = recover_in(&dir);
-        assert_eq!(results.len(), 2, "replay parts are not ours");
+        assert_eq!(results.len(), 3, "replay parts are not ours");
         assert!(dir.join("G__2026-10-22__14-05-09__rec.mp4").is_file(), "crashed part recovered");
+        assert!(dir.join("G__2026-10-22__14-05-09__rec-2.mp4").is_file(), "a same-second second recording too");
         assert!(!crashed.exists());
         assert!(live.exists(), "a file being written is left alone");
         assert!(replay.exists());

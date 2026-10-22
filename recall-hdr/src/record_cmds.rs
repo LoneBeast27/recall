@@ -260,7 +260,8 @@ impl Controller {
             hdr: &hdr,
             paused: self.paused,
             long_recording: self.activity.long_recording_json(),
-            pending_restart: self.pending_restart,
+            // Settings restart or a held retarget: both wait for idle.
+            pending_restart: self.pending_restart || self.retarget_held,
             leader_label: &self.leader_label,
         })
     }

@@ -4,7 +4,9 @@
 //!   `auto_record`), then the idle desktop (if `record_desktop_when_idle`).
 //! - [`EnginePlanner`]: when the game goes away the engine -- and its replay
 //!   ring -- is kept for [`EXIT_LINGER`], so a save pressed right after the
-//!   final round still works. A new game retargets immediately.
+//!   final round still works. A new game retargets immediately -- unless a
+//!   save or the long recording is in flight: the retarget is then held
+//!   ([`Step::Held`]) until the engine is idle.
 //! - [`engine_env`]: the per-spawn environment the engine reads at startup.
 
 use std::time::{Duration, Instant};
@@ -64,6 +66,18 @@ pub fn wanted(detected: Option<&Target>, pinned: Option<&Target>, rec: &Recordin
     }
 }
 
+/// What [`EnginePlanner::step`] decided this tick.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Step {
+    /// Nothing to do: on target, or lingering after the game went away.
+    Keep,
+    /// Retarget the engine now.
+    Apply(EngineTarget),
+    /// A retarget is due but the running engine is busy (a save or the long
+    /// recording in flight): it waits for the first idle tick.
+    Held,
+}
+
 /// Turns the wanted target into engine (re)starts, holding a game's engine for
 /// the linger window after the game goes away.
 pub struct EnginePlanner {
@@ -86,23 +100,38 @@ impl EnginePlanner {
         self.lost_since.map(|t| t + self.linger)
     }
 
-    /// `Some(new)` when the engine must be retargeted now.
+    /// `Some(new)` when an idle engine must be retargeted now (test shorthand).
+    #[cfg(test)]
     pub fn update(&mut self, wanted: &EngineTarget, now: Instant) -> Option<EngineTarget> {
+        match self.step(wanted, now, false) {
+            Step::Apply(target) => Some(target),
+            Step::Keep | Step::Held => None,
+        }
+    }
+
+    /// Plan one tick. `busy` = the engine has a save or the long recording in
+    /// flight: a due retarget is [`Step::Held`] (not applied) so neither is
+    /// cut short; the linger clock keeps running meanwhile. With no engine
+    /// (`Off` applied) there is nothing to protect.
+    pub fn step(&mut self, wanted: &EngineTarget, now: Instant, busy: bool) -> Step {
         if *wanted == self.applied {
             self.lost_since = None;
-            return None;
+            return Step::Keep;
         }
         let game_went_away = matches!(self.applied, EngineTarget::Window(_))
             && !matches!(wanted, EngineTarget::Window(_));
         if game_went_away {
             let since = *self.lost_since.get_or_insert(now);
             if now.duration_since(since) < self.linger {
-                return None;
+                return Step::Keep;
             }
+        }
+        if busy && self.applied != EngineTarget::Off {
+            return Step::Held;
         }
         self.lost_since = None;
         self.applied = wanted.clone();
-        Some(wanted.clone())
+        Step::Apply(wanted.clone())
     }
 
     /// Record that `target` was just applied out of band (a settings change
@@ -272,6 +301,27 @@ mod tests {
         // Off -> Desktop needs no linger.
         let mut q = EnginePlanner::new(EXIT_LINGER);
         assert_eq!(q.update(&EngineTarget::Desktop, t0), Some(EngineTarget::Desktop));
+    }
+
+    #[test]
+    fn a_busy_engine_holds_retargets_until_idle() {
+        let t0 = Instant::now();
+        let mut p = EnginePlanner::new(EXIT_LINGER);
+        let a = EngineTarget::Window(target(1, 1, "A"));
+        let b = EngineTarget::Window(target(2, 2, "B"));
+        assert_eq!(p.step(&a, t0, true), Step::Apply(a.clone()), "no engine yet: nothing to protect");
+        // A new game while the long recording runs: held, engine untouched.
+        assert_eq!(p.step(&b, t0 + Duration::from_secs(1), true), Step::Held);
+        assert_eq!(*p.applied(), a, "still recording the old target");
+        assert_eq!(p.step(&a, t0 + Duration::from_secs(2), true), Step::Keep, "the game came back: nothing pending");
+        assert_eq!(p.step(&b, t0 + Duration::from_secs(3), true), Step::Held);
+        assert_eq!(p.step(&b, t0 + Duration::from_secs(4), false), Step::Apply(b.clone()), "idle: applies at once");
+        // The game exits mid-recording: linger first, then held past it.
+        assert_eq!(p.step(&EngineTarget::Off, t0 + Duration::from_secs(10), true), Step::Keep);
+        let past_linger = t0 + Duration::from_secs(10) + EXIT_LINGER;
+        assert_eq!(p.step(&EngineTarget::Off, past_linger, true), Step::Held);
+        assert_eq!(p.step(&EngineTarget::Off, past_linger + Duration::from_secs(60), false), Step::Apply(EngineTarget::Off));
+        assert_eq!(p.step(&a, past_linger + Duration::from_secs(61), true), Step::Apply(a), "Off -> start never waits");
     }
 
     #[test]

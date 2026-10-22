@@ -242,6 +242,8 @@ fn new_keys_reject_bad_values() {
         (json!({"recording":{"record_hotkey":"Ctrl+Nope"}}), "recording.record_hotkey"),
         (json!({"recording":{"mic_hotkey":""}}), "mic_hotkey"),
         (json!({"storage":{"cap_gb":-1}}), "invalid config"),
+        (json!({"storage":{"cap_gb":1}}), "storage.cap_gb must be 0 (off) or at least 20 GiB, got 1"),
+        (json!({"storage":{"cap_gb":19}}), "at least 20 GiB"),
         (json!({"storage":{"cap":5}}), "unknown config key 'storage.cap'"),
         (json!({"hotkeys":{"leader":"Alt+N"}}), "must differ"),
         (json!({"hotkeys":{"leader":""}}), "hotkeys.leader"),
@@ -295,4 +297,14 @@ fn config_files_without_presets_migrate_from_save_hotkey() {
     std::fs::write(store.path(), USER_TOML).unwrap();
     assert_eq!(store.load().recording, RecordingCfg::default(), "no [recording] at all -> defaults");
     let _ = std::fs::remove_dir_all(store.path().parent().unwrap());
+}
+
+#[test]
+fn storage_cap_is_off_or_at_least_the_minimum() {
+    let base = Config::default();
+    for ok in [0, STORAGE_CAP_MIN_GB, 500] {
+        let out = apply_patch(&base, &json!({"storage":{"cap_gb": ok}})).unwrap_or_else(|e| panic!("cap {ok}: {e}"));
+        assert_eq!(out.config.storage.cap_gb, ok);
+    }
+    assert!(apply_patch(&base, &json!({"storage":{"cap_gb": STORAGE_CAP_MIN_GB - 1}})).is_err());
 }

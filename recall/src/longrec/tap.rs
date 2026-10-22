@@ -6,8 +6,12 @@
 //!
 //! Call sites (the only lines outside this module):
 //! - `encoder::run`, after the LIVE encoder opens: [`on_encoder_open`]
+//! - `encoder::run`, after a fatal encode error: [`on_encoder_failed`]
 //! - `Enc::drain`, for each packet before it enters the ring: [`tap_packet`]
 //! - `TrackRing::push_capture`, for each captured chunk: [`tap_audio`]
+//!
+//! Every packet carries the encoder generation it came from, so a stream
+//! change is seen in order even when the `EncoderReopened` notice is dropped.
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
@@ -24,6 +28,9 @@ static ACTIVE: AtomicBool = AtomicBool::new(false);
 static GAP: AtomicBool = AtomicBool::new(false);
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 static PARAMS: Mutex<Option<ff::codec::Parameters>> = Mutex::new(None);
+/// (generation, reason) of a live encoder that failed for good. Polled by the
+/// writer ([`failure_of`]), so unlike a queued notice it cannot be dropped.
+static FAILED: Mutex<Option<(u64, String)>> = Mutex::new(None);
 static SENDER: OnceLock<SyncSender<Data>> = OnceLock::new();
 
 thread_local! {
@@ -46,13 +53,29 @@ pub fn on_encoder_open(encoder: &ff::encoder::Video) {
     }
 }
 
+/// The live encoder failed and will not reopen at this capture size: a
+/// running recording of its stream ends (`recording_failed`, file kept).
+pub fn on_encoder_failed(reason: &str) {
+    on_encoder_failed_at(GENERATION.load(Relaxed), reason);
+}
+
+pub(super) fn on_encoder_failed_at(generation: u64, reason: &str) {
+    *FAILED.lock().unwrap_or_else(|p| p.into_inner()) = Some((generation, reason.to_string()));
+}
+
+/// Why live encoder `generation` failed, if it did.
+pub(super) fn failure_of(generation: u64) -> Option<String> {
+    FAILED.lock().unwrap_or_else(|p| p.into_inner()).as_ref().filter(|(g, _)| *g == generation).map(|(_, r)| r.clone())
+}
+
 /// One encoded live packet (capture-clock µs PTS).
 pub fn tap_packet(pts_us: u64, keyframe: bool, data: &Arc<[u8]>) {
     if !ACTIVE.load(Relaxed) || !LIVE_ENCODER.with(Cell::get) {
         return;
     }
     let Some(tx) = SENDER.get() else { return };
-    if tx.try_send(Data::Video { pts_us, keyframe, data: Arc::clone(data) }).is_err() {
+    let generation = GENERATION.load(Relaxed);
+    if tx.try_send(Data::Video { pts_us, keyframe, data: Arc::clone(data), generation }).is_err() {
         GAP.store(true, Relaxed);
     }
 }

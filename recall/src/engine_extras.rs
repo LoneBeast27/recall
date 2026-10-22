@@ -54,11 +54,13 @@ impl Extras {
         let Some(lr) = &self.longrec else {
             return self.record_unavailable();
         };
-        let start_us = self.shared.recording_now_us();
+        // Capture time + the instant it was read, sampled together here: the
+        // writer thread may pick the command up much later (HDD spin-up).
+        let start = self.shared.recording_now();
         match cmd {
-            Command::RecordStart => lr.start(&self.source(), start_us),
+            Command::RecordStart => lr.start(&self.source(), start),
             Command::RecordStop => lr.stop(),
-            _ => lr.toggle(&self.source(), start_us),
+            _ => lr.toggle(&self.source(), start),
         }
     }
 

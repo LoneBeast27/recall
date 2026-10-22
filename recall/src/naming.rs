@@ -74,9 +74,16 @@ pub fn part_of(path: &Path) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// A long recording left in progress (`*__rec.mp4.part`, case-insensitive).
+/// A long recording left in progress (`*__rec.mp4.part`, or a same-second
+/// `*__rec-N.mp4.part`; case-insensitive).
 pub fn is_longrec_part(file_name: &str) -> bool {
-    file_name.to_ascii_lowercase().ends_with(&format!("{LONGREC_SUFFIX}{PART_EXT}"))
+    let lower = file_name.to_ascii_lowercase();
+    let Some(stem) = lower.strip_suffix(PART_EXT).and_then(|s| s.strip_suffix(".mp4")) else { return false };
+    let stem = match stem.rsplit_once('-') {
+        Some((head, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => head,
+        _ => stem,
+    };
+    LONGREC_SUFFIX.strip_suffix(".mp4").is_some_and(|rec| stem.ends_with(rec))
 }
 
 /// The name a recovered `.part` gets: the part name without `.part`, or
@@ -130,6 +137,10 @@ mod tests {
     fn only_long_recording_parts_are_recoverable() {
         assert!(is_longrec_part("VALORANT__2026-10-22__14-05-09__rec.mp4.part"));
         assert!(is_longrec_part("X__2026-10-22__14-05-09__REC.MP4.PART"));
+        assert!(is_longrec_part("G__2026-10-22__14-05-09__rec-2.mp4.part"), "the counter name longrec_path picks");
+        assert!(is_longrec_part("G__2026-10-22__14-05-09__rec-12.MP4.part"));
+        assert!(!is_longrec_part("G__2026-10-22__14-05-09__rec-.mp4.part"));
+        assert!(!is_longrec_part("G__2026-10-22__14-05-09__rec-x2.mp4.part"));
         assert!(!is_longrec_part("VALORANT__2026-10-22__14-05-09-275__abc.mp4.part"), "replay parts are the saver's");
         assert!(!is_longrec_part("VALORANT__2026-10-22__14-05-09__rec.mp4"));
         let part = Path::new(r"V:\c\G__2026-10-22__14-05-09__rec.mp4.part");
@@ -139,5 +150,7 @@ mod tests {
             recovered_path(part, |p| p == taken),
             Path::new(r"V:\c\G__2026-10-22__14-05-09__rec-recovered.mp4")
         );
+        let second = Path::new(r"V:\c\G__2026-10-22__14-05-09__rec-2.mp4.part");
+        assert_eq!(recovered_path(second, |_| false), Path::new(r"V:\c\G__2026-10-22__14-05-09__rec-2.mp4"));
     }
 }

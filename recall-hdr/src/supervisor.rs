@@ -55,8 +55,13 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const SLEEP_CHUNK: Duration = Duration::from_millis(250);
 /// Poll cadence for `try_wait` while supervising / draining a grace period.
 const SHUTDOWN_POLL: Duration = Duration::from_millis(50);
+/// Grace between `{"cmd":"quit"}` and a hard kill, for retargets and
+/// shutdown alike. The engine's own quit path finalizes a long recording
+/// (up to 1.5 s) and then lets an in-flight replay save finish (up to 3 s);
+/// this outlasts both with room to spare, so a save is never killed.
+pub(crate) const QUIT_GRACE: Duration = Duration::from_secs(8);
 /// Grace for an intended (retarget) restart before the old engine is killed.
-const RETARGET_GRACE: Duration = Duration::from_secs(3);
+const RETARGET_GRACE: Duration = QUIT_GRACE;
 
 // ---------------------------------------------------------------------------
 // Public API
