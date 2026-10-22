@@ -10,8 +10,14 @@ use serde::{Deserialize, Serialize};
 pub const CLIP_EXTENSIONS: [&str; 4] = ["mp4", "m4v", "mov", "mkv"];
 /// How deep an imported folder is searched (Medal: `Medal\Clips\<game>\clip.mp4`).
 const MAX_DEPTH: usize = 4;
-/// Upper bound on files listed per imported folder (a mistaken pick of `C:\` stays cheap).
+/// Upper bound on clips listed per imported folder.
 const MAX_FILES: usize = 50_000;
+/// Upper bound on directory entries walked per imported folder (a mistaken pick of `C:\`
+/// stays cheap).
+const MAX_ENTRIES: usize = 200_000;
+/// An imported folder is re-walked at most this often; new saves land in the recordings
+/// folder, which is listed fresh every time.
+const SCAN_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Folders {
@@ -102,10 +108,15 @@ pub fn is_clip(path: &Path) -> bool {
 /// system folders, and Recall's own cache, are skipped.
 pub fn scan_imported(root: &Path, skip: &[PathBuf]) -> Vec<FoundClip> {
     let mut found = Vec::new();
+    let mut walked = 0usize;
     let mut stack = vec![(root.to_path_buf(), 0usize)];
     while let Some((dir, depth)) = stack.pop() {
         let Ok(listing) = std::fs::read_dir(&dir) else { continue };
         for item in listing.flatten() {
+            walked += 1;
+            if walked > MAX_ENTRIES {
+                return found;
+            }
             let Ok(meta) = item.metadata() else { continue };
             let path = item.path();
             if meta.is_dir() {
@@ -126,6 +137,33 @@ pub fn scan_imported(root: &Path, skip: &[PathBuf]) -> Vec<FoundClip> {
         }
     }
     found
+}
+
+/// [`scan_imported`] with a per-folder cache (refreshed after [`SCAN_TTL`]), so listing the
+/// library after every save does not re-walk large imported trees.
+pub fn scan_imported_cached(root: &Path, skip: &[PathBuf]) -> Vec<FoundClip> {
+    use std::{collections::HashMap, time::Instant};
+    let key = PathBuf::from(folder_key(&root.to_string_lossy()));
+    if let Some((at, clips)) = CACHE.lock().ok().and_then(|c| c.as_ref().and_then(|m| m.get(&key)).cloned()) {
+        if at.elapsed() < SCAN_TTL {
+            return clips;
+        }
+    }
+    let clips = scan_imported(root, skip);
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.get_or_insert_with(HashMap::new).insert(key, (Instant::now(), clips.clone()));
+    }
+    clips
+}
+
+type ScanCache = std::collections::HashMap<PathBuf, (std::time::Instant, Vec<FoundClip>)>;
+static CACHE: std::sync::Mutex<Option<ScanCache>> = std::sync::Mutex::new(None);
+
+/// Drops cached folder walks (after a delete, or when the folder list changes).
+pub fn forget_scans() {
+    if let Ok(mut cache) = CACHE.lock() {
+        *cache = None;
+    }
 }
 
 fn hidden(meta: &std::fs::Metadata) -> bool {

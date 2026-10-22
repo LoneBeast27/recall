@@ -101,7 +101,7 @@ impl Root {
     pub fn render_storage_limit(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let cap = self.config_value("storage", "cap_gb").and_then(Value::as_u64).unwrap_or(0);
         let recordings = self.recordings_folder();
-        let used: u64 = self.lib.records.iter().filter(|r| r.path.len() > recordings.len() && r.path[..recordings.len()].eq_ignore_ascii_case(&recordings)).map(|r| r.bytes).sum();
+        let used: u64 = self.lib.records.iter().filter(|r| crate::views::folders_settings::inside(&r.path, &recordings)).map(|r| r.bytes).sum();
         let options: Vec<(u64, String)> = CAPS.iter().map(|(gb, l)| (*gb, (*l).to_owned())).collect();
         let detail = format!("Recordings use {}. Past the limit, the oldest go to the Recycle Bin. Favourites and edited clips stay.", format_bytes(used));
         vec![

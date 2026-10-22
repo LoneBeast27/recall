@@ -129,8 +129,9 @@ impl EditorState {
         self.info.as_ref().map_or(0.0, |info| info.duration.max(0.01))
     }
 
+    /// `info.path` is canonical (`\\?\V:\...`); tiles pass plain paths.
     pub fn is_open(&self, path: &str) -> bool {
-        self.info.as_ref().is_some_and(|info| info.path == path) || self.loading_path.as_deref() == Some(path)
+        self.info.as_ref().is_some_and(|info| same_path(&info.path, path)) || self.loading_path.as_deref().is_some_and(|p| same_path(p, path))
     }
 
     pub fn open(&mut self, path: String, workers: &Workers) {
@@ -427,5 +428,20 @@ mod marks_tests {
         assert_eq!(super::read_marks(&clip.to_string_lossy()), vec![3.0, 42.5]);
         assert!(super::read_marks(&dir.join("none.mp4").to_string_lossy()).is_empty());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// Same file, ignoring the `\\?\` verbatim prefix and letter case.
+fn same_path(a: &str, b: &str) -> bool {
+    let plain = |p: &str| p.strip_prefix(r"\\?\").unwrap_or(p).replace('/', "\\");
+    plain(a).eq_ignore_ascii_case(&plain(b))
+}
+
+#[cfg(test)]
+mod same_path_tests {
+    #[test]
+    fn verbatim_and_plain_paths_match() {
+        assert!(super::same_path(r"\\?\V:\ALL RECORDINGS\a.mp4", r"v:\all recordings\a.mp4"));
+        assert!(!super::same_path(r"\\?\V:\ALL RECORDINGS\a.mp4", r"V:\ALL RECORDINGS\b.mp4"));
     }
 }

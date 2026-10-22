@@ -65,7 +65,9 @@ impl CacheView {
             .map_or(2, |(i, _)| i)
     }
 
-    /// Snaps a window x on the slider to a stop; returns true when the budget changed.
+    /// Snaps a window x on the slider to a stop and shows it; returns true when it moved.
+    /// Nothing is applied until [`Self::commit`]: each applied size evicts down to it, so a
+    /// sweep across the small stops must not empty the cache on the way.
     pub fn drag_to(&mut self, window_x: f32) -> bool {
         let Some((left, width)) = self.span.get() else { return false };
         let f = ((window_x - left) / width.max(1.0)).clamp(0.0, 1.0);
@@ -73,10 +75,18 @@ impl CacheView {
         let bytes = (CACHE_STOPS_GB[index] * GB) as u64;
         if bytes != self.budget_bytes {
             self.budget_bytes = bytes;
-            crate::cache::set_budget_bytes(bytes);
             return true;
         }
         false
+    }
+
+    /// Ends a drag: applies the shown size if it changed, then re-reads usage.
+    pub fn commit(&mut self) {
+        self.dragging = false;
+        if self.budget_bytes != crate::cache::budget_bytes() {
+            crate::cache::set_budget_bytes(self.budget_bytes);
+        }
+        self.refresh();
     }
 }
 
@@ -120,16 +130,22 @@ impl Root {
             .on_mouse_move(cx.listener(|this, e: &MouseMoveEvent, _, cx| {
                 if this.cache.dragging {
                     if e.pressed_button != Some(MouseButton::Left) {
-                        this.cache.dragging = false;
+                        this.cache.commit();
+                        cx.notify();
                     } else if this.cache.drag_to(f32::from(e.position.x)) {
                         cx.notify();
                     }
                 }
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.cache.dragging = false;
-                this.cache.refresh();
+                this.cache.commit();
                 cx.notify();
+            }))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, _, cx| {
+                if this.cache.dragging {
+                    this.cache.commit();
+                    cx.notify();
+                }
             }));
 
         // Labels sit exactly under their ticks; 2 GB carries the recommendation.
