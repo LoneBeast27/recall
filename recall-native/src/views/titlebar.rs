@@ -1,9 +1,8 @@
 //! Custom title bar: mark + breadcrumb, live recorder pill, Save replay, window controls.
-use gpui::{
-    AnyElement, Context, FontWeight, Window, WindowControlArea, div, prelude::*, px,
-};
+use gpui::{AnyElement, Context, FontWeight, MouseButton, Window, div, prelude::*, px};
 
 use crate::{
+    views::window_frame::{Caption, caption_button},
     root::{Root, Route, ToastKind},
     services::{daemon::{self, DaemonCommand}, library},
     theme::{self, c},
@@ -19,6 +18,8 @@ impl Root {
         div()
             .h(px(TITLEBAR_H))
             .flex_none()
+            .on_mouse_move(cx.listener(Self::title_move))
+            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, _| this.title_drag = None))
             .flex()
             .items_center()
             .pl(px(16.))
@@ -29,7 +30,7 @@ impl Root {
                     .flex()
                     .items_center()
                     .gap(px(10.))
-                    .window_control_area(WindowControlArea::Drag)
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::title_down))
                     .child(mark(18.))
                     .child(self.render_breadcrumb(cx)),
             )
@@ -40,7 +41,7 @@ impl Root {
                     .flex()
                     .items_center()
                     .justify_center()
-                    .window_control_area(WindowControlArea::Drag)
+                    .on_mouse_down(MouseButton::Left, cx.listener(Self::title_down))
                     .child(self.render_status_pill(cx)),
             )
             .child(
@@ -51,21 +52,16 @@ impl Root {
                     .items_center()
                     .justify_end()
                     .gap(px(8.))
-                    .child(div().flex_1().h_full().window_control_area(WindowControlArea::Drag))
+                    .child(div().flex_1().h_full().on_mouse_down(MouseButton::Left, cx.listener(Self::title_down)))
                     .child(self.render_record_button(cx))
                     .child(self.render_save_button(cx))
                     .child(
                         div()
                             .flex()
                             .ml(px(4.))
-                            .child(window_button("win-min", Icon::WinMin, WindowControlArea::Min, false))
-                            .child(window_button(
-                                "win-max",
-                                if maximized { Icon::WinRestore } else { Icon::WinMax },
-                                WindowControlArea::Max,
-                                false,
-                            ))
-                            .child(window_button("win-close", Icon::WinClose, WindowControlArea::Close, true)),
+                            .child(caption_button("win-min", Icon::WinMin, Caption::Minimize))
+                            .child(caption_button("win-max", if maximized { Icon::WinRestore } else { Icon::WinMax }, Caption::Maximize))
+                            .child(caption_button("win-close", Icon::WinClose, Caption::Close)),
                     ),
             )
             .into_any_element()
@@ -92,6 +88,7 @@ impl Root {
             .child(
                 div()
                     .id("crumb-library")
+                    .occlude()
                     .flex()
                     .items_center()
                     .gap(px(4.))
@@ -121,6 +118,7 @@ impl Root {
         let engine = snap.engine.as_ref();
         let pill = div()
             .id("status-pill")
+            .occlude()
             .h(px(28.))
             .flex()
             .items_center()
@@ -345,18 +343,6 @@ pub fn mark(size: f32) -> gpui::Div {
         .child(div().size(px(size / 3.)).rounded(px(size / 6.)).bg(c(theme::TEXT)))
 }
 
-fn window_button(id: &'static str, kind: Icon, area: WindowControlArea, close: bool) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(id)
-        .w(px(46.))
-        .h(px(TITLEBAR_H))
-        .flex()
-        .items_center()
-        .justify_center()
-        .window_control_area(area)
-        .hover(move |s| if close { s.bg(c(0xc42b1c)) } else { s.bg(c(theme::OVERLAY)) })
-        .child(icon(kind, 12., theme::MUTED))
-}
 
 /// "Sat 17 Oct · 22:21"
 pub fn stamp_label(stamp: library::LocalStamp) -> String {

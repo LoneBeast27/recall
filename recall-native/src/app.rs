@@ -26,9 +26,10 @@ pub fn run() -> Result<(), String> {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions { title: Some("Recall".into()), appears_transparent: true, traffic_light_position: None }),
             window_min_size: Some(size(px(1000.), px(660.))),
-            // GPUI's DirectComposition tree is drawn ABOVE child HWNDs, so the window is
-            // transparent and Root paints everything except a hole over the native video.
-            window_background: WindowBackgroundAppearance::Transparent,
+            // GPUI's DirectComposition tree is drawn ABOVE child HWNDs; its swap chain keeps
+            // per-pixel alpha, so Root paints everything except a hole over the native video.
+            // Opaque only stops the desktop showing through not-yet-painted areas while resizing.
+            window_background: WindowBackgroundAppearance::Opaque,
             app_id: Some("Recall".into()),
             focus: !background,
             ..Default::default()
