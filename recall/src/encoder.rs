@@ -8,13 +8,19 @@
 //! `SaveJob` on this thread in milliseconds (`handoff.rs`; shared packet
 //! window and PCM snapshot) and
 //! written by the `recall-saver` thread (`saver.rs`, `mux.rs`), so a long save
-//! never backs up the frame channel. VFR timing is retained in a 1/1_000_000
+//! never backs up the frame channel. A clip folder on another volume than the
+//! SSD staging folder gets the clip staged first and moved in the background
+//! (`staging.rs`, `mover.rs`). VFR timing is retained in a 1/1_000_000
 //! video time base.
 
+mod bg_io;
+mod events;
 mod frame_fit;
 mod handoff;
+mod mover;
 mod mux;
 mod saver;
+mod staging;
 pub mod settings;
 mod smoke;
 mod still;
@@ -94,6 +100,9 @@ impl EncoderHandle {
     /// Quit path: stop the encoder thread (it hands any already-requested saves
     /// to the saver first), then give in-flight saves up to `budget` to finish.
     /// Past the drain share the saver aborts and removes its `.part` file.
+    /// Then the clip mover stops (<= `mover::STOP_WAIT`): a background move in
+    /// flight is abandoned, never leaving a partial file under the final name;
+    /// its staged copy is moved by the next start.
     pub fn shutdown(self, budget: Duration) {
         let EncoderHandle { frames, commands, saver, .. } = self;
         // Disconnecting frames ends the encoder loop, which drops the saver queue.
