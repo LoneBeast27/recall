@@ -11,7 +11,7 @@
 //!  "advanced_enabled":B,"leader":S,"leader_label":S,"chord_save_seconds":N,
 //!  "mic_muted":B,
 //!  "long_recording":{"active":B,"path":S|null,"started_secs":F|null},  // Unix seconds
-//!  "pending_restart":B,   // settings wait for a save / long recording to end
+//!  "pending_restart":B,   // a settings restart / retarget waits for a save / long recording to end
 //!  "overlay":{"enabled":B,"corner":S,"running":B},"autostart":B,
 //!  "storage":{"cap_gb":N},
 //!  "hdr":{"available":B,"display":S|null,"hdr_on":B,"manual_pin":B,"auto":B}}

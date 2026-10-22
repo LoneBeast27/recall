@@ -28,6 +28,9 @@ pub const FPS_MIN: u32 = 15;
 pub const FPS_MAX: u32 = 240;
 pub const BITRATE_MBPS_MIN: u32 = 1;
 pub const BITRATE_MBPS_MAX: u32 = 200;
+/// Smallest non-zero `storage.cap_gb`: a tiny cap would recycle nearly every
+/// clip on the first run.
+pub const STORAGE_CAP_MIN_GB: u32 = 20;
 
 /// One save-length preset: `seconds` of the buffer (0 = all of it).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -140,8 +143,9 @@ impl Default for HotkeysCfg {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct StorageCfg {
-    /// GiB of top-level `*.mp4` allowed in `recording.output_dir`; the oldest
-    /// unprotected clips go to the Recycle Bin past it. 0 = off.
+    /// GiB of top-level Recall clips allowed in `recording.output_dir`; the
+    /// oldest unprotected clips go to the Recycle Bin past it. 0 = off, else
+    /// at least [`STORAGE_CAP_MIN_GB`].
     pub cap_gb: u32,
 }
 
@@ -185,6 +189,10 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     parse_cpu_mask(&rec.cpu_mask)?;
     crate::record_hotkeys::validate(rec, &cfg.hotkeys)?;
     validate_quality(rec)?;
+    let cap = cfg.storage.cap_gb;
+    if (1..STORAGE_CAP_MIN_GB).contains(&cap) {
+        return Err(format!("storage.cap_gb must be 0 (off) or at least {STORAGE_CAP_MIN_GB} GiB, got {cap}"));
+    }
     if !CORNERS.contains(&cfg.overlay.corner.as_str()) {
         return Err(format!(
             "overlay.corner '{}' must be one of {}",
