@@ -169,6 +169,10 @@ pub enum DaemonEvent {
     RecordingStarted,
     RecordingStopped { path: String, seconds: f64 },
     RecordingFailed { reason: String },
+    /// A clip saved to the SSD first reached the clip folder.
+    ClipMoved { path: String },
+    /// A staged clip could not reach the clip folder yet (it stays safe on the SSD; retried).
+    ClipMoveFailed { path: String, reason: String },
     /// Storage limit moved old clips to the Recycle Bin.
     StorageCleaned { removed: u64, freed_bytes: u64 },
     Error(String),

@@ -96,6 +96,8 @@ impl State {
             "screenshot" => DaemonEvent::Screenshot { path: path() },
             "screenshot_failed" => DaemonEvent::ScreenshotFailed { reason: string_of(event, "reason").unwrap_or_else(|| "Screenshot failed.".into()) },
             "recording_started" => DaemonEvent::RecordingStarted,
+            "clip_moved" => DaemonEvent::ClipMoved { path: path() },
+            "clip_move_failed" => DaemonEvent::ClipMoveFailed { path: path(), reason: string_of(event, "reason").unwrap_or_default() },
             "recording_stopped" => DaemonEvent::RecordingStopped { path: path(), seconds: f64_of(event, "seconds") },
             "recording_failed" => DaemonEvent::RecordingFailed { reason: string_of(event, "reason").unwrap_or_else(|| "Recording failed.".into()) },
             // encoder_log and unknown engine lines carry nothing the UI shows.
