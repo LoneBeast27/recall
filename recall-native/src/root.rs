@@ -185,6 +185,9 @@ impl Root {
             changed = true;
         }
         changed |= self.ed.tick(self.route == Route::Editor, &self.workers);
+        if self.route == Route::Editor {
+            crate::trace::record(&self.ed);
+        }
         if let Some(error) = self.ed.last_error.take() {
             self.show_toast(ToastKind::Bad, "Preview", Some(error));
             changed = true;

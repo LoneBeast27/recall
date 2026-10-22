@@ -137,6 +137,7 @@ impl NativePreview {
             }
         }
         self.last_drift_check.set(Instant::now());
+        self.audio_seen.set((self.audio.position(), Instant::now()));
         Ok(())
     }
 
@@ -172,6 +173,7 @@ impl NativePreview {
         }
         set_player_position(player, seconds)?;
         self.last_drift_check.set(Instant::now());
+        self.audio_seen.set((seconds, Instant::now()));
         Ok(())
     }
 
@@ -184,6 +186,11 @@ impl NativePreview {
             return player_position(player);
         }
         let audio_position = self.audio.position();
+        if self.audio.is_playing() {
+            if let Some(video_position) = self.audio_stalled(audio_position)? {
+                return Ok(video_position);
+            }
+        }
         if self.audio.is_playing()
             && self.last_drift_check.get().elapsed() >= Duration::from_millis(500)
         {
@@ -191,11 +198,42 @@ impl NativePreview {
                 let video_position = player_position(player)?;
                 if (video_position - audio_position).abs() > 0.075 {
                     set_player_position(player, audio_position)?;
+                    self.drift_seeks.set(self.drift_seeks.get() + 1);
                 }
             }
             self.last_drift_check.set(Instant::now());
         }
         Ok(audio_position)
+    }
+
+    /// The audio device stopped consuming (its clock froze while playing): let the picture run
+    /// the clock instead of dragging the video back to a frozen time, and restart the sound
+    /// at the picture's time (at most once a second). Returns the video time while stalled.
+    fn audio_stalled(&self, audio_position: f64) -> Result<Option<f64>, String> {
+        const STALL: Duration = Duration::from_millis(350);
+        let now = Instant::now();
+        let (seen, since) = self.audio_seen.get();
+        if (audio_position - seen).abs() > 1e-6 {
+            self.audio_seen.set((audio_position, now));
+            return Ok(None);
+        }
+        if now.duration_since(since) < STALL {
+            return Ok(None);
+        }
+        let player = self.player.as_ref().ok_or("preview video is not open")?;
+        let video_position = player_position(player)?;
+        if self.audio_restarted.get().elapsed() >= Duration::from_secs(1) {
+            self.audio_restarted.set(now);
+            self.audio_stalls.set(self.audio_stalls.get() + 1); // logged by the editor
+            self.audio.seek(video_position)?;
+            self.audio_seen.set((video_position, now));
+        }
+        Ok(Some(video_position))
+    }
+
+    /// The audio clock without the drift correction `position` applies (test trace).
+    pub fn audio_position(&self) -> f64 {
+        if self.has_audio { self.audio.position() } else { self.video_position().unwrap_or(0.0) }
     }
 
     pub fn video_position(&self) -> Result<f64, String> {
