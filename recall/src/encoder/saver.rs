@@ -4,8 +4,13 @@
 //! The encoder thread builds a self-contained job in milliseconds (shared
 //! packet window, owned codec parameters, PCM already snapshotted) and
 //! `try_send`s it here. Jobs run FIFO, one at a time: still-encode if needed,
-//! AAC encode, mux into `<path>.part`, rename, then the same `Saved` event and
+//! AAC encode, mux into `<target>.part`, rename, then the `Saved` event and
 //! gallery hookup the encoder used to emit inline.
+//!
+//! The target is the clip's final path, or, when the clip folder is on another
+//! volume than the SSD staging folder, `<staging>\<final name>` (`staging.rs`):
+//! `Saved` then reports the FINAL path with `staged: true` and the
+//! `recall-mover` thread (`mover.rs`) moves the clip there in the background.
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
@@ -16,10 +21,14 @@ use std::sync::mpsc::{
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+pub(crate) use super::events::Events;
+use super::events::SavedReport;
+use super::mover::{self, MoverControl};
 use super::mux::OwnedParams;
+use super::staging::{self, Stage};
 use super::StillSpec;
 use crate::audio::AudioPcm;
-use crate::protocol::Outbound;
+use crate::naming::part_of;
 use crate::ring::EncodedPacket;
 
 /// Jobs that may wait behind the one being written.
@@ -129,76 +138,6 @@ pub(crate) fn window_secs(packets: &[EncodedPacket]) -> f64 {
         .unwrap_or(0.0)
 }
 
-/// Where save events go: sidecar JSON on stdout, human `[recall]` lines on
-/// stderr, or (tests) a capture buffer holding exactly those lines.
-#[derive(Clone)]
-pub(crate) struct Events {
-    json: bool,
-    sink: Option<Arc<Mutex<Vec<String>>>>,
-}
-
-impl Events {
-    pub fn new(json: bool) -> Self {
-        Self { json, sink: None }
-    }
-
-    #[cfg(test)]
-    pub fn capture(json: bool) -> (Self, Arc<Mutex<Vec<String>>>) {
-        let sink = Arc::new(Mutex::new(Vec::new()));
-        (
-            Self {
-                json,
-                sink: Some(sink.clone()),
-            },
-            sink,
-        )
-    }
-
-    fn out(&self, msg: Outbound, human: impl FnOnce() -> String) {
-        match &self.sink {
-            None if self.json => crate::protocol::emit(&msg),
-            None => eprintln!("{}", human()),
-            Some(sink) => {
-                let line = if self.json {
-                    serde_json::to_string(&msg).unwrap_or_default()
-                } else {
-                    human()
-                };
-                sink.lock().unwrap_or_else(|p| p.into_inner()).push(line);
-            }
-        }
-    }
-
-    pub fn saved(&self, path: &str, seconds: f32, frames: u64, bytes: u64, elapsed_ms: u64) {
-        let msg = Outbound::Saved {
-            path: path.to_string(),
-            seconds,
-            frames,
-            bytes,
-            elapsed_ms,
-        };
-        self.out(msg, || {
-            format!(
-                "[recall] saved {path} ({seconds:.1}s, {frames} frames, {bytes} bytes, {elapsed_ms}ms)"
-            )
-        });
-    }
-
-    pub fn save_failed(&self, reason: &str) {
-        let msg = Outbound::SaveFailed {
-            reason: reason.to_string(),
-        };
-        self.out(msg, || format!("[recall] save FAILED: {reason}"));
-    }
-
-    pub fn log(&self, message: &str) {
-        let msg = Outbound::EncoderLog {
-            message: message.to_string(),
-        };
-        self.out(msg, || format!("[recall] {message}"));
-    }
-}
-
 /// Encoder-thread end of the saver queue.
 pub(crate) struct SaverQueue {
     tx: SyncSender<SaveJob>,
@@ -239,48 +178,81 @@ pub(crate) enum Shutdown {
     TimedOut,
 }
 
-/// Main-thread handle used to stop the saver at quit.
+/// Main-thread handle used to stop the saver (and its clip mover) at quit.
 pub(crate) struct SaverControl {
     done: Receiver<()>,
     abort: Arc<AtomicBool>,
     current: Arc<Mutex<Option<PathBuf>>>,
+    mover: Option<MoverControl>,
 }
 
 impl SaverControl {
     /// Wait for the saver to finish after its queue sender is dropped. Saves
     /// run normally for most of `budget`; for the last share (<= 500 ms) the
     /// in-flight mux is aborted so its `.part` is removed rather than orphaned.
+    /// Then the clip mover stops (up to `mover::STOP_WAIT`): a move in flight
+    /// is abandoned, its staged copy kept for the next start.
     pub fn shutdown(self, budget: Duration) -> Shutdown {
-        let reserve = (budget / 2).min(Duration::from_millis(500));
-        if wait_done(&self.done, budget - reserve) {
-            return Shutdown::Drained;
+        let SaverControl { done, abort, current, mover } = self;
+        let outcome = stop_saver(&done, &abort, &current, budget);
+        if let Some(mover) = mover {
+            mover.shutdown(mover::STOP_WAIT);
         }
-        self.abort.store(true, Relaxed);
-        if wait_done(&self.done, reserve) {
-            return Shutdown::Aborted;
-        }
-        if let Some(part) = self.current.lock().unwrap_or_else(|p| p.into_inner()).take() {
-            let _ = std::fs::remove_file(part);
-        }
-        Shutdown::TimedOut
+        outcome
     }
+}
+
+fn stop_saver(
+    done: &Receiver<()>,
+    abort: &AtomicBool,
+    current: &Mutex<Option<PathBuf>>,
+    budget: Duration,
+) -> Shutdown {
+    let reserve = (budget / 2).min(Duration::from_millis(500));
+    if wait_done(done, budget - reserve) {
+        return Shutdown::Drained;
+    }
+    abort.store(true, Relaxed);
+    if wait_done(done, reserve) {
+        return Shutdown::Aborted;
+    }
+    if let Some(part) = current.lock().unwrap_or_else(|p| p.into_inner()).take() {
+        let _ = std::fs::remove_file(part);
+    }
+    Shutdown::TimedOut
 }
 
 fn wait_done(done: &Receiver<()>, timeout: Duration) -> bool {
     !matches!(done.recv_timeout(timeout), Err(RecvTimeoutError::Timeout))
 }
 
-/// Spawn the production saver (real mux + Moments gallery).
+/// Spawn the production saver (real mux + Moments gallery + SSD staging).
 pub(super) fn spawn_default(events: Events) -> (SaverQueue, SaverControl) {
-    spawn(
+    spawn_staged(
         events,
         Box::new(super::mux::produce),
         Box::new(super::mux::finish_gallery),
+        Some(staging::Setup::from_env()),
     )
 }
 
-/// Spawn `recall-saver` with injectable mux/gallery stages.
+/// Spawn `recall-saver` with injectable mux/gallery stages, writing in place.
 pub(crate) fn spawn(events: Events, mux: MuxFn, gallery: GalleryFn) -> (SaverQueue, SaverControl) {
+    spawn_staged(events, mux, gallery, None)
+}
+
+/// [`spawn`] with optional SSD staging: leftovers are recovered and the clip
+/// mover started before the saver takes its first job.
+pub(crate) fn spawn_staged(
+    events: Events,
+    mux: MuxFn,
+    gallery: GalleryFn,
+    setup: Option<staging::Setup>,
+) -> (SaverQueue, SaverControl) {
+    let (stage, mover) = match setup {
+        Some(setup) => staging::start(&events, setup),
+        None => (None, None),
+    };
     let (tx, rx) = sync_channel::<SaveJob>(QUEUE_DEPTH);
     let (done_tx, done_rx) = channel::<()>();
     let abort = Arc::new(AtomicBool::new(false));
@@ -291,6 +263,7 @@ pub(crate) fn spawn(events: Events, mux: MuxFn, gallery: GalleryFn) -> (SaverQue
         gallery,
         abort: abort.clone(),
         current: current.clone(),
+        stage,
     };
     let spawned = std::thread::Builder::new()
         .name("recall-saver".into())
@@ -308,6 +281,7 @@ pub(crate) fn spawn(events: Events, mux: MuxFn, gallery: GalleryFn) -> (SaverQue
             done: done_rx,
             abort,
             current,
+            mover,
         },
     )
 }
@@ -318,6 +292,7 @@ struct Worker {
     gallery: GalleryFn,
     abort: Arc<AtomicBool>,
     current: Arc<Mutex<Option<PathBuf>>>,
+    stage: Option<Stage>,
 }
 
 impl Worker {
@@ -328,8 +303,10 @@ impl Worker {
                 self.events.save_failed(QUIT_BEFORE_START);
                 continue;
             }
-            let part = part_path(&job.path);
-            let outcome = catch_unwind(AssertUnwindSafe(|| self.process(&job, &part)));
+            let staged = self.stage.as_ref().and_then(|s| s.target(&job.path, &self.events));
+            let target = staged.unwrap_or_else(|| PathBuf::from(&job.path));
+            let part = part_of(&target);
+            let outcome = catch_unwind(AssertUnwindSafe(|| self.process(&job, &target, &part)));
             if outcome.is_err() {
                 // A panicking stage must not kill the saver or leave a half file.
                 let _ = std::fs::remove_file(&part);
@@ -343,29 +320,38 @@ impl Worker {
         *self.current.lock().unwrap_or_else(|p| p.into_inner()) = part;
     }
 
-    fn process(&mut self, job: &SaveJob, part: &Path) {
+    /// Write `job` to `target` (its final path, or its staged file) via `part`.
+    fn process(&mut self, job: &SaveJob, target: &Path, part: &Path) {
         let mut timing = job.timing;
         timing.queue_wait_ms = timing.queued_at.map(|t| ms(t.elapsed())).unwrap_or(0.0);
         self.set_current(Some(part.to_path_buf()));
-        let result = write_clip(part, job, &mut *self.mux, &self.abort, &mut timing);
+        let result = write_clip_to(part, target, job, &mut *self.mux, &self.abort, &mut timing);
         self.set_current(None);
         match result {
             Ok(muxed) => {
-                let bytes = std::fs::metadata(&job.path).map(|m| m.len()).unwrap_or(0);
+                let bytes = std::fs::metadata(target).map(|m| m.len()).unwrap_or(0);
                 let elapsed = job.requested.elapsed();
                 timing.ready_ms = ms(elapsed);
-                self.events.saved(
-                    &job.path,
-                    muxed.secs,
-                    muxed.frames,
+                let staged = (target != Path::new(&job.path)).then(|| target.to_string_lossy().into_owned());
+                self.events.saved(&SavedReport {
+                    path: &job.path,
+                    staged_path: staged.as_deref(),
+                    seconds: muxed.secs,
+                    frames: muxed.frames,
                     bytes,
-                    elapsed.as_millis() as u64,
-                );
+                    elapsed_ms: elapsed.as_millis() as u64,
+                });
+                if let (Some(stage), Some(_)) = (&self.stage, &staged) {
+                    stage.hand_off(target, &job.path, &self.events);
+                }
+                // Thumbnail + Moments row: against the FINAL path, from the
+                // request-time frame (nothing here reads the clip file).
                 let gallery = Instant::now();
                 (self.gallery)(job, muxed.secs, bytes, &self.events);
                 timing.gallery_ms = ms(gallery.elapsed());
+                let outcome = if staged.is_some() { "staged" } else { "saved" };
                 self.events
-                    .log(&timing.line("saved", muxed.secs, muxed.frames, bytes));
+                    .log(&timing.line(outcome, muxed.secs, muxed.frames, bytes));
             }
             Err(reason) => {
                 self.events.save_failed(&reason);
@@ -392,17 +378,32 @@ pub(crate) fn write_clip<F>(
 where
     F: FnMut(&Path, &SaveJob, &AtomicBool, &mut Timing) -> Result<Muxed, String> + ?Sized,
 {
+    write_clip_to(part, Path::new(&job.path), job, mux, abort, timing)
+}
+
+/// [`write_clip`] renaming to `target` (the staged file, or the job's path).
+pub(crate) fn write_clip_to<F>(
+    part: &Path,
+    target: &Path,
+    job: &SaveJob,
+    mux: &mut F,
+    abort: &AtomicBool,
+    timing: &mut Timing,
+) -> Result<Muxed, String>
+where
+    F: FnMut(&Path, &SaveJob, &AtomicBool, &mut Timing) -> Result<Muxed, String> + ?Sized,
+{
     let _ = std::fs::remove_file(part);
     match mux(part, job, abort, timing) {
         Ok(muxed) => {
             let started = Instant::now();
-            let renamed = std::fs::rename(part, &job.path);
+            let renamed = std::fs::rename(part, target);
             timing.rename_ms = ms(started.elapsed());
             match renamed {
                 Ok(()) => Ok(muxed),
                 Err(e) => {
                     let _ = std::fs::remove_file(part);
-                    Err(format!("finalize {}: {e}", job.path))
+                    Err(format!("finalize {}: {e}", target.display()))
                 }
             }
         }

@@ -74,28 +74,40 @@ fn kinds(lines: &[String]) -> Vec<&'static str> {
         .collect()
 }
 
+fn report<'a>(path: &'a str, staged_path: Option<&'a str>, secs: f32, frames: u64, bytes: u64, ms: u64) -> SavedReport<'a> {
+    SavedReport { path, staged_path, seconds: secs, frames, bytes, elapsed_ms: ms }
+}
+
 #[test]
 fn saved_and_failed_json_match_todays_wire_shape() {
     let (events, sink) = Events::capture(true);
-    events.saved(r"V:\ALL RECORDINGS\Game__x.mp4", 119.146, 7124, 363_691_446, 6934);
+    events.saved(&report(r"V:\ALL RECORDINGS\Game__x.mp4", None, 119.146, 7124, 363_691_446, 6934));
+    events.saved(&report(r"V:\c\G.mp4", Some(r"L:\s\G.mp4"), 120.0, 7200, 400, 812));
     events.save_failed(QUEUE_FULL);
+    events.clip_moved(r"V:\c\G.mp4", 9549);
+    events.clip_move_failed(r"V:\c\G.mp4", r"L:\s\G.mp4", "disk full");
     events.log("hello");
     assert_eq!(
         lines(&sink),
         vec![
-            r#"{"type":"saved","path":"V:\\ALL RECORDINGS\\Game__x.mp4","seconds":119.146,"frames":7124,"bytes":363691446,"elapsed_ms":6934}"#,
+            r#"{"type":"saved","path":"V:\\ALL RECORDINGS\\Game__x.mp4","seconds":119.146,"frames":7124,"bytes":363691446,"elapsed_ms":6934,"staged":false}"#,
+            r#"{"type":"saved","path":"V:\\c\\G.mp4","seconds":120.0,"frames":7200,"bytes":400,"elapsed_ms":812,"staged":true,"staged_path":"L:\\s\\G.mp4"}"#,
             r#"{"type":"save_failed","reason":"previous save still writing"}"#,
+            r#"{"type":"clip_moved","path":"V:\\c\\G.mp4","elapsed_ms":9549}"#,
+            r#"{"type":"clip_move_failed","path":"V:\\c\\G.mp4","staged_path":"L:\\s\\G.mp4","reason":"disk full"}"#,
             r#"{"type":"encoder_log","message":"hello"}"#,
         ]
     );
     let (human, sink) = Events::capture(false);
-    human.saved("a.mp4", 1.5, 3, 10, 5);
+    human.saved(&report("a.mp4", None, 1.5, 3, 10, 5));
+    human.saved(&report("b.mp4", Some(r"L:\s\b.mp4"), 1.5, 3, 10, 5));
     human.save_failed("boom");
     human.log("note");
     assert_eq!(
         lines(&sink),
         vec![
             "[recall] saved a.mp4 (1.5s, 3 frames, 10 bytes, 5ms)",
+            r"[recall] saved b.mp4 (1.5s, 3 frames, 10 bytes, 5ms) [staged at L:\s\b.mp4]",
             "[recall] save FAILED: boom",
             "[recall] note",
         ]
@@ -172,7 +184,7 @@ fn queue_is_fifo_one_at_a_time_and_rejects_when_full() {
             r#"{{"type":"saved","path":{path_json},"seconds":1.5,"frames":3,"bytes":{bytes},"elapsed_ms":"#
         );
         assert!(line.starts_with(&prefix), "{line}");
-        let elapsed = line[prefix.len()..].strip_suffix('}').expect(line);
+        let elapsed = line[prefix.len()..].strip_suffix(r#","staged":false}"#).expect(line);
         assert!(elapsed.parse::<u64>().is_ok(), "{line}");
     }
     let galleries = galleries.lock().unwrap().clone();
@@ -277,4 +289,121 @@ fn idle_shutdown_is_immediate() {
     let started = Instant::now();
     assert_eq!(control.shutdown(Duration::from_secs(3)), Shutdown::Drained);
     assert!(started.elapsed() < Duration::from_millis(500));
+}
+
+// ---- SSD staging (temp dirs; the volume check is injected) ----
+
+const CLIP: &str = "G__2026-10-23__10-00-00-000__ab12.mp4";
+
+fn mover_cfg(same_volume: staging::VolumeCheck) -> mover::Config {
+    mover::Config {
+        chunk: 4096,
+        sync_every: 16_384,
+        retry_after: Duration::from_millis(50),
+        same_volume,
+        background: false,
+    }
+}
+
+fn setup(stage: Option<&Path>, recover: &Path, out: &Path, same: staging::VolumeCheck) -> staging::Setup {
+    staging::Setup {
+        dir: stage.map(Path::to_path_buf),
+        recover: Some(recover.to_path_buf()),
+        out_dir: out.to_path_buf(),
+        mover: mover_cfg(same),
+    }
+}
+
+fn wait_for(sink: &Arc<Mutex<Vec<String>>>, ty: &str, n: usize) -> Vec<String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let found = of_type(&lines(sink), ty);
+        if found.len() >= n {
+            return found;
+        }
+        assert!(Instant::now() < deadline, "no {ty}: {:?}", lines(sink));
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn json(line: &str) -> serde_json::Value {
+    serde_json::from_str(line).unwrap()
+}
+
+fn fixed_mux(bytes: usize) -> MuxFn {
+    Box::new(move |part, _job, _abort, _timing| {
+        std::fs::write(part, vec![7u8; bytes]).unwrap();
+        Ok(Muxed { frames: 3, secs: 1.5 })
+    })
+}
+
+#[test]
+fn staged_save_reports_the_final_path_then_the_mover_puts_it_there() {
+    let (stage, out) = (temp_dir("stage"), temp_dir("out"));
+    let (events, sink) = Events::capture(true);
+    let galleries = Arc::new(Mutex::new(Vec::new()));
+    let seen = galleries.clone();
+    let gallery: GalleryFn = Box::new(move |job, _, bytes, _| seen.lock().unwrap().push((job.path.clone(), bytes)));
+    let cfg = setup(Some(&stage), &stage, &out, |_, _| false);
+    let (queue, control) = spawn_staged(events, fixed_mux(50_000), gallery, Some(cfg));
+    let final_path = out.join(CLIP);
+    assert!(queue.submit(job(&final_path)));
+
+    let moved = wait_for(&sink, "clip_moved", 1);
+    let saved = json(&of_type(&lines(&sink), "saved")[0]);
+    assert_eq!(saved["path"], text(&final_path), "saved names the FINAL path");
+    assert_eq!(saved["staged"], true);
+    assert_eq!(saved["staged_path"], text(&stage.join(CLIP)));
+    assert_eq!(saved["bytes"], 50_000);
+    let moved = json(&moved[0]);
+    assert_eq!(moved["path"], text(&final_path));
+    assert!(moved["elapsed_ms"].is_u64());
+    let all = lines(&sink);
+    let at = |ty: &str| all.iter().position(|l| l.starts_with(&format!("{{\"type\":\"{ty}\""))).unwrap();
+    assert!(at("saved") < at("clip_moved"), "saved is reported before the move");
+    assert!(all.iter().any(|l| l.contains("save timing (staged)")), "{all:?}");
+    assert!(all.iter().any(|l| l.contains("move timing (copy)")), "{all:?}");
+
+    assert_eq!(std::fs::read(&final_path).unwrap(), vec![7u8; 50_000]);
+    assert_eq!(std::fs::read_dir(&stage).unwrap().count(), 0, "staged copy and .part gone");
+    assert!(!part_path(&text(&final_path)).exists());
+    assert_eq!(galleries.lock().unwrap().clone(), vec![(text(&final_path), 50_000)], "gallery uses the FINAL path");
+    drop(queue);
+    assert_eq!(control.shutdown(Duration::from_secs(3)), Shutdown::Drained);
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn same_volume_saves_in_place_and_start_recovers_leftovers_even_with_staging_off() {
+    let (stage, out) = (temp_dir("left"), temp_dir("out2"));
+    std::fs::write(stage.join("Old__2026-10-22__09-00-00-000__cd34.mp4"), b"finished earlier").unwrap();
+    std::fs::write(stage.join("Cut__2026-10-22__09-01-00-000__ef56.mp4.part"), b"half").unwrap();
+    let (events, sink) = Events::capture(true);
+    // Staging folder on the "same volume" as the clip folder: written in place.
+    let cfg = setup(Some(&stage), &stage, &out, |_, _| true);
+    let (queue, control) = spawn_staged(events, fixed_mux(10), no_gallery(), Some(cfg));
+    let moved = wait_for(&sink, "clip_moved", 1);
+    let old = out.join("Old__2026-10-22__09-00-00-000__cd34.mp4");
+    assert_eq!(json(&moved[0])["path"], text(&old));
+    assert_eq!(std::fs::read(&old).unwrap(), b"finished earlier");
+    assert_eq!(std::fs::read_dir(&stage).unwrap().count(), 0, "leftover moved, stale .part deleted");
+
+    let final_path = out.join(CLIP);
+    assert!(queue.submit(job(&final_path)));
+    let saved = json(&wait_for(&sink, "saved", 1)[0]);
+    assert_eq!(saved["staged"], false);
+    assert!(saved.get("staged_path").is_none());
+    assert_eq!(std::fs::read(&final_path).unwrap(), vec![7u8; 10]);
+    drop(queue);
+    assert_eq!(control.shutdown(Duration::from_secs(3)), Shutdown::Drained);
+
+    // Staging off: leftovers in the (default) folder still move at start.
+    std::fs::write(stage.join("Late__2026-10-22__09-02-00-000__aa11.mp4"), b"x").unwrap();
+    let (events, sink) = Events::capture(true);
+    let (queue, control) = spawn_staged(events, fixed_mux(10), no_gallery(), Some(setup(None, &stage, &out, |_, _| false)));
+    wait_for(&sink, "clip_moved", 1);
+    assert!(out.join("Late__2026-10-22__09-02-00-000__aa11.mp4").exists());
+    drop(queue);
+    assert_eq!(control.shutdown(Duration::from_secs(3)), Shutdown::Drained);
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
 }
