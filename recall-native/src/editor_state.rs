@@ -55,6 +55,10 @@ pub struct EditorState {
     pub status: String,
     /// One-shot error for a toast (taken by Root).
     pub last_error: Option<String>,
+    /// The player reported an error for the current source (the video area is hidden).
+    pub preview_failed: bool,
+    /// Clip a preview copy was requested for (once per clip).
+    pub proxy_for: Option<String>,
     pub warning: Option<String>,
     pub preview_rect: DeviceRect,
     applied_rect: (i32, i32, i32, i32),
@@ -104,6 +108,8 @@ impl EditorState {
             needs_flush: false,
             status,
             last_error: None,
+            preview_failed: false,
+            proxy_for: None,
             warning: None,
             preview_rect: Rc::new(Cell::new(None)),
             applied_rect: (0, 0, 0, 0),
@@ -189,6 +195,7 @@ impl EditorState {
         let source = prepared.playback.clone().unwrap_or_else(|| info.path.clone());
         self.playback_path = Some(source.clone());
         self.needs_flush = false;
+        self.preview_failed = false;
         if let Some(preview) = self.preview.as_mut() {
             if let Err(error) = preview.open(&source, &tracks) {
                 self.status = error;
@@ -222,23 +229,22 @@ impl EditorState {
     /// Per-frame upkeep. Returns true when something visible changed.
     pub fn tick(&mut self, editor_visible: bool, workers: &Workers) -> bool {
         let mut changed = false;
-        if let Some(preview) = self.preview.as_mut() {
-            match preview.refresh() {
-                Ok(true) => {
-                    changed = true;
-                    if preview.is_ready() && self.status == "Loading preview…" {
-                        self.status.clear();
-                    }
-                }
-                Ok(false) => {}
-                Err(error) => {
-                    if self.status != error {
-                        self.status = error;
-                        changed = true;
-                    }
-                    self.playing = false;
+        match self.preview.as_mut().map(|preview| (preview.refresh(), preview.is_ready())) {
+            Some((Ok(true), ready)) => {
+                changed = true;
+                if ready && self.status == "Loading preview…" {
+                    self.status.clear();
                 }
             }
+            Some((Err(error), _)) => {
+                self.playing = false;
+                if !self.preview_failed {
+                    self.preview_failed = true;
+                    changed = true;
+                    self.on_preview_failed(error, workers);
+                }
+            }
+            Some((Ok(false), _)) | None => {}
         }
         if let Some(at) = self.pending_seek {
             if self.preview.as_ref().is_some_and(|p| p.is_ready()) {
@@ -282,7 +288,7 @@ impl EditorState {
     }
 
     fn apply_preview_rect(&mut self, visible: bool) {
-        let next = if visible && self.info.is_some() { self.preview_rect.get().unwrap_or((0, 0, 0, 0)) } else { (0, 0, 0, 0) };
+        let next = if visible && self.info.is_some() && !self.preview_failed { self.preview_rect.get().unwrap_or((0, 0, 0, 0)) } else { (0, 0, 0, 0) };
         if next == self.applied_rect {
             return;
         }

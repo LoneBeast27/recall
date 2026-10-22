@@ -255,6 +255,7 @@ impl Root {
             // Storage-tier results; compile shim until the UI wires them (see worker.rs).
             Done::VideoCached(clip, Ok(copy)) => self.ed.on_video_cached(&clip, &copy),
             Done::VideoCached(_, Err(_)) => {} // keeps playing from the clip drive
+            Done::Proxy(clip, result) => self.ed.on_proxy(&clip, result),
             Done::Flushed(Ok(sidecar)) => {
                 if !sidecar.is_empty() {
                     self.lib.mark_edited_by_sidecar(&sidecar);

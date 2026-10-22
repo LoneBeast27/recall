@@ -28,6 +28,7 @@ mod io_priority;
 mod lane;
 mod prefetch;
 mod projects;
+pub mod proxy;
 mod score;
 mod smr;
 mod thumbs;
@@ -104,6 +105,7 @@ pub fn clear() -> Result<u64, String> {
     for kind in CacheKind::ALL {
         freed += clear_kind(kind)?;
     }
+    freed += proxy::clear();
     prefetch::invalidate_usage();
     Ok(freed)
 }

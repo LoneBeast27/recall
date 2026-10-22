@@ -67,6 +67,31 @@ impl EditorState {
         }
     }
 
+    /// The player cannot show the current source: hide the video area and, once per clip,
+    /// ask for a 720p H.264 preview copy (export keeps using the original).
+    pub(super) fn on_preview_failed(&mut self, error: String, workers: &crate::worker::Workers) {
+        self.hide_preview();
+        let Some(info) = self.info.as_ref() else { return };
+        if self.proxy_for.as_deref() == Some(info.path.as_str()) {
+            self.status = format!("Can't preview this clip. Trim and export still work. ({error})");
+            return;
+        }
+        self.proxy_for = Some(info.path.clone());
+        self.status = "Making a preview copy of this clip…".into();
+        workers.asset(crate::worker::AssetJob::Proxy(info.path.clone()));
+    }
+
+    /// A preview copy finished (or failed) for `clip`.
+    pub fn on_proxy(&mut self, clip: &str, result: Result<String, String>) {
+        if self.info.as_ref().is_none_or(|info| info.path != clip) {
+            return;
+        }
+        match result {
+            Ok(copy) => self.on_video_cached(clip, &copy),
+            Err(error) => self.status = format!("Can't preview this clip. Trim and export still work. ({error})"),
+        }
+    }
+
     /// The SSD copy of the open clip is ready: switch playback to it, keeping the position.
     pub fn on_video_cached(&mut self, clip: &str, copy: &str) {
         let Some(info) = self.info.clone() else { return };
@@ -86,6 +111,8 @@ impl EditorState {
                     self.playback_path = Some(path);
                     self.applied_rect = (0, 0, 0, 0);
                     self.pending_seek = Some(at);
+                    self.preview_failed = false;
+                    self.status = "Loading preview…".into();
                 }
                 Err(error) => self.last_error = Some(error),
             }
