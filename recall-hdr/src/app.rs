@@ -15,16 +15,19 @@
 //! The journalled executor, the restore spine and the startup repair live in
 //! [`crate::hdr_exec`] (shared with the unified record mode's optional HDR
 //! manager); process liveness lives in [`crate::liveness`].
+//!
+//! The hub control-pipe commands live in `app_control.rs`; the free helpers
+//! shared with the record mode in `app_helpers.rs`.
+
+#[path = "app_control.rs"]
+mod control;
+#[path = "app_helpers.rs"]
+mod helpers;
 
 use std::sync::mpsc::{channel, Receiver};
 use std::time::{Duration, Instant};
 
-use windows::Win32::Foundation::POINT;
-use windows::Win32::Graphics::Gdi::{MonitorFromPoint, HMONITOR, MONITOR_DEFAULTTOPRIMARY};
-use windows::Win32::UI::WindowsAndMessaging::{
-    DispatchMessageW, MsgWaitForMultipleObjectsEx, PeekMessageW, TranslateMessage, MSG,
-    MWMO_INPUTAVAILABLE, PM_REMOVE, QS_ALLINPUT, WM_QUIT,
-};
+use windows::Win32::UI::WindowsAndMessaging::{MsgWaitForMultipleObjectsEx, MWMO_INPUTAVAILABLE, QS_ALLINPUT};
 
 use crate::config::{Config, Override};
 use crate::control::{Inbound, PipeHub};
@@ -33,12 +36,14 @@ use crate::guard::OnceRestore;
 use crate::hdr_exec::{self, HdrExecutor};
 use crate::liveness::ProcessWatch;
 use crate::log;
-use crate::rules::{self, Foreground};
+use crate::rules;
 use crate::state::Reconciler;
-use crate::supervisor::{EngineHealth, Supervisor};
+use crate::supervisor::Supervisor;
 use crate::tray::{self, Tray, TrayCmd};
 use crate::types::RuleKind;
 use crate::watcher::{WatchEvent, Watcher};
+use helpers::log_file_path;
+pub(crate) use helpers::{drain_messages, foreground_of, health_summary, primary_monitor_isize, wait_ms};
 
 /// Cap on the pump wait so `poll()` stays lively even with no pending deadline
 /// (session-liveness + supervisor-health checks want to tick regularly).
@@ -379,82 +384,6 @@ impl App {
         }
     }
 
-    // -- control pipe ---------------------------------------------------------
-
-    /// Execute one hub command line ON THE PUMP THREAD (display state is
-    /// single-threaded by design; the pipe threads only queue lines).
-    fn handle_control_cmd(&mut self, line: &str, supervisor: &Supervisor, hub: &std::sync::Arc<PipeHub>) {
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
-            return;
-        };
-        match val.get("cmd").and_then(|c| c.as_str()) {
-            Some("save_clip") => {
-                log!("app: control save_clip -> engine");
-                match val.get("seconds").and_then(|s| s.as_u64()) {
-                    Some(s) => supervisor.send_engine_line(&format!(r#"{{"cmd":"save_clip","seconds":{s}}}"#)),
-                    None => supervisor.send_save_clip(),
-                }
-            }
-            Some("export_clip") => {
-                if matches!(supervisor.health(), EngineHealth::Running { .. }) {
-                    supervisor.send_engine_line(&val.to_string());
-                } else {
-                    hub.event("engine", &serde_json::json!({
-                        "type": "export_failed", "source": val.get("path").and_then(|v| v.as_str()).unwrap_or(""),
-                        "reason": "recording engine is offline; start Recall before exporting"
-                    }).to_string());
-                }
-            }
-            Some("toggle_hdr") => {
-                log!("app: control toggle_hdr");
-                self.toggle_hdr_now();
-            }
-            Some("set_mode") => {
-                if let Some(v) = val.get("value").and_then(|v| v.as_str()) {
-                    if matches!(v, "auto" | "sdr" | "hdr") {
-                        supervisor.send_engine_line(&format!(r#"{{"cmd":"set_mode","value":"{v}"}}"#));
-                    }
-                }
-            }
-            Some("status") => {
-                // On-demand snapshot for a client that just connected.
-                hub.event("hdr", &self.hdr_status_json(supervisor));
-                for line in supervisor.cached_engine_events() {
-                    hub.event("engine", &line);
-                }
-            }
-            Some("set_ac_profile") => {
-                let variant = val.get("variant").and_then(|v| v.as_str()).unwrap_or("");
-                let Some(profile) = hdr_exec::ac_profile_file(variant) else {
-                    log!("app: control set_ac_profile -- unknown variant");
-                    return;
-                };
-                let target = self.cfg.display.target_friendly_name.clone();
-                let result = crate::wcs::set_advanced_color_default(&target, profile).map(|()| profile);
-                match &result {
-                    Ok(_) => log!("app: control set_ac_profile -> {profile} (next HDR entry)"),
-                    Err(e) => log!("app: control set_ac_profile FAILED: {e}"),
-                }
-                hub.event("hdr", &hdr_exec::ac_profile_event(&result));
-            }
-            _ => log!("app: control -- unknown command line ignored"),
-        }
-    }
-
-    /// Structured HDR/daemon state for hub clients.
-    fn hdr_status_json(&self, supervisor: &Supervisor) -> String {
-        serde_json::json!({
-            "type": "status",
-            "target": self.exec.target().name(),
-            "hdr": self.reconciler.actual().hdr,
-            "manual_pin": self.reconciler.manual_pinned(),
-            "session_pid": self.reconciler.session_pid(),
-            "auto": self.auto_enabled,
-            "engine_health": health_summary(supervisor.health()),
-        })
-        .to_string()
-    }
-
     // -- status -------------------------------------------------------------
 
     /// Recompute the status line + tray checks and push them only on change.
@@ -488,113 +417,9 @@ impl App {
 }
 
 // ===========================================================================
-// Free helpers (shared with the unified record mode)
-// ===========================================================================
-
-/// Drain the thread message queue with `PeekMessageW`. Returns `true` if a
-/// `WM_QUIT` was seen. Dispatching drives the out-of-context WinEvent callback,
-/// the tray popup menu, and the global hotkey.
-pub(crate) fn drain_messages() -> bool {
-    let mut msg = MSG::default();
-    loop {
-        let got = unsafe { PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE) };
-        if !got.as_bool() {
-            return false;
-        }
-        if msg.message == WM_QUIT {
-            return true;
-        }
-        unsafe {
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
-        }
-    }
-}
-
-/// Milliseconds until `deadline` (0 if passed), capped at `cap`.
-pub(crate) fn wait_ms(deadline: Option<Instant>, cap: u32) -> u32 {
-    match deadline {
-        Some(d) => d.saturating_duration_since(Instant::now()).as_millis().min(cap as u128) as u32,
-        None => cap,
-    }
-}
-
-/// The WatchEvent -> rule-engine Foreground conversion (stem lowercased).
-pub(crate) fn foreground_of(ev: &WatchEvent) -> Foreground {
-    Foreground {
-        exe_stem: ev.exe_stem.to_ascii_lowercase(),
-        title: ev.title.clone(),
-        fullscreen_on_target: ev.fullscreen_on_target,
-        pid: ev.pid,
-    }
-}
-
-/// `%APPDATA%\recall-hdr\recall-hdr.log` -- mirrors `logging::log_path` (which is
-/// private to that module) for the tray's "Open log" helper.
-fn log_file_path() -> std::path::PathBuf {
-    let base = std::env::var("APPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    base.join("recall-hdr").join("recall-hdr.log")
-}
-
-/// The primary monitor's `HMONITOR` as an `isize` (the watcher's target format).
-/// The managed panel (PG27AQDP) is the primary display on this box.
-pub(crate) fn primary_monitor_isize() -> isize {
-    let mon: HMONITOR = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
-    mon.0 as isize
-}
-
-/// A short, human summary of engine health for the status line.
-pub(crate) fn health_summary(h: EngineHealth) -> &'static str {
-    match h {
-        EngineHealth::Running { .. } => "running",
-        EngineHealth::Restarting { .. } => "restarting",
-        EngineHealth::GivenUp => "off",
-        EngineHealth::Stopped => "stopped",
-    }
-}
-
-// ===========================================================================
 // Tests (pure units only)
 // ===========================================================================
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn health_summary_maps_all_variants() {
-        assert_eq!(health_summary(EngineHealth::Running { pid: 1 }), "running");
-        assert_eq!(health_summary(EngineHealth::Restarting { attempt: 1 }), "restarting");
-        assert_eq!(health_summary(EngineHealth::GivenUp), "off");
-        assert_eq!(health_summary(EngineHealth::Stopped), "stopped");
-    }
-
-    /// The WatchEvent -> Foreground conversion: stem is lowercased, the
-    /// managed-monitor fullscreen flag (not the any-monitor one) is carried.
-    #[test]
-    fn watchevent_to_foreground_lowercases_stem() {
-        let ev = WatchEvent {
-            pid: 4321,
-            exe_stem: "HDR-TestCard".to_string(),
-            exe_name: "HDR-TestCard.exe".to_string(),
-            title: "Test".to_string(),
-            fullscreen: true,
-            fullscreen_on_target: false,
-            hwnd: 0x1234,
-        };
-        let fg = foreground_of(&ev);
-        assert_eq!(fg.exe_stem, "hdr-testcard", "stem must be lowercased");
-        assert_eq!(fg.pid, 4321);
-        assert!(!fg.fullscreen_on_target, "HDR rules see only the managed monitor");
-        assert_eq!(fg.title, "Test");
-    }
-
-    #[test]
-    fn wait_ms_clamps_to_cap_and_floors_at_zero() {
-        assert_eq!(wait_ms(None, 250), 250);
-        assert_eq!(wait_ms(Some(Instant::now() - Duration::from_secs(1)), 250), 0);
-        assert_eq!(wait_ms(Some(Instant::now() + Duration::from_secs(60)), 250), 250);
-    }
-}
+#[path = "app_tests.rs"]
+mod tests;

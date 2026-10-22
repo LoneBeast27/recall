@@ -6,8 +6,10 @@
 //!
 //! Driven manually via RECALL_* envs (human `[recall]` logs), or as a Tauri
 //! sidecar via `--json` (machine protocol: JSON status on stdout, commands on
-//! stdin). See `protocol.rs`.
+//! stdin). See `protocol.rs`. The per-redraw [`App`] work lives in
+//! `app_tick.rs`, the export worker in `export_worker.rs`.
 
+mod app_tick;
 #[cfg(feature = "encode")]
 mod audio;
 mod bookmarks;
@@ -28,6 +30,8 @@ mod editor_media;
 mod encoder;
 #[cfg(feature = "encode")]
 mod export;
+#[cfg(feature = "encode")]
+mod export_worker;
 mod gpu;
 mod hdr;
 #[cfg(feature = "encode")]
@@ -48,6 +52,8 @@ use winit::platform::windows::WindowAttributesExtWindows;
 use winit::window::{Window, WindowId};
 
 use crate::capture::{start_monitor, CaptureControlHandle, CaptureShared};
+#[cfg(feature = "encode")]
+use crate::export_worker::{run_export, spawn_export_worker};
 use crate::gpu::Gpu;
 
 const INITIAL_TITLE: &str = "Desktop SDR";
@@ -305,221 +311,6 @@ impl ApplicationHandler for App {
     }
 }
 
-impl App {
-    /// Encode each newly uploaded capture once, retaining its native timestamp.
-    /// A full ingress queue drops a frame instead of blocking capture or growing RAM.
-    #[cfg(feature = "encode")]
-    fn encode_tick(&mut self) {
-        let Some(enc) = &self.encoder else { return };
-        let Some(gpu) = &mut self.gpu else { return };
-        let Some(pts_us) = gpu.source_pts_us() else {
-            return;
-        };
-        if self.last_encoded_pts == Some(pts_us) {
-            return;
-        }
-        let Some((w, h, rgba)) = gpu.encode_frame() else {
-            return;
-        };
-        self.last_encoded_pts = Some(pts_us);
-        if let Err(std::sync::mpsc::TrySendError::Disconnected(_)) =
-            enc.frames.try_send(encoder::PacedFrame {
-                idx: pts_us,
-                width: w,
-                height: h,
-                rgba,
-            })
-        {
-            enc.stats.backend.store(3, Relaxed);
-            if let Ok(mut error) = enc.stats.error.lock() {
-                *error = Some("NVENC recording thread stopped; restart Recall".into());
-            }
-        }
-    }
-
-    /// A pending screenshot reads the current frame back once (the same
-    /// tonemapped RGBA the encoder gets) and hands it to the PNG thread.
-    fn screenshot_tick(&mut self) {
-        let Some(shots) = &self.shots else { return };
-        if !shots.take_request() {
-            return;
-        }
-        match self.gpu.as_mut().and_then(|g| g.encode_frame()) {
-            Some((w, h, rgba)) => shots.submit(w, h, rgba, &self.source_name),
-            None => shots.fail("no captured frame yet"),
-        }
-    }
-
-    fn tick_fps(&mut self) {
-        self.fps_count += 1;
-        let now = Instant::now();
-        match self.fps_last {
-            Some(last) if now.duration_since(last).as_secs_f32() >= 1.0 => {
-                #[cfg(feature = "encode")]
-                {
-                    let count = self
-                        .encoder
-                        .as_ref()
-                        .map(|e| e.stats.encoded_frames.load(Relaxed))
-                        .unwrap_or(0);
-                    self.fps = ((count.saturating_sub(self.last_encoded_count)) as f64
-                        / now.duration_since(last).as_secs_f64())
-                        as u32;
-                    self.last_encoded_count = count;
-                }
-                #[cfg(not(feature = "encode"))]
-                {
-                    self.fps = self.fps_count;
-                }
-                self.fps_count = 0;
-                self.fps_last = Some(now);
-            }
-            None => self.fps_last = Some(now),
-            _ => {}
-        }
-    }
-
-    fn periodic_update(&mut self) {
-        self.poll_counter = self.poll_counter.wrapping_add(1);
-        if self.poll_counter % SOURCE_POLL_FRAMES != 0 {
-            return;
-        }
-        self.refresh_source_title();
-        self.refresh_hdr_mode();
-        self.emit_status();
-    }
-
-    fn refresh_source_title(&mut self) {
-        // A controller-named source (a window target, or the idle "Desktop"
-        // capture) keeps its name; only an unnamed monitor capture follows the
-        // topmost window.
-        if std::env::var_os("RECALL_CAPTURE_HWND").is_some() || std::env::var_os("RECALL_CAPTURE_NAME").is_some() { return; }
-        if let Some(name) = source::captured_source() {
-            if name != self.source_name {
-                self.source_name = name.clone();
-                if let Ok(mut s) = self.source_shared.lock() {
-                    *s = name.clone();
-                }
-                let title = format!("{name} SDR");
-                if let Some(w) = &self.window {
-                    w.set_title(&title);
-                }
-                if !self.config.json {
-                    eprintln!("[recall] SDR source -> {title}");
-                }
-            }
-        }
-    }
-
-    fn refresh_hdr_mode(&mut self) {
-        let Some(info) = hdr::primary_hdr() else {
-            return;
-        };
-        self.max_nits = info.max_nits;
-        let changed = self.last_hdr != Some(info.is_hdr);
-        self.last_hdr = Some(info.is_hdr);
-
-        // Only auto-detect drives the mode; a forced selector is left alone.
-        if let Some(shared) = &self.shared {
-            if shared.auto.load(Relaxed) {
-                let mode = if info.is_hdr {
-                    capture::MODE_TONEMAP
-                } else {
-                    capture::MODE_PASSTHROUGH
-                };
-                shared.mode.store(mode, Relaxed);
-            }
-        }
-
-        if changed && !self.config.json {
-            eprintln!(
-                "[recall] display: {} (max {:.0} nits) -> {}",
-                if info.is_hdr { "HDR" } else { "SDR" },
-                info.max_nits,
-                if info.is_hdr {
-                    "tonemap"
-                } else {
-                    "passthrough"
-                },
-            );
-        }
-    }
-
-    fn emit_status(&self) {
-        if !self.config.json {
-            return;
-        }
-        let Some(shared) = &self.shared else { return };
-        let (width, height) = self
-            .gpu
-            .as_ref()
-            .and_then(|g| g.source_size())
-            .unwrap_or((0, 0));
-        let mode = if shared.mode.load(Relaxed) == capture::MODE_TONEMAP {
-            "tonemap"
-        } else {
-            "passthrough"
-        };
-        let (buffer_secs, encoder_label, encoder_error, codec) = self.encoder_status();
-        protocol::emit(&protocol::Outbound::Status {
-            display: if self.last_hdr == Some(true) {
-                "hdr"
-            } else {
-                "sdr"
-            }
-            .to_string(),
-            max_nits: self.max_nits,
-            mode: mode.to_string(),
-            select: shared.select_label().to_string(),
-            source: self.source_name.clone(),
-            width,
-            height,
-            fps: self.fps,
-            buffer_secs,
-            encoder: encoder_label,
-            encoder_error,
-            codec,
-            recording_mode: "vfr".to_string(),
-            mic_muted: { #[cfg(feature="encode")] { audio::mic_muted() } #[cfg(not(feature="encode"))] { false } },
-        });
-    }
-
-    /// (buffer seconds, encoder label, encoder error, codec).
-    #[cfg(feature = "encode")]
-    fn encoder_status(&self) -> (f32, String, Option<String>, String) {
-        let Some(enc) = &self.encoder else {
-            return (0.0, "off".into(), None, "off".into());
-        };
-        let codec = enc.stats.codec().label().to_string();
-        let label = match enc.stats.backend.load(Relaxed) {
-            // Kept as the "replay ready" token for every codec: the overlay,
-            // native app and hub compare it literally; the codec is `codec`.
-            1 => "h264_nvenc",
-            3 => "failed",
-            _ => "starting",
-        };
-        let error = enc.stats.error.lock().ok().and_then(|e| e.clone());
-        let elapsed_us = if label == "failed" {
-            0
-        } else if enc.stats.buffered_frames.load(Relaxed) > 0 {
-            self.shared
-                .as_ref()
-                .and_then(|s| s.recording_now_us())
-                .map(|end| end.saturating_sub(enc.stats.buffer_start_us.load(Relaxed)))
-                .unwrap_or_else(|| enc.stats.buffered_us.load(Relaxed))
-                .min(self.buffer_capacity_secs as u64 * 1_000_000)
-        } else {
-            0
-        };
-        (elapsed_us as f32 / 1_000_000.0, label.into(), error, codec)
-    }
-
-    #[cfg(not(feature = "encode"))]
-    fn encoder_status(&self) -> (f32, String, Option<String>, String) {
-        (0.0, "off".into(), None, "off".into())
-    }
-}
-
 /// Read newline-delimited JSON commands from stdin and apply them to shared
 /// state. `save` triggers a replay-buffer save (None when encode is off).
 fn spawn_stdin_reader(
@@ -646,107 +437,5 @@ fn main() {
     #[cfg(feature = "encode")]
     if let Some(encoder) = app.encoder.take() {
         encoder.shutdown(std::time::Duration::from_secs(3));
-    }
-}
-
-/// A single bounded export worker keeps re-encoding separate from live recording.
-#[cfg(feature = "encode")]
-fn spawn_export_worker(json: bool) -> ExportHook {
-    struct Job { request: export::ExportRequest, edit: Option<edit_model::EditPlan> }
-    let (tx, rx) = std::sync::mpsc::sync_channel::<Job>(1);
-    std::thread::Builder::new()
-        .name("recall-export".into())
-        .spawn(move || {
-            let settings = edit_model::ExportSettings::default();
-            while let Ok(job) = rx.recv() {
-                let _ = run_export(&job.request, job.edit.as_ref().map(|plan| (plan, &settings)), json);
-            }
-        })
-        .expect("spawn export worker");
-    Box::new(move |input, output, fps, edit| {
-        let fps = fps.unwrap_or(60);
-        let output = output.unwrap_or_else(|| {
-            let source = std::path::Path::new(&input);
-            let parent = source.parent().unwrap_or_else(|| std::path::Path::new("."));
-            let stem = source
-                .file_stem()
-                .and_then(|s| s.to_str())
-                .unwrap_or("Recall");
-            parent
-                .join("exports")
-                .join(format!("{stem}-cfr-{fps}fps-{}.mp4", uuid::Uuid::new_v4()))
-                .to_string_lossy()
-                .into_owned()
-        });
-        if let Some(parent) = std::path::Path::new(&output).parent() {
-            if let Err(e) = std::fs::create_dir_all(parent) {
-                export_failure(json, &input, &format!("create export directory: {e}"));
-                return;
-            }
-        }
-        let request = export::ExportRequest {
-            input: input.clone(),
-            output,
-            fps,
-        };
-        if let Err(e) = tx.try_send(Job { request, edit }) {
-            export_failure(json, &input, &format!("export queue unavailable: {e}"));
-        }
-    })
-}
-
-#[cfg(feature = "encode")]
-fn export_failure(json: bool, source: &str, reason: &str) {
-    if json {
-        protocol::emit(&protocol::Outbound::ExportFailed {
-            source: source.into(),
-            reason: reason.into(),
-        });
-    } else {
-        eprintln!("[recall] export failed: {reason}");
-    }
-}
-
-#[cfg(feature = "encode")]
-fn run_export(request: &export::ExportRequest, edit: Option<(&edit_model::EditPlan, &edit_model::ExportSettings)>, json: bool) -> Result<(), String> {
-    let start = Instant::now();
-    if json {
-        protocol::emit(&protocol::Outbound::ExportStarted {
-            source: request.input.clone(),
-            path: request.output.clone(),
-            fps: request.fps,
-        });
-    }
-    let result = match edit {
-        Some((plan, settings)) => export::export_edited(request, plan, settings).map(|report| {
-            if json { println!("{}", report.report_line(&request.input, &request.output)); }
-            else { println!("[recall] {:?} export: {} bytes, {}x{}, ranges {:?}", report.mode, report.bytes, report.width, report.height, report.ranges.iter().map(|r| (r.start, r.end, r.speed)).collect::<Vec<_>>()); }
-            report.summary()
-        }),
-        None => export::export_cfr(request),
-    };
-    match result {
-        Ok(result) => {
-            if json {
-                protocol::emit(&protocol::Outbound::Exported {
-                    source: request.input.clone(),
-                    path: request.output.clone(),
-                    fps: request.fps,
-                    frames: result.frames,
-                    seconds: result.seconds,
-                    elapsed_ms: start.elapsed().as_millis() as u64,
-                });
-            } else {
-                println!(
-                    "[recall] exported {} at {} CFR fps",
-                    request.output, request.fps
-                );
-            }
-            Ok(())
-        }
-        Err(e) => {
-            export_failure(json, &request.input, &e);
-            Err(e)
-        }
     }
 }
