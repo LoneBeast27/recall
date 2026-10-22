@@ -256,7 +256,8 @@ impl EditorState {
         if self.playing {
             changed |= self.follow_playback();
         }
-        self.apply_preview_rect(editor_visible);
+        // Moving the video means the backdrop's cut-out must be repainted too.
+        changed |= self.apply_preview_rect(editor_visible);
         if let Some(since) = self.dirty_since {
             if !self.saving && since.elapsed() >= AUTOSAVE_AFTER && self.drag.is_none() {
                 if let Some(info) = self.info.clone() {
@@ -287,10 +288,12 @@ impl EditorState {
         true
     }
 
-    fn apply_preview_rect(&mut self, visible: bool) {
+    /// Moves the native video to the layout's preview rect; true when it moved (repaint so the
+    /// backdrop's cut-out follows).
+    pub(crate) fn apply_preview_rect(&mut self, visible: bool) -> bool {
         let next = if visible && self.info.is_some() && !self.preview_failed { self.preview_rect.get().unwrap_or((0, 0, 0, 0)) } else { (0, 0, 0, 0) };
         if next == self.applied_rect {
-            return;
+            return false;
         }
         self.applied_rect = next;
         if let Some(preview) = self.preview.as_mut() {
@@ -304,6 +307,7 @@ impl EditorState {
                 }
             }
         }
+        true
     }
 
     pub fn hide_preview(&mut self) {

@@ -80,6 +80,8 @@ pub struct Root {
     /// Settings → Storage state (cache size slider, usage).
     pub cache: crate::views::storage_settings::CacheView,
     pub settings_tab: crate::views::settings::SettingsTab,
+    /// Where a press on the title bar started (a drag begins once the pointer moves).
+    pub title_drag: Option<gpui::Point<gpui::Pixels>>,
     /// Recordings folder (last reported) + imported folders of old clips.
     pub folders: crate::services::library::folders::Folders,
     /// When to check whether the recorder is running and start it (once per launch).
@@ -122,6 +124,7 @@ impl Root {
             drag_origin: None,
             cache: crate::views::storage_settings::CacheView::new(),
             settings_tab: Default::default(),
+            title_drag: None,
             folders: crate::services::library::folders::Folders::load(),
             controller_check_at: std::env::var_os("RECALL_NO_CONTROLLER").is_none().then(|| Instant::now() + Duration::from_millis(1500)),
             frame_at: Instant::now(),
@@ -145,6 +148,7 @@ impl Root {
             }
             _ => {}
         }
+        crate::views::window_frame::solid_backdrop(window, theme::WINDOW);
         window.focus(&root.focus);
         root
     }
@@ -319,6 +323,18 @@ impl Render for Root {
         // Meters and playback animate at the display refresh rate, not the 30 ms poll.
         if self.route == Route::Audio || (self.route == Route::Editor && self.ed.playing) {
             window.request_animation_frame();
+        }
+        // Right after a frame lays out the preview at a new size (resize, maximize), move the
+        // native video there and repaint, so the cut-out never waits for the 30 ms poll.
+        if self.route == Route::Editor {
+            let root = cx.entity().downgrade();
+            window.on_next_frame(move |_, cx| {
+                let _ = root.update(cx, |this, cx| {
+                    if this.ed.apply_preview_rect(true) {
+                        cx.notify();
+                    }
+                });
+            });
         }
         let body = match self.route {
             Route::Editor => self.render_editor(window, cx),

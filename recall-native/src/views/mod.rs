@@ -8,3 +8,4 @@ pub mod settings_capture;
 pub mod storage_settings;
 pub mod timeline;
 pub mod titlebar;
+pub mod window_frame;
