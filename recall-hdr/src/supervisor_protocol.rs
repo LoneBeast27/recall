@@ -74,11 +74,29 @@ pub(super) fn read_protocol(shared: &Arc<Shared>, stdout: std::process::ChildStd
                 let path = field(&val, "path");
                 let secs = val.get("seconds").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let ms = val.get("elapsed_ms").and_then(|v| v.as_u64()).unwrap_or(0);
-                log!("supervisor: clip SAVED ({secs:.1}s, {ms}ms) -> {path}");
+                let staged = match val.get("staged").and_then(|v| v.as_bool()) {
+                    Some(true) => format!(" (staged at {}, moving in the background)", field(&val, "staged_path")),
+                    _ => String::new(),
+                };
+                log!("supervisor: clip SAVED ({secs:.1}s, {ms}ms) -> {path}{staged}");
                 crate::cues::saved();
             }
             Some("save_failed") => {
                 log!("supervisor: clip save FAILED -- {}", field(&val, "reason"));
+                beep_failure();
+            }
+            // A staged clip's background move (relayed to app clients like every line).
+            Some("clip_moved") => {
+                let ms = val.get("elapsed_ms").and_then(|v| v.as_u64()).unwrap_or(0);
+                log!("supervisor: clip moved into the clip folder ({ms}ms) -> {}", field(&val, "path"));
+            }
+            Some("clip_move_failed") => {
+                log!(
+                    "supervisor: clip move FAILED -- {} (kept at {}, retrying) -> {}",
+                    field(&val, "reason"),
+                    field(&val, "staged_path"),
+                    field(&val, "path")
+                );
                 beep_failure();
             }
             Some("encoder_log") => {
