@@ -46,7 +46,30 @@ if ($drive.kind -ne 'SSD') {
 }
 "Install folder: $InstallDir  ($($drive.model), SSD)"
 
-# 2. Build.
+# 2. Quit the running recorder gracefully, wherever it runs from (only one controller can run;
+#    its quit also stops the engine and overlay). Done before building: a recorder started from
+#    target-dev\release locks the files the build replaces.
+function Send-Recorder([string]$line) {
+  # The controller serves one pipe instance at a time: retry a connect that lands between
+  # instances, and keep the client open briefly so the line is read before it disconnects.
+  for ($attempt = 0; $attempt -lt 5; $attempt++) {
+    try {
+      $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', 'recall-hdr-control', [IO.Pipes.PipeDirection]::InOut)
+      $pipe.Connect(1500); $w = [IO.StreamWriter]::new($pipe); $w.AutoFlush = $true; $w.WriteLine($line)
+      Start-Sleep -Milliseconds 300; $pipe.Dispose(); return $true
+    } catch { Start-Sleep -Milliseconds 400 }
+  }
+  $false
+}
+function Get-Installed { Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) } }
+function Get-Controller { Get-CimInstance Win32_Process -Filter "Name = 'recall-hdr.exe'" }
+if (Get-Controller) { [void](Send-Recorder '{"cmd":"quit"}') }
+$deadline = (Get-Date).AddSeconds(8)
+while ((Get-Date) -lt $deadline -and ((Get-Installed) -or (Get-Controller))) { Start-Sleep -Milliseconds 300 }
+$left = @(Get-Installed) + @(Get-Controller) | Where-Object { $_ }
+if ($left) { throw ("Recall is still running (" + (($left | ForEach-Object { $_.Name }) -join ', ') + "). Quit it from the tray, then re-run.") }
+
+# 3. Build.
 if (-not $NoBuild) {
   $env:FFMPEG_DIR = $ffmpegRoot
   $env:LIBCLANG_PATH = Join-Path $repo '.tmp\nvenc-vfr\clang18\clang\native'
@@ -61,7 +84,7 @@ if (-not $NoBuild) {
   Pop-Location
 }
 
-# 3. Stage.
+# 4. Stage.
 New-Item -ItemType Directory -Force -Path $stage, (Join-Path $stage 'bin') | Out-Null
 foreach ($exe in @('target-gpui\release\recall-native.exe', 'target-dev\release\recall-hdr.exe', 'target-dev\release\recall.exe', 'target-dev\release\recall-overlay.exe')) {
   $from = Join-Path $repo $exe
@@ -74,22 +97,6 @@ Get-ChildItem (Join-Path $ffmpegRoot 'bin\*.dll') | ForEach-Object {
 }
 Copy-Item (Join-Path $ffmpegRoot 'bin\ffmpeg.exe'), (Join-Path $ffmpegRoot 'bin\ffprobe.exe') (Join-Path $stage 'bin') -Force
 Copy-Item (Join-Path $repo 'recall-native\assets\recall.ico') $stage -Force
-
-# 4. Quit the running recorder gracefully, wherever it runs from (only one controller can run;
-#    its quit also stops the engine and overlay), and wait for the installed files to be free.
-function Send-Recorder([string]$line) {
-  try {
-    $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', 'recall-hdr-control', [IO.Pipes.PipeDirection]::Out)
-    $pipe.Connect(1500); $w = [IO.StreamWriter]::new($pipe); $w.AutoFlush = $true; $w.WriteLine($line); $w.Dispose(); $true
-  } catch { $false }
-}
-function Get-Installed { Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) } }
-function Get-Controller { Get-CimInstance Win32_Process -Filter "Name = 'recall-hdr.exe'" }
-if (Get-Controller) { [void](Send-Recorder '{"cmd":"quit"}') }
-$deadline = (Get-Date).AddSeconds(8)
-while ((Get-Date) -lt $deadline -and ((Get-Installed) -or (Get-Controller))) { Start-Sleep -Milliseconds 300 }
-$left = @(Get-Installed) + @(Get-Controller) | Where-Object { $_ }
-if ($left) { throw ("Recall is still running (" + (($left | ForEach-Object { $_.Name }) -join ', ') + "). Quit it from the tray, then re-run.") }
 
 # 5. Install (the cache folder is never touched).
 New-Item -ItemType Directory -Force -Path $InstallDir, (Join-Path $InstallDir 'bin') | Out-Null
@@ -114,7 +121,10 @@ while (-not $up -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500; 
 if (-not $up) { Write-Warning 'The recorder did not answer on its control pipe; start Recall from the Start menu.' }
 elseif (-not $NoAutostart) {
   [void](Send-Recorder '{"cmd":"set_config","patch":{"startup":{"autostart":true}}}')
-  'Recorder running; it starts with Windows (turn off in Settings > General).'
+  Start-Sleep -Milliseconds 500
+  $run = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'recall-hdr' -ErrorAction SilentlyContinue).'recall-hdr'
+  if ($run -and $run -like "*$InstallDir*") { "Recorder running; it starts with Windows ($run)." }
+  else { Write-Warning 'Start with Windows was not set; turn it on in Recall > Settings > General.' }
 } else { 'Recorder running.' }
 $size = (Get-ChildItem $InstallDir -Recurse -File -Exclude 'cache' | Where-Object { $_.FullName -notlike "*\cache\*" } | Measure-Object Length -Sum).Sum
 "Installed to $InstallDir ($([math]::Round($size / 1MB)) MB of program files; the cache is capped separately)."
