@@ -133,7 +133,11 @@ fn run_job(job: Job, tx: &Sender<Done>) -> Done {
         Job::SaveProject(info, plan, fps, export) => Done::Saved(backend::save_project(&info, &plan, fps, &export)),
         Job::FlushProject(info, plan, fps, export) => Done::Flushed(backend::flush_project(&info, &plan, fps, &export)),
         Job::Export(info, plan, fps, export) => Done::Exported(backend::export_clip(&info, &plan, fps, &export)),
-        Job::Delete(paths) => Done::Deleted(library::delete_to_recycle_bin(&paths)),
+        Job::Delete(paths) => {
+            let result = library::delete_to_recycle_bin(&paths);
+            library::folders::forget_scans();
+            Done::Deleted(result)
+        }
         Job::StorageReport => Done::Storage(backend::storage_report(None)),
         Job::ClearCache(kind) => {
             let notice = match storage::clear_kind(kind) {

@@ -86,7 +86,7 @@ pub fn list_clips()->Result<Vec<ClipEntry>,String>{
     }
     let skip=[storage::cache_root()];
     for root in Folders::load().imported{
-        for clip in folders::scan_imported(Path::new(&root),&skip){push(clip.path,clip.bytes,clip.mtime,clip.folder);}
+        for clip in folders::scan_imported_cached(Path::new(&root),&skip){push(clip.path,clip.bytes,clip.mtime,clip.folder);}
     }
     clips.sort_by(|a,b|b.mtime.cmp(&a.mtime));Ok(clips)
 }
@@ -243,7 +243,11 @@ fn project_bytes(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->
 /// on the library drive. Returns the working-copy path.
 pub fn save_project(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->Result<String,String>{
     let bytes=project_bytes(info,plan,fps,export)?;let path=working_path(info)?;
-    storage::write_atomic(&path,&bytes)?;Ok(path.to_string_lossy().into_owned())
+    storage::write_atomic(&path,&bytes)?;
+    // The first real edit also writes the sidecar beside the clip (once): the recorder's storage
+    // limit keeps clips that have one, and an edit made before a crash stays protected.
+    if !plan_is_default(plan,info)&&sidecar(&info.path).is_ok_and(|s|!s.exists()){let _=flush_project(info,plan,fps,export);}
+    Ok(path.to_string_lossy().into_owned())
 }
 /// Untouched plan: one full-length range and every track at 0 dB, unmuted.
 fn plan_is_default(plan:&EditPlan,info:&ClipInfo)->bool{

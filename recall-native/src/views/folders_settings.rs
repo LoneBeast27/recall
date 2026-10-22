@@ -67,6 +67,7 @@ impl Root {
         match folders.save() {
             Ok(()) => {
                 self.folders = folders;
+                crate::services::library::folders::forget_scans();
                 self.workers.job(Job::List);
                 let title = if added == 1 { "Folder added".to_owned() } else { format!("{added} folders added") };
                 self.show_toast(ToastKind::Good, title, Some("Its clips appear in your library in a moment.".into()));
@@ -81,6 +82,7 @@ impl Root {
         match folders.save() {
             Ok(()) => {
                 self.folders = folders;
+                crate::services::library::folders::forget_scans();
                 self.workers.job(Job::List);
                 self.show_toast(ToastKind::Info, "Folder removed", Some("Its clips are hidden from Recall, not deleted.".into()));
             }
@@ -149,7 +151,7 @@ fn folder_row(id: impl Into<gpui::ElementId> + Clone, title: &str, path: &str, c
 }
 
 /// `path` lies inside `folder` (case-insensitive, no allocation).
-fn inside(path: &str, folder: &str) -> bool {
+pub(crate) fn inside(path: &str, folder: &str) -> bool {
     let folder = folder.trim_end_matches(['\\', '/']);
     path.len() > folder.len()
         && path.is_char_boundary(folder.len())
