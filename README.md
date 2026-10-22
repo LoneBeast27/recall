@@ -24,8 +24,11 @@ powershell -NoProfile -File scripts\install.ps1
 
 - **Play a game.** Recording starts by itself when a fullscreen game is in front and stops
   when it closes. The tray icon is red while recording and grey while paused.
-- **Alt+N** saves the last 2 minutes (Settings → Clip → Replay length). **Alt+M** mutes your
-  microphone in clips.
+- **Alt+N** saves the last 2 minutes (Settings → Clip → Replay length). A soft tick confirms the
+  press at once and a chime plays when the clip is safe; the small in-game notice shows it too.
+  Clips are written to the SSD first (about a second) and moved to the clip folder in the
+  background, so the hard drive's speed never delays a save. **Alt+M** mutes your microphone
+  in clips.
 - **Two-step shortcuts:** press **Alt + `** (the key left of 1), then
   **1** bookmark · **2** save the last 30 s · **3** screenshot · **4** start/stop a full
   recording. The game never receives the number. Turn them off in Settings → Shortcuts.
@@ -60,6 +63,8 @@ meters for every source.
 | Favourites, titles, clip folders | `%APPDATA%\Recall\library.json`, `folders.json` |
 | Edits | `<clip>.recall-edit.json` beside each clip |
 | Preview cache | `<install folder>\cache`, one budget (2 GB by default) |
+| Clips on their way to the clip folder | `<install folder>\cache\staging` (moved within seconds; recovered on next start) |
+| Player stall log | `%APPDATA%\Recall\player.log` |
 
 Clips on a hard drive are read on one background lane per disk at low I/O priority (SMR
 drives are detected); thumbnails, hover frames and recently watched clips are kept on the SSD.
@@ -83,6 +88,13 @@ $env:CARGO_TARGET_DIR = "$PWD\target-dev"
 powershell -NoProfile -File C:/Users/rohan/.claude/tools/nice-build.ps1 cargo test -p recall -p recall-hdr -p recall-overlay --offline
 $env:CARGO_TARGET_DIR = "$PWD\target-gpui"
 powershell -NoProfile -File C:/Users/rohan/.claude/tools/nice-build.ps1 cargo test --manifest-path recall-native\Cargo.toml --offline
+```
+
+After any change to playback, editing or layout, run the viewer check against the release
+build. It drives the real app with key and mouse input and times the player's responses:
+
+```powershell
+powershell -NoProfile -File scripts\dev\viewer-check.ps1
 ```
 
 The app uses its own target folder (`target-gpui`) because GPUI pins different dependency
