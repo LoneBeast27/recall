@@ -353,11 +353,19 @@ impl Render for Root {
         // Tabular figures everywhere so timecodes, sizes and counters don't jitter.
         root.text_style().get_or_insert_with(Default::default).font_features =
             Some(gpui::FontFeatures(std::sync::Arc::new(vec![("tnum".into(), 1)])));
-        root
-            .id("root")
+        // Focus tracking stays off the title bar: a focus-tracked element marks every mouse-down
+        // under it as handled, and GPUI's Windows caption code then skips minimize / maximize /
+        // close, title-bar drag and double-click maximize.
+        let body = div()
+            .id("body")
             .key_context("Recall")
             .track_focus(&self.focus)
             .on_key_down(cx.listener(Self::on_key))
+            .flex_1()
+            .min_h_0()
+            .flex()
+            .child(body);
+        root.id("root")
             .size_full()
             .relative()
             .flex()
@@ -368,7 +376,7 @@ impl Render for Root {
             .line_height(px(18.))
             .text_color(c(theme::TEXT))
             .child(self.render_titlebar(window, cx))
-            .child(div().flex_1().min_h_0().flex().child(body))
+            .child(body)
             .children(self.render_toast())
     }
 }
