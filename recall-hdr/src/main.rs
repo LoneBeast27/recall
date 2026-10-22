@@ -30,6 +30,7 @@
 // dead-code warnings until those land rather than littering per-item attributes.
 #![allow(dead_code)]
 
+mod cues;
 mod app;
 mod clamp;
 mod config;

@@ -121,6 +121,8 @@ impl Controller {
         log!("record: save last {secs}s");
         self.activity.save_sent(std::time::Instant::now());
         self.supervisor.send_engine_line(&json!({"cmd": "save_clip", "seconds": secs}).to_string());
+        // Heard at once; the chime follows when the clip is on disk (seconds for a long save to a hard drive).
+        crate::cues::tick();
     }
 
     fn export_clip(&mut self, val: &Value) {
