@@ -249,18 +249,51 @@ pub fn start_monitor(
         Some(i) => Monitor::from_index(i)?,
         None => Monitor::primary()?,
     };
-    let settings = Settings::new(
-        monitor,
-        CursorCaptureSettings::WithoutCursor,
-        DrawBorderSettings::WithoutBorder,
-        SecondaryWindowSettings::Default,
-        MinimumUpdateIntervalSettings::Default,
-        DirtyRegionSettings::Default,
-        ColorFormat::Rgba16F,
-        shared,
-    );
-    let control = Handler::start_free_threaded(settings).map_err(box_start_err)?;
-    Ok(control)
+    let start = |interval| {
+        Handler::start_free_threaded(Settings::new(
+            monitor,
+            CursorCaptureSettings::WithoutCursor,
+            DrawBorderSettings::WithoutBorder,
+            SecondaryWindowSettings::Default,
+            interval,
+            DirtyRegionSettings::Default,
+            ColorFormat::Rgba16F,
+            shared.clone(),
+        ))
+    };
+    with_rate_cap(start)
+}
+
+/// Frames per second the capture is capped at: the recording rate plus 10% headroom (the CFR
+/// pacer makes exact frames from them). Uncapped, Windows hands over every frame the game
+/// presents (500+ a second in VALORANT) and each is read back to the CPU (29.5 MB at 1440p
+/// HDR), which costs the game frames.
+pub(crate) fn capture_interval(recording_fps: u32) -> std::time::Duration {
+    std::time::Duration::from_secs_f64(1.0 / (f64::from(recording_fps.clamp(1, 1000)) * 1.1))
+}
+
+/// `RECALL_FPS` as the encoder reads it (1..=1000, default 60).
+fn recording_fps() -> u32 {
+    std::env::var("RECALL_FPS").ok().and_then(|v| v.trim().parse().ok()).filter(|f| (1..=1000).contains(f)).unwrap_or(60)
+}
+
+/// Starts with the rate cap; Windows builds without `MinUpdateInterval` (before 11 24H2) fall
+/// back to the uncapped stream.
+fn with_rate_cap<S>(start: S) -> Result<CaptureControlHandle, CaptureError>
+where
+    S: Fn(MinimumUpdateIntervalSettings) -> Result<CaptureControlHandle, GraphicsCaptureApiError<CaptureError>>,
+{
+    let interval = capture_interval(recording_fps());
+    match start(MinimumUpdateIntervalSettings::Custom(interval)) {
+        Ok(control) => {
+            eprintln!("[recall] capture capped at {:.0} fps", 1.0 / interval.as_secs_f64());
+            Ok(control)
+        }
+        Err(e) => {
+            eprintln!("[recall] capture rate cap unavailable ({e}); capturing every frame");
+            start(MinimumUpdateIntervalSettings::Default).map_err(box_start_err)
+        }
+    }
 }
 
 /// Flatten the capture-start error into our boxed error type.
@@ -273,10 +306,23 @@ pub fn start_window(hwnd: usize, shared: Arc<CaptureShared>) -> Result<CaptureCo
     if hwnd == 0 { return Err(std::io::Error::other("capture window handle is null").into()); }
     crate::border::request_borderless();
     let window = windows_capture::window::Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
-    let settings = Settings::new(
-        window, CursorCaptureSettings::WithoutCursor, DrawBorderSettings::WithoutBorder,
-        SecondaryWindowSettings::Default, MinimumUpdateIntervalSettings::Default,
-        DirtyRegionSettings::Default, ColorFormat::Rgba16F, shared,
-    );
-    Handler::start_free_threaded(settings).map_err(box_start_err)
+    let start = |interval| {
+        Handler::start_free_threaded(Settings::new(
+            window, CursorCaptureSettings::WithoutCursor, DrawBorderSettings::WithoutBorder,
+            SecondaryWindowSettings::Default, interval,
+            DirtyRegionSettings::Default, ColorFormat::Rgba16F, shared.clone(),
+        ))
+    };
+    with_rate_cap(start)
+}
+
+#[cfg(test)]
+mod rate_cap_tests {
+    #[test]
+    fn interval_leaves_ten_percent_headroom_over_the_recording_rate() {
+        let at60 = super::capture_interval(60);
+        assert!((1.0 / at60.as_secs_f64() - 66.0).abs() < 0.01);
+        assert!((1.0 / super::capture_interval(144).as_secs_f64() - 158.4).abs() < 0.01);
+        assert_eq!(super::capture_interval(0), super::capture_interval(1));
+    }
 }
