@@ -43,15 +43,15 @@ fn leader_then_key_fires_once_and_releases_every_temporary_key() {
     let t0 = Instant::now();
     assert!(c.open(t0, vec![ALT, BACKQUOTE], &mut reg).is_empty());
     assert!(c.is_open());
-    assert_eq!(reg.live.len(), 9, "1-4 bare + Alt+1-4 + Esc");
-    assert!(reg.live.contains(&id(None, Code::Digit1)) && reg.live.contains(&id(Some(Modifiers::ALT), Code::Digit4)));
+    assert_eq!(reg.live.len(), 11, "1-5 bare + Alt+1-5 + Esc");
+    assert!(reg.live.contains(&id(None, Code::Digit1)) && reg.live.contains(&id(Some(Modifiers::ALT), Code::Digit5)));
     assert!(!reg.live.contains(&id(Some(Modifiers::ALT), Code::Escape)), "Alt+Esc stays Windows'");
     assert_eq!(c.deadline(), Some(t0 + WINDOW));
     assert_eq!(c.press(id(None, Code::Digit1), &mut reg), Some(ChordKey::Bookmark));
     assert!(!c.is_open() && reg.live.is_empty(), "closed and released");
     assert_eq!(c.press(id(None, Code::Digit1), &mut reg), None, "a digit after close is not ours");
-    assert_eq!(reg.log.iter().filter(|(on, _)| *on).count(), 9);
-    assert_eq!(reg.log.iter().filter(|(on, _)| !*on).count(), 9);
+    assert_eq!(reg.log.iter().filter(|(on, _)| *on).count(), 11);
+    assert_eq!(reg.log.iter().filter(|(on, _)| !*on).count(), 11);
 }
 
 #[test]
@@ -61,6 +61,8 @@ fn every_follow_up_key_maps_to_its_action_with_or_without_alt_held() {
         (None, Code::Digit2, ChordKey::SaveShort),
         (Some(Modifiers::ALT), Code::Digit3, ChordKey::Screenshot),
         (None, Code::Digit4, ChordKey::Record),
+        (None, Code::Digit5, ChordKey::Stats),
+        (Some(Modifiers::ALT), Code::Digit5, ChordKey::Stats),
         (Some(Modifiers::ALT), Code::Digit1, ChordKey::Bookmark),
         (None, Code::Escape, ChordKey::Cancel),
     ] {
@@ -94,6 +96,7 @@ fn any_other_new_key_closes_but_modifiers_mouse_and_held_keys_do_not() {
     assert!(!c.tick(soon, &[ALT, BACKQUOTE], &mut reg), "the leader is still held");
     assert!(!c.tick(soon, &[0x01, 0xA0, 0x11], &mut reg), "mouse button, shift, ctrl");
     assert!(!c.tick(soon, &[0x31], &mut reg), "our own digit arrives as a hotkey");
+    assert!(!c.tick(soon, &[0x35], &mut reg), "5 (performance stats) is ours too");
     assert!(c.tick(soon, &[0x57], &mut reg), "W: an unknown key just closes the window");
     assert!(reg.live.is_empty());
     // A released leader key pressed again is a new press.
@@ -110,11 +113,11 @@ fn reopening_extends_the_window_without_registering_twice() {
     c.open(t0, vec![], &mut reg);
     c.open(t0 + Duration::from_secs(1), vec![], &mut reg); // FakeRegistrar panics on a double register
     assert_eq!(c.deadline(), Some(t0 + Duration::from_secs(1) + WINDOW));
-    assert_eq!(reg.live.len(), 9);
+    assert_eq!(reg.live.len(), 11);
     c.configure(Duration::from_secs(2), Modifiers::empty(), &mut reg);
     assert!(!c.is_open() && reg.live.is_empty(), "reconfigure closes");
     c.open(t0, vec![], &mut reg);
-    assert_eq!(reg.live.len(), 5, "a modifier-less leader needs only the bare keys");
+    assert_eq!(reg.live.len(), 6, "a modifier-less leader needs only the bare keys");
 }
 
 #[test]
@@ -125,7 +128,7 @@ fn a_taken_bare_key_is_reported_and_skipped() {
     let mut c = chord();
     let warnings = c.open(Instant::now(), vec![], &mut reg);
     assert_eq!(warnings.len(), 1, "only the bare key matters: {warnings:?}");
-    assert_eq!(reg.live.len(), 7);
+    assert_eq!(reg.live.len(), 9);
     assert_eq!(c.press(id(None, Code::Digit3), &mut reg), None, "not registered, not ours");
     assert!(c.is_open());
 }
@@ -159,7 +162,8 @@ fn chord_event_and_hint_shapes() {
         v,
         json!({"type":"chord","active":true,"leader":"Alt `","options":[
             {"key":"1","label":"Bookmark"},{"key":"2","label":"Save 30 s"},
-            {"key":"3","label":"Screenshot"},{"key":"4","label":"Record"}]})
+            {"key":"3","label":"Screenshot"},{"key":"4","label":"Record"},
+            {"key":"5","label":"Performance stats"}]})
     );
     assert_eq!(options(45, true)[3].1, "Stop recording");
     assert_eq!(options(45, true)[1].1, "Save 45 s");

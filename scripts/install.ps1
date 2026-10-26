@@ -8,19 +8,29 @@
     recall-native.exe   the app (opens the library; starts the recorder if needed)
     recall-hdr.exe      recorder controller + tray (Start with Windows points here)
     recall.exe          capture engine (spawned by the controller)
-    recall-overlay.exe  save notice overlay
+    recall-overlay.exe  Recall Island overlay (notices + performance stats)
     *.dll               FFmpeg runtime
     bin\ffmpeg.exe, ffprobe.exe (+ DLLs)  thumbnails and scrub frames
     cache\              created by the app; capped (Settings → Storage)
+    rtss\               private copy of your installed RTSS (performance stats; see step 5b)
 
   Usage (PowerShell):
-    powershell -NoProfile -File scripts\install.ps1 [-InstallDir <path on an SSD>] [-NoBuild] [-NoShortcut] [-NoAutostart]
+    powershell -NoProfile -File scripts\install.ps1 [-InstallDir <path on an SSD>] [-NoBuild] [-NoShortcut] [-NoAutostart] [-NoRtss]
   Default install folder: %LOCALAPPDATA%\Programs\Recall (per-user, no admin rights).
   After installing, the installed recorder starts and is set to start with Windows
   (Settings > General turns that off; -NoAutostart skips it).
   Builds run through nice-build.ps1 (CCD1, BelowNormal) so a running game is not disturbed.
+
+  Performance stats (step 5b, personal install only; -NoRtss skips it): when RivaTuner
+  Statistics Server is installed, its folder is copied to <install>\rtss with its own
+  on-screen display off ([OSD] EnableOSD=0 in Profiles\Global and Profiles\*.cfg; RTSS's
+  files are not modified), and two on-demand scheduled tasks with highest privileges are
+  registered through ONE administrator prompt: "Recall RTSS start" (runs <install>\rtss\RTSS.exe)
+  and "Recall RTSS stop" (stops only RTSS processes under <install>\rtss). The recorder runs
+  them when stats turn on / off, without prompts. Your own "RTSS" / "MSIAfterburner" tasks and
+  your RTSS in Program Files are never changed. RTSS is never copied into the repo or dist.
 #>
-param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$NoAutostart)
+param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$NoAutostart, [switch]$NoRtss)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $stage = Join-Path $repo 'dist'
@@ -102,6 +112,14 @@ Copy-Item (Join-Path $repo 'recall-native\assets\recall.ico') $stage -Force
 New-Item -ItemType Directory -Force -Path $InstallDir, (Join-Path $InstallDir 'bin') | Out-Null
 Get-ChildItem $stage -File | ForEach-Object { Copy-Item $_.FullName $InstallDir -Force }
 Get-ChildItem (Join-Path $stage 'bin') -File | ForEach-Object { Copy-Item $_.FullName (Join-Path $InstallDir 'bin') -Force }
+
+# 5b. RTSS for the performance-stats island (helpers in install-rtss.ps1).
+if (-not $NoRtss) {
+  try {
+    . (Join-Path $PSScriptRoot 'install-rtss.ps1')
+    Install-RecallRtss -InstallDir $InstallDir -Repo $repo
+  } catch { Write-Warning "RTSS step skipped: $($_.Exception.Message). Performance stats show '-' for FPS until it is set up (re-run the installer)." }
+}
 
 if (-not $NoShortcut) {
   $lnk = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Recall.lnk'

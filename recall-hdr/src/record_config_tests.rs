@@ -308,3 +308,37 @@ fn storage_cap_is_off_or_at_least_the_minimum() {
     }
     assert!(apply_patch(&base, &json!({"storage":{"cap_gb": STORAGE_CAP_MIN_GB - 1}})).is_err());
 }
+
+#[test]
+fn overlay_stats_default_off_minimal_and_validated() {
+    let cfg = user_cfg();
+    assert!(!cfg.overlay.stats, "the stats island is hidden by default");
+    assert_eq!(cfg.overlay.stats_style, "minimal");
+    let v = config_json(&cfg);
+    assert_eq!(v["overlay"]["stats"], false, "the app reads overlay.stats from the config event");
+    assert_eq!(v["overlay"]["stats_style"], "minimal");
+    let err = apply_patch(&cfg, &json!({"overlay":{"stats_style":"speedometer"}})).unwrap_err();
+    assert!(err.contains("overlay.stats_style 'speedometer' must be one of minimal"), "{err}");
+    assert!(apply_patch(&cfg, &json!({"overlay":{"stats":"yes"}})).is_err(), "a bool, not text");
+}
+
+#[test]
+fn stats_toggle_patch_flips_persists_and_reports_the_key() {
+    let store = temp_store("stats");
+    std::fs::write(store.path(), USER_TOML).unwrap();
+    let loaded = store.load();
+    let on = apply_patch(&loaded, &crate::record_cmds::stats_patch(!loaded.overlay.stats)).unwrap();
+    assert!(on.config.overlay.stats);
+    assert_eq!(on.changed, vec!["overlay.stats".to_string()]);
+    assert!(on.touched("overlay"));
+    store.save(&on.config).unwrap();
+    let back = store.load();
+    assert!(back.overlay.stats, "survives a restart");
+    assert!(!back.overlay.enabled, "notices untouched");
+    let off = apply_patch(&back, &crate::record_cmds::stats_patch(!back.overlay.stats)).unwrap();
+    assert!(!off.config.overlay.stats, "toggles back");
+    // set_config of overlay.stats from the app is the same patch shape.
+    let app = apply_patch(&back, &json!({"overlay":{"stats":false}})).unwrap();
+    assert_eq!(app.config, off.config);
+    let _ = std::fs::remove_dir_all(store.path().parent().unwrap());
+}

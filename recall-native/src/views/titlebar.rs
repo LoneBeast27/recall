@@ -53,6 +53,7 @@ impl Root {
                     .justify_end()
                     .gap(px(8.))
                     .child(div().flex_1().h_full().on_mouse_down(MouseButton::Left, cx.listener(Self::title_down)))
+                    .child(self.render_stats_button(cx))
                     .child(self.render_record_button(cx))
                     .child(self.render_save_button(cx))
                     .child(
@@ -207,6 +208,18 @@ impl Root {
                     })
                     .when(mic_muted, |d| d.child(icon(Icon::MicOff, 14., theme::TERTIARY))),
             )
+            .into_any_element()
+    }
+
+    /// Quick toggle for the in-game performance-stats island; pressed while it is on.
+    fn render_stats_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let on = self.stats_on();
+        ui::icon_button("stats-toggle", Icon::Sliders, 30., if on { theme::TEXT } else { theme::MUTED }, on)
+            .when(!on, |b| b.border_1().border_color(c(theme::BORDER)).bg(c(theme::RAISED)))
+            .on_click(cx.listener(|this, _, _, cx| {
+                this.send(DaemonCommand::ToggleStats);
+                cx.notify();
+            }))
             .into_any_element()
     }
 

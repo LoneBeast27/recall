@@ -82,8 +82,9 @@ impl Controller {
             return;
         }
         self.last_fired.insert(key, now);
-        if self.paused {
-            // Only resume (tray / app) works while paused.
+        if self.paused && action != HotkeyAction::Leader {
+            // Resume is the tray / app; the chord still opens (5 toggles the
+            // stats island, its capture keys get the paused refusal).
             if let HotkeyAction::Save { .. } = action {
                 self.refuse_capture("save_clip", crate::record_engine::PAUSED_REASON);
             } else {
@@ -136,6 +137,7 @@ impl Controller {
             ChordKey::SaveShort => self.save_clip(Some(self.cfg.recording.save_seconds(self.cfg.hotkeys.save_seconds))),
             ChordKey::Screenshot => self.engine_command("screenshot", None),
             ChordKey::Record => self.engine_command("record_toggle", None),
+            ChordKey::Stats => self.toggle_stats(None),
             ChordKey::Cancel => {}
         }
     }

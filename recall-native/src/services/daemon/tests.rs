@@ -58,6 +58,35 @@ fn bad_field_shapes_are_dropped_not_fatal() {
 }
 
 #[test]
+fn stats_island_status_fields_parse_and_default_on_older_controllers() {
+    let mut state = connected();
+    apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"waiting","save_seconds":120}}));
+    let old = state.snapshot.session.clone().unwrap();
+    assert!(!old.overlay_stats, "older controllers: stats off");
+    assert_eq!(old.rtss, "", "older controllers: no RTSS state");
+    apply(&mut state, json!({"mod":"session","event":{"type":"status","overlay_stats":true,"rtss":"needs_setup",
+        "overlay":{"enabled":false,"corner":"top-right","running":true,"stats_style":"minimal"}}}));
+    let session = state.snapshot.session.clone().unwrap();
+    assert!(session.overlay_stats);
+    assert_eq!(session.rtss, "needs_setup");
+    assert!(session.overlay.running && !session.overlay.enabled, "unknown stats_style is ignored");
+    assert_eq!(session.save_seconds, 120, "earlier fields kept");
+    apply(&mut state, json!({"mod":"session","event":{"type":"status","rtss":"running"}}));
+    assert_eq!(state.snapshot.session.as_ref().unwrap().rtss, "running");
+    assert!(state.snapshot.session.as_ref().unwrap().overlay_stats);
+    apply(&mut state, json!({"mod":"session","event":{"type":"status","overlay_stats":"yes"}}));
+    assert!(!state.snapshot.session.as_ref().unwrap().overlay_stats, "a wrong shape drops to the default");
+}
+
+#[test]
+fn island_notices_are_not_queued_as_app_events() {
+    let mut state = connected();
+    let notice = json!({"mod":"session","event":{"type":"notice","kind":"game","title":"Recording","detail":"VALORANT"}});
+    assert!(!apply(&mut state, notice), "the overlay shows notices; the app's pill already shows the state");
+    assert!(state.events.is_empty());
+}
+
+#[test]
 fn session_fields_absent_from_a_later_status_are_kept() {
     let mut state = connected();
     apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"recording","target":{"name":"VALORANT","exe":"v.exe","pid":1}}}));
@@ -209,6 +238,8 @@ fn commands_serialize_to_controller_json() {
         (DaemonCommand::Pause, json!({"cmd":"pause"})),
         (DaemonCommand::Resume, json!({"cmd":"resume"})),
         (DaemonCommand::ToggleHdr, json!({"cmd":"toggle_hdr"})),
+        (DaemonCommand::ToggleStats, json!({"cmd":"toggle_stats"})),
+        (DaemonCommand::SetConfig(json!({"overlay":{"stats":true}})), json!({"cmd":"set_config","patch":{"overlay":{"stats":true}}})),
         (DaemonCommand::SetMode("hdr".into()), json!({"cmd":"set_mode","value":"hdr"})),
         (DaemonCommand::SetAcProfile("punchy".into()), json!({"cmd":"set_ac_profile","variant":"punchy"})),
         (DaemonCommand::GetConfig, json!({"cmd":"get_config"})),

@@ -232,6 +232,7 @@ pub(super) fn command_line(command: &DaemonCommand) -> String {
         DaemonCommand::Screenshot => json!({"cmd": "screenshot"}),
         DaemonCommand::RecordToggle => json!({"cmd": "record_toggle"}),
         DaemonCommand::ToggleHdr => json!({"cmd": "toggle_hdr"}),
+        DaemonCommand::ToggleStats => json!({"cmd": "toggle_stats"}),
         DaemonCommand::SetMode(mode) => json!({"cmd": "set_mode", "value": mode}),
         DaemonCommand::SetAcProfile(variant) => json!({"cmd": "set_ac_profile", "variant": variant}),
         DaemonCommand::GetConfig => json!({"cmd": "get_config"}),

@@ -3,10 +3,11 @@
 //! Leader `[hotkeys] leader` (default `Alt+Backquote` = Alt + the PHYSICAL key
 //! left of `1`), then within `window_ms` (1.5 s) one of:
 //! `1` Bookmark · `2` Save the last `save_seconds` · `3` Screenshot ·
-//! `4` Start/stop recording · `Esc` cancel.
+//! `4` Start/stop recording · `5` Performance stats on/off (Recall Island,
+//! 2026-10-26) · `Esc` cancel.
 //!
 //! Why these keys: the left hand stays on WASD -- thumb on Alt, ring finger
-//! reaches the key left of 1, the fingers already sit over 1-4. Ctrl / Shift
+//! reaches the key left of 1, the fingers already sit over 1-5. Ctrl / Shift
 //! leaders are avoided because their key-down leaks to the game as crouch /
 //! sprint. The follow-up keys are registered as temporary global hotkeys only
 //! while the window is open (bare, and with the leader's modifiers in case Alt
@@ -37,16 +38,19 @@ pub enum ChordKey {
     SaveShort,
     Screenshot,
     Record,
+    /// Toggle the performance-stats island (`overlay.stats`).
+    Stats,
     Cancel,
 }
 
-/// (code, action, virtual-key) of each follow-up key. Digits are VK_1..VK_4
+/// (code, action, virtual-key) of each follow-up key. Digits are VK_1..VK_5
 /// on every layout.
-const KEYS: [(Code, ChordKey, u16); 5] = [
+const KEYS: [(Code, ChordKey, u16); 6] = [
     (Code::Digit1, ChordKey::Bookmark, 0x31),
     (Code::Digit2, ChordKey::SaveShort, 0x32),
     (Code::Digit3, ChordKey::Screenshot, 0x33),
     (Code::Digit4, ChordKey::Record, 0x34),
+    (Code::Digit5, ChordKey::Stats, 0x35),
     (Code::Escape, ChordKey::Cancel, 0x1B),
 ];
 
@@ -164,6 +168,7 @@ pub fn options(save_seconds: u32, recording: bool) -> Vec<(&'static str, String)
         ("2", format!("Save {save_seconds} s")),
         ("3", "Screenshot".into()),
         ("4", if recording { "Stop recording" } else { "Record" }.into()),
+        ("5", "Performance stats".into()),
     ]
 }
 

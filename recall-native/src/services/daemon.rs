@@ -38,6 +38,8 @@ pub enum DaemonCommand {
     /// Starts or stops the manual long recording.
     RecordToggle,
     ToggleHdr,
+    /// Shows or hides the in-game performance-stats island (`overlay.stats`, saved).
+    ToggleStats,
     /// "auto" | "sdr" | "hdr"
     SetMode(String),
     /// "punchy" | "accurate"
@@ -101,6 +103,11 @@ pub struct SessionStatus {
     pub long_recording: LongRecording,
     /// A setting change waits for a save or long recording to finish.
     pub pending_restart: bool,
+    /// The in-game performance-stats island is on.
+    pub overlay_stats: bool,
+    /// RTSS for the stats island: "off" | "starting" | "running" | "missing" | "needs_setup"
+    /// (empty on builds without it).
+    pub rtss: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

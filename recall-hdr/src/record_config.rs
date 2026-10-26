@@ -122,7 +122,8 @@ pub const CHORD_WINDOW_MS_MAX: u32 = 5_000;
 
 /// `[hotkeys]` -- the advanced chord (`record_chord`): `leader`, then within
 /// `window_ms` one of 1 bookmark, 2 save the last `save_seconds`,
-/// 3 screenshot, 4 start/stop the long recording (Esc cancels). In `leader`,
+/// 3 screenshot, 4 start/stop the long recording, 5 performance stats on/off
+/// (Esc cancels). In `leader`,
 /// `Backquote` means the PHYSICAL key left of 1 on any layout.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -149,17 +150,34 @@ pub struct StorageCfg {
     pub cap_gb: u32,
 }
 
-/// `[overlay]` -- the controller-owned `recall-overlay.exe` toast process.
+/// `overlay.stats_style` tokens (more gauge styles later).
+pub const STATS_STYLES: [&str; 1] = ["minimal"];
+
+/// `[overlay]` -- the controller-owned `recall-overlay.exe` (Recall Island):
+/// notices (`enabled`) and the performance-stats island (`stats`). The
+/// process runs while either is on.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverlayCfg {
+    /// Show notices (saves, bookmarks, recording changes).
     pub enabled: bool,
     pub corner: String,
+    /// Show the performance-stats island (FPS via RTSS, GPU, CPU).
+    pub stats: bool,
+    /// Gauge style of the stats island (`STATS_STYLES`).
+    pub stats_style: String,
 }
 
 impl Default for OverlayCfg {
     fn default() -> Self {
-        OverlayCfg { enabled: false, corner: "top-right".into() }
+        OverlayCfg { enabled: false, corner: "top-right".into(), stats: false, stats_style: "minimal".into() }
+    }
+}
+
+impl OverlayCfg {
+    /// The overlay process is wanted for notices or stats.
+    pub fn wants_process(&self) -> bool {
+        self.enabled || self.stats
     }
 }
 
@@ -198,6 +216,13 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
             "overlay.corner '{}' must be one of {}",
             cfg.overlay.corner,
             CORNERS.join(" | ")
+        ));
+    }
+    if !STATS_STYLES.contains(&cfg.overlay.stats_style.as_str()) {
+        return Err(format!(
+            "overlay.stats_style '{}' must be one of {}",
+            cfg.overlay.stats_style,
+            STATS_STYLES.join(" | ")
         ));
     }
     Ok(())

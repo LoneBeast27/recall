@@ -62,6 +62,18 @@ impl Root {
         let overlay_on = self.config_value("overlay", "enabled").and_then(Value::as_bool).unwrap_or(session.overlay.enabled);
         let corner = self.config_value("overlay", "corner").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| session.overlay.corner.clone());
         let autostart = self.config_value("startup", "autostart").and_then(Value::as_bool).unwrap_or(session.autostart);
+        let stats_on = self.stats_on();
+        let leader = if session.leader_label.is_empty() { "Alt `".to_owned() } else { session.leader_label.clone() };
+        let stats_detail = format!("FPS and 1% low, GPU and CPU in a small island over your game. {leader} then 5 also turns it on or off.");
+        let rtss = rtss_status(&session.rtss).filter(|_| stats_on).map(|(text, color)| {
+            div()
+                .flex()
+                .items_center()
+                .gap(px(8.))
+                .child(ui::dot(color, 6.))
+                .child(div().text_size(px(12.)).text_color(c(color)).child(text))
+                .into_any_element()
+        });
         let mut corners = ui::segment_track().w(px(360.));
         for (value, label) in [("top-left", "Top left"), ("top-right", "Top right"), ("bottom-left", "Bottom left"), ("bottom-right", "Bottom right")] {
             corners = corners.child(ui::segment(SharedString::from(format!("corner-{value}")), label, corner == value).on_click(cx.listener(move |this, _, _, cx| {
@@ -69,7 +81,7 @@ impl Root {
                 cx.notify();
             })));
         }
-        vec![
+        let mut items = vec![
             section_title("Startup"),
             setting_row("Start with Windows", "Recall starts in the tray when you sign in and records your games.")
                 .child(ui::switch("autostart", autostart).on_click(cx.listener(move |this, _, _, cx| {
@@ -78,12 +90,21 @@ impl Root {
                 })))
                 .into_any_element(),
             section_title("Overlay"),
-            setting_row("Show a notice on save", "A small corner card for 3 seconds. Hidden from your own captures.")
+            setting_row("Show notices", "Saves, bookmarks and recording changes appear for 3 seconds. Hidden from your own captures.")
                 .child(ui::switch("overlay-on", overlay_on).on_click(cx.listener(move |this, _, _, cx| {
                     this.set_config("overlay", "enabled", json!(!overlay_on));
                     cx.notify();
                 })))
                 .into_any_element(),
+            setting_row("Performance stats", &stats_detail)
+                .child(ui::switch("overlay-stats", stats_on).on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_config("overlay", "stats", json!(!stats_on));
+                    cx.notify();
+                })))
+                .into_any_element(),
+        ];
+        items.extend(rtss);
+        items.extend([
             setting_row("Corner", "").child(corners).into_any_element(),
             section_title("Recorder"),
             setting_row("Quit Recall", "Stops recording and closes the tray icon.")
@@ -92,7 +113,14 @@ impl Root {
                     cx.notify();
                 })))
                 .into_any_element(),
-        ]
+        ]);
+        items
+    }
+
+    /// The performance-stats island is on (config first, then the live status).
+    pub(crate) fn stats_on(&self) -> bool {
+        let session = self.snap.session.as_ref().is_some_and(|s| s.overlay_stats);
+        self.config_value("overlay", "stats").and_then(Value::as_bool).unwrap_or(session)
     }
 
     fn settings_clip(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -193,6 +221,7 @@ impl Root {
                         (save_label.as_str(), "2".to_owned()),
                         ("Screenshot", "3".to_owned()),
                         ("Start or stop a recording", "4".to_owned()),
+                        ("Performance stats", "5".to_owned()),
                     ],
                 ))
                 .into_any_element(),
@@ -206,5 +235,32 @@ fn short_length(secs: u64) -> String {
         s if s < 60 => format!("{s} s"),
         s if s % 60 == 0 => format!("{} min", s / 60),
         s => format!("{}:{:02}", s / 60, s % 60),
+    }
+}
+
+/// The one-line RTSS status under the Performance stats switch (status `rtss`); none
+/// while stats are off or on controllers without it.
+pub(crate) fn rtss_status(rtss: &str) -> Option<(&'static str, u32)> {
+    Some(match rtss {
+        "running" => ("RTSS running", theme::ACTIVE),
+        "starting" => ("Starting RTSS…", theme::MUTED),
+        "needs_setup" => ("RTSS not set up — run the installer", theme::WARNING),
+        "missing" => ("RTSS not found", theme::WARNING),
+        _ => return None,
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn rtss_status_lines() {
+        assert_eq!(rtss_status("running").map(|s| s.0), Some("RTSS running"));
+        assert_eq!(rtss_status("needs_setup").map(|s| s.0), Some("RTSS not set up — run the installer"));
+        assert_eq!(rtss_status("missing").map(|s| s.0), Some("RTSS not found"));
+        assert_eq!(rtss_status("starting").map(|s| s.1), Some(theme::MUTED));
+        assert_eq!(rtss_status("off"), None);
+        assert_eq!(rtss_status(""), None, "older controllers say nothing");
     }
 }
