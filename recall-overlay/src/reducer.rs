@@ -3,11 +3,26 @@ use serde_json::Value;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::notice::{is_encoder_notice, session_notice, NoticeView, Tone};
+use crate::session::Session;
+
+/// The controller's `encoder` notice and the engine's failed status describe
+/// the same failure; within this window only the first is shown.
+pub const ENCODER_DEDUP: Duration = Duration::from_secs(5);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum EncoderSource {
+    Engine,
+    Session,
+}
+
 pub const STALE_AFTER: Duration = Duration::from_millis(2_500);
 const SAVED_FOR: Duration = Duration::from_secs(3);
 const FAILURE_FOR: Duration = Duration::from_secs(4);
 const MIC_FOR: Duration = Duration::from_secs(2);
 const MARK_FOR: Duration = Duration::from_millis(1_500);
+/// Controller notices (game picked up, desktop, paused, waiting, encoder).
+pub const NOTICE_FOR: Duration = Duration::from_secs(3);
 /// The advanced-shortcut hint lives as long as the chord window (the
 /// controller's `active:false` closes it earlier).
 const CHORD_FOR: Duration = Duration::from_millis(1_500);
@@ -23,12 +38,15 @@ pub enum RecorderState {
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct OverlayView {
+    /// A notice is showing.
     pub visible: bool,
     pub state: RecorderState,
     pub primary: String,
     pub metrics: String,
     pub secondary: String,
     pub connected: bool,
+    /// The island's rendering of the notice (`Some` exactly while `visible`).
+    pub notice: Option<NoticeView>,
 }
 
 #[derive(Clone, Debug)]
@@ -40,42 +58,63 @@ struct Transient {
     metrics: Option<String>,
     /// The advanced-shortcut hint (closed by `chord` `active:false`).
     chord: bool,
+    notice: NoticeView,
 }
 
 #[derive(Debug)]
 pub struct Reducer {
     view: OverlayView,
     source: String,
-    mic_muted: bool,
+    pub(crate) mic_muted: bool,
     encoder_error: Option<String>,
     last_status: Option<Instant>,
     transient: Option<Transient>,
     /// The metrics line the last status produced (restored after a hint).
     status_metrics: String,
+    /// Seconds in the replay buffer (engine `buffer_secs`).
+    buffer_secs: u64,
+    session: Session,
+    /// The last encoder-failure notice shown, and who reported it.
+    encoder_shown: Option<(Instant, EncoderSource)>,
 }
 
 impl Reducer {
     pub fn new() -> Self {
         Self {
-            view: OverlayView {
-                visible: false,
-                state: RecorderState::Stopped,
-                primary: "Recorder stopped".into(),
-                metrics: "Waiting for Recall".into(),
-                secondary: "Recorder disconnected".into(),
-                connected: false,
-            },
+            view: resting_view(false),
             source: String::new(),
             mic_muted: false,
             encoder_error: None,
             last_status: None,
             transient: None,
             status_metrics: "Waiting for Recall".into(),
+            buffer_secs: 0,
+            session: Session::default(),
+            encoder_shown: None,
         }
+    }
+
+    /// True when the other source already showed this encoder failure.
+    fn encoder_duplicate(&mut self, source: EncoderSource, now: Instant) -> bool {
+        let duplicate = self
+            .encoder_shown
+            .is_some_and(|(at, from)| from != source && now.saturating_duration_since(at) < ENCODER_DEDUP);
+        if !duplicate {
+            self.encoder_shown = Some((now, source));
+        }
+        duplicate
     }
 
     pub fn view(&self) -> &OverlayView {
         &self.view
+    }
+
+    pub fn session(&self) -> &Session {
+        &self.session
+    }
+
+    pub fn buffer_secs(&self) -> u64 {
+        self.buffer_secs
     }
 
     pub fn last_status_age(&self, now: Instant) -> Option<Duration> {
@@ -91,31 +130,39 @@ impl Reducer {
     }
 
     pub fn disconnected(&mut self) -> bool {
-        let next = OverlayView {
-            visible: false,
-            state: RecorderState::Stopped,
-            primary: "Recorder stopped".into(),
-            metrics: "Waiting for Recall".into(),
-            secondary: "Recorder disconnected".into(),
-            connected: false,
-        };
         self.last_status = None;
         self.transient = None;
-        self.replace(next)
+        self.buffer_secs = 0;
+        let session_changed = self.session != Session::default();
+        self.session = Session::default();
+        self.replace(resting_view(false)) || session_changed
     }
 
     pub fn apply_envelope(&mut self, value: &Value, now: Instant) -> bool {
         let Some(event) = value.get("event") else {
             return false;
         };
+        let kind = event.get("type").and_then(Value::as_str);
         match value.get("mod").and_then(Value::as_str) {
             Some("engine") => self.apply_engine_event(event, now),
-            Some("session") if event.get("type").and_then(Value::as_str) == Some("chord") => self.apply_chord(event, now),
+            Some("session") => match kind {
+                Some("chord") => self.apply_chord(event, now),
+                Some("status") => self.session.apply_status(event),
+                Some("notice") => {
+                    if is_encoder_notice(event) && self.encoder_duplicate(EncoderSource::Session, now) {
+                        return false;
+                    }
+                    let notice = session_notice(event);
+                    let (title, detail) = (notice.title.clone(), notice.detail.clone());
+                    self.set_transient(&title, detail, now + NOTICE_FOR, notice)
+                }
+                _ => false,
+            },
             _ => false,
         }
     }
 
-    /// `{"type":"chord","active":true,"options":[{"key":"1","label":"Bookmark"},...]}`:
+    /// `{"type":"chord","active":true,"leader":"Alt `","options":[{"key":"1","label":"Bookmark"},...]}`:
     /// "Recall" over "1 Bookmark · 2 Save 30 s" / "3 Screenshot · 4 Record".
     pub fn apply_chord(&mut self, event: &Value, now: Instant) -> bool {
         if event.get("active").and_then(Value::as_bool) != Some(true) {
@@ -135,7 +182,9 @@ impl Reducer {
             .unwrap_or_default();
         let split = options.len().div_ceil(2);
         let (first, second) = (options[..split].join(" · "), options[split..].join(" · "));
-        let changed = self.set_transient("Recall", second, now + CHORD_FOR);
+        // Two equal rows keep five options ("5 Performance stats") narrow.
+        let notice = NoticeView { chord: true, ..NoticeView::new(Tone::Neutral, &first, second.clone(), false) };
+        let changed = self.set_transient("Recall", second, now + CHORD_FOR, notice);
         if let Some(t) = self.transient.as_mut() {
             t.metrics = Some(first.clone());
             t.chord = true;
@@ -146,12 +195,14 @@ impl Reducer {
     }
 
     pub fn apply_engine_event(&mut self, event: &Value, now: Instant) -> bool {
+        use Tone::{Failure, Neutral, Recording, Success};
         match event.get("type").and_then(Value::as_str) {
             Some("status") => self.apply_status(event, now),
             Some("mic_muted") => {
-                self.mic_muted=event.get("muted").and_then(Value::as_bool).unwrap_or(self.mic_muted);
+                self.mic_muted = event.get("muted").and_then(Value::as_bool).unwrap_or(self.mic_muted);
                 let title = if self.mic_muted { "Microphone muted" } else { "Microphone live" };
-                self.set_transient(title, "Game audio continues".into(), now + MIC_FOR)
+                let detail = "Game audio continues";
+                self.set_transient(title, detail.into(), now + MIC_FOR, NoticeView::new(Neutral, title, detail, false))
             }
             Some("saved") => {
                 let filename = event
@@ -163,37 +214,40 @@ impl Reducer {
                 let game = filename.split("__").next().unwrap_or(filename).replace(['-', '_'], " ");
                 let secs = event.get("seconds").and_then(Value::as_f64).unwrap_or(0.0).round() as u64;
                 let detail = if secs > 0 { format!("{game} · {}:{:02}", secs / 60, secs % 60) } else { game };
-                self.set_transient("Clip saved", detail, now + SAVED_FOR)
+                let notice = NoticeView::new(Success, "Clip saved", truncate(&detail, 40), true);
+                self.set_transient("Clip saved", detail, now + SAVED_FOR, notice)
             }
             Some("save_failed") => {
-                let reason = event
-                    .get("reason")
-                    .and_then(Value::as_str)
-                    .unwrap_or("unknown error");
-                self.set_transient(
-                    "Save failed",
-                    format!("Save failed: {}", truncate(reason, 44)),
-                    now + FAILURE_FOR,
-                )
+                let reason = event.get("reason").and_then(Value::as_str).unwrap_or("unknown error");
+                let notice = NoticeView::new(Failure, "Save failed", truncate(reason, 44), false);
+                self.set_transient("Save failed", format!("Save failed: {}", truncate(reason, 44)), now + FAILURE_FOR, notice)
             }
-            Some("bookmarked") => self.set_transient("Bookmark added", "Marked in the clips you save next".into(), now + MARK_FOR),
+            Some("bookmarked") => {
+                let detail = "Marked in the clips you save next";
+                let notice = NoticeView::new(Success, "Bookmark added", detail, false);
+                self.set_transient("Bookmark added", detail.into(), now + MARK_FOR, notice)
+            }
             Some("screenshot") => {
-                let text = format!("Saved {}", file_name(event));
-                self.set_transient("Screenshot saved", text, now + SAVED_FOR)
+                let name = file_name(event);
+                let notice = NoticeView::new(Success, "Screenshot saved", name.clone(), false);
+                self.set_transient("Screenshot saved", format!("Saved {name}"), now + SAVED_FOR, notice)
             }
             Some("recording_started") => {
-                let text = format!("Writing {}", file_name(event));
-                self.set_transient("Recording started", text, now + SAVED_FOR)
+                let name = file_name(event);
+                let notice = NoticeView::new(Recording, "Recording started", name.clone(), false);
+                self.set_transient("Recording started", format!("Writing {name}"), now + SAVED_FOR, notice)
             }
             Some("recording_stopped") => {
                 let secs = event.get("seconds").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64;
-                let text = format!("{} · {}:{:02}", file_name(event), secs / 60, secs % 60);
-                self.set_transient("Recording saved", truncate(&text, 48), now + SAVED_FOR)
+                let text = truncate(&format!("{} · {}:{:02}", file_name(event), secs / 60, secs % 60), 48);
+                let notice = NoticeView::new(Success, "Recording saved", text.clone(), false);
+                self.set_transient("Recording saved", text, now + SAVED_FOR, notice)
             }
             Some(kind @ ("screenshot_failed" | "recording_failed")) => {
-                let reason = event.get("reason").and_then(Value::as_str).unwrap_or("unknown error");
+                let reason = truncate(event.get("reason").and_then(Value::as_str).unwrap_or("unknown error"), 48);
                 let title = if kind == "screenshot_failed" { "Screenshot failed" } else { "Recording failed" };
-                self.set_transient(title, truncate(reason, 48), now + FAILURE_FOR)
+                let notice = NoticeView::new(Failure, title, reason.clone(), false);
+                self.set_transient(title, reason, now + FAILURE_FOR, notice)
             }
             _ => false,
         }
@@ -203,13 +257,8 @@ impl Reducer {
     fn expire_transient(&mut self) -> bool {
         let Some(transient) = self.transient.take() else { return false };
         self.view.visible = false;
-        self.view.primary = match self.view.state {
-            RecorderState::Ready => "Replay ready",
-            RecorderState::Starting => "Starting",
-            RecorderState::Failed => "Encoder failed",
-            RecorderState::Stopped => "Recorder stopped",
-        }
-        .into();
+        self.view.notice = None;
+        self.view.primary = state_line(&self.view.state).into();
         self.view.secondary = self.source_text();
         if transient.metrics.is_some() {
             self.view.metrics = self.status_metrics.clone();
@@ -229,51 +278,40 @@ impl Reducer {
     }
 
     fn source_text(&self) -> String {
-        let source=source_line(&self.source);
+        let source = source_line(&self.source);
         if self.mic_muted { format!("Mic muted | {source}") } else { source }
     }
+
     fn apply_status(&mut self, event: &Value, now: Instant) -> bool {
-        self.mic_muted=event.get("mic_muted").and_then(Value::as_bool).unwrap_or(self.mic_muted);
+        self.mic_muted = event.get("mic_muted").and_then(Value::as_bool).unwrap_or(self.mic_muted);
         self.last_status = Some(now);
         self.view.connected = true;
-        self.source = event
-            .get("source")
-            .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
+        self.source = event.get("source").and_then(Value::as_str).unwrap_or("").to_string();
 
-        let encoder = event
-            .get("encoder")
-            .and_then(Value::as_str)
-            .unwrap_or("starting");
+        let encoder = event.get("encoder").and_then(Value::as_str).unwrap_or("starting");
         let encoder_error = event.get("encoder_error").and_then(Value::as_str);
         let new_failure = (encoder_error.is_some() || encoder == "failed")
             && (self.view.state != RecorderState::Failed || self.encoder_error.as_deref() != encoder_error);
         self.encoder_error = encoder_error.map(str::to_owned);
-        if new_failure {
-            self.set_transient("Encoder failed", truncate(encoder_error.unwrap_or("NVENC is unavailable"), 48), now + FAILURE_FOR);
+        if new_failure && !self.encoder_duplicate(EncoderSource::Engine, now) {
+            let reason = truncate(encoder_error.unwrap_or("NVENC is unavailable"), 48);
+            let notice = NoticeView::new(Tone::Failure, "Encoder failed", reason.clone(), false);
+            self.set_transient("Encoder failed", reason, now + FAILURE_FOR, notice);
         }
-        let (state, primary) = if encoder_error.is_some() || encoder == "failed" {
-            (RecorderState::Failed, "Encoder failed")
+        let state = if encoder_error.is_some() || encoder == "failed" {
+            RecorderState::Failed
         } else {
             match encoder {
-                "h264_nvenc" => (RecorderState::Ready, "Replay ready"),
-                "starting" => (RecorderState::Starting, "Starting"),
-                _ => (RecorderState::Stopped, "Recorder stopped"),
+                "h264_nvenc" => RecorderState::Ready,
+                "starting" => RecorderState::Starting,
+                _ => RecorderState::Stopped,
             }
         };
-        let buffer = event
-            .get("buffer_secs")
-            .and_then(Value::as_f64)
-            .unwrap_or(0.0)
-            .max(0.0)
-            .round() as u64;
+        let buffer = event.get("buffer_secs").and_then(Value::as_f64).unwrap_or(0.0).max(0.0).round() as u64;
+        let buffer_changed = self.buffer_secs != buffer;
+        self.buffer_secs = buffer;
         let fps = event.get("fps").and_then(Value::as_u64).unwrap_or(0);
-        let encoder_label = if encoder == "h264_nvenc" {
-            "NVENC"
-        } else {
-            encoder
-        };
+        let encoder_label = if encoder == "h264_nvenc" { "NVENC" } else { encoder };
         self.status_metrics = format!("{buffer}s buffer · Capture {fps} FPS · {encoder_label}");
         let notification = self.active_transient(now);
         let metrics = self
@@ -281,33 +319,45 @@ impl Reducer {
             .as_ref()
             .and_then(|t| t.metrics.clone())
             .unwrap_or_else(|| self.status_metrics.clone());
-        let secondary = notification.clone()
+        let secondary = notification
+            .clone()
             .or_else(|| encoder_error.map(|error| truncate(error, 48)))
             .unwrap_or_else(|| self.source_text());
-        let primary = self.transient.as_ref().map(|transient| transient.primary.clone()).unwrap_or_else(|| primary.into());
-        self.replace(OverlayView {
-            visible: notification.is_some(),
-            state,
-            primary,
-            metrics,
-            secondary,
-            connected: true,
-        }) || new_failure
+        let primary = self
+            .transient
+            .as_ref()
+            .map(|transient| transient.primary.clone())
+            .unwrap_or_else(|| state_line(&state).into());
+        let notice = self.transient.as_ref().map(|t| t.notice.clone());
+        self.replace(OverlayView { visible: notification.is_some(), state, primary, metrics, secondary, connected: true, notice })
+            || new_failure
+            || buffer_changed
     }
 
-    fn set_transient(&mut self, primary: &str, text: String, until: Instant) -> bool {
+    fn set_transient(&mut self, primary: &str, text: String, until: Instant, notice: NoticeView) -> bool {
         let had_metrics = self.transient.as_ref().is_some_and(|t| t.metrics.is_some());
         if had_metrics {
             self.view.metrics = self.status_metrics.clone(); // a toast replaces the hint
         }
-        self.transient = Some(Transient { primary: primary.into(), text: text.clone(), until, metrics: None, chord: false });
+        self.transient = Some(Transient {
+            primary: primary.into(),
+            text: text.clone(),
+            until,
+            metrics: None,
+            chord: false,
+            notice: notice.clone(),
+        });
         if self.last_status.is_none() {
             self.view.connected = true;
         }
-        let changed = !self.view.visible || self.view.primary != primary || self.view.secondary != text;
+        let changed = !self.view.visible
+            || self.view.primary != primary
+            || self.view.secondary != text
+            || self.view.notice.as_ref() != Some(&notice);
         self.view.visible = true;
         self.view.primary = primary.into();
         self.view.secondary = text;
+        self.view.notice = Some(notice);
         changed
     }
 
@@ -325,13 +375,15 @@ impl Reducer {
     fn mark_stale(&mut self, now: Instant) -> bool {
         self.last_status = None;
         let notification = self.active_transient(now);
+        let transient = self.transient.as_ref();
         self.replace(OverlayView {
             visible: notification.is_some(),
             state: RecorderState::Stopped,
-            primary: self.transient.as_ref().map(|transient| transient.primary.clone()).unwrap_or_else(|| "Recorder stopped".into()),
+            primary: transient.map(|t| t.primary.clone()).unwrap_or_else(|| "Recorder stopped".into()),
             metrics: "Status feed stale".into(),
             secondary: notification.unwrap_or_else(|| "Waiting for recorder status".into()),
             connected: self.view.connected,
+            notice: transient.map(|t| t.notice.clone()),
         })
     }
 
@@ -342,6 +394,27 @@ impl Reducer {
             self.view = next;
             true
         }
+    }
+}
+
+fn resting_view(connected: bool) -> OverlayView {
+    OverlayView {
+        visible: false,
+        state: RecorderState::Stopped,
+        primary: "Recorder stopped".into(),
+        metrics: "Waiting for Recall".into(),
+        secondary: "Recorder disconnected".into(),
+        connected,
+        notice: None,
+    }
+}
+
+fn state_line(state: &RecorderState) -> &'static str {
+    match state {
+        RecorderState::Ready => "Replay ready",
+        RecorderState::Starting => "Starting",
+        RecorderState::Failed => "Encoder failed",
+        RecorderState::Stopped => "Recorder stopped",
     }
 }
 

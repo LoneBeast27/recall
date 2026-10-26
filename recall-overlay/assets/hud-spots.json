@@ -1,0 +1,61 @@
+{
+ "_source": "recall/.tmp/hud-scan/scan.py over V:\\ALL RECORDINGS, 2026-10-26; px at 1440p; free_px 0 = no free top spot (island may overlap)",
+ "spots": {
+  "valorant": {
+   "anchor": "top-right",
+   "free_px": 288
+  },
+  "rocketleague": {
+   "anchor": "top-left",
+   "free_px": 48
+  },
+  "apexlegends": {
+   "anchor": "top-centre",
+   "free_px": 72
+  },
+  "overwatch": {
+   "anchor": "top-centre",
+   "free_px": 44
+  },
+  "overwatch2": {
+   "anchor": "top-right",
+   "free_px": 40
+  },
+  "marvelrivals": {
+   "anchor": "top-right",
+   "free_px": 56
+  },
+  "genshinimpact": {
+   "anchor": "top-centre",
+   "free_px": 104
+  },
+  "battlefield6": {
+   "anchor": "top-right",
+   "free_px": 0
+  },
+  "counterstrike2": {
+   "anchor": "top-right",
+   "free_px": 96
+  },
+  "tomclancysrainbowsixsiege": {
+   "anchor": "top-right",
+   "free_px": 376
+  },
+  "rainbowsixsiege": {
+   "anchor": "top-right",
+   "free_px": 376
+  },
+  "counterstrikeglobaloffensive": {
+   "anchor": "top-right",
+   "free_px": 64
+  },
+  "forzahorizon6": {
+   "anchor": "top-centre",
+   "free_px": 172
+  },
+  "lethalcompany": {
+   "anchor": "top-centre",
+   "free_px": 100
+  }
+ }
+}
