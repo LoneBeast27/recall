@@ -206,6 +206,37 @@ fn screenshot_and_long_recording_toasts() {
     assert_eq!(reducer.view().primary, "Screenshot failed");
 }
 
+fn encoder_notice() -> Value {
+    json!({"mod":"session","event":{"type":"notice","kind":"encoder","title":"Encoder problem","detail":"Recorder stopped"}})
+}
+
+#[test]
+fn engine_failure_then_controller_encoder_notice_shows_once() {
+    let now = Instant::now();
+    let mut reducer = Reducer::new();
+    let failed = json!({"type":"status","encoder":"failed","encoder_error":"NVENC initialization failed"});
+    reducer.apply_engine_event(&failed, now);
+    assert_eq!(reducer.view().primary, "Encoder failed");
+    assert!(!reducer.apply_envelope(&encoder_notice(), now + Duration::from_secs(1)), "duplicate dropped");
+    assert_eq!(reducer.view().primary, "Encoder failed");
+    // A later failure (past the window) is news again.
+    reducer.tick(now + FAILURE_FOR);
+    assert!(reducer.apply_envelope(&encoder_notice(), now + ENCODER_DEDUP + Duration::from_secs(1)));
+    assert_eq!(reducer.view().primary, "Encoder problem");
+}
+
+#[test]
+fn controller_encoder_notice_then_engine_failure_shows_once() {
+    let now = Instant::now();
+    let mut reducer = Reducer::new();
+    reducer.apply_envelope(&status("h264_nvenc"), now);
+    assert!(reducer.apply_envelope(&encoder_notice(), now));
+    let failed = json!({"type":"status","encoder":"failed","encoder_error":"NVENC initialization failed"});
+    reducer.apply_engine_event(&failed, now + Duration::from_millis(300));
+    let notice = reducer.view().notice.clone().expect("still the first notice");
+    assert_eq!((notice.title.as_str(), notice.detail.as_str()), ("Encoder problem", "Recorder stopped"));
+}
+
 #[test]
 fn disconnect_clears_ready_state_immediately() {
     let now = Instant::now();
