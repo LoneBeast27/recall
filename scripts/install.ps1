@@ -26,7 +26,7 @@
   Performance Log Users (SID S-1-5-32-559). When you are not in it, ONE administrator prompt
   adds you; it takes effect at your next sign-in. Declining the prompt only leaves FPS as "-".
 #>
-param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$NoAutostart, [switch]$NoFrameTiming)
+param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$NoAutostart, [switch]$NoFrameTiming, [switch]$NoStart)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $stage = Join-Path $repo 'dist'
@@ -154,6 +154,13 @@ if (-not $NoShortcut) {
   "Start menu shortcut: $lnk"
 }
 # 6. Start the installed recorder; it owns Start with Windows (the Run value names its own path).
+#    -NoStart leaves it stopped (e.g. mid-match: starting a capture can hitch the game once).
+if ($NoStart) {
+  'Recorder left stopped (-NoStart); start Recall from the Start menu.'
+  $size = (Get-ChildItem $InstallDir -Recurse -File -Exclude 'cache' | Where-Object { $_.FullName -notlike "*\cache\*" } | Measure-Object Length -Sum).Sum
+  "Installed to $InstallDir ($([math]::Round($size / 1MB)) MB of program files; the cache is capped separately)."
+  return
+}
 Start-Process -FilePath (Join-Path $InstallDir 'recall-hdr.exe') -ArgumentList '--record' -WorkingDirectory $InstallDir
 $deadline = (Get-Date).AddSeconds(10); $up = $false
 while (-not $up -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500; $up = Send-Recorder '{"cmd":"status"}' }
