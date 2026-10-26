@@ -203,7 +203,7 @@ pub fn run() -> i32 {
         chord: Chord::new(Duration::from_millis(1_500), global_hotkey::hotkey::Modifiers::ALT),
         leader_label: String::new(),
         notices: NoticeTracker::new(),
-        rtss: RtssCtl::new(Box::new(crate::rtss_win::SystemRtss::from_current_exe())),
+        rtss: RtssCtl::new(Box::new(crate::rtss_win::SystemRtss::from_environment())),
     };
     ctl.rebind_hotkeys();
     ctl.overlay.sync(&ctl.cfg.overlay);

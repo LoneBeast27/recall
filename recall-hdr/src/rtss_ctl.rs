@@ -1,10 +1,12 @@
 //! RTSS (RivaTuner Statistics Server) control for the performance-stats
 //! island (spec `.planning/ISLAND_SPEC.md`, "RTSS control").
 //!
-//! RTSS needs administrator rights, so `scripts/install.ps1` copies the
-//! user's RTSS into `<install>\rtss` (its OSD off) and registers two
-//! on-demand scheduled tasks with highest privileges. The controller only
-//! runs them (`schtasks /run`, no prompt, no window):
+//! RTSS needs administrator rights, so `scripts/install-rtss.ps1` copies the
+//! user's RTSS into `%ProgramFiles%\Recall\rtss` (admin-only writable, so the
+//! elevated task cannot be hijacked by swapping the exe; measurement-only
+//! profiles: no OSD, no limiter, no scanline sync, no Reflex injection) and
+//! registers two on-demand scheduled tasks with highest privileges. The
+//! controller only runs them (`schtasks /run`, no prompt, no window):
 //!
 //! - stats on (and at start-up when on): with the private copy and the
 //!   [`START_TASK`] task, run it -> `starting` until an RTSS is seen, then
@@ -16,11 +18,11 @@
 //! - Any other RTSS (the user's own, in Program Files) is never started or
 //!   stopped; while one runs, its shared memory feeds the island (`running`).
 //!
-//! Ownership: an RTSS.exe under `<exe dir>\rtss` is Recall's (only the start
-//! task launches it), so one a crashed controller left running is adopted and
-//! stopped like one started now. An RTSS whose path cannot be read counts as
-//! Recall's only after Recall ran the start task. The stop task itself kills
-//! only RTSS processes under `<install>\rtss`.
+//! Ownership: only an RTSS.exe under `%ProgramFiles%\Recall\rtss` is Recall's
+//! (only the start task launches it), so one a crashed controller left
+//! running is adopted and stopped like one started now. An RTSS whose path
+//! cannot be read counts as Recall's only after Recall ran the start task. The
+//! stop task itself kills only RTSS processes under that folder.
 
 use std::time::{Duration, Instant};
 
@@ -60,7 +62,7 @@ impl RtssState {
 /// The RTSS processes and shared memory seen right now.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Scan {
-    /// An RTSS.exe under `<exe dir>\rtss` (the private copy) runs.
+    /// An RTSS.exe under `%ProgramFiles%\Recall\rtss` (Recall's copy) runs.
     pub ours: bool,
     /// An RTSS.exe elsewhere runs (the user's own).
     pub foreign: bool,
@@ -73,7 +75,7 @@ pub struct Scan {
 /// Everything [`decide`] looks at.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Facts {
-    /// `<exe dir>\rtss\RTSS.exe` exists.
+    /// `%ProgramFiles%\Recall\rtss\RTSS.exe` exists.
     pub copy: bool,
     /// The [`START_TASK`] scheduled task exists.
     pub start_task: bool,
