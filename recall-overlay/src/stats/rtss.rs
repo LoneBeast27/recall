@@ -86,40 +86,108 @@ pub enum RtssRead {
     Frames(FrameStats),
 }
 
+/// A valid v2 header.
+struct Header {
+    version: u32,
+    entry_size: usize,
+    array_offset: usize,
+    array_len: usize,
+}
+
+fn header<M: Mem + ?Sized>(mem: &M) -> Option<Header> {
+    let at = |offset| mem.u32_at(offset);
+    if at(H_SIGNATURE)? != SIGNATURE || at(H_VERSION)? < V2 {
+        return None;
+    }
+    let entry_size = at(H_APP_ENTRY_SIZE)? as usize;
+    (entry_size >= MIN_ENTRY).then_some(Header {
+        version: at(H_VERSION)?,
+        entry_size,
+        array_offset: at(H_APP_ARR_OFFSET)? as usize,
+        array_len: at(H_APP_ARR_SIZE)?.min(MAX_APPS) as usize,
+    })
+}
+
+/// Byte offset of `pid`'s app entry (entries past the mapping's end are ignored).
+fn find_entry<M: Mem + ?Sized>(mem: &M, h: &Header, pid: u32) -> Option<usize> {
+    (0..h.array_len)
+        .filter_map(|index| h.array_offset.checked_add(index.checked_mul(h.entry_size)?))
+        .take_while(|&base| base.checked_add(MIN_ENTRY).is_some_and(|end| end <= mem.len()))
+        .find(|&base| mem.u32_at(base + E_PROCESS_ID) == Some(pid))
+}
+
 /// Reads the framerate for `pid` (or, without a pid, RTSS's last foreground
 /// app). `now_ms` is `GetTickCount()`, the clock RTSS stamps frames with.
 pub fn parse<M: Mem + ?Sized>(mem: &M, pid: Option<u32>, now_ms: u32) -> RtssRead {
-    let header = |offset| mem.u32_at(offset);
-    let (Some(signature), Some(version)) = (header(H_SIGNATURE), header(H_VERSION)) else {
-        return RtssRead::NotReady;
-    };
-    if signature != SIGNATURE || version < V2 {
-        return RtssRead::NotReady;
-    }
-    let (Some(entry_size), Some(array_offset), Some(array_len)) =
-        (header(H_APP_ENTRY_SIZE), header(H_APP_ARR_OFFSET), header(H_APP_ARR_SIZE))
-    else {
-        return RtssRead::NotReady;
-    };
-    let entry_size = entry_size as usize;
-    if entry_size < MIN_ENTRY {
-        return RtssRead::NotReady;
-    }
+    let Some(h) = header(mem) else { return RtssRead::NotReady };
     let wanted = match pid {
         Some(pid) => pid,
-        None if version >= V2_16 => match header(H_LAST_FOREGROUND_PID) {
+        None if h.version >= V2_16 => match mem.u32_at(H_LAST_FOREGROUND_PID) {
             Some(pid) if pid != 0 => pid,
             _ => return RtssRead::NoEntry,
         },
         None => return RtssRead::NoEntry,
     };
-    let entry = (0..array_len.min(MAX_APPS) as usize)
-        .filter_map(|index| (array_offset as usize).checked_add(index.checked_mul(entry_size)?))
-        .take_while(|&base| base.checked_add(MIN_ENTRY).is_some_and(|end| end <= mem.len()))
-        .find(|&base| mem.u32_at(base + E_PROCESS_ID) == Some(wanted));
-    match entry {
-        Some(base) => RtssRead::Frames(entry_stats(mem, base, version, entry_size, now_ms)),
+    match find_entry(mem, &h, wanted) {
+        Some(base) => RtssRead::Frames(entry_stats(mem, base, h.version, h.entry_size, now_ms)),
         None => RtssRead::NoEntry,
+    }
+}
+
+/// `STATFLAG_RECORD`: RTSS collects the `dwStat*` statistics (1% low among
+/// them) for an app only while this bit is set in its `dwStatFlags`.
+pub const STATFLAG_RECORD: u32 = 0x1;
+const E_STAT_FLAGS: usize = 284;
+
+/// One poll's change to `STATFLAG_RECORD` (byte offsets of `dwStatFlags`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct RecordPlan {
+    /// Clear the bit here: the entry we set it on, no longer wanted.
+    pub clear: Option<usize>,
+    /// Set the bit here: the wanted game's entry, bit currently off.
+    pub set: Option<usize>,
+    /// The pid whose bit we own after applying (we only ever clear our own).
+    pub owned: Option<u32>,
+}
+
+/// Recording follows `wanted` (the stats target's pid; `None` = stats off).
+/// A bit someone else set (Afterburner's benchmark) is used but never owned or
+/// cleared; a bit we own that went missing (RTSS restarted) is set again.
+pub fn record_plan<M: Mem + ?Sized>(mem: &M, wanted: Option<u32>, owned: Option<u32>) -> RecordPlan {
+    let mut plan = RecordPlan { owned, ..RecordPlan::default() };
+    let Some(h) = header(mem) else { return plan };
+    let flags = |pid| find_entry(mem, &h, pid).map(|base| base + E_STAT_FLAGS);
+    let recording = |at: usize| mem.u32_at(at).is_some_and(|f| f & STATFLAG_RECORD != 0);
+    if let Some(old) = owned.filter(|&old| Some(old) != wanted) {
+        plan.clear = flags(old).filter(|&at| recording(at));
+        plan.owned = None;
+    }
+    if let Some(at) = wanted.and_then(flags) {
+        if !recording(at) {
+            plan.set = Some(at);
+            plan.owned = wanted;
+        }
+    }
+    plan
+}
+
+/// How the overlay reaches RTSS's mapping. RTSS runs elevated, so a
+/// non-elevated overlay may be refused write access.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Access {
+    /// Read + write: we can turn on RTSS's statistics for the game.
+    Write,
+    /// Write refused: read only; 1% low comes from the frame-time ring.
+    ReadOnly,
+}
+
+/// The fallback choice after trying a write open, then a read open.
+pub fn choose_access(write_opened: bool, read_opened: bool) -> Option<Access> {
+    match (write_opened, read_opened) {
+        (true, _) => Some(Access::Write),
+        (false, true) => Some(Access::ReadOnly),
+        (false, false) => None, // no mapping: RTSS is not running
     }
 }
 
@@ -156,60 +224,6 @@ pub fn low_1_percent(frame_times_us: &[u32]) -> Option<f32> {
     times.sort_unstable_by(|a, b| b.cmp(a));
     let index = (times.len() / 100).min(times.len() - 1);
     Some(1_000_000.0 / times[index] as f32)
-}
-
-/// Live read of RTSS's mapping (opened and closed per call, like the SDK's
-/// own readers, so a restarted RTSS is picked up).
-pub fn read(pid: Option<u32>) -> RtssRead {
-    use windows::core::w;
-    use windows::Win32::Foundation::CloseHandle;
-    use windows::Win32::System::Memory::{
-        MapViewOfFile, OpenFileMappingW, UnmapViewOfFile, VirtualQuery, FILE_MAP_READ, MEMORY_BASIC_INFORMATION,
-    };
-    use windows::Win32::System::SystemInformation::GetTickCount;
-    unsafe {
-        let Ok(handle) = OpenFileMappingW(FILE_MAP_READ.0, false, w!("RTSSSharedMemoryV2")) else {
-            return RtssRead::NoMemory;
-        };
-        let view = MapViewOfFile(handle, FILE_MAP_READ, 0, 0, 0);
-        let result = if view.Value.is_null() {
-            RtssRead::NoMemory
-        } else {
-            let mut info = MEMORY_BASIC_INFORMATION::default();
-            let queried = VirtualQuery(
-                Some(view.Value as *const _),
-                &mut info,
-                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-            );
-            let len = if queried == 0 { 0 } else { info.RegionSize };
-            let mem = SharedView { base: view.Value as *const u8, len };
-            let result = parse(&mem, pid, GetTickCount());
-            let _ = UnmapViewOfFile(view);
-            result
-        };
-        let _ = CloseHandle(handle);
-        result
-    }
-}
-
-/// A mapped view another process writes to: every read is a volatile copy.
-struct SharedView {
-    base: *const u8,
-    len: usize,
-}
-
-impl Mem for SharedView {
-    fn len(&self) -> usize {
-        self.len
-    }
-
-    fn u32_at(&self, offset: usize) -> Option<u32> {
-        if !offset.is_multiple_of(4) || offset.checked_add(4)? > self.len {
-            return None;
-        }
-        // The view is page-aligned and every field offset is 4-aligned.
-        Some(unsafe { std::ptr::read_volatile(self.base.add(offset).cast::<u32>()) })
-    }
 }
 
 #[cfg(test)]

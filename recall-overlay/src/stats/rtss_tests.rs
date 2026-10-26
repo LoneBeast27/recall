@@ -135,6 +135,103 @@ fn without_a_pid_the_last_foreground_app_is_used() {
 }
 
 #[test]
+fn rtss_low_is_trusted_only_while_rtss_records_statistics() {
+    let mut buf = Buf::new(0x0002_0015, 1);
+    let base = buf.app(0, 7, 10_000, 11_000, 144);
+    buf.put(base + E_LOW_1_PERCENT, 555); // left over from an earlier recording
+    buf.frame_times(base, &[8_000; 500]); // 125 FPS frames, no recording
+    let stats = frames(parse(buf.0.as_slice(), Some(7), 11_100));
+    assert_eq!((stats.low1, stats.low_source), (Some(125.0), LowSource::FrameTimes), "dwStatCount = 0: field ignored");
+    // Read-only and nothing in the frame-time ring either: FPS stays, 1% low is "—".
+    let mut bare = Buf::new(0x0002_0015, 1);
+    bare.app(0, 7, 10_000, 11_000, 144);
+    let stats = frames(parse(bare.0.as_slice(), Some(7), 11_100));
+    assert_eq!((stats.fps, stats.low1, stats.low_source), (Some(144.0), None, LowSource::None));
+}
+
+impl Buf {
+    fn flags(&self, base: usize) -> u32 {
+        self.0.as_slice().u32_at(base + E_STAT_FLAGS).unwrap()
+    }
+
+    /// What the live client does with a plan: atomic bit set / clear.
+    fn apply(&mut self, plan: &RecordPlan) {
+        if let Some(at) = plan.clear {
+            let value = self.0.as_slice().u32_at(at).unwrap() & !STATFLAG_RECORD;
+            self.put(at, value);
+        }
+        if let Some(at) = plan.set {
+            let value = self.0.as_slice().u32_at(at).unwrap() | STATFLAG_RECORD;
+            self.put(at, value);
+        }
+    }
+}
+
+#[test]
+fn stats_on_switches_recording_on_for_the_game_and_owns_it() {
+    let mut buf = Buf::new(0x0002_0015, 2);
+    let game = buf.app(1, 42, 10_000, 11_000, 144);
+    buf.put(game + E_STAT_FLAGS, 0x10); // unrelated bits survive
+    let plan = record_plan(buf.0.as_slice(), Some(42), None);
+    assert_eq!(plan, RecordPlan { clear: None, set: Some(game + E_STAT_FLAGS), owned: Some(42) });
+    buf.apply(&plan);
+    assert_eq!(buf.flags(game), 0x11);
+    // Next poll: already on and ours, nothing to do.
+    assert_eq!(record_plan(buf.0.as_slice(), Some(42), Some(42)), RecordPlan { owned: Some(42), ..RecordPlan::default() });
+    // RTSS restarted (the entry's flags are fresh): switch it on again.
+    buf.put(game + E_STAT_FLAGS, 0);
+    assert_eq!(record_plan(buf.0.as_slice(), Some(42), Some(42)).set, Some(game + E_STAT_FLAGS));
+}
+
+#[test]
+fn someone_elses_recording_is_used_but_never_owned_or_cleared() {
+    let mut buf = Buf::new(0x0002_0015, 1);
+    let game = buf.app(0, 42, 10_000, 11_000, 144);
+    buf.put(game + E_STAT_FLAGS, STATFLAG_RECORD); // Afterburner's benchmark
+    let plan = record_plan(buf.0.as_slice(), Some(42), None);
+    assert_eq!(plan, RecordPlan::default(), "already recording: no write, not ours");
+    assert_eq!(record_plan(buf.0.as_slice(), None, plan.owned), RecordPlan::default(), "stats off leaves it alone");
+    assert_eq!(buf.flags(game), STATFLAG_RECORD);
+}
+
+#[test]
+fn target_change_moves_recording_and_stats_off_clears_only_ours() {
+    let mut buf = Buf::new(0x0002_0015, 3);
+    let (old, new) = (buf.app(0, 42, 10_000, 11_000, 144), buf.app(2, 77, 10_000, 11_000, 60));
+    let plan = record_plan(buf.0.as_slice(), Some(42), None);
+    buf.apply(&plan);
+    let plan = record_plan(buf.0.as_slice(), Some(77), plan.owned);
+    assert_eq!(plan, RecordPlan { clear: Some(old + E_STAT_FLAGS), set: Some(new + E_STAT_FLAGS), owned: Some(77) });
+    buf.apply(&plan);
+    assert_eq!((buf.flags(old), buf.flags(new)), (0, STATFLAG_RECORD));
+    let off = record_plan(buf.0.as_slice(), None, plan.owned);
+    assert_eq!(off, RecordPlan { clear: Some(new + E_STAT_FLAGS), set: None, owned: None });
+    buf.apply(&off);
+    assert_eq!(buf.flags(new), 0);
+}
+
+#[test]
+fn missing_entries_and_bad_memory_change_nothing() {
+    let mut buf = Buf::new(0x0002_0015, 1);
+    buf.app(0, 5, 10_000, 11_000, 30);
+    assert_eq!(record_plan(buf.0.as_slice(), Some(42), None), RecordPlan::default(), "game not hooked yet");
+    assert_eq!(
+        record_plan(buf.0.as_slice(), Some(42), Some(42)),
+        RecordPlan { owned: Some(42), ..RecordPlan::default() },
+        "our game's entry briefly gone: keep ownership, retry next poll"
+    );
+    assert_eq!(record_plan(buf.0.as_slice(), None, Some(42)), RecordPlan::default(), "our exited game: nothing left to clear");
+    assert_eq!(record_plan(&[0u8; 64][..], None, Some(42)).owned, Some(42), "invalid mapping: decide later");
+}
+
+#[test]
+fn access_falls_back_to_read_only_when_write_is_refused() {
+    assert_eq!(choose_access(true, true), Some(Access::Write));
+    assert_eq!(choose_access(false, true), Some(Access::ReadOnly), "elevated RTSS refused our write");
+    assert_eq!(choose_access(false, false), None, "no mapping: RTSS not running");
+}
+
+#[test]
 fn low_percentile_needs_enough_frames() {
     assert_eq!(low_1_percent(&[0; 1024]), None);
     assert_eq!(low_1_percent(&[16_667; 5]), None);
