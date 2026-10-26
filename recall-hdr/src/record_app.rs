@@ -46,7 +46,6 @@ use crate::record_notice::NoticeTracker;
 use crate::record_storage::Janitor;
 use crate::record_target::{classify_event, display_name, sanitize, Target, TargetTracker, TARGET_DEBOUNCE};
 use crate::record_tray::{RecallUi, RecordingTray, RecordingTrayCmd};
-use crate::rtss_ctl::RtssCtl;
 use crate::supervisor::{EngineHealth, Supervisor};
 use crate::watcher::{self, WatchEvent, Watcher};
 
@@ -117,8 +116,9 @@ pub struct Controller {
     pub(crate) leader_label: String,
     /// Recall Island notices for recording changes (`record_notice`).
     pub(crate) notices: NoticeTracker,
-    /// RTSS for the performance-stats island (`rtss_ctl`).
-    pub(crate) rtss: RtssCtl,
+    /// This token may start the overlay's frame-timing ETW session
+    /// (`frame_timing`; checked once, membership changes need a new sign-in).
+    pub(crate) can_trace: bool,
 }
 
 /// Entry point. Returns the process exit code.
@@ -203,11 +203,13 @@ pub fn run() -> i32 {
         chord: Chord::new(Duration::from_millis(1_500), global_hotkey::hotkey::Modifiers::ALT),
         leader_label: String::new(),
         notices: NoticeTracker::new(),
-        rtss: RtssCtl::new(Box::new(crate::rtss_win::SystemRtss::from_environment())),
+        can_trace: crate::frame_timing::can_trace(),
     };
+    if !ctl.can_trace {
+        log!("record: FPS needs Performance Log Users (run the installer, then sign in again); stats show FPS as -");
+    }
     ctl.rebind_hotkeys();
     ctl.overlay.sync(&ctl.cfg.overlay);
-    ctl.rtss.sync(ctl.cfg.overlay.stats, now);
     ctl.probe_foreground(now, true);
     log!(
         "record: controller up (auto_record={}, buffer={}s, save={}, mic={}, advanced={} via {}, out={:?}, storage cap={} GiB)",
@@ -314,8 +316,8 @@ impl Controller {
     }
 
     /// Engine events -> chord -> liveness -> target -> engine -> HDR ->
-    /// fresh-engine intents -> deferred restart / storage -> overlay / RTSS ->
-    /// status (+ island notices).
+    /// fresh-engine intents -> deferred restart / storage -> overlay -> status
+    /// (+ island notices).
     fn tick(&mut self, now: Instant) {
         self.drain_engine_events(now);
         self.chord_tick(now);
@@ -338,7 +340,6 @@ impl Controller {
         }
         self.activity_tick(now);
         self.overlay.sync(&self.cfg.overlay);
-        self.rtss.tick(self.cfg.overlay.stats, now);
         if !self.hdr.is_active() && now.duration_since(self.last_hdr_refresh) >= HDR_REFRESH_EVERY {
             self.last_hdr_refresh = now;
             self.hdr.refresh_live();
@@ -418,11 +419,10 @@ impl Controller {
     }
 
     /// Ordered shutdown: display restore first (if HDR was managed), then the
-    /// overlay, Recall's RTSS and the UI, then the engine.
+    /// overlay (and its frame-timing session) and the UI, then the engine.
     fn shutdown(mut self) {
         self.hdr.shutdown();
         self.overlay.stop();
-        self.rtss.shutdown();
         let matched = self.ui.close();
         log!("record: requested WM_CLOSE for {} Recall UI window(s)", matched.len());
         self.hotkeys = None;

@@ -1,12 +1,12 @@
 {
   "_about": "Scripted island tour for --smoke-state: game notice, stats on, a save notice over the stats and its return, stats off. Stats values are fixed.",
   "events": [
-    {"mod": "session", "event": {"type": "status", "state": "recording", "overlay": {"enabled": true, "stats_style": "minimal"}, "overlay_stats": false, "rtss": "running", "save_seconds": 120, "target": {"name": "VALORANT", "exe": "VALORANT-Win64-Shipping.exe", "pid": null}}},
+    {"mod": "session", "event": {"type": "status", "state": "recording", "overlay": {"enabled": true, "stats_style": "minimal"}, "overlay_stats": false, "fps_source": "etw", "save_seconds": 120, "target": {"name": "VALORANT", "exe": "VALORANT-Win64-Shipping.exe", "pid": null}}},
     {"mod": "engine", "event": {"type": "status", "source": "VALORANT", "fps": 144, "buffer_secs": 120.0, "encoder": "h264_nvenc"}},
     {"at_ms": 400, "mod": "session", "event": {"type": "notice", "kind": "game", "title": "Recording", "detail": "VALORANT"}},
-    {"at_ms": 3900, "mod": "session", "event": {"type": "status", "state": "recording", "overlay": {"enabled": true, "stats_style": "minimal"}, "overlay_stats": true, "rtss": "running", "save_seconds": 120, "target": {"name": "VALORANT", "exe": "VALORANT-Win64-Shipping.exe", "pid": null}}},
+    {"at_ms": 3900, "mod": "session", "event": {"type": "status", "state": "recording", "overlay": {"enabled": true, "stats_style": "minimal"}, "overlay_stats": true, "fps_source": "etw", "save_seconds": 120, "target": {"name": "VALORANT", "exe": "VALORANT-Win64-Shipping.exe", "pid": null}}},
     {"at_ms": 5600, "mod": "engine", "event": {"type": "saved", "path": "V:\\clips\\VALORANT__2026-10-26__10-00-00.mp4", "seconds": 120.0}},
-    {"at_ms": 10000, "mod": "session", "event": {"type": "status", "state": "recording", "overlay": {"enabled": true, "stats_style": "minimal"}, "overlay_stats": false, "rtss": "running", "save_seconds": 120, "target": {"name": "VALORANT", "exe": "VALORANT-Win64-Shipping.exe", "pid": null}}}
+    {"at_ms": 10000, "mod": "session", "event": {"type": "status", "state": "recording", "overlay": {"enabled": true, "stats_style": "minimal"}, "overlay_stats": false, "fps_source": "etw", "save_seconds": 120, "target": {"name": "VALORANT", "exe": "VALORANT-Win64-Shipping.exe", "pid": null}}}
   ],
   "stats": {"fps": 144, "low1": 98, "gpu": 71, "gpu_temp": 64, "cpu": 23},
   "exit_ms": 11200

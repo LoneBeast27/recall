@@ -1,7 +1,7 @@
 //! The controller's `mod:"session"` status fields the island needs:
 //! `{"type":"status","state":S,"target":{"name":S,"exe":S|null,"pid":N|null,"hwnd":N?}|null,
 //!   "overlay":{"enabled":B,"stats_style":"minimal",...},"overlay_stats":B,
-//!   "rtss":"off|starting|running|missing|needs_setup","save_seconds":N,...}`.
+//!   "fps_source":"etw|no_permission|off","save_seconds":N,...}`.
 //! `overlay.enabled` gates every notice, `overlay_stats` the stats island;
 //! before the first status both are off.
 
@@ -26,8 +26,8 @@ pub struct Session {
     pub overlay_stats: bool,
     /// `overlay.stats_style`; only "minimal" exists, anything else draws minimal.
     pub stats_style: String,
-    /// RTSS state as the controller reports it; "" = not reported.
-    pub rtss: String,
+    /// The controller's FPS source (`etw` | `no_permission` | `off`); "" = not reported.
+    pub fps_source: String,
     /// The configured replay length (seconds).
     pub save_seconds: u64,
 }
@@ -53,7 +53,7 @@ impl Session {
                 .map(|hwnd| hwnd as isize),
             desktop: target.is_some() && field("exe").is_none_or(Value::is_null),
             overlay_stats: event.get("overlay_stats").and_then(Value::as_bool).unwrap_or(false),
-            rtss: text(event.get("rtss")),
+            fps_source: text(event.get("fps_source")),
             save_seconds: event.get("save_seconds").and_then(Value::as_u64).unwrap_or(0),
         };
         if *self == next {
@@ -108,10 +108,10 @@ mod tests {
     }
 
     #[test]
-    fn status_reads_target_toggle_and_rtss() {
+    fn status_reads_target_toggle_and_fps_source() {
         let mut session = Session::default();
         assert!(!session.notices && !session.overlay_stats, "nothing shows before the first status");
-        let status = json!({"type":"status","state":"recording","overlay_stats":true,"rtss":"running","save_seconds":120,
+        let status = json!({"type":"status","state":"recording","overlay_stats":true,"fps_source":"etw","save_seconds":120,
             "overlay":{"enabled":false,"corner":"top-right","running":true,"stats_style":"minimal"},
             "target":{"name":"VALORANT","exe":"VALORANT-Win64-Shipping.exe","pid":42,"hwnd":1234}});
         assert!(session.apply_status(&status));
@@ -120,7 +120,7 @@ mod tests {
         assert!(!session.notices, "overlay.enabled = false gates the notices");
         assert_eq!(session.stats_style, "minimal");
         assert_eq!((session.target_pid, session.target_hwnd), (Some(42), Some(1234)));
-        assert_eq!((session.game_key().as_str(), session.rtss.as_str()), ("valorant", "running"));
+        assert_eq!((session.game_key().as_str(), session.fps_source.as_str()), ("valorant", "etw"));
     }
 
     #[test]
@@ -129,7 +129,7 @@ mod tests {
         session.apply_status(&json!({"type":"status","state":"recording","target":{"name":"Desktop","exe":null,"pid":null}}));
         assert!(session.desktop && !session.overlay_stats);
         assert!(session.notices, "a status without `overlay` keeps notices on (pre-island controller)");
-        assert_eq!((session.target_pid, session.game_key().as_str(), session.rtss.as_str()), (None, "", ""));
+        assert_eq!((session.target_pid, session.game_key().as_str(), session.fps_source.as_str()), (None, "", ""));
         session.apply_status(&json!({"type":"status","state":"waiting","target":null}));
         assert!(!session.desktop && session.target_name.is_empty());
     }

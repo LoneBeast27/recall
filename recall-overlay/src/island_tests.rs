@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::time::Duration;
 
 fn status_with(notices: bool, stats: bool) -> Value {
-    json!({"mod":"session","event":{"type":"status","state":"recording","overlay_stats":stats,"rtss":"running",
+    json!({"mod":"session","event":{"type":"status","state":"recording","overlay_stats":stats,"fps_source":"etw",
         "overlay":{"enabled":notices,"corner":"top-right","running":true,"stats_style":"minimal"},
         "target":{"name":"VALORANT","exe":"VALORANT-Win64-Shipping.exe","pid":42}}})
 }
@@ -134,13 +134,20 @@ fn stats_content_reads_session_buffer_and_sample() {
     let st = stats_content(&reducer, &sample);
     assert!(st.recording && !st.paused);
     assert_eq!((st.replay_secs, st.fps, st.low1, st.fps_note), (120, Some(144), Some(98), None));
-    let missing = StatsSnapshot { rtss_read: "no_memory".into(), ..Default::default() };
-    assert_eq!(stats_content(&reducer, &missing).fps_note.as_deref(), Some("No RTSS"));
-    let mut off = reducer;
-    off.apply_envelope(&json!({"mod":"session","event":{"type":"status","state":"paused","overlay_stats":true,"rtss":"off"}}), now);
-    let st = stats_content(&off, &missing);
+    let refused = StatsSnapshot { fps_source: FpsSource::NoPermission, ..Default::default() };
+    assert_eq!(stats_content(&reducer, &refused).fps_note.as_deref(), Some("No frame timing"), "the overlay's own refusal");
+    let waiting = StatsSnapshot { fps_source: FpsSource::Etw, ..Default::default() };
+    assert_eq!(stats_content(&reducer, &waiting).fps_note, None, "no frames yet: a plain dash, no note");
+    let mut paused = reducer;
+    paused.apply_envelope(
+        &json!({"mod":"session","event":{"type":"status","state":"paused","overlay_stats":true,"fps_source":"no_permission"}}),
+        now,
+    );
+    let st = stats_content(&paused, &waiting);
     assert!(st.paused && !st.recording);
-    assert_eq!(st.fps_note.as_deref(), Some("RTSS off"));
+    assert_eq!(st.fps_note.as_deref(), Some("No frame timing"), "the controller's permission check");
+    let measured = StatsSnapshot { fps: Some(60), ..waiting };
+    assert_eq!(stats_content(&paused, &measured).fps_note, None, "a framerate never carries a note");
 }
 
 const W: f32 = 300.0;

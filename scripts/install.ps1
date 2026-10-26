@@ -12,27 +12,21 @@
     *.dll               FFmpeg runtime
     bin\ffmpeg.exe, ffprobe.exe (+ DLLs)  thumbnails and scrub frames
     cache\              created by the app; capped (Settings → Storage)
-  Recall's RTSS (performance stats, step 5b) lives in %ProgramFiles%\Recall\rtss, never here.
 
   Usage (PowerShell):
-    powershell -NoProfile -File scripts\install.ps1 [-InstallDir <path on an SSD>] [-NoBuild] [-NoShortcut] [-NoAutostart] [-NoRtss]
+    powershell -NoProfile -File scripts\install.ps1 [-InstallDir <path on an SSD>] [-NoBuild] [-NoShortcut] [-NoAutostart] [-NoFrameTiming]
   Default install folder: %LOCALAPPDATA%\Programs\Recall (per-user, no admin rights).
   After installing, the installed recorder starts and is set to start with Windows
   (Settings > General turns that off; -NoAutostart skips it).
   Builds run through nice-build.ps1 (CCD1, BelowNormal) so a running game is not disturbed.
 
-  Performance stats (step 5b, personal install only; -NoRtss skips it): when RivaTuner
-  Statistics Server is installed, ONE administrator prompt copies it to
-  %ProgramFiles%\Recall\rtss (admin-only writable), makes that copy measurement-only (no OSD,
-  no framerate limit, no scanline sync, no Reflex injection; RTSS's binaries are not modified)
-  and registers two on-demand tasks with highest privileges: "Recall RTSS start" (runs that
-  RTSS.exe) and "Recall RTSS stop" (stops only RTSS processes in that folder). A reinstall skips
-  the prompt while the copy matches your RTSS version and both tasks exist. The recorder runs
-  the tasks when stats turn on / off, without prompts. Details: install-rtss.ps1. Your own
-  "RTSS" / "MSIAfterburner" tasks and your RTSS in Program Files (x86) are never changed; RTSS
-  is never copied into %LOCALAPPDATA%\Programs\Recall, the repo or dist.
+  Performance stats (step 5b; -NoFrameTiming skips it): FPS and 1% low come from Windows frame
+  timing, the present events Windows itself logs (the method Intel PresentMon and NVIDIA
+  FrameView use: no hooks, nothing injected into the game). Reading them needs the local group
+  Performance Log Users (SID S-1-5-32-559). When you are not in it, ONE administrator prompt
+  adds you; it takes effect at your next sign-in. Declining the prompt only leaves FPS as "-".
 #>
-param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$NoAutostart, [switch]$NoRtss)
+param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$NoAutostart, [switch]$NoFrameTiming)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $stage = Join-Path $repo 'dist'
@@ -115,12 +109,37 @@ New-Item -ItemType Directory -Force -Path $InstallDir, (Join-Path $InstallDir 'b
 Get-ChildItem $stage -File | ForEach-Object { Copy-Item $_.FullName $InstallDir -Force }
 Get-ChildItem (Join-Path $stage 'bin') -File | ForEach-Object { Copy-Item $_.FullName (Join-Path $InstallDir 'bin') -Force }
 
-# 5b. RTSS for the performance-stats island (helpers in install-rtss.ps1).
-if (-not $NoRtss) {
-  try {
-    . (Join-Path $PSScriptRoot 'install-rtss.ps1')
-    Install-RecallRtss -InstallDir $InstallDir -Repo $repo
-  } catch { Write-Warning "RTSS step skipped: $($_.Exception.Message). Performance stats show '-' for FPS until it is set up (re-run the installer)." }
+# 5b. Frame timing for the performance-stats island: membership in Performance Log Users.
+$perfLogUsers = 'S-1-5-32-559'
+function Test-PerfLogMember([string]$userSid) {
+  # Already in the group (whether or not this sign-in's token has it yet).
+  try { [bool](Get-LocalGroupMember -SID $perfLogUsers -ErrorAction Stop | Where-Object { $_.SID.Value -eq $userSid }) }
+  catch { $false }
+}
+if (-not $NoFrameTiming) {
+  $me = [Security.Principal.WindowsIdentity]::GetCurrent()
+  $userSid = $me.User.Value
+  if ($me.Groups | Where-Object { $_.Value -eq $perfLogUsers }) {
+    'Frame timing: you are in Performance Log Users; the stats island shows FPS.'
+  } elseif (Test-PerfLogMember $userSid) {
+    'Frame timing: you are in Performance Log Users; FPS shows after your next sign-in.'
+  } else {
+    # One elevated prompt runs exactly this; an existing membership counts as success.
+    $add = "try { Add-LocalGroupMember -SID '$perfLogUsers' -Member '$userSid' -ErrorAction Stop; exit 0 } " +
+      "catch { if (`$_.FullyQualifiedErrorId -like 'MemberExists*') { exit 0 }; exit 1 }"
+    $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($add))
+    try {
+      $elevated = Start-Process powershell -Verb RunAs -Wait -PassThru -WindowStyle Hidden `
+        -ArgumentList @('-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded)
+      if ($elevated.ExitCode -eq 0 -and (Test-PerfLogMember $userSid)) {
+        'Frame timing: added you to Performance Log Users. FPS shows after your next sign-in.'
+      } else {
+        Write-Warning "Frame timing: adding you to Performance Log Users failed (exit $($elevated.ExitCode)). FPS shows '-' until it is done (re-run the installer)."
+      }
+    } catch {
+      Write-Warning "Frame timing: the administrator prompt was declined ($($_.Exception.Message)). FPS shows '-' until you re-run the installer."
+    }
+  }
 }
 
 if (-not $NoShortcut) {

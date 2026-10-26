@@ -1,7 +1,7 @@
 {
   "_about": "Connected, notices on, stats off, nothing happening: the island stays hidden; measures idle cost.",
   "events": [
-    {"mod": "session", "event": {"type": "status", "state": "recording", "overlay": {"enabled": true, "stats_style": "minimal"}, "overlay_stats": false, "rtss": "off", "save_seconds": 120, "target": {"name": "VALORANT", "exe": "VALORANT-Win64-Shipping.exe", "pid": null}}}
+    {"mod": "session", "event": {"type": "status", "state": "recording", "overlay": {"enabled": true, "stats_style": "minimal"}, "overlay_stats": false, "fps_source": "off", "save_seconds": 120, "target": {"name": "VALORANT", "exe": "VALORANT-Win64-Shipping.exe", "pid": null}}}
   ],
   "exit_ms": 10000
 }

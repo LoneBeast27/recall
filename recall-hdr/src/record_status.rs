@@ -14,7 +14,7 @@
 //!  "pending_restart":B,   // a settings restart / retarget waits for a save / long recording to end
 //!  "overlay":{"enabled":B,"corner":S,"running":B,"stats_style":S},"autostart":B,
 //!  "overlay_stats":B,     // the performance-stats island is on
-//!  "rtss":"off|starting|running|missing|needs_setup",   // `rtss_ctl`
+//!  "fps_source":"etw|no_permission|off",   // `frame_timing` (off while stats are off)
 //!  "storage":{"cap_gb":N},
 //!  "hdr":{"available":B,"display":S|null,"hdr_on":B,"manual_pin":B,"auto":B}}
 //! ```
@@ -38,8 +38,8 @@ pub struct StatusInputs<'a> {
     pub cfg: &'a Config,
     pub mic_muted: bool,
     pub overlay_running: bool,
-    /// `RtssState::as_str` ("off" while stats are off).
-    pub rtss: &'a str,
+    /// `frame_timing::FpsSource::as_str` ("off" while stats are off).
+    pub fps_source: &'a str,
     pub hdr: &'a HdrSnapshot,
     pub paused: bool,
     /// `EngineActivity::long_recording_json`.
@@ -120,7 +120,7 @@ pub fn status_json(i: &StatusInputs) -> Value {
             "stats_style": cfg.overlay.stats_style,
         },
         "overlay_stats": cfg.overlay.stats,
-        "rtss": i.rtss,
+        "fps_source": i.fps_source,
         "autostart": cfg.startup.autostart,
         "storage": {"cap_gb": cfg.storage.cap_gb},
         "hdr": i.hdr.to_json(),
@@ -189,7 +189,7 @@ mod tests {
             cfg: &cfg,
             mic_muted: true,
             overlay_running: false,
-            rtss: "off",
+            fps_source: "off",
             hdr: &snap,
             paused: false,
             long_recording: json!({"active":true,"path":"V:\\c\\G__rec.mp4","started_secs":1790000000.5}),
@@ -210,7 +210,7 @@ mod tests {
                 "long_recording":{"active":true,"path":"V:\\c\\G__rec.mp4","started_secs":1790000000.5},
                 "pending_restart":true,
                 "overlay":{"enabled":false,"corner":"top-right","running":false,"stats_style":"minimal"},
-                "overlay_stats":false,"rtss":"off",
+                "overlay_stats":false,"fps_source":"off",
                 "autostart":false,
                 "storage":{"cap_gb":0},
                 "hdr":{"available":false,"display":null,"hdr_on":false,"manual_pin":false,"auto":false}
@@ -219,7 +219,7 @@ mod tests {
     }
 
     #[test]
-    fn stats_fields_follow_the_config_and_the_rtss_state() {
+    fn stats_fields_follow_the_config_and_the_fps_source() {
         let mut cfg = Config::default();
         cfg.overlay.stats = true;
         let snap = hdr();
@@ -231,7 +231,7 @@ mod tests {
             cfg: &cfg,
             mic_muted: false,
             overlay_running: true,
-            rtss: "needs_setup",
+            fps_source: "no_permission",
             hdr: &snap,
             paused: false,
             long_recording: json!({"active":false,"path":null,"started_secs":null}),
@@ -239,7 +239,8 @@ mod tests {
             leader_label: "Alt `",
         });
         assert_eq!(v["overlay_stats"], true);
-        assert_eq!(v["rtss"], "needs_setup");
+        assert_eq!(v["fps_source"], "no_permission");
+        assert!(v.get("rtss").is_none(), "the RTSS field is gone");
         assert_eq!(v["overlay"], json!({"enabled":false,"corner":"top-right","running":true,"stats_style":"minimal"}));
     }
 

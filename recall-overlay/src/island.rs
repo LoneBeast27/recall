@@ -8,6 +8,7 @@ use crate::layout::StatsContent;
 use crate::notice::NoticeView;
 use crate::reducer::{OverlayView, RecorderState, Reducer};
 use crate::session::Session;
+use crate::stats::frame_timing::FpsSource;
 use crate::stats::StatsSnapshot;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -48,24 +49,18 @@ pub fn stats_content(reducer: &Reducer, stats: &StatsSnapshot) -> StatsContent {
         replay_secs: reducer.buffer_secs(),
         fps: stats.fps,
         low1: stats.low1,
-        fps_note: stats.fps.is_none().then(|| fps_note(&session.rtss, &stats.rtss_read)).flatten(),
+        fps_note: stats.fps.is_none().then(|| fps_note(&session.fps_source, stats.fps_source)).flatten(),
         gpu: stats.gpu,
         gpu_temp: stats.gpu_temp,
         cpu: stats.cpu,
     }
 }
 
-/// Why there is no framerate, short enough for the "1% low" slot.
-fn fps_note(rtss: &str, read: &str) -> Option<String> {
-    let note = match (rtss, read) {
-        ("off", _) => "RTSS off",
-        ("starting", _) => "RTSS starting",
-        ("missing", _) => "No RTSS",
-        ("needs_setup", _) => "RTSS setup",
-        (_, "no_memory") => "No RTSS",
-        _ => return None,
-    };
-    Some(note.into())
+/// Why there is no framerate, short enough for the "1% low" slot: only a
+/// missing permission (the controller's `fps_source`, or the overlay's own
+/// refused session) has a note; anything else is a plain "—".
+fn fps_note(controller: &str, overlay: FpsSource) -> Option<String> {
+    (controller == "no_permission" || overlay == FpsSource::NoPermission).then(|| "No frame timing".into())
 }
 
 pub struct Island {

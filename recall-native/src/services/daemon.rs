@@ -105,9 +105,10 @@ pub struct SessionStatus {
     pub pending_restart: bool,
     /// The in-game performance-stats island is on.
     pub overlay_stats: bool,
-    /// RTSS for the stats island: "off" | "starting" | "running" | "missing" | "needs_setup"
-    /// (empty on builds without it).
-    pub rtss: String,
+    /// Where the stats island's FPS comes from: "etw" (Windows frame timing) |
+    /// "no_permission" (not in Performance Log Users) | "off" (stats off); empty
+    /// on builds without it.
+    pub fps_source: String,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

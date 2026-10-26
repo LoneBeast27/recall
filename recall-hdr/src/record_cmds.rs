@@ -15,7 +15,7 @@
 //! | `set_mic_mute` | `muted: bool` | enforced on this and every later engine |
 //! | `toggle_mic_mute` | | flips the enforced state |
 //! | `toggle_hdr` | | manual HDR pin (needs `hdr_auto` + the managed display) |
-//! | `toggle_stats` | | flips `overlay.stats` (saved; RTSS follows, tick); `config` + status broadcast |
+//! | `toggle_stats` | | flips `overlay.stats` (saved; tick); `config` + status broadcast |
 //! | `set_mode` | `value: auto|sdr|hdr` | engine tonemap selector, re-applied after restarts |
 //! | `set_ac_profile` | `variant: punchy|accurate` | `hdr` `ac_profile` result event |
 //! | `get_config` | | `config` event to the caller |
@@ -153,7 +153,7 @@ impl Controller {
 
     /// Flip the performance-stats island (pipe `toggle_stats`, chord 5). Saved
     /// like any `set_config`, so it survives restarts; the effects (tick,
-    /// RTSS, overlay process) follow in `apply_config_effects`.
+    /// overlay process) follow in `apply_config_effects`.
     pub(crate) fn toggle_stats(&mut self, client: Option<u64>) {
         let on = !self.cfg.overlay.stats;
         self.apply_config_patch(&stats_patch(on), client);
@@ -267,7 +267,6 @@ impl Controller {
         if old.overlay.stats != new.overlay.stats {
             log!("record: performance stats {}", if new.overlay.stats { "on" } else { "off" });
             crate::cues::tick();
-            self.rtss.sync(new.overlay.stats, Instant::now());
         }
         self.overlay.sync(&new.overlay);
     }
@@ -284,7 +283,7 @@ impl Controller {
             cfg: &self.cfg,
             mic_muted: self.mic_muted,
             overlay_running: self.overlay.running(),
-            rtss: self.rtss.state().as_str(),
+            fps_source: crate::frame_timing::fps_source(self.cfg.overlay.stats, self.can_trace).as_str(),
             hdr: &hdr,
             paused: self.paused,
             long_recording: self.activity.long_recording_json(),

@@ -124,7 +124,7 @@ pub struct StatsContent {
     pub replay_secs: u64,
     pub fps: Option<u32>,
     pub low1: Option<u32>,
-    /// Shown under the FPS when there is no framerate ("RTSS off").
+    /// Shown under the FPS when there is no framerate ("No frame timing").
     pub fps_note: Option<String>,
     pub gpu: Option<u32>,
     pub gpu_temp: Option<u32>,
