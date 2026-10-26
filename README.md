@@ -47,14 +47,17 @@ powershell -NoProfile -File scripts\install.ps1
 - **Old clips:** Settings → Media → Add folder lists clips from ShadowPlay, Medal, OBS or any
   folder in the library. Nothing is moved.
 
-### FPS numbers (RTSS)
+### FPS numbers (Windows frame timing)
 
-The installer copies your installed RivaTuner Statistics Server into
-`C:\Program Files\Recall\rtss` (admin-only folder, one administrator prompt) and makes that copy
-measurement-only: its own overlay, frame limits, scanline sync and Reflex injection are off.
-Recall starts it through the scheduled task "Recall RTSS start" when stats turn on and stops it
-with "Recall RTSS stop". Your own RTSS install and its settings are never touched. Without RTSS
-the Island shows "—" for FPS. `-NoRtss` skips this step.
+FPS and 1% low come from Windows' own present events (ETW), the method Intel PresentMon and
+NVIDIA FrameView use: nothing is injected into games and no extra tool runs. While stats are on,
+the overlay keeps a small trace session ("RecallFrameTiming") on the game's process; it stops
+when stats turn off. Reading these events needs the "Performance Log Users" group: the installer
+adds you through one administrator prompt (`-NoFrameTiming` skips it), and it takes effect at
+your next sign-in. Until then the Island shows "No frame timing".
+
+RTSS is not used. (An earlier build ran a private RTSS copy; exiting RTSS while a game had its
+hook loaded crashed VALORANT, so it was removed on 2026-10-26.)
 
 ## Settings
 
