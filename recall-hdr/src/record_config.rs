@@ -162,7 +162,7 @@ pub struct OverlayCfg {
     /// Show notices (saves, bookmarks, recording changes).
     pub enabled: bool,
     pub corner: String,
-    /// Show the performance-stats island (FPS via RTSS, GPU, CPU).
+    /// Show the performance-stats island (FPS via Windows frame timing, GPU, CPU).
     pub stats: bool,
     /// Gauge style of the stats island (`STATS_STYLES`).
     pub stats_style: String,

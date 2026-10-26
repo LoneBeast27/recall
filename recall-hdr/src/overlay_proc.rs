@@ -6,6 +6,8 @@
 //! also exits by itself when its `--parent` dies, so a hard-killed controller
 //! never leaves it behind. A crash-looping overlay is respawned at most every
 //! [`RESPAWN_DELAY`] and abandoned after [`MAX_QUICK_EXITS`] quick exits.
+//! An overlay that is killed or dies cannot stop its frame-timing ETW
+//! session, so the controller stops it by name then (`frame_timing`).
 
 use std::path::PathBuf;
 use std::process::{Child, Command};
@@ -111,6 +113,7 @@ impl OverlayProc {
                     self.quick_exits = 0;
                 }
                 log!("overlay: exited by itself ({} quick exit(s))", self.quick_exits);
+                crate::frame_timing::stop_session();
                 if self.quick_exits >= MAX_QUICK_EXITS {
                     log!("overlay: giving up after {MAX_QUICK_EXITS} quick exits");
                 }
@@ -125,6 +128,7 @@ impl OverlayProc {
             let _ = child.kill();
             let _ = child.wait();
             log!("overlay: stopped");
+            crate::frame_timing::stop_session();
         }
     }
 }

@@ -65,7 +65,7 @@ impl Root {
         let stats_on = self.stats_on();
         let leader = if session.leader_label.is_empty() { "Alt `".to_owned() } else { session.leader_label.clone() };
         let stats_detail = format!("FPS and 1% low, GPU and CPU in a small island over your game. {leader} then 5 also turns it on or off.");
-        let rtss = rtss_status(&session.rtss).filter(|_| stats_on).map(|(text, color)| {
+        let fps_line = fps_source_status(&session.fps_source).filter(|_| stats_on).map(|(text, color)| {
             div()
                 .flex()
                 .items_center()
@@ -103,7 +103,7 @@ impl Root {
                 })))
                 .into_any_element(),
         ];
-        items.extend(rtss);
+        items.extend(fps_line);
         items.extend([
             setting_row("Corner", "").child(corners).into_any_element(),
             section_title("Recorder"),
@@ -238,14 +238,12 @@ fn short_length(secs: u64) -> String {
     }
 }
 
-/// The one-line RTSS status under the Performance stats switch (status `rtss`); none
-/// while stats are off or on controllers without it.
-pub(crate) fn rtss_status(rtss: &str) -> Option<(&'static str, u32)> {
-    Some(match rtss {
-        "running" => ("RTSS running", theme::ACTIVE),
-        "starting" => ("Starting RTSS…", theme::MUTED),
-        "needs_setup" => ("RTSS not set up — run the installer", theme::WARNING),
-        "missing" => ("RTSS not found", theme::WARNING),
+/// The one-line FPS source under the Performance stats switch (status
+/// `fps_source`); none while stats are off or on controllers without it.
+pub(crate) fn fps_source_status(fps_source: &str) -> Option<(&'static str, u32)> {
+    Some(match fps_source {
+        "etw" => ("FPS from Windows frame timing", theme::ACTIVE),
+        "no_permission" => ("FPS needs Performance Log Users — run the installer", theme::WARNING),
         _ => return None,
     })
 }
@@ -255,12 +253,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rtss_status_lines() {
-        assert_eq!(rtss_status("running").map(|s| s.0), Some("RTSS running"));
-        assert_eq!(rtss_status("needs_setup").map(|s| s.0), Some("RTSS not set up — run the installer"));
-        assert_eq!(rtss_status("missing").map(|s| s.0), Some("RTSS not found"));
-        assert_eq!(rtss_status("starting").map(|s| s.1), Some(theme::MUTED));
-        assert_eq!(rtss_status("off"), None);
-        assert_eq!(rtss_status(""), None, "older controllers say nothing");
+    fn fps_source_status_lines() {
+        assert_eq!(fps_source_status("etw"), Some(("FPS from Windows frame timing", theme::ACTIVE)));
+        assert_eq!(
+            fps_source_status("no_permission"),
+            Some(("FPS needs Performance Log Users — run the installer", theme::WARNING))
+        );
+        assert_eq!(fps_source_status("off"), None);
+        assert_eq!(fps_source_status(""), None, "older controllers say nothing");
+        assert_eq!(fps_source_status("running"), None, "old RTSS states are not shown");
     }
 }

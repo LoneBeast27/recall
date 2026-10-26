@@ -52,7 +52,7 @@ const WM_FEED: u32 = WM_APP + 1;
 const CORNERS: [&str; 4] = ["top-left", "top-right", "bottom-left", "bottom-right"];
 const USAGE: &str = "usage: recall-overlay --parent PID [--corner top-left|top-right|bottom-left|bottom-right] \
 [--diagnostics PATH] | --smoke-state FIXTURE.json [--smoke-allow-capture] [--smoke-render PATH.bmp] [--diagnostics PATH] \
-| --preview-sheet PATH.bmp [--preview-scale S]";
+| --preview-sheet PATH.bmp [--preview-scale S] | --frame-timing-probe PID [--probe-seconds N]";
 
 #[derive(Debug, Default)]
 struct Options {
@@ -65,6 +65,9 @@ struct Options {
     smoke_render: Option<PathBuf>,
     preview_sheet: Option<PathBuf>,
     preview_scale: Option<f32>,
+    /// `--frame-timing-probe PID`: measure one process's FPS, print, exit.
+    probe_pid: Option<u32>,
+    probe_seconds: Option<u64>,
 }
 
 thread_local! {
@@ -83,8 +86,12 @@ fn run() -> Result<(), String> {
     unsafe {
         let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     }
+    stats::install_cleanup();
     if let Some(path) = options.preview_sheet.as_ref() {
         return preview::sheet(path, options.preview_scale.unwrap_or(1.0));
+    }
+    if let Some(pid) = options.probe_pid {
+        return stats::probe::run(pid, options.probe_seconds.unwrap_or(5));
     }
     if options.parent.is_none() && options.smoke_state.is_none() {
         return Err("--parent PID is required outside --smoke-state test mode".into());
@@ -182,6 +189,14 @@ fn parse_args() -> Result<Options, String> {
             "--preview-scale" => {
                 let raw = value("a number")?;
                 options.preview_scale = Some(raw.parse().map_err(|_| format!("invalid scale: {raw}"))?);
+            }
+            "--frame-timing-probe" => {
+                let raw = value("a PID")?;
+                options.probe_pid = Some(raw.parse().map_err(|_| format!("invalid PID: {raw}"))?);
+            }
+            "--probe-seconds" => {
+                let raw = value("a number")?;
+                options.probe_seconds = Some(raw.parse().map_err(|_| format!("invalid seconds: {raw}"))?);
             }
             "--help" | "-h" => return Err(USAGE.into()),
             _ => return Err(format!("unknown argument: {arg}\n{USAGE}")),

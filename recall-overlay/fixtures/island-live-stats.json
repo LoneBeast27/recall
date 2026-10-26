@@ -1,7 +1,7 @@
 {
-  "_about": "Stats island with the LIVE sources (RTSS shared memory, NVML, GetSystemTimes) and no notices; measures the polling cost.",
+  "_about": "Stats island with the LIVE sources (Windows frame timing via ETW, NVML, GetSystemTimes) and no notices; measures the polling cost.",
   "events": [
-    {"mod": "session", "event": {"type": "status", "state": "recording", "overlay": {"enabled": false, "stats_style": "minimal"}, "overlay_stats": true, "rtss": "running", "save_seconds": 120, "target": {"name": "Desktop", "exe": null, "pid": null}}},
+    {"mod": "session", "event": {"type": "status", "state": "recording", "overlay": {"enabled": false, "stats_style": "minimal"}, "overlay_stats": true, "fps_source": "etw", "save_seconds": 120, "target": {"name": "Desktop", "exe": null, "pid": null}}},
     {"mod": "engine", "event": {"type": "status", "source": "Desktop", "fps": 60, "buffer_secs": 120.0, "encoder": "h264_nvenc"}}
   ],
   "hold": true,

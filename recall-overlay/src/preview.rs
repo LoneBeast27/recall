@@ -159,9 +159,9 @@ fn stats_states() -> Vec<StatsContent> {
     vec![
         base.clone(),
         StatsContent { fps: Some(237), low1: Some(181), gpu: Some(97), gpu_temp: Some(86), cpu: Some(61), ..base.clone() },
-        StatsContent { fps: None, low1: None, fps_note: Some("No RTSS".into()), gpu: None, gpu_temp: None, ..base.clone() },
+        StatsContent { fps: None, low1: None, fps_note: Some("No frame timing".into()), gpu: None, gpu_temp: None, ..base.clone() },
         StatsContent { recording: false, paused: true, replay_secs: 47, ..base.clone() },
-        StatsContent { fps: None, low1: None, fps_note: Some("RTSS starting".into()), cpu: None, ..base },
+        StatsContent { fps: None, low1: None, cpu: None, ..base },
     ]
 }
 

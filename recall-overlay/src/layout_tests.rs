@@ -111,9 +111,9 @@ fn hot_gpu_turns_amber_and_missing_sources_degrade() {
     let cool = stats_scene(&StatsContent { gpu_temp: Some(HOT_GPU_C - 1), ..stats() }, 1.0, &Fake);
     assert_eq!(text(&cool, "82°C").color, TEXT);
 
-    let bare = StatsContent { fps: None, low1: None, fps_note: Some("RTSS off".into()), gpu: None, cpu: None, ..stats() };
+    let bare = StatsContent { fps: None, low1: None, fps_note: Some("No frame timing".into()), gpu: None, cpu: None, ..stats() };
     let scene = stats_scene(&bare, 1.0, &Fake);
-    text(&scene, "RTSS off");
+    text(&scene, "No frame timing");
     assert_eq!(scene.texts.iter().filter(|t| t.text == "—").count(), 2, "FPS and the CPU ring show dashes");
     assert!(!scene.texts.iter().any(|t| t.text == "GPU"), "no NVML → no GPU ring");
     assert_eq!(scene.shapes.iter().filter(|s| matches!(s, Shape::Ring { .. })).count(), 1);

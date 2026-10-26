@@ -63,16 +63,16 @@ fn stats_island_status_fields_parse_and_default_on_older_controllers() {
     apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"waiting","save_seconds":120}}));
     let old = state.snapshot.session.clone().unwrap();
     assert!(!old.overlay_stats, "older controllers: stats off");
-    assert_eq!(old.rtss, "", "older controllers: no RTSS state");
-    apply(&mut state, json!({"mod":"session","event":{"type":"status","overlay_stats":true,"rtss":"needs_setup",
+    assert_eq!(old.fps_source, "", "older controllers: no FPS source");
+    apply(&mut state, json!({"mod":"session","event":{"type":"status","overlay_stats":true,"fps_source":"no_permission",
         "overlay":{"enabled":false,"corner":"top-right","running":true,"stats_style":"minimal"}}}));
     let session = state.snapshot.session.clone().unwrap();
     assert!(session.overlay_stats);
-    assert_eq!(session.rtss, "needs_setup");
+    assert_eq!(session.fps_source, "no_permission");
     assert!(session.overlay.running && !session.overlay.enabled, "unknown stats_style is ignored");
     assert_eq!(session.save_seconds, 120, "earlier fields kept");
-    apply(&mut state, json!({"mod":"session","event":{"type":"status","rtss":"running"}}));
-    assert_eq!(state.snapshot.session.as_ref().unwrap().rtss, "running");
+    apply(&mut state, json!({"mod":"session","event":{"type":"status","fps_source":"etw"}}));
+    assert_eq!(state.snapshot.session.as_ref().unwrap().fps_source, "etw");
     assert!(state.snapshot.session.as_ref().unwrap().overlay_stats);
     apply(&mut state, json!({"mod":"session","event":{"type":"status","overlay_stats":"yes"}}));
     assert!(!state.snapshot.session.as_ref().unwrap().overlay_stats, "a wrong shape drops to the default");
