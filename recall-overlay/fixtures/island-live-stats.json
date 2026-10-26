@@ -1,0 +1,9 @@
+{
+  "_about": "Stats island with the LIVE sources (RTSS shared memory, NVML, GetSystemTimes) and no notices; measures the polling cost.",
+  "events": [
+    {"mod": "session", "event": {"type": "status", "state": "recording", "overlay": {"enabled": false, "stats_style": "minimal"}, "overlay_stats": true, "rtss": "running", "save_seconds": 120, "target": {"name": "Desktop", "exe": null, "pid": null}}},
+    {"mod": "engine", "event": {"type": "status", "source": "Desktop", "fps": 60, "buffer_secs": 120.0, "encoder": "h264_nvenc"}}
+  ],
+  "hold": true,
+  "exit_ms": 10000
+}

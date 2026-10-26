@@ -1,53 +1,27 @@
-//! The overlay window itself: corner placement on the primary monitor's work
-//! area and the layered, click-through, no-activate topmost popup.
+//! The overlay window: a layered, click-through, no-activate, topmost tool
+//! popup whose pixels come from `UpdateLayeredWindow` (so it must never call
+//! `SetLayeredWindowAttributes`), and the monitor the island sits on.
 
-use windows::core::w;
-use windows::Win32::Foundation::{COLORREF, HINSTANCE, HWND, POINT};
-use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTOPRIMARY};
-use windows::Win32::UI::HiDpi::GetDpiForSystem;
+use windows::core::{w, BOOL};
+use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, POINT};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MonitorFromWindow, HMONITOR, MONITORINFO, MONITOR_DEFAULTTOPRIMARY,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, LoadCursorW, RegisterClassW, SetLayeredWindowAttributes, CS_HREDRAW,
-    CS_VREDRAW, IDC_ARROW, LWA_ALPHA, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, EnumWindows, GetWindowRect, GetWindowThreadProcessId, IsWindow, IsWindowVisible, LoadCursorW,
+    RegisterClassW, IDC_ARROW, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST,
+    WS_EX_TRANSPARENT, WS_POPUP,
 };
 
-use crate::{window_proc, Corner, HEIGHT_DIP, MARGIN_DIP, WIDTH_DIP};
+use crate::placement::Rect;
+use crate::window_proc;
 
-pub(super) fn window_bounds(corner: Corner) -> Result<(i32, i32, i32, i32), String> {
-    unsafe {
-        let dpi = GetDpiForSystem().max(96) as i32;
-        let scale = |dip: i32| dip * dpi / 96;
-        let monitor = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-        let mut info = MONITORINFO {
-            cbSize: std::mem::size_of::<MONITORINFO>() as u32,
-            ..Default::default()
-        };
-        if !GetMonitorInfoW(monitor, &mut info).as_bool() {
-            return Err("GetMonitorInfoW failed".into());
-        }
-        let width = scale(WIDTH_DIP);
-        let height = scale(HEIGHT_DIP);
-        let margin = scale(MARGIN_DIP);
-        let left = info.rcWork.left + margin;
-        let right = info.rcWork.right - margin - width;
-        let top = info.rcWork.top + margin;
-        let bottom = info.rcWork.bottom - margin - height;
-        Ok(match corner {
-            Corner::TopLeft => (left, top, width, height),
-            Corner::TopRight => (right, top, width, height),
-            Corner::BottomLeft => (left, bottom, width, height),
-            Corner::BottomRight => (right, bottom, width, height),
-        })
-    }
-}
-
-pub(super) fn create_window(x: i32, y: i32, width: i32, height: i32) -> Result<HWND, String> {
+pub(super) fn create_window() -> Result<HWND, String> {
     unsafe {
         let module = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
             .map_err(|e| format!("GetModuleHandleW: {e}"))?;
         let instance = HINSTANCE(module.0);
         let class = WNDCLASSW {
-            style: CS_HREDRAW | CS_VREDRAW,
             lpfnWndProc: Some(window_proc),
             hInstance: instance,
             hCursor: LoadCursorW(None, IDC_ARROW).unwrap_or_default(),
@@ -57,25 +31,73 @@ pub(super) fn create_window(x: i32, y: i32, width: i32, height: i32) -> Result<H
         if RegisterClassW(&class) == 0 {
             return Err("RegisterClassW failed".into());
         }
-        let extended =
-            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
-        let hwnd = CreateWindowExW(
+        let extended = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST;
+        CreateWindowExW(
             extended,
             w!("RecallNativeStatusOverlay"),
             w!("Recall status"),
             WS_POPUP,
-            x,
-            y,
-            width,
-            height,
+            0,
+            0,
+            1,
+            1,
             None,
             None,
             Some(instance),
             None,
         )
-        .map_err(|e| format!("CreateWindowExW: {e}"))?;
-        SetLayeredWindowAttributes(hwnd, COLORREF(0), 244, LWA_ALPHA)
-            .map_err(|e| format!("SetLayeredWindowAttributes: {e}"))?;
-        Ok(hwnd)
+        .map_err(|e| format!("CreateWindowExW: {e}"))
     }
+}
+
+/// The monitor of the game window (`hwnd`, else the pid's largest visible
+/// top-level window), else the primary monitor.
+pub(super) fn target_monitor(hwnd: Option<isize>, pid: Option<u32>) -> Rect {
+    let window = hwnd
+        .map(|h| HWND(h as *mut _))
+        .filter(|&h| unsafe { IsWindow(Some(h)).as_bool() })
+        .or_else(|| pid.and_then(main_window_of));
+    let monitor = match window {
+        Some(window) => unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY) },
+        None => unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) },
+    };
+    monitor_rect(monitor)
+}
+
+fn monitor_rect(monitor: HMONITOR) -> Rect {
+    let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
+    if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
+        return Rect { left: 0, top: 0, right: 1920, bottom: 1080 };
+    }
+    let r = info.rcMonitor;
+    Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
+}
+
+struct Search {
+    pid: u32,
+    best: Option<(HWND, i64)>,
+}
+
+fn main_window_of(pid: u32) -> Option<HWND> {
+    let mut search = Search { pid, best: None };
+    unsafe {
+        let _ = EnumWindows(Some(visit), LPARAM(&mut search as *mut Search as isize));
+    }
+    search.best.map(|(hwnd, _)| hwnd)
+}
+
+unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
+    let search = unsafe { &mut *(lparam.0 as *mut Search) };
+    let mut owner = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut owner as *mut u32)) };
+    if owner == search.pid && unsafe { IsWindowVisible(hwnd) }.as_bool() {
+        let mut rect = Default::default();
+        if unsafe { GetWindowRect(hwnd, &mut rect) }.is_ok() {
+            let area = i64::from(rect.right - rect.left) * i64::from(rect.bottom - rect.top);
+            if search.best.is_none_or(|(_, best)| area > best) {
+                search.best = Some((hwnd, area));
+            }
+        }
+    }
+    BOOL(1)
 }
