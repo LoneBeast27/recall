@@ -29,6 +29,9 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     # Advanced-shortcut chord: physical-key layout lookup + async key scan.
     "Win32_UI_Input_KeyboardAndMouse",
+    # Recall Island RTSS control: find RTSS.exe and read its shared-memory signature.
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Memory",
 ] }
 
 # Config + rule persistence (Wave 1+) and structured log lines.

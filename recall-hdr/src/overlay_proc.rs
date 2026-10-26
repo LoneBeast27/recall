@@ -1,6 +1,8 @@
-//! The controller-owned `recall-overlay.exe` toast process: spawned with
-//! `--corner <c> --parent <controller pid>` while `overlay.enabled`, restarted
-//! when the corner changes, stopped when disabled, killed on quit. The overlay
+//! The controller-owned `recall-overlay.exe` (Recall Island) process: spawned
+//! with `--corner <c> --parent <controller pid>` while notices
+//! (`overlay.enabled`) or the stats island (`overlay.stats`) are on (it reads
+//! which from the session status), restarted when the corner changes,
+//! stopped when both are off, killed on quit. The overlay
 //! also exits by itself when its `--parent` dies, so a hard-killed controller
 //! never leaves it behind. A crash-looping overlay is respawned at most every
 //! [`RESPAWN_DELAY`] and abandoned after [`MAX_QUICK_EXITS`] quick exits.
@@ -53,7 +55,7 @@ impl OverlayProc {
     /// Call on config change and every pump tick.
     pub fn sync(&mut self, cfg: &OverlayCfg) {
         self.reap();
-        if !cfg.enabled {
+        if !cfg.wants_process() {
             self.stop();
             self.quick_exits = 0;
             return;
@@ -145,9 +147,18 @@ mod tests {
     #[test]
     fn disabled_or_missing_exe_never_spawns() {
         let mut o = OverlayProc { exe: None, child: None, quick_exits: 0, not_before: None };
-        o.sync(&OverlayCfg { enabled: true, corner: "top-right".into() });
+        o.sync(&OverlayCfg { enabled: true, ..OverlayCfg::default() });
         assert!(!o.running(), "no exe -> nothing spawned");
         o.sync(&OverlayCfg::default());
         assert!(!o.running());
+    }
+
+    #[test]
+    fn notices_or_stats_want_the_process() {
+        let off = OverlayCfg::default();
+        assert!(!off.wants_process());
+        assert!(OverlayCfg { enabled: true, ..off.clone() }.wants_process());
+        assert!(OverlayCfg { stats: true, ..off.clone() }.wants_process(), "stats alone start the overlay");
+        assert!(OverlayCfg { enabled: true, stats: true, ..off }.wants_process());
     }
 }

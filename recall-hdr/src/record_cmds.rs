@@ -15,13 +15,17 @@
 //! | `set_mic_mute` | `muted: bool` | enforced on this and every later engine |
 //! | `toggle_mic_mute` | | flips the enforced state |
 //! | `toggle_hdr` | | manual HDR pin (needs `hdr_auto` + the managed display) |
+//! | `toggle_stats` | | flips `overlay.stats` (saved; RTSS follows, tick); `config` + status broadcast |
 //! | `set_mode` | `value: auto|sdr|hdr` | engine tonemap selector, re-applied after restarts |
 //! | `set_ac_profile` | `variant: punchy|accurate` | `hdr` `ac_profile` result event |
 //! | `get_config` | | `config` event to the caller |
 //! | `set_config` | `patch: {...}` | validated deep-merge, saved; `config` + status broadcast |
 //!
 //! Rejected commands get `{"type":"error","message":S}` (mod `session`) sent to
-//! the requesting client only.
+//! the requesting client only. Recording changes also broadcast a `session`
+//! `notice` (`record_notice`) while `overlay.enabled`.
+
+use std::time::Instant;
 
 use serde_json::{json, Value};
 
@@ -31,8 +35,15 @@ use crate::hdr_exec;
 use crate::log;
 use crate::record_app::{apply_affinity, Controller};
 use crate::record_config::{apply_patch, parse_cpu_mask};
+use crate::record_notice::{notice_json, Situation};
 use crate::record_status::{config_event, error_event, status_json, tray_line, StatusInputs};
 use crate::record_engine::{capture_refusal, engine_settings_changed};
+use crate::supervisor::EngineHealth;
+
+/// The `set_config` patch that turns the performance-stats island on or off.
+pub fn stats_patch(on: bool) -> Value {
+    json!({"overlay": {"stats": on}})
+}
 
 impl Controller {
     /// Execute one pipe command on the pump thread.
@@ -78,6 +89,7 @@ impl Controller {
                 None => self.reply_error(client, "set_mic_mute needs \"muted\": true|false"),
             },
             "toggle_mic_mute" => self.set_mic(!self.mic_muted),
+            "toggle_stats" => self.toggle_stats(client),
             "toggle_hdr" => {
                 if let Err(e) = self.hdr.toggle() {
                     self.reply_error(client, &e);
@@ -137,6 +149,14 @@ impl Controller {
                 .to_string(),
             );
         }
+    }
+
+    /// Flip the performance-stats island (pipe `toggle_stats`, chord 5). Saved
+    /// like any `set_config`, so it survives restarts; the effects (tick,
+    /// RTSS, overlay process) follow in `apply_config_effects`.
+    pub(crate) fn toggle_stats(&mut self, client: Option<u64>) {
+        let on = !self.cfg.overlay.stats;
+        self.apply_config_patch(&stats_patch(on), client);
     }
 
     /// Enforce a microphone state now and on every future engine instance.
@@ -244,6 +264,11 @@ impl Controller {
         if old.display.target_friendly_name != new.display.target_friendly_name {
             log!("record: display.target_friendly_name applies after a restart");
         }
+        if old.overlay.stats != new.overlay.stats {
+            log!("record: performance stats {}", if new.overlay.stats { "on" } else { "off" });
+            crate::cues::tick();
+            self.rtss.sync(new.overlay.stats, Instant::now());
+        }
         self.overlay.sync(&new.overlay);
     }
 
@@ -259,6 +284,7 @@ impl Controller {
             cfg: &self.cfg,
             mic_muted: self.mic_muted,
             overlay_running: self.overlay.running(),
+            rtss: self.rtss.state().as_str(),
             hdr: &hdr,
             paused: self.paused,
             long_recording: self.activity.long_recording_json(),
@@ -284,12 +310,31 @@ impl Controller {
             self.tray.set_status(&tray_line(&state, &self.wanted()));
             self.hub.event("session", &line);
             self.last_session = line;
+            self.announce(&state);
         }
         if let Some(hdr) = self.legacy_hdr_event() {
             if hdr != self.last_hdr_event {
                 self.hub.event("hdr", &hdr);
                 self.last_hdr_event = hdr;
             }
+        }
+    }
+
+    /// Recall Island notice + cue for a recording change. The tracker always
+    /// follows the state; with notices off nothing is sent or heard.
+    fn announce(&mut self, state: &str) {
+        let gave_up = self.supervisor.health() == EngineHealth::GivenUp;
+        let next = Situation::of(state, &self.wanted(), gave_up);
+        let Some(notice) = self.notices.observe(next, Instant::now()) else { return };
+        if !self.cfg.overlay.enabled {
+            return;
+        }
+        log!("record: notice {}: {} {}", notice.kind(), notice.title(), notice.detail());
+        self.hub.event("session", &notice_json(&notice));
+        if notice.is_failure() {
+            crate::cues::failed();
+        } else {
+            crate::cues::tick();
         }
     }
 
