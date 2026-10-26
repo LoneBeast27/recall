@@ -32,6 +32,12 @@ powershell -NoProfile -File scripts\install.ps1
 - **Two-step shortcuts:** press **Alt + `** (the key left of 1), then
   **1** bookmark · **2** save the last 30 s · **3** screenshot · **4** start/stop a full
   recording. The game never receives the number. Turn them off in Settings → Shortcuts.
+- **Recall Island** (the in-game overlay): a small pill that drops in when a game is picked up
+  ("Recording VALORANT"), when recording switches to the desktop, pauses or stops, and for saves,
+  bookmarks and screenshots. **Alt + ` then 5** (or the gauge button in the app's title bar, or
+  Settings → General) toggles live performance stats: FPS with its 1% low, GPU and CPU rings,
+  and the recording dot. Each game gets its own spot, measured from your clips so the Island
+  stays clear of that game's HUD (`hud-spots.json`); unknown games use the top right.
 - **Tray menu:** status · Open Recall · Stop/Start recording · Quit Recall.
 - **The app** (Start menu → Recall): library grouped by day, hover a tile to scrub, favourite,
   rename, delete to the Recycle Bin, drag a clip into Discord or copy it. Double-click to edit:
@@ -41,11 +47,20 @@ powershell -NoProfile -File scripts\install.ps1
 - **Old clips:** Settings → Media → Add folder lists clips from ShadowPlay, Medal, OBS or any
   folder in the library. Nothing is moved.
 
+### FPS numbers (RTSS)
+
+The installer copies your installed RivaTuner Statistics Server into
+`C:\Program Files\Recall\rtss` (admin-only folder, one administrator prompt) and makes that copy
+measurement-only: its own overlay, frame limits, scanline sync and Reflex injection are off.
+Recall starts it through the scheduled task "Recall RTSS start" when stats turn on and stops it
+with "Recall RTSS stop". Your own RTSS install and its settings are never touched. Without RTSS
+the Island shows "—" for FPS. `-NoRtss` skips this step.
+
 ## Settings
 
 | Tab | What it holds |
 |---|---|
-| General | Start with Windows, save notice overlay and its corner, quit the recorder |
+| General | Start with Windows, Island notices, performance stats, quit the recorder |
 | Clip | automatic recording, desktop between games, replay length, format (H.264 / HEVC / AV1), frame rate, bitrate, encoder effort, voice chat on its own track |
 | Media | clip folders, storage limit (oldest clips go to the Recycle Bin; favourites and edited clips stay), SSD cache size |
 | Shortcuts | the in-game shortcuts and the two-step switch |
