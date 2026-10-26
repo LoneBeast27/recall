@@ -1,7 +1,8 @@
-//! The real [`RtssHost`]: `<exe dir>\rtss\RTSS.exe`, `schtasks.exe`
-//! (hidden, no window), a process scan for RTSS.exe with each one's image
-//! path, and the `RTSSSharedMemoryV2` signature. Read-only except for running
-//! the two Recall tasks.
+//! The real [`RtssHost`]: `%ProgramFiles%\Recall\rtss\RTSS.exe` (the only
+//! copy that counts as Recall's; admin-only writable, see
+//! `scripts/install-rtss.ps1`), `schtasks.exe` (hidden, no window), a process
+//! scan for RTSS.exe with each one's image path, and the `RTSSSharedMemoryV2`
+//! signature. Read-only except for running the two Recall tasks.
 
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -20,19 +21,30 @@ use windows::Win32::System::Threading::{
 use crate::rtss_ctl::{RtssHost, Scan};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-/// `dwSignature` of a live RTSS shared memory ('RTSS'; 'DEAD' while it shuts down).
+/// `dwSignature` of a live RTSS shared memory ('RTSS'; 0xDEAD while it is
+/// deallocated, per `RTSSSharedMemory.h`).
 const RTSS_SIGNATURE: u32 = 0x5254_5353;
 
 pub struct SystemRtss {
-    /// `<exe dir>\rtss` (None when the exe path is unknown).
+    /// `%ProgramFiles%\Recall\rtss` (None when Program Files is unknown).
     dir: Option<PathBuf>,
 }
 
 impl SystemRtss {
-    pub fn from_current_exe() -> Self {
-        let dir = std::env::current_exe().ok().and_then(|exe| exe.parent().map(|d| d.join("rtss")));
-        SystemRtss { dir }
+    pub fn from_environment() -> Self {
+        SystemRtss { dir: recall_rtss_dir(|name| std::env::var_os(name)) }
     }
+}
+
+/// Where the installer puts Recall's RTSS: the 64-bit Program Files
+/// (`ProgramW6432`, then `ProgramFiles`) + `Recall\rtss`.
+pub fn recall_rtss_dir(var: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    ["ProgramW6432", "ProgramFiles"]
+        .iter()
+        .filter_map(|name| var(name))
+        .map(PathBuf::from)
+        .find(|p| p.is_absolute())
+        .map(|pf| pf.join(r"Recall\rtss"))
 }
 
 impl RtssHost for SystemRtss {
@@ -149,6 +161,23 @@ mod tests {
         assert!(!is_under(Path::new(r"C:\Users\me\AppData\Local\Programs\Recall\rtss-old\RTSS.exe"), dir), "sibling prefix");
         assert!(!is_under(dir, dir), "the folder itself is not inside it");
         assert!(!is_under(Path::new(r"C:\x.exe"), Path::new("")));
+    }
+
+    #[test]
+    fn recalls_rtss_is_in_the_64_bit_program_files_only() {
+        use std::ffi::OsString;
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |name: &str| pairs.iter().find(|(k, _)| *k == name).map(|(_, v)| OsString::from(*v))
+        };
+        let both = env(&[("ProgramW6432", r"C:\Program Files"), ("ProgramFiles", r"C:\Program Files (x86)")]);
+        assert_eq!(recall_rtss_dir(both), Some(PathBuf::from(r"C:\Program Files\Recall\rtss")), "64-bit Program Files wins");
+        let plain = env(&[("ProgramFiles", r"D:\Apps")]);
+        assert_eq!(recall_rtss_dir(plain), Some(PathBuf::from(r"D:\Apps\Recall\rtss")));
+        assert_eq!(recall_rtss_dir(env(&[("ProgramFiles", "relative")])), None, "never a relative folder");
+        assert_eq!(recall_rtss_dir(env(&[])), None);
+        let dir = recall_rtss_dir(env(&[("ProgramW6432", r"C:\Program Files")])).unwrap();
+        assert!(is_under(Path::new(r"C:\Program Files\Recall\rtss\RTSS.exe"), &dir));
+        assert!(!is_under(Path::new(r"C:\Users\me\AppData\Local\Programs\Recall\rtss\RTSS.exe"), &dir), "a user-writable copy is not Recall's");
     }
 
     #[test]

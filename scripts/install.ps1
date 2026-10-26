@@ -12,7 +12,7 @@
     *.dll               FFmpeg runtime
     bin\ffmpeg.exe, ffprobe.exe (+ DLLs)  thumbnails and scrub frames
     cache\              created by the app; capped (Settings → Storage)
-    rtss\               private copy of your installed RTSS (performance stats; see step 5b)
+  Recall's RTSS (performance stats, step 5b) lives in %ProgramFiles%\Recall\rtss, never here.
 
   Usage (PowerShell):
     powershell -NoProfile -File scripts\install.ps1 [-InstallDir <path on an SSD>] [-NoBuild] [-NoShortcut] [-NoAutostart] [-NoRtss]
@@ -22,13 +22,15 @@
   Builds run through nice-build.ps1 (CCD1, BelowNormal) so a running game is not disturbed.
 
   Performance stats (step 5b, personal install only; -NoRtss skips it): when RivaTuner
-  Statistics Server is installed, its folder is copied to <install>\rtss with its own
-  on-screen display off ([OSD] EnableOSD=0 in Profiles\Global and Profiles\*.cfg; RTSS's
-  files are not modified), and two on-demand scheduled tasks with highest privileges are
-  registered through ONE administrator prompt: "Recall RTSS start" (runs <install>\rtss\RTSS.exe)
-  and "Recall RTSS stop" (stops only RTSS processes under <install>\rtss). The recorder runs
-  them when stats turn on / off, without prompts. Your own "RTSS" / "MSIAfterburner" tasks and
-  your RTSS in Program Files are never changed. RTSS is never copied into the repo or dist.
+  Statistics Server is installed, ONE administrator prompt copies it to
+  %ProgramFiles%\Recall\rtss (admin-only writable), makes that copy measurement-only (no OSD,
+  no framerate limit, no scanline sync, no Reflex injection; RTSS's binaries are not modified)
+  and registers two on-demand tasks with highest privileges: "Recall RTSS start" (runs that
+  RTSS.exe) and "Recall RTSS stop" (stops only RTSS processes in that folder). A reinstall skips
+  the prompt while the copy matches your RTSS version and both tasks exist. The recorder runs
+  the tasks when stats turn on / off, without prompts. Details: install-rtss.ps1. Your own
+  "RTSS" / "MSIAfterburner" tasks and your RTSS in Program Files (x86) are never changed; RTSS
+  is never copied into %LOCALAPPDATA%\Programs\Recall, the repo or dist.
 #>
 param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$NoAutostart, [switch]$NoRtss)
 $ErrorActionPreference = 'Stop'
