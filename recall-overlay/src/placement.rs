@@ -74,8 +74,17 @@ impl Spots {
     }
 
     /// The spot for a game key; unknown / empty keys use the top-right default.
+    /// Exact key first, then the longest scanned key the target's key starts with:
+    /// window titles carry suffixes ("Rocket League (64-bit, DX11, Cooked)").
     pub fn lookup(&self, key: &str) -> Spot {
-        self.0.get(key).copied().unwrap_or(DEFAULT_SPOT)
+        if let Some(spot) = self.0.get(key) {
+            return *spot;
+        }
+        self.0
+            .iter()
+            .filter(|(scanned, _)| !scanned.is_empty() && key.starts_with(scanned.as_str()))
+            .max_by_key(|(scanned, _)| scanned.len())
+            .map_or(DEFAULT_SPOT, |(_, spot)| *spot)
     }
 }
 
@@ -128,6 +137,7 @@ mod tests {
         assert_eq!(spots.lookup("valorant"), Spot { anchor: Anchor::TopRight, free_px: Some(288) });
         assert_eq!(spots.lookup("rocketleague").anchor, Anchor::TopLeft);
         assert_eq!(spots.lookup("apexlegends").anchor, Anchor::TopCentre);
+        assert_eq!(spots.lookup("rocketleague64bitdx11cooked").anchor, Anchor::TopLeft, "title suffixes still match");
         assert_eq!(spots.lookup("somenewgame"), DEFAULT_SPOT);
         assert_eq!(spots.lookup(""), DEFAULT_SPOT, "desktop uses top-right");
     }
