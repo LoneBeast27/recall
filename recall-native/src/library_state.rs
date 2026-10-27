@@ -357,6 +357,19 @@ impl LibraryState {
         }
     }
 
+    /// Clips a tile menu acts on: the whole selection (in display order) when `path` is part
+    /// of it, else just `path`.
+    pub fn menu_targets(&self, path: &str) -> Vec<String> {
+        menu_targets(&self.selection, self.display_order(), path)
+    }
+
+    /// Selects exactly `paths` and asks the inline "Move to Recycle Bin?" question.
+    pub fn ask_delete(&mut self, paths: &[String]) {
+        self.selection = paths.iter().cloned().collect();
+        self.anchor = paths.first().cloned();
+        self.confirm_delete = !self.selection.is_empty();
+    }
+
     pub fn selected_paths(&self) -> Vec<PathBuf> {
         self.display_order().into_iter().filter(|p| self.selection.contains(p)).map(PathBuf::from).collect()
     }
@@ -367,6 +380,26 @@ impl LibraryState {
         self.entries.retain(|e| !gone.contains(&e.path));
         self.clear_selection();
         self.rebuild_records();
+    }
+}
+
+fn menu_targets(selection: &HashSet<String>, display_order: Vec<String>, path: &str) -> Vec<String> {
+    if selection.contains(path) {
+        display_order.into_iter().filter(|p| selection.contains(p)).collect()
+    } else {
+        vec![path.to_owned()]
+    }
+}
+
+#[cfg(test)]
+mod menu_tests {
+    #[test]
+    fn menu_acts_on_the_selection_only_when_the_clip_is_in_it() {
+        let order: Vec<String> = ["a", "b", "c", "d"].map(String::from).to_vec();
+        let selection = ["d", "b"].map(String::from).into_iter().collect();
+        assert_eq!(super::menu_targets(&selection, order.clone(), "b"), ["b", "d"], "selection, display order");
+        assert_eq!(super::menu_targets(&selection, order.clone(), "c"), ["c"], "an unselected clip alone");
+        assert_eq!(super::menu_targets(&Default::default(), order, "a"), ["a"]);
     }
 }
 

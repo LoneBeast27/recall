@@ -83,6 +83,11 @@ pub(super) fn recycle_targets(clips: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>)
         files.push(clip.clone());
         files.extend(thumbs.get(&stem).into_iter().flatten().cloned());
         files.extend(super::sidecar_candidates(&clip).into_iter().filter(|p| p.is_file()));
+        // Bookmarks the recorder saved beside the clip (`<stem>.recall-marks.json`).
+        if let Some(stem) = clip.file_stem() {
+            let marks = clip.with_file_name(format!("{}.recall-marks.json", stem.to_string_lossy()));
+            files.extend(marks.is_file().then_some(marks));
+        }
         moved_clips.push(clip);
     }
     files.sort();

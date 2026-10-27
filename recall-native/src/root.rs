@@ -73,6 +73,8 @@ pub struct Root {
     pub toast: Option<Toast>,
     pub sort_open: bool,
     pub corner_open: bool,
+    /// Right-click menu on a library clip tile.
+    pub tile_menu: Option<crate::views::tile_menu::TileMenu>,
     /// Displayed meter levels with ballistics: (rms dB, peak-hold dB, peak time).
     pub meter_display: Vec<(f32, f32, Instant)>,
     /// Tile press that may become a drag-out: (path, window x, y).
@@ -120,6 +122,7 @@ impl Root {
             toast: None,
             sort_open: false,
             corner_open: false,
+            tile_menu: None,
             meter_display: Vec::new(),
             drag_origin: None,
             cache: crate::views::storage_settings::CacheView::new(),
@@ -243,13 +246,12 @@ impl Root {
                 }
                 self.ed.on_exported(result);
             }
-            Done::Deleted(Ok(count)) => {
-                let paths = self.lib.selected_paths();
+            Done::Deleted(paths, Ok(count)) => {
                 self.lib.forget(&paths);
                 let noun = if count == 1 { "clip" } else { "clips" };
                 self.show_toast(ToastKind::Info, format!("Moved {count} {noun} to the Recycle Bin"), None);
             }
-            Done::Deleted(Err(error)) => self.show_toast(ToastKind::Bad, "Delete failed", Some(error)),
+            Done::Deleted(_, Err(error)) => self.show_toast(ToastKind::Bad, "Delete failed", Some(error)),
             Done::Thumb(path, result) => {
                 self.lib.on_thumb(path, result);
             }
@@ -308,6 +310,7 @@ impl Root {
         }
         self.sort_open = false;
         self.corner_open = false;
+        self.tile_menu = None;
         self.route = route;
     }
 

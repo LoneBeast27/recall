@@ -52,6 +52,7 @@ impl Root {
                 "k" if ctrl => window.focus(&self.search.focus),
                 "/" => window.focus(&self.search.focus),
                 "f" if ctrl => window.focus(&self.search.focus),
+                "escape" if self.close_tile_menu() => {}
                 "escape" => self.lib.clear_selection(),
                 "delete" if !self.lib.selection.is_empty() => self.lib.confirm_delete = true,
                 "a" if ctrl => {

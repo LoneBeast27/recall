@@ -6,6 +6,7 @@ pub mod pages;
 pub mod settings;
 pub mod settings_capture;
 pub mod storage_settings;
+pub mod tile_menu;
 pub mod timeline;
 pub mod titlebar;
 pub mod window_frame;
