@@ -54,6 +54,12 @@ impl Root {
                 "f" if ctrl => window.focus(&self.search.focus),
                 "escape" if self.close_tile_menu() => {}
                 "escape" => self.lib.clear_selection(),
+                // The open tile menu shows "Del" beside Delete: the key acts on the menu's clips.
+                "delete" if self.tile_menu.is_some() => {
+                    if let Some(menu) = self.tile_menu.take() {
+                        self.lib.ask_delete(&menu.targets);
+                    }
+                }
                 "delete" if !self.lib.selection.is_empty() => self.lib.confirm_delete = true,
                 "a" if ctrl => {
                     self.lib.selection = self.lib.groups.iter().flat_map(|g| g.items.iter()).map(|i| self.lib.records[*i].path.clone()).collect();
