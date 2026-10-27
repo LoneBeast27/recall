@@ -30,6 +30,8 @@ struct SharedStatus {
     playing: AtomicBool,
     position_bits: AtomicU64,
     generation: AtomicU64,
+    /// Times the device ran out of queued sound while the clip still had more (a gap heard).
+    underruns: AtomicU64,
     error: Mutex<Option<String>>,
 }
 
@@ -158,6 +160,11 @@ impl AudioMixer {
 
     pub(crate) fn position(&self) -> f64 {
         self.shared.position()
+    }
+
+    /// Output underruns since the mixer was created (test trace, player log).
+    pub(crate) fn underruns(&self) -> u64 {
+        self.shared.underruns.load(Ordering::Relaxed)
     }
 
     pub(crate) fn error(&self) -> Option<String> {

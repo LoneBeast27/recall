@@ -31,10 +31,26 @@ pub fn record(ed: &EditorState) {
         "video": preview.and_then(|p| p.video_position().ok()),
         "drift_seeks": preview.map(|p| p.drift_seeks.get()),
         "audio_stalls": preview.map(|p| p.audio_stalls.get()),
+        "audio_underruns": preview.map(|p| p.audio_underruns()),
         "ranges": ed.plan.ranges.iter().map(|r| [r.start, r.end]).collect::<Vec<_>>(),
+        "stems": ed.info.as_ref().map(|i| i.audio.iter().map(|a| a.preview_path.as_str()).collect::<Vec<_>>()),
         "status": ed.status,
     });
     let _ = writeln!(trace.file, "{line}");
+}
+
+/// Logs preview-audio underruns (gaps heard) to the player log when the running total grows,
+/// at most once every 5 s, so a "choppy sound" report leaves evidence.
+pub fn note_underruns(clip: Option<&str>, total: u64) {
+    static SEEN: Mutex<(u64, Option<Instant>)> = Mutex::new((0, None));
+    let Ok(mut seen) = SEEN.lock() else { return };
+    if total <= seen.0 || seen.1.is_some_and(|at| at.elapsed().as_secs() < 5) {
+        return;
+    }
+    let new = total - seen.0;
+    *seen = (total, Some(Instant::now()));
+    drop(seen);
+    player_event("audio underrun: the sound ran dry", serde_json::json!({ "clip": clip, "new": new, "total": total }));
 }
 
 /// Always-on player log at `%APPDATA%\Recall\player.log` (stalls and recoveries), kept under

@@ -95,3 +95,67 @@ fn stale_generation_cannot_publish_error() {
     status.fail_if_current(2, "current");
     assert_eq!(status.error.lock().unwrap().as_deref(), Some("current"));
 }
+
+/// Playback-path soak (run by hand, plays silence so nobody hears it):
+/// `RECALL_AUDIO_SOAK=<folder of audio-*.wav stems> cargo test audio_soak -- --ignored --nocapture`
+/// (`RECALL_AUDIO_SOAK_SECS`, default 30). Plays the stems muted on the default device and
+/// reports output underruns, how far the sample clock fell behind the wall clock, and how fast
+/// sound resumes after a pause.
+#[test]
+#[ignore]
+fn audio_soak() {
+    use std::time::{Duration, Instant};
+    let Some(dir) = std::env::var_os("RECALL_AUDIO_SOAK") else { return };
+    let secs: f64 = std::env::var("RECALL_AUDIO_SOAK_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(30.0);
+    let mut stems: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.path()).filter(|p| p.extension().is_some_and(|x| x == "wav")).collect();
+    stems.sort();
+    let tracks: Vec<PreviewTrack> = stems
+        .iter()
+        .enumerate()
+        .map(|(i, p)| PreviewTrack { stream_index: i + 1, path: p.to_string_lossy().into_owned(), gain_db: 0.0, muted: true })
+        .collect();
+    let mixer = AudioMixer::new().unwrap();
+    mixer.open(&tracks).unwrap();
+    let t = Instant::now();
+    while !mixer.is_ready() {
+        assert!(mixer.error().is_none(), "{:?}", mixer.error());
+        assert!(t.elapsed() < Duration::from_secs(20), "stems never loaded");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let wait_moving = |from: f64| {
+        let t = Instant::now();
+        while mixer.position() <= from + 0.001 && t.elapsed() < Duration::from_secs(2) {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        t.elapsed()
+    };
+    mixer.play().unwrap();
+    let first = wait_moving(0.0);
+    let (start_pos, start) = (mixer.position(), Instant::now());
+    let mut worst_lag = 0.0f64;
+    while start.elapsed().as_secs_f64() < secs {
+        std::thread::sleep(Duration::from_millis(50));
+        let lag = start.elapsed().as_secs_f64() - (mixer.position() - start_pos);
+        worst_lag = worst_lag.max(lag);
+    }
+    let played = mixer.position() - start_pos;
+    let wall = start.elapsed().as_secs_f64();
+    let mut resumes = Vec::new();
+    for _ in 0..10 {
+        mixer.pause().unwrap();
+        std::thread::sleep(Duration::from_millis(300));
+        let at = mixer.position();
+        mixer.play().unwrap();
+        resumes.push(wait_moving(at).as_millis());
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    mixer.pause().unwrap();
+    eprintln!(
+        "audio soak: {} stems, first sound {} ms, played {played:.3} s in {wall:.3} s wall (clock behind by {:.0} ms at the end, worst {:.0} ms), underruns {}, resume after pause (ms) {resumes:?}",
+        tracks.len(),
+        first.as_millis(),
+        (wall - played) * 1000.0,
+        worst_lag * 1000.0,
+        mixer.underruns(),
+    );
+}

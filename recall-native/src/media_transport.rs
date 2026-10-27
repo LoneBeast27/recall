@@ -63,6 +63,7 @@ impl NativePreview {
             "video_position_error": video_position.and_then(Result::err),
             "audio_position_seconds": self.has_audio.then(|| self.audio.position()),
             "audio_playing": self.has_audio && self.audio.is_playing(),
+            "audio_underruns": self.audio_underruns(),
         })
     }
 
@@ -229,6 +230,11 @@ impl NativePreview {
             self.audio_seen.set((video_position, now));
         }
         Ok(Some(video_position))
+    }
+
+    /// Preview-audio output underruns since the preview was created (test trace, player log).
+    pub fn audio_underruns(&self) -> u64 {
+        if self.has_audio { self.audio.underruns() } else { 0 }
     }
 
     /// The audio clock without the drift correction `position` applies (test trace).

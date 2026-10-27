@@ -278,6 +278,7 @@ impl EditorState {
         let Some(preview) = self.preview.as_mut() else { return false };
         let Ok(pos) = preview.position() else { return false };
         let native_playing = preview.is_playing();
+        crate::trace::note_underruns(self.info.as_ref().map(|i| i.path.as_str()), preview.audio_underruns());
         let audio_stalls = preview.audio_stalls.get();
         if audio_stalls != self.audio_stalls_seen {
             self.audio_stalls_seen = audio_stalls;
