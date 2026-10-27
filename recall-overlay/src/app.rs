@@ -7,11 +7,11 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use windows::Win32::Foundation::{HANDLE, HWND, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{HANDLE, HWND, RECT, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::Win32::UI::WindowsAndMessaging::{
-    KillTimer, SetTimer, SetWindowPos, ShowWindow, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE,
-    SW_SHOWNOACTIVATE,
+    GetWindow, GetWindowRect, IsWindowVisible, KillTimer, SetTimer, SetWindowPos, ShowWindow, GW_HWNDPREV, HWND_TOPMOST,
+    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
 };
 
 use crate::fonts::Fonts;
@@ -264,11 +264,39 @@ impl App {
                 let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
             }
             self.window_visible = true;
+        } else if self.window_visible {
+            keep_on_top(hwnd);
         }
         let animating = self.island.animating(now);
         self.set_anim(hwnd, animating);
     }
 
+}
+
+/// Games that make their own window topmost (Rocket League does) cover the
+/// island once they are activated. Re-raise it, without focus, only when a
+/// visible window above it overlaps it (Explorer keeps 1x1 helper windows on
+/// top that never cover anything).
+fn keep_on_top(hwnd: HWND) {
+    let mut mine = RECT::default();
+    if unsafe { GetWindowRect(hwnd, &mut mine) }.is_err() {
+        return;
+    }
+    let mut above = unsafe { GetWindow(hwnd, GW_HWNDPREV) }.unwrap_or_default();
+    while !above.is_invalid() {
+        let mut r = RECT::default();
+        let overlaps = unsafe { GetWindowRect(above, &mut r) }.is_ok()
+            && r.left < mine.right && mine.left < r.right && r.top < mine.bottom && mine.top < r.bottom;
+        if overlaps && unsafe { IsWindowVisible(above) }.as_bool() {
+            let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
+            let _ = unsafe { SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags) };
+            return;
+        }
+        above = unsafe { GetWindow(above, GW_HWNDPREV) }.unwrap_or_default();
+    }
+}
+
+impl App {
     fn set_anim(&mut self, hwnd: HWND, on: bool) {
         if on == self.anim_running {
             return;
