@@ -40,6 +40,7 @@ public static class VC {
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
   // Silence holes (>= 8 zero frames) inside sound in a 16-bit preview stem: the 2026-10-27 choppy audio.
   public static int Holes(string wav) {
+    if (wav.StartsWith(@"\\?\")) wav = wav.Substring(4); // Windows PowerShell rejects verbatim paths
     byte[] b = File.ReadAllBytes(wav); int ch = BitConverter.ToInt16(b, 22); int n = (b.Length - 44) / (2 * ch);
     Func<int, int> peak = f => { int m = 0; for (int c = 0; c < ch; c++) m = Math.Max(m, Math.Abs((int)BitConverter.ToInt16(b, 44 + 2 * (f * ch + c)))); return m; };
     Func<int, int, bool> loud = (a, z) => { for (int f = Math.Max(0, a); f < Math.Min(n, z); f++) if (peak(f) > 300) return true; return false; };
