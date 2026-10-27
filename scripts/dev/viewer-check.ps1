@@ -5,12 +5,14 @@
   the editor with key presses, and reads the app's playback trace (RECALL_NATIVE_TRACE) to time
   responses and catch stalls. Prints one row per scenario and exits 1 if any fails.
 
-    powershell -NoProfile -File scripts\dev\viewer-check.ps1 [-Clip <mp4 on L:>] [-Exe <recall-native.exe>]
+    powershell -NoProfile -File scripts\dev\viewer-check.ps1 [-Clip <mp4 on L:>] [-MomentsClip <mp4>] [-Exe <recall-native.exe>]
 
   Needs a clip of at least 60 s. Default: the newest VALORANT clip in V:\ALL RECORDINGS, copied
-  once to .tmp\viewer-check (hard links need the same volume as the copies).
+  once to .tmp\viewer-check (hard links need the same volume as the copies). The sound check
+  (scenario 8) uses a SteelSeries Moments clip (audio stamps 1000/1100 ticks apart); default: the
+  smallest 2025 VALORANT clip over 60 MB in V:\ALL RECORDINGS.
 #>
-param([string]$Clip = '', [string]$Exe = '')
+param([string]$Clip = '', [string]$MomentsClip = '', [string]$Exe = '')
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $work = Join-Path $repo '.tmp\viewer-check'
@@ -25,18 +27,38 @@ elseif (-not (Test-Path $base)) {
   Copy-Item $src.FullName $base
 }
 
+$moments = Join-Path $work 'moments.mp4'
+if ($MomentsClip) { Copy-Item $MomentsClip $moments -Force }
+elseif (-not (Test-Path $moments)) {
+  $src = Get-ChildItem 'V:\ALL RECORDINGS' -Filter 'VALORANT__2025-*.mp4' | Where-Object { $_.Length -gt 60MB } | Sort-Object Length | Select-Object -First 1
+  Copy-Item $src.FullName $moments
+}
+
 Add-Type @'
-using System; using System.Runtime.InteropServices;
+using System; using System.IO; using System.Runtime.InteropServices;
 public static class VC {
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
+  // Silence holes (>= 8 zero frames) inside sound in a 16-bit preview stem: the 2026-10-27 choppy audio.
+  public static int Holes(string wav) {
+    byte[] b = File.ReadAllBytes(wav); int ch = BitConverter.ToInt16(b, 22); int n = (b.Length - 44) / (2 * ch);
+    Func<int, int> peak = f => { int m = 0; for (int c = 0; c < ch; c++) m = Math.Max(m, Math.Abs((int)BitConverter.ToInt16(b, 44 + 2 * (f * ch + c)))); return m; };
+    Func<int, int, bool> loud = (a, z) => { for (int f = Math.Max(0, a); f < Math.Min(n, z); f++) if (peak(f) > 300) return true; return false; };
+    int holes = 0, run = 0;
+    for (int f = 0; f < n; f++) {
+      if (peak(f) == 0) { run++; continue; }
+      if (run >= 8 && loud(f - run - 48, f - run) && loud(f, f + 48)) holes++;
+      run = 0;
+    }
+    return holes;
+  }
 }
 '@
 $vk = @{ space = 0x20; i = 0x49; o = 0x4F; s = 0x53; l = 0x4C; j = 0x4A; k = 0x4B; home = 0x24; end = 0x23; delete = 0x2E }
 
-function Start-Viewer([string]$name) {
+function Start-Viewer([string]$name, [string]$from = $base) {
   $clip = Join-Path $work "$name.mp4"
   Remove-Item $clip, "$clip.recall-edit.json" -ErrorAction SilentlyContinue
-  New-Item -ItemType HardLink -Path $clip -Target $base | Out-Null
+  New-Item -ItemType HardLink -Path $clip -Target $from | Out-Null
   $trace = Join-Path $work "$name.jsonl"
   Remove-Item $trace -ErrorAction SilentlyContinue
   $env:RECALL_NATIVE_TRACE = $trace; $env:RECALL_NATIVE_CLIP = $clip; $env:RECALL_NATIVE_WINDOW_SIZE = '1280x820'
@@ -158,6 +180,19 @@ for ($n = 1; $n -le 40; $n++) { $x = [int]($x0 + ($x1 - $x0) * $n / 40); [void][
 $start = (Last $s).ranges[0][0]
 $m = Measure-Play $s 4
 Add-Result 'drag trim handle, play' ($start -gt 90 -and $m.LatencyMs -ge 0 -and $m.LatencyMs -lt 800 -and $m.Video -gt 3.2 -and $m.MaxGap -lt 0.2) ("kept from {0:N2}s, start {1} ms, +{2:N2}s audio / +{3:N2}s video, worst gap {4:N3}s, {5} re-seeks" -f $start, $m.LatencyMs, $m.Audio, $m.Video, $m.MaxGap, $m.Seeks)
+Stop-Viewer $s
+
+# 8. Sound of a Moments clip (user report 2026-10-27 "audio playback sounds bad, very choppy"):
+#    its audio stamps sit 1000/1100 ticks apart for 1024-sample frames, and following them cut a
+#    hole or an overlap into every frame. The stems the editor plays must have no holes inside
+#    sound, and the output must never run dry while playing.
+$s = Start-Viewer 'moments-sound' $moments
+$m = Measure-Play $s 4
+$stems = @((Last $s).stems)
+$holes = @($stems | ForEach-Object { [VC]::Holes($_) })
+$underruns = [int]$m.Last.audio_underruns
+$worst = ($holes | Measure-Object -Maximum).Maximum
+Add-Result 'Moments clip plays continuous sound' ($stems.Count -gt 0 -and $worst -eq 0 -and $underruns -eq 0 -and $m.Audio -gt 3.2) ("{0} stems, holes inside sound per stem {1}, output underruns {2}, +{3:N2}s audio" -f $stems.Count, ($holes -join '/'), $underruns, $m.Audio)
 Stop-Viewer $s
 
 $results | Format-Table -AutoSize | Out-String -Width 200

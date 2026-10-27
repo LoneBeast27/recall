@@ -19,6 +19,8 @@ pub(super) fn worker_main(rx: mpsc::Receiver<Command>, shared: Arc<SharedStatus>
     let mut duration_frames = 0usize;
     let mut playing = false;
     let mut active_generation = 0u64;
+    // Sound was queued after the last refill: finding the queue empty next time is an underrun.
+    let mut queued = false;
 
     loop {
         while let Ok(command) = rx.try_recv() {
@@ -29,6 +31,7 @@ pub(super) fn worker_main(rx: mpsc::Receiver<Command>, shared: Arc<SharedStatus>
                 } => {
                     active_generation = generation;
                     playing = false;
+                    queued = false;
                     shared.playing.store(false, Ordering::Release);
                     device = None;
                     cursor_frame = 0;
@@ -61,6 +64,7 @@ pub(super) fn worker_main(rx: mpsc::Receiver<Command>, shared: Arc<SharedStatus>
                 Command::Close { generation } => {
                     active_generation = generation;
                     playing = false;
+                    queued = false;
                     shared.playing.store(false, Ordering::Release);
                     shared.ready.store(false, Ordering::Release);
                     shared.set_position(0.0);
@@ -95,6 +99,7 @@ pub(super) fn worker_main(rx: mpsc::Receiver<Command>, shared: Arc<SharedStatus>
                         ((seconds * SAMPLE_RATE as f64).round() as usize).min(duration_frames);
                     let resume = playing;
                     playing = false;
+                    queued = false;
                     if let Some(output) = device.as_mut() {
                         if let Err(error) = output.reset() {
                             shared.fail_if_current(active_generation, error);
@@ -136,6 +141,9 @@ pub(super) fn worker_main(rx: mpsc::Receiver<Command>, shared: Arc<SharedStatus>
                 playing = false;
                 continue;
             };
+            if queued && cursor_frame < duration_frames && output.buffers.iter().all(WaveBuffer::done) {
+                shared.underruns.fetch_add(1, Ordering::Relaxed);
+            }
             let mut submitted = false;
             for buffer in &mut output.buffers {
                 if cursor_frame >= duration_frames || !buffer.done() {
@@ -159,6 +167,7 @@ pub(super) fn worker_main(rx: mpsc::Receiver<Command>, shared: Arc<SharedStatus>
                 cursor_frame += frames;
                 submitted = true;
             }
+            queued = output.buffers.iter().any(|buffer| !buffer.done());
             if submitted {
                 if let Err(error) = mm_ok(
                     unsafe { waveOutRestart(output.handle) },
