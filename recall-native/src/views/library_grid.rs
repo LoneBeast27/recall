@@ -1,10 +1,10 @@
 //! Library grid: the virtualized day-grouped list, thumbnail tiles (hover scrub,
-//! drag-out, rename) and their hover actions.
+//! drag-out, rename, right-click menu in `tile_menu.rs`) and their hover actions.
 use std::path::PathBuf;
 
 use gpui::{
-    AnyElement, ClickEvent, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, ObjectFit, Window, canvas,
-    div, img, list, prelude::*, px,
+    AnyElement, ClickEvent, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
+    ScrollWheelEvent, Window, canvas, div, img, list, prelude::*, px,
 };
 
 use super::{CONTENT_PAD, GAP, empty_state};
@@ -48,6 +48,12 @@ impl Root {
             list(self.lib.list.clone(), cx.processor(|this, ix: usize, window, cx| this.render_row(ix, window, cx)))
                 .size_full(),
         )
+        .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| {
+            if this.close_tile_menu() {
+                cx.notify();
+            }
+        }))
+        .children(self.render_tile_menu(cx))
         .into_any_element()
     }
 
@@ -200,6 +206,7 @@ impl Root {
         let open_path = path.clone();
         let hover_path = path.clone();
         let drag_path = path.clone();
+        let menu_path = path.clone();
         div()
             .id(("tile", index))
             .w(px(w))
@@ -217,6 +224,12 @@ impl Root {
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, _| {
                 this.drag_origin = Some((drag_path.clone(), f32::from(event.position.x), f32::from(event.position.y)));
+            }))
+            // Windows opens context menus on button release.
+            .on_mouse_up(MouseButton::Right, cx.listener(move |this, event: &MouseUpEvent, _, cx| {
+                this.open_tile_menu(menu_path.clone(), event.position);
+                cx.stop_propagation();
+                cx.notify();
             }))
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
                 if event.pressed_button == Some(MouseButton::Left) {

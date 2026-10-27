@@ -170,7 +170,7 @@ fn mp4_duration_matches_ffprobe_on_a_real_clip() {
 }
 
 #[test]
-fn recycle_bin_moves_clip_thumbs_and_sidecar_only() {
+fn recycle_bin_moves_clip_thumbs_sidecar_and_marks_only() {
     let dir = temp_dir("recycle");
     let stem = "RecallNativeTest__2026-10-22__10-00-00";
     let clip = dir.join(format!("{stem}.mp4"));
@@ -181,18 +181,20 @@ fn recycle_bin_moves_clip_thumbs_and_sidecar_only() {
     let thumb_b = thumbs.join(format!("{stem}-1783463999-thumb.jpg"));
     let other_thumb = thumbs.join("RecallNativeTest__2026-10-22__10-00-01-1783463424-thumb.jpg");
     let sidecar = dir.join(format!("{stem}.mp4.recall-edit.json"));
+    let marks = dir.join(format!("{stem}.recall-marks.json"));
     let other_clip = dir.join("RecallNativeTest__2026-10-22__10-00-01.mp4");
-    for file in [&thumb_a, &thumb_b, &other_thumb, &sidecar, &other_clip] {
+    let other_marks = dir.join("RecallNativeTest__2026-10-22__10-00-01.recall-marks.json");
+    for file in [&thumb_a, &thumb_b, &other_thumb, &sidecar, &marks, &other_clip, &other_marks] {
         std::fs::write(file, b"x").unwrap();
     }
     let (clips, files) = win::recycle_targets(std::slice::from_ref(&clip));
     assert_eq!(clips.len(), 1);
-    assert_eq!(files.len(), 4, "{files:?}");
+    assert_eq!(files.len(), 5, "{files:?}");
     assert_eq!(delete_to_recycle_bin(std::slice::from_ref(&clip)).unwrap(), 1);
-    for gone in [&clip, &thumb_a, &thumb_b, &sidecar] {
+    for gone in [&clip, &thumb_a, &thumb_b, &sidecar, &marks] {
         assert!(!gone.exists(), "{} still present", gone.display());
     }
-    assert!(other_thumb.exists() && other_clip.exists(), "neighbours untouched");
+    assert!(other_thumb.exists() && other_clip.exists() && other_marks.exists(), "neighbours untouched");
     assert_eq!(delete_to_recycle_bin(&[dir.join("missing.mp4")]).unwrap(), 0);
     let _ = std::fs::remove_dir_all(dir);
 }

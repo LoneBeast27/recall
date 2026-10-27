@@ -54,7 +54,8 @@ pub enum Done {
     Prepared(u64, Result<PreparedClip, String>),
     Saved(Result<String, String>),
     Exported(Result<ExportSummary, String>),
-    Deleted(Result<usize, String>),
+    /// The clips asked for, and how many left their folder.
+    Deleted(Vec<PathBuf>, Result<usize, String>),
     Thumb(String, Result<String, String>),
     Duration(String, Option<f64>),
     Scrub(String, Result<Vec<String>, String>),
@@ -140,7 +141,7 @@ fn run_job(job: Job, tx: &Sender<Done>) -> Done {
         Job::Delete(paths) => {
             let result = library::delete_to_recycle_bin(&paths);
             library::folders::forget_scans();
-            Done::Deleted(result)
+            Done::Deleted(paths, result)
         }
         Job::StorageReport => Done::Storage(backend::storage_report(None)),
         Job::ClearCache(kind) => {
