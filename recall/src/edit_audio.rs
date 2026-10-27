@@ -85,7 +85,8 @@ fn encode_track(
     let gain = setting.map_or(1.0, |value| gain_multiplier(value.gain_db, value.muted));
     let mut pcm = EditedPcm::new(ranges, rate, channels, gain, stream_index)?;
     let origin_samples = origin_us.rescale(ff::rescale::TIME_BASE, ff::Rational(1, rate as i32));
-    let mut next_source_sample = 0i64;
+    // Where the previous frame ended; the first frame goes to its timestamp.
+    let mut next_source_sample: Option<i64> = None;
     let mut resampler: Option<ff::software::resampling::Context> = None;
 
     for (stream, packet) in ictx.packets() {
@@ -138,7 +139,7 @@ fn receive_audio_frames(
     output_format: ff::format::Sample,
     stream_tb: ff::Rational,
     origin_samples: i64,
-    next_source_sample: &mut i64,
+    next_source_sample: &mut Option<i64>,
     stream_index: usize,
 ) -> Result<(), String> {
     let mut decoded = ff::frame::Audio::empty();
@@ -177,16 +178,18 @@ fn receive_audio_frames(
                     .expect("resampler initialized")
                     .run(&decoded, &mut converted)
                     .map_err(|e| format!("resample audio stream {stream_index}: {e}"))?;
-                let source_start = decoded
-                    .timestamp()
-                    .or(decoded.pts())
-                    .map(|pts| {
-                        pts.rescale(stream_tb, ff::Rational(1, output_rate as i32))
-                            .saturating_sub(origin_samples)
-                    })
-                    .unwrap_or(*next_source_sample);
+                let stamped = decoded.timestamp().or(decoded.pts()).map(|pts| {
+                    pts.rescale(stream_tb, ff::Rational(1, output_rate as i32))
+                        .saturating_sub(origin_samples)
+                });
+                // Back to back unless the stamps show a real gap (see `audio_clock`).
+                let (source_start, _) = crate::audio_clock::frame_start(
+                    *next_source_sample,
+                    stamped,
+                    crate::audio_clock::drift_tolerance(output_rate),
+                );
                 pcm.place(&converted, source_start);
-                *next_source_sample = source_start.saturating_add(converted.samples() as i64);
+                *next_source_sample = Some(source_start.saturating_add(converted.samples() as i64));
             }
             Err(error) if crate::export::receive_is_drained(&error) => break,
             Err(error) => {
@@ -202,7 +205,7 @@ fn receive_audio_frames(
 fn flush_resampler(
     resampler: &mut Option<ff::software::resampling::Context>,
     pcm: &mut EditedPcm,
-    next_source_sample: &mut i64,
+    next_source_sample: &mut Option<i64>,
     stream_index: usize,
 ) -> Result<(), String> {
     let Some(resampler) = resampler.as_mut() else {
@@ -228,8 +231,9 @@ fn flush_resampler(
         if produced == 0 {
             break;
         }
-        pcm.place(&delayed, *next_source_sample);
-        *next_source_sample = (*next_source_sample).saturating_add(produced as i64);
+        let at = next_source_sample.unwrap_or(0);
+        pcm.place(&delayed, at);
+        *next_source_sample = Some(at.saturating_add(produced as i64));
     }
     Ok(())
 }

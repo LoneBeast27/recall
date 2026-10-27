@@ -119,10 +119,10 @@ pub fn note_editor_media(clip_path: &str, editor_dirs: &[PathBuf], opened: bool)
 }
 
 /// Engine media-cache folder for an input (mirrors `recall/src/editor_media.rs::cache_key`,
-/// `CACHE_VERSION` 4): FNV-1a over the canonical path, version, size and mtime ms. Used only
+/// `CACHE_VERSION` 5): FNV-1a over the canonical path, version, size and mtime ms. Used only
 /// to find an existing entry; a mismatch merely costs a re-preparation.
 pub fn engine_cache_dir(editor_root: &Path, canonical_input: &Path, bytes: u64, modified_ms: u64) -> PathBuf {
-    const CACHE_VERSION: u32 = 4;
+    const CACHE_VERSION: u32 = 5;
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     let text = canonical_input.to_string_lossy();
     for byte in text.bytes().chain(CACHE_VERSION.to_le_bytes()).chain(bytes.to_le_bytes()).chain(modified_ms.to_le_bytes()) {

@@ -1,6 +1,6 @@
 //! One audio track -> its editor preview stem: decode, resample to 48 kHz
-//! packed i16 (re-seeded at source timestamp gaps), write the WAV, and fold the
-//! waveform peaks.
+//! packed i16 (samples kept back to back; re-seeded only at real timestamp gaps,
+//! see `audio_clock`), write the WAV, and fold the waveform peaks.
 
 use std::fs::File;
 use std::io::{BufWriter, Seek, SeekFrom, Write};
@@ -54,7 +54,8 @@ pub(super) fn decode_track(
     let mut writer = WavWriter::create(wav, channels)?;
     let mut peaks = vec![0.0f32; WAVE_BINS];
     let mut cursor = 0u64;
-    let mut next_source_sample = Some(0i64);
+    // Where the previous frame ended (source samples); the first frame goes to its timestamp.
+    let mut next_source_sample: Option<i64> = None;
     let mut frame = ff::frame::Audio::empty();
     for (stream, packet) in input.packets() {
         if let Some(scan) = keyframes.as_deref_mut() {
@@ -135,19 +136,15 @@ fn drain(
                 let input_rate = frame.rate().max(1);
                 let origin_samples =
                     origin_us.rescale(ff::rescale::TIME_BASE, ff::Rational(1, input_rate as i32));
-                let source_start = frame
-                    .pts()
-                    .map(|pts| {
-                        pts.rescale(tb, ff::Rational(1, input_rate as i32))
-                            .saturating_sub(origin_samples)
-                    })
-                    .unwrap_or_else(|| next_source_sample.unwrap_or(0));
-                let delta = source_start.saturating_sub(next_source_sample.unwrap_or(source_start));
-                let delta_preview = delta.rescale(
-                    ff::Rational(1, input_rate as i32),
-                    ff::Rational(1, PREVIEW_RATE as i32),
+                let stamped = frame.pts().map(|pts| {
+                    pts.rescale(tb, ff::Rational(1, input_rate as i32))
+                        .saturating_sub(origin_samples)
+                });
+                let (source_start, discontinuity) = crate::audio_clock::frame_start(
+                    *next_source_sample,
+                    stamped,
+                    crate::audio_clock::drift_tolerance(input_rate),
                 );
-                let discontinuity = delta_preview.unsigned_abs() > 2;
                 if discontinuity {
                     flush_resampler(resampler, writer, cursor, total, peaks, channels)?;
                     let input = *resampler.input();
