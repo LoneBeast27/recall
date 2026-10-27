@@ -12,6 +12,8 @@
 mod app_tick;
 #[cfg(feature = "encode")]
 mod audio;
+#[cfg(feature = "encode")]
+mod audio_clock;
 mod bookmarks;
 mod border;
 mod capture;

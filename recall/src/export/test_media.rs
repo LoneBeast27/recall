@@ -20,6 +20,9 @@ pub(super) struct Spec {
     pub gop: u32,
     /// Audio tone frequencies, one stereo AAC track each.
     pub tones: Vec<f32>,
+    /// Stamp audio packets like SteelSeries Moments: the true time snapped to a 100-tick
+    /// grid, so 1024-sample frames sit 1000 or 1100 ticks apart (the 2026-10-27 choppy audio).
+    pub moments_audio_stamps: bool,
 }
 
 /// Track names written like the recorder does: as the MP4 `handler_name`.
@@ -27,7 +30,7 @@ pub(super) const TRACK_NAMES: [&str; 2] = ["Game", "Microphone"];
 
 impl Default for Spec {
     fn default() -> Self {
-        Self { width: 320, height: 240, fps: 60, seconds: 5.0, gop: 30, tones: vec![440.0, 660.0] }
+        Self { width: 320, height: 240, fps: 60, seconds: 5.0, gop: 30, tones: vec![440.0, 660.0], moments_audio_stamps: false }
     }
 }
 
@@ -165,7 +168,14 @@ pub(super) fn synth(tag: &str, spec: &Spec) -> Option<Clip> {
     }
 
     queue.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    let audio_streams: Vec<usize> = audio.iter().map(|(index, _)| *index).collect();
     for (_, stream, mut packet, tb) in queue {
+        if spec.moments_audio_stamps && audio_streams.contains(&stream) {
+            let snapped = |t: i64| (t + 50).div_euclid(100) * 100;
+            let (pts, dts) = (packet.pts().map(snapped), packet.dts().map(snapped));
+            packet.set_pts(pts);
+            packet.set_dts(dts);
+        }
         let out_tb = octx.stream(stream).unwrap().time_base();
         packet.rescale_ts(tb, out_tb);
         packet.set_stream(stream);

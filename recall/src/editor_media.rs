@@ -13,7 +13,8 @@ use stem::decode_track;
 
 const PREVIEW_RATE: u32 = 48_000;
 const WAVE_BINS: usize = 1024;
-const CACHE_VERSION: u32 = 4;
+// 5: stems no longer follow per-frame timestamp jitter (Moments clips played choppy).
+const CACHE_VERSION: u32 = 5;
 
 pub fn prepare_clip(input: &str, cache_dir: &str) -> Result<ClipInfo, String> {
     ff::init().map_err(|e| format!("FFmpeg initialization failed: {e}"))?;
