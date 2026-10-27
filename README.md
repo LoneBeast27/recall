@@ -40,7 +40,9 @@ powershell -NoProfile -File scripts\install.ps1
   stays clear of that game's HUD (`hud-spots.json`); unknown games use the top right.
 - **Tray menu:** status · Open Recall · Stop/Start recording · Quit Recall.
 - **The app** (Start menu → Recall): library grouped by day, hover a tile to scrub, favourite,
-  rename, delete to the Recycle Bin, drag a clip into Discord or copy it. Double-click to edit:
+  rename, delete to the Recycle Bin, drag a clip into Discord or copy it. Right-click a tile for
+  Open, Favourite, Rename, Copy, Show in folder and Delete (on the whole selection when the tile
+  is selected; Delete asks first and takes thumbnails, edits and bookmarks along). Double-click to edit:
   trim, split, cut, per-track volume, slow motion or speed-up per section, then export
   (re-encode or instant lossless trim, frame rate, resolution, size limit such as 10 MB for
   Discord).
@@ -82,7 +84,7 @@ meters for every source.
 | Edits | `<clip>.recall-edit.json` beside each clip |
 | Preview cache | `<install folder>\cache`, one budget (2 GB by default) |
 | Clips on their way to the clip folder | `<install folder>\cache\staging` (moved within seconds; recovered on next start) |
-| Player stall log | `%APPDATA%\Recall\player.log` |
+| Player log (stalls, audio underruns) | `%APPDATA%\Recall\player.log` |
 
 Clips on a hard drive are read on one background lane per disk at low I/O priority (SMR
 drives are detected); thumbnails, hover frames and recently watched clips are kept on the SSD.
@@ -114,6 +116,12 @@ build. It drives the real app with key and mouse input and times the player's re
 ```powershell
 powershell -NoProfile -File scripts\dev\viewer-check.ps1
 ```
+
+Scenario 8 plays a SteelSeries Moments clip and checks its sound. Moments stamps its audio frames
+1000 or 1100 ticks apart instead of 1024; the editor used to follow those stamps and played
+choppy audio (fixed 2026-10-27: samples stay back to back unless the stamps drift by more than
+40 ms). `RECALL_AUDIO_SOAK=<folder of stems> cargo test audio_soak -- --ignored --nocapture`
+plays stems silently on the default device and reports output underruns.
 
 The app uses its own target folder (`target-gpui`) because GPUI pins different dependency
 versions. Tests that need NVENC or a live game are `#[ignore]`d. Status, verification and
