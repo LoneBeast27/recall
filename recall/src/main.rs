@@ -1,8 +1,10 @@
 //! Recall — capture engine.
 //!
-//! A live HDR->SDR source window (titled `<source> SDR`) that Discord / OBS
-//! window-capture pick up. Pipeline:
-//!   WGC capture (windows-capture, Rgba16F) -> GPU tonemap (wgpu) -> present.
+//! Recording pipeline (zero-copy, `gpu_frames`): WGC capture (windows-capture, Rgba16F)
+//! -> D3D11 tonemap on the capture device -> FFmpeg D3D11 frame -> NVENC. The event loop
+//! then only ticks (status, screenshots) every 50 ms. Fallback (the GPU path cannot start,
+//! or `RECALL_DUMP*`): CPU readback -> wgpu upload + tonemap -> present to the hidden
+//! `<source> SDR` window -> wgpu readback -> NVENC, driven by a continuous redraw loop.
 //!
 //! Driven manually via RECALL_* envs (human `[recall]` logs), or as a Tauri
 //! sidecar via `--json` (machine protocol: JSON status on stdout, commands on
@@ -35,6 +37,9 @@ mod export;
 #[cfg(feature = "encode")]
 mod export_worker;
 mod gpu;
+#[cfg(feature = "encode")]
+mod gpu_frames;
+mod gpu_route;
 mod hdr;
 #[cfg(feature = "encode")]
 mod moments;
@@ -44,7 +49,7 @@ mod source;
 
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
@@ -57,9 +62,15 @@ use crate::capture::{start_monitor, CaptureControlHandle, CaptureShared};
 #[cfg(feature = "encode")]
 use crate::export_worker::{run_export, spawn_export_worker};
 use crate::gpu::Gpu;
+use crate::gpu_route::gpu_path_possible;
+#[cfg(feature = "encode")]
+use crate::gpu_route::{install_gpu_sink, GpuFramesTx};
 
 const INITIAL_TITLE: &str = "Desktop SDR";
-const SOURCE_POLL_FRAMES: u32 = 90;
+/// Status line, source title and HDR mode refresh cadence.
+const PERIODIC: Duration = Duration::from_secs(1);
+/// Event-loop tick while frames take the GPU path (quit, screenshots, status).
+const IDLE_TICK: Duration = Duration::from_millis(50);
 
 /// Parsed command-line config.
 #[derive(Default, Clone)]
@@ -67,6 +78,7 @@ struct Config {
     json: bool,
     monitor: Option<usize>,
     encoder_smoke: Option<String>,
+    gpu_smoke: Option<String>,
     export_cfr: Option<(String, String, u32)>,
     prepare_editor: Option<(String, String)>,
     export_edit: Option<(String, String, u32, String)>,
@@ -79,6 +91,7 @@ fn parse_args() -> Config {
         match a.as_str() {
             "--json" => cfg.json = true,
             "--encoder-smoke" => cfg.encoder_smoke = args.next(),
+            "--gpu-smoke" => cfg.gpu_smoke = args.next(),
             "--prepare-editor" => {
                 cfg.prepare_editor = Some((args.next().unwrap_or_default(), args.next().unwrap_or_default()));
             }
@@ -116,7 +129,8 @@ struct App {
     source_name: String,
     /// Source name mirror for the stdin thread's save-path naming.
     source_shared: Arc<Mutex<String>>,
-    poll_counter: u32,
+    last_periodic: Option<Instant>,
+    next_tick: Option<Instant>,
     last_hdr: Option<bool>,
     max_nits: f32,
     // replay encode
@@ -126,6 +140,9 @@ struct App {
     buffer_capacity_secs: u32,
     #[cfg(feature = "encode")]
     encoder: Option<encoder::EncoderHandle>,
+    /// The capture thread's handle on the encoder queue (dropped at quit so it closes).
+    #[cfg(feature = "encode")]
+    gpu_frames_tx: Option<GpuFramesTx>,
     /// Hotkey features: screenshot requests (fulfilled on this thread) and
     /// the long-recording writer (finalized at quit).
     shots: Option<Arc<screenshot::Screenshots>>,
@@ -218,6 +235,7 @@ impl ApplicationHandler for App {
             self.longrec = Some(Arc::new(longrec::spawn(out_dir.clone(), json, track_infos)));
             longrec::recover_parts(out_dir.clone(), json);
             let handle = encoder::spawn(enc_cfg, tracks);
+            self.gpu_frames_tx = Some(install_gpu_sink(&shared, &handle, json));
             let cmds = handle.commands.clone();
             let src = self.source_shared.clone();
             let timeline = shared.clone();
@@ -274,7 +292,11 @@ impl ApplicationHandler for App {
             Err(e) => eprintln!("failed to start capture: {e}"),
         }
 
-        self.gpu = Some(Gpu::new(window.clone(), shared.clone()));
+        // The wgpu renderer is only for the CPU fallback: on the GPU path it would add a
+        // device, a swapchain and a busy present loop for a window nobody sees.
+        if !gpu_path_possible() {
+            self.gpu = Some(Gpu::new(window.clone(), shared.clone()));
+        }
         self.shared = Some(shared);
         self.window = Some(window);
 
@@ -290,15 +312,15 @@ impl ApplicationHandler for App {
                     gpu.resize(size.width, size.height);
                 }
             }
+            // CPU path only: each redraw renders, encodes and asks for the next one.
             WindowEvent::RedrawRequested => {
+                let Some(gpu) = &mut self.gpu else { return };
                 // Honor a `quit` command from stdin.
                 if self.shared.as_ref().is_some_and(|s| s.quit.load(Relaxed)) {
                     event_loop.exit();
                     return;
                 }
-                if let Some(gpu) = &mut self.gpu {
-                    gpu.render();
-                }
+                gpu.render();
                 #[cfg(feature = "encode")]
                 self.encode_tick();
                 self.screenshot_tick();
@@ -310,6 +332,10 @@ impl ApplicationHandler for App {
             }
             _ => {}
         }
+    }
+
+    fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        self.idle_tick(event_loop);
     }
 }
 
@@ -398,6 +424,19 @@ fn main() {
         return;
     }
     #[cfg(feature = "encode")]
+    if let Some(ref dir) = config.gpu_smoke {
+        match encoder::gpu_smoke(std::path::Path::new(dir)) {
+            Ok(report) => {
+                println!("{report}");
+                return;
+            }
+            Err(e) => {
+                eprintln!("GPU smoke failed: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+    #[cfg(feature = "encode")]
     if let Some(ref dir) = config.encoder_smoke {
         match encoder::smoke_test(std::path::Path::new(dir)) {
             Ok(path) => {
@@ -435,6 +474,13 @@ fn main() {
     #[cfg(feature = "encode")]
     if let Some(longrec) = app.longrec.take() {
         longrec.shutdown(std::time::Duration::from_millis(1500));
+    }
+    // The capture thread's sender too, or the encoder's frame queue never closes.
+    #[cfg(feature = "encode")]
+    if let Some(tx) = app.gpu_frames_tx.take() {
+        if let Ok(mut tx) = tx.lock() {
+            tx.take();
+        }
     }
     #[cfg(feature = "encode")]
     if let Some(encoder) = app.encoder.take() {

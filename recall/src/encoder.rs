@@ -1,9 +1,10 @@
 //! Continuous NVENC VFR encode thread + replay ring + save hand-off (feature `encode`).
 //!
-//! The render loop feeds RGBA8 frames with capture-time microsecond PTS values;
-//! this thread encodes them with `h264_nvenc`, `hevc_nvenc` or `av1_nvenc`
-//! (`RECALL_CODEC`, see `settings.rs`; pix_fmt RGB0 — NVENC ingests RGBA
-//! directly, alpha ignored, no swscale stage) into a `PacketRing` holding
+//! Frames arrive with capture-time microsecond PTS values, either as D3D11 GPU frames from
+//! the capture thread (the zero-copy path, `gpu_frames`: NVENC reads them from VRAM) or as
+//! RGBA8 from the render loop (fallback; pix_fmt RGB0, NVENC ingests RGBA directly). This
+//! thread encodes them with `h264_nvenc`, `hevc_nvenc` or `av1_nvenc`
+//! (`RECALL_CODEC`, see `settings.rs`) into a `PacketRing` holding
 //! the last N seconds. A `SaveRequest` is turned into a self-contained
 //! `SaveJob` on this thread in milliseconds (`handoff.rs`; shared packet
 //! window and PCM snapshot) and
@@ -16,6 +17,7 @@
 mod bg_io;
 mod events;
 mod frame_fit;
+mod gpu_smoke;
 mod handoff;
 mod mover;
 mod mux;
@@ -44,15 +46,18 @@ pub(crate) use still::StillSpec;
 
 pub use saver::clip_path;
 pub use settings::Config;
+pub use gpu_smoke::gpu_smoke;
 pub use smoke::smoke_test;
 
-/// One capture frame from the render thread. `idx` is capture PTS in microseconds.
+/// One capture frame. `idx` is capture PTS in microseconds.
 pub struct PacedFrame {
     pub idx: u64,
     pub width: u32,
     pub height: u32,
-    /// Tightly packed RGBA8, row-major, no padding.
+    /// Tightly packed RGBA8, row-major, no padding (empty for a GPU frame).
     pub rgba: Vec<u8>,
+    /// The zero-copy path's frame: tonemapped BGRA in a D3D11 texture.
+    pub gpu: Option<crate::gpu_frames::HwFrame>,
 }
 
 /// Ask the encoder thread to write the last `seconds` to `path`.
@@ -153,6 +158,10 @@ struct Enc {
     backend: &'static str,
     /// Newest raw frame (moved in after encode) — thumbnail and still source.
     last_frame: Option<RawFrame>,
+    /// Newest GPU frame: read back to a `RawFrame` only when a save needs one.
+    last_gpu: Option<crate::gpu_frames::HwFrame>,
+    /// `Some(pool_id)` when NVENC reads D3D11 frames from that pool, `None` for RGB0.
+    gpu_pool: Option<usize>,
     last_input_pts: Option<u64>,
     /// One id per engine run, mirrored into Moments rows.
     session_id: String,
@@ -194,7 +203,8 @@ fn run(
 
         match frames.recv_timeout(std::time::Duration::from_millis(100)) {
             Ok(mut frame) => {
-                if let Some(active) = enc.as_ref() {
+                // GPU frames arrive already cropped / padded to a stable size.
+                if let Some(active) = enc.as_ref().filter(|_| frame.gpu.is_none()) {
                     if let Err(e) = normalize_small_size_jitter(
                         &mut frame,
                         active.width,
@@ -207,10 +217,15 @@ fn run(
                 let resolution_changed = enc.as_ref().is_some_and(|e| {
                     e.width != (frame.width & !1) || e.height != (frame.height & !1)
                 });
-                if resolution_changed {
+                let input_changed = enc.as_ref().is_some_and(|e| e.gpu_pool != gpu_pool_of(&frame));
+                if resolution_changed || input_changed {
                     report(
                         cfg.json,
-                        "capture resolution changed; reopening NVENC and resetting replay buffer",
+                        if resolution_changed {
+                            "capture resolution changed; reopening NVENC and resetting replay buffer"
+                        } else {
+                            "capture input changed (GPU / CPU frames); reopening NVENC and resetting replay buffer"
+                        },
                     );
                     enc = None;
                     failed_resolution = None;
@@ -220,7 +235,7 @@ fn run(
                     stats.buffered_bytes.store(0, Relaxed);
                 }
                 if enc.is_none() && failed_resolution != Some((frame.width, frame.height)) {
-                    enc = match open_encoder(&cfg, want, frame.width, frame.height) {
+                    enc = match open_encoder(&cfg, want, frame.width, frame.height, frame.gpu.as_ref()) {
                         Ok((e, fallback)) => {
                             crate::longrec::tap::on_encoder_open(&e.encoder); // long-recording hook
                             if let Some(note) = fallback {
@@ -282,19 +297,27 @@ fn run(
     }
 }
 
-/// Open `codec` (falling back to h264_nvenc) for even-cropped `w`x`h` RGB0
-/// input. The second value is the fallback line to log, if one happened.
+/// The frames pool a GPU frame comes from (`None` for an RGBA frame).
+fn gpu_pool_of(frame: &PacedFrame) -> Option<usize> {
+    frame.gpu.as_ref().map(|g| g.pool_id())
+}
+
+/// Open `codec` (falling back to h264_nvenc) for even-cropped `w`x`h` input: D3D11 frames
+/// from `gpu`'s pool when given, else RGB0. The second value is the fallback line to log.
 fn open_encoder(
     cfg: &Config,
     codec: Codec,
     w: u32,
     h: u32,
+    gpu: Option<&crate::gpu_frames::HwFrame>,
 ) -> Result<(Enc, Option<String>), String> {
     let (w, h) = (w & !1, h & !1);
     if w == 0 || h == 0 {
         return Err("NVENC cannot open a zero-sized capture".into());
     }
-    let opened = settings::open_with_fallback(codec, |c| try_open(cfg, c, w, h))?;
+    let pool = gpu.map(|g| g.frames_ctx());
+    let opened = settings::open_with_fallback(codec, |c| try_open(cfg, c, w, h, pool))?;
+    let gpu_pool = gpu.map(|g| g.pool_id());
     let encoder = opened.value;
     let enc = Enc {
         params: OwnedParams::from_encoder(&encoder),
@@ -308,13 +331,21 @@ fn open_encoder(
         height: h,
         backend: opened.codec.nvenc(),
         last_frame: None,
+        last_gpu: None,
+        gpu_pool,
         last_input_pts: None,
         session_id: uuid::Uuid::new_v4().to_string(),
     };
     Ok((enc, opened.fallback))
 }
 
-fn try_open(cfg: &Config, codec: Codec, w: u32, h: u32) -> Result<ff::encoder::Video, String> {
+fn try_open(
+    cfg: &Config,
+    codec: Codec,
+    w: u32,
+    h: u32,
+    gpu_pool: Option<*mut ff::ffi::AVBufferRef>,
+) -> Result<ff::encoder::Video, String> {
     let name = codec.nvenc();
     let codec = ff::encoder::find_by_name(name)
         .ok_or_else(|| format!("{name} is not in this FFmpeg build"))?;
@@ -324,8 +355,15 @@ fn try_open(cfg: &Config, codec: Codec, w: u32, h: u32) -> Result<ff::encoder::V
         .map_err(|e| e.to_string())?;
     ctx.set_width(w);
     ctx.set_height(h);
-    // AV_PIX_FMT_RGB0 (RGBA bytes, alpha ignored) is `RGBZ` in the Rust enum.
-    ctx.set_format(ff::format::Pixel::RGBZ);
+    match gpu_pool {
+        // D3D11 frames: NVENC opens on the capture device and registers the pool textures.
+        Some(pool) => {
+            ctx.set_format(ff::format::Pixel::D3D11);
+            unsafe { (*ctx.as_mut_ptr()).hw_frames_ctx = ff::ffi::av_buffer_ref(pool) };
+        }
+        // AV_PIX_FMT_RGB0 (RGBA bytes, alpha ignored) is `RGBZ` in the Rust enum.
+        None => ctx.set_format(ff::format::Pixel::RGBZ),
+    }
     ctx.set_time_base(ff::Rational(1, 1_000_000));
     ctx.set_frame_rate(Some(ff::Rational(cfg.fps as i32, 1)));
     ctx.set_gop(cfg.fps); // 1s GOP -> save granularity
@@ -348,9 +386,42 @@ impl Enc {
     /// Encode one paced frame; drain packets into the ring. Keeps the raw
     /// frame afterwards as the thumbnail/still source.
     fn encode(&mut self, frame: PacedFrame, stats: &EncStats) -> Result<(), String> {
-        self.send_rgba(frame.idx, frame.width, &frame.rgba)?;
-        self.last_frame = Some((frame.width, frame.height, Arc::new(frame.rgba)));
+        match frame.gpu {
+            Some(gpu) => self.send_gpu(frame.idx, gpu)?,
+            None => {
+                self.send_rgba(frame.idx, frame.width, &frame.rgba)?;
+                self.last_frame = Some((frame.width, frame.height, Arc::new(frame.rgba)));
+            }
+        }
         self.drain(stats)
+    }
+
+    /// Hand a D3D11 frame to NVENC (it keeps its own reference until encoded).
+    fn send_gpu(&mut self, idx: u64, mut gpu: crate::gpu_frames::HwFrame) -> Result<(), String> {
+        gpu.set_pts(idx as i64);
+        let ret = unsafe { ff::ffi::avcodec_send_frame(self.encoder.as_mut_ptr(), gpu.as_ptr()) };
+        if ret < 0 {
+            return Err(ff::Error::from(ret).to_string());
+        }
+        self.last_input_pts = Some(idx);
+        self.last_gpu = Some(gpu);
+        self.last_frame = None;
+        Ok(())
+    }
+
+    /// The newest frame as RGBA for thumbnails / stills (a GPU frame is read back now).
+    pub(super) fn raw_last(&self) -> Option<RawFrame> {
+        if let Some(frame) = &self.last_frame {
+            return Some(frame.clone());
+        }
+        let gpu = self.last_gpu.as_ref()?;
+        match crate::gpu_frames::read_rgba(gpu) {
+            Ok((w, h, rgba)) => Some((w, h, Arc::new(rgba))),
+            Err(e) => {
+                eprintln!("[recall] frame readback for the thumbnail failed: {e}");
+                None
+            }
+        }
     }
 
     fn send_rgba(&mut self, idx: u64, width: u32, rgba: &[u8]) -> Result<(), String> {
