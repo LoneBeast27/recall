@@ -10,7 +10,7 @@ use serde_json::Value;
 use windows::Win32::Foundation::{HANDLE, HWND, RECT, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindow, GetWindowRect, IsWindowVisible, KillTimer, SetTimer, SetWindowPos, ShowWindow, GW_HWNDPREV, HWND_TOPMOST,
+    GetForegroundWindow, GetWindow, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, KillTimer, SetTimer, SetWindowPos, ShowWindow, GW_HWNDPREV, HWND_TOPMOST,
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
 };
 
@@ -206,14 +206,16 @@ impl App {
     /// `--smoke-render`: the fixture's current content, settled, to a BMP.
     pub fn snapshot(&mut self, path: &std::path::Path) -> Result<(), String> {
         self.poll_stats(Instant::now());
-        let content = island::content(self.reducer.view(), self.reducer.session())
+        let content = island::content(self.reducer.view(), self.reducer.session(), true)
             .ok_or("the fixture shows nothing (the island is hidden)")?;
         let (scene, scale) = self.scene_for(&content);
         crate::preview::snapshot(path, &mut self.renderer, &self.fonts, &scene, scale)
     }
 
     fn refresh(&mut self, hwnd: HWND, now: Instant) {
-        match island::content(self.reducer.view(), self.reducer.session()) {
+        let session = self.reducer.session();
+        let in_game = self.smoke.is_some() || game_in_front(session.target_pid.filter(|_| !session.desktop));
+        match island::content(self.reducer.view(), session, in_game) {
             Some(content) => {
                 let (scene, _) = self.scene_for(&content);
                 self.island.update(Some((content, scene.w, scene.h)), now);
@@ -271,6 +273,15 @@ impl App {
         self.set_anim(hwnd, animating);
     }
 
+}
+
+/// The stats are for the game only: true while the foreground window belongs
+/// to the target game's process.
+fn game_in_front(target_pid: Option<u32>) -> bool {
+    let Some(pid) = target_pid else { return false };
+    let mut owner = 0u32;
+    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut owner)) };
+    owner == pid
 }
 
 /// Games that make their own window topmost (Rocket League does) cover the

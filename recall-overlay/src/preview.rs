@@ -113,7 +113,7 @@ fn notice_from(events: &[Value]) -> Option<NoticeView> {
     for event in events {
         reducer.apply_envelope(event, now);
     }
-    match content(reducer.view(), reducer.session()) {
+    match content(reducer.view(), reducer.session(), true) {
         Some(Content::Notice(notice)) => Some(notice),
         _ => None,
     }

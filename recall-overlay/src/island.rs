@@ -27,12 +27,13 @@ impl Content {
 }
 
 /// Hidden by default; a notice while one is active and notices are on
-/// (`overlay.enabled`); the stats while `overlay_stats` is on.
-pub fn content(view: &OverlayView, session: &Session) -> Option<Content> {
+/// (`overlay.enabled`); the stats while `overlay_stats` is on and the target
+/// game is in front (`game_in_front`; never over the desktop or other apps).
+pub fn content(view: &OverlayView, session: &Session, game_in_front: bool) -> Option<Content> {
     if let Some(notice) = view.notice.as_ref().filter(|_| view.visible && session.notices) {
         return Some(Content::Notice(notice.clone()));
     }
-    (session.overlay_stats && view.connected).then_some(Content::Stats)
+    (session.overlay_stats && view.connected && game_in_front).then_some(Content::Stats)
 }
 
 /// The stats island's numbers from the session, the replay buffer and a sample.
