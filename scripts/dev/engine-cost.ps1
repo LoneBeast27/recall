@@ -14,7 +14,7 @@
   Only that one corner pixel is on screen. Clips go to -OutDir (default .tmp\engine-cost\clips).
 
     powershell -NoProfile -File scripts\dev\engine-cost.ps1 [-Engine <recall.exe>] [-Seconds 30]
-      [-TargetFps 500] [-MaxMsPerFrame 8] [-SaveSeconds 0] [-Json <file>]
+      [-TargetFps 500] [-MaxMsPerFrame 1.5] [-SaveSeconds 0] [-Json <file>]
 #>
 param(
   [string]$Engine = '',
@@ -26,7 +26,7 @@ param(
   [int]$TargetY = 1439,
   [string]$TargetArgs = '',
   [switch]$RefuseGpu,
-  [double]$MaxMsPerFrame = 8,
+  [double]$MaxMsPerFrame = 1.5,
   [int]$SaveSeconds = 0,
   [string]$OutDir = '',
   [string]$Json = '',
