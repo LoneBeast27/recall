@@ -131,7 +131,7 @@ CPU per captured frame regresses; `-SaveSeconds 10` also saves a clip for
 
 ```powershell
 cargo build --release -p recall --bins --example present_target --offline   # via nice-build.ps1
-powershell -NoProfile -File scripts\dev\engine-cost.ps1 [-Seconds 30] [-MaxMsPerFrame 8]
+powershell -NoProfile -File scripts\dev\engine-cost.ps1 [-Seconds 30] [-MaxMsPerFrame 1.5]
 ```
 
 The app uses its own target folder (`target-gpui`) because GPUI pins different dependency
