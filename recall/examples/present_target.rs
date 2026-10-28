@@ -3,12 +3,14 @@
 //! (black) is on screen at the bottom-left corner: a window entirely off screen, or under
 //! the taskbar, counts as occluded and WGC sends no frames for it.
 //!
-//!   present_target [--fps 500] [--width W --height H] [--x X --y Y] [--seconds N]
+//!   present_target [--fps 500] [--width W --height H] [--x X --y Y] [--monitor I] [--seconds N]
+//!
+//! `--monitor I` places the window at monitor I's top-left (+ --x/--y), for a visible run.
 //!
 //! Prints one JSON line when the window is up (`{"hwnd":…,"width":…,"height":…}`), then
-//! `{"presented":…}` once a second. The pattern carries known sRGB patches (left), a bar
-//! moving 8 px per frame, and the frame number as 24 binary blocks along the top so a
-//! recorded clip can be checked for colour and frame continuity.
+//! `{"presented":…}` once a second. The pattern carries six known sRGB patches (100 px, left),
+//! a bar moving 8 px per frame, and the frame number as 24 binary blocks of 48 px along the
+//! top, so a recorded clip (1152x664 and up) can be checked for colour and frame continuity.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -48,18 +50,18 @@ fn swatch(i: u32) -> vec3<f32> {
 fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let x = pos.x;
     let y = pos.y;
-    // Top strip: frame number, 24 blocks of 64 px, MSB first, white = 1.
+    // Top strip: frame number, 24 blocks of 48 px, MSB first, white = 1.
     if (y < 48.0) {
-        let b = u32(x / 64.0);
+        let b = u32(x / 48.0);
         if (b < 24u) {
             let bit = (p.frame >> (23u - b)) & 1u;
             return vec4<f32>(vec3<f32>(f32(bit)), 1.0);
         }
         return vec4<f32>(0.0, 0.0, 0.0, 1.0);
     }
-    // Left column: six 160x160 colour patches.
-    if (x < 160.0 && y >= 64.0 && y < 64.0 + 6.0 * 160.0) {
-        return vec4<f32>(swatch(u32((y - 64.0) / 160.0)), 1.0);
+    // Left column: six 100x100 colour patches.
+    if (x < 100.0 && y >= 64.0 && y < 64.0 + 6.0 * 100.0) {
+        return vec4<f32>(swatch(u32((y - 64.0) / 100.0)), 1.0);
     }
     // Moving bar, 8 px per frame.
     let bar = f32((p.frame * 8u) % u32(p.width));
@@ -79,11 +81,12 @@ struct Args {
     height: Option<u32>,
     x: i32,
     y: i32,
+    monitor: Option<usize>,
     seconds: Option<u64>,
 }
 
 fn parse() -> Args {
-    let mut a = Args { fps: 500, width: None, height: None, x: -32000, y: -32000, seconds: None };
+    let mut a = Args { fps: 500, width: None, height: None, x: -32000, y: -32000, monitor: None, seconds: None };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
         let v = it.next().unwrap_or_default();
@@ -94,6 +97,7 @@ fn parse() -> Args {
             "--x" => a.x = v.parse().unwrap_or(-32000),
             "--y" => a.y = v.parse().unwrap_or(-32000),
             "--seconds" => a.seconds = v.parse().ok(),
+            "--monitor" => a.monitor = v.parse().ok(),
             _ => {}
         }
     }
@@ -263,10 +267,18 @@ impl ApplicationHandler for App {
     fn resumed(&mut self, el: &ActiveEventLoop) {
         let size = el.primary_monitor().map(|m| m.size()).unwrap_or(PhysicalSize::new(2560, 1440));
         let (w, h) = (self.args.width.unwrap_or(size.width), self.args.height.unwrap_or(size.height));
+        let (x, y) = match self.args.monitor.and_then(|i| el.available_monitors().nth(i)) {
+            Some(m) => {
+                let p = m.position();
+                eprintln!("[present_target] monitor {:?} at {p:?} size {:?}", m.name(), m.size());
+                (p.x + self.args.x.max(0), p.y + self.args.y.max(0))
+            }
+            None => (self.args.x, self.args.y),
+        };
         let attrs = Window::default_attributes()
             .with_title("Recall Present Target")
             .with_inner_size(PhysicalSize::new(w, h))
-            .with_position(PhysicalPosition::new(self.args.x, self.args.y))
+            .with_position(PhysicalPosition::new(x, y))
             .with_decorations(false)
             .with_skip_taskbar(true)
             .with_active(false)

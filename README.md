@@ -123,6 +123,17 @@ choppy audio (fixed 2026-10-27: samples stay back to back unless the stamps drif
 40 ms). `RECALL_AUDIO_SOAK=<folder of stems> cargo test audio_soak -- --ignored --nocapture`
 plays stems silently on the default device and reports output underruns.
 
+After any change to capture or encoding, run the engine cost check (never while a game runs; the
+display must be on, since Windows sends no capture frames while it sleeps). It records a
+2560x1440 window presenting at ~480 fps the way a game is recorded and fails when the engine's
+CPU per captured frame regresses; `-SaveSeconds 10` also saves a clip for
+`python -I scripts\dev\check-clip.py <clip>` (frame counter continuity, colour swatches):
+
+```powershell
+cargo build --release -p recall --bins --example present_target --offline   # via nice-build.ps1
+powershell -NoProfile -File scripts\dev\engine-cost.ps1 [-Seconds 30] [-MaxMsPerFrame 8]
+```
+
 The app uses its own target folder (`target-gpui`) because GPUI pins different dependency
 versions. Tests that need NVENC or a live game are `#[ignore]`d. Status, verification and
 open items: [.planning/STATE.md](.planning/STATE.md); the scope and every ruling:

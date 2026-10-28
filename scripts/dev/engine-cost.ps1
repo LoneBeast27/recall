@@ -24,6 +24,7 @@ param(
   [int]$TargetFps = 500,
   [int]$TargetX = -2559,
   [int]$TargetY = 1439,
+  [string]$TargetArgs = '',
   [double]$MaxMsPerFrame = 8,
   [int]$SaveSeconds = 0,
   [string]$OutDir = '',
@@ -62,7 +63,7 @@ function Start-Child([string]$exe, [string]$argline, [hashtable]$envs) {
 }
 function Drain($queue) { $lines = @(); $l = $null; while ($queue.TryDequeue([ref]$l)) { $lines += $l }; $lines }
 
-$tgt = Start-Child $Target "--fps $TargetFps --x $TargetX --y $TargetY" @{}
+$tgt = Start-Child $Target "--fps $TargetFps --x $TargetX --y $TargetY $TargetArgs" @{}
 $hwnd = 0; $deadline = (Get-Date).AddSeconds(15); $tlines = @()
 while (-not $hwnd -and (Get-Date) -lt $deadline) {
   Start-Sleep -Milliseconds 200

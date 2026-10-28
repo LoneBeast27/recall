@@ -35,29 +35,29 @@ def main():
                     "color_space": s.get("color_space"), "color_range": s.get("color_range")}
                    if s["codec_type"] == "video" else {"channels": s.get("channels")})} for s in probe["streams"]]
 
-    # Counter row: y = 24, x = 0..1535 (24 blocks of 64 px), sampled at each block centre.
-    row = run([ffmpeg, "-v", "error", "-i", clip, "-map", "0:v:0", "-vf", "format=rgb24,crop=1536:1:0:24",
+    # Counter row: y = 24, x = 0..1151 (24 blocks of 48 px), sampled at each block centre.
+    row = run([ffmpeg, "-v", "error", "-i", clip, "-map", "0:v:0", "-vf", "format=rgb24,crop=1152:1:0:24",
                "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
-    width = 1536 * 3
+    width = 1152 * 3
     counters = []
     for f in range(len(row) // width):
         line = row[f * width:(f + 1) * width]
         value = 0
         for b in range(24):
-            x = b * 64 + 32
+            x = b * 48 + 24
             value = (value << 1) | (1 if line[x * 3] > 128 else 0)
         counters.append(value)
     steps = [b - a for a, b in zip(counters, counters[1:])]
     repeats = sum(1 for s in steps if s == 0)
     backwards = sum(1 for s in steps if s < 0)
 
-    # Swatch column: x = 80, y = 64 + 160 * i + 80 (centres), every frame.
-    col = run([ffmpeg, "-v", "error", "-i", clip, "-map", "0:v:0", "-vf", "format=rgb24,crop=1:960:80:64",
+    # Swatch column: x = 50, y = 64 + 100 * i + 50 (centres), every frame.
+    col = run([ffmpeg, "-v", "error", "-i", clip, "-map", "0:v:0", "-vf", "format=rgb24,crop=1:600:50:64",
                "-f", "rawvideo", "-pix_fmt", "rgb24", "-"])
-    fsize = 960 * 3
+    fsize = 600 * 3
     colours = []
     for i, (name, want) in enumerate(SWATCHES):
-        y = 160 * i + 80
+        y = 100 * i + 50
         px = [col[f * fsize + y * 3:f * fsize + y * 3 + 3] for f in range(len(col) // fsize)]
         med = tuple(int(statistics.median(p[c] for p in px)) for c in range(3)) if px else None
         colours.append({"swatch": name, "drawn": want, "decoded_median": med,
