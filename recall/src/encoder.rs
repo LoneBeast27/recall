@@ -83,6 +83,8 @@ pub struct EncStats {
     /// `Codec::index`: the requested codec until an encoder opens, then the
     /// one actually recording (H.264 after a fallback).
     pub codec: AtomicU64,
+    /// NVENC could not open on GPU frames: capture switches to the CPU path for good.
+    pub gpu_refused: std::sync::atomic::AtomicBool,
     /// Most recent initialization/reconfiguration failure for status consumers.
     pub error: Mutex<Option<String>>,
 }
@@ -203,6 +205,10 @@ fn run(
 
         match frames.recv_timeout(std::time::Duration::from_millis(100)) {
             Ok(mut frame) => {
+                // After a refusal, GPU frames still queued are dropped (capture has switched).
+                if frame.gpu.is_some() && stats.gpu_refused.load(Relaxed) {
+                    continue;
+                }
                 // GPU frames arrive already cropped / padded to a stable size.
                 if let Some(active) = enc.as_ref().filter(|_| frame.gpu.is_none()) {
                     if let Err(e) = normalize_small_size_jitter(
@@ -256,7 +262,13 @@ fn run(
                             *stats.error.lock().unwrap_or_else(|e| e.into_inner()) =
                                 Some(e.clone());
                             report(cfg.json, &format!("encoder init failed: {e}"));
-                            failed_resolution = Some((frame.width, frame.height));
+                            if frame.gpu.is_some() {
+                                // Let the CPU frames that follow open the encoder instead.
+                                stats.gpu_refused.store(true, Relaxed);
+                                report(cfg.json, "NVENC refused GPU frames; capture switches to CPU copies");
+                            } else {
+                                failed_resolution = Some((frame.width, frame.height));
+                            }
                             None
                         }
                     };
@@ -356,6 +368,10 @@ fn try_open(
     ctx.set_width(w);
     ctx.set_height(h);
     match gpu_pool {
+        // Dev check of the CPU fallback (scripts/dev/engine-cost.ps1 -RefuseGpu).
+        Some(_) if std::env::var_os("RECALL_REFUSE_GPU_FRAMES").is_some() => {
+            return Err("GPU frames refused (RECALL_REFUSE_GPU_FRAMES)".into());
+        }
         // D3D11 frames: NVENC opens on the capture device and registers the pool textures.
         Some(pool) => {
             ctx.set_format(ff::format::Pixel::D3D11);

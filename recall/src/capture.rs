@@ -40,7 +40,8 @@ pub const PATH_CPU: u8 = 2;
 /// Where GPU frames go (the encoder's frame queue) and where the capture thread logs.
 #[cfg(feature = "encode")]
 pub struct GpuSink {
-    /// Hand one frame (capture PTS in us) to the encoder; false once the encoder is gone.
+    /// Hand one frame (capture PTS in us) to the encoder; false once the encoder is gone or
+    /// cannot take GPU frames (capture then switches to the CPU path).
     pub send: Box<dyn Fn(u64, crate::gpu_frames::HwFrame) -> bool + Send + Sync>,
     pub log: Box<dyn Fn(String) + Send + Sync>,
 }
@@ -331,7 +332,13 @@ impl Handler {
                 if let (Some(copy), Ok(mut latest)) = (hw.try_clone(), self.shared.latest_gpu.lock()) {
                     *latest = Some(copy);
                 }
-                (sink.send)(pts_us, hw);
+                if !(sink.send)(pts_us, hw) {
+                    (sink.log)("capture: encoder takes no GPU frames; using CPU copies".into());
+                    self.gpu = GpuState::Off;
+                    if let Ok(mut latest) = self.shared.latest_gpu.lock() {
+                        *latest = None;
+                    }
+                }
                 true
             }
             Err(e) => {
