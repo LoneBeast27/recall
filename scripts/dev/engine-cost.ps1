@@ -25,6 +25,7 @@ param(
   [int]$TargetX = -2559,
   [int]$TargetY = 1439,
   [string]$TargetArgs = '',
+  [switch]$RefuseGpu,
   [double]$MaxMsPerFrame = 8,
   [int]$SaveSeconds = 0,
   [string]$OutDir = '',
@@ -79,6 +80,8 @@ $envs = @{
   PATH = "$ffbin;$env:PATH"
 }
 if (-not $Monitor) { $envs.RECALL_CAPTURE_HWND = "$hwnd" }
+# Exercise the CPU fallback: NVENC refuses GPU frames, capture must switch and keep recording.
+if ($RefuseGpu) { $envs.RECALL_REFUSE_GPU_FRAMES = '1' }
 $eng = Start-Child $Engine '--json' $envs
 $log = [Collections.Generic.List[string]]::new()
 function Pump { foreach ($l in (Drain $eng.out)) { $log.Add($l) }; foreach ($l in (Drain $eng.err)) { $log.Add("stderr: $l") } }
