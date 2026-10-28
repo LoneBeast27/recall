@@ -30,6 +30,9 @@ pub(crate) fn install_gpu_sink(shared: &Arc<CaptureShared>, handle: &encoder::En
     let frames = tx.clone();
     let stats = handle.stats.clone();
     let send = move |pts_us: u64, gpu: gpu_frames::HwFrame| {
+        if stats.gpu_refused.load(Relaxed) {
+            return false;
+        }
         let (width, height) = (gpu.width(), gpu.height());
         let frame = encoder::PacedFrame { idx: pts_us, width, height, rgba: Vec::new(), gpu: Some(gpu) };
         let Ok(guard) = frames.lock() else { return false };
