@@ -32,6 +32,7 @@ pub const MODE_TONEMAP: u32 = 1;
 /// Which path frames take (`CaptureShared::path`).
 pub const PATH_STARTING: u8 = 0;
 /// Zero-copy: tonemapped on the GPU, encoded from VRAM; the render loop idles.
+#[cfg_attr(not(feature = "encode"), allow(dead_code))]
 pub const PATH_GPU: u8 = 1;
 /// CPU readback into `latest` for the render thread (fallback / dump harness).
 pub const PATH_CPU: u8 = 2;
