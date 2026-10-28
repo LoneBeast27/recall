@@ -31,14 +31,13 @@ impl Enc {
         let quiet_tail = self
             .last_input_pts
             .is_some_and(|pts| pts < end_us.saturating_sub(want_us));
+        // Thumbnail + still source; a GPU frame is read back once, here.
+        let raw = self.raw_last();
         let (video, secs) = if quiet_tail {
             // A fresh keyframe-only still: reusing an old inter-frame packet
             // would need its references and span the whole quiet gap. The still
             // lasts exactly the requested window (the ring holds it >= 1 µs).
-            let frame = self
-                .last_frame
-                .clone()
-                .ok_or("no frame available for static save")?;
+            let frame = raw.clone().ok_or("no frame available for static save")?;
             let still = VideoSrc::Still {
                 frame,
                 spec: StillSpec {
@@ -70,7 +69,7 @@ impl Enc {
             video,
             backend: self.backend,
             audio,
-            thumb: self.last_frame.clone(),
+            thumb: raw,
             width: self.width,
             height: self.height,
             fps: self.nominal_fps,

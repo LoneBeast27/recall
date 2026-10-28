@@ -1,14 +1,16 @@
-//! Per-redraw and periodic work of the engine [`App`]: the encode and
-//! screenshot ticks, fps tracking, source-title / HDR-mode refresh, and the
-//! `--json` status line.
+//! Per-redraw and periodic work of the engine [`App`]: the idle tick of the GPU path,
+//! the encode and screenshot ticks, fps tracking, source-title / HDR-mode refresh, and
+//! the `--json` status line.
 
 use std::sync::atomic::Ordering::Relaxed;
 use std::time::Instant;
 
+use winit::event_loop::{ActiveEventLoop, ControlFlow};
+
 #[cfg(feature = "encode")]
 use crate::{audio, encoder};
 use crate::{capture, hdr, protocol, source};
-use crate::{App, SOURCE_POLL_FRAMES};
+use crate::{App, IDLE_TICK, PERIODIC};
 
 impl App {
     /// Encode each newly uploaded capture once, retaining its native timestamp.
@@ -33,6 +35,7 @@ impl App {
                 width: w,
                 height: h,
                 rgba,
+                gpu: None,
             })
         {
             enc.stats.backend.store(3, Relaxed);
@@ -49,10 +52,48 @@ impl App {
         if !shots.take_request() {
             return;
         }
+        #[cfg(feature = "encode")]
+        if self.gpu.is_none() {
+            let latest = self.shared.as_ref().and_then(|s| s.latest_gpu.lock().ok().and_then(|f| f.as_ref().and_then(|f| f.try_clone())));
+            match latest.map(|f| crate::gpu_frames::read_rgba(&f)) {
+                Some(Ok((w, h, rgba))) => shots.submit(w, h, rgba, &self.source_name),
+                Some(Err(e)) => shots.fail(&format!("frame readback failed: {e}")),
+                None => shots.fail("no captured frame yet"),
+            }
+            return;
+        }
         match self.gpu.as_mut().and_then(|g| g.encode_frame()) {
             Some((w, h, rgba)) => shots.submit(w, h, rgba, &self.source_name),
             None => shots.fail("no captured frame yet"),
         }
+    }
+
+    /// GPU path (and before the first frame): tick every 50 ms and sleep in between. The
+    /// CPU fallback switches to the redraw loop once the capture thread picks it.
+    pub(super) fn idle_tick(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(shared) = self.shared.clone() else { return };
+        if self.gpu.is_none() && shared.path.load(Relaxed) == capture::PATH_CPU {
+            if let Some(window) = &self.window {
+                self.gpu = Some(crate::gpu::Gpu::new(window.clone(), shared.clone()));
+                window.request_redraw();
+            }
+        }
+        if self.gpu.is_some() {
+            event_loop.set_control_flow(ControlFlow::Poll);
+            return;
+        }
+        let now = Instant::now();
+        if self.next_tick.is_none_or(|t| now >= t) {
+            if shared.quit.load(Relaxed) {
+                event_loop.exit();
+                return;
+            }
+            self.screenshot_tick();
+            self.tick_fps();
+            self.periodic_update();
+            self.next_tick = Some(now + IDLE_TICK);
+        }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_tick.unwrap_or(now + IDLE_TICK)));
     }
 
     pub(super) fn tick_fps(&mut self) {
@@ -85,10 +126,11 @@ impl App {
     }
 
     pub(super) fn periodic_update(&mut self) {
-        self.poll_counter = self.poll_counter.wrapping_add(1);
-        if self.poll_counter % SOURCE_POLL_FRAMES != 0 {
+        let now = Instant::now();
+        if self.last_periodic.is_some_and(|t| now.duration_since(t) < PERIODIC) {
             return;
         }
+        self.last_periodic = Some(now);
         self.refresh_source_title();
         self.refresh_hdr_mode();
         self.emit_status();
@@ -159,6 +201,7 @@ impl App {
             .gpu
             .as_ref()
             .and_then(|g| g.source_size())
+            .or_else(|| shared.gpu_size.lock().ok().and_then(|s| *s))
             .unwrap_or((0, 0));
         let mode = if shared.mode.load(Relaxed) == capture::MODE_TONEMAP {
             "tonemap"

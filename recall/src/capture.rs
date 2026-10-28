@@ -1,12 +1,15 @@
 //! Windows.Graphics.Capture pipeline for Recall.
 //!
-//! Captures the primary monitor in `Rgba16F` (scRGB-linear; carries HDR) on a
-//! dedicated thread, reads each frame back to CPU, and parks the latest frame
-//! in a shared slot for the render thread to upload + tonemap. CPU readback is
-//! the simple/debuggable Phase-0 path; zero-copy D3D11->D3D12 interop is the
-//! deferred optimization.
+//! Captures a window or monitor in `Rgba16F` (scRGB-linear; carries HDR) on a
+//! dedicated thread. Recording takes the zero-copy path (`gpu_frames`): each frame is
+//! tonemapped on the capture device into an FFmpeg D3D11 frame and handed to the encoder,
+//! with no CPU readback. When that path cannot start (or `RECALL_DUMP*` asks for fp16
+//! pixels) the frame is read back to the CPU and parked in a shared slot for the render
+//! thread to upload + tonemap (the Phase-0 path).
 
-use std::sync::atomic::{AtomicBool, AtomicU32};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering::Relaxed};
+#[cfg(feature = "encode")]
+use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 
 use crate::protocol::MonitorInfo;
@@ -25,6 +28,25 @@ use windows_capture::settings::{
 /// Tonemap mode shared with the shader's `Params.mode`.
 pub const MODE_PASSTHROUGH: u32 = 0;
 pub const MODE_TONEMAP: u32 = 1;
+
+/// Which path frames take (`CaptureShared::path`).
+pub const PATH_STARTING: u8 = 0;
+/// Zero-copy: tonemapped on the GPU, encoded from VRAM; the render loop idles.
+pub const PATH_GPU: u8 = 1;
+/// CPU readback into `latest` for the render thread (fallback / dump harness).
+pub const PATH_CPU: u8 = 2;
+
+/// Where GPU frames go (the encoder's frame queue) and where the capture thread logs.
+#[cfg(feature = "encode")]
+pub struct GpuSink {
+    /// Hand one frame (capture PTS in us) to the encoder; false once the encoder is gone.
+    pub send: Box<dyn Fn(u64, crate::gpu_frames::HwFrame) -> bool + Send + Sync>,
+    pub log: Box<dyn Fn(String) + Send + Sync>,
+}
+
+/// Consecutive GPU-path failures after which capture falls back to the CPU path.
+#[cfg(feature = "encode")]
+const GPU_FAILURES_BEFORE_FALLBACK: u32 = 30;
 
 /// A captured frame, tightly packed f16 RGBA (8 bytes/pixel), ready to upload.
 pub struct FrameData {
@@ -46,6 +68,16 @@ pub struct CaptureShared {
     pub auto: AtomicBool,
     /// Set by a `quit` command to ask the event loop to exit.
     pub quit: AtomicBool,
+    /// `PATH_STARTING` / `PATH_GPU` / `PATH_CPU`, set by the capture thread.
+    pub path: AtomicU8,
+    /// Encoder frame size of the newest GPU frame (status line).
+    pub gpu_size: Mutex<Option<(u32, u32)>>,
+    /// Newest GPU frame (screenshots read it back on request).
+    #[cfg(feature = "encode")]
+    pub latest_gpu: Mutex<Option<crate::gpu_frames::HwFrame>>,
+    /// Set once by the engine before capture starts; without it frames take the CPU path.
+    #[cfg(feature = "encode")]
+    pub gpu_sink: OnceLock<GpuSink>,
 }
 
 impl CaptureShared {
@@ -56,6 +88,12 @@ impl CaptureShared {
             mode: AtomicU32::new(MODE_PASSTHROUGH),
             auto: AtomicBool::new(true),
             quit: AtomicBool::new(false),
+            path: AtomicU8::new(PATH_STARTING),
+            gpu_size: Mutex::new(None),
+            #[cfg(feature = "encode")]
+            latest_gpu: Mutex::new(None),
+            #[cfg(feature = "encode")]
+            gpu_sink: OnceLock::new(),
         })
     }
 
@@ -129,11 +167,10 @@ pub type CaptureControlHandle = CaptureControl<Handler, CaptureError>;
 /// Dump the Nth frame so capture has warmed up (avoids the first blank frames).
 const DUMP_AT_FRAME: u64 = 30;
 
-/// The windows-capture handler. Owns the shared slot + a reusable readback
-/// scratch buffer so we allocate at most one frame Vec per arrival.
+/// The windows-capture handler: the zero-copy pipeline, or the CPU readback into the
+/// shared slot (one frame Vec per arrival).
 pub struct Handler {
     shared: Arc<CaptureShared>,
-    scratch: Vec<u8>,
     frame_count: u64,
     timestamp_origin: Option<i64>,
     /// When set (via `RECALL_DUMP`), write one verification PNG then clear it.
@@ -143,6 +180,17 @@ pub struct Handler {
     dump_every: Option<std::time::Duration>,
     last_dump: std::time::Instant,
     dump_seq: u32,
+    #[cfg(feature = "encode")]
+    gpu: GpuState,
+}
+
+/// The capture thread's zero-copy pipeline, built on the first frame (it needs the
+/// capture device).
+#[cfg(feature = "encode")]
+enum GpuState {
+    Untried,
+    Ready { pipe: crate::gpu_frames::Pipeline, failures: u32 },
+    Off,
 }
 
 impl GraphicsCaptureApiHandler for Handler {
@@ -164,13 +212,14 @@ impl GraphicsCaptureApiHandler for Handler {
             .map(std::time::Duration::from_secs_f64);
         Ok(Self {
             shared: ctx.flags,
-            scratch: Vec::new(),
             frame_count: 0,
             timestamp_origin: None,
             dump_path,
             dump_every,
             last_dump: std::time::Instant::now(),
             dump_seq: 0,
+            #[cfg(feature = "encode")]
+            gpu: GpuState::Untried,
         })
     }
 
@@ -187,16 +236,29 @@ impl GraphicsCaptureApiHandler for Handler {
             *timeline = Some((pts_us, std::time::Instant::now()));
         }
 
-        // CPU readback: maps a staging copy; `as_nopadding_buffer` strips the
-        // D3D row-pitch padding into `scratch` (handles Rgba16F = 8 bytes/px).
-        let fb = frame.buffer()?;
-        let packed = fb.as_nopadding_buffer(&mut self.scratch);
+        #[cfg(feature = "encode")]
+        if self.dump_path.is_none() && self.dump_every.is_none() && self.gpu_frame(frame, pts_us) {
+            return Ok(());
+        }
+        self.shared.path.store(PATH_CPU, Relaxed);
+
+        // CPU readback (fallback): map a staging copy and strip the row padding with one
+        // single-threaded copy. (windows-capture's `as_nopadding_buffer` treats every
+        // Rgba16F frame as padded and fans the copy out over a 32-thread rayon pool.)
+        let mut fb = frame.buffer()?;
+        let pitch = fb.row_pitch() as usize;
+        let row = width as usize * 8;
+        let raw = fb.as_raw_buffer();
+        let mut bytes = Vec::with_capacity(row * height as usize);
+        for y in 0..height as usize {
+            bytes.extend_from_slice(&raw[y * pitch..y * pitch + row]);
+        }
 
         let data = FrameData {
             pts_us,
             width,
             height,
-            bytes: packed.to_vec(),
+            bytes,
         };
 
         self.frame_count += 1;
@@ -231,6 +293,62 @@ impl GraphicsCaptureApiHandler for Handler {
             *slot = Some(data);
         }
         Ok(())
+    }
+}
+
+#[cfg(feature = "encode")]
+impl Handler {
+    /// Zero-copy path: tonemap this frame on the GPU and hand it to the encoder. False sends
+    /// the frame down the CPU path (no encoder sink, the pipeline cannot start, or it kept
+    /// failing).
+    fn gpu_frame(&mut self, frame: &mut Frame, pts_us: u64) -> bool {
+        let Some(sink) = self.shared.gpu_sink.get() else { return false };
+        if let GpuState::Untried = self.gpu {
+            self.gpu = match crate::gpu_frames::Pipeline::new(frame.device(), frame.device_context()) {
+                Ok(pipe) => {
+                    (sink.log)("capture: zero-copy GPU path (D3D11 tonemap -> NVENC)".into());
+                    GpuState::Ready { pipe, failures: 0 }
+                }
+                Err(e) => {
+                    (sink.log)(format!("capture: GPU path unavailable ({e}); using CPU copies"));
+                    GpuState::Off
+                }
+            };
+        }
+        let GpuState::Ready { pipe, failures } = &mut self.gpu else { return false };
+        let (width, height) = (frame.width(), frame.height());
+        let target = crate::gpu_frames::target_size(pipe.target(), (width, height));
+        let mode = self.shared.mode.load(Relaxed);
+        match pipe.render(frame.as_raw_texture(), width, height, target, mode) {
+            Ok(hw) => {
+                *failures = 0;
+                self.frame_count += 1;
+                self.shared.path.store(PATH_GPU, Relaxed);
+                if let Ok(mut size) = self.shared.gpu_size.lock() {
+                    *size = Some(target);
+                }
+                if let (Some(copy), Ok(mut latest)) = (hw.try_clone(), self.shared.latest_gpu.lock()) {
+                    *latest = Some(copy);
+                }
+                (sink.send)(pts_us, hw);
+                true
+            }
+            Err(e) => {
+                *failures += 1;
+                if *failures == 1 || *failures >= GPU_FAILURES_BEFORE_FALLBACK {
+                    (sink.log)(format!("capture: GPU frame failed ({e}), failure {}", *failures));
+                }
+                if *failures < GPU_FAILURES_BEFORE_FALLBACK {
+                    return true; // skip this frame; the next one retries the GPU path
+                }
+                (sink.log)("capture: falling back to CPU copies".into());
+                self.gpu = GpuState::Off;
+                if let Ok(mut latest) = self.shared.latest_gpu.lock() {
+                    *latest = None;
+                }
+                false
+            }
+        }
     }
 }
 

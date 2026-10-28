@@ -121,6 +121,7 @@ mod tests {
             width,
             height,
             rgba,
+            gpu: None,
         }
     }
 
