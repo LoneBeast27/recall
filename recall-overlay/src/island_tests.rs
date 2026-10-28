@@ -23,7 +23,19 @@ fn engine_status() -> Value {
 }
 
 fn shown(reducer: &Reducer) -> Option<Content> {
-    content(reducer.view(), reducer.session())
+    content(reducer.view(), reducer.session(), true)
+}
+
+#[test]
+fn stats_show_only_while_the_game_is_in_front_but_notices_always() {
+    let now = Instant::now();
+    let mut reducer = Reducer::new();
+    reducer.apply_envelope(&engine_status(), now);
+    reducer.apply_envelope(&session_status(true), now);
+    assert_eq!(content(reducer.view(), reducer.session(), false), None, "another app in front: no stats");
+    assert_eq!(content(reducer.view(), reducer.session(), true), Some(Content::Stats));
+    reducer.apply_engine_event(&json!({"type":"mic_muted","muted":true}), now);
+    assert!(matches!(content(reducer.view(), reducer.session(), false), Some(Content::Notice(_))), "notices still flash");
 }
 
 #[test]
