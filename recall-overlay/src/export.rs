@@ -69,6 +69,7 @@ fn specs() -> Vec<Spec> {
     let hint = |name, stats, spot| Spec { spot, ..spec(name, "Shortcut hint (Alt ` then a key)", stats, false, vec![at(0, &chord)], None) };
     // 200 free rows: 138 px under the pill, too shallow for five rows (180), room for three (116).
     let shallow = Some(Spot { anchor: Anchor::TopRight, free_px: Some(200) });
+    let unscanned = Some(Spot { anchor: Anchor::TopRight, free_px: None });
     vec![
         spec("new-save", clip, true, false, vec![at(0, &saved)], Some(0)),
         spec("old-save", clip, true, true, vec![at(0, &saved)], Some(0)),
@@ -82,8 +83,10 @@ fn specs() -> Vec<Spec> {
         spec("ring-save-nostats", clip, false, false, vec![at(0, &saving), at(1_800, &saved)], Some(1_800)),
         spec("stats-on", "Stats on", false, false, vec![at(0, &status(true))], None),
         spec("stats-off", "Stats off", true, false, vec![at(0, &status(false))], None),
-        hint("hint-dropdown", false, None),
-        hint("hint-dropdown-stats", true, None),
+        // VALORANT's own scan picks the card; the forced spots show the other layouts.
+        hint("hint-valorant", false, None),
+        hint("hint-valorant-stats", true, None),
+        hint("hint-dropdown", false, unscanned),
         hint("hint-twocol", true, shallow),
     ]
 }
@@ -97,14 +100,18 @@ struct Run {
     frames: Vec<Entry>,
     /// The step the notice handed back (to the stats or to nothing).
     handback: Option<u64>,
+    /// The shortcut hint card's layout, when the sequence opened one.
+    card: Option<crate::hint::CardLayout>,
 }
 
 /// Runs one sequence: the rest frame before the trigger, then every step
 /// until the island rests after the last event.
 fn record(spec: &Spec, renderer: &mut Renderer, fonts: &Fonts, atlas: &mut Atlas) -> Result<Run, String> {
-    let spot = spec.spot.unwrap_or_else(|| Spots::embedded().lookup("valorant"));
+    let spots = Spots::embedded();
+    let spot = spec.spot.unwrap_or_else(|| spots.lookup("valorant"));
     let start = Instant::now();
     let mut sim = Sim::new(fonts, spot, MONITOR, scale(MONITOR.height(), &spot), spec.legacy, start);
+    sim.skyline = if spec.spot.is_some() { None } else { spots.skyline("valorant") };
     let engine = json!({"mod":"engine","event":{"type":"status","source":"VALORANT","fps":60,"buffer_secs":120.0,"encoder":"h264_nvenc"}});
     sim.reducer.apply_envelope(&status(spec.stats), start);
     sim.reducer.apply_envelope(&engine, start);
@@ -136,7 +143,7 @@ fn record(spec: &Spec, renderer: &mut Renderer, fonts: &Fonts, atlas: &mut Atlas
             break;
         }
     }
-    Ok(Run { rest, frames, handback })
+    Ok(Run { rest, frames, handback, card: sim.card_layout() })
 }
 
 /// One sequence's manifest entry; `place` turns (frame id, box w, margin)
@@ -155,6 +162,7 @@ fn sequence(spec: &Spec, run: &Run, place: &dyn Fn((usize, f32, f32)) -> Value) 
     json!({
         "notice": spec.notice, "stats_before": spec.stats, "legacy": spec.legacy,
         "free_px": spec.spot.and_then(|s| s.free_px),
+        "card_layout": run.card,
         "events_ms": spec.events.iter().map(|(at, v)| json!({"t_ms": at, "event": v})).collect::<Vec<_>>(),
         "saved_ms": spec.saved_ms,
         "rest": run.rest.map(place),

@@ -16,7 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::fonts::Fonts;
 use crate::island::{self, stats_content, Content, Island};
-use crate::hint::{card_scene, choose_layout, room_below, CardScene, GAP};
+use crate::hint::{choose_card, CardScene, GAP};
 use crate::layout::{leader_scene, stats_scene, Scene};
 use crate::placement::{self, window_origin, Rect, Spot, Spots, EDGE};
 use crate::presence::{CardLook, Look};
@@ -53,6 +53,8 @@ pub struct Placed {
     /// The scan's free depth below the island's top (physical px; unbounded
     /// when unscanned): a spring's overshoot never reaches past it.
     max_h: f32,
+    /// The scan's free rows per column (the hint card checks its own columns).
+    skyline: Option<Vec<u16>>,
 }
 
 /// What the last pushed frame showed: scene, window origin, look, sweep
@@ -207,7 +209,8 @@ impl App {
             let monitor = target_monitor(hwnd, pid);
             let scale = placement::scale(monitor.height(), &spot);
             let (grow, max_h) = (placement::grow(&spot), placement::free_depth(&spot, &monitor, scale));
-            self.placed = Some(Placed { key, pid, hwnd, monitor, spot, scale, grow, max_h });
+            let skyline = self.spots.skyline(&key);
+            self.placed = Some(Placed { key, pid, hwnd, monitor, spot, scale, grow, max_h, skyline });
         }
         self.placed.as_ref().map_or(1.0, |p| p.scale)
     }
@@ -243,10 +246,12 @@ impl App {
         let hint = self.reducer.view().hint.clone().filter(|_| self.reducer.session().notices);
         let Some(hint) = hint else { return self.island.update_hint(false, now) };
         let scale = self.place();
-        let free = self.placed.as_ref().map_or(f32::INFINITY, |p| p.max_h);
-        let room = room_below(free, self.island.frame(now).h, scale);
-        let layout = choose_layout(hint.options.len(), scale, room);
-        self.card_scene = Some(card_scene(&hint, layout, scale, &self.fonts));
+        let pill_h = self.island.frame(now).h;
+        let room = |w: f32| {
+            let p = self.placed.as_ref()?;
+            placement::card_room(&p.spot, p.skyline.as_deref(), &p.monitor, p.scale, w, pill_h, GAP * p.scale)
+        };
+        self.card_scene = Some(choose_card(&hint, scale, &self.fonts, room));
         self.island.update_hint(true, now);
     }
 

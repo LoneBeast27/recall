@@ -8,10 +8,10 @@ use std::time::{Duration, Instant};
 use crate::anim::{ease_out, Frame, DURATION};
 use crate::fonts::Fonts;
 use crate::island::{self, notice_layout, Content, Island};
-use crate::hint::{card_scene, choose_layout, room_below, CardScene, GAP};
+use crate::hint::{choose_card, CardScene, GAP};
 use crate::layout::{leader_scene, stats_scene, Scene};
 use crate::notice::NoticeView;
-use crate::placement::{align, free_depth, grow, Rect, Spot};
+use crate::placement::{align, card_room, free_depth, grow, Rect, Spot};
 use crate::presence::{CardLook, Look};
 use crate::preview::stats_states;
 use crate::reducer::Reducer;
@@ -55,6 +55,8 @@ pub struct Sim<'a> {
     scene: Scene,
     scene_scale: f32,
     card: Option<CardScene>,
+    /// The spot's skyline (the hint card checks its own columns).
+    pub skyline: Option<Vec<u16>>,
     /// Show notices the pre-change way: no transformation, no save badge,
     /// master's appear / hide from nothing.
     pub legacy: bool,
@@ -74,6 +76,7 @@ impl<'a> Sim<'a> {
             scene: Scene::default(),
             scene_scale: scale,
             card: None,
+            skyline: None,
             legacy,
             legacy_times: (None, None),
         }
@@ -104,13 +107,18 @@ impl<'a> Sim<'a> {
         Some((content, scene, scale, size))
     }
 
+    /// The hint card's layout, once one was laid out.
+    pub fn card_layout(&self) -> Option<crate::hint::CardLayout> {
+        self.card.as_ref().map(|c| c.layout)
+    }
+
     /// `App::refresh_hint`: the card for the room under the pill.
     fn refresh_hint(&mut self, now: Instant) {
         let hint = self.reducer.view().hint.clone().filter(|_| self.reducer.session().notices);
         let Some(hint) = hint else { return self.island.update_hint(false, now) };
-        let room = room_below(free_depth(&self.spot, &self.monitor, self.scale), self.island.frame(now).h, self.scale);
-        let layout = choose_layout(hint.options.len(), self.scale, room);
-        self.card = Some(card_scene(&hint, layout, self.scale, self.fonts));
+        let pill_h = self.island.frame(now).h;
+        let room = |w: f32| card_room(&self.spot, self.skyline.as_deref(), &self.monitor, self.scale, w, pill_h, GAP * self.scale);
+        self.card = Some(choose_card(&hint, self.scale, self.fonts, room));
         self.island.update_hint(true, now);
     }
 
