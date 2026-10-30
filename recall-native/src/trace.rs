@@ -93,6 +93,7 @@ pub fn record(route: &str, ed: &EditorState) {
         "undo": ed.can_undo(),
         "redo": ed.can_redo(),
         "stems": ed.info.as_ref().map(|i| i.audio.iter().map(|a| a.preview_path.as_str()).collect::<Vec<_>>()),
+        "source": ed.playback_path,
         "span": ed.track_span.get().map(|(left, width)| [left, width]),
         "status": ed.status,
         "targets": targets,
