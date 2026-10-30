@@ -102,9 +102,9 @@ impl EditorState {
         let tracks = self.preview_tracks(&info);
         if let Some(preview) = self.preview.as_mut() {
             // A failed swap has already closed the old source: reopen the original.
-            let (path, result) = match preview.open(copy, &tracks) {
+            let (path, result) = match preview.open(copy, &tracks, info.duration) {
                 Ok(()) => (copy.to_owned(), Ok(())),
-                Err(_) => (info.path.clone(), preview.open(&info.path, &tracks)),
+                Err(_) => (info.path.clone(), preview.open(&info.path, &tracks, info.duration)),
             };
             match result {
                 Ok(()) => {

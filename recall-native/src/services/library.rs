@@ -286,6 +286,12 @@ pub fn mp4_duration(path: &Path) -> Option<f64> {
     mp4::duration(path)
 }
 
+/// Length of an MP4's video track (where its last frame ends), without decoding.
+pub fn mp4_video_duration(path: &Path) -> Option<f64> {
+    let mut file = std::fs::File::open(path).ok()?;
+    mp4::video_duration_of(&mut file)
+}
+
 /// Moves clips (plus their recorder thumbnail and edit sidecar) to the Recycle Bin.
 /// Returns how many clips moved.
 pub fn delete_to_recycle_bin(clips: &[PathBuf]) -> Result<usize, String> {

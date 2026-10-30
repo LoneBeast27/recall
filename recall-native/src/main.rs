@@ -14,6 +14,7 @@ mod services;
 mod shell;
 mod theme;
 mod trace;
+mod transport_rules;
 mod ui;
 mod views;
 mod worker;

@@ -123,10 +123,13 @@ impl NativePreview {
             observed_ready: false,
             observed_error: None,
             prime_started: None,
+            video_end: None,
         })
     }
 
-    pub fn open(&mut self, path: &str, audio: &[PreviewTrack]) -> Result<(), String> {
+    /// Opens `path` with `audio` stems; `duration` is the clip's length on the editor timeline
+    /// (the sound clock runs that long even when a stem is shorter).
+    pub fn open(&mut self, path: &str, audio: &[PreviewTrack], duration: f64) -> Result<(), String> {
         if path.is_empty() {
             return Err("preview video path is empty".into());
         }
@@ -171,6 +174,9 @@ impl NativePreview {
         }
         .into();
         let normalized = normalize_windows_path(path);
+        // MP4/MOV state the picture's length; for others (MKV) keep a tenth of a second clear.
+        self.video_end = crate::services::library::mp4_video_duration(Path::new(&normalized))
+            .or_else(|| (duration > 0.2).then(|| duration - 0.1));
         let url = wide(&normalized);
         let mut player = None;
         unsafe {
@@ -192,7 +198,7 @@ impl NativePreview {
         }
         self.has_audio = !audio.is_empty();
         if self.has_audio {
-            if let Err(error) = self.audio.open(audio) {
+            if let Err(error) = self.audio.open(audio, duration) {
                 let _ = unsafe { player.Shutdown() };
                 self.has_audio = false;
                 return Err(error);

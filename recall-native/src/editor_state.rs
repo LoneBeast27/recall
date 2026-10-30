@@ -1,7 +1,7 @@
 //! Editor model: the open clip, its non-destructive plan, undo/redo, native preview
 //! control, autosave and export state. Rendering lives in `views/editor*.rs`.
 //! Save/flush/export settings live in `editor_state_persist.rs`; undo, cuts, trims,
-//! drags and gain in `editor_state_edits.rs`.
+//! drags and gain in `editor_state_edits.rs`; play/pause/seek in `editor_state_playback.rs`.
 use std::{
     cell::Cell,
     rc::Rc,
@@ -41,6 +41,8 @@ pub struct EditorState {
     pub selected: usize,
     pub preview: Option<NativePreview>,
     pub playing: bool,
+    /// Play was pressed while the preview was loading: start once it is ready.
+    play_when_ready: bool,
     pub fps: u32,
     /// Lossless/re-encode, size cap and output height for the next export.
     pub export_settings: ExportSettings,
@@ -86,6 +88,8 @@ pub struct EditorState {
 mod persist;
 #[path = "editor_state_edits.rs"]
 mod edits;
+#[path = "editor_state_playback.rs"]
+mod playback;
 
 impl EditorState {
     pub fn new(preview: Result<NativePreview, String>) -> Self {
@@ -102,6 +106,7 @@ impl EditorState {
             selected: 0,
             preview,
             playing: false,
+            play_when_ready: false,
             fps: 60,
             export_settings: ExportSettings::default(),
             marks: Vec::new(),
@@ -168,6 +173,8 @@ impl EditorState {
             Ok(prepared) => prepared,
             Err(error) => {
                 self.status = error;
+                self.playing = false;
+                self.play_when_ready = false;
                 return;
             }
         };
@@ -201,7 +208,7 @@ impl EditorState {
         self.needs_flush = false;
         self.preview_failed = false;
         if let Some(preview) = self.preview.as_mut() {
-            if let Err(error) = preview.open(&source, &tracks) {
+            if let Err(error) = preview.open(&source, &tracks, info.duration) {
                 self.status = error;
             }
         }
@@ -242,6 +249,7 @@ impl EditorState {
             }
             Some((Err(error), _)) => {
                 self.playing = false;
+                self.play_when_ready = false;
                 if !self.preview_failed {
                     self.preview_failed = true;
                     changed = true;
@@ -257,7 +265,12 @@ impl EditorState {
                 changed = true;
             }
         }
-        if self.playing {
+        let settled = self.info.is_some() && self.loading_path.is_none() && self.pending_seek.is_none();
+        if self.play_when_ready && settled && self.preview.as_ref().is_some_and(|p| p.is_ready()) {
+            self.play();
+            changed = true;
+        }
+        if self.playing && !self.play_when_ready {
             changed |= self.follow_playback();
         }
         // Moving the video means the backdrop's cut-out must be repainted too.
@@ -272,57 +285,6 @@ impl EditorState {
             }
         }
         changed
-    }
-
-    fn follow_playback(&mut self) -> bool {
-        let Some(preview) = self.preview.as_mut() else { return false };
-        let Ok(pos) = preview.position() else { return false };
-        let native_playing = preview.is_playing();
-        crate::trace::note_underruns(self.info.as_ref().map(|i| i.path.as_str()), preview.audio_underruns());
-        let audio_stalls = preview.audio_stalls.get();
-        if audio_stalls != self.audio_stalls_seen {
-            self.audio_stalls_seen = audio_stalls;
-            let clip = self.info.as_ref().map(|i| i.path.clone());
-            crate::trace::player_event("audio clock stalled: sound restarted at the video time", serde_json::json!({ "clip": clip, "position": pos }));
-        }
-        self.saw_native_playing |= native_playing;
-        let settled = self.play_started.is_some_and(|t| t.elapsed() >= Duration::from_millis(250));
-        let ended = self.plan.ranges.last().is_some_and(|last| pos >= last.end - 0.001);
-        if ended || (settled && self.saw_native_playing && !native_playing) {
-            self.pause();
-        } else if !self.plan.ranges.iter().any(|r| pos >= r.start && pos < r.end) {
-            match self.plan.ranges.iter().find(|r| r.start > pos).map(|r| r.start) {
-                Some(next) => self.seek(next),
-                None => self.pause(),
-            }
-        } else if settled {
-            self.watch_stalls(pos);
-        }
-        true
-    }
-
-    /// "Playing" but the clock froze: restart at the same spot; give up after repeated stalls.
-    fn watch_stalls(&mut self, pos: f64) {
-        use crate::playback_watch::WatchAction;
-        let action = self.watch.observe(pos, Instant::now());
-        if action == WatchAction::Nothing {
-            return;
-        }
-        let clip = self.info.as_ref().map(|i| i.path.clone());
-        let what = if action == WatchAction::Restart { "stall: restarting playback" } else { "stall: gave up" };
-        crate::trace::player_event(what, serde_json::json!({ "clip": clip, "position": pos }));
-        if action == WatchAction::GiveUp {
-            self.pause();
-            self.status = "Playback stopped responding. Press play again, or reopen the clip.".into();
-            return;
-        }
-        if let Some(preview) = self.preview.as_mut() {
-            let _ = preview.pause();
-            let _ = preview.seek(pos);
-            let _ = preview.play();
-        }
-        self.play_started = Some(Instant::now());
-        self.saw_native_playing = false;
     }
 
     /// Moves the native video to the layout's preview rect; true when it moved (repaint so the
@@ -353,62 +315,6 @@ impl EditorState {
         if let Some(preview) = self.preview.as_mut() {
             let _ = preview.hide();
         }
-    }
-
-    // ---- playback -------------------------------------------------------
-
-    pub fn position(&self) -> f64 {
-        self.preview.as_ref().and_then(|p| p.position().ok()).unwrap_or(0.0)
-    }
-
-    pub fn toggle_play(&mut self) {
-        if self.playing {
-            self.pause();
-            return;
-        }
-        let Some(preview) = self.preview.as_mut() else { return };
-        let pos = preview.position().unwrap_or(0.0);
-        let at_end = self.plan.ranges.last().is_some_and(|last| pos >= last.end - 0.01);
-        let start = self.plan.ranges.first().map_or(0.0, |first| first.start);
-        if at_end || pos < start {
-            let _ = preview.seek(start);
-        }
-        match preview.play() {
-            Ok(()) => {
-                self.playing = true;
-                self.play_started = Some(Instant::now());
-                self.saw_native_playing = false;
-                self.watch.reset();
-            }
-            Err(error) => {
-                self.status = error.clone();
-                self.last_error = Some(error);
-            }
-        }
-    }
-
-    pub fn pause(&mut self) {
-        self.playing = false;
-        self.play_started = None;
-        self.watch.reset();
-        if let Some(preview) = self.preview.as_mut() {
-            let _ = preview.pause();
-        }
-    }
-
-    pub fn seek(&mut self, seconds: f64) {
-        self.watch.reset();
-        let target = seconds.clamp(0.0, self.duration());
-        if let Some(preview) = self.preview.as_mut() {
-            if let Err(error) = preview.seek(target) {
-                self.status = error;
-            }
-        }
-    }
-
-    pub fn nudge(&mut self, delta: f64) {
-        let pos = self.position();
-        self.seek(pos + delta);
     }
 
     /// Source time → time in the edited output (slow/fast ranges count at their speed).

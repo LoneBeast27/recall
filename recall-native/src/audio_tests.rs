@@ -115,7 +115,7 @@ fn audio_soak() {
         .map(|(i, p)| PreviewTrack { stream_index: i + 1, path: p.to_string_lossy().into_owned(), gain_db: 0.0, muted: true })
         .collect();
     let mixer = AudioMixer::new().unwrap();
-    mixer.open(&tracks).unwrap();
+    mixer.open(&tracks, 0.0).unwrap();
     let t = Instant::now();
     while !mixer.is_ready() {
         assert!(mixer.error().is_none(), "{:?}", mixer.error());
@@ -158,4 +158,60 @@ fn audio_soak() {
         worst_lag * 1000.0,
         mixer.underruns(),
     );
+}
+
+/// A mixer whose worker never runs: the test plays the worker's part by hand.
+fn detached_mixer(clock_seconds: f64) -> (AudioMixer, mpsc::Receiver<Command>) {
+    let (tx, rx) = mpsc::channel();
+    let shared = Arc::new(SharedStatus::default());
+    shared.ready.store(true, Ordering::Release);
+    shared.duration_frames.store((clock_seconds * SAMPLE_RATE as f64) as u64, Ordering::Release);
+    let mixer = AudioMixer { tx, shared, worker: None, sent: Cell::new(0), seek_sent: Cell::new((0, 0.0)), run_sent: Cell::new((0, false)) };
+    (mixer, rx)
+}
+
+#[test]
+fn a_queued_seek_reads_as_done_until_the_worker_catches_up() {
+    // 2026-10-30: play pressed at the end ran "seek to start, play" back to back; play read the
+    // old clock (the seek still queued) and put the picture back at the end.
+    let (mixer, rx) = detached_mixer(10.453);
+    mixer.shared.set_position(10.453);
+    mixer.seek(0.0).unwrap();
+    assert_eq!(mixer.position(), 0.0, "the queued seek's target, not the stale clock");
+    mixer.play().unwrap();
+    assert!(mixer.is_playing(), "play is queued behind the seek");
+    assert_eq!(mixer.position(), 0.0);
+    assert_eq!(rx.try_iter().count(), 2);
+    // The worker carried out both: the shared clock is the truth again.
+    mixer.shared.set_position(0.25);
+    mixer.shared.playing.store(true, Ordering::Release);
+    mixer.shared.applied.store(2, Ordering::Release);
+    assert_eq!(mixer.position(), 0.25);
+    assert!(mixer.is_playing());
+    mixer.pause().unwrap();
+    assert!(!mixer.is_playing(), "a queued pause reads as paused");
+}
+
+#[test]
+fn a_queued_seek_is_clamped_to_the_clock_and_a_seek_to_the_end_stops() {
+    let (mixer, _rx) = detached_mixer(10.453);
+    mixer.play().unwrap();
+    mixer.shared.playing.store(true, Ordering::Release);
+    mixer.shared.applied.store(1, Ordering::Release);
+    mixer.seek(99.0).unwrap();
+    assert!((mixer.position() - 10.453).abs() < 1e-3);
+    assert!(!mixer.is_playing(), "the sound has nothing left to play");
+    mixer.seek(3.0).unwrap();
+    assert_eq!(mixer.position(), 3.0);
+    assert!(!mixer.is_playing(), "a seek keeps the paused state");
+}
+
+#[test]
+fn the_clock_covers_the_whole_clip_when_stems_end_early() {
+    // Sound 9.9 s, picture 10.438 s: the clock (which moves the picture) runs to 10.438.
+    assert_eq!(worker::clock_frames(475_200, 10.437942), 501_021);
+    // Stems longer than the clip keep their length; an unknown clip length changes nothing.
+    assert_eq!(worker::clock_frames(501_744, 10.0), 501_744);
+    assert_eq!(worker::clock_frames(1_000, 0.0), 1_000);
+    assert_eq!(worker::clock_frames(1_000, f64::NAN), 1_000);
 }
