@@ -78,7 +78,11 @@ fn looks_place_the_circle_at_the_anchored_end_and_unroll_left() {
 #[test]
 fn the_mark_rides_the_left_end_and_settles_into_place() {
     // Content 260 wide centred in a 300 pill: its mark settles at 20 + 20.
-    let pose = |pop, unroll| icon_pose(&Look::shaped(PILL, pop, unroll), 260.0, 20.0);
+    let pose = |pop, unroll| {
+        let look = Look::shaped(PILL, pop, unroll);
+        icon_pose(&look, content_dx(&look, 260.0, false), 20.0)
+    };
+    assert_eq!(content_dx(&Look::open(PILL), 260.0, true), 0.0, "a leading scene starts at the left padding");
     assert_eq!(pose(0.5, 0.0), (22.0, 22.0, 0.5), "centred in the small circle, scaled with it");
     assert_eq!(pose(1.0, 0.0), (22.0, 22.0, 1.0));
     let (x, ..) = pose(1.0, 0.5);

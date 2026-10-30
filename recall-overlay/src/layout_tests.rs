@@ -177,6 +177,8 @@ fn a_saves_stages_share_one_layout_so_nothing_moves_when_it_lands() {
     assert_eq!(text(&saving, "VALORANT · 0:30"), text(&saved, "VALORANT · 0:30"), "the detail line stays put");
     assert_eq!((saving.icon.unwrap().cx, saving.icon.unwrap().cy), (saved.icon.unwrap().cx, saved.icon.unwrap().cy));
     assert_eq!(text(&saving, "Saving").x, text(&saved, "Clip saved").x);
+    assert!(saving.lead && saved.lead, "a save's content starts at the left padding, so a wider pill never moves it");
+    assert!(!notice_scene(&NoticeView::new(Tone::Success, "Bookmark added", "x", false), 1.0, &Fake).lead);
     // A detail narrower than "Clip saved": the reserved title slot holds the width.
     let short = |title: &str, phase| notice_scene(&NoticeView::new(Tone::Success, title, "0:30", true).saving(phase), 1.0, &Fake);
     assert_eq!(short("Saving", SavePhase::Saving).w, short("Clip saved", SavePhase::Saved).w);

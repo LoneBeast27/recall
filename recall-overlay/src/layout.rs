@@ -129,6 +129,10 @@ pub struct Scene {
     pub icon: Option<Icon>,
     pub shapes: Vec<Shape>,
     pub texts: Vec<Text>,
+    /// The content starts at the pill's left padding instead of centring: a
+    /// save's stages keep the mark and the lines where they are while the
+    /// pill changes width.
+    pub lead: bool,
 }
 
 /// The stats island's numbers, ready to draw.
@@ -224,6 +228,7 @@ pub fn notice_scene(notice: &NoticeView, s: f32, m: &dyn Measure) -> Scene {
     let mut p = pen(s, m);
     let (pad_l, mark_w, gap, pad_r) = (p.u(16.0), p.u(8.0), p.u(10.0), p.u(20.0));
     p.mark(notice.tone, pad_l, notice.save);
+    p.scene.lead = notice.save.is_some();
     // The shutter ring is twice the dot: its text steps right to keep the gap.
     let x = pad_l + mark_w + gap + if notice.save.is_some() { p.u(4.0) } else { 0.0 };
     let text_w = if notice.chord {

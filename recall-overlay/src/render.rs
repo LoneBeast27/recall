@@ -28,7 +28,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 use crate::badge::Badge;
 use crate::cue::{band, Sheen, CUE_PEAK};
 use crate::fonts::Fonts;
-use crate::presence::Look;
+use crate::presence::{content_dx, Look};
 use crate::layout::{sweep, Rgba, Role, Scene, Shape, Sweep, EDGE_LINE, PILL, TRACK};
 
 #[path = "render_icon.rs"]
@@ -142,22 +142,27 @@ impl Renderer {
             t.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
             let pill = self.pill(&look, sheen);
             t.PushAxisAlignedClip(&pill.rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            let content_dx = content_dx(&look, scene.w, scene.lead);
             if look.content_alpha > 0.01 {
                 let [x, y, _, ph] = look.pill;
-                let (dx, dy) = (look.margin + x + (look.full_w - scene.w) / 2.0, look.margin + y + (ph - scene.h) / 2.0);
+                let (dx, dy) = (look.margin + x + content_dx, look.margin + y + (ph - scene.h) / 2.0);
                 t.SetTransform(&Matrix3x2::translation(dx, dy));
                 for shape in &scene.shapes {
                     self.shape(shape, look.content_alpha)?;
                 }
                 for text in &scene.texts {
                     let layout = fonts.layout(text.role, scale, &text.text)?;
-                    let alpha = if text.role == Role::NoticeTitle { look.title_alpha } else { look.content_alpha };
+                    let alpha = match text.role {
+                        Role::NoticeTitle => look.title_alpha,
+                        Role::NoticeGame | Role::NoticeUi => look.detail_alpha,
+                        _ => look.content_alpha,
+                    };
                     self.paint(text.color, alpha);
                     t.DrawTextLayout(Vector2 { X: text.x, Y: text.y }, &layout, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
                 }
             }
             if let Some(icon) = scene.icon.filter(|_| look.icon_alpha > 0.01) {
-                self.icon(&icon, &look, scene.w, badge)?;
+                self.icon(&icon, &look, content_dx, badge)?;
             }
             t.SetTransform(&Matrix3x2::identity());
             t.PopAxisAlignedClip();

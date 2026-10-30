@@ -3,7 +3,7 @@
 //! (engine) → close, fill, tick, one sweep → hold → back to the stats.
 
 use super::*;
-use crate::badge::{SETTLED, SWEEP_AFTER};
+use crate::badge::{Glyph, SETTLED, SWEEP_AFTER};
 use crate::layout::{ACTIVE, ERROR, SIGNAL};
 use crate::notice::{SavePhase, Tone};
 use crate::reducer::{Reducer, SAVING_FOR};
@@ -53,9 +53,14 @@ impl Rig {
 
     fn refresh(&mut self, now: Instant) {
         self.reducer.tick(now);
+        // Notices size like the layout: at least the grown floor, wider for long text.
         let next = content(self.reducer.view(), self.reducer.session(), true).map(|c| match c {
             Content::Stats => (c, STATS.0, STATS.1),
-            notice => (notice, GROWN.0, GROWN.1),
+            Content::Notice(n) => {
+                let chars = n.title.chars().count().max(n.detail.chars().count()) as f32;
+                let w = GROWN.0.max(120.0 + 9.0 * chars);
+                (Content::Notice(n), w, GROWN.1)
+            }
         });
         self.island.update(next, now);
         self.island.tick(now);
@@ -90,7 +95,7 @@ fn saving_spins_the_ring_then_saved_closes_fills_ticks_and_sweeps_once() {
     assert_eq!(rig.island.badge(landed), Some(spinning), "the ring carries on: no jump");
     assert_eq!(rig.island.look(landed + ms(10), f32::INFINITY).icon_alpha, 1.0, "the mark never blinks");
     let done = rig.island.badge(landed + SETTLED).unwrap();
-    assert_eq!((done.ring, done.dot, done.tick), (ACTIVE, 2.0, 1.0));
+    assert_eq!((done.ring, done.dot, done.drawn), (ACTIVE, 2.0, 1.0));
     let first = (0..100).position(|i| rig.island.sheen(landed + ms(i * 10)).is_some()).expect("one sweep") as u64 * 10;
     let after = SWEEP_AFTER.as_millis() as u64;
     assert!((after..after + 20).contains(&first), "right after the fill (340 ms): {first} ms");
@@ -102,7 +107,7 @@ fn saving_spins_the_ring_then_saved_closes_fills_ticks_and_sweeps_once() {
 }
 
 #[test]
-fn saving_then_failed_closes_the_ring_in_the_failure_colour_and_holds_four_seconds() {
+fn saving_then_failed_settles_with_a_bang_in_the_failure_colour_and_holds_four_seconds() {
     let now = Instant::now();
     let mut rig = Rig::new(now);
     rig.send(&saving(30), now);
@@ -110,7 +115,7 @@ fn saving_then_failed_closes_the_ring_in_the_failure_colour_and_holds_four_secon
     let notice = rig.notice().unwrap();
     assert_eq!((notice.title.as_str(), notice.tone, notice.save), ("Save failed", Tone::Failure, Some(SavePhase::Failed)));
     let done = rig.island.badge(now + ms(900) + SETTLED).unwrap();
-    assert_eq!((done.ring, done.dot_color, done.dot, done.tick), (ERROR, ERROR, 1.0, 0.0));
+    assert_eq!((done.ring, done.dot_color, done.dot, done.glyph, done.drawn), (ERROR, ERROR, 2.0, Glyph::Bang, 1.0));
     rig.refresh(now + ms(900 + 3_999));
     assert!(rig.notice().is_some());
     rig.refresh(now + ms(900 + 4_000));
@@ -138,7 +143,7 @@ fn a_saved_with_no_saving_first_plays_the_settle_from_the_dot() {
     rig.send(&saved(), now);
     assert_eq!(rig.notice().unwrap().save, Some(SavePhase::Saved));
     assert_eq!(rig.island.badge(now).unwrap().sweep, 0.0, "from the plain dot");
-    assert_eq!(rig.island.badge(now + SETTLED).unwrap().tick, 1.0, "ticked within half a second");
+    assert_eq!(rig.island.badge(now + SETTLED).unwrap().drawn, 1.0, "ticked within half a second");
 }
 
 #[test]
@@ -153,7 +158,7 @@ fn a_second_save_while_saving_keeps_the_ring_and_extends_the_wait() {
     rig.refresh(now + SAVING_FOR + ms(500));
     assert!(rig.notice().is_some(), "30 s from the second save");
     rig.send(&saved(), now + ms(2_000));
-    assert_eq!(rig.island.badge(now + ms(2_000) + SETTLED).unwrap().tick, 1.0);
+    assert_eq!(rig.island.badge(now + ms(2_000) + SETTLED).unwrap().drawn, 1.0);
 }
 
 #[test]
@@ -205,5 +210,88 @@ fn a_saved_clip_for_another_game_springs_to_its_width_without_a_jump() {
     let step = widths.windows(2).map(|p| (p[1] - p[0]).abs()).fold(0.0, f32::max);
     assert!(step < 8.0, "continuous: largest 5 ms step {step}");
     assert_eq!(island.frame(landed + crate::anim::SPRING_FOR).w, 360.0);
-    assert_eq!(island.look(landed, f32::INFINITY).content_alpha, 0.0, "a new detail line fades in");
+    let look = island.look(landed, f32::INFINITY);
+    assert_eq!((look.content_alpha, look.icon_alpha, look.detail_alpha, look.title_alpha), (1.0, 1.0, 0.0, 0.0), "only the new lines fade in");
+}
+
+fn failed_reason() -> Value {
+    json!({"mod":"engine","event":{"type":"save_failed","reason":"the output folder is unavailable"}})
+}
+
+/// One sampled moment of a run.
+#[derive(Clone, Debug, PartialEq)]
+struct Snap {
+    stage: &'static str,
+    look: Look,
+    badge: Option<crate::badge::Badge>,
+    sheen: Option<f32>,
+}
+
+fn snap(rig: &Rig, now: Instant) -> Snap {
+    let stage = match rig.island.content() {
+        _ if !rig.island.shown() => "hidden",
+        Some(Content::Stats) => "stats",
+        Some(Content::Notice(n)) if n.save == Some(SavePhase::Saving) => "saving",
+        Some(Content::Notice(_)) => "landed",
+        None => "hidden",
+    };
+    let look = rig.island.look(now, f32::INFINITY);
+    Snap { stage, look, badge: rig.island.badge(now), sheen: rig.island.sheen(now).map(|s| s.progress) }
+}
+
+/// saving at 0, `outcome` at 1.8 s, sampled every 10 ms to 6.5 s.
+fn run(outcome: &Value, now: Instant) -> Vec<Snap> {
+    let mut rig = Rig::new(now);
+    rig.send(&saving(30), now);
+    (0..=650u64)
+        .map(|i| {
+            let t = now + ms(i * 10);
+            if i == 180 { rig.send(outcome, t) } else { rig.refresh(t) }
+            snap(&rig, t)
+        })
+        .collect()
+}
+
+fn stages(run: &[Snap]) -> Vec<&'static str> {
+    let mut seq: Vec<&'static str> = run.iter().map(|s| s.stage).collect();
+    seq.dedup();
+    seq
+}
+
+/// The look minus what may differ between outcomes (width for the reason,
+/// the detail line's text fade).
+fn motion(look: &Look) -> [f32; 8] {
+    [look.box_h, look.margin, look.pop, look.unroll, look.alpha, look.content_alpha, look.title_alpha, look.icon_alpha]
+}
+
+#[test]
+fn saved_and_failed_take_one_path_differing_only_in_colour_glyph_text_width_and_hold() {
+    let now = Instant::now();
+    let (ok, bad) = (run(&saved(), now), run(&failed_reason(), now));
+    assert_eq!(ok[..180], bad[..180], "identical up to the outcome");
+    assert_eq!(stages(&ok), stages(&bad), "the same states in the same order");
+    assert_eq!(stages(&ok), vec!["saving", "landed", "stats"]);
+    let back = |run: &[Snap]| run.iter().position(|s| s.stage == "stats").unwrap();
+    let (ok_back, bad_back) = (back(&ok), back(&bad));
+    assert_eq!((ok_back, bad_back), (480, 580), "hand-back after 3 s / 4 s from the outcome");
+    for i in 180..ok_back {
+        let (a, b) = (&ok[i], &bad[i]);
+        assert_eq!(motion(&a.look), motion(&b.look), "same motion at {} ms", i * 10);
+        let (x, y) = (a.badge.unwrap(), b.badge.unwrap());
+        assert_eq!((x.start, x.sweep, x.dot, x.drawn), (y.start, y.sweep, y.dot, y.drawn), "same mark at {} ms", i * 10);
+        assert_eq!(a.sheen, b.sheen, "same sweep timing at {} ms", i * 10);
+    }
+    assert_eq!((ok[200].badge.unwrap().glyph, bad[200].badge.unwrap().glyph), (Glyph::Tick, Glyph::Bang));
+    assert!(bad[195].look.box_w > ok[195].look.box_w && bad[180].look.box_w == ok[180].look.box_w, "the reason widens it smoothly");
+    // The hand-back: the same morph, step for step.
+    let progress = |run: &[Snap], i: usize, from: usize| {
+        let (start, end) = (run[from - 1].look.box_w, run[from + 40].look.box_w);
+        (run[i].look.box_w - end) / (start - end)
+    };
+    for j in 0..40 {
+        let (a, b) = (&ok[ok_back + j], &bad[bad_back + j]);
+        assert_eq!(motion(&a.look), motion(&b.look), "same hand-back {} ms in", j * 10);
+        let (pa, pb) = (progress(&ok, ok_back + j, ok_back), progress(&bad, bad_back + j, bad_back));
+        assert!((pa - pb).abs() < 1e-3, "same width progress {} ms in: {pa} vs {pb}", j * 10);
+    }
 }

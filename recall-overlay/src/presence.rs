@@ -126,6 +126,12 @@ impl Presence {
     }
 }
 
+/// Where `scene`'s content sits in the open pill: centred, or at the left
+/// padding for a scene that leads (a save).
+pub fn content_dx(look: &Look, content_w: f32, lead: bool) -> f32 {
+    if lead { 0.0 } else { (look.full_w - content_w) / 2.0 }
+}
+
 /// One drawn frame of the island (physical px). The anchor places a
 /// `box_w`×`box_h` box (right-anchored); the window is that box plus
 /// `margin` on every side (room for the circle's overshoot).
@@ -146,6 +152,8 @@ pub struct Look {
     pub content_alpha: f32,
     /// The title line's opacity (≤ `content_alpha`; it fades alone when only it changed).
     pub title_alpha: f32,
+    /// The detail line's opacity (≤ `content_alpha`; fades alone when only it changed).
+    pub detail_alpha: f32,
     pub icon_alpha: f32,
 }
 
@@ -165,7 +173,7 @@ impl Look {
             let pw = h + (w - h).max(0.0) * unroll;
             (pw, [0.0, 0.0, pw, h], 0.0)
         };
-        Self { box_w, box_h: h, margin, pill, full_w: w, unroll, pop, alpha: frame.alpha, content_alpha: 1.0, title_alpha: 1.0, icon_alpha: 1.0 }
+        Self { box_w, box_h: h, margin, pill, full_w: w, unroll, pop, alpha: frame.alpha, content_alpha: 1.0, title_alpha: 1.0, detail_alpha: 1.0, icon_alpha: 1.0 }
     }
 
     /// The window's size in whole pixels.
@@ -177,11 +185,11 @@ impl Look {
 
 /// Where the mark is drawn, in window coordinates, and its scale: it rides
 /// the pill's left end (centred in the circle) and settles into its place in
-/// the content as the pill unrolls. `content_w` / `icon_cx` come from the
-/// scene (the content is centred in the open pill).
-pub fn icon_pose(look: &Look, content_w: f32, icon_cx: f32) -> (f32, f32, f32) {
+/// the content as the pill unrolls. `content_dx` is where the content sits
+/// in the open pill (`content_dx`), `icon_cx` the mark's place in it.
+pub fn icon_pose(look: &Look, content_dx: f32, icon_cx: f32) -> (f32, f32, f32) {
     let [x, y, _, h] = look.pill;
-    let settled = (look.full_w - content_w) / 2.0 + icon_cx;
+    let settled = content_dx + icon_cx;
     let offset = h / 2.0 + (settled - h / 2.0) * look.unroll;
     (look.margin + x + offset, look.margin + y + h / 2.0, look.pop)
 }
