@@ -99,6 +99,9 @@ mod keys;
 impl Root {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         crate::shell::init_ole();
+        if let Ok(hwnd) = parent_hwnd(window) {
+            crate::shell::refuse_drops(hwnd);
+        }
         let preview = parent_hwnd(window).and_then(NativePreview::new);
         let workers = Workers::spawn();
         workers.job(Job::List);
