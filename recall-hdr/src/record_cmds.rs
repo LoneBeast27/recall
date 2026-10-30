@@ -5,7 +5,7 @@
 //! |---|---|---|
 //! | `status` | | session status + cached engine hello/status (+ legacy `hdr` status) to the caller |
 //! | `quit` | | stop recording and exit |
-//! | `save_clip` | `seconds?` | engine save (default = `recording.buffer_secs`); no engine / paused -> `engine` `save_failed` |
+//! | `save_clip` | `seconds?` | engine save (default = `recording.buffer_secs`) + `session` `saving{seconds}` broadcast (the island's saving ring); no engine / paused -> `engine` `save_failed` |
 //! | `bookmark` | | engine bookmark (marks land in the next saves' `.recall-marks.json`) |
 //! | `screenshot` | | engine PNG -> `engine` `screenshot{path}`; refused -> `screenshot_failed` |
 //! | `record_start` / `record_stop` / `record_toggle` | | manual long recording -> `engine` `recording_started{path}` / `recording_stopped{path,seconds,bytes}` / `recording_failed{reason,path}` |
@@ -30,7 +30,7 @@ use std::time::Instant;
 use serde_json::{json, Value};
 
 use crate::config::{sync_autostart, RECORD_RUN_ARG};
-use crate::control::Inbound;
+use crate::control::{Inbound, PipeHub};
 use crate::hdr_exec;
 use crate::log;
 use crate::record_app::{apply_affinity, Controller};
@@ -39,6 +39,20 @@ use crate::record_notice::{notice_json, Situation};
 use crate::record_status::{config_event, error_event, status_json, tray_line, StatusInputs};
 use crate::record_engine::{capture_refusal, engine_settings_changed};
 use crate::supervisor::EngineHealth;
+
+/// `{"type":"saving","seconds":N}` (mod `session`): a save the controller
+/// accepted and handed to the engine. The island spins its shutter ring
+/// until the engine's `saved` / `save_failed` (or 30 s pass).
+pub fn saving_event(seconds: u32) -> String {
+    json!({"type": "saving", "seconds": seconds}).to_string()
+}
+
+/// Every accepted save goes through here (pipe `save_clip`, the save
+/// hotkeys, the chord's save key): the engine command, then the broadcast.
+pub(crate) fn send_save(hub: &PipeHub, send_engine: impl FnOnce(&str), seconds: u32) {
+    send_engine(&json!({"cmd": "save_clip", "seconds": seconds}).to_string());
+    hub.event("session", &saving_event(seconds));
+}
 
 /// The `set_config` patch that turns the performance-stats island on or off.
 pub fn stats_patch(on: bool) -> Value {
@@ -132,7 +146,7 @@ impl Controller {
         }
         log!("record: save last {secs}s");
         self.activity.save_sent(std::time::Instant::now());
-        self.supervisor.send_engine_line(&json!({"cmd": "save_clip", "seconds": secs}).to_string());
+        send_save(&self.hub, |line| self.supervisor.send_engine_line(line), secs);
         // Heard at once; the chime follows when the clip is on disk (seconds for a long save to a hard drive).
         crate::cues::tick();
     }
@@ -349,6 +363,49 @@ impl Controller {
         }
         if let Some(hdr) = self.legacy_hdr_event() {
             self.hub.event_to(client, "hdr", &hdr);
+        }
+    }
+}
+
+#[cfg(test)]
+mod save_tests {
+    use super::*;
+    use std::io::Write;
+    use std::sync::mpsc::channel;
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    #[derive(Clone, Default)]
+    struct Sink(Arc<Mutex<Vec<u8>>>);
+    impl Write for Sink {
+        fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(b);
+            Ok(b.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn an_accepted_save_goes_to_the_engine_then_tells_every_client_it_is_saving() {
+        let (tx, _rx) = channel();
+        let hub = PipeHub::detached(tx);
+        let (a, b) = (Sink::default(), Sink::default());
+        hub.add_client(Box::new(a.clone()));
+        hub.add_client(Box::new(b.clone()));
+        let mut sent = Vec::new();
+        send_save(&hub, |line| sent.push(line.to_owned()), 30);
+        assert_eq!(sent, vec![r#"{"cmd":"save_clip","seconds":30}"#.to_owned()], "one engine command");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let lines = |s: &Sink| String::from_utf8(s.0.lock().unwrap().clone()).unwrap();
+        while (lines(&a).is_empty() || lines(&b).is_empty()) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for sink in [&a, &b] {
+            let text = lines(sink);
+            let line: Value = serde_json::from_str(text.trim()).expect("one JSON line");
+            assert_eq!(line, json!({"mod":"session","event":{"type":"saving","seconds":30}}));
         }
     }
 }

@@ -14,11 +14,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
 };
 
-use crate::anim::Frame;
 use crate::fonts::Fonts;
 use crate::island::{self, stats_content, Content, Island};
 use crate::layout::{stats_scene, Scene};
-use crate::placement::{self, position, Rect, Spot, Spots, EDGE};
+use crate::placement::{self, window_origin, Rect, Spot, Spots, EDGE};
+use crate::presence::Look;
+use crate::badge::Badge;
 use crate::reducer::Reducer;
 use crate::render::Renderer;
 use crate::smoke::Smoke;
@@ -53,9 +54,9 @@ pub struct Placed {
     max_h: f32,
 }
 
-/// What the last pushed frame showed: scene, window bounds, window opacity,
-/// content opacity and sweep position (0..1000). Equal = no redraw.
-type Drawn = (Scene, [i32; 4], u8, u8, Option<u16>);
+/// What the last pushed frame showed: scene, window origin, look, sweep
+/// position (0..1000) and save badge. Equal = no redraw.
+type Drawn = (Scene, [i32; 2], Look, Option<u16>, Option<Badge>);
 
 pub struct App {
     pub reducer: Reducer,
@@ -268,20 +269,16 @@ impl App {
             return;
         }
         let Some(placed) = self.placed.as_ref() else { return };
-        let frame = self.island.frame(now);
-        let frame = Frame { h: frame.h.min(placed.max_h.max(self.scene.h)), ..frame };
-        let (w, h) = (frame.w.ceil().max(1.0) as i32, frame.h.ceil().max(1.0) as i32);
+        let look = self.island.look(now, placed.max_h.max(self.scene.h));
         let edge = (EDGE * placed.scale).round() as i32;
-        let (x, y) = position(placed.spot.anchor, &placed.monitor, w, edge);
-        let alpha = (frame.alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let (content_alpha, sheen) = (self.island.content_alpha(now), self.island.sheen(now));
-        let faded = (content_alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let key = (self.scene.clone(), [x, y, w, h], alpha, faded, sheen.map(|s| (s.progress * 1000.0) as u16));
+        let (x, y) = window_origin(placed.spot.anchor, &placed.monitor, look.box_w, look.margin, edge);
+        let (sheen, badge) = (self.island.sheen(now), self.island.badge(now));
+        let key = (self.scene.clone(), [x, y], look, sheen.map(|s| (s.progress * 1000.0) as u16), badge);
         if self.drawn.as_ref() != Some(&key) {
-            let drawn = self.renderer.draw(&self.fonts, &self.scene, frame, self.scene_scale, content_alpha, sheen);
-            let shown = drawn.and_then(|(w, h)| self.renderer.present(hwnd, x, y, w, h, frame.alpha));
+            let drawn = self.renderer.draw(&self.fonts, &self.scene, look, self.scene_scale, sheen, badge);
+            let shown = drawn.and_then(|(w, h)| self.renderer.present(hwnd, x, y, w, h, look.alpha).map(|()| (w, h)));
             match shown {
-                Ok(()) => {
+                Ok((w, h)) => {
                     self.render_error = None;
                     self.bounds = [x, y, x + w, y + h];
                     self.drawn = Some(key);

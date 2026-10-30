@@ -34,7 +34,12 @@ fn inside(scene: &Scene) -> bool {
         Shape::Ring { cx, cy, r, stroke, .. } => cx + r + stroke / 2.0 <= scene.w && cy + r + stroke / 2.0 <= scene.h,
         Shape::Pause { x, .. } => x >= 0.0,
     });
-    texts_in && shapes_in
+    let icon_in = scene.icon.is_none_or(|i| i.cx - i.r >= 0.0 && i.cy + i.r <= scene.h);
+    texts_in && shapes_in && icon_in
+}
+
+fn icon(scene: &Scene) -> Shape {
+    scene.icon.expect("a leading mark").shape
 }
 
 #[test]
@@ -45,7 +50,7 @@ fn notice_is_44px_tall_at_1440p_and_scales_with_the_monitor() {
     assert_eq!(at_1440.h, 44.0);
     assert_eq!(at_2160.h, 66.0);
     assert!((at_2160.w - at_1440.w * 1.5).abs() <= 1.0, "{} vs {}", at_2160.w, at_1440.w);
-    assert!(matches!(at_1440.shapes[0], Shape::Dot { color: SIGNAL, .. }), "red record dot");
+    assert!(matches!(icon(&at_1440), Shape::Dot { color: SIGNAL, .. }), "red record dot");
     assert!(inside(&at_1440) && inside(&at_2160));
 }
 
@@ -76,9 +81,9 @@ fn non_game_details_use_the_ui_face_and_one_liners_centre() {
     let line = &scene.texts[0];
     let cap_mid = line.y + 14.0 * 0.95 - 14.0 * 0.7 / 2.0;
     assert!((cap_mid - 22.0).abs() < 0.01);
-    assert!(matches!(scene.shapes[0], Shape::Hollow { .. }));
+    assert!(matches!(icon(&scene), Shape::Hollow { .. }));
     let paused = NoticeView::new(Tone::Paused, "Recording paused", "VALORANT", true);
-    assert!(matches!(notice_scene(&paused, 1.0, &Fake).shapes[0], Shape::Pause { .. }));
+    assert!(matches!(icon(&notice_scene(&paused, 1.0, &Fake)), Shape::Pause { .. }));
 }
 
 #[test]
@@ -91,7 +96,7 @@ fn stats_scene_shows_replay_fps_low_and_two_rings() {
     let rings: Vec<_> = scene.shapes.iter().filter(|s| matches!(s, Shape::Ring { .. })).collect();
     assert_eq!(rings.len(), 2);
     assert!(matches!(rings[0], Shape::Ring { frac, color: TEXT, .. } if (*frac - 0.71).abs() < 1e-6));
-    assert!(matches!(scene.shapes[0], Shape::Dot { color: SIGNAL, .. }));
+    assert!(matches!(icon(&scene), Shape::Dot { color: SIGNAL, .. }));
     assert!(text(&scene, "144").x < text(&scene, "71").x && text(&scene, "71").x < text(&scene, "23").x);
     assert!(inside(&scene));
 }
@@ -123,10 +128,24 @@ fn hot_gpu_turns_amber_and_missing_sources_degrade() {
 #[test]
 fn paused_and_idle_marks() {
     let paused = stats_scene(&StatsContent { paused: true, recording: false, ..stats() }, 1.0, &Fake);
-    assert!(matches!(paused.shapes[0], Shape::Pause { .. }));
+    assert!(matches!(icon(&paused), Shape::Pause { .. }));
     assert_eq!(text(&paused, "2:00").color, MUTED);
     let idle = stats_scene(&StatsContent { recording: false, ..stats() }, 1.0, &Fake);
-    assert!(matches!(idle.shapes[0], Shape::Hollow { .. }));
+    assert!(matches!(icon(&idle), Shape::Hollow { .. }));
+}
+
+#[test]
+fn a_clip_save_carries_the_badge_and_steps_its_text_clear_of_the_ring() {
+    let plain = NoticeView::new(Tone::Success, "Clip saved", "VALORANT · 0:30", true);
+    let saving = NoticeView::new(Tone::Recording, "Saving", "0:30…", true).saving(SavePhase::Saving);
+    let (a, b) = (notice_scene(&plain, 1.0, &Fake), notice_scene(&saving, 1.0, &Fake));
+    assert_eq!(a.icon.unwrap().badge, None);
+    let badge = b.icon.unwrap();
+    assert_eq!((badge.badge, badge.cx, badge.cy, badge.r), (Some(SavePhase::Saving), 20.0, 22.0, 4.0));
+    let text_x = text(&b, "Saving").x;
+    assert_eq!(text_x, text(&a, "Clip saved").x + 4.0);
+    assert!(text_x - (badge.cx + 2.0 * badge.r + 1.0) >= 8.0, "8+ px between the ring's outer edge and the text");
+    assert!(inside(&b));
 }
 
 #[test]

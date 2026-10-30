@@ -38,16 +38,33 @@ pub struct NoticeView {
     /// failure: the island transforms into the larger notice pill with one
     /// light sweep instead of only swapping its content.
     pub emphasis: bool,
+    /// A clip save's stage: the mark is the shutter ring (`badge.rs`).
+    pub save: Option<SavePhase>,
+}
+
+/// A clip save as the island shows it: the ring spins while `Saving`, then
+/// closes (and the dot fills green with a tick on `Saved`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SavePhase {
+    Saving,
+    Saved,
+    Failed,
 }
 
 impl NoticeView {
     pub fn new(tone: Tone, title: &str, detail: impl Into<String>, game_font: bool) -> Self {
-        Self { tone, title: title.into(), detail: detail.into(), game_font, chord: false, emphasis: false }
+        Self { tone, title: title.into(), detail: detail.into(), game_font, chord: false, emphasis: false, save: None }
     }
 
     /// The same notice, shown with the transformation.
     pub fn emphasized(self) -> Self {
         Self { emphasis: true, ..self }
+    }
+
+    /// The same notice as a stage of a clip save (the shutter-ring mark).
+    pub fn saving(self, phase: SavePhase) -> Self {
+        Self { save: Some(phase), ..self }
     }
 }
 

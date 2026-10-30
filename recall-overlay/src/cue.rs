@@ -19,18 +19,20 @@ pub const CUE_PEAK: f32 = 0.42;
 pub struct Cue {
     pub start: Instant,
     pub color: Rgba,
+    /// `CUE_DELAY`, or longer after a save lands (the badge fills first).
+    pub delay: Duration,
 }
 
 impl Cue {
     /// 0..1 across the pill while the band is on screen, `None` before and after.
     pub fn progress(&self, now: Instant) -> Option<f32> {
-        let since = now.checked_duration_since(self.start + CUE_DELAY)?;
+        let since = now.checked_duration_since(self.start + self.delay)?;
         (since < CUE_SWEEP).then(|| since.as_secs_f32() / CUE_SWEEP.as_secs_f32())
     }
 
     /// Still to finish (waiting for its delay or sweeping).
     pub fn running(&self, now: Instant) -> bool {
-        now < self.start + CUE_DELAY + CUE_SWEEP
+        now < self.start + self.delay + CUE_SWEEP
     }
 }
 
@@ -60,7 +62,7 @@ mod tests {
     #[test]
     fn the_cue_waits_sweeps_once_then_ends() {
         let now = Instant::now();
-        let cue = Cue { start: now, color: ACTIVE };
+        let cue = Cue { start: now, color: ACTIVE, delay: CUE_DELAY };
         assert_eq!(cue.progress(now), None, "waits for the pill to start growing");
         assert!(cue.running(now));
         let mid = now + CUE_DELAY + CUE_SWEEP / 2;

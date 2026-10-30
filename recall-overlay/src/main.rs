@@ -5,9 +5,11 @@
 
 mod anim;
 mod app;
+mod badge;
 mod cue;
 mod diagnostics;
 mod export;
+mod export_sim;
 mod filmstrip;
 mod fonts;
 mod island;
@@ -15,6 +17,7 @@ mod layout;
 mod notice;
 mod placement;
 mod png;
+mod presence;
 mod preview;
 mod reducer;
 mod render;

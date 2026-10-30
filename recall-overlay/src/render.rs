@@ -25,10 +25,14 @@ use windows::Win32::Graphics::Gdi::{
 use windows::Win32::UI::WindowsAndMessaging::{UpdateLayeredWindow, ULW_ALPHA};
 use windows_numerics::{Matrix3x2, Vector2};
 
-use crate::anim::Frame;
+use crate::badge::Badge;
 use crate::cue::{band, Sheen, CUE_PEAK};
 use crate::fonts::Fonts;
+use crate::presence::Look;
 use crate::layout::{sweep, Rgba, Scene, Shape, Sweep, EDGE_LINE, PILL, TRACK};
+
+#[path = "render_icon.rs"]
+mod icon;
 
 pub struct Renderer {
     factory: ID2D1Factory,
@@ -111,18 +115,20 @@ impl Renderer {
         Ok(())
     }
 
-    /// Draws the pill at `frame` size with `scene` centred in it, and the
-    /// action notice's sweep (`sheen`) over the pill, under the content.
+    /// Draws `look`: the pill (or the circle it grows from) with `scene`
+    /// centred in the open pill, the action notice's sweep (`sheen`) over the
+    /// pill under the content, and the mark (or the save `badge`) on top.
+    /// Returns the window size.
     pub fn draw(
         &mut self,
         fonts: &Fonts,
         scene: &Scene,
-        frame: Frame,
+        look: Look,
         scale: f32,
-        content_alpha: f32,
         sheen: Option<Sheen>,
+        badge: Option<Badge>,
     ) -> Result<(i32, i32)> {
-        let (w, h) = (frame.w.ceil().max(1.0) as i32, frame.h.ceil().max(1.0) as i32);
+        let (w, h) = look.window();
         self.ensure(w, h)?;
         let sheen = match sheen {
             Some(sheen) => Some((self.sheen_brush(sheen.color)?, sheen.progress)),
@@ -134,47 +140,54 @@ impl Renderer {
             t.BeginDraw();
             t.SetTransform(&Matrix3x2::identity());
             t.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
-            let pill = self.pill(frame, sheen);
-            if content_alpha > 0.01 {
-                t.PushAxisAlignedClip(&pill.rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-                let (dx, dy) = ((frame.w - scene.w) / 2.0, (frame.h - scene.h) / 2.0);
+            let pill = self.pill(&look, sheen);
+            t.PushAxisAlignedClip(&pill.rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
+            if look.content_alpha > 0.01 {
+                let [x, y, _, ph] = look.pill;
+                let (dx, dy) = (look.margin + x + (look.full_w - scene.w) / 2.0, look.margin + y + (ph - scene.h) / 2.0);
                 t.SetTransform(&Matrix3x2::translation(dx, dy));
                 for shape in &scene.shapes {
-                    self.shape(shape, content_alpha)?;
+                    self.shape(shape, look.content_alpha)?;
                 }
                 for text in &scene.texts {
                     let layout = fonts.layout(text.role, scale, &text.text)?;
-                    self.paint(text.color, content_alpha);
+                    self.paint(text.color, look.content_alpha);
                     t.DrawTextLayout(Vector2 { X: text.x, Y: text.y }, &layout, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
                 }
-                t.SetTransform(&Matrix3x2::identity());
-                t.PopAxisAlignedClip();
             }
+            if let Some(icon) = scene.icon.filter(|_| look.icon_alpha > 0.01) {
+                self.icon(&icon, &look, scene.w, badge)?;
+            }
+            t.SetTransform(&Matrix3x2::identity());
+            t.PopAxisAlignedClip();
             t.EndDraw(None, None)?;
         }
         Ok((w, h))
     }
 
-    /// The pill body (fill, the sweep's band, hairline edge); returns its shape.
-    unsafe fn pill(&self, frame: Frame, sheen: Option<(ID2D1LinearGradientBrush, f32)>) -> D2D1_ROUNDED_RECT {
+    /// The pill body (fill, the sweep's band, hairline edge) at `look.pill`;
+    /// returns its shape (window coordinates).
+    unsafe fn pill(&self, look: &Look, sheen: Option<(ID2D1LinearGradientBrush, f32)>) -> D2D1_ROUNDED_RECT {
         let t = &self.target;
+        let [x, y, w, h] = look.pill;
+        let (left, top) = (look.margin + x, look.margin + y);
         let pill = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F { left: 0.0, top: 0.0, right: frame.w, bottom: frame.h },
-            radiusX: frame.h / 2.0,
-            radiusY: frame.h / 2.0,
+            rect: D2D_RECT_F { left, top, right: left + w, bottom: top + h },
+            radiusX: h / 2.0,
+            radiusY: h / 2.0,
         };
         let edge = D2D1_ROUNDED_RECT {
-            rect: D2D_RECT_F { left: 0.5, top: 0.5, right: frame.w - 0.5, bottom: frame.h - 0.5 },
-            radiusX: frame.h / 2.0 - 0.5,
-            radiusY: frame.h / 2.0 - 0.5,
+            rect: D2D_RECT_F { left: left + 0.5, top: top + 0.5, right: left + w - 0.5, bottom: top + h - 0.5 },
+            radiusX: (h / 2.0 - 0.5).max(0.0),
+            radiusY: (h / 2.0 - 0.5).max(0.0),
         };
         unsafe {
             self.paint(PILL, 1.0);
             t.FillRoundedRectangle(&pill, &self.brush);
             if let Some((brush, progress)) = sheen {
-                let ((x0, y0), (x1, y1)) = band(frame.w, frame.h, progress);
-                brush.SetStartPoint(Vector2 { X: x0, Y: y0 });
-                brush.SetEndPoint(Vector2 { X: x1, Y: y1 });
+                let ((x0, y0), (x1, y1)) = band(w, h, progress);
+                brush.SetStartPoint(Vector2 { X: left + x0, Y: top + y0 });
+                brush.SetEndPoint(Vector2 { X: left + x1, Y: top + y1 });
                 t.FillRoundedRectangle(&pill, &brush);
             }
             self.paint(EDGE_LINE, 1.0);
@@ -199,11 +212,11 @@ impl Renderer {
         Ok(brush)
     }
 
-    fn paint(&self, rgba: Rgba, alpha: f32) {
+    pub(crate) fn paint(&self, rgba: Rgba, alpha: f32) {
         unsafe { self.brush.SetColor(&color(rgba, alpha)) };
     }
 
-    unsafe fn shape(&self, shape: &Shape, alpha: f32) -> Result<()> {
+    pub(crate) unsafe fn shape(&self, shape: &Shape, alpha: f32) -> Result<()> {
         let t = &self.target;
         let ellipse = |cx: f32, cy: f32, r: f32| D2D1_ELLIPSE { point: Vector2 { X: cx, Y: cy }, radiusX: r, radiusY: r };
         unsafe {
@@ -308,6 +321,7 @@ fn color(rgba: Rgba, alpha: f32) -> D2D1_COLOR_F {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::anim::Frame;
 
     fn alpha_at(renderer: &Renderer, w: i32, h: i32, x: i32, y: i32) -> u8 {
         renderer.pixels(w, h)[(y * w + x) as usize][3]
@@ -317,13 +331,13 @@ mod tests {
     fn pill_is_antialiased_and_survives_the_buffer_growing() {
         let (fonts, mut renderer) = (Fonts::new().unwrap(), Renderer::new().unwrap());
         let scene = Scene { w: 60.0, h: 44.0, ..Scene::default() };
-        let (w, h) = renderer.draw(&fonts, &scene, Frame { w: 60.0, h: 44.0, alpha: 1.0 }, 1.0, 1.0, None).unwrap();
+        let (w, h) = renderer.draw(&fonts, &scene, Look::open(Frame { w: 60.0, h: 44.0, alpha: 1.0 }), 1.0, None, None).unwrap();
         assert_eq!(alpha_at(&renderer, w, h, 30, 22), (PILL.a * 255.0).round() as u8, "pill body is 94% opaque");
         assert_eq!(alpha_at(&renderer, w, h, 0, 0), 0, "rounded corner is transparent");
         let edge = alpha_at(&renderer, w, h, 4, 8);
         assert!(edge > 0 && edge < 240, "the curve is anti-aliased: {edge}");
         // A wider frame re-creates the DIB; drawing must land in the new one.
-        let (w, h) = renderer.draw(&fonts, &scene, Frame { w: 300.0, h: 44.0, alpha: 1.0 }, 1.0, 1.0, None).unwrap();
+        let (w, h) = renderer.draw(&fonts, &scene, Look::open(Frame { w: 300.0, h: 44.0, alpha: 1.0 }), 1.0, None, None).unwrap();
         assert_eq!(w, 300);
         assert_eq!(alpha_at(&renderer, w, h, 280, 22), (PILL.a * 255.0).round() as u8);
     }
@@ -333,24 +347,31 @@ mod tests {
     #[test]
     #[ignore]
     fn draw_cost_per_frame() {
+        use crate::badge::SaveMark;
         use crate::layout::{notice_scene, stats_scene, StatsContent, ACTIVE};
-        use crate::notice::{NoticeView, Tone};
+        use crate::notice::{NoticeView, SavePhase, Tone};
         let (fonts, mut renderer) = (Fonts::new().unwrap(), Renderer::new().unwrap());
         let stats = StatsContent { recording: true, replay_secs: 120, fps: Some(144), low1: Some(98), gpu: Some(71), gpu_temp: Some(64), cpu: Some(23), ..Default::default() };
         let stats = stats_scene(&stats, 1.0, &fonts);
         let grow = 58.0 / 44.0;
         let notice = notice_scene(&NoticeView::new(Tone::Success, "Clip saved", "VALORANT · 0:30", true), grow, &fonts);
+        let saving = NoticeView::new(Tone::Recording, "Saving", "0:30…", true).saving(SavePhase::Saving);
+        let saving = notice_scene(&saving, grow, &fonts);
         let sweep = Some(Sheen { progress: 0.5, color: ACTIVE });
+        let now = std::time::Instant::now();
+        let ring = Some(SaveMark::new(SavePhase::Saving, now).badge(now + std::time::Duration::from_millis(450)));
+        let grown = Frame { w: stats.w + 40.0, h: 58.0, alpha: 1.0 };
         let cases = [
-            ("stats pill", &stats, Frame { w: stats.w, h: stats.h, alpha: 1.0 }, 1.0, None),
-            ("grown notice", &notice, Frame { w: stats.w + 40.0, h: 58.0, alpha: 1.0 }, grow, None),
-            ("grown notice + sweep", &notice, Frame { w: stats.w + 40.0, h: 58.0, alpha: 1.0 }, grow, sweep),
+            ("stats pill", &stats, Frame { w: stats.w, h: stats.h, alpha: 1.0 }, 1.0, None, None),
+            ("grown notice", &notice, grown, grow, None, None),
+            ("grown notice + sweep", &notice, grown, grow, sweep, None),
+            ("saving pill + spinning ring", &saving, grown, grow, None, ring),
         ];
-        for (label, scene, frame, scale, sheen) in cases {
-            renderer.draw(&fonts, scene, frame, scale, 1.0, sheen).unwrap();
+        for (label, scene, frame, scale, sheen, badge) in cases {
+            renderer.draw(&fonts, scene, Look::open(frame), scale, sheen, badge).unwrap();
             let start = std::time::Instant::now();
             for _ in 0..500 {
-                renderer.draw(&fonts, scene, frame, scale, 1.0, sheen).unwrap();
+                renderer.draw(&fonts, scene, Look::open(frame), scale, sheen, badge).unwrap();
             }
             println!("draw_cost {label}: {:.0} us/frame", start.elapsed().as_secs_f64() * 1e6 / 500.0);
         }
@@ -363,20 +384,20 @@ mod tests {
         let scene = Scene { w: 340.0, h: 58.0, ..Scene::default() };
         let frame = Frame { w: 340.0, h: 58.0, alpha: 1.0 };
         let pixel = |r: &Renderer, x: i32, y: i32| r.pixels(340, 58)[(y * 340 + x) as usize];
-        renderer.draw(&fonts, &scene, frame, 1.0, 1.0, None).unwrap();
+        renderer.draw(&fonts, &scene, Look::open(frame), 1.0, None, None).unwrap();
         let plain = pixel(&renderer, 170, 29);
         let mid = Some(Sheen { progress: 0.5, color: ACTIVE });
-        renderer.draw(&fonts, &scene, frame, 1.0, 1.0, mid).unwrap();
+        renderer.draw(&fonts, &scene, Look::open(frame), 1.0, mid, None).unwrap();
         let [b, g, r, _] = pixel(&renderer, 170, 29);
         assert!(g > plain[1] + 50 && g > r && g > b, "green band at the centre: {:?} vs {plain:?}", [b, g, r]);
         assert_eq!(pixel(&renderer, 12, 29), plain, "the pill's far end is untouched mid-sweep");
         assert_eq!(pixel(&renderer, 0, 0)[3], 0, "never outside the pill");
         let failure = Some(Sheen { progress: 0.5, color: ERROR });
-        renderer.draw(&fonts, &scene, frame, 1.0, 1.0, failure).unwrap();
+        renderer.draw(&fonts, &scene, Look::open(frame), 1.0, failure, None).unwrap();
         let [b, g, r, _] = pixel(&renderer, 170, 29);
         assert!(r > g && r > b, "a failure sweeps in the error colour: {:?}", [b, g, r]);
         for progress in [0.0, 1.0] {
-            renderer.draw(&fonts, &scene, frame, 1.0, 1.0, Some(Sheen { progress, color: ACTIVE })).unwrap();
+            renderer.draw(&fonts, &scene, Look::open(frame), 1.0, Some(Sheen { progress, color: ACTIVE }), None).unwrap();
             assert_eq!(pixel(&renderer, 170, 29), plain, "off the pill at {progress}");
             assert_eq!(pixel(&renderer, 6, 29), plain, "left end clear at {progress}");
             assert_eq!(pixel(&renderer, 333, 29), plain, "right end clear at {progress}");

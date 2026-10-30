@@ -3,7 +3,7 @@ use serde_json::Value;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
-use crate::notice::{is_encoder_notice, session_notice, NoticeView, Tone};
+use crate::notice::{is_encoder_notice, session_notice, NoticeView, SavePhase, Tone};
 use crate::session::Session;
 
 /// The controller's `encoder` notice and the engine's failed status describe
@@ -20,7 +20,10 @@ pub const STALE_AFTER: Duration = Duration::from_millis(2_500);
 const SAVED_FOR: Duration = Duration::from_secs(3);
 const FAILURE_FOR: Duration = Duration::from_secs(4);
 const MIC_FOR: Duration = Duration::from_secs(2);
-const MARK_FOR: Duration = Duration::from_millis(1_500);
+/// 2 s (was 1.5 s): from nothing the pill opens before its text shows.
+const MARK_FOR: Duration = Duration::from_secs(2);
+/// A `saving` with no outcome ends quietly after this.
+pub const SAVING_FOR: Duration = Duration::from_secs(30);
 /// Controller notices (game picked up, desktop, paused, waiting, encoder).
 pub const NOTICE_FOR: Duration = Duration::from_secs(3);
 /// The advanced-shortcut hint lives as long as the chord window (the
@@ -147,6 +150,7 @@ impl Reducer {
             Some("engine") => self.apply_engine_event(event, now),
             Some("session") => match kind {
                 Some("chord") => self.apply_chord(event, now),
+                Some("saving") => self.apply_saving(event, now),
                 Some("status") => self.session.apply_status(event),
                 Some("notice") => {
                     if is_encoder_notice(event) && self.encoder_duplicate(EncoderSource::Session, now) {
@@ -194,6 +198,16 @@ impl Reducer {
         changed || metrics_changed
     }
 
+    /// `{"type":"saving","seconds":N}`: the controller sent a save. "Saving"
+    /// over the clip length with the spinning ring, until the engine's
+    /// `saved` / `save_failed` replaces it or `SAVING_FOR` passes.
+    fn apply_saving(&mut self, event: &Value, now: Instant) -> bool {
+        let secs = event.get("seconds").and_then(Value::as_u64).unwrap_or(0);
+        let detail = if secs > 0 { format!("{}:{:02}…", secs / 60, secs % 60) } else { "Replay…".into() };
+        let notice = NoticeView::new(Tone::Recording, "Saving", detail.clone(), true).emphasized().saving(SavePhase::Saving);
+        self.set_transient("Saving", detail, now + SAVING_FOR, notice)
+    }
+
     pub fn apply_engine_event(&mut self, event: &Value, now: Instant) -> bool {
         use Tone::{Failure, Neutral, Recording, Success};
         match event.get("type").and_then(Value::as_str) {
@@ -214,12 +228,12 @@ impl Reducer {
                 let game = filename.split("__").next().unwrap_or(filename).replace(['-', '_'], " ");
                 let secs = event.get("seconds").and_then(Value::as_f64).unwrap_or(0.0).round() as u64;
                 let detail = if secs > 0 { format!("{game} · {}:{:02}", secs / 60, secs % 60) } else { game };
-                let notice = NoticeView::new(Success, "Clip saved", truncate(&detail, 40), true).emphasized();
+                let notice = NoticeView::new(Success, "Clip saved", truncate(&detail, 40), true).emphasized().saving(SavePhase::Saved);
                 self.set_transient("Clip saved", detail, now + SAVED_FOR, notice)
             }
             Some("save_failed") => {
                 let reason = event.get("reason").and_then(Value::as_str).unwrap_or("unknown error");
-                let notice = NoticeView::new(Failure, "Save failed", truncate(reason, 44), false).emphasized();
+                let notice = NoticeView::new(Failure, "Save failed", truncate(reason, 44), false).emphasized().saving(SavePhase::Failed);
                 self.set_transient("Save failed", format!("Save failed: {}", truncate(reason, 44)), now + FAILURE_FOR, notice)
             }
             Some("bookmarked") => {

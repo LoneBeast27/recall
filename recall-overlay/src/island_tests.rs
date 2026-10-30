@@ -165,18 +165,33 @@ fn stats_content_reads_session_buffer_and_sample() {
 const W: f32 = 300.0;
 const H: f32 = 44.0;
 
+/// Appearing from nothing: pop + unravel, then the content fades in.
+const OPEN: Duration = Duration::from_millis(400);
+const HIDE: Duration = Duration::from_millis(550);
+
+fn ms(n: u64) -> Duration {
+    Duration::from_millis(n)
+}
+
 #[test]
-fn the_island_grows_out_of_a_collapsed_pill_and_settles() {
+fn the_stats_pop_in_as_a_circle_that_unravels_then_the_values_fade_in() {
     let now = Instant::now();
     let mut island = Island::new(now);
     assert!(!island.shown());
     island.update(Some((Content::Stats, W, H)), now);
-    assert!(island.shown());
-    assert_eq!(island.frame(now), Frame::collapsed(W, H));
-    assert!(island.animating(now));
-    let settled = now + DURATION;
-    assert_eq!(island.frame(settled), Frame { w: W, h: H, alpha: 1.0 });
-    assert!(!island.animating(settled));
+    assert!(island.shown() && island.animating(now));
+    assert_eq!(island.frame(now), Frame { w: W, h: H, alpha: 1.0 }, "the open size is known at once");
+    let circle = island.look(now + ms(60), f32::INFINITY);
+    assert_eq!((circle.box_w, circle.unroll), (H, 0.0), "a circle the pill's height at the anchored end");
+    assert!(circle.pill[2] == circle.pill[3] && circle.pill[3] < H, "still popping: {:?}", circle.pill);
+    assert_eq!(circle.icon_alpha, 1.0, "the recording dot rides the circle from the first frame");
+    assert_eq!(circle.content_alpha, 0.0, "no values yet");
+    let widths: Vec<f32> = (0..=50).map(|i| island.look(now + ms(150 + i * 5), f32::INFINITY).box_w).collect();
+    assert!(widths.windows(2).all(|p| p[1] >= p[0]) && widths[0] == H && widths[50] == W, "unravels left to full width");
+    assert_eq!(island.content_alpha(now + OPEN), 0.0, "values wait for the open pill");
+    assert!(island.content_alpha(now + OPEN + ms(100)) > 0.5);
+    assert_eq!(island.look(now + OPEN + DURATION, f32::INFINITY), Look::open(Frame { w: W, h: H, alpha: 1.0 }));
+    assert!(!island.animating(now + OPEN + DURATION));
 }
 
 #[test]
@@ -198,29 +213,49 @@ fn a_content_swap_resizes_without_collapsing_and_fades_the_new_content_in() {
 }
 
 #[test]
-fn hiding_shrinks_then_reports_hidden_once() {
+fn hiding_fades_the_values_rolls_into_the_circle_shrinks_and_reports_hidden_once() {
     let now = Instant::now();
     let mut island = Island::new(now);
     island.update(Some((Content::Stats, W, H)), now);
     let later = now + Duration::from_secs(1);
     island.update(None, later);
-    assert!(island.shown(), "still on screen while shrinking");
-    assert!(!island.tick(later + DURATION / 2));
-    assert!(island.tick(later + DURATION));
+    assert!(island.shown(), "still on screen while leaving");
+    assert!(island.content_alpha(later + ms(75)) < 0.6 && island.content_alpha(later + ms(150)) == 0.0, "values fade first");
+    assert_eq!(island.look(later + ms(150), f32::INFINITY).box_w, W, "the pill waits for them");
+    let rolled = island.look(later + ms(150) + ms(250), f32::INFINITY);
+    assert!((rolled.box_w - H).abs() < 0.5 && rolled.unroll < 1e-3, "rolled into the circle: {}", rolled.box_w);
+    assert!(!island.tick(later + HIDE - ms(1)));
+    assert!(island.tick(later + HIDE), "the circle shrank away");
     assert!(!island.shown() && island.content().is_none());
-    assert!(!island.tick(later + DURATION * 2), "reported once");
+    assert!(!island.tick(later + HIDE * 2), "reported once");
 }
 
 #[test]
-fn reshowing_mid_hide_continues_from_the_current_frame() {
+fn reshowing_mid_hide_unravels_again_from_where_it_is() {
     let now = Instant::now();
     let mut island = Island::new(now);
     island.update(Some((Content::Stats, W, H)), now);
     let hide = now + Duration::from_secs(1);
     island.update(None, hide);
-    let mid = hide + DURATION / 2;
-    let here = island.frame(mid);
+    let mid = hide + ms(150) + ms(120);
+    let here = island.look(mid, f32::INFINITY);
+    assert!(here.box_w > H && here.box_w < W, "half rolled: {}", here.box_w);
     island.update(Some((Content::Stats, W, H)), mid);
-    assert_eq!(island.frame(mid), here, "no jump back to collapsed");
-    assert_eq!(island.frame(mid + DURATION), Frame { w: W, h: H, alpha: 1.0 });
+    assert_eq!(island.look(mid, f32::INFINITY).box_w, here.box_w, "no jump");
+    assert!(island.look(mid + ms(40), f32::INFINITY).box_w > here.box_w, "unrolling again");
+    assert_eq!(island.look(mid + ms(400), f32::INFINITY).box_w, W);
+}
+
+#[test]
+fn a_notice_from_nothing_carries_its_mark_in_the_circle_and_sweeps_once_open() {
+    let now = Instant::now();
+    let mut island = Island::new(now);
+    let saved = NoticeView::new(Tone::Success, "Clip saved", "VALORANT · 0:30", true).emphasized();
+    island.update(Some((Content::Notice(saved), 340.0, 58.0)), now);
+    let popping = island.look(now + ms(100), f32::INFINITY);
+    assert!(popping.unroll == 0.0 && popping.icon_alpha == 1.0 && popping.content_alpha == 0.0);
+    assert!(island.sheen(now + ms(300)).is_none(), "no sweep across a half-open pill");
+    let swept: Vec<bool> = (0..60).map(|i| island.sheen(now + ms(i * 20)).is_some()).collect();
+    let first = swept.iter().position(|s| *s).expect("a sweep");
+    assert!(first * 20 >= 400 + 60, "it starts once the pill is open: {} ms", first * 20);
 }

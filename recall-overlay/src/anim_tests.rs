@@ -34,13 +34,6 @@ fn retarget_mid_flight_continues_from_the_current_frame() {
     assert_eq!(tween.at(half + DURATION), A);
 }
 
-#[test]
-fn collapsed_pill_is_small_transparent_and_never_wider_than_the_island() {
-    let collapsed = Frame::collapsed(300.0, 44.0);
-    assert_eq!((collapsed.w, collapsed.h, collapsed.alpha), (105.0, 33.0, 0.0));
-    assert_eq!(Frame::collapsed(30.0, 44.0).w, 30.0);
-}
-
 /// `spring(0 → 1)` sampled every millisecond over its whole run.
 fn spring_path() -> Vec<f32> {
     let total = SPRING_FOR.as_millis() as u32;
