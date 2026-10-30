@@ -54,7 +54,7 @@ pub struct Placed {
     /// when unscanned): a spring's overshoot never reaches past it.
     max_h: f32,
     /// The scan's free rows per column (the hint card checks its own columns).
-    skyline: Option<Vec<u16>>,
+    hud: Option<Vec<u64>>,
 }
 
 /// What the last pushed frame showed: scene, window origin, look, sweep
@@ -209,8 +209,8 @@ impl App {
             let monitor = target_monitor(hwnd, pid);
             let scale = placement::scale(monitor.height(), &spot);
             let (grow, max_h) = (placement::grow(&spot), placement::free_depth(&spot, &monitor, scale));
-            let skyline = self.spots.skyline(&key);
-            self.placed = Some(Placed { key, pid, hwnd, monitor, spot, scale, grow, max_h, skyline });
+            let hud = self.spots.hud(&key);
+            self.placed = Some(Placed { key, pid, hwnd, monitor, spot, scale, grow, max_h, hud });
         }
         self.placed.as_ref().map_or(1.0, |p| p.scale)
     }
@@ -249,7 +249,7 @@ impl App {
         let pill_h = self.island.frame(now).h;
         let cover = |w: f32, h: f32| {
             let p = self.placed.as_ref()?;
-            placement::card_cover(&p.spot, p.skyline.as_deref(), &p.monitor, p.scale, (w, h), pill_h + GAP * p.scale)
+            placement::card_cover(&p.spot, p.hud.as_deref(), &p.monitor, p.scale, (w, h), pill_h + GAP * p.scale)
         };
         self.card_scene = Some(choose_card(&hint, scale, &self.fonts, cover));
         self.island.update_hint(true, now);

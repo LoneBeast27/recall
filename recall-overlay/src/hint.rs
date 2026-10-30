@@ -1,10 +1,10 @@
 //! The two-step shortcut hint (Alt + ` then a key): a card that unfolds
 //! below the island, each option a key cap and its label. The island pill
 //! above stays what it is (the stats, a notice, or a small "Alt `" pill).
-//! Its layout follows the game's skyline (the transient-aware HUD scan, which
-//! only this card uses), judged over the columns each card spans: the first
-//! of drop-down, two columns and one row that covers no HUD, else whichever
-//! covers the least (ties: the shorter). Unscanned spots drop down.
+//! Its layout follows the game's HUD grid (the transient-aware HUD scan, which
+//! only this card uses), judged under each card: the first of drop-down, two
+//! columns and one row that covers no HUD, else whichever covers the least
+//! (ties: the shorter). Unscanned spots drop down.
 
 use serde::Serialize;
 use std::time::{Duration, Instant};

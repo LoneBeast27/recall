@@ -1,5 +1,5 @@
 """HUD scan over the clip library: where each game's HUD sits along the top edge,
-for the Recall Island's shortcut-hint card (the `skyline` entries of
+for the Recall Island's shortcut-hint card (the `hud` entries of
 recall-overlay/assets/hud-spots.json). The island's own spots and scale stay
 on always-on HUD (the first scan's table): the user's ruling, 2026-10-30, was
 "Only for the hint card".
@@ -22,10 +22,11 @@ stray edges along the top do not).
 Each game's raw counts are saved (<key>.npz), so `--reprocess` can redo the
 rule without reading the clips again.
 
-Then the skyline: for every 32 px column at 1440p, the free rows before the
-first occupied pixel. The overlay checks the hint card against it column by
-column. It is coarse on purpose: everything below a column's first occupied
-pixel counts as HUD.
+Then the HUD grid: for every 32 px column at 1440p, one 64-bit number whose
+bit r says the 8 px rows [r, r + 1) x 8 hold an occupied pixel (the top 512
+rows; no card reaches deeper). The overlay adds up the cells under each hint
+card to pick the one covering the least HUD. This grid picks the same card as
+the full mask in all 14 table entries (checked 2026-10-30).
 
 Gentle by design (the user's PC, and the clips sit on an HDD): run it through
 nice-build.ps1 (background cores, BelowNormal); each ffmpeg child also gets very
@@ -56,7 +57,8 @@ STEADY = 16.0  # a HUD pixel's brightness stays within this through a burst
 DENSE = 12  # occupied pixels in a pixel's 9x9 neighbourhood for it to count (drops specks)
 BURST_FRAMES, BURST_STEP = 3, 12  # every 12th frame at 60 fps: 0.2 s apart
 FOOTPRINT = 400  # reported depth: under a 400 px wide box at each anchor, 12 px in from the edge
-BIN = 32  # skyline column width at 1440p
+BIN = 32  # skyline and HUD grid column width at 1440p
+HUD_ROW, HUD_ROWS = 8, 64  # the HUD grid's rows: 8 px at 1440p, 64 bits per column
 GAMES = {  # game key -> exe names that mean "the user is playing" (any of these pauses the scan)
     "valorant": "VALORANT-Win64-Shipping.exe", "rocketleague": "RocketLeague.exe", "apexlegends": "r5apex.exe",
     "overwatch": "Overwatch.exe", "overwatch2": "Overwatch.exe", "marvelrivals": "Marvel-Win64-Shipping.exe",
@@ -182,6 +184,16 @@ def skyline(mask):
     return [int(first[i:i + per_bin].min()) for i in range(0, W, per_bin)]
 
 
+def hud_grid(mask):
+    """Per BIN-px column at 1440p, a number: bit r = rows [r, r + 1) x HUD_ROW hold an occupied pixel."""
+    rows, columns = HUD_ROW // SCALE, BIN // SCALE
+
+    def bits(x):
+        return sum(1 << r for r in range(HUD_ROWS) if mask[r * rows:(r + 1) * rows, x:x + columns].any())
+
+    return [bits(x) for x in range(0, W, columns)]
+
+
 def under(sky, x0, x1):
     """The skyline's free rows under [x0, x1) at 1440p."""
     return min(sky[int(x0 // BIN):int(-(-x1 // BIN))])
@@ -294,6 +306,7 @@ def main():
         results[key] = {"clips": len(clips), "sampled": [c.name for c in picked], "frames": frames, "moving_bursts": n, "occupied_if_in_bursts": need,
                         "free_1440p": free,
                         "skyline_1440p": sky,
+                        "hud_1440p": hud_grid(mask),
                         "first_scan_free_1440p": before and {"centre": before["free_top_island_px_1440p"],
                                                              "left": before["free_top_left_px_1440p"],
                                                              "right": before["free_top_right_px_1440p"]}}
@@ -305,14 +318,14 @@ def main():
         write_ppm(out / f"{key}.ppm", rgb.astype(np.uint8))
         log(f"{key}: {n} moving bursts in {time.time() - started:.0f}s, free {free}")
         (out / "results.json").write_text(json.dumps(results, indent=1), encoding="utf-8")
-    skylines = {key: {"skyline": r["skyline_1440p"]} for key, r in results.items()}
-    if "tomclancysrainbowsixsiege" in skylines:
-        skylines["rainbowsixsiege"] = skylines["tomclancysrainbowsixsiege"]
+    grids = {key: {"hud": r["hud_1440p"]} for key, r in results.items()}
+    if "tomclancysrainbowsixsiege" in grids:
+        grids["rainbowsixsiege"] = grids["tomclancysrainbowsixsiege"]
     rule = (f"an edge in the median of all sampled frames, or steady edges through 3-frame bursts in >= {SHARE:.0%} "
             f"(and >= {MIN_BURSTS}) of a game's bursts in which the world moved")
-    source = (f"skyline: scripts/dev/hud-scan.py over V:\\ALL RECORDINGS, {time.strftime('%Y-%m-%d')}; free rows per {BIN} px column "
-              f"at 1440p, occupied = {rule} (HUD that comes and goes counts); used only by the shortcut hint card")
-    (out / "hud-spots.json").write_text(json.dumps({"_source": source, "spots": skylines}, indent=1), encoding="utf-8")
+    source = (f"hud grid: scripts/dev/hud-scan.py over V:\\ALL RECORDINGS, {time.strftime('%Y-%m-%d')}; per {BIN} px column at 1440p, bit r = {HUD_ROW} px row r holds HUD, "
+              f"occupied = {rule} (HUD that comes and goes counts); used only by the shortcut hint card")
+    (out / "hud-spots.json").write_text(json.dumps({"_source": source, "spots": grids}, indent=1), encoding="utf-8")
     log("done")
 
 

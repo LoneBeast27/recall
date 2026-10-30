@@ -123,10 +123,10 @@ fn card_sizes_at_1440p() {
 fn card_for(key: &str) -> (CardLayout, f32, f32, Option<f32>) {
     use crate::placement::{card_cover, scale, Rect, Spots, ISLAND_H};
     let (fonts, spots) = (crate::fonts::Fonts::new().unwrap(), Spots::embedded());
-    let (spot, sky) = (spots.lookup(key), spots.skyline(key));
+    let (spot, hud) = (spots.lookup(key), spots.hud(key));
     let qhd = Rect { left: 0, top: 0, right: 2560, bottom: 1440 };
     let s = scale(1440, &spot);
-    let cover = |w: f32, h: f32| card_cover(&spot, sky.as_deref(), &qhd, s, (w, h), (ISLAND_H + GAP) * s);
+    let cover = |w: f32, h: f32| card_cover(&spot, hud.as_deref(), &qhd, s, (w, h), (ISLAND_H + GAP) * s);
     let card = choose_card(&hint(), s, &fonts, cover);
     (card.layout, card.w, card.h, cover(card.w, card.h))
 }
@@ -150,9 +150,9 @@ fn every_scanned_game_gets_a_clean_card_or_the_least_covered_one() {
     let (fonts, spots) = (crate::fonts::Fonts::new().unwrap(), Spots::embedded());
     let qhd = Rect { left: 0, top: 0, right: 2560, bottom: 1440 };
     for key in spots.keys() {
-        let (spot, sky) = (spots.lookup(key), spots.skyline(key));
+        let (spot, hud) = (spots.lookup(key), spots.hud(key));
         let s = scale(1440, &spot);
-        let cover = |card: &CardScene| card_cover(&spot, sky.as_deref(), &qhd, s, (card.w, card.h), (ISLAND_H + GAP) * s).unwrap();
+        let cover = |card: &CardScene| card_cover(&spot, hud.as_deref(), &qhd, s, (card.w, card.h), (ISLAND_H + GAP) * s).unwrap();
         let all = [CardLayout::Dropdown, CardLayout::TwoColumn, CardLayout::Row].map(|layout| card_scene(&hint(), layout, s, &fonts));
         let chosen = card_for(key);
         let area = chosen.3.unwrap();
@@ -166,9 +166,16 @@ fn every_scanned_game_gets_a_clean_card_or_the_least_covered_one() {
 
 #[test]
 fn valorant_gets_the_row_above_its_kill_feed() {
-    // Five rows (118 px into the kill feed) and three (54 px) cover more than the
-    // row, which clears the kill feed and only touches the top bar's end.
+    // Five rows and three reach down into the kill feed and cover more than the
+    // row, which clears it and only touches the top bar's end.
     let (layout, w, h, covered) = card_for("valorant");
     assert_eq!((layout, w, h), (CardLayout::Row, 636.0, 52.0));
     assert!(covered.unwrap() > 0.0 && covered.unwrap() < 16_000.0, "{covered:?}");
+}
+
+#[test]
+fn lethal_company_drops_down_and_forza_takes_the_row() {
+    // Their HUD sits in thin bands: counting only the rows that hold it decides both.
+    assert_eq!(card_for("lethalcompany").0, CardLayout::Dropdown);
+    assert_eq!(card_for("forzahorizon6").0, CardLayout::Row);
 }
