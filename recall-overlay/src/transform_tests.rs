@@ -71,20 +71,20 @@ fn after_the_hold_the_notice_eases_back_to_the_stats_pill_without_bouncing() {
 }
 
 #[test]
-fn with_no_stats_the_notice_grows_out_of_the_collapsed_pill_and_collapses_away() {
+fn with_no_stats_the_notice_unravels_from_a_circle_without_a_spring_and_rolls_away() {
     let now = Instant::now();
     let mut island = Island::new(now);
     island.update(Some((saved(), GROWN.0, GROWN.1)), now);
-    assert_eq!(island.frame(now), Frame::collapsed(GROWN.0, GROWN.1));
-    let frames = path(&island, now, SPRING_FOR);
-    assert!(frames.iter().any(|f| f.w > GROWN.0 + 5.0), "the spring overshoots on the way in");
-    assert_eq!(island.frame(now + DURATION).alpha, 1.0, "fully opaque by 200 ms");
+    assert_eq!(island.frame(now), Frame { w: GROWN.0, h: GROWN.1, alpha: 1.0 }, "no size spring from nothing");
+    let looks: Vec<_> = (0..=80).map(|i| island.look(now + ms(i * 5), f32::INFINITY)).collect();
+    assert!(looks[..30].iter().all(|l| l.unroll == 0.0 && l.box_w == GROWN.1), "a circle first, 58 px");
+    assert!(looks.iter().all(|l| l.box_w <= GROWN.0), "the pill never overshoots its width");
+    assert_eq!(looks[80].box_w, GROWN.0, "open at 400 ms");
     let hide = now + Duration::from_secs(3);
     island.update(None, hide);
-    assert!(!island.tick(hide + DURATION / 2));
-    assert_eq!(island.frame(hide + DURATION), Frame::collapsed(GROWN.0, GROWN.1));
-    assert!(island.tick(hide + DURATION), "hidden once collapsed");
-    assert!(!island.shown() && island.sheen(hide + DURATION).is_none());
+    assert!(!island.tick(hide + ms(500)));
+    assert!(island.tick(hide + ms(550)), "faded, rolled up and shrunk away by 550 ms");
+    assert!(!island.shown() && island.sheen(hide + ms(550)).is_none());
 }
 
 #[test]

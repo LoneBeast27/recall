@@ -2,7 +2,7 @@
 //! pixels, measured through [`Measure`] (DirectWrite live, a fake in tests).
 //! Every size below is in 1440p pixels and multiplied by the island scale.
 
-use crate::notice::{NoticeView, Tone};
+use crate::notice::{NoticeView, SavePhase, Tone};
 use crate::placement::ISLAND_H;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -108,10 +108,25 @@ pub enum Shape {
     Ring { cx: f32, cy: f32, r: f32, stroke: f32, frac: f32, color: Rgba },
 }
 
+/// The island's leading mark (tone dot, pause bars, hollow ring, or a clip
+/// save's shutter ring), kept apart from the rest of the scene: it rides
+/// the pill's appear / hide circle and runs the save animation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Icon {
+    pub shape: Shape,
+    pub cx: f32,
+    pub cy: f32,
+    /// The mark's dot radius (the shutter ring is twice that).
+    pub r: f32,
+    /// A clip save: draw the shutter-ring badge here instead of `shape`.
+    pub badge: Option<SavePhase>,
+}
+
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Scene {
     pub w: f32,
     pub h: f32,
+    pub icon: Option<Icon>,
     pub shapes: Vec<Shape>,
     pub texts: Vec<Text>,
 }
@@ -168,7 +183,7 @@ impl Pen<'_> {
         (self.scene.h + self.cap(role, text)) / 2.0
     }
 
-    fn mark(&mut self, tone: Tone, x: f32) {
+    fn mark(&mut self, tone: Tone, x: f32, badge: Option<SavePhase>) {
         let (cy, r, color) = (self.scene.h / 2.0, self.u(4.0), tone_color(tone));
         let shape = match tone {
             Tone::Waiting => Shape::Hollow { cx: x + r, cy, r, stroke: self.u(1.5), color },
@@ -182,7 +197,7 @@ impl Pen<'_> {
             },
             _ => Shape::Dot { cx: x + r, cy, r, color },
         };
-        self.scene.shapes.push(shape);
+        self.scene.icon = Some(Icon { shape, cx: x + r, cy, r, badge });
     }
 }
 
@@ -205,8 +220,9 @@ fn pen(s: f32, m: &dyn Measure) -> Pen<'_> {
 pub fn notice_scene(notice: &NoticeView, s: f32, m: &dyn Measure) -> Scene {
     let mut p = pen(s, m);
     let (pad_l, mark_w, gap, pad_r) = (p.u(16.0), p.u(8.0), p.u(10.0), p.u(20.0));
-    p.mark(notice.tone, pad_l);
-    let x = pad_l + mark_w + gap;
+    p.mark(notice.tone, pad_l, notice.save);
+    // The shutter ring is twice the dot: its text steps right to keep the gap.
+    let x = pad_l + mark_w + gap + if notice.save.is_some() { p.u(4.0) } else { 0.0 };
     let text_w = if notice.chord {
         let (b1, b2) = p.two_lines((Role::Chord, &notice.title), (Role::Chord, &notice.detail), p.u(6.0));
         p.text_at_baseline(Role::Chord, &notice.title, x, b1, TEXT);
@@ -244,7 +260,7 @@ pub fn stats_scene(st: &StatsContent, s: f32, m: &dyn Measure) -> Scene {
     let group_gap = p.u(16.0);
     let mut x = p.u(16.0);
     let tone = if st.paused { Tone::Paused } else if st.recording { Tone::Recording } else { Tone::Waiting };
-    p.mark(tone, x);
+    p.mark(tone, x, None);
     x += p.u(8.0) + p.u(7.0);
 
     let replay = clock(st.replay_secs);

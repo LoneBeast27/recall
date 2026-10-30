@@ -10,12 +10,14 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::anim::{Frame, DURATION};
+use crate::badge::Badge;
 use crate::cue::Sheen;
 use crate::fonts::Fonts;
 use crate::island::{content, Content, Island};
 use crate::layout::{notice_scene, stats_scene, Scene, StatsContent};
 use crate::notice::NoticeView;
 use crate::placement::{grow, DEFAULT_SPOT};
+use crate::presence::{Look, FADE_OUT, POP, UNRAVEL};
 use crate::reducer::Reducer;
 use crate::render::Renderer;
 
@@ -26,22 +28,34 @@ pub struct Tile {
     pub w: usize,
     pub h: usize,
     px: Vec<[u8; 4]>,
+    /// The window's margin around the anchored box.
+    pub inset: usize,
+    /// The anchored box's width.
+    pub box_w: usize,
+}
+
+impl Tile {
+    /// Where the window goes so its box's top-right corner is (`right`, `top`),
+    /// as the top-right anchor places it.
+    pub fn anchored(&self, right: usize, top: usize) -> (usize, usize) {
+        (right.saturating_sub(self.box_w + self.inset), top.saturating_sub(self.inset))
+    }
 }
 
 pub fn tile(
     renderer: &mut Renderer,
     fonts: &Fonts,
     scene: &Scene,
-    frame: Frame,
+    look: Look,
     scale: f32,
-    content_alpha: f32,
     sheen: Option<Sheen>,
+    badge: Option<Badge>,
 ) -> Result<Tile, String> {
-    let (w, h) = renderer.draw(fonts, scene, frame, scale, content_alpha, sheen).map_err(|e| format!("draw: {e}"))?;
+    let (w, h) = renderer.draw(fonts, scene, look, scale, sheen, badge).map_err(|e| format!("draw: {e}"))?;
     let px = renderer.pixels(w, h);
     // Window opacity (UpdateLayeredWindow's constant alpha) applied here for the stills.
-    let px = px.into_iter().map(|p| p.map(|c| (c as f32 * frame.alpha).round() as u8)).collect();
-    Ok(Tile { w: w as usize, h: h as usize, px })
+    let px = px.into_iter().map(|p| p.map(|c| (c as f32 * look.alpha).round() as u8)).collect();
+    Ok(Tile { w: w as usize, h: h as usize, px, inset: look.margin as usize, box_w: look.box_w.ceil() as usize })
 }
 
 pub struct Canvas {
@@ -111,7 +125,7 @@ impl Canvas {
 /// The settled island for one scene (laid out at `scale`, island `size`), on the dark backdrop.
 pub fn snapshot(path: &Path, renderer: &mut Renderer, fonts: &Fonts, scene: &Scene, scale: f32, size: (f32, f32)) -> Result<(), String> {
     let pad = (24.0 * scale) as usize;
-    let t = tile(renderer, fonts, scene, Frame { w: size.0, h: size.1, alpha: 1.0 }, scale, 1.0, None)?;
+    let t = tile(renderer, fonts, scene, Look::open(Frame { w: size.0, h: size.1, alpha: 1.0 }), scale, None, None)?;
     let mut canvas = Canvas::new(t.w + pad * 2, t.h + pad * 2);
     canvas.fill(0, 0, canvas.w, canvas.h, DARK);
     canvas.blit(&t, pad, pad);
@@ -144,6 +158,7 @@ fn notices() -> Vec<NoticeView> {
         session("paused", "Recording paused", "VALORANT"),
         session("waiting", "Waiting for a game", "Not recording"),
         session("encoder", "Encoder problem", "Recorder stopped"),
+        json!({"mod":"session","event":{"type":"saving","seconds":120}}),
         engine(json!({"type":"saved","path":"V:\\c\\Rocket-League__2026-10-26__10-00-00.mp4","seconds":120.0})),
         engine(json!({"type":"mic_muted","muted":true})),
         engine(json!({"type":"save_failed","reason":"the output folder is unavailable"})),
@@ -187,24 +202,25 @@ pub fn sheet(path: &Path, scale: f32) -> Result<(), String> {
     let pad = (24.0 * scale) as usize;
     let mut tiles = Vec::new();
     for (scene, s) in &scenes {
-        tiles.push(tile(&mut renderer, &fonts, scene, Frame { w: scene.w, h: scene.h, alpha: 1.0 }, *s, 1.0, None)?);
+        tiles.push(tile(&mut renderer, &fonts, scene, Look::open(Frame { w: scene.w, h: scene.h, alpha: 1.0 }), *s, None, None)?);
     }
     let scenes: Vec<Scene> = scenes.into_iter().map(|(scene, _)| scene).collect();
-    // Appear (left column) and hide (right column) of the stats island, every 40 ms.
+    // Appear (left column: circle, unravel, values) and hide (right column,
+    // the reverse) of the stats island, 10 steps each.
     let stats = &scenes[scenes.len() - stats_states().len()];
     let (mut appear, mut hide) = (Vec::new(), Vec::new());
     let start = Instant::now();
     let mut island = Island::new(start);
     island.update(Some((Content::Stats, stats.w, stats.h)), start);
-    let hide_at = start + Duration::from_secs(1);
+    let hide_at = start + Duration::from_secs(2);
     let mut leaving = Island::new(start);
     leaving.update(Some((Content::Stats, stats.w, stats.h)), start);
     leaving.update(None, hide_at);
-    for step in 0..=5u32 {
-        let t = DURATION * step / 5;
-        let (a, b) = (start + t, hide_at + t);
-        appear.push(tile(&mut renderer, &fonts, stats, island.frame(a), scale, island.content_alpha(a), None)?);
-        hide.push(tile(&mut renderer, &fonts, stats, leaving.frame(b), scale, leaving.content_alpha(b), None)?);
+    let (appear_for, hide_for) = (POP + UNRAVEL + DURATION, FADE_OUT + POP + UNRAVEL);
+    for step in 0..=10u32 {
+        let (a, b) = (start + appear_for * step / 10, hide_at + hide_for * step / 10);
+        appear.push(tile(&mut renderer, &fonts, stats, island.look(a, f32::INFINITY), scale, None, None)?);
+        hide.push(tile(&mut renderer, &fonts, stats, leaving.look(b, f32::INFINITY), scale, None, None)?);
     }
     let cell_w = tiles.iter().map(|t| t.w).max().unwrap_or(0) + pad * 2;
     let row_h = tiles.iter().map(|t| t.h).max().unwrap_or(0) + pad;
@@ -216,11 +232,13 @@ pub fn sheet(path: &Path, scale: f32) -> Result<(), String> {
         canvas.blit(t, pad, pad + row * row_h);
         canvas.blit(t, cell_w + pad, pad + row * row_h);
     }
+    let right = pad + stats.w.ceil() as usize;
     for (step, (a, b)) in appear.iter().zip(&hide).enumerate() {
         let y = pad + (tiles.len() + step) * row_h;
-        // Centre each frame on the settled island's centre, as top-centre placement does.
-        canvas.blit(a, pad + (stats.w as usize).saturating_sub(a.w) / 2, y);
-        canvas.blit(b, cell_w + pad + (stats.w as usize).saturating_sub(b.w) / 2, y);
+        // Right edges on the settled island's, as the top-right anchor places them.
+        let ((ax, ay), (bx, by)) = (a.anchored(right, y), b.anchored(right, y));
+        canvas.blit(a, ax, ay);
+        canvas.blit(b, cell_w + bx, by);
     }
     canvas.write_bmp(path)
 }

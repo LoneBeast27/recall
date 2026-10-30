@@ -62,8 +62,8 @@ impl Film {
         let now = self.start + at;
         self.island.tick(now);
         let Some(shown) = self.drawn.as_ref().filter(|_| self.island.shown()) else { return Ok(None) };
-        let (frame, fade, sheen) = (self.island.frame(now), self.island.content_alpha(now), self.island.sheen(now));
-        tile(renderer, fonts, &shown.scene, frame, shown.scale, fade, sheen).map(Some)
+        let (look, sheen, badge) = (self.island.look(now, f32::INFINITY), self.island.sheen(now), self.island.badge(now));
+        tile(renderer, fonts, &shown.scene, look, shown.scale, sheen, badge).map(Some)
     }
 }
 
@@ -73,7 +73,8 @@ fn rows() -> Vec<(String, Duration)> {
     let mut rows = vec![("before".to_string(), SAVED - Duration::from_millis(100))];
     rows.extend((0..=16u32).map(|i| (format!("{} ms", i * 40), SAVED + STEP * i)));
     rows.push(("1.5 s".into(), SAVED + Duration::from_millis(1_500)));
-    rows.extend((0..=6u32).map(|i| (format!("{:.2} s", 3.0 + i as f32 * 0.04), SAVED + HOLD + STEP * i)));
+    // The hand-back (200 ms) or, with no stats, the fade, roll-up and shrink (550 ms).
+    rows.extend((0..=14u32).map(|i| (format!("{:.2} s", 3.0 + i as f32 * 0.04), SAVED + HOLD + STEP * i)));
     rows
 }
 
@@ -85,7 +86,9 @@ fn saved_notice() -> Result<NoticeView, String> {
 /// The island's updates: stats from 0 (when `stats`), the save at `SAVED`,
 /// the hand-back after the hold. `emphasis` false = the old content swap.
 fn steps(fonts: &Fonts, scale: f32, stats: bool, emphasis: bool) -> Result<Vec<(Duration, Option<Shown>)>, String> {
-    let notice = NoticeView { emphasis, ..saved_notice()? };
+    // The old content swap: no transformation, no save badge.
+    let saved = saved_notice()?;
+    let notice = if emphasis { saved } else { NoticeView { emphasis: false, save: None, ..saved } };
     let resting = stats_scene(&stats_states()[0], scale, fonts);
     let stats_shown = Shown { content: Content::Stats, size: (resting.w, resting.h), scene: resting, scale };
     // The app's own sizing, at an unscanned spot (full growth).
@@ -130,8 +133,9 @@ fn sheet(renderer: &mut Renderer, fonts: &Fonts, scale: f32, columns: Vec<(&str,
         labels.push(format!("{}\t{}\t13\t{title}", x + pad, 12));
         for (row, tile) in column.iter().enumerate() {
             let Some(tile) = tile else { continue };
-            // Top-right placement: the right edge and the top stay put.
-            canvas.blit(tile, x + cell_w - pad - tile.w, HEADER + pad + row * row_h);
+            // Top-right placement: the box's right edge and top stay put.
+            let (bx, by) = tile.anchored(x + cell_w - pad, HEADER + pad + row * row_h);
+            canvas.blit(tile, bx, by);
         }
     }
     for (row, (label, _)) in rows.iter().enumerate() {

@@ -158,6 +158,15 @@ pub fn position(anchor: Anchor, monitor: &Rect, width: i32, edge: i32) -> (i32, 
     (x, y)
 }
 
+/// The window's top-left for a drawn look: the anchor places the look's
+/// `box_w`-wide box; the window adds `margin` around it (the appearing
+/// circle's overshoot).
+pub fn window_origin(anchor: Anchor, monitor: &Rect, box_w: f32, margin: f32, edge: i32) -> (i32, i32) {
+    let (x, y) = position(anchor, monitor, box_w.ceil() as i32, edge);
+    let m = margin.ceil() as i32;
+    (x - m, y - m)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +231,14 @@ mod tests {
             let none_free = Spots::embedded().lookup("battlefield6");
             assert_eq!(free_depth(&none_free, &monitor, 1.0), f32::INFINITY, "no free spot: nothing to protect");
         }
+    }
+
+    #[test]
+    fn a_window_with_a_margin_keeps_its_box_on_the_anchor() {
+        let monitor = Rect { left: 0, top: 0, right: 2560, bottom: 1440 };
+        assert_eq!(window_origin(Anchor::TopRight, &monitor, 44.0, 0.0, 12), (2504, 12), "the circle sits at the right end");
+        assert_eq!(window_origin(Anchor::TopRight, &monitor, 44.0, 2.0, 12), (2502, 10), "the margin wraps the same box");
+        assert_eq!(window_origin(Anchor::TopRight, &monitor, 299.4, 0.0, 12), position(Anchor::TopRight, &monitor, 300, 12));
     }
 
     #[test]

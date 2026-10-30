@@ -26,11 +26,6 @@ impl Frame {
         let mix = |a: f32, b: f32| a + (b - a) * t;
         Frame { w: mix(self.w, to.w), h: mix(self.h, to.h), alpha: mix(self.alpha, to.alpha) }
     }
-
-    /// The small, transparent pill an island grows out of and shrinks into.
-    pub fn collapsed(w: f32, h: f32) -> Frame {
-        Frame { w: (w * 0.35).max(h).min(w), h: h * 0.75, alpha: 0.0 }
-    }
 }
 
 /// Cubic ease-out: fast start, gentle landing.
@@ -90,10 +85,6 @@ impl Tween {
     pub fn spring(from: Frame, to: Frame, velocity: (f32, f32), now: Instant) -> Self {
         let motion = Motion::Spring { vw: velocity.0, vh: velocity.1 };
         Self { from, to, start: now, duration: SPRING_FOR, motion }
-    }
-
-    pub fn target(&self) -> Frame {
-        self.to
     }
 
     pub fn progress(&self, now: Instant) -> f32 {
