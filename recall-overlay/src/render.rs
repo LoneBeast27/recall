@@ -29,7 +29,7 @@ use crate::badge::Badge;
 use crate::cue::{band, Sheen, CUE_PEAK};
 use crate::fonts::Fonts;
 use crate::presence::Look;
-use crate::layout::{sweep, Rgba, Scene, Shape, Sweep, EDGE_LINE, PILL, TRACK};
+use crate::layout::{sweep, Rgba, Role, Scene, Shape, Sweep, EDGE_LINE, PILL, TRACK};
 
 #[path = "render_icon.rs"]
 mod icon;
@@ -151,7 +151,8 @@ impl Renderer {
                 }
                 for text in &scene.texts {
                     let layout = fonts.layout(text.role, scale, &text.text)?;
-                    self.paint(text.color, look.content_alpha);
+                    let alpha = if text.role == Role::NoticeTitle { look.title_alpha } else { look.content_alpha };
+                    self.paint(text.color, alpha);
                     t.DrawTextLayout(Vector2 { X: text.x, Y: text.y }, &layout, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
                 }
             }

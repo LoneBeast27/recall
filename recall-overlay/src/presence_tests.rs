@@ -17,7 +17,7 @@ fn the_pop_overshoots_a_little_and_lands_exactly() {
 fn a_circle_pops_in_then_unravels_into_the_pill() {
     let now = Instant::now();
     let mut presence = Presence::hidden(now);
-    presence.show(now);
+    presence.show(now, Style::Unravel);
     assert_eq!(presence.shape(now), (0.0, 0.0), "nothing on the first instant");
     let popping: Vec<(f32, f32)> = (0..=30).map(|i| presence.shape(now + ms(i * 5))).collect();
     assert!(popping.iter().all(|&(_, u)| u == 0.0), "a circle for the whole pop");
@@ -34,7 +34,7 @@ fn a_circle_pops_in_then_unravels_into_the_pill() {
 fn hiding_waits_for_the_content_then_rolls_up_and_shrinks_away() {
     let now = Instant::now();
     let mut presence = Presence::hidden(now);
-    presence.show(now);
+    presence.show(now, Style::Unravel);
     let hide = now + Duration::from_secs(3);
     presence.hide(hide, FADE_OUT);
     assert_eq!(presence.shape(hide + FADE_OUT), (1.0, 1.0), "still open while the content fades");
@@ -48,14 +48,14 @@ fn hiding_waits_for_the_content_then_rolls_up_and_shrinks_away() {
 fn a_reversal_mid_flight_carries_on_from_where_it_is() {
     let now = Instant::now();
     let mut presence = Presence::hidden(now);
-    presence.show(now);
+    presence.show(now, Style::Unravel);
     let mid = now + ms(260);
     let here = presence.shape(mid);
     presence.hide(mid, FADE_OUT);
     assert_eq!(presence.shape(mid), here, "an unfinished pill rolls straight back, no wait");
     let back = mid + ms(80);
     let there = presence.shape(back);
-    presence.show(back);
+    presence.show(back, Style::Unravel);
     assert_eq!(presence.shape(back), there);
     let left = presence.opened_at().saturating_duration_since(back).as_secs_f32();
     assert!((left - 0.220).abs() < 1e-3, "opens in the time left (0.55 of 400 ms): {left}");
@@ -84,4 +84,20 @@ fn the_mark_rides_the_left_end_and_settles_into_place() {
     let (x, ..) = pose(1.0, 0.5);
     assert!((x - 31.0).abs() < 1e-4, "half way from the circle's centre to its place: {x}");
     assert_eq!(pose(1.0, 1.0), (40.0, 22.0, 1.0));
+}
+
+#[test]
+fn the_instant_style_opens_at_once_and_fades_the_window_in_and_out() {
+    let now = Instant::now();
+    let mut presence = Presence::hidden(now);
+    presence.show(now, Style::Instant);
+    assert_eq!(presence.shape(now), (1.0, 1.0), "the open pill on the first frame, no circle");
+    assert_eq!(presence.text_ready(), None, "its content shows with it");
+    assert_eq!(presence.window_alpha(now), 0.0);
+    assert!(presence.window_alpha(now + ms(40)) > 0.5);
+    assert_eq!(presence.window_alpha(now + FADE_IN), 1.0);
+    let hide = now + Duration::from_millis(1_500);
+    presence.hide(hide, FADE_OUT);
+    assert!(presence.window_alpha(hide + ms(60)) < 1.0, "fades out straight away");
+    assert!(presence.gone(hide + FADE_IN) && !presence.gone(hide + FADE_IN - ms(1)));
 }

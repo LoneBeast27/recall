@@ -40,7 +40,7 @@ pub fn legacy_look(full: Frame, shown_for: Duration, hidden_for: Option<Duration
             (f, f.alpha)
         }
     };
-    Look { content_alpha: fade, icon_alpha: fade, ..Look::open(frame) }
+    Look { content_alpha: fade, title_alpha: fade, icon_alpha: fade, ..Look::open(frame) }
 }
 
 /// The overlay pipeline for one sequence, driven by timestamps.

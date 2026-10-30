@@ -199,11 +199,14 @@ impl Reducer {
     }
 
     /// `{"type":"saving","seconds":N}`: the controller sent a save. "Saving"
-    /// over the clip length with the spinning ring, until the engine's
-    /// `saved` / `save_failed` replaces it or `SAVING_FOR` passes.
+    /// over "<game> · m:ss" (the saved notice's own layout, so only the title
+    /// word changes when the clip lands) with the spinning ring, until the
+    /// engine's `saved` / `save_failed` replaces it or `SAVING_FOR` passes.
     fn apply_saving(&mut self, event: &Value, now: Instant) -> bool {
         let secs = event.get("seconds").and_then(Value::as_u64).unwrap_or(0);
-        let detail = if secs > 0 { format!("{}:{:02}…", secs / 60, secs % 60) } else { "Replay…".into() };
+        let name = self.session.target_name.trim();
+        let game = if !name.is_empty() { name } else if self.session.desktop { "Desktop" } else { "clip" };
+        let detail = truncate(&format!("{game} · {}:{:02}", secs / 60, secs % 60), 40);
         let notice = NoticeView::new(Tone::Recording, "Saving", detail.clone(), true).emphasized().saving(SavePhase::Saving);
         self.set_transient("Saving", detail, now + SAVING_FOR, notice)
     }

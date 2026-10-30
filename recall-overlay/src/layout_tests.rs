@@ -167,3 +167,17 @@ fn ring_sweep_runs_clockwise_from_twelve() {
     let Sweep::Arc { end, .. } = sweep(15.0, 15.0, 10.0, 0.75) else { panic!() };
     assert!(close(end, (5.0, 15.0)), "three quarters ends at 9 o'clock");
 }
+
+#[test]
+fn a_saves_stages_share_one_layout_so_nothing_moves_when_it_lands() {
+    let stage = |tone, title: &str, phase| NoticeView::new(tone, title, "VALORANT · 0:30", true).saving(phase);
+    let saving = notice_scene(&stage(Tone::Recording, "Saving", SavePhase::Saving), 1.3, &Fake);
+    let saved = notice_scene(&stage(Tone::Success, "Clip saved", SavePhase::Saved), 1.3, &Fake);
+    assert_eq!(saving.w, saved.w, "one width for both stages");
+    assert_eq!(text(&saving, "VALORANT · 0:30"), text(&saved, "VALORANT · 0:30"), "the detail line stays put");
+    assert_eq!((saving.icon.unwrap().cx, saving.icon.unwrap().cy), (saved.icon.unwrap().cx, saved.icon.unwrap().cy));
+    assert_eq!(text(&saving, "Saving").x, text(&saved, "Clip saved").x);
+    // A detail narrower than "Clip saved": the reserved title slot holds the width.
+    let short = |title: &str, phase| notice_scene(&NoticeView::new(Tone::Success, title, "0:30", true).saving(phase), 1.0, &Fake);
+    assert_eq!(short("Saving", SavePhase::Saving).w, short("Clip saved", SavePhase::Saved).w);
+}
