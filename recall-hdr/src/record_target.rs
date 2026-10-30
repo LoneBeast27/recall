@@ -3,8 +3,9 @@
 //! then does with it lives in `record_engine`).
 //!
 //! - **Classification** ([`classify_event`]): a target is a foreground window
-//!   that is fullscreen/borderless on its own monitor, or an exe with an
-//!   `hdr_game|sdr_game` override; never a denied stem (the rules deny list,
+//!   that is fullscreen/borderless on its own monitor, an exe in a Steam library
+//!   (windowed games), or an exe with an `hdr_game|sdr_game` override; never a
+//!   denied stem (the rules deny list,
 //!   Recall's own processes, explorer, browsers, media players, overlays,
 //!   launchers) or an exe with a `none` override.
 //! - **Session** ([`TargetTracker`]): the same rules as the HDR `Reconciler`
@@ -70,6 +71,10 @@ const TARGET_DENY_STEMS: &[&str] = &[
     "lockapp",
     "screenclippinghost",
     "snippingtool",
+    // Steam-library apps that are not games (the Steam-library rule would take them).
+    "wallpaper32",
+    "wallpaper64",
+    "ui32",
 ];
 
 /// A window the engine can capture. `exe` is the image file name.
@@ -113,8 +118,9 @@ pub fn display_name(title: &str, exe_stem: &str) -> String {
     if s.is_empty() { "Game".into() } else { s }
 }
 
-/// Whether an exe stem in this geometry is a capture target under `cfg`.
-pub fn is_target(stem: &str, fullscreen: bool, cfg: &Config) -> bool {
+/// Whether an exe stem is a capture target under `cfg`. `looks_like_game` =
+/// fullscreen on its monitor, or the exe lives in a Steam library.
+pub fn is_target(stem: &str, looks_like_game: bool, cfg: &Config) -> bool {
     let stem = stem.trim();
     if stem.is_empty()
         || rules::is_denied(stem)
@@ -125,13 +131,13 @@ pub fn is_target(stem: &str, fullscreen: bool, cfg: &Config) -> bool {
     match rules::override_kind(cfg, stem) {
         Some(RuleKind::None) => false,
         Some(RuleKind::HdrGame | RuleKind::SdrGame) => true,
-        None => fullscreen,
+        None => looks_like_game,
     }
 }
 
 /// `Some(target)` if this foreground event is a capture target.
 pub fn classify_event(ev: &WatchEvent, cfg: &Config) -> Option<Target> {
-    is_target(&ev.exe_stem, ev.fullscreen, cfg).then(|| Target::from_event(ev))
+    is_target(&ev.exe_stem, ev.fullscreen || ev.steam_game, cfg).then(|| Target::from_event(ev))
 }
 
 /// The debounced capture session (see the module docs).
@@ -221,8 +227,13 @@ mod tests {
             title: title.into(),
             fullscreen,
             fullscreen_on_target: fullscreen,
+            steam_game: false,
             hwnd,
         }
+    }
+
+    fn steam_ev(stem: &str) -> WatchEvent {
+        WatchEvent { steam_game: true, ..ev(stem, stem, 7, 0x70, false) }
     }
 
     fn target(pid: u32, hwnd: isize, name: &str) -> Target {
@@ -253,6 +264,18 @@ mod tests {
         let cfg = user_cfg();
         assert!(classify_event(&ev("notepad", "x", 1, 1, false), &cfg).is_none());
         assert!(classify_event(&ev("WindowedGame", "x", 1, 1, false), &cfg).is_some());
+    }
+
+    #[test]
+    fn windowed_steam_library_game_is_a_target_unless_denied() {
+        let cfg = user_cfg();
+        assert!(classify_event(&steam_ev("sobosuba"), &cfg).is_some(), "maximized windowed Steam game");
+        for stem in ["wallpaper64", "ui32", "brave"] {
+            assert!(classify_event(&steam_ev(stem), &cfg).is_none(), "{stem} in a Steam library is not a game");
+        }
+        let mut off = user_cfg();
+        off.overrides.push(Override { exe: "sobosuba".into(), kind: RuleKind::None, clamp: None });
+        assert!(classify_event(&steam_ev("sobosuba"), &off).is_none(), "a none override still wins");
     }
 
     #[test]

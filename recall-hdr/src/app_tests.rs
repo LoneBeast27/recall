@@ -20,6 +20,7 @@ fn watchevent_to_foreground_lowercases_stem() {
         title: "Test".to_string(),
         fullscreen: true,
         fullscreen_on_target: false,
+        steam_game: false,
         hwnd: 0x1234,
     };
     let fg = foreground_of(&ev);

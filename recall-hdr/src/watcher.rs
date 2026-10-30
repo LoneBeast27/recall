@@ -81,8 +81,18 @@ pub struct WatchEvent {
     pub fullscreen: bool,
     /// True iff `fullscreen` AND that monitor is the managed one (HDR rules).
     pub fullscreen_on_target: bool,
+    /// True iff the executable lives in a Steam library (`steamapps\common`):
+    /// the record mode's "is this a game?" signal for windowed games.
+    pub steam_game: bool,
     /// Raw `HWND` as an `isize` (not a live handle; re-wrap before use).
     pub hwnd: isize,
+}
+
+/// Whether an executable path is a game in a Steam library. Steamworks Shared
+/// (the redistributable installers Steam runs before a first launch) is not.
+pub(crate) fn is_steam_library_path(path: &str) -> bool {
+    let path = path.to_ascii_lowercase().replace('/', "\\");
+    path.contains("\\steamapps\\common\\") && !path.contains("\\steamapps\\common\\steamworks shared\\")
 }
 
 /// The single global slot the callback reads from. `SetWinEventHook` has no
@@ -263,7 +273,7 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
     if pid == 0 || pid == std::process::id() {
         return None;
     }
-    let (exe_stem, exe_name) = exe_identity(pid)?;
+    let (exe_stem, exe_name, steam_game) = exe_identity(pid)?;
     if exe_stem.trim().is_empty() {
         return None; // no stem -> not a real app window we can classify
     }
@@ -276,6 +286,7 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
         title: window_title(hwnd),
         fullscreen,
         fullscreen_on_target: fullscreen && monitor == target_monitor,
+        steam_game,
         hwnd: hwnd.0 as isize,
     })
 }
@@ -334,11 +345,11 @@ fn rect_covers(mon: &RECT, win: &RECT, tol: i32) -> bool {
 // PROCESS_QUERY_LIMITED_INFORMATION + QueryFullProcessImageNameW, then take the
 // file stem. Kept local to avoid a cross-crate dependency for two small helpers.
 fn exe_stem(pid: u32) -> Option<String> {
-    exe_identity(pid).map(|(stem, _)| stem)
+    exe_identity(pid).map(|(stem, _, _)| stem)
 }
 
-/// `(file stem, file name)` of `pid`'s executable image.
-fn exe_identity(pid: u32) -> Option<(String, String)> {
+/// `(file stem, file name, in a Steam library)` of `pid`'s executable image.
+fn exe_identity(pid: u32) -> Option<(String, String, bool)> {
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; 260];
@@ -347,11 +358,12 @@ fn exe_identity(pid: u32) -> Option<(String, String)> {
             QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
         let _ = CloseHandle(handle);
         res.ok()?;
-        let path = String::from_utf16_lossy(&buf[..len as usize]);
-        let path = std::path::Path::new(&path);
+        let full = String::from_utf16_lossy(&buf[..len as usize]);
+        let path = std::path::Path::new(&full);
         Some((
             path.file_stem()?.to_string_lossy().into_owned(),
             path.file_name()?.to_string_lossy().into_owned(),
+            is_steam_library_path(&full),
         ))
     }
 }
@@ -371,7 +383,7 @@ pub fn window_identity(hwnd: isize) -> Option<(u32, String, String, String)> {
     if pid == 0 {
         return None;
     }
-    let (stem, name) = exe_identity(pid)?;
+    let (stem, name, _) = exe_identity(pid)?;
     Some((pid, stem, name, window_title(hwnd)))
 }
 
