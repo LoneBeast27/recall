@@ -42,8 +42,10 @@ pub enum Role {
     NoticeTitle,
     NoticeGame,
     NoticeUi,
-    /// The shortcut hint's option rows.
-    Chord,
+    /// A shortcut hint key cap's key ("1") and the leader pill ("Alt `").
+    Key,
+    /// A shortcut hint option's label ("Bookmark").
+    Option,
     Replay,
     Fps,
     Small,
@@ -58,7 +60,8 @@ impl Role {
             Role::NoticeTitle => 11.0,
             Role::NoticeGame => 15.0,
             Role::NoticeUi => 14.0,
-            Role::Chord => 12.0,
+            Role::Key => 12.0,
+            Role::Option => 13.0,
             Role::Replay => 14.0,
             Role::Fps => 18.0,
             Role::Small => 9.5,
@@ -69,7 +72,7 @@ impl Role {
 
     pub fn face(self) -> Face {
         match self {
-            Role::NoticeTitle | Role::Small | Role::Chord => Face::Geist500,
+            Role::NoticeTitle | Role::Small | Role::Option => Face::Geist500,
             Role::NoticeGame => Face::Bricolage700,
             _ => Face::Geist600,
         }
@@ -231,12 +234,7 @@ pub fn notice_scene(notice: &NoticeView, s: f32, m: &dyn Measure) -> Scene {
     p.scene.lead = notice.save.is_some();
     // The shutter ring is twice the dot: its text steps right to keep the gap.
     let x = pad_l + mark_w + gap + if notice.save.is_some() { p.u(4.0) } else { 0.0 };
-    let text_w = if notice.chord {
-        let (b1, b2) = p.two_lines((Role::Chord, &notice.title), (Role::Chord, &notice.detail), p.u(6.0));
-        p.text_at_baseline(Role::Chord, &notice.title, x, b1, TEXT);
-        p.text_at_baseline(Role::Chord, &notice.detail, x, b2, TEXT);
-        p.width(Role::Chord, &[&notice.title, &notice.detail])
-    } else if notice.detail.is_empty() {
+    let text_w = if notice.detail.is_empty() {
         let baseline = p.centred_baseline(Role::NoticeUi, &notice.title);
         p.text_at_baseline(Role::NoticeUi, &notice.title, x, baseline, TEXT);
         p.width(Role::NoticeUi, &[&notice.title])
@@ -251,6 +249,18 @@ pub fn notice_scene(notice: &NoticeView, s: f32, m: &dyn Measure) -> Scene {
         p.width(Role::NoticeTitle, titles).max(p.width(detail_role, &[&notice.detail]))
     };
     p.scene.w = (x + text_w + pad_r).max(p.scene.h * 2.0).ceil();
+    p.scene
+}
+
+/// The island's small pill while the shortcut hint is open and nothing else
+/// shows: the leader keys ("Alt `"), centred.
+pub fn leader_scene(leader: &str, s: f32, m: &dyn Measure) -> Scene {
+    let mut p = pen(s, m);
+    let (pad, width) = (p.u(18.0), p.width(Role::Key, &[leader]));
+    let baseline = p.centred_baseline(Role::Key, leader);
+    p.scene.w = (width + pad * 2.0).max(p.scene.h * 2.0).ceil();
+    let x = (p.scene.w - width) / 2.0;
+    p.text_at_baseline(Role::Key, leader, x, baseline, MUTED);
     p.scene
 }
 

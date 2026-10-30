@@ -16,12 +16,13 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::fonts::Fonts;
 use crate::island::{self, stats_content, Content, Island};
-use crate::layout::{stats_scene, Scene};
+use crate::hint::{card_scene, choose_layout, room_below, CardScene, GAP};
+use crate::layout::{leader_scene, stats_scene, Scene};
 use crate::placement::{self, window_origin, Rect, Spot, Spots, EDGE};
-use crate::presence::Look;
+use crate::presence::{CardLook, Look};
 use crate::badge::Badge;
 use crate::reducer::Reducer;
-use crate::render::Renderer;
+use crate::render::{Layers, Renderer};
 use crate::smoke::Smoke;
 use crate::stats::{StatsPoller, StatsSnapshot};
 use crate::window::target_monitor;
@@ -80,6 +81,8 @@ pub struct App {
     scene: Scene,
     /// The scale `scene` was laid out at (an action notice's is grown).
     scene_scale: f32,
+    /// The shortcut hint's card (kept while it folds away).
+    card_scene: Option<CardScene>,
     drawn: Option<Drawn>,
     pub bounds: [i32; 4],
     pub render_error: Option<String>,
@@ -111,6 +114,7 @@ impl App {
             stats: StatsSnapshot::default(),
             scene: Scene::default(),
             scene_scale: 1.0,
+            card_scene: None,
             drawn: None,
             bounds: [0; 4],
             render_error: None,
@@ -225,7 +229,25 @@ impl App {
                 let size = (scene.w, scene.h);
                 (scene, scale, size)
             }
+            Content::Leader(leader) => {
+                let scene = leader_scene(leader, scale, &self.fonts);
+                let size = (scene.w, scene.h);
+                (scene, scale, size)
+            }
         }
+    }
+
+    /// The shortcut hint's card: laid out for the room the scan measured
+    /// under the pill, unfolding while the chord window is open.
+    fn refresh_hint(&mut self, now: Instant) {
+        let hint = self.reducer.view().hint.clone().filter(|_| self.reducer.session().notices);
+        let Some(hint) = hint else { return self.island.update_hint(false, now) };
+        let scale = self.place();
+        let free = self.placed.as_ref().map_or(f32::INFINITY, |p| p.max_h);
+        let room = room_below(free, self.island.frame(now).h, scale);
+        let layout = choose_layout(hint.options.len(), scale, room);
+        self.card_scene = Some(card_scene(&hint, layout, scale, &self.fonts));
+        self.island.update_hint(true, now);
     }
 
     /// `--smoke-render`: the fixture's current content, settled, to a BMP.
@@ -252,6 +274,7 @@ impl App {
             }
             None => self.island.update(None, now),
         }
+        self.refresh_hint(now);
         self.render(hwnd, now);
     }
 
@@ -269,13 +292,17 @@ impl App {
             return;
         }
         let Some(placed) = self.placed.as_ref() else { return };
-        let look = self.island.look(now, placed.max_h.max(self.scene.h));
+        let mut look = self.island.look(now, placed.max_h.max(self.scene.h));
+        look.align = placement::align(placed.spot.anchor);
+        let card = self.island.card(now).zip(self.card_scene.as_ref());
+        look.card = card.map(|(progress, c)| CardLook { w: c.w, h: c.h, gap: GAP * placed.scale, progress });
         let edge = (EDGE * placed.scale).round() as i32;
-        let (x, y) = window_origin(placed.spot.anchor, &placed.monitor, look.box_w, look.margin, edge);
+        let (x, y) = window_origin(placed.spot.anchor, &placed.monitor, look.span_w(), look.margin, edge);
         let (sheen, badge) = (self.island.sheen(now), self.island.badge(now));
         let key = (self.scene.clone(), [x, y], look, sheen.map(|s| (s.progress * 1000.0) as u16), badge);
         if self.drawn.as_ref() != Some(&key) {
-            let drawn = self.renderer.draw(&self.fonts, &self.scene, look, self.scene_scale, sheen, badge);
+            let layers = Layers { sheen, badge, card: card.map(|(_, c)| c) };
+            let drawn = self.renderer.draw(&self.fonts, &self.scene, look, self.scene_scale, layers);
             let shown = drawn.and_then(|(w, h)| self.renderer.present(hwnd, x, y, w, h, look.alpha).map(|()| (w, h)));
             match shown {
                 Ok((w, h)) => {

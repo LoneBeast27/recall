@@ -10,16 +10,15 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::anim::{Frame, DURATION};
-use crate::badge::Badge;
-use crate::cue::Sheen;
 use crate::fonts::Fonts;
 use crate::island::{content, Content, Island};
-use crate::layout::{notice_scene, stats_scene, Scene, StatsContent};
+use crate::layout::{leader_scene, notice_scene, stats_scene, Scene, StatsContent};
 use crate::notice::NoticeView;
 use crate::placement::{grow, DEFAULT_SPOT};
-use crate::presence::{Look, FADE_OUT, POP, UNRAVEL};
+use crate::hint::{card_scene, CardLayout, HintOption, HintView, GAP};
+use crate::presence::{CardLook, Look, FADE_OUT, POP, UNRAVEL};
 use crate::reducer::Reducer;
-use crate::render::Renderer;
+use crate::render::{Layers, Renderer};
 
 pub const DARK: [u8; 3] = [0x23, 0x1e, 0x1b]; // BGR
 pub const LIGHT: [u8; 3] = [0xa3, 0x96, 0x8a];
@@ -42,20 +41,12 @@ impl Tile {
     }
 }
 
-pub fn tile(
-    renderer: &mut Renderer,
-    fonts: &Fonts,
-    scene: &Scene,
-    look: Look,
-    scale: f32,
-    sheen: Option<Sheen>,
-    badge: Option<Badge>,
-) -> Result<Tile, String> {
-    let (w, h) = renderer.draw(fonts, scene, look, scale, sheen, badge).map_err(|e| format!("draw: {e}"))?;
+pub fn tile(renderer: &mut Renderer, fonts: &Fonts, scene: &Scene, look: Look, scale: f32, layers: Layers) -> Result<Tile, String> {
+    let (w, h) = renderer.draw(fonts, scene, look, scale, layers).map_err(|e| format!("draw: {e}"))?;
     let px = renderer.pixels(w, h);
     // Window opacity (UpdateLayeredWindow's constant alpha) applied here for the stills.
     let px = px.into_iter().map(|p| p.map(|c| (c as f32 * look.alpha).round() as u8)).collect();
-    Ok(Tile { w: w as usize, h: h as usize, px, inset: look.margin as usize, box_w: look.box_w.ceil() as usize })
+    Ok(Tile { w: w as usize, h: h as usize, px, inset: look.margin as usize, box_w: look.span_w().ceil() as usize })
 }
 
 pub struct Canvas {
@@ -125,7 +116,7 @@ impl Canvas {
 /// The settled island for one scene (laid out at `scale`, island `size`), on the dark backdrop.
 pub fn snapshot(path: &Path, renderer: &mut Renderer, fonts: &Fonts, scene: &Scene, scale: f32, size: (f32, f32)) -> Result<(), String> {
     let pad = (24.0 * scale) as usize;
-    let t = tile(renderer, fonts, scene, Look::open(Frame { w: size.0, h: size.1, alpha: 1.0 }), scale, None, None)?;
+    let t = tile(renderer, fonts, scene, Look::open(Frame { w: size.0, h: size.1, alpha: 1.0 }), scale, Layers::default())?;
     let mut canvas = Canvas::new(t.w + pad * 2, t.h + pad * 2);
     canvas.fill(0, 0, canvas.w, canvas.h, DARK);
     canvas.blit(&t, pad, pad);
@@ -191,6 +182,25 @@ pub fn stats_states() -> Vec<StatsContent> {
     ]
 }
 
+/// The shortcut hint: the "Alt `" pill with its card, each layout.
+fn hint_tiles(renderer: &mut Renderer, fonts: &Fonts, scale: f32) -> Result<Vec<Tile>, String> {
+    let option = |key: &str, label: &str| HintOption { key: key.into(), label: label.into() };
+    let hint = HintView {
+        leader: "Alt `".into(),
+        options: vec![option("1", "Bookmark"), option("2", "Save 30 s"), option("3", "Screenshot"), option("4", "Record"), option("5", "Performance stats")],
+    };
+    let pill = leader_scene(&hint.leader, scale, fonts);
+    [CardLayout::Dropdown, CardLayout::TwoColumn, CardLayout::Row]
+        .into_iter()
+        .map(|layout| {
+            let card = card_scene(&hint, layout, scale, fonts);
+            let card_look = CardLook { w: card.w, h: card.h, gap: GAP * scale, progress: 1.0 };
+            let look = Look { card: Some(card_look), ..Look::open(Frame { w: pill.w, h: pill.h, alpha: 1.0 }) };
+            tile(renderer, fonts, &pill, look, scale, Layers { card: Some(&card), ..Layers::default() })
+        })
+        .collect()
+}
+
 /// Every state on both backdrops, then the appear and hide frames.
 pub fn sheet(path: &Path, scale: f32) -> Result<(), String> {
     let fonts = Fonts::new().map_err(|e| format!("fonts: {e}"))?;
@@ -202,8 +212,9 @@ pub fn sheet(path: &Path, scale: f32) -> Result<(), String> {
     let pad = (24.0 * scale) as usize;
     let mut tiles = Vec::new();
     for (scene, s) in &scenes {
-        tiles.push(tile(&mut renderer, &fonts, scene, Look::open(Frame { w: scene.w, h: scene.h, alpha: 1.0 }), *s, None, None)?);
+        tiles.push(tile(&mut renderer, &fonts, scene, Look::open(Frame { w: scene.w, h: scene.h, alpha: 1.0 }), *s, Layers::default())?);
     }
+    tiles.extend(hint_tiles(&mut renderer, &fonts, scale)?);
     let scenes: Vec<Scene> = scenes.into_iter().map(|(scene, _)| scene).collect();
     // Appear (left column: circle, unravel, values) and hide (right column,
     // the reverse) of the stats island, 10 steps each.
@@ -219,8 +230,8 @@ pub fn sheet(path: &Path, scale: f32) -> Result<(), String> {
     let (appear_for, hide_for) = (POP + UNRAVEL + DURATION, FADE_OUT + POP + UNRAVEL);
     for step in 0..=10u32 {
         let (a, b) = (start + appear_for * step / 10, hide_at + hide_for * step / 10);
-        appear.push(tile(&mut renderer, &fonts, stats, island.look(a, f32::INFINITY), scale, None, None)?);
-        hide.push(tile(&mut renderer, &fonts, stats, leaving.look(b, f32::INFINITY), scale, None, None)?);
+        appear.push(tile(&mut renderer, &fonts, stats, island.look(a, f32::INFINITY), scale, Layers::default())?);
+        hide.push(tile(&mut renderer, &fonts, stats, leaving.look(b, f32::INFINITY), scale, Layers::default())?);
     }
     let cell_w = tiles.iter().map(|t| t.w).max().unwrap_or(0) + pad * 2;
     let row_h = tiles.iter().map(|t| t.h).max().unwrap_or(0) + pad;

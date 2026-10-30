@@ -8,13 +8,14 @@ use std::time::{Duration, Instant};
 use crate::anim::{ease_out, Frame, DURATION};
 use crate::fonts::Fonts;
 use crate::island::{self, notice_layout, Content, Island};
-use crate::layout::{stats_scene, Scene};
+use crate::hint::{card_scene, choose_layout, room_below, CardScene, GAP};
+use crate::layout::{leader_scene, stats_scene, Scene};
 use crate::notice::NoticeView;
-use crate::placement::{free_depth, grow, Rect, Spot};
-use crate::presence::Look;
+use crate::placement::{align, free_depth, grow, Rect, Spot};
+use crate::presence::{CardLook, Look};
 use crate::preview::stats_states;
 use crate::reducer::Reducer;
-use crate::render::Renderer;
+use crate::render::{Layers, Renderer};
 
 /// One drawn window: straight RGBA pixels, size, and the box the anchor places.
 pub struct Shot {
@@ -53,6 +54,7 @@ pub struct Sim<'a> {
     pub island: Island,
     scene: Scene,
     scene_scale: f32,
+    card: Option<CardScene>,
     /// Show notices the pre-change way: no transformation, no save badge,
     /// master's appear / hide from nothing.
     pub legacy: bool,
@@ -71,6 +73,7 @@ impl<'a> Sim<'a> {
             island: Island::new(now),
             scene: Scene::default(),
             scene_scale: scale,
+            card: None,
             legacy,
             legacy_times: (None, None),
         }
@@ -92,8 +95,23 @@ impl<'a> Sim<'a> {
                 let size = (scene.w, scene.h);
                 (scene, self.scale, size)
             }
+            Content::Leader(leader) => {
+                let scene = leader_scene(leader, self.scale, self.fonts);
+                let size = (scene.w, scene.h);
+                (scene, self.scale, size)
+            }
         };
         Some((content, scene, scale, size))
+    }
+
+    /// `App::refresh_hint`: the card for the room under the pill.
+    fn refresh_hint(&mut self, now: Instant) {
+        let hint = self.reducer.view().hint.clone().filter(|_| self.reducer.session().notices);
+        let Some(hint) = hint else { return self.island.update_hint(false, now) };
+        let room = room_below(free_depth(&self.spot, &self.monitor, self.scale), self.island.frame(now).h, self.scale);
+        let layout = choose_layout(hint.options.len(), self.scale, room);
+        self.card = Some(card_scene(&hint, layout, self.scale, self.fonts));
+        self.island.update_hint(true, now);
     }
 
     /// One app tick at `now`: `None` while nothing is on screen.
@@ -114,15 +132,19 @@ impl<'a> Sim<'a> {
                 }
             }
         }
+        self.refresh_hint(now);
         self.island.tick(now);
         let max_h = free_depth(&self.spot, &self.monitor, self.scale).max(self.scene.h);
-        let look = self.look(now, max_h);
-        let Some(look) = look else { return Ok(None) };
+        let Some(mut look) = self.look(now, max_h) else { return Ok(None) };
+        look.align = align(self.spot.anchor);
+        let card = self.island.card(now).zip(self.card.as_ref());
+        look.card = card.map(|(progress, c)| CardLook { w: c.w, h: c.h, gap: GAP * self.scale, progress });
         let (sheen, badge) = (self.island.sheen(now), self.island.badge(now));
-        let (w, h) = renderer.draw(self.fonts, &self.scene, look, self.scene_scale, sheen, badge).map_err(|e| format!("draw: {e}"))?;
+        let layers = Layers { sheen, badge, card: card.map(|(_, c)| c) };
+        let (w, h) = renderer.draw(self.fonts, &self.scene, look, self.scene_scale, layers).map_err(|e| format!("draw: {e}"))?;
         let window = (look.alpha.clamp(0.0, 1.0) * 255.0).round() as u32; // SourceConstantAlpha
         let rgba = straight(&renderer.pixels(w, h), window);
-        Ok(Some(Shot { w: w as usize, h: h as usize, rgba, box_w: look.box_w, margin: look.margin }))
+        Ok(Some(Shot { w: w as usize, h: h as usize, rgba, box_w: look.span_w(), margin: look.margin }))
     }
 
     /// The island's look, or master's for a legacy appear / hide from nothing.

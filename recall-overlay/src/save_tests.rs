@@ -61,6 +61,7 @@ impl Rig {
                 let w = GROWN.0.max(120.0 + 9.0 * chars);
                 (Content::Notice(n), w, GROWN.1)
             }
+            leader => (leader, 88.0, STATS.1),
         });
         self.island.update(next, now);
         self.island.tick(now);
@@ -233,6 +234,7 @@ fn snap(rig: &Rig, now: Instant) -> Snap {
         Some(Content::Stats) => "stats",
         Some(Content::Notice(n)) if n.save == Some(SavePhase::Saving) => "saving",
         Some(Content::Notice(_)) => "landed",
+        Some(Content::Leader(_)) => "hint",
         None => "hidden",
     };
     let look = rig.island.look(now, f32::INFINITY);

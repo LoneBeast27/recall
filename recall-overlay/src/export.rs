@@ -17,8 +17,7 @@ use serde_json::{json, Value};
 use crate::export_sim::{Atlas, Sim};
 use crate::fonts::Fonts;
 use crate::layout::stats_scene;
-use crate::placement::{position, scale, window_origin, Rect, Spots, EDGE, ISLAND_H};
-use crate::presence::Style;
+use crate::placement::{position, scale, window_origin, Anchor, Rect, Spot, Spots, EDGE, ISLAND_H};
 use crate::preview::stats_states;
 use crate::render::Renderer;
 
@@ -53,8 +52,8 @@ struct Spec {
     events: Vec<(u64, Value)>,
     /// When the save's outcome lands (ms), if the sequence has one.
     saved_ms: Option<u64>,
-    /// The shortcut hint's appear style for this run (else the code's default).
-    hint: Option<Style>,
+    /// A spot other than VALORANT's (the forced two-column card).
+    spot: Option<Spot>,
 }
 
 fn specs() -> Vec<Spec> {
@@ -66,8 +65,10 @@ fn specs() -> Vec<Spec> {
     let chord = json!({"mod":"session","event":{"type":"chord","active":true,"leader":"Alt `","options":[
         {"key":"1","label":"Bookmark"},{"key":"2","label":"Save 30 s"},{"key":"3","label":"Screenshot"},
         {"key":"4","label":"Record"},{"key":"5","label":"Performance stats"}]}});
-    let spec = |name, notice, stats, legacy, events: Vec<(u64, Value)>, saved_ms| Spec { name, notice, stats, legacy, events, saved_ms, hint: None };
-    let hint = |name, style| Spec { hint: Some(style), ..spec(name, "Shortcut hint (Alt ` then a key)", false, false, vec![at(0, &chord)], None) };
+    let spec = |name, notice, stats, legacy, events: Vec<(u64, Value)>, saved_ms| Spec { name, notice, stats, legacy, events, saved_ms, spot: None };
+    let hint = |name, stats, spot| Spec { spot, ..spec(name, "Shortcut hint (Alt ` then a key)", stats, false, vec![at(0, &chord)], None) };
+    // 200 free rows: 138 px under the pill, too shallow for five rows (180), room for three (116).
+    let shallow = Some(Spot { anchor: Anchor::TopRight, free_px: Some(200) });
     vec![
         spec("new-save", clip, true, false, vec![at(0, &saved)], Some(0)),
         spec("old-save", clip, true, true, vec![at(0, &saved)], Some(0)),
@@ -81,8 +82,9 @@ fn specs() -> Vec<Spec> {
         spec("ring-save-nostats", clip, false, false, vec![at(0, &saving), at(1_800, &saved)], Some(1_800)),
         spec("stats-on", "Stats on", false, false, vec![at(0, &status(true))], None),
         spec("stats-off", "Stats off", true, false, vec![at(0, &status(false))], None),
-        hint("hint-circle", Style::Unravel),
-        hint("hint-instant", Style::Instant),
+        hint("hint-dropdown", false, None),
+        hint("hint-dropdown-stats", true, None),
+        hint("hint-twocol", true, shallow),
     ]
 }
 
@@ -100,12 +102,9 @@ struct Run {
 /// Runs one sequence: the rest frame before the trigger, then every step
 /// until the island rests after the last event.
 fn record(spec: &Spec, renderer: &mut Renderer, fonts: &Fonts, atlas: &mut Atlas) -> Result<Run, String> {
-    let spot = Spots::embedded().lookup("valorant");
+    let spot = spec.spot.unwrap_or_else(|| Spots::embedded().lookup("valorant"));
     let start = Instant::now();
     let mut sim = Sim::new(fonts, spot, MONITOR, scale(MONITOR.height(), &spot), spec.legacy, start);
-    if let Some(style) = spec.hint {
-        sim.island.hint_style = style;
-    }
     let engine = json!({"mod":"engine","event":{"type":"status","source":"VALORANT","fps":60,"buffer_secs":120.0,"encoder":"h264_nvenc"}});
     sim.reducer.apply_envelope(&status(spec.stats), start);
     sim.reducer.apply_envelope(&engine, start);
@@ -125,7 +124,7 @@ fn record(spec: &Spec, renderer: &mut Renderer, fonts: &Fonts, atlas: &mut Atlas
         }
         let shot = sim.step(renderer, now)?;
         let after = step_at(k) >= Duration::from_millis(last);
-        let notice = sim.reducer.view().notice.is_some();
+        let notice = sim.reducer.view().notice.is_some() || sim.reducer.view().hint.is_some();
         seen |= notice;
         if handback.is_none() && seen && after && !notice {
             handback = Some(k);
@@ -155,7 +154,7 @@ fn sequence(spec: &Spec, run: &Run, place: &dyn Fn((usize, f32, f32)) -> Value) 
         .collect();
     json!({
         "notice": spec.notice, "stats_before": spec.stats, "legacy": spec.legacy,
-        "hint_style": spec.hint.map(|s| if s == Style::Instant { "instant" } else { "circle" }),
+        "free_px": spec.spot.and_then(|s| s.free_px),
         "events_ms": spec.events.iter().map(|(at, v)| json!({"t_ms": at, "event": v})).collect::<Vec<_>>(),
         "saved_ms": spec.saved_ms,
         "rest": run.rest.map(place),

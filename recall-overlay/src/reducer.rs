@@ -3,6 +3,7 @@ use serde_json::Value;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use crate::hint::{HintOption, HintView};
 use crate::notice::{is_encoder_notice, session_notice, NoticeView, SavePhase, Tone};
 use crate::session::Session;
 
@@ -28,7 +29,7 @@ pub const SAVING_FOR: Duration = Duration::from_secs(30);
 pub const NOTICE_FOR: Duration = Duration::from_secs(3);
 /// The advanced-shortcut hint lives as long as the chord window (the
 /// controller's `active:false` closes it earlier).
-const CHORD_FOR: Duration = Duration::from_millis(1_500);
+pub const CHORD_FOR: Duration = Duration::from_millis(1_500);
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,8 +49,11 @@ pub struct OverlayView {
     pub metrics: String,
     pub secondary: String,
     pub connected: bool,
-    /// The island's rendering of the notice (`Some` exactly while `visible`).
+    /// The island's rendering of the notice (`Some` while `visible`, unless
+    /// what shows is the shortcut hint).
     pub notice: Option<NoticeView>,
+    /// The shortcut hint's options while its window is open (the card).
+    pub hint: Option<HintView>,
 }
 
 #[derive(Clone, Debug)]
@@ -59,9 +63,9 @@ struct Transient {
     until: Instant,
     /// Replaces the metrics line while shown (the chord hint's first row).
     metrics: Option<String>,
+    notice: Option<NoticeView>,
     /// The advanced-shortcut hint (closed by `chord` `active:false`).
-    chord: bool,
-    notice: NoticeView,
+    hint: Option<HintView>,
 }
 
 #[derive(Debug)]
@@ -170,28 +174,28 @@ impl Reducer {
     /// "Recall" over "1 Bookmark · 2 Save 30 s" / "3 Screenshot · 4 Record".
     pub fn apply_chord(&mut self, event: &Value, now: Instant) -> bool {
         if event.get("active").and_then(Value::as_bool) != Some(true) {
-            if !self.transient.as_ref().is_some_and(|t| t.chord) {
+            if self.transient.as_ref().is_none_or(|t| t.hint.is_none()) {
                 return false; // an action's toast already replaced the hint
             }
             return self.expire_transient();
         }
-        let options: Vec<String> = event
+        let options: Vec<HintOption> = event
             .get("options")
             .and_then(Value::as_array)
             .map(|list| {
                 list.iter()
-                    .filter_map(|o| Some(format!("{} {}", o.get("key")?.as_str()?, o.get("label")?.as_str()?)))
+                    .filter_map(|o| Some(HintOption { key: o.get("key")?.as_str()?.into(), label: o.get("label")?.as_str()?.into() }))
                     .collect()
             })
             .unwrap_or_default();
+        let line = |o: &[HintOption]| o.iter().map(|o| format!("{} {}", o.key, o.label)).collect::<Vec<_>>().join(" · ");
         let split = options.len().div_ceil(2);
-        let (first, second) = (options[..split].join(" · "), options[split..].join(" · "));
-        // Two equal rows keep five options ("5 Performance stats") narrow.
-        let notice = NoticeView { chord: true, ..NoticeView::new(Tone::Neutral, &first, second.clone(), false) };
-        let changed = self.set_transient("Recall", second, now + CHORD_FOR, notice);
+        let (first, second) = (line(&options[..split]), line(&options[split..]));
+        let leader = event.get("leader").and_then(Value::as_str).unwrap_or("Alt `").to_string();
+        let hint = HintView { leader, options };
+        let changed = self.set_transient_with("Recall", second, now + CHORD_FOR, None, Some(hint));
         if let Some(t) = self.transient.as_mut() {
             t.metrics = Some(first.clone());
-            t.chord = true;
         }
         let metrics_changed = self.view.metrics != first;
         self.view.metrics = first;
@@ -275,6 +279,7 @@ impl Reducer {
         let Some(transient) = self.transient.take() else { return false };
         self.view.visible = false;
         self.view.notice = None;
+        self.view.hint = None;
         self.view.primary = state_line(&self.view.state).into();
         self.view.secondary = self.source_text();
         if transient.metrics.is_some() {
@@ -345,13 +350,19 @@ impl Reducer {
             .as_ref()
             .map(|transient| transient.primary.clone())
             .unwrap_or_else(|| state_line(&state).into());
-        let notice = self.transient.as_ref().map(|t| t.notice.clone());
-        self.replace(OverlayView { visible: notification.is_some(), state, primary, metrics, secondary, connected: true, notice })
+        let notice = self.transient.as_ref().and_then(|t| t.notice.clone());
+        let hint = self.transient.as_ref().and_then(|t| t.hint.clone());
+        self.replace(OverlayView { visible: notification.is_some(), state, primary, metrics, secondary, connected: true, notice, hint })
             || new_failure
             || buffer_changed
     }
 
     fn set_transient(&mut self, primary: &str, text: String, until: Instant, notice: NoticeView) -> bool {
+        self.set_transient_with(primary, text, until, Some(notice), None)
+    }
+
+    /// A notice, or the shortcut hint (an action's notice closes the hint).
+    fn set_transient_with(&mut self, primary: &str, text: String, until: Instant, notice: Option<NoticeView>, hint: Option<HintView>) -> bool {
         let had_metrics = self.transient.as_ref().is_some_and(|t| t.metrics.is_some());
         if had_metrics {
             self.view.metrics = self.status_metrics.clone(); // a toast replaces the hint
@@ -361,8 +372,8 @@ impl Reducer {
             text: text.clone(),
             until,
             metrics: None,
-            chord: false,
             notice: notice.clone(),
+            hint: hint.clone(),
         });
         if self.last_status.is_none() {
             self.view.connected = true;
@@ -370,11 +381,13 @@ impl Reducer {
         let changed = !self.view.visible
             || self.view.primary != primary
             || self.view.secondary != text
-            || self.view.notice.as_ref() != Some(&notice);
+            || self.view.notice != notice
+            || self.view.hint != hint;
         self.view.visible = true;
         self.view.primary = primary.into();
         self.view.secondary = text;
-        self.view.notice = Some(notice);
+        self.view.notice = notice;
+        self.view.hint = hint;
         changed
     }
 
@@ -400,7 +413,8 @@ impl Reducer {
             metrics: "Status feed stale".into(),
             secondary: notification.unwrap_or_else(|| "Waiting for recorder status".into()),
             connected: self.view.connected,
-            notice: transient.map(|t| t.notice.clone()),
+            notice: transient.and_then(|t| t.notice.clone()),
+            hint: transient.and_then(|t| t.hint.clone()),
         })
     }
 
@@ -423,6 +437,7 @@ fn resting_view(connected: bool) -> OverlayView {
         secondary: "Recorder disconnected".into(),
         connected,
         notice: None,
+        hint: None,
     }
 }
 

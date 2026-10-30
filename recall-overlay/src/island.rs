@@ -13,12 +13,8 @@ use crate::badge::{Badge, SaveMark, SWEEP_AFTER};
 use crate::cue::{Cue, Sheen, CUE_DELAY};
 use crate::layout::{notice_scene, tone_color, Measure, Scene, StatsContent};
 use crate::notice::{NoticeView, SavePhase};
+use crate::hint::Unfold;
 use crate::presence::{Look, Presence, Style, FADE_OUT};
-
-/// The two-step shortcut hint appears without the circle: it answers a key
-/// press and its options must be readable within the 1.5 s chord window
-/// (the circle's text shows at ~0.6 s). `--export-frames` renders both.
-pub const HINT_STYLE: Style = Style::Instant;
 use crate::reducer::{OverlayView, RecorderState, Reducer};
 use crate::session::Session;
 use crate::stats::frame_timing::FpsSource;
@@ -32,6 +28,9 @@ pub const GROW_W: f32 = 40.0;
 pub enum Content {
     Notice(NoticeView),
     Stats,
+    /// The small "Alt `" pill above the shortcut hint's card when nothing
+    /// else shows.
+    Leader(String),
 }
 
 impl Content {
@@ -39,6 +38,7 @@ impl Content {
         match self {
             Content::Notice(_) => "notice",
             Content::Stats => "stats",
+            Content::Leader(_) => "hint",
         }
     }
 
@@ -50,12 +50,17 @@ impl Content {
 
 /// Hidden by default; a notice while one is active and notices are on
 /// (`overlay.enabled`); the stats while `overlay_stats` is on and the target
-/// game is in front (`game_in_front`; never over the desktop or other apps).
+/// game is in front (`game_in_front`; never over the desktop or other apps);
+/// else the leader pill while the shortcut hint is open (its card hangs
+/// below whichever of these shows).
 pub fn content(view: &OverlayView, session: &Session, game_in_front: bool) -> Option<Content> {
     if let Some(notice) = view.notice.as_ref().filter(|_| view.visible && session.notices) {
         return Some(Content::Notice(notice.clone()));
     }
-    stats_shown(view, session, game_in_front).then_some(Content::Stats)
+    if stats_shown(view, session, game_in_front) {
+        return Some(Content::Stats);
+    }
+    view.hint.as_ref().filter(|_| session.notices).map(|hint| Content::Leader(hint.leader.clone()))
 }
 
 /// The stats pill shows (or would, under a notice).
@@ -146,8 +151,8 @@ pub struct Island {
     cue: Option<Cue>,
     /// A clip save's shutter ring.
     mark: Option<SaveMark>,
-    /// How the shortcut hint appears from nothing (`HINT_STYLE`).
-    pub(crate) hint_style: Style,
+    /// The shortcut hint's card under the pill.
+    card: Unfold,
 }
 
 impl Island {
@@ -165,16 +170,27 @@ impl Island {
             fade_from: (now, 0.0),
             cue: None,
             mark: None,
-            hint_style: HINT_STYLE,
+            card: Unfold::closed(now),
         }
     }
 
-    /// How `content` appears from nothing.
-    fn style_for(&self, content: &Content) -> Style {
+    /// How `content` appears from nothing: the leader pill answers a key
+    /// press, so it shows at once; everything else pops in and unravels.
+    fn style_for(content: &Content) -> Style {
         match content {
-            Content::Notice(notice) if notice.chord => self.hint_style,
+            Content::Leader(_) => Style::Instant,
             _ => Style::Unravel,
         }
+    }
+
+    /// Unfold (or fold) the shortcut hint's card under the pill.
+    pub fn update_hint(&mut self, open: bool, now: Instant) {
+        self.card.set(open && self.showing, now);
+    }
+
+    /// 0..1 of the card shown, while it is out.
+    pub fn card(&self, now: Instant) -> Option<f32> {
+        self.card.progress(now).filter(|_| self.shown)
     }
 
     /// Show `content` at `size` (physical px), or hide with `None`. From
@@ -197,7 +213,7 @@ impl Island {
             self.tween.retarget(target, now);
         }
         if !self.showing {
-            self.presence.show(now, self.style_for(&content));
+            self.presence.show(now, Self::style_for(&content));
         }
         self.showing = true;
         self.shown = true;
@@ -214,6 +230,7 @@ impl Island {
         self.showing = false;
         self.fade_from = (now, alpha);
         self.presence.hide(now, FADE_OUT.mul_f32(alpha));
+        self.card.set(false, now);
     }
 
     /// New content: its fade-in, the save mark, and an action's one sweep.
@@ -223,7 +240,7 @@ impl Island {
     fn swap(&mut self, content: Content, open: bool, fresh: bool, now: Instant) {
         let save = match &content {
             Content::Notice(notice) => notice.save,
-            Content::Stats => None,
+            _ => None,
         };
         let continuing = save.is_some() && self.mark.is_some();
         match (save, self.mark.as_mut()) {
@@ -260,7 +277,7 @@ impl Island {
 
     /// Advance; returns true when the window just finished hiding.
     pub fn tick(&mut self, now: Instant) -> bool {
-        if !self.showing && self.shown && self.presence.gone(now) {
+        if !self.showing && self.shown && self.presence.gone(now) && self.card.progress(now).is_none() {
             self.shown = false;
             self.content = None;
             self.cue = None;
@@ -335,7 +352,7 @@ impl Island {
         let sweeping = self.cue.is_some_and(|cue| cue.running(now));
         let ring = self.mark.is_some_and(|mark| mark.animating(now));
         let fading = if self.showing { self.content_alpha(now) < 1.0 } else { self.content_alpha(now) > 0.0 };
-        let moving = self.presence.moving(now) || !self.tween.done(now);
+        let moving = self.presence.moving(now) || !self.tween.done(now) || self.card.moving(now);
         self.shown && (moving || fading || sweeping || ring || self.look(now, f32::INFINITY).icon_alpha < 1.0)
     }
 }
