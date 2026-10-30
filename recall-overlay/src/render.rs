@@ -5,14 +5,15 @@
 use windows::core::Result;
 use windows::Win32::Foundation::{COLORREF, HWND, POINT, RECT, SIZE};
 use windows::Win32::Graphics::Direct2D::Common::{
-    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN, D2D1_PIXEL_FORMAT,
-    D2D_RECT_F, D2D_SIZE_F,
+    D2D1_ALPHA_MODE_PREMULTIPLIED, D2D1_COLOR_F, D2D1_FIGURE_BEGIN_HOLLOW, D2D1_FIGURE_END_OPEN, D2D1_GRADIENT_STOP,
+    D2D1_PIXEL_FORMAT, D2D_RECT_F, D2D_SIZE_F,
 };
 use windows::Win32::Graphics::Direct2D::{
-    D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory, ID2D1SolidColorBrush, ID2D1StrokeStyle,
-    D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_CAP_STYLE_ROUND,
-    D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_FACTORY_TYPE_SINGLE_THREADED,
-    D2D1_FEATURE_LEVEL_DEFAULT, D2D1_LINE_JOIN_ROUND, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE,
+    D2D1CreateFactory, ID2D1DCRenderTarget, ID2D1Factory, ID2D1LinearGradientBrush, ID2D1SolidColorBrush,
+    ID2D1StrokeStyle, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_CAP_STYLE_ROUND,
+    D2D1_DASH_STYLE_SOLID, D2D1_DRAW_TEXT_OPTIONS_NONE, D2D1_ELLIPSE, D2D1_EXTEND_MODE_CLAMP,
+    D2D1_FACTORY_TYPE_SINGLE_THREADED, D2D1_FEATURE_LEVEL_DEFAULT, D2D1_GAMMA_2_2, D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES,
+    D2D1_LINE_JOIN_ROUND, D2D1_RENDER_TARGET_PROPERTIES, D2D1_RENDER_TARGET_TYPE_SOFTWARE,
     D2D1_RENDER_TARGET_USAGE_NONE, D2D1_ROUNDED_RECT, D2D1_STROKE_STYLE_PROPERTIES, D2D1_SWEEP_DIRECTION_CLOCKWISE,
     D2D1_TEXT_ANTIALIAS_MODE_GRAYSCALE,
 };
@@ -25,6 +26,7 @@ use windows::Win32::UI::WindowsAndMessaging::{UpdateLayeredWindow, ULW_ALPHA};
 use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::anim::Frame;
+use crate::cue::{band, Sheen, CUE_PEAK};
 use crate::fonts::Fonts;
 use crate::layout::{sweep, Rgba, Scene, Shape, Sweep, EDGE_LINE, PILL, TRACK};
 
@@ -36,6 +38,8 @@ pub struct Renderer {
     dc: HDC,
     dib: Option<(HBITMAP, HGDIOBJ, *mut u8)>,
     capacity: (i32, i32),
+    /// The sweep's gradient for the last tone colour it was drawn in.
+    sheen: Option<(u32, ID2D1LinearGradientBrush)>,
 }
 
 impl Renderer {
@@ -67,7 +71,7 @@ impl Renderer {
                 None,
             )?;
             let dc = CreateCompatibleDC(None);
-            Ok(Self { factory, target, brush, round, dc, dib: None, capacity: (0, 0) })
+            Ok(Self { factory, target, brush, round, dc, dib: None, capacity: (0, 0), sheen: None })
         }
     }
 
@@ -107,30 +111,30 @@ impl Renderer {
         Ok(())
     }
 
-    /// Draws the pill at `frame` size with `scene` centred in it.
-    pub fn draw(&mut self, fonts: &Fonts, scene: &Scene, frame: Frame, scale: f32, content_alpha: f32) -> Result<(i32, i32)> {
+    /// Draws the pill at `frame` size with `scene` centred in it, and the
+    /// action notice's sweep (`sheen`) over the pill, under the content.
+    pub fn draw(
+        &mut self,
+        fonts: &Fonts,
+        scene: &Scene,
+        frame: Frame,
+        scale: f32,
+        content_alpha: f32,
+        sheen: Option<Sheen>,
+    ) -> Result<(i32, i32)> {
         let (w, h) = (frame.w.ceil().max(1.0) as i32, frame.h.ceil().max(1.0) as i32);
         self.ensure(w, h)?;
+        let sheen = match sheen {
+            Some(sheen) => Some((self.sheen_brush(sheen.color)?, sheen.progress)),
+            None => None,
+        };
         let t = &self.target;
         unsafe {
             t.BindDC(self.dc, &RECT { left: 0, top: 0, right: w, bottom: h })?;
             t.BeginDraw();
             t.SetTransform(&Matrix3x2::identity());
             t.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
-            let pill = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F { left: 0.0, top: 0.0, right: frame.w, bottom: frame.h },
-                radiusX: frame.h / 2.0,
-                radiusY: frame.h / 2.0,
-            };
-            self.paint(PILL, 1.0);
-            t.FillRoundedRectangle(&pill, &self.brush);
-            let edge = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F { left: 0.5, top: 0.5, right: frame.w - 0.5, bottom: frame.h - 0.5 },
-                radiusX: frame.h / 2.0 - 0.5,
-                radiusY: frame.h / 2.0 - 0.5,
-            };
-            self.paint(EDGE_LINE, 1.0);
-            t.DrawRoundedRectangle(&edge, &self.brush, 1.0, None::<&ID2D1StrokeStyle>);
+            let pill = self.pill(frame, sheen);
             if content_alpha > 0.01 {
                 t.PushAxisAlignedClip(&pill.rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
                 let (dx, dy) = ((frame.w - scene.w) / 2.0, (frame.h - scene.h) / 2.0);
@@ -149,6 +153,50 @@ impl Renderer {
             t.EndDraw(None, None)?;
         }
         Ok((w, h))
+    }
+
+    /// The pill body (fill, the sweep's band, hairline edge); returns its shape.
+    unsafe fn pill(&self, frame: Frame, sheen: Option<(ID2D1LinearGradientBrush, f32)>) -> D2D1_ROUNDED_RECT {
+        let t = &self.target;
+        let pill = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F { left: 0.0, top: 0.0, right: frame.w, bottom: frame.h },
+            radiusX: frame.h / 2.0,
+            radiusY: frame.h / 2.0,
+        };
+        let edge = D2D1_ROUNDED_RECT {
+            rect: D2D_RECT_F { left: 0.5, top: 0.5, right: frame.w - 0.5, bottom: frame.h - 0.5 },
+            radiusX: frame.h / 2.0 - 0.5,
+            radiusY: frame.h / 2.0 - 0.5,
+        };
+        unsafe {
+            self.paint(PILL, 1.0);
+            t.FillRoundedRectangle(&pill, &self.brush);
+            if let Some((brush, progress)) = sheen {
+                let ((x0, y0), (x1, y1)) = band(frame.w, frame.h, progress);
+                brush.SetStartPoint(Vector2 { X: x0, Y: y0 });
+                brush.SetEndPoint(Vector2 { X: x1, Y: y1 });
+                t.FillRoundedRectangle(&pill, &brush);
+            }
+            self.paint(EDGE_LINE, 1.0);
+            t.DrawRoundedRectangle(&edge, &self.brush, 1.0, None::<&ID2D1StrokeStyle>);
+        }
+        pill
+    }
+
+    /// A soft band of `rgba`: clear at both ends, `CUE_PEAK` in the middle.
+    fn sheen_brush(&mut self, rgba: Rgba) -> Result<ID2D1LinearGradientBrush> {
+        if let Some((_, brush)) = self.sheen.as_ref().filter(|(rgb, _)| *rgb == rgba.rgb) {
+            return Ok(brush.clone());
+        }
+        let stop = |position: f32, alpha: f32| D2D1_GRADIENT_STOP { position, color: color(rgba, alpha) };
+        let stops = [stop(0.0, 0.0), stop(0.3, CUE_PEAK * 0.45), stop(0.5, CUE_PEAK), stop(0.7, CUE_PEAK * 0.45), stop(1.0, 0.0)];
+        let brush = unsafe {
+            let collection = self.target.CreateGradientStopCollection(&stops, D2D1_GAMMA_2_2, D2D1_EXTEND_MODE_CLAMP)?;
+            let axis = D2D1_LINEAR_GRADIENT_BRUSH_PROPERTIES { startPoint: Vector2 { X: 0.0, Y: 0.0 }, endPoint: Vector2 { X: 1.0, Y: 0.0 } };
+            self.target.CreateLinearGradientBrush(&axis, None, &collection)?
+        };
+        self.sheen = Some((rgba.rgb, brush.clone()));
+        Ok(brush)
     }
 
     fn paint(&self, rgba: Rgba, alpha: f32) {
@@ -269,14 +317,69 @@ mod tests {
     fn pill_is_antialiased_and_survives_the_buffer_growing() {
         let (fonts, mut renderer) = (Fonts::new().unwrap(), Renderer::new().unwrap());
         let scene = Scene { w: 60.0, h: 44.0, ..Scene::default() };
-        let (w, h) = renderer.draw(&fonts, &scene, Frame { w: 60.0, h: 44.0, alpha: 1.0 }, 1.0, 1.0).unwrap();
+        let (w, h) = renderer.draw(&fonts, &scene, Frame { w: 60.0, h: 44.0, alpha: 1.0 }, 1.0, 1.0, None).unwrap();
         assert_eq!(alpha_at(&renderer, w, h, 30, 22), (PILL.a * 255.0).round() as u8, "pill body is 94% opaque");
         assert_eq!(alpha_at(&renderer, w, h, 0, 0), 0, "rounded corner is transparent");
         let edge = alpha_at(&renderer, w, h, 4, 8);
         assert!(edge > 0 && edge < 240, "the curve is anti-aliased: {edge}");
         // A wider frame re-creates the DIB; drawing must land in the new one.
-        let (w, h) = renderer.draw(&fonts, &scene, Frame { w: 300.0, h: 44.0, alpha: 1.0 }, 1.0, 1.0).unwrap();
+        let (w, h) = renderer.draw(&fonts, &scene, Frame { w: 300.0, h: 44.0, alpha: 1.0 }, 1.0, 1.0, None).unwrap();
         assert_eq!(w, 300);
         assert_eq!(alpha_at(&renderer, w, h, 280, 22), (PILL.a * 255.0).round() as u8);
+    }
+
+    /// Software-render cost of one island frame (an instrument, not a gate):
+    /// `cargo test --release -p recall-overlay -- --ignored draw_cost --nocapture`.
+    #[test]
+    #[ignore]
+    fn draw_cost_per_frame() {
+        use crate::layout::{notice_scene, stats_scene, StatsContent, ACTIVE};
+        use crate::notice::{NoticeView, Tone};
+        let (fonts, mut renderer) = (Fonts::new().unwrap(), Renderer::new().unwrap());
+        let stats = StatsContent { recording: true, replay_secs: 120, fps: Some(144), low1: Some(98), gpu: Some(71), gpu_temp: Some(64), cpu: Some(23), ..Default::default() };
+        let stats = stats_scene(&stats, 1.0, &fonts);
+        let grow = 58.0 / 44.0;
+        let notice = notice_scene(&NoticeView::new(Tone::Success, "Clip saved", "VALORANT · 0:30", true), grow, &fonts);
+        let sweep = Some(Sheen { progress: 0.5, color: ACTIVE });
+        let cases = [
+            ("stats pill", &stats, Frame { w: stats.w, h: stats.h, alpha: 1.0 }, 1.0, None),
+            ("grown notice", &notice, Frame { w: stats.w + 40.0, h: 58.0, alpha: 1.0 }, grow, None),
+            ("grown notice + sweep", &notice, Frame { w: stats.w + 40.0, h: 58.0, alpha: 1.0 }, grow, sweep),
+        ];
+        for (label, scene, frame, scale, sheen) in cases {
+            renderer.draw(&fonts, scene, frame, scale, 1.0, sheen).unwrap();
+            let start = std::time::Instant::now();
+            for _ in 0..500 {
+                renderer.draw(&fonts, scene, frame, scale, 1.0, sheen).unwrap();
+            }
+            println!("draw_cost {label}: {:.0} us/frame", start.elapsed().as_secs_f64() * 1e6 / 500.0);
+        }
+    }
+
+    #[test]
+    fn the_sweep_tints_the_pill_in_the_tone_colour_where_the_band_is_and_nowhere_else() {
+        use crate::layout::{ACTIVE, ERROR};
+        let (fonts, mut renderer) = (Fonts::new().unwrap(), Renderer::new().unwrap());
+        let scene = Scene { w: 340.0, h: 58.0, ..Scene::default() };
+        let frame = Frame { w: 340.0, h: 58.0, alpha: 1.0 };
+        let pixel = |r: &Renderer, x: i32, y: i32| r.pixels(340, 58)[(y * 340 + x) as usize];
+        renderer.draw(&fonts, &scene, frame, 1.0, 1.0, None).unwrap();
+        let plain = pixel(&renderer, 170, 29);
+        let mid = Some(Sheen { progress: 0.5, color: ACTIVE });
+        renderer.draw(&fonts, &scene, frame, 1.0, 1.0, mid).unwrap();
+        let [b, g, r, _] = pixel(&renderer, 170, 29);
+        assert!(g > plain[1] + 50 && g > r && g > b, "green band at the centre: {:?} vs {plain:?}", [b, g, r]);
+        assert_eq!(pixel(&renderer, 12, 29), plain, "the pill's far end is untouched mid-sweep");
+        assert_eq!(pixel(&renderer, 0, 0)[3], 0, "never outside the pill");
+        let failure = Some(Sheen { progress: 0.5, color: ERROR });
+        renderer.draw(&fonts, &scene, frame, 1.0, 1.0, failure).unwrap();
+        let [b, g, r, _] = pixel(&renderer, 170, 29);
+        assert!(r > g && r > b, "a failure sweeps in the error colour: {:?}", [b, g, r]);
+        for progress in [0.0, 1.0] {
+            renderer.draw(&fonts, &scene, frame, 1.0, 1.0, Some(Sheen { progress, color: ACTIVE })).unwrap();
+            assert_eq!(pixel(&renderer, 170, 29), plain, "off the pill at {progress}");
+            assert_eq!(pixel(&renderer, 6, 29), plain, "left end clear at {progress}");
+            assert_eq!(pixel(&renderer, 333, 29), plain, "right end clear at {progress}");
+        }
     }
 }

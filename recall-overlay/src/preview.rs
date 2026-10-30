@@ -1,7 +1,8 @@
 //! Offline renders through the real renderer and fonts (evidence, no window):
 //! `--preview-sheet PATH.bmp` = every island state on a dark and a light
 //! backdrop plus the appear/hide animation frames; `--smoke-render PATH.bmp`
-//! = the fixture's settled island.
+//! = the fixture's settled island. Action notices show at their grown size;
+//! their transformation over time is `--preview-notice` (`filmstrip.rs`).
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -9,42 +10,52 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use crate::anim::{Frame, DURATION};
+use crate::cue::Sheen;
 use crate::fonts::Fonts;
 use crate::island::{content, Content, Island};
 use crate::layout::{notice_scene, stats_scene, Scene, StatsContent};
 use crate::notice::NoticeView;
+use crate::placement::{grow, DEFAULT_SPOT};
 use crate::reducer::Reducer;
 use crate::render::Renderer;
 
-const DARK: [u8; 3] = [0x23, 0x1e, 0x1b]; // BGR
-const LIGHT: [u8; 3] = [0xa3, 0x96, 0x8a];
+pub const DARK: [u8; 3] = [0x23, 0x1e, 0x1b]; // BGR
+pub const LIGHT: [u8; 3] = [0xa3, 0x96, 0x8a];
 
-struct Tile {
-    w: usize,
-    h: usize,
+pub struct Tile {
+    pub w: usize,
+    pub h: usize,
     px: Vec<[u8; 4]>,
 }
 
-fn tile(renderer: &mut Renderer, fonts: &Fonts, scene: &Scene, frame: Frame, scale: f32, content_alpha: f32) -> Result<Tile, String> {
-    let (w, h) = renderer.draw(fonts, scene, frame, scale, content_alpha).map_err(|e| format!("draw: {e}"))?;
+pub fn tile(
+    renderer: &mut Renderer,
+    fonts: &Fonts,
+    scene: &Scene,
+    frame: Frame,
+    scale: f32,
+    content_alpha: f32,
+    sheen: Option<Sheen>,
+) -> Result<Tile, String> {
+    let (w, h) = renderer.draw(fonts, scene, frame, scale, content_alpha, sheen).map_err(|e| format!("draw: {e}"))?;
     let px = renderer.pixels(w, h);
     // Window opacity (UpdateLayeredWindow's constant alpha) applied here for the stills.
     let px = px.into_iter().map(|p| p.map(|c| (c as f32 * frame.alpha).round() as u8)).collect();
     Ok(Tile { w: w as usize, h: h as usize, px })
 }
 
-struct Canvas {
-    w: usize,
-    h: usize,
+pub struct Canvas {
+    pub w: usize,
+    pub h: usize,
     bgr: Vec<[u8; 3]>,
 }
 
 impl Canvas {
-    fn new(w: usize, h: usize) -> Self {
+    pub fn new(w: usize, h: usize) -> Self {
         Self { w, h, bgr: vec![[0x10, 0x10, 0x10]; w * h] }
     }
 
-    fn fill(&mut self, x: usize, y: usize, w: usize, h: usize, color: [u8; 3]) {
+    pub fn fill(&mut self, x: usize, y: usize, w: usize, h: usize, color: [u8; 3]) {
         for row in y..(y + h).min(self.h) {
             for col in x..(x + w).min(self.w) {
                 self.bgr[row * self.w + col] = color;
@@ -53,7 +64,7 @@ impl Canvas {
     }
 
     /// Premultiplied-alpha "over".
-    fn blit(&mut self, tile: &Tile, x: usize, y: usize) {
+    pub fn blit(&mut self, tile: &Tile, x: usize, y: usize) {
         for row in 0..tile.h {
             for col in 0..tile.w {
                 let (cx, cy) = (x + col, y + row);
@@ -70,7 +81,7 @@ impl Canvas {
         }
     }
 
-    fn write_bmp(&self, path: &Path) -> Result<(), String> {
+    pub fn write_bmp(&self, path: &Path) -> Result<(), String> {
         let row_bytes = self.w * 3;
         let stride = (row_bytes + 3) & !3;
         let size = stride * self.h;
@@ -97,17 +108,17 @@ impl Canvas {
     }
 }
 
-/// The settled island for one scene, on the dark backdrop.
-pub fn snapshot(path: &Path, renderer: &mut Renderer, fonts: &Fonts, scene: &Scene, scale: f32) -> Result<(), String> {
+/// The settled island for one scene (laid out at `scale`, island `size`), on the dark backdrop.
+pub fn snapshot(path: &Path, renderer: &mut Renderer, fonts: &Fonts, scene: &Scene, scale: f32, size: (f32, f32)) -> Result<(), String> {
     let pad = (24.0 * scale) as usize;
-    let t = tile(renderer, fonts, scene, Frame { w: scene.w, h: scene.h, alpha: 1.0 }, scale, 1.0)?;
+    let t = tile(renderer, fonts, scene, Frame { w: size.0, h: size.1, alpha: 1.0 }, scale, 1.0, None)?;
     let mut canvas = Canvas::new(t.w + pad * 2, t.h + pad * 2);
     canvas.fill(0, 0, canvas.w, canvas.h, DARK);
     canvas.blit(&t, pad, pad);
     canvas.write_bmp(path)
 }
 
-fn notice_from(events: &[Value]) -> Option<NoticeView> {
+pub fn notice_from(events: &[Value]) -> Option<NoticeView> {
     let (mut reducer, now) = (Reducer::new(), Instant::now());
     reducer.apply_envelope(&json!({"mod":"session","event":{"type":"status","state":"recording","overlay":{"enabled":true}}}), now);
     for event in events {
@@ -145,7 +156,7 @@ fn notices() -> Vec<NoticeView> {
     .collect()
 }
 
-fn stats_states() -> Vec<StatsContent> {
+pub fn stats_states() -> Vec<StatsContent> {
     let base = StatsContent {
         recording: true,
         replay_secs: 120,
@@ -169,13 +180,16 @@ fn stats_states() -> Vec<StatsContent> {
 pub fn sheet(path: &Path, scale: f32) -> Result<(), String> {
     let fonts = Fonts::new().map_err(|e| format!("fonts: {e}"))?;
     let mut renderer = Renderer::new().map_err(|e| format!("renderer: {e}"))?;
-    let mut scenes: Vec<Scene> = notices().iter().map(|n| notice_scene(n, scale, &fonts)).collect();
-    scenes.extend(stats_states().iter().map(|s| stats_scene(s, scale, &fonts)));
+    // Action notices at their grown size (an unscanned spot: full growth).
+    let notice_scale = |n: &NoticeView| if n.emphasis { scale * grow(&DEFAULT_SPOT) } else { scale };
+    let mut scenes: Vec<(Scene, f32)> = notices().iter().map(|n| (notice_scene(n, notice_scale(n), &fonts), notice_scale(n))).collect();
+    scenes.extend(stats_states().iter().map(|s| (stats_scene(s, scale, &fonts), scale)));
     let pad = (24.0 * scale) as usize;
     let mut tiles = Vec::new();
-    for scene in &scenes {
-        tiles.push(tile(&mut renderer, &fonts, scene, Frame { w: scene.w, h: scene.h, alpha: 1.0 }, scale, 1.0)?);
+    for (scene, s) in &scenes {
+        tiles.push(tile(&mut renderer, &fonts, scene, Frame { w: scene.w, h: scene.h, alpha: 1.0 }, *s, 1.0, None)?);
     }
+    let scenes: Vec<Scene> = scenes.into_iter().map(|(scene, _)| scene).collect();
     // Appear (left column) and hide (right column) of the stats island, every 40 ms.
     let stats = &scenes[scenes.len() - stats_states().len()];
     let (mut appear, mut hide) = (Vec::new(), Vec::new());
@@ -189,11 +203,11 @@ pub fn sheet(path: &Path, scale: f32) -> Result<(), String> {
     for step in 0..=5u32 {
         let t = DURATION * step / 5;
         let (a, b) = (start + t, hide_at + t);
-        appear.push(tile(&mut renderer, &fonts, stats, island.frame(a), scale, island.content_alpha(a))?);
-        hide.push(tile(&mut renderer, &fonts, stats, leaving.frame(b), scale, leaving.content_alpha(b))?);
+        appear.push(tile(&mut renderer, &fonts, stats, island.frame(a), scale, island.content_alpha(a), None)?);
+        hide.push(tile(&mut renderer, &fonts, stats, leaving.frame(b), scale, leaving.content_alpha(b), None)?);
     }
     let cell_w = tiles.iter().map(|t| t.w).max().unwrap_or(0) + pad * 2;
-    let row_h = (44.0 * scale).ceil() as usize + pad;
+    let row_h = tiles.iter().map(|t| t.h).max().unwrap_or(0) + pad;
     let rows = tiles.len() + appear.len();
     let mut canvas = Canvas::new(cell_w * 2, rows * row_h + pad);
     canvas.fill(0, 0, cell_w, canvas.h, DARK);

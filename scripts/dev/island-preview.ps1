@@ -1,0 +1,59 @@
+# island-preview.ps1 - render the Recall Island previews offline (no window,
+# no GPU: Direct2D software rendering) and save them as PNGs:
+#   island-sheet.png        every island state on dark/light + appear/hide frames
+#   notice-transform.png    an action notice's transformation, every 40 ms
+#                           (over the stats pill, and with no stats showing)
+#   notice-before-after.png the old content swap beside the transformation
+#
+#   powershell -NoProfile -File scripts/dev/island-preview.ps1 -Exe <recall-overlay.exe> -Out <dir> [-Scale 1.0]
+#
+# The filmstrips come with <image>.bmp.labels.tsv (x, y, px, text): row times
+# and column titles, printed onto the PNG here.
+param(
+    [Parameter(Mandatory = $true)][string]$Exe,
+    [Parameter(Mandatory = $true)][string]$Out,
+    [double]$Scale = 1.0
+)
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Drawing
+
+function Convert-Bmp([string]$In, [string]$Png) {
+    $src = [System.Drawing.Image]::FromFile($In)
+    $bmp = New-Object System.Drawing.Bitmap($src.Width, $src.Height)
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    try {
+        $g.DrawImage($src, 0, 0, $src.Width, $src.Height)
+        $g.TextRenderingHint = [System.Drawing.Text.TextRenderingHint]::AntiAliasGridFit
+        $brush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(255, 200, 200, 200))
+        $labels = "$In.labels.tsv"
+        if (Test-Path $labels) {
+            foreach ($line in Get-Content $labels) {
+                $parts = $line -split "`t", 4
+                if ($parts.Count -lt 4) { continue }
+                $font = New-Object System.Drawing.Font('Segoe UI', [float]$parts[2], [System.Drawing.FontStyle]::Regular, [System.Drawing.GraphicsUnit]::Pixel)
+                $g.DrawString($parts[3], $font, $brush, [float]$parts[0], [float]$parts[1])
+                $font.Dispose()
+            }
+        }
+        $bmp.Save($Png, [System.Drawing.Imaging.ImageFormat]::Png)
+    } finally {
+        $g.Dispose(); $bmp.Dispose(); $src.Dispose()
+    }
+    Write-Output "$Png  $([math]::Round((Get-Item $Png).Length / 1KB)) KB"
+}
+
+New-Item -ItemType Directory -Force $Out | Out-Null
+$work = Join-Path ([System.IO.Path]::GetTempPath()) "island-preview-$PID"
+New-Item -ItemType Directory -Force $work | Out-Null
+try {
+    $scaleArg = $Scale.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    & $Exe --preview-sheet (Join-Path $work 'island-sheet.bmp') --preview-scale $scaleArg
+    if ($LASTEXITCODE -ne 0) { throw "--preview-sheet failed ($LASTEXITCODE)" }
+    & $Exe --preview-notice (Join-Path $work 'notice-transform.bmp') --preview-scale $scaleArg
+    if ($LASTEXITCODE -ne 0) { throw "--preview-notice failed ($LASTEXITCODE)" }
+    Convert-Bmp (Join-Path $work 'island-sheet.bmp') (Join-Path $Out 'island-sheet.png')
+    Convert-Bmp (Join-Path $work 'notice-transform.bmp') (Join-Path $Out 'notice-transform.png')
+    Convert-Bmp (Join-Path $work 'notice-transform-before-after.bmp') (Join-Path $Out 'notice-before-after.png')
+} finally {
+    Remove-Item -Recurse -Force $work
+}

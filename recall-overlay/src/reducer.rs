@@ -214,39 +214,39 @@ impl Reducer {
                 let game = filename.split("__").next().unwrap_or(filename).replace(['-', '_'], " ");
                 let secs = event.get("seconds").and_then(Value::as_f64).unwrap_or(0.0).round() as u64;
                 let detail = if secs > 0 { format!("{game} · {}:{:02}", secs / 60, secs % 60) } else { game };
-                let notice = NoticeView::new(Success, "Clip saved", truncate(&detail, 40), true);
+                let notice = NoticeView::new(Success, "Clip saved", truncate(&detail, 40), true).emphasized();
                 self.set_transient("Clip saved", detail, now + SAVED_FOR, notice)
             }
             Some("save_failed") => {
                 let reason = event.get("reason").and_then(Value::as_str).unwrap_or("unknown error");
-                let notice = NoticeView::new(Failure, "Save failed", truncate(reason, 44), false);
+                let notice = NoticeView::new(Failure, "Save failed", truncate(reason, 44), false).emphasized();
                 self.set_transient("Save failed", format!("Save failed: {}", truncate(reason, 44)), now + FAILURE_FOR, notice)
             }
             Some("bookmarked") => {
                 let detail = "Marked in the clips you save next";
-                let notice = NoticeView::new(Success, "Bookmark added", detail, false);
+                let notice = NoticeView::new(Success, "Bookmark added", detail, false).emphasized();
                 self.set_transient("Bookmark added", detail.into(), now + MARK_FOR, notice)
             }
             Some("screenshot") => {
                 let name = file_name(event);
-                let notice = NoticeView::new(Success, "Screenshot saved", name.clone(), false);
+                let notice = NoticeView::new(Success, "Screenshot saved", name.clone(), false).emphasized();
                 self.set_transient("Screenshot saved", format!("Saved {name}"), now + SAVED_FOR, notice)
             }
             Some("recording_started") => {
                 let name = file_name(event);
-                let notice = NoticeView::new(Recording, "Recording started", name.clone(), false);
+                let notice = NoticeView::new(Recording, "Recording started", name.clone(), false).emphasized();
                 self.set_transient("Recording started", format!("Writing {name}"), now + SAVED_FOR, notice)
             }
             Some("recording_stopped") => {
                 let secs = event.get("seconds").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64;
                 let text = truncate(&format!("{} · {}:{:02}", file_name(event), secs / 60, secs % 60), 48);
-                let notice = NoticeView::new(Success, "Recording saved", text.clone(), false);
+                let notice = NoticeView::new(Success, "Recording saved", text.clone(), false).emphasized();
                 self.set_transient("Recording saved", text, now + SAVED_FOR, notice)
             }
             Some(kind @ ("screenshot_failed" | "recording_failed")) => {
                 let reason = truncate(event.get("reason").and_then(Value::as_str).unwrap_or("unknown error"), 48);
                 let title = if kind == "screenshot_failed" { "Screenshot failed" } else { "Recording failed" };
-                let notice = NoticeView::new(Failure, title, reason.clone(), false);
+                let notice = NoticeView::new(Failure, title, reason.clone(), false).emphasized();
                 self.set_transient(title, reason, now + FAILURE_FOR, notice)
             }
             _ => false,
@@ -295,7 +295,7 @@ impl Reducer {
         self.encoder_error = encoder_error.map(str::to_owned);
         if new_failure && !self.encoder_duplicate(EncoderSource::Engine, now) {
             let reason = truncate(encoder_error.unwrap_or("NVENC is unavailable"), 48);
-            let notice = NoticeView::new(Tone::Failure, "Encoder failed", reason.clone(), false);
+            let notice = NoticeView::new(Tone::Failure, "Encoder failed", reason.clone(), false).emphasized();
             self.set_transient("Encoder failed", reason, now + FAILURE_FOR, notice);
         }
         let state = if encoder_error.is_some() || encoder == "failed" {

@@ -1,8 +1,17 @@
-//! Size/opacity tweening for the island (≈200 ms ease-out, dynamic-island feel).
+//! Size/opacity tweening for the island (≈200 ms ease-out, dynamic-island
+//! feel), plus the short spring an action notice grows with.
 
 use std::time::{Duration, Instant};
 
 pub const DURATION: Duration = Duration::from_millis(200);
+/// How long an action notice's spring runs (it lands exactly on its target).
+pub const SPRING_FOR: Duration = Duration::from_millis(420);
+/// Damping ratio: one visible overshoot (≈12% of the distance), then settle.
+const ZETA: f32 = 0.55;
+/// Natural frequency (rad/s): the overshoot peaks ≈160 ms in.
+const OMEGA: f32 = 24.0;
+/// From this fraction of `SPRING_FOR` the spring blends onto its target.
+const TAIL: f32 = 0.65;
 
 /// The island's drawn size (physical px) and window opacity (0..1).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -30,21 +39,57 @@ pub fn ease_out(t: f32) -> f32 {
     1.0 - (1.0 - t).powi(3)
 }
 
+/// Smoothstep: slow in, slow out.
+pub fn ease_in_out(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
+}
+
+/// One axis of an under-damped spring from `from` (moving at `velocity` px/s)
+/// to `to`, `secs` in; blended onto `to` over the tail so it lands exactly.
+pub fn spring(from: f32, to: f32, velocity: f32, secs: f32) -> f32 {
+    let total = SPRING_FOR.as_secs_f32();
+    if secs >= total {
+        return to;
+    }
+    let secs = secs.max(0.0);
+    let (decay, omega_d) = (ZETA * OMEGA, OMEGA * (1.0 - ZETA * ZETA).sqrt());
+    let d = from - to;
+    let b = (velocity + decay * d) / omega_d;
+    let free = to + (-decay * secs).exp() * (d * (omega_d * secs).cos() + b * (omega_d * secs).sin());
+    let blend = ease_in_out((secs / total - TAIL) / (1.0 - TAIL));
+    free + (to - free) * blend
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Motion {
+    EaseOut,
+    /// Size springs (from these starting velocities, px/s); opacity eases out.
+    Spring { vw: f32, vh: f32 },
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Tween {
     from: Frame,
     to: Frame,
     start: Instant,
     duration: Duration,
+    motion: Motion,
 }
 
 impl Tween {
     pub fn settled(frame: Frame, now: Instant) -> Self {
-        Self { from: frame, to: frame, start: now, duration: Duration::ZERO }
+        Self { from: frame, to: frame, start: now, duration: Duration::ZERO, motion: Motion::EaseOut }
     }
 
     pub fn new(from: Frame, to: Frame, now: Instant) -> Self {
-        Self { from, to, start: now, duration: DURATION }
+        Self { from, to, start: now, duration: DURATION, motion: Motion::EaseOut }
+    }
+
+    /// Spring from `from` (already moving at `velocity`, px/s for w and h) to `to`.
+    pub fn spring(from: Frame, to: Frame, velocity: (f32, f32), now: Instant) -> Self {
+        let motion = Motion::Spring { vw: velocity.0, vh: velocity.1 };
+        Self { from, to, start: now, duration: SPRING_FOR, motion }
     }
 
     pub fn target(&self) -> Frame {
@@ -59,7 +104,29 @@ impl Tween {
     }
 
     pub fn at(&self, now: Instant) -> Frame {
-        self.from.lerp(self.to, ease_out(self.progress(now)))
+        match self.motion {
+            Motion::EaseOut => self.from.lerp(self.to, ease_out(self.progress(now))),
+            Motion::Spring { vw, vh } => {
+                let secs = now.saturating_duration_since(self.start).as_secs_f32();
+                let fade = ease_out(secs / DURATION.as_secs_f32());
+                Frame {
+                    w: spring(self.from.w, self.to.w, vw, secs),
+                    h: spring(self.from.h, self.to.h, vh, secs),
+                    alpha: self.from.alpha + (self.to.alpha - self.from.alpha) * fade,
+                }
+            }
+        }
+    }
+
+    /// Size velocity (px/s for w and h) at `now`, so a new motion can carry it on.
+    pub fn velocity(&self, now: Instant) -> (f32, f32) {
+        if self.done(now) {
+            return (0.0, 0.0);
+        }
+        let step = Duration::from_millis(2);
+        let (a, b) = (self.at(now), self.at(now + step));
+        let secs = step.as_secs_f32();
+        ((b.w - a.w) / secs, (b.h - a.h) / secs)
     }
 
     pub fn done(&self, now: Instant) -> bool {
@@ -76,47 +143,5 @@ impl Tween {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    const A: Frame = Frame { w: 100.0, h: 44.0, alpha: 1.0 };
-    const B: Frame = Frame { w: 300.0, h: 44.0, alpha: 1.0 };
-
-    #[test]
-    fn ease_out_is_monotonic_and_front_loaded() {
-        assert_eq!((ease_out(0.0), ease_out(1.0), ease_out(2.0)), (0.0, 1.0, 1.0));
-        assert!(ease_out(0.5) > 0.5, "ease-out covers most of the distance early");
-        let steps: Vec<f32> = (0..=10).map(|i| ease_out(i as f32 / 10.0)).collect();
-        assert!(steps.windows(2).all(|pair| pair[1] >= pair[0]));
-    }
-
-    #[test]
-    fn tween_runs_from_start_to_target_in_200_ms() {
-        let now = Instant::now();
-        let tween = Tween::new(A, B, now);
-        assert_eq!(tween.at(now), A);
-        assert!(!tween.done(now + Duration::from_millis(199)));
-        assert_eq!(tween.at(now + DURATION), B);
-        assert!(tween.done(now + DURATION));
-        let mid = tween.at(now + DURATION / 2).w;
-        assert!(mid > 200.0 && mid < 300.0, "past the linear midpoint at half time: {mid}");
-    }
-
-    #[test]
-    fn retarget_mid_flight_continues_from_the_current_frame() {
-        let now = Instant::now();
-        let mut tween = Tween::new(A, B, now);
-        let half = now + DURATION / 2;
-        let here = tween.at(half);
-        tween.retarget(A, half);
-        assert_eq!(tween.at(half), here, "no jump");
-        assert_eq!(tween.at(half + DURATION), A);
-    }
-
-    #[test]
-    fn collapsed_pill_is_small_transparent_and_never_wider_than_the_island() {
-        let collapsed = Frame::collapsed(300.0, 44.0);
-        assert_eq!((collapsed.w, collapsed.h, collapsed.alpha), (105.0, 33.0, 0.0));
-        assert_eq!(Frame::collapsed(30.0, 44.0).w, 30.0);
-    }
-}
+#[path = "anim_tests.rs"]
+mod tests;
