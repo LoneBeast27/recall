@@ -3,7 +3,7 @@
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
-use super::mp4::duration_of;
+use super::mp4::{duration_of, video_duration_of};
 use super::store::{meta_path, quarantine_path};
 use super::*;
 
@@ -154,6 +154,24 @@ fn mp4_parser_rejects_broken_input() {
     let mut truncated = moov(&[mvhd(0, 1000, 5000)]);
     truncated.truncate(30);
     assert_eq!(duration_of(&mut Cursor::new(truncated)), None);
+}
+
+fn trak(handler: &[u8; 4], timescale: u32, duration: u64) -> Vec<u8> {
+    let hdlr = mp4_box(b"hdlr", &[[0u8; 8].as_slice(), handler, &[0u8; 12]].concat());
+    let mut mdhd = mvhd(0, timescale, duration);
+    mdhd[4..8].copy_from_slice(b"mdhd");
+    mp4_box(b"trak", &mp4_box(b"mdia", &[hdlr, mdhd].concat()))
+}
+
+#[test]
+fn mp4_video_track_length_skips_sound_tracks() {
+    // Sound runs to 10.453 s (mvhd); the picture stops at 10.437942 s.
+    let file = moov(&[mvhd(0, 1000, 10_453), trak(b"soun", 48_000, 501_744), trak(b"vide", 1_000_000, 10_437_942)]);
+    let seconds = video_duration_of(&mut Cursor::new(file)).unwrap();
+    assert!((seconds - 10.437942).abs() < 1e-9, "{seconds}");
+    let sound_only = moov(&[mvhd(0, 1000, 5000), trak(b"soun", 1000, 5000)]);
+    assert_eq!(video_duration_of(&mut Cursor::new(sound_only)), None);
+    assert_eq!(video_duration_of(&mut Cursor::new(b"not an mp4".to_vec())), None);
 }
 
 /// Read-only: the real recording; ffprobe reports format duration 119.146000 s.

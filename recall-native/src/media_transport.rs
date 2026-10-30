@@ -10,7 +10,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, ShowWindow,
 };
 
-use super::{NativePreview, player_position, player_state_name, rect_json, set_player_position};
+use super::{NativePreview, player_position, player_state_name, rect_json, set_player_position, video_time};
 
 impl NativePreview {
     pub fn diagnostics(&self) -> serde_json::Value {
@@ -125,10 +125,10 @@ impl NativePreview {
     pub fn play(&mut self) -> Result<(), String> {
         self.require_ready()?;
         self.prime_started = None;
-        let player = self.player.as_ref().ok_or("preview video is not open")?;
         if self.has_audio {
-            set_player_position(player, self.audio.position())?;
+            self.place_video(self.audio.position())?;
         }
+        let player = self.player.as_ref().ok_or("preview video is not open")?;
         unsafe { player.Play() }
             .map_err(|error| format!("could not play native video: {error}"))?;
         if self.has_audio {
@@ -155,11 +155,38 @@ impl NativePreview {
                 unsafe { player.Pause() }
                     .map_err(|error| format!("could not pause native video: {error}"))?;
             }
-            if self.has_audio {
-                set_player_position(player, self.audio.position())?;
-            }
+        }
+        if self.has_audio && self.player.is_some() {
+            self.place_video(self.audio.position())?;
         }
         Ok(())
+    }
+
+    /// The clip has sound stems (the sound runs the clock); without, the picture does.
+    pub fn has_sound(&self) -> bool {
+        self.has_audio
+    }
+
+    /// The latest time the clock can reach: the clip (the sound is padded to its length), or
+    /// the picture's last frame for a clip without sound. None until known.
+    pub fn clock_end(&self) -> Option<f64> {
+        if self.has_audio {
+            let end = self.audio.duration();
+            (end > 0.0).then_some(end)
+        } else {
+            self.video_end
+        }
+    }
+
+    /// Moves the picture to `seconds`, never past the video track's last frame.
+    fn place_video(&self, seconds: f64) -> Result<(), String> {
+        let player = self.player.as_ref().ok_or("preview video is not open")?;
+        set_player_position(player, video_time(seconds, self.video_end))
+    }
+
+    /// The sound runs past the picture's last frame: nothing for the picture to follow.
+    fn past_video_end(&self, seconds: f64) -> bool {
+        self.video_end.is_some_and(|end| seconds >= video_time(end, self.video_end))
     }
 
     pub fn seek(&mut self, seconds: f64) -> Result<(), String> {
@@ -172,7 +199,7 @@ impl NativePreview {
         if self.has_audio {
             self.audio.seek(seconds)?;
         }
-        set_player_position(player, seconds)?;
+        set_player_position(player, video_time(seconds, self.video_end))?;
         self.last_drift_check.set(Instant::now());
         self.audio_seen.set((seconds, Instant::now()));
         Ok(())
@@ -193,12 +220,13 @@ impl NativePreview {
             }
         }
         if self.audio.is_playing()
+            && !self.past_video_end(audio_position)
             && self.last_drift_check.get().elapsed() >= Duration::from_millis(500)
         {
             if let Some(player) = &self.player {
                 let video_position = player_position(player)?;
                 if (video_position - audio_position).abs() > 0.075 {
-                    set_player_position(player, audio_position)?;
+                    self.place_video(audio_position)?;
                     self.drift_seeks.set(self.drift_seeks.get() + 1);
                 }
             }

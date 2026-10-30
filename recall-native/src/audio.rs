@@ -1,5 +1,6 @@
 //! Preview audio: prepared WAV stems mixed on a worker thread into WinMM wave-out.
 //! Device/buffers in `audio_wave.rs`, the worker loop in `audio_worker.rs`.
+use std::cell::Cell;
 use std::fs::{self, File};
 use std::io::Read;
 use std::mem::size_of;
@@ -32,6 +33,10 @@ struct SharedStatus {
     generation: AtomicU64,
     /// Times the device ran out of queued sound while the clip still had more (a gap heard).
     underruns: AtomicU64,
+    /// Commands the worker has carried out (the mixer counts the ones it sent).
+    applied: AtomicU64,
+    /// Length of the clock (the clip, padded past shorter stems) in frames.
+    duration_frames: AtomicU64,
     error: Mutex<Option<String>>,
 }
 
@@ -58,6 +63,8 @@ enum Command {
     Open {
         generation: u64,
         tracks: Vec<PreviewTrack>,
+        /// The clip's length: the clock runs this long even when the stems are shorter.
+        duration: f64,
     },
     Close {
         generation: u64,
@@ -77,6 +84,12 @@ pub(crate) struct AudioMixer {
     tx: mpsc::Sender<Command>,
     shared: Arc<SharedStatus>,
     worker: Option<JoinHandle<()>>,
+    /// Commands sent so far, and the command numbers of the newest seek and play/pause with
+    /// their targets: until the worker has carried one out, the clock reads as if it had (a
+    /// play pressed right after a seek must start from the seek, not from the old time).
+    sent: Cell<u64>,
+    seek_sent: Cell<(u64, f64)>,
+    run_sent: Cell<(u64, bool)>,
 }
 
 impl AudioMixer {
@@ -92,19 +105,27 @@ impl AudioMixer {
             tx,
             shared,
             worker: Some(worker),
+            sent: Cell::new(0),
+            seek_sent: Cell::new((0, 0.0)),
+            run_sent: Cell::new((0, false)),
         })
     }
 
-    pub(crate) fn open(&self, tracks: &[PreviewTrack]) -> Result<(), String> {
+    pub(crate) fn open(&self, tracks: &[PreviewTrack], duration: f64) -> Result<(), String> {
         let generation = self.shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.shared.ready.store(false, Ordering::Release);
         self.shared.playing.store(false, Ordering::Release);
         self.shared.set_position(0.0);
+        self.shared.duration_frames.store(0, Ordering::Release);
         *self.shared.error.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        self.send(Command::Open {
+        let sent = self.send(Command::Open {
             generation,
             tracks: tracks.to_vec(),
-        })
+            duration,
+        });
+        self.seek_sent.set((self.sent.get(), 0.0));
+        self.run_sent.set((self.sent.get(), false));
+        sent
     }
 
     pub(crate) fn close(&self) -> Result<(), String> {
@@ -112,17 +133,26 @@ impl AudioMixer {
         self.shared.ready.store(false, Ordering::Release);
         self.shared.playing.store(false, Ordering::Release);
         self.shared.set_position(0.0);
+        self.shared.duration_frames.store(0, Ordering::Release);
         *self.shared.error.lock().unwrap_or_else(|e| e.into_inner()) = None;
-        self.send(Command::Close { generation })
+        let sent = self.send(Command::Close { generation });
+        self.seek_sent.set((self.sent.get(), 0.0));
+        self.run_sent.set((self.sent.get(), false));
+        sent
     }
 
     pub(crate) fn play(&self) -> Result<(), String> {
         self.require_ready()?;
-        self.send(Command::Play)
+        self.send(Command::Play)?;
+        let runs = self.position() < self.duration() - 0.5 / SAMPLE_RATE as f64;
+        self.run_sent.set((self.sent.get(), runs));
+        Ok(())
     }
 
     pub(crate) fn pause(&self) -> Result<(), String> {
-        self.send(Command::Pause)
+        self.send(Command::Pause)?;
+        self.run_sent.set((self.sent.get(), false));
+        Ok(())
     }
 
     pub(crate) fn seek(&self, seconds: f64) -> Result<(), String> {
@@ -130,7 +160,23 @@ impl AudioMixer {
             return Err("preview seek must be a finite non-negative time".into());
         }
         self.require_ready()?;
-        self.send(Command::Seek(seconds))
+        let running = self.is_playing();
+        self.send(Command::Seek(seconds))?;
+        let target = seconds.min(self.duration());
+        self.seek_sent.set((self.sent.get(), target));
+        // A seek to the very end stops the sound; anywhere else it keeps its state.
+        self.run_sent.set((self.sent.get(), running && target < self.duration()));
+        Ok(())
+    }
+
+    /// Length of the clock in seconds (known once the stems are loaded).
+    pub(crate) fn duration(&self) -> f64 {
+        self.shared.duration_frames.load(Ordering::Acquire) as f64 / SAMPLE_RATE as f64
+    }
+
+    /// The worker has not yet carried out command number `seq`.
+    fn pending(&self, seq: u64) -> bool {
+        self.shared.applied.load(Ordering::Acquire) < seq
     }
 
     pub(crate) fn set_audio(
@@ -155,11 +201,13 @@ impl AudioMixer {
     }
 
     pub(crate) fn is_playing(&self) -> bool {
-        self.shared.playing.load(Ordering::Acquire)
+        let (seq, runs) = self.run_sent.get();
+        if self.pending(seq) { runs } else { self.shared.playing.load(Ordering::Acquire) }
     }
 
     pub(crate) fn position(&self) -> f64 {
-        self.shared.position()
+        let (seq, target) = self.seek_sent.get();
+        if self.pending(seq) { target } else { self.shared.position() }
     }
 
     /// Output underruns since the mixer was created (test trace, player log).
@@ -188,7 +236,9 @@ impl AudioMixer {
     fn send(&self, command: Command) -> Result<(), String> {
         self.tx
             .send(command)
-            .map_err(|_| "preview audio worker stopped".into())
+            .map_err(|_| "preview audio worker stopped".to_string())?;
+        self.sent.set(self.sent.get() + 1);
+        Ok(())
     }
 }
 

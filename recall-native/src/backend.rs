@@ -121,7 +121,17 @@ fn engine_input(source:&Path,metadata:&std::fs::Metadata,copy:Option<&Path>)->Pa
 }
 /// `recall.exe --prepare-editor`: audio stems + waveforms into `<cache>\editor` (a cache hit reads
 /// only `clip.json`). `lowered` starts the engine at very low I/O priority (HDD input).
+/// Opening a clip the smart cache is preparing at the same moment races two engines to publish
+/// one cache entry; the loser fails ("publish cache") although the entry is now complete, so it
+/// asks once more and reads the winner's entry.
 fn run_engine_prepare(input:&Path,lowered:bool)->Result<ClipInfo,String>{
+    match run_engine_prepare_once(input,lowered){
+        Err(error) if lost_publish_race(&error)=>run_engine_prepare_once(input,lowered),
+        result=>result,
+    }
+}
+fn lost_publish_race(error:&str)->bool{error.contains("publish cache:")}
+fn run_engine_prepare_once(input:&Path,lowered:bool)->Result<ClipInfo,String>{
     let mut command=engine_command()?;command.arg("--prepare-editor").arg(input).arg(cache_dir()?);
     let output=storage::run_hidden(&mut command,lowered).map_err(|e|format!("start media preparation: {e}"))?;
     if !output.status.success(){return Err(format!("prepare media: {}",String::from_utf8_lossy(&output.stderr).trim()));}
@@ -223,6 +233,10 @@ mod tests {
         info.path="C:/clips/imported.mp4".into();info.audio[0].name="und".into();info.audio[1].name="unknown".into();normalize_audio_names(&mut info);assert_eq!(info.audio[0].name,"Audio track 1");assert_eq!(info.audio[1].name,"Audio track 2");
         assert_eq!(storage::recorder_thumb_stem("my-hyphenated-game__2026-10-17__22-34-31-275__abcdef0123456789-1783463424-thumb.jpg"),Some("my-hyphenated-game__2026-10-17__22-34-31-275__abcdef0123456789"));
         assert_eq!(storage::recorder_thumb_stem("ordinary-name-thumb.jpg"),None);
+    }
+    #[test] fn a_lost_publish_race_is_retried_and_other_failures_are_not(){
+        assert!(lost_publish_race("prepare media: prepare editor: publish cache: The directory is not empty. (os error 145)"));
+        assert!(!lost_publish_race("prepare media: open clip.mp4: Invalid data found when processing input"));
     }
     #[test] fn only_real_edits_count_as_non_default_plans(){
         let info=ClipInfo{path:"C:/clips/a.mp4".into(),duration:10.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![crate::edit_model::AudioTrackInfo{stream_index:1,name:"Game audio".into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new()}],keyframes:Vec::new()};

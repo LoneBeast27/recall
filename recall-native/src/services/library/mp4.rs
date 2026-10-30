@@ -1,4 +1,5 @@
-//! MP4 duration from `moov/mvhd` by seeking over top-level boxes (mdat is never read).
+//! MP4 duration from `moov/mvhd` (and the video track's own length from its `mdhd`) by
+//! seeking over boxes (mdat is never read).
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
@@ -27,6 +28,34 @@ pub(super) fn duration_of<R: Read + Seek>(reader: &mut R) -> Option<f64> {
     }
     let seconds = units as f64 / f64::from(timescale);
     seconds.is_finite().then_some(seconds)
+}
+
+/// Seconds of the first video track (a `trak` whose `mdia/hdlr` is `vide`) from its `mdhd`.
+/// The picture ends here even when the sound, and so `mvhd`, runs a little longer.
+pub(super) fn video_duration_of<R: Read + Seek>(reader: &mut R) -> Option<f64> {
+    let end = reader.seek(SeekFrom::End(0)).ok()?;
+    let moov = find_box(reader, 0, end, b"moov")?;
+    let mut at = moov.0;
+    for _ in 0..MAX_BOXES {
+        let trak = find_box(reader, at, moov.1, b"trak")?;
+        at = trak.1;
+        let Some(mdia) = find_box(reader, trak.0, trak.1, b"mdia") else { continue };
+        let Some(hdlr) = find_box(reader, mdia.0, mdia.1, b"hdlr") else { continue };
+        // hdlr payload: version/flags, pre_defined, then the handler type.
+        let mut handler = [0u8; 4];
+        if hdlr.1.saturating_sub(hdlr.0) < 12 || reader.seek(SeekFrom::Start(hdlr.0 + 8)).is_err() || reader.read_exact(&mut handler).is_err() {
+            continue;
+        }
+        if &handler != b"vide" {
+            continue;
+        }
+        // mdhd starts like mvhd: version/flags, two times, timescale, duration.
+        let mdhd = find_box(reader, mdia.0, mdia.1, b"mdhd")?;
+        let (timescale, units) = read_mvhd(reader, mdhd)?;
+        let seconds = (timescale > 0 && units > 0).then(|| units as f64 / f64::from(timescale))?;
+        return seconds.is_finite().then_some(seconds);
+    }
+    None
 }
 
 /// (payload start, box end) of the first `kind` child in `[start, end)`.

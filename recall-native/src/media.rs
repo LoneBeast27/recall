@@ -185,6 +185,8 @@ pub struct NativePreview {
     observed_ready: bool,
     observed_error: Option<String>,
     prime_started: Option<Instant>,
+    /// Where the open file's video track ends (its last frame), when the file says.
+    video_end: Option<f64>,
 }
 
 #[path = "media_player.rs"]
@@ -252,6 +254,17 @@ fn player_state_name(state: MFP_MEDIAPLAYER_STATE) -> &'static str {
     }
 }
 
+/// The latest time the video may be asked to show. MFPlay never finishes a seek at or past
+/// the end of the video track (a clip's sound often runs ~15 ms longer, so "the end" of the
+/// timeline is past it) and then ignores every later seek: the picture froze for good.
+fn video_time(seconds: f64, video_end: Option<f64>) -> f64 {
+    const BEFORE_END: f64 = 0.01; // inside the last frame at up to 100 fps
+    match video_end {
+        Some(end) if end > BEFORE_END => seconds.min(end - BEFORE_END),
+        _ => seconds,
+    }
+}
+
 fn set_player_position(player: &IMFPMediaPlayer, seconds: f64) -> Result<(), String> {
     let ticks = (seconds.max(0.0) * 10_000_000.0)
         .round()
@@ -316,6 +329,17 @@ mod tests {
             normalize_windows_path(r"\\?\UNC\server\share\video.mp4"),
             r"\\server\share\video.mp4"
         );
+    }
+
+    #[test]
+    fn video_seeks_stay_inside_the_last_frame() {
+        // Recall-Test-3: sound and timeline end at 10.453 s, the picture at 10.437942 s.
+        let end = Some(10.437942);
+        assert!((video_time(10.453, end) - 10.427942).abs() < 1e-9);
+        assert!(video_time(10.453, end) < 10.437942);
+        assert_eq!(video_time(5.0, end), 5.0);
+        assert_eq!(video_time(10.453, None), 10.453);
+        assert_eq!(video_time(0.0, Some(0.005)), 0.0);
     }
 
     #[test]
