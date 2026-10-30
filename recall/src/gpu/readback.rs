@@ -1,19 +1,26 @@
 //! The encoder / screenshot readback path: tonemap the current source into the
-//! offscreen Rgba8UnormSrgb target and read it back as packed RGBA8.
+//! offscreen Rgba8UnormSrgb target and read it back as packed RGBA8. A windowed game's
+//! client area is drawn into its place on the canvas (`framing::Layout`); the rest of the
+//! target keeps the black clear.
 
 use std::sync::atomic::Ordering;
 
 use super::{EncodeTarget, Gpu, Params};
+use crate::framing::{Layout, Rect};
+
+/// A read-back encoder frame: (width, height, RGBA8, the picture's region on the canvas).
+pub type EncodedRgba = (u32, u32, Vec<u8>, Option<Rect>);
 
 impl Gpu {
     /// (Re)create the offscreen encode target for the current source. The bind
-    /// group references the live source texture, so this must run after
-    /// `ensure_source` whenever the resolution changed.
+    /// group references the live source texture, so it is remade whenever the
+    /// source (re)created by `ensure_source` changed size, as well as the target.
     fn ensure_encode_target(&mut self, width: u32, height: u32) {
-        if matches!(&self.encode, Some(t) if t.width == width && t.height == height) {
+        let Some(source) = &self.source else { return };
+        let src = (source.width, source.height);
+        if matches!(&self.encode, Some(t) if t.width == width && t.height == height && t.source == src) {
             return;
         }
-        let Some(source) = &self.source else { return };
         let texture = self.device.create_texture(&wgpu::TextureDescriptor {
             label: Some("encode-target"),
             size: wgpu::Extent3d {
@@ -64,6 +71,7 @@ impl Gpu {
             staging,
             width,
             height,
+            source: src,
             padded_bpr,
             _texture: texture,
         });
@@ -72,8 +80,13 @@ impl Gpu {
     /// Tonemap the current source into the offscreen target and read it back
     /// as tightly packed RGBA8. Synchronous (blocks ~1-2ms); called at the
     /// pacer cadence, not per swapchain frame. None until a frame exists.
-    pub fn encode_frame(&mut self) -> Option<(u32, u32, Vec<u8>)> {
-        let (sw, sh) = self.source.as_ref().map(|s| (s.width, s.height))?;
+    pub fn encode_frame(&mut self) -> Option<EncodedRgba> {
+        let (size, canvas) = self.source.as_ref().map(|s| ((s.width, s.height), s.canvas))?;
+        let layout = match canvas {
+            Some(c) => Layout::on_canvas(Rect::full(size), c),
+            None => Layout::native(size, size),
+        };
+        let (sw, sh) = layout.out;
         self.ensure_encode_target(sw, sh);
 
         let params = Params {
@@ -110,6 +123,10 @@ impl Gpu {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            // The fullscreen triangle fills the viewport: the source, 1:1 unless a client
+            // area larger than the canvas is scaled down onto it.
+            let d = layout.dst;
+            pass.set_viewport(d.x as f32, d.y as f32, d.w as f32, d.h as f32, 0.0, 1.0);
             pass.set_pipeline(&self.encode_pipeline);
             pass.set_bind_group(0, &et.bind_group, &[]);
             pass.draw(0..3, 0..1);
@@ -155,6 +172,6 @@ impl Gpu {
             }
         }
         et.staging.unmap();
-        Some((sw, sh, out))
+        Some((sw, sh, out, layout.content()))
     }
 }

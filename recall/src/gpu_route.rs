@@ -29,12 +29,12 @@ pub(crate) fn install_gpu_sink(shared: &Arc<CaptureShared>, handle: &encoder::En
     let tx: GpuFramesTx = Arc::new(Mutex::new(Some(handle.frames.clone())));
     let frames = tx.clone();
     let stats = handle.stats.clone();
-    let send = move |pts_us: u64, gpu: gpu_frames::HwFrame| {
+    let send = move |pts_us: u64, gpu: gpu_frames::HwFrame, content: Option<crate::framing::Rect>| {
         if stats.gpu_refused.load(Relaxed) {
             return false;
         }
         let (width, height) = (gpu.width(), gpu.height());
-        let frame = encoder::PacedFrame { idx: pts_us, width, height, rgba: Vec::new(), gpu: Some(gpu) };
+        let frame = encoder::PacedFrame { idx: pts_us, width, height, rgba: Vec::new(), gpu: Some(gpu), content };
         let Ok(guard) = frames.lock() else { return false };
         let Some(frames) = guard.as_ref() else { return false };
         match frames.try_send(frame) {

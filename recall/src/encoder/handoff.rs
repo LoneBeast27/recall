@@ -5,11 +5,37 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use super::saver::{self, ms, SaveJob, SaverQueue, Timing, VideoSrc};
+use super::saver::{self, ms, RawFrame, SaveJob, SaverQueue, Timing, VideoSrc};
 use super::{Enc, EncStats, SaveRequest, StillSpec};
 use crate::audio::TrackRing;
 
 impl Enc {
+    /// The newest frame's picture without canvas bars, for thumbnails.
+    pub(super) fn thumb_of(&self, raw: &RawFrame) -> RawFrame {
+        match self.last_content {
+            Some(r) if r.clamp_to((raw.0, raw.1)) == Some(r) => {
+                let (w, h, rgba) = crate::framing::crop_rgba(raw.0, &raw.2, r);
+                (w, h, Arc::new(rgba))
+            }
+            _ => raw.clone(),
+        }
+    }
+
+    /// The newest frame as RGBA for thumbnails / stills (a GPU frame is read back now).
+    pub(super) fn raw_last(&self) -> Option<RawFrame> {
+        if let Some(frame) = &self.last_frame {
+            return Some(frame.clone());
+        }
+        let gpu = self.last_gpu.as_ref()?;
+        match crate::gpu_frames::read_rgba(gpu) {
+            Ok((w, h, rgba)) => Some((w, h, Arc::new(rgba))),
+            Err(e) => {
+                eprintln!("[recall] frame readback for the thumbnail failed: {e}");
+                None
+            }
+        }
+    }
+
     /// Detach everything a save needs from the live encoder: the ring window
     /// (refcounted payloads) or a still source, owned codec parameters, and
     /// each audio track's PCM snapshotted now, aligned to the video length.
@@ -69,7 +95,8 @@ impl Enc {
             video,
             backend: self.backend,
             audio,
-            thumb: raw,
+            // The still keeps the whole canvas frame; the thumbnail is the picture only.
+            thumb: raw.as_ref().map(|r| self.thumb_of(r)),
             width: self.width,
             height: self.height,
             fps: self.nominal_fps,

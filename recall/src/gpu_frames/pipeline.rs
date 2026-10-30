@@ -12,19 +12,24 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
 
 use super::av::{self, BufRef, DeviceLock, HwFrame};
+use crate::framing::{Layout, Rect};
 
 const SHADER: &str = include_str!("tonemap.hlsl");
 
-/// Matches `cbuffer Params` in tonemap.hlsl (two 16-byte registers).
+/// Matches `cbuffer Params` in tonemap.hlsl (three 16-byte registers).
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq)]
 struct Params {
     mode: u32,
     sdr_white: f32,
     hdr_white: f32,
-    _pad0: u32,
-    src_size: [i32; 2],
-    _pad1: [i32; 2],
+    scaled: u32,
+    src_rect: [i32; 4],
+    dst_rect: [i32; 4],
+}
+
+fn rect4(r: Rect) -> [i32; 4] {
+    [r.x as i32, r.y as i32, r.w as i32, r.h as i32]
 }
 
 /// A source copy for capture textures that cannot be bound as a shader resource.
@@ -40,6 +45,8 @@ pub struct Pipeline {
     vs: ID3D11VertexShader,
     ps: ID3D11PixelShader,
     raster: ID3D11RasterizerState,
+    /// Bilinear, clamped: only used when a client area is scaled down onto the canvas.
+    sampler: ID3D11SamplerState,
     params: ID3D11Buffer,
     last_params: Option<Params>,
     av_device: BufRef,
@@ -96,7 +103,7 @@ impl Pipeline {
         }
         let vs_code = compile(s!("vs_main"), s!("vs_5_0"))?;
         let ps_code = compile(s!("ps_main"), s!("ps_5_0"))?;
-        let (mut vs, mut ps, mut raster, mut params) = (None, None, None, None);
+        let (mut vs, mut ps, mut raster, mut sampler, mut params) = (None, None, None, None, None);
         unsafe {
             device.CreateVertexShader(blob(&vs_code), None, Some(&mut vs)).map_err(|e| format!("vertex shader: {e}"))?;
             device.CreatePixelShader(blob(&ps_code), None, Some(&mut ps)).map_err(|e| format!("pixel shader: {e}"))?;
@@ -107,6 +114,16 @@ impl Pipeline {
                 ..Default::default()
             };
             device.CreateRasterizerState(&rd, Some(&mut raster)).map_err(|e| format!("rasterizer: {e}"))?;
+            let sd = D3D11_SAMPLER_DESC {
+                Filter: D3D11_FILTER_MIN_MAG_MIP_LINEAR,
+                AddressU: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressV: D3D11_TEXTURE_ADDRESS_CLAMP,
+                AddressW: D3D11_TEXTURE_ADDRESS_CLAMP,
+                ComparisonFunc: D3D11_COMPARISON_NEVER,
+                MaxLOD: f32::MAX,
+                ..Default::default()
+            };
+            device.CreateSamplerState(&sd, Some(&mut sampler)).map_err(|e| format!("sampler: {e}"))?;
             let bd = D3D11_BUFFER_DESC {
                 ByteWidth: std::mem::size_of::<Params>() as u32,
                 Usage: D3D11_USAGE_DEFAULT,
@@ -123,6 +140,7 @@ impl Pipeline {
             vs: vs.ok_or("vertex shader missing")?,
             ps: ps.ok_or("pixel shader missing")?,
             raster: raster.ok_or("rasterizer missing")?,
+            sampler: sampler.ok_or("sampler missing")?,
             params: params.ok_or("constant buffer missing")?,
             last_params: None,
             av_device,
@@ -219,8 +237,10 @@ impl Pipeline {
         Ok(copy.view.clone())
     }
 
-    /// Tonemap `src` (`src_w`x`src_h` texels) into a fresh frame of `target` size.
-    pub fn render(&mut self, src: &ID3D11Texture2D, src_w: u32, src_h: u32, target: (u32, u32), mode: u32) -> Result<HwFrame, String> {
+    /// Tonemap `src` into a fresh frame of `layout.out` size: `layout.src` texels into
+    /// `layout.dst`, black around it.
+    pub fn render(&mut self, src: &ID3D11Texture2D, layout: &Layout, mode: u32) -> Result<HwFrame, String> {
+        let target = layout.out;
         let frames = self.frames_for(target.0, target.1)?;
         let frame = HwFrame::get(frames)?;
         let (tex, index) = frame.texture().ok_or("frame has no texture")?;
@@ -233,9 +253,9 @@ impl Pipeline {
             mode,
             sdr_white: 1.0,
             hdr_white: 6.0,
-            _pad0: 0,
-            src_size: [src_w as i32, src_h as i32],
-            _pad1: [0, 0],
+            scaled: u32::from(layout.src.size() != layout.dst.size()),
+            src_rect: rect4(layout.src),
+            dst_rect: rect4(layout.dst),
         };
         let ctx = &self.context;
         unsafe {
@@ -258,6 +278,7 @@ impl Pipeline {
             ctx.VSSetShader(&self.vs, None);
             ctx.PSSetShader(&self.ps, None);
             ctx.PSSetShaderResources(0, Some(&[Some(srv)]));
+            ctx.PSSetSamplers(0, Some(&[Some(self.sampler.clone())]));
             ctx.PSSetConstantBuffers(0, Some(&[Some(self.params.clone())]));
             ctx.Draw(3, 0);
             // Unbind so the capture texture is not held by the pipeline between frames.

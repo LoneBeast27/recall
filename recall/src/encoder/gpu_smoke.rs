@@ -12,6 +12,7 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R16G16B16A16_FLOAT, DXG
 use windows::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
 
 use super::{gpu_pool_of, open_encoder, saver, Config, EncStats, PacedFrame, SaveRequest};
+use crate::framing::Layout;
 use crate::gpu_frames::{hardware_device, read_rgba, target_size, Pipeline};
 
 const W: u32 = 2560;
@@ -85,11 +86,11 @@ pub fn gpu_smoke(out_dir: &std::path::Path) -> Result<String, String> {
     for i in 0..FRAMES {
         let target = target_size(pipe.target(), (W, H));
         let t = Instant::now();
-        let gpu = pipe.render(&sources[(i / 8 % 2) as usize], W, H, target, 0)?;
+        let gpu = pipe.render(&sources[(i / 8 % 2) as usize], &Layout::native((W, H), target), 0)?;
         let took = t.elapsed();
         render_sum += took;
         render_max = render_max.max(took);
-        let frame = PacedFrame { idx: i * 1_000_000 / 60, width: target.0, height: target.1, rgba: Vec::new(), gpu: Some(gpu) };
+        let frame = PacedFrame { idx: i * 1_000_000 / 60, width: target.0, height: target.1, rgba: Vec::new(), gpu: Some(gpu), content: None };
         // The live loop's reopen rule: a frame from another pool reopens NVENC.
         if enc.as_ref().is_some_and(|e| e.gpu_pool != gpu_pool_of(&frame)) {
             reopens += 1;

@@ -52,17 +52,22 @@ struct Source {
     bind_group: wgpu::BindGroup,
     width: u32,
     height: u32,
+    /// The windowed-game canvas the frame goes on (`capture::FrameData::canvas`).
+    canvas: Option<(u32, u32)>,
 }
 
-/// Offscreen tonemap target + readback staging for the encoder, recreated on
-/// source-resolution change. Same shader as the window pass, scale (1,1) —
-/// the clip is native capture resolution, WYSIWYG with the live SDR window.
+/// Offscreen tonemap target + readback staging for the encoder, recreated when its size or
+/// the source's changes. Same shader as the window pass, scale (1,1): the clip is native
+/// capture resolution, WYSIWYG with the live SDR window, or a windowed game's client area
+/// drawn (viewport) onto the canvas.
 struct EncodeTarget {
     view: wgpu::TextureView,
     bind_group: wgpu::BindGroup,
     staging: wgpu::Buffer,
     width: u32,
     height: u32,
+    /// Source size the bind group was made for (it references that texture).
+    source: (u32, u32),
     /// Row stride in the staging buffer (COPY_BYTES_PER_ROW_ALIGNMENT-padded).
     padded_bpr: u32,
     // Kept alive for the view's lifetime.
@@ -284,9 +289,9 @@ impl Gpu {
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// Resolution of the currently uploaded captured frame, if any.
-    pub fn source_size(&self) -> Option<(u32, u32)> {
-        self.source.as_ref().map(|s| (s.width, s.height))
+    /// Size of the frames this path encodes (the canvas for a windowed game), if any.
+    pub fn output_size(&self) -> Option<(u32, u32)> {
+        self.source.as_ref().map(|s| s.canvas.unwrap_or((s.width, s.height)))
     }
 
     /// Capture timestamp of the uploaded source; repeated redraws keep the same value.
@@ -337,6 +342,7 @@ impl Gpu {
             bind_group,
             width,
             height,
+            canvas: None,
         });
     }
 
@@ -347,6 +353,9 @@ impl Gpu {
         };
         self.ensure_source(data.width, data.height);
         self.source_pts_us = Some(data.pts_us);
+        if let Some(source) = &mut self.source {
+            source.canvas = data.canvas;
+        }
 
         let params = Params {
             mode: self.shared.mode.load(Ordering::Relaxed),
