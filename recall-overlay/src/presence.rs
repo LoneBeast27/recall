@@ -14,8 +14,20 @@ pub const POP: Duration = Duration::from_millis(150);
 pub const UNRAVEL: Duration = Duration::from_millis(250);
 /// The content fades out this long (from full) before the pill rolls up.
 pub const FADE_OUT: Duration = Duration::from_millis(150);
+/// The instant style's window fade (in and out).
+pub const FADE_IN: Duration = Duration::from_millis(120);
 /// Ease-out-back constant: the circle overshoots its size by ≈5.7%.
 const BACK: f32 = 1.25;
+
+/// How the island appears from nothing and leaves.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Style {
+    /// The circle pops in and unravels (and rolls back up).
+    Unravel,
+    /// The open pill with its content, the window fading in (and out) in
+    /// `FADE_IN`: for what must be readable at once.
+    Instant,
+}
 
 fn open_for() -> f32 {
     (POP + UNRAVEL).as_secs_f32()
@@ -38,34 +50,56 @@ pub struct Presence {
     /// When the motion (re)started; a hide waits here for the content fade.
     at: Instant,
     opening: bool,
+    style: Style,
 }
 
 impl Presence {
     pub fn hidden(now: Instant) -> Self {
-        Self { from: 0.0, at: now, opening: false }
+        Self { from: 0.0, at: now, opening: false, style: Style::Unravel }
+    }
+
+    fn span(&self) -> Duration {
+        match self.style {
+            Style::Unravel => POP + UNRAVEL,
+            Style::Instant => FADE_IN,
+        }
     }
 
     pub fn progress(&self, now: Instant) -> f32 {
-        let moved = now.saturating_duration_since(self.at).as_secs_f32() / open_for();
+        let moved = now.saturating_duration_since(self.at).as_secs_f32() / self.span().as_secs_f32();
         if self.opening { (self.from + moved).min(1.0) } else { (self.from - moved).max(0.0) }
     }
 
-    /// Open (again), from wherever it is now.
-    pub fn show(&mut self, now: Instant) {
-        *self = Self { from: self.progress(now), at: now, opening: true };
+    /// Open (again) in `style`, from wherever it is now.
+    pub fn show(&mut self, now: Instant, style: Style) {
+        *self = Self { from: self.progress(now), at: now, opening: true, style };
     }
 
-    /// Close: an open pill waits `fade` for its content to fade out first.
+    /// Close: an open, unravelled pill waits `fade` for its content to fade
+    /// out first; an instant one fades with its window.
     pub fn hide(&mut self, now: Instant, fade: Duration) {
         let from = self.progress(now);
-        let at = if from >= 1.0 { now + fade } else { now };
-        *self = Self { from, at, opening: false };
+        let at = if from >= 1.0 && self.style == Style::Unravel { now + fade } else { now };
+        *self = Self { from, at, opening: false, style: self.style };
     }
 
     /// When an opening pill is (or was) fully open.
     pub fn opened_at(&self) -> Instant {
-        let left = (1.0 - self.from).max(0.0) as f64 * (POP + UNRAVEL).as_nanos() as f64;
+        let left = (1.0 - self.from).max(0.0) as f64 * self.span().as_nanos() as f64;
         self.at + Duration::from_nanos(left.round() as u64)
+    }
+
+    /// The content may fade in from here (`None`: at once, with the window).
+    pub fn text_ready(&self) -> Option<Instant> {
+        (self.style == Style::Unravel).then(|| self.opened_at())
+    }
+
+    /// The window's opacity: the instant style fades it; the circle does not.
+    pub fn window_alpha(&self, now: Instant) -> f32 {
+        match self.style {
+            Style::Unravel => 1.0,
+            Style::Instant => ease_out(self.progress(now)),
+        }
     }
 
     pub fn gone(&self, now: Instant) -> bool {
@@ -80,6 +114,9 @@ impl Presence {
     /// (circle scale, unravel) at `now`: the circle pops to its size first,
     /// then unrolls into the pill.
     pub fn shape(&self, now: Instant) -> (f32, f32) {
+        if self.style == Style::Instant {
+            return (1.0, 1.0);
+        }
         let (p, share) = (self.progress(now), pop_share());
         if p < share {
             (ease_out_back(p / share), 0.0)
@@ -107,6 +144,8 @@ pub struct Look {
     pub pop: f32,
     pub alpha: f32,
     pub content_alpha: f32,
+    /// The title line's opacity (≤ `content_alpha`; it fades alone when only it changed).
+    pub title_alpha: f32,
     pub icon_alpha: f32,
 }
 
@@ -126,7 +165,7 @@ impl Look {
             let pw = h + (w - h).max(0.0) * unroll;
             (pw, [0.0, 0.0, pw, h], 0.0)
         };
-        Self { box_w, box_h: h, margin, pill, full_w: w, unroll, pop, alpha: frame.alpha, content_alpha: 1.0, icon_alpha: 1.0 }
+        Self { box_w, box_h: h, margin, pill, full_w: w, unroll, pop, alpha: frame.alpha, content_alpha: 1.0, title_alpha: 1.0, icon_alpha: 1.0 }
     }
 
     /// The window's size in whole pixels.

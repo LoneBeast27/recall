@@ -39,7 +39,8 @@ impl Rig {
     /// Stats on and showing, settled, at `now`.
     fn new(now: Instant) -> Self {
         let mut rig = Self { reducer: Reducer::new(), island: Island::new(now - Duration::from_secs(1)) };
-        let status = json!({"mod":"session","event":{"type":"status","state":"recording","overlay_stats":true,"overlay":{"enabled":true}}});
+        let status = json!({"mod":"session","event":{"type":"status","state":"recording","overlay_stats":true,"overlay":{"enabled":true},
+            "target":{"name":"VALORANT","exe":"VALORANT-Win64-Shipping.exe","pid":42}}});
         rig.reducer.apply_envelope(&status, now - Duration::from_secs(1));
         rig.refresh(now - Duration::from_secs(1));
         rig
@@ -74,7 +75,7 @@ fn saving_spins_the_ring_then_saved_closes_fills_ticks_and_sweeps_once() {
     let mut rig = Rig::new(now);
     rig.send(&saving(30), now);
     let notice = rig.notice().expect("the saving pill");
-    assert_eq!((notice.title.as_str(), notice.detail.as_str(), notice.tone), ("Saving", "0:30…", Tone::Recording));
+    assert_eq!((notice.title.as_str(), notice.detail.as_str(), notice.tone), ("Saving", "VALORANT · 0:30", Tone::Recording));
     assert!(notice.game_font && notice.emphasis && notice.save == Some(SavePhase::Saving));
     assert_eq!(rig.island.frame(now + ms(420)), Frame { w: GROWN.0, h: GROWN.1, alpha: 1.0 }, "transformed at once");
     let ring = rig.island.badge(now + ms(500)).expect("the ring");
@@ -147,7 +148,7 @@ fn a_second_save_while_saving_keeps_the_ring_and_extends_the_wait() {
     rig.send(&saving(30), now);
     let alone = rig.island.badge(now + ms(800)).unwrap();
     rig.send(&saving(60), now + ms(700));
-    assert_eq!(rig.notice().unwrap().detail, "1:00…", "the newer length shows");
+    assert_eq!(rig.notice().unwrap().detail, "VALORANT · 1:00", "the newer length shows");
     assert_eq!(rig.island.badge(now + ms(800)), Some(alone), "the ring is not restarted");
     rig.refresh(now + SAVING_FOR + ms(500));
     assert!(rig.notice().is_some(), "30 s from the second save");
@@ -167,4 +168,42 @@ fn from_nothing_the_saving_ring_shows_in_the_circle_before_the_pill_opens() {
     let circle = island.look(now + ms(120), f32::INFINITY);
     assert!(circle.unroll == 0.0 && circle.icon_alpha == 1.0, "still the circle, mark showing");
     assert!(island.badge(now + ms(120)).unwrap().sweep > 0.0, "the ring is already drawing in");
+}
+
+#[test]
+fn when_the_clip_lands_only_the_title_changes_and_nothing_moves() {
+    let now = Instant::now();
+    let mut rig = Rig::new(now);
+    rig.send(&saving(30), now);
+    let landed = now + ms(1_800);
+    let before = rig.island.look(landed - ms(1), f32::INFINITY);
+    rig.send(&saved(), landed);
+    assert_eq!(rig.notice().unwrap().detail, "VALORANT · 0:30", "the same detail line");
+    for t in [0, 50, 100, 200, 420] {
+        let look = rig.island.look(landed + ms(t), f32::INFINITY);
+        assert_eq!((look.box_w, look.box_h, look.full_w), (before.box_w, before.box_h, before.full_w), "no resize at {t} ms");
+        assert_eq!((look.content_alpha, look.icon_alpha), (1.0, 1.0), "detail and mark stay lit at {t} ms");
+    }
+    assert_eq!(rig.island.look(landed, f32::INFINITY).title_alpha, 0.0, "the new title word fades in");
+    assert!(rig.island.look(landed + ms(100), f32::INFINITY).title_alpha > 0.5);
+    assert!(rig.island.sheen(landed + ms(100)).is_none() && rig.island.badge(landed).is_some());
+}
+
+#[test]
+fn a_saved_clip_for_another_game_springs_to_its_width_without_a_jump() {
+    let now = Instant::now();
+    let mut island = Island::new(now - Duration::from_secs(1));
+    let stage = |phase, title: &str, detail: &str| {
+        let tone = if phase == SavePhase::Saving { Tone::Recording } else { Tone::Success };
+        Content::Notice(NoticeView::new(tone, title, detail, true).emphasized().saving(phase))
+    };
+    island.update(Some((stage(SavePhase::Saving, "Saving", "VALORANT · 0:30"), 300.0, 58.0)), now - Duration::from_secs(1));
+    let landed = now;
+    island.update(Some((stage(SavePhase::Saved, "Clip saved", "Rocket League · 0:30"), 360.0, 58.0)), landed);
+    assert_eq!(island.frame(landed).w, 300.0, "starts from the saving width");
+    let widths: Vec<f32> = (0..=84).map(|i| island.frame(landed + ms(i * 5)).w).collect();
+    let step = widths.windows(2).map(|p| (p[1] - p[0]).abs()).fold(0.0, f32::max);
+    assert!(step < 8.0, "continuous: largest 5 ms step {step}");
+    assert_eq!(island.frame(landed + crate::anim::SPRING_FOR).w, 360.0);
+    assert_eq!(island.look(landed, f32::INFINITY).content_alpha, 0.0, "a new detail line fades in");
 }

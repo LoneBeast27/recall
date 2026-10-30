@@ -18,6 +18,7 @@ use crate::export_sim::{Atlas, Sim};
 use crate::fonts::Fonts;
 use crate::layout::stats_scene;
 use crate::placement::{position, scale, window_origin, Rect, Spots, EDGE, ISLAND_H};
+use crate::presence::Style;
 use crate::preview::stats_states;
 use crate::render::Renderer;
 
@@ -36,8 +37,10 @@ fn ms(k: u64) -> f64 {
     (step_at(k).as_secs_f64() * 1e6).round() / 1e3
 }
 
+/// The controller's session status: recording VALORANT, the stats toggle.
 fn status(stats: bool) -> Value {
-    json!({"mod":"session","event":{"type":"status","state":"recording","overlay_stats":stats,"overlay":{"enabled":true}}})
+    json!({"mod":"session","event":{"type":"status","state":"recording","overlay_stats":stats,"overlay":{"enabled":true},
+        "target":{"name":"VALORANT","exe":"VALORANT-Win64-Shipping.exe","pid":42}}})
 }
 
 struct Spec {
@@ -50,6 +53,8 @@ struct Spec {
     events: Vec<(u64, Value)>,
     /// When the save's outcome lands (ms), if the sequence has one.
     saved_ms: Option<u64>,
+    /// The shortcut hint's appear style for this run (else the code's default).
+    hint: Option<Style>,
 }
 
 fn specs() -> Vec<Spec> {
@@ -58,7 +63,11 @@ fn specs() -> Vec<Spec> {
     let saving = json!({"mod":"session","event":{"type":"saving","seconds":30}});
     let (clip, fail) = ("Clip saved · VALORANT · 0:30", "Save failed · the output folder is unavailable");
     let at = |ms: u64, v: &Value| (ms, v.clone());
-    let spec = |name, notice, stats, legacy, events: Vec<(u64, Value)>, saved_ms| Spec { name, notice, stats, legacy, events, saved_ms };
+    let chord = json!({"mod":"session","event":{"type":"chord","active":true,"leader":"Alt `","options":[
+        {"key":"1","label":"Bookmark"},{"key":"2","label":"Save 30 s"},{"key":"3","label":"Screenshot"},
+        {"key":"4","label":"Record"},{"key":"5","label":"Performance stats"}]}});
+    let spec = |name, notice, stats, legacy, events: Vec<(u64, Value)>, saved_ms| Spec { name, notice, stats, legacy, events, saved_ms, hint: None };
+    let hint = |name, style| Spec { hint: Some(style), ..spec(name, "Shortcut hint (Alt ` then a key)", false, false, vec![at(0, &chord)], None) };
     vec![
         spec("new-save", clip, true, false, vec![at(0, &saved)], Some(0)),
         spec("old-save", clip, true, true, vec![at(0, &saved)], Some(0)),
@@ -72,6 +81,8 @@ fn specs() -> Vec<Spec> {
         spec("ring-save-nostats", clip, false, false, vec![at(0, &saving), at(1_800, &saved)], Some(1_800)),
         spec("stats-on", "Stats on", false, false, vec![at(0, &status(true))], None),
         spec("stats-off", "Stats off", true, false, vec![at(0, &status(false))], None),
+        hint("hint-circle", Style::Unravel),
+        hint("hint-instant", Style::Instant),
     ]
 }
 
@@ -92,6 +103,9 @@ fn record(spec: &Spec, renderer: &mut Renderer, fonts: &Fonts, atlas: &mut Atlas
     let spot = Spots::embedded().lookup("valorant");
     let start = Instant::now();
     let mut sim = Sim::new(fonts, spot, MONITOR, scale(MONITOR.height(), &spot), spec.legacy, start);
+    if let Some(style) = spec.hint {
+        sim.island.hint_style = style;
+    }
     let engine = json!({"mod":"engine","event":{"type":"status","source":"VALORANT","fps":60,"buffer_secs":120.0,"encoder":"h264_nvenc"}});
     sim.reducer.apply_envelope(&status(spec.stats), start);
     sim.reducer.apply_envelope(&engine, start);
@@ -141,6 +155,7 @@ fn sequence(spec: &Spec, run: &Run, place: &dyn Fn((usize, f32, f32)) -> Value) 
         .collect();
     json!({
         "notice": spec.notice, "stats_before": spec.stats, "legacy": spec.legacy,
+        "hint_style": spec.hint.map(|s| if s == Style::Instant { "instant" } else { "circle" }),
         "events_ms": spec.events.iter().map(|(at, v)| json!({"t_ms": at, "event": v})).collect::<Vec<_>>(),
         "saved_ms": spec.saved_ms,
         "rest": run.rest.map(place),

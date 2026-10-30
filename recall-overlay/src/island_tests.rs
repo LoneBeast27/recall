@@ -259,3 +259,33 @@ fn a_notice_from_nothing_carries_its_mark_in_the_circle_and_sweeps_once_open() {
     let first = swept.iter().position(|s| *s).expect("a sweep");
     assert!(first * 20 >= 400 + 60, "it starts once the pill is open: {} ms", first * 20);
 }
+
+fn hint() -> Content {
+    let chord = NoticeView::new(Tone::Neutral, "1 Bookmark · 2 Save 30 s", "3 Screenshot · 4 Record", false);
+    Content::Notice(NoticeView { chord: true, ..chord })
+}
+
+#[test]
+fn the_shortcut_hint_appears_at_once_readable_with_a_short_window_fade() {
+    let now = Instant::now();
+    let mut island = Island::new(now);
+    island.update(Some((hint(), 260.0, H)), now);
+    let first = island.look(now, f32::INFINITY);
+    assert_eq!((first.unroll, first.box_w, first.content_alpha), (1.0, 260.0, 1.0), "the open pill, options readable");
+    assert_eq!(first.alpha, 0.0, "the window fades in");
+    assert_eq!(island.look(now + ms(120), f32::INFINITY).alpha, 1.0, "in 120 ms");
+    let hide = now + ms(1_500);
+    island.update(None, hide);
+    assert!(island.look(hide + ms(60), f32::INFINITY).alpha < 1.0);
+    assert!(island.tick(hide + ms(150)), "gone within 150 ms, no roll-up");
+}
+
+#[test]
+fn the_circle_style_for_the_hint_stays_available() {
+    let now = Instant::now();
+    let mut island = Island::new(now);
+    island.hint_style = Style::Unravel;
+    island.update(Some((hint(), 260.0, H)), now);
+    let circle = island.look(now + ms(100), f32::INFINITY);
+    assert_eq!((circle.unroll, circle.box_w, circle.content_alpha), (0.0, H, 0.0));
+}

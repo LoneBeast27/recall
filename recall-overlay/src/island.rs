@@ -13,7 +13,12 @@ use crate::badge::{Badge, SaveMark, SWEEP_AFTER};
 use crate::cue::{Cue, Sheen, CUE_DELAY};
 use crate::layout::{notice_scene, tone_color, Measure, Scene, StatsContent};
 use crate::notice::{NoticeView, SavePhase};
-use crate::presence::{Look, Presence, FADE_OUT};
+use crate::presence::{Look, Presence, Style, FADE_OUT};
+
+/// The two-step shortcut hint appears without the circle: it answers a key
+/// press and its options must be readable within the 1.5 s chord window
+/// (the circle's text shows at ~0.6 s). `--export-frames` renders both.
+pub const HINT_STYLE: Style = Style::Instant;
 use crate::reducer::{OverlayView, RecorderState, Reducer};
 use crate::session::Session;
 use crate::stats::frame_timing::FpsSource;
@@ -129,6 +134,8 @@ pub struct Island {
     showing: bool,
     /// When the drawn content last changed (drives its fade-in).
     swapped_at: Instant,
+    /// The title line fades in from here (alone, when only it changed).
+    title_since: Instant,
     /// The mark fades in from here (it shows at once with a fresh circle).
     icon_since: Instant,
     /// The content's opacity when a hide began (it fades out from there).
@@ -137,6 +144,8 @@ pub struct Island {
     cue: Option<Cue>,
     /// A clip save's shutter ring.
     mark: Option<SaveMark>,
+    /// How the shortcut hint appears from nothing (`HINT_STYLE`).
+    pub(crate) hint_style: Style,
 }
 
 impl Island {
@@ -148,10 +157,20 @@ impl Island {
             shown: false,
             showing: false,
             swapped_at: now,
+            title_since: now,
             icon_since: now,
             fade_from: (now, 0.0),
             cue: None,
             mark: None,
+            hint_style: HINT_STYLE,
+        }
+    }
+
+    /// How `content` appears from nothing.
+    fn style_for(&self, content: &Content) -> Style {
+        match content {
+            Content::Notice(notice) if notice.chord => self.hint_style,
+            _ => Style::Unravel,
         }
     }
 
@@ -175,12 +194,12 @@ impl Island {
             self.tween.retarget(target, now);
         }
         if !self.showing {
-            self.presence.show(now);
+            self.presence.show(now, self.style_for(&content));
         }
         self.showing = true;
         self.shown = true;
         if swapped {
-            self.swap(content, open, now);
+            self.swap(content, open, fresh, now);
         }
     }
 
@@ -195,7 +214,9 @@ impl Island {
     }
 
     /// New content: its fade-in, the save mark, and an action's one sweep.
-    fn swap(&mut self, content: Content, open: bool, now: Instant) {
+    /// A save moving on a stage with the same detail line changes only its
+    /// title: the rest stays put and lit.
+    fn swap(&mut self, content: Content, open: bool, fresh: bool, now: Instant) {
         let save = match &content {
             Content::Notice(notice) => notice.save,
             Content::Stats => None,
@@ -218,8 +239,17 @@ impl Island {
                 self.cue = Some(Cue { start: now, color: tone_color(notice.tone), delay: open.max(fill) });
             }
         }
+        let same_detail = matches!((&self.content, &content), (Some(Content::Notice(a)), Content::Notice(b)) if a.detail == b.detail);
+        self.title_since = now;
+        if !(continuing && same_detail) {
+            // An instant appear shows its content with the window, no fade.
+            let at_once = fresh && self.presence.text_ready().is_none();
+            self.swapped_at = if at_once { now.checked_sub(DURATION).unwrap_or(now) } else { now };
+            if at_once {
+                self.title_since = self.swapped_at;
+            }
+        }
         self.content = Some(content);
-        self.swapped_at = now;
     }
 
     /// Advance; returns true when the window just finished hiding.
@@ -245,8 +275,16 @@ impl Island {
         let frame = self.frame(now);
         let frame = Frame { h: frame.h.min(max_h), ..frame };
         let (pop, unroll) = self.presence.shape(now);
-        let icon_alpha = ease_out(now.saturating_duration_since(self.icon_since).as_secs_f32() / DURATION.as_secs_f32());
-        Look { content_alpha: self.content_alpha(now), icon_alpha, ..Look::shaped(frame, pop, unroll) }
+        let fade_in = |since: Instant| ease_out(now.saturating_duration_since(since).as_secs_f32() / DURATION.as_secs_f32());
+        let content_alpha = self.content_alpha(now);
+        let shaped = Look::shaped(frame, pop, unroll);
+        Look {
+            alpha: shaped.alpha * self.presence.window_alpha(now),
+            content_alpha,
+            title_alpha: content_alpha.min(fade_in(self.title_since)),
+            icon_alpha: fade_in(self.icon_since),
+            ..shaped
+        }
     }
 
     pub fn shown(&self) -> bool {
@@ -266,7 +304,10 @@ impl Island {
             let gone = if fade <= 0.0 { 1.0 } else { now.saturating_duration_since(at).as_secs_f32() / fade };
             return from * (1.0 - gone.min(1.0));
         }
-        let start = self.swapped_at.max(self.presence.opened_at());
+        let start = match self.presence.text_ready() {
+            Some(open) => self.swapped_at.max(open),
+            None => self.swapped_at,
+        };
         let since = now.checked_duration_since(start).map_or(0.0, |d| d.as_secs_f32());
         ease_out(since / DURATION.as_secs_f32())
     }

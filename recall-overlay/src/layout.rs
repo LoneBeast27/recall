@@ -216,6 +216,9 @@ fn pen(s: f32, m: &dyn Measure) -> Pen<'_> {
     Pen { s, m, scene: Scene { h: ISLAND_H * s, ..Scene::default() } }
 }
 
+/// A clip save's titles, stage by stage.
+pub const SAVE_TITLES: [&str; 3] = ["Saving", "Clip saved", "Save failed"];
+
 /// Mark + small title over a bold detail (or a single bold line).
 pub fn notice_scene(notice: &NoticeView, s: f32, m: &dyn Measure) -> Scene {
     let mut p = pen(s, m);
@@ -237,7 +240,10 @@ pub fn notice_scene(notice: &NoticeView, s: f32, m: &dyn Measure) -> Scene {
         let (b1, b2) = p.two_lines((Role::NoticeTitle, &notice.title), (detail_role, &notice.detail), p.u(5.5));
         p.text_at_baseline(Role::NoticeTitle, &notice.title, x, b1, MUTED);
         p.text_at_baseline(detail_role, &notice.detail, x, b2, TEXT);
-        p.width(Role::NoticeTitle, &[&notice.title]).max(p.width(detail_role, &[&notice.detail]))
+        // A save's title changes word by stage: room for the widest, so the
+        // pill and the content never move when the clip lands.
+        let titles: &[&str] = if notice.save.is_some() { &[&notice.title, SAVE_TITLES[0], SAVE_TITLES[1], SAVE_TITLES[2]] } else { &[&notice.title] };
+        p.width(Role::NoticeTitle, titles).max(p.width(detail_role, &[&notice.detail]))
     };
     p.scene.w = (x + text_w + pad_r).max(p.scene.h * 2.0).ceil();
     p.scene

@@ -4,13 +4,13 @@
 //! (160 ms), the dot grows from the inner dot to fill the ring in the success
 //! green (220 ms from 120 ms) and a tick draws over it (240 ms from 260 ms).
 //! A failed save closes the ring in the failure colour, no fill, no tick.
-//! Tones only: record red, success green, failure colour, the text white.
+//! Tones only: record red, success green, failure colour, the pill's dark.
 
 use std::f32::consts::{PI, TAU};
 use std::time::{Duration, Instant};
 
 use crate::anim::ease_out;
-use crate::layout::{Rgba, ACTIVE, ERROR, SIGNAL, TEXT};
+use crate::layout::{Rgba, ACTIVE, ERROR, PILL, SIGNAL};
 use crate::notice::SavePhase;
 
 pub const TURN: Duration = Duration::from_millis(900);
@@ -26,8 +26,9 @@ pub const TICK_FOR: Duration = Duration::from_millis(240);
 pub const SETTLED: Duration = Duration::from_millis(500);
 /// The light sweep after a save lands waits for the fill.
 pub const SWEEP_AFTER: Duration = Duration::from_millis(340);
-/// The tick's colour: the theme's white.
-pub const TICK: Rgba = TEXT;
+/// The tick's colour: the pill's own dark, cut into the green (≈9.6:1;
+/// the user's pick over white, 2026-10-30).
+pub const TICK: Rgba = Rgba { rgb: PILL.rgb, a: 1.0 };
 
 /// One frame of the badge. Angles in radians clockwise from 12 o'clock;
 /// sizes in dot radii (the ring is 2, its stroke 0.5).
