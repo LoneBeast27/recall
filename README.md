@@ -111,13 +111,24 @@ powershell -NoProfile -File C:/Users/rohan/.claude/tools/nice-build.ps1 cargo te
 ```
 
 After any change to playback, editing or layout, run the viewer check against the release
-build. It drives the real app with key and mouse input and times the player's responses:
+build. Each scenario starts a private Recall instance behind all windows (it never takes focus,
+and has its own settings, library, cache and control pipe), drives it with the inputs a person
+uses -- Space, J/K/L, arrows, the play button, the timeline, trim handles, tools, speed, the
+Library -- and checks from the app's trace that the clock *and the picture* move, start where
+they should and stop where they should:
 
 ```powershell
-powershell -NoProfile -File scripts\dev\viewer-check.ps1
+powershell -NoProfile -File scripts\dev\viewer-check.ps1 [-ShortClip <~10 s clip>] [-Only '*end*']
 ```
 
-Scenario 8 plays a SteelSeries Moments clip and checks its sound. Moments stamps its audio frames
+The player rules it holds the app to: play inside a kept part plays from the playhead; play in a
+cut or at a segment's end plays from the next segment; play at the end of the last segment (or
+after the clip finished) starts over from the first kept frame. The picture is never sent past
+its last frame: a clip's sound usually runs ~15 ms longer than its picture, and a seek past the
+picture's end used to freeze the video for good (2026-10-30, "trimmed and player stopped
+working", "completing the clip watch doesnt play again").
+
+The Moments scenario plays a SteelSeries Moments clip and checks its sound. Moments stamps its audio frames
 1000 or 1100 ticks apart instead of 1024; the editor used to follow those stamps and played
 choppy audio (fixed 2026-10-27: samples stay back to back unless the stamps drift by more than
 40 ms). `RECALL_AUDIO_SOAK=<folder of stems> cargo test audio_soak -- --ignored --nocapture`
