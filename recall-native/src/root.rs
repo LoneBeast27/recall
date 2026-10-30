@@ -31,6 +31,18 @@ pub enum Route {
     Settings,
 }
 
+impl Route {
+    pub fn name(self) -> &'static str {
+        match self {
+            Route::Library => "library",
+            Route::Editor => "editor",
+            Route::Hdr => "hdr",
+            Route::Audio => "audio",
+            Route::Settings => "settings",
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ToastKind {
     Good,
@@ -191,9 +203,7 @@ impl Root {
             changed = true;
         }
         changed |= self.ed.tick(self.route == Route::Editor, &self.workers);
-        if self.route == Route::Editor {
-            crate::trace::record(&self.ed);
-        }
+        crate::trace::record(self.route.name(), &self.ed);
         if let Some(error) = self.ed.last_error.take() {
             self.show_toast(ToastKind::Bad, "Preview", Some(error));
             changed = true;
@@ -329,6 +339,7 @@ impl Root {
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        crate::trace::clear_targets();
         // Meters and playback animate at the display refresh rate, not the 30 ms poll.
         if self.route == Route::Audio || (self.route == Route::Editor && self.ed.playing) {
             window.request_animation_frame();

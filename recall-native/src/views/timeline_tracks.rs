@@ -49,6 +49,7 @@ impl Root {
                     .absolute()
                     .inset_0(),
             )
+            .child(crate::trace::target("tracks"))
             .child(self.render_ruler(duration))
             .child(self.render_filmstrip(lanes_top));
 
@@ -260,6 +261,7 @@ fn selected_segment(start: f32, end: f32, top: f32, height: f32, index: usize, c
             .items_center()
             .justify_center()
             .child(div().w(px(1.)).h(px(12.)).bg(c(theme::BASE)))
+            .child(crate::trace::target(id))
     };
     div()
         .absolute()

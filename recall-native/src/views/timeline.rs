@@ -61,6 +61,7 @@ impl Root {
                 .child(icon(kind, 15., theme::MUTED))
                 .child(label)
                 .child(ui::kbd(key))
+                .child(crate::trace::target(id))
         };
         div()
             .h(px(44.))

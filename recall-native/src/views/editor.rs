@@ -142,6 +142,7 @@ impl Root {
                             .cursor_pointer()
                             .hover(|s| s.bg(c(0xffffff)))
                             .child(icon(if playing { Icon::Pause } else { Icon::Play }, 16., theme::BASE))
+                            .child(crate::trace::target("play"))
                             .on_click(cx.listener(|this, _, _, cx| {
                                 this.ed.toggle_play();
                                 cx.notify();
