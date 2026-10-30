@@ -1,5 +1,6 @@
 //! Screenshot hotkey. The stdin thread only raises a flag; the render thread
-//! reads back the frame the encoder sees (tonemapped SDR RGBA, `Gpu::encode_frame`)
+//! reads back the frame the encoder sees (tonemapped SDR RGBA, `Gpu::encode_frame`;
+//! a windowed game's client area only, without the canvas bars)
 //! once, and the `recall-screenshot` thread PNG-encodes it in memory and writes
 //! `<out_dir>\screenshots\<Game>__<date>__<time>.png` in a single write (via
 //! `.part` + rename). Nothing here runs on the encoder thread.

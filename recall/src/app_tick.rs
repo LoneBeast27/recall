@@ -9,8 +9,17 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow};
 
 #[cfg(feature = "encode")]
 use crate::{audio, encoder};
+use crate::framing::{self, Rect};
 use crate::{capture, hdr, protocol, source};
 use crate::{App, IDLE_TICK, PERIODIC};
+
+/// A screenshot is the picture only: a windowed game's canvas bars are cut off.
+fn picture(w: u32, h: u32, rgba: Vec<u8>, content: Option<Rect>) -> (u32, u32, Vec<u8>) {
+    match content {
+        Some(r) if r.clamp_to((w, h)) == Some(r) => framing::crop_rgba(w, &rgba, r),
+        _ => (w, h, rgba),
+    }
+}
 
 impl App {
     /// Encode each newly uploaded capture once, retaining its native timestamp.
@@ -25,7 +34,7 @@ impl App {
         if self.last_encoded_pts == Some(pts_us) {
             return;
         }
-        let Some((w, h, rgba)) = gpu.encode_frame() else {
+        let Some((w, h, rgba, content)) = gpu.encode_frame() else {
             return;
         };
         self.last_encoded_pts = Some(pts_us);
@@ -36,6 +45,7 @@ impl App {
                 height: h,
                 rgba,
                 gpu: None,
+                content,
             })
         {
             enc.stats.backend.store(3, Relaxed);
@@ -46,7 +56,8 @@ impl App {
     }
 
     /// A pending screenshot reads the current frame back once (the same
-    /// tonemapped RGBA the encoder gets) and hands it to the PNG thread.
+    /// tonemapped RGBA the encoder gets, without the canvas bars of a windowed
+    /// game) and hands it to the PNG thread.
     pub(super) fn screenshot_tick(&mut self) {
         let Some(shots) = &self.shots else { return };
         if !shots.take_request() {
@@ -54,8 +65,10 @@ impl App {
         }
         #[cfg(feature = "encode")]
         if self.gpu.is_none() {
-            let latest = self.shared.as_ref().and_then(|s| s.latest_gpu.lock().ok().and_then(|f| f.as_ref().and_then(|f| f.try_clone())));
-            match latest.map(|f| crate::gpu_frames::read_rgba(&f)) {
+            let latest = self.shared.as_ref().and_then(|s| {
+                s.latest_gpu.lock().ok().and_then(|f| f.as_ref().and_then(|(f, c)| Some((f.try_clone()?, *c))))
+            });
+            match latest.map(|(f, c)| crate::gpu_frames::read_rgba(&f).map(|(w, h, rgba)| picture(w, h, rgba, c))) {
                 Some(Ok((w, h, rgba))) => shots.submit(w, h, rgba, &self.source_name),
                 Some(Err(e)) => shots.fail(&format!("frame readback failed: {e}")),
                 None => shots.fail("no captured frame yet"),
@@ -63,7 +76,10 @@ impl App {
             return;
         }
         match self.gpu.as_mut().and_then(|g| g.encode_frame()) {
-            Some((w, h, rgba)) => shots.submit(w, h, rgba, &self.source_name),
+            Some((w, h, rgba, content)) => {
+                let (w, h, rgba) = picture(w, h, rgba, content);
+                shots.submit(w, h, rgba, &self.source_name)
+            }
             None => shots.fail("no captured frame yet"),
         }
     }
@@ -200,7 +216,7 @@ impl App {
         let (width, height) = self
             .gpu
             .as_ref()
-            .and_then(|g| g.source_size())
+            .and_then(|g| g.output_size())
             .or_else(|| shared.gpu_size.lock().ok().and_then(|s| *s))
             .unwrap_or((0, 0));
         let mode = if shared.mode.load(Relaxed) == capture::MODE_TONEMAP {

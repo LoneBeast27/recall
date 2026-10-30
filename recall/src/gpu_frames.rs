@@ -46,8 +46,9 @@ pub fn hardware_device() -> Option<(
 /// reopening the encoder (encoder/frame_fit.rs keeps the same rule for CPU frames).
 pub const MAX_JITTER_PIXELS: u32 = 8;
 
-/// Encoder frame size for a `src` capture: the current size while the source stays within
-/// [`MAX_JITTER_PIXELS`] of it, else the source cropped to even dimensions (NVENC).
+/// Encoder frame size for a `src` capture recorded at its own size (not on the windowed-game
+/// canvas, `framing`): the current size while the source stays within [`MAX_JITTER_PIXELS`]
+/// of it, else the source cropped to even dimensions (NVENC).
 pub fn target_size(current: Option<(u32, u32)>, src: (u32, u32)) -> (u32, u32) {
     if let Some((w, h)) = current {
         if src.0.abs_diff(w) <= MAX_JITTER_PIXELS && src.1.abs_diff(h) <= MAX_JITTER_PIXELS {

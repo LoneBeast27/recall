@@ -6,13 +6,22 @@
 //! with no CPU readback. When that path cannot start (or `RECALL_DUMP*` asks for fp16
 //! pixels) the frame is read back to the CPU and parked in a shared slot for the render
 //! thread to upload + tonemap (the Phase-0 path).
+//!
+//! A windowed game (title bar / borders: `client_area`) is cropped to its client area on
+//! both paths and recorded on the fixed 2560x1440 canvas (`framing`).
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering::Relaxed};
+mod client_area;
+#[cfg(feature = "encode")]
+mod gpu_path;
+
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
 #[cfg(feature = "encode")]
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 
+use crate::framing::{Rect, CANVAS};
 use crate::protocol::MonitorInfo;
+use client_area::ClientArea;
 
 use windows_capture::capture::{
     CaptureControl, Context, GraphicsCaptureApiError, GraphicsCaptureApiHandler,
@@ -40,15 +49,12 @@ pub const PATH_CPU: u8 = 2;
 /// Where GPU frames go (the encoder's frame queue) and where the capture thread logs.
 #[cfg(feature = "encode")]
 pub struct GpuSink {
-    /// Hand one frame (capture PTS in us) to the encoder; false once the encoder is gone or
-    /// cannot take GPU frames (capture then switches to the CPU path).
-    pub send: Box<dyn Fn(u64, crate::gpu_frames::HwFrame) -> bool + Send + Sync>,
+    /// Hand one frame (capture PTS in us, and the region holding the picture when it sits
+    /// on the canvas) to the encoder; false once the encoder is gone or cannot take GPU
+    /// frames (capture then switches to the CPU path).
+    pub send: Box<dyn Fn(u64, crate::gpu_frames::HwFrame, Option<Rect>) -> bool + Send + Sync>,
     pub log: Box<dyn Fn(String) + Send + Sync>,
 }
-
-/// Consecutive GPU-path failures after which capture falls back to the CPU path.
-#[cfg(feature = "encode")]
-const GPU_FAILURES_BEFORE_FALLBACK: u32 = 30;
 
 /// A captured frame, tightly packed f16 RGBA (8 bytes/pixel), ready to upload.
 pub struct FrameData {
@@ -57,6 +63,9 @@ pub struct FrameData {
     pub width: u32,
     pub height: u32,
     pub bytes: Vec<u8>,
+    /// The windowed-game canvas this frame is placed on (`width`x`height` is then the
+    /// client area); None records the frame at its own size.
+    pub canvas: Option<(u32, u32)>,
 }
 
 /// Hand-off point between the capture thread and the render thread.
@@ -74,9 +83,12 @@ pub struct CaptureShared {
     pub path: AtomicU8,
     /// Encoder frame size of the newest GPU frame (status line).
     pub gpu_size: Mutex<Option<(u32, u32)>>,
-    /// Newest GPU frame (screenshots read it back on request).
+    /// Newest GPU frame and its picture region on the canvas (screenshots read it back on
+    /// request).
     #[cfg(feature = "encode")]
-    pub latest_gpu: Mutex<Option<crate::gpu_frames::HwFrame>>,
+    pub latest_gpu: Mutex<Option<(crate::gpu_frames::HwFrame, Option<Rect>)>>,
+    /// The captured window (`start_window`), 0 for a monitor capture.
+    pub window: AtomicUsize,
     /// Set once by the engine before capture starts; without it frames take the CPU path.
     #[cfg(feature = "encode")]
     pub gpu_sink: OnceLock<GpuSink>,
@@ -94,6 +106,7 @@ impl CaptureShared {
             gpu_size: Mutex::new(None),
             #[cfg(feature = "encode")]
             latest_gpu: Mutex::new(None),
+            window: AtomicUsize::new(0),
             #[cfg(feature = "encode")]
             gpu_sink: OnceLock::new(),
         })
@@ -182,17 +195,10 @@ pub struct Handler {
     dump_every: Option<std::time::Duration>,
     last_dump: std::time::Instant,
     dump_seq: u32,
+    /// The captured window's client area (windowed-game crop + canvas).
+    client: ClientArea,
     #[cfg(feature = "encode")]
-    gpu: GpuState,
-}
-
-/// The capture thread's zero-copy pipeline, built on the first frame (it needs the
-/// capture device).
-#[cfg(feature = "encode")]
-enum GpuState {
-    Untried,
-    Ready { pipe: crate::gpu_frames::Pipeline, failures: u32 },
-    Off,
+    gpu: gpu_path::GpuState,
 }
 
 impl GraphicsCaptureApiHandler for Handler {
@@ -212,6 +218,7 @@ impl GraphicsCaptureApiHandler for Handler {
             .and_then(|v| v.parse::<f64>().ok())
             .filter(|s| *s > 0.0)
             .map(std::time::Duration::from_secs_f64);
+        let client = ClientArea::new(ctx.flags.window.load(Relaxed));
         Ok(Self {
             shared: ctx.flags,
             frame_count: 0,
@@ -220,8 +227,9 @@ impl GraphicsCaptureApiHandler for Handler {
             dump_every,
             last_dump: std::time::Instant::now(),
             dump_seq: 0,
+            client,
             #[cfg(feature = "encode")]
-            gpu: GpuState::Untried,
+            gpu: gpu_path::GpuState::Untried,
         })
     }
 
@@ -238,29 +246,30 @@ impl GraphicsCaptureApiHandler for Handler {
             *timeline = Some((pts_us, std::time::Instant::now()));
         }
 
+        let (crop, canvas) = self.client.update((width, height), std::time::Instant::now());
+
         #[cfg(feature = "encode")]
-        if self.dump_path.is_none() && self.dump_every.is_none() && self.gpu_frame(frame, pts_us) {
+        if self.dump_path.is_none() && self.dump_every.is_none() && self.gpu_frame(frame, pts_us, crop, canvas) {
             return Ok(());
         }
         self.shared.path.store(PATH_CPU, Relaxed);
 
-        // CPU readback (fallback): map a staging copy and strip the row padding with one
+        // CPU readback (fallback): map a staging copy and copy out the client area (the
+        // whole frame unless the window has chrome), stripping the row padding, with one
         // single-threaded copy. (windows-capture's `as_nopadding_buffer` treats every
         // Rgba16F frame as padded and fans the copy out over a 32-thread rayon pool.)
         let mut fb = frame.buffer()?;
         let pitch = fb.row_pitch() as usize;
-        let row = width as usize * 8;
-        let raw = fb.as_raw_buffer();
-        let mut bytes = Vec::with_capacity(row * height as usize);
-        for y in 0..height as usize {
-            bytes.extend_from_slice(&raw[y * pitch..y * pitch + row]);
-        }
+        let rect = crop.unwrap_or(Rect::full((width, height)));
+        let bytes = crate::framing::copy_rect(fb.as_raw_buffer(), pitch, 8, rect);
+        let (width, height) = rect.size();
 
         let data = FrameData {
             pts_us,
             width,
             height,
             bytes,
+            canvas: canvas.then_some(CANVAS),
         };
 
         self.frame_count += 1;
@@ -295,68 +304,6 @@ impl GraphicsCaptureApiHandler for Handler {
             *slot = Some(data);
         }
         Ok(())
-    }
-}
-
-#[cfg(feature = "encode")]
-impl Handler {
-    /// Zero-copy path: tonemap this frame on the GPU and hand it to the encoder. False sends
-    /// the frame down the CPU path (no encoder sink, the pipeline cannot start, or it kept
-    /// failing).
-    fn gpu_frame(&mut self, frame: &mut Frame, pts_us: u64) -> bool {
-        let Some(sink) = self.shared.gpu_sink.get() else { return false };
-        if let GpuState::Untried = self.gpu {
-            self.gpu = match crate::gpu_frames::Pipeline::new(frame.device(), frame.device_context()) {
-                Ok(pipe) => {
-                    (sink.log)("capture: zero-copy GPU path (D3D11 tonemap -> NVENC)".into());
-                    GpuState::Ready { pipe, failures: 0 }
-                }
-                Err(e) => {
-                    (sink.log)(format!("capture: GPU path unavailable ({e}); using CPU copies"));
-                    GpuState::Off
-                }
-            };
-        }
-        let GpuState::Ready { pipe, failures } = &mut self.gpu else { return false };
-        let (width, height) = (frame.width(), frame.height());
-        let target = crate::gpu_frames::target_size(pipe.target(), (width, height));
-        let mode = self.shared.mode.load(Relaxed);
-        match pipe.render(frame.as_raw_texture(), width, height, target, mode) {
-            Ok(hw) => {
-                *failures = 0;
-                self.frame_count += 1;
-                self.shared.path.store(PATH_GPU, Relaxed);
-                if let Ok(mut size) = self.shared.gpu_size.lock() {
-                    *size = Some(target);
-                }
-                if let (Some(copy), Ok(mut latest)) = (hw.try_clone(), self.shared.latest_gpu.lock()) {
-                    *latest = Some(copy);
-                }
-                if !(sink.send)(pts_us, hw) {
-                    (sink.log)("capture: encoder takes no GPU frames; using CPU copies".into());
-                    self.gpu = GpuState::Off;
-                    if let Ok(mut latest) = self.shared.latest_gpu.lock() {
-                        *latest = None;
-                    }
-                }
-                true
-            }
-            Err(e) => {
-                *failures += 1;
-                if *failures == 1 || *failures >= GPU_FAILURES_BEFORE_FALLBACK {
-                    (sink.log)(format!("capture: GPU frame failed ({e}), failure {}", *failures));
-                }
-                if *failures < GPU_FAILURES_BEFORE_FALLBACK {
-                    return true; // skip this frame; the next one retries the GPU path
-                }
-                (sink.log)("capture: falling back to CPU copies".into());
-                self.gpu = GpuState::Off;
-                if let Ok(mut latest) = self.shared.latest_gpu.lock() {
-                    *latest = None;
-                }
-                false
-            }
-        }
     }
 }
 
@@ -430,6 +377,7 @@ fn box_start_err(e: GraphicsCaptureApiError<CaptureError>) -> CaptureError {
 /// Capture an explicitly selected game window through the supported WGC API.
 pub fn start_window(hwnd: usize, shared: Arc<CaptureShared>) -> Result<CaptureControlHandle, CaptureError> {
     if hwnd == 0 { return Err(std::io::Error::other("capture window handle is null").into()); }
+    shared.window.store(hwnd, Relaxed);
     crate::border::request_borderless();
     let window = windows_capture::window::Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
     let start = |interval| {

@@ -36,6 +36,7 @@ mod encoder;
 mod export;
 #[cfg(feature = "encode")]
 mod export_worker;
+mod framing;
 mod gpu;
 #[cfg(feature = "encode")]
 mod gpu_frames;

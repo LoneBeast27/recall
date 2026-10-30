@@ -50,6 +50,7 @@ pub fn smoke_test(out_dir: &std::path::Path) -> Result<String, String> {
                 height: 256,
                 rgba,
                 gpu: None,
+                content: None,
             },
             &stats,
         )?;

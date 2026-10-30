@@ -58,6 +58,9 @@ pub struct PacedFrame {
     pub rgba: Vec<u8>,
     /// The zero-copy path's frame: tonemapped BGRA in a D3D11 texture.
     pub gpu: Option<crate::gpu_frames::HwFrame>,
+    /// Where the picture sits when the frame is a windowed game on the canvas (bars around
+    /// it); thumbnails take only this region. None = the whole frame.
+    pub content: Option<crate::framing::Rect>,
 }
 
 /// Ask the encoder thread to write the last `seconds` to `path`.
@@ -162,6 +165,8 @@ struct Enc {
     last_frame: Option<RawFrame>,
     /// Newest GPU frame: read back to a `RawFrame` only when a save needs one.
     last_gpu: Option<crate::gpu_frames::HwFrame>,
+    /// The newest frame's picture region on the canvas (`PacedFrame::content`).
+    last_content: Option<crate::framing::Rect>,
     /// `Some(pool_id)` when NVENC reads D3D11 frames from that pool, `None` for RGB0.
     gpu_pool: Option<usize>,
     last_input_pts: Option<u64>,
@@ -344,6 +349,7 @@ fn open_encoder(
         backend: opened.codec.nvenc(),
         last_frame: None,
         last_gpu: None,
+        last_content: None,
         gpu_pool,
         last_input_pts: None,
         session_id: uuid::Uuid::new_v4().to_string(),
@@ -402,6 +408,7 @@ impl Enc {
     /// Encode one paced frame; drain packets into the ring. Keeps the raw
     /// frame afterwards as the thumbnail/still source.
     fn encode(&mut self, frame: PacedFrame, stats: &EncStats) -> Result<(), String> {
+        self.last_content = frame.content;
         match frame.gpu {
             Some(gpu) => self.send_gpu(frame.idx, gpu)?,
             None => {
@@ -423,21 +430,6 @@ impl Enc {
         self.last_gpu = Some(gpu);
         self.last_frame = None;
         Ok(())
-    }
-
-    /// The newest frame as RGBA for thumbnails / stills (a GPU frame is read back now).
-    pub(super) fn raw_last(&self) -> Option<RawFrame> {
-        if let Some(frame) = &self.last_frame {
-            return Some(frame.clone());
-        }
-        let gpu = self.last_gpu.as_ref()?;
-        match crate::gpu_frames::read_rgba(gpu) {
-            Ok((w, h, rgba)) => Some((w, h, Arc::new(rgba))),
-            Err(e) => {
-                eprintln!("[recall] frame readback for the thumbnail failed: {e}");
-                None
-            }
-        }
     }
 
     fn send_rgba(&mut self, idx: u64, width: u32, rgba: &[u8]) -> Result<(), String> {
