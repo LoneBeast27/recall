@@ -1,7 +1,8 @@
 //! The two-step shortcut hint (Alt + ` then a key): a card that unfolds
 //! below the island, each option a key cap and its label. The island pill
 //! above stays what it is (the stats, a notice, or a small "Alt `" pill).
-//! Its layout follows the room the HUD scan measured under the island:
+//! Its layout follows the room the HUD scan measured under the island, card
+//! by card over the columns each covers (HUD that comes and goes counted):
 //! one option per row (drop-down) if that fits, else two columns, else one
 //! row (the shortest; also when nothing fits). Unscanned spots drop down.
 
@@ -67,22 +68,6 @@ impl CardLayout {
     }
 }
 
-/// The room for the card under a `pill_h`-tall pill: the scan's free depth
-/// below the island's top (`free_depth`, physical px; infinite = unscanned)
-/// less the pill and the gap.
-pub fn room_below(free_depth: f32, pill_h: f32, s: f32) -> Option<f32> {
-    free_depth.is_finite().then_some(free_depth - pill_h - GAP * s)
-}
-
-/// The first layout whose height fits `room` (physical px under the pill;
-/// `None` = unscanned, anything fits); the single row when none does.
-pub fn choose_layout(n: usize, s: f32, room: Option<f32>) -> CardLayout {
-    [CardLayout::Dropdown, CardLayout::TwoColumn, CardLayout::Row]
-        .into_iter()
-        .find(|layout| room.is_none_or(|room| layout.height(n, s) <= room))
-        .unwrap_or(CardLayout::Row)
-}
-
 /// A key cap: a rounded square in the track tone.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct KeyCap {
@@ -129,6 +114,16 @@ pub fn card_scene(hint: &HintView, layout: CardLayout, s: f32, m: &dyn Measure) 
     }
     scene.w = (x - u(COL_GAP) + u(PAD)).ceil();
     scene
+}
+
+/// The first card (drop-down, then two columns, then one row) that fits the
+/// room under it - `room(card_w)`: physical px under a card that wide, `None`
+/// when unscanned (anything fits) - else the single row, the shortest.
+pub fn choose_card(hint: &HintView, s: f32, m: &dyn Measure, room: impl Fn(f32) -> Option<f32>) -> CardScene {
+    let mut cards: Vec<CardScene> =
+        [CardLayout::Dropdown, CardLayout::TwoColumn, CardLayout::Row].into_iter().map(|layout| card_scene(hint, layout, s, m)).collect();
+    let pick = cards.iter().position(|card| room(card.w).is_none_or(|r| card.h <= r)).unwrap_or(2);
+    cards.swap_remove(pick)
 }
 
 /// The card's unfold: open (or folding) since when, from where.

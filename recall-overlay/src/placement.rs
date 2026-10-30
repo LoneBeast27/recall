@@ -47,10 +47,21 @@ struct SpotsFile {
 struct RawSpot {
     anchor: Anchor,
     free_px: u32,
+    /// Free rows per `SKYLINE_BIN` px column at 1440p (HUD that comes and goes counted).
+    #[serde(default)]
+    skyline: Option<Vec<u16>>,
 }
 
+/// The skyline's column width at 1440p.
+pub const SKYLINE_BIN: f32 = 32.0;
+/// Design reference width (16:9 at 1440p).
+pub const REF_WIDTH: f32 = 2560.0;
+
 #[derive(Debug, Default)]
-pub struct Spots(HashMap<String, Spot>);
+pub struct Spots {
+    spots: HashMap<String, Spot>,
+    skylines: HashMap<String, Vec<u16>>,
+}
 
 impl Spots {
     /// The table compiled into the binary.
@@ -60,32 +71,83 @@ impl Spots {
 
     pub fn parse(json: &str) -> Result<Self, String> {
         let file: SpotsFile = serde_json::from_str(json).map_err(|e| format!("hud-spots.json: {e}"))?;
-        Ok(Self(
-            file.spots
-                .into_iter()
-                .map(|(key, raw)| (key, Spot { anchor: raw.anchor, free_px: Some(raw.free_px) }))
-                .collect(),
-        ))
+        let mut spots = Self::default();
+        for (key, raw) in file.spots {
+            if let Some(skyline) = raw.skyline {
+                spots.skylines.insert(key.clone(), skyline);
+            }
+            spots.spots.insert(key, Spot { anchor: raw.anchor, free_px: Some(raw.free_px) });
+        }
+        Ok(spots)
     }
 
     #[cfg(test)]
     pub fn len(&self) -> usize {
-        self.0.len()
+        self.spots.len()
+    }
+
+    #[cfg(test)]
+    pub fn keys(&self) -> Vec<&str> {
+        let mut keys: Vec<&str> = self.spots.keys().map(String::as_str).collect();
+        keys.sort();
+        keys
+    }
+
+    /// The scanned key a game key matches: exact first, then the longest
+    /// scanned key the target's key starts with (window titles carry
+    /// suffixes: "Rocket League (64-bit, DX11, Cooked)").
+    fn matched(&self, key: &str) -> Option<&str> {
+        if let Some((scanned, _)) = self.spots.get_key_value(key) {
+            return Some(scanned.as_str());
+        }
+        self.spots
+            .keys()
+            .filter(|scanned| !scanned.is_empty() && key.starts_with(scanned.as_str()))
+            .max_by_key(|scanned| scanned.len())
+            .map(String::as_str)
     }
 
     /// The spot for a game key; unknown / empty keys use the top-right default.
-    /// Exact key first, then the longest scanned key the target's key starts with:
-    /// window titles carry suffixes ("Rocket League (64-bit, DX11, Cooked)").
     pub fn lookup(&self, key: &str) -> Spot {
-        if let Some(spot) = self.0.get(key) {
-            return *spot;
-        }
-        self.0
-            .iter()
-            .filter(|(scanned, _)| !scanned.is_empty() && key.starts_with(scanned.as_str()))
-            .max_by_key(|(scanned, _)| scanned.len())
-            .map_or(DEFAULT_SPOT, |(_, spot)| *spot)
+        self.matched(key).map_or(DEFAULT_SPOT, |scanned| self.spots[scanned])
     }
+
+    /// The game's skyline, when the scan measured one.
+    pub fn skyline(&self, key: &str) -> Option<Vec<u16>> {
+        self.matched(key).and_then(|scanned| self.skylines.get(scanned).cloned())
+    }
+}
+
+/// The skyline's free rows (1440p px) under the columns [x0, x1) (1440p px).
+pub fn skyline_free(skyline: &[u16], x0: f32, x1: f32) -> f32 {
+    let end = ((x1 / SKYLINE_BIN).ceil().max(0.0) as usize).min(skyline.len());
+    let start = ((x0.max(0.0) / SKYLINE_BIN) as usize).min(end);
+    skyline[start..end].iter().copied().min().map_or(f32::INFINITY, f32::from)
+}
+
+/// Where a `w`-wide box (1440p px) sits along the top at `anchor`, as the island does.
+pub fn footprint(anchor: Anchor, w: f32) -> (f32, f32) {
+    match anchor {
+        Anchor::TopLeft => (EDGE, EDGE + w),
+        Anchor::TopRight => (REF_WIDTH - EDGE - w, REF_WIDTH - EDGE),
+        Anchor::TopCentre => ((REF_WIDTH - w) / 2.0, (REF_WIDTH + w) / 2.0),
+    }
+}
+
+/// The room (physical px) for a `card_w`-wide card under a `pill_h`-tall
+/// pill and `gap`: the scan's free depth under the card's own columns (its
+/// skyline), else under the island's footprint (`free_px`), less the island's
+/// top gap. `None`: unscanned (anything fits).
+pub fn card_room(spot: &Spot, skyline: Option<&[u16]>, monitor: &Rect, scale: f32, card_w: f32, pill_h: f32, gap: f32) -> Option<f32> {
+    let k = monitor.height().max(1) as f32 / REF_HEIGHT;
+    let free = match skyline {
+        Some(sky) => {
+            let (x0, x1) = footprint(spot.anchor, card_w / k);
+            skyline_free(sky, x0, x1) * k - EDGE * scale
+        }
+        None => free_depth(spot, monitor, scale),
+    };
+    free.is_finite().then_some(free - pill_h - gap)
 }
 
 /// How much the island shrinks to sit above a game's measured HUD.
@@ -185,10 +247,12 @@ mod tests {
     fn embedded_table_parses_every_scanned_game() {
         let spots = Spots::embedded();
         assert_eq!(spots.len(), 14);
-        assert_eq!(spots.lookup("valorant"), Spot { anchor: Anchor::TopRight, free_px: Some(288) });
-        assert_eq!(spots.lookup("rocketleague").anchor, Anchor::TopLeft);
+        // The 2026-10-30 scan (HUD that comes and goes counted): VALORANT's kill feed at 124.
+        assert_eq!(spots.lookup("valorant"), Spot { anchor: Anchor::TopRight, free_px: Some(124) });
+        assert_eq!(spots.lookup("battlefield6").anchor, Anchor::TopLeft);
         assert_eq!(spots.lookup("apexlegends").anchor, Anchor::TopCentre);
-        assert_eq!(spots.lookup("rocketleague64bitdx11cooked").anchor, Anchor::TopLeft, "title suffixes still match");
+        assert_eq!(spots.lookup("battlefield64bit").anchor, Anchor::TopLeft, "title suffixes still match");
+        assert!(spots.keys().iter().all(|key| spots.skyline(key).is_some_and(|sky| sky.len() == 80)), "a skyline for every game");
         assert_eq!(spots.lookup("somenewgame"), DEFAULT_SPOT);
         assert_eq!(spots.lookup(""), DEFAULT_SPOT, "desktop uses top-right");
     }
@@ -218,9 +282,11 @@ mod tests {
     fn action_notices_grow_only_into_the_free_depth() {
         let full = NOTICE_H / ISLAND_H;
         assert_eq!(grow(&DEFAULT_SPOT), full, "unscanned: full growth");
-        assert_eq!(grow(&Spots::embedded().lookup("valorant")), full, "288 free rows");
-        for (game, free) in [("rocketleague", 48), ("overwatch", 44), ("overwatch2", 40), ("marvelrivals", 56)] {
-            assert_eq!(grow(&Spots::embedded().lookup(game)), 1.0, "{game}: no room below, sideways only");
+        let roomy = Spot { anchor: Anchor::TopRight, free_px: Some(288) };
+        assert_eq!(grow(&roomy), full, "288 free rows");
+        for free in [48, 44, 40, 56] {
+            let tight = Spot { anchor: Anchor::TopRight, free_px: Some(free) };
+            assert_eq!(grow(&tight), 1.0, "{free} free rows: no room below, sideways only");
             let k = fit(Some(free));
             assert!((EDGE + ISLAND_H) * k <= free as f32 + 1e-3);
         }
@@ -234,13 +300,37 @@ mod tests {
     fn free_depth_is_exactly_the_tight_island_and_unbounded_when_unscanned() {
         for height in [1080, 1440, 2160] {
             let monitor = Rect { left: 0, top: 0, right: height * 16 / 9, bottom: height };
-            let tight = Spots::embedded().lookup("overwatch2");
+            let tight = Spot { anchor: Anchor::TopRight, free_px: Some(40) };
             let k = scale(height, &tight);
             assert!((free_depth(&tight, &monitor, k) - ISLAND_H * k).abs() < 1e-3, "the fitted island fills it at {height}p");
             assert_eq!(free_depth(&DEFAULT_SPOT, &monitor, 1.0), f32::INFINITY);
-            let none_free = Spots::embedded().lookup("battlefield6");
+            let none_free = Spot { anchor: Anchor::TopRight, free_px: Some(0) };
             assert_eq!(free_depth(&none_free, &monitor, 1.0), f32::INFINITY, "no free spot: nothing to protect");
         }
+    }
+
+    #[test]
+    fn a_skyline_gives_each_box_the_free_rows_under_its_own_columns() {
+        // VALORANT-like: the top bar and a stats line down to 12 px as far as x 2080, then 124 (the kill feed).
+        let sky: Vec<u16> = (0..80).map(|i| if i < 65 { 12 } else { 124 }).collect();
+        assert_eq!(skyline_free(&sky, 2148.0, 2548.0), 124.0, "the island's 400 px footprint");
+        assert_eq!(skyline_free(&sky, 1912.0, 2548.0), 12.0, "a 636 px row reaches the top bar");
+        assert_eq!(skyline_free(&sky, 5000.0, 6000.0), f32::INFINITY, "off the scan");
+        assert_eq!(footprint(Anchor::TopRight, 300.0), (2248.0, 2548.0));
+        assert_eq!(footprint(Anchor::TopLeft, 300.0), (12.0, 312.0));
+        assert_eq!(footprint(Anchor::TopCentre, 300.0), (1130.0, 1430.0));
+        let spot = Spot { anchor: Anchor::TopRight, free_px: Some(124) };
+        let qhd = Rect { left: 0, top: 0, right: 2560, bottom: 1440 };
+        assert_eq!(card_room(&spot, Some(&sky), &qhd, 1.0, 299.0, 44.0, 6.0), Some(62.0), "124 - 12 - 44 - 6");
+        assert_eq!(card_room(&spot, Some(&sky), &qhd, 1.0, 636.0, 44.0, 6.0), Some(-50.0));
+        assert_eq!(card_room(&spot, None, &qhd, 1.0, 636.0, 44.0, 6.0), Some(62.0), "no skyline: the footprint's depth");
+        assert_eq!(card_room(&DEFAULT_SPOT, None, &qhd, 1.0, 299.0, 44.0, 6.0), None, "unscanned");
+        let uhd = Rect { left: 0, top: 0, right: 3840, bottom: 2160 };
+        assert_eq!(card_room(&spot, Some(&sky), &uhd, 1.5, 448.5, 66.0, 9.0), Some(124.0 * 1.5 - 18.0 - 66.0 - 9.0), "4K: same columns, scaled");
+        let json = format!(r#"{{"spots":{{"game":{{"anchor":"top-right","free_px":124,"skyline":{sky:?}}},"old":{{"anchor":"top-left","free_px":48}}}}}}"#);
+        let spots = Spots::parse(&json).unwrap();
+        assert_eq!((spots.skyline("game"), spots.skyline("game64bit").is_some()), (Some(sky.clone()), true), "suffixes match too");
+        assert_eq!(spots.skyline("old"), None, "a spot without a skyline");
     }
 
     #[test]
