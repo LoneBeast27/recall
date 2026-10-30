@@ -14,6 +14,18 @@ fn reset_state() {
 /// force them sequential to test each in isolation.
 static SERIAL: Mutex<()> = Mutex::new(());
 
+// --- Steam library paths (pure) ------------------------------------------
+
+#[test]
+fn steam_library_paths_mark_games_but_not_redistributables() {
+    assert!(is_steam_library_path(r"G:\SteamLibrary\steamapps\common\sobosuba\sobosuba.exe"));
+    assert!(is_steam_library_path(r"C:\Program Files (x86)\Steam\SteamApps\Common\Game\bin\game.exe"));
+    assert!(is_steam_library_path("D:/Steam/steamapps/common/Game/game.exe"));
+    assert!(!is_steam_library_path(r"C:\Program Files (x86)\Steam\steam.exe"));
+    assert!(!is_steam_library_path(r"G:\SteamLibrary\steamapps\common\Steamworks Shared\_CommonRedist\vcredist\vc_redist.x64.exe"));
+    assert!(!is_steam_library_path(r"C:\Windows\notepad.exe"));
+}
+
 // --- rect_covers geometry (pure, no Win32) -------------------------------
 
 #[test]
