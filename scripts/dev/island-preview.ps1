@@ -9,13 +9,44 @@
 #
 # The filmstrips come with <image>.bmp.labels.tsv (x, y, px, text): row times
 # and column titles, printed onto the PNG here.
+#
+# -WebDir <dir> instead (or as well) writes the web preview's inputs:
+#   frames.png + manifest.json  every frame at 60 fps (--export-frames; straight
+#                               RGBA, deflated by png-recompress.py, stdlib Python)
+#   backdrop-valorant.jpg       one 2560x1440 frame of -Clip at -ClipAt s (ffmpeg, JPEG q85)
 param(
     [Parameter(Mandatory = $true)][string]$Exe,
-    [Parameter(Mandatory = $true)][string]$Out,
-    [double]$Scale = 1.0
+    [string]$Out,
+    [double]$Scale = 1.0,
+    [string]$WebDir,
+    [string]$Clip = 'V:\ALL RECORDINGS\VALORANT__2026-10-17__22-21-36-788__adaa986dc538484698bbabf313f2fa1e.mp4',
+    [double]$ClipAt = 40,
+    [string]$Python = 'C:\Program Files\Python311\python.exe'
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
+if (-not $Out -and -not $WebDir) { throw 'give -Out (preview PNGs) and/or -WebDir (web preview frames)' }
+
+function Export-Web([string]$Dir) {
+    New-Item -ItemType Directory -Force $Dir | Out-Null
+    & $Exe --export-frames $Dir
+    if ($LASTEXITCODE -ne 0) { throw "--export-frames failed ($LASTEXITCODE)" }
+    & $Python -I (Join-Path $PSScriptRoot 'png-recompress.py') (Join-Path $Dir 'frames.png')
+    if ($LASTEXITCODE -ne 0) { throw "png-recompress failed ($LASTEXITCODE)" }
+    $still = Join-Path $Dir 'backdrop.tmp.png'
+    $at = $ClipAt.ToString([System.Globalization.CultureInfo]::InvariantCulture)
+    & ffmpeg -v error -hwaccel none -threads 4 -ss $at -i $Clip -frames:v 1 -y $still
+    if ($LASTEXITCODE -ne 0) { throw "ffmpeg failed ($LASTEXITCODE)" }
+    $img = [System.Drawing.Image]::FromFile($still)
+    try {
+        $jpeg = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
+        $params = New-Object System.Drawing.Imaging.EncoderParameters(1)
+        $params.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, [long]85)
+        $img.Save((Join-Path $Dir 'backdrop-valorant.jpg'), $jpeg, $params)
+    } finally { $img.Dispose() }
+    Remove-Item $still
+    Get-ChildItem $Dir | ForEach-Object { Write-Output ("{0}  {1} KB" -f $_.FullName, [math]::Round($_.Length / 1KB)) }
+}
 
 function Convert-Bmp([string]$In, [string]$Png) {
     $src = [System.Drawing.Image]::FromFile($In)
@@ -42,6 +73,8 @@ function Convert-Bmp([string]$In, [string]$Png) {
     Write-Output "$Png  $([math]::Round((Get-Item $Png).Length / 1KB)) KB"
 }
 
+if ($WebDir) { Export-Web $WebDir }
+if (-not $Out) { return }
 New-Item -ItemType Directory -Force $Out | Out-Null
 $work = Join-Path ([System.IO.Path]::GetTempPath()) "island-preview-$PID"
 New-Item -ItemType Directory -Force $work | Out-Null
