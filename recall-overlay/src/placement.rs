@@ -47,22 +47,24 @@ struct SpotsFile {
 struct RawSpot {
     anchor: Anchor,
     free_px: u32,
-    /// Free rows per `SKYLINE_BIN` px column at 1440p, HUD that comes and goes
-    /// counted: only the shortcut hint's card reads it. The island's spot and
+    /// Where the HUD sits, HUD that comes and goes counted: one number per
+    /// `HUD_COLUMN` px column at 1440p, bit r = the `HUD_ROW` px row r holds
+    /// HUD. Only the shortcut hint's card reads it. The island's spot and
     /// scale stay on `anchor` / `free_px` (always-on HUD).
     #[serde(default)]
-    skyline: Option<Vec<u16>>,
+    hud: Option<Vec<u64>>,
 }
 
-/// The skyline's column width at 1440p.
-pub const SKYLINE_BIN: f32 = 32.0;
+/// The HUD grid's cell size at 1440p (its 64 rows reach deeper than any card).
+const HUD_COLUMN: f32 = 32.0;
+const HUD_ROW: f32 = 8.0;
 /// Design reference width (16:9 at 1440p).
 pub const REF_WIDTH: f32 = 2560.0;
 
 #[derive(Debug, Default)]
 pub struct Spots {
     spots: HashMap<String, Spot>,
-    skylines: HashMap<String, Vec<u16>>,
+    huds: HashMap<String, Vec<u64>>,
 }
 
 impl Spots {
@@ -75,8 +77,8 @@ impl Spots {
         let file: SpotsFile = serde_json::from_str(json).map_err(|e| format!("hud-spots.json: {e}"))?;
         let mut spots = Self::default();
         for (key, raw) in file.spots {
-            if let Some(skyline) = raw.skyline {
-                spots.skylines.insert(key.clone(), skyline);
+            if let Some(hud) = raw.hud {
+                spots.huds.insert(key.clone(), hud);
             }
             spots.spots.insert(key, Spot { anchor: raw.anchor, free_px: Some(raw.free_px) });
         }
@@ -114,9 +116,9 @@ impl Spots {
         self.matched(key).map_or(DEFAULT_SPOT, |scanned| self.spots[scanned])
     }
 
-    /// The game's skyline, when the scan measured one (for the hint card).
-    pub fn skyline(&self, key: &str) -> Option<Vec<u16>> {
-        self.matched(key).and_then(|scanned| self.skylines.get(scanned).cloned())
+    /// The game's HUD grid, when the scan measured one (for the hint card).
+    pub fn hud(&self, key: &str) -> Option<Vec<u64>> {
+        self.matched(key).and_then(|scanned| self.huds.get(scanned).cloned())
     }
 }
 
@@ -211,28 +213,29 @@ fn footprint(anchor: Anchor, w: f32, edge: f32) -> (f32, f32) {
 }
 
 /// The HUD area (1440p px2) under the rows [top, bottom) and columns
-/// [x0, x1): everything below a column's first occupied row counts as HUD,
-/// so this is an upper bound.
-fn covered(skyline: &[u16], (x0, x1): (f32, f32), (top, bottom): (f32, f32)) -> f32 {
-    let column = |(i, free): (usize, &u16)| {
-        let (left, right) = (i as f32 * SKYLINE_BIN, (i + 1) as f32 * SKYLINE_BIN);
-        (right.min(x1) - left.max(x0)).max(0.0) * (bottom - top.max(*free as f32)).max(0.0)
+/// [x0, x1): a grid cell counts whole when the scan found HUD in it.
+fn covered(hud: &[u64], (x0, x1): (f32, f32), (top, bottom): (f32, f32)) -> f32 {
+    let overlap = |from: f32, to: f32, low: f32, high: f32| (to.min(high) - from.max(low)).max(0.0);
+    let row = |r: u32| overlap(r as f32 * HUD_ROW, (r + 1) as f32 * HUD_ROW, top, bottom);
+    let column = |(i, bits): (usize, &u64)| {
+        let width = overlap(i as f32 * HUD_COLUMN, (i + 1) as f32 * HUD_COLUMN, x0, x1);
+        width * (0..u64::BITS).filter(|r| bits >> r & 1 == 1).map(row).sum::<f32>()
     };
-    skyline.iter().enumerate().map(column).sum()
+    hud.iter().enumerate().map(column).sum()
 }
 
 /// The HUD area (1440p px2) a `size` card (physical px) would cover, hanging
-/// `below` physical px under the island's top edge: by the game's skyline
-/// over the card's own columns; a spot with no skyline uses its one free
-/// depth for every column. `None`: unscanned, nothing known to cover.
-pub fn card_cover(spot: &Spot, skyline: Option<&[u16]>, monitor: &Rect, scale: f32, size: (f32, f32), below: f32) -> Option<f32> {
+/// `below` physical px under the island's top edge: by the game's HUD grid
+/// under the card; a spot with no grid uses its one free depth for every
+/// column. `None`: unscanned, nothing known to cover.
+pub fn card_cover(spot: &Spot, hud: Option<&[u64]>, monitor: &Rect, scale: f32, size: (f32, f32), below: f32) -> Option<f32> {
     let k = monitor.height().max(1) as f32 / REF_HEIGHT;
     let edge = EDGE * scale / k;
     let (w, top) = (size.0 / k, edge + below / k);
     let rows = (top, top + size.1 / k);
     let columns = footprint(spot.anchor, w, edge);
-    match (skyline, spot.free_px) {
-        (Some(skyline), _) => Some(covered(skyline, columns, rows)),
+    match (hud, spot.free_px) {
+        (Some(hud), _) => Some(covered(hud, columns, rows)),
         (None, Some(free)) if free > 0 => Some(w * (rows.1 - rows.0.max(free as f32)).max(0.0)),
         _ => None,
     }
@@ -250,6 +253,11 @@ pub fn window_origin(anchor: Anchor, monitor: &Rect, box_w: f32, margin: f32, ed
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A HUD grid column occupied over the rows [from, to) (multiples of 8).
+    fn rows(from: u32, to: u32) -> u64 {
+        (from / 8..to / 8).fold(0, |bits, r| bits | 1 << r)
+    }
 
     #[test]
     fn the_island_keeps_masters_spots_for_every_game() {
@@ -275,7 +283,7 @@ mod tests {
         assert_eq!(spots.len(), master.len());
         for (key, anchor, free) in master {
             assert_eq!(spots.lookup(key), Spot { anchor, free_px: Some(free) }, "{key}");
-            assert_eq!(spots.skyline(key).map(|sky| sky.len()), Some(80), "{key} has its skyline for the hint card");
+            assert_eq!(spots.hud(key).map(|hud| hud.len()), Some(80), "{key} has its HUD grid for the hint card");
         }
     }
 
@@ -284,7 +292,7 @@ mod tests {
         let spots = Spots::embedded();
         assert_eq!(spots.lookup("rocketleague64bitdx11cooked").anchor, Anchor::TopLeft, "title suffixes still match");
         assert_eq!(spots.lookup("somenewgame"), DEFAULT_SPOT);
-        assert_eq!((spots.lookup(""), spots.skyline("")), (DEFAULT_SPOT, None), "desktop uses top-right");
+        assert_eq!((spots.lookup(""), spots.hud("")), (DEFAULT_SPOT, None), "desktop uses top-right");
     }
 
     #[test]
@@ -341,25 +349,34 @@ mod tests {
 
     #[test]
     fn a_card_covers_the_hud_under_its_own_columns() {
-        // VALORANT-like: the top bar down to 12 px as far as x 2080, then 124 (the kill feed).
-        let sky: Vec<u16> = (0..80).map(|i| if i < 65 { 12 } else { 124 }).collect();
+        // VALORANT-like: HUD from the top as far as x 2080, then the kill feed from row 120.
+        let hud: Vec<u64> = (0..80).map(|i| if i < 65 { rows(0, 512) } else { rows(120, 512) }).collect();
         let spot = Spot { anchor: Anchor::TopRight, free_px: Some(288) };
         let qhd = Rect { left: 0, top: 0, right: 2560, bottom: 1440 };
-        let cover = |w: f32, h: f32| card_cover(&spot, Some(&sky), &qhd, 1.0, (w, h), 50.0);
+        let cover = |w: f32, h: f32| card_cover(&spot, Some(&hud), &qhd, 1.0, (w, h), 50.0);
         assert_eq!(cover(172.0, 52.0), Some(0.0), "clear above the kill feed (rows 62-114)");
-        assert_eq!(cover(299.0, 116.0), Some(54.0 * 299.0), "rows 124-178 over the kill feed");
+        assert_eq!(cover(299.0, 116.0), Some(58.0 * 299.0), "rows 120-178 over the kill feed");
         assert_eq!(cover(636.0, 52.0), Some(168.0 * 52.0), "its 168 px left of x 2080, all 52 rows");
         let uhd = Rect { left: 0, top: 0, right: 3840, bottom: 2160 };
-        assert_eq!(card_cover(&spot, Some(&sky), &uhd, 1.5, (448.5, 174.0), 75.0), Some(54.0 * 299.0), "4K: the same 1440p area");
+        assert_eq!(card_cover(&spot, Some(&hud), &uhd, 1.5, (448.5, 174.0), 75.0), Some(58.0 * 299.0), "4K: the same 1440p area");
         let left = Spot { anchor: Anchor::TopLeft, ..spot };
-        let wall: Vec<u16> = (0..80).map(|i| if i < 5 { 0 } else { 1440 }).collect();
+        let wall: Vec<u64> = (0..80).map(|i| if i < 5 { u64::MAX } else { 0 }).collect();
         assert_eq!(card_cover(&left, Some(&wall), &qhd, 1.0, (200.0, 52.0), 50.0), Some(148.0 * 52.0), "from the left edge: x 12-160");
         let centre = Spot { anchor: Anchor::TopCentre, ..spot };
         assert_eq!(card_cover(&centre, Some(&wall), &qhd, 1.0, (200.0, 52.0), 50.0), Some(0.0), "centred, far from the wall");
     }
 
     #[test]
-    fn without_a_skyline_the_one_free_depth_stands_in_and_unscanned_covers_nothing_known() {
+    fn only_the_rows_that_hold_hud_count_not_everything_below_them() {
+        // A thin banner across the screen, rows 96-112, and nothing under it.
+        let hud = vec![rows(96, 112); 80];
+        let spot = Spot { anchor: Anchor::TopRight, free_px: Some(288) };
+        let qhd = Rect { left: 0, top: 0, right: 2560, bottom: 1440 };
+        assert_eq!(card_cover(&spot, Some(&hud), &qhd, 1.0, (172.0, 180.0), 50.0), Some(16.0 * 172.0), "16 rows of the card's 180");
+    }
+
+    #[test]
+    fn without_a_grid_the_one_free_depth_stands_in_and_unscanned_covers_nothing_known() {
         let qhd = Rect { left: 0, top: 0, right: 2560, bottom: 1440 };
         let flat = Spot { anchor: Anchor::TopRight, free_px: Some(200) };
         assert_eq!(card_cover(&flat, None, &qhd, 1.0, (172.0, 180.0), 50.0), Some(42.0 * 172.0), "rows 200-242");
@@ -370,12 +387,12 @@ mod tests {
     }
 
     #[test]
-    fn spots_parse_their_skylines() {
-        let sky: Vec<u16> = vec![12; 80];
-        let json = format!(r#"{{"spots":{{"game":{{"anchor":"top-right","free_px":124,"skyline":{sky:?}}},"old":{{"anchor":"top-left","free_px":48}}}}}}"#);
+    fn spots_parse_their_hud_grids() {
+        let hud: Vec<u64> = vec![u64::MAX; 80];
+        let json = format!(r#"{{"spots":{{"game":{{"anchor":"top-right","free_px":124,"hud":{hud:?}}},"old":{{"anchor":"top-left","free_px":48}}}}}}"#);
         let spots = Spots::parse(&json).unwrap();
-        assert_eq!((spots.skyline("game"), spots.skyline("game64bit").is_some()), (Some(sky), true), "suffixes match too");
-        assert_eq!(spots.skyline("old"), None, "a spot without a skyline");
+        assert_eq!((spots.hud("game"), spots.hud("game64bit").is_some()), (Some(hud), true), "suffixes match too");
+        assert_eq!(spots.hud("old"), None, "a spot without a grid");
     }
 
     #[test]

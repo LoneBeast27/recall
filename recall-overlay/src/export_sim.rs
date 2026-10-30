@@ -55,8 +55,8 @@ pub struct Sim<'a> {
     scene: Scene,
     scene_scale: f32,
     card: Option<CardScene>,
-    /// The spot's skyline (the hint card checks its own columns).
-    pub skyline: Option<Vec<u16>>,
+    /// The spot's HUD grid (the hint card checks under itself).
+    pub hud: Option<Vec<u64>>,
     /// Show notices the pre-change way: no transformation, no save badge,
     /// master's appear / hide from nothing.
     pub legacy: bool,
@@ -76,7 +76,7 @@ impl<'a> Sim<'a> {
             scene: Scene::default(),
             scene_scale: scale,
             card: None,
-            skyline: None,
+            hud: None,
             legacy,
             legacy_times: (None, None),
         }
@@ -118,7 +118,7 @@ impl<'a> Sim<'a> {
         let Some(hint) = hint else { return self.island.update_hint(false, now) };
         let pill_h = self.island.frame(now).h;
         let below = pill_h + GAP * self.scale;
-        let cover = |w: f32, h: f32| card_cover(&self.spot, self.skyline.as_deref(), &self.monitor, self.scale, (w, h), below);
+        let cover = |w: f32, h: f32| card_cover(&self.spot, self.hud.as_deref(), &self.monitor, self.scale, (w, h), below);
         self.card = Some(choose_card(&hint, self.scale, self.fonts, cover));
         self.island.update_hint(true, now);
     }
