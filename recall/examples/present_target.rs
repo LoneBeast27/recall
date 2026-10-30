@@ -4,10 +4,15 @@
 //! the taskbar, counts as occluded and WGC sends no frames for it.
 //!
 //!   present_target [--fps 500] [--width W --height H] [--x X --y Y] [--monitor I] [--seconds N]
+//!                  [--decorated] [--resize-after S]
 //!
 //! `--monitor I` places the window at monitor I's top-left (+ --x/--y), for a visible run.
+//! `--decorated` gives it a normal title bar and borders (a windowed game: Recall records only
+//! the W x H client area, on its 2560x1440 canvas); `--resize-after S` shrinks the client area
+//! to 3/4 after S seconds (the canvas, and so NVENC, must not change).
 //!
-//! Prints one JSON line when the window is up (`{"hwnd":…,"width":…,"height":…}`), then
+//! Prints one JSON line when the window is up (`{"hwnd":…,"width":…,"height":…}`, the
+//! client size), then
 //! `{"presented":…}` once a second. The pattern carries six known sRGB patches (100 px, left),
 //! a bar moving 8 px per frame, and the frame number as 24 binary blocks of 48 px along the
 //! top, so a recorded clip (1152x664 and up) can be checked for colour and frame continuity.
@@ -83,12 +88,28 @@ struct Args {
     y: i32,
     monitor: Option<usize>,
     seconds: Option<u64>,
+    decorated: bool,
+    resize_after: Option<f64>,
 }
 
 fn parse() -> Args {
-    let mut a = Args { fps: 500, width: None, height: None, x: -32000, y: -32000, monitor: None, seconds: None };
+    let mut a = Args {
+        fps: 500,
+        width: None,
+        height: None,
+        x: -32000,
+        y: -32000,
+        monitor: None,
+        seconds: None,
+        decorated: false,
+        resize_after: None,
+    };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
+        if k == "--decorated" {
+            a.decorated = true;
+            continue;
+        }
         let v = it.next().unwrap_or_default();
         match k.as_str() {
             "--fps" => a.fps = v.parse().unwrap_or(500),
@@ -98,6 +119,7 @@ fn parse() -> Args {
             "--y" => a.y = v.parse().unwrap_or(-32000),
             "--seconds" => a.seconds = v.parse().ok(),
             "--monitor" => a.monitor = v.parse().ok(),
+            "--resize-after" => a.resize_after = v.parse().ok(),
             _ => {}
         }
     }
@@ -111,6 +133,7 @@ struct Gfx {
     pipeline: wgpu::RenderPipeline,
     uniform: wgpu::Buffer,
     bind: wgpu::BindGroup,
+    config: wgpu::SurfaceConfiguration,
     width: u32,
     height: u32,
 }
@@ -140,19 +163,17 @@ impl Gfx {
             .into_iter()
             .find(|m| caps.present_modes.contains(m))
             .unwrap_or(wgpu::PresentMode::Fifo);
-        surface.configure(
-            &device,
-            &wgpu::SurfaceConfiguration {
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                format,
-                width,
-                height,
-                present_mode,
-                desired_maximum_frame_latency: 2,
-                alpha_mode: caps.alpha_modes[0],
-                view_formats: vec![],
-            },
-        );
+        let config = wgpu::SurfaceConfiguration {
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            format,
+            width,
+            height,
+            present_mode,
+            desired_maximum_frame_latency: 2,
+            alpha_mode: caps.alpha_modes[0],
+            view_formats: vec![],
+        };
+        surface.configure(&device, &config);
         let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("pattern"),
             source: wgpu::ShaderSource::Wgsl(SHADER.into()),
@@ -212,7 +233,16 @@ impl Gfx {
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }],
         });
         eprintln!("[present_target] {format:?} {present_mode:?}");
-        Self { surface, device, queue, pipeline, uniform, bind, width, height }
+        Self { surface, device, queue, pipeline, uniform, bind, config, width, height }
+    }
+
+    fn resize(&mut self, width: u32, height: u32) {
+        if width == 0 || height == 0 || (width, height) == (self.width, self.height) {
+            return;
+        }
+        (self.config.width, self.config.height) = (width, height);
+        (self.width, self.height) = (width, height);
+        self.surface.configure(&self.device, &self.config);
     }
 
     fn draw(&self, frame: u32) -> bool {
@@ -261,6 +291,7 @@ struct App {
     next: Option<Instant>,
     last_report: Option<Instant>,
     started: Option<Instant>,
+    resized: bool,
 }
 
 impl ApplicationHandler for App {
@@ -279,7 +310,7 @@ impl ApplicationHandler for App {
             .with_title("Recall Present Target")
             .with_inner_size(PhysicalSize::new(w, h))
             .with_position(PhysicalPosition::new(x, y))
-            .with_decorations(false)
+            .with_decorations(self.args.decorated)
             .with_skip_taskbar(true)
             .with_active(false)
             // Topmost: the one on-screen pixel (see engine-cost.ps1) must not sit under the
@@ -290,8 +321,10 @@ impl ApplicationHandler for App {
             Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
             _ => 0,
         };
+        let inner = window.inner_size();
+        let (w, h) = (inner.width.max(1), inner.height.max(1));
         self.gfx = Some(Gfx::new(window.clone(), w, h));
-        println!("{{\"hwnd\":{hwnd},\"width\":{w},\"height\":{h}}}");
+        println!("{{\"hwnd\":{hwnd},\"width\":{w},\"height\":{h},\"decorated\":{}}}", self.args.decorated);
         self.window = Some(window);
         self.started = Some(Instant::now());
     }
@@ -299,11 +332,25 @@ impl ApplicationHandler for App {
     fn window_event(&mut self, el: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
         match event {
             WindowEvent::CloseRequested => el.exit(),
+            WindowEvent::Resized(size) => {
+                if let Some(g) = &mut self.gfx {
+                    g.resize(size.width, size.height);
+                }
+            }
             WindowEvent::RedrawRequested => {
                 let now = Instant::now();
                 if self.args.seconds.is_some_and(|s| self.started.is_some_and(|t| now - t >= Duration::from_secs(s))) {
                     el.exit();
                     return;
+                }
+                let due = self.args.resize_after.map(Duration::from_secs_f64);
+                if !self.resized && due.is_some_and(|d| self.started.is_some_and(|t| now - t >= d)) {
+                    self.resized = true;
+                    if let (Some(w), Some(g)) = (&self.window, &self.gfx) {
+                        let (rw, rh) = ((g.width * 3 / 4) & !1, (g.height * 3 / 4) & !1);
+                        let _ = w.request_inner_size(PhysicalSize::new(rw, rh));
+                        println!("{{\"resized\":[{rw},{rh}]}}");
+                    }
                 }
                 let period = Duration::from_secs_f64(1.0 / f64::from(self.args.fps.max(1)));
                 let next = *self.next.get_or_insert(now);
@@ -336,6 +383,16 @@ fn main() {
     let args = parse();
     let el = EventLoop::new().expect("event loop");
     el.set_control_flow(ControlFlow::Poll);
-    let mut app = App { args, window: None, gfx: None, frame: 0, presented: 0, next: None, last_report: None, started: None };
+    let mut app = App {
+        args,
+        window: None,
+        gfx: None,
+        frame: 0,
+        presented: 0,
+        next: None,
+        last_report: None,
+        started: None,
+        resized: false,
+    };
     el.run_app(&mut app).expect("run");
 }
