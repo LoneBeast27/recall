@@ -123,17 +123,23 @@ fn notices_follow_overlay_enabled_and_stats_follow_overlay_stats() {
 }
 
 #[test]
-fn five_option_chord_hint_uses_two_rows() {
+fn the_chord_opens_the_hint_card_under_whatever_the_island_shows() {
     let now = Instant::now();
+    let chord = json!({"mod":"session","event":{"type":"chord","active":true,"leader":"Alt `","options":[
+        {"key":"1","label":"Bookmark"},{"key":"2","label":"Save 30 s"},{"key":"3","label":"Screenshot"},
+        {"key":"4","label":"Record"},{"key":"5","label":"Performance stats"}]}});
     let mut reducer = Reducer::new();
     reducer.apply_envelope(&session_status(false), now);
-    reducer.apply_envelope(&json!({"mod":"session","event":{"type":"chord","active":true,"leader":"Alt `","options":[
-        {"key":"1","label":"Bookmark"},{"key":"2","label":"Save 30 s"},{"key":"3","label":"Screenshot"},
-        {"key":"4","label":"Record"},{"key":"5","label":"Performance stats"}]}}), now);
-    let Some(Content::Notice(notice)) = shown(&reducer) else { panic!("notice expected") };
-    assert!(notice.chord);
-    assert_eq!(notice.title, "1 Bookmark · 2 Save 30 s · 3 Screenshot");
-    assert_eq!(notice.detail, "4 Record · 5 Performance stats");
+    reducer.apply_envelope(&chord, now);
+    assert_eq!(shown(&reducer), Some(Content::Leader("Alt `".into())), "stats off: the small leader pill");
+    let hint = reducer.view().hint.clone().expect("the card's options");
+    let keys: Vec<(&str, &str)> = hint.options.iter().map(|o| (o.key.as_str(), o.label.as_str())).collect();
+    assert_eq!(keys, [("1", "Bookmark"), ("2", "Save 30 s"), ("3", "Screenshot"), ("4", "Record"), ("5", "Performance stats")]);
+    assert!(reducer.view().notice.is_none(), "the hint is not a notice any more");
+    reducer.apply_envelope(&session_status(true), now);
+    assert_eq!(shown(&reducer), Some(Content::Stats), "stats on: the stats pill stays, the card hangs below");
+    reducer.tick(now + crate::reducer::CHORD_FOR);
+    assert!(reducer.view().hint.is_none(), "closes with the chord window");
 }
 
 #[test]
@@ -260,32 +266,38 @@ fn a_notice_from_nothing_carries_its_mark_in_the_circle_and_sweeps_once_open() {
     assert!(first * 20 >= 400 + 60, "it starts once the pill is open: {} ms", first * 20);
 }
 
-fn hint() -> Content {
-    let chord = NoticeView::new(Tone::Neutral, "1 Bookmark · 2 Save 30 s", "3 Screenshot · 4 Record", false);
-    Content::Notice(NoticeView { chord: true, ..chord })
-}
-
 #[test]
-fn the_shortcut_hint_appears_at_once_readable_with_a_short_window_fade() {
+fn the_leader_pill_shows_at_once_and_the_card_unfolds_in_120_ms() {
     let now = Instant::now();
     let mut island = Island::new(now);
-    island.update(Some((hint(), 260.0, H)), now);
+    island.update(Some((Content::Leader("Alt `".into()), 88.0, H)), now);
+    island.update_hint(true, now);
     let first = island.look(now, f32::INFINITY);
-    assert_eq!((first.unroll, first.box_w, first.content_alpha), (1.0, 260.0, 1.0), "the open pill, options readable");
-    assert_eq!(first.alpha, 0.0, "the window fades in");
-    assert_eq!(island.look(now + ms(120), f32::INFINITY).alpha, 1.0, "in 120 ms");
-    let hide = now + ms(1_500);
-    island.update(None, hide);
-    assert!(island.look(hide + ms(60), f32::INFINITY).alpha < 1.0);
-    assert!(island.tick(hide + ms(150)), "gone within 150 ms, no roll-up");
+    assert_eq!((first.unroll, first.box_w, first.content_alpha), (1.0, 88.0, 1.0), "no circle: readable at once");
+    assert_eq!(island.card(now), Some(0.0));
+    assert!(island.card(now + ms(40)).unwrap() > 0.5);
+    assert_eq!(island.card(now + ms(120)), Some(1.0));
+    assert!(!island.animating(now + ms(200)), "still while the window is open");
+    let close = now + ms(1_500);
+    island.update(None, close);
+    island.update_hint(false, close);
+    assert!(island.card(close + ms(60)).unwrap() < 1.0, "folds");
+    assert!(!island.tick(close + ms(100)));
+    assert!(island.tick(close + ms(150)), "gone once the pill faded and the card folded");
 }
 
 #[test]
-fn the_circle_style_for_the_hint_stays_available() {
+fn over_the_stats_the_card_unfolds_without_touching_the_pill() {
     let now = Instant::now();
-    let mut island = Island::new(now);
-    island.hint_style = Style::Unravel;
-    island.update(Some((hint(), 260.0, H)), now);
-    let circle = island.look(now + ms(100), f32::INFINITY);
-    assert_eq!((circle.unroll, circle.box_w, circle.content_alpha), (0.0, H, 0.0));
+    let mut island = Island::new(now - Duration::from_secs(1));
+    island.update(Some((Content::Stats, W, H)), now - Duration::from_secs(1));
+    let before = island.look(now, f32::INFINITY);
+    island.update(Some((Content::Stats, W, H)), now);
+    island.update_hint(true, now);
+    let with_card = island.look(now + ms(60), f32::INFINITY);
+    assert_eq!((with_card.box_w, with_card.box_h, with_card.content_alpha), (before.box_w, before.box_h, 1.0));
+    assert!(island.card(now + ms(60)).is_some() && island.animating(now + ms(60)));
+    island.update_hint(false, now + ms(500));
+    assert_eq!(island.card(now + ms(620)), None);
+    assert!(island.shown(), "the stats stay");
 }

@@ -26,14 +26,12 @@ pub enum Tone {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct NoticeView {
     pub tone: Tone,
-    /// The small secondary line ("Recording", "Clip saved"); the chord hint's first row.
+    /// The small secondary line ("Recording", "Clip saved").
     pub title: String,
-    /// The bold line ("VALORANT"); empty = a one-line notice; the chord hint's second row.
+    /// The bold line ("VALORANT"); empty = a one-line notice.
     pub detail: String,
     /// Draw the detail in the display face (it is a game name).
     pub game_font: bool,
-    /// The two-step shortcut hint: two equal rows of options.
-    pub chord: bool,
     /// The result of an action (saved, screenshot, bookmark, recording) or a
     /// failure: the island transforms into the larger notice pill with one
     /// light sweep instead of only swapping its content.
@@ -54,7 +52,7 @@ pub enum SavePhase {
 
 impl NoticeView {
     pub fn new(tone: Tone, title: &str, detail: impl Into<String>, game_font: bool) -> Self {
-        Self { tone, title: title.into(), detail: detail.into(), game_font, chord: false, emphasis: false, save: None }
+        Self { tone, title: title.into(), detail: detail.into(), game_font, emphasis: false, save: None }
     }
 
     /// The same notice, shown with the transformation.

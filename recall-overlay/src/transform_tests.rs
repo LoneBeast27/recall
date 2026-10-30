@@ -130,13 +130,12 @@ fn the_sweep_runs_once_in_the_tone_colour_and_the_hold_is_idle() {
 }
 
 #[test]
-fn session_notices_and_the_chord_hint_keep_the_plain_swap() {
+fn session_notices_keep_the_plain_swap() {
     let now = Instant::now();
     let game = Content::Notice(NoticeView::new(Tone::Recording, "Recording", "VALORANT", true));
-    let chord = NoticeView { chord: true, ..NoticeView::new(Tone::Neutral, "1 Bookmark", "4 Record", false) };
-    for plain in [game, Content::Notice(chord)] {
+    {
         let mut island = stats_island(now);
-        island.update(Some((plain, 200.0, STATS.1)), now);
+        island.update(Some((game, 200.0, STATS.1)), now);
         let frames = path(&island, now, DURATION);
         assert!(frames.windows(2).all(|p| p[1].w <= p[0].w), "eases straight to size: no spring");
         assert_eq!(island.frame(now + DURATION).w, 200.0);
@@ -207,8 +206,6 @@ fn action_results_and_failures_transform_the_island_and_session_changes_do_not()
         assert!(!shows(session(kind)).1, "{kind}: plain swap");
     }
     assert!(!shows(engine(json!({"type":"mic_muted","muted":true}))).1, "mic toggle: plain swap");
-    let chord = json!({"mod":"session","event":{"type":"chord","active":true,"options":[{"key":"1","label":"Bookmark"}]}});
-    assert!(!shows(chord).1, "chord hint: plain swap");
 }
 
 #[test]

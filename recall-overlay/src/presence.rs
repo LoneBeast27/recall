@@ -126,6 +126,16 @@ impl Presence {
     }
 }
 
+/// The shortcut hint's card under the pill: its size, the gap above it and
+/// how much of it has unfolded.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CardLook {
+    pub w: f32,
+    pub h: f32,
+    pub gap: f32,
+    pub progress: f32,
+}
+
 /// Where `scene`'s content sits in the open pill: centred, or at the left
 /// padding for a scene that leads (a save).
 pub fn content_dx(look: &Look, content_w: f32, lead: bool) -> f32 {
@@ -155,6 +165,11 @@ pub struct Look {
     /// The detail line's opacity (≤ `content_alpha`; fades alone when only it changed).
     pub detail_alpha: f32,
     pub icon_alpha: f32,
+    /// The shortcut hint's card, while it is out.
+    pub card: Option<CardLook>,
+    /// How the pill and the card line up in the window, as the anchor:
+    /// 0 = left edges, 0.5 = centres, 1 = right edges.
+    pub align: f32,
 }
 
 impl Look {
@@ -173,13 +188,30 @@ impl Look {
             let pw = h + (w - h).max(0.0) * unroll;
             (pw, [0.0, 0.0, pw, h], 0.0)
         };
-        Self { box_w, box_h: h, margin, pill, full_w: w, unroll, pop, alpha: frame.alpha, content_alpha: 1.0, title_alpha: 1.0, detail_alpha: 1.0, icon_alpha: 1.0 }
+        Self { box_w, box_h: h, margin, pill, full_w: w, unroll, pop, alpha: frame.alpha, content_alpha: 1.0, title_alpha: 1.0, detail_alpha: 1.0, icon_alpha: 1.0, card: None, align: 1.0 }
     }
 
-    /// The window's size in whole pixels.
+    /// The width the anchor places: the pill's box, or the card when wider.
+    pub fn span_w(&self) -> f32 {
+        self.card.map_or(self.box_w, |c| self.box_w.max(c.w))
+    }
+
+    /// The window's size in whole pixels: the box (and the unfolded card
+    /// below it) plus the margin.
     pub fn window(&self) -> (i32, i32) {
         let m = 2.0 * self.margin;
-        ((self.box_w.ceil() + m).max(1.0) as i32, (self.box_h.ceil() + m).max(1.0) as i32)
+        let h = self.box_h + self.card.map_or(0.0, |c| c.gap + c.h * c.progress);
+        ((self.span_w().ceil() + m).max(1.0) as i32, (h.ceil() + m).max(1.0) as i32)
+    }
+
+    /// The pill box's top-left in the window.
+    pub fn pill_origin(&self) -> (f32, f32) {
+        (self.margin + (self.span_w() - self.box_w) * self.align, self.margin)
+    }
+
+    /// The card's top-left in the window.
+    pub fn card_origin(&self) -> Option<(f32, f32)> {
+        self.card.map(|c| (self.margin + (self.span_w() - c.w) * self.align, self.margin + self.box_h + c.gap))
     }
 }
 
@@ -188,10 +220,10 @@ impl Look {
 /// the content as the pill unrolls. `content_dx` is where the content sits
 /// in the open pill (`content_dx`), `icon_cx` the mark's place in it.
 pub fn icon_pose(look: &Look, content_dx: f32, icon_cx: f32) -> (f32, f32, f32) {
-    let [x, y, _, h] = look.pill;
+    let ([x, y, _, h], (ox, oy)) = (look.pill, look.pill_origin());
     let settled = content_dx + icon_cx;
     let offset = h / 2.0 + (settled - h / 2.0) * look.unroll;
-    (look.margin + x + offset, look.margin + y + h / 2.0, look.pop)
+    (ox + x + offset, oy + y + h / 2.0, look.pop)
 }
 
 #[cfg(test)]

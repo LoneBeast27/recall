@@ -12,6 +12,7 @@ mod export;
 mod export_sim;
 mod filmstrip;
 mod fonts;
+mod hint;
 mod island;
 mod layout;
 mod notice;

@@ -158,6 +158,16 @@ pub fn position(anchor: Anchor, monitor: &Rect, width: i32, edge: i32) -> (i32, 
     (x, y)
 }
 
+/// How the island lines up its pill and the hint card for an anchor
+/// (0 = left edges, 0.5 = centres, 1 = right edges).
+pub fn align(anchor: Anchor) -> f32 {
+    match anchor {
+        Anchor::TopLeft => 0.0,
+        Anchor::TopCentre => 0.5,
+        Anchor::TopRight => 1.0,
+    }
+}
+
 /// The window's top-left for a drawn look: the anchor places the look's
 /// `box_w`-wide box; the window adds `margin` around it (the appearing
 /// circle's overshoot).
