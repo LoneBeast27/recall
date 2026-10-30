@@ -37,20 +37,38 @@ fn heights_at_1440p_drop_down_180_two_columns_116_one_row_52() {
     assert_eq!(CardLayout::Dropdown.height(5, 1.5), 270.0, "scales with the island");
 }
 
+/// What `choose_card` picks when the cards (by height) cover these areas.
+fn picked(drop: f32, two: f32, row: f32) -> CardLayout {
+    let cover = |_: f32, h: f32| Some(if h >= 180.0 { drop } else if h >= 116.0 { two } else { row });
+    choose_card(&hint(), 1.0, &Fake, cover).layout
+}
+
 #[test]
-fn the_card_drops_down_where_it_fits_else_two_columns_else_one_row() {
-    let pick = |room: &dyn Fn(f32) -> Option<f32>| choose_card(&hint(), 1.0, &Fake, room).layout;
-    // The same room whatever the width (a scan with one free depth).
-    assert_eq!(pick(&|_| Some(226.0)), CardLayout::Dropdown, "fits");
-    assert_eq!(pick(&|_| Some(180.0)), CardLayout::Dropdown, "exactly fits");
-    assert_eq!(pick(&|_| Some(138.0)), CardLayout::TwoColumn, "too shallow for five rows");
-    assert_eq!(pick(&|_| Some(60.0)), CardLayout::Row, "too shallow for three rows");
-    assert_eq!(pick(&|_| Some(10.0)), CardLayout::Row, "nothing fits: the shortest");
-    assert_eq!(pick(&|_| None), CardLayout::Dropdown, "no scan data: drop down");
-    // A kill feed under narrow cards, a top bar beside wide ones: each card is
-    // judged on its own columns.
-    let drop_w = card_scene(&hint(), CardLayout::Dropdown, 1.0, &Fake).w;
-    assert_eq!(pick(&|w| Some(if w <= drop_w { 62.0 } else { 200.0 })), CardLayout::TwoColumn);
+fn a_card_that_covers_nothing_wins_in_preference_order() {
+    assert_eq!(picked(0.0, 0.0, 0.0), CardLayout::Dropdown, "all clean: the drop-down");
+    assert_eq!(picked(500.0, 0.0, 0.0), CardLayout::TwoColumn, "the first clean one");
+    assert_eq!(picked(500.0, 900.0, 0.0), CardLayout::Row);
+}
+
+#[test]
+fn when_none_is_clean_the_least_covered_area_wins_whatever_its_layout() {
+    assert_eq!(picked(100.0, 200.0, 300.0), CardLayout::Dropdown, "not the row just because it is shortest");
+    assert_eq!(picked(300.0, 100.0, 200.0), CardLayout::TwoColumn);
+    assert_eq!(picked(300.0, 200.0, 100.0), CardLayout::Row);
+}
+
+#[test]
+fn equal_coverage_goes_to_the_shorter_card() {
+    assert_eq!(picked(100.0, 100.0, 300.0), CardLayout::TwoColumn);
+    assert_eq!(picked(100.0, 300.0, 100.0), CardLayout::Row);
+    assert_eq!(picked(100.0, 100.0, 100.0), CardLayout::Row);
+}
+
+#[test]
+fn no_scan_data_drops_down() {
+    assert_eq!(choose_card(&hint(), 1.0, &Fake, |_, _| None).layout, CardLayout::Dropdown);
+    let (layout, _, _, covered) = card_for("somenewgame");
+    assert_eq!((layout, covered), (CardLayout::Dropdown, None), "a game the scan never saw");
 }
 
 #[test]
@@ -100,20 +118,20 @@ fn card_sizes_at_1440p() {
     println!("card_size leader pill: {} x {}", pill.w, pill.h);
 }
 
-/// The card each scanned game gets at 1440p over a 44 px pill (stats or the
-/// leader pill), from the embedded scan, with the real fonts.
-fn layout_for(key: &str) -> (CardLayout, f32, f32, Option<f32>) {
-    use crate::placement::{card_room, scale, Rect, Spots, ISLAND_H};
+/// The card a game gets at 1440p over a 44 px pill (stats or the leader
+/// pill), from the embedded scan, with the real fonts, and what it covers.
+fn card_for(key: &str) -> (CardLayout, f32, f32, Option<f32>) {
+    use crate::placement::{card_cover, scale, Rect, Spots, ISLAND_H};
     let (fonts, spots) = (crate::fonts::Fonts::new().unwrap(), Spots::embedded());
     let (spot, sky) = (spots.lookup(key), spots.skyline(key));
     let qhd = Rect { left: 0, top: 0, right: 2560, bottom: 1440 };
     let s = scale(1440, &spot);
-    let room = |w: f32| card_room(&spot, sky.as_deref(), &qhd, s, w, ISLAND_H * s, GAP * s);
-    let card = choose_card(&hint(), s, &fonts, room);
-    (card.layout, card.w, card.h, room(card.w))
+    let cover = |w: f32, h: f32| card_cover(&spot, sky.as_deref(), &qhd, s, (w, h), (ISLAND_H + GAP) * s);
+    let card = choose_card(&hint(), s, &fonts, cover);
+    (card.layout, card.w, card.h, cover(card.w, card.h))
 }
 
-/// Per game: spot, free depth and the card it gets (an instrument):
+/// Per game: spot, the card and the HUD area it covers (an instrument):
 /// `cargo test -p recall-overlay -- --ignored per_game_cards --nocapture`.
 #[test]
 #[ignore]
@@ -121,16 +139,36 @@ fn per_game_cards() {
     let spots = crate::placement::Spots::embedded();
     for key in spots.keys() {
         let spot = spots.lookup(key);
-        let (layout, w, h, room) = layout_for(key);
-        let verdict = if room.is_none_or(|r| h <= r) { "fits" } else { "fallback (overlaps)" };
-        println!("per_game {key}: {:?} free {:?} -> {layout:?} {w}x{h}, room {room:?}: {verdict}", spot.anchor, spot.free_px);
+        let (layout, w, h, covered) = card_for(key);
+        println!("per_game {key}: {:?} {:?} -> {layout:?} {w:.0}x{h:.0}, covers {:.0} px2", spot.anchor, spot.free_px, covered.unwrap_or(-1.0));
     }
 }
 
 #[test]
-fn valorant_gets_the_single_row_above_its_kill_feed() {
-    // 124 free rows under the island (the kill feed), 62 of them under the pill:
-    // five rows (180) and three (116) do not fit; the row (52) does in height.
-    let (layout, _, h, _) = layout_for("valorant");
-    assert_eq!((layout, h), (CardLayout::Row, 52.0));
+fn every_scanned_game_gets_a_clean_card_or_the_least_covered_one() {
+    use crate::placement::{card_cover, scale, Rect, Spots, ISLAND_H};
+    let (fonts, spots) = (crate::fonts::Fonts::new().unwrap(), Spots::embedded());
+    let qhd = Rect { left: 0, top: 0, right: 2560, bottom: 1440 };
+    for key in spots.keys() {
+        let (spot, sky) = (spots.lookup(key), spots.skyline(key));
+        let s = scale(1440, &spot);
+        let cover = |card: &CardScene| card_cover(&spot, sky.as_deref(), &qhd, s, (card.w, card.h), (ISLAND_H + GAP) * s).unwrap();
+        let all = [CardLayout::Dropdown, CardLayout::TwoColumn, CardLayout::Row].map(|layout| card_scene(&hint(), layout, s, &fonts));
+        let chosen = card_for(key);
+        let area = chosen.3.unwrap();
+        if let Some(clean) = all.iter().find(|card| cover(card) <= 0.0) {
+            assert_eq!((chosen.0, area), (clean.layout, 0.0), "{key}: the first clean card");
+        } else {
+            assert!(all.iter().all(|card| area <= cover(card)), "{key}: no card covers less than {area}");
+        }
+    }
+}
+
+#[test]
+fn valorant_gets_the_row_above_its_kill_feed() {
+    // Five rows (118 px into the kill feed) and three (54 px) cover more than the
+    // row, which clears the kill feed and only touches the top bar's end.
+    let (layout, w, h, covered) = card_for("valorant");
+    assert_eq!((layout, w, h), (CardLayout::Row, 636.0, 52.0));
+    assert!(covered.unwrap() > 0.0 && covered.unwrap() < 16_000.0, "{covered:?}");
 }

@@ -1,10 +1,10 @@
 //! The two-step shortcut hint (Alt + ` then a key): a card that unfolds
 //! below the island, each option a key cap and its label. The island pill
 //! above stays what it is (the stats, a notice, or a small "Alt `" pill).
-//! Its layout follows the room the HUD scan measured under the island, card
-//! by card over the columns each covers (HUD that comes and goes counted):
-//! one option per row (drop-down) if that fits, else two columns, else one
-//! row (the shortest; also when nothing fits). Unscanned spots drop down.
+//! Its layout follows the game's skyline (the transient-aware HUD scan, which
+//! only this card uses), judged over the columns each card spans: the first
+//! of drop-down, two columns and one row that covers no HUD, else whichever
+//! covers the least (ties: the shorter). Unscanned spots drop down.
 
 use serde::Serialize;
 use std::time::{Duration, Instant};
@@ -116,14 +116,17 @@ pub fn card_scene(hint: &HintView, layout: CardLayout, s: f32, m: &dyn Measure) 
     scene
 }
 
-/// The first card (drop-down, then two columns, then one row) that fits the
-/// room under it - `room(card_w)`: physical px under a card that wide, `None`
-/// when unscanned (anything fits) - else the single row, the shortest.
-pub fn choose_card(hint: &HintView, s: f32, m: &dyn Measure, room: impl Fn(f32) -> Option<f32>) -> CardScene {
+/// The first card (drop-down, then two columns, then one row) that covers no
+/// HUD, else the one covering the least (ties: the shorter). `cover(w, h)`:
+/// the HUD area under a card that size; `None` when unscanned (nothing known
+/// to cover, so the drop-down).
+pub fn choose_card(hint: &HintView, s: f32, m: &dyn Measure, cover: impl Fn(f32, f32) -> Option<f32>) -> CardScene {
     let mut cards: Vec<CardScene> =
         [CardLayout::Dropdown, CardLayout::TwoColumn, CardLayout::Row].into_iter().map(|layout| card_scene(hint, layout, s, m)).collect();
-    let pick = cards.iter().position(|card| room(card.w).is_none_or(|r| card.h <= r)).unwrap_or(2);
-    cards.swap_remove(pick)
+    let area: Vec<f32> = cards.iter().map(|card| cover(card.w, card.h).unwrap_or(0.0)).collect();
+    let clean = area.iter().position(|&a| a <= 0.0);
+    let least = (0..cards.len()).min_by(|&a, &b| area[a].total_cmp(&area[b]).then(cards[a].h.total_cmp(&cards[b].h)));
+    cards.swap_remove(clean.or(least).unwrap_or(0))
 }
 
 /// The card's unfold: open (or folding) since when, from where.

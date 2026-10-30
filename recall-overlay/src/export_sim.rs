@@ -11,7 +11,7 @@ use crate::island::{self, notice_layout, Content, Island};
 use crate::hint::{choose_card, CardScene, GAP};
 use crate::layout::{leader_scene, stats_scene, Scene};
 use crate::notice::NoticeView;
-use crate::placement::{align, card_room, free_depth, grow, Rect, Spot};
+use crate::placement::{align, card_cover, free_depth, grow, Rect, Spot};
 use crate::presence::{CardLook, Look};
 use crate::preview::stats_states;
 use crate::reducer::Reducer;
@@ -117,8 +117,9 @@ impl<'a> Sim<'a> {
         let hint = self.reducer.view().hint.clone().filter(|_| self.reducer.session().notices);
         let Some(hint) = hint else { return self.island.update_hint(false, now) };
         let pill_h = self.island.frame(now).h;
-        let room = |w: f32| card_room(&self.spot, self.skyline.as_deref(), &self.monitor, self.scale, w, pill_h, GAP * self.scale);
-        self.card = Some(choose_card(&hint, self.scale, self.fonts, room));
+        let below = pill_h + GAP * self.scale;
+        let cover = |w: f32, h: f32| card_cover(&self.spot, self.skyline.as_deref(), &self.monitor, self.scale, (w, h), below);
+        self.card = Some(choose_card(&hint, self.scale, self.fonts, cover));
         self.island.update_hint(true, now);
     }
 
