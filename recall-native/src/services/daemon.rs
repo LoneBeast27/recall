@@ -231,8 +231,10 @@ impl Shared {
 
 impl DaemonClient {
     /// Starts the background connection thread. Never blocks.
+    /// `RECALL_CONTROL_PIPE` names another pipe (scripted checks keep off the real recorder).
     pub fn spawn() -> Self {
-        Self::spawn_on(PIPE_NAME)
+        let pipe = std::env::var("RECALL_CONTROL_PIPE").ok().filter(|p| !p.is_empty());
+        Self::spawn_on(pipe.as_deref().unwrap_or(PIPE_NAME))
     }
 
     /// `spawn` against any pipe name (tests use a private one).

@@ -32,6 +32,7 @@ pub fn run() -> Result<(), String> {
             window_background: WindowBackgroundAppearance::Opaque,
             app_id: Some("Recall".into()),
             focus: !background,
+            show: !background,
             ..Default::default()
         };
         let opened = cx.open_window(options, |window, cx| {
@@ -39,16 +40,35 @@ pub fn run() -> Result<(), String> {
             Root::start_polling(root.clone(), window, cx);
             root
         });
-        if let Err(error) = opened {
-            eprintln!("open Recall window: {error}");
-            cx.quit();
-            return;
+        let handle = match opened {
+            Ok(handle) => handle,
+            Err(error) => {
+                eprintln!("open Recall window: {error}");
+                cx.quit();
+                return;
+            }
+        };
+        if background {
+            let _ = handle.update(cx, |_, window, _| show_behind(window, width, height));
         }
         if !background {
             cx.activate(true);
         }
     });
     Ok(())
+}
+
+/// Scripted checks (`RECALL_NATIVE_BACKGROUND`): show the window at the bottom of the z-order
+/// without activating it, so a test instance never takes focus from the person at the PC.
+fn show_behind(window: &gpui::Window, width: f32, height: f32) {
+    use windows::Win32::{
+        Foundation::HWND,
+        UI::WindowsAndMessaging::{HWND_BOTTOM, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos},
+    };
+    let Ok(raw) = crate::root::parent_hwnd(window) else { return };
+    let s = window.scale_factor();
+    let (w, h) = ((width * s).round() as i32, (height * s).round() as i32);
+    let _ = unsafe { SetWindowPos(HWND(raw as *mut _), Some(HWND_BOTTOM), 24, 24, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW) };
 }
 
 /// `RECALL_NATIVE_WINDOW_SIZE=1120x720` for layout checks; default 1280×820.

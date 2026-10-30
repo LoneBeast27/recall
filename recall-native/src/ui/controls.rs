@@ -51,7 +51,9 @@ pub fn button(id: impl Into<ElementId>, variant: Variant) -> Stateful<Div> {
 
 /// Square icon-only button. `pressed` shows the latched state (e.g. muted).
 pub fn icon_button(id: impl Into<ElementId>, kind: Icon, size: f32, color: u32, pressed: bool) -> Stateful<Div> {
+    let id = id.into();
     let base = div()
+        .child(crate::trace::target(id.to_string()))
         .id(id)
         .size(px(size))
         .flex()
@@ -120,7 +122,9 @@ pub fn segment_track() -> Div {
 }
 
 pub fn segment(id: impl Into<ElementId>, label: impl Into<SharedString>, selected: bool) -> Stateful<Div> {
+    let id = id.into();
     let base = div()
+        .child(crate::trace::target(id.to_string()))
         .id(id)
         .flex_1()
         .h(px(26.))

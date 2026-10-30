@@ -102,6 +102,7 @@ impl Root {
                     .hover(|s| s.bg(c(theme::OVERLAY)).text_color(c(theme::TEXT)))
                     .child(icon(Icon::ChevronLeft, 14., theme::MUTED))
                     .child("Library")
+                    .child(crate::trace::target("crumb-library"))
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.go(Route::Library);
                         cx.notify();

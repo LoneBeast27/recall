@@ -207,7 +207,9 @@ impl Root {
         let hover_path = path.clone();
         let drag_path = path.clone();
         let menu_path = path.clone();
+        let target = format!("tile:{}", std::path::Path::new(&path).file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()));
         div()
+            .child(crate::trace::target(target))
             .id(("tile", index))
             .w(px(w))
             .flex()

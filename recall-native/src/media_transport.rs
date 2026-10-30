@@ -242,6 +242,12 @@ impl NativePreview {
         if self.has_audio { self.audio.position() } else { self.video_position().unwrap_or(0.0) }
     }
 
+    /// The video player's own state ("playing", "paused", "stopped", …) for the test trace.
+    pub fn video_state(&self) -> Option<&'static str> {
+        let player = self.player.as_ref()?;
+        unsafe { player.GetState() }.ok().map(player_state_name)
+    }
+
     pub fn video_position(&self) -> Result<f64, String> {
         if let Some(error) = self.error() {
             return Err(error);
