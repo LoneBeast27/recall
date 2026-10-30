@@ -169,24 +169,31 @@ impl Pen<'_> {
     }
 
     fn mark(&mut self, tone: Tone, x: f32) {
-        let (cy, r) = (self.scene.h / 2.0, self.u(4.0));
-        let dot = |color| Shape::Dot { cx: x + r, cy, r, color };
+        let (cy, r, color) = (self.scene.h / 2.0, self.u(4.0), tone_color(tone));
         let shape = match tone {
-            Tone::Recording => dot(SIGNAL),
-            Tone::Success => dot(ACTIVE),
-            Tone::Failure => dot(ERROR),
-            Tone::Neutral => dot(TERTIARY),
-            Tone::Waiting => Shape::Hollow { cx: x + r, cy, r, stroke: self.u(1.5), color: TERTIARY },
+            Tone::Waiting => Shape::Hollow { cx: x + r, cy, r, stroke: self.u(1.5), color },
             Tone::Paused => Shape::Pause {
                 x: x + self.u(0.5),
                 cy,
                 bar_w: self.u(2.5),
                 bar_h: self.u(9.0),
                 gap: self.u(2.0),
-                color: MUTED,
+                color,
             },
+            _ => Shape::Dot { cx: x + r, cy, r, color },
         };
         self.scene.shapes.push(shape);
+    }
+}
+
+/// The colour of a tone's mark (the action notice's sweep reuses it).
+pub fn tone_color(tone: Tone) -> Rgba {
+    match tone {
+        Tone::Recording => SIGNAL,
+        Tone::Success => ACTIVE,
+        Tone::Failure => ERROR,
+        Tone::Neutral | Tone::Waiting => TERTIARY,
+        Tone::Paused => MUTED,
     }
 }
 

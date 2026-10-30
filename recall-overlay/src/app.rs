@@ -14,9 +14,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
 };
 
+use crate::anim::Frame;
 use crate::fonts::Fonts;
 use crate::island::{self, stats_content, Content, Island};
-use crate::layout::{notice_scene, stats_scene, Scene};
+use crate::layout::{stats_scene, Scene};
 use crate::placement::{self, position, Rect, Spot, Spots, EDGE};
 use crate::reducer::Reducer;
 use crate::render::Renderer;
@@ -45,7 +46,16 @@ pub struct Placed {
     pub monitor: Rect,
     pub spot: Spot,
     pub scale: f32,
+    /// Action notices lay out at `scale * grow` (the HUD-aware growth).
+    pub grow: f32,
+    /// The scan's free depth below the island's top (physical px; unbounded
+    /// when unscanned): a spring's overshoot never reaches past it.
+    max_h: f32,
 }
+
+/// What the last pushed frame showed: scene, window bounds, window opacity,
+/// content opacity and sweep position (0..1000). Equal = no redraw.
+type Drawn = (Scene, [i32; 4], u8, u8, Option<u16>);
 
 pub struct App {
     pub reducer: Reducer,
@@ -67,7 +77,9 @@ pub struct App {
     last_poll: Option<Instant>,
     pub stats: StatsSnapshot,
     scene: Scene,
-    drawn: Option<(Scene, [i32; 4], u8, u8)>,
+    /// The scale `scene` was laid out at (an action notice's is grown).
+    scene_scale: f32,
+    drawn: Option<Drawn>,
     pub bounds: [i32; 4],
     pub render_error: Option<String>,
     anim_running: bool,
@@ -97,6 +109,7 @@ impl App {
             last_poll: None,
             stats: StatsSnapshot::default(),
             scene: Scene::default(),
+            scene_scale: 1.0,
             drawn: None,
             bounds: [0; 4],
             render_error: None,
@@ -188,38 +201,53 @@ impl App {
             let spot = self.spots.lookup(&key);
             let monitor = target_monitor(hwnd, pid);
             let scale = placement::scale(monitor.height(), &spot);
-            self.placed = Some(Placed { key, pid, hwnd, monitor, spot, scale });
+            let (grow, max_h) = (placement::grow(&spot), placement::free_depth(&spot, &monitor, scale));
+            self.placed = Some(Placed { key, pid, hwnd, monitor, spot, scale, grow, max_h });
         }
         self.placed.as_ref().map_or(1.0, |p| p.scale)
     }
 
-    /// Lays out `content` at the current placement's scale.
-    fn scene_for(&mut self, content: &Content) -> (Scene, f32) {
+    /// Lays out `content` at the current placement's scale: the scene, the
+    /// scale it was laid out at and the island's size. An action notice lays
+    /// out grown and sizes over the stats pill under it (`stats_under`).
+    fn scene_for(&mut self, content: &Content, stats_under: bool) -> (Scene, f32, (f32, f32)) {
         let scale = self.place();
-        let scene = match content {
-            Content::Notice(notice) => notice_scene(notice, scale, &self.fonts),
-            Content::Stats => stats_scene(&stats_content(&self.reducer, &self.stats), scale, &self.fonts),
-        };
-        (scene, scale)
+        let stats = |app: &Self| stats_scene(&stats_content(&app.reducer, &app.stats), scale, &app.fonts);
+        match content {
+            Content::Notice(notice) => {
+                let grow = self.placed.as_ref().map_or(1.0, |p| p.grow);
+                let under = || stats_under.then(|| stats(self).w);
+                island::notice_layout(notice, scale, grow, under, &self.fonts)
+            }
+            Content::Stats => {
+                let scene = stats(self);
+                let size = (scene.w, scene.h);
+                (scene, scale, size)
+            }
+        }
     }
 
     /// `--smoke-render`: the fixture's current content, settled, to a BMP.
     pub fn snapshot(&mut self, path: &std::path::Path) -> Result<(), String> {
         self.poll_stats(Instant::now());
-        let content = island::content(self.reducer.view(), self.reducer.session(), true)
+        let view = self.reducer.view();
+        let content = island::content(view, self.reducer.session(), true)
             .ok_or("the fixture shows nothing (the island is hidden)")?;
-        let (scene, scale) = self.scene_for(&content);
-        crate::preview::snapshot(path, &mut self.renderer, &self.fonts, &scene, scale)
+        let under = island::stats_shown(view, self.reducer.session(), true);
+        let (scene, scale, size) = self.scene_for(&content, under);
+        crate::preview::snapshot(path, &mut self.renderer, &self.fonts, &scene, scale, size)
     }
 
     fn refresh(&mut self, hwnd: HWND, now: Instant) {
-        let session = self.reducer.session();
+        let (view, session) = (self.reducer.view(), self.reducer.session());
         let in_game = self.smoke.is_some() || game_in_front(session.target_pid.filter(|_| !session.desktop));
-        match island::content(self.reducer.view(), session, in_game) {
+        let under = island::stats_shown(view, session, in_game);
+        match island::content(view, session, in_game) {
             Some(content) => {
-                let (scene, _) = self.scene_for(&content);
-                self.island.update(Some((content, scene.w, scene.h)), now);
+                let (scene, scale, (w, h)) = self.scene_for(&content, under);
+                self.island.update(Some((content, w, h)), now);
                 self.scene = scene;
+                self.scene_scale = scale;
             }
             None => self.island.update(None, now),
         }
@@ -241,14 +269,16 @@ impl App {
         }
         let Some(placed) = self.placed.as_ref() else { return };
         let frame = self.island.frame(now);
+        let frame = Frame { h: frame.h.min(placed.max_h.max(self.scene.h)), ..frame };
         let (w, h) = (frame.w.ceil().max(1.0) as i32, frame.h.ceil().max(1.0) as i32);
         let edge = (EDGE * placed.scale).round() as i32;
         let (x, y) = position(placed.spot.anchor, &placed.monitor, w, edge);
         let alpha = (frame.alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
-        let content_alpha = self.island.content_alpha(now);
-        let key = (self.scene.clone(), [x, y, w, h], alpha, (content_alpha.clamp(0.0, 1.0) * 255.0).round() as u8);
+        let (content_alpha, sheen) = (self.island.content_alpha(now), self.island.sheen(now));
+        let faded = (content_alpha.clamp(0.0, 1.0) * 255.0).round() as u8;
+        let key = (self.scene.clone(), [x, y, w, h], alpha, faded, sheen.map(|s| (s.progress * 1000.0) as u16));
         if self.drawn.as_ref() != Some(&key) {
-            let drawn = self.renderer.draw(&self.fonts, &self.scene, frame, placed.scale, content_alpha);
+            let drawn = self.renderer.draw(&self.fonts, &self.scene, frame, self.scene_scale, content_alpha, sheen);
             let shown = drawn.and_then(|(w, h)| self.renderer.present(hwnd, x, y, w, h, frame.alpha));
             match shown {
                 Ok(()) => {

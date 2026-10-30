@@ -5,7 +5,9 @@
 
 mod anim;
 mod app;
+mod cue;
 mod diagnostics;
+mod filmstrip;
 mod fonts;
 mod island;
 mod layout;
@@ -52,7 +54,8 @@ const WM_FEED: u32 = WM_APP + 1;
 const CORNERS: [&str; 4] = ["top-left", "top-right", "bottom-left", "bottom-right"];
 const USAGE: &str = "usage: recall-overlay --parent PID [--corner top-left|top-right|bottom-left|bottom-right] \
 [--diagnostics PATH] | --smoke-state FIXTURE.json [--smoke-allow-capture] [--smoke-render PATH.bmp] [--diagnostics PATH] \
-| --preview-sheet PATH.bmp [--preview-scale S] | --frame-timing-probe PID [--probe-seconds N]";
+| --preview-sheet PATH.bmp [--preview-scale S] | --preview-notice PATH.bmp [--preview-scale S] \
+| --frame-timing-probe PID [--probe-seconds N]";
 
 #[derive(Debug, Default)]
 struct Options {
@@ -64,6 +67,8 @@ struct Options {
     smoke_allow_capture: bool,
     smoke_render: Option<PathBuf>,
     preview_sheet: Option<PathBuf>,
+    /// `--preview-notice PATH.bmp`: the action notice's transformation filmstrips.
+    preview_notice: Option<PathBuf>,
     preview_scale: Option<f32>,
     /// `--frame-timing-probe PID`: measure one process's FPS, print, exit.
     probe_pid: Option<u32>,
@@ -89,6 +94,9 @@ fn run() -> Result<(), String> {
     stats::install_cleanup();
     if let Some(path) = options.preview_sheet.as_ref() {
         return preview::sheet(path, options.preview_scale.unwrap_or(1.0));
+    }
+    if let Some(path) = options.preview_notice.as_ref() {
+        return filmstrip::notice_filmstrip(path, options.preview_scale.unwrap_or(1.0));
     }
     if let Some(pid) = options.probe_pid {
         return stats::probe::run(pid, options.probe_seconds.unwrap_or(5));
@@ -186,6 +194,7 @@ fn parse_args() -> Result<Options, String> {
             "--smoke-allow-capture" => options.smoke_allow_capture = true,
             "--smoke-render" => options.smoke_render = Some(PathBuf::from(value("a BMP path")?)),
             "--preview-sheet" => options.preview_sheet = Some(PathBuf::from(value("a BMP path")?)),
+            "--preview-notice" => options.preview_notice = Some(PathBuf::from(value("a BMP path")?)),
             "--preview-scale" => {
                 let raw = value("a number")?;
                 options.preview_scale = Some(raw.parse().map_err(|_| format!("invalid scale: {raw}"))?);

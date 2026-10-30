@@ -101,6 +101,38 @@ pub fn scale(monitor_height: i32, spot: &Spot) -> f32 {
     monitor_height.max(1) as f32 / REF_HEIGHT * fit(spot.free_px)
 }
 
+/// An action notice's pill height at 1440p (the island grows into it).
+pub const NOTICE_H: f32 = 58.0;
+/// The spring's height overshoot as a share of the grown height (growing
+/// from the 0.75-high collapsed pill or the 44 px stats pill: ≈3%).
+const OVERSHOOT_H: f32 = 1.04;
+
+/// How much an action notice grows (multiplies the island scale): up to
+/// `NOTICE_H / ISLAND_H`, and only as far as the scan's free depth allows,
+/// overshoot included. Unscanned spots and spots with no free depth at all
+/// grow fully, as `fit` keeps them at full size.
+pub fn grow(spot: &Spot) -> f32 {
+    let full = NOTICE_H / ISLAND_H;
+    match spot.free_px {
+        Some(free) if free > 0 => {
+            let k = fit(spot.free_px);
+            let room = (free as f32 / k - EDGE) / (ISLAND_H * OVERSHOOT_H);
+            room.clamp(1.0, full)
+        }
+        _ => full,
+    }
+}
+
+/// The scan's free depth under the island's top edge in physical px (the
+/// island's own top gap taken off); unbounded where the scan has no number.
+/// A spring's overshoot is clipped here, never the settled island.
+pub fn free_depth(spot: &Spot, monitor: &Rect, scale: f32) -> f32 {
+    match spot.free_px {
+        Some(free) if free > 0 => free as f32 * monitor.height().max(1) as f32 / REF_HEIGHT - EDGE * scale,
+        _ => f32::INFINITY,
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct Rect {
     pub left: i32,
@@ -161,6 +193,35 @@ mod tests {
         assert_eq!(fit(Some(10)), MIN_FIT);
         assert_eq!(fit(Some(0)), 1.0, "no free spot at all: keep full size (the scan says it overlaps)");
         assert_eq!(fit(None), 1.0);
+    }
+
+    #[test]
+    fn action_notices_grow_only_into_the_free_depth() {
+        let full = NOTICE_H / ISLAND_H;
+        assert_eq!(grow(&DEFAULT_SPOT), full, "unscanned: full growth");
+        assert_eq!(grow(&Spots::embedded().lookup("valorant")), full, "288 free rows");
+        for (game, free) in [("rocketleague", 48), ("overwatch", 44), ("overwatch2", 40), ("marvelrivals", 56)] {
+            assert_eq!(grow(&Spots::embedded().lookup(game)), 1.0, "{game}: no room below, sideways only");
+            let k = fit(Some(free));
+            assert!((EDGE + ISLAND_H) * k <= free as f32 + 1e-3);
+        }
+        let csgo = Spot { anchor: Anchor::TopRight, free_px: Some(64) };
+        let g = grow(&csgo);
+        assert!(g > 1.0 && g < full, "partial growth: {g}");
+        assert!(EDGE + ISLAND_H * g * OVERSHOOT_H <= 64.0 + 1e-3, "peak stays above the HUD");
+    }
+
+    #[test]
+    fn free_depth_is_exactly_the_tight_island_and_unbounded_when_unscanned() {
+        for height in [1080, 1440, 2160] {
+            let monitor = Rect { left: 0, top: 0, right: height * 16 / 9, bottom: height };
+            let tight = Spots::embedded().lookup("overwatch2");
+            let k = scale(height, &tight);
+            assert!((free_depth(&tight, &monitor, k) - ISLAND_H * k).abs() < 1e-3, "the fitted island fills it at {height}p");
+            assert_eq!(free_depth(&DEFAULT_SPOT, &monitor, 1.0), f32::INFINITY);
+            let none_free = Spots::embedded().lookup("battlefield6");
+            assert_eq!(free_depth(&none_free, &monitor, 1.0), f32::INFINITY, "no free spot: nothing to protect");
+        }
     }
 
     #[test]

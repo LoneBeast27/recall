@@ -34,11 +34,20 @@ pub struct NoticeView {
     pub game_font: bool,
     /// The two-step shortcut hint: two equal rows of options.
     pub chord: bool,
+    /// The result of an action (saved, screenshot, bookmark, recording) or a
+    /// failure: the island transforms into the larger notice pill with one
+    /// light sweep instead of only swapping its content.
+    pub emphasis: bool,
 }
 
 impl NoticeView {
     pub fn new(tone: Tone, title: &str, detail: impl Into<String>, game_font: bool) -> Self {
-        Self { tone, title: title.into(), detail: detail.into(), game_font, chord: false }
+        Self { tone, title: title.into(), detail: detail.into(), game_font, chord: false, emphasis: false }
+    }
+
+    /// The same notice, shown with the transformation.
+    pub fn emphasized(self) -> Self {
+        Self { emphasis: true, ..self }
     }
 }
 
@@ -61,7 +70,10 @@ pub fn session_notice(event: &Value) -> NoticeView {
         .filter(|title| !title.is_empty())
         .unwrap_or(default_title);
     let detail = event.get("detail").and_then(Value::as_str).unwrap_or("").trim();
-    NoticeView::new(tone, &truncate(title, 32), truncate(detail, 40), game_font)
+    let notice = NoticeView::new(tone, &truncate(title, 32), truncate(detail, 40), game_font);
+    // Session changes keep the plain swap; a failure stands out like the
+    // engine's own encoder failure (the two are de-duplicated).
+    NoticeView { emphasis: tone == Tone::Failure, ..notice }
 }
 
 /// `kind == "encoder"` (de-duplicated against the engine's own failure).
@@ -85,6 +97,8 @@ mod tests {
         assert_eq!((waiting.tone, waiting.detail.as_str(), waiting.game_font), (Tone::Waiting, "Not recording", false));
         let encoder = session_notice(&json!({"kind":"encoder","title":"Encoder problem","detail":"Recorder stopped"}));
         assert_eq!((encoder.tone, encoder.game_font), (Tone::Failure, false));
+        assert!(encoder.emphasis, "a failure transforms the island");
+        assert!(!game.emphasis && !waiting.emphasis, "session changes keep the plain swap");
         assert!(is_encoder_notice(&json!({"kind":"encoder"})) && !is_encoder_notice(&json!({"kind":"game"})));
     }
 }
