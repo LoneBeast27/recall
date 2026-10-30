@@ -1,5 +1,8 @@
 """HUD scan over the clip library: where each game's HUD sits along the top edge,
-for the Recall Island's per-game spot (recall-overlay/assets/hud-spots.json).
+for the Recall Island's shortcut-hint card (the `skyline` entries of
+recall-overlay/assets/hud-spots.json). The island's own spots and scale stay
+on always-on HUD (the first scan's table): the user's ruling, 2026-10-30, was
+"Only for the hint card".
 
 HUD that comes and goes counts (kill feeds, alerts), not only HUD that is always
 there. For each game, short bursts of 3 frames 0.2 s apart are sampled across
@@ -20,9 +23,9 @@ Each game's raw counts are saved (<key>.npz), so `--reprocess` can redo the
 rule without reading the clips again.
 
 Then the skyline: for every 32 px column at 1440p, the free rows before the
-first occupied pixel. The island's spot reads it under its own footprint
-(FOOTPRINT px wide at the anchor), and the overlay checks the shortcut hint's
-card against it column by column.
+first occupied pixel. The overlay checks the hint card against it column by
+column. It is coarse on purpose: everything below a column's first occupied
+pixel counts as HUD.
 
 Gentle by design (the user's PC, and the clips sit on an HDD): run it through
 nice-build.ps1 (background cores, BelowNormal); each ffmpeg child also gets very
@@ -52,8 +55,7 @@ MOTION = 6.0  # mean grey change between a burst's first and last frame: the wor
 STEADY = 16.0  # a HUD pixel's brightness stays within this through a burst
 DENSE = 12  # occupied pixels in a pixel's 9x9 neighbourhood for it to count (drops specks)
 BURST_FRAMES, BURST_STEP = 3, 12  # every 12th frame at 60 fps: 0.2 s apart
-ISLAND_FIT = 56  # EDGE 12 + ISLAND_H 44 at 1440p: the island fits under this much
-FOOTPRINT = 400  # the island's widest pill (a notice, ~370) at 1440p, 12 px in from the edge
+FOOTPRINT = 400  # reported depth: under a 400 px wide box at each anchor, 12 px in from the edge
 BIN = 32  # skyline column width at 1440p
 GAMES = {  # game key -> exe names that mean "the user is playing" (any of these pauses the scan)
     "valorant": "VALORANT-Win64-Shipping.exe", "rocketleague": "RocketLeague.exe", "apexlegends": "r5apex.exe",
@@ -191,15 +193,6 @@ def footprints(sky):
             "right": under(sky, width - 12 - FOOTPRINT, width - 12)}
 
 
-def spot(free):
-    """The island's own spot rule (as the first scan's table): the centre when the
-    island fits there, else the band with the most room (ties: right, left, centre)."""
-    if free["centre"] >= ISLAND_FIT:
-        return "top-centre", free["centre"]
-    best = max((free["right"], 2, "top-right"), (free["left"], 1, "top-left"), (free["centre"], 0, "top-centre"))
-    return best[2], best[0]
-
-
 def clip_date(clip):
     parts = clip.name.split("__")
     return parts[1] if len(parts) > 1 else ""
@@ -289,7 +282,7 @@ def main():
                 log(f"{key}: only {n} moving bursts, skipped")
                 continue
             median, frames = np.median(np.stack(firsts), axis=0), len(firsts)
-            np.savez_compressed(raw, count=count, moving=n, median=median.astype(np.uint8), frames=frames,
+            np.savez_compressed(raw, count=count, moving=n, median=median.astype(np.float32), frames=frames,
                                 sampled=np.array([c.name for c in picked]))
         need = max(MIN_BURSTS, math.ceil(SHARE * n))
         median = median.astype(np.float32)
@@ -297,11 +290,9 @@ def main():
         mask = always | dense(count >= need)
         sky = skyline(mask)
         free = footprints(sky)
-        anchor, free_px = spot(free)
         before = next((v for name, v in old.items() if game_key(name) == key), None)
         results[key] = {"clips": len(clips), "sampled": [c.name for c in picked], "frames": frames, "moving_bursts": n, "occupied_if_in_bursts": need,
                         "free_1440p": free,
-                        "anchor": anchor, "free_px": free_px,
                         "skyline_1440p": sky,
                         "first_scan_free_1440p": before and {"centre": before["free_top_island_px_1440p"],
                                                              "left": before["free_top_left_px_1440p"],
@@ -312,18 +303,16 @@ def main():
         rgb[always] = [255, 200, 40]  # always-there HUD (the first scan's rule) in amber
         del share
         write_ppm(out / f"{key}.ppm", rgb.astype(np.uint8))
-        log(f"{key}: {n} moving bursts in {time.time() - started:.0f}s, free {free}, spot {anchor} {free_px}")
+        log(f"{key}: {n} moving bursts in {time.time() - started:.0f}s, free {free}")
         (out / "results.json").write_text(json.dumps(results, indent=1), encoding="utf-8")
-    spots = {key: {"anchor": r["anchor"], "free_px": r["free_px"], "skyline": r["skyline_1440p"]} for key, r in results.items()}
-    if "tomclancysrainbowsixsiege" in spots:
-        spots["rainbowsixsiege"] = spots["tomclancysrainbowsixsiege"]
+    skylines = {key: {"skyline": r["skyline_1440p"]} for key, r in results.items()}
+    if "tomclancysrainbowsixsiege" in skylines:
+        skylines["rainbowsixsiege"] = skylines["tomclancysrainbowsixsiege"]
     rule = (f"an edge in the median of all sampled frames, or steady edges through 3-frame bursts in >= {SHARE:.0%} "
             f"(and >= {MIN_BURSTS}) of a game's bursts in which the world moved")
-    (out / "hud-spots.json").write_text(json.dumps({"_source": f"scripts/dev/hud-scan.py over V:\\ALL RECORDINGS, {time.strftime('%Y-%m-%d')}; "
-                                                    f"px at 1440p; occupied = {rule} (HUD that comes and goes counts); "
-                                                    f"free_px = free rows under the island's {FOOTPRINT} px footprint at the anchor (0 = none, the island may overlap); "
-                                                    f"skyline = free rows per {BIN} px column", "spots": spots}, indent=1),
-                                         encoding="utf-8")
+    source = (f"skyline: scripts/dev/hud-scan.py over V:\\ALL RECORDINGS, {time.strftime('%Y-%m-%d')}; free rows per {BIN} px column "
+              f"at 1440p, occupied = {rule} (HUD that comes and goes counts); used only by the shortcut hint card")
+    (out / "hud-spots.json").write_text(json.dumps({"_source": source, "spots": skylines}, indent=1), encoding="utf-8")
     log("done")
 
 

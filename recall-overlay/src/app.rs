@@ -247,11 +247,11 @@ impl App {
         let Some(hint) = hint else { return self.island.update_hint(false, now) };
         let scale = self.place();
         let pill_h = self.island.frame(now).h;
-        let room = |w: f32| {
+        let cover = |w: f32, h: f32| {
             let p = self.placed.as_ref()?;
-            placement::card_room(&p.spot, p.skyline.as_deref(), &p.monitor, p.scale, w, pill_h, GAP * p.scale)
+            placement::card_cover(&p.spot, p.skyline.as_deref(), &p.monitor, p.scale, (w, h), pill_h + GAP * p.scale)
         };
-        self.card_scene = Some(choose_card(&hint, scale, &self.fonts, room));
+        self.card_scene = Some(choose_card(&hint, scale, &self.fonts, cover));
         self.island.update_hint(true, now);
     }
 
