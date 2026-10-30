@@ -12,9 +12,11 @@ use windows::Win32::Graphics::Direct2D::{
 use windows_numerics::{Matrix3x2, Vector2};
 
 use super::Renderer;
-use crate::badge::{Badge, TICK};
+use crate::badge::{Badge, Glyph, TICK};
 use crate::layout::Icon;
 use crate::presence::{icon_pose, Look};
+
+type Point = (f32, f32);
 
 /// The tick's corners as fractions of its size (left, bottom, right).
 const TICK_PTS: [(f32, f32); 3] = [(-0.45, 0.0), (-0.1, 0.35), (0.5, -0.35)];
@@ -22,6 +24,14 @@ const TICK_PTS: [(f32, f32); 3] = [(-0.45, 0.0), (-0.1, 0.35), (0.5, -0.35)];
 /// Point at `angle` (radians clockwise from 12 o'clock) on a circle.
 fn on_circle(cx: f32, cy: f32, r: f32, angle: f32) -> Vector2 {
     Vector2 { X: cx + r * angle.sin(), Y: cy - r * angle.cos() }
+}
+
+/// The first `f` (0..1) of the "!": its bar draws down over the first 75%,
+/// then its dot appears. Same size box and stroke as the tick.
+pub fn bang_points(cx: f32, cy: f32, size: f32, f: f32) -> (Vec<Point>, Option<Point>) {
+    let (top, bottom, dot) = (cy - 0.42 * size, cy + 0.12 * size, (cx, cy + 0.38 * size));
+    let bar = (f / 0.75).clamp(0.0, 1.0);
+    (vec![(cx, top), (cx, top + (bottom - top) * bar)], (f >= 0.85).then_some(dot))
 }
 
 /// The first `f` (0..1) of the tick's two strokes, as points.
@@ -39,9 +49,9 @@ pub fn tick_points(cx: f32, cy: f32, size: f32, f: f32) -> Vec<(f32, f32)> {
 }
 
 impl Renderer {
-    /// The mark at its pose for `look` (`content_w`: the scene's width).
-    pub(crate) unsafe fn icon(&self, icon: &Icon, look: &Look, content_w: f32, badge: Option<Badge>) -> Result<()> {
-        let (x, y, k) = icon_pose(look, content_w, icon.cx);
+    /// The mark at its pose for `look` (`content_dx`: where the content sits in the open pill).
+    pub(crate) unsafe fn icon(&self, icon: &Icon, look: &Look, content_dx: f32, badge: Option<Badge>) -> Result<()> {
+        let (x, y, k) = icon_pose(look, content_dx, icon.cx);
         let place = Matrix3x2::translation(-icon.cx, -icon.cy) * Matrix3x2::scale(k, k) * Matrix3x2::translation(x, y);
         unsafe {
             self.target.SetTransform(&place);
@@ -78,19 +88,33 @@ impl Renderer {
             }
             self.paint(b.dot_color, alpha);
             t.FillEllipse(&disc(r * b.dot), &self.brush);
-            if b.tick > 0.0 {
-                let points = tick_points(cx, cy, ring_r, b.tick);
-                let path = self.factory.CreatePathGeometry()?;
-                let sink = path.Open()?;
-                sink.BeginFigure(Vector2 { X: points[0].0, Y: points[0].1 }, D2D1_FIGURE_BEGIN_HOLLOW);
-                for &(x, y) in &points[1..] {
-                    sink.AddLine(Vector2 { X: x, Y: y });
-                }
-                sink.EndFigure(D2D1_FIGURE_END_OPEN);
-                sink.Close()?;
+            if b.drawn > 0.0 {
+                let (points, dot) = match b.glyph {
+                    Glyph::Tick => (tick_points(cx, cy, ring_r, b.drawn), None),
+                    Glyph::Bang => bang_points(cx, cy, ring_r, b.drawn),
+                };
                 self.paint(TICK, alpha);
-                t.DrawGeometry(&path, &self.brush, stroke, &self.round);
+                self.polyline(&points, stroke)?;
+                if let Some((x, y)) = dot {
+                    t.FillEllipse(&D2D1_ELLIPSE { point: Vector2 { X: x, Y: y }, radiusX: stroke / 2.0, radiusY: stroke / 2.0 }, &self.brush);
+                }
             }
+        }
+        Ok(())
+    }
+
+    /// A round-capped open polyline in the current brush.
+    unsafe fn polyline(&self, points: &[(f32, f32)], stroke: f32) -> Result<()> {
+        unsafe {
+            let path = self.factory.CreatePathGeometry()?;
+            let sink = path.Open()?;
+            sink.BeginFigure(Vector2 { X: points[0].0, Y: points[0].1 }, D2D1_FIGURE_BEGIN_HOLLOW);
+            for &(x, y) in &points[1..] {
+                sink.AddLine(Vector2 { X: x, Y: y });
+            }
+            sink.EndFigure(D2D1_FIGURE_END_OPEN);
+            sink.Close()?;
+            self.target.DrawGeometry(&path, &self.brush, stroke, &self.round);
         }
         Ok(())
     }
@@ -99,6 +123,15 @@ impl Renderer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_bang_draws_its_bar_then_its_dot() {
+        let (bar, dot) = bang_points(0.0, 0.0, 10.0, 0.375);
+        assert_eq!((bar[0], dot), ((0.0, -4.2), None));
+        assert!((bar[1].1 - (-4.2 + 5.4 * 0.5)).abs() < 1e-4, "half the bar at half its share");
+        let (bar, dot) = bang_points(0.0, 0.0, 10.0, 1.0);
+        assert!((bar[1].1 - 1.2).abs() < 1e-4 && dot == Some((0.0, 3.8)));
+    }
 
     #[test]
     fn the_tick_draws_its_short_stroke_then_its_long_one() {

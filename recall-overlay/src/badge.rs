@@ -3,8 +3,9 @@
 //! first 300 ms). When the clip lands the arc closes into a full ring
 //! (160 ms), the dot grows from the inner dot to fill the ring in the success
 //! green (220 ms from 120 ms) and a tick draws over it (240 ms from 260 ms).
-//! A failed save closes the ring in the failure colour, no fill, no tick.
-//! Tones only: record red, success green, failure colour, the pill's dark.
+//! A failed save runs the very same steps in the failure colour with a "!"
+//! for the tick: one path, two outcomes. Tones only: record red, success
+//! green, failure colour, the pill's dark.
 
 use std::f32::consts::{PI, TAU};
 use std::time::{Duration, Instant};
@@ -30,6 +31,14 @@ pub const SWEEP_AFTER: Duration = Duration::from_millis(340);
 /// the user's pick over white, 2026-10-30).
 pub const TICK: Rgba = Rgba { rgb: PILL.rgb, a: 1.0 };
 
+/// What draws over the filled dot once the save has landed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Glyph {
+    Tick,
+    /// "!": a failed save.
+    Bang,
+}
+
 /// One frame of the badge. Angles in radians clockwise from 12 o'clock;
 /// sizes in dot radii (the ring is 2, its stroke 0.5).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -40,17 +49,18 @@ pub struct Badge {
     /// Dot radius: 1 = the inner dot, 2 = filling the ring.
     pub dot: f32,
     pub dot_color: Rgba,
-    /// How much of the tick is drawn (0..1).
-    pub tick: f32,
+    pub glyph: Glyph,
+    /// How much of the glyph is drawn (0..1).
+    pub drawn: f32,
 }
 
 impl Badge {
     /// The still badge for a stage (previews, smoke renders).
     pub fn rest(phase: SavePhase) -> Self {
         match phase {
-            SavePhase::Saving => Badge { start: 0.0, sweep: ARC, ring: SIGNAL, dot: 1.0, dot_color: SIGNAL, tick: 0.0 },
-            SavePhase::Saved => Badge { start: 0.0, sweep: TAU, ring: ACTIVE, dot: 2.0, dot_color: ACTIVE, tick: 1.0 },
-            SavePhase::Failed => Badge { start: 0.0, sweep: TAU, ring: ERROR, dot: 1.0, dot_color: ERROR, tick: 0.0 },
+            SavePhase::Saving => Badge { start: 0.0, sweep: ARC, ring: SIGNAL, dot: 1.0, dot_color: SIGNAL, glyph: Glyph::Tick, drawn: 0.0 },
+            SavePhase::Saved => Badge { start: 0.0, sweep: TAU, ring: ACTIVE, dot: 2.0, dot_color: ACTIVE, glyph: Glyph::Tick, drawn: 1.0 },
+            SavePhase::Failed => Badge { start: 0.0, sweep: TAU, ring: ERROR, dot: 2.0, dot_color: ERROR, glyph: Glyph::Bang, drawn: 1.0 },
         }
     }
 }
@@ -102,21 +112,17 @@ impl SaveMark {
     pub fn badge(&self, now: Instant) -> Badge {
         let Some(at) = self.settled_at else {
             let (start, sweep) = self.spin(now);
-            return Badge { start, sweep, ring: SIGNAL, dot: 1.0, dot_color: SIGNAL, tick: 0.0 };
+            return Badge { start, sweep, ring: SIGNAL, dot: 1.0, dot_color: SIGNAL, glyph: Glyph::Tick, drawn: 0.0 };
         };
         let (start, from) = self.spin(at);
         let t = now.saturating_duration_since(at);
         let sweep = from + (TAU - from) * ease_out(secs(t) / secs(CLOSE));
-        let outcome = if self.phase == SavePhase::Saved { ACTIVE } else { ERROR };
+        // One settle for both outcomes; only the colour and the glyph differ.
+        let (outcome, glyph) = if self.phase == SavePhase::Saved { (ACTIVE, Glyph::Tick) } else { (ERROR, Glyph::Bang) };
         let color = if t >= FILL_AT { outcome } else { SIGNAL };
-        let (dot, tick) = match self.phase {
-            SavePhase::Saved => {
-                let fill = ease_out(secs(t.saturating_sub(FILL_AT)) / secs(FILL_FOR));
-                (1.0 + fill, ease_out(secs(t.saturating_sub(TICK_AT)) / secs(TICK_FOR)))
-            }
-            _ => (1.0, 0.0),
-        };
-        Badge { start, sweep, ring: color, dot, dot_color: color, tick }
+        let dot = 1.0 + ease_out(secs(t.saturating_sub(FILL_AT)) / secs(FILL_FOR));
+        let drawn = ease_out(secs(t.saturating_sub(TICK_AT)) / secs(TICK_FOR));
+        Badge { start, sweep, ring: color, dot, dot_color: color, glyph, drawn }
     }
 
     /// Frames are still changing: the ring spins, or the outcome is settling.
@@ -145,7 +151,7 @@ mod tests {
         let (a, b) = (mark.badge(now + ms(450)), mark.badge(now + ms(450) + TURN));
         assert!((a.start - PI).abs() < 0.01, "half a turn at 450 ms: {}", a.start);
         assert_eq!(a, b, "a turn later the frame repeats exactly");
-        assert_eq!((a.ring, a.dot, a.tick), (SIGNAL, 1.0, 0.0));
+        assert_eq!((a.ring, a.dot, a.drawn), (SIGNAL, 1.0, 0.0));
         assert!(mark.animating(now + Duration::from_secs(20)), "spins as long as the save runs");
     }
 
@@ -162,20 +168,28 @@ mod tests {
         assert_eq!(mark.badge(landed + ms(100)).ring, SIGNAL, "still red before the fill");
         let filling = mark.badge(landed + FILL_AT + ms(10));
         assert_eq!((filling.ring, filling.dot_color), (ACTIVE, ACTIVE));
-        assert!(filling.dot > 1.0 && filling.dot < 2.0 && filling.tick == 0.0);
-        assert!(mark.badge(landed + TICK_AT + ms(120)).tick > 0.5);
+        assert!(filling.dot > 1.0 && filling.dot < 2.0 && filling.drawn == 0.0);
+        assert!(mark.badge(landed + TICK_AT + ms(120)).drawn > 0.5);
         let done = mark.badge(landed + SETTLED);
-        assert_eq!((done.dot, done.tick), (2.0, 1.0));
+        assert_eq!((done.dot, done.glyph, done.drawn), (2.0, Glyph::Tick, 1.0));
         assert!(mark.animating(landed + ms(499)) && !mark.animating(landed + SETTLED));
     }
 
     #[test]
-    fn a_failed_save_closes_in_the_failure_colour_without_a_tick() {
+    fn a_failed_save_runs_the_same_settle_in_the_failure_colour_with_a_bang() {
         let now = Instant::now();
-        let mut mark = SaveMark::new(SavePhase::Saving, now);
-        mark.follow(SavePhase::Failed, now + ms(900));
-        let done = mark.badge(now + ms(900) + SETTLED);
-        assert_eq!((done.ring, done.dot_color, done.dot, done.tick), (ERROR, ERROR, 1.0, 0.0));
+        let (mut ok, mut bad) = (SaveMark::new(SavePhase::Saving, now), SaveMark::new(SavePhase::Saving, now));
+        let landed = now + ms(900);
+        ok.follow(SavePhase::Saved, landed);
+        bad.follow(SavePhase::Failed, landed);
+        for t in (0..=600).step_by(10) {
+            let (a, b) = (ok.badge(landed + ms(t)), bad.badge(landed + ms(t)));
+            assert_eq!((a.start, a.sweep, a.dot, a.drawn), (b.start, b.sweep, b.dot, b.drawn), "same motion at {t} ms");
+            let colour = if t >= 120 { (ACTIVE, ERROR) } else { (SIGNAL, SIGNAL) };
+            assert_eq!((a.ring, b.ring), colour, "only the colour differs at {t} ms");
+        }
+        let done = bad.badge(landed + SETTLED);
+        assert_eq!((done.ring, done.dot_color, done.dot, done.glyph, done.drawn), (ERROR, ERROR, 2.0, Glyph::Bang, 1.0));
         assert!((done.sweep - TAU).abs() < 1e-4);
     }
 
@@ -186,6 +200,7 @@ mod tests {
         assert_eq!(mark.badge(now).sweep, 0.0, "starts as the plain dot");
         assert!((mark.badge(now + CLOSE).sweep - TAU).abs() < 1e-4);
         assert_eq!(mark.badge(now + SETTLED), Badge::rest(SavePhase::Saved));
+        assert_eq!(SaveMark::new(SavePhase::Failed, now).badge(now + SETTLED), Badge::rest(SavePhase::Failed));
     }
 
     #[test]

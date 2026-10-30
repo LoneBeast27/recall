@@ -136,6 +136,8 @@ pub struct Island {
     swapped_at: Instant,
     /// The title line fades in from here (alone, when only it changed).
     title_since: Instant,
+    /// The detail line likewise (a save's outcome with a new detail).
+    detail_since: Instant,
     /// The mark fades in from here (it shows at once with a fresh circle).
     icon_since: Instant,
     /// The content's opacity when a hide began (it fades out from there).
@@ -158,6 +160,7 @@ impl Island {
             showing: false,
             swapped_at: now,
             title_since: now,
+            detail_since: now,
             icon_since: now,
             fade_from: (now, 0.0),
             cue: None,
@@ -214,8 +217,9 @@ impl Island {
     }
 
     /// New content: its fade-in, the save mark, and an action's one sweep.
-    /// A save moving on a stage with the same detail line changes only its
-    /// title: the rest stays put and lit.
+    /// A save moving on a stage (either outcome) fades in only its new title
+    /// and, when it changed, its detail line; the mark, the pill and the
+    /// rest carry on.
     fn swap(&mut self, content: Content, open: bool, fresh: bool, now: Instant) {
         let save = match &content {
             Content::Notice(notice) => notice.save,
@@ -240,14 +244,16 @@ impl Island {
             }
         }
         let same_detail = matches!((&self.content, &content), (Some(Content::Notice(a)), Content::Notice(b)) if a.detail == b.detail);
-        self.title_since = now;
-        if !(continuing && same_detail) {
+        if continuing {
+            self.title_since = now;
+            if !same_detail {
+                self.detail_since = now;
+            }
+        } else {
             // An instant appear shows its content with the window, no fade.
             let at_once = fresh && self.presence.text_ready().is_none();
             self.swapped_at = if at_once { now.checked_sub(DURATION).unwrap_or(now) } else { now };
-            if at_once {
-                self.title_since = self.swapped_at;
-            }
+            (self.title_since, self.detail_since) = (self.swapped_at, self.swapped_at);
         }
         self.content = Some(content);
     }
@@ -282,6 +288,7 @@ impl Island {
             alpha: shaped.alpha * self.presence.window_alpha(now),
             content_alpha,
             title_alpha: content_alpha.min(fade_in(self.title_since)),
+            detail_alpha: content_alpha.min(fade_in(self.detail_since)),
             icon_alpha: fade_in(self.icon_since),
             ..shaped
         }
