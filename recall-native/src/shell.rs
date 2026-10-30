@@ -4,10 +4,13 @@ use std::path::Path;
 
 use windows::{
     Win32::{
-        Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, S_OK},
+        Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, HWND, S_OK},
         System::{
             Com::{IBindCtx, IDataObject},
-            Ole::{DROPEFFECT, DROPEFFECT_COPY, DoDragDrop, IDropSource, IDropSource_Impl, OleFlushClipboard, OleInitialize, OleSetClipboard},
+            Ole::{
+                DROPEFFECT, DROPEFFECT_COPY, DoDragDrop, IDropSource, IDropSource_Impl, OleFlushClipboard, OleInitialize, OleSetClipboard,
+                RevokeDragDrop,
+            },
             SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS},
         },
         UI::Shell::{BHID_DataObject, Common::ITEMIDLIST, ILCreateFromPathW, ILFree, IShellItemArray, SHCreateShellItemArrayFromIDLists},
@@ -19,6 +22,15 @@ use windows::{
 pub fn init_ole() {
     // S_FALSE (already initialised) is fine; a failure surfaces later as an error.
     let _ = unsafe { OleInitialize(None) };
+}
+
+/// Recall's window takes no file drops. GPUI 0.2.2's drop target dereferences the CF_HDROP
+/// HGLOBAL; a drag that stays in-process (a clip dragged over Recall itself) hands it the
+/// shell data object's fixed block, so DragQueryFileW read 0x14 and Recall crashed
+/// (2026-10-30). Revoked, Recall's window is a plain "no drop" area during a drag.
+pub fn refuse_drops(hwnd: isize) {
+    // DRAGDROP_E_NOTREGISTERED (nothing to revoke) is fine.
+    let _ = unsafe { RevokeDragDrop(HWND(hwnd as *mut _)) };
 }
 
 fn data_object(paths: &[String]) -> Result<IDataObject, String> {
