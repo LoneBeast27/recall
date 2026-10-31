@@ -4,7 +4,7 @@ use std::time::{Duration, Instant};
 use windows::Win32::Foundation::{POINT, RECT};
 
 use super::{client_in_bounds, Client, ClientArea, REPROBE};
-use crate::framing::Rect;
+use crate::framing::{Layout, Rect};
 
 fn rect(l: i32, t: i32, r: i32, b: i32) -> RECT {
     RECT { left: l, top: t, right: r, bottom: b }
@@ -70,6 +70,43 @@ fn tracker_reprobes_on_size_change_or_timeout_and_keeps_the_canvas() {
     assert_eq!(PROBES.load(Relaxed), 3);
     // The window went borderless: whole frame, still on the canvas (sticky).
     assert_eq!(area.update((2560, 1440), t0 + Duration::from_secs(2)), (None, true));
+}
+
+static WOBBLES: AtomicU32 = AtomicU32::new(0);
+
+/// A borderless game flipping 2560x1440 <-> 2560x1438: the client rect moves before the
+/// frame bounds on some measurements, so a 2 px "inset" shows up for one probe.
+fn wobbling(_hwnd: usize) -> Client {
+    match WOBBLES.fetch_add(1, Relaxed) % 2 {
+        0 => Client::Fills,
+        _ => Client::Inset(Rect { x: 0, y: 0, w: 2560, h: 1438 }),
+    }
+}
+
+#[test]
+fn a_two_pixel_client_wobble_never_changes_the_encoder_size() {
+    // VALORANT opened at 2560x1438 on 10-25 and 10-31, so that is the size to keep.
+    let mut area = ClientArea::with_probe(7, wobbling);
+    let t0 = Instant::now();
+    let mut target = None;
+    for flip in 0..12u64 {
+        let frame = if flip % 2 == 0 { (2560, 1438) } else { (2560, 1440) };
+        let (crop, canvas) = area.update(frame, t0 + Duration::from_millis(flip * 700));
+        let layout = Layout::recorded(frame, crop, canvas, target).expect("a full size frame");
+        assert_eq!(layout.out, (2560, 1438), "flip {flip}: a new frame size reopens NVENC and empties the buffer");
+        assert!(!canvas, "flip {flip}: a 2 px inset is not a title bar");
+        target = Some(layout.out);
+    }
+}
+
+#[test]
+fn a_real_title_bar_still_moves_a_native_session_to_the_canvas() {
+    fn caption(_hwnd: usize) -> Client {
+        Client::Inset(Rect { x: 0, y: 9, w: 2560, h: 1431 })
+    }
+    let mut area = ClientArea::with_probe(7, caption);
+    let (crop, canvas) = area.update((2560, 1440), Instant::now());
+    assert_eq!((crop, canvas), (Some(Rect { x: 0, y: 9, w: 2560, h: 1431 }), true), "9 px is past the tolerance");
 }
 
 #[test]

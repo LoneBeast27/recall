@@ -6,10 +6,38 @@
 //! when the client area is larger than the canvas. The canvas keeps its size for the whole
 //! capture session, so resizing the window never reopens NVENC. Everything else (monitor
 //! captures, borderless and fullscreen windows) records at its own size as before, with the
-//! border-jitter crop / pad of `gpu_frames::target_size`.
+//! border-jitter crop / pad of [`target_size`].
 
 /// The recording canvas for windowed games ("1440p standard").
 pub const CANVAS: (u32, u32) = (2560, 1440);
+
+/// Largest window-border jitter (px per axis) absorbed by cropping / padding instead of
+/// reopening the encoder: both frame paths ([`target_size`], `encoder/frame_fit.rs`) and the
+/// client-area check (`capture/client_area.rs`) use it. Games wobble by 2 (2560x1440 <->
+/// 2560x1438); the smallest real change in the log is 14 (Helldivers 2, 2546 <-> 2560).
+pub const MAX_JITTER_PIXELS: u32 = 8;
+
+/// Smallest even frame every NVENC codec opens: H.264 146x50, HEVC 130x34, AV1 130x66
+/// (RTX 5090, swept by `encoder/wobble_tests.rs`). The largest of each axis, so a small
+/// frame never pushes an AV1 session onto the H.264 fallback.
+pub const MIN_ENCODE: (u32, u32) = (146, 66);
+
+/// Whether NVENC can open on a `size` frame (it encodes the even-cropped size).
+pub fn encodable(size: (u32, u32)) -> bool {
+    size.0 & !1 >= MIN_ENCODE.0 && size.1 & !1 >= MIN_ENCODE.1
+}
+
+/// Encoder frame size for a `src` capture recorded at its own size (not on the canvas): the
+/// current size while the source stays within [`MAX_JITTER_PIXELS`] of it, else the source
+/// cropped to even dimensions (NVENC).
+pub fn target_size(current: Option<(u32, u32)>, src: (u32, u32)) -> (u32, u32) {
+    if let Some((w, h)) = current {
+        if src.0.abs_diff(w) <= MAX_JITTER_PIXELS && src.1.abs_diff(h) <= MAX_JITTER_PIXELS {
+            return (w, h);
+        }
+    }
+    ((src.0 & !1).max(2), (src.1 & !1).max(2))
+}
 
 /// A pixel rectangle: origin and size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +87,18 @@ impl Layout {
     /// `src` of the capture fitted onto `canvas` (see [`fit`]).
     pub fn on_canvas(src: Rect, canvas: (u32, u32)) -> Self {
         Self { src, dst: fit(src.size(), canvas), out: canvas, canvas: true }
+    }
+
+    /// What the zero-copy path renders for a `frame`-sized capture: `crop` of it on the
+    /// canvas when the session records there, else the frame at its own size in the current
+    /// encoder frame `target`. None when that size is too small to encode (a window on its
+    /// way to the taskbar): the frame is skipped, and the encoder, buffer and pool stay.
+    pub fn recorded(frame: (u32, u32), crop: Option<Rect>, canvas: bool, target: Option<(u32, u32)>) -> Option<Self> {
+        if canvas {
+            return Some(Self::on_canvas(crop.unwrap_or(Rect::full(frame)), CANVAS));
+        }
+        let out = target_size(target, frame);
+        encodable(out).then(|| Self::native(frame, out))
     }
 
     /// The region of the output holding the picture, when bars surround it.

@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use windows_capture::frame::Frame;
 
 use super::{Handler, PATH_GPU};
-use crate::framing::{Layout, Rect, CANVAS};
+use crate::framing::{Layout, Rect};
 
 /// Consecutive GPU-path failures after which capture falls back to the CPU path.
 const GPU_FAILURES_BEFORE_FALLBACK: u32 = 30;
@@ -15,7 +15,8 @@ const GPU_FAILURES_BEFORE_FALLBACK: u32 = 30;
 /// capture device).
 pub(super) enum GpuState {
     Untried,
-    Ready { pipe: crate::gpu_frames::Pipeline, failures: u32 },
+    /// `small`: in a run of frames too small to encode (logged once per run).
+    Ready { pipe: crate::gpu_frames::Pipeline, failures: u32, small: bool },
     Off,
 }
 
@@ -30,7 +31,7 @@ impl Handler {
             self.gpu = match crate::gpu_frames::Pipeline::new(frame.device(), frame.device_context()) {
                 Ok(pipe) => {
                     (sink.log)("capture: zero-copy GPU path (D3D11 tonemap -> NVENC)".into());
-                    GpuState::Ready { pipe, failures: 0 }
+                    GpuState::Ready { pipe, failures: 0, small: false }
                 }
                 Err(e) => {
                     (sink.log)(format!("capture: GPU path unavailable ({e}); using CPU copies"));
@@ -38,13 +39,15 @@ impl Handler {
                 }
             };
         }
-        let GpuState::Ready { pipe, failures } = &mut self.gpu else { return false };
+        let GpuState::Ready { pipe, failures, small } = &mut self.gpu else { return false };
         let size = (frame.width(), frame.height());
-        let layout = if canvas {
-            Layout::on_canvas(crop.unwrap_or(Rect::full(size)), CANVAS)
-        } else {
-            Layout::native(size, crate::gpu_frames::target_size(pipe.target(), size))
+        let Some(layout) = Layout::recorded(size, crop, canvas, pipe.target()) else {
+            if !std::mem::replace(small, true) {
+                (sink.log)(format!("capture: skipping {}x{} frames, too small to encode", size.0, size.1));
+            }
+            return true;
         };
+        *small = false;
         let mode = self.shared.mode.load(Relaxed);
         match pipe.render(frame.as_raw_texture(), &layout, mode) {
             Ok(hw) => {

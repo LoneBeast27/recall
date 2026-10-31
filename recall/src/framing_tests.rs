@@ -1,4 +1,4 @@
-use super::{copy_rect, crop_rgba, fit, Layout, Rect, CANVAS};
+use super::{copy_rect, crop_rgba, fit, Layout, Rect, CANVAS, MIN_ENCODE};
 
 #[test]
 fn the_observed_windowed_game_is_letterboxed_unscaled() {
@@ -63,4 +63,16 @@ fn copy_rect_honours_stride_and_pixel_size() {
     assert_eq!(out, vec![12, 13, 14, 15, 22, 23, 24, 25]);
     let (w, h, px) = crop_rgba(2, &[1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4], Rect { x: 1, y: 0, w: 1, h: 2 });
     assert_eq!((w, h, px), (1, 2, vec![2, 2, 2, 2, 4, 4, 4, 4]));
+}
+
+#[test]
+fn a_frame_too_small_for_nvenc_renders_nothing_on_its_own_size() {
+    let tiny = (160, 28);
+    assert_eq!(Layout::recorded(tiny, None, false, Some((2560, 1440))), None, "the frames pool must not change");
+    assert_eq!(Layout::recorded(tiny, None, false, None), None, "nor open on it");
+    let canvas = Layout::recorded(tiny, None, true, Some(CANVAS)).expect("the canvas has a fixed size");
+    assert_eq!(canvas.out, CANVAS);
+    let wide = (2560, MIN_ENCODE.1 - 2);
+    assert_eq!(Layout::recorded(wide, None, false, None), None, "either axis counts");
+    assert!(Layout::recorded(MIN_ENCODE, None, false, None).is_some());
 }
