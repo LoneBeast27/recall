@@ -297,7 +297,7 @@ fn encode_minimum_is_what_the_driver_opens() {
     let _one = nvenc();
     ff::init().unwrap();
     let cfg = Config { fps: 60, buffer_secs: 5, bitrate: 2_000_000, ..Config::from_env(false) };
-    let mut h264 = None;
+    let (mut most, mut opened) = ((0, 0), 0);
     for codec in [Codec::H264, Codec::Hevc, Codec::Av1] {
         if try_open(&cfg, codec, 256, 256, None).is_err() {
             eprintln!("{} does not open here; skipping it", codec.nvenc());
@@ -307,10 +307,9 @@ fn encode_minimum_is_what_the_driver_opens() {
         let h = smallest(|h| try_open(&cfg, codec, 256, h, None).is_ok());
         eprintln!("{} opens from {w}x{h}", codec.nvenc());
         assert!(w <= MIN_ENCODE.0 && h <= MIN_ENCODE.1, "{} needs {w}x{h}, above the rule", codec.nvenc());
-        if matches!(codec, Codec::H264) {
-            h264 = Some((w, h));
-        }
+        try_open(&cfg, codec, MIN_ENCODE.0, MIN_ENCODE.1, None).expect("each axis alone opens, so both together must");
+        most = (most.0.max(w), most.1.max(h));
+        opened += 1;
     }
-    // H.264 is the fallback every recording can end up on.
-    assert!(h264.is_none_or(|size| size == MIN_ENCODE), "H.264 opens from {h264:?}");
+    assert!(opened < 3 || most == MIN_ENCODE, "the codecs open from {most:?}");
 }
