@@ -14,7 +14,9 @@ pub enum Variant {
 }
 
 pub fn button(id: impl Into<ElementId>, variant: Variant) -> Stateful<Div> {
+    let id = id.into();
     let base = div()
+        .child(crate::trace::target(id.to_string()))
         .id(id)
         .h(px(32.))
         .px(px(12.))

@@ -10,12 +10,17 @@ pub mod folders;
 mod mp4;
 mod names;
 mod scrub;
+mod settle;
 mod store;
+pub mod watch;
+mod watch_win;
 mod win;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
 mod tests_io;
+#[cfg(test)]
+mod tests_watch;
 
 /// Local wall-clock time of a clip start (from the file name, else file mtime).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -119,25 +124,31 @@ pub fn build_records(entries: &[ClipEntry], store: &MetaStore) -> Vec<ClipRecord
     entries
         .iter()
         .map(|entry| {
-            let (game_key, game) = normalize_game(&game_prefix(entry));
-            let started = parse_file_name(&entry.name).map_or_else(|| local_from_unix(entry.mtime), |(_, s)| s);
-            let meta = store.meta(&entry.name);
-            ClipRecord {
-                path: entry.path.clone(),
-                file_name: entry.name.clone(),
-                bytes: entry.bytes,
-                mtime: entry.mtime,
-                thumb: entry.thumb.clone(),
-                game_key,
-                game,
-                started,
-                duration: store.duration(&entry.name, entry.bytes, entry.mtime),
-                edited: sidecar_candidates(Path::new(&entry.path)).iter().any(|candidate| sidecars.contains(&sidecar_key(candidate))),
-                favourite: meta.is_some_and(|m| m.favourite),
-                title: meta.and_then(|m| m.title.clone()),
-            }
+            let edited = sidecar_candidates(Path::new(&entry.path)).iter().any(|candidate| sidecars.contains(&sidecar_key(candidate)));
+            build_record(entry, edited, store)
         })
         .collect()
+}
+
+/// One record, when the caller already knows whether the clip has an edit sidecar.
+pub fn build_record(entry: &ClipEntry, edited: bool, store: &MetaStore) -> ClipRecord {
+    let (game_key, game) = normalize_game(&game_prefix(entry));
+    let started = parse_file_name(&entry.name).map_or_else(|| local_from_unix(entry.mtime), |(_, s)| s);
+    let meta = store.meta(&entry.name);
+    ClipRecord {
+        path: entry.path.clone(),
+        file_name: entry.name.clone(),
+        bytes: entry.bytes,
+        mtime: entry.mtime,
+        thumb: entry.thumb.clone(),
+        game_key,
+        game,
+        started,
+        duration: store.duration(&entry.name, entry.bytes, entry.mtime),
+        edited,
+        favourite: meta.is_some_and(|m| m.favourite),
+        title: meta.and_then(|m| m.title.clone()),
+    }
 }
 
 /// Game for a clip: the dated file-name prefix, else (imported clips in a per-game folder,
