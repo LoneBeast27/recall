@@ -4,6 +4,7 @@
 use ffmpeg_next as ff;
 
 use super::PacedFrame;
+use crate::framing::MAX_JITTER_PIXELS;
 
 /// Copy tightly packed RGBA into an RGBZ video frame, honoring the stride.
 pub(super) fn fill_rgbz(vf: &mut ff::frame::Video, w: u32, h: u32, rgba: &[u8]) {
@@ -25,8 +26,6 @@ pub(super) fn normalize_small_size_jitter(
     target_width: u32,
     target_height: u32,
 ) -> Result<bool, String> {
-    const MAX_JITTER_PIXELS: u32 = 8;
-
     if frame.width == target_width && frame.height == target_height {
         return Ok(false);
     }
@@ -103,6 +102,10 @@ pub(super) fn normalize_small_size_jitter(
     frame.height = target_height;
     Ok(true)
 }
+
+#[cfg(test)]
+#[path = "wobble_tests.rs"]
+mod wobble_tests;
 
 #[cfg(test)]
 mod tests {

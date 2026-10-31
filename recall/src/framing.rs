@@ -6,10 +6,31 @@
 //! when the client area is larger than the canvas. The canvas keeps its size for the whole
 //! capture session, so resizing the window never reopens NVENC. Everything else (monitor
 //! captures, borderless and fullscreen windows) records at its own size as before, with the
-//! border-jitter crop / pad of `gpu_frames::target_size`.
+//! border-jitter crop / pad of [`target_size`].
 
 /// The recording canvas for windowed games ("1440p standard").
 pub const CANVAS: (u32, u32) = (2560, 1440);
+
+/// Largest window-border jitter (px per axis) absorbed by cropping / padding instead of
+/// reopening the encoder: both frame paths ([`target_size`], `encoder/frame_fit.rs`) and the
+/// client-area check (`capture/client_area.rs`) use it. Games wobble by 2 (2560x1440 <->
+/// 2560x1438); the smallest real change in the log is 14 (Helldivers 2, 2546 <-> 2560).
+pub const MAX_JITTER_PIXELS: u32 = 8;
+
+/// Smallest even frame NVENC opens (measured: `encoder/wobble_tests.rs`).
+pub const MIN_ENCODE: (u32, u32) = (146, 50);
+
+/// Encoder frame size for a `src` capture recorded at its own size (not on the canvas): the
+/// current size while the source stays within [`MAX_JITTER_PIXELS`] of it, else the source
+/// cropped to even dimensions (NVENC).
+pub fn target_size(current: Option<(u32, u32)>, src: (u32, u32)) -> (u32, u32) {
+    if let Some((w, h)) = current {
+        if src.0.abs_diff(w) <= MAX_JITTER_PIXELS && src.1.abs_diff(h) <= MAX_JITTER_PIXELS {
+            return (w, h);
+        }
+    }
+    ((src.0 & !1).max(2), (src.1 & !1).max(2))
+}
 
 /// A pixel rectangle: origin and size.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -59,6 +80,17 @@ impl Layout {
     /// `src` of the capture fitted onto `canvas` (see [`fit`]).
     pub fn on_canvas(src: Rect, canvas: (u32, u32)) -> Self {
         Self { src, dst: fit(src.size(), canvas), out: canvas, canvas: true }
+    }
+
+    /// What the zero-copy path renders for a `frame`-sized capture: `crop` of it on the
+    /// canvas when the session records there, else the frame at its own size in the current
+    /// encoder frame `target`.
+    pub fn recorded(frame: (u32, u32), crop: Option<Rect>, canvas: bool, target: Option<(u32, u32)>) -> Option<Self> {
+        Some(if canvas {
+            Self::on_canvas(crop.unwrap_or(Rect::full(frame)), CANVAS)
+        } else {
+            Self::native(frame, target_size(target, frame))
+        })
     }
 
     /// The region of the output holding the picture, when bars surround it.

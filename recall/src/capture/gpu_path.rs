@@ -6,7 +6,7 @@ use std::sync::atomic::Ordering::Relaxed;
 use windows_capture::frame::Frame;
 
 use super::{Handler, PATH_GPU};
-use crate::framing::{Layout, Rect, CANVAS};
+use crate::framing::{Layout, Rect};
 
 /// Consecutive GPU-path failures after which capture falls back to the CPU path.
 const GPU_FAILURES_BEFORE_FALLBACK: u32 = 30;
@@ -40,11 +40,7 @@ impl Handler {
         }
         let GpuState::Ready { pipe, failures } = &mut self.gpu else { return false };
         let size = (frame.width(), frame.height());
-        let layout = if canvas {
-            Layout::on_canvas(crop.unwrap_or(Rect::full(size)), CANVAS)
-        } else {
-            Layout::native(size, crate::gpu_frames::target_size(pipe.target(), size))
-        };
+        let Some(layout) = Layout::recorded(size, crop, canvas, pipe.target()) else { return true };
         let mode = self.shared.mode.load(Relaxed);
         match pipe.render(frame.as_raw_texture(), &layout, mode) {
             Ok(hw) => {
