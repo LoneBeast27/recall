@@ -27,8 +27,8 @@ for ($t = 0; $t -lt $Seconds; $t++) {
   $owner = [uint32]0
   $null = [Check.G8]::GetWindowThreadProcessId($front, [ref]$owner)
   $name = (Get-Process -Id $owner -ErrorAction SilentlyContinue).ProcessName
-  $proxy = [Check.G8]::FindWindowW('D3DProxyWindow', $null)
-  $island = [Check.G8]::FindWindowW('RecallNativeStatusOverlay', $null)
+  $proxy = [Check.G8]::FindWindowW('D3DProxyWindow', [NullString]::Value)
+  $island = [Check.G8]::FindWindowW('RecallNativeStatusOverlay', [NullString]::Value)
   $above = $false
   $w = $island
   while ($w -ne [IntPtr]::Zero) {
