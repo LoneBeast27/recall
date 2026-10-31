@@ -3,7 +3,7 @@ use super::{Root, ToastKind};
 use crate::{
     services::{
         daemon::DaemonEvent,
-        library::{format_bytes, format_duration, normalize_game},
+        library::{format_bytes, format_duration, normalize_game, watch::LibraryChange},
         storage::{Interaction, record_interaction},
     },
     worker::Job,
@@ -56,6 +56,26 @@ impl Root {
             ),
             DaemonEvent::Error(message) => self.show_toast(ToastKind::Bad, "Recorder", Some(message)),
             DaemonEvent::MicMuted(_) | DaemonEvent::ExportStarted { .. } | DaemonEvent::Exported { .. } => {}
+        }
+    }
+
+    /// The clip folders changed behind the app's back (`services::library::watch`).
+    pub(super) fn on_library_change(&mut self, change: LibraryChange) {
+        match change {
+            LibraryChange::Clips(changes) => {
+                crate::trace::note(&format!("watch: +{} -{} -{}", changes.added.len(), changes.gone.len(), changes.gone_under.len()));
+                self.lib.apply_changes(changes);
+                if self.tile_menu.as_ref().is_some_and(|menu| !self.lib.lists(&menu.path)) {
+                    self.tile_menu = None;
+                }
+            }
+            LibraryChange::Resync => {
+                self.lib.forget_recent();
+                self.workers.job(Job::List);
+            }
+            LibraryChange::RootsChanged => self.lib.forget_recent(),
+            LibraryChange::FolderLost(folder) => self.show_toast(ToastKind::Bad, "A clip folder is unavailable", Some(folder)),
+            LibraryChange::FolderBack(folder) => self.show_toast(ToastKind::Good, "A clip folder is back", Some(folder)),
         }
     }
 }

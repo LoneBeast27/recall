@@ -16,6 +16,9 @@ use crate::{
     worker::{AssetJob, Workers},
 };
 
+#[path = "library_changes.rs"]
+mod changes;
+
 pub const TILE_MIN_WIDTH: f32 = 220.0;
 pub const SCRUB_FRAMES: usize = 8;
 const VISIBLE_ROWS_AHEAD: usize = 10;
@@ -70,6 +73,8 @@ pub struct LibraryState {
     pub today: LocalStamp,
     meta_dirty_since: Option<Instant>,
     deepest_scroll_days: u32,
+    /// Watcher changes a listing in flight may predate.
+    recent: changes::Recent,
 }
 
 impl LibraryState {
@@ -109,6 +114,7 @@ impl LibraryState {
             today: library::today(),
             meta_dirty_since: None,
             deepest_scroll_days: 0,
+            recent: Default::default(),
         }
     }
 
@@ -123,16 +129,24 @@ impl LibraryState {
     }
 
     pub fn set_entries(&mut self, entries: Vec<ClipEntry>) {
+        let anchor = self.scroll_anchor();
         self.entries = entries;
+        self.replay_recent();
         self.loading = false;
         self.today = library::today();
         // The meter shows the recordings drive, not whichever drive the newest import is on.
         self.drive = library::drive_space(&crate::backend::library_dir());
         self.rebuild_records();
+        self.restore_scroll(anchor);
     }
 
     fn rebuild_records(&mut self) {
         self.records = library::build_records(&self.entries, &self.store);
+        self.reindex();
+    }
+
+    /// Everything derived from `records`. Touches no disk.
+    fn reindex(&mut self) {
         self.by_path = self.records.iter().enumerate().map(|(i, r)| (r.path.clone(), i)).collect();
         self.games = library::game_counts(&self.records);
         self.favourites = self.records.iter().filter(|r| r.favourite).count();

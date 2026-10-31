@@ -19,7 +19,10 @@ use crate::{
     backend::{self, ClipEntry, ExportSummary, PreparedClip, StorageReport},
     edit_model::{ClipInfo, EditPlan, ExportSettings},
     services::{
-        library::{self, MetaStore},
+        library::{
+            self, MetaStore,
+            watch::{ClipWatcher, LibraryChange},
+        },
         storage::{self, CacheKind, PrefetchClip, PrefetchEvent, Priority},
     },
 };
@@ -66,6 +69,8 @@ pub enum Done {
     /// (clip path, preview copy path).
     Proxy(String, Result<String, String>),
     Storage(StorageReport),
+    /// The clip folders changed on disk (`services::library::watch`).
+    Library(LibraryChange),
 }
 
 pub struct Workers {
@@ -83,9 +88,14 @@ impl Workers {
         let (scrub, scrub_rx) = mpsc::channel::<String>();
 
         let tx = done_tx.clone();
+        let watcher = ClipWatcher::start(move |change| {
+            let _ = tx.send(Done::Library(change));
+        });
+
+        let tx = done_tx.clone();
         spawn_named("recall-io", move || {
             while let Ok(job) = job_rx.recv() {
-                if tx.send(run_job(job, &tx)).is_err() {
+                if tx.send(run_job(job, &tx, &watcher)).is_err() {
                     break;
                 }
             }
@@ -125,9 +135,11 @@ impl Workers {
     }
 }
 
-fn run_job(job: Job, tx: &Sender<Done>) -> Done {
+fn run_job(job: Job, tx: &Sender<Done>, watcher: &ClipWatcher) -> Done {
     match job {
         Job::List => {
+            // Every folder change ends in a listing. Armed first, so nothing falls between.
+            watcher.set_roots(backend::clip_roots());
             let result = backend::list_clips();
             if let Ok(entries) = &result {
                 prefetch(entries, tx.clone());
