@@ -4,6 +4,7 @@
 use ffmpeg_next as ff;
 
 use super::PacedFrame;
+use crate::framing::{encodable, MAX_JITTER_PIXELS};
 
 /// Copy tightly packed RGBA into an RGBZ video frame, honoring the stride.
 pub(super) fn fill_rgbz(vf: &mut ff::frame::Video, w: u32, h: u32, rgba: &[u8]) {
@@ -16,6 +17,25 @@ pub(super) fn fill_rgbz(vf: &mut ff::frame::Video, w: u32, h: u32, rgba: &[u8]) 
     }
 }
 
+/// Stops frames too small to encode before they reach the encoder: a reopen on one empties
+/// the replay buffer, and on GPU frames ends zero-copy for the session.
+#[derive(Default)]
+pub(super) struct SmallFrames {
+    in_run: bool,
+}
+
+impl SmallFrames {
+    /// True when `frame` must be dropped; `note` gets one log line per run of such frames.
+    pub(super) fn skips(&mut self, frame: &PacedFrame, note: impl FnOnce(&str)) -> bool {
+        let small = !encodable((frame.width, frame.height));
+        if small && !self.in_run {
+            note(&format!("skipping {}x{} frames, too small to encode", frame.width, frame.height));
+        }
+        self.in_run = small;
+        small
+    }
+}
+
 /// Keep an initialized encoder stable across the few pixels of client-border
 /// jitter that WGC can report while a window gains or loses focus. This is
 /// intentionally a crop/pad, never a scale: larger geometry changes still
@@ -25,8 +45,6 @@ pub(super) fn normalize_small_size_jitter(
     target_width: u32,
     target_height: u32,
 ) -> Result<bool, String> {
-    const MAX_JITTER_PIXELS: u32 = 8;
-
     if frame.width == target_width && frame.height == target_height {
         return Ok(false);
     }
@@ -105,9 +123,13 @@ pub(super) fn normalize_small_size_jitter(
 }
 
 #[cfg(test)]
+#[path = "wobble_tests.rs"]
+mod wobble_tests;
+
+#[cfg(test)]
 mod tests {
     use super::super::PacedFrame;
-    use super::normalize_small_size_jitter;
+    use super::{normalize_small_size_jitter, SmallFrames};
 
     fn patterned_frame(width: u32, height: u32, idx: u64) -> PacedFrame {
         let mut rgba = Vec::new();
@@ -152,6 +174,17 @@ mod tests {
         assert_eq!(frame.rgba.len(), 4 * 3 * 4);
         assert_eq!(pixel(&frame, 0, 0), [0, 0, 0xaa, 0xff]);
         assert_eq!(pixel(&frame, 3, 2), [3, 2, 0xaa, 0xff]);
+    }
+
+    #[test]
+    fn small_frames_are_noted_once_per_run() {
+        let frame = |width, height| PacedFrame { idx: 0, width, height, rgba: Vec::new(), gpu: None, content: None };
+        let mut small = SmallFrames::default();
+        let mut notes = 0;
+        for (width, height, skipped) in [(120, 30, true), (160, 28, true), (2560, 1440, false), (120, 30, true)] {
+            assert_eq!(small.skips(&frame(width, height), |_| notes += 1), skipped);
+        }
+        assert_eq!(notes, 2);
     }
 
     #[test]
