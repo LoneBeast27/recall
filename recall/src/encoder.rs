@@ -36,7 +36,7 @@ use ffmpeg_next as ff;
 
 use crate::audio::TrackRing;
 use crate::ring::{EncodedPacket, PacketRing};
-use frame_fit::{fill_rgbz, normalize_small_size_jitter};
+use frame_fit::{fill_rgbz, normalize_small_size_jitter, SmallFrames};
 use handoff::handle_save;
 use mux::OwnedParams;
 use saver::{ms, RawFrame, SaverControl, SaverQueue};
@@ -198,6 +198,7 @@ fn run(
     }
     let mut enc: Option<Enc> = None;
     let mut failed_resolution: Option<(u32, u32)> = None;
+    let mut small = SmallFrames::default();
     // After one fallback the engine stays on H.264: reopening on a resolution
     // change must not flap codecs or re-log the same failure.
     let mut want = cfg.codec;
@@ -212,6 +213,9 @@ fn run(
             Ok(mut frame) => {
                 // After a refusal, GPU frames still queued are dropped (capture has switched).
                 if frame.gpu.is_some() && stats.gpu_refused.load(Relaxed) {
+                    continue;
+                }
+                if small.skips(&frame, |note| report(cfg.json, note)) {
                     continue;
                 }
                 // GPU frames arrive already cropped / padded to a stable size.

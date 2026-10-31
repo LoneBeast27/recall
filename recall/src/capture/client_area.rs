@@ -19,7 +19,7 @@ use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::UI::HiDpi::{SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, IsIconic};
 
-use crate::framing::Rect;
+use crate::framing::{Rect, MAX_JITTER_PIXELS};
 
 /// Longest a measurement is reused while the frame size stays the same.
 pub const REPROBE: Duration = Duration::from_millis(500);
@@ -113,8 +113,11 @@ impl ClientArea {
             self.client = (self.measure)(self.hwnd);
             self.frame = frame;
             self.probed = Some(now);
-            if matches!(self.client, Client::Inset(_)) {
-                self.canvas = true;
+            match self.client {
+                // Border jitter, not chrome: a native session keeps its encoder size.
+                Client::Inset(r) if !self.canvas && within_jitter(r, frame) => self.client = Client::Fills,
+                Client::Inset(_) => self.canvas = true,
+                _ => {}
             }
         }
         let crop = match self.client {
@@ -123,6 +126,11 @@ impl ClientArea {
         };
         (crop, self.canvas)
     }
+}
+
+/// A client area within the jitter tolerance of the frame on both axes.
+fn within_jitter(client: Rect, frame: (u32, u32)) -> bool {
+    client.w.abs_diff(frame.0) <= MAX_JITTER_PIXELS && client.h.abs_diff(frame.1) <= MAX_JITTER_PIXELS
 }
 
 #[cfg(test)]
