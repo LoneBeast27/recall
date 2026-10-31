@@ -295,6 +295,43 @@ mod tests {
         assert_eq!((spots.lookup(""), spots.hud("")), (DEFAULT_SPOT, None), "desktop uses top-right");
     }
 
+    /// The controller's target name is the window title, not the scan's key:
+    /// each name here takes the path a status takes to `App::place`.
+    #[test]
+    fn real_target_names_reach_their_scanned_spots() {
+        use crate::session::Session;
+        let names = [
+            // Seen as `record: target -> "…"` in recall-hdr.log.
+            ("Rocket League (64-bit, DX11, Cooked)", "RocketLeague.exe", "rocketleague"),
+            ("VALORANT", "VALORANT-Win64-Shipping.exe", "valorant"),
+            ("Counter-Strike 2", "cs2.exe", "counterstrike2"),
+            ("Genshin Impact", "GenshinImpact.exe", "genshinimpact"),
+            // As the clip library names them.
+            ("Rocket League®", "RocketLeague.exe", "rocketleague"),
+            ("Apex Legends", "r5apex.exe", "apexlegends"),
+            ("Overwatch", "Overwatch.exe", "overwatch"),
+            ("Overwatch® 2", "Overwatch.exe", "overwatch2"),
+            ("Marvel Rivals", "Marvel-Win64-Shipping.exe", "marvelrivals"),
+            ("GenshinImpact", "GenshinImpact.exe", "genshinimpact"),
+            ("Battlefield™ 6", "bf6.exe", "battlefield6"),
+            ("Tom Clancys Rainbow Six Siege", "RainbowSix.exe", "tomclancysrainbowsixsiege"),
+            ("Counter-Strike Global Offensive", "csgo.exe", "counterstrikeglobaloffensive"),
+            ("Forza Horizon 6", "forza_gaming.desktop.x64_release_final.exe", "forzahorizon6"),
+            ("Lethal Company", "Lethal Company.exe", "lethalcompany"),
+        ];
+        let spots = Spots::embedded();
+        for (name, exe, scanned) in names {
+            let mut session = Session::default();
+            session.apply_status(&serde_json::json!({"type":"status","state":"recording","target":{"name":name,"exe":exe,"pid":42}}));
+            assert_eq!(spots.lookup(&session.game_key()), spots.lookup(scanned), "{name}");
+            assert_ne!(spots.lookup(&session.game_key()), DEFAULT_SPOT, "{name} is not the default spot");
+        }
+        let monitor = Rect { left: 0, top: 0, right: 2560, bottom: 1440 };
+        let mut rocket = Session::default();
+        rocket.apply_status(&serde_json::json!({"type":"status","state":"recording","target":{"name":names[0].0,"exe":names[0].1,"pid":42}}));
+        assert_eq!(position(spots.lookup(&rocket.game_key()).anchor, &monitor, 300, 12), (12, 12), "Rocket League sits top-left");
+    }
+
     #[test]
     fn scale_follows_monitor_height() {
         assert_eq!(scale(1440, &DEFAULT_SPOT), 1.0);
