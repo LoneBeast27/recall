@@ -2,11 +2,20 @@
 //! `RECALL_NATIVE_TRACE=<file>`, the app appends one JSON line per poll (at most every
 //! 30 ms) with the route and playback state, so a script can measure response times and
 //! stalls, plus where the clickable controls were painted so it can click them like a person.
+//!
+//! `RECALL_NATIVE_LAYOUT=<file>` keeps one JSON document of the current layout for an external
+//! tester (GPUI has no accessibility tree). Dev format, no contract: `route`, `clips`, `scale`,
+//! `window` (client-area origin, screen px) and `targets` (name -> client px [x, y, w, h]).
+//! Replaced atomically when the layout changes, at most every 100 ms.
 use std::{
     fs::File,
     io::Write,
-    sync::{Mutex, OnceLock},
-    time::Instant,
+    path::PathBuf,
+    sync::{
+        Mutex, OnceLock,
+        atomic::{AtomicIsize, Ordering},
+    },
+    time::{Duration, Instant},
 };
 
 use gpui::{IntoElement, Styled, canvas};
@@ -21,10 +30,18 @@ struct Trace {
 static TRACE: Mutex<Option<Option<Trace>>> = Mutex::new(None);
 /// Click targets painted in the last frame: name → device-px [x, y, w, h].
 static TARGETS: Mutex<Vec<(String, [i32; 4])>> = Mutex::new(Vec::new());
+/// Window of the last render, and its scale x 1000 (layout dump only).
+static WINDOW: AtomicIsize = AtomicIsize::new(0);
+static SCALE_MILLI: AtomicIsize = AtomicIsize::new(1000);
 
 fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("RECALL_NATIVE_TRACE").is_some())
+    *ON.get_or_init(|| std::env::var_os("RECALL_NATIVE_TRACE").is_some() || layout_path().is_some())
+}
+
+fn layout_path() -> Option<&'static PathBuf> {
+    static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
+    PATH.get_or_init(|| std::env::var_os("RECALL_NATIVE_LAYOUT").filter(|v| !v.is_empty()).map(PathBuf::from)).as_ref()
 }
 
 /// An invisible child that records where its parent was painted (device px) under `name`,
@@ -51,15 +68,56 @@ pub fn target(name: impl Into<String>) -> impl IntoElement {
 }
 
 /// Called at the start of every render: targets are re-recorded by the frame being built.
-pub fn clear_targets() {
+pub fn clear_targets(window: &gpui::Window) {
     if enabled() {
         if let Ok(mut targets) = TARGETS.lock() {
             targets.clear();
         }
+        if layout_path().is_some() {
+            WINDOW.store(crate::root::parent_hwnd(window).unwrap_or(0), Ordering::Relaxed);
+            SCALE_MILLI.store((window.scale_factor() * 1000.0) as isize, Ordering::Relaxed);
+        }
     }
 }
 
-pub fn record(route: &str, ed: &EditorState) {
+/// Client-area origin of the window on screen.
+fn client_origin() -> [i32; 2] {
+    use windows::Win32::{Foundation::{HWND, POINT}, Graphics::Gdi::ClientToScreen};
+    let mut origin = POINT::default();
+    let _ = unsafe { ClientToScreen(HWND(WINDOW.load(Ordering::Relaxed) as *mut _), &mut origin) };
+    [origin.x, origin.y]
+}
+
+/// Called every poll; returns at once unless `RECALL_NATIVE_LAYOUT` is set.
+pub fn dump_layout(route: &str, clips: usize) {
+    static LAST: Mutex<Option<(Instant, String)>> = Mutex::new(None);
+    let Some(path) = layout_path() else { return };
+    let Ok(mut last) = LAST.lock() else { return };
+    if last.as_ref().is_some_and(|(at, _)| at.elapsed() < Duration::from_millis(100)) {
+        return;
+    }
+    let targets: serde_json::Map<String, serde_json::Value> =
+        TARGETS.lock().map(|t| t.iter().map(|(n, r)| (n.clone(), serde_json::json!(r))).collect()).unwrap_or_default();
+    let scale = SCALE_MILLI.load(Ordering::Relaxed) as f64 / 1000.0;
+    let text = serde_json::json!({ "route": route, "clips": clips, "scale": scale, "window": client_origin(), "targets": targets }).to_string();
+    if last.as_ref().is_some_and(|(_, written)| *written == text) {
+        return;
+    }
+    let tmp = path.with_extension("tmp");
+    if std::fs::write(&tmp, &text).is_ok() && std::fs::rename(&tmp, path).is_ok() {
+        *last = Some((Instant::now(), text));
+    }
+}
+
+/// One line in the test trace, if there is one.
+pub fn note(what: &str) {
+    let Ok(mut slot) = TRACE.lock() else { return };
+    if let Some(Some(trace)) = slot.as_mut() {
+        let _ = writeln!(trace.file, "{}", serde_json::json!({ "ms": trace.start.elapsed().as_millis() as u64, "note": what }));
+    }
+}
+
+pub fn record(route: &str, ed: &EditorState, clips: usize) {
     let Ok(mut slot) = TRACE.lock() else { return };
     let trace = slot.get_or_insert_with(|| {
         let path = std::env::var_os("RECALL_NATIVE_TRACE")?;
@@ -74,6 +132,7 @@ pub fn record(route: &str, ed: &EditorState) {
     let line = serde_json::json!({
         "ms": trace.start.elapsed().as_millis() as u64,
         "route": route,
+        "clips": clips,
         "clip": ed.info.as_ref().map(|i| i.path.as_str()),
         "duration": ed.info.as_ref().map(|i| i.duration),
         "ready": preview.is_some_and(|p| p.is_ready()),

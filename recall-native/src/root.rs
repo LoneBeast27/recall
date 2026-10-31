@@ -203,7 +203,8 @@ impl Root {
             changed = true;
         }
         changed |= self.ed.tick(self.route == Route::Editor, &self.workers);
-        crate::trace::record(self.route.name(), &self.ed);
+        crate::trace::record(self.route.name(), &self.ed, self.lib.records.len());
+        crate::trace::dump_layout(self.route.name(), self.lib.records.len());
         if let Some(error) = self.ed.last_error.take() {
             self.show_toast(ToastKind::Bad, "Preview", Some(error));
             changed = true;
@@ -236,6 +237,7 @@ impl Root {
     fn on_done(&mut self, done: Done) {
         match done {
             Done::Clips(Ok(entries)) => self.lib.set_entries(entries),
+            Done::Library(change) => self.on_library_change(change),
             Done::Clips(Err(error)) => {
                 self.lib.loading = false;
                 self.lib.error = Some(error);
@@ -339,7 +341,7 @@ impl Root {
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        crate::trace::clear_targets();
+        crate::trace::clear_targets(window);
         // Meters and playback animate at the display refresh rate, not the 30 ms poll.
         if self.route == Route::Audio || (self.route == Route::Editor && self.ed.playing) {
             window.request_animation_frame();
