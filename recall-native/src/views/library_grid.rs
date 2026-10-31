@@ -309,6 +309,7 @@ impl Root {
 
 fn tile_action(id: &'static str, kind: Icon) -> gpui::Stateful<gpui::Div> {
     div()
+        .child(crate::trace::target(id))
         .id(id)
         .size(px(28.))
         .flex()

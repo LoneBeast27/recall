@@ -5,7 +5,7 @@
 //! autosave writes the working project to the SSD and the sidecar beside the clip is only
 //! written by [`flush_project`].
 use crate::edit_model::{ClipInfo, EditPlan, ExportMode, ExportSettings};
-use crate::services::library::folders::{self, Folders};
+use crate::services::library::{folders::{self, Folders},watch::WatchRoot};
 use crate::services::storage::{self, Priority, ProjectSource};
 use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 #[path = "visual_assets.rs"]
 mod visual_assets;
 
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ClipEntry {
     pub name:String, pub path:String, pub bytes:u64, pub mtime:u64, pub thumb:Option<String>,
     /// Folder holding an imported clip: names the game when the file name does not.
@@ -60,6 +60,12 @@ fn tmp_dir()->Result<PathBuf,String>{let root=storage::cache_root().join("tmp");
 pub fn library_dir()->PathBuf{
     if let Some(dir)=std::env::var_os("RECALL_OUT_DIR"){return PathBuf::from(dir);}
     Folders::load().recordings.filter(|r|!r.trim().is_empty()).map(PathBuf::from).unwrap_or_else(||PathBuf::from(r"V:\ALL RECORDINGS"))
+}
+/// The folders [`list_clips`] reads, in its order.
+pub fn clip_roots()->Vec<WatchRoot>{
+    let mut roots=vec![WatchRoot{path:library_dir(),recursive:false}];
+    roots.extend(Folders::load().imported.into_iter().map(|folder|WatchRoot{path:PathBuf::from(folder),recursive:true}));
+    roots
 }
 /// The recordings folder (one listing) plus every imported folder (searched a few levels
 /// deep), and one listing of the SSD thumbnail tier; a clip's `thumb` is set only when its
@@ -222,7 +228,13 @@ fn normalize_audio_names(info:&mut ClipInfo){
     if generated&&info.audio.len()==2&&unnamed.len()==2 { info.audio[0].name="Game audio".into();info.audio[1].name="Microphone".into();return; }
     for (ordinal,track) in info.audio.iter_mut().enumerate(){if generic_audio_name(&track.name){track.name=format!("Audio track {}",ordinal+1);}}
 }
-fn generic_audio_name(name:&str)->bool{let value=name.trim().to_ascii_lowercase();if matches!(value.as_str(),""|"und"|"unknown"|"undefined"){return true;}if value.starts_with("audio ")&&value[6..].parse::<usize>().is_ok(){return true;}value.len()<=3&&value.chars().all(|c|c.is_ascii_alphabetic())}
+fn generic_audio_name(name:&str)->bool{let value=name.trim().to_ascii_lowercase();if matches!(value.as_str(),""|"und"|"unknown"|"undefined"){return true;}if value.starts_with("audio ")&&value[6..].parse::<usize>().is_ok(){return true;}language_code(name.trim())}
+/// A stream's language used as a name: 1-3 letters of one case ("eng", "EN"), which a real label
+/// is not ("Mic"). The labels a tool may spell like a code stay names, though "mic" is in ISO 639-2.
+fn language_code(name:&str)->bool{
+    let one_case=name.chars().all(|c|c.is_ascii_lowercase())||name.chars().all(|c|c.is_ascii_uppercase());
+    !name.is_empty()&&name.len()<=3&&one_case&&!matches!(name.to_ascii_lowercase().as_str(),"mic"|"sfx"|"bgm")
+}
 fn recall_generated_path(path:&str)->bool{let stem=Path::new(path).file_stem().and_then(|value|value.to_str()).unwrap_or("");let parts:Vec<_>=stem.split("__").collect();parts.len()==4&&parts[1].len()==10&&parts[1].chars().enumerate().all(|(index,c)|matches!(index,4|7) && c=='-' || index!=4&&index!=7&&c.is_ascii_digit())&&parts[2].len()>=8&&parts[3].len()>=16&&parts[3].chars().all(|c|c.is_ascii_hexdigit())}
 #[cfg(test)]
 mod tests {
@@ -233,6 +245,14 @@ mod tests {
         info.path="C:/clips/imported.mp4".into();info.audio[0].name="und".into();info.audio[1].name="unknown".into();normalize_audio_names(&mut info);assert_eq!(info.audio[0].name,"Audio track 1");assert_eq!(info.audio[1].name,"Audio track 2");
         assert_eq!(storage::recorder_thumb_stem("my-hyphenated-game__2026-10-17__22-34-31-275__abcdef0123456789-1783463424-thumb.jpg"),Some("my-hyphenated-game__2026-10-17__22-34-31-275__abcdef0123456789"));
         assert_eq!(storage::recorder_thumb_stem("ordinary-name-thumb.jpg"),None);
+    }
+    #[test] fn short_track_labels_stay_and_language_codes_do_not(){
+        for label in ["Mic","mic","MIC","SFX","Bgm","Sub","Tom"]{assert!(!generic_audio_name(label),"{label}");}
+        for code in ["eng","en","fre","jpn","ENG","und"," eng ","","a"]{assert!(generic_audio_name(code),"{code}");}
+        let track=|name:&str,stream_index|crate::edit_model::AudioTrackInfo{stream_index,name:name.into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new()};
+        let mut info=ClipInfo{path:"V:/clips/VALORANT__2025-03-01__20-10-11.mp4".into(),duration:1.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![track("eng",1),track("Game",2),track("Mic",3)],keyframes:Vec::new()};
+        normalize_audio_names(&mut info);
+        assert_eq!(info.audio.iter().map(|a|a.name.as_str()).collect::<Vec<_>>(),["Audio track 1","Game","Mic"]);
     }
     #[test] fn a_lost_publish_race_is_retried_and_other_failures_are_not(){
         assert!(lost_publish_race("prepare media: prepare editor: publish cache: The directory is not empty. (os error 145)"));

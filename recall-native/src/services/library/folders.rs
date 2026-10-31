@@ -107,9 +107,38 @@ pub fn is_clip(path: &Path) -> bool {
 /// Lists clips in an imported folder and its subfolders (depth-first, bounded). Hidden and
 /// system folders, and Recall's own cache, are skipped.
 pub fn scan_imported(root: &Path, skip: &[PathBuf]) -> Vec<FoundClip> {
+    scan_from(root, 0, skip)
+}
+
+/// The clips [`scan_imported`] would find inside `folder`, a subfolder of `root`, without
+/// walking the rest of `root`.
+pub fn scan_subfolder(root: &Path, folder: &Path, skip: &[PathBuf]) -> Vec<FoundClip> {
+    if !scan_covers(root, &folder.join("x"), skip) {
+        return Vec::new();
+    }
+    let depth = folder.strip_prefix(root).map_or(0, |rel| rel.components().count());
+    scan_from(folder, depth, skip)
+}
+
+/// By name alone: [`scan_imported`] of `root` goes as deep as `path` and into its folders.
+pub fn scan_reaches(root: &Path, path: &Path) -> bool {
+    let Ok(rel) = path.strip_prefix(root) else { return false };
+    let folders: Vec<_> = rel.parent().map(|p| p.components().collect()).unwrap_or_default();
+    folders.len() < MAX_DEPTH && !folders.iter().any(|f| skipped_name(&f.as_os_str().to_string_lossy()))
+}
+
+/// [`scan_reaches`], plus none of `path`'s folders under `root` is hidden or in `skip`.
+pub fn scan_covers(root: &Path, path: &Path, skip: &[PathBuf]) -> bool {
+    scan_reaches(root, path)
+        && path.ancestors().skip(1).take_while(|folder| *folder != root).all(|folder| {
+            !skip.iter().any(|s| s == folder) && folder.metadata().map_or(true, |meta| !hidden(&meta))
+        })
+}
+
+fn scan_from(start: &Path, depth: usize, skip: &[PathBuf]) -> Vec<FoundClip> {
     let mut found = Vec::new();
     let mut walked = 0usize;
-    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    let mut stack = vec![(start.to_path_buf(), depth)];
     while let Some((dir, depth)) = stack.pop() {
         let Ok(listing) = std::fs::read_dir(&dir) else { continue };
         for item in listing.flatten() {
@@ -163,6 +192,32 @@ static CACHE: std::sync::Mutex<Option<ScanCache>> = std::sync::Mutex::new(None);
 pub fn forget_scans() {
     if let Ok(mut cache) = CACHE.lock() {
         *cache = None;
+    }
+}
+
+/// Drops one folder's cached walk.
+pub fn forget_scan(root: &Path) {
+    if let Ok(mut cache) = CACHE.lock() {
+        if let Some(scans) = cache.as_mut() {
+            scans.remove(Path::new(&folder_key(&root.to_string_lossy())));
+        }
+    }
+}
+
+/// Brings cached walks up to date with what the watcher saw, so the next listing neither
+/// drops a new clip nor shows a gone one, and nothing is re-walked for it.
+pub fn patch_scans(found: &[FoundClip], gone: &[String], gone_under: &[String]) {
+    let Ok(mut cache) = CACHE.lock() else { return };
+    let Some(scans) = cache.as_mut() else { return };
+    let mut leaving: std::collections::HashSet<String> = gone.iter().map(|p| folder_key(p)).collect();
+    leaving.extend(found.iter().map(|f| folder_key(&f.path.to_string_lossy())));
+    for (root, (_, clips)) in scans.iter_mut() {
+        let root = root.to_string_lossy();
+        clips.retain(|clip| {
+            let path = clip.path.to_string_lossy();
+            !leaving.contains(&folder_key(&path)) && !gone_under.iter().any(|folder| is_inside(&path, folder))
+        });
+        clips.extend(found.iter().filter(|f| is_inside(&f.path.to_string_lossy(), &root)).cloned());
     }
 }
 
