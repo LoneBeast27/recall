@@ -49,15 +49,17 @@ pub fn tick_points(cx: f32, cy: f32, size: f32, f: f32) -> Vec<(f32, f32)> {
 }
 
 impl Renderer {
-    /// The mark at its pose for `look` (`content_dx`: where the content sits in the open pill).
-    pub(crate) unsafe fn icon(&self, icon: &Icon, look: &Look, content_dx: f32, badge: Option<Badge>) -> Result<()> {
-        let (x, y, k) = icon_pose(look, content_dx, icon.cx);
+    /// The mark at its pose for `look`: `(content_dx, k)` is where the content
+    /// sits in the pill and the scale it draws at.
+    pub(crate) unsafe fn icon(&self, icon: &Icon, look: &Look, (content_dx, k): (f32, f32), badge: Option<Badge>, alpha: f32) -> Result<()> {
+        let (x, y, pop) = icon_pose(look, content_dx, icon.cx * k);
+        let k = k * pop;
         let place = Matrix3x2::translation(-icon.cx, -icon.cy) * Matrix3x2::scale(k, k) * Matrix3x2::translation(x, y);
         unsafe {
             self.target.SetTransform(&place);
             match icon.badge {
-                Some(phase) => self.badge(icon, &badge.unwrap_or(Badge::rest(phase)), look.icon_alpha)?,
-                None => self.shape(&icon.shape, look.icon_alpha)?,
+                Some(phase) => self.badge(icon, &badge.unwrap_or(Badge::rest(phase)), alpha)?,
+                None => self.shape(&icon.shape, alpha)?,
             }
         }
         Ok(())

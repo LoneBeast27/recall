@@ -91,6 +91,17 @@ fn the_mark_rides_the_left_end_and_settles_into_place() {
 }
 
 #[test]
+fn content_rides_the_pill_height_and_is_exactly_one_when_settled() {
+    let growing = Look::open(Frame { h: 51.0, ..PILL });
+    assert_eq!(content_scale(&growing, 58.0), 51.0 / 58.0);
+    assert_eq!(content_scale(&growing, 44.0), 51.0 / 44.0);
+    assert_eq!(content_scale(&Look::open(PILL), 44.000004), 1.0, "settled text stays on its pixels");
+    // A notice laid out 58 high and 26.4 in sits on the 44 px stats dot (20 in) at the first frame.
+    assert!((26.4 * content_scale(&Look::open(PILL), 58.0) - 20.0).abs() < 0.03);
+    assert_eq!(content_dx(&growing, 200.0, false), 50.0, "centred in the pill as it is now");
+}
+
+#[test]
 fn the_instant_style_opens_at_once_and_fades_the_window_in_and_out() {
     let now = Instant::now();
     let mut presence = Presence::hidden(now);

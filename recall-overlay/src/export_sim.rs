@@ -15,7 +15,7 @@ use crate::placement::{align, card_cover, free_depth, grow, Rect, Spot};
 use crate::presence::{CardLook, Look};
 use crate::preview::stats_states;
 use crate::reducer::Reducer;
-use crate::render::{Layers, Renderer};
+use crate::render::{Layers, Outgoing, Renderer};
 
 /// One drawn window: straight RGBA pixels, size, and the box the anchor places.
 pub struct Shot {
@@ -54,6 +54,7 @@ pub struct Sim<'a> {
     pub island: Island,
     scene: Scene,
     scene_scale: f32,
+    outgoing: Option<(Scene, f32)>,
     card: Option<CardScene>,
     /// The spot's HUD grid (the hint card checks under itself).
     pub hud: Option<Vec<u64>>,
@@ -75,6 +76,7 @@ impl<'a> Sim<'a> {
             island: Island::new(now),
             scene: Scene::default(),
             scene_scale: scale,
+            outgoing: None,
             card: None,
             hud: None,
             legacy,
@@ -128,8 +130,11 @@ impl<'a> Sim<'a> {
         self.reducer.tick(now);
         match self.layout() {
             Some((content, scene, scale, (w, h))) => {
-                self.island.update(Some((content, w, h)), now);
-                (self.scene, self.scene_scale) = (scene, scale);
+                let morphing = self.island.update(Some((content, w, h)), now);
+                let old = (std::mem::replace(&mut self.scene, scene), std::mem::replace(&mut self.scene_scale, scale));
+                if morphing {
+                    self.outgoing = Some(old);
+                }
                 if self.legacy_times.0.is_none() || self.legacy_times.1.is_some() {
                     self.legacy_times = (Some(now), None);
                 }
@@ -149,7 +154,8 @@ impl<'a> Sim<'a> {
         let card = self.island.card(now).zip(self.card.as_ref());
         look.card = card.map(|(progress, c)| CardLook { w: c.w, h: c.h, gap: GAP * self.scale, progress });
         let (sheen, badge) = (self.island.sheen(now), self.island.badge(now));
-        let layers = Layers { sheen, badge, card: card.map(|(_, c)| c) };
+        let outgoing = self.island.crossfade(now).zip(self.outgoing.as_ref()).map(|(f, (scene, scale))| Outgoing { scene, scale: *scale, alpha: f.alpha, icon: f.icon });
+        let layers = Layers { sheen, badge, card: card.map(|(_, c)| c), outgoing };
         let (w, h) = renderer.draw(self.fonts, &self.scene, look, self.scene_scale, layers).map_err(|e| format!("draw: {e}"))?;
         let window = (look.alpha.clamp(0.0, 1.0) * 255.0).round() as u32; // SourceConstantAlpha
         let rgba = straight(&renderer.pixels(w, h), window);

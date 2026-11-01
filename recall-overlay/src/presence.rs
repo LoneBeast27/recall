@@ -136,10 +136,19 @@ pub struct CardLook {
     pub progress: f32,
 }
 
-/// Where `scene`'s content sits in the open pill: centred, or at the left
-/// padding for a scene that leads (a save).
+/// Where `scene`'s content sits in the pill (`content_w` as drawn, scaled):
+/// centred, or at the left padding for a scene that leads.
 pub fn content_dx(look: &Look, content_w: f32, lead: bool) -> f32 {
-    if lead { 0.0 } else { (look.full_w - content_w) / 2.0 }
+    let pill_w = if look.unroll < 1.0 { look.full_w } else { look.pill[2] };
+    if lead { 0.0 } else { (pill_w - content_w) / 2.0 }
+}
+
+/// The scale a scene laid out `scene_h` high draws at: it rides the pill's
+/// height through a transformation, so old and new content move as one.
+/// Exactly 1 once settled, so text stays on its layout's pixels.
+pub fn content_scale(look: &Look, scene_h: f32) -> f32 {
+    let k = look.box_h / scene_h.max(1.0);
+    if (k - 1.0).abs() < 0.003 { 1.0 } else { k }
 }
 
 /// One drawn frame of the island (physical px). The anchor places a

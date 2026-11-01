@@ -278,6 +278,7 @@ pub fn clock(secs: u64) -> String {
 /// pill does not twitch as numbers change.
 pub fn stats_scene(st: &StatsContent, s: f32, m: &dyn Measure) -> Scene {
     let mut p = pen(s, m);
+    p.scene.lead = true; // the record dot stays on the pill's left padding through a transformation
     let group_gap = p.u(16.0);
     let mut x = p.u(16.0);
     let tone = if st.paused { Tone::Paused } else if st.recording { Tone::Recording } else { Tone::Waiting };
