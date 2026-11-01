@@ -2,7 +2,8 @@
   Driver for scripts\dev\viewer-check.ps1: starts private Recall instances and drives them the
   way a person does, without touching the desktop. Dot-source it, then call Initialize-ViewerCheck.
 
-  Every instance runs behind all windows and never activates (RECALL_NATIVE_BACKGROUND), with its
+  Every instance runs outside every monitor, out of the taskbar, and never activates
+  (RECALL_NATIVE_OFFSCREEN), with its
   own settings folder, library folder and control pipe, so the person's Recall window, recorder,
   library titles and player log are never touched. Input is posted to the instance's own window
   (PostMessage), never injected into the desktop: keys go through the app's key handler, clicks
@@ -15,6 +16,7 @@ public static class VC {
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [DllImport("kernel32.dll")] public static extern uint SetErrorMode(uint mode);
   // Silence holes (>= 8 zero frames) inside sound in a 16-bit preview stem: the 2026-10-27 choppy audio.
   public static int Holes(string wav) {
     if (wav.StartsWith(@"\\?\")) wav = wav.Substring(4); // Windows PowerShell rejects verbatim paths
@@ -34,6 +36,8 @@ public static class VC {
 $script:vk = @{ space = 0x20; i = 0x49; o = 0x4F; c = 0x43; s = 0x53; l = 0x4C; j = 0x4A; k = 0x4B; home = 0x24; end = 0x23; delete = 0x2E; left = 0x25; right = 0x27; escape = 0x1B }
 
 function Initialize-ViewerCheck([string]$Repo, [string]$Exe) {
+  # Children inherit this: a missing DLL fails the scenario, not in a dialog on the desktop.
+  [void][VC]::SetErrorMode(0x8003)
   $script:work = Join-Path $Repo '.tmp\viewer-check'
   $script:sandbox = Join-Path $script:work 'appdata'
   # Private cache: prepared stems are reused across runs, saved edits (projects) never are.
@@ -70,7 +74,7 @@ function Start-Viewer([string]$name, [string]$from, [switch]$Library, [string[]]
   foreach ($extra in $Also) { [void](New-ClipLink $libDir $extra $from) }
   $trace = Join-Path $script:work "$name.jsonl"
   Remove-Item $trace -ErrorAction SilentlyContinue
-  $env:RECALL_NATIVE_TRACE = $trace; $env:RECALL_NATIVE_WINDOW_SIZE = '1280x820'; $env:RECALL_NATIVE_BACKGROUND = '1'
+  $env:RECALL_NATIVE_TRACE = $trace; $env:RECALL_NATIVE_WINDOW_SIZE = '1280x820'; $env:RECALL_NATIVE_OFFSCREEN = '1'
   if (-not $Library) { $env:RECALL_NATIVE_CLIP = $clip }
   $env:RECALL_NO_CONTROLLER = '1'; $env:RECALL_CPU_MASK = 'ffff0000'; $env:RECALL_CONTROL_PIPE = "recall-viewer-check-$PID"
   $env:RECALL_OUT_DIR = $libDir; $env:RECALL_FOLDERS = Join-Path $script:sandbox 'folders.json'
@@ -78,13 +82,13 @@ function Start-Viewer([string]$name, [string]$from, [switch]$Library, [string[]]
   if ($script:ffmpeg) { $env:RECALL_FFMPEG = $script:ffmpeg }
   if ($script:ffprobe) { $env:RECALL_FFPROBE = $script:ffprobe }
   $realAppData = $env:APPDATA; $env:APPDATA = $script:sandbox
-  try { $p = Start-Process -FilePath $script:exe -WorkingDirectory (Split-Path $script:exe) -PassThru }
+  try { $p = Start-Process -FilePath $script:exe -WorkingDirectory (Split-Path $script:exe) -NoNewWindow -PassThru; [void]$p.Handle } # a console exe: on our console, no window of its own; keeps the exit code readable
   finally {
     $env:APPDATA = $realAppData
-    foreach ($v in 'RECALL_NATIVE_TRACE', 'RECALL_NATIVE_CLIP', 'RECALL_NATIVE_WINDOW_SIZE', 'RECALL_NATIVE_BACKGROUND', 'RECALL_NO_CONTROLLER', 'RECALL_CONTROL_PIPE', 'RECALL_OUT_DIR', 'RECALL_FOLDERS', 'RECALL_LIBRARY_META', 'RECALL_CACHE_DIR', 'RECALL_FFMPEG', 'RECALL_FFPROBE') { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
+    foreach ($v in 'RECALL_NATIVE_TRACE', 'RECALL_NATIVE_CLIP', 'RECALL_NATIVE_WINDOW_SIZE', 'RECALL_NATIVE_OFFSCREEN', 'RECALL_NO_CONTROLLER', 'RECALL_CONTROL_PIPE', 'RECALL_OUT_DIR', 'RECALL_FOLDERS', 'RECALL_LIBRARY_META', 'RECALL_CACHE_DIR', 'RECALL_FFMPEG', 'RECALL_FFPROBE') { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
   }
   $t = Get-Date
-  while (-not $p.MainWindowHandle -or $p.MainWindowHandle -eq 0) { Start-Sleep -Milliseconds 50; $p.Refresh(); if (((Get-Date) - $t).TotalSeconds -gt 20) { throw 'no window' } }
+  while (-not $p.MainWindowHandle -or $p.MainWindowHandle -eq 0) { Start-Sleep -Milliseconds 50; $p.Refresh(); if (((Get-Date) - $t).TotalSeconds -gt 20) { $how = if ($p.HasExited) { "exit 0x{0:x8}" -f $p.ExitCode } else { 'still running'; Stop-Process -Id $p.Id -Force }; throw "no window ($how)" } }
   $s = [pscustomobject]@{ Process = $p; Hwnd = $p.MainWindowHandle; Trace = $trace; Clip = $clip; Name = $name }
   $want = if ($Library) { { param($r) $r.route -eq 'library' -and $r.targets.PSObject.Properties.Name -contains "tile:$name.mp4" } } else { { param($r) $r.ready -and $r.clip -and $r.targets.play } }
   if (-not (Wait-Trace $s $want 60000)) { Stop-Viewer $s; throw "${name}: never became ready" }
@@ -236,7 +240,9 @@ function Press-Pause($s, [string]$how = 'space') {
 # The picture shows the playhead's spot (paused): catches a picture stuck at an old time.
 function Check-Picture($s, [string]$label) {
   $r = Settle $s 250
-  $ok = [math]::Abs([double]$r.video - [double]$r.pos) -lt 0.05
+  # A file can hold its last frame well past the frame's start: the picture stops there.
+  $want = if ($null -ne $r.picture_end) { [math]::Min([double]$r.pos, [double]$r.picture_end) } else { [double]$r.pos }
+  $ok = [math]::Abs([double]$r.video - $want) -lt 0.05
   [pscustomobject]@{ Pass = $ok; Detail = "$label playhead $(Fmt $r.pos)s, picture $(Fmt $r.video)s" }
 }
 # Derives a test clip with ffmpeg on the background cores (once; reused after).

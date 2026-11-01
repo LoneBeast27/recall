@@ -6,10 +6,14 @@ use gpui::{
     px, size,
 };
 
-use crate::{assets::Assets, root::Root};
+use crate::{assets::Assets, offscreen, root::Root};
 
 pub fn run() -> Result<(), String> {
-    Application::new().with_assets(Assets).run(|cx: &mut App| {
+    let offscreen = offscreen::enabled();
+    if offscreen {
+        offscreen::quiet_errors();
+    }
+    Application::new().with_assets(Assets).run(move |cx: &mut App| {
         if let Err(error) = cx.text_system().add_fonts(vec![
             Cow::Borrowed(include_bytes!("../assets/fonts/geist-400.ttf")),
             Cow::Borrowed(include_bytes!("../assets/fonts/geist-500.ttf")),
@@ -19,7 +23,7 @@ pub fn run() -> Result<(), String> {
         ]) {
             eprintln!("load Recall fonts: {error}");
         }
-        let background = std::env::var_os("RECALL_NATIVE_BACKGROUND").is_some();
+        let background = offscreen || std::env::var_os("RECALL_NATIVE_BACKGROUND").is_some();
         let (width, height) = window_size();
         let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         let options = WindowOptions {
@@ -49,7 +53,8 @@ pub fn run() -> Result<(), String> {
             }
         };
         if background {
-            let _ = handle.update(cx, |_, window, _| show_behind(window, width, height));
+            let show = if offscreen { offscreen::show } else { show_behind };
+            let _ = handle.update(cx, |_, window, _| show(window, width, height));
         }
         if !background {
             cx.activate(true);

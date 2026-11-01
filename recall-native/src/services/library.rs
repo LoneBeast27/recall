@@ -20,6 +20,8 @@ mod tests;
 #[cfg(test)]
 mod tests_io;
 #[cfg(test)]
+mod tests_settle;
+#[cfg(test)]
 mod tests_watch;
 
 /// Local wall-clock time of a clip start (from the file name, else file mtime).
@@ -301,6 +303,12 @@ pub fn mp4_duration(path: &Path) -> Option<f64> {
 pub fn mp4_video_duration(path: &Path) -> Option<f64> {
     let mut file = std::fs::File::open(path).ok()?;
     mp4::video_duration_of(&mut file)
+}
+
+/// Where an MP4's last video frame starts (its track can run on, holding that frame).
+pub fn mp4_last_frame(path: &Path) -> Option<f64> {
+    let mut file = std::fs::File::open(path).ok()?;
+    mp4::last_frame_of(&mut file)
 }
 
 /// Moves clips (plus their recorder thumbnail and edit sidecar) to the Recycle Bin.
