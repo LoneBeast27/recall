@@ -172,9 +172,16 @@ impl NativePreview {
     /// Opens a clip that is still loading. `audio` carries each track's level; the sound comes
     /// from `media.sound`, or from the stems later ([`NativePreview::use_stems`]) without it.
     pub fn open_stream(&mut self, media: StreamMedia, audio: &[PreviewTrack], duration: f64) -> Result<(), String> {
-        let (player, callback) = self.new_player((media.map.video_end, media.map.last_frame))?;
+        let (player, callback) = match self.new_player((media.map.video_end, media.map.last_frame)) {
+            Ok(made) => made,
+            Err(error) => {
+                media.shut();
+                return Err(error);
+            }
+        };
         if let Err(error) = unsafe { player.CreateMediaItemFromObject(&media.video.0, false, 0, None) } {
             let _ = unsafe { player.Shutdown() };
+            media.shut();
             return Err(format!("could not open native video preview: {error}"));
         }
         let _ = unsafe { player.SetMute(true) };
@@ -188,7 +195,12 @@ impl NativePreview {
             });
             self.has_audio = !sound.tracks.is_empty();
             if self.has_audio {
-                self.audio.open_live(tracks.collect(), duration)?;
+                if let Err(error) = self.audio.open_live(tracks.collect(), duration) {
+                    self.has_audio = false;
+                    let _ = unsafe { player.Shutdown() };
+                    media.shut();
+                    return Err(error);
+                }
             }
         }
         media.fill.set_playing();

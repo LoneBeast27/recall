@@ -74,11 +74,7 @@ impl EditorState {
     pub fn apply_streaming(&mut self, generation: u64, clip: Box<StreamedClip>) {
         let clip = *clip;
         if generation != self.generation {
-            clip.media.fill.cancel();
-            if let Some(sound) = &clip.media.sound {
-                sound.stop();
-            }
-            let _ = unsafe { clip.media.video.0.Shutdown() };
+            clip.media.shut();
             return;
         }
         self.loading_path = None;

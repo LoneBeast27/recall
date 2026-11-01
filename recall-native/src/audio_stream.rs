@@ -228,6 +228,14 @@ unsafe impl Send for Decoding {}
 /// Selects the audio streams of `source`, pairs them in order with `tracks`
 /// (stream index, channels) and starts decoding. Err: this clip's sound must wait for the stems.
 pub(crate) fn start(source: IMFMediaSource, fill: ClipFill, map: Arc<ClipMap>, tracks: &[(usize, u16)], origin: f64, duration: f64) -> Result<Arc<LiveSound>, String> {
+    let started = start_on(source.clone(), fill, map, tracks, origin, duration);
+    if started.is_err() {
+        let _ = unsafe { source.Shutdown() };
+    }
+    started
+}
+
+fn start_on(source: IMFMediaSource, fill: ClipFill, map: Arc<ClipMap>, tracks: &[(usize, u16)], origin: f64, duration: f64) -> Result<Arc<LiveSound>, String> {
     let frames = (duration.max(0.0) * SAMPLE_RATE as f64).ceil() as usize;
     let bytes: u64 = tracks.iter().map(|(_, channels)| frames as u64 * u64::from((*channels).clamp(1, 2)) * 2).sum();
     if bytes > MAX_LIVE_BYTES {
