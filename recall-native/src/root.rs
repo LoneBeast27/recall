@@ -192,6 +192,12 @@ impl Root {
         root
     }
 
+    /// The polling task holds this view for a tick after the window goes, and the app can quit
+    /// first, so `drop` alone may never run.
+    pub fn flush_on_close(&mut self) {
+        self.ed.flush_now();
+    }
+
     pub fn start_polling(entity: Entity<Self>, window: &mut Window, cx: &mut gpui::App) {
         window
             .spawn(cx, async move |cx| {
@@ -468,11 +474,8 @@ pub fn parent_hwnd(window: &Window) -> Result<isize, String> {
 }
 
 impl Drop for Root {
-    /// Closing the window writes pending edits beside the clip (the worker may not outlive it)
-    /// and lets a running export finish: helpers end with the app.
+    /// Closing the window writes pending edits beside the clip (the worker may not outlive it).
     fn drop(&mut self) {
-        self.ed.flush_now();
-        crate::backend::wait_for_export();
-        crate::services::storage::close_helpers();
+        self.flush_on_close();
     }
 }
