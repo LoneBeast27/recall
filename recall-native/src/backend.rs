@@ -32,6 +32,8 @@ pub struct PreparedClip {
     pub info:ClipInfo,pub project:Option<Project>,pub warning:Option<String>,pub visuals:VisualAssets,
     /// This session may rewrite or remove the sidecar: there was none, or it loaded.
     pub sidecar_ours:bool,
+    /// A sidecar was there at open; one that appears later is not this session's to remove.
+    pub sidecar_at_open:bool,
     /// SSD copy to play from (`None`: play `info.path` -- a clip already on an SSD, or one the video tier could not take).
     pub playback:Option<String>,
 }
@@ -190,10 +192,10 @@ pub fn prepare_clip(path:&str)->Result<PreparedClip,String>{
     normalize_audio_names(&mut info);
     storage::note_editor_media(&info.path,&editor_dirs(&info),true);
     storage::enforce_budget();
-    let (project,project_warning,sidecar_ours)=load_project(&info);
+    let (project,project_warning,sidecar_ours,sidecar_at_open)=load_project(&info);
     warnings.extend(project_warning);warnings.extend(visual_warning);
     let warning=(!warnings.is_empty()).then(||warnings.join(" "));
-    Ok(PreparedClip{info,project,warning,visuals,sidecar_ours,playback:copy})
+    Ok(PreparedClip{info,project,warning,visuals,sidecar_ours,sidecar_at_open,playback:copy})
 }
 /// Smart-cache fill step (runs on the clip's disk lane): prepares editor media — audio stems,
 /// waveforms, poster, filmstrip — without opening the clip, from the SSD copy when there is
@@ -218,8 +220,8 @@ fn working_path(info:&ClipInfo)->Result<PathBuf,String>{
 /// Newer of the SSD working copy and the sidecar (falling back to the other when the newer one is invalid).
 /// The project to open, a warning, and whether this session owns the sidecar: a sidecar that
 /// exists but cannot be read or loaded may hold edits, so a later flush must leave it alone.
-fn load_project(info:&ClipInfo)->(Option<Project>,Option<String>,bool){
-    let (Ok(working),Ok(sidecar))=(working_path(info),sidecar(&info.path))else{return(None,None,false)};
+fn load_project(info:&ClipInfo)->(Option<Project>,Option<String>,bool,bool){
+    let (Ok(working),Ok(sidecar))=(working_path(info),sidecar(&info.path))else{return(None,None,false,false)};
     let lane_sidecar=sidecar.clone();
     let (sidecar_ms,sidecar_bytes)=storage::run_io(Path::new(&info.path),Priority::Interactive,move||(storage::projects_modified_ms(&lane_sidecar),std::fs::read(&lane_sidecar).ok())).unwrap_or((None,None));
     let parse=|bytes:&[u8]|serde_json::from_slice::<Project>(bytes).map_err(|e|e.to_string()).and_then(|p|{validate_project(&p,info)?;Ok(p)});
@@ -230,11 +232,11 @@ fn load_project(info:&ClipInfo)->(Option<Project>,Option<String>,bool){
         let bytes=match source{ProjectSource::WorkingCopy=>std::fs::read(&working).ok(),ProjectSource::Sidecar=>sidecar_bytes.clone()};
         let Some(bytes)=bytes else{continue};
         match parse(&bytes){
-            Ok(mut p)=>{normalize_project_audio(&mut p.plan,info);return(Some(p),warning,ours)},
+            Ok(mut p)=>{normalize_project_audio(&mut p.plan,info);return(Some(p),warning,ours,present)},
             Err(e)=>{warning.get_or_insert(format!("Saved edits were not loaded: {e}"));}
         }
     }
-    (None,warning,ours)
+    (None,warning,ours,present)
 }
 fn normalize_project_audio(plan:&mut EditPlan,info:&ClipInfo){
     let mut normalized=Vec::with_capacity(info.audio.len());

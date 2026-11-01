@@ -267,6 +267,24 @@ mod drag_tests {
     }
 
     #[test]
+    fn a_sidecar_that_appeared_without_an_edit_here_is_left_alone() {
+        let mut ed = editor();
+        ed.sidecar_ours = true;
+        assert!(!ed.may_touch_sidecar(), "none at open, no edit: not ours");
+        ed.sidecar_at_open = true;
+        assert!(ed.may_touch_sidecar(), "it loaded at open");
+        ed.sidecar_at_open = false;
+        ed.plan.ranges[0].end = 9.0;
+        ed.revise();
+        assert!(ed.may_touch_sidecar(), "an edit here wrote it");
+        ed.undo();
+        assert!(ed.may_touch_sidecar(), "undoing that edit may remove it");
+        ed.sidecar_ours = false;
+        ed.sidecar_at_open = true;
+        assert!(!ed.may_touch_sidecar(), "an unreadable sidecar stays");
+    }
+
+    #[test]
     fn a_scrub_is_no_edit() {
         let mut ed = editor();
         ed.begin_drag(Drag::Scrub);
