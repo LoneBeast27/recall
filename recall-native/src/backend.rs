@@ -70,25 +70,38 @@ pub fn engine_path()->Result<PathBuf,String> {
     for p in exe.ancestors(){for candidate in [p.join("recall.exe"),p.join("target-dev/debug/recall.exe")] {if candidate.is_file(){return Ok(candidate);}}}
     Err("Recorder executable not found. Build recall or set RECALL_ENGINE.".into())
 }
-/// An engine with `flag`. Unknown arguments start an engine as a recorder that never returns,
-/// so a build without the flag must not be run to find out: the check reads the program file.
-fn engine_command(flag:&str)->Result<Command,String>{
+/// What an engine build stamps in its program file: `recall-engine-caps:<cap>,<cap>;`
+/// (`ENGINE_CAPS` in `recall/src/main.rs`). Flag names are not searched for: a release build
+/// holds them split up, and a build without encode holds them while they do nothing.
+const CAPS_MARK:&[u8]=b"recall-engine-caps:";
+/// An engine that can do `cap`, set up to run it. Unknown arguments start an engine as a recorder
+/// that never returns, so a build without it must not be run to find out: the check reads the program file.
+fn engine_command(cap:&str)->Result<Command,String>{
     let path=engine_path()?;
-    if !engine_knows(&path,flag)?{return Err(format!("The recorder at {} is too old for this version of Recall (no {flag}).",path.display()));}
-    let mut command=Command::new(path);command.arg(flag);Ok(command)
+    if !engine_knows(&path,cap)?{return Err(format!("The recorder at {} is too old for this version of Recall (no {cap}).",path.display()));}
+    let mut command=Command::new(path);command.arg(format!("--{cap}"));Ok(command)
 }
-fn engine_knows(path:&Path,flag:&str)->Result<bool,String>{
+fn engine_knows(path:&Path,cap:&str)->Result<bool,String>{
     static KNOWN:Mutex<Option<HashMap<(PathBuf,u64,u64,String),bool>>>=Mutex::new(None);
     let m=path.metadata().map_err(|e|format!("stat recorder: {e}"))?;
-    let key=(path.to_path_buf(),m.len(),modified_ms(&m),flag.to_owned());
+    let key=(path.to_path_buf(),m.len(),modified_ms(&m),cap.to_owned());
     let mut known=KNOWN.lock().unwrap_or_else(|e|e.into_inner());
     if let Some(answer)=known.get_or_insert_with(HashMap::new).get(&key){return Ok(*answer);}
     let bytes=std::fs::read(path).map_err(|e|format!("read recorder: {e}"))?;
-    let answer=contains(&bytes,flag.as_bytes());
+    let answer=stamped_caps(&bytes).iter().any(|stamped|*stamped==cap.as_bytes());
     known.get_or_insert_with(HashMap::new).insert(key,answer);
     Ok(answer)
 }
-fn contains(bytes:&[u8],needle:&[u8])->bool{!needle.is_empty()&&bytes.windows(needle.len()).any(|w|w[0]==needle[0]&&w==needle)}
+/// The capabilities stamped in a program file.
+fn stamped_caps(bytes:&[u8])->Vec<&[u8]>{
+    let mut caps=Vec::new();
+    for at in bytes.windows(CAPS_MARK.len()).enumerate().filter(|(_,w)|w[0]==CAPS_MARK[0]&&*w==CAPS_MARK).map(|(at,_)|at){
+        let list=&bytes[at+CAPS_MARK.len()..];
+        let Some(end)=list.iter().take(256).position(|b|*b==b';')else{continue};
+        caps.extend(list[..end].split(|b|*b==b','));
+    }
+    caps
+}
 /// The engine has already prepared this clip in place.
 pub(crate) fn has_prepared(source:&Path,metadata:&std::fs::Metadata)->bool{
     storage::engine_cache_dir(&storage::cache_root().join("editor"),source,metadata.len(),modified_ms(metadata)).join("clip.json").is_file()
@@ -184,7 +197,7 @@ fn run_engine_prepare(input:&Path,lowered:bool,stop:&dyn Fn()->bool)->Result<Cli
 }
 fn lost_publish_race(error:&str)->bool{error.contains("publish cache:")}
 fn run_engine_prepare_once(input:&Path,lowered:bool,stop:&dyn Fn()->bool)->Result<ClipInfo,String>{
-    let mut command=engine_command("--prepare-editor")?;command.arg(input).arg(cache_dir()?);
+    let mut command=engine_command("prepare-editor")?;command.arg(input).arg(cache_dir()?);
     let limit=prepare_limit(input.metadata().map_or(0,|m|m.len()));
     let output=storage::run_watched(&mut command,lowered,limit,stop).map_err(|e|format!("prepare media: {e}"))?;
     if !output.status.success(){return Err(format!("prepare media: {}",String::from_utf8_lossy(&output.stderr).trim()));}
@@ -333,16 +346,32 @@ mod tests {
         assert!(read_marks(&dir.join("none.mp4").to_string_lossy()).is_empty());
         let _=std::fs::remove_dir_all(&dir);
     }
-    #[test] fn an_engine_without_the_flag_is_told_from_one_with_it_without_running_it(){
+    #[test] fn only_the_stamped_marker_says_what_an_engine_can_do(){
         let dir=std::env::temp_dir().join(format!("recall-engine-{}",std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let (old,new)=(dir.join("old.exe"),dir.join("new.exe"));
-        std::fs::write(&old,b"MZ recorder --export-edit only").unwrap();
-        std::fs::write(&new,b"MZ recorder --prepare-editor --export-edit").unwrap();
-        assert!(!engine_knows(&old,"--prepare-editor").unwrap());
-        assert!(engine_knows(&new,"--prepare-editor").unwrap());
-        assert!(engine_knows(&old,"--export-edit").unwrap());
+        let (old,prepare,new)=(dir.join("old.exe"),dir.join("prepare.exe"),dir.join("new.exe"));
+        std::fs::write(&old,b"MZ recorder --prepare-editor --export-edit").unwrap();
+        std::fs::write(&prepare,b"MZ recall-engine-caps:prepare-editor; rest").unwrap();
+        std::fs::write(&new,b"MZ \0recall-engine-caps:prepare-editor,export-edit;\0 rest").unwrap();
+        assert!(!engine_knows(&old,"prepare-editor").unwrap(),"flag names in a program file prove nothing");
+        assert!(!engine_knows(&old,"export-edit").unwrap());
+        assert!(engine_knows(&prepare,"prepare-editor").unwrap());
+        assert!(!engine_knows(&prepare,"export-edit").unwrap());
+        assert!(engine_knows(&new,"prepare-editor").unwrap());
+        assert!(engine_knows(&new,"export-edit").unwrap());
+        assert!(!engine_knows(&new,"prepare").unwrap(),"a whole capability, not a prefix");
         let _=std::fs::remove_dir_all(&dir);
+    }
+    #[test] fn a_marker_with_no_end_counts_for_nothing(){
+        assert!(stamped_caps(b"recall-engine-caps:prepare-editor").is_empty());
+    }
+    #[test] fn an_export_has_an_end_that_grows_with_the_work(){
+        let range=|start:f64,end:f64,speed:f64|{let mut r=crate::edit_model::TimeRange::new(start,end);r.speed=speed;r};
+        let plan=|ranges|EditPlan{ranges,audio:Vec::new()};
+        assert_eq!(export_limit(&plan(vec![]),60),Duration::from_secs(600));
+        assert_eq!(export_limit(&plan(vec![range(0.0,60.0,1.0)]),60),Duration::from_secs(1800));
+        assert_eq!(export_limit(&plan(vec![range(0.0,60.0,0.25)]),60),Duration::from_secs(5400),"a slowed part is longer");
+        assert_eq!(export_limit(&plan(vec![range(0.0,60.0,1.0)]),240),Duration::from_secs(5400),"more frames");
     }
     #[test] fn a_lost_publish_race_is_retried_and_other_failures_are_not(){
         assert!(lost_publish_race("prepare media: prepare editor: publish cache: The directory is not empty. (os error 145)"));
@@ -410,6 +439,12 @@ pub fn flush_project(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSetting
 /// What a flush left beside the clip; the path is the sidecar's.
 #[derive(Debug,Clone,PartialEq)]
 pub enum Flushed{Nothing,Current(String),Removed(String)}
+/// A hung engine must not hold the io queue and the output drive for good. NVENC runs far past real
+/// time and the CPU encoder near it, at 60 fps; this is well beyond the slowest honest export.
+fn export_limit(plan:&EditPlan,fps:u32)->Duration{
+    let seconds:f64=plan.ranges.iter().map(|r|(r.end-r.start)/if r.speed>0.0{r.speed}else{1.0}).sum();
+    Duration::from_secs_f64(600.0+seconds.max(0.0)*20.0*(f64::from(fps)/60.0).max(1.0))
+}
 pub fn export_clip(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->Result<ExportSummary,String>{
     validate_info(info)?;validate_fps(fps)?;plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())?;export.validate(plan)?;
     let lossless=export.mode==ExportMode::Lossless;
@@ -426,10 +461,11 @@ pub fn export_clip(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)
     let project=tmp_dir()?.join(format!("export-{}-{nonce}.json",std::process::id()));
     std::fs::write(&project,serde_json::to_vec(&serde_json::json!({"plan":plan,"export":export})).map_err(|e|e.to_string())?).map_err(|e|format!("write export plan: {e}"))?;
     let result=(||{
-        let mut command=engine_command("--export-edit")?;command.arg(&input).arg(&output).arg(fps.to_string()).arg(&project).arg("--json");
+        let mut command=engine_command("export-edit")?;command.arg(&input).arg(&output).arg(fps.to_string()).arg(&project).arg("--json");
         // The export holds the output drive's lane: prefetch pauses instead of seeking against it.
-        let run=storage::run_io(&outdir,Priority::Interactive,move||storage::run_cancellable(&mut command,lowered,&EXPORT_CANCEL))?.map_err(|e|format!("start export: {e}"))?;
-        let result=match run{storage::Run::Finished(result)=>result,storage::Run::Cancelled{pid}=>{remove_export_temps(&output,pid);return Err(EXPORT_CANCELLED.to_owned());}};
+        let limit=export_limit(plan,fps);
+        let run=storage::run_io(&outdir,Priority::Interactive,move||storage::run_cancellable(&mut command,lowered,&EXPORT_CANCEL,limit))?.map_err(|e|format!("start export: {e}"))?;
+        let result=match run{storage::Run::Finished(result)=>result,storage::Run::Cancelled{pid}=>{remove_export_temps(&output,pid);return Err(EXPORT_CANCELLED.to_owned());},storage::Run::TimedOut{pid}=>{remove_export_temps(&output,pid);return Err("Export stopped: the recorder did not finish in time.".to_owned());}};
         let events:Vec<serde_json::Value>=String::from_utf8_lossy(&result.stdout).lines().filter_map(|l|serde_json::from_str(l).ok()).collect();
         if !result.status.success(){return Err(events.iter().find(|v|v["type"]=="export_failed").and_then(|v|v["reason"].as_str()).map(str::to_owned).unwrap_or_else(||format!("Export failed: {}",String::from_utf8_lossy(&result.stderr).trim())));}
         let done=events.iter().find(|v|v["type"]=="exported").ok_or("Recorder returned no completed export.")?;

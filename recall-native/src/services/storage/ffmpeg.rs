@@ -28,10 +28,12 @@ pub enum Run {
     Finished(Output),
     /// Stopped by the flag, or never started (`pid` 0). The process is gone.
     Cancelled { pid: u32 },
+    /// Ran past its limit. The process is gone.
+    TimedOut { pid: u32 },
 }
 
-/// [`run_hidden`] that ends the helper as soon as `cancel` turns true.
-pub fn run_cancellable(command: &mut Command, lowered: bool, cancel: &AtomicBool) -> io::Result<Run> {
+/// [`run_hidden`] that ends the helper as soon as `cancel` turns true, or at `limit`.
+pub fn run_cancellable(command: &mut Command, lowered: bool, cancel: &AtomicBool, limit: Duration) -> io::Result<Run> {
     if cancel.load(Ordering::Acquire) {
         return Ok(Run::Cancelled { pid: 0 });
     }
@@ -48,12 +50,14 @@ pub fn run_cancellable(command: &mut Command, lowered: bool, cancel: &AtomicBool
     let stdout = child.stdout.take().map(|pipe| drain(Box::new(pipe)));
     let stderr = child.stderr.take().map(|pipe| drain(Box::new(pipe)));
     let collect = |thread: Option<std::thread::JoinHandle<Vec<u8>>>| thread.and_then(|t| t.join().ok()).unwrap_or_default();
+    let started = Instant::now();
     loop {
-        if cancel.load(Ordering::Acquire) {
+        let late = started.elapsed() >= limit;
+        if late || cancel.load(Ordering::Acquire) {
             let pid = child.id();
             let _ = child.kill();
             child.wait()?;
-            return Ok(Run::Cancelled { pid });
+            return Ok(if late { Run::TimedOut { pid } } else { Run::Cancelled { pid } });
         }
         if let Some(status) = child.try_wait()? {
             return Ok(Run::Finished(Output { status, stdout: collect(stdout), stderr: collect(stderr) }));
