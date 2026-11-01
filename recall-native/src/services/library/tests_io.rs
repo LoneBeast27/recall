@@ -3,7 +3,7 @@
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
-use super::mp4::{duration_of, video_duration_of};
+use super::mp4::{duration_of, last_frame_of, last_presented, video_duration_of};
 use super::store::{meta_path, quarantine_path};
 use super::*;
 
@@ -172,6 +172,36 @@ fn mp4_video_track_length_skips_sound_tracks() {
     let sound_only = moov(&[mvhd(0, 1000, 5000), trak(b"soun", 1000, 5000)]);
     assert_eq!(video_duration_of(&mut Cursor::new(sound_only)), None);
     assert_eq!(video_duration_of(&mut Cursor::new(b"not an mp4".to_vec())), None);
+}
+
+#[test]
+fn mp4_last_frame_is_where_the_samples_say_not_where_the_track_ends() {
+    let run = |entries: &[(u32, u32)]| {
+        let mut payload = [[0u8; 4].as_slice(), &(entries.len() as u32).to_be_bytes()].concat();
+        entries.iter().for_each(|(count, value)| payload.extend([count.to_be_bytes(), value.to_be_bytes()].concat()));
+        payload
+    };
+    // A stream-copied cut: 3 frames of 100 units, the last one held for 533.
+    let stts = mp4_box(b"stts", &run(&[(3, 100), (1, 533)]));
+    let stbl = mp4_box(b"stbl", &stts);
+    let minf = mp4_box(b"minf", &stbl);
+    let hdlr = mp4_box(b"hdlr", &[[0u8; 8].as_slice(), b"vide", &[0u8; 12]].concat());
+    let mut mdhd = mvhd(0, 1000, 833);
+    mdhd[4..8].copy_from_slice(b"mdhd");
+    let track = mp4_box(b"trak", &mp4_box(b"mdia", &[hdlr, mdhd, minf].concat()));
+    let file = moov(&[mvhd(0, 1000, 833), track]);
+    assert_eq!(last_frame_of(&mut Cursor::new(file)), Some(0.3));
+    let no_tables = moov(&[trak(b"vide", 1000, 833)]);
+    assert_eq!(last_frame_of(&mut Cursor::new(no_tables)), None);
+}
+
+#[test]
+fn mp4_last_presented_follows_display_order() {
+    assert_eq!(last_presented(&[(4, 10)], &[]), Some(30));
+    // B-frames: decode 0 10 20 30, shown 10 40 20 30.
+    assert_eq!(last_presented(&[(4, 10)], &[(1, 10), (1, 30), (2, 0)]), Some(40));
+    assert_eq!(last_presented(&[(3, 100), (1, 533)], &[(4, 0)]), Some(300));
+    assert_eq!(last_presented(&[], &[]), None);
 }
 
 /// Read-only: the real recording; ffprobe reports format duration 119.146000 s.

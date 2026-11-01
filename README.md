@@ -123,10 +123,13 @@ powershell -NoProfile -File scripts\dev\viewer-check.ps1 [-ShortClip <~10 s clip
 
 The player rules it holds the app to: play inside a kept part plays from the playhead; play in a
 cut or at a segment's end plays from the next segment; play at the end of the last segment (or
-after the clip finished) starts over from the first kept frame. The picture is never sent past
-its last frame: a clip's sound usually runs ~15 ms longer than its picture, and a seek past the
-picture's end used to freeze the video for good (2026-10-30, "trimmed and player stopped
-working", "completing the clip watch doesnt play again").
+after the clip finished) starts over from the first kept frame. The picture is never sent onto
+its last frame: a seek at or past where that frame starts ends the Media Foundation session, the
+position falls to 0 and the video can freeze for good (2026-10-30, "trimmed and player stopped
+working", "completing the clip watch doesnt play again"). A stream-copied cut can hold its last
+frame for 0.5 s, so the playhead may rest past the picture; the trace's `picture_end` says where
+the picture stops. The player opens only the file's picture stream: the sound comes from the
+stems, and a selected sound stream that ends early makes seeks past it fail.
 
 The Moments scenario plays a SteelSeries Moments clip and checks its sound. Moments stamps its audio frames
 1000 or 1100 ticks apart instead of 1024; the editor used to follow those stamps and played

@@ -305,6 +305,12 @@ pub fn mp4_video_duration(path: &Path) -> Option<f64> {
     mp4::video_duration_of(&mut file)
 }
 
+/// Where an MP4's last video frame starts (its track can run on, holding that frame).
+pub fn mp4_last_frame(path: &Path) -> Option<f64> {
+    let mut file = std::fs::File::open(path).ok()?;
+    mp4::last_frame_of(&mut file)
+}
+
 /// Moves clips (plus their recorder thumbnail and edit sidecar) to the Recycle Bin.
 /// Returns how many clips moved.
 pub fn delete_to_recycle_bin(clips: &[PathBuf]) -> Result<usize, String> {

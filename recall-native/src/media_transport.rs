@@ -125,6 +125,7 @@ impl NativePreview {
     pub fn play(&mut self) -> Result<(), String> {
         self.require_ready()?;
         self.prime_started = None;
+        self.rest.set(None);
         if self.has_audio {
             self.place_video(self.audio.position())?;
         }
@@ -168,7 +169,7 @@ impl NativePreview {
     }
 
     /// The latest time the clock can reach: the clip (the sound is padded to its length), or
-    /// the picture's last frame for a clip without sound. None until known.
+    /// the end of the video track for a clip without sound. None until known.
     pub fn clock_end(&self) -> Option<f64> {
         if self.has_audio {
             let end = self.audio.duration();
@@ -178,15 +179,20 @@ impl NativePreview {
         }
     }
 
-    /// Moves the picture to `seconds`, never past the video track's last frame.
+    /// The latest time the picture can show (the last frame stays up from here to the end).
+    pub fn picture_end(&self) -> Option<f64> {
+        self.last_frame.map(|last| video_time(last, self.last_frame))
+    }
+
+    /// Moves the picture to `seconds`, never onto the video track's last frame.
     fn place_video(&self, seconds: f64) -> Result<(), String> {
         let player = self.player.as_ref().ok_or("preview video is not open")?;
-        set_player_position(player, video_time(seconds, self.video_end))
+        set_player_position(player, video_time(seconds, self.last_frame))
     }
 
     /// The sound runs past the picture's last frame: nothing for the picture to follow.
     fn past_video_end(&self, seconds: f64) -> bool {
-        self.video_end.is_some_and(|end| seconds >= video_time(end, self.video_end))
+        self.picture_end().is_some_and(|end| seconds >= end)
     }
 
     pub fn seek(&mut self, seconds: f64) -> Result<(), String> {
@@ -199,7 +205,9 @@ impl NativePreview {
         if self.has_audio {
             self.audio.seek(seconds)?;
         }
-        set_player_position(player, video_time(seconds, self.video_end))?;
+        let picture = video_time(seconds, self.last_frame);
+        set_player_position(player, picture)?;
+        self.rest.set((picture < seconds).then_some(seconds));
         self.last_drift_check.set(Instant::now());
         self.audio_seen.set((seconds, Instant::now()));
         Ok(())
@@ -211,7 +219,7 @@ impl NativePreview {
         }
         if !self.has_audio {
             let player = self.player.as_ref().ok_or("preview video is not open")?;
-            return player_position(player);
+            return self.rest.get().map_or_else(|| player_position(player), Ok);
         }
         let audio_position = self.audio.position();
         if self.audio.is_playing() {

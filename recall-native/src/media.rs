@@ -12,8 +12,10 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT, UpdateWindow,
 };
 use windows::Win32::Media::MediaFoundation::{
-    IMFPMediaPlayer, IMFPMediaPlayerCallback, IMFPMediaPlayerCallback_Impl, MFP_EVENT_HEADER,
-    MFP_EVENT_TYPE_ERROR, MFP_EVENT_TYPE_MEDIAITEM_SET, MFP_MEDIAPLAYER_STATE,
+    IMFPMediaItem, IMFPMediaPlayer, IMFPMediaPlayerCallback, IMFPMediaPlayerCallback_Impl,
+    MF_MT_MAJOR_TYPE, MFMediaType_Video, MFP_EVENT_HEADER, MFP_EVENT_TYPE_ERROR,
+    MFP_EVENT_TYPE_MEDIAITEM_CREATED, MFP_EVENT_TYPE_MEDIAITEM_SET, MFP_MEDIAITEM_CREATED_EVENT,
+    MFP_MEDIAPLAYER_STATE,
     MFP_MEDIAPLAYER_STATE_EMPTY, MFP_MEDIAPLAYER_STATE_PAUSED, MFP_MEDIAPLAYER_STATE_PLAYING,
     MFP_MEDIAPLAYER_STATE_SHUTDOWN, MFP_MEDIAPLAYER_STATE_STOPPED, MFP_POSITIONTYPE_100NS,
 };
@@ -21,7 +23,7 @@ use windows::Win32::System::Com::StructuredStorage::{
     PROPVARIANT, PROPVARIANT_0, PROPVARIANT_0_0, PROPVARIANT_0_0_0,
 };
 use windows::Win32::System::Com::CoUninitialize;
-use windows::Win32::System::Variant::VT_I8;
+use windows::Win32::System::Variant::{VT_CLSID, VT_I8};
 use windows::Win32::UI::WindowsAndMessaging::{
     CallWindowProcW, DefWindowProcW, DestroyWindow, GWLP_USERDATA, GWLP_WNDPROC,
     GetWindowLongPtrW, SetWindowLongPtrW, WM_PAINT, WM_SIZE, WNDPROC,
@@ -156,12 +158,39 @@ impl IMFPMediaPlayerCallback_Impl for MediaCallback_Impl {
                 "Media Foundation preview failed (HRESULT 0x{:08x})",
                 event.hrEvent.0 as u32
             ));
+        } else if event.eEventType == MFP_EVENT_TYPE_MEDIAITEM_CREATED {
+            let created = unsafe { &*(event as *const MFP_EVENT_HEADER).cast::<MFP_MEDIAITEM_CREATED_EVENT>() };
+            if let Err(error) = set_picture_only_item(event, created) {
+                *self.status.error.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(format!("could not open native video preview: {error}"));
+            }
         } else if event.eEventType == MFP_EVENT_TYPE_MEDIAITEM_SET {
             self.status
                 .ready
                 .store(true, std::sync::atomic::Ordering::Release);
         }
     }
+}
+
+/// Hands the player the new clip with only its picture selected: the sound comes from the
+/// stems, and a selected sound stream that ends before the picture makes Media Foundation fail
+/// every seek past the sound's end (0x80004005, or the picture falls back to 0).
+fn set_picture_only_item(event: &MFP_EVENT_HEADER, created: &MFP_MEDIAITEM_CREATED_EVENT) -> windows_core::Result<()> {
+    let empty = || windows_core::Error::from(windows::Win32::Foundation::E_POINTER);
+    let item = created.pMediaItem.as_ref().ok_or_else(empty)?;
+    let player = event.pMediaPlayer.as_ref().ok_or_else(empty)?;
+    for stream in 0..unsafe { item.GetNumberOfStreams() }? {
+        if !stream_is_video(item, stream)? {
+            unsafe { item.SetStreamSelection(stream, false) }?;
+        }
+    }
+    unsafe { player.SetMediaItem(item) }
+}
+
+fn stream_is_video(item: &IMFPMediaItem, stream: u32) -> windows_core::Result<bool> {
+    let value = unsafe { item.GetStreamAttribute(stream, &MF_MT_MAJOR_TYPE) }?;
+    let inner: &PROPVARIANT_0_0 = unsafe { &value.Anonymous.Anonymous };
+    Ok(inner.vt == VT_CLSID && unsafe { inner.Anonymous.puuid.as_ref() } == Some(&MFMediaType_Video))
 }
 
 pub struct NativePreview {
@@ -185,8 +214,12 @@ pub struct NativePreview {
     observed_ready: bool,
     observed_error: Option<String>,
     prime_started: Option<Instant>,
-    /// Where the open file's video track ends (its last frame), when the file says.
+    /// Where the open file's video track ends: its last frame can stay up long after it starts.
     video_end: Option<f64>,
+    /// Where the last frame starts, when the file says.
+    last_frame: Option<f64>,
+    /// Without sound the clock is the video player's: where the playhead rests past the picture.
+    rest: Cell<Option<f64>>,
 }
 
 #[path = "media_player.rs"]
@@ -254,13 +287,14 @@ fn player_state_name(state: MFP_MEDIAPLAYER_STATE) -> &'static str {
     }
 }
 
-/// The latest time the video may be asked to show. MFPlay never finishes a seek at or past
-/// the end of the video track (a clip's sound often runs ~15 ms longer, so "the end" of the
-/// timeline is past it) and then ignores every later seek: the picture froze for good.
-fn video_time(seconds: f64, video_end: Option<f64>) -> f64 {
-    const BEFORE_END: f64 = 0.01; // inside the last frame at up to 100 fps
-    match video_end {
-        Some(end) if end > BEFORE_END => seconds.min(end - BEFORE_END),
+/// The latest time the video may be asked to show. A seek at or past the start of the video
+/// track's last frame ends the MFPlay session: the position falls to 0 and later seeks can be
+/// ignored, which froze the picture. So the picture stops just before it, one frame short at
+/// worst, however long the file holds that frame (a stream-copied cut can hold it for 0.5 s).
+fn video_time(seconds: f64, last_frame: Option<f64>) -> f64 {
+    const BEFORE_LAST: f64 = 0.002;
+    match last_frame {
+        Some(last) if last > BEFORE_LAST => seconds.min(last - BEFORE_LAST),
         _ => seconds,
     }
 }
@@ -332,14 +366,14 @@ mod tests {
     }
 
     #[test]
-    fn video_seeks_stay_inside_the_last_frame() {
-        // Recall-Test-3: sound and timeline end at 10.453 s, the picture at 10.437942 s.
-        let end = Some(10.437942);
-        assert!((video_time(10.453, end) - 10.427942).abs() < 1e-9);
-        assert!(video_time(10.453, end) < 10.437942);
-        assert_eq!(video_time(5.0, end), 5.0);
+    fn video_seeks_stop_before_the_last_frame() {
+        // Stream-copied cut: the last frame starts at 10.444009 s, the track ends at 10.977354 s.
+        let last = Some(10.444009);
+        assert!((video_time(10.977354, last) - 10.442009).abs() < 1e-9);
+        assert!(video_time(10.444009, last) < 10.444009);
+        assert_eq!(video_time(5.0, last), 5.0);
         assert_eq!(video_time(10.453, None), 10.453);
-        assert_eq!(video_time(0.0, Some(0.005)), 0.0);
+        assert_eq!(video_time(0.0, Some(0.001)), 0.0);
     }
 
     #[test]
