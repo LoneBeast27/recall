@@ -48,6 +48,10 @@ powershell -NoProfile -File scripts\install.ps1
   Discord).
 - **Old clips:** Settings → Media → Add folder lists clips from ShadowPlay, Medal, OBS or any
   folder in the library. Nothing is moved.
+- **Clip folders stay in step:** while the app is open, a clip another program copies, renames or
+  deletes in a clip folder shows up within seconds, once the file is finished. A renamed clip
+  loses its favourite and title, which are stored by file name. An imported folder on a USB drive
+  may need the app closed before Windows lets you safely remove the drive.
 
 ### FPS numbers (Windows frame timing)
 
@@ -109,6 +113,10 @@ powershell -NoProfile -File C:/Users/rohan/.claude/tools/nice-build.ps1 cargo te
 $env:CARGO_TARGET_DIR = "$PWD\target-gpui"
 powershell -NoProfile -File C:/Users/rohan/.claude/tools/nice-build.ps1 cargo test --manifest-path recall-native\Cargo.toml --offline
 ```
+
+After any change to the clip folders' handling, run `scripts\dev\watch-check.ps1` (private
+instance, sandbox folders). `RECALL_NATIVE_LAYOUT=<file>` makes the app keep a JSON dump of tile
+and button bounds for external testers; it is a dev format, off unless set.
 
 After any change to playback, editing or layout, run the viewer check against the release
 build. Each scenario starts a private Recall instance behind all windows (it never takes focus,
