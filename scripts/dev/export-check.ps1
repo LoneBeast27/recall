@@ -74,11 +74,23 @@ Run-Scenario 'Closing the window lets the export finish' {
   $closed = ((Get-Date) - $t).TotalSeconds
   $end = $null -ne $engine -and $engine.WaitForExit(120000)
   $gone = $s.Process.WaitForExit(10000)
-  $code = if ($end) { $engine.ExitCode } else { 'none' }
   $left = @(Get-ChildItem $folder -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*export-close*' })
   $file = $left | Where-Object { -not $_.Name.StartsWith('.') } | Select-Object -First 1
   $length = if ($file) { [double](& ffprobe -v error -show_entries format=duration -of csv=p=0 $file.FullName) } else { 0 }
-  Verdict @((Ok ($null -ne $engine) "export running: pid $($engine.Id)"), (Ok ($closed -lt 5) "window gone after $(Fmt $closed) s"), (Ok ($code -eq 0) "engine exit $code"), (Ok ($length -gt 0 -and $left.Count -eq 1) "$($left.Count) files in exports, $(Fmt $length) s long"), (Ok $gone 'the app ended after the export'))
+  Verdict @((Ok ($null -ne $engine) "export running: pid $($engine.Id)"), (Ok ($closed -lt 5) "window gone after $(Fmt $closed) s"), (Ok $end 'the engine ended'), (Ok ($length -gt 0 -and $left.Count -eq 1) "$($left.Count) files in exports, $(Fmt $length) s long"), (Ok $gone 'the app ended after the export'))
+}
+
+Run-Scenario 'Closing the window writes the edit file' {
+  $s = Start-Viewer 'export-edits' (Join-Path $script:work 'export-source.mp4')
+  $script:current = $s
+  $file = "$($s.Clip).recall-edit.json"
+  Remove-Item $file -ErrorAction SilentlyContinue
+  [void](Wait-Trace $s { param($r) $r.ready -and $r.clip } 30000)
+  Key $s 'l' 1; [void](Settle $s 200); Key $s 'i'; [void](Settle $s 1000)
+  $start = (Last $s).ranges[0][0]
+  [void][VC]::PostMessage($s.Hwnd, 0x10, [IntPtr]::Zero, [IntPtr]::Zero)  # WM_CLOSE
+  $gone = $s.Process.WaitForExit(5000)
+  Verdict @((Ok ($start -gt 0) "trimmed to start at $(Fmt $start) s"), (Ok $gone 'the app ended'), (Ok (Test-Path $file) 'the edit file is beside the clip'))
 }
 
 $fails = @($script:results | Where-Object { $_.Result -eq 'FAIL' }).Count

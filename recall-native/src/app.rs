@@ -42,6 +42,11 @@ pub fn run() -> Result<(), String> {
         let opened = cx.open_window(options, |window, cx| {
             let root = cx.new(|cx| Root::new(window, cx));
             Root::start_polling(root.clone(), window, cx);
+            let closing = root.downgrade();
+            window.on_window_should_close(cx, move |_, cx| {
+                let _ = closing.update(cx, |root, _| root.flush_on_close());
+                true
+            });
             root
         });
         let handle = match opened {
@@ -60,6 +65,9 @@ pub fn run() -> Result<(), String> {
             cx.activate(true);
         }
     });
+    // The window is gone. Helpers end with this process, so a running export finishes first.
+    crate::backend::wait_for_export();
+    crate::services::storage::close_helpers();
     Ok(())
 }
 
