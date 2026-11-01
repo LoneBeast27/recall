@@ -213,16 +213,19 @@ fn folder_bytes(dir:&Path)->u64{std::fs::read_dir(dir).map(|l|l.flatten().filter
 /// audio stems and visuals from the copy (or reuse what the smart cache already prepared). A
 /// clip that cannot be cached is prepared in place on the lane at very low I/O priority.
 /// `info.path` always names the original.
-pub fn prepare_clip(path:&str)->Result<PreparedClip,String>{prepare_clip_steps(path,None,&|_|{},Arc::new(||false))}
-/// [`prepare_clip`] saying what it is doing, for as long as `stop` says no. `known_copy`: an SSD copy that already exists.
-pub fn prepare_clip_steps(path:&str,known_copy:Option<String>,step:&dyn Fn(&'static str),stop:Arc<dyn Fn()->bool+Send+Sync>)->Result<PreparedClip,String>{
+pub fn prepare_clip(path:&str)->Result<PreparedClip,String>{prepare_clip_steps(path,None,false,&|_|{},Arc::new(||false))}
+/// [`prepare_clip`] saying what it is doing, for as long as `stop` says no. `known_copy`: an SSD copy
+/// that already exists. `beside_playback`: the clip plays from where it lies, so it gets no copy, and
+/// the engine runs off the disk's lane (very low I/O priority): for the length of a run the lane would
+/// hold thumbnails, hover frames and the sidecar flush back.
+pub fn prepare_clip_steps(path:&str,known_copy:Option<String>,beside_playback:bool,step:&dyn Fn(&'static str),stop:Arc<dyn Fn()->bool+Send+Sync>)->Result<PreparedClip,String>{
     let source=std::fs::canonicalize(path).map_err(|e|format!("resolve source: {e}"))?;
     let metadata=source.metadata().map_err(|e|format!("stat source: {e}"))?;
     if !metadata.is_file(){return Err("source is not a file".into());}
     let on_hdd=storage::drive_kind(&source).is_hdd();
     let mut warnings=Vec::new();
     // Too big for the video tier (or no room): play from the library drive, no warning needed.
-    let copy=match known_copy{Some(copy)=>Some(copy),None if on_hdd=>{step("Loading clip from the hard drive…");storage::cache_video(&source.to_string_lossy()).ok().filter(|c|Path::new(c)!=source.as_path())},None=>None};
+    let copy=match known_copy{Some(copy)=>Some(copy),None if on_hdd&&!beside_playback=>{step("Loading clip from the hard drive…");storage::cache_video(&source.to_string_lossy()).ok().filter(|c|Path::new(c)!=source.as_path())},None=>None};
     step("Preparing sound…");
     let input=engine_input(&source,&metadata,copy.as_deref().map(Path::new));
     let frames_from=copy.as_ref().map(PathBuf::from).unwrap_or_else(||source.clone());
@@ -233,7 +236,7 @@ pub fn prepare_clip_steps(path:&str,known_copy:Option<String>,step:&dyn Fn(&'sta
         let (visuals,warning)=visual_assets::visuals_best_effort(&original,&frames_from,info.duration);
         Ok((info,visuals,warning))
     };
-    let (mut info,visuals,visual_warning)=if in_place{storage::run_io(&source,Priority::Interactive,work)??}else{work()?};
+    let (mut info,visuals,visual_warning)=if in_place&&!beside_playback{storage::run_io(&source,Priority::Interactive,work)??}else{work()?};
     // The copy is byte-identical and stamped with the source's mtime; pin identity to the original.
     info.path=source.to_string_lossy().into_owned();info.source_bytes=metadata.len();info.source_modified_ms=modified_ms(&metadata);
     normalize_audio_names(&mut info);
