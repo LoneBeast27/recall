@@ -16,6 +16,23 @@ const PICTURE_NEAR: f64 = 0.15;
 /// ...and playback stops waiting for it after this long.
 const PICTURE_WAIT: Duration = Duration::from_secs(3);
 
+/// What playback does once the rest of the clip will not come.
+#[derive(Debug, PartialEq)]
+enum AfterFailure {
+    Carry,
+    Resume,
+    Stop,
+}
+
+/// `waiting`: it was buffering. `ready`: the part ahead did load.
+fn after_failure(waiting: bool, ready: bool) -> AfterFailure {
+    match (waiting, ready) {
+        (true, true) => AfterFailure::Resume,
+        (false, true) => AfterFailure::Carry,
+        (_, false) => AfterFailure::Stop,
+    }
+}
+
 /// The loading part of the editor: what the views draw.
 #[derive(Default)]
 pub struct Loading {
@@ -198,10 +215,14 @@ impl EditorState {
         let Some(preview) = self.preview.as_mut() else { return false };
         // What did not load will not come: playback ends where the loaded part ends.
         if failed {
-            if preview.stream_ready(pos, (pos + STOP_MARGIN).min(end)) {
-                return false;
+            let ready = preview.stream_ready(pos, (pos + STOP_MARGIN).min(end));
+            let waiting = std::mem::take(&mut self.loading.buffering);
+            self.loading.ready_at = None;
+            match after_failure(waiting, ready) {
+                AfterFailure::Carry => return false,
+                AfterFailure::Resume => self.play(),
+                AfterFailure::Stop => self.pause(),
             }
-            self.pause();
             return true;
         }
         if self.loading.buffering {
@@ -247,5 +268,18 @@ impl EditorState {
             return None;
         }
         Some(if self.loading.failed.is_some() { "This part didn't load" } else { "Loading this part…" })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_failure_always_ends_a_wait() {
+        assert_eq!(after_failure(true, true), AfterFailure::Resume, "what is left of the loaded part plays");
+        assert_eq!(after_failure(true, false), AfterFailure::Stop);
+        assert_eq!(after_failure(false, true), AfterFailure::Carry);
+        assert_eq!(after_failure(false, false), AfterFailure::Stop);
     }
 }
