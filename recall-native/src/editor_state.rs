@@ -81,6 +81,8 @@ pub struct EditorState {
     pub saved: bool,
     pub save_error: Option<String>,
     pub exporting: bool,
+    /// Cancel was pressed; the engine has not stopped yet.
+    pub cancelling: bool,
     /// The clip the running or last export is of: its result shows only on that clip.
     export_of: Option<String>,
     pub exported: Option<ExportSummary>,
@@ -139,6 +141,7 @@ impl EditorState {
             saved: true,
             save_error: None,
             exporting: false,
+            cancelling: false,
             export_of: None,
             exported: None,
             export_error: None,

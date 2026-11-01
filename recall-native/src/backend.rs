@@ -39,6 +39,18 @@ pub struct StorageReport { pub library_drives:Vec<storage::DriveInfo>,pub cache_
 #[derive(Clone,Debug,Serialize)]
 pub struct ExportSummary { pub path:String,pub fps:Option<u32>,pub frames:u64,pub seconds:f64,pub bytes:u64,pub lossless:bool,pub width:u32,pub height:u32 }
 static EXPORTING:AtomicBool=AtomicBool::new(false);
+static EXPORT_CANCEL:AtomicBool=AtomicBool::new(false);
+/// The error of an export the person stopped.
+pub const EXPORT_CANCELLED:&str="Export cancelled.";
+/// Before an export is queued: an earlier cancel must not end this one.
+pub fn arm_export(){EXPORT_CANCEL.store(false,Ordering::Release);}
+pub fn cancel_export(){EXPORT_CANCEL.store(true,Ordering::Release);}
+/// The engine's hidden temporary output, left behind when it is stopped mid-write.
+fn remove_export_temps(output:&Path,pid:u32){
+    let (Some(outdir),Some(stem))=(output.parent(),output.file_stem().and_then(|v|v.to_str())) else{return};
+    let prefix=format!(".{stem}.recall-export-{pid}-");
+    for item in std::fs::read_dir(outdir).into_iter().flatten().flatten(){if item.file_name().to_string_lossy().starts_with(&prefix){let _=std::fs::remove_file(item.path());}}
+}
 struct ExportGuard;
 impl Drop for ExportGuard { fn drop(&mut self){EXPORTING.store(false,Ordering::Release);} }
 
@@ -290,19 +302,29 @@ fn plan_is_default(plan:&EditPlan,info:&ClipInfo)->bool{
 }
 /// Leave / close / export: writes the `.recall-edit.json` sidecar beside the clip, through the clip's
 /// disk lane, only when its bytes would change (and, with no sidecar yet, only for real edits).
-/// Ok(sidecar path) when the sidecar is current; Ok("") when there was nothing to write.
-pub fn flush_project(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->Result<String,String>{
+/// A plan back at the untouched default removes the sidecar: no edits, no Edited.
+pub fn flush_project(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->Result<Flushed,String>{
     validate_info(info)?;let bytes=project_bytes(info,plan,fps,export)?;
-    let working=working_path(info)?;let working_exists=working.is_file();let default=plan_is_default(plan,info);
-    let path=sidecar(&info.path)?;let lane_bytes=bytes.clone();
-    let written=storage::run_io(Path::new(&info.path),Priority::Interactive,move||->Result<Option<String>,String>{
-        let existing=std::fs::read(&path).ok();
-        if !storage::should_flush(existing.as_deref(),&lane_bytes,working_exists,default){return Ok(existing.map(|_|path.to_string_lossy().into_owned()));}
-        storage::write_atomic(&path,&lane_bytes)?;Ok(Some(path.to_string_lossy().into_owned()))
+    let working=working_path(info)?;let default=plan_is_default(plan,info);
+    let path=sidecar(&info.path)?;let lane_bytes=bytes.clone();let clip=PathBuf::from(&info.path);
+    let flushed=storage::run_io(Path::new(&info.path),Priority::Interactive,move||->Result<Flushed,String>{
+        let existing=std::fs::read(&path).ok();let name=path.to_string_lossy().into_owned();
+        match storage::sidecar_step(existing.as_deref(),&lane_bytes,default){
+            storage::SidecarStep::Keep=>Ok(Flushed::Current(name)),
+            storage::SidecarStep::Write=>{storage::write_atomic(&path,&lane_bytes)?;Ok(Flushed::Current(name))}
+            storage::SidecarStep::Remove=>{
+                let found:Vec<PathBuf>=crate::services::library::sidecar_candidates(&clip).into_iter().filter(|c|c.is_file()).collect();
+                for candidate in &found{std::fs::remove_file(candidate).map_err(|e|format!("remove {}: {e}",candidate.display()))?;}
+                Ok(if found.is_empty(){Flushed::Nothing}else{Flushed::Removed(name)})
+            }
+        }
     })??;
-    if written.is_some(){storage::write_atomic(&working,&bytes)?;}
-    Ok(written.unwrap_or_default())
+    if !matches!(flushed,Flushed::Nothing){storage::write_atomic(&working,&bytes)?;}
+    Ok(flushed)
 }
+/// What a flush left beside the clip; the path is the sidecar's.
+#[derive(Debug,Clone,PartialEq)]
+pub enum Flushed{Nothing,Current(String),Removed(String)}
 pub fn export_clip(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->Result<ExportSummary,String>{
     validate_info(info)?;validate_fps(fps)?;plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())?;export.validate(plan)?;
     let lossless=export.mode==ExportMode::Lossless;
@@ -321,7 +343,8 @@ pub fn export_clip(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)
     let result=(||{
         let mut command=engine_command()?;command.arg("--export-edit").arg(&input).arg(&output).arg(fps.to_string()).arg(&project).arg("--json");
         // The export holds the output drive's lane: prefetch pauses instead of seeking against it.
-        let result=storage::run_io(&outdir,Priority::Interactive,move||storage::run_hidden(&mut command,lowered))?.map_err(|e|format!("start export: {e}"))?;
+        let run=storage::run_io(&outdir,Priority::Interactive,move||storage::run_cancellable(&mut command,lowered,&EXPORT_CANCEL))?.map_err(|e|format!("start export: {e}"))?;
+        let result=match run{storage::Run::Finished(result)=>result,storage::Run::Cancelled{pid}=>{remove_export_temps(&output,pid);return Err(EXPORT_CANCELLED.to_owned());}};
         let events:Vec<serde_json::Value>=String::from_utf8_lossy(&result.stdout).lines().filter_map(|l|serde_json::from_str(l).ok()).collect();
         if !result.status.success(){return Err(events.iter().find(|v|v["type"]=="export_failed").and_then(|v|v["reason"].as_str()).map(str::to_owned).unwrap_or_else(||format!("Export failed: {}",String::from_utf8_lossy(&result.stderr).trim())));}
         let done=events.iter().find(|v|v["type"]=="exported").ok_or("Recorder returned no completed export.")?;

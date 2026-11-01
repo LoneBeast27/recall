@@ -154,11 +154,11 @@ fn newer_project_wins_with_sidecar_on_ties() {
 
 #[test]
 fn sidecar_is_written_only_for_changes_and_real_edits() {
-    assert!(!should_flush(Some(b"same"), b"same", true, false), "identical bytes: no SMR write");
-    assert!(should_flush(Some(b"old"), b"new", false, true), "changed sidecar is rewritten");
-    assert!(!should_flush(None, b"x", false, true), "opened, never edited: no sidecar");
-    assert!(should_flush(None, b"x", true, true), "autosaved edits get a sidecar");
-    assert!(should_flush(None, b"x", false, false), "edits not yet autosaved still flush");
+    assert_eq!(sidecar_step(Some(b"same"), b"same", false), SidecarStep::Keep, "identical bytes: no SMR write");
+    assert_eq!(sidecar_step(Some(b"old"), b"new", false), SidecarStep::Write, "changed sidecar is rewritten");
+    assert_eq!(sidecar_step(None, b"x", false), SidecarStep::Write, "the first real edit gets a sidecar");
+    assert_eq!(sidecar_step(Some(b"old"), b"x", true), SidecarStep::Remove, "every edit undone: no sidecar");
+    assert_eq!(sidecar_step(None, b"x", true), SidecarStep::Remove, "opened, never edited: nothing to keep");
 }
 
 fn tiny_jpeg(width: u16, height: u16, marker: u8) -> Vec<u8> {
@@ -193,4 +193,31 @@ fn volume_roots_come_from_drive_letters_without_system_calls() {
     assert_eq!(volume_root(Path::new(r"V:\ALL RECORDINGS\a.mp4")).as_deref(), Some(r"V:\"));
     assert_eq!(volume_root(Path::new(r"\\?\v:\ALL RECORDINGS\a.mp4")).as_deref(), Some(r"V:\"));
     assert_eq!(plain_path(Path::new(r"\\?\UNC\nas\share\a.mp4")), PathBuf::from(r"\\nas\share\a.mp4"));
+}
+
+#[test]
+fn a_cancel_ends_the_helper_at_once() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        flag.store(true, Ordering::Release);
+    });
+    let mut wait = std::process::Command::new("ping");
+    wait.args(["-n", "30", "127.0.0.1"]);
+    let start = std::time::Instant::now();
+    assert!(matches!(super::run_cancellable(&mut wait, false, &cancel), Ok(super::Run::Cancelled { pid }) if pid != 0));
+    assert!(start.elapsed().as_secs() < 5, "ended by the cancel, not by the helper");
+    let mut never = std::process::Command::new("cmd");
+    assert!(matches!(super::run_cancellable(&mut never, false, &cancel), Ok(super::Run::Cancelled { pid: 0 })), "already cancelled: never started");
+}
+
+#[test]
+fn a_helper_that_finishes_returns_its_output() {
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut echo = std::process::Command::new("cmd");
+    echo.args(["/c", "echo done"]);
+    let super::Run::Finished(output) = super::run_cancellable(&mut echo, false, &cancel).unwrap() else { panic!("not cancelled") };
+    assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("done"));
 }
