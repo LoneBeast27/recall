@@ -238,6 +238,17 @@ pub struct StreamMedia {
     pub sound: Option<Arc<LiveSound>>,
 }
 
+impl StreamMedia {
+    /// Ends a clip nobody will play: its copy, its decoder and its source.
+    pub fn shut(self) {
+        self.fill.cancel();
+        if let Some(sound) = &self.sound {
+            sound.stop();
+        }
+        let _ = unsafe { self.video.0.Shutdown() };
+    }
+}
+
 /// A media source crossing threads (Media Foundation sources are free-threaded).
 pub struct SourceHandle(pub IMFMediaSource);
 unsafe impl Send for SourceHandle {}
