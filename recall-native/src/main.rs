@@ -8,6 +8,7 @@ mod edit_model;
 mod editor_state;
 mod library_state;
 mod media;
+mod offscreen;
 mod playback_watch;
 mod root;
 mod services;

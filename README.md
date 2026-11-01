@@ -111,7 +111,7 @@ powershell -NoProfile -File C:/Users/rohan/.claude/tools/nice-build.ps1 cargo te
 ```
 
 After any change to playback, editing or layout, run the viewer check against the release
-build. Each scenario starts a private Recall instance behind all windows (it never takes focus,
+build. Each scenario starts a private Recall instance outside every monitor (it never takes focus,
 and has its own settings, library, cache and control pipe), drives it with the inputs a person
 uses -- Space, J/K/L, arrows, the play button, the timeline, trim handles, tools, speed, the
 Library -- and checks from the app's trace that the clock *and the picture* move, start where
