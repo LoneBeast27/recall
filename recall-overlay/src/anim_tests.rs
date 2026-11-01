@@ -41,11 +41,11 @@ fn spring_path() -> Vec<f32> {
 }
 
 #[test]
-fn spring_overshoots_once_by_about_a_tenth_then_lands_exactly() {
+fn spring_overshoots_softly_once_then_lands_exactly() {
     let path = spring_path();
     let (peak_ms, peak) = path.iter().copied().enumerate().fold((0, 0.0), |m, (i, x)| if x > m.1 { (i, x) } else { m });
-    assert!(peak > 1.08 && peak < 1.16, "one clear overshoot: {peak}");
-    assert!((120..=200).contains(&peak_ms), "peaks early (≈160 ms): {peak_ms}");
+    assert!(peak > 1.02 && peak < 1.06, "one soft overshoot: {peak}");
+    assert!((220..=320).contains(&peak_ms), "peaks ≈265 ms in: {peak_ms}");
     assert_eq!(*path.last().unwrap(), 1.0, "lands exactly");
     assert_eq!(spring(0.0, 1.0, 0.0, 10.0), 1.0);
     let after_peak = &path[peak_ms..];
@@ -60,13 +60,33 @@ fn spring_tween_grows_size_with_overshoot_and_fades_opacity_without_one() {
     let (from, to) = (Frame { w: 300.0, h: 44.0, alpha: 0.0 }, Frame { w: 340.0, h: 58.0, alpha: 1.0 });
     let tween = Tween::spring(from, to, (0.0, 0.0), now);
     assert_eq!(tween.at(now), from);
-    let frames: Vec<Frame> = (0..=42).map(|i| tween.at(now + Duration::from_millis(i * 10))).collect();
-    assert!(frames.iter().any(|f| f.w > to.w + 2.0 && f.h > to.h + 1.0), "both dimensions overshoot");
+    let frames: Vec<Frame> = (0..=56).map(|i| tween.at(now + Duration::from_millis(i * 10))).collect();
+    assert!(frames.iter().any(|f| f.w > to.w + 1.0 && f.h > to.h + 0.3), "both dimensions overshoot");
     assert!(frames.iter().all(|f| f.alpha <= 1.0), "opacity never overshoots");
     assert_eq!(tween.at(now + DURATION).alpha, 1.0, "opacity is in by 200 ms");
     assert!(!tween.done(now + DURATION));
     assert_eq!(tween.at(now + SPRING_FOR), to);
     assert!(tween.done(now + SPRING_FOR));
+}
+
+#[test]
+fn the_bezier_starts_from_rest_never_overshoots_and_lands_softly() {
+    assert_eq!((bezier(0.0).round(), bezier(1.0).round()), (0.0, 1.0));
+    let steps: Vec<f32> = (0..=100).map(|i| bezier(i as f32 / 100.0)).collect();
+    assert!(steps.windows(2).all(|p| p[1] >= p[0] - 1e-3), "monotonic");
+    assert!(steps.iter().all(|y| *y <= 1.001), "no overshoot");
+    assert!(steps[5] < 0.05, "leaves from rest: {}", steps[5]);
+    assert!(steps[50] > 0.7, "most of the way by half time: {}", steps[50]);
+}
+
+#[test]
+fn a_glide_runs_on_the_bezier_and_lands_exactly() {
+    let now = Instant::now();
+    let tween = Tween::glide(B, A, now);
+    assert_eq!(tween.at(now).w.round(), B.w);
+    assert!(!tween.done(now + GLIDE_FOR / 2));
+    assert_eq!(tween.at(now + GLIDE_FOR), A);
+    assert!(tween.done(now + GLIDE_FOR));
 }
 
 #[test]
