@@ -85,6 +85,13 @@ struct Config {
     export_edit: Option<(String, String, u32, String)>,
 }
 
+/// What this build answers to, for the app to read from the program file without running it
+/// (a build that does not know a command starts as a recorder and never returns). Only `encode`
+/// builds carry it: without encode neither command works.
+#[cfg(feature = "encode")]
+#[used]
+static ENGINE_CAPS: [u8; 46] = *b"recall-engine-caps:prepare-editor,export-edit;";
+
 fn parse_args() -> Config {
     let mut cfg = Config::default();
     let mut args = std::env::args().skip(1);
@@ -400,6 +407,8 @@ fn spawn_stdin_reader(
 }
 
 fn main() {
+    #[cfg(feature = "encode")]
+    std::hint::black_box(&ENGINE_CAPS); // survives release linking whatever `#[used]` keeps
     if let Ok(mask)=std::env::var("RECALL_CPU_MASK") {
         use windows::Win32::System::Threading::{GetCurrentProcess,SetProcessAffinityMask,SetPriorityClass,BELOW_NORMAL_PRIORITY_CLASS};
         let parsed=usize::from_str_radix(mask.trim_start_matches("0x"),16).unwrap_or(0);
