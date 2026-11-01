@@ -6,9 +6,10 @@ use windows::Win32::{
     Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint, MonitorFromRect},
     System::Diagnostics::Debug::{SEM_FAILCRITICALERRORS, SEM_NOGPFAULTERRORBOX, SEM_NOOPENFILEERRORBOX, SetErrorMode},
     UI::WindowsAndMessaging::{
-        GWL_EXSTYLE, GetSystemMetrics, GetWindowLongPtrW, HWND_BOTTOM, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-        SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowLongPtrW, SetWindowPos,
-        WS_EX_APPWINDOW, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+        GWL_EXSTYLE, GetSystemMetrics, GetWindowLongPtrW, GetWindowPlacement, HWND_BOTTOM, SM_CXVIRTUALSCREEN,
+        SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowLongPtrW,
+        SetWindowPlacement, SetWindowPos, WINDOWPLACEMENT, WPF_SETMINPOSITION, WS_EX_APPWINDOW, WS_EX_NOACTIVATE,
+        WS_EX_TOOLWINDOW,
     },
 };
 
@@ -35,6 +36,13 @@ pub fn show(window: &gpui::Window, width: f32, height: f32) {
     }
     let (x, y) = origin(desktop(), (w, h), |x, y| nearest_is_primary(x, y, w, h));
     let _ = unsafe { SetWindowPos(hwnd, Some(HWND_BOTTOM), x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW) };
+    // A minimized tool window sits on the desktop's corner by default: keep that off screen too.
+    let mut placement = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
+    if unsafe { GetWindowPlacement(hwnd, &mut placement) }.is_ok() {
+        placement.flags |= WPF_SETMINPOSITION;
+        placement.ptMinPosition = POINT { x, y };
+        let _ = unsafe { SetWindowPlacement(hwnd, &placement) };
+    }
 }
 
 /// The virtual desktop: left, top, right, bottom.
