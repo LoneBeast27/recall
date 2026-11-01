@@ -22,7 +22,7 @@ use crate::placement::{self, window_origin, Rect, Spot, Spots, EDGE};
 use crate::presence::{CardLook, Look};
 use crate::badge::Badge;
 use crate::reducer::Reducer;
-use crate::render::{Layers, Renderer};
+use crate::render::{Layers, Outgoing, Renderer};
 use crate::smoke::Smoke;
 use crate::stats::{StatsPoller, StatsSnapshot};
 use crate::window::target_monitor;
@@ -58,8 +58,9 @@ pub struct Placed {
 }
 
 /// What the last pushed frame showed: scene, window origin, look, sweep
-/// position (0..1000) and save badge. Equal = no redraw.
-type Drawn = (Scene, [i32; 2], Look, Option<u16>, Option<Badge>);
+/// position (0..1000), save badge and the old content's opacity (0..1000).
+/// Equal = no redraw.
+type Drawn = (Scene, [i32; 2], Look, Option<u16>, Option<Badge>, Option<u16>);
 
 pub struct App {
     pub reducer: Reducer,
@@ -83,6 +84,8 @@ pub struct App {
     scene: Scene,
     /// The scale `scene` was laid out at (an action notice's is grown).
     scene_scale: f32,
+    /// The scene (and its scale) an open pill is crossfading out of.
+    outgoing: Option<(Scene, f32)>,
     /// The shortcut hint's card (kept while it folds away).
     card_scene: Option<CardScene>,
     drawn: Option<Drawn>,
@@ -116,6 +119,7 @@ impl App {
             stats: StatsSnapshot::default(),
             scene: Scene::default(),
             scene_scale: 1.0,
+            outgoing: None,
             card_scene: None,
             drawn: None,
             bounds: [0; 4],
@@ -273,11 +277,15 @@ impl App {
         match island::content(view, session, in_game) {
             Some(content) => {
                 let (scene, scale, (w, h)) = self.scene_for(&content, under);
-                self.island.update(Some((content, w, h)), now);
-                self.scene = scene;
-                self.scene_scale = scale;
+                let morphing = self.island.update(Some((content, w, h)), now);
+                let old = (std::mem::replace(&mut self.scene, scene), std::mem::replace(&mut self.scene_scale, scale));
+                if morphing {
+                    self.outgoing = Some(old);
+                }
             }
-            None => self.island.update(None, now),
+            None => {
+                self.island.update(None, now);
+            }
         }
         self.refresh_hint(now);
         self.render(hwnd, now);
@@ -304,9 +312,11 @@ impl App {
         let edge = (EDGE * placed.scale).round() as i32;
         let (x, y) = window_origin(placed.spot.anchor, &placed.monitor, look.span_w(), look.margin, edge);
         let (sheen, badge) = (self.island.sheen(now), self.island.badge(now));
-        let key = (self.scene.clone(), [x, y], look, sheen.map(|s| (s.progress * 1000.0) as u16), badge);
+        let fade = self.island.crossfade(now);
+        let key = (self.scene.clone(), [x, y], look, sheen.map(|s| (s.progress * 1000.0) as u16), badge, fade.map(|f| (f.alpha * 1000.0) as u16));
         if self.drawn.as_ref() != Some(&key) {
-            let layers = Layers { sheen, badge, card: card.map(|(_, c)| c) };
+            let outgoing = fade.zip(self.outgoing.as_ref()).map(|(f, (scene, scale))| Outgoing { scene, scale: *scale, alpha: f.alpha, icon: f.icon });
+            let layers = Layers { sheen, badge, card: card.map(|(_, c)| c), outgoing };
             let drawn = self.renderer.draw(&self.fonts, &self.scene, look, self.scene_scale, layers);
             let shown = drawn.and_then(|(w, h)| self.renderer.present(hwnd, x, y, w, h, look.alpha).map(|()| (w, h)));
             match shown {

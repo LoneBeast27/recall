@@ -2,7 +2,7 @@
 //! overshoot), one sweep, then back to the stats or collapse away.
 
 use super::*;
-use crate::anim::SPRING_FOR;
+use crate::anim::{GLIDE_FOR, SPRING_FOR};
 use crate::cue::{CUE_DELAY, CUE_SWEEP};
 use crate::layout::{ACTIVE, ERROR};
 use crate::notice::Tone;
@@ -46,8 +46,8 @@ fn an_action_notice_grows_the_stats_pill_in_both_dimensions_with_one_overshoot()
     let frames = path(&island, now, SPRING_FOR);
     let peak_w = frames.iter().map(|f| f.w).fold(0.0, f32::max);
     let peak_h = frames.iter().map(|f| f.h).fold(0.0, f32::max);
-    assert!(peak_w > GROWN.0 + 3.0 && peak_w < GROWN.0 + 8.0, "springs past the new width once: {peak_w}");
-    assert!(peak_h > GROWN.1 + 1.0 && peak_h < GROWN.1 + 3.0, "and past the new height: {peak_h}");
+    assert!(peak_w > GROWN.0 + 0.8 && peak_w < GROWN.0 + 4.0, "springs softly past the new width: {peak_w}");
+    assert!(peak_h > GROWN.1 + 0.3 && peak_h < GROWN.1 + 2.0, "and past the new height: {peak_h}");
     assert!(frames.iter().all(|f| f.w >= STATS.0 && f.h >= STATS.1), "never dips under the stats pill");
     assert!(frames.iter().all(|f| f.alpha == 1.0), "the window stays opaque: a shape change, not a fade");
     assert_eq!(island.frame(now + SPRING_FOR), Frame { w: GROWN.0, h: GROWN.1, alpha: 1.0 }, "settles exactly");
@@ -55,19 +55,53 @@ fn an_action_notice_grows_the_stats_pill_in_both_dimensions_with_one_overshoot()
 }
 
 #[test]
-fn after_the_hold_the_notice_eases_back_to_the_stats_pill_without_bouncing() {
+fn after_the_hold_the_notice_glides_back_to_the_stats_pill_without_bouncing() {
     let now = Instant::now();
     let mut island = stats_island(now);
     island.update(Some((saved(), GROWN.0, GROWN.1)), now);
     let back = now + Duration::from_secs(3);
     assert!(!island.animating(back), "idle during the hold");
     island.update(Some((Content::Stats, STATS.0, STATS.1)), back);
-    let frames = path(&island, back, DURATION);
-    assert!(frames.windows(2).all(|p| p[1].w <= p[0].w && p[1].h <= p[0].h), "shrinks straight back, no overshoot");
-    assert_eq!(island.frame(back + DURATION), Frame { w: STATS.0, h: STATS.1, alpha: 1.0 });
+    let frames = path(&island, back, GLIDE_FOR);
+    assert!(frames.windows(2).all(|p| p[1].w <= p[0].w + 0.01 && p[1].h <= p[0].h + 0.01), "shrinks straight back, no overshoot");
+    assert!(frames[2].w > GROWN.0 - 2.0, "leaves from rest, no snap");
+    assert_eq!(island.frame(back + GLIDE_FOR), Frame { w: STATS.0, h: STATS.1, alpha: 1.0 });
     assert_eq!(island.content(), Some(&Content::Stats));
     assert!(island.sheen(back + ms(100)).is_none(), "the hand-back has no sweep");
-    assert!(!island.animating(back + DURATION));
+    assert!(!island.animating(back + GLIDE_FOR + CROSS_IN_AT + DURATION));
+}
+
+#[test]
+fn over_the_stats_the_old_content_crossfades_into_the_new_both_ways() {
+    let now = Instant::now();
+    let mut island = stats_island(now);
+    assert!(island.update(Some((saved(), GROWN.0, GROWN.1)), now), "the open pill changed content");
+    assert_eq!(island.crossfade(now).map(|f| f.alpha), Some(1.0), "the stats are still there at the first frame");
+    assert_eq!(island.content_alpha(now), 0.0);
+    assert_eq!(island.content_alpha(now + CROSS_IN_AT), 0.0, "the notice waits for the stats to start leaving");
+    let mid = now + CROSS_OUT / 2;
+    let (old, new) = (island.crossfade(mid).expect("still fading").alpha, island.content_alpha(mid));
+    assert!(old > 0.3 && old < 0.7 && new > 0.0, "both show mid-way: {old} {new}");
+    assert_eq!(island.crossfade(now + CROSS_OUT), None);
+    assert!(!island.update(Some((saved(), GROWN.0, GROWN.1)), now + ms(500)), "the same content is not a change");
+    let back = now + Duration::from_secs(3);
+    assert!(island.update(Some((Content::Stats, STATS.0, STATS.1)), back));
+    assert_eq!(island.crossfade(back).map(|f| f.alpha), Some(1.0), "the notice fades out into the stats, not cut");
+    assert!(!Island::new(now).update(Some((Content::Stats, STATS.0, STATS.1)), now), "nothing to fade from nothing");
+}
+
+#[test]
+fn the_stats_dot_is_the_saving_mark_but_a_new_colour_crossfades() {
+    let now = Instant::now();
+    let saving = Content::Notice(NoticeView::new(Tone::Recording, "Saving", "VALORANT · 0:30", true).emphasized().saving(SavePhase::Saving));
+    let mut island = stats_island(now);
+    island.update(Some((saving, GROWN.0, GROWN.1)), now);
+    assert_eq!(island.look(now, f32::INFINITY).icon_alpha, 1.0, "the red dot stays: it never fades from nothing");
+    assert_eq!(island.crossfade(now).map(|f| f.icon), Some(false), "and is not drawn twice");
+    let mut island = stats_island(now);
+    island.update(Some((saved(), GROWN.0, GROWN.1)), now);
+    assert_eq!(island.look(now, f32::INFINITY).icon_alpha, 0.0, "a green mark fades in");
+    assert_eq!(island.crossfade(now).map(|f| f.icon), Some(true), "over the red one fading out");
 }
 
 #[test]
@@ -140,7 +174,7 @@ fn session_notices_keep_the_plain_swap() {
         assert!(frames.windows(2).all(|p| p[1].w <= p[0].w), "eases straight to size: no spring");
         assert_eq!(island.frame(now + DURATION).w, 200.0);
         assert!((0..40).all(|i| island.sheen(now + ms(i * 20)).is_none()), "no sweep");
-        assert!(!island.animating(now + DURATION));
+        assert!(!island.animating(now + CROSS_IN_AT + DURATION));
     }
 }
 

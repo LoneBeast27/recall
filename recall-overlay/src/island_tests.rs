@@ -211,7 +211,7 @@ fn a_content_swap_resizes_without_collapsing_and_fades_the_new_content_in() {
     assert_eq!(island.frame(later), Frame { w: W, h: H, alpha: 1.0 }, "starts from the stats size");
     assert_eq!(island.content_alpha(later), 0.0);
     assert_eq!(island.frame(later + DURATION).w, 200.0);
-    assert_eq!(island.content_alpha(later + DURATION), 1.0);
+    assert_eq!(island.content_alpha(later + CROSS_IN_AT + DURATION), 1.0);
     // Same content again (a stats value tick) neither fades nor restarts.
     island.update(Some((Content::Stats, W, H)), later + DURATION);
     island.update(Some((Content::Stats, W + 4.0, H)), later + DURATION * 2);
