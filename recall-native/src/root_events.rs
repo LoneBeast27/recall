@@ -65,6 +65,7 @@ impl Root {
             LibraryChange::Clips(changes) => {
                 crate::trace::note(&format!("watch: +{} -{} -{}", changes.added.len(), changes.gone.len(), changes.gone_under.len()));
                 self.lib.apply_changes(changes);
+                self.workers.job(Job::DriveSpace);
                 if self.tile_menu.as_ref().is_some_and(|menu| !self.lib.lists(&menu.path)) {
                     self.tile_menu = None;
                 }

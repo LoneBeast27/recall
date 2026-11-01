@@ -62,7 +62,6 @@ impl LibraryState {
                 }
             }
         }
-        self.drive = library::drive_space(&crate::backend::library_dir());
         self.reindex();
         if self.selection.is_empty() {
             self.confirm_delete = false;
@@ -169,6 +168,10 @@ mod tests {
         ClipEntry { name, path: path.into(), bytes, mtime: 1_700_000_000, thumb: None, folder: None }
     }
 
+    fn listing(entries: Vec<ClipEntry>) -> crate::worker::Listing {
+        crate::worker::Listing { entries, sidecars: Default::default(), drive: None }
+    }
+
     fn added(path: &str, bytes: u64) -> AddedClip {
         AddedClip { entry: entry(path, bytes), edited: false }
     }
@@ -176,7 +179,7 @@ mod tests {
     fn library(paths: &[&str]) -> LibraryState {
         let mut lib = LibraryState::new();
         lib.store = MetaStore::default();
-        lib.set_entries(paths.iter().map(|p| entry(p, 10)).collect());
+        lib.set_entries(listing(paths.iter().map(|p| entry(p, 10)).collect()));
         lib
     }
 
@@ -233,14 +236,14 @@ mod tests {
     fn a_listing_that_started_before_a_change_does_not_undo_it() {
         let mut lib = library(&[r"D:\c\a.mp4", r"D:\c\old.mp4"]);
         lib.apply_changes(ClipChanges { added: vec![added(r"D:\c\new.mp4", 5)], gone: vec![r"D:\c\old.mp4".into()], ..Default::default() });
-        lib.set_entries(vec![entry(r"D:\c\a.mp4", 10), entry(r"D:\c\old.mp4", 10)]);
+        lib.set_entries(listing(vec![entry(r"D:\c\a.mp4", 10), entry(r"D:\c\old.mp4", 10)]));
         assert_eq!(listed(&lib), [r"D:\c\a.mp4", r"D:\c\new.mp4"]);
         // A listing that already has the clip keeps its own entry; no double tile.
-        lib.set_entries(vec![entry(r"D:\c\a.mp4", 10), entry(r"D:\c\new.mp4", 5)]);
+        lib.set_entries(listing(vec![entry(r"D:\c\a.mp4", 10), entry(r"D:\c\new.mp4", 5)]));
         assert_eq!(listed(&lib), [r"D:\c\a.mp4", r"D:\c\new.mp4"]);
         // After a resync the listing is the truth.
         lib.forget_recent();
-        lib.set_entries(vec![entry(r"D:\c\a.mp4", 10)]);
+        lib.set_entries(listing(vec![entry(r"D:\c\a.mp4", 10)]));
         assert_eq!(listed(&lib), [r"D:\c\a.mp4"]);
     }
 

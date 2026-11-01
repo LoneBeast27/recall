@@ -94,7 +94,7 @@ impl Worker {
 
     fn apply(&mut self, command: Command) {
         match command {
-            Command::Open { generation, tracks, duration } => self.open(generation, &tracks, duration),
+            Command::Open { generation, tracks, duration } => self.open(generation, tracks, duration),
             Command::Close { generation } => {
                 self.active_generation = generation;
                 self.stop();
@@ -135,13 +135,17 @@ impl Worker {
         }
     }
 
-    fn open(&mut self, generation: u64, specs: &[super::PreviewTrack], duration: f64) {
+    fn open(&mut self, generation: u64, source: super::Source, duration: f64) {
         self.active_generation = generation;
         self.stop();
         self.device = None;
         (self.cursor_frame, self.clock_base_frame) = (0, 0);
         self.shared.set_position(0.0);
-        match load_tracks(specs).and_then(|loaded| Ok((loaded, WaveDevice::open()?))) {
+        let tracks = match source {
+            super::Source::Stems(specs) => load_tracks(&specs),
+            super::Source::Live(tracks) => Ok(super::live_tracks(tracks)),
+        };
+        match tracks.and_then(|loaded| Ok((loaded, WaveDevice::open()?))) {
             Ok((loaded, device)) => {
                 if self.shared.generation.load(Ordering::Acquire) != generation {
                     return;

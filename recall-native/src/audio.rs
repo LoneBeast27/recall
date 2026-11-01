@@ -17,6 +17,8 @@ use super::media::PreviewTrack;
 mod wave;
 #[path = "audio_worker.rs"]
 mod worker;
+#[path = "audio_stream.rs"]
+pub(crate) mod stream;
 use worker::worker_main;
 
 const SAMPLE_RATE: u32 = 48_000;
@@ -59,10 +61,17 @@ impl SharedStatus {
     }
 }
 
+/// Where a clip's sound comes from.
+enum Source {
+    Stems(Vec<PreviewTrack>),
+    /// Decoded as the clip loads (`audio_stream.rs`).
+    Live(Vec<stream::LiveTrack>),
+}
+
 enum Command {
     Open {
         generation: u64,
-        tracks: Vec<PreviewTrack>,
+        tracks: Source,
         /// The clip's length: the clock runs this long even when the stems are shorter.
         duration: f64,
     },
@@ -112,6 +121,14 @@ impl AudioMixer {
     }
 
     pub(crate) fn open(&self, tracks: &[PreviewTrack], duration: f64) -> Result<(), String> {
+        self.open_source(Source::Stems(tracks.to_vec()), duration)
+    }
+
+    pub(crate) fn open_live(&self, tracks: Vec<stream::LiveTrack>, duration: f64) -> Result<(), String> {
+        self.open_source(Source::Live(tracks), duration)
+    }
+
+    fn open_source(&self, tracks: Source, duration: f64) -> Result<(), String> {
         let generation = self.shared.generation.fetch_add(1, Ordering::AcqRel) + 1;
         self.shared.ready.store(false, Ordering::Release);
         self.shared.playing.store(false, Ordering::Release);
@@ -120,7 +137,7 @@ impl AudioMixer {
         *self.shared.error.lock().unwrap_or_else(|e| e.into_inner()) = None;
         let sent = self.send(Command::Open {
             generation,
-            tracks: tracks.to_vec(),
+            tracks,
             duration,
         });
         self.seek_sent.set((self.sent.get(), 0.0));
@@ -251,9 +268,31 @@ impl Drop for AudioMixer {
     }
 }
 
+/// A track's samples: the whole stem, or what has been decoded so far.
+enum Samples {
+    Stem(Vec<f32>),
+    Live(Arc<stream::LivePcm>),
+}
+
+impl Samples {
+    fn len(&self) -> usize {
+        match self {
+            Samples::Stem(samples) => samples.len(),
+            Samples::Live(pcm) => pcm.len(),
+        }
+    }
+
+    fn at(&self, index: usize) -> f32 {
+        match self {
+            Samples::Stem(samples) => samples[index],
+            Samples::Live(pcm) => pcm.sample(index),
+        }
+    }
+}
+
 struct LoadedTrack {
     stream_index: usize,
-    samples: Vec<f32>,
+    samples: Samples,
     channels: usize,
     gain_db: f64,
     muted: bool,
@@ -289,13 +328,20 @@ fn load_tracks(specs: &[PreviewTrack]) -> Result<Vec<LoadedTrack>, String> {
             .ok_or("preview decoded-audio size overflow")?;
         loaded.push(LoadedTrack {
             stream_index: spec.stream_index,
-            samples,
+            samples: Samples::Stem(samples),
             channels,
             gain_db: spec.gain_db,
             muted: spec.muted,
         });
     }
     Ok(loaded)
+}
+
+fn live_tracks(tracks: Vec<stream::LiveTrack>) -> Vec<LoadedTrack> {
+    tracks
+        .into_iter()
+        .map(|track| LoadedTrack { stream_index: track.stream_index, channels: track.pcm.channels, samples: Samples::Live(track.pcm), gain_db: track.gain_db, muted: track.muted })
+        .collect()
 }
 
 fn read_bounded(path: &str) -> Result<Vec<u8>, String> {
@@ -420,8 +466,8 @@ fn mix_frames(tracks: &[LoadedTrack], start: usize, frames: usize, output: &mut 
                 continue;
             }
             let gain = 10.0f32.powf((track.gain_db as f32).clamp(-96.0, 24.0) / 20.0);
-            left += track.samples[source_index] * gain;
-            right += track.samples[source_index + usize::from(track.channels == 2)] * gain;
+            left += track.samples.at(source_index) * gain;
+            right += track.samples.at(source_index + usize::from(track.channels == 2)) * gain;
         }
         output[frame * 2] = float_to_i16(left);
         output[frame * 2 + 1] = float_to_i16(right);

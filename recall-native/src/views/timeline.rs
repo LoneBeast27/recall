@@ -21,6 +21,8 @@ const LANE_GAP: f32 = 6.0;
 
 #[path = "timeline_tracks.rs"]
 mod tracks;
+#[path = "timeline_loading.rs"]
+mod loading;
 
 impl Root {
     pub fn render_timeline(&mut self, cx: &mut Context<Self>) -> AnyElement {
