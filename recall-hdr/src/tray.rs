@@ -336,9 +336,11 @@ fn tray_icon_rgba() -> (Vec<u8>, u32, u32) {
 /// Uses an empty title arg (`""`) so a path with spaces isn't mistaken for the
 /// window title by `start`. Best-effort: returns the spawn error as a string.
 pub fn open_path(path: &std::path::Path) -> Result<(), String> {
-    use std::process::Command;
+    use std::{os::windows::process::CommandExt, process::Command};
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     Command::new("cmd")
         .args(["/C", "start", "", &path.to_string_lossy()])
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map(|_| ())
         .map_err(|e| format!("open {}: {e}", path.display()))

@@ -22,6 +22,14 @@ mod ui;
 mod views;
 mod worker;
 fn main() {
+    // A GUI program has no stderr of its own: print to the terminal it was started from, if any,
+    // and keep panics in the player log for a start from the Start menu.
+    let _ = unsafe { windows::Win32::System::Console::AttachConsole(windows::Win32::System::Console::ATTACH_PARENT_PROCESS) };
+    let default_panic = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        trace::player_log("panic", serde_json::json!({ "info": info.to_string() }));
+        default_panic(info);
+    }));
     if let Ok(mask) = std::env::var("RECALL_CPU_MASK") {
         use windows::Win32::System::Threading::{
             BELOW_NORMAL_PRIORITY_CLASS, GetCurrentProcess, SetPriorityClass,
@@ -36,6 +44,7 @@ fn main() {
     }
     if let Err(error) = app::run() {
         eprintln!("Recall native: {error}");
+        trace::player_log("start failed", serde_json::json!({ "error": error }));
         std::process::exit(1);
     }
 }
