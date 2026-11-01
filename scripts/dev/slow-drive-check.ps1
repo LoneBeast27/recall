@@ -353,8 +353,8 @@ Run-Scenario 'a drive that goes away during a wait ends the wait' {
   $free = if ($failed) { Wait-Trace $s { param($r) -not $r.loading.buffering -and $r.ms -gt $failed.ms } 3000 }
   Start-Sleep -Milliseconds 500
   $r = Last $s
-  $when = if ($failed) { "waited at the failure: $($failed.loading.buffering)" }
-  Verdict @((Ok ($null -ne $waiting -and $null -ne $failed -and $failed.loading.buffering) "buffered; $when; $($failed.loading.failed)"), (Ok ($null -ne $free -and -not $r.loading.buffering) "Buffering ended by itself: playing=$($r.playing), note '$($r.loading.note)'"))
+  $before = if ($failed) { @(Rows $s 0 | Where-Object { $_.ms -lt $failed.ms }) | Select-Object -Last 1 }
+  Verdict @((Ok ($null -ne $waiting -and $null -ne $failed -and $before.loading.buffering) "buffered up to the failure: $($before.loading.buffering); $($failed.loading.failed)"), (Ok ($null -ne $free -and -not $r.loading.buffering) "Buffering ended by itself: playing=$($r.playing), note '$($r.loading.note)'"))
 }
 
 Add-Type -AssemblyName System.Drawing
@@ -405,6 +405,15 @@ foreach ($path in $real) {
     }
     Verdict $checks
   }
+}
+
+# A helper the app started never outlives it. Runs last, over every instance above.
+Run-Scenario 'no helper outlives its app' {
+  Start-Sleep -Seconds 3
+  $work = [IO.Path]::GetFullPath($script:work)
+  $left = @(Get-CimInstance Win32_Process -Filter "Name='ffmpeg.exe' OR Name='ffprobe.exe' OR Name='recall.exe'" | Where-Object { $_.CommandLine -like "*$work*" })
+  foreach ($p in $left) { Write-Host "left: $($p.ProcessId) $($p.CommandLine)"; Stop-Process -Id $p.ProcessId -Force -ErrorAction SilentlyContinue } # ours: its arguments are in this run's folder
+  Add-Result $script:scenario ($left.Count -eq 0) "$($left.Count) helpers still running after every window closed"
 }
 
 $fails = @($script:results | Where-Object { $_.Result -eq 'FAIL' }).Count
