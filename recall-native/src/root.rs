@@ -471,5 +471,6 @@ impl Drop for Root {
     /// Closing the window writes pending edits beside the clip (the worker may not outlive it).
     fn drop(&mut self) {
         self.ed.flush_now();
+        crate::services::storage::close_helpers();
     }
 }
