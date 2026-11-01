@@ -247,12 +247,16 @@ impl NativePreview {
         }
     }
 
-    /// Clears the clip that was open and makes a player for the next. `limits` is the new
-    /// clip's (track end, start of the last frame).
-    fn new_player(&mut self, limits: VideoLimits) -> Result<(IMFPMediaPlayer, IMFPMediaPlayerCallback), String> {
+    /// Closes a clip that is still loading now, not when the next clip arrives: that may be a
+    /// while on a slow drive, or never.
+    pub fn close_stream(&mut self) -> Result<(), String> {
+        if self.stream.is_some() { self.clear_clip() } else { Ok(()) }
+    }
+
+    /// Stops and lets go of the clip that was open.
+    fn clear_clip(&mut self) -> Result<(), String> {
         self.end_stream();
-        let status = Arc::new(MediaStatus::default());
-        self.media_status = Arc::clone(&status);
+        self.media_status = Arc::new(MediaStatus::default());
         self.has_audio = false;
         self.observed_media_ready = false;
         self.observed_ready = false;
@@ -277,8 +281,15 @@ impl NativePreview {
         }
         self.shut_stream_source();
         self.callback = None;
+        Ok(())
+    }
+
+    /// Clears the clip that was open and makes a player for the next. `limits` is the new
+    /// clip's (track end, start of the last frame).
+    fn new_player(&mut self, limits: VideoLimits) -> Result<(IMFPMediaPlayer, IMFPMediaPlayerCallback), String> {
+        self.clear_clip()?;
         let callback: IMFPMediaPlayerCallback = MediaCallback {
-            status: Arc::clone(&status),
+            status: Arc::clone(&self.media_status),
         }
         .into();
         (self.video_end, self.last_frame) = limits;

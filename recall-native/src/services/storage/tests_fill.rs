@@ -180,6 +180,28 @@ fn parts_in_use_are_known_until_the_fill_goes() {
 }
 
 #[test]
+fn a_fill_only_ever_removes_its_own_part_file() {
+    let dir = scratch("own-part");
+    let bytes = 20 * CHUNK as usize;
+    let (source, modified) = clip(&dir, bytes);
+    let make = |name: &str| ClipFill::create(&source, &dir.join(name), &dir.join(name.replace(".part", "")), bytes as u64, modified, 40 << 20, 0).unwrap();
+    let (stale, current) = (make("a.mp4.1-1.part"), make("b.mp4.1-2.part"));
+    stale.start(&[0]).unwrap();
+    current.start(&[0]).unwrap();
+    stale.cancel();
+    assert!(!stale.wait_done());
+    drop(stale);
+    let gone = std::time::Instant::now();
+    while dir.join("a.mp4.1-1.part").exists() && gone.elapsed() < Duration::from_secs(3) {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!dir.join("a.mp4.1-1.part").exists(), "the stale fill's own part goes");
+    assert!(dir.join("b.mp4.1-2.part").exists(), "the current clip's part stays");
+    assert_eq!(current.outcome(), Outcome::Filling, "and the current fill carries on");
+    current.cancel();
+}
+
+#[test]
 fn chunks_of_a_range_stay_inside_the_clip() {
     assert_eq!(spanning(0, 1, 10).collect::<Vec<_>>(), [0]);
     assert_eq!(spanning(CHUNK - 1, CHUNK + 1, 3 * CHUNK).collect::<Vec<_>>(), [0, 1]);

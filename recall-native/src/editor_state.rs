@@ -179,6 +179,9 @@ impl EditorState {
         self.flush(workers);
         self.pause();
         self.hide_preview();
+        if let Some(Err(error)) = self.preview.as_mut().map(|preview| preview.close_stream()) {
+            self.status = error;
+        }
         self.info = None;
         self.visuals = VisualAssets::default();
         self.warning = None;
