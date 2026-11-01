@@ -1,5 +1,5 @@
-//! MP4 duration from `moov/mvhd` (and the video track's own length from its `mdhd`) by
-//! seeking over boxes (mdat is never read).
+//! MP4 duration from `moov/mvhd` (and the video track's own length from its `mdhd`, and where
+//! its last frame starts from its sample tables) by seeking over boxes (mdat is never read).
 use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
@@ -33,6 +33,31 @@ pub(super) fn duration_of<R: Read + Seek>(reader: &mut R) -> Option<f64> {
 /// Seconds of the first video track (a `trak` whose `mdia/hdlr` is `vide`) from its `mdhd`.
 /// The picture ends here even when the sound, and so `mvhd`, runs a little longer.
 pub(super) fn video_duration_of<R: Read + Seek>(reader: &mut R) -> Option<f64> {
+    let (_, mdia) = video_track(reader)?;
+    // mdhd starts like mvhd: version/flags, two times, timescale, duration.
+    let mdhd = find_box(reader, mdia.0, mdia.1, b"mdhd")?;
+    let (timescale, units) = read_mvhd(reader, mdhd)?;
+    let seconds = (timescale > 0 && units > 0).then(|| units as f64 / f64::from(timescale))?;
+    seconds.is_finite().then_some(seconds)
+}
+
+/// Seconds at which the first video track's last frame (in display order) starts. The track's
+/// `mdhd` length says nothing about this: the last sample can be held for a long time.
+pub(super) fn last_frame_of<R: Read + Seek>(reader: &mut R) -> Option<f64> {
+    let (trak, mdia) = video_track(reader)?;
+    let mdhd = find_box(reader, mdia.0, mdia.1, b"mdhd")?;
+    let (timescale, _) = read_mvhd(reader, mdhd)?;
+    let minf = find_box(reader, mdia.0, mdia.1, b"minf")?;
+    let stbl = find_box(reader, minf.0, minf.1, b"stbl")?;
+    let stts = find_box(reader, stbl.0, stbl.1, b"stts")?;
+    let durations = read_runs(reader, stts)?;
+    let offsets = find_box(reader, stbl.0, stbl.1, b"ctts").and_then(|ctts| read_runs(reader, ctts)).unwrap_or_default();
+    let last = last_presented(&durations, &offsets)? - edit_start(reader, trak).unwrap_or(0);
+    (timescale > 0).then(|| last.max(0) as f64 / f64::from(timescale))
+}
+
+/// (`trak`, `mdia`) of the first track whose `hdlr` is `vide`.
+fn video_track<R: Read + Seek>(reader: &mut R) -> Option<((u64, u64), (u64, u64))> {
     let end = reader.seek(SeekFrom::End(0)).ok()?;
     let moov = find_box(reader, 0, end, b"moov")?;
     let mut at = moov.0;
@@ -46,16 +71,81 @@ pub(super) fn video_duration_of<R: Read + Seek>(reader: &mut R) -> Option<f64> {
         if hdlr.1.saturating_sub(hdlr.0) < 12 || reader.seek(SeekFrom::Start(hdlr.0 + 8)).is_err() || reader.read_exact(&mut handler).is_err() {
             continue;
         }
-        if &handler != b"vide" {
-            continue;
+        if &handler == b"vide" {
+            return Some((trak, mdia));
         }
-        // mdhd starts like mvhd: version/flags, two times, timescale, duration.
-        let mdhd = find_box(reader, mdia.0, mdia.1, b"mdhd")?;
-        let (timescale, units) = read_mvhd(reader, mdhd)?;
-        let seconds = (timescale > 0 && units > 0).then(|| units as f64 / f64::from(timescale))?;
-        return seconds.is_finite().then_some(seconds);
     }
     None
+}
+
+/// The (sample count, value) runs of an `stts` or `ctts` box.
+fn read_runs<R: Read + Seek>(reader: &mut R, (start, end): (u64, u64)) -> Option<Vec<(u32, u32)>> {
+    reader.seek(SeekFrom::Start(start + 4)).ok()?;
+    let count = u64::from(read_u32(reader)?).min(end.saturating_sub(start + 8) / 8);
+    let mut bytes = vec![0u8; count as usize * 8];
+    reader.read_exact(&mut bytes).ok()?;
+    let word = |at: &[u8]| u32::from_be_bytes([at[0], at[1], at[2], at[3]]);
+    Some(bytes.chunks_exact(8).map(|run| (word(run), word(&run[4..]))).collect())
+}
+
+/// The latest presentation time among the samples, in track units: decode times from the
+/// `stts` runs plus the `ctts` offsets. None without samples.
+pub(super) fn last_presented(durations: &[(u32, u32)], offsets: &[(u32, u32)]) -> Option<i64> {
+    let mut offsets = offsets.iter().copied();
+    let (mut left, mut offset) = (0u32, 0u32);
+    let (mut decode, mut latest) = (0i64, None);
+    for &(count, delta) in durations {
+        let mut remaining = count;
+        while remaining > 0 {
+            if left == 0 {
+                (left, offset) = offsets.next().unwrap_or((u32::MAX, 0));
+            }
+            let run = remaining.min(left);
+            if run > 0 {
+                // Within a run the offset is fixed, so its last sample presents last.
+                let shown = decode + i64::from(run - 1) * i64::from(delta) + i64::from(offset as i32);
+                latest = latest.max(Some(shown));
+            }
+            decode += i64::from(run) * i64::from(delta);
+            remaining -= run;
+            left -= run;
+        }
+    }
+    latest
+}
+
+/// The media time the first real `edts/elst` entry starts at (B-frame clips start past 0).
+fn edit_start<R: Read + Seek>(reader: &mut R, trak: (u64, u64)) -> Option<i64> {
+    let edts = find_box(reader, trak.0, trak.1, b"edts")?;
+    let (start, end) = find_box(reader, edts.0, edts.1, b"elst")?;
+    reader.seek(SeekFrom::Start(start)).ok()?;
+    let wide = read_u32(reader)? >> 24 == 1;
+    let count = read_u32(reader)?;
+    for _ in 0..count.min(16) {
+        if reader.stream_position().ok()? >= end {
+            return None;
+        }
+        // Entry: segment duration, media time (-1 means empty), rate.
+        let media_time = if wide {
+            let mut entry = [0u8; 20];
+            reader.read_exact(&mut entry).ok()?;
+            i64::from_be_bytes(entry[8..16].try_into().ok()?)
+        } else {
+            let mut entry = [0u8; 12];
+            reader.read_exact(&mut entry).ok()?;
+            i64::from(i32::from_be_bytes(entry[4..8].try_into().ok()?))
+        };
+        if media_time >= 0 {
+            return Some(media_time);
+        }
+    }
+    None
+}
+
+fn read_u32<R: Read>(reader: &mut R) -> Option<u32> {
+    let mut value = [0u8; 4];
+    reader.read_exact(&mut value).ok()?;
+    Some(u32::from_be_bytes(value))
 }
 
 /// (payload start, box end) of the first `kind` child in `[start, end)`.

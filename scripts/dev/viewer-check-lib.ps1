@@ -236,7 +236,9 @@ function Press-Pause($s, [string]$how = 'space') {
 # The picture shows the playhead's spot (paused): catches a picture stuck at an old time.
 function Check-Picture($s, [string]$label) {
   $r = Settle $s 250
-  $ok = [math]::Abs([double]$r.video - [double]$r.pos) -lt 0.05
+  # A file can hold its last frame well past the frame's start: the picture stops there.
+  $want = if ($null -ne $r.picture_end) { [math]::Min([double]$r.pos, [double]$r.picture_end) } else { [double]$r.pos }
+  $ok = [math]::Abs([double]$r.video - $want) -lt 0.05
   [pscustomobject]@{ Pass = $ok; Detail = "$label playhead $(Fmt $r.pos)s, picture $(Fmt $r.video)s" }
 }
 # Derives a test clip with ffmpeg on the background cores (once; reused after).
