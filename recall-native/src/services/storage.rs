@@ -50,6 +50,7 @@ mod tests_smoke;
 pub use drive::{DriveInfo, DriveKind, drive_info, drive_kind};
 pub(crate) use ffmpeg::{Seek, extract_frame, probe_duration};
 pub use ffmpeg::{Run, binary, run_cancellable, run_hidden, run_watched};
+pub use io_priority::close_helpers;
 pub use probe::{ProbedClip, probe_clip};
 #[allow(unused_imports)]
 pub use evict::DEFAULT_CACHE_BUDGET;

@@ -209,10 +209,10 @@ fn a_cancel_ends_the_helper_at_once() {
     let mut wait = std::process::Command::new("ping");
     wait.args(["-n", "30", "127.0.0.1"]);
     let start = std::time::Instant::now();
-    assert!(matches!(super::run_cancellable(&mut wait, false, &cancel), Ok(super::Run::Cancelled { pid }) if pid != 0));
+    assert!(matches!(super::run_cancellable(&mut wait, false, &cancel, Duration::from_secs(60)), Ok(super::Run::Cancelled { pid }) if pid != 0));
     assert!(start.elapsed().as_secs() < 5, "ended by the cancel, not by the helper");
     let mut never = std::process::Command::new("cmd");
-    assert!(matches!(super::run_cancellable(&mut never, false, &cancel), Ok(super::Run::Cancelled { pid: 0 })), "already cancelled: never started");
+    assert!(matches!(super::run_cancellable(&mut never, false, &cancel, Duration::from_secs(60)), Ok(super::Run::Cancelled { pid: 0 })), "already cancelled: never started");
 }
 
 #[test]
@@ -220,7 +220,7 @@ fn a_helper_that_finishes_returns_its_output() {
     let cancel = std::sync::atomic::AtomicBool::new(false);
     let mut echo = std::process::Command::new("cmd");
     echo.args(["/c", "echo done"]);
-    let super::Run::Finished(output) = super::run_cancellable(&mut echo, false, &cancel).unwrap() else { panic!("not cancelled") };
+    let super::Run::Finished(output) = super::run_cancellable(&mut echo, false, &cancel, Duration::from_secs(60)).unwrap() else { panic!("not cancelled") };
     assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("done"));
 }
 

@@ -16,7 +16,7 @@ use std::io;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::process::{Child, Command, Output};
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use windows::Win32::Foundation::HANDLE;
 use windows::Win32::System::JobObjects::{
@@ -78,19 +78,38 @@ fn helpers_job() -> Option<HANDLE> {
     job.map(|raw| HANDLE(raw as *mut c_void))
 }
 
-/// Starts `command` hidden at below-normal CPU priority, in the helpers' job: the process is
-/// created suspended, so nothing it starts escapes the job, set to very low I/O priority with
-/// `lowered`, then resumed.
+/// True once the app is closing. Held for reading while a helper starts: a process left between
+/// created and resumed by the app's exit stays suspended for good, in no job (it held a check's
+/// output pipe for 46 minutes).
+static CLOSING: RwLock<bool> = RwLock::new(false);
+
+/// No helper starts from here on, and none is half started on return.
+pub fn close_helpers() {
+    *CLOSING.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+}
+
+/// Starts `command` hidden at below-normal CPU priority, in the helpers' job; with `lowered`,
+/// the process is created suspended, set to very low I/O priority, then resumed.
 pub(super) fn spawn(command: &mut Command, lowered: bool) -> io::Result<Child> {
-    let mut child = command.creation_flags(HIDDEN_LOW_PRIORITY | CREATE_SUSPENDED).spawn()?;
+    start(&CLOSING, command, lowered)
+}
+
+fn start(closing: &RwLock<bool>, command: &mut Command, lowered: bool) -> io::Result<Child> {
+    let closing = closing.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if *closing {
+        return Err(io::Error::other("Recall is closing"));
+    }
+    let job = helpers_job();
+    let mut child = command.creation_flags(HIDDEN_LOW_PRIORITY | if lowered { CREATE_SUSPENDED } else { 0 }).spawn()?;
+    if let Some(job) = job {
+        let _ = unsafe { AssignProcessToJobObject(job, handle(&child)) };
+    }
+    if !lowered {
+        return Ok(child);
+    }
     let value = IO_VERY_LOW;
     unsafe {
-        if let Some(job) = helpers_job() {
-            let _ = AssignProcessToJobObject(job, handle(&child));
-        }
-        if lowered {
-            let _ = NtSetInformationProcess(handle(&child), PROCESS_IO_PRIORITY, (&value as *const u32).cast(), 4);
-        }
+        let _ = NtSetInformationProcess(handle(&child), PROCESS_IO_PRIORITY, (&value as *const u32).cast(), 4);
         if NtResumeProcess(handle(&child)) < 0 {
             let _ = child.kill();
             let _ = child.wait();
@@ -103,4 +122,20 @@ pub(super) fn spawn(command: &mut Command, lowered: bool) -> io::Result<Child> {
 /// [`spawn`] then collect stdout/stderr and the exit status.
 pub(super) fn output(command: &mut Command, lowered: bool) -> io::Result<Output> {
     spawn(command, lowered)?.wait_with_output()
+}
+
+#[cfg(test)]
+mod closing_tests {
+    use super::*;
+
+    #[test]
+    fn a_closing_app_starts_no_helper() {
+        let closing = RwLock::new(false);
+        let mut command = Command::new("cmd.exe");
+        command.args(["/c", "exit 0"]);
+        assert!(start(&closing, &mut command, false).unwrap().wait().unwrap().success());
+        *closing.write().unwrap() = true;
+        assert!(start(&closing, &mut command, false).is_err());
+        assert!(start(&closing, &mut command, true).is_err());
+    }
 }
