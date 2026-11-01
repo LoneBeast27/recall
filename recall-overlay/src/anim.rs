@@ -1,17 +1,22 @@
 //! Size/opacity tweening for the island (≈200 ms ease-out, dynamic-island
-//! feel), plus the short spring an action notice grows with.
+//! feel), plus the soft spring an action notice grows with and the bezier
+//! glide it hands back on.
 
 use std::time::{Duration, Instant};
 
 pub const DURATION: Duration = Duration::from_millis(200);
 /// How long an action notice's spring runs (it lands exactly on its target).
-pub const SPRING_FOR: Duration = Duration::from_millis(420);
-/// Damping ratio: one visible overshoot (≈12% of the distance), then settle.
-const ZETA: f32 = 0.55;
-/// Natural frequency (rad/s): the overshoot peaks ≈160 ms in.
-const OMEGA: f32 = 24.0;
+pub const SPRING_FOR: Duration = Duration::from_millis(560);
+/// Damping ratio: a soft overshoot (≈4% of the distance), then settle.
+const ZETA: f32 = 0.72;
+/// Natural frequency (rad/s): the overshoot peaks ≈265 ms in.
+const OMEGA: f32 = 17.0;
 /// From this fraction of `SPRING_FOR` the spring blends onto its target.
 const TAIL: f32 = 0.65;
+/// How long the pill glides back from an action notice (no bounce).
+pub const GLIDE_FOR: Duration = Duration::from_millis(380);
+/// The glide's cubic-bezier control points: leaves from rest, long soft landing.
+const BEZIER: (f32, f32, f32, f32) = (0.4, 0.0, 0.2, 1.0);
 
 /// The island's drawn size (physical px) and window opacity (0..1).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -40,6 +45,26 @@ pub fn ease_in_out(t: f32) -> f32 {
     t * t * (3.0 - 2.0 * t)
 }
 
+/// `cubic-bezier(BEZIER)` at time `t` (0..1).
+pub fn bezier(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    let (x1, y1, x2, y2) = BEZIER;
+    let curve = |a: f32, b: f32, u: f32| {
+        let v = 1.0 - u;
+        3.0 * v * v * u * a + 3.0 * v * u * u * b + u * u * u
+    };
+    let (mut low, mut high) = (0.0f32, 1.0f32);
+    for _ in 0..16 {
+        let mid = (low + high) / 2.0;
+        if curve(x1, x2, mid) < t {
+            low = mid;
+        } else {
+            high = mid;
+        }
+    }
+    curve(y1, y2, (low + high) / 2.0)
+}
+
 /// One axis of an under-damped spring from `from` (moving at `velocity` px/s)
 /// to `to`, `secs` in; blended onto `to` over the tail so it lands exactly.
 pub fn spring(from: f32, to: f32, velocity: f32, secs: f32) -> f32 {
@@ -61,6 +86,8 @@ enum Motion {
     EaseOut,
     /// Size springs (from these starting velocities, px/s); opacity eases out.
     Spring { vw: f32, vh: f32 },
+    /// Size and opacity follow `bezier`.
+    Glide,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -87,6 +114,11 @@ impl Tween {
         Self { from, to, start: now, duration: SPRING_FOR, motion }
     }
 
+    /// Glide from `from` to `to` on the bezier curve.
+    pub fn glide(from: Frame, to: Frame, now: Instant) -> Self {
+        Self { from, to, start: now, duration: GLIDE_FOR, motion: Motion::Glide }
+    }
+
     pub fn progress(&self, now: Instant) -> f32 {
         if self.duration.is_zero() {
             return 1.0;
@@ -97,6 +129,8 @@ impl Tween {
     pub fn at(&self, now: Instant) -> Frame {
         match self.motion {
             Motion::EaseOut => self.from.lerp(self.to, ease_out(self.progress(now))),
+            Motion::Glide if self.done(now) => self.to,
+            Motion::Glide => self.from.lerp(self.to, bezier(self.progress(now))),
             Motion::Spring { vw, vh } => {
                 let secs = now.saturating_duration_since(self.start).as_secs_f32();
                 let fade = ease_out(secs / DURATION.as_secs_f32());

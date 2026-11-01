@@ -29,13 +29,24 @@ use crate::badge::Badge;
 use crate::cue::{band, Sheen, CUE_PEAK};
 use crate::fonts::Fonts;
 use crate::hint::CardScene;
-use crate::presence::{content_dx, Look};
+use crate::presence::{content_dx, content_scale, Look};
 use crate::layout::{sweep, Rgba, Role, Scene, Shape, Sweep, EDGE_LINE, PILL, TRACK};
 
 #[path = "render_icon.rs"]
 mod icon;
 #[path = "render_card.rs"]
 mod card;
+
+/// The old content while an open pill crossfades it into the new.
+#[derive(Clone, Copy)]
+pub struct Outgoing<'a> {
+    pub scene: &'a Scene,
+    /// The scale `scene` was laid out at.
+    pub scale: f32,
+    pub alpha: f32,
+    /// Draw its mark too (`false`: the new scene's mark carries on from it).
+    pub icon: bool,
+}
 
 /// What draws over (and under) a frame's scene besides the pill itself.
 #[derive(Clone, Copy, Default)]
@@ -46,6 +57,8 @@ pub struct Layers<'a> {
     pub badge: Option<Badge>,
     /// The shortcut hint's card under the pill.
     pub card: Option<&'a CardScene>,
+    /// The content a transformation is leaving.
+    pub outgoing: Option<Outgoing<'a>>,
 }
 
 pub struct Renderer {
@@ -134,7 +147,7 @@ impl Renderer {
     /// content, the mark (or the save badge) on top, and the hint card
     /// below. Returns the window size.
     pub fn draw(&mut self, fonts: &Fonts, scene: &Scene, look: Look, scale: f32, layers: Layers) -> Result<(i32, i32)> {
-        let Layers { sheen, badge, card } = layers;
+        let Layers { sheen, badge, card, outgoing } = layers;
         let (w, h) = look.window();
         self.ensure(w, h)?;
         let sheen = match sheen {
@@ -149,27 +162,17 @@ impl Renderer {
             t.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
             let pill = self.pill(&look, sheen);
             t.PushAxisAlignedClip(&pill.rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
-            let content_dx = content_dx(&look, scene.w, scene.lead);
-            if look.content_alpha > 0.01 {
-                let ([x, y, _, ph], (ox, oy)) = (look.pill, look.pill_origin());
-                let (dx, dy) = (ox + x + content_dx, oy + y + (ph - scene.h) / 2.0);
-                t.SetTransform(&Matrix3x2::translation(dx, dy));
-                for shape in &scene.shapes {
-                    self.shape(shape, look.content_alpha)?;
-                }
-                for text in &scene.texts {
-                    let layout = fonts.layout(text.role, scale, &text.text)?;
-                    let alpha = match text.role {
-                        Role::NoticeTitle => look.title_alpha,
-                        Role::NoticeGame | Role::NoticeUi => look.detail_alpha,
-                        _ => look.content_alpha,
-                    };
-                    self.paint(text.color, alpha);
-                    t.DrawTextLayout(Vector2 { X: text.x, Y: text.y }, &layout, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+            if let Some(old) = outgoing {
+                self.content(fonts, old.scene, &look, old.scale, (old.alpha, old.alpha, old.alpha))?;
+                if let Some(icon) = old.scene.icon.filter(|_| old.icon) {
+                    self.icon(&icon, &look, placed(&look, old.scene), None, old.alpha)?;
                 }
             }
+            if look.content_alpha > 0.01 {
+                self.content(fonts, scene, &look, scale, (look.content_alpha, look.title_alpha, look.detail_alpha))?;
+            }
             if let Some(icon) = scene.icon.filter(|_| look.icon_alpha > 0.01) {
-                self.icon(&icon, &look, content_dx, badge)?;
+                self.icon(&icon, &look, placed(&look, scene), badge, look.icon_alpha)?;
             }
             t.SetTransform(&Matrix3x2::identity());
             t.PopAxisAlignedClip();
@@ -179,6 +182,32 @@ impl Renderer {
             t.EndDraw(None, None)?;
         }
         Ok((w, h))
+    }
+
+    /// `scene`'s shapes and text (not its mark) in the pill, scaled with it;
+    /// `alphas` = (content, title line, detail line).
+    unsafe fn content(&self, fonts: &Fonts, scene: &Scene, look: &Look, scale: f32, alphas: (f32, f32, f32)) -> Result<()> {
+        let t = &self.target;
+        let (dx, k) = placed(look, scene);
+        let ([x, y, _, ph], (ox, oy)) = (look.pill, look.pill_origin());
+        let (left, top) = (ox + x + dx, oy + y + (ph - scene.h * k) / 2.0);
+        unsafe {
+            t.SetTransform(&(Matrix3x2::scale(k, k) * Matrix3x2::translation(left, top)));
+            for shape in &scene.shapes {
+                self.shape(shape, alphas.0)?;
+            }
+            for text in &scene.texts {
+                let layout = fonts.layout(text.role, scale, &text.text)?;
+                let alpha = match text.role {
+                    Role::NoticeTitle => alphas.1,
+                    Role::NoticeGame | Role::NoticeUi => alphas.2,
+                    _ => alphas.0,
+                };
+                self.paint(text.color, alpha);
+                t.DrawTextLayout(Vector2 { X: text.x, Y: text.y }, &layout, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+            }
+        }
+        Ok(())
     }
 
     /// The pill body (fill, the sweep's band, hairline edge) at `look.pill`;
@@ -329,6 +358,12 @@ impl Drop for Renderer {
     }
 }
 
+/// Where `scene` sits in the pill now, and the scale it draws at.
+fn placed(look: &Look, scene: &Scene) -> (f32, f32) {
+    let k = content_scale(look, scene.h);
+    (content_dx(look, scene.w * k, scene.lead), k)
+}
+
 fn color(rgba: Rgba, alpha: f32) -> D2D1_COLOR_F {
     let channel = |shift: u32| ((rgba.rgb >> shift) & 0xff) as f32 / 255.0;
     D2D1_COLOR_F { r: channel(16), g: channel(8), b: channel(0), a: rgba.a * alpha }
@@ -384,10 +419,10 @@ mod tests {
             ("saving pill + spinning ring", &saving, grown, grow, None, ring),
         ];
         for (label, scene, frame, scale, sheen, badge) in cases {
-            renderer.draw(&fonts, scene, Look::open(frame), scale, Layers { sheen, badge, card: None }).unwrap();
+            renderer.draw(&fonts, scene, Look::open(frame), scale, Layers { sheen, badge, ..Layers::default() }).unwrap();
             let start = std::time::Instant::now();
             for _ in 0..500 {
-                renderer.draw(&fonts, scene, Look::open(frame), scale, Layers { sheen, badge, card: None }).unwrap();
+                renderer.draw(&fonts, scene, Look::open(frame), scale, Layers { sheen, badge, ..Layers::default() }).unwrap();
             }
             println!("draw_cost {label}: {:.0} us/frame", start.elapsed().as_secs_f64() * 1e6 / 500.0);
         }

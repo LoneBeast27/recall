@@ -1,18 +1,19 @@
 //! The island state machine: which content shows (a notice beats the stats,
 //! the stats beat hidden) and the animated look that carries it. From
 //! nothing it pops in as a circle and unravels (`presence.rs`). An action
-//! notice transforms the open pill: it springs into a larger pill (both
-//! dimensions, one overshoot) with one light sweep in the notice's tone, then
-//! eases back to the stats pill or rolls up and leaves. A clip save carries
-//! the shutter ring (`badge.rs`).
+//! notice transforms the open pill: one shape springs softly into a larger
+//! pill with one light sweep in the notice's tone, then glides back to the
+//! stats pill or rolls up and leaves. While it is open the old content scales
+//! with the pill and crossfades into the new, and a mark of the same tone
+//! stays the same mark. A clip save carries the shutter ring (`badge.rs`).
 
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
-use crate::anim::{ease_out, Frame, Tween, DURATION};
+use crate::anim::{ease_in_out, ease_out, Frame, Tween, DURATION};
 use crate::badge::{Badge, SaveMark, SWEEP_AFTER};
 use crate::cue::{Cue, Sheen, CUE_DELAY};
 use crate::layout::{notice_scene, tone_color, Measure, Scene, StatsContent};
-use crate::notice::{NoticeView, SavePhase};
+use crate::notice::{NoticeView, SavePhase, Tone};
 use crate::hint::Unfold;
 use crate::presence::{Look, Presence, Style, FADE_OUT};
 use crate::reducer::{OverlayView, RecorderState, Reducer};
@@ -23,6 +24,10 @@ use crate::stats::StatsSnapshot;
 /// The larger notice pill is at least this much wider (1440p px) than the
 /// stats pill it transforms from.
 pub const GROW_W: f32 = 40.0;
+/// An open pill's old content fades out in this long...
+pub const CROSS_OUT: Duration = Duration::from_millis(160);
+/// ...and the new content starts fading in this far into it.
+pub const CROSS_IN_AT: Duration = Duration::from_millis(60);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Content {
@@ -46,6 +51,23 @@ impl Content {
     pub fn emphasized(&self) -> bool {
         matches!(self, Content::Notice(notice) if notice.emphasis)
     }
+
+    /// The tone of the leading mark (the stats pill's is the record dot).
+    fn mark_tone(&self) -> Option<Tone> {
+        match self {
+            Content::Notice(notice) => Some(notice.tone),
+            Content::Stats => Some(Tone::Recording),
+            Content::Leader(_) => None,
+        }
+    }
+}
+
+/// The old content while an open pill swaps it for the new.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Crossfade {
+    pub alpha: f32,
+    /// Its mark fades too (`false`: the new content's mark is the same mark).
+    pub icon: bool,
 }
 
 /// Hidden by default; a notice while one is active and notices are on
@@ -153,6 +175,8 @@ pub struct Island {
     mark: Option<SaveMark>,
     /// The shortcut hint's card under the pill.
     card: Unfold,
+    /// The open pill's last content swap: when, and whether the old mark fades.
+    leaving: Option<(Instant, bool)>,
 }
 
 impl Island {
@@ -171,6 +195,7 @@ impl Island {
             cue: None,
             mark: None,
             card: Unfold::closed(now),
+            leaving: None,
         }
     }
 
@@ -196,9 +221,13 @@ impl Island {
     /// Show `content` at `size` (physical px), or hide with `None`. From
     /// nothing the island pops in as a circle and unravels; while open, a
     /// change to an action notice springs into its size (carrying the current
-    /// motion on) and anything else eases.
-    pub fn update(&mut self, next: Option<(Content, f32, f32)>, now: Instant) {
-        let Some((content, w, h)) = next else { return self.hide(now) };
+    /// motion on), leaving one glides back and anything else eases. True when
+    /// an open pill changed its content (keep the old scene for `crossfade`).
+    pub fn update(&mut self, next: Option<(Content, f32, f32)>, now: Instant) -> bool {
+        let Some((content, w, h)) = next else {
+            self.hide(now);
+            return false;
+        };
         let target = Frame { w, h, alpha: 1.0 };
         let swapped = self.content.as_ref() != Some(&content);
         let fresh = !self.shown;
@@ -209,6 +238,8 @@ impl Island {
             self.icon_since = now.checked_sub(DURATION).unwrap_or(now);
         } else if swapped && open && content.emphasized() {
             self.tween = Tween::spring(self.tween.at(now), target, self.tween.velocity(now), now);
+        } else if swapped && open && self.content.as_ref().is_some_and(Content::emphasized) {
+            self.tween = Tween::glide(self.tween.at(now), target, now);
         } else {
             self.tween.retarget(target, now);
         }
@@ -220,6 +251,7 @@ impl Island {
         if swapped {
             self.swap(content, open, fresh, now);
         }
+        swapped && open
     }
 
     fn hide(&mut self, now: Instant) {
@@ -248,8 +280,12 @@ impl Island {
             (Some(phase), None) => self.mark = Some(SaveMark::new(phase, now)),
             (None, _) => self.mark = None,
         }
-        if open && !continuing {
+        let same_mark = self.content.as_ref().and_then(Content::mark_tone).is_some_and(|tone| content.mark_tone() == Some(tone));
+        if open && !continuing && !same_mark {
             self.icon_since = now;
+        }
+        if open && !continuing {
+            self.leaving = Some((now, !same_mark));
         }
         if let Content::Notice(notice) = &content {
             let lands = notice.emphasis && save != Some(SavePhase::Saving);
@@ -269,7 +305,11 @@ impl Island {
         } else {
             // An instant appear shows its content with the window, no fade.
             let at_once = fresh && self.presence.text_ready().is_none();
-            self.swapped_at = if at_once { now.checked_sub(DURATION).unwrap_or(now) } else { now };
+            self.swapped_at = match (at_once, open) {
+                (true, _) => now.checked_sub(DURATION).unwrap_or(now),
+                (false, true) => now + CROSS_IN_AT,
+                (false, false) => now,
+            };
             (self.title_since, self.detail_since) = (self.swapped_at, self.swapped_at);
         }
         self.content = Some(content);
@@ -282,6 +322,7 @@ impl Island {
             self.content = None;
             self.cue = None;
             self.mark = None;
+            self.leaving = None;
             return true;
         }
         false
@@ -336,6 +377,13 @@ impl Island {
         ease_out(since / DURATION.as_secs_f32())
     }
 
+    /// The old content's opacity while it crossfades into the new.
+    pub fn crossfade(&self, now: Instant) -> Option<Crossfade> {
+        let (since, icon) = self.leaving.filter(|_| self.showing)?;
+        let t = now.saturating_duration_since(since).as_secs_f32() / CROSS_OUT.as_secs_f32();
+        (t < 1.0).then(|| Crossfade { alpha: 1.0 - ease_in_out(t), icon })
+    }
+
     /// The sweep's frame, while it crosses the pill.
     pub fn sheen(&self, now: Instant) -> Option<Sheen> {
         let cue = self.cue.filter(|_| self.shown)?;
@@ -353,7 +401,7 @@ impl Island {
         let ring = self.mark.is_some_and(|mark| mark.animating(now));
         let fading = if self.showing { self.content_alpha(now) < 1.0 } else { self.content_alpha(now) > 0.0 };
         let moving = self.presence.moving(now) || !self.tween.done(now) || self.card.moving(now);
-        self.shown && (moving || fading || sweeping || ring || self.look(now, f32::INFINITY).icon_alpha < 1.0)
+        self.shown && (moving || fading || sweeping || ring || self.crossfade(now).is_some() || self.look(now, f32::INFINITY).icon_alpha < 1.0)
     }
 }
 

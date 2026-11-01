@@ -63,7 +63,7 @@ impl Film {
         self.island.tick(now);
         let Some(shown) = self.drawn.as_ref().filter(|_| self.island.shown()) else { return Ok(None) };
         let (look, sheen, badge) = (self.island.look(now, f32::INFINITY), self.island.sheen(now), self.island.badge(now));
-        tile(renderer, fonts, &shown.scene, look, shown.scale, Layers { sheen, badge, card: None }).map(Some)
+        tile(renderer, fonts, &shown.scene, look, shown.scale, Layers { sheen, badge, ..Layers::default() }).map(Some)
     }
 }
 
