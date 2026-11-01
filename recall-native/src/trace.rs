@@ -137,7 +137,7 @@ pub fn record(route: &str, ed: &EditorState, clips: usize) {
     let pos = ed.position();
     let targets: serde_json::Map<String, serde_json::Value> =
         TARGETS.lock().map(|t| t.iter().map(|(n, r)| (n.clone(), serde_json::json!(r))).collect()).unwrap_or_default();
-    let line = serde_json::json!({
+    let mut line = serde_json::json!({
         "ms": trace.start.elapsed().as_millis() as u64,
         "route": route,
         "clips": clips,
@@ -172,7 +172,10 @@ pub fn record(route: &str, ed: &EditorState, clips: usize) {
         "warning": ed.warning,
         "fps": ed.fps,
         "ui": UI.lock().ok().and_then(|ui| ui.clone()),
-        "loading": ed.loading.active().then(|| serde_json::json!({
+        "targets": targets,
+    });
+    // On its own: the rest of the line already fills the macro's recursion limit.
+    line["loading"] = serde_json::json!(ed.loading.active().then(|| serde_json::json!({
             "share": ed.loading.share,
             "grey": ed.loading.grey,
             "grey_parts": ed.loading.grey.len(),
@@ -181,9 +184,8 @@ pub fn record(route: &str, ed: &EditorState, clips: usize) {
             "note": ed.loading_note(),
             "failed": ed.loading.failed,
             "waves": ed.info.as_ref().map(|i| i.audio.iter().filter(|a| !a.waveform.is_empty()).count()),
-        })),
-        "targets": targets,
-    });
+            "lane_ms": ed.info.as_ref().and_then(|info| crate::services::storage::lane_wait_ms(std::path::Path::new(&info.path))),
+        })));
     let _ = writeln!(trace.file, "{line}");
 }
 
