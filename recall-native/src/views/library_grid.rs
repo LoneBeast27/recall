@@ -182,7 +182,10 @@ impl Root {
                     .child(b)
             }));
         let title_row: AnyElement = if renaming {
+            let painted = self.rename_painted.clone();
             div()
+                .id("rename-row")
+                .relative()
                 .h(px(26.))
                 .px(px(8.))
                 .flex()
@@ -191,7 +194,26 @@ impl Root {
                 .bg(c(theme::RAISED))
                 .border_1()
                 .border_color(c(theme::BORDER_STRONG))
+                .child(
+                    // The list also lays out rows just past the viewport: those don't count.
+                    canvas(move |bounds, window, _| painted.set(!bounds.intersect(&window.content_mask().bounds).is_empty()), |_, _, _, _| {})
+                        .absolute()
+                        .inset_0(),
+                )
+                .child(crate::trace::target("rename"))
                 .child(self.rename.render("rename", window).flex_1())
+                // Inside the field a press is for the field: no opening, dragging or menu.
+                .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                .on_mouse_up(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.rename.deselect();
+                    cx.stop_propagation();
+                    cx.notify();
+                }))
+                .on_mouse_down_out(cx.listener(|this, _, window, cx| {
+                    this.end_rename(crate::library_state::RenameEnd::Away, window);
+                    cx.notify();
+                }))
                 .into_any_element()
         } else {
             div()
@@ -252,12 +274,14 @@ impl Root {
                     }
                 }
             }))
-            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                if this.press_dismisses {
+                    return;
+                }
                 let modifiers = event.modifiers();
-                if event.click_count() == 2 && !modifiers.control && !modifiers.shift {
-                    this.begin_rename(open_path.clone(), window);
-                } else if this.lib.click(&open_path, modifiers.control, modifiers.shift) {
+                if this.lib.click(&open_path, modifiers.control, modifiers.shift) {
                     this.open_clip(open_path.clone());
+                    this.opened_by_click = true;
                 }
                 cx.notify();
             }))

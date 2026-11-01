@@ -38,6 +38,18 @@ pub enum Scope {
     Game,
 }
 
+/// How a title rename ends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RenameEnd {
+    /// Enter or Tab: the text is the new title; an empty field goes back to the game's name.
+    Save,
+    /// Escape: the title stays.
+    Cancel,
+    /// Click, page change, the tile leaving the screen. The typing was meant to count, so it
+    /// saves; an empty field means nothing was meant, so the title stays.
+    Away,
+}
+
 pub struct LibraryState {
     entries: Vec<ClipEntry>,
     pub records: Vec<ClipRecord>,
@@ -169,6 +181,13 @@ impl LibraryState {
         let by_day = matches!(self.sort, SortOrder::Newest | SortOrder::Oldest);
         self.groups = library::group_by_day(&self.records, &sorted, self.today, by_day);
         self.rebuild_rows();
+        // Clips out of view leave the selection: its count and its actions cover what is shown.
+        if !self.selection.is_empty() {
+            let shown: HashSet<usize> = self.groups.iter().flat_map(|g| g.items.iter().copied()).collect();
+            let by_path = &self.by_path;
+            self.selection.retain(|path| by_path.get(path).is_some_and(|i| shown.contains(i)));
+            self.confirm_delete &= !self.selection.is_empty();
+        }
     }
 
     /// Recomputes the column count from the measured content width.
@@ -360,11 +379,24 @@ impl LibraryState {
         }
     }
 
+    /// Ends an open rename; nothing happens when none is open.
+    pub fn finish_rename(&mut self, text: &str, how: RenameEnd) {
+        let Some(path) = self.renaming.take() else { return };
+        let empty = text.trim().is_empty();
+        if how == RenameEnd::Save || (how == RenameEnd::Away && !empty) {
+            self.rename(&path, text);
+        }
+    }
+
     pub fn rename(&mut self, path: &str, title: &str) {
         let Some(index) = self.by_path.get(path).copied() else { return };
         let name = self.records[index].file_name.clone();
         let title = title.trim();
         let value = (!title.is_empty()).then_some(title);
+        // Unchanged text must not pin today's game name as a custom title.
+        if value == Some(self.records[index].display_title()) || (value.is_none() && self.records[index].title.is_none()) {
+            return;
+        }
         match self.store.set_title(&name, value) {
             Ok(()) => self.records[index].title = value.map(str::to_owned),
             Err(error) => self.notice = Some(format!("Couldn't rename: {error}")),
@@ -402,6 +434,71 @@ fn menu_targets(selection: &HashSet<String>, display_order: Vec<String>, path: &
         display_order.into_iter().filter(|p| selection.contains(p)).collect()
     } else {
         vec![path.to_owned()]
+    }
+}
+
+#[cfg(test)]
+mod rename_tests {
+    use super::*;
+    use crate::{backend::ClipEntry, services::library::Filter};
+
+    fn library(names: &[&str]) -> LibraryState {
+        let mut lib = LibraryState::new();
+        lib.store = MetaStore::default();
+        lib.set_entries(names.iter().map(|n| ClipEntry { name: (*n).into(), path: format!(r"D:\c\{n}"), bytes: 10, mtime: 1_700_000_000, thumb: None, folder: None }).collect());
+        lib
+    }
+
+    fn renamed(text: &str, how: RenameEnd, title: Option<&str>) -> (Option<String>, String) {
+        let mut lib = library(&["VALORANT__2026-10-22__01-02-03.mp4"]);
+        let path = lib.records[0].path.clone();
+        lib.records[0].title = title.map(str::to_owned);
+        lib.renaming = Some(path);
+        lib.finish_rename(text, how);
+        assert!(lib.renaming.is_none(), "every end closes the field");
+        (lib.records[0].title.clone(), lib.records[0].display_title().to_owned())
+    }
+
+    #[test]
+    fn enter_and_click_away_save_escape_does_not() {
+        assert_eq!(renamed("ace", RenameEnd::Save, None).0.as_deref(), Some("ace"));
+        assert_eq!(renamed("  ace ", RenameEnd::Away, None).0.as_deref(), Some("ace"));
+        assert_eq!(renamed("ace", RenameEnd::Cancel, Some("old")).0.as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn an_empty_field_clears_the_title_only_on_enter() {
+        assert_eq!(renamed("  ", RenameEnd::Save, Some("old")).0, None);
+        assert_eq!(renamed("  ", RenameEnd::Away, Some("old")).0.as_deref(), Some("old"));
+    }
+
+    #[test]
+    fn opening_and_leaving_pins_no_title() {
+        let game = renamed("x", RenameEnd::Cancel, None).1;
+        assert_eq!(renamed(&game, RenameEnd::Away, None).0, None, "click away");
+        assert_eq!(renamed(&game, RenameEnd::Save, None).0, None, "Enter");
+    }
+
+    #[test]
+    fn with_no_rename_open_nothing_happens() {
+        let mut lib = library(&["VALORANT__2026-10-22__01-02-03.mp4"]);
+        lib.finish_rename("stale text", RenameEnd::Save);
+        assert_eq!(lib.records[0].title, None);
+    }
+
+    #[test]
+    fn a_filter_takes_hidden_clips_out_of_the_selection_and_ends_the_question() {
+        let mut lib = library(&["VALORANT__2026-10-22__01-02-03.mp4", "VALORANT__2026-10-22__01-02-04.mp4"]);
+        let (a, b) = (lib.records[0].path.clone(), lib.records[1].path.clone());
+        lib.records[0].favourite = true;
+        lib.ask_delete(&[a.clone(), b.clone()]);
+        lib.filter = Filter { favourites_only: true, ..Default::default() };
+        lib.refilter();
+        assert_eq!(lib.selection.iter().collect::<Vec<_>>(), [&a]);
+        assert!(lib.confirm_delete, "a clip is still selected");
+        lib.records[0].favourite = false;
+        lib.refilter();
+        assert!(lib.selection.is_empty() && !lib.confirm_delete);
     }
 }
 

@@ -2,7 +2,7 @@
 use std::time::Instant;
 
 use super::{Drag, EditorState, GAIN_MAX, GAIN_MIN, MIN_RANGE};
-use crate::edit_model::{AudioSetting, TimeRange};
+use crate::edit_model::{AudioSetting, EditPlan, TimeRange};
 
 impl EditorState {
     pub(super) fn touch(&mut self) {
@@ -12,7 +12,11 @@ impl EditorState {
     }
 
     pub(super) fn revise(&mut self) {
-        self.undo.push(self.plan.clone());
+        self.revise_from(self.plan.clone());
+    }
+
+    fn revise_from(&mut self, before: EditPlan) {
+        self.undo.push(before);
         if self.undo.len() > 200 {
             self.undo.remove(0);
         }
@@ -111,10 +115,10 @@ impl EditorState {
         self.selected = self.selected.min(self.plan.ranges.len() - 1);
     }
 
-    /// Starts a drag; trims record one undo step for the whole gesture.
+    /// Starts a drag; a trim or gain drag makes one undo step, when it changes something.
     pub fn begin_drag(&mut self, drag: Drag) {
         if matches!(drag, Drag::TrimStart(_) | Drag::TrimEnd(_) | Drag::Gain(_)) {
-            self.revise();
+            self.drag_from = Some(self.plan.clone());
         }
         if let Drag::TrimStart(i) | Drag::TrimEnd(i) = drag {
             self.selected = i;
@@ -123,8 +127,18 @@ impl EditorState {
     }
 
     pub fn end_drag(&mut self) {
-        if self.drag.take().is_some() {
-            self.touch();
+        self.drag = None;
+        if let Some(before) = self.drag_from.take().filter(|before| *before != self.plan) {
+            self.revise_from(before);
+        }
+    }
+
+    /// Escape during a drag: the plan goes back to where the drag started.
+    pub fn cancel_drag(&mut self) {
+        self.drag = None;
+        if let Some(before) = self.drag_from.take() {
+            self.plan = before;
+            self.sync_audio();
         }
     }
 
@@ -190,7 +204,73 @@ impl EditorState {
     }
 
     pub fn reset_gain(&mut self, track: usize) {
-        self.revise();
-        self.set_gain(track, 0.0);
+        let Some(stream) = self.info.as_ref().and_then(|i| i.audio.get(track)).map(|t| t.stream_index) else { return };
+        if self.setting(stream).is_some_and(|s| s.gain_db != 0.0) {
+            self.revise();
+            self.set_gain(track, 0.0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod drag_tests {
+    use super::*;
+
+    fn editor() -> EditorState {
+        let mut ed = EditorState::new(Err("no preview".into()));
+        ed.plan.ranges = vec![TimeRange::new(0.0, 10.0)];
+        ed
+    }
+
+    #[test]
+    fn a_press_on_a_handle_without_moving_changes_nothing() {
+        let mut ed = editor();
+        ed.begin_drag(Drag::TrimEnd(0));
+        ed.end_drag();
+        assert!(!ed.can_undo() && ed.saved, "no undo step, nothing to save");
+    }
+
+    #[test]
+    fn a_press_without_moving_keeps_redo() {
+        let mut ed = editor();
+        ed.plan.ranges[0].end = 9.0;
+        ed.revise();
+        ed.plan.ranges[0].end = 8.0;
+        ed.undo();
+        ed.begin_drag(Drag::TrimStart(0));
+        ed.end_drag();
+        assert!(ed.can_redo());
+    }
+
+    #[test]
+    fn a_trim_is_one_undo_step() {
+        let mut ed = editor();
+        ed.begin_drag(Drag::TrimEnd(0));
+        ed.plan.ranges[0].end = 9.0;
+        ed.plan.ranges[0].end = 8.0;
+        ed.end_drag();
+        assert!(!ed.saved);
+        ed.undo();
+        assert!(!ed.can_undo());
+        assert_eq!(ed.plan.ranges[0].end, 10.0);
+    }
+
+    #[test]
+    fn escape_puts_the_plan_back_with_no_undo_step() {
+        let mut ed = editor();
+        ed.begin_drag(Drag::TrimEnd(0));
+        ed.plan.ranges[0].end = 8.0;
+        ed.cancel_drag();
+        ed.end_drag(); // the release that follows
+        assert_eq!(ed.plan.ranges[0].end, 10.0);
+        assert!(ed.drag.is_none() && !ed.can_undo() && ed.saved);
+    }
+
+    #[test]
+    fn a_scrub_is_no_edit() {
+        let mut ed = editor();
+        ed.begin_drag(Drag::Scrub);
+        ed.end_drag();
+        assert!(ed.saved && !ed.can_undo());
     }
 }

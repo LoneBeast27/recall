@@ -16,6 +16,8 @@ public static class VC {
   [DllImport("user32.dll")] public static extern bool PostMessage(IntPtr h, uint m, IntPtr w, IntPtr l);
   [DllImport("user32.dll")] public static extern bool ShowWindow(IntPtr h, int cmd);
   [DllImport("user32.dll")] public static extern bool IsIconic(IntPtr h);
+  [StructLayout(LayoutKind.Sequential)] public struct POINT { public int X; public int Y; }
+  [DllImport("user32.dll")] public static extern bool ClientToScreen(IntPtr h, ref POINT p);
   [DllImport("kernel32.dll")] public static extern uint SetErrorMode(uint mode);
   // Silence holes (>= 8 zero frames) inside sound in a 16-bit preview stem: the 2026-10-27 choppy audio.
   public static int Holes(string wav) {
@@ -33,7 +35,7 @@ public static class VC {
   }
 }
 '@
-$script:vk = @{ space = 0x20; i = 0x49; o = 0x4F; c = 0x43; s = 0x53; l = 0x4C; j = 0x4A; k = 0x4B; home = 0x24; end = 0x23; delete = 0x2E; left = 0x25; right = 0x27; escape = 0x1B }
+$script:vk = @{ space = 0x20; i = 0x49; o = 0x4F; c = 0x43; s = 0x53; l = 0x4C; j = 0x4A; k = 0x4B; home = 0x24; end = 0x23; delete = 0x2E; left = 0x25; right = 0x27; escape = 0x1B; enter = 0x0D; tab = 0x09; a = 0x41; b = 0x42; d1 = 0x31; d2 = 0x32; d3 = 0x33; slash = 0xBF }
 
 function Initialize-ViewerCheck([string]$Repo, [string]$Exe) {
   # Children inherit this: a missing DLL fails the scenario, not in a dialog on the desktop.
@@ -68,7 +70,8 @@ function New-ClipLink([string]$dir, [string]$name, [string]$from) {
 function Start-Viewer([string]$name, [string]$from, [switch]$Library, [string[]]$Also = @()) {
   # Editor runs get an empty library, so the smart cache never prepares the clip being opened.
   $libDir = Join-Path $script:work $(if ($Library) { "lib-$name" } else { 'lib-empty' })
-  if ($Library) { Remove-Item $libDir -Recurse -Force -ErrorAction SilentlyContinue }
+  # Titles and favourites live in the sandbox's library file, by clip name: each run starts clean.
+  if ($Library) { Remove-Item $libDir -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item (Join-Path $script:sandbox 'library.json') -ErrorAction SilentlyContinue }
   New-Item -ItemType Directory -Force -Path $libDir | Out-Null
   $clip = New-ClipLink $(if ($Library) { $libDir } else { $script:work }) $name $from
   foreach ($extra in $Also) { [void](New-ClipLink $libDir $extra $from) }
@@ -137,6 +140,12 @@ function Key($s, [string]$name, [int]$times = 1, [int]$gapMs = 60) {
 }
 function Point([int]$x, [int]$y) { [IntPtr](($y -shl 16) -bor ($x -band 0xFFFF)) }
 function Mouse($s, [uint32]$msg, [int]$x, [int]$y, [int]$buttons) { [void][VC]::PostMessage($s.Hwnd, $msg, [IntPtr]$buttons, (Point $x $y)) }
+# Wheel notches at a client point (the message carries screen coordinates).
+function Wheel($s, [int]$x, [int]$y, [int]$delta, [int]$times = 1) {
+  $p = New-Object VC+POINT; $p.X = $x; $p.Y = $y
+  [void][VC]::ClientToScreen($s.Hwnd, [ref]$p)
+  for ($n = 0; $n -lt $times; $n++) { [void][VC]::PostMessage($s.Hwnd, 0x20A, [IntPtr](($delta -band 0xFFFF) -shl 16), (Point $p.X $p.Y)); Start-Sleep -Milliseconds 30 }
+}
 # Center of a painted control (device px), from the newest trace line.
 function Target($s, [string]$name) {
   $r = Wait-Trace $s { param($r) $null -ne $r.targets.$name } 3000
