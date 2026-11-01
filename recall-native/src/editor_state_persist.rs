@@ -61,6 +61,13 @@ impl EditorState {
         }
     }
 
+    /// A flush may rewrite or remove the sidecar: it loaded at open, or there was none then and
+    /// any sidecar now came from an edit in this session. One that appeared without an edit here
+    /// (another writer) stays.
+    pub(super) fn may_touch_sidecar(&self) -> bool {
+        self.sidecar_ours && (self.sidecar_at_open || !self.undo.is_empty() || !self.redo.is_empty())
+    }
+
     /// Writes the edit file beside the clip (HDD) when the open clip changed since the last
     /// flush. Autosave only touches the SSD working copy; this runs on leave / switch / export / close.
     pub fn flush(&mut self, workers: &Workers) {
@@ -69,7 +76,7 @@ impl EditorState {
         }
         if let Some(info) = self.info.clone() {
             self.needs_flush = false;
-            workers.job(Job::FlushProject(info, self.plan.clone(), self.fps, self.export_settings.clone(), self.sidecar_ours));
+            workers.job(Job::FlushProject(info, self.plan.clone(), self.fps, self.export_settings.clone(), self.may_touch_sidecar()));
         }
     }
 
@@ -80,7 +87,7 @@ impl EditorState {
         }
         if let Some(info) = self.info.as_ref() {
             self.needs_flush = false;
-            let _ = crate::backend::flush_project(info, &self.plan, self.fps, &self.export_settings, self.sidecar_ours);
+            let _ = crate::backend::flush_project(info, &self.plan, self.fps, &self.export_settings, self.may_touch_sidecar());
         }
     }
 
