@@ -46,7 +46,9 @@ powershell -NoProfile -File scripts\install.ps1
   Enter, Tab or a click anywhere else; Esc keeps the old title. Click a tile to edit:
   trim, split, cut, per-track volume, slow motion or speed-up per section, then export
   (re-encode or instant lossless trim, frame rate, resolution, size limit such as 10 MB for
-  Discord).
+  Discord). Edits live in a small file beside the clip and apply only on export, so the original
+  never changes; undoing every edit removes that file and the Edited label. Cancel export stops
+  a running export and leaves nothing behind.
 - **Old clips:** Settings → Media → Add folder lists clips from ShadowPlay, Medal, OBS or any
   folder in the library. Nothing is moved.
 - **Clip folders stay in step:** while the app is open, a clip another program copies, renames or

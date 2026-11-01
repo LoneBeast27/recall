@@ -65,7 +65,7 @@ pub enum Done {
     /// (clip path, SSD copy path — or the clip itself when it already lives on an SSD).
     VideoCached(String, Result<String, String>),
     /// Sidecar path when current; "" when there was nothing to write.
-    Flushed(Result<String, String>),
+    Flushed(Result<backend::Flushed, String>),
     /// (clip path, preview copy path).
     Proxy(String, Result<String, String>),
     Storage(StorageReport),

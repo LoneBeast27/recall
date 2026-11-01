@@ -47,7 +47,7 @@ mod tests_smoke;
 #[allow(unused_imports)]
 pub use drive::{DriveInfo, DriveKind, drive_info, drive_kind};
 pub(crate) use ffmpeg::{Seek, extract_frame, probe_duration};
-pub use ffmpeg::{binary, run_hidden};
+pub use ffmpeg::{Run, binary, run_cancellable, run_hidden};
 #[allow(unused_imports)]
 pub use evict::DEFAULT_CACHE_BUDGET;
 #[allow(unused_imports)]
@@ -56,7 +56,7 @@ pub use history::{Interaction, record_interaction};
 pub use lane::{LaneStats, Priority, run_io, stats, submit_io};
 #[allow(unused_imports)]
 pub use prefetch::{PrefetchClip, PrefetchEvent, PrepareEditor, set_recorder_busy, smart_status, start_prefetch};
-pub use projects::{ProjectSource, project_order, should_flush, working_copy_path, write_atomic};
+pub use projects::{ProjectSource, SidecarStep, project_order, sidecar_step, working_copy_path, write_atomic};
 pub(crate) use projects::modified_ms as projects_modified_ms;
 #[allow(unused_imports)]
 pub use thumbs::{ThumbIndex, cached_thumb, ensure_thumb, recorder_thumb_stem, thumb_index};

@@ -1,9 +1,11 @@
 //! ffmpeg / ffprobe helpers shared by the thumbnail tier, scrub frames and editor visuals.
 //! Every helper runs hidden at below-normal CPU priority; `lowered` additionally starts it
 //! at very low I/O priority (use it whenever the input is on an HDD).
-use std::io;
+use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
 use super::io_priority;
 
@@ -19,6 +21,45 @@ pub(crate) enum Seek {
 pub fn run_hidden(command: &mut Command, lowered: bool) -> io::Result<Output> {
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     io_priority::output(command, lowered)
+}
+
+/// How a [`run_cancellable`] helper ended.
+pub enum Run {
+    Finished(Output),
+    /// Stopped by the flag, or never started (`pid` 0). The process is gone.
+    Cancelled { pid: u32 },
+}
+
+/// [`run_hidden`] that ends the helper as soon as `cancel` turns true.
+pub fn run_cancellable(command: &mut Command, lowered: bool, cancel: &AtomicBool) -> io::Result<Run> {
+    if cancel.load(Ordering::Acquire) {
+        return Ok(Run::Cancelled { pid: 0 });
+    }
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = io_priority::spawn(command, lowered)?;
+    // Both pipes drain on their own threads: a helper that fills one would otherwise never exit.
+    let drain = |mut pipe: Box<dyn Read + Send>| {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            let _ = pipe.read_to_end(&mut bytes);
+            bytes
+        })
+    };
+    let stdout = child.stdout.take().map(|pipe| drain(Box::new(pipe)));
+    let stderr = child.stderr.take().map(|pipe| drain(Box::new(pipe)));
+    let collect = |thread: Option<std::thread::JoinHandle<Vec<u8>>>| thread.and_then(|t| t.join().ok()).unwrap_or_default();
+    loop {
+        if cancel.load(Ordering::Acquire) {
+            let pid = child.id();
+            let _ = child.kill();
+            child.wait()?;
+            return Ok(Run::Cancelled { pid });
+        }
+        if let Some(status) = child.try_wait()? {
+            return Ok(Run::Finished(Output { status, stdout: collect(stdout), stderr: collect(stderr) }));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// `variable`, else `bin/<executable>` or `tools/ffmpeg-dev/*/bin/<executable>` above the

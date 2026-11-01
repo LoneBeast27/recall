@@ -28,13 +28,22 @@ pub fn project_order(working_ms: Option<u64>, sidecar_ms: Option<u64>) -> Vec<Pr
     }
 }
 
-/// Whether a flush must write the sidecar. An existing sidecar is rewritten only when the
-/// bytes differ. Without one, a sidecar is created only for real edits: an autosaved
-/// working copy exists, or the plan differs from the untouched default.
-pub fn should_flush(existing: Option<&[u8]>, next: &[u8], working_copy_exists: bool, plan_is_default: bool) -> bool {
-    match existing {
-        Some(current) => current != next,
-        None => working_copy_exists || !plan_is_default,
+/// What a flush does to the sidecar beside the clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarStep {
+    Keep,
+    Write,
+    Remove,
+}
+
+/// A sidecar exists only while the plan holds real edits: it is what marks a clip Edited and
+/// keeps it from the storage limit. Undoing every edit removes it. Identical bytes are not
+/// written again.
+pub fn sidecar_step(existing: Option<&[u8]>, next: &[u8], plan_is_default: bool) -> SidecarStep {
+    match (existing, plan_is_default) {
+        (_, true) => SidecarStep::Remove,
+        (Some(current), false) if current == next => SidecarStep::Keep,
+        (_, false) => SidecarStep::Write,
     }
 }
 

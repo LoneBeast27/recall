@@ -21,7 +21,9 @@ impl EditorState {
 
     pub fn on_exported(&mut self, result: Result<ExportSummary, String>) {
         self.exporting = false;
+        self.cancelling = false;
         match result {
+            Err(error) if error == crate::backend::EXPORT_CANCELLED => {}
             Ok(summary) if self.export_is_for_open_clip() => {
                 self.exported = Some(summary);
                 self.export_error = None;
@@ -35,6 +37,14 @@ impl EditorState {
         self.export_of.as_deref().is_some_and(|path| self.is_open(path))
     }
 
+    /// Stops the running export; `Done::Exported` follows once the engine is gone.
+    pub fn cancel_export(&mut self) {
+        if self.exporting {
+            self.cancelling = true;
+            crate::backend::cancel_export();
+        }
+    }
+
     pub fn export(&mut self, workers: &Workers) {
         if self.exporting {
             return;
@@ -46,6 +56,7 @@ impl EditorState {
             self.exported = None;
             self.export_error = None;
             self.flush(workers);
+            crate::backend::arm_export();
             workers.job(Job::Export(info, self.plan.clone(), self.fps, self.export_settings.clone()));
         }
     }
