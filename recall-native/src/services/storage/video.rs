@@ -191,6 +191,32 @@ fn remove_left_fills(directory: &Path, id: &str) {
     }
 }
 
+#[cfg(test)]
+mod left_fills {
+    use super::*;
+
+    #[test]
+    fn a_new_fill_clears_only_what_its_own_clip_left() {
+        let dir = std::env::temp_dir().join(format!("recall-left-fills-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("clip.mp4");
+        std::fs::write(&source, vec![1u8; 8192]).unwrap();
+        let modified = source.metadata().unwrap().modified().unwrap();
+        let left = dir.join("aaaa.mp4.1-1.part");
+        let other = dir.join("bbbb.mp4.1-2.part");
+        std::fs::write(&left, b"left by a closed app").unwrap();
+        std::fs::write(&other, b"another clip").unwrap();
+        let running = ClipFill::create(&source, &dir.join("aaaa.mp4.1-3.part"), &dir.join("aaaa.mp4"), 8192, modified, 0, 0).unwrap();
+        remove_left_fills(&dir, "aaaa");
+        assert!(!left.exists(), "what a closed app left goes");
+        assert!(other.exists(), "another clip's part stays");
+        assert!(dir.join("aaaa.mp4.1-3.part").exists(), "a fill still running is not left");
+        drop(running);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
 /// Interrupted copies older than an hour (a crash mid-copy).
 fn remove_stale_parts(directory: &Path) {
     let Ok(listing) = std::fs::read_dir(directory) else { return };
