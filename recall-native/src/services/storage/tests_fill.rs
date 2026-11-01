@@ -124,12 +124,73 @@ fn a_drive_that_stops_answering_fails_the_fill_and_frees_its_readers() {
     assert!(fill.stays_open());
     let waiting = {
         let fill = fill.clone();
-        std::thread::spawn(move || fill.wait_closed())
+        std::thread::spawn(move || fill.wait_released())
     };
     fill.cancel();
-    waiting.join().unwrap();
-    assert!(!fill.stays_open(), "closing the clip frees it");
+    assert!(!waiting.join().unwrap(), "closing the clip frees it");
+    assert!(!fill.stays_open());
     assert!(!dir.join("copy.mp4").exists());
+}
+
+#[test]
+fn a_read_stopped_on_a_hole_lets_go_for_a_seek_only() {
+    let dir = scratch("released");
+    let bytes = 8 * CHUNK as usize;
+    let (source, modified) = clip(&dir, bytes);
+    let fill = ClipFill::create(&source, &dir.join("clip.part"), &dir.join("copy.mp4"), bytes as u64, modified, 0, 3 * CHUNK).unwrap();
+    fill.start(&[0]).unwrap();
+    assert!(!fill.wait_done());
+    fill.set_playing();
+    let waiting = {
+        let fill = fill.clone();
+        std::thread::spawn(move || fill.wait_released())
+    };
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!waiting.is_finished(), "nothing to do until the player seeks");
+    fill.note_seek();
+    assert!(waiting.join().unwrap(), "a seek gets the queue back");
+    std::thread::sleep(RELEASE + Duration::from_millis(100));
+    let later = {
+        let fill = fill.clone();
+        std::thread::spawn(move || fill.wait_released())
+    };
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!later.is_finished(), "long after the seek reads wait again");
+    fill.cancel();
+    assert!(!later.join().unwrap());
+}
+
+#[test]
+fn a_clip_read_where_it_lies_says_when_its_drive_goes() {
+    let dir = scratch("direct-gone");
+    let bytes = 4 * CHUNK as usize;
+    let (source, modified) = clip(&dir, bytes);
+    let fill = ClipFill::direct(&source, bytes as u64, modified, 2 * CHUNK);
+    let file = fill.open_reader().unwrap();
+    let mut scratch = AlignedBuffer::new(1 << 20);
+    let mut out = vec![0u8; 4096];
+    assert!(fill.read_at(&file, 0, &mut out, &mut scratch).is_ok());
+    assert!(fill.read_at(&file, 2 * CHUNK, &mut out, &mut scratch).is_err());
+    assert_eq!(fill.outcome(), Outcome::Done, "the fill has no reader of its own to notice");
+    fill.lost("gone".into());
+    assert_eq!(fill.outcome(), Outcome::Failed);
+    assert_eq!(fill.error().as_deref(), Some("gone"));
+    assert!(!fill.has(0, 1), "nothing counts as there any more");
+    assert!(!fill.wait_for(0, 1, true));
+    fill.set_playing();
+    assert!(fill.stays_open());
+    fill.cancel();
+    drop(fill);
+    assert_eq!(std::fs::read(&source).unwrap(), pattern(bytes), "the clip is left alone");
+}
+
+#[test]
+fn only_a_clip_read_where_it_lies_can_be_lost_this_way() {
+    let dir = scratch("copy-not-lost");
+    let (source, modified) = clip(&dir, CHUNK as usize);
+    let fill = fill(&dir, &source, CHUNK, modified, 0);
+    fill.lost("gone".into());
+    assert_eq!(fill.outcome(), Outcome::Filling);
 }
 
 #[test]
@@ -156,7 +217,7 @@ fn a_clip_read_where_it_lies_is_never_touched() {
     let dir = scratch("direct");
     let bytes = 2 * CHUNK as usize + 100;
     let (source, modified) = clip(&dir, bytes);
-    let fill = ClipFill::direct(&source, bytes as u64, modified);
+    let fill = ClipFill::direct(&source, bytes as u64, modified, 0);
     assert_eq!(fill.outcome(), Outcome::Done);
     assert!(fill.has(0, bytes as u64));
     assert!(fill.wait_for(0, bytes as u64, true));

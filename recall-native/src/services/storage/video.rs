@@ -60,7 +60,7 @@ pub fn start_fill(source: &Path, metadata: &std::fs::Metadata, first: &[u64]) ->
     let budget = budget_in(&root);
     let free = super::drive_info(&root).map_or(u64::MAX, |info| info.free);
     if bytes > budget / 2 || free < bytes.saturating_add(KEEP_FREE) {
-        return Ok(ClipFill::direct(source, bytes, modified));
+        return Ok(ClipFill::direct(source, bytes, modified, mega("RECALL_SLOW_DRIVE_FAIL")));
     }
     let directory = video_dir(&root);
     std::fs::create_dir_all(&directory).map_err(|error| format!("create fill folder: {error}"))?;
