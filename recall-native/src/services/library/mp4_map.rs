@@ -201,6 +201,57 @@ mod tests {
         ClipMap { points: vec![(0.0, 100), (1.0, 200), (2.0, 300), (3.0, 400)], ..Default::default() }
     }
 
+    fn boxed(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+        let mut out = (body.len() as u32 + 8).to_be_bytes().to_vec();
+        out.extend_from_slice(kind);
+        out.extend_from_slice(body);
+        out
+    }
+
+    fn words(values: &[u32]) -> Vec<u8> {
+        values.iter().flat_map(|value| value.to_be_bytes()).collect()
+    }
+
+    /// A clip of one video track with these sample tables; 30 ticks a second.
+    fn clip(stts: &[u32], stsc: &[u32], stss: &[u32]) -> std::io::Cursor<Vec<u8>> {
+        let tables = [
+            boxed(b"stts", &words(&[&[0, stts.len() as u32 / 2][..], stts].concat())),
+            boxed(b"stsc", &words(&[&[0, stsc.len() as u32 / 3][..], stsc].concat())),
+            boxed(b"stco", &words(&[0, 1, 1000])),
+            boxed(b"stsz", &words(&[0, 100, 0])),
+            boxed(b"stss", &words(&[&[0, stss.len() as u32][..], stss].concat())),
+        ]
+        .concat();
+        let mdhd = boxed(b"mdhd", &words(&[0, 0, 0, 30, 3000, 0]));
+        let hdlr = boxed(b"hdlr", &[&[0u8; 8][..], b"vide", &[0u8; 12]].concat());
+        let minf = boxed(b"minf", &boxed(b"stbl", &tables));
+        let trak = boxed(b"trak", &boxed(b"mdia", &[mdhd, hdlr, minf].concat()));
+        std::io::Cursor::new(boxed(b"moov", &trak))
+    }
+
+    fn map_within(mut file: std::io::Cursor<Vec<u8>>, limit: std::time::Duration) -> Option<ClipMap> {
+        let (done, answer) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = done.send(clip_map(&mut file));
+        });
+        answer.recv_timeout(limit).expect("a damaged table must not hold the open")
+    }
+
+    #[test]
+    fn a_small_clip_of_this_shape_maps() {
+        let map = map_within(clip(&[3000, 1], &[1, 3000, 1], &[1]), std::time::Duration::from_secs(5)).expect("the shape parses");
+        assert!(map.points.len() > 300, "{}", map.points.len());
+        assert_eq!(map.keyframes, vec![0.0]);
+    }
+
+    #[test]
+    fn huge_damaged_tables_are_refused_not_walked() {
+        let huge = clip(&[u32::MAX, 1, u32::MAX, 1], &[1, u32::MAX, 1], &[1]);
+        assert_eq!(map_within(huge, std::time::Duration::from_secs(10)), None);
+        let just_over = clip(&[MAX_SAMPLES as u32 + 1, 1], &[1, u32::MAX, 1], &[1]);
+        assert_eq!(map_within(just_over, std::time::Duration::from_secs(10)), None);
+    }
+
     #[test]
     fn offsets_follow_the_picture() {
         assert_eq!(map().offset_at(0.0), 100);
