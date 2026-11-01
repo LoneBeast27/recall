@@ -179,6 +179,14 @@ struct Slot {
     floor: Option<i64>,
 }
 
+impl Slot {
+    /// The reader has reached this track up to `gap`, so its next packet settles it, whenever
+    /// that comes: a late or silent stretch of one track is no reason to go back.
+    fn awaits(&self, gap: usize) -> bool {
+        self.next.or(self.floor).is_some_and(|front| front <= gap as i64)
+    }
+}
+
 /// The decoder, ready to start, and the handle the player keeps.
 pub(crate) struct LiveSound {
     pub(crate) tracks: Vec<(usize, Arc<LivePcm>)>,
@@ -316,25 +324,31 @@ fn decode(reader: &IMFSourceReader, mut slots: Vec<Slot>, sound: &LiveSound, fil
             std::thread::sleep(Duration::from_millis(50));
             continue;
         }
-        if position.is_none_or(|at| want < at - 0.25 || want > at + READ_AHEAD * 2.0) {
-            if !bytes_ready(fill, map, want)? {
+        let behind = slots.iter().filter_map(|slot| slot.pcm.next_gap(from).filter(|gap| !slot.awaits(*gap))).min();
+        if let Some(to) = jump_to(position, gap, behind) {
+            let to_seconds = to as f64 / rate;
+            if !bytes_ready(fill, map, to_seconds)? {
                 continue;
             }
-            last_gap = if last_gap.0 == gap { (gap, last_gap.1 + 1) } else { (gap, 1) };
+            last_gap = if last_gap.0 == to { (to, last_gap.1 + 1) } else { (to, 1) };
             if last_gap.1 > GAP_SEEKS {
-                // The file holds nothing here: a second of silence, then on.
-                for slot in &slots {
-                    slot.pcm.mark(gap, gap + SAMPLE_RATE as usize);
+                // The file holds nothing here for the tracks stopped on it: a second of silence, then on.
+                for slot in slots.iter().filter(|slot| slot.pcm.next_gap(to) == Some(to)) {
+                    slot.pcm.mark(to, to + SAMPLE_RATE as usize);
                 }
                 continue;
             }
-            seek(reader, want + origin)?;
+            seek(reader, to_seconds + origin)?;
             for slot in &mut slots {
                 slot.next = None;
-                slot.floor = Some(gap as i64);
+                slot.floor = Some(to as i64);
             }
             ended.fill(false);
-            position = Some(want);
+            position = Some(to_seconds);
+        }
+        if fill.is_direct() && position.is_some_and(|at| at > playhead + DIRECT_AHEAD) {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
         }
         if !bytes_ready(fill, map, position.unwrap_or(want))? {
             continue;
@@ -365,6 +379,17 @@ fn decode(reader: &IMFSourceReader, mut slots: Vec<Slot>, sound: &LiveSound, fil
         position = Some(seconds.max(0.0));
         place(&mut slots[slot], &sample, seconds)?;
     }
+}
+
+/// The frame the reader must jump to, if any. `position`: where it is, in seconds. `gap`: the first
+/// undecoded frame of any track; `behind`: the same among tracks the reader has already passed.
+fn jump_to(position: Option<f64>, gap: usize, behind: Option<usize>) -> Option<usize> {
+    let rate = SAMPLE_RATE as f64;
+    let Some(at) = position else { return Some(gap) };
+    if gap as f64 / rate > at + READ_AHEAD * 2.0 {
+        return Some(gap);
+    }
+    behind.filter(|frame| (*frame as f64 / rate) < at - 0.25)
 }
 
 /// Waits a moment when the bytes at `seconds` are not on the SSD. False: look again.
