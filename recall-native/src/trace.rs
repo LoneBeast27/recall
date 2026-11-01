@@ -169,6 +169,7 @@ pub fn record(route: &str, ed: &EditorState, clips: usize) {
         "exporting": ed.exporting,
         "exported": ed.exported.is_some(),
         "export_error": ed.export_error,
+        "warning": ed.warning,
         "fps": ed.fps,
         "ui": UI.lock().ok().and_then(|ui| ui.clone()),
         "targets": targets,

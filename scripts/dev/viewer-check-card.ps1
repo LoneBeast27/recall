@@ -274,3 +274,52 @@ Run-Scenario 'editor: undoing every edit clears Edited' {
   $u = UI $s
   Verdict @((Ok ($wrote -and $edited.edited -eq 1) "a trim writes the edit file and shows Edited ($($edited.edited))"), (Ok (-not (Test-Path $file)) 'undoing it removes the file'), (Ok ($u.edited -eq 0) "the card drops Edited ($($u.edited))"))
 }
+
+# Opens a library clip whose edit file holds $bytes, changes a setting and leaves. -Lock holds the
+# file so the open cannot read it. The file must come out byte for byte.
+function Check-ForeignSidecar($s, [byte[]]$bytes, [switch]$Lock) {
+  $file = "$($s.Clip).recall-edit.json"
+  [IO.File]::WriteAllBytes($file, $bytes)
+  $held = if ($Lock) { [IO.File]::Open($file, 'Open', 'Read', 'None') }
+  Click $s (Tile $s.Name)
+  $open = Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.ready -and $r.clip } 30000
+  $warned = (Settle $s).warning
+  if ($held) { $held.Dispose() }
+  Click $s 'mode-Re-encode'; Click $s 'h-720p'; [void](Settle $s 1000)
+  Key $s 'escape'
+  [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 1000)
+  [void](Settle $s 1500)
+  $after = if (Test-Path $file) { [IO.File]::ReadAllBytes($file) } else { @() }
+  @((Ok ([bool]$open) 'the clip opens'), (Ok ([bool]$warned) "the editor warns ('$warned')"), (Ok ($after.Count -eq $bytes.Count -and -not (Compare-Object $after $bytes -SyncWindow 0)) "the edit file is unchanged ($($after.Count) of $($bytes.Count) bytes)"))
+}
+
+Run-Scenario 'editor: an edit file that will not load is left alone' {
+  $s = $script:current = Start-Viewer 'badfile' $clips.short -Library
+  Verdict (Check-ForeignSidecar $s ([Text.Encoding]::UTF8.GetBytes('{"not a project": true')))
+}
+
+Run-Scenario 'editor: an edit file that cannot be read at open is left alone' {
+  $s = $script:current = Start-Viewer 'heldfile' $clips.short -Library
+  Verdict (Check-ForeignSidecar $s ([Text.Encoding]::UTF8.GetBytes('{"version":1}')) -Lock)
+}
+
+Run-Scenario 'editor: an exported clip keeps its edit file when the edits are undone' {
+  $s = $script:current = Start-Viewer 'kept' $clips.short -Library
+  $file = "$($s.Clip).recall-edit.json"
+  $exports = Join-Path (Split-Path $s.Clip) 'exports'
+  New-Item -ItemType Directory -Force $exports | Out-Null
+  [IO.File]::WriteAllBytes((Join-Path $exports 'kept-trim-1.mp4'), [byte[]](0))
+  Click $s (Tile 'kept')
+  [void](Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.ready -and $r.clip } 30000)
+  Key $s 'l' 1; [void](Settle $s 200); Key $s 'i'; [void](Settle $s 1000)
+  Key $s 'escape'
+  [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 1000)
+  $t = Get-Date; while (-not (Test-Path $file) -and ((Get-Date) - $t).TotalSeconds -lt 5) { Start-Sleep -Milliseconds 100 }
+  Click $s (Tile 'kept')
+  [void](Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.targets.'t-undo' } 3000)
+  Click $s 't-undo'; [void](Settle $s 200)
+  Key $s 'escape'
+  [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 1000)
+  $u = Settle $s 1500
+  Verdict @((Ok (Test-Path $file) 'the edit file stays'), (Ok ($u.ui.edited -eq 1) "the card keeps Edited ($($u.ui.edited))"))
+}

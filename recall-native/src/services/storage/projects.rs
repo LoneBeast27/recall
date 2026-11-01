@@ -38,13 +38,26 @@ pub enum SidecarStep {
 
 /// A sidecar exists only while the plan holds real edits: it is what marks a clip Edited and
 /// keeps it from the storage limit. Undoing every edit removes it. Identical bytes are not
-/// written again.
-pub fn sidecar_step(existing: Option<&[u8]>, next: &[u8], plan_is_default: bool) -> SidecarStep {
-    match (existing, plan_is_default) {
+/// written again. A sidecar this session does not own (`ours` false: it could not be read or
+/// loaded at open) may hold edits the editor never saw: it stays as it is.
+pub fn sidecar_step(existing: Option<&[u8]>, next: &[u8], no_edits: bool, ours: bool) -> SidecarStep {
+    match (existing, no_edits) {
+        _ if !ours => SidecarStep::Keep,
         (_, true) => SidecarStep::Remove,
         (Some(current), false) if current == next => SidecarStep::Keep,
         (_, false) => SidecarStep::Write,
     }
+}
+
+/// `clip` has a finished export in the `exports` folder beside it. Exported clips stay
+/// protected from the storage limit, so their sidecar stays when the edits are undone.
+pub fn has_export(clip: &Path) -> bool {
+    let (Some(folder), Some(stem)) = (clip.parent(), clip.file_stem().and_then(|s| s.to_str())) else { return false };
+    let names = [format!("{stem}-edited-").to_lowercase(), format!("{stem}-trim-").to_lowercase()];
+    std::fs::read_dir(folder.join("exports")).into_iter().flatten().flatten().any(|item| {
+        let name = item.file_name().to_string_lossy().to_lowercase();
+        names.iter().any(|prefix| name.starts_with(prefix))
+    })
 }
 
 /// Write to a unique temp sibling, then rename over the target.

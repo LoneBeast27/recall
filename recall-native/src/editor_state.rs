@@ -54,6 +54,8 @@ pub struct EditorState {
     pending_seek: Option<f64>,
     /// The open clip was changed since the sidecar was last written beside it.
     needs_flush: bool,
+    /// A flush may rewrite or remove the sidecar beside the open clip.
+    sidecar_ours: bool,
     pub status: String,
     /// One-shot error for a toast (taken by Root).
     pub last_error: Option<String>,
@@ -119,6 +121,7 @@ impl EditorState {
             playback_path: None,
             pending_seek: None,
             needs_flush: false,
+            sidecar_ours: false,
             status,
             last_error: None,
             preview_failed: false,
@@ -188,6 +191,7 @@ impl EditorState {
             }
         };
         let info = prepared.info;
+        self.sidecar_ours = prepared.sidecar_ours;
         self.plan = match prepared.project {
             Some(project) => {
                 self.fps = project.export_fps.max(1);

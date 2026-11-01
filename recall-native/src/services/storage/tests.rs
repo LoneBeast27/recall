@@ -154,11 +154,13 @@ fn newer_project_wins_with_sidecar_on_ties() {
 
 #[test]
 fn sidecar_is_written_only_for_changes_and_real_edits() {
-    assert_eq!(sidecar_step(Some(b"same"), b"same", false), SidecarStep::Keep, "identical bytes: no SMR write");
-    assert_eq!(sidecar_step(Some(b"old"), b"new", false), SidecarStep::Write, "changed sidecar is rewritten");
-    assert_eq!(sidecar_step(None, b"x", false), SidecarStep::Write, "the first real edit gets a sidecar");
-    assert_eq!(sidecar_step(Some(b"old"), b"x", true), SidecarStep::Remove, "every edit undone: no sidecar");
-    assert_eq!(sidecar_step(None, b"x", true), SidecarStep::Remove, "opened, never edited: nothing to keep");
+    assert_eq!(sidecar_step(Some(b"same"), b"same", false, true), SidecarStep::Keep, "identical bytes: no SMR write");
+    assert_eq!(sidecar_step(Some(b"old"), b"new", false, true), SidecarStep::Write, "changed sidecar is rewritten");
+    assert_eq!(sidecar_step(None, b"x", false, true), SidecarStep::Write, "the first real edit gets a sidecar");
+    assert_eq!(sidecar_step(Some(b"old"), b"x", true, true), SidecarStep::Remove, "every edit undone: no sidecar");
+    assert_eq!(sidecar_step(None, b"x", true, true), SidecarStep::Remove, "opened, never edited: nothing to keep");
+    assert_eq!(sidecar_step(Some(b"bad"), b"x", true, false), SidecarStep::Keep, "not ours: never removed");
+    assert_eq!(sidecar_step(Some(b"bad"), b"x", false, false), SidecarStep::Keep, "not ours: never overwritten");
 }
 
 fn tiny_jpeg(width: u16, height: u16, marker: u8) -> Vec<u8> {
@@ -220,4 +222,18 @@ fn a_helper_that_finishes_returns_its_output() {
     echo.args(["/c", "echo done"]);
     let super::Run::Finished(output) = super::run_cancellable(&mut echo, false, &cancel).unwrap() else { panic!("not cancelled") };
     assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("done"));
+}
+
+#[test]
+fn an_export_beside_the_clip_is_found_by_its_name() {
+    let dir = std::env::temp_dir().join(format!("recall-has-export-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("exports")).unwrap();
+    let clip = dir.join("Clip.mp4");
+    assert!(!super::has_export(&clip));
+    std::fs::write(dir.join("exports").join("clip-two-edited-60fps-1.mp4"), b"x").unwrap();
+    std::fs::write(dir.join("exports").join(".Clip-edited-60fps-1.recall-export-7-1-0.mp4"), b"x").unwrap();
+    assert!(!super::has_export(&clip), "another clip's export, and a temporary file");
+    std::fs::write(dir.join("exports").join("clip-trim-1.mp4"), b"x").unwrap();
+    assert!(super::has_export(&clip));
+    let _ = std::fs::remove_dir_all(&dir);
 }
