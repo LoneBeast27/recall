@@ -1,6 +1,7 @@
 //! `RECALL_NATIVE_OFFSCREEN=1` (scripted checks): the window runs outside every monitor, out of
 //! the taskbar and Alt+Tab, and never activates. It stays shown, not hidden: the video child
-//! window has to keep presenting frames for the checks to read the picture.
+//! window has to keep presenting frames for the checks to read the picture. Its sound stays off
+//! the speakers (`audio_worker.rs`) and it opens no level meters (`services/meters.rs`).
 use windows::Win32::{
     Foundation::{HWND, POINT, RECT},
     Graphics::Gdi::{MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MonitorFromPoint, MonitorFromRect},

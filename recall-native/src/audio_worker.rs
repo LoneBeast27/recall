@@ -17,6 +17,22 @@ pub(super) fn clock_frames(stem_frames: usize, clip_seconds: f64) -> usize {
     stem_frames.max(clip)
 }
 
+/// Test instances and unit tests write silence: the device, its clock and its underruns stay
+/// real, and nothing reaches the person's speakers.
+fn silent_output() -> bool {
+    cfg!(test) || std::env::var_os("RECALL_NATIVE_OFFSCREEN").is_some()
+}
+
+/// The next `frames` of the clip for one device buffer, padded with silence.
+pub(super) fn fill_buffer(tracks: &[LoadedTrack], start: usize, frames: usize, silent: bool, samples: &mut [i16]) {
+    mix_frames(tracks, start, frames, samples);
+    if silent {
+        samples.fill(0);
+    } else if frames < FRAMES_PER_BUFFER {
+        samples[frames * OUTPUT_CHANNELS..].fill(0);
+    }
+}
+
 pub(super) fn worker_main(rx: mpsc::Receiver<Command>, shared: Arc<SharedStatus>) {
     let mut worker = Worker::new(shared);
     loop {
@@ -51,12 +67,14 @@ struct Worker {
     active_generation: u64,
     /// Sound was queued after the last refill: finding the queue empty next time is an underrun.
     queued: bool,
+    silent: bool,
 }
 
 impl Worker {
     fn new(shared: Arc<SharedStatus>) -> Self {
         Self {
             shared,
+            silent: silent_output(),
             tracks: Vec::new(),
             device: None,
             cursor_frame: 0,
@@ -183,10 +201,7 @@ impl Worker {
                 break;
             }
             let frames = (self.duration_frames - self.cursor_frame).min(FRAMES_PER_BUFFER);
-            mix_frames(&self.tracks, self.cursor_frame, frames, &mut buffer.samples);
-            if frames < FRAMES_PER_BUFFER {
-                buffer.samples[frames * OUTPUT_CHANNELS..].fill(0);
-            }
+            fill_buffer(&self.tracks, self.cursor_frame, frames, self.silent, &mut buffer.samples);
             if let Err(error) = buffer.submit(output.handle) {
                 self.shared.fail_if_current(self.active_generation, error);
                 self.playing = false;

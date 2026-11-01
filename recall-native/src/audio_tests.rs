@@ -63,6 +63,17 @@ fn mixes_gain_mute_and_mono_to_stereo() {
 }
 
 #[test]
+fn a_silent_buffer_carries_no_sound_and_a_normal_one_does() {
+    let tracks = [LoadedTrack { stream_index: 0, samples: vec![0.5; 4], channels: 1, gain_db: 0.0, muted: false }];
+    let mut output = vec![1i16; FRAMES_PER_BUFFER * OUTPUT_CHANNELS];
+    worker::fill_buffer(&tracks, 0, 2, false, &mut output);
+    assert!(output[0] > 16000);
+    assert!(output[4..].iter().all(|s| *s == 0), "past the frames: padded");
+    worker::fill_buffer(&tracks, 0, 2, true, &mut output);
+    assert!(output.iter().all(|s| *s == 0));
+}
+
+#[test]
 fn rejects_malformed_truncated_and_non_48k_wav() {
     assert!(parse_wav(b"not a wave", MAX_DECODED_BYTES).is_err());
     let mut truncated = pcm16_wav(SAMPLE_RATE, &[0, 0]);

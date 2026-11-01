@@ -78,10 +78,12 @@ fn reading(label: &str, rms_db: f32, peak_db: f32, state: MeterState) -> MeterRe
 }
 
 impl Meters {
-    /// Starts one thread per meter. Never blocks.
+    /// Starts one thread per meter. Never blocks. A test instance (`RECALL_NATIVE_OFFSCREEN`)
+    /// starts none: it opens no real mic, and every meter reads missing.
     pub fn spawn() -> Self {
         let shared = Arc::new(Shared::new());
-        for index in 0..METERS.len() {
+        let meters = if std::env::var_os("RECALL_NATIVE_OFFSCREEN").is_some() { 0 } else { METERS.len() };
+        for index in 0..meters {
             let worker = shared.clone();
             let name = format!("vu-{}", METERS[index].0);
             if let Err(error) = std::thread::Builder::new().name(name).spawn(move || meter_thread(&worker, index)) {

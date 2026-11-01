@@ -145,6 +145,14 @@ choppy audio (fixed 2026-10-27: samples stay back to back unless the stamps drif
 40 ms). `RECALL_AUDIO_SOAK=<folder of stems> cargo test audio_soak -- --ignored --nocapture`
 plays stems silently on the default device and reports output underruns.
 
+Checks stay silent and leave the real mic alone, with no driver to install and no change to the
+Windows default devices. A test instance (`RECALL_NATIVE_OFFSCREEN=1`) and every unit test write
+zeros to the default output, so its clock and underruns stay real and nothing is heard. A test
+instance opens no level meters. The engine cost check records its Mic track from an endpoint
+nobody speaks into, and `RECALL_AUDIO_EXACT=1` stops it falling back to the real mic.
+`cargo run --release --example audio_poll -- --pid <pid> --stop <file>` proves it: it reads what
+that process tree sends to Windows, and prints the peak.
+
 After any change to capture or encoding, run the engine cost check (never while a game runs; the
 display must be on, since Windows sends no capture frames while it sleeps). It records a
 2560x1440 window presenting at ~480 fps the way a game is recorded and fails when the engine's
