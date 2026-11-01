@@ -28,13 +28,15 @@ struct Trace {
 }
 
 static TRACE: Mutex<Option<Option<Trace>>> = Mutex::new(None);
+/// Short-lived UI state from the last render, for checks of how each state ends.
+static UI: Mutex<Option<serde_json::Value>> = Mutex::new(None);
 /// Click targets painted in the last frame: name → device-px [x, y, w, h].
 static TARGETS: Mutex<Vec<(String, [i32; 4])>> = Mutex::new(Vec::new());
 /// Window of the last render, and its scale x 1000 (layout dump only).
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
 static SCALE_MILLI: AtomicIsize = AtomicIsize::new(1000);
 
-fn enabled() -> bool {
+pub fn enabled() -> bool {
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("RECALL_NATIVE_TRACE").is_some() || layout_path().is_some())
 }
@@ -65,6 +67,12 @@ pub fn target(name: impl Into<String>) -> impl IntoElement {
     )
     .absolute()
     .inset_0()
+}
+
+pub fn set_ui(state: serde_json::Value) {
+    if let Ok(mut ui) = UI.lock() {
+        *ui = Some(state);
+    }
 }
 
 /// Called at the start of every render: targets are re-recorded by the frame being built.
@@ -156,6 +164,10 @@ pub fn record(route: &str, ed: &EditorState, clips: usize) {
         "source": ed.playback_path,
         "span": ed.track_span.get().map(|(left, width)| [left, width]),
         "status": ed.status,
+        "drag": ed.drag.is_some(),
+        "saved": ed.saved,
+        "fps": ed.fps,
+        "ui": UI.lock().ok().and_then(|ui| ui.clone()),
         "targets": targets,
     });
     let _ = writeln!(trace.file, "{line}");

@@ -36,10 +36,6 @@ impl Root {
                     cx.notify();
                 }
             }))
-            .on_mouse_up(MouseButton::Left, cx.listener(|this, _, _, cx| {
-                this.ed.end_drag();
-                cx.notify();
-            }))
             .child(
                 div()
                     .flex_1()

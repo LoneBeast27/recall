@@ -22,12 +22,17 @@ impl EditorState {
     pub fn on_exported(&mut self, result: Result<ExportSummary, String>) {
         self.exporting = false;
         match result {
-            Ok(summary) => {
+            Ok(summary) if self.export_is_for_open_clip() => {
                 self.exported = Some(summary);
                 self.export_error = None;
             }
-            Err(error) => self.export_error = Some(error),
+            Err(error) if self.export_is_for_open_clip() => self.export_error = Some(error),
+            _ => {} // The toast reports it; this footer is another clip's.
         }
+    }
+
+    fn export_is_for_open_clip(&self) -> bool {
+        self.export_of.as_deref().is_some_and(|path| self.is_open(path))
     }
 
     pub fn export(&mut self, workers: &Workers) {
@@ -37,6 +42,7 @@ impl EditorState {
         if let Some(info) = self.info.clone() {
             crate::services::storage::record_interaction(crate::services::storage::Interaction::Exported(info.path.clone()));
             self.exporting = true;
+            self.export_of = Some(info.path.clone());
             self.exported = None;
             self.export_error = None;
             self.flush(workers);
@@ -131,13 +137,17 @@ impl EditorState {
     }
 
     pub fn set_max_bytes(&mut self, max_bytes: Option<u64>) {
-        self.export_settings.max_bytes = max_bytes;
-        self.touch();
+        if self.export_settings.max_bytes != max_bytes {
+            self.export_settings.max_bytes = max_bytes;
+            self.touch();
+        }
     }
 
     pub fn set_height(&mut self, height: Option<u32>) {
-        self.export_settings.height = height;
-        self.touch();
+        if self.export_settings.height != height {
+            self.export_settings.height = height;
+            self.touch();
+        }
     }
 
     /// Playback speed of the selected segment in the export (0.25–4×).

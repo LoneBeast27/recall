@@ -1,7 +1,7 @@
 //! Library page: sidebar + day-grouped, virtualized thumbnail grid.
 //! Header, sort menu and selection bar here; the grid and tiles in `library_grid.rs`,
 //! the sidebar in `library_sidebar.rs`.
-use gpui::{AnyElement, Context, FontWeight, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, FontWeight, Window, deferred, div, prelude::*, px};
 
 use crate::{
     root::{Root, Route},
@@ -107,7 +107,7 @@ impl Root {
                             .child(sort_label)
                             .child(icon(Icon::ChevronDown, 14., theme::MUTED))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.sort_open = !this.sort_open;
+                                this.sort_open = !this.press_saw_sort;
                                 cx.notify();
                             })),
                     )
@@ -118,7 +118,9 @@ impl Root {
 
     fn render_sort_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.lib.sort;
-        div()
+        let panel = div()
+            .id("sort-menu")
+            .occlude()
             .absolute()
             .top(px(38.))
             .right_0()
@@ -130,6 +132,10 @@ impl Root {
             .border_color(c(theme::BORDER))
             .flex()
             .flex_col()
+            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+                this.sort_open = false;
+                cx.notify();
+            }))
             .children([SortOrder::Newest, SortOrder::Oldest, SortOrder::Longest, SortOrder::Largest].into_iter().map(|order| {
                 div()
                     .id(("sort-item", order as usize))
@@ -149,8 +155,9 @@ impl Root {
                         this.lib.refilter();
                         cx.notify();
                     }))
-            }))
-            .into_any_element()
+            }));
+        // Deferred like the tile menu: the grid paints after the header and would cover it.
+        deferred(panel).with_priority(1).into_any_element()
     }
 
     fn render_selection_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -210,6 +217,7 @@ pub fn nav_row(id: &'static str, kind: Icon, label: &str, count: Option<String>,
         .gap(px(10.))
         .rounded(px(6.))
         .cursor_pointer()
+        .child(crate::trace::target(id))
         .text_color(c(if active { theme::TEXT } else { theme::MUTED }))
         .when(active, |d| d.bg(c(theme::OVERLAY)))
         .when(!active, |d| d.hover(|s| s.bg(c(theme::RAISED)).text_color(c(theme::TEXT))))

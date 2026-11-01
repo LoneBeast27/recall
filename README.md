@@ -42,7 +42,8 @@ powershell -NoProfile -File scripts\install.ps1
 - **The app** (Start menu → Recall): library grouped by day, hover a tile to scrub, favourite,
   rename, delete to the Recycle Bin, drag a clip into Discord or copy it. Right-click a tile for
   Open, Favourite, Rename, Copy, Show in folder and Delete (on the whole selection when the tile
-  is selected; Delete asks first and takes thumbnails, edits and bookmarks along). Double-click to edit:
+  is selected; Delete asks first and takes thumbnails, edits and bookmarks along). Renaming saves on
+  Enter, Tab or a click anywhere else; Esc keeps the old title. Click a tile to edit:
   trim, split, cut, per-track volume, slow motion or speed-up per section, then export
   (re-encode or instant lossless trim, frame rate, resolution, size limit such as 10 MB for
   Discord).
