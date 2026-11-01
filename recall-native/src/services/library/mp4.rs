@@ -114,6 +114,60 @@ pub(super) fn last_presented(durations: &[(u32, u32)], offsets: &[(u32, u32)]) -
     latest
 }
 
+/// Seconds of nothing each sound track starts with, in file order: an empty first `elst` entry,
+/// which is how `-itsoffset` and many editors delay a track. Media Foundation ignores it.
+pub(super) fn sound_delays<R: Read + Seek>(reader: &mut R) -> Option<Vec<f64>> {
+    let end = reader.seek(SeekFrom::End(0)).ok()?;
+    let moov = find_box(reader, 0, end, b"moov")?;
+    let mvhd = find_box(reader, moov.0, moov.1, b"mvhd")?;
+    let (timescale, _) = read_mvhd(reader, mvhd)?;
+    if timescale == 0 {
+        return None;
+    }
+    let mut delays = Vec::new();
+    let mut at = moov.0;
+    for _ in 0..MAX_BOXES {
+        let Some(trak) = find_box(reader, at, moov.1, b"trak") else { break };
+        at = trak.1;
+        if handler_of(reader, trak) == Some(*b"soun") {
+            delays.push(empty_edit(reader, trak).unwrap_or(0) as f64 / f64::from(timescale));
+        }
+    }
+    Some(delays)
+}
+
+fn handler_of<R: Read + Seek>(reader: &mut R, trak: (u64, u64)) -> Option<[u8; 4]> {
+    let mdia = find_box(reader, trak.0, trak.1, b"mdia")?;
+    let hdlr = find_box(reader, mdia.0, mdia.1, b"hdlr")?;
+    if hdlr.1.saturating_sub(hdlr.0) < 12 {
+        return None;
+    }
+    reader.seek(SeekFrom::Start(hdlr.0 + 8)).ok()?;
+    let mut handler = [0u8; 4];
+    reader.read_exact(&mut handler).ok()?;
+    Some(handler)
+}
+
+/// Length (movie units) of a first `elst` entry that is empty.
+fn empty_edit<R: Read + Seek>(reader: &mut R, trak: (u64, u64)) -> Option<u64> {
+    let edts = find_box(reader, trak.0, trak.1, b"edts")?;
+    let (start, _) = find_box(reader, edts.0, edts.1, b"elst")?;
+    reader.seek(SeekFrom::Start(start)).ok()?;
+    let wide = read_u32(reader)? >> 24 == 1;
+    if read_u32(reader)? == 0 {
+        return None;
+    }
+    if wide {
+        let mut entry = [0u8; 16];
+        reader.read_exact(&mut entry).ok()?;
+        let length = u64::from_be_bytes(entry[..8].try_into().ok()?);
+        (i64::from_be_bytes(entry[8..].try_into().ok()?) == -1).then_some(length)
+    } else {
+        let length = read_u32(reader)?;
+        (read_u32(reader)? == u32::MAX).then_some(u64::from(length))
+    }
+}
+
 /// The media time the first real `edts/elst` entry starts at (B-frame clips start past 0).
 pub(super) fn edit_start<R: Read + Seek>(reader: &mut R, trak: (u64, u64)) -> Option<i64> {
     let edts = find_box(reader, trak.0, trak.1, b"edts")?;
