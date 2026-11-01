@@ -12,7 +12,7 @@ use super::{ALIGN, AlignedBuffer, ClipFill, Outcome, RELEASE, lock};
 impl ClipFill {
     /// Reads `[offset, ...)` from the SSD file. The range must be there (`wait_for`).
     pub fn read_at(&self, file: &File, offset: u64, out: &mut [u8], scratch: &mut AlignedBuffer) -> std::io::Result<usize> {
-        if self.0.direct && self.0.fail_after > 0 && offset >= self.0.fail_after && self.0.playing.load(Ordering::Acquire) {
+        if self.0.direct && self.0.fail_after > 0 && offset >= self.0.fail_after && lock(&self.0).sought.is_some() {
             return Err(std::io::Error::other("test drive gone"));
         }
         let length = (out.len() as u64).min(self.0.bytes.saturating_sub(offset));

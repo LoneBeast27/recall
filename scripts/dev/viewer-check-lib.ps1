@@ -220,10 +220,13 @@ function Check-Plays($s, [double]$secs = 1.5, $from = $null, [double]$sinceMs = 
   $after = $rows[-1]
   $start = [double]$rows[0].pos
   $late = @($rows | Where-Object { $_.ms -ge $go.ms + 150 })
-  # The sound is stopped while buffering: the two clocks mean nothing until it carries on.
-  $gap = [double](($late | Where-Object { -not $_.loading.buffering } | ForEach-Object { [math]::Abs([double]$_.video - [double]$_.pos) } | Measure-Object -Maximum).Maximum)
   # While a clip loads, playback may wait for the part ahead: that wait is not a frozen picture.
   $resumed = @($rows | Where-Object { $_.loading.buffering } | ForEach-Object { [double]$_.ms })
+  # The sound is stopped while buffering: the two clocks mean nothing until it carries on. After
+  # that the WinMM position sits still for about 0.3 s and then jumps to the true time, so for
+  # 0.4 s the clock reads behind a picture that is on time.
+  $steady = @($late | Where-Object { $row = $_; -not $row.loading.buffering -and -not ($resumed | Where-Object { [double]$row.ms - $_ -lt 400 -and [double]$row.ms -gt $_ }) })
+  $gap = [double](($steady | ForEach-Object { [math]::Abs([double]$_.video - [double]$_.pos) } | Measure-Object -Maximum).Maximum)
   $frozen = @($late | Where-Object { $row = $_; $row.video_state -ne 'playing' -and -not $row.loading.buffering -and -not ($resumed | Where-Object { [double]$row.ms - $_ -lt 120 -and [double]$row.ms -gt $_ }) }).Count
   $moved = [double]$after.pos - $start; $vmoved = [double]$after.video - [double]$rows[0].video
   $want = [math]::Min($secs, [double]$after.kept) * 0.6

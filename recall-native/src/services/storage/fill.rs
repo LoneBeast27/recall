@@ -136,8 +136,8 @@ impl ClipFill {
     }
 
     /// The clip where it lies: nothing is copied, everything counts as there. `fail_after`: the
-    /// test hook: once the clip plays, the first read past it finds the drive gone (the index,
-    /// at the end of a recorder clip, has to open first).
+    /// test hook: after the player's first seek, a read past it finds the drive gone (the index,
+    /// at the end of a recorder clip, has to open and prime first).
     pub fn direct(source: &Path, bytes: u64, modified: SystemTime, fail_after: u64) -> Self {
         let state = State { have: vec![true; chunk_count(bytes) as usize], missing: 0, cursor: 0, wanted: Vec::new(), played: 0, outcome: Outcome::Done, error: None, held: false, parked: false, sought: None };
         Self::shared(source, source, source, bytes, modified, state, 0, fail_after, true)
