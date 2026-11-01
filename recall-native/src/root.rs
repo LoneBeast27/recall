@@ -281,10 +281,10 @@ impl Root {
             }
             Done::Saved(result) => self.ed.on_saved(result),
             Done::Exported(result) => {
-                if let Err(error) = &result {
-                    self.show_toast(ToastKind::Bad, "Export failed", Some(error.clone()));
-                } else {
-                    self.show_toast(ToastKind::Good, "Export finished", None);
+                match &result {
+                    Err(error) if error == crate::backend::EXPORT_CANCELLED => self.show_toast(ToastKind::Info, "Export cancelled", None),
+                    Err(error) => self.show_toast(ToastKind::Bad, "Export failed", Some(error.clone())),
+                    Ok(_) => self.show_toast(ToastKind::Good, "Export finished", None),
                 }
                 self.ed.on_exported(result);
             }
@@ -307,11 +307,9 @@ impl Root {
             Done::VideoCached(clip, Ok(copy)) => self.ed.on_video_cached(&clip, &copy),
             Done::VideoCached(_, Err(_)) => {} // keeps playing from the clip drive
             Done::Proxy(clip, result) => self.ed.on_proxy(&clip, result),
-            Done::Flushed(Ok(sidecar)) => {
-                if !sidecar.is_empty() {
-                    self.lib.mark_edited_by_sidecar(&sidecar);
-                }
-            }
+            Done::Flushed(Ok(crate::backend::Flushed::Current(sidecar))) => self.lib.mark_edited_by_sidecar(&sidecar, true),
+            Done::Flushed(Ok(crate::backend::Flushed::Removed(sidecar))) => self.lib.mark_edited_by_sidecar(&sidecar, false),
+            Done::Flushed(Ok(crate::backend::Flushed::Nothing)) => {}
             Done::Flushed(Err(error)) => self.show_toast(ToastKind::Bad, "Couldn't save edits beside the clip", Some(error)),
             Done::Storage(report) => {
                 if let Some(notice) = report.notice {

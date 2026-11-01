@@ -232,3 +232,94 @@ Run-Scenario 'editor: the fps field cancels, takes digits only, and leaves with 
   [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 1000)
   Verdict @((Ok ([int]$typed.fps -eq 123) "digits count, letters don't (fps $($typed.fps))"), (Ok ([int]$esc.fps -eq [int]$before) "Escape puts $before back (fps $($esc.fps))"), (Ok ((UI $s).field -ne 'Fps') 'the field lets go of the keyboard'), (Keys-Alive $s))
 }
+
+Run-Scenario 'editor: Cancel export stops it and leaves nothing behind' {
+  $s = $script:current = Start-Viewer 'cancelled' $clips.base
+  $exports = Join-Path (Split-Path $s.Clip) 'exports'
+  Remove-Item $exports -Recurse -Force -ErrorAction SilentlyContinue
+  Click $s 'export'
+  $on = Wait-Trace $s { param($r) $r.exporting -and $r.targets.'export-cancel' } 3000
+  # The engine is writing before it is stopped: its hidden temporary file exists.
+  $t = Get-Date; $writing = $false
+  while (-not $writing -and ((Get-Date) - $t).TotalSeconds -lt 20) { $writing = [bool](Get-ChildItem $exports -Force -Filter '.*recall-export-*' -ErrorAction SilentlyContinue); Start-Sleep -Milliseconds 100 }
+  Click $s 'export-cancel'
+  $off = Wait-Trace $s { param($r) -not $r.exporting } 3000
+  $r = Settle $s
+  $left = @(Get-ChildItem $exports -Force -ErrorAction SilentlyContinue)
+  Click $s 'export'
+  $again = Wait-Trace $s { param($r) $r.exporting } 3000
+  Click $s 'export-cancel'
+  $ended = Wait-Trace $s { param($r) -not $r.exporting } 5000
+  Verdict @((Ok ([bool]$on) 'the button shows while exporting'), (Ok $writing 'the engine was writing'), (Ok ([bool]$off) 'stopped within 3 s'), (Ok (-not $r.exported -and -not $r.export_error) 'no result and no error'),
+    (Ok ($left.Count -eq 0) "nothing left in exports ($($left.Count) files)"), (Ok ([bool]($again -and $ended)) 'the next export starts and cancels too'))
+}
+
+Run-Scenario 'editor: undoing every edit clears Edited' {
+  $s = $script:current = Start-Viewer 'undone' $clips.short -Library
+  $file = "$($s.Clip).recall-edit.json"
+  Click $s (Tile 'undone')
+  [void](Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.ready -and $r.clip } 30000)
+  Key $s 'l' 1; [void](Settle $s 200); Key $s 'i'; [void](Settle $s 1000)
+  Key $s 'escape'
+  [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 1000)
+  $t = Get-Date; while (-not (Test-Path $file) -and ((Get-Date) - $t).TotalSeconds -lt 5) { Start-Sleep -Milliseconds 100 }
+  $edited = UI $s
+  $wrote = Test-Path $file
+  Click $s (Tile 'undone')
+  [void](Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.targets.'t-undo' } 3000)
+  Click $s 't-undo'; [void](Settle $s 200)
+  Key $s 'escape'
+  [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 1000)
+  $t = Get-Date; while ((Test-Path $file) -and ((Get-Date) - $t).TotalSeconds -lt 5) { Start-Sleep -Milliseconds 100 }
+  $u = UI $s
+  Verdict @((Ok ($wrote -and $edited.edited -eq 1) "a trim writes the edit file and shows Edited ($($edited.edited))"), (Ok (-not (Test-Path $file)) 'undoing it removes the file'), (Ok ($u.edited -eq 0) "the card drops Edited ($($u.edited))"))
+}
+
+# Opens a library clip whose edit file holds $bytes, changes a setting and leaves. -Lock holds the
+# file so the open cannot read it. The file must come out byte for byte.
+function Check-ForeignSidecar($s, [byte[]]$bytes, [switch]$Lock) {
+  $file = "$($s.Clip).recall-edit.json"
+  [IO.File]::WriteAllBytes($file, $bytes)
+  $held = if ($Lock) { [IO.File]::Open($file, 'Open', 'Read', 'None') }
+  Click $s (Tile $s.Name)
+  $open = Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.ready -and $r.clip } 30000
+  $warned = (Settle $s).warning
+  if ($held) { $held.Dispose() }
+  Click $s 'mode-Re-encode'; Click $s 'h-720p'; [void](Settle $s 1000)
+  Key $s 'escape'
+  [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 1000)
+  [void](Settle $s 1500)
+  $after = if (Test-Path $file) { [IO.File]::ReadAllBytes($file) } else { @() }
+  @((Ok ([bool]$open) 'the clip opens'), (Ok ([bool]$warned) "the editor warns ('$warned')"), (Ok ($after.Count -eq $bytes.Count -and -not (Compare-Object $after $bytes -SyncWindow 0)) "the edit file is unchanged ($($after.Count) of $($bytes.Count) bytes)"))
+}
+
+Run-Scenario 'editor: an edit file that will not load is left alone' {
+  $s = $script:current = Start-Viewer 'badfile' $clips.short -Library
+  Verdict (Check-ForeignSidecar $s ([Text.Encoding]::UTF8.GetBytes('{"not a project": true')))
+}
+
+Run-Scenario 'editor: an edit file that cannot be read at open is left alone' {
+  $s = $script:current = Start-Viewer 'heldfile' $clips.short -Library
+  Verdict (Check-ForeignSidecar $s ([Text.Encoding]::UTF8.GetBytes('{"version":1}')) -Lock)
+}
+
+Run-Scenario 'editor: an exported clip keeps its edit file when the edits are undone' {
+  $s = $script:current = Start-Viewer 'kept' $clips.short -Library
+  $file = "$($s.Clip).recall-edit.json"
+  $exports = Join-Path (Split-Path $s.Clip) 'exports'
+  New-Item -ItemType Directory -Force $exports | Out-Null
+  [IO.File]::WriteAllBytes((Join-Path $exports 'kept-trim-1.mp4'), [byte[]](0))
+  Click $s (Tile 'kept')
+  [void](Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.ready -and $r.clip } 30000)
+  Key $s 'l' 1; [void](Settle $s 200); Key $s 'i'; [void](Settle $s 1000)
+  Key $s 'escape'
+  [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 1000)
+  $t = Get-Date; while (-not (Test-Path $file) -and ((Get-Date) - $t).TotalSeconds -lt 5) { Start-Sleep -Milliseconds 100 }
+  Click $s (Tile 'kept')
+  [void](Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.targets.'t-undo' } 3000)
+  Click $s 't-undo'; [void](Settle $s 200)
+  Key $s 'escape'
+  [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 1000)
+  $u = Settle $s 1500
+  Verdict @((Ok (Test-Path $file) 'the edit file stays'), (Ok ($u.ui.edited -eq 1) "the card keeps Edited ($($u.ui.edited))"))
+}

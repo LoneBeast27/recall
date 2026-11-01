@@ -154,11 +154,13 @@ fn newer_project_wins_with_sidecar_on_ties() {
 
 #[test]
 fn sidecar_is_written_only_for_changes_and_real_edits() {
-    assert!(!should_flush(Some(b"same"), b"same", true, false), "identical bytes: no SMR write");
-    assert!(should_flush(Some(b"old"), b"new", false, true), "changed sidecar is rewritten");
-    assert!(!should_flush(None, b"x", false, true), "opened, never edited: no sidecar");
-    assert!(should_flush(None, b"x", true, true), "autosaved edits get a sidecar");
-    assert!(should_flush(None, b"x", false, false), "edits not yet autosaved still flush");
+    assert_eq!(sidecar_step(Some(b"same"), b"same", false, true), SidecarStep::Keep, "identical bytes: no SMR write");
+    assert_eq!(sidecar_step(Some(b"old"), b"new", false, true), SidecarStep::Write, "changed sidecar is rewritten");
+    assert_eq!(sidecar_step(None, b"x", false, true), SidecarStep::Write, "the first real edit gets a sidecar");
+    assert_eq!(sidecar_step(Some(b"old"), b"x", true, true), SidecarStep::Remove, "every edit undone: no sidecar");
+    assert_eq!(sidecar_step(None, b"x", true, true), SidecarStep::Remove, "opened, never edited: nothing to keep");
+    assert_eq!(sidecar_step(Some(b"bad"), b"x", true, false), SidecarStep::Keep, "not ours: never removed");
+    assert_eq!(sidecar_step(Some(b"bad"), b"x", false, false), SidecarStep::Keep, "not ours: never overwritten");
 }
 
 fn tiny_jpeg(width: u16, height: u16, marker: u8) -> Vec<u8> {
@@ -193,4 +195,45 @@ fn volume_roots_come_from_drive_letters_without_system_calls() {
     assert_eq!(volume_root(Path::new(r"V:\ALL RECORDINGS\a.mp4")).as_deref(), Some(r"V:\"));
     assert_eq!(volume_root(Path::new(r"\\?\v:\ALL RECORDINGS\a.mp4")).as_deref(), Some(r"V:\"));
     assert_eq!(plain_path(Path::new(r"\\?\UNC\nas\share\a.mp4")), PathBuf::from(r"\\nas\share\a.mp4"));
+}
+
+#[test]
+fn a_cancel_ends_the_helper_at_once() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let cancel = std::sync::Arc::new(AtomicBool::new(false));
+    let flag = cancel.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        flag.store(true, Ordering::Release);
+    });
+    let mut wait = std::process::Command::new("ping");
+    wait.args(["-n", "30", "127.0.0.1"]);
+    let start = std::time::Instant::now();
+    assert!(matches!(super::run_cancellable(&mut wait, false, &cancel), Ok(super::Run::Cancelled { pid }) if pid != 0));
+    assert!(start.elapsed().as_secs() < 5, "ended by the cancel, not by the helper");
+    let mut never = std::process::Command::new("cmd");
+    assert!(matches!(super::run_cancellable(&mut never, false, &cancel), Ok(super::Run::Cancelled { pid: 0 })), "already cancelled: never started");
+}
+
+#[test]
+fn a_helper_that_finishes_returns_its_output() {
+    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let mut echo = std::process::Command::new("cmd");
+    echo.args(["/c", "echo done"]);
+    let super::Run::Finished(output) = super::run_cancellable(&mut echo, false, &cancel).unwrap() else { panic!("not cancelled") };
+    assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("done"));
+}
+
+#[test]
+fn an_export_beside_the_clip_is_found_by_its_name() {
+    let dir = std::env::temp_dir().join(format!("recall-has-export-{}", std::process::id()));
+    std::fs::create_dir_all(dir.join("exports")).unwrap();
+    let clip = dir.join("Clip.mp4");
+    assert!(!super::has_export(&clip));
+    std::fs::write(dir.join("exports").join("clip-two-edited-60fps-1.mp4"), b"x").unwrap();
+    std::fs::write(dir.join("exports").join(".Clip-edited-60fps-1.recall-export-7-1-0.mp4"), b"x").unwrap();
+    assert!(!super::has_export(&clip), "another clip's export, and a temporary file");
+    std::fs::write(dir.join("exports").join("clip-trim-1.mp4"), b"x").unwrap();
+    assert!(super::has_export(&clip));
+    let _ = std::fs::remove_dir_all(&dir);
 }

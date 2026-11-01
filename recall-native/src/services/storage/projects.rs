@@ -28,14 +28,36 @@ pub fn project_order(working_ms: Option<u64>, sidecar_ms: Option<u64>) -> Vec<Pr
     }
 }
 
-/// Whether a flush must write the sidecar. An existing sidecar is rewritten only when the
-/// bytes differ. Without one, a sidecar is created only for real edits: an autosaved
-/// working copy exists, or the plan differs from the untouched default.
-pub fn should_flush(existing: Option<&[u8]>, next: &[u8], working_copy_exists: bool, plan_is_default: bool) -> bool {
-    match existing {
-        Some(current) => current != next,
-        None => working_copy_exists || !plan_is_default,
+/// What a flush does to the sidecar beside the clip.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidecarStep {
+    Keep,
+    Write,
+    Remove,
+}
+
+/// A sidecar exists only while the plan holds real edits: it is what marks a clip Edited and
+/// keeps it from the storage limit. Undoing every edit removes it. Identical bytes are not
+/// written again. A sidecar this session does not own (`ours` false: it could not be read or
+/// loaded at open) may hold edits the editor never saw: it stays as it is.
+pub fn sidecar_step(existing: Option<&[u8]>, next: &[u8], no_edits: bool, ours: bool) -> SidecarStep {
+    match (existing, no_edits) {
+        _ if !ours => SidecarStep::Keep,
+        (_, true) => SidecarStep::Remove,
+        (Some(current), false) if current == next => SidecarStep::Keep,
+        (_, false) => SidecarStep::Write,
     }
+}
+
+/// `clip` has a finished export in the `exports` folder beside it. Exported clips stay
+/// protected from the storage limit, so their sidecar stays when the edits are undone.
+pub fn has_export(clip: &Path) -> bool {
+    let (Some(folder), Some(stem)) = (clip.parent(), clip.file_stem().and_then(|s| s.to_str())) else { return false };
+    let names = [format!("{stem}-edited-").to_lowercase(), format!("{stem}-trim-").to_lowercase()];
+    std::fs::read_dir(folder.join("exports")).into_iter().flatten().flatten().any(|item| {
+        let name = item.file_name().to_string_lossy().to_lowercase();
+        names.iter().any(|prefix| name.starts_with(prefix))
+    })
 }
 
 /// Write to a unique temp sibling, then rename over the target.
