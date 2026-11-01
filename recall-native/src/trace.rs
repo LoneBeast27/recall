@@ -178,6 +178,16 @@ pub fn note_underruns(clip: Option<&str>, total: u64) {
 /// Always-on player log at `%APPDATA%\Recall\player.log` (stalls and recoveries), kept under
 /// 512 KB, so a stall on the user's machine leaves evidence. Also mirrored into the test trace.
 pub fn player_event(what: &str, detail: serde_json::Value) {
+    let line = player_log(what, detail);
+    if let Ok(mut slot) = TRACE.lock() {
+        if let Some(Some(trace)) = slot.as_mut() {
+            let _ = writeln!(trace.file, "{line}");
+        }
+    }
+}
+
+/// The file half of [`player_event`]: takes no lock, so a panic hook can call it.
+pub fn player_log(what: &str, detail: serde_json::Value) -> serde_json::Value {
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
     let line = serde_json::json!({ "unix_ms": stamp as u64, "event": what, "detail": detail });
     if let Some(root) = std::env::var_os("APPDATA") {
@@ -191,9 +201,5 @@ pub fn player_event(what: &str, detail: serde_json::Value) {
             let _ = writeln!(file, "{line}");
         }
     }
-    if let Ok(mut slot) = TRACE.lock() {
-        if let Some(Some(trace)) = slot.as_mut() {
-            let _ = writeln!(trace.file, "{line}");
-        }
-    }
+    line
 }
