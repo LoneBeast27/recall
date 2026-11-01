@@ -26,7 +26,7 @@ param(
   [double]$Warmup = 8,
   [int]$TargetFps = 500,
   [int]$TargetX = -2559,
-  [int]$TargetY = 1439,
+  [int]$TargetY = -1439,
   [string]$TargetArgs = '',
   [switch]$RefuseGpu,
   [double]$MaxMsPerFrame = 1.5,
