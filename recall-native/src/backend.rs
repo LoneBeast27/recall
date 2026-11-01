@@ -30,6 +30,8 @@ pub struct VisualAssets { pub poster:Option<String>,pub filmstrip:Vec<String> }
 #[derive(Clone,Debug)]
 pub struct PreparedClip {
     pub info:ClipInfo,pub project:Option<Project>,pub warning:Option<String>,pub visuals:VisualAssets,
+    /// This session may rewrite or remove the sidecar: there was none, or it loaded.
+    pub sidecar_ours:bool,
     /// SSD copy to play from (`None`: play `info.path` -- a clip already on an SSD, or one the video tier could not take).
     pub playback:Option<String>,
 }
@@ -188,10 +190,10 @@ pub fn prepare_clip(path:&str)->Result<PreparedClip,String>{
     normalize_audio_names(&mut info);
     storage::note_editor_media(&info.path,&editor_dirs(&info),true);
     storage::enforce_budget();
-    let (project,project_warning)=load_project(&info);
+    let (project,project_warning,sidecar_ours)=load_project(&info);
     warnings.extend(project_warning);warnings.extend(visual_warning);
     let warning=(!warnings.is_empty()).then(||warnings.join(" "));
-    Ok(PreparedClip{info,project,warning,visuals,playback:copy})
+    Ok(PreparedClip{info,project,warning,visuals,sidecar_ours,playback:copy})
 }
 /// Smart-cache fill step (runs on the clip's disk lane): prepares editor media — audio stems,
 /// waveforms, poster, filmstrip — without opening the clip, from the SSD copy when there is
@@ -214,20 +216,25 @@ fn working_path(info:&ClipInfo)->Result<PathBuf,String>{
     Ok(storage::working_copy_path(&storage::cache_root(),&name,info.source_bytes,info.source_modified_ms/1000))
 }
 /// Newer of the SSD working copy and the sidecar (falling back to the other when the newer one is invalid).
-fn load_project(info:&ClipInfo)->(Option<Project>,Option<String>){
-    let (Ok(working),Ok(sidecar))=(working_path(info),sidecar(&info.path))else{return(None,None)};
+/// The project to open, a warning, and whether this session owns the sidecar: a sidecar that
+/// exists but cannot be read or loaded may hold edits, so a later flush must leave it alone.
+fn load_project(info:&ClipInfo)->(Option<Project>,Option<String>,bool){
+    let (Ok(working),Ok(sidecar))=(working_path(info),sidecar(&info.path))else{return(None,None,false)};
     let lane_sidecar=sidecar.clone();
     let (sidecar_ms,sidecar_bytes)=storage::run_io(Path::new(&info.path),Priority::Interactive,move||(storage::projects_modified_ms(&lane_sidecar),std::fs::read(&lane_sidecar).ok())).unwrap_or((None,None));
-    let mut warning=None;
+    let parse=|bytes:&[u8]|serde_json::from_slice::<Project>(bytes).map_err(|e|e.to_string()).and_then(|p|{validate_project(&p,info)?;Ok(p)});
+    let present=sidecar_ms.is_some()||sidecar.exists();
+    let ours=!present||sidecar_bytes.as_deref().is_some_and(|bytes|parse(bytes).is_ok());
+    let mut warning=(present&&sidecar_bytes.is_none()).then(||"Saved edits could not be read. They stay beside the clip.".to_owned());
     for source in storage::project_order(storage::projects_modified_ms(&working),sidecar_ms.filter(|_|sidecar_bytes.is_some())){
         let bytes=match source{ProjectSource::WorkingCopy=>std::fs::read(&working).ok(),ProjectSource::Sidecar=>sidecar_bytes.clone()};
         let Some(bytes)=bytes else{continue};
-        match serde_json::from_slice::<Project>(&bytes).map_err(|e|e.to_string()).and_then(|p|{validate_project(&p,info)?;Ok(p)}){
-            Ok(mut p)=>{normalize_project_audio(&mut p.plan,info);return(Some(p),warning)},
+        match parse(&bytes){
+            Ok(mut p)=>{normalize_project_audio(&mut p.plan,info);return(Some(p),warning,ours)},
             Err(e)=>{warning.get_or_insert(format!("Saved edits were not loaded: {e}"));}
         }
     }
-    (None,warning)
+    (None,warning,ours)
 }
 fn normalize_project_audio(plan:&mut EditPlan,info:&ClipInfo){
     let mut normalized=Vec::with_capacity(info.audio.len());
@@ -292,7 +299,7 @@ pub fn save_project(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings
     storage::write_atomic(&path,&bytes)?;
     // The first real edit also writes the sidecar beside the clip (once): the recorder's storage
     // limit keeps clips that have one, and an edit made before a crash stays protected.
-    if !plan_is_default(plan,info)&&sidecar(&info.path).is_ok_and(|s|!s.exists()){let _=flush_project(info,plan,fps,export);}
+    if !plan_is_default(plan,info)&&sidecar(&info.path).is_ok_and(|s|!s.exists()){let _=flush_project(info,plan,fps,export,true);}
     Ok(path.to_string_lossy().into_owned())
 }
 /// Untouched plan: one full-length range and every track at 0 dB, unmuted.
@@ -302,20 +309,22 @@ fn plan_is_default(plan:&EditPlan,info:&ClipInfo)->bool{
 }
 /// Leave / close / export: writes the `.recall-edit.json` sidecar beside the clip, through the clip's
 /// disk lane, only when its bytes would change (and, with no sidecar yet, only for real edits).
-/// A plan back at the untouched default removes the sidecar: no edits, no Edited.
-pub fn flush_project(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->Result<Flushed,String>{
+/// A plan back at the untouched default removes the sidecar: no edits, no Edited. An exported
+/// clip keeps its sidecar, and with it the storage limit's protection. `ours` false leaves an
+/// existing sidecar untouched (see [`load_project`]).
+pub fn flush_project(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings,ours:bool)->Result<Flushed,String>{
     validate_info(info)?;let bytes=project_bytes(info,plan,fps,export)?;
     let working=working_path(info)?;let default=plan_is_default(plan,info);
     let path=sidecar(&info.path)?;let lane_bytes=bytes.clone();let clip=PathBuf::from(&info.path);
     let flushed=storage::run_io(Path::new(&info.path),Priority::Interactive,move||->Result<Flushed,String>{
         let existing=std::fs::read(&path).ok();let name=path.to_string_lossy().into_owned();
-        match storage::sidecar_step(existing.as_deref(),&lane_bytes,default){
+        let ours=ours&&(existing.is_some()||!path.exists());
+        match storage::sidecar_step(existing.as_deref(),&lane_bytes,default&&!storage::has_export(&clip),ours){
             storage::SidecarStep::Keep=>Ok(Flushed::Current(name)),
             storage::SidecarStep::Write=>{storage::write_atomic(&path,&lane_bytes)?;Ok(Flushed::Current(name))}
             storage::SidecarStep::Remove=>{
-                let found:Vec<PathBuf>=crate::services::library::sidecar_candidates(&clip).into_iter().filter(|c|c.is_file()).collect();
-                for candidate in &found{std::fs::remove_file(candidate).map_err(|e|format!("remove {}: {e}",candidate.display()))?;}
-                Ok(if found.is_empty(){Flushed::Nothing}else{Flushed::Removed(name)})
+                if existing.is_none(){return Ok(Flushed::Nothing);}
+                std::fs::remove_file(&path).map_err(|e|format!("remove {name}: {e}"))?;Ok(Flushed::Removed(name))
             }
         }
     })??;

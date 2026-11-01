@@ -69,7 +69,7 @@ impl EditorState {
         }
         if let Some(info) = self.info.clone() {
             self.needs_flush = false;
-            workers.job(Job::FlushProject(info, self.plan.clone(), self.fps, self.export_settings.clone()));
+            workers.job(Job::FlushProject(info, self.plan.clone(), self.fps, self.export_settings.clone(), self.sidecar_ours));
         }
     }
 
@@ -80,7 +80,7 @@ impl EditorState {
         }
         if let Some(info) = self.info.as_ref() {
             self.needs_flush = false;
-            let _ = crate::backend::flush_project(info, &self.plan, self.fps, &self.export_settings);
+            let _ = crate::backend::flush_project(info, &self.plan, self.fps, &self.export_settings, self.sidecar_ours);
         }
     }
 
