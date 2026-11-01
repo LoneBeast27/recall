@@ -36,6 +36,26 @@ Run-Scenario 'one real export on this engine' {
   Verdict @((Ok ($stamped -and $null -ne $stems) 'the engine carries the stamp and prepared the clip'), (Ok ($null -ne $file) "wrote $($file.Name), $(Fmt ($file.Length / 1MB)) MB after $(Fmt $took) s"), (Ok ($length -gt 7) "plays $(Fmt $length) s of 8"), (Ok (-not $r.status) "status '$($r.status)'"))
 }
 
+Run-Scenario 'Cancel export stops this engine and leaves nothing' {
+  $s = Start-Viewer 'export-stop' $Clip
+  $script:current = $s
+  $folder = Join-Path (Split-Path $s.Clip) 'exports'
+  [void](Wait-Trace $s { param($r) $r.stems -and $r.stems[0] } 60000)
+  Remove-Item (Join-Path $folder '*export-stop*') -Force -ErrorAction SilentlyContinue
+  Click $s 'export'
+  $t = Get-Date; $running = $null
+  while (-not $running -and ((Get-Date) - $t).TotalSeconds -lt 10) { $running = Get-CimInstance Win32_Process -Filter "Name='recall.exe'" | Where-Object { $_.CommandLine -like '*--export-edit*' -and $_.CommandLine -like '*export-stop*' } | Select-Object -First 1 }
+  $engine = if ($running) { Get-Process -Id $running.ProcessId -ErrorAction SilentlyContinue }
+  if ($engine) { [void]$engine.Handle }
+  Start-Sleep -Seconds 1
+  Click $s 'export-cancel'
+  $end = $null -ne $engine -and $engine.WaitForExit(5000)
+  $said = Wait-Trace $s { param($r) -not $r.exporting } 5000
+  Start-Sleep -Milliseconds 500
+  $left = @(Get-ChildItem $folder -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*export-stop*' })
+  Verdict @((Ok ($null -ne $engine) "export running: pid $($engine.Id)"), (Ok $end 'the engine ended on Cancel'), (Ok ($null -ne $said) "export_error '$($said.export_error)'"), (Ok ($left.Count -eq 0) "$($left.Count) files left in exports"))
+}
+
 $fails = @($script:results | Where-Object { $_.Result -eq 'FAIL' }).Count
 Write-Host "$($script:results.Count - $fails)/$($script:results.Count) passed"
 exit $(if ($fails) { 1 } else { 0 })

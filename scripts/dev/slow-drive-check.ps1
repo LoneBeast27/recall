@@ -385,6 +385,27 @@ if ($Snap) {
   }
 }
 $real = @($RealClip | ForEach-Object { $_ -split '\|' } | Where-Object { $_ })
+# The engine reads a big clip where it lies while it plays: on a real drive the lane stays free.
+$big = $real | Where-Object { (Get-Item -LiteralPath $_).Length -gt 1GB } | Select-Object -First 1
+if ($big) {
+  Run-Scenario 'real drive: the engine leaves the lane free beside a big clip' {
+    function New-ClipLink([string]$dir, [string]$name, [string]$from) { $from }
+    foreach ($tier in 'video', 'editor', 'visuals', 'tmp') { Remove-Item (Join-Path $script:cache $tier) -Recurse -Force -ErrorAction SilentlyContinue }
+    $s = Start-Viewer 'real-big' $big
+    $script:current = $s
+    $work = [IO.Path]::GetFullPath($script:work)
+    $t = Get-Date; $worst = 0; $samples = 0; $parts = 0
+    while (((Get-Date) - $t).TotalSeconds -lt 90) {
+      $r = Last $s
+      if ($r.stems -and $r.stems[0]) { break }
+      $engine = @(Get-CimInstance Win32_Process -Filter "Name='recall.exe'" | Where-Object { $_.CommandLine -like "*$work*" }).Count
+      if ($engine -and $null -ne $r.loading.lane_ms) { $samples++; $worst = [math]::Max($worst, [double]$r.loading.lane_ms) }
+      $parts += @(Fills).Count
+      Start-Sleep -Milliseconds 200
+    }
+    Verdict @((Ok ($null -ne $r.loading) "$(Fmt ((Get-Item -LiteralPath $big).Length / 1GB)) GB clip streaming where it lies, $parts part files seen"), (Ok ($samples -ge 5 -and $worst -lt 3000 -and $parts -eq 0) "lane task waited at most $worst ms in $samples samples while the engine ran"))
+  }
+}
 foreach ($path in $real) {
   Run-Scenario "real drive: $(Split-Path $path -Leaf)" {
     # Where it lies: no link, so nothing on that drive is touched.
