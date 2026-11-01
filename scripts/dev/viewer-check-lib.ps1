@@ -78,13 +78,13 @@ function Start-Viewer([string]$name, [string]$from, [switch]$Library, [string[]]
   if ($script:ffmpeg) { $env:RECALL_FFMPEG = $script:ffmpeg }
   if ($script:ffprobe) { $env:RECALL_FFPROBE = $script:ffprobe }
   $realAppData = $env:APPDATA; $env:APPDATA = $script:sandbox
-  try { $p = Start-Process -FilePath $script:exe -WorkingDirectory (Split-Path $script:exe) -PassThru }
+  try { $p = Start-Process -FilePath $script:exe -WorkingDirectory (Split-Path $script:exe) -PassThru; [void]$p.Handle } # keeps the exit code readable
   finally {
     $env:APPDATA = $realAppData
     foreach ($v in 'RECALL_NATIVE_TRACE', 'RECALL_NATIVE_CLIP', 'RECALL_NATIVE_WINDOW_SIZE', 'RECALL_NATIVE_BACKGROUND', 'RECALL_NO_CONTROLLER', 'RECALL_CONTROL_PIPE', 'RECALL_OUT_DIR', 'RECALL_FOLDERS', 'RECALL_LIBRARY_META', 'RECALL_CACHE_DIR', 'RECALL_FFMPEG', 'RECALL_FFPROBE') { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
   }
   $t = Get-Date
-  while (-not $p.MainWindowHandle -or $p.MainWindowHandle -eq 0) { Start-Sleep -Milliseconds 50; $p.Refresh(); if (((Get-Date) - $t).TotalSeconds -gt 20) { throw 'no window' } }
+  while (-not $p.MainWindowHandle -or $p.MainWindowHandle -eq 0) { Start-Sleep -Milliseconds 50; $p.Refresh(); if (((Get-Date) - $t).TotalSeconds -gt 20) { $how = if ($p.HasExited) { "exit 0x{0:x8}" -f $p.ExitCode } else { 'still running'; Stop-Process -Id $p.Id -Force }; throw "no window ($how)" } }
   $s = [pscustomobject]@{ Process = $p; Hwnd = $p.MainWindowHandle; Trace = $trace; Clip = $clip; Name = $name }
   $want = if ($Library) { { param($r) $r.route -eq 'library' -and $r.targets.PSObject.Properties.Name -contains "tile:$name.mp4" } } else { { param($r) $r.ready -and $r.clip -and $r.targets.play } }
   if (-not (Wait-Trace $s $want 60000)) { Stop-Viewer $s; throw "${name}: never became ready" }
