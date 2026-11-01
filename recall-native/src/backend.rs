@@ -50,11 +50,18 @@ pub struct StorageReport { pub library_drives:Vec<storage::DriveInfo>,pub cache_
 pub struct ExportSummary { pub path:String,pub fps:Option<u32>,pub frames:u64,pub seconds:f64,pub bytes:u64,pub lossless:bool,pub width:u32,pub height:u32 }
 static EXPORTING:AtomicBool=AtomicBool::new(false);
 static EXPORT_CANCEL:AtomicBool=AtomicBool::new(false);
+static EXPORT_QUEUED:AtomicBool=AtomicBool::new(false);
 /// The error of an export the person stopped.
 pub const EXPORT_CANCELLED:&str="Export cancelled.";
 /// Before an export is queued: an earlier cancel must not end this one.
-pub fn arm_export(){EXPORT_CANCEL.store(false,Ordering::Release);}
+pub fn arm_export(){EXPORT_CANCEL.store(false,Ordering::Release);EXPORT_QUEUED.store(true,Ordering::Release);}
 pub fn cancel_export(){EXPORT_CANCEL.store(true,Ordering::Release);}
+/// For a closing app, whose exit would end the engine: returns when the queued export has ended.
+/// Its own time limit bounds a running export; 60 s bounds one the worker never starts.
+pub fn wait_for_export(){
+    let start=std::time::Instant::now();
+    while EXPORT_QUEUED.load(Ordering::Acquire)&&(EXPORTING.load(Ordering::Acquire)||start.elapsed().as_secs()<60){std::thread::sleep(Duration::from_millis(50));}
+}
 /// The engine's hidden temporary output, left behind when it is stopped mid-write.
 fn remove_export_temps(output:&Path,pid:u32){
     let (Some(outdir),Some(stem))=(output.parent(),output.file_stem().and_then(|v|v.to_str())) else{return};
@@ -63,6 +70,8 @@ fn remove_export_temps(output:&Path,pid:u32){
 }
 struct ExportGuard;
 impl Drop for ExportGuard { fn drop(&mut self){EXPORTING.store(false,Ordering::Release);} }
+struct ExportQueueGuard;
+impl Drop for ExportQueueGuard { fn drop(&mut self){EXPORT_QUEUED.store(false,Ordering::Release);} }
 
 pub fn engine_path()->Result<PathBuf,String> {
     if let Some(p)=std::env::var_os("RECALL_ENGINE"){let p=PathBuf::from(p);return if p.is_file(){Ok(p)}else{Err("RECALL_ENGINE does not name an executable".into())};}
@@ -449,6 +458,7 @@ fn export_limit(plan:&EditPlan,fps:u32)->Duration{
     Duration::from_secs_f64(600.0+seconds.max(0.0)*20.0*(f64::from(fps)/60.0).max(1.0))
 }
 pub fn export_clip(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->Result<ExportSummary,String>{
+    let _queued=ExportQueueGuard;
     validate_info(info)?;validate_fps(fps)?;plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())?;export.validate(plan)?;
     let lossless=export.mode==ExportMode::Lossless;
     if EXPORTING.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err(){return Err("Another export is running.".into());}

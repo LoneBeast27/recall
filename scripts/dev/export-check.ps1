@@ -56,6 +56,31 @@ Run-Scenario 'Cancel export stops this engine and leaves nothing' {
   Verdict @((Ok ($null -ne $engine) "export running: pid $($engine.Id)"), (Ok $end 'the engine ended on Cancel'), (Ok ($null -ne $said) "export_error '$($said.export_error)'"), (Ok ($left.Count -eq 0) "$($left.Count) files left in exports"))
 }
 
+Run-Scenario 'Closing the window lets the export finish' {
+  $s = Start-Viewer 'export-close' $Clip
+  $script:current = $s
+  $folder = Join-Path (Split-Path $s.Clip) 'exports'
+  [void](Wait-Trace $s { param($r) $r.stems -and $r.stems[0] } 60000)
+  Remove-Item (Join-Path $folder '*export-close*') -Force -ErrorAction SilentlyContinue
+  Click $s 'export'
+  $t = Get-Date; $running = $null
+  while (-not $running -and ((Get-Date) - $t).TotalSeconds -lt 10) { $running = Get-CimInstance Win32_Process -Filter "Name='recall.exe'" | Where-Object { $_.CommandLine -like '*--export-edit*' -and $_.CommandLine -like '*export-close*' } | Select-Object -First 1 }
+  $engine = if ($running) { Get-Process -Id $running.ProcessId -ErrorAction SilentlyContinue }
+  if ($engine) { [void]$engine.Handle }
+  Start-Sleep -Seconds 1
+  [void][VC]::PostMessage($s.Hwnd, 0x10, [IntPtr]::Zero, [IntPtr]::Zero)  # WM_CLOSE
+  $t = Get-Date
+  while ([VC]::IsWindow($s.Hwnd) -and ((Get-Date) - $t).TotalSeconds -lt 5) { Start-Sleep -Milliseconds 50 }
+  $closed = ((Get-Date) - $t).TotalSeconds
+  $end = $null -ne $engine -and $engine.WaitForExit(120000)
+  $gone = $s.Process.WaitForExit(10000)
+  $code = if ($end) { $engine.ExitCode } else { 'none' }
+  $left = @(Get-ChildItem $folder -Force -ErrorAction SilentlyContinue | Where-Object { $_.Name -like '*export-close*' })
+  $file = $left | Where-Object { -not $_.Name.StartsWith('.') } | Select-Object -First 1
+  $length = if ($file) { [double](& ffprobe -v error -show_entries format=duration -of csv=p=0 $file.FullName) } else { 0 }
+  Verdict @((Ok ($null -ne $engine) "export running: pid $($engine.Id)"), (Ok ($closed -lt 5) "window gone after $(Fmt $closed) s"), (Ok ($code -eq 0) "engine exit $code"), (Ok ($length -gt 0 -and $left.Count -eq 1) "$($left.Count) files in exports, $(Fmt $length) s long"), (Ok $gone 'the app ended after the export'))
+}
+
 $fails = @($script:results | Where-Object { $_.Result -eq 'FAIL' }).Count
 Write-Host "$($script:results.Count - $fails)/$($script:results.Count) passed"
 exit $(if ($fails) { 1 } else { 0 })
