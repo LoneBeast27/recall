@@ -285,7 +285,7 @@ pub fn save_project(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings
 }
 /// Untouched plan: one full-length range and every track at 0 dB, unmuted.
 fn plan_is_default(plan:&EditPlan,info:&ClipInfo)->bool{
-    let full=matches!(plan.ranges.as_slice(),[only] if only.start.abs()<1e-6&&(only.end-info.duration).abs()<1e-3);
+    let full=matches!(plan.ranges.as_slice(),[only] if only.start.abs()<1e-6&&(only.end-info.duration).abs()<1e-3&&only.speed==1.0);
     full&&plan.audio.iter().all(|a|a.gain_db==0.0&&!a.muted)
 }
 /// Leave / close / export: writes the `.recall-edit.json` sidecar beside the clip, through the clip's

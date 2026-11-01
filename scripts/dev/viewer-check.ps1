@@ -59,6 +59,7 @@ foreach ($name in $derived.Keys) { $clips[[IO.Path]::GetFileNameWithoutExtension
 
 . (Join-Path $PSScriptRoot 'viewer-check-play.ps1')
 . (Join-Path $PSScriptRoot 'viewer-check-edit.ps1')
+. (Join-Path $PSScriptRoot 'viewer-check-card.ps1')
 
 $script:results | Format-Table -AutoSize -Wrap | Out-String -Width 220
 $failed = @($script:results | Where-Object { $_.Result -eq 'FAIL' }).Count

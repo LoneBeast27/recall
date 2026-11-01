@@ -1,4 +1,5 @@
-//! Minimal single-line text field: append/backspace editing, Ctrl+A replace, paste.
+//! Minimal single-line text field: append/backspace editing, Ctrl+A replace, paste. A new value
+//! starts all selected; arrow keys, Home, End or a click keep it and go on typing at the end.
 //! The owning view routes `KeyDownEvent`s here and decides what Submit/Cancel mean.
 use gpui::{
     App, Div, ElementId, FocusHandle, KeyDownEvent, SharedString, Stateful, Window, div, prelude::*, px,
@@ -20,6 +21,7 @@ pub struct TextField {
     pub placeholder: SharedString,
     select_all: bool,
     max_len: usize,
+    digits_only: bool,
 }
 
 impl TextField {
@@ -30,7 +32,13 @@ impl TextField {
             placeholder: placeholder.into(),
             select_all: false,
             max_len,
+            digits_only: false,
         }
+    }
+
+    pub fn digits_only(mut self) -> Self {
+        self.digits_only = true;
+        self
     }
 
     pub fn set(&mut self, value: impl Into<String>) {
@@ -38,12 +46,17 @@ impl TextField {
         self.select_all = true;
     }
 
+    /// Keeps the text and types after it.
+    pub fn deselect(&mut self) {
+        self.select_all = false;
+    }
+
     pub fn is_focused(&self, window: &Window) -> bool {
         self.focus.is_focused(window)
     }
 
     pub fn insert(&mut self, text: &str) -> FieldEvent {
-        let clean: String = text.chars().filter(|ch| !ch.is_control()).collect();
+        let clean: String = text.chars().filter(|ch| !ch.is_control() && (!self.digits_only || ch.is_ascii_digit())).collect();
         if clean.is_empty() {
             return FieldEvent::None;
         }
@@ -65,7 +78,7 @@ impl TextField {
         let keystroke = &event.keystroke;
         let ctrl = keystroke.modifiers.control;
         match keystroke.key.as_str() {
-            "enter" => FieldEvent::Submit,
+            "enter" | "tab" => FieldEvent::Submit,
             "escape" => FieldEvent::Cancel,
             "backspace" => {
                 if self.select_all || ctrl {
@@ -75,6 +88,15 @@ impl TextField {
                     self.value.pop();
                 }
                 FieldEvent::Changed
+            }
+            "delete" if self.select_all => {
+                self.value.clear();
+                self.select_all = false;
+                FieldEvent::Changed
+            }
+            "left" | "right" | "home" | "end" => {
+                self.select_all = false;
+                FieldEvent::None
             }
             "a" if ctrl => {
                 self.select_all = true;

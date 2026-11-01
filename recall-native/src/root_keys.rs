@@ -2,7 +2,7 @@
 use gpui::{Context, KeyDownEvent, Window};
 
 use super::{Field, Root, Route};
-use crate::ui::FieldEvent;
+use crate::{library_state::RenameEnd, ui::FieldEvent};
 
 impl Root {
     pub fn focused_field(&self, window: &Window) -> Option<Field> {
@@ -28,6 +28,14 @@ impl Root {
         let ctrl = k.modifiers.control;
         let shift = k.modifiers.shift;
         let key = k.key.as_str();
+        // Keys would act on the plan the mouse is holding: Escape puts it back.
+        if self.ed.drag.is_some() {
+            if key == "escape" {
+                self.ed.cancel_drag();
+                cx.notify();
+            }
+            return;
+        }
         match self.route {
             Route::Editor => match key {
                 "space" => self.ed.toggle_play(),
@@ -49,11 +57,9 @@ impl Root {
                 _ => return,
             },
             Route::Library => match key {
-                "k" if ctrl => window.focus(&self.search.focus),
-                "/" => window.focus(&self.search.focus),
-                "f" if ctrl => window.focus(&self.search.focus),
-                "escape" if self.close_tile_menu() => {}
-                "escape" => self.lib.clear_selection(),
+                "k" | "f" if ctrl => self.focus_search(window),
+                "/" => self.focus_search(window),
+                "escape" => self.library_escape(),
                 // The open tile menu shows "Del" beside Delete: the key acts on the menu's clips.
                 "delete" if self.tile_menu.is_some() => {
                     if let Some(menu) = self.tile_menu.take() {
@@ -82,49 +88,33 @@ impl Root {
                     self.lib.refilter();
                 }
                 FieldEvent::Cancel => {
-                    self.search.value.clear();
-                    self.lib.filter.query.clear();
-                    self.lib.refilter();
+                    self.clear_search();
                     window.focus(&self.focus);
                 }
                 FieldEvent::Submit => window.focus(&self.focus),
                 FieldEvent::None => {}
             },
             Field::Rename => match self.rename.key_down(event, clipboard) {
-                FieldEvent::Submit => {
-                    if let Some(path) = self.lib.renaming.take() {
-                        let title = self.rename.value.clone();
-                        self.lib.rename(&path, &title);
-                    }
-                    window.focus(&self.focus);
-                }
-                FieldEvent::Cancel => {
-                    self.lib.renaming = None;
-                    window.focus(&self.focus);
-                }
+                FieldEvent::Submit => self.end_rename(RenameEnd::Save, window),
+                FieldEvent::Cancel => self.end_rename(RenameEnd::Cancel, window),
                 _ => {}
             },
-            Field::Fps => match self.fps_field.key_down(event, clipboard.map(|t| t.chars().filter(char::is_ascii_digit).collect())) {
-                FieldEvent::Changed | FieldEvent::Submit => {
+            Field::Fps => {
+                let outcome = self.fps_field.key_down(event, clipboard);
+                if outcome == FieldEvent::Changed {
                     if let Ok(fps) = self.fps_field.value.parse::<u32>() {
                         if (1..=i32::MAX as u32).contains(&fps) {
                             self.ed.set_fps(fps);
                         }
                     }
-                    if matches!(event.keystroke.key.as_str(), "enter") {
-                        window.focus(&self.focus);
-                    }
                 }
-                FieldEvent::Cancel => window.focus(&self.focus),
-                FieldEvent::None => {}
-            },
+                if outcome == FieldEvent::Cancel {
+                    self.ed.set_fps(self.fps_before);
+                }
+                if matches!(outcome, FieldEvent::Submit | FieldEvent::Cancel) {
+                    window.focus(&self.focus);
+                }
+            }
         }
-    }
-
-    pub fn begin_rename(&mut self, path: String, window: &mut Window) {
-        let current = self.lib.record(&path).map(|r| r.display_title().to_owned()).unwrap_or_default();
-        self.rename.set(current);
-        self.lib.renaming = Some(path);
-        window.focus(&self.rename.focus);
     }
 }

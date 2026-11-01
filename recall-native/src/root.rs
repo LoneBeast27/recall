@@ -1,6 +1,10 @@
 //! The single top-level view: routes between Library, Editor, HDR, Audio and Settings,
 //! owns services and workers, and runs the 30 ms poll loop.
-use std::time::{Duration, Instant};
+use std::{
+    cell::Cell,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use gpui::{
     Bounds, Context, Entity, FocusHandle, Render, Timer, Window, canvas, div, fill, point,
@@ -91,6 +95,16 @@ pub struct Root {
     pub meter_display: Vec<(f32, f32, Instant)>,
     /// Tile press that may become a drag-out: (path, window x, y).
     pub drag_origin: Option<(String, f32, f32)>,
+    /// The rename field was on screen in the last frame.
+    pub rename_painted: Rc<Cell<bool>>,
+    /// This press ended a rename or closed a menu: it does not also act on the tile under it.
+    pub press_dismisses: bool,
+    /// The sort menu was open at this press (its button then closes it, not reopens it).
+    pub press_saw_sort: bool,
+    /// The last click opened a clip from its tile.
+    pub opened_by_click: bool,
+    /// Frame rate before the fps field took the keyboard (Escape goes back to it).
+    pub fps_before: u32,
     /// Settings → Storage state (cache size slider, usage).
     pub cache: crate::views::storage_settings::CacheView,
     pub settings_tab: crate::views::settings::SettingsTab,
@@ -105,6 +119,8 @@ pub struct Root {
 
 #[path = "root_events.rs"]
 mod events;
+#[path = "root_exits.rs"]
+mod exits;
 #[path = "root_keys.rs"]
 mod keys;
 
@@ -128,7 +144,7 @@ impl Root {
             ed: EditorState::new(preview),
             search: TextField::new(cx, "Search clips", 80),
             rename: TextField::new(cx, "Clip title", 80),
-            fps_field: TextField::new(cx, "fps", 7),
+            fps_field: TextField::new(cx, "fps", 7).digits_only(),
             fps_custom: false,
             meters: None,
             midi: None,
@@ -140,6 +156,11 @@ impl Root {
             tile_menu: None,
             meter_display: Vec::new(),
             drag_origin: None,
+            rename_painted: Rc::new(Cell::new(false)),
+            press_dismisses: false,
+            press_saw_sort: false,
+            opened_by_click: false,
+            fps_before: 60,
             cache: crate::views::storage_settings::CacheView::new(),
             settings_tab: Default::default(),
             title_drag: None,
@@ -215,6 +236,12 @@ impl Root {
             self.lib.note_scroll_depth();
         }
         self.lib.flush_meta_if_due();
+        if let Some(notice) = self.lib.notice.take() {
+            self.show_toast(ToastKind::Bad, notice, None);
+            changed = true;
+        }
+        // The tile with the rename field left the screen: draw again so `settle_focus` sees it.
+        changed |= self.lib.renaming.is_some() && !self.rename_painted.get();
         // Opening Recall means recording: start the recorder once if it isn't running.
         if self.controller_check_at.is_some_and(|at| Instant::now() >= at) {
             self.controller_check_at = None;
@@ -307,6 +334,10 @@ impl Root {
     }
 
     pub fn go(&mut self, route: Route) {
+        self.lib.finish_rename(&self.rename.value, crate::library_state::RenameEnd::Away);
+        self.lib.confirm_delete = false;
+        self.lib.set_hover(None, &self.workers);
+        self.ed.end_drag();
         if self.route == Route::Editor && route != Route::Editor {
             self.ed.flush(&self.workers);
             self.ed.pause();
@@ -341,6 +372,8 @@ impl Root {
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.settle_focus(window);
+        self.trace_ui(window);
         crate::trace::clear_targets(window);
         // Meters and playback animate at the display refresh rate, not the 30 ms poll.
         if self.route == Route::Audio || (self.route == Route::Editor && self.ed.playing) {
@@ -398,6 +431,7 @@ impl Render for Root {
             .id("body")
             .key_context("Recall")
             .track_focus(&self.focus)
+            .capture_any_mouse_down(cx.listener(Self::on_press))
             .on_key_down(cx.listener(Self::on_key))
             .flex_1()
             .min_h_0()
@@ -409,6 +443,7 @@ impl Render for Root {
             .flex()
             .flex_col()
             .child(backdrop)
+            .child(Self::drag_watch(cx))
             .font_family(theme::sans())
             .text_size(px(13.))
             .line_height(px(18.))
