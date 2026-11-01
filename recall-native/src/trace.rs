@@ -144,6 +144,7 @@ pub fn record(route: &str, ed: &EditorState, clips: usize) {
         "kept": ed.plan.duration(),
         "audio": preview.map(|p| p.audio_position()),
         "video": preview.and_then(|p| p.video_position().ok()),
+        "picture_end": preview.and_then(|p| p.picture_end()),
         "drift_seeks": preview.map(|p| p.drift_seeks.get()),
         "audio_stalls": preview.map(|p| p.audio_stalls.get()),
         "audio_underruns": preview.map(|p| p.audio_underruns()),

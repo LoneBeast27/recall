@@ -124,6 +124,8 @@ impl NativePreview {
             observed_error: None,
             prime_started: None,
             video_end: None,
+            last_frame: None,
+            rest: Cell::new(None),
         })
     }
 
@@ -174,14 +176,17 @@ impl NativePreview {
         }
         .into();
         let normalized = normalize_windows_path(path);
-        // MP4/MOV state the picture's length; for others (MKV) keep a tenth of a second clear.
-        self.video_end = crate::services::library::mp4_video_duration(Path::new(&normalized))
-            .or_else(|| (duration > 0.2).then(|| duration - 0.1));
+        // MP4/MOV list the frames; for others (MKV) keep a tenth of a second clear of the end.
+        let file = Path::new(&normalized);
+        self.video_end = crate::services::library::mp4_video_duration(file).or(Some(duration));
+        self.last_frame = crate::services::library::mp4_last_frame(file)
+            .or_else(|| self.video_end.filter(|end| *end > 0.2).map(|end| end - 0.1));
+        self.rest.set(None);
         let url = wide(&normalized);
         let mut player = None;
         unsafe {
             MFPCreateMediaPlayer(
-                PCWSTR(url.as_ptr()),
+                PCWSTR::null(),
                 false,
                 MFP_OPTION_FREE_THREADED_CALLBACK,
                 &callback,
@@ -192,6 +197,11 @@ impl NativePreview {
         .map_err(|error| format!("could not open native video preview: {error}"))?;
         let player =
             player.ok_or_else(|| "Media Foundation returned no preview player".to_string())?;
+        // The callback selects the streams and sets the item (see `set_picture_only_item`).
+        if let Err(error) = unsafe { player.CreateMediaItemFromURL(PCWSTR(url.as_ptr()), false, 0, None) } {
+            let _ = unsafe { player.Shutdown() };
+            return Err(format!("could not open native video preview: {error}"));
+        }
         if let Err(error) = unsafe { player.SetMute(true) } {
             let _ = unsafe { player.Shutdown() };
             return Err(format!("could not mute embedded source audio: {error}"));

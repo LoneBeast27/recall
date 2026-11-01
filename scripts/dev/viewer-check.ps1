@@ -2,7 +2,7 @@
   Viewer response checks for the editor's player (dev check; run after player/editor changes).
 
   Each scenario opens a fresh hard link of a test clip in a private Recall instance (edits never
-  touch the original; the instance runs behind all windows, never takes focus, and uses its own
+  touch the original; the instance runs outside every monitor, never takes focus, and uses its own
   settings, library, cache and control pipe), drives it the way a person does -- keys, the play
   button, the timeline, the tools, the Library -- and reads the app's trace (RECALL_NATIVE_TRACE)
   to check that the clock AND the picture move, start where they should, and stop where they
