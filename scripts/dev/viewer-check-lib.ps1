@@ -70,7 +70,8 @@ function New-ClipLink([string]$dir, [string]$name, [string]$from) {
 function Start-Viewer([string]$name, [string]$from, [switch]$Library, [string[]]$Also = @()) {
   # Editor runs get an empty library, so the smart cache never prepares the clip being opened.
   $libDir = Join-Path $script:work $(if ($Library) { "lib-$name" } else { 'lib-empty' })
-  if ($Library) { Remove-Item $libDir -Recurse -Force -ErrorAction SilentlyContinue }
+  # Titles and favourites live in the sandbox's library file, by clip name: each run starts clean.
+  if ($Library) { Remove-Item $libDir -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item (Join-Path $script:sandbox 'library.json') -ErrorAction SilentlyContinue }
   New-Item -ItemType Directory -Force -Path $libDir | Out-Null
   $clip = New-ClipLink $(if ($Library) { $libDir } else { $script:work }) $name $from
   foreach ($extra in $Also) { [void](New-ClipLink $libDir $extra $from) }

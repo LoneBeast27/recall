@@ -194,7 +194,12 @@ impl Root {
                 .bg(c(theme::RAISED))
                 .border_1()
                 .border_color(c(theme::BORDER_STRONG))
-                .child(canvas(move |_, _, _| painted.set(true), |_, _, _, _| {}).absolute().size_0())
+                .child(
+                    // The list also lays out rows just past the viewport: those don't count.
+                    canvas(move |bounds, window, _| painted.set(!bounds.intersect(&window.content_mask().bounds).is_empty()), |_, _, _, _| {})
+                        .absolute()
+                        .inset_0(),
+                )
                 .child(crate::trace::target("rename"))
                 .child(self.rename.render("rename", window).flex_1())
                 // Inside the field a press is for the field: no opening, dragging or menu.
