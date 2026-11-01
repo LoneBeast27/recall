@@ -207,6 +207,9 @@ impl NativePreview {
         }
         let picture = video_time(seconds, self.last_frame);
         set_player_position(player, picture)?;
+        if let Some(media) = &self.stream {
+            media.fill.note_seek();
+        }
         self.rest.set((picture < seconds).then_some(seconds));
         self.last_drift_check.set(Instant::now());
         self.audio_seen.set((seconds, Instant::now()));
