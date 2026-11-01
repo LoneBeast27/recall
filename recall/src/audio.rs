@@ -281,17 +281,25 @@ fn name_matches(name: &str, want: &str) -> bool {
         .all(|tok| name.contains(&tok.to_lowercase()))
 }
 
+/// Endpoint names to try, in order. `exact` (test runs) keeps only the override.
+fn wanted_endpoints(over: Option<String>, prefer: &[&str], exact: bool) -> Vec<String> {
+    let mut wanted: Vec<String> = over.into_iter().collect();
+    if !exact {
+        wanted.extend(prefer.iter().map(|s| s.to_string()));
+    }
+    wanted
+}
+
 /// Pick the endpoint for a spec: env override tokens, then preference list,
-/// then the OS default for that direction.
+/// then the OS default for that direction. `RECALL_AUDIO_EXACT` allows the
+/// override only: a test run gets its virtual endpoint or no track, never the
+/// person's real mic.
 fn pick_device(spec: &TrackSpec) -> Result<(wasapi::Device, String), String> {
     let collection =
         DeviceCollection::new(&spec.direction).map_err(|e| format!("enumerate: {e}"))?;
     let n = collection.get_nbr_devices().map_err(|e| e.to_string())?;
-    let mut wanted: Vec<String> = Vec::new();
-    if let Ok(over) = std::env::var(spec.env) {
-        wanted.push(over);
-    }
-    wanted.extend(spec.prefer.iter().map(|s| s.to_string()));
+    let exact = std::env::var_os("RECALL_AUDIO_EXACT").is_some();
+    let wanted = wanted_endpoints(std::env::var(spec.env).ok(), spec.prefer, exact);
 
     for want in &wanted {
         for i in 0..n {
@@ -301,6 +309,9 @@ fn pick_device(spec: &TrackSpec) -> Result<(wasapi::Device, String), String> {
                 return Ok((dev, name));
             }
         }
+    }
+    if exact {
+        return Err(format!("no endpoint matches {wanted:?} (RECALL_AUDIO_EXACT)"));
     }
     // Fall back to the default endpoint for the direction.
     let dev = wasapi::get_default_device(&spec.direction)

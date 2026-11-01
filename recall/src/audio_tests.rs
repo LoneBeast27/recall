@@ -176,3 +176,13 @@ fn bench_full_ring_snapshot() {
          lock held for the memcpy ~{lock_ms:.1}ms"
     );
 }
+
+#[test]
+fn an_exact_test_run_reaches_only_the_named_endpoint() {
+    let prefer = ["microphone rodecaster chat"];
+    let wanted = super::wanted_endpoints(Some("virtual mic".into()), &prefer, true);
+    assert_eq!(wanted, ["virtual mic"]);
+    assert!(super::wanted_endpoints(None, &prefer, true).is_empty());
+    let wanted = super::wanted_endpoints(Some("virtual mic".into()), &prefer, false);
+    assert_eq!(wanted, ["virtual mic", "microphone rodecaster chat"]);
+}

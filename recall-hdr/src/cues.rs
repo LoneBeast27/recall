@@ -35,6 +35,10 @@ static SAVED_WAV: OnceLock<Vec<u8>> = OnceLock::new();
 static FAILED_WAV: OnceLock<Vec<u8>> = OnceLock::new();
 
 fn play(cell: &'static OnceLock<Vec<u8>>, notes: Notes, volume: f32) {
+    // Unit tests reach the save paths: they stay off the person's speakers.
+    if cfg!(test) {
+        return;
+    }
     // The buffer lives for the whole process, as SND_MEMORY|SND_ASYNC requires.
     let wav = cell.get_or_init(|| wav(notes, volume));
     #[link(name = "winmm")]
