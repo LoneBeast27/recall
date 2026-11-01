@@ -12,9 +12,12 @@
 
   Never run while a game is running (it refuses): it costs CPU/GPU and starts an NVENC session.
   Only that one corner pixel is on screen. Clips go to -OutDir (default .tmp\engine-cost\clips).
+  The Mic track records -TestMic, an endpoint nobody speaks into, and never falls back to the real
+  mic (RECALL_AUDIO_EXACT). The run fails when that track does not start: the cost would not
+  include it.
 
     powershell -NoProfile -File scripts\dev\engine-cost.ps1 [-Engine <recall.exe>] [-Seconds 30]
-      [-TargetFps 500] [-MaxMsPerFrame 1.5] [-SaveSeconds 0] [-Json <file>]
+      [-TargetFps 500] [-MaxMsPerFrame 1.5] [-SaveSeconds 0] [-Json <file>] [-TestMic <name words>]
 #>
 param(
   [string]$Engine = '',
@@ -30,6 +33,7 @@ param(
   [int]$SaveSeconds = 0,
   [string]$OutDir = '',
   [string]$Json = '',
+  [string]$TestMic = 'microphone steam streaming',
   [switch]$Monitor
 )
 $ErrorActionPreference = 'Stop'
@@ -74,6 +78,7 @@ if (-not $hwnd) { $tgt.proc.Kill(); throw "present_target gave no window: $($tli
 
 $envs = @{
   RECALL_CAPTURE_NAME = 'PresentTarget'; RECALL_AUDIO_GAME_PID = "$($tgt.proc.Id)"
+  RECALL_AUDIO_MIC = $TestMic; RECALL_AUDIO_EXACT = '1'
   RECALL_CPU_MASK = 'ffff0000'; RECALL_FPS = '60'; RECALL_BITRATE = '25000000'; RECALL_BUFFER_SECS = '120'
   RECALL_CODEC = 'h264'; RECALL_QUALITY = 'high'; RECALL_OUT_DIR = $OutDir; RECALL_STAGING_DIR = 'off'
   RECALL_MOMENTS = '0'; RECALL_MOMENTS_DB = (Join-Path $OutDir 'no-moments.db')
@@ -89,6 +94,11 @@ function Pump { foreach ($l in (Drain $eng.out)) { $log.Add($l) }; foreach ($l i
 $warm = (Get-Date).AddSeconds($Warmup)
 while ((Get-Date) -lt $warm) { Start-Sleep -Milliseconds 250; Pump; if ($eng.proc.HasExited) { break } }
 if ($eng.proc.HasExited) { $tgt.proc.Kill(); throw "engine exited during warmup: $($log -join "`n")" }
+$micUp = $log | Where-Object { $_ -match "audio track 'Mic' up" } | Select-Object -First 1
+if (-not $micUp) {
+  $eng.proc.StandardInput.WriteLine('{"cmd":"quit"}'); [void]$eng.proc.WaitForExit(8000); if (-not $tgt.proc.HasExited) { $tgt.proc.Kill() }
+  throw "no test Mic track on '$TestMic': $(($log | Where-Object { $_ -match "'Mic'" }) -join ' | ')"
+}
 
 # A target WGC sees as occluded delivers no frames; say so instead of measuring an idle engine.
 $warmFps = @($log | Where-Object { $_ -match '"type":"status"' } | ForEach-Object { ($_ | ConvertFrom-Json).fps } | Select-Object -Last 2)

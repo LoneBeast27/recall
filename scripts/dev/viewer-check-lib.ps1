@@ -2,8 +2,8 @@
   Driver for scripts\dev\viewer-check.ps1: starts private Recall instances and drives them the
   way a person does, without touching the desktop. Dot-source it, then call Initialize-ViewerCheck.
 
-  Every instance runs outside every monitor, out of the taskbar, and never activates
-  (RECALL_NATIVE_OFFSCREEN), with its
+  Every instance runs outside every monitor, out of the taskbar, never activates and plays
+  silence (RECALL_NATIVE_OFFSCREEN), with its
   own settings folder, library folder and control pipe, so the person's Recall window, recorder,
   library titles and player log are never touched. Input is posted to the instance's own window
   (PostMessage), never injected into the desktop: keys go through the app's key handler, clicks
