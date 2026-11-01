@@ -13,8 +13,8 @@
   Never run while a game is running (it refuses): it costs CPU/GPU and starts an NVENC session.
   Only that one corner pixel is on screen. Clips go to -OutDir (default .tmp\engine-cost\clips).
   The Mic track records -TestMic, an endpoint nobody speaks into, and never falls back to the real
-  mic (RECALL_AUDIO_EXACT). The run fails when that track does not start: the cost would not
-  include it.
+  mic (RECALL_AUDIO_EXACT). When that endpoint is missing the run warns and measures without a
+  Mic track.
 
     powershell -NoProfile -File scripts\dev\engine-cost.ps1 [-Engine <recall.exe>] [-Seconds 30]
       [-TargetFps 500] [-MaxMsPerFrame 1.5] [-SaveSeconds 0] [-Json <file>] [-TestMic <name words>]
@@ -95,10 +95,7 @@ $warm = (Get-Date).AddSeconds($Warmup)
 while ((Get-Date) -lt $warm) { Start-Sleep -Milliseconds 250; Pump; if ($eng.proc.HasExited) { break } }
 if ($eng.proc.HasExited) { $tgt.proc.Kill(); throw "engine exited during warmup: $($log -join "`n")" }
 $micUp = $log | Where-Object { $_ -match "audio track 'Mic' up" } | Select-Object -First 1
-if (-not $micUp) {
-  $eng.proc.StandardInput.WriteLine('{"cmd":"quit"}'); [void]$eng.proc.WaitForExit(8000); if (-not $tgt.proc.HasExited) { $tgt.proc.Kill() }
-  throw "no test Mic track on '$TestMic': $(($log | Where-Object { $_ -match "'Mic'" }) -join ' | ')"
-}
+if (-not $micUp) { Write-Warning "no test Mic track on '$TestMic': the cost below has no Mic track. $(($log | Where-Object { $_ -match "'Mic'" }) -join ' | ')" }
 
 # A target WGC sees as occluded delivers no frames; say so instead of measuring an idle engine.
 $warmFps = @($log | Where-Object { $_ -match '"type":"status"' } | ForEach-Object { ($_ | ConvertFrom-Json).fps } | Select-Object -Last 2)

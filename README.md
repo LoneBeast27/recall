@@ -149,7 +149,8 @@ Checks stay silent and leave the real mic alone, with no driver to install and n
 Windows default devices. A test instance (`RECALL_NATIVE_OFFSCREEN=1`) and every unit test write
 zeros to the default output, so its clock and underruns stay real and nothing is heard. A test
 instance opens no level meters. The engine cost check records its Mic track from an endpoint
-nobody speaks into, and `RECALL_AUDIO_EXACT=1` stops it falling back to the real mic.
+nobody speaks into, and `RECALL_AUDIO_EXACT=1` stops it falling back to the real mic; without that
+endpoint it warns and measures with no Mic track.
 `cargo run --release --example audio_poll -- --pid <pid> --stop <file>` proves it: it reads what
 that process tree sends to Windows, and prints the peak.
 
