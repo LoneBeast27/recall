@@ -82,7 +82,7 @@ function Start-Viewer([string]$name, [string]$from, [switch]$Library, [string[]]
   if ($script:ffmpeg) { $env:RECALL_FFMPEG = $script:ffmpeg }
   if ($script:ffprobe) { $env:RECALL_FFPROBE = $script:ffprobe }
   $realAppData = $env:APPDATA; $env:APPDATA = $script:sandbox
-  try { $p = Start-Process -FilePath $script:exe -WorkingDirectory (Split-Path $script:exe) -PassThru; [void]$p.Handle } # keeps the exit code readable
+  try { $p = Start-Process -FilePath $script:exe -WorkingDirectory (Split-Path $script:exe) -NoNewWindow -PassThru; [void]$p.Handle } # a console exe: on our console, no window of its own; keeps the exit code readable
   finally {
     $env:APPDATA = $realAppData
     foreach ($v in 'RECALL_NATIVE_TRACE', 'RECALL_NATIVE_CLIP', 'RECALL_NATIVE_WINDOW_SIZE', 'RECALL_NATIVE_OFFSCREEN', 'RECALL_NO_CONTROLLER', 'RECALL_CONTROL_PIPE', 'RECALL_OUT_DIR', 'RECALL_FOLDERS', 'RECALL_LIBRARY_META', 'RECALL_CACHE_DIR', 'RECALL_FFMPEG', 'RECALL_FFPROBE') { Remove-Item "Env:$v" -ErrorAction SilentlyContinue }
