@@ -10,26 +10,28 @@
 //!
 //! The file is sparse and unbuffered on both sides: a hole never reaches a reader, and the
 //! file cache never holds zeros for a part written later.
-use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
+//!
+//! A clip too large for the video tier is not copied ([`ClipFill::direct`]): the same readers
+//! read it where it lies, so the player and the decoder need no second path.
 use std::fs::{File, OpenOptions};
-use std::io::{Read, Seek, SeekFrom, Write};
 use std::os::windows::fs::{FileExt, OpenOptionsExt};
-use std::os::windows::io::AsRawHandle;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, SystemTime};
 
-use windows::Win32::Foundation::HANDLE;
-use windows::Win32::Storage::FileSystem::{FILE_FLAG_NO_BUFFERING, FILE_FLAG_WRITE_THROUGH};
-use windows::Win32::System::IO::DeviceIoControl;
+use windows::Win32::Storage::FileSystem::FILE_FLAG_NO_BUFFERING;
 
 use super::lane::{self, Priority};
 
+#[path = "fill_reader.rs"]
+mod reader;
+pub use reader::AlignedBuffer;
+use reader::{Reader, open_part, open_unbuffered, set_sparse};
+
 /// One read of the drive. Also the unit of the "have it" map.
 pub const CHUNK: u64 = 4 << 20;
-const ALIGN: u64 = 4096;
-const FSCTL_SET_SPARSE: u32 = 0x0009_00C4;
+pub(super) const ALIGN: u64 = 4096;
 /// Bytes kept ready past the player's last read before the copy yields to other disk work.
 const RUNWAY: u64 = 64 << 20;
 
@@ -38,6 +40,16 @@ pub enum Outcome {
     Filling,
     Done,
     Cancelled,
+    /// The drive stopped answering, or the clip changed: what arrived stays playable.
+    Failed,
+}
+
+/// Part files of the fills alive in this process: nothing may clean these up.
+static IN_USE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// A fill in this process is writing `path`.
+pub(super) fn in_use(path: &Path) -> bool {
+    IN_USE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().any(|part| part == path)
 }
 
 struct State {
@@ -51,6 +63,18 @@ struct State {
     played: u64,
     outcome: Outcome,
     error: Option<String>,
+    /// Background copying waits (the editor is not showing the clip, or the recorder is busy).
+    /// A reader stopped on a missing part is still served.
+    held: bool,
+    /// The reader stopped for that: the next demand has to start it again.
+    parked: bool,
+}
+
+/// What the reader does next.
+enum Next {
+    Chunk(u64),
+    Park,
+    Finished,
 }
 
 struct Shared {
@@ -63,19 +87,24 @@ struct Shared {
     changed: Condvar,
     /// Each change of the map, so the UI repaints only when there is something new.
     revision: AtomicU64,
-    /// Test hook: bytes a second the reader may take (0 = as fast as the drive goes).
+    /// Test hooks: bytes a second the reader may take (0 = as fast as the drive goes), and
+    /// bytes after which the drive stops answering (0 = never).
     throttle: u64,
-    /// Over the video tier's cap: the copy leaves with the clip.
-    session: bool,
+    fail_after: u64,
+    /// The clip read where it lies: `part` is the clip itself and must never be removed.
+    direct: bool,
+    playing: AtomicBool,
+    reader: Mutex<Option<Arc<Mutex<Reader>>>>,
 }
 
 impl Drop for Shared {
     fn drop(&mut self) {
-        let done = self.state.get_mut().is_ok_and(|state| state.outcome == Outcome::Done);
-        if !done {
+        if self.direct {
+            return;
+        }
+        IN_USE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retain(|part| *part != self.part);
+        if !self.state.get_mut().is_ok_and(|state| state.outcome == Outcome::Done) {
             let _ = std::fs::remove_file(&self.part);
-        } else if self.session {
-            let _ = std::fs::remove_file(&self.target);
         }
     }
 }
@@ -94,12 +123,24 @@ fn chunk_count(bytes: u64) -> u64 {
 
 impl ClipFill {
     /// Prepares `part` (sparse, full length) beside `target`; call [`ClipFill::start`] to begin.
-    pub fn create(source: &Path, part: &Path, target: &Path, bytes: u64, modified: SystemTime, throttle: u64, session: bool) -> Result<Self, String> {
+    pub fn create(source: &Path, part: &Path, target: &Path, bytes: u64, modified: SystemTime, throttle: u64, fail_after: u64) -> Result<Self, String> {
         let file = OpenOptions::new().write(true).create(true).truncate(true).open(part).map_err(|error| format!("create fill: {error}"))?;
         set_sparse(&file)?;
         file.set_len(bytes).map_err(|error| format!("size fill: {error}"))?;
-        let state = State { have: vec![false; chunk_count(bytes) as usize], missing: chunk_count(bytes), cursor: 0, wanted: Vec::new(), played: 0, outcome: Outcome::Filling, error: None };
-        Ok(Self(Arc::new(Shared {
+        IN_USE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(part.to_path_buf());
+        let state = State { have: vec![false; chunk_count(bytes) as usize], missing: chunk_count(bytes), cursor: 0, wanted: Vec::new(), played: 0, outcome: Outcome::Filling, error: None, held: false, parked: false };
+        Ok(Self::shared(source, part, target, bytes, modified, state, throttle, fail_after, false))
+    }
+
+    /// The clip where it lies: nothing is copied, everything counts as there.
+    pub fn direct(source: &Path, bytes: u64, modified: SystemTime) -> Self {
+        let state = State { have: vec![true; chunk_count(bytes) as usize], missing: 0, cursor: 0, wanted: Vec::new(), played: 0, outcome: Outcome::Done, error: None, held: false, parked: false };
+        Self::shared(source, source, source, bytes, modified, state, 0, 0, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn shared(source: &Path, part: &Path, target: &Path, bytes: u64, modified: SystemTime, state: State, throttle: u64, fail_after: u64, direct: bool) -> Self {
+        Self(Arc::new(Shared {
             source: source.to_path_buf(),
             part: part.to_path_buf(),
             target: target.to_path_buf(),
@@ -109,8 +150,11 @@ impl ClipFill {
             changed: Condvar::new(),
             revision: AtomicU64::new(0),
             throttle,
-            session,
-        })))
+            fail_after,
+            direct,
+            playing: AtomicBool::new(false),
+            reader: Mutex::new(None),
+        }))
     }
 
     /// Asks for `chunks` first (the index and the head of the clip) and starts reading.
@@ -121,9 +165,37 @@ impl ClipFill {
             let mut state = lock(&self.0);
             state.wanted = first.iter().rev().copied().collect();
         }
-        let reader = Arc::new(Mutex::new(Reader { input, output, buffer: AlignedBuffer::new(CHUNK as usize), last: None, started: Instant::now(), read: 0 }));
+        let reader = Arc::new(Mutex::new(Reader::new(input, output)));
+        *self.0.reader.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::clone(&reader));
         schedule(self.clone(), reader, Priority::Interactive);
         Ok(())
+    }
+
+    /// The clip is read where it lies, not copied.
+    pub fn is_direct(&self) -> bool {
+        self.0.direct
+    }
+
+    /// Lets background copying wait or carry on.
+    pub fn hold(&self, held: bool) {
+        lock(&self.0).held = held;
+        if !held {
+            self.wake();
+        }
+        self.0.changed.notify_all();
+    }
+
+    pub fn held(&self) -> bool {
+        lock(&self.0).held
+    }
+
+    /// Starts the reader again if it parked.
+    fn wake(&self) {
+        let parked = std::mem::take(&mut lock(&self.0).parked);
+        let reader = self.0.reader.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        if let (true, Some(reader)) = (parked, reader) {
+            schedule(self.clone(), reader, Priority::Interactive);
+        }
     }
 
     pub fn bytes(&self) -> u64 {
@@ -180,7 +252,7 @@ impl ClipFill {
     /// Stops the reader. Readers waiting on this fill return false.
     pub fn cancel(&self) {
         let mut state = lock(&self.0);
-        if state.outcome == Outcome::Filling {
+        if matches!(state.outcome, Outcome::Filling | Outcome::Failed) {
             state.outcome = Outcome::Cancelled;
         }
         drop(state);
@@ -206,6 +278,11 @@ impl ClipFill {
             if want {
                 state.wanted.retain(|chunk| !missing.contains(chunk));
                 state.wanted.extend(missing.iter().rev());
+                if state.parked {
+                    drop(state);
+                    self.wake();
+                    state = lock(&self.0);
+                }
             }
             state = self.0.changed.wait_timeout(state, Duration::from_millis(200)).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
         }
@@ -239,30 +316,62 @@ impl ClipFill {
         Ok(usable)
     }
 
-    /// A handle for [`ClipFill::read_at`].
+    /// A handle for [`ClipFill::read_at`]. A clip read where it lies has no holes to keep out of
+    /// the file cache, and the drive's own read-ahead helps it.
     pub fn open_reader(&self) -> std::io::Result<File> {
-        OpenOptions::new().read(true).custom_flags(FILE_FLAG_NO_BUFFERING.0).share_mode(7).open(&self.0.part)
+        let mut options = OpenOptions::new();
+        options.read(true).share_mode(7);
+        if !self.0.direct {
+            options.custom_flags(FILE_FLAG_NO_BUFFERING.0);
+        }
+        options.open(&self.0.part)
+    }
+
+    /// The player has this clip open: from now on a read of a part that will never come waits
+    /// for the clip to close, so that everything which did arrive stays playable.
+    pub fn set_playing(&self) {
+        self.0.playing.store(true, Ordering::Release);
+    }
+
+    /// After a failed read: true when the reader should wait for the close.
+    pub fn stays_open(&self) -> bool {
+        self.0.playing.load(Ordering::Acquire) && lock(&self.0).outcome == Outcome::Failed
+    }
+
+    /// Waits until the clip closes.
+    pub fn wait_closed(&self) {
+        let mut state = lock(&self.0);
+        while state.outcome == Outcome::Failed {
+            state = self.0.changed.wait_timeout(state, Duration::from_millis(500)).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
+        }
     }
 
     /// Takes the next chunk: a stopped reader's first, else the next in file order, wrapping
     /// to whatever was skipped.
-    fn next_chunk(&self) -> Option<(u64, bool)> {
+    fn next_chunk(&self) -> Next {
         let mut state = lock(&self.0);
         if state.outcome != Outcome::Filling {
-            return None;
+            return Next::Park;
         }
         while let Some(chunk) = state.wanted.pop() {
             if !state.have[chunk as usize] {
                 // The copy carries on from here, so a seek ahead keeps playing.
                 state.cursor = chunk + 1;
-                return Some((chunk, true));
+                return Next::Chunk(chunk);
             }
         }
+        if state.held {
+            state.parked = true;
+            return Next::Park;
+        }
         let total = state.have.len() as u64;
-        (0..total).map(|step| (state.cursor + step) % total).find(|chunk| !state.have[*chunk as usize]).map(|chunk| {
-            state.cursor = chunk + 1;
-            (chunk, false)
-        })
+        match (0..total).map(|step| (state.cursor + step) % total).find(|chunk| !state.have[*chunk as usize]) {
+            Some(chunk) => {
+                state.cursor = chunk + 1;
+                Next::Chunk(chunk)
+            }
+            None => Next::Finished,
+        }
     }
 
     /// How urgently the next chunk is needed: a stopped reader or a short runway beat
@@ -291,7 +400,9 @@ impl ClipFill {
     fn fail(&self, error: String) {
         let mut state = lock(&self.0);
         state.error = Some(error);
-        state.outcome = Outcome::Cancelled;
+        if state.outcome == Outcome::Filling {
+            state.outcome = Outcome::Failed;
+        }
         drop(state);
         self.0.revision.fetch_add(1, Ordering::Relaxed);
         self.0.changed.notify_all();
@@ -312,25 +423,25 @@ impl ClipFill {
     }
 
     fn step(&self, reader: &mut Reader) -> bool {
-        let Some((chunk, _)) = self.next_chunk() else {
-            let complete = lock(&self.0).missing == 0;
-            if complete {
-                let result = self.finish(reader);
-                let mut state = lock(&self.0);
-                match result {
-                    Ok(()) if state.outcome == Outcome::Filling => state.outcome = Outcome::Done,
-                    Ok(()) => {}
-                    Err(error) => {
-                        state.error = Some(error);
-                        state.outcome = Outcome::Cancelled;
+        let chunk = match self.next_chunk() {
+            Next::Chunk(chunk) => chunk,
+            Next::Park => return false,
+            Next::Finished => {
+                match self.finish(reader) {
+                    Ok(()) => {
+                        let mut state = lock(&self.0);
+                        if state.outcome == Outcome::Filling {
+                            state.outcome = Outcome::Done;
+                        }
                     }
+                    Err(error) => self.fail(error),
                 }
-                drop(state);
+                self.0.revision.fetch_add(1, Ordering::Relaxed);
                 self.0.changed.notify_all();
+                return false;
             }
-            return false;
         };
-        if let Err(error) = reader.copy(chunk, self.0.bytes, self.0.throttle) {
+        if let Err(error) = reader.copy(chunk, self.0.bytes, self.0.throttle, self.0.fail_after) {
             self.fail(error);
             return false;
         }
@@ -345,52 +456,6 @@ fn spanning(start: u64, end: u64, bytes: u64) -> impl Iterator<Item = u64> {
     let first = (start / CHUNK).min(last);
     let stop = (end.max(start + 1).saturating_sub(1) / CHUNK).min(last);
     first..=stop
-}
-
-struct Reader {
-    input: File,
-    output: File,
-    buffer: AlignedBuffer,
-    /// Chunk read last: the next one needs no seek when it follows.
-    last: Option<u64>,
-    started: Instant,
-    read: u64,
-}
-
-impl Reader {
-    fn copy(&mut self, chunk: u64, bytes: u64, throttle: u64) -> Result<(), String> {
-        let offset = chunk * CHUNK;
-        let want = (bytes - offset).min(CHUNK);
-        if self.last.is_none_or(|last| last + 1 != chunk) {
-            self.input.seek(SeekFrom::Start(offset)).map_err(|error| format!("seek clip: {error}"))?;
-        }
-        self.last = Some(chunk);
-        let padded = want.div_ceil(ALIGN) * ALIGN;
-        let mut got = 0usize;
-        while (got as u64) < want {
-            let read = self.input.read(&mut self.buffer.bytes()[got..padded as usize]).map_err(|error| format!("read clip: {error}"))?;
-            if read == 0 {
-                return Err("clip ended early".into());
-            }
-            got += read;
-            if (got as u64) < want && got as u64 % ALIGN != 0 {
-                return Err("short unaligned read".into());
-            }
-        }
-        self.buffer.bytes()[got..padded as usize].fill(0);
-        self.output.seek(SeekFrom::Start(offset)).map_err(|error| format!("seek fill: {error}"))?;
-        self.output.write_all(&self.buffer.bytes()[..padded as usize]).map_err(|error| format!("write fill: {error}"))?;
-        lane::count_read(want);
-        self.read += want;
-        if throttle > 0 {
-            let due = Duration::from_secs_f64(self.read as f64 / throttle as f64);
-            let elapsed = self.started.elapsed();
-            if due > elapsed {
-                std::thread::sleep(due - elapsed);
-            }
-        }
-        Ok(())
-    }
 }
 
 /// One step, then the next: on the clip's disk lane, or a thread of its own on an SSD (the
@@ -413,50 +478,6 @@ fn schedule(fill: ClipFill, reader: Arc<Mutex<Reader>>, priority: Priority) {
             schedule(fill, reader, next);
         }
     }));
-}
-
-fn open_unbuffered(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new().read(true).custom_flags(FILE_FLAG_NO_BUFFERING.0).open(path)
-}
-
-fn open_part(path: &Path) -> std::io::Result<File> {
-    OpenOptions::new().write(true).custom_flags(FILE_FLAG_NO_BUFFERING.0 | FILE_FLAG_WRITE_THROUGH.0).open(path)
-}
-
-fn set_sparse(file: &File) -> Result<(), String> {
-    let handle = HANDLE(file.as_raw_handle());
-    let mut returned = 0u32;
-    unsafe { DeviceIoControl(handle, FSCTL_SET_SPARSE, None, 0, None, 0, Some(&mut returned), None) }.map_err(|error| format!("make fill sparse: {error}"))
-}
-
-/// 4 KiB-aligned heap buffer for unbuffered I/O.
-pub struct AlignedBuffer {
-    ptr: *mut u8,
-    layout: Layout,
-}
-
-// The buffer is plain memory owned by one user at a time.
-unsafe impl Send for AlignedBuffer {}
-
-impl AlignedBuffer {
-    pub fn new(len: usize) -> Self {
-        let layout = Layout::from_size_align(len, ALIGN as usize).expect("aligned layout");
-        let ptr = unsafe { alloc_zeroed(layout) };
-        if ptr.is_null() {
-            handle_alloc_error(layout);
-        }
-        Self { ptr, layout }
-    }
-
-    pub fn bytes(&mut self) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.layout.size()) }
-    }
-}
-
-impl Drop for AlignedBuffer {
-    fn drop(&mut self) {
-        unsafe { dealloc(self.ptr, self.layout) };
-    }
 }
 
 #[cfg(test)]

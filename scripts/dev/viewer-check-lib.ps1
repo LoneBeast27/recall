@@ -220,7 +220,8 @@ function Check-Plays($s, [double]$secs = 1.5, $from = $null, [double]$sinceMs = 
   $after = $rows[-1]
   $start = [double]$rows[0].pos
   $late = @($rows | Where-Object { $_.ms -ge $go.ms + 150 })
-  $gap = [double](($late | ForEach-Object { [math]::Abs([double]$_.video - [double]$_.pos) } | Measure-Object -Maximum).Maximum)
+  # The sound is stopped while buffering: the two clocks mean nothing until it carries on.
+  $gap = [double](($late | Where-Object { -not $_.loading.buffering } | ForEach-Object { [math]::Abs([double]$_.video - [double]$_.pos) } | Measure-Object -Maximum).Maximum)
   # While a clip loads, playback may wait for the part ahead: that wait is not a frozen picture.
   $resumed = @($rows | Where-Object { $_.loading.buffering } | ForEach-Object { [double]$_.ms })
   $frozen = @($late | Where-Object { $row = $_; $row.video_state -ne 'playing' -and -not $row.loading.buffering -and -not ($resumed | Where-Object { [double]$row.ms - $_ -lt 120 -and [double]$row.ms -gt $_ }) }).Count

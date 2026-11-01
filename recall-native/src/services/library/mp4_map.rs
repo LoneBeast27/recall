@@ -7,6 +7,8 @@ use super::mp4;
 
 /// One map point per this many seconds of picture.
 const STEP: f64 = 0.25;
+/// More samples than any real clip (16 days at 60 fps): a damaged table is not walked.
+const MAX_SAMPLES: u64 = 83_000_000;
 
 /// `moov` of the file: (start of the box, end of the box).
 pub fn moov_range<R: Read + Seek>(reader: &mut R) -> Option<(u64, u64)> {
@@ -82,6 +84,9 @@ pub fn clip_map<R: Read + Seek>(reader: &mut R) -> Option<ClipMap> {
     let sizes = read_sizes(reader, sizes)?;
     let sync = mp4::find_box(reader, stbl.0, stbl.1, b"stss");
     let sync = sync.and_then(|stss| read_u32s(reader, stss));
+    if stts.iter().map(|run| u64::from(run.0)).sum::<u64>() > MAX_SAMPLES {
+        return None;
+    }
     let shift = mp4::edit_start(reader, trak).unwrap_or(0);
     let scale = f64::from(timescale);
 

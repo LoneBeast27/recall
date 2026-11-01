@@ -2,12 +2,15 @@
 //! the SSD, the player and the sound decoder read that copy as it grows, and the editor gets
 //! the clip as soon as the file's index is in. The engine's stems, waveforms and filmstrip
 //! follow when the copy is complete (`Done::Prepared` then upgrades the open clip).
-//! Anything that cannot stream (no sample tables, no room, no ffprobe) opens the old way.
+//! A clip too large for the video tier takes the same path without the copy (`ClipFill::direct`).
+//! Anything that cannot stream (no sample tables, no ffprobe) opens the old way.
 use std::fs::File;
 use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
+use std::time::Duration;
 
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
 
@@ -39,20 +42,36 @@ pub struct StreamedClip {
     pub media: StreamMedia,
 }
 
+/// The newest open: an older one stops where it is, its engine included.
+static LATEST: AtomicU64 = AtomicU64::new(0);
+
+/// Called on the UI thread as an open starts, so a newer clip is known before its thread runs.
+pub fn note_open(generation: u64) {
+    LATEST.store(generation, Ordering::Release);
+}
+
+fn stale(generation: u64) -> bool {
+    LATEST.load(Ordering::Acquire) != generation
+}
+
 /// Runs one open from start to finish on its own thread: exports and listings keep their queue.
 pub fn run(generation: u64, path: String, tx: &Sender<Done>) {
+    if stale(generation) {
+        return;
+    }
     let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-    match stream(&path) {
+    match stream(generation, &path) {
         Some(clip) => {
             let fill = clip.media.fill.clone();
             let _ = tx.send(Done::Streaming(generation, Box::new(clip)));
             finish(generation, &path, &fill, tx);
         }
+        None if stale(generation) => {}
         None => {
             let step = |text: &'static str| {
                 let _ = tx.send(Done::OpenStep(generation, text));
             };
-            let _ = tx.send(Done::Prepared(generation, backend::prepare_clip_steps(&path, None, &step)));
+            let _ = tx.send(Done::Prepared(generation, backend::prepare_clip_steps(&path, None, &step, Arc::new(move || stale(generation)))));
         }
     }
     if com.is_ok() {
@@ -60,7 +79,8 @@ pub fn run(generation: u64, path: String, tx: &Sender<Done>) {
     }
 }
 
-/// The copy is complete: the engine prepares stems, waveforms and filmstrip from it.
+/// The copy is complete: the engine prepares stems, waveforms and filmstrip from it. A clip
+/// read where it lies is prepared where it lies, at low I/O priority, around the playback.
 fn finish(generation: u64, path: &str, fill: &ClipFill, tx: &Sender<Done>) {
     if !fill.wait_done() {
         if let Some(error) = fill.error() {
@@ -68,15 +88,32 @@ fn finish(generation: u64, path: &str, fill: &ClipFill, tx: &Sender<Done>) {
         }
         return;
     }
-    let copy = fill.target().to_string_lossy().into_owned();
-    let _ = tx.send(Done::Prepared(generation, backend::prepare_clip_steps(path, Some(copy), &|_| {})));
+    while fill.held() {
+        if stale(generation) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    if stale(generation) {
+        return;
+    }
+    let copy = (!fill.is_direct()).then(|| fill.target().to_string_lossy().into_owned());
+    let result = backend::prepare_clip_steps(path, copy, &|_| {}, Arc::new(move || stale(generation)));
+    let _ = tx.send(Done::Prepared(generation, result));
 }
 
-fn stream(path: &str) -> Option<StreamedClip> {
+fn stream(generation: u64, path: &str) -> Option<StreamedClip> {
     let source = std::fs::canonicalize(path).ok()?;
     let metadata = source.metadata().ok().filter(|m| m.is_file())?;
     let streamable = matches!(source.extension()?.to_str()?.to_ascii_lowercase().as_str(), "mp4" | "mov" | "m4v");
     if !streamable || !storage::is_slow(&source) || storage::cached_video(&source.to_string_lossy()).is_some() {
+        return None;
+    }
+    // A large clip prepared before: the engine's entry is one read away.
+    if storage::too_large(metadata.len()) && backend::has_prepared(&source, &metadata) {
+        return None;
+    }
+    if stale(generation) {
         return None;
     }
     match open_streaming(&source, &metadata) {
@@ -122,7 +159,7 @@ fn open_fill(source: &Path, metadata: &std::fs::Metadata, probed: storage::Probe
 }
 
 fn start_sound(fill: &ClipFill, map: &Arc<ClipMap>, tracks: &[(usize, u16)], probed: &storage::ProbedClip) -> Option<Arc<live_sound::LiveSound>> {
-    let started = open_source(fill, false).and_then(|source| live_sound::start(&source, fill.clone(), Arc::clone(map), tracks, probed.origin, probed.duration));
+    let started = open_source(fill, false).and_then(|source| live_sound::start(source, fill.clone(), Arc::clone(map), tracks, probed.origin, probed.duration));
     match started {
         Ok(sound) => Some(sound),
         Err(error) => {

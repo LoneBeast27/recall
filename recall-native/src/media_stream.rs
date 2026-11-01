@@ -40,6 +40,10 @@ impl Inner {
             return Some(0);
         }
         if !self.fill.wait_for(offset, offset + length as u64, self.want) {
+            // An abort here would end the player and everything that loaded with it.
+            if self.fill.stays_open() {
+                self.fill.wait_closed();
+            }
             return None;
         }
         let mut scratch = self.scratch.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

@@ -65,7 +65,7 @@ pub fn set_recorder_busy(busy: bool) {
     RECORDER_BUSY.store(busy, Ordering::Relaxed);
 }
 
-pub(super) fn recorder_busy() -> bool {
+pub fn recorder_busy() -> bool {
     RECORDER_BUSY.load(Ordering::Relaxed)
 }
 

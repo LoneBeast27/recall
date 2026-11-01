@@ -22,8 +22,6 @@ const ALIGN: usize = 4096;
 /// Free space the cache volume keeps after a copy.
 const KEEP_FREE: u64 = 4 << 30;
 const STALE_PART_SECS: u64 = 3600;
-/// Clips over the tier's cap stream through here and leave when the clip closes.
-const SESSION_DIR: &str = "session";
 
 /// Bytes copied of the copy under way, and its size (0 when none): the open shows a percentage.
 static COPY_DONE: AtomicU64 = AtomicU64::new(0);
@@ -38,7 +36,11 @@ pub fn copy_progress() -> Option<f64> {
 /// `RECALL_SLOW_DRIVE=<MB/s>` makes any drive act like a hard drive of that speed (the
 /// slowed-drive check). Unset: 0, and only real hard drives count.
 fn slow_drive_rate() -> u64 {
-    std::env::var("RECALL_SLOW_DRIVE").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0).saturating_mul(1_000_000)
+    mega("RECALL_SLOW_DRIVE")
+}
+
+fn mega(variable: &str) -> u64 {
+    std::env::var(variable).ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0).saturating_mul(1_000_000)
 }
 
 /// Clips here load progressively.
@@ -46,33 +48,35 @@ pub fn is_slow(path: &Path) -> bool {
     slow_drive_rate() > 0 || super::drive_kind(path).is_hdd()
 }
 
-/// Starts copying `source` to the SSD for progressive playback, index and head first. Clips
-/// that fit the video tier end up in it; a larger one goes to a file that leaves with the
-/// clip. Err: not enough room (the clip then opens the old way).
+/// Starts copying `source` to the SSD for progressive playback, index and head first. A clip
+/// the video tier cannot take, by its size or for lack of room, is read where it lies: the
+/// cache budget is never exceeded. `RECALL_SLOW_DRIVE_FAIL=<MB>` stops the drive after that much.
 pub fn start_fill(source: &Path, metadata: &std::fs::Metadata, first: &[u64]) -> Result<ClipFill, String> {
     let root = super::cache_root();
     let bytes = metadata.len();
+    let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
     let name = super::file_name(source).ok_or("clip has no file name")?;
     let id = super::identity(&name, bytes, super::mtime_secs(metadata));
     let budget = budget_in(&root);
-    let in_tier = bytes <= budget / 2;
-    let directory = if in_tier { video_dir(&root) } else { root.join(SESSION_DIR) };
+    let free = super::drive_info(&root).map_or(u64::MAX, |info| info.free);
+    if bytes > budget / 2 || free < bytes.saturating_add(KEEP_FREE) {
+        return Ok(ClipFill::direct(source, bytes, modified));
+    }
+    let directory = video_dir(&root);
     std::fs::create_dir_all(&directory).map_err(|error| format!("create fill folder: {error}"))?;
     remove_stale_parts(&directory);
-    remove_left_fills(&root, &id);
-    if in_tier {
-        budget::enforce(&root, budget, bytes);
-    }
-    let free = super::drive_info(&root).map_or(u64::MAX, |info| info.free);
-    if free < bytes.saturating_add(KEEP_FREE) {
-        return Err(format!("Not enough free space on the cache drive ({} free).", gib(free)));
-    }
+    remove_left_fills(&directory, &id);
+    budget::enforce(&root, budget, bytes);
     let target = directory.join(format!("{id}.mp4"));
     let part = super::temp_sibling(&target);
-    let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
-    let fill = ClipFill::create(source, &part, &target, bytes, modified, slow_drive_rate(), !in_tier)?;
+    let fill = ClipFill::create(source, &part, &target, bytes, modified, slow_drive_rate(), mega("RECALL_SLOW_DRIVE_FAIL"))?;
     fill.start(first)?;
     Ok(fill)
+}
+
+/// True when a clip this size stays out of the video tier.
+pub fn too_large(bytes: u64) -> bool {
+    bytes > budget_in(&super::cache_root()) / 2
 }
 
 fn video_dir(root: &Path) -> PathBuf {
@@ -175,18 +179,14 @@ fn touch(root: &Path, file: &str) {
     let _ = lru::write_index(&path, &index);
 }
 
-/// What an app closed mid-load left: this clip's part file, and any session copy (one clip is
-/// open at a time). Files still in use keep their place until they close.
-fn remove_left_fills(root: &Path, id: &str) {
+/// The part file an app closed mid-load left for this clip. A fill still running is not left.
+fn remove_left_fills(directory: &Path, id: &str) {
     let prefix = format!("{id}.mp4.");
-    for directory in [video_dir(root), root.join(SESSION_DIR)] {
-        let Ok(listing) = std::fs::read_dir(&directory) else { continue };
-        let session = directory.ends_with(SESSION_DIR);
-        for entry in listing.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if session || (name.starts_with(&prefix) && name.ends_with(".part")) {
-                let _ = std::fs::remove_file(entry.path());
-            }
+    let Ok(listing) = std::fs::read_dir(directory) else { return };
+    for entry in listing.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&prefix) && name.ends_with(".part") && !super::fill::in_use(&entry.path()) {
+            let _ = std::fs::remove_file(entry.path());
         }
     }
 }
@@ -196,6 +196,7 @@ fn remove_stale_parts(directory: &Path) {
     let Ok(listing) = std::fs::read_dir(directory) else { return };
     for entry in listing.flatten() {
         let stale = entry.file_name().to_string_lossy().ends_with(".part")
+            && !super::fill::in_use(&entry.path())
             && entry.metadata().ok().and_then(|m| m.created().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() > STALE_PART_SECS);
         if stale {
             let _ = std::fs::remove_file(entry.path());

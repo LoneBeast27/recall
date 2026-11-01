@@ -76,6 +76,10 @@ impl EditorState {
         }
         if let Some(info) = self.info.clone() {
             self.needs_flush = false;
+            // The sidecar may wait behind an export; a reopen must still find these edits.
+            if let Err(error) = crate::backend::save_working(&info, &self.plan, self.fps, &self.export_settings) {
+                self.save_error = Some(error);
+            }
             workers.job(Job::FlushProject(info, self.plan.clone(), self.fps, self.export_settings.clone(), self.may_touch_sidecar()));
         }
     }
@@ -95,6 +99,10 @@ impl EditorState {
     /// ask for a 720p H.264 preview copy (export keeps using the original).
     pub(super) fn on_preview_failed(&mut self, error: String, workers: &crate::worker::Workers) {
         self.hide_preview();
+        if let Some(failure) = self.preview.as_ref().and_then(|preview| preview.stream_failure()) {
+            self.status = format!("Couldn't load this clip. {failure}");
+            return;
+        }
         let Some(info) = self.info.as_ref() else { return };
         if self.proxy_for.as_deref() == Some(info.path.as_str()) {
             self.status = format!("Can't preview this clip. Trim and export still work. ({error})");

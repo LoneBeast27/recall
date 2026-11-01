@@ -21,7 +21,7 @@ fn clip(dir: &Path, bytes: usize) -> (PathBuf, SystemTime) {
 }
 
 fn fill(dir: &Path, source: &Path, bytes: u64, modified: SystemTime, throttle: u64) -> ClipFill {
-    ClipFill::create(source, &dir.join("clip.part"), &dir.join("copy.mp4"), bytes, modified, throttle, false).unwrap()
+    ClipFill::create(source, &dir.join("clip.part"), &dir.join("copy.mp4"), bytes, modified, throttle, 0).unwrap()
 }
 
 fn read_all(fill: &ClipFill, offset: u64, length: usize) -> Vec<u8> {
@@ -104,6 +104,79 @@ fn a_clip_that_changes_while_copying_is_not_published() {
     assert!(!fill.wait_done());
     assert!(fill.error().is_some_and(|error| error.contains("changed")));
     assert!(!dir.join("copy.mp4").exists());
+}
+
+#[test]
+fn a_drive_that_stops_answering_fails_the_fill_and_frees_its_readers() {
+    let dir = scratch("failed");
+    let bytes = 8 * CHUNK as usize;
+    let (source, modified) = clip(&dir, bytes);
+    let fill = ClipFill::create(&source, &dir.join("clip.part"), &dir.join("copy.mp4"), bytes as u64, modified, 0, 3 * CHUNK).unwrap();
+    fill.start(&[0]).unwrap();
+    assert!(!fill.wait_done());
+    assert_eq!(fill.outcome(), Outcome::Failed);
+    assert!(fill.error().is_some());
+    assert!(fill.has(0, CHUNK), "what arrived stays readable");
+    let hole = fill.holes()[0];
+    assert!(!fill.wait_for(hole.0, hole.0 + 1, true), "a reader on a missing part is freed");
+    assert!(!fill.stays_open(), "before the player has it, the open fails");
+    fill.set_playing();
+    assert!(fill.stays_open());
+    let waiting = {
+        let fill = fill.clone();
+        std::thread::spawn(move || fill.wait_closed())
+    };
+    fill.cancel();
+    waiting.join().unwrap();
+    assert!(!fill.stays_open(), "closing the clip frees it");
+    assert!(!dir.join("copy.mp4").exists());
+}
+
+#[test]
+fn held_copying_stops_but_a_stopped_reader_is_still_served() {
+    let dir = scratch("held");
+    let bytes = 12 * CHUNK as usize;
+    let (source, modified) = clip(&dir, bytes);
+    let fill = fill(&dir, &source, bytes as u64, modified, 200 << 20);
+    fill.hold(true);
+    fill.start(&[0]).unwrap();
+    assert!(fill.wait_for(0, 1, true));
+    std::thread::sleep(Duration::from_millis(200));
+    let parked = fill.progress();
+    assert!(parked < 0.5, "copied {parked} while held");
+    std::thread::sleep(Duration::from_millis(100));
+    assert_eq!(fill.progress(), parked, "held means stopped");
+    assert!(fill.wait_for(10 * CHUNK, 10 * CHUNK + 1, true), "a stopped reader still gets its part");
+    fill.hold(false);
+    assert!(fill.wait_done(), "carries on when released");
+}
+
+#[test]
+fn a_clip_read_where_it_lies_is_never_touched() {
+    let dir = scratch("direct");
+    let bytes = 2 * CHUNK as usize + 100;
+    let (source, modified) = clip(&dir, bytes);
+    let fill = ClipFill::direct(&source, bytes as u64, modified);
+    assert_eq!(fill.outcome(), Outcome::Done);
+    assert!(fill.has(0, bytes as u64));
+    assert!(fill.wait_for(0, bytes as u64, true));
+    assert_eq!(read_all(&fill, CHUNK + 5, 4000), pattern(bytes)[CHUNK as usize + 5..CHUNK as usize + 4005]);
+    fill.cancel();
+    drop(fill);
+    assert_eq!(std::fs::read(&source).unwrap(), pattern(bytes), "dropping the fill leaves the clip");
+}
+
+#[test]
+fn parts_in_use_are_known_until_the_fill_goes() {
+    let dir = scratch("in-use");
+    let bytes = CHUNK as usize;
+    let (source, modified) = clip(&dir, bytes);
+    let fill = fill(&dir, &source, bytes as u64, modified, 0);
+    let part = dir.join("clip.part");
+    assert!(in_use(&part));
+    drop(fill);
+    assert!(!in_use(&part));
+    assert!(!part.exists());
 }
 
 #[test]
