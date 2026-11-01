@@ -16,9 +16,15 @@ use std::io;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::process::{Child, Command, Output};
+use std::sync::OnceLock;
 
 use windows::Win32::Foundation::HANDLE;
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectExtendedLimitInformation, SetInformationJobObject,
+};
 use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
+use windows::core::PCWSTR;
 
 pub(super) const IO_VERY_LOW: u32 = 0;
 const PROCESS_IO_PRIORITY: u32 = 33;
@@ -57,16 +63,34 @@ fn handle(child: &Child) -> HANDLE {
     HANDLE(child.as_raw_handle())
 }
 
-/// Starts `command` hidden at below-normal CPU priority; with `lowered`, the process is
-/// created suspended, set to very low I/O priority, then resumed.
+/// Helpers end with the app, however it ends: an engine that never returns must not outlive it.
+/// Windows closes the job's handle with the process, and that ends what is in the job.
+fn helpers_job() -> Option<HANDLE> {
+    static JOB: OnceLock<Option<isize>> = OnceLock::new();
+    let job = JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(None, PCWSTR::null()).ok()?;
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let size = size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(), size).ok()?;
+        Some(job.0 as isize)
+    });
+    job.map(|raw| HANDLE(raw as *mut c_void))
+}
+
+/// Starts `command` hidden at below-normal CPU priority, in the helpers' job: the process is
+/// created suspended, so nothing it starts escapes the job, set to very low I/O priority with
+/// `lowered`, then resumed.
 pub(super) fn spawn(command: &mut Command, lowered: bool) -> io::Result<Child> {
-    if !lowered {
-        return command.creation_flags(HIDDEN_LOW_PRIORITY).spawn();
-    }
     let mut child = command.creation_flags(HIDDEN_LOW_PRIORITY | CREATE_SUSPENDED).spawn()?;
     let value = IO_VERY_LOW;
     unsafe {
-        let _ = NtSetInformationProcess(handle(&child), PROCESS_IO_PRIORITY, (&value as *const u32).cast(), 4);
+        if let Some(job) = helpers_job() {
+            let _ = AssignProcessToJobObject(job, handle(&child));
+        }
+        if lowered {
+            let _ = NtSetInformationProcess(handle(&child), PROCESS_IO_PRIORITY, (&value as *const u32).cast(), 4);
+        }
         if NtResumeProcess(handle(&child)) < 0 {
             let _ = child.kill();
             let _ = child.wait();
