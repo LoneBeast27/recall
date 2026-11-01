@@ -394,16 +394,18 @@ if ($big) {
     $s = Start-Viewer 'real-big' $big
     $script:current = $s
     $work = [IO.Path]::GetFullPath($script:work)
-    $t = Get-Date; $worst = 0; $samples = 0; $parts = 0
+    $t = Get-Date; $parts = 0; $from = $null; $to = $null
     while (((Get-Date) - $t).TotalSeconds -lt 90) {
       $r = Last $s
       if ($r.stems -and $r.stems[0]) { break }
-      $engine = @(Get-CimInstance Win32_Process -Filter "Name='recall.exe'" | Where-Object { $_.CommandLine -like "*$work*" }).Count
-      if ($engine -and $null -ne $r.loading.lane_ms) { $samples++; $worst = [math]::Max($worst, [double]$r.loading.lane_ms) }
+      if (@(Get-CimInstance Win32_Process -Filter "Name='recall.exe'" | Where-Object { $_.CommandLine -like "*$work*" }).Count) { if ($null -eq $from) { $from = $r.ms }; $to = $r.ms }
       $parts += @(Fills).Count
-      Start-Sleep -Milliseconds 200
+      Start-Sleep -Milliseconds 100
     }
-    Verdict @((Ok ($null -ne $r.loading) "$(Fmt ((Get-Item -LiteralPath $big).Length / 1GB)) GB clip streaming where it lies, $parts part files seen"), (Ok ($samples -ge 5 -and $worst -lt 3000 -and $parts -eq 0) "lane task waited at most $worst ms in $samples samples while the engine ran"))
+    # The app traces the lane every poll: every row while the engine ran, not only the samples here.
+    $during = @(Rows $s 0 2000 | Where-Object { $null -ne $from -and $_.ms -ge $from -and $_.ms -le $to -and $null -ne $_.loading.lane_ms })
+    $worst = [double](($during | ForEach-Object { [double]$_.loading.lane_ms } | Measure-Object -Maximum).Maximum)
+    Verdict @((Ok ($null -ne $r.stems -or $null -ne $r.loading) "$(Fmt ((Get-Item -LiteralPath $big).Length / 1GB)) GB clip streaming where it lies, $parts part files seen"), (Ok ($during.Count -ge 10 -and $worst -lt 500 -and $parts -eq 0) "a lane task waited at most $worst ms in $($during.Count) rows, over $([int]($to - $from)) ms of engine run"))
   }
 }
 foreach ($path in $real) {

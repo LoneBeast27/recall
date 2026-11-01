@@ -244,8 +244,10 @@ mod tests {
         assert_eq!(reader.read(0, &mut near), Some(4096));
         assert_eq!(near[0], 7);
         assert_eq!(fill.outcome(), Outcome::Done);
-        assert_eq!(reader.read(1 << 19, &mut near), Some(4096), "the clip is not playing yet: the index still opens");
+        assert_eq!(reader.read(1 << 19, &mut near), Some(4096), "no seek yet: the index still opens");
         fill.set_playing();
+        fill.note_seek();
+        std::thread::sleep(std::time::Duration::from_millis(600));
         let parked = {
             let reader = Arc::clone(&reader);
             std::thread::spawn(move || reader.read(1 << 19, &mut [1u8; 4096]))

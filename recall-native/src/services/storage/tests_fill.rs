@@ -167,6 +167,7 @@ fn a_clip_read_where_it_lies_says_when_its_drive_goes() {
     let (source, modified) = clip(&dir, bytes);
     let fill = ClipFill::direct(&source, bytes as u64, modified, 2 * CHUNK);
     fill.set_playing();
+    fill.note_seek();
     let file = fill.open_reader().unwrap();
     let mut scratch = AlignedBuffer::new(1 << 20);
     let mut out = vec![0u8; 4096];
