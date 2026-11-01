@@ -102,22 +102,27 @@ Run-Scenario 'card: the title bar ends the rename too' {
 Run-Scenario 'card: a clip that vanishes takes its rename along' {
   $s = $script:current = Start-Viewer 'gone' $clips.short -Library -Also 'stays'
   Begin-Rename $s (Tile 'gone'); Key $s 'a'
-  Remove-Item $s.Clip
+  # The hover's scrub frames read the file for a moment: another program's delete waits for that.
+  $t = Get-Date
+  while (Test-Path $s.Clip) {
+    try { Remove-Item $s.Clip -ErrorAction Stop } catch { if (((Get-Date) - $t).TotalSeconds -gt 15) { throw }; Start-Sleep -Milliseconds 250 }
+  }
   $left = Wait-Trace $s { param($r) $r.clips -eq 1 } 6000
   $u = UI $s
   Verdict @((Ok ([bool]$left) 'the tile left'), (Closed $u), (Keys-Alive $s))
 }
 
 Run-Scenario 'card: scrolling the tile off screen ends the rename' {
-  $names = 1..23 | ForEach-Object { "scrolled-$_" }
-  $s = $script:current = Start-Viewer 'scrolled' $clips.short -Library -Also $names
+  $names = 1..89 | ForEach-Object { "scrolled-$_" } # more rows than the window holds
+  $s = $script:current = Start-Viewer 'a-scrolled' $clips.short -Library -Also $names # listed first: it must be on screen
   $first = (Last $s).targets.PSObject.Properties | Where-Object { $_.Name -like 'tile:*' } | Sort-Object { $_.Value[1] }, { $_.Value[0] } | Select-Object -First 1
   Hover $s $first.Name; Click $s 'tile-rename'
   [void](Wait-Trace $s { param($r) $r.ui.field -eq 'Rename' } 1500)
   Key $s 'a'
   $t = Target $s $first.Name
   $still = UI $s
-  Wheel $s $t.X $t.Y -240 12
+  Mouse $s 0x200 $t.X ($t.Y + 40) 0; Start-Sleep -Milliseconds 80
+  Wheel $s $t.X ($t.Y + 40) -240 12
   $ended = Wait-Trace $s { param($r) $null -eq $r.ui.renaming } 2000
   $u = UI $s
   Verdict @((Ok ($still.field -eq 'Rename') 'open before the scroll'), (Ok ([bool]$ended) 'ended with the tile off screen'), (Ok ($u.titles -contains 'a') 'title saved'), (Keys-Alive $s))

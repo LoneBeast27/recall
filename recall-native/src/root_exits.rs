@@ -1,6 +1,6 @@
 //! How short-lived UI ends: the title rename, menus, the delete question, and the keyboard going
 //! back to the page. A field or menu that outlives what opened it is how a person gets stuck.
-use gpui::{Context, MouseDownEvent, Window};
+use gpui::{Context, DispatchPhase, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, Styled, Window, canvas};
 
 use super::{Field, Root, Route};
 use crate::library_state::RenameEnd;
@@ -17,6 +17,45 @@ impl Root {
         }
         self.press_dismisses = self.tile_menu.is_some() || self.lib.renaming.is_some() || self.sort_open;
         self.press_saw_sort = self.sort_open;
+    }
+
+    /// Follows a timeline or gain drag anywhere in the window. These listeners take no hitbox:
+    /// over the title bar's status pill, an occluding element, a hover-based one would never fire
+    /// and the release would be lost.
+    pub(super) fn drag_watch(cx: &mut Context<Self>) -> impl IntoElement {
+        let root = cx.entity().downgrade();
+        canvas(
+            |_, _, _| {},
+            move |_, _, window, _| {
+                let moved = root.clone();
+                window.on_mouse_event(move |event: &MouseMoveEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture {
+                        let _ = moved.update(cx, |this, cx| {
+                            if this.ed.drag.is_some() {
+                                match event.pressed_button {
+                                    Some(MouseButton::Left) => this.ed.drag_to(f32::from(event.position.x)),
+                                    _ => this.ed.end_drag(),
+                                }
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+                let released = root.clone();
+                window.on_mouse_event(move |event: &MouseUpEvent, phase, _, cx| {
+                    if phase == DispatchPhase::Capture && event.button == MouseButton::Left {
+                        let _ = released.update(cx, |this, cx| {
+                            if this.ed.drag.is_some() {
+                                this.ed.end_drag();
+                                cx.notify();
+                            }
+                        });
+                    }
+                });
+            },
+        )
+        .absolute()
+        .size_0()
     }
 
     pub fn begin_rename(&mut self, path: String, window: &mut Window) {

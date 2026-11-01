@@ -442,14 +442,8 @@ impl Render for Root {
             .relative()
             .flex()
             .flex_col()
-            // Anywhere in the window: a drag can be released over the title bar.
-            .capture_any_mouse_up(cx.listener(|this, _, _, cx| {
-                if this.ed.drag.is_some() {
-                    this.ed.end_drag();
-                    cx.notify();
-                }
-            }))
             .child(backdrop)
+            .child(Self::drag_watch(cx))
             .font_family(theme::sans())
             .text_size(px(13.))
             .line_height(px(18.))

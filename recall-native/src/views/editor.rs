@@ -1,5 +1,5 @@
 //! Editor page: native preview stage + transport, inspector (audio, export), timeline.
-use gpui::{AnyElement, Context, MouseButton, MouseMoveEvent, Window, canvas, div, prelude::*, px};
+use gpui::{AnyElement, Context, Window, canvas, div, prelude::*, px};
 
 use crate::{
     editor_state::timecode,
@@ -26,16 +26,6 @@ impl Root {
             .gap(px(8.))
             .px(px(8.))
             .pb(px(8.))
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
-                if this.ed.drag.is_some() {
-                    if event.pressed_button != Some(MouseButton::Left) {
-                        this.ed.end_drag();
-                    } else {
-                        this.ed.drag_to(f32::from(event.position.x));
-                    }
-                    cx.notify();
-                }
-            }))
             .child(
                 div()
                     .flex_1()
