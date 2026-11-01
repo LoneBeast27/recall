@@ -49,7 +49,7 @@ mod tests_smoke;
 #[allow(unused_imports)]
 pub use drive::{DriveInfo, DriveKind, drive_info, drive_kind};
 pub(crate) use ffmpeg::{Seek, extract_frame, probe_duration};
-pub use ffmpeg::{Run, binary, run_cancellable, run_hidden};
+pub use ffmpeg::{Run, binary, run_cancellable, run_hidden, run_watched};
 pub use probe::{ProbedClip, probe_clip};
 #[allow(unused_imports)]
 pub use evict::DEFAULT_CACHE_BUDGET;
@@ -58,7 +58,7 @@ pub use history::{Interaction, record_interaction};
 #[allow(unused_imports)]
 pub use lane::{LaneStats, Priority, run_io, stats, submit_io};
 #[allow(unused_imports)]
-pub use prefetch::{PrefetchClip, PrefetchEvent, PrepareEditor, set_recorder_busy, smart_status, start_prefetch};
+pub use prefetch::{PrefetchClip, PrefetchEvent, PrepareEditor, recorder_busy, set_recorder_busy, smart_status, start_prefetch};
 pub use projects::{ProjectSource, SidecarStep, has_export, project_order, sidecar_step, working_copy_path, write_atomic};
 pub(crate) use projects::modified_ms as projects_modified_ms;
 #[allow(unused_imports)]
@@ -66,7 +66,7 @@ pub use thumbs::{ThumbIndex, cached_thumb, ensure_thumb, recorder_thumb_stem, th
 #[allow(unused_imports)]
 pub use tiers::{CacheKind, CacheUsage, TierUsage, clear_kind, usage_detail};
 #[allow(unused_imports)]
-pub use video::{cache_video, cached_video, copy_progress, enforce_budget, is_slow, start_fill};
+pub use video::{cache_video, cached_video, copy_progress, enforce_budget, is_slow, start_fill, too_large};
 
 /// [`cached_video`] against an explicit cache root.
 pub fn cached_video_in(root: &Path, source: &Path) -> Option<String> {

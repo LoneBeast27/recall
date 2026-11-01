@@ -324,7 +324,7 @@ impl EditorState {
             self.play();
             changed = true;
         }
-        changed |= self.tick_loading();
+        changed |= self.tick_loading(editor_visible);
         if self.playing && !self.play_when_ready && !self.loading.buffering {
             changed |= self.follow_playback();
         }

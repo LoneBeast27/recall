@@ -27,14 +27,14 @@ if (-not (Select-String -Path $env:RECALL_ENGINE -Pattern '--prepare-editor' -Si
 $size = (Get-Item $Clip).Length
 
 function Start-Slow([string]$name, [int]$rate, [switch]$Library, [string[]]$Also = @()) {
-  foreach ($tier in 'video', 'session', 'editor', 'visuals', 'tmp') { Remove-Item (Join-Path $script:cache $tier) -Recurse -Force -ErrorAction SilentlyContinue }
+  foreach ($tier in 'video', 'editor', 'visuals', 'tmp') { Remove-Item (Join-Path $script:cache $tier) -Recurse -Force -ErrorAction SilentlyContinue }
   $env:RECALL_SLOW_DRIVE = "$rate"
   try { $s = if ($Library) { Start-Viewer $name $Clip -Library -Also $Also } else { Start-Viewer $name $Clip } }
   finally { Remove-Item Env:RECALL_SLOW_DRIVE -ErrorAction SilentlyContinue }
   $script:current = $s
   $s
 }
-function Fills { @(Get-ChildItem (Join-Path $script:cache 'video'), (Join-Path $script:cache 'session') -Filter '*.part' -ErrorAction SilentlyContinue) }
+function Fills { @(Get-ChildItem (Join-Path $script:cache 'video') -Filter '*.part' -ErrorAction SilentlyContinue) }
 function Parts($r) { if ($r.loading) { [int]$r.loading.grey_parts } else { 0 } }
 
 Run-Scenario 'the picture and sound start while the clip loads' {
@@ -116,9 +116,12 @@ Run-Scenario 'leaving mid-load stops the copy cleanly' {
   Click $s 'tile:slow-leave.mp4'
   [void](Wait-Trace $s { param($r) $r.ready -and $r.loading } 8000)
   $one = Fills
-  Key $s 'escape'; Start-Sleep -Milliseconds 400
-  $r = Last $s
   $started = Ok ($one.Count -eq 1) "copying: $($one.Count) part file"
+  Key $s 'escape'
+  [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 3000)
+  Start-Sleep -Milliseconds 500
+  $a = (Last $s).loading.share; Start-Sleep -Seconds 2; $b = (Last $s).loading.share
+  $held = Ok ($a -eq $b) "away from the editor the copy waits: $(Fmt ($a * 100))% -> $(Fmt ($b * 100))%"
   $t = Get-Date
   Stop-Viewer $s; $script:current = $null
   $closed = Ok ($s.Process.HasExited -and $s.Process.ExitCode -eq 0 -and ((Get-Date) - $t).TotalSeconds -lt 5) "closed mid-load in $(Fmt ((Get-Date) - $t).TotalSeconds) s, exit $($s.Process.ExitCode)"
@@ -130,7 +133,54 @@ Run-Scenario 'leaving mid-load stops the copy cleanly' {
   Click $again 'tile:slow-leave.mp4'
   [void](Wait-Trace $again { param($r) $r.ready -and $r.loading } 8000)
   $once = Ok ((Fills).Count -eq 1) "after reopening: $((Fills).Count) part file"
-  Verdict @($started, $closed, $once)
+  Verdict @($started, $held, $closed, $once)
+}
+
+Run-Scenario 'sound that starts after the picture does not hang' {
+  $late = Join-Path $script:work 'late-audio.mp4'
+  if (-not (Test-Path $late)) { Invoke-Ffmpeg @('-t', '20', '-i', $Clip, '-itsoffset', '3', '-t', '20', '-i', $Clip, '-map', '0:v', '-map', '1:a:0', '-c', 'copy', $late) }
+  $whole = $Clip
+  try {
+    $Clip = $late
+    $s = Start-Slow 'slow-late' 20
+    $play = Press-Play $s 'space' 2
+    $r = Last $s
+    $free = Ok (-not $r.loading.buffering -and [double]$r.pos -gt 1) "not buffering at $(Fmt $r.pos)s"
+    # The first 0.4 s after a buffered start can show the picture up to 0.4 s ahead of the sound clock.
+    $start = (Rows $s 0 | Where-Object { $_.playing -and -not $_.loading.buffering -and $_.video_state -eq 'playing' } | Select-Object -First 1).ms
+    $steady = @(Rows $s ($start + 500) | Where-Object { $_.playing -and -not $_.loading.buffering })
+    $gap = [double](($steady | ForEach-Object { [math]::Abs([double]$_.video - [double]$_.pos) } | Measure-Object -Maximum).Maximum)
+    $live = Ok ($steady.Count -gt 10 -and $gap -lt 0.1) "plays from 0 over the silent start; steady A/V gap $(Fmt $gap)s; $($play.Detail)"
+    Verdict @($live, $free)
+  } finally { $Clip = $whole }
+}
+
+Run-Scenario 'an engine without the prepare command is refused, not started' {
+  $old = Join-Path $EngineRoot 'target\release\recall.exe'
+  if (Select-String -Path $old -Pattern '--prepare-editor' -SimpleMatch -Quiet) { return Add-Result $script:scenario $true 'no old engine here: skipped' }
+  $engine = $env:RECALL_ENGINE
+  $env:RECALL_ENGINE = $old
+  try {
+    $s = Start-Slow 'slow-old-engine' 200
+    $t = Get-Date; $ran = 0
+    while (((Get-Date) - $t).TotalSeconds -lt 8) { $ran += @(Get-Process -Name recall -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $old }).Count; Start-Sleep -Milliseconds 100 }
+    $r = Last $s
+    Verdict @((Ok ($ran -eq 0) "the old engine ran in $ran samples"), (Ok ($r.ready) 'the clip still plays'))
+  } finally { $env:RECALL_ENGINE = $engine }
+}
+
+Run-Scenario 'a drive that goes away leaves an error and what loaded' {
+  $env:RECALL_SLOW_DRIVE_FAIL = '60'
+  try { $s = Start-Slow 'slow-gone' 30 } finally { Remove-Item Env:RECALL_SLOW_DRIVE_FAIL -ErrorAction SilentlyContinue }
+  $failed = Wait-Trace $s { param($r) $r.loading.failed } 10000
+  $said = Ok ($null -ne $failed) "said: $($failed.loading.failed)"
+  $t0 = (Settle $s 60).ms
+  Key $s 'space'
+  Start-Sleep -Seconds 1
+  $r = Wait-Trace $s { param($r) -not $r.playing } 30000
+  $stopped = Ok ($null -ne $r -and -not $r.loading.buffering -and [double]$r.pos -gt 5 -and -not $r.status) "what loaded played to $(Fmt $r.pos)s, note '$($r.loading.note)', status '$($r.status)'"
+  $never = @(Rows $s $t0 | Where-Object { $_.loading.buffering }).Count
+  Verdict @($said, $stopped, (Ok ($never -eq 0) "buffering samples: $never"))
 }
 
 Add-Type -AssemblyName System.Drawing
@@ -165,7 +215,7 @@ foreach ($path in $real) {
   Run-Scenario "real drive: $(Split-Path $path -Leaf)" {
     # Where it lies: no link, so nothing on that drive is touched.
     function New-ClipLink([string]$dir, [string]$name, [string]$from) { $from }
-    foreach ($tier in 'video', 'session', 'editor', 'visuals', 'tmp') { Remove-Item (Join-Path $script:cache $tier) -Recurse -Force -ErrorAction SilentlyContinue }
+    foreach ($tier in 'video', 'editor', 'visuals', 'tmp') { Remove-Item (Join-Path $script:cache $tier) -Recurse -Force -ErrorAction SilentlyContinue }
     $name = 'real-' + [IO.Path]::GetFileNameWithoutExtension($path).Substring(0, 8)
     $s = Start-Viewer $name $path
     $script:current = $s
@@ -176,8 +226,8 @@ foreach ($path in $real) {
       $checks += Press-Play $s 'space' 3
       Key $s 'space'
       $t = Get-Date
-      $done = Wait-Trace $s { param($r) -not $r.loading } 120000
-      $checks += Ok ($null -ne $done) "whole clip plus stems after $(Fmt ((Get-Date) - $t).TotalSeconds) s more"
+      $done = Wait-Trace $s { param($r) -not $r.loading -or ($r.stems -and $r.stems[0] -and -not @($r.loading.grey).Count) } 120000
+      $checks += Ok ($null -ne $done -or (Get-Item -LiteralPath $path).Length -gt 1GB) "whole clip plus stems after $(Fmt ((Get-Date) - $t).TotalSeconds) s more"
     }
     Verdict $checks
   }

@@ -191,6 +191,7 @@ impl NativePreview {
                 self.audio.open_live(tracks.collect(), duration)?;
             }
         }
+        media.fill.set_playing();
         self.keep_player(player, callback);
         self.stream = Some(media);
         Ok(())
@@ -210,6 +211,12 @@ impl NativePreview {
     /// The sound was to be decoded as the clip loads, and that failed or never started.
     pub fn sound_waits_for_stems(&self) -> bool {
         self.stream.as_ref().is_some_and(|media| media.sound.as_ref().is_none_or(|sound| sound.failed().is_some()))
+    }
+
+    /// Why the clip stopped loading, if it did.
+    pub fn stream_failure(&self) -> Option<String> {
+        let media = self.stream.as_ref()?;
+        (media.fill.outcome() == Outcome::Failed).then(|| media.fill.error().unwrap_or_else(|| "The clip's drive stopped answering.".into()))
     }
 
     /// `[from, to)` seconds can play now: the bytes and the sound are there.

@@ -144,6 +144,7 @@ impl Workers {
 
     /// Opens a clip on a thread of its own: a running export or listing never holds it up.
     pub fn open_clip(&self, generation: u64, path: String) {
+        crate::clip_open::note_open(generation);
         let tx = self.open_tx.clone();
         spawn_named("recall-clip-open", move || crate::clip_open::run(generation, path, &tx));
     }

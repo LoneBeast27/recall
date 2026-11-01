@@ -381,7 +381,7 @@ impl Render for Root {
         self.trace_ui(window);
         crate::trace::clear_targets(window);
         // Meters and playback animate at the display refresh rate, not the 30 ms poll.
-        if self.route == Route::Audio || (self.route == Route::Editor && (self.ed.playing || !self.ed.loading.grey.is_empty())) {
+        if self.route == Route::Audio || (self.route == Route::Editor && (self.ed.playing || (!self.ed.loading.grey.is_empty() && self.ed.loading.failed.is_none()))) {
             window.request_animation_frame();
         }
         // Right after a frame lays out the preview at a new size (resize, maximize), move the

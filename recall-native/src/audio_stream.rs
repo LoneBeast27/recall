@@ -30,6 +30,11 @@ const READ_AHEAD: f64 = 1.0;
 /// Frames a packet may sit off the back-to-back position before it counts as a real gap
 /// (the stems ignore the same timestamp jitter).
 const JITTER_FRAMES: i64 = 1200;
+/// A clip read where it lies is decoded this far past the playhead, not to its end: a second
+/// reader running ahead would fight the player for the drive.
+const DIRECT_AHEAD: f64 = 20.0;
+/// Seeks to one gap that bring nothing before it counts as silence.
+const GAP_SEEKS: u32 = 3;
 
 /// A track's PCM as it arrives. Frames not decoded yet read as silence.
 pub(crate) struct LivePcm {
@@ -61,6 +66,9 @@ impl LivePcm {
 
     /// Stores `pcm` (interleaved) from `start` and counts those frames as decoded.
     fn write(&self, start: usize, pcm: &[i16]) {
+        if start >= self.frames {
+            return;
+        }
         let frames = (pcm.len() / self.channels).min(self.frames.saturating_sub(start));
         for (slot, value) in self.samples[start * self.channels..].iter().zip(&pcm[..frames * self.channels]) {
             slot.store(*value, Ordering::Relaxed);
@@ -90,6 +98,22 @@ impl LivePcm {
     /// First undecoded frame at or after `from`, else the first one before it.
     fn next_gap(&self, from: usize) -> Option<usize> {
         gap_after(&self.done.lock().unwrap_or_else(|e| e.into_inner()), from, self.frames)
+    }
+
+    /// `[start, end)` frames not decoded yet.
+    fn missing(&self) -> Vec<(usize, usize)> {
+        let mut holes = Vec::new();
+        let mut cursor = 0;
+        for run in self.done.lock().unwrap_or_else(|e| e.into_inner()).iter() {
+            if run.0 > cursor {
+                holes.push((cursor, run.0));
+            }
+            cursor = run.1;
+        }
+        if cursor < self.frames {
+            holes.push((cursor, self.frames));
+        }
+        holes
     }
 
     pub(crate) fn revision(&self) -> u64 {
@@ -151,6 +175,8 @@ struct Slot {
     channels: usize,
     /// Where the next packet goes if it follows on.
     next: Option<i64>,
+    /// Where a seek landed: nothing in this track between here and its first packet.
+    floor: Option<i64>,
 }
 
 /// The decoder, ready to start, and the handle the player keeps.
@@ -175,6 +201,12 @@ impl LiveSound {
         self.failed.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
+    /// Seconds of the first track not decoded yet, as `[start, end)` spans.
+    pub(crate) fn missing_spans(&self) -> Vec<(f64, f64)> {
+        let rate = SAMPLE_RATE as f64;
+        self.tracks.first().map_or_else(Vec::new, |(_, pcm)| pcm.missing().into_iter().map(|(start, end)| (start as f64 / rate, end as f64 / rate)).collect())
+    }
+
     /// `[from, to)` seconds can be heard on every track.
     pub(crate) fn has(&self, from: f64, to: f64) -> bool {
         let frame = |t: f64| (t.max(0.0) * SAMPLE_RATE as f64) as usize;
@@ -182,18 +214,18 @@ impl LiveSound {
     }
 }
 
-struct SendReader(IMFSourceReader);
-unsafe impl Send for SendReader {}
+struct Decoding(IMFSourceReader, IMFMediaSource);
+unsafe impl Send for Decoding {}
 
 /// Selects the audio streams of `source`, pairs them in order with `tracks`
 /// (stream index, channels) and starts decoding. Err: this clip's sound must wait for the stems.
-pub(crate) fn start(source: &IMFMediaSource, fill: ClipFill, map: Arc<ClipMap>, tracks: &[(usize, u16)], origin: f64, duration: f64) -> Result<Arc<LiveSound>, String> {
+pub(crate) fn start(source: IMFMediaSource, fill: ClipFill, map: Arc<ClipMap>, tracks: &[(usize, u16)], origin: f64, duration: f64) -> Result<Arc<LiveSound>, String> {
     let frames = (duration.max(0.0) * SAMPLE_RATE as f64).ceil() as usize;
     let bytes: u64 = tracks.iter().map(|(_, channels)| frames as u64 * u64::from((*channels).clamp(1, 2)) * 2).sum();
     if bytes > MAX_LIVE_BYTES {
         return Err("clip is too long to decode in memory".into());
     }
-    let reader = unsafe { MFCreateSourceReaderFromMediaSource(source, None) }.map_err(|e| format!("sound reader: {e}"))?;
+    let reader = unsafe { MFCreateSourceReaderFromMediaSource(&source, None) }.map_err(|e| format!("sound reader: {e}"))?;
     let all = MF_SOURCE_READER_ALL_STREAMS.0 as u32;
     unsafe { reader.SetStreamSelection(all, false) }.map_err(|e| format!("sound reader: {e}"))?;
     let mut slots = Vec::with_capacity(tracks.len());
@@ -212,15 +244,24 @@ pub(crate) fn start(source: &IMFMediaSource, fill: ClipFill, map: Arc<ClipMap>, 
         failed: Mutex::new(None),
     });
     let handle = Arc::clone(&sound);
-    let reader = SendReader(reader);
+    let parts = Decoding(reader, source);
     std::thread::Builder::new()
         .name("recall-live-sound".into())
         .spawn(move || {
-            let reader = reader;
+            let parts = parts;
             let hr = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
-            if let Err(error) = decode(&reader.0, slots, &handle, &fill, &map, origin) {
-                *handle.failed.lock().unwrap_or_else(|e| e.into_inner()) = Some(error);
+            let decoded = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| decode(&parts.0, slots, &handle, &fill, &map, origin)));
+            let failure = match decoded {
+                Ok(Ok(())) => None,
+                Ok(Err(error)) => Some(error),
+                Err(_) => Some("the sound decoder stopped".to_owned()),
+            };
+            if failure.is_some() {
+                *handle.failed.lock().unwrap_or_else(|e| e.into_inner()) = failure;
             }
+            let Decoding(reader, source) = parts;
+            drop(reader);
+            let _ = unsafe { source.Shutdown() };
             if hr.is_ok() {
                 unsafe { CoUninitialize() };
             }
@@ -242,7 +283,7 @@ fn open_track(reader: &IMFSourceReader, stream: u32, channels: u16, frames: usiz
     if !(1..=2).contains(&decoded) {
         return Err(format!("{decoded} sound channels"));
     }
-    Ok(Slot { reader_stream: stream, pcm: Arc::new(LivePcm::new(frames, decoded)), rate, channels: decoded, next: None })
+    Ok(Slot { reader_stream: stream, pcm: Arc::new(LivePcm::new(frames, decoded)), rate, channels: decoded, next: None, floor: None })
 }
 
 fn pcm_type(channels: u32) -> windows::core::Result<IMFMediaType> {
@@ -262,6 +303,7 @@ fn decode(reader: &IMFSourceReader, mut slots: Vec<Slot>, sound: &LiveSound, fil
     let mut position: Option<f64> = None;
     let mut ended = vec![false; slots.len()];
     let mut passes = 0;
+    let mut last_gap = (usize::MAX, 0u32);
     loop {
         if sound.stop.load(Ordering::Relaxed) {
             return Ok(());
@@ -270,13 +312,26 @@ fn decode(reader: &IMFSourceReader, mut slots: Vec<Slot>, sound: &LiveSound, fil
         let from = (playhead.max(0.0) * rate) as usize;
         let Some(gap) = slots.iter().filter_map(|slot| slot.pcm.next_gap(from)).min() else { return Ok(()) };
         let want = gap as f64 / rate;
+        if fill.is_direct() && (want < playhead - 1.0 || want > playhead + DIRECT_AHEAD) {
+            std::thread::sleep(Duration::from_millis(50));
+            continue;
+        }
         if position.is_none_or(|at| want < at - 0.25 || want > at + READ_AHEAD * 2.0) {
             if !bytes_ready(fill, map, want)? {
+                continue;
+            }
+            last_gap = if last_gap.0 == gap { (gap, last_gap.1 + 1) } else { (gap, 1) };
+            if last_gap.1 > GAP_SEEKS {
+                // The file holds nothing here: a second of silence, then on.
+                for slot in &slots {
+                    slot.pcm.mark(gap, gap + SAMPLE_RATE as usize);
+                }
                 continue;
             }
             seek(reader, want + origin)?;
             for slot in &mut slots {
                 slot.next = None;
+                slot.floor = Some(gap as i64);
             }
             ended.fill(false);
             position = Some(want);
@@ -316,7 +371,7 @@ fn decode(reader: &IMFSourceReader, mut slots: Vec<Slot>, sound: &LiveSound, fil
 fn bytes_ready(fill: &ClipFill, map: &ClipMap, seconds: f64) -> Result<bool, String> {
     match fill.outcome() {
         Outcome::Done => Ok(true),
-        Outcome::Cancelled => Err(fill.error().unwrap_or_else(|| "clip closed".into())),
+        Outcome::Cancelled | Outcome::Failed => Err(fill.error().unwrap_or_else(|| "clip closed".into())),
         Outcome::Filling => {
             let (start, end) = map.bytes_of(seconds, seconds + READ_AHEAD);
             let ready = fill.has(start, end);
@@ -344,20 +399,28 @@ fn place(slot: &mut Slot, sample: &IMFSample, seconds: f64) -> Result<(), String
     let _ = unsafe { buffer.Unlock() };
     let pcm = if slot.rate == SAMPLE_RATE { pcm } else { resample(&pcm, slot.channels, slot.rate) };
     let stamped = (seconds * SAMPLE_RATE as f64).round() as i64;
-    let start = match slot.next {
-        Some(next) if (stamped - next).abs() <= JITTER_FRAMES => next,
-        Some(next) if stamped > next => {
-            slot.pcm.mark(next.max(0) as usize, stamped.max(0) as usize);
-            stamped
-        }
-        _ => stamped,
-    };
+    let (start, silent) = packet_start(slot.next, slot.floor.take(), stamped);
+    if let Some((from, to)) = silent {
+        slot.pcm.mark(from.max(0) as usize, to.max(0) as usize);
+    }
     let frames = (pcm.len() / slot.channels) as i64;
     slot.next = Some(start + frames);
     // Samples before the clip's first frame have nowhere to go.
     let skip = (-start).max(0).min(frames) as usize * slot.channels;
     slot.pcm.write(start.max(0) as usize, &pcm[skip..]);
     Ok(())
+}
+
+/// Where a packet stamped `stamped` goes, and the run before it that is real silence: back to
+/// back with the last packet unless the stamps show a gap; after a seek (`floor`), at its stamp,
+/// with nothing in the track between the seek and it (a track that starts after the picture).
+fn packet_start(next: Option<i64>, floor: Option<i64>, stamped: i64) -> (i64, Option<(i64, i64)>) {
+    match (next, floor) {
+        (Some(next), _) if (stamped - next).abs() <= JITTER_FRAMES => (next, None),
+        (Some(next), _) if stamped > next => (stamped, Some((next, stamped))),
+        (_, Some(floor)) if stamped > floor => (stamped, Some((floor, stamped))),
+        _ => (stamped, None),
+    }
 }
 
 /// Linear resampling of one packet to the mixer's rate.
@@ -417,6 +480,23 @@ mod tests {
         pcm.write(1, &[1, 2, 3]);
         assert!(pcm.has(1, 2));
         assert_eq!(pcm.next_gap(0), Some(0));
+    }
+
+    #[test]
+    fn a_track_that_starts_late_has_silence_before_it_not_a_gap() {
+        assert_eq!(packet_start(None, Some(0), 144_000), (144_000, Some((0, 144_000))), "starts 3 s into the clip");
+        assert_eq!(packet_start(None, Some(48_000), 47_500), (47_500, None), "a packet from just before the seek");
+        assert_eq!(packet_start(Some(1000), None, 1500), (1000, None), "jitter stays back to back");
+        assert_eq!(packet_start(Some(1000), None, 9000), (9000, Some((1000, 9000))), "a real gap");
+        assert_eq!(packet_start(None, None, 700), (700, None));
+    }
+
+    #[test]
+    fn a_stamp_past_the_clip_is_dropped_not_a_crash() {
+        let pcm = LivePcm::new(10, 2);
+        pcm.write(50, &[1, 2]);
+        pcm.write(10, &[1, 2]);
+        assert!(!pcm.has(0, 1));
     }
 
     #[test]

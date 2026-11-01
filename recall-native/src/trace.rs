@@ -179,6 +179,7 @@ pub fn record(route: &str, ed: &EditorState, clips: usize) {
             "grey_seconds": ed.loading.grey.iter().map(|span| span.1 - span.0).sum::<f64>(),
             "buffering": ed.loading.buffering,
             "note": ed.loading_note(),
+            "failed": ed.loading.failed,
             "waves": ed.info.as_ref().map(|i| i.audio.iter().filter(|a| !a.waveform.is_empty()).count()),
         })),
         "targets": targets,

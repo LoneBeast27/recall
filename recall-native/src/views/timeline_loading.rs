@@ -15,16 +15,17 @@ impl Root {
     /// The grey parts, over the lanes from `top` down. Empty once the clip is all here.
     pub(super) fn render_loading(&self, top: f32, duration: f64) -> Vec<AnyElement> {
         let loading = &self.ed.loading;
-        let moved = loading.since.map_or(0.0, |since| since.elapsed().as_secs_f32()) * STRIPE_SPEED;
+        let moved = if loading.failed.is_some() { 0.0 } else { loading.since.map_or(0.0, |since| since.elapsed().as_secs_f32()) * STRIPE_SPEED };
         let widest = loading.grey.iter().map(|span| span.1 - span.0).fold(0.0, f64::max);
         let percent = (loading.share * 100.0).floor() as u32;
         let frac = |t: f64| (t / duration).clamp(0.0, 1.0) as f32;
+        let stopped = loading.failed.is_some();
         let mut labelled = false;
         loading
             .grey
             .iter()
             .map(|(start, end)| {
-                let label = (!labelled && end - start >= widest && (end - start) / duration > 0.12).then(|| format!("Loading {percent}%"));
+                let label = (!labelled && end - start >= widest && (end - start) / duration > 0.12).then(|| if stopped { "Couldn't load the rest".to_owned() } else { format!("Loading {percent}%") });
                 labelled |= label.is_some();
                 grey_span(frac(*start), frac(*end), top, moved, label)
             })
@@ -34,6 +35,9 @@ impl Root {
     /// While the clip loads, the transport says how far it has got.
     pub(crate) fn loading_label(&self) -> Option<String> {
         let loading = &self.ed.loading;
+        if loading.failed.is_some() {
+            return Some("Load stopped".to_owned());
+        }
         (loading.active() && !loading.grey.is_empty()).then(|| format!("Loading {}%", (loading.share * 100.0).floor() as u32))
     }
 }

@@ -36,12 +36,20 @@ pub struct Loading {
     pub prepared: bool,
     /// The generation that opened from the fill.
     pub generation: Option<u64>,
+    /// Why the rest of the clip will not arrive.
+    pub failed: Option<String>,
+    held: bool,
 }
 
 impl Loading {
     pub fn active(&self) -> bool {
         self.since.is_some()
     }
+}
+
+/// A clip read where it lies keeps its decoder: the stems are not swapped in while it is open.
+fn media_ended_sound(preview: Option<&crate::media::NativePreview>) -> bool {
+    preview.and_then(|preview| preview.stream()).is_none_or(|media| !media.fill.is_direct())
 }
 
 impl EditorState {
@@ -53,6 +61,7 @@ impl EditorState {
             if let Some(sound) = &clip.media.sound {
                 sound.stop();
             }
+            let _ = unsafe { clip.media.video.0.Shutdown() };
             return;
         }
         self.loading_path = None;
@@ -106,7 +115,7 @@ impl EditorState {
     }
 
     /// Per-poll upkeep while the clip loads. True when something on screen changed.
-    pub(super) fn tick_loading(&mut self) -> bool {
+    pub(super) fn tick_loading(&mut self, editor_visible: bool) -> bool {
         if !self.loading.active() {
             return false;
         }
@@ -116,17 +125,34 @@ impl EditorState {
             return true;
         };
         let mut changed = false;
+        // Nobody is watching, or the recorder needs the drive: what playback needs still comes.
+        let held = !editor_visible || crate::services::storage::recorder_busy();
+        if held != self.loading.held {
+            self.loading.held = held;
+            media.fill.hold(held);
+        }
         let revision = media.fill.revision();
         let outcome = media.fill.outcome();
-        if revision != self.loading.seen_revision {
-            self.loading.seen_revision = revision;
-            self.loading.share = media.fill.progress();
-            self.loading.grey = media.map.missing_spans(&media.fill.holes(), duration);
-            changed = true;
-        }
-        if outcome == Outcome::Done && !self.loading.grey.is_empty() {
-            self.loading.grey.clear();
-            changed = true;
+        if media.fill.is_direct() {
+            // Nothing to copy: what is not ready yet is the sound, until the stems are in.
+            let spans = if self.loading.prepared { Vec::new() } else { media.sound.as_ref().map_or_else(Vec::new, |sound| sound.missing_spans()) };
+            if spans != self.loading.grey {
+                let left: f64 = spans.iter().map(|span| span.1 - span.0).sum();
+                self.loading.share = 1.0 - (left / duration).clamp(0.0, 1.0);
+                self.loading.grey = spans;
+                changed = true;
+            }
+        } else {
+            if revision != self.loading.seen_revision {
+                self.loading.seen_revision = revision;
+                self.loading.share = media.fill.progress();
+                self.loading.grey = media.map.missing_spans(&media.fill.holes(), duration);
+                changed = true;
+            }
+            if outcome == Outcome::Done && !self.loading.grey.is_empty() {
+                self.loading.grey.clear();
+                changed = true;
+            }
         }
         let wave_due = self.loading.wave_at.is_none_or(|at| at.elapsed() >= WAVE_EVERY);
         if wave_due && !self.loading.prepared {
@@ -147,8 +173,14 @@ impl EditorState {
                 changed = true;
             }
         }
+        if outcome == Outcome::Failed && self.loading.failed.is_none() {
+            let why = media.fill.error().unwrap_or_else(|| "The clip's drive stopped answering.".into());
+            crate::trace::player_event("clip stopped loading", serde_json::json!({ "why": why }));
+            self.loading.failed = Some(why);
+            changed = true;
+        }
         changed |= self.keep_buffer();
-        if outcome == Outcome::Done && self.loading.prepared && self.loading.grey.is_empty() && !self.loading.buffering {
+        if outcome == Outcome::Done && self.loading.prepared && self.loading.grey.is_empty() && !self.loading.buffering && media_ended_sound(self.preview.as_ref()) {
             self.loading = Default::default();
             changed = true;
         }
@@ -162,7 +194,16 @@ impl EditorState {
         }
         let pos = self.position();
         let end = self.duration();
+        let failed = self.loading.failed.is_some();
         let Some(preview) = self.preview.as_mut() else { return false };
+        // What did not load will not come: playback ends where the loaded part ends.
+        if failed {
+            if preview.stream_ready(pos, (pos + STOP_MARGIN).min(end)) {
+                return false;
+            }
+            self.pause();
+            return true;
+        }
         if self.loading.buffering {
             // A pause that beat a play still on its way to the player did nothing.
             if preview.video_state() == Some("playing") {
@@ -202,6 +243,9 @@ impl EditorState {
         }
         let pos = self.position();
         let ready = self.preview.as_ref().is_none_or(|preview| preview.stream_ready(pos, (pos + 0.05).min(self.duration())));
-        (!ready).then_some("Loading this part…")
+        if ready {
+            return None;
+        }
+        Some(if self.loading.failed.is_some() { "This part didn't load" } else { "Loading this part…" })
     }
 }
