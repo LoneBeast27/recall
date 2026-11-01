@@ -5,7 +5,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::io_priority;
 
@@ -28,10 +28,12 @@ pub enum Run {
     Finished(Output),
     /// Stopped by the flag, or never started (`pid` 0). The process is gone.
     Cancelled { pid: u32 },
+    /// Ran past its limit. The process is gone.
+    TimedOut { pid: u32 },
 }
 
-/// [`run_hidden`] that ends the helper as soon as `cancel` turns true.
-pub fn run_cancellable(command: &mut Command, lowered: bool, cancel: &AtomicBool) -> io::Result<Run> {
+/// [`run_hidden`] that ends the helper as soon as `cancel` turns true, or at `limit`.
+pub fn run_cancellable(command: &mut Command, lowered: bool, cancel: &AtomicBool, limit: Duration) -> io::Result<Run> {
     if cancel.load(Ordering::Acquire) {
         return Ok(Run::Cancelled { pid: 0 });
     }
@@ -48,18 +50,55 @@ pub fn run_cancellable(command: &mut Command, lowered: bool, cancel: &AtomicBool
     let stdout = child.stdout.take().map(|pipe| drain(Box::new(pipe)));
     let stderr = child.stderr.take().map(|pipe| drain(Box::new(pipe)));
     let collect = |thread: Option<std::thread::JoinHandle<Vec<u8>>>| thread.and_then(|t| t.join().ok()).unwrap_or_default();
+    let started = Instant::now();
     loop {
-        if cancel.load(Ordering::Acquire) {
+        let late = started.elapsed() >= limit;
+        if late || cancel.load(Ordering::Acquire) {
             let pid = child.id();
             let _ = child.kill();
             child.wait()?;
-            return Ok(Run::Cancelled { pid });
+            return Ok(if late { Run::TimedOut { pid } } else { Run::Cancelled { pid } });
         }
         if let Some(status) = child.try_wait()? {
             return Ok(Run::Finished(Output { status, stdout: collect(stdout), stderr: collect(stderr) }));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// [`run_hidden`] with an end: the process is killed once it has run for `limit`, or as soon as
+/// `stop` says so. A process that never returns cannot hold a thread for good.
+pub fn run_watched(command: &mut Command, lowered: bool, limit: Duration, stop: &dyn Fn() -> bool) -> io::Result<Output> {
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = io_priority::spawn(command, lowered)?;
+    let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err(io::Error::other("helper process has no pipes"));
+    };
+    let out = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stdout.read_to_end(&mut bytes);
+        bytes
+    });
+    let err = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let _ = stderr.read_to_end(&mut bytes);
+        bytes
+    });
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Ok(status);
+        }
+        let late = started.elapsed() >= limit;
+        if late || stop() {
+            let _ = child.kill();
+            let _ = child.wait();
+            break Err(io::Error::new(if late { io::ErrorKind::TimedOut } else { io::ErrorKind::Interrupted }, if late { "took too long" } else { "no longer needed" }));
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    let (stdout, stderr) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
+    Ok(Output { status: status?, stdout, stderr })
 }
 
 /// `variable`, else `bin/<executable>` or `tools/ffmpeg-dev/*/bin/<executable>` above the
@@ -162,5 +201,39 @@ pub(crate) fn publish(temporary: &Path, target: &Path) -> Result<(), String> {
             let _ = std::fs::remove_file(temporary);
             Err(format!("publish cache file: {error}"))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slow_process() -> Command {
+        let mut command = Command::new("ping.exe");
+        command.args(["-n", "30", "127.0.0.1"]);
+        command
+    }
+
+    #[test]
+    fn a_process_that_never_returns_is_killed_at_its_limit() {
+        let started = Instant::now();
+        let error = run_watched(&mut slow_process(), false, Duration::from_millis(300), &|| false).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_process_nobody_needs_any_more_is_killed() {
+        let error = run_watched(&mut slow_process(), false, Duration::from_secs(60), &|| true).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Interrupted);
+    }
+
+    #[test]
+    fn a_process_that_finishes_gives_its_output() {
+        let mut command = Command::new("cmd.exe");
+        command.args(["/c", "echo hello"]);
+        let output = run_watched(&mut command, false, Duration::from_secs(20), &|| false).unwrap();
+        assert!(output.status.success());
+        assert!(String::from_utf8_lossy(&output.stdout).contains("hello"));
     }
 }

@@ -21,6 +21,8 @@ const LANE_GAP: f32 = 6.0;
 
 #[path = "timeline_tracks.rs"]
 mod tracks;
+#[path = "timeline_loading.rs"]
+mod loading;
 
 impl Root {
     pub fn render_timeline(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -213,7 +215,7 @@ impl Root {
                 .justify_center()
                 .text_size(px(12.))
                 .text_color(c(theme::TERTIARY))
-                .child(if self.ed.info.is_some() { "Preparing filmstrip…" } else { "" })
+                .child(if self.ed.info.is_some() && self.ed.loading.grey.is_empty() { "Preparing filmstrip…" } else { "" })
                 .into_any_element();
         }
         strip

@@ -12,8 +12,10 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::os::windows::process::CommandExt;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[path = "visual_assets.rs"]
 mod visual_assets;
 
@@ -36,6 +38,10 @@ pub struct PreparedClip {
     pub sidecar_at_open:bool,
     /// SSD copy to play from (`None`: play `info.path` -- a clip already on an SSD, or one the video tier could not take).
     pub playback:Option<String>,
+    /// Where the file's picture ends (`services::library::video_limits`).
+    pub limits:(Option<f64>,Option<f64>),
+    /// Bookmarks from beside the clip.
+    pub marks:Vec<f64>,
 }
 /// Settings > Storage: library and cache drive types plus per-tier cache usage.
 #[derive(Clone,Debug)]
@@ -61,10 +67,47 @@ impl Drop for ExportGuard { fn drop(&mut self){EXPORTING.store(false,Ordering::R
 pub fn engine_path()->Result<PathBuf,String> {
     if let Some(p)=std::env::var_os("RECALL_ENGINE"){let p=PathBuf::from(p);return if p.is_file(){Ok(p)}else{Err("RECALL_ENGINE does not name an executable".into())};}
     let exe=std::env::current_exe().map_err(|e|e.to_string())?;
-    for p in exe.ancestors(){for candidate in [p.join("recall.exe"),p.join("target-dev/debug/recall.exe"),p.join("target/release/recall.exe")] {if candidate.is_file(){return Ok(candidate);}}}
+    for p in exe.ancestors(){for candidate in [p.join("recall.exe"),p.join("target-dev/debug/recall.exe")] {if candidate.is_file(){return Ok(candidate);}}}
     Err("Recorder executable not found. Build recall or set RECALL_ENGINE.".into())
 }
-fn engine_command()->Result<Command,String>{Ok(Command::new(engine_path()?))}
+/// What an engine build stamps in its program file: `recall-engine-caps:<cap>,<cap>;`
+/// (`ENGINE_CAPS` in `recall/src/main.rs`). Flag names are not searched for: a release build
+/// holds them split up, and a build without encode holds them while they do nothing.
+const CAPS_MARK:&[u8]=b"recall-engine-caps:";
+/// An engine that can do `cap`, set up to run it. Unknown arguments start an engine as a recorder
+/// that never returns, so a build without it must not be run to find out: the check reads the program file.
+fn engine_command(cap:&str)->Result<Command,String>{
+    let path=engine_path()?;
+    if !engine_knows(&path,cap)?{return Err(format!("The recorder at {} is too old for this version of Recall (no {cap}).",path.display()));}
+    let mut command=Command::new(path);command.arg(format!("--{cap}"));Ok(command)
+}
+fn engine_knows(path:&Path,cap:&str)->Result<bool,String>{
+    static KNOWN:Mutex<Option<HashMap<(PathBuf,u64,u64,String),bool>>>=Mutex::new(None);
+    let m=path.metadata().map_err(|e|format!("stat recorder: {e}"))?;
+    let key=(path.to_path_buf(),m.len(),modified_ms(&m),cap.to_owned());
+    let mut known=KNOWN.lock().unwrap_or_else(|e|e.into_inner());
+    if let Some(answer)=known.get_or_insert_with(HashMap::new).get(&key){return Ok(*answer);}
+    let bytes=std::fs::read(path).map_err(|e|format!("read recorder: {e}"))?;
+    let answer=stamped_caps(&bytes).iter().any(|stamped|*stamped==cap.as_bytes());
+    known.get_or_insert_with(HashMap::new).insert(key,answer);
+    Ok(answer)
+}
+/// The capabilities stamped in a program file.
+fn stamped_caps(bytes:&[u8])->Vec<&[u8]>{
+    let mut caps=Vec::new();
+    for at in bytes.windows(CAPS_MARK.len()).enumerate().filter(|(_,w)|w[0]==CAPS_MARK[0]&&*w==CAPS_MARK).map(|(at,_)|at){
+        let list=&bytes[at+CAPS_MARK.len()..];
+        let Some(end)=list.iter().take(256).position(|b|*b==b';')else{continue};
+        caps.extend(list[..end].split(|b|*b==b','));
+    }
+    caps
+}
+/// The engine has already prepared this clip in place.
+pub(crate) fn has_prepared(source:&Path,metadata:&std::fs::Metadata)->bool{
+    storage::engine_cache_dir(&storage::cache_root().join("editor"),source,metadata.len(),modified_ms(metadata)).join("clip.json").is_file()
+}
+/// Preparing reads the whole clip once per track; past this it is not coming back.
+fn prepare_limit(bytes:u64)->Duration{Duration::from_secs(120+bytes/(2_000_000))}
 /// Engine media-preparation cache (`<cache>\editor`): WAV preview stems + `clip.json` per source.
 pub fn cache_dir()->Result<PathBuf,String>{
     let root=storage::cache_root().join("editor");
@@ -128,7 +171,7 @@ fn validate_project(project:&Project,info:&ClipInfo)->Result<(),String>{
     validate_fps(project.export_fps)?;
     project.plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())
 }
-fn modified_ms(m:&std::fs::Metadata)->u64{m.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(u64::MAX as u128) as u64}
+pub(crate) fn modified_ms(m:&std::fs::Metadata)->u64{m.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(u64::MAX as u128) as u64}
 /// Engine input for a clip: whichever of (SSD copy, original) already has an engine cache
 /// entry (no re-decode), else the copy (fast reads), else the original.
 fn engine_input(source:&Path,metadata:&std::fs::Metadata,copy:Option<&Path>)->PathBuf{
@@ -146,16 +189,17 @@ fn engine_input(source:&Path,metadata:&std::fs::Metadata,copy:Option<&Path>)->Pa
 /// Opening a clip the smart cache is preparing at the same moment races two engines to publish
 /// one cache entry; the loser fails ("publish cache") although the entry is now complete, so it
 /// asks once more and reads the winner's entry.
-fn run_engine_prepare(input:&Path,lowered:bool)->Result<ClipInfo,String>{
-    match run_engine_prepare_once(input,lowered){
-        Err(error) if lost_publish_race(&error)=>run_engine_prepare_once(input,lowered),
+fn run_engine_prepare(input:&Path,lowered:bool,stop:&dyn Fn()->bool)->Result<ClipInfo,String>{
+    match run_engine_prepare_once(input,lowered,stop){
+        Err(error) if lost_publish_race(&error)=>run_engine_prepare_once(input,lowered,stop),
         result=>result,
     }
 }
 fn lost_publish_race(error:&str)->bool{error.contains("publish cache:")}
-fn run_engine_prepare_once(input:&Path,lowered:bool)->Result<ClipInfo,String>{
-    let mut command=engine_command()?;command.arg("--prepare-editor").arg(input).arg(cache_dir()?);
-    let output=storage::run_hidden(&mut command,lowered).map_err(|e|format!("start media preparation: {e}"))?;
+fn run_engine_prepare_once(input:&Path,lowered:bool,stop:&dyn Fn()->bool)->Result<ClipInfo,String>{
+    let mut command=engine_command("prepare-editor")?;command.arg(input).arg(cache_dir()?);
+    let limit=prepare_limit(input.metadata().map_or(0,|m|m.len()));
+    let output=storage::run_watched(&mut command,lowered,limit,stop).map_err(|e|format!("prepare media: {e}"))?;
     if !output.status.success(){return Err(format!("prepare media: {}",String::from_utf8_lossy(&output.stderr).trim()));}
     serde_json::from_slice(&output.stdout).map_err(|e|format!("read prepared media: {e}"))
 }
@@ -169,24 +213,30 @@ fn folder_bytes(dir:&Path)->u64{std::fs::read_dir(dir).map(|l|l.flatten().filter
 /// audio stems and visuals from the copy (or reuse what the smart cache already prepared). A
 /// clip that cannot be cached is prepared in place on the lane at very low I/O priority.
 /// `info.path` always names the original.
-pub fn prepare_clip(path:&str)->Result<PreparedClip,String>{
+pub fn prepare_clip(path:&str)->Result<PreparedClip,String>{prepare_clip_steps(path,None,false,&|_|{},Arc::new(||false))}
+/// [`prepare_clip`] saying what it is doing, for as long as `stop` says no. `known_copy`: an SSD copy
+/// that already exists. `beside_playback`: the clip plays from where it lies, so it gets no copy, and
+/// the engine runs off the disk's lane (very low I/O priority): for the length of a run the lane would
+/// hold thumbnails, hover frames and the sidecar flush back.
+pub fn prepare_clip_steps(path:&str,known_copy:Option<String>,beside_playback:bool,step:&dyn Fn(&'static str),stop:Arc<dyn Fn()->bool+Send+Sync>)->Result<PreparedClip,String>{
     let source=std::fs::canonicalize(path).map_err(|e|format!("resolve source: {e}"))?;
     let metadata=source.metadata().map_err(|e|format!("stat source: {e}"))?;
     if !metadata.is_file(){return Err("source is not a file".into());}
     let on_hdd=storage::drive_kind(&source).is_hdd();
     let mut warnings=Vec::new();
     // Too big for the video tier (or no room): play from the library drive, no warning needed.
-    let copy=if on_hdd{storage::cache_video(&source.to_string_lossy()).ok().filter(|c|Path::new(c)!=source.as_path())}else{None};
+    let copy=match known_copy{Some(copy)=>Some(copy),None if on_hdd&&!beside_playback=>{step("Loading clip from the hard drive…");storage::cache_video(&source.to_string_lossy()).ok().filter(|c|Path::new(c)!=source.as_path())},None=>None};
+    step("Preparing sound…");
     let input=engine_input(&source,&metadata,copy.as_deref().map(Path::new));
     let frames_from=copy.as_ref().map(PathBuf::from).unwrap_or_else(||source.clone());
     let in_place=on_hdd&&copy.is_none();
     let original=source.clone();
     let work=move||->Result<(ClipInfo,VisualAssets,Option<String>),String>{
-        let info=run_engine_prepare(&input,in_place&&storage::drive_kind(&input).is_hdd())?;
+        let info=run_engine_prepare(&input,in_place&&storage::drive_kind(&input).is_hdd(),&*stop)?;
         let (visuals,warning)=visual_assets::visuals_best_effort(&original,&frames_from,info.duration);
         Ok((info,visuals,warning))
     };
-    let (mut info,visuals,visual_warning)=if in_place{storage::run_io(&source,Priority::Interactive,work)??}else{work()?};
+    let (mut info,visuals,visual_warning)=if in_place&&!beside_playback{storage::run_io(&source,Priority::Interactive,work)??}else{work()?};
     // The copy is byte-identical and stamped with the source's mtime; pin identity to the original.
     info.path=source.to_string_lossy().into_owned();info.source_bytes=metadata.len();info.source_modified_ms=modified_ms(&metadata);
     normalize_audio_names(&mut info);
@@ -195,7 +245,9 @@ pub fn prepare_clip(path:&str)->Result<PreparedClip,String>{
     let (project,project_warning,sidecar_ours,sidecar_at_open)=load_project(&info);
     warnings.extend(project_warning);warnings.extend(visual_warning);
     let warning=(!warnings.is_empty()).then(||warnings.join(" "));
-    Ok(PreparedClip{info,project,warning,visuals,sidecar_ours,sidecar_at_open,playback:copy})
+    let limits=crate::services::library::video_limits(copy.as_deref().unwrap_or(&info.path),info.duration);
+    let marks=read_marks(&info.path);
+    Ok(PreparedClip{info,project,warning,visuals,sidecar_ours,sidecar_at_open,playback:copy,limits,marks})
 }
 /// Smart-cache fill step (runs on the clip's disk lane): prepares editor media — audio stems,
 /// waveforms, poster, filmstrip — without opening the clip, from the SSD copy when there is
@@ -205,13 +257,26 @@ pub fn prefetch_editor_media(path:&str)->Result<u64,String>{
     let metadata=source.metadata().map_err(|e|format!("stat source: {e}"))?;
     let copy=storage::cached_video(&source.to_string_lossy()).map(PathBuf::from);
     let input=engine_input(&source,&metadata,copy.as_deref());
-    let info=run_engine_prepare(&input,storage::drive_kind(&input).is_hdd())?;
+    let info=run_engine_prepare(&input,storage::drive_kind(&input).is_hdd(),&||false)?;
     let frames_from=copy.unwrap_or_else(||source.clone());
     let (visuals,_)=visual_assets::visuals_best_effort(&source,&frames_from,info.duration);
     let dirs=editor_dirs(&info);
     storage::note_editor_media(&source.to_string_lossy(),&dirs,false);
     let frames:u64=visuals.poster.iter().chain(visuals.filmstrip.iter()).filter_map(|p|std::fs::metadata(p).ok()).map(|m|m.len()).sum();
     Ok(dirs.iter().map(|d|folder_bytes(d)).sum::<u64>()+frames)
+}
+/// The poster and filmstrip already in the frame tier for this clip (no extraction).
+pub(crate) fn cached_visuals(source:&Path)->VisualAssets{visual_assets::cached(source)}
+/// Reads bookmark times written by the recorder beside the clip:
+/// `<stem>.recall-marks.json` = `{"version":1,"marks":[seconds,...]}`. Missing → none.
+pub fn read_marks(clip:&str)->Vec<f64>{
+    let path=Path::new(clip);
+    let Some(stem)=path.file_stem().and_then(|s|s.to_str()) else{return Vec::new()};
+    let sidecar=path.with_file_name(format!("{stem}.recall-marks.json"));
+    let Ok(text)=std::fs::read_to_string(sidecar) else{return Vec::new()};
+    let Ok(value)=serde_json::from_str::<serde_json::Value>(&text) else{return Vec::new()};
+    let mut marks:Vec<f64>=value.get("marks").and_then(|m|m.as_array()).map(|a|a.iter().filter_map(|v|v.as_f64()).filter(|t|t.is_finite()&&*t>=0.0).collect()).unwrap_or_default();
+    marks.sort_by(f64::total_cmp);marks
 }
 fn working_path(info:&ClipInfo)->Result<PathBuf,String>{
     let name=Path::new(&info.path).file_name().ok_or("source has no filename")?.to_string_lossy().into_owned();
@@ -220,7 +285,7 @@ fn working_path(info:&ClipInfo)->Result<PathBuf,String>{
 /// Newer of the SSD working copy and the sidecar (falling back to the other when the newer one is invalid).
 /// The project to open, a warning, and whether this session owns the sidecar: a sidecar that
 /// exists but cannot be read or loaded may hold edits, so a later flush must leave it alone.
-fn load_project(info:&ClipInfo)->(Option<Project>,Option<String>,bool,bool){
+pub(crate) fn load_project(info:&ClipInfo)->(Option<Project>,Option<String>,bool,bool){
     let (Ok(working),Ok(sidecar))=(working_path(info),sidecar(&info.path))else{return(None,None,false,false)};
     let lane_sidecar=sidecar.clone();
     let (sidecar_ms,sidecar_bytes)=storage::run_io(Path::new(&info.path),Priority::Interactive,move||(storage::projects_modified_ms(&lane_sidecar),std::fs::read(&lane_sidecar).ok())).unwrap_or((None,None));
@@ -243,7 +308,7 @@ fn normalize_project_audio(plan:&mut EditPlan,info:&ClipInfo){
     for track in &info.audio { normalized.push(plan.audio.iter().find(|setting|setting.stream_index==track.stream_index).cloned().unwrap_or(crate::edit_model::AudioSetting{stream_index:track.stream_index,gain_db:0.0,muted:false})); }
     plan.audio=normalized;
 }
-fn normalize_audio_names(info:&mut ClipInfo){
+pub(crate) fn normalize_audio_names(info:&mut ClipInfo){
     let generated=recall_generated_path(&info.path);
     let unnamed:Vec<_>=info.audio.iter().enumerate().filter_map(|(index,track)|generic_audio_name(&track.name).then_some(index)).collect();
     if generated&&info.audio.len()==2&&unnamed.len()==2 { info.audio[0].name="Game audio".into();info.audio[1].name="Microphone".into();return; }
@@ -275,6 +340,42 @@ mod tests {
         normalize_audio_names(&mut info);
         assert_eq!(info.audio.iter().map(|a|a.name.as_str()).collect::<Vec<_>>(),["Audio track 1","Game","Mic"]);
     }
+    #[test] fn reads_marks_sidecar_and_ignores_garbage(){
+        let dir=std::env::temp_dir().join(format!("recall-marks-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let clip=dir.join("VALORANT__2026-10-22__01-02-03.mp4");
+        std::fs::write(dir.join("VALORANT__2026-10-22__01-02-03.recall-marks.json"),r#"{"version":1,"marks":[42.5,3.0,"x",-1]}"#).unwrap();
+        assert_eq!(read_marks(&clip.to_string_lossy()),vec![3.0,42.5]);
+        assert!(read_marks(&dir.join("none.mp4").to_string_lossy()).is_empty());
+        let _=std::fs::remove_dir_all(&dir);
+    }
+    #[test] fn only_the_stamped_marker_says_what_an_engine_can_do(){
+        let dir=std::env::temp_dir().join(format!("recall-engine-{}",std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (old,prepare,new)=(dir.join("old.exe"),dir.join("prepare.exe"),dir.join("new.exe"));
+        std::fs::write(&old,b"MZ recorder --prepare-editor --export-edit").unwrap();
+        std::fs::write(&prepare,b"MZ recall-engine-caps:prepare-editor; rest").unwrap();
+        std::fs::write(&new,b"MZ \0recall-engine-caps:prepare-editor,export-edit;\0 rest").unwrap();
+        assert!(!engine_knows(&old,"prepare-editor").unwrap(),"flag names in a program file prove nothing");
+        assert!(!engine_knows(&old,"export-edit").unwrap());
+        assert!(engine_knows(&prepare,"prepare-editor").unwrap());
+        assert!(!engine_knows(&prepare,"export-edit").unwrap());
+        assert!(engine_knows(&new,"prepare-editor").unwrap());
+        assert!(engine_knows(&new,"export-edit").unwrap());
+        assert!(!engine_knows(&new,"prepare").unwrap(),"a whole capability, not a prefix");
+        let _=std::fs::remove_dir_all(&dir);
+    }
+    #[test] fn a_marker_with_no_end_counts_for_nothing(){
+        assert!(stamped_caps(b"recall-engine-caps:prepare-editor").is_empty());
+    }
+    #[test] fn an_export_has_an_end_that_grows_with_the_work(){
+        let range=|start:f64,end:f64,speed:f64|{let mut r=crate::edit_model::TimeRange::new(start,end);r.speed=speed;r};
+        let plan=|ranges|EditPlan{ranges,audio:Vec::new()};
+        assert_eq!(export_limit(&plan(vec![]),60),Duration::from_secs(600));
+        assert_eq!(export_limit(&plan(vec![range(0.0,60.0,1.0)]),60),Duration::from_secs(1800));
+        assert_eq!(export_limit(&plan(vec![range(0.0,60.0,0.25)]),60),Duration::from_secs(5400),"a slowed part is longer");
+        assert_eq!(export_limit(&plan(vec![range(0.0,60.0,1.0)]),240),Duration::from_secs(5400),"more frames");
+    }
     #[test] fn a_lost_publish_race_is_retried_and_other_failures_are_not(){
         assert!(lost_publish_race("prepare media: prepare editor: publish cache: The directory is not empty. (os error 145)"));
         assert!(!lost_publish_race("prepare media: open clip.mp4: Invalid data found when processing input"));
@@ -293,6 +394,11 @@ fn project_bytes(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->
     validate_fps(fps)?;plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())?;
     let project=Project{version:1,source_path:info.path.clone(),source_bytes:info.source_bytes,source_modified_ms:info.source_modified_ms,plan:plan.clone(),export_fps:fps,export:export.clone()};
     serde_json::to_vec_pretty(&project).map_err(|e|e.to_string())
+}
+/// The edits now, on the SSD only: a clip reopened while the sidecar waits behind an export
+/// must load these, not what was saved before.
+pub fn save_working(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->Result<(),String>{
+    storage::write_atomic(&working_path(info)?,&project_bytes(info,plan,fps,export)?)
 }
 /// Autosave: writes the working project to the SSD (`cache\projects\<id>.json`, atomic). Touches nothing
 /// on the library drive. Returns the working-copy path.
@@ -336,6 +442,12 @@ pub fn flush_project(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSetting
 /// What a flush left beside the clip; the path is the sidecar's.
 #[derive(Debug,Clone,PartialEq)]
 pub enum Flushed{Nothing,Current(String),Removed(String)}
+/// A hung engine must not hold the io queue and the output drive for good. NVENC runs far past real
+/// time and the CPU encoder near it, at 60 fps; this is well beyond the slowest honest export.
+fn export_limit(plan:&EditPlan,fps:u32)->Duration{
+    let seconds:f64=plan.ranges.iter().map(|r|(r.end-r.start)/if r.speed>0.0{r.speed}else{1.0}).sum();
+    Duration::from_secs_f64(600.0+seconds.max(0.0)*20.0*(f64::from(fps)/60.0).max(1.0))
+}
 pub fn export_clip(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->Result<ExportSummary,String>{
     validate_info(info)?;validate_fps(fps)?;plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())?;export.validate(plan)?;
     let lossless=export.mode==ExportMode::Lossless;
@@ -352,10 +464,11 @@ pub fn export_clip(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)
     let project=tmp_dir()?.join(format!("export-{}-{nonce}.json",std::process::id()));
     std::fs::write(&project,serde_json::to_vec(&serde_json::json!({"plan":plan,"export":export})).map_err(|e|e.to_string())?).map_err(|e|format!("write export plan: {e}"))?;
     let result=(||{
-        let mut command=engine_command()?;command.arg("--export-edit").arg(&input).arg(&output).arg(fps.to_string()).arg(&project).arg("--json");
+        let mut command=engine_command("export-edit")?;command.arg(&input).arg(&output).arg(fps.to_string()).arg(&project).arg("--json");
         // The export holds the output drive's lane: prefetch pauses instead of seeking against it.
-        let run=storage::run_io(&outdir,Priority::Interactive,move||storage::run_cancellable(&mut command,lowered,&EXPORT_CANCEL))?.map_err(|e|format!("start export: {e}"))?;
-        let result=match run{storage::Run::Finished(result)=>result,storage::Run::Cancelled{pid}=>{remove_export_temps(&output,pid);return Err(EXPORT_CANCELLED.to_owned());}};
+        let limit=export_limit(plan,fps);
+        let run=storage::run_io(&outdir,Priority::Interactive,move||storage::run_cancellable(&mut command,lowered,&EXPORT_CANCEL,limit))?.map_err(|e|format!("start export: {e}"))?;
+        let result=match run{storage::Run::Finished(result)=>result,storage::Run::Cancelled{pid}=>{remove_export_temps(&output,pid);return Err(EXPORT_CANCELLED.to_owned());},storage::Run::TimedOut{pid}=>{remove_export_temps(&output,pid);return Err("Export stopped: the recorder did not finish in time.".to_owned());}};
         let events:Vec<serde_json::Value>=String::from_utf8_lossy(&result.stdout).lines().filter_map(|l|serde_json::from_str(l).ok()).collect();
         if !result.status.success(){return Err(events.iter().find(|v|v["type"]=="export_failed").and_then(|v|v["reason"].as_str()).map(str::to_owned).unwrap_or_else(||format!("Export failed: {}",String::from_utf8_lossy(&result.stderr).trim())));}
         let done=events.iter().find(|v|v["type"]=="exported").ok_or("Recorder returned no completed export.")?;

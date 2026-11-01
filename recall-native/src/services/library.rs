@@ -8,6 +8,7 @@ use crate::backend::ClipEntry;
 mod calendar;
 pub mod folders;
 mod mp4;
+pub mod mp4_map;
 mod names;
 mod scrub;
 mod settle;
@@ -122,7 +123,11 @@ pub fn local_from_unix(secs: u64) -> LocalStamp {
 /// Builds records from backend entries plus stored metadata. Cheap; no file reads
 /// except sidecar existence checks.
 pub fn build_records(entries: &[ClipEntry], store: &MetaStore) -> Vec<ClipRecord> {
-    let sidecars = sidecar_index(entries);
+    records_with(entries, &sidecar_index(entries), store)
+}
+
+/// [`build_records`] with the sidecars already listed: touches no disk.
+pub fn records_with(entries: &[ClipEntry], sidecars: &HashSet<String>, store: &MetaStore) -> Vec<ClipRecord> {
     entries
         .iter()
         .map(|entry| {
@@ -178,8 +183,9 @@ fn sidecar_key(path: &Path) -> String {
     path.to_string_lossy().to_lowercase()
 }
 
-/// One directory listing per clip folder instead of two stats per clip.
-fn sidecar_index(entries: &[ClipEntry]) -> HashSet<String> {
+/// One directory listing per clip folder instead of two stats per clip. Reads the clip drive:
+/// call it off the UI thread.
+pub fn sidecar_index(entries: &[ClipEntry]) -> HashSet<String> {
     let folders: HashSet<PathBuf> = entries.iter().filter_map(|e| Path::new(&e.path).parent().map(Path::to_path_buf)).collect();
     let mut index = HashSet::new();
     for folder in folders {
@@ -309,6 +315,16 @@ pub fn mp4_video_duration(path: &Path) -> Option<f64> {
 pub fn mp4_last_frame(path: &Path) -> Option<f64> {
     let mut file = std::fs::File::open(path).ok()?;
     mp4::last_frame_of(&mut file)
+}
+
+/// Where a file's picture ends: (track end, start of the last frame). Reads the file's index,
+/// so call it off the UI thread.
+pub fn video_limits(path: &str, duration: f64) -> (Option<f64>, Option<f64>) {
+    let file = crate::services::storage::plain_path(Path::new(path));
+    // MP4/MOV list the frames; for others (MKV) keep a tenth of a second clear of the end.
+    let end = mp4_video_duration(&file).or(Some(duration));
+    let last = mp4_last_frame(&file).or_else(|| end.filter(|end| *end > 0.2).map(|end| end - 0.1));
+    (end, last)
 }
 
 /// Moves clips (plus their recorder thumbnail and edit sidecar) to the Recycle Bin.

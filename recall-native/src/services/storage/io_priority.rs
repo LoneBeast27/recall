@@ -16,9 +16,15 @@ use std::io;
 use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::process::{Child, Command, Output};
+use std::sync::{OnceLock, RwLock};
 
 use windows::Win32::Foundation::HANDLE;
+use windows::Win32::System::JobObjects::{
+    AssignProcessToJobObject, CreateJobObjectW, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
+    JobObjectExtendedLimitInformation, SetInformationJobObject,
+};
 use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
+use windows::core::PCWSTR;
 
 pub(super) const IO_VERY_LOW: u32 = 0;
 const PROCESS_IO_PRIORITY: u32 = 33;
@@ -57,13 +63,50 @@ fn handle(child: &Child) -> HANDLE {
     HANDLE(child.as_raw_handle())
 }
 
-/// Starts `command` hidden at below-normal CPU priority; with `lowered`, the process is
-/// created suspended, set to very low I/O priority, then resumed.
+/// Helpers end with the app, however it ends: an engine that never returns must not outlive it.
+/// Windows closes the job's handle with the process, and that ends what is in the job.
+fn helpers_job() -> Option<HANDLE> {
+    static JOB: OnceLock<Option<isize>> = OnceLock::new();
+    let job = JOB.get_or_init(|| unsafe {
+        let job = CreateJobObjectW(None, PCWSTR::null()).ok()?;
+        let mut limits = JOBOBJECT_EXTENDED_LIMIT_INFORMATION::default();
+        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+        let size = size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32;
+        SetInformationJobObject(job, JobObjectExtendedLimitInformation, (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(), size).ok()?;
+        Some(job.0 as isize)
+    });
+    job.map(|raw| HANDLE(raw as *mut c_void))
+}
+
+/// True once the app is closing. Held for reading while a helper starts: a process left between
+/// created and resumed by the app's exit stays suspended for good, in no job (it held a check's
+/// output pipe for 46 minutes).
+static CLOSING: RwLock<bool> = RwLock::new(false);
+
+/// No helper starts from here on, and none is half started on return.
+pub fn close_helpers() {
+    *CLOSING.write().unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+}
+
+/// Starts `command` hidden at below-normal CPU priority, in the helpers' job; with `lowered`,
+/// the process is created suspended, set to very low I/O priority, then resumed.
 pub(super) fn spawn(command: &mut Command, lowered: bool) -> io::Result<Child> {
-    if !lowered {
-        return command.creation_flags(HIDDEN_LOW_PRIORITY).spawn();
+    start(&CLOSING, command, lowered)
+}
+
+fn start(closing: &RwLock<bool>, command: &mut Command, lowered: bool) -> io::Result<Child> {
+    let closing = closing.read().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if *closing {
+        return Err(io::Error::other("Recall is closing"));
     }
-    let mut child = command.creation_flags(HIDDEN_LOW_PRIORITY | CREATE_SUSPENDED).spawn()?;
+    let job = helpers_job();
+    let mut child = command.creation_flags(HIDDEN_LOW_PRIORITY | if lowered { CREATE_SUSPENDED } else { 0 }).spawn()?;
+    if let Some(job) = job {
+        let _ = unsafe { AssignProcessToJobObject(job, handle(&child)) };
+    }
+    if !lowered {
+        return Ok(child);
+    }
     let value = IO_VERY_LOW;
     unsafe {
         let _ = NtSetInformationProcess(handle(&child), PROCESS_IO_PRIORITY, (&value as *const u32).cast(), 4);
@@ -79,4 +122,20 @@ pub(super) fn spawn(command: &mut Command, lowered: bool) -> io::Result<Child> {
 /// [`spawn`] then collect stdout/stderr and the exit status.
 pub(super) fn output(command: &mut Command, lowered: bool) -> io::Result<Output> {
     spawn(command, lowered)?.wait_with_output()
+}
+
+#[cfg(test)]
+mod closing_tests {
+    use super::*;
+
+    #[test]
+    fn a_closing_app_starts_no_helper() {
+        let closing = RwLock::new(false);
+        let mut command = Command::new("cmd.exe");
+        command.args(["/c", "exit 0"]);
+        assert!(start(&closing, &mut command, false).unwrap().wait().unwrap().success());
+        *closing.write().unwrap() = true;
+        assert!(start(&closing, &mut command, false).is_err());
+        assert!(start(&closing, &mut command, true).is_err());
+    }
 }

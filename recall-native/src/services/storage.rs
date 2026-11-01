@@ -23,10 +23,12 @@ mod budget;
 mod drive;
 mod evict;
 mod ffmpeg;
+pub mod fill;
 mod history;
 mod io_priority;
 mod lane;
 mod prefetch;
+mod probe;
 mod projects;
 pub mod proxy;
 mod score;
@@ -47,15 +49,17 @@ mod tests_smoke;
 #[allow(unused_imports)]
 pub use drive::{DriveInfo, DriveKind, drive_info, drive_kind};
 pub(crate) use ffmpeg::{Seek, extract_frame, probe_duration};
-pub use ffmpeg::{Run, binary, run_cancellable, run_hidden};
+pub use ffmpeg::{Run, binary, run_cancellable, run_hidden, run_watched};
+pub use io_priority::close_helpers;
+pub use probe::{ProbedClip, probe_clip};
 #[allow(unused_imports)]
 pub use evict::DEFAULT_CACHE_BUDGET;
 #[allow(unused_imports)]
 pub use history::{Interaction, record_interaction};
 #[allow(unused_imports)]
-pub use lane::{LaneStats, Priority, run_io, stats, submit_io};
+pub use lane::{LaneStats, Priority, lane_wait_ms, run_io, stats, submit_io};
 #[allow(unused_imports)]
-pub use prefetch::{PrefetchClip, PrefetchEvent, PrepareEditor, set_recorder_busy, smart_status, start_prefetch};
+pub use prefetch::{PrefetchClip, PrefetchEvent, PrepareEditor, recorder_busy, set_recorder_busy, smart_status, start_prefetch};
 pub use projects::{ProjectSource, SidecarStep, has_export, project_order, sidecar_step, working_copy_path, write_atomic};
 pub(crate) use projects::modified_ms as projects_modified_ms;
 #[allow(unused_imports)]
@@ -63,7 +67,7 @@ pub use thumbs::{ThumbIndex, cached_thumb, ensure_thumb, recorder_thumb_stem, th
 #[allow(unused_imports)]
 pub use tiers::{CacheKind, CacheUsage, TierUsage, clear_kind, usage_detail};
 #[allow(unused_imports)]
-pub use video::{cache_video, cached_video, enforce_budget};
+pub use video::{cache_video, cached_video, copy_progress, enforce_budget, is_slow, start_fill, too_large};
 
 /// [`cached_video`] against an explicit cache root.
 pub fn cached_video_in(root: &Path, source: &Path) -> Option<String> {
@@ -244,7 +248,7 @@ pub(crate) fn valid_file(path: &Path) -> bool {
 }
 
 /// `\\?\V:\x` → `V:\x` for display and volume lookups.
-pub(crate) fn plain_path(path: &Path) -> PathBuf {
+pub fn plain_path(path: &Path) -> PathBuf {
     let text = path.to_string_lossy();
     match text.strip_prefix(r"\\?\") {
         Some(rest) if rest.starts_with("UNC\\") => PathBuf::from(format!(r"\\{}", &rest[4..])),

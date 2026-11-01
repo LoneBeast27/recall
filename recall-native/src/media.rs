@@ -12,7 +12,7 @@ use windows::Win32::Graphics::Gdi::{
     BeginPaint, EndPaint, InvalidateRect, PAINTSTRUCT, UpdateWindow,
 };
 use windows::Win32::Media::MediaFoundation::{
-    IMFPMediaItem, IMFPMediaPlayer, IMFPMediaPlayerCallback, IMFPMediaPlayerCallback_Impl,
+    IMFMediaSource, IMFPMediaItem, IMFPMediaPlayer, IMFPMediaPlayerCallback, IMFPMediaPlayerCallback_Impl,
     MF_MT_MAJOR_TYPE, MFMediaType_Video, MFP_EVENT_HEADER, MFP_EVENT_TYPE_ERROR,
     MFP_EVENT_TYPE_MEDIAITEM_CREATED, MFP_EVENT_TYPE_MEDIAITEM_SET, MFP_MEDIAITEM_CREATED_EVENT,
     MFP_MEDIAPLAYER_STATE,
@@ -31,8 +31,14 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use windows_core::implement;
 
 use crate::audio::AudioMixer;
+use crate::audio::stream::LiveSound;
+use crate::services::library::mp4_map::ClipMap;
+use crate::services::storage::fill::ClipFill;
 
 static MEDIA_FOUNDATION: OnceLock<Result<(), String>> = OnceLock::new();
+
+/// Where a file's picture ends: (track end, start of the last frame).
+pub type VideoLimits = (Option<f64>, Option<f64>);
 
 #[derive(Clone, Debug)]
 pub struct PreviewTrack {
@@ -220,15 +226,44 @@ pub struct NativePreview {
     last_frame: Option<f64>,
     /// Without sound the clock is the video player's: where the playhead rests past the picture.
     rest: Cell<Option<f64>>,
+    /// The clip is playing from its SSD fill (`media_player.rs`).
+    stream: Option<StreamMedia>,
 }
+
+/// What a clip that is still loading plays from. Built off the UI thread (`clip_open.rs`).
+pub struct StreamMedia {
+    pub fill: ClipFill,
+    pub map: Arc<ClipMap>,
+    pub video: SourceHandle,
+    pub sound: Option<Arc<LiveSound>>,
+}
+
+impl StreamMedia {
+    /// Ends a clip nobody will play: its copy, its decoder and its source.
+    pub fn shut(self) {
+        self.fill.cancel();
+        if let Some(sound) = &self.sound {
+            sound.stop();
+        }
+        let _ = unsafe { self.video.0.Shutdown() };
+    }
+}
+
+/// A media source crossing threads (Media Foundation sources are free-threaded).
+pub struct SourceHandle(pub IMFMediaSource);
+unsafe impl Send for SourceHandle {}
 
 #[path = "media_player.rs"]
 mod player;
+#[path = "media_stream.rs"]
+mod stream;
+pub(crate) use stream::open_source;
 #[path = "media_transport.rs"]
 mod transport;
 
 impl Drop for NativePreview {
     fn drop(&mut self) {
+        self.end_stream();
         *self
             .window_state
             .player
@@ -237,6 +272,7 @@ impl Drop for NativePreview {
         if let Some(player) = self.player.take() {
             let _ = unsafe { player.Shutdown() };
         }
+        self.shut_stream_source();
         self.callback = None;
         let previous_proc = self.window_state.previous_proc.load(Ordering::Acquire);
         unsafe {
@@ -322,7 +358,7 @@ fn player_position(player: &IMFPMediaPlayer) -> Result<f64, String> {
     Ok(ticks as f64 / 10_000_000.0)
 }
 
-fn propvariant_i64(value: i64) -> PROPVARIANT {
+pub(crate) fn propvariant_i64(value: i64) -> PROPVARIANT {
     PROPVARIANT {
         Anonymous: PROPVARIANT_0 {
             Anonymous: ManuallyDrop::new(PROPVARIANT_0_0 {

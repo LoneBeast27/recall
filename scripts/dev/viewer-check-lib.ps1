@@ -77,7 +77,7 @@ function Start-Viewer([string]$name, [string]$from, [switch]$Library, [string[]]
   foreach ($extra in $Also) { [void](New-ClipLink $libDir $extra $from) }
   $trace = Join-Path $script:work "$name.jsonl"
   Remove-Item $trace -ErrorAction SilentlyContinue
-  $env:RECALL_NATIVE_TRACE = $trace; $env:RECALL_NATIVE_WINDOW_SIZE = '1280x820'; $env:RECALL_NATIVE_OFFSCREEN = '1'
+  $env:RECALL_NATIVE_TRACE = $trace; $env:RECALL_NATIVE_WINDOW_SIZE = $(if ($script:windowSize) { $script:windowSize } else { '1280x820' }); $env:RECALL_NATIVE_OFFSCREEN = '1'
   if (-not $Library) { $env:RECALL_NATIVE_CLIP = $clip }
   $env:RECALL_NO_CONTROLLER = '1'; $env:RECALL_CPU_MASK = 'ffff0000'; $env:RECALL_CONTROL_PIPE = "recall-viewer-check-$PID"
   $env:RECALL_OUT_DIR = $libDir; $env:RECALL_FOLDERS = Join-Path $script:sandbox 'folders.json'
@@ -220,8 +220,14 @@ function Check-Plays($s, [double]$secs = 1.5, $from = $null, [double]$sinceMs = 
   $after = $rows[-1]
   $start = [double]$rows[0].pos
   $late = @($rows | Where-Object { $_.ms -ge $go.ms + 150 })
-  $gap = [double](($late | ForEach-Object { [math]::Abs([double]$_.video - [double]$_.pos) } | Measure-Object -Maximum).Maximum)
-  $frozen = @($late | Where-Object { $_.video_state -ne 'playing' }).Count
+  # While a clip loads, playback may wait for the part ahead: that wait is not a frozen picture.
+  $resumed = @($rows | Where-Object { $_.loading.buffering } | ForEach-Object { [double]$_.ms })
+  # The sound is stopped while buffering: the two clocks mean nothing until it carries on. After
+  # that the WinMM position sits still for about 0.3 s and then jumps to the true time, so for
+  # 0.4 s the clock reads behind a picture that is on time.
+  $steady = @($late | Where-Object { $row = $_; -not $row.loading.buffering -and -not ($resumed | Where-Object { [double]$row.ms - $_ -lt 400 -and [double]$row.ms -gt $_ }) })
+  $gap = [double](($steady | ForEach-Object { [math]::Abs([double]$_.video - [double]$_.pos) } | Measure-Object -Maximum).Maximum)
+  $frozen = @($late | Where-Object { $row = $_; $row.video_state -ne 'playing' -and -not $row.loading.buffering -and -not ($resumed | Where-Object { [double]$row.ms - $_ -lt 120 -and [double]$row.ms -gt $_ }) }).Count
   $moved = [double]$after.pos - $start; $vmoved = [double]$after.video - [double]$rows[0].video
   $want = [math]::Min($secs, [double]$after.kept) * 0.6
   $okFrom = ($null -eq $from) -or ([math]::Abs($start - [double]$from) -lt 0.12)
