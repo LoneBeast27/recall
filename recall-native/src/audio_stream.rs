@@ -16,7 +16,7 @@ use windows::Win32::Media::MediaFoundation::{
     MFCreateSourceReaderFromMediaSource, MFMediaType_Audio,
 };
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
-use windows::core::GUID;
+use windows::core::{BOOL, GUID};
 
 use super::SAMPLE_RATE;
 use crate::services::library::mp4_map::ClipMap;
@@ -177,6 +177,8 @@ struct Slot {
     next: Option<i64>,
     /// Where a seek landed: nothing in this track between here and its first packet.
     floor: Option<i64>,
+    /// Seconds the file delays this track by: the stamps do not include them.
+    delay: f64,
 }
 
 impl Slot {
@@ -244,14 +246,13 @@ fn start_on(source: IMFMediaSource, fill: ClipFill, map: Arc<ClipMap>, tracks: &
     let reader = unsafe { MFCreateSourceReaderFromMediaSource(&source, None) }.map_err(|e| format!("sound reader: {e}"))?;
     let all = MF_SOURCE_READER_ALL_STREAMS.0 as u32;
     unsafe { reader.SetStreamSelection(all, false) }.map_err(|e| format!("sound reader: {e}"))?;
+    let streams = sound_streams(&reader, &source)?;
+    if streams.len() < tracks.len() {
+        return Err("clip has fewer sound streams than expected".into());
+    }
     let mut slots = Vec::with_capacity(tracks.len());
-    let mut stream = 0u32;
-    while slots.len() < tracks.len() {
-        let Ok(native) = (unsafe { reader.GetNativeMediaType(stream, 0) }) else { return Err("clip has fewer sound streams than expected".into()) };
-        if unsafe { native.GetGUID(&MF_MT_MAJOR_TYPE) }.is_ok_and(|major| major == MFMediaType_Audio) {
-            slots.push(open_track(&reader, stream, tracks[slots.len()].1, frames)?);
-        }
-        stream += 1;
+    for (index, (stream, track)) in streams.iter().zip(tracks).enumerate() {
+        slots.push(open_track(&reader, *stream, track.1, frames, map.sound_delays.get(index).copied().unwrap_or(0.0))?);
     }
     let sound = Arc::new(LiveSound {
         tracks: slots.iter().zip(tracks).map(|(slot, track)| (track.0, Arc::clone(&slot.pcm))).collect(),
@@ -286,7 +287,29 @@ fn start_on(source: IMFMediaSource, fill: ClipFill, map: Arc<ClipMap>, tracks: &
     Ok(sound)
 }
 
-fn open_track(reader: &IMFSourceReader, stream: u32, channels: u16, frames: usize) -> Result<Slot, String> {
+/// The reader's sound streams in file order, which is the order of `tracks`. Media Foundation's
+/// MPEG-4 source numbers a file's tracks from the last one (`sound_streams_come_in_file_order`
+/// pins this for ffmpeg's muxer, which the recorder uses).
+fn sound_streams(reader: &IMFSourceReader, source: &IMFMediaSource) -> Result<Vec<u32>, String> {
+    let described = unsafe { source.CreatePresentationDescriptor() }.map_err(|e| format!("sound streams: {e}"))?;
+    let count = unsafe { described.GetStreamDescriptorCount() }.map_err(|e| format!("sound streams: {e}"))?;
+    let mut found = Vec::new();
+    for stream in 0..count {
+        let Ok(native) = (unsafe { reader.GetNativeMediaType(stream, 0) }) else { continue };
+        if !unsafe { native.GetGUID(&MF_MT_MAJOR_TYPE) }.is_ok_and(|major| major == MFMediaType_Audio) {
+            continue;
+        }
+        let (mut selected, mut descriptor) = (BOOL::default(), None);
+        unsafe { described.GetStreamDescriptorByIndex(stream, &mut selected, &mut descriptor) }.map_err(|e| format!("sound streams: {e}"))?;
+        let descriptor = descriptor.ok_or("sound streams: no descriptor")?;
+        found.push((unsafe { descriptor.GetStreamIdentifier() }.map_err(|e| format!("sound streams: {e}"))?, stream));
+    }
+    found.sort();
+    found.reverse();
+    Ok(found.into_iter().map(|(_, stream)| stream).collect())
+}
+
+fn open_track(reader: &IMFSourceReader, stream: u32, channels: u16, frames: usize, delay: f64) -> Result<Slot, String> {
     let wanted = channels.clamp(1, 2);
     let target = pcm_type(u32::from(wanted)).map_err(|e| format!("sound format: {e}"))?;
     unsafe {
@@ -299,7 +322,7 @@ fn open_track(reader: &IMFSourceReader, stream: u32, channels: u16, frames: usiz
     if !(1..=2).contains(&decoded) {
         return Err(format!("{decoded} sound channels"));
     }
-    Ok(Slot { reader_stream: stream, pcm: Arc::new(LivePcm::new(frames, decoded)), rate, channels: decoded, next: None, floor: None })
+    Ok(Slot { reader_stream: stream, pcm: Arc::new(LivePcm::new(frames, decoded)), rate, channels: decoded, next: None, floor: None, delay })
 }
 
 fn pcm_type(channels: u32) -> windows::core::Result<IMFMediaType> {
@@ -346,7 +369,8 @@ fn decode(reader: &IMFSourceReader, mut slots: Vec<Slot>, sound: &LiveSound, fil
                 }
                 continue;
             }
-            seek(reader, to_seconds + origin)?;
+            let delay = slots.iter().find(|slot| slot.pcm.next_gap(from) == Some(to)).map_or(0.0, |slot| slot.delay);
+            seek(reader, to_seconds + origin - delay)?;
             for slot in &mut slots {
                 slot.next = None;
                 slot.floor = Some(to as i64);
@@ -383,7 +407,7 @@ fn decode(reader: &IMFSourceReader, mut slots: Vec<Slot>, sound: &LiveSound, fil
             continue;
         }
         let Some(sample) = sample else { continue };
-        let seconds = stamp as f64 / 1e7 - origin;
+        let seconds = stamp as f64 / 1e7 - origin + slots[slot].delay;
         position = Some(seconds.max(0.0));
         place(&mut slots[slot], &sample, seconds)?;
     }

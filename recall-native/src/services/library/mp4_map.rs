@@ -27,6 +27,8 @@ pub struct ClipMap {
     pub video_end: Option<f64>,
     /// Keyframe times in seconds (before the timeline origin is taken off).
     pub keyframes: Vec<f64>,
+    /// Seconds of nothing each sound track starts with, in file order.
+    pub sound_delays: Vec<f64>,
 }
 
 impl ClipMap {
@@ -131,6 +133,7 @@ pub fn clip_map<R: Read + Seek>(reader: &mut R) -> Option<ClipMap> {
         last_frame: mp4::last_frame_of(reader),
         video_end: mp4::video_duration_of(reader),
         keyframes,
+        sound_delays: mp4::sound_delays(reader).unwrap_or_default(),
     })
 }
 

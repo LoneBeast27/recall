@@ -129,7 +129,7 @@ fn sound() -> Vec<&'static str> {
 
 #[test]
 fn a_clip_whose_only_track_starts_late_finishes_with_silence_before_it() {
-    let live = decoded("late-one", vec![picture(), sound(), vec!["-i", "v.mp4", "-itsoffset", "3", "-t", "3", "-i", "a.m4a", "-map", "0:v", "-map", "1:a", "-c", "copy", "clip.mp4"]], 1, 6.0);
+    let live = decoded("late-one", vec![picture(), sound(), vec!["-i", "v.mp4", "-itsoffset", "3", "-i", "a.m4a", "-map", "0:v", "-map", "1:a", "-c", "copy", "clip.mp4"]], 1, 6.0);
     let pcm = &live.tracks[0].1;
     assert!(pcm.missing().is_empty());
     assert!(loudest(pcm, 0.0, 2.8) < 0.01, "silence before the track starts");
@@ -138,10 +138,27 @@ fn a_clip_whose_only_track_starts_late_finishes_with_silence_before_it() {
 
 #[test]
 fn a_late_second_track_leaves_the_first_one_whole() {
-    let live = decoded("late-two", vec![picture(), sound(), vec!["-i", "v.mp4", "-i", "a.m4a", "-itsoffset", "3", "-t", "3", "-i", "a.m4a", "-map", "0:v", "-map", "1:a", "-map", "2:a", "-c", "copy", "clip.mp4"]], 2, 6.0);
+    let live = decoded("late-two", vec![picture(), sound(), vec!["-i", "v.mp4", "-i", "a.m4a", "-itsoffset", "3", "-i", "a.m4a", "-map", "0:v", "-map", "1:a", "-map", "2:a", "-c", "copy", "clip.mp4"]], 2, 6.0);
     assert_eq!(holes_in(&live.tracks[0].1, 0.1, 5.8), Vec::<f64>::new(), "the healthy track has no silent parts");
     assert!(loudest(&live.tracks[1].1, 0.0, 2.8) < 0.01);
     assert_eq!(holes_in(&live.tracks[1].1, 3.2, 5.8), Vec::<f64>::new());
+}
+
+/// Three tracks of `lengths` seconds, so each one can be told by where it ends.
+fn three_tracks(name: &str, lengths: [&str; 3]) -> Vec<f64> {
+    let mut clip = vec!["-i", "v.mp4", "-i", "a.m4a"];
+    for length in &lengths {
+        clip.extend(["-t", length, "-i", "a.m4a"]);
+    }
+    clip.extend(["-map", "0:v", "-map", "2:a", "-map", "3:a", "-map", "4:a", "-c", "copy", "clip.mp4"]);
+    let live = decoded(name, vec![picture(), sound(), clip], 3, 6.0);
+    live.tracks.iter().map(|(_, pcm)| (0..60).map(|tenth| tenth as f64 / 10.0).filter(|at| loudest(pcm, *at, at + 0.1) >= 0.01).fold(0.0, f64::max).ceil()).collect()
+}
+
+#[test]
+fn sound_streams_come_in_file_order() {
+    assert_eq!(three_tracks("order-a", ["2", "4", "6"]), [2.0, 4.0, 6.0]);
+    assert_eq!(three_tracks("order-b", ["6", "2", "4"]), [6.0, 2.0, 4.0]);
 }
 
 #[test]
