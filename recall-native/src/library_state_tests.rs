@@ -5,7 +5,8 @@ use crate::{backend::ClipEntry, services::library::Filter};
 fn library(names: &[&str]) -> LibraryState {
     let mut lib = LibraryState::new();
     lib.store = MetaStore::default();
-    lib.set_entries(names.iter().map(|n| ClipEntry { name: (*n).into(), path: format!(r"D:\c\{n}"), bytes: 10, mtime: 1_700_000_000, thumb: None, folder: None }).collect());
+    let entries = names.iter().map(|n| ClipEntry { name: (*n).into(), path: format!(r"D:\c\{n}"), bytes: 10, mtime: 1_700_000_000, thumb: None, folder: None }).collect();
+    lib.set_entries(Listing { entries, sidecars: Default::default(), drive: None });
     lib
 }
 
