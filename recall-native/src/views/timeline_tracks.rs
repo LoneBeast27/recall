@@ -56,12 +56,13 @@ impl Root {
         if let Some(info) = self.ed.info.as_ref() {
             for (i, t) in info.audio.iter().enumerate() {
                 let muted = self.ed.setting(t.stream_index).is_some_and(|s| s.muted);
-                tracks = tracks.child(waveform_lane(t.waveform.clone(), audio_top + i as f32 * (LANE_H + LANE_GAP), muted));
+                tracks = tracks.child(waveform_lane(t.waveform.clone(), audio_top + i as f32 * (LANE_H + LANE_GAP), muted, self.ed.loading.active()));
             }
         }
         for (start, end) in cuts.iter().copied() {
             tracks = tracks.child(cut_region(frac(start), frac(end), lanes_top, end - start));
         }
+        tracks = tracks.children(self.render_loading(lanes_top, duration));
         if self.ed.lossless() {
             for i in 0..ranges.len() {
                 if let Some(snapped) = self.ed.snapped_start(i).filter(|s| *s < ranges[i].start - 0.01) {
@@ -150,7 +151,7 @@ impl Root {
     }
 }
 
-fn waveform_lane(peaks: Vec<f32>, top: f32, muted: bool) -> AnyElement {
+fn waveform_lane(peaks: Vec<f32>, top: f32, muted: bool, loading: bool) -> AnyElement {
     let color = if muted { theme::DISABLED } else { theme::MUTED };
     div()
         .absolute()
@@ -160,6 +161,9 @@ fn waveform_lane(peaks: Vec<f32>, top: f32, muted: bool) -> AnyElement {
         .h(px(LANE_H))
         .rounded(px(6.))
         .bg(c(theme::RAISED))
+        .when(peaks.is_empty() && loading, |d| {
+            d.flex().items_center().justify_center().text_size(px(12.)).text_color(c(theme::TERTIARY)).child("Loading sound…")
+        })
         .child(
             canvas(
                 |_, _, _| {},

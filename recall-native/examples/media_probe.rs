@@ -140,7 +140,7 @@ fn run_probe(source: &str, report: &mut Value) -> Result<(), String> {
         .collect::<Vec<_>>();
     let parent = ParentWindow::create()?;
     let mut preview = NativePreview::new(parent.0.0 as isize)?;
-    preview.open(&prepared.info.path, &tracks, prepared.info.duration)?;
+    preview.open(&prepared.info.path, &tracks, prepared.info.duration, prepared.limits)?;
     preview.rect(0, 0, 640, 400)?;
 
     let ready_started = Instant::now();

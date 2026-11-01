@@ -126,9 +126,11 @@ impl EditorState {
         let tracks = self.preview_tracks(&info);
         if let Some(preview) = self.preview.as_mut() {
             // A failed swap has already closed the old source: reopen the original.
-            let (path, result) = match preview.open(copy, &tracks, info.duration) {
+            // A preview copy is another file: its own picture end (a re-encode ends elsewhere).
+            let limits = crate::services::library::video_limits(copy, info.duration);
+            let (path, result) = match preview.open(copy, &tracks, info.duration, limits) {
                 Ok(()) => (copy.to_owned(), Ok(())),
-                Err(_) => (info.path.clone(), preview.open(&info.path, &tracks, info.duration)),
+                Err(_) => (info.path.clone(), preview.open(&info.path, &tracks, info.duration, self.limits)),
             };
             match result {
                 Ok(()) => {

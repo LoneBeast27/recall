@@ -263,7 +263,10 @@ impl Root {
 
     fn on_done(&mut self, done: Done) {
         match done {
-            Done::Clips(Ok(entries)) => self.lib.set_entries(entries),
+            Done::Clips(Ok(listing)) => self.lib.set_entries(listing),
+            Done::Drive(drive) => self.lib.drive = drive,
+            Done::Streaming(generation, clip) => self.ed.apply_streaming(generation, clip),
+            Done::OpenStep(generation, text) => self.ed.open_step(generation, text),
             Done::Library(change) => self.on_library_change(change),
             Done::Clips(Err(error)) => {
                 self.lib.loading = false;
@@ -289,11 +292,15 @@ impl Root {
                 self.ed.on_exported(result);
             }
             Done::Deleted(paths, Ok(count)) => {
+                self.lib.deleting = 0;
                 self.lib.forget(&paths);
                 let noun = if count == 1 { "clip" } else { "clips" };
                 self.show_toast(ToastKind::Info, format!("Moved {count} {noun} to the Recycle Bin"), None);
             }
-            Done::Deleted(_, Err(error)) => self.show_toast(ToastKind::Bad, "Delete failed", Some(error)),
+            Done::Deleted(_, Err(error)) => {
+                self.lib.deleting = 0;
+                self.show_toast(ToastKind::Bad, "Delete failed", Some(error));
+            }
             Done::Thumb(path, result) => {
                 self.lib.on_thumb(path, result);
             }
@@ -374,7 +381,7 @@ impl Render for Root {
         self.trace_ui(window);
         crate::trace::clear_targets(window);
         // Meters and playback animate at the display refresh rate, not the 30 ms poll.
-        if self.route == Route::Audio || (self.route == Route::Editor && self.ed.playing) {
+        if self.route == Route::Audio || (self.route == Route::Editor && (self.ed.playing || !self.ed.loading.grey.is_empty())) {
             window.request_animation_frame();
         }
         // Right after a frame lays out the preview at a new size (resize, maximize), move the

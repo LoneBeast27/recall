@@ -13,7 +13,7 @@ use gpui::{ListAlignment, ListState, px};
 use crate::{
     backend::ClipEntry,
     services::library::{self, ClipRecord, DayGroup, Filter, GameCount, LocalStamp, MetaStore, SortOrder},
-    worker::{AssetJob, Workers},
+    worker::{AssetJob, Listing, Workers},
 };
 
 #[path = "library_changes.rs"]
@@ -80,6 +80,8 @@ pub struct LibraryState {
     pub notice: Option<String>,
     pub renaming: Option<String>,
     pub confirm_delete: bool,
+    /// Clips on their way to the Recycle Bin (a hard drive can take a while).
+    pub deleting: usize,
     pub content_width: Rc<Cell<f32>>,
     pub drive: Option<(u64, u64)>,
     pub today: LocalStamp,
@@ -121,6 +123,7 @@ impl LibraryState {
             notice: None,
             renaming: None,
             confirm_delete: false,
+            deleting: 0,
             content_width: Rc::new(Cell::new(0.0)),
             drive: None,
             today: library::today(),
@@ -140,21 +143,17 @@ impl LibraryState {
         }
     }
 
-    pub fn set_entries(&mut self, entries: Vec<ClipEntry>) {
+    pub fn set_entries(&mut self, listing: Listing) {
         let anchor = self.scroll_anchor();
-        self.entries = entries;
+        self.entries = listing.entries;
         self.replay_recent();
         self.loading = false;
         self.today = library::today();
         // The meter shows the recordings drive, not whichever drive the newest import is on.
-        self.drive = library::drive_space(&crate::backend::library_dir());
-        self.rebuild_records();
-        self.restore_scroll(anchor);
-    }
-
-    fn rebuild_records(&mut self) {
-        self.records = library::build_records(&self.entries, &self.store);
+        self.drive = listing.drive;
+        self.records = library::records_with(&self.entries, &listing.sidecars, &self.store);
         self.reindex();
+        self.restore_scroll(anchor);
     }
 
     /// Everything derived from `records`. Touches no disk.
@@ -309,6 +308,16 @@ impl LibraryState {
         }
     }
 
+    /// The thumbnail is on its way from the drive (a failed one stays a plain placeholder).
+    pub fn thumb_waiting(&self, path: &str) -> bool {
+        !self.thumb_failed.contains(path)
+    }
+
+    /// Hover frames were asked for and are not here yet.
+    pub fn scrub_waiting(&self, path: &str) -> bool {
+        self.hovered.as_deref() == Some(path) && !self.scrub.contains_key(path)
+    }
+
     /// Frame to show for the hovered tile, if scrub frames are ready.
     pub fn scrub_frame(&self, path: &str) -> Option<&str> {
         if self.hovered.as_deref() != Some(path) {
@@ -424,8 +433,9 @@ impl LibraryState {
     pub fn forget(&mut self, paths: &[PathBuf]) {
         let gone: HashSet<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
         self.entries.retain(|e| !gone.contains(&e.path));
+        self.records.retain(|r| !gone.contains(&r.path));
         self.clear_selection();
-        self.rebuild_records();
+        self.reindex();
     }
 }
 

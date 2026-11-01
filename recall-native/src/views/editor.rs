@@ -4,7 +4,7 @@ use gpui::{AnyElement, Context, Window, canvas, div, prelude::*, px};
 use crate::{
     editor_state::timecode,
     root::Root,
-    theme::{self, c},
+    theme::{self, c, ca},
     ui::{self, Icon, icon},
     views::library::empty_state,
 };
@@ -69,7 +69,12 @@ impl Root {
                 )
                 .size_full(),
             )
-            .children(message.map(|m| div().absolute().inset_0().child(empty_state(Icon::Film, &m, None))));
+            .children(message.map(|m| div().absolute().inset_0().child(empty_state(Icon::Film, &m, None))))
+            .children(self.ed.loading_note().filter(|_| ready).map(|note| {
+                div().absolute().bottom(px(12.)).left_0().right_0().flex().justify_center().child(
+                    div().px(px(10.)).h(px(26.)).flex().items_center().rounded(px(6.)).bg(ca(theme::WINDOW, 0.86)).text_size(px(12.)).text_color(c(theme::MUTED)).child(note),
+                )
+            }));
         div()
             .flex_1()
             .min_w_0()
@@ -148,6 +153,7 @@ impl Root {
                     .gap(px(8.))
                     .text_size(px(12.))
                     .text_color(c(theme::TERTIARY))
+                    .children(self.loading_label())
                     .child("Source")
                     .child(div().font_family(theme::mono()).text_color(c(theme::MUTED)).child(timecode(pos))),
             )

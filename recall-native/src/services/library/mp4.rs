@@ -57,7 +57,7 @@ pub(super) fn last_frame_of<R: Read + Seek>(reader: &mut R) -> Option<f64> {
 }
 
 /// (`trak`, `mdia`) of the first track whose `hdlr` is `vide`.
-fn video_track<R: Read + Seek>(reader: &mut R) -> Option<((u64, u64), (u64, u64))> {
+pub(super) fn video_track<R: Read + Seek>(reader: &mut R) -> Option<((u64, u64), (u64, u64))> {
     let end = reader.seek(SeekFrom::End(0)).ok()?;
     let moov = find_box(reader, 0, end, b"moov")?;
     let mut at = moov.0;
@@ -79,7 +79,7 @@ fn video_track<R: Read + Seek>(reader: &mut R) -> Option<((u64, u64), (u64, u64)
 }
 
 /// The (sample count, value) runs of an `stts` or `ctts` box.
-fn read_runs<R: Read + Seek>(reader: &mut R, (start, end): (u64, u64)) -> Option<Vec<(u32, u32)>> {
+pub(super) fn read_runs<R: Read + Seek>(reader: &mut R, (start, end): (u64, u64)) -> Option<Vec<(u32, u32)>> {
     reader.seek(SeekFrom::Start(start + 4)).ok()?;
     let count = u64::from(read_u32(reader)?).min(end.saturating_sub(start + 8) / 8);
     let mut bytes = vec![0u8; count as usize * 8];
@@ -115,7 +115,7 @@ pub(super) fn last_presented(durations: &[(u32, u32)], offsets: &[(u32, u32)]) -
 }
 
 /// The media time the first real `edts/elst` entry starts at (B-frame clips start past 0).
-fn edit_start<R: Read + Seek>(reader: &mut R, trak: (u64, u64)) -> Option<i64> {
+pub(super) fn edit_start<R: Read + Seek>(reader: &mut R, trak: (u64, u64)) -> Option<i64> {
     let edts = find_box(reader, trak.0, trak.1, b"edts")?;
     let (start, end) = find_box(reader, edts.0, edts.1, b"elst")?;
     reader.seek(SeekFrom::Start(start)).ok()?;
@@ -142,14 +142,14 @@ fn edit_start<R: Read + Seek>(reader: &mut R, trak: (u64, u64)) -> Option<i64> {
     None
 }
 
-fn read_u32<R: Read>(reader: &mut R) -> Option<u32> {
+pub(super) fn read_u32<R: Read>(reader: &mut R) -> Option<u32> {
     let mut value = [0u8; 4];
     reader.read_exact(&mut value).ok()?;
     Some(u32::from_be_bytes(value))
 }
 
 /// (payload start, box end) of the first `kind` child in `[start, end)`.
-fn find_box<R: Read + Seek>(reader: &mut R, start: u64, end: u64, kind: &[u8; 4]) -> Option<(u64, u64)> {
+pub(super) fn find_box<R: Read + Seek>(reader: &mut R, start: u64, end: u64, kind: &[u8; 4]) -> Option<(u64, u64)> {
     let mut pos = start;
     for _ in 0..MAX_BOXES {
         if pos.checked_add(8)? > end {
@@ -185,7 +185,7 @@ fn find_box<R: Read + Seek>(reader: &mut R, start: u64, end: u64, kind: &[u8; 4]
 
 /// (timescale, duration units). Version 0: 32-bit times; version 1: 64-bit.
 /// All-ones duration means "unknown" and reads as 0.
-fn read_mvhd<R: Read + Seek>(reader: &mut R, (start, end): (u64, u64)) -> Option<(u32, u64)> {
+pub(super) fn read_mvhd<R: Read + Seek>(reader: &mut R, (start, end): (u64, u64)) -> Option<(u32, u64)> {
     let mut version = [0u8; 4];
     reader.seek(SeekFrom::Start(start)).ok()?;
     reader.read_exact(&mut version).ok()?;

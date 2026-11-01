@@ -172,6 +172,13 @@ pub fn record(route: &str, ed: &EditorState, clips: usize) {
         "warning": ed.warning,
         "fps": ed.fps,
         "ui": UI.lock().ok().and_then(|ui| ui.clone()),
+        "loading": ed.loading.active().then(|| serde_json::json!({
+            "share": ed.loading.share,
+            "grey": ed.loading.grey,
+            "buffering": ed.loading.buffering,
+            "note": ed.loading_note(),
+            "waves": ed.info.as_ref().map(|i| i.audio.iter().filter(|a| !a.waveform.is_empty()).count()),
+        })),
         "targets": targets,
     });
     let _ = writeln!(trace.file, "{line}");
