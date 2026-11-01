@@ -20,6 +20,8 @@ mod tests;
 #[cfg(test)]
 mod tests_io;
 #[cfg(test)]
+mod tests_settle;
+#[cfg(test)]
 mod tests_watch;
 
 /// Local wall-clock time of a clip start (from the file name, else file mtime).
