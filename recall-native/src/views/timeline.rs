@@ -215,7 +215,7 @@ impl Root {
                 .justify_center()
                 .text_size(px(12.))
                 .text_color(c(theme::TERTIARY))
-                .child(if self.ed.info.is_some() { "Preparing filmstrip…" } else { "" })
+                .child(if self.ed.info.is_some() && self.ed.loading.grey.is_empty() { "Preparing filmstrip…" } else { "" })
                 .into_any_element();
         }
         strip
