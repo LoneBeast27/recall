@@ -11,6 +11,10 @@ const STOP_MARGIN: f64 = 0.4;
 /// ...and restarts with this much ready.
 const RESUME_MARGIN: f64 = 1.5;
 const WAVE_EVERY: Duration = Duration::from_millis(120);
+/// The picture counts as there this close to the playhead...
+const PICTURE_NEAR: f64 = 0.15;
+/// ...and playback stops waiting for it after this long.
+const PICTURE_WAIT: Duration = Duration::from_secs(3);
 
 /// The loading part of the editor: what the views draw.
 #[derive(Default)]
@@ -21,6 +25,8 @@ pub struct Loading {
     pub share: f64,
     /// Playback waits for the part ahead.
     pub buffering: bool,
+    /// When the bytes for the buffered part arrived.
+    ready_at: Option<Instant>,
     /// `started` of the open: runs the loading animation.
     pub since: Option<Instant>,
     seen_revision: u64,
@@ -158,10 +164,22 @@ impl EditorState {
         let end = self.duration();
         let Some(preview) = self.preview.as_mut() else { return false };
         if self.loading.buffering {
+            // A pause that beat a play still on its way to the player did nothing.
+            if preview.video_state() == Some("playing") {
+                let _ = preview.pause();
+            }
             if !preview.stream_ready(pos, (pos + RESUME_MARGIN).min(end)) {
+                self.loading.ready_at = None;
+                return false;
+            }
+            // A seek past the copy lands only now: starting the sound first leaves the picture behind.
+            let waited = *self.loading.ready_at.get_or_insert_with(Instant::now);
+            let near = preview.video_position().is_ok_and(|video| (video - pos).abs() < PICTURE_NEAR);
+            if !near && waited.elapsed() < PICTURE_WAIT {
                 return false;
             }
             self.loading.buffering = false;
+            self.loading.ready_at = None;
             self.play();
             return true;
         }

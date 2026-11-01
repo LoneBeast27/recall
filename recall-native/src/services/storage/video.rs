@@ -59,6 +59,7 @@ pub fn start_fill(source: &Path, metadata: &std::fs::Metadata, first: &[u64]) ->
     let directory = if in_tier { video_dir(&root) } else { root.join(SESSION_DIR) };
     std::fs::create_dir_all(&directory).map_err(|error| format!("create fill folder: {error}"))?;
     remove_stale_parts(&directory);
+    remove_left_fills(&root, &id);
     if in_tier {
         budget::enforce(&root, budget, bytes);
     }
@@ -172,6 +173,22 @@ fn touch(root: &Path, file: &str) {
     let mut index = lru::read_index(&path);
     index.insert(file.to_owned(), budget::now_ms());
     let _ = lru::write_index(&path, &index);
+}
+
+/// What an app closed mid-load left: this clip's part file, and any session copy (one clip is
+/// open at a time). Files still in use keep their place until they close.
+fn remove_left_fills(root: &Path, id: &str) {
+    let prefix = format!("{id}.mp4.");
+    for directory in [video_dir(root), root.join(SESSION_DIR)] {
+        let Ok(listing) = std::fs::read_dir(&directory) else { continue };
+        let session = directory.ends_with(SESSION_DIR);
+        for entry in listing.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if session || (name.starts_with(&prefix) && name.ends_with(".part")) {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
 }
 
 /// Interrupted copies older than an hour (a crash mid-copy).
