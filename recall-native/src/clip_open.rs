@@ -71,7 +71,7 @@ pub fn run(generation: u64, path: String, tx: &Sender<Done>) {
             let step = |text: &'static str| {
                 let _ = tx.send(Done::OpenStep(generation, text));
             };
-            let _ = tx.send(Done::Prepared(generation, backend::prepare_clip_steps(&path, None, &step, Arc::new(move || stale(generation)))));
+            let _ = tx.send(Done::Prepared(generation, backend::prepare_clip_steps(&path, None, false, &step, Arc::new(move || stale(generation)))));
         }
     }
     if com.is_ok() {
@@ -88,18 +88,36 @@ fn finish(generation: u64, path: &str, fill: &ClipFill, tx: &Sender<Done>) {
         }
         return;
     }
-    while fill.held() {
-        if stale(generation) {
+    let direct = fill.is_direct();
+    let copy = (!direct).then(|| fill.target().to_string_lossy().into_owned());
+    let held = fill.clone();
+    // A clip read where it lies shares its drive with the engine: not with a recorder or nobody watching.
+    let blocked = Arc::new(move || held.held() || (direct && storage::recorder_busy()));
+    loop {
+        if !wait_turn(&*blocked, &|| stale(generation), Duration::from_millis(200)) {
             return;
         }
-        std::thread::sleep(Duration::from_millis(200));
-    }
-    if stale(generation) {
+        let waits = Arc::clone(&blocked);
+        let result = backend::prepare_clip_steps(path, copy.clone(), direct, &|_| {}, Arc::new(move || stale(generation) || (direct && waits())));
+        if direct && result.is_err() && blocked() && !stale(generation) {
+            continue; // stopped for the drive: again when it is free
+        }
+        let _ = tx.send(Done::Prepared(generation, result));
         return;
     }
-    let copy = (!fill.is_direct()).then(|| fill.target().to_string_lossy().into_owned());
-    let result = backend::prepare_clip_steps(path, copy, &|_| {}, Arc::new(move || stale(generation)));
-    let _ = tx.send(Done::Prepared(generation, result));
+}
+
+/// Waits while `blocked`. False when the open went `stale` first.
+fn wait_turn(blocked: &dyn Fn() -> bool, stale: &dyn Fn() -> bool, every: Duration) -> bool {
+    loop {
+        if stale() {
+            return false;
+        }
+        if !blocked() {
+            return true;
+        }
+        std::thread::sleep(every);
+    }
 }
 
 fn stream(generation: u64, path: &str) -> Option<StreamedClip> {
@@ -236,5 +254,27 @@ impl Seek for FillReader<'_> {
             SeekFrom::Current(step) => self.position.saturating_add_signed(step),
         };
         Ok(self.position)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::AtomicBool;
+
+    #[test]
+    fn the_engine_waits_its_turn_for_as_long_as_the_open_counts() {
+        let every = Duration::from_millis(1);
+        assert!(wait_turn(&|| false, &|| false, every));
+        assert!(!wait_turn(&|| true, &|| true, every), "a newer clip ends the wait");
+        let free = Arc::new(AtomicBool::new(false));
+        let waiting = {
+            let free = Arc::clone(&free);
+            std::thread::spawn(move || wait_turn(&|| !free.load(Ordering::Relaxed), &|| false, every))
+        };
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!waiting.is_finished(), "a busy drive holds it");
+        free.store(true, Ordering::Relaxed);
+        assert!(waiting.join().unwrap());
     }
 }
