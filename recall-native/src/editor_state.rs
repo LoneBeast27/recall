@@ -69,6 +69,8 @@ pub struct EditorState {
     pub track_span: Span,
     pub gain_spans: Vec<Span>,
     pub drag: Option<Drag>,
+    /// The plan a trim or gain drag started from.
+    drag_from: Option<EditPlan>,
     generation: u64,
     play_started: Option<Instant>,
     saw_native_playing: bool,
@@ -79,6 +81,8 @@ pub struct EditorState {
     pub saved: bool,
     pub save_error: Option<String>,
     pub exporting: bool,
+    /// The clip the running or last export is of: its result shows only on that clip.
+    export_of: Option<String>,
     pub exported: Option<ExportSummary>,
     pub export_error: Option<String>,
     pub loading_path: Option<String>,
@@ -124,6 +128,7 @@ impl EditorState {
             track_span: Rc::new(Cell::new(None)),
             gain_spans: vec![],
             drag: None,
+            drag_from: None,
             generation: 0,
             play_started: None,
             saw_native_playing: false,
@@ -134,6 +139,7 @@ impl EditorState {
             saved: true,
             save_error: None,
             exporting: false,
+            export_of: None,
             exported: None,
             export_error: None,
             loading_path: None,

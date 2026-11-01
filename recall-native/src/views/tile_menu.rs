@@ -82,6 +82,7 @@ impl Root {
                 .child(icon(kind, 15., if danger { theme::ERROR } else { theme::MUTED }))
                 .child(div().flex_1().child(label))
                 .when(danger, |d| d.child(ui::kbd("Del")))
+                .child(crate::trace::target(id))
                 .on_click(cx.listener(move |this, _, window, cx| {
                     this.run_tile_action(action, window);
                     cx.stop_propagation();
