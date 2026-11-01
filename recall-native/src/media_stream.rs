@@ -40,22 +40,35 @@ impl Inner {
             return Some(0);
         }
         if !self.fill.wait_for(offset, offset + length as u64, self.want) {
-            // An abort here would end the player and everything that loaded with it.
-            if self.fill.stays_open() {
-                self.fill.wait_closed();
-            }
-            return None;
+            return self.stopped(&mut out[..length]);
         }
         let mut scratch = self.scratch.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
         let mut done = 0;
         while done < length {
             let window = (length - done).min(READ_WINDOW - 8192);
             match self.fill.read_at(&self.file, offset + done as u64, &mut out[done..done + window], &mut scratch) {
+                Ok(0) | Err(_) if self.fill.is_direct() => {
+                    drop(scratch);
+                    self.fill.lost("The clip's drive stopped answering.".into());
+                    return self.stopped(&mut out[..length]);
+                }
                 Ok(0) | Err(_) => break,
                 Ok(read) => done += read,
             }
         }
         Some(done)
+    }
+
+    /// This read will never be served. An abort would end the player and everything that loaded
+    /// with it, so it waits, and a seek must not wait behind it: reads are served one at a time,
+    /// and Media Foundation finishes one before it takes the next. Nothing plays these zeros: the
+    /// editor stops playback before the hole, and the seek drops them.
+    fn stopped(&self, out: &mut [u8]) -> Option<usize> {
+        if !self.fill.stays_open() || !self.fill.wait_released() {
+            return None;
+        }
+        out.fill(0);
+        Some(out.len())
     }
 }
 
@@ -177,16 +190,20 @@ impl IMFByteStream_Impl for FillStream_Impl {
     }
 }
 
-fn byte_stream(fill: &ClipFill, want: bool) -> Result<IMFByteStream, String> {
+fn inner(fill: &ClipFill, want: bool) -> Result<Inner, String> {
     let file = fill.open_reader().map_err(|error| format!("open clip fill: {error}"))?;
-    let inner = Arc::new(Inner {
+    Ok(Inner {
         fill: fill.clone(),
         want,
         file,
         scratch: Mutex::new(AlignedBuffer::new(READ_WINDOW)),
         position: AtomicU64::new(0),
         finished: Mutex::new(HashMap::new()),
-    });
+    })
+}
+
+fn byte_stream(fill: &ClipFill, want: bool) -> Result<IMFByteStream, String> {
+    let inner = Arc::new(inner(fill, want)?);
     let (reads, jobs) = mpsc::channel();
     let worker = Arc::clone(&inner);
     std::thread::Builder::new().name("recall-clip-read".into()).spawn(move || run_reads(worker, jobs)).map_err(|error| format!("start clip reader: {error}"))?;
@@ -207,4 +224,41 @@ pub(crate) fn open_source(fill: &ClipFill, want: bool) -> Result<IMFMediaSource,
             .map_err(|error| format!("clip source: {error}"))?;
     }
     object.ok_or("clip source: nothing resolved")?.cast().map_err(|error| format!("clip source: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::services::storage::fill::Outcome;
+
+    #[test]
+    fn a_failed_read_of_a_clip_on_its_drive_says_so_and_a_seek_frees_the_queue() {
+        let dir = std::env::temp_dir().join(format!("recall-stream-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("clip.mp4");
+        std::fs::write(&source, vec![7u8; 1 << 20]).unwrap();
+        let metadata = source.metadata().unwrap();
+        let fill = ClipFill::direct(&source, 1 << 20, metadata.modified().unwrap(), 1 << 19);
+        let reader = Arc::new(inner(&fill, true).unwrap());
+        let mut near = vec![0u8; 4096];
+        assert_eq!(reader.read(0, &mut near), Some(4096));
+        assert_eq!(near[0], 7);
+        assert_eq!(fill.outcome(), Outcome::Done);
+        // Not open in the player yet: the open fails rather than shows a clip that cannot play.
+        assert_eq!(reader.read(1 << 19, &mut near), None);
+        assert_eq!(fill.outcome(), Outcome::Failed);
+        assert!(fill.error().is_some());
+        fill.set_playing();
+        let parked = {
+            let reader = Arc::clone(&reader);
+            std::thread::spawn(move || reader.read(0, &mut [1u8; 4096]))
+        };
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        assert!(!parked.is_finished(), "a read of what will not come waits, it does not abort");
+        fill.note_seek();
+        assert_eq!(parked.join().unwrap(), Some(4096), "a seek gets the queue back");
+        fill.cancel();
+        assert_eq!(reader.read(0, &mut near), None, "closing ends it");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

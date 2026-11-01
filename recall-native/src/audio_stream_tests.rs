@@ -81,7 +81,7 @@ fn decoded(name: &str, build: Vec<Vec<&str>>, tracks: usize, seconds: f64) -> Ar
     let source = dir.join("clip.mp4");
     let metadata = source.metadata().unwrap();
     // Read where it lies: a clip this small would be copied and gone before the decoder opened it.
-    let fill = ClipFill::direct(&source, metadata.len(), metadata.modified().unwrap());
+    let fill = ClipFill::direct(&source, metadata.len(), metadata.modified().unwrap(), 0);
     unsafe { MFStartup(MF_VERSION, MFSTARTUP_FULL) }.unwrap();
     let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
     let map = Arc::new(mp4_map::clip_map(&mut std::fs::File::open(&source).unwrap()).unwrap());
