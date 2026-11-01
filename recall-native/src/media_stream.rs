@@ -244,16 +244,15 @@ mod tests {
         assert_eq!(reader.read(0, &mut near), Some(4096));
         assert_eq!(near[0], 7);
         assert_eq!(fill.outcome(), Outcome::Done);
-        // Not open in the player yet: the open fails rather than shows a clip that cannot play.
-        assert_eq!(reader.read(1 << 19, &mut near), None);
-        assert_eq!(fill.outcome(), Outcome::Failed);
-        assert!(fill.error().is_some());
+        assert_eq!(reader.read(1 << 19, &mut near), Some(4096), "the clip is not playing yet: the index still opens");
         fill.set_playing();
         let parked = {
             let reader = Arc::clone(&reader);
-            std::thread::spawn(move || reader.read(0, &mut [1u8; 4096]))
+            std::thread::spawn(move || reader.read(1 << 19, &mut [1u8; 4096]))
         };
         std::thread::sleep(std::time::Duration::from_millis(200));
+        assert_eq!(fill.outcome(), Outcome::Failed, "the read found the drive gone");
+        assert!(fill.error().is_some());
         assert!(!parked.is_finished(), "a read of what will not come waits, it does not abort");
         fill.note_seek();
         assert_eq!(parked.join().unwrap(), Some(4096), "a seek gets the queue back");

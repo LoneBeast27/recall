@@ -166,6 +166,7 @@ fn a_clip_read_where_it_lies_says_when_its_drive_goes() {
     let bytes = 4 * CHUNK as usize;
     let (source, modified) = clip(&dir, bytes);
     let fill = ClipFill::direct(&source, bytes as u64, modified, 2 * CHUNK);
+    fill.set_playing();
     let file = fill.open_reader().unwrap();
     let mut scratch = AlignedBuffer::new(1 << 20);
     let mut out = vec![0u8; 4096];
@@ -177,7 +178,6 @@ fn a_clip_read_where_it_lies_says_when_its_drive_goes() {
     assert_eq!(fill.error().as_deref(), Some("gone"));
     assert!(!fill.has(0, 1), "nothing counts as there any more");
     assert!(!fill.wait_for(0, 1, true));
-    fill.set_playing();
     assert!(fill.stays_open());
     fill.cancel();
     drop(fill);
