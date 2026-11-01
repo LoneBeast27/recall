@@ -283,6 +283,26 @@ pub fn run_io<T: Send + 'static>(path: &Path, priority: Priority, work: impl FnO
     }
 }
 
+static LANE_PROBE: Mutex<Option<Instant>> = Mutex::new(None);
+static LANE_WAITED: AtomicU64 = AtomicU64::new(0);
+
+/// For the player's trace: how long a task has waited, or last waited, for the lane of `path`
+/// (None on an SSD). A lane held by a long job shows here as a number that keeps growing.
+pub fn lane_wait_ms(path: &Path) -> Option<u64> {
+    let lane = hdd_lane(path)?;
+    let mut sent = LANE_PROBE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(at) = *sent {
+        return Some(at.elapsed().as_millis() as u64);
+    }
+    *sent = Some(Instant::now());
+    lane.submit(Priority::Interactive, Box::new(|| {
+        if let Some(at) = LANE_PROBE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).take() {
+            LANE_WAITED.store(at.elapsed().as_millis() as u64, Ordering::Relaxed);
+        }
+    }));
+    Some(LANE_WAITED.load(Ordering::Relaxed))
+}
+
 /// Counters for evidence: tasks run on HDD lanes, idle-prefetch tasks, bytes this process
 /// read from HDDs itself (helper processes' reads are counted as tasks only).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]

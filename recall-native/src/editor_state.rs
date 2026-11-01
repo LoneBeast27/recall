@@ -50,6 +50,12 @@ pub struct EditorState {
     pub marks: Vec<f64>,
     /// The file the preview plays (an SSD copy when the video tier has one).
     pub playback_path: Option<String>,
+    /// Where that file's picture ends.
+    limits: crate::media::VideoLimits,
+    /// The clip still arriving from a hard drive (`editor_state_stream.rs`).
+    pub loading: stream::Loading,
+    /// What an open that cannot stream is doing (the copy adds a percentage).
+    open_step: Option<&'static str>,
     /// Seek to apply once a re-opened preview is ready (SSD swap keeps the position).
     pending_seek: Option<f64>,
     /// The open clip was changed since the sidecar was last written beside it.
@@ -100,6 +106,8 @@ mod persist;
 mod edits;
 #[path = "editor_state_playback.rs"]
 mod playback;
+#[path = "editor_state_stream.rs"]
+pub mod stream;
 
 impl EditorState {
     pub fn new(preview: Result<NativePreview, String>) -> Self {
@@ -121,6 +129,9 @@ impl EditorState {
             export_settings: ExportSettings::default(),
             marks: Vec::new(),
             playback_path: None,
+            limits: (None, None),
+            loading: Default::default(),
+            open_step: None,
             pending_seek: None,
             needs_flush: false,
             sidecar_ours: false,
@@ -168,15 +179,28 @@ impl EditorState {
         self.flush(workers);
         self.pause();
         self.hide_preview();
+        if let Some(Err(error)) = self.preview.as_mut().map(|preview| preview.close_stream()) {
+            self.status = error;
+        }
         self.info = None;
         self.visuals = VisualAssets::default();
         self.warning = None;
         self.exported = None;
         self.export_error = None;
-        self.status = "Preparing clip…".into();
+        self.status = "Opening clip…".into();
         self.generation = self.generation.wrapping_add(1);
         self.loading_path = Some(path.clone());
-        workers.job(Job::Prepare(self.generation, path));
+        self.loading = Default::default();
+        self.open_step = None;
+        workers.open_clip(self.generation, path);
+    }
+
+    /// An open that cannot stream says what it is doing.
+    pub fn open_step(&mut self, generation: u64, text: &'static str) {
+        if generation == self.generation && self.loading_path.is_some() {
+            self.status = text.into();
+            self.open_step = Some(text);
+        }
     }
 
     pub fn apply_prepared(&mut self, generation: u64, result: Result<PreparedClip, String>) {
@@ -184,8 +208,17 @@ impl EditorState {
             return;
         }
         self.loading_path = None;
+        self.open_step = None;
+        let streaming = self.loading.generation == Some(generation);
         let prepared = match result {
+            Ok(prepared) if streaming => return self.upgrade(prepared),
             Ok(prepared) => prepared,
+            Err(error) if streaming => {
+                // The clip keeps playing what has loaded; the rest stays grey.
+                self.loading.prepared = true;
+                self.last_error = Some(error);
+                return;
+            }
             Err(error) => {
                 self.status = error;
                 self.playing = false;
@@ -196,7 +229,27 @@ impl EditorState {
         let info = prepared.info;
         self.sidecar_ours = prepared.sidecar_ours;
         self.sidecar_at_open = prepared.sidecar_at_open;
-        self.plan = match prepared.project {
+        self.adopt(info.clone(), prepared.project, prepared.warning);
+        let tracks = self.preview_tracks(&info);
+        let source = prepared.playback.clone().unwrap_or_else(|| info.path.clone());
+        self.playback_path = Some(source.clone());
+        self.limits = prepared.limits;
+        self.needs_flush = false;
+        self.preview_failed = false;
+        if let Some(preview) = self.preview.as_mut() {
+            if let Err(error) = preview.open(&source, &tracks, info.duration, prepared.limits) {
+                self.status = error;
+            }
+        }
+        self.marks = prepared.marks;
+        self.info = Some(info);
+        self.visuals = prepared.visuals;
+        self.applied_rect = (0, 0, 0, 0);
+    }
+
+    /// The new clip's plan and edit state, from its saved project or untouched.
+    fn adopt(&mut self, info: ClipInfo, project: Option<crate::backend::Project>, warning: Option<String>) {
+        self.plan = match project {
             Some(project) => {
                 self.fps = project.export_fps.max(1);
                 self.export_settings = project.export.clone();
@@ -216,23 +269,10 @@ impl EditorState {
         self.redo.clear();
         self.saved = true;
         self.dirty_since = None;
-        self.warning = prepared.warning;
+        self.warning = warning;
         self.gain_spans = (0..info.audio.len()).map(|_| Rc::new(Cell::new(None))).collect();
-        let tracks = self.preview_tracks(&info);
-        self.status = "Loading preview…".into();
-        let source = prepared.playback.clone().unwrap_or_else(|| info.path.clone());
-        self.playback_path = Some(source.clone());
         self.needs_flush = false;
-        self.preview_failed = false;
-        if let Some(preview) = self.preview.as_mut() {
-            if let Err(error) = preview.open(&source, &tracks, info.duration) {
-                self.status = error;
-            }
-        }
-        self.marks = read_marks(&info.path);
-        self.info = Some(info);
-        self.visuals = prepared.visuals;
-        self.applied_rect = (0, 0, 0, 0);
+        self.status = "Loading preview…".into();
     }
 
     fn preview_tracks(&self, info: &ClipInfo) -> Vec<PreviewTrack> {
@@ -287,8 +327,19 @@ impl EditorState {
             self.play();
             changed = true;
         }
-        if self.playing && !self.play_when_ready {
+        changed |= self.tick_loading(editor_visible);
+        if self.playing && !self.play_when_ready && !self.loading.buffering {
             changed |= self.follow_playback();
+        }
+        if let Some(step) = self.open_step {
+            let text = match crate::services::storage::copy_progress() {
+                Some(share) => format!("{} {}%", step, (share * 100.0).floor() as u32),
+                None => step.to_owned(),
+            };
+            if text != self.status {
+                self.status = text;
+                changed = true;
+            }
         }
         // Moving the video means the backdrop's cut-out must be repainted too.
         changed |= self.apply_preview_rect(editor_visible);
@@ -371,37 +422,6 @@ pub fn short_timecode(seconds: f64) -> String {
     let s = if seconds > 0.0 { seconds } else { 0.0 };
     let minutes = (s / 60.0).floor() as u64;
     format!("{minutes}:{:05.2}", (s - minutes as f64 * 60.0).max(0.0))
-}
-
-/// Reads bookmark times written by the recorder beside the clip:
-/// `<stem>.recall-marks.json` = `{"version":1,"marks":[seconds,...]}`. Missing → none.
-pub fn read_marks(clip: &str) -> Vec<f64> {
-    let path = std::path::Path::new(clip);
-    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else { return Vec::new() };
-    let sidecar = path.with_file_name(format!("{stem}.recall-marks.json"));
-    let Ok(text) = std::fs::read_to_string(sidecar) else { return Vec::new() };
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(&text) else { return Vec::new() };
-    let mut marks: Vec<f64> = value
-        .get("marks")
-        .and_then(|m| m.as_array())
-        .map(|a| a.iter().filter_map(|v| v.as_f64()).filter(|t| t.is_finite() && *t >= 0.0).collect())
-        .unwrap_or_default();
-    marks.sort_by(f64::total_cmp);
-    marks
-}
-
-#[cfg(test)]
-mod marks_tests {
-    #[test]
-    fn reads_marks_sidecar_and_ignores_garbage() {
-        let dir = std::env::temp_dir().join(format!("recall-marks-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let clip = dir.join("VALORANT__2026-10-22__01-02-03.mp4");
-        std::fs::write(dir.join("VALORANT__2026-10-22__01-02-03.recall-marks.json"), r#"{"version":1,"marks":[42.5,3.0,"x",-1]}"#).unwrap();
-        assert_eq!(super::read_marks(&clip.to_string_lossy()), vec![3.0, 42.5]);
-        assert!(super::read_marks(&dir.join("none.mp4").to_string_lossy()).is_empty());
-        let _ = std::fs::remove_dir_all(&dir);
-    }
 }
 
 /// Same file, ignoring the `\\?\` verbatim prefix and letter case.

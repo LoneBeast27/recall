@@ -1,14 +1,13 @@
 //! `NativePreview` lifecycle: COM/MF start-up, the child window, opening a clip and
 //! priming its first frame.
 use std::cell::Cell;
-use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::{HWND, RPC_E_CHANGED_MODE};
 use windows::Win32::Media::MediaFoundation::{
-    IMFPMediaPlayerCallback, MF_VERSION, MFP_MEDIAPLAYER_STATE_PAUSED,
+    IMFPMediaPlayer, IMFPMediaPlayerCallback, MF_VERSION, MFP_MEDIAPLAYER_STATE_PAUSED,
     MFP_MEDIAPLAYER_STATE_PLAYING, MFP_MEDIAPLAYER_STATE_STOPPED,
     MFP_OPTION_FREE_THREADED_CALLBACK, MFPCreateMediaPlayer, MFSTARTUP_FULL, MFStartup,
 };
@@ -21,10 +20,12 @@ use windows::core::PCWSTR;
 
 use super::{
     MEDIA_FOUNDATION, MediaCallback, MediaStatus, NativePreview, PreviewTrack, PreviewWindowState,
-    normalize_windows_path, player_position, player_state_name, preview_window_proc,
+    StreamMedia, VideoLimits, normalize_windows_path, player_position, player_state_name, preview_window_proc,
     redraw_video_window, wide,
 };
 use crate::audio::AudioMixer;
+use crate::audio::stream::LiveTrack;
+use crate::services::storage::fill::Outcome;
 
 impl NativePreview {
     pub fn new(parent_hwnd: isize) -> Result<Self, String> {
@@ -126,17 +127,16 @@ impl NativePreview {
             video_end: None,
             last_frame: None,
             rest: Cell::new(None),
+            stream: None,
         })
     }
 
     /// Opens `path` with `audio` stems; `duration` is the clip's length on the editor timeline
-    /// (the sound clock runs that long even when a stem is shorter).
-    pub fn open(&mut self, path: &str, audio: &[PreviewTrack], duration: f64) -> Result<(), String> {
+    /// (the sound clock runs that long even when a stem is shorter). `limits` from
+    /// `services::library::video_limits`.
+    pub fn open(&mut self, path: &str, audio: &[PreviewTrack], duration: f64, limits: VideoLimits) -> Result<(), String> {
         if path.is_empty() {
             return Err("preview video path is empty".into());
-        }
-        if !Path::new(path).exists() {
-            return Err(format!("preview video does not exist: {path}"));
         }
         for track in audio {
             if !track.gain_db.is_finite() {
@@ -146,8 +146,129 @@ impl NativePreview {
                 ));
             }
         }
-        let status = Arc::new(MediaStatus::default());
-        self.media_status = Arc::clone(&status);
+        let (player, callback) = self.new_player(limits)?;
+        let url = wide(&normalize_windows_path(path));
+        // The callback selects the streams and sets the item (see `set_picture_only_item`).
+        if let Err(error) = unsafe { player.CreateMediaItemFromURL(PCWSTR(url.as_ptr()), false, 0, None) } {
+            let _ = unsafe { player.Shutdown() };
+            return Err(format!("could not open native video preview: {error}"));
+        }
+        if let Err(error) = unsafe { player.SetMute(true) } {
+            let _ = unsafe { player.Shutdown() };
+            return Err(format!("could not mute embedded source audio: {error}"));
+        }
+        self.has_audio = !audio.is_empty();
+        if self.has_audio {
+            if let Err(error) = self.audio.open(audio, duration) {
+                let _ = unsafe { player.Shutdown() };
+                self.has_audio = false;
+                return Err(error);
+            }
+        }
+        self.keep_player(player, callback);
+        Ok(())
+    }
+
+    /// Opens a clip that is still loading. `audio` carries each track's level; the sound comes
+    /// from `media.sound`, or from the stems later ([`NativePreview::use_stems`]) without it.
+    pub fn open_stream(&mut self, media: StreamMedia, audio: &[PreviewTrack], duration: f64) -> Result<(), String> {
+        let (player, callback) = match self.new_player((media.map.video_end, media.map.last_frame)) {
+            Ok(made) => made,
+            Err(error) => {
+                media.shut();
+                return Err(error);
+            }
+        };
+        if let Err(error) = unsafe { player.CreateMediaItemFromObject(&media.video.0, false, 0, None) } {
+            let _ = unsafe { player.Shutdown() };
+            media.shut();
+            return Err(format!("could not open native video preview: {error}"));
+        }
+        let _ = unsafe { player.SetMute(true) };
+        if let Some(sound) = &media.sound {
+            let level = |index: usize| audio.iter().find(|track| track.stream_index == index);
+            let tracks = sound.tracks.iter().map(|(index, pcm)| LiveTrack {
+                stream_index: *index,
+                pcm: Arc::clone(pcm),
+                gain_db: level(*index).map_or(0.0, |track| track.gain_db),
+                muted: level(*index).is_some_and(|track| track.muted),
+            });
+            self.has_audio = !sound.tracks.is_empty();
+            if self.has_audio {
+                if let Err(error) = self.audio.open_live(tracks.collect(), duration) {
+                    self.has_audio = false;
+                    let _ = unsafe { player.Shutdown() };
+                    media.shut();
+                    return Err(error);
+                }
+            }
+        }
+        media.fill.set_playing();
+        self.keep_player(player, callback);
+        self.stream = Some(media);
+        Ok(())
+    }
+
+    /// The stems arrived for a clip whose sound could not be decoded as it loaded.
+    pub fn use_stems(&mut self, audio: &[PreviewTrack], duration: f64) -> Result<(), String> {
+        self.has_audio = !audio.is_empty();
+        if self.has_audio { self.audio.open(audio, duration) } else { Ok(()) }
+    }
+
+    /// The clip's fill while it is loading.
+    pub fn stream(&self) -> Option<&StreamMedia> {
+        self.stream.as_ref()
+    }
+
+    /// The sound was to be decoded as the clip loads, and that failed or never started.
+    pub fn sound_waits_for_stems(&self) -> bool {
+        self.stream.as_ref().is_some_and(|media| media.sound.as_ref().is_none_or(|sound| sound.failed().is_some()))
+    }
+
+    /// Why the clip stopped loading, if it did.
+    pub fn stream_failure(&self) -> Option<String> {
+        let media = self.stream.as_ref()?;
+        (media.fill.outcome() == Outcome::Failed).then(|| media.fill.error().unwrap_or_else(|| "The clip's drive stopped answering.".into()))
+    }
+
+    /// `[from, to)` seconds can play now: the bytes and the sound are there.
+    pub fn stream_ready(&self, from: f64, to: f64) -> bool {
+        let Some(media) = &self.stream else { return true };
+        if media.fill.outcome() != Outcome::Done {
+            let (start, end) = media.map.bytes_of(from, to);
+            if !media.fill.has(start, end) {
+                return false;
+            }
+        }
+        media.sound.as_ref().is_none_or(|sound| sound.failed().is_some() || sound.has(from, to))
+    }
+
+    /// Stops the copy and the decoder of the clip that was playing.
+    pub(super) fn end_stream(&mut self) {
+        if let Some(media) = &self.stream {
+            if let Some(sound) = &media.sound {
+                sound.stop();
+            }
+            media.fill.cancel();
+        }
+    }
+
+    pub(super) fn shut_stream_source(&mut self) {
+        if let Some(media) = self.stream.take() {
+            let _ = unsafe { media.video.0.Shutdown() };
+        }
+    }
+
+    /// Closes a clip that is still loading now, not when the next clip arrives: that may be a
+    /// while on a slow drive, or never.
+    pub fn close_stream(&mut self) -> Result<(), String> {
+        if self.stream.is_some() { self.clear_clip() } else { Ok(()) }
+    }
+
+    /// Stops and lets go of the clip that was open.
+    fn clear_clip(&mut self) -> Result<(), String> {
+        self.end_stream();
+        self.media_status = Arc::new(MediaStatus::default());
         self.has_audio = false;
         self.observed_media_ready = false;
         self.observed_ready = false;
@@ -170,19 +291,21 @@ impl NativePreview {
         if let Some(old) = self.player.take() {
             let _ = unsafe { old.Shutdown() };
         }
+        self.shut_stream_source();
         self.callback = None;
+        Ok(())
+    }
+
+    /// Clears the clip that was open and makes a player for the next. `limits` is the new
+    /// clip's (track end, start of the last frame).
+    fn new_player(&mut self, limits: VideoLimits) -> Result<(IMFPMediaPlayer, IMFPMediaPlayerCallback), String> {
+        self.clear_clip()?;
         let callback: IMFPMediaPlayerCallback = MediaCallback {
-            status: Arc::clone(&status),
+            status: Arc::clone(&self.media_status),
         }
         .into();
-        let normalized = normalize_windows_path(path);
-        // MP4/MOV list the frames; for others (MKV) keep a tenth of a second clear of the end.
-        let file = Path::new(&normalized);
-        self.video_end = crate::services::library::mp4_video_duration(file).or(Some(duration));
-        self.last_frame = crate::services::library::mp4_last_frame(file)
-            .or_else(|| self.video_end.filter(|end| *end > 0.2).map(|end| end - 0.1));
+        (self.video_end, self.last_frame) = limits;
         self.rest.set(None);
-        let url = wide(&normalized);
         let mut player = None;
         unsafe {
             MFPCreateMediaPlayer(
@@ -195,34 +318,15 @@ impl NativePreview {
             )
         }
         .map_err(|error| format!("could not open native video preview: {error}"))?;
-        let player =
-            player.ok_or_else(|| "Media Foundation returned no preview player".to_string())?;
-        // The callback selects the streams and sets the item (see `set_picture_only_item`).
-        if let Err(error) = unsafe { player.CreateMediaItemFromURL(PCWSTR(url.as_ptr()), false, 0, None) } {
-            let _ = unsafe { player.Shutdown() };
-            return Err(format!("could not open native video preview: {error}"));
-        }
-        if let Err(error) = unsafe { player.SetMute(true) } {
-            let _ = unsafe { player.Shutdown() };
-            return Err(format!("could not mute embedded source audio: {error}"));
-        }
-        self.has_audio = !audio.is_empty();
-        if self.has_audio {
-            if let Err(error) = self.audio.open(audio, duration) {
-                let _ = unsafe { player.Shutdown() };
-                self.has_audio = false;
-                return Err(error);
-            }
-        }
-        *self
-            .window_state
-            .player
-            .lock()
-            .unwrap_or_else(|e| e.into_inner()) = Some(player.clone());
+        let player = player.ok_or_else(|| "Media Foundation returned no preview player".to_string())?;
+        Ok((player, callback))
+    }
+
+    fn keep_player(&mut self, player: IMFPMediaPlayer, callback: IMFPMediaPlayerCallback) {
+        *self.window_state.player.lock().unwrap_or_else(|e| e.into_inner()) = Some(player.clone());
         self.callback = Some(callback);
         self.player = Some(player);
         self.last_drift_check.set(Instant::now());
-        Ok(())
     }
 
     pub fn is_ready(&self) -> bool {
@@ -234,6 +338,9 @@ impl NativePreview {
     }
 
     pub fn refresh(&mut self) -> Result<bool, String> {
+        if let Some(sound) = self.stream.as_ref().and_then(|media| media.sound.as_ref()) {
+            sound.set_playhead(if self.has_audio { self.audio.position() } else { 0.0 });
+        }
         let error = self.error();
         let mut changed = error != self.observed_error;
         self.observed_error = error.clone();
@@ -277,7 +384,7 @@ impl NativePreview {
                 self.window_state.presentable.store(true, Ordering::Release);
                 redraw_video_window(self.window, &self.window_state);
                 changed = true;
-            } else if started.elapsed() >= Duration::from_secs(2) {
+            } else if started.elapsed() >= if self.stream.is_some() { Duration::from_secs(30) } else { Duration::from_secs(2) } {
                 self.prime_started = None;
                 return Err(format!(
                     "native video did not start while priming the first frame (state {})",

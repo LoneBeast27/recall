@@ -9,6 +9,15 @@ use crate::services::storage::{self, Seek};
 const FRAME_COUNT: usize = 8;
 const WIDTH: u32 = 320;
 
+/// The poster and filmstrip already cached for `original`, extracting nothing.
+pub(crate) fn cached(original: &Path) -> VisualAssets {
+    let Ok((id, _, _)) = storage::identity_of(original) else { return VisualAssets::default() };
+    let directory = storage::visuals_dir(&storage::cache_root(), &id);
+    let found = |label: String| Some(directory.join(format!("{label}.jpg"))).filter(|p| storage::valid_file(p)).map(|p| p.to_string_lossy().into_owned());
+    let filmstrip: Option<Vec<String>> = (0..FRAME_COUNT).map(|index| found(format!("frame-{index}"))).collect();
+    VisualAssets { poster: found("poster".into()), filmstrip: filmstrip.unwrap_or_default() }
+}
+
 /// The successful frame paths are useful even if a later representative seek fails.
 pub(crate) fn visuals_best_effort(original: &Path, read_from: &Path, source_duration: f64) -> (VisualAssets, Option<String>) {
     let id = match storage::identity_of(original) {

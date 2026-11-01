@@ -36,21 +36,21 @@ fn mixes_gain_mute_and_mono_to_stereo() {
     let tracks = vec![
         LoadedTrack {
             stream_index: 0,
-            samples: vec![0.5],
+            samples: Samples::Stem(vec![0.5]),
             channels: 1,
             gain_db: 0.0,
             muted: false,
         },
         LoadedTrack {
             stream_index: 1,
-            samples: vec![1.0, 1.0],
+            samples: Samples::Stem(vec![1.0, 1.0]),
             channels: 2,
             gain_db: -6.0206,
             muted: false,
         },
         LoadedTrack {
             stream_index: 2,
-            samples: vec![1.0],
+            samples: Samples::Stem(vec![1.0]),
             channels: 1,
             gain_db: 0.0,
             muted: true,
@@ -64,7 +64,7 @@ fn mixes_gain_mute_and_mono_to_stereo() {
 
 #[test]
 fn a_silent_buffer_carries_no_sound_and_a_normal_one_does() {
-    let tracks = [LoadedTrack { stream_index: 0, samples: vec![0.5; 4], channels: 1, gain_db: 0.0, muted: false }];
+    let tracks = [LoadedTrack { stream_index: 0, samples: Samples::Stem(vec![0.5; 4]), channels: 1, gain_db: 0.0, muted: false }];
     let mut output = vec![1i16; FRAMES_PER_BUFFER * OUTPUT_CHANNELS];
     worker::fill_buffer(&tracks, 0, 2, false, &mut output);
     assert!(output[0] > 16000);
@@ -87,7 +87,7 @@ fn rejects_malformed_truncated_and_non_48k_wav() {
 fn clips_mixed_output() {
     let tracks = vec![LoadedTrack {
         stream_index: 0,
-        samples: vec![1.0, -1.0],
+        samples: Samples::Stem(vec![1.0, -1.0]),
         channels: 2,
         gain_db: 24.0,
         muted: false,

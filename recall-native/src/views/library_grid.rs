@@ -112,16 +112,20 @@ impl Root {
                 .rounded(px(8.))
                 .bg(c(theme::RAISED))
                 .flex()
+                .flex_col()
+                .gap(px(4.))
                 .items_center()
                 .justify_center()
                 .child(icon(Icon::Film, 20., theme::DISABLED))
+                .when(self.lib.thumb_waiting(&path), |d| d.text_size(px(11.)).text_color(c(theme::TERTIARY)).child("Loading…"))
                 .into_any_element(),
         };
         let badge = match (hovered, record.duration) {
             (true, Some(d)) => Some(format!("{} / {}", library::format_duration(d * self.lib.hover_frac as f64), library::format_duration(d))),
             (_, Some(d)) => Some(library::format_duration(d)),
-            _ => None,
+            _ => Some("…".to_owned()),
         };
+        let scrub_waiting = self.lib.scrub_waiting(&path);
         let span = self.lib.hover_span.clone();
         let ring = if selected { theme::TEXT } else if hovered { theme::BORDER_STRONG } else { theme::BORDER_SUBTLE };
         let mut meta = library::format_bytes(record.bytes);
@@ -149,6 +153,20 @@ impl Root {
                     ),
                 )
                 .child(self.render_tile_actions(&path, record.favourite, cx))
+            })
+            .when(scrub_waiting, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .left(px(8.))
+                        .bottom(px(10.))
+                        .px(px(5.))
+                        .rounded(px(4.))
+                        .bg(ca(theme::WINDOW, 0.8))
+                        .text_size(px(11.))
+                        .line_height(px(16.))
+                        .child("Loading preview…"),
+                )
             })
             .when(record.favourite && !hovered, |d| {
                 d.child(div().absolute().top(px(8.)).left(px(8.)).child(icon(Icon::StarFill, 14., theme::TEXT)))

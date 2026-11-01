@@ -1,11 +1,13 @@
 //! Background threads. The UI thread never blocks on disk, ffmpeg or the engine.
-//! `io`: list / prepare / save / flush / export / delete / storage (serial, in order).
+//! `io`: list / save / flush / export / delete / storage (serial, in order). Each clip open
+//! runs on its own thread (`clip_open.rs`).
 //! `assets`: thumbnails, durations, video copies. `scrub`: hover-scrub frames.
 //!
 //! Work that reads an HDD is routed onto that disk's I/O lane (`services::storage`): one
 //! reader per physical disk at very low I/O priority, hover-scrub ahead of visible
 //! thumbnails ahead of idle prefetch. SSD work runs directly on these threads.
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -17,6 +19,7 @@ use std::{
 
 use crate::{
     backend::{self, ClipEntry, ExportSummary, PreparedClip, StorageReport},
+    clip_open::StreamedClip,
     edit_model::{ClipInfo, EditPlan, ExportSettings},
     services::{
         library::{
@@ -27,15 +30,24 @@ use crate::{
     },
 };
 
+/// A library listing with what the UI thread must not ask the drive for itself.
+pub struct Listing {
+    pub entries: Vec<ClipEntry>,
+    /// Lowercase paths of the edit sidecars beside the clips.
+    pub sidecars: HashSet<String>,
+    pub drive: Option<(u64, u64)>,
+}
+
 pub enum Job {
     List,
-    Prepare(u64, String),
     /// Autosave: working copy on the SSD (`Done::Saved`).
     SaveProject(ClipInfo, EditPlan, u32, ExportSettings),
     /// Leave / close / export: the sidecar beside the clip, only if it changed (`Done::Flushed`).
     FlushProject(ClipInfo, EditPlan, u32, ExportSettings, bool),
     Export(ClipInfo, EditPlan, u32, ExportSettings),
     Delete(Vec<PathBuf>),
+    /// Free space of the recordings drive (`Done::Drive`).
+    DriveSpace,
     /// Drive types + cache usage for Settings (`Done::Storage`).
     StorageReport,
     /// Settings "clear" for one tier, then a fresh report (`Done::Storage`, with a notice).
@@ -53,7 +65,13 @@ pub enum AssetJob {
 }
 
 pub enum Done {
-    Clips(Result<Vec<ClipEntry>, String>),
+    Clips(Result<Listing, String>),
+    /// (free, total) bytes of the recordings drive.
+    Drive(Option<(u64, u64)>),
+    /// The clip can play while it loads (`clip_open.rs`); `Prepared` follows when it has loaded.
+    Streaming(u64, Box<StreamedClip>),
+    /// What an open without streaming is doing now.
+    OpenStep(u64, &'static str),
     Prepared(u64, Result<PreparedClip, String>),
     Saved(Result<String, String>),
     Exported(Result<ExportSummary, String>),
@@ -77,6 +95,7 @@ pub struct Workers {
     jobs: Sender<Job>,
     assets: Sender<AssetJob>,
     scrub: Sender<String>,
+    open_tx: Sender<Done>,
     pub done: Receiver<Done>,
 }
 
@@ -87,6 +106,7 @@ impl Workers {
         let (assets, asset_rx) = mpsc::channel::<AssetJob>();
         let (scrub, scrub_rx) = mpsc::channel::<String>();
 
+        let open_tx = done_tx.clone();
         let tx = done_tx.clone();
         let watcher = ClipWatcher::start(move |change| {
             let _ = tx.send(Done::Library(change));
@@ -119,7 +139,14 @@ impl Workers {
             }
         });
 
-        Self { jobs, assets, scrub, done }
+        Self { jobs, assets, scrub, done, open_tx }
+    }
+
+    /// Opens a clip on a thread of its own: a running export or listing never holds it up.
+    pub fn open_clip(&self, generation: u64, path: String) {
+        crate::clip_open::note_open(generation);
+        let tx = self.open_tx.clone();
+        spawn_named("recall-clip-open", move || crate::clip_open::run(generation, path, &tx));
     }
 
     pub fn job(&self, job: Job) {
@@ -140,13 +167,13 @@ fn run_job(job: Job, tx: &Sender<Done>, watcher: &ClipWatcher) -> Done {
         Job::List => {
             // Every folder change ends in a listing. Armed first, so nothing falls between.
             watcher.set_roots(backend::clip_roots());
-            let result = backend::list_clips();
-            if let Ok(entries) = &result {
-                prefetch(entries, tx.clone());
-            }
+            let result = backend::list_clips().map(|entries| {
+                prefetch(&entries, tx.clone());
+                Listing { sidecars: library::sidecar_index(&entries), drive: library::drive_space(&backend::library_dir()), entries }
+            });
             Done::Clips(result)
         }
-        Job::Prepare(generation, path) => Done::Prepared(generation, backend::prepare_clip(&path)),
+        Job::DriveSpace => Done::Drive(library::drive_space(&backend::library_dir())),
         Job::SaveProject(info, plan, fps, export) => Done::Saved(backend::save_project(&info, &plan, fps, &export)),
         Job::FlushProject(info, plan, fps, export, ours) => Done::Flushed(backend::flush_project(&info, &plan, fps, &export, ours)),
         Job::Export(info, plan, fps, export) => Done::Exported(backend::export_clip(&info, &plan, fps, &export)),

@@ -3,11 +3,11 @@
 //! sequential pass of 8 MiB unbuffered reads (no system-cache pollution on a shared
 //! desktop), published by atomic rename with the source's modification time. The tier is
 //! capped at half the cache budget and is the first to be evicted (`budget`, `lru`).
-use std::alloc::{Layout, alloc_zeroed, dealloc, handle_alloc_error};
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use windows::Win32::Storage::FileSystem::{FILE_FLAG_NO_BUFFERING, FILE_FLAG_SEQUENTIAL_SCAN, FILE_FLAG_WRITE_THROUGH};
@@ -15,12 +15,69 @@ use windows::Win32::Storage::FileSystem::{FILE_FLAG_NO_BUFFERING, FILE_FLAG_SEQU
 use super::budget::{self, INDEX_LOCK};
 use super::lane::{self, Priority};
 use super::evict::{self as lru, DEFAULT_CACHE_BUDGET};
+use super::fill::{AlignedBuffer, ClipFill};
 
 const CHUNK: usize = 8 << 20;
 const ALIGN: usize = 4096;
 /// Free space the cache volume keeps after a copy.
 const KEEP_FREE: u64 = 4 << 30;
 const STALE_PART_SECS: u64 = 3600;
+
+/// Bytes copied of the copy under way, and its size (0 when none): the open shows a percentage.
+static COPY_DONE: AtomicU64 = AtomicU64::new(0);
+static COPY_SIZE: AtomicU64 = AtomicU64::new(0);
+
+/// Share of the whole-clip copy under way.
+pub fn copy_progress() -> Option<f64> {
+    let total = COPY_SIZE.load(Ordering::Relaxed);
+    (total > 0).then(|| COPY_DONE.load(Ordering::Relaxed) as f64 / total as f64)
+}
+
+/// `RECALL_SLOW_DRIVE=<MB/s>` makes any drive act like a hard drive of that speed (the
+/// slowed-drive check). Unset: 0, and only real hard drives count.
+fn slow_drive_rate() -> u64 {
+    mega("RECALL_SLOW_DRIVE")
+}
+
+fn mega(variable: &str) -> u64 {
+    std::env::var(variable).ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(0).saturating_mul(1_000_000)
+}
+
+/// Clips here load progressively.
+pub fn is_slow(path: &Path) -> bool {
+    slow_drive_rate() > 0 || super::drive_kind(path).is_hdd()
+}
+
+/// Starts copying `source` to the SSD for progressive playback, index and head first. A clip
+/// the video tier cannot take, by its size or for lack of room, is read where it lies: the
+/// cache budget is never exceeded. `RECALL_SLOW_DRIVE_FAIL=<MB>` stops the drive after that much.
+pub fn start_fill(source: &Path, metadata: &std::fs::Metadata, first: &[u64]) -> Result<ClipFill, String> {
+    let root = super::cache_root();
+    let bytes = metadata.len();
+    let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+    let name = super::file_name(source).ok_or("clip has no file name")?;
+    let id = super::identity(&name, bytes, super::mtime_secs(metadata));
+    let budget = budget_in(&root);
+    let free = super::drive_info(&root).map_or(u64::MAX, |info| info.free);
+    if bytes > budget / 2 || free < bytes.saturating_add(KEEP_FREE) {
+        return Ok(ClipFill::direct(source, bytes, modified, mega("RECALL_SLOW_DRIVE_FAIL")));
+    }
+    let directory = video_dir(&root);
+    std::fs::create_dir_all(&directory).map_err(|error| format!("create fill folder: {error}"))?;
+    remove_stale_parts(&directory);
+    remove_left_fills(&directory, &id);
+    budget::enforce(&root, budget, bytes);
+    let target = directory.join(format!("{id}.mp4"));
+    let part = super::temp_sibling(&target);
+    let fill = ClipFill::create(source, &part, &target, bytes, modified, slow_drive_rate(), mega("RECALL_SLOW_DRIVE_FAIL"))?;
+    fill.start(first)?;
+    Ok(fill)
+}
+
+/// True when a clip this size stays out of the video tier.
+pub fn too_large(bytes: u64) -> bool {
+    bytes > budget_in(&super::cache_root()) / 2
+}
 
 fn video_dir(root: &Path) -> PathBuf {
     root.join("video")
@@ -92,7 +149,11 @@ pub(super) fn cache_in(root: &Path, source: &Path, budget: u64) -> Result<PathBu
     }
     let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
     let temporary = super::temp_sibling(&target);
-    if let Err(error) = copy_sequential(source, &temporary, bytes, modified) {
+    COPY_DONE.store(0, Ordering::Relaxed);
+    COPY_SIZE.store(bytes, Ordering::Relaxed);
+    let copied = copy_sequential(source, &temporary, bytes, modified);
+    COPY_SIZE.store(0, Ordering::Relaxed);
+    if let Err(error) = copied {
         let _ = std::fs::remove_file(&temporary);
         return Err(error);
     }
@@ -118,41 +179,54 @@ fn touch(root: &Path, file: &str) {
     let _ = lru::write_index(&path, &index);
 }
 
-/// Interrupted copies older than an hour (a crash mid-copy).
-fn remove_stale_parts(directory: &Path) {
+/// The part file an app closed mid-load left for this clip. A fill still running is not left.
+fn remove_left_fills(directory: &Path, id: &str) {
+    let prefix = format!("{id}.mp4.");
     let Ok(listing) = std::fs::read_dir(directory) else { return };
     for entry in listing.flatten() {
-        let stale = entry.file_name().to_string_lossy().ends_with(".part")
-            && entry.metadata().ok().and_then(|m| m.created().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() > STALE_PART_SECS);
-        if stale {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if name.starts_with(&prefix) && name.ends_with(".part") && !super::fill::in_use(&entry.path()) {
             let _ = std::fs::remove_file(entry.path());
         }
     }
 }
 
-/// 4 KiB-aligned heap buffer for unbuffered I/O.
-struct AlignedBuffer {
-    ptr: *mut u8,
-    layout: Layout,
+#[cfg(test)]
+mod left_fills {
+    use super::*;
+
+    #[test]
+    fn a_new_fill_clears_only_what_its_own_clip_left() {
+        let dir = std::env::temp_dir().join(format!("recall-left-fills-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let source = dir.join("clip.mp4");
+        std::fs::write(&source, vec![1u8; 8192]).unwrap();
+        let modified = source.metadata().unwrap().modified().unwrap();
+        let left = dir.join("aaaa.mp4.1-1.part");
+        let other = dir.join("bbbb.mp4.1-2.part");
+        std::fs::write(&left, b"left by a closed app").unwrap();
+        std::fs::write(&other, b"another clip").unwrap();
+        let running = ClipFill::create(&source, &dir.join("aaaa.mp4.1-3.part"), &dir.join("aaaa.mp4"), 8192, modified, 0, 0).unwrap();
+        remove_left_fills(&dir, "aaaa");
+        assert!(!left.exists(), "what a closed app left goes");
+        assert!(other.exists(), "another clip's part stays");
+        assert!(dir.join("aaaa.mp4.1-3.part").exists(), "a fill still running is not left");
+        drop(running);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
 
-impl AlignedBuffer {
-    fn new(len: usize) -> Self {
-        let layout = Layout::from_size_align(len, ALIGN).expect("aligned layout");
-        let ptr = unsafe { alloc_zeroed(layout) };
-        if ptr.is_null() {
-            handle_alloc_error(layout);
+/// Interrupted copies older than an hour (a crash mid-copy).
+fn remove_stale_parts(directory: &Path) {
+    let Ok(listing) = std::fs::read_dir(directory) else { return };
+    for entry in listing.flatten() {
+        let stale = entry.file_name().to_string_lossy().ends_with(".part")
+            && !super::fill::in_use(&entry.path())
+            && entry.metadata().ok().and_then(|m| m.created().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() > STALE_PART_SECS);
+        if stale {
+            let _ = std::fs::remove_file(entry.path());
         }
-        Self { ptr, layout }
-    }
-    fn bytes(&mut self) -> &mut [u8] {
-        unsafe { std::slice::from_raw_parts_mut(self.ptr, self.layout.size()) }
-    }
-}
-
-impl Drop for AlignedBuffer {
-    fn drop(&mut self) {
-        unsafe { dealloc(self.ptr, self.layout) };
     }
 }
 
@@ -194,6 +268,7 @@ pub(super) fn copy_unbuffered(source: &Path, temporary: &Path, bytes: u64, modif
         buffer.bytes()[read..padded].fill(0);
         output.write_all(&buffer.bytes()[..padded]).map_err(|error| format!("write copy: {error}"))?;
         copied += read as u64;
+        COPY_DONE.store(copied, Ordering::Relaxed);
         lane::count_read(read as u64);
     }
     if copied < bytes {
@@ -215,6 +290,7 @@ fn copy_buffered(source: &Path, temporary: &Path, bytes: u64, modified: SystemTi
         }
         output.write_all(&buffer[..read]).map_err(|error| format!("write copy: {error}"))?;
         copied += read as u64;
+        COPY_DONE.store(copied, Ordering::Relaxed);
         lane::count_read(read as u64);
     }
     if copied != bytes {

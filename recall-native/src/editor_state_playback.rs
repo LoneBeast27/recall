@@ -61,6 +61,7 @@ impl EditorState {
     pub fn pause(&mut self) {
         self.playing = false;
         self.play_when_ready = false;
+        self.loading.buffering = false;
         self.play_started = None;
         self.watch.reset();
         if let Some(preview) = self.preview.as_mut() {

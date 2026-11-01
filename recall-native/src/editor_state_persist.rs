@@ -76,6 +76,10 @@ impl EditorState {
         }
         if let Some(info) = self.info.clone() {
             self.needs_flush = false;
+            // The sidecar may wait behind an export; a reopen must still find these edits.
+            if let Err(error) = crate::backend::save_working(&info, &self.plan, self.fps, &self.export_settings) {
+                self.save_error = Some(error);
+            }
             workers.job(Job::FlushProject(info, self.plan.clone(), self.fps, self.export_settings.clone(), self.may_touch_sidecar()));
         }
     }
@@ -95,6 +99,10 @@ impl EditorState {
     /// ask for a 720p H.264 preview copy (export keeps using the original).
     pub(super) fn on_preview_failed(&mut self, error: String, workers: &crate::worker::Workers) {
         self.hide_preview();
+        if let Some(failure) = self.preview.as_ref().and_then(|preview| preview.stream_failure()) {
+            self.status = format!("Couldn't load this clip. {failure}");
+            return;
+        }
         let Some(info) = self.info.as_ref() else { return };
         if self.proxy_for.as_deref() == Some(info.path.as_str()) {
             self.status = format!("Can't preview this clip. Trim and export still work. ({error})");
@@ -126,9 +134,11 @@ impl EditorState {
         let tracks = self.preview_tracks(&info);
         if let Some(preview) = self.preview.as_mut() {
             // A failed swap has already closed the old source: reopen the original.
-            let (path, result) = match preview.open(copy, &tracks, info.duration) {
+            // A preview copy is another file: its own picture end (a re-encode ends elsewhere).
+            let limits = crate::services::library::video_limits(copy, info.duration);
+            let (path, result) = match preview.open(copy, &tracks, info.duration, limits) {
                 Ok(()) => (copy.to_owned(), Ok(())),
-                Err(_) => (info.path.clone(), preview.open(&info.path, &tracks, info.duration)),
+                Err(_) => (info.path.clone(), preview.open(&info.path, &tracks, info.duration, self.limits)),
             };
             match result {
                 Ok(()) => {

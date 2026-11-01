@@ -164,6 +164,11 @@ impl Root {
         let count = self.lib.selection.len();
         let noun = if count == 1 { "clip" } else { "clips" };
         let bar = div().flex_none().flex().items_center().gap(px(8.)).px(px(CONTENT_PAD)).pt(px(20.)).pb(px(16.));
+        if self.lib.deleting > 0 {
+            let moving = self.lib.deleting;
+            let noun = if moving == 1 { "clip" } else { "clips" };
+            return bar.child(icon(Icon::Trash, 16., theme::MUTED)).child(div().text_color(c(theme::MUTED)).child(format!("Moving {moving} {noun} to the Recycle Bin…"))).into_any_element();
+        }
         if self.lib.confirm_delete {
             return bar
                 .child(icon(Icon::Trash, 16., theme::ERROR))
@@ -177,6 +182,7 @@ impl Root {
                 .child(ui::button("delete-confirm", Variant::Primary).child("Move to Recycle Bin").on_click(cx.listener(|this, _, _, cx| {
                     let paths = this.lib.selected_paths();
                     this.lib.confirm_delete = false;
+                    this.lib.deleting = paths.len();
                     this.workers.job(Job::Delete(paths));
                     cx.notify();
                 })))
