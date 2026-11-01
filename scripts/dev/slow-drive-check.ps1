@@ -9,8 +9,9 @@
     powershell -NoProfile -File scripts\dev\slow-drive-check.ps1 [-Clip <mp4>] [-Exe <recall-native.exe>] [-Only '<pattern>', ...]
 
   -Clip: at least 60 s and 100 MB; default .tmp\viewer-check\base.mp4.
-  Needs an engine that knows --prepare-editor: RECALL_ENGINE, else target-dev\debug\recall.exe under
+  Needs an engine stamped recall-engine-caps: RECALL_ENGINE, else target-dev\debug\recall.exe under
   -EngineRoot. An older engine does not fail: it starts a recorder and never returns.
+  The engine scenarios run stand-ins built here (slow-drive-stub.ps1), never a real older build.
   -RealClip <path>, ...: also opens each clip where it lies, unslowed and unlinked (read only).
   -Snap <png>: saves the window from that scenario while it loads.
 #>
@@ -23,7 +24,9 @@ $script:only = @($Only | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
 Write-Host "player: $script:exe"
 if (-not $Clip) { $Clip = Join-Path $script:work 'base.mp4' }
 if (-not $env:RECALL_ENGINE) { $env:RECALL_ENGINE = Join-Path $EngineRoot 'target-dev\debug\recall.exe' }
-if (-not (Select-String -Path $env:RECALL_ENGINE -Pattern '--prepare-editor' -SimpleMatch -Quiet)) { throw "$env:RECALL_ENGINE has no --prepare-editor: it would start a recorder" }
+if (-not (Select-String -Path $env:RECALL_ENGINE -Pattern 'recall-engine-caps:' -SimpleMatch -Quiet)) { throw "$env:RECALL_ENGINE has no caps stamp: the app refuses it" }
+. (Join-Path $PSScriptRoot 'slow-drive-stub.ps1')
+$script:realEngine = $env:RECALL_ENGINE
 $size = (Get-Item $Clip).Length
 
 function Start-Slow([string]$name, [int]$rate, [switch]$Library, [string[]]$Also = @()) {
@@ -136,6 +139,121 @@ Run-Scenario 'leaving mid-load stops the copy cleanly' {
   Verdict @($started, $held, $closed, $once)
 }
 
+Run-Scenario 'opening another clip stops the first copy' {
+  $s = Start-Slow 'slow-first' 20 -Library -Also @('slow-second')
+  Click $s 'tile:slow-first.mp4'
+  [void](Wait-Trace $s { param($r) $r.ready -and $r.loading } 8000)
+  $a = @(Fills)
+  $one = Ok ($a.Count -eq 1) "the first clip is copying: $($a.Count) part file"
+  Key $s 'escape'
+  [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 3000)
+  Click $s 'tile:slow-second.mp4'
+  $t = Get-Date
+  while ((Test-Path -LiteralPath $a[0].FullName) -and ((Get-Date) - $t).TotalSeconds -lt 5) { Start-Sleep -Milliseconds 20 }
+  $gone = Ok (-not (Test-Path -LiteralPath $a[0].FullName)) "its part file went $([int]((Get-Date) - $t).TotalMilliseconds) ms after the second open"
+  [void](Wait-Trace $s { param($r) $r.ready -and $r.loading -and $r.clip -like '*slow-second*' } 8000)
+  $b = @(Fills)
+  $other = Ok ($b.Count -eq 1 -and $b[0].Name -ne $a[0].Name) "the second clip copies: $($b.Count) part file, another name"
+  $t = Get-Date
+  while ((@(Get-ChildItem (Join-Path $script:cache 'video') -Filter '*.mp4').Count -eq 0) -and ((Get-Date) - $t).TotalSeconds -lt 40) { Start-Sleep -Milliseconds 200 }
+  Start-Sleep -Milliseconds 300
+  $landed = @(Get-ChildItem (Join-Path $script:cache 'video') -Filter '*.mp4')
+  $only = Ok ($landed.Count -eq 1 -and (Fills).Count -eq 0) "the second copy finished whole: $($landed.Count) copy, $((Fills).Count) part files"
+  Verdict @($one, $gone, $other, $only)
+}
+
+Run-Scenario 'a second clip that cannot open still stops the first copy' {
+  $s = Start-Slow 'slow-before-bad' 10 -Library
+  $bad = Join-Path (Split-Path $s.Clip) 'slow-bad.mp4'
+  [IO.File]::WriteAllBytes($bad, [byte[]]::new(2MB))
+  [void](Wait-Trace $s { param($r) $r.targets.PSObject.Properties.Name -contains 'tile:slow-bad.mp4' } 10000)
+  Click $s 'tile:slow-before-bad.mp4'
+  [void](Wait-Trace $s { param($r) $r.ready -and $r.loading } 8000)
+  $a = @(Fills)
+  Key $s 'escape'
+  [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 3000)
+  Click $s 'tile:slow-bad.mp4'
+  $failed = Wait-Trace $s { param($r) -not $r.clip -and $r.status -and $r.status -notlike 'Opening*' -and $r.status -notlike 'Preparing*' -and $r.status -notlike 'Loading*' } 15000
+  $t = Get-Date
+  while ((Test-Path -LiteralPath $a[0].FullName) -and ((Get-Date) - $t).TotalSeconds -lt 3) { Start-Sleep -Milliseconds 20 }
+  $state = if (Test-Path -LiteralPath $a[0].FullName) { 'still running' } else { 'stopped' }
+  Verdict @((Ok ($a.Count -eq 1 -and $state -eq 'stopped') "first copy after the failed open: $state"), (Ok ($null -ne $failed) "said: $($failed.status)"))
+}
+
+Run-Scenario 'edits made during an export survive reopening the clip' {
+  $stub = New-StubEngine 'stub-new' -Caps
+  $env:RECALL_ENGINE = $stub; $env:RECALL_STUB_REAL = $script:realEngine; $env:RECALL_STUB_EXPORT_MS = '25000'; $env:RECALL_STUB_LOG = Join-Path $script:work 'stub-new.log'
+  Remove-Item $env:RECALL_STUB_LOG -ErrorAction SilentlyContinue
+  try {
+    $s = Start-Slow 'slow-keep' 200 -Library -Also @('slow-away')
+    Click $s 'tile:slow-keep.mp4'
+    [void](Wait-Trace $s { param($r) $r.ready -and $r.clip -like '*slow-keep*' -and $r.targets.tracks } 8000)
+    Scrub $s 0.1 3 4; [void](Settle $s 300); Key $s 'c'
+    [void](Wait-Trace $s { param($r) @($r.ranges).Count -eq 2 -and $r.saved } 4000)
+    Click $s 'export'
+    $running = Wait-StubLog '--export-edit' 5000
+    Scrub $s 0.1 6 4; [void](Settle $s 300); Key $s 'c'
+    $three = Wait-Trace $s { param($r) @($r.ranges).Count -eq 3 } 3000
+    Key $s 'escape'
+    [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 3000)
+    Click $s 'tile:slow-away.mp4'
+    [void](Wait-Trace $s { param($r) $r.ready -and $r.clip -like '*slow-away*' } 8000)
+    Key $s 'escape'
+    [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 3000)
+    Click $s 'tile:slow-keep.mp4'
+    $back = Wait-Trace $s { param($r) $r.ready -and $r.clip -like '*slow-keep*' -and $r.targets.tracks } 8000
+    $still = $null -ne $running -and -not $running.HasExited
+    $during = Ok ($still -and $three -and @($back.ranges).Count -eq 3) "reopened with the export still running ($still): $(@($back.ranges).Count) ranges of 3"
+    if ($running) { [void]$running.WaitForExit(30000) }
+    $sidecar = "$($s.Clip).recall-edit.json"
+    $t = Get-Date; $beside = 0
+    while ($beside -ne 3 -and ((Get-Date) - $t).TotalSeconds -lt 5) {
+      if (Test-Path -LiteralPath $sidecar) { $beside = @((Get-Content -LiteralPath $sidecar -Raw | ConvertFrom-Json).plan.ranges).Count }
+      Start-Sleep -Milliseconds 100
+    }
+    Verdict @($during, (Ok ($beside -eq 3) "after the export the edit file beside the clip has $beside ranges"))
+  } finally { Stop-Stubs 'stub-new'; Reset-Engine }
+}
+
+function Over-Cap([scriptblock]$body) {
+  # The budget decides, not the clip: half of it is under this clip's size.
+  Set-Content -LiteralPath (Join-Path $script:cache 'storage.json') -Value "{`"cache_budget_bytes`":$size}"
+  try { & $body } finally { Remove-Item (Join-Path $script:cache 'storage.json') -ErrorAction SilentlyContinue }
+}
+
+Run-Scenario 'a clip over the tier cap streams from the drive and is not copied' {
+  Over-Cap {
+    $s = Start-Slow 'slow-big' 20
+    $first = Last $s
+    $open = Ok ($s.OpenMs -lt 4000 -and $null -ne $first.loading) "cap $(Fmt ($size / 2MB)) MB, clip $(Fmt ($size / 1MB)) MB: ready in $($s.OpenMs) ms, loading state on"
+    $play = Press-Play $s 'space' 2
+    Key $s 'space'
+    $target = [double](Last $s).duration * 0.8
+    Scrub $s 0.1 $target 6
+    $landed = Wait-Trace $s { param($r) [math]::Abs([double]$r.video - [double]$r.pos) -lt 0.1 -and [double]$r.pos -gt ($target - 2) } 6000
+    $seek = Ok ($null -ne $landed) $(if ($landed) { "picture at $(Fmt $landed.video)s with no copy behind it" } else { 'picture never reached the seek' })
+    $stems = Wait-Trace $s { param($r) $r.stems -and $r.stems[0] } 90000
+    $got = Ok ($null -ne $stems) 'stems prepared from the clip where it lies'
+    $copied = @(Get-ChildItem (Join-Path $script:cache 'video') -File -ErrorAction SilentlyContinue)
+    $tier = [long](($copied | Measure-Object Length -Sum).Sum)
+    $clean = Ok (@($copied | Where-Object { $_.Extension -in '.mp4', '.part' }).Count -eq 0 -and $tier -lt 1MB) "video tier holds $($copied.Count) files, $tier bytes"
+    Verdict @($open, $play, $seek, $got, $clean)
+  }
+}
+
+Run-Scenario 'a clip over the cap whose drive goes away says so' {
+  Over-Cap {
+    $env:RECALL_SLOW_DRIVE_FAIL = '60'
+    try { $s = Start-Slow 'slow-big-gone' 20 } finally { Remove-Item Env:RECALL_SLOW_DRIVE_FAIL -ErrorAction SilentlyContinue }
+    Scrub $s 0.1 ([double](Last $s).duration * 0.6) 6
+    $failed = Wait-Trace $s { param($r) $r.loading.failed } 10000
+    Key $s 'space'
+    $stopped = Wait-Trace $s { param($r) -not $r.playing } 8000
+    $r = Last $s
+    Verdict @((Ok ($null -ne $failed) "said: $($failed.loading.failed)"), (Ok ($null -ne $stopped -and -not $r.loading.buffering -and -not $s.Process.HasExited) "stopped, not buffering, alive; note '$($r.loading.note)'"))
+  }
+}
+
 Run-Scenario 'sound that starts after the picture does not hang' {
   $late = Join-Path $script:work 'late-audio.mp4'
   if (-not (Test-Path $late)) { Invoke-Ffmpeg @('-t', '20', '-i', $Clip, '-itsoffset', '3', '-t', '20', '-i', $Clip, '-map', '0:v', '-map', '1:a:0', '-c', 'copy', $late) }
@@ -151,22 +269,59 @@ Run-Scenario 'sound that starts after the picture does not hang' {
     $steady = @(Rows $s ($start + 500) | Where-Object { $_.playing -and -not $_.loading.buffering })
     $gap = [double](($steady | ForEach-Object { [math]::Abs([double]$_.video - [double]$_.pos) } | Measure-Object -Maximum).Maximum)
     $live = Ok ($steady.Count -gt 10 -and $gap -lt 0.1) "plays from 0 over the silent start; steady A/V gap $(Fmt $gap)s; $($play.Detail)"
-    Verdict @($live, $free)
+    $starts = [double](& ffprobe -v error -select_streams a:0 -show_entries stream=start_time -of csv=p=0 $late)
+    $offset = Ok ($starts -ge 2.9) "the file's sound starts at $(Fmt $starts)s"
+    Key $s 'space'
+    $done = Wait-Trace $s { param($r) -not $r.loading -and $r.stems -and $r.stems[0] } 60000
+    $loaded = Ok ($null -ne $done) 'finished loading, stems in'
+    # What a decoder stuck on the silent head costs: one core, for as long as the clip is open.
+    $before = $s.Process.TotalProcessorTime; $t = Get-Date; Start-Sleep -Seconds 4; $s.Process.Refresh()
+    $cores = ($s.Process.TotalProcessorTime - $before).TotalSeconds / ((Get-Date) - $t).TotalSeconds
+    Verdict @($offset, $live, $free, $loaded, (Ok ($cores -lt 0.5) "idle after loading: $(Fmt $cores) cores"))
   } finally { $Clip = $whole }
 }
 
 Run-Scenario 'an engine without the prepare command is refused, not started' {
-  $old = Join-Path $EngineRoot 'target\release\recall.exe'
-  if (Select-String -Path $old -Pattern '--prepare-editor' -SimpleMatch -Quiet) { return Add-Result $script:scenario $true 'no old engine here: skipped' }
-  $engine = $env:RECALL_ENGINE
-  $env:RECALL_ENGINE = $old
+  $stub = New-StubEngine 'stub-old'
+  $env:RECALL_ENGINE = $stub; $env:RECALL_STUB_LOG = Join-Path $script:work 'stub-old.log'
+  Remove-Item $env:RECALL_STUB_LOG -ErrorAction SilentlyContinue
   try {
     $s = Start-Slow 'slow-old-engine' 200
-    $t = Get-Date; $ran = 0
-    while (((Get-Date) - $t).TotalSeconds -lt 8) { $ran += @(Get-Process -Name recall -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $old }).Count; Start-Sleep -Milliseconds 100 }
-    $r = Last $s
-    Verdict @((Ok ($ran -eq 0) "the old engine ran in $ran samples"), (Ok ($r.ready) 'the clip still plays'))
-  } finally { $env:RECALL_ENGINE = $engine }
+    $settled = Wait-Trace $s { param($r) -not $r.loading } 15000
+    $plays = Press-Play $s 'space' 1
+    $runs = if (Test-Path $env:RECALL_STUB_LOG) { @(Get-Content $env:RECALL_STUB_LOG).Count } else { 0 }
+    Verdict @((Ok ($runs -eq 0) "a stand-in engine with no stamp: started $runs times"), (Ok ($null -ne $settled) 'the load ended without it'), $plays)
+  } finally { Stop-Stubs 'stub-old'; Reset-Engine }
+}
+
+Run-Scenario 'an engine that ignores the prepare command is given up on and killed' {
+  $short = Join-Path $script:work 'short-engine.mp4'
+  if (-not (Test-Path $short)) { Invoke-Ffmpeg @('-t', '6', '-i', $Clip, '-map', '0', '-c', 'copy', $short) }
+  $Clip = $short
+  $stub = New-StubEngine 'stub-hang' -Caps
+  $env:RECALL_ENGINE = $stub; $env:RECALL_STUB_LOG = Join-Path $script:work 'stub-hang.log'
+  Remove-Item $env:RECALL_STUB_LOG -ErrorAction SilentlyContinue
+  try {
+    $limit = 120 + (Get-Item $short).Length / 2e6
+    $s = Start-Slow 'slow-hung-engine' 200
+    $hung = Wait-StubLog '--prepare-editor' 15000
+    $t = Get-Date
+    $started = Ok ($null -ne $hung -and -not $hung.HasExited) "a stand-in with the stamp ignores the command and stays: pid $($hung.Id)"
+    $end = $hung.WaitForExit([int](($limit + 15) * 1000))
+    $took = ((Get-Date) - $t).TotalSeconds
+    $killed = Ok ($end -and $took -lt $limit + 10) "killed after $(Fmt $took) s (limit $(Fmt $limit) s)"
+    $r = Wait-Trace $s { param($r) -not $r.loading } 5000
+    $plays = Press-Play $s 'space' 1
+    Stop-Viewer $s; $script:current = $null
+    Remove-Item $env:RECALL_STUB_LOG -ErrorAction SilentlyContinue
+    # Nobody may be left with a recorder when the window closes either.
+    $s = Start-Slow 'slow-hung-engine' 200
+    $again = Wait-StubLog '--prepare-editor' 15000
+    Stop-Viewer $s; $script:current = $null
+    $orphan = $null -eq $again -or -not $again.WaitForExit(3000)
+    $state = if ($orphan) { 'left running' } else { 'gone' }
+    Verdict @($started, $killed, (Ok ($null -ne $r) 'the load ended without it'), $plays, (Ok (-not $orphan) "window closed with the engine running: engine $state"))
+  } finally { Stop-Stubs 'stub-hang'; Reset-Engine }
 }
 
 Run-Scenario 'a drive that goes away leaves an error and what loaded' {
@@ -180,7 +335,26 @@ Run-Scenario 'a drive that goes away leaves an error and what loaded' {
   $r = Wait-Trace $s { param($r) -not $r.playing } 30000
   $stopped = Ok ($null -ne $r -and -not $r.loading.buffering -and [double]$r.pos -gt 5 -and -not $r.status) "what loaded played to $(Fmt $r.pos)s, note '$($r.loading.note)', status '$($r.status)'"
   $never = @(Rows $s $t0 | Where-Object { $_.loading.buffering }).Count
-  Verdict @($said, $stopped, (Ok ($never -eq 0) "buffering samples: $never"))
+  $end = [double](Last $s).duration
+  Scrub $s 0.1 ($end * 0.8) 6
+  $hole = Wait-Trace $s { param($r) $r.loading.note -eq "This part didn't load" } 4000
+  Scrub $s 0.1 3 6
+  $back = Wait-Trace $s { param($r) [double]$r.pos -lt 4 -and [math]::Abs([double]$r.video - [double]$r.pos) -lt 0.15 } 5000
+  $seek = Ok ($null -ne $hole -and $null -ne $back) "a seek into what did not load, then back: picture at $(if ($back) { Fmt $back.video } else { 'nowhere' }) s, note was '$($hole.loading.note)'"
+  Verdict @($said, $stopped, (Ok ($never -eq 0) "buffering samples: $never"), $seek)
+}
+
+Run-Scenario 'a drive that goes away during a wait ends the wait' {
+  $env:RECALL_SLOW_DRIVE_FAIL = '20'
+  try { $s = Start-Slow 'slow-gone-wait' 1 } finally { Remove-Item Env:RECALL_SLOW_DRIVE_FAIL -ErrorAction SilentlyContinue }
+  Key $s 'space'
+  $waiting = Wait-Trace $s { param($r) $r.loading.buffering } 15000
+  $failed = Wait-Trace $s { param($r) $r.loading.failed } 40000
+  $free = if ($failed) { Wait-Trace $s { param($r) -not $r.loading.buffering -and $r.ms -gt $failed.ms } 3000 }
+  Start-Sleep -Milliseconds 500
+  $r = Last $s
+  $when = if ($failed) { "waited at the failure: $($failed.loading.buffering)" }
+  Verdict @((Ok ($null -ne $waiting -and $null -ne $failed -and $failed.loading.buffering) "buffered; $when; $($failed.loading.failed)"), (Ok ($null -ne $free -and -not $r.loading.buffering) "Buffering ended by itself: playing=$($r.playing), note '$($r.loading.note)'"))
 }
 
 Add-Type -AssemblyName System.Drawing
