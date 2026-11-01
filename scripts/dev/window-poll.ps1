@@ -5,9 +5,11 @@
   final count. Windows on screen at the start are the baseline. Cloaked and zero-size windows do
   not count. Other programs can appear too: read the process names.
 
-    powershell -NoProfile -WindowStyle Hidden -File scripts\dev\window-poll.ps1 -Log <txt> -Stop <file>
+    powershell -NoProfile -WindowStyle Hidden -File scripts\dev\window-poll.ps1 -Log <txt> -Stop <file> [-KillTree <pid>]
+
+  -KillTree stops that process tree the moment a check's own kind of window shows.
 #>
-param([Parameter(Mandatory)][string]$Log, [Parameter(Mandatory)][string]$Stop, [int]$EveryMs = 100)
+param([Parameter(Mandatory)][string]$Log, [Parameter(Mandatory)][string]$Stop, [int]$EveryMs = 100, [int]$KillTree = 0)
 Add-Type @'
 using System; using System.Collections.Generic; using System.Runtime.InteropServices; using System.Text;
 public static class WP {
@@ -46,6 +48,7 @@ while (-not (Test-Path $Stop)) {
     $seen[$f[0]] = $true; $new++
     $name = (Get-Process -Id ([int]$f[1]) -ErrorAction SilentlyContinue).ProcessName
     Add-Content -Path $Log -Value "$(Get-Date -Format 'HH:mm:ss.fff') NEW $name pid $($f[1]) '$($f[2])' at $($f[3])"
+    if ($KillTree -and $name -match '^(recall-native|recall|powershell|pwsh|conhost|OpenConsole|WindowsTerminal|ffmpeg|ffprobe|WerFault|cargo)$') { & taskkill /PID $KillTree /T /F | Out-Null; Add-Content -Path $Log -Value 'stopped the check'; exit 1 }
   }
   Start-Sleep -Milliseconds $EveryMs
 }
