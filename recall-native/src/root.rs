@@ -468,9 +468,11 @@ pub fn parent_hwnd(window: &Window) -> Result<isize, String> {
 }
 
 impl Drop for Root {
-    /// Closing the window writes pending edits beside the clip (the worker may not outlive it).
+    /// Closing the window writes pending edits beside the clip (the worker may not outlive it)
+    /// and lets a running export finish: helpers end with the app.
     fn drop(&mut self) {
         self.ed.flush_now();
+        crate::backend::wait_for_export();
         crate::services::storage::close_helpers();
     }
 }
