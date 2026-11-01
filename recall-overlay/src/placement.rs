@@ -61,6 +61,20 @@ const HUD_ROW: f32 = 8.0;
 /// Design reference width (16:9 at 1440p).
 pub const REF_WIDTH: f32 = 2560.0;
 
+/// Game keys of exe stems that do not start with their scanned key. A window
+/// with an empty title goes out under its exe stem (`display_name` in recall-hdr).
+const EXE_KEYS: [(&str, &str); 9] = [
+    ("r5apex", "apexlegends"),
+    ("r5apexdx12", "apexlegends"),
+    ("marvelwin64shipping", "marvelrivals"),
+    ("bf6", "battlefield6"),
+    ("cs2", "counterstrike2"),
+    ("rainbowsix", "tomclancysrainbowsixsiege"),
+    ("rainbowsixvulkan", "tomclancysrainbowsixsiege"),
+    ("csgo", "counterstrikeglobaloffensive"),
+    ("forzagamingdesktopx64releasefinal", "forzahorizon6"),
+];
+
 #[derive(Debug, Default)]
 pub struct Spots {
     spots: HashMap<String, Spot>,
@@ -99,7 +113,8 @@ impl Spots {
 
     /// The scanned key a game key matches: exact first, then the longest
     /// scanned key the target's key starts with (window titles carry
-    /// suffixes: "Rocket League (64-bit, DX11, Cooked)").
+    /// suffixes: "Rocket League (64-bit, DX11, Cooked)"), then the exe stem
+    /// of a window with an empty title.
     fn matched(&self, key: &str) -> Option<&str> {
         if let Some((scanned, _)) = self.spots.get_key_value(key) {
             return Some(scanned.as_str());
@@ -109,6 +124,10 @@ impl Spots {
             .filter(|scanned| !scanned.is_empty() && key.starts_with(scanned.as_str()))
             .max_by_key(|scanned| scanned.len())
             .map(String::as_str)
+            .or_else(|| {
+                let (_, scanned) = EXE_KEYS.iter().find(|(exe, _)| *exe == key)?;
+                self.spots.get_key_value(*scanned).map(|(scanned, _)| scanned.as_str())
+            })
     }
 
     /// The spot for a game key; unknown / empty keys use the top-right default.
@@ -330,6 +349,23 @@ mod tests {
         let mut rocket = Session::default();
         rocket.apply_status(&serde_json::json!({"type":"status","state":"recording","target":{"name":names[0].0,"exe":names[0].1,"pid":42}}));
         assert_eq!(position(spots.lookup(&rocket.game_key()).anchor, &monitor, 300, 12), (12, 12), "Rocket League sits top-left");
+
+        // An empty window title sends the exe stem as the name (`display_name` in recall-hdr).
+        let builds = [("r5apex_dx12.exe", "apexlegends"), ("RainbowSix_Vulkan.exe", "tomclancysrainbowsixsiege")];
+        let stems = names.iter().map(|&(_, exe, scanned)| (exe, scanned)).chain(builds);
+        let mut misses = Vec::new();
+        for (exe, scanned) in stems {
+            // Overwatch.exe runs both games: its stem cannot tell them apart.
+            let scanned = if scanned == "overwatch2" { "overwatch" } else { scanned };
+            let stem = exe.strip_suffix(".exe").unwrap();
+            let mut session = Session::default();
+            session.apply_status(&serde_json::json!({"type":"status","state":"recording","target":{"name":stem,"exe":exe,"pid":42}}));
+            let key = session.game_key();
+            if spots.lookup(&key) != spots.lookup(scanned) || spots.hud(&key) != spots.hud(scanned) {
+                misses.push(stem);
+            }
+        }
+        assert!(misses.is_empty(), "exe stems that miss their scanned spot: {misses:?}");
     }
 
     #[test]
