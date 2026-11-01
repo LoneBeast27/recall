@@ -323,6 +323,18 @@ impl Root {
                         cx.notify();
                     })),
             )
+            .when(self.ed.exporting, |d| {
+                d.child(
+                    ui::button("export-cancel", Variant::Ghost)
+                        .h(px(32.))
+                        .w_full()
+                        .child(if self.ed.cancelling { "Cancelling…" } else { "Cancel export" })
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.ed.cancel_export();
+                            cx.notify();
+                        })),
+                )
+            })
             .into_any_element()
     }
 }

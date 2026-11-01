@@ -33,7 +33,7 @@ pub enum Job {
     /// Autosave: working copy on the SSD (`Done::Saved`).
     SaveProject(ClipInfo, EditPlan, u32, ExportSettings),
     /// Leave / close / export: the sidecar beside the clip, only if it changed (`Done::Flushed`).
-    FlushProject(ClipInfo, EditPlan, u32, ExportSettings),
+    FlushProject(ClipInfo, EditPlan, u32, ExportSettings, bool),
     Export(ClipInfo, EditPlan, u32, ExportSettings),
     Delete(Vec<PathBuf>),
     /// Drive types + cache usage for Settings (`Done::Storage`).
@@ -65,7 +65,7 @@ pub enum Done {
     /// (clip path, SSD copy path — or the clip itself when it already lives on an SSD).
     VideoCached(String, Result<String, String>),
     /// Sidecar path when current; "" when there was nothing to write.
-    Flushed(Result<String, String>),
+    Flushed(Result<backend::Flushed, String>),
     /// (clip path, preview copy path).
     Proxy(String, Result<String, String>),
     Storage(StorageReport),
@@ -148,7 +148,7 @@ fn run_job(job: Job, tx: &Sender<Done>, watcher: &ClipWatcher) -> Done {
         }
         Job::Prepare(generation, path) => Done::Prepared(generation, backend::prepare_clip(&path)),
         Job::SaveProject(info, plan, fps, export) => Done::Saved(backend::save_project(&info, &plan, fps, &export)),
-        Job::FlushProject(info, plan, fps, export) => Done::Flushed(backend::flush_project(&info, &plan, fps, &export)),
+        Job::FlushProject(info, plan, fps, export, ours) => Done::Flushed(backend::flush_project(&info, &plan, fps, &export, ours)),
         Job::Export(info, plan, fps, export) => Done::Exported(backend::export_clip(&info, &plan, fps, &export)),
         Job::Delete(paths) => {
             let result = library::delete_to_recycle_bin(&paths);

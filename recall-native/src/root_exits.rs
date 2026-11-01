@@ -115,6 +115,7 @@ impl Root {
             "query": self.lib.filter.query,
             "titles": self.lib.records.iter().map(|r| r.display_title()).collect::<Vec<_>>(),
             "custom_titles": self.lib.records.iter().filter(|r| r.title.is_some()).count(),
+            "edited": self.lib.records.iter().filter(|r| r.edited).count(),
         }));
     }
 
