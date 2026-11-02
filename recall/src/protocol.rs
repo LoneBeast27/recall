@@ -57,11 +57,16 @@ pub enum Outbound {
         #[serde(skip_serializing_if = "Option::is_none")]
         staged_path: Option<String>,
     },
-    /// A staged clip is now at its final `path` (the staged copy is gone).
-    /// `elapsed_ms`: this move's copy + flush + rename time.
+    /// A staged clip is now at its final `path`. `elapsed_ms`: this move's
+    /// copy + flush + rename time. After a copy across volumes the staged
+    /// copy is kept at `kept_path` (`<staging>\kept\<final name>`, same
+    /// bytes and modification time as `path`) for the app to adopt into its
+    /// SSD video cache; without `kept_path` the staged copy is gone.
     ClipMoved {
         path: String,
         elapsed_ms: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        kept_path: Option<String>,
     },
     /// A staged clip could not be moved to `path`; it stays complete in
     /// `staged_path` and the move is retried (every 60 s, on the next save,
@@ -244,8 +249,10 @@ mod tests {
 
     #[test]
     fn clip_move_events_match_the_wire_shape() {
-        let moved = Outbound::ClipMoved { path: r"V:\c\G.mp4".into(), elapsed_ms: 9549 };
+        let moved = Outbound::ClipMoved { path: r"V:\c\G.mp4".into(), elapsed_ms: 9549, kept_path: None };
         assert_eq!(wire(&moved), r#"{"type":"clip_moved","path":"V:\\c\\G.mp4","elapsed_ms":9549}"#);
+        let kept = Outbound::ClipMoved { path: r"V:\c\G.mp4".into(), elapsed_ms: 9549, kept_path: Some(r"L:\s\kept\G.mp4".into()) };
+        assert_eq!(wire(&kept), r#"{"type":"clip_moved","path":"V:\\c\\G.mp4","elapsed_ms":9549,"kept_path":"L:\\s\\kept\\G.mp4"}"#);
         let failed = Outbound::ClipMoveFailed {
             path: r"V:\c\G.mp4".into(),
             staged_path: r"L:\s\G.mp4".into(),

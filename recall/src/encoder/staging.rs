@@ -21,6 +21,8 @@
 //!   finished `*.mp4` in the staging folder is queued for moving to the current
 //!   clip folder, and stale `*.mp4.part` mux files there are deleted. With
 //!   staging off the default folder is still scanned, so nothing is stranded.
+//!   Its `kept\` subfolder (copies of clips already moved, kept for the app's
+//!   SSD video cache, `mover.rs`) is not scanned: the app adopts or deletes them.
 
 use std::path::{Component, Path, PathBuf, Prefix};
 

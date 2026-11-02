@@ -81,6 +81,23 @@ fn recovery_queues_finished_clips_and_deletes_only_stale_mp4_parts() {
 }
 
 #[test]
+fn recovery_never_requeues_copies_kept_for_the_app() {
+    let (stage, out) = (temp_dir("kept"), PathBuf::from(r"V:
+ever-touched"));
+    let kept_dir = stage.join(super::mover::KEPT_DIR);
+    std::fs::create_dir_all(&kept_dir).unwrap();
+    let kept = kept_dir.join("A__2026-10-22__09-00-00-000__aa.mp4");
+    std::fs::write(&kept, b"moved already").unwrap();
+    let part = kept_dir.join("B__2026-10-22__09-01-00-000__bb.mp4.part");
+    std::fs::write(&part, b"not ours").unwrap();
+    let found = recover(&stage, &out);
+    assert!(found.moves.is_empty(), "{:?}", found.moves);
+    assert!(found.removed.is_empty() && found.errors.is_empty());
+    assert!(kept.exists() && part.exists(), "kept copies are the app's to adopt or delete");
+    let _ = std::fs::remove_dir_all(&stage);
+}
+
+#[test]
 fn an_uncreatable_staging_folder_falls_back_to_writing_in_place() {
     let dir = temp_dir("blocked");
     let file = dir.join("not-a-folder");

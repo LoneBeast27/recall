@@ -79,7 +79,7 @@ pub fn too_large(bytes: u64) -> bool {
     bytes > budget_in(&super::cache_root()) / 2
 }
 
-fn video_dir(root: &Path) -> PathBuf {
+pub(super) fn video_dir(root: &Path) -> PathBuf {
     root.join("video")
 }
 
@@ -171,7 +171,7 @@ fn gib(bytes: u64) -> String {
     format!("{:.1} GB", bytes as f64 / 1e9)
 }
 
-fn touch(root: &Path, file: &str) {
+pub(super) fn touch(root: &Path, file: &str) {
     let _guard = INDEX_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let path = video_dir(root).join("lru.json");
     let mut index = lru::read_index(&path);

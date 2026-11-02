@@ -133,6 +133,7 @@ impl Root {
         let preview = parent_hwnd(window).and_then(NativePreview::new);
         let workers = Workers::spawn();
         workers.job(Job::List);
+        crate::services::storage::sweep_kept(crate::backend::library_dir);
         let mut root = Self {
             route: Route::Library,
             focus: cx.focus_handle(),

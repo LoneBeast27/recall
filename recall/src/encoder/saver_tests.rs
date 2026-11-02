@@ -84,7 +84,7 @@ fn saved_and_failed_json_match_todays_wire_shape() {
     events.saved(&report(r"V:\ALL RECORDINGS\Game__x.mp4", None, 119.146, 7124, 363_691_446, 6934));
     events.saved(&report(r"V:\c\G.mp4", Some(r"L:\s\G.mp4"), 120.0, 7200, 400, 812));
     events.save_failed(QUEUE_FULL);
-    events.clip_moved(r"V:\c\G.mp4", 9549);
+    events.clip_moved(r"V:\c\G.mp4", 9549, None);
     events.clip_move_failed(r"V:\c\G.mp4", r"L:\s\G.mp4", "disk full");
     events.log("hello");
     assert_eq!(
@@ -365,7 +365,9 @@ fn staged_save_reports_the_final_path_then_the_mover_puts_it_there() {
     assert!(all.iter().any(|l| l.contains("move timing (copy)")), "{all:?}");
 
     assert_eq!(std::fs::read(&final_path).unwrap(), vec![7u8; 50_000]);
-    assert_eq!(std::fs::read_dir(&stage).unwrap().count(), 0, "staged copy and .part gone");
+    let left: Vec<_> = std::fs::read_dir(&stage).unwrap().flatten().map(|e| e.path()).collect();
+    assert_eq!(left, vec![stage.join("kept")], "staged copy and .part gone from the staging folder");
+    assert_eq!(moved["kept_path"], text(&stage.join("kept").join(CLIP)), "the staged copy waits for the app");
     assert!(!part_path(&text(&final_path)).exists());
     assert_eq!(galleries.lock().unwrap().clone(), vec![(text(&final_path), 50_000)], "gallery uses the FINAL path");
     drop(queue);
