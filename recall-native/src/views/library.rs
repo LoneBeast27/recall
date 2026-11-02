@@ -306,6 +306,11 @@ impl Root {
         } else {
             vec![path]
         };
+        self.drag_paths(paths, cx);
+    }
+
+    /// Runs an OLE file drag of `paths` (a library selection or a finished export).
+    pub fn drag_paths(&mut self, paths: Vec<String>, cx: &mut Context<Self>) {
         cx.spawn(async move |this, cx| {
             let result = crate::shell::drag_files(&paths);
             let _ = this.update(cx, |this, cx| {

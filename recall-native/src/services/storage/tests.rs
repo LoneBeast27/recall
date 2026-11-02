@@ -239,11 +239,36 @@ fn an_export_beside_the_clip_is_found_by_its_name() {
     let dir = std::env::temp_dir().join(format!("recall-has-export-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("exports")).unwrap();
     let clip = dir.join("Clip.mp4");
-    assert!(!super::has_export(&clip));
+    assert!(!super::has_export(&clip, &dir));
     std::fs::write(dir.join("exports").join("clip-two-edited-60fps-1.mp4"), b"x").unwrap();
     std::fs::write(dir.join("exports").join(".Clip-edited-60fps-1.recall-export-7-1-0.mp4"), b"x").unwrap();
-    assert!(!super::has_export(&clip), "another clip's export, and a temporary file");
+    assert!(!super::has_export(&clip, &dir), "another clip's export, and a temporary file");
     std::fs::write(dir.join("exports").join("clip-trim-1.mp4"), b"x").unwrap();
-    assert!(super::has_export(&clip));
+    assert!(super::has_export(&clip, &dir));
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn with_a_raw_folder_exports_go_to_edited_beside_it() {
+    use std::path::Path;
+    let recordings = Path::new(r"V:\Recall\Raw");
+    let clip = recordings.join("VALORANT__2026-11-02__10-00-00-000.mp4");
+    assert_eq!(super::export_dir(&clip, recordings).as_deref(), Some(Path::new(r"V:\Recall\Edited")));
+    let imported = Path::new(r"D:\Old\a.mp4");
+    assert_eq!(super::export_dir(imported, recordings).as_deref(), Some(Path::new(r"V:\Recall\Edited")), "every export lands in Edited");
+    let flat = Path::new(r"V:\ALL RECORDINGS");
+    assert_eq!(super::export_dir(&flat.join("a.mp4"), flat).as_deref(), Some(Path::new(r"V:\ALL RECORDINGS\exports")));
+}
+
+#[test]
+fn an_export_in_edited_protects_the_raw_clip() {
+    let root = std::env::temp_dir().join(format!("recall-edited-{}", std::process::id()));
+    let (raw, edited) = (root.join("Raw"), root.join("Edited"));
+    std::fs::create_dir_all(&raw).unwrap();
+    std::fs::create_dir_all(&edited).unwrap();
+    let clip = raw.join("Clip.mp4");
+    assert!(!super::has_export(&clip, &raw));
+    std::fs::write(edited.join("Clip-edited-60fps-1.mp4"), b"x").unwrap();
+    assert!(super::has_export(&clip, &raw));
+    let _ = std::fs::remove_dir_all(&root);
 }

@@ -60,7 +60,7 @@ pub use history::{Interaction, record_interaction};
 pub use lane::{LaneStats, Priority, lane_wait_ms, run_io, stats, submit_io};
 #[allow(unused_imports)]
 pub use prefetch::{PrefetchClip, PrefetchEvent, PrepareEditor, recorder_busy, set_recorder_busy, smart_status, start_prefetch};
-pub use projects::{ProjectSource, SidecarStep, has_export, project_order, sidecar_step, working_copy_path, write_atomic};
+pub use projects::{ProjectSource, SidecarStep, export_dir, has_export, project_order, sidecar_step, working_copy_path, write_atomic};
 pub(crate) use projects::modified_ms as projects_modified_ms;
 #[allow(unused_imports)]
 pub use thumbs::{ThumbIndex, cached_thumb, ensure_thumb, recorder_thumb_stem, thumb_index};
