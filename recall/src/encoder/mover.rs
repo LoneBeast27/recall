@@ -8,7 +8,9 @@
 //! end, stamped with the staged file's modification time), rename to
 //! `<final>`, then keep the staged copy as `<staging>\kept\<final name>` and
 //! emit `clip_moved` with its `kept_path`: the app adopts it into its SSD video
-//! cache, so a fresh clip opens from the SSD at once. If it cannot be kept it
+//! cache, so a fresh clip opens from the SSD at once. If the stamp fails the
+//! move still completes, but the staged copy is not kept (its identity would
+//! not match the clip's) and one `encoder_log` line says so. If it cannot be kept it
 //! is deleted as before. On the same volume a move is a plain rename. A `<final>.part` left by an interrupted
 //! move is overwritten by the retry; the final name only ever appears through
 //! the rename of a complete, flushed file.
@@ -62,6 +64,15 @@ pub(crate) struct Config {
     pub same_volume: VolumeCheck,
     /// Enter background mode (tests that only check queueing may skip it).
     pub background: bool,
+    /// Stamps the finished `.part` with the staged file's modification time.
+    pub stamp: StampFn,
+}
+
+/// `fn(open .part, staged mtime)`: [`stamp_mtime`], or a failing one in tests.
+pub(crate) type StampFn = fn(&std::fs::File, std::time::SystemTime) -> std::io::Result<()>;
+
+pub(crate) fn stamp_mtime(file: &std::fs::File, modified: std::time::SystemTime) -> std::io::Result<()> {
+    file.set_modified(modified)
 }
 
 impl Default for Config {
@@ -72,6 +83,7 @@ impl Default for Config {
             retry_after: Duration::from_secs(60),
             same_volume: super::staging::same_volume,
             background: true,
+            stamp: stamp_mtime,
         }
     }
 }
@@ -179,6 +191,9 @@ pub(crate) struct Moved {
     pub staged_kept: Option<String>,
     /// The staged copy, kept under `<staging>\kept\` for the app's video cache.
     pub kept: Option<PathBuf>,
+    /// The destination could not take the staged file's modification time:
+    /// moved, but nothing kept.
+    pub unstamped: Option<String>,
 }
 
 struct Mover {
@@ -254,6 +269,9 @@ impl Mover {
                 self.events.clip_moved(&moved.dest.to_string_lossy(), elapsed.as_millis() as u64, kept.as_deref());
                 let queue_wait = started.saturating_duration_since(pending.queued);
                 self.events.log(&timing_line(&moved, ms(elapsed), ms(queue_wait)));
+                if let Some(e) = &moved.unstamped {
+                    self.events.log(&format!("clip mover: {dest} keeps its copy time ({e}); its SSD copy was not kept"));
+                }
                 if let Some(e) = &moved.staged_kept {
                     self.events.log(&format!("clip mover: staged copy {staged} not deleted yet ({e})"));
                     self.leftovers.push(job.staged.clone());
@@ -314,6 +332,7 @@ pub(crate) fn move_clip(job: &MoveJob, cfg: &Config, abort: &AtomicBool) -> Resu
         rename_ms: 0.0,
         staged_kept: None,
         kept: None,
+        unstamped: None,
     };
     match std::fs::metadata(&job.dest).map(|m| m.len()) {
         // The rename landed before a crash or quit kept the staged copy.
@@ -332,7 +351,8 @@ pub(crate) fn move_clip(job: &MoveJob, cfg: &Config, abort: &AtomicBool) -> Resu
     }
     if moved.how == "copy" {
         copy_into_place(&job.staged, &mut moved, cfg, abort)?;
-        moved.kept = keep_staged(&job.staged, &moved.dest);
+        // Unstamped, the app's identity of `dest` would not match a kept copy.
+        moved.kept = moved.unstamped.is_none().then(|| keep_staged(&job.staged, &moved.dest)).flatten();
         if moved.kept.is_some() {
             return Ok(moved);
         }
@@ -430,8 +450,10 @@ fn copy_to_part(staged: &Path, part: &Path, moved: &mut Moved, cfg: &Config, abo
     moved.flush_ms = ms(flush.elapsed());
     // The clip keeps its save time, so the app's cache identity (name, size,
     // mtime) of `dest` matches the kept copy from the moment it appears.
-    if let Ok(modified) = input.metadata().and_then(|m| m.modified()) {
-        output.set_modified(modified).map_err(|e| failed("stamp", part, e))?;
+    // A failed stamp never fails the move: it only stops the copy being kept.
+    let stamped = input.metadata().and_then(|m| m.modified()).and_then(|modified| (cfg.stamp)(&output, modified));
+    if let Err(e) = stamped {
+        moved.unstamped = Some(format!("stamp {}: {e}", part.display()));
     }
     Ok(())
 }
