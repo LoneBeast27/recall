@@ -347,11 +347,25 @@ pub(crate) fn move_clip(job: &MoveJob, cfg: &Config, abort: &AtomicBool) -> Resu
 /// `recover` scans only the staging folder's own files, so these never move again.
 pub(crate) const KEPT_DIR: &str = "kept";
 
+/// Most bytes `kept\` may hold: the app empties it only when it runs, and a
+/// night of saves with the app closed must not fill the SSD. Matches the app's
+/// default cache budget.
+pub(crate) const KEPT_CAP: u64 = 2 << 30;
+
 /// Renames the staged copy to `<staging>\kept\<dest file name>`; `None` (the
-/// caller deletes it) when that folder or the rename fails.
+/// caller deletes it) when that folder or the rename fails, or the copy would
+/// take `kept\` past [`KEPT_CAP`].
 fn keep_staged(staged: &Path, dest: &Path) -> Option<PathBuf> {
+    keep_staged_within(staged, dest, KEPT_CAP)
+}
+
+fn keep_staged_within(staged: &Path, dest: &Path, cap: u64) -> Option<PathBuf> {
     let dir = staged.parent()?.join(KEPT_DIR);
     let kept = dir.join(dest.file_name()?);
+    let held: u64 = std::fs::read_dir(&dir).into_iter().flatten().flatten().filter_map(|e| e.metadata().ok()).filter(|m| m.is_file()).map(|m| m.len()).sum();
+    if held.saturating_add(std::fs::metadata(staged).ok()?.len()) > cap {
+        return None;
+    }
     std::fs::create_dir_all(&dir).ok()?;
     std::fs::rename(staged, &kept).ok()?;
     Some(kept)
