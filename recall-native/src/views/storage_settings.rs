@@ -13,9 +13,10 @@ use crate::{
 };
 
 /// Slider stops in GB (snapping, evenly spaced on the track).
-pub const CACHE_STOPS_GB: [f64; 7] = [0.5, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0];
-pub const DEFAULT_CACHE_GB: f64 = 2.0;
-/// Cache sizes are binary gigabytes (the storage budget is 2 GiB = 2,147,483,648 bytes).
+/// 10 and 20 match common first-run budgets (`evict::default_budget`); 50 is for a large SSD.
+pub const CACHE_STOPS_GB: [f64; 6] = [1.0, 2.0, 5.0, 10.0, 20.0, 50.0];
+pub const DEFAULT_CACHE_GB: f64 = 20.0;
+/// Cache sizes are binary gigabytes (20 GiB = 21,474,836,480 bytes).
 const GB: f64 = 1_073_741_824.0;
 
 pub struct CacheView {

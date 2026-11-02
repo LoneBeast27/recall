@@ -1,6 +1,6 @@
 //! Eviction plan for the one cache budget, plus `storage.json` settings.
 //!
-//! User rulings (2026-10-22): one budget for everything (default 2 GiB); video copies take
+//! User rulings (2026-10-22): one budget for everything; video copies take
 //! at most half of it; the lowest-score clips lose their cache first, and for a given clip
 //! the costliest-to-hold / cheapest-to-skip tier goes first (video copy, then editor media,
 //! then hover frames); library thumbnails go only when they alone exceed the budget.
@@ -9,7 +9,22 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-pub const DEFAULT_CACHE_BUDGET: u64 = 2 << 30;
+const GIB: u64 = 1 << 30;
+/// The first-run budget is at most this (2026-11-02: 20 GiB, so recently opened clips and the
+/// idle warm-up have room)...
+pub const DEFAULT_CACHE_BUDGET: u64 = 20 * GIB;
+/// ...and at most this share of the cache drive's free space...
+pub const DEFAULT_FREE_SHARE_PERCENT: u64 = 25;
+/// ...but never below this.
+pub const MIN_CACHE_BUDGET: u64 = 2 * GIB;
+
+/// The budget a first run picks (no `storage.json` yet) on a cache drive with `free` bytes:
+/// the smaller of [`DEFAULT_CACHE_BUDGET`] and [`DEFAULT_FREE_SHARE_PERCENT`] of `free`,
+/// in whole GiB, at least [`MIN_CACHE_BUDGET`].
+pub(super) fn default_budget(free: u64) -> u64 {
+    let share = free / 100 * DEFAULT_FREE_SHARE_PERCENT / GIB * GIB;
+    share.min(DEFAULT_CACHE_BUDGET).max(MIN_CACHE_BUDGET)
+}
 
 /// Evictable tiers, in per-clip eviction order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
