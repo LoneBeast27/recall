@@ -18,6 +18,8 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 #[path = "visual_assets.rs"]
 mod visual_assets;
+#[path = "scene_strip.rs"]
+pub mod scene_strip;
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct ClipEntry {
@@ -28,7 +30,8 @@ pub struct ClipEntry {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Project { pub version:u32,pub source_path:String,pub source_bytes:u64,pub source_modified_ms:u64,pub plan:EditPlan,pub export_fps:u32,#[serde(default)] pub export:ExportSettings }
 #[derive(Clone,Debug,Default)]
-pub struct VisualAssets { pub poster:Option<String>,pub filmstrip:Vec<String> }
+/// `aspect`: the clip picture's width / height (0 when unknown).
+pub struct VisualAssets { pub poster:Option<String>,pub filmstrip:Vec<scene_strip::StripFrame>,pub aspect:f32 }
 #[derive(Clone,Debug)]
 pub struct PreparedClip {
     pub info:ClipInfo,pub project:Option<Project>,pub warning:Option<String>,pub visuals:VisualAssets,
@@ -271,7 +274,7 @@ pub fn prefetch_editor_media(path:&str)->Result<u64,String>{
     let (visuals,_)=visual_assets::visuals_best_effort(&source,&frames_from,info.duration);
     let dirs=editor_dirs(&info);
     storage::note_editor_media(&source.to_string_lossy(),&dirs,false);
-    let frames:u64=visuals.poster.iter().chain(visuals.filmstrip.iter()).filter_map(|p|std::fs::metadata(p).ok()).map(|m|m.len()).sum();
+    let frames:u64=visuals.poster.iter().chain(visuals.filmstrip.iter().map(|f|&f.path)).filter_map(|p|std::fs::metadata(p).ok()).map(|m|m.len()).sum();
     Ok(dirs.iter().map(|d|folder_bytes(d)).sum::<u64>()+frames)
 }
 /// The poster and filmstrip already in the frame tier for this clip (no extraction).

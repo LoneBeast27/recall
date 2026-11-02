@@ -39,8 +39,10 @@ fn main() {
     let first_start = Instant::now();
     let first = backend::prepare_clip(&source).expect("prepare source");
     let first_ms = first_start.elapsed().as_millis();
-    let paths: Vec<_> = first.visuals.poster.iter().chain(first.visuals.filmstrip.iter()).collect();
-    assert_eq!(first.visuals.filmstrip.len(), 8, "eight real representative frames");
+    let paths: Vec<_> = first.visuals.poster.iter().chain(first.visuals.filmstrip.iter().map(|f| &f.path)).collect();
+    assert!(!first.visuals.filmstrip.is_empty(), "real filmstrip frames");
+    assert!(first.visuals.filmstrip.windows(2).all(|w| w[0].seconds <= w[1].seconds), "filmstrip in time order");
+    assert!(first.visuals.aspect > 0.0, "picture aspect known");
     let stamps: Vec<_> = paths.iter().map(|path| {
         let bytes = std::fs::read(path).expect("read generated image");
         assert!(bytes.starts_with(&[0xff, 0xd8]) && bytes.ends_with(&[0xff, 0xd9]), "valid JPEG marker envelope");
@@ -58,7 +60,7 @@ fn main() {
         "verdict":"PASS", "source":first.info.path, "duration":first.info.duration,
         "width":first.info.width,"height":first.info.height,
         "first_prepare_ms":first_ms,"cached_prepare_ms":cached_ms,
-        "poster":first.visuals.poster,"filmstrip":first.visuals.filmstrip,
+        "poster":first.visuals.poster,"filmstrip":first.visuals.filmstrip,"aspect":first.visuals.aspect,
         "warning":first.warning,
         "tracks":first.info.audio.iter().map(|track|serde_json::json!({
             "name":track.name,"stream_index":track.stream_index,"channels":track.channels,
