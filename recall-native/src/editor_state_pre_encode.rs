@@ -41,7 +41,8 @@ impl EditorState {
     }
 
     fn follow_pre_encode(&mut self) {
-        let Some(info) = self.info.as_ref().filter(|_| self.loading_path.is_none()) else { return };
+        // Not while the clip still loads: the pre-encode would read the same hard drive as the copy.
+        let Some(info) = self.info.as_ref().filter(|_| self.loading_path.is_none() && !self.loading.active()) else { return };
         let key = pre_encode::key(info, &self.plan, self.fps, &self.export_settings);
         if key != self.pre.current {
             let baseline = *self.pre.baseline.get_or_insert(key.unwrap_or(0));
