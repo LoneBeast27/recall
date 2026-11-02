@@ -102,6 +102,7 @@ impl Root {
         let path = record.path.clone();
         let hovered = self.lib.hovered.as_deref() == Some(path.as_str());
         let selected = self.lib.selection.contains(&path);
+        let last_played = self.lib.last_played().is_some_and(|r| r.path == path);
         let renaming = self.lib.renaming.as_deref() == Some(path.as_str());
         let image_path = self.lib.scrub_frame(&path).map(str::to_owned).or_else(|| record.thumb.clone());
         let image: AnyElement = match image_path {
@@ -170,6 +171,20 @@ impl Root {
             })
             .when(record.favourite && !hovered, |d| {
                 d.child(div().absolute().top(px(8.)).left(px(8.)).child(icon(Icon::StarFill, 14., theme::TEXT)))
+            })
+            .when(last_played && !hovered && !selected, |d| {
+                d.child(
+                    div()
+                        .absolute()
+                        .top(px(6.))
+                        .left(px(if record.favourite { 28. } else { 8. }))
+                        .px(px(5.))
+                        .rounded(px(4.))
+                        .bg(ca(theme::WINDOW, 0.8))
+                        .text_size(px(11.))
+                        .line_height(px(16.))
+                        .child("Last played"),
+                )
             })
             .when(selected, |d| {
                 d.child(

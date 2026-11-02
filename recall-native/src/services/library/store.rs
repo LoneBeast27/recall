@@ -1,4 +1,4 @@
-//! `MetaStore`: `{ "<file name>": {favourite, title, duration{bytes,mtime,secs}} }`
+//! `MetaStore`: `{ "<file name>": {favourite, title, duration{bytes,mtime,secs}, played} }`
 //! at `%APPDATA%\Recall\library.json` (`RECALL_LIBRARY_META` overrides the path).
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -18,11 +18,14 @@ pub(super) struct ClipMeta {
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub duration: Option<CachedDuration>,
+    /// When the clip was last opened (Unix seconds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub played: Option<u64>,
 }
 
 impl ClipMeta {
     fn is_empty(&self) -> bool {
-        !self.favourite && self.title.is_none() && self.duration.is_none()
+        !self.favourite && self.title.is_none() && self.duration.is_none() && self.played.is_none()
     }
 }
 
@@ -94,6 +97,11 @@ impl MetaStore {
     pub fn set_title(&mut self, file_name: &str, title: Option<&str>) -> Result<(), String> {
         let title = title.map(str::trim).filter(|t| !t.is_empty()).map(str::to_owned);
         self.edit(file_name, |meta| meta.title = title)
+    }
+
+    /// Marks the clip as opened at `secs` (Unix seconds).
+    pub fn set_played(&mut self, file_name: &str, secs: u64) -> Result<(), String> {
+        self.edit(file_name, |meta| meta.played = Some(secs))
     }
 
     /// Cached duration keyed by (file name, bytes, mtime).
