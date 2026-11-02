@@ -86,8 +86,9 @@ Run-Scenario 'play at a segment end goes to the next segment; at the last one st
   Scrub $s 7.5 7.5 1; Key $s 'delete'
   $r = Settle $s 250
   $made = Ok ($r.ranges.Count -eq 2 -and [math]::Abs([double]$r.ranges[1][0] - 10.0) -lt 0.02) ("segments " + (($r.ranges | ForEach-Object { '{0}-{1}' -f (Fmt $_[0]), (Fmt $_[1]) }) -join ', ') + ", playhead $(Fmt $r.pos)s")
-  $inCut = Press-Play $s 'space' 0.2 10.0
-  [void](Wait-Stopped $s 2000)
+  # Play in a cut runs the cut footage from the playhead (no snap, 09842f6), into the last segment.
+  $inCut = Press-Play $s 'space' 0.2 7.5
+  [void](Wait-Stopped $s 4500)
   $last = Press-Play $s 'space' 1 0
   Key $s 'k'; Key $s 'home'; Key $s 'l'; [void](Settle $s 300)
   $atEnd = Press-Play $s 'button' 0.2 10.0
