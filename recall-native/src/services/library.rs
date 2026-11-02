@@ -1,5 +1,5 @@
 //! Clip library index: game names, day groups, search/sort, per-clip metadata
-//! (favourite, custom title, cached duration), Recycle Bin delete, hover-scrub frames.
+//! (favourite, custom title, cached duration, last opened), Recycle Bin delete, hover-scrub frames.
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
@@ -60,6 +60,8 @@ pub struct ClipRecord {
     pub edited: bool,
     pub favourite: bool,
     pub title: Option<String>,
+    /// When the clip was last opened (Unix seconds).
+    pub played: Option<u64>,
 }
 
 impl ClipRecord {
@@ -155,6 +157,7 @@ pub fn build_record(entry: &ClipEntry, edited: bool, store: &MetaStore) -> ClipR
         edited,
         favourite: meta.is_some_and(|m| m.favourite),
         title: meta.and_then(|m| m.title.clone()),
+        played: meta.and_then(|m| m.played),
     }
 }
 

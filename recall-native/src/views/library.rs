@@ -72,6 +72,7 @@ impl Root {
             .child(div().font_family(theme::display()).text_size(px(22.)).line_height(px(28.)).font_weight(FontWeight::BOLD).child(title))
             .child(div().pt(px(2.)).text_size(px(14.)).text_color(c(theme::TERTIARY)).child(thousands(self.lib.visible_count)))
             .child(div().flex_1())
+            .children(self.render_resume(cx))
             .child(
                 div()
                     .w(px(260.))
@@ -114,6 +115,23 @@ impl Root {
                     .when(self.sort_open, |d| d.child(self.render_sort_menu(cx))),
             )
             .into_any_element()
+    }
+
+    /// "Resume <title>": reopens the clip played last.
+    fn render_resume(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let record = self.lib.last_played()?;
+        let path = record.path.clone();
+        let button = ui::button("resume", Variant::Ghost)
+            .border_1()
+            .border_color(c(theme::BORDER))
+            .child(icon(Icon::Play, 14., theme::TEXT))
+            .child("Resume")
+            .child(div().max_w(px(200.)).min_w_0().truncate().text_color(c(theme::MUTED)).child(record.display_title().to_owned()))
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_clip(path.clone());
+                cx.notify();
+            }));
+        Some(button.into_any_element())
     }
 
     fn render_sort_menu(&self, cx: &mut Context<Self>) -> AnyElement {

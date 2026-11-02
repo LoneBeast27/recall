@@ -22,6 +22,7 @@ fn record(name: &str, started: LocalStamp, duration: Option<f64>, bytes: u64) ->
         edited: false,
         favourite: false,
         title: None,
+        played: None,
     }
 }
 
