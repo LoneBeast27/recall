@@ -197,8 +197,10 @@ impl Root {
         ruler.into_any_element()
     }
 
+    /// Tiles at the clip's own aspect ratio, side by side over the time they cover; each shows
+    /// the most eventful frame of its stretch (see `scene_strip`). The last tile is cut by the edge.
     fn render_filmstrip(&self, top: f32) -> AnyElement {
-        let frames = self.ed.visuals.filmstrip.clone();
+        let frames = &self.ed.visuals.filmstrip;
         let strip = div()
             .absolute()
             .top(px(top))
@@ -207,10 +209,10 @@ impl Root {
             .h(px(VIDEO_H))
             .rounded(px(6.))
             .overflow_hidden()
-            .bg(c(theme::RAISED))
-            .flex();
+            .bg(c(theme::RAISED));
         if frames.is_empty() {
             return strip
+                .flex()
                 .items_center()
                 .justify_center()
                 .text_size(px(12.))
@@ -218,8 +220,21 @@ impl Root {
                 .child(if self.ed.info.is_some() && self.ed.loading.grey.is_empty() { "Preparing filmstrip…" } else { "" })
                 .into_any_element();
         }
+        let aspect = Some(self.ed.visuals.aspect).filter(|a| a.is_finite() && *a > 0.2 && *a < 6.0).unwrap_or(16.0 / 9.0);
+        let tile_w = VIDEO_H * aspect;
+        // The strip spans the tracks area; before its first paint, assume a typical width.
+        let width = self.ed.track_span.get().map(|(_, w)| w).filter(|w| *w > 1.0).unwrap_or(1200.0);
+        let picks = crate::backend::scene_strip::tile_picks(frames, self.ed.duration(), width, tile_w);
         strip
-            .children(frames.into_iter().map(|path| img(PathBuf::from(path)).flex_1().min_w_0().h(px(VIDEO_H)).object_fit(ObjectFit::Cover)))
+            .children(picks.into_iter().enumerate().map(|(tile, index)| {
+                img(PathBuf::from(&frames[index].path))
+                    .absolute()
+                    .top_0()
+                    .left(px(tile as f32 * tile_w))
+                    .w(px(tile_w))
+                    .h(px(VIDEO_H))
+                    .object_fit(ObjectFit::Cover)
+            }))
             .into_any_element()
     }
 }
