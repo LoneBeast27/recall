@@ -30,6 +30,37 @@ pub(crate) fn us_to_seconds(us: i64) -> f64 {
     us as f64 / 1_000_000.0
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Tests turn this off to get the old decode-the-whole-clip reference.
+    pub(crate) static TRIM_DECODE: std::cell::Cell<bool> = const { std::cell::Cell::new(true) };
+}
+
+/// Exports seek to the first kept range and stop reading after the last one.
+pub(crate) fn trim_decode() -> bool {
+    #[cfg(test)]
+    return TRIM_DECODE.with(std::cell::Cell::get);
+    #[cfg(not(test))]
+    true
+}
+
+/// Lead before a range start, so the demuxer lands on a keyframe shown before
+/// it even with reordered frames, and audio decoders settle before it.
+pub(crate) const SEEK_MARGIN_US: i64 = 1_000_000;
+
+/// Seek `ictx` to the keyframe at or before `start_us` (editor time) less
+/// [`SEEK_MARGIN_US`]. A failed seek leaves reading at the start of the file.
+pub(crate) fn seek_near(ictx: &mut ff::format::context::Input, origin_us: i64, start_us: i64) {
+    let start = start_us.saturating_sub(SEEK_MARGIN_US);
+    if start <= 0 {
+        return;
+    }
+    let target = origin_us.saturating_add(start);
+    if ictx.seek(target, ..target).is_err() {
+        let _ = ictx.seek(origin_us, ..origin_us);
+    }
+}
+
 /// Earliest start time over the video and audio streams, in microseconds. The
 /// editor timeline (and every plan time) is relative to this origin.
 pub(crate) fn timeline_origin_us(ictx: &ff::format::context::Input, video_index: usize) -> i64 {

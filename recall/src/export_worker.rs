@@ -6,6 +6,49 @@ use std::time::Instant;
 
 use crate::{edit_model, export, protocol, ExportHook};
 
+/// A standalone `--export-edit` started without `RECALL_CPU_MASK` keeps to the
+/// upper half of its CPUs (CCD1 on this desktop, the recorder's default mask),
+/// so threaded decode never lands on the cores a running game uses.
+pub(super) fn keep_to_upper_cpus() {
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessAffinityMask, SetProcessAffinityMask};
+    let (mut process, mut system) = (0usize, 0usize);
+    if unsafe { GetProcessAffinityMask(GetCurrentProcess(), &mut process, &mut system) }.is_err() {
+        return;
+    }
+    if let Some(mask) = upper_half(process) {
+        let _ = unsafe { SetProcessAffinityMask(GetCurrentProcess(), mask) };
+    }
+}
+
+/// The upper half of the set bits in `mask`; `None` below 8 CPUs, where halving costs more than it spares.
+fn upper_half(mask: usize) -> Option<usize> {
+    let count = mask.count_ones();
+    if count < 8 {
+        return None;
+    }
+    let mut keep = count / 2;
+    let mut upper = 0usize;
+    for bit in (0..usize::BITS).rev() {
+        if keep == 0 {
+            break;
+        }
+        if mask & (1 << bit) != 0 {
+            upper |= 1 << bit;
+            keep -= 1;
+        }
+    }
+    Some(upper)
+}
+
+#[cfg(test)]
+#[test]
+fn upper_half_keeps_the_high_cpus() {
+    assert_eq!(upper_half(0xffff_ffff), Some(0xffff_0000));
+    assert_eq!(upper_half(0xff), Some(0xf0));
+    assert_eq!(upper_half(0x0f0f), Some(0x0f00));
+    assert_eq!(upper_half(0x7f), None);
+}
+
 /// A single bounded export worker keeps re-encoding separate from live recording.
 #[cfg(feature = "encode")]
 pub(super) fn spawn_export_worker(json: bool) -> ExportHook {
