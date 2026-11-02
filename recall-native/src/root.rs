@@ -354,6 +354,12 @@ impl Root {
             self.ed.pause();
             self.ed.hide_preview();
         }
+        if self.route == Route::Editor && route == Route::Library {
+            // Back on the clip just closed, wherever the grid was scrolled before.
+            if let Some(path) = self.ed.info.as_ref().map(|i| i.path.clone()).or_else(|| self.ed.loading_path.clone()) {
+                self.lib.reveal(&path);
+            }
+        }
         if route == Route::Audio {
             self.meters.get_or_insert_with(Meters::spawn);
             self.midi.get_or_insert_with(Midi::spawn);
@@ -373,6 +379,7 @@ impl Root {
 
     pub fn open_clip(&mut self, path: String) {
         crate::services::storage::record_interaction(crate::services::storage::Interaction::Opened(path.clone()));
+        self.lib.mark_played(&path);
         if !self.ed.is_open(&path) {
             self.ed.open(path, &self.workers);
         }

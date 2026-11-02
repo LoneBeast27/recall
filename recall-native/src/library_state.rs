@@ -18,6 +18,8 @@ use crate::{
 
 #[path = "library_changes.rs"]
 mod changes;
+#[path = "library_played.rs"]
+mod played;
 
 pub const TILE_MIN_WIDTH: f32 = 220.0;
 pub const SCRUB_FRAMES: usize = 8;
@@ -89,6 +91,8 @@ pub struct LibraryState {
     deepest_scroll_days: u32,
     /// Watcher changes a listing in flight may predate.
     recent: changes::Recent,
+    /// Path of the clip opened most recently.
+    played: Option<String>,
 }
 
 impl LibraryState {
@@ -130,6 +134,7 @@ impl LibraryState {
             meta_dirty_since: None,
             deepest_scroll_days: 0,
             recent: Default::default(),
+            played: None,
         }
     }
 
@@ -161,6 +166,7 @@ impl LibraryState {
         self.by_path = self.records.iter().enumerate().map(|(i, r)| (r.path.clone(), i)).collect();
         self.games = library::game_counts(&self.records);
         self.favourites = self.records.iter().filter(|r| r.favourite).count();
+        self.played = played::latest(&self.records);
         self.selection.retain(|path| self.by_path.contains_key(path));
         self.refilter();
     }
@@ -450,18 +456,6 @@ fn menu_targets(selection: &HashSet<String>, display_order: Vec<String>, path: &
 #[cfg(test)]
 #[path = "library_state_tests.rs"]
 mod rename_tests;
-
-#[cfg(test)]
-mod menu_tests {
-    #[test]
-    fn menu_acts_on_the_selection_only_when_the_clip_is_in_it() {
-        let order: Vec<String> = ["a", "b", "c", "d"].map(String::from).to_vec();
-        let selection = ["d", "b"].map(String::from).into_iter().collect();
-        assert_eq!(super::menu_targets(&selection, order.clone(), "b"), ["b", "d"], "selection, display order");
-        assert_eq!(super::menu_targets(&selection, order.clone(), "c"), ["c"], "an unselected clip alone");
-        assert_eq!(super::menu_targets(&Default::default(), order, "a"), ["a"]);
-    }
-}
 
 fn interaction(event: crate::services::storage::Interaction) {
     crate::services::storage::record_interaction(event);

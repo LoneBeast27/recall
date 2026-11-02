@@ -44,6 +44,23 @@ fn store_round_trip_prunes_and_validates_duration_identity() {
 }
 
 #[test]
+fn store_keeps_the_played_stamp_even_alone() {
+    let dir = temp_dir("played");
+    let path = dir.join("library.json");
+    let mut store = MetaStore::load_from(path.clone());
+    store.set_played("a.mp4", 1_700_000_123).unwrap();
+    store.set_favourite("b.mp4", true).unwrap();
+    store.set_played("b.mp4", 5).unwrap();
+    let reloaded = MetaStore::load_from(path.clone());
+    assert_eq!(reloaded.meta("a.mp4").unwrap().played, Some(1_700_000_123), "an entry with only a stamp is kept");
+    assert_eq!(reloaded.meta("b.mp4").unwrap().played, Some(5));
+    let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(json["a.mp4"], serde_json::json!({"played": 1_700_000_123}));
+    assert_eq!(json["b.mp4"], serde_json::json!({"favourite": true, "played": 5}));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn corrupt_store_is_backed_up_and_replaced() {
     let dir = temp_dir("corrupt");
     let path = dir.join("library.json");
