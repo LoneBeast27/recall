@@ -80,10 +80,11 @@ impl Events {
         self.out(msg, || format!("[recall] save FAILED: {reason}"));
     }
 
-    pub fn clip_moved(&self, path: &str, elapsed_ms: u64) {
+    pub fn clip_moved(&self, path: &str, elapsed_ms: u64, kept_path: Option<&str>) {
         let msg = Outbound::ClipMoved {
             path: path.to_string(),
             elapsed_ms,
+            kept_path: kept_path.map(str::to_string),
         };
         self.out(msg, || format!("[recall] moved clip to {path} ({elapsed_ms}ms)"));
     }

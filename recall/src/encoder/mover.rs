@@ -5,8 +5,11 @@
 //!
 //! A move: copy `<staged>` into `<final>.part` in large sequential chunks
 //! (space reserved up front, flushed every [`Config::sync_every`] and at the
-//! end), rename to `<final>`, delete the staged copy, emit `clip_moved`. On the
-//! same volume it is a plain rename. A `<final>.part` left by an interrupted
+//! end, stamped with the staged file's modification time), rename to
+//! `<final>`, then keep the staged copy as `<staging>\kept\<final name>` and
+//! emit `clip_moved` with its `kept_path`: the app adopts it into its SSD video
+//! cache, so a fresh clip opens from the SSD at once. If it cannot be kept it
+//! is deleted as before. On the same volume a move is a plain rename. A `<final>.part` left by an interrupted
 //! move is overwritten by the retry; the final name only ever appears through
 //! the rename of a complete, flushed file.
 //!
@@ -174,6 +177,8 @@ pub(crate) struct Moved {
     pub rename_ms: f64,
     /// The staged copy could not be deleted (kept as a leftover).
     pub staged_kept: Option<String>,
+    /// The staged copy, kept under `<staging>\kept\` for the app's video cache.
+    pub kept: Option<PathBuf>,
 }
 
 struct Mover {
@@ -245,7 +250,8 @@ impl Mover {
         match result {
             Ok(moved) => {
                 let elapsed = started.elapsed();
-                self.events.clip_moved(&moved.dest.to_string_lossy(), elapsed.as_millis() as u64);
+                let kept = moved.kept.as_ref().map(|p| p.to_string_lossy().into_owned());
+                self.events.clip_moved(&moved.dest.to_string_lossy(), elapsed.as_millis() as u64, kept.as_deref());
                 let queue_wait = started.saturating_duration_since(pending.queued);
                 self.events.log(&timing_line(&moved, ms(elapsed), ms(queue_wait)));
                 if let Some(e) = &moved.staged_kept {
@@ -307,6 +313,7 @@ pub(crate) fn move_clip(job: &MoveJob, cfg: &Config, abort: &AtomicBool) -> Resu
         flush_ms: 0.0,
         rename_ms: 0.0,
         staged_kept: None,
+        kept: None,
     };
     match std::fs::metadata(&job.dest).map(|m| m.len()) {
         // The rename landed before a crash or quit kept the staged copy.
@@ -325,11 +332,43 @@ pub(crate) fn move_clip(job: &MoveJob, cfg: &Config, abort: &AtomicBool) -> Resu
     }
     if moved.how == "copy" {
         copy_into_place(&job.staged, &mut moved, cfg, abort)?;
+        moved.kept = keep_staged(&job.staged, &moved.dest);
+        if moved.kept.is_some() {
+            return Ok(moved);
+        }
     }
     if let Err(e) = std::fs::remove_file(&job.staged) {
         moved.staged_kept = Some(e.to_string());
     }
     Ok(moved)
+}
+
+/// `<staging>\kept`: staged copies of moved clips, waiting for the app.
+/// `recover` scans only the staging folder's own files, so these never move again.
+pub(crate) const KEPT_DIR: &str = "kept";
+
+/// Most bytes `kept\` may hold: the app empties it only when it runs, and a
+/// night of saves with the app closed must not fill the SSD. Matches the app's
+/// default cache budget.
+pub(crate) const KEPT_CAP: u64 = 2 << 30;
+
+/// Renames the staged copy to `<staging>\kept\<dest file name>`; `None` (the
+/// caller deletes it) when that folder or the rename fails, or the copy would
+/// take `kept\` past [`KEPT_CAP`].
+fn keep_staged(staged: &Path, dest: &Path) -> Option<PathBuf> {
+    keep_staged_within(staged, dest, KEPT_CAP)
+}
+
+fn keep_staged_within(staged: &Path, dest: &Path, cap: u64) -> Option<PathBuf> {
+    let dir = staged.parent()?.join(KEPT_DIR);
+    let kept = dir.join(dest.file_name()?);
+    let held: u64 = std::fs::read_dir(&dir).into_iter().flatten().flatten().filter_map(|e| e.metadata().ok()).filter(|m| m.is_file()).map(|m| m.len()).sum();
+    if held.saturating_add(std::fs::metadata(staged).ok()?.len()) > cap {
+        return None;
+    }
+    std::fs::create_dir_all(&dir).ok()?;
+    std::fs::rename(staged, &kept).ok()?;
+    Some(kept)
 }
 
 /// Copy `staged` to `<dest>.part`, flush, rename to `dest`.
@@ -389,6 +428,11 @@ fn copy_to_part(staged: &Path, part: &Path, moved: &mut Moved, cfg: &Config, abo
     let flush = Instant::now();
     output.sync_all().map_err(|e| failed("flush", part, e))?;
     moved.flush_ms = ms(flush.elapsed());
+    // The clip keeps its save time, so the app's cache identity (name, size,
+    // mtime) of `dest` matches the kept copy from the moment it appears.
+    if let Ok(modified) = input.metadata().and_then(|m| m.modified()) {
+        output.set_modified(modified).map_err(|e| failed("stamp", part, e))?;
+    }
     Ok(())
 }
 

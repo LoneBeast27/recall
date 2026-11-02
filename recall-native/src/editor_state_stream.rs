@@ -55,7 +55,7 @@ pub struct Loading {
     pub generation: Option<u64>,
     /// Why the rest of the clip will not arrive.
     pub failed: Option<String>,
-    held: bool,
+    paced: bool,
 }
 
 impl Loading {
@@ -138,11 +138,11 @@ impl EditorState {
             return true;
         };
         let mut changed = false;
-        // Nobody is watching, or the recorder needs the drive: what playback needs still comes.
-        let held = !editor_visible || crate::services::storage::recorder_busy();
-        if held != self.loading.held {
-            self.loading.held = held;
-            media.fill.hold(held);
+        // Nobody is watching, or the recorder needs the drive: the copy slows down, never stops.
+        let paced = !editor_visible || crate::services::storage::recorder_holds(media.fill.source());
+        if paced != self.loading.paced {
+            self.loading.paced = paced;
+            media.fill.pace(paced);
         }
         let revision = media.fill.revision();
         let outcome = media.fill.outcome();

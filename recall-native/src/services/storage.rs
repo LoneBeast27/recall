@@ -9,7 +9,8 @@
 //!   (default 2 GiB) in score order and eviction drops the lowest scores first.
 //! * SSD tiers under [`cache_root`] (`<exe folder>\cache` on an SSD install):
 //!   `thumbs/<id>.jpg` library thumbnails · `visuals/<id>/` poster, filmstrip, scrub frames ·
-//!   `editor/<engine key>/` prepared audio stems · `video/<id>.mp4` clip copies ·
+//!   `editor/<engine key>/` prepared audio stems · `video/<id>.mp4` clip copies (also adopted
+//!   from the engine's staging, `kept`) ·
 //!   `projects/<id>.json` working edit projects · `tmp/` · `storage.json` settings ·
 //!   `media.json` / `interactions.json` bookkeeping.
 //!
@@ -26,6 +27,7 @@ mod ffmpeg;
 pub mod fill;
 mod history;
 mod io_priority;
+mod kept;
 mod lane;
 mod prefetch;
 mod probe;
@@ -51,6 +53,8 @@ pub use drive::{DriveInfo, DriveKind, drive_info, drive_kind};
 pub(crate) use ffmpeg::{Seek, extract_frame, probe_duration};
 pub use ffmpeg::{Run, binary, run_cancellable, run_hidden, run_watched};
 pub use io_priority::close_helpers;
+#[allow(unused_imports)]
+pub use kept::{adopt_kept, sweep_kept};
 pub use probe::{ProbedClip, probe_clip};
 #[allow(unused_imports)]
 pub use evict::DEFAULT_CACHE_BUDGET;
@@ -59,7 +63,7 @@ pub use history::{Interaction, record_interaction};
 #[allow(unused_imports)]
 pub use lane::{LaneStats, Priority, lane_wait_ms, run_io, stats, submit_io};
 #[allow(unused_imports)]
-pub use prefetch::{PrefetchClip, PrefetchEvent, PrepareEditor, recorder_busy, set_recorder_busy, smart_status, start_prefetch};
+pub use prefetch::{PrefetchClip, PrefetchEvent, PrepareEditor, recorder_busy, recorder_holds, set_recorder_busy, smart_status, start_prefetch};
 pub use projects::{ProjectSource, SidecarStep, export_dir, has_export, project_order, sidecar_step, working_copy_path, write_atomic};
 pub(crate) use projects::modified_ms as projects_modified_ms;
 #[allow(unused_imports)]
