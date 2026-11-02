@@ -261,8 +261,11 @@ impl Feed {
             }
             Step::Video => {
                 let score = score_of(&clip_id(clip));
-                if super::video::warm_in(&self.root, Path::new(&path), self.budget, warm_limit(self.budget), score).is_ok() {
-                    self.gate.add(step, clip.bytes);
+                match super::video::warm_in(&self.root, Path::new(&path), self.budget, warm_limit(self.budget), score) {
+                    Ok(_) => self.gate.add(step, clip.bytes),
+                    // An open or a hover took the drive: this copy is first again once it is idle.
+                    Err(error) if error == super::video::YIELDED => self.order.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push_front((step, index)),
+                    Err(_) => {}
                 }
             }
         }

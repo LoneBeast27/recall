@@ -4,7 +4,7 @@
 //! hover or scroll position wins). When the queue is empty and no on-demand work arrived
 //! for [`IDLE_GRACE`], the lane pulls one item at a time from its idle (prefetch) source.
 //! SSD paths skip lanes entirely (they run on the caller's thread).
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::cmp::Ordering as CmpOrdering;
 use std::collections::{BinaryHeap, HashMap};
 use std::panic::AssertUnwindSafe;
@@ -84,6 +84,10 @@ impl<T> LaneQueue<T> {
     pub fn len(&self) -> usize {
         self.heap.len()
     }
+    /// Someone is waiting: an `Interactive` or `Visible` item is queued.
+    pub fn has_demand(&self) -> bool {
+        self.heap.peek().is_some_and(|slot| slot.priority < Priority::Background)
+    }
 }
 
 struct State {
@@ -115,6 +119,14 @@ static HDD_BYTES: AtomicU64 = AtomicU64::new(0);
 thread_local! {
     /// Lane id of the current thread (0 = not a lane thread).
     static CURRENT: Cell<u64> = const { Cell::new(0) };
+    /// The current lane thread's queue, for [`demand_waiting`].
+    static CURRENT_LANE: RefCell<Option<Arc<Shared>>> = const { RefCell::new(None) };
+}
+
+/// On a lane thread: on-demand work (`Interactive` / `Visible`) is queued behind the task
+/// running now, which should yield if it is long (an idle warm-up copy). False elsewhere.
+pub(super) fn demand_waiting() -> bool {
+    CURRENT_LANE.with(|lane| lane.borrow().as_ref().is_some_and(|shared| lock(shared).queue.has_demand()))
 }
 
 impl Lane {
@@ -181,6 +193,7 @@ fn execute(task: Task, hdd: bool) {
 fn worker(shared: Arc<Shared>, id: u64, hdd: bool, grace: Duration) {
     io_priority::enter_background_mode();
     CURRENT.with(|current| current.set(id));
+    CURRENT_LANE.with(|lane| *lane.borrow_mut() = Some(shared.clone()));
     let mut state = lock(&shared);
     loop {
         if let Some((_, task)) = state.queue.pop() {

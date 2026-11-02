@@ -134,7 +134,7 @@ fn video_copy_is_exact_and_evicted_least_recently_used() {
     // The unbuffered path itself (cache_in would silently fall back to buffered).
     let direct = root.join("direct.mp4");
     let modified = a.metadata().unwrap().modified().unwrap();
-    video::copy_unbuffered(&a, &direct, a.metadata().unwrap().len(), modified).expect("unbuffered copy on NTFS");
+    video::copy_unbuffered(&a, &direct, a.metadata().unwrap().len(), modified, &video::FULL_SPEED).expect("unbuffered copy on NTFS");
     assert_eq!(std::fs::read(&direct).unwrap(), std::fs::read(&a).unwrap(), "unbuffered copy trims the padded tail");
     assert_eq!(direct.metadata().unwrap().modified().unwrap(), modified);
     let cache = root.join("cache");
@@ -242,4 +242,32 @@ fn thumbnails_import_newest_recorder_thumb_resize_large_and_generate_missing() {
     assert!(tiers::clear_in(&cache, CacheKind::Thumbs).unwrap() >= thumbs_tier.bytes);
     assert_eq!(thumbs::index_in(&cache).len(), 0);
     let _ = std::fs::remove_dir_all(root);
+}
+
+#[test]
+fn an_open_waits_under_half_a_second_for_a_warm_up_copy_on_a_slow_drive() {
+    let root = temp_root("warm-yield");
+    let clip = root.join("clip.mp4");
+    write_pattern(&clip, 96 << 20, 4);
+    let cache = root.join("cache");
+    // A slowed drive (64 MB/s, the RECALL_SLOW_DRIVE throttle): the copy alone takes ~1.6 s.
+    let lane = Lane::spawn("test-lane-warm-yield", false, Duration::from_millis(40));
+    let (tx, rx) = mpsc::channel();
+    let (warm_clip, warm_cache) = (clip.clone(), cache.clone());
+    lane.submit(Priority::Background, Box::new(move || {
+        let pace = video::Pace { rate: 64_000_000, yields: &lane::demand_waiting };
+        let _ = tx.send(video::copy_in(&warm_cache, &warm_clip, 1 << 40, &|_| true, &pace));
+    }));
+    std::thread::sleep(Duration::from_millis(300));
+    let asked = Instant::now();
+    let waited = lane.run(Priority::Interactive, move || asked.elapsed()).unwrap();
+    assert!(waited < Duration::from_millis(500), "the open waited {waited:?} behind the warm-up copy");
+    assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap().unwrap_err(), video::YIELDED);
+    let left: Vec<_> = std::fs::read_dir(cache.join("video")).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert!(left.is_empty(), "the half copy is deleted: {left:?}");
+    // With nobody waiting, the same copy completes.
+    let pace = video::Pace { rate: 0, yields: &lane::demand_waiting };
+    let copy = video::copy_in(&cache, &clip, 1 << 40, &|_| true, &pace).unwrap();
+    assert_eq!(copy.metadata().unwrap().len(), 96 << 20);
+    let _ = std::fs::remove_dir_all(&root);
 }

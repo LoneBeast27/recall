@@ -154,6 +154,9 @@ pub(super) fn inventory(root: &Path, score: &dyn Fn(&str) -> f64) -> Inventory {
     other += dir_size(&root.join("tmp")).0;
     // Clip heads from the filter probe (`head.rs`): at most a few hundred MB, never evicted.
     other += dir_size(&root.join("heads")).0;
+    // The recorder's kept copies waiting to be adopted (`kept.rs`, up to 2 GiB): they hold SSD
+    // space the budget has to leave room for.
+    other += dir_size(&root.join("staging").join("kept")).0;
     for file in ["storage.json", "media.json", "interactions.json"] {
         other += root.join(file).metadata().map_or(0, |m| m.len());
     }
