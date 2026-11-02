@@ -177,8 +177,9 @@ pub enum DaemonEvent {
     RecordingStarted,
     RecordingStopped { path: String, seconds: f64 },
     RecordingFailed { reason: String },
-    /// A clip saved to the SSD first reached the clip folder.
-    ClipMoved { path: String },
+    /// A clip saved to the SSD first reached the clip folder. `kept_path`: the engine kept its
+    /// staged copy there for the SSD video cache (`storage::adopt_kept`).
+    ClipMoved { path: String, kept_path: Option<String> },
     /// A staged clip could not reach the clip folder yet (it stays safe on the SSD; retried).
     ClipMoveFailed { path: String, reason: String },
     /// Storage limit moved old clips to the Recycle Bin.

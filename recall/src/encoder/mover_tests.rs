@@ -67,9 +67,72 @@ fn copy_lands_the_exact_bytes_under_the_final_name_and_cleans_up() {
     assert_eq!((moved.how, moved.bytes, moved.dest.clone()), ("copy", 100_003, dest.clone()));
     assert!(moved.staged_kept.is_none());
     assert_eq!(std::fs::read(&dest).unwrap(), bytes);
-    assert!(!src.exists(), "staged copy deleted");
+    assert!(!src.exists(), "staged copy left the staging folder");
+    assert_eq!(moved.kept, Some(stage.join(KEPT_DIR).join("G.mp4")), "kept for the app's video cache");
     assert!(!part_of(&dest).exists(), ".part renamed away");
     let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+fn mtime(path: &Path) -> std::time::SystemTime {
+    std::fs::metadata(path).unwrap().modified().unwrap()
+}
+
+#[test]
+fn a_copied_clip_keeps_its_staged_copy_and_its_save_time() {
+    let (stage, out) = (temp_dir("s"), temp_dir("o"));
+    let (src, bytes) = staged(&stage, "G.mp4", 30_000);
+    // The save happened an hour ago: the clip must not take the move's time.
+    let saved_at = std::time::SystemTime::now() - Duration::from_secs(3600);
+    std::fs::File::options().write(true).open(&src).unwrap().set_modified(saved_at).unwrap();
+    let saved_at = mtime(&src);
+    let dest = out.join("G.mp4");
+    let moved = move_clip(&MoveJob { staged: src.clone(), dest: dest.clone() }, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
+    let kept = moved.kept.clone().expect("staged copy kept");
+    assert_eq!(kept, stage.join(KEPT_DIR).join("G.mp4"));
+    assert_eq!(std::fs::read(&kept).unwrap(), bytes, "kept copy holds the clip's bytes");
+    assert_eq!(mtime(&dest), saved_at, "destination carries the save time");
+    assert_eq!(mtime(&kept), saved_at, "kept copy and destination share one identity");
+    assert!(!src.exists());
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn kept_copies_stop_at_the_cap_while_the_app_is_away() {
+    let (stage, out) = (temp_dir("s"), temp_dir("o"));
+    let (a, _) = staged(&stage, "A.mp4", 6000);
+    let (b, _) = staged(&stage, "B.mp4", 6000);
+    assert!(keep_staged_within(&a, &out.join("A.mp4"), 10_000).is_some(), "the first fits");
+    assert_eq!(keep_staged_within(&b, &out.join("B.mp4"), 10_000), None, "6000 + 6000 is past the cap");
+    assert!(b.exists(), "the caller deletes it, as when keeping fails");
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn a_staged_copy_that_cannot_be_kept_is_deleted_as_before() {
+    let (stage, out) = (temp_dir("s"), temp_dir("o"));
+    // A file named `kept` blocks the folder.
+    std::fs::write(stage.join(KEPT_DIR), b"not a folder").unwrap();
+    let (src, bytes) = staged(&stage, "G.mp4", 5000);
+    let dest = out.join("G.mp4");
+    let moved = move_clip(&MoveJob { staged: src.clone(), dest: dest.clone() }, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
+    assert_eq!((moved.kept, moved.staged_kept), (None, None));
+    assert_eq!(std::fs::read(&dest).unwrap(), bytes);
+    assert!(!src.exists(), "staged copy deleted");
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn clip_moved_names_the_kept_copy_only_after_a_copy() {
+    let (stage, out, near) = (temp_dir("s"), temp_dir("o"), temp_dir("n"));
+    let (events, sink) = Events::capture(true);
+    let (queue, control) = spawn(events, cfg(|_, dir| dir.to_string_lossy().contains("recall-mover-n-")), Vec::new()).unwrap();
+    assert!(queue.submit(MoveJob { staged: staged(&stage, "A.mp4", 4000).0, dest: out.join("A.mp4") }));
+    assert!(queue.submit(MoveJob { staged: staged(&stage, "B.mp4", 4000).0, dest: near.join("B.mp4") }));
+    let moved = wait_for(&sink, "clip_moved", 2);
+    assert_eq!(moved[0]["kept_path"], text(&stage.join(KEPT_DIR).join("A.mp4")), "{}", moved[0]);
+    assert!(moved[1].get("kept_path").is_none(), "a same-volume rename keeps nothing: {}", moved[1]);
+    assert!(control.shutdown(Duration::from_secs(1)));
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out), std::fs::remove_dir_all(&near));
 }
 
 #[test]
@@ -165,7 +228,8 @@ fn moves_run_fifo_recovered_ones_first() {
     let order: Vec<String> = moved.iter().map(|m| m["path"].as_str().unwrap().to_string()).collect();
     let expected: Vec<String> = names.iter().map(|n| text(&out.join(n))).collect();
     assert_eq!(order, expected);
-    assert_eq!(std::fs::read_dir(&stage).unwrap().count(), 0);
+    let left: Vec<_> = std::fs::read_dir(&stage).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert_eq!(left, vec![std::ffi::OsString::from(KEPT_DIR)], "only the kept copies' folder stays");
     assert!(control.shutdown(Duration::from_secs(1)));
     let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
 }

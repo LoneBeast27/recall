@@ -11,13 +11,18 @@
 //! The file is sparse and unbuffered on both sides: a hole never reaches a reader, and the
 //! file cache never holds zeros for a part written later.
 //!
+//! While the recorder needs the drive, or nobody is watching, the copy never stops: it goes on
+//! at [`PACED_RATE`] on the lane's background I/O, so a clip opened mid-game still loads fully
+//! on its own while the recorder's writes keep most of the disk. A reader stopped on a missing
+//! part is always served at full speed.
+//!
 //! A clip too large for the video tier is not copied ([`ClipFill::direct`]): the same readers
 //! read it where it lies, so the player and the decoder need no second path.
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Condvar, Mutex, MutexGuard};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use super::lane::{self, Priority};
 
@@ -30,6 +35,9 @@ use reader::{Reader, open_part, open_unbuffered, set_sparse};
 
 /// One read of the drive. Also the unit of the "have it" map.
 pub const CHUNK: u64 = 4 << 20;
+/// Background copying while paced ([`ClipFill::pace`]): 40 MB/s, a 400 MB clip in ~10 s,
+/// leaving a hard drive most of its ~150 MB/s for the recorder.
+pub const PACED_RATE: u64 = 40_000_000;
 pub(super) const ALIGN: u64 = 4096;
 /// Bytes kept ready past the player's last read before the copy yields to other disk work.
 const RUNWAY: u64 = 64 << 20;
@@ -64,18 +72,18 @@ struct State {
     played: u64,
     outcome: Outcome,
     error: Option<String>,
-    /// Background copying waits (the editor is not showing the clip, or the recorder is busy).
-    /// A reader stopped on a missing part is still served.
-    held: bool,
-    /// The reader stopped for that: the next demand has to start it again.
-    parked: bool,
+    /// Background copying runs at [`PACED_RATE`] (the editor is not showing the clip, or the
+    /// recorder is busy). A reader stopped on a missing part is served at full speed.
+    paced: bool,
     /// The last seek of the player, while reads wait on what will not arrive.
     sought: Option<std::time::Instant>,
 }
 
 /// What the reader does next.
 enum Next {
-    Chunk(u64),
+    /// A chunk to copy, and whether to pace it.
+    Chunk(u64, bool),
+    /// The fill stopped (done, failed or cancelled).
     Park,
     Finished,
 }
@@ -131,7 +139,7 @@ impl ClipFill {
         set_sparse(&file)?;
         file.set_len(bytes).map_err(|error| format!("size fill: {error}"))?;
         IN_USE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(part.to_path_buf());
-        let state = State { have: vec![false; chunk_count(bytes) as usize], missing: chunk_count(bytes), cursor: 0, wanted: Vec::new(), played: 0, outcome: Outcome::Filling, error: None, held: false, parked: false, sought: None };
+        let state = State { have: vec![false; chunk_count(bytes) as usize], missing: chunk_count(bytes), cursor: 0, wanted: Vec::new(), played: 0, outcome: Outcome::Filling, error: None, paced: false, sought: None };
         Ok(Self::shared(source, part, target, bytes, modified, state, throttle, fail_after, false))
     }
 
@@ -139,7 +147,7 @@ impl ClipFill {
     /// test hook: after the player's first seek, a read past it finds the drive gone (the index,
     /// at the end of a recorder clip, has to open and prime first).
     pub fn direct(source: &Path, bytes: u64, modified: SystemTime, fail_after: u64) -> Self {
-        let state = State { have: vec![true; chunk_count(bytes) as usize], missing: 0, cursor: 0, wanted: Vec::new(), played: 0, outcome: Outcome::Done, error: None, held: false, parked: false, sought: None };
+        let state = State { have: vec![true; chunk_count(bytes) as usize], missing: 0, cursor: 0, wanted: Vec::new(), played: 0, outcome: Outcome::Done, error: None, paced: false, sought: None };
         Self::shared(source, source, source, bytes, modified, state, 0, fail_after, true)
     }
 
@@ -181,30 +189,19 @@ impl ClipFill {
         self.0.direct
     }
 
-    /// Lets background copying wait or carry on.
-    pub fn hold(&self, held: bool) {
-        lock(&self.0).held = held;
-        if !held {
-            self.wake();
-        }
-        self.0.changed.notify_all();
-    }
-
-    pub fn held(&self) -> bool {
-        lock(&self.0).held
-    }
-
-    /// Starts the reader again if it parked.
-    fn wake(&self) {
-        let parked = std::mem::take(&mut lock(&self.0).parked);
-        let reader = self.0.reader.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
-        if let (true, Some(reader)) = (parked, reader) {
-            schedule(self.clone(), reader, Priority::Interactive);
-        }
+    /// Caps background copying at [`PACED_RATE`], or lets it run at the drive's speed. The
+    /// copy never stops for this: it always finishes on its own.
+    pub fn pace(&self, paced: bool) {
+        lock(&self.0).paced = paced;
     }
 
     pub fn bytes(&self) -> u64 {
         self.0.bytes
+    }
+
+    /// The clip being read.
+    pub fn source(&self) -> &Path {
+        &self.0.source
     }
 
     /// Where the finished copy lands.
@@ -283,11 +280,6 @@ impl ClipFill {
             if want {
                 state.wanted.retain(|chunk| !missing.contains(chunk));
                 state.wanted.extend(missing.iter().rev());
-                if state.parked {
-                    drop(state);
-                    self.wake();
-                    state = lock(&self.0);
-                }
             }
             state = self.0.changed.wait_timeout(state, Duration::from_millis(200)).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
         }
@@ -302,8 +294,8 @@ impl ClipFill {
         state.outcome == Outcome::Done
     }
 
-    /// Takes the next chunk: a stopped reader's first, else the next in file order, wrapping
-    /// to whatever was skipped.
+    /// Takes the next chunk: a stopped reader's first (urgent), else the next in file order,
+    /// wrapping to whatever was skipped (paced when [`ClipFill::pace`] says so).
     fn next_chunk(&self) -> Next {
         let mut state = lock(&self.0);
         if state.outcome != Outcome::Filling {
@@ -313,18 +305,15 @@ impl ClipFill {
             if !state.have[chunk as usize] {
                 // The copy carries on from here, so a seek ahead keeps playing.
                 state.cursor = chunk + 1;
-                return Next::Chunk(chunk);
+                return Next::Chunk(chunk, false);
             }
         }
-        if state.held {
-            state.parked = true;
-            return Next::Park;
-        }
+        let paced = state.paced;
         let total = state.have.len() as u64;
         match (0..total).map(|step| (state.cursor + step) % total).find(|chunk| !state.have[*chunk as usize]) {
             Some(chunk) => {
                 state.cursor = chunk + 1;
-                Next::Chunk(chunk)
+                Next::Chunk(chunk, paced)
             }
             None => Next::Finished,
         }
@@ -379,8 +368,9 @@ impl ClipFill {
     }
 
     fn step(&self, reader: &mut Reader) -> bool {
-        let chunk = match self.next_chunk() {
-            Next::Chunk(chunk) => chunk,
+        let started = Instant::now();
+        let (chunk, paced) = match self.next_chunk() {
+            Next::Chunk(chunk, paced) => (chunk, paced),
             Next::Park => return false,
             Next::Finished => {
                 match self.finish(reader) {
@@ -402,6 +392,13 @@ impl ClipFill {
             return false;
         }
         self.mark(chunk);
+        if paced {
+            let length = (self.0.bytes - chunk * CHUNK).min(CHUNK);
+            let due = Duration::from_secs_f64(length as f64 / PACED_RATE as f64);
+            if let Some(rest) = due.checked_sub(started.elapsed()) {
+                std::thread::sleep(rest);
+            }
+        }
         true
     }
 }

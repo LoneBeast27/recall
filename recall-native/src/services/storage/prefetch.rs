@@ -69,6 +69,16 @@ pub fn recorder_busy() -> bool {
     RECORDER_BUSY.load(Ordering::Relaxed)
 }
 
+/// The open clip's copy from `path` slows down for the recorder (`ClipFill::pace`): only a
+/// slow (hard) drive competes with its writes. A clip read from the SSD is never slowed.
+pub fn recorder_holds(path: &Path) -> bool {
+    holds(recorder_busy(), path)
+}
+
+pub(super) fn holds(busy: bool, path: &Path) -> bool {
+    busy && super::is_slow(path)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Step {
     Thumb,
