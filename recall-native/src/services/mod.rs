@@ -3,4 +3,5 @@ pub mod daemon;
 pub mod library;
 pub mod meters;
 pub mod midi;
+pub mod pre_encode;
 pub mod storage;

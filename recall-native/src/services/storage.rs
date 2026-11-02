@@ -51,7 +51,7 @@ mod tests_smoke;
 #[allow(unused_imports)]
 pub use drive::{DriveInfo, DriveKind, drive_info, drive_kind};
 pub(crate) use ffmpeg::{Seek, extract_frame, probe_duration};
-pub use ffmpeg::{Run, binary, run_cancellable, run_hidden, run_watched};
+pub use ffmpeg::{OnLine, Run, binary, run_cancellable, run_cancellable_lines, run_hidden, run_watched};
 pub use io_priority::close_helpers;
 #[allow(unused_imports)]
 pub use kept::{adopt_kept, sweep_kept};

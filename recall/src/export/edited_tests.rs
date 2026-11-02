@@ -32,6 +32,25 @@ fn within(actual: f64, expected: f64, fraction: f64) -> bool {
 }
 
 #[test]
+fn progress_is_reported_against_the_planned_frames() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    // The sink is process-wide; a 1.75 s plan (105 frames) is unique to this test.
+    static REPORTS: AtomicU64 = AtomicU64::new(0);
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    super::set_progress_sink(|frames, total| {
+        if total == 105 {
+            REPORTS.fetch_add(1, Ordering::Relaxed);
+            LAST.fetch_max(frames, Ordering::Relaxed);
+        }
+    });
+    let Some(clip) = clip("progress") else { return };
+    let report = run(&clip, "progress.mp4", &plan(vec![TimeRange::new(1.0, 2.75)]), &ExportSettings::default()).unwrap();
+    assert_eq!(report.frames, 105);
+    assert_eq!(REPORTS.load(Ordering::Relaxed), 3, "one report every 30 frames");
+    assert_eq!(LAST.load(Ordering::Relaxed), 90);
+}
+
+#[test]
 fn size_cap_is_obeyed_and_the_budget_is_used() {
     let Some(clip) = clip("cap") else { return };
     let plan = plan(vec![TimeRange::new(0.0, 4.5)]);
