@@ -139,6 +139,7 @@ fn hotkey_and_recording_events_and_session_fields() {
     apply(&mut state, json!({"mod":"engine","event":{"type":"recording_stopped","path":"V:/rec.mp4","seconds":61.0,"bytes":9}}));
     apply(&mut state, json!({"mod":"session","event":{"type":"storage_cleaned","removed":3,"freed_bytes":1000}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"clip_moved","path":"V:/a.mp4","elapsed_ms":900}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"clip_moved","path":"V:/b.mp4","elapsed_ms":900,"kept_path":"L:/s/kept/b.mp4"}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"clip_move_failed","path":"V:/a.mp4","reason":"disk full"}}));
     assert_eq!(
         state.events,
@@ -148,7 +149,8 @@ fn hotkey_and_recording_events_and_session_fields() {
             DaemonEvent::RecordingStarted,
             DaemonEvent::RecordingStopped { path: "V:/rec.mp4".into(), seconds: 61.0 },
             DaemonEvent::StorageCleaned { removed: 3, freed_bytes: 1000 },
-            DaemonEvent::ClipMoved { path: "V:/a.mp4".into() },
+            DaemonEvent::ClipMoved { path: "V:/a.mp4".into(), kept_path: None },
+            DaemonEvent::ClipMoved { path: "V:/b.mp4".into(), kept_path: Some("L:/s/kept/b.mp4".into()) },
             DaemonEvent::ClipMoveFailed { path: "V:/a.mp4".into(), reason: "disk full".into() },
         ]
     );

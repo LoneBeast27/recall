@@ -47,8 +47,14 @@ impl Root {
                 self.show_toast(ToastKind::Info, format!("Moved {clips} to the Recycle Bin"), Some(format!("Storage limit · {} freed", format_bytes(freed_bytes))));
                 self.workers.job(Job::List);
             }
-            // A clip saved to the SSD first appears in the library once it is in the clip folder.
-            DaemonEvent::ClipMoved { .. } => self.workers.job(Job::List),
+            // A clip saved to the SSD first appears in the library once it is in the clip folder;
+            // the engine's kept SSD copy becomes its video-cache entry, so it opens from the SSD.
+            DaemonEvent::ClipMoved { path, kept_path } => {
+                if let Some(kept) = kept_path {
+                    crate::services::storage::adopt_kept(path, kept);
+                }
+                self.workers.job(Job::List);
+            }
             DaemonEvent::ClipMoveFailed { reason, .. } => self.show_toast(
                 ToastKind::Bad,
                 "Couldn't move a clip to the clip folder",

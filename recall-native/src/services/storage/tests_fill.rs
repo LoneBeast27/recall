@@ -1,4 +1,4 @@
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use super::*;
 
@@ -195,22 +195,47 @@ fn only_a_clip_read_where_it_lies_can_be_lost_this_way() {
 }
 
 #[test]
-fn held_copying_stops_but_a_stopped_reader_is_still_served() {
-    let dir = scratch("held");
+fn paced_copying_never_stops_and_a_stopped_reader_is_served_at_once() {
+    // While recording (or with the editor hidden) the open clip is paced: it still loads fully.
+    let dir = scratch("paced");
     let bytes = 12 * CHUNK as usize;
     let (source, modified) = clip(&dir, bytes);
-    let fill = fill(&dir, &source, bytes as u64, modified, 200 << 20);
-    fill.hold(true);
+    let fill = fill(&dir, &source, bytes as u64, modified, 0);
+    fill.pace(true);
     fill.start(&[0]).unwrap();
     assert!(fill.wait_for(0, 1, true));
-    std::thread::sleep(Duration::from_millis(200));
-    let parked = fill.progress();
-    assert!(parked < 0.5, "copied {parked} while held");
-    std::thread::sleep(Duration::from_millis(100));
-    assert_eq!(fill.progress(), parked, "held means stopped");
-    assert!(fill.wait_for(10 * CHUNK, 10 * CHUNK + 1, true), "a stopped reader still gets its part");
-    fill.hold(false);
-    assert!(fill.wait_done(), "carries on when released");
+    let asked = Instant::now();
+    assert!(fill.wait_for(10 * CHUNK, 10 * CHUNK + 1, true), "a stopped reader gets its part");
+    assert!(asked.elapsed() < Duration::from_millis(600), "its part is not paced: {:?}", asked.elapsed());
+    assert!(fill.wait_done(), "a paced fill finishes on its own");
+    assert_eq!(fill.outcome(), Outcome::Done);
+    assert_eq!(std::fs::read(fill.target()).unwrap(), pattern(bytes));
+}
+
+#[test]
+fn paced_copying_keeps_to_its_rate() {
+    let dir = scratch("paced-rate");
+    let chunks = 8u64;
+    let bytes = (chunks * CHUNK) as usize;
+    let (source, modified) = clip(&dir, bytes);
+    let paced = fill(&dir, &source, bytes as u64, modified, 0);
+    paced.pace(true);
+    let started = Instant::now();
+    paced.start(&[0]).unwrap();
+    assert!(paced.wait_done());
+    let took = started.elapsed().as_secs_f64();
+    // The first chunk is asked for (full speed); the other 7 go at the cap.
+    let floor = (chunks - 1) as f64 * CHUNK as f64 / PACED_RATE as f64;
+    assert!(took >= floor * 0.9, "{took:.2}s for {:.1} MB is faster than {} MB/s", bytes as f64 / 1e6, PACED_RATE / 1_000_000);
+    assert!(took < floor * 3.0 + 1.0, "{took:.2}s: pacing slower than the cap");
+    // Released, the same copy goes at the drive's speed.
+    let dir = scratch("unpaced-rate");
+    let (source, modified) = clip(&dir, bytes);
+    let fast = fill(&dir, &source, bytes as u64, modified, 0);
+    let started = Instant::now();
+    fast.start(&[0]).unwrap();
+    assert!(fast.wait_done());
+    assert!(started.elapsed().as_secs_f64() < floor, "unpaced is not capped");
 }
 
 #[test]

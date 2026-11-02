@@ -184,6 +184,20 @@ fn fill_stops_at_95_percent_of_the_budget() {
     assert_eq!(estimate(Step::Video, &clip), clip.bytes);
 }
 
+#[test]
+fn the_recorder_holds_only_slow_drive_reads() {
+    let ssd = std::env::temp_dir();
+    // This machine's temp folder is on the NVMe system drive; elsewhere the check still holds.
+    assert_eq!(super::prefetch::holds(true, &ssd), super::is_slow(&ssd));
+    if super::drive_kind(&ssd) == super::DriveKind::Ssd && std::env::var_os("RECALL_SLOW_DRIVE").is_none() {
+        assert!(!super::prefetch::holds(true, &ssd), "an SSD read (the video-tier copy) never waits for the recorder");
+    }
+    // No Q: drive here: an unknown volume counts as a hard drive (`drive_kind`).
+    let hdd = std::path::Path::new(r"Q:\no-such-drive\clip.mp4");
+    assert!(super::prefetch::holds(true, hdd), "an unknown drive counts as a hard drive");
+    assert!(!super::prefetch::holds(false, hdd), "nothing waits while the recorder is idle");
+}
+
 struct BusyAware(Mutex<VecDeque<Task>>);
 impl IdleSource for BusyAware {
     fn next_task(&self) -> Option<Task> {

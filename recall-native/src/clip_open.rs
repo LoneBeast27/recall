@@ -10,7 +10,6 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::Sender;
-use std::time::Duration;
 
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
 
@@ -71,7 +70,10 @@ pub fn run(generation: u64, path: String, tx: &Sender<Done>) {
             let step = |text: &'static str| {
                 let _ = tx.send(Done::OpenStep(generation, text));
             };
-            let _ = tx.send(Done::Prepared(generation, backend::prepare_clip_steps(&path, None, false, &step, Arc::new(move || stale(generation)))));
+            // A clip in the SSD video tier is prepared from that copy straight away: it does not
+            // queue on the hard drive's lane, and nothing waits for the recorder.
+            let copy = storage::cached_video(&path);
+            let _ = tx.send(Done::Prepared(generation, backend::prepare_clip_steps(&path, copy, false, &step, Arc::new(move || stale(generation)))));
         }
     }
     if com.is_ok() {
@@ -80,7 +82,8 @@ pub fn run(generation: u64, path: String, tx: &Sender<Done>) {
 }
 
 /// The copy is complete: the engine prepares stems, waveforms and filmstrip from it. A clip
-/// read where it lies is prepared where it lies, at low I/O priority, around the playback.
+/// read where it lies is prepared where it lies, at very low I/O priority, around the playback.
+/// Neither waits for the recorder or for the editor to be on screen: an open always finishes.
 fn finish(generation: u64, path: &str, fill: &ClipFill, tx: &Sender<Done>) {
     if !fill.wait_done() {
         if let Some(error) = fill.error() {
@@ -90,34 +93,8 @@ fn finish(generation: u64, path: &str, fill: &ClipFill, tx: &Sender<Done>) {
     }
     let direct = fill.is_direct();
     let copy = (!direct).then(|| fill.target().to_string_lossy().into_owned());
-    let held = fill.clone();
-    // A clip read where it lies shares its drive with the engine: not with a recorder or nobody watching.
-    let blocked = Arc::new(move || held.held() || (direct && storage::recorder_busy()));
-    loop {
-        if !wait_turn(&*blocked, &|| stale(generation), Duration::from_millis(200)) {
-            return;
-        }
-        let waits = Arc::clone(&blocked);
-        let result = backend::prepare_clip_steps(path, copy.clone(), direct, &|_| {}, Arc::new(move || stale(generation) || (direct && waits())));
-        if direct && result.is_err() && blocked() && !stale(generation) {
-            continue; // stopped for the drive: again when it is free
-        }
-        let _ = tx.send(Done::Prepared(generation, result));
-        return;
-    }
-}
-
-/// Waits while `blocked`. False when the open went `stale` first.
-fn wait_turn(blocked: &dyn Fn() -> bool, stale: &dyn Fn() -> bool, every: Duration) -> bool {
-    loop {
-        if stale() {
-            return false;
-        }
-        if !blocked() {
-            return true;
-        }
-        std::thread::sleep(every);
-    }
+    let result = backend::prepare_clip_steps(path, copy, direct, &|_| {}, Arc::new(move || stale(generation)));
+    let _ = tx.send(Done::Prepared(generation, result));
 }
 
 fn stream(generation: u64, path: &str) -> Option<StreamedClip> {
@@ -257,24 +234,3 @@ impl Seek for FillReader<'_> {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::atomic::AtomicBool;
-
-    #[test]
-    fn the_engine_waits_its_turn_for_as_long_as_the_open_counts() {
-        let every = Duration::from_millis(1);
-        assert!(wait_turn(&|| false, &|| false, every));
-        assert!(!wait_turn(&|| true, &|| true, every), "a newer clip ends the wait");
-        let free = Arc::new(AtomicBool::new(false));
-        let waiting = {
-            let free = Arc::clone(&free);
-            std::thread::spawn(move || wait_turn(&|| !free.load(Ordering::Relaxed), &|| false, every))
-        };
-        std::thread::sleep(Duration::from_millis(100));
-        assert!(!waiting.is_finished(), "a busy drive holds it");
-        free.store(true, Ordering::Relaxed);
-        assert!(waiting.join().unwrap());
-    }
-}
