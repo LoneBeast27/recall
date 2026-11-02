@@ -123,8 +123,10 @@ Run-Scenario 'leaving mid-load stops the copy cleanly' {
   Key $s 'escape'
   [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 3000)
   Start-Sleep -Milliseconds 500
+  # Away from the editor the copy carries on, paced to at most PACED_RATE (fill.rs, 40 MB/s).
   $a = (Last $s).loading.share; Start-Sleep -Seconds 2; $b = (Last $s).loading.share
-  $held = Ok ($a -eq $b) "away from the editor the copy waits: $(Fmt ($a * 100))% -> $(Fmt ($b * 100))%"
+  $rate = ($b - $a) * $size / 2
+  $held = Ok ($b -gt $a -and $rate -le 44e6) "away from the editor the copy carries on, paced: $(Fmt ($a * 100))% -> $(Fmt ($b * 100))%, $(Fmt ($rate / 1e6)) MB/s"
   $t = Get-Date
   Stop-Viewer $s; $script:current = $null
   $closed = Ok ($s.Process.HasExited -and $s.Process.ExitCode -eq 0 -and ((Get-Date) - $t).TotalSeconds -lt 5) "closed mid-load in $(Fmt ((Get-Date) - $t).TotalSeconds) s, exit $($s.Process.ExitCode)"
