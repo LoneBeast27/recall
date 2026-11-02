@@ -27,7 +27,9 @@ impl VideoBackend {
         let mut options = ff::Dictionary::new();
         match self {
             Self::Nvenc => {
-                options.set("preset", "p5");
+                // p4 over p5: a 22 s 1440p60 export took 6.0 s instead of 8.0 s
+                // at the same size, SSIM against the source 0.92544 vs 0.92568.
+                options.set("preset", "p4");
                 options.set("tune", "hq");
                 options.set("rc", "vbr");
                 options.set("bf", "0");
