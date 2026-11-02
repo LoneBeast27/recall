@@ -14,7 +14,7 @@ use windows::Win32::Storage::FileSystem::{FILE_FLAG_NO_BUFFERING, FILE_FLAG_SEQU
 
 use super::budget::{self, INDEX_LOCK};
 use super::lane::{self, Priority};
-use super::evict::{self as lru, DEFAULT_CACHE_BUDGET};
+use super::evict as lru;
 use super::fill::{AlignedBuffer, ClipFill};
 
 const CHUNK: usize = 8 << 20;
@@ -85,8 +85,19 @@ pub(super) fn video_dir(root: &Path) -> PathBuf {
     root.join("video")
 }
 
+/// The budget in `storage.json`. A first run (no budget set) picks one from the cache drive's
+/// free space (`evict::default_budget`) and saves it; Settings changes it from then on.
 pub(super) fn budget_in(root: &Path) -> u64 {
-    lru::read_settings(root).cache_budget_bytes.unwrap_or(DEFAULT_CACHE_BUDGET)
+    let mut settings = lru::read_settings(root);
+    if let Some(budget) = settings.cache_budget_bytes {
+        return budget;
+    }
+    let budget = lru::default_budget(super::drive_info(root).map_or(0, |info| info.free));
+    settings.cache_budget_bytes = Some(budget);
+    if let Err(error) = lru::write_settings(root, &settings) {
+        eprintln!("save first-run cache budget: {error}");
+    }
+    budget
 }
 
 /// Applies the current budget (after a list load, an editor open, ...). Returns bytes freed.

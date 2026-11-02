@@ -274,7 +274,10 @@ fn inventory_classifies_tiers_and_enforcement_frees_on_disk() {
     assert_eq!(usage.total(), inventory.total());
     assert_eq!(usage.video_cap, usage.budget / 2);
     // Budget just above the thumbnail + project + bookkeeping bytes: everything else goes.
-    let freed = budget::enforce(&root, 250 + 100 + inventory.other + 10, 0);
+    // (Reading the budget saved a first-run storage.json: bookkeeping grew.)
+    let other = budget::inventory(&root, &|_| 0.0).other;
+    assert!(root.join("storage.json").exists());
+    let freed = budget::enforce(&root, 250 + 100 + other + 10, 0);
     assert_eq!(freed, 5000 + 3800 + 400);
     assert!(root.join("thumbs/aaaa.jpg").exists() && root.join("projects/aaaa.json").exists());
     assert!(!root.join("editor/k1").exists() && !root.join("video/aaaa.mp4").exists());
@@ -307,4 +310,31 @@ fn warm_up_stops_at_the_margin_and_never_drops_a_better_clip() {
     let big = [video("x", 400 << 20, 0.1)];
     assert_eq!(room_below(&big, gb, 50 * gb / 100 * 95, 25 * gb, 400 << 20, 2.0, &[]), Some(vec![]));
     assert_eq!(super::prefetch::warm_limit(2 * gb), 2 * gb / 100 * 95);
+}
+
+#[test]
+fn a_first_run_budget_is_20_gib_or_a_quarter_of_the_free_space() {
+    use super::evict::{DEFAULT_CACHE_BUDGET, MIN_CACHE_BUDGET, default_budget};
+    let gib = 1u64 << 30;
+    assert_eq!(DEFAULT_CACHE_BUDGET, 20 * gib);
+    assert_eq!(default_budget(500 * gib), 20 * gib, "plenty of room: 20 GiB");
+    assert_eq!(default_budget(41 * gib + gib / 2), 10 * gib, "this PC (41.5 GiB free): a quarter, whole GiB down");
+    assert_eq!(default_budget(5 * gib), MIN_CACHE_BUDGET, "never below 2 GiB");
+    assert_eq!(default_budget(0), MIN_CACHE_BUDGET, "unknown free space");
+}
+
+#[test]
+fn a_set_budget_always_wins_and_a_first_run_saves_its_pick() {
+    let nonce = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let root = std::env::temp_dir().join(format!("recall-budget-{}-{nonce}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let picked = super::video::budget_in(&root);
+    assert!((super::evict::MIN_CACHE_BUDGET..=super::evict::DEFAULT_CACHE_BUDGET).contains(&picked), "{picked}");
+    assert_eq!(picked % (1 << 30), 0, "whole GiB");
+    assert_eq!(super::evict::read_settings(&root).cache_budget_bytes, Some(picked), "saved, so it does not move with free space");
+    let mut settings = super::evict::read_settings(&root);
+    settings.cache_budget_bytes = Some(50 << 30);
+    super::evict::write_settings(&root, &settings).unwrap();
+    assert_eq!(super::video::budget_in(&root), 50 << 30, "the Settings value wins");
+    let _ = std::fs::remove_dir_all(&root);
 }

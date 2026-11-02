@@ -6,7 +6,7 @@
 //!   on-demand work ahead of idle prefetch. SSD paths skip the lane.
 //! * Smart cache (`history`, `score`, `prefetch`, `evict`): interactions are remembered with
 //!   decay, every clip gets a score, the idle planner fills the cache to ~95% of ONE budget
-//!   (default 2 GiB) in score order and eviction drops the lowest scores first.
+//!   (first run: up to 20 GiB, a quarter of free space) in score order and eviction drops the lowest scores first.
 //! * SSD tiers under [`cache_root`] (`<exe folder>\cache` on an SSD install):
 //!   `thumbs/<id>.jpg` library thumbnails · `visuals/<id>/` poster, filmstrip, scrub frames ·
 //!   `editor/<engine key>/` prepared audio stems · `video/<id>.mp4` clip copies (also adopted
@@ -88,7 +88,7 @@ pub fn usage() -> Vec<(&'static str, u64)> {
     vec![("Thumbnails", summary.thumbs), ("Hover previews", summary.scrub), ("Editor media", summary.editor), ("Recent clips", summary.video)]
 }
 
-/// The one cache budget in bytes (default 2 GiB).
+/// The one cache budget in bytes (first run: `evict::default_budget`).
 pub fn budget_bytes() -> u64 {
     video::budget_in(&cache_root())
 }
