@@ -254,7 +254,7 @@ impl Root {
                     .child(detail_row(
                         "Saves to",
                         info.as_ref()
-                            .and_then(|i| crate::services::storage::export_dir(std::path::Path::new(&i.path), std::path::Path::new(&self.recordings_folder())))
+                            .and_then(|i| crate::services::storage::export_dir(std::path::Path::new(&i.path), &crate::backend::library_dir_from(&self.folders)))
                             .map_or_else(|| "exports folder beside the clip".to_owned(), |dir| dir.to_string_lossy().into_owned()),
                         false,
                     )),
