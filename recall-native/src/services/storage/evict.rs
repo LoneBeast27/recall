@@ -15,15 +15,20 @@ const GIB: u64 = 1 << 30;
 pub const DEFAULT_CACHE_BUDGET: u64 = 20 * GIB;
 /// ...and at most this share of the cache drive's free space...
 pub const DEFAULT_FREE_SHARE_PERCENT: u64 = 25;
-/// ...but never below this.
+/// ...and leaves the drive at least this share of its size free...
+pub const DEFAULT_KEEP_FREE_PERCENT: u64 = 10;
+/// ...but is never below this.
 pub const MIN_CACHE_BUDGET: u64 = 2 * GIB;
 
-/// The budget a first run picks (no `storage.json` yet) on a cache drive with `free` bytes:
-/// the smaller of [`DEFAULT_CACHE_BUDGET`] and [`DEFAULT_FREE_SHARE_PERCENT`] of `free`,
-/// in whole GiB, at least [`MIN_CACHE_BUDGET`].
-pub(super) fn default_budget(free: u64) -> u64 {
-    let share = free / 100 * DEFAULT_FREE_SHARE_PERCENT / GIB * GIB;
-    share.min(DEFAULT_CACHE_BUDGET).max(MIN_CACHE_BUDGET)
+/// The budget a first run picks (no `storage.json` yet) on a cache drive with `free` of
+/// `total` bytes: the smallest of [`DEFAULT_CACHE_BUDGET`], [`DEFAULT_FREE_SHARE_PERCENT`] of
+/// `free`, and `free` less [`DEFAULT_KEEP_FREE_PERCENT`] of `total`, in whole GiB, at least
+/// [`MIN_CACHE_BUDGET`].
+pub(super) fn default_budget(free: u64, total: u64) -> u64 {
+    let percent = |bytes: u64, share: u64| (u128::from(bytes) * u128::from(share) / 100) as u64;
+    let share = percent(free, DEFAULT_FREE_SHARE_PERCENT);
+    let spare = free.saturating_sub(percent(total, DEFAULT_KEEP_FREE_PERCENT));
+    (share.min(spare).min(DEFAULT_CACHE_BUDGET) / GIB * GIB).max(MIN_CACHE_BUDGET)
 }
 
 /// Evictable tiers, in per-clip eviction order.

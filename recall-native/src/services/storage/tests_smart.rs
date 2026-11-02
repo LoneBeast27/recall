@@ -313,14 +313,17 @@ fn warm_up_stops_at_the_margin_and_never_drops_a_better_clip() {
 }
 
 #[test]
-fn a_first_run_budget_is_20_gib_or_a_quarter_of_the_free_space() {
+fn a_first_run_budget_is_20_gib_a_quarter_of_free_space_and_keeps_a_tenth_of_the_drive() {
     use super::evict::{DEFAULT_CACHE_BUDGET, MIN_CACHE_BUDGET, default_budget};
     let gib = 1u64 << 30;
     assert_eq!(DEFAULT_CACHE_BUDGET, 20 * gib);
-    assert_eq!(default_budget(500 * gib), 20 * gib, "plenty of room: 20 GiB");
-    assert_eq!(default_budget(41 * gib + gib / 2), 10 * gib, "this PC (41.5 GiB free): a quarter, whole GiB down");
-    assert_eq!(default_budget(5 * gib), MIN_CACHE_BUDGET, "never below 2 GiB");
-    assert_eq!(default_budget(0), MIN_CACHE_BUDGET, "unknown free space");
+    assert_eq!(default_budget(500 * gib, 1000 * gib), 20 * gib, "plenty of room: 20 GiB");
+    assert_eq!(default_budget(60 * gib, 100 * gib), 15 * gib, "a quarter of the free space");
+    assert_eq!(default_budget(40 * gib, 300 * gib), 10 * gib, "a quarter, when the drive keeps its tenth anyway");
+    assert_eq!(default_budget(40 * gib + gib / 2, 350 * gib), 5 * gib, "free less a tenth of the drive, whole GiB down");
+    // This PC: C: is 930.5 GiB with 38.7 GiB free, under a tenth of the drive already.
+    assert_eq!(default_budget(387 * gib / 10, 9305 * gib / 10), MIN_CACHE_BUDGET, "a nearly full drive gets the 2 GiB floor");
+    assert_eq!(default_budget(0, 0), MIN_CACHE_BUDGET, "unknown free space");
 }
 
 #[test]

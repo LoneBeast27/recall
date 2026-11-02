@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::os::windows::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use windows::Win32::Storage::FileSystem::{FILE_FLAG_NO_BUFFERING, FILE_FLAG_SEQUENTIAL_SCAN, FILE_FLAG_WRITE_THROUGH};
 
@@ -92,7 +92,8 @@ pub(super) fn budget_in(root: &Path) -> u64 {
     if let Some(budget) = settings.cache_budget_bytes {
         return budget;
     }
-    let budget = lru::default_budget(super::drive_info(root).map_or(0, |info| info.free));
+    let (free, total) = super::drive_info(root).map_or((0, 0), |info| (info.free, info.total));
+    let budget = lru::default_budget(free, total);
     settings.cache_budget_bytes = Some(budget);
     if let Err(error) = lru::write_settings(root, &settings) {
         eprintln!("save first-run cache budget: {error}");
@@ -139,21 +140,24 @@ pub fn cache_video(path: &str) -> Result<String, String> {
 
 /// The copy itself (call on the source's lane).
 pub(super) fn cache_in(root: &Path, source: &Path, budget: u64) -> Result<PathBuf, String> {
-    copy_in(root, source, budget, &|bytes| {
+    let room = |bytes| {
         budget::enforce(root, budget, bytes);
         true
-    })
+    };
+    copy_in(root, source, budget, &room, &FULL_SPEED)
 }
 
 /// Idle warm-up copy of a clip scored `score` (call on the source's lane): it fits within
 /// the budget less the fill margin, deleting only video copies scored strictly lower;
-/// otherwise it is skipped (`budget::room_below`).
+/// otherwise it is skipped (`budget::room_below`). It gives the drive to any on-demand work
+/// queued on its lane between 8 MiB chunks: Err([`YIELDED`]), temp file deleted.
 pub(super) fn warm_in(root: &Path, source: &Path, budget: u64, limit: u64, score: f64) -> Result<PathBuf, String> {
-    copy_in(root, source, budget, &|bytes| budget::room_below(root, budget, limit, bytes, score))
+    let pace = Pace { rate: slow_drive_rate(), yields: &lane::demand_waiting };
+    copy_in(root, source, budget, &|bytes| budget::room_below(root, budget, limit, bytes, score), &pace)
 }
 
 /// The copy, after `room(bytes)` made room for it (false: no room, nothing copied).
-fn copy_in(root: &Path, source: &Path, budget: u64, room: &dyn Fn(u64) -> bool) -> Result<PathBuf, String> {
+pub(super) fn copy_in(root: &Path, source: &Path, budget: u64, room: &dyn Fn(u64) -> bool, pace: &Pace) -> Result<PathBuf, String> {
     let metadata = source.metadata().map_err(|error| format!("stat clip: {error}"))?;
     let bytes = metadata.len();
     let name = super::file_name(source).ok_or("clip has no file name")?;
@@ -181,7 +185,7 @@ fn copy_in(root: &Path, source: &Path, budget: u64, room: &dyn Fn(u64) -> bool) 
     let temporary = super::temp_sibling(&target);
     COPY_DONE.store(0, Ordering::Relaxed);
     COPY_SIZE.store(bytes, Ordering::Relaxed);
-    let copied = copy_sequential(source, &temporary, bytes, modified);
+    let copied = copy_sequential(source, &temporary, bytes, modified, pace);
     COPY_SIZE.store(0, Ordering::Relaxed);
     if let Err(error) = copied {
         let _ = std::fs::remove_file(&temporary);
@@ -261,19 +265,50 @@ fn remove_stale_parts(directory: &Path) {
     }
 }
 
+/// How a copy runs: at most `rate` bytes a second (0 = the drive's speed; the slowed-drive
+/// check sets it), and stopping with [`YIELDED`] after any chunk where `yields` says so.
+pub(super) struct Pace<'a> {
+    pub rate: u64,
+    pub yields: &'a dyn Fn() -> bool,
+}
+
+/// A warm-up copy stopped for on-demand work on its lane (it is tried again later).
+pub(super) const YIELDED: &str = "the warm-up copy gave the drive to on-demand work";
+
+fn never() -> bool {
+    false
+}
+
+/// On-demand copies: full speed, never yield.
+pub(super) const FULL_SPEED: Pace<'static> = Pace { rate: 0, yields: &never };
+
+impl Pace<'_> {
+    fn after_chunk(&self, started: Instant, copied: u64) -> Result<(), String> {
+        if self.rate > 0 {
+            let due = Duration::from_secs_f64(copied as f64 / self.rate as f64);
+            if let Some(rest) = due.checked_sub(started.elapsed()) {
+                std::thread::sleep(rest);
+            }
+        }
+        if (self.yields)() { Err(YIELDED.into()) } else { Ok(()) }
+    }
+}
+
 /// Unbuffered sequential copy, falling back to a buffered 8 MiB loop (e.g. a network share
 /// that rejects unbuffered handles). The copy carries the source's modification time.
-pub(super) fn copy_sequential(source: &Path, temporary: &Path, bytes: u64, modified: SystemTime) -> Result<(), String> {
-    match copy_unbuffered(source, temporary, bytes, modified) {
+pub(super) fn copy_sequential(source: &Path, temporary: &Path, bytes: u64, modified: SystemTime, pace: &Pace) -> Result<(), String> {
+    match copy_unbuffered(source, temporary, bytes, modified, pace) {
         Ok(()) => Ok(()),
+        Err(yielded) if yielded == YIELDED => Err(yielded),
         Err(unbuffered) => {
             let _ = std::fs::remove_file(temporary);
-            copy_buffered(source, temporary, bytes, modified).map_err(|buffered| format!("copy clip: {unbuffered}; {buffered}"))
+            copy_buffered(source, temporary, bytes, modified, pace).map_err(|buffered| if buffered == YIELDED { buffered } else { format!("copy clip: {unbuffered}; {buffered}") })
         }
     }
 }
 
-pub(super) fn copy_unbuffered(source: &Path, temporary: &Path, bytes: u64, modified: SystemTime) -> Result<(), String> {
+pub(super) fn copy_unbuffered(source: &Path, temporary: &Path, bytes: u64, modified: SystemTime, pace: &Pace) -> Result<(), String> {
+    let started = Instant::now();
     let mut input = OpenOptions::new()
         .read(true)
         .custom_flags(FILE_FLAG_NO_BUFFERING.0 | FILE_FLAG_SEQUENTIAL_SCAN.0)
@@ -301,6 +336,9 @@ pub(super) fn copy_unbuffered(source: &Path, temporary: &Path, bytes: u64, modif
         copied += read as u64;
         COPY_DONE.store(copied, Ordering::Relaxed);
         lane::count_read(read as u64);
+        if copied < bytes {
+            pace.after_chunk(started, copied)?;
+        }
     }
     if copied < bytes {
         return Err("clip ended early".into());
@@ -309,7 +347,8 @@ pub(super) fn copy_unbuffered(source: &Path, temporary: &Path, bytes: u64, modif
     output.set_modified(modified).map_err(|error| format!("stamp copy: {error}"))
 }
 
-fn copy_buffered(source: &Path, temporary: &Path, bytes: u64, modified: SystemTime) -> Result<(), String> {
+fn copy_buffered(source: &Path, temporary: &Path, bytes: u64, modified: SystemTime, pace: &Pace) -> Result<(), String> {
+    let started = Instant::now();
     let mut input = OpenOptions::new().read(true).custom_flags(FILE_FLAG_SEQUENTIAL_SCAN.0).open(source).map_err(|error| format!("open clip: {error}"))?;
     let mut output = OpenOptions::new().write(true).create_new(true).open(temporary).map_err(|error| format!("create copy: {error}"))?;
     let mut buffer = vec![0u8; CHUNK];
@@ -323,6 +362,9 @@ fn copy_buffered(source: &Path, temporary: &Path, bytes: u64, modified: SystemTi
         copied += read as u64;
         COPY_DONE.store(copied, Ordering::Relaxed);
         lane::count_read(read as u64);
+        if copied < bytes {
+            pace.after_chunk(started, copied)?;
+        }
     }
     if copied != bytes {
         return Err("clip size changed during copy".into());
