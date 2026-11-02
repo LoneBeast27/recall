@@ -19,7 +19,7 @@ param(
     [string]$Out,
     [double]$Scale = 1.0,
     [string]$WebDir,
-    [string]$Clip = 'V:\ALL RECORDINGS\VALORANT__2026-10-17__22-21-36-788__adaa986dc538484698bbabf313f2fa1e.mp4',
+    [string]$Clip = 'V:\Recall\Raw\VALORANT__2026-10-17__22-21-36-788__adaa986dc538484698bbabf313f2fa1e.mp4',
     [double]$ClipAt = 40,
     [string]$Python = 'C:\Program Files\Python311\python.exe'
 )

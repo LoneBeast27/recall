@@ -33,7 +33,7 @@ nice-build.ps1 (background cores, BelowNormal); each ffmpeg child also gets very
 low I/O priority and 2 threads; it never writes next to the clips; and it waits
 while a game is running or a fullscreen app is in front.
 
-    powershell -NoProfile -File ~/.claude/tools/nice-build.ps1 python scripts/dev/hud-scan.py "V:/ALL RECORDINGS" OUT_DIR [--old OLD_RESULTS.json]
+    powershell -NoProfile -File ~/.claude/tools/nice-build.ps1 python scripts/dev/hud-scan.py "V:/Recall/Raw" OUT_DIR [--old OLD_RESULTS.json]
 """
 import argparse
 import ctypes
@@ -323,7 +323,7 @@ def main():
         grids["rainbowsixsiege"] = grids["tomclancysrainbowsixsiege"]
     rule = (f"an edge in the median of all sampled frames, or steady edges through 3-frame bursts in >= {SHARE:.0%} "
             f"(and >= {MIN_BURSTS}) of a game's bursts in which the world moved")
-    source = (f"hud grid: scripts/dev/hud-scan.py over V:\\ALL RECORDINGS, {time.strftime('%Y-%m-%d')}; per {BIN} px column at 1440p, bit r = {HUD_ROW} px row r holds HUD, "
+    source = (f"hud grid: scripts/dev/hud-scan.py over V:\\Recall\\Raw, {time.strftime('%Y-%m-%d')}; per {BIN} px column at 1440p, bit r = {HUD_ROW} px row r holds HUD, "
               f"occupied = {rule} (HUD that comes and goes counts); used only by the shortcut hint card")
     (out / "hud-spots.json").write_text(json.dumps({"_source": source, "spots": grids}, indent=1), encoding="utf-8")
     log("done")
