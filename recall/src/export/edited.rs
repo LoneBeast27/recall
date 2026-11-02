@@ -13,7 +13,8 @@ use super::project::{EditedExport, ExportedRange};
 use super::receive_is_drained;
 use super::size_cap::{self, CapInputs, MAX_ATTEMPTS};
 use super::timeline::{
-    ticks_before, timeline_duration_us, timeline_origin_us, us_to_seconds, EditTimeline,
+    seek_near, ticks_before, timeline_duration_us, timeline_origin_us, trim_decode,
+    us_to_seconds, EditTimeline,
 };
 use super::video_encoder::{
     open_decoder, open_encoder, output_dims, probe_video, recommended_bitrate, scaler,
@@ -194,9 +195,23 @@ impl Attempt<'_> {
             cursor: 0,
             decoded_frames: 0,
         };
+        // Start at the keyframe before the first kept range and stop once the last
+        // range is filled: decoding the untouched rest of the clip only costs time.
+        // The sampler ignores frames before a range, so the output is unchanged.
+        let trim = trim_decode();
+        if let Some(first) = self.timeline.ranges.first().filter(|_| trim) {
+            seek_near(&mut ictx, self.origin_us, first.source_start);
+        }
         let video_index = self.source.index;
-        for (stream, packet) in ictx.packets() {
-            if stream.index() == video_index {
+        let mut packet = ff::Packet::empty();
+        while !(trim && pipeline.ranges_done()) {
+            match packet.read(&mut ictx) {
+                Ok(()) => {}
+                Err(ff::Error::Eof) => break,
+                // As `Input::packets` does: a damaged packet is skipped, not fatal.
+                Err(_) => continue,
+            }
+            if packet.stream() == video_index {
                 pipeline.send_packet(&packet, &mut octx, &mut audio_mux)?;
             }
         }
@@ -206,6 +221,8 @@ impl Attempt<'_> {
             return Err("input video decoded no frames for the edit plan".into());
         }
         pipeline.finish_encoder(&mut octx, &mut audio_mux)?;
+        #[cfg(test)]
+        DECODED.with(|decoded| decoded.set(pipeline.decoded_frames));
         let frames = pipeline.cursor;
         drop(pipeline);
         audio_mux.finish(&mut octx)?;
@@ -213,6 +230,12 @@ impl Attempt<'_> {
             .map_err(|e| format!("write output trailer: {e}"))?;
         Ok(frames)
     }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Frames the last export on this thread decoded.
+    pub(super) static DECODED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 struct EditedVideoPipeline<'a> {
@@ -239,6 +262,11 @@ type Mux<'m, 'a> = &'m mut EditedAudioMux<'a>;
 impl EditedVideoPipeline<'_> {
     fn fps(&self) -> u32 {
         self.output_time_base.1 as u32
+    }
+
+    /// Every range has seen a frame at or past its end: later frames add nothing.
+    fn ranges_done(&self) -> bool {
+        self.range_index >= self.timeline.ranges.len()
     }
 
     fn send_packet(

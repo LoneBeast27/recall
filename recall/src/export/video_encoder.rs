@@ -108,9 +108,18 @@ pub(crate) fn probe_video(ictx: &ff::format::context::Input) -> Result<SourceVid
     })
 }
 
+/// Software decoder with frame threads. libavcodec defaults API users to one
+/// thread, which held 1440p60 exports near 100 decoded frames a second; count
+/// 0 lets it size the pool from the process affinity (CCD1 when pinned).
 pub(crate) fn open_decoder(params: ff::codec::Parameters) -> Result<ff::decoder::Video, String> {
-    ff::codec::context::Context::from_parameters(params)
-        .map_err(|e| format!("create video decoder: {e}"))?
+    let mut context = ff::codec::context::Context::from_parameters(params)
+        .map_err(|e| format!("create video decoder: {e}"))?;
+    context.set_threading(ff::codec::threading::Config {
+        kind: ff::codec::threading::Type::Frame,
+        count: 0,
+        ..Default::default()
+    });
+    context
         .decoder()
         .video()
         .map_err(|e| format!("open video decoder: {e}"))
