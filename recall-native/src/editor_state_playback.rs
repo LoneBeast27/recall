@@ -24,9 +24,10 @@ impl EditorState {
         }
     }
 
-    /// Plays from the playhead, from the next kept part when it sits in a cut, or from the
-    /// start of the first kept part when the kept part has finished. Pressed while the preview
-    /// is still loading, playback starts as soon as it is ready.
+    /// Plays from the playhead. Inside a kept part it follows the kept parts (from the next one
+    /// at a part's end, from the first one when the kept part has finished); outside them
+    /// (before In, in a cut, after Out) it plays the cut footage right where it is. Pressed
+    /// while the preview is still loading, playback starts as soon as it is ready.
     pub fn play(&mut self) {
         if self.info.is_none() && self.loading_path.is_none() {
             return; // no clip
@@ -41,11 +42,13 @@ impl EditorState {
         }
         self.play_when_ready = false;
         let pos = preview.position().unwrap_or(0.0);
-        let start = transport_rules::play_from(&self.plan.ranges, pos, limit);
+        let free = transport_rules::plays_free(&self.plan.ranges, pos, limit);
+        let start = if free { pos } else { transport_rules::play_from(&self.plan.ranges, pos, limit) };
         let result = if (start - pos).abs() > 1e-6 { preview.seek(start) } else { Ok(()) };
         match result.and_then(|()| preview.play()) {
             Ok(()) => {
                 self.playing = true;
+                self.free_play = free;
                 self.play_started = Some(Instant::now());
                 self.saw_native_playing = false;
                 self.watch.reset();
@@ -61,6 +64,7 @@ impl EditorState {
     pub fn pause(&mut self) {
         self.playing = false;
         self.play_when_ready = false;
+        self.free_play = false;
         self.loading.buffering = false;
         self.play_started = None;
         self.watch.reset();
@@ -72,6 +76,10 @@ impl EditorState {
     pub fn seek(&mut self, seconds: f64) {
         self.watch.reset();
         let target = seconds.clamp(0.0, self.duration());
+        if self.playing && !self.play_when_ready {
+            // A seek while playing goes free, or back under the kept-range rules, by where it lands.
+            self.free_play = transport_rules::plays_free(&self.plan.ranges, target, self.clock_limit());
+        }
         if let Some(preview) = self.preview.as_mut() {
             if let Err(error) = preview.seek(target) {
                 self.status = error;
@@ -84,7 +92,8 @@ impl EditorState {
         self.seek(pos + delta);
     }
 
-    /// Per-frame while playing: continue, skip a cut, or stop at the end of the kept part.
+    /// Per-frame while playing: continue, skip a cut, or stop at the end of the kept part
+    /// (playing free: continue until a kept part takes over, or stop at the clip's end).
     pub(super) fn follow_playback(&mut self) -> bool {
         let limit = self.clock_limit();
         let Some(preview) = self.preview.as_mut() else { return false };
@@ -99,11 +108,16 @@ impl EditorState {
         }
         self.saw_native_playing |= native_playing;
         let settled = self.play_started.is_some_and(|t| t.elapsed() >= Duration::from_millis(250));
-        match transport_rules::follow(&self.plan.ranges, pos, limit) {
+        let free = self.free_play;
+        let next = if free { transport_rules::follow_free(&self.plan.ranges, pos, limit) } else { transport_rules::follow(&self.plan.ranges, pos, limit) };
+        // The end a stop rests on: the kept part's, or the clip's when playing free.
+        let rest = if free { Some(limit) } else { self.plan.ranges.last().map(|r| r.end.min(limit)) };
+        match next {
+            Follow::Enter => self.free_play = false,
             Follow::Stop => {
                 self.pause();
-                // The clock overshoots by up to a poll: rest the playhead on the kept part's end.
-                if let Some(end) = self.plan.ranges.last().map(|r| r.end.min(limit)).filter(|end| pos > *end) {
+                // The clock overshoots by up to a poll: rest the playhead on the end.
+                if let Some(end) = rest.filter(|end| pos > *end) {
                     self.seek(end);
                 }
             }
@@ -113,7 +127,7 @@ impl EditorState {
             Follow::Keep if settled && self.saw_native_playing && !native_playing => {
                 let silent = !preview.has_sound();
                 self.pause();
-                if let Some(end) = self.plan.ranges.last().map(|r| r.end.min(limit)).filter(|_| silent) {
+                if let Some(end) = rest.filter(|_| silent) {
                     self.seek(end);
                 }
             }
