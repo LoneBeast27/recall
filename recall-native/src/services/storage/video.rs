@@ -69,7 +69,9 @@ pub fn start_fill(source: &Path, metadata: &std::fs::Metadata, first: &[u64]) ->
     budget::enforce(&root, budget, bytes);
     let target = directory.join(format!("{id}.mp4"));
     let part = super::temp_sibling(&target);
-    let fill = ClipFill::create(source, &part, &target, bytes, modified, slow_drive_rate(), mega("RECALL_SLOW_DRIVE_FAIL"))?;
+    // A head fetched by the filter probe starts the fill: index and start already on the SSD.
+    let seeded = super::head::take(&root, &id, bytes, super::mtime_secs(metadata), &part).unwrap_or_default();
+    let fill = ClipFill::create_seeded(source, &part, &target, bytes, modified, &seeded, slow_drive_rate(), mega("RECALL_SLOW_DRIVE_FAIL"))?;
     fill.start(first)?;
     Ok(fill)
 }
@@ -126,6 +128,21 @@ pub fn cache_video(path: &str) -> Result<String, String> {
 
 /// The copy itself (call on the source's lane).
 pub(super) fn cache_in(root: &Path, source: &Path, budget: u64) -> Result<PathBuf, String> {
+    copy_in(root, source, budget, &|bytes| {
+        budget::enforce(root, budget, bytes);
+        true
+    })
+}
+
+/// Idle warm-up copy of a clip scored `score` (call on the source's lane): it fits within
+/// the budget less the fill margin, deleting only video copies scored strictly lower;
+/// otherwise it is skipped (`budget::room_below`).
+pub(super) fn warm_in(root: &Path, source: &Path, budget: u64, limit: u64, score: f64) -> Result<PathBuf, String> {
+    copy_in(root, source, budget, &|bytes| budget::room_below(root, budget, limit, bytes, score))
+}
+
+/// The copy, after `room(bytes)` made room for it (false: no room, nothing copied).
+fn copy_in(root: &Path, source: &Path, budget: u64, room: &dyn Fn(u64) -> bool) -> Result<PathBuf, String> {
     let metadata = source.metadata().map_err(|error| format!("stat clip: {error}"))?;
     let bytes = metadata.len();
     let name = super::file_name(source).ok_or("clip has no file name")?;
@@ -142,7 +159,9 @@ pub(super) fn cache_in(root: &Path, source: &Path, budget: u64) -> Result<PathBu
         return Err(format!("Clip ({}) is larger than the video cache allows ({}, half the cache size).", gib(bytes), gib(cap)));
     }
     remove_stale_parts(&directory);
-    budget::enforce(root, budget, bytes);
+    if !room(bytes) {
+        return Err("No room in the video cache without dropping a clip you are more likely to open.".into());
+    }
     let free = super::drive_info(root).map_or(u64::MAX, |info| info.free);
     if free < bytes.saturating_add(KEEP_FREE) {
         return Err(format!("Not enough free space on the cache drive ({} free).", gib(free)));
@@ -164,6 +183,7 @@ pub(super) fn cache_in(root: &Path, source: &Path, budget: u64) -> Result<PathBu
     }
     super::ffmpeg::publish(&temporary, &target)?;
     touch(root, &file);
+    super::head::forget(root, file.trim_end_matches(".mp4"));
     Ok(target)
 }
 

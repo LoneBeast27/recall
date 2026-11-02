@@ -9,6 +9,7 @@ mod clip_open;
 #[path = "../../recall/src/edit_model.rs"]
 mod edit_model;
 mod editor_state;
+mod library_probe;
 mod library_state;
 mod media;
 mod offscreen;

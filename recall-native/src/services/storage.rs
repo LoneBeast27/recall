@@ -25,6 +25,7 @@ mod drive;
 mod evict;
 mod ffmpeg;
 pub mod fill;
+mod head;
 mod history;
 mod io_priority;
 mod kept;
@@ -53,6 +54,8 @@ pub use drive::{DriveInfo, DriveKind, drive_info, drive_kind};
 pub(crate) use ffmpeg::{Seek, extract_frame, probe_duration};
 pub use ffmpeg::{OnLine, Run, binary, run_cancellable, run_cancellable_lines, run_hidden, run_watched};
 pub use io_priority::close_helpers;
+#[allow(unused_imports)]
+pub use head::{ProbeClip, cancel_probe, probe_filter};
 #[allow(unused_imports)]
 pub use kept::{adopt_kept, sweep_kept};
 pub use probe::{ProbedClip, probe_clip};

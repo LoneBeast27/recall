@@ -152,6 +152,8 @@ pub(super) fn inventory(root: &Path, score: &dyn Fn(&str) -> f64) -> Inventory {
     }
     let projects = dir_size(&root.join("projects")).0;
     other += dir_size(&root.join("tmp")).0;
+    // Clip heads from the filter probe (`head.rs`): at most a few hundred MB, never evicted.
+    other += dir_size(&root.join("heads")).0;
     for file in ["storage.json", "media.json", "interactions.json"] {
         other += root.join(file).metadata().map_or(0, |m| m.len());
     }
@@ -194,8 +196,30 @@ pub(super) fn enforce(root: &Path, budget: u64, incoming_video: u64) -> u64 {
     let inventory = inventory(root, &super::prefetch::score_of);
     let keep = kept();
     let evicted = evict::plan(&inventory.units, inventory.projects + inventory.other, budget, budget / 2, incoming_video, &keep);
+    remove(root, &inventory, &evicted)
+}
+
+/// Makes room for `incoming` bytes of a speculative video copy of a clip scored `score`,
+/// within `limit` (the budget minus the warm-up margin) and the video cap, by deleting only
+/// video copies scored strictly lower ([`evict::room_below`]). False: nothing deleted.
+pub(super) fn room_below(root: &Path, budget: u64, limit: u64, incoming: u64, score: f64) -> bool {
+    let _guard = INDEX_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let inventory = inventory(root, &super::prefetch::score_of);
+    let fixed = inventory.projects + inventory.other;
+    match evict::room_below(&inventory.units, fixed, limit, budget / 2, incoming, score, &kept()) {
+        Some(evicted) => {
+            remove(root, &inventory, &evicted);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Deletes `evicted` units and forgets them in the indexes. Returns bytes freed. Call with
+/// [`INDEX_LOCK`] held.
+fn remove(root: &Path, inventory: &Inventory, evicted: &[String]) -> u64 {
     let mut freed = 0;
-    for name in &evicted {
+    for name in evicted {
         if let Some(unit) = inventory.units.iter().find(|u| &u.name == name) {
             freed += delete(root, unit);
         }

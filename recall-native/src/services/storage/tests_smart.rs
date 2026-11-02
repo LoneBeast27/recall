@@ -85,15 +85,33 @@ fn browse_depth_and_favourites_shift_the_ranking() {
 }
 
 #[test]
-fn interest_decays_with_a_two_week_half_life() {
+fn a_clips_interest_halves_every_week_and_its_game_every_two() {
     let w = Weights::default();
+    assert_eq!(super::score::CLIP_HALF_LIFE_DAYS, 7.0);
     let mut history = History::default();
     history.apply(&Interaction::Opened(path("Game", 1)), NOW - 14 * DAY, &w);
     let memory = &history.clips[&name_of(&path("Game", 1))];
-    let now_value = memory.interest.value_at(NOW, w.memory_half_life_ms());
-    assert!((now_value - w.open_event / 2.0).abs() < 1e-9, "{now_value}");
+    let now_value = memory.interest.value_at(NOW, w.clip_half_life_ms());
+    assert!((now_value - w.open_event / 4.0).abs() < 1e-9, "two weeks = two clip half-lives: {now_value}");
+    let game = history.games.values().next().unwrap().value_at(NOW, w.memory_half_life_ms());
+    assert!((game - w.open_event / 2.0).abs() < 1e-9, "game affinity fades slower: {game}");
     history.prune(NOW + 400 * DAY, &w);
     assert!(history.clips.is_empty() && history.games.is_empty(), "decayed memories are dropped");
+}
+
+#[test]
+fn an_open_outweighs_a_play_which_outweighs_hovers() {
+    let w = Weights::default();
+    let mut history = History::default();
+    let (opened, played, hovered) = (path("Game", 1), path("Game", 2), path("Game", 3));
+    history.apply(&Interaction::Opened(opened.clone()), NOW, &w);
+    history.apply(&Interaction::Played(played.clone()), NOW, &w);
+    for _ in 0..5 {
+        history.apply(&Interaction::Hovered(hovered.clone()), NOW, &w);
+    }
+    let value = |p: &str| history.clips[&name_of(p)].interest.value;
+    assert_eq!((value(&opened), value(&played)), (1.0, 0.5));
+    assert!((value(&hovered) - 0.25).abs() < 1e-9, "five hovers are a quarter of an open: {}", value(&hovered));
 }
 
 #[test]
@@ -115,6 +133,7 @@ fn interactions_round_trip_through_the_history_file() {
     assert!(memory.favourite);
     assert!((memory.interest.value - (w.open_event + w.hover_event + w.export_event + w.favourite_event)).abs() < 1e-9);
     assert_eq!(history.clips[&name_of(&path("VALORANT", 4))].saved_at_ms, Some(NOW));
+    assert_eq!(history.clips[&name_of(&path("VALORANT", 4))].interest.value, w.open_event, "a fresh save starts as one open");
     assert_eq!(history.browse_days.value, 12.0);
     let file = std::env::temp_dir().join(format!("recall-history-{}-{}.json", std::process::id(), NOW));
     history.save(&file).unwrap();
@@ -260,4 +279,32 @@ fn inventory_classifies_tiers_and_enforcement_frees_on_disk() {
     assert!(root.join("thumbs/aaaa.jpg").exists() && root.join("projects/aaaa.json").exists());
     assert!(!root.join("editor/k1").exists() && !root.join("video/aaaa.mp4").exists());
     let _ = std::fs::remove_dir_all(root);
+}
+
+fn video(name: &str, bytes: u64, score: f64) -> Unit {
+    Unit { tier: Tier::Video, name: format!("video/{name}.mp4"), bytes, last_used: 0, score }
+}
+
+#[test]
+fn warm_up_stops_at_the_margin_and_never_drops_a_better_clip() {
+    use super::evict::room_below;
+    let (limit, cap) = (950, 500);
+    // Room as it is: nothing to drop.
+    assert_eq!(room_below(&[video("a", 100, 1.0)], 0, limit, cap, 200, 0.5, &[]), Some(vec![]));
+    // The video cap is reached: a lower clip makes way, the lowest first.
+    let units = [video("low", 200, 0.2), video("lower", 200, 0.1), video("high", 100, 3.0)];
+    assert_eq!(room_below(&units, 0, limit, cap, 200, 1.0, &[]), Some(vec!["video/lower.mp4".to_string()]));
+    // Only better clips hold the room: the copy is skipped, nothing is dropped.
+    assert_eq!(room_below(&units, 0, limit, cap, 200, 0.05, &[]), None);
+    // Equal scores do not trade places either.
+    assert_eq!(room_below(&units, 0, limit, cap, 200, 0.1, &[]), None, "strictly lower only");
+    // The clip open in the editor is never the one dropped.
+    assert_eq!(room_below(&units, 0, limit, cap, 200, 1.0, &["video/lower.mp4".into()]), Some(vec!["video/low.mp4".to_string()]));
+    // Other tiers fill the cache to the margin: dropping lower video copies is not enough.
+    assert_eq!(room_below(&units, 700, limit, cap, 200, 1.0, &[]), None, "the fill stops at budget minus the margin");
+    // The same rules at any budget: a 50 GB cache takes a 400 MB clip without dropping anything.
+    let gb = 1u64 << 30;
+    let big = [video("x", 400 << 20, 0.1)];
+    assert_eq!(room_below(&big, gb, 50 * gb / 100 * 95, 25 * gb, 400 << 20, 2.0, &[]), Some(vec![]));
+    assert_eq!(super::prefetch::warm_limit(2 * gb), 2 * gb / 100 * 95);
 }

@@ -47,6 +47,9 @@ impl EditorState {
         let result = if (start - pos).abs() > 1e-6 { preview.seek(start) } else { Ok(()) };
         match result.and_then(|()| preview.play()) {
             Ok(()) => {
+                if let Some(info) = &self.info {
+                    note_played(self.generation, &info.path);
+                }
                 self.playing = true;
                 self.free_play = free;
                 self.play_started = Some(Instant::now());
@@ -159,5 +162,13 @@ impl EditorState {
         }
         self.play_started = Some(Instant::now());
         self.saw_native_playing = false;
+    }
+}
+
+/// The smart cache hears of the first play of each open (`Interaction::Played`).
+fn note_played(generation: u64, path: &str) {
+    static REPORTED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(u64::MAX);
+    if REPORTED.swap(generation, std::sync::atomic::Ordering::Relaxed) != generation {
+        crate::services::storage::record_interaction(crate::services::storage::Interaction::Played(path.to_owned()));
     }
 }

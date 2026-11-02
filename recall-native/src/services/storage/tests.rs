@@ -121,7 +121,7 @@ pub(super) fn clip(name: &str, has_thumb: bool, has_duration: bool) -> PrefetchC
 
 #[test]
 fn planner_fills_thumbs_first_then_climbs_the_cascade_by_rank() {
-    use super::prefetch::{EDITOR_TOP, VIDEO_TOP};
+    use super::prefetch::EDITOR_TOP;
     let clips: Vec<PrefetchClip> = (0..30).map(|i| clip(&format!("c{i}.mp4"), i % 2 == 0, i % 3 == 0)).collect();
     // Rank order deliberately differs from list order.
     let ranked: Vec<usize> = (0..30).rev().collect();
@@ -135,7 +135,7 @@ fn planner_fills_thumbs_first_then_climbs_the_cascade_by_rank() {
     let editors = order.iter().filter(|(s, _)| *s == Step::Editor).count();
     let videos: Vec<usize> = order.iter().filter(|(s, _)| *s == Step::Video).map(|(_, i)| *i).collect();
     assert_eq!(editors, EDITOR_TOP);
-    assert_eq!(videos, vec![29, 28, 27][..VIDEO_TOP].to_vec(), "video copies only for the top predictions");
+    assert_eq!(videos, (0..30).rev().collect::<Vec<_>>(), "video copies walk the whole ranking; the budget stops them");
     assert_eq!(order.iter().filter(|(s, _)| *s == Step::Scrub).count(), 30);
     let none = plan(&clips, &ranked, &|step, _| step != Step::Duration);
     assert!(none.iter().all(|(s, _)| *s == Step::Duration), "cached work is not planned");
