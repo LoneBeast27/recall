@@ -1,6 +1,6 @@
 //! Editor inspector: per-track gain/mute, export options and the export footer.
 use gpui::{
-    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, SharedString, Window, canvas, div,
+    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, Window, canvas, div,
     prelude::*, px,
 };
 
@@ -251,7 +251,13 @@ impl Root {
                     .child(detail_row("Length", format!("{} of {}", timecode(kept), timecode(self.ed.duration())), true))
                     .child(detail_row("Size", info.as_ref().map_or_else(String::new, |i| format!("{} × {}", i.width, i.height)), false))
                     .child(detail_row("Audio", audio_note, false))
-                    .child(detail_row("Saves to", "exports folder beside the clip".into(), false)),
+                    .child(detail_row(
+                        "Saves to",
+                        info.as_ref()
+                            .and_then(|i| crate::services::storage::export_dir(std::path::Path::new(&i.path), std::path::Path::new(&self.recordings_folder())))
+                            .map_or_else(|| "exports folder beside the clip".to_owned(), |dir| dir.to_string_lossy().into_owned()),
+                        false,
+                    )),
             )
             .into_any_element()
     }
@@ -288,6 +294,7 @@ impl Root {
             .children(self.ed.export_error.clone().map(|e| div().text_size(px(12.)).text_color(c(theme::ERROR)).line_clamp(3).child(e)))
             .children(exported.map(|summary| {
                 let path = summary.path.clone();
+                let drag_path = summary.path.clone();
                 div()
                     .id("exported")
                     .flex()
@@ -306,9 +313,27 @@ impl Root {
                             .flex()
                             .flex_col()
                             .child(div().font_weight(FontWeight::MEDIUM).child(match summary.fps { Some(fps) => format!("Exported · {fps} fps"), None => "Exported · lossless".to_owned() }))
-                            .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(format!("{} frames · {}", summary.frames, library::format_duration(summary.seconds)))),
+                            .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(format!("{} frames · {}", summary.frames, library::format_duration(summary.seconds))))
+                            .child(div().text_size(px(11.)).text_color(c(theme::TERTIARY)).child("Drag into Discord or a folder")),
                     )
                     .child(icon(Icon::Folder, 15., theme::MUTED))
+                    // A press that moves becomes a file drag of the export (Discord, Explorer, chats);
+                    // a plain click shows it in Explorer.
+                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, _| {
+                        this.drag_origin = Some((drag_path.clone(), f32::from(event.position.x), f32::from(event.position.y)));
+                    }))
+                    .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, _, cx| {
+                        if event.pressed_button != Some(MouseButton::Left) {
+                            return;
+                        }
+                        if let Some((path, x0, y0)) = this.drag_origin.clone() {
+                            let (x, y) = (f32::from(event.position.x), f32::from(event.position.y));
+                            if (x - x0).abs() + (y - y0).abs() > 8.0 {
+                                this.drag_origin = None;
+                                this.drag_paths(vec![path], cx);
+                            }
+                        }
+                    }))
                     .on_click(cx.listener(move |_, _, _, _| crate::backend::show_in_folder(&path)))
             }))
             .child(
