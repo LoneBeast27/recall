@@ -7,6 +7,7 @@ use ffmpeg_next as ff;
 
 use crate::edit_model::{AudioSetting, EditPlan, TimeRange};
 use crate::export::edit_pcm::{gain_multiplier, EditedPcm};
+use crate::export::timeline;
 
 pub(crate) struct EncodedAudioTrack {
     pub(crate) source_index: usize,
@@ -88,10 +89,27 @@ fn encode_track(
     // Where the previous frame ended; the first frame goes to its timestamp.
     let mut next_source_sample: Option<i64> = None;
     let mut resampler: Option<ff::software::resampling::Context> = None;
+    // Read only around the kept ranges; the first frame after a seek lands at
+    // its own timestamp, and the margin keeps decoder warm-up out of the ranges.
+    let trim = timeline::trim_decode() && !ranges.is_empty();
+    let stop_us = if trim {
+        let first = timeline::seconds_to_us(ranges[0].start)?;
+        timeline::seek_near(&mut ictx, origin_us, first);
+        let last = ranges.iter().map(|r| r.end).fold(0.0, f64::max);
+        timeline::seconds_to_us(last)?.saturating_add(timeline::SEEK_MARGIN_US)
+    } else {
+        i64::MAX
+    };
 
     for (stream, packet) in ictx.packets() {
         if stream.index() != stream_index {
             continue;
+        }
+        let packet_us = packet.pts().or(packet.dts()).map(|pts| {
+            pts.rescale(stream_tb, ff::rescale::TIME_BASE).saturating_sub(origin_us)
+        });
+        if packet_us.is_some_and(|us| us > stop_us) {
+            break;
         }
         decoder
             .send_packet(&packet)
