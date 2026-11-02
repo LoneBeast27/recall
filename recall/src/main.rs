@@ -430,6 +430,7 @@ fn main() {
         let project = std::fs::read_to_string(project).map_err(|e| e.to_string()).and_then(|s| export::parse_project(&s));
         let (plan, settings) = match project { Ok(p) => p, Err(e) => { eprintln!("editor project: {e}"); std::process::exit(1); } };
         let request = export::ExportRequest { input: input.clone(), output: output.clone(), fps };
+        if std::env::var_os("RECALL_CPU_MASK").is_none() { export_worker::keep_to_upper_cpus(); }
         if run_export(&request, Some((&plan, &settings)), config.json).is_err() { std::process::exit(1); }
         return;
     }

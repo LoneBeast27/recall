@@ -114,6 +114,45 @@ fn speed_scales_video_and_audio_durations() {
     eprintln!("speed: video {frames} frames, audio samples {:?}", probed.audio_samples);
 }
 
+/// Exports `plan` with and without the seek/early stop; returns the decoded
+/// frame counts (full, trimmed) after checking the outputs are identical.
+fn trimmed_matches_full(clip: &Clip, tag: &str, plan: &EditPlan) -> (u64, u64) {
+    use super::edited::DECODED;
+    use super::timeline::TRIM_DECODE;
+    let pass = |trim: bool| {
+        TRIM_DECODE.with(|t| t.set(trim));
+        let name = format!("{tag}-{trim}.mp4");
+        let report = run(clip, &name, plan, &ExportSettings::default());
+        TRIM_DECODE.with(|t| t.set(true));
+        let report = report.unwrap();
+        (report.frames, DECODED.with(|d| d.get()), probe(std::path::Path::new(&clip.output(&name))))
+    };
+    let (full_frames, full_decoded, full) = pass(false);
+    let (frames, decoded, trimmed) = pass(true);
+    assert_eq!(frames, full_frames);
+    assert_eq!(trimmed.video, full.video, "{tag}: trimmed decode changed the video");
+    assert_eq!(trimmed.audio, full.audio, "{tag}: trimmed decode changed the audio");
+    (full_decoded, decoded)
+}
+
+#[test]
+fn late_range_export_seeks_and_stops_without_changing_frames() {
+    let spec = Spec { seconds: 10.0, ..Spec::default() };
+    let Some(clip) = synth("seek", &spec) else { return };
+    let (full, trimmed) = trimmed_matches_full(&clip, "late", &plan(vec![TimeRange::new(6.1, 7.0)]));
+    assert!(full >= 590, "reference decoded only {full} frames");
+    // 1 s margin + up to one 0.5 s GOP before 6.1 s, the 0.9 s range, and the
+    // frames still in the threaded decoder when reading stops (at most 16).
+    assert!(trimmed <= 170, "late range decoded {trimmed} of {full} frames");
+
+    let (full, trimmed) = trimmed_matches_full(
+        &clip,
+        "split",
+        &plan(vec![TimeRange::new(0.5, 1.0), TimeRange { start: 5.0, end: 6.0, speed: 2.0 }]),
+    );
+    assert!(trimmed <= 400 && trimmed < full, "split ranges decoded {trimmed} of {full} frames");
+}
+
 #[test]
 fn unit_speed_export_matches_the_kept_length() {
     let Some(clip) = clip("unit") else { return };

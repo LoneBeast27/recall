@@ -27,7 +27,9 @@ impl VideoBackend {
         let mut options = ff::Dictionary::new();
         match self {
             Self::Nvenc => {
-                options.set("preset", "p5");
+                // p4 over p5: a 22 s 1440p60 export took 6.0 s instead of 8.0 s
+                // at the same size, SSIM against the source 0.92544 vs 0.92568.
+                options.set("preset", "p4");
                 options.set("tune", "hq");
                 options.set("rc", "vbr");
                 options.set("bf", "0");
@@ -108,9 +110,18 @@ pub(crate) fn probe_video(ictx: &ff::format::context::Input) -> Result<SourceVid
     })
 }
 
+/// Software decoder with frame threads. libavcodec defaults API users to one
+/// thread, which held 1440p60 exports near 100 decoded frames a second; count
+/// 0 lets it size the pool from the process affinity (CCD1 when pinned).
 pub(crate) fn open_decoder(params: ff::codec::Parameters) -> Result<ff::decoder::Video, String> {
-    ff::codec::context::Context::from_parameters(params)
-        .map_err(|e| format!("create video decoder: {e}"))?
+    let mut context = ff::codec::context::Context::from_parameters(params)
+        .map_err(|e| format!("create video decoder: {e}"))?;
+    context.set_threading(ff::codec::threading::Config {
+        kind: ff::codec::threading::Type::Frame,
+        count: 0,
+        ..Default::default()
+    });
+    context
         .decoder()
         .video()
         .map_err(|e| format!("open video decoder: {e}"))
