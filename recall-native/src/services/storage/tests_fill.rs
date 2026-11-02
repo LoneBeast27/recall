@@ -295,3 +295,26 @@ fn chunks_of_a_range_stay_inside_the_clip() {
     assert_eq!(spanning(10 * CHUNK, 20 * CHUNK, 3 * CHUNK).collect::<Vec<_>>(), [2]);
     assert_eq!(spanning(CHUNK, CHUNK, 3 * CHUNK).collect::<Vec<_>>(), [1]);
 }
+
+#[test]
+fn a_seeded_fill_has_its_head_at_once_and_copies_only_the_rest() {
+    let dir = scratch("seeded");
+    let bytes = 6 * CHUNK as usize;
+    let (source, modified) = clip(&dir, bytes);
+    // A head from the filter probe: chunks 0, 1 and 5 already in place.
+    let part = dir.join("clip.part");
+    let data = pattern(bytes);
+    let mut head = vec![0u8; bytes];
+    for chunk in [0usize, 1, 5] {
+        let range = chunk * CHUNK as usize..(chunk + 1) * CHUNK as usize;
+        head[range.clone()].copy_from_slice(&data[range]);
+    }
+    std::fs::write(&part, &head).unwrap();
+    let fill = ClipFill::create_seeded(&source, &part, &dir.join("copy.mp4"), bytes as u64, modified, &[0, 1, 5], 0, 0).unwrap();
+    assert!(fill.has(0, 2 * CHUNK) && fill.has(5 * CHUNK, 6 * CHUNK), "the head plays before the drive is read");
+    assert!(!fill.has(2 * CHUNK, 3 * CHUNK));
+    assert!((fill.progress() - 0.5).abs() < 1e-9, "{}", fill.progress());
+    fill.start(&[5, 0]).unwrap();
+    assert!(fill.wait_done());
+    assert_eq!(std::fs::read(dir.join("copy.mp4")).unwrap(), data, "the rest arrives around the head");
+}

@@ -87,6 +87,27 @@ pub(super) fn plan(units: &[Unit], fixed: u64, budget: u64, video_cap: u64, inco
     evict
 }
 
+/// Room for a speculative video copy of a clip scored `below`: the video copies to delete so
+/// `incoming` fits under `video_cap` and the whole cache under `limit`, taking only copies
+/// scored strictly lower (lowest first, never `keep`). `None` when that is not enough: then
+/// nothing is deleted and the copy is skipped, so warming never pushes out a better clip.
+pub(super) fn room_below(units: &[Unit], fixed: u64, limit: u64, video_cap: u64, incoming: u64, below: f64, keep: &[String]) -> Option<Vec<String>> {
+    let mut video = units.iter().filter(|u| u.tier == Tier::Video).map(|u| u.bytes).sum::<u64>().saturating_add(incoming);
+    let mut total = units.iter().map(|u| u.bytes).sum::<u64>().saturating_add(fixed).saturating_add(incoming);
+    let mut lower: Vec<&Unit> = units.iter().filter(|u| u.tier == Tier::Video && u.score < below && !keep.contains(&u.name)).collect();
+    lower.sort_by(|a, b| a.score.total_cmp(&b.score).then(a.last_used.cmp(&b.last_used)).then_with(|| a.name.cmp(&b.name)));
+    let mut evict = Vec::new();
+    for unit in lower {
+        if video <= video_cap && total <= limit {
+            break;
+        }
+        video = video.saturating_sub(unit.bytes);
+        total = total.saturating_sub(unit.bytes);
+        evict.push(unit.name.clone());
+    }
+    (video <= video_cap && total <= limit).then_some(evict)
+}
+
 /// `{ "<key>": value }` index files (`video/lru.json`, `media.json` sections).
 pub(super) fn read_index(path: &Path) -> BTreeMap<String, u64> {
     std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()

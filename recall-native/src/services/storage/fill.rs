@@ -128,6 +128,11 @@ fn lock(shared: &Shared) -> MutexGuard<'_, State> {
     shared.state.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Marks a new file sparse (the filter probe's clip heads match the fill's layout).
+pub(super) fn make_sparse(file: &std::fs::File) -> Result<(), String> {
+    set_sparse(file)
+}
+
 fn chunk_count(bytes: u64) -> u64 {
     bytes.div_ceil(CHUNK).max(1)
 }
@@ -135,11 +140,25 @@ fn chunk_count(bytes: u64) -> u64 {
 impl ClipFill {
     /// Prepares `part` (sparse, full length) beside `target`; call [`ClipFill::start`] to begin.
     pub fn create(source: &Path, part: &Path, target: &Path, bytes: u64, modified: SystemTime, throttle: u64, fail_after: u64) -> Result<Self, String> {
-        let file = OpenOptions::new().write(true).create(true).truncate(true).open(part).map_err(|error| format!("create fill: {error}"))?;
+        Self::create_seeded(source, part, target, bytes, modified, &[], throttle, fail_after)
+    }
+
+    /// [`ClipFill::create`] over a `part` that already holds the `seeded` chunks (a clip head
+    /// from the filter probe, `head.rs`); with none, `part` starts empty.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_seeded(source: &Path, part: &Path, target: &Path, bytes: u64, modified: SystemTime, seeded: &[u64], throttle: u64, fail_after: u64) -> Result<Self, String> {
+        let file = OpenOptions::new().write(true).create(true).truncate(seeded.is_empty()).open(part).map_err(|error| format!("create fill: {error}"))?;
         set_sparse(&file)?;
         file.set_len(bytes).map_err(|error| format!("size fill: {error}"))?;
         IN_USE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(part.to_path_buf());
-        let state = State { have: vec![false; chunk_count(bytes) as usize], missing: chunk_count(bytes), cursor: 0, wanted: Vec::new(), played: 0, outcome: Outcome::Filling, error: None, paced: false, sought: None };
+        let mut have = vec![false; chunk_count(bytes) as usize];
+        for &chunk in seeded {
+            if let Some(slot) = have.get_mut(chunk as usize) {
+                *slot = true;
+            }
+        }
+        let missing = have.iter().filter(|h| !**h).count() as u64;
+        let state = State { have, missing, cursor: 0, wanted: Vec::new(), played: 0, outcome: Outcome::Filling, error: None, paced: false, sought: None };
         Ok(Self::shared(source, part, target, bytes, modified, state, throttle, fail_after, false))
     }
 

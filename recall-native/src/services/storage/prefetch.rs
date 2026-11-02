@@ -1,9 +1,10 @@
 //! Smart-cache planner: keep the cache as full as the budget allows (~95%) with what the
 //! user is most likely to look at next (`score`). Clips are ranked by score; every clip gets
 //! its thumbnail and duration (cheap, kept), then in rank order each clip climbs the
-//! cascade hover frames → editor media (top [`EDITOR_TOP`]) → SSD video copy (top
-//! [`VIDEO_TOP`], within the half-budget video cap). Work items that would overfill the
-//! budget are skipped, so smaller items further down still fit.
+//! cascade hover frames → editor media (top [`EDITOR_TOP`]) → SSD video copy (every clip in
+//! rank order, within the half-budget video cap). Work items that would overfill the budget
+//! are skipped, so smaller items further down still fit. A video copy (idle warm-up) may
+//! push out only copies of clips scored lower than its own (`video::warm_in`).
 //!
 //! The plan runs as each disk lane's idle source: one item at a time, only after the lane
 //! has been free of on-demand work for the idle grace period, and not at all while the
@@ -20,8 +21,8 @@ use super::lane::{self, IdleSource, LaneKey, Task};
 use super::score::{ClipFacts, Weights, score_all};
 
 pub const EDITOR_TOP: usize = 24;
-pub const VIDEO_TOP: usize = 3;
-const FILL_PERCENT: u64 = 95;
+/// The fill stops at this share of the budget; the rest is the margin on-demand work uses.
+pub(super) const FILL_PERCENT: u64 = 95;
 const THUMB_ESTIMATE: u64 = 30 << 10;
 const SCRUB_ESTIMATE: u64 = 160 << 10;
 /// Editor audio stems: 48 kHz 16-bit, stereo game + mono mic.
@@ -111,9 +112,7 @@ pub(super) fn plan(clips: &[PrefetchClip], ranked: &[usize], cached: &dyn Fn(Ste
         if rank < EDITOR_TOP {
             push(Step::Editor);
         }
-        if rank < VIDEO_TOP {
-            push(Step::Video);
-        }
+        push(Step::Video);
     }
     order
 }
@@ -223,7 +222,9 @@ impl IdleSource for Arc<Feed> {
             let (step, index) = self.order.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).pop_front()?;
             let clip = &self.library.clips[index];
             // Re-check: on-demand work may have filled it since the plan was made.
-            if cached(&self.root, &self.owners, step, clip) || !self.gate.admit(step, estimate(step, clip)) {
+            // A video copy is admitted by `warm_in` itself: it may trade places with a lower one.
+            let admitted = step == Step::Video || self.gate.admit(step, estimate(step, clip));
+            if cached(&self.root, &self.owners, step, clip) || !admitted {
                 continue;
             }
             let feed = Arc::clone(self);
@@ -259,13 +260,19 @@ impl Feed {
                 }
             }
             Step::Video => {
-                if super::video::cache_in(&self.root, Path::new(&path), self.budget).is_ok() {
+                let score = score_of(&clip_id(clip));
+                if super::video::warm_in(&self.root, Path::new(&path), self.budget, warm_limit(self.budget), score).is_ok() {
                     self.gate.add(step, clip.bytes);
                 }
             }
         }
         invalidate_usage();
     }
+}
+
+/// The cache size idle warm-up stops at: the budget less the fill margin.
+pub(super) fn warm_limit(budget: u64) -> u64 {
+    budget / 100 * FILL_PERCENT
 }
 
 /// Replaces the plan with one for `clips` (the full list, any order).

@@ -1,6 +1,7 @@
 //! Interaction memory for the smart cache: what the user opens, hovers, exports and
 //! favourites, which games they play, how far back they browse. Everything decays
-//! exponentially (`Weights::memory_half_life_days`), so old habits fade. Stored locally in
+//! exponentially (a clip's own interest over `Weights::clip_half_life_days`, games and
+//! browse depth over `Weights::memory_half_life_days`), so old habits fade. Stored locally in
 //! `<cache>/interactions.json` (atomic, debounced writes); never leaves the machine.
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -17,6 +18,8 @@ use super::score::Weights;
 pub enum Interaction {
     /// A clip was opened in the editor (path).
     Opened(String),
+    /// Playback started in the editor (path), once per open.
+    Played(String),
     /// A library tile was hovered (path).
     Hovered(String),
     /// A clip was exported (path).
@@ -90,17 +93,19 @@ pub(super) fn clip_key(path: &str) -> Option<(String, String, String)> {
 impl History {
     /// Applies one interaction at `now_ms`. Returns true when it should re-plan the cache.
     pub fn apply(&mut self, event: &Interaction, now_ms: u64, weights: &Weights) -> bool {
-        let half_life = weights.memory_half_life_ms();
+        let (half_life, clip_half_life) = (weights.memory_half_life_ms(), weights.clip_half_life_ms());
         let (path, amount, replan) = match event {
             Interaction::ScrolledTo { days_back } => {
                 self.browse_days.raise_to(f64::from(*days_back), now_ms, half_life);
                 return false;
             }
             Interaction::Opened(path) => (path, weights.open_event, true),
+            Interaction::Played(path) => (path, weights.play_event, false),
             Interaction::Exported(path) => (path, weights.export_event, true),
             Interaction::Hovered(path) => (path, weights.hover_event, false),
             Interaction::Favourited(path) => (path, weights.favourite_event, true),
-            Interaction::Saved(path) => (path, 0.0, true),
+            // A fresh save starts as warm as one open (it is usually opened within minutes).
+            Interaction::Saved(path) => (path, weights.open_event, true),
         };
         let Some((name, game, display)) = clip_key(path) else { return false };
         let memory = self.clips.entry(name).or_default();
@@ -110,7 +115,10 @@ impl History {
             _ => {}
         }
         if amount > 0.0 {
-            memory.interest.add(amount, now_ms, half_life);
+            memory.interest.add(amount, now_ms, clip_half_life);
+        }
+        // A save says which game is recorded, not which one is watched.
+        if amount > 0.0 && !matches!(event, Interaction::Saved(_)) {
             self.games.entry(game.clone()).or_default().add(amount, now_ms, half_life);
             self.game_names.insert(game, display);
         }
@@ -119,9 +127,9 @@ impl History {
 
     /// Drops memories that have decayed to nothing (keeps the file small).
     pub fn prune(&mut self, now_ms: u64, weights: &Weights) {
-        let half_life = weights.memory_half_life_ms();
+        let (half_life, clip_half_life) = (weights.memory_half_life_ms(), weights.clip_half_life_ms());
         let day = 86_400_000;
-        self.clips.retain(|_, m| m.favourite || m.interest.value_at(now_ms, half_life) >= 0.01 || m.saved_at_ms.is_some_and(|t| now_ms.saturating_sub(t) < day));
+        self.clips.retain(|_, m| m.favourite || m.interest.value_at(now_ms, clip_half_life) >= 0.01 || m.saved_at_ms.is_some_and(|t| now_ms.saturating_sub(t) < day));
         self.games.retain(|_, g| g.value_at(now_ms, half_life) >= 0.01);
         let games = &self.games;
         self.game_names.retain(|key, _| games.contains_key(key));

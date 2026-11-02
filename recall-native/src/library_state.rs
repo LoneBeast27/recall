@@ -93,6 +93,8 @@ pub struct LibraryState {
     recent: changes::Recent,
     /// Path of the clip opened most recently.
     played: Option<String>,
+    /// The game whose clip heads were last asked for (`library_probe`).
+    probed_game: Option<String>,
 }
 
 impl LibraryState {
@@ -135,6 +137,7 @@ impl LibraryState {
             deepest_scroll_days: 0,
             recent: Default::default(),
             played: None,
+            probed_game: None,
         }
     }
 
@@ -182,6 +185,7 @@ impl LibraryState {
 
     pub fn refilter(&mut self) {
         let sorted = library::filter_sort(&self.records, &self.filter, self.sort);
+        crate::library_probe::follow(&mut self.probed_game, &self.filter, &self.records);
         self.visible_count = sorted.len();
         let by_day = matches!(self.sort, SortOrder::Newest | SortOrder::Oldest);
         self.groups = library::group_by_day(&self.records, &sorted, self.today, by_day);
