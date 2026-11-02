@@ -1,4 +1,5 @@
-//! How a title rename ends, and what a filter does to the selection.
+//! How a title rename ends, what a filter does to the selection, which clips a tile menu acts
+//! on, and the last played clip.
 use super::*;
 use crate::{backend::ClipEntry, services::library::Filter};
 
@@ -60,4 +61,56 @@ fn a_filter_takes_hidden_clips_out_of_the_selection_and_ends_the_question() {
     lib.records[0].favourite = false;
     lib.refilter();
     assert!(lib.selection.is_empty() && !lib.confirm_delete);
+}
+
+#[test]
+fn menu_acts_on_the_selection_only_when_the_clip_is_in_it() {
+    let order: Vec<String> = ["a", "b", "c", "d"].map(String::from).to_vec();
+    let selection = ["d", "b"].map(String::from).into_iter().collect();
+    assert_eq!(super::menu_targets(&selection, order.clone(), "b"), ["b", "d"], "selection, display order");
+    assert_eq!(super::menu_targets(&selection, order.clone(), "c"), ["c"], "an unselected clip alone");
+    assert_eq!(super::menu_targets(&Default::default(), order, "a"), ["a"]);
+}
+
+const CLIPS: [&str; 3] = ["VALORANT__2026-10-22__01-02-03.mp4", "VALORANT__2026-10-22__01-02-04.mp4", "VALORANT__2026-10-21__01-02-05.mp4"];
+
+#[test]
+fn last_played_is_the_latest_stamp_across_every_clip() {
+    let mut lib = library(&CLIPS);
+    assert!(lib.last_played().is_none());
+    let (a, b) = (lib.records[0].path.clone(), lib.records[1].path.clone());
+    lib.mark_played_at(&b, 200);
+    lib.mark_played_at(&a, 100);
+    assert_eq!(lib.last_played().map(|r| r.path.as_str()), Some(b.as_str()), "the later stamp wins, not the later call");
+    lib.filter = Filter { query: "no such clip".into(), ..Default::default() };
+    lib.refilter();
+    assert_eq!(lib.last_played().map(|r| r.path.as_str()), Some(b.as_str()), "a filter does not hide it");
+    lib.reindex();
+    assert_eq!(lib.last_played().map(|r| r.path.as_str()), Some(b.as_str()), "rebuilt from the records");
+}
+
+#[test]
+fn an_editor_path_marks_the_listed_clip() {
+    let mut lib = library(&CLIPS);
+    let listed = lib.records[2].path.clone();
+    lib.mark_played_at(&format!(r"\\?\{listed}"), 300);
+    assert_eq!(lib.records[2].played, Some(300));
+    assert_eq!(lib.last_played().map(|r| r.path.as_str()), Some(listed.as_str()));
+    lib.mark_played_at(r"D:\c\not-listed.mp4", 400);
+    assert_eq!(lib.last_played().map(|r| r.path.as_str()), Some(listed.as_str()), "an unknown clip changes nothing");
+}
+
+#[test]
+fn reveal_finds_the_row_that_holds_the_clip() {
+    let mut lib = library(&CLIPS);
+    lib.columns = 1;
+    lib.refilter();
+    // Rows: 22 Oct header, two tiles, 21 Oct header, one tile.
+    let older = lib.records.iter().find(|r| r.file_name == CLIPS[2]).unwrap().path.clone();
+    assert_eq!(lib.row_of(&older), Some(4));
+    assert_eq!(lib.row_of(&format!(r"\\?\{older}")), Some(4));
+    lib.filter = Filter { query: "no such clip".into(), ..Default::default() };
+    lib.refilter();
+    assert_eq!(lib.row_of(&older), None, "filtered out");
+    lib.reveal(&older);
 }
