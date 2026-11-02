@@ -49,12 +49,27 @@ pub fn sidecar_step(existing: Option<&[u8]>, next: &[u8], no_edits: bool, ours: 
     }
 }
 
-/// `clip` has a finished export in the `exports` folder beside it. Exported clips stay
-/// protected from the storage limit, so their sidecar stays when the edits are undone.
-pub fn has_export(clip: &Path) -> bool {
-    let (Some(folder), Some(stem)) = (clip.parent(), clip.file_stem().and_then(|s| s.to_str())) else { return false };
+/// Where exports of `clip` land. With the Recall layout (recordings in `...\Recall\Raw`) every
+/// export goes to the `Edited` folder beside `Raw`; otherwise to `exports` beside the clip.
+pub fn export_dir(clip: &Path, recordings: &Path) -> Option<std::path::PathBuf> {
+    let raw = recordings.file_name().is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("raw"));
+    match recordings.parent() {
+        Some(recall) if raw => Some(recall.join("Edited")),
+        _ => clip.parent().map(|folder| folder.join("exports")),
+    }
+}
+
+/// `clip` has a finished export, in its export folder ([`export_dir`]) or in the older
+/// `exports` folder beside it. Exported clips stay protected from the storage limit, so their
+/// sidecar stays when the edits are undone.
+pub fn has_export(clip: &Path, recordings: &Path) -> bool {
+    let Some(stem) = clip.file_stem().and_then(|s| s.to_str()) else { return false };
     let names = [format!("{stem}-edited-").to_lowercase(), format!("{stem}-trim-").to_lowercase()];
-    std::fs::read_dir(folder.join("exports")).into_iter().flatten().flatten().any(|item| {
+    let mut folders: Vec<std::path::PathBuf> = export_dir(clip, recordings).into_iter().collect();
+    if let Some(beside) = clip.parent().map(|folder| folder.join("exports")).filter(|beside| !folders.contains(beside)) {
+        folders.push(beside);
+    }
+    folders.iter().flat_map(|folder| std::fs::read_dir(folder).into_iter().flatten().flatten()).any(|item| {
         let name = item.file_name().to_string_lossy().to_lowercase();
         names.iter().any(|prefix| name.starts_with(prefix))
     })
