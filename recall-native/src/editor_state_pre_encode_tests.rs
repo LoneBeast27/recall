@@ -52,6 +52,30 @@ fn only_a_change_arms_a_pre_encode_and_lossless_or_a_new_clip_disarms_it() {
 }
 
 #[test]
+fn idle_ticks_reuse_the_key_and_a_change_recomputes_it() {
+    let _slot = crate::services::pre_encode::test_slot_lock();
+    let mut ed = editor();
+    for _ in 0..20 {
+        ed.follow_pre_encode();
+    }
+    assert_eq!(ed.pre.key_runs, 1, "no file stats or JSON on idle ticks");
+    let opened = ed.pre.current;
+    ed.plan.ranges = vec![TimeRange::new(98.0, 120.0)];
+    ed.follow_pre_encode();
+    ed.follow_pre_encode();
+    assert_eq!(ed.pre.key_runs, 2, "one recompute per change");
+    assert_ne!(ed.pre.current, opened);
+    ed.export_settings.height = Some(720);
+    ed.follow_pre_encode();
+    assert_eq!(ed.pre.key_runs, 3, "a settings change recomputes too");
+    if let Some((_, at)) = ed.pre.keyed.as_mut() {
+        *at -= REKEY_AFTER;
+    }
+    ed.follow_pre_encode();
+    assert_eq!(ed.pre.key_runs, 4, "an aged key is rechecked (engine build may have changed)");
+}
+
+#[test]
 fn an_export_in_progress_freezes_the_plan_it_was_given() {
     let _slot = crate::services::pre_encode::test_slot_lock();
     let mut ed = editor();
