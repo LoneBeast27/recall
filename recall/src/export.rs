@@ -53,6 +53,20 @@ pub struct ExportResult {
     pub seconds: f64,
 }
 
+static PROGRESS: std::sync::OnceLock<fn(u64, u64)> = std::sync::OnceLock::new();
+
+/// Where edited re-encodes report (frames written, frames planned). Only a
+/// standalone `--export-edit` sets one; the recorder's own exports stay quiet.
+pub fn set_progress_sink(sink: fn(u64, u64)) {
+    let _ = PROGRESS.set(sink);
+}
+
+pub(crate) fn report_progress(done: u64, total: u64) {
+    if let Some(sink) = PROGRESS.get() {
+        sink(done, total);
+    }
+}
+
 pub(crate) fn receive_is_drained(error: &ff::Error) -> bool {
     match error {
         ff::Error::Eof => true,

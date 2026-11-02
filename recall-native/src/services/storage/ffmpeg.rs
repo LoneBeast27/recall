@@ -34,6 +34,14 @@ pub enum Run {
 
 /// [`run_hidden`] that ends the helper as soon as `cancel` turns true, or at `limit`.
 pub fn run_cancellable(command: &mut Command, lowered: bool, cancel: &AtomicBool, limit: Duration) -> io::Result<Run> {
+    run_cancellable_lines(command, lowered, cancel, limit, None)
+}
+
+/// Each stdout line as the helper prints it (progress reports).
+pub type OnLine = Box<dyn FnMut(&str) + Send>;
+
+/// [`run_cancellable`] that also hands every stdout line to `on_line` as it arrives.
+pub fn run_cancellable_lines(command: &mut Command, lowered: bool, cancel: &AtomicBool, limit: Duration, on_line: Option<OnLine>) -> io::Result<Run> {
     if cancel.load(Ordering::Acquire) {
         return Ok(Run::Cancelled { pid: 0 });
     }
@@ -47,7 +55,10 @@ pub fn run_cancellable(command: &mut Command, lowered: bool, cancel: &AtomicBool
             bytes
         })
     };
-    let stdout = child.stdout.take().map(|pipe| drain(Box::new(pipe)));
+    let stdout = child.stdout.take().map(|pipe| match on_line {
+        Some(on_line) => drain_lines(pipe, on_line),
+        None => drain(Box::new(pipe)),
+    });
     let stderr = child.stderr.take().map(|pipe| drain(Box::new(pipe)));
     let collect = |thread: Option<std::thread::JoinHandle<Vec<u8>>>| thread.and_then(|t| t.join().ok()).unwrap_or_default();
     let started = Instant::now();
@@ -64,6 +75,21 @@ pub fn run_cancellable(command: &mut Command, lowered: bool, cancel: &AtomicBool
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Collects `pipe` like the plain drain, calling `on_line` for each complete line on the way.
+fn drain_lines(pipe: impl Read + Send + 'static, mut on_line: OnLine) -> std::thread::JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        let mut reader = std::io::BufReader::new(pipe);
+        let mut bytes = Vec::new();
+        let mut line = Vec::new();
+        while reader.read_until(b'\n', &mut line).is_ok_and(|read| read > 0) {
+            on_line(String::from_utf8_lossy(&line).trim_end());
+            bytes.append(&mut line);
+        }
+        bytes
+    })
 }
 
 /// [`run_hidden`] with an end: the process is killed once it has run for `limit`, or as soon as

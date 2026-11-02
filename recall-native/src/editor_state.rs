@@ -98,6 +98,8 @@ pub struct EditorState {
     pub exported: Option<ExportSummary>,
     pub export_error: Option<String>,
     pub loading_path: Option<String>,
+    /// Background re-encode of the current plan (`editor_state_pre_encode.rs`).
+    pre: pre_encode::PreEncodeState,
 }
 
 #[path = "editor_state_persist.rs"]
@@ -108,6 +110,8 @@ mod edits;
 mod playback;
 #[path = "editor_state_stream.rs"]
 pub mod stream;
+#[path = "editor_state_pre_encode.rs"]
+mod pre_encode;
 
 impl EditorState {
     pub fn new(preview: Result<NativePreview, String>) -> Self {
@@ -163,6 +167,7 @@ impl EditorState {
             exported: None,
             export_error: None,
             loading_path: None,
+            pre: Default::default(),
         }
     }
 
@@ -187,6 +192,7 @@ impl EditorState {
         self.warning = None;
         self.exported = None;
         self.export_error = None;
+        self.drop_pre_encode();
         self.status = "Opening clip…".into();
         self.generation = self.generation.wrapping_add(1);
         self.loading_path = Some(path.clone());
