@@ -1,6 +1,10 @@
 //! Where pressing play starts and what playback does at the edges of the kept ranges. Pure
 //! rules (unit tested); `EditorState` applies them to the native preview.
 //!
+//! The kept-range rules hold only while the playhead is in a kept range. Play pressed with the
+//! playhead outside them (before In, in a cut, after Out) runs "free" through the cut footage,
+//! with no snap to In; once it reaches a kept range the kept-range rules apply again.
+//!
 //! `limit` is the latest time the player's clock can reach (the clip's end, or the picture's
 //! last frame for a clip without sound): a kept range never plays past it.
 use crate::edit_model::TimeRange;
@@ -17,8 +21,29 @@ pub enum Follow {
     Keep,
     /// In a cut (or before the first kept range): continue at the next kept range's start.
     Jump(f64),
-    /// Past the end of the last kept range: stop.
+    /// Past the end of the last kept range (free playback: the clip's end): stop.
     Stop,
+    /// Free playback reached a kept range: the kept-range rules apply from here.
+    Enter,
+}
+
+/// True when play pressed with the playhead at `pos` runs free: it sits outside every kept
+/// range (a range's end and a poll's overshoot past it count as inside) and the clip has
+/// something left to play. A finished clip still starts over at the first kept range.
+pub fn plays_free(ranges: &[TimeRange], pos: f64, limit: f64) -> bool {
+    if ranges.is_empty() || pos >= limit - END_SLACK {
+        return false;
+    }
+    !ranges.iter().any(|r| pos >= r.start - AT_EDGE && pos <= r.end.min(limit) + END_SLACK)
+}
+
+/// What free playback does next with the clock at `pos`: run on through cut footage, enter a
+/// kept range when it reaches one, and stop at the clip's end.
+pub fn follow_free(ranges: &[TimeRange], pos: f64, limit: f64) -> Follow {
+    if ranges.iter().any(|r| pos >= r.start - AT_EDGE && pos < r.end.min(limit) - AT_EDGE) {
+        return Follow::Enter;
+    }
+    if pos >= limit - AT_EDGE { Follow::Stop } else { Follow::Keep }
 }
 
 /// Where play starts for the playhead at `pos`: right there when it is inside a kept range
@@ -137,8 +162,81 @@ mod tests {
     }
 
     #[test]
+    fn play_inside_the_kept_range_keeps_its_rules() {
+        // In 2.0, Out 5.0 of a 10 s clip.
+        let kept = ranges(&[(2.0, 5.0)]);
+        assert!(!plays_free(&kept, 3.0, 10.0));
+        assert_eq!(play_from(&kept, 3.0, 10.0), 3.0);
+        assert_eq!(follow(&kept, 4.9995, 10.0), Follow::Stop, "playback ends at Out");
+        for pos in [5.0, 5.02, 4.99] {
+            assert!(!plays_free(&kept, pos, 10.0), "{pos}: resting at Out is inside");
+            assert_eq!(play_from(&kept, pos, 10.0), 2.0, "{pos}: play again goes back to In");
+        }
+    }
+
+    #[test]
+    fn play_before_in_runs_on_into_the_range_without_a_snap() {
+        let kept = ranges(&[(2.0, 5.0)]);
+        assert!(plays_free(&kept, 0.5, 10.0), "no jump to In");
+        assert_eq!(follow_free(&kept, 0.5, 10.0), Follow::Keep);
+        assert_eq!(follow_free(&kept, 1.99, 10.0), Follow::Keep);
+        // Reaching In: the kept range takes over, and its rules end playback at Out.
+        assert_eq!(follow_free(&kept, 2.0, 10.0), Follow::Enter);
+        assert_eq!(follow(&kept, 4.9995, 10.0), Follow::Stop);
+    }
+
+    #[test]
+    fn play_after_out_runs_to_the_clip_end_and_stops() {
+        let kept = ranges(&[(2.0, 5.0)]);
+        assert!(plays_free(&kept, 6.0, 10.0), "no jump to In");
+        assert_eq!(follow_free(&kept, 6.0, 10.0), Follow::Keep);
+        assert_eq!(follow_free(&kept, 9.9, 10.0), Follow::Keep);
+        assert_eq!(follow_free(&kept, 10.0, 10.0), Follow::Stop);
+        // Stopped at the clip's end: play again starts the kept part over.
+        assert!(!plays_free(&kept, 10.0, 10.0));
+        assert_eq!(play_from(&kept, 10.0, 10.0), 2.0);
+    }
+
+    #[test]
+    fn playhead_moved_out_of_the_range_while_paused_plays_free() {
+        let kept = ranges(&[(2.0, 5.0)]);
+        assert!(!plays_free(&kept, 4.0, 10.0), "paused inside");
+        // Dragged past Out while paused, then play: it runs on, no loop back to In.
+        assert!(plays_free(&kept, 7.0, 10.0));
+        assert_eq!(follow_free(&kept, 7.5, 10.0), Follow::Keep);
+        // Dragged before In while paused, then play: same.
+        assert!(plays_free(&kept, 1.0, 10.0));
+    }
+
+    #[test]
+    fn play_in_a_cut_between_kept_ranges_runs_into_the_next_range() {
+        let kept = ranges(&[(0.0, 2.0), (3.0, 5.0)]);
+        assert!(plays_free(&kept, 2.5, 10.0));
+        assert_eq!(follow_free(&kept, 2.9, 10.0), Follow::Keep);
+        assert_eq!(follow_free(&kept, 3.0, 10.0), Follow::Enter);
+        assert!(!plays_free(&kept, 2.0, 10.0), "at a range's end is inside");
+    }
+
+    #[test]
+    fn an_untrimmed_clip_never_plays_free() {
+        let whole = ranges(&[(0.0, 10.0)]);
+        for pos in [0.0, 5.0, 9.99, 10.0] {
+            assert!(!plays_free(&whole, pos, 10.0), "{pos}");
+        }
+    }
+
+    #[test]
+    fn free_play_respects_the_clock_limit() {
+        // No sound: the picture's clock stops at 10.438, short of the 10.453 duration.
+        let kept = ranges(&[(2.0, 5.0)]);
+        assert!(!plays_free(&kept, 10.43, 10.438), "nothing left past Out: starts over");
+        assert_eq!(follow_free(&kept, 10.4375, 10.438), Follow::Stop);
+    }
+
+    #[test]
     fn nothing_kept_plays_where_it_is() {
         assert_eq!(play_from(&[], 3.0, 10.0), 3.0);
         assert_eq!(follow(&[], 3.0, 10.0), Follow::Stop);
+        assert!(!plays_free(&[], 3.0, 10.0));
     }
 }

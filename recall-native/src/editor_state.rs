@@ -43,6 +43,9 @@ pub struct EditorState {
     pub playing: bool,
     /// Play was pressed while the preview was loading: start once it is ready.
     play_when_ready: bool,
+    /// Playing outside the kept ranges (play pressed before In, in a cut, or after Out):
+    /// no snap to In until the playhead reaches a kept range.
+    free_play: bool,
     pub fps: u32,
     /// Lossless/re-encode, size cap and output height for the next export.
     pub export_settings: ExportSettings,
@@ -125,6 +128,7 @@ impl EditorState {
             preview,
             playing: false,
             play_when_ready: false,
+            free_play: false,
             fps: 60,
             export_settings: ExportSettings::default(),
             marks: Vec::new(),
