@@ -439,7 +439,7 @@ pub fn flush_project(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSetting
     let flushed=storage::run_io(Path::new(&info.path),Priority::Interactive,move||->Result<Flushed,String>{
         let existing=std::fs::read(&path).ok();let name=path.to_string_lossy().into_owned();
         let ours=ours&&(existing.is_some()||!path.exists());
-        match storage::sidecar_step(existing.as_deref(),&lane_bytes,default&&!storage::has_export(&clip),ours){
+        match storage::sidecar_step(existing.as_deref(),&lane_bytes,default&&!storage::has_export(&clip,&library_dir()),ours){
             storage::SidecarStep::Keep=>Ok(Flushed::Current(name)),
             storage::SidecarStep::Write=>{storage::write_atomic(&path,&lane_bytes)?;Ok(Flushed::Current(name))}
             storage::SidecarStep::Remove=>{
@@ -467,7 +467,7 @@ pub fn export_clip(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)
     if EXPORTING.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err(){return Err("Another export is running.".into());}
     let _guard=ExportGuard;
     let nonce=SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e|e.to_string())?.as_nanos();
-    let source=Path::new(&info.path);let outdir=source.parent().ok_or("source has no directory")?.join("exports");
+    let source=Path::new(&info.path);let outdir=storage::export_dir(source,&library_dir()).ok_or("source has no directory")?;
     std::fs::create_dir_all(&outdir).map_err(|e|format!("create export directory: {e}"))?;
     let stem=source.file_stem().and_then(|v|v.to_str()).unwrap_or("clip");
     let output=if lossless{outdir.join(format!("{stem}-trim-{nonce}.mp4"))}else{outdir.join(format!("{stem}-edited-{fps}fps-{nonce}.mp4"))};
