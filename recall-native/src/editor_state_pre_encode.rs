@@ -24,7 +24,23 @@ pub struct PreEncodeState {
     pending_since: Option<Instant>,
     /// Panel line last shown.
     shown: Option<String>,
+    /// What the key was last computed from, and when: an idle tick reuses it.
+    keyed: Option<(KeyInputs, Instant)>,
+    /// Times the key was computed (tests check idle ticks skip it).
+    key_runs: u64,
 }
+
+/// Everything the key reads that lives in the editor (the engine build is rechecked by age).
+#[derive(PartialEq)]
+struct KeyInputs {
+    clip: (String, u64, u64),
+    plan: crate::edit_model::EditPlan,
+    fps: u32,
+    export: crate::edit_model::ExportSettings,
+}
+
+/// A key computed from unchanged inputs is reused this long (the engine file may be replaced).
+const REKEY_AFTER: Duration = Duration::from_secs(2);
 
 impl EditorState {
     /// Per-tick: follows plan changes, starts and stops the pre-encode. True when the panel line changed.
@@ -43,7 +59,20 @@ impl EditorState {
     fn follow_pre_encode(&mut self) {
         // Not while the clip still loads: the pre-encode would read the same hard drive as the copy.
         let Some(info) = self.info.as_ref().filter(|_| self.loading_path.is_none() && !self.loading.active()) else { return };
-        let key = pre_encode::key(info, &self.plan, self.fps, &self.export_settings);
+        let inputs = KeyInputs {
+            clip: (info.path.clone(), info.source_bytes, info.source_modified_ms),
+            plan: self.plan.clone(),
+            fps: self.fps,
+            export: self.export_settings.clone(),
+        };
+        let fresh = self.pre.keyed.as_ref().is_some_and(|(seen, at)| *seen == inputs && at.elapsed() < REKEY_AFTER);
+        let key = if fresh {
+            self.pre.current
+        } else {
+            self.pre.key_runs += 1;
+            self.pre.keyed = Some((inputs, Instant::now()));
+            pre_encode::key(info, &self.plan, self.fps, &self.export_settings)
+        };
         if key != self.pre.current {
             let baseline = *self.pre.baseline.get_or_insert(key.unwrap_or(0));
             self.pre.touched |= key != Some(baseline);

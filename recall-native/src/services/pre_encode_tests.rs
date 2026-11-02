@@ -80,6 +80,31 @@ fn one_prepared_file_matches_only_its_own_key_and_is_handed_over_once() {
 }
 
 #[test]
+fn the_start_sweep_removes_only_cut_off_deliveries() {
+    let folder = std::env::temp_dir().join(format!("recall-pre-encode-sweep-{}", std::process::id()));
+    std::fs::create_dir_all(&folder).unwrap();
+    let keep = [
+        "clip-edited-60fps-1.mp4",
+        "clip-edited-60fps-1.mp4.recall-pre-encode",
+        ".clip-edited-60fps-1.mp4.recall-export-77-0.mp4",
+        ".recall-pre-encode",
+        "notes.txt",
+    ];
+    for name in keep.iter().chain([".clip-edited-60fps-2.mp4.recall-pre-encode"].iter()) {
+        std::fs::write(folder.join(name), b"x").unwrap();
+    }
+    std::fs::create_dir_all(folder.join(".folder.recall-pre-encode")).unwrap();
+    assert_eq!(remove_deliveries(&folder), 1);
+    assert!(!folder.join(".clip-edited-60fps-2.mp4.recall-pre-encode").exists());
+    for name in keep {
+        assert!(folder.join(name).exists(), "{name} must stay");
+    }
+    assert!(folder.join(".folder.recall-pre-encode").is_dir(), "folders stay");
+    assert_eq!(remove_deliveries(&folder.join("missing")), 0);
+    let _ = std::fs::remove_dir_all(folder);
+}
+
+#[test]
 fn a_moved_or_rewritten_clip_is_a_mismatch() {
     let folder = std::env::temp_dir().join(format!("recall-pre-encode-src-{}", std::process::id()));
     std::fs::create_dir_all(&folder).unwrap();
