@@ -336,6 +336,18 @@ impl Root {
                     }))
                     .on_click(cx.listener(move |_, _, _, _| crate::backend::show_in_folder(&path)))
             }))
+            .children(self.ed.pre_encode_line().filter(|_| !self.ed.exporting).map(|line| {
+                let ready = self.ed.pre_encode_ready();
+                div()
+                    .id("pre-encode")
+                    .flex()
+                    .items_center()
+                    .gap(px(6.))
+                    .text_size(px(12.))
+                    .text_color(c(if ready { theme::ACTIVE } else { theme::TERTIARY }))
+                    .child(icon(if ready { Icon::Check } else { Icon::Refresh }, 13., if ready { theme::ACTIVE } else { theme::TERTIARY }))
+                    .child(div().truncate().child(line))
+            }))
             .child(
                 ui::button("export", Variant::Primary)
                     .h(px(36.))
