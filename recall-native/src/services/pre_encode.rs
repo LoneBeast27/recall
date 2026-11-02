@@ -183,6 +183,38 @@ pub fn discard() {
 }
 
 /// App start: anything left in the folder is from an earlier run.
+/// Suffix of a prepared file still being copied into the export folder (`.<name><suffix>`).
+const DELIVERING: &str = ".recall-pre-encode";
+
+/// App start: a copy into the export folder cut off by a crash leaves a hidden
+/// `.<name>.recall-pre-encode` there. Removes exactly those, off the UI thread and on the
+/// folder's drive lane.
+pub fn sweep_deliveries() {
+    let body = || {
+        let recordings = backend::library_dir();
+        let Some(folder) = storage::export_dir(&recordings.join("clip.mp4"), &recordings) else { return };
+        let lane = folder.clone();
+        storage::submit_io(&lane, Priority::Background, move || {
+            remove_deliveries(&folder);
+        });
+    };
+    let _ = std::thread::Builder::new().name("recall-delivery-sweep".into()).spawn(body);
+}
+
+/// Deletes the cut-off copies in `folder`; nothing else. Returns how many went.
+fn remove_deliveries(folder: &Path) -> usize {
+    let Ok(entries) = std::fs::read_dir(folder) else { return 0 };
+    entries
+        .flatten()
+        .filter(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            name.starts_with('.') && name.ends_with(DELIVERING) && name.len() > DELIVERING.len() + 1
+        })
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter(|entry| std::fs::remove_file(entry.path()).is_ok())
+        .count()
+}
+
 pub fn clear_dir() {
     let Ok(entries) = std::fs::read_dir(dir()) else { return };
     let ready = slot().ready.as_ref().map(|ready| ready.path.clone());
@@ -251,7 +283,7 @@ fn source_unchanged(info: &ClipInfo) -> bool {
 fn deliver(prepared: &Prepared, info: &ClipInfo, fps: u32) -> Result<ExportSummary, String> {
     let target = backend::export_target(info, fps, false)?;
     let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("export.mp4").to_owned();
-    let hidden = target.with_file_name(format!(".{name}.recall-pre-encode"));
+    let hidden = target.with_file_name(format!(".{name}{DELIVERING}"));
     let outdir = target.parent().map(Path::to_path_buf).unwrap_or_default();
     let (from, to, temp) = (prepared.path.clone(), target.clone(), hidden.clone());
     let copied = storage::run_io(&outdir, Priority::Interactive, move || -> Result<(), String> {
