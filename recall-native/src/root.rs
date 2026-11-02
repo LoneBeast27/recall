@@ -135,6 +135,7 @@ impl Root {
         workers.job(Job::List);
         crate::services::storage::sweep_kept(crate::backend::library_dir);
         crate::services::pre_encode::clear_dir();
+        crate::services::pre_encode::sweep_deliveries();
         let mut root = Self {
             route: Route::Library,
             focus: cx.focus_handle(),
