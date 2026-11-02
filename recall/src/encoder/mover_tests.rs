@@ -17,6 +17,7 @@ fn cfg(same_volume: VolumeCheck) -> Config {
         retry_after: Duration::from_millis(50),
         same_volume,
         background: false,
+        stamp: stamp_mtime,
     }
 }
 
@@ -104,6 +105,29 @@ fn kept_copies_stop_at_the_cap_while_the_app_is_away() {
     assert!(keep_staged_within(&a, &out.join("A.mp4"), 10_000).is_some(), "the first fits");
     assert_eq!(keep_staged_within(&b, &out.join("B.mp4"), 10_000), None, "6000 + 6000 is past the cap");
     assert!(b.exists(), "the caller deletes it, as when keeping fails");
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn a_failed_stamp_still_lands_the_clip_but_keeps_no_copy() {
+    let (stage, out) = (temp_dir("s"), temp_dir("o"));
+    let (src, bytes) = staged(&stage, "G.mp4", 9000);
+    let dest = out.join("G.mp4");
+    let refuse: StampFn = |_, _| Err(std::io::Error::other("stamp refused"));
+    let failing = Config { stamp: refuse, ..cfg(ACROSS) };
+    let (events, sink) = Events::capture(true);
+    let (queue, control) = spawn(events, failing, Vec::new()).unwrap();
+    assert!(queue.submit(MoveJob { staged: src.clone(), dest: dest.clone() }));
+    let moved = wait_for(&sink, "clip_moved", 1);
+    assert_eq!(moved[0]["path"], text(&dest));
+    assert!(moved[0].get("kept_path").is_none(), "an unstamped clip keeps no copy: {}", moved[0]);
+    assert_eq!(std::fs::read(&dest).unwrap(), bytes, "the move itself completed");
+    assert!(!src.exists() && !stage.join(KEPT_DIR).join("G.mp4").exists(), "staged copy deleted as before the keep");
+    assert!(of_type(&sink, "clip_move_failed").is_empty(), "not a failed move");
+    let logged: Vec<String> = lines(&sink).into_iter().filter(|l| l.contains("stamp refused")).collect();
+    assert_eq!(logged.len(), 1, "one encoder_log line: {:?}", lines(&sink));
+    assert!(logged[0].starts_with("{\"type\":\"encoder_log\""), "{}", logged[0]);
+    assert!(control.shutdown(Duration::from_secs(1)));
     let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
 }
 

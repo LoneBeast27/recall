@@ -302,6 +302,7 @@ fn mover_cfg(same_volume: staging::VolumeCheck) -> mover::Config {
         retry_after: Duration::from_millis(50),
         same_volume,
         background: false,
+        stamp: mover::stamp_mtime,
     }
 }
 
