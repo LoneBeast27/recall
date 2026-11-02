@@ -2,6 +2,7 @@
 #[path = "../src/audio.rs"]
 mod audio;
 #[path = "../src/backend.rs"]
+#[allow(dead_code)]
 mod backend;
 #[path = "../src/services/mod.rs"]
 #[allow(dead_code)]
