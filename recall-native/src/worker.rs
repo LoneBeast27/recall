@@ -176,7 +176,7 @@ fn run_job(job: Job, tx: &Sender<Done>, watcher: &ClipWatcher) -> Done {
         Job::DriveSpace => Done::Drive(library::drive_space(&backend::library_dir())),
         Job::SaveProject(info, plan, fps, export) => Done::Saved(backend::save_project(&info, &plan, fps, &export)),
         Job::FlushProject(info, plan, fps, export, ours) => Done::Flushed(backend::flush_project(&info, &plan, fps, &export, ours)),
-        Job::Export(info, plan, fps, export) => Done::Exported(backend::export_clip(&info, &plan, fps, &export)),
+        Job::Export(info, plan, fps, export) => Done::Exported(crate::services::pre_encode::export(&info, &plan, fps, &export)),
         Job::Delete(paths) => {
             let result = library::delete_to_recycle_bin(&paths);
             library::folders::forget_scans();

@@ -77,6 +77,7 @@ pub(super) fn export(
         width,
         height,
         backend,
+        total: frames,
     };
     for number in 1..=MAX_ATTEMPTS {
         let written = attempt.encode(rate)?;
@@ -136,6 +137,8 @@ struct Attempt<'a> {
     width: u32,
     height: u32,
     backend: VideoBackend,
+    /// Output frames the plan asks for (progress reports count against it).
+    total: u64,
 }
 
 impl Attempt<'_> {
@@ -193,6 +196,7 @@ impl Attempt<'_> {
             pending: None,
             held: None,
             cursor: 0,
+            total: self.total,
             decoded_frames: 0,
         };
         // Start at the keyframe before the first kept range and stop once the last
@@ -254,10 +258,14 @@ struct EditedVideoPipeline<'a> {
     pending: Option<ff::frame::Video>,
     held: Option<ff::frame::Video>,
     cursor: u64,
+    total: u64,
     decoded_frames: u64,
 }
 
 type Mux<'m, 'a> = &'m mut EditedAudioMux<'a>;
+
+/// Output frames between progress reports (half a second of 60 fps video).
+const PROGRESS_EVERY: u64 = 30;
 
 impl EditedVideoPipeline<'_> {
     fn fps(&self) -> u32 {
@@ -391,6 +399,9 @@ impl EditedVideoPipeline<'_> {
                 .send_frame(&frame)
                 .map_err(|e| format!("send edited frame {} to encoder: {e}", self.cursor))?;
             self.cursor += 1;
+            if self.cursor % PROGRESS_EVERY == 0 {
+                super::report_progress(self.cursor, self.total);
+            }
             self.drain_encoder(output, audio)?;
         }
         self.held = Some(frame);

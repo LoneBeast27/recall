@@ -134,6 +134,7 @@ impl Root {
         let workers = Workers::spawn();
         workers.job(Job::List);
         crate::services::storage::sweep_kept(crate::backend::library_dir);
+        crate::services::pre_encode::clear_dir();
         let mut root = Self {
             route: Route::Library,
             focus: cx.focus_handle(),
@@ -197,6 +198,7 @@ impl Root {
     /// first, so `drop` alone may never run.
     pub fn flush_on_close(&mut self) {
         self.ed.flush_now();
+        crate::services::pre_encode::discard();
     }
 
     pub fn start_polling(entity: Entity<Self>, window: &mut Window, cx: &mut gpui::App) {
@@ -354,6 +356,7 @@ impl Root {
             self.ed.flush(&self.workers);
             self.ed.pause();
             self.ed.hide_preview();
+            self.ed.drop_pre_encode();
         }
         if self.route == Route::Editor && route == Route::Library {
             // Back on the clip just closed, wherever the grid was scrolled before.

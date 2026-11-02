@@ -6,6 +6,21 @@ use std::time::Instant;
 
 use crate::{edit_model, export, protocol, ExportHook};
 
+/// Setup for a standalone `--export-edit`: CPU placement, and with `--json` an
+/// `{"type":"export_progress","frames":n,"total":t}` line every 30 output frames
+/// (the app shows it; readers that do not know the type skip the line).
+#[cfg(feature = "encode")]
+pub(super) fn standalone_edit(json: bool) {
+    if std::env::var_os("RECALL_CPU_MASK").is_none() {
+        keep_to_upper_cpus();
+    }
+    if json {
+        export::set_progress_sink(|frames, total| {
+            println!("{}", serde_json::json!({"type": "export_progress", "frames": frames, "total": total}));
+        });
+    }
+}
+
 /// A standalone `--export-edit` started without `RECALL_CPU_MASK` keeps to the
 /// upper half of its CPUs (CCD1 on this desktop, the recorder's default mask),
 /// so threaded decode never lands on the cores a running game uses.
