@@ -97,6 +97,17 @@ fn a_copied_clip_keeps_its_staged_copy_and_its_save_time() {
 }
 
 #[test]
+fn kept_copies_stop_at_the_cap_while_the_app_is_away() {
+    let (stage, out) = (temp_dir("s"), temp_dir("o"));
+    let (a, _) = staged(&stage, "A.mp4", 6000);
+    let (b, _) = staged(&stage, "B.mp4", 6000);
+    assert!(keep_staged_within(&a, &out.join("A.mp4"), 10_000).is_some(), "the first fits");
+    assert_eq!(keep_staged_within(&b, &out.join("B.mp4"), 10_000), None, "6000 + 6000 is past the cap");
+    assert!(b.exists(), "the caller deletes it, as when keeping fails");
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
 fn a_staged_copy_that_cannot_be_kept_is_deleted_as_before() {
     let (stage, out) = (temp_dir("s"), temp_dir("o"));
     // A file named `kept` blocks the folder.
