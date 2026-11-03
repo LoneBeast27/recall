@@ -212,6 +212,20 @@ fn byte_stream(fill: &ClipFill, want: bool) -> Result<IMFByteStream, String> {
 
 /// A Media Foundation source over `fill`. Reads the clip's index, so the index must be there
 /// (or `fill` running). Blocks: call it off the UI thread.
+/// A Media Foundation source over a whole file on disk (a light copy). Blocks.
+pub(crate) fn open_file_source(path: &str) -> Result<IMFMediaSource, String> {
+    let url: Vec<u16> = path.encode_utf16().chain(Some(0)).collect();
+    let mut kind = MF_OBJECT_INVALID;
+    let mut object: Option<IUnknown> = None;
+    unsafe {
+        let resolver = MFCreateSourceResolver().map_err(|error| format!("light copy source: {error}"))?;
+        resolver
+            .CreateObjectFromURL(PCWSTR(url.as_ptr()), (MF_RESOLUTION_MEDIASOURCE.0 | MF_RESOLUTION_READ.0) as u32, None::<&IPropertyStore>, &mut kind, &mut object)
+            .map_err(|error| format!("light copy source: {error}"))?;
+    }
+    object.ok_or("light copy source: nothing resolved")?.cast().map_err(|error| format!("light copy source: {error}"))
+}
+
 pub(crate) fn open_source(fill: &ClipFill, want: bool) -> Result<IMFMediaSource, String> {
     let stream = byte_stream(fill, want)?;
     let hint: Vec<u16> = "clip.mp4".encode_utf16().chain(Some(0)).collect();
