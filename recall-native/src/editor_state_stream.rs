@@ -137,6 +137,14 @@ impl EditorState {
             self.loading = Default::default();
             return true;
         };
+        if hand_over_due(media.light, media.fill.outcome() == Outcome::Done, self.loading.prepared, self.playing) {
+            let full = media.fill.target().to_string_lossy().into_owned();
+            if let Some(clip) = self.info.as_ref().map(|info| info.path.clone()) {
+                crate::trace::player_event("full resolution takes over from the light copy", serde_json::json!({ "at": self.position() }));
+                self.on_video_cached(&clip, &full);
+            }
+            return true;
+        }
         let mut changed = false;
         // Nobody is watching, or the recorder needs the drive: the copy slows down, never stops.
         let paced = !editor_visible || crate::services::storage::recorder_holds(media.fill.source());
@@ -193,7 +201,9 @@ impl EditorState {
             changed = true;
         }
         changed |= self.keep_buffer();
-        if outcome == Outcome::Done && self.loading.prepared && self.loading.grey.is_empty() && !self.loading.buffering && media_ended_sound(self.preview.as_ref()) {
+        // Loading ends with the light copy gone: full resolution takes over first (above).
+        let light = self.preview.as_ref().is_some_and(|preview| preview.shows_light_copy());
+        if outcome == Outcome::Done && self.loading.prepared && self.loading.grey.is_empty() && !self.loading.buffering && !light && media_ended_sound(self.preview.as_ref()) {
             self.loading = Default::default();
             changed = true;
         }
@@ -267,9 +277,32 @@ impl EditorState {
     }
 }
 
+/// Full resolution replaces the light copy once the whole clip is on the SSD and its stems are
+/// in (the reopened player plays from them), at a moment playback is stopped: a pause, the end,
+/// or before the first play. Swapping mid-play would show a hitch.
+fn hand_over_due(light: bool, copied: bool, prepared: bool, playing: bool) -> bool {
+    light && copied && prepared && !playing
+}
+
+impl EditorState {
+    /// The picture on screen is the light copy: the transport shows "Preview quality".
+    pub fn preview_quality(&self) -> bool {
+        self.preview.as_ref().is_some_and(|preview| preview.shows_light_copy())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_resolution_takes_over_only_when_whole_prepared_and_stopped() {
+        assert!(hand_over_due(true, true, true, false), "copied, stems in, paused: swap");
+        assert!(!hand_over_due(true, true, true, true), "never mid-play");
+        assert!(!hand_over_due(true, false, true, false), "the whole clip is not on the SSD yet");
+        assert!(!hand_over_due(true, true, false, false), "the stems are not in yet: the sound comes from the fill");
+        assert!(!hand_over_due(false, true, true, false), "a fill without a light copy already shows full resolution");
+    }
 
     #[test]
     fn a_failure_always_ends_a_wait() {

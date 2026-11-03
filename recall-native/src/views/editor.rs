@@ -154,6 +154,7 @@ impl Root {
                     .text_size(px(12.))
                     .text_color(c(theme::TERTIARY))
                     .children(self.loading_label())
+                    .children(self.ed.preview_quality().then(|| div().px(px(6.)).rounded(px(4.)).bg(ca(theme::WINDOW, 0.6)).text_color(c(theme::MUTED)).child("Preview quality")))
                     .child("Source")
                     .child(div().font_family(theme::mono()).text_color(c(theme::MUTED)).child(timecode(pos))),
             )

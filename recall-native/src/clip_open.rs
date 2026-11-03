@@ -157,7 +157,14 @@ fn open_streaming(source: &Path, metadata: &std::fs::Metadata) -> Result<Streame
 fn open_fill(source: &Path, metadata: &std::fs::Metadata, probed: storage::ProbedClip, fill: &ClipFill) -> Result<StreamedClip, String> {
     let mut reader = FillReader::new(fill)?;
     let map = Arc::new(mp4_map::clip_map(&mut reader).ok_or("clip has no sample tables")?);
-    let video = SourceHandle(open_source(fill, true)?);
+    // The light copy, when the clip has one, shows the picture at once; the fill brings the sound
+    // and, once it is done, the full-resolution picture (`EditorState::tick_loading`).
+    let light_source = storage::light_copy(&source.to_string_lossy()).and_then(|path| crate::media::open_file_source(&path).ok());
+    let light = light_source.is_some();
+    let video = SourceHandle(match light_source {
+        Some(source) => source,
+        None => open_source(fill, true)?,
+    });
     let info = clip_info(source, metadata, &probed, &map);
     let (project, warning, sidecar_ours, sidecar_at_open) = backend::load_project(&info);
     let tracks: Vec<(usize, u16)> = probed.tracks.iter().map(|track| (track.stream_index, track.channels)).collect();
@@ -166,7 +173,7 @@ fn open_fill(source: &Path, metadata: &std::fs::Metadata, probed: storage::Probe
     storage::note_editor_media(&plain, &[], true);
     let marks = backend::read_marks(&plain);
     let visuals = backend::cached_visuals(source);
-    Ok(StreamedClip { info, project, warning, sidecar_ours, sidecar_at_open, visuals, marks, media: StreamMedia { fill: fill.clone(), map, video, sound } })
+    Ok(StreamedClip { info, project, warning, sidecar_ours, sidecar_at_open, visuals, marks, media: StreamMedia { fill: fill.clone(), map, video, sound, light } })
 }
 
 fn start_sound(fill: &ClipFill, map: &Arc<ClipMap>, tracks: &[(usize, u16)], probed: &storage::ProbedClip) -> Option<Arc<live_sound::LiveSound>> {
