@@ -227,6 +227,7 @@ impl Root {
             // Background cache filling pauses while a game is being recorded.
             let busy = self.snap.session.as_ref().is_some_and(|s| s.state == "recording" || s.state == "starting");
             crate::services::storage::set_recorder_busy(busy);
+            crate::services::storage::set_recorder_connected(self.snap.connected);
             self.sync_recordings_folder();
             for event in self.daemon.drain_events() {
                 self.on_daemon_event(event);

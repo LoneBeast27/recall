@@ -70,6 +70,19 @@ pub fn recorder_busy() -> bool {
     RECORDER_BUSY.load(Ordering::Relaxed)
 }
 
+static RECORDER_CONNECTED: AtomicBool = AtomicBool::new(false);
+
+/// The app is connected to the recorder, so a running game shows up as recording.
+pub fn set_recorder_connected(connected: bool) {
+    RECORDER_CONNECTED.store(connected, Ordering::Relaxed);
+}
+
+/// Light copies use the GPU: only while the recorder is there to say a game runs (it is off
+/// when Windows starts, autostart being off), or in a check sandbox that runs without one.
+fn gpu_work_allowed() -> bool {
+    RECORDER_CONNECTED.load(Ordering::Relaxed) || std::env::var_os("RECALL_NO_CONTROLLER").is_some()
+}
+
 /// The open clip's copy from `path` slows down for the recorder (`ClipFill::pace`): only a
 /// slow (hard) drive competes with its writes. A clip read from the SSD is never slowed.
 pub fn recorder_holds(path: &Path) -> bool {
@@ -239,6 +252,9 @@ impl Feed {
     /// the clip's whole SSD copy when there is one (fresh clips), else the original on this lane.
     /// Once made, the whole copy goes unless the clip is the best-ranked one or open.
     fn warm_light(&self, clip: &PrefetchClip, top: bool) -> Result<u64, String> {
+        if !gpu_work_allowed() {
+            return Err("light copies wait for the recorder".into());
+        }
         let id = clip_id(clip);
         let estimate = estimate(Step::Video, clip);
         if !budget::room_below(&self.root, self.budget, warm_limit(self.budget), estimate, score_of(&id)) {
