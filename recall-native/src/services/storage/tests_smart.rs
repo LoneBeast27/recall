@@ -396,12 +396,16 @@ fn old_wav_stem_folders_go_except_the_open_clips() {
         std::fs::write(editor.join(dir).join(file), vec![1u8; 700]).unwrap();
     };
     write("v5-a", "audio-0.wav");
+    write("v5-a", "clip.json");
     write("v5-open", "audio-0.wav");
+    write("v5-open", "clip.json");
+    write("not-stems", "take-1.wav");
     write("v6-b", "audio-0.flac");
     write("v6-b", "clip.json");
     std::fs::write(root.join("media.json"), br#"{"owners":{"v5-a":"aaaa","v5-open":"oooo","v6-b":"bbbb"}}"#).unwrap();
     let freed = budget::sweep_old_stems(&root, &["editor/v5-open".to_string()]);
-    assert_eq!(freed, 700, "the old folder's bytes");
+    assert_eq!(freed, 1400, "the old folder's bytes");
+    assert!(editor.join("not-stems").exists(), "a folder without the engine's clip.json is not a stem folder");
     assert!(!editor.join("v5-a").exists(), "a v5 (WAV) folder goes; its clip re-prepares when opened");
     assert!(editor.join("v5-open").exists(), "the clip in the editor keeps its stems");
     assert!(editor.join("v6-b").exists(), "current FLAC folders stay");
@@ -409,9 +413,11 @@ fn old_wav_stem_folders_go_except_the_open_clips() {
     assert!(!media.owners.contains_key("v5-a") && media.owners.contains_key("v6-b"));
     // Through the budget pass: once per root per process.
     write("v5-c", "audio-1.wav");
+    write("v5-c", "clip.json");
     budget::enforce(&root, 1 << 30, 0);
     assert!(!editor.join("v5-c").exists(), "the first budget pass sweeps");
     write("v5-d", "audio-1.wav");
+    write("v5-d", "clip.json");
     budget::enforce(&root, 1 << 30, 0);
     assert!(editor.join("v5-d").exists(), "only the first pass: later folders are the engine's to replace");
     let _ = std::fs::remove_dir_all(&root);

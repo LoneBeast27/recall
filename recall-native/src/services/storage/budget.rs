@@ -238,7 +238,9 @@ pub(super) fn sweep_old_stems(root: &Path, keep: &[String]) -> u64 {
     let mut media = read_media(root);
     let mut freed = 0;
     for (name, metadata, path) in entries(&editor_root) {
+        // Only the engine's own stem folders (they hold its clip.json), whatever the cache path.
         let old = metadata.is_dir()
+            && path.join("clip.json").is_file()
             && std::fs::read_dir(&path).is_ok_and(|listing| listing.flatten().any(|entry| entry.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("wav"))));
         if !old || keep.contains(&format!("editor/{name}")) {
             continue;
