@@ -236,6 +236,9 @@ pub struct StreamMedia {
     pub map: Arc<ClipMap>,
     pub video: SourceHandle,
     pub sound: Option<Arc<LiveSound>>,
+    /// The picture comes from the clip's light copy on the SSD (`storage::light_copy`), not the
+    /// fill: it never waits for the drive, and full resolution takes over once the fill is done.
+    pub light: bool,
 }
 
 impl StreamMedia {
@@ -257,7 +260,7 @@ unsafe impl Send for SourceHandle {}
 mod player;
 #[path = "media_stream.rs"]
 mod stream;
-pub(crate) use stream::open_source;
+pub(crate) use stream::{open_file_source, open_source};
 #[path = "media_transport.rs"]
 mod transport;
 

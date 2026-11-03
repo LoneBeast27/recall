@@ -215,6 +215,11 @@ impl NativePreview {
         if self.has_audio { self.audio.open(audio, duration) } else { Ok(()) }
     }
 
+    /// The picture on screen is the light copy, not full resolution yet.
+    pub fn shows_light_copy(&self) -> bool {
+        self.stream.as_ref().is_some_and(|media| media.light)
+    }
+
     /// The clip's fill while it is loading.
     pub fn stream(&self) -> Option<&StreamMedia> {
         self.stream.as_ref()
@@ -234,7 +239,8 @@ impl NativePreview {
     /// `[from, to)` seconds can play now: the bytes and the sound are there.
     pub fn stream_ready(&self, from: f64, to: f64) -> bool {
         let Some(media) = &self.stream else { return true };
-        if media.fill.outcome() != Outcome::Done {
+        // A light copy's picture is all on the SSD: only the sound can wait.
+        if !media.light && media.fill.outcome() != Outcome::Done {
             let (start, end) = media.map.bytes_of(from, to);
             if !media.fill.has(start, end) {
                 return false;

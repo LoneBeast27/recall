@@ -96,7 +96,16 @@ fn drain_lines(pipe: impl Read + Send + 'static, mut on_line: OnLine) -> std::th
 /// `stop` says so. A process that never returns cannot hold a thread for good.
 pub fn run_watched(command: &mut Command, lowered: bool, limit: Duration, stop: &dyn Fn() -> bool) -> io::Result<Output> {
     command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
-    let mut child = io_priority::spawn(command, lowered)?;
+    watch(io_priority::spawn(command, lowered)?, limit, stop)
+}
+
+/// [`run_watched`] for a long background encode ([`io_priority::spawn_pinned`]).
+pub(super) fn run_pinned(command: &mut Command, limit: Duration, stop: &dyn Fn() -> bool) -> io::Result<Output> {
+    command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+    watch(io_priority::spawn_pinned(command)?, limit, stop)
+}
+
+fn watch(mut child: std::process::Child, limit: Duration, stop: &dyn Fn() -> bool) -> io::Result<Output> {
     let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
         return Err(io::Error::other("helper process has no pipes"));
     };

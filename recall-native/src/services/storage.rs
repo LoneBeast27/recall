@@ -30,6 +30,7 @@ mod history;
 mod io_priority;
 mod kept;
 mod lane;
+mod light;
 mod prefetch;
 mod probe;
 mod projects;
@@ -58,6 +59,8 @@ pub use io_priority::close_helpers;
 pub use head::{ProbeClip, cancel_probe, probe_filter};
 #[allow(unused_imports)]
 pub use kept::{adopt_kept, sweep_kept};
+#[allow(unused_imports)]
+pub use light::light_copy;
 pub use probe::{ProbedClip, probe_clip};
 #[allow(unused_imports)]
 pub use evict::DEFAULT_CACHE_BUDGET;
@@ -66,7 +69,7 @@ pub use history::{Interaction, record_interaction};
 #[allow(unused_imports)]
 pub use lane::{LaneStats, Priority, lane_wait_ms, run_io, stats, submit_io};
 #[allow(unused_imports)]
-pub use prefetch::{PrefetchClip, PrefetchEvent, PrepareEditor, recorder_busy, recorder_holds, set_recorder_busy, smart_status, start_prefetch};
+pub use prefetch::{PrefetchClip, PrefetchEvent, PrepareEditor, recorder_busy, recorder_holds, set_recorder_busy, set_recorder_connected, smart_status, start_prefetch};
 pub use projects::{ProjectSource, SidecarStep, export_dir, has_export, project_order, sidecar_step, working_copy_path, write_atomic};
 pub(crate) use projects::modified_ms as projects_modified_ms;
 #[allow(unused_imports)]
@@ -130,10 +133,10 @@ pub fn note_editor_media(clip_path: &str, editor_dirs: &[PathBuf], opened: bool)
 }
 
 /// Engine media-cache folder for an input (mirrors `recall/src/editor_media.rs::cache_key`,
-/// `CACHE_VERSION` 5): FNV-1a over the canonical path, version, size and mtime ms. Used only
+/// `CACHE_VERSION` 6: FLAC stems): FNV-1a over the canonical path, version, size and mtime ms. Used only
 /// to find an existing entry; a mismatch merely costs a re-preparation.
 pub fn engine_cache_dir(editor_root: &Path, canonical_input: &Path, bytes: u64, modified_ms: u64) -> PathBuf {
-    const CACHE_VERSION: u32 = 5;
+    const CACHE_VERSION: u32 = 6;
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     let text = canonical_input.to_string_lossy();
     for byte in text.bytes().chain(CACHE_VERSION.to_le_bytes()).chain(bytes.to_le_bytes()).chain(modified_ms.to_le_bytes()) {

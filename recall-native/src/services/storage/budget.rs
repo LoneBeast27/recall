@@ -65,7 +65,7 @@ impl Inventory {
 pub(super) fn unit_clip<'a>(name: &'a str, media: &'a Media) -> Option<&'a str> {
     let (folder, rest) = name.split_once('/')?;
     match folder {
-        "video" => rest.strip_suffix(".mp4"),
+        "video" | "light" => rest.strip_suffix(".mp4"),
         "thumbs" => rest.strip_suffix(".jpg"),
         "visuals" => rest.split_once('#').map(|(id, _)| id),
         "editor" => media.owners.get(rest).map(String::as_str),
@@ -116,6 +116,14 @@ pub(super) fn inventory(root: &Path, score: &dyn Fn(&str) -> f64) -> Inventory {
             other += metadata.len();
         }
     }
+    // Light copies (`light.rs`) are video copies too: same tier, same cap, ranked by score.
+    for (name, metadata, _) in entries(&root.join("light")) {
+        if metadata.is_file() && name.ends_with(".mp4") {
+            push(Tier::Video, format!("light/{name}"), metadata.len(), ms(metadata.modified()));
+        } else if metadata.is_file() {
+            other += metadata.len();
+        }
+    }
     for (name, metadata, path) in entries(&root.join("editor")) {
         if metadata.is_dir() {
             let key = format!("editor/{name}");
@@ -157,6 +165,8 @@ pub(super) fn inventory(root: &Path, score: &dyn Fn(&str) -> f64) -> Inventory {
     // The recorder's kept copies waiting to be adopted (`kept.rs`, up to 2 GiB): they hold SSD
     // space the budget has to leave room for.
     other += dir_size(&root.join("staging").join("kept")).0;
+    // Preview copies (`proxy.rs`: today's failure proxies, light copies after it).
+    other += dir_size(&root.join("proxy")).0;
     for file in ["storage.json", "media.json", "interactions.json"] {
         other += root.join(file).metadata().map_or(0, |m| m.len());
     }
@@ -171,7 +181,7 @@ pub(super) fn delete(root: &Path, unit: &Unit) -> u64 {
         if std::fs::remove_file(path).is_ok() { bytes } else { 0 }
     };
     match (folder, rest.split_once('#')) {
-        ("video" | "thumbs", None) => removed(&root.join(folder).join(rest)),
+        ("video" | "light" | "thumbs", None) => removed(&root.join(folder).join(rest)),
         ("editor", None) => {
             let dir = root.join("editor").join(rest);
             let before = dir_size(&dir).0;
@@ -264,11 +274,32 @@ pub(super) fn note_editor_media(root: &Path, id: &str, editor_dirs: &[PathBuf], 
             keep.push(format!("editor/{name}"));
         }
     }
+    drop_wav_stems(&editor_root, id, &keep, &mut media);
     write_media(root, &media);
     if opened {
         if let Ok(mut current) = KEEP.lock() {
             *current = keep;
         }
+    }
+}
+
+/// Lazy stem migration (engine cache v6 writes FLAC): once this clip has a FLAC-stem folder, its
+/// older WAV-stem folders go. Folders of other clips are left for their own next preparation.
+fn drop_wav_stems(editor_root: &Path, id: &str, current: &[String], media: &mut Media) {
+    let holds = |name: &str, extension: &str| {
+        std::fs::read_dir(editor_root.join(name))
+            .map(|listing| listing.flatten().any(|entry| entry.path().extension().is_some_and(|x| x.eq_ignore_ascii_case(extension))))
+            .unwrap_or(false)
+    };
+    let fresh: Vec<&str> = current.iter().filter_map(|unit| unit.strip_prefix("editor/")).collect();
+    if !fresh.iter().any(|name| holds(name, "flac")) {
+        return;
+    }
+    let stale: Vec<String> = media.owners.iter().filter(|(name, owner)| *owner == id && !fresh.contains(&name.as_str()) && holds(name, "wav")).map(|(name, _)| name.clone()).collect();
+    for name in stale {
+        let _ = std::fs::remove_dir_all(editor_root.join(&name));
+        media.used.remove(&format!("editor/{name}"));
+        media.owners.remove(&name);
     }
 }
 

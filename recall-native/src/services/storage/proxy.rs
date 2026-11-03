@@ -22,6 +22,10 @@ const ENCODERS: [&[&str]; 2] = [
 /// Returns the preview copy for `source`, making it first if needed (blocking; call from a
 /// worker thread). A clip on a hard drive is read through that drive's lane.
 pub fn preview_proxy(source: &str) -> Result<String, String> {
+    // A light copy (`light.rs`) is a sharper preview copy already on the SSD.
+    if let Some(light) = super::light::light_copy(source) {
+        return Ok(light);
+    }
     let src = Path::new(source);
     let meta = src.metadata().map_err(|e| format!("read clip: {e}"))?;
     let dir = super::cache_root().join("proxy");
