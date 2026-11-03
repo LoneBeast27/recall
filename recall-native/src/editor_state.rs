@@ -435,7 +435,7 @@ pub fn short_timecode(seconds: f64) -> String {
 }
 
 /// Same file, ignoring the `\\?\` verbatim prefix and letter case.
-fn same_path(a: &str, b: &str) -> bool {
+pub(super) fn same_path(a: &str, b: &str) -> bool {
     let plain = |p: &str| p.strip_prefix(r"\\?\").unwrap_or(p).replace('/', "\\");
     plain(a).eq_ignore_ascii_case(&plain(b))
 }
