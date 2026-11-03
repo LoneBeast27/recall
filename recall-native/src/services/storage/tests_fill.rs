@@ -20,6 +20,10 @@ fn clip(dir: &Path, bytes: usize) -> (PathBuf, SystemTime) {
     (path, modified)
 }
 
+fn fill_at(dir: &Path, source: &Path, part: &Path, bytes: u64, modified: SystemTime) -> ClipFill {
+    ClipFill::create(source, part, &dir.join("copy.mp4"), bytes, modified, 0, 0).unwrap()
+}
+
 fn fill(dir: &Path, source: &Path, bytes: u64, modified: SystemTime, throttle: u64) -> ClipFill {
     ClipFill::create(source, &dir.join("clip.part"), &dir.join("copy.mp4"), bytes, modified, throttle, 0).unwrap()
 }
@@ -318,3 +322,29 @@ fn a_seeded_fill_has_its_head_at_once_and_copies_only_the_rest() {
     assert!(fill.wait_done());
     assert_eq!(std::fs::read(dir.join("copy.mp4")).unwrap(), data, "the rest arrives around the head");
 }
+
+#[test]
+fn a_reader_opened_after_the_copy_finished_reads_the_published_file() {
+    // The sound decoder or a swapped source can open the fill after its .part was renamed.
+    let dir = scratch("late-reader");
+    let bytes = 2 * CHUNK as usize + 999;
+    let (source, modified) = clip(&dir, bytes);
+    let fill = fill(&dir, &source, bytes as u64, modified, 0);
+    fill.start(&[0]).unwrap();
+    assert!(fill.wait_done());
+    assert!(!dir.join("clip.part").exists(), "published under its cache name");
+    assert_eq!(read_all(&fill, CHUNK + 3, 5000), pattern(bytes)[CHUNK as usize + 3..CHUNK as usize + 5003]);
+}
+
+#[test]
+fn a_fill_owns_its_part_before_the_file_exists() {
+    let dir = scratch("owned-early");
+    let bytes = CHUNK as usize;
+    let (source, modified) = clip(&dir, bytes);
+    let part = dir.join("Clip.PART");
+    let fill = fill_at(&dir, &source, &part, bytes as u64, modified);
+    assert!(super::in_use(&dir.join("clip.part")), "owned, whatever the case of the name");
+    drop(fill);
+    assert!(!super::in_use(&part), "released with the fill");
+}
+

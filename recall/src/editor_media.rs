@@ -1,6 +1,9 @@
 //! Read-only editor media preparation: cacheable PCM preview stems and peaks.
-//! The per-track stem decode + WAV writer live in `editor_media/stem.rs`.
+//! The per-track stem decode lives in `editor_media/stem.rs`, the FLAC writer in `editor_media/flac.rs`.
+mod flac;
 mod stem;
+#[allow(unused_imports)]
+pub(crate) use flac::read_stem;
 
 use crate::edit_model::{AudioTrackInfo, ClipInfo};
 use crate::export::keyframes::{scan_keyframes, KeyframeScan};
@@ -14,7 +17,9 @@ use stem::decode_track;
 const PREVIEW_RATE: u32 = 48_000;
 const WAVE_BINS: usize = 1024;
 // 5: stems no longer follow per-frame timestamp jitter (Moments clips played choppy).
-const CACHE_VERSION: u32 = 5;
+/// 6: preview stems are FLAC (`audio-<n>.flac`), not WAV. Folders of older versions are
+/// left behind and removed by the app once a clip is prepared again.
+const CACHE_VERSION: u32 = 6;
 
 pub fn prepare_clip(input: &str, cache_dir: &str) -> Result<ClipInfo, String> {
     ff::init().map_err(|e| format!("FFmpeg initialization failed: {e}"))?;
@@ -130,7 +135,7 @@ fn prepare_uncached(
     let mut scan = KeyframeScan::for_input(&input);
     let mut audio = Vec::with_capacity(tracks.len());
     for (ordinal, track) in tracks.iter().enumerate() {
-        let file = format!("audio-{ordinal}.wav");
+        let file = format!("audio-{ordinal}.flac");
         let keyframes = if ordinal == 0 { scan.as_mut() } else { None };
         let info = decode_track(source, track, duration, origin_us, &out.join(&file), keyframes)?;
         audio.push(AudioTrackInfo {

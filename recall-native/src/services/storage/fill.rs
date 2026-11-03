@@ -56,9 +56,25 @@ pub enum Outcome {
 /// Part files of the fills alive in this process: nothing may clean these up.
 static IN_USE: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-/// A fill in this process is writing `path`.
+/// `path` may not be swept: a fill in this process owns it (registered before the file is
+/// created, so a sweep never sees it unowned), or any handle holds it open (another copy, or
+/// another process).
 pub(super) fn in_use(path: &Path) -> bool {
-    IN_USE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().any(|part| part == path)
+    let key = |p: &Path| super::plain_path(p).to_string_lossy().to_lowercase();
+    let wanted = key(path);
+    IN_USE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).iter().any(|part| key(part) == wanted) || held_open(path)
+}
+
+/// Marks `part` owned by a fill about to be created there (a clip head is moved in first).
+pub(super) fn claim(part: &Path) {
+    IN_USE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(part.to_path_buf());
+}
+
+/// Another handle has `path` open: an exclusive open fails with a sharing violation.
+fn held_open(path: &Path) -> bool {
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    use std::os::windows::fs::OpenOptionsExt;
+    OpenOptions::new().read(true).share_mode(0).open(path).is_err_and(|error| error.raw_os_error() == Some(ERROR_SHARING_VIOLATION))
 }
 
 struct State {
@@ -147,10 +163,22 @@ impl ClipFill {
     /// from the filter probe, `head.rs`); with none, `part` starts empty.
     #[allow(clippy::too_many_arguments)]
     pub fn create_seeded(source: &Path, part: &Path, target: &Path, bytes: u64, modified: SystemTime, seeded: &[u64], throttle: u64, fail_after: u64) -> Result<Self, String> {
-        let file = OpenOptions::new().write(true).create(true).truncate(seeded.is_empty()).open(part).map_err(|error| format!("create fill: {error}"))?;
-        set_sparse(&file)?;
-        file.set_len(bytes).map_err(|error| format!("size fill: {error}"))?;
+        // Owned before it exists: a sweep running now cannot take it.
         IN_USE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(part.to_path_buf());
+        let prepared = OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(seeded.is_empty())
+            .open(part)
+            .map_err(|error| format!("create fill: {error}"))
+            .and_then(|file| {
+                set_sparse(&file)?;
+                file.set_len(bytes).map_err(|error| format!("size fill: {error}"))
+            });
+        if let Err(error) = prepared {
+            IN_USE.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retain(|owned| owned != part);
+            return Err(error);
+        }
         let mut have = vec![false; chunk_count(bytes) as usize];
         for &chunk in seeded {
             if let Some(slot) = have.get_mut(chunk as usize) {

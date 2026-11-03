@@ -321,8 +321,8 @@ fn load_tracks(specs: &[PreviewTrack]) -> Result<Vec<LoadedTrack>, String> {
     for spec in specs {
         let bytes = read_bounded(&spec.path)?;
         let remaining = MAX_DECODED_BYTES.saturating_sub(decoded_bytes);
-        let (samples, channels) = parse_wav(&bytes, remaining)
-            .map_err(|e| format!("invalid preview stem '{}': {e}", spec.path))?;
+        let parsed = if flac::is_flac(&bytes) { flac::parse_flac(&bytes, remaining, SAMPLE_RATE) } else { parse_wav(&bytes, remaining) };
+        let (samples, channels) = parsed.map_err(|e| format!("invalid preview stem '{}': {e}", spec.path))?;
         decoded_bytes = decoded_bytes
             .checked_add(samples.len() * size_of::<f32>())
             .ok_or("preview decoded-audio size overflow")?;
@@ -363,6 +363,14 @@ fn read_bounded(path: &str) -> Result<Vec<u8>, String> {
         .and_then(|mut file| file.read_exact(&mut bytes))
         .map_err(|e| format!("could not read preview stem '{path}': {e}"))?;
     Ok(bytes)
+}
+
+#[path = "audio_flac.rs"]
+mod flac;
+
+#[cfg(test)]
+pub(crate) fn parse_wav_for_tests(bytes: &[u8]) -> (Vec<f32>, usize) {
+    parse_wav(bytes, MAX_DECODED_BYTES).unwrap()
 }
 
 fn parse_wav(bytes: &[u8], decoded_budget: usize) -> Result<(Vec<f32>, usize), String> {

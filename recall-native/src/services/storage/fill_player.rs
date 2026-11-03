@@ -34,13 +34,18 @@ impl ClipFill {
 
     /// A handle for [`ClipFill::read_at`]. A clip read where it lies has no holes to keep out of
     /// the file cache, and the drive's own read-ahead helps it.
+    /// A finished copy has been renamed to its cache name, so a reader opened after that (the
+    /// sound decoder, a source reopened for a swap) opens it there.
     pub fn open_reader(&self) -> std::io::Result<File> {
         let mut options = OpenOptions::new();
         options.read(true).share_mode(7);
         if !self.0.direct {
             options.custom_flags(FILE_FLAG_NO_BUFFERING.0);
         }
-        options.open(&self.0.part)
+        match options.open(&self.0.part) {
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound && lock(&self.0).outcome == Outcome::Done => options.open(&self.0.target),
+            result => result,
+        }
     }
 
     /// The player has this clip open: from now on a read of a part that will never come waits

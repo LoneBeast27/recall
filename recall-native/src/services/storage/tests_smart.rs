@@ -200,7 +200,7 @@ fn fill_stops_at_95_percent_of_the_budget() {
     let mut clip = super::tests::clip("x.mp4", true, true);
     clip.duration = Some(100.0);
     assert_eq!(estimate(Step::Editor, &clip), 28_800_000 + (200 << 10));
-    assert_eq!(estimate(Step::Video, &clip), clip.bytes);
+    assert_eq!(estimate(Step::Video, &clip), 100 * super::light::LIGHT_BYTES_PER_SEC, "a light copy, not the whole clip");
 }
 
 #[test]
@@ -339,5 +339,49 @@ fn a_set_budget_always_wins_and_a_first_run_saves_its_pick() {
     settings.cache_budget_bytes = Some(50 << 30);
     super::evict::write_settings(&root, &settings).unwrap();
     assert_eq!(super::video::budget_in(&root), 50 << 30, "the Settings value wins");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_clip_prepared_with_flac_stems_drops_its_wav_stems() {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let root = std::env::temp_dir().join(format!("recall-stems-{}-{nonce}", std::process::id()));
+    let editor = root.join("editor");
+    let write = |dir: &str, file: &str| {
+        std::fs::create_dir_all(editor.join(dir)).unwrap();
+        std::fs::write(editor.join(dir).join(file), vec![1u8; 500]).unwrap();
+    };
+    write("old-wav", "audio-0.wav");
+    write("other-clip", "audio-0.wav");
+    write("new-flac", "audio-0.flac");
+    std::fs::write(root.join("media.json"), br#"{"owners":{"old-wav":"aaaa","other-clip":"bbbb"}}"#).unwrap();
+    budget::note_editor_media(&root, "aaaa", &[editor.join("new-flac")], false);
+    assert!(!editor.join("old-wav").exists(), "this clip's WAV stems go once its FLAC stems exist");
+    assert!(editor.join("other-clip").exists(), "another clip keeps its stems until it is prepared again");
+    assert!(editor.join("new-flac").exists());
+    let media = budget::read_media(&root);
+    assert_eq!(media.owners.get("new-flac").map(String::as_str), Some("aaaa"));
+    assert!(!media.owners.contains_key("old-wav"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+
+#[test]
+fn light_copies_are_video_units_ranked_and_evicted_by_their_clip() {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let root = std::env::temp_dir().join(format!("recall-light-units-{}-{nonce}", std::process::id()));
+    std::fs::create_dir_all(root.join("light")).unwrap();
+    std::fs::write(root.join("light").join("aaaa.mp4"), vec![1u8; 3000]).unwrap();
+    std::fs::write(root.join("light").join("bbbb.mp4"), vec![1u8; 3000]).unwrap();
+    let inventory = budget::inventory(&root, &|id| if id == "aaaa" { 5.0 } else { 0.5 });
+    let light: Vec<(&str, f64)> = inventory.units.iter().filter(|u| u.name.starts_with("light/")).map(|u| (u.name.as_str(), u.score)).collect();
+    assert_eq!(light.len(), 2);
+    assert!(inventory.units.iter().filter(|u| u.name.starts_with("light/")).all(|u| u.tier == Tier::Video));
+    assert!(light.contains(&("light/aaaa.mp4", 5.0)));
+    // Room for one more light copy of a clip scored 1.0: only the lower-scored one may go.
+    let evicted = super::evict::room_below(&inventory.units, 0, 6000, 1 << 20, 3000, 1.0, &[]);
+    assert_eq!(evicted, Some(vec!["light/bbbb.mp4".to_string()]));
+    assert_eq!(budget::delete(&root, inventory.units.iter().find(|u| u.name == "light/bbbb.mp4").unwrap()), 3000);
+    assert!(!root.join("light").join("bbbb.mp4").exists());
     let _ = std::fs::remove_dir_all(&root);
 }
