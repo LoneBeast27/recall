@@ -43,6 +43,7 @@ use crate::record_env::EnvOverrides;
 use crate::record_hdr::HdrManager;
 use crate::record_engine::{self, engine_env, EnginePlanner, EngineTarget, EXIT_LINGER};
 use crate::record_notice::NoticeTracker;
+use crate::record_quit::QuitReason;
 use crate::record_storage::Janitor;
 use crate::record_target::{classify_event, display_name, sanitize, Target, TargetTracker, TARGET_DEBOUNCE};
 use crate::record_tray::{RecallUi, RecordingTray, RecordingTrayCmd};
@@ -96,7 +97,8 @@ pub struct Controller {
     /// (hwnd, is_target) of the last foreground fed to the tracker.
     pub(crate) last_fed: Option<(isize, bool)>,
     target_monitor: isize,
-    pub(crate) quit: bool,
+    /// Set once a quit is asked for; the reason decides whether the app's windows close.
+    pub(crate) quit: Option<QuitReason>,
     /// Runtime pause (tray "Stop recording" / pipe `pause`): no engine, game
     /// targets ignored, capture actions refused. A restart resumes.
     pub(crate) paused: bool,
@@ -192,7 +194,7 @@ pub fn run() -> i32 {
         last_hdr_refresh: now,
         last_fed: None,
         target_monitor,
-        quit: false,
+        quit: None,
         paused: false,
         activity: EngineActivity::default(),
         engine_events,
@@ -241,6 +243,7 @@ impl Controller {
             // Drives the WinEvent hook callback, tray menu, and hotkeys.
             if app::drain_messages() {
                 log!("record: WM_QUIT received");
+                self.quit.get_or_insert(QuitReason::WindowsQuit);
                 return 0;
             }
             let now = Instant::now();
@@ -259,7 +262,7 @@ impl Controller {
             while let Ok(inbound) = ctl_rx.try_recv() {
                 self.handle_inbound(inbound);
             }
-            if self.quit {
+            if self.quit.is_some() {
                 return 0;
             }
             self.tick(now);
@@ -413,18 +416,24 @@ impl Controller {
             RecordingTrayCmd::TogglePause => self.set_paused(!self.paused),
             RecordingTrayCmd::Quit => {
                 log!("record: tray quit");
-                self.quit = true;
+                self.quit = Some(QuitReason::TrayMenu);
             }
         }
     }
 
     /// Ordered shutdown: display restore first (if HDR was managed), then the
-    /// overlay (and its frame-timing session) and the UI, then the engine.
+    /// overlay (and its frame-timing session) and the UI, then the engine. Only the tray
+    /// Quit closes the app; any other quit leaves it open to reconnect to the next recorder.
     fn shutdown(mut self) {
         self.hdr.shutdown();
         self.overlay.stop();
-        let matched = self.ui.close();
-        log!("record: requested WM_CLOSE for {} Recall UI window(s)", matched.len());
+        let reason = self.quit.unwrap_or(QuitReason::WindowsQuit);
+        if reason.closes_ui() {
+            let matched = self.ui.close();
+            log!("record: requested WM_CLOSE for {} Recall UI window(s)", matched.len());
+        } else {
+            log!("record: {} leaves the Recall app open", reason.label());
+        }
         self.hotkeys = None;
         self.supervisor.shutdown(crate::supervisor::QUIT_GRACE);
         log!("record: clean shutdown (pipe lines dropped for stalled clients: {})", self.hub.dropped());
