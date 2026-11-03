@@ -92,7 +92,9 @@ fn stem_quality(clip: &Clip) -> (f64, usize) {
     let cache = clip.dir.join("cache").to_string_lossy().into_owned();
     let info = crate::editor_media::prepare_clip(&clip.path.to_string_lossy(), &cache).unwrap();
     let track = &info.audio[0];
-    let wav = std::fs::read(Path::new(&track.preview_path)).unwrap();
+    // The stem as 16-bit PCM behind a 44-byte gap, the layout the helpers below read.
+    let (pcm, _) = crate::editor_media::read_stem(Path::new(&track.preview_path)).unwrap();
+    let wav: Vec<u8> = [0u8; 44].into_iter().chain(pcm.iter().flat_map(|s| s.to_le_bytes())).collect();
     let channels = usize::from(track.channels);
     (worst_residual_db(&first_channel(&wav, channels), 4800), zero_holes(&wav, channels))
 }

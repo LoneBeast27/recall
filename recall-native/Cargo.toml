@@ -16,6 +16,9 @@ raw-window-handle = "0.6"
 interprocess = "2.2"
 wasapi = "0.19"
 midir = "0.10"
+# Editor preview stems are FLAC (engine stem cache v6): a pure-Rust decoder, FLAC only.
+symphonia-core = "0.5.5"
+symphonia-bundle-flac = "0.5.5"
 windows-core = "0.62"
 windows = { version = "0.62", features = [
     "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_Storage_FileSystem",

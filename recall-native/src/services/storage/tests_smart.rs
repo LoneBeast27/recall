@@ -341,3 +341,27 @@ fn a_set_budget_always_wins_and_a_first_run_saves_its_pick() {
     assert_eq!(super::video::budget_in(&root), 50 << 30, "the Settings value wins");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_clip_prepared_with_flac_stems_drops_its_wav_stems() {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let root = std::env::temp_dir().join(format!("recall-stems-{}-{nonce}", std::process::id()));
+    let editor = root.join("editor");
+    let write = |dir: &str, file: &str| {
+        std::fs::create_dir_all(editor.join(dir)).unwrap();
+        std::fs::write(editor.join(dir).join(file), vec![1u8; 500]).unwrap();
+    };
+    write("old-wav", "audio-0.wav");
+    write("other-clip", "audio-0.wav");
+    write("new-flac", "audio-0.flac");
+    std::fs::write(root.join("media.json"), br#"{"owners":{"old-wav":"aaaa","other-clip":"bbbb"}}"#).unwrap();
+    budget::note_editor_media(&root, "aaaa", &[editor.join("new-flac")], false);
+    assert!(!editor.join("old-wav").exists(), "this clip's WAV stems go once its FLAC stems exist");
+    assert!(editor.join("other-clip").exists(), "another clip keeps its stems until it is prepared again");
+    assert!(editor.join("new-flac").exists());
+    let media = budget::read_media(&root);
+    assert_eq!(media.owners.get("new-flac").map(String::as_str), Some("aaaa"));
+    assert!(!media.owners.contains_key("old-wav"));
+    let _ = std::fs::remove_dir_all(&root);
+}
+

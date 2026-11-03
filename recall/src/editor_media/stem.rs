@@ -1,14 +1,13 @@
 //! One audio track -> its editor preview stem: decode, resample to 48 kHz
 //! packed i16 (samples kept back to back; re-seeded only at real timestamp gaps,
-//! see `audio_clock`), write the WAV, and fold the waveform peaks.
+//! see `audio_clock`), write the FLAC stem (`flac.rs`), and fold the waveform peaks.
 
-use std::fs::File;
-use std::io::{BufWriter, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use ff::Rescale;
 use ffmpeg_next as ff;
 
+use super::flac::FlacWriter;
 use super::{Decoded, TrackSpec, PREVIEW_RATE, WAVE_BINS};
 use crate::export::keyframes::KeyframeScan;
 
@@ -17,7 +16,7 @@ pub(super) fn decode_track(
     track: &TrackSpec,
     duration: f64,
     origin_us: i64,
-    wav: &Path,
+    stem: &Path,
     mut keyframes: Option<&mut KeyframeScan>,
 ) -> Result<Decoded, String> {
     // Each pass starts at the source: packet iterators consume their input context.
@@ -44,14 +43,7 @@ pub(super) fn decode_track(
     )
     .map_err(|e| format!("create audio resampler: {e}"))?;
     let total_samples = (duration.max(0.0) * PREVIEW_RATE as f64).ceil() as u64;
-    if total_samples
-        .saturating_mul(channels as u64)
-        .saturating_mul(2)
-        > u32::MAX as u64 - 36
-    {
-        return Err("editor preview stem exceeds the RIFF 4 GiB limit".into());
-    }
-    let mut writer = WavWriter::create(wav, channels)?;
+    let mut writer = FlacWriter::create(stem, channels)?;
     let mut peaks = vec![0.0f32; WAVE_BINS];
     let mut cursor = 0u64;
     // Where the previous frame ended (source samples); the first frame goes to its timestamp.
@@ -123,7 +115,7 @@ fn drain(
     frame: &mut ff::frame::Audio,
     tb: ff::Rational,
     origin_us: i64,
-    writer: &mut WavWriter,
+    writer: &mut FlacWriter,
     cursor: &mut u64,
     next_source_sample: &mut Option<i64>,
     total: u64,
@@ -205,7 +197,7 @@ fn drain(
 
 fn flush_resampler(
     resampler: &mut ff::software::resampling::Context,
-    writer: &mut WavWriter,
+    writer: &mut FlacWriter,
     cursor: &mut u64,
     total: u64,
     peaks: &mut [f32],
@@ -244,7 +236,7 @@ fn flush_resampler(
 fn append_at(
     samples: &[i16],
     start: u64,
-    writer: &mut WavWriter,
+    writer: &mut FlacWriter,
     cursor: &mut u64,
     total: u64,
     peaks: &mut [f32],
@@ -278,7 +270,7 @@ fn append_at(
 
 fn append_samples(
     samples: &[i16],
-    writer: &mut WavWriter,
+    writer: &mut FlacWriter,
     cursor: &mut u64,
     total: u64,
     peaks: &mut [f32],
@@ -295,72 +287,4 @@ fn append_samples(
     }
     *cursor += (usable.len() / channels as usize) as u64;
     Ok(())
-}
-
-struct WavWriter {
-    out: BufWriter<File>,
-    bytes: u64,
-    channels: u16,
-}
-impl WavWriter {
-    fn create(path: &Path, channels: u16) -> Result<Self, String> {
-        let mut out = BufWriter::new(
-            File::create(path).map_err(|e| format!("create stem {}: {e}", path.display()))?,
-        );
-        out.write_all(&[0; 44]).map_err(|e| e.to_string())?;
-        Ok(Self {
-            out,
-            bytes: 0,
-            channels,
-        })
-    }
-    fn samples(&mut self, samples: &[i16]) -> Result<(), String> {
-        let added = (samples.len() * 2) as u64;
-        if self.bytes.saturating_add(added) > u32::MAX as u64 - 36 {
-            return Err("editor preview stem exceeds the RIFF 4 GiB limit".into());
-        }
-        for s in samples {
-            self.out
-                .write_all(&s.to_le_bytes())
-                .map_err(|e| e.to_string())?;
-        }
-        self.bytes += added;
-        Ok(())
-    }
-    fn silence(&mut self, frames: u64) -> Result<(), String> {
-        const ZERO: [u8; 8192] = [0; 8192];
-        let mut bytes = frames
-            .saturating_mul(self.channels as u64)
-            .saturating_mul(2);
-        if self.bytes.saturating_add(bytes) > u32::MAX as u64 - 36 {
-            return Err("editor preview stem exceeds the RIFF 4 GiB limit".into());
-        }
-        while bytes > 0 {
-            let n = bytes.min(ZERO.len() as u64) as usize;
-            self.out.write_all(&ZERO[..n]).map_err(|e| e.to_string())?;
-            bytes -= n as u64;
-            self.bytes += n as u64;
-        }
-        Ok(())
-    }
-    fn finish(mut self) -> Result<(), String> {
-        self.out.flush().map_err(|e| e.to_string())?;
-        let mut file = self.out.into_inner().map_err(|e| e.to_string())?;
-        file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
-        let rate = PREVIEW_RATE * self.channels as u32 * 2;
-        let mut h = Vec::with_capacity(44);
-        h.extend_from_slice(b"RIFF");
-        h.extend_from_slice(&(36 + self.bytes as u32).to_le_bytes());
-        h.extend_from_slice(b"WAVEfmt ");
-        h.extend_from_slice(&16u32.to_le_bytes());
-        h.extend_from_slice(&1u16.to_le_bytes());
-        h.extend_from_slice(&self.channels.to_le_bytes());
-        h.extend_from_slice(&PREVIEW_RATE.to_le_bytes());
-        h.extend_from_slice(&rate.to_le_bytes());
-        h.extend_from_slice(&(self.channels * 2).to_le_bytes());
-        h.extend_from_slice(&16u16.to_le_bytes());
-        h.extend_from_slice(b"data");
-        h.extend_from_slice(&(self.bytes as u32).to_le_bytes());
-        file.write_all(&h).map_err(|e| e.to_string())
-    }
 }
