@@ -103,7 +103,14 @@ impl EditorState {
             self.status = format!("Couldn't load this clip. {failure}");
             return;
         }
+        if self.reopen_original() {
+            return;
+        }
         let Some(info) = self.info.as_ref() else { return };
+        if !std::path::Path::new(&info.path).is_file() {
+            self.status = "Can't find this clip's file. It was moved, renamed or deleted.".into();
+            return;
+        }
         if self.proxy_for.as_deref() == Some(info.path.as_str()) {
             self.status = format!("Can't preview this clip. Trim and export still work. ({error})");
             return;
@@ -111,6 +118,36 @@ impl EditorState {
         self.proxy_for = Some(info.path.clone());
         self.status = "Making a preview copy of this clip…".into();
         workers.asset(crate::worker::AssetJob::Proxy(info.path.clone()));
+    }
+
+    /// The player was reading an SSD copy that is gone (the cache let it go, or Settings
+    /// cleared it): play the clip from its own drive, at the same spot, instead of a dead
+    /// preview. False when there is no such copy to fall back from.
+    fn reopen_original(&mut self) -> bool {
+        let Some(info) = self.info.clone() else { return false };
+        let Some(copy) = self.playback_path.clone() else { return false };
+        let gone = |path: &str| !std::path::Path::new(path).is_file();
+        if super::same_path(&copy, &info.path) || !gone(&copy) || gone(&info.path) {
+            return false;
+        }
+        let at = self.position();
+        let tracks = self.preview_tracks(&info);
+        let Some(preview) = self.preview.as_mut() else { return false };
+        crate::trace::player_event("preview copy gone: playing the original", serde_json::json!({ "clip": info.path, "copy": copy }));
+        match preview.open(&info.path, &tracks, info.duration, self.limits) {
+            Ok(()) => {
+                self.playback_path = Some(info.path.clone());
+                self.applied_rect = (0, 0, 0, 0);
+                self.pending_seek = Some(at);
+                self.preview_failed = false;
+                self.status = "Loading preview…".into();
+                true
+            }
+            Err(error) => {
+                self.last_error = Some(error);
+                false
+            }
+        }
     }
 
     /// A preview copy finished (or failed) for `clip`.

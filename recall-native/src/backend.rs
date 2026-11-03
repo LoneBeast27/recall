@@ -247,6 +247,8 @@ pub fn prepare_clip_steps(path:&str,known_copy:Option<String>,beside_playback:bo
     let original=source.clone();
     let work=move||->Result<(ClipInfo,VisualAssets,Option<String>),String>{
         let info=run_engine_prepare(&input,in_place&&storage::drive_kind(&input).is_hdd(),&*stop)?;
+        // A copy gone mid-run (Settings cleared the cache) leaves frames to the original.
+        let frames_from=if frames_from.is_file(){frames_from}else{original.clone()};
         let (visuals,warning)=visual_assets::visuals_best_effort(&original,&frames_from,info.duration);
         Ok((info,visuals,warning))
     };
@@ -259,6 +261,8 @@ pub fn prepare_clip_steps(path:&str,known_copy:Option<String>,beside_playback:bo
     let (project,project_warning,sidecar_ours,sidecar_at_open)=load_project(&info);
     warnings.extend(project_warning);warnings.extend(visual_warning);
     let warning=(!warnings.is_empty()).then(||warnings.join(" "));
+    // Never hand the player a copy that is gone: it would show 0x80070002 and no picture.
+    let copy=copy.filter(|c|Path::new(c).is_file());
     let limits=crate::services::library::video_limits(copy.as_deref().unwrap_or(&info.path),info.duration);
     let marks=read_marks(&info.path);
     Ok(PreparedClip{info,project,warning,visuals,sidecar_ours,sidecar_at_open,playback:copy,limits,marks})

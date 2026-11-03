@@ -53,9 +53,25 @@ fn stale(generation: u64) -> bool {
     LATEST.load(Ordering::Acquire) != generation
 }
 
+/// Orders the keep marks of opens that overlap, so an older open never marks over a newer one.
+static KEEP_MARK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Marks the clip as the one in the editor before anything resolves its SSD copy: the cache
+/// keeps that copy whole from here on. Marked only at the end of preparing, the copy was fair
+/// game for the whole engine run, and a list reload or the recorder's kept copy deleted it
+/// under the player (Media Foundation 0x80070002, no filmstrip). False: a newer open started.
+fn keep_while_opening(generation: u64, path: &str) -> bool {
+    let _order = KEEP_MARK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if stale(generation) {
+        return false;
+    }
+    storage::note_editor_media(path, &[], true);
+    true
+}
+
 /// Runs one open from start to finish on its own thread: exports and listings keep their queue.
 pub fn run(generation: u64, path: String, tx: &Sender<Done>) {
-    if stale(generation) {
+    if !keep_while_opening(generation, &path) {
         return;
     }
     let com = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) };
