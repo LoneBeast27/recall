@@ -65,7 +65,7 @@ impl Inventory {
 pub(super) fn unit_clip<'a>(name: &'a str, media: &'a Media) -> Option<&'a str> {
     let (folder, rest) = name.split_once('/')?;
     match folder {
-        "video" => rest.strip_suffix(".mp4"),
+        "video" | "light" => rest.strip_suffix(".mp4"),
         "thumbs" => rest.strip_suffix(".jpg"),
         "visuals" => rest.split_once('#').map(|(id, _)| id),
         "editor" => media.owners.get(rest).map(String::as_str),
@@ -112,6 +112,14 @@ pub(super) fn inventory(root: &Path, score: &dyn Fn(&str) -> f64) -> Inventory {
         if metadata.is_file() && name.ends_with(".mp4") {
             let last_used = video_index.get(&name).copied().unwrap_or_else(|| ms(metadata.created()));
             push(Tier::Video, format!("video/{name}"), metadata.len(), last_used);
+        } else if metadata.is_file() {
+            other += metadata.len();
+        }
+    }
+    // Light copies (`light.rs`) are video copies too: same tier, same cap, ranked by score.
+    for (name, metadata, _) in entries(&root.join("light")) {
+        if metadata.is_file() && name.ends_with(".mp4") {
+            push(Tier::Video, format!("light/{name}"), metadata.len(), ms(metadata.modified()));
         } else if metadata.is_file() {
             other += metadata.len();
         }
@@ -173,7 +181,7 @@ pub(super) fn delete(root: &Path, unit: &Unit) -> u64 {
         if std::fs::remove_file(path).is_ok() { bytes } else { 0 }
     };
     match (folder, rest.split_once('#')) {
-        ("video" | "thumbs", None) => removed(&root.join(folder).join(rest)),
+        ("video" | "light" | "thumbs", None) => removed(&root.join(folder).join(rest)),
         ("editor", None) => {
             let dir = root.join("editor").join(rest);
             let before = dir_size(&dir).0;

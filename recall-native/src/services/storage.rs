@@ -30,6 +30,7 @@ mod history;
 mod io_priority;
 mod kept;
 mod lane;
+mod light;
 mod prefetch;
 mod probe;
 mod projects;
@@ -58,6 +59,8 @@ pub use io_priority::close_helpers;
 pub use head::{ProbeClip, cancel_probe, probe_filter};
 #[allow(unused_imports)]
 pub use kept::{adopt_kept, sweep_kept};
+#[allow(unused_imports)]
+pub use light::light_copy;
 pub use probe::{ProbedClip, probe_clip};
 #[allow(unused_imports)]
 pub use evict::DEFAULT_CACHE_BUDGET;

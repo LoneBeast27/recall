@@ -148,15 +148,6 @@ pub(super) fn cache_in(root: &Path, source: &Path, budget: u64) -> Result<PathBu
     copy_in(root, source, budget, &room, &FULL_SPEED)
 }
 
-/// Idle warm-up copy of a clip scored `score` (call on the source's lane): it fits within
-/// the budget less the fill margin, deleting only video copies scored strictly lower;
-/// otherwise it is skipped (`budget::room_below`). It gives the drive to any on-demand work
-/// queued on its lane between 8 MiB chunks: Err([`YIELDED`]), temp file deleted.
-pub(super) fn warm_in(root: &Path, source: &Path, budget: u64, limit: u64, score: f64) -> Result<PathBuf, String> {
-    let pace = Pace { rate: slow_drive_rate(), yields: &lane::demand_waiting };
-    copy_in(root, source, budget, &|bytes| budget::room_below(root, budget, limit, bytes, score), &pace)
-}
-
 /// The copy, after `room(bytes)` made room for it (false: no room, nothing copied).
 pub(super) fn copy_in(root: &Path, source: &Path, budget: u64, room: &dyn Fn(u64) -> bool, pace: &Pace) -> Result<PathBuf, String> {
     let metadata = source.metadata().map_err(|error| format!("stat clip: {error}"))?;

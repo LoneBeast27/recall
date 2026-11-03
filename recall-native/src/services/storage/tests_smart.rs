@@ -200,7 +200,7 @@ fn fill_stops_at_95_percent_of_the_budget() {
     let mut clip = super::tests::clip("x.mp4", true, true);
     clip.duration = Some(100.0);
     assert_eq!(estimate(Step::Editor, &clip), 28_800_000 + (200 << 10));
-    assert_eq!(estimate(Step::Video, &clip), clip.bytes);
+    assert_eq!(estimate(Step::Video, &clip), 100 * super::light::LIGHT_BYTES_PER_SEC, "a light copy, not the whole clip");
 }
 
 #[test]
@@ -365,3 +365,23 @@ fn a_clip_prepared_with_flac_stems_drops_its_wav_stems() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+
+#[test]
+fn light_copies_are_video_units_ranked_and_evicted_by_their_clip() {
+    let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+    let root = std::env::temp_dir().join(format!("recall-light-units-{}-{nonce}", std::process::id()));
+    std::fs::create_dir_all(root.join("light")).unwrap();
+    std::fs::write(root.join("light").join("aaaa.mp4"), vec![1u8; 3000]).unwrap();
+    std::fs::write(root.join("light").join("bbbb.mp4"), vec![1u8; 3000]).unwrap();
+    let inventory = budget::inventory(&root, &|id| if id == "aaaa" { 5.0 } else { 0.5 });
+    let light: Vec<(&str, f64)> = inventory.units.iter().filter(|u| u.name.starts_with("light/")).map(|u| (u.name.as_str(), u.score)).collect();
+    assert_eq!(light.len(), 2);
+    assert!(inventory.units.iter().filter(|u| u.name.starts_with("light/")).all(|u| u.tier == Tier::Video));
+    assert!(light.contains(&("light/aaaa.mp4", 5.0)));
+    // Room for one more light copy of a clip scored 1.0: only the lower-scored one may go.
+    let evicted = super::evict::room_below(&inventory.units, 0, 6000, 1 << 20, 3000, 1.0, &[]);
+    assert_eq!(evicted, Some(vec!["light/bbbb.mp4".to_string()]));
+    assert_eq!(budget::delete(&root, inventory.units.iter().find(|u| u.name == "light/bbbb.mp4").unwrap()), 3000);
+    assert!(!root.join("light").join("bbbb.mp4").exists());
+    let _ = std::fs::remove_dir_all(&root);
+}
