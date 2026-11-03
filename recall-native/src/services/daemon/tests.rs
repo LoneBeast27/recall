@@ -310,6 +310,34 @@ fn pipe_client_round_trip_against_a_fake_controller() {
     assert_eq!(client.snapshot().session, None, "stale status cleared");
 }
 
+/// The recorder quits (an install) and a new one starts on the same pipe: the app keeps
+/// running, sees the disconnect, then reconnects by itself and asks for status again.
+#[test]
+fn pipe_client_reconnects_to_a_restarted_controller() {
+    use interprocess::local_socket::traits::{Listener as _, Stream as _};
+    use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName};
+    use std::io::{BufRead as _, BufReader, Write as _};
+
+    let pipe = format!("recall-native-restart-test-{}", std::process::id());
+    let listen = || ListenerOptions::new().name(pipe.as_str().to_ns_name::<GenericNamespaced>().unwrap()).create_sync().unwrap();
+    let client = DaemonClient::spawn_on(&pipe);
+    for run in 1..=2 {
+        let stream = listen().accept().unwrap(); // the listener goes with this scope, like a quit recorder
+        let (reader, mut writer) = stream.split();
+        let mut lines = BufReader::new(reader).lines();
+        assert_eq!(lines.next().unwrap().unwrap(), r#"{"cmd":"status"}"#, "run {run} asks for status");
+        assert_eq!(lines.next().unwrap().unwrap(), r#"{"cmd":"get_config"}"#);
+        wait_until("connected", || client.snapshot().connected);
+        writer.write_all(b"{\"mod\":\"session\",\"event\":{\"type\":\"status\",\"state\":\"recording\",\"save_seconds\":120}}\n").unwrap();
+        wait_until("session status", || client.snapshot().session.is_some_and(|s| s.state == "recording"));
+        assert!(client.send(DaemonCommand::SaveClip { seconds: None }), "run {run} takes commands");
+        drop(writer);
+        drop(lines);
+        wait_until("disconnect", || !client.snapshot().connected);
+        assert!(!client.send(DaemonCommand::Status), "no recorder: commands are dropped, the app stays up");
+    }
+}
+
 #[test]
 fn workspace_manifest_detection() {
     assert!(workspace_lists_controller("[workspace]\nresolver = \"2\"\nmembers = [\"recall\", \"recall-hdr\", \"recall-overlay\"]\n"));

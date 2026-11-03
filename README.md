@@ -19,6 +19,10 @@ powershell -NoProfile -File scripts\install.ps1
   (`-NoAutostart` skips that; Settings → General turns it off later).
 - Builds run on the background CPU cores (CCD1) through `nice-build.ps1`, so a running game
   is not slowed down.
+- Close Recall first: while the app runs, the installer stops with exit 3 and changes nothing.
+  `-CloseApp` closes the app for you instead.
+- Restarting the recorder (an install, or `{"cmd":"quit"}` on its pipe) leaves the app open; it
+  reconnects to the next recorder by itself. Only **Quit Recall** in the tray closes the app.
 
 ## Use it
 

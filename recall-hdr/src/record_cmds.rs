@@ -4,7 +4,7 @@
 //! | cmd | args | effect / reply |
 //! |---|---|---|
 //! | `status` | | session status + cached engine hello/status (+ legacy `hdr` status) to the caller |
-//! | `quit` | | stop recording and exit |
+//! | `quit` | | stop recording and exit (the Recall app stays open) |
 //! | `save_clip` | `seconds?` | engine save (default = `recording.buffer_secs`) + `session` `saving{seconds}` broadcast (the island's saving ring); no engine / paused -> `engine` `save_failed` |
 //! | `bookmark` | | engine bookmark (marks land in the next saves' `.recall-marks.json`) |
 //! | `screenshot` | | engine PNG -> `engine` `screenshot{path}`; refused -> `screenshot_failed` |
@@ -72,7 +72,7 @@ impl Controller {
             "status" => self.reply_status(inbound.client),
             "quit" => {
                 log!("record: control quit");
-                self.quit = true;
+                self.quit = Some(crate::record_quit::QuitReason::ControlPipe);
             }
             "save_clip" => match val.get("seconds") {
                 None | Some(Value::Null) => self.save_clip(None),

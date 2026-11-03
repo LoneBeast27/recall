@@ -14,11 +14,14 @@
     cache\              created by the app; capped (Settings → Storage)
 
   Usage (PowerShell):
-    powershell -NoProfile -File scripts\install.ps1 [-InstallDir <path on an SSD>] [-NoBuild] [-NoShortcut] [-NoAutostart] [-NoFrameTiming]
+    powershell -NoProfile -File scripts\install.ps1 [-InstallDir <path on an SSD>] [-NoBuild] [-NoShortcut] [-NoAutostart] [-NoFrameTiming] [-CloseApp]
   Default install folder: %LOCALAPPDATA%\Programs\Recall (per-user, no admin rights).
   After installing, the installed recorder starts and is set to start with Windows
   (Settings > General turns that off; -NoAutostart skips it).
   Builds run through nice-build.ps1 (CCD1, BelowNormal) so a running game is not disturbed.
+  While the installed Recall app runs, the installer refuses before doing anything (exit 3):
+  replacing the program would close it under you. Close Recall and re-run, or pass -CloseApp
+  to have the installer close it first.
 
   Performance stats (step 5b; -NoFrameTiming skips it): FPS and 1% low come from Windows frame
   timing, the present events Windows itself logs (the method Intel PresentMon and NVIDIA
@@ -26,7 +29,7 @@
   Performance Log Users (SID S-1-5-32-559). When you are not in it, ONE administrator prompt
   adds you; it takes effect at your next sign-in. Declining the prompt only leaves FPS as "-".
 #>
-param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$NoAutostart, [switch]$NoFrameTiming, [switch]$NoStart)
+param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$NoAutostart, [switch]$NoFrameTiming, [switch]$NoStart, [switch]$CloseApp)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $stage = Join-Path $repo 'dist'
@@ -51,6 +54,28 @@ if ($drive.kind -ne 'SSD') {
     "$($drive.model) ($($drive.kind)). Pick a folder on an SSD with -InstallDir.")
 }
 "Install folder: $InstallDir  ($($drive.model), SSD)"
+
+# 2a. Never close the app under the user: refuse while the installed app runs (checked before any
+#     build work). Its window counts even when minimized; a hidden instance still locks the files.
+function Get-InstalledApp { Get-CimInstance Win32_Process -Filter "Name = 'recall-native.exe'" | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) } }
+$app = @(Get-InstalledApp)
+if ($app.Count -and -not $CloseApp) {
+  Add-Type -Name Win -Namespace RecallInstall -MemberDefinition @'
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
+public delegate bool EnumProc(IntPtr h, IntPtr l);
+[DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc f, IntPtr l);
+[DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+'@
+  $ids = @($app | ForEach-Object { [int]$_.ProcessId }); $script:shown = 0
+  [void][RecallInstall.Win]::EnumWindows({ param($h, $l) $p = [uint32]0; [void][RecallInstall.Win]::GetWindowThreadProcessId($h, [ref]$p); if ($ids -contains [int]$p -and [RecallInstall.Win]::IsWindowVisible($h)) { $script:shown++ }; $true }, [IntPtr]::Zero)
+  $how = if ($script:shown) { "is open ($($script:shown) window(s))" } else { 'is running in the background' }
+  Write-Host "Recall $how (pid $($ids -join ', ')). Installing now would close it. Close Recall, then re-run; or pass -CloseApp to close it first."
+  exit 3
+}
+if ($app.Count) {
+  # -CloseApp: ask each instance to close the way its own X button does, then wait below.
+  foreach ($p in $app) { try { [void](Get-Process -Id $p.ProcessId -ErrorAction Stop).CloseMainWindow() } catch { } }
+}
 
 # 2. Quit the running recorder gracefully, wherever it runs from (only one controller can run;
 #    its quit also stops the engine and overlay). Done before building: a recorder started from

@@ -61,6 +61,7 @@ mod record_hotkeys;
 mod record_session;
 mod record_status;
 mod record_notice;
+mod record_quit;
 mod record_storage;
 mod record_target;
 mod record_tray;
