@@ -206,10 +206,55 @@ pub(super) fn delete(root: &Path, unit: &Unit) -> u64 {
 /// join the video tier. Lowest-score clips first (`evict::plan`). Returns bytes freed.
 pub(super) fn enforce(root: &Path, budget: u64, incoming_video: u64) -> u64 {
     let _guard = INDEX_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let swept = sweep_old_stems_once(root);
     let inventory = inventory(root, &super::prefetch::score_of);
     let keep = kept();
     let evicted = evict::plan(&inventory.units, inventory.projects + inventory.other, budget, budget / 2, incoming_video, &keep);
-    remove(root, &inventory, &evicted)
+    swept + remove(root, &inventory, &evicted)
+}
+
+/// Roots whose old stem folders were swept in this process.
+static SWEPT: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+/// [`sweep_old_stems`] at the first budget pass of each cache root in this process. Call with
+/// [`INDEX_LOCK`] held.
+fn sweep_old_stems_once(root: &Path) -> u64 {
+    let mut swept = SWEPT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if swept.iter().any(|done| done == root) {
+        return 0;
+    }
+    swept.push(root.to_path_buf());
+    drop(swept);
+    sweep_old_stems(root, &kept())
+}
+
+/// Deletes the engine stem folders of media cache versions before the current one (6, FLAC):
+/// every older version wrote WAV stems, so a folder holding a `.wav` is old. They would count
+/// against the budget next to the FLAC folders until each clip is prepared again; a clip simply
+/// re-prepares when it opens. `keep` (the clip in the editor) is never touched. Returns bytes
+/// freed. Call with [`INDEX_LOCK`] held.
+pub(super) fn sweep_old_stems(root: &Path, keep: &[String]) -> u64 {
+    let editor_root = root.join("editor");
+    let mut media = read_media(root);
+    let mut freed = 0;
+    for (name, metadata, path) in entries(&editor_root) {
+        let old = metadata.is_dir()
+            && std::fs::read_dir(&path).is_ok_and(|listing| listing.flatten().any(|entry| entry.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("wav"))));
+        if !old || keep.contains(&format!("editor/{name}")) {
+            continue;
+        }
+        let bytes = dir_size(&path).0;
+        if std::fs::remove_dir_all(&path).is_ok() {
+            freed += bytes;
+            media.used.remove(&format!("editor/{name}"));
+            media.owners.remove(&name);
+        }
+    }
+    if freed > 0 {
+        write_media(root, &media);
+        super::prefetch::invalidate_usage();
+    }
+    freed
 }
 
 /// Makes room for `incoming` bytes of a speculative video copy of a clip scored `score`,

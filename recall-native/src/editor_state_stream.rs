@@ -137,7 +137,7 @@ impl EditorState {
             self.loading = Default::default();
             return true;
         };
-        if hand_over_due(media.light, media.fill.outcome() == Outcome::Done, self.loading.prepared, self.playing) {
+        if hand_over_due(media.light, media.fill.outcome() == Outcome::Done, self.loading.prepared, self.playing, self.drag.is_some()) {
             let full = media.fill.target().to_string_lossy().into_owned();
             if let Some(clip) = self.info.as_ref().map(|info| info.path.clone()) {
                 crate::trace::player_event("full resolution takes over from the light copy", serde_json::json!({ "at": self.position() }));
@@ -278,10 +278,11 @@ impl EditorState {
 }
 
 /// Full resolution replaces the light copy once the whole clip is on the SSD and its stems are
-/// in (the reopened player plays from them), at a moment playback is stopped: a pause, the end,
-/// or before the first play. Swapping mid-play would show a hitch.
-fn hand_over_due(light: bool, copied: bool, prepared: bool, playing: bool) -> bool {
-    light && copied && prepared && !playing
+/// in (the reopened player plays from them), at a moment playback is stopped and no timeline
+/// drag (scrub, trim, gain) is under way: a pause, the end, or before the first play. Swapping
+/// mid-play would show a hitch; mid-drag it would drop the scrub's frames and position.
+fn hand_over_due(light: bool, copied: bool, prepared: bool, playing: bool, dragging: bool) -> bool {
+    light && copied && prepared && !playing && !dragging
 }
 
 impl EditorState {
@@ -297,11 +298,12 @@ mod tests {
 
     #[test]
     fn full_resolution_takes_over_only_when_whole_prepared_and_stopped() {
-        assert!(hand_over_due(true, true, true, false), "copied, stems in, paused: swap");
-        assert!(!hand_over_due(true, true, true, true), "never mid-play");
-        assert!(!hand_over_due(true, false, true, false), "the whole clip is not on the SSD yet");
-        assert!(!hand_over_due(true, true, false, false), "the stems are not in yet: the sound comes from the fill");
-        assert!(!hand_over_due(false, true, true, false), "a fill without a light copy already shows full resolution");
+        assert!(hand_over_due(true, true, true, false, false), "copied, stems in, paused: swap");
+        assert!(!hand_over_due(true, true, true, true, false), "never mid-play");
+        assert!(!hand_over_due(true, true, true, false, true), "never mid-drag, even paused: it waits for the drag to end");
+        assert!(!hand_over_due(true, false, true, false, false), "the whole clip is not on the SSD yet");
+        assert!(!hand_over_due(true, true, false, false, false), "the stems are not in yet: the sound comes from the fill");
+        assert!(!hand_over_due(false, true, true, false, false), "a fill without a light copy already shows full resolution");
     }
 
     #[test]
