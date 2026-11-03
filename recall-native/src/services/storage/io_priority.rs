@@ -91,10 +91,36 @@ pub fn close_helpers() {
 /// Starts `command` hidden at below-normal CPU priority, in the helpers' job; with `lowered`,
 /// the process is created suspended, set to very low I/O priority, then resumed.
 pub(super) fn spawn(command: &mut Command, lowered: bool) -> io::Result<Child> {
-    start(&CLOSING, command, lowered)
+    start(&CLOSING, command, lowered, false)
 }
 
-fn start(closing: &RwLock<bool>, command: &mut Command, lowered: bool) -> io::Result<Child> {
+/// [`spawn`] for long background encodes: very low I/O priority, below-normal CPU priority,
+/// and the upper half of the CPUs (CCD1 on this desktop), all set before the process runs.
+pub(super) fn spawn_pinned(command: &mut Command) -> io::Result<Child> {
+    start(&CLOSING, command, true, true)
+}
+
+/// The upper half of the set bits in `mask`; `None` below 8 CPUs.
+pub(super) fn upper_half(mask: usize) -> Option<usize> {
+    let count = mask.count_ones();
+    if count < 8 {
+        return None;
+    }
+    let mut keep = count / 2;
+    let mut upper = 0usize;
+    for bit in (0..usize::BITS).rev() {
+        if keep == 0 {
+            break;
+        }
+        if mask & (1 << bit) != 0 {
+            upper |= 1 << bit;
+            keep -= 1;
+        }
+    }
+    Some(upper)
+}
+
+fn start(closing: &RwLock<bool>, command: &mut Command, lowered: bool, pinned: bool) -> io::Result<Child> {
     let closing = closing.read().unwrap_or_else(|poisoned| poisoned.into_inner());
     if *closing {
         return Err(io::Error::other("Recall is closing"));
@@ -108,6 +134,15 @@ fn start(closing: &RwLock<bool>, command: &mut Command, lowered: bool) -> io::Re
         return Ok(child);
     }
     let value = IO_VERY_LOW;
+    if pinned {
+        use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessAffinityMask, SetProcessAffinityMask};
+        let (mut process, mut system) = (0usize, 0usize);
+        if unsafe { GetProcessAffinityMask(GetCurrentProcess(), &mut process, &mut system) }.is_ok() {
+            if let Some(mask) = upper_half(process) {
+                let _ = unsafe { SetProcessAffinityMask(handle(&child), mask) };
+            }
+        }
+    }
     unsafe {
         let _ = NtSetInformationProcess(handle(&child), PROCESS_IO_PRIORITY, (&value as *const u32).cast(), 4);
         if NtResumeProcess(handle(&child)) < 0 {
@@ -133,9 +168,9 @@ mod closing_tests {
         let closing = RwLock::new(false);
         let mut command = Command::new("cmd.exe");
         command.args(["/c", "exit 0"]);
-        assert!(start(&closing, &mut command, false).unwrap().wait().unwrap().success());
+        assert!(start(&closing, &mut command, false, false).unwrap().wait().unwrap().success());
         *closing.write().unwrap() = true;
-        assert!(start(&closing, &mut command, false).is_err());
-        assert!(start(&closing, &mut command, true).is_err());
+        assert!(start(&closing, &mut command, false, false).is_err());
+        assert!(start(&closing, &mut command, true, false).is_err());
     }
 }

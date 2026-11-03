@@ -1,10 +1,10 @@
 //! Smart-cache planner: keep the cache as full as the budget allows (~95%) with what the
 //! user is most likely to look at next (`score`). Clips are ranked by score; every clip gets
 //! its thumbnail and duration (cheap, kept), then in rank order each clip climbs the
-//! cascade hover frames → editor media (top [`EDITOR_TOP`]) → SSD video copy (every clip in
-//! rank order, within the half-budget video cap). Work items that would overfill the budget
-//! are skipped, so smaller items further down still fit. A video copy (idle warm-up) may
-//! push out only copies of clips scored lower than its own (`video::warm_in`).
+//! cascade hover frames → editor media (top [`EDITOR_TOP`]) → light copy (every clip in rank
+//! order, `light.rs`; whole copies are made only for the clip being opened). Work items that
+//! would overfill the budget are skipped, so smaller items further down still fit. A light copy
+//! may push out only video copies of clips scored lower than its own (`budget::room_below`).
 //!
 //! The plan runs as each disk lane's idle source: one item at a time, only after the lane
 //! has been free of on-demand work for the idle grace period, and not at all while the
@@ -155,7 +155,7 @@ pub(super) fn estimate(step: Step, clip: &PrefetchClip) -> u64 {
         Step::Duration => 0,
         Step::Scrub => SCRUB_ESTIMATE,
         Step::Editor => clip.duration.map_or(clip.bytes / 12, |d| (d * AUDIO_BYTES_PER_SEC) as u64) + VISUALS_ESTIMATE,
-        Step::Video => clip.bytes,
+        Step::Video => clip.duration.map_or(clip.bytes / 2, |seconds| (seconds * super::light::LIGHT_BYTES_PER_SEC as f64) as u64),
     }
 }
 
@@ -197,15 +197,16 @@ fn cached(root: &Path, owners: &HashSet<String>, step: Step, clip: &PrefetchClip
         Step::Scrub => super::scrub_frame_paths(root, &id).iter().all(|p| super::valid_file(p)),
         Step::Editor => owners.contains(&id) && super::valid_file(&super::visuals_dir(root, &id).join("poster.jpg")),
         // A clip already on an SSD gains nothing from a copy.
-        Step::Video => {
-            !super::drive_kind(Path::new(&clip.path)).is_hdd() || root.join("video").join(format!("{id}.mp4")).metadata().is_ok_and(|m| m.len() == clip.bytes)
-        }
+        // The video step is the clip's light copy (`light.rs`); a clip on an SSD needs none.
+        Step::Video => !super::drive_kind(Path::new(&clip.path)).is_hdd() || super::valid_file(&super::light::light_dir(root).join(format!("{id}.mp4"))),
     }
 }
 
 struct Feed {
     root: PathBuf,
     budget: u64,
+    /// The best-ranked clip: the one whose whole SSD copy stays after its light copy is made.
+    top: Option<usize>,
     library: Arc<Library>,
     owners: HashSet<String>,
     order: Mutex<VecDeque<(Step, usize)>>,
@@ -222,7 +223,7 @@ impl IdleSource for Arc<Feed> {
             let (step, index) = self.order.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).pop_front()?;
             let clip = &self.library.clips[index];
             // Re-check: on-demand work may have filled it since the plan was made.
-            // A video copy is admitted by `warm_in` itself: it may trade places with a lower one.
+            // A light copy is admitted by `warm_light` itself: it may trade places with a lower one.
             let admitted = step == Step::Video || self.gate.admit(step, estimate(step, clip));
             if cached(&self.root, &self.owners, step, clip) || !admitted {
                 continue;
@@ -234,6 +235,30 @@ impl IdleSource for Arc<Feed> {
 }
 
 impl Feed {
+    /// The idle light copy of `clip`: room is made only from lower-scored video copies; it reads
+    /// the clip's whole SSD copy when there is one (fresh clips), else the original on this lane.
+    /// Once made, the whole copy goes unless the clip is the best-ranked one or open.
+    fn warm_light(&self, clip: &PrefetchClip, top: bool) -> Result<u64, String> {
+        let id = clip_id(clip);
+        let estimate = estimate(Step::Video, clip);
+        if !budget::room_below(&self.root, self.budget, warm_limit(self.budget), estimate, score_of(&id)) {
+            return Err("no room for a light copy".into());
+        }
+        let source = Path::new(&clip.path);
+        let whole = super::video::video_dir(&self.root).join(format!("{id}.mp4"));
+        let on_ssd = whole.metadata().is_ok_and(|m| m.len() == clip.bytes);
+        let read_from = if on_ssd { whole.clone() } else { source.to_path_buf() };
+        let seconds = clip.duration.unwrap_or_else(|| super::light::seconds_of(source, clip.bytes));
+        // Reading the hard drive, the copy yields to on-demand work on its lane; from the SSD it
+        // only stops for the recorder.
+        let stop = || recorder_busy() || (!on_ssd && super::lane::demand_waiting());
+        let light = super::light::make_in(&self.root, &id, &read_from, seconds, &stop)?;
+        if on_ssd && !top && !budget::kept().contains(&format!("video/{id}.mp4")) {
+            let _ = std::fs::remove_file(&whole);
+        }
+        Ok(light.metadata().map_or(estimate, |m| m.len()))
+    }
+
     fn run(&self, step: Step, index: usize) {
         let clip = &self.library.clips[index];
         let (path, sink) = (clip.path.clone(), &self.library.sink);
@@ -259,15 +284,12 @@ impl Feed {
                     self.gate.add(step, bytes);
                 }
             }
-            Step::Video => {
-                let score = score_of(&clip_id(clip));
-                match super::video::warm_in(&self.root, Path::new(&path), self.budget, warm_limit(self.budget), score) {
-                    Ok(_) => self.gate.add(step, clip.bytes),
-                    // An open or a hover took the drive: this copy is first again once it is idle.
-                    Err(error) if error == super::video::YIELDED => self.order.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push_front((step, index)),
-                    Err(_) => {}
-                }
-            }
+            Step::Video => match self.warm_light(clip, index == self.top.unwrap_or(usize::MAX)) {
+                Ok(bytes) => self.gate.add(step, bytes),
+                // An open or a hover took the drive: this copy is first again once it is idle.
+                Err(error) if error == super::light::STOPPED => self.order.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push_front((step, index)),
+                Err(_) => {}
+            },
         }
         invalidate_usage();
     }
@@ -317,7 +339,7 @@ pub(super) fn replan() {
         }
     }
     for (key, order) in by_lane {
-        let feed = Feed { root: root.clone(), budget, library: library.clone(), owners: owners.clone(), order: Mutex::new(order), gate: gate.clone() };
+        let feed = Feed { root: root.clone(), budget, top: ranked.first().copied(), library: library.clone(), owners: owners.clone(), order: Mutex::new(order), gate: gate.clone() };
         lane::lane(&key).set_idle(Some(Arc::new(Arc::new(feed))));
         lanes.insert(key);
     }
