@@ -6,6 +6,7 @@ pub mod pages;
 pub mod settings;
 pub mod settings_audio;
 pub mod settings_capture;
+pub mod settings_keys;
 pub mod storage_settings;
 pub mod tile_menu;
 pub mod timeline;

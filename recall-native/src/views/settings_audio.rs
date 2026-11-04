@@ -19,6 +19,8 @@ use crate::{
 pub struct SettingsUi {
     pub devices: AudioDevices,
     pub device_menu: Option<DeviceMenu>,
+    /// The Shortcuts chip waiting for new keys.
+    pub capture: Option<crate::views::settings_keys::ShortcutSlot>,
 }
 
 /// Which device list is open.

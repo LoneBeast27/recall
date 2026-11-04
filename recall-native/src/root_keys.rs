@@ -18,6 +18,11 @@ impl Root {
     }
 
     pub(super) fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Settings → Shortcuts: a chip waiting for keys takes the press first.
+        if self.capture_shortcut_key(&event.keystroke) {
+            cx.notify();
+            return;
+        }
         let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
         if let Some(field) = self.focused_field(window) {
             self.field_key(field, event, clipboard, window);
