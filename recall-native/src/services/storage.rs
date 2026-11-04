@@ -69,7 +69,7 @@ pub use history::{Interaction, record_interaction};
 #[allow(unused_imports)]
 pub use lane::{LaneStats, Priority, lane_wait_ms, run_io, stats, submit_io};
 #[allow(unused_imports)]
-pub use prefetch::{PrefetchClip, PrefetchEvent, PrepareEditor, recorder_busy, recorder_holds, set_recorder_busy, set_recorder_connected, smart_status, start_prefetch};
+pub use prefetch::{PrefetchClip, PrefetchEvent, PrepareEditor, gpu_work_allowed, recorder_busy, recorder_holds, set_recorder_busy, set_recorder_connected, smart_status, start_prefetch};
 pub use projects::{ProjectSource, SidecarStep, export_dir, has_export, project_order, sidecar_step, working_copy_path, write_atomic};
 pub(crate) use projects::modified_ms as projects_modified_ms;
 #[allow(unused_imports)]

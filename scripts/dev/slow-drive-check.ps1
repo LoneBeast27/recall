@@ -82,10 +82,15 @@ Run-Scenario 'a seek ahead of the copy pulls it there and plays' {
   $at = Ok ($null -ne $landed) $(if ($landed) { "picture at $(Fmt $landed.video)s after $([int]($landed.ms - $t0)) ms" } else { 'picture never reached the seek' })
   $notes = @(Rows $s $t0 | Where-Object { $_.loading.note }).Count
   $saw = Ok ($notes -gt 0) "said it was loading that part in $notes samples"
+  # Play once the 3 s after the playhead are on the SSD. Pressed at once, playback measures how
+  # fast the slowed copy gets ahead of it, not whether it plays: under CPU or disk load the copy
+  # trails and the 2 s window spent most of its time buffering (+0.64 s in a full gate run).
+  $ahead = Wait-Trace $s { param($r) $p = [double]$r.pos; $r.loading -and -not @($r.loading.grey | Where-Object { [double]$_[0] -lt $p + 3 -and [double]$_[1] -gt $p }) } 30000
+  $loaded = Ok ($null -ne $ahead) $(if ($ahead) { "3 s past the playhead loaded after $([int]($ahead.ms - $t0)) ms" } else { 'the part after the playhead never loaded' })
   $plays = Press-Play $s 'space' 2
   $r = Last $s
   $two = Ok ((Parts $r) -ge 2) "grey parts before and after the jump: $(Parts $r)"
-  Verdict @($at, $saw, $plays, $two)
+  Verdict @($at, $saw, $loaded, $plays, $two)
 }
 
 Run-Scenario 'playback pauses for a drive slower than the clip and carries on' {

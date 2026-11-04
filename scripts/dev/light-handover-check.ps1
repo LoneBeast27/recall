@@ -16,7 +16,8 @@
       it happens once.
     - pre-encode: after the takeover an untouched clip is not prepared; a trim prepares it once into
       cache\tmp\pre-encode, the engine at below-normal priority on the upper CPUs (0xFFFF0000); while
-      the recorder is busy (RECALL_FAKE_RECORDING) it waits, and starts once recording stops.
+      the recorder is busy (RECALL_FAKE_RECORDING) or off (RECALL_FAKE_NO_RECORDER) it waits, and
+      starts once it is back.
 
     powershell -NoProfile -File scripts\dev\light-handover-check.ps1 [-Clip <mp4>] [-Exe <recall-native.exe>] [-Engine <recall.exe>] [-Only '<pattern>', ...]
 
@@ -200,6 +201,26 @@ Run-Scenario 'no pre-encode while the recorder is busy; it starts once recording
   } finally { Remove-Item $busy -ErrorAction SilentlyContinue }
   $started = Wait-Trace $s { param($r) "$($r.pre_encode)" -like 'Preparing export*' -or "$($r.pre_encode)" -like 'Ready*' } 15000
   $resumes = Ok ($null -ne $started) "after recording stops: '$($started.pre_encode)'"
+  $done = Wait-Trace $s { param($r) "$($r.pre_encode)" -like 'Ready*' } 240000
+  $ready = Ok ($null -ne $done -and (Pre-EncodeStarts $s) -eq 1) "ready: $($null -ne $done), starts $(Pre-EncodeStarts $s)"
+  Verdict @($loaded, $waits, $resumes, $ready)
+}
+
+Run-Scenario 'no pre-encode while the recorder is off; it starts once the recorder is back' {
+  Clear-Cache
+  $name = 'handover-norecorder'
+  $off = Join-Path $script:work 'fake-no-recorder'
+  Set-Content $off 'off' -Encoding ascii
+  $env:RECALL_FAKE_NO_RECORDER = $off
+  try { $s = Start-Slow $name 120 } finally { Remove-Item Env:RECALL_FAKE_NO_RECORDER -ErrorAction SilentlyContinue }
+  try {
+    $loaded = Ok ($null -ne (Wait-Trace $s { param($r) -not $r.loading -and $r.pre_encode_eligible } 180000)) 'loaded with no recorder'
+    DragHandle $s 'trim-start' 20
+    $r = Ticks $s 5
+    $waits = Ok ("$($r.pre_encode)" -like '*once the recorder is running*' -and (Pre-EncodeStarts $s) -eq 0 -and -not (Pre-EncodeEngine)) "without the recorder: '$($r.pre_encode)', starts $(Pre-EncodeStarts $s)"
+  } finally { Remove-Item $off -ErrorAction SilentlyContinue }
+  $started = Wait-Trace $s { param($r) "$($r.pre_encode)" -like 'Preparing export*' -or "$($r.pre_encode)" -like 'Ready*' } 15000
+  $resumes = Ok ($null -ne $started) "recorder back: '$($started.pre_encode)'"
   $done = Wait-Trace $s { param($r) "$($r.pre_encode)" -like 'Ready*' } 240000
   $ready = Ok ($null -ne $done -and (Pre-EncodeStarts $s) -eq 1) "ready: $($null -ne $done), starts $(Pre-EncodeStarts $s)"
   Verdict @($loaded, $waits, $resumes, $ready)

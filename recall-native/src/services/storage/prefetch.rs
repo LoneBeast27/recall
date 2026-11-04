@@ -73,8 +73,8 @@ pub fn recorder_busy() -> bool {
 /// Checks only: `RECALL_FAKE_RECORDING=<file>` makes the recorder count as busy while that file
 /// exists, so an offscreen instance without a recorder can be shown a game starting and ending.
 fn fake_recording() -> bool {
-    static FILE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
-    FILE.get_or_init(|| std::env::var_os("RECALL_FAKE_RECORDING").filter(|v| !v.is_empty()).map(PathBuf::from)).as_ref().is_some_and(|file| file.exists())
+    static RECORDING: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    fake_file(&RECORDING, "RECALL_FAKE_RECORDING").is_some_and(|file| file.exists())
 }
 
 static RECORDER_CONNECTED: AtomicBool = AtomicBool::new(false);
@@ -84,10 +84,21 @@ pub fn set_recorder_connected(connected: bool) {
     RECORDER_CONNECTED.store(connected, Ordering::Relaxed);
 }
 
-/// Light copies use the GPU: only while the recorder is there to say a game runs (it is off
-/// when Windows starts, autostart being off), or in a check sandbox that runs without one.
-fn gpu_work_allowed() -> bool {
+/// Background GPU work (light copies, the pre-encode's NVENC export) runs only while the
+/// recorder is there to say a game runs (it is off when Windows starts, autostart being off),
+/// or in a check sandbox that runs without one. `RECALL_FAKE_NO_RECORDER=<file>` (checks only)
+/// shows a sandbox the recorder gone while that file exists.
+pub fn gpu_work_allowed() -> bool {
+    static NO_RECORDER: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    if fake_file(&NO_RECORDER, "RECALL_FAKE_NO_RECORDER").is_some_and(|file| file.exists()) {
+        return false;
+    }
     RECORDER_CONNECTED.load(Ordering::Relaxed) || std::env::var_os("RECALL_NO_CONTROLLER").is_some()
+}
+
+/// The file a checks-only `RECALL_FAKE_*` variable names, read once into `cell`.
+fn fake_file(cell: &'static std::sync::OnceLock<Option<PathBuf>>, variable: &str) -> Option<&'static PathBuf> {
+    cell.get_or_init(|| std::env::var_os(variable).filter(|v| !v.is_empty()).map(PathBuf::from)).as_ref()
 }
 
 /// The open clip's copy from `path` slows down for the recorder (`ClipFill::pace`): only a

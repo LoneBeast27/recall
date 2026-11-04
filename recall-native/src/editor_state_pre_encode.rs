@@ -9,6 +9,18 @@ use crate::services::{
     storage,
 };
 
+/// The pre-encode's NVENC export waits for the GPU: while the recorder records, and while it is
+/// not connected (then a running game cannot be seen), the same rule as light copies.
+fn gpu_held() -> bool {
+    storage::recorder_busy() || !storage::gpu_work_allowed()
+}
+
+/// A pre-encode starts once the edit settled, the GPU is free for it, and nothing runs or is
+/// prepared for this plan already.
+fn may_start(settled: bool, held: bool, running: bool, idle: bool) -> bool {
+    settled && !held && !running && idle
+}
+
 /// Quiet time after the last change before a pre-encode starts.
 const SETTLE: Duration = Duration::from_millis(1500);
 
@@ -80,16 +92,18 @@ impl EditorState {
             self.pre.pending_since = (self.pre.touched && key.is_some()).then(Instant::now);
             pre_encode::cancel_other(key);
         }
+        let held = gpu_held();
         let (Some(key), Some(since)) = (self.pre.current, self.pre.pending_since) else {
-            if storage::recorder_busy() && pre_encode::running() {
-                // A game started recording: stop, and prepare again once it is done.
+            if held && pre_encode::running() {
+                // A game started recording (or the recorder went away): stop, and prepare again
+                // once the GPU is free for it.
                 pre_encode::cancel_other(None);
                 self.pre.pending_since = self.pre.current.map(|_| Instant::now());
             }
             return;
         };
         let settled = since.elapsed() >= SETTLE && self.drag.is_none();
-        if settled && !storage::recorder_busy() && !pre_encode::running() && pre_encode::status(key) == Status::None {
+        if may_start(settled, held, pre_encode::running(), pre_encode::status(key) == Status::None) {
             let info = info.clone();
             if pre_encode::start(key, info, self.plan.clone(), self.fps, self.export_settings.clone()) {
                 self.pre.pending_since = None;
@@ -113,6 +127,9 @@ impl EditorState {
             Status::Failed(error) => Some(format!("Couldn't prepare the export: {error}")),
             Status::None if self.pre.pending_since.is_some() && storage::recorder_busy() => {
                 Some("Prepares the export once recording stops".into())
+            }
+            Status::None if self.pre.pending_since.is_some() && !storage::gpu_work_allowed() => {
+                Some("Prepares the export once the recorder is running".into())
             }
             Status::None => None,
         }
