@@ -204,7 +204,7 @@ fn every_new_key_patches_saves_and_reloads() {
         },
         "storage": {"cap_gb": 500},
         "hotkeys": {"advanced_enabled": false, "leader": "Ctrl+F12", "save_seconds": 45, "window_ms": 2000},
-        "midi": {"input": "Launchpad X"}
+        "midi": {"input": "MIDI Controller 1"}
     });
     let mut base = store.load();
     base.recording.screenshot_hotkey = "Ctrl+F9".into(); // so clearing it is a change
@@ -226,7 +226,7 @@ fn every_new_key_patches_saves_and_reloads() {
     assert_eq!(back.recording.save_hotkeys[2], SaveHotkey { hotkey: "Alt+L".into(), seconds: 60 });
     assert_eq!(back.recording.screenshot_hotkey, "", "empty = off survives");
     assert_eq!(back.storage.cap_gb, 500);
-    assert_eq!(back.midi.input, "Launchpad X");
+    assert_eq!(back.midi.input, "MIDI Controller 1");
     assert_eq!(back.recording.mic_device, "Microphone (USB Audio Device)");
     assert_eq!(back.recording.desktop_audio_device, "Lautsprecher (Kopfhörer USB Audio)", "non-ASCII device names survive TOML");
     assert_eq!(back.hotkeys, HotkeysCfg { advanced_enabled: false, leader: "Ctrl+F12".into(), save_seconds: 45, window_ms: 2000 });

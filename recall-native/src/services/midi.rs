@@ -229,20 +229,20 @@ mod tests {
 
     #[test]
     fn monitor_port_is_only_the_chosen_one() {
-        let inputs = names(&["Launchpad X", "Keyboard 2", "Keyboard"]);
+        let inputs = names(&["MIDI Controller 1", "Keyboard 2", "Keyboard"]);
         assert_eq!(pick_monitor(&inputs, "keyboard"), Some(2), "whole name, not a prefix");
-        assert_eq!(pick_monitor(&inputs, " Launchpad X "), Some(0));
-        assert_eq!(pick_monitor(&inputs, "Pad"), None, "never another device");
+        assert_eq!(pick_monitor(&inputs, " MIDI Controller 1 "), Some(0));
+        assert_eq!(pick_monitor(&inputs, "Controller"), None, "never another device");
         assert_eq!(pick_monitor(&inputs, ""), None, "off");
         assert_eq!(pick_monitor(&[], "Keyboard"), None);
     }
 
     #[test]
     fn output_match_is_case_insensitive_and_skips_wavetable() {
-        let outputs = names(&["Microsoft GS Wavetable Synth", "MIDI function", "Launchpad X"]);
+        let outputs = names(&["Microsoft GS Wavetable Synth", "USB MIDI Interface", "MIDI Controller 1"]);
         assert_eq!(pick_output(&outputs, "midi"), Some(1));
-        assert_eq!(pick_output(&outputs, "launchpad"), Some(2));
-        assert_eq!(pick_output(&outputs, "LAUNCHPAD X"), Some(2));
+        assert_eq!(pick_output(&outputs, "controller"), Some(2));
+        assert_eq!(pick_output(&outputs, "MIDI CONTROLLER 1"), Some(2));
         assert_eq!(pick_output(&outputs, "wavetable"), None);
         assert_eq!(pick_output(&outputs, ""), Some(1), "empty match = first non-wavetable");
         assert_eq!(pick_output(&outputs, "keyboard"), None);
@@ -250,9 +250,9 @@ mod tests {
 
     #[test]
     fn recent_keeps_ten_newest_first() {
-        let shared = Shared::new("MIDI function".into());
+        let shared = Shared::new("MIDI Controller 1".into());
         for i in 0..12u8 {
-            shared.record("MIDI function", &[0x90, i, 0x7f]);
+            shared.record("MIDI Controller 1", &[0x90, i, 0x7f]);
         }
         let recent: Vec<_> = lock(&shared.recent).iter().cloned().collect();
         assert_eq!(recent.len(), 10);
@@ -264,12 +264,12 @@ mod tests {
 
     #[test]
     fn port_and_monitor_changes_bump_revision_once() {
-        let shared = Shared::new("MIDI function".into());
-        let ports = MidiPorts { inputs: names(&["MIDI function"]), outputs: names(&["MIDI function"]) };
+        let shared = Shared::new("MIDI Controller 1".into());
+        let ports = MidiPorts { inputs: names(&["MIDI Controller 1"]), outputs: names(&["MIDI Controller 1"]) };
         shared.set_ports(ports.clone());
         shared.set_ports(ports);
-        shared.set_monitored(Some("MIDI function".into()));
-        shared.set_monitored(Some("MIDI function".into()));
+        shared.set_monitored(Some("MIDI Controller 1".into()));
+        shared.set_monitored(Some("MIDI Controller 1".into()));
         assert_eq!(shared.revision.load(Ordering::Acquire), 2);
     }
 
@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn empty_send_is_rejected_before_touching_devices() {
-        let midi = Midi { shared: Arc::new(Shared::new("MIDI function".into())) };
-        assert!(midi.send("midi function", &[]).is_err());
+        let midi = Midi { shared: Arc::new(Shared::new("MIDI Controller 1".into())) };
+        assert!(midi.send("MIDI Controller 1", &[]).is_err());
     }
 }
