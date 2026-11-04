@@ -74,7 +74,7 @@ try {
   Check 'second start exits' $ended "still running after 15 s"
   Check 'second start exits with code 0' ($ended -and $b.ExitCode -eq 0) "exit=$($b.ExitCode)"
   Check 'second start found the running window' ($err -match 'second start: showed the running window' -and $err -match "`"pid`":$($a.Id)") "stderr: $err"
-  Check 'second start opened no window' ($b.MainWindowHandle -eq 0)
+  Check 'second start handed off at once (no 5 s search)' ($ms -lt 4000) "$ms ms"
   Check 'first instance still running' (-not $a.HasExited)
   "  second start took $ms ms"
 

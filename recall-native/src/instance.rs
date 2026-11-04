@@ -56,10 +56,11 @@ pub fn start() -> Start {
         // A check looks only at its own program file. A person's start shows any Recall
         // window: the installed app's, when a dev build was opened.
         let windows = match exe.as_deref() {
-            Some(exe) if check => app_windows(&|path| path == exe, me),
+            // Offscreen check windows are tool windows (`offscreen::show`).
+            Some(exe) if check => app_windows(&|path| path == exe, me, true),
             Some(exe) => {
                 let name = exe.file_name().map(|n| n.to_os_string());
-                app_windows(&|path| path.file_name().map(|n| n.to_os_string()) == name, me)
+                app_windows(&|path| path.file_name().map(|n| n.to_os_string()) == name, me, false)
             }
             None => Vec::new(),
         };
@@ -96,16 +97,18 @@ fn bring_to_front(hwnd: HWND) {
 
 /// Top-level application windows of other processes whose program file `wanted` accepts
 /// (normalized: canonical, lower case).
-fn app_windows(wanted: &dyn Fn(&Path) -> bool, except_pid: u32) -> Vec<(HWND, u32)> {
+fn app_windows(wanted: &dyn Fn(&Path) -> bool, except_pid: u32, tool_windows: bool) -> Vec<(HWND, u32)> {
     struct Scan<'a> {
         wanted: &'a dyn Fn(&Path) -> bool,
         except: u32,
+        tool_windows: bool,
         found: Vec<(HWND, u32)>,
     }
     unsafe extern "system" fn visit(hwnd: HWND, data: LPARAM) -> BOOL {
         let scan = unsafe { &mut *(data.0 as *mut Scan<'_>) };
         let style = unsafe { GetWindowLongPtrW(hwnd, GWL_STYLE) } as u32;
         let extended = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
+        let extended = if scan.tool_windows { extended & !WS_EX_TOOLWINDOW.0 | WS_EX_APPWINDOW.0 } else { extended };
         if !is_application_window(style, extended) {
             return BOOL(1);
         }
@@ -116,7 +119,7 @@ fn app_windows(wanted: &dyn Fn(&Path) -> bool, except_pid: u32) -> Vec<(HWND, u3
         }
         BOOL(1)
     }
-    let mut scan = Scan { wanted, except: except_pid, found: Vec::new() };
+    let mut scan = Scan { wanted, except: except_pid, tool_windows, found: Vec::new() };
     let _ = unsafe { EnumWindows(Some(visit), LPARAM(&mut scan as *mut Scan<'_> as isize)) };
     // A visible window first: GPUI may own hidden helper windows too.
     scan.found.sort_by_key(|(hwnd, _)| !unsafe { IsWindowVisible(*hwnd) }.as_bool());
@@ -162,7 +165,7 @@ mod tests {
     #[test]
     fn our_own_windows_are_never_the_running_instance() {
         let exe = normalized(&std::env::current_exe().unwrap()).unwrap();
-        assert!(app_windows(&|path| path == exe, std::process::id()).iter().all(|(_, pid)| *pid != std::process::id()));
+        assert!(app_windows(&|path| path == exe, std::process::id(), true).iter().all(|(_, pid)| *pid != std::process::id()));
     }
 
     #[test]
