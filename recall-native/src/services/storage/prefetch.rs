@@ -265,9 +265,10 @@ impl Feed {
         let on_ssd = whole.metadata().is_ok_and(|m| m.len() == clip.bytes);
         let read_from = if on_ssd { whole.clone() } else { source.to_path_buf() };
         let seconds = clip.duration.unwrap_or_else(|| super::light::seconds_of(source, clip.bytes));
-        // Reading the hard drive, the copy yields to on-demand work on its lane; from the SSD it
-        // only stops for the recorder.
-        let stop = || recorder_busy() || (!on_ssd && super::lane::demand_waiting());
+        // It runs as a task of the clip drive's lane even when it reads the SSD copy, so it yields
+        // to on-demand work there either way: an open, an export or an edit-file write never waits
+        // out an encode.
+        let stop = || recorder_busy() || super::lane::demand_waiting();
         let light = super::light::make_in(&self.root, &id, &read_from, seconds, &stop)?;
         if on_ssd && !top && !budget::kept().contains(&format!("video/{id}.mp4")) {
             let _ = std::fs::remove_file(&whole);

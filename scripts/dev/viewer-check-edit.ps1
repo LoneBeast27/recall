@@ -176,7 +176,15 @@ Run-Scenario 'Moments clip plays continuous sound' {
   $s = $script:current = Start-Viewer 'moments-sound' $clips.moments
   $a = Press-Play $s 'space' 4
   $r = Last $s
-  $holes = @(@($r.stems) | ForEach-Object { [VC]::Holes($_) })
+  # Stems are FLAC since cache v6: decode each to 16-bit WAV for the hole count.
+  $holes = @(@($r.stems) | ForEach-Object {
+    $stem = "$_" -replace '^\\\\\?\\', ''
+    if ($stem -like '*.flac') {
+      $wav = Join-Path $script:work "holes-$([IO.Path]::GetFileNameWithoutExtension($stem)).wav"
+      Invoke-Ffmpeg @('-i', $stem, '-c:a', 'pcm_s16le', '-map_metadata', '-1', '-fflags', '+bitexact', '-flags:a', '+bitexact', $wav)
+      [VC]::Holes($wav); Remove-Item $wav -ErrorAction SilentlyContinue
+    } else { [VC]::Holes($stem) }
+  })
   $worst = ($holes | Measure-Object -Maximum).Maximum
   Verdict @($a, (Ok (@($r.stems).Count -gt 0 -and $worst -eq 0 -and [int]$r.audio_underruns -eq 0) "$(@($r.stems).Count) stems, holes inside sound per stem $($holes -join '/'), output underruns $($r.audio_underruns)"))
 }
