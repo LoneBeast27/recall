@@ -338,6 +338,9 @@ impl EditorState {
             changed = true;
         }
         changed |= self.tick_loading(editor_visible);
+        // The background re-encode of an edited clip (`editor_state_pre_encode.rs`): starts once
+        // the edit settles, the clip has loaded and the recorder is idle.
+        changed |= self.tick_pre_encode();
         if self.playing && !self.play_when_ready && !self.loading.buffering {
             changed |= self.follow_playback();
         }
