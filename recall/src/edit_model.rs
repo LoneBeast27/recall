@@ -176,6 +176,9 @@ pub const SOURCE_DESKTOP: &str = "desktop-loopback";
 pub const SOURCE_MIC: &str = "mic";
 #[allow(dead_code)]
 pub const SOURCE_VOICE: &str = "voice-app";
+/// An exported mix-down track (several sources summed): in the mix, no hint.
+#[allow(dead_code)]
+pub const SOURCE_MIX: &str = "mix";
 /// `app:<exe>`: an app the person chose to record as its own track.
 #[allow(dead_code)]
 pub const APP_SOURCE_PREFIX: &str = "app:";
@@ -184,6 +187,31 @@ pub const APP_SOURCE_PREFIX: &str = "app:";
 #[allow(dead_code)]
 pub fn parse_audio_sources(tag: Option<&str>) -> Vec<String> {
     tag.and_then(|t| serde_json::from_str::<Vec<String>>(t).ok()).unwrap_or_default()
+}
+
+/// The sources for a clip with `tracks` audio tracks; a tag that names a different number of
+/// tracks (edited by another tool) counts as no tag.
+#[allow(dead_code)]
+pub fn audio_sources_for(tag: Option<&str>, tracks: usize) -> Vec<String> {
+    let sources = parse_audio_sources(tag);
+    if sources.len() == tracks { sources } else { Vec::new() }
+}
+
+/// The tag an export writes for its audio `outputs` (in output order): a mix is `SOURCE_MIX`,
+/// a kept track keeps its source. `None` when the input had no usable tag.
+#[allow(dead_code)]
+pub fn export_sources(sources: &[String], audio_indices: &[usize], outputs: &[AudioOutput]) -> Option<Vec<String>> {
+    if sources.is_empty() || sources.len() != audio_indices.len() {
+        return None;
+    }
+    let of = |index: &usize| audio_indices.iter().position(|i| i == index).map(|n| sources[n].clone());
+    outputs
+        .iter()
+        .map(|output| match output {
+            AudioOutput::Mix(_) => Some(SOURCE_MIX.to_owned()),
+            AudioOutput::Track(index) => of(index),
+        })
+        .collect()
 }
 
 #[allow(dead_code)] // the editor (recall-native) reads these; the engine tests use them
@@ -287,7 +315,21 @@ mod tests {
         let old = info(&["", ""]);
         assert!(old.default_audio().iter().all(|s| s.mix), "clips without sources: today's behaviour");
         assert_eq!(parse_audio_sources(Some(r#"["desktop-loopback","app:a.exe"]"#)), ["desktop-loopback", "app:a.exe"]);
+        let exported = info(&[SOURCE_MIX, "app:a.exe"]);
+        assert!(exported.default_audio()[0].mix && exported.mix_hint(1, true).is_none(), "an exported mix: in the mix, no hint");
+        assert!(audio_sources_for(Some(r#"["mic"]"#), 2).is_empty(), "a tag for another track count is no tag");
+        assert_eq!(audio_sources_for(Some(r#"["mic","app:a.exe"]"#), 2), ["mic", "app:a.exe"]);
         assert!(parse_audio_sources(Some("not json")).is_empty() && parse_audio_sources(None).is_empty());
+    }
+
+    #[test]
+    fn an_export_tags_its_own_tracks_in_output_order() {
+        let sources = vec![SOURCE_DESKTOP.to_owned(), SOURCE_MIC.to_owned(), "app:a.exe".to_owned()];
+        let outputs = [AudioOutput::Mix(vec![1, 2]), AudioOutput::Track(3)];
+        assert_eq!(export_sources(&sources, &[1, 2, 3], &outputs), Some(vec![SOURCE_MIX.into(), "app:a.exe".into()]));
+        assert_eq!(export_sources(&sources, &[1, 2, 3], &[AudioOutput::Track(3), AudioOutput::Track(1)]), Some(vec!["app:a.exe".into(), SOURCE_DESKTOP.into()]));
+        assert_eq!(export_sources(&[], &[1, 2], &[AudioOutput::Track(1)]), None, "untagged input: untagged output");
+        assert_eq!(export_sources(&sources, &[1, 2], &[AudioOutput::Track(1)]), None, "count mismatch: untagged");
     }
 
     #[test]

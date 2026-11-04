@@ -22,6 +22,7 @@ pub(crate) mod mix_limit;
 mod paths;
 pub mod project;
 mod size_cap;
+mod sources;
 pub(crate) mod tempo;
 pub(crate) mod timeline;
 mod video_encoder;

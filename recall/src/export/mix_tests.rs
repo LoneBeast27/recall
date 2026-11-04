@@ -165,3 +165,75 @@ fn a_desktop_clip_with_an_app_track_mixes_desktop_only_by_default() {
         assert!(carries(&pcm[1], 660.0), "{mode:?}");
     }
 }
+
+/// The sources tag of a written file, read the way the editor reads it.
+fn sources_of(path: &str) -> Vec<String> {
+    crate::editor_media::audio_sources(&ff::format::input(&Path::new(path)).unwrap())
+}
+
+#[test]
+fn an_export_tags_its_own_tracks_so_a_reopened_export_keeps_its_mix_switches() {
+    // 2026-11-05 merge-gate review: exports copied the tag but wrote a plain header, so MP4
+    // dropped it, and the tag would have named the input's tracks, not the output's.
+    let spec = Spec { sources: Some(r#"["desktop-loopback","app:tone.exe"]"#), ..Spec::default() };
+    let Some(clip) = synth("mix-tag-out", &spec) else {
+        eprintln!("libx264 missing in this FFmpeg build; skipped");
+        return;
+    };
+    let cases: [(&str, Vec<AudioSetting>, Vec<&str>); 3] = [
+        ("apart", vec![track(GAME, false, true), track(MIC, false, false)], vec!["desktop-loopback", "app:tone.exe"]),
+        ("mixed", vec![track(GAME, false, true), track(MIC, false, true)], vec!["mix"]),
+        ("muted", vec![track(GAME, false, true), track(MIC, true, false)], vec!["desktop-loopback"]),
+    ];
+    for mode in [ExportMode::Reencode, ExportMode::Lossless] {
+        for (tag, audio, expected) in &cases {
+            let name = format!("tag-{tag}-{mode:?}.mp4");
+            let (names, _) = export(&clip, &name, mode, audio.clone());
+            assert_eq!(sources_of(&clip.output(&name)), *expected, "{mode:?} {tag}: tracks {names:?}");
+        }
+    }
+    let plain = synth("mix-tag-none", &Spec::default()).unwrap();
+    let (_, _) = export(&plain, "untagged.mp4", ExportMode::Reencode, vec![track(GAME, false, true), track(MIC, false, false)]);
+    assert!(sources_of(&plain.output("untagged.mp4")).is_empty(), "an untagged input gives an untagged export");
+}
+
+#[test]
+fn the_whole_clip_cfr_file_keeps_the_sources_tag() {
+    let spec = Spec { sources: Some(r#"["desktop-loopback","app:tone.exe"]"#), ..Spec::default() };
+    let Some(clip) = synth("mix-tag-cfr", &spec) else {
+        eprintln!("libx264 missing in this FFmpeg build; skipped");
+        return;
+    };
+    let out = clip.output("cfr.mp4");
+    match super::cfr::export_to_temp(&clip.path, Path::new(&out), 60) {
+        Ok(_) => assert_eq!(sources_of(&out), ["desktop-loopback", "app:tone.exe"], "every track kept: the tag passes through"),
+        Err(e) if e.to_lowercase().contains("nvenc") || e.contains("unavailable") => eprintln!("NVENC unavailable; skipped: {e}"),
+        Err(e) => panic!("cfr export failed: {e}"),
+    }
+}
+
+#[test]
+fn every_export_mode_is_faststart_and_keeps_the_sources_tag() {
+    // One header writer for all three paths: +faststart, plus +use_metadata_tags when tagged.
+    let spec = Spec { sources: Some(r#"["desktop-loopback","app:tone.exe"]"#), ..Spec::default() };
+    let Some(clip) = synth("mix-tag-faststart", &spec) else {
+        eprintln!("libx264 missing in this FFmpeg build; skipped");
+        return;
+    };
+    let apart = vec![track(GAME, false, true), track(MIC, false, false)];
+    for mode in [ExportMode::Reencode, ExportMode::Lossless] {
+        let name = format!("faststart-{mode:?}.mp4");
+        export(&clip, &name, mode, apart.clone());
+        super::test_media::assert_faststart(Path::new(&clip.output(&name)));
+        assert_eq!(sources_of(&clip.output(&name)), ["desktop-loopback", "app:tone.exe"], "{mode:?}");
+    }
+    let cfr = clip.output("faststart-cfr.mp4");
+    match super::cfr::export_to_temp(&clip.path, Path::new(&cfr), 60) {
+        Ok(_) => {
+            super::test_media::assert_faststart(Path::new(&cfr));
+            assert_eq!(sources_of(&cfr), ["desktop-loopback", "app:tone.exe"], "CFR");
+        }
+        Err(e) if e.to_lowercase().contains("nvenc") || e.contains("unavailable") => eprintln!("NVENC unavailable; CFR skipped: {e}"),
+        Err(e) => panic!("cfr export failed: {e}"),
+    }
+}

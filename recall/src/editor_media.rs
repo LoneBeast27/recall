@@ -172,8 +172,10 @@ fn prepare_uncached(
 /// handler ("SoundHandler") and blanks are skipped.
 /// Each audio track's source, as the recorder saved it, in audio-stream order (empty for
 /// clips without the tag: older recordings and other apps' files).
+/// A tag for a different number of tracks counts as none (`edit_model::audio_sources_for`).
 pub(crate) fn audio_sources(input: &ff::format::context::Input) -> Vec<String> {
-    crate::edit_model::parse_audio_sources(input.metadata().get(crate::edit_model::AUDIO_SOURCES_TAG))
+    let tracks = input.streams().filter(|s| s.parameters().medium() == ff::media::Type::Audio).count();
+    crate::edit_model::audio_sources_for(input.metadata().get(crate::edit_model::AUDIO_SOURCES_TAG), tracks)
 }
 
 pub(crate) fn track_name(metadata: &ff::DictionaryRef) -> Option<String> {
