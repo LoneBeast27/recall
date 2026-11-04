@@ -58,7 +58,7 @@ impl EditorState {
 
     fn follow_pre_encode(&mut self) {
         // Not while the clip still loads: the pre-encode would read the same hard drive as the copy.
-        let Some(info) = self.info.as_ref().filter(|_| self.loading_path.is_none() && !self.loading.active()) else { return };
+        let Some(info) = self.info.as_ref().filter(|_| self.pre_encode_eligible()) else { return };
         let inputs = KeyInputs {
             clip: (info.path.clone(), info.source_bytes, info.source_modified_ms),
             plan: self.plan.clone(),
@@ -95,6 +95,12 @@ impl EditorState {
                 self.pre.pending_since = None;
             }
         }
+    }
+
+    /// The pre-encode trigger may follow this clip: it is open and fully loaded (a streamed open
+    /// counts as loaded once full resolution took over from the light copy).
+    pub fn pre_encode_eligible(&self) -> bool {
+        self.info.is_some() && self.loading_path.is_none() && !self.loading.active()
     }
 
     /// The panel line under Export, if any.
