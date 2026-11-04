@@ -18,6 +18,7 @@ mod playback_watch;
 mod root;
 mod services;
 mod shell;
+mod startup;
 mod theme;
 mod trace;
 mod transport_rules;
@@ -25,6 +26,7 @@ mod ui;
 mod views;
 mod worker;
 fn main() {
+    startup::mark("main");
     // A GUI program has no stderr of its own: print to the terminal it was started from, if any,
     // and keep panics in the player log for a start from the Start menu.
     let _ = unsafe { windows::Win32::System::Console::AttachConsole(windows::Win32::System::Console::ATTACH_PARENT_PROCESS) };
@@ -50,6 +52,7 @@ fn main() {
         instance::Start::Run(guard) => guard,
         instance::Start::Exit => std::process::exit(0),
     };
+    startup::mark("instance guard");
     if let Err(error) = app::run(guard) {
         eprintln!("Recall native: {error}");
         trace::player_log("start failed", serde_json::json!({ "error": error }));

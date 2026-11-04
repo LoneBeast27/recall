@@ -15,14 +15,16 @@ pub fn run(instance: Option<crate::instance::Guard>) -> Result<(), String> {
     if offscreen {
         offscreen::quiet_errors();
     }
-    Application::new().with_assets(Assets).run(move |cx: &mut App| {
-        if let Err(error) = cx.text_system().add_fonts(vec![
+    let application = crate::startup::span("gpui Application::new", || Application::new().with_assets(Assets));
+    application.run(move |cx: &mut App| {
+        crate::startup::mark("gpui run callback");
+        if let Err(error) = crate::startup::span("fonts", || cx.text_system().add_fonts(vec![
             Cow::Borrowed(include_bytes!("../assets/fonts/geist-400.ttf")),
             Cow::Borrowed(include_bytes!("../assets/fonts/geist-500.ttf")),
             Cow::Borrowed(include_bytes!("../assets/fonts/geist-600.ttf")),
             Cow::Borrowed(include_bytes!("../assets/fonts/bricolage-grotesque-600.ttf")),
             Cow::Borrowed(include_bytes!("../assets/fonts/bricolage-grotesque-700.ttf")),
-        ]) {
+        ])) {
             eprintln!("load Recall fonts: {error}");
         }
         let background = offscreen || std::env::var_os("RECALL_NATIVE_BACKGROUND").is_some();
@@ -41,7 +43,7 @@ pub fn run(instance: Option<crate::instance::Guard>) -> Result<(), String> {
             show: !background,
             ..Default::default()
         };
-        let opened = cx.open_window(options, |window, cx| {
+        let opened = crate::startup::span("open_window", || cx.open_window(options, |window, cx| {
             let root = cx.new(|cx| Root::new(window, cx));
             Root::start_polling(root.clone(), window, cx);
             let closing = root.downgrade();
@@ -50,7 +52,7 @@ pub fn run(instance: Option<crate::instance::Guard>) -> Result<(), String> {
                 true
             });
             root
-        });
+        }));
         let handle = match opened {
             Ok(handle) => handle,
             Err(error) => {
