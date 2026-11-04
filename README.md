@@ -85,6 +85,12 @@ hook loaded crashed VALORANT, so it was removed on 2026-10-26.)
 The HDR page switches the monitor between HDR and SDR per game; the Audio page shows live
 meters for every source.
 
+On an SDR display Recall captures 8-bit colour (half the GPU memory traffic); on HDR it
+captures half-float. When the display turns from SDR to HDR while a game records (an HDR
+switch, or Windows HDR turned on), capture restarts in half-float and the replay buffer
+starts again from that moment: a save right after the switch holds only the time since.
+Switching back from HDR to SDR keeps the running capture and the buffer.
+
 ## Where things live
 
 | What | Where |
