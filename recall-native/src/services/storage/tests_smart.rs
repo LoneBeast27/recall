@@ -148,7 +148,7 @@ fn unit(tier: Tier, name: &str, mb: u64, score: f64) -> Unit {
 }
 
 #[test]
-fn eviction_drops_lowest_scores_first_and_thumbnails_last() {
+fn eviction_drops_lowest_scores_first_and_never_thumbnails() {
     let units = [
         unit(Tier::Thumb, "thumbs/low.jpg", 1, 0.1),
         unit(Tier::Scrub, "visuals/low#scrub", 1, 0.1),
@@ -168,11 +168,9 @@ fn eviction_drops_lowest_scores_first_and_thumbnails_last() {
             "visuals/low#scrub",
             "video/high.mp4",
             "editor/high",
-            "visuals/high#scrub",
-            "thumbs/low.jpg",
-            "thumbs/high.jpg"
+            "visuals/high#scrub"
         ],
-        "low-score clip loses everything (costliest first) before a high-score clip loses anything; thumbnails last"
+        "low-score clip loses everything (costliest first) before a high-score clip loses anything; thumbnails never"
     );
     // Budget pressure of 300 MB: only the low-score video copy goes.
     let total: u64 = units.iter().map(|u| u.bytes).sum();
@@ -182,6 +180,21 @@ fn eviction_drops_lowest_scores_first_and_thumbnails_last() {
     // The open clip is kept whole.
     let keep = ["video/low.mp4".to_string(), "editor/low".to_string()];
     assert_eq!(evict_plan(&units, 0, total - (300 << 20), u64::MAX, 0, &keep), ["visuals/low#scrub", "video/high.mp4"]);
+}
+
+/// 2026-11-05: never-evicted files (fresh-clip copies, clip heads) filled the 2 GB budget on
+/// their own and the budget pass deleted every thumbnail. Thumbnails stay however full it is.
+#[test]
+fn thumbnails_survive_when_fixed_files_fill_the_budget() {
+    let budget = 2048u64 << 20;
+    let units = [
+        unit(Tier::Thumb, "thumbs/a.jpg", 1, 0.0),
+        unit(Tier::Thumb, "thumbs/b.jpg", 1, 2.0),
+        unit(Tier::Scrub, "visuals/a#scrub", 1, 0.0),
+        unit(Tier::Video, "light/a.mp4", 150, 0.0),
+    ];
+    let order = evict_plan(&units, budget, budget, budget / 2, 0, &[]);
+    assert_eq!(order, ["light/a.mp4", "visuals/a#scrub"], "everything evictable goes, thumbnails stay");
 }
 
 #[test]

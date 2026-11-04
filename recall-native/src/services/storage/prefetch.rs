@@ -250,6 +250,12 @@ impl IdleSource for Arc<Feed> {
     }
 
     fn next_task(&self) -> Option<Task> {
+        crate::startup::task(|| "prefetch next_task".into(), 5.0, || self.next_task_inner())
+    }
+}
+
+impl Feed {
+    fn next_task_inner(self: &Arc<Self>) -> Option<Task> {
         loop {
             let (step, index) = self.order.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).pop_front()?;
             let clip = &self.library.clips[index];
@@ -295,6 +301,11 @@ impl Feed {
     }
 
     fn run(&self, step: Step, index: usize) {
+        let name = &self.library.clips[index].name;
+        crate::startup::task(|| format!("prefetch {step:?} {name}"), 5.0, || self.run_step(step, index));
+    }
+
+    fn run_step(&self, step: Step, index: usize) {
         let clip = &self.library.clips[index];
         let (path, sink) = (clip.path.clone(), &self.library.sink);
         let size = |p: &str| Path::new(p).metadata().map_or(0, |m| m.len());
@@ -309,6 +320,11 @@ impl Feed {
             Step::Duration => sink(PrefetchEvent::Duration(path.clone(), crate::services::library::mp4_duration(Path::new(&path)))),
             Step::Scrub => {
                 let result = crate::services::library::scrub_frames(&path);
+                match &result {
+                    Ok(frames) if frames.len() < 8 => crate::startup::mark(&format!("scrub partial {} of 8: {path}", frames.len())),
+                    Err(error) => crate::startup::mark(&format!("scrub failed: {path}: {error}")),
+                    _ => {}
+                }
                 if let Ok(frames) = &result {
                     self.gate.add(step, frames.iter().map(|f| size(f)).sum());
                 }
@@ -323,7 +339,7 @@ impl Feed {
                 Ok(bytes) => self.gate.add(step, bytes),
                 // An open or a hover took the drive: this copy is first again once it is idle.
                 Err(error) if error == super::light::STOPPED => self.order.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push_front((step, index)),
-                Err(_) => {}
+                Err(error) => crate::startup::mark(&format!("light copy skipped: {error}")),
             },
         }
         invalidate_usage();
@@ -336,7 +352,13 @@ pub(super) fn warm_limit(budget: u64) -> u64 {
 }
 
 /// Replaces the plan with one for `clips` (the full list, any order).
-pub fn start_prefetch(clips: Vec<PrefetchClip>, sink: Sink, prepare: PrepareEditor) {
+/// `complete`: the listing saw every library folder whole, so a thumbnail no clip owns is truly
+/// an orphan. A partial listing (a drive offline, an unreadable folder) prunes nothing.
+pub fn start_prefetch(clips: Vec<PrefetchClip>, complete: bool, sink: Sink, prepare: PrepareEditor) {
+    if complete {
+        let owned: HashSet<String> = clips.iter().map(clip_id).collect();
+        budget::sweep_orphan_thumbs(&super::cache_root(), &owned, budget::ORPHAN_THUMB_AGE);
+    }
     *library().lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(Library { clips, sink, prepare }));
     replan();
 }

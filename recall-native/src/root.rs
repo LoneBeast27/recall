@@ -121,6 +121,8 @@ pub struct Root {
     hwnd: Option<isize>,
     /// A recorder status change arrived in the background and is not drawn yet.
     status_stale: bool,
+    /// The startup timeline marks the first render once.
+    first_render_marked: bool,
 }
 
 #[path = "root_events.rs"]
@@ -134,21 +136,26 @@ mod poll;
 
 impl Root {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        crate::shell::init_ole();
-        if let Ok(hwnd) = parent_hwnd(window) {
-            crate::shell::refuse_drops(hwnd);
-        }
-        let preview = parent_hwnd(window).and_then(NativePreview::new);
-        let workers = Workers::spawn();
+        use crate::startup::span;
+        span("root: ole + drop target", || {
+            crate::shell::init_ole();
+            if let Ok(hwnd) = parent_hwnd(window) {
+                crate::shell::refuse_drops(hwnd);
+            }
+        });
+        let preview = span("root: native preview", || parent_hwnd(window).and_then(NativePreview::new));
+        let workers = span("root: workers", Workers::spawn);
         workers.job(Job::List);
-        crate::services::storage::sweep_kept(crate::backend::library_dir);
-        crate::services::pre_encode::clear_dir();
-        crate::services::pre_encode::sweep_deliveries();
+        span("root: sweep_kept", || crate::services::storage::sweep_kept(crate::backend::library_dir));
+        span("root: pre_encode clear_dir", crate::services::pre_encode::clear_dir);
+        span("root: pre_encode sweep_deliveries", crate::services::pre_encode::sweep_deliveries);
+        let daemon = span("root: daemon client", DaemonClient::spawn);
+        let folders = span("root: folders load", crate::services::library::folders::Folders::load);
         let mut root = Self {
             route: Route::Library,
             focus: cx.focus_handle(),
             workers,
-            daemon: DaemonClient::spawn(),
+            daemon,
             daemon_rev: u64::MAX,
             snap: DaemonSnapshot::default(),
             lib: LibraryState::new(),
@@ -176,11 +183,12 @@ impl Root {
             settings_tab: Default::default(),
             settings_ui: Default::default(),
             title_drag: None,
-            folders: crate::services::library::folders::Folders::load(),
+            folders,
             controller_check_at: std::env::var_os("RECALL_NO_CONTROLLER").is_none().then(|| Instant::now() + Duration::from_millis(1500)),
             frame_at: Instant::now(),
             hwnd: parent_hwnd(window).ok(),
             status_stale: false,
+            first_render_marked: false,
         };
         if let Some(path) = std::env::var_os("RECALL_NATIVE_CLIP") {
             root.open_clip(path.to_string_lossy().into_owned());
@@ -272,7 +280,10 @@ impl Root {
 
     fn on_done(&mut self, done: Done) {
         match done {
-            Done::Clips(Ok(listing)) => self.lib.set_entries(listing),
+            Done::Clips(Ok(listing)) => {
+                crate::startup::mark(&format!("library listed ({} clips)", listing.entries.len()));
+                self.lib.set_entries(listing)
+            }
             Done::Drive(drive) => self.lib.drive = drive,
             Done::Streaming(generation, clip) => self.ed.apply_streaming(generation, clip),
             Done::OpenStep(generation, text) => self.ed.open_step(generation, text),
@@ -397,6 +408,10 @@ impl Root {
 
 impl Render for Root {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if !self.first_render_marked {
+            self.first_render_marked = true;
+            crate::startup::mark("first render");
+        }
         self.settle_focus(window);
         self.trace_ui(window);
         crate::trace::clear_targets(window);

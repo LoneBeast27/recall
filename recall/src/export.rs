@@ -18,6 +18,7 @@ mod edited;
 pub(crate) mod edit_pcm;
 pub(crate) mod keyframes;
 mod lossless;
+pub(crate) mod mix_limit;
 mod paths;
 pub mod project;
 mod size_cap;
@@ -29,6 +30,8 @@ mod video_encoder;
 mod edited_tests;
 #[cfg(test)]
 mod lossless_tests;
+#[cfg(test)]
+mod mix_tests;
 #[cfg(test)]
 mod stamp_jitter_tests;
 #[cfg(test)]

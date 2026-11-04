@@ -4,9 +4,9 @@
 //! decode order, up to the first packet whose decode time reaches its end (a
 //! decode-order prefix of a GOP always decodes). Ranges whose snapped starts
 //! overlap the previous range are merged. Segments are concatenated with
-//! rebased timestamps. Audio tracks with no gain/mute are stream-copied
-//! (packets whose midpoint lies inside a segment); the others are re-encoded
-//! to AAC over exactly the snapped segments.
+//! rebased timestamps. Audio tracks with no gain are stream-copied (packets
+//! whose midpoint lies inside a segment); a mix or a track with gain is
+//! re-encoded to AAC over exactly the snapped segments; muted tracks are dropped.
 
 use std::path::Path;
 
@@ -18,7 +18,7 @@ use super::paths::file_bytes;
 use super::project::{EditedExport, ExportedRange};
 use super::timeline::{seconds_to_us, timeline_duration_us, timeline_origin_us, us_to_seconds};
 use super::video_encoder::probe_video;
-use crate::edit_model::{EditPlan, ExportMode, TimeRange};
+use crate::edit_model::{AudioOutput, EditPlan, ExportMode, TimeRange};
 
 const US: ff::Rational = ff::rescale::TIME_BASE;
 
@@ -74,14 +74,18 @@ pub(super) fn export(input: &Path, temp: &Path, plan: &EditPlan) -> Result<Edite
             .collect(),
         audio: plan.audio.clone(),
     };
-    let reencode: Vec<usize> = audio_indices
+    // A mix, or a track with gain, is re-encoded; an untouched track is copied. Muted: dropped.
+    let outputs = plan.audio_outputs(&audio_indices);
+    let reencode: Vec<AudioOutput> = outputs
         .iter()
-        .copied()
-        .filter(|index| plan.audio.iter().any(|a| a.stream_index == *index && !a.is_neutral()))
+        .filter(|output| match output {
+            AudioOutput::Mix(_) => true,
+            AudioOutput::Track(index) => plan.audio.iter().any(|a| a.stream_index == *index && !a.is_neutral()),
+        })
+        .cloned()
         .collect();
-    let encoded =
-        crate::edit_audio::encode_selected_audio(input, source.origin_us, &snapped, &reencode)?;
-    let frames = write(input, temp, &source, &segments, &encoded)?;
+    let encoded = crate::edit_audio::encode_outputs(input, source.origin_us, &snapped, &reencode)?;
+    let frames = write(input, temp, &source, &segments, &outputs, &encoded)?;
     let out_s = |ts: i64| us_to_seconds(ts.rescale(source.video_tb, US));
     let ranges: Vec<_> = segments
         .iter()
@@ -228,6 +232,7 @@ fn write(
     temp: &Path,
     source: &Source,
     segments: &[Segment],
+    outputs: &[AudioOutput],
     encoded: &[crate::edit_audio::EncodedAudioTrack],
 ) -> Result<u64, String> {
     let mut ictx =
@@ -249,26 +254,37 @@ fn write(
     };
     let video_out = copy_stream(&mut octx, source.video_index)?;
     let mut routes: Vec<Option<AudioRoute>> = (0..ictx.nb_streams()).map(|_| None).collect();
+    // Output order follows `outputs` (the mix first); `encoded` holds the re-encoded ones in
+    // that order. A source stream missing from `outputs` (muted, or mixed) has no route.
     let mut encoded_outputs = Vec::new();
-    for &(index, tb) in &source.audio {
-        if let Some(track) = encoded.iter().find(|t| t.source_index == index) {
-            let mut out = octx
-                .add_stream(ff::encoder::find(ff::codec::Id::AAC))
-                .map_err(|e| format!("add output audio stream {index}: {e}"))?;
-            out.set_parameters(&track.encoder);
-            out.set_time_base(ff::Rational(1, track.rate as i32));
-            if let Some(stream) = ictx.stream(index) {
-                out.set_metadata(stream.metadata().to_owned());
-            }
-            encoded_outputs.push(out.index());
-            routes[index] = Some(AudioRoute::Reencoded);
-        } else {
-            let output = copy_stream(&mut octx, index)?;
-            routes[index] = Some(AudioRoute::Copy { output, tb, last_dts: None });
+    let mut pending = encoded.iter();
+    for output in outputs {
+        let copy_index = match output {
+            AudioOutput::Track(index) if !encoded.iter().any(|t| !t.mixed && t.source_index == *index) => Some(*index),
+            _ => None,
+        };
+        if let Some(index) = copy_index {
+            let tb = source.audio.iter().find(|(i, _)| *i == index).map(|(_, tb)| *tb).ok_or("source audio stream disappeared")?;
+            let copied = copy_stream(&mut octx, index)?;
+            routes[index] = Some(AudioRoute::Copy { output: copied, tb, last_dts: None });
+            continue;
+        }
+        let track = pending.next().ok_or("an edited audio track is missing")?;
+        let mut out = octx
+            .add_stream(ff::encoder::find(ff::codec::Id::AAC))
+            .map_err(|e| format!("add output audio stream {}: {e}", track.source_index))?;
+        out.set_parameters(&track.encoder);
+        out.set_time_base(ff::Rational(1, track.rate as i32));
+        if let Some(tags) = track.metadata(&ictx) {
+            out.set_metadata(tags);
+        }
+        encoded_outputs.push(out.index());
+        if !track.mixed {
+            routes[track.source_index] = Some(AudioRoute::Reencoded);
         }
     }
     octx.set_metadata(ictx.metadata().to_owned());
-    octx.write_header().map_err(|e| format!("write output header: {e}"))?;
+    super::paths::write_faststart_header(&mut octx)?;
     let out_tbs: Vec<_> = octx.streams().map(|s| s.time_base()).collect();
     let mut mux = EditedAudioMux::new(encoded, encoded_outputs);
     let windows: Vec<_> = segments

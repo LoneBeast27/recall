@@ -7,6 +7,9 @@ mod backend;
 #[path = "../src/services/mod.rs"]
 #[allow(dead_code)]
 mod services;
+#[path = "../src/startup.rs"]
+#[allow(dead_code)]
+mod startup;
 #[path = "../../recall/src/edit_model.rs"]
 mod edit_model;
 #[path = "../src/media.rs"]

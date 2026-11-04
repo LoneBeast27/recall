@@ -144,9 +144,13 @@ pub fn clip_roots()->Vec<WatchRoot>{
 /// deep), and one listing of the SSD thumbnail tier; a clip's `thumb` is set only when its
 /// thumbnail is already on the SSD (misses are filled by `AssetJob::Thumb` and idle prefetch
 /// through the disk lane). A clip reachable from two folders is listed once.
-pub fn list_clips()->Result<Vec<ClipEntry>,String>{
-    let dir=library_dir();
+pub fn list_clips()->Result<Vec<ClipEntry>,String>{list_clips_checked().map(|(clips,_)|clips)}
+/// [`list_clips`], and whether the listing saw every configured folder whole (each existed, was
+/// read, and no entry failed). Only a complete listing may prove a clip is gone.
+pub fn list_clips_checked()->Result<(Vec<ClipEntry>,bool),String>{list_from(&library_dir(),&Folders::load().imported)}
+pub(crate) fn list_from(dir:&Path,imported:&[String])->Result<(Vec<ClipEntry>,bool),String>{
     let thumbs=storage::thumb_index();
+    let mut complete=true;
     let mut clips=Vec::new();
     let mut seen=HashSet::new();
     let mut push=|path:PathBuf,bytes:u64,mtime:u64,folder:Option<String>|{
@@ -156,18 +160,21 @@ pub fn list_clips()->Result<Vec<ClipEntry>,String>{
         clips.push(ClipEntry{name,path:path.to_string_lossy().into_owned(),bytes,mtime,thumb,folder});
     };
     if dir.exists(){
-        for e in std::fs::read_dir(&dir).map_err(|e|format!("read clips: {e}"))?.flatten(){
+        for e in std::fs::read_dir(dir).map_err(|e|format!("read clips: {e}"))?{
+            let Ok(e)=e else{complete=false;continue};
             let path=e.path();if !folders::is_clip(&path){continue;}
-            let Ok(m)=e.metadata()else{continue};if !m.is_file(){continue;}
+            let Ok(m)=e.metadata()else{complete=false;continue};if !m.is_file(){continue;}
             let mtime=m.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
             push(path,m.len(),mtime,None);
         }
-    }
+    }else{complete=false;}
     let skip=[storage::cache_root()];
-    for root in Folders::load().imported{
-        for clip in folders::scan_imported_cached(Path::new(&root),&skip){push(clip.path,clip.bytes,clip.mtime,clip.folder);}
+    for root in imported{
+        let (found,whole)=folders::scan_imported_cached_checked(Path::new(root),&skip);
+        complete&=whole;
+        for clip in found{push(clip.path,clip.bytes,clip.mtime,clip.folder);}
     }
-    clips.sort_by(|a,b|b.mtime.cmp(&a.mtime));Ok(clips)
+    clips.sort_by(|a,b|b.mtime.cmp(&a.mtime));Ok((clips,complete))
 }
 /// SSD thumbnail for a library clip: cached, imported from the recorder's `thumbs` folder, or generated.
 /// Blocking; HDD work runs on the clip's disk lane (inline when already on it).
@@ -323,7 +330,7 @@ pub(crate) fn load_project(info:&ClipInfo)->(Option<Project>,Option<String>,bool
 }
 fn normalize_project_audio(plan:&mut EditPlan,info:&ClipInfo){
     let mut normalized=Vec::with_capacity(info.audio.len());
-    for track in &info.audio { normalized.push(plan.audio.iter().find(|setting|setting.stream_index==track.stream_index).cloned().unwrap_or(crate::edit_model::AudioSetting{stream_index:track.stream_index,gain_db:0.0,muted:false})); }
+    for track in &info.audio { normalized.push(plan.audio.iter().find(|setting|setting.stream_index==track.stream_index).cloned().unwrap_or(crate::edit_model::AudioSetting{stream_index:track.stream_index,gain_db:0.0,muted:false,mix:true})); }
     plan.audio=normalized;
 }
 pub(crate) fn normalize_audio_names(info:&mut ClipInfo){
@@ -409,7 +416,7 @@ mod tests {
     }
     #[test] fn only_real_edits_count_as_non_default_plans(){
         let info=ClipInfo{path:"C:/clips/a.mp4".into(),duration:10.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![crate::edit_model::AudioTrackInfo{stream_index:1,name:"Game audio".into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new()}],keyframes:Vec::new()};
-        let untouched=EditPlan{ranges:vec![crate::edit_model::TimeRange::new(0.0,10.0)],audio:vec![crate::edit_model::AudioSetting{stream_index:1,gain_db:0.0,muted:false}]};
+        let untouched=EditPlan{ranges:vec![crate::edit_model::TimeRange::new(0.0,10.0)],audio:vec![crate::edit_model::AudioSetting{stream_index:1,gain_db:0.0,muted:false,mix:true}]};
         assert!(plan_is_default(&untouched,&info));
         let mut trimmed=untouched.clone();trimmed.ranges[0].start=1.5;assert!(!plan_is_default(&trimmed,&info));
         let mut split=untouched.clone();split.ranges=vec![crate::edit_model::TimeRange::new(0.0,4.0),crate::edit_model::TimeRange::new(4.0,10.0)];assert!(!plan_is_default(&split,&info));
@@ -437,10 +444,10 @@ pub fn save_project(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings
     if !plan_is_default(plan,info)&&sidecar(&info.path).is_ok_and(|s|!s.exists()){let _=flush_project(info,plan,fps,export,true);}
     Ok(path.to_string_lossy().into_owned())
 }
-/// Untouched plan: one full-length range and every track at 0 dB, unmuted.
+/// Untouched plan: one full-length range and every track at 0 dB, unmuted, in the mix.
 fn plan_is_default(plan:&EditPlan,info:&ClipInfo)->bool{
     let full=matches!(plan.ranges.as_slice(),[only] if only.start.abs()<1e-6&&(only.end-info.duration).abs()<1e-3&&only.speed==1.0);
-    full&&plan.audio.iter().all(|a|a.gain_db==0.0&&!a.muted)
+    full&&plan.audio.iter().all(|a|a.gain_db==0.0&&!a.muted&&a.mix)
 }
 /// Leave / close / export: writes the `.recall-edit.json` sidecar beside the clip, through the clip's
 /// disk lane, only when its bytes would change (and, with no sidecar yet, only for real edits).

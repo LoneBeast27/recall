@@ -27,8 +27,8 @@ if ($running) { Write-Error "A game is running ($($running -join ', ')); run the
 foreach ($f in $Engine, $Target) { if (-not (Test-Path $f)) { Write-Error "Not found: $f"; exit 4 } }
 
 # The engine needs the FFmpeg DLLs: the main checkout keeps them (worktrees do not).
-$ff = Join-Path $repo 'toolsfmpeg-devfmpeg-7.1.1-gyan-full-sharedin'
-if (-not (Test-Path $ff)) { $ff = 'L:\Generalecall	oolsfmpeg-devfmpeg-7.1.1-gyan-full-sharedin' }
+$ff = Join-Path $repo 'tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared\bin'
+if (-not (Test-Path $ff)) { $ff = 'L:\General\recall\tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared\bin' }
 $env:PATH = "$ff;$env:PATH"
 
 $clips = Join-Path $env:TEMP "recall-cost-trace-$PID"
