@@ -97,10 +97,6 @@ impl Enc {
             audio,
             // The still keeps the whole canvas frame; the thumbnail is the picture only.
             thumb: raw.as_ref().map(|r| self.thumb_of(r)),
-            width: self.width,
-            height: self.height,
-            fps: self.nominal_fps,
-            session_id: self.session_id.clone(),
             timing,
         })
     }

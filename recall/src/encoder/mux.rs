@@ -1,6 +1,5 @@
 //! Clip assembly on the saver thread: AAC encode of the snapshotted PCM, MP4
-//! stream-copy mux of the packet window, and the gallery thumbnail + Moments
-//! row. Nothing here touches the live encoder, its ring, or the audio rings.
+//! stream-copy mux of the packet window, and the gallery thumbnail. Nothing here touches the live encoder, its ring, or the audio rings.
 
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -289,49 +288,21 @@ pub(crate) fn mux_mp4(
     Ok((mux_ms, ms(trailer.elapsed())))
 }
 
-/// Production `GalleryFn`: thumbnail + version-guarded Moments DB row.
-/// Failures here never un-save the clip — they're reported and skipped.
-pub(crate) fn finish_gallery(job: &SaveJob, secs: f32, bytes: u64, events: &Events) {
-    if !crate::moments::enabled() {
-        return;
-    }
-    let thumb = match job
+/// Production `GalleryFn`: the recorder thumbnail the library and the controller read.
+/// Failures here never un-save the clip; they're reported and skipped.
+pub(crate) fn finish_gallery(job: &SaveJob, _secs: f32, _bytes: u64, events: &Events) {
+    let made = job
         .thumb
         .as_ref()
         .ok_or_else(|| "no frame for thumbnail".to_string())
-        .and_then(|frame| write_thumbnail(&job.path, frame))
-    {
-        Ok(t) => t,
-        Err(e) => {
-            events.log(&format!("thumbnail failed: {e}"));
-            String::new()
-        }
-    };
-    // Anchor to the request: the clip ends when the user asked for it.
-    let requested_ago = chrono::Duration::from_std(job.requested.elapsed()).unwrap_or_default();
-    let recorded = chrono::Local::now()
-        - requested_ago
-        - chrono::Duration::milliseconds((secs * 1000.0) as i64);
-    let meta = crate::moments::ClipMeta {
-        path: job.path.clone(),
-        thumbnail_path: thumb,
-        width: job.width,
-        height: job.height,
-        fps: job.fps,
-        seconds: secs as f64,
-        filesize: bytes,
-        recorded_iso: recorded.format("%Y-%m-%dT%H:%M:%S%:z").to_string(),
-        session_id: job.session_id.clone(),
-        audio_tracks: job.audio.iter().map(|t| t.name.to_string()).collect(),
-    };
-    match crate::moments::insert_clip(&meta) {
-        Ok(id) => events.log(&format!("moments: row inserted {id}")),
-        Err(e) => events.log(&format!("moments: SKIPPED -- {e}")),
+        .and_then(|frame| write_thumbnail(&job.path, frame));
+    if let Err(e) = made {
+        events.log(&format!("thumbnail failed: {e}"));
     }
 }
 
 /// Scale the request-time raw frame to ~640-wide and write a JPEG next to the
-/// clip per Moments' convention: `thumbs\<stem>-<epoch>-thumb.jpg`.
+/// clip: `thumbs\<stem>-<epoch>-thumb.jpg`.
 fn write_thumbnail(clip_path: &str, frame: &RawFrame) -> Result<String, String> {
     let (w, h, rgba) = (frame.0, frame.1, frame.2.as_slice());
     let (tw, th) = (640u32, ((640 * h / w) & !1).max(2));

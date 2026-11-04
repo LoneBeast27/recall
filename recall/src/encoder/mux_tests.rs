@@ -142,10 +142,6 @@ fn window_job(path: &str, packets: Vec<EncodedPacket>, params: OwnedParams, secs
             pcm("Voice", secs, true),
         ],
         thumb: None,
-        width: 64,
-        height: 64,
-        fps: 60,
-        session_id: "test".into(),
         timing: Timing::default(),
     }
 }
