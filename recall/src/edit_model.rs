@@ -242,10 +242,17 @@ impl ClipInfo {
     pub fn snap_to_keyframe(&self, seconds: f64) -> f64 { snap_to_keyframe(&self.keyframes, seconds) }
     /// The game track recorded an output (Desktop mode), so it already holds every app.
     pub fn desktop_loopback(&self) -> bool { self.audio.iter().any(|t| t.source == SOURCE_DESKTOP) }
-    /// The line under a track's mix switch, when mixing it would play it twice.
+    /// The line under a track's mix switch, when mixing it would play it twice: an app track in
+    /// a Desktop clip, or in an exported clip whose Mix track may already hold it.
     pub fn mix_hint(&self, stream_index: usize, mix: bool) -> Option<&'static str> {
         let app = self.audio.iter().any(|t| t.stream_index == stream_index && t.is_app());
-        (mix && app && self.desktop_loopback()).then_some("This app is also in Desktop audio, so mixing it doubles it.")
+        if !(mix && app) {
+            return None;
+        }
+        if self.desktop_loopback() {
+            return Some("This app is also in Desktop audio, so mixing it doubles it.");
+        }
+        self.audio.iter().any(|t| t.source == SOURCE_MIX).then_some("This app may already be in the Mix track, so mixing it again can double it.")
     }
     /// Every track's starting setting (`AudioTrackInfo::default_setting`).
     pub fn default_audio(&self) -> Vec<AudioSetting> { self.audio.iter().map(AudioTrackInfo::default_setting).collect() }
@@ -317,6 +324,9 @@ mod tests {
         assert_eq!(parse_audio_sources(Some(r#"["desktop-loopback","app:a.exe"]"#)), ["desktop-loopback", "app:a.exe"]);
         let exported = info(&[SOURCE_MIX, "app:a.exe"]);
         assert!(exported.default_audio()[0].mix && exported.mix_hint(1, true).is_none(), "an exported mix: in the mix, no hint");
+        assert!(!exported.default_audio()[1].mix, "the app track of an exported clip still starts out of the mix");
+        assert_eq!(exported.mix_hint(2, true), Some("This app may already be in the Mix track, so mixing it again can double it."));
+        assert_eq!(exported.mix_hint(2, false), None);
         assert!(audio_sources_for(Some(r#"["mic"]"#), 2).is_empty(), "a tag for another track count is no tag");
         assert_eq!(audio_sources_for(Some(r#"["mic","app:a.exe"]"#), 2), ["mic", "app:a.exe"]);
         assert!(parse_audio_sources(Some("not json")).is_empty() && parse_audio_sources(None).is_empty());
