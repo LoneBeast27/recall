@@ -364,10 +364,9 @@ impl Root {
                 self.lib.reveal(&path);
             }
         }
-        // Six level meters and the MIDI monitor run only while the Audio page shows.
+        // The level meters and the MIDI monitor run only while the Audio page shows.
         if route == Route::Audio {
-            self.meters.get_or_insert_with(Meters::spawn);
-            self.midi.get_or_insert_with(Midi::spawn);
+            self.sync_audio_monitors();
         } else {
             self.meters = None;
             self.midi = None;
@@ -375,7 +374,7 @@ impl Root {
         if route == Route::Settings {
             self.cache.refresh();
         }
-        if route == Route::Settings || route == Route::Hdr {
+        if matches!(route, Route::Settings | Route::Hdr | Route::Audio) {
             self.daemon.send(DaemonCommand::GetConfig);
             self.daemon.send(DaemonCommand::Status);
         }

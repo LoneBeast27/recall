@@ -8,7 +8,7 @@
 //! (`QueryDisplayConfig` + `DisplayConfigGetDeviceInfo`) addresses a display by
 //! its **(adapter LUID, target id)** pair regardless of which GPU drives it, and
 //! matches a *specific* panel by `monitorFriendlyDeviceName` -- critical: we
-//! manage the ASUS "PG27AQDP" and must NEVER touch the BenQ.
+//! manage the configured display (default: the primary) and must NEVER touch another.
 //!
 //! # HDR API variants on Windows 11 build 26200 (24H2) -- verified intel
 //! 24H2 split "advanced color" (WCG) from "HDR". Two generations; we try NEW

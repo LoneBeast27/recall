@@ -162,6 +162,7 @@ pub fn engine_settings_changed(old: &RecordingCfg, new: &RecordingCfg) -> bool {
         || old.mic_device.trim() != new.mic_device.trim()
         || old.mic_enabled != new.mic_enabled
         || old.desktop_audio_device.trim() != new.desktop_audio_device.trim()
+        || old.moments_gallery != new.moments_gallery
 }
 
 /// Environment for one engine spawn: `Some` sets, `None` removes. Every target
@@ -192,6 +193,7 @@ pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&s
         ("RECALL_BITRATE".to_string(), Some((rec.bitrate_mbps as u64 * 1_000_000).to_string())),
         ("RECALL_QUALITY".to_string(), Some(engine_quality(&rec.quality).to_string())),
         ("RECALL_AUDIO_VOICE_EXE".to_string(), (!voice.is_empty()).then(|| voice.to_string())),
+        ("RECALL_MOMENTS".to_string(), Some(if rec.moments_gallery { "1" } else { "0" }.to_string())),
     ];
     let (hwnd, name, pid) = match target {
         EngineTarget::Window(t) => (
@@ -280,6 +282,7 @@ mod tests {
             RecordingCfg { mic_device: "Microphone (USB)".into(), ..base.clone() },
             RecordingCfg { mic_enabled: false, ..base.clone() },
             RecordingCfg { desktop_audio_device: "Speakers (USB)".into(), ..base.clone() },
+            RecordingCfg { moments_gallery: true, ..base.clone() },
             RecordingCfg { output_dir: "D:\\c".into(), ..base.clone() },
         ] {
             assert!(engine_settings_changed(&base, &changed), "{changed:?}");
@@ -376,6 +379,9 @@ mod tests {
         assert_eq!(get(&env, "RECALL_BITRATE").as_deref(), Some("60000000"));
         assert_eq!(get(&env, "RECALL_QUALITY").as_deref(), Some("max"), "Quality = engine max (p7)");
         assert_eq!(get(&env, "RECALL_AUDIO_VOICE_EXE").as_deref(), Some("Discord.exe"));
+        assert_eq!(get(&win, "RECALL_MOMENTS").as_deref(), Some("0"), "Moments gallery is opt-in");
+        let moments = RecordingCfg { moments_gallery: true, ..RecordingCfg::default() };
+        assert_eq!(get(&engine_env(&EngineTarget::Desktop, &moments, None), "RECALL_MOMENTS").as_deref(), Some("1"));
     }
 
     #[test]

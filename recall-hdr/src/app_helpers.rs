@@ -62,7 +62,7 @@ pub(super) fn log_file_path() -> std::path::PathBuf {
 }
 
 /// The primary monitor's `HMONITOR` as an `isize` (the watcher's target format).
-/// The managed panel (PG27AQDP) is the primary display on this box.
+/// Fullscreen attribution assumes the managed display is the primary (the default setting).
 pub(crate) fn primary_monitor_isize() -> isize {
     let mon: HMONITOR = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
     mon.0 as isize

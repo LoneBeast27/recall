@@ -183,6 +183,7 @@ fn defaults_for_the_hotkey_features_and_quality() {
     assert_eq!((rec.codec.as_str(), rec.fps, rec.bitrate_mbps, rec.quality.as_str()), ("h264", 60, 25, "balanced"));
     assert_eq!(rec.voice_app, "", "voice track off by default");
     assert_eq!((rec.mic_device.as_str(), rec.mic_enabled, rec.desktop_audio_device.as_str()), ("", true, ""), "Windows default devices, mic on");
+    assert!(!rec.moments_gallery, "SteelSeries Moments gallery is opt-in");
     assert_eq!(StorageCfg::default().cap_gb, 0, "auto-clean off by default");
     assert!(validate(&Config::default()).is_ok(), "defaults never collide (incl. Alt+M)");
     assert_eq!(rec.save_seconds(0), 120, "0 = full buffer");
@@ -202,7 +203,8 @@ fn every_new_key_patches_saves_and_reloads() {
             "save_hotkeys": [{"hotkey": "Alt+N", "seconds": 0}, {"hotkey": "Alt+J", "seconds": 15}, {"hotkey": "Alt+L", "seconds": 60}]
         },
         "storage": {"cap_gb": 500},
-        "hotkeys": {"advanced_enabled": false, "leader": "Ctrl+F12", "save_seconds": 45, "window_ms": 2000}
+        "hotkeys": {"advanced_enabled": false, "leader": "Ctrl+F12", "save_seconds": 45, "window_ms": 2000},
+        "midi": {"input": "Launchpad X"}
     });
     let mut base = store.load();
     base.recording.screenshot_hotkey = "Ctrl+F9".into(); // so clearing it is a change
@@ -212,7 +214,7 @@ fn every_new_key_patches_saves_and_reloads() {
         "recording.fps", "recording.bitrate_mbps", "recording.quality", "recording.voice_app",
         "recording.mic_device", "recording.mic_enabled", "recording.desktop_audio_device",
         "recording.save_hotkeys", "storage.cap_gb", "hotkeys.advanced_enabled", "hotkeys.leader",
-        "hotkeys.save_seconds", "hotkeys.window_ms",
+        "hotkeys.save_seconds", "hotkeys.window_ms", "midi.input",
     ] {
         assert!(out.touched(key), "{key} not reported as changed: {:?}", out.changed);
     }
@@ -224,6 +226,7 @@ fn every_new_key_patches_saves_and_reloads() {
     assert_eq!(back.recording.save_hotkeys[2], SaveHotkey { hotkey: "Alt+L".into(), seconds: 60 });
     assert_eq!(back.recording.screenshot_hotkey, "", "empty = off survives");
     assert_eq!(back.storage.cap_gb, 500);
+    assert_eq!(back.midi.input, "Launchpad X");
     assert_eq!(back.recording.mic_device, "Microphone (3- RODECaster Duo Chat)", "non-ASCII device names survive TOML");
     assert_eq!(back.recording.desktop_audio_device, "Game (RØDECaster)");
     assert_eq!(back.hotkeys, HotkeysCfg { advanced_enabled: false, leader: "Ctrl+F12".into(), save_seconds: 45, window_ms: 2000 });
@@ -242,6 +245,7 @@ fn new_keys_reject_bad_values() {
         (json!({"recording":{"voice_app":"C:\\Apps\\Discord.exe"}}), "recording.voice_app"),
         (json!({"recording":{"mic_device":"Mic\u{7}Two"}}), "recording.mic_device"),
         (json!({"recording":{"desktop_audio_device":"x".repeat(300)}}), "recording.desktop_audio_device"),
+        (json!({"midi":{"input":"x".repeat(300)}}), "midi.input"),
         (json!({"recording":{"save_hotkeys": nine}}), "at most 8"),
         (json!({"recording":{"save_hotkeys":[{"hotkey":"Alt+N","seconds":9999}]}}), "seconds"),
         (json!({"recording":{"save_hotkeys":[{"hotkey":"","seconds":0}]}}), "must not be empty"),
