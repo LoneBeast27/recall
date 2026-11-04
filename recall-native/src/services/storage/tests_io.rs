@@ -294,3 +294,25 @@ fn orphan_thumbnails_go_once_old_and_owned_ones_stay() {
     assert!(thumbs.join("orphan-new.jpg").exists());
     let _ = std::fs::remove_dir_all(root);
 }
+
+/// Only a listing that saw every folder whole may prune thumbnails: a missing recordings folder
+/// or a missing (offline) imported folder makes it partial.
+#[test]
+fn a_listing_is_complete_only_when_every_folder_was_read() {
+    let root = temp_root("listing-complete");
+    let (recordings, imported) = (root.join("recordings"), root.join("imported"));
+    std::fs::create_dir_all(&recordings).unwrap();
+    std::fs::create_dir_all(&imported).unwrap();
+    std::fs::write(recordings.join("a.mp4"), b"x").unwrap();
+    std::fs::write(imported.join("b.mp4"), b"x").unwrap();
+    let text = |p: &std::path::Path| p.to_string_lossy().into_owned();
+    crate::services::library::folders::forget_scans();
+    let (clips, complete) = crate::backend::list_from(&recordings, &[text(&imported)]).unwrap();
+    assert_eq!((clips.len(), complete), (2, true), "both folders read whole");
+    let (_, complete) = crate::backend::list_from(&root.join("offline-recordings"), &[text(&imported)]).unwrap();
+    assert!(!complete, "a missing recordings folder makes the listing partial");
+    let (clips, complete) = crate::backend::list_from(&recordings, &[text(&root.join("offline-import"))]).unwrap();
+    assert_eq!((clips.len(), complete), (1, false), "a missing imported folder makes the listing partial");
+    crate::services::library::folders::forget_scans();
+    let _ = std::fs::remove_dir_all(root);
+}
