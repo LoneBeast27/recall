@@ -5,7 +5,7 @@
 //!
 //! This is the one header writer for every export (edited, lossless, CFR): it is always
 //! `+faststart` (at the trailer the muxer moves `moov` ahead of `mdat`, one in-place shift of
-//! the temp file, so Discord and browsers can play a shared export before all of it loads).
+//! the temp file, so chat apps and browsers can play a shared export before all of it loads).
 
 use ffmpeg_next as ff;
 
