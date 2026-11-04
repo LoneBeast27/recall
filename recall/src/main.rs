@@ -48,6 +48,7 @@ mod hybrid_gpu;
 mod moments;
 mod protocol;
 mod ring;
+mod single_instance;
 mod source;
 
 use std::sync::atomic::Ordering::Relaxed;
@@ -94,9 +95,28 @@ struct Config {
 #[used]
 static ENGINE_CAPS: [u8; 46] = *b"recall-engine-caps:prepare-editor,export-edit;";
 
-fn parse_args() -> Config {
+const USAGE: &str = "usage: recall [--json] [--monitor N]   (records; one engine per user)
+       recall --prepare-editor INPUT CACHE_DIR
+       recall --export-edit INPUT OUTPUT FPS PROJECT.json [--json]
+       recall --export-cfr INPUT OUTPUT [FPS] [--json]
+       recall --encoder-smoke DIR | --gpu-smoke DIR
+       recall --help";
+
+/// What the command line asks for.
+enum Args {
+    Run(Config),
+    Help,
+    Bad(String),
+}
+
+fn parse_args() -> Args {
+    parse_args_from(std::env::args().skip(1))
+}
+
+/// Unknown arguments are refused: an engine that ignored them would start recording.
+fn parse_args_from(args: impl IntoIterator<Item = String>) -> Args {
     let mut cfg = Config::default();
-    let mut args = std::env::args().skip(1);
+    let mut args = args.into_iter();
     while let Some(a) = args.next() {
         match a.as_str() {
             "--json" => cfg.json = true,
@@ -119,10 +139,39 @@ fn parse_args() -> Config {
                 cfg.export_cfr = Some((input, output, fps));
             }
             "--monitor" => cfg.monitor = args.next().and_then(|v| v.parse().ok()),
-            _ => {}
+            "--help" | "-h" | "/?" | "-?" => return Args::Help,
+            other => return Args::Bad(format!("unknown argument '{other}'")),
         }
     }
-    cfg
+    Args::Run(cfg)
+}
+
+/// How long a new recorder waits for an engine that is still ending (a restart).
+const ENGINE_WAIT: Duration = Duration::from_secs(3);
+/// Exit code when another engine already records.
+const EXIT_ALREADY_RUNNING: i32 = 3;
+
+/// Claims the recorder guard. Only the recorder takes it: one-shot commands (prepare,
+/// export, smoke tests) run beside a recording engine.
+fn claim_recorder(json: bool) -> Option<single_instance::Guard> {
+    let say = |message: String| {
+        if json {
+            protocol::emit(&protocol::Outbound::EncoderLog { message });
+        } else {
+            eprintln!("[recall] {message}");
+        }
+    };
+    match single_instance::claim_within(&single_instance::mutex_name(single_instance::ENGINE), ENGINE_WAIT) {
+        single_instance::Claim::First(guard) => Some(guard),
+        single_instance::Claim::Taken => {
+            say("another Recall engine is already recording; exiting".into());
+            std::process::exit(EXIT_ALREADY_RUNNING);
+        }
+        single_instance::Claim::Unavailable(code) => {
+            say(format!("single-instance guard unavailable (error {code}); recording anyway"));
+            None
+        }
+    }
 }
 
 /// Stdin-thread hook that triggers a replay save (None when encode is off).
@@ -409,7 +458,17 @@ fn main() {
     if let Ok(mask) = std::env::var("RECALL_CPU_MASK") {
         cpu_mask::apply(&mask);
     }
-    let config = parse_args();
+    let config = match parse_args() {
+        Args::Run(config) => config,
+        Args::Help => {
+            println!("{USAGE}");
+            return;
+        }
+        Args::Bad(why) => {
+            eprintln!("recall: {why}\n{USAGE}");
+            std::process::exit(2);
+        }
+    };
     #[cfg(feature = "encode")]
     if let Some((ref input, ref cache)) = config.prepare_editor {
         match editor_media::prepare_clip(input, cache) {
@@ -464,6 +523,8 @@ fn main() {
         }
         return;
     }
+    // Held until the process ends: Windows frees it then, after a crash too.
+    let _instance = claim_recorder(config.json);
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
@@ -488,5 +549,35 @@ fn main() {
     #[cfg(feature = "encode")]
     if let Some(encoder) = app.encoder.take() {
         encoder.shutdown(std::time::Duration::from_secs(3));
+    }
+}
+
+#[cfg(test)]
+mod args_tests {
+    use super::{parse_args_from, Args};
+
+    fn parse(args: &[&str]) -> Args {
+        parse_args_from(args.iter().map(|a| a.to_string()))
+    }
+
+    #[test]
+    fn the_commands_scripts_and_the_app_send_still_parse() {
+        assert!(matches!(parse(&[]), Args::Run(_)));
+        assert!(matches!(parse(&["--json"]), Args::Run(c) if c.json));
+        assert!(matches!(parse(&["--export-edit", "in.mp4", "out.mp4", "60", "p.json", "--json"]), Args::Run(c) if c.json && c.export_edit.is_some()));
+        assert!(matches!(parse(&["--prepare-editor", "in.mp4", "cache"]), Args::Run(c) if c.prepare_editor.is_some()));
+        assert!(matches!(parse(&["--export-cfr", "in.mp4", "out.mp4", "30"]), Args::Run(c) if c.export_cfr.is_some()));
+        assert!(matches!(parse(&["--gpu-smoke", "dir"]), Args::Run(c) if c.gpu_smoke.is_some()));
+        assert!(matches!(parse(&["--monitor", "1"]), Args::Run(c) if c.monitor == Some(1)));
+    }
+
+    #[test]
+    fn help_and_unknown_arguments_never_reach_the_recorder() {
+        for flag in ["--help", "-h", "/?", "-?"] {
+            assert!(matches!(parse(&[flag]), Args::Help), "{flag}");
+        }
+        assert!(matches!(parse(&["--json", "--help"]), Args::Help));
+        assert!(matches!(parse(&["--recrod"]), Args::Bad(why) if why.contains("--recrod")));
+        assert!(matches!(parse(&["stray"]), Args::Bad(_)));
     }
 }
