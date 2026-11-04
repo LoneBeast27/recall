@@ -176,6 +176,7 @@ pub fn record(route: &str, ed: &EditorState, clips: usize) {
     });
     line["preview_quality"] = serde_json::json!(ed.preview_quality());
     line["pre_encode_eligible"] = serde_json::json!(ed.pre_encode_eligible());
+    line["pre_encode"] = serde_json::json!(ed.pre_encode_line());
     // On its own: the rest of the line already fills the macro's recursion limit.
     line["loading"] = serde_json::json!(ed.loading.active().then(|| serde_json::json!({
             "share": ed.loading.share,
