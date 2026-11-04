@@ -48,13 +48,16 @@ fn write_media(root: &Path, media: &Media) {
 pub(super) struct Inventory {
     pub units: Vec<Unit>,
     pub projects: u64,
-    /// Settings, indexes, history, temp and in-progress files.
+    /// Settings, indexes, history and in-progress files.
     pub other: u64,
+    /// Pre-encode and other temporary files (`tmp`): shown in the total, not held against the
+    /// budget, since they are removed when their job ends or the app starts.
+    pub transient: u64,
 }
 
 impl Inventory {
     pub fn total(&self) -> u64 {
-        self.units.iter().map(|u| u.bytes).sum::<u64>() + self.projects + self.other
+        self.units.iter().map(|u| u.bytes).sum::<u64>() + self.projects + self.other + self.transient
     }
     pub fn tier_bytes(&self, tier: Tier) -> u64 {
         self.units.iter().filter(|u| u.tier == tier).map(|u| u.bytes).sum()
@@ -159,7 +162,7 @@ pub(super) fn inventory(root: &Path, score: &dyn Fn(&str) -> f64) -> Inventory {
         }
     }
     let projects = dir_size(&root.join("projects")).0;
-    other += dir_size(&root.join("tmp")).0;
+    let transient = dir_size(&root.join("tmp")).0;
     // Clip heads from the filter probe (`head.rs`): at most a few hundred MB, never evicted.
     other += dir_size(&root.join("heads")).0;
     // The recorder's kept copies waiting to be adopted (`kept.rs`, up to 2 GiB): they hold SSD
@@ -170,7 +173,7 @@ pub(super) fn inventory(root: &Path, score: &dyn Fn(&str) -> f64) -> Inventory {
     for file in ["storage.json", "media.json", "interactions.json"] {
         other += root.join(file).metadata().map_or(0, |m| m.len());
     }
-    Inventory { units, projects, other }
+    Inventory { units, projects, other, transient }
 }
 
 /// Deletes one unit; returns the bytes actually freed (files still open are skipped).
@@ -204,6 +207,32 @@ pub(super) fn delete(root: &Path, unit: &Unit) -> u64 {
 
 /// Evicts down to `budget` (video ≤ half of it), counting `incoming_video` bytes about to
 /// join the video tier. Lowest-score clips first (`evict::plan`). Returns bytes freed.
+/// Thumbnails no listed clip owns are deleted once this old: the budget never evicts thumbnails,
+/// so the ones of deleted, renamed or re-encoded clips would otherwise pile up. The age keeps a
+/// drive that is only offline for a while from losing its thumbnails.
+pub(super) const ORPHAN_THUMB_AGE: std::time::Duration = std::time::Duration::from_secs(30 * 24 * 3600);
+
+/// Deletes `thumbs\<id>.jpg` files whose id is not in `owned` and that are older than `age`.
+/// Does nothing for an empty list (a listing that found no clips proves nothing). Returns bytes freed.
+pub(super) fn sweep_orphan_thumbs(root: &Path, owned: &std::collections::HashSet<String>, age: std::time::Duration) -> u64 {
+    if owned.is_empty() {
+        return 0;
+    }
+    let _guard = INDEX_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let mut freed = 0;
+    for (name, metadata, path) in entries(&root.join("thumbs")) {
+        let Some(id) = name.strip_suffix(".jpg") else { continue };
+        let old = metadata.modified().ok().and_then(|t| t.elapsed().ok()).is_some_and(|elapsed| elapsed >= age);
+        if metadata.is_file() && old && !owned.contains(id) && std::fs::remove_file(&path).is_ok() {
+            freed += metadata.len();
+        }
+    }
+    if freed > 0 {
+        super::prefetch::invalidate_usage();
+    }
+    freed
+}
+
 pub(super) fn enforce(root: &Path, budget: u64, incoming_video: u64) -> u64 {
     let _guard = INDEX_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let swept = sweep_old_stems_once(root);

@@ -367,16 +367,27 @@ pub(crate) fn move_clip(job: &MoveJob, cfg: &Config, abort: &AtomicBool) -> Resu
 /// `recover` scans only the staging folder's own files, so these never move again.
 pub(crate) const KEPT_DIR: &str = "kept";
 
-/// Most bytes `kept\` may hold: the app empties it only when it runs, and a
-/// night of saves with the app closed must not fill the SSD. Matches the app's
-/// default cache budget.
-pub(crate) const KEPT_CAP: u64 = 2 << 30;
+/// The app's default cache budget, when `<cache>\storage.json` names none.
+const DEFAULT_CACHE_BUDGET: u64 = 2 << 30;
+
+/// Most bytes `kept\` may hold: half the app's cache budget. `kept\` counts against that
+/// budget and cannot be evicted, so at the whole budget (the old fixed 2 GiB) it left no
+/// room and the app's budget pass emptied every other tier (2026-11-05).
+pub(crate) fn kept_cap(staging: &Path) -> u64 {
+    let budget = staging
+        .parent()
+        .and_then(|cache| std::fs::read(cache.join("storage.json")).ok())
+        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|settings| settings.get("cache_budget_bytes").and_then(|v| v.as_u64()))
+        .unwrap_or(DEFAULT_CACHE_BUDGET);
+    budget / 2
+}
 
 /// Renames the staged copy to `<staging>\kept\<dest file name>`; `None` (the
 /// caller deletes it) when that folder or the rename fails, or the copy would
-/// take `kept\` past [`KEPT_CAP`].
+/// take `kept\` past [`kept_cap`].
 fn keep_staged(staged: &Path, dest: &Path) -> Option<PathBuf> {
-    keep_staged_within(staged, dest, KEPT_CAP)
+    keep_staged_within(staged, dest, kept_cap(staged.parent()?))
 }
 
 fn keep_staged_within(staged: &Path, dest: &Path, cap: u64) -> Option<PathBuf> {

@@ -144,9 +144,13 @@ pub fn clip_roots()->Vec<WatchRoot>{
 /// deep), and one listing of the SSD thumbnail tier; a clip's `thumb` is set only when its
 /// thumbnail is already on the SSD (misses are filled by `AssetJob::Thumb` and idle prefetch
 /// through the disk lane). A clip reachable from two folders is listed once.
-pub fn list_clips()->Result<Vec<ClipEntry>,String>{
-    let dir=library_dir();
+pub fn list_clips()->Result<Vec<ClipEntry>,String>{list_clips_checked().map(|(clips,_)|clips)}
+/// [`list_clips`], and whether the listing saw every configured folder whole (each existed, was
+/// read, and no entry failed). Only a complete listing may prove a clip is gone.
+pub fn list_clips_checked()->Result<(Vec<ClipEntry>,bool),String>{list_from(&library_dir(),&Folders::load().imported)}
+pub(crate) fn list_from(dir:&Path,imported:&[String])->Result<(Vec<ClipEntry>,bool),String>{
     let thumbs=storage::thumb_index();
+    let mut complete=true;
     let mut clips=Vec::new();
     let mut seen=HashSet::new();
     let mut push=|path:PathBuf,bytes:u64,mtime:u64,folder:Option<String>|{
@@ -156,18 +160,21 @@ pub fn list_clips()->Result<Vec<ClipEntry>,String>{
         clips.push(ClipEntry{name,path:path.to_string_lossy().into_owned(),bytes,mtime,thumb,folder});
     };
     if dir.exists(){
-        for e in std::fs::read_dir(&dir).map_err(|e|format!("read clips: {e}"))?.flatten(){
+        for e in std::fs::read_dir(dir).map_err(|e|format!("read clips: {e}"))?{
+            let Ok(e)=e else{complete=false;continue};
             let path=e.path();if !folders::is_clip(&path){continue;}
-            let Ok(m)=e.metadata()else{continue};if !m.is_file(){continue;}
+            let Ok(m)=e.metadata()else{complete=false;continue};if !m.is_file(){continue;}
             let mtime=m.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
             push(path,m.len(),mtime,None);
         }
-    }
+    }else{complete=false;}
     let skip=[storage::cache_root()];
-    for root in Folders::load().imported{
-        for clip in folders::scan_imported_cached(Path::new(&root),&skip){push(clip.path,clip.bytes,clip.mtime,clip.folder);}
+    for root in imported{
+        let (found,whole)=folders::scan_imported_cached_checked(Path::new(root),&skip);
+        complete&=whole;
+        for clip in found{push(clip.path,clip.bytes,clip.mtime,clip.folder);}
     }
-    clips.sort_by(|a,b|b.mtime.cmp(&a.mtime));Ok(clips)
+    clips.sort_by(|a,b|b.mtime.cmp(&a.mtime));Ok((clips,complete))
 }
 /// SSD thumbnail for a library clip: cached, imported from the recorder's `thumbs` folder, or generated.
 /// Blocking; HDD work runs on the clip's disk lane (inline when already on it).
