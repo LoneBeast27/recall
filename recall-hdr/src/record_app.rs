@@ -5,7 +5,7 @@
 //! commands (`record_cmds`).
 //!
 //! - Records ANY game: the foreground fullscreen window (foreground hook, a
-//!   scoped location hook on the foreground, 1 s re-probe; `record_detect`)
+//!   100 ms fullscreen check of the foreground, 1 s re-probe; `record_detect`)
 //!   becomes the target after 300 ms (2 s to replace another game); the
 //!   engine is (re)started with that window, name and game-audio pid; no
 //!   target -> engine stopped ("waiting").
@@ -41,6 +41,7 @@ use crate::overlay_proc::OverlayProc;
 use crate::record_activity::{EngineActivity, PendingPause};
 use crate::record_chord::Chord;
 use crate::record_config::{parse_cpu_mask, ConfigStore};
+use crate::record_detect::Follow;
 pub(crate) use crate::record_env::apply_affinity;
 use crate::record_env::EnvOverrides;
 use crate::record_hdr::HdrManager;
@@ -101,6 +102,8 @@ pub struct Controller {
     pub(crate) last_fed: Option<(isize, bool)>,
     /// The foreground window if it could become a target by going fullscreen.
     pub(crate) followable: Option<isize>,
+    /// The followed foreground's fullscreen verdict (`record_detect`).
+    pub(crate) follow: Follow,
     /// (hwnd, wait) of the last committed target, for the retarget log line.
     pub(crate) detected: Option<(isize, Duration)>,
     pub(crate) target_monitor: isize,
@@ -152,13 +155,9 @@ pub fn run() -> i32 {
     };
     let target_monitor = app::primary_monitor_isize();
     let (watch_tx, watch_rx) = channel::<WatchEvent>();
-    let (follow_tx, follow_rx) = channel::<WatchEvent>();
-    let mut watcher = Watcher::install(watch_tx, target_monitor)
+    let watcher = Watcher::install(watch_tx, target_monitor)
         .map_err(|e| log!("record: watcher install failed ({e}); relying on the 1 s foreground probe"))
         .ok();
-    if let Some(w) = watcher.as_mut() {
-        w.follow_into(follow_tx);
-    }
     let (ctl_tx, ctl_rx) = channel::<Inbound>();
     let hub = PipeHub::start(ctl_tx);
     let supervisor = Supervisor::start_idle();
@@ -205,6 +204,7 @@ pub fn run() -> i32 {
         last_hdr_refresh: now,
         last_fed: None,
         followable: None,
+        follow: Follow::new(now),
         detected: None,
         target_monitor,
         quit: None,
@@ -238,22 +238,16 @@ pub fn run() -> i32 {
         ctl.cfg.storage.cap_gb
     );
 
-    let code = ctl.pump(&watch_rx, &follow_rx, &ctl_rx, &mut watcher);
+    let code = ctl.pump(&watch_rx, &ctl_rx);
     if let Some(w) = watcher {
-        w.uninstall(); // both hooks, on the install (pump) thread
+        w.uninstall(); // on the install (pump) thread
     }
     ctl.shutdown();
     code
 }
 
 impl Controller {
-    fn pump(
-        &mut self,
-        watch_rx: &Receiver<WatchEvent>,
-        follow_rx: &Receiver<WatchEvent>,
-        ctl_rx: &Receiver<Inbound>,
-        watcher: &mut Option<Watcher>,
-    ) -> i32 {
+    fn pump(&mut self, watch_rx: &Receiver<WatchEvent>, ctl_rx: &Receiver<Inbound>) -> i32 {
         loop {
             let timeout = app::wait_ms(self.next_deadline(), MAX_WAIT_MS);
             unsafe {
@@ -268,9 +262,6 @@ impl Controller {
             let now = Instant::now();
             while let Ok(ev) = watch_rx.try_recv() {
                 self.on_foreground_event(&ev, now);
-            }
-            while let Ok(ev) = follow_rx.try_recv() {
-                self.on_follow_event(&ev, now);
             }
             if now.duration_since(self.last_probe) >= PROBE_EVERY {
                 self.probe_foreground(now, false);
@@ -288,7 +279,6 @@ impl Controller {
                 return 0;
             }
             self.tick(now);
-            self.sync_follow(watcher.as_mut());
         }
     }
 
@@ -309,7 +299,8 @@ impl Controller {
         record_engine::wanted(self.tracker.current(), self.pinned.as_ref(), &self.cfg.recording, self.paused)
     }
 
-    /// Engine events -> chord -> liveness (process + window) -> target -> engine -> HDR ->
+    /// Engine events -> chord -> liveness (process + window) -> followed
+    /// foreground -> target -> engine -> HDR ->
     /// fresh-engine intents -> deferred restart / storage -> overlay -> status
     /// (+ island notices).
     fn tick(&mut self, now: Instant) {
@@ -324,6 +315,7 @@ impl Controller {
             self.tracker.on_process_exit(pid);
         }
         self.check_windows();
+        self.follow_tick(now);
         if self.tracker.poll(now) {
             self.note_commit();
         }

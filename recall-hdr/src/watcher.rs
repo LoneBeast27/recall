@@ -17,8 +17,6 @@
 //! - The callback runs on that same thread. It must stay cheap and must never
 //!   panic across the FFI boundary (we wrap it in `catch_unwind`) and never mutate
 //!   the display or hold a lock across other calls.
-//! - [`Watcher::follow`] adds a second, scoped hook on one window's location
-//!   changes (`watcher_follow.rs`); same thread rules.
 //! - The watcher is **single-instance**: only one hook may be installed process-
 //!   wide at a time (the callback reads a single global sender). A second
 //!   [`Watcher::install`] before the first is dropped returns `Err`.
@@ -126,16 +124,7 @@ fn state() -> &'static Mutex<Option<WatchState>> {
 #[derive(Debug)]
 pub struct Watcher {
     hook: HWINEVENTHOOK,
-    target_monitor: isize,
-    /// Where location-hook flips go ([`Watcher::follow_into`]).
-    follow_tx: Option<Sender<WatchEvent>>,
-    /// The window [`Watcher::follow`] was last asked for (installed or not).
-    follow_asked: Option<isize>,
-    follow: Option<follow::FollowHook>,
 }
-
-#[path = "watcher_follow.rs"]
-mod follow;
 
 impl Watcher {
     /// Install the `EVENT_SYSTEM_FOREGROUND` hook on the **calling thread** and
@@ -186,35 +175,7 @@ impl Watcher {
         *slot = Some(WatchState { tx, target_monitor });
         drop(slot);
         log!("watcher: EVENT_SYSTEM_FOREGROUND hook installed (target monitor {target_monitor:#x})");
-        Ok(Watcher { hook, target_monitor, follow_tx: None, follow_asked: None, follow: None })
-    }
-
-    /// Send [`Watcher::follow`]'s fullscreen flips into `tx` (a channel apart
-    /// from foreground changes, so the caller can treat them like a probe).
-    pub fn follow_into(&mut self, tx: Sender<WatchEvent>) {
-        self.follow_tx = Some(tx);
-    }
-
-    /// Follow `hwnd`'s location changes (a scoped hook on its thread), or none.
-    /// Replaces the previous hook; asking for the same window again is free,
-    /// and a window that is gone is not retried until another is asked for.
-    /// Pump thread only.
-    pub fn follow(&mut self, hwnd: Option<isize>) {
-        if self.follow_asked == hwnd {
-            return;
-        }
-        self.follow_asked = hwnd;
-        if let Some(f) = self.follow.take() {
-            follow::stop(f);
-        }
-        if let (Some(h), Some(tx)) = (hwnd, self.follow_tx.as_ref()) {
-            self.follow = follow::start(h, tx.clone(), self.target_monitor);
-        }
-    }
-
-    /// The window a scoped hook is installed on.
-    pub fn followed(&self) -> Option<isize> {
-        self.follow.as_ref().and(self.follow_asked)
+        Ok(Watcher { hook })
     }
 
     /// Explicitly uninstall the hook and clear the global state. Equivalent to
@@ -227,9 +188,6 @@ impl Watcher {
 
 impl Drop for Watcher {
     fn drop(&mut self) {
-        if let Some(f) = self.follow.take() {
-            follow::stop(f);
-        }
         // SAFETY: `hook` is a handle we obtained from `SetWinEventHook` on this
         // thread and have not previously unhooked. Must run on the install thread.
         let ok = unsafe { UnhookWinEvent(self.hook) };
@@ -296,6 +254,19 @@ pub fn probe_foreground(target_monitor: isize) -> Option<WatchEvent> {
     // SAFETY: plain query; a null result is handled by `build_event`.
     let hwnd = unsafe { GetForegroundWindow() };
     build_event(hwnd, target_monitor)
+}
+
+/// Probe one window (the record mode's followed foreground, after its
+/// fullscreen verdict flipped). Same filtering as the hook.
+pub fn probe_window(hwnd: isize, target_monitor: isize) -> Option<WatchEvent> {
+    build_event(HWND(hwnd as *mut _), target_monitor)
+}
+
+/// Only the fullscreen verdict of `hwnd` (monitor info, window rect, style):
+/// the record mode checks its followed foreground with this every 100 ms.
+/// A window that is gone reads as not fullscreen.
+pub fn window_fullscreen(hwnd: isize) -> bool {
+    fullscreen_on_own_monitor(HWND(hwnd as *mut _)).0
 }
 
 /// Turn a window into a [`WatchEvent`], or `None` for non-candidates (null hwnd,
@@ -408,6 +379,12 @@ fn exe_identity(pid: u32) -> Option<(String, String, bool)> {
             is_steam_library_path(&full),
         ))
     }
+}
+
+/// Whether `hwnd` is the foreground window now.
+pub fn is_foreground(hwnd: isize) -> bool {
+    // SAFETY: plain query.
+    unsafe { GetForegroundWindow() }.0 as isize == hwnd
 }
 
 /// Whether `hwnd` still names a live window.
