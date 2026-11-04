@@ -314,9 +314,8 @@ impl Root {
                             .flex_col()
                             .child(div().font_weight(FontWeight::MEDIUM).child(match summary.fps { Some(fps) => format!("Exported · {fps} fps"), None => "Exported · lossless".to_owned() }))
                             .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(format!("{} frames · {}", summary.frames, library::format_duration(summary.seconds))))
-                            .child(div().text_size(px(11.)).text_color(c(theme::TERTIARY)).child("Drag into Discord or a folder")),
+                            .child(div().text_size(px(11.)).text_color(c(theme::TERTIARY)).child("Drag into Discord · click to show in folder")),
                     )
-                    .child(icon(Icon::Folder, 15., theme::MUTED))
                     // A press that moves becomes a file drag of the export (Discord, Explorer, chats);
                     // a plain click shows it in Explorer.
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, _| {
