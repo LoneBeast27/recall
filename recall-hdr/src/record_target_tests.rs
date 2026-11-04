@@ -319,3 +319,61 @@ fn destroyed_target_window_ends_the_session() {
     assert!(tr.on_window_gone(0x10));
     assert!(tr.current().is_none());
 }
+
+#[test]
+fn a_held_candidate_waits_for_the_render_check_then_commits() {
+    let t0 = Instant::now();
+    let mut tr = TargetTracker::new(TARGET_DEBOUNCE, START_DEBOUNCE);
+    tr.on_foreground(Some(target(5, 0x50, "Netflix")), t0);
+    let due = t0 + START_DEBOUNCE;
+    let ask = due + Duration::from_millis(100);
+    assert!(!tr.poll_admit(due, |_| Admit::Hold(ask)), "held: nothing commits");
+    assert_eq!(tr.pending().map(|t| t.pid), Some(5), "still pending");
+    assert_eq!(tr.next_deadline(), Some(ask), "the pump wakes for the next ask");
+    assert!(!tr.poll_admit(ask - Duration::from_millis(1), |_| panic!("not due")));
+    assert!(tr.poll_admit(ask, |_| Admit::Commit));
+    assert_eq!(tr.current().map(|t| t.pid), Some(5));
+    assert_eq!(tr.take_last_wait(), Some(ask - t0), "the wait counts from first seen");
+}
+
+#[test]
+fn a_rejected_candidate_is_dropped_and_the_session_stays() {
+    let t0 = Instant::now();
+    let mut tr = TargetTracker::new(TARGET_DEBOUNCE, START_DEBOUNCE);
+    tr.on_foreground(Some(target(1, 0x10, "Game")), t0);
+    assert!(tr.poll(t0 + START_DEBOUNCE));
+    let t1 = t0 + Duration::from_secs(5);
+    tr.on_foreground(Some(target(2, 0x20, "Video")), t1);
+    assert!(!tr.poll_admit(t1 + TARGET_DEBOUNCE, |_| Admit::Reject));
+    assert_eq!(tr.current().map(|t| t.pid), Some(1), "the game's session stays");
+    assert!(tr.pending().is_none());
+    assert_eq!(tr.next_deadline(), None);
+}
+
+#[test]
+fn a_new_candidate_clears_an_old_hold() {
+    let t0 = Instant::now();
+    let mut tr = TargetTracker::new(TARGET_DEBOUNCE, START_DEBOUNCE);
+    tr.on_foreground(Some(target(5, 0x50, "Slow")), t0);
+    let far = t0 + Duration::from_secs(1);
+    assert!(!tr.poll_admit(t0 + START_DEBOUNCE, |_| Admit::Hold(far)));
+    let t1 = t0 + Duration::from_millis(400);
+    tr.on_foreground(Some(target(6, 0x60, "Other")), t1);
+    assert_eq!(tr.next_deadline(), Some(t1 + START_DEBOUNCE), "the old hold does not delay a new window");
+    // Seeing the held candidate again keeps its hold.
+    let mut tr = TargetTracker::new(TARGET_DEBOUNCE, START_DEBOUNCE);
+    tr.on_foreground(Some(target(5, 0x50, "Slow")), t0);
+    assert!(!tr.poll_admit(t0 + START_DEBOUNCE, |_| Admit::Hold(far)));
+    tr.on_foreground(Some(target(5, 0x50, "Slow")), t1);
+    assert_eq!(tr.next_deadline(), Some(far));
+}
+
+#[test]
+fn the_process_exiting_drops_a_held_candidate() {
+    let t0 = Instant::now();
+    let mut tr = TargetTracker::new(TARGET_DEBOUNCE, START_DEBOUNCE);
+    tr.on_foreground(Some(target(5, 0x50, "Slow")), t0);
+    assert!(!tr.poll_admit(t0 + START_DEBOUNCE, |_| Admit::Hold(t0 + Duration::from_secs(1))));
+    assert!(!tr.on_process_exit(5));
+    assert_eq!(tr.next_deadline(), None);
+}

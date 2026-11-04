@@ -7,7 +7,9 @@
 //!   (windowed games), or an exe with an `hdr_game|sdr_game` override; never a
 //!   denied stem (the rules deny list,
 //!   Recall's own processes, explorer, browsers, media players, overlays,
-//!   launchers) or an exe with a `none` override.
+//!   launchers) or an exe with a `none` override. A window that is a
+//!   candidate by the fullscreen rule alone must also render like a game
+//!   before it commits (`record_render`, asked through [`Admit`]).
 //! - **Session** ([`TargetTracker`]): the same rules as the HDR `Reconciler`
 //!   session, applied to capture. With nothing recorded (no session, or the
 //!   engine lingering after a game exited) a candidate commits once it holds
@@ -214,11 +216,23 @@ pub struct TargetTracker {
     pending: Option<(Option<Target>, Instant)>,
     /// How long the last committed candidate waited (first seen -> commit).
     last_wait: Option<Duration>,
+    /// The render check asked to decide the pending candidate later.
+    held: Option<Instant>,
+}
+
+/// What the render check says about a candidate that fell due.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Admit {
+    Commit,
+    /// Ask again at this time; the candidate stays pending.
+    Hold(Instant),
+    /// Not a game: drop the candidate (the session, if any, stays).
+    Reject,
 }
 
 impl TargetTracker {
     pub fn new(debounce: Duration, start: Duration) -> Self {
-        TargetTracker { debounce, start, current: None, pending: None, last_wait: None }
+        TargetTracker { debounce, start, current: None, pending: None, last_wait: None, held: None }
     }
 
     pub fn current(&self) -> Option<&Target> {
@@ -234,7 +248,13 @@ impl TargetTracker {
     }
 
     pub fn next_deadline(&self) -> Option<Instant> {
-        self.pending.as_ref().map(|(c, seen)| *seen + self.hold_for(c))
+        let due = self.pending.as_ref().map(|(c, seen)| *seen + self.hold_for(c))?;
+        Some(self.held.map_or(due, |held| held.max(due)))
+    }
+
+    /// The pending candidate, if it is a window (not an alt-tab away).
+    pub fn pending(&self) -> Option<&Target> {
+        self.pending.as_ref().and_then(|(c, _)| c.as_ref())
     }
 
     /// A foreground change was observed (`None` = not a target). Seeing the
@@ -245,26 +265,43 @@ impl TargetTracker {
             (Some(c), Some(cur), _) if c.same_window(cur) => self.pending = None,
             (Some(c), _, Some((Some(p), _))) if c.same_window(p) => {}
             (None, _, Some((None, _))) => {}
-            _ => self.pending = Some((candidate, now)),
+            _ => {
+                self.pending = Some((candidate, now));
+                self.held = None;
+            }
         }
     }
 
     /// Commit a settled candidate. Returns `true` when the target changed.
     pub fn poll(&mut self, now: Instant) -> bool {
+        self.poll_admit(now, |_| Admit::Commit)
+    }
+
+    /// [`Self::poll`], asking `admit` about a due candidate before it commits.
+    pub fn poll_admit(&mut self, now: Instant, admit: impl FnOnce(&Target) -> Admit) -> bool {
         let due = self.next_deadline().is_some_and(|d| now >= d);
         if !due {
             return false;
         }
         let Some((candidate, seen)) = self.pending.take() else { return false };
+        self.held = None;
         match candidate {
             // Alt-tab / desktop: the session persists.
             None => false,
             Some(c) if self.current.as_ref().is_some_and(|cur| cur.same_window(&c)) => false,
-            Some(c) => {
-                self.current = Some(c);
-                self.last_wait = Some(now.duration_since(seen));
-                true
-            }
+            Some(c) => match admit(&c) {
+                Admit::Commit => {
+                    self.current = Some(c);
+                    self.last_wait = Some(now.duration_since(seen));
+                    true
+                }
+                Admit::Hold(at) => {
+                    self.pending = Some((Some(c), seen));
+                    self.held = Some(at);
+                    false
+                }
+                Admit::Reject => false,
+            },
         }
     }
 
@@ -279,6 +316,7 @@ impl TargetTracker {
     pub fn on_process_exit(&mut self, pid: u32) -> bool {
         if matches!(&self.pending, Some((Some(c), _)) if c.pid == pid) {
             self.pending = None;
+            self.held = None;
         }
         if self.current.as_ref().is_some_and(|c| c.pid == pid) {
             self.current = None;
