@@ -70,9 +70,10 @@ pub struct Config {
 }
 
 /// `[display]` -- which panel we manage.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DisplayCfg {
-    /// Friendly name (e.g. `"PG27AQDP"`) used to select the target display.
+    /// Friendly name (e.g. `"PG27AQDP"`) used to select the target display;
+    /// "" (the default) = the primary display (`display::resolve_target`).
     pub target_friendly_name: String,
     /// Optional exact device-path pin. Empty/absent -> select by friendly name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -241,16 +242,6 @@ fn default_version() -> u32 {
 // ---------------------------------------------------------------------------
 // Defaults (must match the schema block in the design)
 // ---------------------------------------------------------------------------
-
-impl Default for DisplayCfg {
-    fn default() -> Self {
-        DisplayCfg {
-            // "" = the primary display (`display::resolve_target`).
-            target_friendly_name: String::new(),
-            target_device_path: None,
-        }
-    }
-}
 
 impl Default for BehaviorCfg {
     fn default() -> Self {
