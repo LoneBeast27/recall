@@ -181,6 +181,27 @@ impl OverlayCfg {
     }
 }
 
+/// The CPUs of `wanted` that exist in `system`; when none do (the default ffff0000 on a
+/// machine with 16 or fewer threads), the high half of `system`; `None` (no pin) with 4 or
+/// fewer CPUs, where a pin would only crowd the game.
+pub fn fit_cpu_mask(wanted: usize, system: usize) -> Option<usize> {
+    let cpus = system.count_ones();
+    if cpus <= 4 {
+        return None;
+    }
+    if wanted & system != 0 {
+        return Some(wanted & system);
+    }
+    let (mut high, mut seen) = (0usize, 0u32);
+    for bit in (0..usize::BITS).rev() {
+        if system & (1 << bit) != 0 && seen < cpus / 2 {
+            high |= 1 << bit;
+            seen += 1;
+        }
+    }
+    Some(high)
+}
+
 /// Parse a hex affinity mask (`"ffff0000"` / `"0xffff0000"`); zero is invalid.
 pub fn parse_cpu_mask(text: &str) -> Result<usize, String> {
     let raw = text.trim();

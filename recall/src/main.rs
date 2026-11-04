@@ -19,6 +19,7 @@ mod audio_clock;
 mod bookmarks;
 mod border;
 mod capture;
+mod cpu_mask;
 mod engine_extras;
 #[cfg(feature = "encode")]
 mod longrec;
@@ -42,6 +43,7 @@ mod gpu;
 mod gpu_frames;
 mod gpu_route;
 mod hdr;
+mod hybrid_gpu;
 #[cfg(feature = "encode")]
 mod moments;
 mod protocol;
@@ -59,7 +61,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::platform::windows::WindowAttributesExtWindows;
 use winit::window::{Window, WindowId};
 
-use crate::capture::{start_monitor, CaptureControlHandle, CaptureShared};
+use crate::capture::{CaptureControlHandle, CaptureShared};
 #[cfg(feature = "encode")]
 use crate::export_worker::{run_export, spawn_export_worker};
 use crate::gpu::Gpu;
@@ -292,14 +294,6 @@ impl ApplicationHandler for App {
 
         self.source_name = std::env::var("RECALL_CAPTURE_NAME").unwrap_or_else(|_| INITIAL_TITLE.trim_end_matches(" SDR").to_string());
         if let Ok(mut source)=self.source_shared.lock() { *source=self.source_name.clone(); }
-        let started = if let Some(hwnd)=std::env::var("RECALL_CAPTURE_HWND").ok().and_then(|v|v.parse::<usize>().ok()) {
-            capture::start_window(hwnd, shared.clone())
-        } else { start_monitor(self.config.monitor, shared.clone()) };
-        match started {
-            Ok(control) => self.capture = Some(control),
-            Err(e) => eprintln!("failed to start capture: {e}"),
-        }
-
         // The wgpu renderer is only for the CPU fallback: on the GPU path it would add a
         // device, a swapchain and a busy present loop for a window nobody sees.
         if !gpu_path_possible() {
@@ -308,7 +302,9 @@ impl ApplicationHandler for App {
         self.shared = Some(shared);
         self.window = Some(window);
 
+        // The display mode picks the capture format (Bgra8 for SDR, fp16 for HDR).
         self.refresh_hdr_mode();
+        self.start_capture();
         self.emit_status();
     }
 
@@ -409,13 +405,9 @@ fn spawn_stdin_reader(
 fn main() {
     #[cfg(feature = "encode")]
     std::hint::black_box(&ENGINE_CAPS); // survives release linking whatever `#[used]` keeps
-    if let Ok(mask)=std::env::var("RECALL_CPU_MASK") {
-        use windows::Win32::System::Threading::{GetCurrentProcess,SetProcessAffinityMask,SetPriorityClass,BELOW_NORMAL_PRIORITY_CLASS};
-        let parsed=usize::from_str_radix(mask.trim_start_matches("0x"),16).unwrap_or(0);
-        if parsed==0 || unsafe { SetProcessAffinityMask(GetCurrentProcess(),parsed) }.is_err() {
-            eprintln!("Recall CPU affinity could not be applied"); std::process::exit(2);
-        }
-        let _=unsafe { SetPriorityClass(GetCurrentProcess(),BELOW_NORMAL_PRIORITY_CLASS) };
+    std::hint::black_box((&hybrid_gpu::NvOptimusEnablement, &hybrid_gpu::AmdPowerXpressRequestHighPerformance));
+    if let Ok(mask) = std::env::var("RECALL_CPU_MASK") {
+        cpu_mask::apply(&mask);
     }
     let config = parse_args();
     #[cfg(feature = "encode")]

@@ -161,3 +161,13 @@ fn env_values_are_applied_and_bad_ones_noted() {
     assert_eq!((k.fps, k.buffer_secs, k.bitrate), (1000, 5, 1_000_000));
     assert_eq!(k.notes.len(), 3, "{:?}", k.notes);
 }
+
+#[test]
+fn a_low_end_gpu_caps_nvenc_effort_at_p4() {
+    let preset = |q: Quality| q.nvenc_options().iter().find(|o| o.0 == "preset").unwrap().1;
+    for q in [Quality::Balanced, Quality::High, Quality::Max] {
+        assert_eq!(preset(q.for_gpu(true)), "p4", "{q:?}");
+        assert!(!q.for_gpu(true).nvenc_options().iter().any(|o| o.0 == "multipass"));
+        assert_eq!(q.for_gpu(false), q);
+    }
+}

@@ -7,7 +7,7 @@ use std::{
 };
 
 use gpui::{
-    Bounds, Context, Entity, FocusHandle, Render, Timer, Window, canvas, div, fill, point,
+    Bounds, Context, FocusHandle, Render, Window, canvas, div, fill, point,
     prelude::*, px, size,
 };
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -115,6 +115,10 @@ pub struct Root {
     /// When to check whether the recorder is running and start it (once per launch).
     controller_check_at: Option<Instant>,
     pub frame_at: Instant,
+    /// The top-level window, for the background check (`root_poll.rs`).
+    hwnd: Option<isize>,
+    /// A recorder status change arrived in the background and is not drawn yet.
+    status_stale: bool,
 }
 
 #[path = "root_events.rs"]
@@ -123,6 +127,8 @@ mod events;
 mod exits;
 #[path = "root_keys.rs"]
 mod keys;
+#[path = "root_poll.rs"]
+mod poll;
 
 impl Root {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
@@ -170,6 +176,8 @@ impl Root {
             folders: crate::services::library::folders::Folders::load(),
             controller_check_at: std::env::var_os("RECALL_NO_CONTROLLER").is_none().then(|| Instant::now() + Duration::from_millis(1500)),
             frame_at: Instant::now(),
+            hwnd: parent_hwnd(window).ok(),
+            status_stale: false,
         };
         if let Some(path) = std::env::var_os("RECALL_NATIVE_CLIP") {
             root.open_clip(path.to_string_lossy().into_owned());
@@ -202,21 +210,8 @@ impl Root {
         crate::services::pre_encode::discard();
     }
 
-    pub fn start_polling(entity: Entity<Self>, window: &mut Window, cx: &mut gpui::App) {
-        window
-            .spawn(cx, async move |cx| {
-                loop {
-                    Timer::after(Duration::from_millis(30)).await;
-                    if entity.update(cx, |this, cx| this.poll(cx)).is_err() {
-                        break;
-                    }
-                }
-            })
-            .detach();
-    }
-
     fn poll(&mut self, cx: &mut Context<Self>) {
-        let mut changed = false;
+        let mut changed = self.back_in_front();
         while let Ok(done) = self.workers.done.try_recv() {
             changed = true;
             self.on_done(done);
@@ -232,7 +227,7 @@ impl Root {
             for event in self.daemon.drain_events() {
                 self.on_daemon_event(event);
             }
-            changed = true;
+            changed |= self.status_changed();
         }
         changed |= self.ed.tick(self.route == Route::Editor, &self.workers);
         crate::trace::record(self.route.name(), &self.ed, self.lib.records.len());
@@ -366,9 +361,13 @@ impl Root {
                 self.lib.reveal(&path);
             }
         }
+        // Six level meters and the MIDI monitor run only while the Audio page shows.
         if route == Route::Audio {
             self.meters.get_or_insert_with(Meters::spawn);
             self.midi.get_or_insert_with(Midi::spawn);
+        } else {
+            self.meters = None;
+            self.midi = None;
         }
         if route == Route::Settings {
             self.cache.refresh();

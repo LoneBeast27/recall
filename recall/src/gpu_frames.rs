@@ -6,6 +6,7 @@
 //! cores; this path records a draw call per frame. The old path stays as the fallback when
 //! this one cannot start (logged), and for the RECALL_DUMP verification harness.
 
+pub mod adapter;
 mod av;
 mod pipeline;
 mod readback;
