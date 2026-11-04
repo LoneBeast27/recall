@@ -275,7 +275,7 @@ fn mic_off() -> bool {
 
 /// True when every whitespace-separated token of `want` appears in `name`
 /// (both lowercased) — survives vendor naming like
-/// "Gaming (SteelSeries Sonar Virtual Audio Device)".
+/// "Speakers (2- USB Audio Device)" for "usb speakers".
 fn name_matches(name: &str, want: &str) -> bool {
     let name = name.to_lowercase();
     want.split_whitespace()

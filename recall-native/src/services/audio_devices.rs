@@ -1,5 +1,5 @@
-//! Audio endpoints for Settings → Clip → Audio (Microphone, Desktop audio). Listed lazily: the
-//! first time the Clip tab opens, on a thread of its own (COM lives and dies there), once per
+//! Audio endpoints for Settings → Clip → Audio (Microphone, Desktop audio) and MIDI inputs for
+//! Settings → General. Listed lazily: the first time either tab opens, on a thread of its own (COM lives and dies there), once per
 //! launch. Nothing here runs before first paint.
 use wasapi::{DeviceCollection, Direction};
 
@@ -10,6 +10,8 @@ pub struct DeviceLists {
     pub outputs: Vec<String>,
     pub default_input: Option<String>,
     pub default_output: Option<String>,
+    /// MIDI input ports (Settings → General → MIDI device).
+    pub midi_inputs: Vec<String>,
 }
 
 /// Load state; the list is fetched once and kept for the launch.
@@ -30,7 +32,7 @@ impl AudioDevices {
     }
 }
 
-/// List both directions on a fresh thread (MTA COM there only). Blocks the caller, so call it
+/// List both audio directions and the MIDI inputs on a fresh thread (MTA COM there only). Blocks the caller, so call it
 /// from a background task, never the UI thread.
 pub fn enumerate_blocking() -> DeviceLists {
     let worker = std::thread::Builder::new().name("recall-audio-devices".into()).spawn(|| {
@@ -40,6 +42,7 @@ pub fn enumerate_blocking() -> DeviceLists {
             outputs: names(&Direction::Render),
             default_input: default_name(&Direction::Capture),
             default_output: default_name(&Direction::Render),
+            midi_inputs: crate::services::midi::input_names(),
         };
         wasapi::deinitialize();
         lists

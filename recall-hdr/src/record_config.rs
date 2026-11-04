@@ -85,6 +85,9 @@ pub struct RecordingCfg {
     /// Render endpoint recorded as Game in Desktop mode ("" = the Windows
     /// default output; `RECALL_AUDIO_GAME`). Games record their own process.
     pub desktop_audio_device: String,
+    /// Also list each saved clip in the SteelSeries Moments gallery
+    /// (`RECALL_MOMENTS=1`). Off unless the person turns it on.
+    pub moments_gallery: bool,
     /// Save-length presets. Last field: TOML writes it as
     /// `[[recording.save_hotkeys]]` tables after the plain keys.
     pub save_hotkeys: Vec<SaveHotkey>,
@@ -112,6 +115,7 @@ impl Default for RecordingCfg {
             mic_device: String::new(),
             mic_enabled: true,
             desktop_audio_device: String::new(),
+            moments_gallery: false,
             save_hotkeys: crate::record_hotkeys::default_save_hotkeys(),
         }
     }
@@ -265,6 +269,10 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     parse_cpu_mask(&rec.cpu_mask)?;
     crate::record_hotkeys::validate(rec, &cfg.hotkeys)?;
     validate_quality(rec)?;
+    let midi = &cfg.midi.input;
+    if midi.len() > 256 || midi.chars().any(char::is_control) {
+        return Err("midi.input must be a MIDI port name (at most 256 characters, one line)".into());
+    }
     let cap = cfg.storage.cap_gb;
     if (1..STORAGE_CAP_MIN_GB).contains(&cap) {
         return Err(format!("storage.cap_gb must be 0 (off) or at least {STORAGE_CAP_MIN_GB} GiB, got {cap}"));

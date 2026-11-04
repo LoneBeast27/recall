@@ -64,9 +64,20 @@ pub struct Config {
     /// `[hotkeys]` -- the advanced chord (leader + one key; `record_chord`).
     #[serde(default)]
     pub hotkeys: HotkeysCfg,
+    /// `[midi]` -- the MIDI input the app's Audio page listens to ("" = off).
+    #[serde(default)]
+    pub midi: MidiCfg,
     /// Per-exe rule overrides. Exe stems are matched case-insensitively.
     #[serde(default, rename = "overrides")]
     pub overrides: Vec<Override>,
+}
+
+/// `[midi]` -- read by the native app's Audio page only (the controller just
+/// stores it). `input` is a MIDI input port name as Windows lists it.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct MidiCfg {
+    pub input: String,
 }
 
 /// `[display]` -- which panel we manage.
@@ -282,6 +293,7 @@ impl Default for Config {
             overlay: OverlayCfg::default(),
             storage: StorageCfg::default(),
             hotkeys: HotkeysCfg::default(),
+            midi: MidiCfg::default(),
             // The hdr-testcard entry is our live test target; ship it by default.
             overrides: vec![Override {
                 exe: "hdr-testcard".into(),
