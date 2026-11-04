@@ -6,6 +6,9 @@ mod backend;
 #[path = "../src/services/mod.rs"]
 #[allow(dead_code)]
 mod services;
+#[path = "../src/startup.rs"]
+#[allow(dead_code)]
+mod startup;
 use std::time::Instant;
 
 fn main() {
