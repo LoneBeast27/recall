@@ -356,3 +356,103 @@ fn bench_live_shaped_save_cpu_cost() {
     assert_eq!(muxed.frames, count as u64);
     let _ = std::fs::remove_dir_all(&bench_dir);
 }
+
+/// A click at a known sample, encoded by `coder`, muxed with a real video window and decoded
+/// back: where the click lands (channel 0 peak, in samples from the clip start).
+fn click_lands_at(coder: AacCoder, click: usize) -> Option<usize> {
+    let (window, params) = x264_window()?;
+    let secs = window_secs(&window);
+    let mut track = pcm("game", secs, false);
+    for s in &mut track.samples[click * 2..(click + 8) * 2] {
+        *s = 0.9;
+    }
+    let encoded = encode_aac_with(&track, &AtomicBool::new(false), coder).unwrap();
+    assert_eq!(encoded.coder, coder);
+    let (dir, path) = temp_clip(coder.name());
+    mux_mp4(std::path::Path::new(&path), &params, "libx264", &window, &[encoded], &AtomicBool::new(false)).unwrap();
+    let mut ictx = ff::format::input(&path).unwrap();
+    let stream = ictx.stream(1).unwrap();
+    let index = stream.index();
+    let mut decoder = ff::codec::context::Context::from_parameters(stream.parameters()).unwrap().decoder().audio().unwrap();
+    let mut out: Vec<f32> = Vec::new();
+    let mut frame = ff::frame::Audio::empty();
+    let mut take = |decoder: &mut ff::decoder::Audio, out: &mut Vec<f32>| {
+        while decoder.receive_frame(&mut frame).is_ok() {
+            out.extend_from_slice(&frame.plane::<f32>(0)[..frame.samples()]);
+        }
+    };
+    for (s, pkt) in ictx.packets() {
+        if s.index() == index {
+            decoder.send_packet(&pkt).unwrap();
+            take(&mut decoder, &mut out);
+        }
+    }
+    decoder.send_eof().unwrap();
+    take(&mut decoder, &mut out);
+    drop(ictx);
+    let _ = std::fs::remove_dir_all(&dir);
+    (0..out.len()).max_by(|&a, &b| out[a].abs().total_cmp(&out[b].abs()))
+}
+
+#[test]
+fn media_foundation_and_ffmpeg_aac_keep_the_click_in_place() {
+    ff::init().unwrap();
+    let click = 7_200; // 0.15 s at 48 kHz, inside the 0.3 s test window
+    for coder in [AacCoder::MediaFoundation, AacCoder::Native] {
+        let Some(at) = click_lands_at(coder, click) else {
+            eprintln!("libx264 missing; skipped");
+            return;
+        };
+        assert!(at.abs_diff(click) <= 16, "{coder:?}: click at {click} decoded at {at}");
+    }
+}
+
+#[test]
+fn media_foundation_encodes_48k_and_other_rates_fall_back() {
+    ff::init().unwrap();
+    let abort = AtomicBool::new(false);
+    let track = encode_aac(&pcm("game", 1.0, true), &abort).unwrap();
+    assert_eq!(track.coder, AacCoder::MediaFoundation, "Windows' AAC encoder is on every non-N Windows 10/11");
+    assert!(track.packets.len() >= 46, "{} packets for 1 s", track.packets.len());
+    let mut odd = pcm("game", 1.0, true);
+    odd.rate = 32_000;
+    assert_eq!(encode_aac(&odd, &abort).unwrap().coder, AacCoder::Native);
+}
+
+/// CPU of one save track, each encoder, on real game audio: a 120 s stereo 48 kHz f32 WAV
+/// named by `RECALL_AAC_BENCH_WAV`. Ignored:
+/// `cargo test -p recall bench_aac -- --ignored --nocapture --test-threads=1`.
+#[test]
+#[ignore]
+fn bench_aac_encoders_cpu() {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
+    ff::init().unwrap();
+    let wav = std::env::var("RECALL_AAC_BENCH_WAV").expect("RECALL_AAC_BENCH_WAV");
+    let bytes = std::fs::read(wav).unwrap();
+    let data = bytes.windows(4).position(|w| w == b"data").unwrap() + 8;
+    let samples: Vec<f32> = bytes[data..].chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]])).collect();
+    let process_ms = || {
+        let (mut a, mut b, mut k, mut u) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+        unsafe { GetProcessTimes(GetCurrentProcess(), &mut a, &mut b, &mut k, &mut u) }.unwrap();
+        let t = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 10_000.0;
+        t(k) + t(u)
+    };
+    let track = AudioPcm { name: "game", rate: 48_000, channels: 2, samples };
+    for round in 0..3 {
+        for coder in [AacCoder::Native, AacCoder::MediaFoundation] {
+            let (cpu, started) = (process_ms(), Instant::now());
+            let out = encode_aac_with(&track, &AtomicBool::new(false), coder).unwrap();
+            let bytes: usize = out.packets.iter().map(|p| p.1.len()).sum();
+            eprintln!(
+                "BENCH aac round={round} coder={} secs={:.1} process_cpu={:.0}ms thread_cpu={:.0}ms wall={:.0}ms packets={} bytes={bytes}",
+                coder.name(),
+                track.samples.len() as f64 / 96_000.0,
+                process_ms() - cpu,
+                out.cpu_ms,
+                ms(started.elapsed()),
+                out.packets.len()
+            );
+        }
+    }
+}
