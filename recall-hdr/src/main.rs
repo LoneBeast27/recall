@@ -7,8 +7,10 @@
 //! - `--legacy-hdr`  : the old HDR-only display manager tray ([`app::run`]).
 //! - `--record-tray-smoke` : tray/menu check with no capture.
 //!
-//! The long-running modes are single-instance (a named mutex); a second launch
-//! exits quietly with code 0. The diagnostic subcommands remain, all safe by
+//! The long-running modes are single-instance (a named mutex, `single_instance`); a
+//! second launch never records: with no arguments it opens or focuses the Recall
+//! window, with `--record` it waits up to 5 s for a quitting controller, then exits
+//! with code 0. The diagnostic subcommands remain, all safe by
 //! construction:
 //! - `--probe`      : read-only NvAPI CSC reachability probe.
 //! - `--clamp-test` : apply the sRGB clamp for ~3s, then reset. Prints GET state
@@ -66,6 +68,8 @@ mod record_storage;
 mod record_target;
 mod record_tray;
 mod rules;
+#[path = "../../recall/src/single_instance.rs"]
+mod single_instance;
 mod state;
 mod supervisor;
 mod tray;
@@ -79,9 +83,11 @@ use std::time::Duration;
 use clamp::{Capability, GamutClamp, NvApiClamp};
 use types::ClampMode;
 
-/// Session-local mutex shared by every long-running mode (they all own the
-/// control pipe and the hotkeys).
-const INSTANCE_MUTEX: &str = "Local\\recall-hdr-controller";
+/// How long a scripted start (`--record`, the Run key, an install) waits for a controller
+/// that is still quitting before it gives up.
+const RESTART_WAIT: Duration = Duration::from_secs(5);
+
+const USAGE: &str = "usage: recall-hdr [--record|--record-only|--legacy-hdr|--record-tray-smoke|--probe|--clamp-test|--restore|--help] (no args = record mode; a second start opens the Recall window)";
 
 fn main() {
     let arg = std::env::args().nth(1);
@@ -89,18 +95,23 @@ fn main() {
     if !matches!(arg, "" | "--record" | "--record-only" | "--legacy-hdr" | "--record-tray-smoke") {
         attach_parent_console();
     }
+    if matches!(arg, "--help" | "-h" | "/?") {
+        println!("{USAGE}");
+        std::process::exit(0);
+    }
     logging::init();
     log!("command: {}", if arg.is_empty() { "(record mode)" } else { arg });
 
     let code = match arg {
-        "" | "--record" | "--record-only" => single_instance(record_app::run),
-        "--legacy-hdr" => single_instance(app::run),
+        "" => single_instance(record_app::run, Launch::ByHand),
+        "--record" | "--record-only" => single_instance(record_app::run, Launch::Scripted),
+        "--legacy-hdr" => single_instance(app::run, Launch::Scripted),
         "--record-tray-smoke" => record_session::run_tray_smoke(),
         "--probe" => cmd_probe(),
         "--clamp-test" => cmd_clamp_test(),
         "--restore" => cmd_restore(),
         other => {
-            log!("unknown arg '{other}'. usage: recall-hdr [--record|--record-only|--legacy-hdr|--record-tray-smoke|--probe|--clamp-test|--restore] (no args = record mode)");
+            log!("unknown arg '{other}'. {USAGE}");
             2
         }
     };
@@ -113,42 +124,66 @@ fn attach_parent_console() {
     let _ = unsafe { AttachConsole(ATTACH_PARENT_PROCESS) };
 }
 
-/// Run `mode` unless another controller already holds the instance mutex, in
-/// which case exit quietly (0).
-fn single_instance(mode: fn() -> i32) -> i32 {
-    match acquire_instance(INSTANCE_MUTEX) {
-        Some(true) => mode(),
-        Some(false) => {
+/// How this controller was started, which decides what a second start does.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Launch {
+    /// No arguments: a person opened the program. A second start shows the Recall window.
+    ByHand,
+    /// `--record` and friends: the Run key, the app, an install. A second start waits briefly
+    /// for a controller that is quitting, then exits quietly.
+    Scripted,
+}
+
+/// What to do after the claim.
+#[derive(Debug, PartialEq)]
+enum Next {
+    Run,
+    RunUnguarded,
+    OpenWindowAndExit,
+    Exit,
+}
+
+fn next_step(claim: &single_instance::Claim, launch: Launch) -> Next {
+    match (claim, launch) {
+        (single_instance::Claim::First(_), _) => Next::Run,
+        (single_instance::Claim::Unavailable(_), _) => Next::RunUnguarded,
+        (single_instance::Claim::Taken, Launch::ByHand) => Next::OpenWindowAndExit,
+        (single_instance::Claim::Taken, Launch::Scripted) => Next::Exit,
+    }
+}
+
+/// Runs `mode` as the one controller. A second controller never starts a recorder: started by
+/// hand it opens (or focuses) the Recall window and exits 0; started by a script it exits 0.
+fn single_instance(mode: fn() -> i32, launch: Launch) -> i32 {
+    let name = single_instance::mutex_name(single_instance::CONTROLLER);
+    let claim = match launch {
+        Launch::ByHand => single_instance::claim(&name),
+        Launch::Scripted => single_instance::claim_within(&name, RESTART_WAIT),
+    };
+    match next_step(&claim, launch) {
+        // `claim` holds the guard until the process exits.
+        Next::Run => mode(),
+        Next::RunUnguarded => {
+            if let single_instance::Claim::Unavailable(code) = claim {
+                log!("single-instance mutex unavailable (error {code}); continuing without it");
+            }
+            mode()
+        }
+        Next::OpenWindowAndExit => {
+            let shown = record_tray::RecallUi::from_current_exe().open();
+            if shown.is_empty() {
+                log!("another Recall controller is already running; started the Recall window; exiting");
+            } else {
+                log!("another Recall controller is already running; brought the Recall window to the front; exiting");
+            }
+            0
+        }
+        Next::Exit => {
             log!("another Recall controller is already running; exiting");
             0
         }
-        None => {
-            log!("single-instance mutex unavailable; continuing without it");
-            mode()
-        }
     }
 }
-
-/// Create/open the named mutex. `Some(true)` = we are the first instance (the
-/// handle is leaked on purpose: it lives exactly as long as the process),
-/// `Some(false)` = it already existed, `None` = the call failed.
-fn acquire_instance(name: &str) -> Option<bool> {
-    // Raw kernel32 import: the windows-rs CreateMutexW binding sits behind the
-    // Win32_Security feature, which this crate does not enable.
-    #[link(name = "kernel32")]
-    extern "system" {
-        fn CreateMutexW(attributes: *const std::ffi::c_void, initial_owner: i32, name: *const u16) -> *mut std::ffi::c_void;
-        fn GetLastError() -> u32;
-    }
-    const ERROR_ALREADY_EXISTS: u32 = 183;
-    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    let handle = unsafe { CreateMutexW(std::ptr::null(), 0, wide.as_ptr()) };
-    if handle.is_null() {
-        return None;
-    }
-    Some(unsafe { GetLastError() } != ERROR_ALREADY_EXISTS)
-}
-
 /// Read-only probe: report NvAPI reachability + current CSC state.
 fn cmd_probe() -> i32 {
     log!("--- PROBE (read-only) ---");
@@ -287,10 +322,23 @@ mod tests {
     use super::*;
 
     #[test]
-    fn second_acquire_of_the_instance_mutex_reports_already_running() {
+    fn a_second_controller_never_runs_a_recorder() {
+        use single_instance::Claim;
         // A test-unique name: never the real controller's mutex.
         let name = format!("Local\\recall-hdr-test-{}", std::process::id());
-        assert_eq!(acquire_instance(&name), Some(true), "first instance");
-        assert_eq!(acquire_instance(&name), Some(false), "second launch sees it");
+        let first = single_instance::claim(&name);
+        assert_eq!(next_step(&first, Launch::Scripted), Next::Run, "first instance records");
+        let second = single_instance::claim(&name);
+        assert_eq!(next_step(&second, Launch::ByHand), Next::OpenWindowAndExit, "by hand: show the window");
+        assert_eq!(next_step(&second, Launch::Scripted), Next::Exit, "scripted: exit quietly");
+        assert_eq!(next_step(&Claim::Unavailable(5), Launch::Scripted), Next::RunUnguarded);
+        drop(first);
+        assert_eq!(next_step(&single_instance::claim(&name), Launch::ByHand), Next::Run, "a crashed or quit controller never blocks");
+    }
+
+    #[test]
+    fn the_controller_keeps_the_name_older_builds_hold() {
+        // An install replaces a running older controller: both must see the same mutex.
+        assert_eq!(single_instance::CONTROLLER, "recall-hdr-controller");
     }
 }

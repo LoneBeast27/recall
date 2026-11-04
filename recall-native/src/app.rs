@@ -8,7 +8,9 @@ use gpui::{
 
 use crate::{assets::Assets, offscreen, root::Root};
 
-pub fn run() -> Result<(), String> {
+/// `instance` is the single-instance guard; it is let go when the window closes, so a new start
+/// opens a window while this process only finishes a running export.
+pub fn run(instance: Option<crate::instance::Guard>) -> Result<(), String> {
     let offscreen = offscreen::enabled();
     if offscreen {
         offscreen::quiet_errors();
@@ -65,7 +67,9 @@ pub fn run() -> Result<(), String> {
             cx.activate(true);
         }
     });
-    // The window is gone. Helpers end with this process, so a running export finishes first.
+    // The window is gone: a new start may open one now. Helpers end with this process, so a
+    // running export finishes first.
+    drop(instance);
     crate::backend::wait_for_export();
     crate::services::storage::close_helpers();
     Ok(())
