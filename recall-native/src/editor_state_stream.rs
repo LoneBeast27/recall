@@ -141,6 +141,9 @@ impl EditorState {
             let full = media.fill.target().to_string_lossy().into_owned();
             if let Some(clip) = self.info.as_ref().map(|info| info.path.clone()) {
                 crate::trace::player_event("full resolution takes over from the light copy", serde_json::json!({ "at": self.position() }));
+                // The streamed open already names the fill's target as the playback path: without
+                // this the swap returns early, the light copy stays, and this repeats every tick.
+                self.playback_path = None;
                 self.on_video_cached(&clip, &full);
             }
             return true;
