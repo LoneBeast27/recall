@@ -86,3 +86,30 @@ fn an_export_in_progress_freezes_the_plan_it_was_given() {
     ed.tick_pre_encode();
     assert_eq!(ed.pre.current, opened, "no re-key (and no cancel) while Export waits on the pre-encode");
 }
+
+#[test]
+fn a_pre_encode_needs_a_settled_edit_and_a_free_gpu() {
+    assert!(may_start(true, false, false, true), "settled, GPU free, nothing running or prepared");
+    assert!(!may_start(false, false, false, true), "the edit has not settled");
+    assert!(!may_start(true, true, false, true), "recording, or no recorder to tell whether a game runs");
+    assert!(!may_start(true, false, true, true), "one pre-encode at a time");
+    assert!(!may_start(true, false, false, false), "already prepared or failed for this plan");
+}
+
+#[test]
+fn without_the_recorder_the_gpu_is_held() {
+    let _slot = crate::services::pre_encode::test_slot_lock();
+    // Test processes have no recorder connection and no RECALL_NO_CONTROLLER: light copies and
+    // pre-encodes both wait.
+    crate::services::storage::set_recorder_connected(false);
+    if std::env::var_os("RECALL_NO_CONTROLLER").is_none() {
+        assert!(!crate::services::storage::gpu_work_allowed());
+        assert!(gpu_held());
+    }
+    crate::services::storage::set_recorder_connected(true);
+    if !crate::services::storage::recorder_busy() {
+        assert!(!gpu_held(), "connected and idle: the pre-encode may run");
+    }
+    crate::services::storage::set_recorder_connected(false);
+}
+
