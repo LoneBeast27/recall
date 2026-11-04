@@ -49,9 +49,10 @@ fn user_config_without_recording_sections_gets_defaults() {
     assert_eq!(cfg.recording, RecordingCfg::default());
     assert_eq!(cfg.overlay, OverlayCfg::default());
     assert!(!cfg.behavior.hdr_auto, "hdr_auto defaults off");
-    assert_eq!(cfg.recording.output_dir, r"V:\ALL RECORDINGS");
+    let videos = std::path::Path::new(&cfg.recording.output_dir);
+    assert!(videos.ends_with("Recall") && videos.is_absolute(), "Videos\\Recall, got {videos:?}");
     assert_eq!(cfg.recording.buffer_secs, 120);
-    assert_eq!(cfg.recording.cpu_mask, "ffff0000");
+    assert_eq!(cfg.recording.cpu_mask, "auto", "no machine-specific CPUs by default");
 }
 
 #[test]
@@ -153,6 +154,7 @@ fn cpu_mask_parses_with_or_without_prefix() {
     assert_eq!(parse_cpu_mask("ffff0000"), Ok(0xffff_0000));
     assert_eq!(parse_cpu_mask("0xFFFF0000"), Ok(0xffff_0000));
     assert!(parse_cpu_mask("0").is_err());
+    assert_eq!(parse_cpu_mask(" Auto "), Ok(crate::record_config::AUTO_CPU_MASK));
     assert!(parse_cpu_mask("").is_err());
 }
 
@@ -180,9 +182,9 @@ fn defaults_for_the_hotkey_features_and_quality() {
     assert_eq!(HotkeysCfg::default().leader, "Alt+Backquote");
     assert_eq!((rec.codec.as_str(), rec.fps, rec.bitrate_mbps, rec.quality.as_str()), ("h264", 60, 25, "balanced"));
     assert_eq!(rec.voice_app, "", "voice track off by default");
+    assert_eq!((rec.mic_device.as_str(), rec.mic_enabled, rec.desktop_audio_device.as_str()), ("", true, ""), "Windows default devices, mic on");
     assert_eq!(StorageCfg::default().cap_gb, 0, "auto-clean off by default");
     assert!(validate(&Config::default()).is_ok(), "defaults never collide (incl. Alt+M)");
-    assert_eq!((rec.mic_device.as_str(), rec.mic_enabled, rec.desktop_audio_device.as_str()), ("", true, ""), "Windows default devices, mic on");
     assert_eq!(rec.save_seconds(0), 120, "0 = full buffer");
     assert_eq!(rec.save_seconds(30), 30);
     assert_eq!(rec.save_seconds(900), 120, "never more than the buffer");
@@ -196,9 +198,9 @@ fn every_new_key_patches_saves_and_reloads() {
         "recording": {
             "bookmark_hotkey": "Ctrl+F7", "screenshot_hotkey": "", "record_hotkey": "Ctrl+F8",
             "codec": "hevc", "fps": 120, "bitrate_mbps": 50, "quality": "quality", "voice_app": "Discord.exe",
+            "mic_device": "Microphone (3- RODECaster Duo Chat)", "mic_enabled": false, "desktop_audio_device": "Game (RØDECaster)",
             "save_hotkeys": [{"hotkey": "Alt+N", "seconds": 0}, {"hotkey": "Alt+J", "seconds": 15}, {"hotkey": "Alt+L", "seconds": 60}]
         },
-            "mic_device": "Microphone (3- RODECaster Duo Chat)", "mic_enabled": false, "desktop_audio_device": "Game (RØDECaster)",
         "storage": {"cap_gb": 500},
         "hotkeys": {"advanced_enabled": false, "leader": "Ctrl+F12", "save_seconds": 45, "window_ms": 2000}
     });
@@ -208,9 +210,9 @@ fn every_new_key_patches_saves_and_reloads() {
     for key in [
         "recording.bookmark_hotkey", "recording.screenshot_hotkey", "recording.record_hotkey", "recording.codec",
         "recording.fps", "recording.bitrate_mbps", "recording.quality", "recording.voice_app",
+        "recording.mic_device", "recording.mic_enabled", "recording.desktop_audio_device",
         "recording.save_hotkeys", "storage.cap_gb", "hotkeys.advanced_enabled", "hotkeys.leader",
         "hotkeys.save_seconds", "hotkeys.window_ms",
-        "recording.mic_device", "recording.mic_enabled", "recording.desktop_audio_device",
     ] {
         assert!(out.touched(key), "{key} not reported as changed: {:?}", out.changed);
     }
@@ -222,10 +224,10 @@ fn every_new_key_patches_saves_and_reloads() {
     assert_eq!(back.recording.save_hotkeys[2], SaveHotkey { hotkey: "Alt+L".into(), seconds: 60 });
     assert_eq!(back.recording.screenshot_hotkey, "", "empty = off survives");
     assert_eq!(back.storage.cap_gb, 500);
-    assert_eq!(back.hotkeys, HotkeysCfg { advanced_enabled: false, leader: "Ctrl+F12".into(), save_seconds: 45, window_ms: 2000 });
-    let _ = std::fs::remove_dir_all(store.path().parent().unwrap());
     assert_eq!(back.recording.mic_device, "Microphone (3- RODECaster Duo Chat)", "non-ASCII device names survive TOML");
     assert_eq!(back.recording.desktop_audio_device, "Game (RØDECaster)");
+    assert_eq!(back.hotkeys, HotkeysCfg { advanced_enabled: false, leader: "Ctrl+F12".into(), save_seconds: 45, window_ms: 2000 });
+    let _ = std::fs::remove_dir_all(store.path().parent().unwrap());
 }
 
 #[test]
@@ -238,10 +240,10 @@ fn new_keys_reject_bad_values() {
         (json!({"recording":{"bitrate_mbps":0}}), "recording.bitrate_mbps"),
         (json!({"recording":{"quality":"max"}}), "recording.quality"),
         (json!({"recording":{"voice_app":"C:\\Apps\\Discord.exe"}}), "recording.voice_app"),
-        (json!({"recording":{"save_hotkeys": nine}}), "at most 8"),
-        (json!({"recording":{"save_hotkeys":[{"hotkey":"Alt+N","seconds":9999}]}}), "seconds"),
         (json!({"recording":{"mic_device":"Mic\u{7}Two"}}), "recording.mic_device"),
         (json!({"recording":{"desktop_audio_device":"x".repeat(300)}}), "recording.desktop_audio_device"),
+        (json!({"recording":{"save_hotkeys": nine}}), "at most 8"),
+        (json!({"recording":{"save_hotkeys":[{"hotkey":"Alt+N","seconds":9999}]}}), "seconds"),
         (json!({"recording":{"save_hotkeys":[{"hotkey":"","seconds":0}]}}), "must not be empty"),
         (json!({"recording":{"save_hotkeys":[{"hotkey":"Alt+Q","seconds":0},{"hotkey":"alt+q","seconds":5}]}}), "must differ"),
         (json!({"recording":{"bookmark_hotkey":"Alt+N"}}), "must differ"),
@@ -357,4 +359,7 @@ fn cpu_mask_fits_the_machine() {
     assert_eq!(fit_cpu_mask(0xffff_0000, 0xffff), Some(0xff00), "16 threads: high half");
     assert_eq!(fit_cpu_mask(0xffff_0000, 0xff), Some(0xf0), "8 threads: high half");
     assert_eq!(fit_cpu_mask(0xffff_0000, 0xf), None, "4 threads: no pin");
+    let auto = crate::record_config::AUTO_CPU_MASK;
+    assert_eq!(fit_cpu_mask(auto, 0xffff_ffff), Some(0xffff_0000), "auto, 32 threads: high half");
+    assert_eq!(fit_cpu_mask(auto, 0xfff), Some(0xfc0), "auto, 12 threads: high half");
 }

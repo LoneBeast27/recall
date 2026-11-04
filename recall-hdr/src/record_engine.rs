@@ -350,7 +350,7 @@ mod tests {
         assert_eq!(get(&win, "RECALL_CAPTURE_NAME").as_deref(), Some("VALORANT"));
         assert_eq!(get(&win, "RECALL_AUDIO_GAME_PID").as_deref(), Some("42"));
         assert_eq!(get(&win, "RECALL_BUFFER_SECS").as_deref(), Some("120"));
-        assert_eq!(get(&win, "RECALL_OUT_DIR").as_deref(), Some(r"V:\ALL RECORDINGS"));
+        assert_eq!(get(&win, "RECALL_OUT_DIR"), Some(rec.output_dir.clone()));
         let desk = engine_env(&EngineTarget::Desktop, &rec, None);
         assert_eq!(get(&desk, "RECALL_CPU_MASK"), None, "unapplied mask is not passed (engine would exit)");
         assert_eq!(get(&desk, "RECALL_CAPTURE_HWND"), None, "removed, not inherited");

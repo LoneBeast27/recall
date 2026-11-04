@@ -30,7 +30,7 @@ fn default_roundtrips_through_toml() {
 fn default_values_match_frozen_schema() {
     let c = Config::default();
     assert_eq!(c.version, 1);
-    assert_eq!(c.display.target_friendly_name, "PG27AQDP");
+    assert_eq!(c.display.target_friendly_name, "", "empty = the primary display");
     assert_eq!(c.display.target_device_path, None);
     assert_eq!(c.behavior.default_game_class, RuleKind::SdrGame);
     assert_eq!(c.behavior.default_clamp, ClampMode::Punchy);
