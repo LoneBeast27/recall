@@ -7,7 +7,7 @@
 //! Made at idle only (the planner's [`super::prefetch`] light step, and right after a fresh
 //! clip is adopted from the recorder's SSD copy, `kept.rs`), never while the recorder works.
 //! The encoder is a hidden ffmpeg at below-normal priority, very low I/O priority, pinned to
-//! the upper half of the CPUs, decoding on the GPU. Reading a hard drive, it stops the moment
+//! the upper half of the CPUs, decoding on the GPU through D3D11. Reading a hard drive, it stops the moment
 //! on-demand work queues on that drive's lane; the item is tried again later.
 //!
 //! Units count in the video tier as `light/<id>.mp4` (`budget.rs`): score-ranked and evicted
@@ -45,7 +45,13 @@ pub(super) fn light_in(root: &Path, source: &Path) -> Option<String> {
 /// The encoder's arguments: `input` to `output`, video only, timestamps kept (the editor swaps
 /// between this and the original at the same times).
 pub(super) fn arguments(input: &Path, output: &Path) -> Vec<String> {
-    let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-y", "-hwaccel", "cuda", "-i"].map(String::from).to_vec();
+    // Decode on the GPU through D3D11: NVDEC (`-hwaccel cuda`) rejects recorder clips here
+    // (cuvidCreateDecoder: CUDA_ERROR_INVALID_VALUE on 1440p60 H.264 Main, FFmpeg 7.1.1 on an
+    // RTX 5090) and FFmpeg fell back to the CPU: 74 s of CPU for a 2:00 clip, 27 s with D3D11.
+    // Frames come back to system memory: keeping them on the GPU (`-hwaccel_output_format
+    // d3d11`) ran out of surfaces and silently ended the copy early. Where D3D11 decode is not
+    // there, FFmpeg decodes on at most 4 CPU threads.
+    let mut args: Vec<String> = ["-hide_banner", "-loglevel", "error", "-y", "-hwaccel", "d3d11va", "-threads", "4", "-i"].map(String::from).to_vec();
     args.push(input.to_string_lossy().into_owned());
     args.extend(
         [

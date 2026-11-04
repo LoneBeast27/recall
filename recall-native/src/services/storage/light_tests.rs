@@ -14,7 +14,7 @@ fn scratch(tag: &str) -> PathBuf {
 fn a_light_copy_is_full_size_hevc_at_ten_megabits_without_sound() {
     let args = arguments(Path::new(r"V:\clips\a.mp4"), Path::new(r"C:\cache\light\x.mp4.part"));
     let joined = args.join(" ");
-    for wanted in ["-hwaccel cuda", "-c:v hevc_nvenc", "-b:v 10M", "-maxrate 12500k", "-fps_mode passthrough", "-an", "-map 0:v:0"] {
+    for wanted in ["-hwaccel d3d11va", "-threads 4", "-c:v hevc_nvenc", "-b:v 10M", "-maxrate 12500k", "-fps_mode passthrough", "-an", "-map 0:v:0"] {
         assert!(joined.contains(wanted), "{wanted} missing: {joined}");
     }
     assert!(!joined.contains("scale"), "kept at the clip's own resolution (the crosshair survives): {joined}");
