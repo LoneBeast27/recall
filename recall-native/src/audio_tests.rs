@@ -182,6 +182,21 @@ fn detached_mixer(clock_seconds: f64) -> (AudioMixer, mpsc::Receiver<Command>) {
 }
 
 #[test]
+fn a_mute_set_while_the_tracks_load_is_queued_not_dropped() {
+    // 2026-11-04: set_audio refused until ready, so a mute pressed while the Mic track loaded
+    // showed as muted in the editor but still played.
+    let (mixer, rx) = detached_mixer(5.0);
+    mixer.shared.ready.store(false, Ordering::Release);
+    mixer.set_audio(2, -6.0, true).unwrap();
+    match rx.try_recv() {
+        Ok(Command::SetAudio { stream_index, gain_db, muted }) => assert_eq!((stream_index, gain_db, muted), (2, -6.0, true)),
+        _ => panic!("the mute must be queued for the worker"),
+    }
+    *mixer.shared.error.lock().unwrap() = Some("broken".into());
+    assert!(mixer.set_audio(2, 0.0, false).is_err(), "a failed preview still reports its error");
+}
+
+#[test]
 fn a_queued_seek_reads_as_done_until_the_worker_catches_up() {
     // 2026-10-30: play pressed at the end ran "seek to start, play" back to back; play read the
     // old clock (the seek still queued) and put the picture back at the end.
