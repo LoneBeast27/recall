@@ -264,6 +264,7 @@ fn run(
                                 cfg.json,
                                 &format!("encoder up: {} {}x{}", e.backend, e.width, e.height),
                             );
+                            let _ = crate::gpu_frames::adapter::vram_line("encoder open").inspect(|l| report(cfg.json, l));
                             Some(e)
                         }
                         Err(e) => {
@@ -402,7 +403,7 @@ fn try_open(
     // for the mp4 sample entry instead of being repeated in-band.
     ctx.set_flags(ff::codec::Flags::GLOBAL_HEADER);
     let mut opts = ff::Dictionary::new();
-    for (key, value) in cfg.quality.nvenc_options() {
+    for (key, value) in cfg.quality.for_gpu(crate::gpu_frames::adapter::low_end()).nvenc_options() {
         opts.set(key, value);
     }
     ctx.open_with(opts).map_err(|e| e.to_string())

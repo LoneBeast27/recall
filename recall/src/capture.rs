@@ -1,7 +1,8 @@
 //! Windows.Graphics.Capture pipeline for Recall.
 //!
-//! Captures a window or monitor in `Rgba16F` (scRGB-linear; carries HDR) on a
-//! dedicated thread. Recording takes the zero-copy path (`gpu_frames`): each frame is
+//! Captures a window or monitor on a dedicated thread: `Bgra8` while the zero-copy path
+//! records an SDR display (half the memory traffic of fp16), `Rgba16F` (scRGB-linear;
+//! carries HDR) for HDR, the CPU fallback and the dump harness (`CaptureShared::wants_fp16`). Recording takes the zero-copy path (`gpu_frames`): each frame is
 //! tonemapped on the capture device into an FFmpeg D3D11 frame and handed to the encoder,
 //! with no CPU readback. When that path cannot start (or `RECALL_DUMP*` asks for fp16
 //! pixels) the frame is read back to the CPU and parked in a shared slot for the render
@@ -92,6 +93,13 @@ pub struct CaptureShared {
     /// Set once by the engine before capture starts; without it frames take the CPU path.
     #[cfg(feature = "encode")]
     pub gpu_sink: OnceLock<GpuSink>,
+    /// The running capture delivers `Rgba16F` (false: `Bgra8`).
+    pub fp16: AtomicBool,
+    /// A `Bgra8` frame could not take the GPU path: the engine restarts capture in fp16.
+    pub need_fp16: AtomicBool,
+    /// First WGC timestamp of the engine run, kept across capture restarts so PTS never
+    /// jumps back.
+    origin: Mutex<Option<i64>>,
 }
 
 impl CaptureShared {
@@ -109,7 +117,28 @@ impl CaptureShared {
             window: AtomicUsize::new(0),
             #[cfg(feature = "encode")]
             gpu_sink: OnceLock::new(),
+            fp16: AtomicBool::new(true),
+            need_fp16: AtomicBool::new(false),
+            origin: Mutex::new(None),
         })
+    }
+
+    /// The capture format the next start should use: fp16 for HDR (tonemap mode), for the
+    /// CPU fallback and the dump harness (they read 8-byte pixels), else `Bgra8`.
+    /// `RECALL_CAPTURE_FP16=1` forces fp16.
+    pub fn wants_fp16(&self) -> bool {
+        !crate::gpu_route::gpu_path_possible()
+            || self.mode.load(Relaxed) == MODE_TONEMAP
+            || self.need_fp16.load(Relaxed)
+            || std::env::var_os("RECALL_CAPTURE_FP16").is_some_and(|v| v == "1")
+    }
+
+    /// Picks the format for a capture start and records it in `fp16`.
+    fn start_format(&self) -> ColorFormat {
+        let fp16 = self.wants_fp16();
+        self.fp16.store(fp16, Relaxed);
+        eprintln!("[recall] capture format {}", if fp16 { "Rgba16F" } else { "Bgra8" });
+        if fp16 { ColorFormat::Rgba16F } else { ColorFormat::Bgra8 }
     }
 
     /// Current capture timeline, including time since the latest delivered frame.
@@ -187,7 +216,6 @@ const DUMP_AT_FRAME: u64 = 30;
 pub struct Handler {
     shared: Arc<CaptureShared>,
     frame_count: u64,
-    timestamp_origin: Option<i64>,
     /// When set (via `RECALL_DUMP`), write one verification PNG then clear it.
     dump_path: Option<String>,
     /// When set (via `RECALL_DUMP_EVERY=<secs>`), write a sequenced PNG every
@@ -222,7 +250,6 @@ impl GraphicsCaptureApiHandler for Handler {
         Ok(Self {
             shared: ctx.flags,
             frame_count: 0,
-            timestamp_origin: None,
             dump_path,
             dump_every,
             last_dump: std::time::Instant::now(),
@@ -240,7 +267,10 @@ impl GraphicsCaptureApiHandler for Handler {
     ) -> Result<(), Self::Error> {
         let (width, height) = (frame.width(), frame.height());
         let timestamp = frame.timestamp()?.Duration;
-        let origin = *self.timestamp_origin.get_or_insert(timestamp);
+        let origin = match self.shared.origin.lock() {
+            Ok(mut origin) => *origin.get_or_insert(timestamp),
+            Err(_) => timestamp,
+        };
         let pts_us = (timestamp.saturating_sub(origin).max(0) as u64) / 10;
         if let Ok(mut timeline) = self.shared.timeline.lock() {
             *timeline = Some((pts_us, std::time::Instant::now()));
@@ -250,6 +280,12 @@ impl GraphicsCaptureApiHandler for Handler {
 
         #[cfg(feature = "encode")]
         if self.dump_path.is_none() && self.dump_every.is_none() && self.gpu_frame(frame, pts_us, crop, canvas) {
+            return Ok(());
+        }
+        if !self.shared.fp16.load(Relaxed) {
+            // The CPU path reads 8-byte fp16 pixels: drop Bgra8 frames until the engine
+            // restarts capture in fp16 (app_tick `restart_capture_if_needed`).
+            self.shared.need_fp16.store(true, Relaxed);
             return Ok(());
         }
         self.shared.path.store(PATH_CPU, Relaxed);
@@ -322,6 +358,7 @@ pub fn start_monitor(
         Some(i) => Monitor::from_index(i)?,
         None => Monitor::primary()?,
     };
+    let format = shared.start_format();
     let start = |interval| {
         Handler::start_free_threaded(Settings::new(
             monitor,
@@ -330,7 +367,7 @@ pub fn start_monitor(
             SecondaryWindowSettings::Default,
             interval,
             DirtyRegionSettings::Default,
-            ColorFormat::Rgba16F,
+            format,
             shared.clone(),
         ))
     };
@@ -380,11 +417,12 @@ pub fn start_window(hwnd: usize, shared: Arc<CaptureShared>) -> Result<CaptureCo
     shared.window.store(hwnd, Relaxed);
     crate::border::request_borderless();
     let window = windows_capture::window::Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
+    let format = shared.start_format();
     let start = |interval| {
         Handler::start_free_threaded(Settings::new(
             window, CursorCaptureSettings::WithoutCursor, DrawBorderSettings::WithoutBorder,
             SecondaryWindowSettings::Default, interval,
-            DirtyRegionSettings::Default, ColorFormat::Rgba16F, shared.clone(),
+            DirtyRegionSettings::Default, format, shared.clone(),
         ))
     };
     with_rate_cap(start)
