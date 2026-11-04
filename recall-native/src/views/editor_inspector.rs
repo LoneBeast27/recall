@@ -50,7 +50,8 @@ impl Root {
             let setting = self.ed.setting(track.stream_index).cloned();
             let gain = setting.as_ref().map_or(0.0, |s| s.gain_db);
             let muted = setting.as_ref().is_some_and(|s| s.muted);
-            let in_mix = setting.as_ref().is_none_or(|s| s.mix);
+            let in_mix = setting.as_ref().map_or_else(|| track.default_setting().mix, |s| s.mix);
+            let hint = self.ed.mix_hint(index);
             let name = track_name(&track.name, index);
             let detail = format!("{} · {} kHz", channels(track.channels), track.sample_rate as f32 / 1000.0);
             let span = self.ed.gain_spans.get(index).cloned();
@@ -146,7 +147,8 @@ impl Root {
                                 this.ed.toggle_mix(index);
                                 cx.notify();
                             }))),
-                    ),
+                    )
+                    .children(hint.map(|hint| div().text_size(px(12.)).line_height(px(16.)).text_color(c(theme::WARNING)).child(hint))),
             );
         }
         column.into_any_element()

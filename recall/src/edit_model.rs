@@ -1,7 +1,7 @@
 //! Nondestructive single-clip project and prepared-media protocol.
 //!
 //! Compiled into both `recall` and `recall-native` (via `#[path]`), so it stays
-//! dependency-free beyond serde, and every field added after v1 carries a serde
+//! dependency-free beyond serde and serde_json, and every field added after v1 carries a serde
 //! default so older project files and caches keep loading.
 use serde::{Deserialize, Serialize};
 
@@ -155,6 +155,46 @@ impl ExportSettings {
 pub struct AudioTrackInfo {
     pub stream_index: usize, pub name: String, pub channels: u16,
     pub sample_rate: u32, pub preview_path: String, pub waveform: Vec<f32>,
+    /// Where the recorder took this track from (`SOURCE_*`, `app:<exe>`), from the clip's
+    /// `AUDIO_SOURCES_TAG`; "" for clips without it (older recordings, other apps' files).
+    #[serde(default)]
+    pub source: String,
+}
+
+/// File-level MP4 tag (written with `movflags=use_metadata_tags`) naming each audio track's
+/// source as a JSON array, in audio-stream order. MP4 keeps no custom per-stream tags, only
+/// `handler_name`, which stays the track's name.
+#[allow(dead_code)]
+pub const AUDIO_SOURCES_TAG: &str = "recall_audio_sources";
+/// The game's own process tree (process loopback).
+#[allow(dead_code)]
+pub const SOURCE_GAME_PROCESS: &str = "game-process";
+/// Everything an output plays (endpoint loopback): holds every app, captured ones too.
+#[allow(dead_code)]
+pub const SOURCE_DESKTOP: &str = "desktop-loopback";
+#[allow(dead_code)]
+pub const SOURCE_MIC: &str = "mic";
+#[allow(dead_code)]
+pub const SOURCE_VOICE: &str = "voice-app";
+/// `app:<exe>`: an app the person chose to record as its own track.
+#[allow(dead_code)]
+pub const APP_SOURCE_PREFIX: &str = "app:";
+
+/// The sources in a clip's `AUDIO_SOURCES_TAG`; empty when it is missing or unreadable.
+#[allow(dead_code)]
+pub fn parse_audio_sources(tag: Option<&str>) -> Vec<String> {
+    tag.and_then(|t| serde_json::from_str::<Vec<String>>(t).ok()).unwrap_or_default()
+}
+
+#[allow(dead_code)] // the editor (recall-native) reads these; the engine tests use them
+impl AudioTrackInfo {
+    /// An app the person recorded as its own track (it is also inside Desktop audio).
+    pub fn is_app(&self) -> bool { self.source.starts_with(APP_SOURCE_PREFIX) }
+    /// The editor's starting setting: in the mix, except app tracks, which Desktop audio
+    /// (or the game) already carries. Clips without sources keep everything in the mix.
+    pub fn default_setting(&self) -> AudioSetting {
+        AudioSetting { stream_index: self.stream_index, gain_db: 0.0, muted: false, mix: !self.is_app() }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -172,6 +212,15 @@ pub struct ClipInfo {
 impl ClipInfo {
     /// The keyframe a lossless cut starting at `seconds` begins on.
     pub fn snap_to_keyframe(&self, seconds: f64) -> f64 { snap_to_keyframe(&self.keyframes, seconds) }
+    /// The game track recorded an output (Desktop mode), so it already holds every app.
+    pub fn desktop_loopback(&self) -> bool { self.audio.iter().any(|t| t.source == SOURCE_DESKTOP) }
+    /// The line under a track's mix switch, when mixing it would play it twice.
+    pub fn mix_hint(&self, stream_index: usize, mix: bool) -> Option<&'static str> {
+        let app = self.audio.iter().any(|t| t.stream_index == stream_index && t.is_app());
+        (mix && app && self.desktop_loopback()).then_some("This app is also in Desktop audio, so mixing it doubles it.")
+    }
+    /// Every track's starting setting (`AudioTrackInfo::default_setting`).
+    pub fn default_audio(&self) -> Vec<AudioSetting> { self.audio.iter().map(AudioTrackInfo::default_setting).collect() }
 }
 
 /// Last keyframe at or before `seconds` (1 µs tolerance); the first keyframe when
@@ -215,6 +264,30 @@ mod tests {
         assert_eq!(plan(vec![]).audio_outputs(&[1, 2]), vec![AudioOutput::Track(1), AudioOutput::Track(2)], "no setting: untouched");
         let saved: AudioSetting = serde_json::from_str(r#"{"stream_index":1,"gain_db":0.0,"muted":false}"#).unwrap();
         assert!(saved.mix, "edits saved before the choice existed mix by default");
+    }
+
+    fn info(sources: &[&str]) -> ClipInfo {
+        let audio = sources
+            .iter()
+            .enumerate()
+            .map(|(i, s)| AudioTrackInfo { stream_index: i + 1, name: format!("T{i}"), channels: 2, sample_rate: 48_000, preview_path: String::new(), waveform: Vec::new(), source: (*s).into() })
+            .collect();
+        ClipInfo { path: "a.mp4".into(), duration: 1.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio, keyframes: Vec::new() }
+    }
+
+    #[test]
+    fn app_tracks_start_out_of_the_mix_and_untagged_clips_keep_everything_in() {
+        let tagged = info(&[SOURCE_DESKTOP, SOURCE_MIC, "app:a.exe"]);
+        assert_eq!(tagged.default_audio().iter().map(|s| s.mix).collect::<Vec<_>>(), [true, true, false]);
+        assert_eq!(tagged.mix_hint(3, true), Some("This app is also in Desktop audio, so mixing it doubles it."));
+        assert_eq!(tagged.mix_hint(3, false), None, "no hint while it is out of the mix");
+        assert_eq!(tagged.mix_hint(1, true), None, "only app tracks");
+        let game = info(&[SOURCE_GAME_PROCESS, "app:a.exe"]);
+        assert_eq!(game.mix_hint(2, true), None, "a game's own track holds no other app");
+        let old = info(&["", ""]);
+        assert!(old.default_audio().iter().all(|s| s.mix), "clips without sources: today's behaviour");
+        assert_eq!(parse_audio_sources(Some(r#"["desktop-loopback","app:a.exe"]"#)), ["desktop-loopback", "app:a.exe"]);
+        assert!(parse_audio_sources(Some("not json")).is_empty() && parse_audio_sources(None).is_empty());
     }
 
     #[test]

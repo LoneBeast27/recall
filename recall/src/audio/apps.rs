@@ -3,33 +3,41 @@
 //! loopback of the app's process tree (include-tree mode, like the voice track).
 //!
 //! Every chosen app gets its track for the whole recording, running or not, so a
-//! clip's track count and order never depend on which apps were open: a watcher
-//! thread per app finds the app's process (rescanning every 2 s while it is closed),
-//! captures it while it runs, and writes silence by the wall clock whenever the app
-//! is closed or quiet, so the track stays aligned with the others.
+//! clip's track count and order never depend on which apps were open. One scanner
+//! thread lists processes for all closed apps (every 2 s; 5 s while a game is the
+//! target). A watcher thread per app captures it while it runs and keeps the track
+//! level with the wall clock (`Leveller`): silence while the app sends nothing, and
+//! while it plays, drift corrected by at most 0.1%, a frame at a time, never in blocks.
+//! An app that is the game itself stays silent: the Game track already holds it.
 //!
-//! Not done: keeping a captured app out of the desktop track. Process loopback can
-//! exclude only one process tree per stream and ignores the chosen output device,
-//! so an app on its own track is also heard in Desktop audio.
+//! Each track is saved with source `app:<exe>`, so the editor starts it out of the mix.
+//! Not done: keeping a captured app out of Desktop audio. Process loopback can exclude
+//! only one process tree per stream and ignores the chosen output device.
 
 use std::collections::VecDeque;
 use std::ffi::c_void;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
 
-use super::voice::{snapshot_processes, tree_root};
+use super::voice::{snapshot_processes, tree_root, ProcEntry};
 use super::TrackRing;
+
+#[path = "apps_level.rs"]
+mod level;
+pub use level::Leveller;
 
 pub const APPS_ENV: &str = "RECALL_AUDIO_APPS";
 /// Same cap as the Settings list.
 const MAX_APPS: usize = 6;
-/// A closed app is looked for this often.
+/// How often closed apps are looked for: while recording the desktop, and while a game runs.
 const RESCAN: Duration = Duration::from_secs(2);
-/// Silence is written when the track falls this far behind the wall clock.
-const SLACK: Duration = Duration::from_millis(100);
+const RESCAN_IN_GAME: Duration = Duration::from_secs(5);
+/// An app that sends nothing for this long has no active stream: its track gets silence.
+const IDLE: Duration = Duration::from_millis(200);
 
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 pub struct AppSource {
@@ -71,26 +79,73 @@ pub fn parse(json: &str) -> Result<Vec<AppSource>, String> {
     Ok(apps)
 }
 
-/// One ring and one watcher thread per app, in list order.
-pub fn start(apps: &[AppSource], buffer_secs: u32, report: &mut impl FnMut(String)) -> Vec<Arc<TrackRing>> {
+/// One process list shared by every watcher. The scanner thread refreshes it only while
+/// some app is closed (`closed` > 0).
+struct Scanner {
+    latest: Mutex<(u64, Arc<Vec<ProcEntry>>)>,
+    closed: AtomicUsize,
+}
+
+impl Scanner {
+    fn publish(&self, procs: Vec<ProcEntry>) {
+        if let Ok(mut latest) = self.latest.lock() {
+            *latest = (latest.0 + 1, Arc::new(procs));
+        }
+    }
+
+    /// The newest list, when it is newer than `seen`.
+    fn newer(&self, seen: u64) -> Option<(u64, Arc<Vec<ProcEntry>>)> {
+        let latest = self.latest.lock().ok()?;
+        (latest.0 > seen).then(|| (latest.0, Arc::clone(&latest.1)))
+    }
+}
+
+/// One ring and one watcher thread per app, in list order, plus the shared scanner.
+pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, report: &mut impl FnMut(String)) -> Vec<Arc<TrackRing>> {
+    if apps.is_empty() {
+        return Vec::new();
+    }
+    let procs = snapshot_processes().unwrap_or_default();
+    let game_exe = game_pid.and_then(|pid| procs.iter().find(|p| p.pid == pid)).map(|p| p.exe.to_lowercase());
+    let scanner = Arc::new(Scanner { latest: Mutex::new((1, Arc::new(procs))), closed: AtomicUsize::new(0) });
+    let interval = if game_pid.is_some() { RESCAN_IN_GAME } else { RESCAN };
+    let scan = Arc::clone(&scanner);
+    let _ = std::thread::Builder::new().name("recall-app-scan".into()).spawn(move || loop {
+        std::thread::sleep(interval);
+        if scan.closed.load(Ordering::Relaxed) > 0 {
+            scan.publish(snapshot_processes().unwrap_or_default());
+        }
+    });
     let mut out = Vec::new();
     for (n, app) in apps.iter().enumerate() {
-        // Track names are `&'static str` across the engine; an engine run holds at most
-        // MAX_APPS of these for its whole life, so leaking them is bounded.
+        let exe = app.exe.trim().to_owned();
+        // Names and sources are `&'static str` across the engine; an engine run holds at most
+        // MAX_APPS of each for its whole life, so leaking them is bounded.
         let name: &'static str = Box::leak(app.track_name().into_boxed_str());
+        let source: &'static str = Box::leak(format!("{}{exe}", crate::edit_model::APP_SOURCE_PREFIX).into_boxed_str());
+        let is_game = game_exe.as_deref().is_some_and(|g| level::same_exe(g, &exe));
         let (rate, channels) = (48_000u32, 2u16);
         let ring = Arc::new(TrackRing {
             name,
-            endpoint: Mutex::new(format!("{} (not running)", app.exe.trim())),
+            source,
+            endpoint: Mutex::new(format!("{exe} (not running)")),
             rate,
             channels,
             samples: Mutex::new(VecDeque::new()),
             capacity: buffer_secs as usize * rate as usize * channels as usize,
         });
-        let (thread_ring, exe) = (Arc::clone(&ring), app.exe.trim().to_owned());
-        match std::thread::Builder::new().name(format!("recall-app-audio-{n}")).spawn(move || watch(thread_ring, exe)) {
+        let (thread_ring, thread_scanner) = (Arc::clone(&ring), Arc::clone(&scanner));
+        let thread_exe = exe.clone();
+        let spawned = std::thread::Builder::new()
+            .name(format!("recall-app-audio-{n}"))
+            .spawn(move || if is_game { keep_silent(&thread_ring) } else { watch(&thread_ring, &thread_exe, &thread_scanner) });
+        match spawned {
+            Ok(_) if is_game => {
+                report(format!("audio track '{name}' silent: {exe} is the game, already on the Game track"));
+                out.push(ring);
+            }
             Ok(_) => {
-                report(format!("audio track '{name}' up: app {} (silent while it is closed)", app.exe.trim()));
+                report(format!("audio track '{name}' up: app {exe} (silent while it is closed)"));
                 out.push(ring);
             }
             Err(e) => report(format!("audio track '{name}' UNAVAILABLE: {e}")),
@@ -99,39 +154,9 @@ pub fn start(apps: &[AppSource], buffer_secs: u32, report: &mut impl FnMut(Strin
     out
 }
 
-/// Keeps a track level with the wall clock: counts the frames written and says how many
-/// frames of silence are owed once the track falls more than `slack` behind.
-pub struct SilenceClock {
-    rate: u32,
-    written: u64,
-}
-
-impl SilenceClock {
-    pub fn new(rate: u32) -> Self {
-        Self { rate, written: 0 }
-    }
-
-    pub fn wrote(&mut self, frames: u64) {
-        self.written += frames;
-    }
-
-    /// Frames of silence to write now, `elapsed` after the track started.
-    pub fn owed(&mut self, elapsed: Duration, slack: Duration) -> u64 {
-        let due = (elapsed.as_secs_f64() * self.rate as f64) as u64;
-        let slack = (slack.as_secs_f64() * self.rate as f64) as u64;
-        if self.written + slack >= due {
-            return 0;
-        }
-        let owed = due - self.written;
-        self.written = due;
-        owed
-    }
-}
-
-fn pad(ring: &TrackRing, clock: &mut SilenceClock, started: Instant, slack: Duration) {
-    let owed = clock.owed(started.elapsed(), slack);
-    if owed > 0 {
-        ring.push_capture(&vec![0.0; owed as usize * ring.channels as usize], false);
+fn push_silence(ring: &TrackRing, frames: u64) {
+    if frames > 0 {
+        ring.push_capture(&vec![0.0; frames as usize * ring.channels as usize], false);
     }
 }
 
@@ -141,31 +166,44 @@ fn set_endpoint(ring: &TrackRing, text: String) {
     }
 }
 
+/// The game's own exe: the track stays (track count is stable) but holds silence.
+fn keep_silent(ring: &TrackRing) {
+    let started = Instant::now();
+    let mut level = Leveller::new(ring.rate);
+    loop {
+        std::thread::sleep(Duration::from_millis(100));
+        push_silence(ring, level.idle(started.elapsed()));
+    }
+}
+
 /// The app's watcher thread: capture while it runs, silence while it does not.
-fn watch(ring: Arc<TrackRing>, exe: String) {
+fn watch(ring: &TrackRing, exe: &str, scanner: &Scanner) {
     let _ = wasapi::initialize_mta();
     let started = Instant::now();
-    let mut clock = SilenceClock::new(ring.rate);
+    let mut level = Leveller::new(ring.rate);
+    let mut seen = 0;
+    scanner.closed.fetch_add(1, Ordering::Relaxed);
     loop {
-        if let Some(pid) = snapshot_processes().ok().and_then(|procs| tree_root(&procs, &exe)) {
-            set_endpoint(&ring, format!("{exe} pid {pid} (include tree)"));
-            if let Err(e) = capture_while_running(&ring, pid, &mut clock, started) {
-                set_endpoint(&ring, format!("{exe} pid {pid}: {e}"));
-            } else {
-                set_endpoint(&ring, format!("{exe} (closed)"));
+        if let Some((generation, procs)) = scanner.newer(seen) {
+            seen = generation;
+            if let Some(pid) = tree_root(&procs, exe) {
+                scanner.closed.fetch_sub(1, Ordering::Relaxed);
+                set_endpoint(ring, format!("{exe} pid {pid} (include tree)"));
+                match capture_while_running(ring, pid, &mut level, started) {
+                    Ok(()) => set_endpoint(ring, format!("{exe} (closed)")),
+                    Err(e) => set_endpoint(ring, format!("{exe} pid {pid}: {e}")),
+                }
+                scanner.closed.fetch_add(1, Ordering::Relaxed);
             }
         }
-        let until = Instant::now() + RESCAN;
-        while Instant::now() < until {
-            std::thread::sleep(Duration::from_millis(100));
-            pad(&ring, &mut clock, started, Duration::ZERO);
-        }
+        std::thread::sleep(Duration::from_millis(100));
+        push_silence(ring, level.idle(started.elapsed()));
     }
 }
 
 /// Captures `pid`'s process tree until the process exits. Errors end the capture;
 /// the watcher writes silence and looks for the app again.
-fn capture_while_running(ring: &TrackRing, pid: u32, clock: &mut SilenceClock, started: Instant) -> Result<(), String> {
+fn capture_while_running(ring: &TrackRing, pid: u32, level: &mut Leveller, started: Instant) -> Result<(), String> {
     let process = Process::open(pid).ok_or_else(|| format!("open process: {}", std::io::Error::last_os_error()))?;
     let mut client = wasapi::AudioClient::new_application_loopback_client(pid, true).map_err(|e| format!("process loopback: {e}"))?;
     let format = WaveFormat::new(32, 32, &SampleType::Float, ring.rate as usize, ring.channels as usize, None);
@@ -175,17 +213,20 @@ fn capture_while_running(ring: &TrackRing, pid: u32, clock: &mut SilenceClock, s
     let event = client.set_get_eventhandle().map_err(|e| e.to_string())?;
     let capture = client.get_audiocaptureclient().map_err(|e| e.to_string())?;
     client.start_stream().map_err(|e| e.to_string())?;
-    let block = ring.channels as usize * 4;
+    let channels = ring.channels as usize;
+    let block = channels * 4;
     let mut raw: VecDeque<u8> = VecDeque::new();
+    let mut last_sound = Instant::now();
     while !process.exited() {
         if event.wait_for_event(100).is_ok() && capture.read_from_device_to_deque(&mut raw).is_ok() && raw.len() >= block {
             let full = raw.len() - raw.len() % block;
             let samples: Vec<f32> = raw.drain(..full).collect::<Vec<u8>>().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-            clock.wrote((samples.len() / ring.channels as usize) as u64);
-            ring.push_capture(&samples, false);
+            ring.push_capture(&level.live(started.elapsed(), &samples, channels), false);
+            last_sound = Instant::now();
+        } else if last_sound.elapsed() >= IDLE {
+            // No active stream: the app is quiet, so silence up to the clock cuts nothing.
+            push_silence(ring, level.idle(started.elapsed()));
         }
-        // A quiet app may send nothing: keep the track level with the clock.
-        pad(ring, clock, started, SLACK);
     }
     let _ = client.stop_stream();
     Ok(())

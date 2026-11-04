@@ -131,6 +131,7 @@ fn prepare_uncached(
             }
         })
         .collect();
+    let sources = audio_sources(&input);
     // Keyframes ride along the first audio pass; a clip without audio gets its own scan.
     let mut scan = KeyframeScan::for_input(&input);
     let mut audio = Vec::with_capacity(tracks.len());
@@ -145,6 +146,7 @@ fn prepare_uncached(
             sample_rate: PREVIEW_RATE,
             preview_path: file,
             waveform: info.waveform,
+            source: sources.get(ordinal).cloned().unwrap_or_default(),
         });
     }
     let _ = video_index; // kept as an explicit validation that a video stream was selected.
@@ -168,6 +170,12 @@ fn prepare_uncached(
 /// Track label from stream metadata. MP4 keeps no readable per-track `title`,
 /// so Recall names tracks through `handler_name`; FFmpeg's placeholder
 /// handler ("SoundHandler") and blanks are skipped.
+/// Each audio track's source, as the recorder saved it, in audio-stream order (empty for
+/// clips without the tag: older recordings and other apps' files).
+pub(crate) fn audio_sources(input: &ff::format::context::Input) -> Vec<String> {
+    crate::edit_model::parse_audio_sources(input.metadata().get(crate::edit_model::AUDIO_SOURCES_TAG))
+}
+
 pub(crate) fn track_name(metadata: &ff::DictionaryRef) -> Option<String> {
     let usable = |value: &&str| !value.trim().is_empty();
     metadata

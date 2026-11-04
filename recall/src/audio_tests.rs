@@ -7,6 +7,7 @@ use std::sync::Mutex;
 fn test_ring(name: &'static str) -> TrackRing {
     TrackRing {
         name,
+        source: "mic",
         endpoint: Mutex::new(String::new()),
         rate: 1,
         channels: 1,
@@ -85,6 +86,7 @@ fn old_snapshot(ring: &TrackRing, secs: f64) -> Vec<f32> {
 fn slice_snapshot_matches_old_behaviour_across_wraps_and_padding() {
     let ring = TrackRing {
         name: "Game",
+        source: "game-process",
         endpoint: Mutex::new(String::new()),
         rate: 10,
         channels: 2,
@@ -134,6 +136,7 @@ fn bench_full_ring_snapshot() {
         .into_iter()
         .map(|name| TrackRing {
             name,
+            source: "mic",
             endpoint: Mutex::new(String::new()),
             rate,
             channels,

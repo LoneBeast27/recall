@@ -32,6 +32,8 @@ pub(crate) struct AacTrack {
     rate: u32,
     /// Stream `title` + `handler_name` ("Game", "Microphone", "Voice chat").
     title: &'static str,
+    /// Saved in the clip's `edit_model::AUDIO_SOURCES_TAG`.
+    source: &'static str,
     encoder: ff::encoder::Audio,
     /// (pts in 1/rate, packet payload)
     packets: Vec<(i64, Vec<u8>)>,
@@ -166,6 +168,7 @@ pub(crate) fn encode_aac(pcm: &AudioPcm, abort: &AtomicBool) -> Result<AacTrack,
     Ok(AacTrack {
         rate: pcm.rate,
         title: crate::audio::track_title(pcm.name),
+        source: pcm.source,
         encoder: enc,
         packets,
     })
@@ -238,7 +241,15 @@ pub(crate) fn mux_mp4(
         ast.set_time_base(ff::Rational(1, t.rate as i32));
         ast.set_metadata(track_metadata(t.title));
     }
-    octx.write_header()
+    // Each track's source, for the editor (app tracks start out of the mix). MP4 keeps custom
+    // tags only at file level, and only with use_metadata_tags.
+    let mut file_tags = ff::Dictionary::new();
+    let sources: Vec<&str> = tracks.iter().map(|t| t.source).collect();
+    file_tags.set(crate::edit_model::AUDIO_SOURCES_TAG, &serde_json::to_string(&sources).unwrap_or_default());
+    octx.set_metadata(file_tags);
+    let mut options = ff::Dictionary::new();
+    options.set("movflags", "use_metadata_tags");
+    octx.write_header_with(options)
         .map_err(|e| format!("write_header: {e}"))?;
 
     // Merge all packets in presentation-time order so the interleaver

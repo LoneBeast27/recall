@@ -1,8 +1,9 @@
-//! App-track parsing, names and the silence clock (no WASAPI, no processes).
+//! App-track parsing, names and the leveller (no WASAPI, no processes).
 
 use std::time::Duration;
 
-use super::{parse, AppSource, SilenceClock};
+use super::level::same_exe;
+use super::{parse, AppSource, Leveller};
 
 #[test]
 fn the_list_parses_and_bad_entries_are_refused() {
@@ -22,15 +23,62 @@ fn a_track_is_named_by_its_label_else_the_exe_without_its_extension() {
     assert_eq!(app("player.exe", " Source A ").track_name(), "Source A");
     assert_eq!(app("player.EXE", "").track_name(), "player");
     assert_eq!(app("tool", "").track_name(), "tool");
+    assert!(same_exe("Game.EXE", "game") && !same_exe("game.exe", "games.exe"));
+}
+
+const RATE: u32 = 48_000;
+const PACKET: usize = 480; // 10 ms, mono
+
+/// Feeds `seconds` of a never-silent tone through a leveller whose device clock runs at `speed`
+/// times the wall clock; returns the written samples and the lag at the end in frames.
+fn run_live(speed: f64, seconds: f64) -> (Vec<f32>, i64) {
+    let mut level = Leveller::new(RATE);
+    let mut out = Vec::new();
+    let packets = (seconds * RATE as f64 * speed / PACKET as f64) as usize;
+    for p in 0..packets {
+        let samples: Vec<f32> = (0..PACKET).map(|i| 0.5 + 0.1 * (((p * PACKET + i) as f32) * 0.05).sin()).collect();
+        // The device made this packet's last frame at (p + 1) * PACKET / (RATE * speed) seconds.
+        let elapsed = Duration::from_secs_f64((p + 1) as f64 * PACKET as f64 / (RATE as f64 * speed));
+        out.extend(level.live(elapsed, &samples, 1));
+    }
+    let due = (packets as f64 * PACKET as f64 / speed) as i64;
+    (out.clone(), due - out.len() as i64)
+}
+
+fn longest_zero_run(samples: &[f32]) -> usize {
+    samples.split(|s| *s != 0.0).map(<[f32]>::len).max().unwrap_or(0)
 }
 
 #[test]
-fn silence_is_owed_only_past_the_slack_and_keeps_the_track_level_with_the_clock() {
-    let mut clock = SilenceClock::new(48_000);
-    let slack = Duration::from_millis(100);
-    assert_eq!(clock.owed(Duration::from_millis(50), slack), 0, "within the slack: wait for sound");
-    assert_eq!(clock.owed(Duration::from_millis(200), slack), 9_600, "200 ms behind: all of it");
-    clock.wrote(4_800);
-    assert_eq!(clock.owed(Duration::from_millis(300), slack), 0, "the sound kept up");
-    assert_eq!(clock.owed(Duration::from_millis(1_000), Duration::ZERO), 33_600, "closed app: silence to the clock");
+fn a_slow_device_clock_is_corrected_without_silent_blocks() {
+    // 2026-11-05 merge-gate review: silence padding by the wall clock (100 ms slack) put
+    // 100 ms silent blocks into live sound when the device clock ran slow.
+    let (out, lag) = run_live(0.9995, 120.0);
+    assert!(longest_zero_run(&out) < RATE as usize / 100, "a silent run of 10 ms or more inside live sound");
+    assert!(lag.unsigned_abs() <= (RATE as u64 * 25 / 1000), "still {lag} frames behind after 2 minutes");
+}
+
+#[test]
+fn a_fast_device_clock_drops_single_frames_and_stays_level() {
+    let (out, lag) = run_live(1.0005, 120.0);
+    assert_eq!(longest_zero_run(&out), 0, "no silence at all inside live sound");
+    assert!(lag.unsigned_abs() <= (RATE as u64 * 25 / 1000), "{lag} frames off after 2 minutes");
+}
+
+#[test]
+fn correction_never_exceeds_a_tenth_of_a_percent() {
+    let (out, _) = run_live(0.98, 10.0); // far beyond what may be corrected
+    let fed = (10.0 * RATE as f64 * 0.98 / PACKET as f64) as usize * PACKET;
+    assert!(out.len() as f64 <= fed as f64 * 1.0011, "{} frames out for {fed} in", out.len());
+}
+
+#[test]
+fn silence_fills_only_while_no_stream_is_active_and_a_new_stream_starts_on_the_clock() {
+    let mut level = Leveller::new(RATE);
+    assert_eq!(level.idle(Duration::from_secs(1)), 48_000, "closed app: silence to the clock");
+    assert_eq!(level.idle(Duration::from_millis(1_500)), 24_000);
+    // The app starts playing at 2.0 s: 0.5 s of lead silence, then its first packet.
+    let out = level.live(Duration::from_secs(2), &[0.5; PACKET], 1);
+    assert_eq!(out.len(), 24_000 - PACKET + PACKET);
+    assert_eq!(longest_zero_run(&out), 24_000 - PACKET, "the lead is silence, the packet is sound");
 }
