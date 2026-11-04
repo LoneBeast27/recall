@@ -256,6 +256,19 @@ pub fn probe_foreground(target_monitor: isize) -> Option<WatchEvent> {
     build_event(hwnd, target_monitor)
 }
 
+/// Probe one window (the record mode's followed foreground, after its
+/// fullscreen verdict flipped). Same filtering as the hook.
+pub fn probe_window(hwnd: isize, target_monitor: isize) -> Option<WatchEvent> {
+    build_event(HWND(hwnd as *mut _), target_monitor)
+}
+
+/// Only the fullscreen verdict of `hwnd` (monitor info, window rect, style):
+/// the record mode checks its followed foreground with this every 100 ms.
+/// A window that is gone reads as not fullscreen.
+pub fn window_fullscreen(hwnd: isize) -> bool {
+    fullscreen_on_own_monitor(HWND(hwnd as *mut _)).0
+}
+
 /// Turn a window into a [`WatchEvent`], or `None` for non-candidates (null hwnd,
 /// no resolvable process / stem, our own process).
 fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
@@ -366,6 +379,12 @@ fn exe_identity(pid: u32) -> Option<(String, String, bool)> {
             is_steam_library_path(&full),
         ))
     }
+}
+
+/// Whether `hwnd` is the foreground window now.
+pub fn is_foreground(hwnd: isize) -> bool {
+    // SAFETY: plain query.
+    unsafe { GetForegroundWindow() }.0 as isize == hwnd
 }
 
 /// Whether `hwnd` still names a live window.

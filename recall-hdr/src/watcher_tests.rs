@@ -146,3 +146,38 @@ fn exe_stem_resolves_self() {
     assert!(stem.is_some(), "exe_stem(self) should resolve");
     assert!(!stem.unwrap().trim().is_empty(), "self stem is non-empty");
 }
+
+// --- followed-window check -------------------------------------------------
+
+#[test]
+fn a_dead_window_is_not_fullscreen_and_has_no_event() {
+    assert!(!window_fullscreen(0x7fff_fff0));
+    assert!(!is_foreground(0x7fff_fff0));
+    assert!(probe_window(0x7fff_fff0, 0x1).is_none());
+    assert!(probe_window(0, 0x1).is_none());
+}
+
+/// Cost probe (run by hand): time [`window_fullscreen`] on the current
+/// foreground window, the check the record mode runs every 100 ms while it
+/// follows a window. Prints the mean and worst call.
+#[test]
+#[ignore]
+fn window_fullscreen_cost_probe() {
+    let hwnd = unsafe { GetForegroundWindow() }.0 as isize;
+    let n: u32 = 20_000;
+    let mut worst = std::time::Duration::ZERO;
+    let t0 = std::time::Instant::now();
+    let mut hits = 0u32;
+    for _ in 0..n {
+        let t = std::time::Instant::now();
+        hits += window_fullscreen(hwnd) as u32;
+        worst = worst.max(t.elapsed());
+    }
+    let total = t0.elapsed();
+    println!(
+        "FULLSCREEN-CHECK calls={n} mean_us={:.2} worst_us={:.1} fullscreen_hits={hits} at_10_per_s_cpu_pct={:.4}",
+        total.as_secs_f64() * 1e6 / n as f64,
+        worst.as_secs_f64() * 1e6,
+        total.as_secs_f64() / n as f64 * 10.0 * 100.0,
+    );
+}
