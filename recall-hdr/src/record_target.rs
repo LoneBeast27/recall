@@ -40,7 +40,9 @@ pub const DESKTOP_NAME: &str = "Desktop";
 /// Stems that are never a capture target even when fullscreen (on top of
 /// [`rules::is_denied`]): Recall's own processes, browsers, media players,
 /// full-screen overlays (which would otherwise steal the target from the game
-/// underneath and restart the engine), launchers, and shell surfaces.
+/// underneath and restart the engine), launchers, remote-desktop clients, and
+/// shell surfaces. Steam's `streaming_client` (Remote Play) is deliberately
+/// absent: a streamed game is recorded as a game.
 const TARGET_DENY_STEMS: &[&str] = &[
     "recall-native",
     "recall-hub",
@@ -58,6 +60,17 @@ const TARGET_DENY_STEMS: &[&str] = &[
     "battle.net",
     "eadesktop",
     "galaxyclient",
+    "upc",
+    "uplay",
+    "ubisoftconnect",
+    "origin",
+    "xboxpcapp",
+    "xboxapp",
+    "gamingservicesui",
+    "amazongames",
+    "amazon games ui",
+    "playnite.fullscreenapp",
+    "playnite.desktopapp",
     "shellhost",
     "brave",
     "chrome",
@@ -82,6 +95,36 @@ const TARGET_DENY_STEMS: &[&str] = &[
     "lockapp",
     "screenclippinghost",
     "snippingtool",
+    // Remote desktop / remote viewer clients: a fullscreen session is a desktop,
+    // not a game (msrdc.exe was recorded as "Remote Desktop", 2026-11-04).
+    "mstsc",
+    "msrdc",
+    "msrdcw",
+    "rdclient",
+    "rdclient.windows",
+    "windows365",
+    "windowsapp",
+    "rdcman",
+    "vmconnect",
+    "vmware-remotemks",
+    "virtualboxvm",
+    "mremoteng",
+    "royalts",
+    "remotedesktopmanager",
+    "remotedesktopmanager64",
+    "anydesk",
+    "teamviewer",
+    "rustdesk",
+    "parsecd",
+    "moonlight",
+    "remoting_desktop",
+    "remoting_host",
+    "vncviewer",
+    "tvnviewer",
+    "nomachine",
+    "nxplayer",
+    "splashtop",
+    "strwinclt",
     // Steam-library apps that are not games (the Steam-library rule would take them).
     "wallpaper32",
     "wallpaper64",
@@ -132,7 +175,7 @@ pub fn display_name(title: &str, exe_stem: &str) -> String {
 /// Whether an exe stem is a capture target under `cfg`. `looks_like_game` =
 /// fullscreen on its monitor, or the exe lives in a Steam library.
 pub fn is_target(stem: &str, looks_like_game: bool, cfg: &Config) -> bool {
-    let stem = stem.trim();
+    let stem = strip_exe(stem.trim());
     if stem.is_empty()
         || rules::is_denied(stem)
         || TARGET_DENY_STEMS.iter().any(|d| d.eq_ignore_ascii_case(stem))
@@ -143,6 +186,14 @@ pub fn is_target(stem: &str, looks_like_game: bool, cfg: &Config) -> bool {
         Some(RuleKind::None) => false,
         Some(RuleKind::HdrGame | RuleKind::SdrGame) => true,
         None => looks_like_game,
+    }
+}
+
+/// `"msrdc.exe"` -> `"msrdc"` (case-insensitive); a bare stem is unchanged.
+fn strip_exe(s: &str) -> &str {
+    match s.len().checked_sub(4) {
+        Some(i) if s.is_char_boundary(i) && s[i..].eq_ignore_ascii_case(".exe") => &s[..i],
+        _ => s,
     }
 }
 
