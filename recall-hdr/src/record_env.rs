@@ -93,6 +93,14 @@ impl EnvOverrides {
     }
 }
 
+/// The machine's CPUs as an affinity mask (0 if Windows will not say).
+pub(crate) fn system_cpu_mask() -> usize {
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessAffinityMask};
+    let (mut process, mut system) = (0usize, 0usize);
+    let _ = unsafe { GetProcessAffinityMask(GetCurrentProcess(), &mut process, &mut system) };
+    system
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

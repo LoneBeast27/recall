@@ -342,3 +342,12 @@ fn stats_toggle_patch_flips_persists_and_reports_the_key() {
     assert_eq!(app.config, off.config);
     let _ = std::fs::remove_dir_all(store.path().parent().unwrap());
 }
+
+#[test]
+fn cpu_mask_fits_the_machine() {
+    use crate::record_config::fit_cpu_mask;
+    assert_eq!(fit_cpu_mask(0xffff_0000, 0xffff_ffff), Some(0xffff_0000));
+    assert_eq!(fit_cpu_mask(0xffff_0000, 0xffff), Some(0xff00), "16 threads: high half");
+    assert_eq!(fit_cpu_mask(0xffff_0000, 0xff), Some(0xf0), "8 threads: high half");
+    assert_eq!(fit_cpu_mask(0xffff_0000, 0xf), None, "4 threads: no pin");
+}

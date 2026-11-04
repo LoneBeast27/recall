@@ -100,6 +100,17 @@ impl Quality {
         }
     }
 
+    /// The effort a low-end NVIDIA GPU (GTX 10/16, MX: one older NVENC unit) holds at 60
+    /// fps next to a game: High and Max step down to Balanced's p4 without multipass. The
+    /// bitrate is unchanged (it comes from `RECALL_BITRATE` or the requested quality).
+    pub fn for_gpu(self, low_end: bool) -> Quality {
+        if low_end {
+            Quality::Balanced
+        } else {
+            self
+        }
+    }
+
     /// NVENC private options. `bf=0` is mandatory: the ring is muxed with
     /// dts == pts, which only holds without B-frames.
     pub fn nvenc_options(self) -> Vec<(&'static str, &'static str)> {

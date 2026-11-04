@@ -28,9 +28,16 @@ impl Handler {
     pub(super) fn gpu_frame(&mut self, frame: &mut Frame, pts_us: u64, crop: Option<Rect>, canvas: bool) -> bool {
         let Some(sink) = self.shared.gpu_sink.get() else { return false };
         if let GpuState::Untried = self.gpu {
+            match crate::gpu_frames::adapter::remember(frame.device()) {
+                Some(gpu) => (sink.log)(format!("capture: device on {}", gpu.describe())),
+                None => (sink.log)("capture: device adapter unknown".into()),
+            }
             self.gpu = match crate::gpu_frames::Pipeline::new(frame.device(), frame.device_context()) {
                 Ok(pipe) => {
                     (sink.log)("capture: zero-copy GPU path (D3D11 tonemap -> NVENC)".into());
+                    if let Some(line) = crate::gpu_frames::adapter::vram_line("capture device and pipeline") {
+                        (sink.log)(line);
+                    }
                     GpuState::Ready { pipe, failures: 0, small: false }
                 }
                 Err(e) => {
@@ -49,8 +56,16 @@ impl Handler {
         };
         *small = false;
         let mode = self.shared.mode.load(Relaxed);
+        if let Some(note) = pipe.source_note(frame.as_raw_texture()) {
+            (sink.log)(format!("capture: {note}"));
+        }
         match pipe.render(frame.as_raw_texture(), &layout, mode) {
             Ok(hw) => {
+                if self.frame_count == 0 {
+                    if let Some(line) = crate::gpu_frames::adapter::vram_line("first frame (capture pool, frame pool)") {
+                        (sink.log)(line);
+                    }
+                }
                 *failures = 0;
                 self.frame_count += 1;
                 self.shared.path.store(PATH_GPU, Relaxed);

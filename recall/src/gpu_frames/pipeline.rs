@@ -6,7 +6,7 @@ use windows::core::{s, Interface, PCSTR};
 use windows::Win32::Graphics::Direct3D::Fxc::{D3DCompile, D3DCOMPILE_OPTIMIZATION_LEVEL3};
 use windows::Win32::Graphics::Direct3D::{ID3DBlob, D3D11_SRV_DIMENSION_TEXTURE2D, D3D_PRIMITIVE_TOPOLOGY_TRIANGLELIST};
 use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE};
 use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
@@ -16,7 +16,7 @@ use crate::framing::{Layout, Rect};
 
 const SHADER: &str = include_str!("tonemap.hlsl");
 
-/// Matches `cbuffer Params` in tonemap.hlsl (three 16-byte registers).
+/// Matches `cbuffer Params` in tonemap.hlsl (four 16-byte registers).
 #[repr(C)]
 #[derive(Clone, Copy, PartialEq)]
 struct Params {
@@ -26,6 +26,8 @@ struct Params {
     scaled: u32,
     src_rect: [i32; 4],
     dst_rect: [i32; 4],
+    src_srgb: u32,
+    pad: [u32; 3],
 }
 
 fn rect4(r: Rect) -> [i32; 4] {
@@ -54,6 +56,8 @@ pub struct Pipeline {
     /// Render-target views of pool textures, keyed by (texture pointer, array index).
     rtvs: Vec<(usize, u32, ID3D11RenderTargetView)>,
     copy: Option<SourceCopy>,
+    /// Capture texture format and bind flags already logged (once per pipeline).
+    logged_source: bool,
     /// Signalled once the GPU is done with the capture surface.
     done: GpuDone,
 }
@@ -147,6 +151,7 @@ impl Pipeline {
             frames: None,
             rtvs: Vec::new(),
             copy: None,
+            logged_source: false,
             done,
         })
     }
@@ -237,8 +242,28 @@ impl Pipeline {
         Ok(copy.view.clone())
     }
 
+    /// The capture texture's format and bind flags, once per pipeline: shows whether frames
+    /// are Bgra8 or fp16 and whether `source_view` needs its extra copy.
+    pub fn source_note(&mut self, src: &ID3D11Texture2D) -> Option<String> {
+        if std::mem::replace(&mut self.logged_source, true) {
+            return None;
+        }
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { src.GetDesc(&mut desc) };
+        let srv = desc.BindFlags & D3D11_BIND_SHADER_RESOURCE.0 as u32 != 0;
+        Some(format!(
+            "capture texture {}x{} format {} bind 0x{:x} ({})",
+            desc.Width,
+            desc.Height,
+            desc.Format.0,
+            desc.BindFlags,
+            if srv { "shader reads it directly" } else { "copied before each draw" }
+        ))
+    }
+
     /// Tonemap `src` into a fresh frame of `layout.out` size: `layout.src` texels into
-    /// `layout.dst`, black around it.
+    /// `layout.dst`, black around it. A Bgra8 source in passthrough that fills the frame
+    /// pixel for pixel is copied instead (no draw).
     pub fn render(&mut self, src: &ID3D11Texture2D, layout: &Layout, mode: u32) -> Result<HwFrame, String> {
         let target = layout.out;
         let frames = self.frames_for(target.0, target.1)?;
@@ -247,6 +272,27 @@ impl Pipeline {
         let tex = tex.clone();
         let hw = frame.device_hwctx().ok_or("frame has no device")?;
         let _lock = unsafe { DeviceLock::take(hw) };
+        let mut sd = D3D11_TEXTURE2D_DESC::default();
+        unsafe { src.GetDesc(&mut sd) };
+        let src_srgb = sd.Format == DXGI_FORMAT_B8G8R8A8_UNORM;
+        if src_srgb && direct_copy(layout) {
+            let b = D3D11_BOX {
+                left: layout.src.x,
+                top: layout.src.y,
+                front: 0,
+                right: layout.src.x + layout.src.w,
+                bottom: layout.src.y + layout.src.h,
+                back: 1,
+            };
+            unsafe {
+                self.context.CopySubresourceRegion(&tex, index, 0, 0, 0, src, 0, Some(&b));
+                self.done.signal(&self.context);
+                self.context.Flush();
+            }
+            drop(_lock);
+            self.done.wait();
+            return Ok(frame);
+        }
         let rtv = self.rtv(&tex, index)?;
         let srv = self.source_view(src)?;
         let params = Params {
@@ -256,6 +302,8 @@ impl Pipeline {
             scaled: u32::from(layout.src.size() != layout.dst.size()),
             src_rect: rect4(layout.src),
             dst_rect: rect4(layout.dst),
+            src_srgb: u32::from(src_srgb),
+            pad: [0; 3],
         };
         let ctx = &self.context;
         unsafe {
@@ -344,6 +392,11 @@ impl Drop for GpuDone {
             let _ = unsafe { CloseHandle(event) };
         }
     }
+}
+
+/// The source rect lands unscaled on the whole frame, so a copy is the same picture.
+fn direct_copy(layout: &Layout) -> bool {
+    layout.src.size() == layout.out && layout.dst == Rect::full(layout.out)
 }
 
 fn srv_desc(format: DXGI_FORMAT) -> D3D11_SHADER_RESOURCE_VIEW_DESC {

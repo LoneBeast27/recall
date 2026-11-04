@@ -149,7 +149,40 @@ impl App {
         self.last_periodic = Some(now);
         self.refresh_source_title();
         self.refresh_hdr_mode();
+        self.restart_capture_if_needed();
         self.emit_status();
+    }
+
+    /// Starts capture on the target window (`RECALL_CAPTURE_HWND`) or the configured
+    /// monitor, in the format `CaptureShared::wants_fp16` picks.
+    pub(super) fn start_capture(&mut self) {
+        let Some(shared) = self.shared.clone() else { return };
+        let hwnd = std::env::var("RECALL_CAPTURE_HWND").ok().and_then(|v| v.parse::<usize>().ok());
+        let started = match hwnd {
+            Some(hwnd) => capture::start_window(hwnd, shared),
+            None => capture::start_monitor(self.config.monitor, shared),
+        };
+        match started {
+            Ok(control) => self.capture = Some(control),
+            Err(e) => eprintln!("failed to start capture: {e}"),
+        }
+    }
+
+    /// Restarts a Bgra8 capture in fp16 once HDR turns on or a frame needs the CPU path. A
+    /// new capture brings a new D3D11 device, so the encoder reopens and the replay buffer
+    /// starts again (logged).
+    fn restart_capture_if_needed(&mut self) {
+        let Some(shared) = self.shared.clone() else { return };
+        if self.capture.is_none() || shared.fp16.load(Relaxed) || !shared.wants_fp16() {
+            return;
+        }
+        eprintln!("[recall] capture restarts in Rgba16F (HDR display or CPU fallback); the replay buffer restarts");
+        if let Some(control) = self.capture.take() {
+            if let Err(e) = control.stop() {
+                eprintln!("[recall] capture stop: {e}");
+            }
+        }
+        self.start_capture();
     }
 
     fn refresh_source_title(&mut self) {

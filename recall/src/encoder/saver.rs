@@ -352,6 +352,9 @@ impl Worker {
                 let outcome = if staged.is_some() { "staged" } else { "saved" };
                 self.events
                     .log(&timing.line(outcome, muxed.secs, muxed.frames, bytes));
+                if let Some(line) = crate::gpu_frames::adapter::vram_line("after save") {
+                    self.events.log(&line);
+                }
             }
             Err(reason) => {
                 self.events.save_failed(&reason);

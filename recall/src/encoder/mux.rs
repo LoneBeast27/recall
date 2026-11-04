@@ -67,11 +67,7 @@ pub(crate) fn produce(
     }
 
     let started = Instant::now();
-    let mut tracks = Vec::with_capacity(job.audio.len());
-    for pcm in &job.audio {
-        let track = encode_aac(pcm, abort).map_err(|e| format!("audio track '{}': {e}", pcm.name))?;
-        tracks.push(track);
-    }
+    let tracks = encode_tracks(&job.audio, abort)?;
     timing.aac_ms = ms(started.elapsed());
 
     let (mux_ms, trailer_ms) = mux_mp4(part, params, backend, packets, &tracks, abort)?;
@@ -83,7 +79,21 @@ pub(crate) fn produce(
     })
 }
 
+/// Encode every track at once, one thread each: the save waits for the longest track, not
+/// the sum (2 tracks of 119 s took 5.3 s one after another, 2026-11-04).
+fn encode_tracks(audio: &[AudioPcm], abort: &AtomicBool) -> Result<Vec<AacTrack>, String> {
+    std::thread::scope(|scope| {
+        let workers: Vec<_> = audio
+            .iter()
+            .map(|pcm| scope.spawn(move || encode_aac(pcm, abort).map_err(|e| format!("audio track '{}': {e}", pcm.name))))
+            .collect();
+        workers.into_iter().map(|w| w.join().unwrap_or_else(|_| Err("audio encode thread panicked".into()))).collect()
+    })
+}
+
 /// Encode one snapshotted track to AAC (stereo/mono, native rate).
+/// The fast coder: FFmpeg's default two-loop search costs several times the CPU for no
+/// audible gain at 192 kb/s.
 pub(crate) fn encode_aac(pcm: &AudioPcm, abort: &AtomicBool) -> Result<AacTrack, String> {
     let samples = &pcm.samples;
     let src_ch = pcm.channels.max(1) as usize;
@@ -105,7 +115,9 @@ pub(crate) fn encode_aac(pcm: &AudioPcm, abort: &AtomicBool) -> Result<AacTrack,
     ctx.set_bit_rate(192_000);
     ctx.set_time_base(ff::Rational(1, pcm.rate as i32));
     ctx.set_flags(ff::codec::Flags::GLOBAL_HEADER);
-    let mut enc = ctx.open().map_err(|e| format!("aac open: {e}"))?;
+    let mut opts = ff::Dictionary::new();
+    opts.set("aac_coder", "fast");
+    let mut enc = ctx.open_with(opts).map_err(|e| format!("aac open: {e}"))?;
 
     let frame_size = if enc.frame_size() > 0 {
         enc.frame_size() as usize
