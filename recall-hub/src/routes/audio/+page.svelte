@@ -11,7 +11,7 @@
     error?: string;
   }
 
-  const ORDER = ['Game', 'Music', 'System', 'Virtual A', 'Virtual B', 'Mic'];
+  const ORDER = ['Desktop audio', 'Microphone'];
   let meters: Record<string, Meter> = $state({});
   let ports = $state<{ inputs: string[]; outputs: string[] }>({ inputs: [], outputs: [] });
   let midiLog: string[] = $state([]);
@@ -36,8 +36,7 @@
   const pct = (db?: number) =>
     db === undefined ? 0 : Math.max(0, Math.min(100, ((db + 60) / 60) * 100));
 
-  // Target the first hardware output (skip the Windows GS software synth) —
-  // the RODECaster enumerates under its own name ("MIDI function" observed).
+  // Target the first hardware output (skip the Windows GS software synth).
   const hwOut = $derived(
     ports.outputs.find((o) => !o.toLowerCase().includes('wavetable')) ?? ''
   );
@@ -85,7 +84,7 @@
   {/each}
 </section>
 
-<h2>RODECaster MIDI</h2>
+<h2>MIDI</h2>
 <section class="panel">
   <div class="sub">
     outputs: {ports.outputs.length ? ports.outputs.join(' · ') : 'none found'}<br />
@@ -98,8 +97,7 @@
     {#if midiResult}<span class="sub">{midiResult}</span>{/if}
   </div>
   <div class="sub" style="margin-top:10px">
-    Trigger map (mutes/pads) gets pinned on the live unit — incoming SMART-pad
-    messages appear below when MIDI is enabled on the RODECaster.
+    Incoming messages from the first MIDI input appear below.
   </div>
   {#if midiLog.length}
     <pre class="log">{midiLog.join('\n')}</pre>

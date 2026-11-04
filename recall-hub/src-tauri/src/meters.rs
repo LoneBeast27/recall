@@ -1,33 +1,21 @@
-//! Per-endpoint VU meters: one WASAPI capture thread per known cable emitting
-//! `vu` events (~10 Hz, RMS + peak in dBFS). Loopback for render endpoints,
-//! plain capture for the mic — same proven pattern as the engine's audio.rs.
+//! VU meters on the Windows default output (loopback) and default microphone:
+//! one WASAPI capture thread each, emitting `vu` events (~10 Hz, RMS + peak in
+//! dBFS) — same proven pattern as the engine's audio.rs.
 
 use std::io::ErrorKind;
 
 use tauri::{AppHandle, Emitter};
-use wasapi::{DeviceCollection, Direction, SampleType, StreamMode, WaveFormat};
+use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
 
-/// (label, direction, name-tokens — every token must appear in the friendly name)
-const METERS: &[(&str, bool, &str)] = &[
-    ("Game", true, "game rødecaster"),
-    ("Music", true, "music rødecaster"),
-    ("System", true, "system rødecaster"),
-    ("Virtual A", true, "virtual a rødecaster"),
-    ("Virtual B", true, "virtual b rødecaster"),
-    ("Mic", false, "microphone rodecaster chat"),
-];
-
-fn name_matches(name: &str, want: &str) -> bool {
-    let name = name.to_lowercase();
-    want.split_whitespace().all(|t| name.contains(&t.to_lowercase()))
-}
+/// (label, render endpoint via loopback vs capture) — the Windows defaults.
+const METERS: &[(&str, bool)] = &[("Desktop audio", true), ("Microphone", false)];
 
 pub fn spawn_meters(app: AppHandle) {
-    for (label, is_render, tokens) in METERS {
+    for (label, is_render) in METERS {
         let app = app.clone();
         std::thread::Builder::new()
             .name(format!("vu-{label}"))
-            .spawn(move || meter_thread(app, label, *is_render, tokens))
+            .spawn(move || meter_thread(app, label, *is_render))
             .ok();
     }
 }
@@ -40,15 +28,10 @@ fn db(v: f32) -> f32 {
     }
 }
 
-fn meter_thread(app: AppHandle, label: &str, is_render: bool, tokens: &str) {
+fn meter_thread(app: AppHandle, label: &str, is_render: bool) {
     let _ = wasapi::initialize_mta();
     let direction = if is_render { Direction::Render } else { Direction::Capture };
-    let Ok(collection) = DeviceCollection::new(&direction) else { return };
-    let n = collection.get_nbr_devices().unwrap_or(0);
-    let device = (0..n)
-        .filter_map(|i| collection.get_device_at_index(i).ok())
-        .find(|d| d.get_friendlyname().is_ok_and(|nm| name_matches(&nm, tokens)));
-    let Some(device) = device else {
+    let Ok(device) = wasapi::get_default_device(&direction) else {
         let _ = app.emit("vu", serde_json::json!({ "label": label, "missing": true }));
         return;
     };
