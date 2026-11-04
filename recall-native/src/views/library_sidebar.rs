@@ -89,10 +89,12 @@ impl Root {
             .child(div().flex_1())
             .child(div().mx(px(-12.)).child(ui::hairline()))
             .child(div().pt(px(8.)))
-            .child(nav_row("nav-hdr", Icon::Sun, "Display & HDR", None, route == Route::Hdr).on_click(cx.listener(|this, _, _, cx| {
-                this.go(Route::Hdr);
-                cx.notify();
-            })))
+            .when(crate::root::hdr_page_enabled(), |d| {
+                d.child(nav_row("nav-hdr", Icon::Sun, "Display & HDR", None, route == Route::Hdr).on_click(cx.listener(|this, _, _, cx| {
+                    this.go(Route::Hdr);
+                    cx.notify();
+                })))
+            })
             .child(nav_row("nav-audio", Icon::AudioLines, "Audio", None, route == Route::Audio).on_click(cx.listener(|this, _, _, cx| {
                 this.go(Route::Audio);
                 cx.notify();

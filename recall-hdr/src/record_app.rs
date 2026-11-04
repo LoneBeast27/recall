@@ -166,7 +166,9 @@ pub fn run() -> i32 {
     supervisor.attach_events(engine_tx);
     let janitor = Janitor::start(hub.clone());
     let mut hdr = HdrManager::probe(&cfg);
-    if cfg.behavior.hdr_auto {
+    if !crate::hdr_gate::enabled() {
+        log!("record: HDR features shelved (experimental); no display setting will change");
+    } else if cfg.behavior.hdr_auto {
         if let Err(e) = hdr.activate(&cfg) {
             log!("record: hdr_auto is on but HDR management could not start: {e}");
         }

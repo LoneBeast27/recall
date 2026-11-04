@@ -35,6 +35,23 @@ pub enum Route {
     Settings,
 }
 
+/// The Display & HDR page belongs to the shelved experimental HDR feature (2026-11-04):
+/// it is hidden unless the app starts with `RECALL_EXPERIMENTAL_HDR=1`, the variable that
+/// also re-enables HDR switching in the recorder (`recall-hdr/src/hdr_gate.rs`).
+pub fn hdr_page_enabled() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| hdr_flag(std::env::var("RECALL_EXPERIMENTAL_HDR").ok().as_deref()))
+}
+
+fn hdr_flag(value: Option<&str>) -> bool {
+    matches!(value.map(str::trim), Some("1" | "true" | "on" | "yes"))
+}
+
+/// Where a request for `route` lands: the shelved HDR page falls back to the library.
+pub fn reachable(route: Route, hdr_enabled: bool) -> Route {
+    if route == Route::Hdr && !hdr_enabled { Route::Library } else { route }
+}
+
 impl Route {
     pub fn name(self) -> &'static str {
         match self {
@@ -345,6 +362,7 @@ impl Root {
     }
 
     pub fn go(&mut self, route: Route) {
+        let route = reachable(route, hdr_page_enabled());
         self.lib.finish_rename(&self.rename.value, crate::library_state::RenameEnd::Away);
         self.lib.confirm_delete = false;
         self.lib.set_hover(None, &self.workers);
@@ -489,5 +507,19 @@ impl Drop for Root {
     /// Closing the window writes pending edits beside the clip (the worker may not outlive it).
     fn drop(&mut self) {
         self.flush_on_close();
+    }
+}
+
+#[cfg(test)]
+mod hdr_shelf_tests {
+    use super::{Route, hdr_flag, reachable};
+
+    #[test]
+    fn hdr_page_is_hidden_unless_explicitly_enabled() {
+        assert!(!hdr_flag(None) && !hdr_flag(Some("0")) && !hdr_flag(Some("")));
+        assert!(hdr_flag(Some("1")));
+        assert_eq!(reachable(Route::Hdr, false), Route::Library, "shelved HDR page falls back to the library");
+        assert_eq!(reachable(Route::Hdr, true), Route::Hdr);
+        assert_eq!(reachable(Route::Settings, false), Route::Settings);
     }
 }

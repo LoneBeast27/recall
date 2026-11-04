@@ -3,8 +3,10 @@
 //! Entry point. Modes:
 //! - (no args), `--record`, `--record-only` : the unified record mode
 //!   ([`record_app::run`]) -- records any game automatically, tray, hotkeys,
-//!   control pipe, overlay; HDR management only with `behavior.hdr_auto`.
-//! - `--legacy-hdr`  : the old HDR-only display manager tray ([`app::run`]).
+//!   control pipe, overlay; HDR management only with `behavior.hdr_auto`, and
+//!   only while the shelved HDR feature is re-enabled ([`hdr_gate`]).
+//! - `--legacy-hdr`  : the old HDR-only display manager tray ([`app::run`]); shelved
+//!   with `--clamp-test` unless `RECALL_EXPERIMENTAL_HDR=1` ([`hdr_gate`]).
 //! - `--record-tray-smoke` : tray/menu check with no capture.
 //!
 //! The long-running modes are single-instance (a named mutex, `single_instance`); a
@@ -44,6 +46,7 @@ mod frame_timing;
 mod guard;
 mod hdr;
 mod hdr_exec;
+mod hdr_gate;
 mod hotkey;
 mod journal;
 mod liveness;
@@ -106,6 +109,11 @@ fn main() {
     let code = match arg {
         "" => single_instance(record_app::run, Launch::ByHand),
         "--record" | "--record-only" => single_instance(record_app::run, Launch::Scripted),
+        "--legacy-hdr" | "--clamp-test" if !hdr_gate::enabled() => {
+            log!("{arg}: {}", hdr_gate::SHELVED_MSG);
+            eprintln!("{}", hdr_gate::SHELVED_MSG);
+            2
+        }
         "--legacy-hdr" => single_instance(app::run, Launch::Scripted),
         "--record-tray-smoke" => record_session::run_tray_smoke(),
         "--probe" => cmd_probe(),
