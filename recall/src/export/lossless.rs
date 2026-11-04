@@ -283,8 +283,9 @@ fn write(
             routes[track.source_index] = Some(AudioRoute::Reencoded);
         }
     }
-    octx.set_metadata(ictx.metadata().to_owned());
-    super::paths::write_faststart_header(&mut octx)?;
+    let audio_indices: Vec<usize> = source.audio.iter().map(|(index, _)| *index).collect();
+    let sources = super::sources::for_outputs(&ictx, &audio_indices, outputs);
+    super::sources::write_header(&mut octx, &ictx, sources)?;
     let out_tbs: Vec<_> = octx.streams().map(|s| s.time_base()).collect();
     let mut mux = EditedAudioMux::new(encoded, encoded_outputs);
     let windows: Vec<_> = segments

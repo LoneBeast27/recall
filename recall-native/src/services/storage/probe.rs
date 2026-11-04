@@ -72,7 +72,9 @@ fn parse(report: &Value) -> Result<ProbedClip, String> {
         let bottom: f64 = bottom.parse().ok()?;
         (bottom != 0.0).then(|| top.parse::<f64>().ok().map(|top| top / bottom))?
     });
-    let sources = crate::edit_model::parse_audio_sources(report["format"]["tags"][crate::edit_model::AUDIO_SOURCES_TAG].as_str());
+    let audio_count = streams.iter().filter(|stream| kind(stream).as_deref() == Some("audio")).count();
+    // A tag for another number of tracks (the file was edited elsewhere) counts as none.
+    let sources = crate::edit_model::audio_sources_for(report["format"]["tags"][crate::edit_model::AUDIO_SOURCES_TAG].as_str(), audio_count);
     let tracks = streams
         .iter()
         .filter(|stream| kind(stream).as_deref() == Some("audio"))
@@ -133,6 +135,9 @@ mod tests {
         assert_eq!(sources, ["desktop-loopback", "mic", "app:a.exe"]);
         let untagged = serde_json::json!({"format": {"duration": "2.0"}, "streams": [{"index": 0, "codec_type": "video"}, {"index": 1, "codec_type": "audio"}]});
         assert_eq!(parse(&untagged).unwrap().tracks[0].source, "", "older clips: no source");
+        let mut short = report.clone();
+        short["format"]["tags"]["recall_audio_sources"] = serde_json::json!("[\"desktop-loopback\",\"app:a.exe\"]");
+        assert!(parse(&short).unwrap().tracks.iter().all(|t| t.source.is_empty()), "2 sources for 3 tracks: untagged");
     }
 
     #[test]
