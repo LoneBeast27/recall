@@ -1,8 +1,13 @@
 //! Game detection inputs for the record mode, all on the pump thread:
 //!
 //! - foreground changes (the watcher's `EVENT_SYSTEM_FOREGROUND` hook),
-//! - fullscreen flips of the foreground window (the watcher's scoped
-//!   location hook, see [`Controller::sync_follow`]),
+//! - fullscreen flips of the foreground window: [`Controller::follow_tick`]
+//!   re-reads only the followed window's geometry every [`FOLLOW_EVERY`], in
+//!   a pump wake that happens anyway (the pump wakes at least every 50 ms),
+//!   and probes the window in full only when the verdict flips. A scoped
+//!   `EVENT_OBJECT_LOCATIONCHANGE` hook was measured first and dropped: the
+//!   thread filter does not hold back cursor moves (5,506 of 5,510 events
+//!   in 30 s were `OBJID_CURSOR`, 184/s, each one a pump wake),
 //! - the 1 s foreground re-probe (safety net for both),
 //! - window liveness of the target and the pinned window, every pump tick.
 //!
@@ -15,7 +20,10 @@ use std::time::{Duration, Instant};
 use crate::log;
 use crate::record_app::Controller;
 use crate::record_target::{classify_event, is_target};
-use crate::watcher::{self, WatchEvent, Watcher};
+use crate::watcher::{self, WatchEvent};
+
+/// How often the followed foreground's fullscreen verdict is re-read.
+pub(crate) const FOLLOW_EVERY: Duration = Duration::from_millis(100);
 
 impl Controller {
     /// A foreground change from the hook: feeds the tracker and HDR.
@@ -36,15 +44,6 @@ impl Controller {
         if self.last_fed != Some(key) {
             self.last_fed = Some(key);
             self.tracker.on_foreground(candidate, now);
-        }
-    }
-
-    /// A fullscreen flip from the location hook. Dropped unless it is still
-    /// the followed foreground: a move queued before a focus change in the
-    /// same pump wake must not feed a background window.
-    pub(crate) fn on_follow_event(&mut self, ev: &WatchEvent, now: Instant) {
-        if self.followable == Some(ev.hwnd) {
-            self.on_foreground_seen(ev, now);
         }
     }
 
@@ -78,25 +77,30 @@ impl Controller {
         }
     }
 
-    /// The window whose location changes are worth an event: the foreground,
-    /// when it could become a target and is not already the session's
-    /// window. None while paused or pinned (no hook during gameplay at all).
+    /// The window worth following: the foreground, when it could become a
+    /// target and is not already the session's window. None while paused or
+    /// pinned, so nothing is checked during gameplay at all. A window that
+    /// lost the foreground (to one the watcher could not identify) or closed
+    /// is dropped at once.
     pub(crate) fn follow_wanted(&self) -> Option<isize> {
         if self.paused || self.pinned.is_some() {
             return None;
         }
         let hwnd = self.followable?;
-        if self.tracker.current().is_some_and(|t| t.hwnd == hwnd) || !watcher::window_alive(hwnd) {
+        if self.tracker.current().is_some_and(|t| t.hwnd == hwnd) || !watcher::is_foreground(hwnd) {
             return None;
         }
         Some(hwnd)
     }
 
-    /// Move the watcher's scoped location hook to [`Self::follow_wanted`].
-    /// Free when unchanged; runs at the end of every pump tick.
-    pub(crate) fn sync_follow(&mut self, watcher: Option<&mut Watcher>) {
-        if let Some(w) = watcher {
-            w.follow(self.follow_wanted());
+    /// Follow [`Self::follow_wanted`] ([`Follow`]); a due probe feeds the
+    /// tracker like the 1 s probe does.
+    pub(crate) fn follow_tick(&mut self, now: Instant) {
+        let wanted = self.follow_wanted();
+        if let Some(hwnd) = self.follow.step(wanted, now, watcher::window_fullscreen) {
+            if let Some(ev) = watcher::probe_window(hwnd, self.target_monitor) {
+                self.on_foreground_seen(&ev, now);
+            }
         }
     }
 
@@ -119,4 +123,92 @@ impl Controller {
 
 fn ms(d: Duration) -> u128 {
     d.as_millis()
+}
+
+/// The followed window's last fullscreen verdict. A newly followed window is
+/// probed once (catches a flip between its foreground event and now); after
+/// that only its verdict is re-read every [`FOLLOW_EVERY`], and a flip asks
+/// for a full probe.
+pub(crate) struct Follow {
+    window: Option<(isize, bool)>,
+    checked: Instant,
+}
+
+impl Follow {
+    pub(crate) fn new(now: Instant) -> Self {
+        Follow { window: None, checked: now }
+    }
+
+    /// One pump tick. `read` = the fullscreen verdict of a window. Returns the
+    /// window to probe in full, if any.
+    pub(crate) fn step(&mut self, wanted: Option<isize>, now: Instant, read: impl Fn(isize) -> bool) -> Option<isize> {
+        let Some(hwnd) = wanted else {
+            self.window = None;
+            return None;
+        };
+        let same = matches!(self.window, Some((h, _)) if h == hwnd);
+        if same && now.duration_since(self.checked) < FOLLOW_EVERY {
+            return None;
+        }
+        self.checked = now;
+        let fullscreen = read(hwnd);
+        if same && self.window == Some((hwnd, fullscreen)) {
+            return None;
+        }
+        self.window = Some((hwnd, fullscreen));
+        Some(hwnd)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::cell::{Cell, RefCell};
+
+    #[test]
+    fn a_new_window_is_probed_once_then_only_on_a_flip() {
+        let t0 = Instant::now();
+        let mut f = Follow::new(t0);
+        let fs = Cell::new(false);
+        let reads = Cell::new(0);
+        let read = |_| {
+            reads.set(reads.get() + 1);
+            fs.get()
+        };
+        assert_eq!(f.step(Some(7), t0, read), Some(7), "new window: probe once");
+        assert_eq!(f.step(Some(7), t0 + Duration::from_millis(50), read), None, "not due yet");
+        assert_eq!(reads.get(), 1, "no read before FOLLOW_EVERY");
+        assert_eq!(f.step(Some(7), t0 + FOLLOW_EVERY, read), None, "due, no flip");
+        assert_eq!(reads.get(), 2);
+        fs.set(true);
+        let flip = t0 + FOLLOW_EVERY * 2;
+        assert_eq!(f.step(Some(7), flip, read), Some(7), "flip to fullscreen: probe");
+        assert_eq!(f.step(Some(7), flip + FOLLOW_EVERY, read), None, "still fullscreen");
+        fs.set(false);
+        assert_eq!(f.step(Some(7), flip + FOLLOW_EVERY * 2, read), Some(7), "flip back: probe");
+    }
+
+    #[test]
+    fn nothing_wanted_reads_nothing_and_forgets_the_window() {
+        let t0 = Instant::now();
+        let mut f = Follow::new(t0);
+        let seen = RefCell::new(Vec::new());
+        let read = |h| {
+            seen.borrow_mut().push(h);
+            false
+        };
+        assert_eq!(f.step(Some(7), t0, read), Some(7));
+        assert_eq!(f.step(None, t0 + Duration::from_secs(1), read), None);
+        assert_eq!(seen.borrow().len(), 1, "no read while nothing is followed");
+        // Following the same window again is a new follow: probed at once.
+        assert_eq!(f.step(Some(7), t0 + Duration::from_millis(1010), read), Some(7));
+    }
+
+    #[test]
+    fn switching_windows_probes_the_new_one_at_once() {
+        let t0 = Instant::now();
+        let mut f = Follow::new(t0);
+        assert_eq!(f.step(Some(7), t0, |_| false), Some(7));
+        assert_eq!(f.step(Some(8), t0 + Duration::from_millis(10), |_| false), Some(8));
+    }
 }
