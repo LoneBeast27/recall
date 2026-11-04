@@ -29,8 +29,25 @@ impl TimeRange {
     pub fn output_len(&self) -> f64 { (self.end - self.start) / self.speed }
 }
 
+fn yes() -> bool { true }
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AudioSetting { pub stream_index: usize, pub gain_db: f64, pub muted: bool }
+pub struct AudioSetting {
+    pub stream_index: usize, pub gain_db: f64, pub muted: bool,
+    /// Mixed into the export's first track with the other mixed tracks (default on, so
+    /// players that play only track 1 still hear every source). Off: kept as its own track.
+    #[serde(default = "yes")]
+    pub mix: bool,
+}
+
+/// One audio track an export writes, in output order (see `EditPlan::audio_outputs`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AudioOutput {
+    /// Two or more source streams summed into one track named "Mix".
+    Mix(Vec<usize>),
+    /// One source stream on its own, keeping its name.
+    Track(usize),
+}
 
 impl AudioSetting {
     /// True when the track leaves the export bit-for-bit (no gain, not muted).
@@ -65,6 +82,21 @@ impl EditPlan {
             if !track.gain_db.is_finite() || !(-60.0..=12.0).contains(&track.gain_db) { return Err("audio gain must be between -60 and +12 dB".into()); }
         }
         Ok(())
+    }
+    /// The audio tracks an export writes, first to last: the mixed tracks as one "Mix" track
+    /// (a lone mixed track stays itself), then every other kept track in stream order. Muted
+    /// tracks are dropped. A stream with no setting is an untouched track of its own.
+    pub fn audio_outputs(&self, audio_indices: &[usize]) -> Vec<AudioOutput> {
+        let setting = |index: usize| self.audio.iter().find(|s| s.stream_index == index);
+        let kept = audio_indices.iter().copied().filter(|i| !setting(*i).is_some_and(|s| s.muted));
+        let (mixed, separate): (Vec<usize>, Vec<usize>) = kept.partition(|i| setting(*i).is_some_and(|s| s.mix));
+        let mut outputs = match mixed.len() {
+            0 => Vec::new(),
+            1 => vec![AudioOutput::Track(mixed[0])],
+            _ => vec![AudioOutput::Mix(mixed)],
+        };
+        outputs.extend(separate.into_iter().map(AudioOutput::Track));
+        outputs
     }
     /// Length of the exported file in seconds: Σ (range length / speed).
     #[allow(dead_code)] // read by recall-native's editor
@@ -165,6 +197,24 @@ mod tests {
         let settings: ExportSettings = serde_json::from_str("{}").unwrap();
         assert_eq!(settings, ExportSettings::default());
         assert_eq!(settings.mode, ExportMode::Reencode);
+    }
+
+    fn setting(stream_index: usize, muted: bool, mix: bool) -> AudioSetting {
+        AudioSetting { stream_index, gain_db: 0.0, muted, mix }
+    }
+
+    #[test]
+    fn mixed_tracks_come_first_as_one_and_muted_tracks_are_dropped() {
+        let plan = |audio| EditPlan { ranges: vec![TimeRange::new(0.0, 1.0)], audio };
+        let both = plan(vec![setting(1, false, true), setting(2, false, true)]);
+        assert_eq!(both.audio_outputs(&[1, 2]), vec![AudioOutput::Mix(vec![1, 2])]);
+        let one = plan(vec![setting(1, false, false), setting(2, false, true)]);
+        assert_eq!(one.audio_outputs(&[1, 2]), vec![AudioOutput::Track(2), AudioOutput::Track(1)], "a lone mixed track leads");
+        let muted = plan(vec![setting(1, false, true), setting(2, true, true), setting(3, false, true)]);
+        assert_eq!(muted.audio_outputs(&[1, 2, 3]), vec![AudioOutput::Mix(vec![1, 3])]);
+        assert_eq!(plan(vec![]).audio_outputs(&[1, 2]), vec![AudioOutput::Track(1), AudioOutput::Track(2)], "no setting: untouched");
+        let saved: AudioSetting = serde_json::from_str(r#"{"stream_index":1,"gain_db":0.0,"muted":false}"#).unwrap();
+        assert!(saved.mix, "edits saved before the choice existed mix by default");
     }
 
     #[test]

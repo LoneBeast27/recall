@@ -45,8 +45,8 @@ fn lossless_trim_is_packet_identical_and_snapped_to_keyframes() {
     let plan = EditPlan {
         ranges: vec![TimeRange::new(1.2, 2.3), TimeRange::new(3.1, 4.05)],
         audio: vec![
-            AudioSetting { stream_index: 1, gain_db: 0.0, muted: false },
-            AudioSetting { stream_index: 2, gain_db: -6.0, muted: false },
+            AudioSetting { stream_index: 1, gain_db: 0.0, muted: false, mix: false },
+            AudioSetting { stream_index: 2, gain_db: -6.0, muted: false, mix: false },
         ],
     };
     let keyframes = scan_keyframes(&clip.path).unwrap();

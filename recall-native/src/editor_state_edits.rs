@@ -178,7 +178,7 @@ impl EditorState {
     fn setting_mut(&mut self, track: usize) -> Option<&mut AudioSetting> {
         let stream = self.info.as_ref()?.audio.get(track)?.stream_index;
         if !self.plan.audio.iter().any(|s| s.stream_index == stream) {
-            self.plan.audio.push(AudioSetting { stream_index: stream, gain_db: 0.0, muted: false });
+            self.plan.audio.push(AudioSetting { stream_index: stream, gain_db: 0.0, muted: false, mix: true });
         }
         self.plan.audio.iter_mut().find(|s| s.stream_index == stream)
     }
@@ -200,6 +200,15 @@ impl EditorState {
         let (stream, gain, muted) = (setting.stream_index, setting.gain_db, setting.muted);
         if let Some(preview) = self.preview.as_mut() {
             let _ = preview.set_audio(stream, gain, muted);
+        }
+    }
+
+    /// Mix the track into the export's first track, or keep it as its own track. Export only:
+    /// the preview already plays every unmuted track together.
+    pub fn toggle_mix(&mut self, track: usize) {
+        self.revise();
+        if let Some(setting) = self.setting_mut(track) {
+            setting.mix = !setting.mix;
         }
     }
 
@@ -290,5 +299,36 @@ mod drag_tests {
         ed.begin_drag(Drag::Scrub);
         ed.end_drag();
         assert!(ed.saved && !ed.can_undo());
+    }
+}
+
+#[cfg(test)]
+mod mix_tests {
+    use super::*;
+    use crate::edit_model::{AudioOutput, AudioTrackInfo, ClipInfo};
+
+    fn track(stream_index: usize, name: &str) -> AudioTrackInfo {
+        AudioTrackInfo { stream_index, name: name.into(), channels: 2, sample_rate: 48_000, preview_path: String::new(), waveform: Vec::new() }
+    }
+
+    #[test]
+    fn the_mix_switch_changes_the_export_tracks_and_is_one_undo_step() {
+        let mut ed = EditorState::new(Err("no preview".into()));
+        ed.plan.ranges = vec![TimeRange::new(0.0, 10.0)];
+        ed.info = Some(ClipInfo {
+            path: "a.mp4".into(), duration: 10.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1,
+            audio: vec![track(1, "Source A"), track(2, "Source B")], keyframes: Vec::new(),
+        });
+        assert_eq!(ed.plan.audio_outputs(&[1, 2]), vec![AudioOutput::Track(1), AudioOutput::Track(2)], "no settings yet: untouched");
+        ed.toggle_mix(0);
+        assert!(ed.setting(1).is_some_and(|s| !s.mix), "a new setting starts in the mix, the switch takes it out");
+        ed.toggle_mix(1);
+        ed.toggle_mix(1);
+        assert!(ed.setting(2).is_some_and(|s| s.mix));
+        assert_eq!(ed.plan.audio_outputs(&[1, 2]), vec![AudioOutput::Track(2), AudioOutput::Track(1)]);
+        ed.toggle_mix(0);
+        assert_eq!(ed.plan.audio_outputs(&[1, 2]), vec![AudioOutput::Mix(vec![1, 2])]);
+        ed.undo();
+        assert!(ed.setting(1).is_some_and(|s| !s.mix), "undo puts the switch back");
     }
 }
