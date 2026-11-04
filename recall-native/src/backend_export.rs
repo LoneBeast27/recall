@@ -9,7 +9,7 @@ pub fn export_clip(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)
     let _guard=ExportGuard;
     let output=export_target(info,fps,export.mode==ExportMode::Lossless)?;
     // The export holds the output drive's lane: prefetch pauses instead of seeking against it.
-    engine_export(info,&output,plan,fps,export,&EXPORT_CANCEL,None)
+    engine_export(info,&output,plan,fps,export,&EXPORT_CANCEL,None,false)
 }
 /// Held by an export that ends without [`export_clip`] (a prepared copy): closing waits for it.
 pub(crate) fn export_queued()->impl Drop{ExportQueueGuard}
@@ -25,7 +25,7 @@ pub(crate) fn export_target(info:&ClipInfo,fps:u32,lossless:bool)->Result<PathBu
 }
 /// Runs the engine's edited export of `info` into `output` on the output drive's lane, until it
 /// ends or `cancel` turns true. `on_line` sees the engine's stdout as it arrives (progress).
-pub(crate) fn engine_export(info:&ClipInfo,output:&Path,plan:&EditPlan,fps:u32,export:&ExportSettings,cancel:&'static AtomicBool,on_line:Option<storage::OnLine>)->Result<ExportSummary,String>{
+pub(crate) fn engine_export(info:&ClipInfo,output:&Path,plan:&EditPlan,fps:u32,export:&ExportSettings,cancel:&'static AtomicBool,on_line:Option<storage::OnLine>,background:bool)->Result<ExportSummary,String>{
     let lossless=export.mode==ExportMode::Lossless;
     let nonce=SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e|e.to_string())?.as_nanos();
     let outdir=output.parent().ok_or("export path has no directory")?.to_path_buf();
@@ -36,6 +36,8 @@ pub(crate) fn engine_export(info:&ClipInfo,output:&Path,plan:&EditPlan,fps:u32,e
     std::fs::write(&project,serde_json::to_vec(&serde_json::json!({"plan":plan,"export":export})).map_err(|e|e.to_string())?).map_err(|e|format!("write export plan: {e}"))?;
     let result=(||{
         let mut command=engine_command("export-edit")?;command.arg(&input).arg(output).arg(fps.to_string()).arg(&project).arg("--json");
+        // A background job (pre-encode) asks the engine for EcoQoS: slow cores, low clocks.
+        if background{command.env("RECALL_ECOQOS","1");}
         let limit=export_limit(plan,fps);
         let run=storage::run_io(&outdir,Priority::Interactive,move||storage::run_cancellable_lines(&mut command,lowered,cancel,limit,on_line))?.map_err(|e|format!("start export: {e}"))?;
         let result=match run{storage::Run::Finished(result)=>result,storage::Run::Cancelled{pid}=>{remove_export_temps(output,pid);return Err(EXPORT_CANCELLED.to_owned());},storage::Run::TimedOut{pid}=>{remove_export_temps(output,pid);return Err("Export stopped: the recorder did not finish in time.".to_owned());}};
