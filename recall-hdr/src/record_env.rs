@@ -93,6 +93,36 @@ impl EnvOverrides {
     }
 }
 
+/// Pin this process to `mask` fitted to the CPUs that exist; returns its hex text on success.
+pub(crate) fn apply_affinity(mask: usize) -> Option<String> {
+    let system = system_cpu_mask();
+    let Some(mask) = crate::record_config::fit_cpu_mask(mask, system) else {
+        log!("record: {} CPUs, running unpinned, priority BelowNormal", system.count_ones());
+        return None;
+    };
+    use windows::Win32::System::Threading::{GetCurrentProcess, SetProcessAffinityMask};
+    // Retried once; a second refusal leaves the recorder unpinned at BelowNormal (logged).
+    let pin = || unsafe { SetProcessAffinityMask(GetCurrentProcess(), mask) };
+    match pin().or_else(|_| pin()) {
+        Ok(()) => {
+            log!("record: affinity=0x{mask:x}, priority BelowNormal");
+            Some(format!("{mask:x}"))
+        }
+        Err(e) => {
+            log!("record: affinity 0x{mask:x} failed ({e}); running unpinned");
+            None
+        }
+    }
+}
+
+/// The machine's CPUs as an affinity mask (0 if Windows will not say).
+pub(crate) fn system_cpu_mask() -> usize {
+    use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessAffinityMask};
+    let (mut process, mut system) = (0usize, 0usize);
+    let _ = unsafe { GetProcessAffinityMask(GetCurrentProcess(), &mut process, &mut system) };
+    system
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

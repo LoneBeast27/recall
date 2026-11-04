@@ -1,6 +1,7 @@
 // D3D11 twin of tonemap.wgsl for the zero-copy recording path (gpu_frames.rs).
 //
-// Input: the WGC capture texture, Rgba16F scRGB-linear (1.0 = SDR white, HDR above 1.0).
+// Input: the WGC capture texture, Rgba16F scRGB-linear (1.0 = SDR white, HDR above 1.0), or
+// Bgra8 for an SDR display (already sRGB-encoded: `src_srgb` skips the encode).
 // Output: an FFmpeg D3D11 frame (B8G8R8A8_UNORM, NVENC's ARGB input). That texture is not
 // typeless, so the linear -> sRGB encode the wgpu path got from an *-Srgb target is done
 // here, with the exact piecewise sRGB curve.
@@ -22,6 +23,8 @@ cbuffer Params : register(b0) {
     uint scaled;      // 0 = pixel-exact copy, 1 = filtered resize
     int4 src_rect;    // x, y, w, h in source texels
     int4 dst_rect;    // x, y, w, h in output pixels
+    uint src_srgb;    // 1 = Bgra8 source, already sRGB-encoded (passthrough only)
+    uint3 pad;
 };
 
 float4 vs_main(uint vi : SV_VertexID) : SV_Position {
@@ -60,6 +63,9 @@ float4 ps_main(float4 pos : SV_Position) : SV_Target {
         return float4(0.0, 0.0, 0.0, 1.0);
     }
     float3 c = source_at(p);
+    if (src_srgb != 0) {
+        return float4(saturate(c), 1.0);
+    }
     if (mode == 0) {
         c = saturate(c);
     } else {

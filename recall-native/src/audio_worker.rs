@@ -36,7 +36,17 @@ pub(super) fn fill_buffer(tracks: &[LoadedTrack], start: usize, frames: usize, s
 pub(super) fn worker_main(rx: mpsc::Receiver<Command>, shared: Arc<SharedStatus>) {
     let mut worker = Worker::new(shared);
     loop {
-        while let Ok(command) = rx.try_recv() {
+        // Idle (no preview playing): sleep until a command arrives instead of waking every
+        // 4 ms for nothing (0.13% of a core with the library just open, 2026-11-04).
+        let first = if worker.playing {
+            None
+        } else {
+            match rx.recv() {
+                Ok(command) => Some(command),
+                Err(_) => return,
+            }
+        };
+        for command in first.into_iter().chain(std::iter::from_fn(|| rx.try_recv().ok())) {
             let shutdown = matches!(command, Command::Shutdown);
             if !shutdown {
                 worker.apply(command);
@@ -49,8 +59,8 @@ pub(super) fn worker_main(rx: mpsc::Receiver<Command>, shared: Arc<SharedStatus>
         }
         if worker.playing {
             worker.pump();
+            thread::sleep(Duration::from_millis(4));
         }
-        thread::sleep(Duration::from_millis(4));
     }
 }
 
