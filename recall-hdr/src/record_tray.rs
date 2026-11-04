@@ -22,8 +22,8 @@ use windows::Win32::System::Threading::{
     PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetWindowLongPtrW, GetWindowThreadProcessId, IsWindowVisible, PostMessageW,
-    SetForegroundWindow, ShowWindow, GWL_EXSTYLE, GWL_STYLE, SW_RESTORE, WM_CLOSE, WS_CAPTION,
+    EnumWindows, GetWindowLongPtrW, GetWindowThreadProcessId, IsIconic, IsWindowVisible, PostMessageW,
+    SetForegroundWindow, ShowWindow, GWL_EXSTYLE, GWL_STYLE, SW_RESTORE, SW_SHOW, WM_CLOSE, WS_CAPTION,
     WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
 };
 
@@ -302,7 +302,9 @@ impl RecallUi {
                 .into_iter()
                 .map(|(hwnd, pid, path)| {
                     unsafe {
-                        let _ = ShowWindow(hwnd, SW_RESTORE);
+                        // Restore only a minimized window: SW_RESTORE would un-maximize a maximized one.
+                        let show = if IsIconic(hwnd).as_bool() { SW_RESTORE } else { SW_SHOW };
+                        let _ = ShowWindow(hwnd, show);
                         let _ = SetForegroundWindow(hwnd);
                     }
                     let visible = unsafe { IsWindowVisible(hwnd).as_bool() };
