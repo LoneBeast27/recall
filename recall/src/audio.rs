@@ -12,6 +12,8 @@
 //!   (`RECALL_AUDIO_VOICE_PID`, or `RECALL_AUDIO_VOICE_EXE` e.g. `Discord.exe`);
 //!   no track when neither is set or the app is not running. Mic mute never
 //!   touches it.
+//! - App tracks: one per app chosen in Settings (`RECALL_AUDIO_APPS`), after
+//!   the tracks above, named by the person's label; see `audio/apps.rs`.
 //! App→cable routing stays the user's/Windows' job; we only read endpoints.
 //!
 //! Each track runs its own capture thread pushing interleaved f32 samples into
@@ -25,6 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use wasapi::{DeviceCollection, Direction, SampleType, StreamMode, WaveFormat};
 
+mod apps;
 mod voice;
 
 static MIC_MUTED: AtomicBool = AtomicBool::new(false);
@@ -249,6 +252,10 @@ pub fn start(buffer_secs: u32, mut report: impl FnMut(String)) -> Vec<Arc<TrackR
             }
             Err(e) => report(format!("audio track '{}' UNAVAILABLE: {e}", spec.name)),
         }
+    }
+    match apps::from_env() {
+        Ok(list) => out.extend(apps::start(&list, buffer_secs, &mut report)),
+        Err(e) => report(format!("app audio tracks UNAVAILABLE: {e}")),
     }
     out
 }

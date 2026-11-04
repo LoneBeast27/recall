@@ -96,6 +96,7 @@ impl Root {
                 .into_any_element(),
         );
         items.extend(self.render_audio_sources(cx));
+        items.push(self.render_app_audio(cx));
         items
     }
 
