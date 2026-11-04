@@ -129,6 +129,55 @@ pub fn tile_picks(frames: &[StripFrame], duration: f64, width: f32, tile_w: f32)
         .collect()
 }
 
+/// A tile closer than this share of a tile to the next one would show as a sliver: of the two,
+/// the more remarkable frame stays.
+const MIN_VISIBLE: f32 = 0.3;
+
+/// Left-anchored layout: `(frame, x)` per tile, drawn in order so a later tile covers the end of
+/// the one before. A tile's left edge is the exact time of its frame, so clicking that edge lands
+/// on it. The strip opens with the earliest frame at 0, and a frame repeats to fill a gap wider
+/// than a tile until the next one starts.
+pub fn anchored_tiles(frames: &[StripFrame], duration: f64, width: f32, tile_w: f32) -> Vec<(usize, f32)> {
+    let mut picks = tile_picks(frames, duration, width, tile_w);
+    picks.dedup();
+    if picks.is_empty() {
+        return Vec::new();
+    }
+    let x_of = |i: usize| ((frames[i].seconds / duration).clamp(0.0, 1.0) as f32) * width;
+    let mut kept: Vec<usize> = Vec::with_capacity(picks.len());
+    for i in picks {
+        match kept.last().copied() {
+            Some(last) if x_of(i) - x_of(last) < tile_w * MIN_VISIBLE => {
+                if frames[i].score > frames[last].score {
+                    *kept.last_mut().unwrap() = i;
+                }
+            }
+            _ => kept.push(i),
+        }
+    }
+    let mut tiles = Vec::new();
+    if x_of(kept[0]) > 0.5 {
+        tiles.push((0, 0.0));
+        let mut x = tile_w;
+        while x < x_of(kept[0]) - 0.5 {
+            tiles.push((0, x));
+            x += tile_w;
+        }
+    }
+    for (n, &i) in kept.iter().enumerate() {
+        let end = kept.get(n + 1).map_or(width, |&next| x_of(next));
+        let mut x = x_of(i);
+        loop {
+            tiles.push((i, x));
+            x += tile_w;
+            if x >= end - 0.5 {
+                break;
+            }
+        }
+    }
+    tiles
+}
+
 /// `pts_time` and the picture size from ffmpeg `showinfo` lines, one entry per frame.
 pub fn parse_showinfo(log: &str) -> (Vec<f64>, Option<(u32, u32)>) {
     let mut times = Vec::new();
@@ -202,6 +251,32 @@ mod tests {
         let frames: Vec<StripFrame> = (0..3).map(|i| StripFrame { path: String::new(), seconds: i as f64 * 10.0 + 5.0, score: 0.0 }).collect();
         let picks = tile_picks(&frames, 30.0, 600.0, 100.0);
         assert_eq!(picks, vec![0, 0, 1, 1, 2, 2]);
+    }
+
+    #[test]
+    fn tiles_start_exactly_at_their_frame_time() {
+        let frames: Vec<StripFrame> = (0..64).map(|i| StripFrame { path: String::new(), seconds: i as f64 * 2.0, score: if i == 41 { 3.0 } else { 0.9 } }).collect();
+        let (duration, width, tile_w) = (128.0, 1000.0, 106.7);
+        let tiles = anchored_tiles(&frames, duration, width, tile_w);
+        assert_eq!(tiles[0], (0, 0.0), "the strip opens at 0");
+        assert!(tiles.windows(2).all(|w| w[0].1 < w[1].1), "left to right");
+        let event = tiles.iter().find(|t| t.0 == 41).expect("the event is shown");
+        assert!((event.1 - 82.0 / 128.0 * 1000.0).abs() < 0.01, "its left edge is its time");
+        // No hole: each tile starts before the one before it ends, and the last reaches the edge.
+        assert!(tiles.windows(2).all(|w| w[1].1 <= w[0].1 + tile_w + 0.01));
+        assert!(tiles.last().unwrap().1 + tile_w >= width);
+    }
+
+    #[test]
+    fn a_sliver_gives_way_to_the_more_remarkable_frame() {
+        let frames = vec![
+            StripFrame { path: String::new(), seconds: 0.0, score: 0.0 },
+            StripFrame { path: String::new(), seconds: 9.0, score: 0.5 },
+            StripFrame { path: String::new(), seconds: 10.0, score: 2.5 },
+            StripFrame { path: String::new(), seconds: 19.0, score: 0.5 },
+        ];
+        let tiles = anchored_tiles(&frames, 20.0, 400.0, 100.0);
+        assert!(tiles.iter().any(|t| t.0 == 2) && !tiles.iter().any(|t| t.0 == 1), "{tiles:?}");
     }
 
     #[test]
