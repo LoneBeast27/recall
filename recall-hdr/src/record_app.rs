@@ -4,9 +4,11 @@
 //! overlay process and the engine supervisor; the control pipe feeds it
 //! commands (`record_cmds`).
 //!
-//! - Records ANY game: the foreground fullscreen window (hook + 1 s re-probe)
-//!   becomes the target after 2 s; the engine is (re)started with that window,
-//!   name and game-audio pid; no target -> engine stopped ("waiting").
+//! - Records ANY game: the foreground fullscreen window (foreground hook, a
+//!   scoped location hook on the foreground, 1 s re-probe; `record_detect`)
+//!   becomes the target after 300 ms (2 s to replace another game); the
+//!   engine is (re)started with that window, name and game-audio pid; no
+//!   target -> engine stopped ("waiting").
 //! - Never touches a display setting unless `behavior.hdr_auto` (see
 //!   `record_hdr`); starts fine without the managed monitor.
 //! - Env vars still override config at startup (`Start-Recall.ps1`), and
@@ -46,7 +48,7 @@ use crate::record_engine::{self, engine_env, EnginePlanner, EngineTarget, EXIT_L
 use crate::record_notice::NoticeTracker;
 use crate::record_quit::QuitReason;
 use crate::record_storage::Janitor;
-use crate::record_target::{classify_event, display_name, sanitize, Target, TargetTracker, TARGET_DEBOUNCE};
+use crate::record_target::{display_name, sanitize, Target, TargetTracker, START_DEBOUNCE, TARGET_DEBOUNCE};
 use crate::record_tray::{RecallUi, RecordingTray, RecordingTrayCmd};
 use crate::supervisor::{EngineHealth, Supervisor};
 use crate::watcher::{self, WatchEvent, Watcher};
@@ -93,11 +95,15 @@ pub struct Controller {
     pub(crate) last_hdr_event: String,
     /// Last time each hotkey action ran (per-action debounce).
     pub(crate) last_fired: std::collections::HashMap<&'static str, Instant>,
-    last_probe: Instant,
+    pub(crate) last_probe: Instant,
     last_hdr_refresh: Instant,
     /// (hwnd, is_target) of the last foreground fed to the tracker.
     pub(crate) last_fed: Option<(isize, bool)>,
-    target_monitor: isize,
+    /// The foreground window if it could become a target by going fullscreen.
+    pub(crate) followable: Option<isize>,
+    /// (hwnd, wait) of the last committed target, for the retarget log line.
+    pub(crate) detected: Option<(isize, Duration)>,
+    pub(crate) target_monitor: isize,
     /// Set once a quit is asked for; the reason decides whether the app's windows close.
     pub(crate) quit: Option<QuitReason>,
     /// Runtime pause (tray "Stop recording" / pipe `pause`): no engine, game
@@ -146,9 +152,13 @@ pub fn run() -> i32 {
     };
     let target_monitor = app::primary_monitor_isize();
     let (watch_tx, watch_rx) = channel::<WatchEvent>();
-    let watcher = Watcher::install(watch_tx, target_monitor)
+    let (follow_tx, follow_rx) = channel::<WatchEvent>();
+    let mut watcher = Watcher::install(watch_tx, target_monitor)
         .map_err(|e| log!("record: watcher install failed ({e}); relying on the 1 s foreground probe"))
         .ok();
+    if let Some(w) = watcher.as_mut() {
+        w.follow_into(follow_tx);
+    }
     let (ctl_tx, ctl_rx) = channel::<Inbound>();
     let hub = PipeHub::start(ctl_tx);
     let supervisor = Supervisor::start_idle();
@@ -178,7 +188,7 @@ pub fn run() -> i32 {
         overlay: OverlayProc::new(),
         ui: RecallUi::from_current_exe(),
         hdr,
-        tracker: TargetTracker::new(TARGET_DEBOUNCE),
+        tracker: TargetTracker::new(TARGET_DEBOUNCE, START_DEBOUNCE),
         planner: EnginePlanner::new(EXIT_LINGER),
         pinned,
         target_watch: ProcessWatch::new("record: target"),
@@ -194,6 +204,8 @@ pub fn run() -> i32 {
         last_probe: now,
         last_hdr_refresh: now,
         last_fed: None,
+        followable: None,
+        detected: None,
         target_monitor,
         quit: None,
         paused: false,
@@ -226,16 +238,22 @@ pub fn run() -> i32 {
         ctl.cfg.storage.cap_gb
     );
 
-    let code = ctl.pump(&watch_rx, &ctl_rx);
+    let code = ctl.pump(&watch_rx, &follow_rx, &ctl_rx, &mut watcher);
     if let Some(w) = watcher {
-        w.uninstall(); // on the install (pump) thread
+        w.uninstall(); // both hooks, on the install (pump) thread
     }
     ctl.shutdown();
     code
 }
 
 impl Controller {
-    fn pump(&mut self, watch_rx: &Receiver<WatchEvent>, ctl_rx: &Receiver<Inbound>) -> i32 {
+    fn pump(
+        &mut self,
+        watch_rx: &Receiver<WatchEvent>,
+        follow_rx: &Receiver<WatchEvent>,
+        ctl_rx: &Receiver<Inbound>,
+        watcher: &mut Option<Watcher>,
+    ) -> i32 {
         loop {
             let timeout = app::wait_ms(self.next_deadline(), MAX_WAIT_MS);
             unsafe {
@@ -250,6 +268,9 @@ impl Controller {
             let now = Instant::now();
             while let Ok(ev) = watch_rx.try_recv() {
                 self.on_foreground_event(&ev, now);
+            }
+            while let Ok(ev) = follow_rx.try_recv() {
+                self.on_follow_event(&ev, now);
             }
             if now.duration_since(self.last_probe) >= PROBE_EVERY {
                 self.probe_foreground(now, false);
@@ -267,6 +288,7 @@ impl Controller {
                 return 0;
             }
             self.tick(now);
+            self.sync_follow(watcher.as_mut());
         }
     }
 
@@ -283,43 +305,11 @@ impl Controller {
         .min()
     }
 
-    fn on_foreground_event(&mut self, ev: &WatchEvent, now: Instant) {
-        let candidate = classify_event(ev, &self.cfg);
-        self.last_fed = Some((ev.hwnd, candidate.is_some()));
-        self.tracker.on_foreground(candidate, now);
-        self.hdr.on_foreground(ev, &self.cfg, now);
-    }
-
-    /// Re-read the foreground; feed it only when (window, verdict) changed.
-    /// Also drops a target / pin whose window no longer exists.
-    pub(crate) fn probe_foreground(&mut self, now: Instant, initial: bool) {
-        self.last_probe = now;
-        if let Some(t) = self.pinned.as_ref().filter(|t| !watcher::window_alive(t.hwnd)) {
-            log!("record: pinned window {:#x} is gone; auto-detection resumes", t.hwnd);
-            self.pinned = None;
-        }
-        if let Some(hwnd) = self.tracker.current().map(|t| t.hwnd).filter(|h| !watcher::window_alive(*h)) {
-            log!("record: target window {hwnd:#x} is gone");
-            self.tracker.on_window_gone(hwnd);
-        }
-        let Some(ev) = watcher::probe_foreground(self.target_monitor) else { return };
-        if initial {
-            self.on_foreground_event(&ev, now);
-            return;
-        }
-        let candidate = classify_event(&ev, &self.cfg);
-        let key = (ev.hwnd, candidate.is_some());
-        if self.last_fed != Some(key) {
-            self.last_fed = Some(key);
-            self.tracker.on_foreground(candidate, now);
-        }
-    }
-
     pub(crate) fn wanted(&self) -> EngineTarget {
         record_engine::wanted(self.tracker.current(), self.pinned.as_ref(), &self.cfg.recording, self.paused)
     }
 
-    /// Engine events -> chord -> liveness -> target -> engine -> HDR ->
+    /// Engine events -> chord -> liveness (process + window) -> target -> engine -> HDR ->
     /// fresh-engine intents -> deferred restart / storage -> overlay -> status
     /// (+ island notices).
     fn tick(&mut self, now: Instant) {
@@ -333,7 +323,10 @@ impl Controller {
         if let Some(pid) = self.target_watch.poll(self.tracker.current().map(|t| t.pid)) {
             self.tracker.on_process_exit(pid);
         }
-        self.tracker.poll(now);
+        self.check_windows();
+        if self.tracker.poll(now) {
+            self.note_commit();
+        }
         self.plan_engine(now);
         self.hdr.tick(now);
         let hellos = self.supervisor.hello_count();
@@ -362,7 +355,8 @@ impl Controller {
                 self.supervisor.retarget(None);
             }
             EngineTarget::Window(t) => {
-                log!("record: target -> {:?} ({}, pid {}, hwnd {:#x})", t.name, t.exe, t.pid, t.hwnd);
+                let detected = self.take_detected(t.hwnd);
+                log!("record: target -> {:?} ({}, pid {}, hwnd {:#x}){detected}", t.name, t.exe, t.pid, t.hwnd);
                 self.supervisor.retarget(Some(self.engine_spec(target)));
             }
             EngineTarget::Desktop => {
