@@ -12,13 +12,24 @@ fn scratch(tag: &str) -> PathBuf {
 
 #[test]
 fn a_light_copy_is_full_size_hevc_at_ten_megabits_without_sound() {
-    let args = arguments(Path::new(r"V:\clips\a.mp4"), Path::new(r"C:\cache\light\x.mp4.part"));
+    let args = arguments(Path::new(r"V:\clips\a.mp4"), Path::new(r"C:\cache\light\x.mp4.part"), true);
     let joined = args.join(" ");
+    assert!(joined.contains("-hwaccel d3d11va -hwaccel_output_format d3d11 -extra_hw_frames 16"), "GPU-only first: {joined}");
+    let through_memory = arguments(Path::new(r"V:\clips\a.mp4"), Path::new(r"C:\cache\light\x.mp4.part"), false).join(" ");
+    assert!(through_memory.contains("-hwaccel d3d11va") && !through_memory.contains("hwaccel_output_format"), "{through_memory}");
     for wanted in ["-hwaccel d3d11va", "-threads 4", "-c:v hevc_nvenc", "-b:v 10M", "-maxrate 12500k", "-fps_mode passthrough", "-an", "-map 0:v:0"] {
         assert!(joined.contains(wanted), "{wanted} missing: {joined}");
     }
     assert!(!joined.contains("scale"), "kept at the clip's own resolution (the crosshair survives): {joined}");
     assert_eq!(args.last().map(String::as_str), Some(r"C:\cache\light\x.mp4.part"));
+}
+
+#[test]
+fn a_short_copy_is_not_complete() {
+    assert!(complete(Some(7599), Some(7599)));
+    assert!(!complete(Some(7599), Some(7000)), "the old GPU-only failure ended the copy early");
+    assert!(!complete(Some(7599), None));
+    assert!(complete(None, Some(10)), "a source without a frame count is not held against the copy");
 }
 
 #[test]
