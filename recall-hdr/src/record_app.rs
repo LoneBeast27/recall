@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use windows::Win32::System::Threading::{
-    GetCurrentProcess, SetPriorityClass, SetProcessAffinityMask, BELOW_NORMAL_PRIORITY_CLASS,
+    GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
 };
 use windows::Win32::UI::WindowsAndMessaging::{MsgWaitForMultipleObjectsEx, MWMO_INPUTAVAILABLE, QS_ALLINPUT};
 
@@ -38,7 +38,8 @@ use crate::log;
 use crate::overlay_proc::OverlayProc;
 use crate::record_activity::{EngineActivity, PendingPause};
 use crate::record_chord::Chord;
-use crate::record_config::{fit_cpu_mask, parse_cpu_mask, ConfigStore};
+use crate::record_config::{parse_cpu_mask, ConfigStore};
+pub(crate) use crate::record_env::apply_affinity;
 use crate::record_env::EnvOverrides;
 use crate::record_hdr::HdrManager;
 use crate::record_engine::{self, engine_env, EnginePlanner, EngineTarget, EXIT_LINGER};
@@ -450,25 +451,6 @@ pub(crate) fn apply_niceness(mask_text: &str) -> Option<String> {
     });
     let _ = unsafe { SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS) };
     apply_affinity(mask)
-}
-
-/// Pin this process to `mask` fitted to the CPUs that exist; returns its hex text on success.
-pub(crate) fn apply_affinity(mask: usize) -> Option<String> {
-    let system = crate::record_env::system_cpu_mask();
-    let Some(mask) = fit_cpu_mask(mask, system) else {
-        log!("record: {} CPUs, running unpinned, priority BelowNormal", system.count_ones());
-        return None;
-    };
-    match unsafe { SetProcessAffinityMask(GetCurrentProcess(), mask) } {
-        Ok(()) => {
-            log!("record: affinity=0x{mask:x}, priority BelowNormal");
-            Some(format!("{mask:x}"))
-        }
-        Err(e) => {
-            log!("record: affinity 0x{mask:x} failed ({e}); running unpinned");
-            None
-        }
-    }
 }
 
 /// `Start-Recall.ps1 -Valorant`: `RECALL_CAPTURE_HWND` pins one window (name

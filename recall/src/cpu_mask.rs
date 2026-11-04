@@ -2,15 +2,21 @@
 //! written for a 32-thread desktop still means "the background half" on a 4- or 8-core laptop.
 
 /// `RECALL_CPU_MASK`: pin to the mask's CPUs that exist (the high half of the machine's
-/// CPUs when none do, no pin on 4 or fewer) and drop to BelowNormal. Never fatal.
+/// CPUs when none do, no pin on 4 or fewer) and drop to BelowNormal. A pin Windows refuses
+/// twice exits with code 2, as before: an unpinned engine could take the game's cores.
 pub(crate) fn apply(mask: &str) {
     use windows::Win32::System::Threading::{GetCurrentProcess, GetProcessAffinityMask, SetPriorityClass, SetProcessAffinityMask, BELOW_NORMAL_PRIORITY_CLASS};
     let wanted = usize::from_str_radix(mask.trim().trim_start_matches("0x"), 16).unwrap_or(0);
     let (mut process, mut system) = (0usize, 0usize);
     let _ = unsafe { GetProcessAffinityMask(GetCurrentProcess(), &mut process, &mut system) };
     match fit(wanted, system) {
-        Some(m) if unsafe { SetProcessAffinityMask(GetCurrentProcess(), m) }.is_ok() => {}
-        Some(m) => eprintln!("[recall] CPU affinity 0x{m:x} could not be applied; running unpinned"),
+        Some(m) => {
+            let pin = || unsafe { SetProcessAffinityMask(GetCurrentProcess(), m) }.is_ok();
+            if !pin() && !pin() {
+                eprintln!("Recall CPU affinity 0x{m:x} could not be applied");
+                std::process::exit(2);
+            }
+        }
         None => eprintln!("[recall] {} CPUs: running unpinned", system.count_ones()),
     }
     let _ = unsafe { SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS) };

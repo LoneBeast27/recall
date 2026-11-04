@@ -24,7 +24,12 @@ if (-not $admin) { Write-Error 'Run this from an elevated PowerShell: WPR needs 
 $games = 'VALORANT-Win64-Shipping', 'cs2', 'RocketLeague', 'FortniteClient-Win64-Shipping', 'r5apex', 'r5apex_dx12', 'Overwatch'
 $running = @(Get-Process -Name $games -ErrorAction SilentlyContinue | ForEach-Object ProcessName)
 if ($running) { Write-Error "A game is running ($($running -join ', ')); run the trace later."; exit 3 }
-if (-not (Test-Path $Engine)) { Write-Error "Engine not found: $Engine"; exit 4 }
+foreach ($f in $Engine, $Target) { if (-not (Test-Path $f)) { Write-Error "Not found: $f"; exit 4 } }
+
+# The engine needs the FFmpeg DLLs: the main checkout keeps them (worktrees do not).
+$ff = Join-Path $repo 'toolsfmpeg-devfmpeg-7.1.1-gyan-full-sharedin'
+if (-not (Test-Path $ff)) { $ff = 'L:\Generalecall	oolsfmpeg-devfmpeg-7.1.1-gyan-full-sharedin' }
+$env:PATH = "$ff;$env:PATH"
 
 $clips = Join-Path $env:TEMP "recall-cost-trace-$PID"
 New-Item -ItemType Directory -Force $clips | Out-Null
@@ -33,7 +38,7 @@ New-Item -ItemType Directory -Force (Split-Path $Out) | Out-Null
 & wpr -start CPU -start GPU -filemode
 if ($LASTEXITCODE -ne 0) { Write-Error "wpr -start failed ($LASTEXITCODE)"; exit 5 }
 try {
-  & powershell -NoProfile -File (Join-Path $repo 'scripts\dev\engine-cost.ps1') -Engine $Engine -Seconds $Seconds -SaveSeconds $SaveSeconds -OutDir $clips
+  & powershell -NoProfile -File (Join-Path $repo 'scripts\dev\engine-cost.ps1') -Engine $Engine -Target $Target -Seconds $Seconds -SaveSeconds $SaveSeconds -OutDir $clips
   "engine-cost exit $LASTEXITCODE"
 } finally {
   & wpr -stop $Out
