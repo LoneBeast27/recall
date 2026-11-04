@@ -26,7 +26,7 @@ fn main() {
     let info = backend::prepare_clip(clip).expect("prepare clip").info;
     let plan = EditPlan {
         ranges: vec![TimeRange::new(start, end)],
-        audio: info.audio.iter().map(|a| AudioSetting { stream_index: a.stream_index, gain_db: 0.0, muted: false }).collect(),
+        audio: info.audio.iter().map(|a| AudioSetting { stream_index: a.stream_index, gain_db: 0.0, muted: false, mix: true }).collect(),
     };
     let settings = ExportSettings { max_bytes, ..Default::default() };
 

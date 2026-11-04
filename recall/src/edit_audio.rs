@@ -5,61 +5,117 @@ use std::path::Path;
 use ff::Rescale;
 use ffmpeg_next as ff;
 
-use crate::edit_model::{AudioSetting, EditPlan, TimeRange};
+use crate::edit_model::{AudioOutput, AudioSetting, EditPlan, TimeRange};
 use crate::export::edit_pcm::{gain_multiplier, EditedPcm};
 use crate::export::timeline;
 
 pub(crate) struct EncodedAudioTrack {
+    /// The source stream (the first one for a mix): its metadata names the track.
     pub(crate) source_index: usize,
+    /// Several streams summed: the output track is named "Mix".
+    pub(crate) mixed: bool,
     pub(crate) rate: u32,
     pub(crate) encoder: ff::encoder::Audio,
     pub(crate) packets: Vec<ff::Packet>,
 }
 
-/// Edit every audio stream of `input` (in stream order) per `plan`.
+impl EncodedAudioTrack {
+    /// Tags for the output stream: the source stream's, or "Mix" for a mixed track.
+    pub(crate) fn metadata(&self, input: &ff::format::context::Input) -> Option<ff::Dictionary<'static>> {
+        if self.mixed {
+            let mut tags = ff::Dictionary::new();
+            tags.set("handler_name", MIX_NAME);
+            tags.set("title", MIX_NAME);
+            return Some(tags);
+        }
+        input.stream(self.source_index).map(|stream| stream.metadata().to_owned())
+    }
+}
+
+/// Name of the track that carries the mixed sources.
+pub(crate) const MIX_NAME: &str = "Mix";
+/// A mix is decoded to this rate and layout before the tracks are summed.
+const MIX_RATE: u32 = 48_000;
+
+/// The audio streams of `input`, in stream order.
+pub(crate) fn audio_indices(input: &Path) -> Result<Vec<usize>, String> {
+    let probe = ff::format::input(input)
+        .map_err(|e| format!("open input audio {}: {e}", input.display()))?;
+    Ok(probe
+        .streams()
+        .filter(|s| s.parameters().medium() == ff::media::Type::Audio)
+        .map(|s| s.index())
+        .collect())
+}
+
+/// Edit the audio of `input` per `plan`, as the tracks the export writes (mix first).
 pub(crate) fn encode_edited_audio(
     input: &Path,
     origin_us: i64,
     plan: &EditPlan,
 ) -> Result<Vec<EncodedAudioTrack>, String> {
-    let probe = ff::format::input(input)
-        .map_err(|e| format!("open input audio {}: {e}", input.display()))?;
-    let indices: Vec<_> = probe
-        .streams()
-        .filter(|s| s.parameters().medium() == ff::media::Type::Audio)
-        .map(|s| s.index())
-        .collect();
-    drop(probe);
-    encode_selected_audio(input, origin_us, plan, &indices)
+    let outputs = plan.audio_outputs(&audio_indices(input)?);
+    encode_outputs(input, origin_us, plan, &outputs)
 }
 
-/// Edit only the listed audio streams (each range time-stretched by its speed).
-pub(crate) fn encode_selected_audio(
+/// Edit and encode the listed output tracks (each range time-stretched by its speed).
+pub(crate) fn encode_outputs(
     input: &Path,
     origin_us: i64,
     plan: &EditPlan,
-    indices: &[usize],
+    outputs: &[AudioOutput],
 ) -> Result<Vec<EncodedAudioTrack>, String> {
-    indices
+    let setting = |index: usize| plan.audio.iter().find(|s| s.stream_index == index);
+    outputs
         .iter()
-        .copied()
-        .map(|index| {
-            let setting = plan
-                .audio
-                .iter()
-                .find(|setting| setting.stream_index == index);
-            encode_track(input, origin_us, &plan.ranges, index, setting)
+        .map(|output| match output {
+            AudioOutput::Track(index) => {
+                let (rate, layout, pcm) = decode_track(input, origin_us, &plan.ranges, *index, setting(*index), None)?;
+                encode_pcm(*index, false, rate, layout, pcm)
+            }
+            AudioOutput::Mix(indices) => encode_mix(input, origin_us, plan, indices),
         })
         .collect()
 }
 
-fn encode_track(
+/// Sum the edited tracks (each with its own gain) into one 48 kHz stereo track.
+fn encode_mix(input: &Path, origin_us: i64, plan: &EditPlan, indices: &[usize]) -> Result<EncodedAudioTrack, String> {
+    let first = *indices.first().ok_or("a mix needs at least one track")?;
+    let target = (MIX_RATE, ff::ChannelLayout::STEREO);
+    let mut sum: Vec<Vec<f32>> = Vec::new();
+    for &index in indices {
+        let setting = plan.audio.iter().find(|s| s.stream_index == index);
+        let (_, _, pcm) = decode_track(input, origin_us, &plan.ranges, index, setting, Some(target))?;
+        add_into(&mut sum, &pcm);
+    }
+    for channel in &mut sum {
+        channel.iter_mut().for_each(|sample| *sample = sample.clamp(-1.0, 1.0));
+    }
+    encode_pcm(first, true, target.0, target.1, sum)
+}
+
+/// Adds `pcm` channel by channel onto `sum`, growing it to the longer length.
+pub(crate) fn add_into(sum: &mut Vec<Vec<f32>>, pcm: &[Vec<f32>]) {
+    if sum.len() < pcm.len() {
+        sum.resize_with(pcm.len(), Vec::new);
+    }
+    for (total, channel) in sum.iter_mut().zip(pcm) {
+        if total.len() < channel.len() {
+            total.resize(channel.len(), 0.0);
+        }
+        total.iter_mut().zip(channel).for_each(|(t, s)| *t += s);
+    }
+}
+
+/// One stream's kept ranges as planar f32 (gain applied): its own rate and layout, or `target`.
+fn decode_track(
     input: &Path,
     origin_us: i64,
     ranges: &[TimeRange],
     stream_index: usize,
     setting: Option<&AudioSetting>,
-) -> Result<EncodedAudioTrack, String> {
+    target: Option<(u32, ff::ChannelLayout)>,
+) -> Result<(u32, ff::ChannelLayout, Vec<Vec<f32>>), String> {
     let mut ictx = ff::format::input(input)
         .map_err(|e| format!("open input for audio stream {stream_index}: {e}"))?;
     let (parameters, stream_tb) = {
@@ -81,6 +137,7 @@ fn encode_track(
     if layout.is_empty() {
         layout = ff::ChannelLayout::default(decoder.channels().max(1) as i32);
     }
+    let (rate, layout) = target.unwrap_or((rate, layout));
     let channels = layout.channels().max(1) as usize;
     let sample_format = ff::format::Sample::F32(ff::format::sample::Type::Planar);
     let gain = setting.map_or(1.0, |value| gain_multiplier(value.gain_db, value.muted));
@@ -144,7 +201,7 @@ fn encode_track(
     )?;
     flush_resampler(&mut resampler, &mut pcm, &mut next_source_sample, stream_index)?;
 
-    encode_pcm(stream_index, rate, layout, pcm.finish(rate, layout)?)
+    Ok((rate, layout, pcm.finish(rate, layout)?))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -258,6 +315,7 @@ fn flush_resampler(
 
 fn encode_pcm(
     source_index: usize,
+    mixed: bool,
     rate: u32,
     layout: ff::ChannelLayout,
     pcm: Vec<Vec<f32>>,
@@ -307,6 +365,7 @@ fn encode_pcm(
     drain_packets(&mut encoder, &mut packets, source_index)?;
     Ok(EncodedAudioTrack {
         source_index,
+        mixed,
         rate,
         encoder,
         packets,

@@ -174,8 +174,8 @@ impl Attempt<'_> {
                 .map_err(|e| format!("add output audio stream {}: {e}", track.source_index))?;
             stream.set_parameters(&track.encoder);
             stream.set_time_base(ff::Rational(1, track.rate as i32));
-            if let Some(source) = ictx.stream(track.source_index) {
-                stream.set_metadata(source.metadata().to_owned());
+            if let Some(tags) = track.metadata(&ictx) {
+                stream.set_metadata(tags);
             }
             audio_output_indices.push(stream.index());
         }

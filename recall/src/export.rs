@@ -30,6 +30,8 @@ mod edited_tests;
 #[cfg(test)]
 mod lossless_tests;
 #[cfg(test)]
+mod mix_tests;
+#[cfg(test)]
 mod stamp_jitter_tests;
 #[cfg(test)]
 mod test_media;
