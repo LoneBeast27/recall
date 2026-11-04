@@ -13,13 +13,16 @@ default = ["encode"]
 encode = ["dep:ffmpeg-next", "dep:rusqlite", "dep:uuid", "dep:wasapi"]
 
 [dependencies]
-ffmpeg-next = { version = "7.1", optional = true }
+# No "device" feature: nothing here opens a capture device, and it made recall.exe load avdevice-61.dll.
+ffmpeg-next = { version = "7.1", optional = true, default-features = false, features = ["codec", "format", "filter", "software-resampling", "software-scaling"] }
 rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 wasapi = { version = "0.19", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
-chrono = "0.4"
-winit = "0.30"
-wgpu = "29"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# Windows only: no X11/Wayland backends.
+winit = { version = "0.30", default-features = false, features = ["rwh_06"] }
+# The CPU-fallback tonemap path only: D3D12 + WGSL. No Vulkan, GL (opengl32.dll import) or Metal.
+wgpu = { version = "29", default-features = false, features = ["std", "parking_lot", "dx12", "wgsl"] }
 pollster = "0.4"
 windows-capture = "2.0"
 bytemuck = { version = "1", features = ["derive"] }

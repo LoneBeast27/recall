@@ -156,9 +156,11 @@ pub fn binary(variable: &str, executable: &str) -> Result<PathBuf, String> {
                 }
             }
         }
-        let candidate = root.join("bin").join(executable);
-        if candidate.is_file() {
-            return Ok(candidate);
+        // Installed: ffmpeg.exe sits next to the app and shares its FFmpeg DLLs (one copy).
+        for candidate in [root.join(executable), root.join("bin").join(executable)] {
+            if candidate.is_file() {
+                return Ok(candidate);
+            }
         }
     }
     Err(format!("{executable} not found; set {variable} to the packaged binary"))

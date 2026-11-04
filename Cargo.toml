@@ -11,3 +11,18 @@ members = ["recall", "recall-hdr", "recall-overlay"]
 # incremental rebuild +0.3 s. opt-level 2 bought 2% more for +1 s per rebuild.
 [profile.dev.package.recall]
 opt-level = 1
+
+# Release: whole-program optimization, one codegen unit, no symbols in the shipped exes.
+# panic stays "unwind" on purpose: the saver, mover, disk lanes and HDR guard catch a
+# panic with catch_unwind and keep running; "abort" would end the recorder instead.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+strip = "symbols"
+
+# Same code as release, with line tables in a PDB, for CPU traces (cargo build --profile profiling).
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+strip = "none"

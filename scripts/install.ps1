@@ -10,7 +10,7 @@
     recall.exe          capture engine (spawned by the controller)
     recall-overlay.exe  Recall Island overlay (notices + performance stats)
     *.dll               FFmpeg runtime
-    bin\ffmpeg.exe, ffprobe.exe (+ DLLs)  thumbnails and scrub frames
+    ffmpeg.exe, ffprobe.exe  thumbnails, scrub frames, light copies (use the DLLs above)
     cache\              created by the app; capped (Settings → Storage)
 
   Usage (PowerShell):
@@ -116,7 +116,10 @@ if (-not $NoBuild) {
 }
 
 # 4. Stage.
-New-Item -ItemType Directory -Force -Path $stage, (Join-Path $stage 'bin') | Out-Null
+New-Item -ItemType Directory -Force -Path $stage | Out-Null
+# Older installs kept a second copy of every FFmpeg DLL in bin\ (about 159 MB); ffmpeg.exe now sits next to them.
+$oldStageBin = Join-Path $stage 'bin'
+if (Test-Path $oldStageBin) { Remove-Item -LiteralPath $oldStageBin -Recurse -Force }
 foreach ($exe in @('target-gpui\release\recall-native.exe', 'target-dev\release\recall-hdr.exe', 'target-dev\release\recall.exe', 'target-dev\release\recall-overlay.exe')) {
   $from = Join-Path $repo $exe
   if (-not (Test-Path $from)) { throw "missing build output: $from" }
@@ -124,15 +127,20 @@ foreach ($exe in @('target-gpui\release\recall-native.exe', 'target-dev\release\
 }
 Get-ChildItem (Join-Path $ffmpegRoot 'bin\*.dll') | ForEach-Object {
   Copy-Item $_.FullName $stage -Force
-  Copy-Item $_.FullName (Join-Path $stage 'bin') -Force
 }
-Copy-Item (Join-Path $ffmpegRoot 'bin\ffmpeg.exe'), (Join-Path $ffmpegRoot 'bin\ffprobe.exe') (Join-Path $stage 'bin') -Force
+Copy-Item (Join-Path $ffmpegRoot 'bin\ffmpeg.exe'), (Join-Path $ffmpegRoot 'bin\ffprobe.exe') $stage -Force
 Copy-Item (Join-Path $repo 'recall-native\assets\recall.ico') $stage -Force
 
 # 5. Install (the cache folder is never touched).
-New-Item -ItemType Directory -Force -Path $InstallDir, (Join-Path $InstallDir 'bin') | Out-Null
+New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 Get-ChildItem $stage -File | ForEach-Object { Copy-Item $_.FullName $InstallDir -Force }
-Get-ChildItem (Join-Path $stage 'bin') -File | ForEach-Object { Copy-Item $_.FullName (Join-Path $InstallDir 'bin') -Force }
+# Remove the old bin\ copy: only the FFmpeg files this installer put there, then the folder if empty.
+$oldBin = Join-Path $InstallDir 'bin'
+if (Test-Path $oldBin) {
+  $ours = @(Get-ChildItem (Join-Path $ffmpegRoot 'bin') -File | Where-Object { $_.Extension -in '.dll', '.exe' } | ForEach-Object Name)
+  Get-ChildItem $oldBin -File | Where-Object { $ours -contains $_.Name } | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
+  if (-not (Get-ChildItem $oldBin -Force)) { Remove-Item -LiteralPath $oldBin -Force }
+}
 
 # 5b. Frame timing for the performance-stats island: membership in Performance Log Users.
 $perfLogUsers = 'S-1-5-32-559'
