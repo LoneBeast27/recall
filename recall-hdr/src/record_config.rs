@@ -77,6 +77,14 @@ pub struct RecordingCfg {
     pub cpu_mask: String,
     /// With no game target, capture the primary monitor as "Desktop".
     pub record_desktop_when_idle: bool,
+    /// Capture endpoint for the Mic track ("" = the Windows default mic;
+    /// `RECALL_AUDIO_MIC`). Exact friendly name as Windows shows it.
+    pub mic_device: String,
+    /// Record a Mic track at all (`RECALL_AUDIO_MIC_OFF=1` when false).
+    pub mic_enabled: bool,
+    /// Render endpoint recorded as Game in Desktop mode ("" = the Windows
+    /// default output; `RECALL_AUDIO_GAME`). Games record their own process.
+    pub desktop_audio_device: String,
     /// Save-length presets. Last field: TOML writes it as
     /// `[[recording.save_hotkeys]]` tables after the plain keys.
     pub save_hotkeys: Vec<SaveHotkey>,
@@ -101,6 +109,9 @@ impl Default for RecordingCfg {
             voice_app: String::new(),
             cpu_mask: "ffff0000".into(),
             record_desktop_when_idle: false,
+            mic_device: String::new(),
+            mic_enabled: true,
+            desktop_audio_device: String::new(),
             save_hotkeys: crate::record_hotkeys::default_save_hotkeys(),
         }
     }
@@ -249,7 +260,8 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
-/// Codec / rate / bitrate / quality tokens and the voice-chat exe name.
+/// Codec / rate / bitrate / quality tokens, audio device names and the
+/// voice-chat exe name.
 fn validate_quality(rec: &RecordingCfg) -> Result<(), String> {
     if !CODECS.contains(&rec.codec.as_str()) {
         return Err(format!("recording.codec '{}' must be one of {}", rec.codec, CODECS.join(" | ")));
@@ -292,6 +304,11 @@ pub fn merge_json(base: &mut Value, patch: &Value) {
 }
 
 /// Optional schema keys that are absent from the serialized form when unset.
+    for (key, name) in [("mic_device", &rec.mic_device), ("desktop_audio_device", &rec.desktop_audio_device)] {
+        if name.len() > 256 || name.chars().any(char::is_control) {
+            return Err(format!("recording.{key} must be an audio device name (at most 256 characters, one line)"));
+        }
+    }
 const OPTIONAL_KEYS: &[&str] = &["display.target_device_path"];
 
 /// Reject patch keys the schema does not have (typo guard) and `version`.

@@ -182,6 +182,7 @@ fn defaults_for_the_hotkey_features_and_quality() {
     assert_eq!(rec.voice_app, "", "voice track off by default");
     assert_eq!(StorageCfg::default().cap_gb, 0, "auto-clean off by default");
     assert!(validate(&Config::default()).is_ok(), "defaults never collide (incl. Alt+M)");
+    assert_eq!((rec.mic_device.as_str(), rec.mic_enabled, rec.desktop_audio_device.as_str()), ("", true, ""), "Windows default devices, mic on");
     assert_eq!(rec.save_seconds(0), 120, "0 = full buffer");
     assert_eq!(rec.save_seconds(30), 30);
     assert_eq!(rec.save_seconds(900), 120, "never more than the buffer");
@@ -197,6 +198,7 @@ fn every_new_key_patches_saves_and_reloads() {
             "codec": "hevc", "fps": 120, "bitrate_mbps": 50, "quality": "quality", "voice_app": "Discord.exe",
             "save_hotkeys": [{"hotkey": "Alt+N", "seconds": 0}, {"hotkey": "Alt+J", "seconds": 15}, {"hotkey": "Alt+L", "seconds": 60}]
         },
+            "mic_device": "Microphone (3- RODECaster Duo Chat)", "mic_enabled": false, "desktop_audio_device": "Game (RØDECaster)",
         "storage": {"cap_gb": 500},
         "hotkeys": {"advanced_enabled": false, "leader": "Ctrl+F12", "save_seconds": 45, "window_ms": 2000}
     });
@@ -208,6 +210,7 @@ fn every_new_key_patches_saves_and_reloads() {
         "recording.fps", "recording.bitrate_mbps", "recording.quality", "recording.voice_app",
         "recording.save_hotkeys", "storage.cap_gb", "hotkeys.advanced_enabled", "hotkeys.leader",
         "hotkeys.save_seconds", "hotkeys.window_ms",
+        "recording.mic_device", "recording.mic_enabled", "recording.desktop_audio_device",
     ] {
         assert!(out.touched(key), "{key} not reported as changed: {:?}", out.changed);
     }
@@ -221,6 +224,8 @@ fn every_new_key_patches_saves_and_reloads() {
     assert_eq!(back.storage.cap_gb, 500);
     assert_eq!(back.hotkeys, HotkeysCfg { advanced_enabled: false, leader: "Ctrl+F12".into(), save_seconds: 45, window_ms: 2000 });
     let _ = std::fs::remove_dir_all(store.path().parent().unwrap());
+    assert_eq!(back.recording.mic_device, "Microphone (3- RODECaster Duo Chat)", "non-ASCII device names survive TOML");
+    assert_eq!(back.recording.desktop_audio_device, "Game (RØDECaster)");
 }
 
 #[test]
@@ -235,6 +240,8 @@ fn new_keys_reject_bad_values() {
         (json!({"recording":{"voice_app":"C:\\Apps\\Discord.exe"}}), "recording.voice_app"),
         (json!({"recording":{"save_hotkeys": nine}}), "at most 8"),
         (json!({"recording":{"save_hotkeys":[{"hotkey":"Alt+N","seconds":9999}]}}), "seconds"),
+        (json!({"recording":{"mic_device":"Mic\u{7}Two"}}), "recording.mic_device"),
+        (json!({"recording":{"desktop_audio_device":"x".repeat(300)}}), "recording.desktop_audio_device"),
         (json!({"recording":{"save_hotkeys":[{"hotkey":"","seconds":0}]}}), "must not be empty"),
         (json!({"recording":{"save_hotkeys":[{"hotkey":"Alt+Q","seconds":0},{"hotkey":"alt+q","seconds":5}]}}), "must differ"),
         (json!({"recording":{"bookmark_hotkey":"Alt+N"}}), "must differ"),

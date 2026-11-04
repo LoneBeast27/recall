@@ -108,6 +108,8 @@ pub struct Root {
     /// Settings → Storage state (cache size slider, usage).
     pub cache: crate::views::storage_settings::CacheView,
     pub settings_tab: crate::views::settings::SettingsTab,
+    /// Settings device lists (loaded on first view) and open menus.
+    pub settings_ui: crate::views::settings_audio::SettingsUi,
     /// Where a press on the title bar started (a drag begins once the pointer moves).
     pub title_drag: Option<gpui::Point<gpui::Pixels>>,
     /// Recordings folder (last reported) + imported folders of old clips.
@@ -172,6 +174,7 @@ impl Root {
             fps_before: 60,
             cache: crate::views::storage_settings::CacheView::new(),
             settings_tab: Default::default(),
+            settings_ui: Default::default(),
             title_drag: None,
             folders: crate::services::library::folders::Folders::load(),
             controller_check_at: std::env::var_os("RECALL_NO_CONTROLLER").is_none().then(|| Instant::now() + Duration::from_millis(1500)),
