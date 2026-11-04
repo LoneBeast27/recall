@@ -271,3 +271,26 @@ fn an_open_waits_under_half_a_second_for_a_warm_up_copy_on_a_slow_drive() {
     assert_eq!(copy.metadata().unwrap().len(), 96 << 20);
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Thumbnails are never evicted, so the ones no listed clip owns go once they are old enough.
+#[test]
+fn orphan_thumbnails_go_once_old_and_owned_ones_stay() {
+    let root = temp_root("orphan-thumbs");
+    let thumbs = root.join("thumbs");
+    std::fs::create_dir_all(&thumbs).unwrap();
+    let month_ago = SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 3600);
+    for (name, old) in [("owned.jpg", true), ("orphan-old.jpg", true), ("orphan-new.jpg", false)] {
+        std::fs::write(thumbs.join(name), [0u8; 100]).unwrap();
+        if old {
+            std::fs::File::options().write(true).open(thumbs.join(name)).unwrap().set_modified(month_ago).unwrap();
+        }
+    }
+    let owned: std::collections::HashSet<String> = ["owned".to_string()].into();
+    assert_eq!(budget::sweep_orphan_thumbs(&root, &owned, budget::ORPHAN_THUMB_AGE), 100);
+    assert!(thumbs.join("owned.jpg").exists(), "a listed clip keeps its thumbnail");
+    assert!(!thumbs.join("orphan-old.jpg").exists(), "an old orphan goes");
+    assert!(thumbs.join("orphan-new.jpg").exists(), "a recent orphan stays (its drive may be offline)");
+    assert_eq!(budget::sweep_orphan_thumbs(&root, &Default::default(), std::time::Duration::ZERO), 0, "an empty listing deletes nothing");
+    assert!(thumbs.join("orphan-new.jpg").exists());
+    let _ = std::fs::remove_dir_all(root);
+}
