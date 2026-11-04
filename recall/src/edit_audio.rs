@@ -89,7 +89,7 @@ fn encode_mix(input: &Path, origin_us: i64, plan: &EditPlan, indices: &[usize]) 
         let (_, _, pcm) = decode_track(input, origin_us, &plan.ranges, index, setting, Some(target))?;
         add_into(&mut sum, &pcm);
     }
-    // Two loud sources summed can pass full scale: headroom + a limiter, never a hard clip.
+    // Unity-gain sum; two loud sources can pass full scale, so a limiter, never a hard clip.
     crate::export::mix_limit::limit_mix(&mut sum, target.0);
     encode_pcm(first, true, target.0, target.1, sum)
 }
