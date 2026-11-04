@@ -69,6 +69,74 @@ fn denied_and_none_override_stems_are_never_targets() {
     assert!(!is_target("  ", true, &cfg));
 }
 
+const REMOTE_DESKTOP: &[&str] = &[
+    "mstsc", "msrdc", "msrdcw", "rdclient", "rdclient.windows", "windows365", "windowsapp",
+    "rdcman", "vmconnect", "vmware-remotemks", "virtualboxvm", "mremoteng", "royalts",
+    "remotedesktopmanager", "remotedesktopmanager64", "anydesk", "teamviewer", "rustdesk",
+    "parsecd", "moonlight", "remoting_desktop", "remoting_host", "vncviewer", "tvnviewer",
+    "nomachine", "nxplayer", "splashtop", "strwinclt",
+];
+const NEW_LAUNCHERS: &[&str] = &[
+    "upc", "uplay", "ubisoftconnect", "origin", "xboxpcapp", "xboxapp", "gamingservicesui",
+    "amazongames", "amazon games ui", "playnite.fullscreenapp", "playnite.desktopapp",
+];
+
+#[test]
+fn remote_desktop_and_launchers_are_never_targets_even_fullscreen() {
+    let cfg = user_cfg();
+    for &stem in REMOTE_DESKTOP.iter().chain(NEW_LAUNCHERS) {
+        let upper = stem.to_ascii_uppercase();
+        for s in [stem.to_string(), upper.clone(), format!("{stem}.exe"), format!("{upper}.EXE")] {
+            assert!(!is_target(&s, true, &cfg), "{s} fullscreen must not be recorded");
+            assert!(classify_event(&ev(&s, "Remote Desktop", 3, 0x3, true), &cfg).is_none(), "{s}");
+            assert!(classify_event(&steam_ev(&s), &cfg).is_none(), "{s} in a Steam library");
+        }
+    }
+}
+
+#[test]
+fn the_logged_false_positive_is_denied() {
+    // 2026-11-04: record: target -> "Remote Desktop" (msrdc.exe, pid 484, ...)
+    let cfg = user_cfg();
+    assert!(classify_event(&ev("msrdc", "Remote Desktop", 484, 0xdec027e, true), &cfg).is_none());
+}
+
+#[test]
+fn steam_remote_play_and_exe_suffixed_games_stay_targets() {
+    let cfg = user_cfg();
+    assert!(is_target("streaming_client", true, &cfg), "Steam Remote Play is recorded on purpose");
+    assert!(is_target("VALORANT-Win64-Shipping.exe", true, &cfg));
+    assert!(is_target("exe", true, &cfg), "a stem that is only 'exe' is untouched");
+    assert!(!is_target(".exe", true, &cfg), "empty after the suffix");
+}
+
+#[test]
+fn deny_beats_a_game_override_for_new_stems() {
+    // Existing precedence: a denied stem is never a target, even with a game override.
+    let mut cfg = user_cfg();
+    cfg.overrides.push(Override { exe: "msrdc".into(), kind: RuleKind::SdrGame, clamp: None });
+    cfg.overrides.push(Override { exe: "parsecd".into(), kind: RuleKind::HdrGame, clamp: None });
+    assert!(!is_target("msrdc", true, &cfg));
+    assert!(!is_target("parsecd", false, &cfg));
+}
+
+#[test]
+fn fullscreen_game_after_remote_desktop_commits_after_start_debounce() {
+    let cfg = user_cfg();
+    let t0 = Instant::now();
+    let mut tr = TargetTracker::new(TARGET_DEBOUNCE, START_DEBOUNCE);
+    tr.on_foreground(classify_event(&ev("msrdc", "Remote Desktop", 484, 0x1, true), &cfg), t0);
+    assert!(!tr.poll(t0 + Duration::from_secs(10)), "Remote Desktop never commits");
+    assert!(tr.current().is_none());
+    let t1 = t0 + Duration::from_secs(10);
+    let game = classify_event(&ev("cs2", "Counter-Strike 2", 9, 0x9, true), &cfg);
+    tr.on_foreground(game, t1);
+    assert_eq!(START_DEBOUNCE, Duration::from_millis(300));
+    assert!(!tr.poll(t1 + Duration::from_millis(299)));
+    assert!(tr.poll(t1 + START_DEBOUNCE), "first start stays 300 ms");
+    assert_eq!(tr.current().unwrap().pid, 9);
+}
+
 #[test]
 fn default_game_class_none_still_records_fullscreen_games() {
     // HDR rules use default_game_class; capture does not.
