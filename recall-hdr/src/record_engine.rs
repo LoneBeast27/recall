@@ -163,6 +163,7 @@ pub fn engine_settings_changed(old: &RecordingCfg, new: &RecordingCfg) -> bool {
         || old.mic_enabled != new.mic_enabled
         || old.desktop_audio_device.trim() != new.desktop_audio_device.trim()
         || old.moments_gallery != new.moments_gallery
+        || crate::record_app_audio::changed(&old.app_audio, &new.app_audio)
 }
 
 /// Environment for one engine spawn: `Some` sets, `None` removes. Every target
@@ -194,6 +195,7 @@ pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&s
         ("RECALL_QUALITY".to_string(), Some(engine_quality(&rec.quality).to_string())),
         ("RECALL_AUDIO_VOICE_EXE".to_string(), (!voice.is_empty()).then(|| voice.to_string())),
         ("RECALL_MOMENTS".to_string(), Some(if rec.moments_gallery { "1" } else { "0" }.to_string())),
+        (crate::record_app_audio::APPS_ENV.to_string(), crate::record_app_audio::engine_value(&rec.app_audio)),
     ];
     let (hwnd, name, pid) = match target {
         EngineTarget::Window(t) => (
@@ -283,6 +285,7 @@ mod tests {
             RecordingCfg { mic_enabled: false, ..base.clone() },
             RecordingCfg { desktop_audio_device: "Speakers (USB)".into(), ..base.clone() },
             RecordingCfg { moments_gallery: true, ..base.clone() },
+            RecordingCfg { app_audio: vec![crate::record_app_audio::AppAudioSource { exe: "a.exe".into(), label: String::new() }], ..base.clone() },
             RecordingCfg { output_dir: "D:\\c".into(), ..base.clone() },
         ] {
             assert!(engine_settings_changed(&base, &changed), "{changed:?}");
@@ -401,5 +404,16 @@ mod tests {
         assert_eq!(has(&env, "RECALL_AUDIO_MIC"), Some(Some("Microphone (USB Audio Device)".into())));
         assert_eq!(has(&env, "RECALL_AUDIO_GAME"), Some(Some("Speakers (USB Audio Device)".into())));
         assert_eq!(has(&env, "RECALL_AUDIO_MIC_OFF"), Some(Some("1".into())));
+    }
+
+    #[test]
+    fn app_tracks_reach_the_engine_and_an_empty_list_removes_the_variable() {
+        use crate::record_app_audio::{AppAudioSource, APPS_ENV};
+        let has = |env: &[(String, Option<String>)]| env.iter().find(|(n, _)| n == APPS_ENV).map(|(_, v)| v.clone());
+        let plain = engine_env(&EngineTarget::Desktop, &RecordingCfg::default(), None);
+        assert_eq!(has(&plain), Some(None), "removed, so an inherited list never leaks into a recording");
+        let rec = RecordingCfg { app_audio: vec![AppAudioSource { exe: "a.exe".into(), label: "Source A".into() }], ..RecordingCfg::default() };
+        let env = engine_env(&EngineTarget::Desktop, &rec, None);
+        assert_eq!(has(&env), Some(Some(r#"[{"exe":"a.exe","label":"Source A"}]"#.into())));
     }
 }

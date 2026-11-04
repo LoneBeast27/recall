@@ -4,6 +4,7 @@ pub mod folders_settings;
 pub mod library;
 pub mod pages;
 pub mod settings;
+pub mod settings_apps;
 pub mod settings_audio;
 pub mod settings_capture;
 pub mod settings_keys;

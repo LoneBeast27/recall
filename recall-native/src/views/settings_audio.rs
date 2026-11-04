@@ -20,6 +20,9 @@ use crate::{
 pub struct SettingsUi {
     pub devices: AudioDevices,
     pub device_menu: Option<DeviceMenu>,
+    /// Settings → Clip → Audio → App audio: the "Add app…" list and whether it is open.
+    pub playing_apps: crate::services::audio_apps::PlayingApps,
+    pub app_menu: bool,
     /// The Shortcuts chip waiting for new keys.
     pub capture: Option<crate::views::settings_keys::ShortcutSlot>,
 }

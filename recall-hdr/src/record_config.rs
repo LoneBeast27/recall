@@ -88,6 +88,9 @@ pub struct RecordingCfg {
     /// Also list each saved clip in the SteelSeries Moments gallery
     /// (`RECALL_MOMENTS=1`). Off unless the person turns it on.
     pub moments_gallery: bool,
+    /// Apps recorded as tracks of their own, in track order (`RECALL_AUDIO_APPS`).
+    /// A table array: TOML writes it after the plain keys.
+    pub app_audio: Vec<crate::record_app_audio::AppAudioSource>,
     /// Save-length presets. Last field: TOML writes it as
     /// `[[recording.save_hotkeys]]` tables after the plain keys.
     pub save_hotkeys: Vec<SaveHotkey>,
@@ -116,6 +119,7 @@ impl Default for RecordingCfg {
             mic_enabled: true,
             desktop_audio_device: String::new(),
             moments_gallery: false,
+            app_audio: Vec::new(),
             save_hotkeys: crate::record_hotkeys::default_save_hotkeys(),
         }
     }
@@ -317,6 +321,7 @@ fn validate_quality(rec: &RecordingCfg) -> Result<(), String> {
             return Err(format!("recording.{key} must be an audio device name (at most 256 characters, one line)"));
         }
     }
+    crate::record_app_audio::validate(&rec.app_audio)?;
     let voice = rec.voice_app.trim();
     if voice.len() > 64 || voice.chars().any(|c| matches!(c, '\\' | '/' | ':') || c.is_control()) {
         return Err(format!("recording.voice_app '{voice}' must be an exe name like Discord.exe (no folders)"));

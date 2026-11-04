@@ -367,3 +367,21 @@ fn cpu_mask_fits_the_machine() {
     assert_eq!(fit_cpu_mask(auto, 0xffff_ffff), Some(0xffff_0000), "auto, 32 threads: high half");
     assert_eq!(fit_cpu_mask(auto, 0xfff), Some(0xfc0), "auto, 12 threads: high half");
 }
+
+#[test]
+fn app_audio_list_survives_a_patch_and_a_toml_round_trip() {
+    let store = temp_store("appaudio");
+    let base = store.load();
+    assert!(base.recording.app_audio.is_empty(), "no app tracks until the person adds one");
+    let patch = json!({"recording": {"app_audio": [{"exe": "player.exe", "label": "Source A"}, {"exe": "chat.exe"}]}});
+    let out = apply_patch(&base, &patch).unwrap();
+    assert!(out.touched("recording.app_audio"), "{:?}", out.changed);
+    store.save(&out.config).unwrap();
+    let text = std::fs::read_to_string(store.path()).unwrap();
+    assert!(text.contains("[[recording.app_audio]]"), "a TOML table array:\n{text}");
+    let back = store.load();
+    assert_eq!(back, out.config);
+    assert_eq!(back.recording.app_audio[1].label, "", "a missing label means the exe name");
+    let twice = json!({"recording": {"app_audio": [{"exe": "a.exe"}, {"exe": "A.EXE"}]}});
+    assert!(apply_patch(&base, &twice).unwrap_err().contains("twice"));
+}
