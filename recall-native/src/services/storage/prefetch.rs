@@ -67,7 +67,14 @@ pub fn set_recorder_busy(busy: bool) {
 }
 
 pub fn recorder_busy() -> bool {
-    RECORDER_BUSY.load(Ordering::Relaxed)
+    RECORDER_BUSY.load(Ordering::Relaxed) || fake_recording()
+}
+
+/// Checks only: `RECALL_FAKE_RECORDING=<file>` makes the recorder count as busy while that file
+/// exists, so an offscreen instance without a recorder can be shown a game starting and ending.
+fn fake_recording() -> bool {
+    static FILE: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+    FILE.get_or_init(|| std::env::var_os("RECALL_FAKE_RECORDING").filter(|v| !v.is_empty()).map(PathBuf::from)).as_ref().is_some_and(|file| file.exists())
 }
 
 static RECORDER_CONNECTED: AtomicBool = AtomicBool::new(false);
