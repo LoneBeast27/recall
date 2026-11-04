@@ -18,6 +18,7 @@ mod edited;
 pub(crate) mod edit_pcm;
 pub(crate) mod keyframes;
 mod lossless;
+pub(crate) mod mix_limit;
 mod paths;
 pub mod project;
 mod size_cap;

@@ -78,7 +78,8 @@ pub(crate) fn encode_outputs(
         .collect()
 }
 
-/// Sum the edited tracks (each with its own gain) into one 48 kHz stereo track.
+/// Sum the edited tracks (each with its own gain) into one 48 kHz stereo track, then
+/// level it (`mix_limit`). Only called for two or more tracks: a lone track is never touched.
 fn encode_mix(input: &Path, origin_us: i64, plan: &EditPlan, indices: &[usize]) -> Result<EncodedAudioTrack, String> {
     let first = *indices.first().ok_or("a mix needs at least one track")?;
     let target = (MIX_RATE, ff::ChannelLayout::STEREO);
@@ -88,9 +89,8 @@ fn encode_mix(input: &Path, origin_us: i64, plan: &EditPlan, indices: &[usize]) 
         let (_, _, pcm) = decode_track(input, origin_us, &plan.ranges, index, setting, Some(target))?;
         add_into(&mut sum, &pcm);
     }
-    for channel in &mut sum {
-        channel.iter_mut().for_each(|sample| *sample = sample.clamp(-1.0, 1.0));
-    }
+    // Two loud sources summed can pass full scale: headroom + a limiter, never a hard clip.
+    crate::export::mix_limit::limit_mix(&mut sum, target.0);
     encode_pcm(first, true, target.0, target.1, sum)
 }
 
