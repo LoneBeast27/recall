@@ -9,7 +9,7 @@ fn scratch(tag: &str) -> PathBuf {
 }
 
 fn probe(name: &str, mtime_secs: u64) -> ProbeClip {
-    ProbeClip { path: format!(r"V:\clips\{name}.mp4"), bytes: 1000, mtime_secs }
+    ProbeClip { path: format!(r"E:\clips\{name}.mp4"), bytes: 1000, mtime_secs }
 }
 
 /// A recorder-shaped clip: `ftyp`, a patterned `mdat`, the index (`moov`) at the end.

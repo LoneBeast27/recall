@@ -79,7 +79,7 @@ fn rows() -> Vec<(String, Duration)> {
 }
 
 fn saved_notice() -> Result<NoticeView, String> {
-    let event = json!({"mod":"engine","event":{"type":"saved","path":"V:\\c\\VALORANT__2026-10-30__21-14-03.mp4","seconds":30.0}});
+    let event = json!({"mod":"engine","event":{"type":"saved","path":"E:\\c\\VALORANT__2026-10-30__21-14-03.mp4","seconds":30.0}});
     notice_from(&[event]).ok_or_else(|| "the saved event shows no notice".into())
 }
 

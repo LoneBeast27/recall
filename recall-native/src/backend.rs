@@ -346,7 +346,7 @@ mod tests {
     #[test] fn library_dir_from_uses_the_recordings_folder_and_falls_back_when_blank(){
         if std::env::var_os("RECALL_OUT_DIR").is_some(){return;} // the env var wins over both cases
         let folders=|r:Option<&str>|Folders{recordings:r.map(str::to_owned),..Folders::default()};
-        assert_eq!(library_dir_from(&folders(Some(r"V:\Recall\Raw"))),PathBuf::from(r"V:\Recall\Raw"));
+        assert_eq!(library_dir_from(&folders(Some(r"E:\Recall\Raw"))),PathBuf::from(r"E:\Recall\Raw"));
         let default=crate::services::library::folders::default_recordings_dir();
         assert!(default.is_absolute()&&default.ends_with("Recall"),"{default:?}");
         assert_eq!(library_dir_from(&folders(Some("  "))),default);
@@ -363,7 +363,7 @@ mod tests {
         for label in ["Mic","mic","MIC","SFX","Bgm","Sub","Tom"]{assert!(!generic_audio_name(label),"{label}");}
         for code in ["eng","en","fre","jpn","ENG","und"," eng ","","a"]{assert!(generic_audio_name(code),"{code}");}
         let track=|name:&str,stream_index|crate::edit_model::AudioTrackInfo{stream_index,name:name.into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new()};
-        let mut info=ClipInfo{path:"V:/clips/VALORANT__2025-03-01__20-10-11.mp4".into(),duration:1.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![track("eng",1),track("Game",2),track("Mic",3)],keyframes:Vec::new()};
+        let mut info=ClipInfo{path:"E:/clips/VALORANT__2025-03-01__20-10-11.mp4".into(),duration:1.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![track("eng",1),track("Game",2),track("Mic",3)],keyframes:Vec::new()};
         normalize_audio_names(&mut info);
         assert_eq!(info.audio.iter().map(|a|a.name.as_str()).collect::<Vec<_>>(),["Audio track 1","Game","Mic"]);
     }

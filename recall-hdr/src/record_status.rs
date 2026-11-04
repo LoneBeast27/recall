@@ -192,7 +192,7 @@ mod tests {
             fps_source: "off",
             hdr: &snap,
             paused: false,
-            long_recording: json!({"active":true,"path":"V:\\c\\G__rec.mp4","started_secs":1790000000.5}),
+            long_recording: json!({"active":true,"path":"E:\\c\\G__rec.mp4","started_secs":1790000000.5}),
             pending_restart: true,
             leader_label: "Alt `",
         });
@@ -207,7 +207,7 @@ mod tests {
                 "bookmark_hotkey":"","screenshot_hotkey":"","record_hotkey":"",
                 "advanced_enabled":true,"leader":"Alt+Backquote","leader_label":"Alt `","chord_save_seconds":30,
                 "mic_muted":true,
-                "long_recording":{"active":true,"path":"V:\\c\\G__rec.mp4","started_secs":1790000000.5},
+                "long_recording":{"active":true,"path":"E:\\c\\G__rec.mp4","started_secs":1790000000.5},
                 "pending_restart":true,
                 "overlay":{"enabled":false,"corner":"top-right","running":false,"stats_style":"minimal"},
                 "overlay_stats":false,"fps_source":"off",

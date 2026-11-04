@@ -392,14 +392,14 @@ mod tests {
             assert_eq!(has(&plain, key), None, "{key}: Windows default = inherited, not removed");
         }
         let rec = RecordingCfg {
-            mic_device: " Microphone (3- RODECaster Duo Chat) ".into(),
-            desktop_audio_device: "Game (RØDECaster)".into(),
+            mic_device: " Microphone (USB Audio Device) ".into(),
+            desktop_audio_device: "Speakers (USB Audio Device)".into(),
             mic_enabled: false,
             ..RecordingCfg::default()
         };
         let env = engine_env(&EngineTarget::Desktop, &rec, None);
-        assert_eq!(has(&env, "RECALL_AUDIO_MIC"), Some(Some("Microphone (3- RODECaster Duo Chat)".into())));
-        assert_eq!(has(&env, "RECALL_AUDIO_GAME"), Some(Some("Game (RØDECaster)".into())));
+        assert_eq!(has(&env, "RECALL_AUDIO_MIC"), Some(Some("Microphone (USB Audio Device)".into())));
+        assert_eq!(has(&env, "RECALL_AUDIO_GAME"), Some(Some("Speakers (USB Audio Device)".into())));
         assert_eq!(has(&env, "RECALL_AUDIO_MIC_OFF"), Some(Some("1".into())));
     }
 }

@@ -132,7 +132,7 @@ fn library_favourites_parse_and_corruption_is_an_error() {
 
 #[test]
 fn companions_are_the_clip_its_thumbnails_and_sidecars_only() {
-    let dir = Path::new(r"V:\ALL RECORDINGS");
+    let dir = Path::new(r"E:\Clips");
     let l = listing(
         vec![clip("G__2026-10-22__14-05-09.mp4", 1, 1), clip("G__2026-10-22__14-05-09-2.mp4", 1, 2)],
         &["G__2026-10-22__14-05-09.recall-marks.json", "G__2026-10-22__14-05-09.mp4.recall-edit.json", "G__2026-10-22__14-05-09-2.recall-marks.json"],

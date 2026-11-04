@@ -31,7 +31,7 @@
 //! SET is UNDOCUMENTED device-info type `0xFFFFFFEE` (reverse-engineered by
 //! ledoge, whose novideo_srgb CSC `clamp.rs` also ports): struct
 //! `{header, u32 SDRWhiteLevel, u8 finalValue=1}`, inverse nits->level =
-//! nits*1000/80. Panel note: PG27AQDP QD-OLED has aggressive ABL, so the sane
+//! nits*1000/80. Panel note: QD-OLED panels have aggressive ABL, so the sane
 //! SDR-white default while HDR is on is ~200-250 nits (level 2500..=3125).
 
 use std::os::windows::ffi::OsStringExt;
@@ -68,7 +68,7 @@ pub struct TargetId {
 }
 
 impl TargetId {
-    /// The friendly monitor name this target resolved from (e.g. "PG27AQDP").
+    /// The friendly monitor name this target resolved from (e.g. "Monitor 27Q").
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -259,7 +259,7 @@ pub fn enumerate_targets() -> Result<Vec<(String, TargetId)>, String> {
     Ok(out)
 }
 
-/// Resolve a display by its `monitorFriendlyDeviceName` (e.g. "PG27AQDP").
+/// Resolve a display by its `monitorFriendlyDeviceName` (e.g. "Monitor 27Q").
 /// Case-insensitive exact match. Errors if not found among active targets.
 /// An empty name means the primary display (the default on a new PC).
 pub fn resolve_target(friendly_name_wanted: &str) -> Result<TargetId, String> {

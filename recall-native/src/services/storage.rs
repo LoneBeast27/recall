@@ -257,7 +257,7 @@ pub(crate) fn valid_file(path: &Path) -> bool {
     path.metadata().map(|m| m.is_file() && m.len() > 100).unwrap_or(false)
 }
 
-/// `\\?\V:\x` → `V:\x` for display and volume lookups.
+/// `\\?\E:\x` → `E:\x` for display and volume lookups.
 pub fn plain_path(path: &Path) -> PathBuf {
     let text = path.to_string_lossy();
     match text.strip_prefix(r"\\?\") {

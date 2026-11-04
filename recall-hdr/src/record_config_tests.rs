@@ -7,7 +7,7 @@ use serde_json::json;
 const USER_TOML: &str = r#"
 version = 1
 [display]
-target_friendly_name = "PG27AQDP"
+target_friendly_name = "Monitor 27Q"
 [behavior]
 default_game_class = "sdr_game"
 default_clamp = "punchy"
@@ -199,7 +199,7 @@ fn every_new_key_patches_saves_and_reloads() {
         "recording": {
             "bookmark_hotkey": "Ctrl+F7", "screenshot_hotkey": "", "record_hotkey": "Ctrl+F8",
             "codec": "hevc", "fps": 120, "bitrate_mbps": 50, "quality": "quality", "voice_app": "Discord.exe",
-            "mic_device": "Microphone (3- RODECaster Duo Chat)", "mic_enabled": false, "desktop_audio_device": "Game (RØDECaster)",
+            "mic_device": "Microphone (USB Audio Device)", "mic_enabled": false, "desktop_audio_device": "Lautsprecher (Kopfhörer USB Audio)",
             "save_hotkeys": [{"hotkey": "Alt+N", "seconds": 0}, {"hotkey": "Alt+J", "seconds": 15}, {"hotkey": "Alt+L", "seconds": 60}]
         },
         "storage": {"cap_gb": 500},
@@ -227,8 +227,8 @@ fn every_new_key_patches_saves_and_reloads() {
     assert_eq!(back.recording.screenshot_hotkey, "", "empty = off survives");
     assert_eq!(back.storage.cap_gb, 500);
     assert_eq!(back.midi.input, "Launchpad X");
-    assert_eq!(back.recording.mic_device, "Microphone (3- RODECaster Duo Chat)", "non-ASCII device names survive TOML");
-    assert_eq!(back.recording.desktop_audio_device, "Game (RØDECaster)");
+    assert_eq!(back.recording.mic_device, "Microphone (USB Audio Device)");
+    assert_eq!(back.recording.desktop_audio_device, "Lautsprecher (Kopfhörer USB Audio)", "non-ASCII device names survive TOML");
     assert_eq!(back.hotkeys, HotkeysCfg { advanced_enabled: false, leader: "Ctrl+F12".into(), save_seconds: 45, window_ms: 2000 });
     let _ = std::fs::remove_dir_all(store.path().parent().unwrap());
 }

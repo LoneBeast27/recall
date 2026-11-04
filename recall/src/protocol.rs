@@ -220,17 +220,17 @@ mod tests {
     #[test]
     fn saved_keeps_its_fields_and_adds_staging() {
         let staged = Outbound::Saved {
-            path: r"V:\ALL RECORDINGS\G__x.mp4".into(),
+            path: r"E:\Clips\G__x.mp4".into(),
             seconds: 120.0,
             frames: 7200,
             bytes: 400,
             elapsed_ms: 812,
             staged: true,
-            staged_path: Some(r"L:\Recall\cache\staging\G__x.mp4".into()),
+            staged_path: Some(r"F:\Recall\cache\staging\G__x.mp4".into()),
         };
         assert_eq!(
             wire(&staged),
-            r#"{"type":"saved","path":"V:\\ALL RECORDINGS\\G__x.mp4","seconds":120.0,"frames":7200,"bytes":400,"elapsed_ms":812,"staged":true,"staged_path":"L:\\Recall\\cache\\staging\\G__x.mp4"}"#
+            r#"{"type":"saved","path":"E:\\Clips\\G__x.mp4","seconds":120.0,"frames":7200,"bytes":400,"elapsed_ms":812,"staged":true,"staged_path":"F:\\Recall\\cache\\staging\\G__x.mp4"}"#
         );
         let direct = Outbound::Saved {
             path: "a.mp4".into(),
@@ -249,18 +249,18 @@ mod tests {
 
     #[test]
     fn clip_move_events_match_the_wire_shape() {
-        let moved = Outbound::ClipMoved { path: r"V:\c\G.mp4".into(), elapsed_ms: 9549, kept_path: None };
-        assert_eq!(wire(&moved), r#"{"type":"clip_moved","path":"V:\\c\\G.mp4","elapsed_ms":9549}"#);
-        let kept = Outbound::ClipMoved { path: r"V:\c\G.mp4".into(), elapsed_ms: 9549, kept_path: Some(r"L:\s\kept\G.mp4".into()) };
-        assert_eq!(wire(&kept), r#"{"type":"clip_moved","path":"V:\\c\\G.mp4","elapsed_ms":9549,"kept_path":"L:\\s\\kept\\G.mp4"}"#);
+        let moved = Outbound::ClipMoved { path: r"E:\c\G.mp4".into(), elapsed_ms: 9549, kept_path: None };
+        assert_eq!(wire(&moved), r#"{"type":"clip_moved","path":"E:\\c\\G.mp4","elapsed_ms":9549}"#);
+        let kept = Outbound::ClipMoved { path: r"E:\c\G.mp4".into(), elapsed_ms: 9549, kept_path: Some(r"F:\s\kept\G.mp4".into()) };
+        assert_eq!(wire(&kept), r#"{"type":"clip_moved","path":"E:\\c\\G.mp4","elapsed_ms":9549,"kept_path":"F:\\s\\kept\\G.mp4"}"#);
         let failed = Outbound::ClipMoveFailed {
-            path: r"V:\c\G.mp4".into(),
-            staged_path: r"L:\s\G.mp4".into(),
+            path: r"E:\c\G.mp4".into(),
+            staged_path: r"F:\s\G.mp4".into(),
             reason: "disk full".into(),
         };
         assert_eq!(
             wire(&failed),
-            r#"{"type":"clip_move_failed","path":"V:\\c\\G.mp4","staged_path":"L:\\s\\G.mp4","reason":"disk full"}"#
+            r#"{"type":"clip_move_failed","path":"E:\\c\\G.mp4","staged_path":"F:\\s\\G.mp4","reason":"disk full"}"#
         );
     }
 }
