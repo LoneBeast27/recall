@@ -98,6 +98,17 @@ fn a_copied_clip_keeps_its_staged_copy_and_its_save_time() {
 }
 
 #[test]
+fn kept_cap_is_half_the_app_cache_budget() {
+    let cache = temp_dir("cache");
+    let staging = cache.join("staging");
+    std::fs::create_dir_all(&staging).unwrap();
+    assert_eq!(kept_cap(&staging), 1 << 30, "no storage.json: half the default 2 GiB");
+    std::fs::write(cache.join("storage.json"), br#"{ "cache_budget_bytes": 4294967296 }"#).unwrap();
+    assert_eq!(kept_cap(&staging), 2 << 30, "half of a 4 GiB budget");
+    let _ = std::fs::remove_dir_all(&cache);
+}
+
+#[test]
 fn kept_copies_stop_at_the_cap_while_the_app_is_away() {
     let (stage, out) = (temp_dir("s"), temp_dir("o"));
     let (a, _) = staged(&stage, "A.mp4", 6000);
