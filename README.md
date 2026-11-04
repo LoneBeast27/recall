@@ -82,8 +82,15 @@ hook loaded crashed VALORANT, so it was removed on 2026-10-26.)
 | Media | clip folders, storage limit (oldest clips go to the Recycle Bin; favourites and edited clips stay), SSD cache size |
 | Shortcuts | the in-game shortcuts and the two-step switch |
 
-The HDR page switches the monitor between HDR and SDR per game; the Audio page shows live
-meters for every source.
+The Audio page shows live meters for every source.
+
+HDR switching (turning the monitor's HDR on for HDR games, the manual HDR toggle and its
+hotkey, the desktop colour profile, the NvAPI clamp test and the Display & HDR page) is
+experimental and shelved since 2026-11-04: the recorder never changes a display setting
+and the page is hidden, even if `behavior.hdr_auto = true` is in the config. The code is
+kept; start the recorder and the app with `RECALL_EXPERIMENTAL_HDR=1` to try it (see
+`recall-hdr/src/hdr_gate.rs`). Recording itself is unchanged: an HDR desktop is still tone
+mapped into SDR clips.
 
 On an SDR display Recall captures 8-bit colour (half the GPU memory traffic); on HDR it
 captures half-float. When the display turns from SDR to HDR while a game records (an HDR
