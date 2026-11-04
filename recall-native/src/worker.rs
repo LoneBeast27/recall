@@ -167,8 +167,8 @@ fn run_job(job: Job, tx: &Sender<Done>, watcher: &ClipWatcher) -> Done {
         Job::List => {
             // Every folder change ends in a listing. Armed first, so nothing falls between.
             watcher.set_roots(backend::clip_roots());
-            let result = backend::list_clips().map(|entries| {
-                prefetch(&entries, tx.clone());
+            let result = backend::list_clips_checked().map(|(entries, complete)| {
+                prefetch(&entries, complete, tx.clone());
                 Listing { sidecars: library::sidecar_index(&entries), drive: library::drive_space(&backend::library_dir()), entries }
             });
             Done::Clips(result)
@@ -251,7 +251,7 @@ fn send_scrub(path: String, tx: &Sender<Done>) {
 
 /// Smart-cache plan for the listed clips. Durations already in the metadata store are
 /// skipped; results arrive as ordinary `Done::Thumb` / `Duration` / `Scrub`.
-fn prefetch(entries: &[ClipEntry], tx: Sender<Done>) {
+fn prefetch(entries: &[ClipEntry], complete: bool, tx: Sender<Done>) {
     let store = MetaStore::load();
     let records = library::build_records(entries, &store);
     let clips = entries
@@ -271,6 +271,7 @@ fn prefetch(entries: &[ClipEntry], tx: Sender<Done>) {
         .collect();
     storage::start_prefetch(
         clips,
+        complete,
         Arc::new(move |event| {
             let done = match event {
                 PrefetchEvent::Thumb(path, result) => Done::Thumb(path, result),

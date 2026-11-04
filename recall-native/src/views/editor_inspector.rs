@@ -6,7 +6,7 @@ use gpui::{
 
 use super::{INSPECTOR_W, track_name};
 use crate::{
-    edit_model::ExportMode,
+    edit_model::{AudioOutput, ClipInfo, ExportMode},
     editor_state::{Drag, FPS_PRESETS, GAIN_MAX, GAIN_MIN, timecode},
     root::Root,
     services::library,
@@ -50,6 +50,7 @@ impl Root {
             let setting = self.ed.setting(track.stream_index).cloned();
             let gain = setting.as_ref().map_or(0.0, |s| s.gain_db);
             let muted = setting.as_ref().is_some_and(|s| s.muted);
+            let in_mix = setting.as_ref().is_none_or(|s| s.mix);
             let name = track_name(&track.name, index);
             let detail = format!("{} · {} kHz", channels(track.channels), track.sample_rate as f32 / 1000.0);
             let span = self.ed.gain_spans.get(index).cloned();
@@ -133,10 +134,42 @@ impl Root {
                                     .text_size(px(12.))
                                     .child(format_db(gain)),
                             ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .when(muted, |d| d.opacity(0.4))
+                            .child(div().flex_1().text_size(px(12.)).text_color(c(theme::MUTED)).child("Mix into main track"))
+                            .child(ui::switch(("mix", index), in_mix).child(crate::trace::target(format!("mix-switch-{index}"))).on_click(cx.listener(move |this, _, _, cx| {
+                                this.ed.toggle_mix(index);
+                                cx.notify();
+                            }))),
                     ),
             );
         }
         column.into_any_element()
+    }
+
+    /// The export's audio tracks in file order, e.g. "Mix (Game + Microphone) · Voice chat".
+    fn export_audio_note(&self, info: &ClipInfo) -> String {
+        let name = |stream: usize| {
+            let index = info.audio.iter().position(|t| t.stream_index == stream).unwrap_or(0);
+            track_name(info.audio.get(index).map_or("", |t| t.name.as_str()), index)
+        };
+        let indices: Vec<usize> = info.audio.iter().map(|t| t.stream_index).collect();
+        let outputs: Vec<String> = self
+            .ed
+            .plan
+            .audio_outputs(&indices)
+            .into_iter()
+            .map(|output| match output {
+                AudioOutput::Track(stream) => name(stream),
+                AudioOutput::Mix(streams) => format!("Mix ({})", streams.into_iter().map(name).collect::<Vec<_>>().join(" + ")),
+            })
+            .collect();
+        if outputs.is_empty() { "None".into() } else { outputs.join(" · ") }
     }
 
     fn render_export_options(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -144,19 +177,7 @@ impl Root {
         let custom = self.fps_custom;
         let info = self.ed.info.clone();
         let kept = self.ed.plan.duration();
-        let audio_note = info.as_ref().map_or_else(String::new, |i| {
-            let names: Vec<String> = i
-                .audio
-                .iter()
-                .enumerate()
-                .map(|(n, t)| {
-                    let muted = self.ed.setting(t.stream_index).is_some_and(|s| s.muted);
-                    let name = track_name(&t.name, n);
-                    if muted { format!("{} muted", name.to_lowercase()) } else { name }
-                })
-                .collect();
-            if names.is_empty() { "None".into() } else { names.join(" · ") }
-        });
+        let audio_note = info.as_ref().map_or_else(String::new, |i| self.export_audio_note(i));
         let mut track = ui::segment_track();
         for preset in FPS_PRESETS {
             track = track.child(ui::segment(("fps", preset as usize), preset.to_string(), !custom && fps == preset).on_click(cx.listener(move |this, _, _, cx| {
@@ -314,9 +335,8 @@ impl Root {
                             .flex_col()
                             .child(div().font_weight(FontWeight::MEDIUM).child(match summary.fps { Some(fps) => format!("Exported · {fps} fps"), None => "Exported · lossless".to_owned() }))
                             .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(format!("{} frames · {}", summary.frames, library::format_duration(summary.seconds))))
-                            .child(div().text_size(px(11.)).text_color(c(theme::TERTIARY)).child("Drag into Discord or a folder")),
+                            .child(div().text_size(px(11.)).text_color(c(theme::TERTIARY)).child("Drag into Discord · click to show in folder")),
                     )
-                    .child(icon(Icon::Folder, 15., theme::MUTED))
                     // A press that moves becomes a file drag of the export (Discord, Explorer, chats);
                     // a plain click shows it in Explorer.
                     .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, _| {

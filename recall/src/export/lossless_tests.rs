@@ -45,8 +45,8 @@ fn lossless_trim_is_packet_identical_and_snapped_to_keyframes() {
     let plan = EditPlan {
         ranges: vec![TimeRange::new(1.2, 2.3), TimeRange::new(3.1, 4.05)],
         audio: vec![
-            AudioSetting { stream_index: 1, gain_db: 0.0, muted: false },
-            AudioSetting { stream_index: 2, gain_db: -6.0, muted: false },
+            AudioSetting { stream_index: 1, gain_db: 0.0, muted: false, mix: false },
+            AudioSetting { stream_index: 2, gain_db: -6.0, muted: false, mix: false },
         ],
     };
     let keyframes = scan_keyframes(&clip.path).unwrap();
@@ -174,4 +174,13 @@ fn track_names_skip_ffmpeg_placeholder_handler() {
     tags.set("title", "Discord");
     assert_eq!(track_name(&tags).as_deref(), Some("Discord"));
     assert_eq!(track_name(&ff::Dictionary::new()), None);
+}
+
+#[test]
+fn lossless_export_is_faststart_and_reports_its_bytes() {
+    let Some(clip) = clip("lossless-fast") else { return };
+    let report = lossless(&clip, "fast.mp4", &EditPlan { ranges: vec![TimeRange::new(1.0, 3.0)], audio: vec![] }).unwrap();
+    let path = Path::new(&clip.output("fast.mp4")).to_owned();
+    super::test_media::assert_faststart(&path);
+    assert_eq!(report.bytes, std::fs::metadata(&path).unwrap().len());
 }

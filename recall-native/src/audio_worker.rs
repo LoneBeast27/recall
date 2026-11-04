@@ -137,7 +137,8 @@ impl Worker {
                 if let Some(track) = self.tracks.iter_mut().find(|track| track.stream_index == stream_index) {
                     track.gain_db = gain_db;
                     track.muted = muted;
-                } else {
+                } else if !self.tracks.is_empty() {
+                    // Nothing loaded (closed, or its Open failed): the next Open carries the settings.
                     self.shared.fail_if_current(self.active_generation, format!("preview track {stream_index} is not loaded"));
                 }
             }

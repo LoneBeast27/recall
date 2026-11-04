@@ -270,7 +270,7 @@ impl EditorState {
                 audio: info
                     .audio
                     .iter()
-                    .map(|a| AudioSetting { stream_index: a.stream_index, gain_db: 0.0, muted: false })
+                    .map(|a| AudioSetting { stream_index: a.stream_index, gain_db: 0.0, muted: false, mix: true })
                     .collect(),
             },
         };

@@ -68,8 +68,9 @@ pub(super) struct Unit {
 }
 
 /// Units to delete so the video tier plus `incoming_video` fits `video_cap` and everything
-/// (`fixed` never-evicted bytes included) plus `incoming_video` fits `budget`. Thumbnails
-/// are taken only after every other unit; `keep` is never chosen.
+/// (`fixed` never-evicted bytes included) plus `incoming_video` fits `budget`. Thumbnails are
+/// never chosen (about 30 KB each, and the library shows them; on 2026-11-05 a budget filled by
+/// never-evicted files took every one), nor is anything in `keep`.
 pub(super) fn plan(units: &[Unit], fixed: u64, budget: u64, video_cap: u64, incoming_video: u64, keep: &[String]) -> Vec<String> {
     let order = |a: &&Unit, b: &&Unit| {
         let thumbs = (a.tier == Tier::Thumb).cmp(&(b.tier == Tier::Thumb));
@@ -80,7 +81,7 @@ pub(super) fn plan(units: &[Unit], fixed: u64, budget: u64, video_cap: u64, inco
             .then(a.last_used.cmp(&b.last_used))
             .then_with(|| a.name.cmp(&b.name))
     };
-    let mut candidates: Vec<&Unit> = units.iter().filter(|u| !keep.contains(&u.name)).collect();
+    let mut candidates: Vec<&Unit> = units.iter().filter(|u| u.tier != Tier::Thumb && !keep.contains(&u.name)).collect();
     candidates.sort_by(order);
     let mut evict = Vec::new();
     let mut video = units.iter().filter(|u| u.tier == Tier::Video).map(|u| u.bytes).sum::<u64>().saturating_add(incoming_video);
