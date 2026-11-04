@@ -81,3 +81,22 @@ fn a_muted_track_is_dropped() {
         assert!(carries(&pcm[0], 660.0) && !carries(&pcm[0], 440.0), "{mode:?}");
     }
 }
+
+#[test]
+fn two_full_scale_tracks_mix_without_clipping() {
+    // 2026-11-05 merge-gate review: the sum was hard-clamped at ±1.0, so loud game audio
+    // plus the mic flat-topped. The mix now has headroom and a limiter.
+    let Some(clip) = synth("mix-loud", &Spec { amplitude: 1.0, ..Spec::default() }) else {
+        eprintln!("libx264 missing in this FFmpeg build; skipped");
+        return;
+    };
+    for mode in [ExportMode::Reencode, ExportMode::Lossless] {
+        let (names, pcm) = export(&clip, &format!("loud-{mode:?}.mp4"), mode, vec![track(GAME, false, true), track(MIC, false, true)]);
+        assert_eq!(names, ["Mix"], "{mode:?}");
+        let mix = &pcm[0];
+        let peak = mix.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+        assert!(peak <= 1.0, "{mode:?}: peak {peak}");
+        assert!(!mix.windows(3).any(|w| w.iter().all(|s| s.abs() >= 0.999)), "{mode:?}: flat-topped run (hard clip)");
+        assert!(carries(mix, 440.0) && carries(mix, 660.0), "{mode:?}: both sources still heard");
+    }
+}

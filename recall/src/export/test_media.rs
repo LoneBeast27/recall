@@ -23,6 +23,8 @@ pub(super) struct Spec {
     /// Stamp audio packets like SteelSeries Moments: the true time snapped to a 100-tick
     /// grid, so 1024-sample frames sit 1000 or 1100 ticks apart (the 2026-10-27 choppy audio).
     pub moments_audio_stamps: bool,
+    /// Peak of every tone (1.0 = full scale).
+    pub amplitude: f32,
 }
 
 /// Track names written like the recorder does: as the MP4 `handler_name`.
@@ -30,7 +32,7 @@ pub(super) const TRACK_NAMES: [&str; 2] = ["Game", "Microphone"];
 
 impl Default for Spec {
     fn default() -> Self {
-        Self { width: 320, height: 240, fps: 60, seconds: 5.0, gop: 30, tones: vec![440.0, 660.0], moments_audio_stamps: false }
+        Self { width: 320, height: 240, fps: 60, seconds: 5.0, gop: 30, tones: vec![440.0, 660.0], moments_audio_stamps: false, amplitude: 0.4 }
     }
 }
 
@@ -156,7 +158,7 @@ pub(super) fn synth(tag: &str, spec: &Spec) -> Option<Clip> {
                 let plane = frame.plane_mut::<f32>(channel);
                 for (offset, sample) in plane.iter_mut().enumerate() {
                     let t = (position + offset) as f32 / RATE as f32;
-                    *sample = if offset < count { (t * tone * std::f32::consts::TAU).sin() * 0.4 } else { 0.0 };
+                    *sample = if offset < count { (t * tone * std::f32::consts::TAU).sin() * spec.amplitude } else { 0.0 };
                 }
             }
             encoder.send_frame(&frame).unwrap();
