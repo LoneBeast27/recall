@@ -82,10 +82,24 @@ fn a_muted_track_is_dropped() {
     }
 }
 
+/// Peak after AAC decode allowed above the limiter's -1 dBFS ceiling (0.891): measured
+/// codec overshoot on this fixture (0.907 re-encode, 0.913 lossless, 2026-11-05) plus a margin.
+const DECODED_CEILING: f32 = 0.92;
+
+fn peak(pcm: &[f32]) -> f32 {
+    pcm.iter().fold(0.0f32, |m, s| m.max(s.abs()))
+}
+
+/// RMS of the steady middle of `pcm`.
+fn rms(pcm: &[f32]) -> f32 {
+    let middle = &pcm[pcm.len() / 8..pcm.len() * 7 / 8];
+    (middle.iter().map(|s| s * s).sum::<f32>() / middle.len().max(1) as f32).sqrt()
+}
+
 #[test]
 fn two_full_scale_tracks_mix_without_clipping() {
     // 2026-11-05 merge-gate review: the sum was hard-clamped at ±1.0, so loud game audio
-    // plus the mic flat-topped. The mix now has headroom and a limiter.
+    // plus the mic flat-topped. A look-ahead limiter now holds peaks under -1 dBFS.
     let Some(clip) = synth("mix-loud", &Spec { amplitude: 1.0, ..Spec::default() }) else {
         eprintln!("libx264 missing in this FFmpeg build; skipped");
         return;
@@ -94,9 +108,32 @@ fn two_full_scale_tracks_mix_without_clipping() {
         let (names, pcm) = export(&clip, &format!("loud-{mode:?}.mp4"), mode, vec![track(GAME, false, true), track(MIC, false, true)]);
         assert_eq!(names, ["Mix"], "{mode:?}");
         let mix = &pcm[0];
-        let peak = mix.iter().fold(0.0f32, |m, s| m.max(s.abs()));
-        assert!(peak <= 1.0, "{mode:?}: peak {peak}");
-        assert!(!mix.windows(3).any(|w| w.iter().all(|s| s.abs() >= 0.999)), "{mode:?}: flat-topped run (hard clip)");
+        let top = peak(mix);
+        eprintln!("{mode:?}: decoded mix peak {top:.4}");
+        assert!(top <= DECODED_CEILING, "{mode:?}: peak {top} above the ceiling");
+        assert!(top >= 0.85, "{mode:?}: peak {top}: the limiter is engaged, not crushing the mix");
+        assert!(!mix.windows(3).any(|w| w.iter().all(|s| s.abs() == top)), "{mode:?}: flat top at {top}");
         assert!(carries(mix, 440.0) && carries(mix, 660.0), "{mode:?}: both sources still heard");
+    }
+}
+
+#[test]
+fn a_quiet_mix_is_as_loud_as_its_sources_summed() {
+    // Two -20 dBFS tones never reach the limiter, so the mix must equal their plain sum:
+    // any hidden attenuation (such as fixed headroom) shows up here.
+    let Some(clip) = synth("mix-quiet", &Spec { amplitude: 0.1, ..Spec::default() }) else {
+        eprintln!("libx264 missing in this FFmpeg build; skipped");
+        return;
+    };
+    let source = probe(Path::new(&clip.path));
+    let len = source.audio_pcm[0].len().min(source.audio_pcm[1].len());
+    let summed: Vec<f32> = (0..len).map(|n| source.audio_pcm[0][n] + source.audio_pcm[1][n]).collect();
+    let expected = rms(&summed);
+    for mode in [ExportMode::Reencode, ExportMode::Lossless] {
+        let (names, pcm) = export(&clip, &format!("quiet-{mode:?}.mp4"), mode, vec![track(GAME, false, true), track(MIC, false, true)]);
+        assert_eq!(names, ["Mix"], "{mode:?}");
+        let db = 20.0 * (rms(&pcm[0]) / expected).log10();
+        eprintln!("{mode:?}: quiet mix {db:+.2} dB against the plain sum");
+        assert!(db.abs() <= 0.5, "{mode:?}: mix is {db:+.2} dB off its sources' sum");
     }
 }
