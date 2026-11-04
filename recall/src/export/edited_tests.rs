@@ -189,3 +189,41 @@ fn unit_speed_export_matches_the_kept_length() {
         assert!(rms > 0.15 && within(measured, hz, 0.03), "track tone {measured:.1} Hz rms {rms}");
     }
 }
+
+#[test]
+fn edited_export_is_faststart_and_reports_its_bytes() {
+    let Some(clip) = clip("faststart") else { return };
+    let report = run(&clip, "fast.mp4", &plan(vec![TimeRange::new(0.5, 2.0)]), &ExportSettings::default()).unwrap();
+    let path = std::path::Path::new(&clip.output("fast.mp4")).to_owned();
+    super::test_media::assert_faststart(&path);
+    assert_eq!(report.bytes, std::fs::metadata(&path).unwrap().len());
+}
+
+/// Dev check, run on purpose: `cargo test ffprobe_sees_faststart -- --ignored`. Uses the
+/// ffprobe in `FFMPEG_DIR\bin` (else PATH): the trace must open `moov` before `mdat`, and
+/// every frame of both export kinds must decode with no error.
+#[test]
+#[ignore]
+fn ffprobe_sees_faststart_and_a_clean_decode() {
+    let ffprobe = std::env::var_os("FFMPEG_DIR")
+        .map(|dir| std::path::Path::new(&dir).join("bin").join("ffprobe.exe"))
+        .filter(|p| p.is_file())
+        .unwrap_or_else(|| "ffprobe".into());
+    let Some(clip) = clip("ffprobe") else { return };
+    let edited = ExportSettings::default();
+    let lossless = ExportSettings { mode: crate::edit_model::ExportMode::Lossless, ..Default::default() };
+    for (name, settings) in [("edited.mp4", edited), ("lossless.mp4", lossless)] {
+        run(&clip, name, &plan(vec![TimeRange::new(1.0, 3.0)]), &settings).unwrap();
+        let path = clip.output(name);
+        let trace = std::process::Command::new(&ffprobe).args(["-v", "trace", "-i", &path]).output().unwrap();
+        let log = String::from_utf8_lossy(&trace.stderr);
+        let (moov, mdat) = (log.find("type:'moov'").expect("moov in trace"), log.find("type:'mdat'").expect("mdat in trace"));
+        assert!(moov < mdat, "{name}: ffprobe read mdat before moov");
+        let decode = std::process::Command::new(&ffprobe)
+            .args(["-v", "error", "-count_frames", "-show_entries", "stream=nb_read_frames", "-of", "csv=p=0", &path])
+            .output()
+            .unwrap();
+        assert!(decode.status.success() && decode.stderr.is_empty(), "{name}: {}", String::from_utf8_lossy(&decode.stderr));
+        eprintln!("{name}: frames per stream {}", String::from_utf8_lossy(&decode.stdout).trim().replace('\n', " "));
+    }
+}
