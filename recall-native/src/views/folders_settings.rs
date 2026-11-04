@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 use gpui::{AnyElement, Context, Div, FontWeight, PathPromptOptions, SharedString, div, prelude::*, px};
-use serde_json::Value;
+use serde_json::{Value, json};
 
 use crate::{
     root::{Root, ToastKind},
@@ -56,6 +56,55 @@ impl Root {
         .detach();
     }
 
+    /// Settings → Media → Recordings → Change: pick the folder new clips save to.
+    pub fn prompt_recordings_folder(&mut self, cx: &mut Context<Self>) {
+        let picked = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            directories: true,
+            multiple: false,
+            prompt: Some(SharedString::from("Save clips here")),
+        });
+        cx.spawn(async move |this, cx| {
+            let Ok(Ok(Some(paths))) = picked.await else { return };
+            let Some(dir) = paths.into_iter().next() else { return };
+            let _ = this.update(cx, |this, cx| {
+                this.change_recordings_folder(dir);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Point the recorder at `dir`. Clips already saved stay where they are: the old folder
+    /// joins the library's imported folders so they keep showing.
+    fn change_recordings_folder(&mut self, dir: PathBuf) {
+        if !self.snap.connected {
+            self.show_toast(ToastKind::Bad, "The recorder is off", Some("Start it, then change the folder.".into()));
+            return;
+        }
+        let new = dir.to_string_lossy().into_owned();
+        let old = self.recordings_folder();
+        if same_folder(&new, &old) {
+            self.show_toast(ToastKind::Info, "Already your recordings folder", None);
+            return;
+        }
+        self.set_config("recording", "output_dir", json!(new));
+        let mut folders = Folders::load();
+        folders.remove(&new);
+        folders.recordings = Some(new);
+        let kept_old = folders.add(std::path::Path::new(&old));
+        match folders.save() {
+            Ok(()) => {
+                self.folders = folders;
+                crate::services::library::folders::forget_scans();
+                self.workers.job(Job::List);
+                let detail = if kept_old { "New clips save here. Clips already saved stay in the old folder and still show." } else { "New clips save here." };
+                self.show_toast(ToastKind::Good, "Recordings folder changed", Some(detail.into()));
+            }
+            Err(error) => self.show_toast(ToastKind::Bad, "Couldn't update the library folders", Some(error)),
+        }
+    }
+
     fn add_clip_folders(&mut self, paths: Vec<PathBuf>) {
         let mut folders = Folders::load();
         folders.recordings = self.folders.recordings.clone().or_else(|| Some(self.recordings_folder()));
@@ -96,7 +145,10 @@ impl Root {
         let count = |folder: &str| clips_label(paths.iter().filter(|p| inside(p, folder)).count());
 
         let mut list = div().flex().flex_col();
-        list = list.child(folder_row("rec", "Recordings", &recordings, count(&recordings), false, cx));
+        let change = ui::button("rec-change", Variant::Ghost).child("Change").on_click(cx.listener(|this, _, _, cx| {
+            this.prompt_recordings_folder(cx);
+        }));
+        list = list.child(folder_row("rec", "Recordings", &recordings, count(&recordings), false, cx).child(change));
         for (i, folder) in self.folders.imported.clone().into_iter().enumerate() {
             let name = std::path::Path::new(&folder).file_name().map_or_else(|| folder.clone(), |n| n.to_string_lossy().into_owned());
             list = list.child(folder_row(("imp", i), &name, &folder, count(&folder), true, cx));
@@ -157,6 +209,11 @@ pub(crate) fn inside(path: &str, folder: &str) -> bool {
         && path.is_char_boundary(folder.len())
         && path[..folder.len()].eq_ignore_ascii_case(folder)
         && matches!(path.as_bytes()[folder.len()], b'\\' | b'/')
+}
+
+/// Two spellings of one folder (case, trailing separator).
+fn same_folder(a: &str, b: &str) -> bool {
+    a.trim_end_matches(['\\', '/']).eq_ignore_ascii_case(b.trim_end_matches(['\\', '/']))
 }
 
 fn clips_label(n: usize) -> String {
