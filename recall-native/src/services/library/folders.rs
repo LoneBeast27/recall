@@ -136,17 +136,35 @@ pub fn scan_covers(root: &Path, path: &Path, skip: &[PathBuf]) -> bool {
 }
 
 fn scan_from(start: &Path, depth: usize, skip: &[PathBuf]) -> Vec<FoundClip> {
+    scan_from_checked(start, depth, skip).0
+}
+
+/// The walk, and whether it saw everything: false when a folder (the start included) could not
+/// be read, an entry's metadata failed, or a size limit cut it short. Only a complete walk may
+/// prove a clip is gone.
+fn scan_from_checked(start: &Path, depth: usize, skip: &[PathBuf]) -> (Vec<FoundClip>, bool) {
     let mut found = Vec::new();
     let mut walked = 0usize;
     let mut stack = vec![(start.to_path_buf(), depth)];
+    let mut complete = true;
     while let Some((dir, depth)) = stack.pop() {
-        let Ok(listing) = std::fs::read_dir(&dir) else { continue };
-        for item in listing.flatten() {
+        let Ok(listing) = std::fs::read_dir(&dir) else {
+            complete = false;
+            continue;
+        };
+        for item in listing {
+            let Ok(item) = item else {
+                complete = false;
+                continue;
+            };
             walked += 1;
             if walked > MAX_ENTRIES {
-                return found;
+                return (found, false);
             }
-            let Ok(meta) = item.metadata() else { continue };
+            let Ok(meta) = item.metadata() else {
+                complete = false;
+                continue;
+            };
             let path = item.path();
             if meta.is_dir() {
                 if depth + 1 < MAX_DEPTH && !hidden(&meta) && !skip.iter().any(|s| s == &path) && !skipped_name(&item.file_name().to_string_lossy()) {
@@ -161,31 +179,36 @@ fn scan_from(start: &Path, depth: usize, skip: &[PathBuf]) -> Vec<FoundClip> {
             let folder = dir.file_name().map(|n| n.to_string_lossy().into_owned());
             found.push(FoundClip { path, bytes: meta.len(), mtime, folder });
             if found.len() >= MAX_FILES {
-                return found;
+                return (found, false);
             }
         }
     }
-    found
+    (found, complete)
 }
 
 /// [`scan_imported`] with a per-folder cache (refreshed after [`SCAN_TTL`]), so listing the
 /// library after every save does not re-walk large imported trees.
 pub fn scan_imported_cached(root: &Path, skip: &[PathBuf]) -> Vec<FoundClip> {
-    use std::{collections::HashMap, time::Instant};
-    let key = PathBuf::from(folder_key(&root.to_string_lossy()));
-    if let Some((at, clips)) = CACHE.lock().ok().and_then(|c| c.as_ref().and_then(|m| m.get(&key)).cloned()) {
-        if at.elapsed() < SCAN_TTL {
-            return clips;
-        }
-    }
-    let clips = scan_imported(root, skip);
-    if let Ok(mut cache) = CACHE.lock() {
-        cache.get_or_insert_with(HashMap::new).insert(key, (Instant::now(), clips.clone()));
-    }
-    clips
+    scan_imported_cached_checked(root, skip).0
 }
 
-type ScanCache = std::collections::HashMap<PathBuf, (std::time::Instant, Vec<FoundClip>)>;
+/// [`scan_imported_cached`], and whether the walk saw the whole folder (see `scan_from_checked`).
+pub fn scan_imported_cached_checked(root: &Path, skip: &[PathBuf]) -> (Vec<FoundClip>, bool) {
+    use std::{collections::HashMap, time::Instant};
+    let key = PathBuf::from(folder_key(&root.to_string_lossy()));
+    if let Some((at, clips, complete)) = CACHE.lock().ok().and_then(|c| c.as_ref().and_then(|m| m.get(&key)).cloned()) {
+        if at.elapsed() < SCAN_TTL {
+            return (clips, complete);
+        }
+    }
+    let (clips, complete) = scan_from_checked(root, 0, skip);
+    if let Ok(mut cache) = CACHE.lock() {
+        cache.get_or_insert_with(HashMap::new).insert(key, (Instant::now(), clips.clone(), complete));
+    }
+    (clips, complete)
+}
+
+type ScanCache = std::collections::HashMap<PathBuf, (std::time::Instant, Vec<FoundClip>, bool)>;
 static CACHE: std::sync::Mutex<Option<ScanCache>> = std::sync::Mutex::new(None);
 
 /// Drops cached folder walks (after a delete, or when the folder list changes).
@@ -211,7 +234,7 @@ pub fn patch_scans(found: &[FoundClip], gone: &[String], gone_under: &[String]) 
     let Some(scans) = cache.as_mut() else { return };
     let mut leaving: std::collections::HashSet<String> = gone.iter().map(|p| folder_key(p)).collect();
     leaving.extend(found.iter().map(|f| folder_key(&f.path.to_string_lossy())));
-    for (root, (_, clips)) in scans.iter_mut() {
+    for (root, (_, clips, _)) in scans.iter_mut() {
         let root = root.to_string_lossy();
         clips.retain(|clip| {
             let path = clip.path.to_string_lossy();
