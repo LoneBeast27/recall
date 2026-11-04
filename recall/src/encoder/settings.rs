@@ -128,6 +128,27 @@ impl Quality {
     }
 }
 
+/// NVENC queue depth for D3D11 input frames. Every frame NVENC holds is a frames-pool texture
+/// (14.7 MB at 1440p BGRA) and the pool grows to whatever is held at once, so FFmpeg's
+/// default depth costs VRAM a game needs. `RECALL_NVENC_QUEUE` overrides it for measuring:
+/// `default` leaves FFmpeg's choice, `delay=N,surfaces=M` sets those options.
+pub fn queue_options(gpu_frames: bool) -> Vec<(&'static str, &'static str)> {
+    let knob = std::env::var("RECALL_NVENC_QUEUE").ok();
+    match knob.as_deref() {
+        Some("default") => Vec::new(),
+        Some(list) => list
+            .split(',')
+            .filter_map(|pair| pair.split_once('='))
+            .map(|(k, v)| (&*Box::leak(k.trim().to_owned().into_boxed_str()), &*Box::leak(v.trim().to_owned().into_boxed_str())))
+            .collect(),
+        None if gpu_frames => QUEUE.to_vec(),
+        None => Vec::new(),
+    }
+}
+
+/// The production queue for D3D11 frames (see [`queue_options`]).
+const QUEUE: [(&str, &str); 2] = [("delay", "2"), ("surfaces", "4")];
+
 /// Encoders to try, in order, for a requested codec: itself, then H.264.
 pub fn fallback_chain(requested: Codec) -> Vec<Codec> {
     let mut chain = vec![requested];
