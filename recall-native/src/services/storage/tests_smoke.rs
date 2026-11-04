@@ -184,7 +184,7 @@ fn storage_smoke_smart_fill() {
     });
     let before = stats();
     let started = Instant::now();
-    start_prefetch(clips, sink, backend::prefetch_editor_media);
+    start_prefetch(clips, false, sink, backend::prefetch_editor_media);
     let (mut last, mut quiet) = ((0u64, 0u64), 0);
     while quiet < 5 && started.elapsed() < Duration::from_secs(600) {
         std::thread::sleep(Duration::from_secs(2));
