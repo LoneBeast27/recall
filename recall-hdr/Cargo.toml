@@ -35,6 +35,8 @@ windows = { version = "0.62", features = [
     # `fps_source`), and stop the overlay's session after killing the overlay.
     "Win32_Security",
     "Win32_System_Diagnostics_Etw",
+    # The detection render check's real-time ETW consumer (OpenTraceW).
+    "Win32_System_Time",
 ] }
 
 # Config + rule persistence (Wave 1+) and structured log lines.
@@ -50,3 +52,7 @@ libloading = "0.8"
 # Default features are Linux-only (libxdo, gtk).
 tray-icon = { version = "0.24.1", default-features = false }
 global-hotkey = "0.8.0"
+
+[dev-dependencies]
+# render_probe's live check presents from a hidden window (never shown).
+windows = { version = "0.62", features = ["Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_System_ProcessStatus"] }
