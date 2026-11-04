@@ -58,7 +58,7 @@ pub enum ProcessSource {
 /// One track: the configured endpoint name (exact, then token-AND match),
 /// else the Windows default endpoint for the direction.
 pub struct TrackSpec {
-    /// Internal name (Moments `audio_tracks`, mute rule, thread name).
+    /// Internal name (mute rule, thread name).
     pub name: &'static str,
     /// Saved as the stream's `title` and `handler_name`.
     pub title: &'static str,

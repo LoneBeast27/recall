@@ -31,10 +31,6 @@ fn job(path: &Path) -> SaveJob {
         backend: "test",
         audio: Vec::new(),
         thumb: None,
-        width: 2,
-        height: 2,
-        fps: 60,
-        session_id: "session".into(),
         timing: Timing::default(),
     }
 }

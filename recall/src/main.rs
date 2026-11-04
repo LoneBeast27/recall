@@ -44,8 +44,6 @@ mod gpu_frames;
 mod gpu_route;
 mod hdr;
 mod hybrid_gpu;
-#[cfg(feature = "encode")]
-mod moments;
 mod protocol;
 mod ring;
 mod single_instance;

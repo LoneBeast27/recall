@@ -6,7 +6,7 @@
 //! | `RECALL_CODEC`       | `h264` / `hevc` (`h265`) / `av1`          | `h264`  | NVENC encoder `h264_nvenc` / `hevc_nvenc` / `av1_nvenc`. If it cannot open, recording falls back to `h264_nvenc` (logged, `codec` in status). |
 //! | `RECALL_QUALITY`     | `balanced` / `high` / `max`              | `high`  | NVENC effort: preset p4 / p5 / p7 (`max` adds quarter-res multipass + spatial AQ), and the bitrate used when `RECALL_BITRATE` is unset: 15 / 25 / 40 Mbps. |
 //! | `RECALL_BITRATE`     | Mbps (`25`, `12.5`, `25M`, `25mbps`), kbps (`8000k`), bps (any plain number > 1000, e.g. `25000000`) | quality default | VBR target; peak = 2x target. Clamped to 1..=500 Mbps. |
-//! | `RECALL_FPS`         | integer 1..=1000                         | `60`    | Nominal rate: NVENC rate-control hint, GOP = 1 s of it (save granularity), fallback packet duration, Moments `fps`. Capture stays VFR. |
+//! | `RECALL_FPS`         | integer 1..=1000                         | `60`    | Nominal rate: NVENC rate-control hint, GOP = 1 s of it (save granularity), fallback packet duration. Capture stays VFR. |
 //! | `RECALL_BUFFER_SECS` | integer 5..=1800                         | `60`    | Replay retention of the video ring and every audio ring; the full-buffer save length. |
 //!
 //! Unparseable values (and 0) fall back to the default; out-of-range values

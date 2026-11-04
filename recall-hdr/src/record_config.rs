@@ -85,9 +85,6 @@ pub struct RecordingCfg {
     /// Render endpoint recorded as Game in Desktop mode ("" = the Windows
     /// default output; `RECALL_AUDIO_GAME`). Games record their own process.
     pub desktop_audio_device: String,
-    /// Also list each saved clip in the SteelSeries Moments gallery
-    /// (`RECALL_MOMENTS=1`). Off unless the person turns it on.
-    pub moments_gallery: bool,
     /// Save-length presets. Last field: TOML writes it as
     /// `[[recording.save_hotkeys]]` tables after the plain keys.
     pub save_hotkeys: Vec<SaveHotkey>,
@@ -115,7 +112,6 @@ impl Default for RecordingCfg {
             mic_device: String::new(),
             mic_enabled: true,
             desktop_audio_device: String::new(),
-            moments_gallery: false,
             save_hotkeys: crate::record_hotkeys::default_save_hotkeys(),
         }
     }
