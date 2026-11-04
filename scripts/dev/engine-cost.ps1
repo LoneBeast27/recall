@@ -34,7 +34,10 @@ param(
   [string]$OutDir = '',
   [string]$Json = '',
   [string]$TestMic = 'microphone steam streaming',
-  [switch]$Monitor
+  [switch]$Monitor,
+  [int]$Fps = 60,
+  [string]$CpuMask = 'ffff0000',
+  [string]$EngineEnv = ''
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
@@ -79,12 +82,14 @@ if (-not $hwnd) { $tgt.proc.Kill(); throw "present_target gave no window: $($tli
 $envs = @{
   RECALL_CAPTURE_NAME = 'PresentTarget'; RECALL_AUDIO_GAME_PID = "$($tgt.proc.Id)"
   RECALL_AUDIO_MIC = $TestMic; RECALL_AUDIO_EXACT = '1'
-  RECALL_CPU_MASK = 'ffff0000'; RECALL_FPS = '60'; RECALL_BITRATE = '25000000'; RECALL_BUFFER_SECS = '120'
+  RECALL_CPU_MASK = $CpuMask; RECALL_FPS = "$Fps"; RECALL_BITRATE = '25000000'; RECALL_BUFFER_SECS = '120'
   RECALL_CODEC = 'h264'; RECALL_QUALITY = 'high'; RECALL_OUT_DIR = $OutDir; RECALL_STAGING_DIR = 'off'
   RECALL_MOMENTS = '0'; RECALL_MOMENTS_DB = (Join-Path $OutDir 'no-moments.db')
   PATH = "$ffbin;$env:PATH"
 }
 if (-not $Monitor) { $envs.RECALL_CAPTURE_HWND = "$hwnd" }
+# Extra engine variables for comparisons, 'NAME=value;NAME=value' (e.g. RECALL_NVENC_QUEUE=default).
+foreach ($pair in ($EngineEnv -split ';' | Where-Object { $_ -match '=' })) { $k, $v = $pair -split '=', 2; $envs[$k.Trim()] = $v }
 # Exercise the CPU fallback: NVENC refuses GPU frames, capture must switch and keep recording.
 if ($RefuseGpu) { $envs.RECALL_REFUSE_GPU_FRAMES = '1' }
 $eng = Start-Child $Engine '--json' $envs
@@ -106,6 +111,8 @@ if (-not ($warmFps | Where-Object { $_ -gt 0 })) {
 $before = $log.Count
 $m = Measure-ThreadCpu $eng.proc.Id $Seconds
 Pump
+# Dedicated VRAM the engine holds now (Task Manager's number), from the GPU Process Memory counter.
+$vramMb = try { [math]::Round(((Get-Counter "\GPU Process Memory(pid_$($eng.proc.Id)_*)\Dedicated Usage" -ErrorAction Stop).CounterSamples | Measure-Object CookedValue -Sum).Sum / 1MB, 0) } catch { -1 }
 $fpsVals = @($log | Select-Object -Skip $before | Where-Object { $_ -match '"type":"status"' } | ForEach-Object { ($_ | ConvertFrom-Json).fps } | Where-Object { $_ -gt 0 })
 $fps = if ($fpsVals) { ($fpsVals | Measure-Object -Average).Average } else { 0 }
 $tp = @(Drain $tgt.out | Where-Object { $_ -match 'presented' } | ForEach-Object { ($_ | ConvertFrom-Json).presented })
@@ -138,7 +145,7 @@ $groups = $m.threads | Group-Object { if ($_.name) { $_.name } else { "<$($_.mod
 } | Sort-Object total_ms -Descending
 $result = [pscustomobject]@{
   engine = $Engine; seconds = $m.wall_s; target_presented_fps = [math]::Round($targetFps, 0)
-  captured_fps = [math]::Round($fps, 1); cpu_ms = $m.process_cpu_ms; cores = $m.cores
+  captured_fps = [math]::Round($fps, 1); engine_fps = $Fps; vram_dedicated_mb = $vramMb; cpu_ms = $m.process_cpu_ms; cores = $m.cores
   cpu_s_per_min = $m.cpu_s_per_min; cpu_ms_per_frame = [math]::Round($msPerFrame, 2)
   gate_ms_per_frame = $MaxMsPerFrame; pass = ($msPerFrame -le $MaxMsPerFrame -and $fps -ge 30)
   saved = $saved; threads = @($groups)
@@ -147,6 +154,7 @@ $result = [pscustomobject]@{
 }
 "engine: $Engine"
 "target presented $($result.target_presented_fps) fps; engine captured $($result.captured_fps) fps over $($m.wall_s) s"
+"engine VRAM (dedicated): $vramMb MB; $(($log | Where-Object { $_ -match 'vram ' } | ForEach-Object { if ($_ -match '"message":"([^"]+)"') { $Matches[1] } else { $_ } }) -join '; ')"
 "engine CPU: $($m.process_cpu_ms) ms = $($m.cores) cores = $($m.cpu_s_per_min) CPU-s/min = $($result.cpu_ms_per_frame) CPU-ms per captured frame (gate $MaxMsPerFrame)"
 $groups | Select-Object -First 14 | Format-Table -AutoSize | Out-String -Width 200
 if ($saved) { "saved: $($saved | ConvertTo-Json -Compress)" }

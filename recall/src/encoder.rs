@@ -26,6 +26,7 @@ mod staging;
 pub mod settings;
 mod smoke;
 mod still;
+mod vram_watch;
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
@@ -103,6 +104,11 @@ impl EncStats {
     /// Codec for `status.codec`: active once open, requested before that.
     pub fn codec(&self) -> Codec {
         Codec::from_index(self.codec.load(Relaxed))
+    }
+
+    /// The replay buffer was reset (encoder reopened or failed).
+    fn clear_buffer(&self) {
+        [&self.buffered_frames, &self.buffered_us, &self.buffer_start_us, &self.buffered_bytes].iter().for_each(|a| a.store(0, Relaxed));
     }
 }
 
@@ -198,6 +204,7 @@ fn run(
     }
     let mut enc: Option<Enc> = None;
     let mut failed_resolution: Option<(u32, u32)> = None;
+    let mut vram = vram_watch::VramWatch::default();
     let mut small = SmallFrames::default();
     // After one fallback the engine stays on H.264: reopening on a resolution
     // change must not flap codecs or re-log the same failure.
@@ -244,10 +251,7 @@ fn run(
                     );
                     enc = None;
                     failed_resolution = None;
-                    stats.buffered_frames.store(0, Relaxed);
-                    stats.buffered_us.store(0, Relaxed);
-                    stats.buffer_start_us.store(0, Relaxed);
-                    stats.buffered_bytes.store(0, Relaxed);
+                    stats.clear_buffer();
                 }
                 if enc.is_none() && failed_resolution != Some((frame.width, frame.height)) {
                     enc = match open_encoder(&cfg, want, frame.width, frame.height, frame.gpu.as_ref()) {
@@ -265,6 +269,7 @@ fn run(
                                 &format!("encoder up: {} {}x{}", e.backend, e.width, e.height),
                             );
                             let _ = crate::gpu_frames::adapter::vram_line("encoder open").inspect(|l| report(cfg.json, l));
+                            vram.opened();
                             Some(e)
                         }
                         Err(e) => {
@@ -291,6 +296,7 @@ fn run(
                         fatal_encode_error = Some(e);
                     }
                 }
+                let _ = vram.due().inspect(|l| report(cfg.json, l));
                 if let Some(reason) = fatal_encode_error {
                     crate::longrec::tap::on_encoder_failed(&format!("NVENC encode failed: {reason}")); // long-recording hook
                     let failed = enc.as_ref().map(|e| (e.width, e.height));
@@ -302,10 +308,7 @@ fn run(
                         .lock()
                         .unwrap_or_else(|poisoned| poisoned.into_inner()) =
                         Some(format!("NVENC encode failed: {reason}"));
-                    stats.buffered_frames.store(0, Relaxed);
-                    stats.buffered_us.store(0, Relaxed);
-                    stats.buffer_start_us.store(0, Relaxed);
-                    stats.buffered_bytes.store(0, Relaxed);
+                    stats.clear_buffer();
                 }
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
@@ -326,13 +329,7 @@ fn gpu_pool_of(frame: &PacedFrame) -> Option<usize> {
 
 /// Open `codec` (falling back to h264_nvenc) for even-cropped `w`x`h` input: D3D11 frames
 /// from `gpu`'s pool when given, else RGB0. The second value is the fallback line to log.
-fn open_encoder(
-    cfg: &Config,
-    codec: Codec,
-    w: u32,
-    h: u32,
-    gpu: Option<&crate::gpu_frames::HwFrame>,
-) -> Result<(Enc, Option<String>), String> {
+fn open_encoder(cfg: &Config, codec: Codec, w: u32, h: u32, gpu: Option<&crate::gpu_frames::HwFrame>) -> Result<(Enc, Option<String>), String> {
     let (w, h) = (w & !1, h & !1);
     if w == 0 || h == 0 {
         return Err("NVENC cannot open a zero-sized capture".into());
@@ -394,8 +391,7 @@ fn try_open(
     ctx.set_time_base(ff::Rational(1, 1_000_000));
     ctx.set_frame_rate(Some(ff::Rational(cfg.fps as i32, 1)));
     ctx.set_gop(cfg.fps); // 1s GOP -> save granularity
-                          // No B-frames: packets leave in presentation order (dts == pts), so the
-                          // ring can stream-copy with monotonic timestamps (the DTS-regression fix).
+    // No B-frames: packets leave in presentation order (dts == pts), so the ring can stream-copy.
     ctx.set_max_b_frames(0);
     ctx.set_bit_rate(cfg.bitrate);
     ctx.set_max_bit_rate(cfg.bitrate * 2);
@@ -403,7 +399,8 @@ fn try_open(
     // for the mp4 sample entry instead of being repeated in-band.
     ctx.set_flags(ff::codec::Flags::GLOBAL_HEADER);
     let mut opts = ff::Dictionary::new();
-    for (key, value) in cfg.quality.for_gpu(crate::gpu_frames::adapter::low_end()).nvenc_options() {
+    let quality = cfg.quality.for_gpu(crate::gpu_frames::adapter::low_end());
+    for (key, value) in quality.nvenc_options().into_iter().chain(settings::queue_options(gpu_pool.is_some())) {
         opts.set(key, value);
     }
     ctx.open_with(opts).map_err(|e| e.to_string())
