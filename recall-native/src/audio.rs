@@ -205,7 +205,11 @@ impl AudioMixer {
         if !gain_db.is_finite() {
             return Err("preview track gain must be finite".into());
         }
-        self.require_ready()?;
+        // No ready check: a mute or gain set while the tracks load must not be lost. The worker
+        // takes commands in order, so this one lands after the queued Open (2026-11-04).
+        if let Some(error) = self.error() {
+            return Err(error);
+        }
         self.send(Command::SetAudio {
             stream_index,
             gain_db,
