@@ -337,6 +337,8 @@ pub(super) fn warm_limit(budget: u64) -> u64 {
 
 /// Replaces the plan with one for `clips` (the full list, any order).
 pub fn start_prefetch(clips: Vec<PrefetchClip>, sink: Sink, prepare: PrepareEditor) {
+    let owned: HashSet<String> = clips.iter().map(clip_id).collect();
+    budget::sweep_orphan_thumbs(&super::cache_root(), &owned, budget::ORPHAN_THUMB_AGE);
     *library().lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Arc::new(Library { clips, sink, prepare }));
     replan();
 }
