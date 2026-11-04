@@ -25,6 +25,8 @@ pub(super) struct Spec {
     pub moments_audio_stamps: bool,
     /// Peak of every tone (1.0 = full scale).
     pub amplitude: f32,
+    /// The recorder's per-track sources tag (`edit_model::AUDIO_SOURCES_TAG`), when set.
+    pub sources: Option<&'static str>,
 }
 
 /// Track names written like the recorder does: as the MP4 `handler_name`.
@@ -32,7 +34,7 @@ pub(super) const TRACK_NAMES: [&str; 2] = ["Game", "Microphone"];
 
 impl Default for Spec {
     fn default() -> Self {
-        Self { width: 320, height: 240, fps: 60, seconds: 5.0, gop: 30, tones: vec![440.0, 660.0], moments_audio_stamps: false, amplitude: 0.4 }
+        Self { width: 320, height: 240, fps: 60, seconds: 5.0, gop: 30, tones: vec![440.0, 660.0], moments_audio_stamps: false, amplitude: 0.4, sources: None }
     }
 }
 
@@ -112,7 +114,17 @@ pub(super) fn synth(tag: &str, spec: &Spec) -> Option<Clip> {
         }
         audio.push((stream.index(), encoder));
     }
-    octx.write_header().unwrap();
+    match spec.sources {
+        Some(sources) => {
+            let mut tags = ff::Dictionary::new();
+            tags.set(crate::edit_model::AUDIO_SOURCES_TAG, sources);
+            octx.set_metadata(tags);
+            let mut options = ff::Dictionary::new();
+            options.set("movflags", "use_metadata_tags");
+            octx.write_header_with(options).unwrap();
+        }
+        None => octx.write_header().unwrap(),
+    }
 
     // (time in seconds, output stream, packet in its encoder time base)
     let mut queue: Vec<(f64, usize, ff::Packet, ff::Rational)> = Vec::new();

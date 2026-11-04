@@ -87,6 +87,7 @@ fn pcm(name: &'static str, secs: f64, tone: bool) -> AudioPcm {
         .collect();
     AudioPcm {
         name,
+        source: match name { "Game" => "game-process", "Voice" => "voice-app", _ => "mic" },
         rate,
         channels: 2,
         samples,
@@ -198,6 +199,13 @@ fn assert_clip_roundtrip(encoder: &str, id: ff::codec::Id, tag: &str) {
         .collect();
     let titles = ["Game", "Microphone", "Voice chat"];
     assert_eq!(handlers, titles, "{encoder} audio handler_name");
+    // Each track's source, for the editor's mix defaults (file level: MP4 keeps no custom
+    // per-stream tags).
+    assert_eq!(
+        ictx.metadata().get(crate::edit_model::AUDIO_SOURCES_TAG),
+        Some(r#"["game-process","mic","voice-app"]"#),
+        "{encoder} audio sources tag"
+    );
     let bytes = std::fs::read(&path).unwrap();
     for title in titles {
         let name_box = [b"name".as_slice(), title.as_bytes()].concat();

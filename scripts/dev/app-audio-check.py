@@ -40,9 +40,15 @@ def main(clip):
     names = [name for _, name in found]
     print("tracks:", names)
     failures = []
-    apps = names[-3:]
-    if apps != ["Tone A", "Tone B", "Tone C"]:
-        failures.append(f"app tracks must be the last three, in order: {names}")
+    apps = names[-4:]
+    if apps != ["Tone A", "Tone B", "Tone C", "Target"]:
+        failures.append(f"app tracks must be the last four, in order: {names}")
+    tag = json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format_tags=recall_audio_sources", "-of", "json", clip],
+                                    capture_output=True, text=True, check=True).stdout)["format"].get("tags", {}).get("recall_audio_sources")
+    sources = json.loads(tag) if tag else []
+    print("sources:", sources)
+    if sources[-4:] != ["app:tone-a.exe", "app:tone-b.exe", "app:tone-c.exe", "app:present_target.exe"] or len(sources) != len(names):
+        failures.append(f"each track needs its source, apps as app:<exe>: {sources}")
     report = {}
     for ordinal, name in enumerate(names):
         samples = pcm(clip, ordinal)
@@ -72,6 +78,10 @@ def main(clip):
         lengths = {name: len(pcm(clip, i)) / RATE for i, name in enumerate(names)}
         if max(lengths.values()) - lengths["Tone C"] > 0.5:
             failures.append(f"Tone C must run the clip's whole length: {lengths}")
+    if "Target" in report:
+        samples = pcm(clip, names.index("Target"))
+        if len(samples) == 0 or float(np.abs(samples).max()) > 1e-4:
+            failures.append("the game's own exe listed as an app must stay silent (it is on the Game track)")
     for failure in failures:
         print("FAIL:", failure)
     return 1 if failures else 0

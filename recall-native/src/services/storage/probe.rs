@@ -12,6 +12,8 @@ pub struct ProbedTrack {
     pub stream_index: usize,
     pub name: Option<String>,
     pub channels: u16,
+    /// The recorder's source for this track (`edit_model::AUDIO_SOURCES_TAG`), "" when untagged.
+    pub source: String,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -29,7 +31,7 @@ pub fn probe_clip(source: &Path, lowered: bool) -> Result<ProbedClip, String> {
     let mut command = Command::new(ffmpeg::binary("RECALL_FFPROBE", "ffprobe.exe")?);
     command
         .args(["-v", "error", "-of", "json", "-show_entries"])
-        .arg("format=duration:stream=index,codec_type,width,height,avg_frame_rate,start_time,duration,channels:stream_tags=title,handler_name,language")
+        .arg(format!("format=duration:format_tags={}:stream=index,codec_type,width,height,avg_frame_rate,start_time,duration,channels:stream_tags=title,handler_name,language", crate::edit_model::AUDIO_SOURCES_TAG))
         .arg(source);
     let output = ffmpeg::run_hidden(&mut command, lowered).map_err(|error| format!("start ffprobe: {error}"))?;
     if !output.status.success() {
@@ -70,13 +72,16 @@ fn parse(report: &Value) -> Result<ProbedClip, String> {
         let bottom: f64 = bottom.parse().ok()?;
         (bottom != 0.0).then(|| top.parse::<f64>().ok().map(|top| top / bottom))?
     });
+    let sources = crate::edit_model::parse_audio_sources(report["format"]["tags"][crate::edit_model::AUDIO_SOURCES_TAG].as_str());
     let tracks = streams
         .iter()
         .filter(|stream| kind(stream).as_deref() == Some("audio"))
-        .map(|stream| ProbedTrack {
+        .enumerate()
+        .map(|(ordinal, stream)| ProbedTrack {
             stream_index: stream["index"].as_u64().unwrap_or(0) as usize,
             name: track_name(&stream["tags"]),
             channels: stream["channels"].as_u64().unwrap_or(2).clamp(1, 2) as u16,
+            source: sources.get(ordinal).cloned().unwrap_or_default(),
         })
         .collect();
     Ok(ProbedClip {
@@ -108,9 +113,26 @@ mod tests {
         assert!((clip.duration - 10.5).abs() < 1e-9);
         assert_eq!((clip.width, clip.height, clip.fps), (1920, 1080, 60.0));
         assert_eq!(clip.tracks, vec![
-            ProbedTrack { stream_index: 1, name: Some("und".into()), channels: 2 },
-            ProbedTrack { stream_index: 2, name: Some("Mic".into()), channels: 2 },
+            ProbedTrack { stream_index: 1, name: Some("und".into()), channels: 2, source: String::new() },
+            ProbedTrack { stream_index: 2, name: Some("Mic".into()), channels: 2, source: String::new() },
         ]);
+    }
+
+    #[test]
+    fn each_track_gets_its_source_from_the_file_tag() {
+        let report = serde_json::json!({
+            "format": {"duration": "2.0", "tags": {"recall_audio_sources": "[\"desktop-loopback\",\"mic\",\"app:a.exe\"]"}},
+            "streams": [
+                {"index": 0, "codec_type": "video", "width": 4, "height": 2, "avg_frame_rate": "60/1"},
+                {"index": 1, "codec_type": "audio", "channels": 2},
+                {"index": 2, "codec_type": "audio", "channels": 2},
+                {"index": 3, "codec_type": "audio", "channels": 2},
+            ],
+        });
+        let sources: Vec<String> = parse(&report).unwrap().tracks.into_iter().map(|t| t.source).collect();
+        assert_eq!(sources, ["desktop-loopback", "mic", "app:a.exe"]);
+        let untagged = serde_json::json!({"format": {"duration": "2.0"}, "streams": [{"index": 0, "codec_type": "video"}, {"index": 1, "codec_type": "audio"}]});
+        assert_eq!(parse(&untagged).unwrap().tracks[0].source, "", "older clips: no source");
     }
 
     #[test]

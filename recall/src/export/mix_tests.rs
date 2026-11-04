@@ -3,10 +3,12 @@
 
 use std::path::Path;
 
+use ffmpeg_next as ff;
+
 use super::test_media::{probe, synth, Clip, Spec, RATE};
 use super::video_encoder::VideoBackend;
 use super::{export_edited_with, ExportRequest};
-use crate::edit_model::{AudioSetting, EditPlan, ExportMode, ExportSettings, TimeRange};
+use crate::edit_model::{AudioSetting, AudioTrackInfo, EditPlan, ExportMode, ExportSettings, TimeRange};
 
 const GAME: usize = 1;
 const MIC: usize = 2;
@@ -135,5 +137,31 @@ fn a_quiet_mix_is_as_loud_as_its_sources_summed() {
         let db = 20.0 * (rms(&pcm[0]) / expected).log10();
         eprintln!("{mode:?}: quiet mix {db:+.2} dB against the plain sum");
         assert!(db.abs() <= 0.5, "{mode:?}: mix is {db:+.2} dB off its sources' sum");
+    }
+}
+
+#[test]
+fn a_desktop_clip_with_an_app_track_mixes_desktop_only_by_default() {
+    // 2026-11-05 merge-gate review: an app track is also inside Desktop audio, so mixing both
+    // would play the app twice. The editor's default (from the recorder's sources) leaves it out.
+    let spec = Spec { sources: Some(r#"["desktop-loopback","app:tone.exe"]"#), ..Spec::default() };
+    let Some(clip) = synth("mix-desktop-app", &spec) else {
+        eprintln!("libx264 missing in this FFmpeg build; skipped");
+        return;
+    };
+    let input = ff::format::input(&clip.path).unwrap();
+    let sources = crate::editor_media::audio_sources(&input);
+    assert_eq!(sources, ["desktop-loopback", "app:tone.exe"], "the fixture carries the recorder's tag");
+    let tracks: Vec<AudioTrackInfo> = [GAME, MIC]
+        .iter()
+        .zip(&sources)
+        .map(|(&stream_index, source)| AudioTrackInfo { stream_index, name: String::new(), channels: 2, sample_rate: 48_000, preview_path: String::new(), waveform: Vec::new(), source: source.clone() })
+        .collect();
+    let defaults: Vec<AudioSetting> = tracks.iter().map(AudioTrackInfo::default_setting).collect();
+    for mode in [ExportMode::Reencode, ExportMode::Lossless] {
+        let (names, pcm) = export(&clip, &format!("desktop-app-{mode:?}.mp4"), mode, defaults.clone());
+        assert_eq!(names, ["Game", "Microphone"], "{mode:?}: Desktop leads on its own, the app stays a track of its own");
+        assert!(carries(&pcm[0], 440.0) && !carries(&pcm[0], 660.0), "{mode:?}: the first track is Desktop only");
+        assert!(carries(&pcm[1], 660.0), "{mode:?}");
     }
 }

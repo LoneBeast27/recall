@@ -54,7 +54,10 @@ $late = Start-Job -ScriptBlock {
   [void][Diagnostics.Process]::Start($psi)
 } -ArgumentList (Join-Path $apps 'tone-b.exe'), $Device, $LateStart, $total
 
-$env:RECALL_AUDIO_APPS = '[{"exe":"tone-a.exe","label":"Tone A"},{"exe":"tone-b.exe","label":"Tone B"},{"exe":"tone-c.exe","label":"Tone C"}]'
+# The fourth "app" is the capture target itself, which the engine records as the game: its app
+# track must stay silent (the Game track already holds it).
+$targetExe = if ($Target) { Split-Path $Target -Leaf } else { 'present_target.exe' }
+$env:RECALL_AUDIO_APPS = '[{"exe":"tone-a.exe","label":"Tone A"},{"exe":"tone-b.exe","label":"Tone B"},{"exe":"tone-c.exe","label":"Tone C"},{"exe":"' + $targetExe + '","label":"Target"}]'
 $costArgs = @('-NoProfile', '-File', (Join-Path $PSScriptRoot 'engine-cost.ps1'), '-Seconds', '20', '-SaveSeconds', "$SaveSeconds", '-OutDir', (Join-Path $OutDir 'clips'), '-Json', (Join-Path $OutDir 'cost.json'), '-MaxMsPerFrame', '100')
 if ($Engine) { $costArgs += @('-Engine', $Engine) }
 if ($Target) { $costArgs += @('-Target', $Target) }

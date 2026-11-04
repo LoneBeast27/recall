@@ -267,11 +267,8 @@ impl EditorState {
             }
             None => EditPlan {
                 ranges: vec![TimeRange::new(0.0, info.duration)],
-                audio: info
-                    .audio
-                    .iter()
-                    .map(|a| AudioSetting { stream_index: a.stream_index, gain_db: 0.0, muted: false, mix: true })
-                    .collect(),
+                // App tracks start out of the mix: Desktop audio or the game already holds them.
+                audio: info.default_audio(),
             },
         };
         self.selected = 0;

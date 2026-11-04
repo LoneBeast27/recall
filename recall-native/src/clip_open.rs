@@ -199,6 +199,7 @@ fn clip_info(source: &Path, metadata: &std::fs::Metadata, probed: &storage::Prob
             sample_rate: 48_000,
             preview_path: String::new(),
             waveform: Vec::new(),
+            source: track.source.clone(),
         })
         .collect();
     let mut info = ClipInfo {
