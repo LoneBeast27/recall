@@ -267,8 +267,8 @@ mod tests {
 
     #[test]
     fn add_dedupes_case_and_slashes_and_skips_recordings() {
-        let mut folders = Folders { recordings: Some(r"V:\ALL RECORDINGS".into()), imported: vec![] };
-        assert!(!folders.add(Path::new(r"v:\all recordings\")));
+        let mut folders = Folders { recordings: Some(r"E:\Clips".into()), imported: vec![] };
+        assert!(!folders.add(Path::new(r"e:\clips\")));
         assert!(folders.add(Path::new(r"D:\ShadowPlay")));
         assert!(!folders.add(Path::new("d:/shadowplay/")));
         assert_eq!(folders.imported, vec![r"D:\ShadowPlay".to_owned()]);
@@ -288,7 +288,7 @@ mod tests {
     fn save_and_load_round_trip() {
         let dir = temp("roundtrip");
         let path = dir.join("folders.json");
-        let folders = Folders { recordings: Some(r"V:\ALL RECORDINGS".into()), imported: vec![r"D:\Old".into()] };
+        let folders = Folders { recordings: Some(r"E:\Clips".into()), imported: vec![r"D:\Old".into()] };
         folders.save_to(&path).unwrap();
         assert_eq!(Folders::load_from(&path), folders);
         assert_eq!(Folders::load_from(&dir.join("missing.json")), Folders::default());

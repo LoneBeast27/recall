@@ -83,7 +83,7 @@ pub struct MidiCfg {
 /// `[display]` -- which panel we manage.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct DisplayCfg {
-    /// Friendly name (e.g. `"PG27AQDP"`) used to select the target display;
+    /// Friendly name (e.g. `"Monitor 27Q"`) used to select the target display;
     /// "" (the default) = the primary display (`display::resolve_target`).
     pub target_friendly_name: String,
     /// Optional exact device-path pin. Empty/absent -> select by friendly name.

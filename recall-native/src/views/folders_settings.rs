@@ -242,9 +242,9 @@ mod tests {
 
     #[test]
     fn inside_matches_folder_contents_only() {
-        assert!(inside(r"V:\ALL RECORDINGS\a.mp4", r"v:\all recordings"));
+        assert!(inside(r"E:\Clips\a.mp4", r"e:\clips"));
         assert!(inside(r"D:\Medal\Clips\Rocket League\a.mp4", r"D:\Medal\"));
-        assert!(!inside(r"V:\ALL RECORDINGS 2\a.mp4", r"V:\ALL RECORDINGS"));
+        assert!(!inside(r"E:\Clips 2\a.mp4", r"E:\Clips"));
     }
 
     #[test]

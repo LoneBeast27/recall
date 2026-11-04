@@ -158,14 +158,14 @@ mod tests {
         for at in [5 * S, 31 * S + 250_000, 59 * S, 61 * S] {
             b.add(at);
         }
-        b.note_save(r"V:\c\A.mp4", 60 * S);
-        b.note_save(r"V:\c\B.mp4", 62 * S);
+        b.note_save(r"E:\c\A.mp4", 60 * S);
+        b.note_save(r"E:\c\B.mp4", 62 * S);
         // A: a 30 s clip ending at 60 s spans [30, 60].
-        assert_eq!(b.take_saved(r"V:\c\A.mp4", 30.0), Some(vec![1.25, 29.0]));
-        assert_eq!(b.take_saved(r"V:\c\A.mp4", 30.0), None, "taken once");
+        assert_eq!(b.take_saved(r"E:\c\A.mp4", 30.0), Some(vec![1.25, 29.0]));
+        assert_eq!(b.take_saved(r"E:\c\A.mp4", 30.0), None, "taken once");
         // B: a 2 s clip ending at 62 s spans [60, 62] -> only the 61 s mark.
-        assert_eq!(b.take_saved(r"V:\c\B.mp4", 2.0), Some(vec![1.0]));
-        assert_eq!(b.take_saved(r"V:\c\never.mp4", 9.0), None, "unknown save");
+        assert_eq!(b.take_saved(r"E:\c\B.mp4", 2.0), Some(vec![1.0]));
+        assert_eq!(b.take_saved(r"E:\c\never.mp4", 9.0), None, "unknown save");
     }
 
     #[test]
@@ -177,10 +177,10 @@ mod tests {
 
     #[test]
     fn sidecar_shape_and_name() {
-        let clip = Path::new(r"V:\ALL RECORDINGS\VALORANT__2026-10-22__14-05-09-275__ab12.mp4");
+        let clip = Path::new(r"E:\Clips\VALORANT__2026-10-22__14-05-09-275__ab12.mp4");
         assert_eq!(
             sidecar_path(clip),
-            Path::new(r"V:\ALL RECORDINGS\VALORANT__2026-10-22__14-05-09-275__ab12.recall-marks.json")
+            Path::new(r"E:\Clips\VALORANT__2026-10-22__14-05-09-275__ab12.recall-marks.json")
         );
         let v: serde_json::Value = serde_json::from_str(&sidecar_json(&[1.25, 29.0])).unwrap();
         assert_eq!(v, serde_json::json!({"version": 1, "marks": [1.25, 29.0]}));

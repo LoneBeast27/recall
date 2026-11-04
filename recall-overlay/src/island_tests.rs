@@ -74,7 +74,7 @@ fn a_notice_over_the_stats_returns_to_the_stats() {
     let mut reducer = Reducer::new();
     reducer.apply_envelope(&engine_status(), now);
     reducer.apply_envelope(&session_status(true), now);
-    reducer.apply_engine_event(&json!({"type":"saved","path":"V:\\c\\VALORANT__2026-10-26__10-00-00.mp4","seconds":120.0}), now);
+    reducer.apply_engine_event(&json!({"type":"saved","path":"E:\\c\\VALORANT__2026-10-26__10-00-00.mp4","seconds":120.0}), now);
     let Some(Content::Notice(notice)) = shown(&reducer) else { panic!("notice expected") };
     assert_eq!((notice.title.as_str(), notice.detail.as_str()), ("Clip saved", "VALORANT · 2:00"));
     reducer.apply_envelope(&engine_status(), now + Duration::from_secs(1));

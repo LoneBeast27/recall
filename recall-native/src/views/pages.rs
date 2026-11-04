@@ -125,7 +125,7 @@ impl Root {
                         } else {
                             format!("HDR is off · {display}")
                         }))
-                        .child(div().text_color(c(theme::TERTIARY)).child(if !self.snap.connected { "Start the recorder to read and switch HDR.".to_owned() } else if hdr.available { owner } else { "Recall manages HDR on the PG27AQDP. Connect it to use these controls.".into() })),
+                        .child(div().text_color(c(theme::TERTIARY)).child(if !self.snap.connected { "Start the recorder to read and switch HDR.".to_owned() } else if hdr.available { owner } else { "Recall can't find the display it manages. Connect it, or check that it is on, to use these controls.".into() })),
                 )
                 .child(ui::button("toggle-hdr", Variant::Secondary).when(!hdr.available, |b| b.opacity(0.4)).child("Toggle HDR now").on_click(cx.listener(|this, _, _, cx| {
                     this.send(DaemonCommand::ToggleHdr);

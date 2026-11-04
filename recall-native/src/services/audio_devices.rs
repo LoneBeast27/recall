@@ -85,7 +85,7 @@ mod tests {
 
     #[test]
     fn labels_name_the_default_and_missing_devices() {
-        let list = vec!["Microphone (USB)".to_owned(), "Microphone (3- RODECaster Duo Chat)".to_owned()];
+        let list = vec!["Microphone (USB)".to_owned(), "Microphone (USB Audio Device)".to_owned()];
         assert_eq!(device_label("", Some(&list), Some("Microphone (USB)")), "Windows default (Microphone (USB))");
         assert_eq!(device_label("", None, None), "Windows default");
         assert_eq!(device_label("microphone (usb)", Some(&list), None), "microphone (usb)", "case-insensitive like the engine");

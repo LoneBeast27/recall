@@ -10,8 +10,8 @@ fn temp_dir(tag: &str) -> PathBuf {
 
 #[test]
 fn staging_folder_comes_from_the_env_or_the_exe_folder() {
-    let exe = Path::new(r"L:\Programs\Recall\recall.exe");
-    let default = PathBuf::from(r"L:\Programs\Recall\cache\staging");
+    let exe = Path::new(r"F:\Programs\Recall\recall.exe");
+    let default = PathBuf::from(r"F:\Programs\Recall\cache\staging");
     assert_eq!(configured(None, Some(exe)), Some(default.clone()));
     assert_eq!(configured(Some("  "), Some(exe)), Some(default.clone()), "blank = default");
     assert_eq!(configured(Some(r"D:\fast\stage"), Some(exe)), Some(PathBuf::from(r"D:\fast\stage")));
@@ -26,29 +26,29 @@ fn staging_folder_comes_from_the_env_or_the_exe_folder() {
 #[test]
 fn volumes_compare_by_drive_letter_or_share() {
     let same = |a: &str, b: &str| same_volume(Path::new(a), Path::new(b));
-    assert!(!same(r"L:\Programs\Recall\cache\staging", r"V:\ALL RECORDINGS"));
-    assert!(same(r"l:\a", r"L:\b\c"), "drive letters are case-insensitive");
-    assert!(same(r"\\?\V:\x", r"V:\ALL RECORDINGS"), "verbatim and plain forms match");
+    assert!(!same(r"F:\Programs\Recall\cache\staging", r"E:\Clips"));
+    assert!(same(r"f:\a", r"F:\b\c"), "drive letters are case-insensitive");
+    assert!(same(r"\\?\E:\x", r"E:\Clips"), "verbatim and plain forms match");
     assert!(same(r"\\nas\clips\a", r"\\NAS\Clips\b"));
     assert!(!same(r"\\nas\clips\a", r"\\nas\other\a"));
-    assert!(!same(r"\\nas\clips", r"V:\clips"));
+    assert!(!same(r"\\nas\clips", r"E:\clips"));
 }
 
 #[test]
 fn a_save_is_staged_only_across_volumes() {
-    let stage = Path::new(r"L:\Recall\cache\staging");
-    let clip = Path::new(r"V:\ALL RECORDINGS\G__2026-10-23__10-00-00-000__ab.mp4");
+    let stage = Path::new(r"F:\Recall\cache\staging");
+    let clip = Path::new(r"E:\Clips\G__2026-10-23__10-00-00-000__ab.mp4");
     assert_eq!(
         staged_path(stage, clip, same_volume),
-        Some(PathBuf::from(r"L:\Recall\cache\staging\G__2026-10-23__10-00-00-000__ab.mp4"))
+        Some(PathBuf::from(r"F:\Recall\cache\staging\G__2026-10-23__10-00-00-000__ab.mp4"))
     );
-    assert_eq!(staged_path(stage, Path::new(r"L:\clips\G.mp4"), same_volume), None, "same volume: in place");
-    assert_eq!(staged_path(stage, Path::new(r"V:\"), same_volume), None, "no file name");
+    assert_eq!(staged_path(stage, Path::new(r"F:\clips\G.mp4"), same_volume), None, "same volume: in place");
+    assert_eq!(staged_path(stage, Path::new(r"E:\"), same_volume), None, "no file name");
 }
 
 #[test]
 fn recovery_queues_finished_clips_and_deletes_only_stale_mp4_parts() {
-    let (stage, out) = (temp_dir("recover"), PathBuf::from(r"V:\never-touched"));
+    let (stage, out) = (temp_dir("recover"), PathBuf::from(r"E:\never-touched"));
     let older = stage.join("A__2026-10-22__09-00-00-000__aa.mp4");
     std::fs::write(&older, b"a").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(20));
@@ -106,11 +106,11 @@ fn an_uncreatable_staging_folder_falls_back_to_writing_in_place() {
     let cfg = mover::Config { background: false, ..mover::Config::default() };
     let (queue, control) = mover::spawn(events.clone(), cfg, Vec::new()).unwrap();
     let stage = Stage { dir: file.join("staging"), queue, same_volume: |_, _| false };
-    assert_eq!(stage.target(r"V:\c\G.mp4", &events), None);
+    assert_eq!(stage.target(r"E:\c\G.mp4", &events), None);
     let logs = sink.lock().unwrap().clone();
     assert!(logs.iter().any(|l| l.contains("writing the clip in place")), "{logs:?}");
     let ok = Stage { dir: dir.join("staging"), ..stage };
-    assert_eq!(ok.target(r"V:\c\G.mp4", &events), Some(dir.join("staging").join("G.mp4")));
+    assert_eq!(ok.target(r"E:\c\G.mp4", &events), Some(dir.join("staging").join("G.mp4")));
     assert!(dir.join("staging").is_dir());
     assert!(control.shutdown(std::time::Duration::from_secs(1)));
     let _ = std::fs::remove_dir_all(&dir);
