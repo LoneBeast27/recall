@@ -9,10 +9,17 @@
 //!   Recall's own processes, explorer, browsers, media players, overlays,
 //!   launchers) or an exe with a `none` override.
 //! - **Session** ([`TargetTracker`]): the same rules as the HDR `Reconciler`
-//!   session, applied to capture: a candidate commits only after it stays
-//!   foreground for [`TARGET_DEBOUNCE`]; a non-target foreground (alt-tab) never
-//!   ends the session; a *different* game that settles replaces it; the
-//!   session ends only when its process exits.
+//!   session, applied to capture. With nothing recorded (no session, or the
+//!   engine lingering after a game exited) a candidate commits once it holds
+//!   the foreground for [`START_DEBOUNCE`] (300 ms): the first game starts
+//!   recording almost at once. A *different* game (another process) replaces a
+//!   live session only after [`TARGET_DEBOUNCE`] (2 s), so a brief alt-tab to
+//!   another game does not restart the engine; a new window of the session's
+//!   own process (a fullscreen mode switch) needs only [`START_DEBOUNCE`]. The
+//!   deadline follows the session: if the session ends while a candidate
+//!   waits, the short debounce applies from when that candidate was first
+//!   seen. A non-target foreground (alt-tab) never ends the session; the
+//!   session ends when its process exits or its window is destroyed.
 
 use std::time::{Duration, Instant};
 
@@ -21,8 +28,12 @@ use crate::rules;
 use crate::types::RuleKind;
 use crate::watcher::WatchEvent;
 
-/// How long a candidate must hold the foreground before it becomes the target.
+/// How long a different game must hold the foreground before it replaces a
+/// live session (alt-tab protection).
 pub const TARGET_DEBOUNCE: Duration = Duration::from_secs(2);
+/// How long a candidate must hold the foreground when nothing is recorded, or
+/// when it is a new window of the session's own process.
+pub const START_DEBOUNCE: Duration = Duration::from_millis(300);
 /// Source name of the idle monitor capture.
 pub const DESKTOP_NAME: &str = "Desktop";
 
@@ -142,51 +153,74 @@ pub fn classify_event(ev: &WatchEvent, cfg: &Config) -> Option<Target> {
 
 /// The debounced capture session (see the module docs).
 pub struct TargetTracker {
+    /// Replacing a live session with a different game.
     debounce: Duration,
+    /// Starting a session from nothing, or a new window of the session's process.
+    start: Duration,
     current: Option<Target>,
-    /// A foreground observation awaiting its deadline; `None` inside = a
+    /// A foreground observation and when it was first seen; `None` inside = a
     /// non-target foreground (it cancels a pending game, never the session).
     pending: Option<(Option<Target>, Instant)>,
+    /// How long the last committed candidate waited (first seen -> commit).
+    last_wait: Option<Duration>,
 }
 
 impl TargetTracker {
-    pub fn new(debounce: Duration) -> Self {
-        TargetTracker { debounce, current: None, pending: None }
+    pub fn new(debounce: Duration, start: Duration) -> Self {
+        TargetTracker { debounce, start, current: None, pending: None, last_wait: None }
     }
 
     pub fn current(&self) -> Option<&Target> {
         self.current.as_ref()
     }
 
-    pub fn next_deadline(&self) -> Option<Instant> {
-        self.pending.as_ref().map(|(_, d)| *d)
+    /// The hold a candidate needs against the current session.
+    fn hold_for(&self, candidate: &Option<Target>) -> Duration {
+        match (candidate, &self.current) {
+            (Some(c), Some(cur)) if c.pid != cur.pid => self.debounce,
+            _ => self.start,
+        }
     }
 
-    /// A foreground change was observed (`None` = not a target).
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.pending.as_ref().map(|(c, seen)| *seen + self.hold_for(c))
+    }
+
+    /// A foreground change was observed (`None` = not a target). Seeing the
+    /// pending candidate again keeps its first-seen time.
     pub fn on_foreground(&mut self, candidate: Option<Target>, now: Instant) {
-        match (&candidate, &self.current) {
+        match (&candidate, &self.current, &self.pending) {
             // Re-focusing the live target: nothing pending, nothing to do.
-            (Some(c), Some(cur)) if c.same_window(cur) => self.pending = None,
-            _ => self.pending = Some((candidate, now + self.debounce)),
+            (Some(c), Some(cur), _) if c.same_window(cur) => self.pending = None,
+            (Some(c), _, Some((Some(p), _))) if c.same_window(p) => {}
+            (None, _, Some((None, _))) => {}
+            _ => self.pending = Some((candidate, now)),
         }
     }
 
     /// Commit a settled candidate. Returns `true` when the target changed.
     pub fn poll(&mut self, now: Instant) -> bool {
-        let due = matches!(&self.pending, Some((_, deadline)) if now >= *deadline);
+        let due = self.next_deadline().is_some_and(|d| now >= d);
         if !due {
             return false;
         }
-        let Some((candidate, _)) = self.pending.take() else { return false };
+        let Some((candidate, seen)) = self.pending.take() else { return false };
         match candidate {
             // Alt-tab / desktop: the session persists.
             None => false,
             Some(c) if self.current.as_ref().is_some_and(|cur| cur.same_window(&c)) => false,
             Some(c) => {
                 self.current = Some(c);
+                self.last_wait = Some(now.duration_since(seen));
                 true
             }
         }
+    }
+
+    /// How long the last committed target waited from first seen to commit
+    /// (taken once, for the retarget log line).
+    pub fn take_last_wait(&mut self) -> Option<Duration> {
+        self.last_wait.take()
     }
 
     /// The process `pid` exited: end its session (and drop a pending candidate
@@ -215,170 +249,5 @@ impl TargetTracker {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::config::Override;
-
-    fn ev(stem: &str, title: &str, pid: u32, hwnd: isize, fullscreen: bool) -> WatchEvent {
-        WatchEvent {
-            pid,
-            exe_stem: stem.into(),
-            exe_name: format!("{stem}.exe"),
-            title: title.into(),
-            fullscreen,
-            fullscreen_on_target: fullscreen,
-            steam_game: false,
-            hwnd,
-        }
-    }
-
-    fn steam_ev(stem: &str) -> WatchEvent {
-        WatchEvent { steam_game: true, ..ev(stem, stem, 7, 0x70, false) }
-    }
-
-    fn target(pid: u32, hwnd: isize, name: &str) -> Target {
-        Target { hwnd, pid, name: name.into(), exe: format!("{name}.exe") }
-    }
-
-    fn user_cfg() -> Config {
-        let mut cfg = Config::default();
-        cfg.overrides.push(Override { exe: "brave".into(), kind: RuleKind::None, clamp: None });
-        cfg.overrides.push(Override { exe: "windowedgame".into(), kind: RuleKind::SdrGame, clamp: None });
-        cfg.overrides.push(Override { exe: "spotify".into(), kind: RuleKind::None, clamp: None });
-        cfg
-    }
-
-    #[test]
-    fn fullscreen_unknown_game_is_a_target_named_by_title() {
-        let cfg = user_cfg();
-        let t = classify_event(&ev("VALORANT-Win64-Shipping", "VALORANT  ", 10, 0x10, true), &cfg).unwrap();
-        assert_eq!(t.name, "VALORANT");
-        assert_eq!(t.exe, "VALORANT-Win64-Shipping.exe");
-        assert_eq!((t.pid, t.hwnd), (10, 0x10));
-        let untitled = classify_event(&ev("RocketLeague", "", 11, 0x11, true), &cfg).unwrap();
-        assert_eq!(untitled.name, "RocketLeague", "falls back to the exe stem");
-    }
-
-    #[test]
-    fn windowed_unknown_is_not_a_target_but_an_override_is() {
-        let cfg = user_cfg();
-        assert!(classify_event(&ev("notepad", "x", 1, 1, false), &cfg).is_none());
-        assert!(classify_event(&ev("WindowedGame", "x", 1, 1, false), &cfg).is_some());
-    }
-
-    #[test]
-    fn windowed_steam_library_game_is_a_target_unless_denied() {
-        let cfg = user_cfg();
-        assert!(classify_event(&steam_ev("sobosuba"), &cfg).is_some(), "maximized windowed Steam game");
-        for stem in ["wallpaper64", "ui32", "brave"] {
-            assert!(classify_event(&steam_ev(stem), &cfg).is_none(), "{stem} in a Steam library is not a game");
-        }
-        let mut off = user_cfg();
-        off.overrides.push(Override { exe: "sobosuba".into(), kind: RuleKind::None, clamp: None });
-        assert!(classify_event(&steam_ev("sobosuba"), &off).is_none(), "a none override still wins");
-    }
-
-    #[test]
-    fn denied_and_none_override_stems_are_never_targets() {
-        let cfg = user_cfg();
-        for stem in ["explorer", "recall", "recall-hdr", "recall-native", "recall-overlay", "chrome", "msedge", "firefox", "brave", "spotify", "vlc", "NVIDIA Overlay", "GameBar", "steamwebhelper"] {
-            assert!(!is_target(stem, true, &cfg), "{stem} fullscreen must not be recorded");
-        }
-        assert!(!is_target("  ", true, &cfg));
-    }
-
-    #[test]
-    fn default_game_class_none_still_records_fullscreen_games() {
-        // HDR rules use default_game_class; capture does not.
-        let mut cfg = user_cfg();
-        cfg.behavior.default_game_class = RuleKind::None;
-        assert!(is_target("eldenring", true, &cfg));
-    }
-
-    #[test]
-    fn sanitize_collapses_and_caps() {
-        assert_eq!(sanitize("  Elden\tRing\u{7}  "), "Elden Ring");
-        assert_eq!(sanitize(&"x".repeat(100)).chars().count(), 64);
-        assert_eq!(display_name("", ""), "Game");
-    }
-
-    #[test]
-    fn candidate_commits_only_after_debounce() {
-        let t0 = Instant::now();
-        let mut tr = TargetTracker::new(TARGET_DEBOUNCE);
-        tr.on_foreground(Some(target(1, 1, "A")), t0);
-        assert!(!tr.poll(t0 + Duration::from_millis(1999)));
-        assert!(tr.current().is_none());
-        assert!(tr.poll(t0 + TARGET_DEBOUNCE));
-        assert_eq!(tr.current().unwrap().pid, 1);
-    }
-
-    #[test]
-    fn brief_focus_of_another_game_does_not_retarget() {
-        let t0 = Instant::now();
-        let mut tr = TargetTracker::new(TARGET_DEBOUNCE);
-        tr.on_foreground(Some(target(1, 1, "A")), t0);
-        tr.poll(t0 + TARGET_DEBOUNCE);
-        // B is foreground for 1 s, then the desktop: B never commits.
-        tr.on_foreground(Some(target(2, 2, "B")), t0 + Duration::from_secs(5));
-        tr.on_foreground(None, t0 + Duration::from_secs(6));
-        assert!(!tr.poll(t0 + Duration::from_secs(20)));
-        assert_eq!(tr.current().unwrap().pid, 1);
-    }
-
-    #[test]
-    fn alt_tab_keeps_target_while_its_process_lives() {
-        let t0 = Instant::now();
-        let mut tr = TargetTracker::new(TARGET_DEBOUNCE);
-        tr.on_foreground(Some(target(1, 1, "A")), t0);
-        tr.poll(t0 + TARGET_DEBOUNCE);
-        tr.on_foreground(None, t0 + Duration::from_secs(10)); // desktop for a minute
-        assert!(!tr.poll(t0 + Duration::from_secs(70)));
-        assert_eq!(tr.current().unwrap().pid, 1, "target persists off-foreground");
-        // Back to the game: no change, nothing pending.
-        tr.on_foreground(Some(target(1, 1, "A")), t0 + Duration::from_secs(71));
-        assert!(tr.next_deadline().is_none());
-    }
-
-    #[test]
-    fn a_settled_different_game_replaces_the_target() {
-        let t0 = Instant::now();
-        let mut tr = TargetTracker::new(TARGET_DEBOUNCE);
-        tr.on_foreground(Some(target(1, 1, "A")), t0);
-        tr.poll(t0 + TARGET_DEBOUNCE);
-        tr.on_foreground(Some(target(2, 2, "B")), t0 + Duration::from_secs(5));
-        assert!(tr.poll(t0 + Duration::from_secs(7)));
-        assert_eq!(tr.current().unwrap().pid, 2);
-        // Same process, new window (fullscreen mode switch) also retargets.
-        tr.on_foreground(Some(target(2, 3, "B")), t0 + Duration::from_secs(9));
-        assert!(tr.poll(t0 + Duration::from_secs(11)));
-        assert_eq!(tr.current().unwrap().hwnd, 3);
-    }
-
-    #[test]
-    fn process_exit_clears_target_and_pending() {
-        let t0 = Instant::now();
-        let mut tr = TargetTracker::new(TARGET_DEBOUNCE);
-        tr.on_foreground(Some(target(1, 1, "A")), t0);
-        tr.poll(t0 + TARGET_DEBOUNCE);
-        assert!(!tr.on_process_exit(99), "unrelated exit ignored");
-        assert!(tr.on_process_exit(1));
-        assert!(tr.current().is_none());
-        // A candidate whose process dies before committing never commits.
-        tr.on_foreground(Some(target(5, 5, "C")), t0 + Duration::from_secs(3));
-        tr.on_process_exit(5);
-        assert!(!tr.poll(t0 + Duration::from_secs(10)));
-        assert!(tr.current().is_none());
-    }
-
-    #[test]
-    fn destroyed_target_window_ends_the_session() {
-        let t0 = Instant::now();
-        let mut tr = TargetTracker::new(TARGET_DEBOUNCE);
-        tr.on_foreground(Some(target(1, 0x10, "A")), t0);
-        tr.poll(t0 + TARGET_DEBOUNCE);
-        assert!(!tr.on_window_gone(0x99), "another window is irrelevant");
-        assert!(tr.on_window_gone(0x10));
-        assert!(tr.current().is_none());
-    }
-}
+#[path = "record_target_tests.rs"]
+mod tests;
