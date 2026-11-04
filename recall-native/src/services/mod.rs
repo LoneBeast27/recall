@@ -1,4 +1,5 @@
 //! Non-UI services: controller pipe client, audio meters, MIDI, clip library index.
+pub mod audio_devices;
 pub mod daemon;
 pub mod library;
 pub mod meters;
