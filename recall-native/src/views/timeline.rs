@@ -197,8 +197,8 @@ impl Root {
         ruler.into_any_element()
     }
 
-    /// Tiles at the clip's own aspect ratio, side by side over the time they cover; each shows
-    /// the most eventful frame of its stretch (see `scene_strip`). The last tile is cut by the edge.
+    /// Tiles at the clip's own aspect ratio, each showing the most eventful frame of its stretch
+    /// (see `scene_strip`), with its left edge at that frame's exact time. The last is cut by the edge.
     fn render_filmstrip(&self, top: f32) -> AnyElement {
         let frames = &self.ed.visuals.filmstrip;
         let strip = div()
@@ -224,13 +224,13 @@ impl Root {
         let tile_w = VIDEO_H * aspect;
         // The strip spans the tracks area; before its first paint, assume a typical width.
         let width = self.ed.track_span.get().map(|(_, w)| w).filter(|w| *w > 1.0).unwrap_or(1200.0);
-        let picks = crate::backend::scene_strip::tile_picks(frames, self.ed.duration(), width, tile_w);
+        let tiles = crate::backend::scene_strip::anchored_tiles(frames, self.ed.duration(), width, tile_w);
         strip
-            .children(picks.into_iter().enumerate().map(|(tile, index)| {
+            .children(tiles.into_iter().map(|(index, x)| {
                 img(PathBuf::from(&frames[index].path))
                     .absolute()
                     .top_0()
-                    .left(px(tile as f32 * tile_w))
+                    .left(px(x))
                     .w(px(tile_w))
                     .h(px(VIDEO_H))
                     .object_fit(ObjectFit::Cover)
