@@ -23,6 +23,8 @@ mod preview;
 mod reducer;
 mod render;
 mod session;
+#[path = "../../recall/src/single_instance.rs"]
+mod single_instance;
 mod smoke;
 mod stats;
 mod window;
@@ -55,6 +57,8 @@ use smoke::Smoke;
 use window::create_window;
 
 const PIPE_NAME: &str = "recall-hdr-control";
+/// How long a new island waits for one that is ending (the controller restarts it).
+const INSTANCE_WAIT: Duration = Duration::from_secs(3);
 /// Posted by the pipe thread so a notice lands at once, not on the next tick.
 const WM_FEED: u32 = WM_APP + 1;
 const CORNERS: [&str; 4] = ["top-left", "top-right", "bottom-left", "bottom-right"];
@@ -118,6 +122,21 @@ fn run() -> Result<(), String> {
     if (options.smoke_allow_capture || options.smoke_render.is_some()) && options.smoke_state.is_none() {
         return Err("--smoke-allow-capture / --smoke-render require --smoke-state".into());
     }
+    // One island per user. Smoke runs are tests and never take the guard. Held until exit.
+    let _instance = match options.smoke_state {
+        Some(_) => None,
+        None => match single_instance::claim_within(&single_instance::mutex_name(single_instance::OVERLAY), INSTANCE_WAIT) {
+            single_instance::Claim::First(guard) => Some(guard),
+            single_instance::Claim::Taken => {
+                eprintln!("recall-overlay: another island is already running; exiting");
+                return Ok(());
+            }
+            single_instance::Claim::Unavailable(code) => {
+                eprintln!("recall-overlay: single-instance guard unavailable (error {code}); continuing");
+                None
+            }
+        },
+    };
     let parent_handle = match options.parent {
         Some(pid) => Some(
             unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }.map_err(|e| format!("open parent process {pid}: {e}"))?,

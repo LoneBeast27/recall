@@ -9,6 +9,7 @@ mod clip_open;
 #[path = "../../recall/src/edit_model.rs"]
 mod edit_model;
 mod editor_state;
+mod instance;
 mod library_probe;
 mod library_state;
 mod media;
@@ -44,7 +45,12 @@ fn main() {
         }
         let _ = unsafe { SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS) };
     }
-    if let Err(error) = app::run() {
+    // One library per user: a second start shows the running window and exits.
+    let guard = match instance::start() {
+        instance::Start::Run(guard) => guard,
+        instance::Start::Exit => std::process::exit(0),
+    };
+    if let Err(error) = app::run(guard) {
         eprintln!("Recall native: {error}");
         trace::player_log("start failed", serde_json::json!({ "error": error }));
         std::process::exit(1);
