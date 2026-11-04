@@ -245,7 +245,8 @@ fn default_version() -> u32 {
 impl Default for DisplayCfg {
     fn default() -> Self {
         DisplayCfg {
-            target_friendly_name: "PG27AQDP".into(),
+            // "" = the primary display (`display::resolve_target`).
+            target_friendly_name: String::new(),
             target_device_path: None,
         }
     }

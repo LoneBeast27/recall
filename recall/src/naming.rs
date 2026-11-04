@@ -16,9 +16,13 @@ pub const LONGREC_SUFFIX: &str = "__rec.mp4";
 /// Extension of a file that is still being written.
 pub const PART_EXT: &str = ".part";
 
-/// The clip folder (`RECALL_OUT_DIR`, default `V:\ALL RECORDINGS`).
+/// The clip folder (`RECALL_OUT_DIR`, which the controller always sets; run by hand,
+/// `%USERPROFILE%\Videos\Recall`).
 pub fn out_dir() -> String {
-    std::env::var("RECALL_OUT_DIR").unwrap_or_else(|_| r"V:\ALL RECORDINGS".to_string())
+    std::env::var("RECALL_OUT_DIR").unwrap_or_else(|_| {
+        let home = std::path::PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default());
+        home.join("Videos").join("Recall").to_string_lossy().into_owned()
+    })
 }
 
 /// Source name -> file-name-safe slug (the `clip_path` rule): characters other

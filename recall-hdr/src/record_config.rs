@@ -94,7 +94,7 @@ impl Default for RecordingCfg {
     fn default() -> Self {
         RecordingCfg {
             auto_record: true,
-            output_dir: r"V:\ALL RECORDINGS".into(),
+            output_dir: default_output_dir(),
             buffer_secs: 120,
             save_hotkey: "Alt+N".into(),
             mic_hotkey: "Alt+M".into(),
@@ -107,13 +107,32 @@ impl Default for RecordingCfg {
             bitrate_mbps: 25,
             quality: "balanced".into(),
             voice_app: String::new(),
-            cpu_mask: "ffff0000".into(),
+            cpu_mask: "auto".into(),
             record_desktop_when_idle: false,
             mic_device: String::new(),
             mic_enabled: true,
             desktop_audio_device: String::new(),
             save_hotkeys: crate::record_hotkeys::default_save_hotkeys(),
         }
+    }
+}
+
+/// `<Videos>\Recall`: the Videos known folder (follows a moved or OneDrive Videos), else
+/// `%USERPROFILE%\Videos\Recall`.
+pub fn default_output_dir() -> String {
+    let videos = videos_folder().unwrap_or_else(|| PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("Videos"));
+    videos.join("Recall").to_string_lossy().into_owned()
+}
+
+fn videos_folder() -> Option<PathBuf> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_Videos, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+    // SAFETY: the returned buffer is copied, then freed with the allocator that made it.
+    unsafe {
+        let raw = SHGetKnownFolderPath(&FOLDERID_Videos, KF_FLAG_DEFAULT, None).ok()?;
+        let path = raw.to_string().ok();
+        CoTaskMemFree(Some(raw.0 as *const _));
+        path.filter(|p| !p.is_empty()).map(PathBuf::from)
     }
 }
 
@@ -192,7 +211,10 @@ impl OverlayCfg {
     }
 }
 
-/// The CPUs of `wanted` that exist in `system`; when none do (the default ffff0000 on a
+/// `recording.cpu_mask = "auto"`: no CPUs named, so [`fit_cpu_mask`] picks the high half.
+pub const AUTO_CPU_MASK: usize = 0;
+
+/// The CPUs of `wanted` that exist in `system`; when none do ("auto", or ffff0000 on a
 /// machine with 16 or fewer threads), the high half of `system`; `None` (no pin) with 4 or
 /// fewer CPUs, where a pin would only crowd the game.
 pub fn fit_cpu_mask(wanted: usize, system: usize) -> Option<usize> {
@@ -213,9 +235,13 @@ pub fn fit_cpu_mask(wanted: usize, system: usize) -> Option<usize> {
     Some(high)
 }
 
-/// Parse a hex affinity mask (`"ffff0000"` / `"0xffff0000"`); zero is invalid.
+/// Parse a hex affinity mask (`"ffff0000"` / `"0xffff0000"`) or `"auto"`
+/// ([`AUTO_CPU_MASK`]); zero is invalid.
 pub fn parse_cpu_mask(text: &str) -> Result<usize, String> {
     let raw = text.trim();
+    if raw.eq_ignore_ascii_case("auto") {
+        return Ok(AUTO_CPU_MASK);
+    }
     let digits = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")).unwrap_or(raw);
     match usize::from_str_radix(digits, 16) {
         Ok(0) => Err("recording.cpu_mask must select at least one CPU".into()),
@@ -278,6 +304,11 @@ fn validate_quality(rec: &RecordingCfg) -> Result<(), String> {
     if !QUALITIES.contains(&rec.quality.as_str()) {
         return Err(format!("recording.quality '{}' must be one of {}", rec.quality, QUALITIES.join(" | ")));
     }
+    for (key, name) in [("mic_device", &rec.mic_device), ("desktop_audio_device", &rec.desktop_audio_device)] {
+        if name.len() > 256 || name.chars().any(char::is_control) {
+            return Err(format!("recording.{key} must be an audio device name (at most 256 characters, one line)"));
+        }
+    }
     let voice = rec.voice_app.trim();
     if voice.len() > 64 || voice.chars().any(|c| matches!(c, '\\' | '/' | ':') || c.is_control()) {
         return Err(format!("recording.voice_app '{voice}' must be an exe name like Discord.exe (no folders)"));
@@ -304,11 +335,6 @@ pub fn merge_json(base: &mut Value, patch: &Value) {
 }
 
 /// Optional schema keys that are absent from the serialized form when unset.
-    for (key, name) in [("mic_device", &rec.mic_device), ("desktop_audio_device", &rec.desktop_audio_device)] {
-        if name.len() > 256 || name.chars().any(char::is_control) {
-            return Err(format!("recording.{key} must be an audio device name (at most 256 characters, one line)"));
-        }
-    }
 const OPTIONAL_KEYS: &[&str] = &["display.target_device_path"];
 
 /// Reject patch keys the schema does not have (typo guard) and `version`.

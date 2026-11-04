@@ -42,6 +42,7 @@ use windows::Win32::Devices::Display::{
     DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL, DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_NAME,
     DISPLAYCONFIG_DEVICE_INFO_HEADER, DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE,
     DISPLAYCONFIG_DEVICE_INFO_TYPE, DISPLAYCONFIG_GET_ADVANCED_COLOR_INFO, DISPLAYCONFIG_MODE_INFO,
+    DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE,
     DISPLAYCONFIG_PATH_INFO, DISPLAYCONFIG_SDR_WHITE_LEVEL, DISPLAYCONFIG_SET_ADVANCED_COLOR_STATE,
     DISPLAYCONFIG_TARGET_DEVICE_NAME, QDC_ONLY_ACTIVE_PATHS,
 };
@@ -173,6 +174,11 @@ fn header_for<S>(
 /// pairs. Skips inactive/unavailable targets so a deprecated virtual adapter
 /// (e.g. a leftover Parsec target) never shows up.
 fn active_targets() -> Result<Vec<(LUID, u32)>, String> {
+    Ok(active_paths()?.0.iter().map(|p| (p.targetInfo.adapterId, p.targetInfo.id)).collect())
+}
+
+/// Active, available paths plus the mode table their indices point into.
+fn active_paths() -> Result<(Vec<DISPLAYCONFIG_PATH_INFO>, Vec<DISPLAYCONFIG_MODE_INFO>), String> {
     unsafe {
         let mut n_paths: u32 = 0;
         let mut n_modes: u32 = 0;
@@ -195,14 +201,33 @@ fn active_targets() -> Result<Vec<(LUID, u32)>, String> {
             return Err(format!("QueryDisplayConfig failed: {st:?}"));
         }
         paths.truncate(n_paths as usize);
+        modes.truncate(n_modes as usize);
 
         // Skip anything the OS marks unavailable (drops leftover virtual targets).
-        Ok(paths
-            .iter()
-            .filter(|p| p.targetInfo.targetAvailable.as_bool())
-            .map(|p| (p.targetInfo.adapterId, p.targetInfo.id))
-            .collect())
+        paths.retain(|p| p.targetInfo.targetAvailable.as_bool());
+        Ok((paths, modes))
     }
+}
+
+/// The primary display's target: the active path whose source sits at the
+/// desktop origin (0,0); else the first active path.
+fn primary_target() -> Result<(LUID, u32), String> {
+    let (paths, modes) = active_paths()?;
+    let at_origin = paths.iter().find(|p| {
+        // SAFETY: without QDC_VIRTUAL_MODE_AWARE the union holds `modeInfoIdx`.
+        let idx = unsafe { p.sourceInfo.Anonymous.modeInfoIdx } as usize;
+        modes.get(idx).is_some_and(|m| {
+            m.infoType == DISPLAYCONFIG_MODE_INFO_TYPE_SOURCE && {
+                // SAFETY: a SOURCE mode's union holds `sourceMode`.
+                let pos = unsafe { m.Anonymous.sourceMode.position };
+                pos.x == 0 && pos.y == 0
+            }
+        })
+    });
+    at_origin
+        .or(paths.first())
+        .map(|p| (p.targetInfo.adapterId, p.targetInfo.id))
+        .ok_or_else(|| "no active display".to_string())
 }
 
 /// GET the friendly name for a raw target, or `None` if the query fails or the
@@ -236,7 +261,13 @@ pub fn enumerate_targets() -> Result<Vec<(String, TargetId)>, String> {
 
 /// Resolve a display by its `monitorFriendlyDeviceName` (e.g. "PG27AQDP").
 /// Case-insensitive exact match. Errors if not found among active targets.
+/// An empty name means the primary display (the default on a new PC).
 pub fn resolve_target(friendly_name_wanted: &str) -> Result<TargetId, String> {
+    if friendly_name_wanted.trim().is_empty() {
+        let (adapter, id) = primary_target()?;
+        let name = friendly_name(adapter, id).unwrap_or_else(|| "Primary display".into());
+        return Ok(TargetId { adapter, id, name });
+    }
     enumerate_targets()?
         .into_iter()
         .find(|(name, _)| name.eq_ignore_ascii_case(friendly_name_wanted))

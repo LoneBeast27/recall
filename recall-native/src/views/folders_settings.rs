@@ -22,7 +22,7 @@ impl Root {
             .map(str::to_owned)
             .or_else(|| std::env::var("RECALL_OUT_DIR").ok())
             .or_else(|| self.folders.recordings.clone())
-            .unwrap_or_else(|| r"V:\ALL RECORDINGS".into())
+            .unwrap_or_else(|| crate::services::library::folders::default_recordings_dir().to_string_lossy().into_owned())
     }
 
     /// Keeps `folders.json` in step with the recorder's output folder; re-lists when it moved.
