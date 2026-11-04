@@ -76,6 +76,8 @@ pub struct LibraryState {
     scrub_requested: HashSet<String>,
     thumb_queued: HashSet<String>,
     thumb_failed: HashSet<String>,
+    /// Last check that the visible tiles' thumbnail files still exist (once a second).
+    thumb_check_at: Option<std::time::Instant>,
     duration_queued: HashSet<String>,
     pub loading: bool,
     pub error: Option<String>,
@@ -123,6 +125,7 @@ impl LibraryState {
             scrub_requested: HashSet::new(),
             thumb_queued: HashSet::new(),
             thumb_failed: HashSet::new(),
+            thumb_check_at: None,
             duration_queued: HashSet::new(),
             loading: true,
             error: None,
@@ -238,6 +241,23 @@ impl LibraryState {
         for row in self.rows.get(top.saturating_sub(2)..end).unwrap_or_default() {
             if let Row::Tiles(items) = row {
                 wanted.extend(items.iter().copied());
+            }
+        }
+        // A thumbnail file can vanish under a running app (a cache clear, eviction, a person
+        // emptying the folder): a tile that points at a missing file asks for it again.
+        let check = self.thumb_check_at.is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(1));
+        if check {
+            self.thumb_check_at = Some(std::time::Instant::now());
+            for &index in &wanted {
+                let missing = self.records[index].thumb.as_deref().is_some_and(|thumb| !Path::new(thumb).is_file());
+                if missing {
+                    let path = self.records[index].path.clone();
+                    self.records[index].thumb = None;
+                    if let Some(entry) = self.entries.iter_mut().find(|e| e.path == path) {
+                        entry.thumb = None;
+                    }
+                    self.thumb_failed.remove(&path);
+                }
             }
         }
         for index in wanted {
