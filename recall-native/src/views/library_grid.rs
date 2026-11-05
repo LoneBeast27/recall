@@ -1,6 +1,6 @@
 //! Library grid: the virtualized day-grouped list, thumbnail tiles (hover scrub,
 //! drag-out, rename, right-click menu in `tile_menu.rs`) and their hover actions. Clicks select
-//! (`library_select.rs`); a double-click renames.
+//! (`library_select.rs`) or open (`tile_click.rs`); a double-click on the title renames.
 use std::path::PathBuf;
 
 use gpui::{
@@ -255,12 +255,28 @@ impl Root {
                 }))
                 .into_any_element()
         } else {
+            let title_path = path.clone();
+            let title_target = format!("title:{}", std::path::Path::new(&path).file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned()));
             div()
                 .flex()
                 .items_baseline()
                 .justify_between()
                 .gap(px(8.))
-                .child(div().font_weight(FontWeight::MEDIUM).min_w_0().truncate().child(record.display_title().to_owned()))
+                .child(
+                    div()
+                        .child(crate::trace::target(title_target))
+                        .id("tile-title")
+                        .font_weight(FontWeight::MEDIUM)
+                        .min_w_0()
+                        .truncate()
+                        .child(record.display_title().to_owned())
+                        // Waits out a double-click before opening, so a double-click renames.
+                        .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                            cx.stop_propagation();
+                            this.tile_title_click(&title_path, event, window, cx);
+                            cx.notify();
+                        })),
+                )
                 .child(div().font_family(theme::mono()).text_size(px(11.)).text_color(c(theme::TERTIARY)).child(time))
                 .into_any_element()
         };
@@ -313,20 +329,9 @@ impl Root {
                     }
                 }
             }))
-            // A click selects (library_select.rs); a plain double-click renames. Opening is Enter,
-            // the play button, the selection bar's Open or the menu.
-            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                if this.press_dismisses {
-                    return;
-                }
-                let modifiers = event.modifiers();
-                let plain = !modifiers.control && !modifiers.shift;
-                if plain && event.click_count() == 2 {
-                    this.lib.click(&open_path, false, false);
-                    this.begin_rename(open_path.clone(), window);
-                } else {
-                    this.lib.click(&open_path, modifiers.control, modifiers.shift);
-                }
+            // A plain click opens at once; Shift and Ctrl select (`tile_click.rs`).
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                this.tile_body_click(&open_path, event);
                 cx.notify();
             }))
             .child(media)

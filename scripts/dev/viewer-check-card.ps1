@@ -128,7 +128,7 @@ Run-Scenario 'card: scrolling the tile off screen ends the rename' {
   Verdict @((Ok ($still.field -eq 'Rename') 'open before the scroll'), (Ok ([bool]$ended) 'ended with the tile off screen'), (Ok ($u.titles -contains 'a') 'title saved'), (Keys-Alive $s))
 }
 
-Run-Scenario 'card: closing a menu by clicking a tile does not select the tile' {
+Run-Scenario 'card: closing a menu by clicking a tile does not open or select the tile' {
   $s = $script:current = Start-Viewer 'menu' $clips.short -Library -Also 'menu-b'
   RightClick $s (Tile 'menu')
   $open = UI $s
@@ -175,32 +175,40 @@ function DoubleClickAt($s, [int]$x, [int]$y) {
   Mouse $s 0x201 $x $y 1; Start-Sleep -Milliseconds 20; Mouse $s 0x202 $x $y 0
 }
 
-Run-Scenario 'card: a click selects only that clip and Enter opens it' {
+function Title($name) { "title:$name.mp4" }
+
+Run-Scenario 'card: a click on the picture opens the clip at once' {
   $s = $script:current = Start-Viewer 'pick' $clips.short -Library -Also 'pick-b'
-  Click $s (Tile 'pick')
-  $one = Settle $s 200
-  Click $s (Tile 'pick-b')
-  $other = Settle $s 200
-  $bar = $null -ne $other.targets.'sel-open'
-  Key $s 'enter'
-  $open = Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.clip -like '*pick-b.mp4' } 30000
-  Verdict @((Ok ($one.route -eq 'library' -and $one.ui.selected -eq 1) "a click selects and stays in the library ($($one.ui.selected) selected, route $($one.route))"),
-    (Ok ($other.ui.selected -eq 1) "another click moves the selection ($($other.ui.selected) selected)"), (Ok $bar 'the selection bar offers Open'), (Ok ([bool]$open) 'Enter opens the selected clip'))
+  $t = Target $s (Tile 'pick-b')
+  $before = (Last $s).ms
+  Mouse $s 0x200 $t.X ([int]($t.Top + $t.Height * 0.3)) 0; Start-Sleep -Milliseconds 40
+  Mouse $s 0x201 $t.X ([int]($t.Top + $t.Height * 0.3)) 1; Start-Sleep -Milliseconds 40
+  Mouse $s 0x202 $t.X ([int]($t.Top + $t.Height * 0.3)) 0
+  $open = Wait-Trace $s { param($r) $r.route -eq 'editor' } 3000
+  $ms = if ($open) { [int]($open.ms - $before) } else { -1 }
+  $loaded = Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.clip -like '*pick-b.mp4' } 30000
+  Verdict @((Ok ([bool]$open) 'a plain click on the picture opens the clip'), (Ok ([bool]$loaded) "the clicked clip loads ($((Last $s).clip))"),
+    (Ok ($ms -ge 0 -and $ms -lt 400) "no double-click wait ($ms ms from the last trace line before the click)"))
 }
 
-Run-Scenario 'card: a double-click renames and does not open the clip' {
+Run-Scenario 'card: a click on the title opens after the double-click time' {
+  $s = $script:current = Start-Viewer 'late' $clips.short -Library -Also 'late-b'
+  Click $s (Title 'late-b')
+  $soon = Settle $s 80
+  $open = Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.clip -like '*late-b.mp4' } 5000
+  Verdict @((Ok ($soon.route -eq 'library') "still in the library just after the click (route $($soon.route))"), (Ok ([bool]$open) 'then the clip opens'))
+}
+
+Run-Scenario 'card: a double-click on the title renames and does not open the clip' {
   $s = $script:current = Start-Viewer 'dblname' $clips.short -Library -Also 'dblname-b'
-  $t = Target $s (Tile 'dblname')
-  DoubleClickAt $s $t.X ([int]($t.Top + $t.Height * 0.4))
+  $t = Target $s (Title 'dblname')
+  DoubleClickAt $s $t.X $t.Y
   $on = Wait-Trace $s { param($r) $r.ui.field -eq 'Rename' } 1500
   Key $s 'a'; Key $s 'b'; Key $s 'enter'
   $u = UI $s
-  $r = Settle $s 300
-  # The renamed clip stays selected (no search box then): Escape reaching the page clears it.
-  Key $s 'escape'
-  $esc = UI $s
-  Verdict @((Ok ([bool]$on) 'a double-click opens the title field'), (Ok ($r.route -eq 'library') "still in the library (route $($r.route))"), (Closed $u), (Ok ($u.titles -contains 'ab') "Enter saves the title ($($u.titles -join ', '))"),
-    (Ok ($u.selected -eq 1 -and $esc.selected -eq 0) "the clip stays selected, Escape clears it ($($u.selected) -> $($esc.selected))"), (Keys-Alive $s))
+  $r = Settle $s 1200 # past the double-click time: a late open would show here
+  Verdict @((Ok ([bool]$on) 'a double-click on the title opens the title field'), (Ok ($r.route -eq 'library') "still in the library (route $($r.route))"), (Closed $u), (Ok ($u.titles -contains 'ab') "Enter saves the title ($($u.titles -join ', '))"),
+    (Ok ($u.selected -eq 0) "nothing selected ($($u.selected))"), (Keys-Alive $s))
 }
 
 Run-Scenario 'card: the second click of a double-click on Play hits nothing in the editor' {
