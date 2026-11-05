@@ -268,7 +268,7 @@ fn write(
         }
     }
     octx.set_metadata(ictx.metadata().to_owned());
-    octx.write_header().map_err(|e| format!("write output header: {e}"))?;
+    super::paths::write_faststart_header(&mut octx)?;
     let out_tbs: Vec<_> = octx.streams().map(|s| s.time_base()).collect();
     let mut mux = EditedAudioMux::new(encoded, encoded_outputs);
     let windows: Vec<_> = segments

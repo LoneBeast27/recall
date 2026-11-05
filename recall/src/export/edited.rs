@@ -180,8 +180,7 @@ impl Attempt<'_> {
             audio_output_indices.push(stream.index());
         }
         octx.set_metadata(ictx.metadata().to_owned());
-        octx.write_header()
-            .map_err(|e| format!("write output header: {e}"))?;
+        super::paths::write_faststart_header(&mut octx)?;
         let mut audio_mux = EditedAudioMux::new(self.audio, audio_output_indices);
         let mut pipeline = EditedVideoPipeline {
             decoder: &mut decoder,
