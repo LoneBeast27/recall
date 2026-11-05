@@ -48,6 +48,7 @@ pub(super) fn read_protocol(shared: &Arc<Shared>, stdout: std::process::ChildStd
                     if let Some(m) = val.get("mic_muted").and_then(|v| v.as_bool()) {
                         cache.view.mic_muted = Some(m);
                     }
+                    cache.view.buffer_secs = val.get("buffer_secs").and_then(|v| v.as_f64()).map(|b| b as f32);
                 }
                 let digest = StatusDigest {
                     display: field(&val, "display"),

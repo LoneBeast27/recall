@@ -147,6 +147,13 @@ impl Root {
                 }))
                 .into_any_element();
         }
+        if self.recorder_unresponsive {
+            // Connected, but no status reply for 5 s: the last snapshot is not the truth.
+            return pill
+                .child(ui::dot(theme::WARNING, 7.))
+                .child(div().text_color(c(theme::MUTED)).child("Recorder not responding"))
+                .into_any_element();
+        }
         if session.is_some_and(|s| s.state == "paused") {
             return pill
                 .cursor_pointer()
@@ -161,9 +168,16 @@ impl Root {
                 .into_any_element();
         }
         let failed = engine.is_some_and(|e| e.encoder == "failed" || e.encoder_error.is_some());
-        let waiting = session.is_some_and(|s| s.state == "waiting") && !snap.replay_ready();
-        let name = session
-            .and_then(|s| s.target.as_ref().map(|t| t.name.clone()))
+        // The game closed: its last clip stays saveable while this counts down to 0:00.
+        let drain = session
+            .filter(|s| s.state == "draining")
+            .and_then(|s| s.drain.as_ref())
+            .map(|d| (d, d.remaining_secs(daemon::unix_ms())))
+            .filter(|(_, left)| *left > 0);
+        let waiting = drain.is_none() && session.is_some_and(|s| s.state == "waiting" || s.state == "draining");
+        let name = drain
+            .map(|(d, _)| d.name.clone())
+            .or_else(|| session.and_then(|s| s.target.as_ref().map(|t| t.name.clone())))
             .filter(|n| !n.is_empty())
             .or_else(|| engine.map(|e| e.source.clone()).filter(|n| !n.is_empty()))
             .unwrap_or_else(|| "Recorder".into());
@@ -182,11 +196,12 @@ impl Root {
                 .child(div().text_color(c(theme::MUTED)).child("Waiting for a game"))
                 .into_any_element();
         }
-        let buffered = engine.map_or(0.0, |e| e.buffer_secs as f64);
-        let capacity = session.map(|s| s.save_seconds).filter(|s| *s > 0).unwrap_or(120) as f64;
+        let buffered = drain.map_or_else(|| engine.map_or(0.0, |e| e.buffer_secs as f64), |(_, left)| left as f64);
+        let save_seconds = session.map(|s| s.save_seconds).filter(|s| *s > 0).unwrap_or(120);
+        let capacity = drain.map_or(save_seconds as u64, |(d, _)| d.total_secs.max(1)) as f64;
         let filled = ((buffered / capacity) * TICKS as f64).round().clamp(0.0, TICKS as f64) as usize;
-        let ready = snap.replay_ready();
-        let fps = engine.map_or(0, |e| e.fps);
+        let ready = drain.is_some() || snap.replay_ready();
+        let fps = if drain.is_some() { 0 } else { engine.map_or(0, |e| e.fps) };
         div()
             .child(
                 pill.child(ui::dot(if ready { theme::SIGNAL } else { theme::WARNING }, 7.))
@@ -204,6 +219,7 @@ impl Root {
                             .text_size(px(12.))
                             .child(if ready { library::format_duration(buffered) } else { "Starting".into() }),
                     )
+                    .when(drain.is_some(), |d| d.child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child("left to save")))
                     .when(fps > 0, |d| {
                         d.child(div().font_family(theme::mono()).text_size(px(12.)).text_color(c(theme::TERTIARY)).child(format!("{fps} fps")))
                     })

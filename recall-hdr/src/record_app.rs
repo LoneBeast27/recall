@@ -119,6 +119,8 @@ pub struct Controller {
     pub(crate) pending_restart: bool,
     /// A retarget fell due while busy (the planner holds it until idle).
     pub(crate) retarget_held: bool,
+    /// The closed game's drain as status (`record_drain`).
+    pub(crate) drain_clock: crate::record_drain::DrainClock,
     /// Pause asked during a long recording: waiting for it to stop.
     pub(crate) pending_pause: Option<PendingPause>,
     pub(crate) janitor: Janitor,
@@ -215,6 +217,7 @@ pub fn run() -> i32 {
         engine_events,
         pending_restart: false,
         retarget_held: false,
+        drain_clock: Default::default(),
         pending_pause: None,
         janitor,
         chord: Chord::new(Duration::from_millis(1_500), global_hotkey::hotkey::Modifiers::ALT),

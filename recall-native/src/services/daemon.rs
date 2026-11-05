@@ -21,6 +21,11 @@ mod tests;
 
 const PIPE_NAME: &str = "recall-hdr-control";
 const RECONNECT: Duration = Duration::from_secs(1);
+/// A `status` request this often: only the controller's pump answers it, so the
+/// replies show it is alive (engine lines come from another thread).
+const PING: Duration = Duration::from_secs(2);
+/// No `session` status for this long on an open pipe = the recorder is not responding.
+pub const UNRESPONSIVE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub enum DaemonCommand {
@@ -79,7 +84,7 @@ pub struct HdrStatus {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SessionStatus {
-    /// "waiting" | "starting" | "recording" | "error" (empty on old builds)
+    /// "waiting" | "starting" | "recording" | "draining" | "paused" | "error" (empty on old builds)
     pub state: String,
     pub target: Option<Target>,
     pub engine_health: String,
@@ -109,6 +114,28 @@ pub struct SessionStatus {
     /// "no_permission" (not in Performance Log Users) | "off" (stats off); empty
     /// on builds without it.
     pub fps_source: String,
+    /// The closed game's last clip is still saveable until `ends_unix_ms` (state "draining").
+    pub drain: Option<Drain>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Drain {
+    pub name: String,
+    pub total_secs: u64,
+    pub ends_unix_ms: u64,
+}
+
+impl Drain {
+    /// Seconds left at `now_unix_ms`, rounded up; 0 once the drain is over.
+    pub fn remaining_secs(&self, now_unix_ms: u64) -> u64 {
+        self.ends_unix_ms.saturating_sub(now_unix_ms).div_ceil(1000).min(self.total_secs)
+    }
+}
+
+/// Milliseconds since the Unix epoch (the controller's drain end uses the same clock).
+pub fn unix_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -265,6 +292,10 @@ impl DaemonClient {
     pub fn drain_events(&self) -> Vec<DaemonEvent> {
         self.shared.read(|state| state.events.drain(..).collect())
     }
+    /// Connected, but the controller has not answered a status request for [`UNRESPONSIVE`].
+    pub fn unresponsive(&self) -> bool {
+        self.shared.read(|state| state.unresponsive(std::time::Instant::now(), UNRESPONSIVE))
+    }
 }
 
 impl Drop for DaemonClient {
@@ -298,7 +329,13 @@ fn serve(shared: &Shared, stream: Stream) {
     let _ = tx.send(protocol::command_line(&DaemonCommand::Status));
     let _ = tx.send(protocol::command_line(&DaemonCommand::GetConfig));
     let spawned = std::thread::Builder::new().name("recall-daemon-pipe-writer".into()).spawn(move || {
-        for line in rx {
+        let ping = protocol::command_line(&DaemonCommand::Status);
+        loop {
+            let line = match rx.recv_timeout(PING) {
+                Ok(line) => line,
+                Err(mpsc::RecvTimeoutError::Timeout) => ping.clone(),
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+            };
             if writer.write_all(format!("{line}\n").as_bytes()).is_err() {
                 break;
             }

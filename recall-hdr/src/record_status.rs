@@ -2,7 +2,7 @@
 //! plain inputs so the exact wire shape is unit-tested.
 //!
 //! ```json
-//! {"type":"status","mode":"record","state":"waiting|starting|recording|paused|error",
+//! {"type":"status","mode":"record","state":"waiting|starting|recording|draining|paused|error",
 //!  "paused":B,"target":{"name":S,"exe":S|null,"pid":N|null}|null,
 //!  "engine_health":"running|restarting|off|stopped","auto_record":B,
 //!  "save_hotkey":S,"mic_hotkey":S,"save_seconds":N,
@@ -16,6 +16,7 @@
 //!  "overlay_stats":B,     // the performance-stats island is on
 //!  "fps_source":"etw|no_permission|off",   // `frame_timing` (off while stats are off)
 //!  "storage":{"cap_gb":N},
+//!  "drain":{"name":S,"total_secs":N,"ends_unix_ms":N}|null,  // `record_drain`: the closed game's last clip
 //!  "hdr":{"available":B,"display":S|null,"hdr_on":B,"manual_pin":B,"auto":B}}
 //! ```
 
@@ -47,6 +48,8 @@ pub struct StatusInputs<'a> {
     pub pending_restart: bool,
     /// The chord leader as the user sees it ("Alt `").
     pub leader_label: &'a str,
+    /// `record_drain::DrainClock::status`: the closed game's last clip is still saveable.
+    pub drain: Option<Value>,
 }
 
 /// `paused` (the user stopped recording), `waiting` (no target), `starting`
@@ -88,13 +91,25 @@ fn target_name(wanted: &EngineTarget) -> &str {
     }
 }
 
+/// `draining` wins over `waiting` / a desktop start while the closed game's
+/// engine still runs (a pause or a crash ends the drain: no ring is left).
+fn state_with_drain(i: &StatusInputs) -> &'static str {
+    let running = matches!(i.health, EngineHealth::Running { pid } if pid != 0);
+    if i.drain.is_some() && running && !i.paused {
+        return "draining";
+    }
+    session_state(i.wanted, i.health, i.encoder, i.fresh_engine, i.paused)
+}
+
 pub fn status_json(i: &StatusInputs) -> Value {
     let cfg = i.cfg;
     let rec = &cfg.recording;
+    let state = state_with_drain(i);
+    let drain = if state == "draining" { i.drain.clone().unwrap_or(Value::Null) } else { Value::Null };
     json!({
         "type": "status",
         "mode": "record",
-        "state": session_state(i.wanted, i.health, i.encoder, i.fresh_engine, i.paused),
+        "state": state,
         "paused": i.paused,
         "target": target_json(i.wanted),
         "engine_health": health_summary(i.health),
@@ -124,6 +139,7 @@ pub fn status_json(i: &StatusInputs) -> Value {
         "autostart": cfg.startup.autostart,
         "storage": {"cap_gb": cfg.storage.cap_gb},
         "hdr": i.hdr.to_json(),
+        "drain": drain,
     })
 }
 
@@ -134,6 +150,7 @@ pub fn tray_line(state: &str, wanted: &EngineTarget) -> String {
         "recording" => format!("Recording {name}"),
         "starting" => format!("Starting capture: {name}"),
         "paused" => "Recording paused".into(),
+        "draining" => "Game closed: last clip kept".into(),
         "error" => "Recorder error (see recall-hdr.log)".into(),
         _ => "Waiting for a game".into(),
     }
@@ -195,6 +212,7 @@ mod tests {
             long_recording: json!({"active":true,"path":"E:\\c\\G__rec.mp4","started_secs":1790000000.5}),
             pending_restart: true,
             leader_label: "Alt `",
+            drain: None,
         });
         assert_eq!(
             v,
@@ -213,7 +231,8 @@ mod tests {
                 "overlay_stats":false,"fps_source":"off",
                 "autostart":false,
                 "storage":{"cap_gb":0},
-                "hdr":{"available":false,"display":null,"hdr_on":false,"manual_pin":false,"auto":false,"shelved":true}
+                "hdr":{"available":false,"display":null,"hdr_on":false,"manual_pin":false,"auto":false,"shelved":true},
+                "drain":null
             })
         );
     }
@@ -237,11 +256,43 @@ mod tests {
             long_recording: json!({"active":false,"path":null,"started_secs":null}),
             pending_restart: false,
             leader_label: "Alt `",
+            drain: None,
         });
         assert_eq!(v["overlay_stats"], true);
         assert_eq!(v["fps_source"], "no_permission");
         assert!(v.get("rtss").is_none(), "the RTSS field is gone");
         assert_eq!(v["overlay"], json!({"enabled":false,"corner":"top-right","running":true,"stats_style":"minimal"}));
+    }
+
+    #[test]
+    fn a_running_drain_reports_draining_with_its_end_and_no_target() {
+        let cfg = Config::default();
+        let snap = hdr();
+        let drain = json!({"name":"sobosuba","total_secs":120,"ends_unix_ms":1793869759953u64});
+        let inputs = |health, paused| StatusInputs {
+            wanted: &EngineTarget::Off,
+            health,
+            encoder: Some("h264_nvenc"),
+            fresh_engine: true,
+            cfg: &cfg,
+            mic_muted: false,
+            overlay_running: false,
+            fps_source: "off",
+            hdr: &snap,
+            paused,
+            long_recording: json!({"active":false,"path":null,"started_secs":null}),
+            pending_restart: false,
+            leader_label: "Alt `",
+            drain: Some(drain.clone()),
+        };
+        let v = status_json(&inputs(EngineHealth::Running { pid: 9 }, false));
+        assert_eq!(v["state"], "draining");
+        assert_eq!(v["drain"], drain);
+        assert_eq!(v["target"], Value::Null, "the gate and the island see no game");
+        let stopped = status_json(&inputs(EngineHealth::Stopped, false));
+        assert_eq!((stopped["state"].as_str(), &stopped["drain"]), (Some("waiting"), &Value::Null), "no engine, no clip");
+        assert_eq!(status_json(&inputs(EngineHealth::Running { pid: 9 }, true))["state"], "paused");
+        assert_eq!(tray_line("draining", &EngineTarget::Off), "Game closed: last clip kept");
     }
 
     #[test]

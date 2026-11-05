@@ -3,8 +3,11 @@
 //! - [`wanted`]: an env-pinned window wins, then the auto-detected game (if
 //!   `auto_record`), then the idle desktop (if `record_desktop_when_idle`).
 //! - [`EnginePlanner`]: when the game goes away the engine -- and its replay
-//!   ring -- is kept for [`EXIT_LINGER`], so a save pressed right after the
-//!   final round still works. A new game retargets immediately -- unless a
+//!   ring -- is kept while the ring still holds game footage: the buffered
+//!   length at that moment ([`EnginePlanner::set_drain_len`]; [`EXIT_LINGER`]
+//!   when it is unknown). A save in that window still has the last clip, and
+//!   the status counts it down (`draining`). Nothing new is captured: the
+//!   game's window is gone. A new game retargets immediately -- unless a
 //!   save or the long recording is in flight: the retarget is then held
 //!   ([`Step::Held`]) until the engine is idle.
 //! - [`engine_env`]: the per-spawn environment the engine reads at startup.
@@ -14,7 +17,7 @@ use std::time::{Duration, Instant};
 use crate::record_config::RecordingCfg;
 use crate::record_target::{Target, DESKTOP_NAME};
 
-/// How long the engine outlives its game so a late save still has a buffer.
+/// How long the engine outlives its game when its buffered length is unknown.
 pub const EXIT_LINGER: Duration = Duration::from_secs(30);
 
 /// What the engine should be capturing.
@@ -82,13 +85,30 @@ pub enum Step {
 /// the linger window after the game goes away.
 pub struct EnginePlanner {
     applied: EngineTarget,
-    lost_since: Option<Instant>,
-    linger: Duration,
+    /// When the game went away and how long its engine is kept (the drain).
+    lost: Option<(Instant, Duration)>,
+    /// The linger the next loss uses (the buffered length, kept current).
+    next_linger: Duration,
 }
 
 impl EnginePlanner {
     pub fn new(linger: Duration) -> Self {
-        EnginePlanner { applied: EngineTarget::Off, lost_since: None, linger }
+        EnginePlanner { applied: EngineTarget::Off, lost: None, next_linger: linger }
+    }
+
+    /// How long the engine outlives the game if it went away now. Read once,
+    /// at the loss: the engine's buffered length keeps growing with wall time.
+    pub fn set_drain_len(&mut self, linger: Duration) {
+        self.next_linger = linger;
+    }
+
+    /// The running drain: the game that went away, when, and for how long its
+    /// last clip stays saveable. `None` while on target or with no engine.
+    pub fn drain(&self) -> Option<(&Target, Instant, Duration)> {
+        match (&self.applied, self.lost) {
+            (EngineTarget::Window(t), Some((at, len))) => Some((t, at, len)),
+            _ => None,
+        }
     }
 
     pub fn applied(&self) -> &EngineTarget {
@@ -97,7 +117,7 @@ impl EnginePlanner {
 
     /// When the current linger ends (for the pump's wait timeout).
     pub fn linger_deadline(&self) -> Option<Instant> {
-        self.lost_since.map(|t| t + self.linger)
+        self.lost.map(|(t, len)| t + len)
     }
 
     /// `Some(new)` when an idle engine must be retargeted now (test shorthand).
@@ -115,21 +135,21 @@ impl EnginePlanner {
     /// (`Off` applied) there is nothing to protect.
     pub fn step(&mut self, wanted: &EngineTarget, now: Instant, busy: bool) -> Step {
         if *wanted == self.applied {
-            self.lost_since = None;
+            self.lost = None;
             return Step::Keep;
         }
         let game_went_away = matches!(self.applied, EngineTarget::Window(_))
             && !matches!(wanted, EngineTarget::Window(_));
         if game_went_away {
-            let since = *self.lost_since.get_or_insert(now);
-            if now.duration_since(since) < self.linger {
+            let (since, len) = *self.lost.get_or_insert((now, self.next_linger));
+            if now.duration_since(since) < len {
                 return Step::Keep;
             }
         }
         if busy && self.applied != EngineTarget::Off {
             return Step::Held;
         }
-        self.lost_since = None;
+        self.lost = None;
         self.applied = wanted.clone();
         Step::Apply(wanted.clone())
     }
@@ -138,7 +158,7 @@ impl EnginePlanner {
     /// restarted the engine with the wanted target, ending any linger).
     pub fn force(&mut self, target: EngineTarget) {
         self.applied = target;
-        self.lost_since = None;
+        self.lost = None;
     }
 
     /// Pause: stop now, skipping the linger. `true` = an engine must stop.
@@ -401,5 +421,31 @@ mod tests {
         assert_eq!(has(&env, "RECALL_AUDIO_MIC"), Some(Some("Microphone (USB Audio Device)".into())));
         assert_eq!(has(&env, "RECALL_AUDIO_GAME"), Some(Some("Speakers (USB Audio Device)".into())));
         assert_eq!(has(&env, "RECALL_AUDIO_MIC_OFF"), Some(Some("1".into())));
+    }
+
+    #[test]
+    fn a_closed_game_drains_for_its_buffered_length_then_stops() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let mut p = EnginePlanner::new(EXIT_LINGER);
+        let game = target(1, 1, "sobosuba");
+        let a = EngineTarget::Window(game.clone());
+        assert_eq!(p.update(&a, t0), Some(a.clone()));
+        assert!(p.drain().is_none(), "on target: no drain");
+        p.set_drain_len(s(40));
+        assert_eq!(p.update(&EngineTarget::Off, t0 + s(1)), None, "the engine is kept");
+        let (t, at, len) = p.drain().expect("draining");
+        assert_eq!((t, at, len), (&game, t0 + s(1), s(40)));
+        p.set_drain_len(s(120)); // the buffer clock keeps going: the drain is fixed at the loss
+        assert_eq!(p.linger_deadline(), Some(t0 + s(41)));
+        assert_eq!(p.update(&EngineTarget::Off, t0 + s(40)), None);
+        assert_eq!(p.update(&EngineTarget::Off, t0 + s(41)), Some(EngineTarget::Off), "at 0 the engine stops");
+        assert!(p.drain().is_none());
+        // A new game during a drain retargets at once and ends it.
+        assert_eq!(p.update(&a, t0 + s(50)), Some(a.clone()));
+        assert_eq!(p.update(&EngineTarget::Off, t0 + s(51)), None);
+        let b = EngineTarget::Window(target(2, 2, "B"));
+        assert_eq!(p.update(&b, t0 + s(52)), Some(b));
+        assert!(p.drain().is_none());
     }
 }
