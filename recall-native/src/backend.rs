@@ -5,7 +5,7 @@
 //! autosave writes the working project to the SSD and the sidecar beside the clip is only
 //! written by [`flush_project`].
 use crate::edit_model::{ClipInfo, EditPlan, ExportMode, ExportSettings};
-use crate::services::library::{folders::{self, Folders},watch::WatchRoot};
+use crate::services::library::{folders::{self, Folders},import_check,imports,watch::WatchRoot};
 use crate::services::storage::{self, Priority, ProjectSource};
 use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
@@ -172,14 +172,15 @@ pub(crate) fn list_from(dir:&Path,imported:&[String])->Result<(Vec<ClipEntry>,bo
     for root in imported{
         let (found,whole)=folders::scan_imported_cached_checked(Path::new(root),&skip);
         complete&=whole;
-        for clip in found{push(clip.path,clip.bytes,clip.mtime,clip.folder);}
+        for clip in import_check::listable(found,dir,imported){push(clip.path,clip.bytes,clip.mtime,clip.folder);}
     }
     clips.sort_by(|a,b|b.mtime.cmp(&a.mtime));Ok((clips,complete))
 }
 /// SSD thumbnail for a library clip: cached, imported from the recorder's `thumbs` folder, or generated.
 /// Blocking; HDD work runs on the clip's disk lane (inline when already on it).
 pub fn thumbnail(path:&str)->Result<String,String>{storage::ensure_thumb(path)}
-fn sidecar(source:&str)->Result<PathBuf,String>{let p=Path::new(source);let name=p.file_name().ok_or("source has no filename")?.to_string_lossy();Ok(p.with_file_name(format!("{name}.recall-edit.json")))}
+/// The editor save: beside the clip, or on C: for a clip in an imported folder (compatibility mode).
+fn sidecar(source:&str)->Result<PathBuf,String>{let f=Folders::load();if imports::is_imported(source,&library_dir_from(&f),&f.imported){return imports::edit_file(Path::new(source)).ok_or_else(||"APPDATA is not set".into());}let p=Path::new(source);let name=p.file_name().ok_or("source has no filename")?.to_string_lossy();Ok(p.with_file_name(format!("{name}.recall-edit.json")))}
 fn validate_info(info:&ClipInfo)->Result<(),String>{
     let p=std::fs::canonicalize(&info.path).map_err(|e|format!("resolve source: {e}"))?;
     let m=p.metadata().map_err(|e|e.to_string())?;

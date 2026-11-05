@@ -77,8 +77,8 @@ pub enum Done {
     Prepared(u64, Result<PreparedClip, String>),
     Saved(Result<String, String>),
     Exported(Result<ExportSummary, String>),
-    /// The clips asked for, and how many left their folder.
-    Deleted(Vec<PathBuf>, Result<usize, String>),
+    /// The clips asked for: (moved to the Recycle Bin, removed from Recall only).
+    Deleted(Vec<PathBuf>, Result<(usize, usize), String>),
     Thumb(String, Result<String, String>),
     Duration(String, Option<f64>),
     Scrub(String, Result<Vec<String>, String>),
@@ -110,8 +110,17 @@ impl Workers {
 
         let open_tx = done_tx.clone();
         let tx = done_tx.clone();
+        library::import_check::set_sink(Box::new(move |paths| {
+            let gone = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            let _ = tx.send(Done::Library(library::watch::LibraryChange::Clips(library::watch::ClipChanges { added: vec![], gone, gone_under: vec![] })));
+        }));
+        let tx = done_tx.clone();
         let watcher = ClipWatcher::start(move |change| {
             let _ = tx.send(Done::Library(change));
+        });
+        // Off the start-up path: the cache folder and recordings folder resolve on this thread.
+        spawn_named("recall-cache-watch-start", || {
+            library::cache_watch::start(storage::counted_dirs(&backend::library_dir()), storage::note_outside_change);
         });
 
         let tx = done_tx.clone();
@@ -151,6 +160,15 @@ impl Workers {
         spawn_named("recall-clip-open", move || crate::clip_open::run(generation, path, &tx));
     }
 
+    /// Lets the SSD cache drop clips that left the library (`storage::forget_clips`), on a thread
+    /// of its own: an export on the io worker never holds it up.
+    pub fn forget_clips(&self, gone: Vec<storage::GoneClip>) {
+        if gone.is_empty() {
+            return;
+        }
+        spawn_named("recall-cache-forget", move || storage::forget_clips(&gone));
+    }
+
     /// Walks the SSD cache on a thread of its own (`Done::Ssd`): an export on the io worker never holds it up.
     pub fn ssd_usage(&self) {
         let tx = self.open_tx.clone();
@@ -188,7 +206,7 @@ fn run_job(job: Job, tx: &Sender<Done>, watcher: &ClipWatcher) -> Done {
         Job::FlushProject(info, plan, fps, export, ours) => Done::Flushed(backend::flush_project(&info, &plan, fps, &export, ours)),
         Job::Export(info, plan, fps, export) => Done::Exported(crate::services::pre_encode::export(&info, &plan, fps, &export)),
         Job::Delete(paths) => {
-            let result = library::delete_to_recycle_bin(&paths);
+            let result = library::delete_or_hide(&paths);
             library::folders::forget_scans();
             Done::Deleted(paths, result)
         }

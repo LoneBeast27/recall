@@ -73,13 +73,29 @@ pub(super) fn ssd_usage_in(root: &Path, recordings: &Path) -> SsdUsage {
     }
 }
 
+/// `Edited` when it shares the cache's volume (the SSD row counts it), else `None`.
+fn edited_dir_on(root: &Path, recordings: &Path) -> Option<std::path::PathBuf> {
+    let edited = super::export_dir(&recordings.join("clip.mp4"), recordings)?;
+    let cache_volume = super::drive::volume_root(root);
+    (cache_volume.is_some() && super::drive::volume_root(&edited) == cache_volume).then_some(edited)
+}
+
+/// The folders whose contents the SSD row counts: the cache, plus `Edited` when it is on the
+/// cache's drive. Watched for outside deletes (`library::cache_watch`).
+pub fn counted_dirs(recordings: &Path) -> Vec<std::path::PathBuf> {
+    let root = super::cache_root();
+    let edited = edited_dir_on(&root, recordings);
+    std::iter::once(root).chain(edited).collect()
+}
+
+/// Another program removed files the SSD row counts: walk again (at most every few seconds).
+pub fn note_outside_change() {
+    super::prefetch::invalidate_usage();
+}
+
 /// Bytes of finished exports in `Edited` when it shares the cache's volume, else 0.
 fn edited_on(root: &Path, recordings: &Path) -> u64 {
-    let Some(edited) = super::export_dir(&recordings.join("clip.mp4"), recordings) else { return 0 };
-    let cache_volume = super::drive::volume_root(root);
-    if cache_volume.is_none() || super::drive::volume_root(&edited) != cache_volume {
-        return 0;
-    }
+    let Some(edited) = edited_dir_on(root, recordings) else { return 0 };
     let Ok(listing) = std::fs::read_dir(&edited) else { return 0 };
     listing
         .flatten()
