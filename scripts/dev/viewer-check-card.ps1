@@ -205,7 +205,10 @@ Run-Scenario 'card: a double-click renames and does not open the clip' {
 
 Run-Scenario 'card: the second click of a double-click on Play hits nothing in the editor' {
   $names = 1..23 | ForEach-Object { "dbl-$_" }
-  $s = $script:current = Start-Viewer 'dbl' $clips.short -Library -Also $names
+  # Written for a 1904x1014 window (the size every check got before 97b2c12 made them honest): there the
+  # lowest tile's Play button sits where the editor's timeline opens, which is what this checks.
+  $script:windowSize = '1904x1014'
+  try { $s = $script:current = Start-Viewer 'dbl' $clips.short -Library -Also $names } finally { $script:windowSize = $null }
   # A tile low on the page: the second press lands on the editor's lower half.
   $tile = (Last $s).targets.PSObject.Properties | Where-Object { $_.Name -like 'tile:*' -and $_.Value[1] -gt 420 } | Sort-Object { -$_.Value[1] }, { -$_.Value[0] } | Select-Object -First 1
   if (-not $tile) { throw 'no tile low enough on the page' }
