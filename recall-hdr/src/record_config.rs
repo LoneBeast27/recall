@@ -25,9 +25,10 @@ pub const CODECS: [&str; 3] = ["h264", "hevc", "av1"];
 /// `recording.quality` tokens (`RECALL_QUALITY`).
 pub const QUALITIES: [&str; 3] = ["performance", "balanced", "quality"];
 pub const FPS_MIN: u32 = 15;
-/// Matches the editor's highest export rate. NVENC and the capture take any whole rate in
-/// range; a game is captured at most once per monitor refresh, so higher rates repeat frames.
-pub const FPS_MAX: u32 = 960;
+/// The recording rate is also the capture cap (1.1x): above 240 a fast game (VALORANT ~750 fps)
+/// would be copied and encoded nearly every frame it draws, the cost behind the 10-26 freezes.
+/// Exports keep their own higher rates. (Review 11-05; Rohan's call between 240 and 960 pending.)
+pub const FPS_MAX: u32 = 240;
 pub const BITRATE_MBPS_MIN: u32 = 1;
 pub const BITRATE_MBPS_MAX: u32 = 200;
 /// Smallest non-zero `storage.cap_gb`: a tiny cap would recycle nearly every
