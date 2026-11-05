@@ -1632,11 +1632,19 @@ dependencies = [
  "global-hotkey",
  "interprocess",
  "libloading",
+ "recall-nvidia",
  "serde",
  "serde_json",
  "toml",
  "tray-icon",
  "windows 0.62.2",
+]
+
+[[package]]
+name = "recall-nvidia"
+version = "0.0.1"
+dependencies = [
+ "libloading",
 ]
 
 [[package]]

@@ -184,6 +184,24 @@ pub struct StorageCfg {
     pub cap_gb: u32,
 }
 
+/// `[detect]` -- game detection on the record path (`record_target`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DetectCfg {
+    /// Exe stems (`Discord` or `Discord.exe`, any case) whose fullscreen windows
+    /// are games with no render check, even when a deny list names them.
+    /// Windowed, they are not targets. A `none` override and Recall's own
+    /// processes still win.
+    pub fullscreen_games: Vec<String>,
+}
+
+impl Default for DetectCfg {
+    fn default() -> Self {
+        // Rohan, 2026-11-05: "discord i dont mind being in there as a personal decision".
+        DetectCfg { fullscreen_games: vec!["Discord".into()] }
+    }
+}
+
 /// `overlay.stats_style` tokens (more gauge styles later).
 pub const STATS_STYLES: [&str; 1] = ["minimal"];
 
@@ -272,6 +290,9 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     let midi = &cfg.midi.input;
     if midi.len() > 256 || midi.chars().any(char::is_control) {
         return Err("midi.input must be a MIDI port name (at most 256 characters, one line)".into());
+    }
+    if let Some(bad) = cfg.detect.fullscreen_games.iter().find(|g| g.trim().is_empty() || g.contains(['\\', '/'])) {
+        return Err(format!("detect.fullscreen_games entry '{bad}' must be an exe name like Discord.exe (no folders)"));
     }
     let cap = cfg.storage.cap_gb;
     if (1..STORAGE_CAP_MIN_GB).contains(&cap) {

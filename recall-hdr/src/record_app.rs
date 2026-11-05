@@ -48,6 +48,7 @@ use crate::record_hdr::HdrManager;
 use crate::record_engine::{self, engine_env, EnginePlanner, EngineTarget, EXIT_LINGER};
 use crate::record_notice::NoticeTracker;
 use crate::record_quit::QuitReason;
+use crate::record_render::RenderCheck;
 use crate::record_storage::Janitor;
 use crate::record_target::{display_name, sanitize, Target, TargetTracker, START_DEBOUNCE, TARGET_DEBOUNCE};
 use crate::record_tray::{RecallUi, RecordingTray, RecordingTrayCmd};
@@ -131,6 +132,8 @@ pub struct Controller {
     /// This token may start the overlay's frame-timing ETW session
     /// (`frame_timing`; checked once, membership changes need a new sign-in).
     pub(crate) can_trace: bool,
+    /// Unknown fullscreen candidates must render like a game (`record_render`).
+    pub(crate) render: RenderCheck,
 }
 
 /// Entry point. Returns the process exit code.
@@ -177,6 +180,7 @@ pub fn run() -> i32 {
     }
 
     let now = Instant::now();
+    let can_trace = crate::frame_timing::can_trace();
     let mut ctl = Controller {
         store,
         file_cfg,
@@ -220,7 +224,8 @@ pub fn run() -> i32 {
         chord: Chord::new(Duration::from_millis(1_500), global_hotkey::hotkey::Modifiers::ALT),
         leader_label: String::new(),
         notices: NoticeTracker::new(),
-        can_trace: crate::frame_timing::can_trace(),
+        can_trace,
+        render: RenderCheck::new(can_trace),
     };
     if !ctl.can_trace {
         log!("record: FPS needs Performance Log Users (run the installer, then sign in again); stats show FPS as -");
@@ -318,7 +323,8 @@ impl Controller {
         }
         self.check_windows();
         self.follow_tick(now);
-        if self.tracker.poll(now) {
+        self.render_tick();
+        if self.poll_tracker(now) {
             self.note_commit();
         }
         self.plan_engine(now);
@@ -418,6 +424,7 @@ impl Controller {
     /// overlay (and its frame-timing session) and the UI, then the engine. Only the tray
     /// Quit closes the app; any other quit leaves it open to reconnect to the next recorder.
     fn shutdown(mut self) {
+        self.render.stop();
         self.hdr.shutdown();
         self.overlay.stop();
         let reason = self.quit.unwrap_or(QuitReason::WindowsQuit);

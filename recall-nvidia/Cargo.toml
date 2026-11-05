@@ -1,0 +1,9 @@
+[package]
+name = "recall-nvidia"
+version = "0.0.1"
+edition = "2021"
+description = "NVIDIA driver knowledge for Recall: is this exe a game NVIDIA has a game profile for (NvAPI DRS, read-only)"
+
+[dependencies]
+# nvapi64.dll exports only nvapi_QueryInterface; the typed crates add nothing.
+libloading = "0.8"

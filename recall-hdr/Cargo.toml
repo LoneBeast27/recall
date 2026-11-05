@@ -35,6 +35,8 @@ windows = { version = "0.62", features = [
     # `fps_source`), and stop the overlay's session after killing the overlay.
     "Win32_Security",
     "Win32_System_Diagnostics_Etw",
+    # The detection render check's real-time ETW consumer (OpenTraceW).
+    "Win32_System_Time",
 ] }
 
 # Config + rule persistence (Wave 1+) and structured log lines.
@@ -47,6 +49,12 @@ toml = "0.8"
 # and the two CSC IDs are NOT in any public NVIDIA header (ledoge reverse-
 # engineered them), so a typed crate buys us nothing -- we hand-roll with libloading.
 libloading = "0.8"
+# The GPU vendor's game list (`gpu_games`): one crate per vendor.
+recall-nvidia = { path = "../recall-nvidia" }
 # Default features are Linux-only (libxdo, gtk).
 tray-icon = { version = "0.24.1", default-features = false }
 global-hotkey = "0.8.0"
+
+[dev-dependencies]
+# render_probe's live check presents from a hidden window (never shown).
+windows = { version = "0.62", features = ["Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_System_ProcessStatus"] }
