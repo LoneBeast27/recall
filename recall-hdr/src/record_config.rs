@@ -25,7 +25,9 @@ pub const CODECS: [&str; 3] = ["h264", "hevc", "av1"];
 /// `recording.quality` tokens (`RECALL_QUALITY`).
 pub const QUALITIES: [&str; 3] = ["performance", "balanced", "quality"];
 pub const FPS_MIN: u32 = 15;
-pub const FPS_MAX: u32 = 240;
+/// Matches the editor's highest export rate. NVENC and the capture take any whole rate in
+/// range; a game is captured at most once per monitor refresh, so higher rates repeat frames.
+pub const FPS_MAX: u32 = 960;
 pub const BITRATE_MBPS_MIN: u32 = 1;
 pub const BITRATE_MBPS_MAX: u32 = 200;
 /// Smallest non-zero `storage.cap_gb`: a tiny cap would recycle nearly every

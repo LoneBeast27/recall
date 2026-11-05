@@ -33,6 +33,11 @@ impl Root {
             cx.notify();
             return;
         }
+        // Settings → Clip: the Custom frame rate box.
+        if self.fps_input_key(event, clipboard.clone(), window) {
+            cx.notify();
+            return;
+        }
         if let Some(field) = self.focused_field(window) {
             self.field_key(field, event, clipboard, window);
             cx.notify();
