@@ -174,21 +174,41 @@ pub fn display_name(title: &str, exe_stem: &str) -> String {
     if s.is_empty() { "Game".into() } else { s }
 }
 
+/// Recall's own processes: never a target, whatever the config lists.
+const OWN_STEMS: &[&str] = &["recall", "recall-hdr", "recall-native", "recall-hub", "recall-overlay"];
+
 /// Whether an exe stem is a capture target under `cfg`. `looks_like_game` =
 /// fullscreen on its monitor, or the exe lives in a Steam library.
+///
+/// Order: Recall's own processes, then a `none` override, then
+/// `detect.fullscreen_games` (beats the deny lists), then the deny lists, then
+/// a game override, then `looks_like_game`.
 pub fn is_target(stem: &str, looks_like_game: bool, cfg: &Config) -> bool {
     let stem = strip_exe(stem.trim());
-    if stem.is_empty()
-        || rules::is_denied(stem)
-        || TARGET_DENY_STEMS.iter().any(|d| d.eq_ignore_ascii_case(stem))
-    {
+    if stem.is_empty() || OWN_STEMS.iter().any(|d| d.eq_ignore_ascii_case(stem)) {
         return false;
     }
-    match rules::override_kind(cfg, stem) {
-        Some(RuleKind::None) => false,
-        Some(RuleKind::HdrGame | RuleKind::SdrGame) => true,
+    let kind = rules::override_kind(cfg, stem);
+    if kind == Some(RuleKind::None) {
+        return false;
+    }
+    if looks_like_game && is_fullscreen_game(cfg, stem) {
+        return true;
+    }
+    if rules::is_denied(stem) || TARGET_DENY_STEMS.iter().any(|d| d.eq_ignore_ascii_case(stem)) {
+        return false;
+    }
+    match kind {
+        Some(_) => true,
         None => looks_like_game,
     }
+}
+
+/// `stem` is in `detect.fullscreen_games` (case-insensitive, `.exe` optional):
+/// its fullscreen windows are games with no render check.
+pub fn is_fullscreen_game(cfg: &Config, stem: &str) -> bool {
+    let stem = strip_exe(stem.trim());
+    !stem.is_empty() && cfg.detect.fullscreen_games.iter().any(|g| strip_exe(g.trim()).eq_ignore_ascii_case(stem))
 }
 
 /// `"msrdc.exe"` -> `"msrdc"` (case-insensitive); a bare stem is unchanged.
