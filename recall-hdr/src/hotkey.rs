@@ -135,13 +135,12 @@ impl RecordHotkeys {
 
     /// Replace every binding with `list`. Returns one warning per accelerator
     /// that is invalid, collides with an earlier one, or the OS refused (held
-    /// by another app); every other binding still works. The chord leader
-    /// follows the physical key left of 1 on this thread's layout.
+    /// by another app); every other binding still works.
     pub fn bind(&mut self, list: Vec<Binding>) -> Vec<String> {
         for (hk, _) in self.bound.drain(..) {
             let _ = self.manager.unregister(hk);
         }
-        let (keep, mut warnings) = split_conflicts(list, crate::record_chord::win::left_of_one_vk());
+        let (keep, mut warnings) = split_conflicts(list);
         for (b, hk) in keep {
             match self.manager.register(hk) {
                 Ok(()) => self.bound.push((hk, b.action)),
@@ -159,48 +158,22 @@ impl RecordHotkeys {
         self.bound.iter().map(|(_, a)| *a).collect()
     }
 
-    /// The registered accelerator for `action` (the leader resolved to the
-    /// physical key).
-    pub fn bound_hotkey(&self, action: HotkeyAction) -> Option<HotKey> {
-        self.bound.iter().find(|(_, a)| *a == action).map(|(hk, _)| *hk)
-    }
-
     /// Drain the process-global hotkey channel (non-blocking, presses only).
-    /// Each action is reported once however often it fired; ids that are not
-    /// bound actions (the chord's temporary keys) come back as `Other`.
-    pub fn poll(&self) -> Vec<Pressed> {
+    /// Each action is reported once however often it fired; unknown ids are
+    /// dropped.
+    pub fn poll(&self) -> Vec<HotkeyAction> {
         let mut fired = Vec::new();
         while let Ok(event) = GlobalHotKeyEvent::receiver().try_recv() {
             if event.state != HotKeyState::Pressed {
                 continue;
             }
-            let pressed = match action_for(&self.bound, event.id) {
-                Some(action) => Pressed::Action(action),
-                None => Pressed::Other(event.id),
-            };
-            if !fired.contains(&pressed) {
-                fired.push(pressed);
+            if let Some(action) = action_for(&self.bound, event.id) {
+                if !fired.contains(&action) {
+                    fired.push(action);
+                }
             }
         }
         fired
-    }
-}
-
-/// One press drained by [`RecordHotkeys::poll`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Pressed {
-    Action(HotkeyAction),
-    /// A registered id with no bound action (a chord follow-up key).
-    Other(u32),
-}
-
-/// The chord registers its temporary keys on the same manager.
-impl crate::record_chord::Registrar for RecordHotkeys {
-    fn register(&mut self, hk: HotKey) -> Result<(), String> {
-        self.manager.register(hk).map_err(|e| format!("register {hk:?}: {e}"))
-    }
-    fn unregister(&mut self, hk: HotKey) {
-        let _ = self.manager.unregister(hk);
     }
 }
 

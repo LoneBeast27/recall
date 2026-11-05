@@ -161,25 +161,22 @@ fn cpu_mask_parses_with_or_without_prefix() {
 #[test]
 fn config_json_has_every_section() {
     let v = config_json(&user_cfg());
-    for key in ["display", "behavior", "hotkey", "startup", "recording", "overlay", "storage", "hotkeys", "overrides"] {
+    for key in ["display", "behavior", "hotkey", "startup", "recording", "overlay", "storage", "overrides"] {
         assert!(v.get(key).is_some(), "config event lacks '{key}'");
     }
     assert_eq!(v["behavior"]["default_clamp"], "punchy", "snake_case tokens on the wire");
     assert_eq!(v["recording"]["save_hotkey"], "Alt+N");
     assert_eq!(v["recording"]["save_hotkeys"], json!([{"hotkey":"Alt+N","seconds":0}]));
     assert_eq!(v["storage"], json!({"cap_gb": 0}));
-    assert_eq!(
-        v["hotkeys"],
-        json!({"advanced_enabled": true, "leader": "Alt+Backquote", "save_seconds": 30, "window_ms": 1500})
-    );
+    assert!(v.get("hotkeys").is_none(), "the two-step shortcut section is gone");
 }
 
 #[test]
 fn defaults_for_the_hotkey_features_and_quality() {
     let rec = RecordingCfg::default();
-    // Ruling 2026-10-22: two direct combos (Alt+N, Alt+M); the rest is the chord.
-    assert_eq!((rec.bookmark_hotkey.as_str(), rec.screenshot_hotkey.as_str(), rec.record_hotkey.as_str()), ("", "", ""));
-    assert_eq!(HotkeysCfg::default().leader, "Alt+Backquote");
+    // Rohan, 2026-11-05: one direct Alt combo per action, no two-step shortcuts.
+    let direct = [&rec.bookmark_hotkey, &rec.screenshot_hotkey, &rec.record_hotkey, &rec.stats_hotkey];
+    assert_eq!(direct.map(String::as_str), ["Alt+B", "Alt+S", "Alt+L", "Alt+P"]);
     assert_eq!((rec.codec.as_str(), rec.fps, rec.bitrate_mbps, rec.quality.as_str()), ("h264", 60, 25, "balanced"));
     assert_eq!(rec.voice_app, "", "voice track off by default");
     assert_eq!((rec.mic_device.as_str(), rec.mic_enabled, rec.desktop_audio_device.as_str()), ("", true, ""), "Windows default devices, mic on");
@@ -199,10 +196,10 @@ fn every_new_key_patches_saves_and_reloads() {
             "bookmark_hotkey": "Ctrl+F7", "screenshot_hotkey": "", "record_hotkey": "Ctrl+F8",
             "codec": "hevc", "fps": 120, "bitrate_mbps": 50, "quality": "quality", "voice_app": "chat.exe",
             "mic_device": "Microphone (USB Audio Device)", "mic_enabled": false, "desktop_audio_device": "Lautsprecher (Kopfhörer USB Audio)",
-            "save_hotkeys": [{"hotkey": "Alt+N", "seconds": 0}, {"hotkey": "Alt+J", "seconds": 15}, {"hotkey": "Alt+L", "seconds": 60}]
+            "stats_hotkey": "Ctrl+F10",
+            "save_hotkeys": [{"hotkey": "Alt+N", "seconds": 0}, {"hotkey": "Alt+J", "seconds": 15}, {"hotkey": "Alt+K", "seconds": 60}]
         },
         "storage": {"cap_gb": 500},
-        "hotkeys": {"advanced_enabled": false, "leader": "Ctrl+F12", "save_seconds": 45, "window_ms": 2000},
         "midi": {"input": "MIDI Controller 1"}
     });
     let mut base = store.load();
@@ -212,8 +209,7 @@ fn every_new_key_patches_saves_and_reloads() {
         "recording.bookmark_hotkey", "recording.screenshot_hotkey", "recording.record_hotkey", "recording.codec",
         "recording.fps", "recording.bitrate_mbps", "recording.quality", "recording.voice_app",
         "recording.mic_device", "recording.mic_enabled", "recording.desktop_audio_device",
-        "recording.save_hotkeys", "storage.cap_gb", "hotkeys.advanced_enabled", "hotkeys.leader",
-        "hotkeys.save_seconds", "hotkeys.window_ms", "midi.input",
+        "recording.stats_hotkey", "recording.save_hotkeys", "storage.cap_gb", "midi.input",
     ] {
         assert!(out.touched(key), "{key} not reported as changed: {:?}", out.changed);
     }
@@ -222,13 +218,13 @@ fn every_new_key_patches_saves_and_reloads() {
     assert!(text.contains("[[recording.save_hotkeys]]"), "presets are TOML tables:\n{text}");
     let back = store.load();
     assert_eq!(back, out.config, "save -> load is identity");
-    assert_eq!(back.recording.save_hotkeys[2], SaveHotkey { hotkey: "Alt+L".into(), seconds: 60 });
+    assert_eq!(back.recording.save_hotkeys[2], SaveHotkey { hotkey: "Alt+K".into(), seconds: 60 });
     assert_eq!(back.recording.screenshot_hotkey, "", "empty = off survives");
     assert_eq!(back.storage.cap_gb, 500);
     assert_eq!(back.midi.input, "MIDI Controller 1");
     assert_eq!(back.recording.mic_device, "Microphone (USB Audio Device)");
     assert_eq!(back.recording.desktop_audio_device, "Lautsprecher (Kopfhörer USB Audio)", "non-ASCII device names survive TOML");
-    assert_eq!(back.hotkeys, HotkeysCfg { advanced_enabled: false, leader: "Ctrl+F12".into(), save_seconds: 45, window_ms: 2000 });
+    assert_eq!(back.recording.stats_hotkey, "Ctrl+F10");
     let _ = std::fs::remove_dir_all(store.path().parent().unwrap());
 }
 
@@ -257,11 +253,8 @@ fn new_keys_reject_bad_values() {
         (json!({"storage":{"cap_gb":1}}), "storage.cap_gb must be 0 (off) or at least 20 GiB, got 1"),
         (json!({"storage":{"cap_gb":19}}), "at least 20 GiB"),
         (json!({"storage":{"cap":5}}), "unknown config key 'storage.cap'"),
-        (json!({"hotkeys":{"leader":"Alt+N"}}), "must differ"),
-        (json!({"hotkeys":{"leader":""}}), "hotkeys.leader"),
-        (json!({"hotkeys":{"save_seconds":0}}), "hotkeys.save_seconds"),
-        (json!({"hotkeys":{"window_ms":60000}}), "hotkeys.window_ms"),
-        (json!({"hotkeys":{"keys":"1234"}}), "unknown config key 'hotkeys.keys'"),
+        (json!({"recording":{"stats_hotkey":"Alt+M"}}), "must differ"),
+        (json!({"hotkeys":{"leader":"Alt+Backquote"}}), "unknown config key 'hotkeys'"),
     ] {
         let err = apply_patch(&base, &patch).expect_err(&format!("{patch} must be rejected"));
         assert!(err.contains(needle), "{patch}: '{err}' lacks '{needle}'");

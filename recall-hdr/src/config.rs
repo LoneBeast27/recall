@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::log;
-use crate::record_config::{DetectCfg, HotkeysCfg, OverlayCfg, RecordingCfg, StorageCfg};
+use crate::record_config::{DetectCfg, OverlayCfg, RecordingCfg, StorageCfg};
 use crate::types::{ClampMode, RuleKind};
 pub use autostart::{sync_autostart, LEGACY_RUN_ARG, RECORD_RUN_ARG};
 
@@ -61,9 +61,6 @@ pub struct Config {
     /// `[storage]` -- clip-folder size cap + auto-clean (`record_storage`).
     #[serde(default)]
     pub storage: StorageCfg,
-    /// `[hotkeys]` -- the advanced chord (leader + one key; `record_chord`).
-    #[serde(default)]
-    pub hotkeys: HotkeysCfg,
     /// `[midi]` -- the MIDI input the app's Audio page listens to ("" = off).
     #[serde(default)]
     pub midi: MidiCfg,
@@ -295,7 +292,6 @@ impl Default for Config {
             recording: RecordingCfg::default(),
             overlay: OverlayCfg::default(),
             storage: StorageCfg::default(),
-            hotkeys: HotkeysCfg::default(),
             midi: MidiCfg::default(),
             detect: DetectCfg::default(),
             // The hdr-testcard entry is our live test target; ship it by default.
@@ -403,7 +399,8 @@ pub(crate) fn load_from(path: &std::path::Path) -> Config {
 
     match toml::from_str::<Config>(&text) {
         Ok(mut cfg) => {
-            // Legacy single `save_hotkey` -> `save_hotkeys` presets.
+            // Legacy single `save_hotkey` -> `save_hotkeys` presets; a file from
+            // the two-step-shortcut era gets the direct defaults.
             crate::record_hotkeys::migrate_loaded(&mut cfg.recording, &text);
             // Old audio keys -> `audio_sources`.
             crate::record_audio_sources::migrate_loaded(&mut cfg.recording, &text);

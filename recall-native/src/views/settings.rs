@@ -66,8 +66,11 @@ impl Root {
         let corner = self.config_value("overlay", "corner").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| session.overlay.corner.clone());
         let autostart = self.config_value("startup", "autostart").and_then(Value::as_bool).unwrap_or(session.autostart);
         let stats_on = self.stats_on();
-        let leader = if session.leader_label.is_empty() { "Alt `".to_owned() } else { session.leader_label.clone() };
-        let stats_detail = format!("FPS and 1% low, GPU and CPU in a small island over your game. {leader} then 5 also turns it on or off.");
+        let stats_key = self.shortcut_value(ShortcutSlot::Stats);
+        let mut stats_detail = "FPS and 1% low, GPU and CPU in a small island over your game.".to_owned();
+        if !stats_key.is_empty() {
+            stats_detail += &format!(" {} also turns it on or off.", crate::views::settings_keys::chip_text(&stats_key));
+        }
         let fps_line = fps_source_status(&session.fps_source).filter(|_| stats_on).map(|(text, color)| {
             div()
                 .flex()
@@ -170,35 +173,7 @@ impl Root {
     }
 
     fn settings_shortcuts(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let session = self.snap.session.clone().unwrap_or_default();
-        let group = |title: &str, rows: Vec<(&str, String)>| -> AnyElement {
-            div()
-                .flex()
-                .flex_col()
-                .gap(px(2.))
-                .child(div().pb(px(6.)).child(ui::caption(title.to_owned())))
-                .children(rows.into_iter().map(|(label, keys)| {
-                    div()
-                        .h(px(34.))
-                        .flex()
-                        .items_center()
-                        .justify_between()
-                        .border_b_1()
-                        .border_color(c(theme::BORDER_SUBTLE))
-                        .child(div().child(label.to_owned()))
-                        .child(div().flex().gap(px(4.)).children(keys.split(" / ").map(|k| ui::kbd(k.replace('+', " ")))))
-                }))
-                .into_any_element()
-        };
-        let direct: Vec<AnyElement> = ShortcutSlot::DIRECT.into_iter().map(|slot| self.shortcut_row(slot, cx)).collect();
-        let advanced = self.config_value("hotkeys", "advanced_enabled").and_then(Value::as_bool).unwrap_or(session.advanced_enabled);
-        let leader_accel = self.shortcut_value(ShortcutSlot::Leader);
-        let backquote = leader_accel.to_ascii_lowercase().ends_with("backquote");
-        let leader = if backquote && !session.leader_label.is_empty() { session.leader_label.clone() } else { crate::views::settings_keys::chip_text(&leader_accel) };
-        let where_key = if backquote { " (the key left of 1)" } else { "" };
-        let chord_detail = format!("Press {leader}{where_key}, then a number. The game never sees the number.");
-        let chord_secs = self.config_value("hotkeys", "save_seconds").and_then(Value::as_u64).unwrap_or(if session.chord_save_seconds > 0 { session.chord_save_seconds as u64 } else { 30 });
-        let save_label = format!("Save the last {}", short_length(chord_secs));
+        let rows: Vec<AnyElement> = ShortcutSlot::ALL.into_iter().map(|slot| self.shortcut_row(slot, cx)).collect();
         vec![
             div()
                 .text_size(px(12.))
@@ -210,39 +185,9 @@ impl Root {
                 .flex_col()
                 .gap(px(2.))
                 .child(div().pb(px(6.)).child(ui::caption("While you play — click a key to change it")))
-                .children(direct)
-                .into_any_element(),
-            section_title("Two-step shortcuts"),
-            setting_row("Use two-step shortcuts", &chord_detail)
-                .child(ui::switch("advanced-shortcuts", advanced).on_click(cx.listener(move |this, _, _, cx| {
-                    this.set_config("hotkeys", "advanced_enabled", json!(!advanced));
-                    cx.notify();
-                })))
-                .into_any_element(),
-            div()
-                .when(!advanced, |d| d.opacity(0.4))
-                .child(self.shortcut_row(ShortcutSlot::Leader, cx))
-                .child(group(
-                    "Then press",
-                    vec![
-                        ("Bookmark this moment", "1".to_owned()),
-                        (save_label.as_str(), "2".to_owned()),
-                        ("Screenshot", "3".to_owned()),
-                        ("Start or stop a recording", "4".to_owned()),
-                        ("Performance stats", "5".to_owned()),
-                    ],
-                ))
+                .children(rows)
                 .into_any_element(),
         ]
-    }
-}
-
-/// "30 s", "2 min", "1:30".
-fn short_length(secs: u64) -> String {
-    match secs {
-        s if s < 60 => format!("{s} s"),
-        s if s % 60 == 0 => format!("{} min", s / 60),
-        s => format!("{}:{:02}", s / 60, s % 60),
     }
 }
 
