@@ -56,7 +56,26 @@ impl State {
                 self.drop_stale_engine();
             }
             ("session", "config") => self.snapshot.config = Some(config_of(event)),
-            ("session", "storage_cleaned") => self.push(DaemonEvent::StorageCleaned { removed: u64_of(event, "removed"), freed_bytes: u64_of(event, "freed_bytes") }),
+            ("session", "storage_cleaned") => self.push(DaemonEvent::StorageCleaned {
+                removed: u64_of(event, "removed"),
+                freed_bytes: u64_of(event, "freed_bytes"),
+                through: opt_u64(event, "through"),
+                used_bytes: u64_of(event, "used_bytes"),
+                cap_bytes: u64_of(event, "cap_bytes"),
+            }),
+            ("session", "storage_warning") => self.push(DaemonEvent::StorageWarning {
+                level: u64_of(event, "level").min(100) as u8,
+                used_bytes: u64_of(event, "used_bytes"),
+                cap_bytes: u64_of(event, "cap_bytes"),
+                next_through: opt_u64(event, "next_through"),
+            }),
+            ("session", "storage_preview") => self.push(DaemonEvent::StoragePreview {
+                cap_gb: u64_of(event, "cap_gb").min(u64::from(u32::MAX)) as u32,
+                used_bytes: u64_of(event, "used_bytes"),
+                removed: u64_of(event, "removed"),
+                freed_bytes: u64_of(event, "freed_bytes"),
+                through: opt_u64(event, "through"),
+            }),
             ("engine", "status") => self.engine_status(event),
             ("engine", "hello") => self.snapshot.engine = Some(EngineStatus { encoder: "starting".into(), ..EngineStatus::default() }),
             ("hdr", "status") => self.hdr_status(event),
@@ -234,6 +253,10 @@ fn u64_of(event: &Map<String, Value>, key: &str) -> u64 {
     event.get(key).and_then(|v| v.as_u64().or_else(|| v.as_f64().filter(|f| *f >= 0.0).map(|f| f as u64))).unwrap_or(0)
 }
 
+fn opt_u64(event: &Map<String, Value>, key: &str) -> Option<u64> {
+    event.get(key).and_then(Value::as_u64)
+}
+
 fn f64_of(event: &Map<String, Value>, key: &str) -> f64 {
     event.get(key).and_then(Value::as_f64).unwrap_or(0.0)
 }
@@ -258,6 +281,7 @@ pub(super) fn command_line(command: &DaemonCommand) -> String {
         DaemonCommand::SetAcProfile(variant) => json!({"cmd": "set_ac_profile", "variant": variant}),
         DaemonCommand::GetConfig => json!({"cmd": "get_config"}),
         DaemonCommand::SetConfig(patch) => json!({"cmd": "set_config", "patch": patch}),
+        DaemonCommand::StoragePreview(cap_gb) => json!({"cmd": "storage_preview", "cap_gb": cap_gb}),
     };
     value.to_string()
 }

@@ -3,9 +3,10 @@ use super::{Root, ToastKind};
 use crate::{
     services::{
         daemon::DaemonEvent,
-        library::{format_bytes, format_duration, normalize_game, watch::LibraryChange},
+        library::{format_duration, local_from_unix, normalize_game, watch::LibraryChange},
         storage::{GoneClip, Interaction, record_interaction},
     },
+    views::storage_limit,
     worker::Job,
 };
 
@@ -42,10 +43,29 @@ impl Root {
                 self.workers.job(Job::List);
             }
             DaemonEvent::RecordingFailed { reason } => self.show_toast(ToastKind::Bad, "Recording failed", Some(reason)),
-            DaemonEvent::StorageCleaned { removed, freed_bytes } => {
-                let clips = if removed == 1 { "1 old clip".to_owned() } else { format!("{removed} old clips") };
-                self.show_toast(ToastKind::Info, format!("Moved {clips} to the Recycle Bin"), Some(format!("Storage limit · {} freed", format_bytes(freed_bytes))));
+            DaemonEvent::StorageCleaned { removed, freed_bytes, through, cap_bytes, .. } => {
+                let today = crate::services::library::today();
+                let (title, detail) = storage_limit::cleaned(removed, freed_bytes, through.map(local_from_unix), cap_bytes, today);
+                self.show_toast_for(ToastKind::Info, title, Some(detail), storage_limit::TOAST_SECS);
                 self.workers.job(Job::List);
+            }
+            DaemonEvent::StorageWarning { level, used_bytes, cap_bytes, next_through } => {
+                let today = crate::services::library::today();
+                let (title, detail) = storage_limit::warning(level, used_bytes, cap_bytes, next_through.map(local_from_unix), today);
+                let kind = if level >= 100 { ToastKind::Bad } else { ToastKind::Info };
+                self.show_toast_for(kind, title, Some(detail), storage_limit::TOAST_SECS);
+            }
+            DaemonEvent::StoragePreview { cap_gb, used_bytes, removed, freed_bytes, through } => {
+                // Only the answer for the limit still being asked about counts.
+                if self.storage_asking == Some(cap_gb) {
+                    self.storage_asking = None;
+                    if removed == 0 {
+                        self.set_config("storage", "cap_gb", serde_json::json!(cap_gb));
+                    } else {
+                        let through = through.map(local_from_unix);
+                        self.storage_confirm = Some(storage_limit::Preview { cap_gb, used_bytes, removed, freed_bytes, through });
+                    }
+                }
             }
             // A clip saved to the SSD first appears in the library once it is in the clip folder;
             // the engine's kept SSD copy becomes its video-cache entry, so it opens from the SSD.
@@ -60,7 +80,13 @@ impl Root {
                 "Couldn't move a clip to the clip folder",
                 Some(format!("It's safe on the SSD and Recall will retry. {reason}")),
             ),
-            DaemonEvent::Error(message) => self.show_toast(ToastKind::Bad, "Recorder", Some(message)),
+            DaemonEvent::Error(message) => {
+                // A dry run that failed (favourites unknown, folder unreadable) sets nothing.
+                if message.starts_with("storage preview") || message.starts_with("storage_preview") {
+                    self.storage_asking = None;
+                }
+                self.show_toast(ToastKind::Bad, "Recorder", Some(message));
+            }
             DaemonEvent::MicMuted(_) | DaemonEvent::ExportStarted { .. } | DaemonEvent::Exported { .. } => {}
         }
     }
