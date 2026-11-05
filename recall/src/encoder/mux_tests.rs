@@ -461,3 +461,19 @@ fn bench_aac_encoders_cpu() {
         }
     }
 }
+
+#[test]
+fn a_silent_track_goes_to_ffmpegs_encoder_and_stays_small() {
+    ff::init().unwrap();
+    let abort = AtomicBool::new(false);
+    assert!(silent(&[0.0, 1e-7, -1e-6]) && !silent(&[0.0, 1e-3]));
+    let quiet = pcm("mic", 10.0, false);
+    let track = encode_aac(&quiet, &abort).unwrap();
+    assert_eq!(track.coder, AacCoder::Native, "the silent path chose FFmpeg's encoder");
+    assert!(track.packets.len() >= 468, "the track is kept: {} packets for 10 s", track.packets.len());
+    let bytes: usize = track.packets.iter().map(|p| p.1.len()).sum();
+    let mf: usize = encode_aac_with(&quiet, &abort, AacCoder::MediaFoundation).unwrap().packets.iter().map(|p| p.1.len()).sum();
+    eprintln!("10 s of silence: native {bytes} B, Media Foundation {mf} B");
+    assert!(bytes * 10 < mf, "native {bytes} B vs Media Foundation {mf} B");
+    assert_eq!(encode_aac(&pcm("game", 1.0, true), &abort).unwrap().coder, AacCoder::MediaFoundation, "sound still goes to Media Foundation");
+}
