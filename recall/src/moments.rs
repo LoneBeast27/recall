@@ -41,8 +41,10 @@ pub fn db_path() -> String {
         .unwrap_or_else(|_| r"C:\ProgramData\SteelSeries\GG\apps\moments\db\database.db".to_string())
 }
 
+/// Opt-in (`recording.moments_gallery`, sent as `RECALL_MOMENTS=1`): only people who use
+/// SteelSeries Moments want Recall's clips in its gallery.
 pub fn enabled() -> bool {
-    std::env::var("RECALL_MOMENTS").map(|v| v != "0").unwrap_or(true)
+    std::env::var("RECALL_MOMENTS").is_ok_and(|v| v.trim() == "1")
 }
 
 /// Copy the DB (+ WAL sidecar) into `<backup_dir>` once per process.

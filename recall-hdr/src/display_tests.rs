@@ -38,7 +38,7 @@ fn hand_rolled_type_constants() {
 // Run: cargo test -p recall-hdr --bins -- --ignored --nocapture display::tests
 // (this crate is bin-only, so `--bins` not `--lib`.)
 
-const MANAGED: &str = "PG27AQDP";
+const MANAGED: &str = ""; // the default: the primary display
 
 #[test]
 #[ignore = "live: touches real displays"]
@@ -53,28 +53,14 @@ fn live_enumerate() {
     }
     assert!(!all.is_empty(), "expected at least one active display");
 
-    let managed = resolve_target(MANAGED).expect("resolve PG27AQDP");
+    let managed = resolve_target(MANAGED).expect("resolve the primary display");
     println!("resolved managed target: '{}'", managed.name());
-    assert!(managed.name().eq_ignore_ascii_case(MANAGED));
+    assert!(all.iter().any(|(_, t)| *t == managed), "the primary is one of the active displays");
 
-    // Log + assert the BenQ (if present) is a DIFFERENT target -- we must
-    // never touch it. Any non-managed display stands in for that guard.
-    let others: Vec<_> = all
-        .iter()
-        .filter(|(n, _)| !n.eq_ignore_ascii_case(MANAGED))
-        .collect();
+    // Every other display is a DIFFERENT target -- we must never touch it.
+    let others: Vec<_> = all.iter().filter(|(_, t)| *t != managed).collect();
     for (n, t) in &others {
         println!("other (never touch): '{n}' id={}", t.id);
-        assert_ne!(
-            &managed, t,
-            "a non-managed display resolved to the managed target!"
-        );
-    }
-    if others
-        .iter()
-        .any(|(n, _)| n.to_ascii_uppercase().contains("BENQ"))
-    {
-        println!("BenQ present and confirmed != managed target.");
     }
 }
 
@@ -104,7 +90,7 @@ impl Drop for Restore<'_> {
 #[test]
 #[ignore = "live: flips HDR twice (two screen flashes, authorized)"]
 fn live_hdr_roundtrip() {
-    let t = resolve_target(MANAGED).expect("resolve PG27AQDP");
+    let t = resolve_target(MANAGED).expect("resolve the primary display");
     let original = get_hdr_state(&t).expect("initial GET hdr");
     println!("HDR original = {original}");
     let _guard = Restore {
@@ -130,7 +116,7 @@ fn live_hdr_roundtrip() {
 #[test]
 #[ignore = "live: reads real SDR white level"]
 fn live_sdr_white_get() {
-    let t = resolve_target(MANAGED).expect("resolve PG27AQDP");
+    let t = resolve_target(MANAGED).expect("resolve the primary display");
     let nits = get_sdr_white(&t).expect("GET sdr white");
     println!("SDR white level = {nits} nits");
     assert!(
@@ -145,7 +131,7 @@ fn live_sdr_white_get() {
 #[test]
 #[ignore = "live: enables HDR + writes SDR white (screen flash, authorized)"]
 fn live_sdr_white_set_roundtrip() {
-    let t = resolve_target(MANAGED).expect("resolve PG27AQDP");
+    let t = resolve_target(MANAGED).expect("resolve the primary display");
     let orig_hdr = get_hdr_state(&t).expect("GET hdr");
     // White level is only meaningful/settable while HDR is on.
     set_hdr_state(&t, true).expect("enable HDR for white-level test");

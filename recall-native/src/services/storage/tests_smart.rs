@@ -21,7 +21,7 @@ fn facts(name: &str, game: &str, age_days: f64) -> ClipFacts {
 
 /// Clip path whose file name parses to `game` (recorder naming).
 fn path(game: &str, n: u32) -> String {
-    format!("V:\\ALL RECORDINGS\\{game}__2026-10-{:02}__10-00-00-000__abcdef0123456789abcdef01234567{n:02}.mp4", 1 + n % 28)
+    format!("E:\\Clips\\{game}__2026-10-{:02}__10-00-00-000__abcdef0123456789abcdef01234567{n:02}.mp4", 1 + n % 28)
 }
 
 fn name_of(path: &str) -> String {

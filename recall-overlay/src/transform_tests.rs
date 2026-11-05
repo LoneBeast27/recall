@@ -222,13 +222,13 @@ fn action_results_and_failures_transform_the_island_and_session_changes_do_not()
     let engine = |event: serde_json::Value| json!({"mod":"engine","event":event});
     let session = |kind: &str| json!({"mod":"session","event":{"type":"notice","kind":kind,"title":"","detail":"VALORANT"}});
     for event in [
-        json!({"type":"saved","path":"V:\\c\\VALORANT__x.mp4","seconds":30.0}),
+        json!({"type":"saved","path":"E:\\c\\VALORANT__x.mp4","seconds":30.0}),
         json!({"type":"save_failed","reason":"disk full"}),
         json!({"type":"bookmarked"}),
-        json!({"type":"screenshot","path":"V:\\c\\shot.png"}),
+        json!({"type":"screenshot","path":"E:\\c\\shot.png"}),
         json!({"type":"screenshot_failed","reason":"x"}),
-        json!({"type":"recording_started","path":"V:\\c\\r.mp4"}),
-        json!({"type":"recording_stopped","path":"V:\\c\\r.mp4","seconds":61.0}),
+        json!({"type":"recording_started","path":"E:\\c\\r.mp4"}),
+        json!({"type":"recording_stopped","path":"E:\\c\\r.mp4","seconds":61.0}),
         json!({"type":"recording_failed","reason":"x"}),
         json!({"type":"status","encoder":"failed","encoder_error":"NVENC init failed"}),
     ] {

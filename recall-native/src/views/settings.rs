@@ -8,7 +8,10 @@ use crate::{
     services::daemon::DaemonCommand,
     theme::{self, c},
     ui::{self, Icon, Variant, icon},
-    views::pages::{section_title, setting_row},
+    views::{
+        pages::{section_title, setting_row},
+        settings_keys::ShortcutSlot,
+    },
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -104,8 +107,10 @@ impl Root {
                 .into_any_element(),
         ];
         items.extend(fps_line);
+        let corner_row = setting_row("Corner", "").child(corners).into_any_element();
+        items.push(corner_row);
+        items.extend(self.render_midi_device(cx));
         items.extend([
-            setting_row("Corner", "").child(corners).into_any_element(),
             section_title("Recorder"),
             setting_row("Quit Recall", "Stops recording and closes the tray icon.")
                 .child(ui::button("quit-recorder", Variant::Ghost).border_1().border_color(c(theme::BORDER)).child(icon(Icon::Power, 14., theme::MUTED)).child("Stop recorder").on_click(cx.listener(|this, _, _, cx| {
@@ -152,8 +157,27 @@ impl Root {
             setting_row("Replay length", "How much a save keeps. Longer uses more memory.").child(lengths).into_any_element(),
         ]
         .into_iter()
+        .chain(self.moments_row(cx))
         .chain(self.render_video_section(cx))
         .collect()
+    }
+
+    /// "Add clips to SteelSeries Moments": shown only when Moments is installed.
+    fn moments_row(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        static INSTALLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let db = std::env::var_os("ProgramData").map(std::path::PathBuf::from).unwrap_or_default().join(r"SteelSeries\GG\apps\moments\db\database.db");
+        if !*INSTALLED.get_or_init(|| db.is_file()) {
+            return None;
+        }
+        let on = self.config_bool("recording", "moments_gallery");
+        Some(
+            setting_row("Add clips to SteelSeries Moments", "Each saved clip also appears in the Moments gallery.")
+                .child(ui::switch("moments-gallery", on).on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_config("recording", "moments_gallery", json!(!on));
+                    cx.notify();
+                })))
+                .into_any_element(),
+        )
     }
 
     fn settings_media(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -185,17 +209,13 @@ impl Root {
                 }))
                 .into_any_element()
         };
-        let save = if session.save_hotkey.is_empty() { "Alt+N".to_owned() } else { session.save_hotkey.clone() };
-        let mic = if session.mic_hotkey.is_empty() { "Alt+M".to_owned() } else { session.mic_hotkey.clone() };
-        let mut direct = vec![("Save replay", save), ("Mute microphone in clips", mic)];
-        for (label, keys) in [("Bookmark", &session.bookmark_hotkey), ("Screenshot", &session.screenshot_hotkey), ("Start or stop a recording", &session.record_hotkey)] {
-            if !keys.is_empty() {
-                direct.push((label, keys.clone()));
-            }
-        }
+        let direct: Vec<AnyElement> = ShortcutSlot::DIRECT.into_iter().map(|slot| self.shortcut_row(slot, cx)).collect();
         let advanced = self.config_value("hotkeys", "advanced_enabled").and_then(Value::as_bool).unwrap_or(session.advanced_enabled);
-        let leader = if session.leader_label.is_empty() { "Alt `".to_owned() } else { session.leader_label.clone() };
-        let chord_detail = format!("Press {leader} (the key left of 1), then a number. The game never sees the number.");
+        let leader_accel = self.shortcut_value(ShortcutSlot::Leader);
+        let backquote = leader_accel.to_ascii_lowercase().ends_with("backquote");
+        let leader = if backquote && !session.leader_label.is_empty() { session.leader_label.clone() } else { crate::views::settings_keys::chip_text(&leader_accel) };
+        let where_key = if backquote { " (the key left of 1)" } else { "" };
+        let chord_detail = format!("Press {leader}{where_key}, then a number. The game never sees the number.");
         let chord_secs = self.config_value("hotkeys", "save_seconds").and_then(Value::as_u64).unwrap_or(if session.chord_save_seconds > 0 { session.chord_save_seconds as u64 } else { 30 });
         let save_label = format!("Save the last {}", short_length(chord_secs));
         vec![
@@ -204,7 +224,13 @@ impl Root {
                 .text_color(c(theme::TERTIARY))
                 .child("These work in every game, even when Recall is closed.")
                 .into_any_element(),
-            group("While you play", direct),
+            div()
+                .flex()
+                .flex_col()
+                .gap(px(2.))
+                .child(div().pb(px(6.)).child(ui::caption("While you play — click a key to change it")))
+                .children(direct)
+                .into_any_element(),
             section_title("Two-step shortcuts"),
             setting_row("Use two-step shortcuts", &chord_detail)
                 .child(ui::switch("advanced-shortcuts", advanced).on_click(cx.listener(move |this, _, _, cx| {
@@ -214,6 +240,7 @@ impl Root {
                 .into_any_element(),
             div()
                 .when(!advanced, |d| d.opacity(0.4))
+                .child(self.shortcut_row(ShortcutSlot::Leader, cx))
                 .child(group(
                     "Then press",
                     vec![

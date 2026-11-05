@@ -178,11 +178,17 @@ fn bench_full_ring_snapshot() {
 }
 
 #[test]
-fn an_exact_test_run_reaches_only_the_named_endpoint() {
-    let prefer = ["microphone rodecaster chat"];
-    let wanted = super::wanted_endpoints(Some("virtual mic".into()), &prefer, true);
-    assert_eq!(wanted, ["virtual mic"]);
-    assert!(super::wanted_endpoints(None, &prefer, true).is_empty());
-    let wanted = super::wanted_endpoints(Some("virtual mic".into()), &prefer, false);
-    assert_eq!(wanted, ["virtual mic", "microphone rodecaster chat"]);
+fn a_configured_name_matches_exactly_before_tokens() {
+    let names: Vec<String> = [
+        "Microphone (2- USB Audio Device Line)",
+        "Microphone (2- USB Audio Device Chat)",
+        "Microphone",
+    ]
+    .map(String::from)
+    .to_vec();
+    assert_eq!(super::match_endpoint(&names, "Microphone (2- USB Audio Device Chat)"), Some(1));
+    assert_eq!(super::match_endpoint(&names, "microphone"), Some(2), "exact beats the first token match");
+    assert_eq!(super::match_endpoint(&names, "device chat"), Some(1), "token-AND still works");
+    assert_eq!(super::match_endpoint(&names, "Headset (USB)"), None, "missing -> caller uses the default");
+    assert_eq!(super::match_endpoint(&names, "  "), None, "empty = Windows default");
 }

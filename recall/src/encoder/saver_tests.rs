@@ -81,33 +81,33 @@ fn report<'a>(path: &'a str, staged_path: Option<&'a str>, secs: f32, frames: u6
 #[test]
 fn saved_and_failed_json_match_todays_wire_shape() {
     let (events, sink) = Events::capture(true);
-    events.saved(&report(r"V:\ALL RECORDINGS\Game__x.mp4", None, 119.146, 7124, 363_691_446, 6934));
-    events.saved(&report(r"V:\c\G.mp4", Some(r"L:\s\G.mp4"), 120.0, 7200, 400, 812));
+    events.saved(&report(r"E:\Clips\Game__x.mp4", None, 119.146, 7124, 363_691_446, 6934));
+    events.saved(&report(r"E:\c\G.mp4", Some(r"F:\s\G.mp4"), 120.0, 7200, 400, 812));
     events.save_failed(QUEUE_FULL);
-    events.clip_moved(r"V:\c\G.mp4", 9549, None);
-    events.clip_move_failed(r"V:\c\G.mp4", r"L:\s\G.mp4", "disk full");
+    events.clip_moved(r"E:\c\G.mp4", 9549, None);
+    events.clip_move_failed(r"E:\c\G.mp4", r"F:\s\G.mp4", "disk full");
     events.log("hello");
     assert_eq!(
         lines(&sink),
         vec![
-            r#"{"type":"saved","path":"V:\\ALL RECORDINGS\\Game__x.mp4","seconds":119.146,"frames":7124,"bytes":363691446,"elapsed_ms":6934,"staged":false}"#,
-            r#"{"type":"saved","path":"V:\\c\\G.mp4","seconds":120.0,"frames":7200,"bytes":400,"elapsed_ms":812,"staged":true,"staged_path":"L:\\s\\G.mp4"}"#,
+            r#"{"type":"saved","path":"E:\\Clips\\Game__x.mp4","seconds":119.146,"frames":7124,"bytes":363691446,"elapsed_ms":6934,"staged":false}"#,
+            r#"{"type":"saved","path":"E:\\c\\G.mp4","seconds":120.0,"frames":7200,"bytes":400,"elapsed_ms":812,"staged":true,"staged_path":"F:\\s\\G.mp4"}"#,
             r#"{"type":"save_failed","reason":"previous save still writing"}"#,
-            r#"{"type":"clip_moved","path":"V:\\c\\G.mp4","elapsed_ms":9549}"#,
-            r#"{"type":"clip_move_failed","path":"V:\\c\\G.mp4","staged_path":"L:\\s\\G.mp4","reason":"disk full"}"#,
+            r#"{"type":"clip_moved","path":"E:\\c\\G.mp4","elapsed_ms":9549}"#,
+            r#"{"type":"clip_move_failed","path":"E:\\c\\G.mp4","staged_path":"F:\\s\\G.mp4","reason":"disk full"}"#,
             r#"{"type":"encoder_log","message":"hello"}"#,
         ]
     );
     let (human, sink) = Events::capture(false);
     human.saved(&report("a.mp4", None, 1.5, 3, 10, 5));
-    human.saved(&report("b.mp4", Some(r"L:\s\b.mp4"), 1.5, 3, 10, 5));
+    human.saved(&report("b.mp4", Some(r"F:\s\b.mp4"), 1.5, 3, 10, 5));
     human.save_failed("boom");
     human.log("note");
     assert_eq!(
         lines(&sink),
         vec![
             "[recall] saved a.mp4 (1.5s, 3 frames, 10 bytes, 5ms)",
-            r"[recall] saved b.mp4 (1.5s, 3 frames, 10 bytes, 5ms) [staged at L:\s\b.mp4]",
+            r"[recall] saved b.mp4 (1.5s, 3 frames, 10 bytes, 5ms) [staged at F:\s\b.mp4]",
             "[recall] save FAILED: boom",
             "[recall] note",
         ]

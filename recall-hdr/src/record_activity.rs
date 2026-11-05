@@ -181,11 +181,11 @@ mod tests {
         assert_eq!(a.long_recording_json(), json!({"active":false,"path":null,"started_secs":null}));
         a.record_requested(t0);
         assert!(a.busy(t0) && !a.is_recording());
-        a.on_event(&json!({"type":"recording_started","path":"V:\\c\\G__rec.mp4"}), 1_790_000_000.5);
+        a.on_event(&json!({"type":"recording_started","path":"E:\\c\\G__rec.mp4"}), 1_790_000_000.5);
         assert!(a.is_recording());
         assert_eq!(
             a.long_recording_json(),
-            json!({"active":true,"path":"V:\\c\\G__rec.mp4","started_secs":1_790_000_000.5})
+            json!({"active":true,"path":"E:\\c\\G__rec.mp4","started_secs":1_790_000_000.5})
         );
         assert_eq!(a.on_event(&json!({"type":"recording_stopped","path":"p","seconds":3.0,"bytes":9}), 0.0), Some(Trigger::LongRecChanged));
         assert!(!a.busy(t0));

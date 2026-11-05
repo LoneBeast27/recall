@@ -54,7 +54,7 @@ impl DriveKind {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DriveInfo {
-    /// Volume root, e.g. `V:\`.
+    /// Volume root, e.g. `E:\`.
     pub volume: String,
     /// Device model, e.g. "ST4000DM004-2CV104"; empty when the device did not report one.
     pub model: String,
@@ -123,7 +123,7 @@ pub(super) fn parse_descriptor(buffer: &[u8]) -> Option<Descriptor> {
     Some(Descriptor { vendor: text(u32_at(12)?), product: text(u32_at(16)?), bus: u32_at(28)? })
 }
 
-/// Volume root for `path` (`V:\`), uppercase. Drive-letter paths need no system call.
+/// Volume root for `path` (`E:\`), uppercase. Drive-letter paths need no system call.
 pub(super) fn volume_root(path: &Path) -> Option<String> {
     let plain = super::plain_path(path);
     let text = plain.to_string_lossy();
@@ -186,7 +186,7 @@ fn space(volume: &str) -> Option<(u64, u64)> {
     Some((free, total))
 }
 
-/// `V:\` → `\\.\V:`; a mount-point volume → `\\?\Volume{GUID}` (no trailing slash).
+/// `E:\` → `\\.\E:`; a mount-point volume → `\\?\Volume{GUID}` (no trailing slash).
 fn device_path(volume: &str) -> Option<Vec<u16>> {
     let bytes = volume.as_bytes();
     if bytes.len() == 3 && bytes[1] == b':' {

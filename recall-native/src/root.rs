@@ -108,6 +108,8 @@ pub struct Root {
     /// Settings → Storage state (cache size slider, usage).
     pub cache: crate::views::storage_settings::CacheView,
     pub settings_tab: crate::views::settings::SettingsTab,
+    /// Settings device lists (loaded on first view) and open menus.
+    pub settings_ui: crate::views::settings_audio::SettingsUi,
     /// Where a press on the title bar started (a drag begins once the pointer moves).
     pub title_drag: Option<gpui::Point<gpui::Pixels>>,
     /// Recordings folder (last reported) + imported folders of old clips.
@@ -179,6 +181,7 @@ impl Root {
             fps_before: 60,
             cache: crate::views::storage_settings::CacheView::new(),
             settings_tab: Default::default(),
+            settings_ui: Default::default(),
             title_drag: None,
             folders,
             controller_check_at: std::env::var_os("RECALL_NO_CONTROLLER").is_none().then(|| Instant::now() + Duration::from_millis(1500)),
@@ -372,10 +375,9 @@ impl Root {
                 self.lib.reveal(&path);
             }
         }
-        // Six level meters and the MIDI monitor run only while the Audio page shows.
+        // The level meters and the MIDI monitor run only while the Audio page shows.
         if route == Route::Audio {
-            self.meters.get_or_insert_with(Meters::spawn);
-            self.midi.get_or_insert_with(Midi::spawn);
+            self.sync_audio_monitors();
         } else {
             self.meters = None;
             self.midi = None;
@@ -383,7 +385,7 @@ impl Root {
         if route == Route::Settings {
             self.cache.refresh();
         }
-        if route == Route::Settings || route == Route::Hdr {
+        if matches!(route, Route::Settings | Route::Hdr | Route::Audio) {
             self.daemon.send(DaemonCommand::GetConfig);
             self.daemon.send(DaemonCommand::Status);
         }

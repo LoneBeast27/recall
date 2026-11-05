@@ -107,7 +107,7 @@ fn lane_queue_runs_most_urgent_then_newest() {
 
 pub(super) fn clip(name: &str, has_thumb: bool, has_duration: bool) -> PrefetchClip {
     PrefetchClip {
-        path: format!("V:\\clips\\{name}"),
+        path: format!("E:\\clips\\{name}"),
         name: name.into(),
         bytes: 100 << 20,
         mtime_secs: 1,
@@ -192,8 +192,8 @@ fn jpeg_dimensions_and_recorder_thumb_names() {
 #[test]
 fn volume_roots_come_from_drive_letters_without_system_calls() {
     use super::drive::volume_root;
-    assert_eq!(volume_root(Path::new(r"V:\ALL RECORDINGS\a.mp4")).as_deref(), Some(r"V:\"));
-    assert_eq!(volume_root(Path::new(r"\\?\v:\ALL RECORDINGS\a.mp4")).as_deref(), Some(r"V:\"));
+    assert_eq!(volume_root(Path::new(r"E:\Clips\a.mp4")).as_deref(), Some(r"E:\"));
+    assert_eq!(volume_root(Path::new(r"\\?\e:\Clips\a.mp4")).as_deref(), Some(r"E:\"));
     assert_eq!(plain_path(Path::new(r"\\?\UNC\nas\share\a.mp4")), PathBuf::from(r"\\nas\share\a.mp4"));
 }
 
@@ -251,13 +251,13 @@ fn an_export_beside_the_clip_is_found_by_its_name() {
 #[test]
 fn with_a_raw_folder_exports_go_to_edited_beside_it() {
     use std::path::Path;
-    let recordings = Path::new(r"V:\Recall\Raw");
+    let recordings = Path::new(r"E:\Recall\Raw");
     let clip = recordings.join("VALORANT__2026-11-02__10-00-00-000.mp4");
-    assert_eq!(super::export_dir(&clip, recordings).as_deref(), Some(Path::new(r"V:\Recall\Edited")));
+    assert_eq!(super::export_dir(&clip, recordings).as_deref(), Some(Path::new(r"E:\Recall\Edited")));
     let imported = Path::new(r"D:\Old\a.mp4");
-    assert_eq!(super::export_dir(imported, recordings).as_deref(), Some(Path::new(r"V:\Recall\Edited")), "every export lands in Edited");
-    let flat = Path::new(r"V:\ALL RECORDINGS");
-    assert_eq!(super::export_dir(&flat.join("a.mp4"), flat).as_deref(), Some(Path::new(r"V:\ALL RECORDINGS\exports")));
+    assert_eq!(super::export_dir(imported, recordings).as_deref(), Some(Path::new(r"E:\Recall\Edited")), "every export lands in Edited");
+    let flat = Path::new(r"E:\Clips");
+    assert_eq!(super::export_dir(&flat.join("a.mp4"), flat).as_deref(), Some(Path::new(r"E:\Clips\exports")));
 }
 
 #[test]

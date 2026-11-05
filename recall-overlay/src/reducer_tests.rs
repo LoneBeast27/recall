@@ -111,7 +111,7 @@ fn saved_feedback_expires_back_to_source() {
     let mut reducer = Reducer::new();
     reducer.apply_envelope(&status("h264_nvenc"), now);
     reducer.apply_envelope(
-        &json!({"mod":"engine","event":{"type":"saved","path":"V:\\clips\\Rocket-League__2026-06-06__11-17-50.mp4","seconds":118.8}}),
+        &json!({"mod":"engine","event":{"type":"saved","path":"E:\\clips\\Rocket-League__2026-06-06__11-17-50.mp4","seconds":118.8}}),
         now,
     );
     assert_eq!(reducer.view().secondary, "Rocket League · 1:59");
@@ -194,11 +194,11 @@ fn screenshot_and_long_recording_toasts() {
     let now = Instant::now();
     let mut reducer = Reducer::new();
     reducer.apply_envelope(&status("h264_nvenc"), now);
-    reducer.apply_engine_event(&json!({"type":"screenshot","path":"V:\\c\\screenshots\\G__2026-10-22__14-05-09.png"}), now);
+    reducer.apply_engine_event(&json!({"type":"screenshot","path":"E:\\c\\screenshots\\G__2026-10-22__14-05-09.png"}), now);
     assert_eq!((reducer.view().primary.as_str(), reducer.view().secondary.as_str()), ("Screenshot saved", "Saved G__2026-10-22__14-05-09.png"));
-    reducer.apply_engine_event(&json!({"type":"recording_started","path":"V:\\c\\G__rec.mp4"}), now);
+    reducer.apply_engine_event(&json!({"type":"recording_started","path":"E:\\c\\G__rec.mp4"}), now);
     assert_eq!(reducer.view().primary, "Recording started");
-    reducer.apply_engine_event(&json!({"type":"recording_stopped","path":"V:\\c\\G__rec.mp4","seconds":754.2,"bytes":1}), now);
+    reducer.apply_engine_event(&json!({"type":"recording_stopped","path":"E:\\c\\G__rec.mp4","seconds":754.2,"bytes":1}), now);
     assert_eq!(reducer.view().secondary, "G__rec.mp4 · 12:34");
     reducer.apply_engine_event(&json!({"type":"recording_failed","reason":"disk full","path":null}), now);
     assert_eq!((reducer.view().primary.as_str(), reducer.view().secondary.as_str()), ("Recording failed", "disk full"));

@@ -1,5 +1,5 @@
 //! SSD staging for replay saves. A 120 s / 400 MB clip took 9549 ms to mux
-//! straight into `V:\ALL RECORDINGS` (an SMR hard drive, ~42 MB/s; measured
+//! straight into the clip folder (measured on an SMR hard drive, ~42 MB/s;
 //! 2026-10-23) while the encoder side took 11.8 ms. So when the clip folder is
 //! on another volume, the saver muxes into `<staging>\<final name>.part`,
 //! renames it to `<staging>\<final name>`, reports `saved` right away (`path`

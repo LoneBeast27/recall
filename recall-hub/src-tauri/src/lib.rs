@@ -159,7 +159,7 @@ pub fn run() {
             let handle = app.handle().clone();
             std::thread::spawn(move || pipe_client_loop(handle));
             meters::spawn_meters(app.handle().clone());
-            midi::spawn_midi_monitor(app.handle().clone(), "rodecaster");
+            midi::spawn_midi_monitor(app.handle().clone());
             Ok(())
         })
         .run(tauri::generate_context!())

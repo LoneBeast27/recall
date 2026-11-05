@@ -18,7 +18,7 @@
   Default install folder: %LOCALAPPDATA%\Programs\Recall (per-user, no admin rights).
   After installing, the installed recorder starts and is set to start with Windows
   (Settings > General turns that off; -NoAutostart skips it).
-  Builds run through nice-build.ps1 (CCD1, BelowNormal) so a running game is not disturbed.
+  Builds run through nice-build.ps1 (CCD1, BelowNormal) when it is installed, so a running game is not disturbed.
   While the installed Recall app runs, the installer refuses before doing anything (exit 3):
   replacing the program would close it under you. Close Recall and re-run, or pass -CloseApp
   to have the installer close it first.
@@ -35,7 +35,9 @@ $repo = Split-Path $PSScriptRoot -Parent
 $stage = Join-Path $repo 'dist'
 # Gyan FFmpeg 7.1.1 full shared build: same ABI as the 7.1 bindings, and it includes av1_nvenc.
 $ffmpegRoot = Join-Path $repo 'tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared'
-$nice = 'C:/Users/rohan/.claude/tools/nice-build.ps1'
+# Optional low-priority build wrapper (CCD1, BelowNormal); a plain cargo build when absent.
+$nice = Join-Path $env:USERPROFILE '.claude\tools\nice-build.ps1'
+function Invoke-Build { if (Test-Path $nice) { & powershell -NoProfile -File $nice @args } else { & $args[0] @($args | Select-Object -Skip 1) } }
 
 function Get-DriveKind([string]$path) {
   $full = [IO.Path]::GetFullPath($path)
@@ -107,10 +109,10 @@ if (-not $NoBuild) {
   $env:CARGO_BUILD_JOBS = '12'
   $env:CARGO_TARGET_DIR = Join-Path $repo 'target-dev'
   Push-Location $repo
-  & powershell -NoProfile -File $nice cargo build --release -p recall -p recall-hdr -p recall-overlay --offline
+  Invoke-Build cargo build --release -p recall -p recall-hdr -p recall-overlay --offline
   if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'recorder release build failed' }
   $env:CARGO_TARGET_DIR = Join-Path $repo 'target-gpui'
-  & powershell -NoProfile -File $nice cargo build --release --manifest-path (Join-Path $repo 'recall-native\Cargo.toml') --offline
+  Invoke-Build cargo build --release --manifest-path (Join-Path $repo 'recall-native\Cargo.toml') --offline
   if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'app release build failed' }
   Pop-Location
 }

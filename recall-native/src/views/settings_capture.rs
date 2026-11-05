@@ -95,6 +95,7 @@ impl Root {
                 .child(self.segments("voice", 340., &voices, voice_index, "recording", "voice_app", |i| json!(VOICE_APPS[i].0), cx))
                 .into_any_element(),
         );
+        items.extend(self.render_audio_sources(cx));
         items
     }
 

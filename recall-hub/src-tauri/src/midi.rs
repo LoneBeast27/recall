@@ -1,9 +1,5 @@
-//! RODECaster MIDI surface: port enumeration, outbound messages (the RØDE
-//! documented trigger path — Stream-Deck-style control), and an inbound
-//! monitor (SMART pads sending MIDI to the PC) emitted as `midi-in` events.
-//!
-//! The exact trigger map is pinned WITH THE USER on the live unit (the RØDE
-//! help doc enumerates it); until then the UI exposes raw note/CC send.
+//! MIDI surface: port enumeration, outbound messages (raw note/CC send), and an
+//! inbound monitor emitted as `midi-in` events.
 
 use std::sync::Mutex;
 
@@ -50,35 +46,22 @@ pub fn midi_send(
         .map_err(|e| e.to_string())
 }
 
-/// Listen on the first input matching `port_match`, emitting `midi-in` events.
-pub fn spawn_midi_monitor(app: AppHandle, port_match: &'static str) {
+/// Listen on the first MIDI input, emitting `midi-in` events.
+pub fn spawn_midi_monitor(app: AppHandle) {
     std::thread::Builder::new()
         .name("midi-in".into())
         .spawn(move || {
             let Ok(input) = MidiInput::new("recall-hub-in") else { return };
-            // Prefer a name match; else take the first hardware input (the
-            // RODECaster enumerates as e.g. "MIDI function").
-            let ports = input.ports();
-            let Some(port) = ports
-                .iter()
-                .find(|p| {
-                    input
-                        .port_name(p)
-                        .is_ok_and(|n| n.to_lowercase().contains(port_match))
-                })
-                .or_else(|| ports.first())
-                .cloned()
-            else {
-                return;
-            };
+            let Some(port) = input.ports().first().cloned() else { return };
             let name = input.port_name(&port).unwrap_or_default();
+            let label = name.clone();
             let conn = input.connect(
                 &port,
                 "recall-hub-monitor",
                 move |_ts, msg, app| {
                     let _ = app.emit(
                         "midi-in",
-                        serde_json::json!({ "bytes": msg, "port": "rodecaster" }),
+                        serde_json::json!({ "bytes": msg, "port": label }),
                     );
                 },
                 app.clone(),

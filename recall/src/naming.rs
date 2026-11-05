@@ -16,9 +16,13 @@ pub const LONGREC_SUFFIX: &str = "__rec.mp4";
 /// Extension of a file that is still being written.
 pub const PART_EXT: &str = ".part";
 
-/// The clip folder (`RECALL_OUT_DIR`, default `V:\ALL RECORDINGS`).
+/// The clip folder (`RECALL_OUT_DIR`, which the controller always sets; run by hand,
+/// `%USERPROFILE%\Videos\Recall`).
 pub fn out_dir() -> String {
-    std::env::var("RECALL_OUT_DIR").unwrap_or_else(|_| r"V:\ALL RECORDINGS".to_string())
+    std::env::var("RECALL_OUT_DIR").unwrap_or_else(|_| {
+        let home = std::path::PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default());
+        home.join("Videos").join("Recall").to_string_lossy().into_owned()
+    })
 }
 
 /// Source name -> file-name-safe slug (the `clip_path` rule): characters other
@@ -110,9 +114,9 @@ mod tests {
 
     #[test]
     fn screenshot_path_follows_the_clip_convention() {
-        let p = screenshot_path(r"V:\ALL RECORDINGS", "Rocket League®", &at(), |_| false);
-        assert_eq!(p, Path::new(r"V:\ALL RECORDINGS\screenshots\Rocket-League-__2026-10-22__14-05-09.png"));
-        let p = screenshot_path(r"V:\clips", "", &at(), |_| false);
+        let p = screenshot_path(r"E:\Clips", "Rocket League®", &at(), |_| false);
+        assert_eq!(p, Path::new(r"E:\Clips\screenshots\Rocket-League-__2026-10-22__14-05-09.png"));
+        let p = screenshot_path(r"E:\clips", "", &at(), |_| false);
         assert!(p.ends_with("screenshots/Desktop__2026-10-22__14-05-09.png"), "{}", p.display());
     }
 
@@ -125,12 +129,12 @@ mod tests {
 
     #[test]
     fn longrec_names_skip_existing_final_or_part_files() {
-        let free = longrec_path(r"V:\ALL RECORDINGS", "THE FINALS", &at(), |_| false);
-        assert_eq!(free, Path::new(r"V:\ALL RECORDINGS\THE-FINALS__2026-10-22__14-05-09__rec.mp4"));
-        assert_eq!(part_of(&free), Path::new(r"V:\ALL RECORDINGS\THE-FINALS__2026-10-22__14-05-09__rec.mp4.part"));
+        let free = longrec_path(r"E:\Clips", "THE FINALS", &at(), |_| false);
+        assert_eq!(free, Path::new(r"E:\Clips\THE-FINALS__2026-10-22__14-05-09__rec.mp4"));
+        assert_eq!(part_of(&free), Path::new(r"E:\Clips\THE-FINALS__2026-10-22__14-05-09__rec.mp4.part"));
         let busy_part = part_of(&free);
-        let next = longrec_path(r"V:\ALL RECORDINGS", "THE FINALS", &at(), |p| p == busy_part);
-        assert_eq!(next, Path::new(r"V:\ALL RECORDINGS\THE-FINALS__2026-10-22__14-05-09__rec-2.mp4"));
+        let next = longrec_path(r"E:\Clips", "THE FINALS", &at(), |p| p == busy_part);
+        assert_eq!(next, Path::new(r"E:\Clips\THE-FINALS__2026-10-22__14-05-09__rec-2.mp4"));
     }
 
     #[test]
@@ -143,14 +147,14 @@ mod tests {
         assert!(!is_longrec_part("G__2026-10-22__14-05-09__rec-x2.mp4.part"));
         assert!(!is_longrec_part("VALORANT__2026-10-22__14-05-09-275__abc.mp4.part"), "replay parts are the saver's");
         assert!(!is_longrec_part("VALORANT__2026-10-22__14-05-09__rec.mp4"));
-        let part = Path::new(r"V:\c\G__2026-10-22__14-05-09__rec.mp4.part");
-        assert_eq!(recovered_path(part, |_| false), Path::new(r"V:\c\G__2026-10-22__14-05-09__rec.mp4"));
-        let taken = Path::new(r"V:\c\G__2026-10-22__14-05-09__rec.mp4");
+        let part = Path::new(r"E:\c\G__2026-10-22__14-05-09__rec.mp4.part");
+        assert_eq!(recovered_path(part, |_| false), Path::new(r"E:\c\G__2026-10-22__14-05-09__rec.mp4"));
+        let taken = Path::new(r"E:\c\G__2026-10-22__14-05-09__rec.mp4");
         assert_eq!(
             recovered_path(part, |p| p == taken),
-            Path::new(r"V:\c\G__2026-10-22__14-05-09__rec-recovered.mp4")
+            Path::new(r"E:\c\G__2026-10-22__14-05-09__rec-recovered.mp4")
         );
-        let second = Path::new(r"V:\c\G__2026-10-22__14-05-09__rec-2.mp4.part");
-        assert_eq!(recovered_path(second, |_| false), Path::new(r"V:\c\G__2026-10-22__14-05-09__rec-2.mp4"));
+        let second = Path::new(r"E:\c\G__2026-10-22__14-05-09__rec-2.mp4.part");
+        assert_eq!(recovered_path(second, |_| false), Path::new(r"E:\c\G__2026-10-22__14-05-09__rec-2.mp4"));
     }
 }

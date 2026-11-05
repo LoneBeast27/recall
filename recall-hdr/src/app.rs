@@ -89,7 +89,7 @@ pub fn run() -> i32 {
     hdr_exec::repair_if_dirty(&cfg);
 
     // 1. Resolve the managed display + its monitor (for the watcher's fullscreen
-    //    attribution). The PG27AQDP is the primary; use the primary HMONITOR.
+    //    attribution). Attribution uses the primary HMONITOR (the default target).
     let target = match display::resolve_target(&cfg.display.target_friendly_name) {
         Ok(t) => t,
         Err(e) => {
