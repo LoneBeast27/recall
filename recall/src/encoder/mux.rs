@@ -87,7 +87,13 @@ fn encode_tracks(audio: &[AudioPcm], abort: &AtomicBool) -> Result<Vec<AacTrack>
     std::thread::scope(|scope| {
         let workers: Vec<_> = audio
             .iter()
-            .map(|pcm| scope.spawn(move || encode_aac(pcm, abort).map_err(|e| format!("audio track '{}': {e}", pcm.name))))
+            .map(|pcm| {
+                scope.spawn(move || {
+                    // A source above 0 dB can pass full scale: limit it, never a hard clip in the encode.
+                    let limited = pcm.boosted.then(|| pcm.limited());
+                    encode_aac(limited.as_ref().unwrap_or(pcm), abort).map_err(|e| format!("audio track '{}': {e}", pcm.name))
+                })
+            })
             .collect();
         workers.into_iter().map(|w| w.join().unwrap_or_else(|_| Err("audio encode thread panicked".into()))).collect()
     })

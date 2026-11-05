@@ -175,3 +175,41 @@ fn a_configured_name_matches_exactly_before_tokens() {
     assert_eq!(super::match_endpoint(&names, "Headset (USB)"), None, "missing -> caller uses the default");
     assert_eq!(super::match_endpoint(&names, "  "), None, "empty = Windows default");
 }
+
+/// A full-scale stereo tone captured through a +12 dB source: the save's limited copy has no
+/// flat tops (no runs of identical clipped samples) and peaks at or below the -1 dBFS ceiling.
+#[test]
+fn a_boosted_source_is_limited_at_save_without_flat_tops() {
+    use crate::export::mix_limit::CEILING;
+    let rate = 48_000;
+    let ring = raw_ring("app-1", false, 10f32.powf(12.0 / 20.0), rate, 2, rate as usize * 2);
+    let tone: Vec<f32> = (0..rate as usize)
+        .flat_map(|n| {
+            let s = (n as f32 / rate as f32 * 440.0 * std::f32::consts::TAU).sin();
+            [s, s]
+        })
+        .collect();
+    ring.push_capture(&tone, false);
+    let pcm = ring.snapshot_pcm(1.0);
+    assert!(pcm.boosted, "+12 dB marks the track for the limiter");
+    let raw_peak = pcm.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!(raw_peak > 3.9, "the ring holds the boosted samples: {raw_peak}");
+
+    let out = pcm.limited();
+    assert_eq!(out.samples.len(), pcm.samples.len());
+    let peak = out.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!(peak <= CEILING + 1e-6, "peak {peak}");
+    assert!(peak > 0.85, "held near the ceiling, not crushed: {peak}");
+    let left: Vec<f32> = out.samples.iter().step_by(2).copied().collect();
+    assert!(!left.windows(3).any(|w| w[0] == w[1] && w[1] == w[2] && w[0].abs() > 0.5), "no flat top");
+    assert_eq!(out.samples[0..2], [out.samples[0], out.samples[0]], "channels stay interleaved");
+}
+
+#[test]
+fn a_source_at_or_below_unity_is_not_marked_for_the_limiter() {
+    for gain in [1.0, 0.5] {
+        let ring = raw_ring("in-1", true, gain, 48_000, 2, 16);
+        ring.push_capture(&[0.9, -0.9], false);
+        assert!(!ring.snapshot_pcm(0.0001).boosted, "gain {gain}");
+    }
+}

@@ -58,6 +58,20 @@ pub struct AudioPcm {
     pub rate: u32,
     pub channels: u16,
     pub samples: Vec<f32>,
+    /// The source's gain is above 0 dB: the save runs the peak limiter before the AAC
+    /// encode, so a boosted source never hard-clips. Tracks at or below 0 dB stay as captured.
+    pub boosted: bool,
+}
+
+impl AudioPcm {
+    /// This track through the -1 dBFS look-ahead limiter (`export::mix_limit`).
+    pub fn limited(&self) -> AudioPcm {
+        AudioPcm {
+            samples: crate::export::mix_limit::limit_interleaved(&self.samples, self.channels, self.rate),
+            boosted: false,
+            ..*self
+        }
+    }
 }
 
 /// Interleaved f32 ring + the format it was captured in.
@@ -149,6 +163,7 @@ impl TrackRing {
             rate: self.rate,
             channels: self.channels,
             samples: self.snapshot(secs),
+            boosted: self.gain > 1.0,
         }
     }
 
