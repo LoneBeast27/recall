@@ -84,6 +84,8 @@ $envs = @{
   RECALL_AUDIO_MIC = $TestMic; RECALL_AUDIO_EXACT = '1'
   RECALL_CPU_MASK = $CpuMask; RECALL_FPS = "$Fps"; RECALL_BITRATE = '25000000'; RECALL_BUFFER_SECS = '120'
   RECALL_CODEC = 'h264'; RECALL_QUALITY = 'high'; RECALL_OUT_DIR = $OutDir; RECALL_STAGING_DIR = 'off'
+  # Its own single-instance guard: the person's recorder may be recording right now (0e91135).
+  RECALL_INSTANCE_TAG = 'engine-cost'
   PATH = "$ffbin;$env:PATH"
 }
 if (-not $Monitor) { $envs.RECALL_CAPTURE_HWND = "$hwnd" }
