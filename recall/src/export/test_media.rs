@@ -295,3 +295,35 @@ fn drain_samples(decoder: &mut ff::decoder::Audio, pcm: &mut Vec<f32>) -> usize 
     }
     total
 }
+
+/// The top-level MP4 box types of `path`, in file order (`ftyp`, `moov`, `mdat`, ...).
+pub(super) fn top_level_atoms(path: &Path) -> Vec<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).unwrap();
+    let len = file.metadata().unwrap().len();
+    let (mut at, mut atoms) = (0u64, Vec::new());
+    while at + 8 <= len {
+        let mut head = [0u8; 16];
+        file.seek(SeekFrom::Start(at)).unwrap();
+        file.read_exact(&mut head[..8]).unwrap();
+        let mut size = u32::from_be_bytes(head[..4].try_into().unwrap()) as u64;
+        if size == 1 {
+            file.read_exact(&mut head[8..]).unwrap();
+            size = u64::from_be_bytes(head[8..].try_into().unwrap());
+        } else if size == 0 {
+            size = len - at;
+        }
+        atoms.push(String::from_utf8_lossy(&head[4..8]).into_owned());
+        assert!(size >= 8, "bad box size {size} at {at} in {}", path.display());
+        at += size;
+    }
+    assert_eq!(at, len, "boxes do not tile {}", path.display());
+    atoms
+}
+
+/// `moov` sits before `mdat`, so a player can start before the whole file has loaded.
+pub(super) fn assert_faststart(path: &Path) {
+    let atoms = top_level_atoms(path);
+    let at = |name: &str| atoms.iter().position(|a| a == name).unwrap_or_else(|| panic!("no {name} in {atoms:?}"));
+    assert!(at("moov") < at("mdat"), "moov after mdat: {atoms:?}");
+}

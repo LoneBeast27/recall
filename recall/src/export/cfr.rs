@@ -64,8 +64,7 @@ pub(super) fn export_to_temp(input: &Path, temp: &Path, fps: u32) -> Result<Expo
 
     let origin_us = timeline_origin_us(&ictx, video_index);
     let planned_duration_us = timeline_duration_us(&ictx, origin_us);
-    octx.write_header()
-        .map_err(|e| format!("write output header: {e}"))?;
+    super::paths::write_faststart_header(&mut octx)?;
     let output_time_bases: Vec<_> = octx.streams().map(|s| s.time_base()).collect();
 
     let mut pipeline = VideoPipeline {
