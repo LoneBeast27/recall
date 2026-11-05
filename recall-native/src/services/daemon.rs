@@ -52,6 +52,9 @@ pub enum DaemonCommand {
     GetConfig,
     /// Partial config object with the TOML section structure, e.g. {"overlay":{"enabled":true}}.
     SetConfig(Value),
+    /// What `storage.cap_gb` = this would move to the Recycle Bin now (answered by a
+    /// `StoragePreview` event; nothing moves).
+    StoragePreview(u32),
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -208,8 +211,14 @@ pub enum DaemonEvent {
     ClipMoved { path: String, kept_path: Option<String> },
     /// A staged clip could not reach the clip folder yet (it stays safe on the SSD; retried).
     ClipMoveFailed { path: String, reason: String },
-    /// Storage limit moved old clips to the Recycle Bin.
-    StorageCleaned { removed: u64, freed_bytes: u64 },
+    /// Storage limit moved old clips to the Recycle Bin. `through`: last-write Unix seconds of
+    /// the newest clip that went ("recordings from <date> and earlier"); bytes after the run.
+    StorageCleaned { removed: u64, freed_bytes: u64, through: Option<u64>, used_bytes: u64, cap_bytes: u64 },
+    /// Recordings crossed 80 or 90% of the limit, or are over it with nothing left that may go
+    /// (100). `next_through`: the clip that would go first.
+    StorageWarning { level: u8, used_bytes: u64, cap_bytes: u64, next_through: Option<u64> },
+    /// Dry run of a limit the user picked (answer to `StoragePreview`); nothing moved.
+    StoragePreview { cap_gb: u32, used_bytes: u64, removed: u64, freed_bytes: u64, through: Option<u64> },
     Error(String),
 }
 

@@ -19,8 +19,16 @@
 //! permanently (a clip bigger than the Recycle Bin), never silently.
 //!
 //! Runs on its own background-I/O thread (the clip folder is an SMR HDD); one
-//! directory listing per run, no per-file stats. Results: a log line and
-//! `{"type":"storage_cleaned","removed":N,"freed_bytes":B}` on `mod:"session"`.
+//! directory listing per run, no per-file stats. Results (on `mod:"session"`):
+//! a log line and `{"type":"storage_cleaned","removed":N,"freed_bytes":B,
+//! "through":T,"used_bytes":U,"cap_bytes":C}` (`through` = last-write Unix
+//! seconds of the newest clip that went: "recordings from <date> and
+//! earlier"). Before the cap is reached, [`Warner`] sends
+//! `{"type":"storage_warning","level":80|90|100,"used_bytes":U,"cap_bytes":C,
+//! "next_through":T|null}` once per crossing (100 = over the cap with nothing
+//! left that may go; `next_through` = the clip that would go first). A
+//! `storage_preview{cap_gb}` job plans without moving anything and answers the
+//! asking client with `storage_preview{cap_gb,used_bytes,removed,freed_bytes,through}`.
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
@@ -67,6 +75,18 @@ pub struct Plan {
     pub remove: Vec<String>,
     pub freed: u64,
     pub total: u64,
+    /// Last-write time of the newest clip in `remove` (the "and earlier" date).
+    pub through: Option<u64>,
+    /// Last-write time of the oldest clip that may go but stays this run (the
+    /// next one out once the folder grows).
+    pub next: Option<u64>,
+}
+
+impl Plan {
+    /// Over the cap with nothing left that may go (favourites, edits, new clips).
+    pub fn stuck(&self, cap: u64) -> bool {
+        cap > 0 && self.total.saturating_sub(self.freed) > cap && self.next.is_none()
+    }
 }
 
 /// `<GAME>__YYYY-MM-DD__HH-MM-SS[...].mp4` (case-insensitive): replay clips
@@ -93,14 +113,8 @@ pub fn select_oldest(clips: &[ClipFile], cap: u64, now_unix: u64, protected: imp
     if cap == 0 || total <= cap {
         return Vec::new();
     }
-    let by_age = |a: &usize, b: &usize| clips[*a].modified.cmp(&clips[*b].modified).then_with(|| clips[*a].name.cmp(&clips[*b].name));
-    let newest = (0..clips.len()).max_by(by_age);
-    let settled = |c: &ClipFile| c.modified.saturating_add(RECENT_SECS) <= now_unix;
-    let mut order: Vec<usize> =
-        (0..clips.len()).filter(|&i| Some(i) != newest && settled(&clips[i]) && !protected(&clips[i])).collect();
-    order.sort_by(by_age);
     let mut out = Vec::new();
-    for i in order {
+    for i in candidates(clips, now_unix, protected) {
         if total <= cap {
             break;
         }
@@ -108,6 +122,17 @@ pub fn select_oldest(clips: &[ClipFile], cap: u64, now_unix: u64, protected: imp
         out.push(i);
     }
     out
+}
+
+/// Indices of every clip that may go, oldest first (see [`select_oldest`]).
+pub fn candidates(clips: &[ClipFile], now_unix: u64, protected: impl Fn(&ClipFile) -> bool) -> Vec<usize> {
+    let by_age = |a: &usize, b: &usize| clips[*a].modified.cmp(&clips[*b].modified).then_with(|| clips[*a].name.cmp(&clips[*b].name));
+    let newest = (0..clips.len()).max_by(by_age);
+    let settled = |c: &ClipFile| c.modified.saturating_add(RECENT_SECS) <= now_unix;
+    let mut order: Vec<usize> =
+        (0..clips.len()).filter(|&i| Some(i) != newest && settled(&clips[i]) && !protected(&clips[i])).collect();
+    order.sort_by(by_age);
+    order
 }
 
 /// Lowercase file names marked `favourite: true` in `library.json`.
@@ -148,10 +173,50 @@ pub fn plan(listing: &Listing, favs: &HashSet<String>, cap: u64, now_unix: u64) 
         favs.contains(&key) || edits.contains(&key)
     };
     let picks = select_oldest(&listing.clips, cap, now_unix, protected);
+    let next = candidates(&listing.clips, now_unix, protected).into_iter().find(|i| !picks.contains(i)).map(|i| listing.clips[i].modified);
     Plan {
         remove: picks.iter().map(|&i| listing.clips[i].name.clone()).collect(),
         freed: picks.iter().map(|&i| listing.clips[i].bytes).sum(),
         total: listing.clips.iter().map(|c| c.bytes).sum(),
+        through: picks.iter().map(|&i| listing.clips[i].modified).max(),
+        next,
+    }
+}
+
+/// Warning levels, percent of the cap: a toast at each, before anything goes.
+pub const WARN_LEVELS: [u8; 2] = [80, 90];
+/// Over the cap and stuck (nothing left that may go).
+pub const LEVEL_STUCK: u8 = 100;
+/// A level warns again only after usage fell this many points below it.
+pub const REARM_POINTS: u64 = 5;
+
+/// One warning per threshold crossing (per cap; a new cap starts over).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Warner {
+    cap: u64,
+    level: u8,
+}
+
+impl Warner {
+    /// The level to warn about now, if any. `pruned`: this run moved clips
+    /// (their own toast says so), so the level is only recorded.
+    pub fn update(&mut self, used: u64, cap: u64, stuck: bool, pruned: bool) -> Option<u8> {
+        if cap != self.cap {
+            *self = Warner { cap, level: 0 };
+        }
+        if cap == 0 {
+            return None;
+        }
+        let pct = (used as u128 * 100 / cap as u128).min(u128::from(u16::MAX)) as u64;
+        let now = if stuck { LEVEL_STUCK } else { WARN_LEVELS.iter().rev().copied().find(|&l| pct >= u64::from(l)).unwrap_or(0) };
+        if now > self.level {
+            self.level = now;
+            return (!pruned).then_some(now);
+        }
+        if now < self.level && (self.level == LEVEL_STUCK || pct + REARM_POINTS < u64::from(self.level)) {
+            self.level = now;
+        }
+        None
     }
 }
 
@@ -274,9 +339,18 @@ pub fn recycle(files: &[PathBuf]) -> Result<(), String> {
 pub struct Outcome {
     pub removed: usize,
     pub freed: u64,
+    /// Newest clip that went (last-write Unix seconds).
+    pub through: Option<u64>,
+    /// Counted clips after the run, and the cap, in bytes.
+    pub used: u64,
+    pub cap: u64,
+    /// Oldest clip that may go next.
+    pub next: Option<u64>,
+    pub stuck: bool,
 }
 
-fn run_once(dir: &Path, cap_gb: u32) -> Result<Outcome, String> {
+/// List and plan (nothing moved). Errors leave favourites unknown or the folder unread.
+fn plan_dir(dir: &Path, cap_gb: u32) -> Result<(Plan, Listing), String> {
     if cap_gb < STORAGE_CAP_MIN_GB {
         // `set_config` rejects this; a hand-edited config.toml does not.
         return Err(format!("storage.cap_gb {cap_gb} is below the {STORAGE_CAP_MIN_GB} GiB minimum; nothing removed"));
@@ -284,24 +358,51 @@ fn run_once(dir: &Path, cap_gb: u32) -> Result<Outcome, String> {
     let favs = load_favourites().map_err(|e| format!("favourites unknown ({e}); nothing removed"))?;
     let listing = scan(dir).map_err(|e| format!("list {}: {e}", dir.display()))?;
     let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    let plan = plan(&listing, &favs, cap_gb as u64 * GIB, now_unix);
+    Ok((plan(&listing, &favs, cap_gb as u64 * GIB, now_unix), listing))
+}
+
+fn run_once(dir: &Path, cap_gb: u32) -> Result<Outcome, String> {
+    let (plan, listing) = plan_dir(dir, cap_gb)?;
+    let cap = cap_gb as u64 * GIB;
+    let mut out = Outcome { removed: 0, freed: 0, through: None, used: plan.total, cap, next: plan.next, stuck: plan.stuck(cap) };
     if plan.remove.is_empty() {
-        return Ok(Outcome { removed: 0, freed: 0 });
+        return Ok(out);
     }
     let files: Vec<PathBuf> = plan.remove.iter().flat_map(|c| companions(dir, c, &listing)).collect();
-    recycle(&files)?;
-    let removed = plan.remove.iter().filter(|c| !dir.join(c).exists()).count();
-    let freed = listing.clips.iter().filter(|c| plan.remove.contains(&c.name) && !dir.join(&c.name).exists()).map(|c| c.bytes).sum();
-    Ok(Outcome { removed, freed })
+    let moved = recycle(&files);
+    let gone: Vec<&ClipFile> = listing.clips.iter().filter(|c| plan.remove.contains(&c.name) && !dir.join(&c.name).exists()).collect();
+    out.removed = gone.len();
+    out.freed = gone.iter().map(|c| c.bytes).sum();
+    out.through = gone.iter().map(|c| c.modified).max();
+    out.used = plan.total - out.freed;
+    // A partial move still reports what went (the toast names the date); the error follows.
+    if out.removed == 0 {
+        moved?;
+    } else if let Err(e) = moved {
+        log!("storage: {e} (after {} clip(s) went)", out.removed);
+    }
+    Ok(out)
 }
 
 pub fn cleaned_event(o: &Outcome) -> String {
-    json!({"type": "storage_cleaned", "removed": o.removed, "freed_bytes": o.freed}).to_string()
+    json!({"type": "storage_cleaned", "removed": o.removed, "freed_bytes": o.freed, "through": o.through, "used_bytes": o.used, "cap_bytes": o.cap})
+        .to_string()
+}
+
+pub fn warning_event(level: u8, o: &Outcome) -> String {
+    json!({"type": "storage_warning", "level": level, "used_bytes": o.used, "cap_bytes": o.cap, "next_through": o.next}).to_string()
+}
+
+pub fn preview_event(cap_gb: u32, plan: &Plan) -> String {
+    json!({"type": "storage_preview", "cap_gb": cap_gb, "used_bytes": plan.total, "removed": plan.remove.len(), "freed_bytes": plan.freed, "through": plan.through})
+        .to_string()
 }
 
 struct Job {
     dir: PathBuf,
     cap_gb: u32,
+    /// `Some(client)`: a dry run answered to that client; nothing moves.
+    preview_for: Option<u64>,
 }
 
 /// Schedules runs (after saves, hourly, on demand) onto one worker thread.
@@ -316,16 +417,33 @@ impl Janitor {
         let (tx, rx) = channel::<Job>();
         let _ = std::thread::Builder::new().name("recall-storage".into()).spawn(move || {
             background_io();
-            while let Ok(mut job) = rx.recv() {
-                while let Ok(newer) = rx.try_recv() {
-                    job = newer; // coalesce queued runs
-                }
-                match run_once(&job.dir, job.cap_gb) {
-                    Ok(o) if o.removed > 0 => {
-                        log!("storage: cap {} GiB -> {} clip(s) to the Recycle Bin, {} bytes freed", job.cap_gb, o.removed, o.freed);
-                        hub.event("session", &cleaned_event(&o));
+            let mut warner = Warner::default();
+            while let Ok(first) = rx.recv() {
+                // Previews are answered in order; queued runs coalesce into the newest.
+                let mut run = None;
+                for job in std::iter::once(first).chain(std::iter::from_fn(|| rx.try_recv().ok())) {
+                    match job.preview_for {
+                        Some(client) => match plan_dir(&job.dir, job.cap_gb) {
+                            Ok((plan, _)) => hub.event_to(client, "session", &preview_event(job.cap_gb, &plan)),
+                            Err(e) => hub.event_to(client, "session", &crate::record_status::error_event(&format!("storage preview: {e}"))),
+                        },
+                        None => run = Some(job),
                     }
-                    Ok(_) => log!("storage: {} is within its {} GiB cap", job.dir.display(), job.cap_gb),
+                }
+                let Some(job) = run else { continue };
+                match run_once(&job.dir, job.cap_gb) {
+                    Ok(o) => {
+                        if o.removed > 0 {
+                            log!("storage: cap {} GiB -> {} clip(s) to the Recycle Bin, {} bytes freed", job.cap_gb, o.removed, o.freed);
+                            hub.event("session", &cleaned_event(&o));
+                        } else {
+                            log!("storage: {} uses {} of its {} GiB cap", job.dir.display(), o.used, job.cap_gb);
+                        }
+                        if let Some(level) = warner.update(o.used, o.cap, o.stuck, o.removed > 0) {
+                            log!("storage: {level}% warning ({} of {} bytes)", o.used, o.cap);
+                            hub.event("session", &warning_event(level, &o));
+                        }
+                    }
                     Err(e) => {
                         log!("storage: clean-up skipped -- {e}");
                         hub.event("session", &crate::record_status::error_event(&format!("storage clean-up: {e}")));
@@ -349,8 +467,13 @@ impl Janitor {
         self.after_save = None;
         self.next_hourly = now + HOURLY;
         if cap_gb > 0 {
-            let _ = self.tx.send(Job { dir: PathBuf::from(dir), cap_gb });
+            let _ = self.tx.send(Job { dir: PathBuf::from(dir), cap_gb, preview_for: None });
         }
+    }
+
+    /// Plan `cap_gb` without moving anything; the answer goes to `client` only.
+    pub fn preview(&mut self, dir: &str, cap_gb: u32, client: u64) {
+        let _ = self.tx.send(Job { dir: PathBuf::from(dir), cap_gb, preview_for: Some(client) });
     }
 
     pub fn tick(&mut self, dir: &str, cap_gb: u32, now: Instant) {
