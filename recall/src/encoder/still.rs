@@ -35,7 +35,7 @@ pub(super) fn encode_still(
         json: false,
         notes: Vec::new(),
     };
-    let (mut still, _) = open_encoder(&cfg, spec.codec, *width, *height, None)?;
+    let (mut still, _) = open_encoder(&cfg, spec.codec, *width, *height, None, None)?;
     let stats = EncStats::default();
     still.send_rgba(0, *width, rgba)?;
     still.drain(&stats)?;

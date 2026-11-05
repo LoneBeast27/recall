@@ -23,7 +23,7 @@ pub fn smoke_test(out_dir: &std::path::Path) -> Result<String, String> {
     for note in &cfg.notes {
         eprintln!("smoke: {note}");
     }
-    let (mut enc, fallback) = open_encoder(&cfg, cfg.codec, 256, 256, None)?;
+    let (mut enc, fallback) = open_encoder(&cfg, cfg.codec, 256, 256, None, None)?;
     if let Some(note) = fallback {
         eprintln!("smoke: {note}");
     }

@@ -243,6 +243,12 @@ pub(crate) fn encode_aac_with(pcm: &AudioPcm, abort: &AtomicBool, coder: AacCode
     })
 }
 
+/// A packet's bytes while muxing: audio in hand, video possibly in the spill file.
+enum Bytes<'a> {
+    Audio(&'a [u8]),
+    Video(&'a crate::ring::Payload),
+}
+
 /// True when every PTS is strictly greater than the one before. The ring is
 /// stream-copied with dts == pts, which is only valid without B-frames (bf=0).
 pub(crate) fn pts_strictly_increase(video: &[EncodedPacket]) -> bool {
@@ -316,7 +322,8 @@ pub(crate) fn mux_mp4(
     // Merge all packets in presentation-time order so the interleaver
     // never buffers a whole stream. (stream_idx, seconds, src_tb, pts, data, key)
     let vtb = ff::Rational(1, 1_000_000);
-    let mut merged: Vec<(usize, f64, ff::Rational, i64, i64, &[u8], bool)> = Vec::new();
+    // Video payloads may sit in the spill file: they are read one at a time while writing.
+    let mut merged: Vec<(usize, f64, ff::Rational, i64, i64, Bytes<'_>, bool)> = Vec::new();
     for p in video {
         let t = p.frame_idx as f64 / 1_000_000.0;
         merged.push((
@@ -325,14 +332,14 @@ pub(crate) fn mux_mp4(
             vtb,
             p.frame_idx as i64,
             p.duration_us as i64,
-            &p.data,
+            Bytes::Video(&p.data),
             p.keyframe,
         ));
     }
     for (i, t) in tracks.iter().enumerate() {
         let atb = ff::Rational(1, t.rate as i32);
         for (pts, data) in &t.packets {
-            merged.push((i + 1, *pts as f64 / t.rate as f64, atb, *pts, 0, data, true));
+            merged.push((i + 1, *pts as f64 / t.rate as f64, atb, *pts, 0, Bytes::Audio(data), true));
         }
     }
     merged.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
@@ -343,7 +350,10 @@ pub(crate) fn mux_mp4(
         if abort.load(Relaxed) {
             return Err(ABORTED.into());
         }
-        let mut pkt = ff::Packet::copy(data);
+        let mut pkt = match data {
+            Bytes::Audio(bytes) => ff::Packet::copy(bytes),
+            Bytes::Video(payload) => ff::Packet::copy(&payload.read()?),
+        };
         pkt.set_pts(Some(pts));
         pkt.set_dts(Some(pts));
         pkt.set_duration(duration);

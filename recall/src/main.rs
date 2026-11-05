@@ -49,6 +49,7 @@ mod moments;
 mod protocol;
 mod ring;
 mod single_instance;
+mod spill;
 mod thread_qos;
 mod source;
 

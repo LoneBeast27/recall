@@ -50,6 +50,8 @@ struct Scan {
     target: HMONITOR,
     /// First (topmost in Z-order) qualifying window's source name.
     found: Option<String>,
+    /// That window's process id.
+    pid: Option<u32>,
 }
 
 /// Name of the source on the captured (primary) monitor, or `None` if nothing
@@ -57,7 +59,7 @@ struct Scan {
 pub fn captured_source() -> Option<String> {
     unsafe {
         let target = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-        let mut scan = Scan { target, found: None };
+        let mut scan = Scan { target, found: None, pid: None };
         // EnumWindows visits top-level windows in Z-order (topmost first); the
         // callback stops at the first qualifying window on the target monitor.
         let _ = EnumWindows(Some(enum_cb), LPARAM(&mut scan as *mut Scan as isize));
@@ -107,6 +109,7 @@ unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
     };
 
     scan.found = Some(sanitize(&name));
+    scan.pid = Some(pid);
     BOOL(0) // found the topmost qualifying window; stop enumerating
 }
 
@@ -117,6 +120,31 @@ fn window_title(hwnd: HWND) -> String {
         String::new()
     } else {
         String::from_utf16_lossy(&buf[..len as usize])
+    }
+}
+
+/// Full exe path of the topmost source window on the captured monitor (the game,
+/// when one is up). The spill file avoids that exe's disk.
+pub fn captured_exe_path() -> Option<std::path::PathBuf> {
+    let pid = unsafe {
+        let target = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
+        let mut scan = Scan { target, found: None, pid: None };
+        let _ = EnumWindows(Some(enum_cb), LPARAM(&mut scan as *mut Scan as isize));
+        scan.pid?
+    };
+    exe_path(pid).map(std::path::PathBuf::from)
+}
+
+fn exe_path(pid: u32) -> Option<String> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
+        let mut buf = [0u16; 1024];
+        let mut len = buf.len() as u32;
+        let res =
+            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
+        let _ = CloseHandle(handle);
+        res.ok()?;
+        Some(String::from_utf16_lossy(&buf[..len as usize]))
     }
 }
 
