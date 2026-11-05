@@ -71,6 +71,8 @@ pub struct RecordingCfg {
     pub record_hotkey: String,
     /// Show / hide the performance-stats island (`overlay.stats`; "" = off).
     pub stats_hotkey: String,
+    /// Turns the overlay's notices (`overlay.enabled`) on / off ("" = off).
+    pub overlay_hotkey: String,
     /// `h264` | `hevc` | `av1` (`RECALL_CODEC`).
     pub codec: String,
     /// Nominal capture/encode rate (`RECALL_FPS`).
@@ -119,6 +121,7 @@ impl Default for RecordingCfg {
             screenshot_hotkey: crate::record_hotkeys::DEFAULT_SCREENSHOT.into(),
             record_hotkey: crate::record_hotkeys::DEFAULT_RECORD.into(),
             stats_hotkey: crate::record_hotkeys::DEFAULT_STATS.into(),
+            overlay_hotkey: crate::record_hotkeys::DEFAULT_OVERLAY.into(),
             codec: "h264".into(),
             fps: 60,
             bitrate_mbps: 25,

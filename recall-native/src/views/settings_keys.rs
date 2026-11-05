@@ -19,11 +19,12 @@ pub enum ShortcutSlot {
     Screenshot,
     Record,
     Stats,
+    Overlay,
 }
 
 impl ShortcutSlot {
-    pub const ALL: [ShortcutSlot; 6] =
-        [ShortcutSlot::Save, ShortcutSlot::Mic, ShortcutSlot::Bookmark, ShortcutSlot::Screenshot, ShortcutSlot::Record, ShortcutSlot::Stats];
+    pub const ALL: [ShortcutSlot; 7] =
+        [ShortcutSlot::Save, ShortcutSlot::Mic, ShortcutSlot::Bookmark, ShortcutSlot::Screenshot, ShortcutSlot::Record, ShortcutSlot::Stats, ShortcutSlot::Overlay];
 
     /// The controller config key: (section, key).
     fn key(self) -> (&'static str, &'static str) {
@@ -34,6 +35,7 @@ impl ShortcutSlot {
             ShortcutSlot::Screenshot => ("recording", "screenshot_hotkey"),
             ShortcutSlot::Record => ("recording", "record_hotkey"),
             ShortcutSlot::Stats => ("recording", "stats_hotkey"),
+            ShortcutSlot::Overlay => ("recording", "overlay_hotkey"),
         }
     }
 
@@ -45,12 +47,13 @@ impl ShortcutSlot {
             ShortcutSlot::Screenshot => "Screenshot",
             ShortcutSlot::Record => "Start or stop a recording",
             ShortcutSlot::Stats => "Performance stats",
+            ShortcutSlot::Overlay => "Show or hide the overlay",
         }
     }
 
     /// Optional shortcuts can be off ("" in config); the others always have keys.
     fn optional(self) -> bool {
-        matches!(self, ShortcutSlot::Bookmark | ShortcutSlot::Screenshot | ShortcutSlot::Record | ShortcutSlot::Stats)
+        matches!(self, ShortcutSlot::Bookmark | ShortcutSlot::Screenshot | ShortcutSlot::Record | ShortcutSlot::Stats | ShortcutSlot::Overlay)
     }
 }
 
@@ -156,6 +159,7 @@ impl Root {
             ShortcutSlot::Screenshot => s.screenshot_hotkey,
             ShortcutSlot::Record => s.record_hotkey,
             ShortcutSlot::Stats => s.stats_hotkey,
+            ShortcutSlot::Overlay => s.overlay_hotkey,
         }
     }
 

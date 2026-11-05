@@ -3,7 +3,8 @@
 //! `save_hotkey` kept working, and conflict detection.
 //!
 //! - **Defaults**: one direct Alt combo per action -- Alt+N save, Alt+M mic,
-//!   Alt+B bookmark, Alt+S screenshot, Alt+L long recording, Alt+P stats.
+//!   Alt+B bookmark, Alt+S screenshot, Alt+L long recording, Alt+P stats,
+//!   Alt+O overlay (notices) on/off.
 //!   Rohan, 2026-11-05: the two-step chord (Alt+` then a digit) was on Alt
 //!   anyway, so it is gone. [`GAMER_COMBOS`] are never defaults. Bookmark,
 //!   screenshot, record and stats can be turned off ("").
@@ -34,6 +35,7 @@ pub const DEFAULT_BOOKMARK: &str = "Alt+B";
 pub const DEFAULT_SCREENSHOT: &str = "Alt+S";
 pub const DEFAULT_RECORD: &str = "Alt+L";
 pub const DEFAULT_STATS: &str = "Alt+P";
+pub const DEFAULT_OVERLAY: &str = "Alt+O";
 
 /// Combos games, launchers and overlays commonly own (GeForce/ShadowPlay,
 /// Xbox Game Bar, Steam, Discord, screenshot tools), plus Ctrl+Alt+R (a
@@ -54,6 +56,8 @@ pub enum HotkeyAction {
     Record,
     /// Show / hide the performance-stats island.
     Stats,
+    /// Turn the overlay's notices (`overlay.enabled`) on or off.
+    Overlay,
     ToggleHdr,
 }
 
@@ -100,6 +104,7 @@ pub fn bindings(rec: &RecordingCfg, hdr: Option<&str>) -> Vec<Binding> {
         (HotkeyAction::Screenshot, "recording.screenshot_hotkey", "screenshot", rec.screenshot_hotkey.as_str()),
         (HotkeyAction::Record, "recording.record_hotkey", "long recording", rec.record_hotkey.as_str()),
         (HotkeyAction::Stats, "recording.stats_hotkey", "performance stats", rec.stats_hotkey.as_str()),
+        (HotkeyAction::Overlay, "recording.overlay_hotkey", "overlay", rec.overlay_hotkey.as_str()),
         (HotkeyAction::ToggleHdr, "hotkey.toggle_hdr", "HDR toggle", hdr.unwrap_or("")),
     ];
     for (action, key, label, accel) in singles {

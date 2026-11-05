@@ -71,12 +71,12 @@ pub struct Crossfade {
 }
 
 /// Hidden by default; a notice while one is active and notices are on
-/// (`overlay.enabled`); the stats while `overlay_stats` is on and the target
+/// (`overlay.enabled`) or it is forced (`always`: "Overlay off"); the stats while `overlay_stats` is on and the target
 /// game is in front (`game_in_front`; never over the desktop or other apps);
 /// else the leader pill while the shortcut hint is open (its card hangs
 /// below whichever of these shows).
 pub fn content(view: &OverlayView, session: &Session, game_in_front: bool) -> Option<Content> {
-    if let Some(notice) = view.notice.as_ref().filter(|_| view.visible && session.notices) {
+    if let Some(notice) = view.notice.as_ref().filter(|n| view.visible && (session.notices || n.always)) {
         return Some(Content::Notice(notice.clone()));
     }
     if stats_shown(view, session, game_in_front) {

@@ -175,8 +175,8 @@ fn config_json_has_every_section() {
 fn defaults_for_the_hotkey_features_and_quality() {
     let rec = RecordingCfg::default();
     // Rohan, 2026-11-05: one direct Alt combo per action, no two-step shortcuts.
-    let direct = [&rec.bookmark_hotkey, &rec.screenshot_hotkey, &rec.record_hotkey, &rec.stats_hotkey];
-    assert_eq!(direct.map(String::as_str), ["Alt+B", "Alt+S", "Alt+L", "Alt+P"]);
+    let direct = [&rec.bookmark_hotkey, &rec.screenshot_hotkey, &rec.record_hotkey, &rec.stats_hotkey, &rec.overlay_hotkey];
+    assert_eq!(direct.map(String::as_str), ["Alt+B", "Alt+S", "Alt+L", "Alt+P", "Alt+O"]);
     assert_eq!((rec.codec.as_str(), rec.fps, rec.bitrate_mbps, rec.quality.as_str()), ("h264", 60, 25, "balanced"));
     assert_eq!(rec.voice_app, "", "voice track off by default");
     assert_eq!((rec.mic_device.as_str(), rec.mic_enabled, rec.desktop_audio_device.as_str()), ("", true, ""), "Windows default devices, mic on");
@@ -196,7 +196,7 @@ fn every_new_key_patches_saves_and_reloads() {
             "bookmark_hotkey": "Ctrl+F7", "screenshot_hotkey": "", "record_hotkey": "Ctrl+F8",
             "codec": "hevc", "fps": 120, "bitrate_mbps": 50, "quality": "quality", "voice_app": "chat.exe",
             "mic_device": "Microphone (USB Audio Device)", "mic_enabled": false, "desktop_audio_device": "Lautsprecher (Kopfhörer USB Audio)",
-            "stats_hotkey": "Ctrl+F10",
+            "stats_hotkey": "Ctrl+F10", "overlay_hotkey": "Ctrl+F11",
             "save_hotkeys": [{"hotkey": "Alt+N", "seconds": 0}, {"hotkey": "Alt+J", "seconds": 15}, {"hotkey": "Alt+K", "seconds": 60}]
         },
         "storage": {"cap_gb": 500},
@@ -209,7 +209,7 @@ fn every_new_key_patches_saves_and_reloads() {
         "recording.bookmark_hotkey", "recording.screenshot_hotkey", "recording.record_hotkey", "recording.codec",
         "recording.fps", "recording.bitrate_mbps", "recording.quality", "recording.voice_app",
         "recording.mic_device", "recording.mic_enabled", "recording.desktop_audio_device",
-        "recording.stats_hotkey", "recording.save_hotkeys", "storage.cap_gb", "midi.input",
+        "recording.stats_hotkey", "recording.overlay_hotkey", "recording.save_hotkeys", "storage.cap_gb", "midi.input",
     ] {
         assert!(out.touched(key), "{key} not reported as changed: {:?}", out.changed);
     }
@@ -225,6 +225,7 @@ fn every_new_key_patches_saves_and_reloads() {
     assert_eq!(back.recording.mic_device, "Microphone (USB Audio Device)");
     assert_eq!(back.recording.desktop_audio_device, "Lautsprecher (Kopfhörer USB Audio)", "non-ASCII device names survive TOML");
     assert_eq!(back.recording.stats_hotkey, "Ctrl+F10");
+    assert_eq!(back.recording.overlay_hotkey, "Ctrl+F11");
     let _ = std::fs::remove_dir_all(store.path().parent().unwrap());
 }
 
@@ -256,6 +257,7 @@ fn new_keys_reject_bad_values() {
         (json!({"storage":{"cap_gb":19}}), "at least 20 GiB"),
         (json!({"storage":{"cap":5}}), "unknown config key 'storage.cap'"),
         (json!({"recording":{"stats_hotkey":"Alt+M"}}), "must differ"),
+        (json!({"recording":{"overlay_hotkey":"Alt+P"}}), "must differ"),
         (json!({"hotkeys":{"leader":"Alt+Backquote"}}), "unknown config key 'hotkeys'"),
     ] {
         let err = apply_patch(&base, &patch).expect_err(&format!("{patch} must be rejected"));
