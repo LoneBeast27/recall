@@ -172,8 +172,8 @@ pub fn plan(listing: &Listing, favs: &HashSet<String>, cap: u64, now_unix: u64) 
         let key = c.name.to_lowercase();
         favs.contains(&key) || edits.contains(&key)
     };
-    let picks = select_oldest(&listing.clips, cap, now_unix, &protected);
-    let next = candidates(&listing.clips, now_unix, &protected).into_iter().find(|i| !picks.contains(i)).map(|i| listing.clips[i].modified);
+    let picks = select_oldest(&listing.clips, cap, now_unix, protected);
+    let next = candidates(&listing.clips, now_unix, protected).into_iter().find(|i| !picks.contains(i)).map(|i| listing.clips[i].modified);
     Plan {
         remove: picks.iter().map(|&i| listing.clips[i].name.clone()).collect(),
         freed: picks.iter().map(|&i| listing.clips[i].bytes).sum(),

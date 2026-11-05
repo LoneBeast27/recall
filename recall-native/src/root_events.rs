@@ -3,7 +3,7 @@ use super::{Root, ToastKind};
 use crate::{
     services::{
         daemon::DaemonEvent,
-        library::{format_bytes, format_duration, local_from_unix, normalize_game, watch::LibraryChange},
+        library::{format_duration, local_from_unix, normalize_game, watch::LibraryChange},
         storage::{GoneClip, Interaction, record_interaction},
     },
     views::storage_limit,
