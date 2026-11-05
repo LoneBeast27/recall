@@ -21,6 +21,13 @@ const RECENT_KEEP: Duration = Duration::from_secs(600);
 /// Lowercase path → when it changed and what it is now (`None`: gone).
 pub(super) type Recent = HashMap<String, (Instant, Option<ClipEntry>)>;
 
+/// A clip the library dropped: `removed` when its file went (or was replaced), not only its folder.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Retired {
+    pub entry: ClipEntry,
+    pub removed: bool,
+}
+
 /// The anchor clip, its row's distance from the top row, and the pixel offset into the top row.
 pub(super) struct ScrollAnchor {
     path: Option<String>,
@@ -43,11 +50,12 @@ impl LibraryState {
         }
     }
 
-    pub fn apply_changes(&mut self, changes: ClipChanges) {
+    /// Returns the clips that left (or were replaced), for the SSD cache to let go of.
+    pub fn apply_changes(&mut self, changes: ClipChanges) -> Vec<Retired> {
         let anchor = self.scroll_anchor();
         let now = Instant::now();
         self.recent.retain(|_, (at, _)| now.duration_since(*at) < RECENT_KEEP);
-        self.remove_gone(&changes, now);
+        let mut retired = self.remove_gone(&changes, now);
         let mut index: HashMap<String, usize> = HashMap::new();
         if !changes.added.is_empty() {
             index = self.entries.iter().enumerate().map(|(i, e)| (folder_key(&e.path), i)).collect();
@@ -65,6 +73,7 @@ impl LibraryState {
             match at {
                 Some(i) => {
                     self.forget_assets(&self.entries[i].path.clone());
+                    retired.push(Retired { entry: self.entries[i].clone(), removed: true });
                     self.entries[i] = clip.entry;
                     self.records[i] = record;
                 }
@@ -80,19 +89,27 @@ impl LibraryState {
             self.confirm_delete = false;
         }
         self.restore_scroll(anchor);
+        retired
     }
 
-    fn remove_gone(&mut self, changes: &ClipChanges, now: Instant) {
+    fn remove_gone(&mut self, changes: &ClipChanges, now: Instant) -> Vec<Retired> {
         let mut gone: HashSet<String> = changes.gone.iter().map(|p| folder_key(p)).collect();
+        let removed = gone.clone();
         if !changes.gone_under.is_empty() {
             let under: HashSet<String> = changes.gone_under.iter().map(|p| folder_key(p)).collect();
             let inside = |key: &str| Path::new(key).ancestors().skip(1).any(|a| a.to_str().is_some_and(|a| under.contains(a)));
             gone.extend(self.entries.iter().map(|e| folder_key(&e.path)).filter(|key| inside(key)));
         }
         if gone.is_empty() {
-            return;
+            return Vec::new();
         }
-        let paths: Vec<String> = self.entries.iter().filter(|e| gone.contains(&folder_key(&e.path))).map(|e| e.path.clone()).collect();
+        let retired: Vec<Retired> = self
+            .entries
+            .iter()
+            .filter(|e| gone.contains(&folder_key(&e.path)))
+            .map(|e| Retired { entry: e.clone(), removed: removed.contains(&folder_key(&e.path)) })
+            .collect();
+        let paths: Vec<String> = retired.iter().map(|r| r.entry.path.clone()).collect();
         for path in &paths {
             self.forget_assets(path);
             if self.hovered.as_deref() == Some(path.as_str()) {
@@ -108,6 +125,7 @@ impl LibraryState {
         self.records.retain(|r| !gone.contains(&folder_key(&r.path)));
         self.entries.retain(|e| !gone.contains(&folder_key(&e.path)));
         self.recent.extend(gone.into_iter().map(|key| (key, (now, None))));
+        retired
     }
 
     /// Lazy-asset bookkeeping for one path, so a new revision of it loads fresh.
@@ -243,6 +261,20 @@ mod tests {
         let mut lib = library(&[r"D:\c\game\a.mp4", r"D:\c\game\deep\b.mp4", r"D:\c\game2\c.mp4"]);
         lib.apply_changes(ClipChanges { gone_under: vec![r"D:\c\Game".into()], ..Default::default() });
         assert_eq!(listed(&lib), [r"D:\c\game2\c.mp4"]);
+    }
+
+    #[test]
+    fn dropped_clips_are_handed_back_for_the_cache_and_only_removed_files_count_as_removed() {
+        let mut lib = library(&[r"D:\c\a.mp4", r"D:\c\game\b.mp4", r"D:\c\keep.mp4"]);
+        let retired = lib.apply_changes(ClipChanges { gone: vec![r"d:\C\A.mp4".into()], gone_under: vec![r"D:\c\Game".into()], ..Default::default() });
+        let mut seen: Vec<(String, bool)> = retired.into_iter().map(|r| (r.entry.path, r.removed)).collect();
+        seen.sort();
+        assert_eq!(seen, [(r"D:\c\a.mp4".to_owned(), true), (r"D:\c\game\b.mp4".to_owned(), false)]);
+        // A file replaced in place: the old revision goes, the new one is listed.
+        let retired = lib.apply_changes(ClipChanges { added: vec![added(r"D:\c\keep.mp4", 11)], ..Default::default() });
+        assert_eq!(retired.iter().map(|r| (r.entry.bytes, r.removed)).collect::<Vec<_>>(), [(10, true)]);
+        // Recall's own save reported again: nothing retired.
+        assert!(lib.apply_changes(ClipChanges { added: vec![added(r"D:\c\keep.mp4", 11)], ..Default::default() }).is_empty());
     }
 
     #[test]

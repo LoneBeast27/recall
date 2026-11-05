@@ -4,7 +4,7 @@ use crate::{
     services::{
         daemon::DaemonEvent,
         library::{format_bytes, format_duration, normalize_game, watch::LibraryChange},
-        storage::{Interaction, record_interaction},
+        storage::{GoneClip, Interaction, record_interaction},
     },
     worker::Job,
 };
@@ -70,7 +70,12 @@ impl Root {
         match change {
             LibraryChange::Clips(changes) => {
                 crate::trace::note(&format!("watch: +{} -{} -{}", changes.added.len(), changes.gone.len(), changes.gone_under.len()));
-                self.lib.apply_changes(changes);
+                let retired = self.lib.apply_changes(changes);
+                let gone = retired
+                    .into_iter()
+                    .map(|r| GoneClip { name: r.entry.name, bytes: r.entry.bytes, mtime_secs: r.entry.mtime, removed: r.removed })
+                    .collect();
+                self.workers.forget_clips(gone);
                 self.workers.job(Job::DriveSpace);
                 if self.tile_menu.as_ref().is_some_and(|menu| !self.lib.lists(&menu.path)) {
                     self.tile_menu = None;
