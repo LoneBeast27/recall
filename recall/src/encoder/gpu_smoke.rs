@@ -96,7 +96,7 @@ pub fn gpu_smoke(out_dir: &std::path::Path) -> Result<String, String> {
             reopens += 1;
         }
         if enc.is_none() {
-            enc = Some(open_encoder(&cfg, cfg.codec, target.0, target.1, frame.gpu.as_ref())?.0);
+            enc = Some(open_encoder(&cfg, cfg.codec, target.0, target.1, frame.gpu.as_ref(), None)?.0);
         }
         enc.as_mut().expect("opened above").encode(frame, &stats)?;
         // Real time, like capture at 60 fps.
