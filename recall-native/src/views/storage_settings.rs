@@ -151,9 +151,14 @@ impl Root {
         if self.cache_field.is_focused(window) {
             window.focus(&self.focus);
         }
-        if !apply {
-            return;
+        if apply {
+            self.apply_typed_cache();
         }
+    }
+
+    /// Applies the typed size (also from `flush_on_close`, where no window is left to focus).
+    pub fn apply_typed_cache(&mut self) {
+        self.cache.editing = false;
         let Some(gb) = parse_gb(&self.cache_field.value) else {
             if !self.cache_field.value.trim().is_empty() {
                 self.show_toast(ToastKind::Bad, "Cache size not changed", Some("Type a size in GB, like 7 or 7.5".to_owned()));
@@ -205,7 +210,8 @@ impl Root {
                     .h(px(6.))
                     .bg(c(if (i as f32 / stops as f32) <= fraction { theme::MUTED } else { theme::BORDER_STRONG }))
             }))
-            .child(div().absolute().top(px(7.)).left(relative(fraction)).ml(px(-7.)).size(px(14.)).rounded(px(7.)).bg(c(theme::TEXT)))
+            .child(crate::trace::target("cache-slider"))
+            .child(div().absolute().top(px(7.)).left(relative(fraction)).ml(px(-7.)).size(px(14.)).rounded(px(7.)).bg(c(theme::TEXT)).child(crate::trace::target("cache-knob")))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, e: &MouseDownEvent, _, cx| {
                 this.cache.dragging = true;
                 this.cache.drag_to(f32::from(e.position.x));
@@ -283,6 +289,7 @@ impl Root {
                 .into_any_element()
         } else {
             div()
+                .child(crate::trace::target("cache-size-value"))
                 .id("cache-size-value")
                 .flex_none()
                 .px(px(6.))
@@ -411,6 +418,10 @@ mod tests {
         assert_eq!(parse_gb("0"), None);
         assert_eq!(parse_gb("."), None);
         assert_eq!(parse_gb("abc"), None);
+        assert_eq!(parse_gb("inf"), None);
+        assert_eq!(parse_gb("NaN"), None);
+        assert_eq!(parse_gb("-5"), None);
+        assert_eq!(parse_gb("1e999"), None);
     }
 
     #[test]

@@ -369,3 +369,26 @@ Run-Scenario 'editor: an exported clip keeps its edit file when the edits are un
   $u = Settle $s 1500
   Verdict @((Ok (Test-Path $file) 'the edit file stays'), (Ok ($u.ui.edited -eq 1) "the card keeps Edited ($($u.ui.edited))"))
 }
+
+Run-Scenario 'settings: a typed cache size of 7.5 GB sits between the 5 and 10 GB ticks' {
+  $s = $script:current = Start-Viewer 'cachesize' $clips.short -Library
+  Click $s 'nav-settings'; Click $s 'settings-Media'
+  Click $s 'cache-size-value'
+  $editing = Wait-Trace $s { param($r) $r.ui.cache_editing -and $r.ui.field -eq 'CacheSize' } 2000
+  Key $s 'd7'; Key $s 'period'; Key $s 'd5'
+  $typed = Wait-Trace $s { param($r) $r.ui.cache_text -eq '7.5' } 1500
+  Key $s 'enter'
+  $u = Wait-Trace $s { param($r) -not $r.ui.cache_editing -and $r.ui.cache_budget -eq 8053063680 } 2000
+  $u = Settle $s 200
+  $slider = Target $s 'cache-slider'; $knob = Target $s 'cache-knob'
+  $f = ($knob.X - $slider.Left) / [double]$slider.Width
+  # Escape keeps the size: type 9, press Escape.
+  Click $s 'cache-size-value'; [void](Wait-Trace $s { param($r) $r.ui.cache_editing } 2000)
+  Key $s 'd9'; Key $s 'escape'
+  $v = Settle $s 300
+  Key $s 'escape'; $back = Wait-Trace $s { param($r) $r.route -eq 'library' } 1500
+  Verdict @((Ok ([bool]$editing) 'a click on the size opens the field, keys go to it'), (Ok ([bool]$typed) "typed '$((Last $s).ui.cache_text)'"),
+    (Ok ($u.ui.cache_budget -eq 8053063680) "budget $($u.ui.cache_budget) bytes (7.5 GB = 8053063680)"),
+    (Ok ($f -gt 0.42 -and $f -lt 0.58) ("knob at {0:N3} of the track (5 GB tick 0.4, 10 GB tick 0.6)" -f $f)),
+    (Ok ($v.ui.cache_budget -eq 8053063680 -and -not $v.ui.cache_editing) "Escape kept 7.5 GB ($($v.ui.cache_budget))"), (Ok ([bool]$back) 'the keyboard works on the page: Escape goes back to the Library'))
+}
