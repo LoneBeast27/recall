@@ -3,7 +3,7 @@
 //! much to delegate (higher ssd cache means faster load responses, but takes ssd space)".
 use std::{cell::Cell, path::PathBuf, rc::Rc};
 
-use gpui::{AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, canvas, div, prelude::*, px, relative};
+use gpui::{AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, Window, canvas, div, prelude::*, px, relative};
 
 use crate::{
     root::{Root, ToastKind},
@@ -29,6 +29,10 @@ pub struct CacheView {
     pub smart: String,
     pub span: Rc<Cell<Option<(f32, f32)>>>,
     pub dragging: bool,
+    /// The big size value is a text field being typed in.
+    pub editing: bool,
+    /// Set by each draw of the size card; `settle_focus` applies the typed size once it's gone.
+    pub painted: Cell<bool>,
 }
 
 impl CacheView {
@@ -44,6 +48,8 @@ impl CacheView {
             smart: String::new(),
             span: Rc::new(Cell::new(None)),
             dragging: false,
+            editing: false,
+            painted: Cell::new(false),
         }
     }
 
@@ -57,13 +63,11 @@ impl CacheView {
         self.smart = crate::cache::smart_status();
     }
 
-    fn stop_index(&self) -> usize {
-        let gb = self.budget_bytes as f64 / GB;
-        CACHE_STOPS_GB
-            .iter()
-            .enumerate()
-            .min_by(|a, b| (a.1 - gb).abs().total_cmp(&(b.1 - gb).abs()))
-            .map_or(2, |(i, _)| i)
+    /// The largest size that can be typed: what's free on the drive plus what the cache
+    /// already holds, or [`MAX_TYPED_GB`] when the drive can't be read.
+    fn max_typed_bytes(&self) -> u64 {
+        let cap = (MAX_TYPED_GB * GB) as u64;
+        self.ssd_free.map_or(cap, |free| free.saturating_add(self.used_bytes).min(cap))
     }
 
     /// Snaps a window x on the slider to a stop and shows it; returns true when it moved.
@@ -91,11 +95,90 @@ impl CacheView {
     }
 }
 
+/// Smallest typed size, the slider's first stop.
+pub const MIN_TYPED_GB: f64 = 1.0;
+/// Upper bound when free space is unknown.
+const MAX_TYPED_GB: f64 = 4096.0;
+
+/// Reads a typed size in GB ("7", "7.5", "7,5", " 12 "). None for empty, zero or junk.
+pub fn parse_gb(text: &str) -> Option<f64> {
+    let gb = text.trim().replace(',', ".").parse::<f64>().ok()?;
+    (gb.is_finite() && gb > 0.0).then_some(gb)
+}
+
+/// A typed size as budget bytes: rounded to 0.1 GB, then held between 1 GB and `max_bytes`.
+/// The flag says the value was moved to a bound.
+pub fn typed_budget(gb: f64, max_bytes: u64) -> (u64, bool) {
+    let max_gb = (max_bytes as f64 / GB * 10.0).floor() / 10.0;
+    let max_gb = max_gb.max(MIN_TYPED_GB);
+    let rounded = (gb * 10.0).round() / 10.0;
+    let held = rounded.clamp(MIN_TYPED_GB, max_gb);
+    ((held * GB).round() as u64, held != rounded)
+}
+
+/// Knob position (0..=1) for any size: stops sit evenly on the track and sizes between two
+/// stops sit proportionally between them, so a typed 7 GB lands between 5 and 10.
+pub fn slider_fraction(bytes: u64) -> f32 {
+    let gb = bytes as f64 / GB;
+    let last = CACHE_STOPS_GB.len() - 1;
+    if gb <= CACHE_STOPS_GB[0] {
+        return 0.0;
+    }
+    for i in 0..last {
+        let (lo, hi) = (CACHE_STOPS_GB[i], CACHE_STOPS_GB[i + 1]);
+        if gb <= hi {
+            return ((i as f64 + (gb - lo) / (hi - lo)) / last as f64) as f32;
+        }
+    }
+    1.0
+}
+
 impl Root {
-    pub fn render_storage_section(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// Turns the big size value into a text field holding the current size.
+    pub fn begin_cache_edit(&mut self, window: &mut Window) {
+        self.cache.editing = true;
+        self.cache.painted.set(true);
+        self.cache_field.set(gb_label(self.cache.budget_bytes).trim_end_matches(" GB").to_owned());
+        window.focus(&self.cache_field.focus);
+    }
+
+    /// Enter or a click elsewhere applies the typed size; Escape keeps the old one.
+    pub fn end_cache_edit(&mut self, apply: bool, window: &mut Window) {
+        if !self.cache.editing {
+            return;
+        }
+        self.cache.editing = false;
+        if self.cache_field.is_focused(window) {
+            window.focus(&self.focus);
+        }
+        if !apply {
+            return;
+        }
+        let Some(gb) = parse_gb(&self.cache_field.value) else {
+            if !self.cache_field.value.trim().is_empty() {
+                self.show_toast(ToastKind::Bad, "Cache size not changed", Some("Type a size in GB, like 7 or 7.5".to_owned()));
+            }
+            return;
+        };
+        let max = self.cache.max_typed_bytes();
+        let (bytes, held) = typed_budget(gb, max);
+        if held {
+            let detail = if bytes as f64 <= MIN_TYPED_GB * GB + 1.0 {
+                format!("The smallest cache is {}", gb_label(bytes))
+            } else {
+                format!("{} is the most this drive has room for", gb_label(bytes))
+            };
+            self.show_toast(ToastKind::Good, format!("Cache size set to {}", gb_label(bytes)), Some(detail));
+        }
+        self.cache.budget_bytes = bytes;
+        self.cache.commit();
+    }
+
+    pub fn render_storage_section(&mut self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        self.cache.painted.set(true);
         let view = &self.cache;
         let stops = CACHE_STOPS_GB.len() - 1;
-        let fraction = view.stop_index() as f32 / stops as f32;
+        let fraction = slider_fraction(view.budget_bytes);
         let budget = view.budget_bytes;
         let used = view.used_bytes.min(budget.max(1));
         let span = view.span.clone();
@@ -177,6 +260,49 @@ impl Root {
             .collect::<Vec<_>>()
             .join(" · ");
 
+        // The big size: click it to type a size instead of dragging.
+        let size_value = if view.editing {
+            div()
+                .flex_none()
+                .w(px(96.))
+                .h(px(30.))
+                .px(px(8.))
+                .flex()
+                .items_center()
+                .gap(px(4.))
+                .rounded(px(6.))
+                .bg(c(theme::BASE))
+                .border_1()
+                .border_color(c(theme::BORDER_STRONG))
+                .child(self.cache_field.render("cache-size-input", window).flex_1().justify_end().on_click(cx.listener(|this, _, window, cx| {
+                    this.cache_field.deselect();
+                    window.focus(&this.cache_field.focus);
+                    cx.notify();
+                })))
+                .child(div().text_size(px(13.)).text_color(c(theme::TERTIARY)).child("GB"))
+                .into_any_element()
+        } else {
+            div()
+                .id("cache-size-value")
+                .flex_none()
+                .px(px(6.))
+                .mr(px(-6.))
+                .rounded(px(6.))
+                .border_1()
+                .border_color(c(theme::RAISED))
+                .cursor_text()
+                .hover(|d| d.border_color(c(theme::BORDER)))
+                .font_family(theme::display())
+                .text_size(px(18.))
+                .font_weight(FontWeight::BOLD)
+                .child(gb_label(budget))
+                .on_click(cx.listener(|this, _, window, cx| {
+                    this.begin_cache_edit(window);
+                    cx.notify();
+                }))
+                .into_any_element()
+        };
+
         let size_card = div()
             .p(px(16.))
             .rounded(px(10.))
@@ -203,11 +329,7 @@ impl Root {
                                 "Larger loads previews faster but uses more SSD space.",
                             )),
                     )
-                    .child(div().flex_none().font_family(theme::display()).text_size(px(18.)).font_weight(FontWeight::BOLD).child(if budget as f64 >= GB {
-                        format!("{:.0} GB", budget as f64 / GB)
-                    } else {
-                        format!("{:.1} GB", budget as f64 / GB)
-                    })),
+                    .child(size_value),
             )
             .child(div().flex().flex_col().gap(px(6.)).child(slider).child(labels))
             .child(
@@ -271,4 +393,58 @@ impl Root {
 fn gb_label(bytes: u64) -> String {
     let gb = bytes as f64 / GB;
     if gb >= 1.0 && (gb - gb.round()).abs() < 0.05 { format!("{:.0} GB", gb.round()) } else { format!("{gb:.1} GB") }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const G: u64 = 1_073_741_824;
+
+    #[test]
+    fn parses_typed_sizes() {
+        assert_eq!(parse_gb("7"), Some(7.0));
+        assert_eq!(parse_gb(" 7.5 "), Some(7.5));
+        assert_eq!(parse_gb("7,5"), Some(7.5));
+        assert_eq!(parse_gb(".5"), Some(0.5));
+        assert_eq!(parse_gb(""), None);
+        assert_eq!(parse_gb("0"), None);
+        assert_eq!(parse_gb("."), None);
+        assert_eq!(parse_gb("abc"), None);
+    }
+
+    #[test]
+    fn typed_sizes_round_and_hold_to_bounds() {
+        let roomy = 500 * G;
+        assert_eq!(typed_budget(7.0, roomy), (7 * G, false));
+        assert_eq!(typed_budget(7.54, roomy), ((7.5 * GB).round() as u64, false));
+        assert_eq!(typed_budget(0.5, roomy), (G, true));
+        // 139.19 GB free: anything above holds at 139.1 GB.
+        let max = (139.19 * GB) as u64;
+        let (bytes, held) = typed_budget(200.0, max);
+        assert!(held);
+        assert_eq!(bytes, (139.1 * GB).round() as u64);
+        assert!(bytes <= max);
+        // A nearly full drive still allows the 1 GB floor.
+        assert_eq!(typed_budget(5.0, G / 2), (G, true));
+    }
+
+    #[test]
+    fn knob_sits_between_stops() {
+        assert_eq!(slider_fraction(G / 2), 0.0);
+        assert_eq!(slider_fraction(G), 0.0);
+        assert!((slider_fraction(2 * G) - 0.2).abs() < 1e-6);
+        assert!((slider_fraction(10 * G) - 0.6).abs() < 1e-6);
+        // 7.5 GB is halfway between the 5 and 10 GB ticks.
+        assert!((slider_fraction((7.5 * GB) as u64) - 0.5).abs() < 1e-6);
+        assert_eq!(slider_fraction(50 * G), 1.0);
+        assert_eq!(slider_fraction(120 * G), 1.0);
+    }
+
+    #[test]
+    fn labels_typed_sizes() {
+        assert_eq!(gb_label(2 * G), "2 GB");
+        assert_eq!(gb_label((7.5 * GB).round() as u64), "7.5 GB");
+        assert_eq!(gb_label((139.1 * GB).round() as u64), "139.1 GB");
+    }
 }

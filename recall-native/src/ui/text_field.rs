@@ -22,6 +22,7 @@ pub struct TextField {
     select_all: bool,
     max_len: usize,
     digits_only: bool,
+    decimal: bool,
 }
 
 impl TextField {
@@ -33,11 +34,18 @@ impl TextField {
             select_all: false,
             max_len,
             digits_only: false,
+            decimal: false,
         }
     }
 
     pub fn digits_only(mut self) -> Self {
         self.digits_only = true;
+        self
+    }
+
+    /// Digits and one decimal point; a comma counts as the point.
+    pub fn decimal(mut self) -> Self {
+        self.decimal = true;
         self
     }
 
@@ -56,7 +64,15 @@ impl TextField {
     }
 
     pub fn insert(&mut self, text: &str) -> FieldEvent {
-        let clean: String = text.chars().filter(|ch| !ch.is_control() && (!self.digits_only || ch.is_ascii_digit())).collect();
+        let mut clean: String = text.chars().filter(|ch| !ch.is_control() && (!self.digits_only || ch.is_ascii_digit())).collect();
+        if self.decimal {
+            let mut point = !self.select_all && self.value.contains('.');
+            clean = clean
+                .chars()
+                .map(|ch| if ch == ',' { '.' } else { ch })
+                .filter(|ch| ch.is_ascii_digit() || (*ch == '.' && !std::mem::replace(&mut point, true)))
+                .collect();
+        }
         if clean.is_empty() {
             return FieldEvent::None;
         }

@@ -12,6 +12,8 @@ impl Root {
             Some(Field::Rename)
         } else if self.fps_field.is_focused(window) {
             Some(Field::Fps)
+        } else if self.cache_field.is_focused(window) {
+            Some(Field::CacheSize)
         } else {
             None
         }
@@ -131,6 +133,11 @@ impl Root {
                     window.focus(&self.focus);
                 }
             }
+            Field::CacheSize => match self.cache_field.key_down(event, clipboard) {
+                FieldEvent::Submit => self.end_cache_edit(true, window),
+                FieldEvent::Cancel => self.end_cache_edit(false, window),
+                _ => {}
+            },
         }
     }
 }
