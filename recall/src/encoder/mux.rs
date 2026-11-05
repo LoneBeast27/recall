@@ -120,10 +120,17 @@ impl AacCoder {
     }
 }
 
-/// Media Foundation's encoder takes 16-bit PCM at 44.1 or 48 kHz only. `RECALL_AAC=native`
-/// forces FFmpeg's encoder (comparisons).
+/// Media Foundation's encoder takes 16-bit PCM at 44.1 or 48 kHz only. A silent track (a muted
+/// or unused mic writes zeros) goes to FFmpeg's encoder too: Media Foundation is constant-rate,
+/// so silence costs the full 192 kb/s (about 3 MB per 2-minute track) against ~2 kb/s with
+/// FFmpeg's. `RECALL_AAC=native` forces FFmpeg's encoder (comparisons).
 fn mf_fits(pcm: &AudioPcm) -> bool {
-    matches!(pcm.rate, 44_100 | 48_000) && std::env::var("RECALL_AAC").map_or(true, |v| v != "native")
+    matches!(pcm.rate, 44_100 | 48_000) && !silent(&pcm.samples) && std::env::var("RECALL_AAC").map_or(true, |v| v != "native")
+}
+
+/// Every sample at or below 1e-6 (-120 dBFS): nothing an AAC frame would keep.
+pub(crate) fn silent(samples: &[f32]) -> bool {
+    samples.iter().all(|s| s.abs() <= 1e-6)
 }
 
 /// Encode one snapshotted track to AAC: Media Foundation where it fits and opens, else
