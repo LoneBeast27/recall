@@ -442,7 +442,7 @@ fn bench_aac_encoders_cpu() {
         let t = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 10_000.0;
         t(k) + t(u)
     };
-    let track = AudioPcm { name: "game", rate: 48_000, channels: 2, samples };
+    let track = AudioPcm { name: "game", rate: 48_000, channels: 2, samples, source: "" };
     for round in 0..3 {
         for coder in [AacCoder::Native, AacCoder::MediaFoundation] {
             let (cpu, started) = (process_ms(), Instant::now());
