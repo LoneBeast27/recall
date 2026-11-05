@@ -9,9 +9,15 @@
 //! Without trace rights (not an elevated administrator, not in Performance
 //! Log Users) or when the session cannot start, today's rule stands: an
 //! unknown fullscreen window is a game, the deny lists still apply.
+//!
+//! A fullscreen exe that the GPU vendor's driver lists as a game
+//! (`gpu_games`) skips the check: it commits on the 300 ms rule, which also
+//! records composed borderless games the check would reject. The vendor is
+//! asked only after the deny lists passed the window (`classify_event`).
 
 use std::time::Instant;
 
+use crate::gpu_games::KnownGames;
 use crate::log;
 use crate::record_app::Controller;
 use crate::record_target::{classify_event, skips_render_check, Admit, Target};
@@ -28,6 +34,8 @@ pub(crate) struct RenderCheck {
     rejected: Rejected,
     /// A pid whose probe would not start: today's rule for it.
     failed_for: Option<u32>,
+    /// The GPU vendor's game list (lazy worker, cached per exe path).
+    games: KnownGames,
 }
 
 impl RenderCheck {
@@ -38,7 +46,7 @@ impl RenderCheck {
         if !available {
             log!("record: render check off (no trace rights): any fullscreen app that is not denied counts as a game");
         }
-        RenderCheck { available, probe: None, wanted: None, rejected: Rejected::default(), failed_for: None }
+        RenderCheck { available, probe: None, wanted: None, rejected: Rejected::default(), failed_for: None, games: KnownGames::new() }
     }
 
     /// Drop the probe (stops its session).
@@ -79,6 +87,12 @@ impl RenderCheck {
         if !self.needed_for(t, session_pid) {
             return Admit::Commit;
         }
+        // The vendor's answer can arrive while the candidate waits.
+        if self.games.for_pid(t.pid, &t.exe) == Some(true) {
+            log!("record: render check skipped: {} lists {} as a game", self.games.vendor(), t.exe);
+            self.probe = None;
+            return Admit::Commit;
+        }
         let Some(probe) = self.probe.as_ref().filter(|p| p.pid == t.pid) else { return Admit::Commit };
         let stats = probe.stats();
         let watched = now.saturating_duration_since(probe.since).as_millis();
@@ -109,7 +123,13 @@ impl Controller {
     /// not a game is no candidate until its recheck time.
     pub(crate) fn classify(&mut self, ev: &WatchEvent, now: Instant) -> Option<Target> {
         let candidate = classify_event(ev, &self.cfg)?;
-        let needs = !skips_render_check(ev, &self.cfg);
+        // A Steam-library exe, an override, a `detect.fullscreen_games` entry or
+        // a known game keeps the 300 ms rule with no check.
+        let plain = !skips_render_check(ev, &self.cfg);
+        // Asked only when the check would run: without trace rights every
+        // fullscreen window commits anyway.
+        let vendor = (plain && self.render.available).then(|| self.render.games.for_pid(ev.pid, &ev.exe_name)).flatten();
+        let needs = needs_check(plain, vendor);
         if needs && self.render.rejected.holds(ev.pid, ev.hwnd, now) {
             return None;
         }
@@ -133,5 +153,26 @@ impl Controller {
         // A rejected or committed candidate is no longer pending: no ETW session.
         self.render_tick();
         changed
+    }
+}
+
+/// A fullscreen-rule candidate (`plain`: not skipped by
+/// `record_target::skips_render_check`) needs the render check unless the GPU
+/// vendor lists it as a game. `vendor` = `None` while the lookup is on its way.
+fn needs_check(plain: bool, vendor: Option<bool>) -> bool {
+    plain && vendor != Some(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::needs_check;
+
+    #[test]
+    fn a_vendor_listed_game_skips_the_render_check() {
+        assert!(!needs_check(true, Some(true)), "NVIDIA lists it: 300 ms rule");
+        assert!(needs_check(true, Some(false)), "NVIDIA does not: the check decides");
+        assert!(needs_check(true, None), "lookup pending (admit asks again) or no vendor");
+        assert!(!needs_check(false, None), "Steam library / override / fullscreen_games");
+        assert!(!needs_check(false, Some(false)));
     }
 }
