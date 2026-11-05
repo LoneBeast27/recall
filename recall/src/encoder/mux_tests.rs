@@ -93,6 +93,7 @@ fn pcm(name: &'static str, secs: f64, tone: bool) -> AudioPcm {
         rate,
         channels: 2,
         samples,
+        boosted: false,
     }
 }
 

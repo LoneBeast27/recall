@@ -47,6 +47,18 @@ pub(crate) fn limit_mix(channels: &mut [Vec<f32>], rate: u32) {
     }
 }
 
+/// [`limit_mix`] for interleaved samples: split into planes, limit, interleave again.
+pub(crate) fn limit_interleaved(samples: &[f32], channels: u16, rate: u32) -> Vec<f32> {
+    let ch = channels.max(1) as usize;
+    let mut planes: Vec<Vec<f32>> = (0..ch).map(|c| samples.iter().skip(c).step_by(ch).copied().collect()).collect();
+    limit_mix(&mut planes, rate);
+    let mut out = vec![0.0f32; samples.len()];
+    for (c, plane) in planes.iter().enumerate() {
+        out.iter_mut().skip(c).step_by(ch).zip(plane).for_each(|(o, s)| *o = *s);
+    }
+    out
+}
+
 /// Minimum of `values[n - radius ..= n + radius]` for every `n` (monotonic deque, O(n)).
 fn window_min(values: &[f32], radius: usize) -> Vec<f32> {
     let mut out = Vec::with_capacity(values.len());
