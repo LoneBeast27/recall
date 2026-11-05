@@ -25,7 +25,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::log;
-use crate::record_config::{HotkeysCfg, OverlayCfg, RecordingCfg, StorageCfg};
+use crate::record_config::{DetectCfg, HotkeysCfg, OverlayCfg, RecordingCfg, StorageCfg};
 use crate::types::{ClampMode, RuleKind};
 pub use autostart::{sync_autostart, LEGACY_RUN_ARG, RECORD_RUN_ARG};
 
@@ -67,6 +67,9 @@ pub struct Config {
     /// `[midi]` -- the MIDI input the app's Audio page listens to ("" = off).
     #[serde(default)]
     pub midi: MidiCfg,
+    /// `[detect]` -- record-path game detection (`record_target`).
+    #[serde(default)]
+    pub detect: DetectCfg,
     /// Per-exe rule overrides. Exe stems are matched case-insensitively.
     #[serde(default, rename = "overrides")]
     pub overrides: Vec<Override>,
@@ -294,6 +297,7 @@ impl Default for Config {
             storage: StorageCfg::default(),
             hotkeys: HotkeysCfg::default(),
             midi: MidiCfg::default(),
+            detect: DetectCfg::default(),
             // The hdr-testcard entry is our live test target; ship it by default.
             overrides: vec![Override {
                 exe: "hdr-testcard".into(),

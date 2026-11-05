@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use crate::log;
 use crate::record_app::Controller;
-use crate::record_target::{classify_event, Admit, Target};
+use crate::record_target::{classify_event, is_fullscreen_game, Admit, Target};
 use crate::render_probe::{self, RenderProbe, StartError};
 use crate::render_verdict::{gate, Gate, Rejected, Verdict, Watch};
 use crate::rules;
@@ -109,7 +109,11 @@ impl Controller {
     /// not a game is no candidate until its recheck time.
     pub(crate) fn classify(&mut self, ev: &WatchEvent, now: Instant) -> Option<Target> {
         let candidate = classify_event(ev, &self.cfg)?;
-        let needs = !ev.steam_game && rules::override_kind(&self.cfg, &ev.exe_stem).is_none();
+        // A Steam-library exe, an override or a `detect.fullscreen_games` entry
+        // keeps the 300 ms rule with no check.
+        let needs = !ev.steam_game
+            && rules::override_kind(&self.cfg, &ev.exe_stem).is_none()
+            && !is_fullscreen_game(&self.cfg, &ev.exe_stem);
         if needs && self.render.rejected.holds(ev.pid, ev.hwnd, now) {
             return None;
         }

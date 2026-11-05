@@ -377,3 +377,33 @@ fn the_process_exiting_drops_a_held_candidate() {
     assert!(!tr.on_process_exit(5));
     assert_eq!(tr.next_deadline(), None);
 }
+
+#[test]
+fn discord_fullscreen_is_a_game_by_default_windowed_is_not() {
+    let cfg = Config::default();
+    assert!(rules::is_denied("discord"), "the HDR deny list still names it");
+    for stem in ["Discord", "discord", "Discord.exe"] {
+        assert!(is_target(stem, true, &cfg), "{stem} fullscreen is recorded (detect.fullscreen_games)");
+        assert!(!is_target(stem, false, &cfg), "{stem} windowed is not a target");
+        assert!(is_fullscreen_game(&cfg, stem), "{stem} skips the render check");
+    }
+    assert!(classify_event(&ev("discord", "Discord", 5, 0x5, true), &cfg).is_some());
+    assert!(classify_event(&ev("discord", "Discord", 5, 0x5, false), &cfg).is_none());
+    assert!(!is_fullscreen_game(&cfg, "chrome"));
+    assert!(!is_fullscreen_game(&cfg, "  "));
+}
+
+#[test]
+fn fullscreen_games_yield_to_none_overrides_and_recall_itself() {
+    let mut cfg = Config::default();
+    cfg.detect.fullscreen_games = vec!["recall-native".into(), "Recall.exe".into(), "chrome".into(), "discord".into()];
+    assert!(!is_target("recall-native", true, &cfg), "Recall's own windows are never recorded");
+    assert!(!is_target("recall", true, &cfg));
+    assert!(is_target("chrome", true, &cfg), "a listed browser beats the deny list (user's call)");
+    assert!(!is_target("chrome", false, &cfg));
+    cfg.overrides.push(Override { exe: "discord".into(), kind: RuleKind::None, clamp: None });
+    assert!(!is_target("discord", true, &cfg), "a none override still wins");
+    cfg.detect.fullscreen_games.clear();
+    cfg.overrides.clear();
+    assert!(!is_target("discord", true, &cfg), "an empty list restores the deny list");
+}
