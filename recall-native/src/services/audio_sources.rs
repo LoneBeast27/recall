@@ -140,6 +140,26 @@ pub fn clip_name(name: &str) -> String {
     one_line.trim().chars().take(NAME_MAX).collect::<String>().trim().to_owned()
 }
 
+/// `list` with the source `id` moved to slot `to` (clamped to the end); the same list when
+/// `id` is not in it. The list order is the clips' track order.
+pub fn moved(list: &[Source], id: &str, to: usize) -> Vec<Source> {
+    let mut out = list.to_vec();
+    if let Some(from) = out.iter().position(|s| s.id == id) {
+        let source = out.remove(from);
+        out.insert(to.min(out.len()), source);
+    }
+    out
+}
+
+/// The slot a dragged strip lands in when the pointer is at window x `x`: `count` strips,
+/// `pitch` apart, the first one's left edge at `left`.
+pub fn drop_slot(x: f32, left: f32, pitch: f32, count: usize) -> usize {
+    if count == 0 || pitch <= 0.0 {
+        return 0;
+    }
+    ((x - left) / pitch).floor().clamp(0.0, (count - 1) as f32) as usize
+}
+
 /// Gain for a fader position (0 = bottom, 1 = top), in 0.5 dB steps.
 pub fn gain_at(fraction: f32) -> f32 {
     let db = GAIN_MIN_DB + fraction.clamp(0.0, 1.0) * (GAIN_MAX_DB - GAIN_MIN_DB);

@@ -45,3 +45,31 @@ fn the_fader_spans_minus_60_to_plus_12_db_in_half_steps() {
     assert_eq!((gain_label(0.02), gain_label(3.0), gain_label(-3.5), gain_label(-60.0)), ("0 dB".into(), "+3 dB".into(), "-3.5 dB".into(), "-60 dB".into()));
     assert_eq!(clip_name(&"x".repeat(80)).chars().count(), NAME_MAX);
 }
+
+#[test]
+fn a_dragged_source_moves_to_its_slot_and_keeps_the_rest_in_order() {
+    let three = from_config(Some(&json!([
+        {"id": "a", "kind": "game", "name": "A"},
+        {"id": "b", "kind": "input", "name": "B"},
+        {"id": "c", "kind": "output", "name": "C"}
+    ])));
+    let ids = |l: &[Source]| l.iter().map(|s| s.id.clone()).collect::<Vec<_>>();
+    assert_eq!(ids(&moved(&three, "b", 0)), ["b", "a", "c"]);
+    assert_eq!(ids(&moved(&three, "a", 2)), ["b", "c", "a"]);
+    assert_eq!(ids(&moved(&three, "a", 9)), ["b", "c", "a"], "past the end goes last");
+    assert_eq!(moved(&three, "c", 2), three, "same slot, same list");
+    assert_eq!(moved(&three, "gone", 0), three, "an unknown id changes nothing");
+    let saved = moved(&three, "c", 0);
+    assert_eq!(ids(&from_config(Some(&to_config(&saved)))), ["c", "a", "b"], "the saved order is the new track order");
+}
+
+#[test]
+fn the_drop_slot_follows_the_pointer_and_stays_in_range() {
+    let (left, pitch) = (100.0, 168.0);
+    assert_eq!(drop_slot(100.0 + 78.0, left, pitch, 3), 0, "the middle of the first strip");
+    assert_eq!(drop_slot(100.0 + 168.0 + 5.0, left, pitch, 3), 1);
+    assert_eq!(drop_slot(100.0 + 2.0 * 168.0 + 80.0, left, pitch, 3), 2);
+    assert_eq!(drop_slot(-500.0, left, pitch, 3), 0, "left of the row is the first slot");
+    assert_eq!(drop_slot(5000.0, left, pitch, 3), 2, "right of the row is the last slot");
+    assert_eq!(drop_slot(300.0, left, pitch, 0), 0);
+}
