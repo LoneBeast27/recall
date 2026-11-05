@@ -13,7 +13,7 @@ macro_rules! icons {
 
 icons!(
     "alert", "audio-lines", "copy", "back-5", "check", "chevron-down", "chevron-left", "chevron-right",
-    "dot", "drive", "external", "film", "folder", "forward-5", "fullscreen", "gamepad", "grid",
+    "dot", "drive", "external", "film", "folder", "forward-5", "fullscreen", "gamepad", "grid", "grip",
     "info", "keyboard", "mic", "mic-off", "minus", "more", "overlay", "pause", "pencil", "play", "plus",
     "power", "redo", "refresh", "repeat", "scissors", "search", "set-in", "set-out", "settings",
     "sliders", "square", "square-check", "star", "star-fill", "sun", "trash", "undo", "upload",

@@ -22,6 +22,8 @@ pub enum Icon {
     Fullscreen,
     Gamepad,
     Grid,
+    /// Six dots in two rows: a drag handle.
+    Grip,
     Info,
     Keyboard,
     Mic,
@@ -80,6 +82,7 @@ impl Icon {
             Icon::Fullscreen => "icons/fullscreen.svg",
             Icon::Gamepad => "icons/gamepad.svg",
             Icon::Grid => "icons/grid.svg",
+            Icon::Grip => "icons/grip.svg",
             Icon::Info => "icons/info.svg",
             Icon::Keyboard => "icons/keyboard.svg",
             Icon::Mic => "icons/mic.svg",

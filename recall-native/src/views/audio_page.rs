@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 
-use gpui::{AnyElement, Context, KeyDownEvent, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, DragMoveEvent, KeyDownEvent, Window, div, prelude::*, px};
 
 use crate::{
     root::{Root, ToastKind},
@@ -22,7 +22,10 @@ use crate::{
     },
     theme::{self, c},
     ui::{FieldEvent, TextField},
-    views::pages::card,
+    views::{
+        audio_strip::{STRIP_GAP, STRIP_W, StripDrag},
+        pages::card,
+    },
 };
 
 /// How long a removed source can be brought back.
@@ -61,6 +64,10 @@ pub struct AudioPage {
     pub removed: Option<(usize, Source, Instant)>,
     /// "+ Add source" was opened from the card header, not the tile.
     pub add_in_header: bool,
+    /// A strip being dragged by its handle: its id and the slot it would drop into.
+    pub reorder: Option<(String, usize)>,
+    /// Each strip's window left edge, written while painting (places a dragged strip).
+    pub lefts: HashMap<String, Rc<Cell<Option<f32>>>>,
 }
 
 impl AudioPage {
@@ -70,6 +77,7 @@ impl AudioPage {
         self.menu = None;
         self.renaming = None;
         self.fader = None;
+        self.reorder = None;
     }
 
     pub fn span(&mut self, id: &str) -> FaderSpan {
@@ -79,6 +87,10 @@ impl AudioPage {
     /// An app icon by exe, when the list has one.
     pub fn icon(&self, exe: &str) -> Option<std::sync::Arc<gpui::RenderImage>> {
         self.apps.as_ref()?.icons.get(&exe.trim().to_lowercase()).cloned()
+    }
+
+    pub fn left(&mut self, id: &str) -> Rc<Cell<Option<f32>>> {
+        self.lefts.entry(id.to_owned()).or_default().clone()
     }
 
     pub fn undo_open(&self) -> bool {
@@ -132,6 +144,31 @@ impl Root {
 
     pub(crate) fn set_source_gain(&mut self, id: &str, gain_db: f32) {
         self.edit_source(id, |s| s.gain_db = gain_db.clamp(sources::GAIN_MIN_DB, sources::GAIN_MAX_DB));
+    }
+
+    /// The dragged strip moved: work out the slot under the pointer and show the list there.
+    fn drag_strip(&mut self, id: &str, x: f32) -> bool {
+        let list = self.audio_sources();
+        let page = &mut self.settings_ui.audio;
+        let left = list.iter().filter_map(|s| page.lefts.get(&s.id).and_then(|l| l.get())).fold(f32::INFINITY, f32::min);
+        if !left.is_finite() {
+            return false;
+        }
+        let slot = sources::drop_slot(x, left, STRIP_W + STRIP_GAP, list.len());
+        let next = Some((id.to_owned(), slot));
+        let changed = page.reorder != next;
+        page.reorder = next;
+        changed
+    }
+
+    /// The dragged strip was let go over the Sources card: save the new order.
+    fn drop_strip(&mut self) {
+        let Some((id, to)) = self.settings_ui.audio.reorder.take() else { return };
+        let list = self.audio_sources();
+        let next = sources::moved(&list, &id, to);
+        if next != list {
+            self.save_sources(&next);
+        }
     }
 
     pub(crate) fn add_source(&mut self, kind: Kind, exe: &str, name: &str) {
@@ -260,14 +297,23 @@ impl Root {
             1 => "1 track in clips".to_owned(),
             n => format!("{n} tracks in clips"),
         };
-        let mut strips: Vec<AnyElement> = list.iter().map(|s| self.render_strip(s, levels.get(&s.id).copied(), window, cx)).collect();
+        // While a strip is dragged the row shows where it would land; a drag let go outside
+        // the card changes nothing.
+        if self.settings_ui.audio.reorder.is_some() && !cx.has_active_drag() {
+            self.settings_ui.audio.reorder = None;
+        }
+        let shown_order = match &self.settings_ui.audio.reorder {
+            Some((id, to)) => sources::moved(&list, id, *to),
+            None => list.clone(),
+        };
+        let mut strips: Vec<AnyElement> = shown_order.iter().map(|s| self.render_strip(s, levels.get(&s.id).copied(), window, cx)).collect();
         if !sources::addable(&list).is_empty() {
             strips.push(self.render_add_tile(&list, cx));
         }
         let note = if self.snap.config.is_none() {
             "Start the recorder to change sources."
         } else {
-            "Each source is one track in your clips, named as shown. Changes apply after the current save."
+            "Each source is one track in your clips, named as shown, left to right. Drag a strip by its dots to reorder. Changes apply after the current save."
         };
         card()
             .gap(px(14.))
@@ -281,8 +327,26 @@ impl Root {
                     .when(!sources::addable(&list).is_empty(), |d| d.child(self.render_add_button(&list, cx))),
             )
             // One row that scrolls sideways when the strips outgrow the page.
-            .child(div().id("audio-strips").flex().gap(px(12.)).pb(px(6.)).overflow_x_scroll().children(strips))
+            .child(
+                div()
+                    .id("audio-strips")
+                    .flex()
+                    .gap(px(STRIP_GAP))
+                    .pb(px(6.))
+                    .overflow_x_scroll()
+                    .on_drag_move(cx.listener(|this, e: &DragMoveEvent<StripDrag>, _, cx| {
+                        let id = e.drag(cx).id.clone();
+                        if this.drag_strip(&id, f32::from(e.event.position.x)) {
+                            cx.notify();
+                        }
+                    }))
+                    .children(strips),
+            )
             .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(note))
+            .on_drop(cx.listener(|this, _: &StripDrag, _, cx| {
+                this.drop_strip();
+                cx.notify();
+            }))
             .into_any_element()
     }
 }
