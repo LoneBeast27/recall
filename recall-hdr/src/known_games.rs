@@ -4,8 +4,8 @@
 //! still be fullscreen (or in a Steam library), and the deny lists and a
 //! `none` override still win (`record_target::is_target` runs first).
 //!
-//! The one place to extend: a vendor's game list (`fix/detect-nvidia`) adds to
-//! this answer, it does not replace it. Stems are matched case-insensitively,
+//! The one place to extend by hand. The GPU vendor's list (`gpu_games`) is asked
+//! after this one, only for exes it does not skip. Stems are matched case-insensitively,
 //! with or without `.exe`. Only stems known from the game's own files or from
 //! NVIDIA's scan of this PC (`.planning/DETECT_RENDER.md`) are listed.
 

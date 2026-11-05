@@ -75,6 +75,7 @@ mod record_target;
 mod record_tray;
 mod render_probe;
 mod render_verdict;
+mod gpu_games;
 mod rules;
 #[path = "../../recall/src/single_instance.rs"]
 mod single_instance;
