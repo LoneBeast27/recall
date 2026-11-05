@@ -404,6 +404,8 @@ pub(crate) fn load_from(path: &std::path::Path) -> Config {
             crate::record_hotkeys::migrate_loaded(&mut cfg.recording, &text);
             // Old audio keys -> `audio_sources`.
             crate::record_audio_sources::migrate_loaded(&mut cfg.recording, &text);
+            // Pre-v2 corners were never honoured -> `dynamic`.
+            cfg.overlay.migrate_loaded(&text);
             cfg
         }
         Err(e) => {

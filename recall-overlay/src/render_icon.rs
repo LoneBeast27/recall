@@ -56,7 +56,7 @@ impl Renderer {
         let k = k * pop;
         let place = Matrix3x2::translation(-icon.cx, -icon.cy) * Matrix3x2::scale(k, k) * Matrix3x2::translation(x, y);
         unsafe {
-            self.target.SetTransform(&place);
+            self.set_transform(place);
             match icon.badge {
                 Some(phase) => self.badge(icon, &badge.unwrap_or(Badge::rest(phase)), alpha)?,
                 None => self.shape(&icon.shape, alpha)?,

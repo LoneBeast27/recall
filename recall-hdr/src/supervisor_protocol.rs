@@ -110,6 +110,13 @@ pub(super) fn read_protocol(shared: &Arc<Shared>, stdout: std::process::ChildStd
                     crate::cues::saved();
                 }
             }
+            Some("hud_scan") => log!(
+                "supervisor: engine hud scan -- ok={} moving={}/{} {}",
+                val.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                val.get("moving").and_then(|v| v.as_u64()).unwrap_or(0),
+                val.get("bursts").and_then(|v| v.as_u64()).unwrap_or(0),
+                field(&val, "reason")
+            ),
             Some("recording_recovered") => log!("supervisor: engine recovered a crashed long recording -> {}", field(&val, "path")),
             Some(kind @ ("screenshot_failed" | "recording_failed")) => {
                 log!("supervisor: engine {kind} -- {}", field(&val, "reason"));

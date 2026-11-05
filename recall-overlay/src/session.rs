@@ -17,6 +17,8 @@ pub struct Session {
     pub target_pid: Option<u32>,
     /// The game window, when the controller includes it (`target.hwnd`).
     pub target_hwnd: Option<isize>,
+    /// The target's executable ("VALORANT-Win64-Shipping.exe"); "" for the desktop.
+    pub target_exe: String,
     /// The target is the desktop (it has no executable).
     pub desktop: bool,
     /// Notices are on (`overlay.enabled`; a status without it keeps the
@@ -51,6 +53,7 @@ impl Session {
                 .and_then(Value::as_i64)
                 .filter(|&hwnd| hwnd != 0)
                 .map(|hwnd| hwnd as isize),
+            target_exe: text(field("exe")),
             desktop: target.is_some() && field("exe").is_none_or(Value::is_null),
             overlay_stats: event.get("overlay_stats").and_then(Value::as_bool).unwrap_or(false),
             fps_source: text(event.get("fps_source")),
@@ -78,6 +81,20 @@ impl Session {
         }
         game_key(&self.target_name)
     }
+
+    /// The Dynamic corner's per-game key: the exe stem (a window title can
+    /// change), else the name; "" for the desktop / no target.
+    pub fn hud_key(&self) -> String {
+        if self.desktop {
+            return String::new();
+        }
+        let stem = self.target_exe.rsplit(['\\', '/']).next().unwrap_or("");
+        let stem = stem.strip_suffix(".exe").or_else(|| stem.strip_suffix(".EXE")).unwrap_or(stem);
+        match game_key(stem) {
+            key if !key.is_empty() => key,
+            _ => game_key(&self.target_name),
+        }
+    }
 }
 
 fn text(value: Option<&Value>) -> String {
@@ -97,6 +114,17 @@ pub fn game_key(name: &str) -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn hud_keys_follow_the_exe_and_never_the_desktop() {
+        let mut session = Session::default();
+        session.apply_status(&json!({"type":"status","state":"recording","target":{"name":"Rocket League (64-bit, DX11, Cooked)","exe":"RocketLeague.exe","pid":4}}));
+        assert_eq!(session.hud_key(), "rocketleague");
+        session.apply_status(&json!({"type":"status","state":"recording","target":{"name":"VALORANT","exe":"C:\\Riot\\VALORANT-Win64-Shipping.exe","pid":5}}));
+        assert_eq!(session.hud_key(), "valorantwin64shipping");
+        session.apply_status(&json!({"type":"status","state":"recording","target":{"name":"Desktop","exe":null,"pid":null}}));
+        assert_eq!(session.hud_key(), "");
+    }
 
     #[test]
     fn game_keys_match_the_hud_scan_table() {

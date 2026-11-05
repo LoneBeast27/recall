@@ -80,8 +80,9 @@ impl Root {
                 .child(div().text_size(px(12.)).text_color(c(color)).child(text))
                 .into_any_element()
         });
-        let mut corners = ui::segment_track().w(px(360.));
-        for (value, label) in [("top-left", "Top left"), ("top-right", "Top right"), ("bottom-left", "Bottom left"), ("bottom-right", "Bottom right")] {
+        let mut corners = ui::segment_track().w(px(440.));
+        let options = [("dynamic", "Dynamic"), ("top-left", "Top left"), ("top-right", "Top right"), ("bottom-left", "Bottom left"), ("bottom-right", "Bottom right")];
+        for (value, label) in options {
             corners = corners.child(ui::segment(SharedString::from(format!("corner-{value}")), label, corner == value).on_click(cx.listener(move |this, _, _, cx| {
                 this.set_config("overlay", "corner", json!(value));
                 cx.notify();
@@ -110,7 +111,12 @@ impl Root {
                 .into_any_element(),
         ];
         items.extend(fps_line);
-        let corner_row = setting_row("Corner", "").child(corners).into_any_element();
+        let corner_detail = if corner == "dynamic" {
+            "Finds each game's HUD from a few frames and takes a free corner or edge. On a side edge the island turns vertical."
+        } else {
+            ""
+        };
+        let corner_row = setting_row("Corner", corner_detail).child(corners).into_any_element();
         items.push(corner_row);
         items.extend(self.render_midi_device(cx));
         items.extend([
