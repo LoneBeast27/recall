@@ -442,3 +442,28 @@ fn any_whole_frame_rate_up_to_240_is_accepted() {
         assert_eq!(next.config.recording.fps, fps);
     }
 }
+
+/// Review probe (run by hand): `RECALL_PROBE_CONFIG=<a COPY of config.toml> cargo test -p recall-hdr
+/// probe_overlay_toggle_on_a_real_config_copy -- --ignored --nocapture`. The overlay shortcut's
+/// patch changes only `overlay.enabled`, both ways, and a save keeps every device key.
+#[test]
+#[ignore]
+fn probe_overlay_toggle_on_a_real_config_copy() {
+    let path = std::path::PathBuf::from(std::env::var("RECALL_PROBE_CONFIG").expect("set RECALL_PROBE_CONFIG"));
+    let before = std::fs::read(&path).unwrap();
+    let cfg = crate::config::load_from(&path);
+    assert_eq!(std::fs::read(&path).unwrap(), before, "loading leaves the file as it was");
+    let was = cfg.overlay.enabled;
+    let off = apply_patch(&cfg, &json!({"overlay": {"enabled": !was}})).unwrap();
+    assert_eq!(off.changed, vec!["overlay.enabled".to_string()], "only the overlay switch moves");
+    let back = apply_patch(&off.config, &json!({"overlay": {"enabled": was}})).unwrap();
+    assert_eq!(back.changed, vec!["overlay.enabled".to_string()]);
+    assert_eq!(serde_json::to_value(&back.config).unwrap(), serde_json::to_value(&cfg).unwrap(), "off then on is the config it was");
+    println!("overlay_hotkey {:?} stats_hotkey {:?} enabled {was}", cfg.recording.overlay_hotkey, cfg.recording.stats_hotkey);
+    let saved = path.with_extension("probe-overlay.toml");
+    off.config.save_to(&saved).unwrap();
+    let text = std::fs::read_to_string(&saved).unwrap();
+    let devices = |t: &str| t.lines().filter(|l| l.contains("device")).map(str::trim).map(str::to_owned).collect::<Vec<_>>();
+    assert_eq!(devices(&text), devices(&String::from_utf8_lossy(&before)), "a save writes the same device keys");
+    let _ = std::fs::remove_file(&saved);
+}
