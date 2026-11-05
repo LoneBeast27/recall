@@ -67,6 +67,11 @@ impl Root {
 
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.lib.rows.get(ix).cloned() else { return div().into_any_element() };
+        // Thumbnails are cached as wide as the widest tile any monitor can show (maximized, at
+        // its own scale), so the size is the same whichever monitor or window size is in use.
+        let chrome = f32::from(window.viewport_size().width) - self.lib.content_width.get();
+        let here = (self.tile_size().0 * window.scale_factor()).ceil() as u32;
+        crate::services::storage::set_thumb_width(widest_tile_cached(chrome).max(here));
         match row {
             Row::Header { group, first } => {
                 let Some(g) = self.lib.groups.get(group) else { return div().into_any_element() };
@@ -391,4 +396,23 @@ fn tile_action(id: &'static str, kind: Icon) -> gpui::Stateful<gpui::Div> {
         .border_color(c(theme::BORDER))
         .hover(|s| s.bg(c(theme::FLOATING)))
         .child(icon(kind, 14., theme::TEXT))
+}
+
+/// [`crate::display_tiles::widest_tile`], re-measured at most every 2 s (a monitor plugged in,
+/// a scale change) or when the window's chrome width changes.
+fn widest_tile_cached(chrome: f32) -> u32 {
+    use std::cell::Cell;
+    use std::time::{Duration, Instant};
+    thread_local! {
+        static LAST: Cell<Option<(Instant, f32, u32)>> = const { Cell::new(None) };
+    }
+    LAST.with(|last| match last.get() {
+        Some((at, seen, widest)) if at.elapsed() < Duration::from_secs(2) && (seen - chrome).abs() < 1.0 => widest,
+        _ => {
+            let widest = crate::display_tiles::widest_tile(chrome);
+            last.set(Some((Instant::now(), chrome, widest)));
+            crate::startup::mark(&format!("thumbnail width {widest} px (chrome {chrome:.0} px)"));
+            widest
+        }
+    })
 }

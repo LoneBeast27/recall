@@ -269,6 +269,11 @@ impl Root {
             self.lib.queue_visible(&self.workers);
             self.lib.note_scroll_depth();
         }
+        // A thumbnail rewritten larger in place: drop gpui's decode so the tile reloads the file.
+        for thumb in self.lib.refreshed_images.drain(..) {
+            gpui::ImageSource::from(std::path::PathBuf::from(thumb)).remove_asset(cx);
+            changed = true;
+        }
         self.lib.flush_meta_if_due();
         self.lib.ssd.poll(&self.workers, !self.lib.loading);
         if let Some(notice) = self.lib.notice.take() {

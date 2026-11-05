@@ -11,6 +11,7 @@ mod edit_model;
 mod editor_state;
 mod instance;
 mod library_probe;
+mod display_tiles;
 mod library_state;
 mod media;
 mod offscreen;

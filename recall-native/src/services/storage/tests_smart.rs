@@ -436,3 +436,11 @@ fn old_wav_stem_folders_go_except_the_open_clips() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+
+#[test]
+fn background_thumbnails_rest_three_times_their_work_up_to_100_ms() {
+    use std::time::Duration;
+    assert_eq!(super::prefetch::thumb_rest(Duration::from_millis(5)), Duration::from_millis(15));
+    assert_eq!(super::prefetch::thumb_rest(Duration::from_millis(60)), Duration::from_millis(100));
+    assert_eq!(super::prefetch::thumb_rest(Duration::ZERO), Duration::ZERO, "a cache hit does not rest");
+}
