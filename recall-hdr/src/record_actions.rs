@@ -177,7 +177,9 @@ impl Controller {
     fn toggle_overlay(&mut self) {
         let on = !self.cfg.overlay.enabled;
         let key = self.cfg.recording.overlay_hotkey.replace('+', " ");
+        let was_running = self.overlay.running();
         if !on {
+            self.overlay.linger(); // with stats off too, keep it up to show this
             let detail = format!("{key} shows it again");
             self.hub.event(
                 "session",
@@ -185,8 +187,12 @@ impl Controller {
             );
         }
         self.apply_config_patch(&json!({"overlay": {"enabled": on}}), None);
-        if on {
+        if on && was_running {
             self.shortcut_notice("Overlay on", "Notices show over any app");
+        } else if on {
+            // A fresh overlay process gets it with its first status.
+            let notice = shortcut_notice_json("Overlay on", "Notices show over any app", false, false);
+            self.pending_notice = Some((notice, Instant::now() + crate::overlay_proc::LINGER));
         }
     }
 

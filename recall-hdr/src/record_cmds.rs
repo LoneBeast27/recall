@@ -398,6 +398,11 @@ impl Controller {
         if let Some(hdr) = self.legacy_hdr_event() {
             self.hub.event_to(client, "hdr", &hdr);
         }
+        if let Some((notice, until)) = self.pending_notice.take() {
+            if Instant::now() < until {
+                self.hub.event_to(client, "session", &notice);
+            }
+        }
     }
 }
 
