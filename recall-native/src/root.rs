@@ -138,6 +138,9 @@ pub struct Root {
     hwnd: Option<isize>,
     /// A recorder status change arrived in the background and is not drawn yet.
     status_stale: bool,
+    /// The pill's clock (`root_poll::recorder_clock_tick`): no status replies, drain seconds drawn.
+    pub(crate) recorder_unresponsive: bool,
+    drain_drawn: Option<u64>,
     /// The startup timeline marks the first render once.
     first_render_marked: bool,
 }
@@ -205,6 +208,8 @@ impl Root {
             frame_at: Instant::now(),
             hwnd: parent_hwnd(window).ok(),
             status_stale: false,
+            recorder_unresponsive: false,
+            drain_drawn: None,
             first_render_marked: false,
         };
         if let Some(path) = std::env::var_os("RECALL_NATIVE_CLIP") {
@@ -257,6 +262,7 @@ impl Root {
             }
             changed |= self.status_changed();
         }
+        changed |= self.recorder_clock_tick();
         changed |= self.ed.tick(self.route == Route::Editor, &self.workers);
         crate::trace::record(self.route.name(), &self.ed, self.lib.records.len());
         crate::trace::dump_layout(self.route.name(), self.lib.records.len());

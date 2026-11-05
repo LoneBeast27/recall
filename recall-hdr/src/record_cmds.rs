@@ -49,8 +49,14 @@ pub fn saving_event(seconds: u32) -> String {
 
 /// Every accepted save goes through here (pipe `save_clip`, the save
 /// hotkeys, the chord's save key): the engine command, then the broadcast.
-pub(crate) fn send_save(hub: &PipeHub, send_engine: impl FnOnce(&str), seconds: u32) {
-    send_engine(&json!({"cmd": "save_clip", "seconds": seconds}).to_string());
+/// `at_last_frame` (a drain: the game closed) ends the clip at the game's last
+/// frame instead of holding that frame up to now.
+pub(crate) fn send_save(hub: &PipeHub, send_engine: impl FnOnce(&str), seconds: u32, at_last_frame: bool) {
+    let mut cmd = json!({"cmd": "save_clip", "seconds": seconds});
+    if at_last_frame {
+        cmd["at_last_frame"] = Value::Bool(true);
+    }
+    send_engine(&cmd.to_string());
     hub.event("session", &saving_event(seconds));
 }
 
@@ -144,9 +150,10 @@ impl Controller {
         if let Some(reason) = capture_refusal(self.paused, self.engine_running(), &self.wanted()) {
             return self.refuse_capture("save_clip", reason);
         }
-        log!("record: save last {secs}s");
+        let draining = self.planner.drain().is_some();
+        log!("record: save last {secs}s{}", if draining { " (game closed: ends at its last frame)" } else { "" });
         self.activity.save_sent(std::time::Instant::now());
-        send_save(&self.hub, |line| self.supervisor.send_engine_line(line), secs);
+        send_save(&self.hub, |line| self.supervisor.send_engine_line(line), secs, draining);
         // Heard at once; the chime follows when the clip is on disk (seconds for a long save to a hard drive).
         crate::cues::tick();
     }
@@ -304,6 +311,7 @@ impl Controller {
             // Settings restart or a held retarget: both wait for idle.
             pending_restart: self.pending_restart || self.retarget_held,
             leader_label: &self.leader_label,
+            drain: self.drain_clock.status(self.planner.drain(), Instant::now()),
         })
     }
 
@@ -337,7 +345,10 @@ impl Controller {
     /// follows the state; with notices off nothing is sent or heard.
     fn announce(&mut self, state: &str) {
         let gave_up = self.supervisor.health() == EngineHealth::GivenUp;
-        let next = Situation::of(state, &self.wanted(), gave_up);
+        let next = match (state, self.planner.drain()) {
+            ("draining", Some((_, _, len))) => Some(Situation::Draining { secs: len.as_secs_f32().round() as u64 }),
+            _ => Situation::of(state, &self.wanted(), gave_up),
+        };
         let Some(notice) = self.notices.observe(next, Instant::now()) else { return };
         if !self.cfg.overlay.enabled {
             return;
@@ -395,7 +406,7 @@ mod save_tests {
         hub.add_client(Box::new(a.clone()));
         hub.add_client(Box::new(b.clone()));
         let mut sent = Vec::new();
-        send_save(&hub, |line| sent.push(line.to_owned()), 30);
+        send_save(&hub, |line| sent.push(line.to_owned()), 30, false);
         assert_eq!(sent, vec![r#"{"cmd":"save_clip","seconds":30}"#.to_owned()], "one engine command");
         let deadline = Instant::now() + Duration::from_secs(5);
         let lines = |s: &Sink| String::from_utf8(s.0.lock().unwrap().clone()).unwrap();
@@ -407,5 +418,9 @@ mod save_tests {
             let line: Value = serde_json::from_str(text.trim()).expect("one JSON line");
             assert_eq!(line, json!({"mod":"session","event":{"type":"saving","seconds":30}}));
         }
+        let mut drained = Vec::new();
+        send_save(&hub, |line| drained.push(line.to_owned()), 120, true);
+        let v: Value = serde_json::from_str(&drained[0]).unwrap();
+        assert_eq!(v, json!({"cmd":"save_clip","seconds":120,"at_last_frame":true}), "a drain save ends at the last frame");
     }
 }

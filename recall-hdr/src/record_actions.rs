@@ -272,6 +272,8 @@ impl Controller {
     /// save or the long recording is in flight waits (status
     /// `pending_restart`) and applies on the first idle tick.
     pub(crate) fn plan_engine(&mut self, now: Instant) {
+        let buffered = self.supervisor.engine_view().buffer_secs;
+        self.planner.set_drain_len(crate::record_drain::drain_len(buffered, self.cfg.recording.buffer_secs));
         let wanted = self.wanted();
         let busy = self.activity.busy(now);
         match self.planner.step(&wanted, now, busy) {

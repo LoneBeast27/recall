@@ -16,6 +16,8 @@ pub(super) struct State {
     /// updates arrive from other namespaces, so keys absent from a new status keep
     /// their last value instead of resetting.
     session_raw: Option<Map<String, Value>>,
+    /// The last `session` status (only the controller's pump sends one), or the connect.
+    last_status: Option<std::time::Instant>,
 }
 
 impl State {
@@ -32,6 +34,7 @@ impl State {
     pub fn set_connected(&mut self, connected: bool) -> bool {
         let before = self.snapshot.clone();
         self.snapshot.connected = connected;
+        self.last_status = connected.then(std::time::Instant::now);
         if !connected {
             self.snapshot.session = None;
             self.snapshot.engine = None;
@@ -47,7 +50,11 @@ impl State {
         let before = self.snapshot.clone();
         let queued = self.events.len();
         match (namespace, kind) {
-            ("session", "status") => self.merge_session(event),
+            ("session", "status") => {
+                self.last_status = Some(std::time::Instant::now());
+                self.merge_session(event);
+                self.drop_stale_engine();
+            }
             ("session", "config") => self.snapshot.config = Some(config_of(event)),
             ("session", "storage_cleaned") => self.push(DaemonEvent::StorageCleaned { removed: u64_of(event, "removed"), freed_bytes: u64_of(event, "freed_bytes") }),
             ("engine", "status") => self.engine_status(event),
@@ -68,6 +75,20 @@ impl State {
             _ => {}
         }
         self.snapshot != before || self.events.len() != queued
+    }
+
+    /// Connected with no status within `limit` of the connect or the last one.
+    pub fn unresponsive(&self, now: std::time::Instant, limit: std::time::Duration) -> bool {
+        self.snapshot.connected && self.last_status.is_some_and(|at| now.duration_since(at) >= limit)
+    }
+
+    /// The engine sends no goodbye: once the controller says it is not running, its
+    /// last status (buffer full, "replay ready") is stale and must not drive the pill.
+    fn drop_stale_engine(&mut self) {
+        let health = self.snapshot.session.as_ref().map_or("", |s| s.engine_health.as_str());
+        if !health.is_empty() && health != "running" {
+            self.snapshot.engine = None;
+        }
     }
 
     fn push(&mut self, event: DaemonEvent) {

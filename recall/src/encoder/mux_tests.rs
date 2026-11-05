@@ -135,6 +135,7 @@ fn window_job(path: &str, packets: Vec<EncodedPacket>, params: OwnedParams, secs
         seconds: 1,
         requested: Instant::now(),
         secs,
+        video_end_us: None,
         video: VideoSrc::Window { packets, params },
         backend: "libx264",
         audio: vec![

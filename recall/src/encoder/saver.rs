@@ -59,6 +59,9 @@ pub(crate) struct SaveJob {
     pub requested: Instant,
     /// Clip duration the audio PCM was snapshotted for.
     pub secs: f64,
+    /// Capture-clock end of the clip's video (None without a capture clock):
+    /// bookmarks are placed against it (`bookmarks::take_saved`).
+    pub video_end_us: Option<u64>,
     pub video: VideoSrc,
     pub backend: &'static str,
     pub audio: Vec<AudioPcm>,
@@ -341,6 +344,7 @@ impl Worker {
                     frames: muxed.frames,
                     bytes,
                     elapsed_ms: elapsed.as_millis() as u64,
+                    video_end_us: job.video_end_us,
                 });
                 if let (Some(stage), Some(_)) = (&self.stage, &staged) {
                     stage.hand_off(target, &job.path, &self.events);
