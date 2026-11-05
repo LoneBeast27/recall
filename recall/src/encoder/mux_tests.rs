@@ -67,7 +67,7 @@ fn drain_into(enc: &mut ff::encoder::Video, ring: &mut PacketRing) {
             frame_idx: pts,
             duration_us: 16_666,
             keyframe: pkt.is_key(),
-            data: Arc::from(data),
+            data: crate::ring::Payload::from(data),
         });
     }
 }
@@ -275,7 +275,7 @@ fn pts_order_check_rejects_repeats_and_regressions() {
         frame_idx: pts,
         duration_us: 1,
         keyframe: true,
-        data: Arc::from(vec![0u8]),
+        data: crate::ring::Payload::from(vec![0u8]),
     };
     assert!(pts_strictly_increase(&[]));
     assert!(pts_strictly_increase(&[p(0), p(5), p(9)]));
@@ -321,7 +321,7 @@ fn bench_live_shaped_save_cpu_cost() {
             frame_idx: i as u64 * 16_725,
             duration_us: 16_725,
             keyframe: key,
-            data: Arc::from(data),
+            data: crate::ring::Payload::from(data),
         });
     }
     let started = Instant::now();
