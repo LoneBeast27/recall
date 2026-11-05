@@ -37,7 +37,9 @@ param(
   [switch]$Monitor,
   [int]$Fps = 60,
   [string]$CpuMask = 'ffff0000',
-  [string]$EngineEnv = ''
+  [string]$EngineEnv = '',
+  # Ask for a HUD probe (the Dynamic island corner) as the measurement starts: its cost lands in the window.
+  [switch]$Probe
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
@@ -110,8 +112,17 @@ if (-not ($warmFps | Where-Object { $_ -gt 0 })) {
   throw "no frames captured during warmup (target occluded?): $(($log | Where-Object { $_ -notmatch 'status|endpoints' } | Select-Object -Last 12) -join ' | ')"
 }
 $before = $log.Count
+if ($Probe) { $eng.proc.StandardInput.WriteLine('{"cmd":"hud_probe"}'); $eng.proc.StandardInput.Flush() }
 $m = Measure-ThreadCpu $eng.proc.Id $Seconds
 Pump
+if ($Probe) {
+  # The probe runs up to 60 s: wait for its answer so the reading is from a probe that ran.
+  $until = (Get-Date).AddSeconds(70)
+  while (-not ($log | Where-Object { $_ -match 'hud_scan' }) -and (Get-Date) -lt $until) { Start-Sleep -Milliseconds 500; Pump }
+  $scan = $log | Where-Object { $_ -match 'hud_scan' } | Select-Object -Last 1
+  Write-Output "probe answer: $(if ($scan) { $scan.Substring(0, [Math]::Min(200, $scan.Length)) } else { 'none within 70 s' })"
+  Write-Output "probe log: $(($log | Where-Object { $_ -match 'hud' } | Select-Object -First 4) -join ' | ')"
+}
 # Dedicated VRAM the engine holds now (Task Manager's number), from the GPU Process Memory counter.
 $vramMb = try { [math]::Round(((Get-Counter "\GPU Process Memory(pid_$($eng.proc.Id)_*)\Dedicated Usage" -ErrorAction Stop).CounterSamples | Measure-Object CookedValue -Sum).Sum / 1MB, 0) } catch { -1 }
 $fpsVals = @($log | Select-Object -Skip $before | Where-Object { $_ -match '"type":"status"' } | ForEach-Object { ($_ | ConvertFrom-Json).fps } | Where-Object { $_ -gt 0 })
