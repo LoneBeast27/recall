@@ -61,6 +61,7 @@ impl Root {
     }
 
     pub fn begin_rename(&mut self, path: String, window: &mut Window) {
+        self.lib.title_click = None;
         self.lib.finish_rename(&self.rename.value, RenameEnd::Away);
         let current = self.lib.record(&path).map(|r| r.display_title().to_owned()).unwrap_or_default();
         self.rename.set(current);

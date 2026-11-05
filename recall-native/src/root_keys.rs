@@ -18,6 +18,8 @@ impl Root {
     }
 
     pub(super) fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Any key (Escape, F2, Enter) cancels a title click still waiting to open (`tile_click.rs`).
+        self.lib.title_click = None;
         // Settings → Shortcuts: a chip waiting for keys takes the press first.
         if self.capture_shortcut_key(&event.keystroke) {
             cx.notify();
@@ -77,7 +79,7 @@ impl Root {
                     }
                 }
                 "delete" if !self.lib.selection.is_empty() => self.lib.confirm_delete = true,
-                // A click selects a clip; Enter opens it.
+                // Enter opens the one clip a Shift/Ctrl click selected (a plain click opens at once).
                 "enter" if self.tile_menu.is_none() && !self.lib.confirm_delete && self.lib.only_selected().is_some() => {
                     if let Some(path) = self.lib.only_selected() {
                         self.open_clip(path);
