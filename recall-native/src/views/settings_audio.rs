@@ -21,6 +21,11 @@ pub struct SettingsUi {
     pub capture: Option<crate::views::settings_keys::ShortcutSlot>,
     /// The Audio page (sources, their lists and menus).
     pub audio: crate::views::audio_page::AudioPage,
+    /// The open Bitrate / Encoder effort quality comparison, if any.
+    pub quality_preview: Option<crate::views::quality_preview::PreviewState>,
+    /// Which comparison the last outside press closed and where it landed: that same press on
+    /// its own (i) must not open it again (a press on the other (i) still opens that one).
+    pub quality_closed_at: Option<(crate::views::quality_preview::Preview, gpui::Point<gpui::Pixels>)>,
 }
 
 /// Which device list is open.
