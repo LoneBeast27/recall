@@ -161,8 +161,8 @@ function Click($s, [string]$name) {
   Mouse $s 0x201 $t.X $t.Y 1; Start-Sleep -Milliseconds 40
   Mouse $s 0x202 $t.X $t.Y 0; Start-Sleep -Milliseconds 60
 }
-# Opens a library clip the way a person does: a click selects its tile, Enter opens it.
-function Open-Tile($s, [string]$name) { Click $s $name; Key $s 'enter' }
+# Opens a library clip the way a person does: a click on its picture (the tile's middle).
+function Open-Tile($s, [string]$name) { Click $s $name }
 # X (device px) of source time $t on the timeline.
 function TrackX($s, [double]$t) {
   $tracks = Target $s 'tracks'
