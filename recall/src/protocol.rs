@@ -155,7 +155,12 @@ pub enum Command {
     /// value: "auto" | "sdr" | "hdr"
     SetMode { value: String },
     /// Save the last N seconds of the replay buffer (default: full buffer).
-    SaveClip { seconds: Option<u32> },
+    SaveClip {
+        seconds: Option<u32>,
+        /// The game closed: end at its last frame (`SaveRequest::at_last_frame`).
+        #[serde(default)]
+        at_last_frame: bool,
+    },
     /// Set microphone capture muting for newly captured replay audio.
     SetMicMute { muted: bool },
     /// Toggle microphone capture muting for newly captured replay audio.

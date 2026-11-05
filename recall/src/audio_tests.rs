@@ -192,3 +192,58 @@ fn a_configured_name_matches_exactly_before_tokens() {
     assert_eq!(super::match_endpoint(&names, "Headset (USB)"), None, "missing -> caller uses the default");
     assert_eq!(super::match_endpoint(&names, "  "), None, "empty = Windows default");
 }
+
+/// A save's audio covers exactly its video window on the capture clock, whether
+/// the newest frame is held up to the request (a live game) or the clip ends at
+/// the last frame (the game closed 30 s before the save: the 11-05 drain).
+#[test]
+fn a_saves_audio_spans_exactly_its_video_window() {
+    use crate::encoder::{audio_tail_us, video_end_us};
+    use crate::ring::{EncodedPacket, PacketRing};
+    use std::sync::Arc;
+    use std::time::Duration;
+
+    const RATE: u32 = 1_000; // one sample per ms; each sample's value is its capture time in ms
+    const FRAME_US: u64 = 16_667;
+    let audio = TrackRing { rate: RATE, capacity: 200_000, ..test_ring("Game") };
+    let mut video = PacketRing::new(120_000_000);
+    // 60 s of game at 60 fps, keyframe each second; the window then closes.
+    let frames = 60 * 60;
+    for i in 0..frames {
+        video.push(EncodedPacket { frame_idx: i * FRAME_US, duration_us: FRAME_US, keyframe: i % 60 == 0, data: Arc::from(vec![0u8; 4]) });
+    }
+    let last_frame_end = frames * FRAME_US;
+    // Audio keeps flowing to the save moment: 90 s, the request came at 89.995 s.
+    let audio_ms = 90_000u64;
+    let samples: Vec<f32> = (0..audio_ms).map(|t| t as f32).collect();
+    audio.push_capture(&samples, false);
+    let request_end = 89_995_000u64;
+    let waited = Duration::from_millis(5);
+
+    for (at_last_frame, want_s) in [(true, 120u64), (true, 30), (false, 120), (false, 30)] {
+        let end = video_end_us(request_end, video.end_us(), at_last_frame);
+        let window = video.save_window_at(want_s * 1_000_000, end);
+        let last = window.last().unwrap();
+        let video_us = last.frame_idx + last.duration_us; // rebased: the clip's video length
+        let video_start = end - video_us;
+        let secs = video_us as f64 / 1_000_000.0;
+        let tail = audio_tail_us(request_end, waited, end) as f64 / 1_000_000.0;
+        let pcm = audio.snapshot_ending(secs, tail);
+        let case = format!("at_last_frame={at_last_frame} want={want_s}s");
+        // One sample is 1 ms here; frame times are not whole ms, so allow one sample.
+        let near = |a: u64, b: u64| a.abs_diff(b) <= 1;
+        assert!(near(pcm.len() as u64, video_us / 1_000), "{case}: audio {} ms vs video {} us", pcm.len(), video_us);
+        // Front padding (silence) is where the buffer holds no audio; the first real
+        // sample sits at the video's start time on the capture clock.
+        let first_real = pcm.iter().position(|&s| s != 0.0).unwrap();
+        let first_time_ms = pcm[first_real] as u64 - first_real as u64;
+        assert!(near(first_time_ms, video_start / 1_000), "{case}: audio starts {first_time_ms} ms, video {video_start} us");
+        let audio_end_ms = *pcm.last().unwrap() as u64 + 1;
+        assert!(near(audio_end_ms, end / 1_000), "{case}: audio ends {audio_end_ms} ms, video {end} us");
+        if at_last_frame {
+            assert_eq!(end, last_frame_end, "{case}: the clip ends at the game's last frame");
+        } else {
+            assert_eq!(end, request_end, "{case}: a live save holds the newest frame to the request");
+        }
+    }
+}

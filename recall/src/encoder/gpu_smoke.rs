@@ -115,13 +115,13 @@ pub fn gpu_smoke(out_dir: &std::path::Path) -> Result<String, String> {
     let path = out_dir.join(format!("gpu-smoke-{}.mp4", uuid::Uuid::new_v4()));
     let path_text = path.to_string_lossy().into_owned();
     let now = Instant::now();
-    let req = SaveRequest { path: path_text.clone(), seconds: 4, end_us: None, requested: now };
+    let req = SaveRequest { path: path_text.clone(), seconds: 4, end_us: None, at_last_frame: false, requested: now };
     saver::write_now(&enc.build_job(req, &[], now)?)?;
     // The same last frame through the CPU path's encoder input (RGB0 from the readback),
     // as a quiet-tail still: decoding both shows whether D3D11 BGRA input colours match.
     let still = out_dir.join(format!("gpu-smoke-rgb0-{}.mp4", uuid::Uuid::new_v4()));
     let still_text = still.to_string_lossy().into_owned();
-    let req = SaveRequest { path: still_text.clone(), seconds: 1, end_us: Some(300_000_000), requested: now };
+    let req = SaveRequest { path: still_text.clone(), seconds: 1, end_us: Some(300_000_000), at_last_frame: false, requested: now };
     saver::write_now(&enc.build_job(req, &[], now)?)?;
     let out = serde_json::json!({
         "clip": path_text,
