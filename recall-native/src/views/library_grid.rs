@@ -67,6 +67,9 @@ impl Root {
 
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.lib.rows.get(ix).cloned() else { return div().into_any_element() };
+        // Thumbnails are cached as wide as a tile is in physical pixels on this display.
+        let physical = (self.tile_size().0 * window.scale_factor()).ceil() as u32;
+        crate::services::storage::set_thumb_width(physical);
         match row {
             Row::Header { group, first } => {
                 let Some(g) = self.lib.groups.get(group) else { return div().into_any_element() };
