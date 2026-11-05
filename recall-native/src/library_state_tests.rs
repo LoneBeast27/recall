@@ -3,7 +3,7 @@
 use super::*;
 use crate::{backend::ClipEntry, services::library::Filter};
 
-fn library(names: &[&str]) -> LibraryState {
+pub(super) fn library(names: &[&str]) -> LibraryState {
     let mut lib = LibraryState::new();
     lib.store = MetaStore::default();
     let entries = names.iter().map(|n| ClipEntry { name: (*n).into(), path: format!(r"D:\c\{n}"), bytes: 10, mtime: 1_700_000_000, thumb: None, folder: None }).collect();

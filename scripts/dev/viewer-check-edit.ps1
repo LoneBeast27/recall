@@ -108,25 +108,25 @@ Run-Scenario 'scrub while paused, then play' {
 
 Run-Scenario 'Library and back while playing' {
   $s = $script:current = Start-Viewer 'lib-back' $clips.short -Library
-  Click $s "tile:lib-back.mp4"
+  Open-Tile $s "tile:lib-back.mp4"
   $open = Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.ready -and $r.clip } 30000
   $a = Press-Play $s 'space' 1
   Click $s 'crumb-library'
   $lib = Wait-Trace $s { param($r) $r.route -eq 'library' -and -not $r.playing } 1000
   $at = [double](Last $s).pos
-  Click $s "tile:lib-back.mp4"
+  Open-Tile $s "tile:lib-back.mp4"
   $back = Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.ready } 3000
   Verdict @((Ok ([bool]$open) 'opened from its tile'), $a, (Ok ([bool]$lib) "Library stops playback (at $(Fmt $at)s)"), (Ok ([bool]$back) 'back in the editor'), (Press-Play $s 'button' 1.5 $at))
 }
 
 Run-Scenario 'open another clip while one plays; play pressed while it loads' {
   $s = $script:current = Start-Viewer 'clip-a' $clips.short -Library -Also 'clip-b'
-  Click $s "tile:clip-a.mp4"
+  Open-Tile $s "tile:clip-a.mp4"
   [void](Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.ready -and $r.clip } 30000)
   $a = Press-Play $s 'space' 1
   Key $s 'escape'
   [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 1000)
-  Click $s "tile:clip-b.mp4"; Key $s 'space'
+  Open-Tile $s "tile:clip-b.mp4"; Key $s 'space'
   $b = Wait-Trace $s { param($r) $r.clip -like '*clip-b.mp4' -and $r.playing -and $r.video_state -eq 'playing' } 30000
   $c = if ($b) { Check-Plays $s 1.5 0 ($b.ms - 1) } else { Ok $false "clip B never played (status '$((Last $s).status)', clip $((Last $s).clip))" }
   Verdict @($a, $c)
