@@ -387,7 +387,7 @@ Run-Scenario 'settings: a typed cache size of 7.5 GB sits between the 5 and 10 G
   Key $s 'd9'; Key $s 'escape'
   $v = Settle $s 300
   Key $s 'escape'; $back = Wait-Trace $s { param($r) $r.route -eq 'library' } 1500
-  Verdict @((Ok ([bool]$editing) 'a click on the size opens the field, keys go to it'), (Ok ([bool]$typed) "typed '$((Last $s).ui.cache_text)'"),
+  Verdict @((Ok ([bool]$editing) 'a click on the size opens the field, keys go to it'), (Ok ([bool]$typed) "typed '$($typed.ui.cache_text)'"),
     (Ok ($u.ui.cache_budget -eq 8053063680) "budget $($u.ui.cache_budget) bytes (7.5 GB = 8053063680)"),
     (Ok ($f -gt 0.42 -and $f -lt 0.58) ("knob at {0:N3} of the track (5 GB tick 0.4, 10 GB tick 0.6)" -f $f)),
     (Ok ($v.ui.cache_budget -eq 8053063680 -and -not $v.ui.cache_editing) "Escape kept 7.5 GB ($($v.ui.cache_budget))"), (Ok ([bool]$back) 'the keyboard works on the page: Escape goes back to the Library'))
