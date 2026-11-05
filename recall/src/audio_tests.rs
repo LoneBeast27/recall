@@ -183,7 +183,6 @@ fn a_configured_name_matches_exactly_before_tokens() {
 fn a_saves_audio_spans_exactly_its_video_window() {
     use crate::encoder::{audio_tail_us, video_end_us};
     use crate::ring::{EncodedPacket, PacketRing};
-    use std::sync::Arc;
     use std::time::Duration;
 
     const RATE: u32 = 1_000; // one sample per ms; each sample's value is its capture time in ms
