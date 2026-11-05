@@ -29,8 +29,6 @@ windows = { version = "0.62", features = [
     "Win32_UI_Shell",
     # Default clip folder: SHGetKnownFolderPath's buffer is freed with CoTaskMemFree.
     "Win32_System_Com",
-    # Advanced-shortcut chord: physical-key layout lookup + async key scan.
-    "Win32_UI_Input_KeyboardAndMouse",
     # Stats island frame timing: may this token start an ETW session (status
     # `fps_source`), and stop the overlay's session after killing the overlay.
     "Win32_Security",

@@ -48,7 +48,7 @@ pub fn saving_event(seconds: u32) -> String {
 }
 
 /// Every accepted save goes through here (pipe `save_clip`, the save
-/// hotkeys, the chord's save key): the engine command, then the broadcast.
+/// hotkeys): the engine command, then the broadcast.
 /// `at_last_frame` (a drain: the game closed) ends the clip at the game's last
 /// frame instead of holding that frame up to now.
 pub(crate) fn send_save(hub: &PipeHub, send_engine: impl FnOnce(&str), seconds: u32, at_last_frame: bool) {
@@ -142,7 +142,7 @@ impl Controller {
         }
     }
 
-    /// Save the replay buffer (hotkeys, chord, pipe). Paused or with no engine
+    /// Save the replay buffer (hotkeys, pipe). Paused or with no engine
     /// to ask, the failure is surfaced the way an engine failure is (overlay
     /// toast + beep).
     pub(crate) fn save_clip(&mut self, seconds: Option<u32>) {
@@ -172,7 +172,7 @@ impl Controller {
         }
     }
 
-    /// Flip the performance-stats island (pipe `toggle_stats`, chord 5). Saved
+    /// Flip the performance-stats island (pipe `toggle_stats`, its hotkey). Saved
     /// like any `set_config`, so it survives restarts; the effects (tick,
     /// overlay process) follow in `apply_config_effects`.
     pub(crate) fn toggle_stats(&mut self, client: Option<u64>) {
@@ -262,7 +262,7 @@ impl Controller {
             || o.bookmark_hotkey != n.bookmark_hotkey
             || o.screenshot_hotkey != n.screenshot_hotkey
             || o.record_hotkey != n.record_hotkey
-            || old.hotkeys != new.hotkeys
+            || o.stats_hotkey != n.stats_hotkey
             || old.hotkey.toggle_hdr != new.hotkey.toggle_hdr
         {
             self.rebind_hotkeys();
@@ -310,7 +310,6 @@ impl Controller {
             long_recording: self.activity.long_recording_json(),
             // Settings restart or a held retarget: both wait for idle.
             pending_restart: self.pending_restart || self.retarget_held,
-            leader_label: &self.leader_label,
             drain: self.drain_clock.status(self.planner.drain(), Instant::now()),
         })
     }
