@@ -70,6 +70,8 @@ fn only_a_track_the_reader_has_passed_sends_it_back() {
 fn decoded(name: &str, build: Vec<Vec<&str>>, tracks: usize, seconds: f64) -> Arc<LiveSound> {
     use crate::services::{library::mp4_map, storage};
     use windows::Win32::Media::MediaFoundation::{MF_VERSION, MFSTARTUP_FULL, MFStartup};
+    // The sound streams from these files after this returns: earlier runs' folders go instead.
+    crate::test_temp::sweep_dead("recall-live");
     let dir = std::env::temp_dir().join(format!("recall-live-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).unwrap();

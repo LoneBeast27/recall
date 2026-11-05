@@ -157,7 +157,11 @@ pub fn cache_root() -> PathBuf {
     ROOT.get_or_init(|| {
         let root = match std::env::var_os("RECALL_CACHE_DIR").filter(|v| !v.is_empty()) {
             Some(path) => PathBuf::from(path),
-            None if cfg!(test) => std::env::temp_dir().join(format!("recall-cache-test-{}", std::process::id())),
+            None if cfg!(test) => {
+                #[cfg(test)]
+                crate::test_temp::sweep_dead("recall-cache-test");
+                std::env::temp_dir().join(format!("recall-cache-test-{}", std::process::id()))
+            }
             None => {
                 let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Recall");
                 let root = exe_cache_dir().unwrap_or_else(|| base.join("cache"));

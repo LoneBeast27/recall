@@ -11,11 +11,10 @@ use super::io_priority::{self, IO_VERY_LOW};
 use super::lane::{IdleSource, Lane, Priority, Task};
 use super::*;
 
-fn temp_root(tag: &str) -> PathBuf {
+/// Deleted when the test ends, panics included (`TempDir`).
+fn temp_root(tag: &str) -> crate::test_temp::TempDir {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let root = std::env::temp_dir().join(format!("recall-storage-{tag}-{}-{nonce}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
-    root
+    crate::test_temp::TempDir::new(format!("recall-storage-{tag}-{}-{nonce}", std::process::id()))
 }
 
 struct ListSource(Mutex<VecDeque<Task>>);

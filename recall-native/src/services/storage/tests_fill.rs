@@ -2,11 +2,9 @@ use std::time::{Duration, Instant, SystemTime};
 
 use super::*;
 
-fn scratch(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("recall-fill-{}-{name}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// Deleted when the test ends, panics included (`TempDir`).
+fn scratch(name: &str) -> crate::test_temp::TempDir {
+    crate::test_temp::TempDir::new(format!("recall-fill-{}-{name}", std::process::id()))
 }
 
 fn pattern(bytes: usize) -> Vec<u8> {

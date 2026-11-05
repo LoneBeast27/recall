@@ -99,11 +99,9 @@ fn the_probe_sees_writers_folders_and_missing_files() {
 
 // ---- real folders ------------------------------------------------------------------------
 
-fn temp(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("recall-watch-{name}-{}", std::process::id()));
-    let _ = fs::remove_dir_all(&dir);
-    fs::create_dir_all(&dir).unwrap();
-    dir
+/// Deleted when the test ends, panics included (`TempDir`).
+fn temp(name: &str) -> crate::test_temp::TempDir {
+    crate::test_temp::TempDir::new(format!("recall-watch-{name}-{}", std::process::id()))
 }
 
 fn watcher(roots: &[(&Path, bool)]) -> (ClipWatcher, Receiver<LibraryChange>) {
