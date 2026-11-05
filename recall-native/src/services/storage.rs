@@ -37,6 +37,7 @@ mod projects;
 pub mod proxy;
 mod score;
 mod smr;
+mod ssd_usage;
 mod thumbs;
 mod tiers;
 mod video;
@@ -74,6 +75,8 @@ pub use projects::{ProjectSource, SidecarStep, export_dir, has_export, project_o
 pub(crate) use projects::modified_ms as projects_modified_ms;
 #[allow(unused_imports)]
 pub use thumbs::{ThumbIndex, cached_thumb, ensure_thumb, recorder_thumb_stem, thumb_index};
+#[allow(unused_imports)]
+pub use ssd_usage::{SsdUsage, generation as cache_generation, ssd_usage};
 #[allow(unused_imports)]
 pub use tiers::{CacheKind, CacheUsage, TierUsage, clear_kind, usage_detail};
 #[allow(unused_imports)]

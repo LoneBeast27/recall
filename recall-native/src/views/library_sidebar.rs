@@ -1,4 +1,4 @@
-//! Library sidebar: scopes, the games list, page links and the clip-drive meter.
+//! Library sidebar: scopes, the games list, page links, the clip-drive meter and the SSD row.
 use gpui::{AnyElement, Context, div, prelude::*, px};
 
 use super::{nav_row, thousands};
@@ -104,6 +104,7 @@ impl Root {
                 cx.notify();
             })))
             .children(self.lib.drive.map(|(free, total)| drive_meter(free, total)))
+            .children(self.lib.ssd.usage.map(crate::views::ssd_meter::ssd_meter))
             .into_any_element()
     }
 }

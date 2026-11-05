@@ -439,6 +439,7 @@ fn summary_cell() -> &'static Mutex<Option<Summary>> {
 
 pub(super) fn invalidate_usage() {
     SUMMARY_STALE.store(true, Ordering::Relaxed);
+    super::ssd_usage::bump();
 }
 
 pub(super) fn compute_summary(root: &Path) -> Summary {
