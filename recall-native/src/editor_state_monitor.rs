@@ -177,8 +177,16 @@ mod mix_down_tests {
         assert!(next.plan.mix_down.is_none() && !next.mix_down(), "the last choice is the default for new edits");
         let Job::Export(_, plan, _, _) = next.export_job(next.info.clone().unwrap()) else { panic!("an export job") };
         assert_eq!(plan.mix_down, Some(false), "the engine gets the default filled in");
+        // 2026-11-05 merge-gate review: undo must bring Mix back, here and in the export.
         ed.undo();
         assert!(ed.plan.mix_down.is_none());
+        assert!(ed.mix_down(), "undo: the clip shows Mix again");
+        let Job::Export(_, plan, _, _) = ed.export_job(ed.info.clone().unwrap()) else { panic!("an export job") };
+        assert_eq!(plan.mix_down, Some(true), "undo: the export mixes again");
+        ed.redo();
+        assert!(!ed.mix_down(), "redo: Separate again");
+        let Job::Export(_, plan, _, _) = ed.export_job(ed.info.clone().unwrap()) else { panic!("an export job") };
+        assert_eq!(plan.mix_down, Some(false));
         crate::services::editor_prefs::use_test_file(None);
         let _ = std::fs::remove_dir_all(dir);
     }

@@ -82,14 +82,15 @@ impl EditorState {
     }
 
     /// The Export section's Mix / Separate choice: one undo step, kept with the clip's edits,
-    /// and remembered as the default for clips that never set it.
+    /// and remembered as the default for clips opened later that never set it.
     pub fn set_mix_down(&mut self, on: bool) {
         if self.mix_down() == on && self.plan.mix_down.is_some() {
             return;
         }
         self.revise();
         self.plan.mix_down = Some(on);
-        self.mix_down_default = on;
+        // The remembered default changes for the next clip only: this clip's default stays, so an
+        // undo back to "unset" shows what it showed before.
         let _ = crate::services::editor_prefs::EditorPrefs { mix_down: on }.save();
     }
 
