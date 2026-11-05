@@ -104,6 +104,8 @@ pub struct LibraryState {
     played: Option<String>,
     /// The game whose clip heads were last asked for (`library_probe`).
     probed_game: Option<String>,
+    /// A plain click on a clip title waiting out the double-click time (`views/tile_click.rs`).
+    pub title_click: Option<(String, Instant)>,
 }
 
 impl LibraryState {
@@ -151,6 +153,7 @@ impl LibraryState {
             recent: Default::default(),
             played: None,
             probed_game: None,
+            title_click: None,
         }
     }
 

@@ -1,7 +1,7 @@
-//! What a press on a clip tile does to the selection. A plain click selects only that clip, Ctrl
-//! adds or removes one, Shift takes the run from the last clicked clip (or adds one when there is
-//! none). A click never opens a clip: Enter, the tile's play button, the selection bar's Open or
-//! the right-click menu do that, so a double-click is free to start a rename.
+//! What a press on a clip tile does to the selection. A plain click opens the clip
+//! (`views/tile_click.rs`), clears the selection and marks where a Shift run starts. Ctrl adds or
+//! removes one clip, Shift takes the run from the last clicked clip (or adds one when there is
+//! none); neither opens anything.
 use super::LibraryState;
 
 impl LibraryState {
@@ -20,12 +20,11 @@ impl LibraryState {
             }
         } else {
             self.selection.clear();
-            self.selection.insert(path.to_owned());
         }
         self.anchor = Some(path.to_owned());
     }
 
-    /// The one selected clip, if exactly one is selected (what Enter opens).
+    /// The one selected clip, if exactly one is selected (what Enter and the bar's Open open).
     pub fn only_selected(&self) -> Option<String> {
         if self.selection.len() == 1 { self.selection.iter().next().cloned() } else { None }
     }
@@ -58,18 +57,16 @@ mod tests {
     }
 
     #[test]
-    fn a_plain_click_selects_only_that_clip() {
+    fn a_plain_click_clears_the_selection_and_selects_nothing() {
         let mut lib = library(&NAMES);
         let o = order(&lib);
         lib.click(&o[0], true, false);
         lib.click(&o[2], true, false);
         lib.confirm_delete = true;
         lib.click(&o[1], false, false);
-        assert_eq!(selected(&lib), [o[1].clone()]);
-        assert!(!lib.confirm_delete, "a new selection drops the delete question");
-        lib.click(&o[1], false, false);
-        assert_eq!(selected(&lib), [o[1].clone()], "clicking it again keeps it selected");
-        assert_eq!(lib.only_selected().as_deref(), Some(o[1].as_str()));
+        assert!(lib.selection.is_empty(), "no selection bar for a plain click (it opens the clip)");
+        assert!(!lib.confirm_delete, "the delete question goes with the selection");
+        assert_eq!(lib.only_selected(), None);
     }
 
     #[test]
@@ -101,10 +98,11 @@ mod tests {
     fn ctrl_adds_and_removes_one_clip() {
         let mut lib = library(&NAMES);
         let o = order(&lib);
-        lib.click(&o[0], false, false);
+        lib.click(&o[0], true, false);
         lib.click(&o[2], true, false);
         assert_eq!(selected(&lib), [o[0].clone(), o[2].clone()]);
         lib.click(&o[0], true, false);
         assert_eq!(selected(&lib), [o[2].clone()]);
+        assert_eq!(lib.only_selected().as_deref(), Some(o[2].as_str()));
     }
 }
