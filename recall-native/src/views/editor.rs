@@ -11,31 +11,65 @@ use crate::{
 
 const INSPECTOR_W: f32 = 300.0;
 const TRANSPORT_H: f32 = 56.0;
+/// Portrait: the page this much taller than wide switches to it, this much wider switches back,
+/// so a window resized near square does not flip back and forth.
+const PORTRAIT_ON: f32 = 1.05;
+const PORTRAIT_OFF: f32 = 0.95;
+/// Portrait: smallest heights before the export panel scrolls instead.
+const PREVIEW_MIN_H: f32 = 200.0;
+const PANEL_MIN_H: f32 = 160.0;
+/// Portrait: the export panel puts its two sections side by side from this width.
+const TWO_COLUMNS_W: f32 = 880.0;
+
+/// The editor's layout for a page of `width` x `height`, given the current one.
+pub fn portrait_layout(portrait: bool, width: f32, height: f32) -> bool {
+    if width <= 0.0 || height <= 0.0 {
+        return portrait;
+    }
+    if portrait { height > width * PORTRAIT_OFF } else { height > width * PORTRAIT_ON }
+}
 
 #[path = "editor_inspector.rs"]
 mod inspector;
 
 impl Root {
     pub fn render_editor(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        div()
-            .id("editor")
-            .flex_1()
-            .min_w_0()
-            .flex()
-            .flex_col()
-            .gap(px(8.))
-            .px(px(8.))
-            .pb(px(8.))
-            .child(
-                div()
-                    .flex_1()
-                    .min_h_0()
-                    .flex()
-                    .gap(px(8.))
-                    .child(self.render_preview(cx))
-                    .child(self.render_inspector(window, cx)),
-            )
-            .child(self.render_timeline(cx))
+        let area = self.ed.area.clone();
+        let (width, height) = area.get().unwrap_or_else(|| {
+            let size = window.viewport_size();
+            (f32::from(size.width), f32::from(size.height))
+        });
+        self.ed.portrait = portrait_layout(self.ed.portrait, width, height);
+        let portrait = self.ed.portrait;
+        // The page measures itself; a size that calls for the other layout redraws at once.
+        let measure = canvas(
+            move |bounds, window, _| {
+                let size = (f32::from(bounds.size.width), f32::from(bounds.size.height));
+                if area.get() != Some(size) {
+                    area.set(Some(size));
+                    if portrait_layout(portrait, size.0, size.1) != portrait {
+                        window.refresh();
+                    }
+                }
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .inset_0();
+        let page = div().id("editor").flex_1().min_w_0().min_h_0().relative().flex().flex_col().gap(px(8.)).px(px(8.)).pb(px(8.)).child(measure);
+        if !portrait {
+            return page
+                .child(div().flex_1().min_h_0().flex().gap(px(8.)).child(self.render_preview(cx)).child(self.render_inspector(window, cx, None)))
+                .child(self.render_timeline(cx))
+                .into_any_element();
+        }
+        // Portrait: video at full width as tall as its shape needs, then the transport and the
+        // timeline, then the same export panel at its natural height (it scrolls when short).
+        let aspect = self.ed.info.as_ref().filter(|i| i.width > 0 && i.height > 0).map_or(16.0 / 9.0, |i| i.width as f32 / i.height as f32);
+        let preview_h = (width - 16.0).max(1.0) / aspect + TRANSPORT_H;
+        page.child(div().flex_basis(px(preview_h)).flex_shrink().min_h(px(PREVIEW_MIN_H)).flex().child(self.render_preview(cx)))
+            .child(div().flex_none().child(self.render_timeline(cx)))
+            .child(self.render_inspector(window, cx, Some(width)))
             .into_any_element()
     }
 
@@ -175,5 +209,21 @@ pub fn track_name(tag: &str, index: usize) -> String {
         tag.to_owned()
     } else {
         format!("Audio {}", index + 1)
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::portrait_layout;
+
+    #[test]
+    fn a_tall_page_goes_portrait_and_a_near_square_resize_does_not_flip() {
+        assert!(portrait_layout(false, 1410.0, 2468.0), "a portrait monitor");
+        assert!(!portrait_layout(false, 2560.0, 1440.0), "a landscape monitor");
+        assert!(!portrait_layout(false, 1000.0, 1040.0), "4% taller: stays landscape");
+        assert!(portrait_layout(false, 1000.0, 1060.0), "6% taller: portrait");
+        assert!(portrait_layout(true, 1000.0, 980.0), "2% wider: stays portrait");
+        assert!(!portrait_layout(true, 1000.0, 940.0), "6% wider: back to landscape");
+        assert!(portrait_layout(true, 0.0, 0.0), "no size yet: keep the current layout");
     }
 }

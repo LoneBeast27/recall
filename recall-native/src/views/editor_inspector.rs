@@ -7,7 +7,7 @@ use gpui::{
     prelude::*, px,
 };
 
-use super::{INSPECTOR_W, track_name};
+use super::{INSPECTOR_W, PANEL_MIN_H, TWO_COLUMNS_W, track_name};
 use crate::{
     edit_model::{AudioOutput, ClipInfo, ExportMode},
     editor_state::{Drag, FPS_PRESETS, GAIN_MAX, GAIN_MIN, timecode},
@@ -18,23 +18,42 @@ use crate::{
 };
 
 impl Root {
-    pub(super) fn render_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// The export page: beside the preview (`below` = None), or under the timeline in the
+    /// portrait layout (`below` = the page width), where its two sections sit side by side when
+    /// there is room and the footer keeps to the right. Same sections either way.
+    pub(super) fn render_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>, below: Option<f32>) -> AnyElement {
+        let audio = self.render_audio_tracks(cx);
+        let export = self.render_export_options(window, cx);
+        let footer = self.render_export_footer(cx);
+        let Some(width) = below else {
+            return ui::panel()
+                .w(px(INSPECTOR_W))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .child(div().id("inspector-scroll").flex_1().min_h_0().overflow_y_scroll().child(audio).child(ui::hairline()).child(export))
+                .child(footer)
+                .into_any_element();
+        };
+        let sections = if width >= TWO_COLUMNS_W {
+            div()
+                .flex()
+                .items_start()
+                .child(div().flex_1().min_w_0().child(audio))
+                .child(div().flex_1().min_w_0().border_l_1().border_color(c(theme::BORDER_SUBTLE)).child(export))
+        } else {
+            div().flex().flex_col().child(audio).child(ui::hairline()).child(export)
+        };
+        // Natural height (no stretching: the footer stays right under the settings); it shrinks
+        // and scrolls when the page is short, so the timeline above keeps its height.
         ui::panel()
-            .w(px(INSPECTOR_W))
-            .flex_none()
+            .w_full()
+            .flex_initial()
+            .min_h(px(PANEL_MIN_H))
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .id("inspector-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(self.render_audio_tracks(cx))
-                    .child(ui::hairline())
-                    .child(self.render_export_options(window, cx)),
-            )
-            .child(self.render_export_footer(cx))
+            .child(div().id("inspector-scroll").flex_1().min_h_0().overflow_y_scroll().child(sections))
+            .child(div().flex().justify_end().child(div().w(px(INSPECTOR_W + 60.)).child(footer)))
             .into_any_element()
     }
 

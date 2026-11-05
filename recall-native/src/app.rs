@@ -79,7 +79,7 @@ pub fn run(instance: Option<crate::instance::Guard>) -> Result<(), String> {
 
 /// Scripted checks (`RECALL_NATIVE_BACKGROUND`): show the window at the bottom of the z-order
 /// without activating it, so a test instance never takes focus from the person at the PC.
-fn show_behind(window: &gpui::Window, width: f32, height: f32) {
+fn show_behind(window: &mut gpui::Window, width: f32, height: f32) {
     use windows::Win32::{
         Foundation::HWND,
         UI::WindowsAndMessaging::{HWND_BOTTOM, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetWindowPos},

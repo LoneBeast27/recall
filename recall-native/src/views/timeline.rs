@@ -11,7 +11,6 @@ use crate::{
     root::Root,
     theme::{self, c},
     ui::{self, Icon, icon},
-    views::editor::track_name,
 };
 
 const GUTTER: f32 = 104.0;
