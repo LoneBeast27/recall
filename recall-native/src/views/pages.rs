@@ -189,6 +189,11 @@ fn ac_profiles_installed() -> bool {
 }
 
 pub(crate) fn setting_row(title: &str, detail: &str) -> Div {
+    setting_row_with(title, None, detail)
+}
+
+/// [`setting_row`] with an element (an info button) right after the title.
+pub(crate) fn setting_row_with(title: &str, after_title: Option<AnyElement>, detail: &str) -> Div {
     div()
         .flex()
         .items_center()
@@ -201,7 +206,14 @@ pub(crate) fn setting_row(title: &str, detail: &str) -> Div {
                 .flex()
                 .flex_col()
                 .gap(px(2.))
-                .child(div().font_weight(FontWeight::MEDIUM).child(title.to_owned()))
+                .child(
+                    div()
+                        .flex()
+                        .items_center()
+                        .gap(px(6.))
+                        .child(div().font_weight(FontWeight::MEDIUM).child(title.to_owned()))
+                        .children(after_title),
+                )
                 .when(!detail.is_empty(), |d| d.child(div().text_size(px(12.)).line_height(px(16.)).text_color(c(theme::TERTIARY)).child(detail.to_owned()))),
         )
 }
