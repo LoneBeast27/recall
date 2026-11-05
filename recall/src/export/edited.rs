@@ -31,7 +31,7 @@ pub(super) fn export(
     settings: &ExportSettings,
     backend: VideoBackend,
 ) -> Result<EditedExport, String> {
-    let (source, origin_us, audio_indices, source_duration_us) = {
+    let (source, origin_us, audio_indices, source_duration_us, sources) = {
         let ictx = ff::format::input(input)
             .map_err(|e| format!("open input {}: {e}", input.display()))?;
         let source = probe_video(&ictx)?;
@@ -42,7 +42,9 @@ pub(super) fn export(
             .filter(|stream| stream.parameters().medium() == ff::media::Type::Audio)
             .map(|stream| stream.index())
             .collect();
-        (source, origin_us, audio, duration_us)
+        // The output's own sources tag: its tracks are the plan's outputs, in their order.
+        let sources = super::sources::for_outputs(&ictx, &audio, &plan.audio_outputs(&audio));
+        (source, origin_us, audio, duration_us, sources)
     };
     plan.validate(us_to_seconds(source_duration_us), &audio_indices)?;
     let timeline = EditTimeline::from_plan(plan)?;
@@ -74,6 +76,7 @@ pub(super) fn export(
         origin_us,
         timeline: &timeline,
         audio: &audio,
+        sources: &sources,
         width,
         height,
         backend,
@@ -134,6 +137,8 @@ struct Attempt<'a> {
     origin_us: i64,
     timeline: &'a EditTimeline,
     audio: &'a [EncodedAudioTrack],
+    /// `edit_model::AUDIO_SOURCES_TAG` for the output, when the input had one.
+    sources: &'a Option<Vec<String>>,
     width: u32,
     height: u32,
     backend: VideoBackend,
@@ -174,13 +179,12 @@ impl Attempt<'_> {
                 .map_err(|e| format!("add output audio stream {}: {e}", track.source_index))?;
             stream.set_parameters(&track.encoder);
             stream.set_time_base(ff::Rational(1, track.rate as i32));
-            if let Some(source) = ictx.stream(track.source_index) {
-                stream.set_metadata(source.metadata().to_owned());
+            if let Some(tags) = track.metadata(&ictx) {
+                stream.set_metadata(tags);
             }
             audio_output_indices.push(stream.index());
         }
-        octx.set_metadata(ictx.metadata().to_owned());
-        super::paths::write_faststart_header(&mut octx)?;
+        super::sources::write_header(&mut octx, &ictx, self.sources.clone())?;
         let mut audio_mux = EditedAudioMux::new(self.audio, audio_output_indices);
         let mut pipeline = EditedVideoPipeline {
             decoder: &mut decoder,

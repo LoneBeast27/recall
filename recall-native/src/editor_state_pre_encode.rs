@@ -73,7 +73,7 @@ impl EditorState {
         let Some(info) = self.info.as_ref().filter(|_| self.pre_encode_eligible()) else { return };
         let inputs = KeyInputs {
             clip: (info.path.clone(), info.source_bytes, info.source_modified_ms),
-            plan: self.plan.clone(),
+            plan: self.export_plan(),
             fps: self.fps,
             export: self.export_settings.clone(),
         };
@@ -83,7 +83,7 @@ impl EditorState {
         } else {
             self.pre.key_runs += 1;
             self.pre.keyed = Some((inputs, Instant::now()));
-            pre_encode::key(info, &self.plan, self.fps, &self.export_settings)
+            pre_encode::key(info, &self.export_plan(), self.fps, &self.export_settings)
         };
         if key != self.pre.current {
             let baseline = *self.pre.baseline.get_or_insert(key.unwrap_or(0));
@@ -105,7 +105,7 @@ impl EditorState {
         let settled = since.elapsed() >= SETTLE && self.drag.is_none();
         if may_start(settled, held, pre_encode::running(), pre_encode::status(key) == Status::None) {
             let info = info.clone();
-            if pre_encode::start(key, info, self.plan.clone(), self.fps, self.export_settings.clone()) {
+            if pre_encode::start(key, info, self.export_plan(), self.fps, self.export_settings.clone()) {
                 self.pre.pending_since = None;
             }
         }

@@ -284,7 +284,7 @@ mod tests {
 
     #[test]
     fn speed_scales_output_lengths_and_frame_times() {
-        let plan = EditPlan {
+        let plan = EditPlan { mix_down: None,
             ranges: vec![
                 TimeRange { start: 1.0, end: 2.0, speed: 0.25 },
                 TimeRange { start: 3.0, end: 5.0, speed: 4.0 },

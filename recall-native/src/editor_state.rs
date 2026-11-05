@@ -25,6 +25,8 @@ pub enum Drag {
     TrimStart(usize),
     TrimEnd(usize),
     Gain(usize),
+    /// A lane's listening level (left of the timeline): preview only, no undo step.
+    Listen(usize),
 }
 
 /// Device-pixel rect (x, y, w, h) of the preview canvas, written during paint.
@@ -81,6 +83,15 @@ pub struct EditorState {
     pub hole: DeviceRect,
     pub track_span: Span,
     pub gain_spans: Vec<Span>,
+    /// Listening levels beside the lanes (preview only; `editor_state_monitor.rs`).
+    pub monitor: monitor::Monitor,
+    pub listen_spans: Vec<Span>,
+    /// The editor page's size in window pixels, written during paint (layout choice).
+    pub area: Rc<Cell<Option<(f32, f32)>>>,
+    /// Portrait layout (export panel below the timeline), chosen from `area`.
+    pub portrait: bool,
+    /// The remembered "Mix tracks" choice for clips whose edits never set one.
+    pub mix_down_default: bool,
     pub drag: Option<Drag>,
     /// The plan a trim or gain drag started from.
     drag_from: Option<EditPlan>,
@@ -115,6 +126,8 @@ mod playback;
 pub mod stream;
 #[path = "editor_state_pre_encode.rs"]
 mod pre_encode;
+#[path = "editor_state_monitor.rs"]
+pub mod monitor;
 
 impl EditorState {
     pub fn new(preview: Result<NativePreview, String>) -> Self {
@@ -154,6 +167,11 @@ impl EditorState {
             hole: Rc::new(Cell::new(None)),
             track_span: Rc::new(Cell::new(None)),
             gain_spans: vec![],
+            monitor: monitor::Monitor::default(),
+            listen_spans: vec![],
+            area: Rc::new(Cell::new(None)),
+            portrait: false,
+            mix_down_default: true,
             drag: None,
             drag_from: None,
             generation: 0,
@@ -265,15 +283,13 @@ impl EditorState {
                 self.export_settings = project.export.clone();
                 project.plan
             }
-            None => EditPlan {
+            None => EditPlan { mix_down: None,
                 ranges: vec![TimeRange::new(0.0, info.duration)],
-                audio: info
-                    .audio
-                    .iter()
-                    .map(|a| AudioSetting { stream_index: a.stream_index, gain_db: 0.0, muted: false })
-                    .collect(),
+                // App tracks start out of the mix: Desktop audio or the game already holds them.
+                audio: info.default_audio(),
             },
         };
+        self.mix_down_default = crate::services::editor_prefs::EditorPrefs::load().mix_down;
         self.selected = 0;
         self.undo.clear();
         self.redo.clear();
@@ -281,6 +297,8 @@ impl EditorState {
         self.dirty_since = None;
         self.warning = warning;
         self.gain_spans = (0..info.audio.len()).map(|_| Rc::new(Cell::new(None))).collect();
+        self.listen_spans = (0..info.audio.len()).map(|_| Rc::new(Cell::new(None))).collect();
+        self.monitor = monitor::Monitor::default();
         self.needs_flush = false;
         self.status = "Loading preview…".into();
     }
@@ -289,13 +307,9 @@ impl EditorState {
         info.audio
             .iter()
             .map(|track| {
-                let setting = self.setting(track.stream_index);
-                PreviewTrack {
-                    stream_index: track.stream_index,
-                    path: track.preview_path.clone(),
-                    gain_db: setting.map_or(0.0, |s| s.gain_db),
-                    muted: setting.is_some_and(|s| s.muted),
-                }
+                // Export level plus listening level (`editor_state_monitor.rs`).
+                let (gain_db, muted) = self.preview_audio(track.stream_index);
+                PreviewTrack { stream_index: track.stream_index, path: track.preview_path.clone(), gain_db, muted }
             })
             .collect()
     }

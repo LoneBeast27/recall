@@ -60,11 +60,11 @@ pub(super) fn export_to_temp(input: &Path, temp: &Path, fps: u32) -> Result<Expo
         }
         stream_map[stream.index()] = Some(out.index());
     }
-    octx.set_metadata(ictx.metadata().to_owned());
-
     let origin_us = timeline_origin_us(&ictx, video_index);
     let planned_duration_us = timeline_duration_us(&ictx, origin_us);
-    super::paths::write_faststart_header(&mut octx)?;
+    // Every audio track is kept as it is: the sources tag passes through.
+    let sources = super::sources::unchanged(&ictx);
+    super::sources::write_header(&mut octx, &ictx, sources)?;
     let output_time_bases: Vec<_> = octx.streams().map(|s| s.time_base()).collect();
 
     let mut pipeline = VideoPipeline {

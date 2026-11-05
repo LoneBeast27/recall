@@ -1,6 +1,7 @@
 //! Source timeline: ruler, filmstrip, waveform lanes, cut regions, selected
 //! segment with trim handles, and the signal-red playhead.
-//! The interactive tracks (lanes, regions, handles, playhead) are in `timeline_tracks.rs`.
+//! The interactive tracks (lanes, regions, handles, playhead) are in `timeline_tracks.rs`;
+//! the listen-only lane controls left of it in `timeline_listen.rs`.
 use std::path::PathBuf;
 
 use gpui::{AnyElement, Context, ObjectFit, div, img, prelude::*, px, relative};
@@ -10,10 +11,9 @@ use crate::{
     root::Root,
     theme::{self, c},
     ui::{self, Icon, icon},
-    views::editor::track_name,
 };
 
-const GUTTER: f32 = 88.0;
+const GUTTER: f32 = 104.0;
 const RULER_H: f32 = 22.0;
 const VIDEO_H: f32 = 60.0;
 const LANE_H: f32 = 40.0;
@@ -23,6 +23,8 @@ const LANE_GAP: f32 = 6.0;
 mod tracks;
 #[path = "timeline_loading.rs"]
 mod loading;
+#[path = "timeline_listen.rs"]
+mod listen;
 
 impl Root {
     pub fn render_timeline(&mut self, cx: &mut Context<Self>) -> AnyElement {
@@ -40,7 +42,7 @@ impl Root {
                     .pt(px(8.))
                     .pb(px(12.))
                     .pr(px(16.))
-                    .child(self.render_gutter(lanes))
+                    .child(self.render_gutter(lanes, cx))
                     .child(self.render_tracks(tracks_h, cx)),
             )
             .into_any_element()
@@ -116,43 +118,6 @@ impl Root {
                     .child(div().font_family(theme::mono()).text_color(c(theme::MUTED)).child(timecode(kept)))
                     .child("kept"),
             )
-            .into_any_element()
-    }
-
-    fn render_gutter(&self, lanes: usize) -> AnyElement {
-        let names: Vec<(String, bool)> = self
-            .ed
-            .info
-            .as_ref()
-            .map(|info| {
-                info.audio
-                    .iter()
-                    .enumerate()
-                    .map(|(i, t)| (track_name(&t.name, i), self.ed.setting(t.stream_index).is_some_and(|s| s.muted)))
-                    .collect()
-            })
-            .unwrap_or_else(|| (0..lanes).map(|i| (format!("Audio {}", i + 1), false)).collect());
-        let label = |kind: Icon, text: String, h: f32, dim: bool| {
-            div()
-                .h(px(h))
-                .flex()
-                .items_center()
-                .gap(px(7.))
-                .text_size(px(12.))
-                .text_color(c(if dim { theme::TERTIARY } else { theme::MUTED }))
-                .child(icon(kind, 14., if dim { theme::TERTIARY } else { theme::MUTED }))
-                .child(div().truncate().child(text))
-        };
-        div()
-            .w(px(GUTTER))
-            .flex_none()
-            .pl(px(16.))
-            .flex()
-            .flex_col()
-            .gap(px(LANE_GAP))
-            .child(div().h(px(RULER_H)))
-            .child(label(Icon::Film, "Video".into(), VIDEO_H, false))
-            .children(names.into_iter().map(|(name, muted)| label(if muted { Icon::VolumeX } else { Icon::Volume }, short_name(&name), LANE_H, muted)))
             .into_any_element()
     }
 
@@ -249,7 +214,7 @@ fn ruler_label(t: f64) -> String {
     format!("{}:{:02}", total / 60, total % 60)
 }
 
-fn short_name(name: &str) -> String {
+pub(super) fn short_name(name: &str) -> String {
     match name {
         "Microphone" => "Mic".into(),
         "Voice chat" => "Voice".into(),

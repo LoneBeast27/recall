@@ -12,6 +12,8 @@
 //!   (`RECALL_AUDIO_VOICE_PID`, or `RECALL_AUDIO_VOICE_EXE` e.g. `Discord.exe`);
 //!   no track when neither is set or the app is not running. Mic mute never
 //!   touches it.
+//! - App tracks: one per app chosen in Settings (`RECALL_AUDIO_APPS`), after
+//!   the tracks above, named by the person's label; see `audio/apps.rs`.
 //! App→cable routing stays the user's/Windows' job; we only read endpoints.
 //!
 //! Each track runs its own capture thread pushing interleaved f32 samples into
@@ -25,6 +27,7 @@ use std::sync::{Arc, Mutex};
 
 use wasapi::{DeviceCollection, Direction, SampleType, StreamMode, WaveFormat};
 
+mod apps;
 mod voice;
 
 static MIC_MUTED: AtomicBool = AtomicBool::new(false);
@@ -114,6 +117,8 @@ pub struct LoopbackTarget {
 /// clip length. Owned and `Send`, so the saver thread encodes it off-ring.
 pub struct AudioPcm {
     pub name: &'static str,
+    /// Where the track came from (`edit_model::SOURCE_*` / `app:<exe>`), saved in the clip.
+    pub source: &'static str,
     pub rate: u32,
     pub channels: u16,
     pub samples: Vec<f32>,
@@ -122,6 +127,8 @@ pub struct AudioPcm {
 /// Interleaved f32 ring + the format it was captured in.
 pub struct TrackRing {
     pub name: &'static str,
+    /// Where the track comes from (`edit_model::SOURCE_*` / `app:<exe>`).
+    pub source: &'static str,
     /// Resolved endpoint friendly name (set by the capture thread at init).
     endpoint: Mutex<String>,
     pub rate: u32,
@@ -172,6 +179,7 @@ impl TrackRing {
     pub fn snapshot_pcm(&self, secs: f64) -> AudioPcm {
         AudioPcm {
             name: self.name,
+            source: self.source,
             rate: self.rate,
             channels: self.channels,
             samples: self.snapshot(secs),
@@ -249,6 +257,10 @@ pub fn start(buffer_secs: u32, mut report: impl FnMut(String)) -> Vec<Arc<TrackR
             }
             Err(e) => report(format!("audio track '{}' UNAVAILABLE: {e}", spec.name)),
         }
+    }
+    match apps::from_env() {
+        Ok(list) => out.extend(apps::start(&list, buffer_secs, game_pid.clone().ok().flatten(), &mut report)),
+        Err(e) => report(format!("app audio tracks UNAVAILABLE: {e}")),
     }
     out
 }
@@ -347,6 +359,18 @@ fn parse_pid(key: &str, value: &str) -> Result<u32, String> {
     }
 }
 
+/// The saved source of a built-in track: the game's process tree, or an output it listens to.
+fn source_of(spec: &TrackSpec, process: bool) -> &'static str {
+    use crate::edit_model::{SOURCE_DESKTOP, SOURCE_GAME_PROCESS, SOURCE_MIC, SOURCE_VOICE};
+    match spec.process {
+        ProcessSource::GamePid if process => SOURCE_GAME_PROCESS,
+        ProcessSource::GamePid => SOURCE_DESKTOP,
+        ProcessSource::VoiceApp => SOURCE_VOICE,
+        ProcessSource::None if spec.direction == Direction::Capture => SOURCE_MIC,
+        ProcessSource::None => SOURCE_DESKTOP,
+    }
+}
+
 /// Spawn the capture thread for one track. ALL WASAPI/COM objects are created
 /// on the capture thread (they are !Send); init success/failure is reported
 /// back over a channel before this returns. `target` selects process loopback
@@ -361,6 +385,7 @@ fn start_track(
     let (rate, channels) = (48_000u32, 2u16);
     let ring = Arc::new(TrackRing {
         name: spec.name,
+        source: source_of(spec, target.is_some()),
         endpoint: Mutex::new(String::new()),
         rate,
         channels,
