@@ -15,6 +15,7 @@
 //! video time base.
 
 mod bg_io;
+pub(crate) use bg_io::enter_background;
 mod events;
 mod frame_fit;
 mod gpu_smoke;
@@ -36,7 +37,8 @@ use std::time::{Duration, Instant};
 use ffmpeg_next as ff;
 
 use crate::audio::TrackRing;
-use crate::ring::{EncodedPacket, PacketRing};
+use crate::ring::{EncodedPacket, PacketRing, Payload};
+use crate::spill::Spill;
 use frame_fit::{fill_rgbz, normalize_small_size_jitter, SmallFrames};
 use handoff::handle_save;
 use mux::OwnedParams;
@@ -176,6 +178,8 @@ struct Enc {
     /// `Some(pool_id)` when NVENC reads D3D11 frames from that pool, `None` for RGB0.
     gpu_pool: Option<usize>,
     last_input_pts: Option<u64>,
+    /// The "RAM full, dropping old seconds" line was logged for this ring.
+    dropped_noted: bool,
 }
 
 fn run(
@@ -207,6 +211,9 @@ fn run(
     // After one fallback the engine stays on H.264: reopening on a resolution
     // change must not flap codecs or re-log the same failure.
     let mut want = cfg.codec;
+    // One RAM budget and spill file for the whole run; every reopened ring shares it.
+    let json = cfg.json;
+    let spill = Arc::new(Spill::from_system(cfg.buffer_secs, cfg.bitrate, audio.len(), Arc::new(move |m: &str| report(json, m))));
 
     loop {
         // Saves first: they're rare and user-facing latency matters (R10).
@@ -252,7 +259,7 @@ fn run(
                     stats.clear_buffer();
                 }
                 if enc.is_none() && failed_resolution != Some((frame.width, frame.height)) {
-                    enc = match open_encoder(&cfg, want, frame.width, frame.height, frame.gpu.as_ref()) {
+                    enc = match open_encoder(&cfg, want, frame.width, frame.height, frame.gpu.as_ref(), Some(Arc::clone(&spill))) {
                         Ok((e, fallback)) => {
                             crate::longrec::tap::on_encoder_open(&e.encoder); // long-recording hook
                             if let Some(note) = fallback {
@@ -327,7 +334,14 @@ fn gpu_pool_of(frame: &PacedFrame) -> Option<usize> {
 
 /// Open `codec` (falling back to h264_nvenc) for even-cropped `w`x`h` input: D3D11 frames
 /// from `gpu`'s pool when given, else RGB0. The second value is the fallback line to log.
-fn open_encoder(cfg: &Config, codec: Codec, w: u32, h: u32, gpu: Option<&crate::gpu_frames::HwFrame>) -> Result<(Enc, Option<String>), String> {
+fn open_encoder(
+    cfg: &Config,
+    codec: Codec,
+    w: u32,
+    h: u32,
+    gpu: Option<&crate::gpu_frames::HwFrame>,
+    spill: Option<Arc<Spill>>,
+) -> Result<(Enc, Option<String>), String> {
     let (w, h) = (w & !1, h & !1);
     if w == 0 || h == 0 {
         return Err("NVENC cannot open a zero-sized capture".into());
@@ -339,7 +353,8 @@ fn open_encoder(cfg: &Config, codec: Codec, w: u32, h: u32, gpu: Option<&crate::
     let enc = Enc {
         params: OwnedParams::from_encoder(&encoder),
         encoder,
-        ring: PacketRing::new(cfg.buffer_secs as u64 * 1_000_000),
+        ring: PacketRing::with_spill(cfg.buffer_secs as u64 * 1_000_000, spill),
+        dropped_noted: false,
         nominal_fps: cfg.fps,
         bitrate: cfg.bitrate,
         codec: opened.codec,
@@ -404,6 +419,10 @@ fn try_open(
 }
 
 impl Enc {
+    fn ring_capacity_secs(&self) -> u64 {
+        self.ring.capacity_us() / 1_000_000
+    }
+
     /// Encode one paced frame; drain packets into the ring. Keeps the raw
     /// frame afterwards as the thumbnail/still source.
     fn encode(&mut self, frame: PacedFrame, stats: &EncStats) -> Result<(), String> {
@@ -465,9 +484,17 @@ impl Enc {
                 frame_idx: pts,
                 duration_us: (1_000_000 / self.nominal_fps.max(1) as u64).max(1),
                 keyframe: pkt.is_key(),
-                data,
+                data: Payload::from(data),
             });
             stats.encoded_frames.fetch_add(1, Relaxed);
+        }
+        if !self.dropped_noted && self.ring.dropped_for_ram() > 0 {
+            self.dropped_noted = true;
+            eprintln!(
+                "[recall] replay buffer: RAM budget full and no spill file; keeping the last {:.0} s instead of {} s",
+                self.ring.span_us() as f64 / 1e6,
+                self.ring_capacity_secs()
+            );
         }
         stats
             .buffered_frames
