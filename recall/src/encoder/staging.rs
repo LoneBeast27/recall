@@ -14,7 +14,7 @@
 //!   than its clip folder ([`same_volume`]); otherwise it is written in place.
 //! - Per-clip sidecars are written against the FINAL path, straight into the
 //!   clip folder: the bookmark sidecar (`bookmarks.rs`, on the `saved` event)
-//!   and the gallery thumbnail + Moments row (`mux::finish_gallery`, which
+//!   and the gallery thumbnail (`mux::finish_gallery`, which
 //!   reads the request-time frame, never the clip file). Only the `.mp4`
 //!   travels through staging.
 //! - Crash recovery ([`recover`], at engine start, before the first save): every

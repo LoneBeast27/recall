@@ -63,10 +63,6 @@ pub(crate) struct SaveJob {
     pub backend: &'static str,
     pub audio: Vec<AudioPcm>,
     pub thumb: Option<RawFrame>,
-    pub width: u32,
-    pub height: u32,
-    pub fps: u32,
-    pub session_id: String,
     pub timing: Timing,
 }
 
@@ -231,7 +227,7 @@ fn wait_done(done: &Receiver<()>, timeout: Duration) -> bool {
     !matches!(done.recv_timeout(timeout), Err(RecvTimeoutError::Timeout))
 }
 
-/// Spawn the production saver (real mux + Moments gallery + SSD staging).
+/// Spawn the production saver (real mux + gallery thumbnail + SSD staging).
 pub(super) fn spawn_default(events: Events) -> (SaverQueue, SaverControl) {
     spawn_staged(
         events,
@@ -349,7 +345,7 @@ impl Worker {
                 if let (Some(stage), Some(_)) = (&self.stage, &staged) {
                     stage.hand_off(target, &job.path, &self.events);
                 }
-                // Thumbnail + Moments row: against the FINAL path, from the
+                // Thumbnail: against the FINAL path, from the
                 // request-time frame (nothing here reads the clip file).
                 let gallery = Instant::now();
                 (self.gallery)(job, muxed.secs, bytes, &self.events);
