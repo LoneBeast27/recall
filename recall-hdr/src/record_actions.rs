@@ -13,6 +13,7 @@ use crate::record_activity::{LongRec, PendingPause, Trigger, PAUSE_STOP_WAIT};
 use crate::record_app::Controller;
 use crate::record_engine::{capture_refusal, EngineTarget, Step};
 use crate::record_hotkeys::{bindings, HotkeyAction};
+use crate::record_notice::shortcut_notice_json;
 use crate::record_status::error_event;
 
 /// Minimum gap between two runs of the same action (key repeat / bounce).
@@ -24,6 +25,7 @@ fn debounce_of(action: HotkeyAction) -> (&'static str, Duration) {
         HotkeyAction::Screenshot => ("screenshot", Duration::from_millis(500)),
         HotkeyAction::Record => ("record", Duration::from_secs(1)),
         HotkeyAction::Stats => ("stats", Duration::from_millis(250)),
+        HotkeyAction::Overlay => ("overlay", Duration::from_millis(250)),
         HotkeyAction::ToggleHdr => ("hdr", Duration::from_millis(250)),
     }
 }
@@ -66,14 +68,17 @@ impl Controller {
             return;
         }
         self.last_fired.insert(key, now);
-        if self.paused && action != HotkeyAction::Stats {
-            // Resume is the tray / app; the stats island still toggles.
-            if let HotkeyAction::Save { .. } = action {
-                self.refuse_capture("save_clip", crate::record_engine::PAUSED_REASON);
-            } else {
-                log!("record: {key} hotkey ignored -- recording is paused");
+        if self.paused {
+            // Resume is the tray / app. Capture shortcuts say why they did
+            // nothing; mic, stats and overlay still toggle.
+            let paused = crate::record_engine::PAUSED_REASON;
+            match action {
+                HotkeyAction::Save { .. } => return self.refuse_capture("save_clip", paused),
+                HotkeyAction::Screenshot => return self.refuse_capture("screenshot", paused),
+                HotkeyAction::Record => return self.refuse_capture("record_toggle", paused),
+                HotkeyAction::Bookmark => return self.refuse_bookmark(paused),
+                _ => {}
             }
-            return;
         }
         match action {
             HotkeyAction::Save { seconds } => {
@@ -92,7 +97,16 @@ impl Controller {
                 }
                 self.engine_command(cmd, None);
             }
-            HotkeyAction::Stats => self.toggle_stats(None),
+            HotkeyAction::Stats => {
+                self.toggle_stats(None);
+                let (title, detail) = if self.cfg.overlay.stats {
+                    ("Performance stats on", "Shows over your game")
+                } else {
+                    ("Performance stats off", "")
+                };
+                self.shortcut_notice(title, detail);
+            }
+            HotkeyAction::Overlay => self.toggle_overlay(),
             HotkeyAction::ToggleHdr => {
                 if let Err(e) = self.hdr.toggle() {
                     log!("record: HDR hotkey ignored: {e}");
@@ -105,6 +119,9 @@ impl Controller {
     /// engine, or report why it cannot run (paused, no game, starting).
     pub(crate) fn engine_command(&mut self, cmd: &'static str, client: Option<u64>) {
         if let Some(reason) = capture_refusal(self.paused, self.engine_running(), &self.wanted()) {
+            if cmd == "bookmark" && client.is_none() {
+                return self.refuse_bookmark(reason); // the hotkey
+            }
             if cmd == "record_stop" || cmd == "bookmark" {
                 return self.reply_error(client, &format!("{cmd}: {reason}"));
             }
@@ -130,6 +147,54 @@ impl Controller {
         };
         self.hub.event("engine", &event.to_string());
         crate::supervisor::beep_failure();
+    }
+
+    /// A bookmark shortcut that could not mark anything: its pop-up + beep.
+    fn refuse_bookmark(&self, reason: &str) {
+        log!("record: bookmark refused -- {reason}");
+        if self.cfg.overlay.enabled {
+            self.hub.event(
+                "session",
+                &shortcut_notice_json("Bookmark not added", reason, true, false),
+            );
+        }
+        crate::supervisor::beep_failure();
+    }
+
+    /// The pop-up for a shortcut with no engine event of its own (stats,
+    /// overlay on); shown while notices (`overlay.enabled`) are on.
+    pub(crate) fn shortcut_notice(&self, title: &str, detail: &str) {
+        if self.cfg.overlay.enabled {
+            self.hub.event(
+                "session",
+                &shortcut_notice_json(title, detail, false, false),
+            );
+        }
+    }
+
+    /// The overlay shortcut flips `overlay.enabled` (Settings "Show notices").
+    /// "Overlay off" is forced through, so turning it off is seen too.
+    fn toggle_overlay(&mut self) {
+        let on = !self.cfg.overlay.enabled;
+        let key = self.cfg.recording.overlay_hotkey.replace('+', " ");
+        let was_running = self.overlay.running();
+        if !on {
+            self.overlay.linger(); // with stats off too, keep it up to show this
+            let detail = format!("{key} shows it again");
+            self.hub.event(
+                "session",
+                &shortcut_notice_json("Overlay off", &detail, false, true),
+            );
+        }
+        self.apply_config_patch(&json!({"overlay": {"enabled": on}}), None);
+        if on && was_running {
+            self.shortcut_notice("Overlay on", "Notices show over any app");
+        } else if on {
+            // A fresh overlay process gets it with its first status.
+            let notice =
+                shortcut_notice_json("Overlay on", "Notices show over any app", false, false);
+            self.pending_notice = Some((notice, Instant::now() + crate::overlay_proc::LINGER));
+        }
     }
 
     /// Pause stops the engine now (no linger) and ignores games until resume;

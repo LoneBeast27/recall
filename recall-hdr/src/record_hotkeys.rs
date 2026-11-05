@@ -3,7 +3,8 @@
 //! `save_hotkey` kept working, and conflict detection.
 //!
 //! - **Defaults**: one direct Alt combo per action -- Alt+N save, Alt+M mic,
-//!   Alt+B bookmark, Alt+S screenshot, Alt+L long recording, Alt+P stats.
+//!   Alt+B bookmark, Alt+S screenshot, Alt+L long recording, Alt+P stats,
+//!   Alt+O overlay (notices) on/off.
 //!   Rohan, 2026-11-05: the two-step chord (Alt+` then a digit) was on Alt
 //!   anyway, so it is gone. [`GAMER_COMBOS`] are never defaults. Bookmark,
 //!   screenshot, record and stats can be turned off ("").
@@ -34,6 +35,7 @@ pub const DEFAULT_BOOKMARK: &str = "Alt+B";
 pub const DEFAULT_SCREENSHOT: &str = "Alt+S";
 pub const DEFAULT_RECORD: &str = "Alt+L";
 pub const DEFAULT_STATS: &str = "Alt+P";
+pub const DEFAULT_OVERLAY: &str = "Alt+O";
 
 /// Combos games, launchers and overlays commonly own (GeForce/ShadowPlay,
 /// Xbox Game Bar, Steam, Discord, screenshot tools), plus Ctrl+Alt+R (a
@@ -54,6 +56,8 @@ pub enum HotkeyAction {
     Record,
     /// Show / hide the performance-stats island.
     Stats,
+    /// Turn the overlay's notices (`overlay.enabled`) on or off.
+    Overlay,
     ToggleHdr,
 }
 
@@ -100,6 +104,7 @@ pub fn bindings(rec: &RecordingCfg, hdr: Option<&str>) -> Vec<Binding> {
         (HotkeyAction::Screenshot, "recording.screenshot_hotkey", "screenshot", rec.screenshot_hotkey.as_str()),
         (HotkeyAction::Record, "recording.record_hotkey", "long recording", rec.record_hotkey.as_str()),
         (HotkeyAction::Stats, "recording.stats_hotkey", "performance stats", rec.stats_hotkey.as_str()),
+        (HotkeyAction::Overlay, "recording.overlay_hotkey", "overlay", rec.overlay_hotkey.as_str()),
         (HotkeyAction::ToggleHdr, "hotkey.toggle_hdr", "HDR toggle", hdr.unwrap_or("")),
     ];
     for (action, key, label, accel) in singles {
@@ -212,6 +217,42 @@ pub fn migrate_loaded(rec: &mut RecordingCfg, toml_text: &str) {
     rec.save_hotkey = legacy_save_hotkey(&rec.save_hotkeys);
     if doc.as_ref().is_some_and(|v| v.get("hotkeys").is_some()) {
         fill_chord_era_defaults(rec);
+    }
+    let has = |key: &str| {
+        doc.as_ref()
+            .and_then(|v| v.get("recording"))
+            .is_some_and(|r| r.get(key).is_some())
+    };
+    if !has("stats_hotkey") {
+        drop_taken_default(rec, HotkeyAction::Stats);
+    }
+    if !has("overlay_hotkey") {
+        drop_taken_default(rec, HotkeyAction::Overlay);
+    }
+}
+
+/// A key the file did not have came in as its serde default: turn it off
+/// ("") when another binding already holds that combo, so the loaded config
+/// still validates and Settings can save.
+fn drop_taken_default(rec: &mut RecordingCfg, action: HotkeyAction) {
+    let id = |accel: &str| parse_accel(accel).ok().map(|h| h.id());
+    let list = bindings(rec, None);
+    let Some(mine) = list
+        .iter()
+        .find(|b| b.action == action)
+        .and_then(|b| id(&b.accel))
+    else {
+        return;
+    };
+    let taken = list
+        .iter()
+        .any(|b| b.action != action && id(&b.accel) == Some(mine));
+    if taken {
+        match action {
+            HotkeyAction::Stats => rec.stats_hotkey.clear(),
+            HotkeyAction::Overlay => rec.overlay_hotkey.clear(),
+            _ => {}
+        }
     }
 }
 

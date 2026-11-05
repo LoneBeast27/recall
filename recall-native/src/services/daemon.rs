@@ -105,6 +105,8 @@ pub struct SessionStatus {
     pub record_hotkey: String,
     /// Shows / hides the performance-stats island ("" = off).
     pub stats_hotkey: String,
+    /// Turns the overlay's notices on or off ("" = off).
+    pub overlay_hotkey: String,
     /// Hotkeys the recorder could not register, one line each (empty on older builds).
     pub hotkey_problems: Vec<String>,
     pub long_recording: LongRecording,

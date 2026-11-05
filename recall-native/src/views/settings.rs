@@ -97,7 +97,7 @@ impl Root {
                 })))
                 .into_any_element(),
             section_title("Overlay"),
-            setting_row("Show notices", "Saves, bookmarks and recording changes appear for 3 seconds. Hidden from your own captures.")
+            setting_row("Show notices", "Every shortcut, save and recording change pops up for a few seconds, over games and any other app. Hidden from your own captures.")
                 .child(ui::switch("overlay-on", overlay_on).on_click(cx.listener(move |this, _, _, cx| {
                     this.set_config("overlay", "enabled", json!(!overlay_on));
                     cx.notify();
@@ -189,7 +189,7 @@ impl Root {
             div()
                 .text_size(px(12.))
                 .text_color(c(theme::TERTIARY))
-                .child("These work in every game, even when Recall is closed.")
+                .child("These work everywhere, even when Recall is closed.")
                 .into_any_element(),
             div()
                 .flex()
