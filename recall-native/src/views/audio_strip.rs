@@ -154,6 +154,7 @@ impl Root {
             .cursor(CursorStyle::OpenHand)
             .hover(|s| s.bg(c(theme::FLOATING)))
             .child(icon(Icon::Grip, 16., theme::TERTIARY))
+            .child(crate::trace::target(format!("strip-grip-{id}")))
             .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()));
         let header = div().h(px(26.)).flex().items_center().gap(px(8.)).child(type_icon).child(name);
 
@@ -207,8 +208,8 @@ impl Root {
                     .flex_1()
                     .flex_shrink()
                     .min_w_0()
-                    .px(px(6.))
-                    .gap(px(6.))
+                    .px(px(4.))
+                    .gap(px(4.))
                     .text_size(px(12.))
                     .when(!source.enabled, |b| b.bg(c(theme::BASE)).text_color(c(theme::MUTED)))
                     .child(icon(if source.enabled { Icon::Volume } else { Icon::VolumeX }, 13., if source.enabled { theme::TEXT } else { theme::MUTED }))
