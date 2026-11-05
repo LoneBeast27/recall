@@ -99,6 +99,7 @@ impl Enc {
             seconds: req.seconds,
             requested: req.requested,
             secs,
+            video_end_us: req.end_us.map(|_| end_us),
             video,
             backend: self.backend,
             audio,
