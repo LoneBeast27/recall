@@ -5,6 +5,7 @@ pub mod library;
 pub mod pages;
 pub mod settings;
 pub mod settings_capture;
+pub mod ssd_meter;
 pub mod storage_settings;
 pub mod tile_menu;
 pub mod timeline;
