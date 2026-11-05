@@ -53,11 +53,9 @@ impl EditorState {
     }
 
     fn sync_audio(&mut self) {
-        let settings = self.plan.audio.clone();
-        if let Some(preview) = self.preview.as_mut() {
-            for s in settings {
-                let _ = preview.set_audio(s.stream_index, s.gain_db, s.muted);
-            }
+        let streams: Vec<usize> = self.plan.audio.iter().map(|s| s.stream_index).collect();
+        for stream in streams {
+            self.push_preview_audio(stream);
         }
     }
 
@@ -172,6 +170,12 @@ impl EditorState {
                 let f = ((window_x - span.0) / span.1.max(1.0)).clamp(0.0, 1.0) as f64;
                 self.set_gain(track, GAIN_MIN + f * (GAIN_MAX - GAIN_MIN));
             }
+            Drag::Listen(track) => {
+                use super::monitor::{LISTEN_MAX, LISTEN_MIN};
+                let Some(span) = self.listen_spans.get(track).and_then(|s| s.get()) else { return };
+                let f = ((window_x - span.0) / span.1.max(1.0)).clamp(0.0, 1.0) as f64;
+                self.set_listen_gain(track, LISTEN_MIN + f * (LISTEN_MAX - LISTEN_MIN));
+            }
         }
     }
 
@@ -189,20 +193,16 @@ impl EditorState {
         let db = (db * 2.0).round() / 2.0; // 0.5 dB steps
         let Some(setting) = self.setting_mut(track) else { return };
         setting.gain_db = db.clamp(GAIN_MIN, GAIN_MAX);
-        let (stream, gain, muted) = (setting.stream_index, setting.gain_db, setting.muted);
-        if let Some(preview) = self.preview.as_mut() {
-            let _ = preview.set_audio(stream, gain, muted);
-        }
+        let stream = setting.stream_index;
+        self.push_preview_audio(stream);
     }
 
     pub fn toggle_mute(&mut self, track: usize) {
         self.revise();
         let Some(setting) = self.setting_mut(track) else { return };
         setting.muted = !setting.muted;
-        let (stream, gain, muted) = (setting.stream_index, setting.gain_db, setting.muted);
-        if let Some(preview) = self.preview.as_mut() {
-            let _ = preview.set_audio(stream, gain, muted);
-        }
+        let stream = setting.stream_index;
+        self.push_preview_audio(stream);
     }
 
     /// Mix the track into the export's first track, or keep it as its own track. Export only:
