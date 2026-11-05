@@ -20,6 +20,8 @@ use crate::{
 mod changes;
 #[path = "library_played.rs"]
 mod played;
+#[path = "library_select.rs"]
+mod select;
 
 pub const TILE_MIN_WIDTH: f32 = 220.0;
 pub const SCRUB_FRAMES: usize = 8;
@@ -361,33 +363,6 @@ impl LibraryState {
     }
 
     // ---- selection & metadata -------------------------------------------
-
-    /// Click with modifiers. Returns true when the click should open the clip.
-    pub fn click(&mut self, path: &str, ctrl: bool, shift: bool) -> bool {
-        if shift {
-            if let Some(anchor) = self.anchor.clone() {
-                let order = self.display_order();
-                if let (Some(a), Some(b)) = (order.iter().position(|p| *p == anchor), order.iter().position(|p| p == path)) {
-                    let (lo, hi) = (a.min(b), a.max(b));
-                    self.selection = order[lo..=hi].iter().cloned().collect();
-                    return false;
-                }
-            }
-        }
-        if ctrl || shift {
-            if !self.selection.remove(path) {
-                self.selection.insert(path.to_owned());
-            }
-            self.anchor = Some(path.to_owned());
-            return false;
-        }
-        if !self.selection.is_empty() {
-            self.selection.clear();
-            self.confirm_delete = false;
-            return false;
-        }
-        true
-    }
 
     fn display_order(&self) -> Vec<String> {
         self.groups.iter().flat_map(|g| g.items.iter()).map(|i| self.records[*i].path.clone()).collect()

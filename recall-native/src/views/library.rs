@@ -208,6 +208,15 @@ impl Root {
         }
         bar.child(div().font_family(theme::display()).text_size(px(22.)).line_height(px(28.)).font_weight(FontWeight::BOLD).child(format!("{count} selected")))
             .child(div().flex_1())
+            .when(count == 1, |bar| {
+                bar.child(ui::button("sel-open", Variant::Primary).child(icon(Icon::Play, 15., theme::BASE)).child("Open").child(ui::kbd("Enter")).on_click(cx.listener(|this, _, _, cx| {
+                    if let Some(path) = this.lib.only_selected() {
+                        this.open_clip(path);
+                        this.opened_by_click = true;
+                    }
+                    cx.notify();
+                })))
+            })
             .child(ui::button("sel-fav", Variant::Secondary).child(icon(Icon::Star, 15., theme::TEXT)).child("Favourite").on_click(cx.listener(|this, _, _, cx| {
                 let paths: Vec<String> = this.lib.selected_paths().iter().map(|p| p.to_string_lossy().into_owned()).collect();
                 this.lib.toggle_favourite(&paths);

@@ -72,6 +72,12 @@ impl Root {
                     }
                 }
                 "delete" if !self.lib.selection.is_empty() => self.lib.confirm_delete = true,
+                // A click selects a clip; Enter opens it.
+                "enter" if self.tile_menu.is_none() && !self.lib.confirm_delete && self.lib.only_selected().is_some() => {
+                    if let Some(path) = self.lib.only_selected() {
+                        self.open_clip(path);
+                    }
+                }
                 "a" if ctrl => {
                     self.lib.selection = self.lib.groups.iter().flat_map(|g| g.items.iter()).map(|i| self.lib.records[*i].path.clone()).collect();
                 }
