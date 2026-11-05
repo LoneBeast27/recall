@@ -160,12 +160,18 @@ fn chord_era_defaults_never_take_a_combo_already_in_use() {
 fn a_new_default_never_takes_a_combo_the_file_already_uses() {
     let r = load("[recording]\nbookmark_hotkey = \"Alt+O\"\nstats_hotkey = \"Alt+P\"\n");
     assert_eq!(r.bookmark_hotkey, "Alt+O");
-    assert_eq!(r.overlay_hotkey, "", "Alt+O is the bookmark's: the overlay shortcut starts off");
+    assert_eq!(
+        r.overlay_hotkey, "",
+        "Alt+O is the bookmark's: the overlay shortcut starts off"
+    );
     assert!(validate(&r).is_ok(), "so Settings can still save");
     let free = load("[recording]\nbookmark_hotkey = \"Alt+B\"\n");
     assert_eq!(free.overlay_hotkey, "Alt+O", "free: the default stays");
     let set = load("[recording]\noverlay_hotkey = \"Alt+O\"\nmic_hotkey = \"Alt+O\"\n");
-    assert_eq!(set.overlay_hotkey, "Alt+O", "a key the file names is never touched");
+    assert_eq!(
+        set.overlay_hotkey, "Alt+O",
+        "a key the file names is never touched"
+    );
 }
 
 #[test]

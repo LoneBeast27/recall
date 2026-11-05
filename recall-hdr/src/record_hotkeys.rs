@@ -218,7 +218,11 @@ pub fn migrate_loaded(rec: &mut RecordingCfg, toml_text: &str) {
     if doc.as_ref().is_some_and(|v| v.get("hotkeys").is_some()) {
         fill_chord_era_defaults(rec);
     }
-    let has = |key: &str| doc.as_ref().and_then(|v| v.get("recording")).is_some_and(|r| r.get(key).is_some());
+    let has = |key: &str| {
+        doc.as_ref()
+            .and_then(|v| v.get("recording"))
+            .is_some_and(|r| r.get(key).is_some())
+    };
     if !has("stats_hotkey") {
         drop_taken_default(rec, HotkeyAction::Stats);
     }
@@ -233,8 +237,16 @@ pub fn migrate_loaded(rec: &mut RecordingCfg, toml_text: &str) {
 fn drop_taken_default(rec: &mut RecordingCfg, action: HotkeyAction) {
     let id = |accel: &str| parse_accel(accel).ok().map(|h| h.id());
     let list = bindings(rec, None);
-    let Some(mine) = list.iter().find(|b| b.action == action).and_then(|b| id(&b.accel)) else { return };
-    let taken = list.iter().any(|b| b.action != action && id(&b.accel) == Some(mine));
+    let Some(mine) = list
+        .iter()
+        .find(|b| b.action == action)
+        .and_then(|b| id(&b.accel))
+    else {
+        return;
+    };
+    let taken = list
+        .iter()
+        .any(|b| b.action != action && id(&b.accel) == Some(mine));
     if taken {
         match action {
             HotkeyAction::Stats => rec.stats_hotkey.clear(),

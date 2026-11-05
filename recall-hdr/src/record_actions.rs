@@ -191,7 +191,8 @@ impl Controller {
             self.shortcut_notice("Overlay on", "Notices show over any app");
         } else if on {
             // A fresh overlay process gets it with its first status.
-            let notice = shortcut_notice_json("Overlay on", "Notices show over any app", false, false);
+            let notice =
+                shortcut_notice_json("Overlay on", "Notices show over any app", false, false);
             self.pending_notice = Some((notice, Instant::now() + crate::overlay_proc::LINGER));
         }
     }
