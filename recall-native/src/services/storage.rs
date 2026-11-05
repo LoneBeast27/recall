@@ -74,7 +74,7 @@ pub use prefetch::{PrefetchClip, PrefetchEvent, PrepareEditor, gpu_work_allowed,
 pub use projects::{ProjectSource, SidecarStep, export_dir, has_export, project_order, sidecar_step, working_copy_path, write_atomic};
 pub(crate) use projects::modified_ms as projects_modified_ms;
 #[allow(unused_imports)]
-pub use thumbs::{ThumbIndex, cached_thumb, ensure_thumb, recorder_thumb_stem, thumb_index};
+pub use thumbs::{ThumbIndex, cached_thumb, ensure_thumb, file_width as thumb_file_width, recorder_thumb_stem, set_wanted_width as set_thumb_width, thumb_index, wanted_width as thumb_width};
 #[allow(unused_imports)]
 pub use ssd_usage::{SsdUsage, generation as cache_generation, ssd_usage};
 #[allow(unused_imports)]

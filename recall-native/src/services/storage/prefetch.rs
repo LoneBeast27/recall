@@ -311,11 +311,16 @@ impl Feed {
         let size = |p: &str| Path::new(p).metadata().map_or(0, |m| m.len());
         match step {
             Step::Thumb => {
+                let started = std::time::Instant::now();
                 let result = super::thumbs::ensure_in(&self.root, Path::new(&path));
                 if let Ok(thumb) = &result {
                     self.gate.add(step, size(thumb));
                 }
                 sink(PrefetchEvent::Thumb(path, result));
+                // Background thumbnails take at most a quarter of one core: a cold cache of a
+                // few thousand clips was a full core for ~45 s at launch (2026-11-05). Tiles on
+                // screen do not wait for this; they ask on demand.
+                std::thread::sleep(thumb_rest(started.elapsed()));
             }
             Step::Duration => sink(PrefetchEvent::Duration(path.clone(), crate::services::library::mp4_duration(Path::new(&path)))),
             Step::Scrub => {
@@ -493,4 +498,10 @@ pub fn smart_status() -> String {
         line.push_str(" · paused while recording");
     }
     line
+}
+
+/// Rest after a background thumbnail that took `work`: three times as long (a 25% duty
+/// cycle), at most 100 ms so on-demand work on the lane never waits long behind it.
+pub(super) fn thumb_rest(work: std::time::Duration) -> std::time::Duration {
+    (work * 3).min(std::time::Duration::from_millis(100))
 }

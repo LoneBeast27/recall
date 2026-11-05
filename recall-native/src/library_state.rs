@@ -80,6 +80,10 @@ pub struct LibraryState {
     thumb_failed: HashSet<String>,
     /// Last check that the visible tiles' thumbnail files still exist (once a second).
     thumb_check_at: Option<std::time::Instant>,
+    /// Pixel width of each shown thumbnail file (read once from its header).
+    thumb_widths: HashMap<String, u32>,
+    /// Thumbnails rewritten in place at a larger size: the view drops their decoded images.
+    pub refreshed_images: Vec<String>,
     duration_queued: HashSet<String>,
     pub loading: bool,
     pub error: Option<String>,
@@ -129,6 +133,8 @@ impl LibraryState {
             thumb_queued: HashSet::new(),
             thumb_failed: HashSet::new(),
             thumb_check_at: None,
+            thumb_widths: HashMap::new(),
+            refreshed_images: Vec::new(),
             duration_queued: HashSet::new(),
             loading: true,
             error: None,
@@ -263,6 +269,21 @@ impl LibraryState {
                     self.thumb_failed.remove(&path);
                 }
             }
+            // A thumbnail narrower than the tile now is on screen (a wider window, a denser
+            // display): ask for a sharper one and keep showing this one meanwhile.
+            let needed = crate::services::storage::thumb_width();
+            for &index in &wanted {
+                let Some(thumb) = self.records[index].thumb.clone() else { continue };
+                let width = *self
+                    .thumb_widths
+                    .entry(thumb.clone())
+                    .or_insert_with(|| crate::services::storage::thumb_file_width(Path::new(&thumb)).unwrap_or(u32::MAX));
+                let path = &self.records[index].path;
+                if width < needed && !self.thumb_queued.contains(path) && !self.thumb_failed.contains(path) {
+                    self.thumb_queued.insert(path.clone());
+                    workers.asset(AssetJob::Thumb(path.clone()));
+                }
+            }
         }
         for index in wanted {
             let record = &self.records[index];
@@ -280,6 +301,16 @@ impl LibraryState {
         self.thumb_queued.remove(&path);
         match (result, self.by_path.get(&path).copied()) {
             (Ok(thumb), Some(index)) => {
+                // Rewritten in place (same file, larger): the view must drop the old decode.
+                if self.records[index].thumb.as_deref() == Some(thumb.as_str()) {
+                    self.refreshed_images.push(thumb.clone());
+                }
+                let width = crate::services::storage::thumb_file_width(Path::new(&thumb)).unwrap_or(u32::MAX);
+                self.thumb_widths.insert(thumb.clone(), width);
+                // Still too small (the source has no more pixels): do not ask again.
+                if width < crate::services::storage::thumb_width() {
+                    self.thumb_failed.insert(path.clone());
+                }
                 self.records[index].thumb = Some(thumb.clone());
                 if let Some(entry) = self.entries.iter_mut().find(|e| e.path == path) {
                     entry.thumb = Some(thumb);

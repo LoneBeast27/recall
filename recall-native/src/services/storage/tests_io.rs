@@ -205,7 +205,8 @@ fn thumbnails_import_newest_recorder_thumb_resize_large_and_generate_missing() {
     let cache = root.join("cache");
     let text = |p: &Path| p.to_string_lossy().into_owned();
 
-    // 1. Recorder thumb ≤ 640 px: newest epoch is copied byte-for-byte.
+    // 1. Display needs 640 px, recorder thumb is 640 px: newest epoch is copied byte-for-byte.
+    thumbs::set_wanted_width(640);
     let clip = library.join("game__2026-10-17__22-34-31-275__abc.mp4");
     std::fs::write(&clip, vec![7u8; 4096]).unwrap();
     let old = library.join("thumbs").join("game__2026-10-17__22-34-31-275__abc-1792250000-thumb.jpg");
@@ -220,20 +221,30 @@ fn thumbnails_import_newest_recorder_thumb_resize_large_and_generate_missing() {
     assert_eq!(index.lookup("game__2026-10-17__22-34-31-275__abc.mp4", bytes, secs), Some(PathBuf::from(&imported)));
     assert_eq!(index.lookup("game__2026-10-17__22-34-31-275__abc.mp4", bytes + 1, secs), None, "other revision");
 
-    // 2. Recorder thumb wider than 640 px is re-encoded to 480 px.
+    // 2. Display needs 448 px (a 448-wide tile): a 1920 px recorder thumb is scaled to 448.
+    thumbs::set_wanted_width(448);
     let wide = library.join("wide__2026-10-18__10-00-00-000__def.mp4");
     std::fs::write(&wide, vec![8u8; 4096]).unwrap();
     ffmpeg(&["-f", "lavfi", "-i", "color=c=green:s=1920x1080", "-frames:v", "1", &text(&library.join("thumbs").join("wide__2026-10-18__10-00-00-000__def-1792300000-thumb.jpg"))]);
     let scaled = thumbs::ensure_in(&cache, &wide).unwrap();
-    assert_eq!(thumbs::jpeg_size(&std::fs::read(&scaled).unwrap()), Some((480, 270)));
+    assert_eq!(thumbs::jpeg_size(&std::fs::read(&scaled).unwrap()), Some((448, 252)));
 
-    // 3. No recorder thumb: a frame is extracted from the clip at 480 px.
+    // 3. No recorder thumb: a frame is extracted from the clip at the wanted width.
     let bare = library.join("bare.mp4");
     ffmpeg(&["-f", "lavfi", "-i", "testsrc=size=640x360:rate=30", "-t", "2", "-pix_fmt", "yuv420p", "-c:v", "mpeg4", &text(&bare)]);
     let generated = thumbs::ensure_in(&cache, &bare).unwrap();
-    assert_eq!(thumbs::jpeg_size(&std::fs::read(&generated).unwrap()).map(|s| s.0), Some(480));
+    assert_eq!(thumbs::jpeg_size(&std::fs::read(&generated).unwrap()).map(|s| s.0), Some(448));
     assert_eq!(thumbs::ensure_in(&cache, &bare).unwrap(), generated, "second call is a cache hit");
     assert_eq!(thumbs::index_in(&cache).len(), 3);
+
+    // 4. A denser display needs 704 px: the 448 px thumbnail is replaced in place by a larger one,
+    //    taken from the clip since the 640 px recorder thumb is too small.
+    thumbs::set_wanted_width(700);
+    assert_eq!(thumbs::wanted_width(), 704, "rounded up to the 64 px step");
+    let sharper = thumbs::ensure_in(&cache, &bare).unwrap();
+    assert_eq!(sharper, generated, "same file");
+    assert_eq!(thumbs::jpeg_size(&std::fs::read(&sharper).unwrap()).map(|s| s.0), Some(704));
+    thumbs::set_wanted_width(thumbs::DEFAULT_WIDTH);
 
     // Settings usage / clear for the tier.
     let usage = tiers::usage_in(&cache);
