@@ -17,8 +17,7 @@ const CODECS: [(&str, &str); 3] = [("h264", "H.264"), ("hevc", "HEVC"), ("av1", 
 const RATES: [u64; 4] = [30, 60, 120, 144];
 const BITRATES: [u64; 4] = [15, 25, 40, 60];
 const EFFORT: [(&str, &str); 3] = [("performance", "Performance"), ("balanced", "Balanced"), ("quality", "Quality")];
-/// GiB; 0 = no limit.
-const CAPS: [(u64, &str); 5] = [(0, "No limit"), (250, "250 GB"), (500, "500 GB"), (1000, "1 TB"), (2000, "2 TB")];
+use crate::views::storage_limit::{self, CAPS};
 
 impl Root {
     fn segments<T: Copy + PartialEq + 'static>(
@@ -103,11 +102,78 @@ impl Root {
         let cap = self.config_value("storage", "cap_gb").and_then(Value::as_u64).unwrap_or(0);
         let recordings = self.recordings_folder();
         let used: u64 = self.lib.records.iter().filter(|r| crate::views::folders_settings::inside(&r.path, &recordings)).map(|r| r.bytes).sum();
-        let options: Vec<(u64, String)> = CAPS.iter().map(|(gb, l)| (*gb, (*l).to_owned())).collect();
-        let detail = format!("Recordings use {}. Past the limit, the oldest go to the Recycle Bin. Favourites and edited clips stay.", format_bytes(used));
-        vec![
-            section_title("Storage limit"),
-            setting_row("Keep recordings under", &detail).child(self.segments("cap", 400., &options, cap, "storage", "cap_gb", |v| json!(v), cx)).into_any_element(),
-        ]
+        let share = if cap > 0 { format!(" ({}% of {})", used.saturating_mul(100) / (cap << 30), storage_limit::cap_label(cap << 30)) } else { String::new() };
+        let detail = format!(
+            "Recordings use {}{share}. Past the limit, the oldest go to the Recycle Bin. You're told at 80% and 90%. Favourites and edited clips stay.",
+            format_bytes(used)
+        );
+        let mut track = ui::segment_track().w(px(400.));
+        for (i, (value, label)) in CAPS.iter().enumerate() {
+            let value = *value;
+            let picked = self.storage_confirm.as_ref().map(|p| u64::from(p.cap_gb)).or(self.storage_asking.map(u64::from)).unwrap_or(cap);
+            track = track.child(ui::segment((SharedString::from(format!("cap-{i}")), i), (*label).to_owned(), value == picked).on_click(cx.listener(move |this, _, _, cx| {
+                this.pick_storage_cap(value, cap);
+                cx.notify();
+            })));
+        }
+        let mut items = vec![section_title("Storage limit"), setting_row("Keep recordings under", &detail).child(track).into_any_element()];
+        if let Some(asking) = self.storage_asking {
+            let text = format!("Checking what {} would move…", storage_limit::cap_label(u64::from(asking) << 30));
+            items.push(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(text).into_any_element());
+        }
+        if let Some(preview) = self.storage_confirm.clone() {
+            let (question, detail, action) = storage_limit::confirm(&preview, crate::services::library::today());
+            let cap_gb = preview.cap_gb;
+            items.push(
+                div()
+                    .flex()
+                    .items_center()
+                    .gap(px(12.))
+                    .p(px(12.))
+                    .rounded(px(8.))
+                    .bg(c(theme::OVERLAY))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .flex()
+                            .flex_col()
+                            .gap(px(2.))
+                            .child(div().font_weight(gpui::FontWeight::SEMIBOLD).child(question))
+                            .child(div().text_size(px(12.)).line_height(px(16.)).text_color(c(theme::TERTIARY)).child(detail)),
+                    )
+                    .child(ui::button("cap-keep", ui::Variant::Ghost).child("Keep current").on_click(cx.listener(|this, _, _, cx| {
+                        this.storage_confirm = None;
+                        cx.notify();
+                    })))
+                    .child(ui::button("cap-confirm", ui::Variant::Primary).child(action).on_click(cx.listener(move |this, _, _, cx| {
+                        this.storage_confirm = None;
+                        this.set_config("storage", "cap_gb", json!(cap_gb));
+                        cx.notify();
+                    })))
+                    .into_any_element(),
+            );
+        }
+        items
+    }
+
+    /// A limit that would move clips now asks first (the recorder's dry run names how many and
+    /// from which date); no limit, or one already met, applies at once.
+    fn pick_storage_cap(&mut self, value: u64, current: u64) {
+        self.storage_confirm = None;
+        self.storage_asking = None;
+        if value == current {
+            return;
+        }
+        if value == 0 {
+            self.set_config("storage", "cap_gb", json!(0));
+            return;
+        }
+        let cap_gb = value.min(u64::from(u32::MAX)) as u32;
+        self.storage_asking = Some(cap_gb);
+        if !self.daemon.send(crate::services::daemon::DaemonCommand::StoragePreview(cap_gb)) {
+            self.storage_asking = None;
+            self.show_toast(crate::root::ToastKind::Bad, "Recorder is off", Some("Start it from the status pill".into()));
+        }
     }
 }

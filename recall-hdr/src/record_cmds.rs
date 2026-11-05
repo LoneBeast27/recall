@@ -10,7 +10,8 @@
 //! | `screenshot` | | engine PNG -> `engine` `screenshot{path}`; refused -> `screenshot_failed` |
 //! | `record_start` / `record_stop` / `record_toggle` | | manual long recording -> `engine` `recording_started{path}` / `recording_stopped{path,seconds,bytes}` / `recording_failed{reason,path}` |
 //! | `pause` / `resume` / `toggle_pause` | | stop the engine and ignore games until resume (runtime only); status `state:"paused"` |
-//! | `storage_clean` | | run the storage cap now -> `session` `storage_cleaned{removed,freed_bytes}` |
+//! | `storage_clean` | | run the storage cap now -> `session` `storage_cleaned{removed,freed_bytes,through,used_bytes,cap_bytes}` (+ `storage_warning` at 80/90/100%) |
+//! | `storage_preview` | `cap_gb` | dry run, nothing moves -> caller only: `session` `storage_preview{cap_gb,used_bytes,removed,freed_bytes,through}` |
 //! | `export_clip` | unchanged engine shape | forwarded; engine off -> `engine` `export_failed` |
 //! | `set_mic_mute` | `muted: bool` | enforced on this and every later engine |
 //! | `toggle_mic_mute` | | flips the enforced state |
@@ -104,6 +105,13 @@ impl Controller {
                     self.janitor.run_now(&dir, cap, std::time::Instant::now());
                 }
             }
+            "storage_preview" => match (val.get("cap_gb").and_then(Value::as_u64), client) {
+                (Some(cap), Some(c)) if cap >= u64::from(crate::record_config::STORAGE_CAP_MIN_GB) && cap <= u64::from(u32::MAX) => {
+                    self.janitor.preview(&self.cfg.recording.output_dir.clone(), cap as u32, c)
+                }
+                (_, Some(_)) => self.reply_error(client, &format!("storage_preview needs \"cap_gb\" of at least {} GiB", crate::record_config::STORAGE_CAP_MIN_GB)),
+                (_, None) => {}
+            },
             "set_mic_mute" => match val.get("muted").and_then(Value::as_bool) {
                 Some(muted) => self.set_mic(muted),
                 None => self.reply_error(client, "set_mic_mute needs \"muted\": true|false"),
