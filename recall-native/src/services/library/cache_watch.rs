@@ -70,7 +70,7 @@ mod tests {
 
     #[test]
     fn a_file_deleted_by_another_program_is_noticed() {
-        let dir = std::env::temp_dir().join(format!("recall-cache-watch-{}", std::process::id()));
+        let dir = crate::test_temp::TempDir::new(format!("recall-cache-watch-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("thumbs")).unwrap();
         let (file, part) = (dir.join("thumbs").join("a.jpg"), dir.join("thumbs").join("b.jpg.1-2.part"));
         std::fs::write(&file, b"x").unwrap();

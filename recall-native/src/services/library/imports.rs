@@ -62,6 +62,8 @@ fn base_dir() -> Option<PathBuf> {
         return Some(PathBuf::from(dir));
     }
     if cfg!(test) {
+        #[cfg(test)]
+        crate::test_temp::sweep_dead("recall-imports-test");
         return Some(std::env::temp_dir().join(format!("recall-imports-test-{}", std::process::id())));
     }
     std::env::var_os("APPDATA").filter(|d| !d.is_empty()).map(|root| PathBuf::from(root).join("Recall"))

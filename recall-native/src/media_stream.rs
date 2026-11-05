@@ -247,8 +247,7 @@ mod tests {
 
     #[test]
     fn a_failed_read_of_a_clip_on_its_drive_says_so_and_a_seek_frees_the_queue() {
-        let dir = std::env::temp_dir().join(format!("recall-stream-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::test_temp::TempDir::new(format!("recall-stream-{}", std::process::id()));
         let source = dir.join("clip.mp4");
         std::fs::write(&source, vec![7u8; 1 << 20]).unwrap();
         let metadata = source.metadata().unwrap();
