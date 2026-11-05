@@ -293,8 +293,15 @@ impl Root {
             .into_any_element()
     }
 
-    pub fn render_toast(&self) -> Option<AnyElement> {
+    pub fn render_toast(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let toast = self.toast.as_ref()?;
+        // A source removed on the Audio page can come back from its toast.
+        let undo = self.settings_ui.audio.undo_open().then(|| {
+            ui::button("toast-undo", ui::Variant::Secondary).child("Undo").on_click(cx.listener(|this, _, _, cx| {
+                this.undo_remove_source();
+                cx.notify();
+            }))
+        });
         let color = match toast.kind {
             ToastKind::Good => theme::ACTIVE,
             ToastKind::Info => theme::MUTED,
@@ -336,7 +343,8 @@ impl Root {
                                 .children(toast.detail.clone().map(|d| {
                                     div().text_size(px(12.)).line_height(px(16.)).text_color(c(theme::TERTIARY)).child(d)
                                 })),
-                        ),
+                        )
+                        .children(undo),
                 )
                 .into_any_element(),
         )

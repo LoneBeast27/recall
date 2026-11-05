@@ -380,6 +380,7 @@ impl Root {
             self.sync_audio_monitors();
         } else {
             self.meters = None;
+            self.settings_ui.audio.closed();
             self.midi = None;
         }
         if route == Route::Settings {
@@ -490,7 +491,7 @@ impl Render for Root {
             .text_color(c(theme::TEXT))
             .child(self.render_titlebar(window, cx))
             .child(body)
-            .children(self.render_toast())
+            .children(self.render_toast(cx))
     }
 }
 

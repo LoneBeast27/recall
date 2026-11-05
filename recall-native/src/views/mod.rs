@@ -1,10 +1,13 @@
 //! Page and region renderers, implemented as `impl Root` blocks.
+pub mod audio_menus;
+pub mod audio_midi;
+pub mod audio_page;
+pub mod audio_strip;
 pub mod editor;
 pub mod folders_settings;
 pub mod library;
 pub mod pages;
 pub mod settings;
-pub mod settings_apps;
 pub mod settings_audio;
 pub mod settings_capture;
 pub mod settings_keys;

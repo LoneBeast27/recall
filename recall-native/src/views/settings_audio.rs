@@ -1,9 +1,6 @@
-//! Settings → Clip → Audio sources: which microphone is recorded (or none) and which output the
-//! desktop recording listens to. Values are the controller's `recording.mic_device`,
-//! `recording.mic_enabled` and `recording.desktop_audio_device` ("" = the Windows default);
-//! a change restarts the recorder like a format change. Also Settings → General → MIDI device
-//! (`midi.input`, "" = off). Devices are listed the first time either section draws, off the
-//! UI thread.
+//! Settings page state, and Settings → General → MIDI device (`midi.input`, "" = off): the
+//! input the Audio page's MIDI console listens to. Ports are listed the first time the section
+//! draws, off the UI thread. Audio sources live on the Audio page (`audio_page.rs`).
 use gpui::{AnyElement, Context, SharedString, deferred, div, prelude::*, px};
 use serde_json::{Value, json};
 
@@ -20,18 +17,15 @@ use crate::{
 pub struct SettingsUi {
     pub devices: AudioDevices,
     pub device_menu: Option<DeviceMenu>,
-    /// Settings → Clip → Audio → App audio: the "Add app…" list and whether it is open.
-    pub playing_apps: crate::services::audio_apps::PlayingApps,
-    pub app_menu: bool,
     /// The Shortcuts chip waiting for new keys.
     pub capture: Option<crate::views::settings_keys::ShortcutSlot>,
+    /// The Audio page (sources, their lists and menus).
+    pub audio: crate::views::audio_page::AudioPage,
 }
 
 /// Which device list is open.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeviceMenu {
-    Mic,
-    Desktop,
     Midi,
 }
 
@@ -39,23 +33,19 @@ impl DeviceMenu {
     /// The controller config key: (section, key).
     fn key(self) -> (&'static str, &'static str) {
         match self {
-            DeviceMenu::Mic => ("recording", "mic_device"),
-            DeviceMenu::Desktop => ("recording", "desktop_audio_device"),
             DeviceMenu::Midi => ("midi", "input"),
         }
     }
 
     fn names(self, lists: &DeviceLists) -> (&[String], Option<&str>) {
         match self {
-            DeviceMenu::Mic => (&lists.inputs, lists.default_input.as_deref()),
-            DeviceMenu::Desktop => (&lists.outputs, lists.default_output.as_deref()),
             DeviceMenu::Midi => (&lists.midi_inputs, None),
         }
     }
 
-    /// Row text for a saved value: MIDI "" is off; audio "" is the Windows default.
+    /// Row text for a saved value: "" is off.
     fn label(self, saved: &str, names: Option<&[String]>, default: Option<&str>) -> String {
-        if self == DeviceMenu::Midi && saved.trim().is_empty() {
+        if saved.trim().is_empty() {
             return "Off".to_owned();
         }
         audio_devices::device_label(saved, names, default)
@@ -77,23 +67,6 @@ impl Root {
             });
         })
         .detach();
-    }
-
-    pub fn render_audio_sources(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        self.ensure_audio_devices(cx);
-        let mic_on = self.config_value("recording", "mic_enabled").and_then(Value::as_bool).unwrap_or(true);
-        let mic_picker = self.device_picker(DeviceMenu::Mic, cx);
-        vec![
-            setting_row("Microphone", "Recorded on its own track. Turn it off to record no microphone at all.")
-                .child(div().flex().items_center().gap(px(12.)).child(div().when(!mic_on, |d| d.opacity(0.4)).child(mic_picker)).child(ui::switch("mic-enabled", mic_on).on_click(cx.listener(
-                    move |this, _, _, cx| {
-                        this.set_config("recording", "mic_enabled", json!(!mic_on));
-                        cx.notify();
-                    },
-                ))))
-                .into_any_element(),
-            setting_row("Desktop audio", "Used when recording the desktop; games record their own sound.").child(self.device_picker(DeviceMenu::Desktop, cx)).into_any_element(),
-        ]
     }
 
     /// Settings → General → MIDI: the input the Audio page's MIDI console listens to.
