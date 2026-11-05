@@ -16,6 +16,8 @@ use crate::placement::{Anchor, EDGE, NOTICE_H, REF_HEIGHT};
 
 /// Scans kept per game.
 pub const KEEP: usize = 6;
+/// Games kept; the one scanned longest ago goes first.
+pub const MAX_GAMES: usize = 64;
 /// A game with this many scans is settled: re-checked only now and then.
 pub const SETTLED: usize = 3;
 
@@ -117,11 +119,23 @@ struct Entry {
     rows: u32,
     /// Newest last.
     scans: Vec<Vec<u64>>,
+    /// When it was last scanned, as a count of scans kept in this file.
+    #[serde(default)]
+    seq: u64,
+}
+
+impl Entry {
+    /// What `HudGrid::from_scan` would accept: 1..=64 columns and rows, a row per scan line.
+    fn sane(&self) -> bool {
+        (1..=64).contains(&self.cols) && (1..=64).contains(&self.rows) && self.scans.iter().all(|s| s.len() == self.rows as usize)
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CacheFile {
     games: BTreeMap<String, Entry>,
+    #[serde(default)]
+    seq: u64,
 }
 
 /// The per-game scans, on disk at `path` (None: in memory only, for tests).
@@ -143,7 +157,10 @@ impl HudCache {
             .and_then(|p| std::fs::read_to_string(p).ok())
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
-        Self { path, file }
+        let mut cache = Self { path, file };
+        cache.file.games.retain(|_, e| e.sane());
+        cache.trim();
+        cache
     }
 
     pub fn scans(&self, key: &str) -> usize {
@@ -164,12 +181,26 @@ impl HudCache {
         }
         let entry = self.file.games.entry(key.to_string()).or_default();
         if (entry.cols, entry.rows) != (scan.cols, scan.rows) {
-            *entry = Entry { cols: scan.cols, rows: scan.rows, scans: Vec::new() };
+            *entry = Entry { cols: scan.cols, rows: scan.rows, scans: Vec::new(), seq: 0 };
         }
         entry.scans.push(scan.grid);
         let extra = entry.scans.len().saturating_sub(KEEP);
         entry.scans.drain(..extra);
+        self.file.seq += 1;
+        entry.seq = self.file.seq;
+        if !entry.sane() {
+            self.file.games.remove(key);
+        }
+        self.trim();
         self.save();
+    }
+
+    /// At most [`MAX_GAMES`]: the games scanned longest ago go.
+    fn trim(&mut self) {
+        while self.file.games.len() > MAX_GAMES {
+            let Some(oldest) = self.file.games.iter().min_by_key(|(_, e)| e.seq).map(|(k, _)| k.clone()) else { break };
+            self.file.games.remove(&oldest);
+        }
     }
 
     /// Written whole to `<path>.tmp`, then renamed over the old file.

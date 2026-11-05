@@ -52,7 +52,10 @@ pub(super) fn create_window() -> Result<HWND, String> {
 
 /// The monitor of the game window (`hwnd`, else the pid's largest visible
 /// top-level window), else the primary monitor.
-pub(super) fn target_monitor(hwnd: Option<isize>, pid: Option<u32>) -> Rect {
+/// The target's monitor, and the area the island may use on it: the whole
+/// monitor while the game covers it (fullscreen hides the taskbar), else the
+/// work area (the taskbar stays clear of bottom and side spots).
+pub(super) fn target_monitor(hwnd: Option<isize>, pid: Option<u32>) -> (Rect, Rect) {
     let window = hwnd
         .map(|h| HWND(h as *mut _))
         .filter(|&h| unsafe { IsWindow(Some(h)).as_bool() })
@@ -61,16 +64,21 @@ pub(super) fn target_monitor(hwnd: Option<isize>, pid: Option<u32>) -> Rect {
         Some(window) => unsafe { MonitorFromWindow(window, MONITOR_DEFAULTTOPRIMARY) },
         None => unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) },
     };
-    monitor_rect(monitor)
+    let (full, work) = monitor_rects(monitor);
+    let mut r = Default::default();
+    let covers = window.is_some_and(|w| unsafe { GetWindowRect(w, &mut r) }.is_ok())
+        && r.left <= full.left && r.top <= full.top && r.right >= full.right && r.bottom >= full.bottom;
+    (full, if covers { full } else { work })
 }
 
-fn monitor_rect(monitor: HMONITOR) -> Rect {
+fn monitor_rects(monitor: HMONITOR) -> (Rect, Rect) {
     let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
     if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
-        return Rect { left: 0, top: 0, right: 1920, bottom: 1080 };
+        let fallback = Rect { left: 0, top: 0, right: 1920, bottom: 1080 };
+        return (fallback, fallback);
     }
-    let r = info.rcMonitor;
-    Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
+    let rect = |r: windows::Win32::Foundation::RECT| Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom };
+    (rect(info.rcMonitor), rect(info.rcWork))
 }
 
 struct Search {

@@ -8,9 +8,10 @@
 //! ([`GRID_COLS`] x [`GRID_ROWS`] over the game picture) the island picks a
 //! free corner or edge from.
 //!
-//! Cost: at most [`MAX_BURSTS`] x 3 readbacks over at most [`PROBE_FOR`],
-//! and one probe at a time. The device lock is held only for the copy and the
-//! map, never while the CPU averages the pixels.
+//! Cost: at most [`MAX_BURSTS`] x 3 readbacks over at most [`PROBE_FOR`], one
+//! probe at a time and none within [`COOLDOWN`] of the last. The GPU filters each
+//! frame down before it is read back (about 1-2 MB per grab, `gpu_frames::GrayReader`),
+//! and the device lock is never held while the GPU works or the CPU reads.
 
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::Arc;
@@ -44,6 +45,10 @@ const BETWEEN_BURSTS: Duration = Duration::from_millis(1500);
 const ENOUGH: u32 = 8;
 const MAX_BURSTS: u32 = 24;
 const PROBE_FOR: Duration = Duration::from_secs(60);
+/// A probe asked for this soon after the last one ended is refused.
+const COOLDOWN: Duration = Duration::from_secs(60);
+/// No frame at all for this long: stop (nothing is captured on the GPU path).
+const NO_FRAME_FOR: Duration = Duration::from_secs(10);
 /// A scan with fewer moving bursts than this says nothing (menus, a still camera).
 pub const MIN_MOVING: u32 = 4;
 
@@ -220,25 +225,37 @@ impl Tally {
 /// The probe's one-at-a-time guard and its thread.
 pub struct HudProbe {
     running: Arc<AtomicBool>,
+    /// When the last probe ended.
+    ended: Arc<std::sync::Mutex<Option<Instant>>>,
     shared: Arc<CaptureShared>,
     json: bool,
 }
 
 impl HudProbe {
     pub fn new(shared: Arc<CaptureShared>, json: bool) -> Self {
-        Self { running: Arc::new(AtomicBool::new(false)), shared, json }
+        Self { running: Arc::new(AtomicBool::new(false)), ended: Arc::default(), shared, json }
     }
 
-    /// Start a probe unless one is running (a second request joins the first).
+    /// Start a probe unless one is running (a second request joins the first);
+    /// within [`COOLDOWN`] of the last one, answer at once that it is too soon.
     pub fn request(&self) {
+        let last = self.ended.lock().ok().and_then(|e| *e);
+        if let Some(wait) = last.and_then(|at| COOLDOWN.checked_sub(at.elapsed())) {
+            let reason = format!("too soon after the last probe (again in {} s)", wait.as_secs() + 1);
+            let scan = refused(reason);
+            return emit_or_log(self.json, &scan, || "hud probe refused: too soon".into());
+        }
         if self.running.swap(true, Relaxed) {
             return;
         }
-        let (running, shared, json) = (self.running.clone(), self.shared.clone(), self.json);
+        let (running, ended, shared, json) = (self.running.clone(), self.ended.clone(), self.shared.clone(), self.json);
         let spawned = std::thread::Builder::new().name("recall-hud".into()).spawn(move || {
             crate::thread_qos::eco_background();
             let scan = probe(&shared);
             emit_or_log(json, &scan, || format!("hud probe: {}", serde_json::to_string(&scan).unwrap_or_default()));
+            if let Ok(mut at) = ended.lock() {
+                *at = Some(Instant::now());
+            }
             running.store(false, Relaxed);
         });
         if spawned.is_err() {
@@ -247,10 +264,17 @@ impl HudProbe {
     }
 }
 
+fn refused(reason: String) -> Outbound {
+    let (cols, rows) = (GRID_COLS as u32, GRID_ROWS as u32);
+    Outbound::HudScan { ok: false, cols, rows, grid: Vec::new(), moving: 0, bursts: 0, reason: Some(reason) }
+}
+
 fn probe(shared: &CaptureShared) -> Outbound {
     let started = Instant::now();
     let mut tally = Tally::default();
     let mut failure = None;
+    let mut got_frame = false;
+    let mut reader = Reader::default();
     while tally.moving < ENOUGH && tally.bursts < MAX_BURSTS && started.elapsed() < PROBE_FOR {
         if shared.quit.load(Relaxed) {
             failure = Some("engine quitting".to_string());
@@ -261,8 +285,11 @@ fn probe(shared: &CaptureShared) -> Outbound {
             if i > 0 {
                 std::thread::sleep(BURST_STEP);
             }
-            match grab(shared) {
-                Ok(frame) => frames.push(frame),
+            match grab(shared, &mut reader) {
+                Ok(frame) => {
+                    got_frame = true;
+                    frames.push(frame);
+                }
                 Err(e) => {
                     failure = Some(e);
                     break;
@@ -272,7 +299,7 @@ fn probe(shared: &CaptureShared) -> Outbound {
         if frames.len() == BURST_FRAMES {
             tally.add(&frames);
             failure = None;
-        } else if tally.bursts == 0 && started.elapsed() > Duration::from_secs(10) {
+        } else if !got_frame && started.elapsed() > NO_FRAME_FOR {
             break; // nothing to read back at all
         } else {
             tally.bursts += 1;
@@ -299,16 +326,21 @@ fn probe(shared: &CaptureShared) -> Outbound {
 /// The newest encoder frame as an analysis frame (the picture only, without the
 /// canvas bars of a windowed game).
 #[cfg(feature = "encode")]
-fn grab(shared: &CaptureShared) -> Result<Gray, String> {
+type Reader = crate::gpu_frames::GrayReader;
+#[cfg(not(feature = "encode"))]
+type Reader = ();
+
+#[cfg(feature = "encode")]
+fn grab(shared: &CaptureShared, reader: &mut Reader) -> Result<Gray, String> {
     let latest = shared.latest_gpu.lock().map_err(|_| "frame lock poisoned".to_string())?;
     let (frame, content) = latest.as_ref().ok_or("no captured frame yet (the zero-copy path is not running)")?;
     let (frame, content) = (frame.try_clone().ok_or("frame clone failed")?, *content);
     drop(latest);
-    crate::gpu_frames::read_gray(&frame, content)
+    reader.read(&frame, content)
 }
 
 #[cfg(not(feature = "encode"))]
-fn grab(_shared: &CaptureShared) -> Result<Gray, String> {
+fn grab(_shared: &CaptureShared, _reader: &mut Reader) -> Result<Gray, String> {
     Err("engine built without the encode feature".into())
 }
 

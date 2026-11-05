@@ -52,6 +52,9 @@ pub struct Placed {
     pid: Option<u32>,
     hwnd: Option<isize>,
     pub monitor: Rect,
+    /// Where the island may sit: the monitor, or its work area when the game
+    /// does not cover it (the taskbar shows).
+    pub area: Rect,
     pub spot: Spot,
     pub scale: f32,
     /// Action notices lay out at `scale * grow` (the HUD-aware growth).
@@ -228,7 +231,7 @@ impl App {
         let (pid, hwnd) = (session.target_pid, session.target_hwnd);
         let fresh = self.placed.as_ref().is_some_and(|p| p.key == key && p.pid == pid && p.hwnd == hwnd);
         if !fresh {
-            let monitor = target_monitor(hwnd, pid);
+            let (monitor, area) = target_monitor(hwnd, pid);
             let scanned = (!session.desktop).then(|| self.hud_cache.grid(&session.hud_key())).flatten();
             let current = self.placed.as_ref().filter(|p| p.key == key).map(|p| p.spot.anchor);
             let (spot, hud) = match (Anchor::from_corner(&self.corner), scanned) {
@@ -241,7 +244,7 @@ impl App {
             };
             let scale = placement::scale(monitor.height(), &spot);
             let (grow, max_h) = (placement::grow(&spot), placement::free_depth(&spot, &monitor, scale));
-            self.placed = Some(Placed { key, pid, hwnd, monitor, spot, scale, grow, max_h, hud });
+            self.placed = Some(Placed { key, pid, hwnd, monitor, area, spot, scale, grow, max_h, hud });
         }
         self.placed.as_ref().map_or(1.0, |p| p.scale)
     }
@@ -386,7 +389,7 @@ impl App {
         let card = self.island.card(now).zip(self.card_scene.as_ref());
         look.card = card.map(|(progress, c)| CardLook { w: c.w, h: c.h, gap: GAP * placed.scale, progress });
         let edge = (EDGE * placed.scale).round() as i32;
-        let (x, y) = look_origin(anchor, &placed.monitor, look.span_w(), look.extent(), look.margin, edge);
+        let (x, y) = look_origin(anchor, &placed.area, look.span_w(), look.extent(), look.margin, edge);
         let (sheen, badge) = (self.island.sheen(now), self.island.badge(now));
         let fade = self.island.crossfade(now);
         let key = (self.scene.clone(), [x, y], look, sheen.map(|s| (s.progress * 1000.0) as u16), badge, fade.map(|f| (f.alpha * 1000.0) as u16));
