@@ -1,14 +1,12 @@
-//! `recording.app_audio`: apps the person chose to record as tracks of their own
-//! (Settings → Clip → Audio → App audio). The engine captures each app's process
-//! tree by process loopback and names the track with `label`.
-//!
-//! Passed to the engine as `RECALL_AUDIO_APPS`, a JSON array of `{exe, label}`.
+//! `recording.app_audio`: the older list of apps recorded as tracks of their own. Read only
+//! to build `recording.audio_sources` (`record_audio_sources::from_legacy`); the engine no
+//! longer receives it (`RECALL_AUDIO_APPS` is removed from its environment).
 
 use serde::{Deserialize, Serialize};
 
 /// Most app tracks a recording carries (each is one capture stream).
 pub const APP_AUDIO_MAX: usize = 6;
-/// Engine variable holding the list as JSON.
+/// Engine variable that held the list (now always removed).
 pub const APPS_ENV: &str = "RECALL_AUDIO_APPS";
 
 /// One app recorded as its own track.
@@ -49,21 +47,6 @@ fn exe_key(exe: &str) -> String {
     lower.strip_suffix(".exe").map_or(lower.clone(), str::to_owned)
 }
 
-/// Same list for the engine? Order matters: it is the clip's track order.
-pub fn changed(old: &[AppAudioSource], new: &[AppAudioSource]) -> bool {
-    let key = |apps: &[AppAudioSource]| apps.iter().map(|a| (exe_key(&a.exe), a.label.trim().to_owned())).collect::<Vec<_>>();
-    key(old) != key(new)
-}
-
-/// `RECALL_AUDIO_APPS` for the engine: the list as JSON, or `None` (unset) when empty.
-pub fn engine_value(apps: &[AppAudioSource]) -> Option<String> {
-    let trimmed: Vec<AppAudioSource> = apps
-        .iter()
-        .map(|a| AppAudioSource { exe: a.exe.trim().to_owned(), label: a.label.trim().to_owned() })
-        .collect();
-    (!trimmed.is_empty()).then(|| serde_json::to_string(&trimmed).unwrap_or_default())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -80,20 +63,5 @@ mod tests {
         assert!(validate(&seven).unwrap_err().contains("at most"));
         assert!(validate(&[app(r"C:\apps\a.exe", "")]).is_err());
         assert!(validate(&[app("a.exe", "two\nlines")]).is_err());
-    }
-
-    #[test]
-    fn the_engine_gets_json_and_nothing_when_the_list_is_empty() {
-        assert_eq!(engine_value(&[]), None);
-        let value = engine_value(&[app(" a.exe ", " Source A ")]).unwrap();
-        assert_eq!(value, r#"[{"exe":"a.exe","label":"Source A"}]"#);
-    }
-
-    #[test]
-    fn reordering_or_relabelling_is_a_change_case_is_not() {
-        let list = [app("a.exe", "A"), app("b.exe", "B")];
-        assert!(!changed(&list, &[app("A.EXE", "A"), app("b", "B")]));
-        assert!(changed(&list, &[app("b.exe", "B"), app("a.exe", "A")]));
-        assert!(changed(&list, &[app("a.exe", "A2"), app("b.exe", "B")]));
     }
 }

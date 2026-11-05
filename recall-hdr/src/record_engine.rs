@@ -158,12 +158,8 @@ pub fn engine_settings_changed(old: &RecordingCfg, new: &RecordingCfg) -> bool {
         || old.fps != new.fps
         || old.bitrate_mbps != new.bitrate_mbps
         || old.quality != new.quality
-        || old.voice_app.trim() != new.voice_app.trim()
-        || old.mic_device.trim() != new.mic_device.trim()
-        || old.mic_enabled != new.mic_enabled
-        || old.desktop_audio_device.trim() != new.desktop_audio_device.trim()
         || old.moments_gallery != new.moments_gallery
-        || crate::record_app_audio::changed(&old.app_audio, &new.app_audio)
+        || crate::record_audio_sources::changed(&old.audio_sources, &new.audio_sources)
 }
 
 /// Environment for one engine spawn: `Some` sets, `None` removes. Every target
@@ -183,7 +179,6 @@ fn engine_quality(token: &str) -> &'static str {
 }
 
 pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&str>) -> Vec<(String, Option<String>)> {
-    let voice = rec.voice_app.trim();
     let mut env = vec![
         ("RECALL_BUFFER_SECS".to_string(), Some(rec.buffer_secs.to_string())),
         ("RECALL_OUT_DIR".to_string(), Some(rec.output_dir.clone())),
@@ -193,9 +188,14 @@ pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&s
         ("RECALL_FPS".to_string(), Some(rec.fps.to_string())),
         ("RECALL_BITRATE".to_string(), Some((rec.bitrate_mbps as u64 * 1_000_000).to_string())),
         ("RECALL_QUALITY".to_string(), Some(engine_quality(&rec.quality).to_string())),
-        ("RECALL_AUDIO_VOICE_EXE".to_string(), (!voice.is_empty()).then(|| voice.to_string())),
+        // The sources list replaces the old per-track variables; those are removed so an
+        // inherited value cannot add a track.
+        (crate::record_audio_sources::SOURCES_ENV.to_string(), Some(crate::record_audio_sources::engine_value(&rec.audio_sources))),
+        ("RECALL_AUDIO_VOICE_EXE".to_string(), None),
+        ("RECALL_AUDIO_GAME".to_string(), None),
+        ("RECALL_AUDIO_MIC_OFF".to_string(), None),
         ("RECALL_MOMENTS".to_string(), Some(if rec.moments_gallery { "1" } else { "0" }.to_string())),
-        (crate::record_app_audio::APPS_ENV.to_string(), crate::record_app_audio::engine_value(&rec.app_audio)),
+        (crate::record_app_audio::APPS_ENV.to_string(), None),
     ];
     let (hwnd, name, pid) = match target {
         EngineTarget::Window(t) => (
@@ -206,16 +206,8 @@ pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&s
         EngineTarget::Desktop => (None, Some(DESKTOP_NAME.to_string()), None),
         EngineTarget::Off => (None, None, None),
     };
-    // Audio sources: set only when configured, so an inherited test override
-    // (RECALL_AUDIO_MIC + RECALL_AUDIO_EXACT) still reaches the engine.
-    for (key, name) in [("RECALL_AUDIO_MIC", &rec.mic_device), ("RECALL_AUDIO_GAME", &rec.desktop_audio_device)] {
-        if !name.trim().is_empty() {
-            env.push((key.into(), Some(name.trim().to_string())));
-        }
-    }
-    if !rec.mic_enabled {
-        env.push(("RECALL_AUDIO_MIC_OFF".into(), Some("1".into())));
-    }
+    // RECALL_AUDIO_MIC is left as inherited: under RECALL_AUDIO_EXACT (tests) it names the
+    // only endpoint an input source with no device may open.
     env.push(("RECALL_CAPTURE_HWND".into(), hwnd));
     env.push(("RECALL_CAPTURE_NAME".into(), name));
     env.push(("RECALL_AUDIO_GAME_PID".into(), pid));
@@ -279,13 +271,10 @@ mod tests {
             RecordingCfg { fps: 120, ..base.clone() },
             RecordingCfg { bitrate_mbps: 40, ..base.clone() },
             RecordingCfg { quality: "quality".into(), ..base.clone() },
-            RecordingCfg { voice_app: "Discord.exe".into(), ..base.clone() },
+
             RecordingCfg { buffer_secs: 60, ..base.clone() },
-            RecordingCfg { mic_device: "Microphone (USB)".into(), ..base.clone() },
-            RecordingCfg { mic_enabled: false, ..base.clone() },
-            RecordingCfg { desktop_audio_device: "Speakers (USB)".into(), ..base.clone() },
             RecordingCfg { moments_gallery: true, ..base.clone() },
-            RecordingCfg { app_audio: vec![crate::record_app_audio::AppAudioSource { exe: "a.exe".into(), label: String::new() }], ..base.clone() },
+            RecordingCfg { audio_sources: crate::record_audio_sources::default_sources()[..1].to_vec(), ..base.clone() },
             RecordingCfg { output_dir: "D:\\c".into(), ..base.clone() },
         ] {
             assert!(engine_settings_changed(&base, &changed), "{changed:?}");
@@ -362,7 +351,7 @@ mod tests {
         assert_eq!(get(&desk, "RECALL_CAPTURE_HWND"), None, "removed, not inherited");
         assert_eq!(get(&desk, "RECALL_AUDIO_GAME_PID"), None);
         assert_eq!(get(&desk, "RECALL_CAPTURE_NAME").as_deref(), Some("Desktop"));
-        // Quality + voice plumbing: defaults, then every key changed.
+        // Quality plumbing: defaults, then every key changed.
         assert_eq!(get(&win, "RECALL_CODEC").as_deref(), Some("h264"));
         assert_eq!(get(&win, "RECALL_FPS").as_deref(), Some("60"));
         assert_eq!(get(&win, "RECALL_BITRATE").as_deref(), Some("25000000"), "bit/s");
@@ -373,7 +362,6 @@ mod tests {
             fps: 120,
             bitrate_mbps: 60,
             quality: "quality".into(),
-            voice_app: " Discord.exe ".into(),
             ..RecordingCfg::default()
         };
         let env = engine_env(&EngineTarget::Desktop, &tuned, None);
@@ -381,39 +369,27 @@ mod tests {
         assert_eq!(get(&env, "RECALL_FPS").as_deref(), Some("120"));
         assert_eq!(get(&env, "RECALL_BITRATE").as_deref(), Some("60000000"));
         assert_eq!(get(&env, "RECALL_QUALITY").as_deref(), Some("max"), "Quality = engine max (p7)");
-        assert_eq!(get(&env, "RECALL_AUDIO_VOICE_EXE").as_deref(), Some("Discord.exe"));
         assert_eq!(get(&win, "RECALL_MOMENTS").as_deref(), Some("0"), "Moments gallery is opt-in");
         let moments = RecordingCfg { moments_gallery: true, ..RecordingCfg::default() };
         assert_eq!(get(&engine_env(&EngineTarget::Desktop, &moments, None), "RECALL_MOMENTS").as_deref(), Some("1"));
     }
 
     #[test]
-    fn audio_devices_reach_the_engine_only_when_configured() {
+    fn the_sources_list_reaches_the_engine_and_old_audio_variables_are_removed() {
+        use crate::record_audio_sources::{AudioSource, SOURCES_ENV};
         let has = |env: &[(String, Option<String>)], k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
         let plain = engine_env(&EngineTarget::Desktop, &RecordingCfg::default(), None);
-        for key in ["RECALL_AUDIO_MIC", "RECALL_AUDIO_GAME", "RECALL_AUDIO_MIC_OFF"] {
-            assert_eq!(has(&plain, key), None, "{key}: Windows default = inherited, not removed");
+        let value = has(&plain, SOURCES_ENV).flatten().expect("always passed");
+        assert!(value.contains(r#""id":"game""#) && value.contains(r#""id":"mic""#), "{value}");
+        for key in ["RECALL_AUDIO_APPS", "RECALL_AUDIO_VOICE_EXE", "RECALL_AUDIO_GAME", "RECALL_AUDIO_MIC_OFF"] {
+            assert_eq!(has(&plain, key), Some(None), "{key}: removed, so an inherited value never adds a track");
         }
+        assert_eq!(has(&plain, "RECALL_AUDIO_MIC"), None, "inherited: names the test endpoint under RECALL_AUDIO_EXACT");
         let rec = RecordingCfg {
-            mic_device: " Microphone (USB Audio Device) ".into(),
-            desktop_audio_device: "Speakers (USB Audio Device)".into(),
-            mic_enabled: false,
+            audio_sources: vec![AudioSource { id: "in".into(), kind: "input".into(), device: "Microphone (USB Audio Device)".into(), name: "Voice".into(), ..AudioSource::default() }],
             ..RecordingCfg::default()
         };
-        let env = engine_env(&EngineTarget::Desktop, &rec, None);
-        assert_eq!(has(&env, "RECALL_AUDIO_MIC"), Some(Some("Microphone (USB Audio Device)".into())));
-        assert_eq!(has(&env, "RECALL_AUDIO_GAME"), Some(Some("Speakers (USB Audio Device)".into())));
-        assert_eq!(has(&env, "RECALL_AUDIO_MIC_OFF"), Some(Some("1".into())));
-    }
-
-    #[test]
-    fn app_tracks_reach_the_engine_and_an_empty_list_removes_the_variable() {
-        use crate::record_app_audio::{AppAudioSource, APPS_ENV};
-        let has = |env: &[(String, Option<String>)]| env.iter().find(|(n, _)| n == APPS_ENV).map(|(_, v)| v.clone());
-        let plain = engine_env(&EngineTarget::Desktop, &RecordingCfg::default(), None);
-        assert_eq!(has(&plain), Some(None), "removed, so an inherited list never leaks into a recording");
-        let rec = RecordingCfg { app_audio: vec![AppAudioSource { exe: "a.exe".into(), label: "Source A".into() }], ..RecordingCfg::default() };
-        let env = engine_env(&EngineTarget::Desktop, &rec, None);
-        assert_eq!(has(&env), Some(Some(r#"[{"exe":"a.exe","label":"Source A"}]"#.into())));
+        let value = has(&engine_env(&EngineTarget::Desktop, &rec, None), SOURCES_ENV).flatten().unwrap();
+        assert!(value.contains("Microphone (USB Audio Device)") && !value.contains(r#""id":"game""#), "{value}");
     }
 }
