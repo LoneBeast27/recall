@@ -56,7 +56,13 @@ impl OverlayProc {
         if exe.is_none() {
             log!("overlay: recall-overlay.exe not found; overlay toasts unavailable");
         }
-        OverlayProc { exe, child: None, quick_exits: 0, not_before: None, stop_at: None }
+        OverlayProc {
+            exe,
+            child: None,
+            quick_exits: 0,
+            not_before: None,
+            stop_at: None,
+        }
     }
 
     /// Whether the overlay process is alive right now.
@@ -177,7 +183,13 @@ mod tests {
 
     #[test]
     fn disabled_or_missing_exe_never_spawns() {
-        let mut o = OverlayProc { exe: None, child: None, quick_exits: 0, not_before: None, stop_at: None };
+        let mut o = OverlayProc {
+            exe: None,
+            child: None,
+            quick_exits: 0,
+            not_before: None,
+            stop_at: None,
+        };
         o.sync(&OverlayCfg { enabled: true, ..OverlayCfg::default() });
         assert!(!o.running(), "no exe -> nothing spawned");
         o.sync(&OverlayCfg::default());
@@ -187,14 +199,32 @@ mod tests {
     #[test]
     fn a_lingering_process_outlives_the_off_switch_until_the_notice_ends() {
         let now = Instant::now();
-        assert!(lingering(Some(now + LINGER), now), "Overlay off with stats off: still up");
-        assert!(lingering(Some(now + LINGER), now + LINGER - Duration::from_millis(1)));
-        assert!(!lingering(Some(now + LINGER), now + LINGER), "then it stops");
+        assert!(
+            lingering(Some(now + LINGER), now),
+            "Overlay off with stats off: still up"
+        );
+        assert!(lingering(
+            Some(now + LINGER),
+            now + LINGER - Duration::from_millis(1)
+        ));
+        assert!(
+            !lingering(Some(now + LINGER), now + LINGER),
+            "then it stops"
+        );
         assert!(!lingering(None, now), "no linger asked: stops at once");
-        let mut o = OverlayProc { exe: None, child: None, quick_exits: 0, not_before: None, stop_at: None };
+        let mut o = OverlayProc {
+            exe: None,
+            child: None,
+            quick_exits: 0,
+            not_before: None,
+            stop_at: None,
+        };
         o.linger();
         assert_eq!(o.deadline(), None, "no process, nothing to wake for");
-        o.sync(&OverlayCfg { enabled: true, ..OverlayCfg::default() });
+        o.sync(&OverlayCfg {
+            enabled: true,
+            ..OverlayCfg::default()
+        });
         assert_eq!(o.stop_at, None, "wanted again: the linger is cancelled");
     }
 
