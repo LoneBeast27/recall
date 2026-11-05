@@ -86,6 +86,10 @@ pub struct EditorState {
     /// Listening levels beside the lanes (preview only; `editor_state_monitor.rs`).
     pub monitor: monitor::Monitor,
     pub listen_spans: Vec<Span>,
+    /// The editor page's size in window pixels, written during paint (layout choice).
+    pub area: Rc<Cell<Option<(f32, f32)>>>,
+    /// Portrait layout (export panel below the timeline), chosen from `area`.
+    pub portrait: bool,
     pub drag: Option<Drag>,
     /// The plan a trim or gain drag started from.
     drag_from: Option<EditPlan>,
@@ -163,6 +167,8 @@ impl EditorState {
             gain_spans: vec![],
             monitor: monitor::Monitor::default(),
             listen_spans: vec![],
+            area: Rc::new(Cell::new(None)),
+            portrait: false,
             drag: None,
             drag_from: None,
             generation: 0,

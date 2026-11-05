@@ -26,7 +26,7 @@ pub fn quiet_errors() {
     unsafe { SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX) };
 }
 
-pub fn show(window: &gpui::Window, width: f32, height: f32) {
+pub fn show(window: &mut gpui::Window, width: f32, height: f32) {
     let Ok(raw) = crate::root::parent_hwnd(window) else { return };
     let hwnd = HWND(raw as *mut _);
     let s = window.scale_factor();
@@ -37,6 +37,10 @@ pub fn show(window: &gpui::Window, width: f32, height: f32) {
     }
     let (x, y) = origin(desktop(), (w, h), |x, y| nearest_is_primary(x, y, w, h));
     let _ = unsafe { SetWindowPos(hwnd, Some(HWND_BOTTOM), x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW) };
+    // A window opened hidden starts at Windows' default size, and the size message from the call
+    // above arrives while GPUI is busy opening it, so GPUI would keep laying out at the default
+    // size (1904x1014 on a 2560x1440 primary). GPUI's own resize runs once it is free.
+    window.resize(gpui::size(gpui::px(width), gpui::px(height)));
     // A minimized tool window sits on the desktop's corner by default: keep that off screen too.
     let mut placement = WINDOWPLACEMENT { length: size_of::<WINDOWPLACEMENT>() as u32, ..Default::default() };
     if unsafe { GetWindowPlacement(hwnd, &mut placement) }.is_ok() {
