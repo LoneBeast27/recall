@@ -68,6 +68,8 @@ pub enum Done {
     Clips(Result<Listing, String>),
     /// (free, total) bytes of the recordings drive.
     Drive(Option<(u64, u64)>),
+    /// SSD cache totals for the sidebar (`Workers::ssd_usage`).
+    Ssd(storage::SsdUsage),
     /// The clip can play while it loads (`clip_open.rs`); `Prepared` follows when it has loaded.
     Streaming(u64, Box<StreamedClip>),
     /// What an open without streaming is doing now.
@@ -147,6 +149,14 @@ impl Workers {
         crate::clip_open::note_open(generation);
         let tx = self.open_tx.clone();
         spawn_named("recall-clip-open", move || crate::clip_open::run(generation, path, &tx));
+    }
+
+    /// Walks the SSD cache on a thread of its own (`Done::Ssd`): an export on the io worker never holds it up.
+    pub fn ssd_usage(&self) {
+        let tx = self.open_tx.clone();
+        spawn_named("recall-ssd-usage", move || {
+            let _ = tx.send(Done::Ssd(storage::ssd_usage(&backend::library_dir())));
+        });
     }
 
     pub fn job(&self, job: Job) {

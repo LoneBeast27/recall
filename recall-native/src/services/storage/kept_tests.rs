@@ -96,3 +96,23 @@ fn the_start_sweep_adopts_matches_and_deletes_the_rest() {
     assert_eq!(sweep_in(&root, &kept_dir.join("missing"), &clips, BUDGET), (0, 0));
     cleanup(&root);
 }
+
+#[test]
+fn only_a_file_in_a_kept_folder_may_be_adopted() {
+    let (root, clips, kept_dir) = dirs("guard");
+    let (dest, kept) = clip(&clips, &kept_dir, "G__h.mp4", 2000, 2000);
+    let allowed = [kept_dir.clone()];
+    assert!(inside_kept(&kept, &allowed), "a copy in the kept folder is accepted");
+    assert!(!inside_kept(&dest, &allowed), "a clip in the Raw folder is refused");
+    let walked = kept_dir.join("..").join("..").join("..").join("clips").join("G__h.mp4");
+    assert!(!inside_kept(&walked, &allowed), "a path that walks out of kept is refused");
+    std::fs::create_dir_all(kept_dir.join("sub")).unwrap();
+    std::fs::write(kept_dir.join("sub").join("deep.mp4"), b"x").unwrap();
+    assert!(!inside_kept(&kept_dir.join("sub").join("deep.mp4"), &allowed), "only direct children");
+    assert!(!inside_kept(&kept_dir.join("missing.mp4"), &allowed), "a missing file is refused");
+    assert!(!inside_kept(&kept_dir, &allowed), "the folder itself is refused");
+    // The public entry point leaves a refused clip exactly where it is.
+    adopt_kept(dest.to_string_lossy().into_owned(), dest.to_string_lossy().into_owned());
+    assert!(dest.is_file(), "adopt_kept never touches a clip outside the kept folders");
+    cleanup(&root);
+}

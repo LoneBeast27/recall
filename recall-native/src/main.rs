@@ -18,6 +18,7 @@ mod playback_watch;
 mod root;
 mod services;
 mod shell;
+mod ssd_meter;
 mod startup;
 mod theme;
 mod trace;

@@ -270,6 +270,7 @@ impl Root {
             self.lib.note_scroll_depth();
         }
         self.lib.flush_meta_if_due();
+        self.lib.ssd.poll(&self.workers, !self.lib.loading);
         if let Some(notice) = self.lib.notice.take() {
             self.show_toast(ToastKind::Bad, notice, None);
             changed = true;
@@ -302,6 +303,7 @@ impl Root {
                 self.lib.set_entries(listing)
             }
             Done::Drive(drive) => self.lib.drive = drive,
+            Done::Ssd(usage) => self.lib.ssd.set(usage),
             Done::Streaming(generation, clip) => self.ed.apply_streaming(generation, clip),
             Done::OpenStep(generation, text) => self.ed.open_step(generation, text),
             Done::Library(change) => self.on_library_change(change),
