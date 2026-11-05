@@ -15,9 +15,14 @@ commits as a game only if, while it waits for its start debounce, its own proces
 
 It is rejected when its presents are mostly DXGI `PresentMultiplaneOverlay` (55, decode swap chains = video), or when
 1.5 s pass without a game signal (composed by DWM only, or no frames). A rejected window is not a candidate again for
-10 s, then 20, 40, 80 s (cap) while it stays rejected.
+2 s, then 4, 8, 16, 30 s (cap) while it stays rejected after showing frames; a window that showed no frames at
+all (a loading screen) is inconclusive and is watched again after 2 s every time, without advancing that backoff.
+The ETW session is off between watches.
 
-Steam-library exes, overrides and pinned targets keep the 300 ms rule with no check. Without trace rights the
+Steam-library exes, overrides, `detect.fullscreen_games` entries, known games (`recall-hdr/src/known_games.rs`:
+VALORANT, Fortnite, Overwatch, Rocket League, League of Legends, Apex, CoD, Diablo, Hearthstone, WoW, Rainbow Six,
+Battlefield, EA FC, …; Java only when the title starts with "Minecraft") and pinned targets keep the 300 ms rule
+with no check. They must still be fullscreen (or in a Steam library); deny lists and `none` overrides still win. Without trace rights the
 check is off and today's rule applies (fullscreen + not denied = game); the log says so once.
 
 ## Evidence
@@ -70,8 +75,8 @@ check is off and today's rule applies (fullscreen + not denied = game); the log 
 | session still running after drop | no (query by name: not found), every run |
 
 So watching a busy candidate costs about 1.5-3 points of one core on a 9950X3D, for at most 1.5 s per candidate
-(only while it is pending). A rejected window is watched again after 10, 20, 40, 80 s, so a fullscreen video left
-open costs one 1.5 s watch per 80 s at steady state. Scaling to a GTX 1650 laptop's CPU is not measured.
+(only while it is pending). A rejected window is watched again after 2, 4, 8, 16, 30 s, so a fullscreen video left
+open costs one 1.5 s watch per 30 s at steady state (a no-frames window: per 3.5 s, with no presents to count). Scaling to a GTX 1650 laptop's CPU is not measured.
 
 Latency for a real game, by construction (no game was run): before = 300 ms (start debounce). After = 300 ms when
 3 independent-flip frames have arrived by then (VALORANT at 800 fps: its first ~200 ms of frames), else the next

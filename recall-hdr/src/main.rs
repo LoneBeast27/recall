@@ -49,6 +49,7 @@ mod hdr_exec;
 mod hdr_gate;
 mod hotkey;
 mod journal;
+mod known_games;
 mod liveness;
 mod logging;
 mod matrix;

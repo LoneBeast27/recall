@@ -74,17 +74,34 @@ fn the_gate_commits_holds_and_rejects() {
 fn a_rejected_window_waits_longer_each_time() {
     let t0 = Instant::now();
     let mut r = Rejected::default();
-    r.note(7, 70, t0);
+    r.note(7, 70, Why::Composed, t0);
+    assert_eq!(RECHECK_FIRST, Duration::from_secs(2), "a match start is caught within seconds");
     assert!(r.holds(7, 70, t0 + RECHECK_FIRST - Duration::from_millis(1)));
     assert!(!r.holds(7, 70, t0 + RECHECK_FIRST));
     assert!(!r.holds(7, 71, t0), "another window of the process is new");
-    let t1 = t0 + RECHECK_FIRST;
-    r.note(7, 70, t1);
-    assert_eq!(r.until(), Some(t1 + RECHECK_FIRST * 2));
+    let mut waits = vec![RECHECK_FIRST];
     for _ in 0..5 {
-        r.note(7, 70, t1);
+        r.note(7, 70, Why::Composed, t0);
+        waits.push(r.until().unwrap() - t0);
     }
-    assert_eq!(r.until(), Some(t1 + RECHECK_MAX), "capped");
-    r.note(8, 80, t1);
-    assert_eq!(r.until(), Some(t1 + RECHECK_FIRST), "another window starts over");
+    let secs: Vec<u64> = waits.iter().map(Duration::as_secs).collect();
+    assert_eq!(secs, [2, 4, 8, 16, 30, 30], "doubling, capped at 30 s");
+    r.note(8, 80, Why::VideoSwapChain, t0);
+    assert_eq!(r.until(), Some(t0 + RECHECK_FIRST), "another window starts over");
+}
+
+#[test]
+fn no_frames_is_inconclusive_and_rechecked_soon() {
+    let t0 = Instant::now();
+    let mut r = Rejected::default();
+    for _ in 0..4 {
+        r.note(7, 70, Why::NoFrames, t0);
+        assert_eq!(r.until(), Some(t0 + RECHECK_NO_FRAMES), "a loading screen never backs off");
+    }
+    r.note(7, 70, Why::Composed, t0);
+    assert_eq!(r.until(), Some(t0 + RECHECK_FIRST), "no-frames rounds do not advance the backoff");
+    r.note(7, 70, Why::NoFrames, t0);
+    assert_eq!(r.until(), Some(t0 + RECHECK_NO_FRAMES));
+    r.note(7, 70, Why::Composed, t0);
+    assert_eq!(r.until(), Some(t0 + RECHECK_FIRST * 2), "the frames-seen backoff resumes where it was");
 }

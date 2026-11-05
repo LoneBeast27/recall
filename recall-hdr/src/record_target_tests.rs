@@ -407,3 +407,34 @@ fn fullscreen_games_yield_to_none_overrides_and_recall_itself() {
     cfg.overrides.clear();
     assert!(!is_target("discord", true, &cfg), "an empty list restores the deny list");
 }
+
+#[test]
+fn valorant_is_never_left_to_the_render_check() {
+    // Rohan's main game: even vsynced or DWM-composed (which the render check
+    // would reject), its fullscreen window commits on the 300 ms rule.
+    let cfg = Config::default();
+    let v = ev("VALORANT-Win64-Shipping", "VALORANT  ", 10, 0x10, true);
+    assert!(classify_event(&v, &cfg).is_some());
+    assert!(skips_render_check(&v, &cfg), "VALORANT skips the render check");
+    let composed = crate::render_verdict::RenderStats { runtime_presents: 90, kernel_presents: 90, composed_frames: 90, ..Default::default() };
+    assert!(matches!(crate::render_verdict::judge(&composed, true), crate::render_verdict::Verdict::NotGame(_)), "what the check would say");
+    let windowed = ev("VALORANT-Win64-Shipping", "VALORANT", 10, 0x10, false);
+    assert!(classify_event(&windowed, &cfg).is_none(), "windowed: today's rules (not a target)");
+    let mut off = cfg.clone();
+    off.overrides.push(Override { exe: "valorant-win64-shipping".into(), kind: RuleKind::None, clamp: None });
+    assert!(classify_event(&v, &off).is_none(), "a none override still wins");
+}
+
+#[test]
+fn known_games_skip_the_check_only_as_fullscreen_candidates() {
+    let cfg = Config::default();
+    for (stem, title) in [("FortniteClient-Win64-Shipping", "Fortnite"), ("Overwatch", "Overwatch"), ("League of Legends", "League of Legends (TM) Client"), ("r5apex_dx12", "Apex Legends"), ("javaw", "Minecraft 1.21.1")] {
+        let e = ev(stem, title, 3, 0x3, true);
+        assert!(classify_event(&e, &cfg).is_some() && skips_render_check(&e, &cfg), "{stem}");
+        assert!(classify_event(&ev(stem, title, 3, 0x3, false), &cfg).is_none(), "{stem} windowed");
+    }
+    let ide = ev("javaw", "IntelliJ IDEA", 4, 0x4, true);
+    assert!(classify_event(&ide, &cfg).is_some(), "an unknown fullscreen Java app is a candidate");
+    assert!(!skips_render_check(&ide, &cfg), "but it must render like a game");
+    assert!(!skips_render_check(&ev("notepad", "x", 1, 1, true), &cfg));
+}

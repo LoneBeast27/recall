@@ -219,6 +219,17 @@ fn strip_exe(s: &str) -> &str {
     }
 }
 
+/// A candidate that commits on the 300 ms rule with no render check: a
+/// Steam-library exe, an override, a `detect.fullscreen_games` entry, or a
+/// game Recall knows (`known_games`). Asked only after [`classify_event`]
+/// made it a candidate, so the deny lists and `none` overrides already ran.
+pub fn skips_render_check(ev: &WatchEvent, cfg: &Config) -> bool {
+    ev.steam_game
+        || rules::override_kind(cfg, &ev.exe_stem).is_some()
+        || is_fullscreen_game(cfg, &ev.exe_stem)
+        || crate::known_games::is_known_game(&ev.exe_stem, &ev.title)
+}
+
 /// `Some(target)` if this foreground event is a capture target.
 pub fn classify_event(ev: &WatchEvent, cfg: &Config) -> Option<Target> {
     is_target(&ev.exe_stem, ev.fullscreen || ev.steam_game, cfg).then(|| Target::from_event(ev))
