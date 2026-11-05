@@ -15,12 +15,14 @@
 //! Spill drive (`drives.rs`): a different physical disk from the game first (SSD
 //! before HDD), the game's own disk only when nothing else fits, never a drive with
 //! less than `KEEP_FREE` left. The file is opened delete-on-close, so it disappears
-//! when the engine exits or crashes.
+//! when the engine exits or crashes; a power cut or BSOD leaves it, and the next start
+//! removes it (`sweep.rs`).
 //!
 //! When neither RAM nor disk can hold the asked-for length, the ring drops its
 //! oldest seconds instead (the pre-spill behavior with a byte cap).
 
 mod drives;
+mod sweep;
 
 use std::fs::File;
 use std::path::PathBuf;
@@ -357,6 +359,11 @@ impl Spill {
     }
 
     pub(crate) fn new(budget: Budget, plan: SpillPlan, log: Arc<dyn Fn(&str) + Send + Sync>) -> Self {
+        // Leftovers from a run that ended in a power cut or BSOD (delete-on-close never ran).
+        // Not in unit tests: they must not touch this PC's drives.
+        if !cfg!(test) {
+            sweep::spawn(Arc::clone(&log));
+        }
         log(&format!(
             "replay buffer: RAM budget {} MiB of {} MiB installed (audio rings {} MiB); older seconds spill to disk past it",
             budget.base() / MIB,

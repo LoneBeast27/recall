@@ -65,7 +65,7 @@ pub(super) fn root_of(path: &Path) -> Option<String> {
 /// The spill folder on `drive`: the user's temp folder on the Windows drive (its root
 /// is not writable without admin), else `<root>\.recall-spill`. Never inside the clip
 /// folder, where the library would see it.
-fn dir_on(drive: &Drive) -> PathBuf {
+pub(super) fn dir_on(drive: &Drive) -> PathBuf {
     let temp = std::env::temp_dir();
     if drive.system && root_of(&temp).as_deref() == Some(drive.root.as_str()) {
         return temp.join("recall-spill");

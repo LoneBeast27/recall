@@ -210,3 +210,31 @@ fn drive_probe_prints_this_pcs_drives() {
     }
     assert!(!drives.is_empty(), "at least the Windows drive is fixed");
 }
+
+#[test]
+fn spill_file_names_carry_the_pid() {
+    use super::sweep::spill_pid;
+    assert_eq!(spill_pid("recall-replay-4242.spill"), Some(4242));
+    assert_eq!(spill_pid("recall-replay-x.spill"), None);
+    assert_eq!(spill_pid("clip.mp4"), None);
+    assert_eq!(spill_pid("recall-replay-4242.spill.mp4"), None);
+}
+
+#[test]
+fn sweep_removes_only_dead_runs_spill_files() {
+    use super::sweep::sweep_dir;
+    let dir = std::env::temp_dir().join(format!("recall-sweep-test-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("recall-replay-111.spill"), vec![0u8; 3000]).unwrap(); // dead run
+    std::fs::write(dir.join("recall-replay-222.spill"), vec![0u8; 10]).unwrap(); // running recall
+    std::fs::write(dir.join("clip.mp4"), b"keep").unwrap();
+    std::fs::write(dir.join("recall-replay-333.spill.bak"), b"keep").unwrap();
+    let (files, bytes) = sweep_dir(&dir, &|pid| pid == 222);
+    assert_eq!((files, bytes), (1, 3000));
+    assert!(!dir.join("recall-replay-111.spill").exists());
+    assert!(dir.join("recall-replay-222.spill").exists());
+    assert!(dir.join("clip.mp4").exists());
+    assert!(dir.join("recall-replay-333.spill.bak").exists());
+    assert_eq!(sweep_dir(&dir.join("missing"), &|_| false), (0, 0), "a missing folder is fine");
+    let _ = std::fs::remove_dir_all(&dir);
+}
