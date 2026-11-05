@@ -40,6 +40,11 @@ impl PacketRing {
         self.bytes
     }
 
+    /// End of the newest packet (its PTS plus its duration).
+    pub fn end_us(&self) -> Option<u64> {
+        self.packets.back().map(|p| p.frame_idx.saturating_add(p.duration_us))
+    }
+
     pub fn last_pts_us(&self) -> Option<u64> {
         self.packets.back().map(|p| p.frame_idx)
     }
