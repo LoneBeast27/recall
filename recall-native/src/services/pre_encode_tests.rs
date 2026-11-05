@@ -16,7 +16,7 @@ fn info(path: &str, bytes: u64) -> ClipInfo {
 }
 
 fn plan(start: f64, end: f64) -> EditPlan {
-    EditPlan { ranges: vec![TimeRange::new(start, end)], audio: vec![AudioSetting { stream_index: 1, gain_db: 0.0, muted: false }] }
+    EditPlan { mix_down: None, ranges: vec![TimeRange::new(start, end)], audio: vec![AudioSetting { stream_index: 1, gain_db: 0.0, muted: false, mix: true }] }
 }
 
 fn summary(path: &Path) -> ExportSummary {

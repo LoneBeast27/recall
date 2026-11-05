@@ -382,3 +382,21 @@ fn detect_fullscreen_games_default_patch_and_reload() {
         assert!(apply_patch(&user_cfg(), &json!({"detect":{"fullscreen_games": bad}})).is_err(), "{bad}");
     }
 }
+
+#[test]
+fn app_audio_list_survives_a_patch_and_a_toml_round_trip() {
+    let store = temp_store("appaudio");
+    let base = store.load();
+    assert!(base.recording.app_audio.is_empty(), "no app tracks until the person adds one");
+    let patch = json!({"recording": {"app_audio": [{"exe": "player.exe", "label": "Source A"}, {"exe": "chat.exe"}]}});
+    let out = apply_patch(&base, &patch).unwrap();
+    assert!(out.touched("recording.app_audio"), "{:?}", out.changed);
+    store.save(&out.config).unwrap();
+    let text = std::fs::read_to_string(store.path()).unwrap();
+    assert!(text.contains("[[recording.app_audio]]"), "a TOML table array:\n{text}");
+    let back = store.load();
+    assert_eq!(back, out.config);
+    assert_eq!(back.recording.app_audio[1].label, "", "a missing label means the exe name");
+    let twice = json!({"recording": {"app_audio": [{"exe": "a.exe"}, {"exe": "A.EXE"}]}});
+    assert!(apply_patch(&base, &twice).unwrap_err().contains("twice"));
+}

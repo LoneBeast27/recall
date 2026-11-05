@@ -1,6 +1,7 @@
 //! Editor persistence and export: save/export results, flushing the edit file beside
 //! the clip, the SSD playback swap, and export settings.
 use super::EditorState;
+use crate::edit_model::EditPlan;
 use crate::{
     backend::ExportSummary,
     edit_model::ExportMode,
@@ -57,8 +58,40 @@ impl EditorState {
             self.export_error = None;
             self.flush(workers);
             crate::backend::arm_export();
-            workers.job(Job::Export(info, self.plan.clone(), self.fps, self.export_settings.clone()));
+            workers.job(self.export_job(info));
         }
+    }
+
+    /// What Export sends the engine: the plan and the right page's settings. The listening
+    /// levels left of the timeline are not in it.
+    pub(super) fn export_job(&self, info: crate::edit_model::ClipInfo) -> Job {
+        Job::Export(info, self.export_plan(), self.fps, self.export_settings.clone())
+    }
+
+    /// The plan the engine gets: "Mix tracks" filled in from the remembered default when these
+    /// edits never set it (the engine reads an unset choice as on).
+    pub(crate) fn export_plan(&self) -> EditPlan {
+        let mut plan = self.plan.clone();
+        plan.mix_down = Some(self.mix_down());
+        plan
+    }
+
+    /// "Mix tracks" for this clip: its own choice, else the remembered default.
+    pub fn mix_down(&self) -> bool {
+        self.plan.mix_down.unwrap_or(self.mix_down_default)
+    }
+
+    /// The Export section's Mix / Separate choice: one undo step, kept with the clip's edits,
+    /// and remembered as the default for clips opened later that never set it.
+    pub fn set_mix_down(&mut self, on: bool) {
+        if self.mix_down() == on && self.plan.mix_down.is_some() {
+            return;
+        }
+        self.revise();
+        self.plan.mix_down = Some(on);
+        // The remembered default changes for the next clip only: this clip's default stays, so an
+        // undo back to "unset" shows what it showed before.
+        let _ = crate::services::editor_prefs::EditorPrefs { mix_down: on }.save();
     }
 
     /// A flush may rewrite or remove the sidecar: it loaded at open, or there was none then and

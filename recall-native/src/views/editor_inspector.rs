@@ -1,12 +1,15 @@
-//! Editor inspector: per-track gain/mute, export options and the export footer.
+//! Editor inspector, the right page: every export setting lives here. Per-track export gain,
+//! export mute and "Mix into main track"; export method, frame rate, size cap and height; the
+//! output summary and the Export footer. The listen-only lane controls left of the timeline
+//! (`timeline_listen.rs`) change the preview only.
 use gpui::{
     AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, Window, canvas, div,
     prelude::*, px,
 };
 
-use super::{INSPECTOR_W, track_name};
+use super::{INSPECTOR_W, PANEL_MIN_H, TWO_COLUMNS_W, track_name};
 use crate::{
-    edit_model::ExportMode,
+    edit_model::{AudioOutput, ClipInfo, ExportMode},
     editor_state::{Drag, FPS_PRESETS, GAIN_MAX, GAIN_MIN, timecode},
     root::Root,
     services::library,
@@ -15,23 +18,42 @@ use crate::{
 };
 
 impl Root {
-    pub(super) fn render_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    /// The export page: beside the preview (`below` = None), or under the timeline in the
+    /// portrait layout (`below` = the page width), where its two sections sit side by side when
+    /// there is room and the footer keeps to the right. Same sections either way.
+    pub(super) fn render_inspector(&mut self, window: &mut Window, cx: &mut Context<Self>, below: Option<f32>) -> AnyElement {
+        let audio = self.render_audio_tracks(cx);
+        let export = self.render_export_options(window, cx);
+        let footer = self.render_export_footer(cx);
+        let Some(width) = below else {
+            return ui::panel()
+                .w(px(INSPECTOR_W))
+                .flex_none()
+                .flex()
+                .flex_col()
+                .child(div().id("inspector-scroll").flex_1().min_h_0().overflow_y_scroll().child(audio).child(ui::hairline()).child(export))
+                .child(footer)
+                .into_any_element();
+        };
+        let sections = if width >= TWO_COLUMNS_W {
+            div()
+                .flex()
+                .items_start()
+                .child(div().flex_1().min_w_0().child(audio))
+                .child(div().flex_1().min_w_0().border_l_1().border_color(c(theme::BORDER_SUBTLE)).child(export))
+        } else {
+            div().flex().flex_col().child(audio).child(ui::hairline()).child(export)
+        };
+        // Natural height (no stretching: the footer stays right under the settings); it shrinks
+        // and scrolls when the page is short, so the timeline above keeps its height.
         ui::panel()
-            .w(px(INSPECTOR_W))
-            .flex_none()
+            .w_full()
+            .flex_initial()
+            .min_h(px(PANEL_MIN_H))
             .flex()
             .flex_col()
-            .child(
-                div()
-                    .id("inspector-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .child(self.render_audio_tracks(cx))
-                    .child(ui::hairline())
-                    .child(self.render_export_options(window, cx)),
-            )
-            .child(self.render_export_footer(cx))
+            .child(div().id("inspector-scroll").flex_1().min_h_0().overflow_y_scroll().child(sections))
+            .child(div().flex().justify_end().child(div().w(px(INSPECTOR_W + 60.)).child(footer)))
             .into_any_element()
     }
 
@@ -39,17 +61,20 @@ impl Root {
         let tracks = self.ed.info.as_ref().map(|i| i.audio.clone()).unwrap_or_default();
         let count = tracks.len();
         let mut column = div().p(px(16.)).flex().flex_col().gap(px(14.)).child(ui::heading(
-            "Audio",
+            "Export audio",
             match count {
                 0 => "No audio".to_owned(),
                 1 => "1 track".to_owned(),
                 n => format!("{n} tracks"),
             },
         ));
+        let mix_down = self.ed.mix_down();
         for (index, track) in tracks.iter().enumerate() {
             let setting = self.ed.setting(track.stream_index).cloned();
             let gain = setting.as_ref().map_or(0.0, |s| s.gain_db);
             let muted = setting.as_ref().is_some_and(|s| s.muted);
+            let in_mix = setting.as_ref().map_or_else(|| track.default_setting().mix, |s| s.mix);
+            let hint = self.ed.mix_hint(index);
             let name = track_name(&track.name, index);
             let detail = format!("{} · {} kHz", channels(track.channels), track.sample_rate as f32 / 1000.0);
             let span = self.ed.gain_spans.get(index).cloned();
@@ -133,10 +158,45 @@ impl Root {
                                     .text_size(px(12.))
                                     .child(format_db(gain)),
                             ),
-                    ),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .items_center()
+                            .gap(px(10.))
+                            .when(muted || !mix_down, |d| d.opacity(0.4))
+                            .child(div().flex_1().text_size(px(12.)).text_color(c(theme::MUTED)).child(if mix_down { "Mix into main track" } else { "Mix into main track (Separate is on)" }))
+                            .child(ui::switch(("mix", index), in_mix).child(crate::trace::target(format!("mix-switch-{index}"))).when(mix_down, |s| {
+                                s.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.ed.toggle_mix(index);
+                                    cx.notify();
+                                }))
+                            })),
+                    )
+                    .children(hint.map(|hint| div().text_size(px(12.)).line_height(px(16.)).text_color(c(theme::WARNING)).child(hint))),
             );
         }
         column.into_any_element()
+    }
+
+    /// The export's audio tracks in file order, e.g. "Mix (Game + Microphone) · Voice chat".
+    fn export_audio_note(&self, info: &ClipInfo) -> String {
+        let name = |stream: usize| {
+            let index = info.audio.iter().position(|t| t.stream_index == stream).unwrap_or(0);
+            track_name(info.audio.get(index).map_or("", |t| t.name.as_str()), index)
+        };
+        let indices: Vec<usize> = info.audio.iter().map(|t| t.stream_index).collect();
+        let outputs: Vec<String> = self
+            .ed
+            .export_plan()
+            .audio_outputs(&indices)
+            .into_iter()
+            .map(|output| match output {
+                AudioOutput::Track(stream) => name(stream),
+                AudioOutput::Mix(streams) => format!("Mix ({})", streams.into_iter().map(name).collect::<Vec<_>>().join(" + ")),
+            })
+            .collect();
+        if outputs.is_empty() { "None".into() } else { outputs.join(" · ") }
     }
 
     fn render_export_options(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
@@ -144,19 +204,7 @@ impl Root {
         let custom = self.fps_custom;
         let info = self.ed.info.clone();
         let kept = self.ed.plan.duration();
-        let audio_note = info.as_ref().map_or_else(String::new, |i| {
-            let names: Vec<String> = i
-                .audio
-                .iter()
-                .enumerate()
-                .map(|(n, t)| {
-                    let muted = self.ed.setting(t.stream_index).is_some_and(|s| s.muted);
-                    let name = track_name(&t.name, n);
-                    if muted { format!("{} muted", name.to_lowercase()) } else { name }
-                })
-                .collect();
-            if names.is_empty() { "None".into() } else { names.join(" · ") }
-        });
+        let audio_note = info.as_ref().map_or_else(String::new, |i| self.export_audio_note(i));
         let mut track = ui::segment_track();
         for preset in FPS_PRESETS {
             track = track.child(ui::segment(("fps", preset as usize), preset.to_string(), !custom && fps == preset).on_click(cx.listener(move |this, _, _, cx| {
@@ -181,6 +229,23 @@ impl Root {
                 cx.notify();
             })));
         }
+        let mix_down = self.ed.mix_down();
+        let mut mixing = ui::segment_track();
+        for (label, on) in [("Mix", true), ("Separate", false)] {
+            mixing = mixing.child(
+                ui::segment(SharedString::from(format!("mixdown-{label}")), label, mix_down == on)
+                    .child(crate::trace::target(format!("mixdown-{label}")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.ed.set_mix_down(on);
+                        cx.notify();
+                    })),
+            );
+        }
+        let mixing_note = if mix_down {
+            "Tracks switched to Mix become track 1; players that play one track hear them all."
+        } else {
+            "Every track is its own track in the file, nothing mixed."
+        };
         let mut sizes = ui::segment_track();
         for (label, value) in [("Original", None), ("1080p", Some(1080u32)), ("720p", Some(720u32))] {
             sizes = sizes.child(ui::segment(SharedString::from(format!("h-{label}")), label, height == value).on_click(cx.listener(move |this, _, _, cx| {
@@ -210,7 +275,8 @@ impl Root {
             .flex_col()
             .gap(px(12.))
             .child(ui::heading("Export", if lossless { "Stream copy" } else { "NVENC" }))
-            .child(field("Method", method.into_any_element()));
+            .child(field("Method", method.into_any_element()))
+            .child(field("Audio tracks", mixing.into_any_element()).child(note(mixing_note.into())));
         if lossless {
             column = column.child(note("Copies the video untouched, in seconds. Each cut starts at the nearest earlier keyframe (shaded on the timeline). Frame rate, size and speed stay as recorded.".into()));
         } else {

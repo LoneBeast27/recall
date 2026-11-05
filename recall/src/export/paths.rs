@@ -74,17 +74,6 @@ fn canonical_input(path: &Path) -> Result<PathBuf, String> {
     std::fs::canonicalize(path).map_err(|e| format!("resolve input {}: {e}", path.display()))
 }
 
-/// Write the MP4 header with `movflags=+faststart`: at the trailer the muxer moves `moov`
-/// ahead of `mdat` (one in-place shift of the temp file), so Discord and browsers can start
-/// playing a shared export before all of it has loaded.
-pub(super) fn write_faststart_header(octx: &mut ff::format::context::Output) -> Result<(), String> {
-    let mut options = ff::Dictionary::new();
-    options.set("movflags", "+faststart");
-    octx.write_header_with(options)
-        .map(|_| ())
-        .map_err(|e| format!("write output header: {e}"))
-}
-
 fn absolute_output(path: &Path) -> Result<PathBuf, String> {
     let name = path
         .file_name()
