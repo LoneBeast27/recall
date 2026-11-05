@@ -1,4 +1,7 @@
-//! Editor inspector: per-track gain/mute, export options and the export footer.
+//! Editor inspector, the right page: every export setting lives here. Per-track export gain,
+//! export mute and "Mix into main track"; export method, frame rate, size cap and height; the
+//! output summary and the Export footer. The listen-only lane controls left of the timeline
+//! (`timeline_listen.rs`) change the preview only.
 use gpui::{
     AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, Window, canvas, div,
     prelude::*, px,
@@ -39,7 +42,7 @@ impl Root {
         let tracks = self.ed.info.as_ref().map(|i| i.audio.clone()).unwrap_or_default();
         let count = tracks.len();
         let mut column = div().p(px(16.)).flex().flex_col().gap(px(14.)).child(ui::heading(
-            "Audio",
+            "Export audio",
             match count {
                 0 => "No audio".to_owned(),
                 1 => "1 track".to_owned(),

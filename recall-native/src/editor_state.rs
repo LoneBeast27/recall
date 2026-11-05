@@ -25,6 +25,8 @@ pub enum Drag {
     TrimStart(usize),
     TrimEnd(usize),
     Gain(usize),
+    /// A lane's listening level (left of the timeline): preview only, no undo step.
+    Listen(usize),
 }
 
 /// Device-pixel rect (x, y, w, h) of the preview canvas, written during paint.
@@ -81,6 +83,9 @@ pub struct EditorState {
     pub hole: DeviceRect,
     pub track_span: Span,
     pub gain_spans: Vec<Span>,
+    /// Listening levels beside the lanes (preview only; `editor_state_monitor.rs`).
+    pub monitor: monitor::Monitor,
+    pub listen_spans: Vec<Span>,
     pub drag: Option<Drag>,
     /// The plan a trim or gain drag started from.
     drag_from: Option<EditPlan>,
@@ -115,6 +120,8 @@ mod playback;
 pub mod stream;
 #[path = "editor_state_pre_encode.rs"]
 mod pre_encode;
+#[path = "editor_state_monitor.rs"]
+pub mod monitor;
 
 impl EditorState {
     pub fn new(preview: Result<NativePreview, String>) -> Self {
@@ -154,6 +161,8 @@ impl EditorState {
             hole: Rc::new(Cell::new(None)),
             track_span: Rc::new(Cell::new(None)),
             gain_spans: vec![],
+            monitor: monitor::Monitor::default(),
+            listen_spans: vec![],
             drag: None,
             drag_from: None,
             generation: 0,
@@ -278,6 +287,8 @@ impl EditorState {
         self.dirty_since = None;
         self.warning = warning;
         self.gain_spans = (0..info.audio.len()).map(|_| Rc::new(Cell::new(None))).collect();
+        self.listen_spans = (0..info.audio.len()).map(|_| Rc::new(Cell::new(None))).collect();
+        self.monitor = monitor::Monitor::default();
         self.needs_flush = false;
         self.status = "Loading preview…".into();
     }
@@ -286,13 +297,9 @@ impl EditorState {
         info.audio
             .iter()
             .map(|track| {
-                let setting = self.setting(track.stream_index);
-                PreviewTrack {
-                    stream_index: track.stream_index,
-                    path: track.preview_path.clone(),
-                    gain_db: setting.map_or(0.0, |s| s.gain_db),
-                    muted: setting.is_some_and(|s| s.muted),
-                }
+                // Export level plus listening level (`editor_state_monitor.rs`).
+                let (gain_db, muted) = self.preview_audio(track.stream_index);
+                PreviewTrack { stream_index: track.stream_index, path: track.preview_path.clone(), gain_db, muted }
             })
             .collect()
     }

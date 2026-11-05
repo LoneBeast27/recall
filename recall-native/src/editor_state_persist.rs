@@ -57,8 +57,14 @@ impl EditorState {
             self.export_error = None;
             self.flush(workers);
             crate::backend::arm_export();
-            workers.job(Job::Export(info, self.plan.clone(), self.fps, self.export_settings.clone()));
+            workers.job(self.export_job(info));
         }
+    }
+
+    /// What Export sends the engine: the plan and the right page's settings. The listening
+    /// levels left of the timeline are not in it.
+    pub(super) fn export_job(&self, info: crate::edit_model::ClipInfo) -> Job {
+        Job::Export(info, self.plan.clone(), self.fps, self.export_settings.clone())
     }
 
     /// A flush may rewrite or remove the sidecar: it loaded at open, or there was none then and
