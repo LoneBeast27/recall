@@ -6,7 +6,8 @@ use crate::{
     root::{Root, ToastKind},
     services::{
         daemon::{self, DaemonCommand},
-        meters::{MeterState, bar_fraction},
+        meters::{MeterState, Meters, bar_fraction, meter_specs},
+        midi::Midi,
     },
     theme::{self, c},
     ui::{self, Icon, Variant, icon},
@@ -124,7 +125,7 @@ impl Root {
                         } else {
                             format!("HDR is off · {display}")
                         }))
-                        .child(div().text_color(c(theme::TERTIARY)).child(if !self.snap.connected { "Start the recorder to read and switch HDR.".to_owned() } else if hdr.available { owner } else { "Recall manages HDR on the PG27AQDP. Connect it to use these controls.".into() })),
+                        .child(div().text_color(c(theme::TERTIARY)).child(if !self.snap.connected { "Start the recorder to read and switch HDR.".to_owned() } else if hdr.available { owner } else { "Recall can't find the display it manages. Connect it, or check that it is on, to use these controls.".into() })),
                 )
                 .child(ui::button("toggle-hdr", Variant::Secondary).when(!hdr.available, |b| b.opacity(0.4)).child("Toggle HDR now").on_click(cx.listener(|this, _, _, cx| {
                     this.send(DaemonCommand::ToggleHdr);
@@ -157,13 +158,35 @@ impl Root {
                 cx.notify();
             })));
         }
-        body.push(setting_row("Desktop colour in HDR", "Gamma for SDR apps while HDR is on. Applies the next time HDR turns on.").child(profile_track).into_any_element());
-        self.page_shell("Display & HDR", "HDR switching for the PG27AQDP", body)
+        // The colour profiles are made for one monitor model: the row shows only where they are installed.
+        if ac_profiles_installed() {
+            body.push(setting_row("Desktop colour in HDR", "Gamma for SDR apps while HDR is on. Applies the next time HDR turns on.").child(profile_track).into_any_element());
+        }
+        let subtitle = format!("HDR switching for {}", if display == "Managed display" { "your main display" } else { display.as_str() });
+        self.page_shell("Display & HDR", &subtitle, body)
     }
 
     // ---- Audio ------------------------------------------------------------
 
+    /// Start or replace the meters and the MIDI monitor so they follow the settings: the
+    /// recorded desktop output and microphone, and the chosen MIDI input ("" = none).
+    pub(crate) fn sync_audio_monitors(&mut self) {
+        let text = |this: &Self, section: &str, key: &str| this.config_value(section, key).and_then(Value::as_str).unwrap_or("").trim().to_owned();
+        let mic_on = self.config_value("recording", "mic_enabled").and_then(Value::as_bool).unwrap_or(true);
+        let specs = meter_specs(&text(self, "recording", "desktop_audio_device"), &text(self, "recording", "mic_device"), mic_on);
+        if self.meters.as_ref().is_none_or(|m| m.specs() != specs.as_slice()) {
+            self.meters = Some(Meters::spawn(specs));
+        }
+        let port = text(self, "midi", "input");
+        if port.is_empty() {
+            self.midi = None;
+        } else if self.midi.as_ref().is_none_or(|m| m.wanted() != port) {
+            self.midi = Some(Midi::spawn(port));
+        }
+    }
+
     pub fn render_audio(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        self.sync_audio_monitors();
         let readings = self.meters.as_ref().map(|m| m.snapshot()).unwrap_or_default();
         let shown = self.meter_ballistics(&readings);
         let strips = readings.into_iter().zip(shown).map(|(r, (rms_db, hold_db))| {
@@ -204,23 +227,28 @@ impl Root {
         let mut body = vec![
             card()
                 .gap(px(16.))
-                .child(ui::heading("RØDECaster levels", "Live"))
+                .child(ui::heading("Levels", "Live"))
                 .child(div().flex().gap(px(8.)).children(strips))
-                .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child("Monitoring only. Clips record the Game and Microphone tracks."))
+                .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child("The desktop audio and microphone your clips record. Change them in Settings → Clip."))
                 .into_any_element(),
         ];
         body.push(
             card()
                 .gap(px(14.))
-                .child(ui::heading("MIDI console", port.clone().map_or_else(|| "RØDECaster port not found".into(), |p| format!("Listening on {p}"))))
+                .child(ui::heading("MIDI console", match (midi, port.clone()) {
+                    (None, _) => "Off · choose a device in Settings → General".to_owned(),
+                    (Some(m), None) => format!("{} is not connected", m.wanted()),
+                    (Some(_), Some(p)) => format!("Listening on {p}"),
+                }))
                 .child(
                     div()
                         .flex()
                         .items_center()
                         .gap(px(10.))
                         .child(ui::button("midi-test", Variant::Secondary).child(icon(Icon::Play, 13., theme::TEXT)).child("Send test note").on_click(cx.listener(|this, _, _, cx| {
-                            let result = this.midi.as_ref().map_or(Err("MIDI is not running".to_owned()), |m| {
-                                let target = m.ports().outputs.into_iter().find(|o| !o.to_lowercase().contains("wavetable")).unwrap_or_default();
+                            // The output with the chosen input's name (devices list both sides).
+                            let result = this.midi.as_ref().map_or(Err("MIDI is off".to_owned()), |m| {
+                                let target = m.wanted().to_owned();
                                 m.send(&target, &[0x90, 60, 127]).map(|_| target)
                             });
                             if let Some(midi) = this.midi.as_ref() {
@@ -246,7 +274,7 @@ impl Root {
                         .font_family(theme::mono())
                         .text_size(px(12.))
                         .child(div().font_family(theme::sans()).text_color(c(theme::TERTIARY)).pb(px(4.)).child("Incoming"))
-                        .when(recent.is_empty(), |d| d.child(div().text_color(c(theme::DISABLED)).child("No messages yet. Press a pad on the RØDECaster.")))
+                        .when(recent.is_empty(), |d| d.child(div().text_color(c(theme::DISABLED)).child("No messages yet. Press a key or pad on the device.")))
                         .children(recent.into_iter().map(|m| {
                             let bytes: Vec<String> = m.bytes.iter().map(|b| format!("{b:02X}")).collect();
                             div()
@@ -258,7 +286,7 @@ impl Root {
                 )
                 .into_any_element(),
         );
-        self.page_shell("Audio", "RØDECaster meters and MIDI", body)
+        self.page_shell("Audio", "Levels and MIDI", body)
     }
 
     // ---- Settings ---------------------------------------------------------
@@ -270,6 +298,16 @@ pub(crate) fn card() -> Div {
 
 pub(crate) fn section_title(text: &str) -> AnyElement {
     div().pt(px(8.)).child(ui::caption(text.to_owned())).into_any_element()
+}
+
+/// The Punchy/Accurate MHC2 profiles (`recall-hdr` `ac_profile_file`) are in the Windows colour
+/// store. Checked once per launch.
+fn ac_profiles_installed() -> bool {
+    static FOUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *FOUND.get_or_init(|| {
+        let store = std::env::var_os("WINDIR").map(std::path::PathBuf::from).unwrap_or_default().join(r"System32\spool\drivers\color");
+        ["PG27AQDP_Punchy-Gamma2.2_MHC2.icm", "PG27AQDP_sRGB-to-Gamma2.2_MHC2.icm"].iter().all(|f| store.join(f).is_file())
+    })
 }
 
 pub(crate) fn setting_row(title: &str, detail: &str) -> Div {

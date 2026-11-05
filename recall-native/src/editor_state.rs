@@ -179,7 +179,7 @@ impl EditorState {
         self.info.as_ref().map_or(0.0, |info| info.duration.max(0.01))
     }
 
-    /// `info.path` is canonical (`\\?\V:\...`); tiles pass plain paths.
+    /// `info.path` is canonical (`\\?\E:\...`); tiles pass plain paths.
     pub fn is_open(&self, path: &str) -> bool {
         self.info.as_ref().is_some_and(|info| same_path(&info.path, path)) || self.loading_path.as_deref().is_some_and(|p| same_path(p, path))
     }
@@ -447,7 +447,7 @@ pub(super) fn same_path(a: &str, b: &str) -> bool {
 mod same_path_tests {
     #[test]
     fn verbatim_and_plain_paths_match() {
-        assert!(super::same_path(r"\\?\V:\ALL RECORDINGS\a.mp4", r"v:\all recordings\a.mp4"));
-        assert!(!super::same_path(r"\\?\V:\ALL RECORDINGS\a.mp4", r"V:\ALL RECORDINGS\b.mp4"));
+        assert!(super::same_path(r"\\?\E:\Clips\a.mp4", r"e:\clips\a.mp4"));
+        assert!(!super::same_path(r"\\?\E:\Clips\a.mp4", r"E:\Clips\b.mp4"));
     }
 }

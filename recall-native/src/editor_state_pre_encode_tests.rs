@@ -4,7 +4,7 @@ use crate::edit_model::{ClipInfo, ExportMode, TimeRange};
 fn editor() -> EditorState {
     let mut ed = EditorState::new(Err("no preview in tests".into()));
     ed.info = Some(ClipInfo {
-        path: "V:/Recall/Raw/never-there.mp4".into(),
+        path: "E:/Recall/Raw/never-there.mp4".into(),
         duration: 120.0,
         width: 2560,
         height: 1440,

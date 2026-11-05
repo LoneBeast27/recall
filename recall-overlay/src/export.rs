@@ -57,7 +57,7 @@ struct Spec {
 }
 
 fn specs() -> Vec<Spec> {
-    let saved = json!({"mod":"engine","event":{"type":"saved","path":"V:\\c\\VALORANT__2026-10-30__21-14-03.mp4","seconds":30.0}});
+    let saved = json!({"mod":"engine","event":{"type":"saved","path":"E:\\c\\VALORANT__2026-10-30__21-14-03.mp4","seconds":30.0}});
     let failed = json!({"mod":"engine","event":{"type":"save_failed","reason":"the output folder is unavailable"}});
     let saving = json!({"mod":"session","event":{"type":"saving","seconds":30}});
     let (clip, fail) = ("Clip saved · VALORANT · 0:30", "Save failed · the output folder is unavailable");

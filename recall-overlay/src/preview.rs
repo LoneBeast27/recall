@@ -150,11 +150,11 @@ fn notices() -> Vec<NoticeView> {
         session("waiting", "Waiting for a game", "Not recording"),
         session("encoder", "Encoder problem", "Recorder stopped"),
         json!({"mod":"session","event":{"type":"saving","seconds":120}}),
-        engine(json!({"type":"saved","path":"V:\\c\\Rocket-League__2026-10-26__10-00-00.mp4","seconds":120.0})),
+        engine(json!({"type":"saved","path":"E:\\c\\Rocket-League__2026-10-26__10-00-00.mp4","seconds":120.0})),
         engine(json!({"type":"mic_muted","muted":true})),
         engine(json!({"type":"save_failed","reason":"the output folder is unavailable"})),
         engine(json!({"type":"bookmarked","at_secs":12.5})),
-        engine(json!({"type":"screenshot","path":"V:\\c\\VALORANT__2026-10-26__10-00-05.png"})),
+        engine(json!({"type":"screenshot","path":"E:\\c\\VALORANT__2026-10-26__10-00-05.png"})),
         chord,
     ]
     .iter()

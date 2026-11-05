@@ -277,8 +277,7 @@ impl ApplicationHandler for App {
             self.enc_fps = enc_cfg.fps;
             let buffer_secs = enc_cfg.buffer_secs;
             self.buffer_capacity_secs = buffer_secs;
-            let out_dir = std::env::var("RECALL_OUT_DIR")
-                .unwrap_or_else(|_| r"V:\ALL RECORDINGS".to_string());
+            let out_dir = naming::out_dir();
             let json = self.config.json;
             let tracks = audio::start(buffer_secs, |msg| {
                 if json {

@@ -127,12 +127,12 @@ pub fn cache_dir()->Result<PathBuf,String>{
 }
 fn tmp_dir()->Result<PathBuf,String>{let root=storage::cache_root().join("tmp");std::fs::create_dir_all(&root).map_err(|e|format!("create cache temp: {e}"))?;Ok(root)}
 /// `RECALL_OUT_DIR`, else the recorder's output folder (last reported, kept in
-/// `folders.json`), else `V:\ALL RECORDINGS`.
+/// `folders.json`), else `<Videos>\Recall` (the recorder's default).
 pub fn library_dir()->PathBuf{library_dir_from(&Folders::load())}
 /// [`library_dir`] from folders already in memory (the UI's copy), so a render never reads the file.
 pub fn library_dir_from(folders:&Folders)->PathBuf{
     if let Some(dir)=std::env::var_os("RECALL_OUT_DIR"){return PathBuf::from(dir);}
-    folders.recordings.clone().filter(|r|!r.trim().is_empty()).map(PathBuf::from).unwrap_or_else(||PathBuf::from(r"V:\ALL RECORDINGS"))
+    folders.recordings.clone().filter(|r|!r.trim().is_empty()).map(PathBuf::from).unwrap_or_else(crate::services::library::folders::default_recordings_dir)
 }
 /// The folders [`list_clips`] reads, in its order.
 pub fn clip_roots()->Vec<WatchRoot>{
@@ -353,9 +353,11 @@ mod tests {
     #[test] fn library_dir_from_uses_the_recordings_folder_and_falls_back_when_blank(){
         if std::env::var_os("RECALL_OUT_DIR").is_some(){return;} // the env var wins over both cases
         let folders=|r:Option<&str>|Folders{recordings:r.map(str::to_owned),..Folders::default()};
-        assert_eq!(library_dir_from(&folders(Some(r"V:\Recall\Raw"))),PathBuf::from(r"V:\Recall\Raw"));
-        assert_eq!(library_dir_from(&folders(Some("  "))),PathBuf::from(r"V:\ALL RECORDINGS"));
-        assert_eq!(library_dir_from(&folders(None)),PathBuf::from(r"V:\ALL RECORDINGS"));
+        assert_eq!(library_dir_from(&folders(Some(r"E:\Recall\Raw"))),PathBuf::from(r"E:\Recall\Raw"));
+        let default=crate::services::library::folders::default_recordings_dir();
+        assert!(default.is_absolute()&&default.ends_with("Recall"),"{default:?}");
+        assert_eq!(library_dir_from(&folders(Some("  "))),default);
+        assert_eq!(library_dir_from(&folders(None)),default);
     }
     #[test] fn recall_two_track_names_are_only_applied_to_matching_generated_sources(){
         let mut info=ClipInfo{path:"C:/clips/VALORANT__2026-10-17__22-34-31-275__3d260146faca4115835ba29741d71fe3.mp4".into(),duration:1.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![crate::edit_model::AudioTrackInfo{stream_index:1,name:"und".into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new()},crate::edit_model::AudioTrackInfo{stream_index:2,name:"und".into(),channels:1,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new()}],keyframes:Vec::new()};
@@ -368,7 +370,7 @@ mod tests {
         for label in ["Mic","mic","MIC","SFX","Bgm","Sub","Tom"]{assert!(!generic_audio_name(label),"{label}");}
         for code in ["eng","en","fre","jpn","ENG","und"," eng ","","a"]{assert!(generic_audio_name(code),"{code}");}
         let track=|name:&str,stream_index|crate::edit_model::AudioTrackInfo{stream_index,name:name.into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new()};
-        let mut info=ClipInfo{path:"V:/clips/VALORANT__2025-03-01__20-10-11.mp4".into(),duration:1.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![track("eng",1),track("Game",2),track("Mic",3)],keyframes:Vec::new()};
+        let mut info=ClipInfo{path:"E:/clips/VALORANT__2025-03-01__20-10-11.mp4".into(),duration:1.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![track("eng",1),track("Game",2),track("Mic",3)],keyframes:Vec::new()};
         normalize_audio_names(&mut info);
         assert_eq!(info.audio.iter().map(|a|a.name.as_str()).collect::<Vec<_>>(),["Audio track 1","Game","Mic"]);
     }

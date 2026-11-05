@@ -84,7 +84,15 @@ fn source_for_target_name(wanted: &str) -> Result<(LUID, u32), String> {
 /// Associate `profile_file` (a filename already present in the color store) as
 /// the current-user Advanced-Color DEFAULT for the named display. Takes effect
 /// on the next HDR entry.
+/// An empty name means the primary display.
 pub fn set_advanced_color_default(display_name: &str, profile_file: &str) -> Result<(), String> {
+    let primary;
+    let display_name = if display_name.trim().is_empty() {
+        primary = crate::display::resolve_target("")?;
+        primary.name()
+    } else {
+        display_name
+    };
     let (luid, source_id) = source_for_target_name(display_name)?;
     let wide: Vec<u16> = profile_file.encode_utf16().chain(std::iter::once(0)).collect();
     let hr = unsafe {

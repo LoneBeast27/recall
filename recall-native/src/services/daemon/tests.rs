@@ -34,7 +34,7 @@ fn new_session_status_parses_every_field() {
     let line = json!({"mod":"session","event":{"type":"status","state":"recording","target":{"name":"VALORANT","exe":"VALORANT-Win64-Shipping.exe","pid":4242},
         "engine_health":"running","auto_record":true,"save_hotkey":"Alt+N","mic_hotkey":"Alt+M","save_seconds":90,"mic_muted":true,
         "overlay":{"enabled":true,"corner":"top-right","running":false},"autostart":true,
-        "hdr":{"available":true,"display":"PG27AQDP","hdr_on":true,"manual_pin":false,"auto":true}}});
+        "hdr":{"available":true,"display":"Monitor 27Q","hdr_on":true,"manual_pin":false,"auto":true}}});
     assert!(apply(&mut state, line));
     let session = state.snapshot.session.clone().unwrap();
     assert_eq!(session.state, "recording");
@@ -43,7 +43,7 @@ fn new_session_status_parses_every_field() {
     assert!(session.auto_record && session.mic_muted && session.autostart);
     assert_eq!(session.save_seconds, 90);
     assert_eq!(session.overlay, OverlayStatus { enabled: true, corner: "top-right".into(), running: false });
-    assert_eq!(session.hdr, HdrStatus { available: true, display: Some("PG27AQDP".into()), hdr_on: true, manual_pin: false, auto: true });
+    assert_eq!(session.hdr, HdrStatus { available: true, display: Some("Monitor 27Q".into()), hdr_on: true, manual_pin: false, auto: true });
 }
 
 #[test]
@@ -119,10 +119,10 @@ fn engine_status_parses_and_drives_replay_ready() {
 #[test]
 fn legacy_hdr_status_maps_into_session() {
     let mut state = connected();
-    let line = json!({"mod":"hdr","event":{"type":"status","target":"PG27AQDP","hdr":true,"manual_pin":true,"session_pid":null,"auto":false,"engine_health":"restarting"}});
+    let line = json!({"mod":"hdr","event":{"type":"status","target":"Monitor 27Q","hdr":true,"manual_pin":true,"session_pid":null,"auto":false,"engine_health":"restarting"}});
     assert!(apply(&mut state, line));
     let session = state.snapshot.session.clone().unwrap();
-    assert_eq!(session.hdr, HdrStatus { available: true, display: Some("PG27AQDP".into()), hdr_on: true, manual_pin: true, auto: false });
+    assert_eq!(session.hdr, HdrStatus { available: true, display: Some("Monitor 27Q".into()), hdr_on: true, manual_pin: true, auto: false });
     assert_eq!(session.engine_health, "restarting");
     apply(&mut state, json!({"mod":"session","event":{"type":"status","record_only":true,"save_hotkey":"Alt+N"}}));
     let session = state.snapshot.session.clone().unwrap();
@@ -134,28 +134,28 @@ fn legacy_hdr_status_maps_into_session() {
 fn hotkey_and_recording_events_and_session_fields() {
     let mut state = connected();
     apply(&mut state, json!({"mod":"engine","event":{"type":"bookmarked","at_secs":12.5}}));
-    apply(&mut state, json!({"mod":"engine","event":{"type":"screenshot","path":"V:/shots/a.png"}}));
-    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_started","path":"V:/rec.mp4"}}));
-    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_stopped","path":"V:/rec.mp4","seconds":61.0,"bytes":9}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"screenshot","path":"E:/shots/a.png"}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_started","path":"E:/rec.mp4"}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_stopped","path":"E:/rec.mp4","seconds":61.0,"bytes":9}}));
     apply(&mut state, json!({"mod":"session","event":{"type":"storage_cleaned","removed":3,"freed_bytes":1000}}));
-    apply(&mut state, json!({"mod":"engine","event":{"type":"clip_moved","path":"V:/a.mp4","elapsed_ms":900}}));
-    apply(&mut state, json!({"mod":"engine","event":{"type":"clip_moved","path":"V:/b.mp4","elapsed_ms":900,"kept_path":"L:/s/kept/b.mp4"}}));
-    apply(&mut state, json!({"mod":"engine","event":{"type":"clip_move_failed","path":"V:/a.mp4","reason":"disk full"}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"clip_moved","path":"E:/a.mp4","elapsed_ms":900}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"clip_moved","path":"E:/b.mp4","elapsed_ms":900,"kept_path":"F:/s/kept/b.mp4"}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"clip_move_failed","path":"E:/a.mp4","reason":"disk full"}}));
     assert_eq!(
         state.events,
         vec![
             DaemonEvent::Bookmarked,
-            DaemonEvent::Screenshot { path: "V:/shots/a.png".into() },
+            DaemonEvent::Screenshot { path: "E:/shots/a.png".into() },
             DaemonEvent::RecordingStarted,
-            DaemonEvent::RecordingStopped { path: "V:/rec.mp4".into(), seconds: 61.0 },
+            DaemonEvent::RecordingStopped { path: "E:/rec.mp4".into(), seconds: 61.0 },
             DaemonEvent::StorageCleaned { removed: 3, freed_bytes: 1000 },
-            DaemonEvent::ClipMoved { path: "V:/a.mp4".into(), kept_path: None },
-            DaemonEvent::ClipMoved { path: "V:/b.mp4".into(), kept_path: Some("L:/s/kept/b.mp4".into()) },
-            DaemonEvent::ClipMoveFailed { path: "V:/a.mp4".into(), reason: "disk full".into() },
+            DaemonEvent::ClipMoved { path: "E:/a.mp4".into(), kept_path: None },
+            DaemonEvent::ClipMoved { path: "E:/b.mp4".into(), kept_path: Some("F:/s/kept/b.mp4".into()) },
+            DaemonEvent::ClipMoveFailed { path: "E:/a.mp4".into(), reason: "disk full".into() },
         ]
     );
     apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"recording","paused":false,"advanced_enabled":true,
-        "leader_label":"Alt `","chord_save_seconds":30,"long_recording":{"active":true,"path":"V:/rec.mp4","started_secs":1792621900.0}}}));
+        "leader_label":"Alt `","chord_save_seconds":30,"long_recording":{"active":true,"path":"E:/rec.mp4","started_secs":1792621900.0}}}));
     let session = state.snapshot.session.clone().unwrap();
     assert!(session.advanced_enabled && session.long_recording.active);
     assert_eq!(session.leader_label, "Alt `");
@@ -165,7 +165,7 @@ fn hotkey_and_recording_events_and_session_fields() {
 #[test]
 fn engine_one_shot_events_queue_in_order() {
     let mut state = connected();
-    apply(&mut state, json!({"mod":"engine","event":{"type":"saved","path":"V:\\clip.mp4","seconds":119.5,"frames":7000,"bytes":123456,"elapsed_ms":850}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"saved","path":"E:\\clip.mp4","seconds":119.5,"frames":7000,"bytes":123456,"elapsed_ms":850}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"save_failed","reason":"buffer empty"}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"export_started","source":"a.mp4","path":"b.mp4","fps":60}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"exported","source":"a.mp4","path":"b.mp4","fps":60,"frames":600,"seconds":10.0,"elapsed_ms":900}}));
@@ -174,7 +174,7 @@ fn engine_one_shot_events_queue_in_order() {
     assert_eq!(
         state.events,
         vec![
-            DaemonEvent::Saved { path: "V:\\clip.mp4".into(), seconds: 119.5, bytes: 123456, elapsed_ms: 850 },
+            DaemonEvent::Saved { path: "E:\\clip.mp4".into(), seconds: 119.5, bytes: 123456, elapsed_ms: 850 },
             DaemonEvent::SaveFailed { reason: "buffer empty".into() },
             DaemonEvent::ExportStarted { source: "a.mp4".into(), path: "b.mp4".into(), fps: 60 },
             DaemonEvent::Exported { source: "a.mp4".into(), path: "b.mp4".into(), fps: 60, frames: 600, seconds: 10.0 },
@@ -198,13 +198,13 @@ fn config_ac_profile_and_error_events() {
     let config = json!({"overlay":{"enabled":true,"corner":"top-left"},"replay":{"seconds":120}});
     assert!(apply(&mut state, json!({"mod":"session","event":{"type":"config","config":config.clone()}})));
     assert_eq!(state.snapshot.config, Some(config));
-    apply(&mut state, json!({"mod":"hdr","event":{"type":"ac_profile","profile":"PG27AQDP_Punchy-Gamma2.2_MHC2.icm","ok":true}}));
+    apply(&mut state, json!({"mod":"hdr","event":{"type":"ac_profile","profile":"Punchy-Gamma2.2_MHC2.icm","ok":true}}));
     apply(&mut state, json!({"mod":"hdr","event":{"type":"ac_profile","ok":false,"error":"no display"}}));
     apply(&mut state, json!({"mod":"session","event":{"type":"error","message":"set_config: unknown key"}}));
     assert_eq!(
         state.events,
         vec![
-            DaemonEvent::AcProfile { ok: true, profile: Some("PG27AQDP_Punchy-Gamma2.2_MHC2.icm".into()), error: None },
+            DaemonEvent::AcProfile { ok: true, profile: Some("Punchy-Gamma2.2_MHC2.icm".into()), error: None },
             DaemonEvent::AcProfile { ok: false, profile: None, error: Some("no display".into()) },
             DaemonEvent::Error("set_config: unknown key".into()),
         ]
@@ -297,10 +297,10 @@ fn pipe_client_round_trip_against_a_fake_controller() {
     assert_eq!(lines.next().unwrap().unwrap(), r#"{"cmd":"get_config"}"#);
     wait_until("connected", || client.snapshot().connected);
     writer.write_all(b"{\"mod\":\"session\",\"event\":{\"type\":\"status\",\"state\":\"recording\",\"save_seconds\":120}}\n").unwrap();
-    writer.write_all(b"{\"mod\":\"engine\",\"event\":{\"type\":\"saved\",\"path\":\"V:\\\\c.mp4\",\"seconds\":12.5,\"bytes\":9,\"elapsed_ms\":3}}\n").unwrap();
+    writer.write_all(b"{\"mod\":\"engine\",\"event\":{\"type\":\"saved\",\"path\":\"E:\\\\c.mp4\",\"seconds\":12.5,\"bytes\":9,\"elapsed_ms\":3}}\n").unwrap();
     wait_until("session status", || client.snapshot().session.is_some_and(|s| s.state == "recording"));
     wait_until("saved event", || client.revision() >= 3);
-    assert_eq!(client.drain_events(), vec![DaemonEvent::Saved { path: "V:\\c.mp4".into(), seconds: 12.5, bytes: 9, elapsed_ms: 3 }]);
+    assert_eq!(client.drain_events(), vec![DaemonEvent::Saved { path: "E:\\c.mp4".into(), seconds: 12.5, bytes: 9, elapsed_ms: 3 }]);
     assert!(client.drain_events().is_empty(), "drained once");
     assert!(client.send(DaemonCommand::SaveClip { seconds: Some(30) }));
     assert_eq!(lines.next().unwrap().unwrap(), r#"{"cmd":"save_clip","seconds":30}"#);

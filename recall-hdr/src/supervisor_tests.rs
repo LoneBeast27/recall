@@ -154,8 +154,15 @@ fn retargets_restart_on_purpose_and_never_trip_give_up() {
 fn real_engine_path() -> Option<PathBuf> {
     ["release", "debug"]
         .iter()
-        .map(|profile| PathBuf::from(format!("L:/Projects/recall/target/{profile}/recall.exe")))
+        .map(|profile| target_dir().join(profile).join("recall.exe"))
         .find(|p| p.is_file())
+}
+
+/// `CARGO_TARGET_DIR`, else the workspace's own `target` folder.
+fn target_dir() -> PathBuf {
+    std::env::var_os("CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("target"))
 }
 
 fn pid_alive(pid: u32) -> bool {
@@ -172,7 +179,7 @@ fn pid_alive(pid: u32) -> bool {
 #[ignore = "live: spawns the real recall.exe (screen capture) for a few seconds"]
 fn live_spawn_hello_shutdown_no_orphan() {
     let Some(engine) = real_engine_path() else {
-        panic!("real recall.exe not found under L:/Projects/recall/target");
+        panic!("real recall.exe not found under {}", target_dir().display());
     };
     let sup = Supervisor::start_with_locator(move || Some(engine), Some(EngineSpec::default()));
     let mut pid = 0;

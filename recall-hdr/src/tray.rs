@@ -284,7 +284,7 @@ impl Tray {
         cmds
     }
 
-    /// Update the disabled status header (e.g. `"PG27AQDP: SDR · desktop"`).
+    /// Update the disabled status header (e.g. `"Monitor 27Q: SDR · desktop"`).
     pub fn set_status(&mut self, line: &str) {
         self.status.set_text(line);
     }

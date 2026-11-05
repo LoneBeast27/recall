@@ -371,7 +371,10 @@ mod tests {
         assert_eq!(v["error"], r#"WCS said "no" at C:\x"#);
         let ok: serde_json::Value = serde_json::from_str(&ac_profile_event(&Ok("p.icm"))).unwrap();
         assert_eq!(ok["profile"], "p.icm");
-        assert_eq!(ac_profile_file("punchy"), Some("PG27AQDP_Punchy-Gamma2.2_MHC2.icm"));
+        for (variant, word) in [("punchy", "Punchy"), ("accurate", "sRGB")] {
+            let file = ac_profile_file(variant).expect(variant);
+            assert!(file.contains(word) && file.ends_with("_MHC2.icm"), "{file}");
+        }
         assert_eq!(ac_profile_file("vivid"), None);
     }
 }

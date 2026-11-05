@@ -159,6 +159,10 @@ pub fn engine_settings_changed(old: &RecordingCfg, new: &RecordingCfg) -> bool {
         || old.bitrate_mbps != new.bitrate_mbps
         || old.quality != new.quality
         || old.voice_app.trim() != new.voice_app.trim()
+        || old.mic_device.trim() != new.mic_device.trim()
+        || old.mic_enabled != new.mic_enabled
+        || old.desktop_audio_device.trim() != new.desktop_audio_device.trim()
+        || old.moments_gallery != new.moments_gallery
 }
 
 /// Environment for one engine spawn: `Some` sets, `None` removes. Every target
@@ -189,6 +193,7 @@ pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&s
         ("RECALL_BITRATE".to_string(), Some((rec.bitrate_mbps as u64 * 1_000_000).to_string())),
         ("RECALL_QUALITY".to_string(), Some(engine_quality(&rec.quality).to_string())),
         ("RECALL_AUDIO_VOICE_EXE".to_string(), (!voice.is_empty()).then(|| voice.to_string())),
+        ("RECALL_MOMENTS".to_string(), Some(if rec.moments_gallery { "1" } else { "0" }.to_string())),
     ];
     let (hwnd, name, pid) = match target {
         EngineTarget::Window(t) => (
@@ -199,6 +204,16 @@ pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&s
         EngineTarget::Desktop => (None, Some(DESKTOP_NAME.to_string()), None),
         EngineTarget::Off => (None, None, None),
     };
+    // Audio sources: set only when configured, so an inherited test override
+    // (RECALL_AUDIO_MIC + RECALL_AUDIO_EXACT) still reaches the engine.
+    for (key, name) in [("RECALL_AUDIO_MIC", &rec.mic_device), ("RECALL_AUDIO_GAME", &rec.desktop_audio_device)] {
+        if !name.trim().is_empty() {
+            env.push((key.into(), Some(name.trim().to_string())));
+        }
+    }
+    if !rec.mic_enabled {
+        env.push(("RECALL_AUDIO_MIC_OFF".into(), Some("1".into())));
+    }
     env.push(("RECALL_CAPTURE_HWND".into(), hwnd));
     env.push(("RECALL_CAPTURE_NAME".into(), name));
     env.push(("RECALL_AUDIO_GAME_PID".into(), pid));
@@ -264,6 +279,10 @@ mod tests {
             RecordingCfg { quality: "quality".into(), ..base.clone() },
             RecordingCfg { voice_app: "Discord.exe".into(), ..base.clone() },
             RecordingCfg { buffer_secs: 60, ..base.clone() },
+            RecordingCfg { mic_device: "Microphone (USB)".into(), ..base.clone() },
+            RecordingCfg { mic_enabled: false, ..base.clone() },
+            RecordingCfg { desktop_audio_device: "Speakers (USB)".into(), ..base.clone() },
+            RecordingCfg { moments_gallery: true, ..base.clone() },
             RecordingCfg { output_dir: "D:\\c".into(), ..base.clone() },
         ] {
             assert!(engine_settings_changed(&base, &changed), "{changed:?}");
@@ -334,7 +353,7 @@ mod tests {
         assert_eq!(get(&win, "RECALL_CAPTURE_NAME").as_deref(), Some("VALORANT"));
         assert_eq!(get(&win, "RECALL_AUDIO_GAME_PID").as_deref(), Some("42"));
         assert_eq!(get(&win, "RECALL_BUFFER_SECS").as_deref(), Some("120"));
-        assert_eq!(get(&win, "RECALL_OUT_DIR").as_deref(), Some(r"V:\ALL RECORDINGS"));
+        assert_eq!(get(&win, "RECALL_OUT_DIR"), Some(rec.output_dir.clone()));
         let desk = engine_env(&EngineTarget::Desktop, &rec, None);
         assert_eq!(get(&desk, "RECALL_CPU_MASK"), None, "unapplied mask is not passed (engine would exit)");
         assert_eq!(get(&desk, "RECALL_CAPTURE_HWND"), None, "removed, not inherited");
@@ -360,5 +379,27 @@ mod tests {
         assert_eq!(get(&env, "RECALL_BITRATE").as_deref(), Some("60000000"));
         assert_eq!(get(&env, "RECALL_QUALITY").as_deref(), Some("max"), "Quality = engine max (p7)");
         assert_eq!(get(&env, "RECALL_AUDIO_VOICE_EXE").as_deref(), Some("Discord.exe"));
+        assert_eq!(get(&win, "RECALL_MOMENTS").as_deref(), Some("0"), "Moments gallery is opt-in");
+        let moments = RecordingCfg { moments_gallery: true, ..RecordingCfg::default() };
+        assert_eq!(get(&engine_env(&EngineTarget::Desktop, &moments, None), "RECALL_MOMENTS").as_deref(), Some("1"));
+    }
+
+    #[test]
+    fn audio_devices_reach_the_engine_only_when_configured() {
+        let has = |env: &[(String, Option<String>)], k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
+        let plain = engine_env(&EngineTarget::Desktop, &RecordingCfg::default(), None);
+        for key in ["RECALL_AUDIO_MIC", "RECALL_AUDIO_GAME", "RECALL_AUDIO_MIC_OFF"] {
+            assert_eq!(has(&plain, key), None, "{key}: Windows default = inherited, not removed");
+        }
+        let rec = RecordingCfg {
+            mic_device: " Microphone (USB Audio Device) ".into(),
+            desktop_audio_device: "Speakers (USB Audio Device)".into(),
+            mic_enabled: false,
+            ..RecordingCfg::default()
+        };
+        let env = engine_env(&EngineTarget::Desktop, &rec, None);
+        assert_eq!(has(&env, "RECALL_AUDIO_MIC"), Some(Some("Microphone (USB Audio Device)".into())));
+        assert_eq!(has(&env, "RECALL_AUDIO_GAME"), Some(Some("Speakers (USB Audio Device)".into())));
+        assert_eq!(has(&env, "RECALL_AUDIO_MIC_OFF"), Some(Some("1".into())));
     }
 }

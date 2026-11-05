@@ -25,7 +25,7 @@ fn summary(path: &Path) -> ExportSummary {
 
 #[test]
 fn the_key_follows_everything_that_shapes_the_output() {
-    let clip = info("V:/Recall/Raw/a.mp4", 100);
+    let clip = info("E:/Recall/Raw/a.mp4", 100);
     let settings = ExportSettings::default();
     let base = key(&clip, &plan(98.0, 120.0), 60, &settings).expect("re-encode has a key");
     assert_eq!(key(&clip, &plan(98.0, 120.0), 60, &settings), Some(base), "same inputs, same key");
@@ -35,8 +35,8 @@ fn the_key_follows_everything_that_shapes_the_output() {
     assert_ne!(key(&clip, &plan(98.0, 120.0), 60, &capped), Some(base), "a size limit");
     let smaller = ExportSettings { height: Some(720), ..settings.clone() };
     assert_ne!(key(&clip, &plan(98.0, 120.0), 60, &smaller), Some(base), "a resolution");
-    assert_ne!(key(&info("V:/Recall/Raw/a.mp4", 101), &plan(98.0, 120.0), 60, &settings), Some(base), "a rewritten clip");
-    assert_ne!(key(&info("L:/Recall/Raw/a.mp4", 100), &plan(98.0, 120.0), 60, &settings), Some(base), "a moved clip");
+    assert_ne!(key(&info("E:/Recall/Raw/a.mp4", 101), &plan(98.0, 120.0), 60, &settings), Some(base), "a rewritten clip");
+    assert_ne!(key(&info("F:/Recall/Raw/a.mp4", 100), &plan(98.0, 120.0), 60, &settings), Some(base), "a moved clip");
     let lossless = ExportSettings { mode: ExportMode::Lossless, ..settings };
     assert_eq!(key(&clip, &plan(98.0, 120.0), 60, &lossless), None, "lossless is already a copy");
 }

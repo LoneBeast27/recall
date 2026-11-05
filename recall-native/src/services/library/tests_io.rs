@@ -224,7 +224,7 @@ fn mp4_last_presented_follows_display_order() {
 /// Read-only: the real recording; ffprobe reports format duration 119.146000 s.
 #[test]
 fn mp4_duration_matches_ffprobe_on_a_real_clip() {
-    let clip = Path::new(r"V:\ALL RECORDINGS\VALORANT__2026-10-17__22-21-36-788__adaa986dc538484698bbabf313f2fa1e.mp4");
+    let clip = Path::new(r"E:\Clips\VALORANT__2026-10-17__22-21-36-788__adaa986dc538484698bbabf313f2fa1e.mp4");
     if !clip.is_file() {
         eprintln!("skipped: {} not present", clip.display());
         return;

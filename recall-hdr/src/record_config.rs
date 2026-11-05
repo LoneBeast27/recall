@@ -77,6 +77,17 @@ pub struct RecordingCfg {
     pub cpu_mask: String,
     /// With no game target, capture the primary monitor as "Desktop".
     pub record_desktop_when_idle: bool,
+    /// Capture endpoint for the Mic track ("" = the Windows default mic;
+    /// `RECALL_AUDIO_MIC`). Exact friendly name as Windows shows it.
+    pub mic_device: String,
+    /// Record a Mic track at all (`RECALL_AUDIO_MIC_OFF=1` when false).
+    pub mic_enabled: bool,
+    /// Render endpoint recorded as Game in Desktop mode ("" = the Windows
+    /// default output; `RECALL_AUDIO_GAME`). Games record their own process.
+    pub desktop_audio_device: String,
+    /// Also list each saved clip in the SteelSeries Moments gallery
+    /// (`RECALL_MOMENTS=1`). Off unless the person turns it on.
+    pub moments_gallery: bool,
     /// Save-length presets. Last field: TOML writes it as
     /// `[[recording.save_hotkeys]]` tables after the plain keys.
     pub save_hotkeys: Vec<SaveHotkey>,
@@ -86,7 +97,7 @@ impl Default for RecordingCfg {
     fn default() -> Self {
         RecordingCfg {
             auto_record: true,
-            output_dir: r"V:\ALL RECORDINGS".into(),
+            output_dir: default_output_dir(),
             buffer_secs: 120,
             save_hotkey: "Alt+N".into(),
             mic_hotkey: "Alt+M".into(),
@@ -99,10 +110,33 @@ impl Default for RecordingCfg {
             bitrate_mbps: 25,
             quality: "balanced".into(),
             voice_app: String::new(),
-            cpu_mask: "ffff0000".into(),
+            cpu_mask: "auto".into(),
             record_desktop_when_idle: false,
+            mic_device: String::new(),
+            mic_enabled: true,
+            desktop_audio_device: String::new(),
+            moments_gallery: false,
             save_hotkeys: crate::record_hotkeys::default_save_hotkeys(),
         }
+    }
+}
+
+/// `<Videos>\Recall`: the Videos known folder (follows a moved or OneDrive Videos), else
+/// `%USERPROFILE%\Videos\Recall`.
+pub fn default_output_dir() -> String {
+    let videos = videos_folder().unwrap_or_else(|| PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("Videos"));
+    videos.join("Recall").to_string_lossy().into_owned()
+}
+
+fn videos_folder() -> Option<PathBuf> {
+    use windows::Win32::System::Com::CoTaskMemFree;
+    use windows::Win32::UI::Shell::{FOLDERID_Videos, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
+    // SAFETY: the returned buffer is copied, then freed with the allocator that made it.
+    unsafe {
+        let raw = SHGetKnownFolderPath(&FOLDERID_Videos, KF_FLAG_DEFAULT, None).ok()?;
+        let path = raw.to_string().ok();
+        CoTaskMemFree(Some(raw.0 as *const _));
+        path.filter(|p| !p.is_empty()).map(PathBuf::from)
     }
 }
 
@@ -181,7 +215,10 @@ impl OverlayCfg {
     }
 }
 
-/// The CPUs of `wanted` that exist in `system`; when none do (the default ffff0000 on a
+/// `recording.cpu_mask = "auto"`: no CPUs named, so [`fit_cpu_mask`] picks the high half.
+pub const AUTO_CPU_MASK: usize = 0;
+
+/// The CPUs of `wanted` that exist in `system`; when none do ("auto", or ffff0000 on a
 /// machine with 16 or fewer threads), the high half of `system`; `None` (no pin) with 4 or
 /// fewer CPUs, where a pin would only crowd the game.
 pub fn fit_cpu_mask(wanted: usize, system: usize) -> Option<usize> {
@@ -202,9 +239,13 @@ pub fn fit_cpu_mask(wanted: usize, system: usize) -> Option<usize> {
     Some(high)
 }
 
-/// Parse a hex affinity mask (`"ffff0000"` / `"0xffff0000"`); zero is invalid.
+/// Parse a hex affinity mask (`"ffff0000"` / `"0xffff0000"`) or `"auto"`
+/// ([`AUTO_CPU_MASK`]); zero is invalid.
 pub fn parse_cpu_mask(text: &str) -> Result<usize, String> {
     let raw = text.trim();
+    if raw.eq_ignore_ascii_case("auto") {
+        return Ok(AUTO_CPU_MASK);
+    }
     let digits = raw.strip_prefix("0x").or_else(|| raw.strip_prefix("0X")).unwrap_or(raw);
     match usize::from_str_radix(digits, 16) {
         Ok(0) => Err("recording.cpu_mask must select at least one CPU".into()),
@@ -228,6 +269,10 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     parse_cpu_mask(&rec.cpu_mask)?;
     crate::record_hotkeys::validate(rec, &cfg.hotkeys)?;
     validate_quality(rec)?;
+    let midi = &cfg.midi.input;
+    if midi.len() > 256 || midi.chars().any(char::is_control) {
+        return Err("midi.input must be a MIDI port name (at most 256 characters, one line)".into());
+    }
     let cap = cfg.storage.cap_gb;
     if (1..STORAGE_CAP_MIN_GB).contains(&cap) {
         return Err(format!("storage.cap_gb must be 0 (off) or at least {STORAGE_CAP_MIN_GB} GiB, got {cap}"));
@@ -249,7 +294,8 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     Ok(())
 }
 
-/// Codec / rate / bitrate / quality tokens and the voice-chat exe name.
+/// Codec / rate / bitrate / quality tokens, audio device names and the
+/// voice-chat exe name.
 fn validate_quality(rec: &RecordingCfg) -> Result<(), String> {
     if !CODECS.contains(&rec.codec.as_str()) {
         return Err(format!("recording.codec '{}' must be one of {}", rec.codec, CODECS.join(" | ")));
@@ -265,6 +311,11 @@ fn validate_quality(rec: &RecordingCfg) -> Result<(), String> {
     }
     if !QUALITIES.contains(&rec.quality.as_str()) {
         return Err(format!("recording.quality '{}' must be one of {}", rec.quality, QUALITIES.join(" | ")));
+    }
+    for (key, name) in [("mic_device", &rec.mic_device), ("desktop_audio_device", &rec.desktop_audio_device)] {
+        if name.len() > 256 || name.chars().any(char::is_control) {
+            return Err(format!("recording.{key} must be an audio device name (at most 256 characters, one line)"));
+        }
     }
     let voice = rec.voice_app.trim();
     if voice.len() > 64 || voice.chars().any(|c| matches!(c, '\\' | '/' | ':') || c.is_control()) {

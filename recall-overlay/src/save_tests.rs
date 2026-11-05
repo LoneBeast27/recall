@@ -22,7 +22,7 @@ fn saving(seconds: u64) -> Value {
 }
 
 fn saved() -> Value {
-    json!({"mod":"engine","event":{"type":"saved","path":"V:\\c\\VALORANT__2026-10-30__21-14-03.mp4","seconds":30.0}})
+    json!({"mod":"engine","event":{"type":"saved","path":"E:\\c\\VALORANT__2026-10-30__21-14-03.mp4","seconds":30.0}})
 }
 
 fn failed() -> Value {

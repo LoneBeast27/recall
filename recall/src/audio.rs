@@ -3,8 +3,11 @@
 //! Endpoint/virtual-cable model (PRD §9): a track = one audio ENDPOINT or one
 //! process tree.
 //! - "Game": process loopback of `RECALL_AUDIO_GAME_PID` (incl. children), else
-//!   LOOPBACK capture of a render endpoint ("Game (RØDECaster)" preferred).
-//! - "Mic": normal capture of a capture endpoint (RØDECaster Chat preferred).
+//!   LOOPBACK capture of the render endpoint named by `RECALL_AUDIO_GAME`
+//!   (Settings → Desktop audio), else the Windows default output.
+//! - "Mic": normal capture of the endpoint named by `RECALL_AUDIO_MIC`
+//!   (Settings → Microphone), else the Windows default mic. No Mic track at
+//!   all when `RECALL_AUDIO_MIC_OFF=1`.
 //! - "Voice": opt-in process loopback of a voice-chat app's process tree
 //!   (`RECALL_AUDIO_VOICE_PID`, or `RECALL_AUDIO_VOICE_EXE` e.g. `Discord.exe`);
 //!   no track when neither is set or the app is not running. Mic mute never
@@ -52,18 +55,16 @@ pub enum ProcessSource {
     VoiceApp,
 }
 
-/// Selection preference for one track: substring matched against endpoint
-/// friendly names (case-insensitive); falls back to the default endpoint.
+/// One track: the configured endpoint name (exact, then token-AND match),
+/// else the Windows default endpoint for the direction.
 pub struct TrackSpec {
     /// Internal name (Moments `audio_tracks`, mute rule, thread name).
     pub name: &'static str,
     /// Saved as the stream's `title` and `handler_name`.
     pub title: &'static str,
     pub direction: Direction,
-    /// Env var holding a name-substring override (endpoint tracks only).
+    /// Env var holding the configured endpoint name (endpoint tracks only).
     pub env: &'static str,
-    /// Default name-substring preferences, tried in order.
-    pub prefer: &'static [&'static str],
     pub process: ProcessSource,
 }
 
@@ -73,10 +74,6 @@ pub static TRACKS: [TrackSpec; 3] = [
         title: "Game",
         direction: Direction::Render, // loopback
         env: "RECALL_AUDIO_GAME",
-        // Token-AND matching: every whitespace-separated token must appear in
-        // the friendly name. This machine's cable set is the RØDECaster
-        // virtual suite (probed 2026-07-08): games route to "Game (RØDECaster)".
-        prefer: &["game rødecaster", "game rodecaster", "sonar gaming"],
         process: ProcessSource::GamePid,
     },
     TrackSpec {
@@ -84,11 +81,6 @@ pub static TRACKS: [TrackSpec; 3] = [
         title: "Microphone",
         direction: Direction::Capture,
         env: "RECALL_AUDIO_MIC",
-        prefer: &[
-            "microphone rodecaster chat",
-            "microphone rødecaster chat",
-            "sonar microphone",
-        ],
         process: ProcessSource::None,
     },
     TrackSpec {
@@ -96,7 +88,6 @@ pub static TRACKS: [TrackSpec; 3] = [
         title: "Voice chat",
         direction: Direction::Render,
         env: "",
-        prefer: &[],
         process: ProcessSource::VoiceApp,
     },
 ];
@@ -214,6 +205,10 @@ pub fn start(buffer_secs: u32, mut report: impl FnMut(String)) -> Vec<Arc<TrackR
     let game_pid = game_process_loopback_pid();
     let mut out = Vec::new();
     for spec in &TRACKS {
+        if spec.name == "Mic" && mic_off() {
+            report(format!("audio track '{}' off: microphone turned off in Settings", spec.name));
+            continue;
+        }
         let target = match spec.process {
             ProcessSource::None => None,
             ProcessSource::GamePid => match &game_pid {
@@ -272,52 +267,62 @@ pub fn list_endpoints(direction: &Direction) -> Vec<String> {
         .collect()
 }
 
+/// `RECALL_AUDIO_MIC_OFF=1`: the person turned the microphone off in
+/// Settings, so no Mic track is captured at all.
+fn mic_off() -> bool {
+    std::env::var("RECALL_AUDIO_MIC_OFF").is_ok_and(|v| v.trim() == "1")
+}
+
 /// True when every whitespace-separated token of `want` appears in `name`
 /// (both lowercased) — survives vendor naming like
-/// "Gaming (SteelSeries Sonar Virtual Audio Device)".
+/// "Speakers (2- USB Audio Device)" for "usb speakers".
 fn name_matches(name: &str, want: &str) -> bool {
     let name = name.to_lowercase();
     want.split_whitespace()
         .all(|tok| name.contains(&tok.to_lowercase()))
 }
 
-/// Endpoint names to try, in order. `exact` (test runs) keeps only the override.
-fn wanted_endpoints(over: Option<String>, prefer: &[&str], exact: bool) -> Vec<String> {
-    let mut wanted: Vec<String> = over.into_iter().collect();
-    if !exact {
-        wanted.extend(prefer.iter().map(|s| s.to_string()));
+/// Index of the endpoint `want` names: an exact (case-insensitive) friendly
+/// name first, so "Microphone (2- USB)" never loses to a longer name that
+/// shares its tokens; then the first token-AND match.
+fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
+    let want = want.trim();
+    if want.is_empty() {
+        return None;
     }
-    wanted
+    let exact = names.iter().position(|n| n.trim().to_lowercase() == want.to_lowercase());
+    exact.or_else(|| names.iter().position(|n| name_matches(n, want)))
 }
 
-/// Pick the endpoint for a spec: env override tokens, then preference list,
-/// then the OS default for that direction. `RECALL_AUDIO_EXACT` allows the
-/// override only: a test run gets its virtual endpoint or no track, never the
-/// person's real mic.
+/// Pick the endpoint for a spec: the configured name (env), else the Windows
+/// default for that direction, with the reason in the reported name.
+/// `RECALL_AUDIO_EXACT` allows the configured name only: a test run gets its
+/// virtual endpoint or no track, never the person's real mic.
 fn pick_device(spec: &TrackSpec) -> Result<(wasapi::Device, String), String> {
     let collection =
         DeviceCollection::new(&spec.direction).map_err(|e| format!("enumerate: {e}"))?;
     let n = collection.get_nbr_devices().map_err(|e| e.to_string())?;
     let exact = std::env::var_os("RECALL_AUDIO_EXACT").is_some();
-    let wanted = wanted_endpoints(std::env::var(spec.env).ok(), spec.prefer, exact);
+    let want = std::env::var(spec.env).ok().filter(|w| !w.trim().is_empty());
 
-    for want in &wanted {
-        for i in 0..n {
-            let Ok(dev) = collection.get_device_at_index(i) else { continue };
-            let name = dev.get_friendlyname().unwrap_or_default();
-            if name_matches(&name, want) {
-                return Ok((dev, name));
-            }
+    if let Some(want) = &want {
+        let devices: Vec<wasapi::Device> = (0..n).filter_map(|i| collection.get_device_at_index(i).ok()).collect();
+        let names: Vec<String> = devices.iter().map(|d| d.get_friendlyname().unwrap_or_default()).collect();
+        if let Some(i) = match_endpoint(&names, want) {
+            let name = names[i].clone();
+            return Ok((devices.into_iter().nth(i).expect("index from names"), name));
         }
     }
     if exact {
-        return Err(format!("no endpoint matches {wanted:?} (RECALL_AUDIO_EXACT)"));
+        return Err(format!("no endpoint matches {want:?} (RECALL_AUDIO_EXACT)"));
     }
-    // Fall back to the default endpoint for the direction.
     let dev = wasapi::get_default_device(&spec.direction)
-        .map_err(|e| format!("no preference matched; default endpoint failed: {e}"))?;
+        .map_err(|e| format!("default endpoint failed: {e}"))?;
     let name = dev.get_friendlyname().unwrap_or_else(|_| "(default)".into());
-    Ok((dev, format!("{name} (default fallback)")))
+    Ok(match want {
+        Some(want) => (dev, format!("{name} (Windows default; '{want}' not found)")),
+        None => (dev, format!("{name} (Windows default)")),
+    })
 }
 
 /// Resolve the opt-in process-loopback target for Game capture. A supplied

@@ -1,4 +1,5 @@
-//! RØDECaster level meters (WASAPI loopback on render endpoints, capture on the mic).
+//! Level meters for the sources clips record: the desktop audio output (WASAPI loopback) and
+//! the microphone (capture), each the device chosen in Settings or the Windows default.
 //! Ported from the hub's `meters.rs`; missing devices are retried.
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -16,25 +17,32 @@ pub enum MeterState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MeterReading {
-    /// "Game", "Music", "System", "Virtual A", "Virtual B", "Mic"
+    /// "Desktop audio" or "Microphone".
     pub label: String,
     pub rms_db: f32,
     pub peak_db: f32,
     pub state: MeterState,
 }
 
-/// (label, render endpoint (loopback) vs capture, words that must all appear in the
-/// friendly name). Real names: "Game (RØDECaster)", "Virtual A (RØDECaster)",
-/// "Microphone (3- RODECaster Duo Chat)". Matching is per whole word so "virtual a"
-/// cannot match "Virtual B (RØDECaster)" through the 'a' inside "caster".
-const METERS: [(&str, bool, &str); 6] = [
-    ("Game", true, "game rødecaster"),
-    ("Music", true, "music rødecaster"),
-    ("System", true, "system rødecaster"),
-    ("Virtual A", true, "virtual a rødecaster"),
-    ("Virtual B", true, "virtual b rødecaster"),
-    ("Mic", false, "microphone rodecaster chat"),
-];
+/// One meter: a label, render endpoint (loopback) vs capture, and the endpoint's friendly
+/// name ("" = the Windows default for that direction).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeterSpec {
+    pub label: &'static str,
+    pub render: bool,
+    pub device: String,
+}
+
+/// The meters for the recording settings: desktop audio always, the microphone only when it is
+/// recorded.
+pub fn meter_specs(desktop_device: &str, mic_device: &str, mic_enabled: bool) -> Vec<MeterSpec> {
+    let mut specs = vec![MeterSpec { label: "Desktop audio", render: true, device: desktop_device.trim().to_owned() }];
+    if mic_enabled {
+        specs.push(MeterSpec { label: "Microphone", render: false, device: mic_device.trim().to_owned() });
+    }
+    specs
+}
+
 const FLOOR_DB: f32 = -90.0;
 const RETRY: Duration = Duration::from_secs(3);
 const UPDATE: Duration = Duration::from_millis(16);
@@ -44,20 +52,21 @@ pub struct Meters {
 }
 
 struct Shared {
+    specs: Vec<MeterSpec>,
     readings: Mutex<Vec<MeterReading>>,
     revision: AtomicU64,
     stop: AtomicBool,
 }
 
 impl Shared {
-    fn new() -> Self {
-        let readings = METERS.iter().map(|(label, _, _)| reading(label, FLOOR_DB, FLOOR_DB, MeterState::Missing)).collect();
-        Self { readings: Mutex::new(readings), revision: AtomicU64::new(0), stop: AtomicBool::new(false) }
+    fn new(specs: Vec<MeterSpec>) -> Self {
+        let readings = specs.iter().map(|spec| reading(spec.label, FLOOR_DB, FLOOR_DB, MeterState::Missing)).collect();
+        Self { specs, readings: Mutex::new(readings), revision: AtomicU64::new(0), stop: AtomicBool::new(false) }
     }
 
     /// Stores a reading; bumps the revision only when something visible changed.
     fn set(&self, index: usize, rms_db: f32, peak_db: f32, state: MeterState) {
-        let next = reading(METERS[index].0, round_tenth(rms_db), round_tenth(peak_db), state);
+        let next = reading(self.specs[index].label, round_tenth(rms_db), round_tenth(peak_db), state);
         let mut readings = match self.readings.lock() {
             Ok(readings) => readings,
             Err(poisoned) => poisoned.into_inner(),
@@ -80,19 +89,23 @@ fn reading(label: &str, rms_db: f32, peak_db: f32, state: MeterState) -> MeterRe
 impl Meters {
     /// Starts one thread per meter. Never blocks. A test instance (`RECALL_NATIVE_OFFSCREEN`)
     /// starts none: it opens no real mic, and every meter reads missing.
-    pub fn spawn() -> Self {
-        let shared = Arc::new(Shared::new());
-        let meters = if std::env::var_os("RECALL_NATIVE_OFFSCREEN").is_some() { 0 } else { METERS.len() };
+    pub fn spawn(specs: Vec<MeterSpec>) -> Self {
+        let shared = Arc::new(Shared::new(specs));
+        let meters = if std::env::var_os("RECALL_NATIVE_OFFSCREEN").is_some() { 0 } else { shared.specs.len() };
         for index in 0..meters {
             let worker = shared.clone();
-            let name = format!("vu-{}", METERS[index].0);
+            let name = format!("vu-{}", shared.specs[index].label);
             if let Err(error) = std::thread::Builder::new().name(name).spawn(move || meter_thread(&worker, index)) {
                 shared.set(index, FLOOR_DB, FLOOR_DB, MeterState::Error(format!("meter thread: {error}")));
             }
         }
         Self { shared }
     }
-    /// Latest readings in display order (always 6 entries).
+    /// What these meters listen to (a settings change replaces the meters).
+    pub fn specs(&self) -> &[MeterSpec] {
+        &self.shared.specs
+    }
+    /// Latest readings in display order (one per spec).
     pub fn snapshot(&self) -> Vec<MeterReading> {
         match self.shared.readings.lock() {
             Ok(readings) => readings.clone(),
@@ -119,9 +132,9 @@ pub fn bar_fraction(db: f32) -> f32 {
 /// on a missing device (the hub's thread returned for good).
 fn meter_thread(shared: &Shared, index: usize) {
     let _ = wasapi::initialize_mta();
-    let (_, is_render, tokens) = METERS[index];
+    let spec = shared.specs[index].clone();
     while !shared.stopped() {
-        let state = match find_device(is_render, tokens) {
+        let state = match find_device(spec.render, &spec.device) {
             Ok(Some(device)) => match capture(shared, index, &device) {
                 Ok(()) => MeterState::Missing,
                 Err(error) => MeterState::Error(error),
@@ -140,13 +153,20 @@ fn meter_thread(shared: &Shared, index: usize) {
     }
 }
 
-fn find_device(is_render: bool, tokens: &str) -> Result<Option<Device>, String> {
+/// The named endpoint (exact name first, then whole-word match, like the recorder), or the
+/// Windows default when `name` is "". A named device that is gone reads as missing: the meter
+/// never shows a different device than the one being recorded.
+fn find_device(is_render: bool, name: &str) -> Result<Option<Device>, String> {
     let direction = if is_render { Direction::Render } else { Direction::Capture };
+    if name.is_empty() {
+        return Ok(wasapi::get_default_device(&direction).ok());
+    }
     let collection = DeviceCollection::new(&direction).map_err(|error| error.to_string())?;
     let count = collection.get_nbr_devices().map_err(|error| error.to_string())?;
-    Ok((0..count)
-        .filter_map(|i| collection.get_device_at_index(i).ok())
-        .find(|device| device.get_friendlyname().is_ok_and(|name| name_matches(&name, tokens))))
+    let devices: Vec<Device> = (0..count).filter_map(|i| collection.get_device_at_index(i).ok()).collect();
+    let names: Vec<String> = devices.iter().map(|d| d.get_friendlyname().unwrap_or_default()).collect();
+    let index = names.iter().position(|n| n.trim().eq_ignore_ascii_case(name)).or_else(|| names.iter().position(|n| name_matches(n, name)));
+    Ok(index.and_then(|i| devices.into_iter().nth(i)))
 }
 
 /// Streams levels at ~10 Hz. Returns Ok(()) only when asked to stop; device loss
@@ -222,7 +242,7 @@ fn round_tenth(value: f32) -> f32 {
     (value * 10.0).round() / 10.0
 }
 
-/// Lowercase, ø→o (so "RØDECaster" and "RODECaster" are one spelling), split into words.
+/// Lowercase, ø→o (so a name typed without the ø still matches), split into words.
 fn words(text: &str) -> Vec<String> {
     let folded: String = text.to_lowercase().chars().map(|c| if c == 'ø' { 'o' } else { c }).collect();
     folded.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()).map(str::to_owned).collect()
@@ -238,36 +258,23 @@ fn name_matches(name: &str, tokens: &str) -> bool {
 mod tests {
     use super::*;
 
-    fn tokens_of(label: &str) -> &'static str {
-        METERS.iter().find(|(l, _, _)| *l == label).unwrap().2
+    #[test]
+    fn meters_follow_the_recording_settings() {
+        let specs = meter_specs("", " Speakers (USB Audio) ", true);
+        assert_eq!(specs.iter().map(|s| s.label).collect::<Vec<_>>(), ["Desktop audio", "Microphone"]);
+        assert!(specs[0].render && !specs[1].render);
+        assert_eq!((specs[0].device.as_str(), specs[1].device.as_str()), ("", "Speakers (USB Audio)"));
+        assert_eq!(meter_specs("", "", false).len(), 1, "no mic meter when the mic is off");
+        let labels: Vec<_> = Shared::new(specs).readings.lock().unwrap().iter().map(|r| r.label.clone()).collect();
+        assert_eq!(labels, ["Desktop audio", "Microphone"]);
     }
 
     #[test]
-    fn labels_are_exact_and_in_display_order() {
-        let labels: Vec<_> = Shared::new().readings.lock().unwrap().iter().map(|r| r.label.clone()).collect();
-        assert_eq!(labels, ["Game", "Music", "System", "Virtual A", "Virtual B", "Mic"]);
-        assert!(METERS[..5].iter().all(|(_, render, _)| *render) && !METERS[5].1);
-    }
-
-    #[test]
-    fn matching_uses_real_endpoint_names_and_both_spellings() {
-        assert!(name_matches("Game (RØDECaster)", tokens_of("Game")));
-        assert!(name_matches("Game (RODECaster)", tokens_of("Game")));
-        assert!(name_matches("Music (RØDECaster)", tokens_of("Music")));
-        assert!(name_matches("System (RØDECaster)", tokens_of("System")));
-        assert!(name_matches("Virtual A (RØDECaster)", tokens_of("Virtual A")));
-        assert!(name_matches("Virtual B (RØDECaster)", tokens_of("Virtual B")));
-        assert!(name_matches("Microphone (3- RODECaster Duo Chat)", tokens_of("Mic")));
-        assert!(name_matches("Microphone (RØDECaster Duo Chat)", tokens_of("Mic")));
-    }
-
-    #[test]
-    fn matching_rejects_neighbours() {
-        assert!(!name_matches("Virtual B (RØDECaster)", tokens_of("Virtual A")), "hub bug: 'a' inside 'caster'");
-        assert!(!name_matches("Virtual A (RØDECaster)", tokens_of("Virtual B")));
-        assert!(!name_matches("Speakers (3- RODECaster Duo Chat)", tokens_of("Game")));
-        assert!(!name_matches("Microphone (3- RODECaster Duo Main Multitrack)", tokens_of("Mic")));
-        assert!(!name_matches("Game Capture HD60", tokens_of("Game")));
+    fn whole_word_matching_rejects_neighbours() {
+        assert!(name_matches("Virtual A (Mixer)", "virtual a"));
+        assert!(!name_matches("Virtual B (Mixer)", "virtual a"), "hub bug: 'a' inside another word");
+        assert!(name_matches("Microphone (USB Audio Device)", "microphone usb"));
+        assert!(!name_matches("Game Capture HD60", "game mixer"));
     }
 
     #[test]
@@ -297,21 +304,21 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "live hardware: opens shared-mode WASAPI loopback/capture on the RØDECaster endpoints"]
+    #[ignore = "live hardware: opens shared-mode WASAPI loopback/capture on the default endpoints"]
     fn live_meters_report_every_endpoint() {
-        let meters = Meters::spawn();
+        let meters = Meters::spawn(meter_specs("", "", true));
         std::thread::sleep(Duration::from_millis(1500));
         let snapshot = meters.snapshot();
         for r in &snapshot {
             eprintln!("{:<10} {:?} rms {:.1} dB peak {:.1} dB", r.label, r.state, r.rms_db, r.peak_db);
         }
-        assert_eq!(snapshot.len(), 6);
+        assert_eq!(snapshot.len(), 2);
         assert!(meters.revision() > 0, "threads published readings");
     }
 
     #[test]
     fn set_bumps_revision_only_on_visible_change() {
-        let shared = Shared::new();
+        let shared = Shared::new(meter_specs("", "", false));
         shared.set(0, -90.0, -90.0, MeterState::Missing);
         assert_eq!(shared.revision.load(Ordering::Acquire), 0);
         shared.set(0, -20.04, -10.0, MeterState::Live);

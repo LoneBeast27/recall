@@ -61,7 +61,7 @@ const MAX_WAIT_MS: u32 = 50;
 const PROBE_EVERY: Duration = Duration::from_secs(1);
 /// Read-only HDR state refresh while HDR management is off.
 const HDR_REFRESH_EVERY: Duration = Duration::from_secs(5);
-const FALLBACK_CPU_MASK: usize = 0xffff_0000;
+const FALLBACK_CPU_MASK: usize = crate::record_config::AUTO_CPU_MASK;
 
 /// The controller's state, owned by the pump thread. `record_cmds` adds the
 /// pipe/tray/hotkey command handlers.
@@ -359,6 +359,10 @@ impl Controller {
     }
 
     fn engine_spec(&self, target: &EngineTarget) -> EngineSpec {
+        // A new PC's default clip folder (Videos\Recall) may not exist yet.
+        if let Err(e) = std::fs::create_dir_all(&self.cfg.recording.output_dir) {
+            log!("record: cannot create clip folder {:?}: {e}", self.cfg.recording.output_dir);
+        }
         EngineSpec { env: engine_env(target, &self.cfg.recording, self.applied_mask.as_deref()) }
     }
 
