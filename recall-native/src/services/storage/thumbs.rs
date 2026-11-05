@@ -1,20 +1,56 @@
-//! Library thumbnail tier on the SSD: `thumbs/<identity>.jpg`, ≈480 px.
+//! Library thumbnail tier on the SSD: `thumbs/<identity>.jpg`, as wide as a library tile is in
+//! physical pixels on the current display ([`set_wanted_width`]): never smaller than the screen
+//! can show, so it is indistinguishable from the source there, and no bigger. A tile that grows
+//! (a wider window, a denser display) asks for a bigger thumbnail again; zooming past it upscales.
 //!
 //! First sight of a clip imports the recorder's own thumbnail (`<folder>\thumbs\
-//! <stem>-<epoch>-thumb.jpg`, 640×360) once — a plain copy when it is ≤ 640 px wide,
-//! re-encoded to 480 px otherwise — or extracts a frame at 5% when there is none. Both run
-//! on the clip's disk lane. After that `list_clips` finds the thumbnail from one listing of
+//! <stem>-<epoch>-thumb.jpg`, 640×360): a plain copy when it is about the wanted width, a
+//! scaled copy when larger, or a frame extracted from the clip when it is too small or
+//! missing. All run on the clip's disk lane. (A WIC decode at 1/2 or 1/4 size was measured on
+//! 2026-11-05 and cost the same ~4.5 ms per 853×480 thumbnail, so it is not used.) After that `list_clips` finds the thumbnail from one listing of
 //! `thumbs/`, so a warm launch reads no thumbnail from the library drive.
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
 use std::time::SystemTime;
 
 use super::ffmpeg::{self, Seek};
 use super::lane::{self, Priority};
 
-pub const THUMB_WIDTH: u32 = 480;
-const IMPORT_MAX_WIDTH: u32 = 640;
+/// Width used until the library grid has measured a tile (a 1280 px window at 100%).
+pub const DEFAULT_WIDTH: u32 = 384;
+/// Wanted widths are rounded up to this step, so resizing the window does not regenerate
+/// thumbnails pixel by pixel.
+const WIDTH_STEP: u32 = 64;
+/// A recorder thumbnail up to this much wider than wanted is copied as is (no re-encode).
+const COPY_SLACK: u32 = 64;
+
+static WANTED: AtomicU32 = AtomicU32::new(DEFAULT_WIDTH);
+
+/// The library grid reports a tile's width in physical pixels (tile width x display scale).
+pub fn set_wanted_width(physical: u32) {
+    let rounded = physical.clamp(128, 3840).div_ceil(WIDTH_STEP) * WIDTH_STEP;
+    WANTED.store(rounded, Ordering::Relaxed);
+}
+
+/// Thumbnail width the current display needs.
+pub fn wanted_width() -> u32 {
+    WANTED.load(Ordering::Relaxed)
+}
+
+/// Width of the JPEG at `path`, from its header (reads at most 64 KB).
+pub fn file_width(path: &Path) -> Option<u32> {
+    use std::io::Read;
+    let mut head = Vec::with_capacity(64 << 10);
+    std::fs::File::open(path).ok()?.take(64 << 10).read_to_end(&mut head).ok()?;
+    jpeg_size(&head).map(|(width, _)| width)
+}
+
+/// A cached thumbnail that is at least `wanted` wide.
+fn sharp_enough(path: &Path, wanted: u32) -> bool {
+    super::valid_file(path) && file_width(path).is_some_and(|width| width >= wanted)
+}
 
 /// One listing of the thumbnail tier, for metadata-only lookups while listing clips.
 pub struct ThumbIndex {
@@ -48,11 +84,12 @@ pub(super) fn thumb_path(root: &Path, id: &str) -> PathBuf {
     root.join("thumbs").join(format!("{id}.jpg"))
 }
 
-/// Cached thumbnail for `path` (stats the clip, reads nothing).
+/// Cached thumbnail for `path` at least as wide as the display needs (stats the clip, reads the
+/// thumbnail's header).
 pub fn cached_thumb(path: &str) -> Option<String> {
     let (id, _, _) = super::identity_of(Path::new(path)).ok()?;
     let target = thumb_path(&super::cache_root(), &id);
-    super::valid_file(&target).then(|| target.to_string_lossy().into_owned())
+    sharp_enough(&target, wanted_width()).then(|| target.to_string_lossy().into_owned())
 }
 
 /// Cached, imported or generated thumbnail; misses run on the clip's disk lane at
@@ -75,37 +112,44 @@ pub(super) fn ensure_in(root: &Path, source: &Path) -> Result<String, String> {
     let (id, _, _) = super::identity_of(source)?;
     let target = thumb_path(root, &id);
     let text = |path: &Path| path.to_string_lossy().into_owned();
-    if super::valid_file(&target) {
+    let wanted = wanted_width();
+    if sharp_enough(&target, wanted) {
         return Ok(text(&target));
     }
     std::fs::create_dir_all(target.parent().unwrap_or(root)).map_err(|error| format!("create thumbnail cache: {error}"))?;
+    // A smaller one from an earlier display goes first: the frame extraction keeps an existing file.
+    let _ = std::fs::remove_file(&target);
     let lowered = super::drive_kind(source).is_hdd();
-    let imported = recorder_thumb(source).map(|recorder| import(&recorder, &target, lowered));
+    let imported = recorder_thumb(source).map(|recorder| import(&recorder, &target, wanted, lowered));
     if let Some(Ok(())) = imported {
         return Ok(text(&target));
     }
     let duration = crate::services::library::mp4_duration(source).unwrap_or(0.0);
     let seconds = if duration.is_finite() && duration > 0.0 { duration * 0.05 } else { 0.0 };
-    ffmpeg::extract_frame(source, seconds, THUMB_WIDTH, 4, &target, Seek::Fast, lowered)?;
+    ffmpeg::extract_frame(source, seconds, wanted, 4, &target, Seek::Fast, lowered)?;
     Ok(text(&target))
 }
 
-fn import(recorder: &Path, target: &Path, from_hdd: bool) -> Result<(), String> {
+/// The recorder's thumbnail as the cached one, when it is at least `wanted` wide.
+fn import(recorder: &Path, target: &Path, wanted: u32, from_hdd: bool) -> Result<(), String> {
     let bytes = std::fs::read(recorder).map_err(|error| format!("read recorder thumbnail: {error}"))?;
     if from_hdd {
         lane::count_read(bytes.len() as u64);
     }
     let (width, _) = jpeg_size(&bytes).ok_or("recorder thumbnail is not a JPEG")?;
-    if width <= IMPORT_MAX_WIDTH {
+    if width < wanted {
+        return Err(format!("recorder thumbnail is {width} px, the display needs {wanted}"));
+    }
+    if width <= wanted + COPY_SLACK {
         return super::write_atomic(target, &bytes);
     }
-    if let Ok(small) = resize_jpeg(&bytes, THUMB_WIDTH) {
+    if let Ok(small) = resize_jpeg(&bytes, wanted) {
         return super::write_atomic(target, &small);
     }
-    // Decoder could not handle it: let ffmpeg try (one process per image, so only a fallback).
+    // The decoder could not handle it: let ffmpeg try (one process per image, so only a fallback).
     let staged = super::temp_sibling(target).with_extension("src.jpg");
     std::fs::write(&staged, &bytes).map_err(|error| format!("stage recorder thumbnail: {error}"))?;
-    let result = ffmpeg::scale_image(&staged, THUMB_WIDTH, target);
+    let result = ffmpeg::scale_image(&staged, wanted, target);
     let _ = std::fs::remove_file(&staged);
     result
 }
