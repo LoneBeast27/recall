@@ -2,8 +2,10 @@
 //! Direct2D frame → layered window, and the 4 Hz stats poller (alive only
 //! while the stats toggle is on).
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::mpsc::Receiver;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
@@ -14,11 +16,12 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
 };
 
+use crate::dynamic::{self, HudCache, HudGrid, Prober};
 use crate::fonts::Fonts;
 use crate::island::{self, stats_content, Content, Island};
 use crate::hint::{choose_card, CardScene, GAP};
 use crate::layout::{leader_scene, stats_scene, Scene};
-use crate::placement::{self, window_origin, Rect, Spot, Spots, EDGE};
+use crate::placement::{self, look_origin, Anchor, Rect, Spot, Spots, EDGE};
 use crate::presence::{CardLook, Look};
 use crate::badge::Badge;
 use crate::reducer::Reducer;
@@ -32,6 +35,9 @@ pub const BASE_MS: u32 = 250;
 pub const ANIM_TIMER: usize = 2;
 const ANIM_MS: u32 = 15;
 const POLL_EVERY: Duration = Duration::from_millis(240);
+
+/// The pipe's write half while connected (the island's own commands: `hud_probe`).
+pub type PipeOut = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
 
 #[derive(Debug)]
 pub enum Feed {
@@ -67,7 +73,11 @@ pub struct App {
     pub rx: Receiver<Feed>,
     pub parent_handle: Option<HANDLE>,
     pub parent_pid: Option<u32>,
+    /// `--corner`: `dynamic`, or a fixed corner (`Anchor::from_corner`).
     pub corner: String,
+    pub out: PipeOut,
+    hud_cache: HudCache,
+    prober: Prober,
     pub diagnostics_path: Option<PathBuf>,
     pub capture_exclusion_requested: bool,
     pub capture_exclusion_result: String,
@@ -104,6 +114,9 @@ impl App {
             parent_handle: None,
             parent_pid: None,
             corner: String::new(),
+            out: Arc::new(Mutex::new(None)),
+            hud_cache: HudCache::default(),
+            prober: Prober::default(),
             diagnostics_path: None,
             capture_exclusion_requested: true,
             capture_exclusion_result: String::new(),
@@ -155,9 +168,13 @@ impl App {
             changed |= match feed {
                 Feed::Connected => self.reducer.connected(),
                 Feed::Disconnected => self.reducer.disconnected(),
-                Feed::Json(value) => self.reducer.apply_envelope(&value, now),
+                Feed::Json(value) => match hud_scan(&value) {
+                    Some(scan) => self.on_hud_scan(scan, now),
+                    None => self.reducer.apply_envelope(&value, now),
+                },
             };
         }
+        self.probe_hud(now);
         if let Some(smoke) = self.smoke.as_mut() {
             changed |= smoke.apply_due(&mut self.reducer, elapsed, now);
         }
@@ -202,21 +219,77 @@ impl App {
     }
 
     /// The current target's spot, monitor and scale (looked up on target changes
-    /// and again each time the island appears).
+    /// and again each time the island appears). A fixed corner is that corner
+    /// at full size; Dynamic takes the clearest spot of the game's kept HUD
+    /// scans, else the built-in per-game spot (top right for unknown games).
     fn place(&mut self) -> f32 {
         let session = self.reducer.session();
         let key = session.game_key();
         let (pid, hwnd) = (session.target_pid, session.target_hwnd);
         let fresh = self.placed.as_ref().is_some_and(|p| p.key == key && p.pid == pid && p.hwnd == hwnd);
         if !fresh {
-            let spot = self.spots.lookup(&key);
             let monitor = target_monitor(hwnd, pid);
+            let scanned = (!session.desktop).then(|| self.hud_cache.grid(&session.hud_key())).flatten();
+            let current = self.placed.as_ref().filter(|p| p.key == key).map(|p| p.spot.anchor);
+            let (spot, hud) = match (Anchor::from_corner(&self.corner), scanned) {
+                (Some(anchor), _) => (Spot { anchor, free_px: None }, None),
+                (None, Some(grid)) => {
+                    let aspect = (monitor.right - monitor.left) as f32 / monitor.height().max(1) as f32;
+                    (Spot { anchor: dynamic::choose(&grid, aspect, current), free_px: None }, None)
+                }
+                (None, None) => (self.spots.lookup(&key), self.spots.hud(&key)),
+            };
             let scale = placement::scale(monitor.height(), &spot);
             let (grow, max_h) = (placement::grow(&spot), placement::free_depth(&spot, &monitor, scale));
-            let hud = self.spots.hud(&key);
             self.placed = Some(Placed { key, pid, hwnd, monitor, spot, scale, grow, max_h, hud });
         }
         self.placed.as_ref().map_or(1.0, |p| p.scale)
+    }
+
+    /// The Dynamic corner's kept scans (`--smoke-state` runs keep none).
+    pub fn load_hud_cache(&mut self, path: Option<PathBuf>) {
+        self.hud_cache = HudCache::load(path);
+    }
+
+    fn dynamic(&self) -> bool {
+        self.smoke.is_none() && Anchor::from_corner(&self.corner).is_none()
+    }
+
+    /// Dynamic: ask the engine for a HUD scan of the game when one is due
+    /// (`Prober`), only while the game is recorded and in front.
+    fn probe_hud(&mut self, now: Instant) {
+        if !self.dynamic() {
+            return;
+        }
+        let session = self.reducer.session();
+        let key = session.hud_key();
+        let active = session.recording() && game_in_front(session.target_pid.filter(|_| !session.desktop));
+        let scans = self.hud_cache.scans(&key);
+        if self.prober.due(&key, active, scans, now) {
+            let sent = self.out.lock().ok().and_then(|mut slot| Some(slot.as_mut()?.write_all(b"{\"cmd\":\"hud_probe\"}\n").is_ok()));
+            if sent != Some(true) {
+                self.prober.answered(false, scans, now);
+            }
+        }
+    }
+
+    /// A `hud_scan` from the engine: kept for the game it was asked for, and
+    /// the island moves to the clearest spot. True when the island moved.
+    fn on_hud_scan(&mut self, event: Value, now: Instant) -> bool {
+        let grid = HudGrid::from_scan(&event);
+        let key = self.reducer.session().hud_key();
+        let scans = self.hud_cache.scans(&key) + grid.is_some() as usize;
+        let Some(for_key) = self.prober.answered(grid.is_some(), scans, now) else { return false };
+        let Some(grid) = grid else { return false };
+        self.hud_cache.add(&for_key, grid);
+        let before = self.placed.as_ref().map(|p| p.spot.anchor);
+        // Re-place now (the current spot is kept when it is still among the clearest).
+        if let Some(p) = self.placed.as_mut() {
+            p.pid = None;
+            p.hwnd = None;
+        }
+        self.place();
+        before != self.placed.as_ref().map(|p| p.spot.anchor)
     }
 
     /// Lays out `content` at the current placement's scale: the scene, the
@@ -306,11 +379,14 @@ impl App {
         }
         let Some(placed) = self.placed.as_ref() else { return };
         let mut look = self.island.look(now, placed.max_h.max(self.scene.h));
-        look.align = placement::align(placed.spot.anchor);
+        let anchor = placed.spot.anchor;
+        look.align = placement::align(anchor);
+        look.up = anchor.side() == placement::Side::Bottom;
+        look.turn = anchor.turn();
         let card = self.island.card(now).zip(self.card_scene.as_ref());
         look.card = card.map(|(progress, c)| CardLook { w: c.w, h: c.h, gap: GAP * placed.scale, progress });
         let edge = (EDGE * placed.scale).round() as i32;
-        let (x, y) = window_origin(placed.spot.anchor, &placed.monitor, look.span_w(), look.margin, edge);
+        let (x, y) = look_origin(anchor, &placed.monitor, look.span_w(), look.extent(), look.margin, edge);
         let (sheen, badge) = (self.island.sheen(now), self.island.badge(now));
         let fade = self.island.crossfade(now);
         let key = (self.scene.clone(), [x, y], look, sheen.map(|s| (s.progress * 1000.0) as u16), badge, fade.map(|f| (f.alpha * 1000.0) as u16));
@@ -342,6 +418,12 @@ impl App {
         self.set_anim(hwnd, animating);
     }
 
+}
+
+/// An engine `hud_scan` line (the island's own, not for the reducer).
+fn hud_scan(value: &Value) -> Option<Value> {
+    let event = value.get("event").filter(|_| value.get("mod").and_then(Value::as_str) == Some("engine"))?;
+    (event.get("type").and_then(Value::as_str) == Some("hud_scan")).then(|| event.clone())
 }
 
 /// The stats are for the game only: true while the foreground window belongs

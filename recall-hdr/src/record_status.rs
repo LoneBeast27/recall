@@ -227,7 +227,7 @@ mod tests {
                 "mic_muted":true,
                 "long_recording":{"active":true,"path":"E:\\c\\G__rec.mp4","started_secs":1790000000.5},
                 "pending_restart":true,
-                "overlay":{"enabled":false,"corner":"top-right","running":false,"stats_style":"minimal"},
+                "overlay":{"enabled":false,"corner":"dynamic","running":false,"stats_style":"minimal"},
                 "overlay_stats":false,"fps_source":"off",
                 "autostart":false,
                 "storage":{"cap_gb":0},
@@ -261,7 +261,7 @@ mod tests {
         assert_eq!(v["overlay_stats"], true);
         assert_eq!(v["fps_source"], "no_permission");
         assert!(v.get("rtss").is_none(), "the RTSS field is gone");
-        assert_eq!(v["overlay"], json!({"enabled":false,"corner":"top-right","running":true,"stats_style":"minimal"}));
+        assert_eq!(v["overlay"], json!({"enabled":false,"corner":"dynamic","running":true,"stats_style":"minimal"}));
     }
 
     #[test]

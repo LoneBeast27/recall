@@ -16,7 +16,11 @@ use serde_json::{Map, Value};
 use crate::config::Config;
 
 /// Valid `overlay.corner` tokens (the `recall-overlay --corner` vocabulary).
-pub const CORNERS: [&str; 4] = ["top-left", "top-right", "bottom-left", "bottom-right"];
+/// `dynamic`: the island finds the game's HUD and takes a free corner or edge.
+pub const CORNERS: [&str; 5] = ["dynamic", "top-left", "top-right", "bottom-left", "bottom-right"];
+/// `overlay.corner_version`: 2 = the corner is honoured (before, the island
+/// ignored it and kept a per-game spot, so older configs load as `dynamic`).
+pub const CORNER_VERSION: u32 = 2;
 /// Accepted replay-buffer lengths (seconds). The ring lives in RAM.
 pub const BUFFER_SECS_MIN: u32 = 10;
 pub const BUFFER_SECS_MAX: u32 = 600;
@@ -218,6 +222,8 @@ pub struct OverlayCfg {
     /// Show notices (saves, bookmarks, recording changes).
     pub enabled: bool,
     pub corner: String,
+    /// [`CORNER_VERSION`] once `corner` means what it says (see `migrate_loaded`).
+    pub corner_version: u32,
     /// Show the performance-stats island (FPS via Windows frame timing, GPU, CPU).
     pub stats: bool,
     /// Gauge style of the stats island (`STATS_STYLES`).
@@ -226,7 +232,23 @@ pub struct OverlayCfg {
 
 impl Default for OverlayCfg {
     fn default() -> Self {
-        OverlayCfg { enabled: false, corner: "top-right".into(), stats: false, stats_style: "minimal".into() }
+        OverlayCfg { enabled: false, corner: "dynamic".into(), corner_version: CORNER_VERSION, stats: false, stats_style: "minimal".into() }
+    }
+}
+
+impl OverlayCfg {
+    /// A config saved before the corner was honoured always said `top-right`
+    /// (the default) while the island sat at its per-game spot: it loads as
+    /// `dynamic`, which keeps that behaviour. Saved again, it is version 2.
+    pub fn migrate_loaded(&mut self, toml_text: &str) {
+        let version = toml::from_str::<toml::Value>(toml_text)
+            .ok()
+            .and_then(|v| v.get("overlay")?.get("corner_version")?.as_integer())
+            .unwrap_or(0);
+        if version < CORNER_VERSION as i64 {
+            self.corner = "dynamic".into();
+            self.corner_version = CORNER_VERSION;
+        }
     }
 }
 

@@ -16,7 +16,7 @@ mod tests;
 pub use crate::framing::target_size;
 pub use av::HwFrame;
 pub use pipeline::Pipeline;
-pub use readback::read_rgba;
+pub use readback::{read_gray, read_rgba};
 
 /// A hardware D3D11 device (tests and `--gpu-smoke`; recording uses the capture device).
 pub fn hardware_device() -> Option<(
