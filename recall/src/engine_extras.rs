@@ -1,5 +1,5 @@
 //! Stdin handlers for the hotkey features: `bookmark`, `screenshot`,
-//! `record_start` / `record_stop` / `record_toggle`. Built once in
+//! `record_start` / `record_stop` / `record_toggle`, `hud_probe`. Built once in
 //! `App::resumed`; the render thread fulfils screenshots (`App::screenshot_tick`).
 
 use std::sync::{Arc, Mutex};
@@ -15,6 +15,8 @@ pub struct Extras {
     pub source: Arc<Mutex<String>>,
     pub bookmarks: Arc<Bookmarks>,
     pub shots: Arc<Screenshots>,
+    /// The island's HUD probe (one at a time, on its own background thread).
+    pub hud: crate::hud_probe::HudProbe,
     #[cfg(feature = "encode")]
     pub longrec: Option<Arc<crate::longrec::LongRec>>,
     pub json: bool,
@@ -26,6 +28,7 @@ impl Extras {
         match cmd {
             Command::Bookmark => self.bookmark(),
             Command::Screenshot => self.shots.request(),
+            Command::HudProbe => self.hud.request(),
             Command::RecordStart | Command::RecordStop | Command::RecordToggle => self.record(cmd),
             _ => return false,
         }

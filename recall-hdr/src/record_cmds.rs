@@ -91,6 +91,15 @@ impl Controller {
             "export_clip" => self.export_clip(&val),
             "bookmark" => self.engine_command("bookmark", client),
             "screenshot" => self.engine_command("screenshot", client),
+            // The island's Dynamic spot: quiet when nothing captures (no failure cue).
+            "hud_probe" => {
+                if self.engine_running() && !self.paused {
+                    log!("record: engine hud_probe");
+                    self.supervisor.send_engine_line(r#"{"cmd":"hud_probe"}"#);
+                } else {
+                    self.reply_error(client, "hud_probe: nothing is being captured");
+                }
+            }
             "record_start" => self.engine_command("record_start", client),
             "record_stop" => self.engine_command("record_stop", client),
             "record_toggle" => self.engine_command("record_toggle", client),

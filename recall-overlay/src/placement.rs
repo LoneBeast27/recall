@@ -6,6 +6,8 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+use crate::presence::Turn;
+
 /// Design reference: sizes are in 1440p pixels.
 pub const REF_HEIGHT: f32 = 1440.0;
 /// Island height at 1440p.
@@ -15,8 +17,9 @@ pub const EDGE: f32 = 12.0;
 /// The island never shrinks below this fraction to fit a tight HUD.
 pub const MIN_FIT: f32 = 0.6;
 
-/// The scan's anchor vocabulary (`top-left`, `top-centre`, `top-right`).
-#[allow(clippy::enum_variant_names)]
+/// Where the island sits: the scan's top spots (`top-left`, `top-centre`,
+/// `top-right`), the bottom ones the corner setting and the Dynamic pick add,
+/// and the middles of the side edges (the island turns vertical there).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Anchor {
     #[serde(rename = "top-left")]
@@ -25,6 +28,56 @@ pub enum Anchor {
     TopCentre,
     #[serde(rename = "top-right")]
     TopRight,
+    #[serde(rename = "bottom-left")]
+    BottomLeft,
+    #[serde(rename = "bottom-centre", alias = "bottom-center")]
+    BottomCentre,
+    #[serde(rename = "bottom-right")]
+    BottomRight,
+    #[serde(rename = "left-middle")]
+    LeftMiddle,
+    #[serde(rename = "right-middle")]
+    RightMiddle,
+}
+
+/// The screen edge an anchor sits on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Side {
+    Top,
+    Bottom,
+    Left,
+    Right,
+}
+
+impl Anchor {
+    pub fn side(self) -> Side {
+        match self {
+            Anchor::TopLeft | Anchor::TopCentre | Anchor::TopRight => Side::Top,
+            Anchor::BottomLeft | Anchor::BottomCentre | Anchor::BottomRight => Side::Bottom,
+            Anchor::LeftMiddle => Side::Left,
+            Anchor::RightMiddle => Side::Right,
+        }
+    }
+
+    /// The quarter turn the look takes here (side edges only).
+    pub fn turn(self) -> Turn {
+        match self.side() {
+            Side::Right => Turn::Cw,
+            Side::Left => Turn::Ccw,
+            Side::Top | Side::Bottom => Turn::None,
+        }
+    }
+
+    /// The `--corner` setting's fixed spots; None for `dynamic` (and anything else).
+    pub fn from_corner(corner: &str) -> Option<Anchor> {
+        match corner {
+            "top-left" => Some(Anchor::TopLeft),
+            "top-right" => Some(Anchor::TopRight),
+            "bottom-left" => Some(Anchor::BottomLeft),
+            "bottom-right" => Some(Anchor::BottomRight),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -200,34 +253,49 @@ impl Rect {
     }
 }
 
-/// Top-left corner of a `width`-wide island at `anchor`, `edge` px from the edges.
+/// Top-left corner of a `width`-wide island at a top or bottom `anchor`,
+/// `edge` px from the edges (a bottom spot's box ends `edge` above the bottom).
 pub fn position(anchor: Anchor, monitor: &Rect, width: i32, edge: i32) -> (i32, i32) {
-    let y = monitor.top + edge;
+    place(anchor, monitor, width, 0, edge)
+}
+
+/// Top-left of a box `along` px long on its edge and `depth` px deep into
+/// the screen (unturned sizes: a side spot's box is `depth` wide, `along` high).
+fn place(anchor: Anchor, monitor: &Rect, along: i32, depth: i32, edge: i32) -> (i32, i32) {
     let x = match anchor {
-        Anchor::TopLeft => monitor.left + edge,
-        Anchor::TopRight => monitor.right - edge - width,
-        Anchor::TopCentre => monitor.left + (monitor.right - monitor.left - width) / 2,
+        Anchor::TopLeft | Anchor::BottomLeft => monitor.left + edge,
+        Anchor::TopRight | Anchor::BottomRight => monitor.right - edge - along,
+        Anchor::TopCentre | Anchor::BottomCentre => monitor.left + (monitor.right - monitor.left - along) / 2,
+        Anchor::LeftMiddle => monitor.left + edge,
+        Anchor::RightMiddle => monitor.right - edge - depth,
+    };
+    let y = match anchor.side() {
+        Side::Top => monitor.top + edge,
+        Side::Bottom => monitor.bottom - edge - depth,
+        Side::Left | Side::Right => monitor.top + (monitor.height() - along) / 2,
     };
     (x, y)
 }
 
-/// How the island lines up its pill and the hint card for an anchor
-/// (0 = left edges, 0.5 = centres, 1 = right edges).
+/// How the island lines up its pill and the hint card along its edge
+/// (0 = left edges, 0.5 = centres, 1 = right edges; unturned).
 pub fn align(anchor: Anchor) -> f32 {
     match anchor {
-        Anchor::TopLeft => 0.0,
-        Anchor::TopCentre => 0.5,
-        Anchor::TopRight => 1.0,
+        Anchor::TopLeft | Anchor::BottomLeft => 0.0,
+        Anchor::TopCentre | Anchor::BottomCentre | Anchor::LeftMiddle | Anchor::RightMiddle => 0.5,
+        Anchor::TopRight | Anchor::BottomRight => 1.0,
     }
 }
 
 /// Where a `w`-wide box sits along the top at `anchor`, `edge` in from the
 /// screen's sides (1440p px), as the island places it.
-fn footprint(anchor: Anchor, w: f32, edge: f32) -> (f32, f32) {
+fn footprint(anchor: Anchor, w: f32, edge: f32) -> Option<(f32, f32)> {
     match anchor {
-        Anchor::TopLeft => (edge, edge + w),
-        Anchor::TopRight => (REF_WIDTH - edge - w, REF_WIDTH - edge),
-        Anchor::TopCentre => ((REF_WIDTH - w) / 2.0, (REF_WIDTH + w) / 2.0),
+        Anchor::TopLeft => Some((edge, edge + w)),
+        Anchor::TopRight => Some((REF_WIDTH - edge - w, REF_WIDTH - edge)),
+        Anchor::TopCentre => Some(((REF_WIDTH - w) / 2.0, (REF_WIDTH + w) / 2.0)),
+        // The scan's grid covers the top rows only.
+        _ => None,
     }
 }
 
@@ -252,7 +320,7 @@ pub fn card_cover(spot: &Spot, hud: Option<&[u64]>, monitor: &Rect, scale: f32, 
     let edge = EDGE * scale / k;
     let (w, top) = (size.0 / k, edge + below / k);
     let rows = (top, top + size.1 / k);
-    let columns = footprint(spot.anchor, w, edge);
+    let columns = footprint(spot.anchor, w, edge)?;
     match (hud, spot.free_px) {
         (Some(hud), _) => Some(covered(hud, columns, rows)),
         (None, Some(free)) if free > 0 => Some(w * (rows.1 - rows.0.max(free as f32)).max(0.0)),
@@ -264,7 +332,15 @@ pub fn card_cover(spot: &Spot, hud: Option<&[u64]>, monitor: &Rect, scale: f32, 
 /// `box_w`-wide box; the window adds `margin` around it (the appearing
 /// circle's overshoot).
 pub fn window_origin(anchor: Anchor, monitor: &Rect, box_w: f32, margin: f32, edge: i32) -> (i32, i32) {
-    let (x, y) = position(anchor, monitor, box_w.ceil() as i32, edge);
+    look_origin(anchor, monitor, box_w, 0.0, margin, edge)
+}
+
+/// The window's top-left for a look `along` long on its edge and `depth`
+/// deep (its unturned `span_w()` and `extent()`), with `margin` around it.
+/// A bottom spot keeps the box's bottom `edge` above the screen's, so the
+/// island grows upwards; a side spot's window is the turned one.
+pub fn look_origin(anchor: Anchor, monitor: &Rect, along: f32, depth: f32, margin: f32, edge: i32) -> (i32, i32) {
+    let (x, y) = place(anchor, monitor, along.ceil() as i32, depth.ceil() as i32, edge);
     let m = margin.ceil() as i32;
     (x - m, y - m)
 }
@@ -474,6 +550,33 @@ mod tests {
         assert_eq!(window_origin(Anchor::TopRight, &monitor, 44.0, 0.0, 12), (2504, 12), "the circle sits at the right end");
         assert_eq!(window_origin(Anchor::TopRight, &monitor, 44.0, 2.0, 12), (2502, 10), "the margin wraps the same box");
         assert_eq!(window_origin(Anchor::TopRight, &monitor, 299.4, 0.0, 12), position(Anchor::TopRight, &monitor, 300, 12));
+    }
+
+    #[test]
+    fn bottom_and_side_spots_keep_the_box_on_their_edge() {
+        let qhd = Rect { left: 0, top: 0, right: 2560, bottom: 1440 };
+        // A 300 x 44 pill with a 100 px card unfolded: 300 along, 144 deep.
+        assert_eq!(look_origin(Anchor::BottomRight, &qhd, 300.0, 144.0, 0.0, 12), (2248, 1440 - 12 - 144), "grows upwards");
+        assert_eq!(look_origin(Anchor::BottomLeft, &qhd, 300.0, 44.0, 2.0, 12), (10, 1440 - 12 - 44 - 2));
+        assert_eq!(look_origin(Anchor::BottomCentre, &qhd, 300.0, 44.0, 0.0, 12), (1130, 1384));
+        // Side spots: the turned window is `depth` wide and `along` high, centred down the edge.
+        assert_eq!(look_origin(Anchor::RightMiddle, &qhd, 300.0, 44.0, 0.0, 12), (2560 - 12 - 44, 570));
+        assert_eq!(look_origin(Anchor::LeftMiddle, &qhd, 300.0, 144.0, 0.0, 12), (12, 570), "the card reaches inwards");
+        let left_screen = Rect { left: -1920, top: -200, right: 0, bottom: 880 };
+        assert_eq!(look_origin(Anchor::RightMiddle, &left_screen, 200.0, 44.0, 0.0, 9), (-53, 240));
+    }
+
+    #[test]
+    fn corners_turns_and_alignment_per_anchor() {
+        use crate::presence::Turn;
+        assert_eq!(Anchor::from_corner("bottom-left"), Some(Anchor::BottomLeft));
+        assert_eq!(Anchor::from_corner("top-right"), Some(Anchor::TopRight));
+        assert_eq!(Anchor::from_corner("dynamic"), None);
+        assert_eq!((Anchor::RightMiddle.turn(), Anchor::LeftMiddle.turn(), Anchor::BottomRight.turn()), (Turn::Cw, Turn::Ccw, Turn::None));
+        assert_eq!((align(Anchor::BottomLeft), align(Anchor::RightMiddle), align(Anchor::BottomRight)), (0.0, 0.5, 1.0));
+        let qhd = Rect { left: 0, top: 0, right: 2560, bottom: 1440 };
+        let low = Spot { anchor: Anchor::BottomRight, free_px: None };
+        assert_eq!(card_cover(&low, Some(&[u64::MAX; 80]), &qhd, 1.0, (200.0, 52.0), 50.0), None, "the scan's grid is the top rows only");
     }
 
     #[test]

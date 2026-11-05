@@ -43,6 +43,7 @@ mod gpu;
 mod gpu_frames;
 mod gpu_route;
 mod hdr;
+mod hud_probe;
 mod hybrid_gpu;
 mod protocol;
 mod ring;
@@ -327,6 +328,7 @@ impl ApplicationHandler for App {
             source: self.source_shared.clone(),
             bookmarks: marks,
             shots,
+            hud: hud_probe::HudProbe::new(shared.clone(), self.config.json),
             #[cfg(feature = "encode")]
             longrec: self.longrec.clone(),
             json: self.config.json,
@@ -435,6 +437,7 @@ fn spawn_stdin_reader(
                 Ok(
                     cmd @ (protocol::Command::Bookmark
                     | protocol::Command::Screenshot
+                    | protocol::Command::HudProbe
                     | protocol::Command::RecordStart
                     | protocol::Command::RecordStop
                     | protocol::Command::RecordToggle),
