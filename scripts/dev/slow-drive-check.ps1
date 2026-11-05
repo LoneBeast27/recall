@@ -121,7 +121,7 @@ Run-Scenario 'edits made while loading survive the upgrade' {
 
 Run-Scenario 'leaving mid-load stops the copy cleanly' {
   $s = Start-Slow 'slow-leave' 10 -Library -Also @('slow-other')
-  Click $s 'tile:slow-leave.mp4'
+  Open-Tile $s 'tile:slow-leave.mp4'
   [void](Wait-Trace $s { param($r) $r.ready -and $r.loading } 8000)
   $one = Fills
   $started = Ok ($one.Count -eq 1) "copying: $($one.Count) part file"
@@ -140,7 +140,7 @@ Run-Scenario 'leaving mid-load stops the copy cleanly' {
   $env:RECALL_SLOW_DRIVE = '10'
   try { $again = Start-Viewer 'slow-leave' $Clip -Library -Also @('slow-other') } finally { Remove-Item Env:RECALL_SLOW_DRIVE -ErrorAction SilentlyContinue }
   $script:current = $again
-  Click $again 'tile:slow-leave.mp4'
+  Open-Tile $again 'tile:slow-leave.mp4'
   [void](Wait-Trace $again { param($r) $r.ready -and $r.loading } 8000)
   $once = Ok ((Fills).Count -eq 1) "after reopening: $((Fills).Count) part file"
   Verdict @($started, $held, $closed, $once)
@@ -148,13 +148,13 @@ Run-Scenario 'leaving mid-load stops the copy cleanly' {
 
 Run-Scenario 'opening another clip stops the first copy' {
   $s = Start-Slow 'slow-first' 20 -Library -Also @('slow-second')
-  Click $s 'tile:slow-first.mp4'
+  Open-Tile $s 'tile:slow-first.mp4'
   [void](Wait-Trace $s { param($r) $r.ready -and $r.loading } 8000)
   $a = @(Fills)
   $one = Ok ($a.Count -eq 1) "the first clip is copying: $($a.Count) part file"
   Key $s 'escape'
   [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 3000)
-  Click $s 'tile:slow-second.mp4'
+  Open-Tile $s 'tile:slow-second.mp4'
   $t = Get-Date
   while ((Test-Path -LiteralPath $a[0].FullName) -and ((Get-Date) - $t).TotalSeconds -lt 5) { Start-Sleep -Milliseconds 20 }
   $gone = Ok (-not (Test-Path -LiteralPath $a[0].FullName)) "its part file went $([int]((Get-Date) - $t).TotalMilliseconds) ms after the second open"
@@ -174,12 +174,12 @@ Run-Scenario 'a second clip that cannot open still stops the first copy' {
   $bad = Join-Path (Split-Path $s.Clip) 'slow-bad.mp4'
   [IO.File]::WriteAllBytes($bad, [byte[]]::new(2MB))
   [void](Wait-Trace $s { param($r) $r.targets.PSObject.Properties.Name -contains 'tile:slow-bad.mp4' } 10000)
-  Click $s 'tile:slow-before-bad.mp4'
+  Open-Tile $s 'tile:slow-before-bad.mp4'
   [void](Wait-Trace $s { param($r) $r.ready -and $r.loading } 8000)
   $a = @(Fills)
   Key $s 'escape'
   [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 3000)
-  Click $s 'tile:slow-bad.mp4'
+  Open-Tile $s 'tile:slow-bad.mp4'
   $failed = Wait-Trace $s { param($r) -not $r.clip -and $r.status -and $r.status -notlike 'Opening*' -and $r.status -notlike 'Preparing*' -and $r.status -notlike 'Loading*' } 15000
   $t = Get-Date
   while ((Test-Path -LiteralPath $a[0].FullName) -and ((Get-Date) - $t).TotalSeconds -lt 3) { Start-Sleep -Milliseconds 20 }
@@ -193,7 +193,7 @@ Run-Scenario 'edits made during an export survive reopening the clip' {
   Remove-Item $env:RECALL_STUB_LOG -ErrorAction SilentlyContinue
   try {
     $s = Start-Slow 'slow-keep' 200 -Library -Also @('slow-away')
-    Click $s 'tile:slow-keep.mp4'
+    Open-Tile $s 'tile:slow-keep.mp4'
     [void](Wait-Trace $s { param($r) $r.ready -and $r.clip -like '*slow-keep*' -and $r.targets.tracks } 8000)
     Scrub $s 0.1 3 4; [void](Settle $s 300); Key $s 'c'
     [void](Wait-Trace $s { param($r) @($r.ranges).Count -eq 2 -and $r.saved } 4000)
@@ -203,11 +203,11 @@ Run-Scenario 'edits made during an export survive reopening the clip' {
     $three = Wait-Trace $s { param($r) @($r.ranges).Count -eq 3 } 3000
     Key $s 'escape'
     [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 3000)
-    Click $s 'tile:slow-away.mp4'
+    Open-Tile $s 'tile:slow-away.mp4'
     [void](Wait-Trace $s { param($r) $r.ready -and $r.clip -like '*slow-away*' } 8000)
     Key $s 'escape'
     [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 3000)
-    Click $s 'tile:slow-keep.mp4'
+    Open-Tile $s 'tile:slow-keep.mp4'
     $back = Wait-Trace $s { param($r) $r.ready -and $r.clip -like '*slow-keep*' -and $r.targets.tracks } 8000
     $still = $null -ne $running -and -not $running.HasExited
     $during = Ok ($still -and $three -and @($back.ranges).Count -eq 3) "reopened with the export still running ($still): $(@($back.ranges).Count) ranges of 3"
