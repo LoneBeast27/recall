@@ -22,6 +22,7 @@ pub(crate) struct SavedReport<'a> {
     pub frames: u64,
     pub bytes: u64,
     pub elapsed_ms: u64,
+    pub video_end_us: Option<u64>,
 }
 
 impl Events {
@@ -65,6 +66,7 @@ impl Events {
             elapsed_ms: r.elapsed_ms,
             staged: r.staged_path.is_some(),
             staged_path: r.staged_path.map(str::to_string),
+            video_end_us: r.video_end_us,
         };
         self.out(msg, || {
             let (path, seconds, frames, bytes, ms) = (r.path, r.seconds, r.frames, r.bytes, r.elapsed_ms);

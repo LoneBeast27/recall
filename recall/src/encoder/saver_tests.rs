@@ -19,6 +19,7 @@ fn job(path: &Path) -> SaveJob {
         seconds: 2,
         requested: Instant::now(),
         secs: 1.5,
+        video_end_us: None,
         video: VideoSrc::Still {
             frame: (2, 2, Arc::new(vec![0; 16])),
             spec: StillSpec {
@@ -75,7 +76,7 @@ fn kinds(lines: &[String]) -> Vec<&'static str> {
 }
 
 fn report<'a>(path: &'a str, staged_path: Option<&'a str>, secs: f32, frames: u64, bytes: u64, ms: u64) -> SavedReport<'a> {
-    SavedReport { path, staged_path, seconds: secs, frames, bytes, elapsed_ms: ms }
+    SavedReport { path, staged_path, seconds: secs, frames, bytes, elapsed_ms: ms, video_end_us: None }
 }
 
 #[test]
