@@ -145,7 +145,7 @@ fn prepare(key: u64, info: &ClipInfo, plan: &EditPlan, fps: u32, export: &Export
             PROGRESS.store((share * 1000.0) as u32, Ordering::Relaxed);
         }
     });
-    let summary = backend::engine_export(info, &path, plan, fps, export, &CANCEL, Some(on_line))?;
+    let summary = backend::engine_export(info, &path, plan, fps, export, &CANCEL, Some(on_line), true)?;
     Ok(Prepared { key, path, summary })
 }
 

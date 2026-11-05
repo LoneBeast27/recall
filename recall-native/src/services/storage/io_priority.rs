@@ -142,6 +142,7 @@ fn start(closing: &RwLock<bool>, command: &mut Command, lowered: bool, pinned: b
                 let _ = unsafe { SetProcessAffinityMask(handle(&child), mask) };
             }
         }
+        eco_qos(handle(&child));
     }
     unsafe {
         let _ = NtSetInformationProcess(handle(&child), PROCESS_IO_PRIORITY, (&value as *const u32).cast(), 4);
@@ -152,6 +153,21 @@ fn start(closing: &RwLock<bool>, command: &mut Command, lowered: bool, pinned: b
         }
     }
     Ok(child)
+}
+
+/// EcoQoS on a helper process: Windows runs it on the slowest cores at low clocks (E-cores on a
+/// hybrid Intel CPU), away from a game. Set while the process is still suspended.
+fn eco_qos(process: windows::Win32::Foundation::HANDLE) -> bool {
+    use windows::Win32::System::Threading::{
+        ProcessPowerThrottling, SetProcessInformation, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED, PROCESS_POWER_THROTTLING_STATE,
+    };
+    let state = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+    };
+    // SAFETY: a correctly sized PROCESS_POWER_THROTTLING_STATE for a live child handle.
+    unsafe { SetProcessInformation(process, ProcessPowerThrottling, (&state as *const PROCESS_POWER_THROTTLING_STATE).cast(), std::mem::size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32) }.is_ok()
 }
 
 /// [`spawn`] then collect stdout/stderr and the exit status.

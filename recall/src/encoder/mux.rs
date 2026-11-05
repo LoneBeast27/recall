@@ -35,6 +35,9 @@ pub(crate) struct AacTrack {
     encoder: ff::encoder::Audio,
     /// (pts in 1/rate, packet payload)
     packets: Vec<(i64, Vec<u8>)>,
+    pub coder: AacCoder,
+    /// CPU time of the encoding thread.
+    pub cpu_ms: f64,
 }
 
 /// Production `MuxFn`: still-encode a quiet tail if needed, encode every
@@ -69,6 +72,8 @@ pub(crate) fn produce(
     let started = Instant::now();
     let tracks = encode_tracks(&job.audio, abort)?;
     timing.aac_ms = ms(started.elapsed());
+    timing.aac_cpu_ms = tracks.iter().map(|t| t.cpu_ms).sum();
+    timing.aac_coder = tracks.first().map_or("", |t| t.coder.name());
 
     let (mux_ms, trailer_ms) = mux_mp4(part, params, backend, packets, &tracks, abort)?;
     timing.mux_ms = mux_ms;
@@ -80,21 +85,65 @@ pub(crate) fn produce(
 }
 
 /// Encode every track at once, one thread each: the save waits for the longest track, not
-/// the sum (2 tracks of 119 s took 5.3 s one after another, 2026-11-04).
+/// the sum (2 tracks of 119 s took 5.3 s one after another, 2026-11-04). Each worker runs at
+/// below-normal priority with EcoQoS, so a save mid-game stays off the game's cores.
 fn encode_tracks(audio: &[AudioPcm], abort: &AtomicBool) -> Result<Vec<AacTrack>, String> {
     std::thread::scope(|scope| {
         let workers: Vec<_> = audio
             .iter()
-            .map(|pcm| scope.spawn(move || encode_aac(pcm, abort).map_err(|e| format!("audio track '{}': {e}", pcm.name))))
+            .map(|pcm| {
+                scope.spawn(move || {
+                    crate::thread_qos::eco_background();
+                    encode_aac(pcm, abort).map_err(|e| format!("audio track '{}': {e}", pcm.name))
+                })
+            })
             .collect();
         workers.into_iter().map(|w| w.join().unwrap_or_else(|_| Err("audio encode thread panicked".into()))).collect()
     })
 }
 
-/// Encode one snapshotted track to AAC (stereo/mono, native rate).
-/// The fast coder: FFmpeg's default two-loop search costs several times the CPU for no
-/// audible gain at 192 kb/s.
+/// Which AAC encoder made a track.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum AacCoder {
+    /// Windows' own AAC encoder (Media Foundation, through FFmpeg's `aac_mf`).
+    MediaFoundation,
+    /// FFmpeg's native encoder, fast coder: any rate and channel count.
+    Native,
+}
+
+impl AacCoder {
+    pub fn name(self) -> &'static str {
+        match self {
+            AacCoder::MediaFoundation => "mf",
+            AacCoder::Native => "native",
+        }
+    }
+}
+
+/// Media Foundation's encoder takes 16-bit PCM at 44.1 or 48 kHz only. `RECALL_AAC=native`
+/// forces FFmpeg's encoder (comparisons).
+fn mf_fits(pcm: &AudioPcm) -> bool {
+    matches!(pcm.rate, 44_100 | 48_000) && std::env::var("RECALL_AAC").map_or(true, |v| v != "native")
+}
+
+/// Encode one snapshotted track to AAC: Media Foundation where it fits and opens, else
+/// FFmpeg's encoder.
 pub(crate) fn encode_aac(pcm: &AudioPcm, abort: &AtomicBool) -> Result<AacTrack, String> {
+    if mf_fits(pcm) {
+        match encode_aac_with(pcm, abort, AacCoder::MediaFoundation) {
+            Ok(track) => return Ok(track),
+            Err(e) if e == ABORTED => return Err(e),
+            Err(_) => {} // no Media Foundation (Windows N without the Media Feature Pack)
+        }
+    }
+    encode_aac_with(pcm, abort, AacCoder::Native)
+}
+
+/// Encode one snapshotted track to AAC (stereo/mono, native rate) with `coder`.
+/// The native encoder uses the fast coder: FFmpeg's default two-loop search costs several
+/// times the CPU for no audible gain at 192 kb/s.
+pub(crate) fn encode_aac_with(pcm: &AudioPcm, abort: &AtomicBool, coder: AacCoder) -> Result<AacTrack, String> {
+    let started_cpu = crate::thread_qos::thread_cpu_ms();
     let samples = &pcm.samples;
     let src_ch = pcm.channels.max(1) as usize;
     let ch = src_ch.min(2); // fold >stereo down by taking the first two channels
@@ -103,21 +152,31 @@ pub(crate) fn encode_aac(pcm: &AudioPcm, abort: &AtomicBool) -> Result<AacTrack,
     } else {
         ff::ChannelLayout::STEREO
     };
-
-    let codec = ff::encoder::find(ff::codec::Id::AAC).ok_or("aac encoder missing")?;
+    let (codec, format) = match coder {
+        AacCoder::MediaFoundation => (
+            ff::encoder::find_by_name("aac_mf").ok_or("aac_mf encoder missing")?,
+            ff::format::Sample::I16(ff::format::sample::Type::Packed),
+        ),
+        AacCoder::Native => (
+            ff::encoder::find(ff::codec::Id::AAC).ok_or("aac encoder missing")?,
+            ff::format::Sample::F32(ff::format::sample::Type::Planar),
+        ),
+    };
     let mut ctx = ff::codec::context::Context::new_with_codec(codec)
         .encoder()
         .audio()
         .map_err(|e| e.to_string())?;
     ctx.set_rate(pcm.rate as i32);
-    ctx.set_format(ff::format::Sample::F32(ff::format::sample::Type::Planar));
+    ctx.set_format(format);
     ctx.set_channel_layout(layout);
     ctx.set_bit_rate(192_000);
     ctx.set_time_base(ff::Rational(1, pcm.rate as i32));
     ctx.set_flags(ff::codec::Flags::GLOBAL_HEADER);
     let mut opts = ff::Dictionary::new();
-    opts.set("aac_coder", "fast");
-    let mut enc = ctx.open_with(opts).map_err(|e| format!("aac open: {e}"))?;
+    if coder == AacCoder::Native {
+        opts.set("aac_coder", "fast");
+    }
+    let mut enc = ctx.open_with(opts).map_err(|e| format!("aac open ({}): {e}", coder.name()))?;
 
     let frame_size = if enc.frame_size() > 0 {
         enc.frame_size() as usize
@@ -133,19 +192,30 @@ pub(crate) fn encode_aac(pcm: &AudioPcm, abort: &AtomicBool) -> Result<AacTrack,
             return Err(ABORTED.into());
         }
         let n = frame_size.min(total_frames - pos);
-        let mut af = ff::frame::Audio::new(
-            ff::format::Sample::F32(ff::format::sample::Type::Planar),
-            frame_size,
-            layout,
-        );
+        let mut af = ff::frame::Audio::new(format, frame_size, layout);
         af.set_rate(pcm.rate);
         let src = &samples[pos * src_ch..(pos + n) * src_ch];
-        for c in 0..ch {
-            let plane = af.plane_mut::<f32>(c);
-            for (dst, frame) in plane[..n].iter_mut().zip(src.chunks_exact(src_ch)) {
-                *dst = frame[c];
+        match coder {
+            AacCoder::Native => {
+                for c in 0..ch {
+                    let plane = af.plane_mut::<f32>(c);
+                    for (dst, frame) in plane[..n].iter_mut().zip(src.chunks_exact(src_ch)) {
+                        *dst = frame[c];
+                    }
+                    plane[n..frame_size].fill(0.0);
+                }
             }
-            plane[n..frame_size].fill(0.0);
+            AacCoder::MediaFoundation => {
+                // Packed: one buffer of interleaved i16, addressed as raw bytes.
+                let data = af.data_mut(0);
+                let out: &mut [i16] = bytemuck::cast_slice_mut(&mut data[..frame_size * ch * 2]);
+                for (dst, frame) in out.chunks_exact_mut(ch).zip(src.chunks_exact(src_ch)) {
+                    for c in 0..ch {
+                        dst[c] = (frame[c].clamp(-1.0, 1.0) * 32767.0).round() as i16;
+                    }
+                }
+                out[n * ch..].fill(0);
+            }
         }
         af.set_pts(Some(pos as i64));
         enc.send_frame(&af).map_err(|e| e.to_string())?;
@@ -168,6 +238,8 @@ pub(crate) fn encode_aac(pcm: &AudioPcm, abort: &AtomicBool) -> Result<AacTrack,
         title: crate::audio::track_title(pcm.name),
         encoder: enc,
         packets,
+        coder,
+        cpu_ms: crate::thread_qos::thread_cpu_ms() - started_cpu,
     })
 }
 

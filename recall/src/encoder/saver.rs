@@ -95,6 +95,9 @@ pub(crate) struct Timing {
     pub queue_wait_ms: f64,
     pub still_ms: f64,
     pub aac_ms: f64,
+    /// CPU time of all audio encode threads together, and the encoder used ("mf" / "native").
+    pub aac_cpu_ms: f64,
+    pub aac_coder: &'static str,
     pub mux_ms: f64,
     pub trailer_ms: f64,
     pub rename_ms: f64,
@@ -112,7 +115,7 @@ impl Timing {
         format!(
             "save timing ({outcome}): secs={secs:.3} packets={frames} bytes={bytes} | \
              encoder thread: request_wait={:.1}ms window={:.1}ms snapshot={:.1}ms blocked={:.1}ms | \
-             saver: queue_wait={:.1}ms still={:.1}ms aac={:.1}ms mux={:.1}ms trailer={:.1}ms \
+             saver: queue_wait={:.1}ms still={:.1}ms aac={:.1}ms aac_cpu={:.1}ms aac_coder={} mux={:.1}ms trailer={:.1}ms \
              rename={:.1}ms ready={:.1}ms gallery={:.1}ms",
             self.request_wait_ms,
             self.window_ms,
@@ -121,6 +124,8 @@ impl Timing {
             self.queue_wait_ms,
             self.still_ms,
             self.aac_ms,
+            self.aac_cpu_ms,
+            self.aac_coder,
             self.mux_ms,
             self.trailer_ms,
             self.rename_ms,
@@ -440,6 +445,8 @@ fn lower_thread_priority(events: &Events) {
     if let Err(e) = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) } {
         events.log(&format!("saver: could not lower thread priority: {e}"));
     }
+    // EcoQoS: Windows keeps the writer on slow cores at low clocks, away from the game.
+    crate::thread_qos::eco_background();
 }
 
 /// Build a Moments-convention clip path: `<Game>__<YYYY-MM-DD>__<HH-MM-SS>.mp4`.
