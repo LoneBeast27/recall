@@ -226,6 +226,16 @@ pub(crate) fn probe_duration(source: &Path, lowered: bool) -> Result<f64, String
         .ok_or_else(|| "ffprobe returned no usable duration".into())
 }
 
+/// The first video stream's frame count from the container header (no decode; an MP4 keeps
+/// it in its sample table). `None` when the container does not say.
+pub(crate) fn probe_frames(source: &Path, lowered: bool) -> Option<u64> {
+    let mut command = Command::new(binary("RECALL_FFPROBE", "ffprobe.exe").ok()?);
+    command.args(["-v", "error", "-select_streams", "v:0", "-show_entries", "stream=nb_frames", "-of", "default=nw=1:nk=1"]).arg(source);
+    let output = run_hidden(&mut command, lowered).ok()?;
+    output.status.success().then_some(())?;
+    String::from_utf8_lossy(&output.stdout).trim().parse::<u64>().ok().filter(|&frames| frames > 0)
+}
+
 /// Atomic rename; when another writer published first, its file is kept.
 pub(crate) fn publish(temporary: &Path, target: &Path) -> Result<(), String> {
     match std::fs::rename(temporary, target) {

@@ -49,6 +49,7 @@ mod moments;
 mod protocol;
 mod ring;
 mod single_instance;
+mod thread_qos;
 mod source;
 
 use std::sync::atomic::Ordering::Relaxed;
@@ -456,6 +457,9 @@ fn main() {
     std::hint::black_box((&hybrid_gpu::NvOptimusEnablement, &hybrid_gpu::AmdPowerXpressRequestHighPerformance));
     if let Ok(mask) = std::env::var("RECALL_CPU_MASK") {
         cpu_mask::apply(&mask);
+    }
+    if std::env::var_os("RECALL_ECOQOS").is_some_and(|v| v == "1") {
+        thread_qos::eco_process();
     }
     let config = match parse_args() {
         Args::Run(config) => config,

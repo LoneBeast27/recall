@@ -41,7 +41,9 @@ pub fn preview_proxy(source: &str) -> Result<String, String> {
     for encoder in ENCODERS {
         let mut command = Command::new(&ffmpeg);
         command
-            .args(["-hide_banner", "-loglevel", "error", "-y", "-i"])
+            // Decode on the GPU where it can (AV1 on RTX 30 and newer); FFmpeg decodes on the CPU
+            // where it cannot. FFmpeg 7.1 has no D3D11 scaler, so frames come back for the scale.
+            .args(["-hide_banner", "-loglevel", "error", "-y", "-hwaccel", "d3d11va", "-i"])
             .arg(src)
             .args(["-map", "0:v:0", "-an", "-sn", "-vf", "scale=-2:'min(720,ih)'", "-fps_mode", "passthrough"])
             .args(encoder)

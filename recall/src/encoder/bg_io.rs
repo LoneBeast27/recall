@@ -32,7 +32,9 @@ pub(crate) fn enter_background() -> Result<(), String> {
         .map_err(|e| format!("below-normal priority: {e}"))?;
     // SAFETY: as above; background mode may only be entered by the thread itself.
     unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) }
-        .map_err(|e| format!("background mode: {e}"))
+        .map_err(|e| format!("background mode: {e}"))?;
+    crate::thread_qos::eco_background();
+    Ok(())
 }
 
 /// I/O priority of the calling thread (0 very low, 1 low, 2 normal, 3 high).
