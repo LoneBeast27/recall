@@ -367,3 +367,19 @@ fn cpu_mask_fits_the_machine() {
     assert_eq!(fit_cpu_mask(auto, 0xffff_ffff), Some(0xffff_0000), "auto, 32 threads: high half");
     assert_eq!(fit_cpu_mask(auto, 0xfff), Some(0xfc0), "auto, 12 threads: high half");
 }
+
+#[test]
+fn detect_fullscreen_games_default_patch_and_reload() {
+    assert_eq!(user_cfg().detect.fullscreen_games, vec!["Discord".to_string()], "absent [detect] = Discord");
+    assert_eq!(config_json(&user_cfg())["detect"], json!({"fullscreen_games": ["Discord"]}));
+    let out = apply_patch(&user_cfg(), &json!({"detect":{"fullscreen_games": ["Discord.exe", "kodi"]}})).unwrap();
+    assert!(out.touched("detect"));
+    let store = temp_store("detect");
+    store.save(&out.config).unwrap();
+    assert_eq!(store.load().detect.fullscreen_games, vec!["Discord.exe".to_string(), "kodi".to_string()]);
+    let off = apply_patch(&user_cfg(), &json!({"detect":{"fullscreen_games": []}})).unwrap();
+    assert!(off.config.detect.fullscreen_games.is_empty(), "an empty list is allowed (opt out)");
+    for bad in [json!([""]), json!([r"C:\Apps\Discord.exe"]), json!(["a/b"])] {
+        assert!(apply_patch(&user_cfg(), &json!({"detect":{"fullscreen_games": bad}})).is_err(), "{bad}");
+    }
+}

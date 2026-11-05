@@ -363,6 +363,18 @@ fn exe_stem(pid: u32) -> Option<String> {
 
 /// `(file stem, file name, in a Steam library)` of `pid`'s executable image.
 fn exe_identity(pid: u32) -> Option<(String, String, bool)> {
+    let full = exe_path(pid)?;
+    let path = std::path::Path::new(&full);
+    Some((
+        path.file_stem()?.to_string_lossy().into_owned(),
+        path.file_name()?.to_string_lossy().into_owned(),
+        is_steam_library_path(&full),
+    ))
+}
+
+/// The full path of `pid`'s executable image (Win32 form).
+pub fn exe_path(pid: u32) -> Option<String> {
+    // SAFETY: a query-only handle, closed before return; the buffer outlives the call.
     unsafe {
         let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
         let mut buf = [0u16; 260];
@@ -371,13 +383,7 @@ fn exe_identity(pid: u32) -> Option<(String, String, bool)> {
             QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
         let _ = CloseHandle(handle);
         res.ok()?;
-        let full = String::from_utf16_lossy(&buf[..len as usize]);
-        let path = std::path::Path::new(&full);
-        Some((
-            path.file_stem()?.to_string_lossy().into_owned(),
-            path.file_name()?.to_string_lossy().into_owned(),
-            is_steam_library_path(&full),
-        ))
+        Some(String::from_utf16_lossy(&buf[..len as usize]))
     }
 }
 

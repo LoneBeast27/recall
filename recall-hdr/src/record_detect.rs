@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use crate::log;
 use crate::record_app::Controller;
-use crate::record_target::{classify_event, is_target};
+use crate::record_target::is_target;
 use crate::watcher::{self, WatchEvent};
 
 /// How often the followed foreground's fullscreen verdict is re-read.
@@ -28,7 +28,7 @@ pub(crate) const FOLLOW_EVERY: Duration = Duration::from_millis(100);
 impl Controller {
     /// A foreground change from the hook: feeds the tracker and HDR.
     pub(crate) fn on_foreground_event(&mut self, ev: &WatchEvent, now: Instant) {
-        let candidate = classify_event(ev, &self.cfg);
+        let candidate = self.classify(ev, now);
         self.last_fed = Some((ev.hwnd, candidate.is_some()));
         self.note_followable(ev);
         self.tracker.on_foreground(candidate, now);
@@ -39,7 +39,7 @@ impl Controller {
     /// the tracker only when (window, verdict) changed.
     pub(crate) fn on_foreground_seen(&mut self, ev: &WatchEvent, now: Instant) {
         self.note_followable(ev);
-        let candidate = classify_event(ev, &self.cfg);
+        let candidate = self.classify(ev, now);
         let key = (ev.hwnd, candidate.is_some());
         if self.last_fed != Some(key) {
             self.last_fed = Some(key);

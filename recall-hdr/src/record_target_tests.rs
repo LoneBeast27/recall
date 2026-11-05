@@ -319,3 +319,122 @@ fn destroyed_target_window_ends_the_session() {
     assert!(tr.on_window_gone(0x10));
     assert!(tr.current().is_none());
 }
+
+#[test]
+fn a_held_candidate_waits_for_the_render_check_then_commits() {
+    let t0 = Instant::now();
+    let mut tr = TargetTracker::new(TARGET_DEBOUNCE, START_DEBOUNCE);
+    tr.on_foreground(Some(target(5, 0x50, "Netflix")), t0);
+    let due = t0 + START_DEBOUNCE;
+    let ask = due + Duration::from_millis(100);
+    assert!(!tr.poll_admit(due, |_| Admit::Hold(ask)), "held: nothing commits");
+    assert_eq!(tr.pending().map(|t| t.pid), Some(5), "still pending");
+    assert_eq!(tr.next_deadline(), Some(ask), "the pump wakes for the next ask");
+    assert!(!tr.poll_admit(ask - Duration::from_millis(1), |_| panic!("not due")));
+    assert!(tr.poll_admit(ask, |_| Admit::Commit));
+    assert_eq!(tr.current().map(|t| t.pid), Some(5));
+    assert_eq!(tr.take_last_wait(), Some(ask - t0), "the wait counts from first seen");
+}
+
+#[test]
+fn a_rejected_candidate_is_dropped_and_the_session_stays() {
+    let t0 = Instant::now();
+    let mut tr = TargetTracker::new(TARGET_DEBOUNCE, START_DEBOUNCE);
+    tr.on_foreground(Some(target(1, 0x10, "Game")), t0);
+    assert!(tr.poll(t0 + START_DEBOUNCE));
+    let t1 = t0 + Duration::from_secs(5);
+    tr.on_foreground(Some(target(2, 0x20, "Video")), t1);
+    assert!(!tr.poll_admit(t1 + TARGET_DEBOUNCE, |_| Admit::Reject));
+    assert_eq!(tr.current().map(|t| t.pid), Some(1), "the game's session stays");
+    assert!(tr.pending().is_none());
+    assert_eq!(tr.next_deadline(), None);
+}
+
+#[test]
+fn a_new_candidate_clears_an_old_hold() {
+    let t0 = Instant::now();
+    let mut tr = TargetTracker::new(TARGET_DEBOUNCE, START_DEBOUNCE);
+    tr.on_foreground(Some(target(5, 0x50, "Slow")), t0);
+    let far = t0 + Duration::from_secs(1);
+    assert!(!tr.poll_admit(t0 + START_DEBOUNCE, |_| Admit::Hold(far)));
+    let t1 = t0 + Duration::from_millis(400);
+    tr.on_foreground(Some(target(6, 0x60, "Other")), t1);
+    assert_eq!(tr.next_deadline(), Some(t1 + START_DEBOUNCE), "the old hold does not delay a new window");
+    // Seeing the held candidate again keeps its hold.
+    let mut tr = TargetTracker::new(TARGET_DEBOUNCE, START_DEBOUNCE);
+    tr.on_foreground(Some(target(5, 0x50, "Slow")), t0);
+    assert!(!tr.poll_admit(t0 + START_DEBOUNCE, |_| Admit::Hold(far)));
+    tr.on_foreground(Some(target(5, 0x50, "Slow")), t1);
+    assert_eq!(tr.next_deadline(), Some(far));
+}
+
+#[test]
+fn the_process_exiting_drops_a_held_candidate() {
+    let t0 = Instant::now();
+    let mut tr = TargetTracker::new(TARGET_DEBOUNCE, START_DEBOUNCE);
+    tr.on_foreground(Some(target(5, 0x50, "Slow")), t0);
+    assert!(!tr.poll_admit(t0 + START_DEBOUNCE, |_| Admit::Hold(t0 + Duration::from_secs(1))));
+    assert!(!tr.on_process_exit(5));
+    assert_eq!(tr.next_deadline(), None);
+}
+
+#[test]
+fn discord_fullscreen_is_a_game_by_default_windowed_is_not() {
+    let cfg = Config::default();
+    assert!(rules::is_denied("discord"), "the HDR deny list still names it");
+    for stem in ["Discord", "discord", "Discord.exe"] {
+        assert!(is_target(stem, true, &cfg), "{stem} fullscreen is recorded (detect.fullscreen_games)");
+        assert!(!is_target(stem, false, &cfg), "{stem} windowed is not a target");
+        assert!(is_fullscreen_game(&cfg, stem), "{stem} skips the render check");
+    }
+    assert!(classify_event(&ev("discord", "Discord", 5, 0x5, true), &cfg).is_some());
+    assert!(classify_event(&ev("discord", "Discord", 5, 0x5, false), &cfg).is_none());
+    assert!(!is_fullscreen_game(&cfg, "chrome"));
+    assert!(!is_fullscreen_game(&cfg, "  "));
+}
+
+#[test]
+fn fullscreen_games_yield_to_none_overrides_and_recall_itself() {
+    let mut cfg = Config::default();
+    cfg.detect.fullscreen_games = vec!["recall-native".into(), "Recall.exe".into(), "chrome".into(), "discord".into()];
+    assert!(!is_target("recall-native", true, &cfg), "Recall's own windows are never recorded");
+    assert!(!is_target("recall", true, &cfg));
+    assert!(is_target("chrome", true, &cfg), "a listed browser beats the deny list (user's call)");
+    assert!(!is_target("chrome", false, &cfg));
+    cfg.overrides.push(Override { exe: "discord".into(), kind: RuleKind::None, clamp: None });
+    assert!(!is_target("discord", true, &cfg), "a none override still wins");
+    cfg.detect.fullscreen_games.clear();
+    cfg.overrides.clear();
+    assert!(!is_target("discord", true, &cfg), "an empty list restores the deny list");
+}
+
+#[test]
+fn valorant_is_never_left_to_the_render_check() {
+    // Rohan's main game: even vsynced or DWM-composed (which the render check
+    // would reject), its fullscreen window commits on the 300 ms rule.
+    let cfg = Config::default();
+    let v = ev("VALORANT-Win64-Shipping", "VALORANT  ", 10, 0x10, true);
+    assert!(classify_event(&v, &cfg).is_some());
+    assert!(skips_render_check(&v, &cfg), "VALORANT skips the render check");
+    let composed = crate::render_verdict::RenderStats { runtime_presents: 90, kernel_presents: 90, composed_frames: 90, ..Default::default() };
+    assert!(matches!(crate::render_verdict::judge(&composed, true), crate::render_verdict::Verdict::NotGame(_)), "what the check would say");
+    let windowed = ev("VALORANT-Win64-Shipping", "VALORANT", 10, 0x10, false);
+    assert!(classify_event(&windowed, &cfg).is_none(), "windowed: today's rules (not a target)");
+    let mut off = cfg.clone();
+    off.overrides.push(Override { exe: "valorant-win64-shipping".into(), kind: RuleKind::None, clamp: None });
+    assert!(classify_event(&v, &off).is_none(), "a none override still wins");
+}
+
+#[test]
+fn known_games_skip_the_check_only_as_fullscreen_candidates() {
+    let cfg = Config::default();
+    for (stem, title) in [("FortniteClient-Win64-Shipping", "Fortnite"), ("Overwatch", "Overwatch"), ("League of Legends", "League of Legends (TM) Client"), ("r5apex_dx12", "Apex Legends"), ("javaw", "Minecraft 1.21.1")] {
+        let e = ev(stem, title, 3, 0x3, true);
+        assert!(classify_event(&e, &cfg).is_some() && skips_render_check(&e, &cfg), "{stem}");
+        assert!(classify_event(&ev(stem, title, 3, 0x3, false), &cfg).is_none(), "{stem} windowed");
+    }
+    let ide = ev("javaw", "IntelliJ IDEA", 4, 0x4, true);
+    assert!(classify_event(&ide, &cfg).is_some(), "an unknown fullscreen Java app is a candidate");
+    assert!(!skips_render_check(&ide, &cfg), "but it must render like a game");
+    assert!(!skips_render_check(&ev("notepad", "x", 1, 1, true), &cfg));
+}
