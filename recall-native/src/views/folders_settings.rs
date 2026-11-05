@@ -109,6 +109,10 @@ impl Root {
         let mut folders = Folders::load();
         folders.recordings = self.folders.recordings.clone().or_else(|| Some(self.recordings_folder()));
         let added = paths.iter().filter(|p| folders.add(p)).count();
+        // Clips removed from Recall while the folder was listed before come back with it.
+        for path in &paths {
+            let _ = crate::services::library::imports::unhide_under(&path.to_string_lossy());
+        }
         if added == 0 {
             self.show_toast(ToastKind::Info, "Already in your library", None);
             return;
@@ -151,7 +155,9 @@ impl Root {
         list = list.child(folder_row("rec", "Recordings", &recordings, count(&recordings), false, cx).child(change));
         for (i, folder) in self.folders.imported.clone().into_iter().enumerate() {
             let name = std::path::Path::new(&folder).file_name().map_or_else(|| folder.clone(), |n| n.to_string_lossy().into_owned());
-            list = list.child(folder_row(("imp", i), &name, &folder, count(&folder), true, cx));
+            let skipped = crate::services::library::imports::skipped_under(&folder);
+            let label = if skipped == 0 { count(&folder) } else { format!("{} · {skipped} skipped as edited", count(&folder)) };
+            list = list.child(folder_row(("imp", i), &name, &folder, label, true, cx));
         }
 
         let add = div()
@@ -162,7 +168,7 @@ impl Root {
             .child(ui::button("add-folder", Variant::Secondary).child(icon(Icon::Plus, 14., theme::TEXT)).child("Add folder").on_click(cx.listener(|this, _, _, cx| {
                 this.prompt_clip_folders(cx);
             })))
-            .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(c(theme::TERTIARY)).child("Bring in old clips from ShadowPlay, Medal or OBS. Nothing is moved."));
+            .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(c(theme::TERTIARY)).child("Bring in old clips from ShadowPlay, SteelSeries, Medal or OBS. Files stay as they are; videos made in an editor like Premiere Pro are skipped."));
 
         vec![section_title("Clip folders"), crate::views::pages::card().child(list).child(add).into_any_element()]
     }

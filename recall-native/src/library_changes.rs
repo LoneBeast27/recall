@@ -33,6 +33,7 @@ impl LibraryState {
     /// Sets Edited on the clip whose edit sidecar was just written or removed.
     pub fn mark_edited_by_sidecar(&mut self, sidecar: &str, edited: bool) {
         let name = Path::new(sidecar).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let name = crate::services::library::imports::edit_file_clip_name(&name);
         let Some(stem) = name.strip_suffix(".recall-edit.json").map(|s| s.trim_end_matches(".mp4").to_owned()) else { return };
         for record in &mut self.records {
             let file_stem = Path::new(&record.file_name).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();

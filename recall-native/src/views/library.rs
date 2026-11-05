@@ -180,24 +180,24 @@ impl Root {
 
     fn render_selection_bar(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let count = self.lib.selection.len();
-        let noun = if count == 1 { "clip" } else { "clips" };
-        let bar = div().flex_none().flex().items_center().gap(px(8.)).px(px(CONTENT_PAD)).pt(px(20.)).pb(px(16.));
+        let bar =div().flex_none().flex().items_center().gap(px(8.)).px(px(CONTENT_PAD)).pt(px(20.)).pb(px(16.));
         if self.lib.deleting > 0 {
             let moving = self.lib.deleting;
             let noun = if moving == 1 { "clip" } else { "clips" };
             return bar.child(icon(Icon::Trash, 16., theme::MUTED)).child(div().text_color(c(theme::MUTED)).child(format!("Moving {moving} {noun} to the Recycle Bin…"))).into_any_element();
         }
         if self.lib.confirm_delete {
+            let (question, detail, action) = delete_wording(count, self.imported_in_selection());
             return bar
                 .child(icon(Icon::Trash, 16., theme::ERROR))
-                .child(div().font_weight(FontWeight::SEMIBOLD).child(format!("Move {count} {noun} to the Recycle Bin?")))
-                .child(div().text_color(c(theme::TERTIARY)).child("Thumbnails and edits go with them."))
+                .child(div().font_weight(FontWeight::SEMIBOLD).child(question))
+                .child(div().text_color(c(theme::TERTIARY)).child(detail))
                 .child(div().flex_1())
                 .child(ui::button("delete-cancel", Variant::Ghost).child("Keep").on_click(cx.listener(|this, _, _, cx| {
                     this.lib.confirm_delete = false;
                     cx.notify();
                 })))
-                .child(ui::button("delete-confirm", Variant::Primary).child("Move to Recycle Bin").on_click(cx.listener(|this, _, _, cx| {
+                .child(ui::button("delete-confirm", Variant::Primary).child(action).on_click(cx.listener(|this, _, _, cx| {
                     let paths = this.lib.selected_paths();
                     this.lib.confirm_delete = false;
                     this.lib.deleting = paths.len();
@@ -330,5 +330,26 @@ impl Root {
             });
         })
         .detach();
+    }
+}
+
+impl Root {
+    /// Selected clips that live in an imported folder (Delete only removes them from Recall).
+    fn imported_in_selection(&self) -> usize {
+        let recordings = crate::backend::library_dir_from(&self.folders);
+        self.lib.selection.iter().filter(|p| crate::services::library::imports::is_imported(p, &recordings, &self.folders.imported)).count()
+    }
+}
+
+/// The delete question, its detail line and the button, for `count` clips of which `imported`
+/// are in folders another recorder owns.
+fn delete_wording(count: usize, imported: usize) -> (String, String, &'static str) {
+    let clips = |n: usize| format!("{n} {}", if n == 1 { "clip" } else { "clips" });
+    if imported == 0 {
+        (format!("Move {} to the Recycle Bin?", clips(count)), "Thumbnails and edits go with them.".into(), "Move to Recycle Bin")
+    } else if imported == count {
+        (format!("Remove {} from Recall?", clips(count)), "The files stay in their folder.".into(), "Remove from Recall")
+    } else {
+        (format!("Remove {}?", clips(count)), format!("{} go to the Recycle Bin. {imported} from other folders stay where they are.", count - imported), "Remove")
     }
 }

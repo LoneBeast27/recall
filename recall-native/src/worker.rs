@@ -77,8 +77,8 @@ pub enum Done {
     Prepared(u64, Result<PreparedClip, String>),
     Saved(Result<String, String>),
     Exported(Result<ExportSummary, String>),
-    /// The clips asked for, and how many left their folder.
-    Deleted(Vec<PathBuf>, Result<usize, String>),
+    /// The clips asked for: (moved to the Recycle Bin, removed from Recall only).
+    Deleted(Vec<PathBuf>, Result<(usize, usize), String>),
     Thumb(String, Result<String, String>),
     Duration(String, Option<f64>),
     Scrub(String, Result<Vec<String>, String>),
@@ -109,6 +109,11 @@ impl Workers {
         let (scrub, scrub_rx) = mpsc::channel::<String>();
 
         let open_tx = done_tx.clone();
+        let tx = done_tx.clone();
+        library::import_check::set_sink(Box::new(move |paths| {
+            let gone = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+            let _ = tx.send(Done::Library(library::watch::LibraryChange::Clips(library::watch::ClipChanges { added: vec![], gone, gone_under: vec![] })));
+        }));
         let tx = done_tx.clone();
         let watcher = ClipWatcher::start(move |change| {
             let _ = tx.send(Done::Library(change));
@@ -188,7 +193,7 @@ fn run_job(job: Job, tx: &Sender<Done>, watcher: &ClipWatcher) -> Done {
         Job::FlushProject(info, plan, fps, export, ours) => Done::Flushed(backend::flush_project(&info, &plan, fps, &export, ours)),
         Job::Export(info, plan, fps, export) => Done::Exported(crate::services::pre_encode::export(&info, &plan, fps, &export)),
         Job::Delete(paths) => {
-            let result = library::delete_to_recycle_bin(&paths);
+            let result = library::delete_or_hide(&paths);
             library::folders::forget_scans();
             Done::Deleted(paths, result)
         }
