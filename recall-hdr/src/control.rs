@@ -180,7 +180,19 @@ impl PipeHub {
                 break;
             }
         }
-        // The writer half is pruned by the next send after EOF.
+        // Prune now: an idle recorder may not broadcast again for a long time, and
+        // until then the dead client's writer thread and pipe handle would stay.
+        self.remove(client);
+    }
+
+    /// Drop a client whose pipe ended; its writer thread exits when `tx` drops.
+    fn remove(&self, client: u64) {
+        let Ok(mut clients) = self.clients.lock() else { return };
+        let before = clients.len();
+        clients.retain(|c| c.id != client);
+        if clients.len() != before {
+            log!("control: client {client} disconnected ({} left)", clients.len());
+        }
     }
 }
 
@@ -343,5 +355,22 @@ mod tests {
         hub.read_client(id, &b"  {\"cmd\":\"quit\"}  \n\n"[..]);
         assert_eq!(rx.recv().unwrap(), Inbound { client: id, line: r#"{"cmd":"quit"}"#.into() });
         assert!(rx.try_recv().is_err());
+        assert_eq!(hub.client_count(), 0, "EOF pruned the client");
+    }
+
+    /// A client that hangs up is pruned at EOF with no broadcast after it: an idle
+    /// recorder (engine stopped) sends nothing, and dead clients piled up (935 on 11-05).
+    #[test]
+    fn a_client_that_hangs_up_is_pruned_without_any_broadcast() {
+        let (tx, _rx) = channel();
+        let hub = PipeHub::detached(tx);
+        let stay = hub.add_client(Box::new(Sink::default()));
+        for _ in 0..50 {
+            let id = hub.add_client(Box::new(Sink::default()));
+            hub.read_client(id, &b"{\"cmd\":\"status\"}\n"[..]);
+        }
+        assert_eq!(hub.client_count(), 1, "only the open client is left");
+        hub.event_to(stay, "session", "{}");
+        assert_eq!(hub.client_count(), 1);
     }
 }

@@ -304,6 +304,7 @@ impl Controller {
             // Settings restart or a held retarget: both wait for idle.
             pending_restart: self.pending_restart || self.retarget_held,
             leader_label: &self.leader_label,
+            drain: self.drain_clock.status(self.planner.drain(), Instant::now()),
         })
     }
 
@@ -337,7 +338,10 @@ impl Controller {
     /// follows the state; with notices off nothing is sent or heard.
     fn announce(&mut self, state: &str) {
         let gave_up = self.supervisor.health() == EngineHealth::GivenUp;
-        let next = Situation::of(state, &self.wanted(), gave_up);
+        let next = match (state, self.planner.drain()) {
+            ("draining", Some((_, _, len))) => Some(Situation::Draining { secs: len.as_secs_f32().round() as u64 }),
+            _ => Situation::of(state, &self.wanted(), gave_up),
+        };
         let Some(notice) = self.notices.observe(next, Instant::now()) else { return };
         if !self.cfg.overlay.enabled {
             return;

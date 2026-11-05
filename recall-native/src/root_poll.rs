@@ -59,6 +59,23 @@ impl Root {
         true
     }
 
+    /// The pill changes with no new pipe line: the recorder stopped answering, or a
+    /// drain countdown reached its next second.
+    pub(super) fn recorder_clock_tick(&mut self) -> bool {
+        let unresponsive = self.daemon.unresponsive();
+        let drain = self.snap.session.as_ref().filter(|s| s.state == "draining").and_then(|s| s.drain.as_ref());
+        let left = drain.map(|d| d.remaining_secs(crate::services::daemon::unix_ms()));
+        if unresponsive == self.recorder_unresponsive && left == self.drain_drawn {
+            return false;
+        }
+        if unresponsive != self.recorder_unresponsive {
+            eprintln!("Recall native: recorder {}", if unresponsive { "not responding" } else { "responding again" });
+        }
+        self.recorder_unresponsive = unresponsive;
+        self.drain_drawn = left;
+        self.status_changed()
+    }
+
     /// Recall came back to the front with a status change it has not drawn yet.
     pub(super) fn back_in_front(&mut self) -> bool {
         if self.status_stale && !self.in_background() {

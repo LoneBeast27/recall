@@ -60,6 +60,7 @@ mod record_chord;
 mod record_cmds;
 mod record_config;
 mod record_detect;
+mod record_drain;
 mod record_engine;
 mod record_env;
 mod record_hdr;

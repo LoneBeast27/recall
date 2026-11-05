@@ -34,6 +34,9 @@ pub enum Situation {
     Paused,
     /// No target: not recording, waiting for a game.
     Waiting,
+    /// The game closed; its last clip stays saveable this long (`record_drain`).
+    /// The end of the drain ("waiting") is silent: nothing new happened.
+    Draining { secs: u64 },
     /// The encoder failed; `gave_up` = the engine crashed repeatedly.
     Encoder { gave_up: bool },
 }
@@ -45,6 +48,8 @@ impl Situation {
         match state {
             "paused" => Some(Situation::Paused),
             "waiting" => Some(Situation::Waiting),
+            // The caller knows the drain's length (`Controller::announce`).
+            "draining" => None,
             "error" => Some(Situation::Encoder { gave_up }),
             "recording" => Some(match wanted {
                 EngineTarget::Window(t) => Situation::Game(t.name.clone()),
@@ -60,7 +65,7 @@ impl Situation {
             Situation::Game(_) => "game",
             Situation::Desktop => "desktop",
             Situation::Paused => "paused",
-            Situation::Waiting => "waiting",
+            Situation::Waiting | Situation::Draining { .. } => "waiting",
             Situation::Encoder { .. } => "encoder",
         }
     }
@@ -70,6 +75,7 @@ impl Situation {
             Situation::Game(_) | Situation::Desktop => "Recording",
             Situation::Paused => "Recording paused",
             Situation::Waiting => "Waiting for a game",
+            Situation::Draining { .. } => "Game closed",
             Situation::Encoder { gave_up: false } => "Encoder problem",
             Situation::Encoder { gave_up: true } => "Recorder stopped",
         }
@@ -81,6 +87,7 @@ impl Situation {
             Situation::Desktop => DESKTOP_NAME.into(),
             Situation::Paused => "Resume from the tray or the app".into(),
             Situation::Waiting => "Not recording".into(),
+            Situation::Draining { secs } => format!("Last clip kept for {}", crate::record_drain::clock(*secs)),
             Situation::Encoder { gave_up: false } => "Clips are not being recorded".into(),
             Situation::Encoder { gave_up: true } => "It failed repeatedly (see recall-hdr.log)".into(),
         }
@@ -119,9 +126,13 @@ impl NoticeTracker {
             return None;
         }
         let first = self.current.is_none();
+        let drain_ended = matches!(self.current, Some(Situation::Draining { .. }));
         self.current = Some(next.clone());
         if first && next == Situation::Waiting {
             return None; // controller start-up: nothing has changed for the player
+        }
+        if drain_ended && next == Situation::Waiting {
+            return None; // "Game closed" already said it; the countdown ending is not news
         }
         self.recent.retain(|(_, at)| now.duration_since(*at) < REPEAT_GAP);
         if self.recent.iter().any(|(s, _)| *s == next) {
@@ -222,6 +233,22 @@ mod tests {
         assert_eq!(gave_up.title(), "Recorder stopped");
         assert!(gave_up.is_failure() && !Situation::Desktop.is_failure());
         assert_eq!(Situation::of("starting", &EngineTarget::Desktop, false), None);
+    }
+
+    #[test]
+    fn a_closed_game_announces_its_kept_clip_once_and_the_end_is_silent() {
+        let t0 = Instant::now();
+        let mut tracker = NoticeTracker::new();
+        let at = |s| t0 + Duration::from_secs(s);
+        assert!(tracker.observe(Situation::of("recording", &game("sobosuba"), false), at(0)).is_some());
+        let closed = tracker.observe(Some(Situation::Draining { secs: 120 }), at(30)).unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&notice_json(&closed)).unwrap(),
+            serde_json::json!({"type":"notice","kind":"waiting","title":"Game closed","detail":"Last clip kept for 2:00"})
+        );
+        assert!(tracker.observe(Some(Situation::Draining { secs: 120 }), at(31)).is_none(), "said once");
+        assert!(tracker.observe(Situation::of("waiting", &EngineTarget::Off, false), at(150)).is_none(), "the end is silent");
+        assert_eq!(Situation::of("draining", &EngineTarget::Off, false), None);
     }
 
     #[test]
