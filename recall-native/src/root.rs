@@ -84,6 +84,7 @@ pub enum Field {
     Search,
     Rename,
     Fps,
+    CacheSize,
 }
 
 pub struct Root {
@@ -98,6 +99,8 @@ pub struct Root {
     pub search: TextField,
     pub rename: TextField,
     pub fps_field: TextField,
+    /// Settings → Storage: the typed SSD cache size in GB.
+    pub cache_field: TextField,
     pub fps_custom: bool,
     pub meters: Option<Meters>,
     pub midi: Option<Midi>,
@@ -183,6 +186,7 @@ impl Root {
             search: TextField::new(cx, "Search clips", 80),
             rename: TextField::new(cx, "Clip title", 80),
             fps_field: TextField::new(cx, "fps", 7).digits_only(),
+            cache_field: TextField::new(cx, "GB", 6).decimal(),
             fps_custom: false,
             meters: None,
             midi: None,
@@ -288,6 +292,8 @@ impl Root {
         }
         // The tile with the rename field left the screen: draw again so `settle_focus` sees it.
         changed |= self.lib.renaming.is_some() && !self.rename_painted.get();
+        // Same for the cache size field when Settings → Storage closes while it's open.
+        changed |= self.cache.editing && !self.cache.painted.get();
         // Opening Recall means recording: start the recorder once if it isn't running.
         if self.controller_check_at.is_some_and(|at| Instant::now() >= at) {
             self.controller_check_at = None;
