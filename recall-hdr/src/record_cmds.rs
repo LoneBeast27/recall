@@ -398,10 +398,13 @@ impl Controller {
         if let Some(hdr) = self.legacy_hdr_event() {
             self.hub.event_to(client, "hdr", &hdr);
         }
-        if let Some((notice, until)) = self.pending_notice.take() {
-            if Instant::now() < until {
-                self.hub.event_to(client, "session", &notice);
-            }
+        // Every client that joins before the deadline gets it, not just the first: the app's own
+        // status queries join too (and ignore notices), so a take() could hand it to the app and
+        // leave the starting overlay without it. The overlay joins once per process.
+        match &self.pending_notice {
+            Some((notice, until)) if Instant::now() < *until => self.hub.event_to(client, "session", notice),
+            Some(_) => self.pending_notice = None,
+            None => {}
         }
     }
 }
