@@ -86,11 +86,15 @@ mod tests {
     fn thread_cpu_counts_work() {
         let before = super::thread_cpu_ms();
         let mut x = 0u64;
+        // Spin until this thread has 30 ms of CPU (wall time varies when parallel tests share the
+        // cores): the reading must grow with the work, within a generous 5 s.
         let started = std::time::Instant::now();
-        while started.elapsed().as_millis() < 60 {
-            x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+        while super::thread_cpu_ms() - before < 30.0 && started.elapsed().as_secs() < 5 {
+            for _ in 0..10_000 {
+                x = x.wrapping_mul(6364136223846793005).wrapping_add(1);
+            }
         }
         std::hint::black_box(x);
-        assert!(super::thread_cpu_ms() - before >= 30.0);
+        assert!(super::thread_cpu_ms() - before >= 30.0, "thread CPU did not reach 30 ms in 5 s of spinning");
     }
 }
