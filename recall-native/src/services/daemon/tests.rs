@@ -138,6 +138,10 @@ fn hotkey_and_recording_events_and_session_fields() {
     apply(&mut state, json!({"mod":"engine","event":{"type":"recording_started","path":"E:/rec.mp4"}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"recording_stopped","path":"E:/rec.mp4","seconds":61.0,"bytes":9}}));
     apply(&mut state, json!({"mod":"session","event":{"type":"storage_cleaned","removed":3,"freed_bytes":1000}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"storage_cleaned","removed":2,"freed_bytes":9,"through":1_790_000_000u64,"used_bytes":80,"cap_bytes":100}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"storage_warning","level":90,"used_bytes":91,"cap_bytes":100,"next_through":1_780_000_000u64}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"storage_warning","level":100,"used_bytes":120,"cap_bytes":100,"next_through":null}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"storage_preview","cap_gb":1000,"used_bytes":5,"removed":4,"freed_bytes":3,"through":1_770_000_000u64}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"clip_moved","path":"E:/a.mp4","elapsed_ms":900}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"clip_moved","path":"E:/b.mp4","elapsed_ms":900,"kept_path":"F:/s/kept/b.mp4"}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"clip_move_failed","path":"E:/a.mp4","reason":"disk full"}}));
@@ -148,7 +152,11 @@ fn hotkey_and_recording_events_and_session_fields() {
             DaemonEvent::Screenshot { path: "E:/shots/a.png".into() },
             DaemonEvent::RecordingStarted,
             DaemonEvent::RecordingStopped { path: "E:/rec.mp4".into(), seconds: 61.0 },
-            DaemonEvent::StorageCleaned { removed: 3, freed_bytes: 1000 },
+            DaemonEvent::StorageCleaned { removed: 3, freed_bytes: 1000, through: None, used_bytes: 0, cap_bytes: 0 },
+            DaemonEvent::StorageCleaned { removed: 2, freed_bytes: 9, through: Some(1_790_000_000), used_bytes: 80, cap_bytes: 100 },
+            DaemonEvent::StorageWarning { level: 90, used_bytes: 91, cap_bytes: 100, next_through: Some(1_780_000_000) },
+            DaemonEvent::StorageWarning { level: 100, used_bytes: 120, cap_bytes: 100, next_through: None },
+            DaemonEvent::StoragePreview { cap_gb: 1000, used_bytes: 5, removed: 4, freed_bytes: 3, through: Some(1_770_000_000) },
             DaemonEvent::ClipMoved { path: "E:/a.mp4".into(), kept_path: None },
             DaemonEvent::ClipMoved { path: "E:/b.mp4".into(), kept_path: Some("F:/s/kept/b.mp4".into()) },
             DaemonEvent::ClipMoveFailed { path: "E:/a.mp4".into(), reason: "disk full".into() },
@@ -245,6 +253,7 @@ fn commands_serialize_to_controller_json() {
         (DaemonCommand::SetMode("hdr".into()), json!({"cmd":"set_mode","value":"hdr"})),
         (DaemonCommand::SetAcProfile("punchy".into()), json!({"cmd":"set_ac_profile","variant":"punchy"})),
         (DaemonCommand::GetConfig, json!({"cmd":"get_config"})),
+        (DaemonCommand::StoragePreview(500), json!({"cmd":"storage_preview","cap_gb":500})),
         (DaemonCommand::SetConfig(json!({"overlay":{"enabled":true}})), json!({"cmd":"set_config","patch":{"overlay":{"enabled":true}}})),
     ];
     for (command, expected) in cases {

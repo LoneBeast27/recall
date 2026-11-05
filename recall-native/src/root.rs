@@ -143,6 +143,10 @@ pub struct Root {
     drain_drawn: Option<u64>,
     /// The startup timeline marks the first render once.
     first_render_marked: bool,
+    /// Settings → Storage limit: a picked limit waiting for the recorder's dry run.
+    pub storage_asking: Option<u32>,
+    /// That dry run would move clips now: the confirm bar under the limit row.
+    pub storage_confirm: Option<crate::views::storage_limit::Preview>,
 }
 
 #[path = "root_events.rs"]
@@ -211,6 +215,8 @@ impl Root {
             recorder_unresponsive: false,
             drain_drawn: None,
             first_render_marked: false,
+            storage_asking: None,
+            storage_confirm: None,
         };
         if let Some(path) = std::env::var_os("RECALL_NATIVE_CLIP") {
             root.open_clip(path.to_string_lossy().into_owned());
@@ -379,6 +385,10 @@ impl Root {
 
     pub fn show_toast(&mut self, kind: ToastKind, text: impl Into<String>, detail: Option<String>) {
         let secs = if kind == ToastKind::Bad { 6 } else { 3 };
+        self.show_toast_for(kind, text, detail, secs);
+    }
+
+    pub fn show_toast_for(&mut self, kind: ToastKind, text: impl Into<String>, detail: Option<String>, secs: u64) {
         self.toast = Some(Toast { text: text.into(), detail, kind, until: Instant::now() + Duration::from_secs(secs) });
     }
 

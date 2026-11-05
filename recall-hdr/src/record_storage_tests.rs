@@ -175,6 +175,75 @@ fn scan_lists_top_level_clips_only() {
 
 #[test]
 fn cleaned_event_shape() {
-    let v: Value = serde_json::from_str(&cleaned_event(&Outcome { removed: 3, freed: 7 * GIB })).unwrap();
-    assert_eq!(v, json!({"type":"storage_cleaned","removed":3,"freed_bytes":7 * GIB}));
+    let v: Value = serde_json::from_str(&cleaned_event(&Outcome { removed: 3, freed: 7 * GIB, through: Some(1_700_000_000), used: 90 * GIB, cap: 100 * GIB, next: Some(1_700_000_100), stuck: false })).unwrap();
+    assert_eq!(
+        v,
+        json!({"type":"storage_cleaned","removed":3,"freed_bytes":7 * GIB,"through":1_700_000_000u64,"used_bytes":90 * GIB,"cap_bytes":100 * GIB})
+    );
+}
+
+#[test]
+fn warning_and_preview_event_shapes() {
+    let o = Outcome { removed: 0, freed: 0, through: None, used: 85 * GIB, cap: 100 * GIB, next: Some(500), stuck: false };
+    let v: Value = serde_json::from_str(&warning_event(80, &o)).unwrap();
+    assert_eq!(v, json!({"type":"storage_warning","level":80,"used_bytes":85 * GIB,"cap_bytes":100 * GIB,"next_through":500}));
+    let o = Outcome { next: None, ..o };
+    let v: Value = serde_json::from_str(&warning_event(100, &o)).unwrap();
+    assert_eq!(v["next_through"], Value::Null);
+    let l = listing(vec![clip("a.mp4", 3, 100), clip("b.mp4", 3, 200), clip("c.mp4", 3, 300)], &[], &[]);
+    let p = plan(&l, &HashSet::new(), 4 * GIB, NOW);
+    let v: Value = serde_json::from_str(&preview_event(500, &p)).unwrap();
+    assert_eq!(v, json!({"type":"storage_preview","cap_gb":500,"used_bytes":9 * GIB,"removed":2,"freed_bytes":6 * GIB,"through":200}));
+}
+
+#[test]
+fn plan_names_the_cut_off_date_and_the_next_clip_out() {
+    // 10 GiB, cap 6: a (100) and b (200) go -> "200 and earlier"; c (300) is next.
+    let l = listing(vec![clip("d.mp4", 2, 400), clip("a.mp4", 2, 100), clip("c.mp4", 2, 300), clip("b.mp4", 2, 200), clip("e.mp4", 2, 500)], &[], &[]);
+    let p = plan(&l, &HashSet::new(), 6 * GIB, NOW);
+    assert_eq!(p.remove, vec!["a.mp4", "b.mp4"]);
+    assert_eq!((p.through, p.next), (Some(200), Some(300)));
+    assert!(!p.stuck(6 * GIB));
+    // Under the cap: nothing goes, but the next clip out is still the oldest.
+    let p = plan(&l, &HashSet::new(), 20 * GIB, NOW);
+    assert_eq!((p.remove.len(), p.through, p.next), (0, None, Some(100)));
+    // Favourites skipped: the next out is the oldest unprotected clip.
+    let favs: HashSet<String> = ["a.mp4".to_string()].into();
+    assert_eq!(plan(&l, &favs, 20 * GIB, NOW).next, Some(200));
+}
+
+#[test]
+fn stuck_when_over_the_cap_and_nothing_may_go() {
+    let favs: HashSet<String> = ["a.mp4".to_string(), "b.mp4".to_string()].into();
+    // c is the newest (never goes); a and b are favourites.
+    let l = listing(vec![clip("a.mp4", 5, 100), clip("b.mp4", 5, 200), clip("c.mp4", 5, 300)], &[], &[]);
+    let p = plan(&l, &favs, 10 * GIB, NOW);
+    assert!(p.remove.is_empty() && p.next.is_none());
+    assert!(p.stuck(10 * GIB));
+    assert!(!plan(&l, &favs, 20 * GIB, NOW).stuck(20 * GIB), "under the cap is never stuck");
+}
+
+#[test]
+fn warner_warns_once_per_crossing_and_rearms_below_it() {
+    let cap = 100 * GIB;
+    let mut w = Warner::default();
+    assert_eq!(w.update(70 * GIB, cap, false, false), None);
+    assert_eq!(w.update(80 * GIB, cap, false, false), Some(80));
+    assert_eq!(w.update(85 * GIB, cap, false, false), None, "same level: quiet");
+    assert_eq!(w.update(91 * GIB, cap, false, false), Some(90));
+    assert_eq!(w.update(99 * GIB, cap, false, false), None);
+    // A prune toasts on its own; the level is recorded without a second toast.
+    assert_eq!(w.update(100 * GIB, cap, false, true), None);
+    assert_eq!(w.update(87 * GIB, cap, false, false), None, "3 points under 90: not re-armed");
+    assert_eq!(w.update(92 * GIB, cap, false, false), None);
+    assert_eq!(w.update(84 * GIB, cap, false, false), None, "re-armed at 80");
+    assert_eq!(w.update(90 * GIB, cap, false, false), Some(90), "warns again after falling well below");
+    // Stuck over the cap warns once; leaving that state re-arms it.
+    assert_eq!(w.update(110 * GIB, cap, true, false), Some(LEVEL_STUCK));
+    assert_eq!(w.update(110 * GIB, cap, true, false), None);
+    assert_eq!(w.update(95 * GIB, cap, false, true), None);
+    assert_eq!(w.update(105 * GIB, cap, true, false), Some(LEVEL_STUCK));
+    // A new cap starts over, so choosing a limit tells where usage stands.
+    assert_eq!(w.update(95 * GIB, 110 * GIB, false, false), Some(80));
+    assert_eq!(w.update(95 * GIB, 0, false, false), None, "no limit: no warnings");
 }
