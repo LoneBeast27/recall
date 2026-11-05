@@ -1,6 +1,6 @@
-//! App tracks: each app the person chose in Settings (`RECALL_AUDIO_APPS`, a JSON
-//! array of `{exe, label}`) is recorded as a track of its own, captured by process
-//! loopback of the app's process tree (include-tree mode, like the voice track).
+//! App tracks: each `app` source (`sources.rs`; the older `RECALL_AUDIO_APPS`, a JSON
+//! array of `{exe, label}`, still parses) is recorded as a track of its own, captured by
+//! process loopback of the app's process tree (include-tree mode).
 //!
 //! Every chosen app gets its track for the whole recording, running or not, so a
 //! clip's track count and order never depend on which apps were open. One scanner
@@ -23,6 +23,7 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
 
+use super::sources::SourceSpec;
 use super::voice::{snapshot_processes, tree_root, ProcEntry};
 use super::TrackRing;
 
@@ -31,19 +32,24 @@ mod level;
 pub use level::Leveller;
 
 pub const APPS_ENV: &str = "RECALL_AUDIO_APPS";
-/// Same cap as the Settings list.
-const MAX_APPS: usize = 6;
+/// Same cap as the sources list.
+const MAX_APPS: usize = super::sources::SOURCES_MAX;
 /// How often closed apps are looked for: while recording the desktop, and while a game runs.
 const RESCAN: Duration = Duration::from_secs(2);
 const RESCAN_IN_GAME: Duration = Duration::from_secs(5);
 /// An app that sends nothing for this long has no active stream: its track gets silence.
 const IDLE: Duration = Duration::from_millis(200);
 
-#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct AppSource {
     pub exe: String,
     #[serde(default)]
     pub label: String,
+    /// The source's id ("" in the old list: `app-<n>`).
+    #[serde(default)]
+    pub id: String,
+    #[serde(default)]
+    pub gain_db: f32,
 }
 
 impl AppSource {
@@ -56,15 +62,6 @@ impl AppSource {
         let exe = self.exe.trim();
         let stem = exe.len().checked_sub(4).filter(|&n| exe[n..].eq_ignore_ascii_case(".exe")).map_or(exe, |n| &exe[..n]);
         stem.to_owned()
-    }
-}
-
-/// The chosen apps; none when the variable is unset or empty.
-pub fn from_env() -> Result<Vec<AppSource>, String> {
-    match std::env::var(APPS_ENV) {
-        Ok(value) if !value.trim().is_empty() => parse(&value),
-        Ok(_) | Err(std::env::VarError::NotPresent) => Ok(Vec::new()),
-        Err(std::env::VarError::NotUnicode(_)) => Err(format!("{APPS_ENV} is not valid Unicode")),
     }
 }
 
@@ -119,21 +116,14 @@ pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, report
     let mut out = Vec::new();
     for (n, app) in apps.iter().enumerate() {
         let exe = app.exe.trim().to_owned();
-        // Names and sources are `&'static str` across the engine; an engine run holds at most
-        // MAX_APPS of each for its whole life, so leaking them is bounded.
-        let name: &'static str = Box::leak(app.track_name().into_boxed_str());
+        // Sources are `&'static str` across the engine; an engine run holds at most
+        // MAX_APPS of them for its whole life, so leaking them is bounded.
         let source: &'static str = Box::leak(format!("{}{exe}", crate::edit_model::APP_SOURCE_PREFIX).into_boxed_str());
         let is_game = game_exe.as_deref().is_some_and(|g| level::same_exe(g, &exe));
-        let (rate, channels) = (48_000u32, 2u16);
-        let ring = Arc::new(TrackRing {
-            name,
-            source,
-            endpoint: Mutex::new(format!("{exe} (not running)")),
-            rate,
-            channels,
-            samples: Mutex::new(VecDeque::new()),
-            capacity: buffer_secs as usize * rate as usize * channels as usize,
-        });
+        let id = if app.id.trim().is_empty() { format!("app-{}", n + 1) } else { app.id.trim().to_owned() };
+        let spec = SourceSpec { id, kind: "app".into(), device: String::new(), exe: exe.clone(), name: app.track_name(), gain_db: app.gain_db };
+        let ring = Arc::new(TrackRing::for_source(&spec, source, buffer_secs, format!("{exe} (not running)")));
+        let name = ring.title;
         let (thread_ring, thread_scanner) = (Arc::clone(&ring), Arc::clone(&scanner));
         let thread_exe = exe.clone();
         let spawned = std::thread::Builder::new()

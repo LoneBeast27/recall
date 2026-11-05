@@ -87,6 +87,8 @@ fn pcm(name: &'static str, secs: f64, tone: bool) -> AudioPcm {
         .collect();
     AudioPcm {
         name,
+        // The stream titles the old fixed tracks had.
+        title: match name { "Mic" => "Microphone", "Voice" => "Voice chat", other => other },
         source: match name { "Game" => "game-process", "Voice" => "voice-app", _ => "mic" },
         rate,
         channels: 2,
