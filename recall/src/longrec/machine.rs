@@ -22,6 +22,7 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use super::TrackInfo;
+use crate::export::mix_limit::stream::StreamLimiter;
 use crate::naming;
 
 /// How long `Armed` waits for a keyframe.
@@ -62,8 +63,10 @@ pub enum Event {
 struct Lane {
     rate: u64,
     channels: usize,
-    /// Frames handed to the sink so far.
+    /// Frames placed on the track so far (a boosted track's limiter may still hold the newest ~10 ms).
     written: u64,
+    /// A source above 0 dB: every frame, silence included, passes through the -1 dBFS limiter in order.
+    limiter: Option<StreamLimiter>,
 }
 
 struct Active<S> {
@@ -220,7 +223,16 @@ impl<F: SinkFactory> Recorder<F> {
                 return vec![Event::Failed { reason, kept: None }];
             }
         };
-        let lanes = self.tracks.iter().map(|t| Lane { rate: t.rate as u64, channels: t.channels.max(1) as usize, written: 0 }).collect();
+        let lanes = self
+            .tracks
+            .iter()
+            .map(|t| Lane {
+                rate: t.rate as u64,
+                channels: t.channels.max(1) as usize,
+                written: 0,
+                limiter: t.boosted.then(|| StreamLimiter::new(t.channels, t.rate)),
+            })
+            .collect();
         let mut active = Box::new(Active {
             sink,
             path: path.clone(),
@@ -317,11 +329,11 @@ impl<S: Sink> Active<S> {
         }
         let skip = skip.min(frames) as usize;
         if pad > 0 {
-            self.sink.silence(track, pad as u64)?;
+            self.write_silence(track, pad as u64)?;
         }
         let keep = &samples[skip * channels..frames as usize * channels];
         if !keep.is_empty() {
-            self.sink.audio(track, keep)?;
+            self.write_audio(track, keep)?;
         }
         self.lanes[track].written = (written + pad) as u64 + (keep.len() / channels) as u64;
         Ok(())
@@ -333,8 +345,48 @@ impl<S: Sink> Active<S> {
             let target = self.wall_frames(rate, now) - (rate * PAD_LAG_MS / 1000) as i64;
             let written = self.lanes[track].written as i64;
             if target - written > (rate * AUDIO_TOLERANCE_MS / 1000) as i64 {
-                self.sink.silence(track, (target - written) as u64)?;
+                self.write_silence(track, (target - written) as u64)?;
                 self.lanes[track].written = target as u64;
+            }
+        }
+        Ok(())
+    }
+
+    /// Samples for `track`, through its limiter when the source is boosted.
+    fn write_audio(&mut self, track: usize, samples: &[f32]) -> Result<(), String> {
+        match self.lanes[track].limiter.as_mut() {
+            Some(limiter) => {
+                let out = limiter.push(samples);
+                if out.is_empty() { Ok(()) } else { self.sink.audio(track, &out) }
+            }
+            None => self.sink.audio(track, samples),
+        }
+    }
+
+    /// Silence for `track`. A boosted track's silence goes through its limiter as zeros, so it
+    /// stays behind the frames the limiter still holds.
+    fn write_silence(&mut self, track: usize, frames: u64) -> Result<(), String> {
+        if self.lanes[track].limiter.is_none() {
+            return self.sink.silence(track, frames);
+        }
+        let channels = self.lanes[track].channels;
+        let zeros = vec![0.0f32; 4_800 * channels];
+        let mut left = frames as usize;
+        while left > 0 {
+            let n = left.min(4_800);
+            self.write_audio(track, &zeros[..n * channels])?;
+            left -= n;
+        }
+        Ok(())
+    }
+
+    /// Stop: each limiter hands on the frames it still holds, so no sample is lost or moved.
+    fn flush_limiters(&mut self) -> Result<(), String> {
+        for track in 0..self.lanes.len() {
+            let Some(limiter) = self.lanes[track].limiter.as_mut() else { continue };
+            let out = limiter.finish();
+            if !out.is_empty() {
+                self.sink.audio(track, &out)?;
             }
         }
         Ok(())
@@ -347,6 +399,9 @@ fn finish<S: Sink>(mut a: Active<S>) -> Vec<Event> {
         if let Err(reason) = a.write_video(pts, duration, key, &payload) {
             return vec![Event::Failed { reason, kept: abandon_and_keep(a.sink, &a.part) }];
         }
+    }
+    if let Err(reason) = a.flush_limiters() {
+        return vec![Event::Failed { reason, kept: abandon_and_keep(a.sink, &a.part) }];
     }
     let seconds = a.last_pts.map(|p| (p + a.last_duration - a.base_us) as f64 / 1_000_000.0).unwrap_or(0.0);
     let bytes = match a.sink.finish() {
