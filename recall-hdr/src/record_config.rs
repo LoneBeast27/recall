@@ -221,19 +221,14 @@ impl OverlayCfg {
     /// A config saved before the corner was honoured always said `top-right`
     /// (the default) while the island sat at its per-game spot: it loads as
     /// `dynamic`, which keeps that behaviour. Saved again, it is version 2.
-    ///
-    /// HELD (review 11-05, until Rohan answers whether his saved `top-right` was his pick): a
-    /// corner already in the file is honoured as written and its version is left as it was, so
-    /// this migration can still run once he decides. A file with no corner gets the default.
     pub fn migrate_loaded(&mut self, toml_text: &str) {
-        // serde fills a missing `corner_version` with the current one: keep what the file says.
         let version = toml::from_str::<toml::Value>(toml_text)
             .ok()
             .and_then(|v| v.get("overlay")?.get("corner_version")?.as_integer())
             .unwrap_or(0);
-        let has_corner = toml::from_str::<toml::Value>(toml_text).ok().is_some_and(|v| v.get("overlay").and_then(|o| o.get("corner")).is_some());
-        if has_corner {
-            self.corner_version = u32::try_from(version).unwrap_or(0);
+        if version < CORNER_VERSION as i64 {
+            self.corner = "dynamic".into();
+            self.corner_version = CORNER_VERSION;
         }
     }
 }
