@@ -10,13 +10,18 @@ use crate::{
     services::library::format_bytes,
     theme::{self, c},
     ui,
-    views::pages::{section_title, setting_row},
+    views::{
+        pages::{section_title, setting_row, setting_row_with},
+        quality_preview::Preview,
+    },
 };
 
 const CODECS: [(&str, &str); 3] = [("h264", "H.264"), ("hevc", "HEVC"), ("av1", "AV1")];
 const RATES: [u64; 4] = [30, 60, 120, 144];
-const BITRATES: [u64; 4] = [15, 25, 40, 60];
-const EFFORT: [(&str, &str); 3] = [("performance", "Performance"), ("balanced", "Balanced"), ("quality", "Quality")];
+/// Mbps. `quality_preview` has one comparison image per entry, in this order.
+pub(crate) const BITRATES: [u64; 4] = [15, 25, 40, 60];
+/// `quality_preview` has one comparison image per entry, in this order.
+pub(crate) const EFFORT: [(&str, &str); 3] = [("performance", "Performance"), ("balanced", "Balanced"), ("quality", "Quality")];
 use crate::views::storage_limit::{self, CAPS};
 
 impl Root {
@@ -74,10 +79,10 @@ impl Root {
             setting_row("Frame rate", "Frames per second in your clips.")
                 .child(self.segments("fps", 240., &rates, fps, "recording", "fps", |v| json!(v), cx))
                 .into_any_element(),
-            setting_row("Bitrate", "Higher looks sharper and makes bigger files.")
+            setting_row_with("Bitrate", Some(self.quality_info(Preview::Bitrate, BITRATES.iter().position(|b| *b == bitrate).unwrap_or(1), cx)), "Higher looks sharper and makes bigger files.")
                 .child(self.segments("bitrate", 320., &bitrates, bitrate, "recording", "bitrate_mbps", |v| json!(v), cx))
                 .into_any_element(),
-            setting_row("Encoder effort", "Quality uses a little more GPU time.")
+            setting_row_with("Encoder effort", Some(self.quality_info(Preview::Effort, effort_index, cx)), "Quality uses a little more GPU time.")
                 .child(self.segments("effort", 300., &efforts, effort_index, "recording", "quality", |i| json!(EFFORT[i].0), cx))
                 .into_any_element(),
         ];
