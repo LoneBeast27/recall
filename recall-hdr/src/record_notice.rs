@@ -163,11 +163,32 @@ mod tests {
 
     #[test]
     fn shortcut_notices_name_their_kind_and_only_overlay_off_is_forced() {
-        let ok: Value = serde_json::from_str(&shortcut_notice_json("Performance stats on", "Shows over your game", false, false)).unwrap();
-        assert_eq!(ok, serde_json::json!({"type":"notice","kind":"shortcut","title":"Performance stats on","detail":"Shows over your game"}));
-        let no: Value = serde_json::from_str(&shortcut_notice_json("Bookmark not added", "Recording is paused", true, false)).unwrap();
+        let ok: Value = serde_json::from_str(&shortcut_notice_json(
+            "Performance stats on",
+            "Shows over your game",
+            false,
+            false,
+        ))
+        .unwrap();
+        assert_eq!(
+            ok,
+            serde_json::json!({"type":"notice","kind":"shortcut","title":"Performance stats on","detail":"Shows over your game"})
+        );
+        let no: Value = serde_json::from_str(&shortcut_notice_json(
+            "Bookmark not added",
+            "Recording is paused",
+            true,
+            false,
+        ))
+        .unwrap();
         assert_eq!(no["kind"], "refused");
-        let off: Value = serde_json::from_str(&shortcut_notice_json("Overlay off", "Alt O shows it again", false, true)).unwrap();
+        let off: Value = serde_json::from_str(&shortcut_notice_json(
+            "Overlay off",
+            "Alt O shows it again",
+            false,
+            true,
+        ))
+        .unwrap();
         assert_eq!(off["always"], true);
     }
 
