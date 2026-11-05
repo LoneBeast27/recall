@@ -363,6 +363,49 @@ pub fn start_prefetch(clips: Vec<PrefetchClip>, complete: bool, sink: Sink, prep
     replan();
 }
 
+/// A clip that left the library behind Recall's back (the folder watcher saw it go).
+#[derive(Debug, Clone)]
+pub struct GoneClip {
+    pub name: String,
+    pub bytes: u64,
+    pub mtime_secs: u64,
+    /// The file itself was removed or replaced. False when only its folder moved away, which
+    /// may come back: then its previews stay.
+    pub removed: bool,
+}
+
+/// Clips deleted, replaced or moved away outside Recall: they leave the warm-up plan and score
+/// lowest, so their SSD copies are the first the budget lets go of (a copy is never deleted
+/// here). For a removed file, its editor media and hover frames go now, since nothing opens
+/// them again. The thumbnail stays (a clip back from the Recycle Bin finds it); the orphan sweep
+/// takes it later. The clip open in the editor keeps everything.
+pub fn forget_clips(gone: &[GoneClip]) {
+    if gone.is_empty() {
+        return;
+    }
+    let ids: HashSet<String> = gone.iter().map(|g| super::identity(&g.name, g.bytes, g.mtime_secs)).collect();
+    {
+        let mut current = library().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(old) = current.as_ref() {
+            let clips: Vec<PrefetchClip> = old.clips.iter().filter(|c| !ids.contains(&clip_id(c))).cloned().collect();
+            if clips.len() != old.clips.len() {
+                *current = Some(Arc::new(Library { clips, sink: old.sink.clone(), prepare: old.prepare }));
+            }
+        }
+    }
+    let root = super::cache_root();
+    let removed: HashSet<String> = gone.iter().filter(|g| g.removed).map(|g| super::identity(&g.name, g.bytes, g.mtime_secs)).collect();
+    let keep = budget::kept();
+    for id in &removed {
+        if !keep.iter().any(|unit| unit.contains(id.as_str())) {
+            super::head::forget(&root, id);
+        }
+    }
+    budget::drop_previews(&root, &removed);
+    invalidate_usage();
+    replan();
+}
+
 /// Re-scores the current list, evicts to the budget and restarts the fill.
 pub(super) fn replan() {
     let Some(library) = library().lock().ok().and_then(|l| l.clone()) else { return };

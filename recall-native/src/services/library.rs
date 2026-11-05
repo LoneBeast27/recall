@@ -6,7 +6,11 @@ use std::path::{Path, PathBuf};
 use crate::backend::ClipEntry;
 
 mod calendar;
+pub mod cache_watch;
+pub mod edit_marks;
 pub mod folders;
+pub mod import_check;
+pub mod imports;
 mod mp4;
 pub mod mp4_map;
 mod names;
@@ -176,6 +180,8 @@ fn game_prefix(entry: &ClipEntry) -> String {
 pub(crate) fn sidecar_candidates(clip: &Path) -> Vec<PathBuf> {
     let Some(name) = clip.file_name().map(|n| n.to_string_lossy().into_owned()) else { return Vec::new() };
     let mut candidates = vec![clip.with_file_name(format!("{name}.recall-edit.json"))];
+    // An imported clip's editor save lives on C:, never beside the clip.
+    candidates.extend(imports::edit_file(clip));
     if let Some(stem) = clip.file_stem().map(|s| s.to_string_lossy().into_owned()) {
         candidates.push(clip.with_file_name(format!("{stem}.recall-edit.json")));
     }
@@ -189,7 +195,8 @@ fn sidecar_key(path: &Path) -> String {
 /// One directory listing per clip folder instead of two stats per clip. Reads the clip drive:
 /// call it off the UI thread.
 pub fn sidecar_index(entries: &[ClipEntry]) -> HashSet<String> {
-    let folders: HashSet<PathBuf> = entries.iter().filter_map(|e| Path::new(&e.path).parent().map(Path::to_path_buf)).collect();
+    let mut folders: HashSet<PathBuf> = entries.iter().filter_map(|e| Path::new(&e.path).parent().map(Path::to_path_buf)).collect();
+    folders.extend(imports::edits_dir());
     let mut index = HashSet::new();
     for folder in folders {
         let Ok(listing) = std::fs::read_dir(&folder) else { continue };
@@ -334,6 +341,28 @@ pub fn video_limits(path: &str, duration: f64) -> (Option<f64>, Option<f64>) {
 /// Returns how many clips moved.
 pub fn delete_to_recycle_bin(clips: &[PathBuf]) -> Result<usize, String> {
     win::recycle(clips)
+}
+
+/// Delete from the library: clips in the recordings folder go to the Recycle Bin; clips in an
+/// imported folder are only removed from Recall (compatibility mode: their folder belongs to
+/// another recorder). Returns (recycled, removed from Recall).
+pub fn delete_or_hide(clips: &[PathBuf]) -> Result<(usize, usize), String> {
+    let folders = folders::Folders::load();
+    let recordings = crate::backend::library_dir_from(&folders);
+    let (imported, own): (Vec<PathBuf>, Vec<PathBuf>) = clips.iter().cloned().partition(|c| imports::is_imported(&c.to_string_lossy(), &recordings, &folders.imported));
+    let hidden = if imported.is_empty() { 0 } else { imports::hide(&imported)? };
+    let recycled = if own.is_empty() { 0 } else { win::recycle(&own)? };
+    Ok((recycled, hidden))
+}
+
+/// The toast after [`delete_or_hide`]: title and detail.
+pub fn delete_message(recycled: usize, hidden: usize) -> (String, Option<String>) {
+    let clips = |n: usize| format!("{n} {}", if n == 1 { "clip" } else { "clips" });
+    match (recycled, hidden) {
+        (r, 0) => (format!("Moved {} to the Recycle Bin", clips(r)), None),
+        (0, h) => (format!("Removed {} from Recall", clips(h)), Some("The files stay in their folder.".into())),
+        (r, h) => (format!("Removed {}", clips(r + h)), Some(format!("{r} went to the Recycle Bin. {h} from other folders stay where they are."))),
+    }
 }
 
 /// Eight low-resolution cached frames across the clip for hover-scrub.

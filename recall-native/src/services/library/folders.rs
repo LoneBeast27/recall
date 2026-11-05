@@ -271,10 +271,11 @@ fn hidden(meta: &std::fs::Metadata) -> bool {
     meta.file_attributes() & (HIDDEN | SYSTEM) != 0
 }
 
-/// Recorder bookkeeping folders that never hold clips worth listing.
+/// Recorder bookkeeping folders that never hold clips worth listing: thumbnails, captures still
+/// in progress (Overwolf `temp-capture`), and editor output (Medal `editor`, `Edits`, `projects`).
 fn skipped_name(name: &str) -> bool {
     let name = name.to_lowercase();
-    matches!(name.as_str(), "thumbs" | "thumbnails" | "$recycle.bin" | "system volume information" | "windows" | "program files" | "program files (x86)" | "node_modules") || name.starts_with('.')
+    matches!(name.as_str(), "thumbs" | "thumbnails" | "temp-capture" | "editor" | "edits" | "projects" | "$recycle.bin" | "system volume information" | "windows" | "program files" | "program files (x86)" | "node_modules") || name.starts_with('.')
 }
 
 #[cfg(test)]

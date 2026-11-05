@@ -70,13 +70,13 @@ pub use history::{Interaction, record_interaction};
 #[allow(unused_imports)]
 pub use lane::{LaneStats, Priority, lane_wait_ms, run_io, stats, submit_io};
 #[allow(unused_imports)]
-pub use prefetch::{PrefetchClip, PrefetchEvent, PrepareEditor, gpu_work_allowed, recorder_busy, recorder_holds, set_recorder_busy, set_recorder_connected, smart_status, start_prefetch};
+pub use prefetch::{GoneClip, PrefetchClip, PrefetchEvent, PrepareEditor, forget_clips, gpu_work_allowed, recorder_busy, recorder_holds, set_recorder_busy, set_recorder_connected, smart_status, start_prefetch};
 pub use projects::{ProjectSource, SidecarStep, export_dir, has_export, project_order, sidecar_step, working_copy_path, write_atomic};
 pub(crate) use projects::modified_ms as projects_modified_ms;
 #[allow(unused_imports)]
 pub use thumbs::{ThumbIndex, cached_thumb, ensure_thumb, recorder_thumb_stem, thumb_index};
 #[allow(unused_imports)]
-pub use ssd_usage::{SsdUsage, generation as cache_generation, ssd_usage};
+pub use ssd_usage::{SsdUsage, counted_dirs, generation as cache_generation, note_outside_change, ssd_usage};
 #[allow(unused_imports)]
 pub use tiers::{CacheKind, CacheUsage, TierUsage, clear_kind, usage_detail};
 #[allow(unused_imports)]

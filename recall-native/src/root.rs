@@ -330,11 +330,11 @@ impl Root {
                 }
                 self.ed.on_exported(result);
             }
-            Done::Deleted(paths, Ok(count)) => {
+            Done::Deleted(paths, Ok((recycled, hidden))) => {
                 self.lib.deleting = 0;
                 self.lib.forget(&paths);
-                let noun = if count == 1 { "clip" } else { "clips" };
-                self.show_toast(ToastKind::Info, format!("Moved {count} {noun} to the Recycle Bin"), None);
+                let (title, detail) = crate::services::library::delete_message(recycled, hidden);
+                self.show_toast(ToastKind::Info, title, detail);
             }
             Done::Deleted(_, Err(error)) => {
                 self.lib.deleting = 0;
