@@ -179,6 +179,7 @@ function Title($name) { "title:$name.mp4" }
 
 Run-Scenario 'card: a click on the picture opens the clip at once' {
   $s = $script:current = Start-Viewer 'pick' $clips.short -Library -Also 'pick-b'
+  [void](Settle $s 1000) # a click in the first second after start can be lost (follow-up)
   $t = Target $s (Tile 'pick-b')
   $before = (Last $s).ms
   Mouse $s 0x200 $t.X ([int]($t.Top + $t.Height * 0.3)) 0; Start-Sleep -Milliseconds 40
@@ -372,7 +373,7 @@ Run-Scenario 'editor: an exported clip keeps its edit file when the edits are un
 
 Run-Scenario 'settings: a typed cache size of 7.5 GB sits between the 5 and 10 GB ticks' {
   $s = $script:current = Start-Viewer 'cachesize' $clips.short -Library
-  Click $s 'nav-settings'; Click $s 'settings-Media'
+  [void](Settle $s 1000); Click $s 'nav-settings'; Click $s 'settings-Media'
   Click $s 'cache-size-value'
   $editing = Wait-Trace $s { param($r) $r.ui.cache_editing -and $r.ui.field -eq 'CacheSize' } 2000
   Key $s 'd7'; Key $s 'period'; Key $s 'd5'
