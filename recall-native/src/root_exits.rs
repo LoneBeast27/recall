@@ -98,6 +98,7 @@ impl Root {
         if orphan {
             window.focus(&self.focus);
         }
+        self.settle_fps_input(window);
         // An fps field that isn't being typed in shows the rate an export would use.
         if self.focused_field(window) != Some(Field::Fps) {
             self.fps_before = self.ed.fps;

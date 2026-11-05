@@ -53,7 +53,7 @@ impl Root {
         body.extend(self.offline_banner(cx));
         body.extend(match current {
             SettingsTab::General => self.settings_general(cx),
-            SettingsTab::Clip => self.settings_clip(cx),
+            SettingsTab::Clip => self.settings_clip(window, cx),
             SettingsTab::Media => self.settings_media(window, cx),
             SettingsTab::Shortcuts => self.settings_shortcuts(cx),
         });
@@ -131,7 +131,7 @@ impl Root {
         self.config_value("overlay", "stats").and_then(Value::as_bool).unwrap_or(session)
     }
 
-    fn settings_clip(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn settings_clip(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let session = self.snap.session.clone().unwrap_or_default();
         let auto_record = self.config_value("recording", "auto_record").and_then(Value::as_bool).unwrap_or(session.auto_record);
         let desktop = self.config_bool("recording", "record_desktop_when_idle");
@@ -160,7 +160,7 @@ impl Root {
             setting_row("Replay length", "How much a save keeps. Longer uses more memory.").child(lengths).into_any_element(),
         ]
         .into_iter()
-        .chain(self.render_video_section(cx))
+        .chain(self.render_video_section(window, cx))
         .collect()
     }
 
