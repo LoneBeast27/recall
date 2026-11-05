@@ -1,13 +1,12 @@
 //! Display & HDR, Audio and Settings pages.
-use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Window, div, prelude::*, px, relative};
+use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Window, div, prelude::*, px};
 use serde_json::{Value, json};
 
 use crate::{
     root::{Root, ToastKind},
     services::{
         daemon::{self, DaemonCommand},
-        meters::{MeterState, Meters, bar_fraction, meter_specs},
-        midi::Midi,
+        meters::MeterState,
     },
     theme::{self, c},
     ui::{self, Icon, Variant, icon},
@@ -168,127 +167,6 @@ impl Root {
 
     // ---- Audio ------------------------------------------------------------
 
-    /// Start or replace the meters and the MIDI monitor so they follow the settings: the
-    /// recorded desktop output and microphone, and the chosen MIDI input ("" = none).
-    pub(crate) fn sync_audio_monitors(&mut self) {
-        let text = |this: &Self, section: &str, key: &str| this.config_value(section, key).and_then(Value::as_str).unwrap_or("").trim().to_owned();
-        let mic_on = self.config_value("recording", "mic_enabled").and_then(Value::as_bool).unwrap_or(true);
-        let specs = meter_specs(&text(self, "recording", "desktop_audio_device"), &text(self, "recording", "mic_device"), mic_on);
-        if self.meters.as_ref().is_none_or(|m| m.specs() != specs.as_slice()) {
-            self.meters = Some(Meters::spawn(specs));
-        }
-        let port = text(self, "midi", "input");
-        if port.is_empty() {
-            self.midi = None;
-        } else if self.midi.as_ref().is_none_or(|m| m.wanted() != port) {
-            self.midi = Some(Midi::spawn(port));
-        }
-    }
-
-    pub fn render_audio(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
-        self.sync_audio_monitors();
-        let readings = self.meters.as_ref().map(|m| m.snapshot()).unwrap_or_default();
-        let shown = self.meter_ballistics(&readings);
-        let strips = readings.into_iter().zip(shown).map(|(r, (rms_db, hold_db))| {
-            let live = r.state == MeterState::Live;
-            let rms = bar_fraction(rms_db);
-            let peak = bar_fraction(hold_db);
-            let clipping = live && hold_db > -1.0;
-            div()
-                .flex_1()
-                .flex()
-                .flex_col()
-                .items_center()
-                .gap(px(10.))
-                .when(!live, |d| d.opacity(0.45))
-                .child(
-                    div()
-                        .w(px(14.))
-                        .h(px(160.))
-                        .relative()
-                        .rounded(px(4.))
-                        .bg(c(theme::RAISED))
-                        .border_1()
-                        .border_color(c(theme::BORDER_SUBTLE))
-                        .child(div().absolute().bottom_0().left_0().right_0().h(relative(rms)).rounded(px(3.)).bg(c(theme::MUTED)))
-                        .when(live, |d| d.child(div().absolute().left_0().right_0().bottom(relative(peak)).h(px(2.)).bg(c(if clipping { theme::SIGNAL } else { theme::TEXT })))),
-                )
-                .child(div().font_weight(FontWeight::MEDIUM).child(r.label.clone()))
-                .child(div().font_family(theme::mono()).text_size(px(11.)).text_color(c(theme::TERTIARY)).child(match &r.state {
-                    MeterState::Live => format!("{:.0} dB", r.rms_db.max(-90.0)),
-                    MeterState::Missing => "Not found".into(),
-                    MeterState::Error(_) => "Error".into(),
-                }))
-        });
-        let midi = self.midi.as_ref();
-        let port = midi.and_then(|m| m.monitored_port());
-        let outputs = midi.map(|m| m.ports().outputs).unwrap_or_default();
-        let recent = midi.map(|m| m.recent()).unwrap_or_default();
-        let mut body = vec![
-            card()
-                .gap(px(16.))
-                .child(ui::heading("Levels", "Live"))
-                .child(div().flex().gap(px(8.)).children(strips))
-                .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child("The desktop audio and microphone your clips record. Change them in Settings → Clip."))
-                .into_any_element(),
-        ];
-        body.push(
-            card()
-                .gap(px(14.))
-                .child(ui::heading("MIDI console", match (midi, port.clone()) {
-                    (None, _) => "Off · choose a device in Settings → General".to_owned(),
-                    (Some(m), None) => format!("{} is not connected", m.wanted()),
-                    (Some(_), Some(p)) => format!("Listening on {p}"),
-                }))
-                .child(
-                    div()
-                        .flex()
-                        .items_center()
-                        .gap(px(10.))
-                        .child(ui::button("midi-test", Variant::Secondary).child(icon(Icon::Play, 13., theme::TEXT)).child("Send test note").on_click(cx.listener(|this, _, _, cx| {
-                            // The output with the chosen input's name (devices list both sides).
-                            let result = this.midi.as_ref().map_or(Err("MIDI is off".to_owned()), |m| {
-                                let target = m.wanted().to_owned();
-                                m.send(&target, &[0x90, 60, 127]).map(|_| target)
-                            });
-                            if let Some(midi) = this.midi.as_ref() {
-                                if let Ok(target) = &result {
-                                    std::thread::sleep(std::time::Duration::from_millis(120));
-                                    let _ = midi.send(target, &[0x80, 60, 0]);
-                                }
-                            }
-                            this.midi_result = Some(result);
-                            cx.notify();
-                        })))
-                        .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(match &self.midi_result {
-                            Some(Ok(target)) => format!("Sent to {target}"),
-                            Some(Err(error)) => error.clone(),
-                            None => format!("{} output ports", outputs.len()),
-                        })),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .gap(px(2.))
-                        .font_family(theme::mono())
-                        .text_size(px(12.))
-                        .child(div().font_family(theme::sans()).text_color(c(theme::TERTIARY)).pb(px(4.)).child("Incoming"))
-                        .when(recent.is_empty(), |d| d.child(div().text_color(c(theme::DISABLED)).child("No messages yet. Press a key or pad on the device.")))
-                        .children(recent.into_iter().map(|m| {
-                            let bytes: Vec<String> = m.bytes.iter().map(|b| format!("{b:02X}")).collect();
-                            div()
-                                .flex()
-                                .gap(px(16.))
-                                .child(div().w(px(80.)).text_color(c(theme::TERTIARY)).child(format!("{:.1} s", m.at_ms as f64 / 1000.0)))
-                                .child(div().child(bytes.join(" ")))
-                        })),
-                )
-                .into_any_element(),
-        );
-        self.page_shell("Audio", "Levels and MIDI", body)
-    }
-
     // ---- Settings ---------------------------------------------------------
 }
 
@@ -332,7 +210,7 @@ pub(crate) fn setting_row(title: &str, detail: &str) -> Div {
 impl Root {
     /// Meter ballistics per frame: fast rise (~30 ms), 26 dB/s fall, 0.8 s peak hold
     /// then 18 dB/s fall. Returns (displayed RMS dB, displayed peak dB) per meter.
-    fn meter_ballistics(&mut self, readings: &[crate::services::meters::MeterReading]) -> Vec<(f32, f32)> {
+    pub(crate) fn meter_ballistics(&mut self, readings: &[crate::services::meters::MeterReading]) -> Vec<(f32, f32)> {
         let now = std::time::Instant::now();
         let dt = now.duration_since(self.frame_at).as_secs_f32().min(0.1);
         self.frame_at = now;

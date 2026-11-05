@@ -1,78 +1,20 @@
-//! Voice-chat track target: one app's process tree, captured by process
-//! loopback (include-tree mode) so the app's children are recorded too —
-//! Discord plays voice from a child `Discord.exe` (its audio service).
-//!
-//! `RECALL_AUDIO_VOICE_PID` wins; otherwise `RECALL_AUDIO_VOICE_EXE` (e.g.
-//! `Discord.exe`, `.exe` optional) names the image and the root of its
-//! largest running tree is used. Neither set, or the app not running, means
-//! no voice track — not an error.
+//! Process helpers for app tracks (`apps.rs`): a snapshot of running processes and the
+//! root of an app's largest process tree, captured by process loopback (include-tree
+//! mode) so an app that plays sound from a child process is recorded too.
 
 use std::collections::HashMap;
 use std::ffi::c_void;
-
-use super::{parse_pid, LoopbackTarget};
-
-pub const PID_ENV: &str = "RECALL_AUDIO_VOICE_PID";
-pub const EXE_ENV: &str = "RECALL_AUDIO_VOICE_EXE";
 
 /// One row of a process snapshot.
 #[derive(Clone, Debug)]
 pub struct ProcEntry {
     pub pid: u32,
     pub parent: u32,
-    /// Image file name, e.g. `Discord.exe`.
+    /// Image file name, e.g. `chat.exe`.
     pub exe: String,
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum Resolved {
-    Target(LoopbackTarget),
-    /// No voice track, with the reason to log.
-    Off(String),
-}
-
-pub fn resolve_from_env(game_pid: Option<u32>) -> Result<Resolved, String> {
-    resolve(|key| std::env::var(key).ok(), snapshot_processes, game_pid)
-}
-
-/// `resolve_from_env` with injected env lookup and process listing (tests).
-pub fn resolve(
-    get: impl Fn(&str) -> Option<String>,
-    list: impl FnOnce() -> Result<Vec<ProcEntry>, String>,
-    game_pid: Option<u32>,
-) -> Result<Resolved, String> {
-    let set = |key: &str| get(key).filter(|v| !v.trim().is_empty());
-    let target = if let Some(raw) = set(PID_ENV) {
-        let pid = parse_pid(PID_ENV, &raw)?;
-        LoopbackTarget {
-            pid,
-            label: format!("process {pid} (include tree)"),
-        }
-    } else if let Some(raw) = set(EXE_ENV) {
-        let exe = exe_name(&raw);
-        let procs = list()?;
-        let Some(pid) = tree_root(&procs, &exe) else {
-            return Ok(Resolved::Off(format!("{exe} is not running")));
-        };
-        LoopbackTarget {
-            pid,
-            label: format!("{exe} pid {pid} (include tree)"),
-        }
-    } else {
-        return Ok(Resolved::Off(format!(
-            "no voice app chosen (set {EXE_ENV}=Discord.exe or {PID_ENV})"
-        )));
-    };
-    if Some(target.pid) == game_pid {
-        return Ok(Resolved::Off(format!(
-            "voice app pid {} is the game process (already on the Game track)",
-            target.pid
-        )));
-    }
-    Ok(Resolved::Target(target))
-}
-
-/// File name with `.exe`: `Discord` / `C:\..\Discord.exe` -> `Discord.exe`.
+/// File name with `.exe`: `chat` / `C:\..\chat.exe` -> `chat.exe`.
 fn exe_name(raw: &str) -> String {
     let raw = raw.trim();
     let name = raw.rsplit(['\\', '/']).next().unwrap_or(raw);

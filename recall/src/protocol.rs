@@ -41,6 +41,9 @@ pub enum Outbound {
         recording_mode: String,
         /// Whether new microphone samples are entering the replay buffer as silence.
         mic_muted: bool,
+        /// What each recorded source opened, in track order (`audio::sources::opened`).
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        audio: Vec<AudioOpened>,
     },
     /// A `save_clip` completed: the clip is on disk. `path` is always the
     /// clip's FINAL place in the clip folder. With `staged: true` the finished
@@ -140,6 +143,18 @@ pub enum Outbound {
     RecordingRecovered {
         path: String,
     },
+}
+
+/// One recorded source in `status.audio`: what it captures right now.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct AudioOpened {
+    /// The source's id in `recording.audio_sources`.
+    pub id: String,
+    pub name: String,
+    /// The endpoint or process captured ("… (Windows default)" after a fallback), or why
+    /// the source has no track.
+    pub opened: String,
+    pub live: bool,
 }
 
 #[derive(Serialize)]

@@ -21,12 +21,24 @@ pub(crate) enum Call {
     Abandon,
 }
 
+/// Every call, plus each track's samples as the sink received them (silence as zeros).
 #[derive(Clone, Default)]
-pub(crate) struct Log(Arc<Mutex<Vec<Call>>>);
+pub(crate) struct Log(Arc<Mutex<Vec<Call>>>, Arc<Mutex<Vec<Vec<f32>>>>);
 
 impl Log {
     fn push(&self, c: Call) {
         self.0.lock().unwrap().push(c);
+    }
+    fn keep(&self, track: usize, samples: impl IntoIterator<Item = f32>) {
+        let mut pcm = self.1.lock().unwrap();
+        if pcm.len() <= track {
+            pcm.resize(track + 1, Vec::new());
+        }
+        pcm[track].extend(samples);
+    }
+    /// `track`'s interleaved stereo samples in the order the sink wrote them.
+    pub(crate) fn pcm(&self, track: usize) -> Vec<f32> {
+        self.1.lock().unwrap().get(track).cloned().unwrap_or_default()
     }
     pub(crate) fn calls(&self) -> Vec<Call> {
         self.0.lock().unwrap().clone()
@@ -68,10 +80,12 @@ impl Sink for FakeSink {
     }
     fn audio(&mut self, track: usize, samples: &[f32]) -> Result<(), String> {
         self.log.push(Call::Audio { track, frames: samples.len() / 2 });
+        self.log.keep(track, samples.iter().copied());
         Ok(())
     }
     fn silence(&mut self, track: usize, frames: u64) -> Result<(), String> {
         self.log.push(Call::Silence { track, frames });
+        self.log.keep(track, std::iter::repeat_n(0.0, frames as usize * 2));
         Ok(())
     }
     fn finish(&mut self) -> Result<u64, String> {
@@ -116,7 +130,7 @@ impl SinkFactory for FakeFactory {
 }
 
 pub(crate) fn tracks() -> Vec<TrackInfo> {
-    vec![TrackInfo { name: "Game", rate: 48_000, channels: 2 }, TrackInfo { name: "Mic", rate: 48_000, channels: 2 }]
+    vec![TrackInfo { name: "Game", rate: 48_000, channels: 2, boosted: false }, TrackInfo { name: "Mic", rate: 48_000, channels: 2, boosted: false }]
 }
 
 pub(crate) fn pkt(tag: u8) -> Arc<[u8]> {

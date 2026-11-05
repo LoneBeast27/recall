@@ -197,7 +197,7 @@ fn every_new_key_patches_saves_and_reloads() {
     let patch = json!({
         "recording": {
             "bookmark_hotkey": "Ctrl+F7", "screenshot_hotkey": "", "record_hotkey": "Ctrl+F8",
-            "codec": "hevc", "fps": 120, "bitrate_mbps": 50, "quality": "quality", "voice_app": "Discord.exe",
+            "codec": "hevc", "fps": 120, "bitrate_mbps": 50, "quality": "quality", "voice_app": "chat.exe",
             "mic_device": "Microphone (USB Audio Device)", "mic_enabled": false, "desktop_audio_device": "Lautsprecher (Kopfhörer USB Audio)",
             "save_hotkeys": [{"hotkey": "Alt+N", "seconds": 0}, {"hotkey": "Alt+J", "seconds": 15}, {"hotkey": "Alt+L", "seconds": 60}]
         },
@@ -241,7 +241,7 @@ fn new_keys_reject_bad_values() {
         (json!({"recording":{"fps":5}}), "recording.fps"),
         (json!({"recording":{"bitrate_mbps":0}}), "recording.bitrate_mbps"),
         (json!({"recording":{"quality":"max"}}), "recording.quality"),
-        (json!({"recording":{"voice_app":"C:\\Apps\\Discord.exe"}}), "recording.voice_app"),
+        (json!({"recording":{"voice_app":"C:\\Apps\\chat.exe"}}), "recording.voice_app"),
         (json!({"recording":{"mic_device":"Mic\u{7}Two"}}), "recording.mic_device"),
         (json!({"recording":{"desktop_audio_device":"x".repeat(300)}}), "recording.desktop_audio_device"),
         (json!({"midi":{"input":"x".repeat(300)}}), "midi.input"),
@@ -399,4 +399,27 @@ fn app_audio_list_survives_a_patch_and_a_toml_round_trip() {
     assert_eq!(back.recording.app_audio[1].label, "", "a missing label means the exe name");
     let twice = json!({"recording": {"app_audio": [{"exe": "a.exe"}, {"exe": "A.EXE"}]}});
     assert!(apply_patch(&base, &twice).unwrap_err().contains("twice"));
+}
+
+#[test]
+fn audio_sources_survive_a_patch_and_a_toml_round_trip() {
+    let store = temp_store("sources");
+    let base = store.load();
+    assert_eq!(base.recording.audio_sources, crate::record_audio_sources::default_sources());
+    let patch = json!({"recording": {"audio_sources": [
+        {"id": "game", "kind": "game", "name": "Game"},
+        {"id": "in-2", "kind": "input", "device": "Microphone (USB Audio Device)", "name": "Voice", "gain_db": -3.5},
+        {"id": "app-1", "kind": "app", "exe": "player.exe", "name": "Music", "enabled": false}
+    ]}});
+    let out = apply_patch(&base, &patch).unwrap();
+    assert!(out.touched("recording.audio_sources"), "{:?}", out.changed);
+    store.save(&out.config).unwrap();
+    let text = std::fs::read_to_string(store.path()).unwrap();
+    assert!(text.contains("[[recording.audio_sources]]"), "a TOML table array:\n{text}");
+    let back = store.load();
+    assert_eq!(back, out.config, "a saved list is not rebuilt from the old keys");
+    assert_eq!((back.recording.audio_sources[1].gain_db, back.recording.audio_sources[2].enabled), (-3.5, false));
+    let twice = json!({"recording": {"audio_sources": [{"id": "a", "kind": "input", "name": "A"}, {"id": "A", "kind": "input", "name": "B"}]}});
+    assert!(apply_patch(&base, &twice).unwrap_err().contains("unique"));
+    let _ = std::fs::remove_dir_all(store.path().parent().unwrap());
 }

@@ -87,10 +87,13 @@ fn pcm(name: &'static str, secs: f64, tone: bool) -> AudioPcm {
         .collect();
     AudioPcm {
         name,
+        // The stream titles the old fixed tracks had.
+        title: match name { "Mic" => "Microphone", "Voice" => "Voice chat", other => other },
         source: match name { "Game" => "game-process", "Voice" => "voice-app", _ => "mic" },
         rate,
         channels: 2,
         samples,
+        boosted: false,
     }
 }
 
@@ -443,7 +446,7 @@ fn bench_aac_encoders_cpu() {
         let t = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 10_000.0;
         t(k) + t(u)
     };
-    let track = AudioPcm { name: "game", rate: 48_000, channels: 2, samples, source: "" };
+    let track = AudioPcm { name: "game", title: "Game", rate: 48_000, channels: 2, samples, source: "", boosted: false };
     for round in 0..3 {
         for coder in [AacCoder::Native, AacCoder::MediaFoundation] {
             let (cpu, started) = (process_ms(), Instant::now());

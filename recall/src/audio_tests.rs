@@ -1,64 +1,60 @@
-//! TrackRing snapshot/mute behaviour (no WASAPI).
+//! TrackRing snapshot/mute/gain behaviour (no WASAPI).
 
 use super::TrackRing;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-fn test_ring(name: &'static str) -> TrackRing {
+fn raw_ring(name: &'static str, input: bool, gain: f32, rate: u32, channels: u16, capacity: usize) -> TrackRing {
     TrackRing {
         name,
-        source: "mic",
+        title: name,
+        source: if input { "mic" } else { "desktop-loopback" },
+        gain,
+        input,
         endpoint: Mutex::new(String::new()),
-        rate: 1,
-        channels: 1,
+        rate,
+        channels,
         samples: Mutex::new(VecDeque::new()),
-        capacity: 16,
+        capacity,
     }
 }
 
+fn test_ring(name: &'static str, input: bool) -> TrackRing {
+    raw_ring(name, input, 1.0, 1, 1, 16)
+}
+
 #[test]
-fn microphone_mute_silences_only_future_microphone_samples() {
-    let mic = test_ring("Mic");
-    let game = test_ring("Game");
+fn the_mute_hotkey_silences_only_future_input_samples() {
+    let mic = test_ring("in-1", true);
+    let line = test_ring("in-2", true);
+    let game = test_ring("game", false);
 
     mic.push_capture(&[1.0, 2.0], false);
     game.push_capture(&[3.0, 4.0], false);
     mic.push_capture(&[5.0, 6.0], true);
+    line.push_capture(&[5.0], true);
     game.push_capture(&[7.0, 8.0], true);
     mic.push_capture(&[9.0], false);
 
     assert_eq!(mic.snapshot(5.0), vec![1.0, 2.0, 0.0, 0.0, 9.0]);
+    assert_eq!(line.snapshot(1.0), vec![0.0], "every input source is muted");
     assert_eq!(game.snapshot(4.0), vec![3.0, 4.0, 7.0, 8.0]);
 }
 
 #[test]
-fn voice_track_ignores_microphone_mute() {
-    let voice = test_ring("Voice");
-    voice.push_capture(&[1.0, 2.0], true);
-    voice.push_capture(&[3.0], false);
-    assert_eq!(voice.snapshot(3.0), vec![1.0, 2.0, 3.0]);
+fn an_app_or_output_track_ignores_the_mute_hotkey() {
+    let app = test_ring("app-1", false);
+    app.push_capture(&[1.0, 2.0], true);
+    app.push_capture(&[3.0], false);
+    assert_eq!(app.snapshot(3.0), vec![1.0, 2.0, 3.0]);
 }
 
 #[test]
-fn every_track_has_an_editor_title_and_only_voice_is_process_only() {
-    use super::{track_title, ProcessSource, TRACKS};
-    let rows: Vec<(&str, &str, ProcessSource)> =
-        TRACKS.iter().map(|t| (t.name, t.title, t.process)).collect();
-    assert_eq!(
-        rows,
-        vec![
-            ("Game", "Game", ProcessSource::GamePid),
-            ("Mic", "Microphone", ProcessSource::None),
-            ("Voice", "Voice chat", ProcessSource::VoiceApp),
-        ]
-    );
-    assert_eq!(track_title("Mic"), "Microphone");
-    assert_eq!(track_title("Voice"), "Voice chat");
-    assert_eq!(track_title("Other"), "Other", "unknown names pass through");
-    // The native editor labels lanes by these substrings (views/editor.rs).
-    for (title, needle) in [("Game", "game"), ("Microphone", "mic"), ("Voice chat", "voice")] {
-        assert!(title.to_lowercase().contains(needle));
-    }
+fn gain_scales_samples_before_they_are_stored() {
+    let quiet = raw_ring("in-1", true, 0.5, 1, 1, 16);
+    quiet.push_capture(&[1.0, -0.5], false);
+    quiet.push_capture(&[1.0], true);
+    assert_eq!(quiet.snapshot(3.0), vec![0.5, -0.25, 0.0]);
 }
 
 #[test]
@@ -84,15 +80,7 @@ fn old_snapshot(ring: &TrackRing, secs: f64) -> Vec<f32> {
 
 #[test]
 fn slice_snapshot_matches_old_behaviour_across_wraps_and_padding() {
-    let ring = TrackRing {
-        name: "Game",
-        source: "game-process",
-        endpoint: Mutex::new(String::new()),
-        rate: 10,
-        channels: 2,
-        samples: Mutex::new(VecDeque::new()),
-        capacity: 40,
-    };
+    let ring = raw_ring("Game", false, 1.0, 10, 2, 40);
     let secs_cases = [0.0, 0.05, 0.1, 0.35, 1.0, 1.95, 2.0, 2.5, 7.0];
     // Before any audio: all padding.
     for secs in secs_cases {
@@ -134,15 +122,7 @@ fn bench_full_ring_snapshot() {
     let capacity = secs * rate as usize * channels as usize;
     let rings: Vec<TrackRing> = ["Game", "Mic"]
         .into_iter()
-        .map(|name| TrackRing {
-            name,
-            source: "mic",
-            endpoint: Mutex::new(String::new()),
-            rate,
-            channels,
-            samples: Mutex::new(VecDeque::new()),
-            capacity,
-        })
+        .map(|name| raw_ring(name, false, 1.0, rate, channels, capacity))
         .collect();
     let chunk: Vec<f32> = (0..960).map(|i| i as f32 * 1e-4).collect();
     for ring in &rings {
@@ -208,12 +188,12 @@ fn a_saves_audio_spans_exactly_its_video_window() {
 
     const RATE: u32 = 1_000; // one sample per ms; each sample's value is its capture time in ms
     const FRAME_US: u64 = 16_667;
-    let audio = TrackRing { rate: RATE, capacity: 200_000, ..test_ring("Game") };
+    let audio = TrackRing { rate: RATE, capacity: 200_000, ..test_ring("Game", false) };
     let mut video = PacketRing::new(120_000_000);
     // 60 s of game at 60 fps, keyframe each second; the window then closes.
     let frames = 60 * 60;
     for i in 0..frames {
-        video.push(EncodedPacket { frame_idx: i * FRAME_US, duration_us: FRAME_US, keyframe: i % 60 == 0, data: Arc::from(vec![0u8; 4]) });
+        video.push(EncodedPacket { frame_idx: i * FRAME_US, duration_us: FRAME_US, keyframe: i % 60 == 0, data: vec![0u8; 4].into() });
     }
     let last_frame_end = frames * FRAME_US;
     // Audio keeps flowing to the save moment: 90 s, the request came at 89.995 s.
@@ -248,5 +228,43 @@ fn a_saves_audio_spans_exactly_its_video_window() {
         } else {
             assert_eq!(end, request_end, "{case}: a live save holds the newest frame to the request");
         }
+    }
+}
+
+/// A full-scale stereo tone captured through a +12 dB source: the save's limited copy has no
+/// flat tops (no runs of identical clipped samples) and peaks at or below the -1 dBFS ceiling.
+#[test]
+fn a_boosted_source_is_limited_at_save_without_flat_tops() {
+    use crate::export::mix_limit::CEILING;
+    let rate = 48_000;
+    let ring = raw_ring("app-1", false, 10f32.powf(12.0 / 20.0), rate, 2, rate as usize * 2);
+    let tone: Vec<f32> = (0..rate as usize)
+        .flat_map(|n| {
+            let s = (n as f32 / rate as f32 * 440.0 * std::f32::consts::TAU).sin();
+            [s, s]
+        })
+        .collect();
+    ring.push_capture(&tone, false);
+    let pcm = ring.snapshot_pcm(1.0);
+    assert!(pcm.boosted, "+12 dB marks the track for the limiter");
+    let raw_peak = pcm.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!(raw_peak > 3.9, "the ring holds the boosted samples: {raw_peak}");
+
+    let out = pcm.limited();
+    assert_eq!(out.samples.len(), pcm.samples.len());
+    let peak = out.samples.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!(peak <= CEILING + 1e-6, "peak {peak}");
+    assert!(peak > 0.85, "held near the ceiling, not crushed: {peak}");
+    let left: Vec<f32> = out.samples.iter().step_by(2).copied().collect();
+    assert!(!left.windows(3).any(|w| w[0] == w[1] && w[1] == w[2] && w[0].abs() > 0.5), "no flat top");
+    assert_eq!(out.samples[0..2], [out.samples[0], out.samples[0]], "channels stay interleaved");
+}
+
+#[test]
+fn a_source_at_or_below_unity_is_not_marked_for_the_limiter() {
+    for gain in [1.0, 0.5] {
+        let ring = raw_ring("in-1", true, gain, 48_000, 2, 16);
+        ring.push_capture(&[0.9, -0.9], false);
+        assert!(!ring.snapshot_pcm(0.0001).boosted, "gain {gain}");
     }
 }
