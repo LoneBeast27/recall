@@ -311,6 +311,7 @@ impl Controller {
             // Settings restart or a held retarget: both wait for idle.
             pending_restart: self.pending_restart || self.retarget_held,
             drain: self.drain_clock.status(self.planner.drain(), Instant::now()),
+            hotkey_problems: &self.hotkey_problems,
         })
     }
 

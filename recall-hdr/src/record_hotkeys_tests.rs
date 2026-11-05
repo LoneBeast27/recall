@@ -175,3 +175,26 @@ fn legacy_patch_rewrite_shapes() {
     let bad = json!({"recording":{"save_hotkey":5}});
     assert_eq!(rewrite_legacy_patch(&base, &bad), bad, "non-strings are left for the parser to reject");
 }
+
+/// Review probe (run by hand): `RECALL_PROBE_CONFIG=<a COPY of config.toml> cargo test -p recall-hdr
+/// probe_a_real_config_copy -- --ignored --nocapture`. Loading must not rename, rewrite or
+/// back the file up; a save may drop `[hotkeys]` and add `stats_hotkey`, never device keys.
+#[test]
+#[ignore]
+fn probe_a_real_config_copy() {
+    let path = std::path::PathBuf::from(std::env::var("RECALL_PROBE_CONFIG").expect("set RECALL_PROBE_CONFIG"));
+    let before = std::fs::read(&path).unwrap();
+    let cfg = crate::config::load_from(&path);
+    assert_eq!(std::fs::read(&path).unwrap(), before, "loading leaves the file as it was");
+    assert!(!path.with_extension("toml.bad").exists(), "no .bad backup");
+    crate::record_config::validate(&cfg).expect("the loaded config validates");
+    let rec = &cfg.recording;
+    println!("save {:?} mic {} bookmark {} screenshot {} record {} stats {}", rec.save_hotkeys, rec.mic_hotkey, rec.bookmark_hotkey, rec.screenshot_hotkey, rec.record_hotkey, rec.stats_hotkey);
+    let saved = path.with_extension("probe-saved.toml");
+    cfg.save_to(&saved).unwrap();
+    let text = std::fs::read_to_string(&saved).unwrap();
+    let devices = |t: &str| t.lines().filter(|l| l.contains("device")).map(str::trim).map(str::to_owned).collect::<Vec<_>>();
+    assert_eq!(devices(&text), devices(&String::from_utf8_lossy(&before)), "a save writes the same device keys");
+    assert!(!text.contains("[hotkeys]") && !text.contains("leader"), "a save drops the old table");
+    let _ = std::fs::remove_file(&saved);
+}

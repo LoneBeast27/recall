@@ -47,6 +47,8 @@ pub struct StatusInputs<'a> {
     pub pending_restart: bool,
     /// `record_drain::DrainClock::status`: the closed game's last clip is still saveable.
     pub drain: Option<Value>,
+    /// Hotkeys that did not register (`RecordHotkeys::bind` warnings).
+    pub hotkey_problems: &'a [String],
 }
 
 /// `paused` (the user stopped recording), `waiting` (no target), `starting`
@@ -119,6 +121,7 @@ pub fn status_json(i: &StatusInputs) -> Value {
         "screenshot_hotkey": rec.screenshot_hotkey,
         "record_hotkey": rec.record_hotkey,
         "stats_hotkey": rec.stats_hotkey,
+        "hotkey_problems": i.hotkey_problems,
         "mic_muted": i.mic_muted,
         "long_recording": i.long_recording,
         "pending_restart": i.pending_restart,
@@ -206,6 +209,7 @@ mod tests {
             long_recording: json!({"active":true,"path":"E:\\c\\G__rec.mp4","started_secs":1790000000.5}),
             pending_restart: true,
             drain: None,
+            hotkey_problems: &[],
         });
         assert_eq!(
             v,
@@ -248,6 +252,7 @@ mod tests {
             long_recording: json!({"active":false,"path":null,"started_secs":null}),
             pending_restart: false,
             drain: None,
+            hotkey_problems: &[],
         });
         assert_eq!(v["overlay_stats"], true);
         assert_eq!(v["fps_source"], "no_permission");
@@ -274,6 +279,7 @@ mod tests {
             long_recording: json!({"active":false,"path":null,"started_secs":null}),
             pending_restart: false,
             drain: Some(drain.clone()),
+            hotkey_problems: &[],
         };
         let v = status_json(&inputs(EngineHealth::Running { pid: 9 }, false));
         assert_eq!(v["state"], "draining");

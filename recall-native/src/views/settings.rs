@@ -174,6 +174,11 @@ impl Root {
 
     fn settings_shortcuts(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let rows: Vec<AnyElement> = ShortcutSlot::ALL.into_iter().map(|slot| self.shortcut_row(slot, cx)).collect();
+        // A combo another app holds does not work in games: say so instead of failing silently.
+        let problems = self.snap.session.as_ref().map(|s| s.hotkey_problems.clone()).unwrap_or_default();
+        let problems = problems.into_iter().map(|p| {
+            div().text_size(px(12.)).text_color(c(theme::WARNING)).child(format!("Not working: {p}. Pick another key below.")).into_any_element()
+        });
         vec![
             div()
                 .text_size(px(12.))
@@ -188,6 +193,9 @@ impl Root {
                 .children(rows)
                 .into_any_element(),
         ]
+        .into_iter()
+        .chain(problems)
+        .collect()
     }
 }
 
