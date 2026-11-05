@@ -16,7 +16,8 @@ commits as a game only if, while it waits for its start debounce, its own proces
 It is rejected when its presents are mostly DXGI `PresentMultiplaneOverlay` (55, decode swap chains = video), or when
 1.5 s pass without a game signal (composed by DWM only, or no frames). A rejected window is not a candidate again for
 2 s, then 4, 8, 16, 30 s (cap) while it stays rejected after showing frames; a window that showed no frames at
-all (a loading screen) is inconclusive and is watched again after 2 s every time, without advancing that backoff.
+all (a loading screen) is inconclusive: watched again after 2 s, up to 10 times in a row (about 20 s), then 4, 8,
+16, 30 s (cap). A new window, or frames seen, starts over at 2 s.
 The ETW session is off between watches.
 
 Steam-library exes, overrides, `detect.fullscreen_games` entries, known games (`recall-hdr/src/known_games.rs`:
@@ -76,7 +77,7 @@ check is off and today's rule applies (fullscreen + not denied = game); the log 
 
 So watching a busy candidate costs about 1.5-3 points of one core on a 9950X3D, for at most 1.5 s per candidate
 (only while it is pending). A rejected window is watched again after 2, 4, 8, 16, 30 s, so a fullscreen video left
-open costs one 1.5 s watch per 30 s at steady state (a no-frames window: per 3.5 s, with no presents to count). Scaling to a GTX 1650 laptop's CPU is not measured.
+open costs one 1.5 s watch per 30 s at steady state (a window that never presents: the same after its first ~20 s). Scaling to a GTX 1650 laptop's CPU is not measured.
 
 Latency for a real game, by construction (no game was run): before = 300 ms (start debounce). After = 300 ms when
 3 independent-flip frames have arrived by then (VALORANT at 800 fps: its first ~200 ms of frames), else the next
