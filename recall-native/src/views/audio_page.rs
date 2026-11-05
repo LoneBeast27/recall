@@ -235,6 +235,20 @@ impl Root {
         true
     }
 
+    /// Escape while a strip is dragged: end the drag and keep the order. True when the press was taken.
+    /// Ending gpui's drag means letting go of the button drops nothing, so nothing is saved.
+    /// StripDrag is the only gpui drag in the app, so any active drag here is a strip.
+    pub(crate) fn audio_drag_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let k = &event.keystroke;
+        let dragging = self.settings_ui.audio.reorder.is_some() || cx.has_active_drag();
+        if !sources::escape_cancels_drag(&k.key, k.modifiers.modified(), dragging) {
+            return false;
+        }
+        cx.stop_active_drag(window);
+        self.settings_ui.audio.reorder = None;
+        true
+    }
+
     /// Read the device and app lists once per visit, off the UI thread.
     fn load_audio_lists(&mut self, cx: &mut Context<Self>) {
         if self.settings_ui.audio.loaded {

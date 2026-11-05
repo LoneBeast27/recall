@@ -160,6 +160,12 @@ pub fn drop_slot(x: f32, left: f32, pitch: f32, count: usize) -> usize {
     ((x - left) / pitch).floor().clamp(0.0, (count - 1) as f32) as usize
 }
 
+/// Escape cancels a strip drag: only a bare Escape, and only while a drag is on.
+/// Any other press, or Escape with no drag, goes on to the other key handlers.
+pub fn escape_cancels_drag(key: &str, any_modifier: bool, dragging: bool) -> bool {
+    dragging && key == "escape" && !any_modifier
+}
+
 /// Gain for a fader position (0 = bottom, 1 = top), in 0.5 dB steps.
 pub fn gain_at(fraction: f32) -> f32 {
     let db = GAIN_MIN_DB + fraction.clamp(0.0, 1.0) * (GAIN_MAX_DB - GAIN_MIN_DB);

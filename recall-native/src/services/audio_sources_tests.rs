@@ -73,3 +73,11 @@ fn the_drop_slot_follows_the_pointer_and_stays_in_range() {
     assert_eq!(drop_slot(5000.0, left, pitch, 3), 2, "right of the row is the last slot");
     assert_eq!(drop_slot(300.0, left, pitch, 0), 0);
 }
+
+#[test]
+fn escape_cancels_only_a_live_strip_drag() {
+    assert!(escape_cancels_drag("escape", false, true));
+    assert!(!escape_cancels_drag("escape", false, false), "no drag: Escape goes on (closes Settings)");
+    assert!(!escape_cancels_drag("escape", true, true), "Shift+Escape is not a cancel");
+    assert!(!escape_cancels_drag("enter", false, true));
+}
