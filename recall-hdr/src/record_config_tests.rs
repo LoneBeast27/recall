@@ -418,11 +418,11 @@ fn audio_sources_survive_a_patch_and_a_toml_round_trip() {
 }
 
 #[test]
-fn a_saved_corner_is_honoured_while_the_migration_is_held() {
-    use crate::record_config::OverlayCfg;
+fn corners_saved_before_they_were_honoured_load_as_dynamic() {
+    use crate::record_config::{OverlayCfg, CORNER_VERSION};
     let mut old = OverlayCfg { corner: "top-right".into(), corner_version: 0, ..OverlayCfg::default() };
     old.migrate_loaded("[overlay]\nenabled = true\ncorner = \"top-right\"\n");
-    assert_eq!((old.corner.as_str(), old.corner_version), ("top-right", 0), "held until Rohan decides");
+    assert_eq!((old.corner.as_str(), old.corner_version), ("dynamic", CORNER_VERSION));
     let mut picked = OverlayCfg { corner: "bottom-left".into(), ..OverlayCfg::default() };
     picked.migrate_loaded("[overlay]\ncorner = \"bottom-left\"\ncorner_version = 2\n");
     assert_eq!(picked.corner, "bottom-left", "a v2 corner is the user's pick");
