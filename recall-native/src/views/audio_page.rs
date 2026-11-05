@@ -21,7 +21,7 @@ use crate::{
         midi::Midi,
     },
     theme::{self, c},
-    ui::{self, FieldEvent, TextField},
+    ui::{FieldEvent, TextField},
     views::pages::card,
 };
 
@@ -276,7 +276,8 @@ impl Root {
                     .flex()
                     .items_center()
                     .gap(px(12.))
-                    .child(div().flex_1().min_w_0().child(ui::heading("Sources", meta).w_full()))
+                    .child(div().flex_1().text_size(px(13.)).line_height(px(18.)).font_weight(gpui::FontWeight::SEMIBOLD).text_color(c(theme::TEXT)).child("Sources"))
+                    .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(meta))
                     .when(!sources::addable(&list).is_empty(), |d| d.child(self.render_add_button(&list, cx))),
             )
             // One row that scrolls sideways when the strips outgrow the page.
