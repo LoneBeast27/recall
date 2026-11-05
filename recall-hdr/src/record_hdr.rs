@@ -54,8 +54,15 @@ pub struct HdrManager {
 }
 
 impl HdrManager {
-    /// Resolve the managed display (read-only; no display change).
+    /// Resolve the managed display (read-only; no display change). While HDR is shelved
+    /// ([`crate::hdr_gate`]) the monitor is not even probed: HDR reads as unavailable,
+    /// so every HDR command is refused and the 5 s live refresh does nothing.
     pub fn probe(cfg: &Config) -> Self {
+        if !crate::hdr_gate::enabled() {
+            // An older build may have left the display switched; put it back once.
+            hdr_exec::repair_if_dirty(cfg);
+            return Self::shelved();
+        }
         let target = match display::resolve_target(&cfg.display.target_friendly_name) {
             Ok(t) => {
                 log!("record-hdr: managed display {} found", t.name());
@@ -70,6 +77,11 @@ impl HdrManager {
         HdrManager { target, active: None, live_hdr, spine: None }
     }
 
+    /// The manager while HDR is shelved: no managed display, never activates.
+    pub(crate) fn shelved() -> Self {
+        HdrManager { target: None, active: None, live_hdr: false, spine: None }
+    }
+
     pub fn available(&self) -> bool {
         self.target.is_some()
     }
@@ -82,6 +94,9 @@ impl HdrManager {
     pub fn activate(&mut self, cfg: &Config) -> Result<(), String> {
         if self.active.is_some() {
             return Ok(());
+        }
+        if !crate::hdr_gate::enabled() {
+            return Err(crate::hdr_gate::SHELVED_MSG.into());
         }
         let Some(target) = self.target.clone() else {
             return Err(format!("managed display '{}' not found", cfg.display.target_friendly_name));
@@ -152,6 +167,9 @@ impl HdrManager {
     /// `Ok` when HDR commands may change the display: the managed monitor is
     /// present AND `behavior.hdr_auto` is on.
     pub fn ready(&self) -> Result<(), String> {
+        if !crate::hdr_gate::enabled() {
+            return Err(crate::hdr_gate::SHELVED_MSG.into());
+        }
         if self.target.is_none() {
             return Err("HDR is unavailable: the managed display was not found".into());
         }
@@ -178,7 +196,7 @@ impl HdrManager {
             display: self.target.as_ref().map(|t| t.name().to_string()),
             hdr_on,
             manual_pin,
-            auto: cfg.behavior.hdr_auto,
+            auto: cfg.behavior.hdr_auto && crate::hdr_gate::enabled(),
             session_pid,
         }
     }
@@ -213,6 +231,7 @@ impl HdrSnapshot {
             "hdr_on": self.hdr_on,
             "manual_pin": self.manual_pin,
             "auto": self.auto,
+            "shelved": !crate::hdr_gate::enabled(),
         })
     }
 
@@ -228,5 +247,28 @@ impl HdrSnapshot {
             "engine_health": engine_health,
         })
         .to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Tests run without RECALL_EXPERIMENTAL_HDR, so this is the shipped (shelved) state.
+    #[test]
+    fn shelved_hdr_refuses_every_display_change() {
+        assert!(!crate::hdr_gate::enabled(), "tests must see the shipped, shelved state");
+        let mut cfg = Config::default();
+        cfg.behavior.hdr_auto = true; // an old config that still asks for switching
+        let mut hdr = HdrManager::shelved();
+        assert!(!hdr.available());
+        assert_eq!(hdr.activate(&cfg), Err(crate::hdr_gate::SHELVED_MSG.to_string()));
+        assert!(!hdr.is_active(), "hdr_auto in config does not start HDR management");
+        assert_eq!(hdr.ready(), Err(crate::hdr_gate::SHELVED_MSG.to_string()));
+        assert!(hdr.toggle().is_err(), "the manual HDR toggle is refused");
+        let snap = hdr.snapshot(&cfg);
+        assert!(!snap.available && !snap.auto && !snap.hdr_on, "status reads as off: {snap:?}");
+        assert_eq!(snap.to_json()["shelved"], serde_json::json!(true));
+        hdr.shutdown(); // no spine, no display restore: a no-op
     }
 }

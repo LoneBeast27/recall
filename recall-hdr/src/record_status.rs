@@ -213,7 +213,7 @@ mod tests {
                 "overlay_stats":false,"fps_source":"off",
                 "autostart":false,
                 "storage":{"cap_gb":0},
-                "hdr":{"available":false,"display":null,"hdr_on":false,"manual_pin":false,"auto":false}
+                "hdr":{"available":false,"display":null,"hdr_on":false,"manual_pin":false,"auto":false,"shelved":true}
             })
         );
     }
