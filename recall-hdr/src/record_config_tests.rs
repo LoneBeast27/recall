@@ -183,7 +183,6 @@ fn defaults_for_the_hotkey_features_and_quality() {
     assert_eq!((rec.codec.as_str(), rec.fps, rec.bitrate_mbps, rec.quality.as_str()), ("h264", 60, 25, "balanced"));
     assert_eq!(rec.voice_app, "", "voice track off by default");
     assert_eq!((rec.mic_device.as_str(), rec.mic_enabled, rec.desktop_audio_device.as_str()), ("", true, ""), "Windows default devices, mic on");
-    assert!(!rec.moments_gallery, "SteelSeries Moments gallery is opt-in");
     assert_eq!(StorageCfg::default().cap_gb, 0, "auto-clean off by default");
     assert!(validate(&Config::default()).is_ok(), "defaults never collide (incl. Alt+M)");
     assert_eq!(rec.save_seconds(0), 120, "0 = full buffer");

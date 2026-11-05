@@ -157,27 +157,8 @@ impl Root {
             setting_row("Replay length", "How much a save keeps. Longer uses more memory.").child(lengths).into_any_element(),
         ]
         .into_iter()
-        .chain(self.moments_row(cx))
         .chain(self.render_video_section(cx))
         .collect()
-    }
-
-    /// "Add clips to SteelSeries Moments": shown only when Moments is installed.
-    fn moments_row(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
-        static INSTALLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let db = std::env::var_os("ProgramData").map(std::path::PathBuf::from).unwrap_or_default().join(r"SteelSeries\GG\apps\moments\db\database.db");
-        if !*INSTALLED.get_or_init(|| db.is_file()) {
-            return None;
-        }
-        let on = self.config_bool("recording", "moments_gallery");
-        Some(
-            setting_row("Add clips to SteelSeries Moments", "Each saved clip also appears in the Moments gallery.")
-                .child(ui::switch("moments-gallery", on).on_click(cx.listener(move |this, _, _, cx| {
-                    this.set_config("recording", "moments_gallery", json!(!on));
-                    cx.notify();
-                })))
-                .into_any_element(),
-        )
     }
 
     fn settings_media(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {

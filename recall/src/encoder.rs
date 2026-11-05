@@ -176,8 +176,6 @@ struct Enc {
     /// `Some(pool_id)` when NVENC reads D3D11 frames from that pool, `None` for RGB0.
     gpu_pool: Option<usize>,
     last_input_pts: Option<u64>,
-    /// One id per engine run, mirrored into Moments rows.
-    session_id: String,
 }
 
 fn run(
@@ -354,7 +352,6 @@ fn open_encoder(cfg: &Config, codec: Codec, w: u32, h: u32, gpu: Option<&crate::
         last_content: None,
         gpu_pool,
         last_input_pts: None,
-        session_id: uuid::Uuid::new_v4().to_string(),
     };
     Ok((enc, opened.fallback))
 }

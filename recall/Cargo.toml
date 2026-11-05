@@ -10,12 +10,11 @@ default = ["encode"]
 #   FFMPEG_DIR    -> tools/ffmpeg-dev/ffmpeg-n7.1-latest-win64-gpl-shared-7.1
 #   LIBCLANG_PATH -> a dir containing libclang.dll (pip package `libclang` works)
 # Runtime needs the FFmpeg bin/ DLLs next to recall.exe or on PATH.
-encode = ["dep:ffmpeg-next", "dep:rusqlite", "dep:uuid", "dep:wasapi"]
+encode = ["dep:ffmpeg-next", "dep:uuid", "dep:wasapi"]
 
 [dependencies]
 # No "device" feature: nothing here opens a capture device, and it made recall.exe load avdevice-61.dll.
 ffmpeg-next = { version = "7.1", optional = true, default-features = false, features = ["codec", "format", "filter", "software-resampling", "software-scaling"] }
-rusqlite = { version = "0.32", features = ["bundled"], optional = true }
 wasapi = { version = "0.19", optional = true }
 uuid = { version = "1", features = ["v4"], optional = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

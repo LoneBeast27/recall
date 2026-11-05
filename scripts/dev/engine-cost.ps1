@@ -5,7 +5,7 @@
   black pixel on screen at the bottom-left corner, presenting a moving test pattern at -TargetFps,
   like a game at 500+ fps), starts the
   engine on that window exactly as the controller does for a game (window capture, CCD1 mask,
-  BelowNormal, Moments off), lets it warm up, then reads the engine's CPU over -Seconds:
+  BelowNormal), lets it warm up, then reads the engine's CPU over -Seconds:
   CPU-seconds per minute, cores, and CPU-ms per captured frame, plus a per-thread table.
   Optional -SaveSeconds N saves a clip at the end (for frame / colour checks).
   Exit 1 when CPU-ms per captured frame is above -MaxMsPerFrame (the regression gate).
@@ -84,7 +84,6 @@ $envs = @{
   RECALL_AUDIO_MIC = $TestMic; RECALL_AUDIO_EXACT = '1'
   RECALL_CPU_MASK = $CpuMask; RECALL_FPS = "$Fps"; RECALL_BITRATE = '25000000'; RECALL_BUFFER_SECS = '120'
   RECALL_CODEC = 'h264'; RECALL_QUALITY = 'high'; RECALL_OUT_DIR = $OutDir; RECALL_STAGING_DIR = 'off'
-  RECALL_MOMENTS = '0'; RECALL_MOMENTS_DB = (Join-Path $OutDir 'no-moments.db')
   PATH = "$ffbin;$env:PATH"
 }
 if (-not $Monitor) { $envs.RECALL_CAPTURE_HWND = "$hwnd" }
