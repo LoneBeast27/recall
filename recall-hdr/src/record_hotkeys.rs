@@ -218,6 +218,30 @@ pub fn migrate_loaded(rec: &mut RecordingCfg, toml_text: &str) {
     if doc.as_ref().is_some_and(|v| v.get("hotkeys").is_some()) {
         fill_chord_era_defaults(rec);
     }
+    let has = |key: &str| doc.as_ref().and_then(|v| v.get("recording")).is_some_and(|r| r.get(key).is_some());
+    if !has("stats_hotkey") {
+        drop_taken_default(rec, HotkeyAction::Stats);
+    }
+    if !has("overlay_hotkey") {
+        drop_taken_default(rec, HotkeyAction::Overlay);
+    }
+}
+
+/// A key the file did not have came in as its serde default: turn it off
+/// ("") when another binding already holds that combo, so the loaded config
+/// still validates and Settings can save.
+fn drop_taken_default(rec: &mut RecordingCfg, action: HotkeyAction) {
+    let id = |accel: &str| parse_accel(accel).ok().map(|h| h.id());
+    let list = bindings(rec, None);
+    let Some(mine) = list.iter().find(|b| b.action == action).and_then(|b| id(&b.accel)) else { return };
+    let taken = list.iter().any(|b| b.action != action && id(&b.accel) == Some(mine));
+    if taken {
+        match action {
+            HotkeyAction::Stats => rec.stats_hotkey.clear(),
+            HotkeyAction::Overlay => rec.overlay_hotkey.clear(),
+            _ => {}
+        }
+    }
 }
 
 /// Each empty bookmark / screenshot / record / stats key takes its default

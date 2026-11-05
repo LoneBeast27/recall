@@ -98,6 +98,9 @@ pub struct Controller {
     pub(crate) last_fired: std::collections::HashMap<&'static str, Instant>,
     /// Hotkeys that did not register (taken by another app, invalid, duplicate): status `hotkey_problems`.
     pub(crate) hotkey_problems: Vec<String>,
+    /// A shortcut notice for an overlay still starting: sent with the next
+    /// late-joiner status, dropped after its deadline.
+    pub(crate) pending_notice: Option<(String, Instant)>,
     pub(crate) last_probe: Instant,
     last_hdr_refresh: Instant,
     /// (hwnd, is_target) of the last foreground fed to the tracker.
@@ -206,6 +209,7 @@ pub fn run() -> i32 {
         last_hdr_event: String::new(),
         last_fired: Default::default(),
         hotkey_problems: Vec::new(),
+        pending_notice: None,
         last_probe: now,
         last_hdr_refresh: now,
         last_fed: None,
@@ -292,6 +296,7 @@ impl Controller {
             self.planner.linger_deadline(),
             self.hdr.next_deadline(),
             self.janitor.next_deadline(),
+            self.overlay.deadline(),
         ]
         .into_iter()
         .flatten()
