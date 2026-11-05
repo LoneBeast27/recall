@@ -18,11 +18,12 @@ pub enum ShortcutSlot {
     Bookmark,
     Screenshot,
     Record,
-    Leader,
+    Stats,
 }
 
 impl ShortcutSlot {
-    pub const DIRECT: [ShortcutSlot; 5] = [ShortcutSlot::Save, ShortcutSlot::Mic, ShortcutSlot::Bookmark, ShortcutSlot::Screenshot, ShortcutSlot::Record];
+    pub const ALL: [ShortcutSlot; 6] =
+        [ShortcutSlot::Save, ShortcutSlot::Mic, ShortcutSlot::Bookmark, ShortcutSlot::Screenshot, ShortcutSlot::Record, ShortcutSlot::Stats];
 
     /// The controller config key: (section, key).
     fn key(self) -> (&'static str, &'static str) {
@@ -32,7 +33,7 @@ impl ShortcutSlot {
             ShortcutSlot::Bookmark => ("recording", "bookmark_hotkey"),
             ShortcutSlot::Screenshot => ("recording", "screenshot_hotkey"),
             ShortcutSlot::Record => ("recording", "record_hotkey"),
-            ShortcutSlot::Leader => ("hotkeys", "leader"),
+            ShortcutSlot::Stats => ("recording", "stats_hotkey"),
         }
     }
 
@@ -43,13 +44,13 @@ impl ShortcutSlot {
             ShortcutSlot::Bookmark => "Bookmark",
             ShortcutSlot::Screenshot => "Screenshot",
             ShortcutSlot::Record => "Start or stop a recording",
-            ShortcutSlot::Leader => "First key",
+            ShortcutSlot::Stats => "Performance stats",
         }
     }
 
     /// Optional shortcuts can be off ("" in config); the others always have keys.
     fn optional(self) -> bool {
-        matches!(self, ShortcutSlot::Bookmark | ShortcutSlot::Screenshot | ShortcutSlot::Record)
+        matches!(self, ShortcutSlot::Bookmark | ShortcutSlot::Screenshot | ShortcutSlot::Record | ShortcutSlot::Stats)
     }
 }
 
@@ -154,7 +155,7 @@ impl Root {
             ShortcutSlot::Bookmark => s.bookmark_hotkey,
             ShortcutSlot::Screenshot => s.screenshot_hotkey,
             ShortcutSlot::Record => s.record_hotkey,
-            ShortcutSlot::Leader => "Alt+Backquote".to_owned(),
+            ShortcutSlot::Stats => s.stats_hotkey,
         }
     }
 
@@ -259,7 +260,8 @@ mod tests {
         assert_eq!(capture(ShortcutSlot::Bookmark, &back), Capture::Set(String::new()));
         assert_eq!(capture(ShortcutSlot::Mic, &back), Capture::Wait, "the mic shortcut must keep a key");
         assert_eq!(capture(ShortcutSlot::Save, &press("j", false, true, false)), Capture::Set("Alt+J".into()));
-        assert_eq!(capture(ShortcutSlot::Leader, &press("alt", false, true, false)), Capture::Wait);
+        assert_eq!(capture(ShortcutSlot::Stats, &press("alt", false, true, false)), Capture::Wait, "modifier alone: keep waiting");
+        assert_eq!(capture(ShortcutSlot::Stats, &back), Capture::Set(String::new()), "stats can be turned off");
     }
 
     #[test]

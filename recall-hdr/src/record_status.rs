@@ -7,8 +7,7 @@
 //!  "engine_health":"running|restarting|off|stopped","auto_record":B,
 //!  "save_hotkey":S,"mic_hotkey":S,"save_seconds":N,
 //!  "save_hotkeys":[{"hotkey":S,"seconds":N}],   // seconds 0 = full buffer
-//!  "bookmark_hotkey":S,"screenshot_hotkey":S,"record_hotkey":S,  // "" = off
-//!  "advanced_enabled":B,"leader":S,"leader_label":S,"chord_save_seconds":N,
+//!  "bookmark_hotkey":S,"screenshot_hotkey":S,"record_hotkey":S,"stats_hotkey":S,  // "" = off
 //!  "mic_muted":B,
 //!  "long_recording":{"active":B,"path":S|null,"started_secs":F|null},  // Unix seconds
 //!  "pending_restart":B,   // a settings restart / retarget waits for a save / long recording to end
@@ -46,8 +45,6 @@ pub struct StatusInputs<'a> {
     /// `EngineActivity::long_recording_json`.
     pub long_recording: Value,
     pub pending_restart: bool,
-    /// The chord leader as the user sees it ("Alt `").
-    pub leader_label: &'a str,
     /// `record_drain::DrainClock::status`: the closed game's last clip is still saveable.
     pub drain: Option<Value>,
 }
@@ -121,10 +118,7 @@ pub fn status_json(i: &StatusInputs) -> Value {
         "bookmark_hotkey": rec.bookmark_hotkey,
         "screenshot_hotkey": rec.screenshot_hotkey,
         "record_hotkey": rec.record_hotkey,
-        "advanced_enabled": cfg.hotkeys.advanced_enabled,
-        "leader": cfg.hotkeys.leader,
-        "leader_label": i.leader_label,
-        "chord_save_seconds": rec.save_seconds(cfg.hotkeys.save_seconds),
+        "stats_hotkey": rec.stats_hotkey,
         "mic_muted": i.mic_muted,
         "long_recording": i.long_recording,
         "pending_restart": i.pending_restart,
@@ -211,7 +205,6 @@ mod tests {
             paused: false,
             long_recording: json!({"active":true,"path":"E:\\c\\G__rec.mp4","started_secs":1790000000.5}),
             pending_restart: true,
-            leader_label: "Alt `",
             drain: None,
         });
         assert_eq!(
@@ -222,8 +215,7 @@ mod tests {
                 "engine_health":"running","auto_record":true,
                 "save_hotkey":"Alt+N","mic_hotkey":"Alt+M","save_seconds":120,
                 "save_hotkeys":[{"hotkey":"Alt+N","seconds":0}],
-                "bookmark_hotkey":"","screenshot_hotkey":"","record_hotkey":"",
-                "advanced_enabled":true,"leader":"Alt+Backquote","leader_label":"Alt `","chord_save_seconds":30,
+                "bookmark_hotkey":"Alt+B","screenshot_hotkey":"Alt+S","record_hotkey":"Alt+L","stats_hotkey":"Alt+P",
                 "mic_muted":true,
                 "long_recording":{"active":true,"path":"E:\\c\\G__rec.mp4","started_secs":1790000000.5},
                 "pending_restart":true,
@@ -255,7 +247,6 @@ mod tests {
             paused: false,
             long_recording: json!({"active":false,"path":null,"started_secs":null}),
             pending_restart: false,
-            leader_label: "Alt `",
             drain: None,
         });
         assert_eq!(v["overlay_stats"], true);
@@ -282,7 +273,6 @@ mod tests {
             paused,
             long_recording: json!({"active":false,"path":null,"started_secs":null}),
             pending_restart: false,
-            leader_label: "Alt `",
             drain: Some(drain.clone()),
         };
         let v = status_json(&inputs(EngineHealth::Running { pid: 9 }, false));

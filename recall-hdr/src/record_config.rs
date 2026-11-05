@@ -62,6 +62,8 @@ pub struct RecordingCfg {
     pub screenshot_hotkey: String,
     /// Start / stop the manual long recording ("" = off).
     pub record_hotkey: String,
+    /// Show / hide the performance-stats island (`overlay.stats`; "" = off).
+    pub stats_hotkey: String,
     /// `h264` | `hevc` | `av1` (`RECALL_CODEC`).
     pub codec: String,
     /// Nominal capture/encode rate (`RECALL_FPS`).
@@ -104,10 +106,12 @@ impl Default for RecordingCfg {
             buffer_secs: 120,
             save_hotkey: "Alt+N".into(),
             mic_hotkey: "Alt+M".into(),
-            // Off by default: the advanced chord (`[hotkeys]`) carries these.
-            bookmark_hotkey: String::new(),
-            screenshot_hotkey: String::new(),
-            record_hotkey: String::new(),
+            // One direct Alt combo per action (Rohan, 2026-11-05: the old
+            // two-step chord was Alt too, so it bought nothing).
+            bookmark_hotkey: crate::record_hotkeys::DEFAULT_BOOKMARK.into(),
+            screenshot_hotkey: crate::record_hotkeys::DEFAULT_SCREENSHOT.into(),
+            record_hotkey: crate::record_hotkeys::DEFAULT_RECORD.into(),
+            stats_hotkey: crate::record_hotkeys::DEFAULT_STATS.into(),
             codec: "h264".into(),
             fps: 60,
             bitrate_mbps: 25,
@@ -152,29 +156,6 @@ impl RecordingCfg {
         } else {
             preset.min(self.buffer_secs)
         }
-    }
-}
-
-pub const CHORD_WINDOW_MS_MIN: u32 = 500;
-pub const CHORD_WINDOW_MS_MAX: u32 = 5_000;
-
-/// `[hotkeys]` -- the advanced chord (`record_chord`): `leader`, then within
-/// `window_ms` one of 1 bookmark, 2 save the last `save_seconds`,
-/// 3 screenshot, 4 start/stop the long recording, 5 performance stats on/off
-/// (Esc cancels). In `leader`,
-/// `Backquote` means the PHYSICAL key left of 1 on any layout.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct HotkeysCfg {
-    pub advanced_enabled: bool,
-    pub leader: String,
-    pub save_seconds: u32,
-    pub window_ms: u32,
-}
-
-impl Default for HotkeysCfg {
-    fn default() -> Self {
-        HotkeysCfg { advanced_enabled: true, leader: "Alt+Backquote".into(), save_seconds: 30, window_ms: 1_500 }
     }
 }
 
@@ -289,7 +270,7 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
         return Err("recording.output_dir must not be empty".into());
     }
     parse_cpu_mask(&rec.cpu_mask)?;
-    crate::record_hotkeys::validate(rec, &cfg.hotkeys)?;
+    crate::record_hotkeys::validate(rec)?;
     validate_quality(rec)?;
     let midi = &cfg.midi.input;
     if midi.len() > 256 || midi.chars().any(char::is_control) {
