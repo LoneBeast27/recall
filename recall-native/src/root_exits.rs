@@ -9,6 +9,8 @@ impl Root {
     /// First look at every press in the page, before any control sees it.
     pub(super) fn on_press(&mut self, event: &MouseDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         self.drag_origin = None;
+        // A press cancels a title click still waiting to open its clip (`tile_click.rs`).
+        self.lib.title_click = None;
         // The first click of a double-click opened the clip: the second lands on whatever the
         // editor shows there (a timeline, Delete, Export).
         if std::mem::take(&mut self.opened_by_click) && event.click_count >= 2 {
