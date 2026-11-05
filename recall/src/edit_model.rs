@@ -333,6 +333,22 @@ mod tests {
     }
 
     #[test]
+    fn repeated_source_kinds_each_get_their_own_default() {
+        // The source manager (feat/audio-sources) may record several outputs and mics.
+        let tag = r#"["game-process","desktop-loopback","desktop-loopback","mic","mic","app:x.exe"]"#;
+        let sources = audio_sources_for(Some(tag), 6);
+        assert_eq!(sources.len(), 6, "count matching takes repeats as they are");
+        assert!(audio_sources_for(Some(tag), 5).is_empty());
+        let refs: Vec<&str> = sources.iter().map(String::as_str).collect();
+        let clip = info(&refs);
+        assert_eq!(clip.default_audio().iter().map(|s| s.mix).collect::<Vec<_>>(), [true, true, true, true, true, false]);
+        assert_eq!(clip.mix_hint(6, true), Some("This app is also in Desktop audio, so mixing it doubles it."), "any Desktop track");
+        let exported = info(&["mix", "mic", "app:x.exe", "app:y.exe"]);
+        assert_eq!(exported.default_audio().iter().map(|s| s.mix).collect::<Vec<_>>(), [true, true, false, false]);
+        assert!(exported.mix_hint(3, true).is_some() && exported.mix_hint(4, true).is_some(), "every app track, with a Mix track");
+    }
+
+    #[test]
     fn an_export_tags_its_own_tracks_in_output_order() {
         let sources = vec![SOURCE_DESKTOP.to_owned(), SOURCE_MIC.to_owned(), "app:a.exe".to_owned()];
         let outputs = [AudioOutput::Mix(vec![1, 2]), AudioOutput::Track(3)];
