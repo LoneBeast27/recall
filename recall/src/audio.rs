@@ -1,25 +1,14 @@
-//! WASAPI endpoint capture for the replay buffer (feature `encode`).
+//! WASAPI capture for the replay buffer (feature `encode`).
 //!
-//! Endpoint/virtual-cable model (PRD §9): a track = one audio ENDPOINT or one
-//! process tree.
-//! - "Game": process loopback of `RECALL_AUDIO_GAME_PID` (incl. children), else
-//!   LOOPBACK capture of the render endpoint named by `RECALL_AUDIO_GAME`
-//!   (Settings → Desktop audio), else the Windows default output.
-//! - "Mic": normal capture of the endpoint named by `RECALL_AUDIO_MIC`
-//!   (Settings → Microphone), else the Windows default mic. No Mic track at
-//!   all when `RECALL_AUDIO_MIC_OFF=1`.
-//! - "Voice": opt-in process loopback of a voice-chat app's process tree
-//!   (`RECALL_AUDIO_VOICE_PID`, or `RECALL_AUDIO_VOICE_EXE` e.g. `Discord.exe`);
-//!   no track when neither is set or the app is not running. Mic mute never
-//!   touches it.
-//! - App tracks: one per app chosen in Settings (`RECALL_AUDIO_APPS`), after
-//!   the tracks above, named by the person's label; see `audio/apps.rs`.
-//! App→cable routing stays the user's/Windows' job; we only read endpoints.
+//! A track = one recorded source (`sources.rs`, the Audio page's strips): the game's process
+//! tree, an output device by loopback, a microphone or line-in, or an app's process tree
+//! (`apps.rs`). Each is titled with the source's name, scaled by its gain before anything is
+//! stored, and the mic-mute hotkey silences every input source. A device that is gone falls
+//! back to the Windows default and the status says so (`sources::opened`).
 //!
-//! Each track runs its own capture thread pushing interleaved f32 samples into
-//! a ring holding the last `buffer_secs`. The encoder snapshots rings at save
-//! time and encodes AAC per track — raw PCM in RAM keeps encoder state out of
-//! the ring (~23MB / 60s / stereo track).
+//! Each track runs its own capture thread pushing interleaved f32 samples into a ring
+//! holding the last `buffer_secs`. The encoder snapshots rings at save time and encodes AAC
+//! per track — raw PCM in RAM keeps encoder state out of the ring (~23MB / 60s / stereo).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -28,11 +17,14 @@ use std::sync::{Arc, Mutex};
 use wasapi::{DeviceCollection, Direction, SampleType, StreamMode, WaveFormat};
 
 mod apps;
+pub mod sources;
 mod voice;
+
+use sources::{Kind, SourceSpec};
 
 static MIC_MUTED: AtomicBool = AtomicBool::new(false);
 
-/// Set whether newly captured microphone samples enter the replay buffer as silence.
+/// Set whether newly captured input samples enter the replay buffer as silence.
 pub fn set_mic_muted(muted: bool) {
     MIC_MUTED.store(muted, Ordering::Relaxed);
 }
@@ -42,67 +34,9 @@ pub fn toggle_mic_mute() -> bool {
     MIC_MUTED.fetch_xor(true, Ordering::Relaxed) ^ true
 }
 
-/// Return whether newly captured microphone samples are muted.
+/// Return whether newly captured input samples are muted.
 pub fn mic_muted() -> bool {
     MIC_MUTED.load(Ordering::Relaxed)
-}
-
-/// Where a track's process-loopback target comes from.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum ProcessSource {
-    /// Endpoint capture only.
-    None,
-    /// `RECALL_AUDIO_GAME_PID`'s process tree when set, else the endpoint.
-    GamePid,
-    /// The voice-chat app's process tree only; no track when unresolved.
-    VoiceApp,
-}
-
-/// One track: the configured endpoint name (exact, then token-AND match),
-/// else the Windows default endpoint for the direction.
-pub struct TrackSpec {
-    /// Internal name (Moments `audio_tracks`, mute rule, thread name).
-    pub name: &'static str,
-    /// Saved as the stream's `title` and `handler_name`.
-    pub title: &'static str,
-    pub direction: Direction,
-    /// Env var holding the configured endpoint name (endpoint tracks only).
-    pub env: &'static str,
-    pub process: ProcessSource,
-}
-
-pub static TRACKS: [TrackSpec; 3] = [
-    TrackSpec {
-        name: "Game",
-        title: "Game",
-        direction: Direction::Render, // loopback
-        env: "RECALL_AUDIO_GAME",
-        process: ProcessSource::GamePid,
-    },
-    TrackSpec {
-        name: "Mic",
-        title: "Microphone",
-        direction: Direction::Capture,
-        env: "RECALL_AUDIO_MIC",
-        process: ProcessSource::None,
-    },
-    TrackSpec {
-        name: "Voice",
-        title: "Voice chat",
-        direction: Direction::Render,
-        env: "",
-        process: ProcessSource::VoiceApp,
-    },
-];
-
-/// Stream title for a track name ("Mic" -> "Microphone"); unknown names pass
-/// through unchanged.
-pub fn track_title(name: &str) -> &str {
-    TRACKS
-        .iter()
-        .find(|t| t.name == name)
-        .map(|t| t.title)
-        .unwrap_or(name)
 }
 
 /// A process tree captured by process loopback (include-tree mode).
@@ -117,6 +51,8 @@ pub struct LoopbackTarget {
 /// clip length. Owned and `Send`, so the saver thread encodes it off-ring.
 pub struct AudioPcm {
     pub name: &'static str,
+    /// The stream's `title` in the clip (the source's name).
+    pub title: &'static str,
     /// Where the track came from (`edit_model::SOURCE_*` / `app:<exe>`), saved in the clip.
     pub source: &'static str,
     pub rate: u32,
@@ -126,9 +62,16 @@ pub struct AudioPcm {
 
 /// Interleaved f32 ring + the format it was captured in.
 pub struct TrackRing {
+    /// The source's id: unique in a run (long-recording lanes, thread names).
     pub name: &'static str,
+    /// The source's name: the clip's stream title.
+    pub title: &'static str,
     /// Where the track comes from (`edit_model::SOURCE_*` / `app:<exe>`).
     pub source: &'static str,
+    /// Linear gain applied to every captured sample.
+    gain: f32,
+    /// An input device: silenced by the mic-mute hotkey.
+    input: bool,
     /// Resolved endpoint friendly name (set by the capture thread at init).
     endpoint: Mutex<String>,
     pub rate: u32,
@@ -137,7 +80,29 @@ pub struct TrackRing {
     capacity: usize,
 }
 
+/// Fixed 48 kHz stereo f32 for every track; WASAPI autoconverts from the endpoint's format.
+const RATE: u32 = 48_000;
+const CHANNELS: u16 = 2;
+
 impl TrackRing {
+    /// A ring for `spec` holding `buffer_secs` of 48 kHz stereo. Names are `&'static str`
+    /// across the engine; a run holds at most `SOURCES_MAX` sources for its whole life, so
+    /// leaking them is bounded.
+    fn for_source(spec: &SourceSpec, source: &'static str, buffer_secs: u32, endpoint: String) -> Self {
+        TrackRing {
+            name: Box::leak(spec.id.trim().to_owned().into_boxed_str()),
+            title: Box::leak(spec.name.trim().to_owned().into_boxed_str()),
+            source,
+            gain: spec.gain(),
+            input: spec.kind() == Some(Kind::Input),
+            endpoint: Mutex::new(endpoint),
+            rate: RATE,
+            channels: CHANNELS,
+            samples: Mutex::new(VecDeque::new()),
+            capacity: buffer_secs as usize * RATE as usize * CHANNELS as usize,
+        }
+    }
+
     pub fn endpoint(&self) -> String {
         self.endpoint.lock().map(|s| s.clone()).unwrap_or_default()
     }
@@ -179,6 +144,7 @@ impl TrackRing {
     pub fn snapshot_pcm(&self, secs: f64) -> AudioPcm {
         AudioPcm {
             name: self.name,
+            title: self.title,
             source: self.source,
             rate: self.rate,
             channels: self.channels,
@@ -186,14 +152,21 @@ impl TrackRing {
         }
     }
 
-    /// Append captured samples. Muting is applied only to microphone samples
-    /// entering the ring, so existing replay history is never changed.
-    fn push_capture(&self, data: &[f32], mute_mic: bool) {
-        crate::longrec::tap::tap_audio(self.name, data, mute_mic && self.name == "Mic"); // long-recording hook
+    /// Append captured samples, scaled by the source's gain. The mic-mute hotkey silences
+    /// only input sources, and only samples entering the ring: replay history never changes.
+    fn push_capture(&self, data: &[f32], mute_inputs: bool) {
+        let silence = mute_inputs && self.input;
+        let gained: Vec<f32>;
+        let data = if self.gain != 1.0 && !silence {
+            gained = data.iter().map(|s| s * self.gain).collect();
+            &gained[..]
+        } else {
+            data
+        };
+        crate::longrec::tap::tap_audio(self.name, data, silence); // long-recording hook
         let mut buf = self.samples.lock().expect("ring lock");
         for &s in data {
-            let s = if mute_mic && self.name == "Mic" { 0.0 } else { s };
-            buf.push_back(s);
+            buf.push_back(if silence { 0.0 } else { s });
         }
         let over = buf.len().saturating_sub(self.capacity);
         if over > 0 {
@@ -202,67 +175,53 @@ impl TrackRing {
     }
 }
 
-/// Resolve + start all tracks. Failures are per-track (a broken Mic endpoint
-/// must not kill Game audio); returns whatever started with a report line each.
+/// Resolve + start every source in list order. Failures are per-source (a broken input
+/// must not kill game audio); returns whatever started, with a report line each.
 pub fn start(buffer_secs: u32, mut report: impl FnMut(String)) -> Vec<Arc<TrackRing>> {
     report(format!(
         "audio endpoints -- render: {:?} | capture: {:?}",
         list_endpoints(&Direction::Render),
         list_endpoints(&Direction::Capture)
     ));
+    let list = match sources::from_env() {
+        Ok(list) => list,
+        Err(e) => {
+            report(format!("audio sources UNAVAILABLE: {e}"));
+            return Vec::new();
+        }
+    };
     let game_pid = game_process_loopback_pid();
     let mut out = Vec::new();
-    for spec in &TRACKS {
-        if spec.name == "Mic" && mic_off() {
-            report(format!("audio track '{}' off: microphone turned off in Settings", spec.name));
-            continue;
-        }
-        let target = match spec.process {
-            ProcessSource::None => None,
-            ProcessSource::GamePid => match &game_pid {
-                Ok(pid) => pid.map(|pid| LoopbackTarget {
-                    pid,
-                    label: format!("process {pid} (include tree)"),
-                }),
-                Err(e) => {
-                    report(format!("audio track '{}' UNAVAILABLE: {e}", spec.name));
-                    continue;
-                }
-            },
-            ProcessSource::VoiceApp => {
-                match voice::resolve_from_env(game_pid.clone().ok().flatten()) {
-                    Ok(voice::Resolved::Target(target)) => Some(target),
-                    // Not an error: the voice track is opt-in.
-                    Ok(voice::Resolved::Off(reason)) => {
-                        report(format!("audio track '{}' off: {reason}", spec.name));
-                        continue;
-                    }
-                    Err(e) => {
-                        report(format!("audio track '{}' UNAVAILABLE: {e}", spec.name));
-                        continue;
-                    }
-                }
+    for spec in list.iter().filter(|s| s.kind() != Some(Kind::App)) {
+        let target = match (spec.kind(), &game_pid) {
+            (Some(Kind::Game), Ok(pid)) => pid.map(|pid| LoopbackTarget { pid, label: format!("process {pid} (include tree)") }),
+            (Some(Kind::Game), Err(e)) => {
+                report(format!("audio track '{}' UNAVAILABLE: {e}", spec.name));
+                sources::note_failed(spec, e.clone());
+                continue;
             }
+            _ => None,
         };
         match start_track(spec, buffer_secs, target) {
             Ok(ring) => {
-                report(format!(
-                    "audio track '{}' up: {} ({} Hz, {} ch)",
-                    ring.name,
-                    ring.endpoint(),
-                    ring.rate,
-                    ring.channels
-                ));
+                report(format!("audio track '{}' up: {} ({} Hz, {} ch)", ring.title, ring.endpoint(), ring.rate, ring.channels));
+                sources::note_live(spec, &ring);
                 out.push(ring);
             }
-            Err(e) => report(format!("audio track '{}' UNAVAILABLE: {e}", spec.name)),
+            Err(e) => {
+                report(format!("audio track '{}' UNAVAILABLE: {e}", spec.name));
+                sources::note_failed(spec, e);
+            }
         }
     }
-    match apps::from_env() {
-        Ok(list) => out.extend(apps::start(&list, buffer_secs, game_pid.clone().ok().flatten(), &mut report)),
-        Err(e) => report(format!("app audio tracks UNAVAILABLE: {e}")),
+    let app_rings = apps::start(&sources::app_sources(&list), buffer_secs, game_pid.clone().ok().flatten(), &mut report);
+    for ring in &app_rings {
+        if let Some(spec) = list.iter().find(|s| s.id.trim() == ring.name) {
+            sources::note_live(spec, ring);
+        }
     }
-    out
+    out.extend(app_rings);
+    sources::in_list_order(&list, out)
 }
 
 /// List every endpoint's friendly name for a direction (startup diagnostics /
@@ -277,12 +236,6 @@ pub fn list_endpoints(direction: &Direction) -> Vec<String> {
         .filter_map(|i| collection.get_device_at_index(i).ok())
         .filter_map(|d| d.get_friendlyname().ok())
         .collect()
-}
-
-/// `RECALL_AUDIO_MIC_OFF=1`: the person turned the microphone off in
-/// Settings, so no Mic track is captured at all.
-fn mic_off() -> bool {
-    std::env::var("RECALL_AUDIO_MIC_OFF").is_ok_and(|v| v.trim() == "1")
 }
 
 /// True when every whitespace-separated token of `want` appears in `name`
@@ -306,16 +259,15 @@ fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
     exact.or_else(|| names.iter().position(|n| name_matches(n, want)))
 }
 
-/// Pick the endpoint for a spec: the configured name (env), else the Windows
-/// default for that direction, with the reason in the reported name.
-/// `RECALL_AUDIO_EXACT` allows the configured name only: a test run gets its
-/// virtual endpoint or no track, never the person's real mic.
-fn pick_device(spec: &TrackSpec) -> Result<(wasapi::Device, String), String> {
-    let collection =
-        DeviceCollection::new(&spec.direction).map_err(|e| format!("enumerate: {e}"))?;
+/// The endpoint a device source asks for: its device, else the Windows default. Under
+/// `RECALL_AUDIO_EXACT` (tests) only a named endpoint may open — an input with no device
+/// takes `RECALL_AUDIO_MIC`'s — so a test never records the person's real devices.
+fn pick_device(direction: &Direction, device: &str, input: bool) -> Result<(wasapi::Device, String), String> {
+    let collection = DeviceCollection::new(direction).map_err(|e| format!("enumerate: {e}"))?;
     let n = collection.get_nbr_devices().map_err(|e| e.to_string())?;
     let exact = std::env::var_os("RECALL_AUDIO_EXACT").is_some();
-    let want = std::env::var(spec.env).ok().filter(|w| !w.trim().is_empty());
+    let test_mic = (exact && input).then(|| std::env::var("RECALL_AUDIO_MIC").ok()).flatten();
+    let want = Some(device.trim().to_owned()).filter(|w| !w.is_empty()).or(test_mic).filter(|w| !w.trim().is_empty());
 
     if let Some(want) = &want {
         let devices: Vec<wasapi::Device> = (0..n).filter_map(|i| collection.get_device_at_index(i).ok()).collect();
@@ -328,8 +280,7 @@ fn pick_device(spec: &TrackSpec) -> Result<(wasapi::Device, String), String> {
     if exact {
         return Err(format!("no endpoint matches {want:?} (RECALL_AUDIO_EXACT)"));
     }
-    let dev = wasapi::get_default_device(&spec.direction)
-        .map_err(|e| format!("default endpoint failed: {e}"))?;
+    let dev = wasapi::get_default_device(direction).map_err(|e| format!("default endpoint failed: {e}"))?;
     let name = dev.get_friendlyname().unwrap_or_else(|_| "(default)".into());
     Ok(match want {
         Some(want) => (dev, format!("{name} (Windows default; '{want}' not found)")),
@@ -359,45 +310,30 @@ fn parse_pid(key: &str, value: &str) -> Result<u32, String> {
     }
 }
 
-/// The saved source of a built-in track: the game's process tree, or an output it listens to.
-fn source_of(spec: &TrackSpec, process: bool) -> &'static str {
-    use crate::edit_model::{SOURCE_DESKTOP, SOURCE_GAME_PROCESS, SOURCE_MIC, SOURCE_VOICE};
-    match spec.process {
-        ProcessSource::GamePid if process => SOURCE_GAME_PROCESS,
-        ProcessSource::GamePid => SOURCE_DESKTOP,
-        ProcessSource::VoiceApp => SOURCE_VOICE,
-        ProcessSource::None if spec.direction == Direction::Capture => SOURCE_MIC,
-        ProcessSource::None => SOURCE_DESKTOP,
+/// The saved source tag of a device track: the game's process tree, an output it listens
+/// to, or an input. The editor reads these (`edit_model::SOURCE_*`).
+fn source_of(kind: Option<Kind>, process: bool) -> &'static str {
+    use crate::edit_model::{SOURCE_DESKTOP, SOURCE_GAME_PROCESS, SOURCE_MIC};
+    match kind {
+        Some(Kind::Game) if process => SOURCE_GAME_PROCESS,
+        Some(Kind::Input) => SOURCE_MIC,
+        _ => SOURCE_DESKTOP,
     }
 }
 
-/// Spawn the capture thread for one track. ALL WASAPI/COM objects are created
+/// Spawn the capture thread for one device source. ALL WASAPI/COM objects are created
 /// on the capture thread (they are !Send); init success/failure is reported
 /// back over a channel before this returns. `target` selects process loopback
-/// instead of the spec's endpoint.
-fn start_track(
-    spec: &'static TrackSpec,
-    buffer_secs: u32,
-    target: Option<LoopbackTarget>,
-) -> Result<Arc<TrackRing>, String> {
-    // Fixed 48k stereo f32 for every track; WASAPI autoconverts from the
-    // endpoint's native mix format.
-    let (rate, channels) = (48_000u32, 2u16);
-    let ring = Arc::new(TrackRing {
-        name: spec.name,
-        source: source_of(spec, target.is_some()),
-        endpoint: Mutex::new(String::new()),
-        rate,
-        channels,
-        samples: Mutex::new(VecDeque::new()),
-        capacity: buffer_secs as usize * rate as usize * channels as usize,
-    });
-
+/// instead of the source's endpoint.
+fn start_track(spec: &SourceSpec, buffer_secs: u32, target: Option<LoopbackTarget>) -> Result<Arc<TrackRing>, String> {
+    let ring = Arc::new(TrackRing::for_source(spec, source_of(spec.kind(), target.is_some()), buffer_secs, String::new()));
+    let direction = if spec.kind() == Some(Kind::Input) { Direction::Capture } else { Direction::Render };
+    let device = spec.device.clone();
     let tring = ring.clone();
     let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::Builder::new()
-        .name(format!("recall-audio-{}", spec.name))
-        .spawn(move || capture_thread(spec, tring, init_tx, target))
+        .name(format!("recall-audio-{}", ring.name))
+        .spawn(move || capture_thread(direction, device, tring, init_tx, target))
         .map_err(|e| e.to_string())?;
 
     match init_rx.recv_timeout(std::time::Duration::from_secs(5)) {
@@ -408,7 +344,8 @@ fn start_track(
 }
 
 fn capture_thread(
-    spec: &'static TrackSpec,
+    direction: Direction,
+    device: String,
     ring: Arc<TrackRing>,
     init_tx: std::sync::mpsc::Sender<Result<(), String>>,
     target: Option<LoopbackTarget>,
@@ -416,14 +353,7 @@ fn capture_thread(
     let init = || -> Result<_, String> {
         // Per-thread COM init; already-initialized is fine.
         let _ = wasapi::initialize_mta();
-        let format = WaveFormat::new(
-            32,
-            32,
-            &SampleType::Float,
-            ring.rate as usize,
-            ring.channels as usize,
-            None,
-        );
+        let format = WaveFormat::new(32, 32, &SampleType::Float, ring.rate as usize, ring.channels as usize, None);
         let (mut client, endpoint, buffer_duration_hns) = match &target {
             Some(LoopbackTarget { pid, label }) => (
                 wasapi::AudioClient::new_application_loopback_client(*pid, true)
@@ -434,17 +364,13 @@ fn capture_thread(
                 200_000,
             ),
             None => {
-                let (device, endpoint) = pick_device(spec)?;
-                let mut client = device.get_iaudioclient().map_err(|e| e.to_string())?;
-                let (_def_period, min_period) =
-                    client.get_device_period().map_err(|e| e.to_string())?;
+                let (device, endpoint) = pick_device(&direction, &device, ring.input)?;
+                let client = device.get_iaudioclient().map_err(|e| e.to_string())?;
+                let (_def_period, min_period) = client.get_device_period().map_err(|e| e.to_string())?;
                 (client, endpoint, min_period)
             }
         };
-        let mode = StreamMode::EventsShared {
-            autoconvert: true,
-            buffer_duration_hns,
-        };
+        let mode = StreamMode::EventsShared { autoconvert: true, buffer_duration_hns };
         // Loopback = a RENDER endpoint's client initialized Capture-direction.
         client
             .initialize_client(&format, &Direction::Capture, &mode)

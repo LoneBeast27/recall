@@ -1,64 +1,60 @@
-//! TrackRing snapshot/mute behaviour (no WASAPI).
+//! TrackRing snapshot/mute/gain behaviour (no WASAPI).
 
 use super::TrackRing;
 use std::collections::VecDeque;
 use std::sync::Mutex;
 
-fn test_ring(name: &'static str) -> TrackRing {
+fn raw_ring(name: &'static str, input: bool, gain: f32, rate: u32, channels: u16, capacity: usize) -> TrackRing {
     TrackRing {
         name,
-        source: "mic",
+        title: name,
+        source: if input { "mic" } else { "desktop-loopback" },
+        gain,
+        input,
         endpoint: Mutex::new(String::new()),
-        rate: 1,
-        channels: 1,
+        rate,
+        channels,
         samples: Mutex::new(VecDeque::new()),
-        capacity: 16,
+        capacity,
     }
 }
 
+fn test_ring(name: &'static str, input: bool) -> TrackRing {
+    raw_ring(name, input, 1.0, 1, 1, 16)
+}
+
 #[test]
-fn microphone_mute_silences_only_future_microphone_samples() {
-    let mic = test_ring("Mic");
-    let game = test_ring("Game");
+fn the_mute_hotkey_silences_only_future_input_samples() {
+    let mic = test_ring("in-1", true);
+    let line = test_ring("in-2", true);
+    let game = test_ring("game", false);
 
     mic.push_capture(&[1.0, 2.0], false);
     game.push_capture(&[3.0, 4.0], false);
     mic.push_capture(&[5.0, 6.0], true);
+    line.push_capture(&[5.0], true);
     game.push_capture(&[7.0, 8.0], true);
     mic.push_capture(&[9.0], false);
 
     assert_eq!(mic.snapshot(5.0), vec![1.0, 2.0, 0.0, 0.0, 9.0]);
+    assert_eq!(line.snapshot(1.0), vec![0.0], "every input source is muted");
     assert_eq!(game.snapshot(4.0), vec![3.0, 4.0, 7.0, 8.0]);
 }
 
 #[test]
-fn voice_track_ignores_microphone_mute() {
-    let voice = test_ring("Voice");
-    voice.push_capture(&[1.0, 2.0], true);
-    voice.push_capture(&[3.0], false);
-    assert_eq!(voice.snapshot(3.0), vec![1.0, 2.0, 3.0]);
+fn an_app_or_output_track_ignores_the_mute_hotkey() {
+    let app = test_ring("app-1", false);
+    app.push_capture(&[1.0, 2.0], true);
+    app.push_capture(&[3.0], false);
+    assert_eq!(app.snapshot(3.0), vec![1.0, 2.0, 3.0]);
 }
 
 #[test]
-fn every_track_has_an_editor_title_and_only_voice_is_process_only() {
-    use super::{track_title, ProcessSource, TRACKS};
-    let rows: Vec<(&str, &str, ProcessSource)> =
-        TRACKS.iter().map(|t| (t.name, t.title, t.process)).collect();
-    assert_eq!(
-        rows,
-        vec![
-            ("Game", "Game", ProcessSource::GamePid),
-            ("Mic", "Microphone", ProcessSource::None),
-            ("Voice", "Voice chat", ProcessSource::VoiceApp),
-        ]
-    );
-    assert_eq!(track_title("Mic"), "Microphone");
-    assert_eq!(track_title("Voice"), "Voice chat");
-    assert_eq!(track_title("Other"), "Other", "unknown names pass through");
-    // The native editor labels lanes by these substrings (views/editor.rs).
-    for (title, needle) in [("Game", "game"), ("Microphone", "mic"), ("Voice chat", "voice")] {
-        assert!(title.to_lowercase().contains(needle));
-    }
+fn gain_scales_samples_before_they_are_stored() {
+    let quiet = raw_ring("in-1", true, 0.5, 1, 1, 16);
+    quiet.push_capture(&[1.0, -0.5], false);
+    quiet.push_capture(&[1.0], true);
+    assert_eq!(quiet.snapshot(3.0), vec![0.5, -0.25, 0.0]);
 }
 
 #[test]
@@ -84,15 +80,7 @@ fn old_snapshot(ring: &TrackRing, secs: f64) -> Vec<f32> {
 
 #[test]
 fn slice_snapshot_matches_old_behaviour_across_wraps_and_padding() {
-    let ring = TrackRing {
-        name: "Game",
-        source: "game-process",
-        endpoint: Mutex::new(String::new()),
-        rate: 10,
-        channels: 2,
-        samples: Mutex::new(VecDeque::new()),
-        capacity: 40,
-    };
+    let ring = raw_ring("Game", false, 1.0, 10, 2, 40);
     let secs_cases = [0.0, 0.05, 0.1, 0.35, 1.0, 1.95, 2.0, 2.5, 7.0];
     // Before any audio: all padding.
     for secs in secs_cases {
@@ -134,15 +122,7 @@ fn bench_full_ring_snapshot() {
     let capacity = secs * rate as usize * channels as usize;
     let rings: Vec<TrackRing> = ["Game", "Mic"]
         .into_iter()
-        .map(|name| TrackRing {
-            name,
-            source: "mic",
-            endpoint: Mutex::new(String::new()),
-            rate,
-            channels,
-            samples: Mutex::new(VecDeque::new()),
-            capacity,
-        })
+        .map(|name| raw_ring(name, false, 1.0, rate, channels, capacity))
         .collect();
     let chunk: Vec<f32> = (0..960).map(|i| i as f32 * 1e-4).collect();
     for ring in &rings {

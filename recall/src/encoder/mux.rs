@@ -167,7 +167,7 @@ pub(crate) fn encode_aac(pcm: &AudioPcm, abort: &AtomicBool) -> Result<AacTrack,
 
     Ok(AacTrack {
         rate: pcm.rate,
-        title: crate::audio::track_title(pcm.name),
+        title: pcm.title,
         source: pcm.source,
         encoder: enc,
         packets,
@@ -333,7 +333,7 @@ pub(crate) fn finish_gallery(job: &SaveJob, secs: f32, bytes: u64, events: &Even
         filesize: bytes,
         recorded_iso: recorded.format("%Y-%m-%dT%H:%M:%S%:z").to_string(),
         session_id: job.session_id.clone(),
-        audio_tracks: job.audio.iter().map(|t| t.name.to_string()).collect(),
+        audio_tracks: job.audio.iter().map(|t| t.title.to_string()).collect(),
     };
     match crate::moments::insert_clip(&meta) {
         Ok(id) => events.log(&format!("moments: row inserted {id}")),
