@@ -91,17 +91,37 @@ fn a_rejected_window_waits_longer_each_time() {
 }
 
 #[test]
-fn no_frames_is_inconclusive_and_rechecked_soon() {
+fn no_frames_is_rechecked_soon_then_backs_off() {
     let t0 = Instant::now();
     let mut r = Rejected::default();
-    for _ in 0..4 {
+    let mut holds = Vec::new();
+    for _ in 0..15 {
         r.note(7, 70, Why::NoFrames, t0);
-        assert_eq!(r.until(), Some(t0 + RECHECK_NO_FRAMES), "a loading screen never backs off");
+        holds.push((r.until().unwrap() - t0).as_secs());
     }
+    assert_eq!(holds[..NO_FRAMES_FAST as usize], [2; 10], "about 20 s of fast rechecks for a loading screen");
+    assert_eq!(holds[10..], [4, 8, 16, 30, 30], "then the backoff, capped at 30 s");
+}
+
+#[test]
+fn no_frames_backoff_resets_on_frames_or_a_new_window() {
+    let t0 = Instant::now();
+    let quiet = |r: &mut Rejected, pid, hwnd| {
+        for _ in 0..12 {
+            r.note(pid, hwnd, Why::NoFrames, t0);
+        }
+    };
+    let mut r = Rejected::default();
+    quiet(&mut r, 7, 70);
+    assert_eq!(r.until(), Some(t0 + Duration::from_secs(8)));
     r.note(7, 70, Why::Composed, t0);
-    assert_eq!(r.until(), Some(t0 + RECHECK_FIRST), "no-frames rounds do not advance the backoff");
+    assert_eq!(r.until(), Some(t0 + RECHECK_FIRST), "it started presenting: back to 2 s");
     r.note(7, 70, Why::NoFrames, t0);
-    assert_eq!(r.until(), Some(t0 + RECHECK_NO_FRAMES));
-    r.note(7, 70, Why::Composed, t0);
-    assert_eq!(r.until(), Some(t0 + RECHECK_FIRST * 2), "the frames-seen backoff resumes where it was");
+    assert_eq!(r.until(), Some(t0 + RECHECK_NO_FRAMES), "and the fast no-frames rounds again");
+    quiet(&mut r, 7, 70);
+    r.note(7, 71, Why::NoFrames, t0);
+    assert_eq!(r.until(), Some(t0 + RECHECK_NO_FRAMES), "a new window starts at 2 s");
+    quiet(&mut r, 7, 71);
+    r.note(9, 71, Why::NoFrames, t0);
+    assert_eq!(r.until(), Some(t0 + RECHECK_NO_FRAMES), "a new process too");
 }
