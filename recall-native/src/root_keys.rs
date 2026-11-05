@@ -27,6 +27,11 @@ impl Root {
             cx.notify();
             return;
         }
+        // Audio page: Escape ends a strip drag and keeps the order (it does not close Settings).
+        if self.audio_drag_key(event, window, cx) {
+            cx.notify();
+            return;
+        }
         let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
         // Audio page: a source's name being edited.
         if self.audio_name_key(event, clipboard.clone(), window) {
