@@ -173,3 +173,25 @@ fn an_answer_for_a_game_that_left_is_dropped() {
     assert_eq!(p.answered(true, 1, t0 + Duration::from_secs(40)), None);
     assert_eq!(Prober::default().answered(true, 1, t0), None, "nothing was asked");
 }
+
+#[test]
+fn a_bad_cache_file_is_cleaned_on_load_and_the_game_count_is_capped() {
+    let dir = std::env::temp_dir().join(format!("recall-island-hud-bad-{}", std::process::id()));
+    let path = dir.join("island-hud.json");
+    std::fs::create_dir_all(&dir).unwrap();
+    let bad = r#"{"games":{"huge":{"cols":1000000,"rows":2,"scans":[[1,2]]},"short":{"cols":4,"rows":3,"scans":[[1]]},"fine":{"cols":4,"rows":1,"scans":[[1]]}}}"#;
+    std::fs::write(&path, bad).unwrap();
+    let cache = HudCache::load(Some(path));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!((cache.scans("huge"), cache.scans("short"), cache.scans("fine")), (0, 0, 1));
+    let mut many = HudCache::load(None);
+    for i in 0..MAX_GAMES + 5 {
+        many.add(&format!("game{i}"), HudGrid { cols: 2, rows: 1, grid: vec![1] });
+    }
+    many.add("game0", HudGrid { cols: 2, rows: 1, grid: vec![1] });
+    assert_eq!(many.file.games.len(), MAX_GAMES);
+    assert_eq!(many.scans("game1"), 0, "the game scanned longest ago went first");
+    assert_eq!(many.scans("game0"), 1, "dropped earlier, a rescan brings it back fresh");
+    assert_eq!(many.scans("game5"), 0, "and pushes out the next oldest");
+    assert_eq!(many.scans(&format!("game{}", MAX_GAMES + 4)), 1);
+}
