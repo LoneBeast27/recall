@@ -29,7 +29,7 @@ use crate::badge::Badge;
 use crate::cue::{band, Sheen, CUE_PEAK};
 use crate::fonts::Fonts;
 use crate::hint::CardScene;
-use crate::presence::{content_dx, content_scale, Look};
+use crate::presence::{content_dx, content_scale, Look, Turn};
 use crate::layout::{sweep, Rgba, Role, Scene, Shape, Sweep, EDGE_LINE, PILL, TRACK};
 
 #[path = "render_icon.rs"]
@@ -71,6 +71,8 @@ pub struct Renderer {
     capacity: (i32, i32),
     /// The sweep's gradient for the last tone colour it was drawn in.
     sheen: Option<(u32, ID2D1LinearGradientBrush)>,
+    /// The look's quarter turn (a side spot), applied after every transform.
+    base: std::cell::Cell<Matrix3x2>,
 }
 
 impl Renderer {
@@ -102,7 +104,7 @@ impl Renderer {
                 None,
             )?;
             let dc = CreateCompatibleDC(None);
-            Ok(Self { factory, target, brush, round, dc, dib: None, capacity: (0, 0), sheen: None })
+            Ok(Self { factory, target, brush, round, dc, dib: None, capacity: (0, 0), sheen: None, base: std::cell::Cell::new(Matrix3x2::identity()) })
         }
     }
 
@@ -148,7 +150,9 @@ impl Renderer {
     /// below. Returns the window size.
     pub fn draw(&mut self, fonts: &Fonts, scene: &Scene, look: Look, scale: f32, layers: Layers) -> Result<(i32, i32)> {
         let Layers { sheen, badge, card, outgoing } = layers;
-        let (w, h) = look.window();
+        let (uw, uh) = look.window();
+        let (w, h) = look.shown_window();
+        self.base.set(turn(look.turn, uw as f32, uh as f32));
         self.ensure(w, h)?;
         let sheen = match sheen {
             Some(sheen) => Some((self.sheen_brush(sheen.color)?, sheen.progress)),
@@ -158,7 +162,7 @@ impl Renderer {
         unsafe {
             t.BindDC(self.dc, &RECT { left: 0, top: 0, right: w, bottom: h })?;
             t.BeginDraw();
-            t.SetTransform(&Matrix3x2::identity());
+            self.set_transform(Matrix3x2::identity());
             t.Clear(Some(&D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 0.0 }));
             let pill = self.pill(&look, sheen);
             t.PushAxisAlignedClip(&pill.rect, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
@@ -174,7 +178,7 @@ impl Renderer {
             if let Some(icon) = scene.icon.filter(|_| look.icon_alpha > 0.01) {
                 self.icon(&icon, &look, placed(&look, scene), badge, look.icon_alpha)?;
             }
-            t.SetTransform(&Matrix3x2::identity());
+            self.set_transform(Matrix3x2::identity());
             t.PopAxisAlignedClip();
             if let (Some(card), Some(spot)) = (card, look.card_origin()) {
                 self.card(fonts, card, &look, spot, scale)?;
@@ -192,7 +196,7 @@ impl Renderer {
         let ([x, y, _, ph], (ox, oy)) = (look.pill, look.pill_origin());
         let (left, top) = (ox + x + dx, oy + y + (ph - scene.h * k) / 2.0);
         unsafe {
-            t.SetTransform(&(Matrix3x2::scale(k, k) * Matrix3x2::translation(left, top)));
+            self.set_transform(Matrix3x2::scale(k, k) * Matrix3x2::translation(left, top));
             for shape in &scene.shapes {
                 self.shape(shape, alphas.0)?;
             }
@@ -255,6 +259,11 @@ impl Renderer {
         };
         self.sheen = Some((rgba.rgb, brush.clone()));
         Ok(brush)
+    }
+
+    /// `m`, then the look's quarter turn.
+    pub(crate) fn set_transform(&self, m: Matrix3x2) {
+        unsafe { self.target.SetTransform(&(m * self.base.get())) };
     }
 
     pub(crate) fn paint(&self, rgba: Rgba, alpha: f32) {
@@ -359,6 +368,17 @@ impl Drop for Renderer {
 }
 
 /// Where `scene` sits in the pill now, and the scale it draws at.
+/// The quarter turn of a `w`x`h` unturned window into the shown one
+/// (row vectors: a point is `p * M`). `Cw`: the unturned top edge lands on
+/// the right, text reads top to bottom; `Ccw`: on the left, bottom to top.
+pub(crate) fn turn(turn: Turn, w: f32, h: f32) -> Matrix3x2 {
+    match turn {
+        Turn::None => Matrix3x2::identity(),
+        Turn::Cw => Matrix3x2 { M11: 0.0, M12: 1.0, M21: -1.0, M22: 0.0, M31: h, M32: 0.0 },
+        Turn::Ccw => Matrix3x2 { M11: 0.0, M12: -1.0, M21: 1.0, M22: 0.0, M31: 0.0, M32: w },
+    }
+}
+
 fn placed(look: &Look, scene: &Scene) -> (f32, f32) {
     let k = content_scale(look, scene.h);
     (content_dx(look, scene.w * k, scene.lead), k)
@@ -391,6 +411,34 @@ mod tests {
         let (w, h) = renderer.draw(&fonts, &scene, Look::open(Frame { w: 300.0, h: 44.0, alpha: 1.0 }), 1.0, Layers::default()).unwrap();
         assert_eq!(w, 300);
         assert_eq!(alpha_at(&renderer, w, h, 280, 22), (PILL.a * 255.0).round() as u8);
+    }
+
+    #[test]
+    fn a_side_spot_turns_the_whole_look_a_quarter() {
+        use crate::layout::{Shape, SIGNAL};
+        let (fonts, mut renderer) = (Fonts::new().unwrap(), Renderer::new().unwrap());
+        // A mark 20 px into the pill's left end.
+        let dot = Shape::Dot { cx: 20.0, cy: 22.0, r: 6.0, color: SIGNAL };
+        let scene = Scene { w: 300.0, h: 44.0, shapes: vec![dot], ..Scene::default() };
+        let frame = Frame { w: 300.0, h: 44.0, alpha: 1.0 };
+        let red = |r: &Renderer, w: i32, h: i32, x: i32, y: i32| {
+            let [b, g, red, a] = r.pixels(w, h)[(y * w + x) as usize];
+            red > 200 && g < 120 && b < 120 && a > 240
+        };
+        let flat = renderer.draw(&fonts, &scene, Look::open(frame), 1.0, Layers::default()).unwrap();
+        assert_eq!(flat, (300, 44));
+        assert!(red(&renderer, 300, 44, 20, 22), "unturned: the mark at the left end");
+        let cw = Look { turn: Turn::Cw, ..Look::open(frame) };
+        assert_eq!(renderer.draw(&fonts, &scene, cw, 1.0, Layers::default()).unwrap(), (44, 300), "the window turns");
+        assert!(red(&renderer, 44, 300, 22, 20), "right edge: the mark on top, text reads downwards");
+        assert_eq!(alpha_at(&renderer, 44, 300, 22, 150), (PILL.a * 255.0).round() as u8, "the body runs down the middle");
+        assert_eq!(alpha_at(&renderer, 44, 300, 0, 0), 0, "rounded ends stay clear");
+        let ccw = Look { turn: Turn::Ccw, ..Look::open(frame) };
+        assert_eq!(renderer.draw(&fonts, &scene, ccw, 1.0, Layers::default()).unwrap(), (44, 300));
+        assert!(red(&renderer, 44, 300, 22, 279), "left edge: the mark at the bottom, text reads upwards");
+        // The next unturned frame is flat again.
+        renderer.draw(&fonts, &scene, Look::open(frame), 1.0, Layers::default()).unwrap();
+        assert!(red(&renderer, 300, 44, 20, 22));
     }
 
     /// Software-render cost of one island frame (an instrument, not a gate):

@@ -97,10 +97,10 @@ fn patch_reports_only_changed_leaves() {
     let base = user_cfg();
     let out = apply_patch(
         &base,
-        &json!({"startup":{"autostart":true},"overlay":{"corner":"top-right"}}),
+        &json!({"startup":{"autostart":true},"overlay":{"corner":"dynamic"}}),
     )
     .unwrap();
-    assert_eq!(out.changed, vec!["startup.autostart".to_string()], "corner was already top-right");
+    assert_eq!(out.changed, vec!["startup.autostart".to_string()], "corner was already dynamic");
     assert!(out.touched("startup"));
     assert!(!out.touched("overlay"));
     assert!(!out.touched("start"), "prefix match is per path segment");
@@ -422,4 +422,16 @@ fn audio_sources_survive_a_patch_and_a_toml_round_trip() {
     let twice = json!({"recording": {"audio_sources": [{"id": "a", "kind": "input", "name": "A"}, {"id": "A", "kind": "input", "name": "B"}]}});
     assert!(apply_patch(&base, &twice).unwrap_err().contains("unique"));
     let _ = std::fs::remove_dir_all(store.path().parent().unwrap());
+}
+
+#[test]
+fn corners_saved_before_they_were_honoured_load_as_dynamic() {
+    use crate::record_config::{OverlayCfg, CORNER_VERSION};
+    let mut old = OverlayCfg { corner: "top-right".into(), corner_version: 0, ..OverlayCfg::default() };
+    old.migrate_loaded("[overlay]\nenabled = true\ncorner = \"top-right\"\n");
+    assert_eq!((old.corner.as_str(), old.corner_version), ("dynamic", CORNER_VERSION));
+    let mut picked = OverlayCfg { corner: "bottom-left".into(), ..OverlayCfg::default() };
+    picked.migrate_loaded("[overlay]\ncorner = \"bottom-left\"\ncorner_version = 2\n");
+    assert_eq!(picked.corner, "bottom-left", "a v2 corner is the user's pick");
+    assert_eq!(OverlayCfg::default().corner, "dynamic");
 }

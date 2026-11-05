@@ -22,7 +22,11 @@ impl Renderer {
     pub(crate) unsafe fn card(&self, fonts: &Fonts, card: &CardScene, look: &Look, (x, y): (f32, f32), scale: f32) -> Result<()> {
         let Some(shown) = look.card else { return Ok(()) };
         let t = &self.target;
-        let reveal = D2D_RECT_F { left: x, top: y, right: x + card.w, bottom: y + card.h * shown.progress };
+        // Unfolds from the pill: from its top edge down, or (`up`) from its bottom edge up.
+        let reveal = match look.up {
+            false => D2D_RECT_F { left: x, top: y, right: x + card.w, bottom: y + card.h * shown.progress },
+            true => D2D_RECT_F { left: x, top: y + card.h * (1.0 - shown.progress), right: x + card.w, bottom: y + card.h },
+        };
         unsafe {
             t.PushAxisAlignedClip(&reveal, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             self.paint(PILL, 1.0);
@@ -34,13 +38,13 @@ impl Renderer {
             for key in &card.keys {
                 t.FillRoundedRectangle(&rounded(x + key.x, y + key.y, key.size, key.size, key.r), &self.brush);
             }
-            t.SetTransform(&Matrix3x2::translation(x, y));
+            self.set_transform(Matrix3x2::translation(x, y));
             for text in &card.texts {
                 let layout = fonts.layout(text.role, scale, &text.text)?;
                 self.paint(text.color, 1.0);
                 t.DrawTextLayout(Vector2 { X: text.x, Y: text.y }, &layout, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
             }
-            t.SetTransform(&Matrix3x2::identity());
+            self.set_transform(Matrix3x2::identity());
             t.PopAxisAlignedClip();
         }
         Ok(())

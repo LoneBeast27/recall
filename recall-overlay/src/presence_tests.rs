@@ -116,3 +116,20 @@ fn the_instant_style_opens_at_once_and_fades_the_window_in_and_out() {
     assert!(presence.window_alpha(hide + ms(60)) < 1.0, "fades out straight away");
     assert!(presence.gone(hide + FADE_IN) && !presence.gone(hide + FADE_IN - ms(1)));
 }
+
+#[test]
+fn a_bottom_spot_stacks_the_card_above_the_pill() {
+    use super::{CardLook, Look, Turn};
+    let open = Look::open(Frame { w: 200.0, h: 44.0, alpha: 1.0 });
+    let card = Some(CardLook { w: 300.0, h: 100.0, gap: 8.0, progress: 0.5 });
+    let down = Look { card, align: 1.0, ..open };
+    assert_eq!(down.pill_origin(), (100.0, 0.0));
+    assert_eq!(down.card_origin(), Some((0.0, 52.0)));
+    let up = Look { up: true, ..down };
+    assert_eq!(up.window(), down.window(), "the same window");
+    assert_eq!(up.pill_origin(), (100.0, 58.0), "the pill keeps the window's bottom");
+    assert_eq!(up.card_origin(), Some((0.0, -50.0)), "the card's bottom sits a gap above the pill; half unfolded");
+    assert_eq!(up.extent(), 102.0);
+    let side = Look { turn: Turn::Cw, ..down };
+    assert_eq!((side.window(), side.shown_window()), ((300, 102), (102, 300)));
+}

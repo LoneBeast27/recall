@@ -179,6 +179,22 @@ pub struct Look {
     /// How the pill and the card line up in the window, as the anchor:
     /// 0 = left edges, 0.5 = centres, 1 = right edges.
     pub align: f32,
+    /// The card stacks above the pill (a bottom spot): the pill keeps the
+    /// window's bottom and the card unfolds upwards from it.
+    pub up: bool,
+    /// A side spot draws the whole look turned a quarter (text included);
+    /// every size here stays in the unturned layout.
+    pub turn: Turn,
+}
+
+/// The quarter turn of a side spot: `Cw` on the right edge (reads top to
+/// bottom), `Ccw` on the left edge (reads bottom to top).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Turn {
+    #[default]
+    None,
+    Cw,
+    Ccw,
 }
 
 impl Look {
@@ -197,7 +213,7 @@ impl Look {
             let pw = h + (w - h).max(0.0) * unroll;
             (pw, [0.0, 0.0, pw, h], 0.0)
         };
-        Self { box_w, box_h: h, margin, pill, full_w: w, unroll, pop, alpha: frame.alpha, content_alpha: 1.0, title_alpha: 1.0, detail_alpha: 1.0, icon_alpha: 1.0, card: None, align: 1.0 }
+        Self { box_w, box_h: h, margin, pill, full_w: w, unroll, pop, alpha: frame.alpha, content_alpha: 1.0, title_alpha: 1.0, detail_alpha: 1.0, icon_alpha: 1.0, card: None, align: 1.0, up: false, turn: Turn::None }
     }
 
     /// The width the anchor places: the pill's box, or the card when wider.
@@ -205,22 +221,47 @@ impl Look {
         self.card.map_or(self.box_w, |c| self.box_w.max(c.w))
     }
 
-    /// The window's size in whole pixels: the box (and the unfolded card
-    /// below it) plus the margin.
+    /// How far the unfolded card reaches past the pill (its gap included).
+    fn card_reach(&self) -> f32 {
+        self.card.map_or(0.0, |c| c.gap + c.h * c.progress)
+    }
+
+    /// The depth the look takes from the edge it sits on: the box and the
+    /// unfolded card (no margin).
+    pub fn extent(&self) -> f32 {
+        self.box_h + self.card_reach()
+    }
+
+    /// The window's size in whole pixels, unturned: the box (and the
+    /// unfolded card below it, or above it when `up`) plus the margin.
     pub fn window(&self) -> (i32, i32) {
         let m = 2.0 * self.margin;
-        let h = self.box_h + self.card.map_or(0.0, |c| c.gap + c.h * c.progress);
-        ((self.span_w().ceil() + m).max(1.0) as i32, (h.ceil() + m).max(1.0) as i32)
+        ((self.span_w().ceil() + m).max(1.0) as i32, (self.extent().ceil() + m).max(1.0) as i32)
     }
 
-    /// The pill box's top-left in the window.
+    /// The window's size as shown: a side spot's window is turned.
+    pub fn shown_window(&self) -> (i32, i32) {
+        let (w, h) = self.window();
+        match self.turn {
+            Turn::None => (w, h),
+            Turn::Cw | Turn::Ccw => (h, w),
+        }
+    }
+
+    /// The pill box's top-left in the (unturned) window.
     pub fn pill_origin(&self) -> (f32, f32) {
-        (self.margin + (self.span_w() - self.box_w) * self.align, self.margin)
+        let y = if self.up { self.margin + self.card_reach() } else { self.margin };
+        (self.margin + (self.span_w() - self.box_w) * self.align, y)
     }
 
-    /// The card's top-left in the window.
+    /// The card's top-left in the (unturned) window: under the pill, or with
+    /// `up` its bottom `gap` above the pill (it unfolds upwards).
     pub fn card_origin(&self) -> Option<(f32, f32)> {
-        self.card.map(|c| (self.margin + (self.span_w() - c.w) * self.align, self.margin + self.box_h + c.gap))
+        self.card.map(|c| {
+            let x = self.margin + (self.span_w() - c.w) * self.align;
+            let y = if self.up { self.margin + self.card_reach() - c.gap - c.h } else { self.margin + self.box_h + c.gap };
+            (x, y)
+        })
     }
 }
 

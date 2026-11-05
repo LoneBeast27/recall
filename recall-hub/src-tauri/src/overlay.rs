@@ -25,7 +25,7 @@ fn stop_child(child: &mut Option<Child>) {
         let _=own_child.wait();
     }
 }
-fn valid_corner(corner:&str)->bool { matches!(corner,"top-left"|"top-right"|"bottom-left"|"bottom-right") }
+fn valid_corner(corner:&str)->bool { matches!(corner,"dynamic"|"top-left"|"top-right"|"bottom-left"|"bottom-right") }
 fn locate_overlay()->Result<PathBuf,String> {
     if let Some(value)=std::env::var_os("RECALL_OVERLAY") {
         let path=PathBuf::from(value);

@@ -143,6 +143,18 @@ pub enum Outbound {
     RecordingRecovered {
         path: String,
     },
+    /// A `hud_probe` finished: where the game's HUD sits over the picture, one
+    /// number per grid row (bit c = column c holds HUD). `ok` false: too little
+    /// moving play to tell (`grid` empty, `reason` says why).
+    HudScan {
+        ok: bool,
+        cols: u32,
+        rows: u32,
+        grid: Vec<u64>,
+        moving: u32,
+        bursts: u32,
+        reason: Option<String>,
+    },
 }
 
 /// One recorded source in `status.audio`: what it captures right now.
@@ -195,6 +207,8 @@ pub enum Command {
     Bookmark,
     /// PNG of the next rendered capture frame into `<out_dir>\screenshots\`.
     Screenshot,
+    /// Find the game's HUD from a few frames (`hud_scan` answers; the island's Dynamic spot).
+    HudProbe,
     /// Start / stop / toggle the manual long recording.
     RecordStart,
     RecordStop,

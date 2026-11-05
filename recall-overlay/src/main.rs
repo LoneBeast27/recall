@@ -8,6 +8,7 @@ mod app;
 mod badge;
 mod cue;
 mod diagnostics;
+mod dynamic;
 mod export;
 mod export_sim;
 mod filmstrip;
@@ -61,15 +62,15 @@ const PIPE_NAME: &str = "recall-hdr-control";
 const INSTANCE_WAIT: Duration = Duration::from_secs(3);
 /// Posted by the pipe thread so a notice lands at once, not on the next tick.
 const WM_FEED: u32 = WM_APP + 1;
-const CORNERS: [&str; 4] = ["top-left", "top-right", "bottom-left", "bottom-right"];
-const USAGE: &str = "usage: recall-overlay --parent PID [--corner top-left|top-right|bottom-left|bottom-right] \
+const CORNERS: [&str; 5] = ["dynamic", "top-left", "top-right", "bottom-left", "bottom-right"];
+const USAGE: &str = "usage: recall-overlay --parent PID [--corner dynamic|top-left|top-right|bottom-left|bottom-right] \
 [--diagnostics PATH] | --smoke-state FIXTURE.json [--smoke-allow-capture] [--smoke-render PATH.bmp] [--diagnostics PATH] \
 | --preview-sheet PATH.bmp [--preview-scale S] | --preview-notice PATH.bmp [--preview-scale S] \
 | --export-frames DIR | --frame-timing-probe PID [--probe-seconds N]";
 
 #[derive(Debug, Default)]
 struct Options {
-    /// Accepted for the controller's launch line; the island's placement is per game.
+    /// `dynamic` (a free spot from the game's HUD) or a fixed corner.
     corner: String,
     parent: Option<u32>,
     diagnostics: Option<PathBuf>,
@@ -160,6 +161,9 @@ fn run() -> Result<(), String> {
     app.parent_handle = parent_handle;
     app.parent_pid = options.parent;
     app.corner = options.corner.clone();
+    if options.smoke_state.is_none() {
+        app.load_hud_cache(dynamic::HudCache::default_path());
+    }
     app.diagnostics_path = options.diagnostics.clone();
     app.capture_exclusion_requested = !options.smoke_allow_capture;
     app.capture_exclusion_result = capture_exclusion_result;
@@ -169,7 +173,7 @@ fn run() -> Result<(), String> {
             smoke.apply_due(&mut app.reducer, Duration::ZERO, Instant::now());
             app.smoke = Some(smoke);
         }
-        None => spawn_pipe_client(tx, hwnd.0 as isize),
+        None => spawn_pipe_client(tx, hwnd.0 as isize, app.out.clone()),
     }
     if let Some(path) = options.smoke_render.as_ref() {
         app.snapshot(path)?;
@@ -199,7 +203,7 @@ fn run() -> Result<(), String> {
 }
 
 fn parse_args() -> Result<Options, String> {
-    let mut options = Options { corner: "top-right".into(), ..Options::default() };
+    let mut options = Options { corner: "dynamic".into(), ..Options::default() };
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         let mut value = |what: &str| args.next().ok_or(format!("{arg} requires {what}"));
@@ -245,7 +249,7 @@ fn parse_args() -> Result<Options, String> {
     Ok(options)
 }
 
-fn spawn_pipe_client(tx: Sender<Feed>, hwnd: isize) {
+fn spawn_pipe_client(tx: Sender<Feed>, hwnd: isize, out: app::PipeOut) {
     let wake = move || unsafe {
         let _ = PostMessageW(Some(HWND(hwnd as *mut _)), WM_FEED, WPARAM(0), LPARAM(0));
     };
@@ -257,6 +261,9 @@ fn spawn_pipe_client(tx: Sender<Feed>, hwnd: isize) {
                 let (reader, mut writer) = stream.split();
                 let _ = tx.send(Feed::Connected);
                 let _ = writer.write_all(b"{\"cmd\":\"status\"}\n");
+                if let Ok(mut slot) = out.lock() {
+                    *slot = Some(Box::new(writer));
+                }
                 for line in BufReader::new(reader).lines() {
                     let Ok(line) = line else { break };
                     if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
@@ -266,6 +273,9 @@ fn spawn_pipe_client(tx: Sender<Feed>, hwnd: isize) {
                         wake();
                     }
                 }
+            }
+            if let Ok(mut slot) = out.lock() {
+                *slot = None;
             }
             if tx.send(Feed::Disconnected).is_err() {
                 return;
