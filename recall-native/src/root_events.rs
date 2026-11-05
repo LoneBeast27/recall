@@ -57,13 +57,13 @@ impl Root {
             }
             DaemonEvent::StoragePreview { cap_gb, used_bytes, removed, freed_bytes, through } => {
                 // Only the answer for the limit still being asked about counts.
-                if self.storage_asking == Some(cap_gb) {
+                if self.storage_asking.is_some_and(|(asked, _)| asked == cap_gb) {
                     self.storage_asking = None;
                     if removed == 0 {
                         self.set_config("storage", "cap_gb", serde_json::json!(cap_gb));
                     } else {
                         let through = through.map(local_from_unix);
-                        self.storage_confirm = Some(storage_limit::Preview { cap_gb, used_bytes, removed, freed_bytes, through });
+                        self.storage_confirm = Some(storage_limit::Preview { cap_gb, used_bytes, removed, freed_bytes, through, at: std::time::Instant::now() });
                     }
                 }
             }
@@ -82,7 +82,8 @@ impl Root {
             ),
             DaemonEvent::Error(message) => {
                 // A dry run that failed (favourites unknown, folder unreadable) sets nothing.
-                if message.starts_with("storage preview") || message.starts_with("storage_preview") {
+                // An older recorder answers "unknown command 'storage_preview'".
+                if message.starts_with("storage preview") || message.starts_with("storage_preview") || message.contains("'storage_preview'") {
                     self.storage_asking = None;
                 }
                 self.show_toast(ToastKind::Bad, "Recorder", Some(message));

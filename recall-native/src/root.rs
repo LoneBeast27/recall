@@ -147,7 +147,7 @@ pub struct Root {
     /// The startup timeline marks the first render once.
     first_render_marked: bool,
     /// Settings → Storage limit: a picked limit waiting for the recorder's dry run.
-    pub storage_asking: Option<u32>,
+    pub storage_asking: Option<(u32, Instant)>,
     /// That dry run would move clips now: the confirm bar under the limit row.
     pub storage_confirm: Option<crate::views::storage_limit::Preview>,
 }
@@ -304,6 +304,12 @@ impl Root {
         changed |= self.lib.renaming.is_some() && !self.rename_painted.get();
         // Same for the cache size field when Settings → Storage closes while it's open.
         changed |= self.cache.editing && !self.cache.painted.get();
+        // A recorder that never answers the dry run (an older build, a dropped pipe) sets nothing.
+        if self.storage_asking.is_some_and(|(_, at)| at.elapsed() > crate::views::storage_limit::ASK_TIMEOUT) {
+            self.storage_asking = None;
+            self.show_toast(ToastKind::Bad, "Recorder didn't answer", Some("Storage limit not changed".to_owned()));
+            changed = true;
+        }
         // Opening Recall means recording: start the recorder once if it isn't running.
         if self.controller_check_at.is_some_and(|at| Instant::now() >= at) {
             self.controller_check_at = None;
@@ -412,6 +418,11 @@ impl Root {
         let route = reachable(route, hdr_page_enabled());
         self.lib.finish_rename(&self.rename.value, crate::library_state::RenameEnd::Away);
         self.lib.confirm_delete = false;
+        // A storage-limit question belongs to the page it was asked on.
+        if route != Route::Settings {
+            self.storage_asking = None;
+            self.storage_confirm = None;
+        }
         self.lib.set_hover(None, &self.workers);
         self.ed.end_drag();
         if self.route == Route::Editor && route != Route::Editor {

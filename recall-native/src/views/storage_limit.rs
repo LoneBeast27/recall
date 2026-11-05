@@ -20,7 +20,14 @@ pub struct Preview {
     pub freed_bytes: u64,
     /// Local stamp of the newest clip that would go.
     pub through: Option<LocalStamp>,
+    /// When the dry run answered: an old answer is asked again before it moves anything.
+    pub at: std::time::Instant,
 }
+
+/// How long the app waits for the recorder's dry run.
+pub const ASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+/// How long a dry run's numbers stay good enough to confirm.
+pub const CONFIRM_FRESH: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// "1 TB" for a cap in bytes (the Settings label), else "N GB".
 pub fn cap_label(cap_bytes: u64) -> String {
@@ -122,7 +129,7 @@ mod tests {
 
     #[test]
     fn confirm_wording() {
-        let p = Preview { cap_gb: 1000, used_bytes: 2_140_000_000_000, removed: 240, freed_bytes: 1_100_000_000_000, through: Some(day(2026, 10, 3)) };
+        let p = Preview { cap_gb: 1000, used_bytes: 2_140_000_000_000, removed: 240, freed_bytes: 1_100_000_000_000, through: Some(day(2026, 10, 3)), at: std::time::Instant::now() };
         let (q, d, a) = confirm(&p, TODAY);
         assert_eq!(q, "Set the limit to 1 TB?");
         assert_eq!(d, "240 recordings from 3 Oct and earlier (1.10 TB) go to the Recycle Bin now. Favourites and edited clips stay.");
