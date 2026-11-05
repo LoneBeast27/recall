@@ -125,6 +125,9 @@ impl Root {
             "titles": self.lib.records.iter().map(|r| r.display_title()).collect::<Vec<_>>(),
             "custom_titles": self.lib.records.iter().filter(|r| r.title.is_some()).count(),
             "edited": self.lib.records.iter().filter(|r| r.edited).count(),
+            "cache_budget": self.cache.budget_bytes,
+            "cache_editing": self.cache.editing,
+            "cache_text": self.cache_field.value,
         }));
     }
 

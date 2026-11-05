@@ -244,6 +244,10 @@ impl Root {
     /// first, so `drop` alone may never run.
     pub fn flush_on_close(&mut self) {
         self.ed.flush_now();
+        // A cache size still being typed is applied, as a click elsewhere would.
+        if self.cache.editing {
+            self.apply_typed_cache();
+        }
         crate::services::pre_encode::discard();
     }
 
