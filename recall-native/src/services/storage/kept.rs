@@ -24,9 +24,30 @@ fn engine_kept_dir() -> Option<PathBuf> {
     Some(std::env::current_exe().ok()?.parent()?.join("cache").join("staging").join("kept"))
 }
 
-/// Adopts the engine's kept copy of the clip now at `dest`, on its own thread.
+/// The folders a kept copy may come from: the engine's (beside the exe) and the cache's own.
+fn kept_dirs() -> Vec<PathBuf> {
+    let mut dirs: Vec<PathBuf> = engine_kept_dir().into_iter().collect();
+    dirs.push(super::cache_root().join("staging").join("kept"));
+    dirs
+}
+
+/// True only for a file directly inside one of `dirs`, after both are canonicalized. Everything
+/// else (a clip in Raw, an export, a path that walks out with `..`, a missing file) is refused:
+/// adoption moves and deletes the file it is given, so it must never be one of the user's clips.
+pub(super) fn inside_kept(kept: &Path, dirs: &[PathBuf]) -> bool {
+    let Ok(file) = std::fs::canonicalize(kept) else { return false };
+    let Some(parent) = file.parent() else { return false };
+    file.is_file() && dirs.iter().filter_map(|dir| std::fs::canonicalize(dir).ok()).any(|dir| dir.as_path() == parent)
+}
+
+/// Adopts the engine's kept copy of the clip now at `dest`, on its own thread. A path outside
+/// the kept folders is logged and ignored: nothing is moved or deleted.
 pub fn adopt_kept(dest: String, kept: String) {
     let file = PathBuf::from(&kept);
+    if !inside_kept(&file, &kept_dirs()) {
+        eprintln!("kept clip ignored: {kept} is outside the kept-copy folders");
+        return;
+    }
     let spawned = std::thread::Builder::new().name("recall-adopt".into()).spawn(move || {
         let root = super::cache_root();
         let budget = budget_in(&root);
