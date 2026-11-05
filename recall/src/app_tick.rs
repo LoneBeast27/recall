@@ -13,6 +13,15 @@ use crate::framing::{self, Rect};
 use crate::{capture, hdr, protocol, source};
 use crate::{App, IDLE_TICK, PERIODIC};
 
+/// `status.audio`: each source's current capture.
+#[cfg(feature = "encode")]
+fn audio_opened() -> Vec<protocol::AudioOpened> {
+    audio::sources::opened()
+        .into_iter()
+        .map(|o| protocol::AudioOpened { id: o.id, name: o.name, opened: o.opened, live: o.live })
+        .collect()
+}
+
 /// A screenshot is the picture only: a windowed game's canvas bars are cut off.
 fn picture(w: u32, h: u32, rgba: Vec<u8>, content: Option<Rect>) -> (u32, u32, Vec<u8>) {
     match content {
@@ -278,6 +287,7 @@ impl App {
             codec,
             recording_mode: "vfr".to_string(),
             mic_muted: { #[cfg(feature="encode")] { audio::mic_muted() } #[cfg(not(feature="encode"))] { false } },
+            audio: { #[cfg(feature="encode")] { audio_opened() } #[cfg(not(feature="encode"))] { Vec::new() } },
         });
     }
 

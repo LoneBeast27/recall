@@ -171,8 +171,8 @@ fn track_names_skip_ffmpeg_placeholder_handler() {
     assert_eq!(track_name(&tags).as_deref(), Some("und"));
     tags.set("handler_name", " Voice chat ");
     assert_eq!(track_name(&tags).as_deref(), Some("Voice chat"));
-    tags.set("title", "Discord");
-    assert_eq!(track_name(&tags).as_deref(), Some("Discord"));
+    tags.set("title", "Voice chat");
+    assert_eq!(track_name(&tags).as_deref(), Some("Voice chat"));
     assert_eq!(track_name(&ff::Dictionary::new()), None);
 }
 

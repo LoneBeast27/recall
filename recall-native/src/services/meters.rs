@@ -1,12 +1,15 @@
-//! Level meters for the sources clips record: the desktop audio output (WASAPI loopback) and
-//! the microphone (capture), each the device chosen in Settings or the Windows default.
-//! Ported from the hub's `meters.rs`; missing devices are retried.
+//! Level meters for the Audio page's sources, one per source: an output device by loopback,
+//! an input by capture, an app or the recorded game by process loopback. Levels are measured
+//! before the source's gain (the page adds it). Ported from the hub's `meters.rs`; missing
+//! devices and closed apps are retried.
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use wasapi::{Device, DeviceCollection, Direction, SampleType, StreamMode, WaveFormat};
+use wasapi::{AudioClient, Device, DeviceCollection, Direction, SampleType, StreamMode, WaveFormat};
+
+use crate::services::audio_sources::{Kind, Source};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MeterState {
@@ -17,30 +20,45 @@ pub enum MeterState {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MeterReading {
-    /// "Desktop audio" or "Microphone".
+    /// The source's id.
     pub label: String,
     pub rms_db: f32,
     pub peak_db: f32,
     pub state: MeterState,
 }
 
-/// One meter: a label, render endpoint (loopback) vs capture, and the endpoint's friendly
-/// name ("" = the Windows default for that direction).
+/// What one meter listens to.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MeterSpec {
-    pub label: &'static str,
-    pub render: bool,
-    pub device: String,
+pub enum MeterTarget {
+    /// An endpoint ("" = the Windows default): loopback of an output, or an input.
+    Device { render: bool, device: String },
+    /// The largest running process tree of an exe.
+    App { exe: String },
+    /// One process tree (the recorded game).
+    Process { pid: u32 },
 }
 
-/// The meters for the recording settings: desktop audio always, the microphone only when it is
-/// recorded.
-pub fn meter_specs(desktop_device: &str, mic_device: &str, mic_enabled: bool) -> Vec<MeterSpec> {
-    let mut specs = vec![MeterSpec { label: "Desktop audio", render: true, device: desktop_device.trim().to_owned() }];
-    if mic_enabled {
-        specs.push(MeterSpec { label: "Microphone", render: false, device: mic_device.trim().to_owned() });
-    }
-    specs
+/// One meter: the source's id and what it listens to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MeterSpec {
+    pub label: String,
+    pub target: MeterTarget,
+}
+
+/// The meter for a source, the way the recorder captures it: the game's process while a game
+/// is recorded (`game_pid`), else its output device.
+pub fn spec_for(source: &Source, game_pid: Option<u32>) -> MeterSpec {
+    let device = source.device.trim().to_owned();
+    let target = match source.kind {
+        Kind::Game => match game_pid {
+            Some(pid) => MeterTarget::Process { pid },
+            None => MeterTarget::Device { render: true, device },
+        },
+        Kind::Output => MeterTarget::Device { render: true, device },
+        Kind::Input => MeterTarget::Device { render: false, device },
+        Kind::App => MeterTarget::App { exe: source.exe.trim().to_owned() },
+    };
+    MeterSpec { label: source.id.clone(), target }
 }
 
 const FLOOR_DB: f32 = -90.0;
@@ -60,13 +78,13 @@ struct Shared {
 
 impl Shared {
     fn new(specs: Vec<MeterSpec>) -> Self {
-        let readings = specs.iter().map(|spec| reading(spec.label, FLOOR_DB, FLOOR_DB, MeterState::Missing)).collect();
+        let readings = specs.iter().map(|spec| reading(&spec.label, FLOOR_DB, FLOOR_DB, MeterState::Missing)).collect();
         Self { specs, readings: Mutex::new(readings), revision: AtomicU64::new(0), stop: AtomicBool::new(false) }
     }
 
     /// Stores a reading; bumps the revision only when something visible changed.
     fn set(&self, index: usize, rms_db: f32, peak_db: f32, state: MeterState) {
-        let next = reading(self.specs[index].label, round_tenth(rms_db), round_tenth(peak_db), state);
+        let next = reading(&self.specs[index].label, round_tenth(rms_db), round_tenth(peak_db), state);
         let mut readings = match self.readings.lock() {
             Ok(readings) => readings,
             Err(poisoned) => poisoned.into_inner(),
@@ -134,8 +152,8 @@ fn meter_thread(shared: &Shared, index: usize) {
     let _ = wasapi::initialize_mta();
     let spec = shared.specs[index].clone();
     while !shared.stopped() {
-        let state = match find_device(spec.render, &spec.device) {
-            Ok(Some(device)) => match capture(shared, index, &device) {
+        let state = match open(&spec.target) {
+            Ok(Some((client, period, pid))) => match capture(shared, index, client, period, pid) {
                 Ok(()) => MeterState::Missing,
                 Err(error) => MeterState::Error(error),
             },
@@ -169,16 +187,38 @@ fn find_device(is_render: bool, name: &str) -> Result<Option<Device>, String> {
     Ok(index.and_then(|i| devices.into_iter().nth(i)))
 }
 
-/// Streams levels at ~10 Hz. Returns Ok(()) only when asked to stop; device loss
-/// surfaces as an error from the read or the padding probe on a silent timeout.
-fn capture(shared: &Shared, index: usize, device: &Device) -> Result<(), String> {
+/// An audio client for a target, with its event period and, for a process, its pid; `None`
+/// while the device is missing or the app is closed.
+fn open(target: &MeterTarget) -> Result<Option<(AudioClient, i64, Option<u32>)>, String> {
     let text = |error: wasapi::WasapiError| error.to_string();
-    let mut client = device.get_iaudioclient().map_err(text)?;
+    let process = |pid: u32| -> Result<Option<(AudioClient, i64, Option<u32>)>, String> {
+        // Process-loopback clients have no device period; 20 ms as the recorder uses.
+        Ok(Some((AudioClient::new_application_loopback_client(pid, true).map_err(text)?, 200_000, Some(pid))))
+    };
+    match target {
+        MeterTarget::Device { render, device } => {
+            let Some(device) = find_device(*render, device)? else { return Ok(None) };
+            let client = device.get_iaudioclient().map_err(text)?;
+            let (_, min_period) = client.get_device_period().map_err(text)?;
+            Ok(Some((client, min_period, None)))
+        }
+        MeterTarget::App { exe } => match crate::services::process_tree::tree_root(exe) {
+            Some(pid) => process(pid),
+            None => Ok(None),
+        },
+        MeterTarget::Process { pid } => process(*pid),
+    }
+}
+
+/// Streams levels at ~10 Hz. Returns Ok(()) when asked to stop or when a captured process
+/// exits; device loss surfaces as an error from the read or the padding probe.
+fn capture(shared: &Shared, index: usize, mut client: AudioClient, period: i64, pid: Option<u32>) -> Result<(), String> {
+    let text = |error: wasapi::WasapiError| error.to_string();
     let format = WaveFormat::new(32, 32, &SampleType::Float, 48000, 2, None);
-    let (_, min_period) = client.get_device_period().map_err(text)?;
     client
-        .initialize_client(&format, &Direction::Capture, &StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: min_period })
+        .initialize_client(&format, &Direction::Capture, &StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: period })
         .map_err(text)?;
+    let process = pid.and_then(crate::services::process_tree::Waitable::open);
     let event = client.set_get_eventhandle().map_err(text)?;
     let capture = client.get_audiocaptureclient().map_err(text)?;
     client.start_stream().map_err(text)?;
@@ -194,6 +234,9 @@ fn capture(shared: &Shared, index: usize, device: &Device) -> Result<(), String>
             raw.drain(..full);
         } else {
             client.get_current_padding().map_err(|error| format!("device lost: {error}"))?;
+            if process.as_ref().is_some_and(|p| p.exited()) {
+                break;
+            }
         }
         if last.elapsed() >= UPDATE {
             let (rms_db, peak_db) = levels.take();
@@ -258,15 +301,21 @@ fn name_matches(name: &str, tokens: &str) -> bool {
 mod tests {
     use super::*;
 
+    fn source(kind: Kind, device: &str, exe: &str) -> Source {
+        Source { id: format!("{}-1", kind.token()), kind, device: device.into(), exe: exe.into(), name: "S".into(), enabled: true, gain_db: 0.0 }
+    }
+
     #[test]
-    fn meters_follow_the_recording_settings() {
-        let specs = meter_specs("", " Speakers (USB Audio) ", true);
-        assert_eq!(specs.iter().map(|s| s.label).collect::<Vec<_>>(), ["Desktop audio", "Microphone"]);
-        assert!(specs[0].render && !specs[1].render);
-        assert_eq!((specs[0].device.as_str(), specs[1].device.as_str()), ("", "Speakers (USB Audio)"));
-        assert_eq!(meter_specs("", "", false).len(), 1, "no mic meter when the mic is off");
+    fn each_source_is_metered_the_way_the_recorder_captures_it() {
+        let device = |render: bool, d: &str| MeterTarget::Device { render, device: d.into() };
+        assert_eq!(spec_for(&source(Kind::Input, " Microphone (USB Audio Device) ", ""), None).target, device(false, "Microphone (USB Audio Device)"));
+        assert_eq!(spec_for(&source(Kind::Output, "", ""), None).target, device(true, ""));
+        assert_eq!(spec_for(&source(Kind::Game, "Speakers (USB Audio Device)", ""), None).target, device(true, "Speakers (USB Audio Device)"), "desktop: the output");
+        assert_eq!(spec_for(&source(Kind::Game, "", ""), Some(42)).target, MeterTarget::Process { pid: 42 }, "in game: its process");
+        assert_eq!(spec_for(&source(Kind::App, "", "player.exe"), None).target, MeterTarget::App { exe: "player.exe".into() });
+        let specs = vec![spec_for(&source(Kind::Game, "", ""), None), spec_for(&source(Kind::Input, "", ""), None)];
         let labels: Vec<_> = Shared::new(specs).readings.lock().unwrap().iter().map(|r| r.label.clone()).collect();
-        assert_eq!(labels, ["Desktop audio", "Microphone"]);
+        assert_eq!(labels, ["game-1", "input-1"], "readings are keyed by source id");
     }
 
     #[test]
@@ -306,7 +355,7 @@ mod tests {
     #[test]
     #[ignore = "live hardware: opens shared-mode WASAPI loopback/capture on the default endpoints"]
     fn live_meters_report_every_endpoint() {
-        let meters = Meters::spawn(meter_specs("", "", true));
+        let meters = Meters::spawn(vec![spec_for(&source(Kind::Output, "", ""), None), spec_for(&source(Kind::Input, "", ""), None)]);
         std::thread::sleep(Duration::from_millis(1500));
         let snapshot = meters.snapshot();
         for r in &snapshot {
@@ -318,7 +367,7 @@ mod tests {
 
     #[test]
     fn set_bumps_revision_only_on_visible_change() {
-        let shared = Shared::new(meter_specs("", "", false));
+        let shared = Shared::new(vec![spec_for(&source(Kind::Output, "", ""), None)]);
         shared.set(0, -90.0, -90.0, MeterState::Missing);
         assert_eq!(shared.revision.load(Ordering::Acquire), 0);
         shared.set(0, -20.04, -10.0, MeterState::Live);

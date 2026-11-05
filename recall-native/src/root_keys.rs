@@ -24,6 +24,11 @@ impl Root {
             return;
         }
         let clipboard = cx.read_from_clipboard().and_then(|item| item.text());
+        // Audio page: a source's name being edited.
+        if self.audio_name_key(event, clipboard.clone(), window) {
+            cx.notify();
+            return;
+        }
         if let Some(field) = self.focused_field(window) {
             self.field_key(field, event, clipboard, window);
             cx.notify();
