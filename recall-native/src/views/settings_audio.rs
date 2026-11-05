@@ -26,6 +26,8 @@ pub struct SettingsUi {
     /// Which comparison the last outside press closed and where it landed: that same press on
     /// its own (i) must not open it again (a press on the other (i) still opens that one).
     pub quality_closed_at: Option<(crate::views::quality_preview::Preview, gpui::Point<gpui::Pixels>)>,
+    /// Clip → Frame rate's Custom box.
+    pub fps: crate::views::settings_fps::FpsInput,
 }
 
 /// Which device list is open.

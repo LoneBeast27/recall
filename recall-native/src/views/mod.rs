@@ -11,6 +11,7 @@ pub mod quality_preview;
 pub mod settings;
 pub mod settings_audio;
 pub mod settings_capture;
+pub mod settings_fps;
 pub mod settings_keys;
 pub mod ssd_meter;
 pub mod storage_limit;
