@@ -247,3 +247,38 @@ fn warner_warns_once_per_crossing_and_rearms_below_it() {
     assert_eq!(w.update(95 * GIB, 110 * GIB, false, false), Some(80));
     assert_eq!(w.update(95 * GIB, 0, false, false), None, "no limit: no warnings");
 }
+
+/// The dry run (`storage_preview`) chooses clips but moves, renames and rewrites nothing.
+#[test]
+fn a_dry_run_leaves_the_folder_as_it_was() {
+    let dir = std::env::temp_dir().join(format!("recall-hdr-preview-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("thumbs")).unwrap();
+    let names = ["G__2026-01-01__10-00-00.mp4", "G__2026-01-02__10-00-00.mp4", "G__2026-01-03__10-00-00.mp4"];
+    for (i, n) in names.iter().enumerate() {
+        let f = std::fs::File::create(dir.join(n)).unwrap();
+        f.set_len(100).unwrap();
+        f.set_modified(UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000 + i as u64 * 60)).unwrap();
+    }
+    std::fs::write(dir.join("thumbs").join("G__2026-01-01__10-00-00-thumb.jpg"), b"j").unwrap();
+    let snap = |d: &Path| {
+        let mut v: Vec<(String, u64, SystemTime)> = std::fs::read_dir(d)
+            .unwrap()
+            .chain(std::fs::read_dir(d.join("thumbs")).unwrap())
+            .flatten()
+            // Files only: NTFS updates a folder's own time lazily after the setup writes.
+            .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+            .map(|e| {
+                let m = e.metadata().unwrap();
+                (e.path().display().to_string(), m.len(), m.modified().unwrap())
+            })
+            .collect();
+        v.sort();
+        v
+    };
+    let before = snap(&dir);
+    let (plan, _) = plan_listing(&dir, &HashSet::new(), 150).unwrap();
+    assert_eq!(plan.remove.len(), 2, "the dry run would move the two oldest");
+    assert_eq!(snap(&dir), before, "every file, size and time unchanged");
+    let _ = std::fs::remove_dir_all(&dir);
+}

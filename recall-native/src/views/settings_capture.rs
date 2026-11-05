@@ -110,14 +110,14 @@ impl Root {
         let mut track = ui::segment_track().w(px(400.));
         for (i, (value, label)) in CAPS.iter().enumerate() {
             let value = *value;
-            let picked = self.storage_confirm.as_ref().map(|p| u64::from(p.cap_gb)).or(self.storage_asking.map(u64::from)).unwrap_or(cap);
+            let picked = self.storage_confirm.as_ref().map(|p| u64::from(p.cap_gb)).or(self.storage_asking.map(|(asked, _)| u64::from(asked))).unwrap_or(cap);
             track = track.child(ui::segment((SharedString::from(format!("cap-{i}")), i), (*label).to_owned(), value == picked).on_click(cx.listener(move |this, _, _, cx| {
                 this.pick_storage_cap(value, cap);
                 cx.notify();
             })));
         }
         let mut items = vec![section_title("Storage limit"), setting_row("Keep recordings under", &detail).child(track).into_any_element()];
-        if let Some(asking) = self.storage_asking {
+        if let Some((asking, _)) = self.storage_asking {
             let text = format!("Checking what {} would move…", storage_limit::cap_label(u64::from(asking) << 30));
             items.push(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(text).into_any_element());
         }
@@ -147,8 +147,13 @@ impl Root {
                         cx.notify();
                     })))
                     .child(ui::button("cap-confirm", ui::Variant::Primary).child(action).on_click(cx.listener(move |this, _, _, cx| {
-                        this.storage_confirm = None;
-                        this.set_config("storage", "cap_gb", json!(cap_gb));
+                        // Numbers older than a minute may no longer hold: ask again, show the new ones.
+                        let fresh = this.storage_confirm.take().is_some_and(|p| p.at.elapsed() < storage_limit::CONFIRM_FRESH);
+                        if fresh {
+                            this.set_config("storage", "cap_gb", json!(cap_gb));
+                        } else {
+                            this.pick_storage_cap(u64::from(cap_gb), cap);
+                        }
                         cx.notify();
                     })))
                     .into_any_element(),
@@ -170,7 +175,7 @@ impl Root {
             return;
         }
         let cap_gb = value.min(u64::from(u32::MAX)) as u32;
-        self.storage_asking = Some(cap_gb);
+        self.storage_asking = Some((cap_gb, std::time::Instant::now()));
         if !self.daemon.send(crate::services::daemon::DaemonCommand::StoragePreview(cap_gb)) {
             self.storage_asking = None;
             self.show_toast(crate::root::ToastKind::Bad, "Recorder is off", Some("Start it from the status pill".into()));

@@ -356,9 +356,14 @@ fn plan_dir(dir: &Path, cap_gb: u32) -> Result<(Plan, Listing), String> {
         return Err(format!("storage.cap_gb {cap_gb} is below the {STORAGE_CAP_MIN_GB} GiB minimum; nothing removed"));
     }
     let favs = load_favourites().map_err(|e| format!("favourites unknown ({e}); nothing removed"))?;
+    plan_listing(dir, &favs, cap_gb as u64 * GIB)
+}
+
+/// The read-only half of a run (the dry run is only this): list the folder and choose.
+fn plan_listing(dir: &Path, favs: &HashSet<String>, cap: u64) -> Result<(Plan, Listing), String> {
     let listing = scan(dir).map_err(|e| format!("list {}: {e}", dir.display()))?;
     let now_unix = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-    Ok((plan(&listing, &favs, cap_gb as u64 * GIB, now_unix), listing))
+    Ok((plan(&listing, favs, cap, now_unix), listing))
 }
 
 fn run_once(dir: &Path, cap_gb: u32) -> Result<Outcome, String> {
