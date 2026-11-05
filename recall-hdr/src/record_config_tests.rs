@@ -235,7 +235,7 @@ fn new_keys_reject_bad_values() {
     for (patch, needle) in [
         (json!({"recording":{"codec":"vp9"}}), "recording.codec"),
         (json!({"recording":{"fps":5}}), "recording.fps"),
-        (json!({"recording":{"fps":961}}), "recording.fps must be 15..=960"),
+        (json!({"recording":{"fps":961}}), "recording.fps must be 15..=240"),
         (json!({"recording":{"fps":0}}), "recording.fps"),
         (json!({"recording":{"bitrate_mbps":0}}), "recording.bitrate_mbps"),
         (json!({"recording":{"quality":"max"}}), "recording.quality"),
@@ -420,10 +420,10 @@ fn audio_sources_survive_a_patch_and_a_toml_round_trip() {
 }
 
 #[test]
-fn any_whole_frame_rate_up_to_960_is_accepted() {
+fn any_whole_frame_rate_up_to_240_is_accepted() {
     let base = Config::default();
     assert_eq!(base.recording.fps, 60, "the default stays 60");
-    for fps in [15, 30, 60, 144, 165, 240, 360, 480, 500, 960] {
+    for fps in [15, 30, 60, 144, 165, 240] {
         let next = apply_patch(&base, &json!({"recording":{"fps":fps}})).unwrap_or_else(|e| panic!("{fps}: {e}"));
         assert_eq!(next.config.recording.fps, fps);
     }

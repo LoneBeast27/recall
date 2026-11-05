@@ -16,7 +16,7 @@ pub const PRESETS: [u64; 5] = [30, 60, 120, 144, 240];
 pub const DEFAULT_FPS: u64 = 60;
 /// The recorder's accepted range (`recall-hdr` `record_config::FPS_MIN..=FPS_MAX`).
 pub const FPS_MIN: u64 = 15;
-pub const FPS_MAX: u64 = 960;
+pub const FPS_MAX: u64 = 240;
 
 /// The Custom box's state.
 #[derive(Default)]
@@ -60,7 +60,9 @@ impl Root {
         let current = self.recording_fps();
         let input = &mut self.settings_ui.fps;
         input.editing = false;
-        if !input.open {
+        // The box also shows for a saved rate that is no preset (after leaving and coming back,
+        // `open` is false): a value typed there must still save.
+        if !input.open && PRESETS.contains(&current) {
             return;
         }
         let Some(field) = input.field.as_mut() else { return };
@@ -186,12 +188,9 @@ impl Root {
         if let Some(note) = self.settings_ui.fps.note.clone() {
             return note;
         }
-        let fps = self.recording_fps();
-        if fps > 240 {
-            format!("Frames per second in your clips. Custom takes {FPS_MIN} to {FPS_MAX}. A game is captured at most as often as your monitor refreshes, so above that rate frames repeat.")
-        } else {
-            format!("Frames per second in your clips. Custom takes {FPS_MIN} to {FPS_MAX}.")
-        }
+        // Recall records each frame the game draws, up to this rate: a higher rate costs the game
+        // more and spreads the same bitrate over more frames.
+        format!("Frames per second in your clips. Custom takes {FPS_MIN} to {FPS_MAX}. Higher rates cost the game more and spread the same bitrate over more frames.")
     }
 }
 
@@ -205,8 +204,8 @@ mod tests {
         assert_eq!(typed_fps("  "), None);
         assert_eq!(typed_fps("60"), Some(60));
         assert_eq!(typed_fps("165"), Some(165));
-        assert_eq!(typed_fps("960"), Some(960));
-        assert_eq!(typed_fps("999"), Some(960));
+        assert_eq!(typed_fps("240"), Some(240));
+        assert_eq!(typed_fps("999"), Some(240));
         assert_eq!(typed_fps("0"), Some(FPS_MIN));
         assert_eq!(typed_fps("5"), Some(FPS_MIN));
         assert_eq!(typed_fps("060"), Some(60));
@@ -218,8 +217,8 @@ mod tests {
         assert_eq!(clamp_note("165", 165), None);
         assert_eq!(clamp_note("060", 60), None);
         assert_eq!(clamp_note("", 60), None);
-        assert_eq!(clamp_note("999", 960).as_deref(), Some("Frame rate goes from 15 to 960 fps, so 999 was saved as 960."));
-        assert_eq!(clamp_note("5", 15).as_deref(), Some("Frame rate goes from 15 to 960 fps, so 5 was saved as 15."));
+        assert_eq!(clamp_note("999", 240).as_deref(), Some("Frame rate goes from 15 to 240 fps, so 999 was saved as 240."));
+        assert_eq!(clamp_note("5", 15).as_deref(), Some("Frame rate goes from 15 to 240 fps, so 5 was saved as 15."));
     }
 
     #[test]
