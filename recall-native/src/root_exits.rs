@@ -83,10 +83,16 @@ impl Root {
         if self.lib.renaming.is_some() && (!on_screen || !self.rename.is_focused(window)) {
             self.end_rename(RenameEnd::Away, window);
         }
+        // Clicking elsewhere applies a typed cache size, like Enter; leaving the page does too.
+        let cache_shown = self.cache.painted.replace(false);
+        if self.cache.editing && (!cache_shown || !self.cache_field.is_focused(window)) {
+            self.end_cache_edit(true, window);
+        }
         let orphan = match self.focused_field(window) {
             Some(Field::Search) => self.route != Route::Library || !self.lib.selection.is_empty(),
             Some(Field::Rename) => self.lib.renaming.is_none(),
             Some(Field::Fps) => self.route != Route::Editor || !self.fps_custom || self.ed.lossless(),
+            Some(Field::CacheSize) => !self.cache.editing,
             None => false,
         };
         if orphan {

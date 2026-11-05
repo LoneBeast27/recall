@@ -37,7 +37,7 @@ impl SettingsTab {
 }
 
 impl Root {
-    pub fn render_settings(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub fn render_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let current = self.settings_tab;
         let mut tabs = ui::segment_track().w(px(440.));
         for tab in SettingsTab::ALL {
@@ -54,7 +54,7 @@ impl Root {
         body.extend(match current {
             SettingsTab::General => self.settings_general(cx),
             SettingsTab::Clip => self.settings_clip(cx),
-            SettingsTab::Media => self.settings_media(cx),
+            SettingsTab::Media => self.settings_media(window, cx),
             SettingsTab::Shortcuts => self.settings_shortcuts(cx),
         });
         self.page_shell_tabs("Settings", "", Some(tabs.into_any_element()), body)
@@ -161,11 +161,11 @@ impl Root {
         .collect()
     }
 
-    fn settings_media(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn settings_media(&mut self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut items = self.render_folder_section(cx);
         items.extend(self.render_storage_limit(cx));
         items.push(section_title("SSD cache"));
-        items.extend(self.render_storage_section(cx));
+        items.extend(self.render_storage_section(window, cx));
         items
     }
 
