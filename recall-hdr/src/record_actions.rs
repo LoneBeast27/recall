@@ -99,8 +99,11 @@ impl Controller {
             }
             HotkeyAction::Stats => {
                 self.toggle_stats(None);
-                let (title, detail) =
-                    if self.cfg.overlay.stats { ("Performance stats on", "Shows over your game") } else { ("Performance stats off", "") };
+                let (title, detail) = if self.cfg.overlay.stats {
+                    ("Performance stats on", "Shows over your game")
+                } else {
+                    ("Performance stats off", "")
+                };
                 self.shortcut_notice(title, detail);
             }
             HotkeyAction::Overlay => self.toggle_overlay(),
@@ -150,7 +153,10 @@ impl Controller {
     fn refuse_bookmark(&self, reason: &str) {
         log!("record: bookmark refused -- {reason}");
         if self.cfg.overlay.enabled {
-            self.hub.event("session", &shortcut_notice_json("Bookmark not added", reason, true, false));
+            self.hub.event(
+                "session",
+                &shortcut_notice_json("Bookmark not added", reason, true, false),
+            );
         }
         crate::supervisor::beep_failure();
     }
@@ -159,7 +165,10 @@ impl Controller {
     /// overlay on); shown while notices (`overlay.enabled`) are on.
     pub(crate) fn shortcut_notice(&self, title: &str, detail: &str) {
         if self.cfg.overlay.enabled {
-            self.hub.event("session", &shortcut_notice_json(title, detail, false, false));
+            self.hub.event(
+                "session",
+                &shortcut_notice_json(title, detail, false, false),
+            );
         }
     }
 
@@ -170,7 +179,10 @@ impl Controller {
         let key = self.cfg.recording.overlay_hotkey.replace('+', " ");
         if !on {
             let detail = format!("{key} shows it again");
-            self.hub.event("session", &shortcut_notice_json("Overlay off", &detail, false, true));
+            self.hub.event(
+                "session",
+                &shortcut_notice_json("Overlay off", &detail, false, true),
+            );
         }
         self.apply_config_patch(&json!({"overlay": {"enabled": on}}), None);
         if on {

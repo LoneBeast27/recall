@@ -55,7 +55,15 @@ pub enum SavePhase {
 
 impl NoticeView {
     pub fn new(tone: Tone, title: &str, detail: impl Into<String>, game_font: bool) -> Self {
-        Self { tone, title: title.into(), detail: detail.into(), game_font, emphasis: false, save: None, always: false }
+        Self {
+            tone,
+            title: title.into(),
+            detail: detail.into(),
+            game_font,
+            emphasis: false,
+            save: None,
+            always: false,
+        }
     }
 
     /// The same notice, shown with the transformation.
@@ -94,8 +102,15 @@ pub fn session_notice(event: &Value) -> NoticeView {
     let notice = NoticeView::new(tone, &truncate(title, 32), truncate(detail, 40), game_font);
     // Session changes keep the plain swap; a failure stands out like the
     // engine's own encoder failure (the two are de-duplicated).
-    let always = event.get("always").and_then(Value::as_bool).unwrap_or(false);
-    NoticeView { emphasis: tone == Tone::Failure, always, ..notice }
+    let always = event
+        .get("always")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    NoticeView {
+        emphasis: tone == Tone::Failure,
+        always,
+        ..notice
+    }
 }
 
 /// `kind == "encoder"` (de-duplicated against the engine's own failure).
@@ -126,10 +141,19 @@ mod tests {
 
     #[test]
     fn shortcut_pop_ups_are_neutral_refusals_fail_and_only_always_is_forced() {
-        let on = session_notice(&json!({"kind":"shortcut","title":"Performance stats on","detail":"Shows over your game"}));
-        assert_eq!((on.tone, on.emphasis, on.always), (Tone::Neutral, false, false));
-        let refused = session_notice(&json!({"kind":"refused","title":"Bookmark not added","detail":"Recording is paused"}));
+        let on = session_notice(
+            &json!({"kind":"shortcut","title":"Performance stats on","detail":"Shows over your game"}),
+        );
+        assert_eq!(
+            (on.tone, on.emphasis, on.always),
+            (Tone::Neutral, false, false)
+        );
+        let refused = session_notice(
+            &json!({"kind":"refused","title":"Bookmark not added","detail":"Recording is paused"}),
+        );
         assert_eq!((refused.tone, refused.emphasis), (Tone::Failure, true));
-        assert!(session_notice(&json!({"kind":"shortcut","title":"Overlay off","always":true})).always);
+        assert!(
+            session_notice(&json!({"kind":"shortcut","title":"Overlay off","always":true})).always
+        );
     }
 }
