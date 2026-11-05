@@ -76,6 +76,7 @@ fn save_now(enc: &Enc, path: &str, seconds: u32, end_us: Option<u64>) -> Result<
         path: path.to_string(),
         seconds,
         end_us,
+        at_last_frame: false,
         requested: now,
     };
     saver::write_now(&enc.build_job(req, &[], now)?).map(|_| ())

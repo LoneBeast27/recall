@@ -148,8 +148,18 @@ impl TrackRing {
     /// The capture thread's `push_capture` shares this lock, so the critical
     /// section is only the ring's two contiguous halves `memcpy`d into pages
     /// that were allocated and faulted in before the lock was taken.
+    #[cfg(test)]
     pub fn snapshot(&self, secs: f64) -> Vec<f32> {
-        let want = (secs * self.rate as f64) as usize * self.channels as usize;
+        self.snapshot_ending(secs, 0.0)
+    }
+
+    /// As [`Self::snapshot`], for the `secs` that end `tail_secs` before the
+    /// newest sample: a save whose video ends before now (the game closed)
+    /// leaves out the audio recorded after its last frame.
+    pub fn snapshot_ending(&self, secs: f64, tail_secs: f64) -> Vec<f32> {
+        let ch = self.channels as usize;
+        let want = (secs * self.rate as f64) as usize * ch;
+        let tail = (tail_secs.max(0.0) * self.rate as f64).round() as usize * ch;
         // Zeroed allocation doubles as the silence padding. Touch one sample per
         // page so the copy below never takes demand-zero page faults under the
         // lock (black_box keeps the store from being elided as redundant).
@@ -159,30 +169,39 @@ impl TrackRing {
             out[i] = std::hint::black_box(0.0);
         }
         let buf = self.samples.lock().expect("ring lock");
-        let have = buf.len().min(want);
-        let skip = buf.len() - have;
-        let (head, tail) = buf.as_slices();
+        // Samples [skip, end) of the ring, end = newest minus the tail.
+        let end = buf.len().saturating_sub(tail);
+        let have = end.min(want);
+        let skip = end - have;
+        let (head, back) = buf.as_slices();
         let dst = &mut out[want - have..];
-        if skip < head.len() {
-            let from_head = &head[skip..];
-            dst[..from_head.len()].copy_from_slice(from_head);
-            dst[from_head.len()..].copy_from_slice(tail);
-        } else {
-            dst.copy_from_slice(&tail[skip - head.len()..]);
-        }
+        // The part of [skip, end) in `head`, then the part in `back`.
+        let h0 = skip.min(head.len());
+        let h1 = end.min(head.len());
+        let from_head = &head[h0..h1];
+        dst[..from_head.len()].copy_from_slice(from_head);
+        let b0 = skip.saturating_sub(head.len());
+        let b1 = end.saturating_sub(head.len());
+        dst[from_head.len()..].copy_from_slice(&back[b0..b1]);
         drop(buf);
         out
     }
 
     /// Snapshot `secs` of audio together with the format needed to encode it,
     /// so the clip's audio is fixed at save-request time on the encoder thread.
+    #[cfg(test)]
     pub fn snapshot_pcm(&self, secs: f64) -> AudioPcm {
+        self.snapshot_pcm_ending(secs, 0.0)
+    }
+
+    /// [`Self::snapshot_ending`] with its format (the encoder's `av_cut` sets the tail).
+    pub fn snapshot_pcm_ending(&self, secs: f64, tail_secs: f64) -> AudioPcm {
         AudioPcm {
             name: self.name,
             source: self.source,
             rate: self.rate,
             channels: self.channels,
-            samples: self.snapshot(secs),
+            samples: self.snapshot_ending(secs, tail_secs),
         }
     }
 

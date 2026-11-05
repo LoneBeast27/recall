@@ -20,6 +20,8 @@ mod events;
 mod frame_fit;
 mod gpu_smoke;
 mod handoff;
+#[cfg(test)]
+pub(crate) use handoff::{audio_tail_us, video_end_us};
 mod mover;
 mod mux;
 mod saver;
@@ -72,6 +74,9 @@ pub struct SaveRequest {
     pub seconds: u32,
     /// Capture-clock PTS at save request, used to retain a static tail.
     pub end_us: Option<u64>,
+    /// End the clip at the newest frame instead of holding it up to `end_us`
+    /// (the controller sets it once the game has closed: a drain).
+    pub at_last_frame: bool,
     /// When the user asked; the `Saved` event's `elapsed_ms` starts here.
     pub requested: Instant,
 }

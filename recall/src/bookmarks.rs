@@ -77,10 +77,13 @@ impl Bookmarks {
 
     /// The marks of a finished save, relative to its first frame. `None` when
     /// the save was not noted here; `Some(empty)` when no mark is inside it.
-    pub fn take_saved(&self, path: &str, seconds: f64) -> Option<Vec<f64>> {
+    /// `video_end_us`: where the clip's video really ends (a save made after the
+    /// game closed ends at its last frame, before the request); else the request's end.
+    pub fn take_saved(&self, path: &str, seconds: f64, video_end_us: Option<u64>) -> Option<Vec<f64>> {
         let mut s = self.state();
         let pos = s.pending.iter().position(|(p, _)| p == path)?;
-        let (_, end_us) = s.pending.remove(pos)?;
+        let (_, requested_end_us) = s.pending.remove(pos)?;
+        let end_us = video_end_us.unwrap_or(requested_end_us);
         let span_us = (seconds.max(0.0) * 1_000_000.0).round() as u64;
         Some(window_marks(s.marks.iter().copied(), end_us.saturating_sub(span_us), end_us))
     }
@@ -112,8 +115,8 @@ pub fn sidecar_json(marks: &[f64]) -> String {
 /// `protocol` observer: on `Saved`, write the clip's marks sidecar (before the
 /// event is printed, so a client reading `saved` finds it).
 pub fn on_emit(marks: &Bookmarks, msg: &crate::protocol::Outbound) {
-    let crate::protocol::Outbound::Saved { path, seconds, .. } = msg else { return };
-    let Some(list) = marks.take_saved(path, f64::from(*seconds)) else { return };
+    let crate::protocol::Outbound::Saved { path, seconds, video_end_us, .. } = msg else { return };
+    let Some(list) = marks.take_saved(path, f64::from(*seconds), *video_end_us) else { return };
     if list.is_empty() {
         return;
     }
@@ -161,11 +164,49 @@ mod tests {
         b.note_save(r"E:\c\A.mp4", 60 * S);
         b.note_save(r"E:\c\B.mp4", 62 * S);
         // A: a 30 s clip ending at 60 s spans [30, 60].
-        assert_eq!(b.take_saved(r"E:\c\A.mp4", 30.0), Some(vec![1.25, 29.0]));
-        assert_eq!(b.take_saved(r"E:\c\A.mp4", 30.0), None, "taken once");
+        assert_eq!(b.take_saved(r"E:\c\A.mp4", 30.0, None), Some(vec![1.25, 29.0]));
+        assert_eq!(b.take_saved(r"E:\c\A.mp4", 30.0, None), None, "taken once");
         // B: a 2 s clip ending at 62 s spans [60, 62] -> only the 61 s mark.
-        assert_eq!(b.take_saved(r"E:\c\B.mp4", 2.0), Some(vec![1.0]));
-        assert_eq!(b.take_saved(r"E:\c\never.mp4", 9.0), None, "unknown save");
+        assert_eq!(b.take_saved(r"E:\c\B.mp4", 2.0, None), Some(vec![1.0]));
+        assert_eq!(b.take_saved(r"E:\c\never.mp4", 9.0, None), None, "unknown save");
+    }
+
+    /// The game closed at 60 s and the save came 30 s later (the countdown): the
+    /// clip ends at the last frame, so a mark made at 50 s, before the close,
+    /// sits 10 s before the clip's end, not 40 s before the request.
+    #[test]
+    fn a_countdown_save_places_marks_against_its_last_frame() {
+        let b = Bookmarks::new(120);
+        b.add(50 * S);
+        let clip = r"E:\c\Game__closed.mp4";
+        b.note_save(clip, 90 * S); // the request, 30 s into the countdown
+        assert_eq!(b.take_saved(clip, 30.0, Some(60 * S)), Some(vec![20.0]), "[30 s, 60 s]: 50 s is at 20 s");
+        b.note_save(clip, 90 * S);
+        assert_eq!(b.take_saved(clip, 60.0, Some(60 * S)), Some(vec![50.0]), "the whole buffer, [0, 60 s]");
+        // Against the request time the same 30 s clip would be [60 s, 90 s]: the mark is lost.
+        b.note_save(clip, 90 * S);
+        assert_eq!(b.take_saved(clip, 30.0, None), Some(vec![]));
+        // Through the Saved event, as the engine reports it.
+        let dir = std::env::temp_dir().join(format!("recall-marks-drain-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("Game__closed.mp4").to_string_lossy().into_owned();
+        b.note_save(&path, 90 * S);
+        on_emit(
+            &b,
+            &crate::protocol::Outbound::Saved {
+                path: path.clone(),
+                seconds: 30.0,
+                frames: 1,
+                bytes: 1,
+                elapsed_ms: 1,
+                staged: false,
+                staged_path: None,
+                video_end_us: Some(60 * S),
+            },
+        );
+        let sidecar = std::fs::read_to_string(sidecar_path(Path::new(&path))).unwrap();
+        assert_eq!(sidecar, sidecar_json(&[20.0]));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -218,6 +259,7 @@ mod tests {
             elapsed_ms: 1,
             staged: true,
             staged_path: Some(staging.join("A.mp4").to_string_lossy().into_owned()),
+            video_end_us: None,
         };
         on_emit(&b, &saved(&with, 15.0)); // [5 s, 20 s] holds the 10 s mark
         on_emit(&b, &saved(&without, 5.0)); // [35 s, 40 s] holds none

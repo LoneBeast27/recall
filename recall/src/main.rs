@@ -175,7 +175,7 @@ fn claim_recorder(json: bool) -> Option<single_instance::Guard> {
 }
 
 /// Stdin-thread hook that triggers a replay save (None when encode is off).
-type SaveHook = Box<dyn Fn(Option<u32>) + Send>;
+type SaveHook = Box<dyn Fn(Option<u32>, bool) + Send>;
 type ExportHook = Box<dyn Fn(String, Option<String>, Option<u32>, Option<edit_model::EditPlan>) + Send>;
 
 #[derive(Default)]
@@ -298,7 +298,7 @@ impl ApplicationHandler for App {
             let src = self.source_shared.clone();
             let timeline = shared.clone();
             let save_marks = marks.clone();
-            save_hook = Some(Box::new(move |secs: Option<u32>| {
+            save_hook = Some(Box::new(move |secs: Option<u32>, at_last_frame: bool| {
                 let name = src.lock().map(|s| s.clone()).unwrap_or_default();
                 let path = encoder::clip_path(&out_dir, &name);
                 let end_us = timeline.recording_now_us();
@@ -309,6 +309,7 @@ impl ApplicationHandler for App {
                     path,
                     seconds: secs.unwrap_or(buffer_secs),
                     end_us,
+                    at_last_frame,
                     requested: Instant::now(),
                 });
             }));
@@ -410,8 +411,8 @@ fn spawn_stdin_reader(
             }
             match serde_json::from_str::<protocol::Command>(line) {
                 Ok(protocol::Command::SetMode { value }) => shared.set_select(&value),
-                Ok(protocol::Command::SaveClip { seconds }) => match &save {
-                    Some(hook) => hook(seconds),
+                Ok(protocol::Command::SaveClip { seconds, at_last_frame }) => match &save {
+                    Some(hook) => hook(seconds, at_last_frame),
                     None => protocol::emit(&protocol::Outbound::SaveFailed {
                         reason: "engine built without the encode feature".to_string(),
                     }),

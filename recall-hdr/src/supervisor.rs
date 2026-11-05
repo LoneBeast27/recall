@@ -82,11 +82,13 @@ pub enum EngineHealth {
 }
 
 /// What the controller derives "recording" from (last engine status line).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct EngineView {
     /// `status.encoder`: "h264_nvenc" | "starting" | "off" | "failed".
     pub encoder: Option<String>,
     pub mic_muted: Option<bool>,
+    /// Last engine `status.buffer_secs`: seconds of footage in the replay ring.
+    pub buffer_secs: Option<f32>,
 }
 
 /// Supervises the capture engine on a background manager thread.

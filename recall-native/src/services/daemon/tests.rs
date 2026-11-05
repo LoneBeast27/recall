@@ -303,7 +303,13 @@ fn pipe_client_round_trip_against_a_fake_controller() {
     assert_eq!(client.drain_events(), vec![DaemonEvent::Saved { path: "E:\\c.mp4".into(), seconds: 12.5, bytes: 9, elapsed_ms: 3 }]);
     assert!(client.drain_events().is_empty(), "drained once");
     assert!(client.send(DaemonCommand::SaveClip { seconds: Some(30) }));
-    assert_eq!(lines.next().unwrap().unwrap(), r#"{"cmd":"save_clip","seconds":30}"#);
+    // A status ping (every 2 s) may come first on a slow run.
+    let sent = lines.by_ref().map(Result::unwrap).find(|l| l != r#"{"cmd":"status"}"#).unwrap();
+    assert_eq!(sent, r#"{"cmd":"save_clip","seconds":30}"#);
+    // Idle, the client asks for status by itself: only a live pump answers.
+    let t = std::time::Instant::now();
+    assert_eq!(lines.next().unwrap().unwrap(), r#"{"cmd":"status"}"#);
+    assert!(t.elapsed() < std::time::Duration::from_secs(4), "ping after {:?}", t.elapsed());
     drop(writer);
     drop(lines);
     wait_until("disconnect", || !client.snapshot().connected);
@@ -373,4 +379,57 @@ fn process_lookup_finds_this_test_binary_only() {
     let name = me.file_name().unwrap().to_string_lossy().to_uppercase();
     assert!(process_running(&name).unwrap());
     assert!(!process_running("recall-native-no-such-process-7f3a.exe").unwrap());
+}
+
+/// 11-05: the engine stopped 30 s after sobosuba closed, the controller said
+/// "waiting" + engine "stopped", and the pill still read "sobosuba 2:00" from the
+/// engine's last status (it sends no goodbye).
+#[test]
+fn a_stopped_engine_drops_its_last_status() {
+    let mut state = connected();
+    apply(&mut state, json!({"mod":"engine","event":{"type":"status","source":"sobosuba","fps":60,"buffer_secs":120.0,"encoder":"h264_nvenc"}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"waiting","engine_health":"running","target":null}}));
+    assert!(state.snapshot.replay_ready(), "a lingering engine still holds the clip");
+    assert!(apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"waiting","engine_health":"stopped","target":null}})));
+    assert_eq!(state.snapshot.engine, None);
+    assert!(!state.snapshot.replay_ready());
+    for health in ["off", "restarting"] {
+        apply(&mut state, json!({"mod":"engine","event":{"type":"status","source":"A","buffer_secs":5.0,"encoder":"h264_nvenc"}}));
+        apply(&mut state, json!({"mod":"session","event":{"type":"status","engine_health":health}}));
+        assert_eq!(state.snapshot.engine, None, "{health}");
+    }
+}
+
+#[test]
+fn a_drain_parses_and_counts_down_from_its_end_time() {
+    let mut state = connected();
+    apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"draining","engine_health":"running","target":null,
+        "drain":{"name":"sobosuba","total_secs":120,"ends_unix_ms":1_000_000}}}));
+    let session = state.snapshot.session.clone().unwrap();
+    let drain = session.drain.clone().unwrap();
+    assert_eq!((session.state.as_str(), drain.name.as_str(), drain.total_secs), ("draining", "sobosuba", 120));
+    assert_eq!(drain.remaining_secs(1_000_000 - 120_000), 120);
+    assert_eq!(drain.remaining_secs(1_000_000 - 119_500), 120, "rounded up");
+    assert_eq!(drain.remaining_secs(1_000_000 - 1), 1);
+    assert_eq!(drain.remaining_secs(1_000_000), 0);
+    assert_eq!(drain.remaining_secs(2_000_000), 0);
+    assert_eq!(drain.remaining_secs(0), 120, "a clock behind the controller never shows more than the buffer");
+    apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"waiting","engine_health":"stopped","drain":null}}));
+    assert_eq!(state.snapshot.session.unwrap().drain, None);
+}
+
+#[test]
+fn no_status_reply_for_five_seconds_is_unresponsive() {
+    use std::time::{Duration, Instant};
+    let limit = Duration::from_secs(5);
+    let mut state = State::default();
+    assert!(!state.unresponsive(Instant::now() + limit * 2, limit), "disconnected is not unresponsive");
+    state.set_connected(true);
+    let t0 = Instant::now();
+    assert!(!state.unresponsive(t0, limit), "a fresh connection has its grace");
+    assert!(state.unresponsive(t0 + Duration::from_secs(6), limit));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"status","buffer_secs":1.0}}));
+    assert!(state.unresponsive(Instant::now() + Duration::from_secs(6), limit), "engine lines do not prove the pump is alive");
+    apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"waiting"}}));
+    assert!(!state.unresponsive(Instant::now() + Duration::from_secs(4), limit));
 }

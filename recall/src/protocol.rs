@@ -56,6 +56,9 @@ pub enum Outbound {
         staged: bool,
         #[serde(skip_serializing_if = "Option::is_none")]
         staged_path: Option<String>,
+        /// In-process only (bookmark placement): the clip's video end on the capture clock.
+        #[serde(skip)]
+        video_end_us: Option<u64>,
     },
     /// A staged clip is now at its final `path`. `elapsed_ms`: this move's
     /// copy + flush + rename time. After a copy across volumes the staged
@@ -155,7 +158,12 @@ pub enum Command {
     /// value: "auto" | "sdr" | "hdr"
     SetMode { value: String },
     /// Save the last N seconds of the replay buffer (default: full buffer).
-    SaveClip { seconds: Option<u32> },
+    SaveClip {
+        seconds: Option<u32>,
+        /// The game closed: end at its last frame (`SaveRequest::at_last_frame`).
+        #[serde(default)]
+        at_last_frame: bool,
+    },
     /// Set microphone capture muting for newly captured replay audio.
     SetMicMute { muted: bool },
     /// Toggle microphone capture muting for newly captured replay audio.
@@ -227,6 +235,7 @@ mod tests {
             elapsed_ms: 812,
             staged: true,
             staged_path: Some(r"F:\Recall\cache\staging\G__x.mp4".into()),
+            video_end_us: Some(7),
         };
         assert_eq!(
             wire(&staged),
@@ -240,6 +249,7 @@ mod tests {
             elapsed_ms: 5,
             staged: false,
             staged_path: None,
+            video_end_us: None,
         };
         assert_eq!(
             wire(&direct),
