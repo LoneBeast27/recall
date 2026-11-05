@@ -21,6 +21,8 @@ pub struct SettingsUi {
     pub capture: Option<crate::views::settings_keys::ShortcutSlot>,
     /// The Audio page (sources, their lists and menus).
     pub audio: crate::views::audio_page::AudioPage,
+    /// Clip → Frame rate's Custom box.
+    pub fps: crate::views::settings_fps::FpsInput,
 }
 
 /// Which device list is open.
