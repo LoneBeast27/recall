@@ -18,6 +18,7 @@ fn defaults_are_one_direct_alt_combo_per_action() {
             (HotkeyAction::Screenshot, "Alt+S"),
             (HotkeyAction::Record, "Alt+L"),
             (HotkeyAction::Stats, "Alt+P"),
+            (HotkeyAction::Overlay, "Alt+O"),
         ]
     );
 }
@@ -38,7 +39,7 @@ fn defaults_avoid_combos_games_and_overlays_use() {
 fn defaults_do_not_conflict_with_each_other_or_the_hdr_key() {
     let (keep, warnings) = split_conflicts(bindings(&rec(), Some("Ctrl+Alt+H")));
     assert!(warnings.is_empty(), "{warnings:?}");
-    assert_eq!(keep.len(), 7);
+    assert_eq!(keep.len(), 8);
     assert!(validate(&rec()).is_ok());
 }
 
@@ -66,7 +67,7 @@ fn direct_combos_stay_configurable() {
 #[test]
 fn optional_combos_can_be_turned_off() {
     let mut r = rec();
-    for slot in [&mut r.bookmark_hotkey, &mut r.screenshot_hotkey, &mut r.record_hotkey, &mut r.stats_hotkey] {
+    for slot in [&mut r.bookmark_hotkey, &mut r.screenshot_hotkey, &mut r.record_hotkey, &mut r.stats_hotkey, &mut r.overlay_hotkey] {
         slot.clear();
     }
     let actions: Vec<HotkeyAction> = bindings(&r, None).iter().map(|b| b.action).collect();
