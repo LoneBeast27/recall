@@ -1,5 +1,6 @@
 //! The render check on the record path: an unknown fullscreen window (not in
-//! a Steam library, no game override) commits as a game only if it renders
+//! a Steam library, no game override, not a known game:
+//! `record_target::skips_render_check`) commits as a game only if it renders
 //! like one (`render_verdict`). While such a candidate waits for its start
 //! debounce, `render_probe` watches its presents; the probe exists only while
 //! that candidate is pending and is dropped (session stopped) the moment it
@@ -13,10 +14,9 @@ use std::time::Instant;
 
 use crate::log;
 use crate::record_app::Controller;
-use crate::record_target::{classify_event, is_fullscreen_game, Admit, Target};
+use crate::record_target::{classify_event, skips_render_check, Admit, Target};
 use crate::render_probe::{self, RenderProbe, StartError};
 use crate::render_verdict::{gate, Gate, Rejected, Verdict, Watch};
-use crate::rules;
 use crate::watcher::WatchEvent;
 
 pub(crate) struct RenderCheck {
@@ -90,7 +90,7 @@ impl RenderCheck {
             }
             (Gate::Commit, _) => {}
             (Gate::Reject(why), _) => {
-                self.rejected.note(t.pid, t.hwnd, now);
+                self.rejected.note(t.pid, t.hwnd, why, now);
                 let again = self.rejected.until().map_or(0, |u| u.saturating_duration_since(now).as_secs());
                 log!(
                     "record: render check: {} is not a game ({}) after {watched} ms: {stats:?}; checked again in {again} s",
@@ -109,11 +109,7 @@ impl Controller {
     /// not a game is no candidate until its recheck time.
     pub(crate) fn classify(&mut self, ev: &WatchEvent, now: Instant) -> Option<Target> {
         let candidate = classify_event(ev, &self.cfg)?;
-        // A Steam-library exe, an override or a `detect.fullscreen_games` entry
-        // keeps the 300 ms rule with no check.
-        let needs = !ev.steam_game
-            && rules::override_kind(&self.cfg, &ev.exe_stem).is_none()
-            && !is_fullscreen_game(&self.cfg, &ev.exe_stem);
+        let needs = !skips_render_check(ev, &self.cfg);
         if needs && self.render.rejected.holds(ev.pid, ev.hwnd, now) {
             return None;
         }

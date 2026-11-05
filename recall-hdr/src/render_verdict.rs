@@ -27,9 +27,14 @@ pub const MAX_WATCH: Duration = Duration::from_millis(1_500);
 pub const ASK_EVERY: Duration = Duration::from_millis(100);
 /// Frames a signal needs before it counts (3 frames = 100 ms at 30 fps).
 pub const MIN_FRAMES: u32 = 3;
-/// A rejected window is watched again after this, doubling up to [`RECHECK_MAX`].
-pub const RECHECK_FIRST: Duration = Duration::from_secs(10);
-pub const RECHECK_MAX: Duration = Duration::from_secs(80);
+/// A window rejected after showing frames (composed, video) is watched again
+/// after this, doubling up to [`RECHECK_MAX`]: 2, 4, 8, 16, 30, 30 s.
+pub const RECHECK_FIRST: Duration = Duration::from_secs(2);
+pub const RECHECK_MAX: Duration = Duration::from_secs(30);
+/// A window that showed no frames at all (a loading screen, a game still
+/// starting) is inconclusive: watched again after this every time, without
+/// advancing the backoff above.
+pub const RECHECK_NO_FRAMES: Duration = Duration::from_secs(2);
 
 /// One process's presents since the probe started.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -151,17 +156,24 @@ struct Entry {
     pid: u32,
     hwnd: isize,
     until: Instant,
+    /// The last frames-seen wait (zero: none yet), the base of the next one.
     wait: Duration,
 }
 
 impl Rejected {
-    /// `(pid, hwnd)` was judged not a game at `now`.
-    pub fn note(&mut self, pid: u32, hwnd: isize, now: Instant) {
-        let wait = match self.last {
-            Some(e) if e.pid == pid && e.hwnd == hwnd => (e.wait * 2).min(RECHECK_MAX),
-            _ => RECHECK_FIRST,
+    /// `(pid, hwnd)` was judged not a game (`why`) at `now`.
+    pub fn note(&mut self, pid: u32, hwnd: isize, why: Why, now: Instant) {
+        let level = match self.last {
+            Some(e) if e.pid == pid && e.hwnd == hwnd => e.wait,
+            _ => Duration::ZERO,
         };
-        self.last = Some(Entry { pid, hwnd, until: now + wait, wait });
+        let (hold, wait) = if why == Why::NoFrames {
+            (RECHECK_NO_FRAMES, level)
+        } else {
+            let next = if level.is_zero() { RECHECK_FIRST } else { (level * 2).min(RECHECK_MAX) };
+            (next, next)
+        };
+        self.last = Some(Entry { pid, hwnd, until: now + hold, wait });
     }
 
     /// The window is still inside its wait.
