@@ -96,6 +96,8 @@ pub struct Controller {
     pub(crate) last_hdr_event: String,
     /// Last time each hotkey action ran (per-action debounce).
     pub(crate) last_fired: std::collections::HashMap<&'static str, Instant>,
+    /// Hotkeys that did not register (taken by another app, invalid, duplicate): status `hotkey_problems`.
+    pub(crate) hotkey_problems: Vec<String>,
     pub(crate) last_probe: Instant,
     last_hdr_refresh: Instant,
     /// (hwnd, is_target) of the last foreground fed to the tracker.
@@ -203,6 +205,7 @@ pub fn run() -> i32 {
         last_session: String::new(),
         last_hdr_event: String::new(),
         last_fired: Default::default(),
+        hotkey_problems: Vec::new(),
         last_probe: now,
         last_hdr_refresh: now,
         last_fed: None,

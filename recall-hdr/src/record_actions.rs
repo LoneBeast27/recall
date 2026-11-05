@@ -44,10 +44,12 @@ impl Controller {
         let Some(hk) = self.hotkeys.as_mut() else { return };
         let warnings = hk.bind(list);
         let bound = hk.bound();
-        for warning in warnings {
+        for warning in &warnings {
             log!("record: hotkey unavailable: {warning}");
-            self.hub.event("session", &error_event(&warning));
+            self.hub.event("session", &error_event(warning));
         }
+        // Kept in the status too: an app that connects later still sees them.
+        self.hotkey_problems = warnings;
         log!("record: hotkeys bound {bound:?}");
     }
 
