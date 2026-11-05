@@ -235,6 +235,8 @@ fn new_keys_reject_bad_values() {
     for (patch, needle) in [
         (json!({"recording":{"codec":"vp9"}}), "recording.codec"),
         (json!({"recording":{"fps":5}}), "recording.fps"),
+        (json!({"recording":{"fps":961}}), "recording.fps must be 15..=240"),
+        (json!({"recording":{"fps":0}}), "recording.fps"),
         (json!({"recording":{"bitrate_mbps":0}}), "recording.bitrate_mbps"),
         (json!({"recording":{"quality":"max"}}), "recording.quality"),
         (json!({"recording":{"voice_app":"C:\\Apps\\chat.exe"}}), "recording.voice_app"),
@@ -427,4 +429,14 @@ fn corners_saved_before_they_were_honoured_load_as_dynamic() {
     picked.migrate_loaded("[overlay]\ncorner = \"bottom-left\"\ncorner_version = 2\n");
     assert_eq!(picked.corner, "bottom-left", "a v2 corner is the user's pick");
     assert_eq!(OverlayCfg::default().corner, "dynamic");
+}
+
+#[test]
+fn any_whole_frame_rate_up_to_240_is_accepted() {
+    let base = Config::default();
+    assert_eq!(base.recording.fps, 60, "the default stays 60");
+    for fps in [15, 30, 60, 144, 165, 240] {
+        let next = apply_patch(&base, &json!({"recording":{"fps":fps}})).unwrap_or_else(|e| panic!("{fps}: {e}"));
+        assert_eq!(next.config.recording.fps, fps);
+    }
 }
