@@ -1,7 +1,8 @@
 //! One Audio page strip (Voicemeeter / OBS mixer style), top to bottom: type icon and name,
 //! the device or app picker, a tall meter with the gain fader beside it, then record-in-clips
-//! and remove. The last tile adds a source. Levels shown include the source's gain.
-use gpui::{AnyElement, Context, Div, FontWeight, ImageSource, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, Window, canvas, div, img, prelude::*, px, relative};
+//! and remove. A row of dots on top drags the strip to another place (the list order is the
+//! clips' track order). The last tile adds a source. Levels shown include the source's gain.
+use gpui::{AnyElement, Context, CursorStyle, Div, FontWeight, ImageSource, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, Window, canvas, div, img, prelude::*, px, relative};
 
 use crate::{
     root::Root,
@@ -16,6 +17,8 @@ use crate::{
 };
 
 pub const STRIP_W: f32 = 156.;
+/// Space between strips in the row.
+pub const STRIP_GAP: f32 = 12.;
 const METER_H: f32 = 176.;
 /// Level zones like a broadcast mixer: green to -20 dB, yellow to -9 dB, red above.
 const ZONES: [(f32, f32, u32); 3] = [(-60., -20., theme::ACTIVE), (-20., -9., theme::WARNING), (-9., 0., theme::ERROR)];
@@ -48,6 +51,37 @@ fn meter(rms_db: f32, hold_db: f32, live: bool) -> Div {
         }
     }
     bar
+}
+
+/// A strip on the move: what the pointer carries, drawn as a small card under it.
+#[derive(Clone)]
+pub struct StripDrag {
+    pub id: String,
+    name: String,
+    kind: Kind,
+}
+
+impl Render for StripDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .w(px(STRIP_W))
+            .h(px(40.))
+            .px(px(10.))
+            .flex()
+            .items_center()
+            .gap(px(8.))
+            .rounded(px(8.))
+            .bg(c(theme::FLOATING))
+            .border_1()
+            .border_color(c(theme::BORDER_STRONG))
+            .font_family(theme::sans())
+            .text_size(px(13.))
+            .text_color(c(theme::TEXT))
+            .font_weight(FontWeight::MEDIUM)
+            .child(icon(Icon::Grip, 14., theme::MUTED))
+            .child(icon(kind_icon(self.kind), 16., theme::MUTED))
+            .child(div().flex_1().min_w_0().truncate().child(self.name.clone()))
+    }
 }
 
 impl Root {
@@ -106,6 +140,22 @@ impl Root {
                 }))
                 .into_any_element()
         };
+        // The drag handle: six dots across the top of the strip.
+        let drag = StripDrag { id: id.clone(), name: source.name.clone(), kind: source.kind };
+        let grip = div()
+            .id(SharedString::from(format!("strip-grip-{id}")))
+            .h(px(14.))
+            .mt(px(-4.))
+            .mb(px(-4.))
+            .flex()
+            .items_center()
+            .justify_center()
+            .rounded(px(4.))
+            .cursor(CursorStyle::OpenHand)
+            .hover(|s| s.bg(c(theme::FLOATING)))
+            .child(icon(Icon::Grip, 16., theme::TERTIARY))
+            .child(crate::trace::target(format!("strip-grip-{id}")))
+            .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()));
         let header = div().h(px(26.)).flex().items_center().gap(px(8.)).child(type_icon).child(name);
 
         let menu_open = self.settings_ui.audio.menu == Some(StripMenu::Device(id.clone()));
@@ -147,28 +197,39 @@ impl Root {
             .child(self.render_fader(&id, gain, cx));
 
         let (toggle_id, remove_id) = (id.clone(), id.clone());
+        // One box in both states (only the icon, words and colour change), with room for the
+        // longer "Not recorded" so the button never overflows and shifts.
         let footer = div()
             .flex()
-            .gap(px(6.))
+            .items_center()
+            .gap(px(4.))
             .child(
-                ui::button(SharedString::from(format!("strip-rec-{id}")), if source.enabled { Variant::Secondary } else { Variant::Ghost })
+                ui::button(SharedString::from(format!("strip-rec-{id}")), Variant::Secondary)
                     .flex_1()
+                    .flex_shrink()
+                    .min_w_0()
+                    .px(px(4.))
+                    .gap(px(4.))
                     .text_size(px(12.))
+                    .when(!source.enabled, |b| b.bg(c(theme::BASE)).text_color(c(theme::MUTED)))
                     .child(icon(if source.enabled { Icon::Volume } else { Icon::VolumeX }, 13., if source.enabled { theme::TEXT } else { theme::MUTED }))
-                    .child(if source.enabled { "In clips" } else { "Not recorded" })
+                    .child(div().min_w_0().truncate().child(if source.enabled { "In clips" } else { "Not recorded" }))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.toggle_source(&toggle_id);
                         cx.notify();
                     })),
             )
-            .child(ui::icon_button(SharedString::from(format!("strip-remove-{id}")), Icon::X, 28., theme::MUTED, false).on_click(cx.listener(move |this, _, _, cx| {
+            .child(ui::icon_button(SharedString::from(format!("strip-remove-{id}")), Icon::X, 24., theme::MUTED, false).on_click(cx.listener(move |this, _, _, cx| {
                 this.remove_source(&remove_id);
                 cx.notify();
             })));
 
+        let moving = self.settings_ui.audio.reorder.as_ref().is_some_and(|(d, _)| *d == id);
+        let left = self.settings_ui.audio.left(&id);
         div()
             .w(px(STRIP_W))
             .flex_none()
+            .relative()
             .p(px(10.))
             .flex()
             .flex_col()
@@ -177,6 +238,10 @@ impl Root {
             .bg(c(theme::OVERLAY))
             .border_1()
             .border_color(c(theme::BORDER_SUBTLE))
+            // The empty place a dragged strip will drop into.
+            .when(moving, |d| d.opacity(0.35).border_dashed().border_color(c(theme::BORDER_STRONG)))
+            .child(canvas(move |b, _, _| left.set(Some(f32::from(b.origin.x))), |_, _, _, _| {}).absolute().inset_0())
+            .child(grip)
             .child(header)
             .child(picker)
             .child(body)
@@ -252,14 +317,17 @@ impl Root {
     pub(crate) fn render_add_tile(&mut self, list: &[Source], cx: &mut Context<Self>) -> AnyElement {
         let page = &self.settings_ui.audio;
         let open = !page.add_in_header && matches!(page.menu, Some(StripMenu::Add | StripMenu::AddApp));
+        // A column so the tile stretches to the strips' full height.
         div()
             .relative()
             .flex_none()
+            .flex()
+            .flex_col()
             .child(
                 div()
                     .id("add-source")
                     .w(px(STRIP_W))
-                    .h_full()
+                    .flex_1()
                     .min_h(px(METER_H + 120.))
                     .flex()
                     .flex_col()
