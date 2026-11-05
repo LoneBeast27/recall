@@ -24,7 +24,7 @@ fn main() {
     let (clip, start, end) = (&args[1], args[2].parse::<f64>().unwrap(), args[3].parse::<f64>().unwrap());
     let max_bytes = args.get(4).map(|mb| (mb.parse::<f64>().unwrap() * 1e6) as u64);
     let info = backend::prepare_clip(clip).expect("prepare clip").info;
-    let plan = EditPlan {
+    let plan = EditPlan { mix_down: None,
         ranges: vec![TimeRange::new(start, end)],
         audio: info.audio.iter().map(|a| AudioSetting { stream_index: a.stream_index, gain_db: 0.0, muted: false, mix: true }).collect(),
     };

@@ -27,7 +27,12 @@ fn track(stream_index: usize, muted: bool, mix: bool) -> AudioSetting {
 
 /// Exports `audio` choices in `mode`; returns (handler names, first-channel PCM) per track.
 fn export(clip: &Clip, name: &str, mode: ExportMode, audio: Vec<AudioSetting>) -> (Vec<String>, Vec<Vec<f32>>) {
-    let plan = EditPlan { ranges: vec![TimeRange::new(0.5, 2.5)], audio };
+    export_with(clip, name, mode, audio, None)
+}
+
+/// `export` with the plan's "Mix tracks" choice.
+fn export_with(clip: &Clip, name: &str, mode: ExportMode, audio: Vec<AudioSetting>, mix_down: Option<bool>) -> (Vec<String>, Vec<Vec<f32>>) {
+    let plan = EditPlan { mix_down, ranges: vec![TimeRange::new(0.5, 2.5)], audio };
     let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: clip.output(name), fps: 60 };
     let settings = ExportSettings { mode, ..Default::default() };
     export_edited_with(&request, &plan, &settings, VideoBackend::X264).unwrap();
@@ -235,5 +240,34 @@ fn every_export_mode_is_faststart_and_keeps_the_sources_tag() {
         }
         Err(e) if e.to_lowercase().contains("nvenc") || e.contains("unavailable") => eprintln!("NVENC unavailable; CFR skipped: {e}"),
         Err(e) => panic!("cfr export failed: {e}"),
+    }
+}
+
+#[test]
+fn with_mixing_off_every_track_is_exported_on_its_own_with_its_source() {
+    // Rohan, 2026-11-05: "have a toggle for mix or not on export". Off: no mixing, whatever the
+    // per-track switches say; lossless copies the audio untouched, as before mix-down existed.
+    let spec = Spec { sources: Some(r#"["desktop-loopback","app:tone.exe"]"#), ..Spec::default() };
+    let Some(clip) = synth("mix-off", &spec) else {
+        eprintln!("libx264 missing in this FFmpeg build; skipped");
+        return;
+    };
+    let both = vec![track(GAME, false, true), track(MIC, false, true)];
+    for mode in [ExportMode::Reencode, ExportMode::Lossless] {
+        let name = format!("off-{mode:?}.mp4");
+        let (names, pcm) = export_with(&clip, &name, mode, both.clone(), Some(false));
+        assert_eq!(names, ["Game", "Microphone"], "{mode:?}");
+        assert_eq!(sources_of(&clip.output(&name)), ["desktop-loopback", "app:tone.exe"], "{mode:?}");
+        assert!(carries(&pcm[0], 440.0) && !carries(&pcm[0], 660.0), "{mode:?}");
+        assert!(carries(&pcm[1], 660.0) && !carries(&pcm[1], 440.0), "{mode:?}");
+        let (on, _) = export_with(&clip, &format!("on-{mode:?}.mp4"), mode, both.clone(), Some(true));
+        assert_eq!(on, ["Mix"], "{mode:?}: on is unchanged");
+    }
+    // Lossless with mixing off copies both tracks byte for byte.
+    let source = probe(Path::new(&clip.path));
+    let copied = probe(Path::new(&clip.output("off-Lossless.mp4")));
+    for track in 0..2 {
+        let hashes: Vec<u64> = copied.audio[track].iter().map(|p| p.hash).collect();
+        assert!(!hashes.is_empty() && hashes.iter().all(|h| source.audio[track].iter().any(|p| p.hash == *h)), "track {track} was re-encoded");
     }
 }

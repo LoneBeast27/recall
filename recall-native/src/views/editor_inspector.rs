@@ -68,6 +68,7 @@ impl Root {
                 n => format!("{n} tracks"),
             },
         ));
+        let mix_down = self.ed.mix_down();
         for (index, track) in tracks.iter().enumerate() {
             let setting = self.ed.setting(track.stream_index).cloned();
             let gain = setting.as_ref().map_or(0.0, |s| s.gain_db);
@@ -163,12 +164,14 @@ impl Root {
                             .flex()
                             .items_center()
                             .gap(px(10.))
-                            .when(muted, |d| d.opacity(0.4))
-                            .child(div().flex_1().text_size(px(12.)).text_color(c(theme::MUTED)).child("Mix into main track"))
-                            .child(ui::switch(("mix", index), in_mix).child(crate::trace::target(format!("mix-switch-{index}"))).on_click(cx.listener(move |this, _, _, cx| {
-                                this.ed.toggle_mix(index);
-                                cx.notify();
-                            }))),
+                            .when(muted || !mix_down, |d| d.opacity(0.4))
+                            .child(div().flex_1().text_size(px(12.)).text_color(c(theme::MUTED)).child(if mix_down { "Mix into main track" } else { "Mix into main track (Separate is on)" }))
+                            .child(ui::switch(("mix", index), in_mix).child(crate::trace::target(format!("mix-switch-{index}"))).when(mix_down, |s| {
+                                s.on_click(cx.listener(move |this, _, _, cx| {
+                                    this.ed.toggle_mix(index);
+                                    cx.notify();
+                                }))
+                            })),
                     )
                     .children(hint.map(|hint| div().text_size(px(12.)).line_height(px(16.)).text_color(c(theme::WARNING)).child(hint))),
             );
@@ -185,7 +188,7 @@ impl Root {
         let indices: Vec<usize> = info.audio.iter().map(|t| t.stream_index).collect();
         let outputs: Vec<String> = self
             .ed
-            .plan
+            .export_plan()
             .audio_outputs(&indices)
             .into_iter()
             .map(|output| match output {
@@ -226,6 +229,23 @@ impl Root {
                 cx.notify();
             })));
         }
+        let mix_down = self.ed.mix_down();
+        let mut mixing = ui::segment_track();
+        for (label, on) in [("Mix", true), ("Separate", false)] {
+            mixing = mixing.child(
+                ui::segment(SharedString::from(format!("mixdown-{label}")), label, mix_down == on)
+                    .child(crate::trace::target(format!("mixdown-{label}")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.ed.set_mix_down(on);
+                        cx.notify();
+                    })),
+            );
+        }
+        let mixing_note = if mix_down {
+            "Tracks switched to Mix become track 1; players that play one track hear them all."
+        } else {
+            "Every track is its own track in the file, nothing mixed."
+        };
         let mut sizes = ui::segment_track();
         for (label, value) in [("Original", None), ("1080p", Some(1080u32)), ("720p", Some(720u32))] {
             sizes = sizes.child(ui::segment(SharedString::from(format!("h-{label}")), label, height == value).on_click(cx.listener(move |this, _, _, cx| {
@@ -255,7 +275,8 @@ impl Root {
             .flex_col()
             .gap(px(12.))
             .child(ui::heading("Export", if lossless { "Stream copy" } else { "NVENC" }))
-            .child(field("Method", method.into_any_element()));
+            .child(field("Method", method.into_any_element()))
+            .child(field("Audio tracks", mixing.into_any_element()).child(note(mixing_note.into())));
         if lossless {
             column = column.child(note("Copies the video untouched, in seconds. Each cut starts at the nearest earlier keyframe (shaded on the timeline). Frame rate, size and speed stay as recorded.".into()));
         } else {
