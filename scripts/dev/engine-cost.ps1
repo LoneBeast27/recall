@@ -100,7 +100,7 @@ function Pump { foreach ($l in (Drain $eng.out)) { $log.Add($l) }; foreach ($l i
 $warm = (Get-Date).AddSeconds($Warmup)
 while ((Get-Date) -lt $warm) { Start-Sleep -Milliseconds 250; Pump; if ($eng.proc.HasExited) { break } }
 if ($eng.proc.HasExited) { $tgt.proc.Kill(); throw "engine exited during warmup: $($log -join "`n")" }
-$micUp = $log | Where-Object { $_ -match "audio track 'Mic' up" } | Select-Object -First 1
+$micUp = $log | Where-Object { $_ -match "audio track '(Mic|Microphone|mic)' up" } | Select-Object -First 1
 if (-not $micUp) { Write-Warning "no test Mic track on '$TestMic': the cost below has no Mic track. $(($log | Where-Object { $_ -match "'Mic'" }) -join ' | ')" }
 
 # A target WGC sees as occluded delivers no frames; say so instead of measuring an idle engine.
