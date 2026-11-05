@@ -60,6 +60,7 @@ mod record_app;
 mod record_chord;
 mod record_cmds;
 mod record_app_audio;
+mod record_audio_sources;
 mod record_config;
 mod record_detect;
 mod record_drain;

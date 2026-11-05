@@ -71,7 +71,7 @@ pub struct RecordingCfg {
     /// `performance` | `balanced` | `quality` (`RECALL_QUALITY`).
     pub quality: String,
     /// Exe captured as its own "Voice" track and kept out of Game, e.g.
-    /// `Discord.exe` ("" = off; `RECALL_AUDIO_VOICE_EXE`).
+    /// `chat.exe` ("" = off). Read only to build `audio_sources`.
     pub voice_app: String,
     /// Hex CPU affinity mask applied to the controller and every child.
     pub cpu_mask: String,
@@ -85,8 +85,11 @@ pub struct RecordingCfg {
     /// Render endpoint recorded as Game in Desktop mode ("" = the Windows
     /// default output; `RECALL_AUDIO_GAME`). Games record their own process.
     pub desktop_audio_device: String,
-    /// Apps recorded as tracks of their own, in track order (`RECALL_AUDIO_APPS`).
-    /// A table array: TOML writes it after the plain keys.
+    /// Every recorded source, in track order (`RECALL_AUDIO_SOURCES`; the Audio page).
+    /// A table array: TOML writes it after the plain keys. Built from the old audio keys
+    /// above when a config has none (`record_audio_sources::migrate_loaded`).
+    pub audio_sources: Vec<crate::record_audio_sources::AudioSource>,
+    /// Old app list, read only to build `audio_sources` (`record_audio_sources::from_legacy`).
     pub app_audio: Vec<crate::record_app_audio::AppAudioSource>,
     /// Save-length presets. Last field: TOML writes it as
     /// `[[recording.save_hotkeys]]` tables after the plain keys.
@@ -115,6 +118,7 @@ impl Default for RecordingCfg {
             mic_device: String::new(),
             mic_enabled: true,
             desktop_audio_device: String::new(),
+            audio_sources: crate::record_audio_sources::default_sources(),
             app_audio: Vec::new(),
             save_hotkeys: crate::record_hotkeys::default_save_hotkeys(),
         }
@@ -339,9 +343,10 @@ fn validate_quality(rec: &RecordingCfg) -> Result<(), String> {
         }
     }
     crate::record_app_audio::validate(&rec.app_audio)?;
+    crate::record_audio_sources::validate(&rec.audio_sources)?;
     let voice = rec.voice_app.trim();
     if voice.len() > 64 || voice.chars().any(|c| matches!(c, '\\' | '/' | ':') || c.is_control()) {
-        return Err(format!("recording.voice_app '{voice}' must be an exe name like Discord.exe (no folders)"));
+        return Err(format!("recording.voice_app '{voice}' must be an exe name like chat.exe (no folders)"));
     }
     Ok(())
 }

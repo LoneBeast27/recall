@@ -1,4 +1,5 @@
-//! Settings → Clip (video format, frame rate, bitrate, encoder effort, voice-chat track) and
+//! Settings → Clip (video format, frame rate, bitrate, encoder effort, a link to the Audio
+//! page's sources) and
 //! Settings → Media (storage limit). Values are the controller's config keys; a change
 //! restarts the recorder (after any save or long recording in flight).
 use gpui::{AnyElement, Context, SharedString, div, prelude::*, px};
@@ -16,8 +17,6 @@ const CODECS: [(&str, &str); 3] = [("h264", "H.264"), ("hevc", "HEVC"), ("av1", 
 const RATES: [u64; 4] = [30, 60, 120, 144];
 const BITRATES: [u64; 4] = [15, 25, 40, 60];
 const EFFORT: [(&str, &str); 3] = [("performance", "Performance"), ("balanced", "Balanced"), ("quality", "Quality")];
-/// (exe, label); "" turns the separate voice track off.
-const VOICE_APPS: [(&str, &str); 4] = [("", "Off"), ("Discord.exe", "Discord"), ("TeamSpeak.exe", "TeamSpeak"), ("mumble.exe", "Mumble")];
 /// GiB; 0 = no limit.
 const CAPS: [(u64, &str); 5] = [(0, "No limit"), (250, "250 GB"), (500, "500 GB"), (1000, "1 TB"), (2000, "2 TB")];
 
@@ -51,7 +50,6 @@ impl Root {
         let fps = number(self, "fps", 60);
         let bitrate = number(self, "bitrate_mbps", 25);
         let effort = text(self, "quality", "balanced");
-        let voice = text(self, "voice_app", "");
         let pending = self.snap.session.as_ref().is_some_and(|s| s.pending_restart);
         // The engine falls back to H.264 when the GPU cannot encode the chosen format.
         let running = self.snap.engine.as_ref().map(|e| e.codec.clone()).filter(|c| !c.is_empty() && self.snap.replay_ready());
@@ -63,8 +61,6 @@ impl Root {
         let bitrates: Vec<(u64, String)> = BITRATES.iter().map(|b| (*b, format!("{b} Mbps"))).collect();
         let effort_index = EFFORT.iter().position(|(v, _)| *v == effort).unwrap_or(1);
         let efforts: Vec<(usize, String)> = EFFORT.iter().enumerate().map(|(i, (_, l))| (i, (*l).to_owned())).collect();
-        let voice_index = VOICE_APPS.iter().position(|(exe, _)| exe.eq_ignore_ascii_case(&voice)).unwrap_or(usize::MAX);
-        let voices: Vec<(usize, String)> = VOICE_APPS.iter().enumerate().map(|(i, (_, l))| (i, (*l).to_owned())).collect();
 
         let format_detail = if fallback {
             format!("This GPU can't record {}; recording {} instead.", CODECS[codec_index].1, running.as_deref().unwrap_or("H.264").to_uppercase().replace("H264", "H.264"))
@@ -90,13 +86,16 @@ impl Root {
             items.push(div().text_size(px(12.)).text_color(c(theme::WARNING)).child("Changes apply when the current save or recording finishes.").into_any_element());
         }
         items.push(section_title("Audio"));
+        let count = self.audio_sources().iter().filter(|s| s.enabled).count();
+        let detail = format!("{count} recorded now. Microphones, desktop audio, apps and the game are set on the Audio page, each as its own track.");
         items.push(
-            setting_row("Voice chat on its own track", "Keeps friends' voices separate, so you can turn them down in the editor.")
-                .child(self.segments("voice", 340., &voices, voice_index, "recording", "voice_app", |i| json!(VOICE_APPS[i].0), cx))
+            setting_row("Audio sources", &detail)
+                .child(ui::button("open-audio-page", crate::ui::Variant::Secondary).child("Open Audio page").on_click(cx.listener(|this, _, _, cx| {
+                    this.go(crate::root::Route::Audio);
+                    cx.notify();
+                })))
                 .into_any_element(),
         );
-        items.extend(self.render_audio_sources(cx));
-        items.push(self.render_app_audio(cx));
         items
     }
 

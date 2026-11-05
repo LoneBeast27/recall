@@ -12,14 +12,14 @@ fn the_list_parses_and_bad_entries_are_refused() {
     assert_eq!(apps[1].label, "");
     assert!(parse(r#"[{"exe":"C:\\apps\\a.exe"}]"#).is_err(), "no folders");
     assert!(parse(r#"[{"exe":""}]"#).is_err());
-    let seven: Vec<String> = (0..7).map(|n| format!(r#"{{"exe":"a{n}.exe"}}"#)).collect();
-    assert!(parse(&format!("[{}]", seven.join(","))).is_err(), "at most 6");
+    let nine: Vec<String> = (0..9).map(|n| format!(r#"{{"exe":"a{n}.exe"}}"#)).collect();
+    assert!(parse(&format!("[{}]", nine.join(","))).is_err(), "at most 8, like the sources list");
     assert!(parse("not json").is_err());
 }
 
 #[test]
 fn a_track_is_named_by_its_label_else_the_exe_without_its_extension() {
-    let app = |exe: &str, label: &str| AppSource { exe: exe.into(), label: label.into() };
+    let app = |exe: &str, label: &str| AppSource { exe: exe.into(), label: label.into(), id: String::new(), gain_db: 0.0 };
     assert_eq!(app("player.exe", " Source A ").track_name(), "Source A");
     assert_eq!(app("player.EXE", "").track_name(), "player");
     assert_eq!(app("tool", "").track_name(), "tool");
