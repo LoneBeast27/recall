@@ -118,6 +118,10 @@ impl Workers {
         let watcher = ClipWatcher::start(move |change| {
             let _ = tx.send(Done::Library(change));
         });
+        // Off the start-up path: the cache folder and recordings folder resolve on this thread.
+        spawn_named("recall-cache-watch-start", || {
+            library::cache_watch::start(storage::counted_dirs(&backend::library_dir()), storage::note_outside_change);
+        });
 
         let tx = done_tx.clone();
         spawn_named("recall-io", move || {
@@ -154,6 +158,15 @@ impl Workers {
         crate::clip_open::note_open(generation);
         let tx = self.open_tx.clone();
         spawn_named("recall-clip-open", move || crate::clip_open::run(generation, path, &tx));
+    }
+
+    /// Lets the SSD cache drop clips that left the library (`storage::forget_clips`), on a thread
+    /// of its own: an export on the io worker never holds it up.
+    pub fn forget_clips(&self, gone: Vec<storage::GoneClip>) {
+        if gone.is_empty() {
+            return;
+        }
+        spawn_named("recall-cache-forget", move || storage::forget_clips(&gone));
     }
 
     /// Walks the SSD cache on a thread of its own (`Done::Ssd`): an export on the io worker never holds it up.

@@ -310,6 +310,28 @@ pub(super) fn room_below(root: &Path, budget: u64, limit: u64, incoming: u64, sc
     }
 }
 
+/// Deletes the editor media and hover frames of the clips `ids` (their files are gone, so
+/// nothing opens these again), never their video copies or thumbnails, and nothing of the
+/// clip open in the editor. Returns bytes freed.
+pub(super) fn drop_previews(root: &Path, ids: &std::collections::HashSet<String>) -> u64 {
+    if ids.is_empty() {
+        return 0;
+    }
+    let _guard = INDEX_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    let inventory = inventory(root, &super::prefetch::score_of);
+    let media = read_media(root);
+    let keep = kept();
+    let names: Vec<String> = inventory
+        .units
+        .iter()
+        .filter(|unit| matches!(unit.tier, Tier::EditorMedia | Tier::Scrub))
+        .filter(|unit| !keep.contains(&unit.name))
+        .filter(|unit| unit_clip(&unit.name, &media).is_some_and(|id| ids.contains(id)))
+        .map(|unit| unit.name.clone())
+        .collect();
+    remove(root, &inventory, &names)
+}
+
 /// Deletes `evicted` units and forgets them in the indexes. Returns bytes freed. Call with
 /// [`INDEX_LOCK`] held.
 fn remove(root: &Path, inventory: &Inventory, evicted: &[String]) -> u64 {

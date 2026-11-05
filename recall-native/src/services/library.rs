@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::backend::ClipEntry;
 
 mod calendar;
+pub mod cache_watch;
 pub mod edit_marks;
 pub mod folders;
 pub mod import_check;
