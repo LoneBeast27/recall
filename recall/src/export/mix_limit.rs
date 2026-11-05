@@ -17,6 +17,32 @@ pub(crate) const CEILING: f32 = 0.891_251;
 const ATTACK_SECONDS: f32 = 0.005;
 const RELEASE_SECONDS: f32 = 0.100;
 
+/// The streaming form for the long recording (`stream::StreamLimiter`).
+pub(crate) mod stream;
+
+/// The gain one sample needs to stay under the ceiling.
+fn needed_gain(sample: f32) -> f32 {
+    let peak = sample.abs();
+    if peak > CEILING { CEILING / peak } else { 1.0 }
+}
+
+/// Hold radius (frames) and the per-frame attack and release steps at `rate`.
+struct Ramps {
+    hold: usize,
+    attack: f32,
+    release: f32,
+}
+
+impl Ramps {
+    fn at(rate: u32) -> Self {
+        Ramps {
+            hold: (ATTACK_SECONDS * rate as f32).max(1.0) as usize,
+            attack: 1.0 / (ATTACK_SECONDS * rate as f32).max(1.0),
+            release: 1.0 / (RELEASE_SECONDS * rate as f32).max(1.0),
+        }
+    }
+}
+
 /// Limits planar `channels` at `rate` in place; samples under the ceiling far from a peak are untouched.
 pub(crate) fn limit_mix(channels: &mut [Vec<f32>], rate: u32) {
     let frames = channels.iter().map(Vec::len).max().unwrap_or(0);
@@ -26,16 +52,11 @@ pub(crate) fn limit_mix(channels: &mut [Vec<f32>], rate: u32) {
     let mut gain = vec![1.0f32; frames];
     for channel in channels.iter_mut() {
         for (sample, g) in channel.iter().zip(gain.iter_mut()) {
-            let peak = sample.abs();
-            if peak > CEILING {
-                *g = g.min(CEILING / peak);
-            }
+            *g = g.min(needed_gain(*sample));
         }
     }
-    let hold = (ATTACK_SECONDS * rate as f32).max(1.0) as usize;
+    let Ramps { hold, attack, release } = Ramps::at(rate);
     let mut gain = window_min(&gain, hold);
-    let attack = 1.0 / (ATTACK_SECONDS * rate as f32).max(1.0);
-    let release = 1.0 / (RELEASE_SECONDS * rate as f32).max(1.0);
     for n in (0..frames - 1).rev() {
         gain[n] = gain[n].min(gain[n + 1] + attack);
     }

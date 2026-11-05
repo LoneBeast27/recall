@@ -117,6 +117,11 @@ impl TrackRing {
         }
     }
 
+    /// The source's gain is above 0 dB: every output of this track goes through the peak limiter.
+    pub fn boosted(&self) -> bool {
+        self.gain > 1.0
+    }
+
     pub fn endpoint(&self) -> String {
         self.endpoint.lock().map(|s| s.clone()).unwrap_or_default()
     }
@@ -163,7 +168,7 @@ impl TrackRing {
             rate: self.rate,
             channels: self.channels,
             samples: self.snapshot(secs),
-            boosted: self.gain > 1.0,
+            boosted: self.boosted(),
         }
     }
 

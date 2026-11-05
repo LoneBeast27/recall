@@ -147,7 +147,7 @@ fn encode_frames(enc: &mut ff::encoder::Video, n: usize) -> Vec<(u64, bool, Vec<
 }
 
 fn tracks() -> Vec<TrackInfo> {
-    vec![TrackInfo { name: "Game", rate: 48_000, channels: 2 }, TrackInfo { name: "Mic", rate: 48_000, channels: 2 }]
+    vec![TrackInfo { name: "Game", rate: 48_000, channels: 2, boosted: false }, TrackInfo { name: "Mic", rate: 48_000, channels: 2, boosted: false }]
 }
 
 fn temp_part(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {
