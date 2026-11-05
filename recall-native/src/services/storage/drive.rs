@@ -160,6 +160,8 @@ pub fn drive_info(path: &Path) -> Option<DriveInfo> {
     let volume = volume_root(path)?;
     let device = device(&volume);
     let (free, total) = space(&volume).unwrap_or((0, 0));
+    // Checks only: `RECALL_FAKE_FREE_BYTES=<n>` makes every drive report n bytes free (a low-disk fixture).
+    let free = std::env::var("RECALL_FAKE_FREE_BYTES").ok().and_then(|v| v.trim().parse::<u64>().ok()).map_or(free, |fake| fake.min(free));
     Some(DriveInfo { volume, model: device.model, kind: device.kind, free, total, disk: device.disk })
 }
 

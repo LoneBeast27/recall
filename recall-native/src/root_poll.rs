@@ -70,6 +70,7 @@ impl Root {
         }
         if unresponsive != self.recorder_unresponsive {
             eprintln!("Recall native: recorder {}", if unresponsive { "not responding" } else { "responding again" });
+            crate::trace::note(if unresponsive { "recorder not responding" } else { "recorder responding again" });
         }
         self.recorder_unresponsive = unresponsive;
         self.drain_drawn = left;
