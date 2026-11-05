@@ -90,6 +90,8 @@ pub struct EditorState {
     pub area: Rc<Cell<Option<(f32, f32)>>>,
     /// Portrait layout (export panel below the timeline), chosen from `area`.
     pub portrait: bool,
+    /// The remembered "Mix tracks" choice for clips whose edits never set one.
+    pub mix_down_default: bool,
     pub drag: Option<Drag>,
     /// The plan a trim or gain drag started from.
     drag_from: Option<EditPlan>,
@@ -169,6 +171,7 @@ impl EditorState {
             listen_spans: vec![],
             area: Rc::new(Cell::new(None)),
             portrait: false,
+            mix_down_default: true,
             drag: None,
             drag_from: None,
             generation: 0,
@@ -280,12 +283,13 @@ impl EditorState {
                 self.export_settings = project.export.clone();
                 project.plan
             }
-            None => EditPlan {
+            None => EditPlan { mix_down: None,
                 ranges: vec![TimeRange::new(0.0, info.duration)],
                 // App tracks start out of the mix: Desktop audio or the game already holds them.
                 audio: info.default_audio(),
             },
         };
+        self.mix_down_default = crate::services::editor_prefs::EditorPrefs::load().mix_down;
         self.selected = 0;
         self.undo.clear();
         self.redo.clear();

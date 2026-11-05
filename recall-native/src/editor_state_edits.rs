@@ -219,7 +219,7 @@ impl EditorState {
         let info = self.info.as_ref()?;
         let stream = info.audio.get(track)?.stream_index;
         let mix = self.setting(stream).map_or_else(|| info.audio[track].default_setting().mix, |s| s.mix);
-        info.mix_hint(stream, mix)
+        info.mix_hint(stream, mix && self.mix_down())
     }
 
     pub fn reset_gain(&mut self, track: usize) {

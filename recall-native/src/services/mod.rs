@@ -2,6 +2,7 @@
 pub mod audio_apps;
 pub mod audio_devices;
 pub mod daemon;
+pub mod editor_prefs;
 pub mod library;
 pub mod meters;
 pub mod midi;

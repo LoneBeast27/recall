@@ -155,3 +155,31 @@ mod export_tests {
         assert!(plan.audio.iter().all(|s| !s.muted && s.gain_db == 0.0), "the export keeps both tracks: {:?}", plan.audio);
     }
 }
+
+#[cfg(test)]
+mod mix_down_tests {
+    use super::tests_support::editor;
+    use crate::edit_model::AudioOutput;
+    use crate::worker::Job;
+
+    #[test]
+    fn the_mix_toggle_reaches_the_export_and_is_remembered_for_the_next_clip() {
+        let dir = std::env::temp_dir().join(format!("recall-mixdown-{}", std::process::id()));
+        crate::services::editor_prefs::use_test_file(Some(dir.join("editor.json")));
+        let mut ed = editor();
+        assert!(ed.mix_down() && ed.plan.mix_down.is_none(), "a new install mixes; the clip has no choice of its own");
+        ed.set_mix_down(false);
+        assert!(ed.can_undo(), "one undo step");
+        let Job::Export(_, plan, _, _) = ed.export_job(ed.info.clone().unwrap()) else { panic!("an export job") };
+        assert_eq!(plan.mix_down, Some(false));
+        assert_eq!(plan.audio_outputs(&[1, 2]), vec![AudioOutput::Track(1), AudioOutput::Track(2)], "Separate: both tracks apart");
+        let next = editor(); // the next clip opens: no choice of its own, the remembered default
+        assert!(next.plan.mix_down.is_none() && !next.mix_down(), "the last choice is the default for new edits");
+        let Job::Export(_, plan, _, _) = next.export_job(next.info.clone().unwrap()) else { panic!("an export job") };
+        assert_eq!(plan.mix_down, Some(false), "the engine gets the default filled in");
+        ed.undo();
+        assert!(ed.plan.mix_down.is_none());
+        crate::services::editor_prefs::use_test_file(None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}

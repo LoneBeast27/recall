@@ -24,7 +24,7 @@ fn run(clip: &Clip, name: &str, plan: &EditPlan, settings: &ExportSettings) -> R
 }
 
 fn plan(ranges: Vec<TimeRange>) -> EditPlan {
-    EditPlan { ranges, audio: vec![] }
+    EditPlan { mix_down: None, ranges, audio: vec![] }
 }
 
 fn within(actual: f64, expected: f64, fraction: f64) -> bool {

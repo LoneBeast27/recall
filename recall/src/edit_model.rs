@@ -59,6 +59,11 @@ pub struct EditPlan {
     pub ranges: Vec<TimeRange>,
     #[serde(default)]
     pub audio: Vec<AudioSetting>,
+    /// Mix tracks into track 1 ("Mix") or export every track separately. `None` (edits saved
+    /// before the choice existed, or never changed): the editor's remembered default; the
+    /// engine reads `None` as on.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mix_down: Option<bool>,
 }
 
 impl EditPlan {
@@ -89,6 +94,10 @@ impl EditPlan {
     pub fn audio_outputs(&self, audio_indices: &[usize]) -> Vec<AudioOutput> {
         let setting = |index: usize| self.audio.iter().find(|s| s.stream_index == index);
         let kept = audio_indices.iter().copied().filter(|i| !setting(*i).is_some_and(|s| s.muted));
+        if !self.mix_down.unwrap_or(true) {
+            // Mixing off: every kept track on its own, in stream order (the switches keep their values).
+            return kept.map(AudioOutput::Track).collect();
+        }
         let (mixed, separate): (Vec<usize>, Vec<usize>) = kept.partition(|i| setting(*i).is_some_and(|s| s.mix));
         let mut outputs = match mixed.len() {
             0 => Vec::new(),
@@ -289,7 +298,7 @@ mod tests {
 
     #[test]
     fn mixed_tracks_come_first_as_one_and_muted_tracks_are_dropped() {
-        let plan = |audio| EditPlan { ranges: vec![TimeRange::new(0.0, 1.0)], audio };
+        let plan = |audio| EditPlan { mix_down: None, ranges: vec![TimeRange::new(0.0, 1.0)], audio };
         let both = plan(vec![setting(1, false, true), setting(2, false, true)]);
         assert_eq!(both.audio_outputs(&[1, 2]), vec![AudioOutput::Mix(vec![1, 2])]);
         let one = plan(vec![setting(1, false, false), setting(2, false, true)]);
@@ -333,6 +342,22 @@ mod tests {
     }
 
     #[test]
+    fn with_mixing_off_every_kept_track_is_its_own_track() {
+        let audio = vec![
+            AudioSetting { stream_index: 1, gain_db: 0.0, muted: false, mix: true },
+            AudioSetting { stream_index: 2, gain_db: 0.0, muted: false, mix: true },
+            AudioSetting { stream_index: 3, gain_db: 0.0, muted: true, mix: true },
+        ];
+        let mut plan = EditPlan { ranges: vec![TimeRange::new(0.0, 1.0)], audio, mix_down: Some(false) };
+        assert_eq!(plan.audio_outputs(&[1, 2, 3]), vec![AudioOutput::Track(1), AudioOutput::Track(2)], "muted still dropped");
+        plan.mix_down = None;
+        assert_eq!(plan.audio_outputs(&[1, 2, 3]), vec![AudioOutput::Mix(vec![1, 2])], "no choice: on");
+        let old: EditPlan = serde_json::from_str(r#"{"ranges":[{"start":0.0,"end":1.0}]}"#).unwrap();
+        assert_eq!(old.mix_down, None, "saved before the choice existed");
+        assert!(!serde_json::to_string(&old).unwrap().contains("mix_down"), "None is not written");
+    }
+
+    #[test]
     fn repeated_source_kinds_each_get_their_own_default() {
         // The source manager (feat/audio-sources) may record several outputs and mics.
         let tag = r#"["game-process","desktop-loopback","desktop-loopback","mic","mic","app:x.exe"]"#;
@@ -360,7 +385,7 @@ mod tests {
 
     #[test]
     fn duration_is_output_length_after_speed() {
-        let plan = EditPlan { ranges: vec![TimeRange { start: 0.0, end: 2.0, speed: 0.5 }, TimeRange { start: 3.0, end: 5.0, speed: 2.0 }], audio: vec![] };
+        let plan = EditPlan { mix_down: None, ranges: vec![TimeRange { start: 0.0, end: 2.0, speed: 0.5 }, TimeRange { start: 3.0, end: 5.0, speed: 2.0 }], audio: vec![] };
         assert!((plan.duration() - 5.0).abs() < 1e-9);
         assert!((plan.source_duration() - 4.0).abs() < 1e-9);
         assert!(plan.validate(6.0, &[]).is_ok());
@@ -368,7 +393,7 @@ mod tests {
 
     #[test]
     fn speed_and_lossless_combinations_are_validated() {
-        let mut plan = EditPlan { ranges: vec![TimeRange { start: 0.0, end: 1.0, speed: 0.2 }], audio: vec![] };
+        let mut plan = EditPlan { mix_down: None, ranges: vec![TimeRange { start: 0.0, end: 1.0, speed: 0.2 }], audio: vec![] };
         assert!(plan.validate(2.0, &[]).unwrap_err().contains("speed"));
         plan.ranges[0].speed = 0.5;
         let lossless = ExportSettings { mode: ExportMode::Lossless, ..Default::default() };
