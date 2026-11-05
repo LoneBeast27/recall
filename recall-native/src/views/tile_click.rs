@@ -38,12 +38,14 @@ impl Root {
                 self.lib.click(path, false, false);
                 let at = Instant::now();
                 self.lib.title_click = Some((path.to_owned(), at));
-                cx.spawn(async move |this, cx| {
+                cx.spawn_in(window, async move |this, cx| {
                     cx.background_executor().timer(double_click_time()).await;
-                    let _ = this.update(cx, |this, cx| {
-                        // Any later press (`on_press`) or a page change ends the wait.
+                    let _ = this.update_in(cx, |this, window, cx| {
+                        // Any later press (`on_press`), any key (`on_key`: Escape, F2), a rename or a
+                        // page change ends the wait; so does the window losing focus.
                         let Some((path, _)) = this.lib.title_click.take_if(|(_, t)| *t == at) else { return };
-                        if this.route == Route::Library && this.lib.record(&path).is_some() {
+                        let live = window.is_window_active() && this.lib.renaming.is_none();
+                        if live && this.route == Route::Library && this.lib.record(&path).is_some() {
                             this.open_clip(path);
                             cx.notify();
                         }
