@@ -198,10 +198,15 @@ impl Controller {
     }
 
     /// Enforce a microphone state now and on every future engine instance.
+    /// With no engine to echo `mic_muted`, the controller sends it itself so
+    /// the shortcut still gets its pop-up.
     pub(crate) fn set_mic(&mut self, muted: bool) {
         self.mic_muted = muted;
         log!("record: microphone {}", if muted { "muted" } else { "live" });
         self.supervisor.send_engine_line(&json!({"cmd": "set_mic_mute", "muted": muted}).to_string());
+        if !self.engine_running() {
+            self.hub.event("engine", &json!({"type": "mic_muted", "muted": muted}).to_string());
+        }
         self.publish_status();
     }
 
@@ -280,6 +285,7 @@ impl Controller {
             || o.screenshot_hotkey != n.screenshot_hotkey
             || o.record_hotkey != n.record_hotkey
             || o.stats_hotkey != n.stats_hotkey
+            || o.overlay_hotkey != n.overlay_hotkey
             || old.hotkey.toggle_hdr != new.hotkey.toggle_hdr
         {
             self.rebind_hotkeys();
@@ -391,6 +397,11 @@ impl Controller {
         }
         if let Some(hdr) = self.legacy_hdr_event() {
             self.hub.event_to(client, "hdr", &hdr);
+        }
+        if let Some((notice, until)) = self.pending_notice.take() {
+            if Instant::now() < until {
+                self.hub.event_to(client, "session", &notice);
+            }
         }
     }
 }

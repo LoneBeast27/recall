@@ -38,6 +38,9 @@ pub struct NoticeView {
     pub emphasis: bool,
     /// A clip save's stage: the mark is the shutter ring (`badge.rs`).
     pub save: Option<SavePhase>,
+    /// Shown even with notices off: the overlay shortcut's "Overlay off".
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub always: bool,
 }
 
 /// A clip save as the island shows it: the ring spins while `Saving`, then
@@ -52,7 +55,15 @@ pub enum SavePhase {
 
 impl NoticeView {
     pub fn new(tone: Tone, title: &str, detail: impl Into<String>, game_font: bool) -> Self {
-        Self { tone, title: title.into(), detail: detail.into(), game_font, emphasis: false, save: None }
+        Self {
+            tone,
+            title: title.into(),
+            detail: detail.into(),
+            game_font,
+            emphasis: false,
+            save: None,
+            always: false,
+        }
     }
 
     /// The same notice, shown with the transformation.
@@ -66,7 +77,9 @@ impl NoticeView {
     }
 }
 
-/// `{"type":"notice","kind":"game|desktop|paused|waiting|encoder","title":S,"detail":S}`;
+/// `{"type":"notice","kind":"game|desktop|paused|waiting|encoder|shortcut|refused","title":S,"detail":S,"always"?:B}`;
+/// `shortcut` / `refused` are a shortcut's own pop-up (stats, overlay, a
+/// bookmark that could not be added);
 /// the controller sends "Recording"/<game or "Desktop">, "Recording paused",
 /// "Waiting for a game"/"Not recording", "Encoder problem"/"Recorder stopped".
 pub fn session_notice(event: &Value) -> NoticeView {
@@ -76,6 +89,7 @@ pub fn session_notice(event: &Value) -> NoticeView {
         "paused" => (Tone::Paused, "Recording paused", false),
         "waiting" => (Tone::Waiting, "Waiting for a game", false),
         "encoder" => (Tone::Failure, "Encoder problem", false),
+        "refused" => (Tone::Failure, "Recall", false),
         _ => (Tone::Neutral, "Recall", false),
     };
     let title = event
@@ -88,7 +102,15 @@ pub fn session_notice(event: &Value) -> NoticeView {
     let notice = NoticeView::new(tone, &truncate(title, 32), truncate(detail, 40), game_font);
     // Session changes keep the plain swap; a failure stands out like the
     // engine's own encoder failure (the two are de-duplicated).
-    NoticeView { emphasis: tone == Tone::Failure, ..notice }
+    let always = event
+        .get("always")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    NoticeView {
+        emphasis: tone == Tone::Failure,
+        always,
+        ..notice
+    }
 }
 
 /// `kind == "encoder"` (de-duplicated against the engine's own failure).
@@ -115,5 +137,23 @@ mod tests {
         assert!(encoder.emphasis, "a failure transforms the island");
         assert!(!game.emphasis && !waiting.emphasis, "session changes keep the plain swap");
         assert!(is_encoder_notice(&json!({"kind":"encoder"})) && !is_encoder_notice(&json!({"kind":"game"})));
+    }
+
+    #[test]
+    fn shortcut_pop_ups_are_neutral_refusals_fail_and_only_always_is_forced() {
+        let on = session_notice(
+            &json!({"kind":"shortcut","title":"Performance stats on","detail":"Shows over your game"}),
+        );
+        assert_eq!(
+            (on.tone, on.emphasis, on.always),
+            (Tone::Neutral, false, false)
+        );
+        let refused = session_notice(
+            &json!({"kind":"refused","title":"Bookmark not added","detail":"Recording is paused"}),
+        );
+        assert_eq!((refused.tone, refused.emphasis), (Tone::Failure, true));
+        assert!(
+            session_notice(&json!({"kind":"shortcut","title":"Overlay off","always":true})).always
+        );
     }
 }

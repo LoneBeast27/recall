@@ -104,6 +104,18 @@ pub fn notice_json(s: &Situation) -> String {
     json!({"type": "notice", "kind": s.kind(), "title": s.title(), "detail": s.detail()}).to_string()
 }
 
+/// A shortcut's pop-up (`session` `notice`, kind `shortcut`, or `refused`
+/// when it could not act). `always` shows it even with notices off: the
+/// overlay shortcut's own "Overlay off".
+pub fn shortcut_notice_json(title: &str, detail: &str, refused: bool, always: bool) -> String {
+    let kind = if refused { "refused" } else { "shortcut" };
+    let mut v = json!({"type": "notice", "kind": kind, "title": title, "detail": detail});
+    if always {
+        v["always"] = json!(true);
+    }
+    v.to_string()
+}
+
 /// Follows the session situation and decides which changes are announced.
 #[derive(Debug, Default)]
 pub struct NoticeTracker {
@@ -148,6 +160,37 @@ mod tests {
     use super::*;
     use crate::record_target::Target;
     use serde_json::Value;
+
+    #[test]
+    fn shortcut_notices_name_their_kind_and_only_overlay_off_is_forced() {
+        let ok: Value = serde_json::from_str(&shortcut_notice_json(
+            "Performance stats on",
+            "Shows over your game",
+            false,
+            false,
+        ))
+        .unwrap();
+        assert_eq!(
+            ok,
+            serde_json::json!({"type":"notice","kind":"shortcut","title":"Performance stats on","detail":"Shows over your game"})
+        );
+        let no: Value = serde_json::from_str(&shortcut_notice_json(
+            "Bookmark not added",
+            "Recording is paused",
+            true,
+            false,
+        ))
+        .unwrap();
+        assert_eq!(no["kind"], "refused");
+        let off: Value = serde_json::from_str(&shortcut_notice_json(
+            "Overlay off",
+            "Alt O shows it again",
+            false,
+            true,
+        ))
+        .unwrap();
+        assert_eq!(off["always"], true);
+    }
 
     fn game(name: &str) -> EngineTarget {
         EngineTarget::Window(Target { hwnd: 7, pid: 42, name: name.into(), exe: format!("{name}.exe") })

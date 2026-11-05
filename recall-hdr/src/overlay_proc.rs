@@ -2,7 +2,8 @@
 //! with `--corner <c> --parent <controller pid>` while notices
 //! (`overlay.enabled`) or the stats island (`overlay.stats`) are on (it reads
 //! which from the session status), restarted when the corner changes,
-//! stopped when both are off, killed on quit. The overlay
+//! stopped when both are off (after a short linger when asked, so the
+//! overlay shortcut's "Overlay off" can still show), killed on quit. The overlay
 //! also exits by itself when its `--parent` dies, so a hard-killed controller
 //! never leaves it behind. A crash-looping overlay is respawned at most every
 //! [`RESPAWN_DELAY`] and abandoned after [`MAX_QUICK_EXITS`] quick exits.
@@ -21,6 +22,15 @@ const RESPAWN_DELAY: Duration = Duration::from_secs(5);
 const QUICK_EXIT: Duration = Duration::from_secs(10);
 const MAX_QUICK_EXITS: u32 = 5;
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// How long a process no longer wanted stays up after [`OverlayProc::linger`]:
+/// long enough for a notice to show.
+pub const LINGER: Duration = Duration::from_secs(4);
+
+/// Whether a process the config no longer wants still runs: only until the
+/// linger ends.
+fn lingering(stop_at: Option<Instant>, now: Instant) -> bool {
+    stop_at.is_some_and(|t| now < t)
+}
 
 /// The overlay's command-line arguments.
 pub fn overlay_args(corner: &str, parent_pid: u32) -> Vec<String> {
@@ -32,6 +42,8 @@ pub struct OverlayProc {
     child: Option<(Child, String, Instant)>,
     quick_exits: u32,
     not_before: Option<Instant>,
+    /// Keep a no-longer-wanted process up until then ([`LINGER`]).
+    stop_at: Option<Instant>,
 }
 
 impl OverlayProc {
@@ -44,7 +56,13 @@ impl OverlayProc {
         if exe.is_none() {
             log!("overlay: recall-overlay.exe not found; overlay toasts unavailable");
         }
-        OverlayProc { exe, child: None, quick_exits: 0, not_before: None }
+        OverlayProc {
+            exe,
+            child: None,
+            quick_exits: 0,
+            not_before: None,
+            stop_at: None,
+        }
     }
 
     /// Whether the overlay process is alive right now.
@@ -55,13 +73,28 @@ impl OverlayProc {
 
     /// Converge on `cfg`: spawn, respawn (corner change / crash), or stop.
     /// Call on config change and every pump tick.
+    /// The next config that stops the process waits [`LINGER`] first.
+    pub fn linger(&mut self) {
+        self.stop_at = Some(Instant::now() + LINGER);
+    }
+
+    /// When a lingering process is due to stop (for the pump's wait).
+    pub fn deadline(&self) -> Option<Instant> {
+        self.stop_at.filter(|_| self.child.is_some())
+    }
+
     pub fn sync(&mut self, cfg: &OverlayCfg) {
         self.reap();
         if !cfg.wants_process() {
+            if self.child.is_some() && lingering(self.stop_at, Instant::now()) {
+                return;
+            }
+            self.stop_at = None;
             self.stop();
             self.quick_exits = 0;
             return;
         }
+        self.stop_at = None;
         if let Some((_, corner, _)) = &self.child {
             if *corner == cfg.corner {
                 return;
@@ -150,11 +183,49 @@ mod tests {
 
     #[test]
     fn disabled_or_missing_exe_never_spawns() {
-        let mut o = OverlayProc { exe: None, child: None, quick_exits: 0, not_before: None };
+        let mut o = OverlayProc {
+            exe: None,
+            child: None,
+            quick_exits: 0,
+            not_before: None,
+            stop_at: None,
+        };
         o.sync(&OverlayCfg { enabled: true, ..OverlayCfg::default() });
         assert!(!o.running(), "no exe -> nothing spawned");
         o.sync(&OverlayCfg::default());
         assert!(!o.running());
+    }
+
+    #[test]
+    fn a_lingering_process_outlives_the_off_switch_until_the_notice_ends() {
+        let now = Instant::now();
+        assert!(
+            lingering(Some(now + LINGER), now),
+            "Overlay off with stats off: still up"
+        );
+        assert!(lingering(
+            Some(now + LINGER),
+            now + LINGER - Duration::from_millis(1)
+        ));
+        assert!(
+            !lingering(Some(now + LINGER), now + LINGER),
+            "then it stops"
+        );
+        assert!(!lingering(None, now), "no linger asked: stops at once");
+        let mut o = OverlayProc {
+            exe: None,
+            child: None,
+            quick_exits: 0,
+            not_before: None,
+            stop_at: None,
+        };
+        o.linger();
+        assert_eq!(o.deadline(), None, "no process, nothing to wake for");
+        o.sync(&OverlayCfg {
+            enabled: true,
+            ..OverlayCfg::default()
+        });
+        assert_eq!(o.stop_at, None, "wanted again: the linger is cancelled");
     }
 
     #[test]

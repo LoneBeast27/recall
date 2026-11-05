@@ -18,6 +18,7 @@ fn defaults_are_one_direct_alt_combo_per_action() {
             (HotkeyAction::Screenshot, "Alt+S"),
             (HotkeyAction::Record, "Alt+L"),
             (HotkeyAction::Stats, "Alt+P"),
+            (HotkeyAction::Overlay, "Alt+O"),
         ]
     );
 }
@@ -38,7 +39,7 @@ fn defaults_avoid_combos_games_and_overlays_use() {
 fn defaults_do_not_conflict_with_each_other_or_the_hdr_key() {
     let (keep, warnings) = split_conflicts(bindings(&rec(), Some("Ctrl+Alt+H")));
     assert!(warnings.is_empty(), "{warnings:?}");
-    assert_eq!(keep.len(), 7);
+    assert_eq!(keep.len(), 8);
     assert!(validate(&rec()).is_ok());
 }
 
@@ -66,7 +67,7 @@ fn direct_combos_stay_configurable() {
 #[test]
 fn optional_combos_can_be_turned_off() {
     let mut r = rec();
-    for slot in [&mut r.bookmark_hotkey, &mut r.screenshot_hotkey, &mut r.record_hotkey, &mut r.stats_hotkey] {
+    for slot in [&mut r.bookmark_hotkey, &mut r.screenshot_hotkey, &mut r.record_hotkey, &mut r.stats_hotkey, &mut r.overlay_hotkey] {
         slot.clear();
     }
     let actions: Vec<HotkeyAction> = bindings(&r, None).iter().map(|b| b.action).collect();
@@ -153,6 +154,24 @@ fn chord_era_defaults_never_take_a_combo_already_in_use() {
     assert_eq!(r.record_hotkey, "Alt+B");
     assert_eq!(r.bookmark_hotkey, "", "Alt+B is the record key's, so bookmark stays off");
     assert!(validate(&r).is_ok());
+}
+
+#[test]
+fn a_new_default_never_takes_a_combo_the_file_already_uses() {
+    let r = load("[recording]\nbookmark_hotkey = \"Alt+O\"\nstats_hotkey = \"Alt+P\"\n");
+    assert_eq!(r.bookmark_hotkey, "Alt+O");
+    assert_eq!(
+        r.overlay_hotkey, "",
+        "Alt+O is the bookmark's: the overlay shortcut starts off"
+    );
+    assert!(validate(&r).is_ok(), "so Settings can still save");
+    let free = load("[recording]\nbookmark_hotkey = \"Alt+B\"\n");
+    assert_eq!(free.overlay_hotkey, "Alt+O", "free: the default stays");
+    let set = load("[recording]\noverlay_hotkey = \"Alt+O\"\nmic_hotkey = \"Alt+O\"\n");
+    assert_eq!(
+        set.overlay_hotkey, "Alt+O",
+        "a key the file names is never touched"
+    );
 }
 
 #[test]
