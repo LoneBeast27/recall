@@ -89,6 +89,7 @@ impl Root {
                 _ => return,
             },
             _ => match key {
+                "escape" if self.settings_ui.quality_preview.is_some() => self.settings_ui.quality_preview = None,
                 "escape" => self.go(Route::Library),
                 _ => return,
             },
