@@ -405,6 +405,8 @@ pub(crate) fn load_from(path: &std::path::Path) -> Config {
         Ok(mut cfg) => {
             // Legacy single `save_hotkey` -> `save_hotkeys` presets.
             crate::record_hotkeys::migrate_loaded(&mut cfg.recording, &text);
+            // Old audio keys -> `audio_sources`.
+            crate::record_audio_sources::migrate_loaded(&mut cfg.recording, &text);
             cfg
         }
         Err(e) => {

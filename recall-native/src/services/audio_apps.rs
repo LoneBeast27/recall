@@ -1,9 +1,13 @@
-//! Apps for Settings → Clip → Audio → App audio: the apps that have a sound session on any
-//! active output right now ("Add app…"), and the name to show for an exe ("Browse…").
-//! Listed when the person opens the menu, on a thread of its own (COM lives and dies there).
+//! Apps for the Audio page's app sources: the apps that have a sound session on any active
+//! output right now, with their names and icons, and the entry for an exe picked by hand.
+//! Listed while the Audio page is open, on a thread of its own (COM lives and dies there).
 //! Nothing here runs before first paint.
 
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Arc;
+
+use gpui::RenderImage;
 
 use windows::Win32::Foundation::{CloseHandle, S_OK};
 use windows::Win32::Media::Audio::{
@@ -15,7 +19,7 @@ use windows::Win32::System::Com::{CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInst
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW};
 use windows::core::{HSTRING, Interface, PWSTR};
 
-/// Longest track name Settings stores (the controller refuses more).
+/// Longest track name the Audio page stores (the controller refuses more).
 pub const LABEL_MAX: usize = 64;
 
 /// An app as Settings shows and stores it.
@@ -25,15 +29,37 @@ pub struct PlayingApp {
     pub exe: String,
     /// The app's own name (its file description), else the exe name without `.exe`.
     pub label: String,
+    /// Full path of the exe ("" when unknown).
+    pub path: String,
 }
 
-/// Load state of the "Add app…" list; fetched again each time the menu opens.
-#[derive(Debug, Default)]
-pub enum PlayingApps {
-    #[default]
-    NotLoaded,
-    Loading,
-    Ready(Vec<PlayingApp>),
+/// The playing apps and an icon per exe (lowercase), including the saved app sources that run.
+#[derive(Clone, Default)]
+pub struct AppList {
+    pub apps: Vec<PlayingApp>,
+    pub icons: HashMap<String, Arc<RenderImage>>,
+}
+
+/// `list_blocking` plus icons for those apps and for the running exes in `saved`. Blocks: call
+/// from a background task.
+pub fn list_with_icons_blocking(saved: &[String]) -> AppList {
+    let apps = list_blocking();
+    let mut icons = HashMap::new();
+    let mut paths: Vec<(String, String)> = apps.iter().map(|a| (a.exe.to_lowercase(), a.path.clone())).collect();
+    for exe in saved {
+        let key = exe.trim().to_lowercase();
+        if !paths.iter().any(|(e, _)| *e == key)
+            && let Some(path) = crate::services::process_tree::tree_root(exe).and_then(image_path)
+        {
+            paths.push((key, path));
+        }
+    }
+    for (exe, path) in paths.into_iter().filter(|(_, p)| !p.is_empty()) {
+        if let Some(icon) = crate::services::app_icons::icon_for(Path::new(&path)) {
+            icons.insert(exe, icon);
+        }
+    }
+    AppList { apps, icons }
 }
 
 /// Apps with a sound session on an active output, by name, without Recall itself. Blocks:
@@ -112,7 +138,7 @@ fn image_path(pid: u32) -> Option<String> {
 pub fn app_from_path(path: &Path) -> PlayingApp {
     let exe = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
     let label = file_description(path).unwrap_or_else(|| exe_stem(&exe));
-    PlayingApp { exe, label: clip_label(&label) }
+    PlayingApp { exe, label: clip_label(&label), path: path.to_string_lossy().into_owned() }
 }
 
 /// `player.exe` → `player`.

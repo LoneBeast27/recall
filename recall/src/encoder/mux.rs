@@ -95,7 +95,9 @@ fn encode_tracks(audio: &[AudioPcm], abort: &AtomicBool) -> Result<Vec<AacTrack>
             .map(|pcm| {
                 scope.spawn(move || {
                     crate::thread_qos::eco_background();
-                    encode_aac(pcm, abort).map_err(|e| format!("audio track '{}': {e}", pcm.name))
+                    // A source above 0 dB can pass full scale: limit it, never a hard clip in the encode.
+                    let limited = pcm.boosted.then(|| pcm.limited());
+                    encode_aac(limited.as_ref().unwrap_or(pcm), abort).map_err(|e| format!("audio track '{}': {e}", pcm.name))
                 })
             })
             .collect();
@@ -243,7 +245,7 @@ pub(crate) fn encode_aac_with(pcm: &AudioPcm, abort: &AtomicBool, coder: AacCode
 
     Ok(AacTrack {
         rate: pcm.rate,
-        title: crate::audio::track_title(pcm.name),
+        title: pcm.title,
         source: pcm.source,
         encoder: enc,
         packets,
