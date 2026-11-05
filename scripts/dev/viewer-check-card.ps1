@@ -128,7 +128,7 @@ Run-Scenario 'card: scrolling the tile off screen ends the rename' {
   Verdict @((Ok ($still.field -eq 'Rename') 'open before the scroll'), (Ok ([bool]$ended) 'ended with the tile off screen'), (Ok ($u.titles -contains 'a') 'title saved'), (Keys-Alive $s))
 }
 
-Run-Scenario 'card: closing a menu by clicking a tile does not open the tile' {
+Run-Scenario 'card: closing a menu by clicking a tile does not select the tile' {
   $s = $script:current = Start-Viewer 'menu' $clips.short -Library -Also 'menu-b'
   RightClick $s (Tile 'menu')
   $open = UI $s
@@ -138,7 +138,7 @@ Run-Scenario 'card: closing a menu by clicking a tile does not open the tile' {
   $sort = UI $s
   Click $s (Tile 'menu-b')
   $v = UI $s
-  Verdict @((Ok ($open.tile_menu -eq $true) 'right-click opens the menu'), (Ok ($u.tile_menu -eq $false) 'click closes it'), (Ok ($sort.sort_open -eq $true) 'sort menu opens'), (Ok ($v.sort_open -eq $false) 'click closes it'), (In-Library $s))
+  Verdict @((Ok ($open.tile_menu -eq $true) 'right-click opens the menu'), (Ok ($u.tile_menu -eq $false) 'click closes it'), (Ok ($sort.sort_open -eq $true) 'sort menu opens'), (Ok ($v.sort_open -eq $false) 'click closes it'), (Ok ($u.selected -eq 0 -and $v.selected -eq 0) "the closing click selects nothing ($($u.selected), $($v.selected))"), (In-Library $s))
 }
 
 Run-Scenario 'card: the sort menu closes every way it can' {
@@ -167,20 +167,55 @@ Run-Scenario 'card: Escape steps back from the delete question' {
     (Ok ($left.confirm_delete -eq $false) 'leaving the page drops the question'))
 }
 
-Run-Scenario 'card: the second click of a double-click hits nothing in the editor' {
-  $names = 1..23 | ForEach-Object { "dbl-$_" }
-  $s = $script:current = Start-Viewer 'dbl' $clips.short -Library -Also $names
-  # A tile low on the page: the editor's timeline is under it.
-  $tile = (Last $s).targets.PSObject.Properties | Where-Object { $_.Name -like 'tile:*' -and $_.Value[1] -gt 420 } | Sort-Object { -$_.Value[0] } | Select-Object -First 1
-  if (-not $tile) { throw 'no tile low enough on the page' }
-  $x = [int]($tile.Value[0] + $tile.Value[2] / 2); $y = [int]($tile.Value[1] + $tile.Value[3] * 0.8)
+# A plain double-click at a client point. Recall's window has no CS_DBLCLKS style, so Windows sends
+# two plain presses and GPUI counts them (it ignores WM_LBUTTONDBLCLK).
+function DoubleClickAt($s, [int]$x, [int]$y) {
   Mouse $s 0x200 $x $y 0; Start-Sleep -Milliseconds 40
   Mouse $s 0x201 $x $y 1; Start-Sleep -Milliseconds 20; Mouse $s 0x202 $x $y 0; Start-Sleep -Milliseconds 90
-  Mouse $s 0x203 $x $y 1; Start-Sleep -Milliseconds 20; Mouse $s 0x201 $x $y 1; Start-Sleep -Milliseconds 20; Mouse $s 0x202 $x $y 0
+  Mouse $s 0x201 $x $y 1; Start-Sleep -Milliseconds 20; Mouse $s 0x202 $x $y 0
+}
+
+Run-Scenario 'card: a click selects only that clip and Enter opens it' {
+  $s = $script:current = Start-Viewer 'pick' $clips.short -Library -Also 'pick-b'
+  Click $s (Tile 'pick')
+  $one = Settle $s 200
+  Click $s (Tile 'pick-b')
+  $other = Settle $s 200
+  $bar = $null -ne $other.targets.'sel-open'
+  Key $s 'enter'
+  $open = Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.clip -like '*pick-b.mp4' } 30000
+  Verdict @((Ok ($one.route -eq 'library' -and $one.ui.selected -eq 1) "a click selects and stays in the library ($($one.ui.selected) selected, route $($one.route))"),
+    (Ok ($other.ui.selected -eq 1) "another click moves the selection ($($other.ui.selected) selected)"), (Ok $bar 'the selection bar offers Open'), (Ok ([bool]$open) 'Enter opens the selected clip'))
+}
+
+Run-Scenario 'card: a double-click renames and does not open the clip' {
+  $s = $script:current = Start-Viewer 'dblname' $clips.short -Library -Also 'dblname-b'
+  $t = Target $s (Tile 'dblname')
+  DoubleClickAt $s $t.X ([int]($t.Top + $t.Height * 0.4))
+  $on = Wait-Trace $s { param($r) $r.ui.field -eq 'Rename' } 1500
+  Key $s 'a'; Key $s 'b'; Key $s 'enter'
+  $u = UI $s
+  $r = Settle $s 300
+  # The renamed clip stays selected (no search box then): Escape reaching the page clears it.
+  Key $s 'escape'
+  $esc = UI $s
+  Verdict @((Ok ([bool]$on) 'a double-click opens the title field'), (Ok ($r.route -eq 'library') "still in the library (route $($r.route))"), (Closed $u), (Ok ($u.titles -contains 'ab') "Enter saves the title ($($u.titles -join ', '))"),
+    (Ok ($u.selected -eq 1 -and $esc.selected -eq 0) "the clip stays selected, Escape clears it ($($u.selected) -> $($esc.selected))"), (Keys-Alive $s))
+}
+
+Run-Scenario 'card: the second click of a double-click on Play hits nothing in the editor' {
+  $names = 1..23 | ForEach-Object { "dbl-$_" }
+  $s = $script:current = Start-Viewer 'dbl' $clips.short -Library -Also $names
+  # A tile low on the page: the second press lands on the editor's lower half.
+  $tile = (Last $s).targets.PSObject.Properties | Where-Object { $_.Name -like 'tile:*' -and $_.Value[1] -gt 420 } | Sort-Object { -$_.Value[1] }, { -$_.Value[0] } | Select-Object -First 1
+  if (-not $tile) { throw 'no tile low enough on the page' }
+  Hover $s $tile.Name
+  $play = Target $s 'tile-open'
+  DoubleClickAt $s $play.X $play.Y
   $r = Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.ready -and $r.clip } 30000
   $r = Settle $s 200
   $tracks = Target $s 'tracks'
-  Verdict @((Ok ([bool]$r) 'one double-click opens the clip'), (Ok ($y -gt $tracks.Top) "the click point ($y) is on the timeline (from $($tracks.Top))"), (Ok ([double]$r.pos -lt 0.01 -and -not $r.drag) "playhead stayed at $(Fmt $r.pos)s"))
+  Verdict @((Ok ([bool]$r) "one double-click on Play opens the clip (second press at y $($play.Y), timeline from $($tracks.Top))"), (Ok ([double]$r.pos -lt 0.01 -and -not $r.drag -and -not $r.playing) "playhead stayed at $(Fmt $r.pos)s, not playing"))
 }
 
 Run-Scenario 'editor: a press on a handle or the timeline is no edit' {
@@ -257,7 +292,7 @@ Run-Scenario 'editor: Cancel export stops it and leaves nothing behind' {
 Run-Scenario 'editor: undoing every edit clears Edited' {
   $s = $script:current = Start-Viewer 'undone' $clips.short -Library
   $file = "$($s.Clip).recall-edit.json"
-  Click $s (Tile 'undone')
+  Open-Tile $s (Tile 'undone')
   [void](Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.ready -and $r.clip } 30000)
   Key $s 'l' 1; [void](Settle $s 200); Key $s 'i'; [void](Settle $s 1000)
   Key $s 'escape'
@@ -265,7 +300,7 @@ Run-Scenario 'editor: undoing every edit clears Edited' {
   $t = Get-Date; while (-not (Test-Path $file) -and ((Get-Date) - $t).TotalSeconds -lt 5) { Start-Sleep -Milliseconds 100 }
   $edited = UI $s
   $wrote = Test-Path $file
-  Click $s (Tile 'undone')
+  Open-Tile $s (Tile 'undone')
   [void](Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.targets.'t-undo' } 3000)
   Click $s 't-undo'; [void](Settle $s 200)
   Key $s 'escape'
@@ -281,7 +316,7 @@ function Check-ForeignSidecar($s, [byte[]]$bytes, [switch]$Lock) {
   $file = "$($s.Clip).recall-edit.json"
   [IO.File]::WriteAllBytes($file, $bytes)
   $held = if ($Lock) { [IO.File]::Open($file, 'Open', 'Read', 'None') }
-  Click $s (Tile $s.Name)
+  Open-Tile $s (Tile $s.Name)
   $open = Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.ready -and $r.clip } 30000
   $warned = (Settle $s).warning
   if ($held) { $held.Dispose() }
@@ -309,13 +344,13 @@ Run-Scenario 'editor: an exported clip keeps its edit file when the edits are un
   $exports = Join-Path (Split-Path $s.Clip) 'exports'
   New-Item -ItemType Directory -Force $exports | Out-Null
   [IO.File]::WriteAllBytes((Join-Path $exports 'kept-trim-1.mp4'), [byte[]](0))
-  Click $s (Tile 'kept')
+  Open-Tile $s (Tile 'kept')
   [void](Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.ready -and $r.clip } 30000)
   Key $s 'l' 1; [void](Settle $s 200); Key $s 'i'; [void](Settle $s 1000)
   Key $s 'escape'
   [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 1000)
   $t = Get-Date; while (-not (Test-Path $file) -and ((Get-Date) - $t).TotalSeconds -lt 5) { Start-Sleep -Milliseconds 100 }
-  Click $s (Tile 'kept')
+  Open-Tile $s (Tile 'kept')
   [void](Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.targets.'t-undo' } 3000)
   Click $s 't-undo'; [void](Settle $s 200)
   Key $s 'escape'

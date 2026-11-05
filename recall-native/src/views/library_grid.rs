@@ -1,5 +1,6 @@
 //! Library grid: the virtualized day-grouped list, thumbnail tiles (hover scrub,
-//! drag-out, rename, right-click menu in `tile_menu.rs`) and their hover actions.
+//! drag-out, rename, right-click menu in `tile_menu.rs`) and their hover actions. Clicks select
+//! (`library_select.rs`); a double-click renames.
 use std::path::PathBuf;
 
 use gpui::{
@@ -307,14 +308,19 @@ impl Root {
                     }
                 }
             }))
-            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+            // A click selects (library_select.rs); a plain double-click renames. Opening is Enter,
+            // the play button, the selection bar's Open or the menu.
+            .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                 if this.press_dismisses {
                     return;
                 }
                 let modifiers = event.modifiers();
-                if this.lib.click(&open_path, modifiers.control, modifiers.shift) {
-                    this.open_clip(open_path.clone());
-                    this.opened_by_click = true;
+                let plain = !modifiers.control && !modifiers.shift;
+                if plain && event.click_count() == 2 {
+                    this.lib.click(&open_path, false, false);
+                    this.begin_rename(open_path.clone(), window);
+                } else {
+                    this.lib.click(&open_path, modifiers.control, modifiers.shift);
                 }
                 cx.notify();
             }))
@@ -331,6 +337,7 @@ impl Root {
     }
 
     fn render_tile_actions(&self, path: &str, favourite: bool, cx: &mut Context<Self>) -> AnyElement {
+        let open_path = path.to_owned();
         let fav_path = path.to_owned();
         let folder_path = path.to_owned();
         let rename_path = path.to_owned();
@@ -341,6 +348,12 @@ impl Root {
             .right(px(6.))
             .flex()
             .gap(px(4.))
+            .child(tile_action("tile-open", Icon::Play).on_click(cx.listener(move |this, _, _, cx| {
+                this.open_clip(open_path.clone());
+                this.opened_by_click = true;
+                cx.stop_propagation();
+                cx.notify();
+            })))
             .child(tile_action("tile-fav", if favourite { Icon::StarFill } else { Icon::Star }).on_click(cx.listener(move |this, _, _, cx| {
                 this.lib.toggle_favourite(std::slice::from_ref(&fav_path));
                 cx.stop_propagation();

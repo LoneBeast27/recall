@@ -47,7 +47,9 @@ powershell -NoProfile -File scripts\install.ps1
   rename, delete to the Recycle Bin, drag a clip into Discord or copy it. Right-click a tile for
   Open, Favourite, Rename, Copy, Show in folder and Delete (on the whole selection when the tile
   is selected; Delete asks first and takes thumbnails, edits and bookmarks along). Renaming saves on
-  Enter, Tab or a click anywhere else; Esc keeps the old title. Click a tile to edit:
+  Enter, Tab or a click anywhere else; Esc keeps the old title. A click selects one tile,
+  Shift+click selects the run from the last clicked tile, Ctrl+click adds or removes one, and a
+  double-click renames. Open a clip with Enter, the tile's play button or the menu to edit it:
   trim, split, cut, per-track volume, slow motion or speed-up per section, then export
   (re-encode or instant lossless trim, frame rate, resolution, size limit such as 10 MB for
   Discord). Edits live in a small file beside the clip and apply only on export, so the original
