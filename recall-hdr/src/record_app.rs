@@ -16,8 +16,8 @@
 //! - Pause (tray "Stop recording" / pipe `pause`): the engine stops at once
 //!   (no linger) -- after a running long recording is stopped and saved (up
 //!   to 10 s) -- games are ignored and capture actions are refused until
-//!   resume; runtime only. Hotkeys + the advanced chord: `record_actions`,
-//!   `record_hotkeys`, `record_chord`. Saves / long recording in flight defer
+//!   resume; runtime only. Hotkeys: `record_actions`,
+//!   `record_hotkeys`. Saves / long recording in flight defer
 //!   settings restarts and retargets (`record_activity`); the storage cap
 //!   runs in `record_storage`.
 
@@ -39,7 +39,6 @@ use crate::liveness::ProcessWatch;
 use crate::log;
 use crate::overlay_proc::OverlayProc;
 use crate::record_activity::{EngineActivity, PendingPause};
-use crate::record_chord::Chord;
 use crate::record_config::{parse_cpu_mask, ConfigStore};
 use crate::record_detect::Follow;
 pub(crate) use crate::record_env::apply_affinity;
@@ -125,10 +124,6 @@ pub struct Controller {
     /// Pause asked during a long recording: waiting for it to stop.
     pub(crate) pending_pause: Option<PendingPause>,
     pub(crate) janitor: Janitor,
-    /// The advanced-shortcut chord window.
-    pub(crate) chord: Chord,
-    /// How the leader reads on this keyboard layout ("Alt `").
-    pub(crate) leader_label: String,
     /// Recall Island notices for recording changes (`record_notice`).
     pub(crate) notices: NoticeTracker,
     /// This token may start the overlay's frame-timing ETW session
@@ -224,8 +219,6 @@ pub fn run() -> i32 {
         drain_clock: Default::default(),
         pending_pause: None,
         janitor,
-        chord: Chord::new(Duration::from_millis(1_500), global_hotkey::hotkey::Modifiers::ALT),
-        leader_label: String::new(),
         notices: NoticeTracker::new(),
         can_trace,
         render: RenderCheck::new(can_trace),
@@ -237,13 +230,11 @@ pub fn run() -> i32 {
     ctl.overlay.sync(&ctl.cfg.overlay);
     ctl.probe_foreground(now, true);
     log!(
-        "record: controller up (auto_record={}, buffer={}s, save={}, mic={}, advanced={} via {}, out={:?}, storage cap={} GiB)",
+        "record: controller up (auto_record={}, buffer={}s, save={}, mic={}, out={:?}, storage cap={} GiB)",
         ctl.cfg.recording.auto_record,
         ctl.cfg.recording.buffer_secs,
         ctl.cfg.recording.save_hotkey,
         ctl.cfg.recording.mic_hotkey,
-        ctl.cfg.hotkeys.advanced_enabled,
-        ctl.leader_label,
         ctl.cfg.recording.output_dir,
         ctl.cfg.storage.cap_gb
     );
@@ -297,7 +288,6 @@ impl Controller {
             self.tracker.next_deadline(),
             self.planner.linger_deadline(),
             self.hdr.next_deadline(),
-            self.chord.deadline(),
             self.janitor.next_deadline(),
         ]
         .into_iter()
@@ -309,13 +299,12 @@ impl Controller {
         record_engine::wanted(self.tracker.current(), self.pinned.as_ref(), &self.cfg.recording, self.paused)
     }
 
-    /// Engine events -> chord -> liveness (process + window) -> followed
+    /// Engine events -> liveness (process + window) -> followed
     /// foreground -> target -> engine -> HDR ->
     /// fresh-engine intents -> deferred restart / storage -> overlay -> status
     /// (+ island notices).
     fn tick(&mut self, now: Instant) {
         self.drain_engine_events(now);
-        self.chord_tick(now);
         if let Some(pid) = self.pin_watch.poll(self.pinned.as_ref().map(|t| t.pid)) {
             log!("record: pinned target's process {pid} exited; auto-detection resumes");
             self.pinned = None;

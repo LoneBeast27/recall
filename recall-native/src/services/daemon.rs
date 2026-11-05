@@ -100,11 +100,8 @@ pub struct SessionStatus {
     pub bookmark_hotkey: String,
     pub screenshot_hotkey: String,
     pub record_hotkey: String,
-    /// Two-step shortcuts (leader, then 1-4).
-    pub advanced_enabled: bool,
-    /// "Alt `" (physical key left of 1).
-    pub leader_label: String,
-    pub chord_save_seconds: u32,
+    /// Shows / hides the performance-stats island ("" = off).
+    pub stats_hotkey: String,
     pub long_recording: LongRecording,
     /// A setting change waits for a save or long recording to finish.
     pub pending_restart: bool,

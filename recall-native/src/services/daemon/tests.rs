@@ -154,12 +154,11 @@ fn hotkey_and_recording_events_and_session_fields() {
             DaemonEvent::ClipMoveFailed { path: "E:/a.mp4".into(), reason: "disk full".into() },
         ]
     );
-    apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"recording","paused":false,"advanced_enabled":true,
-        "leader_label":"Alt `","chord_save_seconds":30,"long_recording":{"active":true,"path":"E:/rec.mp4","started_secs":1792621900.0}}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"recording","paused":false,
+        "stats_hotkey":"Alt+P","long_recording":{"active":true,"path":"E:/rec.mp4","started_secs":1792621900.0}}}));
     let session = state.snapshot.session.clone().unwrap();
-    assert!(session.advanced_enabled && session.long_recording.active);
-    assert_eq!(session.leader_label, "Alt `");
-    assert_eq!(session.chord_save_seconds, 30);
+    assert!(session.long_recording.active);
+    assert_eq!(session.stats_hotkey, "Alt+P");
 }
 
 #[test]
