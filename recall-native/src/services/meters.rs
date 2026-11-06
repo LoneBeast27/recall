@@ -141,6 +141,13 @@ impl Drop for Meters {
     }
 }
 
+/// A level measured before the gain, as it sounds after it: silence stays silence, anything
+/// else moves by the gain and stays in -90..+12 dB. The page applies this to the bar, the
+/// peak-hold line and the number alike, so all three follow the fader together.
+pub fn with_gain(db: f32, gain_db: f32) -> f32 {
+    if db <= FLOOR_DB { FLOOR_DB } else { (db + gain_db).clamp(FLOOR_DB, 12.0) }
+}
+
 /// Maps dB to a 0..1 bar fraction over a -60..0 dB scale.
 pub fn bar_fraction(db: f32) -> f32 {
     ((db + 60.0) / 60.0).clamp(0.0, 1.0)
@@ -171,20 +178,32 @@ fn meter_thread(shared: &Shared, index: usize) {
     }
 }
 
-/// The named endpoint (exact name first, then whole-word match, like the recorder), or the
-/// Windows default when `name` is "". A named device that is gone reads as missing: the meter
-/// never shows a different device than the one being recorded.
+/// The endpoint the recorder opens for `name` (`recall` `audio.rs` `pick_device`): exact name
+/// first, then a whole-word match, else the Windows default. A saved device that is gone
+/// records from the default, so the meter shows the default too; the strip says "Not connected".
 fn find_device(is_render: bool, name: &str) -> Result<Option<Device>, String> {
     let direction = if is_render { Direction::Render } else { Direction::Capture };
-    if name.is_empty() {
-        return Ok(wasapi::get_default_device(&direction).ok());
+    if !name.is_empty() {
+        let collection = DeviceCollection::new(&direction).map_err(|error| error.to_string())?;
+        let count = collection.get_nbr_devices().map_err(|error| error.to_string())?;
+        let devices: Vec<Device> = (0..count).filter_map(|i| collection.get_device_at_index(i).ok()).collect();
+        let names: Vec<String> = devices.iter().map(|d| d.get_friendlyname().unwrap_or_default()).collect();
+        if let Some(device) = match_endpoint(&names, name).and_then(|i| devices.into_iter().nth(i)) {
+            return Ok(Some(device));
+        }
     }
-    let collection = DeviceCollection::new(&direction).map_err(|error| error.to_string())?;
-    let count = collection.get_nbr_devices().map_err(|error| error.to_string())?;
-    let devices: Vec<Device> = (0..count).filter_map(|i| collection.get_device_at_index(i).ok()).collect();
-    let names: Vec<String> = devices.iter().map(|d| d.get_friendlyname().unwrap_or_default()).collect();
-    let index = names.iter().position(|n| n.trim().eq_ignore_ascii_case(name)).or_else(|| names.iter().position(|n| name_matches(n, name)));
-    Ok(index.and_then(|i| devices.into_iter().nth(i)))
+    Ok(wasapi::get_default_device(&direction).ok())
+}
+
+/// Index of the endpoint `want` names: exact (case-insensitive) first, then the first whole-word
+/// match. A copy of the recorder's `match_endpoint`; both crates test the same table.
+pub fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
+    let want = want.trim();
+    if want.is_empty() {
+        return None;
+    }
+    let want_lower = want.to_lowercase();
+    names.iter().position(|n| n.trim().to_lowercase() == want_lower).or_else(|| names.iter().position(|n| name_matches(n, want)))
 }
 
 /// An audio client for a target, with its event period and, for a process, its pid; `None`
@@ -294,7 +313,8 @@ fn words(text: &str) -> Vec<String> {
 /// Every token must appear as a whole word of the friendly name.
 fn name_matches(name: &str, tokens: &str) -> bool {
     let name_words = words(name);
-    words(tokens).iter().all(|token| name_words.contains(token))
+    let want = words(tokens);
+    !want.is_empty() && want.iter().all(|token| name_words.contains(token))
 }
 
 #[cfg(test)]
@@ -324,6 +344,19 @@ mod tests {
         assert!(!name_matches("Virtual B (Mixer)", "virtual a"), "hub bug: 'a' inside another word");
         assert!(name_matches("Microphone (USB Audio Device)", "microphone usb"));
         assert!(!name_matches("Game Capture HD60", "game mixer"));
+    }
+
+    /// Same table as `recall` `audio_tests.rs`: the meter picks what the recorder records.
+    #[test]
+    fn endpoint_matching_is_whole_word_and_folds_the_slashed_o() {
+        let names: Vec<String> = ["Virtual B (Mixer)", "Virtual A (Mixer)", "Line (Mixér)", "System (MØNITOR)"].map(String::from).to_vec();
+        assert_eq!(match_endpoint(&names, "virtual a"), Some(1), "'a' is not found inside another word");
+        assert_eq!(match_endpoint(&names, "System (MØNITOR)"), Some(3), "exact, non-ASCII");
+        assert_eq!(match_endpoint(&names, "system monitor"), Some(3), "ø typed as o");
+        assert_eq!(match_endpoint(&names, "SYSTEM (mønitor)"), Some(3), "case-insensitive Ø/ø");
+        assert_eq!(match_endpoint(&names, "line mixér"), Some(2));
+        assert_eq!(match_endpoint(&names, "mix"), None, "a part of a word is not a word");
+        assert_eq!(match_endpoint(&names, "  "), None, "empty = Windows default");
     }
 
     #[test]
@@ -363,6 +396,23 @@ mod tests {
         }
         assert_eq!(snapshot.len(), 2);
         assert!(meters.revision() > 0, "threads published readings");
+    }
+
+    #[test]
+    fn gain_moves_bar_hold_and_number_together_and_keeps_silence() {
+        assert_eq!(with_gain(-30.0, 6.0), -24.0);
+        assert_eq!(with_gain(-30.0, -12.5), -42.5);
+        assert_eq!(with_gain(FLOOR_DB, 12.0), FLOOR_DB, "silence is not lifted to -78 dB");
+        assert_eq!(with_gain(-80.0, -60.0), FLOOR_DB, "clamped at the floor");
+        assert_eq!(with_gain(-2.0, 12.0), 10.0);
+        assert_eq!(with_gain(3.0, 12.0), 12.0, "clamped at the top");
+        // A small fader step never makes the bar or the hold line jump: the change is the step.
+        for gain in [-60.0_f32, -20.0, 0.0, 6.5, 12.0] {
+            let (rms, hold) = (-35.0, -18.0);
+            let step = 0.5;
+            assert!((bar_fraction(with_gain(rms, gain + step)) - bar_fraction(with_gain(rms, gain))).abs() <= step / 60.0 + 1e-6);
+            assert!(with_gain(hold, gain) >= with_gain(rms, gain), "hold stays at or above the bar for gain {gain}");
+        }
     }
 
     #[test]

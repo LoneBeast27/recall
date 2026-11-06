@@ -81,3 +81,14 @@ fn escape_cancels_only_a_live_strip_drag() {
     assert!(!escape_cancels_drag("escape", true, true), "Shift+Escape is not a cancel");
     assert!(!escape_cancels_drag("enter", false, true));
 }
+
+#[test]
+fn a_let_go_fader_keeps_its_gain_until_the_save_comes_back() {
+    use std::time::Duration;
+    let ms = Duration::from_millis;
+    assert_eq!(shown_gain(Some(-6.0), Some((3.0, ms(10))), 0.0), -6.0, "dragging wins");
+    assert_eq!(shown_gain(None, Some((-6.0, ms(40))), 0.0), -6.0, "saved list still old: no snap back");
+    assert_eq!(shown_gain(None, Some((-6.0, ms(60))), -6.0), -6.0, "save came back");
+    assert_eq!(shown_gain(None, Some((-6.0, PENDING_GAIN_FOR)), 0.0), 0.0, "a save that never lands gives way");
+    assert_eq!(shown_gain(None, None, 4.5), 4.5);
+}

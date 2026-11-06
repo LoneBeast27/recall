@@ -64,7 +64,7 @@ fn default_name(direction: &Direction) -> Option<String> {
 }
 
 /// The row label for a saved device name: "" = the Windows default (named when known); a name
-/// Windows no longer lists = "<name> (not connected)".
+/// that matches no listed endpoint the way the recorder matches it = "<name> (not connected)".
 pub fn device_label(saved: &str, listed: Option<&[String]>, default: Option<&str>) -> String {
     let saved = saved.trim();
     if saved.is_empty() {
@@ -74,7 +74,7 @@ pub fn device_label(saved: &str, listed: Option<&[String]>, default: Option<&str
         };
     }
     match listed {
-        Some(list) if !list.iter().any(|n| n.trim().eq_ignore_ascii_case(saved)) => format!("{saved} (not connected)"),
+        Some(list) if crate::services::meters::match_endpoint(list, saved).is_none() => format!("{saved} (not connected)"),
         _ => saved.to_owned(),
     }
 }
@@ -91,5 +91,6 @@ mod tests {
         assert_eq!(device_label("microphone (usb)", Some(&list), None), "microphone (usb)", "case-insensitive like the engine");
         assert_eq!(device_label("Headset (BT)", Some(&list), None), "Headset (BT) (not connected)");
         assert_eq!(device_label("Headset (BT)", None, None), "Headset (BT)", "not listed yet: no claim either way");
+        assert_eq!(device_label("usb audio microphone", Some(&list), None), "usb audio microphone", "the recorder finds it by its words");
     }
 }
