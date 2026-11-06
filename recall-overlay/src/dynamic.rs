@@ -224,6 +224,10 @@ struct CacheFile {
     /// Spots the user placed with the island editor, per exe stem.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     spots: BTreeMap<String, SavedSpot>,
+    /// When each spot was last placed (the file's `seq` then): the oldest go
+    /// past [`MAX_GAMES`]. A spot with none counts as the oldest.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    spots_seq: BTreeMap<String, u64>,
 }
 
 /// The per-game scans, on disk at `path` (None: in memory only, for tests).
@@ -279,9 +283,17 @@ impl HudCache {
             return;
         }
         match spot.filter(SavedSpot::sane) {
-            Some(spot) => self.file.spots.insert(key.to_string(), spot),
-            None => self.file.spots.remove(key),
-        };
+            Some(spot) => {
+                self.file.seq += 1;
+                self.file.spots.insert(key.to_string(), spot);
+                self.file.spots_seq.insert(key.to_string(), self.file.seq);
+            }
+            None => {
+                self.file.spots.remove(key);
+                self.file.spots_seq.remove(key);
+            }
+        }
+        self.trim();
         self.save();
     }
 
@@ -337,11 +349,19 @@ impl HudCache {
         self.save();
     }
 
-    /// At most [`MAX_GAMES`]: the games scanned longest ago go.
+    /// At most [`MAX_GAMES`] scanned games and [`MAX_GAMES`] placed spots:
+    /// the ones scanned or placed longest ago go.
     fn trim(&mut self) {
         while self.file.games.len() > MAX_GAMES {
             let Some(oldest) = self.file.games.iter().min_by_key(|(_, e)| e.seq).map(|(k, _)| k.clone()) else { break };
             self.file.games.remove(&oldest);
+        }
+        let file = &mut self.file;
+        file.spots_seq.retain(|key, _| file.spots.contains_key(key));
+        while file.spots.len() > MAX_GAMES {
+            let Some(oldest) = file.spots.keys().min_by_key(|k| file.spots_seq.get(*k).copied().unwrap_or(0)).cloned() else { break };
+            file.spots.remove(&oldest);
+            file.spots_seq.remove(&oldest);
         }
     }
 

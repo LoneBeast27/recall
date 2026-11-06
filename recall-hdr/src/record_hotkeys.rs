@@ -234,9 +234,9 @@ pub fn migrate_loaded(rec: &mut RecordingCfg, toml_text: &str) {
     if !has("overlay_hotkey") {
         drop_taken_default(rec, HotkeyAction::Overlay);
     }
-    if !has("editor_hotkey") {
-        drop_taken_default(rec, HotkeyAction::Editor);
-    }
+    // Alt+U is on by default (Rohan asked for it), but never over a combo the
+    // user already gave another action, whether or not the file names it.
+    drop_taken_default(rec, HotkeyAction::Editor);
 }
 
 /// A key the file did not have came in as its serde default: turn it off

@@ -100,6 +100,8 @@ impl Controller {
                     self.reply_error(client, "hud_probe: nothing is being captured");
                 }
             }
+            // The overlay's answer to the island editor shortcut.
+            "island_editor_ack" => self.island_editor_ack(val.get("started").and_then(Value::as_bool).unwrap_or(false)),
             "record_start" => self.engine_command("record_start", client),
             "record_stop" => self.engine_command("record_stop", client),
             "record_toggle" => self.engine_command("record_toggle", client),

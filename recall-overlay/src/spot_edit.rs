@@ -3,13 +3,12 @@
 //! The spot is kept per exe stem (never a window title) in `island-hud.json`
 //! as the pill's centre in monitor fractions plus the edge it hugs.
 //!
-//! Keys while editing (the overlay holds them only while editing): the
-//! arrow keys move the pill (for exclusive fullscreen, where the game locks
-//! or hides the cursor and nothing can be dragged), Enter or the editor shortcut saves, Esc cancels (the old spot stays),
-//! R clears the game's spot (back to automatic) and leaves. The editor also
-//! leaves without saving after [`IDLE`] without input or when the game
-//! loses focus.
-
+//! Mouse only: the editor holds no keyboard keys. Drag the pill; releasing
+//! saves the spot for the game. Right-click on the pill cancels (the spot the
+//! game had before is put back); the pill's ⟲ button clears the spot (back
+//! to automatic). The editor shortcut again, [`IDLE`] without input, [`CAP`]
+//! in all, the game losing focus or the mouse capture lost all leave without
+//! writing anything more.
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -56,10 +55,10 @@ impl SavedSpot {
 /// How close (1440p px, times the island scale) a dragged pill's edge comes
 /// to the monitor's before it snaps to that edge.
 pub const SNAP: f32 = 48.0;
-/// One arrow-key step (1440p px, times the island scale).
-pub const NUDGE: f32 = 40.0;
 /// The editor leaves without saving after this long without input.
 pub const IDLE: Duration = Duration::from_secs(60);
+/// ... and after this long in all, dragging or not.
+pub const CAP: Duration = Duration::from_secs(120);
 
 /// The spot for a pill centred at `(cx, cy)` (screen px) whose shown box is
 /// `(w, h)`, on `monitor`: the nearest edge when the box comes within
@@ -118,15 +117,17 @@ pub fn dynamic_spot(saved: Option<SavedSpot>, choose: impl FnOnce() -> Spot) -> 
     }
 }
 
-/// A key the editor holds while it runs.
+/// How the editor ends (none of these is a key: the editor holds no keys).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EditKey {
-    /// Enter, or the editor shortcut again.
-    Save,
-    /// Esc.
+    /// Right-click on the pill: the spot the game had before the editor is put back.
     Cancel,
-    /// R: back to automatic.
+    /// The pill's ⟲ button: the game's spot is cleared (back to automatic).
     Reset,
+    /// The editor shortcut again, a timeout, focus loss or the mouse capture
+    /// lost: nothing more is written (a drag in progress is dropped; spots
+    /// saved by earlier releases stay).
+    Leave,
 }
 
 /// One editing run for one game.
@@ -134,17 +135,22 @@ pub enum EditKey {
 pub struct Editor {
     /// The game's exe-stem key.
     pub key: String,
-    /// The spot being edited (`None`: automatic until the first drag).
+    /// The spot shown (`None`: automatic until the first drag).
     pub spot: Option<SavedSpot>,
+    /// The game's spot when the editor started (right-click puts it back).
+    original: Option<SavedSpot>,
+    /// The game's spot on disk now (each release writes it).
+    saved: Option<SavedSpot>,
     /// Cursor minus the pill's centre (screen px) while dragging.
     grab: Option<(f32, f32)>,
     last_input: Instant,
+    started: Instant,
 }
 
 impl Editor {
     /// Starts on the game's saved spot (`None`: automatic).
     pub fn new(key: &str, saved: Option<SavedSpot>, now: Instant) -> Self {
-        Self { key: key.to_string(), spot: saved, grab: None, last_input: now }
+        Self { key: key.to_string(), spot: saved, original: saved, saved, grab: None, last_input: now, started: now }
     }
 
     pub fn dragging(&self) -> bool {
@@ -168,37 +174,88 @@ impl Editor {
         changed
     }
 
-    /// An arrow key: the pill (centred at `centre`, screen px) moves by
-    /// `offset` px, snapping near an edge like a drag. True when the spot changed.
-    pub fn nudge(&mut self, offset: (f32, f32), centre: (f32, f32), shown: (f32, f32), monitor: &Rect, snap_px: f32, now: Instant) -> bool {
+    /// The button came up: the dragged spot is the game's from now on.
+    /// `Some(spot)` = write it (None when no drag was under way).
+    pub fn release(&mut self, now: Instant) -> Option<SavedSpot> {
+        self.grab.take()?;
         self.last_input = now;
-        let next = Some(snap((centre.0 + offset.0, centre.1 + offset.1), shown, monitor, snap_px));
-        let changed = next != self.spot;
-        self.spot = next;
-        changed
+        self.saved = self.spot;
+        self.spot
     }
 
-    pub fn release(&mut self, now: Instant) {
-        self.grab = None;
-        self.last_input = now;
+    /// A drag ended without a release (the capture was lost, the button came
+    /// up somewhere the window never heard of): the pill goes back to the
+    /// game's saved spot and nothing is written. True when a drag was dropped.
+    pub fn drop_drag(&mut self) -> bool {
+        if self.grab.take().is_none() {
+            return false;
+        }
+        self.spot = self.saved;
+        true
     }
 
-    /// What a key does: `Some(write)` leaves and writes `write` as the
-    /// game's spot (`None` clears it); `None` leaves and writes nothing.
-    pub fn finish(&self, key: EditKey) -> Option<Option<SavedSpot>> {
-        match key {
-            EditKey::Save => Some(self.spot),
-            EditKey::Cancel => None,
+    /// How the editor ends: `Some(write)` writes `write` as the game's spot
+    /// (`None` clears it); `None` writes nothing.
+    pub fn finish(&self, how: EditKey) -> Option<Option<SavedSpot>> {
+        match how {
+            EditKey::Cancel => (self.saved != self.original).then_some(self.original),
             EditKey::Reset => Some(None),
+            EditKey::Leave => None,
         }
     }
 
-    /// Leave without saving: idle too long (never mid-drag).
+    /// Leave without saving: [`IDLE`] without input (a held, unmoving
+    /// button too: a release that never came), or [`CAP`] since it started.
     pub fn timed_out(&self, now: Instant) -> bool {
-        !self.dragging() && now.saturating_duration_since(self.last_input) >= IDLE
+        now.saturating_duration_since(self.last_input) >= IDLE || now.saturating_duration_since(self.started) >= CAP
+    }
+
+    /// Each tick: `Some(Leave)` when the editor must end. `in_front`: the game
+    /// still has the focus; `captured`: the window still holds the mouse
+    /// capture (only asked while dragging).
+    pub fn watch(&self, now: Instant, in_front: bool, captured: bool) -> Option<EditKey> {
+        let lost_capture = self.dragging() && !captured;
+        (self.timed_out(now) || !in_front || lost_capture).then_some(EditKey::Leave)
     }
 }
 
+/// The window side of the editor: the click-through style and the mouse
+/// capture. Every exit goes through [`end`], so the window always goes back
+/// to click-through.
+pub trait EditWindow {
+    fn set_click_through(&mut self, on: bool);
+    fn release_capture(&mut self);
+}
+
+/// Why the editor may not start, or None. Exclusive fullscreen is refused:
+/// the game owns the screen and the mouse there, so nothing can be dragged.
+pub fn refusal(dynamic: bool, has_game: bool, in_front: bool, exclusive: bool) -> Option<&'static str> {
+    match () {
+        _ if !dynamic => Some("the island is not on Dynamic"),
+        _ if !has_game => Some("no game target"),
+        _ if !in_front => Some("the game is not in front"),
+        _ if exclusive => Some("the game runs in exclusive fullscreen"),
+        _ => None,
+    }
+}
+
+/// Starts the editor unless `refused`; a refusal leaves the window untouched.
+pub fn begin(window: &mut dyn EditWindow, refused: Option<&'static str>, key: &str, saved: Option<SavedSpot>, now: Instant) -> Result<Editor, &'static str> {
+    if let Some(why) = refused {
+        return Err(why);
+    }
+    window.set_click_through(false);
+    Ok(Editor::new(key, saved, now))
+}
+
+/// Ends the editor: the capture is let go, the window is click-through
+/// again, and the answer is what to write for the game (see [`Editor::finish`]).
+pub fn end(window: &mut dyn EditWindow, editor: &mut Editor, how: EditKey) -> Option<Option<SavedSpot>> {
+    editor.drop_drag();
+    window.release_capture();
+    window.set_click_through(true);
+    editor.finish(how)
+}
 /// The spot the island uses now: the one being edited while the editor
 /// runs, else the saved one.
 pub fn effective(editor: Option<&Editor>, saved: Option<SavedSpot>) -> Option<SavedSpot> {

@@ -50,53 +50,138 @@ fn a_saved_spot_wins_over_the_hud_pick() {
 }
 
 #[test]
-fn dragging_moves_the_spot_and_esc_restores_the_old_one() {
+fn dragging_and_releasing_saves_and_right_click_puts_the_old_spot_back() {
     let t0 = Instant::now();
     let old = SavedSpot { x: 0.5, y: 0.0, edge: Edge::Top };
     let mut editor = Editor::new("rocketleague", Some(old), t0);
     assert_eq!(effective(Some(&editor), Some(old)), Some(old), "editing starts where the island is");
     assert!(!editor.drag((100.0, 100.0), (300.0, 44.0), &QHD, SNAP, t0), "no drag before the button goes down");
+    assert_eq!(editor.release(t0), None, "a release with no drag writes nothing");
     editor.press((1290.0, 40.0), (1280.0, 34.0), t0);
     assert!(editor.drag((2390.0, 726.0), (300.0, 44.0), &QHD, SNAP, t0));
     let moved = editor.spot.unwrap();
     assert_eq!((moved.edge, moved.x, moved.y), (Edge::Right, 2380.0 / 2560.0, 0.5), "the grab point is kept");
     assert_eq!(effective(Some(&editor), Some(old)), Some(moved), "the island follows the drag live");
-    editor.release(t0);
-    // Esc: nothing is written and the island goes back to the saved spot.
-    assert_eq!(editor.finish(EditKey::Cancel), None);
-    assert_eq!(effective(None, Some(old)), Some(old));
-    // Enter writes the moved spot; R clears the game's spot.
-    assert_eq!(editor.finish(EditKey::Save), Some(Some(moved)));
-    assert_eq!(editor.finish(EditKey::Reset), Some(None));
+    assert_eq!(editor.release(t0), Some(moved), "releasing saves the spot");
+    assert_eq!(editor.finish(EditKey::Leave), None, "Alt+U after a release writes nothing more (it is saved)");
+    assert_eq!(editor.finish(EditKey::Cancel), Some(Some(old)), "right-click writes the old spot back");
+    assert_eq!(editor.finish(EditKey::Reset), Some(None), "the ⟲ button clears it");
+    let untouched = Editor::new("rocketleague", Some(old), t0);
+    assert_eq!(untouched.finish(EditKey::Cancel), None, "nothing saved yet: nothing to put back");
+}
+
+/// P0-1: a press whose release never arrives (the button came up over
+/// another window, or the capture went elsewhere) must not trap the editor.
+#[test]
+fn a_press_with_no_release_ends_after_the_idle_minute_without_saving() {
+    let t0 = Instant::now();
+    let old = SavedSpot { x: 0.5, y: 0.0, edge: Edge::Top };
+    let mut editor = Editor::new("valorant", Some(old), t0);
+    editor.press((1290.0, 40.0), (1280.0, 34.0), t0);
+    editor.drag((1290.0, 700.0), (300.0, 44.0), &QHD, SNAP, t0);
+    assert!(editor.dragging());
+    assert_eq!(editor.watch(t0 + IDLE - Duration::from_millis(1), true, true), None);
+    assert_eq!(editor.watch(t0 + IDLE, true, true), Some(EditKey::Leave), "held but idle: leave");
+    let mut window = Fake::default();
+    assert_eq!(end(&mut window, &mut editor, EditKey::Leave), None, "the drag is not saved");
+    assert_eq!(editor.spot, Some(old), "the pill goes back to the saved spot");
+    assert!(!editor.dragging() && window.click_through == Some(true) && window.released);
 }
 
 #[test]
-fn the_editor_gives_up_after_a_minute_idle_but_never_mid_drag() {
+fn a_move_without_the_button_drops_the_drag_and_keeps_editing() {
     let t0 = Instant::now();
     let mut editor = Editor::new("valorant", None, t0);
-    assert!(!editor.timed_out(t0 + IDLE - Duration::from_millis(1)));
-    assert!(editor.timed_out(t0 + IDLE));
-    editor.press((0.0, 0.0), (0.0, 0.0), t0);
-    assert!(!editor.timed_out(t0 + IDLE * 2), "holding the pill is not idle");
-    editor.release(t0 + IDLE * 2);
-    assert!(!editor.timed_out(t0 + IDLE * 2 + Duration::from_secs(59)));
+    assert!(!editor.drop_drag(), "nothing to drop");
+    editor.press((1290.0, 40.0), (1280.0, 34.0), t0);
+    editor.drag((1290.0, 700.0), (300.0, 44.0), &QHD, SNAP, t0);
+    assert!(editor.drop_drag());
+    assert_eq!((editor.spot, editor.dragging()), (None, false), "back to automatic, nothing written");
+    assert_eq!(editor.release(t0), None, "a late release saves nothing");
 }
 
 #[test]
-fn arrow_keys_place_the_pill_without_a_mouse() {
-    // Exclusive fullscreen: the game owns the cursor, so the arrows move the pill.
+fn focus_loss_capture_loss_and_the_two_minute_cap_end_the_editor_even_mid_drag() {
     let t0 = Instant::now();
-    let mut editor = Editor::new("rocketleague", None, t0);
-    let shown = (300.0, 44.0);
-    assert!(editor.nudge((NUDGE, 0.0), (1280.0, 720.0), shown, &QHD, SNAP, t0));
-    assert_eq!(editor.spot, Some(SavedSpot { x: 1320.0 / 2560.0, y: 0.5, edge: Edge::Free }));
-    // Walking up to the top edge snaps to it.
-    let mut centre = (1280.0, 720.0);
-    while editor.spot.map(|s| s.edge) != Some(Edge::Top) {
-        centre.1 -= NUDGE;
-        editor.nudge((0.0, -NUDGE), (centre.0, centre.1 + NUDGE), shown, &QHD, SNAP, t0);
-        assert!(centre.1 > 0.0, "reaches the top edge");
+    let mut editor = Editor::new("valorant", None, t0);
+    assert_eq!(editor.watch(t0, true, false), None, "no capture is needed while not dragging");
+    editor.press((0.0, 0.0), (0.0, 0.0), t0);
+    assert_eq!(editor.watch(t0, false, true), Some(EditKey::Leave), "the game lost focus mid-drag");
+    assert_eq!(editor.watch(t0, true, false), Some(EditKey::Leave), "the capture went elsewhere mid-drag");
+    // Moving all along keeps it from idling, but not past the cap.
+    let mut now = t0;
+    while now < t0 + CAP - Duration::from_secs(5) {
+        now += Duration::from_secs(5);
+        editor.drag((now.duration_since(t0).as_secs_f32(), 700.0), (300.0, 44.0), &QHD, SNAP, now);
+        assert_eq!(editor.watch(now, true, true), None, "busy dragging at {:?}", now - t0);
     }
-    assert!(editor.timed_out(t0 + IDLE) && !editor.timed_out(t0 + IDLE - Duration::from_secs(1)), "a key press counts as input");
-    assert_eq!(editor.finish(EditKey::Save), Some(editor.spot), "Enter keeps it");
+    assert_eq!(editor.watch(t0 + CAP, true, true), Some(EditKey::Leave), "120 s from the start, dragging or not");
+}
+
+#[derive(Default)]
+struct Fake {
+    click_through: Option<bool>,
+    released: bool,
+    calls: usize,
+}
+
+impl EditWindow for Fake {
+    fn set_click_through(&mut self, on: bool) {
+        self.click_through = Some(on);
+        self.calls += 1;
+    }
+    fn release_capture(&mut self) {
+        self.released = true;
+        self.calls += 1;
+    }
+}
+
+/// P0-2: exclusive fullscreen (and every other refusal) never touches the window.
+#[test]
+fn a_refusal_leaves_the_window_style_untouched() {
+    let t0 = Instant::now();
+    assert_eq!(refusal(true, true, true, true), Some("the game runs in exclusive fullscreen"));
+    assert_eq!(refusal(true, true, true, false), None);
+    for refused in [refusal(false, true, true, false), refusal(true, false, true, false), refusal(true, true, false, false), refusal(true, true, true, true)] {
+        let mut window = Fake::default();
+        assert!(begin(&mut window, refused, "rocketleague", None, t0).is_err());
+        assert_eq!(window.calls, 0, "{refused:?}: the style is never changed");
+    }
+}
+
+/// Every way out puts the window back to click-through and lets the mouse go.
+#[test]
+fn every_exit_path_restores_click_through() {
+    let t0 = Instant::now();
+    let spot = SavedSpot { x: 0.2, y: 0.0, edge: Edge::Top };
+    type Path = (&'static str, fn(&mut Editor, Instant) -> Option<EditKey>);
+    let paths: [Path; 8] = [
+        ("save then Alt+U", |e, t| {
+            e.press((0.0, 0.0), (0.0, 0.0), t);
+            e.release(t);
+            Some(EditKey::Leave)
+        }),
+        ("right-click cancel", |_, _| Some(EditKey::Cancel)),
+        ("reset button", |_, _| Some(EditKey::Reset)),
+        ("Alt+U", |_, _| Some(EditKey::Leave)),
+        ("idle", |e, t| e.watch(t + IDLE, true, true)),
+        ("focus loss", |e, t| e.watch(t, false, true)),
+        ("120 s cap", |e, t| {
+            e.press((0.0, 0.0), (0.0, 0.0), t + CAP);
+            e.watch(t + CAP, true, true)
+        }),
+        ("capture lost", |e, t| {
+            e.press((0.0, 0.0), (0.0, 0.0), t);
+            e.watch(t, true, false)
+        }),
+    ];
+    for (name, path) in paths {
+        let mut window = Fake::default();
+        let mut editor = begin(&mut window, None, "rocketleague", Some(spot), t0).unwrap();
+        assert_eq!(window.click_through, Some(false), "{name}: editing takes the mouse");
+        let how = path(&mut editor, t0).unwrap_or_else(|| panic!("{name}: the editor must end"));
+        end(&mut window, &mut editor, how);
+        assert_eq!((window.click_through, window.released), (Some(true), true), "{name}: click-through again");
+        assert!(!editor.dragging(), "{name}: no drag left");
+    }
 }
