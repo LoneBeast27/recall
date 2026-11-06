@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use super::super::{Event, Recorder};
-use super::{Cause, PART_GAP, SETTLE};
+use super::{Cause, PART_GAP};
 use crate::longrec::test_sink::{pkt, temp_dir, tracks, Call, FakeFactory, Log, MS};
 
 /// A recording whose part 1 began at the returned instant (keyframe at capture 0),
@@ -25,25 +25,95 @@ fn ms(n: u64) -> Duration {
     Duration::from_millis(n)
 }
 
-/// Merge gate 11-07 (P2): a size flap made a new part per reopen.
+/// Merge gate 11-07 #2 (P1): every reopen while waiting pushed the next part 2 s on, so a
+/// window resized every second never got one (all video and audio dropped).
 #[test]
-fn a_size_flap_inside_ten_seconds_waits_for_the_gap_and_for_the_size_to_settle() {
+fn a_flap_that_never_stops_still_gets_a_part_within_ten_seconds_of_the_first_reopen() {
     let (mut rec, _log, path, t0) = recording("flap");
-    // 1 s into part 1 the window is dragged: part 1 ends, part 2 waits for the 10 s gap.
-    assert!(matches!(rec.encoder_reopened(t0 + ms(1_000), Cause::Size, None).last(), Some(Event::Continued { part: 1, .. })));
-    assert!(rec.video(2_000 * MS, true, pkt(3), false, t0 + ms(2_000)).is_empty(), "no new part within 10 s of the last one");
-    // Still changing at 9.5 s: part 2 waits until the size has held for SETTLE.
-    assert!(rec.encoder_reopened(t0 + ms(9_500), Cause::Size, None).is_empty());
-    assert!(rec.video(10_500 * MS, true, pkt(4), false, t0 + ms(10_500)).is_empty(), "still settling");
-    assert_eq!(ms(9_500) + SETTLE, ms(11_500));
+    let mut started = Vec::new();
+    // From 1 s on the size changes every second, for a minute; keyframes every 500 ms.
+    for step in 2..=120u64 {
+        let at = t0 + ms(step * 500);
+        if step % 2 == 0 {
+            rec.encoder_reopened(at, Cause::Size, None);
+        }
+        for e in rec.video(step * 500 * MS + 100 * MS, true, pkt(step as u8), false, at + ms(100)) {
+            if let Event::PartStarted { part, .. } = e {
+                started.push((part, step * 500 + 100));
+            }
+        }
+    }
+    // Part 1 began at 0, the first reopen came at 1 s: part 2 by 11 s, no sooner than 10 s.
+    assert_eq!(started.first(), Some(&(2, 10_100)), "{started:?}");
+    assert!(started.windows(2).all(|w| w[1].1 - w[0].1 >= 10_000 && w[1].1 - w[0].1 <= 10_600), "one part per ~10 s: {started:?}");
+    assert!(started.len() >= 5, "{started:?}");
     let part2 = path.with_file_name("G__2026-10-22__14-05-09__rec-2.mp4");
-    let events = rec.video(11_500 * MS, true, pkt(5), false, t0 + ms(11_500));
-    assert_eq!(events, vec![Event::PartStarted { path: part2, part: 2, cause: Cause::Size }]);
-    // A reopen of a part older than the gap goes on at the next keyframe.
-    let t = t0 + ms(11_500) + PART_GAP;
-    assert!(matches!(rec.encoder_reopened(t, Cause::Size, None).last(), Some(Event::Continued { part: 2, .. })));
-    assert!(matches!(&rec.video(21_600 * MS, true, pkt(6), false, t)[..], [Event::PartStarted { part: 3, .. }]));
-    assert!(matches!(&rec.stop()[..], [Event::Stopped { parts: 3, .. }]));
+    assert!(part2.is_file() || naming_part(&part2).is_file());
+    assert!(matches!(&rec.stop()[..], [Event::Stopped { .. }]));
+}
+
+fn naming_part(p: &std::path::Path) -> PathBuf {
+    crate::naming::part_of(p)
+}
+
+/// Merge gate 11-07 #2 (P1): the final stop said nothing of the time between parts.
+#[test]
+fn the_final_stop_counts_the_seconds_missed_between_parts() {
+    let (mut rec, _log, _path, t0) = recording("gap");
+    rec.video(1_000 * MS, false, pkt(3), false, t0 + ms(1_000));
+    // Reopen at 3 s, inside the part gap: part 2 starts on the first keyframe from 10 s.
+    rec.encoder_reopened(t0 + ms(3_000), Cause::Size, None);
+    rec.video(9_000 * MS, true, pkt(4), false, t0 + ms(9_000));
+    assert!(matches!(&rec.video(10_000 * MS, true, pkt(5), false, t0 + ms(10_000))[..], [Event::PartStarted { .. }]));
+    rec.video(11_000 * MS, false, pkt(6), false, t0 + ms(11_000));
+    let events = rec.stop();
+    let [Event::Stopped { parts: 2, gap_seconds, .. }] = events[..] else { panic!("{events:?}") };
+    // Part 1 ends at 1 s + its last frame (0.984 s held as the tail): ~1.984 s; part 2 begins at 10 s.
+    assert!((gap_seconds - 8.016).abs() < 0.01, "{gap_seconds}");
+}
+
+/// Merge gate 11-07 (P2): a GPU -> CPU switch whose headers match made a new file.
+#[test]
+fn a_reopen_with_matching_headers_goes_on_in_the_same_file() {
+    let (mut rec, log, path, t0) = recording("same");
+    let events = rec.encoder_reopened(t0 + PART_GAP, Cause::Same, Some(2));
+    assert!(events.iter().all(|e| matches!(e, Event::Log(_))), "{events:?}");
+    assert!(rec.video(40 * MS, false, pkt(3), false, t0 + PART_GAP).is_empty(), "waits for the new encoder's keyframe");
+    assert!(rec.video(50 * MS, true, pkt(4), false, t0 + PART_GAP).is_empty(), "no new part");
+    let events = rec.stop();
+    assert!(matches!(&events[..], [Event::Stopped { path: p, parts: 1, .. }] if *p == path), "{events:?}");
+    let tags: Vec<u8> = log.videos().iter().map(|v| v.3).collect();
+    assert_eq!(tags, vec![1, 2, 4], "the P-frame before the new keyframe is dropped");
+    assert_eq!(log.calls().iter().filter(|c| matches!(c, Call::Open(_))).count(), 1, "one file");
+}
+
+/// Merge gate 11-07 (P2): part 2's audio must start with its first video frame.
+#[test]
+fn part_two_audio_starts_with_its_first_video_frame() {
+    let (mut rec, log, _path, t0) = recording("sync");
+    let at = t0 + PART_GAP;
+    rec.encoder_reopened(at, Cause::Size, None);
+    // Audio keeps arriving while part 2 waits for its keyframe (10 ms chunks by arrival).
+    for k in 0..5u64 {
+        rec.audio(0, &[0.3; 960], at + ms(10 * k));
+    }
+    let opened = log.calls().len();
+    // Part 2's first keyframe: capture 12.003 s = wall t0 + 12.003 s.
+    assert!(matches!(&rec.video(12_003 * MS, true, pkt(5), false, t0 + ms(12_003))[..], [Event::PartStarted { .. }]));
+    // A 10 ms chunk arriving at 12.008 s covers 11.998 .. 12.008: 5 ms of it are before the frame.
+    rec.audio(0, &[0.3; 960], t0 + ms(12_008));
+    rec.audio(0, &[0.3; 960], t0 + ms(12_018));
+    let after: Vec<i64> = log.calls()[opened..]
+        .iter()
+        .filter_map(|c| match c {
+            Call::Audio { track: 0, frames } => Some(*frames as i64),
+            Call::Silence { track: 0, frames } => Some(-(*frames as i64)),
+            _ => None,
+        })
+        .collect();
+    // 48 kHz: 5 ms = 240 frames dropped from the front; one video frame is 800.
+    assert_eq!(after.first(), Some(&(480 - 240)), "part 2's audio begins at its first frame: {after:?}");
+    assert!(after.iter().all(|f| *f > -800), "no silence over a frame: {after:?}");
 }
 
 /// Merge gate 11-07 (P2): the final toast showed only the last part's length.

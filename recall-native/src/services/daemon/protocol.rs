@@ -162,8 +162,12 @@ impl State {
                 path: path(),
                 seconds: event.get("total_seconds").and_then(Value::as_f64).unwrap_or_else(|| f64_of(event, "seconds")),
                 parts: u64_of(event, "parts").clamp(1, u64::from(u32::MAX)) as u32,
+                gap_seconds: f64_of(event, "gap_seconds"),
             },
-            "recording_failed" => DaemonEvent::RecordingFailed { reason: string_of(event, "reason").unwrap_or_else(|| "Recording failed.".into()) },
+            "recording_failed" => DaemonEvent::RecordingFailed {
+                reason: string_of(event, "reason").unwrap_or_else(|| "Recording failed.".into()),
+                files: failed_files(event),
+            },
             // encoder_log and unknown engine lines carry nothing the UI shows.
             _ => return,
         };
@@ -263,6 +267,12 @@ fn error_text(event: &Map<String, Value>) -> String {
         .iter()
         .find_map(|key| string_of(event, key))
         .unwrap_or_else(|| Value::Object(event.clone()).to_string())
+}
+
+/// `recording_failed`'s `paths` (every file left), or the older single `path`.
+fn failed_files(event: &Map<String, Value>) -> Vec<String> {
+    let paths: Vec<String> = event.get("paths").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default();
+    if paths.is_empty() { string_of(event, "path").into_iter().collect() } else { paths }
 }
 
 fn string_of(event: &Map<String, Value>, key: &str) -> Option<String> {

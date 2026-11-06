@@ -64,8 +64,9 @@ pub trait SinkFactory {
 #[derive(Debug, Clone, PartialEq)]
 pub enum Event {
     Started { path: PathBuf },
-    /// The recording ended. `seconds`: this file; `total_seconds`: every part; `parts`: files written.
-    Stopped { path: PathBuf, seconds: f64, bytes: u64, marks: usize, parts: u32, total_seconds: f64 },
+    /// The recording ended. `seconds`: this file; `total_seconds`: every part; `parts`: files written;
+    /// `gap_seconds`: time not recorded between the parts.
+    Stopped { path: PathBuf, seconds: f64, bytes: u64, marks: usize, parts: u32, total_seconds: f64, gap_seconds: f64 },
     /// Part `part` ended because the stream changed (`cause`); the recording goes on.
     Continued { path: PathBuf, seconds: f64, bytes: u64, marks: usize, part: u32, total_seconds: f64, cause: Cause },
     /// Part `part` (2, 3, ...) of a continued recording is writing.
@@ -99,6 +100,8 @@ struct Active<S> {
     /// This part's number (1 = the first file) and the seconds of the parts before it.
     number: u32,
     earlier_secs: f64,
+    /// Seconds not recorded between the parts before this one and it.
+    earlier_gap: f64,
     /// When this part's first keyframe was written.
     began: Instant,
 }
@@ -250,6 +253,7 @@ impl<F: SinkFactory> Recorder<F> {
             marks: Vec::new(),
             number: previous.as_ref().map_or(1, |p| p.part + 1),
             earlier_secs: previous.as_ref().map_or(0.0, |p| p.total_seconds),
+            earlier_gap: previous.as_ref().map_or(0.0, |p| p.gap_seconds + p.end_us.map_or(0.0, |end| pts_us.saturating_sub(end) as f64 / 1e6)),
             began: now,
         });
         if let Err(e) = active.push_video(pts_us, true, data, false) {
@@ -429,7 +433,8 @@ fn finish<S: Sink>(mut a: Active<S>) -> Vec<Event> {
             events.push(Event::Log(format!("long recording marks not written: {e}")));
         }
     }
-    events.push(Event::Stopped { path, seconds, bytes, marks: rel.len(), parts: a.number, total_seconds: a.earlier_secs + seconds });
+    let (parts, total_seconds, gap_seconds) = (a.number, a.earlier_secs + seconds, a.earlier_gap);
+    events.push(Event::Stopped { path, seconds, bytes, marks: rel.len(), parts, total_seconds, gap_seconds });
     events
 }
 
@@ -451,7 +456,7 @@ fn keep_partial(part: &Path) -> Option<PathBuf> {
 mod parts;
 pub use parts::Cause;
 #[cfg(test)]
-pub use parts::{PART_GAP, SETTLE};
+pub use parts::PART_GAP;
 use parts::{arm_wait_from, Series};
 
 #[cfg(test)]

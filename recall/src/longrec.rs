@@ -91,7 +91,7 @@ pub fn spawn(out_dir: String, json: bool, tracks: Vec<TrackInfo>) -> LongRec {
     let (done_tx, done) = channel::<()>();
     let spawned = std::thread::Builder::new().name("recall-longrec".into()).spawn(move || {
         let _done = done_tx; // dropped when the thread ends
-        Writer { out_dir, json, recorder: Recorder::new(fmp4::Fmp4Factory, tracks), generation: tap::generation(), skew: Duration::ZERO }
+        Writer { out_dir, json, recorder: Recorder::new(fmp4::Fmp4Factory, tracks), generation: tap::generation(), skew: Duration::ZERO, parts_so_far: Vec::new() }
             .run(&ctl_rx, &data_rx);
     });
     if let Err(e) = spawned {
@@ -134,6 +134,8 @@ struct Writer<F: SinkFactory> {
     generation: u64,
     /// Added to the clock (tests step time with it; zero live).
     skew: Duration,
+    /// The finished parts of the running recording (a failure names them all).
+    parts_so_far: Vec<PathBuf>,
 }
 
 impl<F: SinkFactory> Writer<F> {
@@ -276,6 +278,16 @@ impl<F: SinkFactory> Writer<F> {
 
     fn events(&mut self, events: Vec<Event>) {
         for e in events {
+            match e {
+                Event::Started { .. } | Event::Stopped { .. } => self.parts_so_far.clear(),
+                Event::Continued { ref path, .. } => self.parts_so_far.push(path.clone()),
+                Event::Failed { reason, kept } => {
+                    let files = std::mem::take(&mut self.parts_so_far);
+                    report_failed(self.json, &reason, kept.as_deref(), &files);
+                    continue;
+                }
+                _ => {}
+            }
             report(self.json, e);
         }
         if !self.recorder.is_active() {
@@ -297,20 +309,30 @@ fn report(json: bool, event: Event) {
             let started = Outbound::RecordingStarted { path: path.clone(), continued: true, part, cause: Some(cause.as_str()) };
             emit_or_log(json, &started, || format!("long recording continues in part {part} ({}) -> {path}", cause.as_str()));
         }
-        Event::Stopped { path, seconds, bytes, marks, parts, total_seconds } => {
-            stopped(json, &path, Stop { seconds, bytes, marks, parts, total_seconds, cause: None })
+        Event::Stopped { path, seconds, bytes, marks, parts, total_seconds, gap_seconds } => {
+            stopped(json, &path, Stop { seconds, bytes, marks, parts, total_seconds, gap_seconds, cause: None })
         }
         Event::Continued { path, seconds, bytes, marks, part, total_seconds, cause } => {
-            stopped(json, &path, Stop { seconds, bytes, marks, parts: part, total_seconds, cause: Some(cause.as_str()) })
+            stopped(json, &path, Stop { seconds, bytes, marks, parts: part, total_seconds, gap_seconds: 0.0, cause: Some(cause.as_str()) })
         }
-        Event::Failed { reason, kept } => {
-            let kept = kept.as_ref().map(path_text);
-            emit_or_log(json, &Outbound::RecordingFailed { reason: reason.clone(), path: kept.clone() }, || {
-                format!("long recording FAILED: {reason} (kept: {})", kept.as_deref().unwrap_or("nothing"))
-            });
-        }
+        Event::Failed { reason, kept } => report_failed(json, &reason, kept.as_deref(), &[]),
         Event::Log(message) => emit_or_log(json, &Outbound::EncoderLog { message: message.clone() }, || message),
     }
+}
+
+/// `recording_failed`: `path` is the file kept from the part that failed, `paths` every
+/// file the recording left (its finished parts first).
+fn failed_outbound(reason: &str, kept: Option<&Path>, earlier: &[PathBuf]) -> Outbound {
+    let text = |p: &Path| p.to_string_lossy().into_owned();
+    let paths = earlier.iter().map(|p| text(p)).chain(kept.map(text)).collect();
+    Outbound::RecordingFailed { reason: reason.to_string(), path: kept.map(text), paths }
+}
+
+fn report_failed(json: bool, reason: &str, kept: Option<&Path>, earlier: &[PathBuf]) {
+    let out = failed_outbound(reason, kept, earlier);
+    let Outbound::RecordingFailed { paths, .. } = &out else { return };
+    let files = if paths.is_empty() { "nothing".to_string() } else { paths.join(", ") };
+    emit_or_log(json, &out, || format!("long recording FAILED: {reason} (kept: {files})"));
 }
 
 /// One `recording_stopped`. `cause`: only this part ended (the stream changed).
@@ -320,17 +342,19 @@ struct Stop {
     marks: usize,
     parts: u32,
     total_seconds: f64,
+    gap_seconds: f64,
     cause: Option<&'static str>,
 }
 
 fn stopped(json: bool, path: &Path, stop: Stop) {
     let path = path.to_string_lossy().into_owned();
-    let Stop { seconds, bytes, marks, parts, total_seconds, cause } = stop;
-    let out = Outbound::RecordingStopped { path: path.clone(), seconds, bytes, continued: cause.is_some(), parts, total_seconds, cause };
+    let Stop { seconds, bytes, marks, parts, total_seconds, gap_seconds, cause } = stop;
+    let continued = cause.is_some();
+    let out = Outbound::RecordingStopped { path: path.clone(), seconds, bytes, continued, parts, total_seconds, gap_seconds, cause };
     emit_or_log(json, &out, || {
         let what = match cause {
             Some(cause) => format!("part {parts} saved ({cause} changed; continuing in a new file)"),
-            None => format!("saved ({parts} file(s), {total_seconds:.1} s in all)"),
+            None => format!("saved ({parts} file(s), {total_seconds:.1} s in all, {gap_seconds:.1} s missing between them)"),
         };
         format!("long recording {what} {path} ({seconds:.1}s, {bytes} bytes, {marks} marks)")
     });

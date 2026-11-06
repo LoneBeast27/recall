@@ -223,9 +223,11 @@ pub enum DaemonEvent {
     RecordingContinued { part: u32, cause: String },
     /// A finished part of a recording that goes on: listed, no toast.
     RecordingPartSaved { path: String },
-    /// `seconds`: the whole recording, every part; `parts`: the files it took.
-    RecordingStopped { path: String, seconds: f64, parts: u32 },
-    RecordingFailed { reason: String },
+    /// `seconds`: the whole recording, every part; `parts`: the files it took; `gap_seconds`:
+    /// time not recorded between the parts.
+    RecordingStopped { path: String, seconds: f64, parts: u32, gap_seconds: f64 },
+    /// `files`: what the recording left (it ended early), empty when nothing was saved.
+    RecordingFailed { reason: String, files: Vec<String> },
     /// A clip saved to the SSD first reached the clip folder. `kept_path`: the engine kept its
     /// staged copy there for the SSD video cache (`storage::adopt_kept`).
     ClipMoved { path: String, kept_path: Option<String> },

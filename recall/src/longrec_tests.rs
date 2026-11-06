@@ -11,7 +11,7 @@ const G: u64 = 1_000_000;
 fn writer(tag: &str, generation: u64) -> (Writer<FakeFactory>, PathBuf) {
     let dir = temp_dir(tag);
     let recorder = Recorder::new(FakeFactory::default(), tracks());
-    (Writer { out_dir: dir.to_string_lossy().into_owned(), json: false, recorder, generation, skew: Duration::ZERO }, dir)
+    (Writer { out_dir: dir.to_string_lossy().into_owned(), json: false, recorder, generation, skew: Duration::ZERO, parts_so_far: Vec::new() }, dir)
 }
 
 fn video(pts_ms: u64, keyframe: bool, generation: u64) -> Data {
@@ -115,6 +115,37 @@ fn a_failed_encoder_that_already_reopened_ends_the_recording() {
     assert!(!w.recorder.is_active(), "the failure ends the recording");
     let names = finished(&dir);
     assert_eq!(names.len(), 1, "no part 2: {names:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Merge gate 11-07 #3 (P1): a failure named only the last file, so the toast could not
+/// say which files the recording left.
+#[test]
+fn a_failure_after_a_continued_part_names_every_file() {
+    let generation = u64::MAX - 40;
+    let _failures = tap::FAILED_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    let (mut w, dir) = writer("failparts", generation);
+    let (_tx, rx) = sync_channel::<Data>(4);
+    w.start("G", Some((0, Instant::now())));
+    w.generation = generation;
+    w.data(video(0, true, generation));
+    w.data(video(16, false, generation));
+    w.skew = machine::PART_GAP;
+    w.data(video(33, true, generation + 1)); // part 2
+    w.data(video(50, false, generation + 1));
+    assert_eq!(w.parts_so_far.len(), 1, "part 1 is finished");
+    tap::on_encoder_failed_at(generation + 1, "NVENC encode failed: device lost");
+    let first = w.parts_so_far.clone();
+    w.check_encoder_failed(&rx);
+    assert!(!w.recorder.is_active() && w.parts_so_far.is_empty());
+    let mut names = finished(&dir);
+    names.sort();
+    assert_eq!(names.len(), 2, "{names:?}");
+    let out = serde_json::to_value(failed_outbound("the video encoder failed", Some(&dir.join(&names[0])), &first)).unwrap();
+    let paths: Vec<&str> = out["paths"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect();
+    assert_eq!(paths.len(), 2, "{out}");
+    assert!(paths[0].ends_with("__rec.mp4") && paths[1].ends_with("__rec-2.mp4"), "{paths:?}");
+    assert_eq!(out["type"], "recording_failed");
     let _ = std::fs::remove_dir_all(&dir);
 }
 
