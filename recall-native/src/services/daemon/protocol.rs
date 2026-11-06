@@ -168,6 +168,8 @@ impl State {
             "recording_failed" => DaemonEvent::RecordingFailed {
                 reason: string_of(event, "reason").unwrap_or_else(|| "Recording failed.".into()),
                 files: failed_files(event),
+                gap_seconds: f64_of(event, "gap_seconds"),
+                frozen_seconds: f64_of(event, "frozen_seconds"),
             },
             // encoder_log and unknown engine lines carry nothing the UI shows.
             _ => return,

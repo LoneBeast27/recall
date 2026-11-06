@@ -22,24 +22,37 @@ fn recording_toast(event: &DaemonEvent) -> Option<(ToastKind, String, Option<Str
             let mut notes = Vec::new();
             if *parts > 1 {
                 notes.push(format!("{parts} files"));
-                if *gap_seconds > MISSING_OVER {
-                    notes.push(format!("{} missing", missing(*gap_seconds)));
-                }
             }
-            if *frozen_seconds > MISSING_OVER {
-                notes.push(format!("{} frozen", missing(*frozen_seconds)));
-            }
+            notes.extend(lost_notes(*parts > 1, *gap_seconds, *frozen_seconds));
             let detail = (!notes.is_empty()).then(|| notes.join(" · "));
             Some((ToastKind::Good, format!("Recording saved · {}", format_duration(*seconds)), detail))
         }
-        DaemonEvent::RecordingFailed { reason, files } if files.is_empty() => Some((ToastKind::Bad, "Recording failed".into(), Some(reason.clone()))),
-        DaemonEvent::RecordingFailed { reason, files } => Some((ToastKind::Bad, "Recording ended early".into(), Some(format!("{reason}. {}", saved(files))))),
+        DaemonEvent::RecordingFailed { reason, files, .. } if files.is_empty() => Some((ToastKind::Bad, "Recording failed".into(), Some(reason.clone()))),
+        DaemonEvent::RecordingFailed { reason, files, gap_seconds, frozen_seconds } => {
+            let mut detail = format!("{reason}. {}", saved(files));
+            for note in lost_notes(files.len() > 1, *gap_seconds, *frozen_seconds) {
+                detail.push_str(&format!(" · {note}"));
+            }
+            Some((ToastKind::Bad, "Recording ended early".into(), Some(detail)))
+        }
         _ => None,
     }
 }
 
 /// Time missed between parts, or frozen, is shown past this (seconds).
 const MISSING_OVER: f64 = 2.0;
+
+/// "7 s missing" (only between several parts) and "40 s frozen", each past [`MISSING_OVER`].
+fn lost_notes(several: bool, gap_seconds: f64, frozen_seconds: f64) -> Vec<String> {
+    let mut notes = Vec::new();
+    if several && gap_seconds > MISSING_OVER {
+        notes.push(format!("{} missing", missing(gap_seconds)));
+    }
+    if frozen_seconds > MISSING_OVER {
+        notes.push(format!("{} frozen", missing(frozen_seconds)));
+    }
+    notes
+}
 
 /// "7 s", or "1:05" from a minute.
 fn missing(secs: f64) -> String {
@@ -215,10 +228,14 @@ mod tests {
         let toast = recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec-2.mp4".into(), seconds: 3600.0, parts: 2, gap_seconds: 7.2, frozen_seconds: 0.0 });
         assert_eq!(toast, Some((ToastKind::Good, "Recording saved · 1:00:00".into(), Some("2 files · 7 s missing".into()))));
         let files = vec!["E:/c/G__rec.mp4".to_string(), "E:/c/G__rec-2.mp4".to_string()];
-        let toast = recording_toast(&DaemonEvent::RecordingFailed { reason: "the video encoder failed".into(), files });
+        let toast = recording_toast(&DaemonEvent::RecordingFailed { reason: "the video encoder failed".into(), files: files.clone(), gap_seconds: 0.0, frozen_seconds: 0.0 });
         let expected = "the video encoder failed. Saved G__rec.mp4, G__rec-2.mp4";
         assert_eq!(toast, Some((ToastKind::Bad, "Recording ended early".into(), Some(expected.into()))));
-        let toast = recording_toast(&DaemonEvent::RecordingFailed { reason: "no keyframe".into(), files: Vec::new() });
+        // Review 11-07: an early end names what was lost too, as the saved toast does.
+        let toast = recording_toast(&DaemonEvent::RecordingFailed { reason: "the video encoder failed".into(), files, gap_seconds: 7.2, frozen_seconds: 40.0 });
+        let expected = "the video encoder failed. Saved G__rec.mp4, G__rec-2.mp4 · 7 s missing · 40 s frozen";
+        assert_eq!(toast, Some((ToastKind::Bad, "Recording ended early".into(), Some(expected.into()))));
+        let toast = recording_toast(&DaemonEvent::RecordingFailed { reason: "no keyframe".into(), files: Vec::new(), gap_seconds: 0.0, frozen_seconds: 0.0 });
         assert_eq!(toast, Some((ToastKind::Bad, "Recording failed".into(), Some("no keyframe".into()))));
     }
 
