@@ -351,7 +351,9 @@ fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
 /// The endpoint a device source asks for: its device, else the Windows default. Under
 /// `RECALL_AUDIO_EXACT` (tests) only a named endpoint may open — an input with no device
 /// takes `RECALL_AUDIO_MIC`'s — so a test never records the person's real devices.
-fn pick_device(direction: &Direction, device: &str, input: bool) -> Result<(wasapi::Device, String), String> {
+/// `reopen`: the track lost its device; a named device must come back by its own name, never as
+/// the Windows default (that would record another device under this track's name).
+fn pick_device(direction: &Direction, device: &str, input: bool, reopen: bool) -> Result<(wasapi::Device, String), String> {
     let collection = DeviceCollection::new(direction).map_err(|e| format!("enumerate: {e}"))?;
     let n = collection.get_nbr_devices().map_err(|e| e.to_string())?;
     let exact = std::env::var_os("RECALL_AUDIO_EXACT").is_some();
@@ -368,6 +370,9 @@ fn pick_device(direction: &Direction, device: &str, input: bool) -> Result<(wasa
     }
     if exact {
         return Err(format!("no endpoint matches {want:?} (RECALL_AUDIO_EXACT)"));
+    }
+    if reopen && want.is_some() {
+        return Err(format!("'{}' is not connected", want.unwrap_or_default()));
     }
     let dev = wasapi::get_default_device(direction).map_err(|e| format!("default endpoint failed: {e}"))?;
     let name = dev.get_friendlyname().unwrap_or_else(|_| "(default)".into());
@@ -434,6 +439,13 @@ fn start_track(spec: &SourceSpec, buffer_secs: u32, target: Option<LoopbackTarge
 
 /// How long a track waits between attempts to reopen a device or process it lost.
 const REOPEN_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+/// The longest wait between reopen attempts after repeated failures.
+const REOPEN_MAX: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Wait before the next reopen after `failures` failed attempts in a row.
+fn reopen_wait(failures: u32) -> std::time::Duration {
+    REOPEN_EVERY.saturating_mul(1 << failures.saturating_sub(1).min(3)).min(REOPEN_MAX)
+}
 /// No packet for this long: the source is quiet (loopback sends nothing while nothing
 /// plays, a closed game's process sends nothing), so its track gets silence up to the clock.
 const IDLE: std::time::Duration = std::time::Duration::from_millis(200);
@@ -450,7 +462,7 @@ struct Stream {
 
 /// Open `target`'s process loopback, else the source's endpoint, and start it. All COM
 /// objects live on the calling (capture) thread.
-fn open_stream(direction: &Direction, device: &str, ring: &TrackRing, target: &Option<LoopbackTarget>) -> Result<Stream, String> {
+fn open_stream(direction: &Direction, device: &str, ring: &TrackRing, target: &Option<LoopbackTarget>, reopen: bool) -> Result<Stream, String> {
     let format = WaveFormat::new(32, 32, &SampleType::Float, ring.rate as usize, ring.channels as usize, None);
     let (mut client, endpoint, buffer_duration_hns) = match target {
         Some(LoopbackTarget { pid, label }) => (
@@ -461,7 +473,7 @@ fn open_stream(direction: &Direction, device: &str, ring: &TrackRing, target: &O
             200_000,
         ),
         None => {
-            let (device, endpoint) = pick_device(direction, device, ring.input)?;
+            let (device, endpoint) = pick_device(direction, device, ring.input, reopen)?;
             let client = device.get_iaudioclient().map_err(|e| e.to_string())?;
             let (_def_period, min_period) = client.get_device_period().map_err(|e| e.to_string())?;
             (client, endpoint, min_period)
@@ -537,9 +549,12 @@ fn capture_thread(
     let started = std::time::Instant::now();
     let mut level = apps::Leveller::new(ring.rate);
     let mut init_tx = Some(init_tx);
+    // Failed reopens back off: 2 s, 4 s, 8 s, then every 10 s, and back to 2 s once it opens.
+    let mut failures = 0u32;
     loop {
-        match open_stream(&direction, &device, &ring, &target) {
+        match open_stream(&direction, &device, &ring, &target, init_tx.is_none()) {
             Ok(stream) => {
+                failures = 0;
                 set_endpoint(&ring, stream.endpoint.clone());
                 if let Some(tx) = init_tx.take() {
                     let _ = tx.send(Ok(()));
@@ -554,9 +569,10 @@ fn capture_thread(
                     let _ = tx.send(Err(e));
                     return;
                 }
+                failures = failures.saturating_add(1);
             }
         }
-        let until = std::time::Instant::now() + REOPEN_EVERY;
+        let until = std::time::Instant::now() + reopen_wait(failures);
         while std::time::Instant::now() < until {
             std::thread::sleep(std::time::Duration::from_millis(100));
             fill_silence(&ring, &mut level, started);

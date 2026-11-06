@@ -339,6 +339,7 @@ impl ApplicationHandler for App {
             protocol::emit(&protocol::Outbound::Hello {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 monitors: capture::list_monitors(),
+                live_sources: true,
             });
             spawn_stdin_reader(shared.clone(), save_hook, export_hook, extras);
         }

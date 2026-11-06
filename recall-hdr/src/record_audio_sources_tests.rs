@@ -114,4 +114,13 @@ fn gain_and_names_go_live_and_everything_else_restarts() {
     let mut off_and_louder = off.clone();
     off_and_louder[1].gain_db = 3.0;
     assert!(live_updates(&off, &off_and_louder).is_empty(), "a disabled source has no live track");
+    // Into boost: a long recording that started unlimited would clip, so this restarts.
+    let mut boosted = base.clone();
+    boosted[1].gain_db = 2.0;
+    assert!(changed(&base, &boosted), "0 dB -> +2 dB: restart (the limiter is chosen at start)");
+    let mut more = boosted.clone();
+    more[1].gain_db = 6.0;
+    assert!(!changed(&boosted, &more), "+2 -> +6 dB: live (the track already runs the limiter)");
+    assert!(!changed(&more, &louder), "+6 -> -4.5 dB: live (lowering never clips)");
+    assert!(!changed(&louder, &base), "-4.5 -> 0 dB: live (0 dB is not a boost)");
 }
