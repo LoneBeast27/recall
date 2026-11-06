@@ -251,6 +251,11 @@ impl Rect {
     pub fn height(&self) -> i32 {
         self.bottom - self.top
     }
+
+    /// Width / height (0 for an empty rect).
+    pub fn aspect(&self) -> f32 {
+        if self.height() > 0 { (self.right - self.left) as f32 / self.height() as f32 } else { 0.0 }
+    }
 }
 
 /// Top-left corner of a `width`-wide island at a top or bottom `anchor`,
