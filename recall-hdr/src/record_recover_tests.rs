@@ -124,8 +124,9 @@ fn a_recovering_engine_that_stopped_updating_is_restarted_like_a_failed_one() {
     // No status line after second 0: stale at 10 s, then the 15 s error grace; a restart
     // that changed nothing waits the 30 s gap.
     assert_eq!(tick(60, |_| ("recovering", 3, true)), [26, 56]);
-    // Statuses keep coming but "recovering" outlives the engine's own 60 s bound.
-    assert_eq!(tick(100, |s| ("recovering", s, true)), [76]);
+    // Statuses keep coming: the engine is alive and waits for a frame (a static game).
+    // Time alone is no evidence; the engine says `failed` after 5 real failed reopens.
+    assert_eq!(tick(150, |s| ("recovering", s, true)), Vec::<u64>::new());
 }
 
 #[test]

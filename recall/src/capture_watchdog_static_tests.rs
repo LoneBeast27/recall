@@ -2,8 +2,8 @@
 //! per-turn pieces composed as the engine runs them:
 //! - the capture watchdog's [`tick`] over the fake slot (`App::watch_capture`);
 //! - the live encoder's reopen plan, the real [`Reopen`] driven as `encoder/live.rs` does
-//!   (`encoded` per frame, `stalled` each loop turn; a `RestartCapture` becomes the slot's
-//!   restart request, as `EncStats::request_capture_restart` does);
+//!   (`encoded` per frame, `status` each loop turn: only a real open or encode error can
+//!   ask for a capture restart, and none comes here);
 //! - the real long-recording state machine, [`Recorder`] on the fake sink, driven as the
 //!   `recall-longrec` writer does (every packet, game audio, `tick` each turn).
 //!
@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 
 use super::*;
-use crate::encoder::reopen::{AfterFail, Reopen};
+use crate::encoder::reopen::Reopen;
 use crate::longrec::machine::{Event, Recorder};
 use crate::longrec::test_sink::{pkt, temp_dir, tracks, Call, FakeFactory, Log};
 
@@ -31,7 +31,8 @@ struct Engine {
     log: Log,
     events: Vec<Event>,
     frames: u64,
-    capture_asks: u32,
+    /// Turns the encoder reported `recovering` / `failed` (`Reopen::status`).
+    recovering_turns: u32,
 }
 
 impl Engine {
@@ -45,7 +46,7 @@ impl Engine {
         let log = Log::default();
         let mut rec = Recorder::new(FakeFactory { log: log.clone(), no_pcm: true, ..Default::default() }, tracks());
         let events = rec.start(path, Some((0, t0)), t0);
-        Engine { t0, slot, reopen, rec, log, events, frames: 0, capture_asks: 0 }
+        Engine { t0, slot, reopen, rec, log, events, frames: 0, recovering_turns: 0 }
     }
 
     /// Turn `n`: this turn's frames (when the game sends any), then the per-turn ticks.
@@ -62,9 +63,8 @@ impl Engine {
         }
         // The game's audio plays on through a still picture (the mic track stays silent).
         self.events.extend(self.rec.audio(0, &[0.1; 9_600], now));
-        if let Some(AfterFail::RestartCapture(_)) = self.reopen.stalled(now) {
-            self.capture_asks += 1;
-            self.slot.reason = Some("(the encoder asked)");
+        if self.reopen.status().is_some() {
+            self.recovering_turns += 1;
         }
         tick(&mut self.slot, now);
         self.events.extend(self.rec.tick(now));
@@ -72,7 +72,7 @@ impl Engine {
 
     fn assert_untouched(&self, when: &str) {
         assert_eq!((self.slot.stops, self.slot.starts), (0, 0), "{when}: capture restarts");
-        assert_eq!(self.capture_asks, 0, "{when}: encoder asked for a new capture");
+        assert_eq!(self.recovering_turns, 0, "{when}: the encoder left recording");
         assert!(!self.reopen.recovering() && self.reopen.reopen_failures() == 0, "{when}: encoder reopens");
         assert!(self.rec.is_active(), "{when}: the long recording runs");
         assert!(self.events.iter().all(|e| matches!(e, Event::Started { .. })), "{when}: {:?}", self.events);

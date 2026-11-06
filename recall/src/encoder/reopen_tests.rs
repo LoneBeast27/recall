@@ -111,33 +111,19 @@ fn a_first_gpu_open_refusal_still_switches_to_cpu_at_once() {
 }
 
 #[test]
-fn a_retry_no_frame_came_for_counts_as_failed() {
-    let t0 = Instant::now();
-    let mut r = Reopen::default();
-    r.failed(SIZE, t0);
-    assert_eq!(r.stalled(t0 + secs(3.9)), None, "due at 2 s, overdue after 4 s");
-    assert_eq!(r.stalled(t0 + secs(4.0)), Some(AfterFail::Wait(secs(5.0))));
-    assert_eq!(r.reopen_failures(), 1, "the plan moves on without frames");
-}
-
-#[test]
 fn status_hands_off_to_the_controller_only_when_the_engine_plan_is_spent() {
     let t0 = Instant::now();
     let mut r = Reopen::default();
     r.failed(SIZE, t0);
     for n in 1..HAND_OFF_AFTER {
         r.failed(SIZE, t0 + secs(n as f32));
-        assert!(!r.handed_off(t0 + secs(n as f32)), "failure {n}: still the engine's turn");
+        assert!(!r.handed_off(), "failure {n}: still the engine's turn");
     }
     // The capture restart (3) and the CPU fallback (4) came first.
     const { assert!(RESTART_EVERY < CPU_FALLBACK_AFTER && CPU_FALLBACK_AFTER < HAND_OFF_AFTER) };
     r.failed(SIZE, t0 + secs(10.0));
-    assert!(r.handed_off(t0 + secs(10.0)));
-    // Or by age, with no encoder for a minute.
-    let mut slow = Reopen::default();
-    slow.failed(SIZE, t0);
-    assert!(!slow.handed_off(t0 + HAND_OFF_AGE - secs(0.1)));
-    assert!(slow.handed_off(t0 + HAND_OFF_AGE));
+    assert!(r.handed_off());
+    assert_eq!(r.status(), Some(3));
 }
 
 #[test]
@@ -187,7 +173,29 @@ fn an_open_encoder_with_no_frames_for_5_minutes_never_reopens_or_asks_for_a_capt
     r.opened(t0);
     for s in 0..=300 {
         let now = t0 + secs(s as f32);
-        assert_eq!(r.stalled(now), None, "{s} s");
-        assert!(!r.recovering() && !r.handed_off(now), "{s} s");
+        assert_eq!(r.status(), None, "{s} s");
+        assert!(!r.recovering() && !r.handed_off() && r.may_open(SIZE, now), "{s} s");
     }
+}
+
+#[test]
+fn a_recovery_with_no_frames_for_2_minutes_never_escalates_but_real_errors_still_do() {
+    // A static game (a paused menu: VFR, no WGC repeats) right after an encode error: no
+    // frame comes to retry the encoder. That is no evidence against capture, so nothing
+    // escalates: no capture restart, no `failed` for the controller (capture-watchdog-v2
+    // restarts capture only on evidence too).
+    let t0 = Instant::now();
+    let mut r = Reopen::default();
+    r.failed(SIZE, t0);
+    // The loop's per-turn check (`Live::tick`) is `status`; nothing there counts time.
+    for tenth in 0..=1200u32 {
+        assert_eq!(r.status(), Some(4), "{:.1} s: status must stay `recovering`", tenth as f32 / 10.0);
+    }
+    assert_eq!(r.reopen_failures(), 0, "no frame, no failure: no capture restart either");
+    assert!(r.may_open(SIZE, t0 + secs(120.0)), "the first frame that comes is tried at once");
+    // The game moves again and every reopen really fails: the plan escalates as before.
+    let back = t0 + secs(121.0);
+    let afters: Vec<AfterFail> = (1..=HAND_OFF_AFTER).map(|n| r.failed(SIZE, back + secs(n as f32))).collect();
+    assert!(matches!(afters[RESTART_EVERY as usize - 1], AfterFail::RestartCapture(_)), "{afters:?}");
+    assert_eq!(r.status(), Some(3), "5 real failed reopens hand off to the controller");
 }

@@ -171,17 +171,14 @@ impl Live {
         }
     }
 
-    /// Every loop turn, frames or not: a retry no frame came for, the status, the GPU retry.
+    /// Every loop turn, frames or not: the status, the GPU retry.
     fn tick(&mut self, now: Instant, cfg: &Config, stats: &EncStats) {
         if self.enc.is_none() {
-            if let Some(after) = self.reopen.stalled(now) {
-                report(cfg.json, "no frame came to retry the encoder");
-                reopen::after_failure(after, self.reopen.reopen_failures(), stats, cfg.json);
-            }
-            if self.reopen.recovering() {
-                let failed = self.reopen.handed_off(now);
-                stats.backend.store(if failed { 3 } else { 4 }, Relaxed);
-                if failed {
+            // No frame to retry with is no failure: a static game waits here as long as it
+            // takes (`reopen.rs`); only real open or encode errors escalate.
+            if let Some(backend) = self.reopen.status() {
+                stats.backend.store(backend, Relaxed);
+                if backend == 3 {
                     // Recovery spent (status `failed`): a running long recording ends here.
                     let reason = stats.error.lock().unwrap_or_else(|p| p.into_inner()).clone();
                     crate::longrec::tap::on_encoder_failed(reason.as_deref().unwrap_or("the encoder could not reopen")); // long-recording hook
