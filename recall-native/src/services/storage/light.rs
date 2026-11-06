@@ -90,7 +90,11 @@ pub(super) fn make_in(root: &Path, id: &str, read_from: &Path, seconds: f64, sto
     if super::valid_file(&target) {
         return Ok(target);
     }
+    if let Some(why) = super::guard::blocked(root) {
+        return Err(format!("no light copy: {why}"));
+    }
     std::fs::create_dir_all(&directory).map_err(|error| format!("create light folder: {error}"))?;
+    super::owned::mark(root, &format!("light/{id}.mp4"));
     let temporary = super::temp_sibling(&target);
     let ffmpeg = super::binary("RECALL_FFMPEG", "ffmpeg.exe")?;
     let lowered = super::drive_kind(read_from).is_hdd();

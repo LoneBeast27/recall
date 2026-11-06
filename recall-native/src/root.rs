@@ -173,11 +173,13 @@ impl Root {
         let preview = span("root: native preview", || parent_hwnd(window).and_then(NativePreview::new));
         let workers = span("root: workers", Workers::spawn);
         workers.job(Job::List);
+        let folders = span("root: folders load", crate::services::library::folders::Folders::load);
+        // Before any sweep: a clip folder inside the cache (or the cache inside one) blocks it.
+        let cache_overlap = span("root: cache guard", || crate::services::library::folders::check_cache_overlap(&folders));
         span("root: sweep_kept", || crate::services::storage::sweep_kept(crate::backend::library_dir));
         span("root: pre_encode clear_dir", crate::services::pre_encode::clear_dir);
         span("root: pre_encode sweep_deliveries", crate::services::pre_encode::sweep_deliveries);
         let daemon = span("root: daemon client", DaemonClient::spawn);
-        let folders = span("root: folders load", crate::services::library::folders::Folders::load);
         let mut root = Self {
             route: Route::Library,
             focus: cx.focus_handle(),
@@ -222,6 +224,9 @@ impl Root {
             storage_asking: None,
             storage_confirm: None,
         };
+        if let Some(message) = cache_overlap {
+            root.show_toast_for(ToastKind::Bad, "Cache and clip folders overlap", Some(message), 30);
+        }
         if let Some(path) = std::env::var_os("RECALL_NATIVE_CLIP") {
             root.open_clip(path.to_string_lossy().into_owned());
         }

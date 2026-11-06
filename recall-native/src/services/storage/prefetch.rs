@@ -295,7 +295,7 @@ impl Feed {
         let stop = || recorder_busy() || super::lane::demand_waiting();
         let light = super::light::make_in(&self.root, &id, &read_from, seconds, &stop)?;
         if on_ssd && !top && !budget::kept().contains(&format!("video/{id}.mp4")) {
-            let _ = std::fs::remove_file(&whole);
+            super::owned::remove(&self.root, "video", &format!("{id}.mp4"));
         }
         Ok(light.metadata().map_or(estimate, |m| m.len()))
     }

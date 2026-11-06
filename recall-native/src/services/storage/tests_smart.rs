@@ -269,16 +269,16 @@ fn inventory_classifies_tiers_and_enforcement_frees_on_disk() {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, vec![1u8; len]).unwrap();
     };
-    write("video/aaaa.mp4", 5000);
-    write("editor/k1/audio-0.wav", 3000);
-    write("editor/k1/clip.json", 200);
-    write("visuals/aaaa/poster.jpg", 300);
-    write("visuals/aaaa/frame-0.jpg", 300);
-    write("visuals/aaaa/scrub-0.jpg", 400);
-    write("thumbs/aaaa.jpg", 250);
-    write("projects/aaaa.json", 100);
-    std::fs::write(root.join("media.json"), br#"{"owners":{"k1":"aaaa"}}"#).unwrap();
-    let inventory = budget::inventory(&root, &|id| if id == "aaaa" { 2.0 } else { 0.0 });
+    write("video/aaaaaaaaaaaaaaaa.mp4", 5000);
+    write("editor/1111111111111111/audio-0.wav", 3000);
+    write("editor/1111111111111111/clip.json", 200);
+    write("visuals/aaaaaaaaaaaaaaaa/poster.jpg", 300);
+    write("visuals/aaaaaaaaaaaaaaaa/frame-0.jpg", 300);
+    write("visuals/aaaaaaaaaaaaaaaa/scrub-0.jpg", 400);
+    write("thumbs/aaaaaaaaaaaaaaaa.jpg", 250);
+    write("projects/aaaaaaaaaaaaaaaa.json", 100);
+    std::fs::write(root.join("media.json"), br#"{"owners":{"1111111111111111":"aaaaaaaaaaaaaaaa"}}"#).unwrap();
+    let inventory = budget::inventory(&root, &|id| if id == "aaaaaaaaaaaaaaaa" { 2.0 } else { 0.0 });
     let tier = |t: Tier| inventory.tier_bytes(t);
     assert_eq!((tier(Tier::Video), tier(Tier::EditorMedia), tier(Tier::Scrub), tier(Tier::Thumb)), (5000, 3800, 400, 250));
     assert!(inventory.units.iter().all(|u| u.score == 2.0), "every unit maps to its clip, the engine folder via media.json owners");
@@ -292,8 +292,8 @@ fn inventory_classifies_tiers_and_enforcement_frees_on_disk() {
     assert!(root.join("storage.json").exists());
     let freed = budget::enforce(&root, 250 + 100 + other + 10, 0);
     assert_eq!(freed, 5000 + 3800 + 400);
-    assert!(root.join("thumbs/aaaa.jpg").exists() && root.join("projects/aaaa.json").exists());
-    assert!(!root.join("editor/k1").exists() && !root.join("video/aaaa.mp4").exists());
+    assert!(root.join("thumbs/aaaaaaaaaaaaaaaa.jpg").exists() && root.join("projects/aaaaaaaaaaaaaaaa.json").exists());
+    assert!(!root.join("editor/1111111111111111").exists() && !root.join("video/aaaaaaaaaaaaaaaa.mp4").exists());
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -364,17 +364,17 @@ fn a_clip_prepared_with_flac_stems_drops_its_wav_stems() {
         std::fs::create_dir_all(editor.join(dir)).unwrap();
         std::fs::write(editor.join(dir).join(file), vec![1u8; 500]).unwrap();
     };
-    write("old-wav", "audio-0.wav");
-    write("other-clip", "audio-0.wav");
-    write("new-flac", "audio-0.flac");
-    std::fs::write(root.join("media.json"), br#"{"owners":{"old-wav":"aaaa","other-clip":"bbbb"}}"#).unwrap();
-    budget::note_editor_media(&root, "aaaa", &[editor.join("new-flac")], false);
-    assert!(!editor.join("old-wav").exists(), "this clip's WAV stems go once its FLAC stems exist");
-    assert!(editor.join("other-clip").exists(), "another clip keeps its stems until it is prepared again");
-    assert!(editor.join("new-flac").exists());
+    write("0000000000000001", "audio-0.wav");
+    write("0000000000000002", "audio-0.wav");
+    write("0000000000000003", "audio-0.flac");
+    std::fs::write(root.join("media.json"), br#"{"owners":{"0000000000000001":"aaaa","0000000000000002":"bbbb"}}"#).unwrap();
+    budget::note_editor_media(&root, "aaaa", &[editor.join("0000000000000003")], false);
+    assert!(!editor.join("0000000000000001").exists(), "this clip's WAV stems go once its FLAC stems exist");
+    assert!(editor.join("0000000000000002").exists(), "another clip keeps its stems until it is prepared again");
+    assert!(editor.join("0000000000000003").exists());
     let media = budget::read_media(&root);
-    assert_eq!(media.owners.get("new-flac").map(String::as_str), Some("aaaa"));
-    assert!(!media.owners.contains_key("old-wav"));
+    assert_eq!(media.owners.get("0000000000000003").map(String::as_str), Some("aaaa"));
+    assert!(!media.owners.contains_key("0000000000000001"));
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -384,18 +384,18 @@ fn light_copies_are_video_units_ranked_and_evicted_by_their_clip() {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
     let root = std::env::temp_dir().join(format!("recall-light-units-{}-{nonce}", std::process::id()));
     std::fs::create_dir_all(root.join("light")).unwrap();
-    std::fs::write(root.join("light").join("aaaa.mp4"), vec![1u8; 3000]).unwrap();
-    std::fs::write(root.join("light").join("bbbb.mp4"), vec![1u8; 3000]).unwrap();
-    let inventory = budget::inventory(&root, &|id| if id == "aaaa" { 5.0 } else { 0.5 });
+    std::fs::write(root.join("light").join("aaaaaaaaaaaaaaaa.mp4"), vec![1u8; 3000]).unwrap();
+    std::fs::write(root.join("light").join("bbbbbbbbbbbbbbbb.mp4"), vec![1u8; 3000]).unwrap();
+    let inventory = budget::inventory(&root, &|id| if id == "aaaaaaaaaaaaaaaa" { 5.0 } else { 0.5 });
     let light: Vec<(&str, f64)> = inventory.units.iter().filter(|u| u.name.starts_with("light/")).map(|u| (u.name.as_str(), u.score)).collect();
     assert_eq!(light.len(), 2);
     assert!(inventory.units.iter().filter(|u| u.name.starts_with("light/")).all(|u| u.tier == Tier::Video));
-    assert!(light.contains(&("light/aaaa.mp4", 5.0)));
+    assert!(light.contains(&("light/aaaaaaaaaaaaaaaa.mp4", 5.0)));
     // Room for one more light copy of a clip scored 1.0: only the lower-scored one may go.
     let evicted = super::evict::room_below(&inventory.units, 0, 6000, 1 << 20, 3000, 1.0, &[]);
-    assert_eq!(evicted, Some(vec!["light/bbbb.mp4".to_string()]));
-    assert_eq!(budget::delete(&root, inventory.units.iter().find(|u| u.name == "light/bbbb.mp4").unwrap()), 3000);
-    assert!(!root.join("light").join("bbbb.mp4").exists());
+    assert_eq!(evicted, Some(vec!["light/bbbbbbbbbbbbbbbb.mp4".to_string()]));
+    assert_eq!(budget::delete(&root, inventory.units.iter().find(|u| u.name == "light/bbbbbbbbbbbbbbbb.mp4").unwrap()), 3000);
+    assert!(!root.join("light").join("bbbbbbbbbbbbbbbb.mp4").exists());
     let _ = std::fs::remove_dir_all(&root);
 }
 
@@ -408,31 +408,31 @@ fn old_wav_stem_folders_go_except_the_open_clips() {
         std::fs::create_dir_all(editor.join(dir)).unwrap();
         std::fs::write(editor.join(dir).join(file), vec![1u8; 700]).unwrap();
     };
-    write("v5-a", "audio-0.wav");
-    write("v5-a", "clip.json");
-    write("v5-open", "audio-0.wav");
-    write("v5-open", "clip.json");
+    write("0000000000000001", "audio-0.wav");
+    write("0000000000000001", "clip.json");
+    write("0000000000000002", "audio-0.wav");
+    write("0000000000000002", "clip.json");
     write("not-stems", "take-1.wav");
-    write("v6-b", "audio-0.flac");
-    write("v6-b", "clip.json");
-    std::fs::write(root.join("media.json"), br#"{"owners":{"v5-a":"aaaa","v5-open":"oooo","v6-b":"bbbb"}}"#).unwrap();
-    let freed = budget::sweep_old_stems(&root, &["editor/v5-open".to_string()]);
+    write("0000000000000003", "audio-0.flac");
+    write("0000000000000003", "clip.json");
+    std::fs::write(root.join("media.json"), br#"{"owners":{"0000000000000001":"aaaa","0000000000000002":"oooo","0000000000000003":"bbbb"}}"#).unwrap();
+    let freed = budget::sweep_old_stems(&root, &["editor/0000000000000002".to_string()]);
     assert_eq!(freed, 1400, "the old folder's bytes");
     assert!(editor.join("not-stems").exists(), "a folder without the engine's clip.json is not a stem folder");
-    assert!(!editor.join("v5-a").exists(), "a v5 (WAV) folder goes; its clip re-prepares when opened");
-    assert!(editor.join("v5-open").exists(), "the clip in the editor keeps its stems");
-    assert!(editor.join("v6-b").exists(), "current FLAC folders stay");
+    assert!(!editor.join("0000000000000001").exists(), "a v5 (WAV) folder goes; its clip re-prepares when opened");
+    assert!(editor.join("0000000000000002").exists(), "the clip in the editor keeps its stems");
+    assert!(editor.join("0000000000000003").exists(), "current FLAC folders stay");
     let media = budget::read_media(&root);
-    assert!(!media.owners.contains_key("v5-a") && media.owners.contains_key("v6-b"));
+    assert!(!media.owners.contains_key("0000000000000001") && media.owners.contains_key("0000000000000003"));
     // Through the budget pass: once per root per process.
-    write("v5-c", "audio-1.wav");
-    write("v5-c", "clip.json");
+    write("0000000000000004", "audio-1.wav");
+    write("0000000000000004", "clip.json");
     budget::enforce(&root, 1 << 30, 0);
-    assert!(!editor.join("v5-c").exists(), "the first budget pass sweeps");
-    write("v5-d", "audio-1.wav");
-    write("v5-d", "clip.json");
+    assert!(!editor.join("0000000000000004").exists(), "the first budget pass sweeps");
+    write("0000000000000005", "audio-1.wav");
+    write("0000000000000005", "clip.json");
     budget::enforce(&root, 1 << 30, 0);
-    assert!(editor.join("v5-d").exists(), "only the first pass: later folders are the engine's to replace");
+    assert!(editor.join("0000000000000005").exists(), "only the first pass: later folders are the engine's to replace");
     let _ = std::fs::remove_dir_all(&root);
 }
 
