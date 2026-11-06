@@ -24,8 +24,9 @@ pub const PAUSE_STOP_WAIT: Duration = Duration::from_secs(10);
 /// Why a screenshot is refused while a closed game drains (it would be the
 /// closed game's last frame).
 pub const DRAIN_SCREENSHOT_REASON: &str = "The game closed";
-/// A screenshot with no `screenshot` / `screenshot_failed` after this is assumed lost.
-pub const SCREENSHOT_STALE: Duration = Duration::from_secs(10);
+/// Screenshots with no `screenshot` / `screenshot_failed` this long after the
+/// last one was sent are assumed lost (a PNG can go to a sleeping hard drive).
+pub const SCREENSHOT_STALE: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LongRec {
@@ -49,15 +50,23 @@ pub struct AutoStop {
 pub struct EngineActivity {
     pending_saves: u32,
     last_save_sent: Option<Instant>,
-    /// A screenshot sent and not yet reported (its PNG is still being written).
-    screenshot_sent: Option<Instant>,
+    /// Screenshots sent and not yet reported (their PNGs are still being written).
+    pending_screenshots: u32,
+    last_screenshot_sent: Option<Instant>,
     pub long: LongRec,
     auto_stop: Option<AutoStop>,
 }
 
 impl Default for EngineActivity {
     fn default() -> Self {
-        EngineActivity { pending_saves: 0, last_save_sent: None, screenshot_sent: None, long: LongRec::Idle, auto_stop: None }
+        EngineActivity {
+            pending_saves: 0,
+            last_save_sent: None,
+            pending_screenshots: 0,
+            last_screenshot_sent: None,
+            long: LongRec::Idle,
+            auto_stop: None,
+        }
     }
 }
 
@@ -86,7 +95,8 @@ impl EngineActivity {
             self.record_requested(now);
         }
         if cmd == "screenshot" {
-            self.screenshot_sent = Some(now);
+            self.pending_screenshots += 1;
+            self.last_screenshot_sent = Some(now);
         }
     }
 
@@ -119,7 +129,7 @@ impl EngineActivity {
                 None
             }
             "screenshot" | "screenshot_failed" => {
-                self.screenshot_sent = None;
+                self.pending_screenshots = self.pending_screenshots.saturating_sub(1);
                 None
             }
             "recording_started" => {
@@ -148,10 +158,10 @@ impl EngineActivity {
                 self.long = LongRec::Idle;
             }
         }
-        if self.screenshot_sent.is_some_and(|t| now.duration_since(t) >= SCREENSHOT_STALE) {
-            self.screenshot_sent = None;
+        if self.last_screenshot_sent.is_some_and(|t| now.duration_since(t) >= SCREENSHOT_STALE) {
+            self.pending_screenshots = 0;
         }
-        self.pending_saves > 0 || self.screenshot_sent.is_some() || self.long != LongRec::Idle
+        self.pending_saves > 0 || self.pending_screenshots > 0 || self.long != LongRec::Idle
     }
 
     /// What holds a due retarget now (see `EnginePlanner::step`): saves or a
@@ -161,7 +171,7 @@ impl EngineActivity {
     pub fn retarget_busy(&mut self, now: Instant) -> Busy {
         self.busy(now); // expire stale saves / starts
         let given_up = self.auto_stop.is_some_and(|s| now >= s.deadline);
-        let saving = self.pending_saves > 0 || self.screenshot_sent.is_some();
+        let saving = self.pending_saves > 0 || self.pending_screenshots > 0;
         Busy { saving, long_rec: self.is_recording() && !given_up }
     }
 
@@ -390,6 +400,26 @@ mod tests {
         assert!(a.busy(t0 + s(3) + SCREENSHOT_STALE - Duration::from_millis(1)));
         assert!(!a.busy(t0 + s(3) + SCREENSHOT_STALE), "a lost screenshot does not block forever");
         assert_eq!(a.retarget_busy(t0 + s(3) + SCREENSHOT_STALE), Busy::default());
+    }
+
+    #[test]
+    fn screenshots_in_flight_are_counted_and_go_stale_after_60_s() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let mut a = EngineActivity::default();
+        a.command_sent("screenshot", t0);
+        a.command_sent("screenshot", t0 + s(1));
+        a.on_event(&json!({"type":"screenshot","path":"a.png"}), 0.0);
+        assert!(a.busy(t0 + s(1)), "the second PNG is still being written");
+        assert!(a.retarget_busy(t0 + s(1)).saving, "and it holds a retarget");
+        a.on_event(&json!({"type":"screenshot_failed","reason":"r"}), 0.0);
+        assert!(!a.busy(t0 + s(1)), "both reported");
+        a.on_event(&json!({"type":"screenshot","path":"x.png"}), 0.0);
+        assert!(!a.busy(t0 + s(1)), "a stray report does not underflow");
+        assert_eq!(SCREENSHOT_STALE, s(60), "a PNG can go to a sleeping hard drive");
+        a.command_sent("screenshot", t0 + s(2));
+        assert!(a.busy(t0 + s(2) + s(59)), "a slow disk is not a lost screenshot");
+        assert!(!a.busy(t0 + s(2) + SCREENSHOT_STALE), "a lost one does not block forever");
     }
 
     #[test]
