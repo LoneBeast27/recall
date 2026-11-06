@@ -240,7 +240,11 @@ impl TrackRing {
 
     /// Append captured samples, scaled by the source's gain. The mic-mute hotkey silences
     /// only input sources, and only samples entering the ring: replay history never changes.
+    ///
+    /// A block bigger than the ring keeps only its newest `capacity` samples, and the ring
+    /// makes room before it takes them, so it never grows past its capacity.
     fn push_capture(&self, data: &[f32], mute_inputs: bool) {
+        let data = &data[data.len().saturating_sub(self.capacity)..];
         let silence = mute_inputs && self.input;
         let gain = self.gain();
         let gained: Vec<f32>;
@@ -252,12 +256,12 @@ impl TrackRing {
         };
         crate::longrec::tap::tap_audio(self.name, data, silence); // long-recording hook
         let mut buf = self.samples.lock().expect("ring lock");
-        for &s in data {
-            buf.push_back(if silence { 0.0 } else { s });
-        }
-        let over = buf.len().saturating_sub(self.capacity);
+        let over = (buf.len() + data.len()).saturating_sub(self.capacity);
         if over > 0 {
             buf.drain(..over);
+        }
+        for &s in data {
+            buf.push_back(if silence { 0.0 } else { s });
         }
     }
 }

@@ -87,6 +87,7 @@ pub fn tap_audio(track: &'static str, samples: &[f32], silence: bool) {
         return;
     }
     let Some(tx) = SENDER.get() else { return };
+    let samples = tap_part(samples);
     let samples = if silence { vec![0.0; samples.len()] } else { samples.to_vec() };
     let _ = tx.try_send(Data::Audio { track, samples, at: Instant::now() });
 }
@@ -114,4 +115,31 @@ pub(super) fn video_params() -> Option<ff::codec::Parameters> {
 
 pub(super) fn generation() -> u64 {
     GENERATION.load(Relaxed)
+}
+
+/// At most this many samples of one chunk go to the long recording (5 s of the engine's
+/// fixed 48 kHz stereo). Placement is by arrival time, so the writer pads anything before
+/// the kept part with silence in small blocks (`Machine::push_audio`).
+pub(super) const TAP_MAX_SAMPLES: usize = 5 * 48_000 * 2;
+
+/// The part of a chunk the long recording gets: the newest [`TAP_MAX_SAMPLES`], whole frames.
+pub(super) fn tap_part(samples: &[f32]) -> &[f32] {
+    &samples[samples.len().saturating_sub(TAP_MAX_SAMPLES)..]
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{tap_part, TAP_MAX_SAMPLES};
+
+    /// 2026-11-07 audit T1: a resume's silence block was copied whole into the writer queue.
+    #[test]
+    fn a_long_silence_run_reaches_the_recording_as_its_newest_five_seconds() {
+        let long: Vec<f32> = (0..3 * TAP_MAX_SAMPLES + 2).map(|i| i as f32).collect();
+        let part = tap_part(&long);
+        assert_eq!(part.len(), TAP_MAX_SAMPLES);
+        assert_eq!(part.last(), long.last(), "the newest samples are kept");
+        assert_eq!(part.len() % 2, 0, "whole stereo frames");
+        let short = [0.25f32; 960];
+        assert_eq!(tap_part(&short).len(), 960, "a normal packet goes through whole");
+    }
 }
