@@ -34,7 +34,10 @@ pub enum Outbound {
         fps: u32,
         /// Seconds of replay currently buffered (0.0 when encode is off/down).
         buffer_secs: f32,
-        /// "h264_nvenc" (replay ready, for every codec) | "starting" | "off" | "failed".
+        /// "h264_nvenc" (replay ready, for every codec) | "degraded" (recording from CPU
+        /// copies after GPU frames were refused; replay ready) | "recovering" (encoder
+        /// being rebuilt; the buffer is kept and saveable) | "starting" | "off" | "failed"
+        /// (the engine's own recovery is spent).
         encoder: String,
         encoder_error: Option<String>,
         /// "h264" | "hevc" | "av1": the codec recording (H.264 after a

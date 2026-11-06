@@ -142,6 +142,8 @@ pub struct Controller {
     pub(crate) render: RenderCheck,
     /// Sleep and resume (`record_power`).
     pub(crate) power: crate::record_power::PowerPlanner,
+    /// Engine restart after a lasting encoder failure (`record_recover`).
+    pub(crate) recovery: crate::record_recover::EncoderRecovery,
 }
 
 /// Entry point. Returns the process exit code.
@@ -238,6 +240,7 @@ pub fn run() -> i32 {
         can_trace,
         render: RenderCheck::new(can_trace),
         power: Default::default(),
+        recovery: Default::default(),
     };
     if !ctl.can_trace {
         log!("record: FPS needs Performance Log Users (run the installer, then sign in again); stats show FPS as -");
@@ -347,6 +350,7 @@ impl Controller {
             self.reapply_engine_intents();
         }
         self.activity_tick(now);
+        self.encoder_recover_tick(now);
         self.overlay.sync(&self.cfg.overlay);
         self.fullscreen_tick(now);
         self.island_editor_tick(now);

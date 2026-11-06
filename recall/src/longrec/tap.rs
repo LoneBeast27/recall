@@ -53,8 +53,9 @@ pub fn on_encoder_open(encoder: &ff::encoder::Video) {
     }
 }
 
-/// The live encoder failed and will not reopen at this capture size: a
-/// running recording of its stream ends (`recording_failed`, file kept).
+/// The live encoder failed (it reopens on a backoff, `encoder/reopen.rs`, as a new
+/// generation): a running recording of this generation's stream ends
+/// (`recording_failed`, file kept).
 pub fn on_encoder_failed(reason: &str) {
     on_encoder_failed_at(GENERATION.load(Relaxed), reason);
 }
