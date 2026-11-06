@@ -404,15 +404,14 @@ fn clips_on_a_share_are_never_sent() {
     assert!(out.refused.is_some());
 }
 
-// ---- A shell call that Windows had to ask about, then was declined or cancelled, is a refusal ----
+// ---- A delete the IFileOperation sink refused (it would not recycle) is a refusal ----
 
 #[test]
-fn shell_results_declined_or_cancelled_are_refusals() {
-    assert_eq!(shell_outcome(0, false), Ok(()));
-    assert!(matches!(shell_outcome(0, true), Err(RecycleError::Refused(_))), "fAnyOperationsAborted");
-    assert!(matches!(shell_outcome(0x4C7, false), Err(RecycleError::Refused(_))), "ERROR_CANCELLED");
-    assert!(matches!(shell_outcome(0x75, false), Err(RecycleError::Refused(_))), "DE_OPCANCELLED");
-    assert!(matches!(shell_outcome(0x7C, false), Err(RecycleError::Failed(_))), "another error is a failure");
+fn sink_refusals_and_cancels_are_refusals() {
+    use crate::win_fileop::Outcome;
+    assert_eq!(from_outcome(Outcome::Recycled), Ok(()));
+    assert!(matches!(from_outcome(Outcome::Refused("would delete for good".into())), Err(RecycleError::Refused(_))));
+    assert!(matches!(from_outcome(Outcome::Failed("access denied".into())), Err(RecycleError::Failed(_))));
 }
 
 static DECLINED_CALLS: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());

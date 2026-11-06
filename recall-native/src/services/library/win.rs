@@ -4,11 +4,10 @@ use std::os::windows::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use windows::Win32::Foundation::{FILETIME, HWND, SYSTEMTIME};
+use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
 use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
-use windows::Win32::UI::Shell::{FO_DELETE, SHFILEOPSTRUCTW, SHFileOperationW};
-use windows::core::{BOOL, PCWSTR};
+use windows::core::PCWSTR;
 
 use super::LocalStamp;
 use super::calendar::stamp_from_unix_offset;
@@ -116,30 +115,20 @@ pub(super) fn recycle(clips: &[PathBuf]) -> Result<usize, String> {
         return Ok(0);
     }
     check_recyclable(&files, crate::win_recycle::can_recycle)?;
-    // Double-NUL-terminated list of NUL-separated paths.
-    let mut list: Vec<u16> = Vec::new();
-    for file in &files {
-        list.extend(file.as_os_str().encode_wide());
-        list.push(0);
+    // IFileOperation with a sink that refuses any delete Windows would not recycle
+    // (`win_fileop.rs`); `check_recyclable` above is the second guard.
+    let outcome = crate::win_fileop::recycle_files(&files).outcome;
+    if let crate::win_fileop::Outcome::Refused(why) = &outcome {
+        return Err(format!("Couldn't move these clips to the Recycle Bin: {why}. Nothing was deleted for good."));
     }
-    list.push(0);
-    let mut operation = SHFILEOPSTRUCTW {
-        hwnd: HWND(std::ptr::null_mut()),
-        wFunc: FO_DELETE,
-        pFrom: PCWSTR(list.as_ptr()),
-        pTo: PCWSTR::null(),
-        // `check_recyclable` refused anything the bin would not take; should it ever be wrong,
-        // FOF_WANTNUKEWARNING in the checked set asks before a permanent delete.
-        fFlags: crate::win_recycle::RECYCLE_FLAGS,
-        fAnyOperationsAborted: BOOL(0),
-        hNameMappings: std::ptr::null_mut(),
-        lpszProgressTitle: PCWSTR::null(),
-    };
-    let code = unsafe { SHFileOperationW(&mut operation) };
     // Count what actually left the folder; a partial move returns the smaller count.
     let moved = clips.iter().filter(|clip| !clip.exists()).count();
     if moved == 0 && !clips.is_empty() {
-        return Err(format!("Recycle Bin move failed (shell error {code:#x})"));
+        let why = match outcome {
+            crate::win_fileop::Outcome::Failed(why) => why,
+            _ => "nothing left the folder".into(),
+        };
+        return Err(format!("Recycle Bin move failed: {why}"));
     }
     Ok(moved)
 }

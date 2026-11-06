@@ -96,14 +96,6 @@ fn settings_read_the_volume_key_and_both_policy_hives() {
 }
 
 #[test]
-fn the_recycle_flags_never_delete_for_good_unasked() {
-    assert!(recycles_only(RECYCLE_FLAGS));
-    assert!(!recycles_only(FOF_NOCONFIRMATION | FOF_SILENT), "no FOF_ALLOWUNDO: a plain delete");
-    assert!(!recycles_only(FOF_ALLOWUNDO | FOF_NOCONFIRMATION), "auto-yes to a permanent delete");
-    assert!(recycles_only(FOF_ALLOWUNDO | FOF_SILENT));
-}
-
-#[test]
 fn this_machine_reports_its_temp_volume_bin() {
     // Read only: the temp folder's volume is local and fixed with a bin; the answer is printed for the record.
     let f = facts(&std::env::temp_dir());
