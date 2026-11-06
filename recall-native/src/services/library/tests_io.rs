@@ -235,6 +235,21 @@ fn mp4_duration_matches_ffprobe_on_a_real_clip() {
 }
 
 #[test]
+fn library_delete_refuses_files_their_bin_cannot_take() {
+    let dir = temp_dir("refuse");
+    let clip = dir.join("RecallNativeTest__2026-10-22__11-00-00.mp4");
+    std::fs::write(&clip, b"x").unwrap();
+    fn no_bin(_: &Path, _: u64) -> Result<(), String> {
+        Err("the drive has no Recycle Bin".into())
+    }
+    let err = win::check_recyclable(std::slice::from_ref(&clip), no_bin).unwrap_err();
+    assert!(err.contains("Nothing was deleted"), "{err}");
+    assert!(clip.exists(), "the clip stays");
+    assert!(win::check_recyclable(std::slice::from_ref(&clip), |_, _| Ok(())).is_ok());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn recycle_bin_moves_clip_thumbs_sidecar_and_marks_only() {
     let dir = temp_dir("recycle");
     let stem = "RecallNativeTest__2026-10-22__10-00-00";

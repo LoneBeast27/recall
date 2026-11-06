@@ -3,7 +3,9 @@
 //! when the top-level Recall clips in `recording.output_dir` total more than
 //! the cap, the OLDEST clips go to the Recycle Bin (`SHFileOperationW` +
 //! `FOF_ALLOWUNDO`, with their recorder thumbnails and `.recall-edit.json` /
-//! `.recall-marks.json` sidecars) until the folder is under the cap.
+//! `.recall-marks.json` sidecars) until the folder is under the cap. A clip
+//! goes only when its volume has a Recycle Bin that will take it
+//! (`win_recycle.rs`); otherwise the run stops there and nothing is deleted.
 //!
 //! Only Recall-named clips count and can go ([`is_recall_clip`]:
 //! `<GAME>__YYYY-MM-DD__HH-MM-SS[...].mp4`, long recordings included); other
@@ -193,14 +195,19 @@ pub const REARM_POINTS: u64 = 5;
 pub struct Warner {
     cap: u64,
     level: u8,
+    /// The "couldn't move old clips" notice was shown and no run has worked since.
+    refused: bool,
 }
+
+/// The notice when a clip cannot go to the Recycle Bin (shown once until a run works again).
+pub const REFUSED_NOTICE: &str = "Couldn't move old clips to the Recycle Bin, so your limit wasn't applied.";
 
 impl Warner {
     /// The level to warn about now, if any. `pruned`: this run moved clips
     /// (their own toast says so), so the level is only recorded.
     pub fn update(&mut self, used: u64, cap: u64, stuck: bool, pruned: bool) -> Option<u8> {
         if cap != self.cap {
-            *self = Warner { cap, level: 0 };
+            *self = Warner { cap, level: 0, refused: self.refused };
         }
         if cap == 0 {
             return None;
@@ -215,6 +222,15 @@ impl Warner {
             self.level = now;
         }
         None
+    }
+}
+
+impl Warner {
+    /// Whether to show [`REFUSED_NOTICE`] for this run: once, until a run goes through again.
+    pub fn refusal(&mut self, refused: bool) -> bool {
+        let show = refused && !self.refused;
+        self.refused = refused;
+        show
     }
 }
 
@@ -296,14 +312,13 @@ pub fn favourites_at(path: &Path) -> Result<HashSet<String>, String> {
     }
 }
 
-/// Move `files` to the Recycle Bin in one shell operation.
+/// Move `files` (one clip and its companions) to the Recycle Bin in one shell operation.
 pub fn recycle(files: &[PathBuf]) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::{BOOL, PCWSTR};
     use windows::Win32::Foundation::HWND;
     use windows::Win32::UI::Shell::{
-        SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING, FO_DELETE,
-        SHFILEOPSTRUCTW,
+        SHFileOperationW, FO_DELETE, SHFILEOPSTRUCTW,
     };
     if files.is_empty() {
         return Ok(());
@@ -319,7 +334,8 @@ pub fn recycle(files: &[PathBuf]) -> Result<(), String> {
         wFunc: FO_DELETE,
         pFrom: PCWSTR(list.as_ptr()),
         pTo: PCWSTR::null(),
-        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING).0 as u16,
+        // The checked flag set (`win_recycle::recycles_only`): recycle, and ask before any permanent delete.
+        fFlags: crate::win_recycle::RECYCLE_FLAGS,
         fAnyOperationsAborted: BOOL(0),
         hNameMappings: std::ptr::null_mut(),
         lpszProgressTitle: PCWSTR::null(),
@@ -345,6 +361,8 @@ pub struct Outcome {
     /// Oldest clip that may go next.
     pub next: Option<u64>,
     pub stuck: bool,
+    /// Why the run stopped before a clip that cannot go to the Recycle Bin.
+    pub refused: Option<String>,
 }
 
 /// List and plan (nothing moved). Errors leave favourites unknown or the folder unread.
@@ -368,35 +386,62 @@ fn plan_listing(dir: &Path, favs: &HashSet<String>, cap: u64) -> Result<(Plan, L
 pub(crate) type PlanFn = fn(&Path, u32) -> Result<(Plan, Listing), String>;
 /// Moves files to the Recycle Bin (production: [`recycle`]; tests inject one).
 pub(crate) type RecycleFn = fn(&[PathBuf]) -> Result<(), String>;
+pub(crate) use crate::win_recycle::BinCheck;
 
-/// One cap run. `wanted` is asked right before the Recycle Bin call: the
-/// listing can take long on a sleeping NAS, and a run whose cap or folder is
-/// no longer the user's setting must move nothing.
-pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: &dyn Fn() -> bool, recycle: RecycleFn) -> Result<Outcome, String> {
+/// Bytes one Recycle Bin call moves: the clip (its listed size) and its
+/// companions as they are on disk (a missing one counts 0).
+fn companions_bytes(files: &[PathBuf], clip: Option<&ClipFile>) -> u64 {
+    let clip_bytes = clip.map_or(0, |c| c.bytes);
+    let others: u64 = files.iter().skip(1).filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
+    clip_bytes + others
+}
+
+/// One cap run: one Recycle Bin call per clip (with its thumbnails and
+/// sidecars), oldest first. `wanted` is asked before EVERY call: the listing
+/// can take long on a sleeping NAS and each call takes a moment on an HDD,
+/// and once the cap or folder is no longer the user's setting nothing more
+/// moves. `bin` is asked before every call too: a clip whose volume has no
+/// Recycle Bin that will take it (a share, a removable drive, a bin turned
+/// off or too small) stops the run, so nothing is ever deleted for good.
+/// The first failed call ends the run.
+pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: &dyn Fn() -> bool, bin: BinCheck, recycle: RecycleFn) -> Result<Outcome, String> {
     let (plan, listing) = plan(dir, cap_gb)?;
     let cap = cap_gb as u64 * GIB;
-    let mut out = Outcome { removed: 0, freed: 0, through: None, used: plan.total, cap, next: plan.next, stuck: plan.stuck(cap) };
-    if plan.remove.is_empty() {
-        return Ok(out);
+    let stuck = plan.stuck(cap);
+    let mut out = Outcome { removed: 0, freed: 0, through: None, used: plan.total, cap, next: plan.next, stuck, refused: None };
+    let mut failed = None;
+    for name in &plan.remove {
+        if !wanted() {
+            log!("storage: the storage limit or folder changed during the run; stopped after {} clip(s)", out.removed);
+            break;
+        }
+        let files = companions(dir, name, &listing);
+        let bytes = companions_bytes(&files, listing.clips.iter().find(|c| c.name == *name));
+        if let Err(why) = bin(dir, bytes) {
+            out.refused = Some(why);
+            break;
+        }
+        let moved = recycle(&files);
+        if let Some(c) = listing.clips.iter().find(|c| c.name == *name).filter(|c| !dir.join(&c.name).exists()) {
+            out.removed += 1;
+            out.freed += c.bytes;
+            out.through = out.through.max(Some(c.modified));
+        }
+        if let Err(e) = moved {
+            failed = Some(e);
+            break;
+        }
     }
-    if !wanted() {
-        log!("storage: the storage limit or folder changed during the run; nothing moved");
-        return Ok(out);
-    }
-    let files: Vec<PathBuf> = plan.remove.iter().flat_map(|c| companions(dir, c, &listing)).collect();
-    let moved = recycle(&files);
-    let gone: Vec<&ClipFile> = listing.clips.iter().filter(|c| plan.remove.contains(&c.name) && !dir.join(&c.name).exists()).collect();
-    out.removed = gone.len();
-    out.freed = gone.iter().map(|c| c.bytes).sum();
-    out.through = gone.iter().map(|c| c.modified).max();
     out.used = plan.total - out.freed;
-    // A partial move still reports what went (the toast names the date); the error follows.
-    if out.removed == 0 {
-        moved?;
-    } else if let Err(e) = moved {
-        log!("storage: {e} (after {} clip(s) went)", out.removed);
+    // A partial run still reports what went (the toast names the date); the error follows.
+    match failed {
+        Some(e) if out.removed == 0 => Err(e),
+        Some(e) => {
+            log!("storage: {e} (after {} clip(s) went)", out.removed);
+            Ok(out)
+        }
+        None => Ok(out),
     }
-    Ok(out)
 }
 
 pub fn cleaned_event(o: &Outcome) -> String {

@@ -10,6 +10,13 @@ mod cache;
 mod clip_open;
 #[path = "../../recall/src/edit_model.rs"]
 mod edit_model;
+// Can a clip really go to the Recycle Bin (shared with the recorder's storage limit).
+#[allow(dead_code)]
+#[path = "../../recall/src/win_recycle.rs"]
+mod win_recycle;
+#[allow(dead_code)]
+#[path = "../../recall/src/win_volume.rs"]
+mod win_volume;
 mod editor_state;
 mod install_wait;
 mod instance;

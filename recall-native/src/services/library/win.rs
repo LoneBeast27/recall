@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use windows::Win32::Foundation::{FILETIME, HWND, SYSTEMTIME};
 use windows::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
 use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
-use windows::Win32::UI::Shell::{FO_DELETE, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING, SHFILEOPSTRUCTW, SHFileOperationW};
+use windows::Win32::UI::Shell::{FO_DELETE, SHFILEOPSTRUCTW, SHFileOperationW};
 use windows::core::{BOOL, PCWSTR};
 
 use super::LocalStamp;
@@ -95,11 +95,27 @@ pub(super) fn recycle_targets(clips: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>)
     (moved_clips, files)
 }
 
+/// Every file must fit its volume's Recycle Bin (`win_recycle.rs`), or nothing
+/// is sent: on a share, a removable drive, a bin turned off or too small,
+/// Windows would delete for good. The user is told why and nothing is deleted.
+pub(super) fn check_recyclable(files: &[PathBuf], bin: crate::win_recycle::BinCheck) -> Result<(), String> {
+    for file in files {
+        let bytes = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
+        let folder = file.parent().unwrap_or(file);
+        if let Err(why) = bin(folder, bytes) {
+            let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+            return Err(format!("Couldn't move {name} to the Recycle Bin: {why}. Nothing was deleted."));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn recycle(clips: &[PathBuf]) -> Result<usize, String> {
     let (clips, files) = recycle_targets(clips);
     if files.is_empty() {
         return Ok(0);
     }
+    check_recyclable(&files, crate::win_recycle::can_recycle)?;
     // Double-NUL-terminated list of NUL-separated paths.
     let mut list: Vec<u16> = Vec::new();
     for file in &files {
@@ -112,9 +128,9 @@ pub(super) fn recycle(clips: &[PathBuf]) -> Result<usize, String> {
         wFunc: FO_DELETE,
         pFrom: PCWSTR(list.as_ptr()),
         pTo: PCWSTR::null(),
-        // A drive without a Recycle Bin (network share, some USB disks) or a file too big for it
-        // would be deleted for good: FOF_WANTNUKEWARNING asks first instead of doing it silently.
-        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING).0 as u16,
+        // `check_recyclable` refused anything the bin would not take; should it ever be wrong,
+        // FOF_WANTNUKEWARNING in the checked set asks before a permanent delete.
+        fFlags: crate::win_recycle::RECYCLE_FLAGS,
         fAnyOperationsAborted: BOOL(0),
         hNameMappings: std::ptr::null_mut(),
         lpszProgressTitle: PCWSTR::null(),
