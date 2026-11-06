@@ -28,6 +28,7 @@ mod session;
 mod single_instance;
 mod smoke;
 mod stack;
+mod stack_lines;
 mod stats;
 mod trace;
 mod window;
