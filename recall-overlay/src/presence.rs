@@ -136,6 +136,15 @@ pub struct CardLook {
     pub progress: f32,
 }
 
+impl CardLook {
+    /// The card of a `size` (w, h) card scene at a spot turned `turn`: a side
+    /// spot's card stands upright beside the pill (`h` along the edge, `w` across).
+    pub fn placed(turn: Turn, (w, h): (f32, f32), gap: f32, progress: f32) -> Self {
+        let (w, h) = if turn == Turn::None { (w, h) } else { (h, w) };
+        Self { w, h, gap, progress }
+    }
+}
+
 /// Where `scene`'s content sits in the pill (`content_w` as drawn, scaled):
 /// centred, or at the left padding for a scene that leads.
 pub fn content_dx(look: &Look, content_w: f32, lead: bool) -> f32 {
@@ -182,19 +191,20 @@ pub struct Look {
     /// The card stacks above the pill (a bottom spot): the pill keeps the
     /// window's bottom and the card unfolds upwards from it.
     pub up: bool,
-    /// A side spot draws the whole look turned a quarter (text included);
-    /// every size here stays in the unturned layout.
+    /// A side spot lays the pill down its edge (the window is turned);
+    /// text and marks stay upright ([`crate::stack`]). Every size here
+    /// stays in the unturned layout.
     pub turn: Turn,
 }
 
-/// The quarter turn of a side spot: `Cw` on the right edge (reads top to
-/// bottom), `Ccw` on the left edge (reads bottom to top).
+/// A side spot's pill runs down its edge: `Right` / `Left` edge. The
+/// pill's start (the mark) is at the top on both; nothing is rotated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Turn {
     #[default]
     None,
-    Cw,
-    Ccw,
+    Right,
+    Left,
 }
 
 impl Look {
@@ -244,7 +254,7 @@ impl Look {
         let (w, h) = self.window();
         match self.turn {
             Turn::None => (w, h),
-            Turn::Cw | Turn::Ccw => (h, w),
+            Turn::Right | Turn::Left => (h, w),
         }
     }
 

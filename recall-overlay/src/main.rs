@@ -27,6 +27,7 @@ mod session;
 #[path = "../../recall/src/single_instance.rs"]
 mod single_instance;
 mod smoke;
+mod stack;
 mod stats;
 mod trace;
 mod window;
