@@ -139,7 +139,6 @@ pub(super) mod sys {
     extern "system" {
         fn GetLogicalDrives() -> u32;
         fn GetDriveTypeW(root: *const u16) -> u32;
-        fn GetDiskFreeSpaceExW(dir: *const u16, free_to_caller: *mut u64, total: *mut u64, total_free: *mut u64) -> i32;
         fn CreateFileW(name: *const u16, access: u32, share: u32, security: *const c_void, disposition: u32, flags: u32, template: Handle) -> Handle;
         fn DeviceIoControl(
             device: Handle,
@@ -173,12 +172,7 @@ pub(super) mod sys {
                 if unsafe { GetDriveTypeW(root_w.as_ptr()) } != DRIVE_FIXED {
                     return None;
                 }
-                let mut free = 0u64;
-                // SAFETY: NUL-terminated path; out pointers are valid or null.
-                let ok = unsafe { GetDiskFreeSpaceExW(root_w.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) };
-                if ok == 0 {
-                    return None;
-                }
+                let free = crate::win_volume::free_bytes_raw(std::path::Path::new(&root))?;
                 let (disk, ssd) = probe(letter);
                 Some(Drive { root, disk, ssd, free, system: system.starts_with(letter) })
             })

@@ -157,7 +157,7 @@ fn hotkey_and_recording_events_and_session_fields() {
     apply(&mut state, json!({"mod":"session","event":{"type":"storage_cleaned","removed":2,"freed_bytes":9,"through":1_790_000_000u64,"used_bytes":80,"cap_bytes":100}}));
     apply(&mut state, json!({"mod":"session","event":{"type":"storage_warning","level":90,"used_bytes":91,"cap_bytes":100,"next_through":1_780_000_000u64}}));
     apply(&mut state, json!({"mod":"session","event":{"type":"storage_warning","level":100,"used_bytes":120,"cap_bytes":100,"next_through":null}}));
-    apply(&mut state, json!({"mod":"session","event":{"type":"storage_warning","level":"free","drive":"C:","free_bytes":3,"need_bytes":5}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"disk_low","drive":"C:","free_bytes":3,"need_bytes":5}}));
     apply(&mut state, json!({"mod":"session","event":{"type":"storage_preview","cap_gb":1000,"used_bytes":5,"removed":4,"freed_bytes":3,"through":1_770_000_000u64}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"clip_moved","path":"E:/a.mp4","elapsed_ms":900}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"clip_moved","path":"E:/b.mp4","elapsed_ms":900,"kept_path":"F:/s/kept/b.mp4"}}));
@@ -460,4 +460,24 @@ fn no_status_reply_for_five_seconds_is_unresponsive() {
     assert!(state.unresponsive(Instant::now() + Duration::from_secs(6), limit), "engine lines do not prove the pump is alive");
     apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"waiting"}}));
     assert!(!state.unresponsive(Instant::now() + Duration::from_secs(4), limit));
+}
+
+#[test]
+fn unknown_storage_warning_levels_never_toast() {
+    // A newer recorder may add levels; only a known numeric level (1..=100) is a cap warning.
+    let mut state = connected();
+    for level in [json!("free"), json!("bogus"), json!(0), json!(150), Value::Null] {
+        apply(&mut state, json!({"mod":"session","event":{"type":"storage_warning","level":level,"used_bytes":0,"cap_bytes":0}}));
+    }
+    apply(&mut state, json!({"mod":"session","event":{"type":"storage_warning","used_bytes":0,"cap_bytes":0}}));
+    assert_eq!(state.events, Vec::<DaemonEvent>::new(), "no cap toast for a level this app does not know");
+}
+
+#[test]
+fn a_message_type_the_app_does_not_know_is_ignored() {
+    // How an app built before `disk_low` treats it: its parser has the same catch-all
+    // `_ => {}` arm (protocol.rs before d57f46f, line 94), so no event and no toast.
+    let mut state = connected();
+    apply(&mut state, json!({"mod":"session","event":{"type":"disk_low_v2","drive":"C:","free_bytes":3,"need_bytes":5}}));
+    assert_eq!(state.events, Vec::<DaemonEvent>::new());
 }

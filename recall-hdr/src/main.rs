@@ -92,6 +92,10 @@ mod gpu_games;
 mod rules;
 #[path = "../../recall/src/single_instance.rs"]
 mod single_instance;
+// Volume + free-space calls shared with the engine (spill-only helpers unused here).
+#[allow(dead_code)]
+#[path = "../../recall/src/win_volume.rs"]
+mod win_volume;
 mod state;
 mod supervisor;
 mod tray;

@@ -1,12 +1,13 @@
 //! Free space for a save. Before muxing, the saver checks the drive it is
-//! about to write (estimate: the window's video bytes + AAC audio + 64 MiB).
+//! about to write (estimate: the window's video bytes + AAC audio + the MP4
+//! index + a small fixed allowance, see [`estimate`]).
 //! A staged save whose staging drive is short, or whose staged mux fails with
 //! a disk-full error (ERROR_DISK_FULL 112 / ERROR_HANDLE_DISK_FULL 39), is
 //! written in place on the clip drive instead. When that drive is short too
 //! the save fails with "Not enough space on <staging> or <clip> (need X)".
 //!
 //! The free-space function is injected ([`FreeSpace`]) so tests never fill a
-//! disk; production uses [`free_bytes`] (`GetDiskFreeSpaceExW`). An unknown
+//! disk; production uses [`free_bytes`] (`win_volume.rs`). An unknown
 //! answer counts as enough room, so the worst case is today's behaviour.
 
 use std::path::{Path, PathBuf};
@@ -17,24 +18,46 @@ use super::staging::volume_key;
 /// `fn(folder) -> free bytes` on that folder's volume (`None` = unknown).
 pub(crate) type FreeSpace = fn(&Path) -> Option<u64>;
 
-/// Headroom on top of the clip estimate (moov atom, thumbnails, rounding).
-pub(crate) const MARGIN: u64 = 64 << 20;
-/// AAC bytes per second per track (`mux.rs` encodes at 192 kbit/s).
-const AAC_BYTES_PER_SEC: f64 = 192_000.0 / 8.0;
+/// Free space of a save folder; the folder is resolved once per minute per
+/// thread (`win_volume::VolumeCache`), its free space read every save.
+pub(crate) use crate::win_volume::free_bytes_cached as free_bytes;
 
-/// Bytes this save is expected to need on disk.
+/// MP4 index bytes per sample, worst case: stsz 4, stts 8, ctts 8, stss 4 and
+/// one co64 chunk offset (8) per sample. FFmpeg's mov muxer writes no
+/// per-packet bytes into `mdat`, so this is all the container adds per frame.
+const INDEX_BYTES_PER_SAMPLE: u64 = 32;
+/// ftyp + moov box headers and track metadata (a few KB) and NTFS cluster
+/// rounding of the clip file. Only the clip itself is reserved: the gallery
+/// thumbnail and bookmark sidecar are not, since a failed thumbnail does not
+/// fail the save.
+const HEADER_BYTES: u64 = 64 << 10;
+/// AAC bytes per second per track: `mux.rs` asks for 192 kbit/s and the
+/// encoder averages to it; 10% over is allowed (an allowance, not measured).
+const AAC_BYTES_PER_SEC: f64 = 192_000.0 / 8.0 * 1.1;
+const AAC_SAMPLES_PER_FRAME: f64 = 1024.0;
+
+/// Bytes this save is expected to need on disk: the video as it is in the
+/// window (stream copy) or the still at its bitrate, the AAC audio, the MP4
+/// index for every video and audio sample, and [`HEADER_BYTES`].
 pub(crate) fn estimate(job: &SaveJob) -> u64 {
-    let video = match &job.video {
-        VideoSrc::Window { packets, .. } => packets.iter().map(|p| p.data.len() as u64).sum(),
-        VideoSrc::Still { spec, .. } => (spec.bitrate as f64 / 8.0 * job.secs.max(0.0)) as u64,
+    let secs = job.secs.max(0.0);
+    let (video, video_samples) = match &job.video {
+        VideoSrc::Window { packets, .. } => (packets.iter().map(|p| p.data.len() as u64).sum(), packets.len() as u64),
+        VideoSrc::Still { spec, .. } => ((spec.bitrate as f64 / 8.0 * secs) as u64, (f64::from(spec.fps) * secs).ceil() as u64),
     };
-    let audio = (job.audio.len() as f64 * AAC_BYTES_PER_SEC * job.secs.max(0.0)) as u64;
-    video + audio + MARGIN
+    let audio = (job.audio.len() as f64 * AAC_BYTES_PER_SEC * secs) as u64;
+    let audio_frames: u64 = job.audio.iter().map(|t| (f64::from(t.rate) / AAC_SAMPLES_PER_FRAME * secs).ceil() as u64).sum();
+    video + audio + (video_samples + audio_frames) * INDEX_BYTES_PER_SAMPLE + HEADER_BYTES
 }
 
 /// `C:` / `\\server\share` for a path, as the user knows the drive.
+/// The volume the file's folder really lands on (`win_volume.rs`, cached per
+/// folder on this thread), else the path text.
 pub(crate) fn drive(path: &Path) -> String {
-    volume_key(path).unwrap_or_else(|| path.display().to_string())
+    crate::win_volume::volume_of_cached(folder(path))
+        .map(|v| v.label)
+        .or_else(|| volume_key(path))
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 /// The folder a file is written into (`.` for a bare name).
@@ -46,13 +69,13 @@ fn room(free: FreeSpace, file: &Path, need: u64) -> bool {
     !matches!(free(folder(file)), Some(have) if have < need)
 }
 
-/// "1.4 GB" / "64 MB".
+/// "1.5 GB" / "300 MB": decimal units like the app's sizes, rounded up so
+/// the message never asks for less than is needed.
 pub(crate) fn size(bytes: u64) -> String {
-    const GIB: u64 = 1 << 30;
-    if bytes >= GIB {
-        format!("{:.1} GB", bytes as f64 / GIB as f64)
+    if bytes >= 1_000_000_000 {
+        format!("{:.1} GB", bytes.div_ceil(100_000_000) as f64 / 10.0)
     } else {
-        format!("{} MB", bytes.div_ceil(1 << 20))
+        format!("{} MB", bytes.div_ceil(1_000_000))
     }
 }
 
@@ -128,31 +151,6 @@ pub(crate) fn write_with_room<T>(
         }
         other => (staged, other),
     }
-}
-
-/// Free bytes for the caller on the volume holding `dir` (the nearest
-/// existing ancestor is asked, so a folder not made yet still answers).
-pub(crate) fn free_bytes(dir: &Path) -> Option<u64> {
-    use std::os::windows::ffi::OsStrExt;
-    #[link(name = "kernel32", kind = "raw-dylib")]
-    extern "system" {
-        fn GetDiskFreeSpaceExW(dir: *const u16, free_to_caller: *mut u64, total: *mut u64, total_free: *mut u64) -> i32;
-    }
-    let abs = std::path::absolute(dir).ok()?;
-    abs.ancestors().filter(|p| p.is_dir()).find_map(|p| {
-        let wide: Vec<u16> = p.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-        let mut free = 0u64;
-        // SAFETY: NUL-terminated path; the out pointer is valid, the others null.
-        let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) };
-        (ok != 0).then_some(free)
-    })
-    .map(fake_free)
-}
-
-/// Checks only: `RECALL_FAKE_FREE_BYTES=<n>` caps every drive's free space at n
-/// (the low-disk fixture; the app's drive info reads the same variable).
-fn fake_free(free: u64) -> u64 {
-    std::env::var("RECALL_FAKE_FREE_BYTES").ok().and_then(|v| v.trim().parse::<u64>().ok()).map_or(free, |fake| fake.min(free))
 }
 
 #[cfg(test)]
