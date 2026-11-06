@@ -3,8 +3,9 @@
 //! The spot is kept per exe stem (never a window title) in `island-hud.json`
 //! as the pill's centre in monitor fractions plus the edge it hugs.
 //!
-//! Keys while editing (the overlay holds them only while editing):
-//! Enter or the editor shortcut saves, Esc cancels (the old spot stays),
+//! Keys while editing (the overlay holds them only while editing): the
+//! arrow keys move the pill (for exclusive fullscreen, where the game locks
+//! or hides the cursor and nothing can be dragged), Enter or the editor shortcut saves, Esc cancels (the old spot stays),
 //! R clears the game's spot (back to automatic) and leaves. The editor also
 //! leaves without saving after [`IDLE`] without input or when the game
 //! loses focus.
@@ -55,6 +56,8 @@ impl SavedSpot {
 /// How close (1440p px, times the island scale) a dragged pill's edge comes
 /// to the monitor's before it snaps to that edge.
 pub const SNAP: f32 = 48.0;
+/// One arrow-key step (1440p px, times the island scale).
+pub const NUDGE: f32 = 40.0;
 /// The editor leaves without saving after this long without input.
 pub const IDLE: Duration = Duration::from_secs(60);
 
@@ -160,6 +163,16 @@ impl Editor {
         let Some((gx, gy)) = self.grab else { return false };
         self.last_input = now;
         let next = Some(snap((cursor.0 - gx, cursor.1 - gy), shown, monitor, snap_px));
+        let changed = next != self.spot;
+        self.spot = next;
+        changed
+    }
+
+    /// An arrow key: the pill (centred at `centre`, screen px) moves by
+    /// `offset` px, snapping near an edge like a drag. True when the spot changed.
+    pub fn nudge(&mut self, offset: (f32, f32), centre: (f32, f32), shown: (f32, f32), monitor: &Rect, snap_px: f32, now: Instant) -> bool {
+        self.last_input = now;
+        let next = Some(snap((centre.0 + offset.0, centre.1 + offset.1), shown, monitor, snap_px));
         let changed = next != self.spot;
         self.spot = next;
         changed

@@ -10,7 +10,8 @@ use std::time::Instant;
 use serde_json::Value;
 use windows::Win32::Foundation::{HWND, POINT};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    RegisterHotKey, ReleaseCapture, UnregisterHotKey, MOD_NOREPEAT, VK_ESCAPE, VK_R, VK_RETURN,
+    RegisterHotKey, ReleaseCapture, UnregisterHotKey, HOT_KEY_MODIFIERS, MOD_NOREPEAT, VK_DOWN, VK_ESCAPE, VK_LEFT, VK_R,
+    VK_RETURN, VK_RIGHT, VK_UP,
 };
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TRANSPARENT};
 
@@ -18,7 +19,7 @@ use super::App;
 use crate::island::Content;
 use crate::notice::{NoticeView, Tone};
 use crate::placement::Spot;
-use crate::spot_edit::{EditKey, Editor, SNAP};
+use crate::spot_edit::{EditKey, Editor, NUDGE, SNAP};
 use crate::zorder::game_in_front;
 
 /// Hotkey ids the overlay holds only while the editor runs.
@@ -28,13 +29,27 @@ const HELD: [(i32, u16, EditKey); 3] = [
     (0xE503, VK_R.0, EditKey::Reset),
 ];
 
-pub const HINT_TITLE: &str = "Drag to place";
+/// The arrow keys, held (with key repeat) only while editing: they move the
+/// pill when the game owns the cursor (exclusive fullscreen).
+const ARROWS: [(i32, u16, (f32, f32)); 4] = [
+    (0xE511, VK_LEFT.0, (-1.0, 0.0)),
+    (0xE512, VK_RIGHT.0, (1.0, 0.0)),
+    (0xE513, VK_UP.0, (0.0, -1.0)),
+    (0xE514, VK_DOWN.0, (0.0, 1.0)),
+];
+
+pub const HINT_TITLE: &str = "Drag or use arrow keys";
 pub const HINT_DETAIL: &str = "Enter save · Esc cancel · R reset to auto";
 
 /// The controller's editor shortcut event.
 pub fn is_toggle(value: &Value) -> bool {
     value.get("mod").and_then(Value::as_str) == Some("session")
         && value.get("event").and_then(|e| e.get("type")).and_then(Value::as_str) == Some("island_editor")
+}
+
+/// The arrow a `WM_HOTKEY` id stands for (its direction).
+pub fn held_arrow(id: i32) -> Option<(f32, f32)> {
+    ARROWS.iter().find(|(held, _, _)| *held == id).map(|(_, _, dir)| *dir)
 }
 
 /// The editor key a `WM_HOTKEY` id stands for.
@@ -90,8 +105,10 @@ impl App {
         }
         self.editor = Some(Editor::new(&key, self.hud_cache.spot(&key), now));
         set_click_through(hwnd, false);
-        for (id, vk, _) in HELD {
-            if let Err(error) = unsafe { RegisterHotKey(Some(hwnd), id, MOD_NOREPEAT, u32::from(vk)) } {
+        let keys = HELD.iter().map(|&(id, vk, _)| (id, vk, MOD_NOREPEAT));
+        let arrows = ARROWS.iter().map(|&(id, vk, _)| (id, vk, HOT_KEY_MODIFIERS(0)));
+        for (id, vk, modifiers) in keys.chain(arrows) {
+            if let Err(error) = unsafe { RegisterHotKey(Some(hwnd), id, modifiers, u32::from(vk)) } {
                 self.trace.note("editor", format!("key {vk:#x} not held: {error}"));
             }
         }
@@ -103,7 +120,7 @@ impl App {
     /// Leaves the editor; `key` decides what is written for the game.
     pub fn finish_editor(&mut self, hwnd: HWND, key: EditKey) -> bool {
         let Some(editor) = self.editor.take() else { return false };
-        for (id, _, _) in HELD {
+        for id in HELD.iter().map(|k| k.0).chain(ARROWS.iter().map(|k| k.0)) {
             unsafe {
                 let _ = UnregisterHotKey(Some(hwnd), id);
             }
@@ -152,6 +169,19 @@ impl App {
         let (Some(editor), Some(placed)) = (self.editor.as_mut(), self.placed.as_mut()) else { return };
         let shown = ((r - l) as f32, (b - t) as f32);
         if editor.drag(cursor(), shown, &placed.monitor, SNAP * placed.scale, now) {
+            placed.custom = editor.spot;
+            placed.spot = Spot { anchor: editor.spot.map_or(placed.spot.anchor, |s| s.anchor()), free_px: None };
+            self.refresh(hwnd, now);
+        }
+    }
+
+    /// An arrow key: the pill moves one step that way (snapping near an edge).
+    pub fn editor_nudge(&mut self, hwnd: HWND, dir: (f32, f32), now: Instant) {
+        let [l, t, r, b] = self.bounds;
+        let (Some(editor), Some(placed)) = (self.editor.as_mut(), self.placed.as_mut()) else { return };
+        let (centre, shown) = (((l + r) as f32 / 2.0, (t + b) as f32 / 2.0), ((r - l) as f32, (b - t) as f32));
+        let step = NUDGE * placed.scale;
+        if editor.nudge((dir.0 * step, dir.1 * step), centre, shown, &placed.monitor, SNAP * placed.scale, now) {
             placed.custom = editor.spot;
             placed.spot = Spot { anchor: editor.spot.map_or(placed.spot.anchor, |s| s.anchor()), free_px: None };
             self.refresh(hwnd, now);

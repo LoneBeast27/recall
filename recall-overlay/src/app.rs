@@ -36,7 +36,7 @@ use crate::zorder::{self, game_in_front, keep_on_top, Names, Raise};
 mod place;
 #[path = "app_editor.rs"]
 mod editor;
-pub use editor::held_key;
+pub use editor::{held_arrow, held_key};
 
 pub const BASE_TIMER: usize = 1;
 pub const BASE_MS: u32 = 250;

@@ -81,3 +81,22 @@ fn the_editor_gives_up_after_a_minute_idle_but_never_mid_drag() {
     editor.release(t0 + IDLE * 2);
     assert!(!editor.timed_out(t0 + IDLE * 2 + Duration::from_secs(59)));
 }
+
+#[test]
+fn arrow_keys_place_the_pill_without_a_mouse() {
+    // Exclusive fullscreen: the game owns the cursor, so the arrows move the pill.
+    let t0 = Instant::now();
+    let mut editor = Editor::new("rocketleague", None, t0);
+    let shown = (300.0, 44.0);
+    assert!(editor.nudge((NUDGE, 0.0), (1280.0, 720.0), shown, &QHD, SNAP, t0));
+    assert_eq!(editor.spot, Some(SavedSpot { x: 1320.0 / 2560.0, y: 0.5, edge: Edge::Free }));
+    // Walking up to the top edge snaps to it.
+    let mut centre = (1280.0, 720.0);
+    while editor.spot.map(|s| s.edge) != Some(Edge::Top) {
+        centre.1 -= NUDGE;
+        editor.nudge((0.0, -NUDGE), (centre.0, centre.1 + NUDGE), shown, &QHD, SNAP, t0);
+        assert!(centre.1 > 0.0, "reaches the top edge");
+    }
+    assert!(editor.timed_out(t0 + IDLE) && !editor.timed_out(t0 + IDLE - Duration::from_secs(1)), "a key press counts as input");
+    assert_eq!(editor.finish(EditKey::Save), Some(editor.spot), "Enter keeps it");
+}
