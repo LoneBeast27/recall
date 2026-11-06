@@ -297,6 +297,13 @@ impl Controller {
         }
         if engine_settings_changed(o, n) {
             self.request_engine_restart();
+        } else if self.engine_running() {
+            // Gain and names reach the running engine's tracks: no restart, the buffer stays.
+            // An engine started later reads them from its environment.
+            for line in crate::record_audio_sources::live_updates(&o.audio_sources, &n.audio_sources) {
+                log!("record: audio source {line}");
+                self.supervisor.send_engine_line(&line);
+            }
         }
         if old.storage.cap_gb != new.storage.cap_gb || o.output_dir != n.output_dir {
             log!("record: storage cap -> {} GiB", new.storage.cap_gb);
