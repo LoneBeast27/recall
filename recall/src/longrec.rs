@@ -25,10 +25,10 @@
 //! delete-sharing), so recovery never touches a live recording.
 
 mod fmp4;
-mod machine;
+pub(crate) mod machine;
 pub mod tap;
 #[cfg(test)]
-mod test_sink;
+pub(crate) mod test_sink;
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender};
