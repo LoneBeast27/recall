@@ -66,6 +66,8 @@ fn staged_setup(stage: &Path, out: &Path) -> staging::Setup {
             same_volume: |_, _| false,
             background: false,
             stamp: mover::stamp_mtime,
+            identity: mover::same_identity,
+            stat: mover::stat_dest,
         },
         refused: Vec::new(),
     }

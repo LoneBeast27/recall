@@ -1,8 +1,8 @@
 //! Is a clip already where the mover would put it? The mover deletes the staged copy when
 //! it is, so "already in place" must mean the same clip, not just the same length.
 //!
-//! The check: same file (staging pointed at the clip folder: the clip IS its destination and
-//! is never deleted); or same size, same modification time (the mover stamps every copy with
+//! The check: same file (`file_id.rs`, asked by the mover first: the clip IS its destination
+//! and is never deleted, and an unknown answer deletes nothing); else same size, same modification time (the mover stamps every copy with
 //! the staged file's time, and a rename keeps it) and the same first and last MiB. A full
 //! hash would read a whole multi-GB clip off the hard drive at every start for a recovered
 //! move; two different recordings agreeing on size, the 100 ns save time and 2 MiB of
@@ -13,14 +13,6 @@ use std::io::{Read, Seek, SeekFrom};
 use std::path::Path;
 
 const MIB: u64 = 1 << 20;
-
-/// Both paths name one file on disk (also through `\\?\`, case or a junction).
-pub(crate) fn same_file(a: &Path, b: &Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(x), Ok(y)) => x == y,
-        _ => false,
-    }
-}
 
 /// `dest` holds the same clip as `staged` (see the module doc).
 pub(crate) fn same_clip(staged: &Path, dest: &Path) -> bool {
@@ -42,4 +34,17 @@ fn ends(path: &Path, tail: u64) -> Option<(Vec<u8>, Vec<u8>)> {
     let mut last = Vec::new();
     file.take(MIB).read_to_end(&mut last).ok()?;
     Some((head, last))
+}
+
+pub(crate) type IdentityFn = fn(&Path, &Path) -> Option<bool>;
+pub(crate) type StatFn = fn(&Path) -> std::io::Result<std::fs::Metadata>;
+
+/// `mover::Config::stat` in production.
+pub(crate) fn stat_dest(path: &Path) -> std::io::Result<std::fs::Metadata> {
+    std::fs::metadata(path)
+}
+
+/// `mover::Config::identity` in production: volume serial + file index (`file_id.rs`).
+pub(crate) fn same_identity(a: &Path, b: &Path) -> Option<bool> {
+    crate::file_id::same_file(a, b)
 }

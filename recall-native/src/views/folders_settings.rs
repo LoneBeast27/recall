@@ -32,14 +32,20 @@ impl Root {
             return;
         }
         let before = crate::backend::library_dir();
-        // A recorder pointed into the cache (by hand, or before this check existed) blocks it.
-        if let Some(message) = crate::services::storage::guard::check(&crate::services::storage::guard::cache_dirs(), &[PathBuf::from(&dir)]) {
-            self.show_toast_for(ToastKind::Bad, "Cache and clip folders overlap", Some(message), 30);
-        }
         self.folders.recordings = Some(dir);
         let _ = self.folders.save();
+        // A recorder pointed into the cache (by hand, or before this check existed) blocks it.
+        self.recheck_cache_overlap();
         if crate::backend::library_dir() != before {
             self.workers.job(Job::List);
+        }
+    }
+
+    /// After any clip-folder change: blocks the cache if a folder now overlaps it, releases a
+    /// block once none does (`storage::guard::check`).
+    fn recheck_cache_overlap(&mut self) {
+        if let Some(message) = crate::services::library::folders::check_cache_overlap(&self.folders) {
+            self.show_toast_for(ToastKind::Bad, "Cache and clip folders overlap", Some(message), 30);
         }
     }
 
@@ -104,6 +110,7 @@ impl Root {
         match folders.save() {
             Ok(()) => {
                 self.folders = folders;
+                self.recheck_cache_overlap();
                 crate::services::library::folders::forget_scans();
                 self.workers.job(Job::List);
                 let detail = if kept_old { "New clips save here. Clips already saved stay in the old folder and still show." } else { "New clips save here." };
@@ -132,6 +139,7 @@ impl Root {
         match folders.save() {
             Ok(()) => {
                 self.folders = folders;
+                self.recheck_cache_overlap();
                 crate::services::library::folders::forget_scans();
                 self.workers.job(Job::List);
                 let title = if added == 1 { "Folder added".to_owned() } else { format!("{added} folders added") };
@@ -147,6 +155,7 @@ impl Root {
         match folders.save() {
             Ok(()) => {
                 self.folders = folders;
+                self.recheck_cache_overlap();
                 crate::services::library::folders::forget_scans();
                 self.workers.job(Job::List);
                 self.show_toast(ToastKind::Info, "Folder removed", Some("Its clips are hidden from Recall, not deleted.".into()));
