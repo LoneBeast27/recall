@@ -25,34 +25,31 @@ use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use windows::Win32::System::Threading::{
-    GetCurrentProcess, SetPriorityClass, BELOW_NORMAL_PRIORITY_CLASS,
-};
 use windows::Win32::UI::WindowsAndMessaging::{MsgWaitForMultipleObjectsEx, MWMO_INPUTAVAILABLE, QS_ALLINPUT};
 
 use crate::app;
 use crate::config::Config;
 use crate::control::{Inbound, PipeHub};
-use crate::engine_policy::EngineSpec;
 use crate::hotkey::RecordHotkeys;
 use crate::liveness::ProcessWatch;
 use crate::log;
 use crate::overlay_proc::OverlayProc;
 use crate::record_activity::{EngineActivity, PendingPause};
-use crate::record_config::{parse_cpu_mask, ConfigStore};
+use crate::record_config::ConfigStore;
 use crate::record_detect::Follow;
 pub(crate) use crate::record_env::apply_affinity;
 use crate::record_env::EnvOverrides;
 use crate::record_hdr::HdrManager;
-use crate::record_engine::{self, engine_env, EnginePlanner, EngineTarget, EXIT_LINGER};
+use crate::record_engine::{self, EnginePlanner, EngineTarget, EXIT_LINGER};
 use crate::record_notice::NoticeTracker;
 use crate::record_quit::QuitReason;
 use crate::record_render::RenderCheck;
 use crate::record_janitor::Janitor;
-use crate::record_target::{display_name, sanitize, Target, TargetTracker, START_DEBOUNCE, TARGET_DEBOUNCE};
+use crate::record_startup::{apply_niceness, pinned_target_from_env};
+use crate::record_target::{Target, TargetTracker, START_DEBOUNCE, TARGET_DEBOUNCE};
 use crate::record_tray::{RecallUi, RecordingTray, RecordingTrayCmd};
-use crate::supervisor::{EngineHealth, Supervisor};
-use crate::watcher::{self, WatchEvent, Watcher};
+use crate::supervisor::Supervisor;
+use crate::watcher::{WatchEvent, Watcher};
 
 /// Pump wake cap: bounds pipe-command latency (commands arrive on a channel,
 /// not as window messages).
@@ -61,7 +58,6 @@ const MAX_WAIT_MS: u32 = 50;
 const PROBE_EVERY: Duration = Duration::from_secs(1);
 /// Read-only HDR state refresh while HDR management is off.
 const HDR_REFRESH_EVERY: Duration = Duration::from_secs(5);
-const FALLBACK_CPU_MASK: usize = crate::record_config::AUTO_CPU_MASK;
 
 /// The controller's state, owned by the pump thread. `record_cmds` adds the
 /// pipe/tray/hotkey command handlers.
@@ -379,59 +375,6 @@ impl Controller {
         }
     }
 
-    /// Start, restart or stop the engine for `target` (an intended restart).
-    pub(crate) fn apply_engine_target(&mut self, target: &EngineTarget) {
-        self.hello_at_retarget = self.supervisor.hello_count();
-        // Any (re)start or stop picks up the current settings.
-        self.pending_restart = false;
-        match target {
-            EngineTarget::Off => {
-                log!("record: no target -> engine stopped (waiting for a game)");
-                self.supervisor.retarget(None);
-            }
-            EngineTarget::Window(t) => {
-                let detected = self.take_detected(t.hwnd);
-                log!("record: target -> {:?} ({}, pid {}, hwnd {:#x}){detected}", t.name, t.exe, t.pid, t.hwnd);
-                self.supervisor.retarget(Some(self.engine_spec(target)));
-            }
-            EngineTarget::Desktop => {
-                log!("record: no game -> desktop capture");
-                self.supervisor.retarget(Some(self.engine_spec(target)));
-            }
-        }
-    }
-
-    fn engine_spec(&self, target: &EngineTarget) -> EngineSpec {
-        // A new PC's default clip folder (Videos\Recall) may not exist yet.
-        if let Err(e) = std::fs::create_dir_all(&self.cfg.recording.output_dir) {
-            log!("record: cannot create clip folder {:?}: {e}", self.cfg.recording.output_dir);
-        }
-        EngineSpec { env: engine_env(target, &self.cfg.recording, self.applied_mask.as_deref()) }
-    }
-
-    /// Restart a running engine so new buffer/output/affinity settings apply.
-    pub(crate) fn restart_engine_for_settings(&mut self) {
-        if *self.planner.applied() == EngineTarget::Off {
-            return; // the next start already uses the new settings
-        }
-        let wanted = self.wanted();
-        self.planner.force(wanted.clone());
-        self.apply_engine_target(&wanted);
-    }
-
-    /// A fresh engine instance starts unmuted in `auto` mode: re-apply ours.
-    fn reapply_engine_intents(&mut self) {
-        if self.mic_muted {
-            self.supervisor.send_engine_line(r#"{"cmd":"set_mic_mute","muted":true}"#);
-        }
-        if let Some(mode) = self.mode_select.as_deref().filter(|m| *m != "auto") {
-            self.supervisor.send_engine_line(&serde_json::json!({"cmd": "set_mode", "value": mode}).to_string());
-        }
-    }
-
-    pub(crate) fn engine_running(&self) -> bool {
-        matches!(self.supervisor.health(), EngineHealth::Running { pid } if pid != 0)
-    }
 
     /// The hotkey manager, created on first use (pump thread).
     pub(crate) fn ensure_hotkeys(&mut self) -> Option<&mut RecordHotkeys> {
@@ -473,44 +416,4 @@ impl Controller {
         self.supervisor.shutdown(crate::supervisor::QUIT_GRACE);
         log!("record: clean shutdown (pipe lines dropped for stalled clients: {})", self.hub.dropped());
     }
-}
-
-/// Apply the CPU mask + BelowNormal priority to this process (children inherit
-/// both at creation). An invalid or unsupported mask is logged, never fatal.
-/// Returns the mask (hex text) now in effect, if any.
-pub(crate) fn apply_niceness(mask_text: &str) -> Option<String> {
-    let mask = parse_cpu_mask(mask_text).unwrap_or_else(|e| {
-        log!("record: {e}; using 0x{FALLBACK_CPU_MASK:x}");
-        FALLBACK_CPU_MASK
-    });
-    let _ = unsafe { SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS) };
-    apply_affinity(mask)
-}
-
-/// `Start-Recall.ps1 -Valorant`: `RECALL_CAPTURE_HWND` pins one window (name
-/// from `RECALL_CAPTURE_NAME`, audio pid from `RECALL_AUDIO_GAME_PID`) until
-/// its process exits.
-fn pinned_target_from_env() -> Option<Target> {
-    let raw = std::env::var("RECALL_CAPTURE_HWND").ok()?;
-    let Ok(hwnd) = raw.trim().parse::<usize>() else {
-        log!("record: RECALL_CAPTURE_HWND={raw:?} is not a window handle; ignoring the pin");
-        return None;
-    };
-    let hwnd = hwnd as isize;
-    let Some((window_pid, stem, exe, title)) = watcher::window_identity(hwnd) else {
-        log!("record: RECALL_CAPTURE_HWND={hwnd} is not a live window; ignoring the pin");
-        return None;
-    };
-    let pid = std::env::var("RECALL_AUDIO_GAME_PID")
-        .ok()
-        .and_then(|v| v.trim().parse::<u32>().ok())
-        .filter(|p| *p != 0)
-        .unwrap_or(window_pid);
-    let name = std::env::var("RECALL_CAPTURE_NAME")
-        .ok()
-        .map(|n| sanitize(&n))
-        .filter(|n| !n.is_empty())
-        .unwrap_or_else(|| display_name(&title, &stem));
-    log!("record: pinned target from environment: {name:?} ({exe}, pid {pid})");
-    Some(Target { hwnd, pid, name, exe })
 }
