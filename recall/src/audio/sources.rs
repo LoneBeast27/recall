@@ -144,8 +144,9 @@ pub fn set_live(id: &str, gain_db: Option<f32>, name: Option<&str>) -> bool {
 pub struct Opened {
     pub id: String,
     pub name: String,
-    /// The endpoint or process captured ("… (Windows default)" when it fell back), or why
-    /// there is no track.
+    /// The endpoint or process captured ("… (Windows default)" for a source with no device,
+    /// "<name> (not connected; waiting)" for a named device not there yet), or why there is no
+    /// track.
     pub opened: String,
     pub live: bool,
 }

@@ -46,22 +46,30 @@ impl Clock for FakeClock {
     }
 }
 
-/// A device that plays `secs` of 0.5 in 20 ms packets, then ends as `at_once` says.
+/// A device that plays `secs` of 0.5 in 20 ms packets, then ends as `at_once` says. `trace`
+/// gets (clock, ring length) after every packet.
 struct FakeStream {
     now: Rc<Cell<Duration>>,
     secs: u64,
     at_once: bool,
+    endpoint: String,
+    trace: Rc<RefCell<Vec<(Duration, usize)>>>,
+}
+
+fn fake(now: &Rc<Cell<Duration>>, secs: u64, at_once: bool) -> FakeStream {
+    FakeStream { now: now.clone(), secs, at_once, endpoint: "Headset (USB)".into(), trace: Rc::default() }
 }
 
 impl Capture for FakeStream {
     fn endpoint(&self) -> String {
-        "Headset (USB)".into()
+        self.endpoint.clone()
     }
 
-    fn run(&mut self, ring: &TrackRing, level: &mut Leveller, _clock: &dyn Clock) -> Ended {
+    fn run(&mut self, ring: &TrackRing, level: &mut Leveller, _clock: &dyn Clock, _notices: &dyn Notices) -> Ended {
         for _ in 0..self.secs * 50 {
             self.now.set(self.now.get() + Duration::from_millis(20));
             ring.push_capture(&level.live(self.now.get(), &[0.5; 2], 1), false);
+            self.trace.borrow_mut().push((self.now.get(), len(ring)));
         }
         Ended { why: "device lost".into(), at_once: self.at_once }
     }
@@ -96,10 +104,10 @@ fn a_named_device_absent_at_start_keeps_a_level_track_and_opens_when_it_appears(
         if n < 3 {
             Err("'Headset (USB)' is not connected".to_owned())
         } else {
-            Ok(FakeStream { now: now.clone(), secs: 1, at_once: false })
+            Ok(fake(&now, 1, false))
         }
     };
-    capture_loop(&ring, " Headset (USB) ", true, open, tx, &mut clock);
+    capture_loop(&ring, " Headset (USB) ", true, open, tx, &mut clock, &FakeNotices::none(&now));
 
     let waiting = "Headset (USB) (not connected; waiting)";
     let seen = attempts.into_inner();
@@ -133,7 +141,7 @@ fn without_waiting_a_failed_first_open_ends_the_track_as_before() {
         opens.set(opens.get() + 1);
         Err("no endpoint matches \"Test Mic\" (RECALL_AUDIO_EXACT)".to_owned())
     };
-    capture_loop(&ring, "Test Mic", false, open, tx, &mut clock);
+    capture_loop(&ring, "Test Mic", false, open, tx, &mut clock, &FakeNotices::none(&now));
     assert_eq!(rx.try_recv().unwrap().unwrap_err(), "no endpoint matches \"Test Mic\" (RECALL_AUDIO_EXACT)");
     assert_eq!((opens.get(), len(&ring), now.get()), (1, 0, Duration::ZERO), "no track, no retries");
 }
@@ -156,117 +164,40 @@ fn a_moved_windows_default_reopens_at_once_without_a_gap() {
     let opens = RefCell::new(Vec::new());
     let open = |reopen: bool| {
         opens.borrow_mut().push((reopen, now.get()));
-        Ok::<_, String>(FakeStream { now: now.clone(), secs: 1, at_once: true })
+        Ok::<_, String>(fake(&now, 1, true))
     };
-    capture_loop(&ring, "", false, open, tx, &mut clock);
+    capture_loop(&ring, "", false, open, tx, &mut clock, &FakeNotices::none(&now));
     let at = |s| Duration::from_secs(s);
     assert_eq!(opens.into_inner()[..3], [(false, at(0)), (true, at(1)), (true, at(2))]);
     assert!(ring.snapshot(3.0).iter().all(|&s| s == 0.5), "no silent gap between the two devices");
 }
 
-/// Endpoints where "Headset (USB)" is plugged in at `appears_at`.
-struct FakeEndpoints {
+/// Notices as Windows would send them: devices changed once the clock passes `devices_at`; a
+/// default id the test sets.
+struct FakeNotices {
     now: Rc<Cell<Duration>>,
-    appears_at: Duration,
-    default: Option<String>,
+    devices_at: Cell<Option<Duration>>,
+    default: RefCell<Option<String>>,
 }
 
-impl Endpoints for FakeEndpoints {
-    fn default_id(&self) -> Option<String> {
-        self.default.clone()
-    }
-
-    fn has(&self, want: &str) -> bool {
-        self.now.get() >= self.appears_at && want == "Headset (USB)"
+impl FakeNotices {
+    fn none(now: &Rc<Cell<Duration>>) -> Self {
+        FakeNotices { now: now.clone(), devices_at: Cell::new(None), default: RefCell::new(None) }
     }
 }
 
-/// A device playing `value` in 20 ms packets for `secs`; its watch (as the engine's `Stream`
-/// runs it) may end it first. `shown` collects the track's status while each stream runs.
-struct WatchedStream {
-    endpoint: &'static str,
-    value: f32,
-    secs: u64,
-    watch: Option<Watch>,
-    endpoints: Rc<FakeEndpoints>,
-    shown: Rc<RefCell<Vec<String>>>,
-}
-
-impl Capture for WatchedStream {
-    fn endpoint(&self) -> String {
-        self.endpoint.into()
-    }
-
-    fn run(&mut self, ring: &TrackRing, level: &mut Leveller, clock: &dyn Clock) -> Ended {
-        self.shown.borrow_mut().push(ring.endpoint());
-        let now = &self.endpoints.now;
-        for _ in 0..self.secs * 50 {
-            if let Some(ended) = self.watch.as_mut().and_then(|w| w.check(clock.elapsed(), &*self.endpoints)) {
-                return ended;
-            }
-            now.set(now.get() + Duration::from_millis(20));
-            ring.push_capture(&level.live(now.get(), &[self.value; 2], 1), false);
+impl Notices for FakeNotices {
+    fn take_devices_changed(&self) -> bool {
+        let fired = self.devices_at.get().is_some_and(|at| self.now.get() >= at);
+        if fired {
+            self.devices_at.set(None); // taken: acted on once
         }
-        Ended { why: "device lost".into(), at_once: false }
+        fired
     }
-}
 
-#[test]
-fn a_named_device_plugged_in_while_on_the_default_takes_over_without_a_gap() {
-    let ring = ring();
-    let now = Rc::new(Cell::new(Duration::ZERO));
-    let endpoints = Rc::new(FakeEndpoints { now: now.clone(), appears_at: Duration::from_millis(3_000), default: Some("{default}".into()) });
-    let mut clock = FakeClock { now: now.clone(), stop_at: Duration::from_secs(6) };
-    let (tx, rx) = std::sync::mpsc::channel();
-    let opens = RefCell::new(Vec::new());
-    let shown = Rc::new(RefCell::new(Vec::new()));
-    let open = |reopen: bool| {
-        opens.borrow_mut().push((reopen, now.get()));
-        let shown = shown.clone();
-        Ok::<_, String>(if !reopen {
-            // As pick_device answers a missing named device on the first open: the default.
-            let watch = watch_for("Headset (USB)", true, Some("{default}".into()), now.get());
-            WatchedStream { endpoint: "Mic (Windows default; 'Headset (USB)' not found)", value: 0.25, secs: 10, watch, endpoints: endpoints.clone(), shown }
-        } else {
-            let watch = watch_for("Headset (USB)", false, None, now.get());
-            WatchedStream { endpoint: "Headset (USB)", value: 0.5, secs: 2, watch, endpoints: endpoints.clone(), shown }
-        })
-    };
-    capture_loop(&ring, "Headset (USB)", true, open, tx, &mut clock);
-
-    assert_eq!(rx.try_recv().unwrap(), Ok(()));
-    let at = Duration::from_millis;
-    // Checks at 2 s (absent) and 4 s (there): the stream moves to it at once, by name.
-    let opens = opens.into_inner();
-    assert_eq!(opens.get(..2), Some(&[(false, at(0)), (true, at(4_000))][..]), "{opens:?}");
-    let samples = ring.snapshot(6.0);
-    assert_eq!(len(&ring), 600, "level with the clock");
-    assert!(samples[..400].iter().all(|&s| s == 0.25), "the default until the switch");
-    assert!(samples[400..].iter().all(|&s| s == 0.5), "the named device from 4 s, no silent gap");
-    let shown = shown.borrow();
-    assert_eq!(shown[0], "Mic (Windows default; 'Headset (USB)' not found)");
-    assert_eq!(shown[1], "Headset (USB)", "the fallback note is gone");
-}
-
-#[test]
-fn the_watch_checks_every_two_seconds() {
-    let at = Duration::from_millis;
-    let now = Rc::new(Cell::new(at(0)));
-    let ends = |default: Option<&str>| FakeEndpoints { now: now.clone(), appears_at: at(5_000), default: default.map(str::to_owned) };
-    let mut watch = watch_for("", false, Some("{dev-a}".into()), at(0)).expect("a default source is watched");
-    assert!(watch.check(at(1_900), &ends(Some("{dev-b}"))).is_none(), "not checked before 2 s");
-    assert!(watch.check(at(2_000), &ends(Some("{dev-a}"))).is_none(), "same device");
-    assert!(watch.check(at(4_100), &ends(None)).is_none(), "no default now: the stream reports the loss itself");
-    assert!(watch.check(at(5_000), &ends(Some("{dev-b}"))).is_none(), "not checked again within 2 s");
-    let moved = watch.check(at(6_200), &ends(Some("{dev-b}"))).expect("the default moved");
-    assert!(moved.at_once);
-
-    let mut named = watch_for(" Headset (USB) ", true, Some("{dev-a}".into()), at(0)).expect("a fallback is watched");
-    assert!(named.check(at(2_000), &ends(None)).is_none(), "not plugged in yet");
-    now.set(at(5_000));
-    assert_eq!(named.check(at(5_000), &ends(None)).map(|e| e.why), Some("'Headset (USB)' connected".to_owned()));
-    assert!(watch_for("Headset (USB)", false, None, at(0)).is_none(), "the named device itself is not watched");
-    assert!(watch_for("", false, None, at(0)).is_none(), "no default id, nothing to compare");
+    fn take_default(&self) -> Option<String> {
+        self.default.borrow_mut().take()
+    }
 }
 
 /// A lost device is retried at 2 s, then backs off to 4 s, 8 s and at most 10 s.
@@ -274,4 +205,127 @@ fn the_watch_checks_every_two_seconds() {
 fn reopen_backs_off_to_ten_seconds() {
     let s = |n| reopen_wait(n).as_secs();
     assert_eq!((s(0), s(1), s(2), s(3), s(4), s(50)), (2, 2, 4, 8, 10, 10));
+}
+
+/// A named source never opens another device: with the Windows default connected and the
+/// named device not, the track starts silent and waiting, and opens by name once it appears.
+#[test]
+fn a_named_source_never_opens_the_default_and_opens_by_name_when_it_appears() {
+    use crate::audio::{choose_endpoint, Pick};
+    let ring = ring();
+    let now = Rc::new(Cell::new(Duration::ZERO));
+    let mut clock = FakeClock { now: now.clone(), stop_at: Duration::from_secs(8) };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let attempts = RefCell::new(Vec::new());
+    let open = |reopen: bool| {
+        // The fake enumerator: the Windows default mic is always there; the headset from 3 s.
+        let mut names = vec!["Mic (Realtek)".to_owned()];
+        if now.get() >= Duration::from_secs(3) {
+            names.push("Headset (USB)".to_owned());
+        }
+        attempts.borrow_mut().push((reopen, now.get(), ring.endpoint()));
+        let mut stream = fake(&now, 1, false);
+        stream.endpoint = match choose_endpoint(&names, Some("Headset (USB)"), false)? {
+            Pick::Named(i) => names[i].clone(),
+            Pick::Default => "Mic (Realtek) (Windows default)".to_owned(),
+        };
+        Ok::<_, String>(stream)
+    };
+    capture_loop(&ring, "Headset (USB)", true, open, tx, &mut clock, &FakeNotices::none(&now));
+
+    assert_eq!(rx.try_recv().unwrap(), Ok(()), "the track starts");
+    let attempts = attempts.into_inner();
+    let times: Vec<(bool, Duration)> = attempts.iter().map(|a| (a.0, a.1)).collect();
+    let at = Duration::from_secs;
+    assert_eq!(times, [(false, at(0)), (true, at(2)), (true, at(6))], "no open until the headset is there: {attempts:?}");
+    assert_eq!(attempts[1].2, "Headset (USB) (not connected; waiting)");
+    let samples = ring.snapshot(8.0);
+    assert_eq!(len(&ring), 800, "level with the clock");
+    assert!(samples[..600].iter().all(|&s| s == 0.0), "silent while waiting, though a default mic is connected");
+    assert!(samples[600..700].iter().all(|&s| s == 0.5), "the headset, by name, from 6 s");
+}
+
+#[test]
+fn choose_endpoint_never_falls_back_for_a_named_source() {
+    use crate::audio::{choose_endpoint, Pick};
+    let names = ["Mic (Realtek)".to_owned(), "Headset (USB)".to_owned()];
+    assert_eq!(choose_endpoint(&names, Some("headset usb"), false), Ok(Pick::Named(1)));
+    assert_eq!(choose_endpoint(&names[..1], Some("Headset (USB)"), false), Err("'Headset (USB)' is not connected".to_owned()));
+    assert_eq!(choose_endpoint(&names, None, false), Ok(Pick::Default), "only a source with no device follows the default");
+    assert_eq!(choose_endpoint(&names, Some("  "), false), Ok(Pick::Default));
+    assert!(choose_endpoint(&names, None, true).unwrap_err().contains("RECALL_AUDIO_EXACT"));
+    assert!(choose_endpoint(&names[..1], Some("Headset (USB)"), true).unwrap_err().contains("RECALL_AUDIO_EXACT"));
+}
+
+/// The Windows default moved: the new device takes 120 ms to open. Right after the switch the
+/// track is level with the clock again, within one frame (10 ms at this test's 100 Hz), so it
+/// stays in sync with the video instead of lagging by the switch time.
+#[test]
+fn a_switch_at_once_keeps_the_track_level_with_the_clock() {
+    let ring = ring();
+    let now = Rc::new(Cell::new(Duration::ZERO));
+    let mut clock = FakeClock { now: now.clone(), stop_at: Duration::from_millis(2_120) };
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let trace = Rc::new(RefCell::new(Vec::new()));
+    let open = |reopen: bool| {
+        if reopen {
+            now.set(now.get() + Duration::from_millis(120)); // opening the new device
+        }
+        let mut stream = fake(&now, 1, !reopen);
+        if reopen {
+            stream.trace = trace.clone();
+        }
+        Ok::<_, String>(stream)
+    };
+    capture_loop(&ring, "", false, open, tx, &mut clock, &FakeNotices::none(&now));
+
+    let trace = trace.borrow();
+    assert_eq!(trace.len(), 50, "the second device played");
+    for &(t, samples) in trace.iter() {
+        let due = (t.as_millis() / 10) as usize;
+        assert!(samples.abs_diff(due) <= 1, "at {t:?}: {samples} frames, clock {due}");
+    }
+}
+
+/// A waiting track does not sit out its backoff when Windows says a device arrived: it tries
+/// its device by name at once.
+#[test]
+fn a_waiting_track_tries_its_device_at_once_when_one_arrives() {
+    let ring = ring();
+    let now = Rc::new(Cell::new(Duration::ZERO));
+    let mut clock = FakeClock { now: now.clone(), stop_at: Duration::from_secs(5) };
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let notices = FakeNotices::none(&now);
+    notices.devices_at.set(Some(Duration::from_millis(3_000))); // plugged in at 3 s
+    let opens = RefCell::new(Vec::new());
+    let open = |reopen: bool| {
+        opens.borrow_mut().push((reopen, now.get()));
+        if now.get() < Duration::from_secs(3) {
+            return Err("'Headset (USB)' is not connected".to_owned());
+        }
+        Ok(fake(&now, 1, false))
+    };
+    capture_loop(&ring, "Headset (USB)", true, open, tx, &mut clock, &notices);
+    let at = Duration::from_millis;
+    // Backoff alone would try at 6 s (2 s, then 4 s).
+    assert_eq!(opens.into_inner()[..3], [(false, at(0)), (true, at(2_000)), (true, at(3_000))]);
+    let samples = ring.snapshot(5.0);
+    assert_eq!(len(&ring), 500, "level with the clock");
+    assert!(samples[300..400].iter().all(|&s| s == 0.5), "the headset from 3 s");
+}
+
+#[test]
+fn only_a_default_source_follows_a_moved_default() {
+    let now = Rc::new(Cell::new(Duration::ZERO));
+    let notices = FakeNotices::none(&now);
+    let mut watch = watch_for(" ", Some("{dev-a}".into())).expect("a source with no device is watched");
+    assert!(watch.check(&notices).is_none(), "no notice");
+    *notices.default.borrow_mut() = Some("{dev-a}".into());
+    assert!(watch.check(&notices).is_none(), "the same device");
+    *notices.default.borrow_mut() = Some("{dev-b}".into());
+    let moved = watch.check(&notices).expect("the default moved");
+    assert!(moved.at_once);
+    assert!(watch.check(&notices).is_none(), "the notice was taken");
+    assert!(watch_for("Headset (USB)", Some("{dev-a}".into())).is_none(), "a named source never follows the default");
+    assert!(watch_for("", None).is_none(), "no default id, nothing to compare");
 }

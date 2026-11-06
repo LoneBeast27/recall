@@ -57,73 +57,59 @@ pub(super) struct Ended {
     pub at_once: bool,
 }
 
+/// Endpoint changes the loop hears about: `notify.rs` (IMMNotificationClient) in the engine,
+/// injected in tests. Each call takes the notice, so it is acted on once.
+pub(super) trait Notices {
+    /// A device was added, removed or changed state since the last call: a waiting track tries
+    /// its device now instead of at the end of its backoff.
+    fn take_devices_changed(&self) -> bool;
+    /// The Windows default endpoint's id for this track's direction, when it changed since the
+    /// last call (the latest of several changes).
+    fn take_default(&self) -> Option<String>;
+}
+
+/// No notices (registration failed): plain backoff, and a default source stays where it opened.
+pub(super) struct NoNotices;
+
+impl Notices for NoNotices {
+    fn take_devices_changed(&self) -> bool {
+        false
+    }
+
+    fn take_default(&self) -> Option<String> {
+        None
+    }
+}
+
 /// One open capture stream.
 pub(super) trait Capture {
     /// The endpoint or process it captures, for the status.
     fn endpoint(&self) -> String;
     /// Capture into `ring` until the stream fails or must move; the stream is stopped on return.
-    fn run(&mut self, ring: &TrackRing, level: &mut Leveller, clock: &dyn Clock) -> Ended;
+    fn run(&mut self, ring: &TrackRing, level: &mut Leveller, clock: &dyn Clock, notices: &dyn Notices) -> Ended;
 }
 
-/// How often a stream on the Windows default checks whether it should move.
-const WATCH_EVERY: Duration = Duration::from_secs(2);
-
-/// What a stream on the Windows default waits for.
-#[derive(Clone, Debug, PartialEq)]
-pub(super) enum Want {
-    /// A source with no device: the default moves away from this endpoint id.
-    DefaultMovesFrom(String),
-    /// A named device that was missing at start (the stream fell back to the default): it appears.
-    Named(String),
-}
-
-/// The endpoints as a watch sees them (WASAPI in the engine, a fake in tests).
-pub(super) trait Endpoints {
-    /// The Windows default endpoint's id now, if there is one.
-    fn default_id(&self) -> Option<String>;
-    /// An endpoint matching `want` (the recorder's name rule) is connected now.
-    fn has(&self, want: &str) -> bool;
-}
-
-/// Checks every `WATCH_EVERY` whether a stream on the Windows default should reopen.
+/// A source with no device recording the Windows default: follows the default when it moves.
+/// Named sources are never watched (they never open another device).
 #[derive(Debug)]
 pub(super) struct Watch {
-    want: Want,
-    next: Duration,
+    id: String,
 }
 
 impl Watch {
-    pub(super) fn new(want: Want, now: Duration) -> Self {
-        Watch { want, next: now + WATCH_EVERY }
-    }
-
-    /// The stream should end and reopen at once: the default moved, or the named device
-    /// appeared (the reopen takes it by name). No default at all is not a move (the stream
-    /// reports the lost device itself).
-    pub(super) fn check(&mut self, now: Duration, endpoints: &dyn Endpoints) -> Option<Ended> {
-        if now < self.next {
-            return None;
-        }
-        self.next = now + WATCH_EVERY;
-        let why = match &self.want {
-            Want::DefaultMovesFrom(id) => endpoints.default_id().is_some_and(|now| now != *id).then(|| "the Windows default moved to another device".to_owned()),
-            Want::Named(name) => endpoints.has(name).then(|| format!("'{}' connected", name.trim())),
-        };
-        why.map(|why| Ended { why, at_once: true })
+    /// The stream should end and reopen at once: the default moved to another endpoint. No
+    /// default at all is not a move (the stream reports the lost device itself).
+    pub(super) fn check(&mut self, notices: &dyn Notices) -> Option<Ended> {
+        let id = notices.take_default()?;
+        (id != self.id).then(|| Ended { why: "the Windows default moved to another device".to_owned(), at_once: true })
     }
 }
 
-/// The watch for a stream that opened `device`: on the Windows default for a source with no
-/// device (`default_id`), or on the default because the named device was missing (`fell_back`).
-pub(super) fn watch_for(device: &str, fell_back: bool, default_id: Option<String>, now: Duration) -> Option<Watch> {
-    let want = if device.trim().is_empty() {
-        Want::DefaultMovesFrom(default_id?)
-    } else if fell_back {
-        Want::Named(device.trim().to_owned())
-    } else {
-        return None;
-    };
-    Some(Watch::new(want, now))
+/// The watch for a stream that opened `device`: only a source with no device, on the default
+/// endpoint `default_id`.
+pub(super) fn watch_for(device: &str, default_id: Option<String>) -> Option<Watch> {
+    device.trim().is_empty().then_some(())?;
+    Some(Watch { id: default_id? })
 }
 
 /// A named device that does not open at start still gets its track (silence) and waits for
@@ -154,10 +140,10 @@ fn set_endpoint(ring: &TrackRing, text: String) {
 }
 
 /// Open, capture, and when the device or stream is lost, keep the track level with silence
-/// and reopen. `open(reopen)`: `reopen` is false only for the first attempt (a named device
-/// may then fall back to the Windows default; a reopen never does). The first open answers
-/// `init_tx`: a failure there ends the track unless `wait_absent`, which starts the track
-/// as "not connected; waiting" and keeps trying.
+/// and reopen. `open(reopen)`: `reopen` is false only for the first attempt. A named device
+/// only ever opens by its own name. The first open answers `init_tx`: a failure there ends the
+/// track unless `wait_absent`, which starts the track as "not connected; waiting" and keeps
+/// trying, at once when `notices` says a device came or went.
 pub(super) fn capture_loop<C: Capture>(
     ring: &TrackRing,
     device: &str,
@@ -165,6 +151,7 @@ pub(super) fn capture_loop<C: Capture>(
     mut open: impl FnMut(bool) -> Result<C, String>,
     init_tx: Sender<Result<(), String>>,
     clock: &mut dyn Clock,
+    notices: &dyn Notices,
 ) {
     let mut level = Leveller::new(ring.rate);
     let mut init_tx = Some(init_tx);
@@ -180,7 +167,10 @@ pub(super) fn capture_loop<C: Capture>(
                 if let Some(tx) = init_tx.take() {
                     let _ = tx.send(Ok(()));
                 }
-                let ended = stream.run(ring, &mut level, &*clock);
+                let ended = stream.run(ring, &mut level, &*clock, notices);
+                // Up to the clock, and out of live sound: the next stream starts with silence for
+                // the time its open takes, so the track never lags by the switch.
+                silence_to_clock(ring, &mut level, &*clock);
                 eprintln!("[recall] audio track '{}': {}; reopening", ring.name, ended.why);
                 set_endpoint(ring, format!("{endpoint} (lost: {}; reopening)", ended.why));
                 wait = !ended.at_once;
@@ -198,17 +188,26 @@ pub(super) fn capture_loop<C: Capture>(
                 failures = failures.saturating_add(1);
             }
         }
-        let until = clock.elapsed() + if wait { reopen_wait(failures) } else { Duration::ZERO };
-        while clock.elapsed() < until {
-            if !clock.pause(TICK) {
-                return;
-            }
-            silence_to_clock(ring, &mut level, &*clock);
-        }
-        if !wait && !clock.pause(Duration::ZERO) {
+        if !wait_to_reopen(ring, &mut level, clock, notices, if wait { reopen_wait(failures) } else { Duration::ZERO }) {
             return;
         }
     }
+}
+
+/// Silence for up to `wait`, cut short when a device comes or goes. False: the clock ended
+/// the loop (tests only).
+fn wait_to_reopen(ring: &TrackRing, level: &mut Leveller, clock: &mut dyn Clock, notices: &dyn Notices, wait: Duration) -> bool {
+    let until = clock.elapsed() + wait;
+    while clock.elapsed() < until {
+        if notices.take_devices_changed() {
+            return true;
+        }
+        if !clock.pause(TICK) {
+            return false;
+        }
+        silence_to_clock(ring, level, &*clock);
+    }
+    wait > Duration::ZERO || clock.pause(Duration::ZERO)
 }
 
 #[cfg(test)]
