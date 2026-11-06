@@ -33,6 +33,9 @@ try {
   New-Item -ItemType Directory -Force -Path $out | Out-Null
 
   $env:RECALL_VERSION = $Version
+  # A release checkout is usually a worktree: borrow the main checkout's local build tools.
+  $common = Split-Path (git rev-parse --path-format=absolute --git-common-dir).Trim() -Parent
+  if (-not $env:RECALL_TOOLS_ROOT -and (Test-Path (Join-Path $common 'tools\ffmpeg-dev'))) { $env:RECALL_TOOLS_ROOT = $common }
   & powershell -NoProfile -File (Join-Path $PSScriptRoot 'install.ps1') -StageOnly -StageDir $stage
   if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE)" }
 
