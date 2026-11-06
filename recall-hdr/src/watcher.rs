@@ -359,7 +359,7 @@ fn rect_covers(mon: &RECT, win: &RECT, tol: i32) -> bool {
 // vendored from recall/src/source.rs (exe_stem): OpenProcess with
 // PROCESS_QUERY_LIMITED_INFORMATION + QueryFullProcessImageNameW, then take the
 // file stem. Kept local to avoid a cross-crate dependency for two small helpers.
-fn exe_stem(pid: u32) -> Option<String> {
+pub(crate) fn exe_stem(pid: u32) -> Option<String> {
     exe_identity(pid).map(|(stem, _, _)| stem)
 }
 

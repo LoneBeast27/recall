@@ -14,7 +14,7 @@ const GHOST: isize = 0x99;
 /// The watcher's event while the ghost is foreground. `found` = user32 found the hung window.
 fn ghost_focus(found: bool) -> WatchEvent {
     let class_of = |h: isize| (h == GHOST).then(|| GHOST_CLASS.to_string());
-    match resolve_with(GHOST, class_of, |_| if found { 0x10 } else { 0 }) {
+    match resolve_with(GHOST, class_of, |_| Some("dwm".into()), |_| if found { 0x10 } else { 0 }) {
         0x10 => game_ev(VAL, 10, 0x10),
         _ => app_ev("dwm", 500, GHOST, true),
     }
