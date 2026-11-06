@@ -8,7 +8,7 @@ use std::time::Duration;
 use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
 
 use super::apps::Leveller;
-use super::capture_loop::{silence_to_clock, Capture, Clock, Ended};
+use super::capture_loop::{silence_to_clock, watch_for, Capture, Clock, Ended, Endpoints, Watch};
 use super::{LoopbackTarget, TrackRing};
 
 /// No packet for this long: the source is quiet (loopback sends nothing while nothing
@@ -16,29 +16,16 @@ use super::{LoopbackTarget, TrackRing};
 const IDLE: Duration = Duration::from_millis(200);
 /// Event wait per turn: short, so a quiet source is filled promptly.
 const WAIT_MS: u32 = 100;
-/// How often a Windows-default source checks whether the default moved to another device.
-const DEFAULT_CHECK: Duration = Duration::from_secs(2);
+/// The engine's endpoints for a watch: the default and the connected ones of one direction.
+struct Wasapi(Direction);
 
-/// A source recording the Windows default: notices when the default becomes another device.
-pub(super) struct DefaultWatch {
-    id: String,
-    next: Duration,
-}
-
-impl DefaultWatch {
-    /// Watching the default endpoint `id`, opened at `now` on the track's clock.
-    pub(super) fn new(id: String, now: Duration) -> Self {
-        DefaultWatch { id, next: now + DEFAULT_CHECK }
+impl Endpoints for Wasapi {
+    fn default_id(&self) -> Option<String> {
+        wasapi::get_default_device(&self.0).ok()?.get_id().ok()
     }
 
-    /// Every `DEFAULT_CHECK`: true when `current` (the default endpoint's id now) names another
-    /// device. No default at all is not a move (the stream reports the lost device itself).
-    pub(super) fn moved(&mut self, now: Duration, current: impl FnOnce() -> Option<String>) -> bool {
-        if now < self.next {
-            return false;
-        }
-        self.next = now + DEFAULT_CHECK;
-        current().is_some_and(|id| id != self.id)
+    fn has(&self, want: &str) -> bool {
+        super::match_endpoint(&super::list_endpoints(&self.0), want).is_some()
     }
 }
 
@@ -51,12 +38,9 @@ pub(super) struct Stream {
     /// A device endpoint (not process loopback): an unplug shows as a padding error.
     device: bool,
     direction: Direction,
-    /// Set when this stream records the Windows default for a source with no device.
-    watch: Option<DefaultWatch>,
-}
-
-fn default_id(direction: &Direction) -> Option<String> {
-    wasapi::get_default_device(direction).ok()?.get_id().ok()
+    /// Set when this stream records the Windows default: for a source with no device, or
+    /// for a named device that was missing at start (`capture_loop::watch_for`).
+    watch: Option<Watch>,
 }
 
 /// Open `target`'s process loopback, else the source's endpoint, and start it. `now` is the
@@ -80,9 +64,9 @@ pub(super) fn open_stream(
             200_000,
         ),
         None => {
-            let (dev, endpoint) = super::pick_device(direction, device, ring.input, reopen)?;
-            if device.trim().is_empty() && endpoint.ends_with("(Windows default)") {
-                watch = dev.get_id().ok().map(|id| DefaultWatch::new(id, now));
+            let (dev, endpoint, on_default) = super::pick_device(direction, device, ring.input, reopen)?;
+            if on_default {
+                watch = watch_for(device, true, dev.get_id().ok(), now);
             }
             let client = dev.get_iaudioclient().map_err(|e| e.to_string())?;
             let (_def_period, min_period) = client.get_device_period().map_err(|e| e.to_string())?;
@@ -109,10 +93,8 @@ impl Stream {
         let mut raw: VecDeque<u8> = VecDeque::new();
         let mut last_sound = std::time::Instant::now();
         loop {
-            if let Some(watch) = &mut self.watch {
-                if watch.moved(clock.elapsed(), || default_id(&self.direction)) {
-                    return Ended { why: "the Windows default moved to another device".into(), at_once: true };
-                }
+            if let Some(ended) = self.watch.as_mut().and_then(|w| w.check(clock.elapsed(), &Wasapi(self.direction))) {
+                return ended;
             }
             if self.event.wait_for_event(WAIT_MS).is_ok() {
                 if let Err(e) = self.capture.read_from_device_to_deque(&mut raw) {
