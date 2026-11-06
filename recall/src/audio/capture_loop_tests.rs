@@ -329,3 +329,43 @@ fn only_a_default_source_follows_a_moved_default() {
     assert!(watch_for("Headset (USB)", Some("{dev-a}".into())).is_none(), "a named source never follows the default");
     assert!(watch_for("", None).is_none(), "no default id, nothing to compare");
 }
+
+/// A device whose stream wakes from a 3 h sleep: the first packet after it, and what each
+/// `level.live` returned.
+struct SleepyStream {
+    now: Rc<Cell<Duration>>,
+    out: Rc<RefCell<Vec<usize>>>,
+}
+
+impl Capture for SleepyStream {
+    fn endpoint(&self) -> String {
+        "Headset (USB)".into()
+    }
+
+    fn run(&mut self, ring: &TrackRing, level: &mut Leveller, _clock: &dyn Clock, _notices: &dyn Notices) -> Ended {
+        self.now.set(self.now.get() + Duration::from_secs(3 * 3600)); // the PC slept
+        let out = level.live(self.now.get(), &[0.5; 2], 1);
+        self.out.borrow_mut().push(out.len());
+        ring.push_capture(&out, false);
+        Ended { why: "device lost".into(), at_once: false }
+    }
+}
+
+/// 2026-11-07 audit T1: the capture loop's leveller owes at most one ring after a sleep (the
+/// stream's lead and the silence after it ends), however long the sleep was.
+#[test]
+fn a_sleep_owes_at_most_one_ring_through_the_capture_loop() {
+    let ring = ring();
+    let cap = ring.capacity_frames() as usize;
+    let now = Rc::new(Cell::new(Duration::ZERO));
+    let mut clock = FakeClock { now: now.clone(), stop_at: Duration::from_secs(3 * 3600 + 1) };
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let out = Rc::new(RefCell::new(Vec::new()));
+    let open = |_reopen: bool| Ok::<_, String>(SleepyStream { now: now.clone(), out: out.clone() });
+    capture_loop(&ring, "", false, open, tx, &mut clock, &FakeNotices::none(&now));
+
+    let out = out.borrow();
+    assert_eq!(out.len(), 1, "{out:?}");
+    assert!(out[0] <= cap + 2, "the first packet after the sleep carried {} frames (ring {cap})", out[0]);
+    assert_eq!(len(&ring), cap, "the ring is full and no bigger");
+}

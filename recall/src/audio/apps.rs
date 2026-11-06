@@ -144,7 +144,9 @@ pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, report
     out
 }
 
+/// At most one ring of silence (the leveller caps it too; this keeps the block small).
 fn push_silence(ring: &TrackRing, frames: u64) {
+    let frames = frames.min(ring.capacity_frames());
     if frames > 0 {
         ring.push_capture(&vec![0.0; frames as usize * ring.channels as usize], false);
     }
@@ -159,7 +161,7 @@ fn set_endpoint(ring: &TrackRing, text: String) {
 /// The game's own exe: the track stays (track count is stable) but holds silence.
 fn keep_silent(ring: &TrackRing) {
     let started = Instant::now();
-    let mut level = Leveller::new(ring.rate);
+    let mut level = Leveller::new(ring.rate).with_cap(ring.capacity_frames());
     loop {
         std::thread::sleep(Duration::from_millis(100));
         push_silence(ring, level.idle(started.elapsed()));
@@ -170,7 +172,7 @@ fn keep_silent(ring: &TrackRing) {
 fn watch(ring: &TrackRing, exe: &str, scanner: &Scanner) {
     let _ = wasapi::initialize_mta();
     let started = Instant::now();
-    let mut level = Leveller::new(ring.rate);
+    let mut level = Leveller::new(ring.rate).with_cap(ring.capacity_frames());
     let mut seen = 0;
     scanner.closed.fetch_add(1, Ordering::Relaxed);
     loop {

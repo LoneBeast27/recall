@@ -72,6 +72,8 @@ mod record_hotkeys;
 mod record_session;
 mod record_status;
 mod record_notice;
+mod record_power;
+mod record_power_win;
 mod record_quit;
 mod record_render;
 mod record_storage;
