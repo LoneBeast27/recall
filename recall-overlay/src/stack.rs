@@ -1,7 +1,8 @@
 //! The side spots' tall, narrow island: a laid-out (horizontal) scene
 //! re-flowed so it reads top to bottom with nothing rotated. The mark sits
-//! at the top; every text run becomes upright glyphs, one per line, each
-//! centred across the pill ("REC" → R, E, C); a space is a small gap; a
+//! at the top; every text run becomes upright lines of up to 3 glyphs, each
+//! centred across the pill ("REC" stays one line, "1:23" → 1 / 23; the
+//! grouping rules are in [`crate::stack_lines`]); a space is a small gap; a
 //! usage ring stays a ring with its number upright inside.
 //!
 //! The result stays in the island's unturned coordinates (x along the
@@ -11,13 +12,22 @@
 //! [`Text`]'s `x`, `y` is the glyph's centre, not its box's top-left.
 
 use crate::layout::{Icon, Measure, Role, Scene, Shape, Text};
+use crate::stack_lines::{descends, group};
 
-/// Room before the mark and after the last glyph, the gap between glyph
-/// lines, between runs, and for a space (1440p px).
+/// Room before the mark and after the last line, between runs, and for a
+/// space between words (1440p px).
 const PAD: f32 = 14.0;
-const LINE_GAP: f32 = 3.5;
 const RUN_GAP: f32 = 9.0;
 const SPACE: f32 = 5.0;
+/// Room between lines, as a share of the cap height (a pitch of 1.35 caps: at
+/// 1.1 the lines touched in the offscreen PNGs),
+/// and the extra under a line that hangs below the baseline (g, p, y).
+const LINE_PITCH: f32 = 0.35;
+const DESCENT: f32 = 0.3;
+/// The least room either side of the widest line, across the pill (1440p px).
+const ACROSS: f32 = 6.0;
+/// Room kept before a closing "…".
+const ELLIPSIS_GAP: f32 = 3.5;
 
 /// `scene` (laid out at scale `s`) re-flowed for a side spot.
 pub fn stack(scene: &Scene, s: f32, m: &dyn Measure) -> Scene {
@@ -31,6 +41,7 @@ pub fn stack_within(scene: &Scene, s: f32, m: &dyn Measure, max: f32) -> Scene {
     let cy = scene.h / 2.0;
     let mut out = Scene { h: scene.h, lead: scene.lead, stacked: true, ..Scene::default() };
     let mut cursor = PAD * s;
+    let mut widest = 0.0f32;
     if let Some(icon) = scene.icon {
         let along = icon_along(&icon);
         let (cx, dx, dy) = (cursor + along / 2.0, cursor + along / 2.0 - icon.cx, cy - icon.cy);
@@ -39,7 +50,7 @@ pub fn stack_within(scene: &Scene, s: f32, m: &dyn Measure, max: f32) -> Scene {
     }
     // Room left for the next piece, keeping the end padding and a "…".
     let ellipsis = m.measure(Role::NoticeUi, s, "…").cap.max(m.measure(Role::NoticeUi, s, "0").cap * 0.6);
-    let fits = |cursor: f32, along: f32| cursor + along + PAD * s + ellipsis + LINE_GAP * s <= max;
+    let fits = |cursor: f32, along: f32| cursor + along + PAD * s + ellipsis + ELLIPSIS_GAP * s <= max;
     'items: for item in items(scene) {
         match item {
             Item::Shape(shape) => {
@@ -56,27 +67,48 @@ pub fn stack_within(scene: &Scene, s: f32, m: &dyn Measure, max: f32) -> Scene {
                 cursor += along + RUN_GAP * s;
             }
             Item::Text(text) => {
-                for c in text.text.chars() {
-                    if c.is_whitespace() {
+                let cap = m.measure(text.role, s, "0").cap;
+                let mut gap = 0.0;
+                for (i, word) in group(&text.text).into_iter().enumerate() {
+                    if i > 0 {
                         cursor += SPACE * s;
-                        continue;
                     }
-                    let glyph = c.to_string();
-                    let cap = m.measure(text.role, s, &glyph).cap.max(m.measure(text.role, s, "0").cap * 0.6);
-                    if !fits(cursor, cap) {
-                        out.texts.push(Text { role: text.role, text: "…".into(), x: cursor + ellipsis / 2.0, y: cy, color: text.color });
-                        cursor += ellipsis + RUN_GAP * s;
-                        break 'items;
+                    for line in word {
+                        let metrics = m.measure(text.role, s, &line);
+                        let along = metrics.cap.max(cap * 0.6);
+                        if !fits(cursor, along) {
+                            out.texts.push(Text { role: text.role, text: "…".into(), x: cursor + ellipsis / 2.0, y: cy, color: text.color });
+                            cursor += ellipsis + RUN_GAP * s;
+                            break 'items;
+                        }
+                        widest = widest.max(metrics.width);
+                        out.texts.push(Text { role: text.role, text: line.clone(), x: cursor + along / 2.0, y: cy, color: text.color });
+                        gap = along * if descends(&line) { LINE_PITCH + DESCENT } else { LINE_PITCH };
+                        cursor += along + gap;
                     }
-                    out.texts.push(Text { role: text.role, text: glyph, x: cursor + cap / 2.0, y: cy, color: text.color });
-                    cursor += cap + LINE_GAP * s;
                 }
-                cursor += (RUN_GAP - LINE_GAP) * s;
+                cursor += RUN_GAP * s - gap;
             }
         }
     }
     out.w = (cursor - RUN_GAP * s + PAD * s).max(scene.h * 2.0).ceil();
+    widen(&mut out, widest + 2.0 * ACROSS * s);
     out
+}
+
+/// A pill too thin for its widest line grows across (everything stays centred).
+fn widen(out: &mut Scene, need: f32) {
+    if need <= out.h {
+        return;
+    }
+    let dy = (need.ceil() - out.h) / 2.0;
+    out.h = need.ceil();
+    out.texts.iter_mut().for_each(|t| t.y += dy);
+    out.shapes = out.shapes.iter().map(|&shape| moved(shape, 0.0, dy)).collect();
+    if let Some(icon) = out.icon.as_mut() {
+        icon.cy += dy;
+        icon.shape = moved(icon.shape, 0.0, dy);
+    }
 }
 
 enum Item<'a> {
