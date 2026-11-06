@@ -94,6 +94,23 @@ pub(crate) fn staged_path(dir: &Path, final_path: &Path, same: VolumeCheck) -> O
     (!same(dir, out_dir)).then(|| dir.join(name))
 }
 
+/// Why `dir` may not be the staging folder: it is, holds or lies inside one of `clip_dirs`.
+/// Recovery would then queue the user's clips as leftovers and delete their `.part` files.
+pub(crate) fn refused(dir: &Path, clip_dirs: &[PathBuf]) -> Option<String> {
+    let staging = super::staging_guard::normalized(dir);
+    clip_dirs.iter().filter(|c| !c.as_os_str().is_empty()).find_map(|clips| {
+        let key = super::staging_guard::normalized(clips);
+        let how = if super::staging_guard::within(&staging, &key) {
+            "is inside the clip folder"
+        } else if super::staging_guard::within(&key, &staging) {
+            "holds the clip folder"
+        } else {
+            return None;
+        };
+        Some(format!("staging folder {} {how} {}: staging is off and that folder is not scanned, so nothing in it is moved or deleted", dir.display(), clips.display()))
+    })
+}
+
 /// What a start-up scan of the staging folder found.
 #[derive(Debug, Default)]
 pub(crate) struct Recovery {
@@ -117,7 +134,8 @@ pub(crate) fn recover(dir: &Path, out_dir: &Path) -> Recovery {
         let name = entry.file_name();
         let lower = name.to_string_lossy().to_ascii_lowercase();
         let path = entry.path();
-        if lower.strip_suffix(PART_EXT).is_some_and(|stem| stem.ends_with(".mp4")) {
+        // A long recording's `.part` is `longrec::recover_parts`'s to rename, never stale.
+        if lower.strip_suffix(PART_EXT).is_some_and(|stem| stem.ends_with(".mp4")) && !crate::naming::is_longrec_part(&lower) {
             match std::fs::remove_file(&path) {
                 Ok(()) => found.removed.push(path),
                 Err(e) => found.errors.push(format!("stale {} not removed: {e}", path.display())),
@@ -171,6 +189,8 @@ pub(crate) struct Setup {
     /// The clip folder recovered clips move to.
     pub out_dir: PathBuf,
     pub mover: mover::Config,
+    /// Folders refused as overlapping a clip folder ([`refused`]), logged at start.
+    pub refused: Vec<String>,
 }
 
 impl Setup {
@@ -178,12 +198,30 @@ impl Setup {
     pub fn from_env() -> Self {
         let env = std::env::var(ENV).ok();
         let exe = std::env::current_exe().ok();
+        let out_dir = PathBuf::from(crate::naming::out_dir());
+        let mut clip_dirs = vec![out_dir.clone()];
+        clip_dirs.extend(super::staging_guard::library_dirs());
         Setup {
             dir: configured(env.as_deref(), exe.as_deref()),
             recover: recovery_dir(env.as_deref(), exe.as_deref()),
-            out_dir: PathBuf::from(crate::naming::out_dir()),
+            out_dir,
             mover: mover::Config::default(),
+            refused: Vec::new(),
         }
+        .guarded(&clip_dirs)
+    }
+
+    /// Drops a staging or recovery folder that overlaps one of `clip_dirs` ([`refused`]).
+    pub fn guarded(mut self, clip_dirs: &[PathBuf]) -> Self {
+        for slot in [&mut self.dir, &mut self.recover] {
+            if let Some(why) = slot.as_deref().and_then(|dir| refused(dir, clip_dirs)) {
+                if !self.refused.contains(&why) {
+                    self.refused.push(why);
+                }
+                *slot = None;
+            }
+        }
+        self
     }
 }
 
@@ -192,6 +230,9 @@ impl Setup {
 /// and the mover's quit handle.
 pub(crate) fn start(events: &Events, setup: Setup) -> (Option<Stage>, Option<MoverControl>) {
     let mut recovered = Vec::new();
+    for why in &setup.refused {
+        events.log(&format!("staging: {why}"));
+    }
     if let Some(dir) = &setup.recover {
         let found = recover(dir, &setup.out_dir);
         for path in &found.removed {

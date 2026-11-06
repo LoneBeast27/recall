@@ -113,7 +113,8 @@ fn prune(root: &Path, keep: &HashSet<String>) {
     for entry in listing.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
         let id = name.split('.').next().unwrap_or_default();
-        if !keep.contains(id) {
+        let ours = super::owned::is_id(id) && [".head", ".json", ".head.part"].iter().any(|ext| name.len() == id.len() + ext.len() && name.ends_with(ext));
+        if ours && !keep.contains(id) && super::guard::blocked(root).is_none() {
             let _ = std::fs::remove_file(entry.path());
         }
     }

@@ -21,11 +21,20 @@ fn dirs(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
     (root, clips, kept)
 }
 
-/// A clip in the clip folder and its kept copy (`kept_len` bytes).
+/// Marks `kept` the way the engine does (`recall/src/encoder/mover.rs`).
+fn mark(kept: &Path) {
+    std::fs::write(format!("{}:{KEPT_MARK}", kept.display()), b"").unwrap();
+}
+
+/// A clip in the clip folder and the engine's kept copy of it (`kept_len` bytes, the clip's
+/// time, marked).
 fn clip(clips: &Path, kept_dir: &Path, name: &str, len: usize, kept_len: usize) -> (PathBuf, PathBuf) {
     let (dest, kept) = (clips.join(name), kept_dir.join(name));
     std::fs::write(&dest, vec![7u8; len]).unwrap();
     std::fs::write(&kept, vec![7u8; kept_len]).unwrap();
+    let saved = dest.metadata().unwrap().modified().unwrap();
+    std::fs::File::options().write(true).open(&kept).unwrap().set_modified(saved).unwrap();
+    mark(&kept);
     (dest, kept)
 }
 
@@ -75,6 +84,7 @@ fn a_clip_already_cached_drops_the_kept_copy() {
     let (dest, kept) = clip(&clips, &kept_dir, "G__d.mp4", 3000, 3000);
     let first = adopt_in(&root, &dest, &kept, BUDGET).unwrap();
     std::fs::write(&kept, vec![7u8; 3000]).unwrap();
+    mark(&kept);
     assert_eq!(adopt_in(&root, &dest, &kept, BUDGET).unwrap(), first);
     assert!(!kept.exists() && first.exists());
     cleanup(&root);
@@ -87,6 +97,7 @@ fn the_start_sweep_adopts_matches_and_deletes_the_rest() {
     let (_, short_kept) = clip(&clips, &kept_dir, "G__f.mp4", 2000, 1500);
     let orphan = kept_dir.join("G__gone.mp4");
     std::fs::write(&orphan, vec![1u8; 900]).unwrap();
+    mark(&orphan);
     std::fs::create_dir_all(kept_dir.join("sub")).unwrap();
 
     assert_eq!(sweep_in(&root, &kept_dir, &clips, BUDGET), (1, 2));

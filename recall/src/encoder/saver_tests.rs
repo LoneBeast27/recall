@@ -309,6 +309,7 @@ fn setup(stage: Option<&Path>, recover: &Path, out: &Path, same: staging::Volume
         recover: Some(recover.to_path_buf()),
         out_dir: out.to_path_buf(),
         mover: mover_cfg(same),
+        refused: Vec::new(),
     }
 }
 

@@ -32,6 +32,10 @@ impl Root {
             return;
         }
         let before = crate::backend::library_dir();
+        // A recorder pointed into the cache (by hand, or before this check existed) blocks it.
+        if let Some(message) = crate::services::storage::guard::check(&crate::services::storage::guard::cache_dirs(), &[PathBuf::from(&dir)]) {
+            self.show_toast_for(ToastKind::Bad, "Cache and clip folders overlap", Some(message), 30);
+        }
         self.folders.recordings = Some(dir);
         let _ = self.folders.save();
         if crate::backend::library_dir() != before {
@@ -82,6 +86,10 @@ impl Root {
             self.show_toast(ToastKind::Bad, "The recorder is off", Some("Start it, then change the folder.".into()));
             return;
         }
+        if let Some(why) = crate::services::storage::guard::refuse_clip_folder(&dir) {
+            self.show_toast_for(ToastKind::Bad, "Can't save clips there", Some(why), 10);
+            return;
+        }
         let new = dir.to_string_lossy().into_owned();
         let old = self.recordings_folder();
         if same_folder(&new, &old) {
@@ -106,6 +114,10 @@ impl Root {
     }
 
     fn add_clip_folders(&mut self, paths: Vec<PathBuf>) {
+        if let Some(why) = paths.iter().find_map(|path| crate::services::storage::guard::refuse_clip_folder(path)) {
+            self.show_toast_for(ToastKind::Bad, "Can't add that folder", Some(why), 10);
+            return;
+        }
         let mut folders = Folders::load();
         folders.recordings = self.folders.recordings.clone().or_else(|| Some(self.recordings_folder()));
         let added = paths.iter().filter(|p| folders.add(p)).count();

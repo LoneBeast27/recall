@@ -25,6 +25,7 @@ mod handoff;
 mod live;
 #[cfg(test)]
 pub(crate) use handoff::{audio_tail_us, video_end_us};
+mod landed;
 mod mover;
 mod mux;
 pub(crate) mod reopen;
@@ -38,6 +39,7 @@ mod decode_tests;
 mod saver;
 mod space;
 mod staging;
+mod staging_guard;
 pub mod settings;
 mod smoke;
 mod still;

@@ -334,9 +334,15 @@ pub(crate) fn move_clip(job: &MoveJob, cfg: &Config, abort: &AtomicBool) -> Resu
         kept: None,
         unstamped: None,
     };
-    match std::fs::metadata(&job.dest).map(|m| m.len()) {
-        // The rename landed before a crash or quit kept the staged copy.
-        Ok(existing) if existing == len => moved.how = "already in place",
+    match std::fs::metadata(&job.dest) {
+        // Staging pointed at the clip folder: the clip is its own destination. Nothing to do,
+        // and above all nothing to delete.
+        Ok(_) if super::landed::same_file(&job.staged, &job.dest) => {
+            moved.how = "already in place";
+            return Ok(moved);
+        }
+        // The rename landed before a crash or quit kept the staged copy (`landed.rs`).
+        Ok(_) if super::landed::same_clip(&job.staged, &job.dest) => moved.how = "already in place",
         // Never overwrite a different finished file: land beside it.
         Ok(_) => moved.dest = recovered_path(&part_of(&job.dest), Path::exists),
         Err(_) => {}
@@ -399,8 +405,13 @@ fn keep_staged_within(staged: &Path, dest: &Path, cap: u64) -> Option<PathBuf> {
     }
     std::fs::create_dir_all(&dir).ok()?;
     std::fs::rename(staged, &kept).ok()?;
+    // The app's kept sweep deletes only marked copies; unmarked ones it only adopts.
+    let _ = std::fs::write(format!("{}:{KEPT_MARK}", kept.display()), b"");
     Some(kept)
 }
+
+/// Alternate stream on each kept copy: "the engine kept this" (`recall-native` `kept.rs`).
+pub(crate) const KEPT_MARK: &str = "recall.kept";
 
 /// Copy `staged` to `<dest>.part`, flush, rename to `dest`.
 fn copy_into_place(staged: &Path, moved: &mut Moved, cfg: &Config, abort: &AtomicBool) -> Result<(), MoveError> {

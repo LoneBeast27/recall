@@ -9,11 +9,20 @@
 //! [`super::video::cache_in`] (LRU touch, budget). A copy whose size differs from the clip, or
 //! a clip too large for the video tier, is deleted instead. At start [`sweep_kept`] adopts what
 //! the engine kept while the app was closed, and deletes what no longer matches a clip.
+//!
+//! Only the engine's own copies are ever deleted: it marks each with the alternate stream
+//! [`KEPT_MARK`] (`recall/src/encoder/mover.rs`). An unmarked file (a user's, or a copy kept
+//! before the mark existed) is adopted when it is the clip's copy by name, size and time,
+//! and otherwise left where it is. A cache the guard blocked (`guard.rs`) touches nothing.
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use super::budget;
 use super::video::{budget_in, touch, video_dir};
+
+/// NTFS alternate stream the engine writes on each copy it keeps (`recall/src/encoder/mover.rs`,
+/// `KEPT_MARK`): the sweep deletes only marked files.
+pub(super) const KEPT_MARK: &str = "recall.kept";
 
 /// One adoption at a time (an engine event and the start-up sweep may name the same file).
 static ADOPT_LOCK: Mutex<()> = Mutex::new(());
@@ -55,7 +64,7 @@ pub fn adopt_kept(dest: String, kept: String) {
             eprintln!("kept clip not cached: {error}");
         }
     });
-    if spawned.is_err() {
+    if spawned.is_err() && marked(&file) {
         let _ = std::fs::remove_file(file);
     }
 }
@@ -74,9 +83,24 @@ pub fn sweep_kept(clip_folder: impl FnOnce() -> PathBuf + Send + 'static) {
     });
 }
 
-/// [`sweep_kept`] against explicit folders: a kept copy whose clip is in `clip_folder` with the
-/// same size is adopted, anything else is deleted. Returns (adopted, deleted).
+/// The engine marked `kept` as its own copy.
+pub(super) fn marked(kept: &Path) -> bool {
+    std::fs::metadata(format!("{}:{KEPT_MARK}", kept.display())).is_ok()
+}
+
+/// `kept` is a copy of the clip `dest` by size and modification time (whole seconds, the
+/// cache identity): the engine stamps the clip with the staged copy's time.
+fn copy_of(dest: &Path, kept: &Path) -> bool {
+    matches!((dest.metadata(), kept.metadata()), (Ok(d), Ok(k)) if d.is_file() && d.len() == k.len() && super::mtime_secs(&d) == super::mtime_secs(&k))
+}
+
+/// [`sweep_kept`] against explicit folders: a kept copy of a clip in `clip_folder` is
+/// adopted; a marked copy that matches no clip is deleted; anything else stays. Returns
+/// (adopted, deleted).
 pub(super) fn sweep_in(root: &Path, kept_dir: &Path, clip_folder: &Path, budget: u64) -> (usize, usize) {
+    if super::guard::blocked(root).or_else(|| super::guard::blocked(kept_dir)).is_some() {
+        return (0, 0);
+    }
     let Ok(listing) = std::fs::read_dir(kept_dir) else { return (0, 0) };
     let (mut adopted, mut deleted) = (0, 0);
     for entry in listing.flatten() {
@@ -85,23 +109,25 @@ pub(super) fn sweep_in(root: &Path, kept_dir: &Path, clip_folder: &Path, budget:
         }
         let kept = entry.path();
         let dest = clip_folder.join(entry.file_name());
-        let same_size = matches!((dest.metadata(), entry.metadata()), (Ok(d), Ok(k)) if d.is_file() && d.len() == k.len());
-        if same_size && adopt_in(root, &dest, &kept, budget).is_ok() {
+        if copy_of(&dest, &kept) && adopt_in(root, &dest, &kept, budget).is_ok() {
             adopted += 1;
-        } else {
-            let _ = std::fs::remove_file(&kept);
+        } else if marked(&kept) && std::fs::remove_file(&kept).is_ok() {
             deleted += 1;
         }
     }
     (adopted, deleted)
 }
 
-/// Moves `kept` into the video tier as the copy of `dest`. Err (and `kept` deleted) when it
-/// is not a copy of `dest` by size, the clip is too large for the tier, or the move fails.
+/// Moves `kept` into the video tier as the copy of `dest`. Err when it is not a copy of `dest`
+/// by size, the clip is too large for the tier, or the move fails; `kept` is then deleted only
+/// when the engine marked it. A blocked cache adopts and deletes nothing.
 pub(super) fn adopt_in(root: &Path, dest: &Path, kept: &Path, budget: u64) -> Result<PathBuf, String> {
+    if let Some(why) = super::guard::blocked(root).or_else(|| super::guard::blocked(kept)) {
+        return Err(format!("kept copy left alone: {why}"));
+    }
     let _guard = ADOPT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let result = adopt_locked(root, dest, kept, budget);
-    if result.is_err() {
+    if result.is_err() && marked(kept) {
         let _ = std::fs::remove_file(kept);
     }
     result
@@ -121,8 +147,11 @@ fn adopt_locked(root: &Path, dest: &Path, kept: &Path, budget: u64) -> Result<Pa
     let file = format!("{id}.mp4");
     let target = directory.join(&file);
     if target.metadata().is_ok_and(|m| m.len() == bytes) {
-        let _ = std::fs::remove_file(kept);
+        if marked(kept) {
+            let _ = std::fs::remove_file(kept);
+        }
     } else {
+        super::owned::mark(root, &format!("video/{file}"));
         budget::enforce(root, budget, bytes);
         place(kept, &target)?;
     }
