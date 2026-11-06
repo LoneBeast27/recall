@@ -3,10 +3,14 @@
 //! need an engine restart wait until neither is running (`pending_restart` in
 //! the session status), and a pause first stops the long recording
 //! ([`PendingPause`]); engine events arrive through `Supervisor::attach_events`.
+//! A retarget (game closed past its drain, or a new game) stops the long
+//! recording itself ([`AutoStop`]) instead of waiting on it.
 
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
+
+use crate::record_engine::Busy;
 
 /// A save with no `saved` / `save_failed` after this is assumed lost.
 pub const SAVE_STALE: Duration = Duration::from_secs(120);
@@ -24,16 +28,27 @@ pub enum LongRec {
     Active { path: String, started_unix: f64 },
 }
 
+/// The long recording the controller stopped for a retarget (its
+/// `record_stop` is sent once): the retarget goes ahead when the engine
+/// reports it ended, or after [`PAUSE_STOP_WAIT`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct AutoStop {
+    deadline: Instant,
+    /// The game closed (else a new game is wanted).
+    game_closed: bool,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineActivity {
     pending_saves: u32,
     last_save_sent: Option<Instant>,
     pub long: LongRec,
+    auto_stop: Option<AutoStop>,
 }
 
 impl Default for EngineActivity {
     fn default() -> Self {
-        EngineActivity { pending_saves: 0, last_save_sent: None, long: LongRec::Idle }
+        EngineActivity { pending_saves: 0, last_save_sent: None, long: LongRec::Idle, auto_stop: None }
     }
 }
 
@@ -44,6 +59,8 @@ pub enum Trigger {
     Saved,
     /// Long recording started / stopped / failed: publish status.
     LongRecChanged,
+    /// The long recording a retarget stopped ([`AutoStop`]) was saved.
+    AutoStopped { game_closed: bool },
 }
 
 impl EngineActivity {
@@ -84,9 +101,12 @@ impl EngineActivity {
                 self.long = LongRec::Active { path: text("path"), started_unix: unix_now };
                 Some(Trigger::LongRecChanged)
             }
-            "recording_stopped" | "recording_failed" => {
+            kind @ ("recording_stopped" | "recording_failed") => {
                 self.long = LongRec::Idle;
-                Some(Trigger::LongRecChanged)
+                match self.auto_stop.take() {
+                    Some(stop) if kind == "recording_stopped" => Some(Trigger::AutoStopped { game_closed: stop.game_closed }),
+                    _ => Some(Trigger::LongRecChanged),
+                }
             }
             _ => None,
         }
@@ -104,6 +124,24 @@ impl EngineActivity {
             }
         }
         self.pending_saves > 0 || self.long != LongRec::Idle
+    }
+
+    /// What holds a due retarget now (see `EnginePlanner::step`): saves in
+    /// flight, and a long recording whose stop has not timed out.
+    pub fn retarget_busy(&mut self, now: Instant) -> Busy {
+        self.busy(now); // expire stale saves / starts
+        let given_up = self.auto_stop.is_some_and(|s| now >= s.deadline);
+        Busy { saving: self.pending_saves > 0, long_rec: self.long != LongRec::Idle && !given_up }
+    }
+
+    /// A retarget needs the long recording stopped. `true` = send
+    /// `record_stop` now; once per recording, later calls only wait.
+    pub fn auto_stop(&mut self, now: Instant, game_closed: bool) -> bool {
+        if self.long == LongRec::Idle || self.auto_stop.is_some() {
+            return false;
+        }
+        self.auto_stop = Some(AutoStop { deadline: now + PAUSE_STOP_WAIT, game_closed });
+        true
     }
 
     /// Session-status `long_recording`.
@@ -194,6 +232,35 @@ mod tests {
         a.record_requested(t0);
         a.on_event(&json!({"type":"recording_failed","reason":"x","path":null}), 0.0);
         assert_eq!(a.long, LongRec::Idle);
+    }
+
+    #[test]
+    fn a_retarget_stops_the_long_recording_once_and_waits_for_it_bounded() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let mut a = EngineActivity::default();
+        assert!(!a.auto_stop(t0, true), "nothing recording: nothing to stop");
+        a.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
+        assert_eq!(a.retarget_busy(t0), Busy { saving: false, long_rec: true });
+        assert!(a.auto_stop(t0, true), "first ask sends record_stop");
+        assert!(!a.auto_stop(t0 + s(1), true), "sent once per recording");
+        assert!(a.retarget_busy(t0 + s(1)).long_rec, "waits for the engine to report it");
+        let ev = a.on_event(&json!({"type":"recording_stopped","path":"p","seconds":9.0,"bytes":1}), 0.0);
+        assert_eq!(ev, Some(Trigger::AutoStopped { game_closed: true }), "the island says why it stopped");
+        assert_eq!(a.retarget_busy(t0 + s(1)), Busy::default(), "stopped: retarget now");
+        // An engine that never answers holds the retarget only PAUSE_STOP_WAIT.
+        a.on_event(&json!({"type":"recording_started","path":"q"}), 1.0);
+        assert!(a.auto_stop(t0 + s(20), false));
+        assert!(a.retarget_busy(t0 + s(20) + PAUSE_STOP_WAIT - Duration::from_millis(1)).long_rec);
+        assert!(!a.retarget_busy(t0 + s(20) + PAUSE_STOP_WAIT).long_rec, "gave up on the stop");
+        // A user's own stop (no auto stop) is the plain event.
+        let mut b = EngineActivity::default();
+        b.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
+        assert_eq!(b.on_event(&json!({"type":"recording_stopped","path":"p"}), 0.0), Some(Trigger::LongRecChanged));
+        // A save in flight still holds, bounded by SAVE_STALE.
+        b.save_sent(t0);
+        assert_eq!(b.retarget_busy(t0 + s(1)), Busy { saving: true, long_rec: false });
+        assert_eq!(b.retarget_busy(t0 + SAVE_STALE), Busy::default());
     }
 
     #[test]

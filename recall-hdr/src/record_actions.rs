@@ -286,6 +286,11 @@ impl Controller {
         while let Ok(ev) = self.engine_events.try_recv() {
             match self.activity.on_event(&ev, unix_now()) {
                 Some(Trigger::Saved) => self.janitor.saved(now),
+                Some(Trigger::AutoStopped { game_closed }) => {
+                    let detail = if game_closed { "the game closed" } else { "the recorded window changed" };
+                    log!("record: long recording saved -- {detail}");
+                    self.shortcut_notice("Long recording saved", detail);
+                }
                 Some(Trigger::LongRecChanged) | None => {}
             }
         }
@@ -309,14 +314,16 @@ impl Controller {
         self.restart_engine_for_settings();
     }
 
-    /// Planner -> engine, every pump tick. A retarget that falls due while a
-    /// save or the long recording is in flight waits (status
-    /// `pending_restart`) and applies on the first idle tick.
+    /// Planner -> engine, every pump tick. A retarget that falls due while
+    /// the long recording runs stops it first (one `record_stop`; the
+    /// retarget applies once it reports stopping, or after
+    /// [`PAUSE_STOP_WAIT`]); one due while a save is in flight waits for it.
+    /// Meanwhile the status says `pending_restart`.
     pub(crate) fn plan_engine(&mut self, now: Instant) {
         let buffered = self.supervisor.engine_view().buffer_secs;
         self.planner.set_drain_len(crate::record_drain::drain_len(buffered, self.cfg.recording.buffer_secs));
         let wanted = self.wanted();
-        let busy = self.activity.busy(now);
+        let busy = self.activity.retarget_busy(now);
         match self.planner.step(&wanted, now, busy) {
             Step::Apply(target) => {
                 self.retarget_held = false;
@@ -324,7 +331,15 @@ impl Controller {
             }
             Step::Held => {
                 if !self.retarget_held {
-                    log!("record: engine retarget deferred until the save / long recording ends");
+                    log!("record: engine retarget deferred until the save ends");
+                }
+                self.retarget_held = true;
+            }
+            Step::StopLongRec { game_closed } => {
+                if self.activity.auto_stop(now, game_closed) {
+                    let why = if game_closed { "the game closed" } else { "a new game is wanted" };
+                    log!("record: {why} -- stopping the long recording before the retarget (up to {} s)", PAUSE_STOP_WAIT.as_secs());
+                    self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#);
                 }
                 self.retarget_held = true;
             }
