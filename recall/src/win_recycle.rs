@@ -17,33 +17,14 @@
 //!   A bigger item is the one Windows offers to delete permanently.
 //!
 //! A refusal stops the caller, which tells the user, and nothing is deleted.
-//! The shell call itself uses [`RECYCLE_FLAGS`]: `FOF_ALLOWUNDO` always, and
-//! `FOF_NOCONFIRMATION` (no "move to the Recycle Bin?" box) only together
-//! with `FOF_WANTNUKEWARNING`. If this check were ever wrong, Windows would
-//! then ask before a permanent delete instead of doing one silently, and the
-//! storage limit counts a declined or cancelled call as a refusal.
+//! This is the second guard: the call itself (`win_fileop.rs`) goes through
+//! `IFileOperation` with a progress sink that refuses any delete Windows
+//! would not recycle (a `subst` drive passes this precheck but not the sink,
+//! measured 2026-11-07).
 
 use std::path::Path;
 
 use crate::win_volume::Volume;
-
-/// `FOF_SILENT`: no progress window.
-pub const FOF_SILENT: u16 = 0x0004;
-/// Auto-answers "yes" to confirmations. Safe only with `FOF_WANTNUKEWARNING`.
-pub const FOF_NOCONFIRMATION: u16 = 0x0010;
-/// Recycle Bin instead of delete.
-pub const FOF_ALLOWUNDO: u16 = 0x0040;
-pub const FOF_NOERRORUI: u16 = 0x0400;
-/// Ask before a delete that cannot go to the Recycle Bin, even with `FOF_NOCONFIRMATION`.
-pub const FOF_WANTNUKEWARNING: u16 = 0x4000;
-/// The one flag set Recall passes to `SHFileOperationW(FO_DELETE)`.
-pub const RECYCLE_FLAGS: u16 = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING;
-
-/// A flag set that can never delete for good without asking: it recycles,
-/// and it does not auto-confirm a permanent delete.
-pub fn recycles_only(flags: u16) -> bool {
-    flags & FOF_ALLOWUNDO != 0 && (flags & FOF_NOCONFIRMATION == 0 || flags & FOF_WANTNUKEWARNING != 0)
-}
 
 const DRIVE_FIXED: u32 = 3;
 const MIB: u64 = 1 << 20;

@@ -9,6 +9,8 @@ name = "recall-hdr"
 path = "src/main.rs"
 
 [dependencies]
+# IFileOperation progress sink (`recall/src/win_fileop.rs`): `#[implement]` needs windows-core.
+windows-core = "0.62"
 interprocess = "2.2"
 # Windows surface for HDR-state detection (DXGI), display enumeration, registry
 # EDID reads, and (Wave 3) the tray/message loop. Feature set is pinned to what
