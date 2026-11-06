@@ -86,6 +86,16 @@ pub(super) struct Bounds {
 }
 
 /// The window covers the whole monitor (borderless or fullscreen: it may overhang it).
+/// A window style with no title bar (`WS_CAPTION`) and no sizing frame (`WS_THICKFRAME`): a
+/// borderless or exclusive-fullscreen game. A maximized ordinary window overhangs its monitor
+/// too (`covers` accepts that), but it has a caption: recording the monitor would show its
+/// title bar and, with an auto-hide taskbar, the taskbar.
+pub(super) fn frameless(style: u32) -> bool {
+    const WS_CAPTION: u32 = 0x00C0_0000;
+    const WS_THICKFRAME: u32 = 0x0004_0000;
+    style & (WS_CAPTION | WS_THICKFRAME) == 0
+}
+
 pub(super) fn covers(window: Bounds, monitor: Bounds) -> bool {
     monitor.right > monitor.left
         && monitor.bottom > monitor.top

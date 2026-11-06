@@ -133,3 +133,12 @@ fn window_covers_monitor_only_when_it_spans_it() {
     assert!(!covers(monitor, second), "other monitor");
     assert!(!covers(monitor, Bounds { left: 0, top: 0, right: 0, bottom: 0 }), "empty monitor rect");
 }
+
+/// Only a window with no title bar and no sizing frame may be recorded as its monitor.
+#[test]
+fn only_frameless_windows_count_as_covering() {
+    assert!(frameless(0x9600_0000), "WS_POPUP | WS_VISIBLE | WS_CLIPSIBLINGS: a borderless game");
+    assert!(!frameless(0x16CF_0000), "WS_OVERLAPPEDWINDOW maximized: has a caption");
+    assert!(!frameless(0x00C0_0000), "caption alone");
+    assert!(!frameless(0x0004_0000), "sizing frame alone");
+}
