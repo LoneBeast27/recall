@@ -256,8 +256,13 @@ impl App {
             };
             let scale = placement::scale(monitor.height(), &spot);
             let (grow, max_h) = (placement::grow(&spot), placement::free_depth(&spot, &monitor, scale));
+            // The exe stem only: `key` comes from the window title and never reaches the log.
+            let exe = match session.hud_key() {
+                stem if stem.is_empty() => "<unknown>".to_string(),
+                stem => stem,
+            };
             let line = format!(
-                "{key} anchor {:?} monitor [{},{},{},{}] area [{},{},{},{}] scale {scale:.2} (pid {pid:?}, hwnd {:#x})",
+                "{exe} anchor {:?} monitor [{},{},{},{}] area [{},{},{},{}] scale {scale:.2} (pid {pid:?}, hwnd {:#x})",
                 spot.anchor, monitor.left, monitor.top, monitor.right, monitor.bottom, area.left, area.top, area.right, area.bottom,
                 hwnd.unwrap_or(0)
             );
