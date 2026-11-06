@@ -107,9 +107,9 @@ fn the_cache_survives_a_restart_on_disk() {
     let dir = std::env::temp_dir().join(format!("recall-island-hud-{}", std::process::id()));
     let path = dir.join("island-hud.json");
     let mut cache = HudCache::load(Some(path.clone()));
-    cache.add("valorant", HudGrid { cols: 2, rows: 1, grid: vec![2] });
+    cache.add("valorant", HudGrid { cols: 8, rows: 1, grid: vec![2] });
     let back = HudCache::load(Some(path.clone()));
-    assert_eq!(back.grid("valorant"), Some(HudGrid { cols: 2, rows: 1, grid: vec![2] }));
+    assert_eq!(back.grid("valorant"), Some(HudGrid { cols: 8, rows: 1, grid: vec![2] }));
     assert!(!path.with_extension("json.tmp").exists(), "the temp file was renamed into place");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -186,12 +186,43 @@ fn a_bad_cache_file_is_cleaned_on_load_and_the_game_count_is_capped() {
     assert_eq!((cache.scans("huge"), cache.scans("short"), cache.scans("fine")), (0, 0, 1));
     let mut many = HudCache::load(None);
     for i in 0..MAX_GAMES + 5 {
-        many.add(&format!("game{i}"), HudGrid { cols: 2, rows: 1, grid: vec![1] });
+        many.add(&format!("game{i}"), HudGrid { cols: 8, rows: 1, grid: vec![1] });
     }
-    many.add("game0", HudGrid { cols: 2, rows: 1, grid: vec![1] });
+    many.add("game0", HudGrid { cols: 8, rows: 1, grid: vec![1] });
     assert_eq!(many.file.games.len(), MAX_GAMES);
     assert_eq!(many.scans("game1"), 0, "the game scanned longest ago went first");
     assert_eq!(many.scans("game0"), 1, "dropped earlier, a rescan brings it back fresh");
     assert_eq!(many.scans("game5"), 0, "and pushes out the next oldest");
     assert_eq!(many.scans(&format!("game{}", MAX_GAMES + 4)), 1);
+}
+
+#[test]
+fn scans_that_mark_most_of_the_screen_are_ignored() {
+    let mut cache = HudCache::load(None);
+    let menu = hud(&[(0.0, 0.0, 1.0, 0.7)]);
+    cache.add("rocketleague", menu.clone());
+    assert_eq!(cache.scans("rocketleague"), 0, "a new menu scan is not kept");
+    // Saved before this check: skipped when read.
+    cache.file.games.insert("rocketleague".into(), Entry { cols: 64, rows: 36, scans: vec![menu.grid.clone()], seq: 1 });
+    assert_eq!(cache.grid("rocketleague"), None);
+    let feed = hud(&[(0.4, 0.0, 0.6, 0.08)]);
+    cache.add("rocketleague", feed.clone());
+    assert_eq!(cache.grid("rocketleague"), Some(feed), "only the good scan counts");
+    assert_eq!(choose(&cache.grid("rocketleague").unwrap(), WIDE, None), Anchor::TopRight);
+}
+
+/// Rohan's Rocket League scans from 2026-11-06: two good ones (score top centre,
+/// boost bottom right) and two taken in menus that marked ~65% of the screen.
+#[test]
+fn rocket_league_lands_top_right_once_menu_scans_are_skipped() {
+    let rows: Vec<(u32, u32, u32)> = vec![(0, 27, 37), (1, 27, 37), (2, 27, 37), (3, 53, 58), (4, 53, 62), (34, 56, 64), (35, 56, 63), (30, 56, 62)];
+    let mut good = vec![0u64; 36];
+    for (r, c0, c1) in rows {
+        good[r as usize] |= (c0..c1).fold(0u64, |b, c| b | 1 << c);
+    }
+    let menu: Vec<u64> = (0..36).map(|r| if r % 3 == 2 { 0 } else { u64::MAX }).collect();
+    let mut cache = HudCache::load(None);
+    cache.file.games.insert("rocketleague".into(), Entry { cols: 64, rows: 36, scans: vec![good.clone(), menu.clone(), menu, good], seq: 4 });
+    let grid = cache.grid("rocketleague").unwrap();
+    assert_eq!(choose(&grid, WIDE, None), Anchor::TopRight);
 }
