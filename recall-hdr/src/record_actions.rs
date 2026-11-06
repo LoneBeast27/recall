@@ -118,9 +118,13 @@ impl Controller {
     }
 
     /// Forward `bookmark` / `screenshot` / `record_start|stop|toggle` to the
-    /// engine, or report why it cannot run (paused, no game, starting).
+    /// engine, or report why it cannot run (paused, no game, starting; a
+    /// long recording cannot start while a closed game drains).
     pub(crate) fn engine_command(&mut self, cmd: &'static str, client: Option<u64>) {
-        if let Some(reason) = capture_refusal(self.paused, self.engine_running(), &self.wanted()) {
+        let draining = self.planner.drain().is_some();
+        let refused = capture_refusal(self.paused, self.engine_running(), &self.wanted())
+            .or_else(|| self.activity.record_refusal(cmd, draining));
+        if let Some(reason) = refused {
             if cmd == "bookmark" && client.is_none() {
                 return self.refuse_bookmark(reason); // the hotkey
             }
