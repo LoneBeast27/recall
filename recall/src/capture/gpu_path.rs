@@ -1,11 +1,9 @@
-//! The capture thread's zero-copy half: each WGC frame is tonemapped on the capture device
+//! The capture thread's zero-copy half: each captured frame (WGC or Desktop Duplication) is tonemapped on the capture device
 //! into an FFmpeg D3D11 frame (`gpu_frames::Pipeline`) and handed to the encoder queue.
 
 use std::sync::atomic::Ordering::Relaxed;
 
-use windows_capture::frame::Frame;
-
-use super::{Handler, PATH_GPU};
+use super::{Handler, Source, PATH_GPU};
 use crate::framing::{Layout, Rect};
 
 /// Consecutive GPU-path failures after which capture falls back to the CPU path.
@@ -16,7 +14,7 @@ const GPU_FAILURES_BEFORE_FALLBACK: u32 = 30;
 pub(super) enum GpuState {
     Untried,
     /// `small`: in a run of frames too small to encode (logged once per run).
-    Ready { pipe: crate::gpu_frames::Pipeline, failures: u32, small: bool },
+    Ready { pipe: Box<crate::gpu_frames::Pipeline>, failures: u32, small: bool },
     Off,
 }
 
@@ -25,20 +23,20 @@ impl Handler {
     /// the window's client area and `canvas` whether the session records on the canvas
     /// (`client_area::ClientArea::update`). False sends the frame down the CPU path (no
     /// encoder sink, the pipeline cannot start, or it kept failing).
-    pub(super) fn gpu_frame(&mut self, frame: &mut Frame, pts_us: u64, crop: Option<Rect>, canvas: bool) -> bool {
+    pub(super) fn gpu_frame(&mut self, src: &Source<'_>, pts_us: u64, crop: Option<Rect>, canvas: bool) -> bool {
         let Some(sink) = self.shared.gpu_sink.get() else { return false };
         if let GpuState::Untried = self.gpu {
-            match crate::gpu_frames::adapter::remember(frame.device()) {
+            match crate::gpu_frames::adapter::remember(src.device) {
                 Some(gpu) => (sink.log)(format!("capture: device on {}", gpu.describe())),
                 None => (sink.log)("capture: device adapter unknown".into()),
             }
-            self.gpu = match crate::gpu_frames::Pipeline::new(frame.device(), frame.device_context()) {
+            self.gpu = match crate::gpu_frames::Pipeline::new(src.device, src.context) {
                 Ok(pipe) => {
                     (sink.log)("capture: zero-copy GPU path (D3D11 tonemap -> NVENC)".into());
                     if let Some(line) = crate::gpu_frames::adapter::vram_line("capture device and pipeline") {
                         (sink.log)(line);
                     }
-                    GpuState::Ready { pipe, failures: 0, small: false }
+                    GpuState::Ready { pipe: Box::new(pipe), failures: 0, small: false }
                 }
                 Err(e) => {
                     (sink.log)(format!("capture: GPU path unavailable ({e}); using CPU copies"));
@@ -47,7 +45,7 @@ impl Handler {
             };
         }
         let GpuState::Ready { pipe, failures, small } = &mut self.gpu else { return false };
-        let size = (frame.width(), frame.height());
+        let size = src.size;
         let Some(layout) = Layout::recorded(size, crop, canvas, pipe.target()) else {
             if !std::mem::replace(small, true) {
                 (sink.log)(format!("capture: skipping {}x{} frames, too small to encode", size.0, size.1));
@@ -56,10 +54,10 @@ impl Handler {
         };
         *small = false;
         let mode = self.shared.mode.load(Relaxed);
-        if let Some(note) = pipe.source_note(frame.as_raw_texture()) {
+        if let Some(note) = pipe.source_note(src.texture) {
             (sink.log)(format!("capture: {note}"));
         }
-        match pipe.render(frame.as_raw_texture(), &layout, mode) {
+        match pipe.render(src.texture, &layout, mode) {
             Ok(hw) => {
                 if self.frame_count == 0 {
                     if let Some(line) = crate::gpu_frames::adapter::vram_line("first frame (capture pool, frame pool)") {
