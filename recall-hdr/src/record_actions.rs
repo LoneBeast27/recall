@@ -120,7 +120,7 @@ impl Controller {
 
     /// Forward `bookmark` / `screenshot` / `record_start|stop|toggle` to the
     /// engine, or report why it cannot run (paused, no game, starting; a
-    /// long recording cannot start while a closed game drains).
+    /// long recording or a screenshot cannot start while a closed game drains).
     pub(crate) fn engine_command(&mut self, cmd: &'static str, client: Option<u64>) {
         let draining = self.planner.drain().is_some();
         let refused = capture_refusal(self.paused, self.engine_running(), &self.wanted())
@@ -134,10 +134,7 @@ impl Controller {
             }
             return self.refuse_capture(cmd, reason);
         }
-        let starts = cmd == "record_start" || (cmd == "record_toggle" && !self.activity.is_recording());
-        if starts {
-            self.activity.record_requested(Instant::now());
-        }
+        self.activity.command_sent(cmd, Instant::now());
         log!("record: engine {cmd}");
         self.supervisor.send_engine_line(&json!({ "cmd": cmd }).to_string());
         self.publish_status();
