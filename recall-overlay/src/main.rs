@@ -27,6 +27,7 @@ mod session;
 #[path = "../../recall/src/single_instance.rs"]
 mod single_instance;
 mod smoke;
+mod spot_edit;
 mod stack;
 mod stack_lines;
 mod stats;
@@ -49,9 +50,11 @@ use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, PostMessageW, PostQuitMessage, SetTimer,
-    SetWindowDisplayAffinity, TranslateMessage, HTTRANSPARENT, MSG, WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_CLOSE,
-    WM_DESTROY, WM_ERASEBKGND, WM_NCHITTEST, WM_PAINT, WM_TIMER,
+    SetWindowDisplayAffinity, TranslateMessage, HTCLIENT, HTTRANSPARENT, MSG, WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_CLOSE,
+    WM_CAPTURECHANGED, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT,
+    WM_RBUTTONUP, WM_TIMER,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 
 use app::{App, Feed, ANIM_TIMER, BASE_MS, BASE_TIMER};
 use diagnostics::write_diagnostics;
@@ -299,6 +302,11 @@ fn spawn_pipe_client(tx: Sender<Feed>, hwnd: isize, out: app::PipeOut) {
         .expect("spawn overlay pipe client");
 }
 
+/// Runs `f` on the app unless it is already borrowed (a re-entrant message).
+fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
+    APP.with(|slot| slot.try_borrow_mut().ok().and_then(|mut slot| slot.as_mut().map(f)))
+}
+
 /// Runs a base tick (or an animation frame) unless the app is already
 /// borrowed (a re-entrant message during ShowWindow / SetWindowPos).
 fn on_tick(hwnd: HWND, animation_frame: bool) {
@@ -318,9 +326,51 @@ fn on_tick(hwnd: HWND, animation_frame: bool) {
     }
 }
 
+/// `WM_MOUSEMOVE`'s wParam bit: the left button is down (WinUser.h).
+const MK_LBUTTON: usize = 0x0001;
+
 extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
-        WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+        // Click-through, except while the island editor runs (the pill takes the mouse).
+        WM_NCHITTEST => LRESULT(if with_app(|app| app.editing()) == Some(true) { HTCLIENT as isize } else { HTTRANSPARENT as isize }),
+        // The island editor is mouse only (no keys held): drag, release saves,
+        // right-click cancels, the pill's ⟲ end resets.
+        WM_LBUTTONDOWN => {
+            match with_app(|app| app.editor_press(hwnd, Instant::now())) {
+                Some(true) => unsafe {
+                    SetCapture(hwnd);
+                },
+                Some(false) => on_tick(hwnd, false),
+                None => {}
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            // No MK_LBUTTON: the release never reached the window (a stuck drag).
+            let held = wparam.0 & MK_LBUTTON != 0;
+            with_app(|app| app.editor_drag(hwnd, held, Instant::now()));
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            with_app(|app| app.editor_release(Instant::now()));
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            LRESULT(0)
+        }
+        WM_RBUTTONUP => {
+            if with_app(|app| app.editor_cancel(hwnd)) == Some(true) {
+                on_tick(hwnd, false);
+            }
+            LRESULT(0)
+        }
+        // Another window took the mouse mid-drag: the editor ends, nothing more saved.
+        WM_CAPTURECHANGED => {
+            if HWND(lparam.0 as *mut _) != hwnd && with_app(|app| app.editor_capture_lost(hwnd)) == Some(true) {
+                on_tick(hwnd, false);
+            }
+            LRESULT(0)
+        }
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
             // Pixels come from UpdateLayeredWindow; just validate.
