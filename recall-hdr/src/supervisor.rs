@@ -183,7 +183,7 @@ impl Supervisor {
     }
 
     /// Also hand the controller the engine events it acts on
-    /// ([`FORWARDED_EVENTS`]: saves, long recording, screenshots, bookmarks).
+    /// ([`FORWARDED_EVENTS`]: saves, long recording, screenshots, bookmarks, buffer restarts).
     pub fn attach_events(&self, tx: std::sync::mpsc::Sender<serde_json::Value>) {
         if let Ok(mut g) = self.shared.events.lock() {
             *g = Some(tx);
@@ -247,7 +247,7 @@ struct Shared {
 }
 
 /// Engine event types handed to the controller via `attach_events`.
-pub const FORWARDED_EVENTS: [&str; 9] = [
+pub const FORWARDED_EVENTS: [&str; 10] = [
     "saved",
     "save_failed",
     "recording_started",
@@ -257,6 +257,7 @@ pub const FORWARDED_EVENTS: [&str; 9] = [
     "screenshot",
     "screenshot_failed",
     "bookmarked",
+    "buffer_restarted",
 ];
 
 impl Shared {
