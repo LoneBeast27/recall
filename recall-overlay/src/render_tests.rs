@@ -181,3 +181,19 @@ fn side_spot_pngs() {
         }
     }
 }
+
+/// A 3-digit number stays one line and fits the side pill's usual thickness
+/// in the real font (the pill only grows across for a line that needs it).
+#[test]
+fn three_digits_fit_the_side_pill_on_one_line() {
+    use crate::layout::{stats_scene, Measure, StatsContent};
+    let fonts = Fonts::new().unwrap();
+    for fps in [144, 888, 999] {
+        let st = StatsContent { recording: true, replay_secs: 120, fps: Some(fps), low1: Some(98), ..Default::default() };
+        let flat = stats_scene(&st, 1.0, &fonts);
+        let tall = crate::stack::stack(&flat, 1.0, &fonts);
+        let line = tall.texts.iter().find(|t| t.text == fps.to_string()).expect("the number stays whole");
+        assert!(fonts.measure(line.role, 1.0, &line.text).width + 12.0 <= flat.h, "{fps}: 6 px either side");
+        assert_eq!(tall.h, flat.h, "{fps} fits {} px across without widening", flat.h);
+    }
+}
