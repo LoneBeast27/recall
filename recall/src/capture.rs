@@ -12,8 +12,13 @@
 //! both paths and recorded on the fixed 2560x1440 canvas (`framing`).
 
 mod client_area;
+mod control;
+mod dda;
+mod dda_logic;
 #[cfg(feature = "encode")]
 mod gpu_path;
+
+pub use control::CaptureControlHandle;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
 #[cfg(feature = "encode")]
@@ -24,6 +29,7 @@ use crate::framing::{Rect, CANVAS};
 use crate::protocol::MonitorInfo;
 use client_area::ClientArea;
 
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 use windows_capture::capture::{
     CaptureControl, Context, GraphicsCaptureApiError, GraphicsCaptureApiHandler,
 };
@@ -205,8 +211,21 @@ pub fn list_monitors() -> Vec<MonitorInfo> {
 
 type CaptureError = Box<dyn std::error::Error + Send + Sync>;
 
-/// Opaque handle that keeps the capture thread alive; held by the app.
-pub type CaptureControlHandle = CaptureControl<Handler, CaptureError>;
+/// The WGC capture's control (one variant of `CaptureControlHandle`).
+pub(crate) type WgcControl = CaptureControl<Handler, CaptureError>;
+
+/// One captured frame as both sources (WGC, Desktop Duplication) hand it to `Handler::deliver`.
+pub(crate) struct Source<'a> {
+    pub device: &'a ID3D11Device,
+    pub context: &'a ID3D11DeviceContext,
+    pub texture: &'a ID3D11Texture2D,
+    pub size: (u32, u32),
+    /// QPC-based time in 100 ns units (WGC `SystemRelativeTime`).
+    pub timestamp: i64,
+}
+
+/// Reads the frame's `rect` back to the CPU as tightly packed fp16 RGBA.
+pub(crate) type CpuRead<'a> = dyn FnMut(Rect) -> Result<Vec<u8>, CaptureError> + 'a;
 
 /// Dump the Nth frame so capture has warmed up (avoids the first blank frames).
 const DUMP_AT_FRAME: u64 = 30;
@@ -234,6 +253,33 @@ impl GraphicsCaptureApiHandler for Handler {
     type Error = CaptureError;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
+        Ok(Self::from_shared(ctx.flags))
+    }
+
+    fn on_frame_arrived(
+        &mut self,
+        frame: &mut Frame,
+        _capture_control: InternalCaptureControl,
+    ) -> Result<(), Self::Error> {
+        // COM references (an AddRef each), so the CPU closure below can borrow `frame`.
+        let (device, context, texture) = (frame.device().clone(), frame.device_context().clone(), frame.as_raw_texture().clone());
+        let size = (frame.width(), frame.height());
+        let src = Source { device: &device, context: &context, texture: &texture, size, timestamp: frame.timestamp()?.Duration };
+        // CPU readback (fallback): map a staging copy and copy out the client area (the
+        // whole frame unless the window has chrome), stripping the row padding, with one
+        // single-threaded copy. (windows-capture's `as_nopadding_buffer` treats every
+        // Rgba16F frame as padded and fans the copy out over a 32-thread rayon pool.)
+        let mut cpu = |rect: Rect| -> Result<Vec<u8>, CaptureError> {
+            let mut fb = frame.buffer()?;
+            let pitch = fb.row_pitch() as usize;
+            Ok(crate::framing::copy_rect(fb.as_raw_buffer(), pitch, 8, rect))
+        };
+        self.deliver(&src, &mut cpu)
+    }
+}
+
+impl Handler {
+    pub(crate) fn from_shared(shared: Arc<CaptureShared>) -> Self {
         let dump_path = std::env::var("RECALL_DUMP").ok().map(|v| {
             if v.is_empty() || v == "1" {
                 "captures/recall-dump.png".to_string()
@@ -246,9 +292,9 @@ impl GraphicsCaptureApiHandler for Handler {
             .and_then(|v| v.parse::<f64>().ok())
             .filter(|s| *s > 0.0)
             .map(std::time::Duration::from_secs_f64);
-        let client = ClientArea::new(ctx.flags.window.load(Relaxed));
-        Ok(Self {
-            shared: ctx.flags,
+        let client = ClientArea::new(shared.window.load(Relaxed));
+        Self {
+            shared,
             frame_count: 0,
             dump_path,
             dump_every,
@@ -257,16 +303,14 @@ impl GraphicsCaptureApiHandler for Handler {
             client,
             #[cfg(feature = "encode")]
             gpu: gpu_path::GpuState::Untried,
-        })
+        }
     }
 
-    fn on_frame_arrived(
-        &mut self,
-        frame: &mut Frame,
-        _capture_control: InternalCaptureControl,
-    ) -> Result<(), Self::Error> {
-        let (width, height) = (frame.width(), frame.height());
-        let timestamp = frame.timestamp()?.Duration;
+    /// One frame from either source: the zero-copy GPU path, else the CPU readback (`cpu`)
+    /// into the shared slot.
+    pub(crate) fn deliver(&mut self, src: &Source<'_>, cpu: &mut CpuRead<'_>) -> Result<(), CaptureError> {
+        let (width, height) = src.size;
+        let timestamp = src.timestamp;
         let origin = match self.shared.origin.lock() {
             Ok(mut origin) => *origin.get_or_insert(timestamp),
             Err(_) => timestamp,
@@ -279,7 +323,7 @@ impl GraphicsCaptureApiHandler for Handler {
         let (crop, canvas) = self.client.update((width, height), std::time::Instant::now());
 
         #[cfg(feature = "encode")]
-        if self.dump_path.is_none() && self.dump_every.is_none() && self.gpu_frame(frame, pts_us, crop, canvas) {
+        if self.dump_path.is_none() && self.dump_every.is_none() && self.gpu_frame(src, pts_us, crop, canvas) {
             return Ok(());
         }
         if !self.shared.fp16.load(Relaxed) {
@@ -290,14 +334,8 @@ impl GraphicsCaptureApiHandler for Handler {
         }
         self.shared.path.store(PATH_CPU, Relaxed);
 
-        // CPU readback (fallback): map a staging copy and copy out the client area (the
-        // whole frame unless the window has chrome), stripping the row padding, with one
-        // single-threaded copy. (windows-capture's `as_nopadding_buffer` treats every
-        // Rgba16F frame as padded and fans the copy out over a 32-thread rayon pool.)
-        let mut fb = frame.buffer()?;
-        let pitch = fb.row_pitch() as usize;
         let rect = crop.unwrap_or(Rect::full((width, height)));
-        let bytes = crate::framing::copy_rect(fb.as_raw_buffer(), pitch, 8, rect);
+        let bytes = cpu(rect)?;
         let (width, height) = rect.size();
 
         let data = FrameData {
@@ -349,16 +387,26 @@ pub fn start_monitor(
     index: Option<usize>,
     shared: Arc<CaptureShared>,
 ) -> Result<CaptureControlHandle, CaptureError> {
-    // Ask for borderless access first so the session's IsBorderRequired(false)
-    // (set by windows-capture for our WithoutBorder setting) actually suppresses
-    // the Windows capture border.
-    crate::border::request_borderless();
-
     let monitor = match index {
         Some(i) => Monitor::from_index(i)?,
         None => Monitor::primary()?,
     };
     let format = shared.start_format();
+    // Desktop Duplication first: no yellow border and no Borderless permission needed.
+    // `RECALL_CAPTURE=wgc` keeps the WGC path (A/B checks, safety).
+    if std::env::var("RECALL_CAPTURE").is_ok_and(|v| v.eq_ignore_ascii_case("wgc")) {
+        eprintln!("[recall] capture: wgc (RECALL_CAPTURE=wgc)");
+    } else {
+        let hmonitor = windows::Win32::Graphics::Gdi::HMONITOR(monitor.as_raw_hmonitor());
+        match dda::start(hmonitor, shared.clone(), capture_interval(recording_fps())) {
+            Ok(control) => return Ok(CaptureControlHandle::Dda(control)),
+            Err(reason) => eprintln!("[recall] capture: wgc (desktop duplication unavailable: {reason})"),
+        }
+    }
+    // Ask for borderless access first so the session's IsBorderRequired(false)
+    // (set by windows-capture for our WithoutBorder setting) actually suppresses
+    // the Windows capture border.
+    crate::border::request_borderless();
     let start = |interval| {
         Handler::start_free_threaded(Settings::new(
             monitor,
@@ -371,7 +419,7 @@ pub fn start_monitor(
             shared.clone(),
         ))
     };
-    with_rate_cap(start)
+    with_rate_cap(start).map(CaptureControlHandle::Wgc)
 }
 
 /// Frames per second the capture is capped at: the recording rate plus 10% headroom (the CFR
@@ -389,9 +437,9 @@ fn recording_fps() -> u32 {
 
 /// Starts with the rate cap; Windows builds without `MinUpdateInterval` (before 11 24H2) fall
 /// back to the uncapped stream.
-fn with_rate_cap<S>(start: S) -> Result<CaptureControlHandle, CaptureError>
+fn with_rate_cap<S>(start: S) -> Result<WgcControl, CaptureError>
 where
-    S: Fn(MinimumUpdateIntervalSettings) -> Result<CaptureControlHandle, GraphicsCaptureApiError<CaptureError>>,
+    S: Fn(MinimumUpdateIntervalSettings) -> Result<WgcControl, GraphicsCaptureApiError<CaptureError>>,
 {
     let interval = capture_interval(recording_fps());
     match start(MinimumUpdateIntervalSettings::Custom(interval)) {
@@ -425,7 +473,7 @@ pub fn start_window(hwnd: usize, shared: Arc<CaptureShared>) -> Result<CaptureCo
             DirtyRegionSettings::Default, format, shared.clone(),
         ))
     };
-    with_rate_cap(start)
+    with_rate_cap(start).map(CaptureControlHandle::Wgc)
 }
 
 #[cfg(test)]
