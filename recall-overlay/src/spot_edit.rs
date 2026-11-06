@@ -163,12 +163,14 @@ impl Editor {
         self.last_input = now;
     }
 
-    /// The cursor moved while dragging: the spot follows (snapping near an
-    /// edge). True when the spot changed.
-    pub fn drag(&mut self, cursor: (f32, f32), shown: (f32, f32), monitor: &Rect, snap_px: f32, now: Instant) -> bool {
+    /// The cursor moved while dragging: the spot follows, its centre
+    /// snapping onto the centre lines of `area` (the grid) and its box to
+    /// the nearest edge, both within `snap_px`. True when the spot changed.
+    pub fn drag(&mut self, cursor: (f32, f32), shown: (f32, f32), monitor: &Rect, area: &Rect, snap_px: f32, now: Instant) -> bool {
         let Some((gx, gy)) = self.grab else { return false };
         self.last_input = now;
-        let next = Some(snap((cursor.0 - gx, cursor.1 - gy), shown, monitor, snap_px));
+        let (centre, _) = crate::guide::centre_snap((cursor.0 - gx, cursor.1 - gy), area, snap_px);
+        let next = Some(snap(centre, shown, monitor, snap_px));
         let changed = next != self.spot;
         self.spot = next;
         changed
@@ -219,12 +221,14 @@ impl Editor {
     }
 }
 
-/// The window side of the editor: the click-through style and the mouse
-/// capture. Every exit goes through [`end`], so the window always goes back
-/// to click-through.
+/// The window side of the editor: the click-through style, the mouse
+/// capture and the guide grid's window. Every exit goes through [`end`], so
+/// the window always goes back to click-through and the grid is gone.
 pub trait EditWindow {
     fn set_click_through(&mut self, on: bool);
     fn release_capture(&mut self);
+    /// Makes (`true`) or destroys (`false`) the guide grid's window.
+    fn show_guide(&mut self, on: bool);
 }
 
 /// Why the editor may not start, or None. Exclusive fullscreen is refused:
@@ -245,15 +249,18 @@ pub fn begin(window: &mut dyn EditWindow, refused: Option<&'static str>, key: &s
         return Err(why);
     }
     window.set_click_through(false);
+    window.show_guide(true);
     Ok(Editor::new(key, saved, now))
 }
 
 /// Ends the editor: the capture is let go, the window is click-through
-/// again, and the answer is what to write for the game (see [`Editor::finish`]).
+/// again, the guide grid is destroyed, and the answer is what to write for
+/// the game (see [`Editor::finish`]).
 pub fn end(window: &mut dyn EditWindow, editor: &mut Editor, how: EditKey) -> Option<Option<SavedSpot>> {
     editor.drop_drag();
     window.release_capture();
     window.set_click_through(true);
+    window.show_guide(false);
     editor.finish(how)
 }
 /// The spot the island uses now: the one being edited while the editor

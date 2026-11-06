@@ -35,7 +35,7 @@ use crate::zorder::{self, game_in_front, keep_on_top, Names, Raise};
 #[path = "app_place.rs"]
 mod place;
 #[path = "app_editor.rs"]
-mod editor;
+pub(crate) mod editor;
 
 pub const BASE_TIMER: usize = 1;
 pub const BASE_MS: u32 = 250;
@@ -120,6 +120,8 @@ pub struct App {
     names: Names,
     /// The island editor while it runs.
     editor: Option<Editor>,
+    /// The editor's guide grid window (only while the editor runs).
+    guide: Option<crate::guide_window::GuideWindow>,
 }
 
 impl App {
@@ -159,6 +161,7 @@ impl App {
             trace: Trace::default(),
             names: Names::default(),
             editor: None,
+            guide: None,
         }
     }
 
@@ -410,6 +413,9 @@ impl App {
                     self.trace.note("raise", format!("re-raise failed: {error}, over {above}"));
                 }
             }
+        }
+        if self.guide.is_some() {
+            self.update_guide(hwnd);
         }
         let animating = self.island.animating(now);
         self.set_anim(hwnd, animating);
