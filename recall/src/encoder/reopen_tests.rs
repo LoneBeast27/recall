@@ -156,3 +156,17 @@ fn the_gpu_path_is_tried_again_on_its_own_backoff() {
     p.refused(t0 + secs(1000.0));
     assert!(p.due(t0 + secs(1060.0)), "working again: back to 1 min");
 }
+
+#[test]
+fn an_open_encoder_with_no_frames_for_5_minutes_never_reopens_or_asks_for_a_capture() {
+    // A static game (VFR, no WGC repeats), also while a long recording runs: no frame,
+    // no failure, so nothing to reopen, no capture restart, no hand-off to the controller.
+    let t0 = Instant::now();
+    let mut r = Reopen::default();
+    r.opened(t0);
+    for s in 0..=300 {
+        let now = t0 + secs(s as f32);
+        assert_eq!(r.stalled(now), None, "{s} s");
+        assert!(!r.recovering() && !r.handed_off(now), "{s} s");
+    }
+}

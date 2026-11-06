@@ -159,7 +159,6 @@ impl App {
         self.refresh_source_title();
         self.refresh_hdr_mode();
         self.watch_capture();
-        self.restart_capture_if_needed();
         self.emit_status();
     }
 
