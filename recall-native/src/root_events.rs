@@ -55,6 +55,10 @@ impl Root {
                 let kind = if level >= 100 { ToastKind::Bad } else { ToastKind::Info };
                 self.show_toast_for(kind, title, Some(detail), storage_limit::TOAST_SECS);
             }
+            DaemonEvent::DiskLow { drive, free_bytes, need_bytes } => {
+                let (title, detail) = storage_limit::disk_low(&drive, free_bytes, need_bytes);
+                self.show_toast_for(ToastKind::Bad, title, Some(detail), storage_limit::TOAST_SECS);
+            }
             DaemonEvent::StoragePreview { cap_gb, used_bytes, removed, freed_bytes, through } => {
                 // Only the answer for the limit still being asked about counts.
                 if self.storage_asking.is_some_and(|(asked, _)| asked == cap_gb) {
