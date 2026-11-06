@@ -73,9 +73,16 @@ pub(super) fn open_stream(direction: &Direction, device: &str, ring: &TrackRing,
     // Loopback = a RENDER endpoint's client initialized Capture-direction.
     client.initialize_client(&format, &Direction::Capture, &mode).map_err(|e| format!("initialize: {e}"))?;
     let event = Event(client.set_get_eventhandle().map_err(|e| e.to_string())?);
-    let capture = client.get_audiocaptureclient().map_err(|e| e.to_string())?;
-    client.start_stream().map_err(|e| e.to_string())?;
-    Ok(Stream { client, event, capture, endpoint, device: target.is_none(), watch })
+    let started = client.get_audiocaptureclient().and_then(|capture| client.start_stream().map(|()| capture));
+    match started {
+        Ok(capture) => Ok(Stream { client, event, capture, endpoint, device: target.is_none(), watch }),
+        Err(e) => {
+            // The client still holds the event: release it first, as a Stream's drop does.
+            drop(client);
+            drop(event);
+            Err(e.to_string())
+        }
+    }
 }
 
 impl Stream {

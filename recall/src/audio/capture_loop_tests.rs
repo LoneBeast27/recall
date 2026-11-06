@@ -369,3 +369,39 @@ fn a_sleep_owes_at_most_one_ring_through_the_capture_loop() {
     assert!(out[0] <= cap + 2, "the first packet after the sleep carried {} frames (ring {cap})", out[0]);
     assert_eq!(len(&ring), cap, "the ring is full and no bigger");
 }
+
+/// A device notice that arrived while the stream was live (another device plugged in) is
+/// stale by the time that stream is lost: the first reopen still waits its 2 s.
+#[test]
+fn a_notice_during_a_live_stream_does_not_cut_the_next_backoff() {
+    let ring = ring();
+    let now = Rc::new(Cell::new(Duration::ZERO));
+    let mut clock = FakeClock { now: now.clone(), stop_at: Duration::from_millis(3_500) };
+    let (tx, _rx) = std::sync::mpsc::channel();
+    let notices = FakeNotices::none(&now);
+    notices.devices_at.set(Some(Duration::from_millis(500))); // during the first stream
+    let opens = RefCell::new(Vec::new());
+    let open = |reopen: bool| {
+        opens.borrow_mut().push((reopen, now.get()));
+        if reopen {
+            return Err("'Headset (USB)' is not connected".to_owned());
+        }
+        Ok(fake(&now, 1, false))
+    };
+    capture_loop(&ring, "Headset (USB)", true, open, tx, &mut clock, &notices);
+    let at = Duration::from_millis;
+    // Lost at 1 s: the reopen is at 3 s (1 s + REOPEN_EVERY), not at once.
+    assert_eq!(opens.into_inner(), [(false, at(0)), (true, at(3_000))]);
+}
+
+#[test]
+fn a_process_loopback_track_registers_no_device_notices() {
+    let none = notices_for::<()>(true, || panic!("a loopback track registered device notices"));
+    assert!(none.is_none());
+    let calls = Cell::new(0);
+    let some = notices_for(false, || {
+        calls.set(calls.get() + 1);
+        Ok::<_, String>(7)
+    });
+    assert_eq!((some, calls.get()), (Some(Ok(7)), 1), "a device track registers once");
+}
