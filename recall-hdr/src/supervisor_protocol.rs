@@ -50,6 +50,8 @@ pub(super) fn read_protocol(shared: &Arc<Shared>, stdout: std::process::ChildStd
                         cache.view.mic_muted = Some(m);
                     }
                     cache.view.buffer_secs = val.get("buffer_secs").and_then(|v| v.as_f64()).map(|b| b as f32);
+                    cache.view.heartbeat = val.get("encoder_heartbeat").and_then(|v| v.as_u64());
+                    cache.view.opening = val.get("encoder_opening").and_then(|v| v.as_bool()).unwrap_or(false);
                 }
                 let digest = StatusDigest {
                     display: field(&val, "display"),

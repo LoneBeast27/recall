@@ -16,6 +16,8 @@ pub(crate) struct Faults {
     pub encode_errors: AtomicU32,
     /// Opens on frames from this pool fail: its device was removed.
     pub dead_pool: Mutex<Option<usize>>,
+    /// The next open blocks this long (an NVENC open hung after a TDR).
+    pub open_hang_ms: AtomicU32,
     /// Retry delays 1/20 of the real ones.
     pub fast: AtomicBool,
 }
@@ -26,6 +28,13 @@ impl Faults {
             return Some(DEVICE_REMOVED.into());
         }
         take(&self.open_errors).then(|| "injected open failure".into())
+    }
+
+    pub fn hang_open(&self) {
+        let ms = self.open_hang_ms.swap(0, Relaxed);
+        if ms > 0 {
+            std::thread::sleep(Duration::from_millis(ms as u64));
+        }
     }
 
     pub fn encode(&self) -> Option<String> {

@@ -45,6 +45,11 @@ pub enum Outbound {
         /// without an encoder.
         codec: String,
         recording_mode: String,
+        /// Encoder-thread turns so far (about 10 a second, frames or not; 0 without an
+        /// encoder). A beat that stops while the game is visible is a hung encoder.
+        encoder_heartbeat: u64,
+        /// An NVENC open (or reopen) is running now: a hang clock allows it longer.
+        encoder_opening: bool,
         /// Whether new microphone samples are entering the replay buffer as silence.
         mic_muted: bool,
         /// What each recorded source opened, in track order (`audio::sources::opened`).
@@ -255,6 +260,9 @@ pub enum Command {
     RecordStart,
     RecordStop,
     RecordToggle,
+    /// End a running long recording as failed now, keeping every part (the controller
+    /// sends it before restarting a hung engine; the app says "Recording ended early").
+    RecordFail { reason: String },
     /// Ask the engine to exit cleanly.
     Quit,
 }
@@ -299,6 +307,13 @@ mod tests {
         assert!(matches!(both, Command::SetSource { ref id, gain_db: Some(g), name: Some(ref n) } if id == "mic" && g == -3.5 && n == "Voice"));
         let gain: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"game","gain_db":6}"#).unwrap();
         assert!(matches!(gain, Command::SetSource { gain_db: Some(_), name: None, .. }));
+    }
+
+    #[test]
+    fn record_fail_parses_with_its_reason() {
+        // The controller ends a running long recording early before restarting a hung engine.
+        let v = serde_json::from_str::<super::Command>(r#"{"cmd":"record_fail","reason":"the encoder isn't responding"}"#);
+        assert!(matches!(v, Ok(super::Command::RecordFail { ref reason }) if reason == "the encoder isn't responding"), "not a record_fail");
     }
 
     fn wire(msg: &Outbound) -> String {

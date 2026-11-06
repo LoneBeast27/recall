@@ -244,3 +244,28 @@ fn recovery_renames_only_long_recording_parts_and_skips_open_files() {
     drop(_held);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Merge gate 11-07 (P1): an NVENC hang mid-recording sends no packets and no failure;
+/// the controller ends the recording with `record_fail` before it restarts the engine.
+#[test]
+fn record_fail_ends_a_continued_recording_early_and_keeps_every_part() {
+    let generation = u64::MAX - 60;
+    let (mut w, dir) = writer("recordfail", generation);
+    let (tx, rx) = sync_channel::<Data>(4);
+    w.start("G", Some((0, Instant::now())));
+    w.generation = generation;
+    w.data(video(0, true, generation));
+    w.data(video(16, false, generation));
+    w.skew = machine::PART_GAP;
+    w.data(video(33, true, generation + 1)); // part 2
+    tx.send(video(50, false, generation + 1)).unwrap();
+    assert_eq!(w.parts_so_far.len(), 1);
+    w.control(Control::Fail { reason: "the encoder isn't responding".into() }, &rx);
+    assert!(!w.recorder.is_active(), "the recording ended");
+    assert!(rx.try_recv().is_err(), "the queued packet was written first");
+    let mut names = finished(&dir);
+    names.sort();
+    assert_eq!(names.len(), 2, "both parts kept and finished: {names:?}");
+    w.control(Control::Fail { reason: "again".into() }, &rx); // nothing running: ignored
+    let _ = std::fs::remove_dir_all(&dir);
+}

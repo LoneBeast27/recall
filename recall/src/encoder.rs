@@ -112,6 +112,13 @@ pub struct EncStats {
     pub gpu_refused: std::sync::atomic::AtomicBool,
     /// Most recent initialization/reconfiguration failure for status consumers.
     pub error: Mutex<Option<String>>,
+    /// Encoder-thread turns so far (about one per 100 ms, frames or not): `status.encoder_heartbeat`.
+    /// A beat that stops is a hung encoder thread (an NVENC call stuck after a TDR), told
+    /// apart from a static game, which sends no frames but keeps the beat.
+    pub heartbeat: AtomicU64,
+    /// An NVENC open (or reopen) is running now: `status.encoder_opening` (a TDR open can
+    /// take about 10 s, so the controller's hang clock allows 20 s meanwhile).
+    pub opening: std::sync::atomic::AtomicBool,
     /// The GPU path may be tried again: capture's handler leaves CPU copies (taken by `install_gpu_sink`).
     pub gpu_retry: std::sync::atomic::AtomicBool,
     /// Asks capture for a new device (`CaptureShared::restart`; set by `install_gpu_sink`).
@@ -229,6 +236,8 @@ fn retry_delays(_stats: &EncStats) -> [Duration; 4] {
 
 /// `open_encoder` for this frame (tests can make it fail).
 fn open_checked(cfg: &Config, want: Codec, frame: &PacedFrame, _stats: &EncStats) -> Result<(Enc, Option<String>), String> {
+    #[cfg(test)]
+    _stats.faults.hang_open();
     #[cfg(test)]
     if let Some(e) = _stats.faults.open(gpu_pool_of(frame)) {
         return Err(e);

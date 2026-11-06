@@ -42,6 +42,9 @@ pub(super) fn run(
     }
     let mut live = Live::new(&cfg, &stats, audio.len());
     loop {
+        // One beat per turn, frames or not: a static game keeps it, a hung NVENC call
+        // (inside `live.frame`) stops it (`EncStats::heartbeat`).
+        stats.heartbeat.fetch_add(1, Relaxed);
         // Saves first: they're rare and user-facing latency matters (R10).
         while let Ok(req) = commands.try_recv() {
             handle_save(live.replay.as_ref(), req, &stats, &audio, &saver);
@@ -140,7 +143,11 @@ impl Live {
     }
 
     fn open(&mut self, frame: &PacedFrame, input: Input, cfg: &Config, stats: &EncStats) {
-        match open_checked(cfg, self.want, frame, stats) {
+        // Flagged while it runs (`status.encoder_opening`): a TDR open can take ~10 s.
+        stats.opening.store(true, Relaxed);
+        let opened = open_checked(cfg, self.want, frame, stats);
+        stats.opening.store(false, Relaxed);
+        match opened {
             Ok((e, fallback)) => {
                 crate::longrec::tap::on_encoder_open(&e.encoder); // long-recording hook
                 if let Some(note) = fallback {
@@ -171,17 +178,14 @@ impl Live {
         }
     }
 
-    /// Every loop turn, frames or not: a retry no frame came for, the status, the GPU retry.
+    /// Every loop turn, frames or not: the status, the GPU retry.
     fn tick(&mut self, now: Instant, cfg: &Config, stats: &EncStats) {
         if self.enc.is_none() {
-            if let Some(after) = self.reopen.stalled(now) {
-                report(cfg.json, "no frame came to retry the encoder");
-                reopen::after_failure(after, self.reopen.reopen_failures(), stats, cfg.json);
-            }
-            if self.reopen.recovering() {
-                let failed = self.reopen.handed_off(now);
-                stats.backend.store(if failed { 3 } else { 4 }, Relaxed);
-                if failed {
+            // No frame to retry with is no failure: a static game waits here as long as it
+            // takes (`reopen.rs`); only real open or encode errors escalate.
+            if let Some(backend) = self.reopen.status() {
+                stats.backend.store(backend, Relaxed);
+                if backend == 3 {
                     // Recovery spent (status `failed`): a running long recording ends here.
                     let reason = stats.error.lock().unwrap_or_else(|p| p.into_inner()).clone();
                     crate::longrec::tap::on_encoder_failed(reason.as_deref().unwrap_or("the encoder could not reopen")); // long-recording hook

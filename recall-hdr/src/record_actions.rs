@@ -301,6 +301,8 @@ impl Controller {
     /// Engine settings changed: restart now, or once no save / long
     /// recording is in flight (`pending_restart` in the status meanwhile).
     pub(crate) fn request_engine_restart(&mut self) {
+        // New settings: an encoder recovery that gave up on a hung engine tries again.
+        self.recovery.settings_changed();
         if *self.planner.applied() == EngineTarget::Off {
             self.pending_restart = false; // the next start uses the new settings
             return;

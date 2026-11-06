@@ -239,3 +239,37 @@ fn one_encode_error_keeps_a_long_recording_and_a_spent_recovery_ends_it() {
     assert!(spent, "a spent recovery did not end the long recording: backend {}", stats.backend.load(Relaxed));
     assert_eq!(stats.label(), "failed");
 }
+
+#[test]
+fn the_encoder_thread_beats_every_turn_without_frames_and_stops_while_an_open_hangs() {
+    // No NVENC needed: the beat is the loop's, frames or not.
+    let stats = Arc::new(EncStats::default());
+    let mut enc = Loop::start_with(stats.clone());
+    std::thread::sleep(Duration::from_millis(1_000));
+    let idle = stats.heartbeat.load(Relaxed);
+    assert!(idle >= 5, "a static game (no frames) must keep the beat: {idle} turns in 1 s");
+    // An NVENC open hung after a TDR: the beat stops while it hangs, then goes on.
+    stats.faults.open_hang_ms.store(1_500, Relaxed);
+    enc.rgba(BIG);
+    std::thread::sleep(Duration::from_millis(300));
+    let hung = stats.heartbeat.load(Relaxed);
+    std::thread::sleep(Duration::from_millis(800));
+    assert_eq!(stats.heartbeat.load(Relaxed), hung, "the beat moved during a hung open");
+    std::thread::sleep(Duration::from_millis(1_200));
+    assert!(stats.heartbeat.load(Relaxed) > hung, "the beat did not come back after the open");
+}
+
+#[test]
+fn an_open_in_progress_is_flagged_while_it_runs() {
+    // No NVENC needed: the flag wraps the open, whatever it answers.
+    let stats = Arc::new(EncStats::default());
+    let mut enc = Loop::start_with(stats.clone());
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!stats.opening.load(Relaxed));
+    stats.faults.open_hang_ms.store(1_000, Relaxed);
+    enc.rgba(BIG);
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(stats.opening.load(Relaxed), "a hung open is not flagged as an open in progress");
+    std::thread::sleep(Duration::from_millis(1_500));
+    assert!(!stats.opening.load(Relaxed), "the flag outlived the open");
+}
