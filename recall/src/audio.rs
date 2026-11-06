@@ -583,3 +583,7 @@ fn capture_thread(
 #[cfg(test)]
 #[path = "audio_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "audio_sleep_tests.rs"]
+mod sleep_tests;
