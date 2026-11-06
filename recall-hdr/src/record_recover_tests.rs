@@ -132,3 +132,23 @@ fn a_recovering_engine_that_stopped_updating_is_restarted_like_a_failed_one() {
 fn a_stale_recovering_restarts_nothing_while_the_game_cannot_be_seen() {
     assert_eq!(tick(120, |_| ("recovering", 3, false)), Vec::<u64>::new());
 }
+
+#[test]
+fn a_timed_error_or_a_fresh_restart_is_pending_so_the_capture_stuck_watch_stands_aside() {
+    let t0 = Instant::now();
+    let mut r = EncoderRecovery::default();
+    assert!(!r.pending(t0));
+    r.observe(t0, Seen::EncoderFailed, false);
+    assert!(r.pending(t0), "the 15 s grace runs");
+    assert_eq!(run(&mut r, t0, 0.1, 15.1, Seen::EncoderFailed, false), vec![15.1]);
+    assert!(r.pending(t0 + secs(16.0)), "restarted, recording not back");
+    assert!(!r.pending(t0 + secs(15.1) + STABLE_AFTER), "a minute later it lets the stuck watch act");
+}
+
+#[test]
+fn a_capture_stuck_restart_in_flight_holds_the_encoder_restart() {
+    // encoder_recover_tick passes `busy` while `capture_stuck.pending()`: busy never restarts.
+    let t0 = Instant::now();
+    let mut r = EncoderRecovery::default();
+    assert!(run(&mut r, t0, 0.0, 60.0, Seen::EncoderFailed, true).is_empty());
+}
