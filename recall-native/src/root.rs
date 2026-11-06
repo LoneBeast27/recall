@@ -241,6 +241,15 @@ impl Root {
             }
             _ => {}
         }
+        // Alt+Tab mid-drag: the release goes to another window and no later move may come.
+        // Save the dragged gain now, as a release would; a move after refocus then finds no drag.
+        cx.observe_window_activation(window, |this, window, cx| {
+            if !window.is_window_active() && this.settings_ui.audio.fader.is_some() {
+                this.commit_dragged_fader();
+                cx.notify();
+            }
+        })
+        .detach();
         crate::views::window_frame::solid_backdrop(window, theme::WINDOW);
         window.focus(&root.focus);
         root
@@ -250,6 +259,8 @@ impl Root {
     /// first, so `drop` alone may never run.
     pub fn flush_on_close(&mut self) {
         self.ed.flush_now();
+        // A fader still held is saved, as a release would.
+        self.commit_dragged_fader();
         // A cache size still being typed is applied, as a click elsewhere would.
         if self.cache.editing {
             self.apply_typed_cache();
@@ -442,6 +453,8 @@ impl Root {
             self.sync_audio_monitors();
         } else {
             self.meters = None;
+            // A fader still held when the page goes is saved, as a release would.
+            self.commit_dragged_fader();
             self.settings_ui.audio.closed();
             self.midi = None;
         }
