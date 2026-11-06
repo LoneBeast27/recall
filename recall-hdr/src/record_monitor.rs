@@ -3,9 +3,10 @@
 //! engine's Desktop capture (`Monitor::primary()` at engine start) were read
 //! once at start-up, so a hot-plug or a new primary display was not followed.
 //! Every [`CHECK_EVERY`] the controller re-reads the primary (two cheap
-//! queries): a new handle updates the watcher; a different display as primary
-//! restarts the Desktop capture (only while the engine records the desktop; a
-//! game capture follows its window).
+//! queries); a new reading counts once it held for [`SETTLE`]. A new handle
+//! updates the watcher; a different display as primary restarts the Desktop
+//! capture (only while the engine records the desktop; a game capture follows
+//! its window).
 
 use std::time::{Duration, Instant};
 
@@ -18,6 +19,10 @@ use crate::record_engine::EngineTarget;
 
 /// How often the primary monitor is re-read.
 pub const CHECK_EVERY: Duration = Duration::from_secs(5);
+/// A new reading is re-read after this and reported only if it held, so a
+/// DisplayPort link drop (the other display primary for a moment) restarts
+/// nothing, and a real change restarts once.
+pub const SETTLE: Duration = Duration::from_secs(2);
 
 /// The primary display: its `HMONITOR` (as `isize`) and GDI device name
 /// (`\\.\DISPLAY1`). A handle can change on a display reconfigure while the
@@ -39,22 +44,34 @@ pub struct PrimaryChange {
 pub struct PrimaryWatch {
     last: Primary,
     checked: Instant,
+    /// A new reading, re-read after [`SETTLE`].
+    settling: Option<Primary>,
 }
 
 impl PrimaryWatch {
     pub fn new(primary: Primary, now: Instant) -> Self {
-        PrimaryWatch { last: primary, checked: now }
+        PrimaryWatch { last: primary, checked: now, settling: None }
     }
 
-    /// Re-read the primary with `read` when [`CHECK_EVERY`] has passed.
+    /// Re-read the primary with `read` when [`CHECK_EVERY`] has passed (or
+    /// [`SETTLE`] after a new reading). A change is reported once it held.
     pub fn poll(&mut self, now: Instant, read: impl FnOnce() -> Primary) -> Option<PrimaryChange> {
-        if now.duration_since(self.checked) < CHECK_EVERY {
+        let wait = if self.settling.is_some() { SETTLE } else { CHECK_EVERY };
+        if now.duration_since(self.checked) < wait {
             return None;
         }
         self.checked = now;
         let primary = read();
         if primary == self.last {
+            self.settling = None; // it came back: a link drop, nothing to do
             return None;
+        }
+        match self.settling.take() {
+            Some(seen) if seen == primary => {}
+            _ => {
+                self.settling = Some(primary);
+                return None;
+            }
         }
         let moved = primary.device != self.last.device;
         self.last = primary.clone();
@@ -116,11 +133,37 @@ mod tests {
         let never = || -> Primary { panic!("read before CHECK_EVERY") };
         assert_eq!(w.poll(t0 + CHECK_EVERY - Duration::from_millis(1), never), None, "cheap: not every tick");
         assert_eq!(w.poll(t0 + CHECK_EVERY, || primary(1, r"\\.\DISPLAY1")), None, "unchanged");
-        let moved = w.poll(t0 + CHECK_EVERY * 2, || primary(2, r"\\.\DISPLAY2"));
+        let at = t0 + CHECK_EVERY * 2;
+        assert_eq!(w.poll(at, || primary(2, r"\\.\DISPLAY2")), None, "seen once: it settles first");
+        let moved = w.poll(at + SETTLE, || primary(2, r"\\.\DISPLAY2"));
         assert_eq!(moved, Some(PrimaryChange { now: primary(2, r"\\.\DISPLAY2"), moved: true }), "a new primary display");
-        assert_eq!(w.poll(t0 + CHECK_EVERY * 3, || primary(2, r"\\.\DISPLAY2")), None, "reported once");
-        let rehandled = w.poll(t0 + CHECK_EVERY * 4, || primary(3, r"\\.\DISPLAY2"));
+        assert_eq!(w.poll(at + SETTLE + CHECK_EVERY, || primary(2, r"\\.\DISPLAY2")), None, "reported once");
+        let at = at + SETTLE + CHECK_EVERY * 2;
+        assert_eq!(w.poll(at, || primary(3, r"\\.\DISPLAY2")), None);
+        let rehandled = w.poll(at + SETTLE, || primary(3, r"\\.\DISPLAY2"));
         assert_eq!(rehandled, Some(PrimaryChange { now: primary(3, r"\\.\DISPLAY2"), moved: false }), "hot-plug: same display, new handle");
+    }
+
+    #[test]
+    fn a_display_port_drop_is_settled_before_anything_restarts() {
+        let t0 = Instant::now();
+        let ms = Duration::from_millis;
+        let d1 = || primary(1, r"\\.\DISPLAY1");
+        let d2 = || primary(2, r"\\.\DISPLAY2");
+        assert_eq!(SETTLE, Duration::from_secs(2));
+        // The link drops: the other display is primary for a moment, then the first one is back.
+        let mut w = PrimaryWatch::new(d1(), t0);
+        assert_eq!(w.poll(t0 + CHECK_EVERY, d2), None, "seen once: no restart yet");
+        let early = || -> Primary { panic!("re-read before SETTLE") };
+        assert_eq!(w.poll(t0 + CHECK_EVERY + SETTLE - ms(1), early), None);
+        assert_eq!(w.poll(t0 + CHECK_EVERY + SETTLE, d1), None, "it came back: no restart at all");
+        assert_eq!(w.poll(t0 + CHECK_EVERY * 2 + SETTLE, d1), None, "and nothing later either");
+        // A third reading while settling starts the wait over.
+        let mut w = PrimaryWatch::new(d1(), t0);
+        assert_eq!(w.poll(t0 + CHECK_EVERY, d2), None);
+        assert_eq!(w.poll(t0 + CHECK_EVERY + SETTLE, || primary(3, r"\\.\DISPLAY3")), None, "still moving");
+        let settled = w.poll(t0 + CHECK_EVERY + SETTLE * 2, || primary(3, r"\\.\DISPLAY3"));
+        assert_eq!(settled, Some(PrimaryChange { now: primary(3, r"\\.\DISPLAY3"), moved: true }), "one restart, for where it ended");
     }
 
     #[test]
