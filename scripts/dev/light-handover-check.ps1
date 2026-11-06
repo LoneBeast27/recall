@@ -30,7 +30,7 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 . (Join-Path $PSScriptRoot 'viewer-check-lib.ps1')
 Initialize-ViewerCheck $repo $Exe
-$script:only = @($Only | ForEach-Object { $_ -split ',' } | Where-Object { $_ })
+$script:only = @($Only | ForEach-Object { if ($_ -like '*|*') { $_ -split '\|' } else { $_ -split ',' } } | Where-Object { $_ })  # '|' between names lets a name hold a comma
 Write-Host "player: $script:exe"
 if (-not $Clip) { $Clip = Join-Path $script:work 'base.mp4' }
 if (-not (Test-Path $Clip)) { throw "test clip $Clip is missing" }
