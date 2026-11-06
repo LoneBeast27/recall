@@ -402,6 +402,7 @@ impl Controller {
     /// overlay (and its frame-timing session) and the UI, then the engine. Only the tray
     /// Quit closes the app; any other quit leaves it open to reconnect to the next recorder.
     fn shutdown(mut self) {
+        crate::record_power_win::unregister();
         self.render.stop();
         self.hdr.shutdown();
         self.overlay.stop();

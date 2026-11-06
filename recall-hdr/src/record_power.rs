@@ -10,6 +10,10 @@
 //!
 //! This module only decides; `record_power_win` registers for the notices and applies the
 //! actions on the pump thread.
+//!
+//! The suspend stop is best-effort: the system's power callback only queues the notice and
+//! wakes the pump, it never waits, so a PC that sleeps within a pump tick of the notice can
+//! sleep before `record_stop` lands. The fragmented MP4 still plays up to its last fragment.
 
 /// `PBT_APMSUSPEND`.
 pub const PBT_SUSPEND: u32 = 4;
@@ -67,9 +71,87 @@ impl PowerPlanner {
     }
 }
 
+/// The power callback's whole job: queue the notice for the pump. Returns whether the pump
+/// should be woken (only for the notices it acts on).
+pub fn enqueue(pending: &mut Vec<u32>, kind: u32) -> bool {
+    pending.push(kind);
+    PowerEvent::from_pbt(kind).is_some()
+}
+
+/// The suspend/resume registration, the OS handle kept as an integer. Registering again while
+/// registered does nothing; unregistering hands the handle back once.
+#[derive(Debug, Default)]
+pub struct Registration {
+    handle: Option<usize>,
+}
+
+impl Registration {
+    pub const fn new() -> Self {
+        Self { handle: None }
+    }
+
+    /// Calls `os` only when not registered yet. `Ok(true)`: registered now; `Ok(false)`: already
+    /// registered; `Err(code)`: the OS refused (a later call may try again).
+    pub fn register(&mut self, os: impl FnOnce() -> Result<usize, u32>) -> Result<bool, u32> {
+        if self.handle.is_some() {
+            return Ok(false);
+        }
+        self.handle = Some(os()?);
+        Ok(true)
+    }
+
+    /// Calls `os` with the handle if registered; false when there was nothing to undo.
+    pub fn unregister(&mut self, os: impl FnOnce(usize)) -> bool {
+        match self.handle.take() {
+            Some(handle) => {
+                os(handle);
+                true
+            }
+            None => false,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{PowerAction, PowerEvent, PowerPlanner, PBT_RESUME_AUTOMATIC, PBT_SUSPEND};
+    use super::{enqueue, PowerAction, PowerEvent, PowerPlanner, Registration, PBT_RESUME_AUTOMATIC, PBT_SUSPEND};
+
+    #[test]
+    fn a_second_register_does_not_ask_the_os_again() {
+        let mut reg = Registration::new();
+        let mut asked = 0;
+        assert_eq!(reg.register(|| { asked += 1; Ok(7) }), Ok(true));
+        assert_eq!(reg.register(|| { asked += 1; Ok(8) }), Ok(false));
+        assert_eq!(asked, 1);
+    }
+
+    #[test]
+    fn a_refused_register_can_be_tried_again() {
+        let mut reg = Registration::new();
+        assert_eq!(reg.register(|| Err(5)), Err(5));
+        assert_eq!(reg.register(|| Ok(7)), Ok(true));
+    }
+
+    #[test]
+    fn unregister_hands_the_handle_back_once() {
+        let mut reg = Registration::new();
+        let mut released = Vec::new();
+        assert!(!reg.unregister(|h| released.push(h)), "never registered");
+        reg.register(|| Ok(7)).unwrap();
+        assert!(reg.unregister(|h| released.push(h)));
+        assert!(!reg.unregister(|h| released.push(h)), "unregister after unregister");
+        assert_eq!(released, vec![7]);
+        assert_eq!(reg.register(|| Ok(9)), Ok(true), "can register again after");
+    }
+
+    #[test]
+    fn the_callback_queues_every_notice_and_wakes_only_for_ours() {
+        let mut pending = Vec::new();
+        assert!(enqueue(&mut pending, PBT_SUSPEND));
+        assert!(!enqueue(&mut pending, 10), "power source change");
+        assert!(enqueue(&mut pending, PBT_RESUME_AUTOMATIC));
+        assert_eq!(pending, vec![PBT_SUSPEND, 10, PBT_RESUME_AUTOMATIC]);
+    }
 
     #[test]
     fn suspend_during_a_long_recording_stops_it() {
