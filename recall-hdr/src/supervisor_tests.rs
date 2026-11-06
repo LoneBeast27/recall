@@ -146,6 +146,26 @@ fn retargets_restart_on_purpose_and_never_trip_give_up() {
     sup.shutdown(Duration::from_millis(50));
 }
 
+#[test]
+fn encoder_recovery_restarts_to_the_same_target_never_raise_give_up() {
+    // `record_recover` restarts with the SAME spec (`restart_engine_for_settings`).
+    let engine = fake_engine();
+    let sup = Supervisor::start_with_locator(move || Some(engine), None);
+    sup.shared.restart_grace_ms.store(50, Ordering::SeqCst);
+    let spec = EngineSpec { env: vec![("RECALL_CAPTURE_NAME".into(), Some("VALORANT".into()))] };
+    for n in 1..=8u32 {
+        sup.retarget(Some(spec.clone()));
+        assert!(
+            wait_for(5, || sup.shared.spawn_count.load(Ordering::SeqCst) == n
+                && matches!(sup.health(), EngineHealth::Running { pid } if pid != 0)),
+            "restart {n}: health {:?}",
+            sup.health()
+        );
+    }
+    assert!(!matches!(sup.health(), EngineHealth::GivenUp | EngineHealth::Restarting { .. }));
+    sup.shutdown(Duration::from_millis(50));
+}
+
 // --- LIVE test against the real engine --------------------------------
 //
 // Requires the real capture engine. It starts screen capture for a few

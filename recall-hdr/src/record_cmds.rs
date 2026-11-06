@@ -36,7 +36,7 @@ use crate::hdr_exec;
 use crate::log;
 use crate::record_app::{apply_affinity, Controller};
 use crate::record_config::{apply_patch, parse_cpu_mask};
-use crate::record_notice::{notice_json, Situation};
+use crate::record_notice::Situation;
 use crate::record_status::{config_event, error_event, status_json, tray_line, StatusInputs};
 use crate::record_engine::{capture_refusal, engine_settings_changed};
 use crate::supervisor::EngineHealth;
@@ -392,7 +392,7 @@ impl Controller {
             return;
         }
         log!("record: notice {}: {} {}", notice.kind(), notice.title(), notice.detail());
-        self.hub.event("session", &notice_json(&notice));
+        self.hub.event("session", &self.notices.notice_body(&notice));
         if notice.is_failure() {
             crate::cues::failed();
         } else {

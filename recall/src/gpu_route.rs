@@ -26,6 +26,13 @@ pub(crate) type GpuFramesTx = Arc<Mutex<Option<std::sync::mpsc::SyncSender<encod
 /// path reports it.
 #[cfg(feature = "encode")]
 pub(crate) fn install_gpu_sink(shared: &Arc<CaptureShared>, handle: &encoder::EncoderHandle, json: bool) -> GpuFramesTx {
+    // An encoder that cannot reopen on this device asks for a new capture (app_tick restarts it).
+    let weak = Arc::downgrade(shared);
+    let _ = handle.stats.capture_restart.set(Box::new(move || {
+        if let Some(shared) = weak.upgrade() {
+            shared.restart.store(true, Relaxed);
+        }
+    }));
     let tx: GpuFramesTx = Arc::new(Mutex::new(Some(handle.frames.clone())));
     let frames = tx.clone();
     let stats = handle.stats.clone();

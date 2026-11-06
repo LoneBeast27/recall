@@ -24,6 +24,7 @@ mod handoff;
 pub(crate) use handoff::{audio_tail_us, video_end_us};
 mod mover;
 mod mux;
+mod reopen;
 mod saver;
 mod space;
 mod staging;
@@ -99,6 +100,8 @@ pub struct EncStats {
     pub gpu_refused: std::sync::atomic::AtomicBool,
     /// Most recent initialization/reconfiguration failure for status consumers.
     pub error: Mutex<Option<String>>,
+    /// Asks capture for a new device (`CaptureShared::restart`; set by `install_gpu_sink`).
+    pub capture_restart: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
 }
 
 pub struct EncoderHandle {
@@ -112,6 +115,13 @@ impl EncStats {
     /// Codec for `status.codec`: active once open, requested before that.
     pub fn codec(&self) -> Codec {
         Codec::from_index(self.codec.load(Relaxed))
+    }
+
+    /// The encoder cannot reopen on this capture device (`reopen::RESTART_EVERY`).
+    fn request_capture_restart(&self) {
+        if let Some(restart) = self.capture_restart.get() {
+            restart();
+        }
     }
 
     /// The replay buffer was reset (encoder reopened or failed).
@@ -211,7 +221,8 @@ fn run(
         report(cfg.json, note);
     }
     let mut enc: Option<Enc> = None;
-    let mut failed_resolution: Option<(u32, u32)> = None;
+    // A failed encoder opens again on a backoff (`reopen.rs`), never left off for good.
+    let mut reopen = reopen::Reopen::default();
     let mut vram = vram_watch::VramWatch::default();
     let mut small = SmallFrames::default();
     // After one fallback the engine stays on H.264: reopening on a resolution
@@ -261,10 +272,10 @@ fn run(
                         },
                     );
                     enc = None;
-                    failed_resolution = None;
                     stats.clear_buffer();
                 }
-                if enc.is_none() && failed_resolution != Some((frame.width, frame.height)) {
+                let input = reopen::Input { width: frame.width, height: frame.height, pool: gpu_pool_of(&frame) };
+                if enc.is_none() && reopen.may_open(input, Instant::now()) {
                     enc = match open_encoder(&cfg, want, frame.width, frame.height, frame.gpu.as_ref(), Some(Arc::clone(&spill))) {
                         Ok((e, fallback)) => {
                             crate::longrec::tap::on_encoder_open(&e.encoder); // long-recording hook
@@ -281,6 +292,7 @@ fn run(
                             );
                             let _ = crate::gpu_frames::adapter::vram_line("encoder open").inspect(|l| report(cfg.json, l));
                             vram.opened();
+                            reopen.opened(Instant::now());
                             Some(e)
                         }
                         Err(e) => {
@@ -288,13 +300,7 @@ fn run(
                             *stats.error.lock().unwrap_or_else(|e| e.into_inner()) =
                                 Some(e.clone());
                             report(cfg.json, &format!("encoder init failed: {e}"));
-                            if frame.gpu.is_some() {
-                                // Let the CPU frames that follow open the encoder instead.
-                                stats.gpu_refused.store(true, Relaxed);
-                                report(cfg.json, "NVENC refused GPU frames; capture switches to CPU copies");
-                            } else {
-                                failed_resolution = Some((frame.width, frame.height));
-                            }
+                            reopen::open_failed(&mut reopen, input, frame.gpu.is_some(), &stats, cfg.json);
                             None
                         }
                     };
@@ -302,17 +308,19 @@ fn run(
                 let mut fatal_encode_error = None;
                 if let Some(enc) = enc.as_mut() {
                     let idx = frame.idx;
-                    if let Err(e) = enc.encode(frame, &stats) {
-                        report(cfg.json, &format!("encode error at frame {idx}: {e}"));
-                        fatal_encode_error = Some(e);
+                    match enc.encode(frame, &stats) {
+                        Ok(()) => reopen.encoded(Instant::now()),
+                        Err(e) => {
+                            report(cfg.json, &format!("encode error at frame {idx}: {e}"));
+                            fatal_encode_error = Some(e);
+                        }
                     }
                 }
                 let _ = vram.due().inspect(|l| report(cfg.json, l));
                 if let Some(reason) = fatal_encode_error {
                     crate::longrec::tap::on_encoder_failed(&format!("NVENC encode failed: {reason}")); // long-recording hook
-                    let failed = enc.as_ref().map(|e| (e.width, e.height));
                     enc = None;
-                    failed_resolution = failed;
+                    reopen::encode_failed(&mut reopen, input, &stats, cfg.json);
                     stats.backend.store(3, Relaxed);
                     *stats
                         .error

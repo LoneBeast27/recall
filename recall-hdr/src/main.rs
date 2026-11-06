@@ -73,6 +73,7 @@ mod record_session;
 mod record_status;
 mod record_notice;
 mod record_quit;
+mod record_recover;
 mod record_render;
 mod record_storage;
 mod record_free_space;
