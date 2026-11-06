@@ -48,6 +48,9 @@ pub enum Role {
     Option,
     Replay,
     Fps,
+    /// [`Role::Fps`] a little smaller, for a side spot's upright column: 3
+    /// digits at 18 px are 33.7 px, past the 32 px a 44 px pill leaves.
+    FpsUpright,
     Small,
     RingNumber,
     Temp,
@@ -64,6 +67,7 @@ impl Role {
             Role::Option => 13.0,
             Role::Replay => 14.0,
             Role::Fps => 18.0,
+            Role::FpsUpright => 16.5,
             Role::Small => 9.5,
             Role::RingNumber => 10.5,
             Role::Temp => 11.0,

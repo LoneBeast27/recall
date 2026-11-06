@@ -69,7 +69,7 @@ fn stats_stack_with_rings_kept_whole_and_their_numbers_upright_inside() {
     let st = StatsContent { recording: true, replay_secs: 120, fps: Some(144), low1: Some(98), gpu: Some(71), gpu_temp: Some(64), cpu: Some(23), ..Default::default() };
     let flat = stats_scene(&st, 1.0, &Fake);
     let tall = stack(&flat, 1.0, &Fake);
-    assert_eq!(glyphs(&tall), ["2", "00", "1", "44", "1%", "low", "98", "GPU", "64°", "C", "CPU"]);
+    assert_eq!(glyphs(&tall), ["2", "00", "144", "1%", "low", "98", "GPU", "64°", "C", "CPU"]);
     assert_eq!(tall.shapes.len(), 2, "both rings");
     for (shape, number) in tall.shapes.iter().zip(["71", "23"]) {
         let Shape::Ring { cx, cy, .. } = *shape else { panic!("a ring") };

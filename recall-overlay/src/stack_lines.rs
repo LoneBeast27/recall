@@ -4,7 +4,8 @@
 //!
 //! - Words: a word of 1-3 letters is one line; a longer one splits into
 //!   balanced lines of at most 3 ("SAVED" → "SAV" / "ED", "Clip" → "Cl" / "ip").
-//! - Numbers: at most 2 digits per line, the remainder first ("144" → "1" / "44").
+//! - Numbers: up to 3 digits stay one line ("144", "98"); a longer one splits
+//!   in groups of 3 from the right, the remainder first ("1440" → "1" / "440").
 //! - A timer drops its colons: one line per part ("1:23" → "1" / "23",
 //!   "1:02:03" → "1" / "02" / "03").
 //! - A number with its unit stays one line up to 3 glyphs ("1%", "64°"); a
@@ -60,14 +61,15 @@ fn is_timer(word: &str) -> bool {
         && parts[0].len() <= 2
 }
 
-/// Pairs of digits, the odd one out first ("144" → "1", "44").
+/// Groups of [`MAX_LINE`] digits from the right, the remainder first
+/// ("144" → "144", "12345" → "12", "345").
 fn digits(chars: &[char]) -> Vec<String> {
-    let first = match chars.len() % 2 {
-        0 => 2.min(chars.len()),
-        _ => 1,
+    let first = match chars.len() % MAX_LINE {
+        0 => MAX_LINE.min(chars.len()),
+        r => r,
     };
     let mut lines = vec![chars[..first].iter().collect::<String>()];
-    lines.extend(chars[first..].chunks(2).map(|c| c.iter().collect::<String>()));
+    lines.extend(chars[first..].chunks(MAX_LINE).map(|c| c.iter().collect::<String>()));
     lines.retain(|l| !l.is_empty());
     lines
 }
@@ -111,11 +113,14 @@ mod tests {
     }
 
     #[test]
-    fn numbers_take_two_digits_a_line_the_remainder_first() {
-        assert_eq!(lines("144"), [vec!["1", "44"]]);
+    fn numbers_stay_whole_to_three_digits_then_split_in_threes_from_the_right() {
+        assert_eq!(lines("144"), [vec!["144"]]);
         assert_eq!(lines("98"), [vec!["98"]]);
-        assert_eq!(lines("1440"), [vec!["14", "40"]]);
-        assert_eq!(lines("12345"), [vec!["1", "23", "45"]]);
+        assert_eq!(lines("7"), [vec!["7"]]);
+        assert_eq!(lines("1440"), [vec!["1", "440"]]);
+        assert_eq!(lines("12345"), [vec!["12", "345"]]);
+        assert_eq!(lines("123456"), [vec!["123", "456"]]);
+        assert_eq!(lines("1234567"), [vec!["1", "234", "567"]]);
     }
 
     #[test]
@@ -132,7 +137,8 @@ mod tests {
         assert_eq!(lines("64°"), [vec!["64°"]]);
         assert_eq!(lines("1%"), [vec!["1%"]]);
         assert_eq!(lines("64°C"), [vec!["64°", "C"]]);
-        assert_eq!(lines("120fps"), [vec!["1", "20", "fps"]]);
+        assert_eq!(lines("120fps"), [vec!["120", "fps"]]);
+        assert_eq!(lines("1440p"), [vec!["1", "440", "p"]]);
     }
 
     #[test]
