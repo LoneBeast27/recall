@@ -56,6 +56,8 @@ mod tests_smoke;
 mod tests_owned;
 #[cfg(test)]
 mod tests_safety;
+#[cfg(test)]
+mod tests_set_aside;
 
 // Public API for the UI (Settings > Storage, editor playback); not every item is used yet.
 #[allow(unused_imports)]
@@ -89,15 +91,16 @@ pub use tiers::{CacheKind, CacheUsage, TierUsage, clear_kind, usage_detail};
 #[allow(unused_imports)]
 pub use video::{cache_video, cached_video, copy_progress, enforce_budget, is_slow, start_fill, too_large};
 
-/// Records `rel` (`video/<id>.mp4`, `tmp/pre-encode/<key>.mp4`, ...) as a file Recall made in
-/// the cache at `root`: only such files are ever evicted or swept (`owned.rs`).
 /// Dry run of the cache at `root`: (files a first load would adopt into `owned.json`, units the
-/// budget would evict now). Writes nothing at all.
+/// budget would evict now). Writes nothing at all. Outside the app every clip scores 0
+/// (`budget::plan_dry`).
 #[allow(dead_code)]
 pub fn plan_dry(root: &Path) -> (Vec<String>, Vec<String>) {
     budget::plan_dry(root)
 }
 
+/// Records `rel` (`video/<id>.mp4`, `tmp/pre-encode/<key>.mp4`, ...) as a file Recall made in
+/// the cache at `root`: only such files are ever evicted or swept (`owned.rs`).
 pub(crate) fn mark_owned(root: &Path, rel: &str) {
     owned::mark(root, rel);
 }
