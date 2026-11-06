@@ -3,8 +3,9 @@
 //! a save, hourly, on demand) and once shortly after start, the
 //! `recall-storage` thread reads the real free space of both volumes. Below
 //! [`threshold`] = max(2 x the replay buffer's bytes, 5 GB) it sends
-//! `{"type":"storage_warning","level":"free","drive":"C:","free_bytes":F,
-//! "need_bytes":T}` on `mod:"session"`, once per crossing; a drive warns again
+//! `{"type":"disk_low","drive":"C:","free_bytes":F,"need_bytes":T}` on
+//! `mod:"session"` (its own type: an app that predates it ignores it, where a
+//! new `storage_warning` level showed a cap toast), once per crossing; a drive warns again
 //! only after it climbed [`REARM_BYTES`] above the threshold. Drives are the
 //! volumes the folders really land on (`win_volume.rs`: junctions, mounted
 //! folders and subst drives resolve), so a junctioned staging folder on the
@@ -128,7 +129,7 @@ impl FreeWarner {
 }
 
 pub fn free_event(drive: &str, free_bytes: u64, need_bytes: u64) -> String {
-    json!({"type": "storage_warning", "level": "free", "drive": drive, "free_bytes": free_bytes, "need_bytes": need_bytes})
+    json!({"type": "disk_low", "drive": drive, "free_bytes": free_bytes, "need_bytes": need_bytes})
         .to_string()
 }
 

@@ -108,7 +108,7 @@ pub(crate) fn coalesce(prev: Option<Job>, job: Job) -> Job {
     }
 }
 
-/// The `storage_warning{level:"free"}` events this check sends.
+/// The `disk_low` events this check sends.
 /// Storage thread: resolves the folders' volumes (may block) and reads free space.
 pub(crate) fn free_warnings(warner: &mut FreeWarner, check: &FreeCheck, free: FreeFn, resolve: Resolve) -> Vec<String> {
     let drives = free_space::resolve_drives(&check.dirs, resolve);
