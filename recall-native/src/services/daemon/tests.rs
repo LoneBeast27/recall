@@ -188,6 +188,21 @@ fn hotkey_and_recording_events_and_session_fields() {
     assert_eq!(session.editor_hotkey, "Alt+U");
 }
 
+/// Gate P2-d: `recording_recovered` (a `.part` renamed after a kill) was only logged.
+#[test]
+fn a_recovered_recording_is_an_event() {
+    let mut state = connected();
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_recovered","path":"E:/c/G__rec.mp4"}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_recovered","path":"E:/c/H__rec.mp4","gap_seconds":7.5,"frozen_seconds":40.0}}));
+    assert_eq!(
+        state.events,
+        vec![
+            DaemonEvent::RecordingRecovered { path: "E:/c/G__rec.mp4".into(), gap_seconds: 0.0, frozen_seconds: 0.0 },
+            DaemonEvent::RecordingRecovered { path: "E:/c/H__rec.mp4".into(), gap_seconds: 7.5, frozen_seconds: 40.0 },
+        ]
+    );
+}
+
 /// Merge gate 11-07 (P1): `continued` was ignored, so a part change read as
 /// "Recording saved" then "Recording started".
 #[test]

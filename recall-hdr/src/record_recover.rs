@@ -165,7 +165,12 @@ impl EncoderRecovery {
         }
         let verdict = self.watch.observe(state, progress, opening, shown, now);
         if self.gave_up {
-            return Recovery::Nothing;
+            // A healthy minute ends a give-up too: a later real `failed` in the same game
+            // still gets its last-resort restart.
+            if !self.watch.healthy(now) {
+                return Recovery::Nothing;
+            }
+            self.gave_up = false;
         }
         if verdict != Some(Verdict::Hung) {
             self.hang_held_since = None;
@@ -234,6 +239,28 @@ pub fn restart_lines(long_rec: bool) -> Vec<String> {
     vec![serde_json::json!({"cmd": "record_fail", "reason": ENDED_EARLY_REASON}).to_string()]
 }
 
+/// How long the restart waits after `record_fail` for `recording_failed` (the part's
+/// finish on a slow HDD). Then it quits anyway; the next start recovers the `.part`.
+pub const END_EARLY_WAIT: Duration = Duration::from_secs(20);
+
+/// A restart waiting for the long recording to end early (a state, polled every pump
+/// tick; never a sleep on the pump).
+#[derive(Debug, Clone, Copy)]
+pub struct EndingEarly {
+    pub until: Instant,
+}
+
+impl EndingEarly {
+    pub fn new(now: Instant) -> Self {
+        EndingEarly { until: now + END_EARLY_WAIT }
+    }
+
+    /// Quit now: the recording ended (`recording`: it still runs), or the wait is over.
+    pub fn restart_now(&self, now: Instant, recording: bool) -> bool {
+        !recording || now >= self.until
+    }
+}
+
 /// The one notice when a hung engine gives up: "Recording stopped".
 pub fn gave_up_notice() -> String {
     serde_json::json!({"type": "notice", "kind": "encoder", "title": "Recording stopped", "detail": "The encoder isn't responding"}).to_string()
@@ -242,6 +269,18 @@ pub fn gave_up_notice() -> String {
 impl crate::record_app::Controller {
     /// Every pump tick: restart the engine when the encoder error has lasted (intended).
     pub(crate) fn encoder_recover_tick(&mut self, now: Instant) {
+        // A restart waiting for the long recording to end early (`record_fail` sent).
+        if let Some(wait) = self.ending_early {
+            if !wait.restart_now(now, self.activity.is_recording()) {
+                return;
+            }
+            self.ending_early = None;
+            if self.activity.is_recording() {
+                log!("record: the long recording did not end within {} s; restarting anyway (the next start recovers its .part)", END_EARLY_WAIT.as_secs());
+            }
+            self.restart_engine_for_settings();
+            return;
+        }
         let health = self.supervisor.health();
         let view = self.supervisor.engine_view();
         let fresh = self.supervisor.hello_count() > self.hello_at_retarget;
@@ -265,11 +304,17 @@ impl crate::record_app::Controller {
         match self.recovery.step_held(now, state, health, progress, view.opening, shown, hold, &target) {
             Recovery::Restart => {
                 log!("record: the encoder failed, its recovery ran past its bound, or the engine hung; restarting the engine (intended)");
-                for line in restart_lines(self.activity.is_recording()) {
-                    log!("record: ending the long recording early before the restart");
+                let lines = restart_lines(self.activity.is_recording());
+                if lines.is_empty() {
+                    self.restart_engine_for_settings();
+                    return;
+                }
+                // The quit waits (up to 20 s) for the recording thread to finish the part.
+                log!("record: ending the long recording early; the restart follows once it reports");
+                for line in lines {
                     self.supervisor.send_engine_line(&line);
                 }
-                self.restart_engine_for_settings();
+                self.ending_early = Some(EndingEarly::new(now));
             }
             Recovery::Recovered => log!("record: recording again after the engine restart"),
             Recovery::GaveUp => {

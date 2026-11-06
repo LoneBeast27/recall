@@ -225,3 +225,57 @@ fn quit_grace_outlasts_the_engines_own_quit_path() {
     assert_eq!(RETARGET_GRACE, QUIT_GRACE, "a retarget never kills a save either");
     assert_eq!(Shared::new(None).restart_grace(), QUIT_GRACE);
 }
+
+// --- a wedged engine stdin (gate P2-c) ----------------------------------
+
+/// An engine stdin whose pipe is full and never read: every write blocks for good.
+struct Wedged;
+
+impl std::io::Write for Wedged {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        loop {
+            thread::park();
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_wedged_engine_stdin_never_blocks_the_pump() {
+    let shared = Arc::new(Shared::new(None));
+    shared.attach_writer(Some(Box::new(Wedged)));
+    let pump = shared.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let started = Instant::now();
+        for _ in 0..1_000 {
+            pump.send_line(r#"{"cmd":"record_fail","reason":"the encoder isn't responding"}"#);
+        }
+        let _ = tx.send(started.elapsed());
+    });
+    let took = rx.recv_timeout(Duration::from_secs(3)).expect("the pump blocked on a wedged engine stdin");
+    assert!(took < Duration::from_millis(500), "1000 lines took {took:?}");
+}
+
+#[test]
+fn a_wedged_engine_stdin_still_gets_killed_within_its_grace() {
+    let engine = fake_engine();
+    // Never dropped on a failure: a manager blocked on stdin would hang the drop.
+    let sup = std::mem::ManuallyDrop::new(Supervisor::start_with_locator(move || Some(engine), None));
+    sup.shared.restart_grace_ms.store(50, Ordering::SeqCst);
+    sup.retarget(Some(EngineSpec::default()));
+    assert!(wait_for(5, || matches!(sup.health(), EngineHealth::Running { pid } if pid != 0)));
+    // The engine stops reading its stdin (the pipe fills); the pump writes on.
+    sup.shared.attach_writer(Some(Box::new(Wedged)));
+    let pump = sup.shared.clone();
+    thread::spawn(move || pump.send_line(r#"{"cmd":"save_clip"}"#));
+    thread::sleep(Duration::from_millis(100));
+    let asked = Instant::now();
+    sup.retarget(Some(EngineSpec { env: vec![("RECALL_CAPTURE_NAME".into(), Some("next".into()))] }));
+    let replaced = wait_for(5, || sup.shared.spawn_count.load(Ordering::SeqCst) == 2);
+    assert!(replaced, "the wedged engine was never killed (manager stuck on its stdin)");
+    assert!(asked.elapsed() < Duration::from_secs(3), "the kill took {:?}", asked.elapsed());
+    std::mem::ManuallyDrop::into_inner(sup).shutdown(Duration::from_millis(50));
+}

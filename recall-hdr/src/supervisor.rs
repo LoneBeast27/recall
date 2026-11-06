@@ -35,8 +35,9 @@
 mod manager;
 #[path = "supervisor_protocol.rs"]
 mod protocol;
+#[path = "supervisor_stdin.rs"]
+mod stdin;
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -232,7 +233,9 @@ struct Shared {
     /// `(generation, spec)`: every retarget bumps the generation.
     desired: Mutex<(u64, Option<EngineSpec>)>,
     /// Stdin of the live child, so commands / quit can reach it.
-    child_stdin: Mutex<Option<std::process::ChildStdin>>,
+    /// The live child's stdin queue (`supervisor_stdin.rs`): held only to queue a line,
+    /// never across a write, so neither the pump nor the kill path blocks on a full pipe.
+    child_stdin: Mutex<Option<stdin::StdinQueue>>,
     hello_count: AtomicU32,
     spawn_count: AtomicU32,
     cache: Mutex<EngineCache>,
@@ -343,19 +346,22 @@ impl Shared {
     }
 
     fn set_child_stdin(&self, stdin: Option<std::process::ChildStdin>) {
-        if let Ok(mut g) = self.child_stdin.lock() {
-            *g = stdin;
-        }
+        self.attach_writer(stdin.map(|s| Box::new(s) as Box<dyn std::io::Write + Send>));
     }
 
-    /// Send one JSON command line to the child if we hold its stdin. Best-effort.
+    /// The engine's stdin (tests inject a writer): its own writer thread and queue.
+    fn attach_writer(&self, w: Option<Box<dyn std::io::Write + Send>>) {
+        let queue = w.map(stdin::StdinQueue::start);
+        let mut g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
+        *g = queue; // the old queue closes: its writer ends after its current write
+    }
+
+    /// Queue one JSON command line for the child, if one runs. Never blocks: a line the
+    /// engine is not reading is dropped once its queue is full (`supervisor_stdin.rs`).
     fn send_line(&self, line: &str) {
-        if let Ok(mut g) = self.child_stdin.lock() {
-            if let Some(stdin) = g.as_mut() {
-                let _ = stdin.write_all(line.as_bytes());
-                let _ = stdin.write_all(b"\n");
-                let _ = stdin.flush();
-            }
+        let g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(queue) = g.as_ref() {
+            queue.send(line);
         }
     }
 

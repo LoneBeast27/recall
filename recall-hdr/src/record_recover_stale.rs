@@ -90,6 +90,11 @@ impl EngineWatch {
         (state == "recovering" && self.recovering_seen >= RECOVERING_BOUND).then_some(Verdict::Failed)
     }
 
+    /// The engine has beaten without a stall for [`HEALTHY_AFTER`] (it works again).
+    pub fn healthy(&self, now: Instant) -> bool {
+        self.beating_since.is_some_and(|since| now.duration_since(since) >= HEALTHY_AFTER)
+    }
+
     /// A new game or new settings: the next hang gets its restart again.
     pub fn forget_hangs(&mut self) {
         self.hang_restarted = false;
