@@ -128,6 +128,13 @@ pub fn free_bytes(dir: &Path) -> Option<u64> {
         let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) };
         (ok != 0).then_some(free)
     })
+    .map(fake_free)
+}
+
+/// Checks only: `RECALL_FAKE_FREE_BYTES=<n>` caps every drive's free space at n
+/// (the low-disk fixture; the app's drive info reads the same variable).
+fn fake_free(free: u64) -> u64 {
+    std::env::var("RECALL_FAKE_FREE_BYTES").ok().and_then(|v| v.trim().parse::<u64>().ok()).map_or(free, |fake| fake.min(free))
 }
 
 #[cfg(test)]
