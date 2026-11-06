@@ -172,9 +172,11 @@ pub enum Outbound {
         gap_seconds: f64,
         frozen_seconds: f64,
     },
-    /// A long recording left as `.part` by a crash was renamed into place.
+    /// Long recordings left as `.part` by a crash or a kill, renamed into place on this
+    /// start: one event for all of them (`paths`; `path` is the first, for older readers).
     RecordingRecovered {
         path: String,
+        paths: Vec<String>,
     },
     /// A `hud_probe` finished: where the game's HUD sits over the picture, one
     /// number per grid row (bit c = column c holds HUD). `ok` false: too little

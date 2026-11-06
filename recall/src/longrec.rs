@@ -404,16 +404,23 @@ fn stopped(json: bool, path: &Path, stop: Stop) {
 /// clip folder may be a sleeping HDD). See the module docs.
 pub fn recover_parts(out_dir: String, json: bool) {
     let _ = std::thread::Builder::new().name("recall-longrec-recover".into()).spawn(move || {
+        let mut recovered = Vec::new();
         for (part, result) in recover_in(Path::new(&out_dir)) {
             match result {
-                Ok(path) => {
-                    let path = path.to_string_lossy().into_owned();
-                    emit_or_log(json, &Outbound::RecordingRecovered { path: path.clone() }, || format!("recovered long recording {path}"));
-                }
+                Ok(path) => recovered.push(path.to_string_lossy().into_owned()),
                 Err(e) => report(json, Event::Log(format!("long recording {} not recovered: {e}", part.display()))),
             }
         }
+        if let Some(out) = recovered_outbound(recovered) {
+            emit_or_log(json, &out, || "recovered long recordings".into());
+        }
     });
+}
+
+/// One `recording_recovered` for every file one start recovered (none: nothing to say).
+fn recovered_outbound(paths: Vec<String>) -> Option<Outbound> {
+    let path = paths.first()?.clone();
+    Some(Outbound::RecordingRecovered { path, paths })
 }
 
 /// Every `*__rec.mp4.part` directly in `dir`, renamed (or the error).

@@ -330,7 +330,11 @@ impl App {
         }
         self.last_save_press = Some(now);
         log!("app: save_clip hotkey -> engine");
-        supervisor.send_save_clip();
+        if crate::record_dispatch::legacy_save_effects(supervisor.send_save_clip()).contains(&crate::record_dispatch::Effect::NotResponding) {
+            // The legacy app's hotkey has no notice path of its own: logged, and the failure beep.
+            log!("app: save_clip not sent: {}", crate::record_dispatch::NOT_RESPONDING);
+            crate::supervisor::beep_failure();
+        }
     }
 
     /// Upsert an override for the last focused stem to `kind`, then save.

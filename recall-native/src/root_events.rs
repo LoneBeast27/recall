@@ -37,13 +37,20 @@ fn recording_toast(event: &DaemonEvent) -> Option<(ToastKind, String, Option<Str
         }
         // A `.part` left by a kill (a hung engine restarted mid-recording, a crash), renamed
         // into place on the next start.
-        DaemonEvent::RecordingRecovered { path, gap_seconds, frozen_seconds } => {
-            let name = std::path::Path::new(path).file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
-            let mut detail = format!("Recovered {name}");
-            for note in lost_notes(false, *gap_seconds, *frozen_seconds) {
+        // One toast for every file one start recovered.
+        DaemonEvent::RecordingRecovered { paths, gap_seconds, frozen_seconds } => {
+            let name = |p: &String| std::path::Path::new(p).file_name().map_or_else(|| p.clone(), |n| n.to_string_lossy().into_owned());
+            let (title, mut detail) = match &paths[..] {
+                [one] => ("Recording ended early", format!("Recovered {}", name(one))),
+                [a, b, c] => ("Recordings ended early", format!("Recovered 3 files: {}, {}, {}", name(a), name(b), name(c))),
+                [a, b] => ("Recordings ended early", format!("Recovered 2 files: {}, {}", name(a), name(b))),
+                [a, .., z] => ("Recordings ended early", format!("Recovered {} files: {} … {}", paths.len(), name(a), name(z))),
+                [] => return None,
+            };
+            for note in lost_notes(paths.len() > 1, *gap_seconds, *frozen_seconds) {
                 detail.push_str(&format!(" · {note}"));
             }
-            Some((ToastKind::Bad, "Recording ended early".into(), Some(detail)))
+            Some((ToastKind::Bad, title.into(), Some(detail)))
         }
         _ => None,
     }
@@ -125,9 +132,11 @@ impl Root {
                 record_interaction(Interaction::Saved(path));
                 self.workers.job(Job::List);
             }
-            DaemonEvent::RecordingRecovered { path, .. } => {
-                // Toast: `recording_toast`. The recovered file reaches the library.
-                record_interaction(Interaction::Saved(path));
+            DaemonEvent::RecordingRecovered { paths, .. } => {
+                // Toast: `recording_toast`. The recovered files reach the library.
+                for path in paths {
+                    record_interaction(Interaction::Saved(path));
+                }
                 self.workers.job(Job::List);
             }
             DaemonEvent::RecordingFailed { files, .. } => {
@@ -254,12 +263,21 @@ mod tests {
         assert_eq!(toast, Some((ToastKind::Bad, "Recording failed".into(), Some("no keyframe".into()))));
     }
 
+    /// Gate P2-c (d1e057e): several `.part` files recovered at once get one toast listing them.
+    #[test]
+    fn several_recovered_recordings_get_one_toast_that_lists_them() {
+        let paths = vec!["E:/c/G__rec.mp4".to_string(), "E:/c/H__rec.mp4".to_string(), "E:/c/I__rec.mp4".to_string()];
+        let toast = recording_toast(&DaemonEvent::RecordingRecovered { paths, gap_seconds: 0.0, frozen_seconds: 0.0 });
+        assert_eq!(toast, Some((ToastKind::Bad, "Recordings ended early".into(), Some("Recovered 3 files: G__rec.mp4, H__rec.mp4, I__rec.mp4".into()))));
+    }
+
     /// Gate P2-d: a recording recovered from its `.part` on the next start said nothing.
     #[test]
     fn a_recovered_recording_says_it_ended_early_and_names_the_file() {
-        let toast = recording_toast(&DaemonEvent::RecordingRecovered { path: "E:/c/G__rec.mp4".into(), gap_seconds: 0.0, frozen_seconds: 0.0 });
+        let one = |path: &str| vec![path.to_string()];
+        let toast = recording_toast(&DaemonEvent::RecordingRecovered { paths: one("E:/c/G__rec.mp4"), gap_seconds: 0.0, frozen_seconds: 0.0 });
         assert_eq!(toast, Some((ToastKind::Bad, "Recording ended early".into(), Some("Recovered G__rec.mp4".into()))));
-        let toast = recording_toast(&DaemonEvent::RecordingRecovered { path: "E:/c/G__rec.mp4".into(), gap_seconds: 7.2, frozen_seconds: 40.0 });
+        let toast = recording_toast(&DaemonEvent::RecordingRecovered { paths: one("E:/c/G__rec.mp4"), gap_seconds: 7.2, frozen_seconds: 40.0 });
         assert_eq!(toast.and_then(|t| t.2).as_deref(), Some("Recovered G__rec.mp4 · 40 s frozen"), "frozen time named; a gap needs several parts");
     }
 
