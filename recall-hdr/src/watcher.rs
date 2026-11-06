@@ -276,6 +276,8 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
     if hwnd.0.is_null() {
         return None;
     }
+    // A hung game's DWM ghost stands in for the game's own window (U3).
+    let hwnd = crate::ghost_window::resolve(hwnd);
 
     // PID + exe identity. Skip windows with no resolvable owning process.
     let mut pid = 0u32;

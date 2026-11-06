@@ -46,6 +46,9 @@ pub const DESKTOP_NAME: &str = "Desktop";
 /// shell surfaces. Steam's `streaming_client` (Remote Play) is deliberately
 /// absent: a streamed game is recorded as a game.
 const TARGET_DENY_STEMS: &[&str] = &[
+    // DWM: owns the "Not Responding" ghost of a hung game (third audit U3; the
+    // watcher maps a ghost to its hung window first, see `ghost_window`).
+    "dwm",
     "recall-native",
     "recall-hub",
     "recall-overlay",
