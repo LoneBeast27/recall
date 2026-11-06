@@ -157,7 +157,7 @@ impl crate::record_app::Controller {
             _ => true,
         };
         // A capture-stuck restart in flight: never stack a second one on it.
-        let busy = self.activity.busy(now) || self.capture_stuck.pending();
+        let busy = self.activity.busy(now) || self.capture_stuck.pending(now);
         match self.recovery.step(now, state, health, view.statuses, shown, busy) {
             Recovery::Restart => {
                 log!("record: the encoder has failed (or its recovery stopped) for over {} s; restarting the engine (intended)", ERROR_GRACE.as_secs());
