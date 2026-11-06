@@ -327,7 +327,10 @@ impl TargetTracker {
                     due = due.max(at + REPLACE_COOLDOWN);
                 }
             }
-            (Some(c), None) if self.traits.windowed_only() && self.draining.is_some_and(|p| p != c.pid) => return None,
+            // The drain (T2): any windowed-only window waits, the same process's
+            // too (an adopted re-made window is vouched for); so does a
+            // `fullscreen_games` entry.
+            (Some(_), None) if (self.traits.windowed_only() || self.traits.listed_only) && self.draining.is_some() => return None,
             _ => {}
         }
         Some(self.held.map_or(due, |held| held.max(due)))

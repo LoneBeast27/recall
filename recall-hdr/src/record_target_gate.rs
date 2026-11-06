@@ -7,15 +7,17 @@
 //!   window of a game whose window was just destroyed), or only a
 //!   `detect.fullscreen_games` entry (Discord).
 //! - **Drain** (T2): while the closed game's last clip is still saveable, a
-//!   windowed Steam-library window (a crash reporter, the game's own launcher)
-//!   waits until the drain ends; a fullscreen or vouched-for window may end
-//!   it, and the island says so ([`drain_cut`]: "Last clip dropped").
+//!   windowed Steam-library window (a crash reporter, the game's own launcher,
+//!   the same process's included) and a `fullscreen_games` entry wait until
+//!   the drain ends; a fullscreen or vouched-for window may end it, and the
+//!   island says so ([`drain_cut`]: "Last clip dropped"), unless it is a pin.
 //! - **Listed only** (T3): a `fullscreen_games` entry may start a session but
 //!   never replace a live one; it commits once the session ends.
 //! - **Adoption** (T5a): the session's window was destroyed but its process
 //!   lives (a fullscreen <-> windowed switch re-makes the window): for
 //!   [`ADOPT_FOR`] that process's next foreground window is the session,
-//!   windowed or not ([`adopted_candidate`]).
+//!   windowed or not, when fullscreen or at least [`MIN_CLIENT`]
+//!   ([`adopted_candidate`]).
 //! - **Cool-down** (T9): after one live game replaced another, the session
 //!   cannot be replaced by another live game for [`REPLACE_COOLDOWN`], unless
 //!   its process exits or its window goes.
@@ -83,17 +85,23 @@ pub fn too_small(traits: Traits, client: (i32, i32)) -> bool {
     traits.windowed_only() && (client.0 < MIN_CLIENT.0 || client.1 < MIN_CLIENT.1)
 }
 
-/// A foreground window of an adoptable process: the session, unless the stem
-/// is never a target (denied, a `none` override, Recall itself).
-pub fn adopted_candidate(ev: &WatchEvent, cfg: &Config) -> Option<Target> {
-    is_target(&ev.exe_stem, true, cfg).then(|| Target::from_event(ev))
+/// A foreground window of an adoptable process: the session when it is
+/// fullscreen or at least [`MIN_CLIENT`] (an error MessageBox or a small
+/// launcher of the same process is not), unless the stem is never a target
+/// (denied, a `none` override, Recall itself).
+pub fn adopted_candidate(ev: &WatchEvent, cfg: &Config, client: (i32, i32)) -> Option<Target> {
+    let big = ev.fullscreen || (client.0 >= MIN_CLIENT.0 && client.1 >= MIN_CLIENT.1);
+    (big && is_target(&ev.exe_stem, true, cfg)).then(|| Target::from_event(ev))
 }
 
-/// The game that started when a retarget cut the drain of another game's
-/// last clip short: `Some(its name)` for the island notice.
-pub fn drain_cut(drained: Option<&Target>, applied: &EngineTarget) -> Option<String> {
+/// The window that started when a retarget cut a drain short (any other
+/// window, the same game's re-made one included: the engine restarts and its
+/// ring with it): `Some(its name)` for the island notice. A pin is the
+/// player's own choice: no notice.
+pub fn drain_cut(drained: Option<&Target>, applied: &EngineTarget, pinned: Option<&Target>) -> Option<String> {
     match (drained, applied) {
-        (Some(a), EngineTarget::Window(b)) if a.pid != b.pid => Some(b.name.clone()),
+        (_, EngineTarget::Window(b)) if pinned == Some(b) => None,
+        (Some(a), EngineTarget::Window(b)) if (a.pid, a.hwnd) != (b.pid, b.hwnd) => Some(b.name.clone()),
         _ => None,
     }
 }

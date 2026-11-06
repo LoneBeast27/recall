@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 use crate::log;
 use crate::record_app::Controller;
 use crate::record_target::is_target;
+use crate::record_transition::Transitions;
 use crate::watcher::{self, WatchEvent};
 
 /// How often the followed foreground's fullscreen verdict is re-read.

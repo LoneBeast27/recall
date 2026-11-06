@@ -15,6 +15,7 @@ use crate::record_engine::{capture_refusal, EngineTarget, Step};
 use crate::record_hotkeys::{bindings, HotkeyAction};
 use crate::record_notice::shortcut_notice_json;
 use crate::record_status::error_event;
+use crate::record_transition::Transitions;
 
 /// Minimum gap between two runs of the same action (key repeat / bounce).
 fn debounce_of(action: HotkeyAction) -> (&'static str, Duration) {
@@ -328,7 +329,7 @@ impl Controller {
         self.planner.set_drain_len(crate::record_drain::drain_len(buffered, self.cfg.recording.buffer_secs));
         let wanted = self.wanted();
         let busy = self.activity.retarget_busy(now);
-        let drained = self.planner.drain().filter(|(_, at, len)| now < *at + *len).map(|(t, _, _)| t.clone());
+        let drained = self.running_drain(now);
         match self.planner.step(&wanted, now, busy) {
             Step::Apply(target) => {
                 self.retarget_held = false;
@@ -342,6 +343,7 @@ impl Controller {
                 self.retarget_held = true;
             }
             Step::StopLongRec { game_closed } => {
+                let game_closed = self.closed_game(game_closed);
                 if self.activity.auto_stop(now, game_closed) {
                     let why = if game_closed { "the game closed" } else { "a new game is wanted" };
                     log!("record: {why} -- stopping the long recording before the retarget (up to {} s)", PAUSE_STOP_WAIT.as_secs());

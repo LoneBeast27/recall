@@ -81,10 +81,12 @@ fn a_windowed_steam_window_waits_for_the_drain_a_fullscreen_one_ends_it() {
 fn ending_a_drain_early_names_the_game_that_started() {
     let a = target(1, 0x10, "Game A");
     let b = target(2, 0x20, "Game B");
-    assert_eq!(drain_cut(Some(&a), &EngineTarget::Window(b.clone())).as_deref(), Some("Game B"));
-    assert_eq!(drain_cut(None, &EngineTarget::Window(b)), None, "no drain: nothing dropped");
-    assert_eq!(drain_cut(Some(&a), &EngineTarget::Off), None, "the drain ran out");
-    assert_eq!(drain_cut(Some(&a), &EngineTarget::Window(target(1, 0x11, "Game A"))), None, "same game, new window");
+    assert_eq!(drain_cut(Some(&a), &EngineTarget::Window(b.clone()), None).as_deref(), Some("Game B"));
+    assert_eq!(drain_cut(None, &EngineTarget::Window(b.clone()), None), None, "no drain: nothing dropped");
+    assert_eq!(drain_cut(Some(&a), &EngineTarget::Off, None), None, "the drain ran out");
+    let remade = target(1, 0x11, "Game A");
+    assert_eq!(drain_cut(Some(&a), &EngineTarget::Window(remade), None).as_deref(), Some("Game A"), "same game, new window: the ring restarts too");
+    assert_eq!(drain_cut(Some(&a), &EngineTarget::Window(b.clone()), Some(&b)), None, "a pin is the player's choice");
 }
 
 // --- T3: fullscreen_games entries start, never replace -----------------------
@@ -134,7 +136,9 @@ fn fullscreen_to_windowed_recreate_keeps_recording() {
     tr.set_draining(Some(1));
     let windowed = ev("UnityGame", 1, 0x11, false, false);
     assert!(classify_event(&windowed, &cfg).is_none(), "today's rules drop it");
-    let adopted = adopted_candidate(&windowed, &cfg);
+    assert!(adopted_candidate(&windowed, &cfg, (400, 200)).is_none(), "a MessageBox-sized window is not the game");
+    assert!(adopted_candidate(&ev("UnityGame", 1, 0x12, true, false), &cfg, (400, 200)).is_some(), "fullscreen is never sized out");
+    let adopted = adopted_candidate(&windowed, &cfg, MIN_CLIENT);
     assert!(adopted.is_some(), "adopted as the session");
     let seen = gone + ms(500);
     tr.on_foreground_with(adopted, Traits::ADOPTED, seen);
@@ -156,7 +160,7 @@ fn adoption_lapses_and_ends_with_the_process() {
     assert!(tr.on_window_gone_at(0x10, t0 + START_DEBOUNCE));
     tr.on_process_exit(1);
     assert!(!tr.adopts(1, t0 + ms(400)), "a dead process adopts nothing");
-    assert!(adopted_candidate(&ev("explorer", 1, 0x12, false, false), &cfg).is_none(), "the deny lists still win");
+    assert!(adopted_candidate(&ev("explorer", 1, 0x12, false, false), &cfg, MIN_CLIENT).is_none(), "the deny lists still win");
 }
 
 // --- T9: retarget storm ------------------------------------------------------

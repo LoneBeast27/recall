@@ -96,6 +96,8 @@ mod state;
 mod supervisor;
 mod tray;
 #[cfg(test)]
+mod transitions_gate_tests;
+#[cfg(test)]
 mod transitions_scope_tests;
 #[cfg(test)]
 mod transitions_sim;
