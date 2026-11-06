@@ -17,6 +17,18 @@ fn normal_status_never_shows_the_overlay() {
 }
 
 #[test]
+fn a_recovering_engine_is_not_a_failure_and_cpu_copies_are_ready() {
+    let now = Instant::now();
+    let mut reducer = Reducer::new();
+    let recovering = json!({"mod":"engine","event":{"type":"status","source":"","fps":60,"buffer_secs":30.0,"encoder":"recovering","encoder_error":"NVENC encode failed: x"}});
+    reducer.apply_envelope(&recovering, now);
+    assert_eq!(reducer.view().state, RecorderState::Starting, "the engine rebuilds its encoder; the buffer is kept");
+    assert!(!reducer.view().visible, "no 'Encoder failed' pop-up for a recovery");
+    reducer.apply_envelope(&status("degraded"), now + Duration::from_secs(1));
+    assert_eq!(reducer.view().state, RecorderState::Ready);
+}
+
+#[test]
 fn saved_notification_hides_on_deadline_despite_status_updates() {
     let now = Instant::now();
     let mut reducer = Reducer::new();

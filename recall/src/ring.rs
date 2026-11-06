@@ -208,25 +208,26 @@ impl PacketRing {
     /// As `save_window`, with an explicit capture-clock end point. This keeps
     /// the newest still frame visible through a quiet tail before saving.
     pub fn save_window_at(&self, want_us: u64, end_us: u64) -> Vec<EncodedPacket> {
+        self.save_window_since(want_us, end_us, 0)
+    }
+
+    /// As `save_window_at`, starting no earlier than `since_us` (the first packet of the
+    /// newest run of encoders whose streams can share one clip, `encoder/replay.rs`).
+    pub fn save_window_since(&self, want_us: u64, end_us: u64, since_us: u64) -> Vec<EncodedPacket> {
         let Some(back) = self.packets.back() else {
             return Vec::new();
         };
         let end = end_us.max(back.frame_idx.saturating_add(back.duration_us));
         let target_start = end.saturating_sub(want_us);
+        let usable = |p: &EncodedPacket| p.keyframe && p.frame_idx >= since_us && !p.data.lost();
         let start_pos = self
             .packets
             .iter()
             .enumerate()
-            .filter(|(_, p)| p.keyframe && p.frame_idx <= target_start && !p.data.lost())
+            .filter(|(_, p)| usable(p) && p.frame_idx <= target_start)
             .map(|(i, _)| i)
             .next_back()
-            .or_else(|| {
-                self.packets
-                    .iter()
-                    .enumerate()
-                    .find(|(_, p)| p.keyframe && !p.data.lost())
-                    .map(|(i, _)| i)
-            });
+            .or_else(|| self.packets.iter().enumerate().find(|(_, p)| usable(p)).map(|(i, _)| i));
         let Some(start_pos) = start_pos else {
             return Vec::new();
         };

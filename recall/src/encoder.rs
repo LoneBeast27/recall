@@ -17,14 +17,20 @@
 mod bg_io;
 pub(crate) use bg_io::enter_background;
 mod events;
+#[cfg(test)]
+mod faults;
 mod frame_fit;
 mod gpu_smoke;
 mod handoff;
+mod live;
 #[cfg(test)]
 pub(crate) use handoff::{audio_tail_us, video_end_us};
 mod mover;
 mod mux;
 mod reopen;
+mod replay;
+#[cfg(test)]
+mod recover_tests;
 mod saver;
 mod space;
 mod staging;
@@ -34,20 +40,20 @@ mod still;
 mod vram_watch;
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use ffmpeg_next as ff;
 
 use crate::audio::TrackRing;
-use crate::ring::{EncodedPacket, PacketRing, Payload};
-use crate::spill::Spill;
-use frame_fit::{fill_rgbz, normalize_small_size_jitter, SmallFrames};
-use handoff::handle_save;
+use crate::ring::{EncodedPacket, Payload};
+use frame_fit::fill_rgbz;
+use live::run;
 use mux::OwnedParams;
-use saver::{ms, RawFrame, SaverControl, SaverQueue};
-use settings::{Codec, Quality};
+use replay::Replay;
+use saver::{ms, SaverControl};
+use settings::Codec;
 use still::encode_still;
 pub(crate) use still::StillSpec;
 
@@ -91,7 +97,7 @@ pub struct EncStats {
     pub buffer_start_us: AtomicU64,
     pub buffered_bytes: AtomicU64,
     pub encoded_frames: AtomicU64,
-    /// 0 = not initialized, 1 = nvenc, 3 = failed.
+    /// 0 = not initialized, 1 = nvenc, 3 = failed (recovery spent), 4 = recovering (`label`).
     pub backend: AtomicU64,
     /// `Codec::index`: the requested codec until an encoder opens, then the
     /// one actually recording (H.264 after a fallback).
@@ -100,8 +106,13 @@ pub struct EncStats {
     pub gpu_refused: std::sync::atomic::AtomicBool,
     /// Most recent initialization/reconfiguration failure for status consumers.
     pub error: Mutex<Option<String>>,
+    /// The GPU path may be tried again: capture's handler leaves CPU copies (taken by `install_gpu_sink`).
+    pub gpu_retry: std::sync::atomic::AtomicBool,
     /// Asks capture for a new device (`CaptureShared::restart`; set by `install_gpu_sink`).
     pub capture_restart: std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>,
+    /// Injected failures (tests drive recovery on the real loop).
+    #[cfg(test)]
+    pub(crate) faults: faults::Faults,
 }
 
 pub struct EncoderHandle {
@@ -115,6 +126,21 @@ impl EncStats {
     /// Codec for `status.codec`: active once open, requested before that.
     pub fn codec(&self) -> Codec {
         Codec::from_index(self.codec.load(Relaxed))
+    }
+
+    /// `status.encoder`: "h264_nvenc" (replay ready, for every codec; the overlay,
+    /// native app and hub compare it literally), "degraded" (recording from CPU copies
+    /// after GPU frames were refused), "recovering" (the encoder is being rebuilt; the
+    /// buffer is kept and saveable), "failed" (the engine's own recovery is spent),
+    /// "starting".
+    pub fn label(&self) -> &'static str {
+        match self.backend.load(Relaxed) {
+            1 if self.gpu_refused.load(Relaxed) => "degraded",
+            1 => "h264_nvenc",
+            3 => "failed",
+            4 => "recovering",
+            _ => "starting",
+        }
     }
 
     /// The encoder cannot reopen on this capture device (`reopen::RESTART_EVERY`).
@@ -173,172 +199,43 @@ pub fn spawn(cfg: Config, audio: Vec<Arc<TrackRing>>) -> EncoderHandle {
     }
 }
 
+/// One open NVENC session. The replay buffer it fills lives apart (`replay.rs`), so
+/// it survives this encoder failing.
 struct Enc {
     encoder: ff::encoder::Video,
     /// Codec parameters (SPS/PPS extradata) copied once after open.
     params: OwnedParams,
-    ring: PacketRing,
-    nominal_fps: u32,
-    bitrate: usize,
     codec: Codec,
-    quality: Quality,
     width: u32,
     height: u32,
     backend: &'static str,
-    /// Newest raw frame (moved in after encode) — thumbnail and still source.
-    last_frame: Option<RawFrame>,
-    /// Newest GPU frame: read back to a `RawFrame` only when a save needs one.
-    last_gpu: Option<crate::gpu_frames::HwFrame>,
-    /// The newest frame's picture region on the canvas (`PacedFrame::content`).
-    last_content: Option<crate::framing::Rect>,
     /// `Some(pool_id)` when NVENC reads D3D11 frames from that pool, `None` for RGB0.
     gpu_pool: Option<usize>,
-    last_input_pts: Option<u64>,
-    /// The "RAM full, dropping old seconds" line was logged for this ring.
-    dropped_noted: bool,
 }
 
-fn run(
-    cfg: Config,
-    frames: Receiver<PacedFrame>,
-    commands: Receiver<SaveRequest>,
-    stats: Arc<EncStats>,
-    audio: Vec<Arc<TrackRing>>,
-    saver: SaverQueue,
-) {
-    if let Err(e) = ff::init() {
-        let reason = format!("ffmpeg init failed: {e}");
-        report(cfg.json, &reason);
-        stats.backend.store(3, Relaxed);
-        *stats
-            .error
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(reason);
-        return;
-    }
-    report(cfg.json, &cfg.summary());
-    for note in &cfg.notes {
-        report(cfg.json, note);
-    }
-    let mut enc: Option<Enc> = None;
-    // A failed encoder opens again on a backoff (`reopen.rs`), never left off for good.
-    let mut reopen = reopen::Reopen::default();
-    let mut vram = vram_watch::VramWatch::default();
-    let mut small = SmallFrames::default();
-    // After one fallback the engine stays on H.264: reopening on a resolution
-    // change must not flap codecs or re-log the same failure.
-    let mut want = cfg.codec;
-    // One RAM budget and spill file for the whole run; every reopened ring shares it.
-    let json = cfg.json;
-    let spill = Arc::new(Spill::from_system(cfg.buffer_secs, cfg.bitrate, audio.len(), Arc::new(move |m: &str| report(json, m))));
+/// The retry schedule (tests shorten it).
+fn retry_delays(_stats: &EncStats) -> [Duration; 4] {
+    #[cfg(test)]
+    return _stats.faults.delays(reopen::RETRY_DELAYS);
+    #[cfg(not(test))]
+    reopen::RETRY_DELAYS
+}
 
-    loop {
-        // Saves first: they're rare and user-facing latency matters (R10).
-        while let Ok(req) = commands.try_recv() {
-            handle_save(enc.as_ref(), req, &stats, &audio, &saver);
-        }
+/// `open_encoder` for this frame (tests can make it fail).
+fn open_checked(cfg: &Config, want: Codec, frame: &PacedFrame, _stats: &EncStats) -> Result<(Enc, Option<String>), String> {
+    #[cfg(test)]
+    if let Some(e) = _stats.faults.open(gpu_pool_of(frame)) {
+        return Err(e);
+    }
+    open_encoder(cfg, want, frame.width, frame.height, frame.gpu.as_ref())
+}
 
-        match frames.recv_timeout(std::time::Duration::from_millis(100)) {
-            Ok(mut frame) => {
-                // After a refusal, GPU frames still queued are dropped (capture has switched).
-                if frame.gpu.is_some() && stats.gpu_refused.load(Relaxed) {
-                    continue;
-                }
-                if small.skips(&frame, |note| report(cfg.json, note)) {
-                    continue;
-                }
-                // GPU frames arrive already cropped / padded to a stable size.
-                if let Some(active) = enc.as_ref().filter(|_| frame.gpu.is_none()) {
-                    if let Err(e) = normalize_small_size_jitter(
-                        &mut frame,
-                        active.width,
-                        active.height,
-                    ) {
-                        report(cfg.json, &format!("capture frame rejected: {e}"));
-                        continue;
-                    }
-                }
-                let resolution_changed = enc.as_ref().is_some_and(|e| {
-                    e.width != (frame.width & !1) || e.height != (frame.height & !1)
-                });
-                let input_changed = enc.as_ref().is_some_and(|e| e.gpu_pool != gpu_pool_of(&frame));
-                if resolution_changed || input_changed {
-                    report(
-                        cfg.json,
-                        if resolution_changed {
-                            "capture resolution changed; reopening NVENC and resetting replay buffer"
-                        } else {
-                            "capture input changed (GPU / CPU frames); reopening NVENC and resetting replay buffer"
-                        },
-                    );
-                    enc = None;
-                    stats.clear_buffer();
-                }
-                let input = reopen::Input { width: frame.width, height: frame.height, pool: gpu_pool_of(&frame) };
-                if enc.is_none() && reopen.may_open(input, Instant::now()) {
-                    enc = match open_encoder(&cfg, want, frame.width, frame.height, frame.gpu.as_ref(), Some(Arc::clone(&spill))) {
-                        Ok((e, fallback)) => {
-                            crate::longrec::tap::on_encoder_open(&e.encoder); // long-recording hook
-                            if let Some(note) = fallback {
-                                report(cfg.json, &note);
-                                want = e.codec;
-                            }
-                            stats.codec.store(e.codec.index(), Relaxed);
-                            stats.backend.store(1, Relaxed);
-                            *stats.error.lock().unwrap_or_else(|e| e.into_inner()) = None;
-                            report(
-                                cfg.json,
-                                &format!("encoder up: {} {}x{}", e.backend, e.width, e.height),
-                            );
-                            let _ = crate::gpu_frames::adapter::vram_line("encoder open").inspect(|l| report(cfg.json, l));
-                            vram.opened();
-                            reopen.opened(Instant::now());
-                            Some(e)
-                        }
-                        Err(e) => {
-                            stats.backend.store(3, Relaxed);
-                            *stats.error.lock().unwrap_or_else(|e| e.into_inner()) =
-                                Some(e.clone());
-                            report(cfg.json, &format!("encoder init failed: {e}"));
-                            reopen::open_failed(&mut reopen, input, frame.gpu.is_some(), &stats, cfg.json);
-                            None
-                        }
-                    };
-                }
-                let mut fatal_encode_error = None;
-                if let Some(enc) = enc.as_mut() {
-                    let idx = frame.idx;
-                    match enc.encode(frame, &stats) {
-                        Ok(()) => reopen.encoded(Instant::now()),
-                        Err(e) => {
-                            report(cfg.json, &format!("encode error at frame {idx}: {e}"));
-                            fatal_encode_error = Some(e);
-                        }
-                    }
-                }
-                let _ = vram.due().inspect(|l| report(cfg.json, l));
-                if let Some(reason) = fatal_encode_error {
-                    crate::longrec::tap::on_encoder_failed(&format!("NVENC encode failed: {reason}")); // long-recording hook
-                    enc = None;
-                    reopen::encode_failed(&mut reopen, input, &stats, cfg.json);
-                    stats.backend.store(3, Relaxed);
-                    *stats
-                        .error
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()) =
-                        Some(format!("NVENC encode failed: {reason}"));
-                    stats.clear_buffer();
-                }
-            }
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
-        }
-    }
-    // Quit: saves requested before the frame channel closed still get written
-    // (the saver drains them within the shutdown budget).
-    while let Ok(req) = commands.try_recv() {
-        handle_save(enc.as_ref(), req, &stats, &audio, &saver);
-    }
+/// The GPU-path retry schedule (tests shorten it).
+fn probe_delays(_stats: &EncStats) -> [Duration; 4] {
+    #[cfg(test)]
+    return _stats.faults.probe_delays(reopen::PROBE_DELAYS);
+    #[cfg(not(test))]
+    reopen::PROBE_DELAYS
 }
 
 /// The frames pool a GPU frame comes from (`None` for an RGBA frame).
@@ -354,7 +251,6 @@ fn open_encoder(
     w: u32,
     h: u32,
     gpu: Option<&crate::gpu_frames::HwFrame>,
-    spill: Option<Arc<Spill>>,
 ) -> Result<(Enc, Option<String>), String> {
     let (w, h) = (w & !1, h & !1);
     if w == 0 || h == 0 {
@@ -367,20 +263,11 @@ fn open_encoder(
     let enc = Enc {
         params: OwnedParams::from_encoder(&encoder),
         encoder,
-        ring: PacketRing::with_spill(cfg.buffer_secs as u64 * 1_000_000, spill),
-        dropped_noted: false,
-        nominal_fps: cfg.fps,
-        bitrate: cfg.bitrate,
         codec: opened.codec,
-        quality: cfg.quality,
         width: w,
         height: h,
         backend: opened.codec.nvenc(),
-        last_frame: None,
-        last_gpu: None,
-        last_content: None,
         gpu_pool,
-        last_input_pts: None,
     };
     Ok((enc, opened.fallback))
 }
@@ -433,47 +320,42 @@ fn try_open(
 }
 
 impl Enc {
-    fn ring_capacity_secs(&self) -> u64 {
-        self.ring.capacity_us() / 1_000_000
-    }
-
-    /// Encode one paced frame; drain packets into the ring. Keeps the raw
+    /// Encode one paced frame; drain packets into the replay buffer, which keeps the raw
     /// frame afterwards as the thumbnail/still source.
-    fn encode(&mut self, frame: PacedFrame, stats: &EncStats) -> Result<(), String> {
-        self.last_content = frame.content;
+    fn encode(&mut self, frame: PacedFrame, stats: &EncStats, replay: &mut Replay) -> Result<(), String> {
+        #[cfg(test)]
+        if let Some(e) = stats.faults.encode() {
+            return Err(e);
+        }
+        replay.last_content = frame.content;
         match frame.gpu {
-            Some(gpu) => self.send_gpu(frame.idx, gpu)?,
+            Some(mut gpu) => {
+                gpu.set_pts(frame.idx as i64);
+                // NVENC keeps its own reference to the D3D11 frame until encoded.
+                let ret = unsafe { ff::ffi::avcodec_send_frame(self.encoder.as_mut_ptr(), gpu.as_ptr()) };
+                if ret < 0 {
+                    return Err(ff::Error::from(ret).to_string());
+                }
+                replay.last_gpu = Some(gpu);
+                replay.last_frame = None;
+            }
             None => {
                 self.send_rgba(frame.idx, frame.width, &frame.rgba)?;
-                self.last_frame = Some((frame.width, frame.height, Arc::new(frame.rgba)));
+                replay.last_frame = Some((frame.width, frame.height, Arc::new(frame.rgba)));
             }
         }
-        self.drain(stats)
-    }
-
-    /// Hand a D3D11 frame to NVENC (it keeps its own reference until encoded).
-    fn send_gpu(&mut self, idx: u64, mut gpu: crate::gpu_frames::HwFrame) -> Result<(), String> {
-        gpu.set_pts(idx as i64);
-        let ret = unsafe { ff::ffi::avcodec_send_frame(self.encoder.as_mut_ptr(), gpu.as_ptr()) };
-        if ret < 0 {
-            return Err(ff::Error::from(ret).to_string());
-        }
-        self.last_input_pts = Some(idx);
-        self.last_gpu = Some(gpu);
-        self.last_frame = None;
-        Ok(())
+        replay.last_input_pts = Some(frame.idx);
+        self.drain(stats, replay)
     }
 
     fn send_rgba(&mut self, idx: u64, width: u32, rgba: &[u8]) -> Result<(), String> {
         let mut vf = ff::frame::Video::new(ff::format::Pixel::RGBZ, self.width, self.height);
         fill_rgbz(&mut vf, self.width.min(width), self.height, rgba);
         vf.set_pts(Some(idx as i64));
-        self.encoder.send_frame(&vf).map_err(|e| e.to_string())?;
-        self.last_input_pts = Some(idx);
-        Ok(())
+        self.encoder.send_frame(&vf).map_err(|e| e.to_string())
     }
 
-    fn drain(&mut self, stats: &EncStats) -> Result<(), String> {
+    fn drain(&mut self, stats: &EncStats, replay: &mut Replay) -> Result<(), String> {
         let mut pkt = ff::Packet::empty();
         loop {
             match self.encoder.receive_packet(&mut pkt) {
@@ -485,41 +367,33 @@ impl Enc {
             let pts = pkt.pts().unwrap_or(0).max(0) as u64;
             // NVENC may leave packet duration unset. The next PTS is the
             // authoritative duration for VFR; the current tail gets a nominal
-            // value until it can be refined by the next packet.
-            if let Some(previous_pts) = self.ring.last_pts_us() {
+            // value until it can be refined by the next packet (across an encoder
+            // gap, that holds the last frame through it).
+            if let Some(previous_pts) = replay.ring.last_pts_us() {
                 if pts > previous_pts {
-                    self.ring.set_last_duration_us(pts - previous_pts);
+                    replay.ring.set_last_duration_us(pts - previous_pts);
                 }
             }
             // The one payload copy; save windows share it by refcount.
             let data: Arc<[u8]> = Arc::from(data);
             crate::longrec::tap::tap_packet(pts, pkt.is_key(), &data); // long-recording hook
-            self.ring.push(EncodedPacket {
+            replay.push(EncodedPacket {
                 frame_idx: pts,
-                duration_us: (1_000_000 / self.nominal_fps.max(1) as u64).max(1),
+                duration_us: (1_000_000 / replay.nominal_fps.max(1) as u64).max(1),
                 keyframe: pkt.is_key(),
                 data: Payload::from(data),
             });
             stats.encoded_frames.fetch_add(1, Relaxed);
         }
-        if !self.dropped_noted && self.ring.dropped_for_ram() > 0 {
-            self.dropped_noted = true;
+        if !replay.dropped_noted && replay.ring.dropped_for_ram() > 0 {
+            replay.dropped_noted = true;
             eprintln!(
                 "[recall] replay buffer: RAM budget full and no spill file; keeping the last {:.0} s instead of {} s",
-                self.ring.span_us() as f64 / 1e6,
-                self.ring_capacity_secs()
+                replay.ring.span_us() as f64 / 1e6,
+                replay.ring_capacity_secs()
             );
         }
-        stats
-            .buffered_frames
-            .store(self.ring.span_frames(), Relaxed);
-        stats.buffered_us.store(self.ring.span_us(), Relaxed);
-        stats
-            .buffer_start_us
-            .store(self.ring.first_pts_us().unwrap_or(0), Relaxed);
-        stats
-            .buffered_bytes
-            .store(self.ring.bytes() as u64, Relaxed);
+        replay.publish(stats);
         Ok(())
     }
 }

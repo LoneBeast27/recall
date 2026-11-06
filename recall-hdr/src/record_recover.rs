@@ -1,5 +1,10 @@
-//! Engine restart after a lasting encoder failure (the controller's half of encoder
-//! recovery; the engine first retries the open itself, `recall/src/encoder/reopen.rs`).
+//! Engine restart after a lasting encoder failure: the last resort of encoder recovery.
+//!
+//! The engine goes first (`recall/src/encoder/reopen.rs`): it rebuilds the encoder in
+//! place keeping the replay buffer, asks for a capture restart, falls back to CPU copies,
+//! and meanwhile reports `encoder: recovering` (session `recovering`). It reports
+//! `failed` only once that plan is spent (5 failed reopens or 60 s without an encoder).
+//! The controller is keyed off that engine state, not off a shorter timer.
 //!
 //! When the session sits in `error` from `encoder: failed` for longer than
 //! [`ERROR_GRACE`], the engine is restarted as an INTENDED restart (a retarget to the same
@@ -47,8 +52,11 @@ impl Seen {
     pub fn of(state: &str, health: EngineHealth) -> Seen {
         match state {
             "error" if health != EngineHealth::GivenUp => Seen::EncoderFailed,
-            "recording" => Seen::Recording,
-            "starting" => Seen::Starting,
+            // CPU copies still record: nothing to restart.
+            "recording" | "degraded" => Seen::Recording,
+            // The engine's own recovery (encoder rebuild, capture restart, CPU copies) goes
+            // first; it says "failed" when that is spent. The restart here is the last resort.
+            "starting" | "recovering" => Seen::Starting,
             _ => Seen::Idle,
         }
     }

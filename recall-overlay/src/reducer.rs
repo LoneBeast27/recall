@@ -312,7 +312,10 @@ impl Reducer {
 
         let encoder = event.get("encoder").and_then(Value::as_str).unwrap_or("starting");
         let encoder_error = event.get("encoder_error").and_then(Value::as_str);
-        let new_failure = (encoder_error.is_some() || encoder == "failed")
+        // "recovering": the engine rebuilds its encoder and keeps the buffer; its error is
+        // the reason, not a failure (the session notice says "Encoder problem").
+        let failed = encoder == "failed" || (encoder_error.is_some() && encoder != "recovering");
+        let new_failure = failed
             && (self.view.state != RecorderState::Failed || self.encoder_error.as_deref() != encoder_error);
         self.encoder_error = encoder_error.map(str::to_owned);
         if new_failure && !self.encoder_duplicate(EncoderSource::Engine, now) {
@@ -320,12 +323,13 @@ impl Reducer {
             let notice = NoticeView::new(Tone::Failure, "Encoder failed", reason.clone(), false).emphasized();
             self.set_transient("Encoder failed", reason, now + FAILURE_FOR, notice);
         }
-        let state = if encoder_error.is_some() || encoder == "failed" {
+        let state = if failed {
             RecorderState::Failed
         } else {
             match encoder {
-                "h264_nvenc" => RecorderState::Ready,
-                "starting" => RecorderState::Starting,
+                // "degraded": recording from CPU copies; replay ready all the same.
+                "h264_nvenc" | "degraded" => RecorderState::Ready,
+                "starting" | "recovering" => RecorderState::Starting,
                 _ => RecorderState::Stopped,
             }
         };
@@ -333,7 +337,11 @@ impl Reducer {
         let buffer_changed = self.buffer_secs != buffer;
         self.buffer_secs = buffer;
         let fps = event.get("fps").and_then(Value::as_u64).unwrap_or(0);
-        let encoder_label = if encoder == "h264_nvenc" { "NVENC" } else { encoder };
+        let encoder_label = match encoder {
+            "h264_nvenc" => "NVENC",
+            "degraded" => "NVENC (CPU copies)",
+            other => other,
+        };
         self.status_metrics = format!("{buffer}s buffer · Capture {fps} FPS · {encoder_label}");
         let notification = self.active_transient(now);
         let metrics = self

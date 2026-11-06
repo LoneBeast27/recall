@@ -63,6 +63,9 @@ pub struct GpuSink {
     /// frames (capture then switches to the CPU path).
     pub send: Box<dyn Fn(u64, crate::gpu_frames::HwFrame, Option<Rect>) -> bool + Send + Sync>,
     pub log: Box<dyn Fn(String) + Send + Sync>,
+    /// True once when the encoder wants GPU frames again after refusing them: a capture on
+    /// CPU copies tries the zero-copy path again (`encoder/reopen.rs` `GpuProbe`).
+    pub retry_gpu: Box<dyn Fn() -> bool + Send + Sync>,
 }
 
 /// A captured frame, tightly packed f16 RGBA (8 bytes/pixel), ready to upload.

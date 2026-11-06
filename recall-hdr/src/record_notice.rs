@@ -42,6 +42,8 @@ pub enum Situation {
     Draining { secs: u64 },
     /// The encoder failed; `gave_up` = the engine crashed repeatedly.
     Encoder { gave_up: bool },
+    /// The engine is rebuilding its encoder; the replay buffer is kept.
+    Recovering,
 }
 
 impl Situation {
@@ -54,7 +56,9 @@ impl Situation {
             // The caller knows the drain's length (`Controller::announce`).
             "draining" => None,
             "error" => Some(Situation::Encoder { gave_up }),
-            "recording" => Some(match wanted {
+            "recovering" => Some(Situation::Recovering),
+            // CPU copies: still recording this game (the tray line says how).
+            "recording" | "degraded" => Some(match wanted {
                 EngineTarget::Window(t) => Situation::Game(t.name.clone()),
                 EngineTarget::Desktop => Situation::Desktop,
                 EngineTarget::Off => Situation::Waiting,
@@ -69,7 +73,7 @@ impl Situation {
             Situation::Desktop => "desktop",
             Situation::Paused => "paused",
             Situation::Waiting | Situation::Draining { .. } => "waiting",
-            Situation::Encoder { .. } => "encoder",
+            Situation::Encoder { .. } | Situation::Recovering => "encoder",
         }
     }
 
@@ -79,7 +83,7 @@ impl Situation {
             Situation::Paused => "Recording paused",
             Situation::Waiting => "Waiting for a game",
             Situation::Draining { .. } => "Game closed",
-            Situation::Encoder { gave_up: false } => "Encoder problem",
+            Situation::Encoder { gave_up: false } | Situation::Recovering => "Encoder problem",
             Situation::Encoder { gave_up: true } => "Recorder stopped",
         }
     }
@@ -92,13 +96,14 @@ impl Situation {
             Situation::Waiting => "Not recording".into(),
             Situation::Draining { secs } => format!("Last clip kept for {}", crate::record_drain::clock(*secs)),
             Situation::Encoder { gave_up: false } => "Clips are not being recorded".into(),
+            Situation::Recovering => "Retrying; the replay buffer is kept".into(),
             Situation::Encoder { gave_up: true } => "It failed repeatedly (see recall-hdr.log)".into(),
         }
     }
 
     /// Announced with the failure tone instead of the tick.
     pub fn is_failure(&self) -> bool {
-        matches!(self, Situation::Encoder { .. })
+        matches!(self, Situation::Encoder { .. } | Situation::Recovering)
     }
 }
 
@@ -143,7 +148,7 @@ impl NoticeTracker {
             return None;
         }
         let first = self.current.is_none();
-        let was_failing = matches!(self.current, Some(Situation::Encoder { .. }));
+        let was_failing = matches!(self.current, Some(Situation::Encoder { .. } | Situation::Recovering));
         let drain_ended = matches!(self.current, Some(Situation::Draining { .. }));
         self.current = Some(next.clone());
         if first && next == Situation::Waiting {
@@ -331,6 +336,27 @@ mod tests {
         assert_eq!(said[1]["kind"], "encoder");
         assert_eq!(said[2], serde_json::json!({"type":"notice","kind":"game","title":"Recording again","detail":"VALORANT"}));
         assert_eq!(said[4]["title"], "Recording", "a later pickup is plain again");
+    }
+
+    #[test]
+    fn a_recovering_encoder_is_announced_and_recording_after_it_says_recording_again() {
+        let t0 = Instant::now();
+        let mut tracker = NoticeTracker::new();
+        let mut said = Vec::new();
+        for (secs, state, target) in [
+            (0, "recording", game("VALORANT")),
+            (60, "recovering", game("VALORANT")),
+            (62, "recording", game("VALORANT")), // the engine rebuilt its encoder
+            (120, "degraded", game("VALORANT")), // CPU copies: still this game, no new notice
+        ] {
+            if let Some(s) = tracker.observe(Situation::of(state, &target, false), t0 + Duration::from_secs(secs)) {
+                said.push(serde_json::from_str::<Value>(&tracker.notice_body(&s)).unwrap());
+            }
+        }
+        assert_eq!(said.len(), 3, "{said:?}");
+        assert_eq!(said[1], serde_json::json!({"type":"notice","kind":"encoder","title":"Encoder problem","detail":"Retrying; the replay buffer is kept"}));
+        assert_eq!(said[2]["title"], "Recording again");
+        assert!(Situation::of("recovering", &game("x"), false).unwrap().is_failure());
     }
 
     #[test]
