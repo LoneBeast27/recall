@@ -457,7 +457,8 @@ fn spawn_stdin_reader(
                     | protocol::Command::HudProbe
                     | protocol::Command::RecordStart
                     | protocol::Command::RecordStop
-                    | protocol::Command::RecordToggle),
+                    | protocol::Command::RecordToggle
+                    | protocol::Command::RecordFail { .. }),
                 ) => {
                     extras.handle(&cmd);
                 }

@@ -75,6 +75,8 @@ enum Control {
     Stop,
     Toggle { source: String, start: StartClock },
     Mark { at_us: u64 },
+    /// End a running recording as failed (every part kept, `recording_failed`).
+    Fail { reason: String },
     Shutdown,
 }
 
@@ -112,6 +114,12 @@ impl LongRec {
 
     pub fn toggle(&self, source: &str, start: StartClock) {
         let _ = self.ctl.send(Control::Toggle { source: source.to_string(), start });
+    }
+
+    /// End a running recording as failed now (`record_fail`): the writer thread finishes
+    /// it whatever the encoder does, so a hung encoder cannot hold the file open.
+    pub fn fail(&self, reason: &str) {
+        let _ = self.ctl.send(Control::Fail { reason: reason.to_string() });
     }
 
     /// A bookmark at capture time `at_us` (kept if a recording is running).
@@ -195,6 +203,7 @@ impl<F: SinkFactory> Writer<F> {
                 }
             }
             Control::Mark { at_us } => self.recorder.mark(at_us),
+            Control::Fail { reason } => self.fail(&reason, data),
             Control::Shutdown => {}
         }
     }
@@ -268,6 +277,20 @@ impl<F: SinkFactory> Writer<F> {
             None => (None, machine::Cause::Encoder),
         };
         self.recorder.encoder_reopened(at.unwrap_or_else(|| self.now()), cause, video)
+    }
+
+    /// End the running recording as failed (`record_fail`): what is queued is written
+    /// first, then it is finished, every part named in `recording_failed`.
+    fn fail(&mut self, reason: &str, data: &Receiver<Data>) {
+        if !self.recorder.is_active() {
+            return self.events(vec![Event::Log("record_fail ignored: no long recording is running".into())]);
+        }
+        tap::set_active(false);
+        while let Ok(item) = data.try_recv() {
+            self.data(item);
+        }
+        let events = self.recorder.encoder_failed(reason);
+        self.events(events);
     }
 
     /// The live encoder of this recording died for good: write what it

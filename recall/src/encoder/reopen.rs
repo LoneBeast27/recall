@@ -3,16 +3,17 @@
 //! A fatal encode error or a failed open marks the input (frame size + frames pool)
 //! failed; the replay buffer is kept (`replay.rs`). The same input is tried again after
 //! 2 s, 5 s, 10 s, then every 30 s; a frame of another size or from another pool (a
-//! capture restart brings a new D3D11 device) gets an attempt at once. When no frame comes
-//! to try (a dead capture), a retry that is a further 2 s overdue counts as failed, so the
-//! plan moves on without frames.
+//! capture restart brings a new D3D11 device) gets an attempt at once. Only real open and
+//! encode errors count: a retry no frame comes to try (a static game, a paused menu: VFR,
+//! no WGC repeats) waits as long as it takes and escalates nothing. A capture that really
+//! died is the capture watchdog's (`capture_watchdog.rs`, on evidence only: thread ended,
+//! start failed, restart asked).
 //!
 //! The engine's own plan, in order: retry in place; every [`RESTART_EVERY`] (3) failed
 //! reopens ask for a capture restart (after DXGI device-removed only a new device lets
 //! NVENC open), the first about 17 s after the error; a GPU open that still fails after
 //! that ([`CPU_FALLBACK_AFTER`]) falls back to CPU copies. Only after
-//! [`HAND_OFF_AFTER`] failed reopens, or [`HAND_OFF_AGE`] without an encoder, does status
-//! say `failed`, which is what the controller's engine restart waits for; until then it
+//! [`HAND_OFF_AFTER`] failed reopens does status say `failed`, which is what the controller's engine restart waits for; until then it
 //! says `recovering`. An encoder that opens and fails again at once stays in the same
 //! episode (no 2 s loop); one minute of clean encoding ends it.
 //!
@@ -31,9 +32,8 @@ pub(crate) const RESTART_EVERY: u32 = 3;
 /// back to CPU copies, as a first open refused by NVENC does.
 pub(crate) const CPU_FALLBACK_AFTER: u32 = 4;
 /// The engine's plan is spent: status says `failed` (the controller may restart the engine).
+/// Counts real errors only; time without frames counts for nothing.
 pub(crate) const HAND_OFF_AFTER: u32 = 5;
-/// ...or once an episode has gone this long without an encoder.
-pub(crate) const HAND_OFF_AGE: Duration = Duration::from_secs(60);
 /// An encoder that has run this long without an error ends the failure episode.
 pub(crate) const STABLE_AFTER: Duration = Duration::from_secs(60);
 /// A GPU try that brings no answer this long (no GPU frame opened or was refused: the
@@ -108,10 +108,8 @@ impl Reopen {
     }
 
     /// The engine's own plan is spent: status `failed` instead of `recovering`.
-    pub fn handed_off(&self, now: Instant) -> bool {
-        self.since.is_some_and(|since| {
-            self.reopen_failures >= HAND_OFF_AFTER || (self.retry.is_some() && now.saturating_duration_since(since) >= HAND_OFF_AGE)
-        })
+    pub fn handed_off(&self) -> bool {
+        self.since.is_some() && self.reopen_failures >= HAND_OFF_AFTER
     }
 
     /// The encoder failed on `input` (an encode error, or an open that did not work).
@@ -133,10 +131,10 @@ impl Reopen {
         }
     }
 
-    /// A due retry no frame came to try: it counts as failed.
-    pub fn stalled(&mut self, now: Instant) -> Option<AfterFail> {
-        let (input, at) = self.retry?;
-        (now >= at + self.delays[0]).then(|| self.failed(input, now))
+    /// The status backend while recovering with no encoder open (3 `failed`, 4
+    /// `recovering`), checked every loop turn. Time alone never changes it.
+    pub fn status(&self) -> Option<u64> {
+        self.recovering().then(|| if self.handed_off() { 3 } else { 4 })
     }
 
     /// The encoder opened: stop waiting (the episode lasts until it has run cleanly).
