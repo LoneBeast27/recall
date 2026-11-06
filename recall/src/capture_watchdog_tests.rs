@@ -67,8 +67,6 @@ struct Fake {
     stops: u32,
     /// A pending `restart_reason` (taken when read).
     reason: Option<&'static str>,
-    /// The encoder's count while it records.
-    frames: Option<u64>,
 }
 
 impl CaptureSlot for Fake {
@@ -95,17 +93,13 @@ impl CaptureSlot for Fake {
     fn restart_reason(&mut self) -> Option<&'static str> {
         self.reason.take()
     }
-    fn encoded_frames(&self) -> Option<u64> {
-        self.frames
-    }
 }
 
-/// A game window in front, on the user's desktop with the display on.
-const SHOWN: Screen = Screen { iconic: false, locked: false, display_off: false, game_in_front: true };
-const MINIMIZED: Screen = Screen { iconic: true, game_in_front: false, ..SHOWN };
-const LOCKED: Screen = Screen { locked: true, game_in_front: false, ..SHOWN };
+/// The game window shown, on the user's desktop with the display on.
+const SHOWN: Screen = Screen { iconic: false, locked: false, display_off: false };
+const MINIMIZED: Screen = Screen { iconic: true, ..SHOWN };
+const LOCKED: Screen = Screen { locked: true, ..SHOWN };
 const DISPLAY_OFF: Screen = Screen { display_off: true, ..SHOWN };
-const BEHIND: Screen = Screen { game_in_front: false, ..SHOWN };
 
 /// A capture whose thread ended at t0, then `screen` for seconds 0..=to.
 fn died_then(screen: Screen, to: u64) -> (Fake, Instant) {
@@ -189,56 +183,77 @@ fn a_restart_asked_while_locked_waits_for_the_user() {
     assert_eq!((f.stops, f.starts), (1, 1), "replaced once the user is back");
 }
 
-// A recording whose encoded-frame count stopped (`capture_stall` through `watch`): only
-// a capture that ended is restarted; a still count alone is logged.
+// No new frames on their own never restart anything (the encoder is VFR, WGC sends no
+// repeats): only a capture that ended or was asked to change is replaced.
 
-/// A running capture recording a stuck count, `screen` for seconds 0..=to.
-fn stalled_with(screen: Screen, to: u64) -> Fake {
+/// A running capture that delivers nothing, ticked once a second for `0..=to`.
+fn quiet_for(screen: Screen, to: u64) -> Fake {
     let t0 = Instant::now();
-    let mut f = Fake { capture: true, start_ok: true, screen, frames: Some(900), ..Default::default() };
+    let mut f = Fake { capture: true, start_ok: true, screen, ..Default::default() };
     f.backoff.started(t0);
     for s in 0..=to {
-        watch(&mut f, t0 + secs(s));
+        tick(&mut f, t0 + secs(s));
     }
     f
 }
 
 #[test]
 fn a_static_foreground_game_for_5_minutes_is_never_restarted() {
-    // A paused game, a menu or a loading screen: no new WGC frames, so the encoder count
-    // stands still (it encodes only delivered frames, no CFR repeats). The capture is alive.
-    let f = stalled_with(SHOWN, 300);
+    // A paused game, a menu, a load screen or a shader compile: the capture is alive.
+    let f = quiet_for(SHOWN, 300);
     assert_eq!((f.stops, f.starts), (0, 0), "no restart on a still picture");
 }
 
 #[test]
-fn a_still_count_with_a_closed_capture_is_restarted_once() {
-    // Positive evidence: the WGC item closed (or the handler failed), so the thread ended.
+fn a_dead_thread_or_a_closed_item_is_restarted_once() {
+    // A handler error or GraphicsCaptureItem.Closed both end the capture thread.
     let t0 = Instant::now();
-    let mut f = Fake { capture: true, start_ok: true, screen: SHOWN, frames: Some(900), ..Default::default() };
+    let mut f = Fake { capture: true, start_ok: true, screen: SHOWN, ..Default::default() };
     f.backoff.started(t0 - secs(60));
     f.finished = true;
     for s in 0..=300 {
-        watch(&mut f, t0 + secs(s));
+        tick(&mut f, t0 + secs(s));
     }
     assert_eq!((f.stops, f.starts), (1, 1));
 }
 
+// `tick`: one periodic tick opens at most one capture; `restart_if_asked` backs off.
+
 #[test]
-fn no_stall_restart_while_minimized_behind_a_window_locked_or_the_display_is_off() {
-    for (why, screen) in [("minimized", MINIMIZED), ("behind", BEHIND), ("locked", LOCKED), ("display off", DISPLAY_OFF)] {
-        let f = stalled_with(screen, 60);
-        assert_eq!((f.stops, f.starts), (0, 0), "{why}: 60 s");
-    }
+fn a_start_and_a_pending_request_in_one_tick_open_one_capture() {
+    let t0 = Instant::now();
+    let mut f = Fake { start_ok: true, screen: SHOWN, reason: Some("(capture source changed)"), ..Default::default() };
+    note_start(&mut f.backoff, Err("device lost".into()), t0 - secs(1)); // the 1 s wait ends at t0
+    assert_eq!(tick(&mut f, t0), Step::Start);
+    assert_eq!((f.starts, f.stops), (1, 0), "one device, the request is taken");
+    tick(&mut f, t0 + secs(1));
+    assert_eq!((f.starts, f.stops), (1, 0), "and does not tear the new capture down");
 }
 
 #[test]
-fn a_monitor_capture_or_an_encoder_not_recording_never_stalls() {
-    assert_eq!(stalled_with(Screen { game_in_front: false, ..SHOWN }, 60).stops, 0, "monitor capture");
+fn requests_in_a_row_replace_the_capture_on_a_1_2_5_10_s_backoff() {
     let t0 = Instant::now();
-    let mut f = Fake { capture: true, screen: SHOWN, frames: None, ..Default::default() };
-    for s in 0..=60 {
-        watch(&mut f, t0 + secs(s));
+    let mut f = Fake { capture: true, start_ok: true, screen: SHOWN, ..Default::default() };
+    let mut at = Vec::new();
+    for s in 0..=40 {
+        f.reason = Some("(capture source changed)"); // asked every second
+        let before = f.starts;
+        tick(&mut f, t0 + secs(s));
+        if f.starts > before {
+            at.push(s);
+        }
     }
-    assert_eq!(f.stops, 0, "starting / recovering");
+    assert_eq!(at, [0, 1, 3, 8, 18, 28, 38]);
+}
+
+#[test]
+fn a_request_inside_the_backoff_is_kept_for_when_it_runs_out() {
+    let t0 = Instant::now();
+    let mut f = Fake { capture: true, start_ok: true, screen: SHOWN, reason: Some("(a)"), ..Default::default() };
+    tick(&mut f, t0); // replaced, a 1 s wait starts
+    f.reason = Some("(b)");
+    tick(&mut f, t0 + Duration::from_millis(500));
+    assert_eq!(f.starts, 1, "inside the wait");
+    tick(&mut f, t0 + secs(1));
+    assert_eq!(f.starts, 2, "kept, then honoured");
 }

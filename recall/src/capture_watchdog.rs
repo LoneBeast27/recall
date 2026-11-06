@@ -5,8 +5,15 @@
 //! over a [`CaptureSlot`] (the [`App`], or a fake in the tests).
 //!
 //! It also restarts a capture the encoder or the capture thread asked to replace
-//! ([`restart_if_asked`], also with no capture held). A recording that stands still is
-//! only logged ([`crate::capture_stall`]): with no new frames on their own nothing restarts.
+//! ([`restart_if_asked`], also with no capture held), on its own backoff. [`tick`] runs
+//! both, so one periodic tick opens at most one capture (one D3D11 device).
+//!
+//! It acts only on evidence that capture is dead or must change: the thread ended (a
+//! handler error, or the WGC item closed: windows-capture posts WM_QUIT on
+//! `GraphicsCaptureItem.Closed`), a start failed, or capture / the encoder asked
+//! (`restart_reason`). No new frames on their own never restart anything: the encoder
+//! is VFR and WGC sends no repeats, so a load screen, a shader compile or a pause menu
+//! sends none while the capture is alive.
 //!
 //! While the target is minimized, the session is locked or the display is off
 //! (`capture::screen`) nothing is reaped, started or restarted: a start then fails or
@@ -16,7 +23,6 @@
 use std::time::{Duration, Instant};
 
 use crate::capture::screen::{self, Screen};
-use crate::capture_stall::{Stall, STALL_AFTER};
 use crate::App;
 
 /// Waits between tries, by the number of failures so far (the last one repeats).
@@ -42,8 +48,11 @@ pub(crate) struct Backoff {
     failures: u32,
     next_try: Option<Instant>,
     started_at: Option<Instant>,
-    /// The running game capture's recording, for [`watch`]'s stall log.
-    pub(crate) stall: Stall,
+    /// Restarts `restart_if_asked` made in a row and the last one's time (its backoff).
+    asked_restarts: u32,
+    last_asked_restart: Option<Instant>,
+    /// A request that came inside that backoff, kept for when it runs out.
+    deferred: Option<&'static str>,
 }
 
 impl Backoff {
@@ -85,6 +94,23 @@ impl Backoff {
         self.next_try.get_or_insert(now);
     }
 
+    /// A held capture may be replaced on request now (1, 2, 5, 10 s between replacements;
+    /// one that ran [`STABLE`] starts over). Counts the replacement when it says yes.
+    pub(crate) fn may_replace(&mut self, now: Instant) -> bool {
+        if let Some(last) = self.last_asked_restart {
+            let since = now.duration_since(last);
+            if since < Self::delay(self.asked_restarts) {
+                return false;
+            }
+            if since >= STABLE {
+                self.asked_restarts = 0;
+            }
+        }
+        self.asked_restarts = self.asked_restarts.saturating_add(1);
+        self.last_asked_restart = Some(now);
+        true
+    }
+
     fn schedule(&mut self, now: Instant) -> Duration {
         self.failures = self.failures.saturating_add(1);
         let wait = Self::delay(self.failures);
@@ -115,9 +141,23 @@ pub(crate) trait CaptureSlot {
     fn screen(&self) -> Screen;
     /// Why the capture must be replaced, if it must (taken: `CaptureShared::restart_reason`).
     fn restart_reason(&mut self) -> Option<&'static str>;
-    /// The encoded-frame count while the encoder records (`None` while starting,
-    /// recovering, failed or without an encoder).
-    fn encoded_frames(&self) -> Option<u64>;
+}
+
+/// `periodic_update`'s capture step: [`watch`], then [`restart_if_asked`] only when watch
+/// opened nothing. A start already uses the current source, so a request pending then is
+/// taken and dropped (it would tear the new capture down at once).
+pub(crate) fn tick(slot: &mut impl CaptureSlot, now: Instant) -> Step {
+    let step = watch(slot, now);
+    match step {
+        Step::Idle => restart_if_asked(slot, now),
+        Step::Start => {
+            if let Some(why) = slot.backoff().deferred.take().or_else(|| slot.restart_reason()) {
+                eprintln!("[recall] capture restart asked {why}; the start just made uses it");
+            }
+        }
+        Step::Reap => {}
+    }
+    step
 }
 
 /// One watchdog tick; returns what it did.
@@ -129,15 +169,7 @@ pub(crate) fn watch(slot: &mut impl CaptureSlot, now: Instant) -> Step {
         return Step::Idle;
     }
     match step {
-        Step::Idle => {
-            let frames = slot.encoded_frames().filter(|_| has_capture);
-            if slot.backoff().stall.observe(frames, screen.watched(), now) {
-                eprintln!(
-                    "[recall] capture: no frame encoded for {} s with the game in front (a still picture, or a capture that went quiet); the capture is running, so it is kept",
-                    STALL_AFTER.as_secs()
-                );
-            }
-        }
+        Step::Idle => {}
         Step::Start => {
             eprintln!("[recall] capture: retrying the start (try {})", slot.backoff().failures() + 1);
             let result = slot.try_start();
@@ -152,16 +184,21 @@ pub(crate) fn watch(slot: &mut impl CaptureSlot, now: Instant) -> Step {
     step
 }
 
-/// `restart_capture_if_needed`: replace the capture when asked. With no capture held the
-/// request is taken too (the next start must not be torn down by it) and a start is due
-/// now unless a backoff wait runs. Nothing while the screen is away (the request waits).
+/// `restart_capture_if_needed`: replace the capture when asked, at most on
+/// [`Backoff::may_replace`]'s backoff (a request inside it waits for it). With no capture
+/// held the request is taken too (the next start must not be torn down by it) and a start
+/// is due now unless a backoff wait runs. Nothing while the screen is away (the request waits).
 pub(crate) fn restart_if_asked(slot: &mut impl CaptureSlot, now: Instant) {
     if slot.screen().away() {
         return;
     }
     let (has_capture, _) = slot.held();
-    let Some(why) = slot.restart_reason() else { return };
+    let Some(why) = slot.backoff().deferred.take().or_else(|| slot.restart_reason()) else { return };
     if has_capture {
+        if !slot.backoff().may_replace(now) {
+            slot.backoff().deferred = Some(why);
+            return;
+        }
         eprintln!("[recall] capture restarts {why}");
         restart(slot, now);
     } else {
@@ -215,30 +252,14 @@ impl CaptureSlot for App {
         self.shared.as_ref().and_then(|s| s.restart_reason())
     }
 
-    #[cfg(feature = "encode")]
-    fn encoded_frames(&self) -> Option<u64> {
-        let stats = &self.encoder.as_ref()?.stats;
-        matches!(stats.label(), "h264_nvenc" | "degraded").then(|| stats.encoded_frames.load(std::sync::atomic::Ordering::Relaxed))
-    }
-
-    #[cfg(not(feature = "encode"))]
-    fn encoded_frames(&self) -> Option<u64> {
-        None
-    }
 }
 
 impl App {
-    /// Called from `periodic_update`: retry a failed start, or restart a dead capture.
+    /// Called from `periodic_update`: retry a failed start, restart a dead capture, or
+    /// replace it when asked ([`tick`]: at most one new capture per call).
     pub(super) fn watch_capture(&mut self) {
         if self.shared.is_some() {
-            watch(self, Instant::now());
-        }
-    }
-
-    /// Called from `periodic_update`: replace the capture when asked (`restart_if_asked`).
-    pub(super) fn restart_capture_if_needed(&mut self) {
-        if self.shared.is_some() {
-            restart_if_asked(self, Instant::now());
+            tick(self, Instant::now());
         }
     }
 }
