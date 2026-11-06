@@ -61,3 +61,24 @@ fn dda_headless_primary_monitor() {
         }
     }
 }
+
+/// The follow glue the capture thread runs every `FOLLOW_CHECK`: holds never ask for a
+/// capture restart (the encoder and replay buffer keep running), resuming takes the next
+/// frame, and only a `Restart` verdict sets `CaptureShared::restart`.
+#[test]
+fn holding_never_restarts_and_resuming_takes_the_next_frame() {
+    use super::{apply_follow, Applied, Follow, Hold};
+    let shared = super::super::CaptureShared::new();
+    let mut held = None;
+    assert_eq!(apply_follow(&shared, &mut held, Follow::Deliver), Applied::Same);
+    for why in [Hold::Covered, Hold::Minimized, Hold::Away, Hold::Minimized] {
+        assert_eq!(apply_follow(&shared, &mut held, Follow::Hold(why)), Applied::Same);
+        assert_eq!(held, Some(why));
+    }
+    assert!(!shared.restart.load(Relaxed), "a hold never restarts capture");
+    assert_eq!(apply_follow(&shared, &mut held, Follow::Deliver), Applied::Resumed, "back on top");
+    assert_eq!(held, None);
+    assert!(shared.restart_reason().is_none(), "no restart after a whole alt-tab");
+    assert_eq!(apply_follow(&shared, &mut held, Follow::Restart("moved")), Applied::Ended);
+    assert!(shared.restart_reason().is_some(), "a real monitor change restarts");
+}

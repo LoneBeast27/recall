@@ -14,6 +14,7 @@
 mod client_area;
 mod control;
 mod dda;
+mod dda_desktop;
 mod dda_dxgi;
 mod dda_logic;
 mod dda_window;
