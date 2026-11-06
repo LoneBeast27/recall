@@ -189,7 +189,8 @@ fn a_restart_asked_while_locked_waits_for_the_user() {
     assert_eq!((f.stops, f.starts), (1, 1), "replaced once the user is back");
 }
 
-// A recording whose encoded-frame count stopped (`capture_stall` through `watch`).
+// A recording whose encoded-frame count stopped (`capture_stall` through `watch`): only
+// a capture that ended is restarted; a still count alone is logged.
 
 /// A running capture recording a stuck count, `screen` for seconds 0..=to.
 fn stalled_with(screen: Screen, to: u64) -> Fake {
@@ -203,8 +204,23 @@ fn stalled_with(screen: Screen, to: u64) -> Fake {
 }
 
 #[test]
-fn a_stalled_recording_in_front_gets_one_capture_restart() {
-    let f = stalled_with(SHOWN, 15);
+fn a_static_foreground_game_for_5_minutes_is_never_restarted() {
+    // A paused game, a menu or a loading screen: no new WGC frames, so the encoder count
+    // stands still (it encodes only delivered frames, no CFR repeats). The capture is alive.
+    let f = stalled_with(SHOWN, 300);
+    assert_eq!((f.stops, f.starts), (0, 0), "no restart on a still picture");
+}
+
+#[test]
+fn a_still_count_with_a_closed_capture_is_restarted_once() {
+    // Positive evidence: the WGC item closed (or the handler failed), so the thread ended.
+    let t0 = Instant::now();
+    let mut f = Fake { capture: true, start_ok: true, screen: SHOWN, frames: Some(900), ..Default::default() };
+    f.backoff.started(t0 - secs(60));
+    f.finished = true;
+    for s in 0..=300 {
+        watch(&mut f, t0 + secs(s));
+    }
     assert_eq!((f.stops, f.starts), (1, 1));
 }
 

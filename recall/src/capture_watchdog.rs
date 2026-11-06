@@ -5,8 +5,8 @@
 //! over a [`CaptureSlot`] (the [`App`], or a fake in the tests).
 //!
 //! It also restarts a capture the encoder or the capture thread asked to replace
-//! ([`restart_if_asked`], also with no capture held), and a game capture whose recording
-//! stopped ([`crate::capture_stall`]).
+//! ([`restart_if_asked`], also with no capture held). A recording that stands still is
+//! only logged ([`crate::capture_stall`]): with no new frames on their own nothing restarts.
 //!
 //! While the target is minimized, the session is locked or the display is off
 //! (`capture::screen`) nothing is reaped, started or restarted: a start then fails or
@@ -42,7 +42,7 @@ pub(crate) struct Backoff {
     failures: u32,
     next_try: Option<Instant>,
     started_at: Option<Instant>,
-    /// The running game capture's recording, for [`watch`]'s stall check.
+    /// The running game capture's recording, for [`watch`]'s stall log.
     pub(crate) stall: Stall,
 }
 
@@ -132,8 +132,10 @@ pub(crate) fn watch(slot: &mut impl CaptureSlot, now: Instant) -> Step {
         Step::Idle => {
             let frames = slot.encoded_frames().filter(|_| has_capture);
             if slot.backoff().stall.observe(frames, screen.watched(), now) {
-                eprintln!("[recall] capture stalled: no frame encoded for {} s with the game in front; restarting it", STALL_AFTER.as_secs());
-                restart(slot, now);
+                eprintln!(
+                    "[recall] capture: no frame encoded for {} s with the game in front (a still picture, or a capture that went quiet); the capture is running, so it is kept",
+                    STALL_AFTER.as_secs()
+                );
             }
         }
         Step::Start => {
@@ -226,7 +228,7 @@ impl CaptureSlot for App {
 }
 
 impl App {
-    /// Called from `periodic_update`: retry a failed start, or restart a dead or stalled capture.
+    /// Called from `periodic_update`: retry a failed start, or restart a dead capture.
     pub(super) fn watch_capture(&mut self) {
         if self.shared.is_some() {
             watch(self, Instant::now());
