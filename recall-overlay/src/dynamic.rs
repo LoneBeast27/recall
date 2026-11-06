@@ -139,6 +139,11 @@ impl Entry {
     }
 }
 
+/// A plain exe-stem key: `[a-z0-9._-]{1,64}` (no spaces, no capitals).
+pub fn exe_stem_key(key: &str) -> bool {
+    (1..=64).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 struct CacheFile {
     games: BTreeMap<String, Entry>,
@@ -166,8 +171,15 @@ impl HudCache {
             .and_then(|text| serde_json::from_str(&text).ok())
             .unwrap_or_default();
         let mut cache = Self { path, file };
+        let before = cache.file.games.len();
+        // Keys are exe stems; anything else (a window title) is dropped and the file rewritten once.
+        cache.file.games.retain(|key, _| exe_stem_key(key));
+        let dropped = cache.file.games.len() != before;
         cache.file.games.retain(|_, e| e.sane());
         cache.trim();
+        if dropped {
+            cache.save();
+        }
         cache
     }
 
