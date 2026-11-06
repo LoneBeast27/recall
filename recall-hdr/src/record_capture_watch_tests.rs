@@ -1,10 +1,16 @@
 use super::*;
+use crate::record_screen::Frame;
 use crate::record_target::Target;
 use crate::supervisor::EngineHealth;
 use serde_json::Value;
 
+/// A game whose process id is its window handle (another window = another game).
 fn game(name: &str, hwnd: isize) -> EngineTarget {
-    EngineTarget::Window(Target { hwnd, pid: 42, name: name.into(), exe: format!("{name}.exe") })
+    game_of(name, hwnd, hwnd as u32)
+}
+
+fn game_of(name: &str, hwnd: isize, pid: u32) -> EngineTarget {
+    EngineTarget::Window(Target { hwnd, pid, name: name.into(), exe: format!("{name}.exe") })
 }
 
 const RUN: EngineHealth = EngineHealth::Running { pid: 9 };
@@ -116,7 +122,6 @@ fn inputs(t: &EngineTarget) -> StuckInputs<'_> {
         paused: false,
         running: true,
         held: false,
-        user_acted: None,
         overlay: true,
     }
 }
@@ -168,13 +173,10 @@ fn a_first_frame_that_never_comes_gets_at_most_one_restart_then_one_notice_in_5_
 }
 
 #[test]
-fn a_new_window_mode_or_a_user_action_starts_a_new_episode() {
+fn a_new_window_mode_starts_a_new_episode() {
     let g = game("VALORANT", 7);
-    let borderless_at_100 = |s| Sight { mode: if s < 100 { 1 } else { 2 }, ..Sight::SHOWN };
-    assert_eq!(tick_run(130, &inputs(&g), borderless_at_100), [(10, "restart"), (21, "notice"), (110, "restart"), (121, "notice")]);
-    let t0 = Instant::now();
-    let pressed_at_100 = |s| StuckInputs { user_acted: (s >= 100).then_some(t0), ..inputs(&g) };
-    assert_eq!(tick_seq(130, pressed_at_100, |_| Sight::SHOWN), [(10, "restart"), (21, "notice"), (110, "restart"), (121, "notice")]);
+    let borderless_at_100 = |s| if s < 100 { windowed(1920, 1080) } else { fullscreen() };
+    assert_eq!(tick_run(130, &inputs(&g), borderless_at_100), REARMED_AT_100);
 }
 
 #[test]
@@ -233,4 +235,81 @@ fn a_restart_counts_as_in_flight_for_a_bounded_time_only() {
     stuck_step(&mut w, &failed, |_: &Target| Sight::SHOWN, at(11));
     assert!(w.pending(at(11)), "just restarted: recovery waits");
     assert!(!w.pending(at(10) + RESTART_GRACE), "bounded: recovery may act");
+}
+
+// p2 11-07: after the notice only a target change or a window-mode change re-arms it.
+
+const TITLED: u32 = 0x00C0_0000 | 0x0004_0000; // WS_CAPTION | WS_THICKFRAME
+
+/// The game in a titled window of this size on a 2560x1440 monitor.
+fn windowed(w: i32, h: i32) -> Sight {
+    Sight { frame: Frame { style: TITLED, rect: [100, 100, 100 + w, 100 + h], monitor: [0, 0, 2560, 1440] }, ..Sight::SHOWN }
+}
+
+fn fullscreen() -> Sight {
+    Sight::SHOWN
+}
+
+const TOLD: [(u64, &str); 2] = [(10, "restart"), (21, "notice")];
+const REARMED_AT_100: [(u64, &str); 4] = [(10, "restart"), (21, "notice"), (110, "restart"), (121, "notice")];
+
+#[test]
+fn a_shortcut_press_after_the_notice_does_not_rearm() {
+    // A save hotkey at 100 s: the engine is busy saving for 2 s. The controller's last
+    // shortcut time (`last_fired`) is no input any more.
+    let g = game("VALORANT", 7);
+    let pressed = |s| StuckInputs { held: (100..102).contains(&s), ..inputs(&g) };
+    assert_eq!(tick_seq(200, pressed, |_| windowed(1920, 1080)), TOLD);
+}
+
+#[test]
+fn a_pause_and_resume_after_the_notice_do_not_rearm() {
+    let g = game("VALORANT", 7);
+    let paused = |s: u64| StuckInputs { paused: (100..105).contains(&s), ..inputs(&g) };
+    assert_eq!(tick_seq(200, paused, |_| windowed(1920, 1080)), TOLD);
+}
+
+#[test]
+fn a_window_resize_does_not_rearm() {
+    let g = game("VALORANT", 7);
+    let resized = |s| if s < 100 { windowed(1920, 1080) } else { windowed(1600, 900) };
+    assert_eq!(tick_run(200, &inputs(&g), resized), TOLD);
+}
+
+#[test]
+fn a_target_change_rearms() {
+    let a = game_of("A", 7, 42);
+    let b = game_of("B", 8, 43);
+    let switched = |s| inputs(if s < 100 { &a } else { &b });
+    assert_eq!(tick_seq(200, switched, |_| windowed(1920, 1080)), REARMED_AT_100);
+}
+
+#[test]
+fn a_fullscreen_switch_rearms() {
+    let g = game("VALORANT", 7);
+    let switched = |s| if s < 100 { windowed(1920, 1080) } else { fullscreen() };
+    assert_eq!(tick_run(200, &inputs(&g), switched), REARMED_AT_100);
+    let back = |s| if s < 100 { fullscreen() } else { windowed(1920, 1080) };
+    assert_eq!(tick_run(200, &inputs(&g), back), REARMED_AT_100, "and back");
+}
+
+#[test]
+fn a_new_window_of_the_same_game_rearms_only_if_its_fullscreen_state_differs() {
+    let old = game_of("VALORANT", 7, 42);
+    let new = game_of("VALORANT", 9, 42);
+    let moved = |s| inputs(if s < 100 { &old } else { &new });
+    assert_eq!(tick_seq(200, moved, |_| fullscreen()), TOLD, "same mode: not news");
+    let sight = |s| if s < 100 { fullscreen() } else { windowed(1920, 1080) };
+    assert_eq!(tick_seq(200, moved, sight), REARMED_AT_100, "fullscreen -> windowed");
+}
+
+#[test]
+fn a_static_game_with_a_long_recording_gets_nothing_for_5_minutes() {
+    // The engine says `recording` whether frames come or not (VFR); a long recording keeps
+    // it busy (`held`). Neither asks the screen nor restarts anything.
+    let g = game("VALORANT", 7);
+    let probe = |_: u64| -> Sight { panic!("asked") };
+    let recording = StuckInputs { encoder: Some("h264_nvenc"), ..inputs(&g) };
+    assert_eq!(tick_run(300, &StuckInputs { held: true, ..recording.clone() }, probe), []);
+    assert_eq!(tick_run(300, &recording, probe), []);
 }
