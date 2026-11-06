@@ -45,7 +45,7 @@ use windows::Win32::UI::Accessibility::{
     HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
+    GetClientRect, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
     GetWindowThreadProcessId, IsWindow, IsZoomed, EVENT_SYSTEM_FOREGROUND, GWL_STYLE, WINEVENT_OUTOFCONTEXT,
     WINEVENT_SKIPOWNPROCESS, WS_CAPTION,
 };
@@ -86,6 +86,35 @@ pub struct WatchEvent {
     pub steam_game: bool,
     /// Raw `HWND` as an `isize` (not a live handle; re-wrap before use).
     pub hwnd: isize,
+}
+
+impl WatchEvent {
+    /// A foreground window whose process cannot be identified (`OpenProcess`
+    /// refused): no stem, never a target. Fed as "not a target" so it cancels
+    /// a pending game (T11); the HDR side ignores it.
+    pub fn unknown(pid: u32, hwnd: isize) -> WatchEvent {
+        WatchEvent {
+            pid,
+            exe_stem: String::new(),
+            exe_name: String::new(),
+            title: String::new(),
+            fullscreen: false,
+            fullscreen_on_target: false,
+            steam_game: false,
+            hwnd,
+        }
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        self.exe_stem.trim().is_empty()
+    }
+}
+
+/// The event for a foreground window: `built` when it was identified, else
+/// an [`WatchEvent::unknown`] for a real window of another process (`None`
+/// for no window, no owner, or our own process).
+pub(crate) fn event_or_unknown(hwnd: isize, pid: u32, built: Option<WatchEvent>) -> Option<WatchEvent> {
+    built.or_else(|| (hwnd != 0 && pid != 0 && pid != std::process::id()).then(|| WatchEvent::unknown(pid, hwnd)))
 }
 
 /// Whether an executable path is a game in a Steam library. Steamworks Shared
@@ -241,7 +270,7 @@ fn handle_foreground(hwnd: HWND) {
         };
         (st.target_monitor, st.tx.clone())
     };
-    if let Some(event) = build_event(hwnd, target_monitor) {
+    if let Some(event) = build_or_unknown(hwnd, target_monitor) {
         // A closed receiver just means the reconciler shut down; drop the event.
         let _ = tx.send(event);
     }
@@ -253,7 +282,30 @@ fn handle_foreground(hwnd: HWND) {
 pub fn probe_foreground(target_monitor: isize) -> Option<WatchEvent> {
     // SAFETY: plain query; a null result is handled by `build_event`.
     let hwnd = unsafe { GetForegroundWindow() };
-    build_event(hwnd, target_monitor)
+    build_or_unknown(hwnd, target_monitor)
+}
+
+/// [`build_event`], or an unknown event for a window whose process cannot be
+/// identified ([`event_or_unknown`]): the hook and the 1 s probe feed it.
+fn build_or_unknown(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
+    let built = build_event(hwnd, target_monitor);
+    if built.is_some() || hwnd.0.is_null() {
+        return built;
+    }
+    let mut pid = 0u32;
+    // SAFETY: GetWindowThreadProcessId tolerates a stale handle (pid stays 0).
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    event_or_unknown(hwnd.0 as isize, pid, None)
+}
+
+/// The client area (width, height) of `hwnd`; (0, 0) when it is gone.
+pub fn client_size(hwnd: isize) -> (i32, i32) {
+    let mut r = RECT::default();
+    // SAFETY: GetClientRect tolerates a stale handle (it fails).
+    if unsafe { GetClientRect(HWND(hwnd as *mut _), &mut r) }.is_err() {
+        return (0, 0);
+    }
+    (r.right - r.left, r.bottom - r.top)
 }
 
 /// Probe one window (the record mode's followed foreground, after its

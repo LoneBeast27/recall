@@ -21,6 +21,7 @@ use crate::gpu_games::KnownGames;
 use crate::log;
 use crate::record_app::Controller;
 use crate::record_target::{classify_event, skips_render_check, Admit, Target};
+use crate::record_transition::Transitions;
 use crate::render_probe::{self, RenderProbe, StartError};
 use crate::render_verdict::{gate, Gate, Rejected, Verdict, Watch};
 use crate::watcher::WatchEvent;
@@ -147,6 +148,7 @@ impl Controller {
 
     /// The tracker's poll with the render check asked before a commit.
     pub(crate) fn poll_tracker(&mut self, now: Instant) -> bool {
+        self.feed_drain(now);
         let session = self.tracker.current().map(|t| t.pid);
         let render = &mut self.render;
         let changed = self.tracker.poll_admit(now, |t| render.admit(t, session, now));
