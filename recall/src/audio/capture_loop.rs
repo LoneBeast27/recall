@@ -65,6 +65,67 @@ pub(super) trait Capture {
     fn run(&mut self, ring: &TrackRing, level: &mut Leveller, clock: &dyn Clock) -> Ended;
 }
 
+/// How often a stream on the Windows default checks whether it should move.
+const WATCH_EVERY: Duration = Duration::from_secs(2);
+
+/// What a stream on the Windows default waits for.
+#[derive(Clone, Debug, PartialEq)]
+pub(super) enum Want {
+    /// A source with no device: the default moves away from this endpoint id.
+    DefaultMovesFrom(String),
+    /// A named device that was missing at start (the stream fell back to the default): it appears.
+    Named(String),
+}
+
+/// The endpoints as a watch sees them (WASAPI in the engine, a fake in tests).
+pub(super) trait Endpoints {
+    /// The Windows default endpoint's id now, if there is one.
+    fn default_id(&self) -> Option<String>;
+    /// An endpoint matching `want` (the recorder's name rule) is connected now.
+    fn has(&self, want: &str) -> bool;
+}
+
+/// Checks every `WATCH_EVERY` whether a stream on the Windows default should reopen.
+#[derive(Debug)]
+pub(super) struct Watch {
+    want: Want,
+    next: Duration,
+}
+
+impl Watch {
+    pub(super) fn new(want: Want, now: Duration) -> Self {
+        Watch { want, next: now + WATCH_EVERY }
+    }
+
+    /// The stream should end and reopen at once: the default moved, or the named device
+    /// appeared (the reopen takes it by name). No default at all is not a move (the stream
+    /// reports the lost device itself).
+    pub(super) fn check(&mut self, now: Duration, endpoints: &dyn Endpoints) -> Option<Ended> {
+        if now < self.next {
+            return None;
+        }
+        self.next = now + WATCH_EVERY;
+        let why = match &self.want {
+            Want::DefaultMovesFrom(id) => endpoints.default_id().is_some_and(|now| now != *id).then(|| "the Windows default moved to another device".to_owned()),
+            Want::Named(name) => endpoints.has(name).then(|| format!("'{}' connected", name.trim())),
+        };
+        why.map(|why| Ended { why, at_once: true })
+    }
+}
+
+/// The watch for a stream that opened `device`: on the Windows default for a source with no
+/// device (`default_id`), or on the default because the named device was missing (`fell_back`).
+pub(super) fn watch_for(device: &str, fell_back: bool, default_id: Option<String>, now: Duration) -> Option<Watch> {
+    let want = if device.trim().is_empty() {
+        Want::DefaultMovesFrom(default_id?)
+    } else if fell_back {
+        Want::Named(device.trim().to_owned())
+    } else {
+        return None;
+    };
+    Some(Watch::new(want, now))
+}
+
 /// A named device that does not open at start still gets its track (silence) and waits for
 /// the device by its own name. Not for process loopback (a bad target is reported, never
 /// waited on), a Windows-default source (no name to wait for), or `RECALL_AUDIO_EXACT`

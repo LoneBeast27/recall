@@ -356,7 +356,8 @@ fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
 /// takes `RECALL_AUDIO_MIC`'s — so a test never records the person's real devices.
 /// `reopen`: the track lost its device; a named device must come back by its own name, never as
 /// the Windows default (that would record another device under this track's name).
-fn pick_device(direction: &Direction, device: &str, input: bool, reopen: bool) -> Result<(wasapi::Device, String), String> {
+/// The flag: the Windows default was opened (the stream then watches it, `capture_loop::Watch`).
+fn pick_device(direction: &Direction, device: &str, input: bool, reopen: bool) -> Result<(wasapi::Device, String, bool), String> {
     let collection = DeviceCollection::new(direction).map_err(|e| format!("enumerate: {e}"))?;
     let n = collection.get_nbr_devices().map_err(|e| e.to_string())?;
     let exact = std::env::var_os("RECALL_AUDIO_EXACT").is_some();
@@ -368,7 +369,7 @@ fn pick_device(direction: &Direction, device: &str, input: bool, reopen: bool) -
         let names: Vec<String> = devices.iter().map(|d| d.get_friendlyname().unwrap_or_default()).collect();
         if let Some(i) = match_endpoint(&names, want) {
             let name = names[i].clone();
-            return Ok((devices.into_iter().nth(i).expect("index from names"), name));
+            return Ok((devices.into_iter().nth(i).expect("index from names"), name, false));
         }
     }
     if exact {
@@ -380,8 +381,8 @@ fn pick_device(direction: &Direction, device: &str, input: bool, reopen: bool) -
     let dev = wasapi::get_default_device(direction).map_err(|e| format!("default endpoint failed: {e}"))?;
     let name = dev.get_friendlyname().unwrap_or_else(|_| "(default)".into());
     Ok(match want {
-        Some(want) => (dev, format!("{name} (Windows default; '{want}' not found)")),
-        None => (dev, format!("{name} (Windows default)")),
+        Some(want) => (dev, format!("{name} (Windows default; '{want}' not found)"), true),
+        None => (dev, format!("{name} (Windows default)"), true),
     })
 }
 
