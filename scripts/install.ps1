@@ -135,7 +135,10 @@ Copy-Item (Join-Path $repo 'recall-native\assets\recall.ico') $stage -Force
 
 # 5. Install (the cache folder is never touched).
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
-Get-ChildItem $stage -File | ForEach-Object { Copy-Item $_.FullName $InstallDir -Force }
+# All or nothing: staged and verified beside the install, swapped by rename, rolled back on any failure
+# (Recall reopened mid-install must never leave old and new programs mixed). Proof: dev\install-swap-check.ps1.
+. (Join-Path $PSScriptRoot 'install-swap.ps1')
+Install-Swap $stage $InstallDir
 # Remove the old bin\ copy: only the FFmpeg files this installer put there, then the folder if empty.
 $oldBin = Join-Path $InstallDir 'bin'
 if (Test-Path $oldBin) {
