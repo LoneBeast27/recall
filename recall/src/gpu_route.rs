@@ -62,6 +62,8 @@ pub(crate) fn install_gpu_sink(shared: &Arc<CaptureShared>, handle: &encoder::En
             eprintln!("[recall] {message}");
         }
     };
-    let _ = shared.gpu_sink.set(capture::GpuSink { send: Box::new(send), log: Box::new(log) });
+    let retry = handle.stats.clone();
+    let retry_gpu = move || retry.gpu_retry.load(Relaxed) && retry.gpu_retry.swap(false, Relaxed);
+    let _ = shared.gpu_sink.set(capture::GpuSink { send: Box::new(send), log: Box::new(log), retry_gpu: Box::new(retry_gpu) });
     tx
 }

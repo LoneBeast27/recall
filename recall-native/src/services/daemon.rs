@@ -87,7 +87,7 @@ pub struct HdrStatus {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SessionStatus {
-    /// "waiting" | "starting" | "recording" | "draining" | "paused" | "error" (empty on old builds)
+    /// "waiting" | "starting" | "recording" | "degraded" | "recovering" | "draining" | "paused" | "error" (empty on old builds)
     pub state: String,
     pub target: Option<Target>,
     pub engine_health: String,
@@ -163,7 +163,7 @@ pub struct EngineStatus {
     /// Encoded capture fps, not game fps.
     pub fps: u32,
     pub buffer_secs: f32,
-    /// "h264_nvenc" | "starting" | "off" | "failed"
+    /// "h264_nvenc" | "degraded" (CPU copies) | "recovering" (buffer kept) | "starting" | "off" | "failed"
     pub encoder: String,
     /// "h264" | "hevc" | "av1": what is recording (H.264 after a fallback).
     pub codec: String,
@@ -186,12 +186,22 @@ pub struct DaemonSnapshot {
     pub config: Option<Value>,
 }
 
+impl SessionStatus {
+    /// A game (or the desktop) is being captured: background cache filling pauses.
+    pub fn capturing(&self) -> bool {
+        // `degraded`: CPU copies; `recovering`: the engine rebuilds its encoder, buffer kept.
+        matches!(self.state.as_str(), "recording" | "starting" | "degraded" | "recovering")
+    }
+}
+
 impl DaemonSnapshot {
-    /// Replay is ready when NVENC runs and the buffer holds footage.
+    /// Replay is ready when the buffer holds footage and NVENC runs (also from CPU
+    /// copies), or while the engine rebuilds its encoder: the buffer is kept and saveable.
     pub fn replay_ready(&self) -> bool {
-        self.engine
-            .as_ref()
-            .is_some_and(|e| e.encoder == "h264_nvenc" && e.buffer_secs > 0.0 && e.encoder_error.is_none())
+        self.engine.as_ref().is_some_and(|e| {
+            let running = matches!(e.encoder.as_str(), "h264_nvenc" | "degraded") && e.encoder_error.is_none();
+            (running || e.encoder == "recovering") && e.buffer_secs > 0.0
+        })
     }
 }
 

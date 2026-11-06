@@ -2,7 +2,7 @@
 //! plain inputs so the exact wire shape is unit-tested.
 //!
 //! ```json
-//! {"type":"status","mode":"record","state":"waiting|starting|recording|draining|paused|error",
+//! {"type":"status","mode":"record","state":"waiting|starting|recording|degraded|recovering|draining|paused|error",
 //!  "paused":B,"target":{"name":S,"exe":S|null,"pid":N|null}|null,
 //!  "engine_health":"running|restarting|off|stopped","auto_record":B,
 //!  "save_hotkey":S,"mic_hotkey":S,"save_seconds":N,
@@ -54,7 +54,10 @@ pub struct StatusInputs<'a> {
 
 /// `paused` (the user stopped recording), `waiting` (no target), `starting`
 /// (engine spawning / encoder warming up / restarting), `recording` (NVENC
-/// running for this target), `error` (engine gave up or the encoder failed).
+/// running for this target), `degraded` (recording, from CPU copies after the GPU
+/// path was refused), `recovering` (the engine is rebuilding its encoder; the buffer
+/// is kept and saveable), `error` (engine gave up, or its own encoder recovery is
+/// spent: `record_recover` then restarts it).
 pub fn session_state(wanted: &EngineTarget, health: EngineHealth, encoder: Option<&str>, fresh: bool, paused: bool) -> &'static str {
     if paused {
         return "paused";
@@ -68,6 +71,8 @@ pub fn session_state(wanted: &EngineTarget, health: EngineHealth, encoder: Optio
     match health {
         EngineHealth::Running { pid } if pid != 0 && fresh => match encoder {
             Some("failed") => "error",
+            Some("recovering") => "recovering",
+            Some("degraded") => "degraded",
             Some("starting") | Some("off") | None => "starting",
             Some(_) => "recording",
         },
@@ -148,6 +153,8 @@ pub fn tray_line(state: &str, wanted: &EngineTarget) -> String {
     let name = target_name(wanted);
     match state {
         "recording" => format!("Recording {name}"),
+        "degraded" => format!("Recording {name} (CPU copies)"),
+        "recovering" => format!("Encoder recovering: {name} (the buffer is kept)"),
         "starting" => format!("Starting capture: {name}"),
         "paused" => "Recording paused".into(),
         "draining" => "Game closed: last clip kept".into(),
@@ -192,6 +199,15 @@ mod tests {
         assert_eq!(session_state(&EngineTarget::Off, EngineHealth::Stopped, None, false, true), "paused");
         assert_eq!(session_state(&EngineTarget::Off, EngineHealth::GivenUp, None, false, true), "paused", "pause wins");
         assert_eq!(tray_line("paused", &EngineTarget::Off), "Recording paused");
+    }
+
+    #[test]
+    fn an_engine_recovering_or_on_cpu_copies_is_its_own_state_not_recording() {
+        let run = EngineHealth::Running { pid: 9 };
+        assert_eq!(session_state(&game(), run, Some("recovering"), true, false), "recovering");
+        assert_eq!(session_state(&game(), run, Some("degraded"), true, false), "degraded");
+        assert_eq!(tray_line("recovering", &game()), "Encoder recovering: VALORANT (the buffer is kept)");
+        assert_eq!(tray_line("degraded", &game()), "Recording VALORANT (CPU copies)");
     }
 
     #[test]

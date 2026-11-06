@@ -23,6 +23,43 @@ impl OwnedParams {
     pub fn from_encoder(encoder: &ff::encoder::Video) -> Self {
         Self(ff::codec::Parameters::from(encoder))
     }
+
+    /// H.264 parameters of `w`x`h` with these parameter-set bytes (replay tests).
+    #[cfg(test)]
+    pub fn test_h264(w: i32, h: i32, extradata: &[u8]) -> Self {
+        let params = ff::codec::Parameters::new();
+        // SAFETY: a fresh owned AVCodecParameters; extradata is av_malloc'd with the
+        // padding FFmpeg requires and freed with the parameters.
+        unsafe {
+            let p = &mut *params.as_ptr().cast_mut();
+            p.codec_type = ff::ffi::AVMediaType::AVMEDIA_TYPE_VIDEO;
+            p.codec_id = ff::ffi::AVCodecID::AV_CODEC_ID_H264;
+            p.width = w;
+            p.height = h;
+            let pad = ff::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize;
+            let buf = ff::ffi::av_mallocz(extradata.len() + pad) as *mut u8;
+            std::ptr::copy_nonoverlapping(extradata.as_ptr(), buf, extradata.len());
+            p.extradata = buf;
+            p.extradata_size = extradata.len() as i32;
+        }
+        Self(params)
+    }
+
+    /// Both streams can share one MP4 sample entry: same codec, size and parameter sets
+    /// (SPS/PPS extradata), so packets of either decode with these. The input pixel
+    /// format (D3D11 or RGB0) is not part of the stream.
+    pub fn same_stream(&self, other: &OwnedParams) -> bool {
+        // SAFETY: both point at live, owned AVCodecParameters; the extradata pointer is
+        // valid for `extradata_size` bytes (or null with size 0).
+        unsafe {
+            let (a, b) = (&*self.0.as_ptr(), &*other.0.as_ptr());
+            let bytes = |p: &ff::ffi::AVCodecParameters| match p.extradata.is_null() || p.extradata_size <= 0 {
+                true => &[][..],
+                false => std::slice::from_raw_parts(p.extradata, p.extradata_size as usize),
+            };
+            a.codec_id == b.codec_id && a.width == b.width && a.height == b.height && bytes(a) == bytes(b)
+        }
+    }
 }
 
 /// One audio track's AAC-encoded save window. The encoder context is kept so

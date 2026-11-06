@@ -66,8 +66,10 @@ impl Session {
         true
     }
 
+    /// Recording this target: also on CPU copies (`degraded`) and while the engine
+    /// rebuilds its encoder (`recovering`, the buffer is kept).
     pub fn recording(&self) -> bool {
-        self.state == "recording"
+        matches!(self.state.as_str(), "recording" | "degraded" | "recovering")
     }
 
     pub fn paused(&self) -> bool {
@@ -159,6 +161,15 @@ mod tests {
         assert_eq!(session.stats_style, "minimal");
         assert_eq!((session.target_pid, session.target_hwnd), (Some(42), Some(1234)));
         assert_eq!((session.game_key().as_str(), session.fps_source.as_str()), ("valorant", "etw"));
+    }
+
+    #[test]
+    fn degraded_and_recovering_sessions_still_record_the_game() {
+        let mut session = Session::default();
+        for state in ["degraded", "recovering"] {
+            session.apply_status(&json!({"type":"status","state":state,"target":{"name":"VALORANT","exe":"v.exe","pid":42}}));
+            assert!(session.recording(), "{state}");
+        }
     }
 
     #[test]

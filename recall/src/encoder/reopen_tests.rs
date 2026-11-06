@@ -109,3 +109,50 @@ fn a_first_gpu_open_refusal_still_switches_to_cpu_at_once() {
     assert!(stats.gpu_refused.load(std::sync::atomic::Ordering::Relaxed));
     assert!(!r.recovering(), "the CPU frames that follow open at once");
 }
+
+#[test]
+fn a_retry_no_frame_came_for_counts_as_failed() {
+    let t0 = Instant::now();
+    let mut r = Reopen::default();
+    r.failed(SIZE, t0);
+    assert_eq!(r.stalled(t0 + secs(3.9)), None, "due at 2 s, overdue after 4 s");
+    assert_eq!(r.stalled(t0 + secs(4.0)), Some(AfterFail::Wait(secs(5.0))));
+    assert_eq!(r.reopen_failures(), 1, "the plan moves on without frames");
+}
+
+#[test]
+fn status_hands_off_to_the_controller_only_when_the_engine_plan_is_spent() {
+    let t0 = Instant::now();
+    let mut r = Reopen::default();
+    r.failed(SIZE, t0);
+    for n in 1..HAND_OFF_AFTER {
+        r.failed(SIZE, t0 + secs(n as f32));
+        assert!(!r.handed_off(t0 + secs(n as f32)), "failure {n}: still the engine's turn");
+    }
+    // The capture restart (3) and the CPU fallback (4) came first.
+    const { assert!(RESTART_EVERY < CPU_FALLBACK_AFTER && CPU_FALLBACK_AFTER < HAND_OFF_AFTER) };
+    r.failed(SIZE, t0 + secs(10.0));
+    assert!(r.handed_off(t0 + secs(10.0)));
+    // Or by age, with no encoder for a minute.
+    let mut slow = Reopen::default();
+    slow.failed(SIZE, t0);
+    assert!(!slow.handed_off(t0 + HAND_OFF_AGE - secs(0.1)));
+    assert!(slow.handed_off(t0 + HAND_OFF_AGE));
+}
+
+#[test]
+fn the_gpu_path_is_tried_again_on_its_own_backoff() {
+    let t0 = Instant::now();
+    let mut p = GpuProbe::default();
+    assert!(!p.due(t0 + secs(3600.0)), "nothing refused yet");
+    p.refused(t0);
+    assert!(!p.due(t0 + secs(59.0)));
+    assert!(p.due(t0 + secs(60.0)));
+    assert!(!p.due(t0 + secs(61.0)), "once per try");
+    p.refused(t0 + secs(61.0));
+    assert!(!p.due(t0 + secs(61.0 + 299.0)));
+    assert!(p.due(t0 + secs(61.0 + 300.0)), "then 5 min");
+    p.gpu_ok();
+    p.refused(t0 + secs(1000.0));
+    assert!(p.due(t0 + secs(1060.0)), "working again: back to 1 min");
+}

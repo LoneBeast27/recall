@@ -1,4 +1,5 @@
 use super::*;
+use crate::record_status::session_state;
 
 fn secs(s: f32) -> Duration {
     Duration::from_secs_f32(s)
@@ -79,6 +80,21 @@ fn says_recovered_once_recording_returns_and_a_stable_minute_resets_the_backoff(
     let at = 18.0 + STABLE_AFTER.as_secs_f32() + 1.0;
     assert!(run(&mut r, t0, at, at + 15.0, Seen::EncoderFailed, false).is_empty());
     assert_eq!(run(&mut r, t0, at + 15.1, at + 15.1, Seen::EncoderFailed, false).len(), 1);
+}
+
+#[test]
+fn the_engine_recovering_on_its_own_never_triggers_the_controller_restart() {
+    // P2: the controller restart is the last resort. It waits for the engine to say
+    // "failed" (its own plan spent), never for "recovering" or CPU copies.
+    let up = EngineHealth::Running { pid: 9 };
+    let game = crate::record_engine::EngineTarget::Desktop;
+    let seen = |encoder| Seen::of(session_state(&game, up, Some(encoder), true, false), up);
+    assert_eq!(seen("recovering"), Seen::Starting);
+    assert_eq!(seen("degraded"), Seen::Recording);
+    assert_eq!(seen("failed"), Seen::EncoderFailed);
+    let t0 = Instant::now();
+    let mut r = EncoderRecovery::default();
+    assert!(run(&mut r, t0, 0.0, 120.0, seen("recovering"), false).is_empty());
 }
 
 #[test]
