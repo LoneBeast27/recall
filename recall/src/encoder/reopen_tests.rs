@@ -156,3 +156,24 @@ fn the_gpu_path_is_tried_again_on_its_own_backoff() {
     p.refused(t0 + secs(1000.0));
     assert!(p.due(t0 + secs(1060.0)), "working again: back to 1 min");
 }
+
+#[test]
+fn an_unanswered_gpu_try_counts_as_refused_and_the_next_try_still_comes() {
+    let t0 = Instant::now();
+    let mut p = GpuProbe::default();
+    p.refused(t0);
+    assert!(p.due(t0 + secs(60.0)), "the 1 min try");
+    assert!(!p.unanswered(t0 + secs(60.0) + PROBE_VERDICT - secs(0.1)));
+    assert!(p.unanswered(t0 + secs(60.0) + PROBE_VERDICT), "no GPU frame came back to answer it");
+    assert!(!p.unanswered(t0 + secs(200.0)), "once");
+    let lapsed = t0 + secs(60.0) + PROBE_VERDICT;
+    p.refused(lapsed);
+    assert!(!p.due(lapsed + secs(299.0)));
+    assert!(p.due(lapsed + secs(300.0)), "the 5 min try still comes");
+    // An answered try (GPU frames opened) clears the wait.
+    p.gpu_ok();
+    p.refused(t0);
+    assert!(p.due(t0 + secs(60.0)));
+    p.gpu_ok();
+    assert!(!p.unanswered(t0 + secs(1000.0)));
+}
