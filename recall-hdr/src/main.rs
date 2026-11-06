@@ -100,6 +100,10 @@ mod single_instance;
 #[allow(dead_code)]
 #[path = "../../recall/src/win_volume.rs"]
 mod win_volume;
+// Can a clip really go to the Recycle Bin (shared with the app's library delete).
+#[allow(dead_code)]
+#[path = "../../recall/src/win_recycle.rs"]
+mod win_recycle;
 mod state;
 mod supervisor;
 mod tray;

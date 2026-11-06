@@ -13,7 +13,8 @@ use crate::control::PipeHub;
 use crate::log;
 use crate::record_free_space::{self as free_space, FreeCheck, FreeFn, FreeWarner, Resolve};
 use crate::record_storage::{
-    cleaned_event, plan_dir, preview_event, recycle, run_once, warning_event, PlanFn, RecycleFn, Warner, AFTER_SAVE, HOURLY,
+    cleaned_event, plan_dir, preview_event, recycle, run_once, warning_event, BinCheck, PlanFn, RecycleFn, Warner, AFTER_SAVE, HOURLY,
+    REFUSED_NOTICE,
 };
 
 /// The first free-space check after start (the engine is up by then).
@@ -47,6 +48,8 @@ pub(crate) struct Deps {
     pub free: FreeFn,
     pub resolve: Resolve,
     pub plan: PlanFn,
+    /// Can a clip go to its volume's Recycle Bin (production `win_recycle::can_recycle`).
+    pub bin: BinCheck,
     pub recycle: RecycleFn,
 }
 
@@ -69,7 +72,7 @@ impl Janitor {
     pub fn start(hub: Arc<PipeHub>) -> Self {
         let (tx, rx) = channel::<Job>();
         let janitor = Janitor::with_sender(tx, free_space::engine_staging_dir(), Instant::now(), crate::win_volume::volume_of);
-        let deps = Deps { free: free_space::free_bytes, resolve: janitor.resolve, plan: plan_dir, recycle };
+        let deps = Deps { free: free_space::free_bytes, resolve: janitor.resolve, plan: plan_dir, bin: crate::win_recycle::can_recycle, recycle };
         let current = janitor.current.clone();
         let _ = std::thread::Builder::new()
             .name("recall-storage".into())
@@ -214,8 +217,14 @@ fn cap_run(job: &Job, current: &Mutex<Setting>, deps: Deps, warner: &mut Warner,
         log!("storage: a queued run for {} at {} GiB is no longer the setting; skipped", job.dir.display(), job.cap_gb);
         return;
     }
-    match run_once(&job.dir, job.cap_gb, deps.plan, &wanted, deps.recycle) {
+    match run_once(&job.dir, job.cap_gb, deps.plan, &wanted, deps.bin, deps.recycle) {
         Ok(o) => {
+            if let Some(why) = &o.refused {
+                log!("storage: stopped before a clip that cannot go to the Recycle Bin ({why}); nothing deleted");
+            }
+            if warner.refusal(o.refused.is_some()) {
+                emit(&crate::record_status::error_event(REFUSED_NOTICE));
+            }
             if o.removed > 0 {
                 log!("storage: cap {} GiB -> {} clip(s) to the Recycle Bin, {} bytes freed", job.cap_gb, o.removed, o.freed);
                 emit(&cleaned_event(&o));

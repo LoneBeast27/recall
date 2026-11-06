@@ -14,7 +14,7 @@ use std::path::{Component, Path, PathBuf, Prefix};
 use std::time::{Duration, Instant};
 
 #[link(name = "kernel32", kind = "raw-dylib")]
-extern "system" {
+unsafe extern "system" {
     fn GetDiskFreeSpaceExW(dir: *const u16, free_to_caller: *mut u64, total: *mut u64, total_free: *mut u64) -> i32;
     fn GetVolumePathNameW(path: *const u16, out: *mut u16, len: u32) -> i32;
     fn GetVolumeNameForVolumeMountPointW(mount: *const u16, out: *mut u16, len: u32) -> i32;
@@ -176,10 +176,8 @@ impl VolumeCache {
     }
 
     pub fn get(&mut self, dir: &Path, now: Instant) -> Resolved {
-        if let Some((at, found)) = self.entries.get(dir) {
-            if now.saturating_duration_since(*at) < self.ttl {
-                return found.clone();
-            }
+        if let Some((_, found)) = self.entries.get(dir).filter(|(at, _)| now.saturating_duration_since(*at) < self.ttl) {
+            return found.clone();
         }
         let found = (self.lookup)(dir);
         if self.entries.len() >= CACHE_MAX {

@@ -186,7 +186,7 @@ fn batch_with_limit_off_midway(deps: Deps) -> Instant {
 
 #[test]
 fn a_slow_free_space_check_never_lets_a_stale_cap_recycle() {
-    let deps = Deps { free: roomy, resolve: slow_resolve, plan: plan_one, recycle: recycle_a };
+    let deps = Deps { free: roomy, resolve: slow_resolve, plan: plan_one, bin: any_bin, recycle: recycle_a };
     let changed = batch_with_limit_off_midway(deps);
     let late: Vec<_> = RECYCLED_A.lock().unwrap().iter().filter(|at| **at >= changed).copied().collect();
     assert!(late.is_empty(), "recycled {} time(s) after the limit was turned off", late.len());
@@ -194,14 +194,14 @@ fn a_slow_free_space_check_never_lets_a_stale_cap_recycle() {
 
 #[test]
 fn a_limit_change_during_the_listing_moves_nothing() {
-    let deps = Deps { free: roomy, resolve: by_letter, plan: slow_plan, recycle: recycle_b };
+    let deps = Deps { free: roomy, resolve: by_letter, plan: slow_plan, bin: any_bin, recycle: recycle_b };
     batch_with_limit_off_midway(deps);
     assert_eq!(RECYCLED_B.lock().unwrap().len(), 0, "the run listed under 500 GB but the limit is now off");
 }
 
 #[test]
 fn a_job_for_another_folder_or_cap_moves_nothing() {
-    let deps = Deps { free: roomy, resolve: by_letter, plan: plan_one, recycle: recycle_c };
+    let deps = Deps { free: roomy, resolve: by_letter, plan: plan_one, bin: any_bin, recycle: recycle_c };
     let (mut low, mut warner) = (FreeWarner::default(), Warner::default());
     for now in [Setting { dir: DIR.into(), cap_gb: 0 }, Setting { dir: r"G:\NewClips".into(), cap_gb: 500 }, Setting { dir: DIR.into(), cap_gb: 250 }] {
         run_batch(&cap_job(), &Mutex::new(now), deps, &mut low, &mut warner, &mut |_| {});
@@ -219,4 +219,33 @@ fn the_pump_publishes_the_current_setting() {
     assert_eq!(*j.current().lock().unwrap(), Setting { dir: DIR.into(), cap_gb: 500 });
     j.run_now(r"G:\NewClips", 0, t0);
     assert_eq!(*j.current().lock().unwrap(), Setting { dir: r"G:\NewClips".into(), cap_gb: 0 });
+}
+
+fn any_bin(_: &Path, _: u64) -> Result<(), String> {
+    Ok(())
+}
+
+/// A volume without a Recycle Bin (a \nas share, a USB stick).
+fn no_bin(_: &Path, _: u64) -> Result<(), String> {
+    Err("the drive has no Recycle Bin".into())
+}
+
+static RECYCLED_D: StdMutex<Vec<Instant>> = StdMutex::new(Vec::new());
+fn recycle_d(_: &[PathBuf]) -> Result<(), String> {
+    RECYCLED_D.lock().unwrap().push(Instant::now());
+    Ok(())
+}
+
+#[test]
+fn a_volume_without_a_recycle_bin_deletes_nothing_and_tells_once() {
+    let deps = Deps { free: roomy, resolve: by_letter, plan: plan_one, bin: no_bin, recycle: recycle_d };
+    let current = Mutex::new(Setting { dir: DIR.into(), cap_gb: 500 });
+    let (mut low, mut warner) = (FreeWarner::default(), Warner::default());
+    let mut events = Vec::new();
+    for _ in 0..2 {
+        run_batch(&cap_job(), &current, deps, &mut low, &mut warner, &mut |e| events.push(e.to_string()));
+    }
+    assert_eq!(RECYCLED_D.lock().unwrap().len(), 0, "nothing deleted or recycled");
+    let notice = crate::record_status::error_event(crate::record_storage::REFUSED_NOTICE);
+    assert_eq!(events.iter().filter(|e| **e == notice).count(), 1, "one toast across runs: {events:?}");
 }
