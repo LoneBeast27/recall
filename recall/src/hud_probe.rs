@@ -57,6 +57,9 @@ const MENU_SHARE: f32 = 0.15;
 pub const MAX_HUD_SHARE: f32 = 0.30;
 /// A scan with fewer moving bursts than this says nothing (menus, a still camera).
 pub const MIN_MOVING: u32 = 4;
+/// This many bursts with the world never moving: a still picture (an app, a
+/// menu). The probe stops early and reads the still frame instead.
+const STILL_ENOUGH: u32 = 8;
 
 /// One grey analysis frame.
 #[derive(Clone, Debug, PartialEq)]
@@ -194,16 +197,19 @@ pub struct Tally {
     counts: Vec<u16>,
     pub moving: u32,
     pub bursts: u32,
+    /// The newest frame read (the still picture a `ui` scan is made from).
+    still: Option<Gray>,
 }
 
 impl Tally {
     pub fn add(&mut self, frames: &[Gray]) {
         self.bursts += 1;
+        self.still = frames.last().cloned();
         let Some(mask) = steady_edges(frames) else { return };
         let (w, h) = (frames[0].w, frames[0].h);
         if (self.w, self.h) != (w, h) {
             // The picture changed size (a resize, a new canvas): start over.
-            *self = Tally { w, h, counts: vec![0; w * h], moving: 0, bursts: self.bursts };
+            *self = Tally { w, h, counts: vec![0; w * h], moving: 0, bursts: self.bursts, still: self.still.take() };
         }
         for (count, hit) in self.counts.iter_mut().zip(mask) {
             *count += hit as u16;
@@ -218,16 +224,36 @@ impl Tally {
             return vec![0; GRID_ROWS];
         }
         let occupied: Vec<bool> = self.counts.iter().map(|&c| c >= MIN_HITS).collect();
-        let occupied = dense(&occupied, w, h);
-        let mut cells = vec![0u32; GRID_COLS * GRID_ROWS];
-        for (i, _) in occupied.iter().enumerate().filter(|(_, o)| **o) {
-            let (c, r) = ((i % w) * GRID_COLS / w, (i / w) * GRID_ROWS / h);
-            cells[r * GRID_COLS + c] += 1;
-        }
-        (0..GRID_ROWS)
-            .map(|r| (0..GRID_COLS).filter(|&c| cells[r * GRID_COLS + c] >= CELL_MIN).fold(0u64, |bits, c| bits | 1 << c))
-            .collect()
+        to_grid(&dense(&occupied, w, h), w, h)
     }
+
+    /// The picture's width / height (0 before any frame).
+    fn aspect(&self) -> f32 {
+        self.still.as_ref().filter(|f| f.h > 0).map_or(0.0, |f| f.w as f32 / f.h as f32)
+    }
+}
+
+/// Occupied analysis pixels binned into the grid: a cell with [`CELL_MIN`] of them is set.
+fn to_grid(occupied: &[bool], w: usize, h: usize) -> Vec<u64> {
+    let mut cells = vec![0u32; GRID_COLS * GRID_ROWS];
+    for (i, _) in occupied.iter().enumerate().filter(|(_, o)| **o) {
+        let (c, r) = ((i % w) * GRID_COLS / w, (i / w) * GRID_ROWS / h);
+        cells[r * GRID_COLS + c] += 1;
+    }
+    (0..GRID_ROWS)
+        .map(|r| (0..GRID_COLS).filter(|&c| cells[r * GRID_COLS + c] >= CELL_MIN).fold(0u64, |bits, c| bits | 1 << c))
+        .collect()
+}
+
+/// A still picture's occupied cells: dense edges and text, with the same edge
+/// threshold, tidy and density steps as the steady scan, from one frame.
+pub fn ui_grid(still: &Gray) -> Vec<u64> {
+    let (w, h) = (still.w, still.h);
+    if w * h == 0 || still.px.len() != w * h {
+        return vec![0; GRID_ROWS];
+    }
+    let mask: Vec<bool> = edges(still).iter().map(|&g| g > EDGE_THRESHOLD).collect();
+    to_grid(&dense(&tidy(&mask, w, h), w, h), w, h)
 }
 
 /// The share of grid cells marked HUD.
@@ -280,7 +306,7 @@ impl HudProbe {
 
 fn refused(reason: String) -> Outbound {
     let (cols, rows) = (GRID_COLS as u32, GRID_ROWS as u32);
-    Outbound::HudScan { ok: false, cols, rows, grid: Vec::new(), moving: 0, bursts: 0, reason: Some(reason) }
+    Outbound::HudScan { ok: false, kind: "game", cols, rows, grid: Vec::new(), moving: 0, bursts: 0, aspect: 0.0, reason: Some(reason) }
 }
 
 fn probe(shared: &CaptureShared) -> Outbound {
@@ -318,26 +344,38 @@ fn probe(shared: &CaptureShared) -> Outbound {
         } else {
             tally.bursts += 1;
         }
+        if tally.moving == 0 && tally.bursts >= STILL_ENOUGH && tally.still.is_some() {
+            break; // a still picture: the ui scan below reads it
+        }
         std::thread::sleep(BETWEEN_BURSTS);
+    }
+    verdict(&tally, failure)
+}
+
+/// The probe's answer. Moving play gives a `game` scan (steady HUD, refused
+/// past [`MAX_HUD_SHARE`]: menus or replays over moving play). Too little
+/// motion with a frame in hand gives a `ui` scan of the still picture (apps
+/// such as Discord are almost all static UI); it has no share limit.
+pub fn verdict(tally: &Tally, failure: Option<String>) -> Outbound {
+    let (cols, rows, aspect) = (GRID_COLS as u32, GRID_ROWS as u32, tally.aspect());
+    let (moving, bursts) = (tally.moving, tally.bursts);
+    if moving < MIN_MOVING {
+        if let Some(still) = tally.still.as_ref() {
+            let grid = ui_grid(still);
+            return Outbound::HudScan { ok: true, kind: "ui", cols, rows, grid, moving, bursts, aspect, reason: None };
+        }
     }
     let grid = tally.grid();
     let share = grid_share(&grid);
-    let ok = tally.moving >= MIN_MOVING && share <= MAX_HUD_SHARE;
+    let ok = moving >= MIN_MOVING && share <= MAX_HUD_SHARE;
     let reason = match (ok, failure) {
         (true, _) => None,
-        (false, _) if tally.moving >= MIN_MOVING => Some(format!("{:.0}% of the picture looked like HUD: menus or replays, not play", share * 100.0)),
+        (false, _) if moving >= MIN_MOVING => Some(format!("{:.0}% of the picture looked like HUD: menus or replays, not play", share * 100.0)),
         (false, Some(e)) => Some(e),
-        (false, None) => Some(format!("only {} of {} bursts had the world moving", tally.moving, tally.bursts)),
+        (false, None) => Some(format!("only {moving} of {bursts} bursts had the world moving")),
     };
-    Outbound::HudScan {
-        ok,
-        cols: GRID_COLS as u32,
-        rows: GRID_ROWS as u32,
-        grid: if ok { grid } else { Vec::new() },
-        moving: tally.moving,
-        bursts: tally.bursts,
-        reason,
-    }
+    let grid = if ok { grid } else { Vec::new() };
+    Outbound::HudScan { ok, kind: "game", cols, rows, grid, moving, bursts, aspect, reason }
 }
 
 /// The newest encoder frame as an analysis frame (the picture only, without the

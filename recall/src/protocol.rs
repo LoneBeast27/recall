@@ -148,14 +148,19 @@ pub enum Outbound {
     },
     /// A `hud_probe` finished: where the game's HUD sits over the picture, one
     /// number per grid row (bit c = column c holds HUD). `ok` false: too little
-    /// moving play to tell (`grid` empty, `reason` says why).
+    /// moving play to tell (`grid` empty, `reason` says why). `kind` "game" is
+    /// steady HUD over a moving world; "ui" is a still picture (an app such as
+    /// Discord, or a menu) whose dense edges and text count as occupied.
+    /// `aspect` is the picture's width / height (0 when nothing was read).
     HudScan {
         ok: bool,
+        kind: &'static str,
         cols: u32,
         rows: u32,
         grid: Vec<u64>,
         moving: u32,
         bursts: u32,
+        aspect: f32,
         reason: Option<String>,
     },
 }
