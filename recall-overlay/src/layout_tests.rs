@@ -55,23 +55,25 @@ fn notice_is_44px_tall_at_1440p_and_scales_with_the_monitor() {
 }
 
 #[test]
-fn notice_runs_the_muted_title_cells_then_the_bold_game_name_cells() {
+fn notice_runs_the_muted_title_then_the_bold_game_name_whole() {
     let notice = NoticeView::new(Tone::Recording, "Recording", "VALORANT", true);
     let scene = notice_scene(&notice, 1.0, &Fake);
     let words: Vec<_> = scene.texts.iter().map(|t| t.text.as_str()).collect();
-    assert_eq!(words, ["Rec", "ord", "ing", "VAL", "ORA", "NT"]);
-    let (title, game) = (text(&scene, "Rec"), text(&scene, "VAL"));
+    assert_eq!(words, ["Recording", "VALORANT"]);
+    let (title, game) = (text(&scene, "Recording"), text(&scene, "VALORANT"));
     assert_eq!((title.role, title.color), (Role::NoticeTitle, MUTED));
     assert_eq!((game.role, game.color), (Role::NoticeGame, TEXT));
     assert!(title.x < game.x);
-    // Length = 7 cells of 44 and 6 gaps.
-    assert_eq!(scene.w, 7.0 * 44.0 + 6.0 * crate::cells::GAP);
+    // The mark's cell, then each run in its own box: 44 + gap + (pad + text + pad) twice + end pad.
+    let w = |r, t| Fake.measure(r, 1.0, t).width;
+    let want = 44.0 + 2.0 * crate::cells::GAP + w(Role::NoticeTitle, "Recording") + w(Role::NoticeGame, "VALORANT") + 4.0 * 4.0 + 16.0;
+    assert_eq!(scene.w, want.ceil());
 }
 
 #[test]
 fn non_game_details_use_the_ui_face_and_one_liners_centre() {
     let saved = NoticeView::new(Tone::Failure, "Save failed", "disk full", false);
-    assert_eq!(text(&notice_scene(&saved, 1.0, &Fake), "di").role, Role::NoticeUi);
+    assert_eq!(text(&notice_scene(&saved, 1.0, &Fake), "disk full").role, Role::NoticeUi);
     let waiting = NoticeView::new(Tone::Waiting, "Waiting for a game", "", true);
     let scene = notice_scene(&waiting, 1.0, &Fake);
     assert!(scene.texts.iter().all(|t| t.role == Role::NoticeUi && t.color == TEXT));
@@ -115,8 +117,9 @@ fn hot_gpu_turns_amber_and_missing_sources_degrade() {
 
     let bare = StatsContent { fps: None, low1: None, fps_note: Some("No frame timing".into()), gpu: None, cpu: None, ..stats() };
     let scene = stats_scene(&bare, 1.0, &Fake);
+    text(&scene, "No frame timing");
     for cell in ["No", "fra", "me", "tim", "ing"] {
-        text(&scene, cell);
+        text(scene.tall.as_ref().expect("the side pill's cells"), cell);
     }
     assert_eq!(scene.texts.iter().filter(|t| t.text == "—").count(), 2, "FPS and the CPU ring show dashes");
     assert!(!scene.texts.iter().any(|t| t.text == "GPU"), "no NVML → no GPU ring");
@@ -140,9 +143,8 @@ fn a_clip_save_carries_the_badge_in_the_first_cell() {
     assert_eq!(a.icon.unwrap().badge, None);
     let badge = b.icon.unwrap();
     assert_eq!((badge.badge, badge.cx, badge.cy, badge.r), (Some(SavePhase::Saving), 22.0, 22.0, 4.0));
-    let centre = |s: &Scene, t: &str| text(s, t).x + Fake.measure(Role::NoticeTitle, 1.0, t).width / 2.0;
-    assert_eq!(centre(&b, "Sav"), centre(&a, "Cl"), "the title starts in the second cell either way");
-    assert!(text(&b, "Sav").x - (badge.cx + 2.0 * badge.r) >= 8.0, "8+ px between the ring's outer edge and the text");
+    assert_eq!(text(&b, "Saving").x, text(&a, "Clip saved").x, "the title starts after the mark's cell either way");
+    assert!(text(&b, "Saving").x - (badge.cx + 2.0 * badge.r) >= 8.0, "8+ px between the ring's outer edge and the text");
     assert!(inside(&b));
 }
 
@@ -172,7 +174,7 @@ fn a_saves_stages_share_one_length_so_nothing_moves_when_it_lands() {
     let saving = notice_scene(&stage(Tone::Recording, "Saving", SavePhase::Saving), 1.3, &Fake);
     let saved = notice_scene(&stage(Tone::Success, "Clip saved", SavePhase::Saved), 1.3, &Fake);
     assert_eq!(saving.w, saved.w, "one width for both stages");
-    assert_eq!(text(&saving, "VAL"), text(&saved, "VAL"), "the detail stays put");
+    assert_eq!(text(&saving, "VALORANT · 0:30"), text(&saved, "VALORANT · 0:30"), "the detail stays put");
     assert_eq!((saving.icon.unwrap().cx, saving.icon.unwrap().cy), (saved.icon.unwrap().cx, saved.icon.unwrap().cy));
     assert!(saving.lead && saved.lead, "a save's content starts at the left end, so a wider pill never moves it");
     assert!(!notice_scene(&NoticeView::new(Tone::Success, "Bookmark added", "x", false), 1.0, &Fake).lead);

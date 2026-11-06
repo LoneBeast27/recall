@@ -21,6 +21,8 @@ pub fn stack(scene: &Scene, s: f32, m: &dyn Measure) -> Scene {
 /// [`stack`], at most `max` long (px): a column that would leave the side's
 /// room (a long notice) ends in a "…" cell instead of running off the monitor.
 pub fn stack_within(scene: &Scene, s: f32, m: &dyn Measure, max: f32) -> Scene {
+    // Prose drawn whole on the horizontal pill stacks from its cells.
+    let scene = scene.tall.as_deref().unwrap_or(scene);
     let mut out = scene.clone();
     out.stacked = true;
     let side = scene.h;

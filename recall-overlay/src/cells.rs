@@ -8,6 +8,12 @@
 //! rotations of each other cell by cell and have the same length:
 //! `cells × S + (cells − 1) × gap`.
 //!
+//! Prose (more than one word, or a word longer than
+//! [`crate::cell_text::MAX_CELL`] glyphs: a sentence, a title, a game name)
+//! is never chopped on a horizontal pill: [`flat`] draws it as one
+//! continuous run in place of its cells. The side pill keeps the cells
+//! ([`Scene::tall`]): whole words, upright, up to 3 glyphs a line.
+//!
 //! A cell's content is centred in it. Cells of a kind share one size: every
 //! number cell (a timer part, fps, 1% low, temperature) is the same face and
 //! size, so 3 tabular digits fit with [`MARGIN`] either side.
@@ -64,16 +70,36 @@ pub struct Cell {
     pub joint: Joint,
 }
 
+/// Prose on a horizontal pill: one run in place of cells `start..end`, at
+/// least `min_w` wide (a save's title holds room for its longest stage).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Span {
+    pub start: usize,
+    pub end: usize,
+    pub role: Role,
+    pub text: String,
+    pub color: Rgba,
+    pub min_w: f32,
+}
+
+/// Room inside a prose run's box either side of its text, and after the
+/// last run at the pill's end (1440p px: 20 px in all, the island editor's
+/// reset zone).
+pub const PROSE_PAD: f32 = 4.0;
+pub const END_PAD: f32 = 16.0;
+
 /// Builds the cells of a pill, splitting text runs to fit a cell.
 pub struct Cells<'a> {
     s: f32,
     m: &'a dyn Measure,
     pub out: Vec<Cell>,
+    /// The prose runs among `out` (drawn whole on a horizontal pill).
+    pub spans: Vec<Span>,
 }
 
 impl<'a> Cells<'a> {
     pub fn new(s: f32, m: &'a dyn Measure) -> Self {
-        Self { s, m, out: Vec::new() }
+        Self { s, m, out: Vec::new(), spans: Vec::new() }
     }
 
     pub fn push(&mut self, fill: Fill) {
@@ -114,6 +140,86 @@ impl<'a> Cells<'a> {
                 Token::Ellipsis => self.push(Fill::Text(word, "…".into(), color)),
             }
         }
+    }
+}
+
+impl Cells<'_> {
+    /// `run` as [`Cells::run`] lays it, marked as one prose run when it is
+    /// prose ([`is_prose`]) so a horizontal pill draws it whole.
+    pub fn text(&mut self, run: &str, word: Role, number: Role, color: Rgba, min_w: f32) {
+        let start = self.out.len();
+        self.run(run, word, number, color);
+        if is_prose(run) && self.out.len() > start {
+            self.spans.push(Span { start, end: self.out.len(), role: word, text: run.to_string(), color, min_w });
+        }
+    }
+
+    /// The horizontal scene ([`flat`]), with the side pill's cells kept in
+    /// [`Scene::tall`] when any prose is drawn whole.
+    pub fn scene(&self) -> Scene {
+        let cells = grid(&self.out, self.s, self.m);
+        if self.spans.is_empty() {
+            return cells;
+        }
+        let mut scene = flat(&self.out, &self.spans, self.s, self.m);
+        scene.tall = Some(Box::new(cells));
+        scene
+    }
+}
+
+/// Prose: more than one word, or a word longer than a cell holds. A lone
+/// short word ("REC", "64°"), a timer or a number is a compact field.
+pub fn is_prose(run: &str) -> bool {
+    let words: Vec<String> = tokens(run).into_iter().filter_map(|t| if let Token::Word(w) = t { Some(w) } else { None }).collect();
+    words.len() > 1 || words.iter().any(|w| w.chars().count() > crate::cell_text::MAX_CELL)
+}
+
+/// The horizontal pill: the cells left to right as [`grid`] lays them,
+/// except that each prose span is one continuous text run (its cap height
+/// centred across the pill) in a box of its own width.
+pub fn flat(cells: &[Cell], spans: &[Span], s: f32, m: &dyn Measure) -> Scene {
+    let side = ISLAND_H * s;
+    let mut scene = Scene { h: side, ..Scene::default() };
+    let (mut x, mut i, mut last_prose) = (0.0f32, 0usize, false);
+    let gap = |x: f32| if x > 0.0 { x + GAP * s } else { x };
+    while i < cells.len() {
+        x = gap(x);
+        if let Some(span) = spans.iter().find(|sp| sp.start == i) {
+            let metrics = m.measure(span.role, s, &span.text);
+            let y = side / 2.0 - (metrics.baseline - metrics.cap / 2.0);
+            scene.texts.push(Text { role: span.role, text: span.text.clone(), x: x + PROSE_PAD * s, y, color: span.color });
+            x += metrics.width.max(span.min_w) + 2.0 * PROSE_PAD * s;
+            (i, last_prose) = (span.end, true);
+            continue;
+        }
+        let end = spans.iter().map(|sp| sp.start).filter(|&st| st > i).min().unwrap_or(cells.len());
+        let part = grid(&cells[i..end], s, m);
+        for mut text in part.texts {
+            text.x += x;
+            scene.texts.push(text);
+        }
+        scene.shapes.extend(part.shapes.into_iter().map(|shape| moved(shape, x)));
+        if let Some(mut icon) = part.icon {
+            icon.cx += x;
+            icon.shape = moved(icon.shape, x);
+            scene.icon = Some(icon);
+        }
+        x += length(end - i, s);
+        (i, last_prose) = (end, false);
+    }
+    if last_prose {
+        x += END_PAD * s;
+    }
+    scene.w = x.max(side).ceil();
+    scene
+}
+
+fn moved(shape: Shape, dx: f32) -> Shape {
+    match shape {
+        Shape::Dot { cx, cy, r, color } => Shape::Dot { cx: cx + dx, cy, r, color },
+        Shape::Hollow { cx, cy, r, stroke, color } => Shape::Hollow { cx: cx + dx, cy, r, stroke, color },
+        Shape::Pause { x, cy, bar_w, bar_h, gap, color } => Shape::Pause { x: x + dx, cy, bar_w, bar_h, gap, color },
+        Shape::Ring { cx, cy, r, stroke, frac, color } => Shape::Ring { cx: cx + dx, cy, r, stroke, frac, color },
     }
 }
 
