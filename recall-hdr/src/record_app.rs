@@ -108,6 +108,8 @@ pub struct Controller {
     /// (hwnd, wait) of the last committed target, for the retarget log line.
     pub(crate) detected: Option<(isize, Duration)>,
     pub(crate) target_monitor: isize,
+    /// The primary monitor, re-read every 5 s (`record_monitor`).
+    pub(crate) primary: crate::record_monitor::PrimaryWatch,
     /// Set once a quit is asked for; the reason decides whether the app's windows close.
     pub(crate) quit: Option<QuitReason>,
     /// Runtime pause (tray "Stop recording" / pipe `pause`): no engine, game
@@ -221,6 +223,7 @@ pub fn run() -> i32 {
         follow: Follow::new(now),
         detected: None,
         target_monitor,
+        primary: crate::record_monitor::PrimaryWatch::new(crate::record_monitor::read_primary(), now),
         quit: None,
         paused: false,
         activity: EngineActivity::default(),
@@ -323,6 +326,7 @@ impl Controller {
     /// (+ island notices).
     fn tick(&mut self, now: Instant) {
         self.drain_engine_events(now);
+        self.monitor_tick(now);
         if let Some(pid) = self.pin_watch.poll(self.pinned.as_ref().map(|t| t.pid)) {
             log!("record: pinned target's process {pid} exited; auto-detection resumes");
             self.pinned = None;
