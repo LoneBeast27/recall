@@ -71,10 +71,15 @@ pub(crate) fn volume_key(path: &Path) -> Option<String> {
     })
 }
 
-/// Same drive letter / UNC share. Folders mounted into another drive's tree
-/// count as that drive, and an unknown answer counts as "same", so the worst
-/// case is today's behaviour: write the clip in place.
+/// Same volume, as Windows resolves it (`win_volume.rs`: junctions, mounted
+/// folders and subst drives count as the volume they land on). When Windows
+/// cannot say, the drive letter / UNC share text decides, and an unknown
+/// answer counts as "same", so the worst case is writing the clip in place.
 pub(crate) fn same_volume(a: &Path, b: &Path) -> bool {
+    // Cached per folder on this thread: the saver asks once per save, the mover once per move.
+    if let (Some(x), Some(y)) = (crate::win_volume::volume_of_cached(a), crate::win_volume::volume_of_cached(b)) {
+        return x.id == y.id;
+    }
     match (volume_key(a), volume_key(b)) {
         (Some(x), Some(y)) => x == y,
         _ => true,
@@ -208,9 +213,10 @@ pub(crate) fn start(events: &Events, setup: Setup) -> (Option<Stage>, Option<Mov
     let Some((queue, control)) = mover::spawn(events.clone(), setup.mover, recovered) else {
         return (None, None);
     };
+    // No volume question here: on a sleeping NAS it would hold the encoder's
+    // start. Each save asks it on the saver thread ([`Stage::target`]).
     let stage = setup.dir.map(|dir| {
-        let mode = if same_volume(&dir, &setup.out_dir) { "off (same volume as the clip folder)" } else { "on" };
-        events.log(&format!("staging {mode}: {} -> {}", dir.display(), setup.out_dir.display()));
+        events.log(&format!("staging: {} -> {} (used when the clip folder is on another volume)", dir.display(), setup.out_dir.display()));
         Stage { dir, queue, same_volume }
     });
     (stage, Some(control))
