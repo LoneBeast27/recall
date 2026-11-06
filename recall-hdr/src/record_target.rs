@@ -22,10 +22,16 @@
 //!   waits, the short debounce applies from when that candidate was first
 //!   seen. A non-target foreground (alt-tab) never ends the session; the
 //!   session ends when its process exits or its window is destroyed.
+//! - **Transitions** (`record_target_gate`): during the closed game's drain a
+//!   windowed Steam-library window waits; a `fullscreen_games` entry never
+//!   replaces a live session; a re-made window of the session's process is
+//!   adopted; a 10 s cool-down after a retarget between live games; with no
+//!   session a windowed Steam-library window needs 1.5 s and 640x360.
 
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
+use crate::record_target_gate::{Traits, ADOPT_FOR, REPLACE_COOLDOWN, WINDOWED_START};
 use crate::rules;
 use crate::types::RuleKind;
 use crate::watcher::WatchEvent;
@@ -131,6 +137,15 @@ const TARGET_DENY_STEMS: &[&str] = &[
     "wallpaper32",
     "wallpaper64",
     "ui32",
+    // Crash reporters: they ship in the game's folder (a Steam library) and
+    // would end the closed game's drain, its last clip with it (T2).
+    "crashreportclient",
+    "unitycrashhandler32",
+    "unitycrashhandler64",
+    "crashpad_handler",
+    "werfault",
+    "werfaultsecure",
+    "crashreporter",
 ];
 
 /// A window the engine can capture. `exe` is the image file name.
@@ -249,6 +264,14 @@ pub struct TargetTracker {
     last_wait: Option<Duration>,
     /// The render check asked to decide the pending candidate later.
     held: Option<Instant>,
+    /// What the pending candidate is (`record_target_gate`).
+    traits: Traits,
+    /// The closed game's pid while its drain runs (T2).
+    draining: Option<u32>,
+    /// When a live game last replaced another (T9 cool-down).
+    replaced_at: Option<Instant>,
+    /// A live process whose session window was destroyed, and when (T5a).
+    adoptable: Option<(u32, Instant)>,
 }
 
 /// What the render check says about a candidate that fell due.
@@ -263,7 +286,18 @@ pub enum Admit {
 
 impl TargetTracker {
     pub fn new(debounce: Duration, start: Duration) -> Self {
-        TargetTracker { debounce, start, current: None, pending: None, last_wait: None, held: None }
+        TargetTracker {
+            debounce,
+            start,
+            current: None,
+            pending: None,
+            last_wait: None,
+            held: None,
+            traits: Traits::FULLSCREEN,
+            draining: None,
+            replaced_at: None,
+            adoptable: None,
+        }
     }
 
     pub fn current(&self) -> Option<&Target> {
@@ -274,12 +308,28 @@ impl TargetTracker {
     fn hold_for(&self, candidate: &Option<Target>) -> Duration {
         match (candidate, &self.current) {
             (Some(c), Some(cur)) if c.pid != cur.pid => self.debounce,
+            (Some(_), None) if self.traits.windowed_only() => WINDOWED_START,
             _ => self.start,
         }
     }
 
+    /// When the pending candidate may commit; `None` while it waits for the
+    /// session or the drain to end (`record_target_gate`).
     pub fn next_deadline(&self) -> Option<Instant> {
-        let due = self.pending.as_ref().map(|(c, seen)| *seen + self.hold_for(c))?;
+        let (candidate, seen) = self.pending.as_ref()?;
+        let mut due = *seen + self.hold_for(candidate);
+        match (candidate, &self.current) {
+            (Some(c), Some(cur)) if c.pid != cur.pid => {
+                if self.traits.listed_only {
+                    return None;
+                }
+                if let Some(at) = self.replaced_at {
+                    due = due.max(at + REPLACE_COOLDOWN);
+                }
+            }
+            (Some(c), None) if self.traits.windowed_only() && self.draining.is_some_and(|p| p != c.pid) => return None,
+            _ => {}
+        }
         Some(self.held.map_or(due, |held| held.max(due)))
     }
 
@@ -291,14 +341,20 @@ impl TargetTracker {
     /// A foreground change was observed (`None` = not a target). Seeing the
     /// pending candidate again keeps its first-seen time.
     pub fn on_foreground(&mut self, candidate: Option<Target>, now: Instant) {
+        self.on_foreground_with(candidate, Traits::FULLSCREEN, now)
+    }
+
+    /// [`Self::on_foreground`] with what the candidate is (`record_target_gate`).
+    pub fn on_foreground_with(&mut self, candidate: Option<Target>, traits: Traits, now: Instant) {
         match (&candidate, &self.current, &self.pending) {
             // Re-focusing the live target: nothing pending, nothing to do.
             (Some(c), Some(cur), _) if c.same_window(cur) => self.pending = None,
-            (Some(c), _, Some((Some(p), _))) if c.same_window(p) => {}
+            (Some(c), _, Some((Some(p), _))) if c.same_window(p) => self.traits = traits,
             (None, _, Some((None, _))) => {}
             _ => {
                 self.pending = Some((candidate, now));
                 self.held = None;
+                self.traits = traits;
             }
         }
     }
@@ -322,6 +378,10 @@ impl TargetTracker {
             Some(c) if self.current.as_ref().is_some_and(|cur| cur.same_window(&c)) => false,
             Some(c) => match admit(&c) {
                 Admit::Commit => {
+                    if self.current.as_ref().is_some_and(|cur| cur.pid != c.pid) {
+                        self.replaced_at = Some(now);
+                    }
+                    self.adoptable = None;
                     self.current = Some(c);
                     self.last_wait = Some(now.duration_since(seen));
                     true
@@ -334,6 +394,18 @@ impl TargetTracker {
                 Admit::Reject => false,
             },
         }
+    }
+
+    /// The closed game's drain: `Some(its pid)` while its last clip is still
+    /// saveable (or about to be: its session just ended).
+    pub fn set_draining(&mut self, pid: Option<u32>) {
+        self.draining = pid;
+    }
+
+    /// `pid`'s session window was destroyed under [`ADOPT_FOR`] ago while it
+    /// lives: its next foreground window is the session.
+    pub fn adopts(&self, pid: u32, now: Instant) -> bool {
+        self.adoptable.is_some_and(|(p, at)| p == pid && now < at + ADOPT_FOR)
     }
 
     /// How long the last committed target waited from first seen to commit
@@ -349,8 +421,12 @@ impl TargetTracker {
             self.pending = None;
             self.held = None;
         }
+        if self.adoptable.is_some_and(|(p, _)| p == pid) {
+            self.adoptable = None;
+        }
         if self.current.as_ref().is_some_and(|c| c.pid == pid) {
             self.current = None;
+            self.replaced_at = None;
             return true;
         }
         false
@@ -360,8 +436,15 @@ impl TargetTracker {
     /// game dropped back to an in-process launcher): end the session so the
     /// engine is not left capturing a dead window. Returns `true` on change.
     pub fn on_window_gone(&mut self, hwnd: isize) -> bool {
-        if self.current.as_ref().is_some_and(|c| c.hwnd == hwnd) {
-            self.current = None;
+        self.on_window_gone_at(hwnd, Instant::now())
+    }
+
+    /// [`Self::on_window_gone`] at `now`: the process stays adoptable for
+    /// [`ADOPT_FOR`] (its next foreground window is the session).
+    pub fn on_window_gone_at(&mut self, hwnd: isize, now: Instant) -> bool {
+        if let Some(c) = self.current.take_if(|c| c.hwnd == hwnd) {
+            self.adoptable = Some((c.pid, now));
+            self.replaced_at = None;
             return true;
         }
         false

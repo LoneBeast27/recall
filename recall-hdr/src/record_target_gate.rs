@@ -1,0 +1,103 @@
+//! Transition rules for the capture target (transitions audit 2026-11-06):
+//! which window may become, or replace, the recorded game. Pure logic; the
+//! tracker (`record_target`) asks these, the controller feeds them.
+//!
+//! - **Traits** ([`traits_of`]): what a candidate is beyond its window:
+//!   fullscreen, vouched for by name (an override, a known game, or a new
+//!   window of a game whose window was just destroyed), or only a
+//!   `detect.fullscreen_games` entry (Discord).
+//! - **Drain** (T2): while the closed game's last clip is still saveable, a
+//!   windowed Steam-library window (a crash reporter, the game's own launcher)
+//!   waits until the drain ends; a fullscreen or vouched-for window may end
+//!   it, and the island says so ([`drain_cut`]: "Last clip dropped").
+//! - **Listed only** (T3): a `fullscreen_games` entry may start a session but
+//!   never replace a live one; it commits once the session ends.
+//! - **Adoption** (T5a): the session's window was destroyed but its process
+//!   lives (a fullscreen <-> windowed switch re-makes the window): for
+//!   [`ADOPT_FOR`] that process's next foreground window is the session,
+//!   windowed or not ([`adopted_candidate`]).
+//! - **Cool-down** (T9): after one live game replaced another, the session
+//!   cannot be replaced by another live game for [`REPLACE_COOLDOWN`], unless
+//!   its process exits or its window goes.
+//! - **Windowed start** (T10): with no session, a windowed Steam-library
+//!   window needs [`WINDOWED_START`] and a client area of at least
+//!   [`MIN_CLIENT`] ([`too_small`]): a splash or launcher window does not
+//!   start the engine. Fullscreen keeps the 300 ms start.
+
+use std::time::Duration;
+
+use crate::config::Config;
+use crate::record_engine::EngineTarget;
+use crate::record_target::{is_fullscreen_game, is_target, Target};
+use crate::rules;
+use crate::watcher::WatchEvent;
+
+/// How long a windowed Steam-library window must hold the foreground before
+/// it starts a session from nothing.
+pub const WINDOWED_START: Duration = Duration::from_millis(1500);
+/// The smallest client area (width, height) a windowed Steam-library window
+/// needs to be a candidate at all.
+pub const MIN_CLIENT: (i32, i32) = (640, 360);
+/// After a retarget between two live games, how long the new session cannot
+/// be replaced by another live game.
+pub const REPLACE_COOLDOWN: Duration = Duration::from_secs(10);
+/// How long a process whose session window was destroyed stays adoptable.
+pub const ADOPT_FOR: Duration = Duration::from_secs(10);
+
+/// What a candidate is, beyond its window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Traits {
+    /// Fullscreen / borderless on its monitor.
+    pub fullscreen: bool,
+    /// A game by name: an override, a known game, or adopted.
+    pub vouched: bool,
+    /// Only a `detect.fullscreen_games` entry: starts a session, never
+    /// replaces a live one.
+    pub listed_only: bool,
+}
+
+impl Traits {
+    /// A plain fullscreen window (what `TargetTracker::on_foreground` assumes).
+    pub const FULLSCREEN: Traits = Traits { fullscreen: true, vouched: false, listed_only: false };
+    /// A windowed Steam-library window on the look alone.
+    pub const WINDOWED: Traits = Traits { fullscreen: false, vouched: false, listed_only: false };
+    /// A new window of the process whose session window was destroyed.
+    pub const ADOPTED: Traits = Traits { fullscreen: false, vouched: true, listed_only: false };
+
+    /// A windowed window that is a candidate only by its Steam-library path.
+    pub fn windowed_only(self) -> bool {
+        !self.fullscreen && !self.vouched
+    }
+}
+
+/// The traits of a foreground event that `classify_event` made a candidate.
+pub fn traits_of(ev: &WatchEvent, cfg: &Config) -> Traits {
+    let over = rules::override_kind(cfg, &ev.exe_stem).is_some();
+    let known = crate::known_games::is_known_game(&ev.exe_stem, &ev.title);
+    let listed = ev.fullscreen && is_fullscreen_game(cfg, &ev.exe_stem);
+    Traits { fullscreen: ev.fullscreen, vouched: over || known, listed_only: listed && !over && !known && !ev.steam_game }
+}
+
+/// A windowed-only candidate whose client area is under [`MIN_CLIENT`].
+pub fn too_small(traits: Traits, client: (i32, i32)) -> bool {
+    traits.windowed_only() && (client.0 < MIN_CLIENT.0 || client.1 < MIN_CLIENT.1)
+}
+
+/// A foreground window of an adoptable process: the session, unless the stem
+/// is never a target (denied, a `none` override, Recall itself).
+pub fn adopted_candidate(ev: &WatchEvent, cfg: &Config) -> Option<Target> {
+    is_target(&ev.exe_stem, true, cfg).then(|| Target::from_event(ev))
+}
+
+/// The game that started when a retarget cut the drain of another game's
+/// last clip short: `Some(its name)` for the island notice.
+pub fn drain_cut(drained: Option<&Target>, applied: &EngineTarget) -> Option<String> {
+    match (drained, applied) {
+        (Some(a), EngineTarget::Window(b)) if a.pid != b.pid => Some(b.name.clone()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+#[path = "record_target_transition_tests.rs"]
+mod tests;
