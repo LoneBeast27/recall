@@ -148,11 +148,27 @@ impl State {
             "bookmarked" => DaemonEvent::Bookmarked,
             "screenshot" => DaemonEvent::Screenshot { path: path() },
             "screenshot_failed" => DaemonEvent::ScreenshotFailed { reason: string_of(event, "reason").unwrap_or_else(|| "Screenshot failed.".into()) },
+            // A recording whose stream changed goes on in a new file (`continued`).
+            "recording_started" if bool_of(event, "continued") => DaemonEvent::RecordingContinued {
+                part: u64_of(event, "part").clamp(2, u64::from(u32::MAX)) as u32,
+                cause: string_of(event, "cause").unwrap_or_default(),
+            },
             "recording_started" => DaemonEvent::RecordingStarted,
             "clip_moved" => DaemonEvent::ClipMoved { path: path(), kept_path: string_of(event, "kept_path") },
             "clip_move_failed" => DaemonEvent::ClipMoveFailed { path: path(), reason: string_of(event, "reason").unwrap_or_default() },
-            "recording_stopped" => DaemonEvent::RecordingStopped { path: path(), seconds: f64_of(event, "seconds") },
-            "recording_failed" => DaemonEvent::RecordingFailed { reason: string_of(event, "reason").unwrap_or_else(|| "Recording failed.".into()) },
+            "recording_stopped" if bool_of(event, "continued") => DaemonEvent::RecordingPartSaved { path: path() },
+            // `total_seconds`/`parts` (every part); an older engine sends only this file's `seconds`.
+            "recording_stopped" => DaemonEvent::RecordingStopped {
+                path: path(),
+                seconds: event.get("total_seconds").and_then(Value::as_f64).unwrap_or_else(|| f64_of(event, "seconds")),
+                parts: u64_of(event, "parts").clamp(1, u64::from(u32::MAX)) as u32,
+                gap_seconds: f64_of(event, "gap_seconds"),
+                frozen_seconds: f64_of(event, "frozen_seconds"),
+            },
+            "recording_failed" => DaemonEvent::RecordingFailed {
+                reason: string_of(event, "reason").unwrap_or_else(|| "Recording failed.".into()),
+                files: failed_files(event),
+            },
             // encoder_log and unknown engine lines carry nothing the UI shows.
             _ => return,
         };
@@ -252,6 +268,12 @@ fn error_text(event: &Map<String, Value>) -> String {
         .iter()
         .find_map(|key| string_of(event, key))
         .unwrap_or_else(|| Value::Object(event.clone()).to_string())
+}
+
+/// `recording_failed`'s `paths` (every file left), or the older single `path`.
+fn failed_files(event: &Map<String, Value>) -> Vec<String> {
+    let paths: Vec<String> = event.get("paths").and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default();
+    if paths.is_empty() { string_of(event, "path").into_iter().collect() } else { paths }
 }
 
 fn string_of(event: &Map<String, Value>, key: &str) -> Option<String> {

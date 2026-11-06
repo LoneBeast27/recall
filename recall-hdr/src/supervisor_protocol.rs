@@ -107,7 +107,9 @@ pub(super) fn read_protocol(shared: &Arc<Shared>, stdout: std::process::ChildStd
             Some(kind @ ("bookmarked" | "screenshot" | "recording_started" | "recording_stopped")) => {
                 log!("supervisor: engine {kind} -- {}", field(&val, "path"));
                 // A long recording ending is a finished file; the others were cued on the press.
-                if kind == "recording_stopped" {
+                // A continued part (`continued`, the capture size changed) is not the end.
+                let continued = val.get("continued").and_then(|v| v.as_bool()).unwrap_or(false);
+                if kind == "recording_stopped" && !continued {
                     crate::cues::saved();
                 }
             }

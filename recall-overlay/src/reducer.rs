@@ -216,7 +216,7 @@ impl Reducer {
     }
 
     pub fn apply_engine_event(&mut self, event: &Value, now: Instant) -> bool {
-        use Tone::{Failure, Neutral, Recording, Success};
+        use Tone::{Failure, Neutral, Success};
         match event.get("type").and_then(Value::as_str) {
             Some("status") => self.apply_status(event, now),
             Some("mic_muted") => {
@@ -253,16 +253,18 @@ impl Reducer {
                 let notice = NoticeView::new(Success, "Screenshot saved", name.clone(), false).emphasized();
                 self.set_transient("Screenshot saved", format!("Saved {name}"), now + SAVED_FOR, notice)
             }
-            Some("recording_started") => {
-                let name = file_name(event);
-                let notice = NoticeView::new(Recording, "Recording started", name.clone(), false).emphasized();
-                self.set_transient("Recording started", format!("Writing {name}"), now + SAVED_FOR, notice)
-            }
-            Some("recording_stopped") => {
-                let secs = event.get("seconds").and_then(Value::as_f64).unwrap_or(0.0).max(0.0) as u64;
-                let text = truncate(&format!("{} · {}:{:02}", file_name(event), secs / 60, secs % 60), 48);
-                let notice = NoticeView::new(Success, "Recording saved", text.clone(), false).emphasized();
-                self.set_transient("Recording saved", text, now + SAVED_FOR, notice)
+            // Long recording (`rec_notice`): a continued part's stop shows nothing.
+            Some(kind @ ("recording_started" | "recording_stopped")) => match crate::rec_notice::recording_notice(kind, event, file_name(event)) {
+                Some(n) => {
+                    let notice = NoticeView::new(n.tone, &n.title, n.detail, false).emphasized();
+                    self.set_transient(&n.title, n.text, now + SAVED_FOR, notice)
+                }
+                None => false,
+            },
+            Some("recording_failed") if crate::rec_notice::failed_notice(event).is_some() => {
+                let Some(n) = crate::rec_notice::failed_notice(event) else { return false };
+                let notice = NoticeView::new(n.tone, &n.title, n.detail, false).emphasized();
+                self.set_transient(&n.title, n.text, now + FAILURE_FOR, notice)
             }
             Some(kind @ ("screenshot_failed" | "recording_failed")) => {
                 let reason = truncate(event.get("reason").and_then(Value::as_str).unwrap_or("unknown error"), 48);

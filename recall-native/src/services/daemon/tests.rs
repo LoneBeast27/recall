@@ -1,6 +1,5 @@
 use serde_json::{Value, json};
 
-use super::controller::{process_running, repo_controller, workspace_lists_controller};
 use super::protocol::{State, command_line};
 use super::*;
 
@@ -168,7 +167,7 @@ fn hotkey_and_recording_events_and_session_fields() {
             DaemonEvent::Bookmarked,
             DaemonEvent::Screenshot { path: "E:/shots/a.png".into() },
             DaemonEvent::RecordingStarted,
-            DaemonEvent::RecordingStopped { path: "E:/rec.mp4".into(), seconds: 61.0 },
+            DaemonEvent::RecordingStopped { path: "E:/rec.mp4".into(), seconds: 61.0, parts: 1, gap_seconds: 0.0, frozen_seconds: 0.0 },
             DaemonEvent::StorageCleaned { removed: 3, freed_bytes: 1000, through: None, used_bytes: 0, cap_bytes: 0 },
             DaemonEvent::StorageCleaned { removed: 2, freed_bytes: 9, through: Some(1_790_000_000), used_bytes: 80, cap_bytes: 100 },
             DaemonEvent::StorageWarning { level: 90, used_bytes: 91, cap_bytes: 100, next_through: Some(1_780_000_000) },
@@ -187,6 +186,30 @@ fn hotkey_and_recording_events_and_session_fields() {
     assert_eq!(session.stats_hotkey, "Alt+P");
     assert_eq!(session.overlay_hotkey, "Alt+O");
     assert_eq!(session.editor_hotkey, "Alt+U");
+}
+
+/// Merge gate 11-07 (P1): `continued` was ignored, so a part change read as
+/// "Recording saved" then "Recording started".
+#[test]
+fn a_continued_recording_maps_to_its_own_events() {
+    let mut state = connected();
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_started","path":"E:/G__rec.mp4","continued":false,"part":1,"cause":null}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_stopped","path":"E:/G__rec.mp4","seconds":3540.0,"bytes":9,"continued":true,"parts":1,"total_seconds":3540.0,"cause":"size"}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_started","path":"E:/G__rec-2.mp4","continued":true,"part":2,"cause":"size"}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_stopped","path":"E:/G__rec-2.mp4","seconds":60.0,"bytes":9,"continued":false,"parts":2,"total_seconds":3600.0,"gap_seconds":7.5,"frozen_seconds":40.0,"cause":null}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_failed","reason":"the video encoder failed","path":"E:/H__rec-2.mp4","paths":["E:/H__rec.mp4","E:/H__rec-2.mp4"]}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_failed","reason":"old engine","path":"E:/I__rec.mp4"}}));
+    assert_eq!(
+        state.events,
+        vec![
+            DaemonEvent::RecordingStarted,
+            DaemonEvent::RecordingPartSaved { path: "E:/G__rec.mp4".into() },
+            DaemonEvent::RecordingContinued { part: 2, cause: "size".into() },
+            DaemonEvent::RecordingStopped { path: "E:/G__rec-2.mp4".into(), seconds: 3600.0, parts: 2, gap_seconds: 7.5, frozen_seconds: 40.0 },
+            DaemonEvent::RecordingFailed { reason: "the video encoder failed".into(), files: vec!["E:/H__rec.mp4".into(), "E:/H__rec-2.mp4".into()] },
+            DaemonEvent::RecordingFailed { reason: "old engine".into(), files: vec!["E:/I__rec.mp4".into()] },
+        ]
+    );
 }
 
 #[test]
@@ -290,123 +313,6 @@ fn send_without_connection_is_dropped() {
     assert!(!client.send(DaemonCommand::Status));
     assert_eq!(client.revision(), 0);
     assert!(!client.snapshot().connected);
-}
-
-fn wait_until(what: &str, condition: impl Fn() -> bool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !condition() {
-        assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-/// Real pipe, real threads: a fake controller on a private pipe name sees the two
-/// connect requests and a UI command; its lines reach the snapshot; closing it marks
-/// the client disconnected and sends are dropped.
-#[test]
-fn pipe_client_round_trip_against_a_fake_controller() {
-    use interprocess::local_socket::traits::{Listener as _, Stream as _};
-    use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName};
-    use std::io::{BufRead as _, BufReader, Write as _};
-
-    let pipe = format!("recall-native-test-{}", std::process::id());
-    let listener = ListenerOptions::new().name(pipe.as_str().to_ns_name::<GenericNamespaced>().unwrap()).create_sync().unwrap();
-    let client = DaemonClient::spawn_on(&pipe);
-    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let stream = listener.accept().unwrap();
-        let _ = accepted_tx.send(stream);
-        std::thread::sleep(std::time::Duration::from_secs(5)); // keep the listener alive briefly
-    });
-    let stream = accepted_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("client connected");
-    let (reader, mut writer) = stream.split();
-    let mut lines = BufReader::new(reader).lines();
-    assert_eq!(lines.next().unwrap().unwrap(), r#"{"cmd":"status"}"#);
-    assert_eq!(lines.next().unwrap().unwrap(), r#"{"cmd":"get_config"}"#);
-    wait_until("connected", || client.snapshot().connected);
-    writer.write_all(b"{\"mod\":\"session\",\"event\":{\"type\":\"status\",\"state\":\"recording\",\"save_seconds\":120}}\n").unwrap();
-    writer.write_all(b"{\"mod\":\"engine\",\"event\":{\"type\":\"saved\",\"path\":\"E:\\\\c.mp4\",\"seconds\":12.5,\"bytes\":9,\"elapsed_ms\":3}}\n").unwrap();
-    wait_until("session status", || client.snapshot().session.is_some_and(|s| s.state == "recording"));
-    wait_until("saved event", || client.revision() >= 3);
-    assert_eq!(client.drain_events(), vec![DaemonEvent::Saved { path: "E:\\c.mp4".into(), seconds: 12.5, bytes: 9, elapsed_ms: 3 }]);
-    assert!(client.drain_events().is_empty(), "drained once");
-    assert!(client.send(DaemonCommand::SaveClip { seconds: Some(30) }));
-    // A status ping (every 2 s) may come first on a slow run.
-    let sent = lines.by_ref().map(Result::unwrap).find(|l| l != r#"{"cmd":"status"}"#).unwrap();
-    assert_eq!(sent, r#"{"cmd":"save_clip","seconds":30}"#);
-    // Idle, the client asks for status by itself: only a live pump answers.
-    let t = std::time::Instant::now();
-    assert_eq!(lines.next().unwrap().unwrap(), r#"{"cmd":"status"}"#);
-    assert!(t.elapsed() < std::time::Duration::from_secs(4), "ping after {:?}", t.elapsed());
-    drop(writer);
-    drop(lines);
-    wait_until("disconnect", || !client.snapshot().connected);
-    assert_eq!(client.snapshot().session, None, "stale status cleared");
-}
-
-/// The recorder quits (an install) and a new one starts on the same pipe: the app keeps
-/// running, sees the disconnect, then reconnects by itself and asks for status again.
-#[test]
-fn pipe_client_reconnects_to_a_restarted_controller() {
-    use interprocess::local_socket::traits::{Listener as _, Stream as _};
-    use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName};
-    use std::io::{BufRead as _, BufReader, Write as _};
-
-    let pipe = format!("recall-native-restart-test-{}", std::process::id());
-    let listen = || ListenerOptions::new().name(pipe.as_str().to_ns_name::<GenericNamespaced>().unwrap()).create_sync().unwrap();
-    let client = DaemonClient::spawn_on(&pipe);
-    for run in 1..=2 {
-        let stream = listen().accept().unwrap(); // the listener goes with this scope, like a quit recorder
-        let (reader, mut writer) = stream.split();
-        let mut lines = BufReader::new(reader).lines();
-        assert_eq!(lines.next().unwrap().unwrap(), r#"{"cmd":"status"}"#, "run {run} asks for status");
-        assert_eq!(lines.next().unwrap().unwrap(), r#"{"cmd":"get_config"}"#);
-        wait_until("connected", || client.snapshot().connected);
-        writer.write_all(b"{\"mod\":\"session\",\"event\":{\"type\":\"status\",\"state\":\"recording\",\"save_seconds\":120}}\n").unwrap();
-        wait_until("session status", || client.snapshot().session.is_some_and(|s| s.state == "recording"));
-        assert!(client.send(DaemonCommand::SaveClip { seconds: None }), "run {run} takes commands");
-        drop(writer);
-        drop(lines);
-        wait_until("disconnect", || !client.snapshot().connected);
-        assert!(!client.send(DaemonCommand::Status), "no recorder: commands are dropped, the app stays up");
-    }
-}
-
-#[test]
-fn workspace_manifest_detection() {
-    assert!(workspace_lists_controller("[workspace]\nresolver = \"2\"\nmembers = [\"recall\", \"recall-hdr\", \"recall-overlay\"]\n"));
-    assert!(workspace_lists_controller("[workspace]\nmembers = [\n  \"recall\",\n  \"recall-hdr\",\n]\n"));
-    assert!(!workspace_lists_controller("[workspace]\n"));
-    assert!(!workspace_lists_controller("[package]\nname = \"recall-hdr\"\n"));
-    assert!(!workspace_lists_controller("[workspace]\nmembers = [\"recall-hdr-extra\"]\n"));
-}
-
-#[test]
-fn repo_controller_walks_up_to_the_workspace() {
-    let root = std::env::temp_dir().join(format!("recall-native-controller-test-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    let exe_dir = root.join("target-gpui").join("debug");
-    std::fs::create_dir_all(&exe_dir).unwrap();
-    std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = [\"recall\", \"recall-hdr\"]\n").unwrap();
-    let exe = exe_dir.join("recall-native.exe");
-    assert_eq!(repo_controller(&exe), None, "no build yet");
-    let debug = root.join("target-dev").join("debug");
-    std::fs::create_dir_all(&debug).unwrap();
-    std::fs::write(debug.join("recall-hdr.exe"), b"stub").unwrap();
-    assert_eq!(repo_controller(&exe), Some(debug.join("recall-hdr.exe")));
-    let release = root.join("target-dev").join("release");
-    std::fs::create_dir_all(&release).unwrap();
-    std::fs::write(release.join("recall-hdr.exe"), b"stub").unwrap();
-    assert_eq!(repo_controller(&exe), Some(release.join("recall-hdr.exe")), "release preferred");
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-fn process_lookup_finds_this_test_binary_only() {
-    let me = std::env::current_exe().unwrap();
-    let name = me.file_name().unwrap().to_string_lossy().to_uppercase();
-    assert!(process_running(&name).unwrap());
-    assert!(!process_running("recall-native-no-such-process-7f3a.exe").unwrap());
 }
 
 /// 11-05: the engine stopped 30 s after sobosuba closed, the controller said

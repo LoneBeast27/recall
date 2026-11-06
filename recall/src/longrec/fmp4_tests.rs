@@ -121,15 +121,20 @@ fn x264(w: u32, h: u32) -> Option<ff::encoder::Video> {
     Some(ctx.open_with(opts).expect("open libx264"))
 }
 
-/// (pts µs, keyframe, payload) for `n` frames at ~60 fps.
+/// (pts µs, keyframe, payload) for `n` 64x64 frames at ~60 fps.
 fn encode_frames(enc: &mut ff::encoder::Video, n: usize) -> Vec<(u64, bool, Vec<u8>)> {
+    encode_sized(enc, n, 64, 64)
+}
+
+/// [`encode_frames`] for a `w`x`h` encoder.
+fn encode_sized(enc: &mut ff::encoder::Video, n: usize, w: u32, h: u32) -> Vec<(u64, bool, Vec<u8>)> {
     let mut out = Vec::new();
     let mut pkt = ff::Packet::empty();
     for i in 0..n {
-        let mut vf = ff::frame::Video::new(ff::format::Pixel::YUV420P, 64, 64);
+        let mut vf = ff::frame::Video::new(ff::format::Pixel::YUV420P, w, h);
         let stride = vf.stride(0);
-        for y in 0..64 {
-            for x in 0..64 {
+        for y in 0..h as usize {
+            for x in 0..w as usize {
                 vf.data_mut(0)[y * stride + x] = ((x * 3 + y + i * 9) & 0xff) as u8;
             }
         }
@@ -248,4 +253,56 @@ fn create_refuses_to_overwrite_an_existing_part() {
     assert!(Fmp4Sink::create(&part, &params, &tracks()).is_err());
     assert_eq!(std::fs::read(&part).unwrap(), b"someone else's");
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Merge gate 11-07 (P2): the parts were only ever tested against a fake sink. A
+/// continued recording through the real muxer: two files, each with its own size,
+/// each starting on a keyframe. Written under the worktree's `.tmp`, never a clip folder.
+#[test]
+fn a_continued_recording_writes_two_playable_parts_through_the_real_muxer() {
+    use super::super::machine::{Cause, Event, Recorder, PART_GAP};
+    ff::init().unwrap();
+    // A skip goes through `hw_skip` (printed past libtest's capture, counted, and a failure
+    // under RECALL_REQUIRE_NVENC=1); RECALL_FAKE_NO_NVENC=1 takes this path on purpose.
+    if crate::hw_skip::faked_absent() {
+        return crate::hw_skip::skipped("encoders treated as absent (RECALL_FAKE_NO_NVENC)");
+    }
+    let (Some(mut small), Some(mut wide)) = (x264(64, 64), x264(96, 64)) else { return crate::hw_skip::skipped("libx264 unavailable") };
+    let (first_params, second_params) = (ff::codec::Parameters::from(&small), ff::codec::Parameters::from(&wide));
+    let first = encode_sized(&mut small, 40, 64, 64);
+    let second = encode_sized(&mut wide, 40, 96, 64);
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.tmp").join(format!("longrec-parts-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("G__2026-11-07__10-00-00__rec.mp4");
+    let mut rec = Recorder::new(Fmp4Factory, tracks());
+    rec.set_video(Some(first_params));
+    let t0 = Instant::now();
+    rec.start(path.clone(), Some((0, t0)), t0);
+    let tone: Vec<f32> = (0..1_600).map(|i| ((i / 2) as f32 * 0.03).sin() * 0.2).collect();
+    let feed = |rec: &mut Recorder<Fmp4Factory>, frames: &[(u64, bool, Vec<u8>)], base_us: u64, at: Instant| {
+        for (pts, key, data) in frames {
+            let now = at + Duration::from_micros(*pts);
+            assert!(!rec.video(base_us + pts, *key, Arc::from(data.as_slice()), false, now).iter().any(|e| matches!(e, Event::Failed { .. })));
+            rec.audio(0, &tone, now);
+        }
+    };
+    feed(&mut rec, &first, 0, t0);
+    let t1 = t0 + PART_GAP;
+    let events = rec.encoder_reopened(t1, Cause::Size, Some(second_params));
+    assert!(matches!(events.last(), Some(Event::Continued { part: 1, .. })), "{events:?}");
+    feed(&mut rec, &second, PART_GAP.as_micros() as u64, t1);
+    let events = rec.stop();
+    assert!(matches!(&events[..], [Event::Stopped { parts: 2, .. }]), "{events:?}");
+    let part2 = dir.join("G__2026-11-07__10-00-00__rec-2.mp4");
+    for (file, width, sent) in [(&path, 64, first.len()), (&part2, 96, second.len())] {
+        let mut ictx = ff::format::input(file).unwrap_or_else(|e| panic!("{} opens: {e}", file.display()));
+        let stream = ictx.stream(0).unwrap();
+        // SAFETY: the stream's parameters are valid while `ictx` lives.
+        let (w, h) = unsafe { ((*stream.parameters().as_ptr()).width, (*stream.parameters().as_ptr()).height) };
+        assert_eq!((w, h), (width, 64), "{} has its own encoder's size", file.display());
+        let video: Vec<bool> = ictx.packets().filter(|(s, _)| s.index() == 0).map(|(_, p)| p.is_key()).collect();
+        assert_eq!(video.first(), Some(&true), "{} starts on a keyframe", file.display());
+        assert_eq!(video.len(), sent, "{}: every packet of its encoder", file.display());
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }

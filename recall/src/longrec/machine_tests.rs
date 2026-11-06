@@ -26,7 +26,7 @@ fn waits_for_a_keyframe_then_writes_each_packet_one_step_late() {
     assert_eq!(log.videos(), vec![(0, 16 * MS, true, 2), (16 * MS, 34 * MS, false, 3)], "VFR durations from the next PTS");
     // The tail packet reuses the previous duration: (1070 + 34 - 1020) ms.
     let events = rec.stop();
-    assert_eq!(events, vec![Event::Stopped { path: path.clone(), seconds: 0.084, bytes: 4, marks: 0 }]);
+    assert_eq!(events, vec![Event::Stopped { path: path.clone(), seconds: 0.084, bytes: 4, marks: 0, parts: 1, total_seconds: 0.084, gap_seconds: 0.0, frozen_seconds: 0.0 }]);
     assert_eq!(log.videos().last(), Some(&(50 * MS, 34 * MS, false, 4)));
     assert!(path.is_file(), "renamed into place");
     assert!(!naming::part_of(&path).exists(), "no .part left");
@@ -140,8 +140,8 @@ fn a_failing_sink_keeps_the_partial_recording() {
 }
 
 #[test]
-fn marks_land_in_the_recording_sidecar_and_a_reopen_ends_it() {
-    let (mut rec, _log, path) = recorder("marks");
+fn marks_land_in_the_recording_sidecar_and_a_reopen_continues_in_a_new_file() {
+    let (mut rec, log, path) = recorder("marks");
     let t0 = Instant::now();
     rec.start(path.clone(), Some((0, t0)), t0);
     rec.mark(5 * MS); // before the first frame: ignored (armed)
@@ -149,12 +149,75 @@ fn marks_land_in_the_recording_sidecar_and_a_reopen_ends_it() {
     rec.mark(600 * MS);
     rec.video(1_100 * MS, false, pkt(2), false, t0);
     rec.mark(1_100 * MS);
-    let events = rec.encoder_reopened();
+    let later = t0 + PART_GAP; // part 1 is older than the part gap: part 2 may start at once
+    let events = rec.encoder_reopened(later, Cause::Size, None);
     assert!(matches!(&events[0], Event::Log(_)));
-    assert!(matches!(&events[1], Event::Stopped { marks: 2, .. }), "{events:?}");
+    assert!(matches!(&events[1], Event::Continued { path: p, marks: 2, .. } if *p == path), "{events:?}");
+    assert_eq!(events.len(), 2, "{events:?}");
     let sidecar = crate::bookmarks::sidecar_path(&path);
     assert_eq!(std::fs::read_to_string(sidecar).unwrap(), r#"{"version":1,"marks":[0.5,1.0]}"#);
-    assert!(rec.encoder_reopened().is_empty(), "nothing to end when idle");
+    assert!(path.is_file() && !naming::part_of(&path).exists(), "part 1 finished and renamed");
+    assert!(rec.is_active(), "armed for part 2");
+    assert!(rec.encoder_reopened(later, Cause::Size, None).is_empty(), "armed: nothing to end");
+    // Part 2 starts on the new encoder's first keyframe, with its own timeline.
+    let second = path.with_file_name("G__2026-10-22__14-05-09__rec-2.mp4");
+    let settled = later + Duration::from_secs(2); // the second reopen came while waiting
+    assert!(rec.video(1_150 * MS, false, pkt(3), false, settled).is_empty(), "waits for a keyframe");
+    assert_eq!(rec.video(1_200 * MS, true, pkt(4), false, settled), vec![Event::PartStarted { path: second.clone(), part: 2, cause: Cause::Size }]);
+    assert_eq!(log.calls().iter().rfind(|c| matches!(c, Call::Open(_))), Some(&Call::Open(naming::part_of(&second))));
+    rec.video(1_216 * MS, false, pkt(5), false, settled);
+    let events = rec.stop();
+    assert!(matches!(&events[..], [Event::Stopped { path: p, .. }] if *p == second), "{events:?}");
+    assert_eq!(log.videos().iter().find(|v| v.3 == 4).map(|v| v.0), Some(0), "part 2 starts at 0");
+    assert!(second.is_file() && path.is_file(), "both parts kept");
+    assert!(!rec.is_active());
+}
+
+#[test]
+fn each_reopen_takes_the_next_free_part_and_never_overwrites_a_clip() {
+    let (mut rec, _log, path) = recorder("parts");
+    let name = |n: &str| path.with_file_name(format!("G__2026-10-22__14-05-09__rec{n}.mp4"));
+    std::fs::write(name("-3"), b"keep").unwrap(); // another clip with the part-3 name
+    let t0 = Instant::now();
+    rec.start(path.clone(), Some((0, t0)), t0);
+    rec.video(0, true, pkt(1), false, t0);
+    rec.video(16 * MS, false, pkt(2), false, t0);
+    let (t1, t2) = (t0 + PART_GAP, t0 + PART_GAP * 2);
+    assert!(matches!(rec.encoder_reopened(t1, Cause::Size, None).last(), Some(Event::Continued { .. })));
+    assert_eq!(rec.video(33 * MS, true, pkt(3), false, t1), vec![Event::PartStarted { path: name("-2"), part: 2, cause: Cause::Size }]);
+    rec.video(50 * MS, false, pkt(4), false, t1);
+    let events = rec.encoder_reopened(t2, Cause::Size, None);
+    assert!(matches!(events.last(), Some(Event::Continued { path: p, .. }) if *p == name("-2")), "{events:?}");
+    assert_eq!(rec.video(66 * MS, true, pkt(5), false, t2), vec![Event::PartStarted { path: name("-4"), part: 3, cause: Cause::Size }]);
+    assert!(matches!(&rec.stop()[..], [Event::Stopped { path: p, .. }] if *p == name("-4")));
+    assert_eq!(std::fs::read(name("-3")).unwrap(), b"keep", "an existing clip is untouched");
+    assert!(path.is_file() && name("-2").is_file() && name("-4").is_file());
+}
+
+#[test]
+fn a_stop_timeout_or_failure_before_the_next_part_names_the_saved_part() {
+    let (mut rec, _log, path) = recorder("between");
+    let t0 = Instant::now();
+    let reopened = |rec: &mut Recorder<FakeFactory>, path: &PathBuf| {
+        rec.start(path.clone(), Some((0, t0)), t0);
+        rec.video(0, true, pkt(1), false, t0);
+        rec.video(16 * MS, false, pkt(2), false, t0);
+        assert!(matches!(rec.encoder_reopened(t0 + PART_GAP, Cause::Size, None).last(), Some(Event::Continued { .. })));
+    };
+    reopened(&mut rec, &path);
+    let events = rec.stop();
+    assert!(matches!(&events[..], [Event::Stopped { path: p, .. }] if *p == path), "the user's stop saves part 1: {events:?}");
+    assert!(!rec.is_active());
+    let path = path.with_file_name("G__2026-10-22__14-06-00__rec.mp4");
+    reopened(&mut rec, &path);
+    assert!(rec.tick(t0 + PART_GAP + ARM_TIMEOUT / 2).is_empty());
+    let events = rec.tick(t0 + PART_GAP + ARM_TIMEOUT);
+    assert!(matches!(&events[..], [Event::Failed { kept: Some(p), .. }] if *p == path), "{events:?}");
+    let path = path.with_file_name("G__2026-10-22__14-07-00__rec.mp4");
+    reopened(&mut rec, &path);
+    let events = rec.encoder_failed("NVENC encode failed: device lost");
+    assert!(matches!(&events[..], [Event::Failed { kept: Some(p), .. }] if *p == path), "{events:?}");
+    assert!(!rec.is_active());
 }
 
 #[test]

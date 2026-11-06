@@ -131,19 +131,41 @@ pub enum Outbound {
     },
     /// A manual long recording is writing; `path` is the final name (the file
     /// is `<path>.part` until it stops).
+    /// `continued`: part `part` (2, 3, ...) of a running recording whose stream
+    /// changed (`cause`: "size" | "input" (GPU / CPU frames) | "encoder"); it
+    /// follows a `recording_stopped` with `continued`. A fresh start is part 1, cause null.
     RecordingStarted {
         path: String,
+        continued: bool,
+        part: u32,
+        cause: Option<&'static str>,
     },
+    /// `seconds`/`bytes`: this file. `parts`: files so far, `total_seconds`: all of them,
+    /// `gap_seconds`: time not recorded between the parts (0 for one file); `frozen_seconds`:
+    /// time the picture held still after a same-header encoder reopen (0 if none).
+    /// `continued`: only this part ended (`cause` as above); the recording goes on
+    /// in a new file, reported by the next `recording_started`.
     RecordingStopped {
         path: String,
         seconds: f64,
         bytes: u64,
+        continued: bool,
+        parts: u32,
+        total_seconds: f64,
+        gap_seconds: f64,
+        frozen_seconds: f64,
+        cause: Option<&'static str>,
     },
     /// `path`: the partial recording that was kept (renamed to its final name),
-    /// or null when nothing was written.
+    /// or null when nothing was written. `paths`: every file the recording left,
+    /// the finished parts of a continued recording first (it ended early).
+    /// `gap_seconds` / `frozen_seconds`: as `recording_stopped`, up to the failure.
     RecordingFailed {
         reason: String,
         path: Option<String>,
+        paths: Vec<String>,
+        gap_seconds: f64,
+        frozen_seconds: f64,
     },
     /// A long recording left as `.part` by a crash was renamed into place.
     RecordingRecovered {
