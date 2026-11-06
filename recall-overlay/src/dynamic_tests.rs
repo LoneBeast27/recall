@@ -70,7 +70,7 @@ fn footprints_sit_on_their_edges() {
         assert!(0.0 <= x0 && x0 < x1 && x1 <= 1.0 && 0.0 <= y0 && y0 < y1 && y1 <= 1.0, "{a:?}");
     }
     let (_, y0, _, y1) = footprint(Anchor::RightMiddle, WIDE);
-    assert!((y1 - y0 - 360.0 / 1440.0).abs() < 1e-4, "a side spot runs along the edge");
+    assert!((y1 - y0 - 560.0 / 1440.0).abs() < 1e-4, "a side spot runs along the edge, tall (stacked glyphs)");
     let (x0, _, x1, _) = footprint(Anchor::TopLeft, 21.0 / 9.0);
     assert!(x1 - x0 < 360.0 / 2560.0, "ultrawide: the same pill is a smaller share of the width");
 }
