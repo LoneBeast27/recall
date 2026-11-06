@@ -4,6 +4,12 @@
 //! Usage: pre_encode_demo <clip copy> <start s> <end s> [max MB]
 #[path = "../../recall/src/edit_model.rs"]
 mod edit_model;
+#[allow(dead_code)]
+#[path = "../../recall/src/win_recycle.rs"]
+mod win_recycle;
+#[allow(dead_code)]
+#[path = "../../recall/src/win_volume.rs"]
+mod win_volume;
 #[path = "../src/backend.rs"]
 #[allow(dead_code)]
 mod backend;

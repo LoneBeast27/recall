@@ -3,6 +3,11 @@
 
 use super::*;
 
+/// A Recycle Bin that takes anything (the bin checks have their own tests).
+fn any_bin(_: &Path, _: u64) -> Result<(), String> {
+    Ok(())
+}
+
 fn clip(name: &str, gib: u64, modified: u64) -> ClipFile {
     ClipFile { name: name.into(), bytes: gib * GIB, modified }
 }
@@ -109,7 +114,7 @@ fn a_quarantined_library_file_cancels_the_run() {
 
 #[test]
 fn caps_below_the_minimum_never_run() {
-    let err = run_once(Path::new(r"Z:\does-not-matter"), STORAGE_CAP_MIN_GB - 1, plan_dir, &|| true, |_| panic!("no recycle"))
+    let err = run_once(Path::new(r"Z:\does-not-matter"), STORAGE_CAP_MIN_GB - 1, plan_dir, &|| true, any_bin, |_| panic!("no recycle"))
         .expect_err("refused");
     assert!(err.contains("minimum"), "{err}");
 }
@@ -176,7 +181,7 @@ fn scan_lists_top_level_clips_only() {
 
 #[test]
 fn cleaned_event_shape() {
-    let v: Value = serde_json::from_str(&cleaned_event(&Outcome { removed: 3, freed: 7 * GIB, through: Some(1_700_000_000), used: 90 * GIB, cap: 100 * GIB, next: Some(1_700_000_100), stuck: false })).unwrap();
+    let v: Value = serde_json::from_str(&cleaned_event(&Outcome { removed: 3, freed: 7 * GIB, through: Some(1_700_000_000), used: 90 * GIB, cap: 100 * GIB, next: Some(1_700_000_100), stuck: false, refused: None })).unwrap();
     assert_eq!(
         v,
         json!({"type":"storage_cleaned","removed":3,"freed_bytes":7 * GIB,"through":1_700_000_000u64,"used_bytes":90 * GIB,"cap_bytes":100 * GIB})
@@ -185,7 +190,7 @@ fn cleaned_event_shape() {
 
 #[test]
 fn warning_and_preview_event_shapes() {
-    let o = Outcome { removed: 0, freed: 0, through: None, used: 85 * GIB, cap: 100 * GIB, next: Some(500), stuck: false };
+    let o = Outcome { removed: 0, freed: 0, through: None, used: 85 * GIB, cap: 100 * GIB, next: Some(500), stuck: false, refused: None };
     let v: Value = serde_json::from_str(&warning_event(80, &o)).unwrap();
     assert_eq!(v, json!({"type":"storage_warning","level":80,"used_bytes":85 * GIB,"cap_bytes":100 * GIB,"next_through":500}));
     let o = Outcome { next: None, ..o };
@@ -320,7 +325,7 @@ fn recycle_then_limit_off(files: &[PathBuf]) -> Result<(), String> {
 #[test]
 fn turning_the_limit_off_between_clips_stops_the_run() {
     let wanted = || LIMIT_ON.load(SeqCst);
-    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, &wanted, recycle_then_limit_off).unwrap();
+    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, &wanted, any_bin, recycle_then_limit_off).unwrap();
     let calls = FLIP_CALLS.lock().unwrap().clone();
     let clips: Vec<&String> = calls.iter().flatten().filter(|n| n.ends_with(".mp4")).collect();
     assert_eq!(clips, vec![A], "exactly one clip recycled: {calls:?}");
@@ -336,7 +341,7 @@ fn recycle_recorded(files: &[PathBuf]) -> Result<(), String> {
 
 #[test]
 fn a_clip_and_its_companions_go_in_one_call() {
-    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, &|| true, recycle_recorded).unwrap();
+    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, &|| true, any_bin, recycle_recorded).unwrap();
     let mut calls = GROUP_CALLS.lock().unwrap().clone();
     for call in &mut calls {
         call.sort();
@@ -345,4 +350,55 @@ fn a_clip_and_its_companions_go_in_one_call() {
     a_call.sort();
     assert_eq!(calls, vec![a_call, vec![B.to_string()], vec![C.to_string()]], "one call per clip, companions with their clip");
     assert_eq!(out.removed, 3);
+}
+
+// ---- Never a permanent delete: a clip that cannot go to the Recycle Bin stops the run ----
+
+const BIG: &str = "G__2026-01-02__00-00-00.mp4";
+
+/// A (1 GiB), then B (60 GiB, bigger than the bin), then C (1 GiB).
+fn plan_big_middle(_: &Path, _: u32) -> Result<(Plan, Listing), String> {
+    let clips = vec![clip(A, 1, 100), clip(BIG, 60, 200), clip(C, 1, 300)];
+    let listing = Listing { clips, names: [A, BIG, C].map(String::from).to_vec(), thumbs: Vec::new() };
+    let plan = Plan { remove: vec![A.into(), BIG.into(), C.into()], freed: 62 * GIB, total: 600 * GIB, through: Some(300), next: None };
+    Ok((plan, listing))
+}
+
+/// A bin that holds at most 10 GiB.
+fn ten_gib_bin(_: &Path, bytes: u64) -> Result<(), String> {
+    if bytes > 10 * GIB { Err("the clip is bigger than the Recycle Bin".into()) } else { Ok(()) }
+}
+
+static BIG_CALLS: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
+fn recycle_big(files: &[PathBuf]) -> Result<(), String> {
+    BIG_CALLS.lock().unwrap().push(names_of(files));
+    Ok(())
+}
+
+#[test]
+fn a_clip_too_big_for_the_bin_is_skipped_and_the_run_stops() {
+    let out = run_once(Path::new(r"E:\Clips"), 500, plan_big_middle, &|| true, ten_gib_bin, recycle_big).unwrap();
+    assert_eq!(BIG_CALLS.lock().unwrap().clone(), vec![vec![A.to_string()]], "A went, B was refused, C was never tried");
+    assert_eq!(out.removed, 1);
+    assert!(out.refused.as_deref().is_some_and(|r| r.contains("bigger than the Recycle Bin")), "{out:?}");
+}
+
+/// What `win_recycle::facts` reports for a `\nas` share: no volume GUID.
+fn share_bin(_: &Path, bytes: u64) -> Result<(), String> {
+    let share = crate::win_volume::Volume { id: r"\nas\clips\".into(), label: r"\nas\clips".into() };
+    crate::win_recycle::decide(&crate::win_recycle::BinFacts { volume: Some(share), drive_type: 4, nuke: None, max_mb: None }, bytes)
+}
+
+static SHARE_CALLS: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
+fn recycle_share(files: &[PathBuf]) -> Result<(), String> {
+    SHARE_CALLS.lock().unwrap().push(names_of(files));
+    Ok(())
+}
+
+#[test]
+fn clips_on_a_share_are_never_sent() {
+    let out = run_once(Path::new(r"\nas\clips"), 500, plan_three, &|| true, share_bin, recycle_share).unwrap();
+    assert!(SHARE_CALLS.lock().unwrap().is_empty(), "no shell call: on a share it would delete for good");
+    assert_eq!(out.removed, 0);
+    assert!(out.refused.is_some());
 }

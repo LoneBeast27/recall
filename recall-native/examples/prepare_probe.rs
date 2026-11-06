@@ -1,6 +1,12 @@
 //! Exercise the native editor's actual read-only media preparation and visual cache.
 #[path = "../../recall/src/edit_model.rs"]
 mod edit_model;
+#[allow(dead_code)]
+#[path = "../../recall/src/win_recycle.rs"]
+mod win_recycle;
+#[allow(dead_code)]
+#[path = "../../recall/src/win_volume.rs"]
+mod win_volume;
 #[path = "../src/backend.rs"]
 mod backend;
 #[path = "../src/services/mod.rs"]
