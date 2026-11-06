@@ -62,8 +62,8 @@ impl Anchor {
     /// The quarter turn the look takes here (side edges only).
     pub fn turn(self) -> Turn {
         match self.side() {
-            Side::Right => Turn::Cw,
-            Side::Left => Turn::Ccw,
+            Side::Right => Turn::Right,
+            Side::Left => Turn::Left,
             Side::Top | Side::Bottom => Turn::None,
         }
     }
@@ -572,7 +572,7 @@ mod tests {
         assert_eq!(Anchor::from_corner("bottom-left"), Some(Anchor::BottomLeft));
         assert_eq!(Anchor::from_corner("top-right"), Some(Anchor::TopRight));
         assert_eq!(Anchor::from_corner("dynamic"), None);
-        assert_eq!((Anchor::RightMiddle.turn(), Anchor::LeftMiddle.turn(), Anchor::BottomRight.turn()), (Turn::Cw, Turn::Ccw, Turn::None));
+        assert_eq!((Anchor::RightMiddle.turn(), Anchor::LeftMiddle.turn(), Anchor::BottomRight.turn()), (Turn::Right, Turn::Left, Turn::None));
         assert_eq!((align(Anchor::BottomLeft), align(Anchor::RightMiddle), align(Anchor::BottomRight)), (0.0, 0.5, 1.0));
         let qhd = Rect { left: 0, top: 0, right: 2560, bottom: 1440 };
         let low = Spot { anchor: Anchor::BottomRight, free_px: None };

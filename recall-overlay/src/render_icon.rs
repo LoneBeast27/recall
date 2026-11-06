@@ -9,7 +9,7 @@ use windows::Win32::Graphics::Direct2D::Common::{D2D1_FIGURE_BEGIN_HOLLOW, D2D1_
 use windows::Win32::Graphics::Direct2D::{
     ID2D1StrokeStyle, D2D1_ARC_SEGMENT, D2D1_ARC_SIZE_LARGE, D2D1_ARC_SIZE_SMALL, D2D1_ELLIPSE, D2D1_SWEEP_DIRECTION_CLOCKWISE,
 };
-use windows_numerics::{Matrix3x2, Vector2};
+use windows_numerics::Vector2;
 
 use super::Renderer;
 use crate::badge::{Badge, Glyph, TICK};
@@ -54,9 +54,9 @@ impl Renderer {
     pub(crate) unsafe fn icon(&self, icon: &Icon, look: &Look, (content_dx, k): (f32, f32), badge: Option<Badge>, alpha: f32) -> Result<()> {
         let (x, y, pop) = icon_pose(look, content_dx, icon.cx * k);
         let k = k * pop;
-        let place = Matrix3x2::translation(-icon.cx, -icon.cy) * Matrix3x2::scale(k, k) * Matrix3x2::translation(x, y);
         unsafe {
-            self.set_transform(place);
+            // Upright on a side spot too (the pause bars stay vertical, the ring starts at 12).
+            self.upright((icon.cx, icon.cy), k, (x, y));
             match icon.badge {
                 Some(phase) => self.badge(icon, &badge.unwrap_or(Badge::rest(phase)), alpha)?,
                 None => self.shape(&icon.shape, alpha)?,
