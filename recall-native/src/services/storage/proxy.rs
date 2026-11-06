@@ -64,9 +64,26 @@ pub fn preview_proxy(source: &str) -> Result<String, String> {
 
 /// Removes every preview copy (Settings → Clear). Returns bytes freed.
 pub fn clear() -> u64 {
-    let dir = super::cache_root().join("proxy");
-    let freed = copies(&dir).iter().map(|(_, bytes, _)| bytes).sum();
-    let _ = std::fs::remove_dir_all(&dir);
+    clear_in(&super::cache_root().join("proxy"))
+}
+
+/// [`clear`] of one folder: Recall's `<id>.mp4` copies and their `.part` only.
+pub(super) fn clear_in(dir: &Path) -> u64 {
+    if super::guard::blocked(dir).is_some() {
+        return 0;
+    }
+    let Ok(listing) = std::fs::read_dir(dir) else { return 0 };
+    let mut freed = 0;
+    for entry in listing.flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let copy = name.strip_suffix(".part").map_or(name.as_str(), |stem| stem).strip_suffix(".mp4").is_some_and(super::owned::is_id)
+            || name.strip_suffix(".part").is_some_and(super::owned::is_id);
+        let bytes = entry.metadata().map_or(0, |m| m.len());
+        if copy && entry.file_type().is_ok_and(|t| t.is_file()) && std::fs::remove_file(entry.path()).is_ok() {
+            freed += bytes;
+        }
+    }
+    let _ = std::fs::remove_dir(dir);
     freed
 }
 
@@ -84,13 +101,16 @@ fn copies(dir: &Path) -> Vec<(PathBuf, u64, std::time::SystemTime)> {
     let Ok(listing) = std::fs::read_dir(dir) else { return Vec::new() };
     listing
         .flatten()
-        .filter(|e| e.path().extension().is_some_and(|x| x == "mp4"))
+        .filter(|e| e.file_name().to_string_lossy().strip_suffix(".mp4").is_some_and(super::owned::is_id))
         .filter_map(|e| e.metadata().ok().map(|m| (e.path(), m.len(), m.modified().unwrap_or(UNIX_EPOCH))))
         .collect()
 }
 
 /// Keeps the newest [`KEEP`] copies.
 fn prune(dir: &Path) {
+    if super::guard::blocked(dir).is_some() {
+        return;
+    }
     let mut all = copies(dir);
     all.sort_by(|a, b| b.2.cmp(&a.2));
     for (path, _, _) in all.into_iter().skip(KEEP) {

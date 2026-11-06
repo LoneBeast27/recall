@@ -120,12 +120,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("recall-ssd-usage-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("cache");
-        write(&root.join("thumbs").join("a.jpg"), 100);
-        write(&root.join("visuals").join("a").join("scrub-0.jpg"), 200);
-        write(&root.join("visuals").join("a").join("poster.jpg"), 300);
+        write(&root.join("thumbs").join("aaaaaaaaaaaaaaaa.jpg"), 100);
+        write(&root.join("visuals").join("aaaaaaaaaaaaaaaa").join("scrub-0.jpg"), 200);
+        write(&root.join("visuals").join("aaaaaaaaaaaaaaaa").join("poster.jpg"), 300);
         write(&root.join("proxy").join("p.mp4"), 400);
-        write(&root.join("video").join("a.mp4"), 5000);
-        write(&root.join("light").join("b.mp4"), 600);
+        write(&root.join("video").join("aaaaaaaaaaaaaaaa.mp4"), 5000);
+        write(&root.join("light").join("bbbbbbbbbbbbbbbb.mp4"), 600);
         write(&root.join("staging").join("kept").join("c.mp4"), 700);
         write(&root.join("heads").join("a.head"), 800);
         write(&root.join("projects").join("a.json"), 10);
@@ -142,10 +142,12 @@ mod tests {
         assert_eq!(usage.previews, 100 + 200 + 300 + 400);
         assert_eq!(usage.kept, 5000 + 600 + 700);
         assert_eq!(usage.heads, 800);
-        assert_eq!(usage.other, 10 + settings);
+        // The ownership list (`owned.rs`) the inventory wrote when it adopted this cache.
+        let listed = root.join("owned.json").metadata().map_or(0, |m| m.len());
+        assert_eq!(usage.other, 10 + settings + listed);
         assert_eq!(usage.budget, 2 << 30);
         assert_eq!(usage.exports, 900 + 1000, "pre-encode plus finished exports, no hidden part files");
-        assert_eq!(usage.used(), 1000 + 6300 + 800 + 10 + settings, "the pre-encode is not held against the budget");
+        assert_eq!(usage.used(), 1000 + 6300 + 800 + 10 + settings + listed, "the pre-encode is not held against the budget");
         assert!(raw.join("clip.mp4").exists() && dir.join("Recall").join("Edited").join("clip-edited-1.mp4").exists(), "read only");
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -130,10 +130,68 @@ fn engine_start_asks_no_volume_question() {
     let (stage_dir, out) = (temp_dir("start-stage"), temp_dir("start-out"));
     let (events, _sink) = Events::capture(true);
     let mover = mover::Config { background: false, same_volume: counted_same_volume, ..mover::Config::default() };
-    let setup = Setup { dir: Some(stage_dir.clone()), recover: None, out_dir: out.clone(), mover };
+    let setup = Setup { dir: Some(stage_dir.clone()), recover: None, out_dir: out.clone(), mover, refused: Vec::new() };
     let (stage, control) = start(&events, setup);
     assert!(stage.is_some());
     assert_eq!(START_VOLUME_LOOKUPS.load(std::sync::atomic::Ordering::SeqCst), 0, "start looked up a volume");
     assert!(control.unwrap().shutdown(std::time::Duration::from_secs(1)));
     let _ = (std::fs::remove_dir_all(&stage_dir), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn recovery_leaves_a_crashed_long_recording_part_for_its_own_recovery() {
+    // The clip folder pointed at the staging folder: a long recording's `.part` there must
+    // wait for `longrec::recover_parts`, which renames it; it is never a stale mux file.
+    let stage = sandbox("longrec");
+    let part = stage.join("G__2026-10-22__14-05-09__rec.mp4.part");
+    std::fs::write(&part, b"fragments").unwrap();
+    let mux = stage.join("G__2026-10-22__14-05-09-275__ab12.mp4.part");
+    std::fs::write(&mux, b"half a mux").unwrap();
+    let found = recover(&stage, &stage);
+    assert!(part.exists(), "the long recording waits for its recovery");
+    assert_eq!(found.removed, vec![mux.clone()], "only the saver's own stale mux file goes");
+    let _ = std::fs::remove_dir_all(&stage);
+}
+
+#[test]
+fn a_staging_folder_inside_or_around_a_clip_folder_is_refused() {
+    let base = sandbox("refuse");
+    let (clips, other) = (base.join("Clips"), base.join("Imported"));
+    let dirs = vec![clips.clone(), other.clone()];
+    assert!(refused(&clips, &dirs).is_some(), "the clip folder itself");
+    assert!(refused(&clips.join("stage"), &dirs).is_some(), "inside the clip folder");
+    assert!(refused(&base, &dirs).is_some(), "around the clip folder");
+    assert!(refused(&other.join("x"), &dirs).is_some(), "inside an imported folder");
+    let upper = PathBuf::from(clips.to_string_lossy().to_uppercase());
+    assert!(refused(&upper, &dirs).is_some(), "case does not hide it");
+    assert!(refused(&base.join("Clips2"), &dirs).is_none(), "a name prefix is not a parent");
+    assert!(refused(&base.join("cache").join("staging"), &dirs).is_none(), "a separate folder is fine");
+    let message = refused(&clips, &dirs).unwrap_or_default();
+    assert!(message.contains("Clips"), "the message names the folder: {message}");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// `<worktree>\.tmp\sandbox\<tag>-<uuid>`: tests that stand in for clip folders stay out of %TEMP%.
+fn sandbox(tag: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".tmp").join("sandbox").join(format!("{tag}-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn a_refused_staging_folder_is_neither_used_nor_scanned() {
+    let base = sandbox("guarded");
+    let clips = base.join("Clips");
+    std::fs::create_dir_all(&clips).unwrap();
+    let setup = Setup { dir: Some(clips.clone()), recover: Some(clips.clone()), out_dir: clips.clone(), mover: mover::Config::default(), refused: Vec::new() };
+    let setup = setup.guarded(std::slice::from_ref(&clips));
+    assert!(setup.dir.is_none() && setup.recover.is_none(), "staging off and no recovery scan of the clip folder");
+    assert_eq!(setup.refused.len(), 1, "one line says why: {:?}", setup.refused);
+    let fine = Setup { dir: Some(base.join("stage")), recover: Some(base.join("stage")), out_dir: clips.clone(), mover: mover::Config::default(), refused: Vec::new() };
+    let fine = fine.guarded(std::slice::from_ref(&clips));
+    assert!(fine.dir.is_some() && fine.recover.is_some() && fine.refused.is_empty());
+    let listed = crate::encoder::staging_guard::parse(br#"{"recordings":"E:\\Clips","imported":["F:\\Old clips"]}"#);
+    assert_eq!(listed, vec![PathBuf::from(r"E:\Clips"), PathBuf::from(r"F:\Old clips")], "the app's library folders count too");
+    assert!(crate::encoder::staging_guard::parse(b"not json").is_empty());
+    let _ = std::fs::remove_dir_all(&base);
 }

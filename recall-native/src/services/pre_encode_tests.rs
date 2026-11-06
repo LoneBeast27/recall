@@ -117,3 +117,23 @@ fn a_moved_or_rewritten_clip_is_a_mismatch() {
     assert!(!source_unchanged(&info(&path, 5)), "moved away");
     let _ = std::fs::remove_dir_all(folder);
 }
+
+#[test]
+fn clearing_the_pre_encode_folder_spares_files_recall_did_not_make() {
+    let sandbox = crate::test_temp::TempDir::sandbox("recall-pre-encode-clear");
+    let root = sandbox.join("cache");
+    let folder = root.join("tmp").join("pre-encode");
+    std::fs::create_dir_all(&folder).unwrap();
+    let user = folder.join("My clip.mp4");
+    let shaped = folder.join("0123456789abcdef.mp4");
+    let own = folder.join("00000000000000aa.mp4");
+    let own_temp = folder.join(".00000000000000aa.recall-export-1-2-0.mp4");
+    // Recall lists its prepared file before the engine writes it; the user's files come later.
+    storage::mark_owned(&root, "tmp/pre-encode/00000000000000aa.mp4");
+    for file in [&user, &shaped, &own, &own_temp] {
+        std::fs::write(file, b"bytes").unwrap();
+    }
+    clear_in(&root, None);
+    assert!(user.exists() && shaped.exists(), "a file Recall did not make is left alone");
+    assert!(!own.exists() && !own_temp.exists(), "Recall's prepared file and its engine temp go");
+}

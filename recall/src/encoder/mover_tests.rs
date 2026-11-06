@@ -189,6 +189,8 @@ fn existing_destinations_are_never_overwritten() {
     // Same size: the rename landed before a crash kept the staged copy.
     let (src, bytes) = staged(&stage, "A.mp4", 1000);
     std::fs::write(out.join("A.mp4"), &bytes).unwrap();
+    // The landed copy carries the staged file's time (the mover stamps it).
+    std::fs::File::options().write(true).open(out.join("A.mp4")).unwrap().set_modified(mtime(&src)).unwrap();
     let job = MoveJob { staged: src.clone(), dest: out.join("A.mp4") };
     let moved = move_clip(&job, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
     assert_eq!(moved.how, "already in place");
@@ -295,4 +297,62 @@ fn background_mode_drops_this_threads_io_priority_to_very_low() {
     assert_eq!(before, Some(2), "a fresh thread starts at normal I/O priority");
     assert_eq!(after, Some(0), "background mode = very low I/O priority");
     assert!(cpu <= -1, "at or below THREAD_PRIORITY_BELOW_NORMAL, got {cpu}");
+}
+
+/// `len` patterned bytes with byte `at` flipped.
+fn flipped(bytes: &[u8], at: usize) -> Vec<u8> {
+    let mut other = bytes.to_vec();
+    other[at] ^= 0xff;
+    other
+}
+
+#[test]
+fn a_same_size_destination_with_other_bytes_or_time_is_not_taken_for_the_clip() {
+    let (stage, out) = (sandbox("s"), sandbox("o"));
+    let len = 3 << 20;
+    // Differs only in the last MiB, only in the first MiB, or only in its time.
+    for (name, at) in [("Tail.mp4", Some(len - 10)), ("Head.mp4", Some(10)), ("Time.mp4", None)] {
+        let (src, bytes) = staged(&stage, name, len);
+        let dest = out.join(name);
+        std::fs::write(&dest, at.map_or(bytes.clone(), |at| flipped(&bytes, at))).unwrap();
+        let when = if at.is_some() { mtime(&src) } else { mtime(&src) - Duration::from_secs(60) };
+        std::fs::File::options().write(true).open(&dest).unwrap().set_modified(when).unwrap();
+        let before = std::fs::read(&dest).unwrap();
+        let moved = move_clip(&MoveJob { staged: src.clone(), dest: dest.clone() }, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
+        assert_ne!(moved.how, "already in place", "{name}");
+        assert_eq!(std::fs::read(&moved.dest).unwrap(), bytes, "{name}: the new clip landed beside");
+        assert_eq!(std::fs::read(&dest).unwrap(), before, "{name}: the other file is untouched");
+    }
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn a_staged_file_that_is_its_own_destination_is_never_deleted() {
+    // Staging pointed at the clip folder: recovery queues each clip to itself.
+    let out = sandbox("self");
+    let (clip, bytes) = staged(&out, "A.mp4", 5000);
+    let moved = move_clip(&MoveJob { staged: clip.clone(), dest: clip.clone() }, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
+    assert_eq!(moved.how, "already in place");
+    assert_eq!(std::fs::read(&clip).unwrap(), bytes, "the clip is still there");
+    assert!(moved.kept.is_none());
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `<worktree>\.tmp\sandbox\<tag>-<uuid>`: tests that stand in for clip folders stay out of %TEMP%.
+fn sandbox(tag: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".tmp").join("sandbox").join(format!("{tag}-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn a_kept_copy_carries_the_engines_mark() {
+    // The app's start-up sweep deletes only marked copies, so a file someone else put in
+    // `kept\` is never the engine's to throw away.
+    let (stage, out) = (sandbox("mark-s"), sandbox("mark-o"));
+    let (src, _) = staged(&stage, "G.mp4", 30_000);
+    let moved = move_clip(&MoveJob { staged: src, dest: out.join("G.mp4") }, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
+    let kept = moved.kept.expect("staged copy kept");
+    assert!(std::fs::metadata(format!("{}:{KEPT_MARK}", kept.display())).is_ok(), "the kept copy is marked");
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
 }

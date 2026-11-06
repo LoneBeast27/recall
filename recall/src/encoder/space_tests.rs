@@ -67,6 +67,7 @@ fn staged_setup(stage: &Path, out: &Path) -> staging::Setup {
             background: false,
             stamp: mover::stamp_mtime,
         },
+        refused: Vec::new(),
     }
 }
 
