@@ -1,0 +1,45 @@
+name: Bug report
+description: Something in Recall did not work as expected
+labels: [bug]
+body:
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what Recall did instead.
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open a game in fullscreen
+        2. Press Alt+N
+        3. ...
+  - type: input
+    id: game
+    attributes:
+      label: Game or app being recorded
+  - type: input
+    id: recall-version
+    attributes:
+      label: Recall version
+      description: Filled in when you use Settings → About → Report a bug.
+    validations:
+      required: true
+  - type: input
+    id: windows-version
+    attributes:
+      label: Windows version
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU and driver version
+      placeholder: e.g. RTX 4070, driver 581.57
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: The end of %LOCALAPPDATA%\Recall\updates\update.log for update problems, or the player log. Remove anything private first.
+      render: text

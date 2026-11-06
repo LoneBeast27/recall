@@ -101,6 +101,20 @@ switch, or Windows HDR turned on), capture restarts in half-float and the replay
 starts again from that moment: a save right after the switch holds only the time since.
 Switching back from HDR to SDR keeps the running capture and the buffer.
 
+## Updates and bug reports
+
+- **Updates:** a release build checks [GitHub Releases](https://github.com/LoneBeast27/recall/releases)
+  a few seconds after it opens. When there is a newer version, a card shows it with its changelog:
+  **Update now**, **Later** or **Skip this version**. Update now downloads the release, checks its
+  SHA-256, swaps every file at once (or rolls back to the old version), keeps Start with Windows
+  as it was and reopens Recall. Settings → General → About also has **Check for updates**.
+  Update log: `%LOCALAPPDATA%\Recall\updates\update.log`.
+- **Bug reports:** Settings → General → About → **Report a bug** opens a GitHub issue form with
+  your Recall and Windows versions filled in. You write the rest and send it yourself.
+- **Branches:** day-to-day work goes to `dev` and is never offered as an update. A release is cut
+  from `main` with `scripts/release.ps1` only after the owner approves its version and its list of
+  features and fixes. Dev builds (no version stamp) never check for updates.
+
 ## Where things live
 
 | What | Where |

@@ -345,6 +345,9 @@ impl Root {
             changed = true;
         }
         changed |= self.update.tick();
+        if let Some((good, text)) = self.update.notice.take() {
+            self.show_toast(if good { ToastKind::Good } else { ToastKind::Bad }, text, None);
+        }
         // The update is downloaded and its script waits for this process: save and quit.
         if self.update.quit_now {
             self.update.quit_now = false;

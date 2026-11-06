@@ -194,11 +194,38 @@ fn curl(url: &str, accept: &str, out: Option<&Path>) -> Result<Vec<u8>, String> 
     Ok(output.stdout)
 }
 
-/// Asks GitHub for the latest full release; `Ok(None)` = up to date (or skipped).
-pub fn check(current: &str) -> Result<Option<Release>, String> {
+/// Asks GitHub for the latest full release; `Ok(None)` = up to date (or skipped, unless `manual`).
+pub fn check(current: &str, manual: bool) -> Result<Option<Release>, String> {
     let body = curl(&format!("https://api.github.com/repos/{REPO}/releases/latest"), "application/vnd.github+json", None)?;
     let offer = offer(&String::from_utf8_lossy(&body), current)?;
-    Ok(offer.filter(|r| skipped().as_deref() != Some(r.version.as_str())))
+    Ok(offer.filter(|r| manual || skipped().as_deref() != Some(r.version.as_str())))
+}
+
+fn url_encode(text: &str) -> String {
+    text.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// "Microsoft Windows [Version 10.0.26300.1234]" from `ver`, trimmed to the version.
+fn windows_version() -> String {
+    let out = hidden("cmd.exe").args(["/c", "ver"]).output().ok();
+    let text = out.map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned()).unwrap_or_default();
+    text.rsplit("Version ").next().map(|v| v.trim_end_matches(']').trim().to_owned()).filter(|v| !v.is_empty()).unwrap_or_else(|| "unknown".into())
+}
+
+/// A new-issue page on the bug-report form with the versions filled in; the user writes the rest
+/// and sends it themselves (nothing is sent from the app).
+pub fn bug_report_url() -> String {
+    let version = current().unwrap_or("dev build");
+    format!(
+        "https://github.com/{REPO}/issues/new?template=bug_report.yml&recall-version={}&windows-version={}",
+        url_encode(version),
+        url_encode(&format!("Windows {}", windows_version()))
+    )
 }
 
 /// Downloads the zip and its checksums, then starts the updater script, which waits for this
@@ -260,6 +287,10 @@ pub struct UpdateUi {
     rx: Option<Receiver<Msg>>,
     /// The download finished and the updater is waiting for the app to quit.
     pub quit_now: bool,
+    /// A check the user asked for (Settings → About): its answer becomes a toast.
+    manual: bool,
+    /// (good, text) for the root to show as a toast.
+    pub notice: Option<(bool, String)>,
 }
 
 enum Msg {
@@ -273,12 +304,26 @@ impl UpdateUi {
         if crate::offscreen::enabled() {
             if let Some(json) = std::env::var_os("RECALL_UPDATE_PREVIEW").and_then(|p| std::fs::read_to_string(p).ok()) {
                 if let Ok(Some(release)) = offer(&json, "0.0.0") {
-                    return Self { phase: Phase::Offered(release), check_at: None, rx: None, quit_now: false };
+                    return Self { phase: Phase::Offered(release), check_at: None, rx: None, quit_now: false, manual: false, notice: None };
                 }
             }
         }
         let off = std::env::var_os("RECALL_NO_UPDATE_CHECK").is_some() || crate::offscreen::enabled();
-        Self { phase: Phase::Idle, check_at: (current().is_some() && !off).then(|| Instant::now() + CHECK_DELAY), rx: None, quit_now: false }
+        let check_at = (current().is_some() && !off).then(|| Instant::now() + CHECK_DELAY);
+        Self { phase: Phase::Idle, check_at, rx: None, quit_now: false, manual: false, notice: None }
+    }
+
+    /// A check is running (the button shows "Checking…").
+    pub fn checking(&self) -> bool {
+        self.rx.is_some() && !matches!(self.phase, Phase::Downloading(_))
+    }
+
+    /// Settings → About: check now; the answer shows even for a skipped version.
+    pub fn check_now(&mut self) {
+        if current().is_some() && self.rx.is_none() {
+            self.manual = true;
+            self.check_at = Some(Instant::now());
+        }
     }
 
     /// Starts the check when due and takes finished background results; true = redraw.
@@ -288,16 +333,21 @@ impl UpdateUi {
             if let Some(current) = current() {
                 let (tx, rx) = channel();
                 self.rx = Some(rx);
+                let manual = self.manual;
                 std::thread::spawn(move || {
-                    let _ = tx.send(Msg::Checked(check(current)));
+                    let _ = tx.send(Msg::Checked(check(current, manual)));
                 });
             }
+            return true;
         }
         let Some(msg) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) else { return false };
         self.rx = None;
+        let manual = std::mem::take(&mut self.manual);
         match (msg, &self.phase) {
             (Msg::Checked(Ok(Some(release))), _) => self.phase = Phase::Offered(release),
-            // A failed check stays silent: being offline is not worth a toast.
+            (Msg::Checked(Ok(None)), _) if manual => self.notice = Some((true, format!("Recall {} is up to date", current().unwrap_or("")))),
+            (Msg::Checked(Err(error)), _) if manual => self.notice = Some((false, format!("Couldn't check for updates: {error}"))),
+            // The launch check stays silent when offline or up to date.
             (Msg::Checked(_), _) => return false,
             (Msg::Launched(Ok(())), _) => self.quit_now = true,
             (Msg::Launched(Err(error)), Phase::Downloading(release)) => self.phase = Phase::Failed(release.clone(), error),
@@ -387,6 +437,14 @@ mod tests {
                 NoteLine::Text("Plain text".into()),
             ]
         );
+    }
+
+    #[test]
+    fn bug_report_link_is_encoded() {
+        assert_eq!(url_encode("Windows 10.0.26300 [x]&y"), "Windows%2010.0.26300%20%5Bx%5D%26y");
+        let url = bug_report_url();
+        assert!(url.starts_with(&format!("https://github.com/{REPO}/issues/new?template=bug_report.yml&recall-version=")));
+        assert!(!url.contains(' '));
     }
 
     #[test]
