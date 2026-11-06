@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use crate::control::PipeHub;
 use crate::log;
-use crate::record_free_space::{self as free_space, FreeCheck, FreeFn, FreeWarner};
+use crate::record_free_space::{self as free_space, FreeCheck, FreeFn, FreeWarner, Resolve};
 use crate::record_storage::{cleaned_event, plan_dir, preview_event, run_once, warning_event, Warner, AFTER_SAVE, HOURLY};
 
 /// The first free-space check after start (the engine is up by then).
@@ -20,8 +20,10 @@ pub const START_CHECK: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Job {
     pub dir: PathBuf,
-    /// 0 = no cap run (free space only).
+    /// 0 = no cap run.
     pub cap_gb: u32,
+    /// The scheduled free-space-only check: it never replaces a queued cap run.
+    pub free_only: bool,
     /// `Some(client)`: a dry run answered to that client; nothing moves.
     pub preview_for: Option<u64>,
     /// Free-space check of the clip and staging drives.
@@ -38,19 +40,24 @@ pub struct Janitor {
     /// Replay buffer bytes (from the config, refreshed every tick).
     buffer_bytes: u64,
     staging: Option<PathBuf>,
+    /// The storage thread's volume resolver (it may block, so the pump never calls it).
+    resolve: Resolve,
 }
 
 impl Janitor {
     pub fn start(hub: Arc<PipeHub>) -> Self {
         let (tx, rx) = channel::<Job>();
+        let janitor = Janitor::with_sender(tx, free_space::engine_staging_dir(), Instant::now(), crate::win_volume::volume_of);
+        let resolve = janitor.resolve;
         let _ = std::thread::Builder::new()
             .name("recall-storage".into())
-            .spawn(move || worker(&hub, rx, free_space::free_bytes));
-        Janitor::with_sender(tx, free_space::engine_staging_dir(), Instant::now())
+            .spawn(move || worker(&hub, rx, free_space::free_bytes, resolve));
+        janitor
     }
 
-    pub(crate) fn with_sender(tx: Sender<Job>, staging: Option<PathBuf>, now: Instant) -> Self {
-        Janitor { tx, after_save: None, next_hourly: now + HOURLY, free_soon: Some(now + START_CHECK), buffer_bytes: 0, staging }
+    pub(crate) fn with_sender(tx: Sender<Job>, staging: Option<PathBuf>, now: Instant, resolve: Resolve) -> Self {
+        let free_soon = Some(now + START_CHECK);
+        Janitor { tx, after_save: None, next_hourly: now + HOURLY, free_soon, buffer_bytes: 0, staging, resolve }
     }
 
     pub fn saved(&mut self, now: Instant) {
@@ -61,6 +68,7 @@ impl Janitor {
         self.after_save.into_iter().chain(self.free_soon).min()
     }
 
+    /// Plain paths only: the storage thread resolves their volumes (that can block).
     fn free_check(&self, dir: &str) -> FreeCheck {
         FreeCheck::new(Path::new(dir), self.staging.as_deref(), self.buffer_bytes)
     }
@@ -70,12 +78,12 @@ impl Janitor {
         self.after_save = None;
         self.free_soon = None;
         self.next_hourly = now + HOURLY;
-        let _ = self.tx.send(Job { dir: PathBuf::from(dir), cap_gb, preview_for: None, free: Some(self.free_check(dir)) });
+        let _ = self.tx.send(Job { dir: PathBuf::from(dir), cap_gb, free_only: false, preview_for: None, free: Some(self.free_check(dir)) });
     }
 
     /// Plan `cap_gb` without moving anything; the answer goes to `client` only.
     pub fn preview(&mut self, dir: &str, cap_gb: u32, client: u64) {
-        let _ = self.tx.send(Job { dir: PathBuf::from(dir), cap_gb, preview_for: Some(client), free: None });
+        let _ = self.tx.send(Job { dir: PathBuf::from(dir), cap_gb, free_only: false, preview_for: Some(client), free: None });
     }
 
     /// Every pump tick. `buffer_bytes`: the replay buffer at the configured bitrate.
@@ -85,32 +93,36 @@ impl Janitor {
             self.run_now(dir, cap_gb, now);
         } else if self.free_soon.is_some_and(|t| now >= t) {
             self.free_soon = None;
-            let _ = self.tx.send(Job { dir: PathBuf::from(dir), cap_gb: 0, preview_for: None, free: Some(self.free_check(dir)) });
+            let job = Job { dir: PathBuf::from(dir), cap_gb: 0, free_only: true, preview_for: None, free: Some(self.free_check(dir)) };
+            let _ = self.tx.send(job);
         }
     }
 }
 
-/// Queued runs coalesce into the newest; a free-only job never drops a cap run.
+/// Queued runs coalesce into the newest; the scheduled free-only check never
+/// drops a queued cap run (but a newer cap of 0, the limit turned off, does).
 pub(crate) fn coalesce(prev: Option<Job>, job: Job) -> Job {
     match prev {
-        Some(p) if job.cap_gb == 0 && p.cap_gb > 0 => Job { free: job.free.or(p.free), ..p },
+        Some(p) if job.free_only => Job { free: job.free.or(p.free), ..p },
         _ => job,
     }
 }
 
 /// The `storage_warning{level:"free"}` events this check sends.
-pub(crate) fn free_warnings(warner: &mut FreeWarner, check: &FreeCheck, free: FreeFn) -> Vec<String> {
+/// Storage thread: resolves the folders' volumes (may block) and reads free space.
+pub(crate) fn free_warnings(warner: &mut FreeWarner, check: &FreeCheck, free: FreeFn, resolve: Resolve) -> Vec<String> {
+    let drives = free_space::resolve_drives(&check.dirs, resolve);
     warner
-        .update(check, free)
+        .update(&drives, check.threshold, free)
         .into_iter()
         .map(|(drive, have)| {
-            log!("storage: {drive} has {have} bytes free, below {} (2 x the replay buffer, at least 5 GiB)", check.threshold);
+            log!("storage: {drive} has {have} bytes free, below {} (2 x the replay buffer, at least 5 GB)", check.threshold);
             free_space::free_event(&drive, have, check.threshold)
         })
         .collect()
 }
 
-fn worker(hub: &PipeHub, rx: Receiver<Job>, free: FreeFn) {
+fn worker(hub: &PipeHub, rx: Receiver<Job>, free: FreeFn, resolve: Resolve) {
     background_io();
     let (mut warner, mut low) = (Warner::default(), FreeWarner::default());
     while let Ok(first) = rx.recv() {
@@ -127,7 +139,7 @@ fn worker(hub: &PipeHub, rx: Receiver<Job>, free: FreeFn) {
         }
         let Some(job) = run else { continue };
         if let Some(check) = &job.free {
-            for event in free_warnings(&mut low, check, free) {
+            for event in free_warnings(&mut low, check, free, resolve) {
                 hub.event("session", &event);
             }
         }

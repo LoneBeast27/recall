@@ -1,6 +1,6 @@
 //! Free space for a save. Before muxing, the saver checks the drive it is
 //! about to write (estimate: the window's video bytes + AAC audio + the MP4
-//! index + a 1 MiB fixed allowance, see [`estimate`]).
+//! index + a small fixed allowance, see [`estimate`]).
 //! A staged save whose staging drive is short, or whose staged mux fails with
 //! a disk-full error (ERROR_DISK_FULL 112 / ERROR_HANDLE_DISK_FULL 39), is
 //! written in place on the clip drive instead. When that drive is short too
@@ -18,16 +18,26 @@ use super::staging::volume_key;
 /// `fn(folder) -> free bytes` on that folder's volume (`None` = unknown).
 pub(crate) type FreeSpace = fn(&Path) -> Option<u64>;
 
-pub(crate) use crate::win_volume::free_bytes;
+/// Free space of a save folder; the folder is resolved once per minute per
+/// thread (`win_volume::VolumeCache`), its free space read every save.
+pub(crate) use crate::win_volume::free_bytes_cached as free_bytes;
 
 /// MP4 index bytes per sample, worst case: stsz 4, stts 8, ctts 8, stss 4 and
 /// one co64 chunk offset (8) per sample. FFmpeg's mov muxer writes no
 /// per-packet bytes into `mdat`, so this is all the container adds per frame.
 const INDEX_BYTES_PER_SAMPLE: u64 = 32;
-/// ftyp + moov box headers and track metadata (a few KB), the gallery
-/// thumbnail JPEG (a few hundred KB), the bookmark sidecar and NTFS cluster
-/// rounding of each file (4 KiB).
-const FIXED_BYTES: u64 = 1 << 20;
+/// ftyp + moov box headers and track metadata (a few KB), the bookmark
+/// sidecar and NTFS cluster rounding of each file (4 KiB).
+const HEADER_BYTES: u64 = 64 << 10;
+/// The gallery thumbnail (a 640 px wide JPEG) at most. Measured 2026-11-07 over
+/// the 7,007 thumbnails in the user's clip folder: median 88 KB, p99 302 KB,
+/// max 450 KB.
+const THUMB_MAX: u64 = 512 << 10;
+/// The thumbnail allowance shrinks with the clip (1/32 of its video + audio,
+/// up to [`THUMB_MAX`]): a short or low-bitrate save is not refused for a
+/// thumbnail that rarely reaches it. Under-counting costs at most one
+/// thumbnail, and a disk-full mux still falls back in place.
+const THUMB_SHARE: u64 = 32;
 /// AAC bytes per second per track: `mux.rs` asks for 192 kbit/s and the
 /// encoder averages to it; 10% over is allowed (an allowance, not measured).
 const AAC_BYTES_PER_SEC: f64 = 192_000.0 / 8.0 * 1.1;
@@ -35,7 +45,7 @@ const AAC_SAMPLES_PER_FRAME: f64 = 1024.0;
 
 /// Bytes this save is expected to need on disk: the video as it is in the
 /// window (stream copy) or the still at its bitrate, the AAC audio, the MP4
-/// index for every video and audio sample, and [`FIXED_BYTES`].
+/// index for every video and audio sample, [`HEADER_BYTES`] and the thumbnail allowance.
 pub(crate) fn estimate(job: &SaveJob) -> u64 {
     let secs = job.secs.max(0.0);
     let (video, video_samples) = match &job.video {
@@ -44,13 +54,15 @@ pub(crate) fn estimate(job: &SaveJob) -> u64 {
     };
     let audio = (job.audio.len() as f64 * AAC_BYTES_PER_SEC * secs) as u64;
     let audio_frames: u64 = job.audio.iter().map(|t| (f64::from(t.rate) / AAC_SAMPLES_PER_FRAME * secs).ceil() as u64).sum();
-    video + audio + (video_samples + audio_frames) * INDEX_BYTES_PER_SAMPLE + FIXED_BYTES
+    let thumb = ((video + audio) / THUMB_SHARE).min(THUMB_MAX);
+    video + audio + (video_samples + audio_frames) * INDEX_BYTES_PER_SAMPLE + HEADER_BYTES + thumb
 }
 
 /// `C:` / `\\server\share` for a path, as the user knows the drive.
-/// The volume the file's folder really lands on (`win_volume.rs`), else the path text.
+/// The volume the file's folder really lands on (`win_volume.rs`, cached per
+/// folder on this thread), else the path text.
 pub(crate) fn drive(path: &Path) -> String {
-    crate::win_volume::volume_of(folder(path))
+    crate::win_volume::volume_of_cached(folder(path))
         .map(|v| v.label)
         .or_else(|| volume_key(path))
         .unwrap_or_else(|| path.display().to_string())
