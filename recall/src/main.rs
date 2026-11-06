@@ -49,6 +49,7 @@ mod protocol;
 mod ring;
 mod single_instance;
 mod spill;
+mod win_volume;
 mod thread_qos;
 mod source;
 

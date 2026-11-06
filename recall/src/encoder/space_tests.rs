@@ -111,10 +111,80 @@ fn finish(queue: SaverQueue, control: SaverControl, dirs: &[&Path]) {
 }
 
 #[test]
-fn estimate_is_video_plus_audio_plus_margin() {
+fn estimate_is_video_plus_audio_plus_real_mux_overhead() {
     let j = job(Path::new(r"E:\Clips\a.mp4"), 2.0);
-    // 8 Mbit/s still for 2 s = 2 MB, no audio tracks.
-    assert_eq!(estimate(&j), 2_000_000 + MARGIN);
+    // 8 Mbit/s still for 2 s = 2 MB; 120 frames at 60 fps x 32 index bytes; 1 MiB fixed; no audio tracks.
+    assert_eq!(estimate(&j), 2_000_000 + 120 * 32 + (1 << 20));
+}
+
+#[test]
+fn a_save_that_just_fits_is_not_refused() {
+    // 1.5 MB of video with 4 MiB free on both drives: the old 64 MiB headroom refused this.
+    let (stage, out) = (temp_dir("stage"), temp_dir("out"));
+    let calls = Arc::new(AtomicUsize::new(0));
+    let four_mib: FreeSpace = |_| Some(4 * MIB);
+    let (queue, control, sink) = spawn_with(&stage, &out, mux_full_in("never", calls.clone()), four_mib);
+    let final_path = out.join(CLIP);
+    assert!(queue.submit(job(&final_path, 1.5)));
+    let saved = outcome(&sink);
+    assert_eq!(saved["type"], "saved", "{saved}");
+    assert_eq!(calls.load(SeqCst), 1);
+    finish(queue, control, &[&stage, &out]);
+}
+
+#[test]
+fn sizes_are_decimal_like_the_app() {
+    // The app's format_bytes is decimal (1 GB = 10^9 bytes); the label must say what the math does.
+    assert_eq!(size(1_500_000_000), "1.5 GB");
+    assert_eq!(size(1_100_000_000), "1.1 GB");
+    assert_eq!(size(300_000_000), "300 MB");
+    assert_eq!(size(1), "1 MB", "rounded up: never claims less than is needed");
+}
+
+/// A directory junction at `link` -> `target` (no admin needed; no window).
+fn junction(link: &Path, target: &Path) {
+    use std::os::windows::process::CommandExt;
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(link)
+        .arg(target)
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "mklink /J failed");
+}
+
+/// A folder in this checkout (L: here) reached through a junction under %TEMP% (C: here).
+fn junction_pair() -> (PathBuf, PathBuf) {
+    let id = uuid::Uuid::new_v4().simple();
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".tmp").join(format!("junction-target-{id}"));
+    std::fs::create_dir_all(&target).unwrap();
+    let link = std::env::temp_dir().join(format!("recall-space-junction-{id}"));
+    junction(&link, &target);
+    (link, std::fs::canonicalize(&target).unwrap())
+}
+
+fn drop_pair(link: &Path, target: &Path) {
+    let _ = std::fs::remove_dir(link); // removes the junction only
+    let _ = std::fs::remove_dir_all(target);
+}
+
+#[test]
+fn a_junctioned_clip_folder_is_named_by_the_drive_it_really_lands_on() {
+    let (link, target) = junction_pair();
+    let (via_link, real) = (drive(&link.join(CLIP)), drive(&target.join(CLIP)));
+    // Staging decisions follow the real volume too.
+    let same_as_target = staging::same_volume(&link, &target);
+    let temp = std::env::temp_dir();
+    let temp_is_other = drive(&temp.join("x")) != real;
+    let same_as_temp = staging::same_volume(&link, &temp);
+    drop_pair(&link, &target);
+    assert_eq!(via_link, real, "the junction's text drive is not where the clip lands");
+    assert!(same_as_target, "a junction to the clip folder's volume is that volume");
+    if temp_is_other {
+        assert!(!same_as_temp, "temp and the checkout are different volumes here");
+    }
 }
 
 #[test]
@@ -130,7 +200,7 @@ fn disk_full_errors_are_recognised() {
 fn choice_falls_back_in_place_and_names_both_drives() {
     let staged = PathBuf::from(r"F:\Recall\cache\staging").join(CLIP);
     let clip = PathBuf::from(r"E:\Clips").join(CLIP);
-    let need = 300 * MIB;
+    let need = 300_000_000;
     assert_eq!(choose(Some(staged.clone()), &clip, need, plenty).unwrap(), (Some(staged.clone()), None));
     let (to, note) = choose(Some(staged.clone()), &clip, need, |d| d.starts_with("F:").then_some(MIB)).unwrap();
     assert_eq!(to, None, "staging short -> in place");
@@ -183,7 +253,7 @@ fn both_drives_short_fails_with_the_space_reason() {
     assert_eq!(failed["type"], "save_failed", "{failed}");
     let reason = failed["reason"].as_str().unwrap();
     let drive = drive(&out);
-    assert_eq!(reason, format!("Not enough space on {drive} (need {})", size(1_500_000 + MARGIN)));
+    assert_eq!(reason, format!("Not enough space on {drive} (need {})", size(estimate(&job(&final_path, 1.5)))));
     assert_eq!(calls.load(SeqCst), 0, "nothing written");
     assert!(!final_path.exists());
     finish(queue, control, &[&stage, &out]);
