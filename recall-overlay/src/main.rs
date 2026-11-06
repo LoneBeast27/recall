@@ -24,6 +24,7 @@ mod placement;
 mod png;
 mod presence;
 mod preview;
+mod rec_notice;
 mod reducer;
 mod render;
 mod session;

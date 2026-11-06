@@ -202,3 +202,40 @@ fn a_switch_from_gpu_frames_to_cpu_copies_keeps_the_buffer() {
     eprintln!("gpu -> cpu switch: clip {secs:.2} s");
     assert!(secs > 1.6, "the save cut at the GPU -> CPU switch: {secs:.2} s of ~2 s");
 }
+
+/// Merge gate 11-07 #3 (P1): the first encode error told the long recording the encoder
+/// had failed, before the in-place rebuild, so one transient NVENC error ended it. Only a
+/// spent recovery (status `failed`) ends it now.
+#[test]
+fn one_encode_error_keeps_a_long_recording_and_a_spent_recovery_ends_it() {
+    use crate::longrec::tap::{failed_generation, generation_now};
+    let _one = nvenc();
+    let (stats, _) = stats();
+    let mut enc = Loop::start_with(stats.clone());
+    enc.rgba(BIG);
+    if !enc.nvenc_opened() {
+        return;
+    }
+    rgba_for(&mut enc, 10);
+    // Writer tests use generations from 1e6 up; the live loop's are small.
+    let failed_since = |from: u64| failed_generation().is_some_and(|g| g >= from && g < 1_000_000);
+    let first = generation_now();
+    stats.faults.encode_errors.store(1, Relaxed);
+    rgba_for(&mut enc, 2);
+    assert!(wait(|| stats.backend.load(Relaxed) != 1), "the injected encode error did not land");
+    rgba_for(&mut enc, SECOND / 2);
+    assert!(wait(|| stats.backend.load(Relaxed) == 1), "encoder never came back: {:?}", enc.error());
+    assert!(!failed_since(first), "one encode error ended the long recording (generation {:?})", failed_generation());
+    // Now every reopen fails: after the recovery's reopens (fast delays) it is spent.
+    let before = generation_now();
+    stats.faults.open_errors.store(1_000, Relaxed);
+    stats.faults.encode_errors.store(1, Relaxed);
+    let spent = wait(|| {
+        enc.rgba(BIG);
+        std::thread::sleep(Duration::from_millis(16));
+        failed_since(before)
+    });
+    stats.faults.open_errors.store(0, Relaxed);
+    assert!(spent, "a spent recovery did not end the long recording: backend {}", stats.backend.load(Relaxed));
+    assert_eq!(stats.label(), "failed");
+}

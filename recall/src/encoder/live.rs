@@ -129,7 +129,7 @@ impl Live {
             Err(reason) => {
                 report(cfg.json, &format!("encode error at frame {idx}: {reason}"));
                 let reason = format!("NVENC encode failed: {reason}");
-                crate::longrec::tap::on_encoder_failed(&reason); // long-recording hook
+                // The long recording waits: it ends only if the recovery fails (`tick`).
                 self.enc = None;
                 reopen::encode_failed(&mut self.reopen, input, stats, cfg.json);
                 stats.backend.store(3, Relaxed);
@@ -178,7 +178,13 @@ impl Live {
                 reopen::after_failure(after, self.reopen.reopen_failures(), stats, cfg.json);
             }
             if self.reopen.recovering() {
-                stats.backend.store(if self.reopen.handed_off(now) { 3 } else { 4 }, Relaxed);
+                let failed = self.reopen.handed_off(now);
+                stats.backend.store(if failed { 3 } else { 4 }, Relaxed);
+                if failed {
+                    // Recovery spent (status `failed`): a running long recording ends here.
+                    let reason = stats.error.lock().unwrap_or_else(|p| p.into_inner()).clone();
+                    crate::longrec::tap::on_encoder_failed(reason.as_deref().unwrap_or("the encoder could not reopen")); // long-recording hook
+                }
             }
         }
         // A try nobody answered (no GPU frame came: capture's pipeline did not start again)

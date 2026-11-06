@@ -74,7 +74,7 @@ impl Extras {
 
     fn record_unavailable(&self) {
         let reason = "engine built without the encode feature".to_string();
-        emit_or_log(self.json, &Outbound::RecordingFailed { reason: reason.clone(), path: None }, || reason);
+        emit_or_log(self.json, &Outbound::RecordingFailed { reason: reason.clone(), path: None, paths: Vec::new(), gap_seconds: 0.0, frozen_seconds: 0.0 }, || reason);
     }
 
     fn log(&self, message: &str) {
