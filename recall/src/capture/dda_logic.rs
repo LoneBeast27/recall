@@ -77,7 +77,7 @@ pub(crate) fn dda_wanted(env: Option<&str>, failed_earlier: bool) -> Result<(), 
 }
 
 /// A screen rectangle (left/top inclusive, right/bottom exclusive).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(super) struct Bounds {
     pub left: i32,
     pub top: i32,
@@ -103,6 +103,187 @@ pub(super) fn covers(window: Bounds, monitor: Bounds) -> bool {
         && window.top <= monitor.top
         && window.right >= monitor.right
         && window.bottom >= monitor.bottom
+}
+
+/// How often a window-following capture looks at the game window and what sits over it.
+pub(super) const FOLLOW_CHECK: Duration = Duration::from_millis(250);
+
+/// A visible top-level window above the followed game in z-order (`dda_window::snapshot`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(super) struct Above {
+    pub rect: Bounds,
+    /// DWM keeps it off screen (another virtual desktop, a suspended UWP app).
+    pub cloaked: bool,
+    /// `WS_EX_TOOLWINDOW`: tooltips, the taskbar, overlays.
+    pub tool: bool,
+    /// `WS_EX_LAYERED | WS_EX_TRANSPARENT`: a click-through overlay.
+    pub click_through: bool,
+    /// Never shows in a capture (`WDA_EXCLUDEFROMCAPTURE`: Recall's island and guide), or
+    /// belongs to Recall's own process.
+    pub excluded: bool,
+    /// Belongs to the game's own process (a popup of the game).
+    pub game: bool,
+}
+
+/// One look at the followed game window (`dda_window::snapshot`).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(super) struct WindowState {
+    pub exists: bool,
+    pub iconic: bool,
+    /// The monitor (`HMONITOR` value) the window is on; 0 when it is on none.
+    pub monitor: usize,
+    /// Frameless and covering that whole monitor (`covering_monitor`).
+    pub covers: bool,
+    /// The foreground window belongs to the game's process.
+    pub foreground_is_game: bool,
+    /// The captured monitor's rectangle.
+    pub monitor_rect: Bounds,
+    /// Visible windows above the game, nearest first (empty when the game is in front).
+    pub above: Vec<Above>,
+}
+
+/// Whether the screen shows the user's desktop at all (`dda_desktop::now`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Desktop {
+    /// The input desktop is the user's (false on the lock screen, UAC, Ctrl+Alt+Del).
+    pub input_is_users: bool,
+    pub display_on: bool,
+}
+
+impl Desktop {
+    #[cfg(test)]
+    pub(super) const USER: Self = Self { input_is_users: true, display_on: true };
+
+    /// Duplication cannot work now and will once the user is back: never a reason to give up.
+    pub(super) fn away(self) -> bool {
+        !self.input_is_users || !self.display_on
+    }
+}
+
+/// Why frames are held (the clip shows the last game frame, as WGC does on a minimized window).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Hold {
+    /// Another window sits over the game on its monitor (privacy: it is never recorded).
+    Covered,
+    Minimized,
+    /// The window stopped covering its monitor (mode switch); restarts after `LEAVE_GRACE`.
+    NotCovering,
+    /// The window is gone; restarts after `LEAVE_GRACE`.
+    Gone,
+    /// Lock screen, UAC, Ctrl+Alt+Del or display off.
+    Away,
+}
+
+impl Hold {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            Hold::Covered => "another window covers the game",
+            Hold::Minimized => "the game is minimized",
+            Hold::NotCovering => "the game window does not cover its monitor",
+            Hold::Gone => "the game window is gone",
+            Hold::Away => "the user's desktop is not on screen",
+        }
+    }
+}
+
+/// What the capture does after a look at the game window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Follow {
+    /// Frames go to the encoder.
+    Deliver,
+    Hold(Hold),
+    /// Ask the engine for a new capture (`CaptureShared::restart`), with the reason.
+    Restart(&'static str),
+}
+
+/// A window that leaves its monitor's full area (windowed mode, closed) for this long ends
+/// the monitor capture: it restarts (on WGC window capture, or a new target).
+pub(super) const LEAVE_GRACE: Duration = Duration::from_secs(2);
+
+/// Follows the game window across looks (it times how long it has been off its monitor).
+#[derive(Debug, Default)]
+pub(super) struct Follower {
+    leaving_since: Option<Instant>,
+}
+
+impl Follower {
+    /// What to do after this look at the game window. Holds never restart: a covered or
+    /// minimized game comes back on the same capture, so the encoder and replay buffer keep
+    /// running. Only a move to another monitor restarts at once; a window that stays off its
+    /// monitor's full area (or gone) restarts after `LEAVE_GRACE`.
+    pub(super) fn decide(&mut self, state: &WindowState, captured: usize, desktop: Desktop, now: Instant) -> Follow {
+        let look = look(state, captured, desktop);
+        let Follow::Hold(why @ (Hold::NotCovering | Hold::Gone)) = look else {
+            self.leaving_since = None;
+            return look;
+        };
+        let since = *self.leaving_since.get_or_insert(now);
+        if now.saturating_duration_since(since) < LEAVE_GRACE {
+            return look;
+        }
+        Follow::Restart(if why == Hold::Gone { "the game window closed" } else { "the game window no longer covers its monitor" })
+    }
+}
+
+/// A window above the game must overlap the monitor at least this much each way to hide
+/// it (Explorer keeps 1x1 helper windows on top).
+const MIN_OVERLAP: i32 = 8;
+
+/// One look, with no memory of earlier ones.
+fn look(state: &WindowState, captured: usize, desktop: Desktop) -> Follow {
+    if desktop.away() {
+        return Follow::Hold(Hold::Away);
+    }
+    if !state.exists {
+        return Follow::Hold(Hold::Gone);
+    }
+    if state.iconic {
+        return Follow::Hold(Hold::Minimized);
+    }
+    if state.monitor != 0 && state.monitor != captured {
+        return Follow::Restart("the game window moved to another monitor");
+    }
+    if !state.covers || state.monitor == 0 {
+        return Follow::Hold(Hold::NotCovering);
+    }
+    if !state.foreground_is_game && state.above.iter().any(|a| hides(a, state.monitor_rect)) {
+        return Follow::Hold(Hold::Covered);
+    }
+    Follow::Deliver
+}
+
+/// A window above the game that shows on the captured monitor (so it would be recorded).
+fn hides(above: &Above, monitor: Bounds) -> bool {
+    if above.cloaked || above.tool || above.click_through || above.excluded || above.game {
+        return false;
+    }
+    let w = above.rect.right.min(monitor.right) - above.rect.left.max(monitor.left);
+    let h = above.rect.bottom.min(monitor.bottom) - above.rect.top.max(monitor.top);
+    w >= MIN_OVERLAP && h >= MIN_OVERLAP
+}
+
+/// When re-creates started failing.
+#[derive(Debug, Default)]
+pub(super) struct FailClock {
+    since: Option<Instant>,
+}
+
+impl FailClock {
+    /// Before a re-create attempt: true = give up on Desktop Duplication. Time on the
+    /// secure desktop or with the display off never counts (the count starts again when the
+    /// user is back), so the lock screen, UAC or a sleeping monitor never ends DDA.
+    pub(super) fn give_up(&mut self, now: Instant, desktop: Desktop) -> bool {
+        if desktop.away() {
+            self.since = None;
+            return false;
+        }
+        should_give_up(*self.since.get_or_insert(now), now)
+    }
+
+    /// A re-create worked.
+    pub(super) fn recovered(&mut self) {
+        self.since = None;
+    }
 }
 
 /// The one format asked of `DuplicateOutput1`: exactly what the capture start picked
@@ -178,3 +359,7 @@ pub(super) fn has_new_image(last_present_time: i64, accumulated_frames: u32, fir
 #[cfg(test)]
 #[path = "dda_logic_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "dda_follow_tests.rs"]
+mod follow_tests;
