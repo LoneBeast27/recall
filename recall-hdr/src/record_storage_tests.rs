@@ -283,3 +283,66 @@ fn a_dry_run_leaves_the_folder_as_it_was() {
     assert_eq!(snap(&dir), before, "every file, size and time unchanged");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+// ---- One Recycle Bin call per clip, the setting re-read between calls (no real files) ----
+
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+use std::sync::Mutex;
+
+const A: &str = "G__2026-01-01__00-00-00.mp4";
+const B: &str = "G__2026-01-02__00-00-00.mp4";
+const C: &str = "G__2026-01-03__00-00-00.mp4";
+const A_THUMB: &str = "G__2026-01-01__00-00-00-1767225600-thumb.jpg";
+
+/// Three old clips to go; A has a thumbnail and both sidecars.
+fn plan_three(_: &Path, _: u32) -> Result<(Plan, Listing), String> {
+    let clips = vec![clip(A, 1, 100), clip(B, 1, 200), clip(C, 1, 300)];
+    let names = [A, B, C, "G__2026-01-01__00-00-00.recall-edit.json", "G__2026-01-01__00-00-00.mp4.recall-marks.json"];
+    let listing = Listing { clips, names: names.map(String::from).to_vec(), thumbs: vec![A_THUMB.into()] };
+    let plan = Plan { remove: vec![A.into(), B.into(), C.into()], freed: 3 * GIB, total: 600 * GIB, through: Some(300), next: None };
+    Ok((plan, listing))
+}
+
+fn names_of(files: &[PathBuf]) -> Vec<String> {
+    files.iter().map(|f| f.file_name().unwrap().to_string_lossy().into_owned()).collect()
+}
+
+static FLIP_CALLS: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
+static LIMIT_ON: AtomicBool = AtomicBool::new(true);
+
+/// Records the call, then the user turns the limit off (between clip 1 and clip 2).
+fn recycle_then_limit_off(files: &[PathBuf]) -> Result<(), String> {
+    FLIP_CALLS.lock().unwrap().push(names_of(files));
+    LIMIT_ON.store(false, SeqCst);
+    Ok(())
+}
+
+#[test]
+fn turning_the_limit_off_between_clips_stops_the_run() {
+    let wanted = || LIMIT_ON.load(SeqCst);
+    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, &wanted, recycle_then_limit_off).unwrap();
+    let calls = FLIP_CALLS.lock().unwrap().clone();
+    let clips: Vec<&String> = calls.iter().flatten().filter(|n| n.ends_with(".mp4")).collect();
+    assert_eq!(clips, vec![A], "exactly one clip recycled: {calls:?}");
+    assert_eq!((out.removed, out.freed, out.through), (1, GIB, Some(100)));
+}
+
+static GROUP_CALLS: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
+
+fn recycle_recorded(files: &[PathBuf]) -> Result<(), String> {
+    GROUP_CALLS.lock().unwrap().push(names_of(files));
+    Ok(())
+}
+
+#[test]
+fn a_clip_and_its_companions_go_in_one_call() {
+    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, &|| true, recycle_recorded).unwrap();
+    let mut calls = GROUP_CALLS.lock().unwrap().clone();
+    for call in &mut calls {
+        call.sort();
+    }
+    let mut a_call = vec![A.to_string(), "G__2026-01-01__00-00-00.recall-edit.json".into(), "G__2026-01-01__00-00-00.mp4.recall-marks.json".into(), A_THUMB.into()];
+    a_call.sort();
+    assert_eq!(calls, vec![a_call, vec![B.to_string()], vec![C.to_string()]], "one call per clip, companions with their clip");
+    assert_eq!(out.removed, 3);
+}
