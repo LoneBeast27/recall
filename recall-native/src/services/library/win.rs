@@ -62,7 +62,7 @@ fn thumbs_by_stem(folder: &Path) -> HashMap<String, Vec<PathBuf>> {
     thumbs
 }
 
-/// Plain absolute path; SHFileOperation rejects `\\?\` verbatim paths.
+/// Plain absolute path (no `\\?\` verbatim prefix) for the shell calls.
 fn shell_path(path: &Path) -> Option<PathBuf> {
     let absolute = std::path::absolute(path).ok()?;
     let text = absolute.to_string_lossy();

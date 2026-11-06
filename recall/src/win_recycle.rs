@@ -5,7 +5,10 @@
 //!
 //! - a local fixed volume with a volume GUID (a `\\nas` share, a mapped
 //!   network drive or a removable drive has no Recycle Bin: Windows would
-//!   delete for good, or ask whether to);
+//!   delete for good, or ask whether to). A `subst` drive letter is refused
+//!   before anything is resolved (`QueryDosDeviceW` names a `\??\` path:
+//!   Windows deletes there for good, measured 2026-11-07), and so is a folder
+//!   that resolves to a UNC path;
 //! - the bin not turned off: neither the `NoRecycleFiles` policy (HKLM, else
 //!   HKCU `Software\Microsoft\Windows\CurrentVersion\Policies\Explorer`) nor
 //!   the volume's own `NukeOnDelete` (HKCU `...\Explorer\BitBucket\Volume\
@@ -19,8 +22,7 @@
 //! A refusal stops the caller, which tells the user, and nothing is deleted.
 //! This is the second guard: the call itself (`win_fileop.rs`) goes through
 //! `IFileOperation` with a progress sink that refuses any delete Windows
-//! would not recycle (a `subst` drive passes this precheck but not the sink,
-//! measured 2026-11-07).
+//! would not recycle.
 
 use std::path::Path;
 
@@ -43,6 +45,10 @@ pub fn default_max_mb(total_bytes: u64) -> u64 {
 /// What Windows says about one volume's Recycle Bin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinFacts {
+    /// The path's drive letter is a `subst` onto a folder (`QueryDosDeviceW` gives `\??\...`).
+    pub subst: bool,
+    /// The folder resolves to a UNC path (a share, wherever it is mounted).
+    pub resolved_unc: bool,
     pub volume: Option<Volume>,
     /// `GetDriveTypeW` of the volume's root.
     pub drive_type: u32,
@@ -106,6 +112,12 @@ fn max_bytes(facts: &BinFacts) -> Option<u64> {
 
 /// May `bytes` from this volume go to its Recycle Bin?
 pub fn decide(facts: &BinFacts, bytes: u64) -> Result<(), String> {
+    if facts.subst {
+        return Err("the folder is on a subst drive, which has no Recycle Bin".into());
+    }
+    if facts.resolved_unc {
+        return Err("the folder is on a network share, which has no Recycle Bin".into());
+    }
     let Some(volume) = facts.volume.as_ref().filter(|v| v.id.starts_with(r"\\?\Volume{")) else {
         return Err("the drive has no Recycle Bin (a network share or an unknown drive)".into());
     };
@@ -130,6 +142,37 @@ pub fn decide(facts: &BinFacts, bytes: u64) -> Result<(), String> {
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn GetDriveTypeW(root: *const u16) -> u32;
+    fn QueryDosDeviceW(device: *const u16, target: *mut u16, max: u32) -> u32;
+}
+
+/// `fn(drive letter) -> its DOS device target` (`QueryDosDeviceW`; tests inject one).
+pub type DosQuery = fn(char) -> Option<String>;
+
+/// The first target of `X:` (`\Device\HarddiskVolume3`, or `\??\D:\folder` for a subst).
+pub fn dos_target(letter: char) -> Option<String> {
+    let name = wide(&format!("{letter}:"));
+    let mut out = [0u16; 1024];
+    // SAFETY: a NUL-terminated device name; `out` is writable for the length given.
+    let n = unsafe { QueryDosDeviceW(name.as_ptr(), out.as_mut_ptr(), out.len() as u32) };
+    let end = out[..n as usize].iter().position(|c| *c == 0).unwrap_or(n as usize);
+    (n > 0).then(|| String::from_utf16_lossy(&out[..end]))
+}
+
+/// The drive letter of `dir` as written (before anything is resolved).
+fn letter_of(dir: &Path) -> Option<char> {
+    let abs = std::path::absolute(dir).ok()?;
+    match abs.components().next()? {
+        std::path::Component::Prefix(p) => match p.kind() {
+            std::path::Prefix::Disk(d) | std::path::Prefix::VerbatimDisk(d) => Some((d as char).to_ascii_uppercase()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Is `dir`'s drive letter a subst (checked before resolving)?
+pub fn is_subst(dir: &Path, dos: DosQuery) -> bool {
+    letter_of(dir).and_then(dos).is_some_and(|t| t.starts_with(r"\??\"))
 }
 
 #[link(name = "advapi32", kind = "raw-dylib")]
@@ -159,14 +202,26 @@ pub fn reg_dword(hive: Hive, sub_key: &str, value: &str) -> Option<u32> {
 
 /// The facts for the volume `dir` really lives on (read only).
 pub fn facts(dir: &Path) -> BinFacts {
+    facts_with(dir, dos_target)
+}
+
+/// [`facts`] with an injected `QueryDosDeviceW`.
+pub fn facts_with(dir: &Path, dos: DosQuery) -> BinFacts {
+    let none = |subst, resolved_unc| BinFacts { subst, resolved_unc, volume: None, drive_type: 0, total_bytes: None, settings: Settings::default() };
+    if is_subst(dir, dos) {
+        return none(true, false);
+    }
+    if crate::win_volume::resolve(dir).is_some_and(|r| r.to_string_lossy().starts_with(r"\\")) {
+        return none(false, true);
+    }
     let volume = crate::win_volume::volume_of(dir);
-    let Some(v) = volume.clone() else { return BinFacts { volume, drive_type: 0, total_bytes: None, settings: Settings::default() } };
+    let Some(v) = volume.clone() else { return BinFacts { volume, ..none(false, false) } };
     let root = wide(&format!("{}\\", v.label));
     // SAFETY: a NUL-terminated root path.
     let drive_type = unsafe { GetDriveTypeW(root.as_ptr()) };
     let guid = v.id.trim_start_matches(r"\\?\Volume").trim_end_matches('\\');
     let total_bytes = crate::win_volume::total_bytes(dir);
-    BinFacts { volume, drive_type, total_bytes, settings: read_settings(guid, reg_dword) }
+    BinFacts { subst: false, resolved_unc: false, volume, drive_type, total_bytes, settings: read_settings(guid, reg_dword) }
 }
 
 /// [`decide`] for the real volume of `dir` (production [`BinCheck`]).

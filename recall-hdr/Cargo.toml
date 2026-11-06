@@ -27,7 +27,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Console",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
-    # Storage cap: Recycle Bin moves (SHFileOperationW).
+    # Storage cap: Recycle Bin moves (IFileOperation + progress sink, `recall/src/win_fileop.rs`).
     "Win32_UI_Shell",
     # Default clip folder: SHGetKnownFolderPath's buffer is freed with CoTaskMemFree.
     "Win32_System_Com",
