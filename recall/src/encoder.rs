@@ -116,6 +116,9 @@ pub struct EncStats {
     /// A beat that stops is a hung encoder thread (an NVENC call stuck after a TDR), told
     /// apart from a static game, which sends no frames but keeps the beat.
     pub heartbeat: AtomicU64,
+    /// An NVENC open (or reopen) is running now: `status.encoder_opening` (a TDR open can
+    /// take about 10 s, so the controller's hang clock allows 20 s meanwhile).
+    pub opening: std::sync::atomic::AtomicBool,
     /// The GPU path may be tried again: capture's handler leaves CPU copies (taken by `install_gpu_sink`).
     pub gpu_retry: std::sync::atomic::AtomicBool,
     /// Asks capture for a new device (`CaptureShared::restart`; set by `install_gpu_sink`).

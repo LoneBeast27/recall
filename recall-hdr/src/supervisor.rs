@@ -93,6 +93,8 @@ pub struct EngineView {
     pub statuses: u64,
     /// Last engine `status.encoder_heartbeat` (encoder-thread turns; older engines: none).
     pub heartbeat: Option<u64>,
+    /// Last engine `status.encoder_opening`: an NVENC open is in progress.
+    pub opening: bool,
 }
 
 /// Supervises the capture engine on a background manager thread.

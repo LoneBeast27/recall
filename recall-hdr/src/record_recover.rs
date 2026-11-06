@@ -30,6 +30,10 @@ pub const RESTART_GAPS: [Duration; 4] =
     [Duration::from_secs(30), Duration::from_secs(60), Duration::from_secs(120), Duration::from_secs(300)];
 /// Recording this long after a restart forgets the backoff.
 pub const STABLE_AFTER: Duration = Duration::from_secs(60);
+/// A save in flight holds a hang restart this long at most (a hung encoder answers no save).
+pub const HANG_SAVE_HOLD: Duration = Duration::from_secs(15);
+/// Why a recording ends early when the engine restarts under it (`record_fail`).
+pub const ENDED_EARLY_REASON: &str = "the encoder isn't responding";
 
 /// The session as this rule sees it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,8 +47,22 @@ pub enum Seen {
     Idle,
 }
 
+/// What holds a restart back now (`encoder_recover_tick`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Hold {
+    /// A save or a screenshot in flight.
+    pub saving: bool,
+    /// A long recording starting or running.
+    pub long_rec: bool,
+    /// A capture-stuck restart in flight (never stack a second one).
+    pub stuck: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Recovery {
+    /// The engine hung again right after its hang restart: one notice, no more restarts
+    /// until the game or the settings change.
+    GaveUp,
     Nothing,
     /// Restart the engine now (an intended restart).
     Restart,
@@ -81,6 +99,12 @@ pub struct EncoderRecovery {
     /// A hung engine, or a recovery getting nowhere (`record_recover_stale`). Kept across
     /// the stable-minute reset: a hang gets one restart, not one per minute.
     watch: EngineWatch,
+    /// A hang verdict held back by a save in flight, since.
+    hang_held_since: Option<Instant>,
+    /// Hung again right after its hang restart: no restarts until the game or settings change.
+    gave_up: bool,
+    /// The target the session records (a new one ends a give-up).
+    target: String,
 }
 
 impl EncoderRecovery {
@@ -105,7 +129,8 @@ impl EncoderRecovery {
             Seen::Recording => self.recording(now),
             Seen::Starting => Recovery::Nothing,
             Seen::Idle => {
-                *self = EncoderRecovery::default();
+                let target = std::mem::take(&mut self.target);
+                *self = EncoderRecovery { target, ..Default::default() };
                 Recovery::Nothing
             }
         }
@@ -120,18 +145,58 @@ impl EncoderRecovery {
     /// One pump tick from the session: `progress` = the encoder heartbeat (or the status
     /// line count on an engine without one), `shown` = the game can be seen. A hung engine
     /// gets one restart at once; a recovery past its bound is fed as [`Seen::EncoderFailed`].
+    /// `busy`: anything that holds a restart (all as a capture-stuck restart would).
     pub fn step(&mut self, now: Instant, state: &str, health: EngineHealth, progress: u64, shown: bool, busy: bool) -> Recovery {
-        match self.watch.observe(state, progress, shown, now) {
-            Some(Verdict::Hung) if !busy => {
-                self.watch.hang_restart_done();
-                self.awaiting = true;
-                self.last_restart = Some(now);
-                Recovery::Restart
-            }
-            Some(Verdict::Hung) => Recovery::Nothing,
-            Some(Verdict::Failed) => self.observe(now, Seen::EncoderFailed, busy),
-            None => self.observe(now, Seen::of(state, health), busy),
+        let target = self.target.clone();
+        self.step_held(now, state, health, progress, false, shown, Hold { stuck: busy, ..Hold::default() }, &target)
+    }
+
+    /// [`Self::step`] with what holds a restart told apart. A hang verdict and the 90 s
+    /// bound are not held by a long recording (a hung encoder sends it nothing, so it would
+    /// wait forever; the restart ends it early, `restart_lines`); a save in flight holds a
+    /// hang restart [`HANG_SAVE_HOLD`] at most; a capture-stuck restart in flight holds
+    /// everything. `opening`: the engine says an NVENC open is in progress. `target`: what
+    /// is recorded; a new one, like new settings, ends a give-up.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_held(&mut self, now: Instant, state: &str, health: EngineHealth, progress: u64, opening: bool, shown: bool, hold: Hold, target: &str) -> Recovery {
+        if self.target != target {
+            self.target = target.to_string();
+            self.settings_changed();
         }
+        let verdict = self.watch.observe(state, progress, opening, shown, now);
+        if self.gave_up {
+            return Recovery::Nothing;
+        }
+        if verdict != Some(Verdict::Hung) {
+            self.hang_held_since = None;
+        }
+        match verdict {
+            Some(Verdict::Hung) => self.hang_restart(now, hold),
+            Some(Verdict::HungAgain) => {
+                self.gave_up = true;
+                Recovery::GaveUp
+            }
+            Some(Verdict::Failed) => self.observe(now, Seen::EncoderFailed, hold.saving || hold.stuck),
+            None => self.observe(now, Seen::of(state, health), hold.saving || hold.long_rec || hold.stuck),
+        }
+    }
+
+    fn hang_restart(&mut self, now: Instant, hold: Hold) -> Recovery {
+        let held = *self.hang_held_since.get_or_insert(now);
+        if hold.stuck || (hold.saving && now.saturating_duration_since(held) < HANG_SAVE_HOLD) {
+            return Recovery::Nothing;
+        }
+        self.hang_held_since = None;
+        self.watch.hang_restart_done();
+        self.awaiting = true;
+        self.last_restart = Some(now);
+        Recovery::Restart
+    }
+
+    /// New engine settings: a give-up ends, the next hang gets its restart again.
+    pub fn settings_changed(&mut self) {
+        self.gave_up = false;
+        self.watch.forget_hangs();
     }
 
     fn recording(&mut self, now: Instant) -> Recovery {
@@ -140,8 +205,8 @@ impl EncoderRecovery {
         }
         let since = *self.healthy_since.get_or_insert(now);
         if now.saturating_duration_since(since) >= STABLE_AFTER {
-            let watch = std::mem::take(&mut self.watch);
-            *self = EncoderRecovery { watch, ..Default::default() };
+            let (watch, target, gave_up) = (std::mem::take(&mut self.watch), std::mem::take(&mut self.target), self.gave_up);
+            *self = EncoderRecovery { watch, target, gave_up, ..Default::default() };
             return Recovery::Nothing;
         }
         if std::mem::take(&mut self.awaiting) {
@@ -155,6 +220,23 @@ impl EncoderRecovery {
         let gap = RESTART_GAPS[(self.restarts.max(1) as usize - 1).min(RESTART_GAPS.len() - 1)];
         self.last_restart.is_none_or(|at| now.saturating_duration_since(at) >= gap)
     }
+}
+
+/// The engine lines sent before an engine restart from here: a running long recording is
+/// ended early first (`record_fail`; the recording thread finishes it whatever the encoder
+/// does, every part kept, and the app says "Recording ended early"). The quit that follows
+/// cannot finalize what a hung encoder holds; a `.part` a kill leaves is still recovered on
+/// the next start.
+pub fn restart_lines(long_rec: bool) -> Vec<String> {
+    if !long_rec {
+        return Vec::new();
+    }
+    vec![serde_json::json!({"cmd": "record_fail", "reason": ENDED_EARLY_REASON}).to_string()]
+}
+
+/// The one notice when a hung engine gives up: "Recording stopped".
+pub fn gave_up_notice() -> String {
+    serde_json::json!({"type": "notice", "kind": "encoder", "title": "Recording stopped", "detail": "The encoder isn't responding"}).to_string()
 }
 
 impl crate::record_app::Controller {
@@ -172,14 +254,31 @@ impl crate::record_app::Controller {
         };
         // The encoder heartbeat when the engine sends one, else its status line count.
         let progress = view.heartbeat.filter(|h| *h > 0).unwrap_or(view.statuses);
+        let saving = self.activity.retarget_busy(now).saving;
         // A capture-stuck restart in flight: never stack a second one on it.
-        let busy = self.activity.busy(now) || self.capture_stuck.pending(now);
-        match self.recovery.step(now, state, health, progress, shown, busy) {
+        let hold = Hold { saving, long_rec: self.activity.busy(now) && !saving, stuck: self.capture_stuck.pending(now) };
+        let target = match &wanted {
+            crate::record_engine::EngineTarget::Window(t) => format!("{}:{}", t.exe, t.pid),
+            crate::record_engine::EngineTarget::Desktop => "desktop".into(),
+            crate::record_engine::EngineTarget::Off => String::new(),
+        };
+        match self.recovery.step_held(now, state, health, progress, view.opening, shown, hold, &target) {
             Recovery::Restart => {
                 log!("record: the encoder failed, its recovery ran past its bound, or the engine hung; restarting the engine (intended)");
+                for line in restart_lines(self.activity.is_recording()) {
+                    log!("record: ending the long recording early before the restart");
+                    self.supervisor.send_engine_line(&line);
+                }
                 self.restart_engine_for_settings();
             }
             Recovery::Recovered => log!("record: recording again after the engine restart"),
+            Recovery::GaveUp => {
+                log!("record: the engine hung again right after its restart; no more restarts until the game or the settings change");
+                if self.cfg.overlay.enabled {
+                    self.hub.event("session", &gave_up_notice());
+                }
+                crate::cues::failed();
+            }
             Recovery::Nothing => {}
         }
     }
@@ -192,3 +291,7 @@ mod tests;
 #[cfg(test)]
 #[path = "record_recover_hang_tests.rs"]
 mod hang_tests;
+
+#[cfg(test)]
+#[path = "record_recover_hold_tests.rs"]
+mod hold_tests;

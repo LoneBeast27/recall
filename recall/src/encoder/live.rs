@@ -143,7 +143,11 @@ impl Live {
     }
 
     fn open(&mut self, frame: &PacedFrame, input: Input, cfg: &Config, stats: &EncStats) {
-        match open_checked(cfg, self.want, frame, stats) {
+        // Flagged while it runs (`status.encoder_opening`): a TDR open can take ~10 s.
+        stats.opening.store(true, Relaxed);
+        let opened = open_checked(cfg, self.want, frame, stats);
+        stats.opening.store(false, Relaxed);
+        match opened {
             Ok((e, fallback)) => {
                 crate::longrec::tap::on_encoder_open(&e.encoder); // long-recording hook
                 if let Some(note) = fallback {
