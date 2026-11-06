@@ -3,13 +3,18 @@
 //! with injected time and window state. No Win32, no engine process, no audio.
 //!
 //! Which live call site each step mirrors:
-//! - [`Sim::focus`]: `record_detect::on_foreground_event` (classify -> `TargetTracker::on_foreground`).
-//!   The render check is not run: the games here commit like known games / overrides do
-//!   (`TargetTracker::poll`, i.e. `poll_admit` answering `Admit::Commit`).
+//! - [`Sim::focus`] / [`Sim::focus_unidentified`]: `record_detect::on_foreground_event`
+//!   (`Transitions::candidate` -> `TargetTracker::on_foreground_with`). The transition rules
+//!   are the controller's own code (`record_transition::Transitions`, implemented here with
+//!   injected state); only the render check is not run: `classify_seen` is `classify_event`
+//!   and the games commit like known games / overrides do (`poll_admit` answering `Commit`).
+//!   A window's client area is [`Sim::client`].
 //! - [`Sim::exit`] / [`Sim::window_gone`]: `record_app::tick` (`target_watch.poll` ->
-//!   `on_process_exit`) and `record_detect::check_windows` (`on_window_gone`).
-//! - [`Sim::tick`]: `record_app::tick`: `poll_tracker` -> `record_actions::plan_engine`
-//!   (`set_drain_len(drain_len(..))`, `wanted()`, `activity.retarget_busy`, `planner.step`) ->
+//!   `on_process_exit`) and `record_detect::check_windows` (`on_window_gone_at`).
+//! - [`Sim::tick`]: `record_app::tick`: `poll_tracker` (`feed_drain`, poll) ->
+//!   `record_actions::plan_engine` (`set_drain_len(drain_len(..))`, `wanted()`,
+//!   `activity.retarget_busy`, `running_drain`, `planner.step`, `note_drain_cut` on Apply,
+//!   `closed_game` on a long-recording stop) ->
 //!   fresh-engine bookkeeping (`activity.engine_restarted` on the new engine's hello) ->
 //!   `activity_tick` (pending pause) -> `record_cmds::announce` (island notices).
 //! - [`Sim::save`]: `record_cmds::save_clip`; [`Sim::long_start`]: `engine_command("record_start")`;
@@ -21,12 +26,13 @@
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
-use crate::record_activity::{EngineActivity, LongRec, PendingPause};
+use crate::record_activity::{EngineActivity, LongRec, PendingPause, Trigger};
 use crate::record_config::RecordingCfg;
 use crate::record_drain::drain_len;
 use crate::record_engine::{capture_refusal, wanted, EnginePlanner, EngineTarget, Step, EXIT_LINGER};
 use crate::record_notice::{NoticeTracker, Situation};
 use crate::record_target::{classify_event, Target, TargetTracker, START_DEBOUNCE, TARGET_DEBOUNCE};
+use crate::record_transition::Transitions;
 use crate::watcher::WatchEvent;
 
 /// The pump wakes at least this often (`MAX_WAIT_MS`).
@@ -77,6 +83,12 @@ pub struct Sim {
     pub notices_said: Vec<Situation>,
     /// Ticks the planner answered `Step::Held`.
     pub held_ticks: u32,
+    /// The client area every focused window reports (`watcher::client_size`).
+    pub client: (i32, i32),
+    /// The pinned window (`Controller::pinned`).
+    pub pinned: Option<Target>,
+    /// Shortcut-style island notices (title, detail): `Transitions::island`.
+    pub island_said: Vec<(String, String)>,
 }
 
 impl Sim {
@@ -99,6 +111,9 @@ impl Sim {
             sent: Vec::new(),
             notices_said: Vec::new(),
             held_ticks: 0,
+            client: (1920, 1080),
+            pinned: None,
+            island_said: Vec::new(),
         }
     }
 
@@ -120,16 +135,16 @@ impl Sim {
     }
 
     pub fn focus(&mut self, ev: WatchEvent) {
-        let candidate = classify_event(&ev, &self.cfg);
+        let now = self.now;
+        let (candidate, traits) = self.candidate(&ev, now);
         self.foreground = Some(ev);
-        self.tracker.on_foreground(candidate, self.now);
+        self.tracker.on_foreground_with(candidate, traits, now);
     }
 
-    /// A foreground the watcher cannot identify (OpenProcess fails): `watcher::build_event`
-    /// returns `None`, so no event reaches the tracker at all (the hook and the 1 s probe
-    /// both drop it). Kept as a step so the tests read like the timeline.
+    /// A foreground the watcher cannot identify (OpenProcess fails): the hook and the
+    /// 1 s probe feed it as `WatchEvent::unknown` (`watcher::event_or_unknown`).
     pub fn focus_unidentified(&mut self) {
-        self.foreground = None;
+        self.focus(WatchEvent::unknown(999, 0x999));
     }
 
     pub fn exit(&mut self, pid: u32) {
@@ -137,11 +152,11 @@ impl Sim {
     }
 
     pub fn window_gone(&mut self, hwnd: isize) {
-        self.tracker.on_window_gone(hwnd);
+        self.tracker.on_window_gone_at(hwnd, self.now);
     }
 
     pub fn wanted(&self) -> EngineTarget {
-        wanted(self.tracker.current(), None, &self.rec, self.paused)
+        wanted(self.tracker.current(), self.pinned.as_ref(), &self.rec, self.paused)
     }
 
     pub fn engine(&self) -> &EngineTarget {
@@ -153,14 +168,20 @@ impl Sim {
         if self.pending_pause.is_some_and(|p| p.ready(&self.activity, now)) {
             self.apply_pause(true);
         }
+        self.feed_drain(now);
         self.tracker.poll(now);
         self.planner.set_drain_len(drain_len(self.buffered, self.rec.buffer_secs));
         let busy = self.activity.retarget_busy(now);
+        let drained = self.running_drain(now);
         match self.planner.step(&self.wanted(), now, busy) {
-            Step::Apply(target) => self.applied_engine(target),
+            Step::Apply(target) => {
+                self.note_drain_cut(drained.as_ref(), &target);
+                self.applied_engine(target)
+            }
             Step::Held => self.held_ticks += 1,
             // `plan_engine`: one record_stop per recording, the retarget follows its stop.
             Step::StopLongRec { game_closed } => {
+                let game_closed = self.closed_game(game_closed);
                 if self.activity.auto_stop(now, game_closed) {
                     self.sent.push(("record_stop".into(), self.engine().clone()));
                 }
@@ -215,6 +236,11 @@ impl Sim {
     /// The engine reports a clip landed.
     pub fn saved(&mut self) {
         self.activity.on_event(&serde_json::json!({"type": "saved", "path": "c.mp4"}), 0.0);
+    }
+
+    /// The engine reports the long recording stopped: what `drain_engine_events` acts on.
+    pub fn long_stopped(&mut self) -> Option<Trigger> {
+        self.activity.on_event(&serde_json::json!({"type": "recording_stopped", "path": "r.mp4", "seconds": 9.0, "bytes": 1}), 0.0)
     }
 
     /// Alt+L on an idle engine, and the engine reporting it started.
@@ -286,5 +312,35 @@ impl Sim {
 
     pub fn game_notices(&self, name: &str) -> usize {
         self.notices_said.iter().filter(|n| **n == Situation::Game(name.into())).count()
+    }
+}
+
+impl Transitions for Sim {
+    fn cfg(&self) -> &Config {
+        &self.cfg
+    }
+    fn tracker(&self) -> &TargetTracker {
+        &self.tracker
+    }
+    fn tracker_mut(&mut self) -> &mut TargetTracker {
+        &mut self.tracker
+    }
+    fn planner(&self) -> &EnginePlanner {
+        &self.planner
+    }
+    fn pinned(&self) -> Option<&Target> {
+        self.pinned.as_ref()
+    }
+    fn is_paused(&self) -> bool {
+        self.paused
+    }
+    fn classify_seen(&mut self, ev: &WatchEvent, _now: Instant) -> Option<Target> {
+        classify_event(ev, &self.cfg)
+    }
+    fn client_of(&self, _hwnd: isize) -> (i32, i32) {
+        self.client
+    }
+    fn island(&mut self, title: &str, detail: &str) {
+        self.island_said.push((title.into(), detail.into()));
     }
 }
