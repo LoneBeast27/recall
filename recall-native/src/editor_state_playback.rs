@@ -6,7 +6,11 @@ use super::EditorState;
 use crate::transport_rules::{self, Follow};
 
 impl EditorState {
+    /// A seek still waiting for the preview counts as where the playhead is.
     pub fn position(&self) -> f64 {
+        if let Some(at) = self.pending_seek {
+            return at;
+        }
         self.preview.as_ref().and_then(|p| p.position().ok()).unwrap_or(0.0)
     }
 
@@ -79,6 +83,11 @@ impl EditorState {
     pub fn seek(&mut self, seconds: f64) {
         self.watch.reset();
         let target = seconds.clamp(0.0, self.duration());
+        if self.pending_seek.is_some() {
+            // The preview is not ready yet: this seek replaces the waiting one.
+            self.pending_seek = Some(target);
+            return;
+        }
         if self.playing && !self.play_when_ready {
             // A seek while playing goes free, or back under the kept-range rules, by where it lands.
             self.free_play = transport_rules::plays_free(&self.plan.ranges, target, self.clock_limit());
