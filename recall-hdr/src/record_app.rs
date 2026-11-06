@@ -133,6 +133,8 @@ pub struct Controller {
     pub(crate) notices: NoticeTracker,
     /// Exclusive fullscreen hiding the island (`record_fullscreen`).
     fullscreen: crate::record_fullscreen::FullscreenWatch,
+    /// The island editor shortcut waiting for the overlay's answer.
+    pub(crate) editor_ask: crate::record_editor_ask::EditorAsk,
     /// This token may start the overlay's frame-timing ETW session
     /// (`frame_timing`; checked once, membership changes need a new sign-in).
     pub(crate) can_trace: bool,
@@ -230,6 +232,7 @@ pub fn run() -> i32 {
         janitor,
         notices: NoticeTracker::new(),
         fullscreen: Default::default(),
+        editor_ask: Default::default(),
         can_trace,
         render: RenderCheck::new(can_trace),
     };
@@ -341,6 +344,7 @@ impl Controller {
         self.activity_tick(now);
         self.overlay.sync(&self.cfg.overlay);
         self.fullscreen_tick(now);
+        self.island_editor_tick(now);
         if !self.hdr.is_active() && now.duration_since(self.last_hdr_refresh) >= HDR_REFRESH_EVERY {
             self.last_hdr_refresh = now;
             self.hdr.refresh_live();

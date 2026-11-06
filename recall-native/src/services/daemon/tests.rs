@@ -163,11 +163,12 @@ fn hotkey_and_recording_events_and_session_fields() {
         ]
     );
     apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"recording","paused":false,
-        "stats_hotkey":"Alt+P","overlay_hotkey":"Alt+O","long_recording":{"active":true,"path":"E:/rec.mp4","started_secs":1792621900.0}}}));
+        "stats_hotkey":"Alt+P","overlay_hotkey":"Alt+O","editor_hotkey":"Alt+U","long_recording":{"active":true,"path":"E:/rec.mp4","started_secs":1792621900.0}}}));
     let session = state.snapshot.session.clone().unwrap();
     assert!(session.long_recording.active);
     assert_eq!(session.stats_hotkey, "Alt+P");
     assert_eq!(session.overlay_hotkey, "Alt+O");
+    assert_eq!(session.editor_hotkey, "Alt+U");
 }
 
 #[test]

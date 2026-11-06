@@ -24,6 +24,14 @@ unsafe extern "system" {
     fn SHQueryUserNotificationState(state: *mut i32) -> i32;
 }
 
+/// A Direct3D app owns the display in exclusive fullscreen
+/// (`QUNS_RUNNING_D3D_FULL_SCREEN`): nothing can be dragged over it.
+pub fn exclusive_fullscreen() -> bool {
+    let mut state = 0i32;
+    let hr = unsafe { SHQueryUserNotificationState(&mut state) };
+    hr == 0 && state == 3
+}
+
 /// The shell's notification state, named (`QUNS_*`), or the failing HRESULT.
 pub fn notification_state() -> String {
     let mut state = 0i32;
