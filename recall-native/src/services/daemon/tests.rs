@@ -117,6 +117,22 @@ fn engine_status_parses_and_drives_replay_ready() {
 }
 
 #[test]
+fn a_recovering_or_degraded_engine_still_has_a_saveable_replay_and_counts_as_recording() {
+    let mut state = connected();
+    // A recovering engine keeps its buffer and says why it is recovering; CPU copies record.
+    for (encoder, error) in [("recovering", json!("NVENC encode failed: x")), ("degraded", Value::Null)] {
+        apply(&mut state, json!({"mod":"engine","event":{"type":"status","buffer_secs":30.0,"encoder":encoder,"encoder_error":error}}));
+        assert!(state.snapshot.replay_ready(), "{encoder}: the buffered clip is saveable");
+    }
+    apply(&mut state, json!({"mod":"engine","event":{"type":"status","buffer_secs":30.0,"encoder":"failed","encoder_error":"x"}}));
+    assert!(!state.snapshot.replay_ready());
+    for (session, busy) in [("degraded", true), ("recovering", true), ("recording", true), ("starting", true), ("error", false), ("waiting", false)] {
+        let status = SessionStatus { state: session.into(), ..Default::default() };
+        assert_eq!(status.capturing(), busy, "{session}");
+    }
+}
+
+#[test]
 fn legacy_hdr_status_maps_into_session() {
     let mut state = connected();
     let line = json!({"mod":"hdr","event":{"type":"status","target":"Monitor 27Q","hdr":true,"manual_pin":true,"session_pid":null,"auto":false,"engine_health":"restarting"}});

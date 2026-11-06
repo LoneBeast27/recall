@@ -18,7 +18,7 @@ use super::super::{run, saver, try_open, Config, EncStats, PacedFrame, SaveReque
 use crate::framing::{Layout, MIN_ENCODE};
 use crate::gpu_frames::{hardware_device, Pipeline};
 
-const BIG: (u32, u32) = (640, 360);
+pub(crate) const BIG: (u32, u32) = (640, 360);
 const WOBBLE: (u32, u32) = (640, 358);
 /// A window on its way to the taskbar: NVENC refuses this (CS2, 2026-10-31).
 const TINY: (u32, u32) = (120, 30);
@@ -31,14 +31,14 @@ const PHASE: u64 = 60;
 /// One NVENC loop at a time: the tests measure buffers, not session limits.
 static NVENC: Mutex<()> = Mutex::new(());
 
-fn nvenc() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn nvenc() -> std::sync::MutexGuard<'static, ()> {
     NVENC.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-struct Loop {
+pub(crate) struct Loop {
     frames: Option<SyncSender<PacedFrame>>,
     saves: Sender<SaveRequest>,
-    stats: Arc<EncStats>,
+    pub stats: Arc<EncStats>,
     thread: Option<JoinHandle<()>>,
     saver: Option<saver::SaverControl>,
     clip_secs: Receiver<f64>,
@@ -47,11 +47,15 @@ struct Loop {
 
 impl Loop {
     fn start() -> Self {
+        Self::start_with(Arc::new(EncStats::default()))
+    }
+
+    /// With `stats` set up first (faults, the capture-restart hook).
+    pub fn start_with(stats: Arc<EncStats>) -> Self {
         let cfg = Config { fps: 60, buffer_secs: 30, bitrate: 2_000_000, ..Config::from_env(false) };
         let (ftx, frx) = sync_channel(3);
         let (stx, srx) = channel();
         let (ctx, crx) = channel();
-        let stats = Arc::new(EncStats::default());
         let mux: saver::MuxFn = Box::new(move |_, job, _, _| {
             let _ = ctx.send(job.secs);
             Err("wobble test: the clip length is all that is read".into())
@@ -62,22 +66,22 @@ impl Loop {
         Self { frames: Some(ftx), saves: stx, stats, thread: Some(thread), saver: Some(control), clip_secs: crx, sent: 0 }
     }
 
-    fn pts(&self) -> u64 {
+    pub fn pts(&self) -> u64 {
         self.sent * FRAME_US
     }
 
-    fn send(&mut self, frame: PacedFrame) {
+    pub fn send(&mut self, frame: PacedFrame) {
         self.frames.as_ref().unwrap().send(frame).expect("encoder loop is alive");
         self.sent += 1;
     }
 
-    fn rgba(&mut self, (width, height): (u32, u32)) {
+    pub fn rgba(&mut self, (width, height): (u32, u32)) {
         let rgba = vec![0x40; (width * height * 4) as usize];
         self.send(PacedFrame { idx: self.pts(), width, height, rgba, gpu: None, content: None });
     }
 
     /// False when this machine has no NVENC (the test then has nothing to say).
-    fn nvenc_opened(&self) -> bool {
+    pub fn nvenc_opened(&self) -> bool {
         let deadline = Instant::now() + Duration::from_secs(5);
         while self.stats.backend.load(Relaxed) == 0 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
@@ -90,7 +94,7 @@ impl Loop {
     }
 
     /// Let NVENC's few frames of delay come out, then save: the clip's length in seconds.
-    fn clip_after_settling(&self) -> f64 {
+    pub fn clip_after_settling(&self) -> f64 {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut last = (self.stats.encoded_frames.load(Relaxed), Instant::now());
         while Instant::now() < deadline && last.1.elapsed() < Duration::from_millis(300) {
@@ -107,7 +111,7 @@ impl Loop {
         self.clip_secs.recv_timeout(Duration::from_secs(5)).expect("the save reached the saver")
     }
 
-    fn error(&self) -> Option<String> {
+    pub fn error(&self) -> Option<String> {
         self.stats.error.lock().unwrap().clone()
     }
 }
@@ -144,19 +148,26 @@ fn surface(dev: &ID3D11Device, (w, h): (u32, u32)) -> ID3D11Texture2D {
 }
 
 /// The capture thread's zero-copy half, minus WGC.
-struct Capture {
+pub(crate) struct Capture {
     dev: ID3D11Device,
-    pipe: Pipeline,
+    pub pipe: Pipeline,
 }
 
 impl Capture {
-    fn new() -> Option<Self> {
+    pub fn new() -> Option<Self> {
         let (dev, ctx) = hardware_device()?;
         let pipe = Pipeline::new(&dev, &ctx).expect("pipeline");
         Some(Self { dev, pipe })
     }
 
-    fn frames(&mut self, enc: &mut Loop, size: (u32, u32), count: u64) {
+    /// The frames pool this capture's frames of `size` come from.
+    pub fn pool(&mut self, size: (u32, u32)) -> usize {
+        let src = surface(&self.dev, size);
+        let layout = Layout::recorded(size, None, false, self.pipe.target()).expect("layout");
+        self.pipe.render(&src, &layout, 0).expect("render").pool_id()
+    }
+
+    pub fn frames(&mut self, enc: &mut Loop, size: (u32, u32), count: u64) {
         let src = surface(&self.dev, size);
         for _ in 0..count {
             let Some(layout) = Layout::recorded(size, None, false, self.pipe.target()) else { continue };

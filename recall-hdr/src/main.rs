@@ -75,6 +75,7 @@ mod record_notice;
 mod record_power;
 mod record_power_win;
 mod record_quit;
+mod record_recover;
 mod record_render;
 mod record_storage;
 mod record_free_space;

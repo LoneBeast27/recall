@@ -25,6 +25,10 @@ impl Handler {
     /// encoder sink, the pipeline cannot start, or it kept failing).
     pub(super) fn gpu_frame(&mut self, src: &Source<'_>, pts_us: u64, crop: Option<Rect>, canvas: bool) -> bool {
         let Some(sink) = self.shared.gpu_sink.get() else { return false };
+        if matches!(self.gpu, GpuState::Off) && (sink.retry_gpu)() {
+            (sink.log)("capture: trying the zero-copy GPU path again".into());
+            self.gpu = GpuState::Untried;
+        }
         if let GpuState::Untried = self.gpu {
             match crate::gpu_frames::adapter::remember(src.device) {
                 Some(gpu) => (sink.log)(format!("capture: device on {}", gpu.describe())),

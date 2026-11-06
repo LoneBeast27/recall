@@ -301,13 +301,8 @@ impl App {
             return (0.0, "off".into(), None, "off".into());
         };
         let codec = enc.stats.codec().label().to_string();
-        let label = match enc.stats.backend.load(Relaxed) {
-            // Kept as the "replay ready" token for every codec: the overlay,
-            // native app and hub compare it literally; the codec is `codec`.
-            1 => "h264_nvenc",
-            3 => "failed",
-            _ => "starting",
-        };
+        // "h264_nvenc" stays the "replay ready" token for every codec (`EncStats::label`).
+        let label = enc.stats.label();
         let error = enc.stats.error.lock().ok().and_then(|e| e.clone());
         let elapsed_us = if label == "failed" {
             0
