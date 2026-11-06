@@ -31,7 +31,7 @@ use windows::Win32::UI::HiDpi::{SetThreadDpiAwarenessContext, DPI_AWARENESS_CONT
 
 use super::dda_dxgi::{device_on, find_target, present_or_now, Readback, Target, Timer};
 use super::dda_logic::{self as logic, Action, Pace, Pacer};
-use super::{CaptureShared, Handler, Source};
+use super::{CaptureError, CaptureShared, FrameSource, Handler, Source};
 use crate::framing::Rect;
 
 /// `AcquireNextFrame` timeout: how often an idle capture checks for stop.
@@ -314,14 +314,32 @@ impl Capture {
         if let Ok(mut s) = self.stats.size.lock() {
             *s = size;
         }
-        let (device, context) = (self.device.clone(), self.context.clone());
-        let src = Source { device: &device, context: &context, texture: &texture, size, timestamp };
-        let readback = &mut self.readback;
-        let mut cpu = |rect: Rect| readback.read(&texture, size, rect);
-        if let Err(e) = self.handler.deliver(&src, &mut cpu) {
+        let mut frame = DdaFrame { device: &self.device, context: &self.context, texture: &texture, size, timestamp, readback: &mut self.readback };
+        if let Err(e) = self.handler.deliver(&mut frame) {
             eprintln!("[recall] capture: dda frame failed: {e}");
         }
         true
+    }
+}
+
+/// An acquired Desktop Duplication frame as a `FrameSource`: the capture's device and
+/// context and the acquired texture, borrowed for the call.
+struct DdaFrame<'a> {
+    device: &'a ID3D11Device,
+    context: &'a ID3D11DeviceContext,
+    texture: &'a ID3D11Texture2D,
+    size: (u32, u32),
+    timestamp: i64,
+    readback: &'a mut Readback,
+}
+
+impl FrameSource for DdaFrame<'_> {
+    fn source(&self) -> Source<'_> {
+        Source { device: self.device, context: self.context, texture: self.texture, size: self.size, timestamp: self.timestamp }
+    }
+
+    fn read(&mut self, rect: Rect) -> Result<Vec<u8>, CaptureError> {
+        self.readback.read(self.texture, self.size, rect)
     }
 }
 
