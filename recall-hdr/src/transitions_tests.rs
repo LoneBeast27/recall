@@ -144,7 +144,6 @@ fn r06b_a_save_in_the_switch_window_lands_in_a_and_holds_the_retarget() {
 /// runs. Expected: the long recording is stopped (record_stop) and B is recorded; never held
 /// indefinitely. Master: held until Alt+L.
 #[test]
-#[ignore = "fixed by fix/longrec-game-exit"]
 fn r06d_a_second_game_during_the_long_recording_stops_it_then_retargets() {
     let mut s = recording_a();
     s.long_start();
@@ -276,7 +275,6 @@ fn r12a_a_crash_during_a_save_lets_the_save_finish() {
 /// Expected: at the drain's end record_stop is sent and the engine stops (no file growing
 /// with audio and no video). Master: held forever.
 #[test]
-#[ignore = "fixed by fix/longrec-game-exit"]
 fn r12b_a_crash_during_the_long_recording_stops_it_at_the_drain_end() {
     let mut s = recording_a();
     s.long_start();
@@ -292,7 +290,6 @@ fn r12b_a_crash_during_the_long_recording_stops_it_at_the_drain_end() {
 /// Row 12c (lane fix/longrec-game-exit): quit A during the long recording and launch B.
 /// Expected: the long recording stops at once and B is recorded.
 #[test]
-#[ignore = "fixed by fix/longrec-game-exit"]
 fn r12c_a_new_game_after_a_crash_during_the_long_recording_is_recorded() {
     let mut s = recording_a();
     s.long_start();
