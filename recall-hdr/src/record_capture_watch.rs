@@ -3,9 +3,12 @@
 //! before it). After [`STUCK_AFTER`] the engine gets ONE intended restart. If the first
 //! frame still does not come within another [`STUCK_AFTER`], the island says
 //! "Can't capture <game>" and the failure cue plays, once. After that nothing respawns
-//! until the target changes, its window mode changes (`Sight::mode`) or the user acts (a
-//! shortcut, pause / resume). The engine retries its own capture meanwhile (`recall`
-//! `capture_watchdog`), on evidence only.
+//! until the target changes (another game: another process) or the game's window mode
+//! changes (fullscreen <-> windowed, [`WindowMode`]). Shortcuts, a pause / resume and a
+//! resize or move change neither, so they never re-arm it (p2 11-07). A new window of the
+//! same game (some games recreate it on a mode switch) counts only when its mode differs.
+//! A first frame that does come ends the episode, so a later stall is news again. The
+//! engine retries its own capture meanwhile (`recall` `capture_watchdog`), on evidence only.
 //!
 //! Only time the player could see the game counts: while it is minimized or behind
 //! another window, the session is locked or the display is off (`record_screen`), a game
@@ -21,7 +24,7 @@ use crate::log;
 use crate::record_app::Controller;
 use crate::record_engine::EngineTarget;
 use crate::record_notice::shortcut_notice_json;
-use crate::record_screen::Sight;
+use crate::record_screen::{Sight, WindowMode};
 use crate::record_status::session_state;
 use crate::record_target::Target;
 use crate::supervisor::EngineHealth;
@@ -56,15 +59,14 @@ enum Phase {
 /// Follows (state, target) each tick.
 #[derive(Debug, Default)]
 pub struct StuckWatch {
-    /// The target (hwnd, pid) and since when it has been stuck-shaped.
-    since: Option<((isize, u32), Instant)>,
-    /// The target the episode belongs to, and its phase.
-    phase: Option<((isize, u32), Phase)>,
+    /// The game (its pid) and since when it has been stuck-shaped.
+    since: Option<(u32, Instant)>,
+    /// The game the episode belongs to, and its phase.
+    phase: Option<(u32, Phase)>,
     /// When the one restart was made (bounds `pending`).
     restarted_at: Option<Instant>,
-    /// The last window mode and user action seen (a change starts a new episode).
-    mode: Option<u64>,
-    user: Option<Instant>,
+    /// The game and its window mode last seen (a change of mode starts a new episode).
+    mode: Option<(u32, WindowMode)>,
 }
 
 impl StuckWatch {
@@ -75,7 +77,7 @@ impl StuckWatch {
             self.since = None;
             return None;
         };
-        let key = (t.hwnd, t.pid);
+        let key = t.pid;
         if self.phase.is_some_and(|(k, _)| k != key) || state == "recording" {
             self.phase = None; // a new target, or this one recovered: a later stall is news again
         }
@@ -116,15 +118,14 @@ impl StuckWatch {
         self.since.is_some() || (in_flight && self.phase.is_some_and(|(_, p)| p == Phase::Restarted))
     }
 
-    /// The window mode now and the last user action: a change starts a new episode.
-    fn note_changes(&mut self, mode: Option<u64>, user: Option<Instant>) {
-        let mode_changed = mode.is_some() && self.mode.is_some_and(|m| Some(m) != mode);
-        if mode_changed || user != self.user {
+    /// The game's window mode now: a change (same game) starts a new episode.
+    fn note_mode(&mut self, seen: Option<(u32, WindowMode)>) {
+        let Some((pid, mode)) = seen else { return };
+        if self.mode.is_some_and(|(p, m)| p == pid && m != mode) {
             self.phase = None;
             self.since = None; // the new episode's 10 s start now
         }
-        self.mode = mode.or(self.mode);
-        self.user = user;
+        self.mode = seen;
     }
 }
 
@@ -141,26 +142,22 @@ pub struct StuckInputs<'a> {
     /// A drain runs, the engine is busy (a save, a long recording) or an encoder
     /// recovery is pending: hands off.
     pub held: bool,
-    /// The user's last shortcut / pause / resume.
-    pub user_acted: Option<Instant>,
     pub overlay: bool,
 }
 
 /// One tick: the act to apply (its notice already dropped when the overlay is off), with
 /// `sight` asked only for a game target.
 pub fn stuck_step(w: &mut StuckWatch, i: &StuckInputs, sight: impl Fn(&Target) -> Sight, now: Instant) -> Option<StuckAct> {
-    if i.paused {
-        w.phase = None; // a pause is the user acting: the next stall starts fresh
-    }
     if i.held {
         return None;
     }
     let state = session_state(i.wanted, i.health, i.encoder, i.fresh, i.paused);
     let seen = match i.wanted {
-        EngineTarget::Window(t) if state == "starting" => Some(sight(t)),
+        EngineTarget::Window(t) if state == "starting" => Some((t.pid, sight(t))),
         _ => None,
     };
-    w.note_changes(seen.map(|s| s.mode), i.user_acted);
+    w.note_mode(seen.map(|(pid, s)| (pid, s.mode())));
+    let seen = seen.map(|(_, s)| s);
     let act = w.observe(state, i.wanted, i.running, i.fresh, seen.is_none_or(Sight::shown), now)?;
     Some(StuckAct { notice: act.notice.filter(|_| i.overlay), ..act })
 }
@@ -178,7 +175,6 @@ impl Controller {
             paused: self.paused,
             running: self.engine_running(),
             held: self.planner.drain().is_some() || self.activity.busy(now) || self.recovery.pending(now),
-            user_acted: self.last_fired.values().max().copied(),
             overlay: self.cfg.overlay.enabled,
         };
         let Some(act) = stuck_step(&mut self.capture_stuck, &inputs, crate::record_screen::sight, now) else { return };

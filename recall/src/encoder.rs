@@ -27,7 +27,7 @@ mod live;
 pub(crate) use handoff::{audio_tail_us, video_end_us};
 mod mover;
 mod mux;
-mod reopen;
+pub(crate) mod reopen;
 mod replay;
 #[cfg(test)]
 mod recover_tests;

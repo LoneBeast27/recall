@@ -14,9 +14,10 @@ use std::time::{Duration, Instant};
 
 use windows::core::GUID;
 use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Graphics::Gdi::{GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic, GWL_STYLE, WS_CAPTION,
-    WS_POPUP, WS_THICKFRAME,
+    WS_POPUP,
 };
 
 use crate::log;
@@ -31,18 +32,52 @@ pub struct Sight {
     /// The input desktop is not the user's (lock screen, UAC, Ctrl+Alt+Del).
     pub locked: bool,
     pub display_off: bool,
-    /// The window mode: frame style bits and size (a change = windowed / borderless /
-    /// fullscreen switched, or a new size).
-    pub mode: u64,
+    /// The window's frame (its [`WindowMode`]).
+    pub frame: Frame,
+}
+
+/// Fullscreen (exclusive or borderless) or in a window: what the player switches in the
+/// game's video settings. A resize or a move is not a mode change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WindowMode {
+    Windowed,
+    Fullscreen,
+}
+
+/// A window's style bits, its rect and its monitor's rect (left, top, right, bottom).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Frame {
+    pub style: u32,
+    pub rect: [i32; 4],
+    pub monitor: [i32; 4],
+}
+
+impl Frame {
+    /// A 2560x1440 borderless window on a 2560x1440 monitor.
+    pub const FULLSCREEN: Self = Self { style: WS_POPUP.0, rect: [0, 0, 2560, 1440], monitor: [0, 0, 2560, 1440] };
+
+    /// Fullscreen: the window covers its whole monitor and has no title bar. A maximized
+    /// window also covers it (its borders hang off the edges) but keeps its title bar.
+    pub fn mode(self) -> WindowMode {
+        let [l, t, r, b] = self.rect;
+        let [ml, mt, mr, mb] = self.monitor;
+        let covers = l <= ml && t <= mt && r >= mr && b >= mb;
+        let titled = self.style & WS_CAPTION.0 == WS_CAPTION.0;
+        if covers && !titled { WindowMode::Fullscreen } else { WindowMode::Windowed }
+    }
 }
 
 impl Sight {
     /// In front, not minimized, on the user's desktop with the display on.
-    pub const SHOWN: Self = Self { in_front: true, iconic: false, locked: false, display_off: false, mode: 0 };
+    pub const SHOWN: Self = Self { in_front: true, iconic: false, locked: false, display_off: false, frame: Frame::FULLSCREEN };
 
     /// The game can be sending frames now.
     pub fn shown(self) -> bool {
         self.in_front && !self.iconic && !self.locked && !self.display_off
+    }
+
+    pub fn mode(self) -> WindowMode {
+        self.frame.mode()
     }
 }
 
@@ -107,20 +142,22 @@ pub fn sight(t: &Target) -> Sight {
     let hwnd = HWND(t.hwnd as *mut _);
     let mut front = 0u32;
     let mut rect = RECT::default();
+    let mut monitor = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
     // SAFETY: plain queries; each tolerates a stale handle.
     let (iconic, style) = unsafe {
         GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut front));
         let _ = GetWindowRect(hwnd, &mut rect);
-        (IsIconic(hwnd).as_bool(), GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & (WS_CAPTION.0 | WS_THICKFRAME.0 | WS_POPUP.0))
+        let _ = GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut monitor);
+        (IsIconic(hwnd).as_bool(), GetWindowLongPtrW(hwnd, GWL_STYLE) as u32)
     };
-    let size = ((rect.right - rect.left) as u32 as u64) << 16 | (rect.bottom - rect.top) as u16 as u64;
+    let edges = |r: RECT| [r.left, r.top, r.right, r.bottom];
     let locked = !LOCKED.lock().unwrap_or_else(|p| p.into_inner()).get(Instant::now(), input_is_users);
     Sight {
         in_front: front != 0 && front == t.pid,
         iconic,
         locked,
         display_off: DISPLAY.load(Relaxed) == 0,
-        mode: (style as u64) << 32 | size,
+        frame: Frame { style, rect: edges(rect), monitor: edges(monitor.rcMonitor) },
     }
 }
 
@@ -163,6 +200,21 @@ unsafe extern "system" fn on_power(_context: *const c_void, kind: u32, setting: 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const TITLED: u32 = WS_CAPTION.0 | 0x0004_0000; // + WS_THICKFRAME
+
+    #[test]
+    fn fullscreen_is_a_window_covering_its_monitor_with_no_title_bar() {
+        let on = |style, rect| Frame { style, rect, monitor: [0, 0, 2560, 1440] }.mode();
+        assert_eq!(on(WS_POPUP.0, [0, 0, 2560, 1440]), WindowMode::Fullscreen, "borderless / exclusive");
+        assert_eq!(on(0, [0, 0, 2560, 1440]), WindowMode::Fullscreen, "no style bits at all");
+        assert_eq!(on(TITLED, [100, 100, 1700, 1000]), WindowMode::Windowed);
+        assert_eq!(on(TITLED, [100, 100, 2020, 1180]), WindowMode::Windowed, "resized: still windowed");
+        assert_eq!(on(TITLED, [-8, -8, 2568, 1448]), WindowMode::Windowed, "maximized keeps its title bar");
+        assert_eq!(on(WS_POPUP.0, [0, 0, 1920, 1080]), WindowMode::Windowed, "a borderless window smaller than the monitor");
+        let second = Frame { style: WS_POPUP.0, rect: [2560, 0, 4480, 1080], monitor: [2560, 0, 4480, 1080] };
+        assert_eq!(second.mode(), WindowMode::Fullscreen, "on a second monitor");
+    }
 
     #[test]
     fn the_input_desktop_is_looked_at_at_most_once_a_second() {
