@@ -316,7 +316,7 @@ static FLIP_CALLS: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
 static LIMIT_ON: AtomicBool = AtomicBool::new(true);
 
 /// Records the call, then the user turns the limit off (between clip 1 and clip 2).
-fn recycle_then_limit_off(files: &[PathBuf]) -> Result<(), String> {
+fn recycle_then_limit_off(files: &[PathBuf]) -> Result<(), crate::record_storage::RecycleError> {
     FLIP_CALLS.lock().unwrap().push(names_of(files));
     LIMIT_ON.store(false, SeqCst);
     Ok(())
@@ -334,7 +334,7 @@ fn turning_the_limit_off_between_clips_stops_the_run() {
 
 static GROUP_CALLS: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
 
-fn recycle_recorded(files: &[PathBuf]) -> Result<(), String> {
+fn recycle_recorded(files: &[PathBuf]) -> Result<(), crate::record_storage::RecycleError> {
     GROUP_CALLS.lock().unwrap().push(names_of(files));
     Ok(())
 }
@@ -370,7 +370,7 @@ fn ten_gib_bin(_: &Path, bytes: u64) -> Result<(), String> {
 }
 
 static BIG_CALLS: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
-fn recycle_big(files: &[PathBuf]) -> Result<(), String> {
+fn recycle_big(files: &[PathBuf]) -> Result<(), crate::record_storage::RecycleError> {
     BIG_CALLS.lock().unwrap().push(names_of(files));
     Ok(())
 }
@@ -383,22 +383,50 @@ fn a_clip_too_big_for_the_bin_is_skipped_and_the_run_stops() {
     assert!(out.refused.as_deref().is_some_and(|r| r.contains("bigger than the Recycle Bin")), "{out:?}");
 }
 
-/// What `win_recycle::facts` reports for a `\nas` share: no volume GUID.
+/// What `win_recycle::facts` reports for a `\\nas` share: no volume GUID.
 fn share_bin(_: &Path, bytes: u64) -> Result<(), String> {
-    let share = crate::win_volume::Volume { id: r"\nas\clips\".into(), label: r"\nas\clips".into() };
-    crate::win_recycle::decide(&crate::win_recycle::BinFacts { volume: Some(share), drive_type: 4, nuke: None, max_mb: None }, bytes)
+    let share = crate::win_volume::Volume { id: r"\\nas\clips\".into(), label: r"\\nas\clips".into() };
+    crate::win_recycle::decide(&crate::win_recycle::BinFacts { volume: Some(share), drive_type: 4, total_bytes: None, settings: Default::default() }, bytes)
 }
 
 static SHARE_CALLS: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
-fn recycle_share(files: &[PathBuf]) -> Result<(), String> {
+fn recycle_share(files: &[PathBuf]) -> Result<(), crate::record_storage::RecycleError> {
     SHARE_CALLS.lock().unwrap().push(names_of(files));
     Ok(())
 }
 
 #[test]
 fn clips_on_a_share_are_never_sent() {
-    let out = run_once(Path::new(r"\nas\clips"), 500, plan_three, &|| true, share_bin, recycle_share).unwrap();
+    // A local-looking folder: the share is what `share_bin` reports (no network lookup in a test).
+    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, &|| true, share_bin, recycle_share).unwrap();
     assert!(SHARE_CALLS.lock().unwrap().is_empty(), "no shell call: on a share it would delete for good");
     assert_eq!(out.removed, 0);
     assert!(out.refused.is_some());
+}
+
+// ---- A shell call that Windows had to ask about, then was declined or cancelled, is a refusal ----
+
+#[test]
+fn shell_results_declined_or_cancelled_are_refusals() {
+    assert_eq!(shell_outcome(0, false), Ok(()));
+    assert!(matches!(shell_outcome(0, true), Err(RecycleError::Refused(_))), "fAnyOperationsAborted");
+    assert!(matches!(shell_outcome(0x4C7, false), Err(RecycleError::Refused(_))), "ERROR_CANCELLED");
+    assert!(matches!(shell_outcome(0x75, false), Err(RecycleError::Refused(_))), "DE_OPCANCELLED");
+    assert!(matches!(shell_outcome(0x7C, false), Err(RecycleError::Failed(_))), "another error is a failure");
+}
+
+static DECLINED_CALLS: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());
+
+/// The nuke prompt appeared (no owner window, maybe over a game) and was declined.
+fn recycle_declined(files: &[PathBuf]) -> Result<(), RecycleError> {
+    DECLINED_CALLS.lock().unwrap().push(names_of(files));
+    Err(RecycleError::Refused("the delete was declined".into()))
+}
+
+#[test]
+fn a_declined_shell_call_stops_the_run_like_a_refusal() {
+    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, &|| true, any_bin, recycle_declined).expect("a refusal, not an error");
+    assert_eq!(DECLINED_CALLS.lock().unwrap().len(), 1, "no second clip after a declined call");
+    assert_eq!(out.removed, 0);
+    assert!(out.refused.as_deref().is_some_and(|r| r.contains("declined")), "{out:?}");
 }
