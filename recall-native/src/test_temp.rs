@@ -15,6 +15,16 @@ impl TempDir {
         TempDir(dir)
     }
 
+    /// `<worktree>\.tmp\sandbox\<name>-<pid>`, emptied first, then created: tests that place
+    /// user-like clips never touch %TEMP%, a real cache or a real clip folder.
+    pub fn sandbox(name: impl AsRef<str>) -> Self {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".tmp").join("sandbox");
+        let dir = base.join(format!("{}-{}", name.as_ref(), std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("create a test sandbox folder");
+        TempDir(dir)
+    }
+
     pub fn path(&self) -> &Path {
         &self.0
     }

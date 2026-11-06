@@ -109,6 +109,24 @@ impl Folders {
     }
 }
 
+impl Folders {
+    /// Every folder that holds the user's clips: the library's recordings folder (also
+    /// `RECALL_OUT_DIR`, else the default one), the last one the recorder reported, and each
+    /// imported folder.
+    pub fn clip_dirs(&self) -> Vec<PathBuf> {
+        let mut dirs = vec![crate::backend::library_dir_from(self)];
+        dirs.extend(self.recordings.iter().chain(&self.imported).map(PathBuf::from));
+        dirs
+    }
+}
+
+/// Start: blocks the cache when a clip folder overlaps it (`storage::guard`). The message
+/// to show, if any.
+pub fn check_cache_overlap(folders: &Folders) -> Option<String> {
+    use crate::services::storage::guard;
+    guard::check(&guard::cache_dirs(), &folders.clip_dirs())
+}
+
 /// Case-insensitive, separator-normalized, no trailing slash.
 pub fn folder_key(folder: &str) -> String {
     folder.replace('/', "\\").trim_end_matches('\\').to_lowercase()

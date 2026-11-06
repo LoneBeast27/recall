@@ -140,6 +140,7 @@ fn prepare(key: u64, info: &ClipInfo, plan: &EditPlan, fps: u32, export: &Export
     let folder = dir();
     std::fs::create_dir_all(&folder).map_err(|e| format!("create pre-encode folder: {e}"))?;
     let path = folder.join(format!("{key:016x}.mp4"));
+    storage::mark_owned(&storage::cache_root(), &format!("tmp/pre-encode/{key:016x}.mp4"));
     let on_line: storage::OnLine = Box::new(|line| {
         if let Some(share) = progress_share(line) {
             PROGRESS.store((share * 1000.0) as u32, Ordering::Relaxed);
@@ -216,11 +217,17 @@ fn remove_deliveries(folder: &Path) -> usize {
 }
 
 pub fn clear_dir() {
-    let Ok(entries) = std::fs::read_dir(dir()) else { return };
     let ready = slot().ready.as_ref().map(|ready| ready.path.clone());
+    clear_in(&storage::cache_root(), ready.as_deref());
+}
+
+/// [`clear_dir`] of the cache at `root`, sparing `ready`: only prepared files Recall listed
+/// (`<key>.mp4`) and the engine's temporaries of them; anything else in the folder stays.
+pub(crate) fn clear_in(root: &Path, ready: Option<&Path>) {
+    let Ok(entries) = std::fs::read_dir(root.join("tmp").join("pre-encode")) else { return };
     for entry in entries.flatten() {
-        if Some(entry.path()) != ready {
-            let _ = std::fs::remove_file(entry.path());
+        if Some(entry.path().as_path()) != ready {
+            storage::remove_owned(root, "tmp/pre-encode", &entry.file_name().to_string_lossy());
         }
     }
 }

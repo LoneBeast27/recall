@@ -25,12 +25,14 @@ mod drive;
 mod evict;
 mod ffmpeg;
 pub mod fill;
+pub mod guard;
 mod head;
 mod history;
 mod io_priority;
 mod kept;
 mod lane;
 mod light;
+mod owned;
 mod prefetch;
 mod probe;
 mod projects;
@@ -40,6 +42,7 @@ mod smr;
 mod ssd_usage;
 mod thumbs;
 mod tiers;
+mod unit_files;
 mod video;
 #[cfg(test)]
 mod tests;
@@ -49,6 +52,8 @@ mod tests_io;
 mod tests_smart;
 #[cfg(test)]
 mod tests_smoke;
+#[cfg(test)]
+mod tests_owned;
 
 // Public API for the UI (Settings > Storage, editor playback); not every item is used yet.
 #[allow(unused_imports)]
@@ -81,6 +86,18 @@ pub use ssd_usage::{SsdUsage, counted_dirs, generation as cache_generation, note
 pub use tiers::{CacheKind, CacheUsage, TierUsage, clear_kind, usage_detail};
 #[allow(unused_imports)]
 pub use video::{cache_video, cached_video, copy_progress, enforce_budget, is_slow, start_fill, too_large};
+
+/// Records `rel` (`video/<id>.mp4`, `tmp/pre-encode/<key>.mp4`, ...) as a file Recall made in
+/// the cache at `root`: only such files are ever evicted or swept (`owned.rs`).
+pub(crate) fn mark_owned(root: &Path, rel: &str) {
+    owned::mark(root, rel);
+}
+
+/// Deletes `name` in `folder` of the cache at `root` only if Recall made it ([`mark_owned`])
+/// and the cache is not blocked (`guard.rs`). True when it went.
+pub(crate) fn remove_owned(root: &Path, folder: &str, name: &str) -> bool {
+    owned::remove(root, folder, name)
+}
 
 /// [`cached_video`] against an explicit cache root.
 pub fn cached_video_in(root: &Path, source: &Path) -> Option<String> {
