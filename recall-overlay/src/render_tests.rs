@@ -121,47 +121,53 @@ fn side_notice(fonts: &Fonts, turn: Turn) -> (Scene, Look) {
 }
 
 #[test]
-fn stacked_glyphs_and_marks_draw_upright_with_no_rotation_or_mirror() {
+fn stacked_cells_and_marks_draw_upright_with_no_rotation_or_mirror() {
     let (fonts, mut renderer) = (Fonts::new().unwrap(), Renderer::new().unwrap());
     for turn in [Turn::Right, Turn::Left] {
         let (scene, look) = side_notice(&fonts, turn);
         renderer.upright_log.borrow_mut().clear();
         let (w, h) = renderer.draw(&fonts, &scene, look, 1.0, Layers::default()).unwrap();
         let log = renderer.upright_log.borrow();
-        assert_eq!(log.len(), scene.texts.len() + 1, "{turn:?}: every glyph and the mark drew upright");
+        assert_eq!(log.len(), scene.shapes.len() + scene.texts.len() + 1, "{turn:?}: every separator dot, cell and the mark drew upright");
         for m in log.iter() {
             assert!(m.M12 == 0.0 && m.M21 == 0.0 && m.M11 > 0.0 && (m.M11 - m.M22).abs() < 1e-6, "{turn:?}: no rotation, no mirror: {m:?}");
         }
         assert_eq!((w, h), (scene.h.ceil() as i32, scene.w.ceil() as i32), "{turn:?}: the window is the tall pill");
-        // The glyph lines run top to bottom inside the window.
         // Every centre is mid-pill across (`scene.h / 2`): where it lands is M32 + that * k.
         let ys: Vec<f32> = log.iter().map(|m| m.M32 + scene.h / 2.0 * m.M22).collect();
-        // The glyphs draw first, the mark last: the mark is on top, the lines run downwards.
-        let (mark, lines) = ys.split_last().unwrap();
-        assert!(lines.windows(2).all(|p| p[1] > p[0]) && mark < &lines[0], "{turn:?}: top to bottom: {ys:?}");
+        // Separators draw first, then the cells' text, the mark last: the mark is on top, the cells run downwards.
+        let (mark, rest) = ys.split_last().unwrap();
+        let cells = &rest[scene.shapes.len()..];
+        assert!(cells.windows(2).all(|p| p[1] > p[0]) && mark < &cells[0], "{turn:?}: top to bottom: {ys:?}");
         assert!(ys.iter().all(|&y| y > 0.0 && y < h as f32), "{turn:?}: inside the window");
     }
 }
 
-/// Writes the left- and right-spot pills (a notice and the stats) to PNGs,
-/// drawn offscreen (no window):
-/// `RECALL_SHOTS=<dir> cargo test -p recall-overlay -- --ignored side_spot_pngs`.
+/// Writes the REC notice (0:08, 1:23, 12:34, 1:02:03) and the stats pill,
+/// horizontal and in the right side spot, to PNGs drawn offscreen (no
+/// window) at 3x: `RECALL_SHOTS=<dir> cargo test -p recall-overlay -- --ignored cell_grid_pngs`.
 #[test]
 #[ignore]
-fn side_spot_pngs() {
-    use crate::layout::{stats_scene, StatsContent};
+fn cell_grid_pngs() {
+    use crate::layout::{notice_scene, stats_scene, StatsContent};
+    use crate::notice::{NoticeView, Tone};
     let Some(dir) = std::env::var_os("RECALL_SHOTS").map(std::path::PathBuf::from) else { return };
     std::fs::create_dir_all(&dir).unwrap();
     let (fonts, mut renderer) = (Fonts::new().unwrap(), Renderer::new().unwrap());
-    let st = StatsContent { recording: true, replay_secs: 120, fps: Some(144), low1: Some(98), gpu: Some(71), gpu_temp: Some(64), cpu: Some(23), ..Default::default() };
-    let stats = crate::stack::stack(&stats_scene(&st, 1.0, &fonts), 1.0, &fonts);
-    for (side, turn) in [("right", Turn::Right), ("left", Turn::Left)] {
-        let (notice, _) = side_notice(&fonts, turn);
-        for (what, scene) in [("notice", &notice), ("stats", &stats)] {
+    let k = 3.0;
+    let st = StatsContent { recording: true, replay_secs: 8, fps: Some(144), low1: Some(98), gpu: Some(71), gpu_temp: Some(64), cpu: Some(23), ..Default::default() };
+    let mut pills = vec![("stats".to_string(), stats_scene(&st, k, &fonts))];
+    for timer in ["0:08", "1:23", "12:34", "1:02:03"] {
+        let name = format!("rec-{}", timer.replace(':', "-"));
+        pills.push((name, notice_scene(&NoticeView::new(Tone::Recording, "REC", timer, true), k, &fonts)));
+    }
+    for (what, flat) in &pills {
+        let tall = crate::stack::stack(flat, k, &fonts);
+        for (way, scene, turn) in [("horizontal", flat, Turn::None), ("vertical", &tall, Turn::Right)] {
             let look = Look { turn, align: 0.5, ..Look::open(Frame { w: scene.w, h: scene.h, alpha: 1.0 }) };
-            let (w, h) = renderer.draw(&fonts, scene, look, 1.0, Layers::default()).unwrap();
+            let (w, h) = renderer.draw(&fonts, scene, look, k, Layers::default()).unwrap();
             // Over a mid-grey backdrop, unpremultiplied to RGBA.
-            let pad = 12;
+            let pad = 36;
             let (cw, ch) = (w + 2 * pad, h + 2 * pad);
             let mut rgba = vec![0u8; (cw * ch * 4) as usize];
             for px in rgba.chunks_mut(4) {
@@ -175,25 +181,29 @@ fn side_spot_pngs() {
                     rgba[o + c] = (src as f32 + rgba[o + c] as f32 * under).round().min(255.0) as u8;
                 }
             }
-            let path = dir.join(format!("{side}-{what}.png"));
+            let path = dir.join(format!("{what}-{way}.png"));
             std::fs::write(&path, crate::png::encode(cw as u32, ch as u32, &rgba)).unwrap();
-            println!("wrote {} ({w}x{h})", path.display());
+            println!("wrote {} ({w}x{h}, {} cells)", path.display(), scene.cells);
         }
     }
 }
 
-/// A 3-digit number stays one line and fits the side pill's usual thickness
-/// in the real font (the pill only grows across for a line that needs it).
+/// Three digits fit a number cell with the margin either side in the real
+/// font, and a timer's two cells are the same width (tabular figures).
 #[test]
-fn three_digits_fit_the_side_pill_on_one_line() {
-    use crate::layout::{stats_scene, Measure, StatsContent};
+fn three_digits_fit_a_number_cell_in_the_real_font() {
+    use crate::cells::{Cells, MARGIN};
+    use crate::layout::{Measure, Role};
+    use crate::placement::ISLAND_H;
     let fonts = Fonts::new().unwrap();
-    for fps in [144, 888, 999] {
-        let st = StatsContent { recording: true, replay_secs: 120, fps: Some(fps), low1: Some(98), ..Default::default() };
-        let flat = stats_scene(&st, 1.0, &fonts);
-        let tall = crate::stack::stack(&flat, 1.0, &fonts);
-        let line = tall.texts.iter().find(|t| t.text == fps.to_string()).expect("the number stays whole");
-        assert!(fonts.measure(line.role, 1.0, &line.text).width + 12.0 <= flat.h, "{fps}: 6 px either side");
-        assert_eq!(tall.h, flat.h, "{fps} fits {} px across without widening", flat.h);
+    let cells = Cells::new(1.0, &fonts);
+    for number in ["144", "888", "999", "000", "64°"] {
+        assert!(cells.fits(Role::Fps, number), "{number}: {} px", fonts.measure(Role::Fps, 1.0, number).width);
+        assert!(fonts.measure(Role::Fps, 1.0, number).width + 2.0 * MARGIN <= ISLAND_H);
+    }
+    let width = |t: &str| fonts.measure(Role::NoticeNumber, 1.0, t).width;
+    assert!((width("00") - width("08")).abs() < 0.01 && (width("12") - width("34")).abs() < 0.01, "tabular timer cells");
+    for word in ["REC", "GPU", "CPU"] {
+        assert!(cells.fits(Role::NoticeTitle, word) && cells.fits(Role::Small, word), "{word}");
     }
 }
