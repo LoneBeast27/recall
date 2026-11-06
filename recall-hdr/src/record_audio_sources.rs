@@ -144,9 +144,18 @@ fn track_shape(list: &[AudioSource]) -> Vec<AudioSource> {
 }
 
 /// Different tracks for the engine (a restart)? Order matters: it is the clip's track order.
-/// A gain or a name alone is not: [`live_updates`] sends those to the running engine.
+/// A gain or a name alone is not: [`live_updates`] sends those to the running engine, except a
+/// gain that rises from 0 dB or below to above it. A long recording picks its limiter when it
+/// starts (`longrec::TrackInfo::boosted`), so a boost it did not start with would clip there:
+/// that change restarts the engine, which waits for a running save or long recording to end.
 pub fn changed(old: &[AudioSource], new: &[AudioSource]) -> bool {
-    track_shape(old) != track_shape(new)
+    track_shape(old) != track_shape(new) || crosses_into_boost(old, new)
+}
+
+/// Some recorded source's gain goes from 0 dB or below to above 0 dB.
+fn crosses_into_boost(old: &[AudioSource], new: &[AudioSource]) -> bool {
+    let old = engine_list(old);
+    engine_list(new).iter().any(|n| n.gain_db > 0.0 && old.iter().any(|o| o.id == n.id && o.gain_db <= 0.0))
 }
 
 /// `set_source` lines for the recorded sources whose gain or name changed (the running

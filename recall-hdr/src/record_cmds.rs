@@ -295,7 +295,12 @@ impl Controller {
                 self.applied_mask = apply_affinity(mask);
             }
         }
+        let live_change = crate::record_audio_sources::live_updates(&o.audio_sources, &n.audio_sources);
         if engine_settings_changed(o, n) {
+            self.request_engine_restart();
+        } else if self.engine_running() && !live_change.is_empty() && !self.supervisor.engine_takes_live_sources() {
+            // An older engine ignores set_source: restart it so the new gain or name applies.
+            log!("record: the engine cannot change audio sources live; restarting it");
             self.request_engine_restart();
         } else if self.engine_running() {
             // Gain and names reach the running engine's tracks: no restart, the buffer stays.

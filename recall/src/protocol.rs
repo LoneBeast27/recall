@@ -14,6 +14,9 @@ pub enum Outbound {
     Hello {
         version: String,
         monitors: Vec<MonitorInfo>,
+        /// This engine applies `set_source` (gain, name) to live tracks. A controller restarts
+        /// engines that do not say so (older builds ignore the command).
+        live_sources: bool,
     },
     /// Sent on change (and ~1/s for fps): current live state.
     Status {
