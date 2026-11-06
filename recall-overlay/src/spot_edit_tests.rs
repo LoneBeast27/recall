@@ -55,10 +55,10 @@ fn dragging_and_releasing_saves_and_right_click_puts_the_old_spot_back() {
     let old = SavedSpot { x: 0.5, y: 0.0, edge: Edge::Top };
     let mut editor = Editor::new("rocketleague", Some(old), t0);
     assert_eq!(effective(Some(&editor), Some(old)), Some(old), "editing starts where the island is");
-    assert!(!editor.drag((100.0, 100.0), (300.0, 44.0), &QHD, SNAP, t0), "no drag before the button goes down");
+    assert!(!editor.drag((100.0, 100.0), (300.0, 44.0), &QHD, &QHD, SNAP, t0), "no drag before the button goes down");
     assert_eq!(editor.release(t0), None, "a release with no drag writes nothing");
     editor.press((1290.0, 40.0), (1280.0, 34.0), t0);
-    assert!(editor.drag((2390.0, 726.0), (300.0, 44.0), &QHD, SNAP, t0));
+    assert!(editor.drag((2390.0, 726.0), (300.0, 44.0), &QHD, &QHD, SNAP, t0));
     let moved = editor.spot.unwrap();
     assert_eq!((moved.edge, moved.x, moved.y), (Edge::Right, 2380.0 / 2560.0, 0.5), "the grab point is kept");
     assert_eq!(effective(Some(&editor), Some(old)), Some(moved), "the island follows the drag live");
@@ -78,7 +78,7 @@ fn a_press_with_no_release_ends_after_the_idle_minute_without_saving() {
     let old = SavedSpot { x: 0.5, y: 0.0, edge: Edge::Top };
     let mut editor = Editor::new("valorant", Some(old), t0);
     editor.press((1290.0, 40.0), (1280.0, 34.0), t0);
-    editor.drag((1290.0, 700.0), (300.0, 44.0), &QHD, SNAP, t0);
+    editor.drag((1290.0, 700.0), (300.0, 44.0), &QHD, &QHD, SNAP, t0);
     assert!(editor.dragging());
     assert_eq!(editor.watch(t0 + IDLE - Duration::from_millis(1), true, true), None);
     assert_eq!(editor.watch(t0 + IDLE, true, true), Some(EditKey::Leave), "held but idle: leave");
@@ -94,7 +94,7 @@ fn a_move_without_the_button_drops_the_drag_and_keeps_editing() {
     let mut editor = Editor::new("valorant", None, t0);
     assert!(!editor.drop_drag(), "nothing to drop");
     editor.press((1290.0, 40.0), (1280.0, 34.0), t0);
-    editor.drag((1290.0, 700.0), (300.0, 44.0), &QHD, SNAP, t0);
+    editor.drag((1290.0, 700.0), (300.0, 44.0), &QHD, &QHD, SNAP, t0);
     assert!(editor.drop_drag());
     assert_eq!((editor.spot, editor.dragging()), (None, false), "back to automatic, nothing written");
     assert_eq!(editor.release(t0), None, "a late release saves nothing");
@@ -112,7 +112,7 @@ fn focus_loss_capture_loss_and_the_two_minute_cap_end_the_editor_even_mid_drag()
     let mut now = t0;
     while now < t0 + CAP - Duration::from_secs(5) {
         now += Duration::from_secs(5);
-        editor.drag((now.duration_since(t0).as_secs_f32(), 700.0), (300.0, 44.0), &QHD, SNAP, now);
+        editor.drag((now.duration_since(t0).as_secs_f32(), 700.0), (300.0, 44.0), &QHD, &QHD, SNAP, now);
         assert_eq!(editor.watch(now, true, true), None, "busy dragging at {:?}", now - t0);
     }
     assert_eq!(editor.watch(t0 + CAP, true, true), Some(EditKey::Leave), "120 s from the start, dragging or not");
@@ -122,6 +122,9 @@ fn focus_loss_capture_loss_and_the_two_minute_cap_end_the_editor_even_mid_drag()
 struct Fake {
     click_through: Option<bool>,
     released: bool,
+    /// The guide grid's window exists.
+    guide: bool,
+    guides_made: usize,
     calls: usize,
 }
 
@@ -132,6 +135,11 @@ impl EditWindow for Fake {
     }
     fn release_capture(&mut self) {
         self.released = true;
+        self.calls += 1;
+    }
+    fn show_guide(&mut self, on: bool) {
+        self.guides_made += (on && !self.guide) as usize;
+        self.guide = on;
         self.calls += 1;
     }
 }
@@ -179,9 +187,41 @@ fn every_exit_path_restores_click_through() {
         let mut window = Fake::default();
         let mut editor = begin(&mut window, None, "rocketleague", Some(spot), t0).unwrap();
         assert_eq!(window.click_through, Some(false), "{name}: editing takes the mouse");
+        assert!(window.guide, "{name}: the grid shows while editing");
         let how = path(&mut editor, t0).unwrap_or_else(|| panic!("{name}: the editor must end"));
         end(&mut window, &mut editor, how);
         assert_eq!((window.click_through, window.released), (Some(true), true), "{name}: click-through again");
         assert!(!editor.dragging(), "{name}: no drag left");
+        assert!(!window.guide, "{name}: the grid window is gone");
+        assert_eq!(window.guides_made, 1, "{name}: one grid per editing run");
     }
+}
+
+/// The centre lines pull the pill's centre in from the same distance edges
+/// snap at; past it the pill stays where it is dropped.
+#[test]
+fn a_dragged_pill_snaps_its_centre_onto_the_grid_centre_lines() {
+    let t0 = Instant::now();
+    let drag_to = |cursor: (f32, f32)| {
+        let mut editor = Editor::new("valorant", None, t0);
+        editor.press((0.0, 0.0), (0.0, 0.0), t0);
+        editor.drag(cursor, (300.0, 44.0), &QHD, &QHD, SNAP, t0);
+        editor.spot.unwrap()
+    };
+    let vertical = drag_to((1280.0 + 40.0, 400.0));
+    assert_eq!((vertical.x, vertical.y, vertical.edge), (0.5, 400.0 / 1440.0, Edge::Free), "x onto the line down the middle");
+    let horizontal = drag_to((600.0, 720.0 - 47.0));
+    assert_eq!((horizontal.x, horizontal.y), (600.0 / 2560.0, 0.5), "y onto the line across");
+    let both = drag_to((1280.0 - 30.0, 720.0 + 30.0));
+    assert_eq!((both.x, both.y), (0.5, 0.5), "both: the dead centre");
+    let free = drag_to((1280.0 + 49.0, 720.0 - 49.0));
+    assert_eq!((free.x, free.y), (1329.0 / 2560.0, 671.0 / 1440.0), "49 px off both: no snap");
+    let top = drag_to((1280.0 + 20.0, 30.0));
+    assert_eq!((top.x, top.edge), (0.5, Edge::Top), "an edge snap and a centre snap together");
+    // The grid is the placement area: a work area above a 40 px taskbar centres higher.
+    let work = Rect { left: 0, top: 0, right: 2560, bottom: 1400 };
+    let mut editor = Editor::new("valorant", None, t0);
+    editor.press((0.0, 0.0), (0.0, 0.0), t0);
+    editor.drag((900.0, 705.0), (300.0, 44.0), &QHD, &work, SNAP, t0);
+    assert_eq!(editor.spot.unwrap().y, 700.0 / 1440.0, "onto the work area's centre (700), in monitor fractions");
 }
