@@ -86,6 +86,12 @@ mod single_instance;
 mod state;
 mod supervisor;
 mod tray;
+#[cfg(test)]
+mod transitions_scope_tests;
+#[cfg(test)]
+mod transitions_sim;
+#[cfg(test)]
+mod transitions_tests;
 mod types;
 mod watcher;
 mod wcs;
