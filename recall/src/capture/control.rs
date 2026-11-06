@@ -16,4 +16,13 @@ impl CaptureControlHandle {
             Self::Dda(control) => control.stop(),
         }
     }
+
+    /// The WGC capture thread has ended (the handler returned an error, or the window
+    /// closed). Desktop Duplication asks for its own restarts (`restart_reason`).
+    pub fn is_finished(&self) -> bool {
+        match self {
+            Self::Wgc(control) => control.is_finished(),
+            Self::Dda(_) => false,
+        }
+    }
 }
