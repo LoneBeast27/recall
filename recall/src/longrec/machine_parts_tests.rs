@@ -235,22 +235,29 @@ fn frozen_seconds_carry_across_parts() {
 }
 
 /// Merge gate 11-07 #3/#4 (P1): audio keeps its wall-clock place through a frozen span (the
-/// encoder down from 1 s, back on a keyframe at 20 s), so the sound after it lines up.
+/// encoder down from an encode error at 1 s, back on a keyframe at 20 s), so the sound after it lines up.
 #[test]
 fn audio_stays_in_sync_across_a_frozen_span() {
     let (mut rec, log, _path, t0) = recording("frozen-sync");
     // 10 ms chunks (480 frames at 48 kHz) by arrival, all through the freeze and after it;
-    // video at 60 fps to 1 s, nothing, then a reopen on a keyframe at 20 s and video to 25 s.
+    // video at 60 fps as it is captured (each packet when its time comes): to 1 s, an encode
+    // error, nothing, then a reopen on a keyframe at 20 s and video to 25 s.
+    let mut next = 20 * MS;
     for k in 1..=2_500u64 {
         let at = t0 + ms(10 * k);
         rec.audio(0, &[0.25; 960], at);
-        match k {
-            100 => frames(&mut rec, t0, 20, 1_000, 3),
-            2_000 => {
-                rec.encoder_reopened(at, Cause::Same, Some(2));
-                frames(&mut rec, t0, 20_000, 25_000, 5);
-            }
-            _ => {}
+        if k == 2_000 {
+            rec.encoder_reopened(at, Cause::Same, Some(2));
+            next = 20_000 * MS;
+        }
+        let tag = if k >= 2_000 { 5 } else { 3 };
+        while next <= 10 * k * MS && next < 25_000 * MS && (next < 1_000 * MS || k >= 2_000) {
+            let key = next == 20 * MS || next == 20_000 * MS;
+            rec.video(next, key, pkt(tag), false, t0 + Duration::from_micros(next));
+            next += 16_667;
+        }
+        if k == 100 {
+            rec.encode_error(at);
         }
         rec.tick(at);
     }
@@ -266,4 +273,20 @@ fn audio_stays_in_sync_across_a_frozen_span() {
     assert_eq!(key.0, 20_000 * MS, "the keyframe sits at 20 s in the file, where its sound is");
     let held = videos.iter().rev().find(|v| v.3 == 3).unwrap();
     assert_eq!(held.0 + held.1, 20_000 * MS, "the last old frame is held on screen until it");
+}
+
+/// Merge gate 11-07 (P2): the freeze ran from the old encoder's last packet, so a static
+/// screen before the encode error (VFR: no packets) was counted as frozen too.
+#[test]
+fn a_freeze_starts_at_the_encode_error_not_at_a_static_pause_before_it() {
+    let (mut rec, _log, _path, t0) = recording("frozen-error");
+    frames(&mut rec, t0, 1_000, 5_000, 3); // the last packet is at ~4.99 s
+    // 15 s of a static screen (nothing sent), then the encode error at 20 s.
+    rec.encode_error(t0 + ms(20_000));
+    // The recovery opens 20 s later, on a keyframe.
+    rec.encoder_reopened(t0 + ms(40_000), Cause::Same, Some(2));
+    frames(&mut rec, t0, 40_000, 41_000, 4);
+    let events = rec.stop();
+    let [Event::Stopped { parts: 1, frozen_seconds, .. }] = events[..] else { panic!("{events:?}") };
+    assert!((frozen_seconds - 20.0).abs() < 0.05, "the error at 20 s to the keyframe at 40 s, not ~35 s: {frozen_seconds}");
 }

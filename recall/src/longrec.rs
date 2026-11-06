@@ -254,9 +254,14 @@ impl<F: SinkFactory> Writer<F> {
             return Vec::new();
         }
         let failed = tap::failure_of(self.generation);
+        let errored = tap::error_of(self.generation);
         self.generation = generation;
         if let Some(reason) = failed {
             return self.recorder.encoder_failed(&reason);
+        }
+        // The old encoder's encode error, on the writer's clock as the reopen's `at` is.
+        if let Some(at) = errored {
+            self.recorder.encode_error(at + self.skew);
         }
         let (video, cause) = match self.recorder.factory().stream_of(generation) {
             Some((video, cause)) => (Some(video), cause),
