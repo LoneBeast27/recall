@@ -108,12 +108,36 @@ fn a_clock_jump_inside_live_sound_re_bases_instead_of_creeping() {
     let mut level = Leveller::new(RATE).with_cap(cap);
     let first = level.live(Duration::from_millis(10), &[0.5; PACKET], 1);
     assert_eq!(first.len(), PACKET);
-    // The PC slept 3 h mid-stream; the next packets keep their length and stay level.
-    let mut t = Duration::from_secs(3 * 3600) + Duration::from_millis(10);
+    // The PC slept 3 h mid-stream: the first packet after it carries at most a ring of
+    // silence, then the packets keep their length and stay level.
+    let mut t = Duration::from_secs(3 * 3600) + Duration::from_millis(20);
+    let resumed = level.live(t, &[0.5; PACKET], 1);
+    assert_eq!(resumed.len() as u64, cap + PACKET as u64, "a ring of silence, then the packet");
     for _ in 0..100 {
         t += Duration::from_millis(10);
         let out = level.live(t, &[0.5; PACKET], 1);
         assert_eq!(out.len(), PACKET, "frames duplicated to creep up to a 3 h lag");
     }
     assert_eq!(level.idle(t), 0, "level with the clock after the jump");
+}
+
+/// Review 2026-11-07: a 30 s sleep (shorter than the ring) that a live stream survives must be
+/// silenced up to the clock like an idle track, not crept up on at 0.1 % (about 8 h for 30 s).
+#[test]
+fn a_short_sleep_inside_live_sound_lines_up_with_idle_tracks() {
+    let cap = 120 * RATE as u64;
+    let (mut live, mut quiet) = (Leveller::new(RATE).with_cap(cap), Leveller::new(RATE).with_cap(cap));
+    assert_eq!(live.live(Duration::from_millis(10), &[0.5; PACKET], 1).len(), PACKET);
+    assert_eq!(quiet.idle(Duration::from_millis(10)), 480);
+    let t = Duration::from_secs(30) + Duration::from_millis(20);
+    let resumed = live.live(t, &[0.5; PACKET], 1);
+    let silence = resumed.len() - PACKET;
+    assert_eq!(silence as u64, 30 * RATE as u64, "30 s of silence, then the packet");
+    assert!(resumed[..silence].iter().all(|&x| x == 0.0) && resumed[silence..].iter().all(|&x| x == 0.5));
+    // Both tracks now end on the clock: no lag left to creep.
+    assert_eq!(live.idle(t), 0);
+    assert_eq!(quiet.idle(t), 30 * RATE as u64 + 480);
+    // Drift-sized lags (under a second) are still corrected gently, never with a block.
+    let (out, _) = run_live(1.0005, 60.0);
+    assert!(longest_zero_run(&out) == 0);
 }
