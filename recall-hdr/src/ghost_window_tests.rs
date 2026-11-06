@@ -21,7 +21,7 @@ fn class_of(hwnd: isize) -> Option<String> {
 /// The event `watcher::build_event` makes for the window `resolve_with` picks:
 /// the game's own window, or the ghost (owned by `dwm.exe`, fullscreen).
 fn event_for(hwnd: isize, hung_of: impl Fn(isize) -> isize) -> WatchEvent {
-    let (pid, stem) = match resolve_with(hwnd, class_of, hung_of) {
+    let (pid, stem) = match resolve_with(hwnd, class_of, owner_of, hung_of) {
         GAME_HWND => (GAME_PID, "VALORANT-Win64-Shipping"),
         _ => (DWM_PID, "dwm"),
     };
@@ -38,20 +38,39 @@ fn event_for(hwnd: isize, hung_of: impl Fn(isize) -> isize) -> WatchEvent {
     }
 }
 
+/// Owner of each window: the ghost is `dwm.exe`'s, the game its own.
+fn owner_of(hwnd: isize) -> Option<String> {
+    match hwnd {
+        GHOST_HWND => Some(GHOST_OWNER_STEM.into()),
+        GAME_HWND => Some("VALORANT-Win64-Shipping".into()),
+        _ => None,
+    }
+}
+
 fn hung_is_game(ghost: isize) -> isize {
     if ghost == GHOST_HWND { GAME_HWND } else { 0 }
 }
 
 #[test]
 fn a_ghost_maps_to_its_hung_window() {
-    assert_eq!(resolve_with(GHOST_HWND, class_of, hung_is_game), GAME_HWND);
+    assert_eq!(resolve_with(GHOST_HWND, class_of, owner_of, hung_is_game), GAME_HWND);
 }
 
 #[test]
 fn a_normal_window_and_an_unresolved_ghost_stay_themselves() {
-    assert_eq!(resolve_with(GAME_HWND, class_of, |_| 0x77), GAME_HWND, "not a ghost: no lookup");
-    assert_eq!(resolve_with(GHOST_HWND, class_of, |_| 0), GHOST_HWND);
-    assert_eq!(resolve_with(0x55, |_| None, |_| 0x77), 0x55, "class unknown");
+    assert_eq!(resolve_with(GAME_HWND, class_of, owner_of, |_| 0x77), GAME_HWND, "not a ghost: no lookup");
+    assert_eq!(resolve_with(GHOST_HWND, class_of, owner_of, |_| 0), GHOST_HWND);
+    assert_eq!(resolve_with(0x55, |_| None, owner_of, |_| 0x77), 0x55, "class unknown");
+}
+
+#[test]
+fn a_ghost_class_window_of_another_process_stays_itself() {
+    // An app may name its own window class "Ghost": only dwm.exe's ghosts map.
+    let app = |_: isize| Some("SomeApp".to_string());
+    assert_eq!(resolve_with(GHOST_HWND, class_of, app, hung_is_game), GHOST_HWND, "owner not dwm");
+    assert_eq!(resolve_with(GHOST_HWND, class_of, |_| None, hung_is_game), GHOST_HWND, "owner unknown");
+    let dwm_upper = |_: isize| Some("DWM".to_string());
+    assert_eq!(resolve_with(GHOST_HWND, class_of, dwm_upper, hung_is_game), GAME_HWND, "stem case");
 }
 
 #[test]
