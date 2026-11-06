@@ -8,19 +8,25 @@
 //! * `owned.json` at the cache root lists `<folder>/<id>.mp4`. A target is listed BEFORE its
 //!   file is created, so the part a crash cut off is owned through its target; an entry goes
 //!   when Recall deleted the file and no temporary of it is left ([`forget`]).
-//! * A cache from before the list (no `owned.json`, or an unreadable one) is adopted once:
-//!   only files with the exact names above join it. A user's clip carries its own name
-//!   (`VALORANT__2026-...mp4`), so it stays out. A cache the guard blocked adopts nothing.
+//! * A cache from before the list is adopted once, and only when `owned.json` is truly missing
+//!   (and none was ever set aside): only files with the exact names above join it, and
+//!   `since_ms` records when. A user's clip carries its own name (`VALORANT__2026-...mp4`), so
+//!   it stays out. A cache the guard blocked adopts nothing.
+//! * A list that exists but cannot be read is never re-adopted over: a corrupt one is set aside
+//!   as `owned.json.corrupt-<unix secs>` (never deleted) and a locked one is left as it is; in
+//!   both cases this pass owns nothing, so nothing is evicted.
 //!
 //! Why a list and not a per-file marker: the cache may sit on a volume without alternate
 //! streams, and one small file read per inventory is cheaper than one open per cache file.
 use std::collections::BTreeSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
 
 const FILE: &str = "owned.json";
+const CORRUPT: &str = "owned.json.corrupt-";
 /// Folders whose files are listed.
 const FOLDERS: [&str; 3] = ["video", "light", "tmp/pre-encode"];
 /// Serializes read-modify-writes of `owned.json`. Never taken around [`super::budget::INDEX_LOCK`].
@@ -30,6 +36,17 @@ static LOCK: Mutex<()> = Mutex::new(());
 #[serde(default)]
 struct Owned {
     files: BTreeSet<String>,
+    /// When this cache was adopted (Unix ms): kept copies older than it predate the engine's mark.
+    since_ms: Option<u64>,
+}
+
+/// What reading `owned.json` found.
+enum Read {
+    Listed(Owned),
+    /// No list, and none was ever set aside: a cache from before the list.
+    Missing,
+    /// There but unreadable (corrupt, locked, denied), or one was set aside before.
+    Unreadable(String),
 }
 
 /// 16 lowercase hex digits (`format!("{hash:016x}")`).
@@ -63,31 +80,73 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn read(root: &Path) -> Option<Owned> {
-    serde_json::from_slice(&std::fs::read(root.join(FILE)).ok()?).ok()
+fn set_aside_before(root: &Path) -> bool {
+    std::fs::read_dir(root).is_ok_and(|listing| listing.flatten().any(|entry| entry.file_name().to_string_lossy().starts_with(CORRUPT)))
 }
 
+fn read(root: &Path) -> Read {
+    match std::fs::read(root.join(FILE)) {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(owned) => Read::Listed(owned),
+            Err(error) => Read::Unreadable(format!("corrupt: {error}")),
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound && !set_aside_before(root) => Read::Missing,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Read::Unreadable("an earlier list was set aside".into()),
+        Err(error) => Read::Unreadable(format!("unreadable: {error}")),
+    }
+}
+
+/// Writes the list to a temp sibling, flushes it to disk, then renames it into place.
 fn write(root: &Path, owned: &Owned) {
-    let saved = serde_json::to_vec(owned).map_err(|error| error.to_string()).and_then(|bytes| super::projects::write_atomic(&root.join(FILE), &bytes));
+    let path = root.join(FILE);
+    let temporary = super::temp_sibling(&path);
+    let saved = serde_json::to_vec(owned).map_err(|error| error.to_string()).and_then(|bytes| {
+        let mut file = std::fs::File::create(&temporary).map_err(|error| error.to_string())?;
+        file.write_all(&bytes).and_then(|()| file.sync_all()).map_err(|error| error.to_string())?;
+        drop(file);
+        std::fs::rename(&temporary, &path).map_err(|error| error.to_string())
+    });
     if let Err(error) = saved {
+        let _ = std::fs::remove_file(&temporary);
         eprintln!("save cache ownership list: {error}");
     }
 }
 
-/// The list, adopting a cache from before it once. Call with [`LOCK`] held.
-fn load_locked(root: &Path) -> Owned {
-    if let Some(owned) = read(root) {
-        return owned;
+/// Renames a corrupt list to `owned.json.corrupt-<unix secs>`; a locked one cannot move and stays.
+fn set_aside(root: &Path, why: &str) {
+    let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
+    let aside = root.join(format!("{CORRUPT}{secs}"));
+    match std::fs::rename(root.join(FILE), &aside) {
+        Ok(()) => eprintln!("cache ownership list {why}; set aside as {}, nothing adopted", aside.display()),
+        Err(error) => eprintln!("cache ownership list {why}; left in place ({error}), nothing adopted"),
     }
-    if super::guard::blocked(root).is_some() {
-        return Owned::default();
-    }
-    let owned = Owned { files: legacy(root) };
-    write(root, &owned);
-    owned
 }
 
-/// Recall's exact names in a cache made before the list.
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
+}
+
+/// The list; adopts a cache from before it only when it is truly missing (see the module doc).
+/// Call with [`LOCK`] held.
+fn load_locked(root: &Path) -> Owned {
+    match read(root) {
+        Read::Listed(owned) => owned,
+        Read::Unreadable(why) => {
+            if root.join(FILE).exists() && why.starts_with("corrupt") {
+                set_aside(root, &why);
+            }
+            Owned::default()
+        }
+        Read::Missing if super::guard::blocked(root).is_some() => Owned::default(),
+        Read::Missing => {
+            let owned = Owned { files: legacy(root), since_ms: Some(now_ms()) };
+            write(root, &owned);
+            owned
+        }
+    }
+}
+
+/// Recall's exact names in a cache made before the list. Reads only.
 fn legacy(root: &Path) -> BTreeSet<String> {
     let mut files = BTreeSet::new();
     for folder in FOLDERS {
@@ -101,15 +160,46 @@ fn legacy(root: &Path) -> BTreeSet<String> {
     files
 }
 
+/// The dry run's view (writes nothing, sets nothing aside): (what is listed, what a first
+/// load would adopt).
+// Reached through `storage::plan_dry` (tests and tools; no Settings caller yet).
+#[allow(dead_code)]
+pub(super) fn peek(root: &Path) -> (BTreeSet<String>, Vec<String>) {
+    let _guard = lock();
+    match read(root) {
+        Read::Listed(owned) => (owned.files, Vec::new()),
+        Read::Missing if super::guard::blocked(root).is_none() => {
+            let adopt = legacy(root);
+            let list = adopt.iter().cloned().collect();
+            (adopt, list)
+        }
+        _ => (BTreeSet::new(), Vec::new()),
+    }
+}
+
 /// Every listed `<folder>/<id>.mp4`.
 pub(super) fn listed(root: &Path) -> BTreeSet<String> {
     let _guard = lock();
     load_locked(root).files
 }
 
-/// Lists `rel` (`video/<id>.mp4`): call before the file or its temporary is created.
+/// When the cache was adopted (`None`: a list from before `since_ms`, or none readable).
+pub(super) fn since_ms(root: &Path) -> Option<u64> {
+    let _guard = lock();
+    match read(root) {
+        Read::Listed(owned) => owned.since_ms,
+        _ => None,
+    }
+}
+
+/// Lists `rel` (`video/<id>.mp4`): call before the file or its temporary is created. With an
+/// unreadable list the mark is not saved (the file is then never evicted: a leak, not a loss).
 pub(super) fn mark(root: &Path, rel: &str) {
     let _guard = lock();
+    if matches!(read(root), Read::Unreadable(_)) && root.join(FILE).exists() {
+        let _ = load_locked(root);
+        return;
+    }
     let mut owned = load_locked(root);
     if owned.files.insert(rel.to_owned()) {
         write(root, &owned);
@@ -134,7 +224,7 @@ pub(super) fn forget(root: &Path, folder: &str, name: &str) {
         return;
     }
     let _guard = lock();
-    let mut owned = load_locked(root);
+    let Read::Listed(mut owned) = read(root) else { return };
     if owned.files.remove(&format!("{folder}/{target}")) {
         write(root, &owned);
     }

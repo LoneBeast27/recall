@@ -27,9 +27,11 @@ pub(super) fn is_thumb(name: &str) -> bool {
     name.strip_suffix(".jpg").is_some_and(is_id)
 }
 
-/// A poster, filmstrip or scrub frame (all `.jpg`).
+/// A poster, filmstrip or scrub frame (all `.jpg`), or the filmstrip's list `strip.json` and its
+/// temporaries (`visual_assets.rs`): left behind, the list kept the folder alive forever.
 pub(super) fn is_frame(name: &str) -> bool {
-    name.to_ascii_lowercase().ends_with(".jpg")
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".jpg") || lower == "strip.json" || (lower.starts_with("strip.json.") && lower.ends_with(".part"))
 }
 
 /// What the engine writes into an editor folder (`recall/src/editor_media.rs`): its

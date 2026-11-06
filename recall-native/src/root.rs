@@ -171,11 +171,11 @@ impl Root {
             }
         });
         let preview = span("root: native preview", || parent_hwnd(window).and_then(NativePreview::new));
+        let folders = span("root: folders load", crate::services::library::folders::Folders::load);
+        // Before any worker or sweep: a clip folder inside the cache (or the cache inside one) blocks it.
+        let cache_overlap = span("root: cache guard", || crate::services::library::folders::check_cache_overlap(&folders));
         let workers = span("root: workers", Workers::spawn);
         workers.job(Job::List);
-        let folders = span("root: folders load", crate::services::library::folders::Folders::load);
-        // Before any sweep: a clip folder inside the cache (or the cache inside one) blocks it.
-        let cache_overlap = span("root: cache guard", || crate::services::library::folders::check_cache_overlap(&folders));
         span("root: sweep_kept", || crate::services::storage::sweep_kept(crate::backend::library_dir));
         span("root: pre_encode clear_dir", crate::services::pre_encode::clear_dir);
         span("root: pre_encode sweep_deliveries", crate::services::pre_encode::sweep_deliveries);

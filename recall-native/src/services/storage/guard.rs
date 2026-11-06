@@ -28,9 +28,11 @@ pub fn overlap(cache: &[PathBuf], clips: &[PathBuf]) -> Option<String> {
         let cache_key = normalized(cache_dir);
         for clip_dir in clips.iter().filter(|p| !p.as_os_str().is_empty()) {
             let clip_key = normalized(clip_dir);
-            let how = if within(&clip_key, &cache_key) {
+            // The text, or the folders themselves (`\\nas\x` and `\\10.0.0.5\x`, junctions).
+            let inside = |inner: &Path, outer: &Path| crate::file_id::inside(inner, outer) == Some(true);
+            let how = if within(&clip_key, &cache_key) || inside(clip_dir, cache_dir) {
                 "is inside Recall's cache folder"
-            } else if within(&cache_key, &clip_key) {
+            } else if within(&cache_key, &clip_key) || inside(cache_dir, clip_dir) {
                 "holds Recall's cache folder"
             } else {
                 continue;
@@ -57,10 +59,15 @@ pub fn refuse_clip_folder(folder: &Path) -> Option<String> {
     overlap(&cache_dirs(), &[folder.to_path_buf()]).map(|why| format!("{why} Pick a folder outside it: the cache deletes and replaces files on its own."))
 }
 
-/// Start (and whenever the recordings folder changes): blocks every cache folder that
-/// overlaps one of `clips`. Returns the message to show, or `None` when all is apart.
+/// Start, and whenever a clip folder changes: blocks every cache folder that overlaps one of
+/// `clips`, and releases one that no longer does. Returns the message to show, or `None` when
+/// all is apart.
 pub fn check(cache: &[PathBuf], clips: &[PathBuf]) -> Option<String> {
-    let why = overlap(cache, clips)?;
+    let Some(why) = overlap(cache, clips) else {
+        let keys: Vec<String> = cache.iter().map(|dir| normalized(dir)).collect();
+        BLOCKED.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).retain(|(dir, _)| !keys.contains(dir));
+        return None;
+    };
     let message = format!("{why} Until they are apart, Recall deletes nothing in its cache and makes no new copies there; clips play from where they are.");
     for dir in cache {
         block(dir, message.clone());

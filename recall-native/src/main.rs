@@ -17,6 +17,10 @@ mod win_recycle;
 #[allow(dead_code)]
 #[path = "../../recall/src/win_volume.rs"]
 mod win_volume;
+// Which file a path names, by volume serial + file index (shared with the engine's mover).
+#[allow(dead_code)]
+#[path = "../../recall/src/file_id.rs"]
+mod file_id;
 mod editor_state;
 mod install_wait;
 mod instance;

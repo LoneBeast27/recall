@@ -18,6 +18,8 @@ fn cfg(same_volume: VolumeCheck) -> Config {
         same_volume,
         background: false,
         stamp: stamp_mtime,
+        identity: same_identity,
+        stat: stat_dest,
     }
 }
 
@@ -354,5 +356,47 @@ fn a_kept_copy_carries_the_engines_mark() {
     let moved = move_clip(&MoveJob { staged: src, dest: out.join("G.mp4") }, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
     let kept = moved.kept.expect("staged copy kept");
     assert!(std::fs::metadata(format!("{}:{KEPT_MARK}", kept.display())).is_ok(), "the kept copy is marked");
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn a_hard_link_to_the_staged_file_is_the_same_file() {
+    // Two names, one file: deleting the staged name would leave only the link.
+    let (stage, out) = (sandbox("link-s"), sandbox("link-o"));
+    let (src, bytes) = staged(&stage, "A.mp4", 5000);
+    let dest = out.join("A.mp4");
+    std::fs::hard_link(&src, &dest).unwrap();
+    let moved = move_clip(&MoveJob { staged: src.clone(), dest: dest.clone() }, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
+    assert_eq!(moved.how, "already in place");
+    assert!(src.exists(), "one file under two names: nothing is deleted");
+    assert_eq!(std::fs::read(&dest).unwrap(), bytes);
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn an_identity_windows_cannot_read_never_deletes_the_staged_copy() {
+    // A RAM disk or a user-mode file system that answers no file index: unknown is not "different".
+    let (stage, out) = (sandbox("noid-s"), sandbox("noid-o"));
+    let (src, bytes) = staged(&stage, "A.mp4", 5000);
+    let dest = out.join("A.mp4");
+    std::fs::write(&dest, &bytes).unwrap();
+    std::fs::File::options().write(true).open(&dest).unwrap().set_modified(mtime(&src)).unwrap();
+    let unknown = Config { identity: |_, _| None, ..cfg(ACROSS) };
+    assert!(move_clip(&MoveJob { staged: src.clone(), dest: dest.clone() }, &unknown, &AtomicBool::new(false)).is_err(), "parked, retried later");
+    assert_eq!(std::fs::read(&src).unwrap(), bytes, "the staged copy stays");
+    assert_eq!(std::fs::read(&dest).unwrap(), bytes, "the destination stays");
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn a_destination_windows_cannot_stat_is_never_replaced() {
+    // Access denied (or any error but "not found"): the destination may exist.
+    let (stage, out) = (sandbox("stat-s"), sandbox("stat-o"));
+    let (src, bytes) = staged(&stage, "A.mp4", 5000);
+    let dest = out.join("A.mp4");
+    let denied = Config { stat: |_| Err(std::io::Error::from_raw_os_error(5)), ..cfg(ACROSS) };
+    assert!(move_clip(&MoveJob { staged: src.clone(), dest: dest.clone() }, &denied, &AtomicBool::new(false)).is_err());
+    assert!(!dest.exists(), "nothing was written over a destination it could not see");
+    assert_eq!(std::fs::read(&src).unwrap(), bytes, "the staged copy stays");
     let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
 }

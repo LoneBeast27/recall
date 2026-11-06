@@ -100,9 +100,10 @@ pub(crate) fn refused(dir: &Path, clip_dirs: &[PathBuf]) -> Option<String> {
     let staging = super::staging_guard::normalized(dir);
     clip_dirs.iter().filter(|c| !c.as_os_str().is_empty()).find_map(|clips| {
         let key = super::staging_guard::normalized(clips);
-        let how = if super::staging_guard::within(&staging, &key) {
+        // The text, or the files themselves (`\\nas\x` and `\\10.0.0.5\x`, junctions).
+        let how = if super::staging_guard::within(&staging, &key) || crate::file_id::inside(dir, clips) == Some(true) {
             "is inside the clip folder"
-        } else if super::staging_guard::within(&key, &staging) {
+        } else if super::staging_guard::within(&key, &staging) || crate::file_id::inside(clips, dir) == Some(true) {
             "holds the clip folder"
         } else {
             return None;
