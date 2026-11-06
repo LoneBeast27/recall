@@ -121,7 +121,9 @@ pub(super) fn inventory(root: &Path, score: &dyn Fn(&str) -> f64) -> Inventory {
 }
 
 /// What a budget pass would do, writing nothing (no `owned.json`, no first-run budget, no
-/// sweep): (files a first load would adopt, units the budget would evict).
+/// sweep): (files a first load would adopt, units the budget would evict). Scores come from the
+/// app's loaded library: outside the app (a tool, a test) every clip scores 0, so the evict
+/// order is tier and last use only.
 // Reached through `storage::plan_dry` (tests and tools; no Settings caller yet).
 #[allow(dead_code)]
 pub(super) fn plan_dry(root: &Path) -> (Vec<String>, Vec<String>) {

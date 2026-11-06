@@ -13,8 +13,13 @@
 //!   `since_ms` records when. A user's clip carries its own name (`VALORANT__2026-...mp4`), so
 //!   it stays out. A cache the guard blocked adopts nothing.
 //! * A list that exists but cannot be read is never re-adopted over: a corrupt one is set aside
-//!   as `owned.json.corrupt-<unix secs>` (never deleted) and a locked one is left as it is; in
-//!   both cases this pass owns nothing, so nothing is evicted.
+//!   as `owned.json.corrupt-<unix secs>-<n>` (a counter, so two in one second never overwrite
+//!   each other) and a locked one is left as it is; in both cases this pass owns nothing, so
+//!   nothing is evicted. The newest three set-aside lists are kept; older ones are the only
+//!   files this module ever removes outside the cache tiers, and only by that exact name.
+//! * Once a valid list exists again (the next copy Recall makes starts one), the files the
+//!   set-aside left unlisted are adopted once more, by the same exact-name rule as a first
+//!   adoption (`readopted` records it), so they do not leak.
 //!
 //! Why a list and not a per-file marker: the cache may sit on a volume without alternate
 //! streams, and one small file read per inventory is cheaper than one open per cache file.
@@ -38,6 +43,8 @@ struct Owned {
     files: BTreeSet<String>,
     /// When this cache was adopted (Unix ms): kept copies older than it predate the engine's mark.
     since_ms: Option<u64>,
+    /// The files a set-aside left unlisted were adopted again into this list.
+    readopted: bool,
 }
 
 /// What reading `owned.json` found.
@@ -80,9 +87,35 @@ fn lock() -> std::sync::MutexGuard<'static, ()> {
     LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-fn set_aside_before(root: &Path) -> bool {
-    std::fs::read_dir(root).is_ok_and(|listing| listing.flatten().any(|entry| entry.file_name().to_string_lossy().starts_with(CORRUPT)))
+/// `owned.json.corrupt-<secs>` or `owned.json.corrupt-<secs>-<n>` → (secs, n; -1 without one).
+fn set_aside_key(name: &str) -> Option<(u64, i64)> {
+    let rest = name.strip_prefix(CORRUPT)?;
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    match rest.split_once('-') {
+        Some((secs, n)) if digits(secs) && digits(n) => Some((secs.parse().ok()?, n.parse().ok()?)),
+        None if digits(rest) => Some((rest.parse().ok()?, -1)),
+        _ => None,
+    }
 }
+
+/// The set-aside lists directly in `root` (regular files with the exact name), oldest first.
+fn set_aside_lists(root: &Path) -> Vec<((u64, i64), PathBuf)> {
+    let Ok(listing) = std::fs::read_dir(root) else { return Vec::new() };
+    let mut lists: Vec<((u64, i64), PathBuf)> = listing
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
+        .filter_map(|entry| Some((set_aside_key(&entry.file_name().to_string_lossy())?, entry.path())))
+        .collect();
+    lists.sort();
+    lists
+}
+
+fn set_aside_before(root: &Path) -> bool {
+    !set_aside_lists(root).is_empty()
+}
+
+/// Set-aside lists kept for a look; older ones go.
+const KEEP_SET_ASIDE: usize = 3;
 
 fn read(root: &Path) -> Read {
     match std::fs::read(root.join(FILE)) {
@@ -112,13 +145,20 @@ fn write(root: &Path, owned: &Owned) {
     }
 }
 
-/// Renames a corrupt list to `owned.json.corrupt-<unix secs>`; a locked one cannot move and stays.
+/// Renames a corrupt list to `owned.json.corrupt-<unix secs>-<n>` (the first free `n`); a locked
+/// one cannot move and stays. Then only the newest [`KEEP_SET_ASIDE`] set-aside lists remain.
 fn set_aside(root: &Path, why: &str) {
     let secs = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
-    let aside = root.join(format!("{CORRUPT}{secs}"));
+    // After the newest of this second: a free counter freed by pruning would sort as the oldest.
+    let next = set_aside_lists(root).iter().filter(|((at, _), _)| *at == secs).map(|((_, n), _)| n + 1).max().unwrap_or(0);
+    let Some(aside) = (next..next + 1000).map(|n| root.join(format!("{CORRUPT}{secs}-{n}"))).find(|path| !path.exists()) else { return };
     match std::fs::rename(root.join(FILE), &aside) {
         Ok(()) => eprintln!("cache ownership list {why}; set aside as {}, nothing adopted", aside.display()),
         Err(error) => eprintln!("cache ownership list {why}; left in place ({error}), nothing adopted"),
+    }
+    let lists = set_aside_lists(root);
+    for (_, old) in lists.iter().take(lists.len().saturating_sub(KEEP_SET_ASIDE)) {
+        let _ = std::fs::remove_file(old);
     }
 }
 
@@ -130,6 +170,12 @@ fn now_ms() -> u64 {
 /// Call with [`LOCK`] held.
 fn load_locked(root: &Path) -> Owned {
     match read(root) {
+        Read::Listed(mut owned) if !owned.readopted && set_aside_before(root) && super::guard::blocked(root).is_none() => {
+            owned.files.extend(legacy(root));
+            owned.readopted = true;
+            write(root, &owned);
+            owned
+        }
         Read::Listed(owned) => owned,
         Read::Unreadable(why) => {
             if root.join(FILE).exists() && why.starts_with("corrupt") {
@@ -139,7 +185,7 @@ fn load_locked(root: &Path) -> Owned {
         }
         Read::Missing if super::guard::blocked(root).is_some() => Owned::default(),
         Read::Missing => {
-            let owned = Owned { files: legacy(root), since_ms: Some(now_ms()) };
+            let owned = Owned { files: legacy(root), since_ms: Some(now_ms()), readopted: false };
             write(root, &owned);
             owned
         }
