@@ -145,7 +145,8 @@ pub fn notice_layout(
 pub fn stacked_layout((scene, k, size): (Scene, f32, (f32, f32)), under_w: Option<f32>, s: f32, m: &dyn Measure, max: f32) -> (Scene, f32, (f32, f32)) {
     let tall = crate::stack::stack_within(&scene, k, m, max);
     let floor = under_w.map_or(0.0, |w| (w + GROW_W * s).ceil());
-    let size = (tall.w.max(floor), size.1);
+    // A grouped line wider than the pill makes the pill a little thicker.
+    let size = (tall.w.max(floor), size.1.max(tall.h));
     (tall, k, size)
 }
 
