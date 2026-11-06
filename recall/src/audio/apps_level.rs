@@ -9,8 +9,8 @@
 //!   dropped frame), and only past `TOLERANCE`. Never a silent block inside live sound.
 //! - The clock jumps (Windows' clock runs on through sleep): never more than the ring's
 //!   capacity (`cap`) is owed at once. Past it, `written` is re-based on the clock, so a resume
-//!   writes at most one ring of silence, and a jump inside live sound is re-based rather than
-//!   crept up on at 0.1 %.
+//!   writes at most one ring of silence. A jump inside live sound (past `JUMP`) gets the same
+//!   silence as a quiet track (at most a ring) rather than being crept up on at 0.1 %.
 
 use std::time::Duration;
 
@@ -18,6 +18,8 @@ use std::time::Duration;
 const TOLERANCE: Duration = Duration::from_millis(20);
 /// At most this share of frames is duplicated or dropped.
 const MAX_STEP: f64 = 0.001;
+/// A lag past this inside live sound is a clock jump (a sleep), not drift.
+const JUMP: Duration = Duration::from_secs(1);
 
 pub struct Leveller {
     rate: u32,
@@ -79,9 +81,14 @@ impl Leveller {
             out.resize(lead as usize * channels, 0.0);
             self.written += lead;
         }
-        if due.saturating_sub(self.written + frames as u64) > self.cap {
-            // A clock jump inside live sound, not drift: re-base rather than creep.
-            self.written = due - frames as u64;
+        let jump = (JUMP.as_secs_f64() * self.rate as f64) as u64;
+        if lead == 0 && due.saturating_sub(self.written + frames as u64) > jump {
+            // A clock jump inside live sound (a sleep the stream survived), not drift: silence
+            // up to the clock as for a quiet stretch (at most a ring), so this track stays
+            // lined up with the idle ones, never crept up on at 0.1 %.
+            lead = self.rebase(due, frames as u64);
+            out.resize(lead as usize * channels, 0.0);
+            self.written += lead;
         }
         let lag = due as i64 - (self.written + frames as u64) as i64;
         let tolerance = (TOLERANCE.as_secs_f64() * self.rate as f64) as i64;
