@@ -89,7 +89,7 @@ pub enum Step {
 /// What the running engine has in flight, for [`EnginePlanner::step`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Busy {
-    /// A replay save not yet reported (holds a retarget, bounded).
+    /// A replay save or a screenshot not yet reported (holds a retarget, bounded).
     pub saving: bool,
     /// The long recording is starting or running and has not been given up
     /// on (its stop not yet timed out).

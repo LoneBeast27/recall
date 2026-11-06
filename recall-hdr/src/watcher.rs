@@ -231,6 +231,14 @@ impl Drop for Watcher {
     }
 }
 
+/// The managed monitor changed (`record_monitor`): later hook events use it.
+pub fn set_target_monitor(target_monitor: isize) {
+    let mut slot = state().lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(st) = slot.as_mut() {
+        st.target_monitor = target_monitor;
+    }
+}
+
 /// The Win32 `WINEVENTPROC`. Runs on the installing (message-pump) thread when the
 /// system foreground window changes.
 ///
