@@ -65,6 +65,7 @@ mod record_detect;
 mod record_drain;
 mod record_engine;
 mod record_env;
+mod record_fullscreen;
 mod record_hdr;
 mod record_hotkeys;
 mod record_session;
