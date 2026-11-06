@@ -138,9 +138,38 @@ fn engine_list(list: &[AudioSource]) -> Vec<AudioSource> {
         .collect()
 }
 
-/// Different tracks for the engine? Order matters: it is the clip's track order.
+/// The engine's tracks without what it can change live (gain, name).
+fn track_shape(list: &[AudioSource]) -> Vec<AudioSource> {
+    engine_list(list).into_iter().map(|s| AudioSource { gain_db: 0.0, name: String::new(), ..s }).collect()
+}
+
+/// Different tracks for the engine (a restart)? Order matters: it is the clip's track order.
+/// A gain or a name alone is not: [`live_updates`] sends those to the running engine.
 pub fn changed(old: &[AudioSource], new: &[AudioSource]) -> bool {
-    engine_list(old) != engine_list(new)
+    track_shape(old) != track_shape(new)
+}
+
+/// `set_source` lines for the recorded sources whose gain or name changed (the running
+/// engine applies them to its tracks; the replay buffer stays). Only meaningful when
+/// [`changed`] is false.
+pub fn live_updates(old: &[AudioSource], new: &[AudioSource]) -> Vec<String> {
+    let old = engine_list(old);
+    engine_list(new)
+        .into_iter()
+        .filter_map(|n| {
+            let o = old.iter().find(|o| o.id == n.id)?;
+            let mut cmd = serde_json::Map::new();
+            cmd.insert("cmd".into(), "set_source".into());
+            cmd.insert("id".into(), n.id.clone().into());
+            if o.gain_db != n.gain_db {
+                cmd.insert("gain_db".into(), serde_json::json!(n.gain_db));
+            }
+            if o.name != n.name {
+                cmd.insert("name".into(), n.name.clone().into());
+            }
+            (cmd.len() > 2).then(|| serde_json::Value::Object(cmd).to_string())
+        })
+        .collect()
 }
 
 /// `RECALL_AUDIO_SOURCES`: the enabled sources as JSON (`[]` when none: no audio tracks).

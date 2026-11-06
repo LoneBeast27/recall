@@ -2,14 +2,16 @@
 
 use super::TrackRing;
 use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicU32};
 use std::sync::Mutex;
 
 fn raw_ring(name: &'static str, input: bool, gain: f32, rate: u32, channels: u16, capacity: usize) -> TrackRing {
     TrackRing {
         name,
-        title: name,
+        title: Mutex::new(name),
         source: if input { "mic" } else { "desktop-loopback" },
-        gain,
+        gain: AtomicU32::new(gain.to_bits()),
+        boosted: AtomicBool::new(gain > 1.0),
         input,
         endpoint: Mutex::new(String::new()),
         rate,
@@ -278,4 +280,56 @@ fn a_source_at_or_below_unity_is_not_marked_for_the_limiter() {
         ring.push_capture(&[0.9, -0.9], false);
         assert!(!ring.snapshot_pcm(0.0001).boosted, "gain {gain}");
     }
+}
+
+#[test]
+fn a_live_gain_change_scales_only_new_samples_and_a_boost_stays_limited() {
+    let ring = raw_ring("in-1", true, 1.0, 1, 1, 16);
+    ring.push_capture(&[1.0], false);
+    ring.set_gain_db(-6.0);
+    ring.push_capture(&[1.0], false);
+    let s = ring.snapshot(2.0);
+    assert_eq!(s[0], 1.0, "history keeps its gain");
+    assert!((s[1] - 0.501).abs() < 0.01, "{}", s[1]);
+    assert!(!ring.boosted());
+    ring.set_gain_db(6.0);
+    ring.set_gain_db(0.0);
+    assert!(ring.boosted(), "boosted samples may still be in the ring");
+    ring.set_gain_db(f32::NAN);
+    ring.push_capture(&[0.25], false);
+    assert_eq!(ring.snapshot(1.0), vec![0.25], "NaN counts as 0 dB");
+}
+
+#[test]
+fn a_rename_titles_the_next_save() {
+    let ring = raw_ring("mic", true, 1.0, 1, 1, 16);
+    ring.set_title("  Voice  ");
+    assert_eq!(ring.snapshot_pcm(0.0).title, "Voice");
+    ring.set_title("   ");
+    assert_eq!(ring.title(), "Voice", "a blank name is ignored");
+}
+
+/// The countdown case: a game's process loopback stops sending when the game closes. The
+/// track's Leveller fills silence to the clock, so a save made 30 s into the drain, cutting
+/// 30 s off the newest sample (`encoder::handoff::audio_tail_us`), gets the sound that ran
+/// under the clip's last frames, not sound from 30 s earlier.
+#[test]
+fn a_quiet_or_closed_source_stays_on_the_clock_for_a_later_save() {
+    use std::time::Duration;
+    let rate = 100;
+    let ring = raw_ring("game", false, 1.0, rate, 1, rate as usize * 120);
+    let mut level = super::apps::Leveller::new(rate);
+    // 10 s of sound in 20 ms packets, sample value = the second it was played in.
+    for packet in 0..500u64 {
+        let at = Duration::from_millis((packet + 1) * 20);
+        let samples = vec![(packet / 50) as f32 + 1.0; 2];
+        ring.push_capture(&level.live(at, &samples, 1), false);
+    }
+    // The game closes at 10 s; 30 s pass with no packets.
+    let frames = level.idle(Duration::from_secs(40));
+    ring.push_capture(&vec![0.0; frames as usize], false);
+    let clip = ring.snapshot_ending(5.0, 30.0);
+    assert_eq!(clip.len(), 500);
+    assert_eq!(clip[0], 6.0, "starts 5 s before the game closed");
+    assert_eq!(clip[499], 10.0, "ends on the last second of sound");
 }
