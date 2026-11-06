@@ -12,11 +12,11 @@ use serde_json::Value;
 use windows::Win32::Foundation::{HANDLE, HWND, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible, KillTimer, SetTimer, SetWindowPos, ShowWindow,
+    IsWindowVisible, KillTimer, SetTimer, SetWindowPos, ShowWindow,
     HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
 };
 
-use crate::dynamic::{self, HudCache, HudGrid, Prober};
+use crate::dynamic::{self, hud_scan, HudCache, HudGrid, Prober};
 use crate::fonts::Fonts;
 use crate::island::{self, stats_content, Content, Island};
 use crate::hint::{choose_card, CardScene, GAP};
@@ -30,7 +30,7 @@ use crate::smoke::Smoke;
 use crate::stats::{StatsPoller, StatsSnapshot};
 use crate::trace::Trace;
 use crate::window::target_monitor;
-use crate::zorder::{self, keep_on_top, Names, Raise};
+use crate::zorder::{self, game_in_front, keep_on_top, Names, Raise};
 
 pub const BASE_TIMER: usize = 1;
 pub const BASE_MS: u32 = 250;
@@ -324,7 +324,7 @@ impl App {
     fn scene_for(&mut self, content: &Content, stats_under: bool) -> (Scene, f32, (f32, f32)) {
         let scale = self.place();
         let stats = |app: &Self| stats_scene(&stats_content(&app.reducer, &app.stats), scale, &app.fonts);
-        match content {
+        let laid = match content {
             Content::Notice(notice) => {
                 let grow = self.placed.as_ref().map_or(1.0, |p| p.grow);
                 let under = || stats_under.then(|| stats(self).w);
@@ -340,7 +340,16 @@ impl App {
                 let size = (scene.w, scene.h);
                 (scene, scale, size)
             }
+        };
+        // A side spot: the same content, re-flowed tall with upright glyphs.
+        if !self.placed.as_ref().is_some_and(|p| p.spot.anchor.turn() != crate::presence::Turn::None) {
+            return laid;
         }
+        let under = match content {
+            Content::Notice(notice) if notice.emphasis && stats_under => Some(crate::stack::stack(&stats(self), scale, &self.fonts).w),
+            _ => None,
+        };
+        island::stacked_layout(laid, under, scale, &self.fonts)
     }
 
     /// The shortcut hint's card: laid out for the room the scan measured
@@ -417,7 +426,8 @@ impl App {
         look.up = anchor.side() == placement::Side::Bottom;
         look.turn = anchor.turn();
         let card = self.island.card(now).zip(self.card_scene.as_ref());
-        look.card = card.map(|(progress, c)| CardLook { w: c.w, h: c.h, gap: GAP * placed.scale, progress });
+        // A side spot's card stands upright beside the pill: `c.h` along the edge, `c.w` across.
+        look.card = card.map(|(progress, c)| CardLook::placed(look.turn, (c.w, c.h), GAP * placed.scale, progress));
         let edge = (EDGE * placed.scale).round() as i32;
         let (x, y) = look_origin(anchor, &placed.area, look.span_w(), look.extent(), look.margin, edge);
         let (sheen, badge) = (self.island.sheen(now), self.island.badge(now));
@@ -470,21 +480,6 @@ impl App {
         self.set_anim(hwnd, animating);
     }
 
-}
-
-/// An engine `hud_scan` line (the island's own, not for the reducer).
-fn hud_scan(value: &Value) -> Option<Value> {
-    let event = value.get("event").filter(|_| value.get("mod").and_then(Value::as_str) == Some("engine"))?;
-    (event.get("type").and_then(Value::as_str) == Some("hud_scan")).then(|| event.clone())
-}
-
-/// The stats are for the game only: true while the foreground window belongs
-/// to the target game's process.
-fn game_in_front(target_pid: Option<u32>) -> bool {
-    let Some(pid) = target_pid else { return false };
-    let mut owner = 0u32;
-    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut owner)) };
-    owner == pid
 }
 
 impl App {

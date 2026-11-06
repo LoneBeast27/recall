@@ -32,6 +32,8 @@ pub const SETTLED: usize = 3;
 /// The island's footprint the pick keeps clear (1440p px): a wide notice along
 /// its edge, and its depth from the screen edge (gap, grown notice, a little air).
 const ALONG: f32 = 360.0;
+/// A side spot's island is tall (one upright glyph per line): its length down the edge.
+const ALONG_SIDE: f32 = 560.0;
 const DEPTH: f32 = EDGE + NOTICE_H + 10.0;
 
 /// Spots in the order they are preferred when equally clear: the corners
@@ -91,7 +93,7 @@ impl HudGrid {
 /// The picture fraction an anchor's footprint covers on a `aspect` (w / h) screen.
 fn footprint(anchor: Anchor, aspect: f32) -> (f32, f32, f32, f32) {
     let width = REF_HEIGHT * aspect.max(0.5);
-    let (along_x, along_y) = (ALONG / width, ALONG / REF_HEIGHT);
+    let (along_x, along_y) = (ALONG / width, ALONG_SIDE / REF_HEIGHT);
     let (deep_x, deep_y) = (DEPTH / width, DEPTH / REF_HEIGHT);
     let edge_x = EDGE / width;
     let centre = |along: f32| ((1.0 - along) / 2.0, (1.0 + along) / 2.0);
@@ -319,6 +321,12 @@ impl Prober {
         self.failures += 1;
         self.next = Some(now + RETRY);
     }
+}
+
+/// An engine `hud_scan` line (the island's own, not for the reducer).
+pub fn hud_scan(value: &Value) -> Option<Value> {
+    let event = value.get("event").filter(|_| value.get("mod").and_then(Value::as_str) == Some("engine"))?;
+    (event.get("type").and_then(Value::as_str) == Some("hud_scan")).then(|| event.clone())
 }
 
 #[cfg(test)]

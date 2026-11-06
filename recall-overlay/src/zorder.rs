@@ -146,3 +146,12 @@ pub fn keep_on_top(hwnd: HWND, names: &mut Names) -> Raise {
     }
     Raise::Clear
 }
+
+/// The stats are for the game only: true while the foreground window belongs
+/// to the target game's process.
+pub fn game_in_front(target_pid: Option<u32>) -> bool {
+    let Some(pid) = target_pid else { return false };
+    let mut owner = 0u32;
+    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut owner)) };
+    owner == pid
+}
