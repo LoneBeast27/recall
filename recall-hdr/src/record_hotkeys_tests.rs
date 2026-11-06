@@ -182,10 +182,16 @@ screenshot_hotkey = \"Alt+U\"
 ");
     assert_eq!((r.screenshot_hotkey.as_str(), r.editor_hotkey.as_str()), ("Alt+U", ""), "Alt+U stays the screenshot's");
     assert!(validate(&r).is_ok());
-    let free = load("[recording]
-bookmark_hotkey = \"Alt+B\"
+    // Rohan's config shape (no editor_hotkey, nothing on Alt+U): the editor shortcut comes on.
+    let existing = load("[recording]
+save_hotkey = \"Alt+N\"
+mic_hotkey = \"Alt+M\"
+bookmark_hotkey = \"\"
+screenshot_hotkey = \"\"
+record_hotkey = \"\"
 ");
-    assert_eq!(free.editor_hotkey, "Alt+U");
+    assert_eq!(existing.editor_hotkey, "Alt+U", "nothing of his holds Alt+U: on, as he asked");
+    assert!(validate(&existing).is_ok());
     assert!(!is_gamer_combo("Alt+U"), "not a combo games or overlays own");
 }
 
