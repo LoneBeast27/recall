@@ -110,6 +110,8 @@ struct Active<S> {
     earlier_frozen: f64,
     frozen_us: u64,
     freeze_from: Option<u64>,
+    /// The capture µs of the live encoder's encode error, until its reopen is seen.
+    error_us: Option<u64>,
 }
 
 enum Phase<S> {
@@ -264,6 +266,7 @@ impl<F: SinkFactory> Recorder<F> {
             earlier_frozen: previous.as_ref().map_or(0.0, |p| p.frozen_seconds),
             frozen_us: 0,
             freeze_from: None,
+            error_us: None,
         });
         if let Err(e) = active.push_video(pts_us, true, data, false) {
             self.phase = Phase::Recording(active);
