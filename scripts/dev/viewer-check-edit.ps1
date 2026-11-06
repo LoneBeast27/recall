@@ -205,3 +205,21 @@ Run-Scenario 'AV1 clip: plays, finishes, plays again' {
   $end = Wait-Stopped $s 3000
   Verdict @((Ok $true "plays $(if (-not $src) { 'an unknown source' } elseif ($src -notlike '*av1-run.mp4') { 'a preview copy' } else { 'the AV1 file' })"), $a, (Ok ([bool]$end) "stopped at $(if ($end) { Fmt $end.pos } else { '?' })s"), (Press-Play $s 'space' 1.5 0))
 }
+
+Run-Scenario 'a clip with a leading cut opens on its in-point and plays from there' {
+  $s = $script:current = Start-Viewer 'pstart' $clips.base -Library
+  [void](Settle $s 1000) # a click in the first second after start can be lost (follow-up)
+  Open-Tile $s 'tile:pstart.mp4'
+  [void](Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.ready } 30000)
+  Key $s 'l' 4; [void](Settle $s 400); Key $s 'i'
+  $in = [double](Settle $s 400).ranges[0][0]
+  Key $s 'escape'
+  [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 3000)
+  [void](Settle $s 800)
+  Open-Tile $s 'tile:pstart.mp4'
+  $open = Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.ready -and $r.clip -like '*pstart.mp4' } 30000
+  $r = Settle $s 600
+  Verdict @((Ok ($in -gt 15) "in point set at $(Fmt $in)s"), (Ok ([bool]$open) 'the clip opens again'),
+    (Ok ([math]::Abs([double]$r.pos - $in) -lt 0.3) "the playhead opens on the in point ($(Fmt $r.pos)s, in $(Fmt $in)s)"),
+    (Press-Play $s 'space' 1.5 $in))
+}
