@@ -49,6 +49,12 @@ const PROBE_FOR: Duration = Duration::from_secs(60);
 const COOLDOWN: Duration = Duration::from_secs(60);
 /// No frame at all for this long: stop (nothing is captured on the GPU path).
 const NO_FRAME_FOR: Duration = Duration::from_secs(10);
+/// A burst where more of the picture than this holds steady edges is a menu,
+/// a scoreboard or a replay over a moving background, not play: skipped.
+const MENU_SHARE: f32 = 0.15;
+/// A finished scan whose grid marks more of the picture than this as HUD is
+/// not trusted (`ok` false): real HUDs leave most of the screen clear.
+pub const MAX_HUD_SHARE: f32 = 0.30;
 /// A scan with fewer moving bursts than this says nothing (menus, a still camera).
 pub const MIN_MOVING: u32 = 4;
 
@@ -155,7 +161,9 @@ pub fn steady_edges(frames: &[Gray]) -> Option<Vec<bool>> {
             edge && hi - lo < STEADY
         })
         .collect();
-    Some(tidy(&mask, w, h))
+    let mask = tidy(&mask, w, h);
+    let steady = mask.iter().filter(|m| **m).count();
+    (steady as f32 <= MENU_SHARE * (w * h) as f32).then_some(mask)
 }
 
 /// Keep occupied pixels with at least [`DENSE`] occupied pixels in their 9x9 box.
@@ -220,6 +228,12 @@ impl Tally {
             .map(|r| (0..GRID_COLS).filter(|&c| cells[r * GRID_COLS + c] >= CELL_MIN).fold(0u64, |bits, c| bits | 1 << c))
             .collect()
     }
+}
+
+/// The share of grid cells marked HUD.
+pub fn grid_share(grid: &[u64]) -> f32 {
+    let set: u32 = grid.iter().map(|row| row.count_ones()).sum();
+    set as f32 / (GRID_COLS * GRID_ROWS) as f32
 }
 
 /// The probe's one-at-a-time guard and its thread.
@@ -306,9 +320,12 @@ fn probe(shared: &CaptureShared) -> Outbound {
         }
         std::thread::sleep(BETWEEN_BURSTS);
     }
-    let ok = tally.moving >= MIN_MOVING;
+    let grid = tally.grid();
+    let share = grid_share(&grid);
+    let ok = tally.moving >= MIN_MOVING && share <= MAX_HUD_SHARE;
     let reason = match (ok, failure) {
         (true, _) => None,
+        (false, _) if tally.moving >= MIN_MOVING => Some(format!("{:.0}% of the picture looked like HUD: menus or replays, not play", share * 100.0)),
         (false, Some(e)) => Some(e),
         (false, None) => Some(format!("only {} of {} bursts had the world moving", tally.moving, tally.bursts)),
     };
@@ -316,7 +333,7 @@ fn probe(shared: &CaptureShared) -> Outbound {
         ok,
         cols: GRID_COLS as u32,
         rows: GRID_ROWS as u32,
-        grid: if ok { tally.grid() } else { Vec::new() },
+        grid: if ok { grid } else { Vec::new() },
         moving: tally.moving,
         bursts: tally.bursts,
         reason,

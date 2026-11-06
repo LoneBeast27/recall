@@ -133,3 +133,27 @@ fn the_scan_line_is_what_the_island_reads() {
     assert_eq!(wire["grid"], serde_json::json!([1, 2]));
     assert_eq!((wire["cols"].as_u64(), wire["rows"].as_u64()), (Some(64), Some(36)));
 }
+
+#[test]
+fn a_menu_over_a_moving_background_is_not_play() {
+    // A big static panel (a scoreboard or garage menu) over a scrolling world: 40% of the picture.
+    let menu = Some((40, 40, 600, 300));
+    assert_eq!(steady_edges(&burst(0, menu)), None, "most of the picture is steady");
+    let mut tally = Tally::default();
+    for b in 0..6 {
+        tally.add(&burst(b * 101, menu));
+    }
+    assert_eq!((tally.moving, tally.bursts), (0, 6));
+    // A normal panel still counts.
+    assert!(steady_edges(&burst(0, Some((20, 300, 120, 340)))).is_some());
+}
+
+#[test]
+fn grid_share_counts_marked_cells() {
+    assert_eq!(grid_share(&vec![0; GRID_ROWS]), 0.0);
+    assert_eq!(grid_share(&vec![u64::MAX >> (64 - GRID_COLS); GRID_ROWS]), 1.0);
+    let mut half = vec![0u64; GRID_ROWS];
+    half[..GRID_ROWS / 2].fill(u64::MAX >> (64 - GRID_COLS));
+    assert_eq!(grid_share(&half), 0.5);
+    assert!(MAX_HUD_SHARE < 0.5);
+}
