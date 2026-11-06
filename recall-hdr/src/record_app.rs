@@ -140,6 +140,8 @@ pub struct Controller {
     pub(crate) can_trace: bool,
     /// Unknown fullscreen candidates must render like a game (`record_render`).
     pub(crate) render: RenderCheck,
+    /// Sleep and resume (`record_power`).
+    pub(crate) power: crate::record_power::PowerPlanner,
 }
 
 /// Entry point. Returns the process exit code.
@@ -235,6 +237,7 @@ pub fn run() -> i32 {
         editor_ask: Default::default(),
         can_trace,
         render: RenderCheck::new(can_trace),
+        power: Default::default(),
     };
     if !ctl.can_trace {
         log!("record: FPS needs Performance Log Users (run the installer, then sign in again); stats show FPS as -");
@@ -242,6 +245,7 @@ pub fn run() -> i32 {
     ctl.rebind_hotkeys();
     ctl.overlay.sync(&ctl.cfg.overlay);
     ctl.probe_foreground(now, true);
+    crate::record_power_win::register();
     log!(
         "record: controller up (auto_record={}, buffer={}s, save={}, mic={}, out={:?}, storage cap={} GiB)",
         ctl.cfg.recording.auto_record,
@@ -292,6 +296,7 @@ impl Controller {
             if self.quit.is_some() {
                 return 0;
             }
+            self.power_tick(now);
             self.tick(now);
         }
     }

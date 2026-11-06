@@ -133,6 +133,13 @@ pub(super) fn silence_to_clock(ring: &TrackRing, level: &mut Leveller, clock: &d
     }
 }
 
+impl TrackRing {
+    /// The ring's length in frames (the most silence a `Leveller` may owe).
+    pub(super) fn capacity_frames(&self) -> u64 {
+        (self.capacity / self.channels.max(1) as usize) as u64
+    }
+}
+
 fn set_endpoint(ring: &TrackRing, text: String) {
     if let Ok(mut g) = ring.endpoint.lock() {
         *g = text;
@@ -153,7 +160,7 @@ pub(super) fn capture_loop<C: Capture>(
     clock: &mut dyn Clock,
     notices: &dyn Notices,
 ) {
-    let mut level = Leveller::new(ring.rate);
+    let mut level = Leveller::new(ring.rate).with_cap(ring.capacity_frames()); // a sleep owes at most one ring
     let mut init_tx = Some(init_tx);
     // Failed reopens back off: 2 s, 4 s, 8 s, then every 10 s, and back to 2 s once it opens.
     let mut failures = 0u32;
