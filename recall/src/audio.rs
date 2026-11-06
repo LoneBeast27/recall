@@ -277,13 +277,21 @@ pub fn list_endpoints(direction: &Direction) -> Vec<String> {
         .collect()
 }
 
-/// True when every whitespace-separated token of `want` appears in `name`
-/// (both lowercased) — survives vendor naming like
-/// "Speakers (2- USB Audio Device)" for "usb speakers".
+/// Lowercase, ø→o (a name typed without the ø still matches), split into words.
+/// The Audio page's meter (`recall-native` `services/meters.rs`) uses the same rule, so it
+/// meters the endpoint this records; keep the two copies equal (same test table in both).
+fn words(text: &str) -> Vec<String> {
+    let folded: String = text.to_lowercase().chars().map(|c| if c == 'ø' { 'o' } else { c }).collect();
+    folded.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_owned).collect()
+}
+
+/// True when every word of `want` is a whole word of `name` — survives vendor naming like
+/// "Speakers (2- USB Audio Device)" for "usb speakers", but "a" never matches inside
+/// another word.
 fn name_matches(name: &str, want: &str) -> bool {
-    let name = name.to_lowercase();
-    want.split_whitespace()
-        .all(|tok| name.contains(&tok.to_lowercase()))
+    let name = words(name);
+    let want = words(want);
+    !want.is_empty() && want.iter().all(|w| name.contains(w))
 }
 
 /// Index of the endpoint `want` names: an exact (case-insensitive) friendly

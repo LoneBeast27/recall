@@ -40,6 +40,14 @@ impl Root {
                                 }
                                 cx.notify();
                             }
+                            // A gain fader keeps following the pointer off its 28 px track.
+                            if this.settings_ui.audio.fader.is_some() {
+                                match event.pressed_button {
+                                    Some(MouseButton::Left) => this.fader_to(f32::from(event.position.y)),
+                                    _ => this.commit_dragged_fader(),
+                                }
+                                cx.notify();
+                            }
                         });
                     }
                 });
@@ -49,6 +57,10 @@ impl Root {
                         let _ = released.update(cx, |this, cx| {
                             if this.ed.drag.is_some() {
                                 this.ed.end_drag();
+                                cx.notify();
+                            }
+                            if this.settings_ui.audio.fader.is_some() {
+                                this.commit_dragged_fader();
                                 cx.notify();
                             }
                         });

@@ -207,6 +207,51 @@ mod tests {
         }
     }
 
+    /// Prints what the Audio page would show on this PC: every output and input, the defaults,
+    /// the apps with a sound session (with the pid of each session and the tree root an app
+    /// source captures), and 2 s of process-loopback peak per app. Reads only.
+    #[test]
+    #[ignore = "live hardware: lists this PC's endpoints and sessions, opens process loopback"]
+    fn live_inventory() {
+        let lists = crate::services::audio_devices::enumerate_blocking();
+        eprintln!("default output: {:?}\ndefault input: {:?}", lists.default_output, lists.default_input);
+        lists.outputs.iter().for_each(|n| eprintln!("output: {n}"));
+        lists.inputs.iter().for_each(|n| eprintln!("input: {n}"));
+        let _ = wasapi::initialize_mta();
+        let pids = session_pids().unwrap_or_default();
+        for pid in &pids {
+            eprintln!("session pid {pid}: {:?}", image_path(*pid));
+        }
+        for app in list_blocking() {
+            let root = crate::services::process_tree::tree_root(&app.exe);
+            eprintln!("app: {} ({}) tree root {root:?} peak {:?}", app.label, app.exe, root.map(loopback_peak));
+        }
+    }
+
+    /// Peak sample over 2 s of process loopback on a tree, or the error text.
+    fn loopback_peak(pid: u32) -> Result<f32, String> {
+        use wasapi::{AudioClient, Direction, SampleType, StreamMode, WaveFormat};
+        let text = |e: wasapi::WasapiError| e.to_string();
+        let mut client = AudioClient::new_application_loopback_client(pid, true).map_err(text)?;
+        let format = WaveFormat::new(32, 32, &SampleType::Float, 48000, 2, None);
+        client.initialize_client(&format, &Direction::Capture, &StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: 200_000 }).map_err(text)?;
+        let event = client.set_get_eventhandle().map_err(text)?;
+        let capture = client.get_audiocaptureclient().map_err(text)?;
+        client.start_stream().map_err(text)?;
+        let (mut raw, mut peak) = (std::collections::VecDeque::new(), 0.0f32);
+        let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while std::time::Instant::now() < until {
+            if event.wait_for_event(200).is_ok() {
+                capture.read_from_device_to_deque(&mut raw).map_err(text)?;
+                let full = raw.len() - raw.len() % 4;
+                let bytes: Vec<u8> = raw.drain(..full).collect();
+                peak = bytes.chunks_exact(4).map(|b| f32::from_le_bytes([b[0], b[1], b[2], b[3]]).abs()).fold(peak, f32::max);
+            }
+        }
+        let _ = client.stop_stream();
+        Ok(peak)
+    }
+
     #[test]
     fn listing_playing_apps_never_lists_recall_itself() {
         let own = std::env::current_exe().unwrap().file_name().unwrap().to_string_lossy().to_lowercase();
