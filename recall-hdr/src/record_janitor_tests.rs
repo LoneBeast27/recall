@@ -117,3 +117,106 @@ fn free_warnings_fire_once_then_rearm() {
     assert!(free_warnings(&mut low, &c, |_| Some(50 * GIB), by_letter).is_empty());
     assert_eq!(free_warnings(&mut low, &c, short, by_letter).len(), 1, "re-armed after recovering");
 }
+
+// ---- Nothing is recycled beyond the user's CURRENT storage limit ----
+
+use crate::record_storage::{ClipFile, Listing, Plan};
+use std::sync::Mutex as StdMutex;
+
+const OLD_CLIP: &str = "G__2026-01-01__00-00-00.mp4";
+
+/// A plan that would move one clip (no disk read).
+fn plan_one(_: &Path, _: u32) -> Result<(Plan, Listing), String> {
+    let clip = ClipFile { name: OLD_CLIP.into(), bytes: GIB, modified: 1 };
+    let plan = Plan { remove: vec![OLD_CLIP.into()], freed: GIB, total: 600 * GIB, through: Some(1), next: None };
+    Ok((plan, Listing { clips: vec![clip], names: vec![OLD_CLIP.into()], thumbs: Vec::new() }))
+}
+
+/// The listing of a folder on a sleeping NAS.
+fn slow_plan(dir: &Path, cap: u32) -> Result<(Plan, Listing), String> {
+    std::thread::sleep(Duration::from_millis(400));
+    plan_one(dir, cap)
+}
+
+/// A volume lookup on a sleeping NAS.
+fn slow_resolve(dir: &Path) -> Option<crate::win_volume::Volume> {
+    std::thread::sleep(Duration::from_millis(400));
+    by_letter(dir)
+}
+
+fn roomy(_: &Path) -> Option<u64> {
+    Some(900 * GIB)
+}
+
+static RECYCLED_A: StdMutex<Vec<Instant>> = StdMutex::new(Vec::new());
+static RECYCLED_B: StdMutex<Vec<Instant>> = StdMutex::new(Vec::new());
+static RECYCLED_C: StdMutex<Vec<Instant>> = StdMutex::new(Vec::new());
+
+fn recycle_a(_: &[PathBuf]) -> Result<(), String> {
+    RECYCLED_A.lock().unwrap().push(Instant::now());
+    Ok(())
+}
+fn recycle_b(_: &[PathBuf]) -> Result<(), String> {
+    RECYCLED_B.lock().unwrap().push(Instant::now());
+    Ok(())
+}
+fn recycle_c(_: &[PathBuf]) -> Result<(), String> {
+    RECYCLED_C.lock().unwrap().push(Instant::now());
+    Ok(())
+}
+
+fn cap_job() -> Job {
+    Job { dir: DIR.into(), cap_gb: 500, free_only: false, preview_for: None, free: Some(expected_check(BUFFER)) }
+}
+
+/// Run the batch on its own thread; after 100 ms the user sets "No limit". Returns when that happened.
+fn batch_with_limit_off_midway(deps: Deps) -> Instant {
+    let current = Arc::new(Mutex::new(Setting { dir: DIR.into(), cap_gb: 500 }));
+    let shared = current.clone();
+    let worker = std::thread::spawn(move || {
+        let (mut low, mut warner) = (FreeWarner::default(), Warner::default());
+        run_batch(&cap_job(), &shared, deps, &mut low, &mut warner, &mut |_| {});
+    });
+    std::thread::sleep(Duration::from_millis(100));
+    *current.lock().unwrap() = Setting { dir: DIR.into(), cap_gb: 0 };
+    let changed = Instant::now();
+    worker.join().unwrap();
+    changed
+}
+
+#[test]
+fn a_slow_free_space_check_never_lets_a_stale_cap_recycle() {
+    let deps = Deps { free: roomy, resolve: slow_resolve, plan: plan_one, recycle: recycle_a };
+    let changed = batch_with_limit_off_midway(deps);
+    let late: Vec<_> = RECYCLED_A.lock().unwrap().iter().filter(|at| **at >= changed).copied().collect();
+    assert!(late.is_empty(), "recycled {} time(s) after the limit was turned off", late.len());
+}
+
+#[test]
+fn a_limit_change_during_the_listing_moves_nothing() {
+    let deps = Deps { free: roomy, resolve: by_letter, plan: slow_plan, recycle: recycle_b };
+    batch_with_limit_off_midway(deps);
+    assert_eq!(RECYCLED_B.lock().unwrap().len(), 0, "the run listed under 500 GB but the limit is now off");
+}
+
+#[test]
+fn a_job_for_another_folder_or_cap_moves_nothing() {
+    let deps = Deps { free: roomy, resolve: by_letter, plan: plan_one, recycle: recycle_c };
+    let (mut low, mut warner) = (FreeWarner::default(), Warner::default());
+    for now in [Setting { dir: DIR.into(), cap_gb: 0 }, Setting { dir: r"G:\NewClips".into(), cap_gb: 500 }, Setting { dir: DIR.into(), cap_gb: 250 }] {
+        run_batch(&cap_job(), &Mutex::new(now), deps, &mut low, &mut warner, &mut |_| {});
+    }
+    assert_eq!(RECYCLED_C.lock().unwrap().len(), 0);
+    // The setting the job was made for still runs.
+    run_batch(&cap_job(), &Mutex::new(Setting { dir: DIR.into(), cap_gb: 500 }), deps, &mut low, &mut warner, &mut |_| {});
+    assert_eq!(RECYCLED_C.lock().unwrap().len(), 1);
+}
+
+#[test]
+fn the_pump_publishes_the_current_setting() {
+    let (mut j, _rx, t0) = janitor();
+    j.tick(DIR, 500, BUFFER, t0);
+    assert_eq!(*j.current().lock().unwrap(), Setting { dir: DIR.into(), cap_gb: 500 });
+    j.run_now(r"G:\NewClips", 0, t0);
+    assert_eq!(*j.current().lock().unwrap(), Setting { dir: r"G:\NewClips".into(), cap_gb: 0 });
+}

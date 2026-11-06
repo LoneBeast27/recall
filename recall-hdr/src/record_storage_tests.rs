@@ -109,7 +109,8 @@ fn a_quarantined_library_file_cancels_the_run() {
 
 #[test]
 fn caps_below_the_minimum_never_run() {
-    let err = run_once(Path::new(r"Z:\does-not-matter"), STORAGE_CAP_MIN_GB - 1).expect_err("refused");
+    let err = run_once(Path::new(r"Z:\does-not-matter"), STORAGE_CAP_MIN_GB - 1, plan_dir, &|| true, |_| panic!("no recycle"))
+        .expect_err("refused");
     assert!(err.contains("minimum"), "{err}");
 }
 

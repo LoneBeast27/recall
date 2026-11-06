@@ -114,8 +114,8 @@ fn finish(queue: SaverQueue, control: SaverControl, dirs: &[&Path]) {
 fn estimate_is_video_plus_audio_plus_real_mux_overhead() {
     let j = job(Path::new(r"E:\Clips\a.mp4"), 2.0);
     // 8 Mbit/s still for 2 s = 2 MB; 120 frames at 60 fps x 32 index bytes; 64 KiB headers;
-    // thumbnail allowance 2 MB / 32; no audio tracks.
-    assert_eq!(estimate(&j), 2_000_000 + 120 * 32 + (64 << 10) + 2_000_000 / 32);
+    // no audio tracks, no thumbnail reserve.
+    assert_eq!(estimate(&j), 2_000_000 + 120 * 32 + (64 << 10));
 }
 
 fn still_job(secs: f64, bitrate: usize) -> SaveJob {
@@ -133,10 +133,10 @@ fn short_and_low_bitrate_saves_get_a_small_allowance() {
         let overhead = estimate(&still_job(5.0, bitrate)) - payload;
         assert!(overhead * 100 < payload * 5, "{bitrate} bit/s, 5 s: {overhead} bytes over {payload}");
     }
-    // A long save gets the full thumbnail allowance and no more.
+    // A long save reserves its index and headers only.
     let payload = 25_000_000 / 8 * 120;
     let overhead = estimate(&still_job(120.0, 25_000_000)) - payload;
-    assert_eq!(overhead, 7200 * 32 + (64 << 10) + (512 << 10));
+    assert_eq!(overhead, 7200 * 32 + (64 << 10));
 }
 
 #[test]
