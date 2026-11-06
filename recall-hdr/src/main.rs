@@ -82,6 +82,7 @@ mod record_startup;
 mod record_storage;
 mod record_free_space;
 mod record_janitor;
+mod record_monitor;
 mod record_target;
 mod record_target_gate;
 mod record_transition;

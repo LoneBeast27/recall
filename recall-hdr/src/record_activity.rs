@@ -21,6 +21,12 @@ pub const START_STALE: Duration = Duration::from_secs(35);
 pub const DRAIN_RECORD_REASON: &str = "The game closed; nothing to record";
 /// How long a pause waits for the long recording to report stopping.
 pub const PAUSE_STOP_WAIT: Duration = Duration::from_secs(10);
+/// Why a screenshot is refused while a closed game drains (it would be the
+/// closed game's last frame).
+pub const DRAIN_SCREENSHOT_REASON: &str = "The game closed";
+/// Screenshots with no `screenshot` / `screenshot_failed` this long after the
+/// last one was sent are assumed lost (a PNG can go to a sleeping hard drive).
+pub const SCREENSHOT_STALE: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum LongRec {
@@ -44,13 +50,23 @@ pub struct AutoStop {
 pub struct EngineActivity {
     pending_saves: u32,
     last_save_sent: Option<Instant>,
+    /// Screenshots sent and not yet reported (their PNGs are still being written).
+    pending_screenshots: u32,
+    last_screenshot_sent: Option<Instant>,
     pub long: LongRec,
     auto_stop: Option<AutoStop>,
 }
 
 impl Default for EngineActivity {
     fn default() -> Self {
-        EngineActivity { pending_saves: 0, last_save_sent: None, long: LongRec::Idle, auto_stop: None }
+        EngineActivity {
+            pending_saves: 0,
+            last_save_sent: None,
+            pending_screenshots: 0,
+            last_screenshot_sent: None,
+            long: LongRec::Idle,
+            auto_stop: None,
+        }
     }
 }
 
@@ -69,6 +85,19 @@ impl EngineActivity {
     pub fn save_sent(&mut self, now: Instant) {
         self.pending_saves += 1;
         self.last_save_sent = Some(now);
+    }
+
+    /// `cmd` (`engine_command`) went to the engine: a long-recording start or
+    /// a screenshot is now in flight.
+    pub fn command_sent(&mut self, cmd: &str, now: Instant) {
+        let starts = cmd == "record_start" || (cmd == "record_toggle" && !self.is_recording());
+        if starts {
+            self.record_requested(now);
+        }
+        if cmd == "screenshot" {
+            self.pending_screenshots += 1;
+            self.last_screenshot_sent = Some(now);
+        }
     }
 
     /// A `record_start` / `record_toggle` went to an idle engine.
@@ -99,6 +128,10 @@ impl EngineActivity {
                 self.pending_saves = self.pending_saves.saturating_sub(1);
                 None
             }
+            "screenshot" | "screenshot_failed" => {
+                self.pending_screenshots = self.pending_screenshots.saturating_sub(1);
+                None
+            }
             "recording_started" => {
                 self.long = LongRec::Active { path: text("path"), started_unix: unix_now };
                 Some(Trigger::LongRecChanged)
@@ -114,7 +147,7 @@ impl EngineActivity {
         }
     }
 
-    /// Saves in flight or a long recording starting / running: an engine
+    /// Saves or a screenshot in flight, or a long recording starting / running: an engine
     /// restart now would lose work.
     pub fn busy(&mut self, now: Instant) -> bool {
         if self.last_save_sent.is_some_and(|t| now.duration_since(t) >= SAVE_STALE) {
@@ -125,17 +158,21 @@ impl EngineActivity {
                 self.long = LongRec::Idle;
             }
         }
-        self.pending_saves > 0 || self.long != LongRec::Idle
+        if self.last_screenshot_sent.is_some_and(|t| now.duration_since(t) >= SCREENSHOT_STALE) {
+            self.pending_screenshots = 0;
+        }
+        self.pending_saves > 0 || self.pending_screenshots > 0 || self.long != LongRec::Idle
     }
 
-    /// What holds a due retarget now (see `EnginePlanner::step`): saves in
-    /// flight, and an active long recording whose stop has not timed out. A
+    /// What holds a due retarget now (see `EnginePlanner::step`): saves or a
+    /// screenshot in flight, and an active long recording whose stop has not timed out. A
     /// recording still starting has nothing to save: the retarget's engine
     /// restart drops it.
     pub fn retarget_busy(&mut self, now: Instant) -> Busy {
         self.busy(now); // expire stale saves / starts
         let given_up = self.auto_stop.is_some_and(|s| now >= s.deadline);
-        Busy { saving: self.pending_saves > 0, long_rec: self.is_recording() && !given_up }
+        let saving = self.pending_saves > 0 || self.pending_screenshots > 0;
+        Busy { saving, long_rec: self.is_recording() && !given_up }
     }
 
     /// A retarget needs the active long recording stopped. `true` = send
@@ -148,9 +185,12 @@ impl EngineActivity {
         true
     }
 
-    /// Why `cmd` (a long-recording command) is refused now: a start while a
-    /// closed game drains has no window to record. `None` = send it.
+    /// Why `cmd` (a long-recording command or a screenshot) is refused now: a
+    /// start while a closed game drains has no window to record. `None` = send it.
     pub fn record_refusal(&self, cmd: &str, draining: bool) -> Option<&'static str> {
+        if draining && cmd == "screenshot" {
+            return Some(DRAIN_SCREENSHOT_REASON);
+        }
         let starts = cmd == "record_start" || (cmd == "record_toggle" && !self.is_recording());
         (draining && starts).then_some(DRAIN_RECORD_REASON)
     }
@@ -328,6 +368,58 @@ mod tests {
         }
         assert_eq!(sent, 1, "record_stop sent once");
         assert_eq!(applied_at, Some(1 + PAUSE_STOP_WAIT.as_secs()), "retargeted once the stop timed out");
+    }
+
+    #[test]
+    fn a_screenshot_is_refused_while_a_closed_game_drains() {
+        let a = EngineActivity::default();
+        assert_eq!(a.record_refusal("screenshot", true), Some(DRAIN_SCREENSHOT_REASON), "the closed game's last frame");
+        assert_eq!(a.record_refusal("screenshot", false), None, "on target it is taken");
+        assert_eq!(a.record_refusal("bookmark", true), None);
+    }
+
+    #[test]
+    fn a_screenshot_in_flight_holds_a_retarget_until_reported_or_stale() {
+        use crate::record_engine::{EnginePlanner, EngineTarget, Step, EXIT_LINGER};
+        use crate::record_target::Target;
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let win = |pid, hwnd| EngineTarget::Window(Target { hwnd, pid, name: "G".into(), exe: "G.exe".into() });
+        let (mut p, mut a) = (EnginePlanner::new(EXIT_LINGER), EngineActivity::default());
+        assert_eq!(p.step(&win(7, 1), t0, a.retarget_busy(t0)), Step::Apply(win(7, 1)));
+        a.command_sent("screenshot", t0);
+        assert!(a.busy(t0), "a settings restart waits for the PNG");
+        assert_eq!(p.step(&win(8, 2), t0 + s(1), a.retarget_busy(t0 + s(1))), Step::Held, "a new game waits for the PNG");
+        a.on_event(&json!({"type":"screenshot","path":"G.png"}), 0.0);
+        assert!(!a.busy(t0 + s(1)));
+        assert_eq!(p.step(&win(8, 2), t0 + s(1), a.retarget_busy(t0 + s(1))), Step::Apply(win(8, 2)));
+        a.command_sent("screenshot", t0 + s(2));
+        a.on_event(&json!({"type":"screenshot_failed","reason":"r"}), 0.0);
+        assert!(!a.busy(t0 + s(2)), "a failed screenshot is over too");
+        a.command_sent("screenshot", t0 + s(3));
+        assert!(a.busy(t0 + s(3) + SCREENSHOT_STALE - Duration::from_millis(1)));
+        assert!(!a.busy(t0 + s(3) + SCREENSHOT_STALE), "a lost screenshot does not block forever");
+        assert_eq!(a.retarget_busy(t0 + s(3) + SCREENSHOT_STALE), Busy::default());
+    }
+
+    #[test]
+    fn screenshots_in_flight_are_counted_and_go_stale_after_60_s() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let mut a = EngineActivity::default();
+        a.command_sent("screenshot", t0);
+        a.command_sent("screenshot", t0 + s(1));
+        a.on_event(&json!({"type":"screenshot","path":"a.png"}), 0.0);
+        assert!(a.busy(t0 + s(1)), "the second PNG is still being written");
+        assert!(a.retarget_busy(t0 + s(1)).saving, "and it holds a retarget");
+        a.on_event(&json!({"type":"screenshot_failed","reason":"r"}), 0.0);
+        assert!(!a.busy(t0 + s(1)), "both reported");
+        a.on_event(&json!({"type":"screenshot","path":"x.png"}), 0.0);
+        assert!(!a.busy(t0 + s(1)), "a stray report does not underflow");
+        assert_eq!(SCREENSHOT_STALE, s(60), "a PNG can go to a sleeping hard drive");
+        a.command_sent("screenshot", t0 + s(2));
+        assert!(a.busy(t0 + s(2) + s(59)), "a slow disk is not a lost screenshot");
+        assert!(!a.busy(t0 + s(2) + SCREENSHOT_STALE), "a lost one does not block forever");
     }
 
     #[test]
