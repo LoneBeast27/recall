@@ -78,6 +78,6 @@ fn rings_follow_the_list_order_and_carry_title_and_tag() {
     let list = resolve(env(&[(SOURCES_ENV, r#"[{"id":"app-1","kind":"app","exe":"a.exe","name":"A"},{"id":"in","kind":"input","name":"Voice"}]"#)])).unwrap();
     let ring = |spec: &SourceSpec, tag| Arc::new(TrackRing::for_source(spec, tag, 1, String::new()));
     let ordered = in_list_order(&list, vec![ring(&list[1], "mic"), ring(&list[0], "app:a.exe")]);
-    let got: Vec<(&str, &str, &str)> = ordered.iter().map(|r| (r.name, r.title, r.source)).collect();
+    let got: Vec<(&str, &str, &str)> = ordered.iter().map(|r| (r.name, r.title(), r.source)).collect();
     assert_eq!(got, [("app-1", "A", "app:a.exe"), ("in", "Voice", "mic")]);
 }

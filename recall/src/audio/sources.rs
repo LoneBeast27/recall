@@ -56,8 +56,14 @@ impl SourceSpec {
 
     /// Linear factor for `gain_db`, clamped to the controller's -60..+12 dB.
     pub fn gain(&self) -> f32 {
-        10f32.powf(self.gain_db.clamp(-60.0, 12.0) / 20.0)
+        gain_of(self.gain_db)
     }
+}
+
+/// Linear factor for a gain in dB, clamped to the controller's -60..+12 dB (NaN = 0 dB).
+pub fn gain_of(gain_db: f32) -> f32 {
+    let db = if gain_db.is_finite() { gain_db.clamp(-60.0, 12.0) } else { 0.0 };
+    10f32.powf(db / 20.0)
 }
 
 fn spec(id: &str, kind: &str, name: &str, device: &str, exe: &str) -> SourceSpec {
@@ -108,6 +114,29 @@ pub fn resolve(get: impl Fn(&str) -> Option<String>) -> Result<Vec<SourceSpec>, 
 
 pub fn from_env() -> Result<Vec<SourceSpec>, String> {
     resolve(|key| std::env::var(key).ok())
+}
+
+/// The Audio page changed a source's gain or name: apply it to the live track (no engine
+/// restart, so the replay buffer stays). False when no live track has that id.
+pub fn set_live(id: &str, gain_db: Option<f32>, name: Option<&str>) -> bool {
+    let Ok(mut states) = STATES.lock() else { return false };
+    let mut found = false;
+    for (sid, sname, state) in states.iter_mut() {
+        if sid.trim() != id.trim() {
+            continue;
+        }
+        if let Some(name) = name.map(str::trim).filter(|n| !n.is_empty()) {
+            *sname = name.to_owned();
+            if let State::Live(ring) = state {
+                ring.set_title(name);
+            }
+        }
+        if let (Some(db), State::Live(ring)) = (gain_db, &*state) {
+            ring.set_gain_db(db);
+        }
+        found |= matches!(state, State::Live(_));
+    }
+    found
 }
 
 /// What one source opened, for the engine status (`audio` in `status`).
@@ -162,7 +191,7 @@ pub(super) fn app_sources(list: &[SourceSpec]) -> Vec<AppSource> {
 
 /// `rings` in the order of `list` (app tracks start together, after the others).
 pub(super) fn in_list_order(list: &[SourceSpec], mut rings: Vec<Arc<TrackRing>>) -> Vec<Arc<TrackRing>> {
-    rings.sort_by_key(|r| list.iter().position(|s| s.id == r.name).unwrap_or(usize::MAX));
+    rings.sort_by_key(|r| list.iter().position(|s| s.id.trim() == r.name).unwrap_or(usize::MAX));
     rings
 }
 

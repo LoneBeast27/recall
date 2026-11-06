@@ -1,6 +1,10 @@
 use super::*;
 use crate::record_app_audio::AppAudioSource;
 
+fn json_lines(lines: &[String]) -> Vec<serde_json::Value> {
+    lines.iter().map(|l| serde_json::from_str(l).unwrap()).collect()
+}
+
 fn ids(list: &[AudioSource]) -> Vec<&str> {
     list.iter().map(|s| s.id.as_str()).collect()
 }
@@ -80,8 +84,34 @@ fn the_engine_gets_enabled_sources_in_order_and_a_disabled_one_changes_tracks() 
     assert!(changed(&default_sources(), &list));
     let mut renamed = default_sources();
     renamed[0].name = "Game audio".into();
-    assert!(changed(&default_sources(), &renamed), "a name is the track title");
+    assert!(!changed(&default_sources(), &renamed), "a name is applied live, no restart");
+    assert_eq!(json_lines(&live_updates(&default_sources(), &renamed)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","id":"game","name":"Game audio"}"#).unwrap()]);
     let mut disabled_twice = list.clone();
     disabled_twice[1].gain_db = 9.0;
     assert!(!changed(&list, &disabled_twice), "a disabled source records nothing either way");
+}
+
+#[test]
+fn gain_and_names_go_live_and_everything_else_restarts() {
+    let base = default_sources();
+    let mut louder = base.clone();
+    louder[1].gain_db = -4.5;
+    assert!(!changed(&base, &louder), "a fader move keeps the replay buffer");
+    assert_eq!(json_lines(&live_updates(&base, &louder)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","gain_db":-4.5,"id":"mic"}"#).unwrap()]);
+    let mut both = louder.clone();
+    both[1].name = " Voice ".into();
+    assert_eq!(json_lines(&live_updates(&base, &both)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","gain_db":-4.5,"id":"mic","name":"Voice"}"#).unwrap()]);
+    assert!(live_updates(&base, &base).is_empty());
+    let mut device = base.clone();
+    device[1].device = "Microphone (USB Audio Device)".into();
+    assert!(changed(&base, &device), "another device: restart");
+    let mut reordered = base.clone();
+    reordered.swap(0, 1);
+    assert!(changed(&base, &reordered), "track order is the clip's: restart");
+    let mut off = base.clone();
+    off[1].enabled = false;
+    assert!(changed(&base, &off), "a track fewer: restart");
+    let mut off_and_louder = off.clone();
+    off_and_louder[1].gain_db = 3.0;
+    assert!(live_updates(&off, &off_and_louder).is_empty(), "a disabled source has no live track");
 }

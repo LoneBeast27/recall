@@ -123,7 +123,7 @@ pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, report
         let id = if app.id.trim().is_empty() { format!("app-{}", n + 1) } else { app.id.trim().to_owned() };
         let spec = SourceSpec { id, kind: "app".into(), device: String::new(), exe: exe.clone(), name: app.track_name(), gain_db: app.gain_db };
         let ring = Arc::new(TrackRing::for_source(&spec, source, buffer_secs, format!("{exe} (not running)")));
-        let name = ring.title;
+        let name = ring.title();
         let (thread_ring, thread_scanner) = (Arc::clone(&ring), Arc::clone(&scanner));
         let thread_exe = exe.clone();
         let spawned = std::thread::Builder::new()

@@ -195,6 +195,15 @@ pub enum Command {
     SetMicMute { muted: bool },
     /// Toggle microphone capture muting for newly captured replay audio.
     ToggleMicMute,
+    /// The Audio page changed a recorded source's gain or name: applied to its live track,
+    /// with no restart (the replay buffer stays). Unknown ids are ignored.
+    SetSource {
+        id: String,
+        #[serde(default)]
+        gain_db: Option<f32>,
+        #[serde(default)]
+        name: Option<String>,
+    },
     /// Export an existing VFR clip to a separate NVENC CFR file (60 fps default).
     ExportClip {
         path: String,
@@ -249,6 +258,15 @@ pub fn emit_or_log(json: bool, msg: &Outbound, human: impl FnOnce() -> String) {
 #[cfg(test)]
 mod tests {
     use super::Outbound;
+
+    #[test]
+    fn set_source_parses_with_either_field() {
+        use super::Command;
+        let both: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"mic","gain_db":-3.5,"name":"Voice"}"#).unwrap();
+        assert!(matches!(both, Command::SetSource { ref id, gain_db: Some(g), name: Some(ref n) } if id == "mic" && g == -3.5 && n == "Voice"));
+        let gain: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"game","gain_db":6}"#).unwrap();
+        assert!(matches!(gain, Command::SetSource { gain_db: Some(_), name: None, .. }));
+    }
 
     fn wire(msg: &Outbound) -> String {
         serde_json::to_string(msg).unwrap()
