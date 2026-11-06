@@ -197,6 +197,29 @@ fn a_failure_reports_the_seconds_frozen_before_it() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Merge gate 11-07 (P2): the writer starts a same-header recovery's freeze at the old
+/// encoder's encode error (`tap::on_encode_error`), not at its last packet.
+#[test]
+fn the_writer_counts_a_freeze_from_the_encode_error() {
+    let generation = u64::MAX - 100;
+    let dir = temp_dir("errfrozen");
+    let factory = FakeFactory { causes: vec![(generation + 1, machine::Cause::Same)], ..Default::default() };
+    let recorder = Recorder::new(factory, tracks());
+    let mut w = Writer { out_dir: dir.to_string_lossy().into_owned(), json: false, recorder, generation, skew: Duration::ZERO, parts_so_far: Vec::new(), missed: (0.0, 0.0) };
+    let t0 = Instant::now();
+    w.start("G", Some((0, t0)));
+    w.generation = generation;
+    w.data(video(0, true, generation));
+    w.data(video(1_000, false, generation)); // then a static screen: no packets
+    tap::on_encode_error_at(generation, t0 + Duration::from_secs(6));
+    w.data(Data::EncoderReopened { generation: generation + 1, at: t0 + Duration::from_secs(9) });
+    w.data(video(9_000, true, generation + 1));
+    w.data(video(9_016, false, generation + 1));
+    let (_, frozen) = w.missed;
+    assert!((frozen - 3.0).abs() < 0.01, "the error at 6 s to the keyframe at 9 s, not 8 s: {frozen}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn recovery_renames_only_long_recording_parts_and_skips_open_files() {
     use std::os::windows::fs::OpenOptionsExt;

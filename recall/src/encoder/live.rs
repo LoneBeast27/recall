@@ -128,6 +128,7 @@ impl Live {
             Ok(()) => self.reopen.encoded(Instant::now()),
             Err(reason) => {
                 report(cfg.json, &format!("encode error at frame {idx}: {reason}"));
+                crate::longrec::tap::on_encode_error(); // long-recording hook: a freeze starts here
                 let reason = format!("NVENC encode failed: {reason}");
                 // The long recording waits: it ends only if the recovery fails (`tick`).
                 self.enc = None;

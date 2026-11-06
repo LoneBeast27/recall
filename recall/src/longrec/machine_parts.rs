@@ -11,10 +11,11 @@
 //! while it waits (a size flap, a window being dragged) only move it to the
 //! newest size. A reopen whose stream headers match (`Cause::Same`, e.g. GPU
 //! frames to CPU copies at the same size) needs no new file at all; the time from
-//! the old encoder's last packet to the new encoder's first keyframe (the last
-//! frame held on screen through an encode error and its recovery) is reported as
-//! `frozen_seconds`. Gaps between packets with no reopen are not: the encoder is
-//! VFR and a static screen sends nothing.
+//! the old encoder's encode error to the new encoder's first keyframe (the last
+//! frame held on screen through the error and its recovery) is reported as
+//! `frozen_seconds`. With no error known (a reopen nothing failed before) it runs
+//! from the old encoder's last packet. Gaps between packets with no reopen are
+//! not counted: the encoder is VFR and a static screen sends nothing.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -111,15 +112,32 @@ impl<F: SinkFactory> Recorder<F> {
             }
             // Headers match: same file, from the new encoder's first keyframe. The old
             // encoder's last packet holds until then (an encode error and its recovery, up to
-            // the 5th failed reopen): that span is counted as frozen.
+            // the 5th failed reopen): from the error on, that span is counted as frozen (a
+            // static screen before it sent nothing and was not). No error known: from the
+            // last packet.
             Phase::Recording(a) if cause == Cause::Same => {
                 a.need_key = true;
-                if let Some(last) = a.held.as_ref().map(|h| h.0).or(a.last_pts) {
-                    a.freeze_from.get_or_insert(last);
+                let last = a.held.as_ref().map(|h| h.0).or(a.last_pts);
+                let error = a.error_us.take();
+                if let Some(from) = error.map(|e| last.map_or(e, |l| e.max(l))).or(last) {
+                    a.freeze_from.get_or_insert(from);
                 }
                 vec![Event::Log(format!("{}; the long recording goes on in the same file", cause.log_text()))]
             }
             Phase::Recording(_) => self.next_part(now, cause),
+        }
+    }
+
+    /// The live encoder had an encode error at `at` (wall clock, mapped onto the capture
+    /// clock through this part's first frame): a same-header reopen after it counts the
+    /// freeze from here. The first error before a reopen is kept.
+    pub fn encode_error(&mut self, at: Instant) {
+        if let Phase::Recording(a) = &mut self.phase {
+            let us = match at >= a.wall_base {
+                true => a.base_us + at.duration_since(a.wall_base).as_micros() as u64,
+                false => a.base_us.saturating_sub(a.wall_base.duration_since(at).as_micros() as u64),
+            };
+            a.error_us.get_or_insert(us.max(a.base_us));
         }
     }
 

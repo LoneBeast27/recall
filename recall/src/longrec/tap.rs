@@ -7,6 +7,7 @@
 //! Call sites (the only lines outside this module):
 //! - `encoder::run`, after the LIVE encoder opens: [`on_encoder_open`]
 //! - `encoder::live` `tick`, once encoder recovery is spent (status `failed`): [`on_encoder_failed`]
+//! - `encoder::live` `frame`, on an encode error (before the recovery): [`on_encode_error`]
 //! - `Enc::drain`, for each packet before it enters the ring: [`tap_packet`]
 //! - `TrackRing::push_capture`, for each captured chunk: [`tap_audio`]
 //!
@@ -36,6 +37,9 @@ const KEPT_STREAMS: usize = 8;
 /// (generation, reason) of a live encoder that failed for good. Polled by the
 /// writer ([`failure_of`]), so unlike a queued notice it cannot be dropped.
 static FAILED: Mutex<Option<(u64, String)>> = Mutex::new(None);
+/// (generation, when) of a live encoder's encode error (the first one): a same-header
+/// recovery's freeze counts from it. Polled by the writer ([`error_of`]).
+static ERRORED: Mutex<Option<(u64, Instant)>> = Mutex::new(None);
 static SENDER: OnceLock<SyncSender<Data>> = OnceLock::new();
 
 thread_local! {
@@ -126,6 +130,23 @@ pub(super) fn on_encoder_failed_at(generation: u64, reason: &str) {
     if failed.as_ref().is_none_or(|(g, _)| *g != generation) {
         *failed = Some((generation, reason.to_string()));
     }
+}
+
+/// The live encoder hit an encode error now (`encoder::live`; the recovery reopens it).
+pub fn on_encode_error() {
+    on_encode_error_at(GENERATION.load(Relaxed), Instant::now());
+}
+
+pub(super) fn on_encode_error_at(generation: u64, at: Instant) {
+    let mut errored = ERRORED.lock().unwrap_or_else(|p| p.into_inner());
+    if errored.is_none_or(|(g, _)| g != generation) {
+        *errored = Some((generation, at));
+    }
+}
+
+/// When live encoder `generation` had its encode error, if it did.
+pub(super) fn error_of(generation: u64) -> Option<Instant> {
+    ERRORED.lock().unwrap_or_else(|p| p.into_inner()).filter(|(g, _)| *g == generation).map(|(_, at)| at)
 }
 
 /// The generation the failure slot names, if any (tests of the encoder loop).
