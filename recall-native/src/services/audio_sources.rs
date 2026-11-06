@@ -177,6 +177,22 @@ pub fn fader_fraction(gain_db: f32) -> f32 {
     ((gain_db.clamp(GAIN_MIN_DB, GAIN_MAX_DB) - GAIN_MIN_DB) / (GAIN_MAX_DB - GAIN_MIN_DB)).clamp(0.0, 1.0)
 }
 
+/// How long a let-go fader keeps its gain on screen while the save comes back from the recorder.
+pub const PENDING_GAIN_FOR: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// The gain a strip shows: the fader while it is dragged, else the gain just let go (until the
+/// saved list carries it, at most `PENDING_GAIN_FOR` after release), else the saved gain.
+/// Without the middle step the fader and meter snap back to the old gain for the round trip.
+pub fn shown_gain(dragging: Option<f32>, pending: Option<(f32, std::time::Duration)>, saved: f32) -> f32 {
+    if let Some(gain) = dragging {
+        return gain;
+    }
+    match pending {
+        Some((gain, since)) if since < PENDING_GAIN_FOR && (gain - saved).abs() > 0.01 => gain,
+        _ => saved,
+    }
+}
+
 /// "+3.5 dB", "0 dB", "-60 dB".
 pub fn gain_label(gain_db: f32) -> String {
     if gain_db.abs() < 0.05 {
