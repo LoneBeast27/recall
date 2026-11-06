@@ -190,6 +190,20 @@ bookmark_hotkey = \"Alt+B\"
 }
 
 #[test]
+fn alt_u_is_cleared_whenever_another_binding_holds_it_even_when_the_file_names_it() {
+    let both = load("[recording]
+editor_hotkey = \"Alt+U\"
+stats_hotkey = \"Alt+U\"
+");
+    assert_eq!((both.stats_hotkey.as_str(), both.editor_hotkey.as_str()), ("Alt+U", ""), "the other action keeps Alt+U");
+    assert!(validate(&both).is_ok(), "the loaded config still validates");
+    let mine = load("[recording]
+editor_hotkey = \"Alt+U\"
+");
+    assert_eq!(mine.editor_hotkey, "Alt+U", "nobody else holds it: kept");
+}
+
+#[test]
 fn a_new_era_config_keeps_its_empty_keys_off() {
     let text = "[recording]\nbookmark_hotkey = \"\"\nstats_hotkey = \"\"\n";
     let r = load(text);

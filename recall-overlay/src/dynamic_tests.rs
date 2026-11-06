@@ -336,13 +336,13 @@ fn a_placed_spot_survives_a_restart_and_a_title_key_is_refused() {
     let path = dir.join("island-hud.json");
     let right = SavedSpot { x: 0.97, y: 0.4, edge: Edge::Right };
     let mut cache = HudCache::load(Some(path.clone()));
-    cache.add("rocketleague", HudGrid { cols: 8, rows: 1, grid: vec![2] });
+    cache.add("rocketleague@9", HudGrid { cols: 8, rows: 1, grid: vec![2] });
     cache.set_spot("rocketleague", Some(right));
     cache.set_spot("Rocket League (64-bit)", Some(right));
     cache.set_spot("valorant", Some(SavedSpot { x: 2.0, y: 0.5, edge: Edge::Free }));
     let back = HudCache::load(Some(path.clone()));
     assert_eq!(back.spot("rocketleague"), Some(right), "round trip through the file");
-    assert_eq!(back.scans("rocketleague"), 1, "the scans stay next to it");
+    assert_eq!(back.scans("rocketleague@9"), 1, "the scans (per shape) stay next to it");
     assert_eq!(back.spot("Rocket League (64-bit)"), None, "a title-like key is never kept");
     assert_eq!(back.spot("valorant"), None, "an off-screen spot is refused");
     let text = std::fs::read_to_string(&path).unwrap();
@@ -356,4 +356,23 @@ fn a_placed_spot_survives_a_restart_and_a_title_key_is_refused() {
     assert_eq!((cleaned.spot("My Secret Chat"), cleaned.spot("discord").map(|s| s.edge)), (None, Some(Edge::Top)));
     assert!(!std::fs::read_to_string(&path).unwrap().contains("Secret"), "rewritten without the title");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn placed_spots_are_capped_at_64_games_the_oldest_going_first() {
+    use crate::spot_edit::{Edge, SavedSpot};
+    let spot = SavedSpot { x: 0.5, y: 0.0, edge: Edge::Top };
+    let mut cache = HudCache::load(None);
+    for i in 0..MAX_GAMES + 3 {
+        cache.set_spot(&format!("game{i}"), Some(spot));
+    }
+    assert_eq!(cache.file.spots.len(), MAX_GAMES);
+    assert_eq!((cache.spot("game0"), cache.spot("game2")), (None, None), "the 3 placed longest ago went");
+    assert_eq!(cache.spot("game3"), Some(spot));
+    // Placing an old one again makes it the newest.
+    cache.set_spot("game3", Some(spot));
+    cache.set_spot("fresh", Some(spot));
+    assert_eq!((cache.spot("game3"), cache.spot("game4")), (Some(spot), None));
+    cache.set_spot("fresh", None);
+    assert!(!cache.file.spots_seq.contains_key("fresh"), "a cleared spot leaves no order behind");
 }

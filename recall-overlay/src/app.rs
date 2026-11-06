@@ -36,7 +36,6 @@ use crate::zorder::{self, game_in_front, keep_on_top, Names, Raise};
 mod place;
 #[path = "app_editor.rs"]
 mod editor;
-pub use editor::{held_arrow, held_key};
 
 pub const BASE_TIMER: usize = 1;
 pub const BASE_MS: u32 = 250;
@@ -189,7 +188,7 @@ impl App {
             changed |= match feed {
                 Feed::Connected => self.reducer.connected(),
                 Feed::Disconnected => self.reducer.disconnected(),
-                Feed::Json(value) if editor::is_toggle(&value) => self.toggle_editor(hwnd, now),
+                Feed::Json(value) if editor::is_toggle(&value) => self.answer_editor_toggle(hwnd, now),
                 Feed::Json(value) => match hud_scan(&value) {
                     Some(scan) => self.on_hud_scan(scan, now),
                     None => self.reducer.apply_envelope(&value, now),

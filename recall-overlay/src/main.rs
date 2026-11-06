@@ -50,7 +50,8 @@ use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CON
 use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, PostMessageW, PostQuitMessage, SetTimer,
     SetWindowDisplayAffinity, TranslateMessage, HTCLIENT, HTTRANSPARENT, MSG, WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_CLOSE,
-    WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_TIMER,
+    WM_CAPTURECHANGED, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT,
+    WM_RBUTTONUP, WM_TIMER,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 
@@ -324,33 +325,48 @@ fn on_tick(hwnd: HWND, animation_frame: bool) {
     }
 }
 
+/// `WM_MOUSEMOVE`'s wParam bit: the left button is down (WinUser.h).
+const MK_LBUTTON: usize = 0x0001;
+
 extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
         // Click-through, except while the island editor runs (the pill takes the mouse).
         WM_NCHITTEST => LRESULT(if with_app(|app| app.editing()) == Some(true) { HTCLIENT as isize } else { HTTRANSPARENT as isize }),
+        // The island editor is mouse only (no keys held): drag, release saves,
+        // right-click cancels, the pill's ⟲ end resets.
         WM_LBUTTONDOWN => {
-            if with_app(|app| app.editor_press(Instant::now())) == Some(true) {
-                unsafe { SetCapture(hwnd) };
+            match with_app(|app| app.editor_press(hwnd, Instant::now())) {
+                Some(true) => unsafe {
+                    SetCapture(hwnd);
+                },
+                Some(false) => on_tick(hwnd, false),
+                None => {}
             }
             LRESULT(0)
         }
         WM_MOUSEMOVE => {
-            with_app(|app| app.editor_drag(hwnd, Instant::now()));
+            // No MK_LBUTTON: the release never reached the window (a stuck drag).
+            let held = wparam.0 & MK_LBUTTON != 0;
+            with_app(|app| app.editor_drag(hwnd, held, Instant::now()));
             LRESULT(0)
         }
         WM_LBUTTONUP => {
+            with_app(|app| app.editor_release(Instant::now()));
             unsafe {
                 let _ = ReleaseCapture();
             }
-            with_app(|app| app.editor_release(Instant::now()));
             LRESULT(0)
         }
-        WM_HOTKEY => {
-            if let Some(key) = app::held_key(wparam.0 as i32) {
-                with_app(|app| app.finish_editor(hwnd, key));
+        WM_RBUTTONUP => {
+            if with_app(|app| app.editor_cancel(hwnd)) == Some(true) {
                 on_tick(hwnd, false);
-            } else if let Some(dir) = app::held_arrow(wparam.0 as i32) {
-                with_app(|app| app.editor_nudge(hwnd, dir, Instant::now()));
+            }
+            LRESULT(0)
+        }
+        // Another window took the mouse mid-drag: the editor ends, nothing more saved.
+        WM_CAPTURECHANGED => {
+            if HWND(lparam.0 as *mut _) != hwnd && with_app(|app| app.editor_capture_lost(hwnd)) == Some(true) {
+                on_tick(hwnd, false);
             }
             LRESULT(0)
         }

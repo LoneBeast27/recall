@@ -57,6 +57,13 @@ struct Diagnostics<'a> {
     font_families: (String, String),
 }
 
+/// The extended style the window must carry. While the island editor runs
+/// the pill takes the mouse, so `WS_EX_TRANSPARENT` is not required then.
+pub fn required_style(editing: bool) -> u32 {
+    let all = (WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST).0;
+    if editing { all & !WS_EX_TRANSPARENT.0 } else { all }
+}
+
 pub(super) fn write_diagnostics(app: &App, hwnd: HWND) {
     let Some(path) = app.diagnostics_path.as_ref() else { return };
     let now = Instant::now();
@@ -65,7 +72,7 @@ pub(super) fn write_diagnostics(app: &App, hwnd: HWND) {
         let _ = GetWindowRect(hwnd, &mut rect);
     }
     let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } as u32;
-    let required = (WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TOPMOST).0;
+    let required = required_style(app.editing());
     let frame = app.island.frame(now);
     let placed = app.placed.as_ref();
     let diagnostics = Diagnostics {
@@ -104,5 +111,17 @@ pub(super) fn write_diagnostics(app: &App, hwnd: HWND) {
     };
     if let Ok(json) = serde_json::to_vec_pretty(&diagnostics) {
         let _ = fs::write(path, json);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn click_through_is_required_except_while_editing() {
+        assert_ne!(required_style(false) & WS_EX_TRANSPARENT.0, 0);
+        assert_eq!(required_style(true) & WS_EX_TRANSPARENT.0, 0, "the editor takes the mouse");
+        assert_eq!(required_style(true) | WS_EX_TRANSPARENT.0, required_style(false), "nothing else changes");
     }
 }
