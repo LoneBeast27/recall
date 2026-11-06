@@ -14,6 +14,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{GetCapture, ReleaseCapture};
 use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowLongPtrW, SetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TRANSPARENT};
 
 use super::App;
+use crate::guide;
+use crate::guide_window::GuideWindow;
 use crate::island::Content;
 use crate::layout::{Measure, Role};
 use crate::notice::{NoticeView, Tone};
@@ -34,22 +36,43 @@ pub fn is_toggle(value: &Value) -> bool {
         && value.get("event").and_then(|e| e.get("type")).and_then(Value::as_str) == Some("island_editor")
 }
 
-/// The live window as the editor sees it.
-struct Window(HWND);
+/// The live window as the editor sees it, and the guide grid's slot.
+struct Window<'a> {
+    hwnd: HWND,
+    guide: &'a mut Option<GuideWindow>,
+    /// Why the grid could not be made (the editor runs without it).
+    error: Option<String>,
+}
 
-impl EditWindow for Window {
+impl<'a> Window<'a> {
+    fn new(hwnd: HWND, guide: &'a mut Option<GuideWindow>) -> Self {
+        Self { hwnd, guide, error: None }
+    }
+}
+
+impl EditWindow for Window<'_> {
     fn set_click_through(&mut self, on: bool) {
         unsafe {
-            let style = GetWindowLongPtrW(self.0, GWL_EXSTYLE);
+            let style = GetWindowLongPtrW(self.hwnd, GWL_EXSTYLE);
             let bit = WS_EX_TRANSPARENT.0 as isize;
-            SetWindowLongPtrW(self.0, GWL_EXSTYLE, if on { style | bit } else { style & !bit });
+            SetWindowLongPtrW(self.hwnd, GWL_EXSTYLE, if on { style | bit } else { style & !bit });
         }
     }
 
     fn release_capture(&mut self) {
-        if unsafe { GetCapture() } == self.0 {
+        if unsafe { GetCapture() } == self.hwnd {
             unsafe {
                 let _ = ReleaseCapture();
+            }
+        }
+    }
+
+    fn show_guide(&mut self, on: bool) {
+        *self.guide = None;
+        if on {
+            match GuideWindow::create() {
+                Ok(guide) => *self.guide = Some(guide),
+                Err(error) => self.error = Some(error),
             }
         }
     }
@@ -107,7 +130,12 @@ impl App {
         let key = session.hud_key();
         let has_game = !session.desktop && !key.is_empty();
         let refused = refusal(self.dynamic(), has_game, game_in_front(session.target_pid), exclusive_fullscreen());
-        match begin(&mut Window(hwnd), refused, &key, self.hud_cache.spot(&key), now) {
+        let mut window = Window::new(hwnd, &mut self.guide);
+        let begun = begin(&mut window, refused, &key, self.hud_cache.spot(&key), now);
+        if let Some(error) = window.error.take() {
+            self.trace.note("guide", format!("no grid: {error}"));
+        }
+        match begun {
             Ok(editor) => {
                 self.editor = Some(editor);
                 self.trace.note("editor", format!("on for {key}"));
@@ -124,7 +152,7 @@ impl App {
     /// Leaves the editor; `how` decides what is written for the game.
     pub fn finish_editor(&mut self, hwnd: HWND, how: EditKey) -> bool {
         let Some(mut editor) = self.editor.take() else { return false };
-        let line = match end(&mut Window(hwnd), &mut editor, how) {
+        let line = match end(&mut Window::new(hwnd, &mut self.guide), &mut editor, how) {
             Some(spot) => {
                 self.hud_cache.set_spot(&editor.key, spot);
                 match spot {
@@ -184,7 +212,7 @@ impl App {
         let [l, t, r, b] = self.bounds;
         let (Some(editor), Some(placed)) = (self.editor.as_mut(), self.placed.as_mut()) else { return };
         let shown = ((r - l) as f32, (b - t) as f32);
-        if editor.drag(cursor(), shown, &placed.monitor, SNAP * placed.scale, now) {
+        if editor.drag(cursor(), shown, &placed.monitor, &placed.area, SNAP * placed.scale, now) {
             self.sync_placed();
             self.refresh(hwnd, now);
         }
@@ -208,6 +236,24 @@ impl App {
     /// (nothing more written).
     pub fn editor_capture_lost(&mut self, hwnd: HWND) -> bool {
         self.editor.as_ref().is_some_and(|e| e.dragging()) && self.finish_editor(hwnd, EditKey::Leave)
+    }
+
+    /// The guide grid over the placement area: drawn whole once per size or
+    /// when a centre line lights or dims, else only the readout moves.
+    pub(super) fn update_guide(&mut self, hwnd: HWND) {
+        let (Some(grid), Some(placed), Some(editor)) = (self.guide.as_mut(), self.placed.as_ref(), self.editor.as_ref()) else { return };
+        let area = placed.area;
+        let lines = guide::lines_of(editor.spot, &placed.monitor, &area);
+        let [l, t, r, b] = self.bounds;
+        let pill = (r > l && b > t).then(|| {
+            let centre = ((l + r) as f32 / 2.0, (t + b) as f32 / 2.0);
+            ([l - area.left, t - area.top, r - area.left, b - area.top], guide::readout(centre, &area))
+        });
+        let (_, (w, h)) = guide::frame(&area);
+        let scene = guide::scene(w, h, placed.scale, lines, pill, &self.fonts);
+        if let Err(error) = grid.update(hwnd, &area, &self.fonts, scene) {
+            self.trace.note("guide", error);
+        }
     }
 
     /// The placement follows the editor's spot.
@@ -237,6 +283,23 @@ mod tests {
         assert!(!on_reset(wide, (520.0, 30.0), 60.0), "outside the window");
         let tall = [2500, 400, 2550, 900];
         assert!(on_reset(tall, (2520.0, 880.0), 60.0) && !on_reset(tall, (2520.0, 600.0), 60.0), "a side pill: its bottom end");
+    }
+
+    /// The live window side: the grid's real window is made on start and
+    /// destroyed on every way out (never shown: it is drawn only on a frame).
+    #[test]
+    fn every_exit_path_destroys_the_real_grid_window() {
+        use crate::spot_edit::EditKey;
+        use windows::Win32::UI::WindowsAndMessaging::IsWindow;
+        let t0 = Instant::now();
+        for how in [EditKey::Leave, EditKey::Cancel, EditKey::Reset] {
+            let mut slot = None;
+            let mut editor = begin(&mut Window::new(HWND::default(), &mut slot), None, "valorant", None, t0).unwrap();
+            let grid = slot.as_ref().map(|g| g.hwnd).expect("the grid is made on start");
+            assert!(unsafe { IsWindow(Some(grid)) }.as_bool());
+            end(&mut Window::new(HWND::default(), &mut slot), &mut editor, how);
+            assert!(slot.is_none() && !unsafe { IsWindow(Some(grid)) }.as_bool(), "{how:?}: the grid window is destroyed");
+        }
     }
 
     #[test]
