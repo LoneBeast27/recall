@@ -14,6 +14,14 @@ use serde_json::Value;
 
 use crate::placement::{Anchor, EDGE, NOTICE_H, REF_HEIGHT};
 
+/// A scan marking more of the picture than this as HUD came from menus or
+/// replays, not play (the engine refuses these too; older saved ones are skipped).
+pub const MAX_HUD_SHARE: f32 = 0.30;
+
+fn share(scan: &[u64], cols: u32, rows: u32) -> f32 {
+    scan.iter().map(|r| r.count_ones()).sum::<u32>() as f32 / (cols * rows).max(1) as f32
+}
+
 /// Scans kept per game.
 pub const KEEP: usize = 6;
 /// Games kept; the one scanned longest ago goes first.
@@ -169,14 +177,18 @@ impl HudCache {
 
     /// Every kept scan of the game, together (a cell is HUD when any scan saw it).
     pub fn grid(&self, key: &str) -> Option<HudGrid> {
-        let entry = self.file.games.get(key).filter(|e| !e.scans.is_empty())?;
-        let grid = (0..entry.rows as usize).map(|r| entry.scans.iter().fold(0, |bits, s| bits | s.get(r).copied().unwrap_or(0))).collect();
+        let entry = self.file.games.get(key)?;
+        let good: Vec<&Vec<u64>> = entry.scans.iter().filter(|s| share(s, entry.cols, entry.rows) <= MAX_HUD_SHARE).collect();
+        if good.is_empty() {
+            return None;
+        }
+        let grid = (0..entry.rows as usize).map(|r| good.iter().fold(0, |bits, s| bits | s.get(r).copied().unwrap_or(0))).collect();
         Some(HudGrid { cols: entry.cols, rows: entry.rows, grid })
     }
 
     /// Keeps a new scan (a grid of another size starts the game over) and saves.
     pub fn add(&mut self, key: &str, scan: HudGrid) {
-        if key.is_empty() {
+        if key.is_empty() || share(&scan.grid, scan.cols, scan.rows) > MAX_HUD_SHARE {
             return;
         }
         let entry = self.file.games.entry(key.to_string()).or_default();
