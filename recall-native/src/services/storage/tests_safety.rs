@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::os::windows::fs::{FileTimesExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime};
 
 use super::*;
 use crate::test_temp::TempDir;
@@ -111,27 +111,20 @@ fn a_locked_ownership_list_is_left_alone_and_nothing_is_adopted() {
     assert_eq!(std::fs::read_to_string(&list).unwrap(), text, "the list is not overwritten");
 }
 
+/// Review 11-07: unmarked kept copies from before the mark may be the only copy of a clip;
+/// the start-up sweep leaves every one of them (a leak, never a delete).
 #[test]
-fn old_unmarked_kept_copies_go_only_within_the_cap() {
-    let (sandbox, _root) = cache("kept-cap");
+fn old_unmarked_kept_copies_are_never_deleted() {
+    let (sandbox, root) = cache("kept-cap");
     let kept = sandbox.join("kept");
-    let old_name = "VALORANT__2026-10-01__10-00-00-000__0123456789abcdef0123456789abcdef.mp4";
-    let old = kept.join(old_name);
+    let old = kept.join("VALORANT__2026-10-01__10-00-00-000__0123456789abcdef0123456789abcdef.mp4");
     write(&old, 4096);
     aged(&old, 30);
-    let user = kept.join("My clip.mp4");
-    write(&user, 4096);
-    aged(&user, 30);
-    let fresh = kept.join("VALORANT__2026-11-07__10-00-00-000__fedcba9876543210fedcba9876543210.mp4");
-    write(&fresh, 4096);
-    let since = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64 - 24 * 3600 * 1000;
-    // Over the cap: more than the old engine could have left, so none of it is assumed its own.
-    assert_eq!(kept::sweep_old_unmarked(&kept, since, 1000), 0);
-    assert!(old.exists(), "over the cap nothing goes");
-    assert_eq!(kept::sweep_old_unmarked(&kept, since, 1 << 20), 1);
-    assert!(!old.exists(), "an old copy with the recorder's exact name, from before the mark, goes");
-    assert!(user.exists(), "a name outside the recorder's scheme stays");
-    assert!(fresh.exists(), "a copy made since the mark existed is not an old one");
+    let clips = sandbox.join("clips");
+    std::fs::create_dir_all(&clips).unwrap();
+    let (_adopted, deleted) = kept::sweep_in(&root, &kept, &clips, 1 << 30);
+    assert_eq!(deleted, 0);
+    assert!(old.exists(), "an old unmarked copy whose clip is gone stays");
 }
 
 #[test]

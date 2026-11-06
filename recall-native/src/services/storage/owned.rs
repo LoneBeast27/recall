@@ -183,14 +183,6 @@ pub(super) fn listed(root: &Path) -> BTreeSet<String> {
     load_locked(root).files
 }
 
-/// When the cache was adopted (`None`: a list from before `since_ms`, or none readable).
-pub(super) fn since_ms(root: &Path) -> Option<u64> {
-    let _guard = lock();
-    match read(root) {
-        Read::Listed(owned) => owned.since_ms,
-        _ => None,
-    }
-}
 
 /// Lists `rel` (`video/<id>.mp4`): call before the file or its temporary is created. With an
 /// unreadable list the mark is not saved (the file is then never evicted: a leak, not a loss).
