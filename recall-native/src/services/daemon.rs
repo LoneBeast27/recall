@@ -230,7 +230,7 @@ pub enum DaemonEvent {
     /// (a same-header encoder reopen waiting for its keyframe).
     RecordingStopped { path: String, seconds: f64, parts: u32, gap_seconds: f64, frozen_seconds: f64 },
     /// `files`: what the recording left (it ended early), empty when nothing was saved.
-    RecordingFailed { reason: String, files: Vec<String> },
+    RecordingFailed { reason: String, files: Vec<String>, gap_seconds: f64, frozen_seconds: f64 },
     /// A clip saved to the SSD first reached the clip folder. `kept_path`: the engine kept its
     /// staged copy there for the SSD video cache (`storage::adopt_kept`).
     ClipMoved { path: String, kept_path: Option<String> },

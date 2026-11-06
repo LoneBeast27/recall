@@ -206,8 +206,8 @@ fn a_continued_recording_maps_to_its_own_events() {
             DaemonEvent::RecordingPartSaved { path: "E:/G__rec.mp4".into() },
             DaemonEvent::RecordingContinued { part: 2, cause: "size".into() },
             DaemonEvent::RecordingStopped { path: "E:/G__rec-2.mp4".into(), seconds: 3600.0, parts: 2, gap_seconds: 7.5, frozen_seconds: 40.0 },
-            DaemonEvent::RecordingFailed { reason: "the video encoder failed".into(), files: vec!["E:/H__rec.mp4".into(), "E:/H__rec-2.mp4".into()] },
-            DaemonEvent::RecordingFailed { reason: "old engine".into(), files: vec!["E:/I__rec.mp4".into()] },
+            DaemonEvent::RecordingFailed { reason: "the video encoder failed".into(), files: vec!["E:/H__rec.mp4".into(), "E:/H__rec-2.mp4".into()], gap_seconds: 0.0, frozen_seconds: 0.0 },
+            DaemonEvent::RecordingFailed { reason: "old engine".into(), files: vec!["E:/I__rec.mp4".into()], gap_seconds: 0.0, frozen_seconds: 0.0 },
         ]
     );
 }
