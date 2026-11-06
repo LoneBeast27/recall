@@ -29,7 +29,7 @@ impl Extras {
             Command::Bookmark => self.bookmark(),
             Command::Screenshot => self.shots.request(),
             Command::HudProbe => self.hud.request(),
-            Command::RecordStart | Command::RecordStop | Command::RecordToggle => self.record(cmd),
+            Command::RecordStart | Command::RecordStop | Command::RecordToggle | Command::RecordFail { .. } => self.record(cmd),
             _ => return false,
         }
         true
@@ -63,6 +63,7 @@ impl Extras {
         match cmd {
             Command::RecordStart => lr.start(&self.source(), start),
             Command::RecordStop => lr.stop(),
+            Command::RecordFail { reason } => lr.fail(reason),
             _ => lr.toggle(&self.source(), start),
         }
     }

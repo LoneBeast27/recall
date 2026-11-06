@@ -258,3 +258,18 @@ fn the_encoder_thread_beats_every_turn_without_frames_and_stops_while_an_open_ha
     std::thread::sleep(Duration::from_millis(1_200));
     assert!(stats.heartbeat.load(Relaxed) > hung, "the beat did not come back after the open");
 }
+
+#[test]
+fn an_open_in_progress_is_flagged_while_it_runs() {
+    // No NVENC needed: the flag wraps the open, whatever it answers.
+    let stats = Arc::new(EncStats::default());
+    let mut enc = Loop::start_with(stats.clone());
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(!stats.opening.load(Relaxed));
+    stats.faults.open_hang_ms.store(1_000, Relaxed);
+    enc.rgba(BIG);
+    std::thread::sleep(Duration::from_millis(400));
+    assert!(stats.opening.load(Relaxed), "a hung open is not flagged as an open in progress");
+    std::thread::sleep(Duration::from_millis(1_500));
+    assert!(!stats.opening.load(Relaxed), "the flag outlived the open");
+}

@@ -276,6 +276,7 @@ impl App {
             codec,
             recording_mode: "vfr".to_string(),
             encoder_heartbeat: self.encoder_heartbeat(),
+            encoder_opening: self.encoder_opening(),
             mic_muted: { #[cfg(feature="encode")] { audio::mic_muted() } #[cfg(not(feature="encode"))] { false } },
             audio: { #[cfg(feature="encode")] { audio_opened() } #[cfg(not(feature="encode"))] { Vec::new() } },
         });
@@ -313,6 +314,15 @@ impl App {
             return enc.stats.heartbeat.load(Relaxed);
         }
         0
+    }
+
+    /// `status.encoder_opening` (`EncStats::opening`).
+    fn encoder_opening(&self) -> bool {
+        #[cfg(feature = "encode")]
+        if let Some(enc) = &self.encoder {
+            return enc.stats.opening.load(Relaxed);
+        }
+        false
     }
 
     #[cfg(not(feature = "encode"))]
