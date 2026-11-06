@@ -132,6 +132,19 @@ impl TrackRing {
         }
     }
 
+    /// A 48 kHz stereo game-audio ring of `buffer_secs` fed by the test (no WASAPI).
+    #[cfg(test)]
+    pub(crate) fn for_test(name: &'static str, buffer_secs: u32) -> Self {
+        let spec = SourceSpec { id: name.into(), kind: "game".into(), device: String::new(), exe: String::new(), name: name.into(), gain_db: 0.0 };
+        Self::for_source(&spec, "game", buffer_secs, String::new())
+    }
+
+    /// Append samples as the capture thread does.
+    #[cfg(test)]
+    pub(crate) fn push_for_test(&self, data: &[f32]) {
+        self.push_capture(data, false);
+    }
+
     /// The source's gain is, or has been, above 0 dB: every output of this track goes through
     /// the peak limiter (it leaves samples under the ceiling as they are).
     pub fn boosted(&self) -> bool {

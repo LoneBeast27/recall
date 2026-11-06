@@ -48,6 +48,19 @@ impl OwnedParams {
     /// Both streams can share one MP4 sample entry: same codec, size and parameter sets
     /// (SPS/PPS extradata), so packets of either decode with these. The input pixel
     /// format (D3D11 or RGB0) is not part of the stream.
+    /// The parameter-set bytes (SPS/PPS, HEVC VPS, AV1 sequence header).
+    #[cfg(test)]
+    pub fn extradata(&self) -> Vec<u8> {
+        // SAFETY: a live, owned AVCodecParameters; extradata is valid for its size.
+        unsafe {
+            let p = &*self.0.as_ptr();
+            if p.extradata.is_null() || p.extradata_size <= 0 {
+                return Vec::new();
+            }
+            std::slice::from_raw_parts(p.extradata, p.extradata_size as usize).to_vec()
+        }
+    }
+
     pub fn same_stream(&self, other: &OwnedParams) -> bool {
         // SAFETY: both point at live, owned AVCodecParameters; the extradata pointer is
         // valid for `extradata_size` bytes (or null with size 0).

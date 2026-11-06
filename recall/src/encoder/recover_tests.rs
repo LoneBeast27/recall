@@ -148,3 +148,57 @@ fn a_cpu_fallback_reports_degraded_and_the_gpu_path_comes_back() {
     }
     assert!(wait(|| stats.label() == "h264_nvenc"), "label {} after the GPU came back", stats.label());
 }
+
+/// Feed CPU frames until `until` holds (at most `secs` seconds of them).
+fn rgba_until(enc: &mut Loop, secs: u64, mut until: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(secs);
+    while Instant::now() < deadline {
+        if until() {
+            return true;
+        }
+        rgba_for(enc, 1);
+    }
+    until()
+}
+
+#[test]
+fn a_gpu_retry_that_gets_no_gpu_frame_does_not_stop_the_later_retries() {
+    let _one = nvenc();
+    let Some(mut capture) = Capture::new() else { return };
+    let (stats, _) = stats();
+    stats.faults.open_errors.store(1, Relaxed);
+    let mut enc = Loop::start_with(stats.clone());
+    capture.frames(&mut enc, BIG, 1);
+    if !wait(|| stats.gpu_refused.load(Relaxed)) {
+        return crate::hw_skip::skipped("GPU frames were never refused (no NVENC?)");
+    }
+    // The first retry (1 min, here 1 s) comes; capture never answers it with a GPU frame
+    // (its pipeline did not start again). CPU copies keep recording.
+    assert!(rgba_until(&mut enc, 5, || stats.gpu_retry.swap(false, Relaxed)), "no first GPU retry");
+    // The unanswered retry counts as refused: degraded again, and the schedule goes on.
+    assert!(rgba_until(&mut enc, 5, || stats.gpu_refused.load(Relaxed)), "the unanswered retry is never counted: label {}", stats.label());
+    assert_eq!(stats.label(), "degraded");
+    assert!(rgba_until(&mut enc, 10, || stats.gpu_retry.load(Relaxed)), "the later retry (5 min, here 5 s) never came");
+}
+
+#[test]
+fn a_switch_from_gpu_frames_to_cpu_copies_keeps_the_buffer() {
+    // NVENC writes the same parameter sets for D3D11 and RGB0 input (headers_tests), so
+    // the replay joins across the switch instead of cutting at it.
+    let _one = nvenc();
+    let Some(mut capture) = Capture::new() else { return };
+    let (stats, _) = stats();
+    let mut enc = Loop::start_with(stats.clone());
+    capture.frames(&mut enc, BIG, 1);
+    if !enc.nvenc_opened() {
+        return;
+    }
+    for _ in 0..SECOND {
+        capture.frames(&mut enc, BIG, 1);
+        std::thread::sleep(Duration::from_millis(16));
+    }
+    rgba_for(&mut enc, SECOND);
+    let secs = enc.clip_after_settling();
+    eprintln!("gpu -> cpu switch: clip {secs:.2} s");
+    assert!(secs > 1.6, "the save cut at the GPU -> CPU switch: {secs:.2} s of ~2 s");
+}
