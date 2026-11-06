@@ -17,6 +17,8 @@ pub const SAVE_STALE: Duration = Duration::from_secs(120);
 /// A `record_start` with no `recording_started` / `_failed` after this is dropped
 /// (the engine's own keyframe wait is 30 s).
 pub const START_STALE: Duration = Duration::from_secs(35);
+/// Why a long recording cannot start while a closed game drains.
+pub const DRAIN_RECORD_REASON: &str = "The game closed; nothing to record";
 /// How long a pause waits for the long recording to report stopping.
 pub const PAUSE_STOP_WAIT: Duration = Duration::from_secs(10);
 
@@ -127,21 +129,30 @@ impl EngineActivity {
     }
 
     /// What holds a due retarget now (see `EnginePlanner::step`): saves in
-    /// flight, and a long recording whose stop has not timed out.
+    /// flight, and an active long recording whose stop has not timed out. A
+    /// recording still starting has nothing to save: the retarget's engine
+    /// restart drops it.
     pub fn retarget_busy(&mut self, now: Instant) -> Busy {
         self.busy(now); // expire stale saves / starts
         let given_up = self.auto_stop.is_some_and(|s| now >= s.deadline);
-        Busy { saving: self.pending_saves > 0, long_rec: self.long != LongRec::Idle && !given_up }
+        Busy { saving: self.pending_saves > 0, long_rec: self.is_recording() && !given_up }
     }
 
-    /// A retarget needs the long recording stopped. `true` = send
+    /// A retarget needs the active long recording stopped. `true` = send
     /// `record_stop` now; once per recording, later calls only wait.
     pub fn auto_stop(&mut self, now: Instant, game_closed: bool) -> bool {
-        if self.long == LongRec::Idle || self.auto_stop.is_some() {
+        if !self.is_recording() || self.auto_stop.is_some() {
             return false;
         }
         self.auto_stop = Some(AutoStop { deadline: now + PAUSE_STOP_WAIT, game_closed });
         true
+    }
+
+    /// Why `cmd` (a long-recording command) is refused now: a start while a
+    /// closed game drains has no window to record. `None` = send it.
+    pub fn record_refusal(&self, cmd: &str, draining: bool) -> Option<&'static str> {
+        let starts = cmd == "record_start" || (cmd == "record_toggle" && !self.is_recording());
+        (draining && starts).then_some(DRAIN_RECORD_REASON)
     }
 
     /// Session-status `long_recording`.
@@ -261,6 +272,62 @@ mod tests {
         b.save_sent(t0);
         assert_eq!(b.retarget_busy(t0 + s(1)), Busy { saving: true, long_rec: false });
         assert_eq!(b.retarget_busy(t0 + SAVE_STALE), Busy::default());
+    }
+
+    #[test]
+    fn a_long_recording_cannot_start_while_a_closed_game_drains() {
+        let mut a = EngineActivity::default();
+        for cmd in ["record_start", "record_toggle"] {
+            assert_eq!(a.record_refusal(cmd, true), Some(DRAIN_RECORD_REASON), "{cmd}");
+            assert_eq!(a.record_refusal(cmd, false), None, "{cmd}: on target it starts");
+        }
+        assert_eq!(a.record_refusal("record_stop", true), None);
+        a.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
+        assert_eq!(a.record_refusal("record_toggle", true), None, "a toggle that stops is never refused");
+        assert_eq!(a.record_refusal("record_start", true), Some(DRAIN_RECORD_REASON));
+    }
+
+    #[test]
+    fn a_starting_long_recording_never_holds_a_retarget() {
+        let t0 = Instant::now();
+        let mut a = EngineActivity::default();
+        a.record_requested(t0);
+        assert_eq!(a.retarget_busy(t0 + Duration::from_secs(1)), Busy::default(), "not yet recording: nothing to save");
+        assert!(!a.auto_stop(t0 + Duration::from_secs(1), true), "nothing to stop either");
+        a.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
+        assert!(a.retarget_busy(t0 + Duration::from_secs(2)).long_rec, "an active recording is stopped first");
+    }
+
+    #[test]
+    fn a_game_recreating_its_window_during_a_long_recording_is_never_held_forever() {
+        use crate::record_engine::{EnginePlanner, EngineTarget, Step, EXIT_LINGER};
+        use crate::record_target::Target;
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let win = |hwnd| EngineTarget::Window(Target { hwnd, pid: 7, name: "G".into(), exe: "G.exe".into() });
+        let (mut p, mut a) = (EnginePlanner::new(EXIT_LINGER), EngineActivity::default());
+        assert_eq!(p.step(&win(1), t0, a.retarget_busy(t0)), Step::Apply(win(1)));
+        a.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
+        // Fullscreen -> windowed: same pid, new hwnd. The engine never answers the stop.
+        let mut sent = 0;
+        let mut applied_at = None;
+        for tick in 1..=3600u64 {
+            let now = t0 + s(tick);
+            match p.step(&win(2), now, a.retarget_busy(now)) {
+                Step::StopLongRec { game_closed } => {
+                    assert!(!game_closed);
+                    sent += a.auto_stop(now, game_closed) as u32;
+                }
+                Step::Apply(t) => {
+                    assert_eq!(t, win(2));
+                    applied_at = Some(tick);
+                    break;
+                }
+                other => panic!("tick {tick}: {other:?}"),
+            }
+        }
+        assert_eq!(sent, 1, "record_stop sent once");
+        assert_eq!(applied_at, Some(1 + PAUSE_STOP_WAIT.as_secs()), "retargeted once the stop timed out");
     }
 
     #[test]
