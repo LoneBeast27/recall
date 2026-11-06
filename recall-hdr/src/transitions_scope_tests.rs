@@ -1,8 +1,8 @@
 //! Transition rows added by the coordinator's second-pass audit (ADDENDUM-2026-11-06, lane 6:
 //! T2, T3, T5, T9, T11; T1 is engine-side, `recall/src/audio_sleep_tests.rs`). Expected
-//! behaviour first, measured on master; a failing row is fixed in another lane set
-//! (`transitions-fixes`, branch fix/transition-targets) and marked ignored. Same harness as
-//! `transitions_tests`.
+//! behaviour first; the rows that failed on master are fixed by fix/transition-targets-v2,
+//! whose rules the harness runs as the controller's own code (`record_transition`). Same
+//! harness as `transitions_tests`.
 
 use crate::record_engine::EngineTarget;
 use crate::transitions_sim::{app_ev, game_ev, steam_ev, Sim};
@@ -31,10 +31,9 @@ fn draining_a() -> Sim {
 /// T2a: a crash handler shipped in the game's Steam folder (UnityCrashHandler64,
 /// CrashReportClient, crashpad_handler) opening during the drain. Expected: the drain goes
 /// on (A's last clip stays saveable), the handler is never recorded.
-/// Master: a Steam-library exe is a candidate with no render check, so it commits after
-/// START_DEBOUNCE and ends the drain.
+/// Before the fix: a Steam-library exe was a candidate with no render check, so it committed
+/// after START_DEBOUNCE and ended the drain.
 #[test]
-#[ignore = "fixed in transitions-fixes/fix/transition-targets"]
 fn t2a_a_crash_handler_during_the_drain_does_not_end_it() {
     for stem in ["UnityCrashHandler64", "CrashReportClient", "crashpad_handler"] {
         let mut s = draining_a();
@@ -54,9 +53,8 @@ fn t2b_werfault_during_the_drain_does_not_end_it() {
 }
 
 /// T2c: a windowed Steam-library launcher (the game's own launcher exe) opening during the
-/// drain. Expected: the drain goes on. Master: commits like a windowed Steam game.
+/// drain. Expected: the drain goes on. Before the fix: committed like a windowed Steam game.
 #[test]
-#[ignore = "fixed in transitions-fixes/fix/transition-targets"]
 fn t2c_a_windowed_steam_launcher_during_the_drain_does_not_end_it() {
     let mut s = draining_a();
     s.focus(steam_ev("GameLauncher", 52, 0x52));
@@ -65,10 +63,9 @@ fn t2c_a_windowed_steam_launcher_during_the_drain_does_not_end_it() {
 }
 
 /// T3: Discord fullscreen (a `detect.fullscreen_games` entry by default) in front of a live
-/// game for 10 s. Expected: the game stays the target. Master: Discord replaces it after
-/// TARGET_DEBOUNCE.
+/// game for 10 s. Expected: the game stays the target. Before the fix: Discord replaced it
+/// after TARGET_DEBOUNCE.
 #[test]
-#[ignore = "fixed in transitions-fixes/fix/transition-targets"]
 fn t3_fullscreen_discord_over_a_live_game_does_not_replace_it() {
     let mut s = recording_a();
     let mark = s.now;
@@ -82,10 +79,9 @@ fn t3_fullscreen_discord_over_a_live_game_does_not_replace_it() {
 
 /// T5: the game recreates its window (same pid, new hwnd) windowed, outside a Steam library,
 /// and the old window is destroyed. Expected: the game keeps being recorded (no drain,
-/// no "Game closed"). Master: the new window is not a candidate (not fullscreen), the old
-/// window's end ends the session: drain, then waiting.
+/// no "Game closed"). Before the fix: the new window was not a candidate (not fullscreen),
+/// the old window's end ended the session: drain, then waiting.
 #[test]
-#[ignore = "fixed in transitions-fixes/fix/transition-targets"]
 fn t5_a_windowed_new_window_of_the_game_keeps_it_recorded() {
     let mut s = recording_a();
     s.run_to(5_000);
@@ -98,9 +94,8 @@ fn t5_a_windowed_new_window_of_the_game_keeps_it_recorded() {
 
 /// T9: two games swapped every 2.5 s (each holds past TARGET_DEBOUNCE). Expected: restarts
 /// are rate-limited, at most one retarget per 10 s (<= 4 spawns in 30 s, the first
-/// included). Master: one restart per swap.
+/// included). Before the fix: one restart per swap.
 #[test]
-#[ignore = "fixed in transitions-fixes/fix/transition-targets"]
 fn t9_games_swapped_every_two_and_a_half_seconds_are_rate_limited() {
     let mut s = Sim::new();
     for i in 0..12u64 {
@@ -115,9 +110,9 @@ fn t9_games_swapped_every_two_and_a_half_seconds_are_rate_limited() {
 
 /// T11: a game B pending against live A, then a foreground the watcher cannot identify
 /// (OpenProcess fails, e.g. an elevated or protected window). Expected: B's pending switch
-/// is cancelled (the player left B). Master: no event reaches the tracker, so B commits.
+/// is cancelled (the player left B). Before the fix: no event reached the tracker, so B
+/// committed.
 #[test]
-#[ignore = "fixed in transitions-fixes/fix/transition-targets"]
 fn t11_an_unidentifiable_foreground_cancels_a_pending_game() {
     let mut s = recording_a();
     s.run_to(1_000);

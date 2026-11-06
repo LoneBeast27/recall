@@ -21,6 +21,7 @@ use crate::gpu_games::KnownGames;
 use crate::log;
 use crate::record_app::Controller;
 use crate::record_target::{classify_event, skips_render_check, Admit, Target};
+use crate::record_transition::Transitions;
 use crate::render_probe::{self, RenderProbe, StartError};
 use crate::render_verdict::{gate, Gate, Rejected, Verdict, Watch};
 use crate::watcher::WatchEvent;
