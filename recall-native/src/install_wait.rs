@@ -128,10 +128,42 @@ pub fn marker_path() -> Option<PathBuf> {
     Some(std::env::current_exe().ok()?.parent()?.join(MARKER))
 }
 
+/// A file's identity on its volume (serial, index): a renamed file keeps it, a new file at the
+/// same path gets another. None when the file cannot be opened.
+pub fn file_id(path: &Path) -> Option<(u32, u64)> {
+    use std::os::windows::io::AsRawHandle;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+    let file = std::fs::File::open(path).ok()?;
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    // SAFETY: a valid handle owned by `file` for the call; `info` is written by the call.
+    unsafe { GetFileInformationByHandle(HANDLE(file.as_raw_handle()), &mut info) }.ok()?;
+    Some((info.dwVolumeSerialNumber, (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow)))
+}
+
+/// After a real wait, the program file at our path is no longer the one this process was started
+/// from (the install swapped it: this process runs the old image, renamed into `.old`): start the
+/// new program instead. No wait, or an unknown identity, never re-starts.
+pub fn needs_restart(waited: &Waited, before: Option<(u32, u64)>, after: Option<(u32, u64)>) -> bool {
+    matches!(waited, Waited::Cleared { .. } | Waited::TimedOut { .. }) && before.is_some() && after.is_some() && before != after
+}
+
 /// Called at start-up, before the single-instance check.
 pub fn wait_for_install() {
     let Some(marker) = marker_path() else { return };
+    // The program file this process was started from, by identity, before any swap can move it.
+    let exe = std::env::current_exe().ok();
+    let before = exe.as_deref().and_then(file_id);
     let waited = wait_while_installing(&marker, INTERVAL, TIMEOUT, |p| std::fs::read(p), pid_alive, std::thread::sleep);
+    if let Some(exe) = exe.as_deref() {
+        if needs_restart(&waited, before, file_id(exe)) {
+            log("install restart", format!("the install replaced {}: starting the new program", exe.display()), serde_json::json!({ "exe": exe.display().to_string() }));
+            // The single-instance lock is not taken yet: the new process takes it.
+            if std::process::Command::new(exe).args(std::env::args_os().skip(1)).spawn().is_ok() {
+                std::process::exit(0);
+            }
+        }
+    }
     let ms = |polls: u32| polls as u64 * INTERVAL.as_millis() as u64;
     match waited {
         Waited::NoMarker => {}
