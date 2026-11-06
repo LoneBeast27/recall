@@ -186,23 +186,10 @@ fn a_restart_asked_while_locked_waits_for_the_user() {
 // No new frames on their own never restart anything (the encoder is VFR, WGC sends no
 // repeats): only a capture that ended or was asked to change is replaced.
 
-/// A running capture that delivers nothing, ticked once a second for `0..=to`.
-fn quiet_for(screen: Screen, to: u64) -> Fake {
-    let t0 = Instant::now();
-    let mut f = Fake { capture: true, start_ok: true, screen, ..Default::default() };
-    f.backoff.started(t0);
-    for s in 0..=to {
-        tick(&mut f, t0 + secs(s));
-    }
-    f
-}
-
-#[test]
-fn a_static_foreground_game_for_5_minutes_is_never_restarted() {
-    // A paused game, a menu, a load screen or a shader compile: the capture is alive.
-    let f = quiet_for(SHOWN, 300);
-    assert_eq!((f.stops, f.starts), (0, 0), "no restart on a still picture");
-}
+/// A static game for 5 minutes (frames stop, then come back) during a long recording:
+/// `capture_watchdog_static_tests.rs`.
+#[path = "capture_watchdog_static_tests.rs"]
+mod static_game;
 
 #[test]
 fn a_dead_thread_or_a_closed_item_is_restarted_once() {

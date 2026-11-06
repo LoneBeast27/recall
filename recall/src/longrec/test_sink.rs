@@ -67,6 +67,7 @@ pub(crate) struct FakeSink {
     fail_video_after: Option<usize>,
     fail_finish: bool,
     videos: usize,
+    no_pcm: bool,
 }
 
 impl Sink for FakeSink {
@@ -80,12 +81,16 @@ impl Sink for FakeSink {
     }
     fn audio(&mut self, track: usize, samples: &[f32]) -> Result<(), String> {
         self.log.push(Call::Audio { track, frames: samples.len() / 2 });
-        self.log.keep(track, samples.iter().copied());
+        if !self.no_pcm {
+            self.log.keep(track, samples.iter().copied());
+        }
         Ok(())
     }
     fn silence(&mut self, track: usize, frames: u64) -> Result<(), String> {
         self.log.push(Call::Silence { track, frames });
-        self.log.keep(track, std::iter::repeat_n(0.0, frames as usize * 2));
+        if !self.no_pcm {
+            self.log.keep(track, std::iter::repeat_n(0.0, frames as usize * 2));
+        }
         Ok(())
     }
     fn finish(&mut self) -> Result<u64, String> {
@@ -106,6 +111,8 @@ pub(crate) struct FakeFactory {
     pub fail_open: bool,
     pub fail_video_after: Option<usize>,
     pub fail_finish: bool,
+    /// Log calls only, not the samples (a minutes-long run would hold hundreds of MB).
+    pub no_pcm: bool,
 }
 
 impl SinkFactory for FakeFactory {
@@ -125,6 +132,7 @@ impl SinkFactory for FakeFactory {
             fail_video_after: self.fail_video_after,
             fail_finish: self.fail_finish,
             videos: 0,
+            no_pcm: self.no_pcm,
         })
     }
 }
