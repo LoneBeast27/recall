@@ -349,6 +349,8 @@ extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam:
             if let Some(key) = app::held_key(wparam.0 as i32) {
                 with_app(|app| app.finish_editor(hwnd, key));
                 on_tick(hwnd, false);
+            } else if let Some(dir) = app::held_arrow(wparam.0 as i32) {
+                with_app(|app| app.editor_nudge(hwnd, dir, Instant::now()));
             }
             LRESULT(0)
         }
