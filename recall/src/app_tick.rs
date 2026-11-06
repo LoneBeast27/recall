@@ -184,26 +184,6 @@ impl App {
         started.map(|control| self.capture = Some(control)).map_err(|e| e.to_string())
     }
 
-    /// Restarts capture when `CaptureShared::restart_reason` says so: a Bgra8 capture once
-    /// HDR turns on or a frame needs the CPU path, or the capture thread asked (Desktop
-    /// Duplication gave up, so the new start uses WGC; or the followed game window left its
-    /// monitor). A new capture brings a new D3D11 device, so the encoder reopens and the
-    /// replay buffer starts again (logged).
-    fn restart_capture_if_needed(&mut self) {
-        let Some(shared) = self.shared.clone() else { return };
-        if self.capture.is_none() {
-            return;
-        }
-        let Some(why) = shared.restart_reason() else { return };
-        eprintln!("[recall] capture restarts {why}; the replay buffer restarts");
-        if let Some(control) = self.capture.take() {
-            if let Err(e) = control.stop() {
-                eprintln!("[recall] capture stop: {e}");
-            }
-        }
-        self.start_capture();
-    }
-
     fn refresh_source_title(&mut self) {
         // A controller-named source (a window target, or the idle "Desktop"
         // capture) keeps its name; only an unnamed monitor capture follows the

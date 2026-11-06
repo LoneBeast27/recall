@@ -19,6 +19,7 @@ mod audio_clock;
 mod bookmarks;
 mod border;
 mod capture;
+mod capture_stall;
 mod capture_watchdog;
 mod cpu_mask;
 mod engine_extras;

@@ -71,6 +71,7 @@ mod record_editor_ask;
 mod record_fullscreen;
 mod record_hdr;
 mod record_hotkeys;
+mod record_recover_stale;
 mod record_screen;
 mod record_session;
 mod record_status;
