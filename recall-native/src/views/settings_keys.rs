@@ -20,11 +20,20 @@ pub enum ShortcutSlot {
     Record,
     Stats,
     Overlay,
+    Editor,
 }
 
 impl ShortcutSlot {
-    pub const ALL: [ShortcutSlot; 7] =
-        [ShortcutSlot::Save, ShortcutSlot::Mic, ShortcutSlot::Bookmark, ShortcutSlot::Screenshot, ShortcutSlot::Record, ShortcutSlot::Stats, ShortcutSlot::Overlay];
+    pub const ALL: [ShortcutSlot; 8] = [
+        ShortcutSlot::Save,
+        ShortcutSlot::Mic,
+        ShortcutSlot::Bookmark,
+        ShortcutSlot::Screenshot,
+        ShortcutSlot::Record,
+        ShortcutSlot::Stats,
+        ShortcutSlot::Overlay,
+        ShortcutSlot::Editor,
+    ];
 
     /// The controller config key: (section, key).
     fn key(self) -> (&'static str, &'static str) {
@@ -36,6 +45,7 @@ impl ShortcutSlot {
             ShortcutSlot::Record => ("recording", "record_hotkey"),
             ShortcutSlot::Stats => ("recording", "stats_hotkey"),
             ShortcutSlot::Overlay => ("recording", "overlay_hotkey"),
+            ShortcutSlot::Editor => ("recording", "editor_hotkey"),
         }
     }
 
@@ -48,12 +58,13 @@ impl ShortcutSlot {
             ShortcutSlot::Record => "Start or stop a recording",
             ShortcutSlot::Stats => "Performance stats",
             ShortcutSlot::Overlay => "Show or hide the overlay",
+            ShortcutSlot::Editor => "Place the island for this game",
         }
     }
 
     /// Optional shortcuts can be off ("" in config); the others always have keys.
     fn optional(self) -> bool {
-        matches!(self, ShortcutSlot::Bookmark | ShortcutSlot::Screenshot | ShortcutSlot::Record | ShortcutSlot::Stats | ShortcutSlot::Overlay)
+        matches!(self, ShortcutSlot::Bookmark | ShortcutSlot::Screenshot | ShortcutSlot::Record | ShortcutSlot::Stats | ShortcutSlot::Overlay | ShortcutSlot::Editor)
     }
 }
 
@@ -160,6 +171,7 @@ impl Root {
             ShortcutSlot::Record => s.record_hotkey,
             ShortcutSlot::Stats => s.stats_hotkey,
             ShortcutSlot::Overlay => s.overlay_hotkey,
+            ShortcutSlot::Editor => s.editor_hotkey,
         }
     }
 
