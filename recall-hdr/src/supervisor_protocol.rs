@@ -44,6 +44,7 @@ pub(super) fn read_protocol(shared: &Arc<Shared>, stdout: std::process::ChildStd
                 {
                     let mut cache = shared.cache.lock().unwrap_or_else(|p| p.into_inner());
                     cache.status = Some(line.to_string());
+                    cache.view.statuses += 1;
                     cache.view.encoder = val.get("encoder").and_then(|v| v.as_str()).map(str::to_owned);
                     if let Some(m) = val.get("mic_muted").and_then(|v| v.as_bool()) {
                         cache.view.mic_muted = Some(m);

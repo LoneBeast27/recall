@@ -177,3 +177,17 @@ fn an_unanswered_gpu_try_counts_as_refused_and_the_next_try_still_comes() {
     p.gpu_ok();
     assert!(!p.unanswered(t0 + secs(1000.0)));
 }
+
+#[test]
+fn an_open_encoder_with_no_frames_for_5_minutes_never_reopens_or_asks_for_a_capture() {
+    // A static game (VFR, no WGC repeats), also while a long recording runs: no frame,
+    // no failure, so nothing to reopen, no capture restart, no hand-off to the controller.
+    let t0 = Instant::now();
+    let mut r = Reopen::default();
+    r.opened(t0);
+    for s in 0..=300 {
+        let now = t0 + secs(s as f32);
+        assert_eq!(r.stalled(now), None, "{s} s");
+        assert!(!r.recovering() && !r.handed_off(now), "{s} s");
+    }
+}

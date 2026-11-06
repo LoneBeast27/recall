@@ -11,10 +11,14 @@
 //! target: the supervisor never counts it toward give-up). These restarts have their own
 //! backoff ([`RESTART_GAPS`]); a minute of recording forgets it. The island says
 //! "Recording again" when recording comes back (`record_notice`).
+//!
+//! A "recovering" engine whose recovery stopped moving counts as `encoder: failed` here
+//! (`record_recover_stale`), but only while the game can be seen.
 
 use std::time::{Duration, Instant};
 
 use crate::log;
+use crate::record_recover_stale::StaleRecovering;
 use crate::record_status::session_state;
 use crate::supervisor::EngineHealth;
 
@@ -73,6 +77,8 @@ pub struct EncoderRecovery {
     awaiting: bool,
     /// Recording since (after a restart): a stable minute ends the episode.
     healthy_since: Option<Instant>,
+    /// A "recovering" that stopped moving.
+    stale: StaleRecovering,
 }
 
 impl EncoderRecovery {
@@ -103,6 +109,19 @@ impl EncoderRecovery {
         }
     }
 
+    /// An error is being timed, or a restart from here was asked under a minute ago and
+    /// recording has not come back (`record_capture_watch` stands aside meanwhile).
+    pub fn pending(&self, now: Instant) -> bool {
+        self.failed_since.is_some() || (self.awaiting && self.last_restart.is_some_and(|t| now.saturating_duration_since(t) < STABLE_AFTER))
+    }
+
+    /// One pump tick from the session: `statuses` = status lines so far, `shown` = the game
+    /// can be seen. A stale "recovering" is fed as [`Seen::EncoderFailed`].
+    pub fn step(&mut self, now: Instant, state: &str, health: EngineHealth, statuses: u64, shown: bool, busy: bool) -> Recovery {
+        let seen = if self.stale.observe(state, statuses, shown, now) { Seen::EncoderFailed } else { Seen::of(state, health) };
+        self.observe(now, seen, busy)
+    }
+
     fn recording(&mut self, now: Instant) -> Recovery {
         if self.restarts == 0 {
             return Recovery::Nothing;
@@ -129,13 +148,19 @@ impl crate::record_app::Controller {
     /// Every pump tick: restart the engine when the encoder error has lasted (intended).
     pub(crate) fn encoder_recover_tick(&mut self, now: Instant) {
         let health = self.supervisor.health();
-        let encoder = self.supervisor.engine_view().encoder;
+        let view = self.supervisor.engine_view();
         let fresh = self.supervisor.hello_count() > self.hello_at_retarget;
-        let state = session_state(&self.wanted(), health, encoder.as_deref(), fresh, self.paused);
-        let busy = self.activity.busy(now);
-        match self.recovery.observe(now, Seen::of(state, health), busy) {
+        let wanted = self.wanted();
+        let state = session_state(&wanted, health, view.encoder.as_deref(), fresh, self.paused);
+        let shown = match &wanted {
+            crate::record_engine::EngineTarget::Window(t) if state == "recovering" => crate::record_screen::sight(t).shown(),
+            _ => true,
+        };
+        // A capture-stuck restart in flight: never stack a second one on it.
+        let busy = self.activity.busy(now) || self.capture_stuck.pending();
+        match self.recovery.step(now, state, health, view.statuses, shown, busy) {
             Recovery::Restart => {
-                log!("record: the encoder has failed for over {} s; restarting the engine (intended)", ERROR_GRACE.as_secs());
+                log!("record: the encoder has failed (or its recovery stopped) for over {} s; restarting the engine (intended)", ERROR_GRACE.as_secs());
                 self.restart_engine_for_settings();
             }
             Recovery::Recovered => log!("record: recording again after the engine restart"),
