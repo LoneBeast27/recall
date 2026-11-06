@@ -25,6 +25,7 @@ pub(crate) use super::events::Events;
 use super::events::SavedReport;
 use super::mover::{self, MoverControl};
 use super::mux::OwnedParams;
+use super::space::{self, FreeSpace};
 use super::staging::{self, Stage};
 use super::StillSpec;
 use crate::audio::AudioPcm;
@@ -253,6 +254,17 @@ pub(crate) fn spawn_staged(
     gallery: GalleryFn,
     setup: Option<staging::Setup>,
 ) -> (SaverQueue, SaverControl) {
+    spawn_checked(events, mux, gallery, setup, space::free_bytes)
+}
+
+/// [`spawn_staged`] with an injected free-space check (`space.rs`).
+pub(crate) fn spawn_checked(
+    events: Events,
+    mux: MuxFn,
+    gallery: GalleryFn,
+    setup: Option<staging::Setup>,
+    free: FreeSpace,
+) -> (SaverQueue, SaverControl) {
     let (stage, mover) = match setup {
         Some(setup) => staging::start(&events, setup),
         None => (None, None),
@@ -268,6 +280,7 @@ pub(crate) fn spawn_staged(
         abort: abort.clone(),
         current: current.clone(),
         stage,
+        free,
     };
     let spawned = std::thread::Builder::new()
         .name("recall-saver".into())
@@ -297,6 +310,7 @@ struct Worker {
     abort: Arc<AtomicBool>,
     current: Arc<Mutex<Option<PathBuf>>>,
     stage: Option<Stage>,
+    free: FreeSpace,
 }
 
 impl Worker {
@@ -307,30 +321,35 @@ impl Worker {
                 self.events.save_failed(QUIT_BEFORE_START);
                 continue;
             }
-            let staged = self.stage.as_ref().and_then(|s| s.target(&job.path, &self.events));
-            let target = staged.unwrap_or_else(|| PathBuf::from(&job.path));
-            let part = part_of(&target);
-            let outcome = catch_unwind(AssertUnwindSafe(|| self.process(&job, &target, &part)));
+            let outcome = catch_unwind(AssertUnwindSafe(|| self.process(&job)));
             if outcome.is_err() {
                 // A panicking stage must not kill the saver or leave a half file.
-                let _ = std::fs::remove_file(&part);
-                self.set_current(None);
+                if let Some(part) = self.current.lock().unwrap_or_else(|p| p.into_inner()).take() {
+                    let _ = std::fs::remove_file(part);
+                }
                 self.events.save_failed("internal error while writing the clip");
             }
         }
     }
 
-    fn set_current(&self, part: Option<PathBuf>) {
-        *self.current.lock().unwrap_or_else(|p| p.into_inner()) = part;
-    }
-
-    /// Write `job` to `target` (its final path, or its staged file) via `part`.
-    fn process(&mut self, job: &SaveJob, target: &Path, part: &Path) {
+    /// Write `job` to its staged file or its final path, whichever has room
+    /// (`space.rs`: a disk-full staged write is retried in place), via `.part`.
+    fn process(&mut self, job: &SaveJob) {
         let mut timing = job.timing;
         timing.queue_wait_ms = timing.queued_at.map(|t| ms(t.elapsed())).unwrap_or(0.0);
-        self.set_current(Some(part.to_path_buf()));
-        let result = write_clip_to(part, target, job, &mut *self.mux, &self.abort, &mut timing);
-        self.set_current(None);
+        let staged = self.stage.as_ref().and_then(|s| s.target(&job.path, &self.events));
+        let (events, need) = (self.events.clone(), space::estimate(job));
+        let log = |line: &str| events.log(line);
+        let (mux, abort, current) = (&mut *self.mux, &self.abort, &self.current);
+        let set_current = |part: Option<PathBuf>| *current.lock().unwrap_or_else(|p| p.into_inner()) = part;
+        let (target, result) = space::write_with_room(staged, Path::new(&job.path), need, self.free, &log, |target| {
+            let part = part_of(target);
+            set_current(Some(part.clone()));
+            let result = write_clip_to(&part, target, job, mux, abort, &mut timing);
+            set_current(None);
+            result
+        });
+        let target = target.as_path();
         match result {
             Ok(muxed) => {
                 let bytes = std::fs::metadata(target).map(|m| m.len()).unwrap_or(0);

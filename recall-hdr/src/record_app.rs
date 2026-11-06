@@ -48,7 +48,7 @@ use crate::record_engine::{self, engine_env, EnginePlanner, EngineTarget, EXIT_L
 use crate::record_notice::NoticeTracker;
 use crate::record_quit::QuitReason;
 use crate::record_render::RenderCheck;
-use crate::record_storage::Janitor;
+use crate::record_janitor::Janitor;
 use crate::record_target::{display_name, sanitize, Target, TargetTracker, START_DEBOUNCE, TARGET_DEBOUNCE};
 use crate::record_tray::{RecallUi, RecordingTray, RecordingTrayCmd};
 use crate::supervisor::{EngineHealth, Supervisor};

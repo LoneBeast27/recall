@@ -141,6 +141,7 @@ fn hotkey_and_recording_events_and_session_fields() {
     apply(&mut state, json!({"mod":"session","event":{"type":"storage_cleaned","removed":2,"freed_bytes":9,"through":1_790_000_000u64,"used_bytes":80,"cap_bytes":100}}));
     apply(&mut state, json!({"mod":"session","event":{"type":"storage_warning","level":90,"used_bytes":91,"cap_bytes":100,"next_through":1_780_000_000u64}}));
     apply(&mut state, json!({"mod":"session","event":{"type":"storage_warning","level":100,"used_bytes":120,"cap_bytes":100,"next_through":null}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"storage_warning","level":"free","drive":"C:","free_bytes":3,"need_bytes":5}}));
     apply(&mut state, json!({"mod":"session","event":{"type":"storage_preview","cap_gb":1000,"used_bytes":5,"removed":4,"freed_bytes":3,"through":1_770_000_000u64}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"clip_moved","path":"E:/a.mp4","elapsed_ms":900}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"clip_moved","path":"E:/b.mp4","elapsed_ms":900,"kept_path":"F:/s/kept/b.mp4"}}));
@@ -156,6 +157,7 @@ fn hotkey_and_recording_events_and_session_fields() {
             DaemonEvent::StorageCleaned { removed: 2, freed_bytes: 9, through: Some(1_790_000_000), used_bytes: 80, cap_bytes: 100 },
             DaemonEvent::StorageWarning { level: 90, used_bytes: 91, cap_bytes: 100, next_through: Some(1_780_000_000) },
             DaemonEvent::StorageWarning { level: 100, used_bytes: 120, cap_bytes: 100, next_through: None },
+            DaemonEvent::DiskLow { drive: "C:".into(), free_bytes: 3, need_bytes: 5 },
             DaemonEvent::StoragePreview { cap_gb: 1000, used_bytes: 5, removed: 4, freed_bytes: 3, through: Some(1_770_000_000) },
             DaemonEvent::ClipMoved { path: "E:/a.mp4".into(), kept_path: None },
             DaemonEvent::ClipMoved { path: "E:/b.mp4".into(), kept_path: Some("F:/s/kept/b.mp4".into()) },
