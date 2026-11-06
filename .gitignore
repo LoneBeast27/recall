@@ -32,3 +32,6 @@ tools/ffmpeg-dev/
 
 # Installed app (scripts/install.ps1)
 /dist/
+
+# Updater branch test builds
+/target-test/

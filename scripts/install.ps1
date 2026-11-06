@@ -28,11 +28,16 @@
   FrameView use: no hooks, nothing injected into the game). Reading them needs the local group
   Performance Log Users (SID S-1-5-32-559). When you are not in it, ONE administrator prompt
   adds you; it takes effect at your next sign-in. Declining the prompt only leaves FPS as "-".
+
+  Updates and releases (see scripts\release.ps1, scripts\apply-update.ps1):
+    -Stage <folder>   install a ready staged folder (an unpacked release zip); no build.
+    -StageOnly        build and stage only (to -StageDir, default <repo>\dist); installs nothing.
 #>
-param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$NoAutostart, [switch]$NoFrameTiming, [switch]$NoStart, [switch]$CloseApp)
+param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$NoAutostart, [switch]$NoFrameTiming, [switch]$NoStart, [switch]$CloseApp,
+  [string]$Stage, [switch]$StageOnly, [string]$StageDir)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
-$stage = Join-Path $repo 'dist'
+$stage = if ($Stage) { $Stage } elseif ($StageDir) { $StageDir } else { Join-Path $repo 'dist' }
 # Gyan FFmpeg 7.1.1 full shared build: same ABI as the 7.1 bindings, and it includes av1_nvenc.
 $ffmpegRoot = Join-Path $repo 'tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared'
 # Optional low-priority build wrapper (CCD1, BelowNormal); a plain cargo build when absent.
@@ -47,6 +52,47 @@ function Get-DriveKind([string]$path) {
   if (-not $disk) { return @{ kind = 'Unknown'; model = '?' } }
   $kind = if ($disk.MediaType -eq 'SSD' -or $disk.BusType -eq 'NVMe') { 'SSD' } elseif ($disk.MediaType -eq 'HDD') { 'HDD' } else { 'Unknown' }
   @{ kind = $kind; model = $disk.FriendlyName }
+}
+
+function Invoke-RecallBuild {
+  $env:FFMPEG_DIR = $ffmpegRoot
+  $env:LIBCLANG_PATH = Join-Path $repo '.tmp\nvenc-vfr\clang18\clang\native'
+  $env:CARGO_BUILD_JOBS = '12'
+  $env:CARGO_TARGET_DIR = Join-Path $repo 'target-dev'
+  Push-Location $repo
+  Invoke-Build cargo build --release -p recall -p recall-hdr -p recall-overlay --offline
+  if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'recorder release build failed' }
+  $env:CARGO_TARGET_DIR = Join-Path $repo 'target-gpui'
+  Invoke-Build cargo build --release --manifest-path (Join-Path $repo 'recall-native\Cargo.toml') --offline
+  if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'app release build failed' }
+  Pop-Location
+}
+
+function Invoke-RecallStage {
+  New-Item -ItemType Directory -Force -Path $stage | Out-Null
+  # Older installs kept a second copy of every FFmpeg DLL in bin\ (about 159 MB); ffmpeg.exe now sits next to them.
+  $oldStageBin = Join-Path $stage 'bin'
+  if (Test-Path $oldStageBin) { Remove-Item -LiteralPath $oldStageBin -Recurse -Force }
+  foreach ($exe in @('target-gpui\release\recall-native.exe', 'target-dev\release\recall-hdr.exe', 'target-dev\release\recall.exe', 'target-dev\release\recall-overlay.exe')) {
+    $from = Join-Path $repo $exe
+    if (-not (Test-Path $from)) { throw "missing build output: $from" }
+    Copy-Item -LiteralPath $from -Destination $stage -Force
+  }
+  Get-ChildItem (Join-Path $ffmpegRoot 'bin\*.dll') | ForEach-Object {
+    Copy-Item $_.FullName $stage -Force
+  }
+  Copy-Item (Join-Path $ffmpegRoot 'bin\ffmpeg.exe'), (Join-Path $ffmpegRoot 'bin\ffprobe.exe') $stage -Force
+  Copy-Item (Join-Path $repo 'recall-native\assets\recall.ico') $stage -Force
+  # The in-app updater runs these from the install folder (services/update.rs).
+  foreach ($s in 'install.ps1', 'install-swap.ps1', 'apply-update.ps1') { Copy-Item (Join-Path $PSScriptRoot $s) $stage -Force }
+}
+
+# 0. Release builds: build and stage only, touch no install.
+if ($StageOnly) {
+  Invoke-RecallBuild
+  Invoke-RecallStage
+  "Staged to $stage"
+  return
 }
 
 # 1. The install folder must be on an SSD (checked before any build work).
@@ -102,36 +148,13 @@ while ((Get-Date) -lt $deadline -and ((Get-Installed) -or (Get-Controller))) { S
 $left = @(Get-Installed) + @(Get-Controller) | Where-Object { $_ }
 if ($left) { throw ("Recall is still running (" + (($left | ForEach-Object { $_.Name }) -join ', ') + "). Quit it from the tray, then re-run.") }
 
-# 3. Build.
-if (-not $NoBuild) {
-  $env:FFMPEG_DIR = $ffmpegRoot
-  $env:LIBCLANG_PATH = Join-Path $repo '.tmp\nvenc-vfr\clang18\clang\native'
-  $env:CARGO_BUILD_JOBS = '12'
-  $env:CARGO_TARGET_DIR = Join-Path $repo 'target-dev'
-  Push-Location $repo
-  Invoke-Build cargo build --release -p recall -p recall-hdr -p recall-overlay --offline
-  if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'recorder release build failed' }
-  $env:CARGO_TARGET_DIR = Join-Path $repo 'target-gpui'
-  Invoke-Build cargo build --release --manifest-path (Join-Path $repo 'recall-native\Cargo.toml') --offline
-  if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'app release build failed' }
-  Pop-Location
+# 3. Build, 4. Stage (skipped for -Stage: that folder is already staged, e.g. an unpacked update).
+if (-not $Stage) {
+  if (-not $NoBuild) { Invoke-RecallBuild }
+  Invoke-RecallStage
+} elseif (-not (Test-Path (Join-Path $stage 'recall-native.exe'))) {
+  throw "not a staged Recall folder: $stage"
 }
-
-# 4. Stage.
-New-Item -ItemType Directory -Force -Path $stage | Out-Null
-# Older installs kept a second copy of every FFmpeg DLL in bin\ (about 159 MB); ffmpeg.exe now sits next to them.
-$oldStageBin = Join-Path $stage 'bin'
-if (Test-Path $oldStageBin) { Remove-Item -LiteralPath $oldStageBin -Recurse -Force }
-foreach ($exe in @('target-gpui\release\recall-native.exe', 'target-dev\release\recall-hdr.exe', 'target-dev\release\recall.exe', 'target-dev\release\recall-overlay.exe')) {
-  $from = Join-Path $repo $exe
-  if (-not (Test-Path $from)) { throw "missing build output: $from" }
-  Copy-Item -LiteralPath $from -Destination $stage -Force
-}
-Get-ChildItem (Join-Path $ffmpegRoot 'bin\*.dll') | ForEach-Object {
-  Copy-Item $_.FullName $stage -Force
-}
-Copy-Item (Join-Path $ffmpegRoot 'bin\ffmpeg.exe'), (Join-Path $ffmpegRoot 'bin\ffprobe.exe') $stage -Force
-Copy-Item (Join-Path $repo 'recall-native\assets\recall.ico') $stage -Force
 
 # 5. Install (the cache folder is never touched).
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -142,7 +165,8 @@ Install-Swap $stage $InstallDir
 # Remove the old bin\ copy: only the FFmpeg files this installer put there, then the folder if empty.
 $oldBin = Join-Path $InstallDir 'bin'
 if (Test-Path $oldBin) {
-  $ours = @(Get-ChildItem (Join-Path $ffmpegRoot 'bin') -File | Where-Object { $_.Extension -in '.dll', '.exe' } | ForEach-Object Name)
+  $ffBin = if ($Stage) { $stage } else { Join-Path $ffmpegRoot 'bin' }
+  $ours = @(Get-ChildItem $ffBin -File | Where-Object { $_.Extension -in '.dll', '.exe' } | ForEach-Object Name)
   Get-ChildItem $oldBin -File | Where-Object { $ours -contains $_.Name } | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force }
   if (-not (Get-ChildItem $oldBin -Force)) { Remove-Item -LiteralPath $oldBin -Force }
 }
