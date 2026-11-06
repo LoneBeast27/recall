@@ -130,6 +130,6 @@ fn a_bottom_spot_stacks_the_card_above_the_pill() {
     assert_eq!(up.pill_origin(), (100.0, 58.0), "the pill keeps the window's bottom");
     assert_eq!(up.card_origin(), Some((0.0, -50.0)), "the card's bottom sits a gap above the pill; half unfolded");
     assert_eq!(up.extent(), 102.0);
-    let side = Look { turn: Turn::Cw, ..down };
+    let side = Look { turn: Turn::Right, ..down };
     assert_eq!((side.window(), side.shown_window()), ((300, 102), (102, 300)));
 }

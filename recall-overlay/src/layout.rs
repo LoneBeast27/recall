@@ -136,6 +136,9 @@ pub struct Scene {
     /// save's stages keep the mark and the lines where they are while the
     /// pill changes width.
     pub lead: bool,
+    /// Re-flowed for a side spot ([`crate::stack`]): each text is one upright
+    /// glyph (or a ring's number) centred on its `x`, `y`.
+    pub stacked: bool,
 }
 
 /// The stats island's numbers, ready to draw.

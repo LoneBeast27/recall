@@ -70,7 +70,7 @@ fn footprints_sit_on_their_edges() {
         assert!(0.0 <= x0 && x0 < x1 && x1 <= 1.0 && 0.0 <= y0 && y0 < y1 && y1 <= 1.0, "{a:?}");
     }
     let (_, y0, _, y1) = footprint(Anchor::RightMiddle, WIDE);
-    assert!((y1 - y0 - 360.0 / 1440.0).abs() < 1e-4, "a side spot runs along the edge");
+    assert!((y1 - y0 - 560.0 / 1440.0).abs() < 1e-4, "a side spot runs along the edge, tall (stacked glyphs)");
     let (x0, _, x1, _) = footprint(Anchor::TopLeft, 21.0 / 9.0);
     assert!(x1 - x0 < 360.0 / 2560.0, "ultrawide: the same pill is a smaller share of the width");
 }
@@ -225,4 +225,25 @@ fn rocket_league_lands_top_right_once_menu_scans_are_skipped() {
     cache.file.games.insert("rocketleague".into(), Entry { cols: 64, rows: 36, scans: vec![good.clone(), menu.clone(), menu, good], seq: 4 });
     let grid = cache.grid("rocketleague").unwrap();
     assert_eq!(choose(&grid, WIDE, None), Anchor::TopRight);
+}
+
+#[test]
+fn title_like_keys_are_dropped_on_load_and_the_file_is_rewritten() {
+    let dir = std::env::temp_dir().join(format!("recall-island-hud-title-{}", std::process::id()));
+    let path = dir.join("island-hud.json");
+    std::fs::create_dir_all(&dir).unwrap();
+    let file = r#"{"games":{"My Secret Chat - Discord":{"cols":4,"rows":1,"scans":[[1]]},"Rocket League (64-bit)":{"cols":4,"rows":1,"scans":[[1]]},"rocketleague":{"cols":4,"rows":1,"scans":[[1]]},"valorant-win64.shipping_x":{"cols":4,"rows":1,"scans":[[1]]}}}"#;
+    std::fs::write(&path, file).unwrap();
+    let cache = HudCache::load(Some(path.clone()));
+    assert_eq!(cache.file.games.keys().map(String::as_str).collect::<Vec<_>>(), ["rocketleague", "valorant-win64.shipping_x"]);
+    let on_disk = std::fs::read_to_string(&path).unwrap();
+    assert!(!on_disk.contains("Secret") && !on_disk.contains("Rocket League"), "the file was rewritten without titles: {on_disk}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn exe_stem_keys_are_plain_lowercase_names() {
+    assert!(exe_stem_key("rocketleague") && exe_stem_key("valorant-win64-shipping") && exe_stem_key("cs2.x_y"));
+    assert!(!exe_stem_key("") && !exe_stem_key("Rocket League") && !exe_stem_key("Discord") && !exe_stem_key("a b"));
+    assert!(!exe_stem_key(&"a".repeat(65)) && exe_stem_key(&"a".repeat(64)));
 }

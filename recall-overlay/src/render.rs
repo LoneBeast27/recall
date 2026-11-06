@@ -73,6 +73,9 @@ pub struct Renderer {
     sheen: Option<(u32, ID2D1LinearGradientBrush)>,
     /// The look's quarter turn (a side spot), applied after every transform.
     base: std::cell::Cell<Matrix3x2>,
+    /// Every upright transform of the last draws (tests check none rotates).
+    #[cfg(test)]
+    pub(crate) upright_log: std::cell::RefCell<Vec<Matrix3x2>>,
 }
 
 impl Renderer {
@@ -104,7 +107,11 @@ impl Renderer {
                 None,
             )?;
             let dc = CreateCompatibleDC(None);
-            Ok(Self { factory, target, brush, round, dc, dib: None, capacity: (0, 0), sheen: None, base: std::cell::Cell::new(Matrix3x2::identity()) })
+            Ok(Self { factory, target, brush, round, dc, dib: None, capacity: (0, 0), sheen: None,
+                base: std::cell::Cell::new(Matrix3x2::identity()),
+                #[cfg(test)]
+                upright_log: Default::default(),
+            })
         }
     }
 
@@ -195,6 +202,9 @@ impl Renderer {
         let (dx, k) = placed(look, scene);
         let ([x, y, _, ph], (ox, oy)) = (look.pill, look.pill_origin());
         let (left, top) = (ox + x + dx, oy + y + (ph - scene.h * k) / 2.0);
+        if scene.stacked {
+            return unsafe { self.stacked(fonts, scene, (left, top), k, scale, alphas) };
+        }
         unsafe {
             self.set_transform(Matrix3x2::scale(k, k) * Matrix3x2::translation(left, top));
             for shape in &scene.shapes {
@@ -209,6 +219,33 @@ impl Renderer {
                 };
                 self.paint(text.color, alpha);
                 t.DrawTextLayout(Vector2 { X: text.x, Y: text.y }, &layout, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
+            }
+        }
+        Ok(())
+    }
+
+    /// A side spot's re-flowed `scene` at `(left, top)`: each glyph and
+    /// shape upright at its mapped centre.
+    unsafe fn stacked(&self, fonts: &Fonts, scene: &Scene, (left, top): (f32, f32), k: f32, scale: f32, alphas: (f32, f32, f32)) -> Result<()> {
+        let at = |(x, y): (f32, f32)| (left + x * k, top + y * k);
+        unsafe {
+            for shape in &scene.shapes {
+                let c = crate::stack::shape_centre(shape);
+                self.upright(c, k, at(c));
+                self.shape(shape, alphas.0)?;
+            }
+            for text in &scene.texts {
+                let layout = fonts.layout(text.role, scale, &text.text)?;
+                let metrics = crate::layout::Measure::measure(fonts, text.role, scale, &text.text);
+                let alpha = match text.role {
+                    Role::NoticeTitle => alphas.1,
+                    Role::NoticeGame | Role::NoticeUi => alphas.2,
+                    _ => alphas.0,
+                };
+                self.upright((text.x, text.y), k, at((text.x, text.y)));
+                self.paint(text.color, alpha);
+                let origin = Vector2 { X: text.x - metrics.width / 2.0, Y: text.y - (metrics.baseline - metrics.cap / 2.0) };
+                self.target.DrawTextLayout(origin, &layout, &self.brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
             }
         }
         Ok(())
@@ -261,9 +298,19 @@ impl Renderer {
         Ok(brush)
     }
 
-    /// `m`, then the look's quarter turn.
+    /// `m`, then the look's side-spot mapping.
     pub(crate) fn set_transform(&self, m: Matrix3x2) {
         unsafe { self.target.SetTransform(&(m * self.base.get())) };
+    }
+
+    /// Draws upright: content point `c` lands where the unturned window
+    /// point `at` is shown, scaled `k`, with no rotation or mirror.
+    pub(crate) fn upright(&self, c: (f32, f32), k: f32, at: (f32, f32)) {
+        let (x, y) = apply(&self.base.get(), at);
+        let m = Matrix3x2::translation(-c.0, -c.1) * Matrix3x2::scale(k, k) * Matrix3x2::translation(x, y);
+        #[cfg(test)]
+        self.upright_log.borrow_mut().push(m);
+        unsafe { self.target.SetTransform(&m) };
     }
 
     pub(crate) fn paint(&self, rgba: Rgba, alpha: f32) {
@@ -367,18 +414,26 @@ impl Drop for Renderer {
     }
 }
 
-/// Where `scene` sits in the pill now, and the scale it draws at.
-/// The quarter turn of a `w`x`h` unturned window into the shown one
-/// (row vectors: a point is `p * M`). `Cw`: the unturned top edge lands on
-/// the right, text reads top to bottom; `Ccw`: on the left, bottom to top.
-pub(crate) fn turn(turn: Turn, w: f32, h: f32) -> Matrix3x2 {
+/// How a `w`x`h` unturned window maps into the shown one for a side spot
+/// (row vectors: a point is `p * M`). The pill's length runs down the
+/// screen on both edges, its start at the top; across the pill, `Right`
+/// reaches leftwards (inwards from the right edge), `Left` rightwards.
+/// Only geometry (the pill, clips, the sweep) goes through this; glyphs
+/// and marks are drawn upright at their mapped centres.
+pub(crate) fn turn(turn: Turn, _w: f32, h: f32) -> Matrix3x2 {
     match turn {
         Turn::None => Matrix3x2::identity(),
-        Turn::Cw => Matrix3x2 { M11: 0.0, M12: 1.0, M21: -1.0, M22: 0.0, M31: h, M32: 0.0 },
-        Turn::Ccw => Matrix3x2 { M11: 0.0, M12: -1.0, M21: 1.0, M22: 0.0, M31: 0.0, M32: w },
+        Turn::Right => Matrix3x2 { M11: 0.0, M12: 1.0, M21: -1.0, M22: 0.0, M31: h, M32: 0.0 },
+        Turn::Left => Matrix3x2 { M11: 0.0, M12: 1.0, M21: 1.0, M22: 0.0, M31: 0.0, M32: 0.0 },
     }
 }
 
+/// `p * m` (row vector).
+pub(crate) fn apply(m: &Matrix3x2, (x, y): (f32, f32)) -> (f32, f32) {
+    (x * m.M11 + y * m.M21 + m.M31, x * m.M12 + y * m.M22 + m.M32)
+}
+
+/// Where `scene` sits in the pill now, and the scale it draws at.
 fn placed(look: &Look, scene: &Scene) -> (f32, f32) {
     let k = content_scale(look, scene.h);
     (content_dx(look, scene.w * k, scene.lead), k)
@@ -390,116 +445,5 @@ fn color(rgba: Rgba, alpha: f32) -> D2D1_COLOR_F {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::anim::Frame;
-
-    fn alpha_at(renderer: &Renderer, w: i32, h: i32, x: i32, y: i32) -> u8 {
-        renderer.pixels(w, h)[(y * w + x) as usize][3]
-    }
-
-    #[test]
-    fn pill_is_antialiased_and_survives_the_buffer_growing() {
-        let (fonts, mut renderer) = (Fonts::new().unwrap(), Renderer::new().unwrap());
-        let scene = Scene { w: 60.0, h: 44.0, ..Scene::default() };
-        let (w, h) = renderer.draw(&fonts, &scene, Look::open(Frame { w: 60.0, h: 44.0, alpha: 1.0 }), 1.0, Layers::default()).unwrap();
-        assert_eq!(alpha_at(&renderer, w, h, 30, 22), (PILL.a * 255.0).round() as u8, "pill body is 94% opaque");
-        assert_eq!(alpha_at(&renderer, w, h, 0, 0), 0, "rounded corner is transparent");
-        let edge = alpha_at(&renderer, w, h, 4, 8);
-        assert!(edge > 0 && edge < 240, "the curve is anti-aliased: {edge}");
-        // A wider frame re-creates the DIB; drawing must land in the new one.
-        let (w, h) = renderer.draw(&fonts, &scene, Look::open(Frame { w: 300.0, h: 44.0, alpha: 1.0 }), 1.0, Layers::default()).unwrap();
-        assert_eq!(w, 300);
-        assert_eq!(alpha_at(&renderer, w, h, 280, 22), (PILL.a * 255.0).round() as u8);
-    }
-
-    #[test]
-    fn a_side_spot_turns_the_whole_look_a_quarter() {
-        use crate::layout::{Shape, SIGNAL};
-        let (fonts, mut renderer) = (Fonts::new().unwrap(), Renderer::new().unwrap());
-        // A mark 20 px into the pill's left end.
-        let dot = Shape::Dot { cx: 20.0, cy: 22.0, r: 6.0, color: SIGNAL };
-        let scene = Scene { w: 300.0, h: 44.0, shapes: vec![dot], ..Scene::default() };
-        let frame = Frame { w: 300.0, h: 44.0, alpha: 1.0 };
-        let red = |r: &Renderer, w: i32, h: i32, x: i32, y: i32| {
-            let [b, g, red, a] = r.pixels(w, h)[(y * w + x) as usize];
-            red > 200 && g < 120 && b < 120 && a > 240
-        };
-        let flat = renderer.draw(&fonts, &scene, Look::open(frame), 1.0, Layers::default()).unwrap();
-        assert_eq!(flat, (300, 44));
-        assert!(red(&renderer, 300, 44, 20, 22), "unturned: the mark at the left end");
-        let cw = Look { turn: Turn::Cw, ..Look::open(frame) };
-        assert_eq!(renderer.draw(&fonts, &scene, cw, 1.0, Layers::default()).unwrap(), (44, 300), "the window turns");
-        assert!(red(&renderer, 44, 300, 22, 20), "right edge: the mark on top, text reads downwards");
-        assert_eq!(alpha_at(&renderer, 44, 300, 22, 150), (PILL.a * 255.0).round() as u8, "the body runs down the middle");
-        assert_eq!(alpha_at(&renderer, 44, 300, 0, 0), 0, "rounded ends stay clear");
-        let ccw = Look { turn: Turn::Ccw, ..Look::open(frame) };
-        assert_eq!(renderer.draw(&fonts, &scene, ccw, 1.0, Layers::default()).unwrap(), (44, 300));
-        assert!(red(&renderer, 44, 300, 22, 279), "left edge: the mark at the bottom, text reads upwards");
-        // The next unturned frame is flat again.
-        renderer.draw(&fonts, &scene, Look::open(frame), 1.0, Layers::default()).unwrap();
-        assert!(red(&renderer, 300, 44, 20, 22));
-    }
-
-    /// Software-render cost of one island frame (an instrument, not a gate):
-    /// `cargo test --release -p recall-overlay -- --ignored draw_cost --nocapture`.
-    #[test]
-    #[ignore]
-    fn draw_cost_per_frame() {
-        use crate::badge::SaveMark;
-        use crate::layout::{notice_scene, stats_scene, StatsContent, ACTIVE};
-        use crate::notice::{NoticeView, SavePhase, Tone};
-        let (fonts, mut renderer) = (Fonts::new().unwrap(), Renderer::new().unwrap());
-        let stats = StatsContent { recording: true, replay_secs: 120, fps: Some(144), low1: Some(98), gpu: Some(71), gpu_temp: Some(64), cpu: Some(23), ..Default::default() };
-        let stats = stats_scene(&stats, 1.0, &fonts);
-        let grow = 58.0 / 44.0;
-        let notice = notice_scene(&NoticeView::new(Tone::Success, "Clip saved", "VALORANT · 0:30", true), grow, &fonts);
-        let saving = NoticeView::new(Tone::Recording, "Saving", "0:30…", true).saving(SavePhase::Saving);
-        let saving = notice_scene(&saving, grow, &fonts);
-        let sweep = Some(Sheen { progress: 0.5, color: ACTIVE });
-        let now = std::time::Instant::now();
-        let ring = Some(SaveMark::new(SavePhase::Saving, now).badge(now + std::time::Duration::from_millis(450)));
-        let grown = Frame { w: stats.w + 40.0, h: 58.0, alpha: 1.0 };
-        let cases = [
-            ("stats pill", &stats, Frame { w: stats.w, h: stats.h, alpha: 1.0 }, 1.0, None, None),
-            ("grown notice", &notice, grown, grow, None, None),
-            ("grown notice + sweep", &notice, grown, grow, sweep, None),
-            ("saving pill + spinning ring", &saving, grown, grow, None, ring),
-        ];
-        for (label, scene, frame, scale, sheen, badge) in cases {
-            renderer.draw(&fonts, scene, Look::open(frame), scale, Layers { sheen, badge, ..Layers::default() }).unwrap();
-            let start = std::time::Instant::now();
-            for _ in 0..500 {
-                renderer.draw(&fonts, scene, Look::open(frame), scale, Layers { sheen, badge, ..Layers::default() }).unwrap();
-            }
-            println!("draw_cost {label}: {:.0} us/frame", start.elapsed().as_secs_f64() * 1e6 / 500.0);
-        }
-    }
-
-    #[test]
-    fn the_sweep_tints_the_pill_in_the_tone_colour_where_the_band_is_and_nowhere_else() {
-        use crate::layout::{ACTIVE, ERROR};
-        let (fonts, mut renderer) = (Fonts::new().unwrap(), Renderer::new().unwrap());
-        let scene = Scene { w: 340.0, h: 58.0, ..Scene::default() };
-        let frame = Frame { w: 340.0, h: 58.0, alpha: 1.0 };
-        let pixel = |r: &Renderer, x: i32, y: i32| r.pixels(340, 58)[(y * 340 + x) as usize];
-        renderer.draw(&fonts, &scene, Look::open(frame), 1.0, Layers::default()).unwrap();
-        let plain = pixel(&renderer, 170, 29);
-        let mid = Some(Sheen { progress: 0.5, color: ACTIVE });
-        renderer.draw(&fonts, &scene, Look::open(frame), 1.0, Layers { sheen: mid, ..Layers::default() }).unwrap();
-        let [b, g, r, _] = pixel(&renderer, 170, 29);
-        assert!(g > plain[1] + 50 && g > r && g > b, "green band at the centre: {:?} vs {plain:?}", [b, g, r]);
-        assert_eq!(pixel(&renderer, 12, 29), plain, "the pill's far end is untouched mid-sweep");
-        assert_eq!(pixel(&renderer, 0, 0)[3], 0, "never outside the pill");
-        let failure = Some(Sheen { progress: 0.5, color: ERROR });
-        renderer.draw(&fonts, &scene, Look::open(frame), 1.0, Layers { sheen: failure, ..Layers::default() }).unwrap();
-        let [b, g, r, _] = pixel(&renderer, 170, 29);
-        assert!(r > g && r > b, "a failure sweeps in the error colour: {:?}", [b, g, r]);
-        for progress in [0.0, 1.0] {
-            renderer.draw(&fonts, &scene, Look::open(frame), 1.0, Layers { sheen: Some(Sheen { progress, color: ACTIVE }), ..Layers::default() }).unwrap();
-            assert_eq!(pixel(&renderer, 170, 29), plain, "off the pill at {progress}");
-            assert_eq!(pixel(&renderer, 6, 29), plain, "left end clear at {progress}");
-            assert_eq!(pixel(&renderer, 333, 29), plain, "right end clear at {progress}");
-        }
-    }
-}
+#[path = "render_tests.rs"]
+mod tests;

@@ -82,18 +82,16 @@ impl Session {
         game_key(&self.target_name)
     }
 
-    /// The Dynamic corner's per-game key: the exe stem (a window title can
-    /// change), else the name; "" for the desktop / no target.
+    /// The Dynamic corner's per-game key: the exe stem only, lowercased
+    /// ("rocketleague"). Never the window title: this key reaches disk
+    /// (`island-hud.json`) and the trace. "" for the desktop / no exe.
     pub fn hud_key(&self) -> String {
         if self.desktop {
             return String::new();
         }
         let stem = self.target_exe.rsplit(['\\', '/']).next().unwrap_or("");
-        let stem = stem.strip_suffix(".exe").or_else(|| stem.strip_suffix(".EXE")).unwrap_or(stem);
-        match game_key(stem) {
-            key if !key.is_empty() => key,
-            _ => game_key(&self.target_name),
-        }
+        let lower = stem.to_ascii_lowercase();
+        game_key(lower.strip_suffix(".exe").unwrap_or(&lower))
     }
 }
 
@@ -124,6 +122,18 @@ mod tests {
         assert_eq!(session.hud_key(), "valorantwin64shipping");
         session.apply_status(&json!({"type":"status","state":"recording","target":{"name":"Desktop","exe":null,"pid":null}}));
         assert_eq!(session.hud_key(), "");
+    }
+
+    #[test]
+    fn hud_key_never_uses_the_window_title() {
+        let mut session = Session::default();
+        // No exe: the key is empty, never the title.
+        session.apply_status(&json!({"type":"status","state":"recording","target":{"name":"My Secret Chat - Discord","exe":"","pid":4}}));
+        assert_eq!(session.hud_key(), "");
+        // The exe wins over any title, and the title leaves no trace in the key.
+        session.apply_status(&json!({"type":"status","state":"recording","target":{"name":"My Secret Chat - Discord","exe":"C:\\Apps\\Discord.EXE","pid":4}}));
+        assert_eq!(session.hud_key(), "discord");
+        assert!(!session.hud_key().contains("secret"));
     }
 
     #[test]
