@@ -81,6 +81,12 @@ impl Notices for NoNotices {
     }
 }
 
+/// The device notices a track registers (`register`, run on its capture thread). A
+/// process-loopback track follows a process, not an endpoint, so it registers none.
+pub(super) fn notices_for<N>(loopback: bool, register: impl FnOnce() -> Result<N, String>) -> Option<Result<N, String>> {
+    (!loopback).then(register)
+}
+
 /// One open capture stream.
 pub(super) trait Capture {
     /// The endpoint or process it captures, for the status.
@@ -174,7 +180,12 @@ pub(super) fn capture_loop<C: Capture>(
                 if let Some(tx) = init_tx.take() {
                     let _ = tx.send(Ok(()));
                 }
+                // Device notices from before this stream are stale for the next loss.
+                notices.take_devices_changed();
                 let ended = stream.run(ring, &mut level, &*clock, notices);
+                // Nor do the ones that came while it was live (another device came or went):
+                // the first reopen after this loss keeps its backoff.
+                notices.take_devices_changed();
                 // Up to the clock, and out of live sound: the next stream starts with silence for
                 // the time its open takes, so the track never lags by the switch.
                 silence_to_clock(ring, &mut level, &*clock);
