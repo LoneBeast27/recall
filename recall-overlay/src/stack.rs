@@ -21,6 +21,13 @@ const SPACE: f32 = 5.0;
 
 /// `scene` (laid out at scale `s`) re-flowed for a side spot.
 pub fn stack(scene: &Scene, s: f32, m: &dyn Measure) -> Scene {
+    stack_within(scene, s, m, f32::INFINITY)
+}
+
+/// [`stack`], at most `max` long (px): a column that would leave the side's
+/// room (a long notice: up to 72 glyphs) stops with "…" instead of running
+/// off the monitor.
+pub fn stack_within(scene: &Scene, s: f32, m: &dyn Measure, max: f32) -> Scene {
     let cy = scene.h / 2.0;
     let mut out = Scene { h: scene.h, lead: scene.lead, stacked: true, ..Scene::default() };
     let mut cursor = PAD * s;
@@ -30,10 +37,16 @@ pub fn stack(scene: &Scene, s: f32, m: &dyn Measure) -> Scene {
         out.icon = Some(Icon { shape: moved(icon.shape, dx, dy), cx, cy, ..icon });
         cursor += along + RUN_GAP * s;
     }
-    for item in items(scene) {
+    // Room left for the next piece, keeping the end padding and a "…".
+    let ellipsis = m.measure(Role::NoticeUi, s, "…").cap.max(m.measure(Role::NoticeUi, s, "0").cap * 0.6);
+    let fits = |cursor: f32, along: f32| cursor + along + PAD * s + ellipsis + LINE_GAP * s <= max;
+    'items: for item in items(scene) {
         match item {
             Item::Shape(shape) => {
                 let (centre, along) = (shape_centre(&shape), shape_along(&shape));
+                if !fits(cursor, along) {
+                    break 'items;
+                }
                 let to = (cursor + along / 2.0, cy);
                 out.shapes.push(moved(shape, to.0 - centre.0, to.1 - centre.1));
                 // A ring's number stays inside it, whole and upright.
@@ -50,6 +63,11 @@ pub fn stack(scene: &Scene, s: f32, m: &dyn Measure) -> Scene {
                     }
                     let glyph = c.to_string();
                     let cap = m.measure(text.role, s, &glyph).cap.max(m.measure(text.role, s, "0").cap * 0.6);
+                    if !fits(cursor, cap) {
+                        out.texts.push(Text { role: text.role, text: "…".into(), x: cursor + ellipsis / 2.0, y: cy, color: text.color });
+                        cursor += ellipsis + RUN_GAP * s;
+                        break 'items;
+                    }
                     out.texts.push(Text { role: text.role, text: glyph, x: cursor + cap / 2.0, y: cy, color: text.color });
                     cursor += cap + LINE_GAP * s;
                 }

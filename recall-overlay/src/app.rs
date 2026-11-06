@@ -349,7 +349,9 @@ impl App {
             Content::Notice(notice) if notice.emphasis && stats_under => Some(crate::stack::stack(&stats(self), scale, &self.fonts).w),
             _ => None,
         };
-        island::stacked_layout(laid, under, scale, &self.fonts)
+        // The column may use the side's height less the edge margins, never more.
+        let max = self.placed.as_ref().map_or(f32::INFINITY, |p| ((p.area.bottom - p.area.top) as f32 - 2.0 * EDGE * p.scale).max(0.0));
+        island::stacked_layout(laid, under, scale, &self.fonts, max)
     }
 
     /// The shortcut hint's card: laid out for the room the scan measured

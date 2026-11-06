@@ -67,3 +67,20 @@ fn the_longest_notice_still_fits_down_the_screen() {
     assert_eq!(glyphs(&tall).len(), 72);
     assert!(tall.w <= REF_HEIGHT - 2.0 * crate::placement::EDGE, "72 glyphs fit: {}", tall.w);
 }
+
+/// A notice longer than the side's room stops with "…" inside it, never off the monitor.
+#[test]
+fn a_column_longer_than_the_side_stops_with_an_ellipsis_inside_it() {
+    let notice = NoticeView::new(Tone::Failure, "Island hidden by fullscreen", "Rocket League runs in exclusive fullscreen.", false);
+    let flat = notice_scene(&notice, 1.0, &Fake);
+    let free = stack(&flat, 1.0, &Fake);
+    let max = 300.0;
+    assert!(free.w > max, "the whole notice would be {} px", free.w);
+    let tall = stack_within(&flat, 1.0, &Fake, max);
+    assert!(tall.w <= max, "{} px fits in {max}", tall.w);
+    assert_eq!(glyphs(&tall).last().copied(), Some("…"));
+    assert_eq!(&glyphs(&tall)[..3], ["I", "s", "l"], "it starts as before");
+    let short = NoticeView::new(Tone::Recording, "REC", "1:23", true);
+    let flat = notice_scene(&short, 1.0, &Fake);
+    assert_eq!(glyphs(&stack_within(&flat, 1.0, &Fake, max)), glyphs(&stack(&flat, 1.0, &Fake)), "a short one is untouched");
+}
