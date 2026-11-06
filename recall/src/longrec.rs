@@ -236,7 +236,7 @@ impl<F: SinkFactory> Writer<F> {
             return Vec::new();
         }
         self.generation = generation;
-        self.recorder.encoder_reopened()
+        self.recorder.encoder_reopened(Instant::now())
     }
 
     /// The live encoder of this recording died for good: write what it
@@ -269,14 +269,14 @@ fn report(json: bool, event: Event) {
     match event {
         Event::Started { path } => {
             let path = path_text(&path);
-            emit_or_log(json, &Outbound::RecordingStarted { path: path.clone() }, || format!("long recording -> {path}"));
+            emit_or_log(json, &Outbound::RecordingStarted { path: path.clone(), continued: false }, || format!("long recording -> {path}"));
         }
-        Event::Stopped { path, seconds, bytes, marks } => {
+        Event::PartStarted { path } => {
             let path = path_text(&path);
-            emit_or_log(json, &Outbound::RecordingStopped { path: path.clone(), seconds, bytes }, || {
-                format!("long recording saved {path} ({seconds:.1}s, {bytes} bytes, {marks} marks)")
-            });
+            emit_or_log(json, &Outbound::RecordingStarted { path: path.clone(), continued: true }, || format!("long recording continues -> {path}"));
         }
+        Event::Stopped { path, seconds, bytes, marks } => stopped(json, &path, seconds, bytes, marks, false),
+        Event::Continued { path, seconds, bytes, marks } => stopped(json, &path, seconds, bytes, marks, true),
         Event::Failed { reason, kept } => {
             let kept = kept.as_ref().map(path_text);
             emit_or_log(json, &Outbound::RecordingFailed { reason: reason.clone(), path: kept.clone() }, || {
@@ -285,6 +285,15 @@ fn report(json: bool, event: Event) {
         }
         Event::Log(message) => emit_or_log(json, &Outbound::EncoderLog { message: message.clone() }, || message),
     }
+}
+
+/// `recording_stopped`; `continued`: only this part ended (the stream changed).
+fn stopped(json: bool, path: &Path, seconds: f64, bytes: u64, marks: usize, continued: bool) {
+    let path = path.to_string_lossy().into_owned();
+    emit_or_log(json, &Outbound::RecordingStopped { path: path.clone(), seconds, bytes, continued }, || {
+        let what = if continued { "part saved (capture size changed; continuing in a new file)" } else { "saved" };
+        format!("long recording {what} {path} ({seconds:.1}s, {bytes} bytes, {marks} marks)")
+    });
 }
 
 /// Rename long recordings a crash left as `.part` (background thread: the
@@ -344,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn a_reopened_encoders_first_packet_ends_the_recording_without_the_notice() {
+    fn a_reopened_encoders_first_packet_continues_the_recording_without_the_notice() {
         let (mut w, dir) = writer("reopen", 0);
         let (_tx, rx) = sync_channel::<Data>(4);
         w.start("G", Some((0, Instant::now())));
@@ -355,12 +364,17 @@ mod tests {
         w.data(video(20, false, 2)); // a stale packet of an older encoder: skipped
         assert!(w.recorder.is_active());
         // The EncoderReopened notice was dropped (queue full); the new
-        // encoder's first keyframe still ends the file cleanly.
+        // encoder's first keyframe ends part 1 and starts part 2.
         w.data(video(33, true, 4));
-        assert!(!w.recorder.is_active(), "the recording ended at the stream change");
         assert_eq!(w.generation, 4);
-        assert_eq!(finished(&dir).len(), 1, "finished and renamed into place");
-        w.check_encoder_failed(&rx); // idle: nothing to do
+        assert!(w.recorder.is_active(), "the recording goes on in a new file");
+        w.data(video(50, false, 4));
+        w.check_encoder_failed(&rx); // nothing failed
+        w.stop(&rx);
+        let mut names = finished(&dir);
+        names.sort();
+        assert_eq!(names.len(), 2, "two finished parts: {names:?}");
+        assert!(names[0].ends_with("__rec-2.mp4") && names[1].ends_with("__rec.mp4"), "{names:?}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

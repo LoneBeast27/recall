@@ -258,3 +258,20 @@ fn disconnect_clears_ready_state_immediately() {
     assert_eq!(reducer.view().state, RecorderState::Stopped);
     assert!(!reducer.view().connected);
 }
+
+#[test]
+fn a_continued_long_recording_says_so_instead_of_saved() {
+    let now = Instant::now();
+    let mut reducer = Reducer::new();
+    reducer.apply_envelope(&status("h264_nvenc"), now);
+    reducer.apply_engine_event(&json!({"type":"recording_started","path":"E:\\c\\G__rec.mp4","continued":false}), now);
+    reducer.apply_engine_event(&json!({"type":"recording_stopped","path":"E:\\c\\G__rec.mp4","seconds":75.0,"bytes":1,"continued":true}), now);
+    let view = || (reducer.view().primary.clone(), reducer.view().secondary.clone());
+    assert_eq!(view(), ("Recording continued in a new file".to_string(), "The game's size changed".to_string()));
+    reducer.apply_engine_event(&json!({"type":"recording_started","path":"E:\\c\\G__rec-2.mp4","continued":true}), now);
+    let (primary, secondary) = (reducer.view().primary.clone(), reducer.view().secondary.clone());
+    assert_eq!(primary, "Recording continued in a new file");
+    assert!(secondary.contains("G__rec-2.mp4"), "{secondary}");
+    reducer.apply_engine_event(&json!({"type":"recording_stopped","path":"E:\\c\\G__rec-2.mp4","seconds":5.0,"bytes":1,"continued":false}), now);
+    assert_eq!(reducer.view().primary, "Recording saved", "the user's stop is the normal saved toast");
+}
