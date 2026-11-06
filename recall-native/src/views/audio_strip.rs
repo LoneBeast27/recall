@@ -2,14 +2,14 @@
 //! the device or app picker, a tall meter with the gain fader beside it, then record-in-clips
 //! and remove. A row of dots on top drags the strip to another place (the list order is the
 //! clips' track order). The last tile adds a source. Levels shown include the source's gain.
-use gpui::{AnyElement, Context, CursorStyle, Div, FontWeight, ImageSource, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, Window, canvas, div, img, prelude::*, px, relative};
+use gpui::{AnyElement, Context, CursorStyle, Div, FontWeight, ImageSource, MouseButton, MouseDownEvent, SharedString, Window, canvas, div, img, prelude::*, px, relative};
 
 use crate::{
     root::Root,
     services::{
         audio_devices,
         audio_sources::{self as sources, Kind, Source},
-        meters::bar_fraction,
+        meters::{bar_fraction, with_gain},
     },
     theme::{self, c},
     ui::{self, Icon, Variant, icon},
@@ -109,11 +109,11 @@ impl Root {
     pub(crate) fn render_strip(&mut self, source: &Source, level: Option<(f32, f32, bool)>, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let id = source.id.clone();
         let renaming = self.settings_ui.audio.renaming.as_deref() == Some(id.as_str());
-        let dragging = self.settings_ui.audio.fader.as_ref().filter(|(f, _)| *f == id).map(|(_, g)| *g);
-        let gain = dragging.unwrap_or(source.gain_db);
+        let gain = self.strip_gain(source);
         let (rms, hold, live) = level.unwrap_or((-90., -90., false));
-        let shown = |db: f32| if db <= -89.0 { db } else { db + gain };
-        let level_text = if !live { "—".to_owned() } else if rms <= -89.0 { "-∞".to_owned() } else { format!("{:.0} dB", shown(rms).max(-90.)) };
+        // Bar, hold line and number all after the gain, so they move together with the fader.
+        let (rms, hold) = (with_gain(rms, gain), with_gain(hold, gain));
+        let level_text = if !live { "—".to_owned() } else if rms <= -89.0 { "-∞".to_owned() } else { format!("{:.0} dB", rms) };
 
         let type_icon: AnyElement = match self.settings_ui.audio.icon(&source.exe).filter(|_| source.kind == Kind::App) {
             Some(image) => img(ImageSource::Render(image)).size(px(16.)).flex_none().into_any_element(),
@@ -193,7 +193,7 @@ impl Root {
             .gap(px(10.))
             .justify_center()
             .when(!source.enabled, |d| d.opacity(0.4))
-            .child(div().flex().flex_col().items_center().gap(px(6.)).child(meter(rms, shown(hold), live && source.enabled)).child(div().text_size(px(11.)).font_family(theme::mono()).text_color(c(theme::TERTIARY)).child(level_text)))
+            .child(div().flex().flex_col().items_center().gap(px(6.)).child(meter(rms, hold, live && source.enabled)).child(div().text_size(px(11.)).font_family(theme::mono()).text_color(c(theme::TERTIARY)).child(level_text)))
             .child(self.render_fader(&id, gain, cx));
 
         let (toggle_id, remove_id) = (id.clone(), id.clone());
@@ -250,13 +250,14 @@ impl Root {
     }
 
     /// The gain fader: drag to set (-60..+12 dB), double-click for 0 dB; saved on release.
+    /// Only the press is on the track: moves and the release are followed window-wide
+    /// (`Root::drag_watch`), so a drag that leaves the track keeps going and ends anywhere.
     fn render_fader(&mut self, id: &str, gain: f32, cx: &mut Context<Self>) -> AnyElement {
         let span = self.settings_ui.audio.span(id);
         let fraction = sources::fader_fraction(gain);
         let unity = sources::fader_fraction(0.0);
         let at = |span: &crate::views::audio_page::FaderSpan, y: f32| span.get().map(|(top, h)| sources::gain_at(1.0 - (y - top) / h.max(1.0)));
-        let (down_id, down_span, move_id, move_span) = (id.to_owned(), span.clone(), id.to_owned(), span.clone());
-        let (up_id, out_id) = (id.to_owned(), id.to_owned());
+        let (down_id, down_span) = (id.to_owned(), span.clone());
         let track = div()
             .id(SharedString::from(format!("fader-{id}")))
             .w(px(28.))
@@ -275,24 +276,6 @@ impl Root {
                     this.settings_ui.audio.fader = Some((down_id.clone(), g));
                 }
                 cx.notify();
-            }))
-            .on_mouse_move(cx.listener(move |this, e: &MouseMoveEvent, _, cx| {
-                let dragging = this.settings_ui.audio.fader.as_ref().is_some_and(|(f, _)| *f == move_id);
-                if dragging
-                    && e.pressed_button == Some(MouseButton::Left)
-                    && let Some(g) = at(&move_span, f32::from(e.position.y))
-                {
-                    this.settings_ui.audio.fader = Some((move_id.clone(), g));
-                    cx.notify();
-                }
-            }))
-            .on_mouse_up(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                this.commit_fader(&up_id);
-                cx.notify();
-            }))
-            .on_mouse_up_out(MouseButton::Left, cx.listener(move |this, _, _, cx| {
-                this.commit_fader(&out_id);
-                cx.notify();
             }));
         div()
             .flex()
@@ -304,13 +287,19 @@ impl Root {
             .into_any_element()
     }
 
-    fn commit_fader(&mut self, id: &str) {
-        if let Some((dragged, gain)) = self.settings_ui.audio.fader.take() {
-            if dragged == id {
-                self.set_source_gain(id, gain);
-            } else {
-                self.settings_ui.audio.fader = Some((dragged, gain));
-            }
+    /// The dragged fader follows the pointer's height, wherever the pointer is.
+    pub(crate) fn fader_to(&mut self, y: f32) {
+        let page = &mut self.settings_ui.audio;
+        let Some((id, _)) = page.fader.clone() else { return };
+        if let Some(gain) = page.spans.get(&id).and_then(|s| s.get()).map(|(top, h)| sources::gain_at(1.0 - (y - top) / h.max(1.0))) {
+            page.fader = Some((id, gain));
+        }
+    }
+
+    /// The button came up: save the dragged gain.
+    pub(crate) fn commit_dragged_fader(&mut self) {
+        if let Some((id, gain)) = self.settings_ui.audio.fader.take() {
+            self.set_source_gain(&id, gain);
         }
     }
 

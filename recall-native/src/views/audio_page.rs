@@ -58,6 +58,8 @@ pub struct AudioPage {
     pub name_field: Option<TextField>,
     /// The fader being dragged: source id and the gain shown.
     pub fader: Option<(String, f32)>,
+    /// A gain let go and sent to the recorder, shown until the saved list carries it.
+    pub pending_gain: Option<(String, f32, Instant)>,
     /// Each fader track's window top and height, written while painting.
     pub spans: HashMap<String, FaderSpan>,
     /// The last removed source, its place and when.
@@ -143,7 +145,22 @@ impl Root {
     }
 
     pub(crate) fn set_source_gain(&mut self, id: &str, gain_db: f32) {
-        self.edit_source(id, |s| s.gain_db = gain_db.clamp(sources::GAIN_MIN_DB, sources::GAIN_MAX_DB));
+        let gain_db = gain_db.clamp(sources::GAIN_MIN_DB, sources::GAIN_MAX_DB);
+        self.settings_ui.audio.pending_gain = Some((id.to_owned(), gain_db, Instant::now()));
+        self.edit_source(id, |s| s.gain_db = gain_db);
+    }
+
+    /// The gain a strip shows now (see `sources::shown_gain`); forgets a pending gain once the
+    /// saved list has it or it has waited too long.
+    pub(crate) fn strip_gain(&mut self, source: &Source) -> f32 {
+        let page = &mut self.settings_ui.audio;
+        let dragging = page.fader.as_ref().filter(|(f, _)| *f == source.id).map(|(_, g)| *g);
+        let pending = page.pending_gain.as_ref().filter(|(p, _, _)| *p == source.id).map(|(_, g, at)| (*g, at.elapsed()));
+        let gain = sources::shown_gain(dragging, pending, source.gain_db);
+        if pending.is_some() && dragging.is_none() && gain == source.gain_db {
+            page.pending_gain = None;
+        }
+        gain
     }
 
     /// The dragged strip moved: work out the slot under the pointer and show the list there.

@@ -153,7 +153,7 @@ impl Root {
             }
             let saved = source.device.trim().to_owned();
             let mut entries = vec![(String::new(), audio_devices::device_label("", lists.map(|_| names.as_slice()), default.as_deref()))];
-            if !saved.is_empty() && lists.is_some() && !names.iter().any(|n| n.trim().eq_ignore_ascii_case(&saved)) {
+            if !saved.is_empty() && lists.is_some() && crate::services::meters::match_endpoint(&names, &saved).is_none() {
                 entries.push((saved.clone(), format!("{saved} (not connected)")));
             }
             entries.extend(names.iter().map(|n| (n.clone(), n.clone())));

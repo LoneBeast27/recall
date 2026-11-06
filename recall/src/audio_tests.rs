@@ -176,6 +176,18 @@ fn a_configured_name_matches_exactly_before_tokens() {
     assert_eq!(super::match_endpoint(&names, "  "), None, "empty = Windows default");
 }
 
+/// Same table as `recall-native` `services/meters.rs`: the meter must pick what this records.
+#[test]
+fn endpoint_matching_is_whole_word_and_folds_the_slashed_o() {
+    let names: Vec<String> = ["Virtual B (Mixer)", "Virtual A (Mixer)", "Line (Mixér)", "System (MØNITOR)"].map(String::from).to_vec();
+    assert_eq!(super::match_endpoint(&names, "virtual a"), Some(1), "'a' is not found inside another word");
+    assert_eq!(super::match_endpoint(&names, "System (MØNITOR)"), Some(3), "exact, non-ASCII");
+    assert_eq!(super::match_endpoint(&names, "system monitor"), Some(3), "ø typed as o");
+    assert_eq!(super::match_endpoint(&names, "SYSTEM (mønitor)"), Some(3), "case-insensitive Ø/ø");
+    assert_eq!(super::match_endpoint(&names, "line mixér"), Some(2));
+    assert_eq!(super::match_endpoint(&names, "mix"), None, "a part of a word is not a word");
+}
+
 /// A save's audio covers exactly its video window on the capture clock, whether
 /// the newest frame is held up to the request (a live game) or the clip ends at
 /// the last frame (the game closed 30 s before the save: the 11-05 drain).
