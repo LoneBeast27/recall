@@ -62,7 +62,7 @@ pub(crate) enum Data {
     /// `generation`: the live encoder that produced it (`tap::generation`).
     Video { pts_us: u64, keyframe: bool, data: Arc<[u8]>, generation: u64 },
     Audio { track: &'static str, samples: Vec<f32>, at: Instant },
-    /// `at`: when the encoder reopened (the part's clock maps it to capture time).
+    /// `at`: when the encoder reopened (the next part's rate cap counts from it).
     EncoderReopened { generation: u64, at: Instant },
 }
 
@@ -92,7 +92,7 @@ pub fn spawn(out_dir: String, json: bool, tracks: Vec<TrackInfo>) -> LongRec {
     let (done_tx, done) = channel::<()>();
     let spawned = std::thread::Builder::new().name("recall-longrec".into()).spawn(move || {
         let _done = done_tx; // dropped when the thread ends
-        Writer { out_dir, json, recorder: Recorder::new(fmp4::Fmp4Factory, tracks), generation: tap::generation(), skew: Duration::ZERO, parts_so_far: Vec::new() }
+        Writer { out_dir, json, recorder: Recorder::new(fmp4::Fmp4Factory, tracks), generation: tap::generation(), skew: Duration::ZERO, parts_so_far: Vec::new(), missed: (0.0, 0.0) }
             .run(&ctl_rx, &data_rx);
     });
     if let Err(e) = spawned {
@@ -137,6 +137,8 @@ struct Writer<F: SinkFactory> {
     skew: Duration,
     /// The finished parts of the running recording (a failure names them all).
     parts_so_far: Vec<PathBuf>,
+    /// (gap, frozen) seconds of the running recording as of the last step (a failure reports them).
+    missed: (f64, f64),
 }
 
 impl<F: SinkFactory> Writer<F> {
@@ -285,14 +287,16 @@ impl<F: SinkFactory> Writer<F> {
                 Event::Continued { ref path, .. } => self.parts_so_far.push(path.clone()),
                 Event::Failed { reason, kept } => {
                     let files = std::mem::take(&mut self.parts_so_far);
-                    report_failed(self.json, &reason, kept.as_deref(), &files);
+                    report_failed(self.json, &reason, kept.as_deref(), &files, self.missed);
                     continue;
                 }
                 _ => {}
             }
             report(self.json, e);
         }
-        if !self.recorder.is_active() {
+        if self.recorder.is_active() {
+            self.missed = self.recorder.missed();
+        } else {
             tap::set_active(false);
         }
     }
@@ -317,24 +321,26 @@ fn report(json: bool, event: Event) {
         Event::Continued { path, seconds, bytes, marks, part, total_seconds, cause } => {
             stopped(json, &path, Stop { seconds, bytes, marks, parts: part, total_seconds, gap_seconds: 0.0, frozen_seconds: 0.0, cause: Some(cause.as_str()) })
         }
-        Event::Failed { reason, kept } => report_failed(json, &reason, kept.as_deref(), &[]),
+        Event::Failed { reason, kept } => report_failed(json, &reason, kept.as_deref(), &[], (0.0, 0.0)),
         Event::Log(message) => emit_or_log(json, &Outbound::EncoderLog { message: message.clone() }, || message),
     }
 }
 
 /// `recording_failed`: `path` is the file kept from the part that failed, `paths` every
 /// file the recording left (its finished parts first), each once: a failure while the next
-/// part waits keeps the finished part, which is already among `earlier`.
-fn failed_outbound(reason: &str, kept: Option<&Path>, earlier: &[PathBuf]) -> Outbound {
+/// part waits keeps the finished part, which is already among `earlier`. `missed`: the
+/// recording's (gap, frozen) seconds.
+fn failed_outbound(reason: &str, kept: Option<&Path>, earlier: &[PathBuf], missed: (f64, f64)) -> Outbound {
     let text = |p: &Path| p.to_string_lossy().into_owned();
     let mut paths: Vec<String> = earlier.iter().map(|p| text(p)).collect();
     let last = kept.map(text).filter(|k| !paths.contains(k));
     paths.extend(last);
-    Outbound::RecordingFailed { reason: reason.to_string(), path: kept.map(text), paths }
+    let (gap_seconds, frozen_seconds) = missed;
+    Outbound::RecordingFailed { reason: reason.to_string(), path: kept.map(text), paths, gap_seconds, frozen_seconds }
 }
 
-fn report_failed(json: bool, reason: &str, kept: Option<&Path>, earlier: &[PathBuf]) {
-    let out = failed_outbound(reason, kept, earlier);
+fn report_failed(json: bool, reason: &str, kept: Option<&Path>, earlier: &[PathBuf], missed: (f64, f64)) {
+    let out = failed_outbound(reason, kept, earlier, missed);
     let Outbound::RecordingFailed { paths, .. } = &out else { return };
     let files = if paths.is_empty() { "nothing".to_string() } else { paths.join(", ") };
     emit_or_log(json, &out, || format!("long recording FAILED: {reason} (kept: {files})"));

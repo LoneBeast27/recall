@@ -58,7 +58,23 @@ pub fn failed_notice(event: &Value) -> Option<RecNotice> {
     };
     let reason = event.get("reason").and_then(Value::as_str).unwrap_or("unknown error");
     let detail = truncate(&format!("{}. {saved}", truncate(reason, 32)), 64);
-    Some(RecNotice { tone: Tone::Failure, title: "Recording ended early".into(), text: truncate(&saved, 48), detail })
+    let text = format!("{}{}", truncate(&saved, 48), notes(event, paths.len() > 1));
+    Some(RecNotice { tone: Tone::Failure, title: "Recording ended early".into(), text, detail })
+}
+
+/// " · 7 s missing · 40 s frozen" from the event's `gap_seconds` (only past one file) and
+/// `frozen_seconds`, each past [`MISSING_OVER`]; empty when neither is.
+fn notes(event: &Value, several: bool) -> String {
+    let secs = |key: &str| event.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+    let (gap, frozen) = (secs("gap_seconds"), secs("frozen_seconds"));
+    let mut tail = String::new();
+    if several && gap > MISSING_OVER {
+        tail += &format!(" · {} missing", missing(gap));
+    }
+    if frozen > MISSING_OVER {
+        tail += &format!(" · {} frozen", missing(frozen));
+    }
+    tail
 }
 
 /// `m:ss`, or `h:mm:ss` from an hour.
@@ -87,15 +103,7 @@ pub fn recording_notice(kind: &str, event: &Value, name: String) -> Option<RecNo
         _ => {
             let parts = num("parts").unwrap_or(1).max(1);
             let seconds = event.get("total_seconds").or_else(|| event.get("seconds")).and_then(Value::as_f64).unwrap_or(0.0);
-            let secs = |key: &str| event.get(key).and_then(Value::as_f64).unwrap_or(0.0);
-            let (gap, frozen) = (secs("gap_seconds"), secs("frozen_seconds"));
-            let mut tail = String::new();
-            if parts > 1 && gap > MISSING_OVER {
-                tail += &format!(" · {} missing", missing(gap));
-            }
-            if frozen > MISSING_OVER {
-                tail += &format!(" · {} frozen", missing(frozen));
-            }
+            let tail = notes(event, parts > 1);
             let text = match parts {
                 1 if tail.is_empty() => truncate(&format!("{name} · {}", length(seconds)), 48),
                 1 => format!("{} · {}{tail}", truncate(&name, 20), length(seconds)),
@@ -154,5 +162,16 @@ mod tests {
         assert_eq!(n.title, "Recording ended early");
         assert_eq!(n.detail, "the video encoder failed (devic…. Saved G__rec.mp4", "the notice gives the reason, then the files");
         assert_eq!(n.text, "Saved G__rec.mp4");
+    }
+
+    /// Merge gate 11-07 #4 (P2): the island's second line after an early end read only
+    /// "Saved …", with no word of the time missed or frozen.
+    #[test]
+    fn a_failure_after_a_freeze_says_so_on_the_second_line() {
+        let failed = json!({"type":"recording_failed","reason":"the video encoder failed","path":"E:/c/G__rec-2.mp4",
+            "paths":["E:/c/G__rec.mp4","E:/c/G__rec-2.mp4"],"gap_seconds":7.2,"frozen_seconds":40.2});
+        assert_eq!(failed_notice(&failed).unwrap().text, "Saved G__rec.mp4, G__rec-2.mp4 · 7 s missing · 40 s frozen");
+        let quiet = json!({"type":"recording_failed","reason":"x","path":"E:/c/G__rec.mp4","paths":["E:/c/G__rec.mp4"],"gap_seconds":0.0,"frozen_seconds":1.0});
+        assert_eq!(failed_notice(&quiet).unwrap().text, "Saved G__rec.mp4", "short spans are not news");
     }
 }

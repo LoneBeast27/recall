@@ -186,65 +186,84 @@ fn each_part_opens_with_the_settings_it_was_given_and_names_the_cause() {
     assert!(matches!(&rec.stop()[..], [Event::Stopped { parts: 2, .. }]));
 }
 
-/// Merge gate 11-07 #3 (P1): a same-header reopen holds the last frame until the new
-/// encoder's keyframe, and nothing counted that span.
-#[test]
-fn a_same_header_reopen_counts_the_frozen_span_up_to_the_next_keyframe() {
-    let (mut rec, _log, _path, t0) = recording("frozen");
-    rec.video(1_000 * MS, false, pkt(3), false, t0 + ms(1_000));
-    // Reopen at capture 5 s; the new encoder's P-frames are dropped until its keyframe at 45 s.
-    rec.encoder_reopened(t0 + ms(5_000), Cause::Same, Some(2));
-    for s in 6..45u64 {
-        rec.video(s * 1_000 * MS, false, pkt(4), false, t0 + ms(s * 1_000));
+/// Feed `rec` 60 fps frames from capture `from_ms` (a keyframe first) to before `to_ms`,
+/// each arriving at its own wall time.
+fn frames(rec: &mut Recorder<FakeFactory>, t0: Instant, from_ms: u64, to_ms: u64, tag: u8) {
+    let mut at = from_ms * MS;
+    while at < to_ms * MS {
+        rec.video(at, at == from_ms * MS, pkt(tag), false, t0 + Duration::from_micros(at));
+        at += 16_667;
     }
-    rec.video(45_000 * MS, true, pkt(5), false, t0 + ms(45_000));
+}
+
+/// Merge gate 11-07 #4 (P1): an encode error stops the packets; the recovery's reopen comes
+/// up to ~60 s later and real NVENC opens on a keyframe. The picture held still from the
+/// old encoder's last packet, and the count from the reopen's own time read ~0 s.
+#[test]
+fn a_same_header_recovery_counts_from_the_last_packet_to_the_new_keyframe() {
+    let (mut rec, _log, _path, t0) = recording("frozen");
+    frames(&mut rec, t0, 1_000, 5_000, 3); // the last packet is at ~4.99 s: the encode error
+    // No packets while the encoder is down; the 5th reopen opens at 45 s on a keyframe.
+    rec.encoder_reopened(t0 + ms(45_000), Cause::Same, Some(2));
+    frames(&mut rec, t0, 45_000, 46_000, 4);
     // A static screen afterwards: the VFR encoder sends nothing for 30 s. Not a freeze.
-    rec.video(46_000 * MS, false, pkt(6), false, t0 + ms(46_000));
-    rec.video(76_000 * MS, false, pkt(7), false, t0 + ms(76_000));
+    rec.video(76_000 * MS, false, pkt(5), false, t0 + ms(76_000));
     let events = rec.stop();
     let [Event::Stopped { parts: 1, gap_seconds, frozen_seconds, .. }] = events[..] else { panic!("{events:?}") };
     assert_eq!(gap_seconds, 0.0);
-    assert!((frozen_seconds - 40.0).abs() < 0.01, "reopen at 5 s to the keyframe at 45 s: {frozen_seconds}");
+    assert!((frozen_seconds - 40.0).abs() < 0.05, "last packet ~5 s to the keyframe at 45 s: {frozen_seconds}");
 }
 
-/// The frozen seconds of every part add up, and a reopen whose keyframe comes at once
-/// freezes nothing.
+/// The frozen seconds of every part add up; a reopen with no gap in the packets freezes ~nothing.
 #[test]
 fn frozen_seconds_carry_across_parts() {
     let (mut rec, _log, _path, t0) = recording("frozen-parts");
-    rec.encoder_reopened(t0 + ms(2_000), Cause::Same, Some(2));
-    rec.video(5_000 * MS, true, pkt(3), false, t0 + ms(5_000));
+    rec.video(1_000 * MS, false, pkt(3), false, t0 + ms(1_000));
+    rec.encoder_reopened(t0 + ms(4_000), Cause::Same, Some(2));
+    rec.video(4_000 * MS, true, pkt(4), false, t0 + ms(4_000)); // 1 s -> 4 s: 3 s
     rec.encoder_reopened(t0 + PART_GAP, Cause::Size, Some(3));
-    assert!(matches!(&rec.video(10_000 * MS, true, pkt(4), false, t0 + PART_GAP)[..], [Event::PartStarted { part: 2, .. }]));
-    rec.encoder_reopened(t0 + ms(12_000), Cause::Same, Some(4));
-    rec.video(12_000 * MS, true, pkt(5), false, t0 + ms(12_000));
-    rec.encoder_reopened(t0 + ms(13_000), Cause::Same, Some(5));
-    rec.video(20_500 * MS, true, pkt(6), false, t0 + ms(20_500));
+    assert!(matches!(&rec.video(10_000 * MS, true, pkt(5), false, t0 + PART_GAP)[..], [Event::PartStarted { part: 2, .. }]));
+    rec.video(10_016 * MS, false, pkt(6), false, t0 + ms(10_016));
+    rec.encoder_reopened(t0 + ms(10_032), Cause::Same, Some(4));
+    rec.video(10_032 * MS, true, pkt(7), false, t0 + ms(10_032)); // a clean reopen: 16 ms
+    rec.video(10_500 * MS, false, pkt(8), false, t0 + ms(10_500));
+    rec.encoder_reopened(t0 + ms(18_000), Cause::Same, Some(5));
+    rec.video(18_000 * MS, true, pkt(9), false, t0 + ms(18_000)); // 10.5 s -> 18 s: 7.5 s
     let events = rec.stop();
     let [Event::Stopped { parts: 2, frozen_seconds, .. }] = events[..] else { panic!("{events:?}") };
-    assert!((frozen_seconds - 10.5).abs() < 0.01, "3 s in part 1, 0 + 7.5 s in part 2: {frozen_seconds}");
+    assert!((frozen_seconds - 10.516).abs() < 0.01, "3 s in part 1, 0.016 + 7.5 s in part 2: {frozen_seconds}");
 }
 
-/// Merge gate 11-07 #3 (P1): audio keeps its wall-clock place through a frozen span, so the
-/// sound after the new keyframe lines up with its picture.
+/// Merge gate 11-07 #3/#4 (P1): audio keeps its wall-clock place through a frozen span (the
+/// encoder down from 1 s, back on a keyframe at 20 s), so the sound after it lines up.
 #[test]
 fn audio_stays_in_sync_across_a_frozen_span() {
     let (mut rec, log, _path, t0) = recording("frozen-sync");
-    rec.encoder_reopened(t0 + ms(1_000), Cause::Same, Some(2));
-    // 10 ms chunks (480 frames at 48 kHz) by arrival, all through the freeze and after it.
+    // 10 ms chunks (480 frames at 48 kHz) by arrival, all through the freeze and after it;
+    // video at 60 fps to 1 s, nothing, then a reopen on a keyframe at 20 s and video to 25 s.
     for k in 1..=2_500u64 {
         let at = t0 + ms(10 * k);
         rec.audio(0, &[0.25; 960], at);
-        if k == 2_000 {
-            rec.video(20_000 * MS, true, pkt(5), false, at);
+        match k {
+            100 => frames(&mut rec, t0, 20, 1_000, 3),
+            2_000 => {
+                rec.encoder_reopened(at, Cause::Same, Some(2));
+                frames(&mut rec, t0, 20_000, 25_000, 5);
+            }
+            _ => {}
         }
         rec.tick(at);
     }
-    assert!(matches!(&rec.stop()[..], [Event::Stopped { .. }]));
+    let events = rec.stop();
+    let [Event::Stopped { frozen_seconds, .. }] = events[..] else { panic!("{events:?}") };
+    assert!((frozen_seconds - 19.0).abs() < 0.05, "{frozen_seconds}");
     let pcm = log.pcm(0);
     // 25 s of sound by 25 s, none of it shifted: frame n is at n / 48 000 s.
     assert_eq!(pcm.len() / 2, 25 * 48_000, "every frame in its wall-clock place");
     assert!(pcm.iter().all(|s| *s == 0.25), "no silence inserted or sound dropped across the freeze");
-    let key = log.videos().into_iter().find(|v| v.3 == 5).expect("the new keyframe was written");
+    let videos = log.videos();
+    let key = videos.iter().find(|v| v.3 == 5).expect("the new keyframe was written");
     assert_eq!(key.0, 20_000 * MS, "the keyframe sits at 20 s in the file, where its sound is");
+    let held = videos.iter().rev().find(|v| v.3 == 3).unwrap();
+    assert_eq!(held.0 + held.1, 20_000 * MS, "the last old frame is held on screen until it");
 }

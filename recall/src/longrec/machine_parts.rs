@@ -11,8 +11,9 @@
 //! while it waits (a size flap, a window being dragged) only move it to the
 //! newest size. A reopen whose stream headers match (`Cause::Same`, e.g. GPU
 //! frames to CPU copies at the same size) needs no new file at all; the time from
-//! it to the new encoder's first keyframe (the last frame held on screen) is
-//! reported as `frozen_seconds`. Gaps between packets are not: the encoder is
+//! the old encoder's last packet to the new encoder's first keyframe (the last
+//! frame held on screen through an encode error and its recovery) is reported as
+//! `frozen_seconds`. Gaps between packets with no reopen are not: the encoder is
 //! VFR and a static screen sends nothing.
 
 use std::path::{Path, PathBuf};
@@ -108,15 +109,26 @@ impl<F: SinkFactory> Recorder<F> {
                 }
                 Vec::new()
             }
-            // Headers match: same file, from the new encoder's first keyframe. The last frame
-            // holds until then: that span is counted as frozen (from this reopen's capture time).
+            // Headers match: same file, from the new encoder's first keyframe. The old
+            // encoder's last packet holds until then (an encode error and its recovery, up to
+            // the 5th failed reopen): that span is counted as frozen.
             Phase::Recording(a) if cause == Cause::Same => {
                 a.need_key = true;
-                let at_us = a.capture_us_at(now);
-                a.freeze_from.get_or_insert(at_us);
+                if let Some(last) = a.held.as_ref().map(|h| h.0).or(a.last_pts) {
+                    a.freeze_from.get_or_insert(last);
+                }
                 vec![Event::Log(format!("{}; the long recording goes on in the same file", cause.log_text()))]
             }
             Phase::Recording(_) => self.next_part(now, cause),
+        }
+    }
+
+    /// (gap, frozen) seconds of the running recording so far ((0, 0) when idle).
+    pub fn missed(&self) -> (f64, f64) {
+        match &self.phase {
+            Phase::Recording(a) => (a.earlier_gap, a.earlier_frozen + a.frozen_us as f64 / 1e6),
+            Phase::Armed { previous: Some(s), .. } => (s.gap_seconds, s.frozen_seconds),
+            _ => (0.0, 0.0),
         }
     }
 
