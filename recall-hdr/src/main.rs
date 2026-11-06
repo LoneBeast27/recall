@@ -63,6 +63,7 @@ mod record_app_audio;
 mod record_audio_sources;
 mod record_config;
 mod record_detect;
+mod record_dispatch;
 mod record_drain;
 mod record_engine;
 mod record_engine_ctl;

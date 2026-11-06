@@ -269,3 +269,15 @@ fn record_fail_ends_a_continued_recording_early_and_keeps_every_part() {
     w.control(Control::Fail { reason: "again".into() }, &rx); // nothing running: ignored
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Gate P2-c (d1e057e): several `.part` files recovered at once were one event each, so
+/// the app showed a toast per file; one event lists them all.
+#[test]
+fn several_recovered_parts_are_one_event_that_lists_them() {
+    assert!(recovered_outbound(Vec::new()).is_none());
+    let out = recovered_outbound(vec!["E:/c/G__rec.mp4".into(), "E:/c/H__rec.mp4".into()]).unwrap();
+    let v = serde_json::to_value(out).unwrap();
+    assert_eq!(v["type"], "recording_recovered");
+    assert_eq!(v["path"], "E:/c/G__rec.mp4", "older readers still get the first file");
+    assert_eq!(v["paths"], serde_json::json!(["E:/c/G__rec.mp4", "E:/c/H__rec.mp4"]));
+}

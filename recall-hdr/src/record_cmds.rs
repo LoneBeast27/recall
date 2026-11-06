@@ -39,6 +39,7 @@ use crate::record_config::{apply_patch, parse_cpu_mask};
 use crate::record_notice::Situation;
 use crate::record_status::{config_event, error_event, status_json, tray_line, StatusInputs};
 use crate::record_engine::{capture_refusal, engine_settings_changed};
+use crate::record_dispatch::{command_effects, hud_probe_effects, mic_effects, save_effects, Effect, NOT_RESPONDING};
 use crate::supervisor::EngineHealth;
 
 /// `{"type":"saving","seconds":N}` (mod `session`): a save the controller
@@ -49,16 +50,20 @@ pub fn saving_event(seconds: u32) -> String {
 }
 
 /// Every accepted save goes through here (pipe `save_clip`, the save
-/// hotkeys): the engine command, then the broadcast.
+/// hotkeys): the engine command, then (only if it was queued) the broadcast. True when
+/// queued.
 /// `at_last_frame` (a drain: the game closed) ends the clip at the game's last
 /// frame instead of holding that frame up to now.
-pub(crate) fn send_save(hub: &PipeHub, send_engine: impl FnOnce(&str), seconds: u32, at_last_frame: bool) {
+pub(crate) fn send_save(hub: &PipeHub, send_engine: impl FnOnce(&str) -> bool, seconds: u32, at_last_frame: bool) -> bool {
     let mut cmd = json!({"cmd": "save_clip", "seconds": seconds});
     if at_last_frame {
         cmd["at_last_frame"] = Value::Bool(true);
     }
-    send_engine(&cmd.to_string());
-    hub.event("session", &saving_event(seconds));
+    let queued = send_engine(&cmd.to_string());
+    if queued {
+        hub.event("session", &saving_event(seconds));
+    }
+    queued
 }
 
 /// The `set_config` patch that turns the performance-stats island on or off.
@@ -95,7 +100,10 @@ impl Controller {
             "hud_probe" => {
                 if self.engine_running() && !self.paused {
                     log!("record: engine hud_probe");
-                    self.supervisor.send_engine_line(r#"{"cmd":"hud_probe"}"#);
+                    let queued = self.supervisor.send_engine_line(r#"{"cmd":"hud_probe"}"#);
+                    if hud_probe_effects(queued).contains(&Effect::LogOnly) {
+                        log!("record: hud_probe not sent: {NOT_RESPONDING}");
+                    }
                 } else {
                     self.reply_error(client, "hud_probe: nothing is being captured");
                 }
@@ -171,15 +179,26 @@ impl Controller {
         }
         let draining = self.planner.drain().is_some();
         log!("record: save last {secs}s{}", if draining { " (game closed: ends at its last frame)" } else { "" });
-        self.activity.save_sent(std::time::Instant::now());
-        send_save(&self.hub, |line| self.supervisor.send_engine_line(line), secs, draining);
-        // Heard at once; the chime follows when the clip is on disk (seconds for a long save to a hard drive).
-        crate::cues::tick();
+        // Queued FIRST: only a save the engine will see is marked pending and cued.
+        let queued = send_save(&self.hub, |line| self.supervisor.send_engine_line(line), secs, draining);
+        for effect in save_effects(queued) {
+            match effect {
+                Effect::MarkPending => self.activity.save_sent(std::time::Instant::now()),
+                // Heard at once; the chime follows when the clip is on disk (seconds for a long save to a hard drive).
+                Effect::Cue => crate::cues::tick(),
+                Effect::NotResponding => self.refuse_capture("save_clip", NOT_RESPONDING),
+                Effect::Announce | Effect::LogOnly => {} // `send_save` announced it
+            }
+        }
     }
 
     fn export_clip(&mut self, val: &Value) {
         if self.engine_running() {
-            self.supervisor.send_engine_line(&val.to_string());
+            if command_effects(self.supervisor.send_engine_line(&val.to_string())).contains(&Effect::NotResponding) {
+                let source = val.get("path").and_then(Value::as_str).unwrap_or("");
+                self.hub.event("engine", &json!({"type": "export_failed", "source": source, "reason": NOT_RESPONDING}).to_string());
+                crate::supervisor::beep_failure();
+            }
         } else {
             let source = val.get("path").and_then(Value::as_str).unwrap_or("");
             self.hub.event(
@@ -205,7 +224,15 @@ impl Controller {
     pub(crate) fn set_mic(&mut self, muted: bool) {
         self.mic_muted = muted;
         log!("record: microphone {}", if muted { "muted" } else { "live" });
-        self.supervisor.send_engine_line(&json!({"cmd": "set_mic_mute", "muted": muted}).to_string());
+        let queued = self.supervisor.send_engine_line(&json!({"cmd": "set_mic_mute", "muted": muted}).to_string());
+        // The mute stays our intent either way: the next engine gets it (`reapply_engine_intents`).
+        if self.engine_running() && mic_effects(queued).contains(&Effect::NotResponding) {
+            log!("record: microphone change not sent: {NOT_RESPONDING}");
+            if self.cfg.overlay.enabled {
+                self.hub.event("session", &crate::record_notice::shortcut_notice_json("Microphone not changed", NOT_RESPONDING, true, false));
+            }
+            crate::supervisor::beep_failure();
+        }
         if !self.engine_running() {
             self.hub.event("engine", &json!({"type": "mic_muted", "muted": muted}).to_string());
         }
@@ -452,7 +479,7 @@ mod save_tests {
         hub.add_client(Box::new(a.clone()));
         hub.add_client(Box::new(b.clone()));
         let mut sent = Vec::new();
-        send_save(&hub, |line| sent.push(line.to_owned()), 30, false);
+        send_save(&hub, |line| { sent.push(line.to_owned()); true }, 30, false);
         assert_eq!(sent, vec![r#"{"cmd":"save_clip","seconds":30}"#.to_owned()], "one engine command");
         let deadline = Instant::now() + Duration::from_secs(5);
         let lines = |s: &Sink| String::from_utf8(s.0.lock().unwrap().clone()).unwrap();
@@ -465,7 +492,7 @@ mod save_tests {
             assert_eq!(line, json!({"mod":"session","event":{"type":"saving","seconds":30}}));
         }
         let mut drained = Vec::new();
-        send_save(&hub, |line| drained.push(line.to_owned()), 120, true);
+        send_save(&hub, |line| { drained.push(line.to_owned()); true }, 120, true);
         let v: Value = serde_json::from_str(&drained[0]).unwrap();
         assert_eq!(v, json!({"cmd":"save_clip","seconds":120,"at_last_frame":true}), "a drain save ends at the last frame");
     }

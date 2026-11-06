@@ -229,7 +229,7 @@ fn quit_grace_outlasts_the_engines_own_quit_path() {
 // --- a wedged engine stdin (gate P2-c) ----------------------------------
 
 /// An engine stdin whose pipe is full and never read: every write blocks for good.
-struct Wedged;
+pub(crate) struct Wedged;
 
 impl std::io::Write for Wedged {
     fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
@@ -278,4 +278,46 @@ fn a_wedged_engine_stdin_still_gets_killed_within_its_grace() {
     assert!(replaced, "the wedged engine was never killed (manager stuck on its stdin)");
     assert!(asked.elapsed() < Duration::from_secs(3), "the kill took {:?}", asked.elapsed());
     std::mem::ManuallyDrop::into_inner(sup).shutdown(Duration::from_millis(50));
+}
+
+#[test]
+fn a_line_to_a_full_queue_is_reported_not_queued() {
+    let shared = Arc::new(Shared::new(None));
+    assert!(!shared.send_line(r#"{"cmd":"save_clip"}"#), "no engine: nothing queued");
+    shared.attach_writer(Some(Box::new(Wedged)));
+    let queued = (0..200).filter(|_| shared.send_line(r#"{"cmd":"save_clip"}"#)).count();
+    assert!(queued <= stdin::QUEUE + 1, "{queued} lines queued to a 64-line queue");
+    assert!(!shared.send_line(r#"{"cmd":"save_clip"}"#), "a full queue said it queued the line");
+}
+
+/// A writer that takes lines only once `open` says so (a healthy engine that is busy).
+struct Gated {
+    open: Arc<AtomicBool>,
+    seen: Arc<Mutex<Vec<String>>>,
+}
+
+impl std::io::Write for Gated {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        while !self.open.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(5));
+        }
+        self.seen.lock().unwrap().push(String::from_utf8_lossy(b).into_owned());
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn quit_keeps_a_slot_so_a_busy_engine_behind_a_full_queue_still_finishes_cleanly() {
+    let shared = Arc::new(Shared::new(None));
+    let open = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    shared.attach_writer(Some(Box::new(Gated { open: open.clone(), seen: seen.clone() })));
+    let filled = (0..1_000).take_while(|_| shared.send_line(r#"{"cmd":"bookmark"}"#)).count();
+    assert!(filled < 1_000, "the queue never said it was full");
+    assert!(shared.send_quit(), "quit found the queue full");
+    open.store(true, Ordering::SeqCst);
+    assert!(wait_for(5, || seen.lock().unwrap().iter().any(|l| l.contains("quit"))), "quit never reached the engine");
 }

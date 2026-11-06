@@ -4,6 +4,7 @@
 //! bookkeeping, the engine plan with deferred restarts / retargets, and the
 //! storage schedule.
 
+use crate::record_dispatch::Effect;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
@@ -134,10 +135,31 @@ impl Controller {
             }
             return self.refuse_capture(cmd, reason);
         }
-        self.activity.command_sent(cmd, Instant::now());
-        log!("record: engine {cmd}");
-        self.supervisor.send_engine_line(&json!({ "cmd": cmd }).to_string());
-        self.publish_status();
+        // Queued first: only a command the engine will see is marked in flight.
+        let queued = self.supervisor.send_engine_line(&json!({ "cmd": cmd }).to_string());
+        log!("record: engine {cmd}{}", if queued { "" } else { " (not sent: the engine is not reading)" });
+        for effect in crate::record_dispatch::command_effects(queued) {
+            match effect {
+                Effect::MarkPending => self.activity.command_sent(cmd, Instant::now()),
+                Effect::Announce => self.publish_status(),
+                Effect::NotResponding => self.command_not_sent(cmd, client),
+                Effect::Cue | Effect::LogOnly => {}
+            }
+        }
+    }
+
+    /// A command the engine is not reading: the same path a refusal takes, with
+    /// "Recorder isn't responding".
+    fn command_not_sent(&self, cmd: &str, client: Option<u64>) {
+        let reason = crate::record_dispatch::NOT_RESPONDING;
+        if cmd == "bookmark" && client.is_none() {
+            return self.refuse_bookmark(reason);
+        }
+        if cmd == "record_stop" || cmd == "bookmark" {
+            self.reply_error(client, &format!("{cmd}: {reason}"));
+            return crate::supervisor::beep_failure();
+        }
+        self.refuse_capture(cmd, reason);
     }
 
     /// The failure event + beep a refused capture action gets (as if the

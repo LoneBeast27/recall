@@ -194,11 +194,14 @@ fn a_recovered_recording_is_an_event() {
     let mut state = connected();
     apply(&mut state, json!({"mod":"engine","event":{"type":"recording_recovered","path":"E:/c/G__rec.mp4"}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"recording_recovered","path":"E:/c/H__rec.mp4","gap_seconds":7.5,"frozen_seconds":40.0}}));
+    // One event for several files (the engine lists them in `paths`; `path` is the first).
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_recovered","path":"E:/c/A__rec.mp4","paths":["E:/c/A__rec.mp4","E:/c/B__rec.mp4"]}}));
     assert_eq!(
         state.events,
         vec![
-            DaemonEvent::RecordingRecovered { path: "E:/c/G__rec.mp4".into(), gap_seconds: 0.0, frozen_seconds: 0.0 },
-            DaemonEvent::RecordingRecovered { path: "E:/c/H__rec.mp4".into(), gap_seconds: 7.5, frozen_seconds: 40.0 },
+            DaemonEvent::RecordingRecovered { paths: vec!["E:/c/G__rec.mp4".into()], gap_seconds: 0.0, frozen_seconds: 0.0 },
+            DaemonEvent::RecordingRecovered { paths: vec!["E:/c/H__rec.mp4".into()], gap_seconds: 7.5, frozen_seconds: 40.0 },
+            DaemonEvent::RecordingRecovered { paths: vec!["E:/c/A__rec.mp4".into(), "E:/c/B__rec.mp4".into()], gap_seconds: 0.0, frozen_seconds: 0.0 },
         ]
     );
 }

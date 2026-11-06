@@ -141,7 +141,7 @@ fn the_restart_waits_up_to_20_s_for_the_recording_to_end_early() {
     // slow HDD. The quit waits for `recording_failed` (the activity leaves recording), at
     // most 20 s; then it quits anyway and the next start recovers the .part.
     let t0 = Instant::now();
-    let wait = EndingEarly::new(t0);
+    let wait = EndingEarly::new(t0, 0);
     assert!(!wait.restart_now(t0 + Duration::from_secs(1), true), "still finishing the part");
     assert!(!wait.restart_now(t0 + Duration::from_secs(19), true));
     assert!(wait.restart_now(t0 + Duration::from_secs(3), false), "recording_failed came: quit now");
@@ -167,4 +167,15 @@ fn a_healthy_minute_after_giving_up_lets_a_later_failure_restart_again() {
         }
     }
     assert_eq!(outs, [(10, Recovery::Restart), (21, Recovery::GaveUp), (127, Recovery::Restart)]);
+}
+
+#[test]
+fn a_new_engine_during_the_wait_cancels_the_restart() {
+    // The supervisor restarted a crashed engine while record_fail waited: the fresh engine
+    // (a new hello) must not be restarted again.
+    let t0 = Instant::now();
+    let wait = EndingEarly::new(t0, 3);
+    assert_eq!(wait.decide(t0 + Duration::from_secs(5), true, 3), EndDecision::Wait);
+    assert_eq!(wait.decide(t0 + Duration::from_secs(6), false, 4), EndDecision::Cancel, "a fresh engine restarted again");
+    assert_eq!(wait.decide(t0 + Duration::from_secs(6), false, 3), EndDecision::RestartNow);
 }

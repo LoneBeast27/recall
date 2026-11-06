@@ -245,19 +245,42 @@ pub const END_EARLY_WAIT: Duration = Duration::from_secs(20);
 
 /// A restart waiting for the long recording to end early (a state, polled every pump
 /// tick; never a sleep on the pump).
+/// What a restart waiting for the recording to end does this tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EndDecision {
+    Wait,
+    RestartNow,
+    /// A new engine came up meanwhile (the supervisor restarted a crash): nothing to restart.
+    Cancel,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct EndingEarly {
     pub until: Instant,
+    hellos: u32,
 }
 
 impl EndingEarly {
-    pub fn new(now: Instant) -> Self {
-        EndingEarly { until: now + END_EARLY_WAIT }
+    /// `hellos`: engine hellos so far (`Supervisor::hello_count`): a new one is a new engine.
+    pub fn new(now: Instant, hellos: u32) -> Self {
+        EndingEarly { until: now + END_EARLY_WAIT, hellos }
     }
 
     /// Quit now: the recording ended (`recording`: it still runs), or the wait is over.
     pub fn restart_now(&self, now: Instant, recording: bool) -> bool {
         !recording || now >= self.until
+    }
+
+    /// The wait's decision this tick; `hellos`: engine hellos so far. A new hello is a new
+    /// engine (the supervisor restarted a crash meanwhile): cancel, never restart it again.
+    pub fn decide(&self, now: Instant, recording: bool, hellos: u32) -> EndDecision {
+        if hellos != self.hellos {
+            EndDecision::Cancel
+        } else if self.restart_now(now, recording) {
+            EndDecision::RestartNow
+        } else {
+            EndDecision::Wait
+        }
     }
 }
 
@@ -271,8 +294,14 @@ impl crate::record_app::Controller {
     pub(crate) fn encoder_recover_tick(&mut self, now: Instant) {
         // A restart waiting for the long recording to end early (`record_fail` sent).
         if let Some(wait) = self.ending_early {
-            if !wait.restart_now(now, self.activity.is_recording()) {
-                return;
+            match wait.decide(now, self.activity.is_recording(), self.supervisor.hello_count()) {
+                EndDecision::Wait => return,
+                EndDecision::Cancel => {
+                    log!("record: a new engine started while the long recording ended early; no restart");
+                    self.ending_early = None;
+                    return;
+                }
+                EndDecision::RestartNow => {}
             }
             self.ending_early = None;
             if self.activity.is_recording() {
@@ -314,7 +343,7 @@ impl crate::record_app::Controller {
                 for line in lines {
                     self.supervisor.send_engine_line(&line);
                 }
-                self.ending_early = Some(EndingEarly::new(now));
+                self.ending_early = Some(EndingEarly::new(now, self.supervisor.hello_count()));
             }
             Recovery::Recovered => log!("record: recording again after the engine restart"),
             Recovery::GaveUp => {
