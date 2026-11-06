@@ -152,15 +152,15 @@ static RECYCLED_A: StdMutex<Vec<Instant>> = StdMutex::new(Vec::new());
 static RECYCLED_B: StdMutex<Vec<Instant>> = StdMutex::new(Vec::new());
 static RECYCLED_C: StdMutex<Vec<Instant>> = StdMutex::new(Vec::new());
 
-fn recycle_a(_: &[PathBuf]) -> Result<(), String> {
+fn recycle_a(_: &[PathBuf]) -> Result<(), crate::record_storage::RecycleError> {
     RECYCLED_A.lock().unwrap().push(Instant::now());
     Ok(())
 }
-fn recycle_b(_: &[PathBuf]) -> Result<(), String> {
+fn recycle_b(_: &[PathBuf]) -> Result<(), crate::record_storage::RecycleError> {
     RECYCLED_B.lock().unwrap().push(Instant::now());
     Ok(())
 }
-fn recycle_c(_: &[PathBuf]) -> Result<(), String> {
+fn recycle_c(_: &[PathBuf]) -> Result<(), crate::record_storage::RecycleError> {
     RECYCLED_C.lock().unwrap().push(Instant::now());
     Ok(())
 }
@@ -225,13 +225,13 @@ fn any_bin(_: &Path, _: u64) -> Result<(), String> {
     Ok(())
 }
 
-/// A volume without a Recycle Bin (a \nas share, a USB stick).
+/// A volume without a Recycle Bin (a \\nas share, a USB stick).
 fn no_bin(_: &Path, _: u64) -> Result<(), String> {
     Err("the drive has no Recycle Bin".into())
 }
 
 static RECYCLED_D: StdMutex<Vec<Instant>> = StdMutex::new(Vec::new());
-fn recycle_d(_: &[PathBuf]) -> Result<(), String> {
+fn recycle_d(_: &[PathBuf]) -> Result<(), crate::record_storage::RecycleError> {
     RECYCLED_D.lock().unwrap().push(Instant::now());
     Ok(())
 }

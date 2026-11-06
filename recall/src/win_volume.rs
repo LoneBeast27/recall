@@ -115,10 +115,22 @@ pub fn free_bytes_raw(dir: &Path) -> Option<u64> {
 
 /// GetDiskFreeSpaceExW on an existing folder: the one call site in Recall.
 fn free_at(real: &Path) -> Option<u64> {
-    let mut free = 0u64;
-    // SAFETY: NUL-terminated path; the out pointer is valid, the others null.
-    let ok = unsafe { GetDiskFreeSpaceExW(wide(real.as_os_str()).as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) };
-    (ok != 0).then_some(free)
+    space_at(real).map(|(free, _)| free)
+}
+
+/// (free for the caller, total) bytes of an existing folder's volume.
+fn space_at(real: &Path) -> Option<(u64, u64)> {
+    let (mut free, mut total) = (0u64, 0u64);
+    // SAFETY: NUL-terminated path; the out pointers are valid, the last null.
+    let ok = unsafe { GetDiskFreeSpaceExW(wide(real.as_os_str()).as_ptr(), &mut free, &mut total, std::ptr::null_mut()) };
+    (ok != 0).then_some((free, total))
+}
+
+/// Size of the volume `dir` really lives on (the Recycle Bin's default size depends on it).
+// The engine does not use it; `win_recycle.rs` (controller and app) does.
+#[allow(dead_code)]
+pub fn total_bytes(dir: &Path) -> Option<u64> {
+    space_at(&resolve(dir)?).map(|(_, total)| total)
 }
 
 /// `RECALL_FAKE_FREE_BYTES=<n>` (checks only: the low-disk fixture; the app's

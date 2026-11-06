@@ -313,7 +313,7 @@ pub fn favourites_at(path: &Path) -> Result<HashSet<String>, String> {
 }
 
 /// Move `files` (one clip and its companions) to the Recycle Bin in one shell operation.
-pub fn recycle(files: &[PathBuf]) -> Result<(), String> {
+pub fn recycle(files: &[PathBuf]) -> Result<(), RecycleError> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::{BOOL, PCWSTR};
     use windows::Win32::Foundation::HWND;
@@ -342,8 +342,31 @@ pub fn recycle(files: &[PathBuf]) -> Result<(), String> {
     };
     // SAFETY: `list` is a double-NUL-terminated wide path list alive for the call.
     let code = unsafe { SHFileOperationW(&mut op) };
-    if code != 0 || op.fAnyOperationsAborted.as_bool() {
-        return Err(format!("Recycle Bin move failed (shell error {code:#x})"));
+    shell_outcome(code, op.fAnyOperationsAborted.as_bool())
+}
+
+/// Why one Recycle Bin call did not go through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecycleError {
+    /// The clip could not or would not go to the Recycle Bin: Windows asked
+    /// (the precheck missed something) and the call was declined or
+    /// cancelled. The run stops and the user is told, as for a precheck refusal.
+    Refused(String),
+    Failed(String),
+}
+
+/// `ERROR_CANCELLED` and the shell's own `DE_OPCANCELLED`.
+const CANCEL_CODES: [i32; 2] = [0x4C7, 0x75];
+
+/// What `SHFileOperationW` returned, as a [`RecycleError`]: a call the user
+/// declined or cancelled (Windows asked, e.g. before a permanent delete) is a
+/// refusal, never retried.
+pub fn shell_outcome(code: i32, aborted: bool) -> Result<(), RecycleError> {
+    if aborted || CANCEL_CODES.contains(&code) {
+        return Err(RecycleError::Refused(format!("the Recycle Bin move was declined or cancelled (shell code {code:#x})")));
+    }
+    if code != 0 {
+        return Err(RecycleError::Failed(format!("Recycle Bin move failed (shell error {code:#x})")));
     }
     Ok(())
 }
@@ -385,7 +408,7 @@ fn plan_listing(dir: &Path, favs: &HashSet<String>, cap: u64) -> Result<(Plan, L
 /// Lists and plans a run (production: [`plan_dir`]; tests inject one).
 pub(crate) type PlanFn = fn(&Path, u32) -> Result<(Plan, Listing), String>;
 /// Moves files to the Recycle Bin (production: [`recycle`]; tests inject one).
-pub(crate) type RecycleFn = fn(&[PathBuf]) -> Result<(), String>;
+pub(crate) type RecycleFn = fn(&[PathBuf]) -> Result<(), RecycleError>;
 pub(crate) use crate::win_recycle::BinCheck;
 
 /// Bytes one Recycle Bin call moves: the clip (its listed size) and its
@@ -422,14 +445,23 @@ pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: &dyn Fn() 
             break;
         }
         let moved = recycle(&files);
-        if let Some(c) = listing.clips.iter().find(|c| c.name == *name).filter(|c| !dir.join(&c.name).exists()) {
+        // A declined or cancelled call moved nothing; otherwise count what left the folder.
+        let gone = !matches!(moved, Err(RecycleError::Refused(_)));
+        if let Some(c) = listing.clips.iter().find(|c| c.name == *name).filter(|c| gone && !dir.join(&c.name).exists()) {
             out.removed += 1;
             out.freed += c.bytes;
             out.through = out.through.max(Some(c.modified));
         }
-        if let Err(e) = moved {
-            failed = Some(e);
-            break;
+        match moved {
+            Ok(()) => {}
+            Err(RecycleError::Refused(why)) => {
+                out.refused = Some(why);
+                break;
+            }
+            Err(RecycleError::Failed(why)) => {
+                failed = Some(why);
+                break;
+            }
         }
     }
     out.used = plan.total - out.freed;
