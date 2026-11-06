@@ -219,6 +219,7 @@ impl EditorState {
         self.generation = self.generation.wrapping_add(1);
         self.loading_path = Some(path.clone());
         self.loading = Default::default();
+        self.pending_seek = None;
         self.open_step = None;
         workers.open_clip(self.generation, path);
     }
@@ -301,6 +302,8 @@ impl EditorState {
         self.monitor = monitor::Monitor::default();
         self.needs_flush = false;
         self.status = "Loading preview…".into();
+        // The playhead opens on the first kept part, landing there once the preview is ready.
+        self.pending_seek = start_at(&self.plan.ranges);
     }
 
     fn preview_tracks(&self, info: &ClipInfo) -> Vec<PreviewTrack> {
@@ -455,6 +458,34 @@ pub fn short_timecode(seconds: f64) -> String {
 pub(super) fn same_path(a: &str, b: &str) -> bool {
     let plain = |p: &str| p.strip_prefix(r"\\?\").unwrap_or(p).replace('/', "\\");
     plain(a).eq_ignore_ascii_case(&plain(b))
+}
+
+/// Where a freshly opened clip's playhead starts: the first kept part's In, or None for 0:00.
+fn start_at(ranges: &[TimeRange]) -> Option<f64> {
+    ranges.first().map(|range| range.start).filter(|start| *start > 0.0)
+}
+
+#[cfg(test)]
+mod start_at_tests {
+    use super::*;
+
+    #[test]
+    fn a_trimmed_clip_opens_on_its_first_in_point() {
+        assert_eq!(start_at(&[TimeRange::new(30.2, 60.0), TimeRange::new(70.0, 80.0)]), Some(30.2));
+        assert_eq!(start_at(&[TimeRange::new(0.0, 60.0)]), None, "untrimmed: 0:00");
+        assert_eq!(start_at(&[]), None);
+    }
+
+    #[test]
+    fn the_playhead_shows_the_start_while_the_preview_loads_and_a_click_replaces_it() {
+        let mut ed = EditorState::new(Err("no preview".into()));
+        ed.plan.ranges = vec![TimeRange::new(30.2, 60.0)];
+        ed.info = Some(ClipInfo { path: "a.mp4".into(), duration: 90.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() });
+        ed.pending_seek = start_at(&ed.plan.ranges);
+        assert_eq!(ed.position(), 30.2);
+        ed.seek(12.0);
+        assert_eq!(ed.position(), 12.0, "a seek before the preview is ready waits in its place");
+    }
 }
 
 #[cfg(test)]
