@@ -3,8 +3,10 @@
 //! A track = one recorded source (`sources.rs`, the Audio page's strips): the game's process
 //! tree, an output device by loopback, a microphone or line-in, or an app's process tree
 //! (`apps.rs`). Each is titled with the source's name, scaled by its gain before anything is
-//! stored, and the mic-mute hotkey silences every input source. A device that is gone falls
-//! back to the Windows default and the status says so (`sources::opened`).
+//! stored, and the mic-mute hotkey silences every input source. A named device only ever
+//! records itself: while it is not connected its track is silent and the status says
+//! "<name> (not connected; waiting)" (`sources::opened`); a source with no device follows the
+//! Windows default as it moves (`notify.rs`).
 //!
 //! Each track runs its own capture thread pushing interleaved f32 samples into a ring
 //! holding the last `buffer_secs`. Every track is kept level with the wall clock
@@ -22,6 +24,7 @@ use wasapi::{DeviceCollection, Direction};
 
 mod apps;
 mod capture_loop;
+mod notify;
 pub mod sources;
 mod stream;
 mod voice;
@@ -351,39 +354,52 @@ fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
     exact.or_else(|| names.iter().position(|n| name_matches(n, want)))
 }
 
-/// The endpoint a device source asks for: its device, else the Windows default. Under
-/// `RECALL_AUDIO_EXACT` (tests) only a named endpoint may open — an input with no device
-/// takes `RECALL_AUDIO_MIC`'s — so a test never records the person's real devices.
-/// `reopen`: the track lost its device; a named device must come back by its own name, never as
-/// the Windows default (that would record another device under this track's name).
-/// The flag: the Windows default was opened (the stream then watches it, `capture_loop::Watch`).
-fn pick_device(direction: &Direction, device: &str, input: bool, reopen: bool) -> Result<(wasapi::Device, String, bool), String> {
+/// Which endpoint a device source opens.
+#[derive(Debug, PartialEq)]
+pub(super) enum Pick {
+    /// The connected endpoint at this index of the names.
+    Named(usize),
+    Default,
+}
+
+/// The endpoint a device source asks for, from the connected endpoints' `names`: its
+/// device `want`, else (no device) the Windows default. A named device opens by its own name
+/// only, at start and on every reopen, never as the Windows default: that would record another
+/// device under this track's name (the track waits for it instead, `capture_loop`). Under
+/// `RECALL_AUDIO_EXACT` (tests) only a named endpoint may open, so a test never records the
+/// person's real devices.
+pub(super) fn choose_endpoint(names: &[String], want: Option<&str>, exact: bool) -> Result<Pick, String> {
+    let want = want.map(str::trim).filter(|w| !w.is_empty());
+    if let Some(i) = want.and_then(|w| match_endpoint(names, w)) {
+        return Ok(Pick::Named(i));
+    }
+    if exact {
+        return Err(format!("no endpoint matches {:?} (RECALL_AUDIO_EXACT)", want.map(str::to_owned)));
+    }
+    match want {
+        Some(want) => Err(format!("'{want}' is not connected")),
+        None => Ok(Pick::Default),
+    }
+}
+
+/// Open what `choose_endpoint` picks; an input with no device takes `RECALL_AUDIO_MIC`'s under
+/// `RECALL_AUDIO_EXACT`. The flag: the Windows default was opened (the stream watches it).
+fn pick_device(direction: &Direction, device: &str, input: bool) -> Result<(wasapi::Device, String, bool), String> {
     let collection = DeviceCollection::new(direction).map_err(|e| format!("enumerate: {e}"))?;
     let n = collection.get_nbr_devices().map_err(|e| e.to_string())?;
     let exact = std::env::var_os("RECALL_AUDIO_EXACT").is_some();
     let test_mic = (exact && input).then(|| std::env::var("RECALL_AUDIO_MIC").ok()).flatten();
     let want = Some(device.trim().to_owned()).filter(|w| !w.is_empty()).or(test_mic).filter(|w| !w.trim().is_empty());
-
-    if let Some(want) = &want {
-        let devices: Vec<wasapi::Device> = (0..n).filter_map(|i| collection.get_device_at_index(i).ok()).collect();
-        let names: Vec<String> = devices.iter().map(|d| d.get_friendlyname().unwrap_or_default()).collect();
-        if let Some(i) = match_endpoint(&names, want) {
-            let name = names[i].clone();
-            return Ok((devices.into_iter().nth(i).expect("index from names"), name, false));
+    let devices: Vec<wasapi::Device> = (0..n).filter_map(|i| collection.get_device_at_index(i).ok()).collect();
+    let names: Vec<String> = devices.iter().map(|d| d.get_friendlyname().unwrap_or_default()).collect();
+    match choose_endpoint(&names, want.as_deref(), exact)? {
+        Pick::Named(i) => Ok((devices.into_iter().nth(i).expect("index from names"), names[i].clone(), false)),
+        Pick::Default => {
+            let dev = wasapi::get_default_device(direction).map_err(|e| format!("default endpoint failed: {e}"))?;
+            let name = dev.get_friendlyname().unwrap_or_else(|_| "(default)".into());
+            Ok((dev, format!("{name} (Windows default)"), true))
         }
     }
-    if exact {
-        return Err(format!("no endpoint matches {want:?} (RECALL_AUDIO_EXACT)"));
-    }
-    if reopen && want.is_some() {
-        return Err(format!("'{}' is not connected", want.unwrap_or_default()));
-    }
-    let dev = wasapi::get_default_device(direction).map_err(|e| format!("default endpoint failed: {e}"))?;
-    let name = dev.get_friendlyname().unwrap_or_else(|_| "(default)".into());
-    Ok(match want {
-        Some(want) => (dev, format!("{name} (Windows default; '{want}' not found)"), true),
-        None => (dev, format!("{name} (Windows default)"), true),
-    })
 }
 
 /// Resolve the opt-in process-loopback target for Game capture. A supplied
@@ -456,9 +472,18 @@ fn capture_thread(
     let exact = std::env::var_os("RECALL_AUDIO_EXACT").is_some();
     let wait_absent = capture_loop::waits_when_absent(&device, target.is_some(), exact);
     let mut clock = capture_loop::WallClock::start();
-    let started = std::time::Instant::now();
-    let open = |reopen| stream::open_stream(&direction, &device, &ring, &target, reopen, started.elapsed());
-    capture_loop::capture_loop(&ring, &device, wait_absent, open, init_tx, &mut clock);
+    // Device and default changes arrive as notices (no polling on this thread); without them
+    // the track still reopens on its backoff.
+    let notices = notify::EndpointNotices::register(direction);
+    if let Err(e) = &notices {
+        eprintln!("[recall] audio track '{}': no device notices ({e}); reopening on the backoff only", ring.name);
+    }
+    let notices: &dyn capture_loop::Notices = match &notices {
+        Ok(n) => n,
+        Err(_) => &capture_loop::NoNotices,
+    };
+    let open = |_reopen| stream::open_stream(&direction, &device, &ring, &target);
+    capture_loop::capture_loop(&ring, &device, wait_absent, open, init_tx, &mut clock, notices);
 }
 
 #[cfg(test)]
