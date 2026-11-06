@@ -36,6 +36,9 @@ pub(crate) const HAND_OFF_AFTER: u32 = 5;
 pub(crate) const HAND_OFF_AGE: Duration = Duration::from_secs(60);
 /// An encoder that has run this long without an error ends the failure episode.
 pub(crate) const STABLE_AFTER: Duration = Duration::from_secs(60);
+/// A GPU try that brings no answer this long (no GPU frame opened or was refused: the
+/// capture's pipeline did not start again) counts as refused, so the next try is scheduled.
+pub(crate) const PROBE_VERDICT: Duration = Duration::from_secs(10);
 /// After a GPU refusal, try the GPU path again after these: 1 min, 5 min, 15 min, then 30 min.
 pub(crate) const PROBE_DELAYS: [Duration; 4] =
     [Duration::from_secs(60), Duration::from_secs(300), Duration::from_secs(900), Duration::from_secs(1800)];
@@ -154,39 +157,55 @@ impl Reopen {
 #[derive(Debug)]
 pub(crate) struct GpuProbe {
     delays: [Duration; 4],
+    verdict: Duration,
     next: Option<Instant>,
+    /// A try is out and waits for its answer until then.
+    pending: Option<Instant>,
     tries: usize,
 }
 
 impl Default for GpuProbe {
     fn default() -> Self {
-        Self::with_delays(PROBE_DELAYS)
+        Self::with_delays(PROBE_DELAYS, PROBE_VERDICT)
     }
 }
 
 impl GpuProbe {
-    pub fn with_delays(delays: [Duration; 4]) -> Self {
-        Self { delays, next: None, tries: 0 }
+    pub fn with_delays(delays: [Duration; 4], verdict: Duration) -> Self {
+        Self { delays, verdict, next: None, pending: None, tries: 0 }
     }
 
-    /// GPU frames were refused (again): schedule the next try.
+    /// GPU frames were refused (again), or a try went unanswered: schedule the next try.
     pub fn refused(&mut self, now: Instant) {
+        self.pending = None;
         self.next = Some(now + self.delays[self.tries.min(self.delays.len() - 1)]);
         self.tries += 1;
     }
 
-    /// Time to try the GPU path again (once per scheduled try).
+    /// Time to try the GPU path again (once per scheduled try); the try then waits for
+    /// its answer (`unanswered`).
     pub fn due(&mut self, now: Instant) -> bool {
         let due = self.next.is_some_and(|at| now >= at);
         if due {
             self.next = None;
+            self.pending = Some(now + self.verdict);
         }
         due
     }
 
+    /// The try out has had no answer for [`PROBE_VERDICT`]: true once (the caller counts it
+    /// as refused, which schedules the next try).
+    pub fn unanswered(&mut self, now: Instant) -> bool {
+        let lapsed = self.pending.is_some_and(|at| now >= at);
+        if lapsed {
+            self.pending = None;
+        }
+        lapsed
+    }
+
     /// The GPU path works again: a later refusal starts at 1 min.
     pub fn gpu_ok(&mut self) {
-        *self = GpuProbe::with_delays(self.delays);
+        *self = GpuProbe::with_delays(self.delays, self.verdict);
     }
 }
 

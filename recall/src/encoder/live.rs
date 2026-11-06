@@ -84,7 +84,7 @@ impl Live {
             enc: None,
             replay: None,
             reopen: Reopen::with_delays(super::retry_delays(stats)),
-            probe: GpuProbe::with_delays(super::probe_delays(stats)),
+            probe: GpuProbe::with_delays(super::probe_delays(stats), super::probe_verdict(stats)),
             vram: Default::default(),
             small: SmallFrames::default(),
             want: cfg.codec,
@@ -180,6 +180,14 @@ impl Live {
             if self.reopen.recovering() {
                 stats.backend.store(if self.reopen.handed_off(now) { 3 } else { 4 }, Relaxed);
             }
+        }
+        // A try nobody answered (no GPU frame came: capture's pipeline did not start again)
+        // is a refusal: CPU copies again, and the later tries stay scheduled.
+        if self.probe.unanswered(now) && !stats.gpu_refused.load(Relaxed) {
+            report(cfg.json, "the GPU path did not come back; recording from CPU copies again");
+            stats.gpu_retry.store(false, Relaxed);
+            stats.gpu_refused.store(true, Relaxed);
+            self.probe.refused(now);
         }
         if stats.gpu_refused.load(Relaxed) && self.probe.due(now) {
             report(cfg.json, "trying the GPU path again (zero-copy)");

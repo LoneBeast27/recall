@@ -52,17 +52,26 @@ impl Loop {
 
     /// With `stats` set up first (faults, the capture-restart hook).
     pub fn start_with(stats: Arc<EncStats>) -> Self {
+        Self::start_full(stats, Vec::new(), false)
+    }
+
+    /// With audio tracks, and `real_mux`: the saver writes a real MP4 (`mux::produce`)
+    /// instead of only reporting the clip length.
+    pub fn start_full(stats: Arc<EncStats>, audio: Vec<Arc<crate::audio::TrackRing>>, real_mux: bool) -> Self {
         let cfg = Config { fps: 60, buffer_secs: 30, bitrate: 2_000_000, ..Config::from_env(false) };
         let (ftx, frx) = sync_channel(3);
         let (stx, srx) = channel();
         let (ctx, crx) = channel();
-        let mux: saver::MuxFn = Box::new(move |_, job, _, _| {
+        let mux: saver::MuxFn = Box::new(move |part, job, abort, timing| {
             let _ = ctx.send(job.secs);
+            if real_mux {
+                return super::super::mux::produce(part, job, abort, timing);
+            }
             Err("wobble test: the clip length is all that is read".into())
         });
         let (queue, control) = saver::spawn(saver::Events::new(false), mux, Box::new(|_, _, _, _| {}));
         let shared = stats.clone();
-        let thread = std::thread::spawn(move || run(cfg, frx, srx, shared, Vec::new(), queue));
+        let thread = std::thread::spawn(move || run(cfg, frx, srx, shared, audio, queue));
         Self { frames: Some(ftx), saves: stx, stats, thread: Some(thread), saver: Some(control), clip_secs: crx, sent: 0 }
     }
 
@@ -80,21 +89,33 @@ impl Loop {
         self.send(PacedFrame { idx: self.pts(), width, height, rgba, gpu: None, content: None });
     }
 
-    /// False when this machine has no NVENC (the test then has nothing to say).
+    /// False when this machine has no NVENC: the test then has nothing to say, and says
+    /// so (`hw_skip`: printed and counted, never a silent pass).
     pub fn nvenc_opened(&self) -> bool {
+        if crate::hw_skip::faked_absent() {
+            crate::hw_skip::skipped("no NVENC (RECALL_FAKE_NO_NVENC)");
+            return false;
+        }
         let deadline = Instant::now() + Duration::from_secs(5);
         while self.stats.backend.load(Relaxed) == 0 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
         let up = self.stats.backend.load(Relaxed) == 1;
         if !up {
-            eprintln!("no NVENC here; skipping ({:?})", self.error());
+            crate::hw_skip::skipped(&format!("no NVENC here ({:?})", self.error()));
         }
         up
     }
 
     /// Let NVENC's few frames of delay come out, then save: the clip's length in seconds.
     pub fn clip_after_settling(&self) -> f64 {
+        let path = std::env::temp_dir().join(format!("recall-wobble-{}.mp4", uuid::Uuid::new_v4().simple()));
+        self.save_to(&path)
+    }
+
+    /// Save to `path` once NVENC has settled: the clip's length in seconds (the file is
+    /// complete once `path` exists, with a real mux).
+    pub fn save_to(&self, path: &std::path::Path) -> f64 {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut last = (self.stats.encoded_frames.load(Relaxed), Instant::now());
         while Instant::now() < deadline && last.1.elapsed() < Duration::from_millis(300) {
@@ -104,7 +125,6 @@ impl Loop {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        let path = std::env::temp_dir().join(format!("recall-wobble-{}.mp4", uuid::Uuid::new_v4().simple()));
         let save = SaveRequest { path: path.to_string_lossy().into_owned(), seconds: 30, end_us: None, at_last_frame: false, requested: Instant::now() };
         self.saves.send(save).expect("encoder loop is alive");
         // The loop looks at saves between frames, at the latest after its 100 ms wait.
@@ -155,16 +175,24 @@ pub(crate) struct Capture {
 
 impl Capture {
     pub fn new() -> Option<Self> {
-        let (dev, ctx) = hardware_device()?;
+        let Some((dev, ctx)) = hardware_device().filter(|_| !crate::hw_skip::faked_absent()) else {
+            crate::hw_skip::skipped("no hardware D3D11 device");
+            return None;
+        };
         let pipe = Pipeline::new(&dev, &ctx).expect("pipeline");
         Some(Self { dev, pipe })
     }
 
     /// The frames pool this capture's frames of `size` come from.
     pub fn pool(&mut self, size: (u32, u32)) -> usize {
+        self.render(size).pool_id()
+    }
+
+    /// One frame of `size` through the zero-copy pipeline (not sent anywhere).
+    pub fn render(&mut self, size: (u32, u32)) -> crate::gpu_frames::HwFrame {
         let src = surface(&self.dev, size);
         let layout = Layout::recorded(size, None, false, self.pipe.target()).expect("layout");
-        self.pipe.render(&src, &layout, 0).expect("render").pool_id()
+        self.pipe.render(&src, &layout, 0).expect("render")
     }
 
     pub fn frames(&mut self, enc: &mut Loop, size: (u32, u32), count: u64) {
@@ -306,12 +334,15 @@ fn smallest(opens: impl Fn(u32) -> bool) -> u32 {
 #[test]
 fn encode_minimum_is_what_the_driver_opens() {
     let _one = nvenc();
+    if crate::hw_skip::faked_absent() {
+        return crate::hw_skip::skipped("no NVENC (RECALL_FAKE_NO_NVENC)");
+    }
     ff::init().unwrap();
     let cfg = Config { fps: 60, buffer_secs: 5, bitrate: 2_000_000, ..Config::from_env(false) };
     let (mut most, mut opened) = ((0, 0), 0);
     for codec in [Codec::H264, Codec::Hevc, Codec::Av1] {
         if try_open(&cfg, codec, 256, 256, None).is_err() {
-            eprintln!("{} does not open here; skipping it", codec.nvenc());
+            crate::hw_skip::skipped(&format!("{} does not open here", codec.nvenc()));
             continue;
         }
         let w = smallest(|w| try_open(&cfg, codec, w, 256, None).is_ok());
