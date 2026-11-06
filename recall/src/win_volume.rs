@@ -7,8 +7,11 @@
 //! choice, the save free-space check and staging; the controller (`recall-hdr`)
 //! includes this file by path for its free-space warning.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::os::windows::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf, Prefix};
+use std::time::{Duration, Instant};
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 extern "system" {
@@ -53,12 +56,21 @@ pub fn plain(path: &Path) -> PathBuf {
     out
 }
 
+/// `fn(existing folder) -> its final path` (`std::fs::canonicalize`; injectable for tests).
+pub type Canon = fn(&Path) -> std::io::Result<PathBuf>;
+
 /// `dir`, or its nearest existing ancestor (a folder not made yet), with
-/// junctions, symlinks and subst drives resolved. `None`: nothing on the path exists.
+/// junctions, symlinks and subst drives resolved. When resolving fails
+/// (ImDisk, VeraCrypt, cloud volumes, a denied parent) the folder as written
+/// is used, so its free space is still read. `None`: nothing on the path exists.
 pub fn resolve(dir: &Path) -> Option<PathBuf> {
+    resolve_with(dir, |p| std::fs::canonicalize(p))
+}
+
+pub fn resolve_with(dir: &Path, canon: Canon) -> Option<PathBuf> {
     let abs = std::path::absolute(dir).ok()?;
     let found = abs.ancestors().find(|p| p.is_dir())?;
-    Some(plain(&std::fs::canonicalize(found).ok()?))
+    Some(canon(found).map_or_else(|_| found.to_path_buf(), |real| plain(&real)))
 }
 
 /// `C:\` -> `C:`, `\\NAS\Clips\` -> `\\nas\clips`, `D:\mnt\fast\` -> `D:\mnt\fast`.
@@ -75,8 +87,14 @@ pub fn label_of(mount: &str) -> String {
 }
 
 /// The volume `dir` really lives on (`None` when Windows cannot say).
+// Uncached: the controller's storage thread uses it; the engine uses the cached call.
+#[allow(dead_code)]
 pub fn volume_of(dir: &Path) -> Option<Volume> {
-    let real = resolve(dir)?;
+    volume_at(&resolve(dir)?)
+}
+
+/// The volume of an already resolved folder.
+fn volume_at(real: &Path) -> Option<Volume> {
     let mut mount = [0u16; 1024];
     // SAFETY: NUL-terminated path; `mount` is writable for the length given.
     if unsafe { GetVolumePathNameW(wide(real.as_os_str()).as_ptr(), mount.as_mut_ptr(), mount.len() as u32) } == 0 {
@@ -92,18 +110,103 @@ pub fn volume_of(dir: &Path) -> Option<Volume> {
 
 /// Free bytes for the caller on the volume `dir` really lives on.
 pub fn free_bytes_raw(dir: &Path) -> Option<u64> {
-    let real = resolve(dir)?;
+    free_at(&resolve(dir)?)
+}
+
+/// GetDiskFreeSpaceExW on an existing folder: the one call site in Recall.
+fn free_at(real: &Path) -> Option<u64> {
     let mut free = 0u64;
     // SAFETY: NUL-terminated path; the out pointer is valid, the others null.
     let ok = unsafe { GetDiskFreeSpaceExW(wide(real.as_os_str()).as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) };
     (ok != 0).then_some(free)
 }
 
-/// [`free_bytes_raw`] capped by `RECALL_FAKE_FREE_BYTES=<n>` (checks only: the
-/// low-disk fixture; the app's drive info reads the same variable).
+/// `RECALL_FAKE_FREE_BYTES=<n>` (checks only: the low-disk fixture; the app's
+/// drive info reads the same variable).
+fn fake_env() -> Option<u64> {
+    std::env::var("RECALL_FAKE_FREE_BYTES").ok().and_then(|v| v.trim().parse::<u64>().ok())
+}
+
+/// A real reading capped by the fake one; the fake stands alone when the real read failed.
+pub fn with_fake(real: Option<u64>, fake: Option<u64>) -> Option<u64> {
+    match (real, fake) {
+        (Some(free), Some(fake)) => Some(free.min(fake)),
+        (real, fake) => real.or(fake),
+    }
+}
+
+/// [`free_bytes_raw`] with `RECALL_FAKE_FREE_BYTES` applied.
+// Uncached: the controller's storage thread uses it; the engine uses the cached call.
+#[allow(dead_code)]
 pub fn free_bytes(dir: &Path) -> Option<u64> {
-    let fake = std::env::var("RECALL_FAKE_FREE_BYTES").ok().and_then(|v| v.trim().parse::<u64>().ok());
-    free_bytes_raw(dir).map(|free| fake.map_or(free, |fake| fake.min(free)))
+    with_fake(free_bytes_raw(dir), fake_env())
+}
+
+/// What a folder resolves to, kept by [`VolumeCache`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Resolved {
+    pub real: Option<PathBuf>,
+    pub volume: Option<Volume>,
+}
+
+/// `fn(folder) -> Resolved` (the real one is [`lookup`]).
+pub type Lookup = fn(&Path) -> Resolved;
+
+pub fn lookup(dir: &Path) -> Resolved {
+    let real = resolve(dir);
+    let volume = real.as_deref().and_then(volume_at);
+    Resolved { real, volume }
+}
+
+/// Re-resolve a folder after this long (a volume remounted elsewhere is seen within it).
+pub const CACHE_TTL: Duration = Duration::from_secs(60);
+const CACHE_MAX: usize = 64;
+
+/// Per-folder resolve results, so a thread that saves often (the saver, the
+/// mover) resolves each save folder once per [`CACHE_TTL`], not once per save.
+pub struct VolumeCache {
+    lookup: Lookup,
+    ttl: Duration,
+    entries: HashMap<PathBuf, (Instant, Resolved)>,
+}
+
+impl VolumeCache {
+    pub fn new(lookup: Lookup, ttl: Duration) -> Self {
+        VolumeCache { lookup, ttl, entries: HashMap::new() }
+    }
+
+    pub fn get(&mut self, dir: &Path, now: Instant) -> Resolved {
+        if let Some((at, found)) = self.entries.get(dir) {
+            if now.saturating_duration_since(*at) < self.ttl {
+                return found.clone();
+            }
+        }
+        let found = (self.lookup)(dir);
+        if self.entries.len() >= CACHE_MAX {
+            self.entries.clear();
+        }
+        self.entries.insert(dir.to_path_buf(), (now, found.clone()));
+        found
+    }
+}
+
+thread_local! {
+    static CACHE: RefCell<VolumeCache> = RefCell::new(VolumeCache::new(lookup, CACHE_TTL));
+}
+
+fn cached(dir: &Path) -> Resolved {
+    CACHE.with(|c| c.borrow_mut().get(dir, Instant::now()))
+}
+
+/// [`volume_of`] through this thread's [`VolumeCache`].
+pub fn volume_of_cached(dir: &Path) -> Option<Volume> {
+    cached(dir).volume
+}
+
+/// [`free_bytes`] with the folder resolved through this thread's [`VolumeCache`]
+/// (free space itself is read every time).
+pub fn free_bytes_cached(dir: &Path) -> Option<u64> {
+    with_fake(cached(dir).real.as_deref().and_then(free_at), fake_env())
 }
 
 #[cfg(test)]
@@ -131,5 +234,47 @@ mod tests {
         assert!(v.id.starts_with(r"\\?\Volume{"), "{v:?}");
         assert_eq!(volume_of(&std::env::temp_dir()), Some(v));
         assert!(free_bytes_raw(&missing).is_some_and(|b| b > 0));
+    }
+
+    fn denied(_: &Path) -> std::io::Result<PathBuf> {
+        Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
+    }
+
+    #[test]
+    fn a_folder_that_cannot_be_canonicalized_is_still_read_as_written() {
+        // ImDisk / VeraCrypt / cloud volumes / a denied parent: canonicalize fails.
+        let temp = std::path::absolute(std::env::temp_dir()).unwrap();
+        let missing = temp.join("recall-win-volume-not-made");
+        assert_eq!(resolve_with(&missing, denied).as_deref(), Some(temp.as_path()), "the nearest existing folder, as written");
+        let real = resolve_with(&missing, denied).and_then(|p| free_at(&p));
+        assert!(real.is_some_and(|b| b > 0), "free space still read");
+    }
+
+    #[test]
+    fn the_fake_free_space_applies_even_when_the_real_read_fails() {
+        assert_eq!(with_fake(Some(900), Some(5)), Some(5));
+        assert_eq!(with_fake(Some(3), Some(5)), Some(3));
+        assert_eq!(with_fake(Some(900), None), Some(900));
+        assert_eq!(with_fake(None, Some(5)), Some(5), "the low-disk fixture works where reads fail");
+        assert_eq!(with_fake(None, None), None);
+    }
+
+    static LOOKUPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+    fn counting(dir: &Path) -> Resolved {
+        LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Resolved { real: Some(dir.to_path_buf()), volume: None }
+    }
+
+    #[test]
+    fn a_save_folder_is_resolved_once_per_ttl() {
+        let mut cache = VolumeCache::new(counting, Duration::from_secs(60));
+        let t0 = Instant::now();
+        let dir = Path::new(r"E:\Clips");
+        cache.get(dir, t0);
+        cache.get(dir, t0 + Duration::from_secs(30));
+        assert_eq!(LOOKUPS.load(std::sync::atomic::Ordering::SeqCst), 1, "second save reuses it");
+        cache.get(dir, t0 + Duration::from_secs(61));
+        assert_eq!(LOOKUPS.load(std::sync::atomic::Ordering::SeqCst), 2, "re-resolved after the TTL");
     }
 }

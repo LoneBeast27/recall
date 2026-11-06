@@ -76,7 +76,8 @@ pub(crate) fn volume_key(path: &Path) -> Option<String> {
 /// cannot say, the drive letter / UNC share text decides, and an unknown
 /// answer counts as "same", so the worst case is writing the clip in place.
 pub(crate) fn same_volume(a: &Path, b: &Path) -> bool {
-    if let (Some(x), Some(y)) = (crate::win_volume::volume_of(a), crate::win_volume::volume_of(b)) {
+    // Cached per folder on this thread: the saver asks once per save, the mover once per move.
+    if let (Some(x), Some(y)) = (crate::win_volume::volume_of_cached(a), crate::win_volume::volume_of_cached(b)) {
         return x.id == y.id;
     }
     match (volume_key(a), volume_key(b)) {
