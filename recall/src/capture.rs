@@ -151,7 +151,8 @@ impl CaptureShared {
     /// Why the running capture must be replaced, if it must: the capture thread asked
     /// (`restart`, taken here), or a Bgra8 capture needs fp16 (HDR display or CPU fallback).
     pub fn restart_reason(&self) -> Option<&'static str> {
-        if self.restart.swap(false, Relaxed) {
+        // A plain load first: the engine asks every tick, and a swap is a locked write each time.
+        if self.restart.load(Relaxed) && self.restart.swap(false, Relaxed) {
             return Some(if self.dda_failed.load(Relaxed) { "(desktop duplication stopped; WGC from now on)" } else { "(capture source changed)" });
         }
         (!self.fp16.load(Relaxed) && self.wants_fp16()).then_some("in Rgba16F (HDR display or CPU fallback)")
@@ -237,7 +238,8 @@ type CaptureError = Box<dyn std::error::Error + Send + Sync>;
 /// The WGC capture's control (one variant of `CaptureControlHandle`).
 pub(crate) type WgcControl = CaptureControl<Handler, CaptureError>;
 
-/// One captured frame as both sources (WGC, Desktop Duplication) hand it to `Handler::deliver`.
+/// One captured frame's GPU side as `Handler::deliver` sees it: device, context and texture
+/// borrowed from the source (no COM AddRef/Release per frame).
 pub(crate) struct Source<'a> {
     pub device: &'a ID3D11Device,
     pub context: &'a ID3D11DeviceContext,
@@ -247,8 +249,36 @@ pub(crate) struct Source<'a> {
     pub timestamp: i64,
 }
 
-/// Reads the frame's `rect` back to the CPU as tightly packed fp16 RGBA.
-pub(crate) type CpuRead<'a> = dyn FnMut(Rect) -> Result<Vec<u8>, CaptureError> + 'a;
+/// A captured frame from either source (WGC, Desktop Duplication), handed to `Handler::deliver`.
+pub(crate) trait FrameSource {
+    /// The frame's borrowed GPU side, for the zero-copy path.
+    fn source(&self) -> Source<'_>;
+    /// Reads the frame's `rect` back to the CPU as tightly packed fp16 RGBA (CPU path only).
+    fn read(&mut self, rect: Rect) -> Result<Vec<u8>, CaptureError>;
+}
+
+/// A WGC frame as a `FrameSource`; the timestamp is read once on arrival.
+struct WgcFrame<'f, 'a> {
+    frame: &'f mut Frame<'a>,
+    timestamp: i64,
+}
+
+impl FrameSource for WgcFrame<'_, '_> {
+    fn source(&self) -> Source<'_> {
+        let f = &*self.frame;
+        Source { device: f.device(), context: f.device_context(), texture: f.as_raw_texture(), size: (f.width(), f.height()), timestamp: self.timestamp }
+    }
+
+    /// CPU readback (fallback): map a staging copy and copy out the client area (the whole
+    /// frame unless the window has chrome), stripping the row padding, with one
+    /// single-threaded copy. (windows-capture's `as_nopadding_buffer` treats every Rgba16F
+    /// frame as padded and fans the copy out over a 32-thread rayon pool.)
+    fn read(&mut self, rect: Rect) -> Result<Vec<u8>, CaptureError> {
+        let mut fb = self.frame.buffer()?;
+        let pitch = fb.row_pitch() as usize;
+        Ok(crate::framing::copy_rect(fb.as_raw_buffer(), pitch, 8, rect))
+    }
+}
 
 /// Dump the Nth frame so capture has warmed up (avoids the first blank frames).
 const DUMP_AT_FRAME: u64 = 30;
@@ -284,20 +314,8 @@ impl GraphicsCaptureApiHandler for Handler {
         frame: &mut Frame,
         _capture_control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
-        // COM references (an AddRef each), so the CPU closure below can borrow `frame`.
-        let (device, context, texture) = (frame.device().clone(), frame.device_context().clone(), frame.as_raw_texture().clone());
-        let size = (frame.width(), frame.height());
-        let src = Source { device: &device, context: &context, texture: &texture, size, timestamp: frame.timestamp()?.Duration };
-        // CPU readback (fallback): map a staging copy and copy out the client area (the
-        // whole frame unless the window has chrome), stripping the row padding, with one
-        // single-threaded copy. (windows-capture's `as_nopadding_buffer` treats every
-        // Rgba16F frame as padded and fans the copy out over a 32-thread rayon pool.)
-        let mut cpu = |rect: Rect| -> Result<Vec<u8>, CaptureError> {
-            let mut fb = frame.buffer()?;
-            let pitch = fb.row_pitch() as usize;
-            Ok(crate::framing::copy_rect(fb.as_raw_buffer(), pitch, 8, rect))
-        };
-        self.deliver(&src, &mut cpu)
+        let timestamp = frame.timestamp()?.Duration;
+        self.deliver(&mut WgcFrame { frame, timestamp })
     }
 }
 
@@ -329,9 +347,10 @@ impl Handler {
         }
     }
 
-    /// One frame from either source: the zero-copy GPU path, else the CPU readback (`cpu`)
-    /// into the shared slot.
-    pub(crate) fn deliver(&mut self, src: &Source<'_>, cpu: &mut CpuRead<'_>) -> Result<(), CaptureError> {
+    /// One frame from either source: the zero-copy GPU path, else the CPU readback
+    /// (`FrameSource::read`) into the shared slot.
+    pub(crate) fn deliver(&mut self, frame: &mut impl FrameSource) -> Result<(), CaptureError> {
+        let src = frame.source();
         let (width, height) = src.size;
         let timestamp = src.timestamp;
         let origin = match self.shared.origin.lock() {
@@ -346,7 +365,7 @@ impl Handler {
         let (crop, canvas) = self.client.update((width, height), std::time::Instant::now());
 
         #[cfg(feature = "encode")]
-        if self.dump_path.is_none() && self.dump_every.is_none() && self.gpu_frame(src, pts_us, crop, canvas) {
+        if self.dump_path.is_none() && self.dump_every.is_none() && self.gpu_frame(&src, pts_us, crop, canvas) {
             return Ok(());
         }
         if !self.shared.fp16.load(Relaxed) {
@@ -358,7 +377,7 @@ impl Handler {
         self.shared.path.store(PATH_CPU, Relaxed);
 
         let rect = crop.unwrap_or(Rect::full((width, height)));
-        let bytes = cpu(rect)?;
+        let bytes = frame.read(rect)?;
         let (width, height) = rect.size();
 
         let data = FrameData {
