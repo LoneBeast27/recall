@@ -4,7 +4,8 @@
 
   powershell -NoProfile -File scripts\dev\update-card-shot.ps1 -Exe <recall-native.exe> -Out <png> [-Size 1280x900]
 #>
-param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string]$Out, [string]$Size = '1280x900')
+#  -Route settings -NoCard: the Settings → General page with the About rows instead.
+param([Parameter(Mandatory)][string]$Exe, [Parameter(Mandatory)][string]$Out, [string]$Size = '1280x900', [string]$Route = '', [switch]$NoCard)
 $ErrorActionPreference = 'Stop'
 $sandbox = Join-Path ([IO.Path]::GetTempPath()) "recall-update-shot-$PID"
 New-Item -ItemType Directory -Force -Path $sandbox | Out-Null
@@ -17,6 +18,8 @@ $saved = @{}
 $vars = @{ RECALL_NATIVE_OFFSCREEN = '1'; RECALL_NO_CONTROLLER = '1'; RECALL_CONTROL_PIPE = "recall-update-shot-$PID"; RECALL_NATIVE_WINDOW_SIZE = $Size;
   RECALL_UPDATE_PREVIEW = $fixture; LOCALAPPDATA = $sandbox; RECALL_INSTANCE_TAG = "update-shot-$PID"
   RECALL_FOLDERS = (Join-Path $sandbox 'folders.json'); RECALL_LIBRARY_META = (Join-Path $sandbox 'library.json'); RECALL_CACHE_DIR = (Join-Path $sandbox 'cache'); RECALL_OUT_DIR = (Join-Path $sandbox 'clips'); APPDATA = $sandbox }
+if ($Route) { $vars.RECALL_NATIVE_ROUTE = $Route }
+if ($NoCard) { $vars.RECALL_UPDATE_PREVIEW = '' }
 foreach ($k in $vars.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, $vars[$k]) }
 try { $p = Start-Process -FilePath $Exe -WorkingDirectory (Split-Path $Exe) -NoNewWindow -PassThru; [void]$p.Handle }
 finally { foreach ($k in $vars.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) } }
