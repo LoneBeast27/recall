@@ -9,9 +9,18 @@ fn game(name: &str, hwnd: isize) -> EngineTarget {
 
 const RUN: EngineHealth = EngineHealth::Running { pid: 9 };
 
+/// What an act did: "restart", "notice", or "quiet" (a notice the overlay-off dropped).
+fn kind(act: &StuckAct) -> &'static str {
+    match (act.restart, &act.notice) {
+        (true, _) => "restart",
+        (false, Some(_)) => "notice",
+        (false, None) => "quiet",
+    }
+}
+
 /// Feed (second, target, health, encoder, fresh) steps through `session_state`
-/// into the watch; return the seconds that acted and whether each had a notice.
-fn run(steps: &[Step]) -> Vec<(u64, Option<Value>)> {
+/// into the watch; return (second, kind, notice) per act.
+fn run(steps: &[Step]) -> Vec<(u64, &'static str, Option<Value>)> {
     let t0 = Instant::now();
     let mut w = StuckWatch::default();
     steps
@@ -20,9 +29,13 @@ fn run(steps: &[Step]) -> Vec<(u64, Option<Value>)> {
             let state = session_state(target, *health, *encoder, *fresh, false);
             let running = matches!(health, EngineHealth::Running { pid } if *pid != 0);
             let act = w.observe(state, target, running, *fresh, true, t0 + Duration::from_secs(*s))?;
-            Some((*s, act.notice.map(|n| serde_json::from_str(&n).unwrap())))
+            Some((*s, kind(&act), act.notice.map(|n| serde_json::from_str(&n).unwrap())))
         })
         .collect()
+}
+
+fn when(acts: &[(u64, &'static str, Option<Value>)]) -> Vec<(u64, &'static str)> {
+    acts.iter().map(|a| (a.0, a.1)).collect()
 }
 
 /// One step per second from `from` to `to`, all with the same inputs.
@@ -33,28 +46,24 @@ fn hold(from: u64, to: u64, t: &EngineTarget, h: EngineHealth, enc: Option<&'sta
 }
 
 #[test]
-fn a_game_starting_for_over_10_s_gets_one_notice_and_one_restart() {
+fn a_game_starting_for_over_10_s_gets_one_restart() {
     let g = game("VALORANT", 7);
-    let acts = run(&hold(0, 15, &g, RUN, Some("starting"), true));
-    assert_eq!(acts.len(), 1, "{acts:?}");
-    assert_eq!(acts[0].0, 10);
-    assert_eq!(
-        acts[0].1,
-        Some(serde_json::json!({"type":"notice","kind":"refused","title":"Can't capture VALORANT","detail":"Retrying"}))
-    );
+    assert_eq!(when(&run(&hold(0, 15, &g, RUN, Some("starting"), true))), [(10, "restart")]);
 }
 
 #[test]
-fn after_the_restart_it_never_loops_faster_than_60_s_and_says_it_once() {
+fn after_the_one_restart_it_says_so_once_and_never_restarts_again() {
     let g = game("VALORANT", 7);
     let mut steps = hold(0, 10, &g, RUN, Some("starting"), true);
     // The intended restart: no hello yet for 2 s, then fresh again, still no frames.
     steps.extend(hold(11, 12, &g, RUN, None, false));
-    steps.extend(hold(13, 200, &g, RUN, Some("starting"), true));
+    steps.extend(hold(13, 300, &g, RUN, Some("starting"), true));
     let acts = run(&steps);
-    let secs: Vec<u64> = acts.iter().map(|a| a.0).collect();
-    assert_eq!(secs, [10, 70, 130, 190]);
-    assert!(acts[1..].iter().all(|a| a.1.is_none()), "the notice is said once");
+    assert_eq!(when(&acts), [(10, "restart"), (23, "notice")]);
+    assert_eq!(
+        acts[1].2,
+        Some(serde_json::json!({"type":"notice","kind":"refused","title":"Can't capture VALORANT","detail":"Try another window mode"}))
+    );
 }
 
 #[test]
@@ -79,16 +88,12 @@ fn a_new_target_or_a_recovery_makes_a_later_stall_news_again() {
     let b = game("B", 8);
     let mut steps = hold(0, 10, &a, RUN, Some("starting"), true);
     steps.extend(hold(11, 25, &b, RUN, Some("starting"), true));
-    let acts = run(&steps);
-    assert_eq!(acts.iter().map(|a| a.0).collect::<Vec<_>>(), [10, 21]);
-    assert!(acts.iter().all(|a| a.1.is_some()));
+    assert_eq!(when(&run(&steps)), [(10, "restart"), (21, "restart")]);
 
     let mut steps = hold(0, 10, &a, RUN, Some("starting"), true);
     steps.extend(hold(11, 20, &a, RUN, Some("h264_nvenc"), true));
     steps.extend(hold(21, 40, &a, RUN, Some("starting"), true));
-    let acts = run(&steps);
-    assert_eq!(acts.iter().map(|a| a.0).collect::<Vec<_>>(), [10, 31]);
-    assert!(acts[1].1.is_some(), "recovered, then stuck again: told again");
+    assert_eq!(when(&run(&steps)), [(10, "restart"), (31, "restart")], "recovered, then stuck again: a fresh episode");
 }
 
 #[test]
@@ -97,26 +102,41 @@ fn a_flicker_out_of_starting_restarts_the_10_s_clock() {
     let mut steps = hold(0, 8, &g, RUN, Some("starting"), true);
     steps.extend(hold(9, 9, &g, RUN, Some("starting"), false));
     steps.extend(hold(10, 25, &g, RUN, Some("starting"), true));
-    assert_eq!(run(&steps).iter().map(|a| a.0).collect::<Vec<_>>(), [20]);
+    assert_eq!(when(&run(&steps)), [(20, "restart")]);
 }
 
 // capture_stuck_tick's step (`stuck_step`): the controller's inputs, the screen probe.
 
 fn inputs(t: &EngineTarget) -> StuckInputs<'_> {
-    StuckInputs { wanted: t, health: RUN, encoder: Some("starting"), fresh: true, paused: false, running: true, held: false, overlay: true }
+    StuckInputs {
+        wanted: t,
+        health: RUN,
+        encoder: Some("starting"),
+        fresh: true,
+        paused: false,
+        running: true,
+        held: false,
+        user_acted: None,
+        overlay: true,
+    }
 }
 
-/// A game stuck in "starting" for seconds `0..=to`, the screen as `sight(second)` says;
-/// returns (second, has notice) per act (each act is one engine restart).
-fn tick_run(to: u64, i: &StuckInputs, sight: impl Fn(u64) -> Sight) -> Vec<(u64, bool)> {
+/// `stuck_step` once a second for `0..=to`, inputs and screen as `inputs(second)` /
+/// `sight(second)` say (the screen only when asked); returns (second, kind) per act.
+fn tick_seq<'a>(to: u64, inputs: impl Fn(u64) -> StuckInputs<'a>, sight: impl Fn(u64) -> Sight) -> Vec<(u64, &'static str)> {
     let t0 = Instant::now();
     let mut w = StuckWatch::default();
     (0..=to)
         .filter_map(|s| {
-            let act = stuck_step(&mut w, i, |_: &Target| sight(s), t0 + Duration::from_secs(s))?;
-            Some((s, act.notice.is_some()))
+            let act = stuck_step(&mut w, &inputs(s), |_: &Target| sight(s), t0 + Duration::from_secs(s))?;
+            Some((s, kind(&act)))
         })
         .collect()
+}
+
+/// The same inputs every second, the screen as `sight(second)` says.
+fn tick_run(to: u64, i: &StuckInputs, sight: impl Fn(u64) -> Sight) -> Vec<(u64, &'static str)> {
+    tick_seq(to, |_| i.clone(), sight)
 }
 
 #[test]
@@ -135,23 +155,59 @@ fn no_notice_and_no_restart_while_the_game_is_minimized_behind_a_window_locked_o
 }
 
 #[test]
-fn in_front_and_stuck_for_10_s_still_gets_one_notice_and_one_restart() {
+fn in_front_and_stuck_for_10_s_still_gets_one_restart() {
     let g = game("VALORANT", 7);
-    assert_eq!(tick_run(15, &inputs(&g), |_| Sight::SHOWN), [(10, true)]);
+    assert_eq!(tick_run(15, &inputs(&g), |_| Sight::SHOWN), [(10, "restart")]);
+}
+
+#[test]
+fn a_first_frame_that_never_comes_gets_at_most_one_restart_then_one_notice_in_5_minutes() {
+    let g = game("VALORANT", 7);
+    // The next 10 s count from the second after the restart.
+    assert_eq!(tick_run(300, &inputs(&g), |_| Sight::SHOWN), [(10, "restart"), (21, "notice")]);
+}
+
+#[test]
+fn a_new_window_mode_or_a_user_action_starts_a_new_episode() {
+    let g = game("VALORANT", 7);
+    let borderless_at_100 = |s| Sight { mode: if s < 100 { 1 } else { 2 }, ..Sight::SHOWN };
+    assert_eq!(tick_run(130, &inputs(&g), borderless_at_100), [(10, "restart"), (21, "notice"), (110, "restart"), (121, "notice")]);
+    let t0 = Instant::now();
+    let pressed_at_100 = |s| StuckInputs { user_acted: (s >= 100).then_some(t0), ..inputs(&g) };
+    assert_eq!(tick_seq(130, pressed_at_100, |_| Sight::SHOWN), [(10, "restart"), (21, "notice"), (110, "restart"), (121, "notice")]);
 }
 
 #[test]
 fn the_10_s_count_starts_when_the_game_is_back_in_front() {
     let g = game("VALORANT", 7);
     let back_at_30 = |s| if s < 30 { Sight { iconic: true, in_front: false, ..Sight::SHOWN } } else { Sight::SHOWN };
-    assert_eq!(tick_run(45, &inputs(&g), back_at_30), [(40, true)]);
+    assert_eq!(tick_run(45, &inputs(&g), back_at_30), [(40, "restart")]);
 }
 
 #[test]
-fn a_drain_or_a_busy_engine_holds_it_and_the_overlay_off_drops_only_the_notice() {
+fn a_drain_a_busy_engine_or_a_pending_recovery_holds_it_and_the_overlay_off_drops_only_the_notice() {
     let g = game("VALORANT", 7);
     assert_eq!(tick_run(30, &StuckInputs { held: true, ..inputs(&g) }, |_| Sight::SHOWN), []);
-    assert_eq!(tick_run(15, &StuckInputs { overlay: false, ..inputs(&g) }, |_| Sight::SHOWN), [(10, false)]);
+    assert_eq!(tick_run(25, &StuckInputs { overlay: false, ..inputs(&g) }, |_| Sight::SHOWN), [(10, "restart"), (21, "quiet")]);
+}
+
+#[test]
+fn a_restart_in_flight_is_pending_so_the_encoder_recovery_stands_aside() {
+    let g = game("VALORANT", 7);
+    let t0 = Instant::now();
+    let mut w = StuckWatch::default();
+    let at = |s| t0 + Duration::from_secs(s);
+    assert!(!w.pending());
+    assert!(stuck_step(&mut w, &inputs(&g), |_: &Target| Sight::SHOWN, at(0)).is_none());
+    assert!(w.pending(), "the clock runs");
+    assert!(stuck_step(&mut w, &inputs(&g), |_: &Target| Sight::SHOWN, at(10)).is_some_and(|a| a.restart));
+    assert!(w.pending(), "the restart awaits its first frame");
+    for s in 11..=21 {
+        stuck_step(&mut w, &inputs(&g), |_: &Target| Sight::SHOWN, at(s));
+    }
+    let recording = StuckInputs { encoder: Some("h264_nvenc"), ..inputs(&g) };
+    stuck_step(&mut w, &recording, |_: &Target| Sight::SHOWN, at(22));
+    assert!(!w.pending(), "told, then recording: nothing in flight");
 }
 
 #[test]

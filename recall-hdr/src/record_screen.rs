@@ -4,16 +4,20 @@
 //! turned off sends no frames, so an encoder still "starting" then is not stuck.
 //!
 //! The engine's Desktop Duplication has the same check (`recall` `capture/dda_desktop.rs`);
-//! that is another crate, so this is the controller's thin copy: one `OpenInputDesktop`
-//! per call and the `GUID_CONSOLE_DISPLAY_STATE` power notification.
+//! that is another crate, so this is the controller's thin copy: `OpenInputDesktop` at
+//! most once a second ([`Throttle`]) and the `GUID_CONSOLE_DISPLAY_STATE` power notification.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
-use std::sync::Once;
+use std::sync::{Mutex, Once};
+use std::time::{Duration, Instant};
 
 use windows::core::GUID;
-use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId, IsIconic};
+use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::UI::WindowsAndMessaging::{
+    GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId, IsIconic, GWL_STYLE, WS_CAPTION,
+    WS_POPUP, WS_THICKFRAME,
+};
 
 use crate::log;
 use crate::record_target::Target;
@@ -27,11 +31,14 @@ pub struct Sight {
     /// The input desktop is not the user's (lock screen, UAC, Ctrl+Alt+Del).
     pub locked: bool,
     pub display_off: bool,
+    /// The window mode: frame style bits and size (a change = windowed / borderless /
+    /// fullscreen switched, or a new size).
+    pub mode: u64,
 }
 
 impl Sight {
     /// In front, not minimized, on the user's desktop with the display on.
-    pub const SHOWN: Self = Self { in_front: true, iconic: false, locked: false, display_off: false };
+    pub const SHOWN: Self = Self { in_front: true, iconic: false, locked: false, display_off: false, mode: 0 };
 
     /// The game can be sending frames now.
     pub fn shown(self) -> bool {
@@ -66,17 +73,55 @@ const CONSOLE_DISPLAY_STATE: GUID = GUID::from_u128(0x6fe69556_704a_47a0_8f24_c2
 static DISPLAY: AtomicU8 = AtomicU8::new(1);
 static WATCH: Once = Once::new();
 
+/// How often the input desktop is looked at.
+const DESKTOP_EVERY: Duration = Duration::from_secs(1);
+static LOCKED: Mutex<Throttle> = Mutex::new(Throttle::new(DESKTOP_EVERY));
+
+/// A probe asked at most once per `every`; the last answer in between.
+#[derive(Debug)]
+pub struct Throttle {
+    every: Duration,
+    last: Option<(Instant, bool)>,
+}
+
+impl Throttle {
+    pub const fn new(every: Duration) -> Self {
+        Self { every, last: None }
+    }
+
+    pub fn get(&mut self, now: Instant, probe: impl FnOnce() -> bool) -> bool {
+        match self.last {
+            Some((at, v)) if now.saturating_duration_since(at) < self.every => v,
+            _ => {
+                let v = probe();
+                self.last = Some((now, v));
+                v
+            }
+        }
+    }
+}
+
 /// The target and the screen now. The display watch is registered on the first call.
 pub fn sight(t: &Target) -> Sight {
     WATCH.call_once(watch_display);
     let hwnd = HWND(t.hwnd as *mut _);
     let mut front = 0u32;
-    // SAFETY: plain queries; both tolerate a stale handle.
-    let iconic = unsafe {
+    let mut rect = RECT::default();
+    // SAFETY: plain queries; each tolerates a stale handle.
+    let (iconic, style) = unsafe {
         GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut front));
-        IsIconic(hwnd).as_bool()
+        let _ = GetWindowRect(hwnd, &mut rect);
+        (IsIconic(hwnd).as_bool(), GetWindowLongPtrW(hwnd, GWL_STYLE) as u32 & (WS_CAPTION.0 | WS_THICKFRAME.0 | WS_POPUP.0))
     };
-    Sight { in_front: front != 0 && front == t.pid, iconic, locked: !input_is_users(), display_off: DISPLAY.load(Relaxed) == 0 }
+    let size = ((rect.right - rect.left) as u32 as u64) << 16 | (rect.bottom - rect.top) as u16 as u64;
+    let locked = !LOCKED.lock().unwrap_or_else(|p| p.into_inner()).get(Instant::now(), input_is_users);
+    Sight {
+        in_front: front != 0 && front == t.pid,
+        iconic,
+        locked,
+        display_off: DISPLAY.load(Relaxed) == 0,
+        mode: (style as u64) << 32 | size,
+    }
 }
 
 /// Opening the input desktop works (it fails on the Winlogon desktop).
@@ -113,4 +158,23 @@ unsafe extern "system" fn on_power(_context: *const c_void, kind: u32, setting: 
         }
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_input_desktop_is_looked_at_at_most_once_a_second() {
+        let t0 = Instant::now();
+        let mut t = Throttle::new(DESKTOP_EVERY);
+        let mut calls = 0;
+        for ms in (0..=3000).step_by(100) {
+            t.get(t0 + Duration::from_millis(ms), || {
+                calls += 1;
+                true
+            });
+        }
+        assert_eq!(calls, 4, "0, 1, 2, 3 s");
+    }
 }
