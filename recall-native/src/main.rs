@@ -11,6 +11,7 @@ mod clip_open;
 #[path = "../../recall/src/edit_model.rs"]
 mod edit_model;
 mod editor_state;
+mod install_wait;
 mod instance;
 mod library_probe;
 mod display_tiles;
@@ -51,6 +52,8 @@ fn main() {
         }
         let _ = unsafe { SetPriorityClass(GetCurrentProcess(), BELOW_NORMAL_PRIORITY_CLASS) };
     }
+    // An install replacing files (`.installing` beside the program): wait for it first.
+    install_wait::wait_for_install();
     // One library per user: a second start shows the running window and exits.
     let guard = match instance::start() {
         instance::Start::Run(guard) => guard,
