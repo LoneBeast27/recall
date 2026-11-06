@@ -244,7 +244,9 @@ impl App {
         let fresh = self.placed.as_ref().is_some_and(|p| p.key == key && p.pid == pid && p.hwnd == hwnd);
         if !fresh {
             let (monitor, area) = target_monitor(hwnd, pid);
-            let scanned = (!session.desktop).then(|| self.hud_cache.grid(&session.hud_key())).flatten();
+            // Scans are kept per picture shape: a landscape grid never places a portrait window.
+            let shaped = dynamic::shape_key(&session.hud_key(), area.aspect());
+            let scanned = (!session.desktop).then(|| self.hud_cache.grid(&shaped)).flatten();
             let current = self.placed.as_ref().filter(|p| p.key == key).map(|p| p.spot.anchor);
             let (spot, hud) = match (Anchor::from_corner(&self.corner), scanned) {
                 (Some(anchor), _) => (Spot { anchor, free_px: None }, None),
@@ -277,6 +279,17 @@ impl App {
         self.hud_cache = HudCache::load(path);
     }
 
+    /// The current target's scan key, `<exe stem>@<shape>` of the area it was
+    /// placed in ("" until it is placed, and for the desktop).
+    fn hud_cache_key(&self) -> String {
+        let session = self.reducer.session();
+        let game = session.game_key();
+        match self.placed.as_ref().filter(|p| p.key == game && !session.desktop) {
+            Some(p) => dynamic::shape_key(&session.hud_key(), p.area.aspect()),
+            None => String::new(),
+        }
+    }
+
     fn dynamic(&self) -> bool {
         self.smoke.is_none() && Anchor::from_corner(&self.corner).is_none()
     }
@@ -288,7 +301,7 @@ impl App {
             return;
         }
         let session = self.reducer.session();
-        let key = session.hud_key();
+        let key = self.hud_cache_key();
         let active = session.recording() && game_in_front(session.target_pid.filter(|_| !session.desktop));
         let scans = self.hud_cache.scans(&key);
         if self.prober.due(&key, active, scans, now) {
@@ -303,11 +316,11 @@ impl App {
     /// the island moves to the clearest spot. True when the island moved.
     fn on_hud_scan(&mut self, event: Value, now: Instant) -> bool {
         let grid = HudGrid::from_scan(&event);
-        let key = self.reducer.session().hud_key();
+        let key = self.hud_cache_key();
         let scans = self.hud_cache.scans(&key) + grid.is_some() as usize;
         let Some(for_key) = self.prober.answered(grid.is_some(), scans, now) else { return false };
         let Some(grid) = grid else { return false };
-        self.hud_cache.add(&for_key, grid);
+        if HudGrid::is_ui(&event) { self.hud_cache.add_ui(&for_key, grid) } else { self.hud_cache.add(&for_key, grid) }
         let before = self.placed.as_ref().map(|p| p.spot.anchor);
         // Re-place now (the current spot is kept when it is still among the clearest).
         if let Some(p) = self.placed.as_mut() {

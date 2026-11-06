@@ -107,9 +107,9 @@ fn the_cache_survives_a_restart_on_disk() {
     let dir = std::env::temp_dir().join(format!("recall-island-hud-{}", std::process::id()));
     let path = dir.join("island-hud.json");
     let mut cache = HudCache::load(Some(path.clone()));
-    cache.add("valorant", HudGrid { cols: 8, rows: 1, grid: vec![2] });
+    cache.add("valorant@9", HudGrid { cols: 8, rows: 1, grid: vec![2] });
     let back = HudCache::load(Some(path.clone()));
-    assert_eq!(back.grid("valorant"), Some(HudGrid { cols: 8, rows: 1, grid: vec![2] }));
+    assert_eq!(back.grid("valorant@9"), Some(HudGrid { cols: 8, rows: 1, grid: vec![2] }));
     assert!(!path.with_extension("json.tmp").exists(), "the temp file was renamed into place");
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -183,7 +183,7 @@ fn a_bad_cache_file_is_cleaned_on_load_and_the_game_count_is_capped() {
     std::fs::write(&path, bad).unwrap();
     let cache = HudCache::load(Some(path));
     let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!((cache.scans("huge"), cache.scans("short"), cache.scans("fine")), (0, 0, 1));
+    assert_eq!((cache.scans("huge@9"), cache.scans("short@9"), cache.scans("fine@9")), (0, 0, 1), "an unshaped key loads as landscape");
     let mut many = HudCache::load(None);
     for i in 0..MAX_GAMES + 5 {
         many.add(&format!("game{i}"), HudGrid { cols: 8, rows: 1, grid: vec![1] });
@@ -203,7 +203,7 @@ fn scans_that_mark_most_of_the_screen_are_ignored() {
     cache.add("rocketleague", menu.clone());
     assert_eq!(cache.scans("rocketleague"), 0, "a new menu scan is not kept");
     // Saved before this check: skipped when read.
-    cache.file.games.insert("rocketleague".into(), Entry { cols: 64, rows: 36, scans: vec![menu.grid.clone()], seq: 1 });
+    cache.file.games.insert("rocketleague".into(), Entry { cols: 64, rows: 36, scans: vec![menu.grid.clone()], seq: 1, ui: Vec::new() });
     assert_eq!(cache.grid("rocketleague"), None);
     let feed = hud(&[(0.4, 0.0, 0.6, 0.08)]);
     cache.add("rocketleague", feed.clone());
@@ -222,7 +222,7 @@ fn rocket_league_lands_top_right_once_menu_scans_are_skipped() {
     }
     let menu: Vec<u64> = (0..36).map(|r| if r % 3 == 2 { 0 } else { u64::MAX }).collect();
     let mut cache = HudCache::load(None);
-    cache.file.games.insert("rocketleague".into(), Entry { cols: 64, rows: 36, scans: vec![good.clone(), menu.clone(), menu, good], seq: 4 });
+    cache.file.games.insert("rocketleague".into(), Entry { cols: 64, rows: 36, scans: vec![good.clone(), menu.clone(), menu, good], seq: 4, ui: Vec::new() });
     let grid = cache.grid("rocketleague").unwrap();
     assert_eq!(choose(&grid, WIDE, None), Anchor::TopRight);
 }
@@ -235,7 +235,7 @@ fn title_like_keys_are_dropped_on_load_and_the_file_is_rewritten() {
     let file = r#"{"games":{"My Secret Chat - Discord":{"cols":4,"rows":1,"scans":[[1]]},"Rocket League (64-bit)":{"cols":4,"rows":1,"scans":[[1]]},"rocketleague":{"cols":4,"rows":1,"scans":[[1]]},"valorant-win64.shipping_x":{"cols":4,"rows":1,"scans":[[1]]}}}"#;
     std::fs::write(&path, file).unwrap();
     let cache = HudCache::load(Some(path.clone()));
-    assert_eq!(cache.file.games.keys().map(String::as_str).collect::<Vec<_>>(), ["rocketleague", "valorant-win64.shipping_x"]);
+    assert_eq!(cache.file.games.keys().map(String::as_str).collect::<Vec<_>>(), ["rocketleague@9", "valorant-win64.shipping_x@9"]);
     let on_disk = std::fs::read_to_string(&path).unwrap();
     assert!(!on_disk.contains("Secret") && !on_disk.contains("Rocket League"), "the file was rewritten without titles: {on_disk}");
     let _ = std::fs::remove_dir_all(&dir);
@@ -246,4 +246,85 @@ fn exe_stem_keys_are_plain_lowercase_names() {
     assert!(exe_stem_key("rocketleague") && exe_stem_key("valorant-win64-shipping") && exe_stem_key("cs2.x_y"));
     assert!(!exe_stem_key("") && !exe_stem_key("Rocket League") && !exe_stem_key("Discord") && !exe_stem_key("a b"));
     assert!(!exe_stem_key(&"a".repeat(65)) && exe_stem_key(&"a".repeat(64)));
+}
+
+/// The engine's synthetic still "app" frame as a grid: a dense panel bottom
+/// left (user and voice buttons), text down the middle, an empty top-right strip.
+fn app_grid() -> HudGrid {
+    let mut g = hud(&[(0.0, 0.83, 0.25, 1.0), (0.31, 0.17, 0.69, 0.83)]);
+    // Discord-like side panels down both edges, below the top strip.
+    for r in 3..36 {
+        g.grid[r] |= 0b11 | (0b11 << 62);
+    }
+    g
+}
+
+#[test]
+fn a_still_app_lands_in_the_empty_top_right() {
+    assert_eq!(choose(&app_grid(), WIDE, None), Anchor::TopRight);
+    assert_eq!(choose(&app_grid(), WIDE, Some(Anchor::BottomLeft)), Anchor::TopRight, "the covered bottom left is left");
+    assert_eq!(choose(&app_grid(), 1440.0 / 2560.0, None), Anchor::TopRight, "portrait too");
+}
+
+#[test]
+fn a_fully_covered_picture_never_lands_bottom_left() {
+    let full = HudGrid { cols: 64, rows: 36, grid: vec![u64::MAX; 36] };
+    for current in [None, Some(Anchor::BottomLeft), Some(Anchor::BottomCentre)] {
+        assert_eq!(choose(&full, WIDE, current), Anchor::TopRight, "{current:?}");
+    }
+    // Everything crowded, the top centre a little clearer than the rest.
+    let mut busy = full.clone();
+    let (cols, rows) = busy.cells_under(footprint(Anchor::TopCentre, WIDE));
+    for r in rows {
+        for c in cols.clone().step_by(2) {
+            busy.grid[r as usize] &= !(1u64 << c);
+        }
+    }
+    assert_eq!(choose(&busy, WIDE, None), Anchor::TopCentre, "the least covered share wins");
+}
+
+#[test]
+fn ui_scans_have_no_share_limit_and_give_way_to_game_scans() {
+    let mut cache = HudCache::load(None);
+    let full = HudGrid { cols: 64, rows: 36, grid: vec![u64::MAX; 36] };
+    cache.add("discord@9", full.clone());
+    assert_eq!(cache.scans("discord@9"), 0, "a game scan this full is a menu");
+    cache.add_ui("discord@9", full.clone());
+    assert_eq!((cache.scans("discord@9"), cache.grid("discord@9")), (1, Some(full)), "a ui scan is kept whole");
+    let feed = hud(&[(0.4, 0.0, 0.6, 0.08)]);
+    cache.add("discord@9", feed.clone());
+    assert_eq!(cache.grid("discord@9"), Some(feed), "a game scan wins over ui scans (a game paused in a menu)");
+    assert!(HudGrid::is_ui(&json!({"kind":"ui"})) && !HudGrid::is_ui(&json!({"ok":true})));
+    let ui = json!({"type":"hud_scan","ok":true,"kind":"ui","cols":2,"rows":1,"grid":[3],"aspect":1.78});
+    assert_eq!(HudGrid::from_scan(&ui), Some(HudGrid { cols: 2, rows: 1, grid: vec![3] }));
+}
+
+/// 2026-11-06: Discord's scans were taken maximised on the 2560x1440 monitor,
+/// then placed the island on the portrait 1440x2560 monitor (bottom centre,
+/// over the voice buttons). Shapes are now kept apart.
+#[test]
+fn a_landscape_scan_never_places_a_portrait_window() {
+    assert_eq!((shape(16.0 / 9.0), shape(16.0 / 10.0), shape(21.0 / 9.0), shape(1440.0 / 2560.0)), (9, 8, 12, 3));
+    assert_eq!(shape(1440.0 / 2488.0), shape(1440.0 / 2560.0), "a maximised portrait window and its monitor agree");
+    assert_eq!(shape(0.0), 0);
+    let (wide, tall) = (shape_key("discord", 2560.0 / 1392.0), shape_key("discord", 1440.0 / 2488.0));
+    assert_eq!((wide.as_str(), tall.as_str()), ("discord@9", "discord@3"));
+    assert_eq!(shape_key("", 1.78), "", "the desktop has no key");
+    let mut cache = HudCache::load(None);
+    cache.add("discord@9", hud(&[(0.9, 0.3, 1.0, 0.7)]));
+    assert_eq!((cache.scans(&tall), cache.grid(&tall)), (0, None), "portrait starts unscanned (probed soon)");
+    assert!(cache_key("discord@3") && cache_key("discord") && !cache_key("discord@") && !cache_key("discord@123") && !cache_key("Discord@3"));
+}
+
+#[test]
+fn saved_scans_without_a_shape_load_as_landscape() {
+    let dir = std::env::temp_dir().join(format!("recall-island-hud-shape-{}", std::process::id()));
+    let path = dir.join("island-hud.json");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(&path, r#"{"games":{"discord":{"cols":4,"rows":1,"scans":[[1]]},"cs2@12":{"cols":4,"rows":1,"scans":[[2]]}}}"#).unwrap();
+    let cache = HudCache::load(Some(path.clone()));
+    assert_eq!(cache.file.games.keys().map(String::as_str).collect::<Vec<_>>(), ["cs2@12", "discord@9"]);
+    let again = HudCache::load(Some(path));
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(again.scans("discord@9"), 1, "the file was rewritten with the shape");
 }

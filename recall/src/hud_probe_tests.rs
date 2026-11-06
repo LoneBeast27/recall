@@ -127,11 +127,13 @@ fn bgra_frames_box_average_to_about_640_wide() {
 
 #[test]
 fn the_scan_line_is_what_the_island_reads() {
-    let scan = Outbound::HudScan { ok: true, cols: 64, rows: 36, grid: vec![1, 2], moving: 8, bursts: 9, reason: None };
+    let scan = Outbound::HudScan { ok: true, kind: "game", cols: 64, rows: 36, grid: vec![1, 2], moving: 8, bursts: 9, aspect: 1.78, reason: None };
     let wire = serde_json::to_value(&scan).unwrap();
     assert_eq!(wire["type"], "hud_scan");
     assert_eq!(wire["grid"], serde_json::json!([1, 2]));
     assert_eq!((wire["cols"].as_u64(), wire["rows"].as_u64()), (Some(64), Some(36)));
+    assert_eq!(wire["kind"], "game");
+    assert!((wire["aspect"].as_f64().unwrap() - 1.78).abs() < 1e-3);
 }
 
 #[test]
@@ -156,4 +158,69 @@ fn grid_share_counts_marked_cells() {
     half[..GRID_ROWS / 2].fill(u64::MAX >> (64 - GRID_COLS));
     assert_eq!(grid_share(&half), 0.5);
     assert!(MAX_HUD_SHARE < 0.5);
+}
+
+/// A still 640x360 "app" frame (Discord-like): flat background, a dense
+/// striped panel bottom-left (user and voice buttons), lines of text down the
+/// middle, and nothing in the top-right strip.
+fn app_frame() -> Gray {
+    let (w, h) = (640, 360);
+    let px = (0..w * h)
+        .map(|i| {
+            let (x, y) = (i % w, i / w);
+            let panel = x < 160 && y >= 300;
+            let text = (200..440).contains(&x) && (60..300).contains(&y) && y % 12 < 7;
+            if (panel || text) && (x / 2) % 2 == 0 { 220.0 } else { 40.0 }
+        })
+        .collect();
+    Gray { w, h, px }
+}
+
+fn grid_cells(grid: &[u64], cols: std::ops::Range<usize>, rows: std::ops::Range<usize>) -> usize {
+    rows.map(|r| cols.clone().filter(|&c| grid[r] >> c & 1 == 1).count()).sum()
+}
+
+#[test]
+fn a_still_app_window_gives_a_ui_scan_of_its_dense_parts() {
+    let mut tally = Tally::default();
+    for _ in 0..STILL_ENOUGH {
+        tally.add(&vec![app_frame(); 3]);
+    }
+    assert_eq!(tally.moving, 0, "nothing moves in an app window");
+    let Outbound::HudScan { ok, kind, grid, aspect, .. } = verdict(&tally, None) else { panic!("not a scan") };
+    assert!(ok && kind == "ui", "a still picture is a ui scan, not a failure");
+    assert!((aspect - 640.0 / 360.0).abs() < 1e-3);
+    assert_eq!(grid.len(), GRID_ROWS);
+    // The panel (cols 0-15, rows 30-35) and the text (cols 20-43, rows 6-29) are occupied.
+    assert!(grid_cells(&grid, 1..15, 31..35) > 40, "the bottom-left panel");
+    assert!(grid_cells(&grid, 21..43, 7..29) > 200, "the text in the middle");
+    assert_eq!(grid_cells(&grid, 48..64, 0..6), 0, "the top-right strip is empty");
+}
+
+#[test]
+fn a_fully_dense_still_frame_marks_everything_and_has_no_share_limit() {
+    let (w, h) = (640, 360);
+    let busy = Gray { w, h, px: (0..w * h).map(|i| if (i % w / 2 + i / w / 2) % 2 == 0 { 230.0 } else { 20.0 }).collect() };
+    let mut tally = Tally::default();
+    tally.add(&vec![busy; 3]);
+    let Outbound::HudScan { ok, kind, grid, .. } = verdict(&tally, None) else { panic!("not a scan") };
+    assert!(ok && kind == "ui");
+    assert!(grid_share(&grid) > 0.9, "share {}", grid_share(&grid));
+}
+
+#[test]
+fn moving_play_keeps_the_game_scan_and_no_frame_is_still_a_failure() {
+    let mut tally = Tally::default();
+    for b in 0..6 {
+        tally.add(&burst(b * 101, Some((20, 300, 120, 340))));
+    }
+    let Outbound::HudScan { ok, kind, .. } = verdict(&tally, None) else { panic!("not a scan") };
+    assert!(ok && kind == "game");
+    let Outbound::HudScan { ok, kind, reason, .. } = verdict(&Tally::default(), Some("no captured frame yet".into())) else { panic!() };
+    assert!(!ok && kind == "game" && reason.as_deref() == Some("no captured frame yet"));
+    // A menu over moving play (no burst counted) with a frame in hand reads as ui.
+    let mut menu = Tally::default();
+    menu.add(&burst(0, Some((40, 40, 600, 300))));
+    let Outbound::HudScan { kind, .. } = verdict(&menu, None) else { panic!() };
+    assert_eq!(kind, "ui");
 }
