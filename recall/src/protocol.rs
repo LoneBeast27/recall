@@ -159,10 +159,13 @@ pub enum Outbound {
     /// `path`: the partial recording that was kept (renamed to its final name),
     /// or null when nothing was written. `paths`: every file the recording left,
     /// the finished parts of a continued recording first (it ended early).
+    /// `gap_seconds` / `frozen_seconds`: as `recording_stopped`, up to the failure.
     RecordingFailed {
         reason: String,
         path: Option<String>,
         paths: Vec<String>,
+        gap_seconds: f64,
+        frozen_seconds: f64,
     },
     /// A long recording left as `.part` by a crash was renamed into place.
     RecordingRecovered {

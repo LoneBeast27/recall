@@ -11,7 +11,7 @@ const G: u64 = 1_000_000;
 fn writer(tag: &str, generation: u64) -> (Writer<FakeFactory>, PathBuf) {
     let dir = temp_dir(tag);
     let recorder = Recorder::new(FakeFactory::default(), tracks());
-    (Writer { out_dir: dir.to_string_lossy().into_owned(), json: false, recorder, generation, skew: Duration::ZERO, parts_so_far: Vec::new() }, dir)
+    (Writer { out_dir: dir.to_string_lossy().into_owned(), json: false, recorder, generation, skew: Duration::ZERO, parts_so_far: Vec::new(), missed: (0.0, 0.0) }, dir)
 }
 
 fn video(pts_ms: u64, keyframe: bool, generation: u64) -> Data {
@@ -141,7 +141,7 @@ fn a_failure_after_a_continued_part_names_every_file() {
     let mut names = finished(&dir);
     names.sort();
     assert_eq!(names.len(), 2, "{names:?}");
-    let out = serde_json::to_value(failed_outbound("the video encoder failed", Some(&dir.join(&names[0])), &first)).unwrap();
+    let out = serde_json::to_value(failed_outbound("the video encoder failed", Some(&dir.join(&names[0])), &first, (0.0, 0.0))).unwrap();
     let paths: Vec<&str> = out["paths"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect();
     assert_eq!(paths.len(), 2, "{out}");
     assert!(paths[0].ends_with("__rec.mp4") && paths[1].ends_with("__rec-2.mp4"), "{paths:?}");
@@ -166,9 +166,34 @@ fn a_failure_between_parts_names_the_finished_part_once() {
     let events = w.recorder.encoder_failed("device lost");
     let [Event::Failed { reason, kept }] = &events[..] else { panic!("{events:?}") };
     assert_eq!(kept.as_ref(), first.first(), "the kept file is the finished part");
-    let out = serde_json::to_value(failed_outbound(reason, kept.as_deref(), &first)).unwrap();
+    let out = serde_json::to_value(failed_outbound(reason, kept.as_deref(), &first, w.missed)).unwrap();
     let paths: Vec<&str> = out["paths"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect();
     assert_eq!(paths.len(), 1, "named once: {out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Merge gate 11-07 #4 (P2): a recording that ended early after a freeze did not say so.
+#[test]
+fn a_failure_reports_the_seconds_frozen_before_it() {
+    let generation = u64::MAX - 80;
+    let dir = temp_dir("failfrozen");
+    let factory = FakeFactory { causes: vec![(generation + 1, machine::Cause::Same)], ..Default::default() };
+    let recorder = Recorder::new(factory, tracks());
+    let mut w = Writer { out_dir: dir.to_string_lossy().into_owned(), json: false, recorder, generation, skew: Duration::ZERO, parts_so_far: Vec::new(), missed: (0.0, 0.0) };
+    let t0 = Instant::now();
+    w.start("G", Some((0, t0)));
+    w.generation = generation;
+    w.data(video(0, true, generation));
+    w.data(video(1_000, false, generation)); // the last packet before an encode error
+    // The same-header encoder is back 4 s later, on a keyframe.
+    w.data(Data::EncoderReopened { generation: generation + 1, at: t0 + Duration::from_secs(5) });
+    w.data(video(5_000, true, generation + 1));
+    w.data(video(5_016, false, generation + 1));
+    let events = w.recorder.encoder_failed("device lost");
+    let [Event::Failed { reason, kept }] = &events[..] else { panic!("{events:?}") };
+    let out = serde_json::to_value(failed_outbound(reason, kept.as_deref(), &[], w.missed)).unwrap();
+    let frozen = out["frozen_seconds"].as_f64().unwrap();
+    assert!((frozen - 4.0).abs() < 0.01, "1 s -> 5 s held still: {out}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

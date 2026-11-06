@@ -106,7 +106,7 @@ struct Active<S> {
     /// When this part's first keyframe was written.
     began: Instant,
     /// Seconds frozen in the parts before this one; µs frozen in this one; the capture µs of
-    /// a same-header reopen still waiting for its keyframe.
+    /// the last packet before a same-header reopen still waiting for its keyframe.
     earlier_frozen: f64,
     frozen_us: u64,
     freeze_from: Option<u64>,
@@ -325,11 +325,6 @@ impl<S: Sink> Active<S> {
         self.last_duration = duration;
         self.video_packets += 1;
         Ok(())
-    }
-
-    /// The capture clock (µs) at wall instant `at`: it runs in real time from `wall_base`.
-    fn capture_us_at(&self, at: Instant) -> u64 {
-        (self.base_us as i64 + self.wall_frames(1_000_000, at)).max(0) as u64
     }
 
     /// Frames of real time elapsed at `at` since the recording's first frame.
