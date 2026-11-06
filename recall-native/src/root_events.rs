@@ -12,17 +12,24 @@ use crate::{
 
 /// The long recording's toast for `event`: one per change. A continued part's stop
 /// shows none (the next part's start says "continues in part N"); the final stop
-/// shows the whole length and, past one file, how many it took.
+/// shows the whole length and, past one file, how many it took; time missed between parts
+/// or frozen (a same-header encoder reopen) past 2 s is named.
 fn recording_toast(event: &DaemonEvent) -> Option<(ToastKind, String, Option<String>)> {
     match event {
         DaemonEvent::RecordingStarted => Some((ToastKind::Info, "Recording started".into(), Some("Press the same shortcut again to stop.".into()))),
         DaemonEvent::RecordingContinued { part, cause } => Some((ToastKind::Info, format!("Recording continues in part {part}"), Some(cause_text(cause).into()))),
-        DaemonEvent::RecordingStopped { seconds, parts, gap_seconds, .. } => {
-            let detail = match *parts {
-                1 => None,
-                n if *gap_seconds > MISSING_OVER => Some(format!("{n} files · {} missing", missing(*gap_seconds))),
-                n => Some(format!("{n} files")),
-            };
+        DaemonEvent::RecordingStopped { seconds, parts, gap_seconds, frozen_seconds, .. } => {
+            let mut notes = Vec::new();
+            if *parts > 1 {
+                notes.push(format!("{parts} files"));
+                if *gap_seconds > MISSING_OVER {
+                    notes.push(format!("{} missing", missing(*gap_seconds)));
+                }
+            }
+            if *frozen_seconds > MISSING_OVER {
+                notes.push(format!("{} frozen", missing(*frozen_seconds)));
+            }
+            let detail = (!notes.is_empty()).then(|| notes.join(" · "));
             Some((ToastKind::Good, format!("Recording saved · {}", format_duration(*seconds)), detail))
         }
         DaemonEvent::RecordingFailed { reason, files } if files.is_empty() => Some((ToastKind::Bad, "Recording failed".into(), Some(reason.clone()))),
@@ -31,7 +38,7 @@ fn recording_toast(event: &DaemonEvent) -> Option<(ToastKind, String, Option<Str
     }
 }
 
-/// Time missed between parts is shown past this (seconds).
+/// Time missed between parts, or frozen, is shown past this (seconds).
 const MISSING_OVER: f64 = 2.0;
 
 /// "7 s", or "1:05" from a minute.
@@ -195,9 +202,9 @@ mod tests {
         assert_eq!(toast, Some((ToastKind::Info, "Recording continues in part 2".into(), Some("The game's size changed".into()))));
         let toast = recording_toast(&DaemonEvent::RecordingContinued { part: 3, cause: "input".into() });
         assert_eq!(toast.and_then(|t| t.2).as_deref(), Some("Capture switched between GPU and CPU frames"), "the reason matches the cause");
-        let toast = recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec-3.mp4".into(), seconds: 3725.0, parts: 3, gap_seconds: 0.4 });
+        let toast = recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec-3.mp4".into(), seconds: 3725.0, parts: 3, gap_seconds: 0.4, frozen_seconds: 0.0 });
         assert_eq!(toast, Some((ToastKind::Good, "Recording saved · 1:02:05".into(), Some("3 files".into()))));
-        let toast = recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec.mp4".into(), seconds: 61.0, parts: 1, gap_seconds: 0.0 });
+        let toast = recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec.mp4".into(), seconds: 61.0, parts: 1, gap_seconds: 0.0, frozen_seconds: 0.0 });
         assert_eq!(toast, Some((ToastKind::Good, "Recording saved · 1:01".into(), None)), "one file reads as before");
     }
 
@@ -205,7 +212,7 @@ mod tests {
     /// failure after a part change neither said it ended early nor named the files.
     #[test]
     fn the_final_toast_says_what_is_missing_and_a_failure_names_the_files() {
-        let toast = recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec-2.mp4".into(), seconds: 3600.0, parts: 2, gap_seconds: 7.2 });
+        let toast = recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec-2.mp4".into(), seconds: 3600.0, parts: 2, gap_seconds: 7.2, frozen_seconds: 0.0 });
         assert_eq!(toast, Some((ToastKind::Good, "Recording saved · 1:00:00".into(), Some("2 files · 7 s missing".into()))));
         let files = vec!["E:/c/G__rec.mp4".to_string(), "E:/c/G__rec-2.mp4".to_string()];
         let toast = recording_toast(&DaemonEvent::RecordingFailed { reason: "the video encoder failed".into(), files });
@@ -213,5 +220,18 @@ mod tests {
         assert_eq!(toast, Some((ToastKind::Bad, "Recording ended early".into(), Some(expected.into()))));
         let toast = recording_toast(&DaemonEvent::RecordingFailed { reason: "no keyframe".into(), files: Vec::new() });
         assert_eq!(toast, Some((ToastKind::Bad, "Recording failed".into(), Some("no keyframe".into()))));
+    }
+
+    /// Merge gate 11-07 #3 (P1): a same-header encoder reopen held the picture still until its
+    /// keyframe, and the toast never said so.
+    #[test]
+    fn the_final_toast_says_how_long_the_picture_froze() {
+        let stop = |parts: u32, gap_seconds: f64, frozen_seconds: f64| {
+            recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec.mp4".into(), seconds: 3600.0, parts, gap_seconds, frozen_seconds }).and_then(|t| t.2)
+        };
+        assert_eq!(stop(1, 0.0, 40.2).as_deref(), Some("40 s frozen"));
+        assert_eq!(stop(2, 7.2, 40.2).as_deref(), Some("2 files · 7 s missing · 40 s frozen"));
+        assert_eq!(stop(2, 0.0, 95.0).as_deref(), Some("2 files · 1:35 frozen"));
+        assert_eq!(stop(1, 0.0, 1.5), None, "a short freeze is not news");
     }
 }

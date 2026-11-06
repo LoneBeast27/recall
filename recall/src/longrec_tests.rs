@@ -149,6 +149,29 @@ fn a_failure_after_a_continued_part_names_every_file() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// Merge gate 11-07 (P2): a failure while the next part waits named the finished part as
+/// both an earlier part and the kept file, so the toast listed it twice.
+#[test]
+fn a_failure_between_parts_names_the_finished_part_once() {
+    let generation = u64::MAX - 60;
+    let (mut w, dir) = writer("failbetween", generation);
+    w.start("G", Some((0, Instant::now())));
+    w.generation = generation;
+    w.data(video(0, true, generation));
+    w.data(video(16, false, generation));
+    // Reopened inside the part gap: part 1 is finished, part 2 waits.
+    w.data(Data::EncoderReopened { generation: generation + 1, at: Instant::now() });
+    assert_eq!(w.parts_so_far.len(), 1, "part 1 is finished");
+    let first = w.parts_so_far.clone();
+    let events = w.recorder.encoder_failed("device lost");
+    let [Event::Failed { reason, kept }] = &events[..] else { panic!("{events:?}") };
+    assert_eq!(kept.as_ref(), first.first(), "the kept file is the finished part");
+    let out = serde_json::to_value(failed_outbound(reason, kept.as_deref(), &first)).unwrap();
+    let paths: Vec<&str> = out["paths"].as_array().unwrap().iter().map(|p| p.as_str().unwrap()).collect();
+    assert_eq!(paths.len(), 1, "named once: {out}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn recovery_renames_only_long_recording_parts_and_skips_open_files() {
     use std::os::windows::fs::OpenOptionsExt;

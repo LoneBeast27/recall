@@ -163,6 +163,7 @@ impl State {
                 seconds: event.get("total_seconds").and_then(Value::as_f64).unwrap_or_else(|| f64_of(event, "seconds")),
                 parts: u64_of(event, "parts").clamp(1, u64::from(u32::MAX)) as u32,
                 gap_seconds: f64_of(event, "gap_seconds"),
+                frozen_seconds: f64_of(event, "frozen_seconds"),
             },
             "recording_failed" => DaemonEvent::RecordingFailed {
                 reason: string_of(event, "reason").unwrap_or_else(|| "Recording failed.".into()),

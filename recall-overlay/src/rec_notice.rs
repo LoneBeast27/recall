@@ -2,8 +2,9 @@
 //! parts (`recording_stopped`/`recording_started` with `continued`): the
 //! part's stop shows nothing, the next part's start shows ONE notice,
 //! "Recording continues in part N", with what changed. The final stop shows the
-//! whole length, how many files it took and any time missed between them; a
-//! recording that failed after saving something "ended early" and names its files.
+//! whole length, how many files it took, any time missed between them and any
+//! time the picture froze; a recording that failed after saving something "ended
+//! early", gives its reason and names its files.
 use serde_json::Value;
 
 use crate::notice::Tone;
@@ -28,7 +29,7 @@ pub fn cause_text(cause: Option<&str>) -> &'static str {
     }
 }
 
-/// Time missed between parts is shown past this (seconds).
+/// Time missed between parts, or frozen (a same-header encoder reopen), is shown past this (seconds).
 pub const MISSING_OVER: f64 = 2.0;
 
 /// "7 s", "1:05".
@@ -55,8 +56,9 @@ pub fn failed_notice(event: &Value) -> Option<RecNotice> {
         2 => format!("Saved {first}, {last}"),
         n => format!("Saved {n} files, {first} … {last}"),
     };
-    let detail = truncate(&saved, 48);
-    Some(RecNotice { tone: Tone::Failure, title: "Recording ended early".into(), text: detail.clone(), detail })
+    let reason = event.get("reason").and_then(Value::as_str).unwrap_or("unknown error");
+    let detail = truncate(&format!("{}. {saved}", truncate(reason, 32)), 64);
+    Some(RecNotice { tone: Tone::Failure, title: "Recording ended early".into(), text: truncate(&saved, 48), detail })
 }
 
 /// `m:ss`, or `h:mm:ss` from an hour.
@@ -85,11 +87,19 @@ pub fn recording_notice(kind: &str, event: &Value, name: String) -> Option<RecNo
         _ => {
             let parts = num("parts").unwrap_or(1).max(1);
             let seconds = event.get("total_seconds").or_else(|| event.get("seconds")).and_then(Value::as_f64).unwrap_or(0.0);
-            let gap = event.get("gap_seconds").and_then(Value::as_f64).unwrap_or(0.0);
+            let secs = |key: &str| event.get(key).and_then(Value::as_f64).unwrap_or(0.0);
+            let (gap, frozen) = (secs("gap_seconds"), secs("frozen_seconds"));
+            let mut tail = String::new();
+            if parts > 1 && gap > MISSING_OVER {
+                tail += &format!(" · {} missing", missing(gap));
+            }
+            if frozen > MISSING_OVER {
+                tail += &format!(" · {} frozen", missing(frozen));
+            }
             let text = match parts {
-                1 => truncate(&format!("{name} · {}", length(seconds)), 48),
-                n if gap > MISSING_OVER => format!("{} · {n} files · {} missing", length(seconds), missing(gap)),
-                n => format!("{} · {n} files", length(seconds)),
+                1 if tail.is_empty() => truncate(&format!("{name} · {}", length(seconds)), 48),
+                1 => format!("{} · {}{tail}", truncate(&name, 20), length(seconds)),
+                n => format!("{} · {n} files{tail}", length(seconds)),
             };
             Some(RecNotice { tone: Tone::Success, title: "Recording saved".into(), detail: text.clone(), text })
         }
@@ -120,7 +130,29 @@ mod tests {
         assert_eq!(recording_notice("recording_stopped", &stop(1.5), "x".into()).unwrap().text, "1:00:00 · 2 files", "a short gap is not news");
         let failed = json!({"type":"recording_failed","reason":"the video encoder failed","path":"E:/c/G__rec-2.mp4","paths":["E:/c/G__rec.mp4","E:/c/G__rec-2.mp4"]});
         let n = failed_notice(&failed).unwrap();
-        assert_eq!((n.title.as_str(), n.detail.as_str()), ("Recording ended early", "Saved G__rec.mp4, G__rec-2.mp4"));
+        assert_eq!((n.title.as_str(), n.text.as_str()), ("Recording ended early", "Saved G__rec.mp4, G__rec-2.mp4"));
         assert_eq!(failed_notice(&json!({"type":"recording_failed","reason":"no keyframe","path":null,"paths":[]})), None, "nothing saved: a plain failure");
+    }
+
+    /// Merge gate 11-07 #3 (P1): a same-header encoder reopen held the picture still until its
+    /// keyframe, and the last notice never said so.
+    #[test]
+    fn the_last_stop_says_how_long_the_picture_froze() {
+        let stop = |parts: u32, gap: f64, frozen: f64| json!({"type":"recording_stopped","path":"E:/c/G__rec.mp4","seconds":60.0,"continued":false,
+            "parts":parts,"total_seconds":3600.0,"gap_seconds":gap,"frozen_seconds":frozen});
+        assert_eq!(recording_notice("recording_stopped", &stop(1, 0.0, 40.2), "G__rec.mp4".into()).unwrap().text, "G__rec.mp4 · 1:00:00 · 40 s frozen");
+        assert_eq!(recording_notice("recording_stopped", &stop(2, 7.2, 40.2), "x".into()).unwrap().text, "1:00:00 · 2 files · 7 s missing · 40 s frozen");
+        assert_eq!(recording_notice("recording_stopped", &stop(2, 0.0, 95.0), "x".into()).unwrap().text, "1:00:00 · 2 files · 1:35 frozen");
+        assert_eq!(recording_notice("recording_stopped", &stop(1, 0.0, 1.5), "G__rec.mp4".into()).unwrap().text, "G__rec.mp4 · 1:00:00", "a short freeze is not news");
+    }
+
+    /// Merge gate 11-07 (P2): the overlay's "ended early" notice dropped the reason.
+    #[test]
+    fn a_failure_that_saved_files_gives_its_reason() {
+        let failed = json!({"type":"recording_failed","reason":"the video encoder failed (device lost)","path":"E:/c/G__rec.mp4","paths":["E:/c/G__rec.mp4"]});
+        let n = failed_notice(&failed).unwrap();
+        assert_eq!(n.title, "Recording ended early");
+        assert_eq!(n.detail, "the video encoder failed (devic…. Saved G__rec.mp4", "the notice gives the reason, then the files");
+        assert_eq!(n.text, "Saved G__rec.mp4");
     }
 }

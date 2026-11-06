@@ -255,13 +255,6 @@ fn create_refuses_to_overwrite_an_existing_part() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// A skipped hardware/codec test says so on the real stderr (libtest captures `eprintln!`),
-/// so a green run that ran nothing shows a `HW-SKIP` line.
-fn hw_skip(why: &str) {
-    use std::io::Write as _;
-    let _ = writeln!(std::io::stderr(), "HW-SKIP longrec::fmp4 two-part test: {why}");
-}
-
 /// Merge gate 11-07 (P2): the parts were only ever tested against a fake sink. A
 /// continued recording through the real muxer: two files, each with its own size,
 /// each starting on a keyframe. Written under the worktree's `.tmp`, never a clip folder.
@@ -269,7 +262,12 @@ fn hw_skip(why: &str) {
 fn a_continued_recording_writes_two_playable_parts_through_the_real_muxer() {
     use super::super::machine::{Cause, Event, Recorder, PART_GAP};
     ff::init().unwrap();
-    let (Some(mut small), Some(mut wide)) = (x264(64, 64), x264(96, 64)) else { return hw_skip("libx264 unavailable") };
+    // A skip goes through `hw_skip` (printed past libtest's capture, counted, and a failure
+    // under RECALL_REQUIRE_NVENC=1); RECALL_FAKE_NO_NVENC=1 takes this path on purpose.
+    if crate::hw_skip::faked_absent() {
+        return crate::hw_skip::skipped("encoders treated as absent (RECALL_FAKE_NO_NVENC)");
+    }
+    let (Some(mut small), Some(mut wide)) = (x264(64, 64), x264(96, 64)) else { return crate::hw_skip::skipped("libx264 unavailable") };
     let (first_params, second_params) = (ff::codec::Parameters::from(&small), ff::codec::Parameters::from(&wide));
     let first = encode_sized(&mut small, 40, 64, 64);
     let second = encode_sized(&mut wide, 40, 96, 64);

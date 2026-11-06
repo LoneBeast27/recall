@@ -29,17 +29,24 @@ fn ms(n: u64) -> Duration {
 /// window resized every second never got one (all video and audio dropped).
 #[test]
 fn a_flap_that_never_stops_still_gets_a_part_within_ten_seconds_of_the_first_reopen() {
-    let (mut rec, _log, path, t0) = recording("flap");
+    let (mut rec, log, path, t0) = recording("flap");
     let mut started = Vec::new();
-    // From 1 s on the size changes every second, for a minute; keyframes every 500 ms.
+    // From 1 s on the size changes every second, for a minute; keyframes every 500 ms;
+    // 10 ms audio chunks all along (the chunk at the keyframe's instant comes first).
     for step in 2..=120u64 {
         let at = t0 + ms(step * 500);
         if step % 2 == 0 {
             rec.encoder_reopened(at, Cause::Size, None);
         }
-        for e in rec.video(step * 500 * MS + 100 * MS, true, pkt(step as u8), false, at + ms(100)) {
-            if let Event::PartStarted { part, .. } = e {
-                started.push((part, step * 500 + 100));
+        for k in 1..=50u64 {
+            rec.audio(0, &[0.3; 960], at + ms(10 * k));
+            if k != 10 {
+                continue;
+            }
+            for e in rec.video(step * 500 * MS + 100 * MS, true, pkt(step as u8), false, at + ms(100)) {
+                if let Event::PartStarted { part, .. } = e {
+                    started.push((part, step * 500 + 100));
+                }
             }
         }
     }
@@ -50,6 +57,30 @@ fn a_flap_that_never_stops_still_gets_a_part_within_ten_seconds_of_the_first_reo
     let part2 = path.with_file_name("G__2026-10-22__14-05-09__rec-2.mp4");
     assert!(part2.is_file() || naming_part(&part2).is_file());
     assert!(matches!(&rec.stop()[..], [Event::Stopped { .. }]));
+    flap_parts_keep_their_sound(&log.calls());
+}
+
+/// Merge gate 11-07 (P2): each part after the first starts its sound with its first frame
+/// (one whole 10 ms chunk, no silence ahead of it) and holds sound for its whole length.
+fn flap_parts_keep_their_sound(calls: &[Call]) {
+    let parts: Vec<&[Call]> = calls.split(|c| matches!(c, Call::Open(_))).skip(1).collect();
+    assert!(parts.len() >= 5, "{} parts", parts.len());
+    for (i, part) in parts.iter().enumerate() {
+        let audio: Vec<i64> = part.iter().filter_map(|c| match c {
+            Call::Audio { track: 0, frames } => Some(*frames as i64),
+            Call::Silence { track: 0, frames } => Some(-(*frames as i64)),
+            _ => None,
+        }).collect();
+        let video: Vec<(u64, u64)> = part.iter().filter_map(|c| if let Call::Video { pts, dur, .. } = c { Some((*pts, *dur)) } else { None }).collect();
+        let (first, last) = (video.first().unwrap(), video.last().unwrap());
+        let video_frames = ((last.0 + last.1 - first.0) * 48 / 1_000) as i64;
+        let sound: i64 = audio.iter().map(|f| f.abs()).sum();
+        if i > 0 {
+            assert_eq!(audio.first(), Some(&480), "part {} starts its sound at its first frame: {audio:?}", i + 1);
+        }
+        assert!(audio.iter().all(|f| *f > -800), "part {}: no silence over a frame: {audio:?}", i + 1);
+        assert!((sound - video_frames).abs() <= 48 * 500, "part {}: {sound} audio frames for {video_frames} of video", i + 1);
+    }
 }
 
 fn naming_part(p: &std::path::Path) -> PathBuf {
@@ -153,4 +184,67 @@ fn each_part_opens_with_the_settings_it_was_given_and_names_the_cause() {
     let t = t + PART_GAP;
     rec.encoder_reopened(t, Cause::Encoder, Some(3));
     assert!(matches!(&rec.stop()[..], [Event::Stopped { parts: 2, .. }]));
+}
+
+/// Merge gate 11-07 #3 (P1): a same-header reopen holds the last frame until the new
+/// encoder's keyframe, and nothing counted that span.
+#[test]
+fn a_same_header_reopen_counts_the_frozen_span_up_to_the_next_keyframe() {
+    let (mut rec, _log, _path, t0) = recording("frozen");
+    rec.video(1_000 * MS, false, pkt(3), false, t0 + ms(1_000));
+    // Reopen at capture 5 s; the new encoder's P-frames are dropped until its keyframe at 45 s.
+    rec.encoder_reopened(t0 + ms(5_000), Cause::Same, Some(2));
+    for s in 6..45u64 {
+        rec.video(s * 1_000 * MS, false, pkt(4), false, t0 + ms(s * 1_000));
+    }
+    rec.video(45_000 * MS, true, pkt(5), false, t0 + ms(45_000));
+    // A static screen afterwards: the VFR encoder sends nothing for 30 s. Not a freeze.
+    rec.video(46_000 * MS, false, pkt(6), false, t0 + ms(46_000));
+    rec.video(76_000 * MS, false, pkt(7), false, t0 + ms(76_000));
+    let events = rec.stop();
+    let [Event::Stopped { parts: 1, gap_seconds, frozen_seconds, .. }] = events[..] else { panic!("{events:?}") };
+    assert_eq!(gap_seconds, 0.0);
+    assert!((frozen_seconds - 40.0).abs() < 0.01, "reopen at 5 s to the keyframe at 45 s: {frozen_seconds}");
+}
+
+/// The frozen seconds of every part add up, and a reopen whose keyframe comes at once
+/// freezes nothing.
+#[test]
+fn frozen_seconds_carry_across_parts() {
+    let (mut rec, _log, _path, t0) = recording("frozen-parts");
+    rec.encoder_reopened(t0 + ms(2_000), Cause::Same, Some(2));
+    rec.video(5_000 * MS, true, pkt(3), false, t0 + ms(5_000));
+    rec.encoder_reopened(t0 + PART_GAP, Cause::Size, Some(3));
+    assert!(matches!(&rec.video(10_000 * MS, true, pkt(4), false, t0 + PART_GAP)[..], [Event::PartStarted { part: 2, .. }]));
+    rec.encoder_reopened(t0 + ms(12_000), Cause::Same, Some(4));
+    rec.video(12_000 * MS, true, pkt(5), false, t0 + ms(12_000));
+    rec.encoder_reopened(t0 + ms(13_000), Cause::Same, Some(5));
+    rec.video(20_500 * MS, true, pkt(6), false, t0 + ms(20_500));
+    let events = rec.stop();
+    let [Event::Stopped { parts: 2, frozen_seconds, .. }] = events[..] else { panic!("{events:?}") };
+    assert!((frozen_seconds - 10.5).abs() < 0.01, "3 s in part 1, 0 + 7.5 s in part 2: {frozen_seconds}");
+}
+
+/// Merge gate 11-07 #3 (P1): audio keeps its wall-clock place through a frozen span, so the
+/// sound after the new keyframe lines up with its picture.
+#[test]
+fn audio_stays_in_sync_across_a_frozen_span() {
+    let (mut rec, log, _path, t0) = recording("frozen-sync");
+    rec.encoder_reopened(t0 + ms(1_000), Cause::Same, Some(2));
+    // 10 ms chunks (480 frames at 48 kHz) by arrival, all through the freeze and after it.
+    for k in 1..=2_500u64 {
+        let at = t0 + ms(10 * k);
+        rec.audio(0, &[0.25; 960], at);
+        if k == 2_000 {
+            rec.video(20_000 * MS, true, pkt(5), false, at);
+        }
+        rec.tick(at);
+    }
+    assert!(matches!(&rec.stop()[..], [Event::Stopped { .. }]));
+    let pcm = log.pcm(0);
+    // 25 s of sound by 25 s, none of it shifted: frame n is at n / 48 000 s.
+    assert_eq!(pcm.len() / 2, 25 * 48_000, "every frame in its wall-clock place");
+    assert!(pcm.iter().all(|s| *s == 0.25), "no silence inserted or sound dropped across the freeze");
+    let key = log.videos().into_iter().find(|v| v.3 == 5).expect("the new keyframe was written");
+    assert_eq!(key.0, 20_000 * MS, "the keyframe sits at 20 s in the file, where its sound is");
 }

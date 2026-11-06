@@ -62,7 +62,8 @@ pub(crate) enum Data {
     /// `generation`: the live encoder that produced it (`tap::generation`).
     Video { pts_us: u64, keyframe: bool, data: Arc<[u8]>, generation: u64 },
     Audio { track: &'static str, samples: Vec<f32>, at: Instant },
-    EncoderReopened { generation: u64 },
+    /// `at`: when the encoder reopened (the part's clock maps it to capture time).
+    EncoderReopened { generation: u64, at: Instant },
 }
 
 /// A start's (capture-clock µs, `Instant` it was read at), sampled together
@@ -225,7 +226,7 @@ impl<F: SinkFactory> Writer<F> {
     fn data(&mut self, item: Data) {
         let events = match item {
             Data::Video { pts_us, keyframe, data, generation } => {
-                let mut events = self.encoder_seen(generation);
+                let mut events = self.encoder_seen(generation, None);
                 if generation == self.generation {
                     let gap = tap::take_gap();
                     events.extend(self.recorder.video(pts_us, keyframe, data, gap, self.now()));
@@ -236,7 +237,7 @@ impl<F: SinkFactory> Writer<F> {
                 Some(i) => self.recorder.audio(i, &samples, at),
                 None => Vec::new(),
             },
-            Data::EncoderReopened { generation } => self.encoder_seen(generation),
+            Data::EncoderReopened { generation, at } => self.encoder_seen(generation, Some(at + self.skew)),
         };
         self.events(events);
     }
@@ -245,7 +246,8 @@ impl<F: SinkFactory> Writer<F> {
     /// stream's parameters: a running part ends here and the next one gets that
     /// generation's settings (older packets are the caller's to skip). If the
     /// old encoder failed, the recording ends with it, whichever is seen first.
-    fn encoder_seen(&mut self, generation: u64) -> Vec<Event> {
+    /// `at`: when it reopened (None: seen from its first packet, now).
+    fn encoder_seen(&mut self, generation: u64, at: Option<Instant>) -> Vec<Event> {
         if generation <= self.generation {
             return Vec::new();
         }
@@ -258,7 +260,7 @@ impl<F: SinkFactory> Writer<F> {
             Some((video, cause)) => (Some(video), cause),
             None => (None, machine::Cause::Encoder),
         };
-        self.recorder.encoder_reopened(self.now(), cause, video)
+        self.recorder.encoder_reopened(at.unwrap_or_else(|| self.now()), cause, video)
     }
 
     /// The live encoder of this recording died for good: write what it
@@ -309,11 +311,11 @@ fn report(json: bool, event: Event) {
             let started = Outbound::RecordingStarted { path: path.clone(), continued: true, part, cause: Some(cause.as_str()) };
             emit_or_log(json, &started, || format!("long recording continues in part {part} ({}) -> {path}", cause.as_str()));
         }
-        Event::Stopped { path, seconds, bytes, marks, parts, total_seconds, gap_seconds } => {
-            stopped(json, &path, Stop { seconds, bytes, marks, parts, total_seconds, gap_seconds, cause: None })
+        Event::Stopped { path, seconds, bytes, marks, parts, total_seconds, gap_seconds, frozen_seconds } => {
+            stopped(json, &path, Stop { seconds, bytes, marks, parts, total_seconds, gap_seconds, frozen_seconds, cause: None })
         }
         Event::Continued { path, seconds, bytes, marks, part, total_seconds, cause } => {
-            stopped(json, &path, Stop { seconds, bytes, marks, parts: part, total_seconds, gap_seconds: 0.0, cause: Some(cause.as_str()) })
+            stopped(json, &path, Stop { seconds, bytes, marks, parts: part, total_seconds, gap_seconds: 0.0, frozen_seconds: 0.0, cause: Some(cause.as_str()) })
         }
         Event::Failed { reason, kept } => report_failed(json, &reason, kept.as_deref(), &[]),
         Event::Log(message) => emit_or_log(json, &Outbound::EncoderLog { message: message.clone() }, || message),
@@ -321,10 +323,13 @@ fn report(json: bool, event: Event) {
 }
 
 /// `recording_failed`: `path` is the file kept from the part that failed, `paths` every
-/// file the recording left (its finished parts first).
+/// file the recording left (its finished parts first), each once: a failure while the next
+/// part waits keeps the finished part, which is already among `earlier`.
 fn failed_outbound(reason: &str, kept: Option<&Path>, earlier: &[PathBuf]) -> Outbound {
     let text = |p: &Path| p.to_string_lossy().into_owned();
-    let paths = earlier.iter().map(|p| text(p)).chain(kept.map(text)).collect();
+    let mut paths: Vec<String> = earlier.iter().map(|p| text(p)).collect();
+    let last = kept.map(text).filter(|k| !paths.contains(k));
+    paths.extend(last);
     Outbound::RecordingFailed { reason: reason.to_string(), path: kept.map(text), paths }
 }
 
@@ -343,18 +348,19 @@ struct Stop {
     parts: u32,
     total_seconds: f64,
     gap_seconds: f64,
+    frozen_seconds: f64,
     cause: Option<&'static str>,
 }
 
 fn stopped(json: bool, path: &Path, stop: Stop) {
     let path = path.to_string_lossy().into_owned();
-    let Stop { seconds, bytes, marks, parts, total_seconds, gap_seconds, cause } = stop;
+    let Stop { seconds, bytes, marks, parts, total_seconds, gap_seconds, frozen_seconds, cause } = stop;
     let continued = cause.is_some();
-    let out = Outbound::RecordingStopped { path: path.clone(), seconds, bytes, continued, parts, total_seconds, gap_seconds, cause };
+    let out = Outbound::RecordingStopped { path: path.clone(), seconds, bytes, continued, parts, total_seconds, gap_seconds, frozen_seconds, cause };
     emit_or_log(json, &out, || {
         let what = match cause {
             Some(cause) => format!("part {parts} saved ({cause} changed; continuing in a new file)"),
-            None => format!("saved ({parts} file(s), {total_seconds:.1} s in all, {gap_seconds:.1} s missing between them)"),
+            None => format!("saved ({parts} file(s), {total_seconds:.1} s in all, {gap_seconds:.1} s missing between them, {frozen_seconds:.1} s frozen)"),
         };
         format!("long recording {what} {path} ({seconds:.1}s, {bytes} bytes, {marks} marks)")
     });
