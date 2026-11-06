@@ -9,7 +9,7 @@
 //! - [`Sim::exit`] / [`Sim::window_gone`]: `record_app::tick` (`target_watch.poll` ->
 //!   `on_process_exit`) and `record_detect::check_windows` (`on_window_gone`).
 //! - [`Sim::tick`]: `record_app::tick`: `poll_tracker` -> `record_actions::plan_engine`
-//!   (`set_drain_len(drain_len(..))`, `wanted()`, `activity.busy`, `planner.step`) ->
+//!   (`set_drain_len(drain_len(..))`, `wanted()`, `activity.retarget_busy`, `planner.step`) ->
 //!   fresh-engine bookkeeping (`activity.engine_restarted` on the new engine's hello) ->
 //!   `activity_tick` (pending pause) -> `record_cmds::announce` (island notices).
 //! - [`Sim::save`]: `record_cmds::save_clip`; [`Sim::long_start`]: `engine_command("record_start")`;
@@ -155,10 +155,16 @@ impl Sim {
         }
         self.tracker.poll(now);
         self.planner.set_drain_len(drain_len(self.buffered, self.rec.buffer_secs));
-        let busy = self.activity.busy(now);
+        let busy = self.activity.retarget_busy(now);
         match self.planner.step(&self.wanted(), now, busy) {
             Step::Apply(target) => self.applied_engine(target),
             Step::Held => self.held_ticks += 1,
+            // `plan_engine`: one record_stop per recording, the retarget follows its stop.
+            Step::StopLongRec { game_closed } => {
+                if self.activity.auto_stop(now, game_closed) {
+                    self.sent.push(("record_stop".into(), self.engine().clone()));
+                }
+            }
             Step::Keep => {}
         }
         self.announce();
