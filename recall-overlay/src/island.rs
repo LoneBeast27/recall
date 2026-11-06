@@ -85,6 +85,24 @@ pub fn content(view: &OverlayView, session: &Session, game_in_front: bool) -> Op
     view.hint.as_ref().filter(|_| session.notices).map(|hint| Content::Leader(hint.leader.clone()))
 }
 
+/// What the island shows, or why it shows nothing (the change-only log).
+pub fn state_line(content: Option<&Content>, view: &OverlayView, session: &Session, game_in_front: bool) -> String {
+    match content {
+        Some(Content::Notice(_)) => "show notice".into(),
+        Some(Content::Stats) => "show stats".into(),
+        Some(Content::Leader(_)) => "show shortcut hint".into(),
+        None => format!(
+            "hide: nothing to show (notice {}, view visible {}, notices on {}, stats on {}, connected {}, game in front {})",
+            view.notice.is_some(),
+            view.visible,
+            session.notices,
+            session.overlay_stats,
+            view.connected,
+            game_in_front
+        ),
+    }
+}
+
 /// The stats pill shows (or would, under a notice).
 pub fn stats_shown(view: &OverlayView, session: &Session, game_in_front: bool) -> bool {
     session.overlay_stats && view.connected && game_in_front

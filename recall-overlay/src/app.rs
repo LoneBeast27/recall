@@ -9,11 +9,11 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use windows::Win32::Foundation::{HANDLE, HWND, RECT, WAIT_OBJECT_0};
+use windows::Win32::Foundation::{HANDLE, HWND, WAIT_OBJECT_0};
 use windows::Win32::System::Threading::WaitForSingleObject;
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindow, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, KillTimer, SetTimer, SetWindowPos, ShowWindow, GW_HWNDPREV, HWND_TOPMOST,
-    SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
+    GetForegroundWindow, GetWindowThreadProcessId, IsWindowVisible, KillTimer, SetTimer, SetWindowPos, ShowWindow,
+    HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
 };
 
 use crate::dynamic::{self, HudCache, HudGrid, Prober};
@@ -28,7 +28,9 @@ use crate::reducer::Reducer;
 use crate::render::{Layers, Outgoing, Renderer};
 use crate::smoke::Smoke;
 use crate::stats::{StatsPoller, StatsSnapshot};
+use crate::trace::Trace;
 use crate::window::target_monitor;
+use crate::zorder::{self, keep_on_top, Names, Raise};
 
 pub const BASE_TIMER: usize = 1;
 pub const BASE_MS: u32 = 250;
@@ -106,6 +108,9 @@ pub struct App {
     pub render_error: Option<String>,
     anim_running: bool,
     window_visible: bool,
+    /// The change-only log (`trace`); off in smoke runs.
+    pub trace: Trace,
+    names: Names,
 }
 
 impl App {
@@ -142,6 +147,8 @@ impl App {
             render_error: None,
             anim_running: false,
             window_visible: false,
+            trace: Trace::default(),
+            names: Names::default(),
         }
     }
 
@@ -187,6 +194,11 @@ impl App {
         changed |= self.poll_stats(now);
         let was_shown = self.island.shown();
         self.refresh(hwnd, now);
+        if self.trace.enabled() {
+            let foreground = self.names.foreground();
+            self.trace.note("foreground", foreground);
+            self.trace.note("notification state", zorder::notification_state());
+        }
         (false, changed || was_shown != self.island.shown())
     }
 
@@ -244,6 +256,12 @@ impl App {
             };
             let scale = placement::scale(monitor.height(), &spot);
             let (grow, max_h) = (placement::grow(&spot), placement::free_depth(&spot, &monitor, scale));
+            let line = format!(
+                "{key} anchor {:?} monitor [{},{},{},{}] area [{},{},{},{}] scale {scale:.2} (pid {pid:?}, hwnd {:#x})",
+                spot.anchor, monitor.left, monitor.top, monitor.right, monitor.bottom, area.left, area.top, area.right, area.bottom,
+                hwnd.unwrap_or(0)
+            );
+            self.trace.note("placed", line);
             self.placed = Some(Placed { key, pid, hwnd, monitor, area, spot, scale, grow, max_h, hud });
         }
         self.placed.as_ref().map_or(1.0, |p| p.scale)
@@ -350,7 +368,11 @@ impl App {
         let (view, session) = (self.reducer.view(), self.reducer.session());
         let in_game = self.smoke.is_some() || game_in_front(session.target_pid.filter(|_| !session.desktop));
         let under = island::stats_shown(view, session, in_game);
-        match island::content(view, session, in_game) {
+        let content = island::content(view, session, in_game);
+        if self.trace.enabled() {
+            self.trace.note("island", island::state_line(content.as_ref(), view, session, in_game));
+        }
+        match content {
             Some(content) => {
                 let (scene, scale, (w, h)) = self.scene_for(&content, under);
                 let morphing = self.island.update(Some((content, w, h)), now);
@@ -372,6 +394,9 @@ impl App {
             unsafe {
                 let _ = ShowWindow(hwnd, SW_HIDE);
             }
+            let still = unsafe { IsWindowVisible(hwnd) }.as_bool();
+            self.trace.note("window", if still { "hide failed: still visible after ShowWindow(SW_HIDE)" } else { "hidden (fade done)" });
+            self.trace.note("raise", "idle (window hidden)");
             self.window_visible = false;
             self.drawn = None;
             self.placed = None;
@@ -401,21 +426,40 @@ impl App {
             match shown {
                 Ok((w, h)) => {
                     self.render_error = None;
+                    self.trace.note("present", "ok");
                     self.bounds = [x, y, x + w, y + h];
                     self.drawn = Some(key);
                 }
-                Err(error) => self.render_error = Some(error.to_string()),
+                Err(error) => {
+                    self.trace.note("present", format!("UpdateLayeredWindow failed: {}", zorder::win_error(&error)));
+                    self.render_error = Some(error.to_string());
+                }
             }
         }
         if !self.window_visible && self.render_error.is_none() {
-            unsafe {
+            let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+            let placed = unsafe {
                 let _ = ShowWindow(hwnd, SW_SHOWNOACTIVATE);
-                let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
-                let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags);
-            }
+                SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags)
+            };
+            let visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
+            let line = match placed {
+                Ok(()) if visible => "shown, topmost set".to_string(),
+                Ok(()) => "show failed: not visible after ShowWindow(SW_SHOWNOACTIVATE)".to_string(),
+                Err(error) => format!("shown (visible {visible}), SetWindowPos topmost failed: {}", zorder::win_error(&error)),
+            };
+            self.trace.note("window", line);
             self.window_visible = true;
         } else if self.window_visible {
-            keep_on_top(hwnd);
+            match keep_on_top(hwnd, &mut self.names) {
+                Raise::Clear => {}
+                Raise::Raised { above, result: Ok(()) } => {
+                    self.trace.note("raise", format!("re-raised over {above}"));
+                }
+                Raise::Raised { above, result: Err(error) } => {
+                    self.trace.note("raise", format!("re-raise failed: {error}, over {above}"));
+                }
+            }
         }
         let animating = self.island.animating(now);
         self.set_anim(hwnd, animating);
@@ -436,29 +480,6 @@ fn game_in_front(target_pid: Option<u32>) -> bool {
     let mut owner = 0u32;
     unsafe { GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut owner)) };
     owner == pid
-}
-
-/// Games that make their own window topmost (Rocket League does) cover the
-/// island once they are activated. Re-raise it, without focus, only when a
-/// visible window above it overlaps it (Explorer keeps 1x1 helper windows on
-/// top that never cover anything).
-fn keep_on_top(hwnd: HWND) {
-    let mut mine = RECT::default();
-    if unsafe { GetWindowRect(hwnd, &mut mine) }.is_err() {
-        return;
-    }
-    let mut above = unsafe { GetWindow(hwnd, GW_HWNDPREV) }.unwrap_or_default();
-    while !above.is_invalid() {
-        let mut r = RECT::default();
-        let overlaps = unsafe { GetWindowRect(above, &mut r) }.is_ok()
-            && r.left < mine.right && mine.left < r.right && r.top < mine.bottom && mine.top < r.bottom;
-        if overlaps && unsafe { IsWindowVisible(above) }.as_bool() {
-            let flags = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOOWNERZORDER;
-            let _ = unsafe { SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags) };
-            return;
-        }
-        above = unsafe { GetWindow(above, GW_HWNDPREV) }.unwrap_or_default();
-    }
 }
 
 impl App {
