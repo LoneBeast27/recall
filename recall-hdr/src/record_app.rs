@@ -131,6 +131,8 @@ pub struct Controller {
     pub(crate) janitor: Janitor,
     /// Recall Island notices for recording changes (`record_notice`).
     pub(crate) notices: NoticeTracker,
+    /// Exclusive fullscreen hiding the island (`record_fullscreen`).
+    fullscreen: crate::record_fullscreen::FullscreenWatch,
     /// This token may start the overlay's frame-timing ETW session
     /// (`frame_timing`; checked once, membership changes need a new sign-in).
     pub(crate) can_trace: bool,
@@ -227,6 +229,7 @@ pub fn run() -> i32 {
         pending_pause: None,
         janitor,
         notices: NoticeTracker::new(),
+        fullscreen: Default::default(),
         can_trace,
         render: RenderCheck::new(can_trace),
     };
@@ -337,11 +340,30 @@ impl Controller {
         }
         self.activity_tick(now);
         self.overlay.sync(&self.cfg.overlay);
+        self.fullscreen_tick(now);
         if !self.hdr.is_active() && now.duration_since(self.last_hdr_refresh) >= HDR_REFRESH_EVERY {
             self.last_hdr_refresh = now;
             self.hdr.refresh_live();
         }
         self.publish_status();
+    }
+
+    /// While the island runs: a recorded game in exclusive fullscreen hides it;
+    /// say so once per game, as soon as the island can be seen again.
+    fn fullscreen_tick(&mut self, now: Instant) {
+        use crate::record_fullscreen::{exclusive_now, notice_json, Hidden};
+        if !self.cfg.overlay.wants_process() || !self.fullscreen.due(now) {
+            return;
+        }
+        let game = match self.wanted() {
+            EngineTarget::Window(t) if crate::watcher::is_foreground(t.hwnd) => Some(Hidden { exe: t.exe, name: t.name }),
+            _ => None,
+        };
+        let exclusive = game.is_some() && exclusive_now();
+        if let Some(hidden) = self.fullscreen.observe(game, exclusive) {
+            log!("record: {} ran in exclusive fullscreen (the island cannot show there); told the user", hidden.exe);
+            self.hub.event("session", &notice_json(&hidden));
+        }
     }
 
     /// Start, restart or stop the engine for `target` (an intended restart).
