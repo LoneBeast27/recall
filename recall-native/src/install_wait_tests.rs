@@ -138,3 +138,28 @@ fn the_marker_sits_beside_the_program() {
     assert_eq!(path.file_name().and_then(|n| n.to_str()), Some(MARKER));
     assert_eq!(path.parent(), std::env::current_exe().unwrap().parent());
 }
+
+/// A program swapped in by the install (a new file at the same path) is told apart from the one
+/// this process started from; the same file, or a rename of it, is not.
+#[test]
+fn a_swapped_program_file_has_a_new_identity_and_restarts_only_after_a_wait() {
+    let dir = crate::test_temp::TempDir::new(format!("recall-install-id-{}", std::process::id()));
+    let exe = dir.join("recall-native.exe");
+    std::fs::write(&exe, b"old").unwrap();
+    let first = file_id(&exe);
+    assert!(first.is_some());
+    assert_eq!(file_id(&exe), first, "the same file keeps its identity");
+    // What install-swap does: the old file is renamed aside, the new one moves in.
+    std::fs::create_dir_all(dir.join(".old")).unwrap();
+    std::fs::rename(&exe, dir.join(".old").join("recall-native.exe")).unwrap();
+    assert_eq!(file_id(&dir.join(".old").join("recall-native.exe")), first, "a rename keeps the identity");
+    std::fs::write(&exe, b"new").unwrap();
+    let swapped = file_id(&exe);
+    assert!(swapped.is_some() && swapped != first, "the new file at the path is another file");
+    assert!(needs_restart(&Waited::Cleared { polls: 3 }, first, swapped), "waited and swapped: start the new program");
+    assert!(needs_restart(&Waited::TimedOut { polls: 120 }, first, swapped));
+    assert!(!needs_restart(&Waited::NoMarker, first, swapped), "no wait: carry on");
+    assert!(!needs_restart(&Waited::Stale { reason: String::new(), polls: 0 }, first, swapped), "a stale marker: carry on");
+    assert!(!needs_restart(&Waited::Cleared { polls: 3 }, first, first), "waited but not swapped: carry on");
+    assert!(!needs_restart(&Waited::Cleared { polls: 3 }, None, swapped), "unknown identity: never restart");
+}
