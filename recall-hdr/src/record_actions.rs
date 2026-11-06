@@ -363,6 +363,8 @@ impl Controller {
             self.request_engine_restart();
         }
         let (dir, cap) = (self.cfg.recording.output_dir.clone(), self.cfg.storage.cap_gb);
-        self.janitor.tick(&dir, cap, now);
+        let rec = &self.cfg.recording;
+        let buffer = crate::record_free_space::buffer_bytes(rec.buffer_secs, rec.bitrate_mbps);
+        self.janitor.tick(&dir, cap, buffer, now);
     }
 }

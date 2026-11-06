@@ -25,6 +25,7 @@ pub(crate) use handoff::{audio_tail_us, video_end_us};
 mod mover;
 mod mux;
 mod saver;
+mod space;
 mod staging;
 pub mod settings;
 mod smoke;

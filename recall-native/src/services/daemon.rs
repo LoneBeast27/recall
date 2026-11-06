@@ -221,6 +221,8 @@ pub enum DaemonEvent {
     /// Recordings crossed 80 or 90% of the limit, or are over it with nothing left that may go
     /// (100). `next_through`: the clip that would go first.
     StorageWarning { level: u8, used_bytes: u64, cap_bytes: u64, next_through: Option<u64> },
+    /// A clip or staging drive is below its free-space threshold (`storage_warning{level:"free"}`).
+    DiskLow { drive: String, free_bytes: u64, need_bytes: u64 },
     /// Dry run of a limit the user picked (answer to `StoragePreview`); nothing moved.
     StoragePreview { cap_gb: u32, used_bytes: u64, removed: u64, freed_bytes: u64, through: Option<u64> },
     Error(String),

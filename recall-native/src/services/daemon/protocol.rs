@@ -63,6 +63,12 @@ impl State {
                 used_bytes: u64_of(event, "used_bytes"),
                 cap_bytes: u64_of(event, "cap_bytes"),
             }),
+            // `level:"free"`: a drive is short of free space (no cap involved).
+            ("session", "storage_warning") if event.get("level").and_then(Value::as_str) == Some("free") => self.push(DaemonEvent::DiskLow {
+                drive: string_of(event, "drive").unwrap_or_default(),
+                free_bytes: u64_of(event, "free_bytes"),
+                need_bytes: u64_of(event, "need_bytes"),
+            }),
             ("session", "storage_warning") => self.push(DaemonEvent::StorageWarning {
                 level: u64_of(event, "level").min(100) as u8,
                 used_bytes: u64_of(event, "used_bytes"),

@@ -18,7 +18,8 @@
 //! nothing). `FOF_WANTNUKEWARNING` makes Windows ask before it would delete
 //! permanently (a clip bigger than the Recycle Bin), never silently.
 //!
-//! Runs on its own background-I/O thread (the clip folder is an SMR HDD); one
+//! Runs on its own background-I/O thread (`record_janitor.rs`, which also
+//! checks free space: `record_free_space.rs`; the clip folder is an SMR HDD); one
 //! directory listing per run, no per-file stats. Results (on `mod:"session"`):
 //! a log line and `{"type":"storage_cleaned","removed":N,"freed_bytes":B,
 //! "through":T,"used_bytes":U,"cap_bytes":C}` (`through` = last-write Unix
@@ -32,13 +33,10 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Sender};
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
-use crate::control::PipeHub;
 use crate::log;
 use crate::record_config::STORAGE_CAP_MIN_GB;
 
@@ -350,7 +348,7 @@ pub struct Outcome {
 }
 
 /// List and plan (nothing moved). Errors leave favourites unknown or the folder unread.
-fn plan_dir(dir: &Path, cap_gb: u32) -> Result<(Plan, Listing), String> {
+pub(crate) fn plan_dir(dir: &Path, cap_gb: u32) -> Result<(Plan, Listing), String> {
     if cap_gb < STORAGE_CAP_MIN_GB {
         // `set_config` rejects this; a hand-edited config.toml does not.
         return Err(format!("storage.cap_gb {cap_gb} is below the {STORAGE_CAP_MIN_GB} GiB minimum; nothing removed"));
@@ -366,7 +364,7 @@ fn plan_listing(dir: &Path, favs: &HashSet<String>, cap: u64) -> Result<(Plan, L
     Ok((plan(&listing, favs, cap, now_unix), listing))
 }
 
-fn run_once(dir: &Path, cap_gb: u32) -> Result<Outcome, String> {
+pub(crate) fn run_once(dir: &Path, cap_gb: u32) -> Result<Outcome, String> {
     let (plan, listing) = plan_dir(dir, cap_gb)?;
     let cap = cap_gb as u64 * GIB;
     let mut out = Outcome { removed: 0, freed: 0, through: None, used: plan.total, cap, next: plan.next, stuck: plan.stuck(cap) };
@@ -401,99 +399,6 @@ pub fn warning_event(level: u8, o: &Outcome) -> String {
 pub fn preview_event(cap_gb: u32, plan: &Plan) -> String {
     json!({"type": "storage_preview", "cap_gb": cap_gb, "used_bytes": plan.total, "removed": plan.remove.len(), "freed_bytes": plan.freed, "through": plan.through})
         .to_string()
-}
-
-struct Job {
-    dir: PathBuf,
-    cap_gb: u32,
-    /// `Some(client)`: a dry run answered to that client; nothing moves.
-    preview_for: Option<u64>,
-}
-
-/// Schedules runs (after saves, hourly, on demand) onto one worker thread.
-pub struct Janitor {
-    tx: Sender<Job>,
-    after_save: Option<Instant>,
-    next_hourly: Instant,
-}
-
-impl Janitor {
-    pub fn start(hub: Arc<PipeHub>) -> Self {
-        let (tx, rx) = channel::<Job>();
-        let _ = std::thread::Builder::new().name("recall-storage".into()).spawn(move || {
-            background_io();
-            let mut warner = Warner::default();
-            while let Ok(first) = rx.recv() {
-                // Previews are answered in order; queued runs coalesce into the newest.
-                let mut run = None;
-                for job in std::iter::once(first).chain(std::iter::from_fn(|| rx.try_recv().ok())) {
-                    match job.preview_for {
-                        Some(client) => match plan_dir(&job.dir, job.cap_gb) {
-                            Ok((plan, _)) => hub.event_to(client, "session", &preview_event(job.cap_gb, &plan)),
-                            Err(e) => hub.event_to(client, "session", &crate::record_status::error_event(&format!("storage preview: {e}"))),
-                        },
-                        None => run = Some(job),
-                    }
-                }
-                let Some(job) = run else { continue };
-                match run_once(&job.dir, job.cap_gb) {
-                    Ok(o) => {
-                        if o.removed > 0 {
-                            log!("storage: cap {} GiB -> {} clip(s) to the Recycle Bin, {} bytes freed", job.cap_gb, o.removed, o.freed);
-                            hub.event("session", &cleaned_event(&o));
-                        } else {
-                            log!("storage: {} uses {} of its {} GiB cap", job.dir.display(), o.used, job.cap_gb);
-                        }
-                        if let Some(level) = warner.update(o.used, o.cap, o.stuck, o.removed > 0) {
-                            log!("storage: {level}% warning ({} of {} bytes)", o.used, o.cap);
-                            hub.event("session", &warning_event(level, &o));
-                        }
-                    }
-                    Err(e) => {
-                        log!("storage: clean-up skipped -- {e}");
-                        hub.event("session", &crate::record_status::error_event(&format!("storage clean-up: {e}")));
-                    }
-                }
-            }
-        });
-        Janitor { tx, after_save: None, next_hourly: Instant::now() + HOURLY }
-    }
-
-    pub fn saved(&mut self, now: Instant) {
-        self.after_save = Some(now + AFTER_SAVE);
-    }
-
-    pub fn next_deadline(&self) -> Option<Instant> {
-        self.after_save
-    }
-
-    /// Run now (cap changed / pipe `storage_clean`); 0 = off.
-    pub fn run_now(&mut self, dir: &str, cap_gb: u32, now: Instant) {
-        self.after_save = None;
-        self.next_hourly = now + HOURLY;
-        if cap_gb > 0 {
-            let _ = self.tx.send(Job { dir: PathBuf::from(dir), cap_gb, preview_for: None });
-        }
-    }
-
-    /// Plan `cap_gb` without moving anything; the answer goes to `client` only.
-    pub fn preview(&mut self, dir: &str, cap_gb: u32, client: u64) {
-        let _ = self.tx.send(Job { dir: PathBuf::from(dir), cap_gb, preview_for: Some(client) });
-    }
-
-    pub fn tick(&mut self, dir: &str, cap_gb: u32, now: Instant) {
-        let due = self.after_save.is_some_and(|t| now >= t) || now >= self.next_hourly;
-        if due {
-            self.run_now(dir, cap_gb, now);
-        }
-    }
-}
-
-/// Background I/O + CPU priority for this thread (the HDD stays responsive).
-fn background_io() {
-    use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
-    // SAFETY: the current-thread pseudo-handle needs no closing.
-    let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) };
 }
 
 #[cfg(test)]
