@@ -171,6 +171,12 @@ impl State {
                 gap_seconds: f64_of(event, "gap_seconds"),
                 frozen_seconds: f64_of(event, "frozen_seconds"),
             },
+            // A `.part` a crash or a kill left, renamed into place on the next start.
+            "recording_recovered" => DaemonEvent::RecordingRecovered {
+                path: path(),
+                gap_seconds: f64_of(event, "gap_seconds"),
+                frozen_seconds: f64_of(event, "frozen_seconds"),
+            },
             // encoder_log and unknown engine lines carry nothing the UI shows.
             _ => return,
         };

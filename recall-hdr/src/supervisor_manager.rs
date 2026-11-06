@@ -67,7 +67,8 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
                     _ => None,
                 };
                 if let Some(grace) = grace {
-                    // Run quit->grace->kill FIRST, while we still hold stdin;
+                    // Run quit->grace->kill FIRST, while the stdin queue is open (`quit` is queued,
+                    // never written here: a wedged pipe cannot hold the kill back);
                     // only a dead child closes stdout and unblocks the reader.
                     finish_shutdown(&shared, child, grace);
                 }

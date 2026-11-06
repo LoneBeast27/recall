@@ -35,6 +35,16 @@ fn recording_toast(event: &DaemonEvent) -> Option<(ToastKind, String, Option<Str
             }
             Some((ToastKind::Bad, "Recording ended early".into(), Some(detail)))
         }
+        // A `.part` left by a kill (a hung engine restarted mid-recording, a crash), renamed
+        // into place on the next start.
+        DaemonEvent::RecordingRecovered { path, gap_seconds, frozen_seconds } => {
+            let name = std::path::Path::new(path).file_name().map_or_else(|| path.clone(), |n| n.to_string_lossy().into_owned());
+            let mut detail = format!("Recovered {name}");
+            for note in lost_notes(false, *gap_seconds, *frozen_seconds) {
+                detail.push_str(&format!(" · {note}"));
+            }
+            Some((ToastKind::Bad, "Recording ended early".into(), Some(detail)))
+        }
         _ => None,
     }
 }
@@ -112,6 +122,11 @@ impl Root {
             // Toasts: `recording_toast` above.
             DaemonEvent::RecordingStarted | DaemonEvent::RecordingContinued { .. } => {}
             DaemonEvent::RecordingStopped { path, .. } | DaemonEvent::RecordingPartSaved { path } => {
+                record_interaction(Interaction::Saved(path));
+                self.workers.job(Job::List);
+            }
+            DaemonEvent::RecordingRecovered { path, .. } => {
+                // Toast: `recording_toast`. The recovered file reaches the library.
                 record_interaction(Interaction::Saved(path));
                 self.workers.job(Job::List);
             }
@@ -237,6 +252,15 @@ mod tests {
         assert_eq!(toast, Some((ToastKind::Bad, "Recording ended early".into(), Some(expected.into()))));
         let toast = recording_toast(&DaemonEvent::RecordingFailed { reason: "no keyframe".into(), files: Vec::new(), gap_seconds: 0.0, frozen_seconds: 0.0 });
         assert_eq!(toast, Some((ToastKind::Bad, "Recording failed".into(), Some("no keyframe".into()))));
+    }
+
+    /// Gate P2-d: a recording recovered from its `.part` on the next start said nothing.
+    #[test]
+    fn a_recovered_recording_says_it_ended_early_and_names_the_file() {
+        let toast = recording_toast(&DaemonEvent::RecordingRecovered { path: "E:/c/G__rec.mp4".into(), gap_seconds: 0.0, frozen_seconds: 0.0 });
+        assert_eq!(toast, Some((ToastKind::Bad, "Recording ended early".into(), Some("Recovered G__rec.mp4".into()))));
+        let toast = recording_toast(&DaemonEvent::RecordingRecovered { path: "E:/c/G__rec.mp4".into(), gap_seconds: 7.2, frozen_seconds: 40.0 });
+        assert_eq!(toast.and_then(|t| t.2).as_deref(), Some("Recovered G__rec.mp4 · 40 s frozen"), "frozen time named; a gap needs several parts");
     }
 
     /// Merge gate 11-07 #3 (P1): a same-header encoder reopen held the picture still until its
