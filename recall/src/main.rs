@@ -19,6 +19,7 @@ mod audio_clock;
 mod bookmarks;
 mod border;
 mod capture;
+mod capture_watchdog;
 mod cpu_mask;
 mod engine_extras;
 #[cfg(feature = "encode")]
@@ -186,6 +187,8 @@ struct App {
     gpu: Option<Gpu>,
     shared: Option<Arc<CaptureShared>>,
     capture: Option<CaptureControlHandle>,
+    /// Retry / restart backoff for a capture that failed or died (`capture_watchdog`).
+    capture_watch: capture_watchdog::Backoff,
     source_name: String,
     /// Source name mirror for the stdin thread's save-path naming.
     source_shared: Arc<Mutex<String>>,

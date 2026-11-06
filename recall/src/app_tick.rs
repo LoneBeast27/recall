@@ -158,6 +158,7 @@ impl App {
         self.last_periodic = Some(now);
         self.refresh_source_title();
         self.refresh_hdr_mode();
+        self.watch_capture();
         self.restart_capture_if_needed();
         self.emit_status();
     }
@@ -171,10 +172,8 @@ impl App {
             Some(hwnd) => capture::start_window(hwnd, shared),
             None => capture::start_monitor(self.config.monitor, shared),
         };
-        match started {
-            Ok(control) => self.capture = Some(control),
-            Err(e) => eprintln!("failed to start capture: {e}"),
-        }
+        let result = started.map(|control| self.capture = Some(control)).map_err(|e| e.to_string());
+        self.note_capture_start(result);
     }
 
     /// Restarts capture when `CaptureShared::restart_reason` says so: a Bgra8 capture once

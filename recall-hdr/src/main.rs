@@ -58,6 +58,7 @@ mod record_actions;
 mod record_activity;
 mod record_app;
 mod record_cmds;
+mod record_capture_watch;
 mod record_app_audio;
 mod record_audio_sources;
 mod record_config;
