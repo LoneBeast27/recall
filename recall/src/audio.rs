@@ -478,13 +478,14 @@ fn capture_thread(
     let mut clock = capture_loop::WallClock::start();
     // Device and default changes arrive as notices (no polling on this thread); without them
     // the track still reopens on its backoff.
-    let notices = notify::EndpointNotices::register(direction);
-    if let Err(e) = &notices {
+    // A process-loopback track follows its process, not an endpoint: no notices.
+    let notices = capture_loop::notices_for(target.is_some(), || notify::EndpointNotices::register(direction));
+    if let Some(Err(e)) = &notices {
         eprintln!("[recall] audio track '{}': no device notices ({e}); reopening on the backoff only", ring.name);
     }
     let notices: &dyn capture_loop::Notices = match &notices {
-        Ok(n) => n,
-        Err(_) => &capture_loop::NoNotices,
+        Some(Ok(n)) => n,
+        _ => &capture_loop::NoNotices,
     };
     let open = |_reopen| stream::open_stream(&direction, &device, &ring, &target);
     capture_loop::capture_loop(&ring, &device, wait_absent, open, init_tx, &mut clock, notices);
