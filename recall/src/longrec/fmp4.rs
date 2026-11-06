@@ -22,7 +22,7 @@ use std::path::Path;
 use ffmpeg_next as ff;
 use ff::ffi;
 
-use super::machine::{Sink, SinkFactory};
+use super::machine::{Cause, Sink, SinkFactory};
 use super::{tap, TrackInfo};
 use writer::FileWriter;
 
@@ -377,14 +377,21 @@ impl Drop for Fmp4Sink {
     }
 }
 
-/// Opens [`Fmp4Sink`]s with the live encoder's parameters.
+/// Opens [`Fmp4Sink`]s with the live encoder's parameters (`tap`'s per-generation record).
 pub(crate) struct Fmp4Factory;
 
 impl SinkFactory for Fmp4Factory {
     type Sink = Fmp4Sink;
-    fn open(&mut self, part: &Path, tracks: &[TrackInfo]) -> Result<Fmp4Sink, String> {
-        let params = tap::video_params().ok_or("the video encoder has not started yet")?;
-        Fmp4Sink::create(part, &params, tracks)
+    type Video = ff::codec::Parameters;
+    fn open(&mut self, part: &Path, tracks: &[TrackInfo], video: Option<&ff::codec::Parameters>) -> Result<Fmp4Sink, String> {
+        let params = video.ok_or("the video encoder has not started yet")?;
+        Fmp4Sink::create(part, params, tracks)
+    }
+    fn stream_of(&self, generation: u64) -> Option<(ff::codec::Parameters, Cause)> {
+        tap::stream_of(generation)
+    }
+    fn newest(&self) -> (u64, Option<ff::codec::Parameters>) {
+        tap::newest()
     }
 }
 

@@ -8,7 +8,7 @@
 //! | `save_clip` | `seconds?` | engine save (default = `recording.buffer_secs`) + `session` `saving{seconds}` broadcast (the island's saving ring); no engine / paused -> `engine` `save_failed` |
 //! | `bookmark` | | engine bookmark (marks land in the next saves' `.recall-marks.json`) |
 //! | `screenshot` | | engine PNG -> `engine` `screenshot{path}`; refused -> `screenshot_failed` |
-//! | `record_start` / `record_stop` / `record_toggle` | | manual long recording -> `engine` `recording_started{path,continued}` / `recording_stopped{path,seconds,bytes,continued}` (continued: the capture size changed, the recording goes on in a new file) / `recording_failed{reason,path}` |
+//! | `record_start` / `record_stop` / `record_toggle` | | manual long recording -> `engine` `recording_started{path,continued,part,cause}` / `recording_stopped{path,seconds,bytes,continued,parts,total_seconds,cause}` (continued: the stream changed, cause size/input/encoder, the recording goes on in part N; at most one new part per 10 s) / `recording_failed{reason,path}` |
 //! | `pause` / `resume` / `toggle_pause` | | stop the engine and ignore games until resume (runtime only); status `state:"paused"` |
 //! | `storage_clean` | | run the storage cap now -> `session` `storage_cleaned{removed,freed_bytes,through,used_bytes,cap_bytes}` (+ `storage_warning` at 80/90/100%) |
 //! | `storage_preview` | `cap_gb` | dry run, nothing moves -> caller only: `session` `storage_preview{cap_gb,used_bytes,removed,freed_bytes,through}` |

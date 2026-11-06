@@ -6,13 +6,15 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use super::machine::{Sink, SinkFactory};
+use super::machine::{Cause, Sink, SinkFactory};
 use super::TrackInfo;
 
 pub(crate) const MS: u64 = 1_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Call {
+    /// The encoder generation whose settings a part opened with.
+    Params(u64),
     Open(PathBuf),
     Video { pts: u64, dur: u64, key: bool, tag: u8 },
     Audio { track: usize, frames: usize },
@@ -113,14 +115,22 @@ pub(crate) struct FakeFactory {
     pub fail_finish: bool,
     /// Log calls only, not the samples (a minutes-long run would hold hundreds of MB).
     pub no_pcm: bool,
+    /// The newest live encoder generation (the "video settings" are the generation itself).
+    pub newest: u64,
+    /// Why each generation opened (default: the size changed).
+    pub causes: Vec<(u64, Cause)>,
 }
 
 impl SinkFactory for FakeFactory {
     type Sink = FakeSink;
-    fn open(&mut self, part: &Path, _tracks: &[TrackInfo]) -> Result<FakeSink, String> {
+    type Video = u64;
+    fn open(&mut self, part: &Path, _tracks: &[TrackInfo], video: Option<&u64>) -> Result<FakeSink, String> {
         use std::os::windows::fs::OpenOptionsExt;
         if self.fail_open {
             return Err("no encoder parameters".into());
+        }
+        if let Some(generation) = video {
+            self.log.push(Call::Params(*generation));
         }
         std::fs::write(part, b"fmp4").map_err(|e| e.to_string())?;
         let file = std::fs::OpenOptions::new().append(true).share_mode(0x1).open(part).map_err(|e| e.to_string())?;
@@ -134,6 +144,13 @@ impl SinkFactory for FakeFactory {
             videos: 0,
             no_pcm: self.no_pcm,
         })
+    }
+    fn stream_of(&self, generation: u64) -> Option<(u64, Cause)> {
+        let cause = self.causes.iter().find(|(g, _)| *g == generation).map_or(Cause::Size, |(_, c)| *c);
+        Some((generation, cause))
+    }
+    fn newest(&self) -> (u64, Option<u64>) {
+        (self.newest, Some(self.newest))
     }
 }
 

@@ -14,6 +14,7 @@
 //! change is seen in order even when the `EncoderReopened` notice is dropped.
 
 use std::cell::Cell;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc::SyncSender;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -21,13 +22,17 @@ use std::time::Instant;
 
 use ffmpeg_next as ff;
 
+use super::machine::Cause;
 use super::Data;
 
 static ACTIVE: AtomicBool = AtomicBool::new(false);
 /// A video packet could not be queued since the writer last looked.
 static GAP: AtomicBool = AtomicBool::new(false);
 static GENERATION: AtomicU64 = AtomicU64::new(0);
-static PARAMS: Mutex<Option<ff::codec::Parameters>> = Mutex::new(None);
+/// The newest live encoders' settings by generation (bumped under this lock), so
+/// a part opens with the settings of the encoder its packets come from.
+static STREAMS: Mutex<VecDeque<Stream>> = Mutex::new(VecDeque::new());
+const KEPT_STREAMS: usize = 8;
 /// (generation, reason) of a live encoder that failed for good. Polled by the
 /// writer ([`failure_of`]), so unlike a queued notice it cannot be dropped.
 static FAILED: Mutex<Option<(u64, String)>> = Mutex::new(None);
@@ -40,12 +45,46 @@ thread_local! {
     static LIVE_ENCODER: Cell<bool> = const { Cell::new(false) };
 }
 
+struct Stream {
+    generation: u64,
+    params: ff::codec::Parameters,
+    cause: Cause,
+}
+
+/// (width, height, pixel format) of an encoder's stream.
+type Shape = (i32, i32, i32);
+
+fn shape_of(params: &ff::codec::Parameters) -> Shape {
+    // SAFETY: `params` owns a valid AVCodecParameters for its whole life.
+    let p = unsafe { &*params.as_ptr() };
+    (p.width, p.height, p.format)
+}
+
+/// Why an encoder of shape `new` replaced one of shape `old`.
+pub(super) fn cause_between(old: Option<Shape>, new: Shape) -> Cause {
+    match old {
+        Some((w, h, _)) if (w, h) != (new.0, new.1) => Cause::Size,
+        // D3D11 frames vs RGB0 copies: the encoder's input format.
+        Some((_, _, format)) if format != new.2 => Cause::Input,
+        _ => Cause::Encoder,
+    }
+}
+
 /// Live encoder (re)opened: keep its codec parameters for the next recording
 /// and tell a running one that the stream changed.
 pub fn on_encoder_open(encoder: &ff::encoder::Video) {
     LIVE_ENCODER.with(|live| live.set(true));
-    *PARAMS.lock().unwrap_or_else(|p| p.into_inner()) = Some(ff::codec::Parameters::from(encoder));
-    let generation = GENERATION.fetch_add(1, Relaxed) + 1;
+    let params = ff::codec::Parameters::from(encoder);
+    let generation = {
+        let mut streams = STREAMS.lock().unwrap_or_else(|p| p.into_inner());
+        let cause = cause_between(streams.back().map(|s| shape_of(&s.params)), shape_of(&params));
+        let generation = GENERATION.fetch_add(1, Relaxed) + 1;
+        streams.push_back(Stream { generation, params, cause });
+        if streams.len() > KEPT_STREAMS {
+            streams.pop_front();
+        }
+        generation
+    };
     if ACTIVE.load(Relaxed) {
         if let Some(tx) = SENDER.get() {
             let _ = tx.try_send(Data::EncoderReopened { generation });
@@ -59,6 +98,10 @@ pub fn on_encoder_open(encoder: &ff::encoder::Video) {
 pub fn on_encoder_failed(reason: &str) {
     on_encoder_failed_at(GENERATION.load(Relaxed), reason);
 }
+
+/// Tests that set a failure hold this (the failure slot is global).
+#[cfg(test)]
+pub(super) static FAILED_TEST_LOCK: Mutex<()> = Mutex::new(());
 
 pub(super) fn on_encoder_failed_at(generation: u64, reason: &str) {
     *FAILED.lock().unwrap_or_else(|p| p.into_inner()) = Some((generation, reason.to_string()));
@@ -109,9 +152,17 @@ pub(super) fn take_gap() -> bool {
     GAP.swap(false, Relaxed)
 }
 
-/// The live encoder's parameters, if it has opened.
-pub(super) fn video_params() -> Option<ff::codec::Parameters> {
-    PARAMS.lock().unwrap_or_else(|p| p.into_inner()).clone()
+/// Live encoder `generation`'s parameters and why it opened (None once it is long gone).
+pub(super) fn stream_of(generation: u64) -> Option<(ff::codec::Parameters, Cause)> {
+    let streams = STREAMS.lock().unwrap_or_else(|p| p.into_inner());
+    streams.iter().find(|s| s.generation == generation).map(|s| (s.params.clone(), s.cause))
+}
+
+/// The newest generation and its parameters, read together (None before an encoder opened).
+pub(super) fn newest() -> (u64, Option<ff::codec::Parameters>) {
+    let streams = STREAMS.lock().unwrap_or_else(|p| p.into_inner());
+    let generation = GENERATION.load(Relaxed);
+    (generation, streams.back().filter(|s| s.generation == generation).map(|s| s.params.clone()))
 }
 
 pub(super) fn generation() -> u64 {
@@ -130,7 +181,19 @@ pub(super) fn tap_part(samples: &[f32]) -> &[f32] {
 
 #[cfg(test)]
 mod tests {
-    use super::{tap_part, TAP_MAX_SAMPLES};
+    use super::{cause_between, tap_part, Cause, TAP_MAX_SAMPLES};
+
+    /// Merge gate 11-07 (P2): an input change said "the game's size changed".
+    #[test]
+    fn a_reopen_names_what_changed() {
+        const D3D11: i32 = 174;
+        const RGB0: i32 = 121;
+        assert_eq!(cause_between(Some((1920, 1080, D3D11)), (1280, 720, D3D11)), Cause::Size);
+        assert_eq!(cause_between(Some((1920, 1080, D3D11)), (1920, 1080, RGB0)), Cause::Input);
+        assert_eq!(cause_between(Some((1920, 1080, D3D11)), (1280, 720, RGB0)), Cause::Size, "size first");
+        assert_eq!(cause_between(Some((1920, 1080, RGB0)), (1920, 1080, RGB0)), Cause::Encoder);
+        assert_eq!(cause_between(None, (1920, 1080, RGB0)), Cause::Encoder);
+    }
 
     /// 2026-11-07 audit T1: a resume's silence block was copied whole into the writer queue.
     #[test]
