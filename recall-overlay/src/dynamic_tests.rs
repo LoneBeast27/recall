@@ -328,3 +328,32 @@ fn saved_scans_without_a_shape_load_as_landscape() {
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(again.scans("discord@9"), 1, "the file was rewritten with the shape");
 }
+
+#[test]
+fn a_placed_spot_survives_a_restart_and_a_title_key_is_refused() {
+    use crate::spot_edit::{Edge, SavedSpot};
+    let dir = std::env::temp_dir().join(format!("recall-island-spot-{}", std::process::id()));
+    let path = dir.join("island-hud.json");
+    let right = SavedSpot { x: 0.97, y: 0.4, edge: Edge::Right };
+    let mut cache = HudCache::load(Some(path.clone()));
+    cache.add("rocketleague", HudGrid { cols: 8, rows: 1, grid: vec![2] });
+    cache.set_spot("rocketleague", Some(right));
+    cache.set_spot("Rocket League (64-bit)", Some(right));
+    cache.set_spot("valorant", Some(SavedSpot { x: 2.0, y: 0.5, edge: Edge::Free }));
+    let back = HudCache::load(Some(path.clone()));
+    assert_eq!(back.spot("rocketleague"), Some(right), "round trip through the file");
+    assert_eq!(back.scans("rocketleague"), 1, "the scans stay next to it");
+    assert_eq!(back.spot("Rocket League (64-bit)"), None, "a title-like key is never kept");
+    assert_eq!(back.spot("valorant"), None, "an off-screen spot is refused");
+    let text = std::fs::read_to_string(&path).unwrap();
+    assert!(text.contains("\"edge\":\"right\"") && !text.contains("Rocket League"), "{text}");
+    let mut back = back;
+    back.set_spot("rocketleague", None);
+    assert_eq!(HudCache::load(Some(path.clone())).spot("rocketleague"), None, "R clears it on disk");
+    // A hand-edited file with a title key is cleaned on load.
+    std::fs::write(&path, r#"{"games":{},"spots":{"My Secret Chat":{"x":0.5,"y":0.5,"edge":"free"},"discord":{"x":0.5,"y":0.0,"edge":"top"}}}"#).unwrap();
+    let cleaned = HudCache::load(Some(path.clone()));
+    assert_eq!((cleaned.spot("My Secret Chat"), cleaned.spot("discord").map(|s| s.edge)), (None, Some(Edge::Top)));
+    assert!(!std::fs::read_to_string(&path).unwrap().contains("Secret"), "rewritten without the title");
+    let _ = std::fs::remove_dir_all(&dir);
+}

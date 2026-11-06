@@ -27,6 +27,7 @@ mod session;
 #[path = "../../recall/src/single_instance.rs"]
 mod single_instance;
 mod smoke;
+mod spot_edit;
 mod stack;
 mod stats;
 mod trace;
@@ -48,9 +49,10 @@ use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, PostMessageW, PostQuitMessage, SetTimer,
-    SetWindowDisplayAffinity, TranslateMessage, HTTRANSPARENT, MSG, WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_CLOSE,
-    WM_DESTROY, WM_ERASEBKGND, WM_NCHITTEST, WM_PAINT, WM_TIMER,
+    SetWindowDisplayAffinity, TranslateMessage, HTCLIENT, HTTRANSPARENT, MSG, WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_CLOSE,
+    WM_DESTROY, WM_ERASEBKGND, WM_HOTKEY, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_TIMER,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 
 use app::{App, Feed, ANIM_TIMER, BASE_MS, BASE_TIMER};
 use diagnostics::write_diagnostics;
@@ -298,6 +300,11 @@ fn spawn_pipe_client(tx: Sender<Feed>, hwnd: isize, out: app::PipeOut) {
         .expect("spawn overlay pipe client");
 }
 
+/// Runs `f` on the app unless it is already borrowed (a re-entrant message).
+fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
+    APP.with(|slot| slot.try_borrow_mut().ok().and_then(|mut slot| slot.as_mut().map(f)))
+}
+
 /// Runs a base tick (or an animation frame) unless the app is already
 /// borrowed (a re-entrant message during ShowWindow / SetWindowPos).
 fn on_tick(hwnd: HWND, animation_frame: bool) {
@@ -319,7 +326,32 @@ fn on_tick(hwnd: HWND, animation_frame: bool) {
 
 extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
-        WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+        // Click-through, except while the island editor runs (the pill takes the mouse).
+        WM_NCHITTEST => LRESULT(if with_app(|app| app.editing()) == Some(true) { HTCLIENT as isize } else { HTTRANSPARENT as isize }),
+        WM_LBUTTONDOWN => {
+            if with_app(|app| app.editor_press(Instant::now())) == Some(true) {
+                unsafe { SetCapture(hwnd) };
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            with_app(|app| app.editor_drag(hwnd, Instant::now()));
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            with_app(|app| app.editor_release(Instant::now()));
+            LRESULT(0)
+        }
+        WM_HOTKEY => {
+            if let Some(key) = app::held_key(wparam.0 as i32) {
+                with_app(|app| app.finish_editor(hwnd, key));
+                on_tick(hwnd, false);
+            }
+            LRESULT(0)
+        }
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
             // Pixels come from UpdateLayeredWindow; just validate.

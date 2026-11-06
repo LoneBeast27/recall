@@ -16,21 +16,27 @@ use windows::Win32::UI::WindowsAndMessaging::{
     HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
 };
 
-use crate::dynamic::{self, hud_scan, HudCache, HudGrid, Prober};
+use crate::dynamic::{hud_scan, HudCache, Prober};
 use crate::fonts::Fonts;
 use crate::island::{self, stats_content, Content, Island};
 use crate::hint::{choose_card, CardScene, GAP};
 use crate::layout::{leader_scene, stats_scene, Scene};
-use crate::placement::{self, look_origin, Anchor, Rect, Spot, Spots, EDGE};
+use crate::placement::{self, look_origin, Rect, Spot, Spots, EDGE};
 use crate::presence::{CardLook, Look};
 use crate::badge::Badge;
 use crate::reducer::Reducer;
 use crate::render::{Layers, Outgoing, Renderer};
 use crate::smoke::Smoke;
+use crate::spot_edit::{Editor, LookBox, SavedSpot};
 use crate::stats::{StatsPoller, StatsSnapshot};
 use crate::trace::Trace;
-use crate::window::target_monitor;
 use crate::zorder::{self, game_in_front, keep_on_top, Names, Raise};
+
+#[path = "app_place.rs"]
+mod place;
+#[path = "app_editor.rs"]
+mod editor;
+pub use editor::held_key;
 
 pub const BASE_TIMER: usize = 1;
 pub const BASE_MS: u32 = 250;
@@ -66,6 +72,8 @@ pub struct Placed {
     max_h: f32,
     /// The scan's free rows per column (the hint card checks its own columns).
     hud: Option<Vec<u64>>,
+    /// Dynamic: the spot the user placed (island editor); it sets the origin.
+    custom: Option<SavedSpot>,
 }
 
 /// What the last pushed frame showed: scene, window origin, look, sweep
@@ -111,6 +119,8 @@ pub struct App {
     /// The change-only log (`trace`); off in smoke runs.
     pub trace: Trace,
     names: Names,
+    /// The island editor while it runs.
+    editor: Option<Editor>,
 }
 
 impl App {
@@ -149,6 +159,7 @@ impl App {
             window_visible: false,
             trace: Trace::default(),
             names: Names::default(),
+            editor: None,
         }
     }
 
@@ -178,6 +189,7 @@ impl App {
             changed |= match feed {
                 Feed::Connected => self.reducer.connected(),
                 Feed::Disconnected => self.reducer.disconnected(),
+                Feed::Json(value) if editor::is_toggle(&value) => self.toggle_editor(hwnd, now),
                 Feed::Json(value) => match hud_scan(&value) {
                     Some(scan) => self.on_hud_scan(scan, now),
                     None => self.reducer.apply_envelope(&value, now),
@@ -192,6 +204,7 @@ impl App {
             changed |= self.reducer.tick(now);
         }
         changed |= self.poll_stats(now);
+        changed |= self.watch_editor(hwnd, now);
         let was_shown = self.island.shown();
         self.refresh(hwnd, now);
         if self.trace.enabled() {
@@ -231,104 +244,6 @@ impl App {
         let changed = next != self.stats;
         self.stats = next;
         changed
-    }
-
-    /// The current target's spot, monitor and scale (looked up on target changes
-    /// and again each time the island appears). A fixed corner is that corner
-    /// at full size; Dynamic takes the clearest spot of the game's kept HUD
-    /// scans, else the built-in per-game spot (top right for unknown games).
-    fn place(&mut self) -> f32 {
-        let session = self.reducer.session();
-        let key = session.game_key();
-        let (pid, hwnd) = (session.target_pid, session.target_hwnd);
-        let fresh = self.placed.as_ref().is_some_and(|p| p.key == key && p.pid == pid && p.hwnd == hwnd);
-        if !fresh {
-            let (monitor, area) = target_monitor(hwnd, pid);
-            // Scans are kept per picture shape: a landscape grid never places a portrait window.
-            let shaped = dynamic::shape_key(&session.hud_key(), area.aspect());
-            let scanned = (!session.desktop).then(|| self.hud_cache.grid(&shaped)).flatten();
-            let current = self.placed.as_ref().filter(|p| p.key == key).map(|p| p.spot.anchor);
-            let (spot, hud) = match (Anchor::from_corner(&self.corner), scanned) {
-                (Some(anchor), _) => (Spot { anchor, free_px: None }, None),
-                (None, Some(grid)) => {
-                    let aspect = (monitor.right - monitor.left) as f32 / monitor.height().max(1) as f32;
-                    (Spot { anchor: dynamic::choose(&grid, aspect, current), free_px: None }, None)
-                }
-                (None, None) => (self.spots.lookup(&key), self.spots.hud(&key)),
-            };
-            let scale = placement::scale(monitor.height(), &spot);
-            let (grow, max_h) = (placement::grow(&spot), placement::free_depth(&spot, &monitor, scale));
-            // The exe stem only: `key` comes from the window title and never reaches the log.
-            let exe = match session.hud_key() {
-                stem if stem.is_empty() => "<unknown>".to_string(),
-                stem => stem,
-            };
-            let line = format!(
-                "{exe} anchor {:?} monitor [{},{},{},{}] area [{},{},{},{}] scale {scale:.2} (pid {pid:?}, hwnd {:#x})",
-                spot.anchor, monitor.left, monitor.top, monitor.right, monitor.bottom, area.left, area.top, area.right, area.bottom,
-                hwnd.unwrap_or(0)
-            );
-            self.trace.note("placed", line);
-            self.placed = Some(Placed { key, pid, hwnd, monitor, area, spot, scale, grow, max_h, hud });
-        }
-        self.placed.as_ref().map_or(1.0, |p| p.scale)
-    }
-
-    /// The Dynamic corner's kept scans (`--smoke-state` runs keep none).
-    pub fn load_hud_cache(&mut self, path: Option<PathBuf>) {
-        self.hud_cache = HudCache::load(path);
-    }
-
-    /// The current target's scan key, `<exe stem>@<shape>` of the area it was
-    /// placed in ("" until it is placed, and for the desktop).
-    fn hud_cache_key(&self) -> String {
-        let session = self.reducer.session();
-        let game = session.game_key();
-        match self.placed.as_ref().filter(|p| p.key == game && !session.desktop) {
-            Some(p) => dynamic::shape_key(&session.hud_key(), p.area.aspect()),
-            None => String::new(),
-        }
-    }
-
-    fn dynamic(&self) -> bool {
-        self.smoke.is_none() && Anchor::from_corner(&self.corner).is_none()
-    }
-
-    /// Dynamic: ask the engine for a HUD scan of the game when one is due
-    /// (`Prober`), only while the game is recorded and in front.
-    fn probe_hud(&mut self, now: Instant) {
-        if !self.dynamic() {
-            return;
-        }
-        let session = self.reducer.session();
-        let key = self.hud_cache_key();
-        let active = session.recording() && game_in_front(session.target_pid.filter(|_| !session.desktop));
-        let scans = self.hud_cache.scans(&key);
-        if self.prober.due(&key, active, scans, now) {
-            let sent = self.out.lock().ok().and_then(|mut slot| Some(slot.as_mut()?.write_all(b"{\"cmd\":\"hud_probe\"}\n").is_ok()));
-            if sent != Some(true) {
-                self.prober.answered(false, scans, now);
-            }
-        }
-    }
-
-    /// A `hud_scan` from the engine: kept for the game it was asked for, and
-    /// the island moves to the clearest spot. True when the island moved.
-    fn on_hud_scan(&mut self, event: Value, now: Instant) -> bool {
-        let grid = HudGrid::from_scan(&event);
-        let key = self.hud_cache_key();
-        let scans = self.hud_cache.scans(&key) + grid.is_some() as usize;
-        let Some(for_key) = self.prober.answered(grid.is_some(), scans, now) else { return false };
-        let Some(grid) = grid else { return false };
-        if HudGrid::is_ui(&event) { self.hud_cache.add_ui(&for_key, grid) } else { self.hud_cache.add(&for_key, grid) }
-        let before = self.placed.as_ref().map(|p| p.spot.anchor);
-        // Re-place now (the current spot is kept when it is still among the clearest).
-        if let Some(p) = self.placed.as_mut() {
-            p.pid = None;
-            p.hwnd = None;
-        }
-        self.place();
-        before != self.placed.as_ref().map(|p| p.spot.anchor)
     }
 
     /// Lays out `content` at the current placement's scale: the scene, the
@@ -397,7 +312,7 @@ impl App {
         let (view, session) = (self.reducer.view(), self.reducer.session());
         let in_game = self.smoke.is_some() || game_in_front(session.target_pid.filter(|_| !session.desktop));
         let under = island::stats_shown(view, session, in_game);
-        let content = island::content(view, session, in_game);
+        let content = self.editor_content().or_else(|| island::content(view, session, in_game));
         if self.trace.enabled() {
             self.trace.note("island", island::state_line(content.as_ref(), view, session, in_game));
         }
@@ -444,7 +359,13 @@ impl App {
         // A side spot's card stands upright beside the pill: `c.h` along the edge, `c.w` across.
         look.card = card.map(|(progress, c)| CardLook::placed(look.turn, (c.w, c.h), GAP * placed.scale, progress));
         let edge = (EDGE * placed.scale).round() as i32;
-        let (x, y) = look_origin(anchor, &placed.area, look.span_w(), look.extent(), look.margin, edge);
+        let (x, y) = match placed.custom {
+            Some(spot) => {
+                let b = LookBox { along: look.span_w(), depth: look.extent(), pill: look.box_h, margin: look.margin };
+                crate::spot_edit::origin(&spot, &placed.monitor, &placed.area, b, edge)
+            }
+            None => look_origin(anchor, &placed.area, look.span_w(), look.extent(), look.margin, edge),
+        };
         let (sheen, badge) = (self.island.sheen(now), self.island.badge(now));
         let fade = self.island.crossfade(now);
         let key = (self.scene.clone(), [x, y], look, sheen.map(|s| (s.progress * 1000.0) as u16), badge, fade.map(|f| (f.alpha * 1000.0) as u16));
