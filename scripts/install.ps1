@@ -39,7 +39,10 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $stage = if ($Stage) { $Stage } elseif ($StageDir) { $StageDir } else { Join-Path $repo 'dist' }
 # Gyan FFmpeg 7.1.1 full shared build: same ABI as the 7.1 bindings, and it includes av1_nvenc.
-$ffmpegRoot = Join-Path $repo 'tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared'
+# Local, gitignored build tools (FFmpeg dev files, clang) live in the main checkout; a worktree
+# (e.g. a release checkout of main) points here with RECALL_TOOLS_ROOT.
+$toolsRoot = if ($env:RECALL_TOOLS_ROOT) { $env:RECALL_TOOLS_ROOT } else { $repo }
+$ffmpegRoot = Join-Path $toolsRoot 'tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared'
 # Optional low-priority build wrapper (CCD1, BelowNormal); a plain cargo build when absent.
 $nice = Join-Path $env:USERPROFILE '.claude\tools\nice-build.ps1'
 function Invoke-Build { if (Test-Path $nice) { & powershell -NoProfile -File $nice @args } else { & $args[0] @($args | Select-Object -Skip 1) } }
@@ -56,7 +59,7 @@ function Get-DriveKind([string]$path) {
 
 function Invoke-RecallBuild {
   $env:FFMPEG_DIR = $ffmpegRoot
-  $env:LIBCLANG_PATH = Join-Path $repo '.tmp\nvenc-vfr\clang18\clang\native'
+  $env:LIBCLANG_PATH = Join-Path $toolsRoot '.tmp\nvenc-vfr\clang18\clang\native'
   $env:CARGO_BUILD_JOBS = '12'
   $env:CARGO_TARGET_DIR = Join-Path $repo 'target-dev'
   Push-Location $repo
