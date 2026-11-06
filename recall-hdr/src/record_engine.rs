@@ -8,8 +8,10 @@
 //!   when it is unknown). A save in that window still has the last clip, and
 //!   the status counts it down (`draining`). Nothing new is captured: the
 //!   game's window is gone. A new game retargets immediately -- unless a
-//!   save or the long recording is in flight: the retarget is then held
-//!   ([`Step::Held`]) until the engine is idle.
+//!   save is in flight: the retarget is then held ([`Step::Held`]) until the
+//!   save lands (bounded by `SAVE_STALE`). A running long recording is never
+//!   held on: it is stopped ([`Step::StopLongRec`]) when the drain ends or at
+//!   once for a new game, and the retarget follows its stop.
 //! - [`engine_env`]: the per-spawn environment the engine reads at startup.
 
 use std::time::{Duration, Instant};
@@ -76,9 +78,22 @@ pub enum Step {
     Keep,
     /// Retarget the engine now.
     Apply(EngineTarget),
-    /// A retarget is due but the running engine is busy (a save or the long
-    /// recording in flight): it waits for the first idle tick.
+    /// A retarget is due but a save is in flight: it waits for the first
+    /// idle tick.
     Held,
+    /// A retarget is due while the long recording runs: stop it (once) and
+    /// retarget after its stop. `game_closed` = the drain ended (no new game).
+    StopLongRec { game_closed: bool },
+}
+
+/// What the running engine has in flight, for [`EnginePlanner::step`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Busy {
+    /// A replay save not yet reported (holds a retarget, bounded).
+    pub saving: bool,
+    /// The long recording is starting or running and has not been given up
+    /// on (its stop not yet timed out).
+    pub long_rec: bool,
 }
 
 /// Turns the wanted target into engine (re)starts, holding a game's engine for
@@ -123,17 +138,19 @@ impl EnginePlanner {
     /// `Some(new)` when an idle engine must be retargeted now (test shorthand).
     #[cfg(test)]
     pub fn update(&mut self, wanted: &EngineTarget, now: Instant) -> Option<EngineTarget> {
-        match self.step(wanted, now, false) {
+        match self.step(wanted, now, Busy::default()) {
             Step::Apply(target) => Some(target),
-            Step::Keep | Step::Held => None,
+            Step::Keep | Step::Held | Step::StopLongRec { .. } => None,
         }
     }
 
-    /// Plan one tick. `busy` = the engine has a save or the long recording in
-    /// flight: a due retarget is [`Step::Held`] (not applied) so neither is
-    /// cut short; the linger clock keeps running meanwhile. With no engine
-    /// (`Off` applied) there is nothing to protect.
-    pub fn step(&mut self, wanted: &EngineTarget, now: Instant, busy: bool) -> Step {
+    /// Plan one tick. A due retarget first stops a running long recording
+    /// ([`Step::StopLongRec`], each tick until it reports stopping or its stop
+    /// times out), then waits for a save in flight ([`Step::Held`]); the
+    /// linger clock keeps running meanwhile, and a closed game's long
+    /// recording is stopped only when its drain ends. With no engine (`Off`
+    /// applied) there is nothing to protect.
+    pub fn step(&mut self, wanted: &EngineTarget, now: Instant, busy: Busy) -> Step {
         if *wanted == self.applied {
             self.lost = None;
             return Step::Keep;
@@ -146,8 +163,13 @@ impl EnginePlanner {
                 return Step::Keep;
             }
         }
-        if busy && self.applied != EngineTarget::Off {
-            return Step::Held;
+        if self.applied != EngineTarget::Off {
+            if busy.long_rec {
+                return Step::StopLongRec { game_closed: game_went_away };
+            }
+            if busy.saving {
+                return Step::Held;
+            }
         }
         self.lost = None;
         self.applied = wanted.clone();
@@ -332,24 +354,52 @@ mod tests {
     }
 
     #[test]
-    fn a_busy_engine_holds_retargets_until_idle() {
+    fn a_save_in_flight_holds_retargets_until_idle() {
         let t0 = Instant::now();
+        let saving = Busy { saving: true, long_rec: false };
+        let idle = Busy::default();
         let mut p = EnginePlanner::new(EXIT_LINGER);
         let a = EngineTarget::Window(target(1, 1, "A"));
         let b = EngineTarget::Window(target(2, 2, "B"));
-        assert_eq!(p.step(&a, t0, true), Step::Apply(a.clone()), "no engine yet: nothing to protect");
-        // A new game while the long recording runs: held, engine untouched.
-        assert_eq!(p.step(&b, t0 + Duration::from_secs(1), true), Step::Held);
+        assert_eq!(p.step(&a, t0, saving), Step::Apply(a.clone()), "no engine yet: nothing to protect");
+        // A new game while a save is in flight: held, engine untouched.
+        assert_eq!(p.step(&b, t0 + Duration::from_secs(1), saving), Step::Held);
         assert_eq!(*p.applied(), a, "still recording the old target");
-        assert_eq!(p.step(&a, t0 + Duration::from_secs(2), true), Step::Keep, "the game came back: nothing pending");
-        assert_eq!(p.step(&b, t0 + Duration::from_secs(3), true), Step::Held);
-        assert_eq!(p.step(&b, t0 + Duration::from_secs(4), false), Step::Apply(b.clone()), "idle: applies at once");
-        // The game exits mid-recording: linger first, then held past it.
-        assert_eq!(p.step(&EngineTarget::Off, t0 + Duration::from_secs(10), true), Step::Keep);
+        assert_eq!(p.step(&a, t0 + Duration::from_secs(2), saving), Step::Keep, "the game came back: nothing pending");
+        assert_eq!(p.step(&b, t0 + Duration::from_secs(3), saving), Step::Held);
+        assert_eq!(p.step(&b, t0 + Duration::from_secs(4), idle), Step::Apply(b.clone()), "idle: applies at once");
+        // The game exits mid-save: linger first, then held past it.
+        assert_eq!(p.step(&EngineTarget::Off, t0 + Duration::from_secs(10), saving), Step::Keep);
         let past_linger = t0 + Duration::from_secs(10) + EXIT_LINGER;
-        assert_eq!(p.step(&EngineTarget::Off, past_linger, true), Step::Held);
-        assert_eq!(p.step(&EngineTarget::Off, past_linger + Duration::from_secs(60), false), Step::Apply(EngineTarget::Off));
-        assert_eq!(p.step(&a, past_linger + Duration::from_secs(61), true), Step::Apply(a), "Off -> start never waits");
+        assert_eq!(p.step(&EngineTarget::Off, past_linger, saving), Step::Held);
+        assert_eq!(p.step(&EngineTarget::Off, past_linger + Duration::from_secs(60), idle), Step::Apply(EngineTarget::Off));
+        assert_eq!(p.step(&a, past_linger + Duration::from_secs(61), saving), Step::Apply(a), "Off -> start never waits");
+    }
+
+    #[test]
+    fn a_long_recording_is_stopped_for_a_retarget_never_held_on() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let rec = Busy { saving: false, long_rec: true };
+        let mut p = EnginePlanner::new(EXIT_LINGER);
+        let a = EngineTarget::Window(target(1, 1, "A"));
+        let b = EngineTarget::Window(target(2, 2, "B"));
+        assert_eq!(p.step(&a, t0, rec), Step::Apply(a.clone()));
+        // The game closes: its drain runs first, the recording is not cut short.
+        p.set_drain_len(s(40));
+        assert_eq!(p.step(&EngineTarget::Off, t0 + s(1), rec), Step::Keep);
+        assert_eq!(p.step(&EngineTarget::Off, t0 + s(40), rec), Step::Keep, "not before the drain ends");
+        assert_eq!(p.step(&EngineTarget::Off, t0 + s(41), rec), Step::StopLongRec { game_closed: true });
+        assert_eq!(*p.applied(), a, "the engine runs until the recording is saved");
+        // Stopped (or its stop timed out): the retarget applies.
+        assert_eq!(p.step(&EngineTarget::Off, t0 + s(42), Busy::default()), Step::Apply(EngineTarget::Off));
+        // A new game while the recording runs: stop at once, then retarget.
+        assert_eq!(p.step(&a, t0 + s(50), rec), Step::Apply(a.clone()));
+        assert_eq!(p.step(&b, t0 + s(51), rec), Step::StopLongRec { game_closed: false });
+        // Recording stopped, a save still landing: held, then applied.
+        let saving = Busy { saving: true, long_rec: false };
+        assert_eq!(p.step(&b, t0 + s(52), saving), Step::Held);
+        assert_eq!(p.step(&b, t0 + s(53), Busy::default()), Step::Apply(b));
     }
 
     #[test]
