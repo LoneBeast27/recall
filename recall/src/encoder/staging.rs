@@ -71,10 +71,14 @@ pub(crate) fn volume_key(path: &Path) -> Option<String> {
     })
 }
 
-/// Same drive letter / UNC share. Folders mounted into another drive's tree
-/// count as that drive, and an unknown answer counts as "same", so the worst
-/// case is today's behaviour: write the clip in place.
+/// Same volume, as Windows resolves it (`win_volume.rs`: junctions, mounted
+/// folders and subst drives count as the volume they land on). When Windows
+/// cannot say, the drive letter / UNC share text decides, and an unknown
+/// answer counts as "same", so the worst case is writing the clip in place.
 pub(crate) fn same_volume(a: &Path, b: &Path) -> bool {
+    if let (Some(x), Some(y)) = (crate::win_volume::volume_of(a), crate::win_volume::volume_of(b)) {
+        return x.id == y.id;
+    }
     match (volume_key(a), volume_key(b)) {
         (Some(x), Some(y)) => x == y,
         _ => true,

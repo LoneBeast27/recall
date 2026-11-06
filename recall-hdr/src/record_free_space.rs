@@ -5,7 +5,10 @@
 //! [`threshold`] = max(2 x the replay buffer's bytes, 5 GiB) it sends
 //! `{"type":"storage_warning","level":"free","drive":"C:","free_bytes":F,
 //! "need_bytes":T}` on `mod:"session"`, once per crossing; a drive warns again
-//! only after it climbed [`REARM_BYTES`] above the threshold.
+//! only after it climbed [`REARM_BYTES`] above the threshold. Drives are the
+//! volumes the folders really land on (`win_volume.rs`: junctions, mounted
+//! folders and subst drives resolve), so a junctioned staging folder on the
+//! clip volume is read once.
 
 use std::collections::HashSet;
 use std::path::{Component, Path, PathBuf, Prefix};
@@ -32,8 +35,14 @@ pub fn threshold(buffer_bytes: u64) -> u64 {
     buffer_bytes.saturating_mul(2).max(FREE_FLOOR)
 }
 
-/// `C:` for drive paths, `\\server\share` for UNC (as the engine names them).
+/// `C:` / `\\server\share` / a mount folder: the volume `path` really lands on
+/// (as the engine names it), else read from the path text.
 pub fn drive_label(path: &Path) -> String {
+    crate::win_volume::volume_of(path).map_or_else(|| text_label(path), |v| v.label)
+}
+
+/// The drive as the path text names it (a folder Windows cannot resolve).
+fn text_label(path: &Path) -> String {
     let abs = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
     match abs.components().next() {
         Some(Component::Prefix(p)) => match p.kind() {
@@ -73,9 +82,14 @@ pub struct FreeCheck {
 impl FreeCheck {
     pub fn new(clip_dir: &Path, staging: Option<&Path>, buffer_bytes: u64) -> Self {
         let mut drives: Vec<(String, PathBuf)> = Vec::new();
+        let mut seen: Vec<String> = Vec::new();
         for dir in std::iter::once(clip_dir).chain(staging) {
-            let label = drive_label(dir);
-            if !drives.iter().any(|(l, _)| *l == label) {
+            let (key, label) = match crate::win_volume::volume_of(dir) {
+                Some(v) => (v.id, v.label),
+                None => (text_label(dir), text_label(dir)),
+            };
+            if !seen.contains(&key) {
+                seen.push(key);
                 drives.push((label, dir.to_path_buf()));
             }
         }
@@ -112,30 +126,8 @@ pub fn free_event(drive: &str, free_bytes: u64, need_bytes: u64) -> String {
         .to_string()
 }
 
-/// Free bytes for the caller on the volume holding `dir` (its nearest
-/// existing ancestor is asked, so a folder not made yet still answers).
-pub fn free_bytes(dir: &Path) -> Option<u64> {
-    use std::os::windows::ffi::OsStrExt;
-    #[link(name = "kernel32", kind = "raw-dylib")]
-    extern "system" {
-        fn GetDiskFreeSpaceExW(dir: *const u16, free_to_caller: *mut u64, total: *mut u64, total_free: *mut u64) -> i32;
-    }
-    let abs = std::path::absolute(dir).ok()?;
-    abs.ancestors().filter(|p| p.is_dir()).find_map(|p| {
-        let wide: Vec<u16> = p.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-        let mut free = 0u64;
-        // SAFETY: NUL-terminated path; the out pointer is valid, the others null.
-        let ok = unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut free, std::ptr::null_mut(), std::ptr::null_mut()) };
-        (ok != 0).then_some(free)
-    })
-    .map(fake_free)
-}
-
-/// Checks only: `RECALL_FAKE_FREE_BYTES=<n>` caps every drive's free space at n
-/// (the low-disk fixture; the app's drive info reads the same variable).
-fn fake_free(free: u64) -> u64 {
-    std::env::var("RECALL_FAKE_FREE_BYTES").ok().and_then(|v| v.trim().parse::<u64>().ok()).map_or(free, |fake| fake.min(free))
-}
+/// Free bytes on the volume `dir` really lands on (`RECALL_FAKE_FREE_BYTES` honoured).
+pub use crate::win_volume::free_bytes;
 
 #[cfg(test)]
 #[path = "record_free_space_tests.rs"]

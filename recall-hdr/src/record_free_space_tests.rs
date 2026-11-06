@@ -75,3 +75,34 @@ fn real_free_space_answers_for_a_folder_not_made_yet() {
     let missing = std::env::temp_dir().join("recall-free-space-not-made").join("deeper");
     assert!(free_bytes(&missing).is_some_and(|b| b > 0), "asks the nearest existing folder");
 }
+
+/// A folder in this checkout (L: here) reached through a junction under %TEMP% (C: here).
+fn junction_pair() -> (PathBuf, PathBuf) {
+    use std::os::windows::process::CommandExt;
+    let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let target = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".tmp").join(format!("hdr-junction-target-{id}"));
+    std::fs::create_dir_all(&target).unwrap();
+    let link = std::env::temp_dir().join(format!("recall-hdr-junction-{id}"));
+    let status = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&link)
+        .arg(&target)
+        .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap();
+    assert!(status.success(), "mklink /J failed");
+    (link, std::fs::canonicalize(&target).unwrap())
+}
+
+#[test]
+fn junctioned_clip_and_staging_folders_are_checked_on_their_real_volume() {
+    let (link, target) = junction_pair();
+    let (via_link, real) = (drive_label(&link), drive_label(&target));
+    // The staging folder through the junction is the clip folder's volume: read once.
+    let check = FreeCheck::new(&target, Some(&link), 0);
+    let _ = std::fs::remove_dir(&link); // the junction only
+    let _ = std::fs::remove_dir_all(&target);
+    assert_eq!(via_link, real, "named by where the folder really is, not the path text");
+    assert_eq!(check.drives.len(), 1, "{check:?}");
+}
