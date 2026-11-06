@@ -33,6 +33,8 @@ param(
   [int]$SaveSeconds = 0,
   [string]$OutDir = '',
   [string]$Json = '',
+  # Every engine log line of the run, for checks that need to see which path ran.
+  [string]$LogTo = '',
   [string]$TestMic = 'microphone steam streaming',
   [switch]$Monitor,
   [int]$Fps = 60,
@@ -171,5 +173,6 @@ $result = [pscustomobject]@{
 $groups | Select-Object -First 14 | Format-Table -AutoSize | Out-String -Width 200
 if ($saved) { "saved: $($saved | ConvertTo-Json -Compress)" }
 if ($Json) { $result | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 $Json }
+if ($LogTo) { $log | Set-Content -Encoding UTF8 $LogTo }
 if (-not $result.pass) { "FAIL: engine cost regressed (or no frames captured)"; exit 1 }
 "PASS"
