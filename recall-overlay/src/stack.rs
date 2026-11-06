@@ -39,6 +39,7 @@ pub fn stack(scene: &Scene, s: f32, m: &dyn Measure) -> Scene {
 /// off the monitor.
 pub fn stack_within(scene: &Scene, s: f32, m: &dyn Measure, max: f32) -> Scene {
     let cy = scene.h / 2.0;
+    let room = scene.h - 2.0 * ACROSS * s;
     let mut out = Scene { h: scene.h, lead: scene.lead, stacked: true, ..Scene::default() };
     let mut cursor = PAD * s;
     let mut widest = 0.0f32;
@@ -74,7 +75,8 @@ pub fn stack_within(scene: &Scene, s: f32, m: &dyn Measure, max: f32) -> Scene {
                         cursor += SPACE * s;
                     }
                     for line in word {
-                        let metrics = m.measure(text.role, s, &line);
+                        let role = upright_role(text.role, &line, room, m, s);
+                        let metrics = m.measure(role, s, &line);
                         let along = metrics.cap.max(cap * 0.6);
                         if !fits(cursor, along) {
                             out.texts.push(Text { role: text.role, text: "…".into(), x: cursor + ellipsis / 2.0, y: cy, color: text.color });
@@ -82,7 +84,7 @@ pub fn stack_within(scene: &Scene, s: f32, m: &dyn Measure, max: f32) -> Scene {
                             break 'items;
                         }
                         widest = widest.max(metrics.width);
-                        out.texts.push(Text { role: text.role, text: line.clone(), x: cursor + along / 2.0, y: cy, color: text.color });
+                        out.texts.push(Text { role, text: line.clone(), x: cursor + along / 2.0, y: cy, color: text.color });
                         gap = along * if descends(&line) { LINE_PITCH + DESCENT } else { LINE_PITCH };
                         cursor += along + gap;
                     }
@@ -94,6 +96,15 @@ pub fn stack_within(scene: &Scene, s: f32, m: &dyn Measure, max: f32) -> Scene {
     out.w = (cursor - RUN_GAP * s + PAD * s).max(scene.h * 2.0).ceil();
     widen(&mut out, widest + 2.0 * ACROSS * s);
     out
+}
+
+/// The big fps number drawn a little smaller when a line of it would
+/// overflow the pill's usual thickness ("144" stays whole on one line).
+fn upright_role(role: Role, line: &str, room: f32, m: &dyn Measure, s: f32) -> Role {
+    match role {
+        Role::Fps if m.measure(role, s, line).width > room => Role::FpsUpright,
+        _ => role,
+    }
 }
 
 /// A pill too thin for its widest line grows across (everything stays centred).
