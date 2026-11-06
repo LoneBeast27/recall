@@ -3,7 +3,8 @@
 //! The engine goes first (`recall/src/encoder/reopen.rs`): it rebuilds the encoder in
 //! place keeping the replay buffer, asks for a capture restart, falls back to CPU copies,
 //! and meanwhile reports `encoder: recovering` (session `recovering`). It reports
-//! `failed` only once that plan is spent (5 failed reopens or 60 s without an encoder).
+//! `failed` only once that plan is spent (5 real failed reopens; time without frames counts
+//! for nothing).
 //! The controller is keyed off that engine state, not off a shorter timer.
 //!
 //! When the session sits in `error` from `encoder: failed` for longer than

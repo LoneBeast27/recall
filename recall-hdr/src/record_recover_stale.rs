@@ -1,8 +1,12 @@
-//! A "recovering" engine whose recovery stopped moving counts as failed, so the last-resort
-//! engine restart (`record_recover`) still comes. The engine bounds its own recovery (it
-//! says `failed` after 5 reopens or 60 s), but a hung engine never says it: its status
-//! lines stop coming ([`SILENT_AFTER`]), or the status says "recovering" past the engine's
-//! own bound ([`RECOVERING_TOO_LONG`]).
+//! A "recovering" engine that stopped updating counts as failed, so the last-resort engine
+//! restart (`record_recover`) still comes. The engine bounds its own recovery by real
+//! errors (it says `failed` after 5 failed reopens), but a hung engine never says it: its
+//! status lines stop coming ([`SILENT_AFTER`]).
+//!
+//! Time in "recovering" alone is no evidence: a static game (a paused menu) sends no frame
+//! for the engine to retry with, and the engine rightly waits (`encoder/reopen.rs`). That
+//! matches the capture watchdog, which restarts capture only on evidence (thread ended,
+//! start failed, restart asked), never on a frame gap.
 //!
 //! Only time the player can see the game counts (`record_screen`): a minimized or covered
 //! game, a locked session or a display that is off sends no frames, and an encoder rebuild
@@ -12,13 +16,9 @@ use std::time::{Duration, Instant};
 
 /// No status line this long while recovering: the engine stopped updating.
 pub const SILENT_AFTER: Duration = Duration::from_secs(10);
-/// "recovering" this long: past the engine's own 60 s bound.
-pub const RECOVERING_TOO_LONG: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Default)]
 pub struct StaleRecovering {
-    /// Since when the session has said "recovering" (seen time only).
-    since: Option<Instant>,
     /// The last status line count and since when it has not moved (seen time only).
     statuses: Option<(u64, Instant)>,
 }
@@ -31,7 +31,6 @@ impl StaleRecovering {
             *self = Self::default();
             return false;
         }
-        let since = *self.since.get_or_insert(now);
         let quiet_since = match self.statuses {
             Some((n, at)) if n == statuses => at,
             _ => {
@@ -39,7 +38,7 @@ impl StaleRecovering {
                 now
             }
         };
-        now.duration_since(quiet_since) >= SILENT_AFTER || now.duration_since(since) >= RECOVERING_TOO_LONG
+        now.duration_since(quiet_since) >= SILENT_AFTER
     }
 }
 
@@ -65,8 +64,11 @@ mod tests {
     }
 
     #[test]
-    fn recovering_past_the_engines_60_s_bound_is_failed_though_statuses_still_come() {
-        assert_eq!(run(61, |s| ("recovering", s, true)), [60, 61]);
+    fn a_live_engine_recovering_for_2_minutes_without_frames_is_not_failed() {
+        // A static game (paused menu) after an encode error: the engine waits for a frame
+        // and keeps sending status lines. That is no evidence of a hang; the engine says
+        // `failed` itself after 5 real failed reopens (`encoder/reopen.rs`).
+        assert_eq!(run(120, |s| ("recovering", s, true)), Vec::<u64>::new());
     }
 
     #[test]
