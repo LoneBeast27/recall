@@ -197,17 +197,17 @@ fn a_restart_in_flight_is_pending_so_the_encoder_recovery_stands_aside() {
     let t0 = Instant::now();
     let mut w = StuckWatch::default();
     let at = |s| t0 + Duration::from_secs(s);
-    assert!(!w.pending());
+    assert!(!w.pending(at(0)));
     assert!(stuck_step(&mut w, &inputs(&g), |_: &Target| Sight::SHOWN, at(0)).is_none());
-    assert!(w.pending(), "the clock runs");
+    assert!(w.pending(at(0)), "the clock runs");
     assert!(stuck_step(&mut w, &inputs(&g), |_: &Target| Sight::SHOWN, at(10)).is_some_and(|a| a.restart));
-    assert!(w.pending(), "the restart awaits its first frame");
+    assert!(w.pending(at(10)), "the restart awaits its first frame");
     for s in 11..=21 {
         stuck_step(&mut w, &inputs(&g), |_: &Target| Sight::SHOWN, at(s));
     }
     let recording = StuckInputs { encoder: Some("h264_nvenc"), ..inputs(&g) };
     stuck_step(&mut w, &recording, |_: &Target| Sight::SHOWN, at(22));
-    assert!(!w.pending(), "told, then recording: nothing in flight");
+    assert!(!w.pending(at(22)), "told, then recording: nothing in flight");
 }
 
 #[test]
@@ -216,4 +216,21 @@ fn the_screen_is_not_asked_for_the_desktop_or_a_recording_game() {
     assert_eq!(tick_run(20, &inputs(&EngineTarget::Desktop), probe), []);
     let g = game("A", 7);
     assert_eq!(tick_run(20, &StuckInputs { encoder: Some("h264_nvenc"), ..inputs(&g) }, probe), []);
+}
+
+/// Review 11-07: a restart whose engine comes back in `error` (never `starting`) must not
+/// hold the encoder recovery off for good; the restart counts as in flight for RESTART_GRACE only.
+#[test]
+fn a_restart_counts_as_in_flight_for_a_bounded_time_only() {
+    let g = game("VALORANT", 7);
+    let t0 = Instant::now();
+    let mut w = StuckWatch::default();
+    let at = |s| t0 + Duration::from_secs(s);
+    stuck_step(&mut w, &inputs(&g), |_: &Target| Sight::SHOWN, at(0));
+    assert!(stuck_step(&mut w, &inputs(&g), |_: &Target| Sight::SHOWN, at(10)).is_some_and(|a| a.restart));
+    // The new engine reports an encoder error: stuck no longer observes `starting`.
+    let failed = StuckInputs { encoder: Some("failed"), ..inputs(&g) };
+    stuck_step(&mut w, &failed, |_: &Target| Sight::SHOWN, at(11));
+    assert!(w.pending(at(11)), "just restarted: recovery waits");
+    assert!(!w.pending(at(10) + RESTART_GRACE), "bounded: recovery may act");
 }

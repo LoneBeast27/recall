@@ -28,6 +28,10 @@ use crate::supervisor::EngineHealth;
 
 /// `starting` this long with a fresh, running engine is stuck.
 pub const STUCK_AFTER: Duration = Duration::from_secs(10);
+/// How long the one restart counts as in flight for the encoder recovery (which stands
+/// aside meanwhile). Bounded: an engine that comes back in `error`, never `starting`,
+/// would otherwise hold both watches off for good (review 11-07).
+pub const RESTART_GRACE: Duration = Duration::from_secs(20);
 
 /// What to do for a stuck session (one of the two).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -56,6 +60,8 @@ pub struct StuckWatch {
     since: Option<((isize, u32), Instant)>,
     /// The target the episode belongs to, and its phase.
     phase: Option<((isize, u32), Phase)>,
+    /// When the one restart was made (bounds `pending`).
+    restarted_at: Option<Instant>,
     /// The last window mode and user action seen (a change starts a new episode).
     mode: Option<u64>,
     user: Option<Instant>,
@@ -96,13 +102,18 @@ impl StuckWatch {
             }
             Phase::Told => return None,
         };
+        if phase == Phase::Restarted {
+            self.restarted_at = Some(now);
+        }
         self.phase = Some((key, phase));
         Some(act)
     }
 
-    /// A restart was made and its first frame is still awaited, or the clock runs.
-    pub fn pending(&self) -> bool {
-        self.since.is_some() || self.phase.is_some_and(|(_, p)| p == Phase::Restarted)
+    /// The clock runs, or the restart was made under [`RESTART_GRACE`] ago and its first
+    /// frame is still awaited.
+    pub fn pending(&self, now: Instant) -> bool {
+        let in_flight = self.restarted_at.is_some_and(|at| now.duration_since(at) < RESTART_GRACE);
+        self.since.is_some() || (in_flight && self.phase.is_some_and(|(_, p)| p == Phase::Restarted))
     }
 
     /// The window mode now and the last user action: a change starts a new episode.
