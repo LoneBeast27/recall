@@ -7,6 +7,10 @@
 //! - Live sound: the app's device clock can run a little fast or slow. The drift is corrected
 //!   one frame at a time, spread through the sound, at most 0.1% of the frames (a duplicated or
 //!   dropped frame), and only past `TOLERANCE`. Never a silent block inside live sound.
+//! - The clock jumps (Windows' clock runs on through sleep): never more than the ring's
+//!   capacity (`cap`) is owed at once. Past it, `written` is re-based on the clock, so a resume
+//!   writes at most one ring of silence, and a jump inside live sound is re-based rather than
+//!   crept up on at 0.1 %.
 
 use std::time::Duration;
 
@@ -22,11 +26,19 @@ pub struct Leveller {
     /// stretch never allows a burst.
     credit: f64,
     live: bool,
+    /// Most frames ever owed at once (the ring's capacity in frames).
+    cap: u64,
 }
 
 impl Leveller {
     pub fn new(rate: u32) -> Self {
-        Self { rate, written: 0, credit: 0.0, live: false }
+        Self { rate, written: 0, credit: 0.0, live: false, cap: u64::MAX }
+    }
+
+    /// Owe at most `frames` at once (the ring's capacity: `TrackRing::capacity_frames`).
+    pub fn with_cap(mut self, frames: u64) -> Self {
+        self.cap = frames.max(1);
+        self
     }
 
     fn due(&self, elapsed: Duration) -> u64 {
@@ -36,8 +48,20 @@ impl Leveller {
     /// No active stream: frames of silence owed up to the clock.
     pub fn idle(&mut self, elapsed: Duration) -> u64 {
         self.live = false;
-        let owed = self.due(elapsed).saturating_sub(self.written);
+        let due = self.due(elapsed);
+        let owed = self.rebase(due, 0);
         self.written += owed;
+        owed
+    }
+
+    /// Frames still owed before `frames` more reach `due`, at most `cap`: past the cap,
+    /// `written` moves up so the rest is never written.
+    fn rebase(&mut self, due: u64, frames: u64) -> u64 {
+        let owed = due.saturating_sub(self.written + frames);
+        if owed > self.cap {
+            self.written += owed - self.cap;
+            return self.cap;
+        }
         owed
     }
 
@@ -51,9 +75,13 @@ impl Leveller {
         if !self.live {
             // The stream starts: everything before it was silence.
             self.live = true;
-            lead = due.saturating_sub(self.written + frames as u64);
+            lead = self.rebase(due, frames as u64);
             out.resize(lead as usize * channels, 0.0);
             self.written += lead;
+        }
+        if due.saturating_sub(self.written + frames as u64) > self.cap {
+            // A clock jump inside live sound, not drift: re-base rather than creep.
+            self.written = due - frames as u64;
         }
         let lag = due as i64 - (self.written + frames as u64) as i64;
         let tolerance = (TOLERANCE.as_secs_f64() * self.rate as f64) as i64;

@@ -333,3 +333,17 @@ fn a_quiet_or_closed_source_stays_on_the_clock_for_a_later_save() {
     assert_eq!(clip[0], 6.0, "starts 5 s before the game closed");
     assert_eq!(clip[499], 10.0, "ends on the last second of sound");
 }
+
+/// 2026-11-07 audit T1: a block bigger than the ring (silence owed after a sleep) went into the
+/// `VecDeque` whole before the trim, so the ring grew to the block's size and stayed that big.
+#[test]
+fn a_block_bigger_than_the_ring_never_grows_it() {
+    let ring = raw_ring("big", false, 0.5, 48_000, 2, 1_000);
+    let block: Vec<f32> = (0..10_000).map(|i| i as f32).collect();
+    ring.push_capture(&block, false);
+    let buf = ring.samples.lock().unwrap();
+    assert_eq!(buf.len(), 1_000, "holds exactly the ring");
+    assert!(buf.capacity() < 2_000, "the ring grew to {} samples for a {}-sample block", buf.capacity(), block.len());
+    assert_eq!(buf.front().copied(), Some(9_000.0 * 0.5), "the newest samples, with the gain");
+    assert_eq!(buf.back().copied(), Some(9_999.0 * 0.5));
+}

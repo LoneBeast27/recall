@@ -82,3 +82,38 @@ fn silence_fills_only_while_no_stream_is_active_and_a_new_stream_starts_on_the_c
     assert_eq!(out.len(), 24_000 - PACKET + PACKET);
     assert_eq!(longest_zero_run(&out), 24_000 - PACKET, "the lead is silence, the packet is sound");
 }
+
+/// 2026-11-07 audit T1: Windows' clock runs on through sleep, so the first call after a long
+/// sleep owed the whole sleep (8 h = 1.4 G frames per track) in one block.
+#[test]
+fn a_three_hour_clock_jump_owes_at_most_the_ring() {
+    let cap = 60 * RATE as u64; // a 60 s ring
+    let mut level = Leveller::new(RATE).with_cap(cap);
+    assert_eq!(level.idle(Duration::from_secs(1)), 48_000);
+    let asleep = Duration::from_secs(3 * 3600 + 1);
+    assert!(level.idle(asleep) <= cap, "a 3 h jump owes more than the ring holds");
+    // Re-based on the clock: the next 10 ms owe 10 ms.
+    assert_eq!(level.idle(asleep + Duration::from_millis(10)), 480);
+    // A stream that starts after the jump gets at most a ring of lead silence.
+    let mut level = Leveller::new(RATE).with_cap(cap);
+    let out = level.live(asleep, &[0.5; PACKET], 1);
+    assert!(out.len() as u64 <= cap + PACKET as u64, "lead of {} frames", out.len());
+}
+
+/// 2026-11-07 audit T1: a sleep inside live sound was crept up on at 0.1 % (a duplicated frame
+/// per thousand, for days) instead of being re-based on the clock.
+#[test]
+fn a_clock_jump_inside_live_sound_re_bases_instead_of_creeping() {
+    let cap = 60 * RATE as u64;
+    let mut level = Leveller::new(RATE).with_cap(cap);
+    let first = level.live(Duration::from_millis(10), &[0.5; PACKET], 1);
+    assert_eq!(first.len(), PACKET);
+    // The PC slept 3 h mid-stream; the next packets keep their length and stay level.
+    let mut t = Duration::from_secs(3 * 3600) + Duration::from_millis(10);
+    for _ in 0..100 {
+        t += Duration::from_millis(10);
+        let out = level.live(t, &[0.5; PACKET], 1);
+        assert_eq!(out.len(), PACKET, "frames duplicated to creep up to a 3 h lag");
+    }
+    assert_eq!(level.idle(t), 0, "level with the clock after the jump");
+}
