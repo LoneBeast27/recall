@@ -18,6 +18,9 @@ mod win_recycle;
 #[allow(dead_code)]
 #[path = "../../recall/src/win_volume.rs"]
 mod win_volume;
+#[allow(dead_code)]
+#[path = "../../recall/src/file_id.rs"]
+mod file_id;
 #[path = "../src/media.rs"]
 mod media;
 

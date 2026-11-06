@@ -117,10 +117,32 @@ fn entries(dir: &Path) -> Vec<(String, std::fs::Metadata, PathBuf)> {
 
 /// Everything under `root`, each unit scored by `score(clip id)`.
 pub(super) fn inventory(root: &Path, score: &dyn Fn(&str) -> f64) -> Inventory {
+    inventory_with(root, score, &owned::listed(root))
+}
+
+/// What a budget pass would do, writing nothing (no `owned.json`, no first-run budget, no
+/// sweep): (files a first load would adopt, units the budget would evict).
+// Reached through `storage::plan_dry` (tests and tools; no Settings caller yet).
+#[allow(dead_code)]
+pub(super) fn plan_dry(root: &Path) -> (Vec<String>, Vec<String>) {
+    let (listed, adopt) = owned::peek(root);
+    if super::guard::blocked(root).is_some() {
+        return (adopt, Vec::new());
+    }
+    let inventory = inventory_with(root, &super::prefetch::score_of, &listed);
+    let budget = evict::read_settings(root).cache_budget_bytes.unwrap_or_else(|| {
+        let (free, total) = super::drive_info(root).map_or((0, 0), |info| (info.free, info.total));
+        evict::default_budget(free, total)
+    });
+    let evict = evict::plan(&inventory.units, inventory.projects + inventory.other, budget, budget / 2, 0, &kept());
+    (adopt, evict)
+}
+
+/// [`inventory`] against an explicit ownership list. Reads only.
+fn inventory_with(root: &Path, score: &dyn Fn(&str) -> f64, listed: &std::collections::BTreeSet<String>) -> Inventory {
     let video_index = evict::read_index(&root.join("video").join("lru.json"));
     let media = read_media(root);
-    let listed = owned::listed(root);
-    let copy = |folder: &str, name: &str| owned::recall_mp4(name).is_some() && owned::owns(&listed, folder, name);
+    let copy = |folder: &str, name: &str| owned::recall_mp4(name).is_some() && owned::owns(listed, folder, name);
     let mut units = Vec::new();
     let mut other = 0u64;
     let mut push = |tier: Tier, name: String, bytes: u64, last_used: u64| {

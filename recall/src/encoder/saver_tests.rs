@@ -300,6 +300,8 @@ fn mover_cfg(same_volume: staging::VolumeCheck) -> mover::Config {
         same_volume,
         background: false,
         stamp: mover::stamp_mtime,
+        identity: mover::same_identity,
+        stat: mover::stat_dest,
     }
 }
 

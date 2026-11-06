@@ -24,6 +24,50 @@ use super::video::{budget_in, touch, video_dir};
 /// `KEPT_MARK`): the sweep deletes only marked files.
 pub(super) const KEPT_MARK: &str = "recall.kept";
 
+/// The recorder's exact clip name (`recall/src/encoder/saver.rs` `clip_path`):
+/// `<game>__YYYY-MM-DD__HH-MM-SS-mmm__<32 hex>.mp4`.
+fn recorder_name(name: &str) -> bool {
+    let Some(stem) = name.strip_suffix(".mp4") else { return false };
+    let parts: Vec<&str> = stem.split("__").collect();
+    let shaped = |text: &str, shape: &str| text.len() == shape.len() && text.bytes().zip(shape.bytes()).all(|(c, s)| if s == b'9' { c.is_ascii_digit() } else { c == s });
+    parts.len() == 4
+        && !parts[0].is_empty()
+        && shaped(parts[1], "9999-99-99")
+        && shaped(parts[2], "99-99-99-999")
+        && parts[3].len() == 32
+        && parts[3].bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// Most the engine could have kept before it marked its copies: half the cache budget since
+/// 2026-11-05, a fixed 2 GiB before. More unmarked bytes than this cannot all be its leftovers.
+pub(super) fn old_kept_cap(budget: u64) -> u64 {
+    (budget / 2).max(2 << 30)
+}
+
+/// Kept copies the engine left before it marked them, whose clip is gone: unmarked, the
+/// recorder's exact clip name, last written before the cache was adopted (`since_ms`). Deleted
+/// only when all of them together fit in `cap`; over it, none (something else is in the
+/// folder) and one log line says so. Returns how many went.
+pub(super) fn sweep_old_unmarked(kept_dir: &Path, since_ms: u64, cap: u64) -> usize {
+    let Ok(listing) = std::fs::read_dir(kept_dir) else { return 0 };
+    let old: Vec<(PathBuf, u64)> = listing
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_file()) && recorder_name(&entry.file_name().to_string_lossy()))
+        .filter(|entry| !marked(&entry.path()))
+        .filter_map(|entry| {
+            let meta = entry.metadata().ok()?;
+            let written = meta.modified().ok()?.duration_since(std::time::UNIX_EPOCH).ok()?.as_millis() as u64;
+            (written < since_ms).then(|| (entry.path(), meta.len()))
+        })
+        .collect();
+    let total: u64 = old.iter().map(|(_, bytes)| bytes).sum();
+    if total > cap {
+        eprintln!("kept clips: {} old unmarked copies ({total} bytes) in {} exceed {cap}; left alone", old.len(), kept_dir.display());
+        return 0;
+    }
+    old.iter().filter(|(path, _)| std::fs::remove_file(path).is_ok()).count()
+}
+
 /// One adoption at a time (an engine event and the start-up sweep may name the same file).
 static ADOPT_LOCK: Mutex<()> = Mutex::new(());
 
@@ -114,6 +158,10 @@ pub(super) fn sweep_in(root: &Path, kept_dir: &Path, clip_folder: &Path, budget:
         } else if marked(&kept) && std::fs::remove_file(&kept).is_ok() {
             deleted += 1;
         }
+    }
+    // Copies kept before the mark existed whose clip is gone (`sweep_old_unmarked`).
+    if let Some(since) = super::owned::since_ms(root) {
+        deleted += sweep_old_unmarked(kept_dir, since, old_kept_cap(budget));
     }
     (adopted, deleted)
 }
