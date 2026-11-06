@@ -253,6 +253,14 @@ impl Reducer {
                 let notice = NoticeView::new(Success, "Screenshot saved", name.clone(), false).emphasized();
                 self.set_transient("Screenshot saved", format!("Saved {name}"), now + SAVED_FOR, notice)
             }
+            // A part of a long recording whose capture size changed: it goes on in a new file.
+            Some(kind @ ("recording_started" | "recording_stopped")) if event.get("continued").and_then(Value::as_bool) == Some(true) => {
+                let title = "Recording continued in a new file";
+                let why = "The game's size changed";
+                let detail = if kind == "recording_started" { truncate(&format!("{why} · {}", file_name(event)), 48) } else { why.to_string() };
+                let notice = NoticeView::new(Recording, title, detail.clone(), false).emphasized();
+                self.set_transient(title, detail, now + SAVED_FOR, notice)
+            }
             Some("recording_started") => {
                 let name = file_name(event);
                 let notice = NoticeView::new(Recording, "Recording started", name.clone(), false).emphasized();

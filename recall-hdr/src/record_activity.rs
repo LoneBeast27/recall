@@ -119,6 +119,8 @@ impl EngineActivity {
     /// Track one engine event; `unix_now` stamps a recording start.
     pub fn on_event(&mut self, ev: &Value, unix_now: f64) -> Option<Trigger> {
         let text = |k: &str| ev.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        // A part of a recording whose capture size changed: it goes on in a new file.
+        let continued = ev.get("continued").and_then(Value::as_bool).unwrap_or(false);
         match ev.get("type").and_then(Value::as_str)? {
             "saved" => {
                 self.pending_saves = self.pending_saves.saturating_sub(1);
@@ -133,9 +135,16 @@ impl EngineActivity {
                 None
             }
             "recording_started" => {
-                self.long = LongRec::Active { path: text("path"), started_unix: unix_now };
+                let started_unix = match self.long {
+                    LongRec::Active { started_unix, .. } if continued => started_unix,
+                    _ => unix_now,
+                };
+                self.long = LongRec::Active { path: text("path"), started_unix };
                 Some(Trigger::LongRecChanged)
             }
+            // Only a part ended: the recording stays Active (no retarget slips in
+            // between the parts), and an auto stop waits for the last part.
+            "recording_stopped" if continued => Some(Trigger::LongRecChanged),
             kind @ ("recording_stopped" | "recording_failed") => {
                 self.long = LongRec::Idle;
                 match self.auto_stop.take() {
@@ -430,5 +439,25 @@ mod tests {
         a.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
         a.engine_restarted();
         assert_eq!(a, EngineActivity::default());
+    }
+
+    #[test]
+    fn a_continued_recording_stays_active_between_its_parts() {
+        let t0 = Instant::now();
+        let mut a = EngineActivity::default();
+        a.on_event(&json!({"type":"recording_started","path":"p1","continued":false}), 5.0);
+        a.on_event(&json!({"type":"recording_stopped","path":"p1","seconds":9.0,"bytes":1,"continued":true}), 9.0);
+        assert!(a.is_recording(), "no gap between the parts for a retarget to slip into");
+        assert!(a.retarget_busy(t0).long_rec);
+        a.on_event(&json!({"type":"recording_started","path":"p2","continued":true}), 9.5);
+        assert_eq!(a.long, LongRec::Active { path: "p2".into(), started_unix: 5.0 }, "the timer counts from part 1");
+        // A retarget's stop sent before the size change is answered by the last part's stop.
+        assert!(a.auto_stop(t0, false));
+        let ev = a.on_event(&json!({"type":"recording_stopped","path":"p2","seconds":1.0,"bytes":1,"continued":true}), 10.0);
+        assert_ne!(ev, Some(Trigger::AutoStopped { game_closed: false }));
+        assert!(a.is_recording());
+        let ev = a.on_event(&json!({"type":"recording_stopped","path":"p3","seconds":1.0,"bytes":1,"continued":false}), 11.0);
+        assert_eq!(ev, Some(Trigger::AutoStopped { game_closed: false }));
+        assert_eq!(a.long, LongRec::Idle);
     }
 }
