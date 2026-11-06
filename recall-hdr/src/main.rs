@@ -83,6 +83,8 @@ mod record_storage;
 mod record_free_space;
 mod record_janitor;
 mod record_target;
+mod record_target_gate;
+mod record_transition;
 mod record_tray;
 mod render_probe;
 mod render_verdict;

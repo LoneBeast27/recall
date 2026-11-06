@@ -28,22 +28,25 @@ pub(crate) const FOLLOW_EVERY: Duration = Duration::from_millis(100);
 impl Controller {
     /// A foreground change from the hook: feeds the tracker and HDR.
     pub(crate) fn on_foreground_event(&mut self, ev: &WatchEvent, now: Instant) {
-        let candidate = self.classify(ev, now);
+        let (candidate, traits) = self.candidate(ev, now);
         self.last_fed = Some((ev.hwnd, candidate.is_some()));
         self.note_followable(ev);
-        self.tracker.on_foreground(candidate, now);
-        self.hdr.on_foreground(ev, &self.cfg, now);
+        // An unidentifiable window is "not a target" (cancels a pending game, T11).
+        self.tracker.on_foreground_with(candidate, traits, now);
+        if !ev.is_unknown() {
+            self.hdr.on_foreground(ev, &self.cfg, now);
+        }
     }
 
     /// A foreground observation from the probe or the location hook: fed to
     /// the tracker only when (window, verdict) changed.
     pub(crate) fn on_foreground_seen(&mut self, ev: &WatchEvent, now: Instant) {
         self.note_followable(ev);
-        let candidate = self.classify(ev, now);
+        let (candidate, traits) = self.candidate(ev, now);
         let key = (ev.hwnd, candidate.is_some());
         if self.last_fed != Some(key) {
             self.last_fed = Some(key);
-            self.tracker.on_foreground(candidate, now);
+            self.tracker.on_foreground_with(candidate, traits, now);
         }
     }
 
@@ -73,7 +76,7 @@ impl Controller {
         }
         if let Some(hwnd) = self.tracker.current().map(|t| t.hwnd).filter(|h| !watcher::window_alive(*h)) {
             log!("record: target window {hwnd:#x} is gone");
-            self.tracker.on_window_gone(hwnd);
+            self.tracker.on_window_gone_at(hwnd, Instant::now());
         }
     }
 

@@ -328,9 +328,11 @@ impl Controller {
         self.planner.set_drain_len(crate::record_drain::drain_len(buffered, self.cfg.recording.buffer_secs));
         let wanted = self.wanted();
         let busy = self.activity.retarget_busy(now);
+        let drained = self.planner.drain().filter(|(_, at, len)| now < *at + *len).map(|(t, _, _)| t.clone());
         match self.planner.step(&wanted, now, busy) {
             Step::Apply(target) => {
                 self.retarget_held = false;
+                self.note_drain_cut(drained.as_ref(), &target);
                 self.apply_engine_target(&target);
             }
             Step::Held => {

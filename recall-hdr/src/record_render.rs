@@ -147,6 +147,7 @@ impl Controller {
 
     /// The tracker's poll with the render check asked before a commit.
     pub(crate) fn poll_tracker(&mut self, now: Instant) -> bool {
+        self.feed_drain(now);
         let session = self.tracker.current().map(|t| t.pid);
         let render = &mut self.render;
         let changed = self.tracker.poll_admit(now, |t| render.admit(t, session, now));

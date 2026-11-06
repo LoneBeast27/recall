@@ -260,6 +260,9 @@ impl App {
     /// FocusedRule actions. The watcher does NOT lowercase the stem; we do.
     fn drain_watcher(&mut self, watch_rx: &Receiver<WatchEvent>) {
         while let Ok(ev) = watch_rx.try_recv() {
+            if ev.is_unknown() {
+                continue; // an unidentifiable window: the record mode's signal only
+            }
             let fg = foreground_of(&ev);
             let kind = rules::classify(&fg, &self.cfg);
             // Remember the last focused stem so FocusedRule targets the right one
