@@ -11,3 +11,4 @@ pub mod process_tree;
 pub mod midi;
 pub mod pre_encode;
 pub mod storage;
+pub mod update;
