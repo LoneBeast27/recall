@@ -129,6 +129,8 @@ pub struct Controller {
     pub(crate) janitor: Janitor,
     /// Recall Island notices for recording changes (`record_notice`).
     pub(crate) notices: NoticeTracker,
+    /// A game session stuck in `starting` (`record_capture_watch`).
+    pub(crate) capture_stuck: crate::record_capture_watch::StuckWatch,
     /// Exclusive fullscreen hiding the island (`record_fullscreen`).
     fullscreen: crate::record_fullscreen::FullscreenWatch,
     /// The island editor shortcut waiting for the overlay's answer.
@@ -234,6 +236,7 @@ pub fn run() -> i32 {
         pending_pause: None,
         janitor,
         notices: NoticeTracker::new(),
+        capture_stuck: Default::default(),
         fullscreen: Default::default(),
         editor_ask: Default::default(),
         can_trace,
@@ -354,6 +357,7 @@ impl Controller {
         self.overlay.sync(&self.cfg.overlay);
         self.fullscreen_tick(now);
         self.island_editor_tick(now);
+        self.capture_stuck_tick(now);
         if !self.hdr.is_active() && now.duration_since(self.last_hdr_refresh) >= HDR_REFRESH_EVERY {
             self.last_hdr_refresh = now;
             self.hdr.refresh_live();

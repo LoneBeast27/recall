@@ -89,6 +89,8 @@ pub struct EngineView {
     pub mic_muted: Option<bool>,
     /// Last engine `status.buffer_secs`: seconds of footage in the replay ring.
     pub buffer_secs: Option<f32>,
+    /// Status lines received (all engines): one that stops moving is a hung engine.
+    pub statuses: u64,
 }
 
 /// Supervises the capture engine on a background manager thread.

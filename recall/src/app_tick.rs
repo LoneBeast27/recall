@@ -158,43 +158,29 @@ impl App {
         self.last_periodic = Some(now);
         self.refresh_source_title();
         self.refresh_hdr_mode();
-        self.restart_capture_if_needed();
+        self.watch_capture();
         self.emit_status();
     }
 
     /// Starts capture on the target window (`RECALL_CAPTURE_HWND`) or the configured
     /// monitor, in the format `CaptureShared::wants_fp16` picks.
     pub(super) fn start_capture(&mut self) {
-        let Some(shared) = self.shared.clone() else { return };
+        if self.shared.is_none() {
+            return;
+        }
+        let result = self.try_start_capture();
+        crate::capture_watchdog::note_start(&mut self.capture_watch, result, Instant::now());
+    }
+
+    /// `start_capture` without telling the watchdog (`capture_watchdog::watch` does).
+    pub(super) fn try_start_capture(&mut self) -> Result<(), String> {
+        let Some(shared) = self.shared.clone() else { return Err("no capture state".into()) };
         let hwnd = std::env::var("RECALL_CAPTURE_HWND").ok().and_then(|v| v.parse::<usize>().ok());
         let started = match hwnd {
             Some(hwnd) => capture::start_window(hwnd, shared),
             None => capture::start_monitor(self.config.monitor, shared),
         };
-        match started {
-            Ok(control) => self.capture = Some(control),
-            Err(e) => eprintln!("failed to start capture: {e}"),
-        }
-    }
-
-    /// Restarts capture when `CaptureShared::restart_reason` says so: a Bgra8 capture once
-    /// HDR turns on or a frame needs the CPU path, or the capture thread asked (Desktop
-    /// Duplication gave up, so the new start uses WGC; or the followed game window left its
-    /// monitor). A new capture brings a new D3D11 device, so the encoder reopens and the
-    /// replay buffer starts again (logged).
-    fn restart_capture_if_needed(&mut self) {
-        let Some(shared) = self.shared.clone() else { return };
-        if self.capture.is_none() {
-            return;
-        }
-        let Some(why) = shared.restart_reason() else { return };
-        eprintln!("[recall] capture restarts {why}; the replay buffer restarts");
-        if let Some(control) = self.capture.take() {
-            if let Err(e) = control.stop() {
-                eprintln!("[recall] capture stop: {e}");
-            }
-        }
-        self.start_capture();
+        started.map(|control| self.capture = Some(control)).map_err(|e| e.to_string())
     }
 
     fn refresh_source_title(&mut self) {
