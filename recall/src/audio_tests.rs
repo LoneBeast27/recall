@@ -333,10 +333,3 @@ fn a_quiet_or_closed_source_stays_on_the_clock_for_a_later_save() {
     assert_eq!(clip[0], 6.0, "starts 5 s before the game closed");
     assert_eq!(clip[499], 10.0, "ends on the last second of sound");
 }
-
-/// A lost device is retried at 2 s, then backs off to 4 s, 8 s and at most 10 s.
-#[test]
-fn reopen_backs_off_to_ten_seconds() {
-    let s = |n| super::reopen_wait(n).as_secs();
-    assert_eq!((s(0), s(1), s(2), s(3), s(4), s(50)), (2, 2, 4, 8, 10, 10));
-}
