@@ -386,7 +386,7 @@ fn a_clip_too_big_for_the_bin_is_skipped_and_the_run_stops() {
 /// What `win_recycle::facts` reports for a `\\nas` share: no volume GUID.
 fn share_bin(_: &Path, bytes: u64) -> Result<(), String> {
     let share = crate::win_volume::Volume { id: r"\\nas\clips\".into(), label: r"\\nas\clips".into() };
-    crate::win_recycle::decide(&crate::win_recycle::BinFacts { volume: Some(share), drive_type: 4, total_bytes: None, settings: Default::default() }, bytes)
+    crate::win_recycle::decide(&crate::win_recycle::BinFacts { subst: false, resolved_unc: false, volume: Some(share), drive_type: 4, total_bytes: None, settings: Default::default() }, bytes)
 }
 
 static SHARE_CALLS: Mutex<Vec<Vec<String>>> = Mutex::new(Vec::new());

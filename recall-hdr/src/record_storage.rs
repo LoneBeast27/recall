@@ -1,10 +1,10 @@
 //! Storage cap + auto-clean (`[storage] cap_gb`: 0 = off, else at least
 //! [`STORAGE_CAP_MIN_GB`]). After each saved clip (debounced) and hourly,
 //! when the top-level Recall clips in `recording.output_dir` total more than
-//! the cap, the OLDEST clips go to the Recycle Bin (`SHFileOperationW` +
-//! `FOF_ALLOWUNDO`, with their recorder thumbnails and `.recall-edit.json` /
-//! `.recall-marks.json` sidecars, through `IFileOperation`: `win_fileop.rs`)
-//! until the folder is under the cap. A clip
+//! the cap, the OLDEST clips go to the Recycle Bin, with their recorder
+//! thumbnails and `.recall-edit.json` / `.recall-marks.json` sidecars, through
+//! `IFileOperation` with a sink that refuses a permanent delete
+//! (`win_fileop.rs`), until the folder is under the cap. A clip
 //! goes only when its volume has a Recycle Bin that will take it
 //! (`win_recycle.rs`); otherwise the run stops there and nothing is deleted.
 //!
