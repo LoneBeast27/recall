@@ -226,8 +226,9 @@ pub enum DaemonEvent {
     /// A finished part of a recording that goes on: listed, no toast.
     RecordingPartSaved { path: String },
     /// `seconds`: the whole recording, every part; `parts`: the files it took; `gap_seconds`:
-    /// time not recorded between the parts.
-    RecordingStopped { path: String, seconds: f64, parts: u32, gap_seconds: f64 },
+    /// time not recorded between the parts; `frozen_seconds`: time the picture held still
+    /// (a same-header encoder reopen waiting for its keyframe).
+    RecordingStopped { path: String, seconds: f64, parts: u32, gap_seconds: f64, frozen_seconds: f64 },
     /// `files`: what the recording left (it ended early), empty when nothing was saved.
     RecordingFailed { reason: String, files: Vec<String> },
     /// A clip saved to the SSD first reached the clip folder. `kept_path`: the engine kept its

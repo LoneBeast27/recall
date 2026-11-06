@@ -26,7 +26,7 @@ fn waits_for_a_keyframe_then_writes_each_packet_one_step_late() {
     assert_eq!(log.videos(), vec![(0, 16 * MS, true, 2), (16 * MS, 34 * MS, false, 3)], "VFR durations from the next PTS");
     // The tail packet reuses the previous duration: (1070 + 34 - 1020) ms.
     let events = rec.stop();
-    assert_eq!(events, vec![Event::Stopped { path: path.clone(), seconds: 0.084, bytes: 4, marks: 0, parts: 1, total_seconds: 0.084, gap_seconds: 0.0 }]);
+    assert_eq!(events, vec![Event::Stopped { path: path.clone(), seconds: 0.084, bytes: 4, marks: 0, parts: 1, total_seconds: 0.084, gap_seconds: 0.0, frozen_seconds: 0.0 }]);
     assert_eq!(log.videos().last(), Some(&(50 * MS, 34 * MS, false, 4)));
     assert!(path.is_file(), "renamed into place");
     assert!(!naming::part_of(&path).exists(), "no .part left");

@@ -65,8 +65,9 @@ pub trait SinkFactory {
 pub enum Event {
     Started { path: PathBuf },
     /// The recording ended. `seconds`: this file; `total_seconds`: every part; `parts`: files written;
-    /// `gap_seconds`: time not recorded between the parts.
-    Stopped { path: PathBuf, seconds: f64, bytes: u64, marks: usize, parts: u32, total_seconds: f64, gap_seconds: f64 },
+    /// `gap_seconds`: time not recorded between the parts; `frozen_seconds`: time the picture
+    /// held still after a same-header encoder reopen, waiting for its keyframe.
+    Stopped { path: PathBuf, seconds: f64, bytes: u64, marks: usize, parts: u32, total_seconds: f64, gap_seconds: f64, frozen_seconds: f64 },
     /// Part `part` ended because the stream changed (`cause`); the recording goes on.
     Continued { path: PathBuf, seconds: f64, bytes: u64, marks: usize, part: u32, total_seconds: f64, cause: Cause },
     /// Part `part` (2, 3, ...) of a continued recording is writing.
@@ -104,6 +105,11 @@ struct Active<S> {
     earlier_gap: f64,
     /// When this part's first keyframe was written.
     began: Instant,
+    /// Seconds frozen in the parts before this one; µs frozen in this one; the capture µs of
+    /// a same-header reopen still waiting for its keyframe.
+    earlier_frozen: f64,
+    frozen_us: u64,
+    freeze_from: Option<u64>,
 }
 
 enum Phase<S> {
@@ -255,6 +261,9 @@ impl<F: SinkFactory> Recorder<F> {
             earlier_secs: previous.as_ref().map_or(0.0, |p| p.total_seconds),
             earlier_gap: previous.as_ref().map_or(0.0, |p| p.gap_seconds + p.end_us.map_or(0.0, |end| pts_us.saturating_sub(end) as f64 / 1e6)),
             began: now,
+            earlier_frozen: previous.as_ref().map_or(0.0, |p| p.frozen_seconds),
+            frozen_us: 0,
+            freeze_from: None,
         });
         if let Err(e) = active.push_video(pts_us, true, data, false) {
             self.phase = Phase::Recording(active);
@@ -298,6 +307,10 @@ impl<S: Sink> Active<S> {
             return Ok(()); // non-monotonic: never hand the muxer a regression
         }
         self.need_key = false;
+        // A same-header reopen's freeze ends at the new encoder's first keyframe.
+        if let Some(from) = self.freeze_from.take_if(|_| keyframe) {
+            self.frozen_us += pts_us.saturating_sub(from);
+        }
         if let Some((pts, key, payload)) = self.held.take() {
             let duration = (pts_us - pts).max(1);
             self.write_video(pts, duration, key, &payload)?;
@@ -312,6 +325,11 @@ impl<S: Sink> Active<S> {
         self.last_duration = duration;
         self.video_packets += 1;
         Ok(())
+    }
+
+    /// The capture clock (µs) at wall instant `at`: it runs in real time from `wall_base`.
+    fn capture_us_at(&self, at: Instant) -> u64 {
+        (self.base_us as i64 + self.wall_frames(1_000_000, at)).max(0) as u64
     }
 
     /// Frames of real time elapsed at `at` since the recording's first frame.
@@ -434,7 +452,8 @@ fn finish<S: Sink>(mut a: Active<S>) -> Vec<Event> {
         }
     }
     let (parts, total_seconds, gap_seconds) = (a.number, a.earlier_secs + seconds, a.earlier_gap);
-    events.push(Event::Stopped { path, seconds, bytes, marks: rel.len(), parts, total_seconds, gap_seconds });
+    let frozen_seconds = a.earlier_frozen + a.frozen_us as f64 / 1e6;
+    events.push(Event::Stopped { path, seconds, bytes, marks: rel.len(), parts, total_seconds, gap_seconds, frozen_seconds });
     events
 }
 

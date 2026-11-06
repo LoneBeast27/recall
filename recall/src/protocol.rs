@@ -141,7 +141,8 @@ pub enum Outbound {
         cause: Option<&'static str>,
     },
     /// `seconds`/`bytes`: this file. `parts`: files so far, `total_seconds`: all of them,
-    /// `gap_seconds`: time not recorded between the parts (0 for one file).
+    /// `gap_seconds`: time not recorded between the parts (0 for one file); `frozen_seconds`:
+    /// time the picture held still after a same-header encoder reopen (0 if none).
     /// `continued`: only this part ended (`cause` as above); the recording goes on
     /// in a new file, reported by the next `recording_started`.
     RecordingStopped {
@@ -152,6 +153,7 @@ pub enum Outbound {
         parts: u32,
         total_seconds: f64,
         gap_seconds: f64,
+        frozen_seconds: f64,
         cause: Option<&'static str>,
     },
     /// `path`: the partial recording that was kept (renamed to its final name),

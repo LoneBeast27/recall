@@ -10,7 +10,10 @@
 //! [`PART_GAP`] after the reopen that ended it whatever follows. Further reopens
 //! while it waits (a size flap, a window being dragged) only move it to the
 //! newest size. A reopen whose stream headers match (`Cause::Same`, e.g. GPU
-//! frames to CPU copies at the same size) needs no new file at all.
+//! frames to CPU copies at the same size) needs no new file at all; the time from
+//! it to the new encoder's first keyframe (the last frame held on screen) is
+//! reported as `frozen_seconds`. Gaps between packets are not: the encoder is
+//! VFR and a static screen sends nothing.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -68,6 +71,8 @@ pub(super) struct Series {
     /// Capture µs where the finished part ended (None if unknown) and the seconds missed so far.
     pub end_us: Option<u64>,
     pub gap_seconds: f64,
+    /// Seconds frozen so far (same-header reopens waiting for a keyframe).
+    pub frozen_seconds: f64,
     /// The next part opens on the first keyframe at or after this (fixed at the first reopen).
     pub not_before: Instant,
     /// Why the stream changed (the newest reopen's).
@@ -77,8 +82,8 @@ pub(super) struct Series {
 impl Series {
     /// The recording stopped between two parts: it is the finished parts.
     pub fn stopped(self) -> Event {
-        let Series { path, seconds, bytes, marks, part, total_seconds, gap_seconds, .. } = self;
-        Event::Stopped { path, seconds, bytes, marks, parts: part, total_seconds, gap_seconds }
+        let Series { path, seconds, bytes, marks, part, total_seconds, gap_seconds, frozen_seconds, .. } = self;
+        Event::Stopped { path, seconds, bytes, marks, parts: part, total_seconds, gap_seconds, frozen_seconds }
     }
 }
 
@@ -88,7 +93,7 @@ pub(super) fn arm_wait_from(requested: Instant, previous: &Option<Series>) -> In
 }
 
 impl<F: SinkFactory> Recorder<F> {
-    /// The live encoder reopened (`cause`) with these settings (`video`, its
+    /// The live encoder reopened (`cause`) at `now` with these settings (`video`, its
     /// generation's own). A running part ends here and the recording arms the
     /// next part; its audio keeps the first part's wall-clock mapping. A part
     /// that fails to finish ends the recording.
@@ -103,9 +108,12 @@ impl<F: SinkFactory> Recorder<F> {
                 }
                 Vec::new()
             }
-            // Headers match: same file, from the new encoder's first keyframe.
+            // Headers match: same file, from the new encoder's first keyframe. The last frame
+            // holds until then: that span is counted as frozen (from this reopen's capture time).
             Phase::Recording(a) if cause == Cause::Same => {
                 a.need_key = true;
+                let at_us = a.capture_us_at(now);
+                a.freeze_from.get_or_insert(at_us);
                 vec![Event::Log(format!("{}; the long recording goes on in the same file", cause.log_text()))]
             }
             Phase::Recording(_) => self.next_part(now, cause),
@@ -121,7 +129,7 @@ impl<F: SinkFactory> Recorder<F> {
         let mut ended = finish(*active);
         let last = ended.pop();
         events.extend(ended);
-        let Some(Event::Stopped { path, seconds, bytes, marks, parts, total_seconds, gap_seconds }) = last else {
+        let Some(Event::Stopped { path, seconds, bytes, marks, parts, total_seconds, gap_seconds, frozen_seconds }) = last else {
             events.extend(last);
             return events;
         };
@@ -130,7 +138,7 @@ impl<F: SinkFactory> Recorder<F> {
         // Inside the gap since this part began: wait for it (fixed now: later reopens never push it).
         let not_before = (began + PART_GAP).max(now);
         let end_us = Some(base_us + (seconds * 1e6) as u64);
-        let previous = Some(Series { path, seconds, bytes, marks, part: parts, total_seconds, end_us, gap_seconds, not_before, cause });
+        let previous = Some(Series { path, seconds, bytes, marks, part: parts, total_seconds, end_us, gap_seconds, frozen_seconds, not_before, cause });
         self.phase = Phase::Armed { path: next, start, requested: now, previous };
         events
     }

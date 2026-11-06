@@ -167,7 +167,7 @@ fn hotkey_and_recording_events_and_session_fields() {
             DaemonEvent::Bookmarked,
             DaemonEvent::Screenshot { path: "E:/shots/a.png".into() },
             DaemonEvent::RecordingStarted,
-            DaemonEvent::RecordingStopped { path: "E:/rec.mp4".into(), seconds: 61.0, parts: 1, gap_seconds: 0.0 },
+            DaemonEvent::RecordingStopped { path: "E:/rec.mp4".into(), seconds: 61.0, parts: 1, gap_seconds: 0.0, frozen_seconds: 0.0 },
             DaemonEvent::StorageCleaned { removed: 3, freed_bytes: 1000, through: None, used_bytes: 0, cap_bytes: 0 },
             DaemonEvent::StorageCleaned { removed: 2, freed_bytes: 9, through: Some(1_790_000_000), used_bytes: 80, cap_bytes: 100 },
             DaemonEvent::StorageWarning { level: 90, used_bytes: 91, cap_bytes: 100, next_through: Some(1_780_000_000) },
@@ -196,7 +196,7 @@ fn a_continued_recording_maps_to_its_own_events() {
     apply(&mut state, json!({"mod":"engine","event":{"type":"recording_started","path":"E:/G__rec.mp4","continued":false,"part":1,"cause":null}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"recording_stopped","path":"E:/G__rec.mp4","seconds":3540.0,"bytes":9,"continued":true,"parts":1,"total_seconds":3540.0,"cause":"size"}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"recording_started","path":"E:/G__rec-2.mp4","continued":true,"part":2,"cause":"size"}}));
-    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_stopped","path":"E:/G__rec-2.mp4","seconds":60.0,"bytes":9,"continued":false,"parts":2,"total_seconds":3600.0,"gap_seconds":7.5,"cause":null}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_stopped","path":"E:/G__rec-2.mp4","seconds":60.0,"bytes":9,"continued":false,"parts":2,"total_seconds":3600.0,"gap_seconds":7.5,"frozen_seconds":40.0,"cause":null}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"recording_failed","reason":"the video encoder failed","path":"E:/H__rec-2.mp4","paths":["E:/H__rec.mp4","E:/H__rec-2.mp4"]}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"recording_failed","reason":"old engine","path":"E:/I__rec.mp4"}}));
     assert_eq!(
@@ -205,7 +205,7 @@ fn a_continued_recording_maps_to_its_own_events() {
             DaemonEvent::RecordingStarted,
             DaemonEvent::RecordingPartSaved { path: "E:/G__rec.mp4".into() },
             DaemonEvent::RecordingContinued { part: 2, cause: "size".into() },
-            DaemonEvent::RecordingStopped { path: "E:/G__rec-2.mp4".into(), seconds: 3600.0, parts: 2, gap_seconds: 7.5 },
+            DaemonEvent::RecordingStopped { path: "E:/G__rec-2.mp4".into(), seconds: 3600.0, parts: 2, gap_seconds: 7.5, frozen_seconds: 40.0 },
             DaemonEvent::RecordingFailed { reason: "the video encoder failed".into(), files: vec!["E:/H__rec.mp4".into(), "E:/H__rec-2.mp4".into()] },
             DaemonEvent::RecordingFailed { reason: "old engine".into(), files: vec!["E:/I__rec.mp4".into()] },
         ]

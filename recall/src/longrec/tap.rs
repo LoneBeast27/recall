@@ -104,7 +104,7 @@ pub fn on_encoder_open(encoder: &ff::encoder::Video) {
     };
     if ACTIVE.load(Relaxed) {
         if let Some(tx) = SENDER.get() {
-            let _ = tx.try_send(Data::EncoderReopened { generation });
+            let _ = tx.try_send(Data::EncoderReopened { generation, at: Instant::now() });
         }
     }
 }
