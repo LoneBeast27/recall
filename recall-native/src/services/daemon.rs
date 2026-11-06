@@ -18,6 +18,8 @@ mod controller;
 mod protocol;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_pipe;
 
 const PIPE_NAME: &str = "recall-hdr-control";
 const RECONNECT: Duration = Duration::from_secs(1);
