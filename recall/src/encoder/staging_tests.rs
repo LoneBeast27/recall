@@ -195,3 +195,20 @@ fn a_refused_staging_folder_is_neither_used_nor_scanned() {
     assert!(crate::encoder::staging_guard::parse(b"not json").is_empty());
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn a_staging_folder_named_through_a_network_alias_is_still_refused() {
+    let base = sandbox("alias");
+    let clips = base.join("Clips");
+    std::fs::create_dir_all(&clips).unwrap();
+    let real = crate::win_volume::plain(&std::fs::canonicalize(&clips).unwrap());
+    let text = real.to_string_lossy().into_owned();
+    let Some((drive, rest)) = text.split_once(":\\") else { return };
+    let alias = PathBuf::from(format!("\\\\localhost\\{}$\\{rest}", drive.to_ascii_lowercase()));
+    if !alias.exists() {
+        eprintln!("skipped: the admin share is not reachable here");
+        return;
+    }
+    assert!(refused(&alias, std::slice::from_ref(&clips)).is_some(), "one folder under two names");
+    let _ = std::fs::remove_dir_all(&base);
+}

@@ -66,7 +66,13 @@ pub(crate) struct Config {
     pub background: bool,
     /// Stamps the finished `.part` with the staged file's modification time.
     pub stamp: StampFn,
+    /// Do two paths name one file: `Some(true)` / `Some(false)`, `None` when Windows cannot say.
+    pub identity: IdentityFn,
+    /// The destination's metadata (`std::fs::metadata`; a failing one in tests).
+    pub stat: StatFn,
 }
+
+pub(crate) use super::landed::{same_identity, stat_dest, IdentityFn, StatFn};
 
 /// `fn(open .part, staged mtime)`: [`stamp_mtime`], or a failing one in tests.
 pub(crate) type StampFn = fn(&std::fs::File, std::time::SystemTime) -> std::io::Result<()>;
@@ -84,6 +90,8 @@ impl Default for Config {
             same_volume: super::staging::same_volume,
             background: true,
             stamp: stamp_mtime,
+            identity: same_identity,
+            stat: stat_dest,
         }
     }
 }
@@ -334,18 +342,25 @@ pub(crate) fn move_clip(job: &MoveJob, cfg: &Config, abort: &AtomicBool) -> Resu
         kept: None,
         unstamped: None,
     };
-    match std::fs::metadata(&job.dest) {
-        // Staging pointed at the clip folder: the clip is its own destination. Nothing to do,
-        // and above all nothing to delete.
-        Ok(_) if super::landed::same_file(&job.staged, &job.dest) => {
-            moved.how = "already in place";
-            return Ok(moved);
-        }
-        // The rename landed before a crash or quit kept the staged copy (`landed.rs`).
-        Ok(_) if super::landed::same_clip(&job.staged, &job.dest) => moved.how = "already in place",
-        // Never overwrite a different finished file: land beside it.
-        Ok(_) => moved.dest = recovered_path(&part_of(&job.dest), Path::exists),
-        Err(_) => {}
+    match (cfg.stat)(&job.dest) {
+        Ok(_) => match (cfg.identity)(&job.staged, &job.dest) {
+            // Staging pointed at the clip folder (or a link): the clip is its own destination.
+            // Nothing to do, and above all nothing to delete.
+            Some(true) => {
+                moved.how = "already in place";
+                return Ok(moved);
+            }
+            // Windows cannot say whether they are one file: deleting the staged copy could
+            // delete the only one. Keep both; the move is retried later.
+            None => return Err(MoveError::Failed(format!("cannot tell whether {} is the staged clip; both kept", job.dest.display()))),
+            // The rename landed before a crash or quit kept the staged copy (`landed.rs`).
+            Some(false) if super::landed::same_clip(&job.staged, &job.dest) => moved.how = "already in place",
+            // Never overwrite a different finished file: land beside it.
+            Some(false) => moved.dest = recovered_path(&part_of(&job.dest), Path::exists),
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        // Any other error: the destination may exist. Never replace it; keep the staged copy.
+        Err(e) => return Err(failed("check", &job.dest, e)),
     }
     let out_dir = moved.dest.parent().unwrap_or(Path::new("."));
     if moved.how != "already in place" && (cfg.same_volume)(&job.staged, out_dir) {
