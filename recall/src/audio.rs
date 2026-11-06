@@ -9,7 +9,8 @@
 //! Each track runs its own capture thread pushing interleaved f32 samples into a ring
 //! holding the last `buffer_secs`. Every track is kept level with the wall clock
 //! (`apps::Leveller`): silence while its source sends nothing (loopback of a quiet output,
-//! a closed game), and a lost device is reopened every `REOPEN_EVERY` meanwhile. Gain and
+//! a closed game), and a lost device is reopened every `REOPEN_EVERY` meanwhile; a named
+//! device not connected at start waits for its device the same way (`capture_loop`). Gain and
 //! name change live (`sources::set_live`), so the Audio page never restarts the engine. The encoder snapshots rings at save time and encodes AAC
 //! per track — raw PCM in RAM keeps encoder state out of the ring (~23MB / 60s / stereo).
 
@@ -17,10 +18,12 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-use wasapi::{DeviceCollection, Direction, SampleType, StreamMode, WaveFormat};
+use wasapi::{DeviceCollection, Direction};
 
 mod apps;
+mod capture_loop;
 pub mod sources;
+mod stream;
 mod voice;
 
 use sources::{Kind, SourceSpec};
@@ -437,106 +440,9 @@ fn start_track(spec: &SourceSpec, buffer_secs: u32, target: Option<LoopbackTarge
     }
 }
 
-/// How long a track waits between attempts to reopen a device or process it lost.
-const REOPEN_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
-/// The longest wait between reopen attempts after repeated failures.
-const REOPEN_MAX: std::time::Duration = std::time::Duration::from_secs(10);
-
-/// Wait before the next reopen after `failures` failed attempts in a row.
-fn reopen_wait(failures: u32) -> std::time::Duration {
-    REOPEN_EVERY.saturating_mul(1 << failures.saturating_sub(1).min(3)).min(REOPEN_MAX)
-}
-/// No packet for this long: the source is quiet (loopback sends nothing while nothing
-/// plays, a closed game's process sends nothing), so its track gets silence up to the clock.
-const IDLE: std::time::Duration = std::time::Duration::from_millis(200);
-/// Event wait per turn: short, so a quiet source is filled promptly.
-const WAIT_MS: u32 = 100;
-
-/// One open capture stream.
-struct Stream {
-    client: wasapi::AudioClient,
-    event: wasapi::Handle,
-    capture: wasapi::AudioCaptureClient,
-    endpoint: String,
-}
-
-/// Open `target`'s process loopback, else the source's endpoint, and start it. All COM
-/// objects live on the calling (capture) thread.
-fn open_stream(direction: &Direction, device: &str, ring: &TrackRing, target: &Option<LoopbackTarget>, reopen: bool) -> Result<Stream, String> {
-    let format = WaveFormat::new(32, 32, &SampleType::Float, ring.rate as usize, ring.channels as usize, None);
-    let (mut client, endpoint, buffer_duration_hns) = match target {
-        Some(LoopbackTarget { pid, label }) => (
-            wasapi::AudioClient::new_application_loopback_client(*pid, true).map_err(|e| format!("process loopback for PID {pid}: {e}"))?,
-            label.clone(),
-            // Process-loopback clients do not support get_device_period.
-            // 20 ms is the wasapi example's documented safe event period.
-            200_000,
-        ),
-        None => {
-            let (device, endpoint) = pick_device(direction, device, ring.input, reopen)?;
-            let client = device.get_iaudioclient().map_err(|e| e.to_string())?;
-            let (_def_period, min_period) = client.get_device_period().map_err(|e| e.to_string())?;
-            (client, endpoint, min_period)
-        }
-    };
-    let mode = StreamMode::EventsShared { autoconvert: true, buffer_duration_hns };
-    // Loopback = a RENDER endpoint's client initialized Capture-direction.
-    client.initialize_client(&format, &Direction::Capture, &mode).map_err(|e| format!("initialize: {e}"))?;
-    let event = client.set_get_eventhandle().map_err(|e| e.to_string())?;
-    let capture = client.get_audiocaptureclient().map_err(|e| e.to_string())?;
-    client.start_stream().map_err(|e| e.to_string())?;
-    Ok(Stream { client, event, capture, endpoint })
-}
-
-/// Silence up to the wall clock (the source sends nothing right now).
-fn fill_silence(ring: &TrackRing, level: &mut apps::Leveller, started: std::time::Instant) {
-    let frames = level.idle(started.elapsed());
-    if frames > 0 {
-        ring.push_capture(&vec![0.0; frames as usize * ring.channels as usize], false);
-    }
-}
-
-/// Capture until the stream fails. Every packet goes through the track's `Leveller`, so
-/// the ring stays level with the wall clock: a save cuts every track on the same clock
-/// (`encoder::handoff`), quiet stretches included. Returns why the stream ended.
-fn run_stream(ring: &TrackRing, stream: &Stream, level: &mut apps::Leveller, started: std::time::Instant, device: bool) -> String {
-    let block = ring.channels as usize * 4; // f32 frame size in bytes
-    let channels = ring.channels as usize;
-    let mut raw: VecDeque<u8> = VecDeque::new();
-    let mut last_sound = std::time::Instant::now();
-    loop {
-        if stream.event.wait_for_event(WAIT_MS).is_ok() {
-            if let Err(e) = stream.capture.read_from_device_to_deque(&mut raw) {
-                return format!("read failed: {e}");
-            }
-            if raw.len() >= block {
-                let full = raw.len() - raw.len() % block;
-                let samples: Vec<f32> = raw.drain(..full).collect::<Vec<u8>>().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-                ring.push_capture(&level.live(started.elapsed(), &samples, channels), mic_muted());
-                last_sound = std::time::Instant::now();
-                continue;
-            }
-        } else if device {
-            // A device that was unplugged or invalidated answers this with an error.
-            if let Err(e) = stream.client.get_current_padding() {
-                return format!("device lost: {e}");
-            }
-        }
-        if last_sound.elapsed() >= IDLE {
-            fill_silence(ring, level, started);
-        }
-    }
-}
-
-fn set_endpoint(ring: &TrackRing, text: String) {
-    if let Ok(mut g) = ring.endpoint.lock() {
-        *g = text;
-    }
-}
-
-/// The capture thread of a device or game track: open, capture, and when the device or
-/// stream is lost, keep the track level with silence and reopen every `REOPEN_EVERY`.
-/// Only the first open is reported to `start_track` (a source that never opens has no track).
+/// The capture thread of a device or game track (`capture_loop`): open, capture, and when
+/// the device or stream is lost, keep the track level with silence and reopen. A named device
+/// that is not connected at start still gets its track and waits for it by name.
 fn capture_thread(
     direction: Direction,
     device: String,
@@ -546,38 +452,12 @@ fn capture_thread(
 ) {
     // Per-thread COM init; already-initialized is fine.
     let _ = wasapi::initialize_mta();
+    let exact = std::env::var_os("RECALL_AUDIO_EXACT").is_some();
+    let wait_absent = capture_loop::waits_when_absent(&device, target.is_some(), exact);
+    let mut clock = capture_loop::WallClock::start();
     let started = std::time::Instant::now();
-    let mut level = apps::Leveller::new(ring.rate);
-    let mut init_tx = Some(init_tx);
-    // Failed reopens back off: 2 s, 4 s, 8 s, then every 10 s, and back to 2 s once it opens.
-    let mut failures = 0u32;
-    loop {
-        match open_stream(&direction, &device, &ring, &target, init_tx.is_none()) {
-            Ok(stream) => {
-                failures = 0;
-                set_endpoint(&ring, stream.endpoint.clone());
-                if let Some(tx) = init_tx.take() {
-                    let _ = tx.send(Ok(()));
-                }
-                let why = run_stream(&ring, &stream, &mut level, started, target.is_none());
-                let _ = stream.client.stop_stream();
-                eprintln!("[recall] audio track '{}': {why}; reopening", ring.name);
-                set_endpoint(&ring, format!("{} (lost: {why}; reopening)", stream.endpoint));
-            }
-            Err(e) => {
-                if let Some(tx) = init_tx.take() {
-                    let _ = tx.send(Err(e));
-                    return;
-                }
-                failures = failures.saturating_add(1);
-            }
-        }
-        let until = std::time::Instant::now() + reopen_wait(failures);
-        while std::time::Instant::now() < until {
-            std::thread::sleep(std::time::Duration::from_millis(100));
-            fill_silence(&ring, &mut level, started);
-        }
-    }
+    let open = |reopen| stream::open_stream(&direction, &device, &ring, &target, reopen, started.elapsed());
+    capture_loop::capture_loop(&ring, &device, wait_absent, open, init_tx, &mut clock);
 }
 
 #[cfg(test)]
