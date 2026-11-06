@@ -2,7 +2,7 @@
 //! pixels, measured through [`Measure`] (DirectWrite live, a fake in tests).
 //! Every size below is in 1440p pixels and multiplied by the island scale.
 
-use crate::cells::{count, grid, Cells, Fill};
+use crate::cells::{count, Cells, Fill};
 use crate::notice::{NoticeView, SavePhase, Tone};
 use crate::placement::ISLAND_H;
 
@@ -145,6 +145,9 @@ pub struct Scene {
     /// and the pitch from one cell's start to the next (0: not a grid).
     pub cells: usize,
     pub pitch: f32,
+    /// A horizontal pill that draws prose whole: its cells, which the side
+    /// pill stacks instead ([`crate::stack`]).
+    pub tall: Option<Box<Scene>>,
 }
 
 /// The stats island's numbers, ready to draw.
@@ -208,26 +211,37 @@ fn pen(s: f32, m: &dyn Measure) -> Pen<'_> {
 /// A clip save's titles, stage by stage.
 pub const SAVE_TITLES: [&str; 3] = ["Saving", "Clip saved", "Save failed"];
 
-/// Mark, then the title's cells, then the detail's ([`crate::cells`]).
+/// Mark, then the title, then the detail ([`crate::cells`]): compact
+/// fields in square cells, prose as continuous runs on a horizontal pill.
 pub fn notice_scene(notice: &NoticeView, s: f32, m: &dyn Measure) -> Scene {
     let mut cells = Cells::new(s, m);
     cells.push(Fill::Mark(notice.tone, notice.save));
     if notice.detail.is_empty() {
-        cells.run(&notice.title, Role::NoticeUi, Role::NoticeNumber, TEXT);
+        cells.text(&notice.title, Role::NoticeUi, Role::NoticeNumber, TEXT, 0.0);
     } else {
-        cells.run(&notice.title, Role::NoticeTitle, Role::NoticeTitle, MUTED);
         // A save's title changes word by stage: room for the longest, so the
         // pill and the detail never move when the clip lands.
-        if notice.save.is_some() {
+        let hold = notice.save.is_some();
+        let widest = if hold { SAVE_TITLES.iter().map(|t| m.measure(Role::NoticeTitle, s, t).width).fold(0.0, f32::max) } else { 0.0 };
+        cells.text(&notice.title, Role::NoticeTitle, Role::NoticeTitle, MUTED, widest);
+        if hold {
             let most = SAVE_TITLES.iter().map(|t| count(t, Role::NoticeTitle, Role::NoticeTitle, s, m)).max().unwrap_or(0);
             let title = count(&notice.title, Role::NoticeTitle, Role::NoticeTitle, s, m);
             (title..most).for_each(|_| cells.push(Fill::Blank));
+            // The held cells belong to the title's run on a horizontal pill.
+            let end = cells.out.len();
+            if let Some(span) = cells.spans.last_mut() {
+                span.end = end;
+            }
         }
         let detail_role = if notice.game_font { Role::NoticeGame } else { Role::NoticeUi };
-        cells.run(&notice.detail, detail_role, Role::NoticeNumber, TEXT);
+        cells.text(&notice.detail, detail_role, Role::NoticeNumber, TEXT, 0.0);
     }
-    let mut scene = grid(&cells.out, s, m);
+    let mut scene = cells.scene();
     scene.lead = notice.save.is_some();
+    if let Some(tall) = scene.tall.as_mut() {
+        tall.lead = scene.lead;
+    }
     scene
 }
 
@@ -266,7 +280,7 @@ pub fn stats_scene(st: &StatsContent, s: f32, m: &dyn Measure) -> Scene {
         None => dash(&mut cells, Role::Fps, TEXT),
     }
     match (st.fps, st.low1, &st.fps_note) {
-        (None, _, Some(note)) => cells.run(note, Role::Small, Role::Small, TERTIARY),
+        (None, _, Some(note)) => cells.text(note, Role::Small, Role::Small, TERTIARY, 0.0),
         (_, low, _) => {
             cells.push(Fill::Pair(Role::Small, ["1%", "low"], TERTIARY));
             match low {
@@ -285,8 +299,11 @@ pub fn stats_scene(st: &StatsContent, s: f32, m: &dyn Measure) -> Scene {
     }
     cells.push(Fill::Ring(st.cpu, TEXT));
     cells.push(Fill::Text(Role::Small, "CPU".into(), TERTIARY));
-    let mut scene = grid(&cells.out, s, m);
+    let mut scene = cells.scene();
     scene.lead = true; // the record dot stays put through a transformation
+    if let Some(tall) = scene.tall.as_mut() {
+        tall.lead = true;
+    }
     scene
 }
 

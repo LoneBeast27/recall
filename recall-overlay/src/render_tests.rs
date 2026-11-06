@@ -207,3 +207,62 @@ fn three_digits_fit_a_number_cell_in_the_real_font() {
         assert!(cells.fits(Role::NoticeTitle, word) && cells.fits(Role::Small, word), "{word}");
     }
 }
+
+/// `RECALL_NOTICES_PNG=path`: the island editor's hint and the fullscreen
+/// notice at 1x, horizontal (prose whole) and vertical (stacked by word),
+/// through the real renderer and fonts. No window.
+#[test]
+#[ignore]
+fn notices_png() {
+    use crate::layout::notice_scene;
+    use crate::notice::{NoticeView, Tone};
+    use crate::placement::{EDGE, REF_HEIGHT};
+    let Some(path) = std::env::var_os("RECALL_NOTICES_PNG").map(std::path::PathBuf::from) else { return };
+    let (fonts, mut renderer) = (Fonts::new().unwrap(), Renderer::new().unwrap());
+    let notices = [
+        NoticeView::new(Tone::Neutral, crate::app::editor::HINT_TITLE, crate::app::editor::HINT_DETAIL, false),
+        NoticeView::new(Tone::Failure, "Island hidden by fullscreen", "Rocket League runs in exclusive fullscreen.", false),
+    ];
+    let mut tiles: Vec<(i32, i32, Vec<[u8; 4]>)> = Vec::new();
+    for turn in [Turn::None, Turn::Right] {
+        for notice in &notices {
+            let flat = notice_scene(notice, 1.0, &fonts);
+            let scene = match turn {
+                Turn::None => flat,
+                _ => crate::stack::stack_within(&flat, 1.0, &fonts, REF_HEIGHT - 2.0 * EDGE),
+            };
+            let look = Look { turn, align: 0.5, ..Look::open(Frame { w: scene.w, h: scene.h, alpha: 1.0 }) };
+            let (w, h) = renderer.draw(&fonts, &scene, look, 1.0, Layers::default()).unwrap();
+            tiles.push((w, h, renderer.pixels(w, h)));
+        }
+    }
+    // Horizontal pills stacked on the left, the side pills in columns to their right.
+    let pad = 32;
+    let left_w = tiles[..2].iter().map(|t| t.0).max().unwrap();
+    let cw = pad + left_w + tiles[2..].iter().map(|t| pad + t.0).sum::<i32>() + pad;
+    let ch = pad + tiles[2..].iter().map(|t| t.1).max().unwrap().max(tiles[0].1 + tiles[1].1 + pad) + pad;
+    let mut rgba: Vec<u8> = [58u8, 62, 70, 255].repeat((cw * ch) as usize);
+    let mut place = |(w, h, px): &(i32, i32, Vec<[u8; 4]>), ox: i32, oy: i32| {
+        for (i, [b, g, r, a]) in px.iter().copied().enumerate() {
+            let (x, y) = (ox + i as i32 % w, oy + i as i32 / w);
+            let o = ((y * cw + x) * 4) as usize;
+            let under = 1.0 - a as f32 / 255.0;
+            for (c, src) in [r, g, b].into_iter().enumerate() {
+                rgba[o + c] = (src as f32 + rgba[o + c] as f32 * under).round().min(255.0) as u8;
+            }
+        }
+        let _ = h;
+    };
+    place(&tiles[0], pad, pad);
+    place(&tiles[1], pad, pad * 2 + tiles[0].1);
+    let mut x = pad + left_w + pad;
+    for tile in &tiles[2..] {
+        place(tile, x, pad);
+        x += tile.0 + pad;
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    std::fs::write(&path, crate::png::encode(cw as u32, ch as u32, &rgba)).unwrap();
+    println!("wrote {} ({cw}x{ch})", path.display());
+}

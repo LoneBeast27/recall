@@ -120,10 +120,11 @@ fn three_digits_fit_a_number_cell() {
 #[test]
 fn the_longest_notice_fits_a_1440p_edge_both_ways() {
     let (title, detail) = ("W".repeat(32), "W".repeat(40));
-    let flat = notice_scene(&NoticeView::new(Tone::Neutral, &title, detail, false), 1.0, &Fake);
-    assert_eq!(words(&flat).concat().chars().count(), 72, "every glyph has a cell");
-    assert!(words(&flat).iter().all(|g| g.chars().count() <= 3), "3 glyphs a cell at most");
+    let flat = notice_scene(&NoticeView::new(Tone::Neutral, &title, detail.clone(), false), 1.0, &Fake);
+    assert_eq!(words(&flat), [title.clone(), detail], "horizontal: each run whole");
     let tall = stack(&flat, 1.0, &Fake);
+    assert_eq!(words(&tall).concat().chars().count(), 72, "vertical: every glyph has a cell");
+    assert!(words(&tall).iter().all(|g| g.chars().count() <= 3), "3 glyphs a cell at most");
     for scene in [&flat, &tall] {
         assert!(scene.w <= REF_HEIGHT - 2.0 * EDGE, "72 glyphs fit: {}", scene.w);
     }
@@ -148,13 +149,63 @@ fn a_column_longer_than_the_side_ends_in_an_ellipsis_cell() {
 fn a_saves_stages_keep_the_detail_cells_put() {
     let stage = |tone, title: &str, phase| notice_scene(&NoticeView::new(tone, title, "VALORANT · 0:30", true).saving(phase), 1.3, &Fake);
     let (saving, saved) = (stage(Tone::Recording, "Saving", SavePhase::Saving), stage(Tone::Success, "Clip saved", SavePhase::Saved));
-    assert_eq!((saving.w, saving.cells), (saved.w, saved.cells), "one length for both stages");
+    assert_eq!(saving.w, saved.w, "one length for both stages");
     let at = |scene: &Scene, needle: &str| scene.texts.iter().find(|t| t.text == needle).map(|t| (t.x, t.y));
-    for cell in ["VAL", "00", "30"] {
-        assert_eq!(at(&saving, cell), at(&saved, cell), "{cell} stays put");
-    }
+    assert_eq!(at(&saving, "VALORANT · 0:30"), at(&saved, "VALORANT · 0:30"), "the detail stays put");
     assert!(saving.lead && saved.lead);
     assert_eq!(saving.icon.unwrap().badge, Some(SavePhase::Saving));
-    // "VALORANT · 0:30": a dot in the gap before the timer, a colon inside it.
-    assert_eq!(saved.shapes.iter().filter(|s| matches!(s, Shape::Dot { .. })).count(), 3);
+    // The side pill: the same cell count for both stages, the detail's cells put.
+    let (a, b) = (stack(&saving, 1.3, &Fake), stack(&saved, 1.3, &Fake));
+    assert_eq!((a.w, a.cells), (b.w, b.cells));
+    for cell in ["VAL", "00", "30"] {
+        assert_eq!(at(&a, cell), at(&b, cell), "{cell} stays put down the side");
+    }
+    // "VALORANT · 0:30" in cells: a dot in the gap before the timer, a colon inside it.
+    assert_eq!(b.shapes.iter().filter(|s| matches!(s, Shape::Dot { .. })).count(), 3);
+    assert!(saved.shapes.is_empty(), "horizontal: the run carries its own dot and colon");
+}
+
+/// Rohan: prose is never chopped into 3-letter cells. A horizontal pill
+/// draws each sentence as one run; only compact fields take square cells.
+#[test]
+fn horizontal_prose_is_one_run_per_sentence_with_no_cell_splits() {
+    use crate::cells::is_prose;
+    let hint = NoticeView::new(Tone::Neutral, "Island editor", "Drag to place · right-click cancel · ⟲ auto", false);
+    let fullscreen = NoticeView::new(Tone::Failure, "Island hidden by fullscreen", "Rocket League runs in exclusive fullscreen.", false);
+    for notice in [&hint, &fullscreen] {
+        let flat = notice_scene(notice, 1.0, &Fake);
+        assert_eq!(words(&flat), [notice.title.clone(), notice.detail.clone()], "two runs, whole");
+        assert!(flat.tall.is_some(), "the cells are kept for the side pill");
+        let [title, detail] = &flat.texts[..] else { panic!() };
+        assert!(title.x + Fake.measure(title.role, 1.0, &title.text).width < detail.x, "title, then detail, apart");
+        let end = detail.x + Fake.measure(detail.role, 1.0, &detail.text).width;
+        assert!((flat.w - end - 20.0).abs() <= 1.0, "20 px after the last run: {} vs {end}", flat.w);
+    }
+    let saved = notice_scene(&NoticeView::new(Tone::Success, "Clip saved", "VALORANT", true), 1.0, &Fake);
+    assert_eq!(words(&saved), ["Clip saved", "VALORANT"], "a game name is prose too");
+    // Compact fields stay square cells.
+    assert_eq!(words(&notice_scene(&rec("1:23"), 1.0, &Fake)), ["REC", "01", "23"]);
+    assert!(notice_scene(&rec("1:23"), 1.0, &Fake).tall.is_none());
+    for compact in ["REC", "64°", "0:30…", "144", "x"] {
+        assert!(!is_prose(compact), "{compact}");
+    }
+    for prose in ["Saving", "disk full", "No frame timing", "VALORANT · 0:30"] {
+        assert!(is_prose(prose), "{prose}");
+    }
+}
+
+/// The side pill keeps the stacking rule: whole words, upright, up to 3
+/// glyphs a line, a 1-3 glyph word whole; long prose caps with "…".
+#[test]
+fn vertical_prose_stacks_by_word() {
+    let hint = NoticeView::new(Tone::Neutral, "Island editor", "Drag to place · right-click cancel · ⟲ auto", false);
+    let tall = stack(&notice_scene(&hint, 1.0, &Fake), 1.0, &Fake);
+    assert!(tall.stacked);
+    assert_eq!(
+        words(&tall),
+        ["Isl", "and", "edi", "tor", "Dr", "ag", "to", "pla", "ce", "rig", "ht-", "cli", "ck", "can", "cel", "⟲", "au", "to"]
+    );
+    assert!(words(&tall).iter().all(|w| w.chars().count() <= 3));
+    let capped = stack_within(&notice_scene(&hint, 1.0, &Fake), 1.0, &Fake, 400.0);
+    assert!(capped.w <= 400.0 && words(&capped).last().map(String::as_str) == Some("…"));
 }
