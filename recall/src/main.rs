@@ -42,6 +42,8 @@ mod gpu;
 #[cfg(feature = "encode")]
 mod gpu_frames;
 mod gpu_route;
+#[cfg(test)]
+mod hw_skip;
 mod hdr;
 mod hud_probe;
 mod hybrid_gpu;

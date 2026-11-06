@@ -31,6 +31,10 @@ mod reopen;
 mod replay;
 #[cfg(test)]
 mod recover_tests;
+#[cfg(test)]
+mod headers_tests;
+#[cfg(test)]
+mod decode_tests;
 mod saver;
 mod space;
 mod staging;
@@ -228,6 +232,15 @@ fn open_checked(cfg: &Config, want: Codec, frame: &PacedFrame, _stats: &EncStats
         return Err(e);
     }
     open_encoder(cfg, want, frame.width, frame.height, frame.gpu.as_ref())
+}
+
+/// How long a GPU-path try waits for its answer (tests shorten it).
+fn probe_verdict(_stats: &EncStats) -> Duration {
+    #[cfg(test)]
+    if _stats.faults.fast.load(Relaxed) {
+        return Duration::from_secs(2);
+    }
+    reopen::PROBE_VERDICT
 }
 
 /// The GPU-path retry schedule (tests shorten it).
