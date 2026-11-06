@@ -12,6 +12,8 @@
 //!   `RECALL_STAGING_DIR=off` turns staging off.
 //! - A save is staged only when the staging folder is on a different volume
 //!   than its clip folder ([`same_volume`]); otherwise it is written in place.
+//!   It is also written in place when the staging drive is short of space or
+//!   fills up mid-mux (`space.rs`).
 //! - Per-clip sidecars are written against the FINAL path, straight into the
 //!   clip folder: the bookmark sidecar (`bookmarks.rs`, on the `saved` event)
 //!   and the gallery thumbnail (`mux::finish_gallery`, which
@@ -57,7 +59,7 @@ pub(crate) fn recovery_dir(env: Option<&str>, exe: Option<&Path>) -> Option<Path
 
 /// Comparable volume identity: `C:` for drive paths, `\\server\share` for UNC
 /// (case-folded); `None` when the path has no prefix to compare.
-fn volume_key(path: &Path) -> Option<String> {
+pub(crate) fn volume_key(path: &Path) -> Option<String> {
     let abs = std::path::absolute(path).ok()?;
     let Some(Component::Prefix(prefix)) = abs.components().next() else { return None };
     Some(match prefix.kind() {
