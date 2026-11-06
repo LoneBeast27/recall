@@ -168,7 +168,7 @@ fn hotkey_and_recording_events_and_session_fields() {
             DaemonEvent::Bookmarked,
             DaemonEvent::Screenshot { path: "E:/shots/a.png".into() },
             DaemonEvent::RecordingStarted,
-            DaemonEvent::RecordingStopped { path: "E:/rec.mp4".into(), seconds: 61.0 },
+            DaemonEvent::RecordingStopped { path: "E:/rec.mp4".into(), seconds: 61.0, parts: 1 },
             DaemonEvent::StorageCleaned { removed: 3, freed_bytes: 1000, through: None, used_bytes: 0, cap_bytes: 0 },
             DaemonEvent::StorageCleaned { removed: 2, freed_bytes: 9, through: Some(1_790_000_000), used_bytes: 80, cap_bytes: 100 },
             DaemonEvent::StorageWarning { level: 90, used_bytes: 91, cap_bytes: 100, next_through: Some(1_780_000_000) },
@@ -187,6 +187,26 @@ fn hotkey_and_recording_events_and_session_fields() {
     assert_eq!(session.stats_hotkey, "Alt+P");
     assert_eq!(session.overlay_hotkey, "Alt+O");
     assert_eq!(session.editor_hotkey, "Alt+U");
+}
+
+/// Merge gate 11-07 (P1): `continued` was ignored, so a part change read as
+/// "Recording saved" then "Recording started".
+#[test]
+fn a_continued_recording_maps_to_its_own_events() {
+    let mut state = connected();
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_started","path":"E:/G__rec.mp4","continued":false,"part":1,"cause":null}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_stopped","path":"E:/G__rec.mp4","seconds":3540.0,"bytes":9,"continued":true,"parts":1,"total_seconds":3540.0,"cause":"size"}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_started","path":"E:/G__rec-2.mp4","continued":true,"part":2,"cause":"size"}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_stopped","path":"E:/G__rec-2.mp4","seconds":60.0,"bytes":9,"continued":false,"parts":2,"total_seconds":3600.0,"cause":null}}));
+    assert_eq!(
+        state.events,
+        vec![
+            DaemonEvent::RecordingStarted,
+            DaemonEvent::RecordingPartSaved { path: "E:/G__rec.mp4".into() },
+            DaemonEvent::RecordingContinued { part: 2, cause: "size".into() },
+            DaemonEvent::RecordingStopped { path: "E:/G__rec-2.mp4".into(), seconds: 3600.0, parts: 2 },
+        ]
+    );
 }
 
 #[test]

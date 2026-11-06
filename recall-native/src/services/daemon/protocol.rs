@@ -148,10 +148,21 @@ impl State {
             "bookmarked" => DaemonEvent::Bookmarked,
             "screenshot" => DaemonEvent::Screenshot { path: path() },
             "screenshot_failed" => DaemonEvent::ScreenshotFailed { reason: string_of(event, "reason").unwrap_or_else(|| "Screenshot failed.".into()) },
+            // A recording whose stream changed goes on in a new file (`continued`).
+            "recording_started" if bool_of(event, "continued") => DaemonEvent::RecordingContinued {
+                part: u64_of(event, "part").clamp(2, u64::from(u32::MAX)) as u32,
+                cause: string_of(event, "cause").unwrap_or_default(),
+            },
             "recording_started" => DaemonEvent::RecordingStarted,
             "clip_moved" => DaemonEvent::ClipMoved { path: path(), kept_path: string_of(event, "kept_path") },
             "clip_move_failed" => DaemonEvent::ClipMoveFailed { path: path(), reason: string_of(event, "reason").unwrap_or_default() },
-            "recording_stopped" => DaemonEvent::RecordingStopped { path: path(), seconds: f64_of(event, "seconds") },
+            "recording_stopped" if bool_of(event, "continued") => DaemonEvent::RecordingPartSaved { path: path() },
+            // `total_seconds`/`parts` (every part); an older engine sends only this file's `seconds`.
+            "recording_stopped" => DaemonEvent::RecordingStopped {
+                path: path(),
+                seconds: event.get("total_seconds").and_then(Value::as_f64).unwrap_or_else(|| f64_of(event, "seconds")),
+                parts: u64_of(event, "parts").clamp(1, u64::from(u32::MAX)) as u32,
+            },
             "recording_failed" => DaemonEvent::RecordingFailed { reason: string_of(event, "reason").unwrap_or_else(|| "Recording failed.".into()) },
             // encoder_log and unknown engine lines carry nothing the UI shows.
             _ => return,

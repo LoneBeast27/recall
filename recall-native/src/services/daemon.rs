@@ -218,7 +218,13 @@ pub enum DaemonEvent {
     Screenshot { path: String },
     ScreenshotFailed { reason: String },
     RecordingStarted,
-    RecordingStopped { path: String, seconds: f64 },
+    /// A recording whose stream changed goes on in part `part` (2, 3, ...). `cause`: the
+    /// engine's "size" | "input" (GPU / CPU frames) | "encoder".
+    RecordingContinued { part: u32, cause: String },
+    /// A finished part of a recording that goes on: listed, no toast.
+    RecordingPartSaved { path: String },
+    /// `seconds`: the whole recording, every part; `parts`: the files it took.
+    RecordingStopped { path: String, seconds: f64, parts: u32 },
     RecordingFailed { reason: String },
     /// A clip saved to the SSD first reached the clip folder. `kept_path`: the engine kept its
     /// staged copy there for the SSD video cache (`storage::adopt_kept`).

@@ -10,8 +10,36 @@ use crate::{
     worker::Job,
 };
 
+/// The long recording's toast for `event`: one per change. A continued part's stop
+/// shows none (the next part's start says "continues in part N"); the final stop
+/// shows the whole length and, past one file, how many it took.
+fn recording_toast(event: &DaemonEvent) -> Option<(ToastKind, String, Option<String>)> {
+    match event {
+        DaemonEvent::RecordingStarted => Some((ToastKind::Info, "Recording started".into(), Some("Press the same shortcut again to stop.".into()))),
+        DaemonEvent::RecordingContinued { part, cause } => Some((ToastKind::Info, format!("Recording continues in part {part}"), Some(cause_text(cause).into()))),
+        DaemonEvent::RecordingStopped { seconds, parts, .. } => {
+            let detail = (*parts > 1).then(|| format!("{parts} files"));
+            Some((ToastKind::Good, format!("Recording saved · {}", format_duration(*seconds)), detail))
+        }
+        _ => None,
+    }
+}
+
+/// What changed, from the engine's `cause`.
+fn cause_text(cause: &str) -> &'static str {
+    match cause {
+        "size" => "The game's size changed",
+        "input" => "Capture switched between GPU and CPU frames",
+        "encoder" => "The video encoder restarted",
+        _ => "The capture changed",
+    }
+}
+
 impl Root {
     pub(super) fn on_daemon_event(&mut self, event: DaemonEvent) {
+        if let Some((kind, text, detail)) = recording_toast(&event) {
+            self.show_toast(kind, text, detail);
+        }
         match event {
             DaemonEvent::Saved { path, seconds, .. } => {
                 record_interaction(Interaction::Saved(path.clone()));
@@ -36,10 +64,10 @@ impl Root {
                 self.show_toast(ToastKind::Good, "Screenshot saved", name);
             }
             DaemonEvent::ScreenshotFailed { reason } => self.show_toast(ToastKind::Bad, "Screenshot failed", Some(reason)),
-            DaemonEvent::RecordingStarted => self.show_toast(ToastKind::Info, "Recording started", Some("Press the same shortcut again to stop.".into())),
-            DaemonEvent::RecordingStopped { path, seconds } => {
+            // Toasts: `recording_toast` above.
+            DaemonEvent::RecordingStarted | DaemonEvent::RecordingContinued { .. } => {}
+            DaemonEvent::RecordingStopped { path, .. } | DaemonEvent::RecordingPartSaved { path } => {
                 record_interaction(Interaction::Saved(path));
-                self.show_toast(ToastKind::Good, format!("Recording saved · {}", format_duration(seconds)), None);
                 self.workers.job(Job::List);
             }
             DaemonEvent::RecordingFailed { reason } => self.show_toast(ToastKind::Bad, "Recording failed", Some(reason)),
@@ -120,5 +148,25 @@ impl Root {
             LibraryChange::FolderLost(folder) => self.show_toast(ToastKind::Bad, "A clip folder is unavailable", Some(folder)),
             LibraryChange::FolderBack(folder) => self.show_toast(ToastKind::Good, "A clip folder is back", Some(folder)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DaemonEvent, ToastKind, recording_toast};
+
+    /// Merge gate 11-07 (P1/P2): Alt+Enter at minute 59 toasted "Recording saved · 59:00" then
+    /// "Recording started"; the final toast gave the last part's length only.
+    #[test]
+    fn a_continued_recording_toasts_once_and_the_final_stop_gives_the_whole_length() {
+        assert_eq!(recording_toast(&DaemonEvent::RecordingPartSaved { path: "E:/G__rec.mp4".into() }), None, "a part's stop is quiet");
+        let toast = recording_toast(&DaemonEvent::RecordingContinued { part: 2, cause: "size".into() });
+        assert_eq!(toast, Some((ToastKind::Info, "Recording continues in part 2".into(), Some("The game's size changed".into()))));
+        let toast = recording_toast(&DaemonEvent::RecordingContinued { part: 3, cause: "input".into() });
+        assert_eq!(toast.and_then(|t| t.2).as_deref(), Some("Capture switched between GPU and CPU frames"), "the reason matches the cause");
+        let toast = recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec-3.mp4".into(), seconds: 3725.0, parts: 3 });
+        assert_eq!(toast, Some((ToastKind::Good, "Recording saved · 1:02:05".into(), Some("3 files".into()))));
+        let toast = recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec.mp4".into(), seconds: 61.0, parts: 1 });
+        assert_eq!(toast, Some((ToastKind::Good, "Recording saved · 1:01".into(), None)), "one file reads as before");
     }
 }

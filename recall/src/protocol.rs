@@ -131,19 +131,26 @@ pub enum Outbound {
     },
     /// A manual long recording is writing; `path` is the final name (the file
     /// is `<path>.part` until it stops).
-    /// `continued`: the next part of a running recording whose capture size
-    /// changed (it follows a `recording_stopped` with `continued`).
+    /// `continued`: part `part` (2, 3, ...) of a running recording whose stream
+    /// changed (`cause`: "size" | "input" (GPU / CPU frames) | "encoder"); it
+    /// follows a `recording_stopped` with `continued`. A fresh start is part 1, cause null.
     RecordingStarted {
         path: String,
         continued: bool,
+        part: u32,
+        cause: Option<&'static str>,
     },
-    /// `continued`: only this part ended (the capture size changed); the
-    /// recording goes on in a new file, reported by the next `recording_started`.
+    /// `seconds`/`bytes`: this file. `parts`: files so far, `total_seconds`: all of them.
+    /// `continued`: only this part ended (`cause` as above); the recording goes on
+    /// in a new file, reported by the next `recording_started`.
     RecordingStopped {
         path: String,
         seconds: f64,
         bytes: u64,
         continued: bool,
+        parts: u32,
+        total_seconds: f64,
+        cause: Option<&'static str>,
     },
     /// `path`: the partial recording that was kept (renamed to its final name),
     /// or null when nothing was written.
