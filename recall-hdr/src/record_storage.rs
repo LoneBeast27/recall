@@ -296,7 +296,7 @@ pub fn favourites_at(path: &Path) -> Result<HashSet<String>, String> {
     }
 }
 
-/// Move `files` to the Recycle Bin in one shell operation.
+/// Move `files` (one clip and its companions) to the Recycle Bin in one shell operation.
 pub fn recycle(files: &[PathBuf]) -> Result<(), String> {
     use std::os::windows::ffi::OsStrExt;
     use windows::core::{BOOL, PCWSTR};
@@ -369,34 +369,42 @@ pub(crate) type PlanFn = fn(&Path, u32) -> Result<(Plan, Listing), String>;
 /// Moves files to the Recycle Bin (production: [`recycle`]; tests inject one).
 pub(crate) type RecycleFn = fn(&[PathBuf]) -> Result<(), String>;
 
-/// One cap run. `wanted` is asked right before the Recycle Bin call: the
-/// listing can take long on a sleeping NAS, and a run whose cap or folder is
-/// no longer the user's setting must move nothing.
+/// One cap run: one Recycle Bin call per clip (with its thumbnails and
+/// sidecars), oldest first. `wanted` is asked before EVERY call: the listing
+/// can take long on a sleeping NAS and each call takes a moment on an HDD,
+/// and once the cap or folder is no longer the user's setting nothing more
+/// moves. The first failed call ends the run.
 pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: &dyn Fn() -> bool, recycle: RecycleFn) -> Result<Outcome, String> {
     let (plan, listing) = plan(dir, cap_gb)?;
     let cap = cap_gb as u64 * GIB;
     let mut out = Outcome { removed: 0, freed: 0, through: None, used: plan.total, cap, next: plan.next, stuck: plan.stuck(cap) };
-    if plan.remove.is_empty() {
-        return Ok(out);
+    let mut failed = None;
+    for name in &plan.remove {
+        if !wanted() {
+            log!("storage: the storage limit or folder changed during the run; stopped after {} clip(s)", out.removed);
+            break;
+        }
+        let moved = recycle(&companions(dir, name, &listing));
+        if let Some(c) = listing.clips.iter().find(|c| c.name == *name).filter(|c| !dir.join(&c.name).exists()) {
+            out.removed += 1;
+            out.freed += c.bytes;
+            out.through = out.through.max(Some(c.modified));
+        }
+        if let Err(e) = moved {
+            failed = Some(e);
+            break;
+        }
     }
-    if !wanted() {
-        log!("storage: the storage limit or folder changed during the run; nothing moved");
-        return Ok(out);
-    }
-    let files: Vec<PathBuf> = plan.remove.iter().flat_map(|c| companions(dir, c, &listing)).collect();
-    let moved = recycle(&files);
-    let gone: Vec<&ClipFile> = listing.clips.iter().filter(|c| plan.remove.contains(&c.name) && !dir.join(&c.name).exists()).collect();
-    out.removed = gone.len();
-    out.freed = gone.iter().map(|c| c.bytes).sum();
-    out.through = gone.iter().map(|c| c.modified).max();
     out.used = plan.total - out.freed;
-    // A partial move still reports what went (the toast names the date); the error follows.
-    if out.removed == 0 {
-        moved?;
-    } else if let Err(e) = moved {
-        log!("storage: {e} (after {} clip(s) went)", out.removed);
+    // A partial run still reports what went (the toast names the date); the error follows.
+    match failed {
+        Some(e) if out.removed == 0 => Err(e),
+        Some(e) => {
+            log!("storage: {e} (after {} clip(s) went)", out.removed);
+            Ok(out)
+        }
+        None => Ok(out),
     }
-    Ok(out)
 }
 
 pub fn cleaned_event(o: &Outcome) -> String {
