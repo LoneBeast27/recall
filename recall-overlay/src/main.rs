@@ -28,7 +28,9 @@ mod session;
 mod single_instance;
 mod smoke;
 mod stats;
+mod trace;
 mod window;
+mod zorder;
 
 use std::cell::RefCell;
 use std::io::{BufRead, BufReader, Write};
@@ -163,6 +165,15 @@ fn run() -> Result<(), String> {
     app.corner = options.corner.clone();
     if options.smoke_state.is_none() {
         app.load_hud_cache(dynamic::HudCache::default_path());
+        app.trace = trace::Trace::open(trace::Trace::default_path(), trace::LIMIT);
+        let line = format!(
+            "start: pid {} parent {:?} corner {} capture exclusion {}",
+            std::process::id(),
+            options.parent,
+            options.corner,
+            capture_exclusion_result
+        );
+        app.trace.event(&line);
     }
     app.diagnostics_path = options.diagnostics.clone();
     app.capture_exclusion_requested = !options.smoke_allow_capture;

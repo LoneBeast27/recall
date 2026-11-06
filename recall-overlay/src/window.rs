@@ -71,7 +71,7 @@ pub(super) fn target_monitor(hwnd: Option<isize>, pid: Option<u32>) -> (Rect, Re
     (full, if covers { full } else { work })
 }
 
-fn monitor_rects(monitor: HMONITOR) -> (Rect, Rect) {
+pub(super) fn monitor_rects(monitor: HMONITOR) -> (Rect, Rect) {
     let mut info = MONITORINFO { cbSize: std::mem::size_of::<MONITORINFO>() as u32, ..Default::default() };
     if !unsafe { GetMonitorInfoW(monitor, &mut info) }.as_bool() {
         let fallback = Rect { left: 0, top: 0, right: 1920, bottom: 1080 };
