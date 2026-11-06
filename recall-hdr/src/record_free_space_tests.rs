@@ -76,7 +76,7 @@ fn unresolved_folders_are_named_from_the_path_and_the_engine_staging_folder() {
 #[test]
 fn free_event_shape() {
     let v: Value = serde_json::from_str(&free_event("C:", 3 * GIB, FIVE_GB)).unwrap();
-    assert_eq!(v, serde_json::json!({"type":"storage_warning","level":"free","drive":"C:","free_bytes":3 * GIB,"need_bytes":FIVE_GB}));
+    assert_eq!(v, serde_json::json!({"type":"disk_low","drive":"C:","free_bytes":3 * GIB,"need_bytes":FIVE_GB}));
 }
 
 #[test]

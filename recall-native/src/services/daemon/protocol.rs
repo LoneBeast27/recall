@@ -63,18 +63,25 @@ impl State {
                 used_bytes: u64_of(event, "used_bytes"),
                 cap_bytes: u64_of(event, "cap_bytes"),
             }),
-            // `level:"free"`: a drive is short of free space (no cap involved).
-            ("session", "storage_warning") if event.get("level").and_then(Value::as_str) == Some("free") => self.push(DaemonEvent::DiskLow {
+            // A drive is short of free space (no cap involved). Its own type, so an app
+            // that predates it ignores it instead of showing a cap toast.
+            ("session", "disk_low") => self.push(DaemonEvent::DiskLow {
                 drive: string_of(event, "drive").unwrap_or_default(),
                 free_bytes: u64_of(event, "free_bytes"),
                 need_bytes: u64_of(event, "need_bytes"),
             }),
-            ("session", "storage_warning") => self.push(DaemonEvent::StorageWarning {
-                level: u64_of(event, "level").min(100) as u8,
-                used_bytes: u64_of(event, "used_bytes"),
-                cap_bytes: u64_of(event, "cap_bytes"),
-                next_through: opt_u64(event, "next_through"),
-            }),
+            // Cap warnings carry a percent level (80, 90, 100); a level this app does not
+            // know (a string, 0, over 100, missing) is ignored, never a "0% of the limit" toast.
+            ("session", "storage_warning") => {
+                if let Some(level) = event.get("level").and_then(Value::as_u64).filter(|l| (1..=100).contains(l)) {
+                    self.push(DaemonEvent::StorageWarning {
+                        level: level as u8,
+                        used_bytes: u64_of(event, "used_bytes"),
+                        cap_bytes: u64_of(event, "cap_bytes"),
+                        next_through: opt_u64(event, "next_through"),
+                    });
+                }
+            }
             ("session", "storage_preview") => self.push(DaemonEvent::StoragePreview {
                 cap_gb: u64_of(event, "cap_gb").min(u64::from(u32::MAX)) as u32,
                 used_bytes: u64_of(event, "used_bytes"),
