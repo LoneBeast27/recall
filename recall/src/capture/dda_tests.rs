@@ -14,7 +14,7 @@ fn run(fp16: bool, secs: f64) -> Report {
     let monitor = windows_capture::monitor::Monitor::primary().expect("primary monitor");
     let shared = super::super::CaptureShared::new();
     shared.fp16.store(fp16, Relaxed);
-    let control = super::start(HMONITOR(monitor.as_raw_hmonitor()), shared.clone(), super::super::capture_interval(60))
+    let control = super::start(HMONITOR(monitor.as_raw_hmonitor()), shared.clone(), super::super::start::capture_interval(60), None)
         .expect("dda starts on the primary monitor");
     std::thread::sleep(Duration::from_secs_f64(secs));
     let stats = control.stats.clone();

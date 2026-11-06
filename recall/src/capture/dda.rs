@@ -1,14 +1,20 @@
 //! Monitor capture through DXGI Desktop Duplication (`IDXGIOutput5::DuplicateOutput1`), as
 //! OBS Display Capture does. Unlike WGC it draws no yellow capture border and needs no
 //! Borderless permission (which this PC's Windows build denies to unpackaged apps).
+//! Opt-in for now: `RECALL_CAPTURE=dda` (`dda_logic::dda_wanted`).
 //!
-//! One thread owns the duplication: `AcquireNextFrame` blocks with a timeout, a new image is
-//! copied once into our own shader-readable texture (`CopyResource`), the frame is released
-//! at once, and the copy goes down the same `Handler` path as a WGC frame (zero-copy GPU
-//! tonemap -> NVENC, or the CPU readback fallback). Frames above the capture rate are
-//! released unread. A lost duplication (mode change, exclusive fullscreen switch, UAC secure
-//! desktop) is made again on the same device with backoff, so the encoder and replay buffer
-//! keep running; a new size flows through the per-frame size handling WGC uses.
+//! One thread owns the duplication. It waits (high-resolution timer) until the next capture
+//! slot, then `AcquireNextFrame` blocks with a timeout; a new image goes straight from the
+//! acquired surface down the same `Handler` path as a WGC frame (the GPU path waits until
+//! the GPU has read it and copies it itself only when the surface cannot be bound), and the
+//! frame is released before the next acquire.
+//!
+//! A lost duplication (mode change, exclusive fullscreen switch, UAC secure desktop, monitor
+//! sleep or replug) is made again, looking the monitor's output up again each time, on the
+//! same device with backoff, so the encoder and replay buffer keep running; a new size flows
+//! through the per-frame size handling WGC uses. A lost device, or re-creates failing for
+//! longer than `dda_logic::GIVE_UP`, marks Desktop Duplication failed for the run and asks
+//! the engine to restart capture, which then lands on WGC (`CaptureShared::restart_reason`).
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::{mpsc, Arc, Mutex};
@@ -16,21 +22,22 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use windows::core::Interface;
-use windows::Win32::Foundation::HMODULE;
-use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
-use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D, D3D11_TEXTURE2D_DESC};
+use windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT;
 use windows::Win32::Graphics::Dxgi::*;
 use windows::Win32::Graphics::Gdi::HMONITOR;
-use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+use windows::Win32::System::Performance::QueryPerformanceFrequency;
 use windows::Win32::UI::HiDpi::{SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 
+use super::dda_dxgi::{device_on, find_target, present_or_now, Readback, Target, Timer};
 use super::dda_logic::{self as logic, Action, Pace, Pacer};
-use super::{CaptureError, CaptureShared, Handler, Source};
+use super::{CaptureShared, Handler, Source};
 use crate::framing::Rect;
 
 /// `AcquireNextFrame` timeout: how often an idle capture checks for stop.
 const ACQUIRE_TIMEOUT_MS: u32 = 100;
+/// How often a window-following capture checks that the window still covers its monitor.
+const FOLLOW_CHECK: Duration = Duration::from_secs(1);
 
 /// Counters for logs and the headless check.
 #[derive(Default)]
@@ -80,16 +87,11 @@ impl Drop for DdaControl {
     }
 }
 
-/// The output that shows `monitor` and the adapter that drives it.
-struct Target {
-    adapter: IDXGIAdapter1,
-    output: IDXGIOutput1,
-    adapter_name: String,
-}
-
-/// Start duplicating `monitor` in the format `shared.fp16` holds. Setup runs on the capture
-/// thread (the COM objects stay there); an Err is the reason to use WGC instead.
-pub fn start(monitor: HMONITOR, shared: Arc<CaptureShared>, interval: Duration) -> Result<DdaControl, String> {
+/// Start duplicating `monitor` in the format `shared.fp16` holds. `follow`: a game window
+/// that covers this monitor; when it stops covering it the capture asks for a restart (back
+/// to WGC window capture). Setup runs on the capture thread (the COM objects stay there);
+/// an Err is the reason to use WGC instead.
+pub fn start(monitor: HMONITOR, shared: Arc<CaptureShared>, interval: Duration, follow: Option<usize>) -> Result<DdaControl, String> {
     let fp16 = shared.fp16.load(Relaxed);
     let stop = Arc::new(AtomicBool::new(false));
     let stats = Arc::new(DdaStats::default());
@@ -100,7 +102,7 @@ pub fn start(monitor: HMONITOR, shared: Arc<CaptureShared>, interval: Duration) 
     let thread = std::thread::Builder::new()
         .name("recall-dda".into())
         .spawn(move || {
-            let mut cap = match Capture::open(HMONITOR(monitor as *mut _), fp16, shared, stats2) {
+            let mut cap = match Capture::open(monitor, fp16, shared, stats2, follow) {
                 Ok(cap) => cap,
                 Err(e) => return drop(ready_tx.send(Err(e))),
             };
@@ -123,41 +125,45 @@ pub fn start(monitor: HMONITOR, shared: Arc<CaptureShared>, interval: Duration) 
 
 /// The capture thread's state.
 struct Capture {
+    monitor: usize,
     target: Target,
     device: ID3D11Device,
     context: ID3D11DeviceContext,
     dupl: Option<IDXGIOutputDuplication>,
-    fp16: bool,
     format: DXGI_FORMAT,
-    /// Our shader-readable copy of the desktop and the CPU-readback staging texture.
-    copy: Option<(ID3D11Texture2D, (u32, u32))>,
     readback: Readback,
     handler: Handler,
+    shared: Arc<CaptureShared>,
     stats: Arc<DdaStats>,
     qpc_frequency: i64,
+    timer: Timer,
+    follow: Option<usize>,
     wrong_format_logged: bool,
 }
 
 impl Capture {
-    fn open(monitor: HMONITOR, fp16: bool, shared: Arc<CaptureShared>, stats: Arc<DdaStats>) -> Result<Self, String> {
+    fn open(monitor: usize, fp16: bool, shared: Arc<CaptureShared>, stats: Arc<DdaStats>, follow: Option<usize>) -> Result<Self, String> {
         // DuplicateOutput1 needs per-monitor DPI awareness (as OBS sets for its thread).
         unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-        let target = find_target(monitor)?;
+        let target = find_target(HMONITOR(monitor as *mut _))?;
         let (device, context) = device_on(&target.adapter)?;
         let mut qpc_frequency = 0i64;
         let _ = unsafe { QueryPerformanceFrequency(&mut qpc_frequency) };
+        let format = logic::duplication_format(fp16);
         let mut cap = Self {
+            monitor,
             target,
-            device: device.clone(),
-            context: context.clone(),
+            readback: Readback::new(device.clone(), context.clone(), format),
+            device,
+            context,
             dupl: None,
-            fp16,
-            format: logic::duplication_format(fp16),
-            copy: None,
-            readback: Readback { device: device.clone(), context: context.clone(), format: logic::duplication_format(fp16), staging: None },
-            handler: Handler::from_shared(shared),
+            format,
+            handler: Handler::from_shared(shared.clone()),
+            shared,
             stats,
             qpc_frequency,
+            timer: Timer::new(),
+            follow,
             wrong_format_logged: false,
         };
         cap.duplicate()?;
@@ -165,55 +171,92 @@ impl Capture {
     }
 
     fn describe(&self) -> String {
-        format!("{}, {}", logic::format_label(self.format), self.target.adapter_name)
+        let follow = if self.follow.is_some() { ", following the game window" } else { "" };
+        format!("{}, {}{follow}", logic::format_label(self.format), self.target.adapter_name)
     }
 
-    /// (Re)create the duplication on our device.
+    /// Create the duplication of `self.target` on our device, in `self.format`.
     fn duplicate(&mut self) -> Result<(), String> {
         self.dupl = None;
-        let wanted = logic::duplication_format(self.fp16);
+        let wanted = self.format;
+        let fp16 = wanted != logic::duplication_format(false);
         let dupl = match self.target.output.cast::<IDXGIOutput5>() {
             Ok(out5) => unsafe { out5.DuplicateOutput1(&self.device, 0, &[wanted]) }.map_err(|e| e.code()),
             Err(e) => Err(e.code()),
         };
         let dupl = match dupl {
             Ok(d) => d,
-            Err(code) if logic::legacy_duplication_fits(self.fp16) => unsafe { self.target.output.DuplicateOutput(&self.device) }
+            Err(code) if logic::legacy_duplication_fits(fp16) => unsafe { self.target.output.DuplicateOutput(&self.device) }
                 .map_err(|e| format!("DuplicateOutput: {e} (DuplicateOutput1: {code:?})"))?,
             Err(code) => return Err(format!("DuplicateOutput1 {}: {code:?}", logic::format_label(wanted))),
         };
         // ModeDesc.Format is the display mode (Bgra8 on an SDR desktop even when fp16 frames
-        // are asked for); the frame texture's own format is checked in `copy_out`.
+        // are asked for); each frame texture's own format is checked in `step`.
         let desc = unsafe { dupl.GetDesc() };
         if !logic::rotation_supported(desc.Rotation) {
             return Err(format!("monitor is rotated ({})", desc.Rotation.0));
         }
-        self.format = wanted;
-        self.readback.format = wanted;
         self.dupl = Some(dupl);
         Ok(())
     }
 
+    /// Look the monitor's output up again (sleep/wake, replug and rotation give a new one)
+    /// and duplicate it; it must still sit on our device's adapter.
+    fn recreate(&mut self) -> Result<(), String> {
+        let target = find_target(HMONITOR(self.monitor as *mut _))?;
+        if target.luid != self.target.luid {
+            return Err(format!("monitor moved to {}", target.adapter_name));
+        }
+        self.target = target;
+        self.duplicate()
+    }
+
+    /// Desktop Duplication cannot go on: mark it failed for the run and ask the engine to
+    /// restart capture (on WGC).
+    fn give_up(&self, why: &str) {
+        eprintln!("[recall] capture: dda {why}; capture restarts on WGC");
+        self.shared.dda_failed.store(true, Relaxed);
+        self.shared.restart.store(true, Relaxed);
+    }
+
     fn run(&mut self, stop: &AtomicBool, interval: Duration) {
         let mut pacer = Pacer::new(interval);
-        let mut first = true;
-        let mut attempt = 0u32;
+        let (mut first, mut attempt, mut failing_since) = (true, 0u32, None::<Instant>);
+        let mut followed = Instant::now();
         while !stop.load(Relaxed) {
+            if let Some(hwnd) = self.follow {
+                if followed.elapsed() >= FOLLOW_CHECK {
+                    followed = Instant::now();
+                    if !super::dda_window::still_covers(hwnd, self.monitor) {
+                        eprintln!("[recall] capture: game window no longer covers its monitor; capture restarts");
+                        self.shared.restart.store(true, Relaxed);
+                        return;
+                    }
+                }
+            }
             if self.dupl.is_none() {
-                std::thread::sleep(logic::backoff(attempt));
+                let now = Instant::now();
+                if logic::should_give_up(*failing_since.get_or_insert(now), now) {
+                    return self.give_up("re-create kept failing");
+                }
+                if !sleep_unless_stopped(logic::backoff(attempt), stop) {
+                    return;
+                }
                 attempt = attempt.saturating_add(1);
-                match self.duplicate() {
+                match self.recreate() {
                     Ok(()) => {
                         eprintln!("[recall] capture: dda duplication re-created");
                         self.stats.recreated.fetch_add(1, Relaxed);
-                        attempt = 0;
-                        first = true;
+                        (attempt, failing_since, first) = (0, None, true);
                     }
                     Err(e) if attempt == 1 || attempt.is_multiple_of(20) => eprintln!("[recall] capture: dda re-create failed ({e}), retrying"),
                     Err(_) => {}
                 }
                 continue;
             }
+            // Acquire no faster than the capture rate: the wait lets frames above the cap
+            // accumulate in the duplication instead of being acquired and dropped.
+            self.timer.wait(pacer.until_due(Instant::now()));
             match self.step(&mut pacer, first) {
                 Ok(took) => first &= !took,
                 Err(code) => match logic::action_for(code) {
@@ -224,37 +267,48 @@ impl Capture {
                         eprintln!("[recall] capture: dda duplication lost ({code:?}); re-creating");
                         self.dupl = None;
                     }
-                    Action::Fatal => {
-                        eprintln!("[recall] capture: dda device lost ({code:?}); capture stops");
-                        return;
-                    }
+                    Action::Fatal => return self.give_up(&format!("device lost ({code:?})")),
                 },
             }
         }
     }
 
-    /// Acquire one frame and deliver or skip it. Ok(true): a new image was taken.
+    /// Acquire one frame and deliver or skip it, releasing it before returning. Ok(true): a
+    /// new image was taken.
     fn step(&mut self, pacer: &mut Pacer, first: bool) -> Result<bool, windows::core::HRESULT> {
         let dupl = self.dupl.clone().ok_or(DXGI_ERROR_ACCESS_LOST)?;
         let mut info = DXGI_OUTDUPL_FRAME_INFO::default();
         let mut resource = None;
         unsafe { dupl.AcquireNextFrame(ACQUIRE_TIMEOUT_MS, &mut info, &mut resource) }.map_err(|e| e.code())?;
         self.stats.acquired.fetch_add(1, Relaxed);
+        let took = self.take(&info, resource, pacer, first);
+        let _ = unsafe { dupl.ReleaseFrame() };
+        Ok(took)
+    }
+
+    /// Hand an acquired frame down the `Handler` path, straight from the acquired surface.
+    fn take(&mut self, info: &DXGI_OUTDUPL_FRAME_INFO, resource: Option<IDXGIResource>, pacer: &mut Pacer, first: bool) -> bool {
         if !logic::has_new_image(info.LastPresentTime, info.AccumulatedFrames, first) {
             self.stats.no_image.fetch_add(1, Relaxed);
-            let _ = unsafe { dupl.ReleaseFrame() };
-            return Ok(false);
+            return false;
         }
-        if let Pace::Skip(wait) = pacer.offer(Instant::now()) {
-            let _ = unsafe { dupl.ReleaseFrame() };
+        if let Pace::Skip(_) = pacer.offer(Instant::now()) {
             self.stats.skipped.fetch_add(1, Relaxed);
-            // The next acquire returns the newest frame presented meanwhile.
-            precise_wait(wait);
-            return Ok(false);
+            return false;
         }
-        let copied = resource.and_then(|r| r.cast::<ID3D11Texture2D>().ok()).and_then(|t| self.copy_out(&t));
-        let _ = unsafe { dupl.ReleaseFrame() };
-        let Some((texture, size)) = copied else { return Ok(false) };
+        let Some(texture) = resource.and_then(|r| r.cast::<ID3D11Texture2D>().ok()) else { return false };
+        let mut desc = D3D11_TEXTURE2D_DESC::default();
+        unsafe { texture.GetDesc(&mut desc) };
+        let size = (desc.Width, desc.Height);
+        if let Ok(mut f) = self.stats.format.lock() {
+            *f = logic::format_label(desc.Format);
+        }
+        if desc.Format != self.format {
+            if !std::mem::replace(&mut self.wrong_format_logged, true) {
+                eprintln!("[recall] capture: dda frame format {} (asked {}); frame dropped", desc.Format.0, logic::format_label(self.format));
+            }
+            return false;
+        }
         let timestamp = logic::qpc_to_100ns(present_or_now(info.LastPresentTime), self.qpc_frequency);
         self.stats.delivered.fetch_add(1, Relaxed);
         if let Ok(mut s) = self.stats.size.lock() {
@@ -267,180 +321,21 @@ impl Capture {
         if let Err(e) = self.handler.deliver(&src, &mut cpu) {
             eprintln!("[recall] capture: dda frame failed: {e}");
         }
-        Ok(true)
+        true
     }
+}
 
-    /// One `CopyResource` of the desktop image into our own texture (made again on a size
-    /// change); the duplication frame can then be released at once.
-    fn copy_out(&mut self, desktop: &ID3D11Texture2D) -> Option<(ID3D11Texture2D, (u32, u32))> {
-        let mut desc = D3D11_TEXTURE2D_DESC::default();
-        unsafe { desktop.GetDesc(&mut desc) };
-        let size = (desc.Width, desc.Height);
-        if let Ok(mut f) = self.stats.format.lock() {
-            *f = logic::format_label(desc.Format);
+/// Sleep `total` in short steps; false once `stop` is set.
+fn sleep_unless_stopped(total: Duration, stop: &AtomicBool) -> bool {
+    let deadline = Instant::now() + total;
+    while !stop.load(Relaxed) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return true;
         }
-        if desc.Format != self.format {
-            if !std::mem::replace(&mut self.wrong_format_logged, true) {
-                eprintln!("[recall] capture: dda frame format {} (asked {}); frame dropped", desc.Format.0, logic::format_label(self.format));
-            }
-            return None;
-        }
-        if self.copy.as_ref().is_none_or(|(_, s)| *s != size) {
-            let want = D3D11_TEXTURE2D_DESC {
-                Width: size.0,
-                Height: size.1,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: desc.Format,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                Usage: D3D11_USAGE_DEFAULT,
-                BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
-                CPUAccessFlags: 0,
-                MiscFlags: 0,
-            };
-            let mut tex = None;
-            if let Err(e) = unsafe { self.device.CreateTexture2D(&want, None, Some(&mut tex)) } {
-                eprintln!("[recall] capture: dda copy texture {}x{}: {e}", size.0, size.1);
-                return None;
-            }
-            self.copy = Some((tex?, size));
-        }
-        let (tex, _) = self.copy.as_ref()?;
-        unsafe { self.context.CopyResource(tex, desktop) };
-        Some((tex.clone(), size))
+        std::thread::sleep(left.min(Duration::from_millis(25)));
     }
-}
-
-/// The CPU-readback staging texture (made again on a size change).
-struct Readback {
-    device: ID3D11Device,
-    context: ID3D11DeviceContext,
-    format: DXGI_FORMAT,
-    staging: Option<(ID3D11Texture2D, (u32, u32))>,
-}
-
-impl Readback {
-    /// CPU path only (no encoder GPU sink, or the dump harness): map a staging copy and copy
-    /// out `rect` of the fp16 frame (8 bytes/pixel), as WGC's `frame.buffer()` path does.
-    fn read(&mut self, src: &ID3D11Texture2D, size: (u32, u32), rect: Rect) -> Result<Vec<u8>, CaptureError> {
-        if self.staging.as_ref().is_none_or(|(_, s)| *s != size) {
-            let want = D3D11_TEXTURE2D_DESC {
-                Width: size.0,
-                Height: size.1,
-                MipLevels: 1,
-                ArraySize: 1,
-                Format: self.format,
-                SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
-                Usage: D3D11_USAGE_STAGING,
-                BindFlags: 0,
-                CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
-                MiscFlags: 0,
-            };
-            let mut tex = None;
-            unsafe { self.device.CreateTexture2D(&want, None, Some(&mut tex))? };
-            self.staging = Some((tex.ok_or("staging texture missing")?, size));
-        }
-        let (staging, _) = self.staging.as_ref().ok_or("staging texture missing")?;
-        let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
-        unsafe {
-            self.context.CopyResource(staging, src);
-            self.context.Map(staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))?;
-        }
-        let pitch = mapped.RowPitch as usize;
-        let data = unsafe { std::slice::from_raw_parts(mapped.pData.cast::<u8>(), pitch * size.1 as usize) };
-        let bytes = crate::framing::copy_rect(data, pitch, 8, rect);
-        unsafe { self.context.Unmap(staging, 0) };
-        Ok(bytes)
-    }
-}
-
-fn present_or_now(last_present_time: i64) -> i64 {
-    if last_present_time != 0 {
-        return last_present_time;
-    }
-    let mut now = 0i64;
-    let _ = unsafe { QueryPerformanceCounter(&mut now) };
-    now
-}
-
-/// Find the output showing `monitor`. Its adapter must be the one WGC (and so the encoder
-/// path) would use, the process default adapter: on a hybrid laptop where the iGPU drives
-/// the panel and the dGPU encodes (`hybrid_gpu`), DDA would need a cross-adapter copy, so
-/// those stay on WGC.
-fn find_target(monitor: HMONITOR) -> Result<Target, String> {
-    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(|e| format!("DXGI factory: {e}"))?;
-    let default = unsafe { factory.EnumAdapters1(0) }.and_then(|a| unsafe { a.GetDesc1() }).map_err(|e| format!("default adapter: {e}"))?;
-    for a in 0.. {
-        let Ok(adapter) = (unsafe { factory.EnumAdapters1(a) }) else { break };
-        for o in 0.. {
-            let Ok(output) = (unsafe { adapter.EnumOutputs(o) }) else { break };
-            let Ok(desc) = (unsafe { output.GetDesc() }) else { continue };
-            if desc.Monitor != monitor {
-                continue;
-            }
-            let ad = unsafe { adapter.GetDesc1() }.map_err(|e| format!("adapter desc: {e}"))?;
-            let name = wide(&ad.Description);
-            if ad.AdapterLuid != default.AdapterLuid {
-                return Err(format!("monitor is driven by {name}, the encoder device is on {} (hybrid GPU)", wide(&default.Description)));
-            }
-            let output = output.cast::<IDXGIOutput1>().map_err(|e| format!("IDXGIOutput1: {e}"))?;
-            return Ok(Target { adapter, output, adapter_name: name });
-        }
-    }
-    Err("no DXGI output shows this monitor".into())
-}
-
-fn device_on(adapter: &IDXGIAdapter1) -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
-    let (mut device, mut context) = (None, None);
-    unsafe {
-        D3D11CreateDevice(
-            adapter,
-            D3D_DRIVER_TYPE_UNKNOWN,
-            HMODULE::default(),
-            D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-            Some(&[D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0]),
-            D3D11_SDK_VERSION,
-            Some(&mut device),
-            None,
-            Some(&mut context),
-        )
-    }
-    .map_err(|e| format!("D3D11 device: {e}"))?;
-    let (device, context) = (device.ok_or("no device")?, context.ok_or("no context")?);
-    // The encoder and screenshot readbacks share the device across threads (as on WGC).
-    if let Ok(mt) = context.cast::<ID3D11Multithread>() {
-        let _ = unsafe { mt.SetMultithreadProtected(true) };
-    }
-    Ok((device, context))
-}
-
-fn wide(s: &[u16]) -> String {
-    String::from_utf16_lossy(&s[..s.iter().position(|c| *c == 0).unwrap_or(s.len())])
-}
-
-/// Sleep `wait` with a high-resolution waitable timer (plain sleep rounds up to the 15.6 ms
-/// system tick, a whole frame at 60 fps).
-fn precise_wait(wait: Duration) {
-    use windows::Win32::System::Threading::{
-        CreateWaitableTimerExW, SetWaitableTimer, WaitForSingleObject, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, INFINITE,
-        TIMER_ALL_ACCESS,
-    };
-    thread_local! {
-        static TIMER: Option<windows::Win32::Foundation::HANDLE> = unsafe {
-            CreateWaitableTimerExW(None, None, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS.0).ok()
-        };
-    }
-    if wait.is_zero() {
-        return;
-    }
-    let due = -((wait.as_nanos() / 100) as i64).max(1); // negative = relative, 100 ns units
-    let waited = TIMER.with(|t| match t {
-        Some(h) => unsafe { SetWaitableTimer(*h, &due, 0, None, None, false).is_ok() && WaitForSingleObject(*h, INFINITE).0 == 0 },
-        None => false,
-    });
-    if !waited {
-        std::thread::sleep(wait);
-    }
+    false
 }
 
 #[cfg(test)]

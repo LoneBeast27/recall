@@ -48,6 +48,51 @@ impl Pacer {
             }
         }
     }
+
+    /// How long to wait before the next acquire, so acquires run at the capture rate too
+    /// (frames above it accumulate in the duplication instead of being acquired and dropped).
+    pub(super) fn until_due(&self, now: Instant) -> Duration {
+        self.next_due.map_or(Duration::ZERO, |due| due.saturating_duration_since(now))
+    }
+}
+
+/// Re-creates that keep failing this long (output gone after a replug, a monitor that stays
+/// asleep, an adapter change) end Desktop Duplication for the run: capture restarts on WGC.
+pub(super) const GIVE_UP: Duration = Duration::from_secs(5);
+
+pub(super) fn should_give_up(failing_since: Instant, now: Instant) -> bool {
+    now.saturating_duration_since(failing_since) > GIVE_UP
+}
+
+/// Whether a capture start uses Desktop Duplication: only on `RECALL_CAPTURE=dda` (opt-in
+/// until checked live), and not after it failed earlier this run. Err is the WGC reason.
+pub(crate) fn dda_wanted(env: Option<&str>, failed_earlier: bool) -> Result<(), &'static str> {
+    match env {
+        Some(v) if v.trim().eq_ignore_ascii_case("dda") => {
+            if failed_earlier { Err("desktop duplication failed earlier this run") } else { Ok(()) }
+        }
+        Some(v) if v.trim().eq_ignore_ascii_case("wgc") => Err("RECALL_CAPTURE=wgc"),
+        _ => Err("default; RECALL_CAPTURE=dda opts in to desktop duplication"),
+    }
+}
+
+/// A screen rectangle (left/top inclusive, right/bottom exclusive).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Bounds {
+    pub left: i32,
+    pub top: i32,
+    pub right: i32,
+    pub bottom: i32,
+}
+
+/// The window covers the whole monitor (borderless or fullscreen: it may overhang it).
+pub(super) fn covers(window: Bounds, monitor: Bounds) -> bool {
+    monitor.right > monitor.left
+        && monitor.bottom > monitor.top
+        && window.left <= monitor.left
+        && window.top <= monitor.top
+        && window.right >= monitor.right
+        && window.bottom >= monitor.bottom
 }
 
 /// The one format asked of `DuplicateOutput1`: exactly what the capture start picked

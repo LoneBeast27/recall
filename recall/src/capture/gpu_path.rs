@@ -14,7 +14,7 @@ const GPU_FAILURES_BEFORE_FALLBACK: u32 = 30;
 pub(super) enum GpuState {
     Untried,
     /// `small`: in a run of frames too small to encode (logged once per run).
-    Ready { pipe: crate::gpu_frames::Pipeline, failures: u32, small: bool },
+    Ready { pipe: Box<crate::gpu_frames::Pipeline>, failures: u32, small: bool },
     Off,
 }
 
@@ -36,7 +36,7 @@ impl Handler {
                     if let Some(line) = crate::gpu_frames::adapter::vram_line("capture device and pipeline") {
                         (sink.log)(line);
                     }
-                    GpuState::Ready { pipe, failures: 0, small: false }
+                    GpuState::Ready { pipe: Box::new(pipe), failures: 0, small: false }
                 }
                 Err(e) => {
                     (sink.log)(format!("capture: GPU path unavailable ({e}); using CPU copies"));
