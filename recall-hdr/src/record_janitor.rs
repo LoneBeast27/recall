@@ -6,13 +6,15 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use crate::control::PipeHub;
 use crate::log;
 use crate::record_free_space::{self as free_space, FreeCheck, FreeFn, FreeWarner, Resolve};
-use crate::record_storage::{cleaned_event, plan_dir, preview_event, run_once, warning_event, Warner, AFTER_SAVE, HOURLY};
+use crate::record_storage::{
+    cleaned_event, plan_dir, preview_event, recycle, run_once, warning_event, PlanFn, RecycleFn, Warner, AFTER_SAVE, HOURLY,
+};
 
 /// The first free-space check after start (the engine is up by then).
 pub const START_CHECK: Duration = Duration::from_secs(60);
@@ -30,6 +32,24 @@ pub(crate) struct Job {
     pub free: Option<FreeCheck>,
 }
 
+/// The storage limit and clip folder as the user has them NOW: the pump
+/// writes it every tick and on every run request; the storage thread reads
+/// it right before it moves anything.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Setting {
+    pub dir: PathBuf,
+    pub cap_gb: u32,
+}
+
+/// What the storage thread calls (production: real disks; tests inject).
+#[derive(Clone, Copy)]
+pub(crate) struct Deps {
+    pub free: FreeFn,
+    pub resolve: Resolve,
+    pub plan: PlanFn,
+    pub recycle: RecycleFn,
+}
+
 /// Schedules runs (after saves, hourly, on demand) onto one worker thread.
 pub struct Janitor {
     tx: Sender<Job>,
@@ -42,22 +62,39 @@ pub struct Janitor {
     staging: Option<PathBuf>,
     /// The storage thread's volume resolver (it may block, so the pump never calls it).
     resolve: Resolve,
+    current: Arc<Mutex<Setting>>,
 }
 
 impl Janitor {
     pub fn start(hub: Arc<PipeHub>) -> Self {
         let (tx, rx) = channel::<Job>();
         let janitor = Janitor::with_sender(tx, free_space::engine_staging_dir(), Instant::now(), crate::win_volume::volume_of);
-        let resolve = janitor.resolve;
+        let deps = Deps { free: free_space::free_bytes, resolve: janitor.resolve, plan: plan_dir, recycle };
+        let current = janitor.current.clone();
         let _ = std::thread::Builder::new()
             .name("recall-storage".into())
-            .spawn(move || worker(&hub, rx, free_space::free_bytes, resolve));
+            .spawn(move || worker(&hub, rx, &current, deps));
         janitor
     }
 
     pub(crate) fn with_sender(tx: Sender<Job>, staging: Option<PathBuf>, now: Instant, resolve: Resolve) -> Self {
         let free_soon = Some(now + START_CHECK);
-        Janitor { tx, after_save: None, next_hourly: now + HOURLY, free_soon, buffer_bytes: 0, staging, resolve }
+        let current = Arc::new(Mutex::new(Setting::default()));
+        Janitor { tx, after_save: None, next_hourly: now + HOURLY, free_soon, buffer_bytes: 0, staging, resolve, current }
+    }
+
+    /// The setting the storage thread checks before it moves anything.
+    #[cfg(test)]
+    pub(crate) fn current(&self) -> Arc<Mutex<Setting>> {
+        self.current.clone()
+    }
+
+    fn set_current(&self, dir: &str, cap_gb: u32) {
+        let now = Setting { dir: PathBuf::from(dir), cap_gb };
+        let mut shared = self.current.lock().unwrap_or_else(|p| p.into_inner());
+        if *shared != now {
+            *shared = now;
+        }
     }
 
     pub fn saved(&mut self, now: Instant) {
@@ -75,6 +112,7 @@ impl Janitor {
 
     /// Run now (cap changed / pipe `storage_clean` / schedule); cap 0 = free space only.
     pub fn run_now(&mut self, dir: &str, cap_gb: u32, now: Instant) {
+        self.set_current(dir, cap_gb);
         self.after_save = None;
         self.free_soon = None;
         self.next_hourly = now + HOURLY;
@@ -88,6 +126,7 @@ impl Janitor {
 
     /// Every pump tick. `buffer_bytes`: the replay buffer at the configured bitrate.
     pub fn tick(&mut self, dir: &str, cap_gb: u32, buffer_bytes: u64, now: Instant) {
+        self.set_current(dir, cap_gb);
         self.buffer_bytes = buffer_bytes;
         if self.after_save.is_some_and(|t| now >= t) || now >= self.next_hourly {
             self.run_now(dir, cap_gb, now);
@@ -122,7 +161,7 @@ pub(crate) fn free_warnings(warner: &mut FreeWarner, check: &FreeCheck, free: Fr
         .collect()
 }
 
-fn worker(hub: &PipeHub, rx: Receiver<Job>, free: FreeFn, resolve: Resolve) {
+fn worker(hub: &PipeHub, rx: Receiver<Job>, current: &Mutex<Setting>, deps: Deps) {
     background_io();
     let (mut warner, mut low) = (Warner::default(), FreeWarner::default());
     while let Ok(first) = rx.recv() {
@@ -138,34 +177,59 @@ fn worker(hub: &PipeHub, rx: Receiver<Job>, free: FreeFn, resolve: Resolve) {
             }
         }
         let Some(job) = run else { continue };
-        if let Some(check) = &job.free {
-            for event in free_warnings(&mut low, check, free, resolve) {
-                hub.event("session", &event);
-            }
-        }
-        if job.cap_gb > 0 {
-            cap_run(hub, &job, &mut warner);
+        run_batch(&job, current, deps, &mut low, &mut warner, &mut |event| hub.event("session", event));
+    }
+}
+
+/// The run a batch coalesced into. The cap step goes first, while the job is
+/// fresh: the free-space check can block for an SMB timeout. The cap step
+/// itself re-reads the current setting right before it moves anything.
+pub(crate) fn run_batch(
+    job: &Job,
+    current: &Mutex<Setting>,
+    deps: Deps,
+    low: &mut FreeWarner,
+    warner: &mut Warner,
+    emit: &mut dyn FnMut(&str),
+) {
+    if job.cap_gb > 0 {
+        cap_run(job, current, deps, warner, emit);
+    }
+    if let Some(check) = &job.free {
+        for event in free_warnings(low, check, deps.free, deps.resolve) {
+            emit(&event);
         }
     }
 }
 
-fn cap_run(hub: &PipeHub, job: &Job, warner: &mut Warner) {
-    match run_once(&job.dir, job.cap_gb) {
+/// Is `job` still what the user has set (same folder, same non-zero cap)?
+fn still_wanted(job: &Job, current: &Mutex<Setting>) -> bool {
+    let now = current.lock().unwrap_or_else(|p| p.into_inner());
+    now.cap_gb > 0 && now.cap_gb == job.cap_gb && now.dir == job.dir
+}
+
+fn cap_run(job: &Job, current: &Mutex<Setting>, deps: Deps, warner: &mut Warner, emit: &mut dyn FnMut(&str)) {
+    let wanted = || still_wanted(job, current);
+    if !wanted() {
+        log!("storage: a queued run for {} at {} GiB is no longer the setting; skipped", job.dir.display(), job.cap_gb);
+        return;
+    }
+    match run_once(&job.dir, job.cap_gb, deps.plan, &wanted, deps.recycle) {
         Ok(o) => {
             if o.removed > 0 {
                 log!("storage: cap {} GiB -> {} clip(s) to the Recycle Bin, {} bytes freed", job.cap_gb, o.removed, o.freed);
-                hub.event("session", &cleaned_event(&o));
+                emit(&cleaned_event(&o));
             } else {
                 log!("storage: {} uses {} of its {} GiB cap", job.dir.display(), o.used, job.cap_gb);
             }
             if let Some(level) = warner.update(o.used, o.cap, o.stuck, o.removed > 0) {
                 log!("storage: {level}% warning ({} of {} bytes)", o.used, o.cap);
-                hub.event("session", &warning_event(level, &o));
+                emit(&warning_event(level, &o));
             }
         }
         Err(e) => {
             log!("storage: clean-up skipped -- {e}");
-            hub.event("session", &crate::record_status::error_event(&format!("storage clean-up: {e}")));
+            emit(&crate::record_status::error_event(&format!("storage clean-up: {e}")));
         }
     }
 }

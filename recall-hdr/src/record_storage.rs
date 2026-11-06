@@ -364,11 +364,23 @@ fn plan_listing(dir: &Path, favs: &HashSet<String>, cap: u64) -> Result<(Plan, L
     Ok((plan(&listing, favs, cap, now_unix), listing))
 }
 
-pub(crate) fn run_once(dir: &Path, cap_gb: u32) -> Result<Outcome, String> {
-    let (plan, listing) = plan_dir(dir, cap_gb)?;
+/// Lists and plans a run (production: [`plan_dir`]; tests inject one).
+pub(crate) type PlanFn = fn(&Path, u32) -> Result<(Plan, Listing), String>;
+/// Moves files to the Recycle Bin (production: [`recycle`]; tests inject one).
+pub(crate) type RecycleFn = fn(&[PathBuf]) -> Result<(), String>;
+
+/// One cap run. `wanted` is asked right before the Recycle Bin call: the
+/// listing can take long on a sleeping NAS, and a run whose cap or folder is
+/// no longer the user's setting must move nothing.
+pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: &dyn Fn() -> bool, recycle: RecycleFn) -> Result<Outcome, String> {
+    let (plan, listing) = plan(dir, cap_gb)?;
     let cap = cap_gb as u64 * GIB;
     let mut out = Outcome { removed: 0, freed: 0, through: None, used: plan.total, cap, next: plan.next, stuck: plan.stuck(cap) };
     if plan.remove.is_empty() {
+        return Ok(out);
+    }
+    if !wanted() {
+        log!("storage: the storage limit or folder changed during the run; nothing moved");
         return Ok(out);
     }
     let files: Vec<PathBuf> = plan.remove.iter().flat_map(|c| companions(dir, c, &listing)).collect();

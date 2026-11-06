@@ -115,3 +115,25 @@ fn an_uncreatable_staging_folder_falls_back_to_writing_in_place() {
     assert!(control.shutdown(std::time::Duration::from_secs(1)));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+static START_VOLUME_LOOKUPS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn counted_same_volume(_: &Path, _: &Path) -> bool {
+    START_VOLUME_LOOKUPS.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    false
+}
+
+#[test]
+fn engine_start_asks_no_volume_question() {
+    // A clip folder on a sleeping NAS must not hold the encoder's start: the
+    // same-volume answer is asked per save, on the saver thread.
+    let (stage_dir, out) = (temp_dir("start-stage"), temp_dir("start-out"));
+    let (events, _sink) = Events::capture(true);
+    let mover = mover::Config { background: false, same_volume: counted_same_volume, ..mover::Config::default() };
+    let setup = Setup { dir: Some(stage_dir.clone()), recover: None, out_dir: out.clone(), mover };
+    let (stage, control) = start(&events, setup);
+    assert!(stage.is_some());
+    assert_eq!(START_VOLUME_LOOKUPS.load(std::sync::atomic::Ordering::SeqCst), 0, "start looked up a volume");
+    assert!(control.unwrap().shutdown(std::time::Duration::from_secs(1)));
+    let _ = (std::fs::remove_dir_all(&stage_dir), std::fs::remove_dir_all(&out));
+}

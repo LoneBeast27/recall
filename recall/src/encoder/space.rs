@@ -26,18 +26,11 @@ pub(crate) use crate::win_volume::free_bytes_cached as free_bytes;
 /// one co64 chunk offset (8) per sample. FFmpeg's mov muxer writes no
 /// per-packet bytes into `mdat`, so this is all the container adds per frame.
 const INDEX_BYTES_PER_SAMPLE: u64 = 32;
-/// ftyp + moov box headers and track metadata (a few KB), the bookmark
-/// sidecar and NTFS cluster rounding of each file (4 KiB).
+/// ftyp + moov box headers and track metadata (a few KB) and NTFS cluster
+/// rounding of the clip file. Only the clip itself is reserved: the gallery
+/// thumbnail and bookmark sidecar are not, since a failed thumbnail does not
+/// fail the save.
 const HEADER_BYTES: u64 = 64 << 10;
-/// The gallery thumbnail (a 640 px wide JPEG) at most. Measured 2026-11-07 over
-/// the 7,007 thumbnails in the user's clip folder: median 88 KB, p99 302 KB,
-/// max 450 KB.
-const THUMB_MAX: u64 = 512 << 10;
-/// The thumbnail allowance shrinks with the clip (1/32 of its video + audio,
-/// up to [`THUMB_MAX`]): a short or low-bitrate save is not refused for a
-/// thumbnail that rarely reaches it. Under-counting costs at most one
-/// thumbnail, and a disk-full mux still falls back in place.
-const THUMB_SHARE: u64 = 32;
 /// AAC bytes per second per track: `mux.rs` asks for 192 kbit/s and the
 /// encoder averages to it; 10% over is allowed (an allowance, not measured).
 const AAC_BYTES_PER_SEC: f64 = 192_000.0 / 8.0 * 1.1;
@@ -45,7 +38,7 @@ const AAC_SAMPLES_PER_FRAME: f64 = 1024.0;
 
 /// Bytes this save is expected to need on disk: the video as it is in the
 /// window (stream copy) or the still at its bitrate, the AAC audio, the MP4
-/// index for every video and audio sample, [`HEADER_BYTES`] and the thumbnail allowance.
+/// index for every video and audio sample, and [`HEADER_BYTES`].
 pub(crate) fn estimate(job: &SaveJob) -> u64 {
     let secs = job.secs.max(0.0);
     let (video, video_samples) = match &job.video {
@@ -54,8 +47,7 @@ pub(crate) fn estimate(job: &SaveJob) -> u64 {
     };
     let audio = (job.audio.len() as f64 * AAC_BYTES_PER_SEC * secs) as u64;
     let audio_frames: u64 = job.audio.iter().map(|t| (f64::from(t.rate) / AAC_SAMPLES_PER_FRAME * secs).ceil() as u64).sum();
-    let thumb = ((video + audio) / THUMB_SHARE).min(THUMB_MAX);
-    video + audio + (video_samples + audio_frames) * INDEX_BYTES_PER_SAMPLE + HEADER_BYTES + thumb
+    video + audio + (video_samples + audio_frames) * INDEX_BYTES_PER_SAMPLE + HEADER_BYTES
 }
 
 /// `C:` / `\\server\share` for a path, as the user knows the drive.
