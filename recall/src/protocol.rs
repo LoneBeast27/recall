@@ -45,6 +45,9 @@ pub enum Outbound {
         /// without an encoder.
         codec: String,
         recording_mode: String,
+        /// Encoder-thread turns so far (about 10 a second, frames or not; 0 without an
+        /// encoder). A beat that stops while the game is visible is a hung encoder.
+        encoder_heartbeat: u64,
         /// Whether new microphone samples are entering the replay buffer as silence.
         mic_muted: bool,
         /// What each recorded source opened, in track order (`audio::sources::opened`).

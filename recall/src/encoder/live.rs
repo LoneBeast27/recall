@@ -42,6 +42,9 @@ pub(super) fn run(
     }
     let mut live = Live::new(&cfg, &stats, audio.len());
     loop {
+        // One beat per turn, frames or not: a static game keeps it, a hung NVENC call
+        // (inside `live.frame`) stops it (`EncStats::heartbeat`).
+        stats.heartbeat.fetch_add(1, Relaxed);
         // Saves first: they're rare and user-facing latency matters (R10).
         while let Ok(req) = commands.try_recv() {
             handle_save(live.replay.as_ref(), req, &stats, &audio, &saver);

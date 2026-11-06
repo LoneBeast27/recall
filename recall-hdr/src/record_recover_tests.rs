@@ -121,12 +121,11 @@ fn tick(to: u64, at: impl Fn(u64) -> (&'static str, u64, bool)) -> Vec<u64> {
 
 #[test]
 fn a_recovering_engine_that_stopped_updating_is_restarted_like_a_failed_one() {
-    // No status line after second 0: stale at 10 s, then the 15 s error grace; a restart
-    // that changed nothing waits the 30 s gap.
-    assert_eq!(tick(60, |_| ("recovering", 3, true)), [26, 56]);
-    // Statuses keep coming: the engine is alive and waits for a frame (a static game).
-    // Time alone is no evidence; the engine says `failed` after 5 real failed reopens.
-    assert_eq!(tick(150, |s| ("recovering", s, true)), Vec::<u64>::new());
+    // No status line (no beat) after second 0: hung at 10 s, one restart at once.
+    assert_eq!(tick(60, |_| ("recovering", 3, true)), [10]);
+    // The engine beats but "recovering" (an episode a real error started) lasts 90 s of
+    // visible time: failed, then the 15 s error grace and the 30 s gap.
+    assert_eq!(tick(150, |s| ("recovering", s, true)), [106, 136]);
 }
 
 #[test]
