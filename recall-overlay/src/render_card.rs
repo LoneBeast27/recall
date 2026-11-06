@@ -11,7 +11,7 @@ use super::Renderer;
 use crate::fonts::Fonts;
 use crate::hint::CardScene;
 use crate::layout::{EDGE_LINE, PILL, TRACK};
-use crate::presence::Look;
+use crate::presence::{Look, Turn};
 
 fn rounded(left: f32, top: f32, w: f32, h: f32, r: f32) -> D2D1_ROUNDED_RECT {
     D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left, top, right: left + w, bottom: top + h }, radiusX: r, radiusY: r }
@@ -22,11 +22,25 @@ impl Renderer {
     pub(crate) unsafe fn card(&self, fonts: &Fonts, card: &CardScene, look: &Look, (x, y): (f32, f32), scale: f32) -> Result<()> {
         let Some(shown) = look.card else { return Ok(()) };
         let t = &self.target;
-        // Unfolds from the pill: from its top edge down, or (`up`) from its bottom edge up.
-        let reveal = match look.up {
-            false => D2D_RECT_F { left: x, top: y, right: x + card.w, bottom: y + card.h * shown.progress },
-            true => D2D_RECT_F { left: x, top: y + card.h * (1.0 - shown.progress), right: x + card.w, bottom: y + card.h },
+        let base = self.base.get();
+        let ((x, y), reveal) = match (look.turn, look.up) {
+            // Unfolds from the pill: from its top edge down, or (`up`) from its bottom edge up.
+            (Turn::None, false) => ((x, y), D2D_RECT_F { left: x, top: y, right: x + card.w, bottom: y + card.h * shown.progress }),
+            (Turn::None, true) => ((x, y), D2D_RECT_F { left: x, top: y + card.h * (1.0 - shown.progress), right: x + card.w, bottom: y + card.h }),
+            // A side spot keeps the card upright and horizontal beside the pill (its
+            // unturned box is `card.h` along by `card.w` across); it unfolds inwards.
+            (turn, _) => {
+                let (a, b) = (super::apply(&base, (x, y)), super::apply(&base, (x + card.h, y + card.w)));
+                let (sx, sy) = (a.0.min(b.0), a.1.min(b.1));
+                let (left, right) = match turn {
+                    Turn::Right => (sx + card.w * (1.0 - shown.progress), sx + card.w),
+                    _ => (sx, sx + card.w * shown.progress),
+                };
+                ((sx, sy), D2D_RECT_F { left, top: sy, right, bottom: sy + card.h })
+            }
         };
+        self.base.set(Matrix3x2::identity());
+        self.set_transform(Matrix3x2::identity());
         unsafe {
             t.PushAxisAlignedClip(&reveal, D2D1_ANTIALIAS_MODE_PER_PRIMITIVE);
             self.paint(PILL, 1.0);
@@ -47,6 +61,7 @@ impl Renderer {
             self.set_transform(Matrix3x2::identity());
             t.PopAxisAlignedClip();
         }
+        self.base.set(base);
         Ok(())
     }
 }
