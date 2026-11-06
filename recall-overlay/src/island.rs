@@ -141,8 +141,9 @@ pub fn notice_layout(
 /// A side spot's island: `laid` re-flowed tall ([`crate::stack`]), its
 /// size following; an action notice still reaches `GROW_W` past the
 /// (stacked) stats pill under it (`under_w`).
-pub fn stacked_layout((scene, k, size): (Scene, f32, (f32, f32)), under_w: Option<f32>, s: f32, m: &dyn Measure) -> (Scene, f32, (f32, f32)) {
-    let tall = crate::stack::stack(&scene, k, m);
+/// `max`: the room along the side (px); a longer column stops with "…".
+pub fn stacked_layout((scene, k, size): (Scene, f32, (f32, f32)), under_w: Option<f32>, s: f32, m: &dyn Measure, max: f32) -> (Scene, f32, (f32, f32)) {
+    let tall = crate::stack::stack_within(&scene, k, m, max);
     let floor = under_w.map_or(0.0, |w| (w + GROW_W * s).ceil());
     let size = (tall.w.max(floor), size.1);
     (tall, k, size)
