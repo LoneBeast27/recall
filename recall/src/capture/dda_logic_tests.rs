@@ -95,3 +95,41 @@ fn mouse_only_updates_carry_no_image() {
     assert!(has_new_image(123, 1, false));
     assert!(has_new_image(0, 0, true), "first frame after a create is the desktop");
 }
+
+#[test]
+fn acquires_wait_for_the_next_slot() {
+    let t0 = Instant::now();
+    let mut pacer = Pacer::new(Duration::from_millis(15));
+    assert_eq!(pacer.until_due(t0), Duration::ZERO, "nothing delivered yet");
+    assert_eq!(pacer.offer(t0), Pace::Deliver);
+    assert_eq!(pacer.until_due(t0 + Duration::from_millis(4)), Duration::from_millis(11));
+    assert_eq!(pacer.until_due(t0 + Duration::from_millis(20)), Duration::ZERO);
+}
+
+#[test]
+fn re_create_gives_up_after_five_seconds() {
+    let t0 = Instant::now();
+    assert!(!should_give_up(t0, t0 + Duration::from_secs(5)));
+    assert!(should_give_up(t0, t0 + Duration::from_millis(5001)));
+}
+
+#[test]
+fn desktop_duplication_is_opt_in_and_off_after_a_failure() {
+    assert!(dda_wanted(None, false).is_err(), "default stays WGC");
+    assert!(dda_wanted(Some("wgc"), false).is_err());
+    assert!(dda_wanted(Some("dda"), false).is_ok());
+    assert!(dda_wanted(Some(" DDA "), false).is_ok());
+    assert_eq!(dda_wanted(Some("dda"), true), Err("desktop duplication failed earlier this run"));
+}
+
+#[test]
+fn window_covers_monitor_only_when_it_spans_it() {
+    let monitor = Bounds { left: 0, top: 0, right: 2560, bottom: 1440 };
+    assert!(covers(monitor, monitor), "borderless fullscreen");
+    assert!(covers(Bounds { left: -8, top: -8, right: 2568, bottom: 1448 }, monitor), "overhang");
+    assert!(!covers(Bounds { left: 0, top: 0, right: 1920, bottom: 1080 }, monitor), "windowed");
+    assert!(!covers(Bounds { left: 0, top: 31, right: 2560, bottom: 1440 }, monitor), "title bar shows the desktop above");
+    let second = Bounds { left: 2560, top: 0, right: 5120, bottom: 1440 };
+    assert!(!covers(monitor, second), "other monitor");
+    assert!(!covers(monitor, Bounds { left: 0, top: 0, right: 0, bottom: 0 }), "empty monitor rect");
+}

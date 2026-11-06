@@ -14,11 +14,15 @@
 mod client_area;
 mod control;
 mod dda;
+mod dda_dxgi;
 mod dda_logic;
+mod dda_window;
 #[cfg(feature = "encode")]
 mod gpu_path;
+mod start;
 
 pub use control::CaptureControlHandle;
+pub use start::{start_monitor, start_window};
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
 #[cfg(feature = "encode")]
@@ -31,15 +35,12 @@ use client_area::ClientArea;
 
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11DeviceContext, ID3D11Texture2D};
 use windows_capture::capture::{
-    CaptureControl, Context, GraphicsCaptureApiError, GraphicsCaptureApiHandler,
+    CaptureControl, Context, GraphicsCaptureApiHandler,
 };
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
 use windows_capture::monitor::Monitor;
-use windows_capture::settings::{
-    ColorFormat, CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings,
-    MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
-};
+use windows_capture::settings::ColorFormat;
 
 /// Tonemap mode shared with the shader's `Params.mode`.
 pub const MODE_PASSTHROUGH: u32 = 0;
@@ -103,6 +104,12 @@ pub struct CaptureShared {
     pub fp16: AtomicBool,
     /// A `Bgra8` frame could not take the GPU path: the engine restarts capture in fp16.
     pub need_fp16: AtomicBool,
+    /// The capture thread asks the engine for a new capture (Desktop Duplication gave up,
+    /// or the followed game window left its monitor); taken by `restart_reason`.
+    pub restart: AtomicBool,
+    /// Desktop Duplication failed this run (device lost, re-create kept failing): later
+    /// starts use WGC.
+    pub dda_failed: AtomicBool,
     /// First WGC timestamp of the engine run, kept across capture restarts so PTS never
     /// jumps back.
     origin: Mutex<Option<i64>>,
@@ -125,6 +132,8 @@ impl CaptureShared {
             gpu_sink: OnceLock::new(),
             fp16: AtomicBool::new(true),
             need_fp16: AtomicBool::new(false),
+            restart: AtomicBool::new(false),
+            dda_failed: AtomicBool::new(false),
             origin: Mutex::new(None),
         })
     }
@@ -137,6 +146,20 @@ impl CaptureShared {
             || self.mode.load(Relaxed) == MODE_TONEMAP
             || self.need_fp16.load(Relaxed)
             || std::env::var_os("RECALL_CAPTURE_FP16").is_some_and(|v| v == "1")
+    }
+
+    /// Why the running capture must be replaced, if it must: the capture thread asked
+    /// (`restart`, taken here), or a Bgra8 capture needs fp16 (HDR display or CPU fallback).
+    pub fn restart_reason(&self) -> Option<&'static str> {
+        if self.restart.swap(false, Relaxed) {
+            return Some(if self.dda_failed.load(Relaxed) { "(desktop duplication stopped; WGC from now on)" } else { "(capture source changed)" });
+        }
+        (!self.fp16.load(Relaxed) && self.wants_fp16()).then_some("in Rgba16F (HDR display or CPU fallback)")
+    }
+
+    /// Whether this start may use Desktop Duplication (`dda_logic::dda_wanted`).
+    fn dda_wanted(&self) -> Result<(), &'static str> {
+        dda_logic::dda_wanted(std::env::var("RECALL_CAPTURE").ok().as_deref(), self.dda_failed.load(Relaxed))
     }
 
     /// Picks the format for a capture start and records it in `fp16`.
@@ -381,108 +404,6 @@ impl Handler {
     }
 }
 
-/// Start capturing the primary monitor on its own thread. The returned
-/// `CaptureControl` keeps the capture alive — drop or `.stop()` it to end.
-pub fn start_monitor(
-    index: Option<usize>,
-    shared: Arc<CaptureShared>,
-) -> Result<CaptureControlHandle, CaptureError> {
-    let monitor = match index {
-        Some(i) => Monitor::from_index(i)?,
-        None => Monitor::primary()?,
-    };
-    let format = shared.start_format();
-    // Desktop Duplication first: no yellow border and no Borderless permission needed.
-    // `RECALL_CAPTURE=wgc` keeps the WGC path (A/B checks, safety).
-    if std::env::var("RECALL_CAPTURE").is_ok_and(|v| v.eq_ignore_ascii_case("wgc")) {
-        eprintln!("[recall] capture: wgc (RECALL_CAPTURE=wgc)");
-    } else {
-        let hmonitor = windows::Win32::Graphics::Gdi::HMONITOR(monitor.as_raw_hmonitor());
-        match dda::start(hmonitor, shared.clone(), capture_interval(recording_fps())) {
-            Ok(control) => return Ok(CaptureControlHandle::Dda(control)),
-            Err(reason) => eprintln!("[recall] capture: wgc (desktop duplication unavailable: {reason})"),
-        }
-    }
-    // Ask for borderless access first so the session's IsBorderRequired(false)
-    // (set by windows-capture for our WithoutBorder setting) actually suppresses
-    // the Windows capture border.
-    crate::border::request_borderless();
-    let start = |interval| {
-        Handler::start_free_threaded(Settings::new(
-            monitor,
-            CursorCaptureSettings::WithoutCursor,
-            DrawBorderSettings::WithoutBorder,
-            SecondaryWindowSettings::Default,
-            interval,
-            DirtyRegionSettings::Default,
-            format,
-            shared.clone(),
-        ))
-    };
-    with_rate_cap(start).map(CaptureControlHandle::Wgc)
-}
-
-/// Frames per second the capture is capped at: the recording rate plus 10% headroom (the CFR
-/// pacer makes exact frames from them). Uncapped, Windows hands over every frame the game
-/// presents (500+ a second in VALORANT) and each is read back to the CPU (29.5 MB at 1440p
-/// HDR), which costs the game frames.
-pub(crate) fn capture_interval(recording_fps: u32) -> std::time::Duration {
-    std::time::Duration::from_secs_f64(1.0 / (f64::from(recording_fps.clamp(1, 1000)) * 1.1))
-}
-
-/// `RECALL_FPS` as the encoder reads it (1..=1000, default 60).
-fn recording_fps() -> u32 {
-    std::env::var("RECALL_FPS").ok().and_then(|v| v.trim().parse().ok()).filter(|f| (1..=1000).contains(f)).unwrap_or(60)
-}
-
-/// Starts with the rate cap; Windows builds without `MinUpdateInterval` (before 11 24H2) fall
-/// back to the uncapped stream.
-fn with_rate_cap<S>(start: S) -> Result<WgcControl, CaptureError>
-where
-    S: Fn(MinimumUpdateIntervalSettings) -> Result<WgcControl, GraphicsCaptureApiError<CaptureError>>,
-{
-    let interval = capture_interval(recording_fps());
-    match start(MinimumUpdateIntervalSettings::Custom(interval)) {
-        Ok(control) => {
-            eprintln!("[recall] capture capped at {:.0} fps", 1.0 / interval.as_secs_f64());
-            Ok(control)
-        }
-        Err(e) => {
-            eprintln!("[recall] capture rate cap unavailable ({e}); capturing every frame");
-            start(MinimumUpdateIntervalSettings::Default).map_err(box_start_err)
-        }
-    }
-}
-
-/// Flatten the capture-start error into our boxed error type.
-fn box_start_err(e: GraphicsCaptureApiError<CaptureError>) -> CaptureError {
-    Box::new(std::io::Error::other(e.to_string()))
-}
-
-/// Capture an explicitly selected game window through the supported WGC API.
-pub fn start_window(hwnd: usize, shared: Arc<CaptureShared>) -> Result<CaptureControlHandle, CaptureError> {
-    if hwnd == 0 { return Err(std::io::Error::other("capture window handle is null").into()); }
-    shared.window.store(hwnd, Relaxed);
-    crate::border::request_borderless();
-    let window = windows_capture::window::Window::from_raw_hwnd(hwnd as *mut std::ffi::c_void);
-    let format = shared.start_format();
-    let start = |interval| {
-        Handler::start_free_threaded(Settings::new(
-            window, CursorCaptureSettings::WithoutCursor, DrawBorderSettings::WithoutBorder,
-            SecondaryWindowSettings::Default, interval,
-            DirtyRegionSettings::Default, format, shared.clone(),
-        ))
-    };
-    with_rate_cap(start).map(CaptureControlHandle::Wgc)
-}
-
 #[cfg(test)]
-mod rate_cap_tests {
-    #[test]
-    fn interval_leaves_ten_percent_headroom_over_the_recording_rate() {
-        let at60 = super::capture_interval(60);
-        assert!((1.0 / at60.as_secs_f64() - 66.0).abs() < 0.01);
-        assert!((1.0 / super::capture_interval(144).as_secs_f64() - 158.4).abs() < 0.01);
-        assert_eq!(super::capture_interval(0), super::capture_interval(1));
-    }
-}
+#[path = "capture/capture_tests.rs"]
+mod tests;
