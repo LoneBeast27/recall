@@ -128,7 +128,36 @@ impl Root {
                 })))
                 .into_any_element(),
         ]);
+        items.extend(self.settings_about(cx));
         items
+    }
+
+    /// Version, a manual update check and a bug report (a prefilled GitHub issue).
+    fn settings_about(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        use crate::services::update;
+        let version = update::current().map(|v| format!("Recall {v}")).unwrap_or_else(|| "Recall (dev build)".into());
+        let detail = if update::current().is_some() {
+            "Recall checks for a new version each time it opens and shows what changed before it installs."
+        } else {
+            "Dev builds do not check for updates."
+        };
+        let checking = self.update.checking();
+        let mut check = ui::button("update-check", Variant::Secondary).child(if checking { "Checking…" } else { "Check for updates" });
+        if update::current().is_some() && !checking {
+            check = check.on_click(cx.listener(|this, _, _, cx| {
+                this.update.check_now();
+                cx.notify();
+            }));
+        }
+        vec![
+            section_title("About"),
+            setting_row(&version, detail).child(check).into_any_element(),
+            setting_row("Report a bug", "Opens a GitHub issue with your Recall and Windows versions filled in. Add what happened before you send it.")
+                .child(ui::button("report-bug", Variant::Secondary).child("Report a bug").on_click(cx.listener(|_, _, _, cx| {
+                    cx.open_url(&update::bug_report_url());
+                })))
+                .into_any_element(),
+        ]
     }
 
     /// The performance-stats island is on (config first, then the live status).

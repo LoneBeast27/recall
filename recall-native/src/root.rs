@@ -150,6 +150,8 @@ pub struct Root {
     pub storage_asking: Option<(u32, Instant)>,
     /// That dry run would move clips now: the confirm bar under the limit row.
     pub storage_confirm: Option<crate::views::storage_limit::Preview>,
+    /// GitHub release check and the update prompt (`services/update.rs`).
+    pub update: crate::services::update::UpdateUi,
 }
 
 #[path = "root_events.rs"]
@@ -221,7 +223,14 @@ impl Root {
             first_render_marked: false,
             storage_asking: None,
             storage_confirm: None,
+            update: crate::services::update::UpdateUi::new(),
         };
+        // The updater script leaves a one-line result for the next start.
+        match crate::services::update::take_last_result() {
+            Some(Ok(version)) => root.show_toast_for(ToastKind::Good, format!("Updated to Recall {version}"), None, 5),
+            Some(Err(error)) => root.show_toast_for(ToastKind::Bad, "Update failed; this version is unchanged", Some(error), 8),
+            None => {}
+        }
         if let Some(path) = std::env::var_os("RECALL_NATIVE_CLIP") {
             root.open_clip(path.to_string_lossy().into_owned());
         }
@@ -334,6 +343,17 @@ impl Root {
         if self.toast.as_ref().is_some_and(|t| Instant::now() >= t.until) {
             self.toast = None;
             changed = true;
+        }
+        changed |= self.update.tick();
+        if let Some((good, text)) = self.update.notice.take() {
+            self.show_toast(if good { ToastKind::Good } else { ToastKind::Bad }, text, None);
+        }
+        // The update is downloaded and its script waits for this process: save and quit.
+        if self.update.quit_now {
+            self.update.quit_now = false;
+            self.flush_on_close();
+            cx.quit();
+            return;
         }
         if changed {
             cx.notify();
@@ -567,6 +587,7 @@ impl Render for Root {
             .child(self.render_titlebar(window, cx))
             .child(body)
             .children(self.render_toast(cx))
+            .children(self.render_update(cx))
     }
 }
 
