@@ -20,6 +20,7 @@ mod dda_logic;
 mod dda_window;
 #[cfg(feature = "encode")]
 mod gpu_path;
+pub mod screen;
 mod start;
 
 pub use control::CaptureControlHandle;

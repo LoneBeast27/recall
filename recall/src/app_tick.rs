@@ -166,14 +166,22 @@ impl App {
     /// Starts capture on the target window (`RECALL_CAPTURE_HWND`) or the configured
     /// monitor, in the format `CaptureShared::wants_fp16` picks.
     pub(super) fn start_capture(&mut self) {
-        let Some(shared) = self.shared.clone() else { return };
+        if self.shared.is_none() {
+            return;
+        }
+        let result = self.try_start_capture();
+        crate::capture_watchdog::note_start(&mut self.capture_watch, result, Instant::now());
+    }
+
+    /// `start_capture` without telling the watchdog (`capture_watchdog::watch` does).
+    pub(super) fn try_start_capture(&mut self) -> Result<(), String> {
+        let Some(shared) = self.shared.clone() else { return Err("no capture state".into()) };
         let hwnd = std::env::var("RECALL_CAPTURE_HWND").ok().and_then(|v| v.parse::<usize>().ok());
         let started = match hwnd {
             Some(hwnd) => capture::start_window(hwnd, shared),
             None => capture::start_monitor(self.config.monitor, shared),
         };
-        let result = started.map(|control| self.capture = Some(control)).map_err(|e| e.to_string());
-        self.note_capture_start(result);
+        started.map(|control| self.capture = Some(control)).map_err(|e| e.to_string())
     }
 
     /// Restarts capture when `CaptureShared::restart_reason` says so: a Bgra8 capture once
