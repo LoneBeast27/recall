@@ -2,20 +2,23 @@
 //! (`PowerRegisterSuspendResumeNotification` with a callback, so no window is
 //! needed) and applies the planner's actions on the pump thread.
 //!
-//! The callback runs on a system thread. It queues the notice; on suspend it
-//! waits up to [`SUSPEND_WAIT`] for the pump to act on it, so the long
-//! recording's `record_stop` is sent before the PC sleeps.
+//! The callback runs on a system thread. It only queues the notice and posts a
+//! `WM_NULL` to the pump thread so the pump acts on its next pass; it never waits,
+//! so the system's power broadcast is not held up (the suspend stop is
+//! best-effort, see `record_power`).
 
 use std::ffi::c_void;
-use std::sync::{Condvar, Mutex};
-use std::time::Duration;
+use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::{Mutex, MutexGuard};
+
+use windows::Win32::Foundation::{LPARAM, WPARAM};
+use windows::Win32::System::Threading::GetCurrentThreadId;
+use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_NULL};
 
 use crate::log;
 use crate::record_app::Controller;
-use crate::record_power::{PowerAction, PowerEvent, PBT_SUSPEND};
+use crate::record_power::{enqueue, PowerAction, PowerEvent, Registration};
 
-/// How long a suspend notice waits for the pump (the pump wakes every 50 ms).
-const SUSPEND_WAIT: Duration = Duration::from_secs(2);
 /// `DEVICE_NOTIFY_CALLBACK`: the recipient is a `DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS`.
 const DEVICE_NOTIFY_CALLBACK: u32 = 2;
 
@@ -32,60 +35,72 @@ unsafe impl Sync for SubscribeParams {}
 
 static PARAMS: SubscribeParams = SubscribeParams { callback: Some(on_power), context: std::ptr::null_mut() };
 
-/// Notices not yet taken by the pump, how many were posted, how many were acted on.
-struct Queue {
-    pending: Vec<u32>,
-    posted: u64,
-    served: u64,
-}
-
-static QUEUE: Mutex<Queue> = Mutex::new(Queue { pending: Vec::new(), posted: 0, served: 0 });
-static SERVED: Condvar = Condvar::new();
+/// Notices not yet taken by the pump.
+static PENDING: Mutex<Vec<u32>> = Mutex::new(Vec::new());
+/// The live registration (its handle is given back at shutdown).
+static REGISTRATION: Mutex<Registration> = Mutex::new(Registration::new());
+/// The pump's thread id, for the wake message; 0 = no pump to wake.
+static PUMP_THREAD: AtomicU32 = AtomicU32::new(0);
 
 #[link(name = "powrprof")]
 extern "system" {
     fn PowerRegisterSuspendResumeNotification(flags: u32, recipient: *const c_void, handle: *mut *mut c_void) -> u32;
+    fn PowerUnregisterSuspendResumeNotification(handle: *mut c_void) -> u32;
+}
+
+fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
 unsafe extern "system" fn on_power(_context: *const c_void, kind: u32, _setting: *const c_void) -> u32 {
-    let mut queue = QUEUE.lock().unwrap_or_else(|p| p.into_inner());
-    queue.pending.push(kind);
-    queue.posted += 1;
-    let ticket = queue.posted;
-    if kind == PBT_SUSPEND {
-        let _ = SERVED.wait_timeout_while(queue, SUSPEND_WAIT, |q| q.served < ticket);
+    let wake = enqueue(&mut lock(&PENDING), kind);
+    let pump = PUMP_THREAD.load(Ordering::Acquire);
+    if wake && pump != 0 {
+        // A failed post only costs latency: the pump also wakes on its own every 50 ms.
+        let _ = unsafe { PostThreadMessageW(pump, WM_NULL, WPARAM(0), LPARAM(0)) };
     }
     0 // ERROR_SUCCESS
 }
 
-/// Register once at controller start-up. The registration lives as long as the process.
+/// Register at controller start-up, on the pump thread. A second call while registered
+/// does nothing.
 pub(crate) fn register() {
-    let mut handle: *mut c_void = std::ptr::null_mut();
-    let recipient = &PARAMS as *const SubscribeParams as *const c_void;
-    let code = unsafe { PowerRegisterSuspendResumeNotification(DEVICE_NOTIFY_CALLBACK, recipient, &mut handle) };
-    if code == 0 {
-        log!("record: listening for sleep and resume");
-    } else {
-        log!("record: sleep/resume notices unavailable (error {code}); a resume keeps the old engine");
+    PUMP_THREAD.store(unsafe { GetCurrentThreadId() }, Ordering::Release);
+    let outcome = lock(&REGISTRATION).register(|| {
+        let mut handle: *mut c_void = std::ptr::null_mut();
+        let recipient = &PARAMS as *const SubscribeParams as *const c_void;
+        let code = unsafe { PowerRegisterSuspendResumeNotification(DEVICE_NOTIFY_CALLBACK, recipient, &mut handle) };
+        if code == 0 { Ok(handle as usize) } else { Err(code) }
+    });
+    match outcome {
+        Ok(true) => log!("record: listening for sleep and resume"),
+        Ok(false) => {}
+        Err(code) => log!("record: sleep/resume notices unavailable (error {code}); a resume keeps the old engine"),
     }
 }
 
-/// The notices queued since the last call, and the ticket that marks them served.
-fn take() -> (Vec<u32>, u64) {
-    let mut queue = QUEUE.lock().unwrap_or_else(|p| p.into_inner());
-    (std::mem::take(&mut queue.pending), queue.posted)
+/// Give the registration back at controller shutdown. Safe to call again, or unregistered.
+pub(crate) fn unregister() {
+    lock(&REGISTRATION).unregister(|handle| {
+        let code = unsafe { PowerUnregisterSuspendResumeNotification(handle as *mut c_void) };
+        if code == 0 {
+            log!("record: stopped listening for sleep and resume");
+        } else {
+            log!("record: sleep/resume unregister failed (error {code})");
+        }
+    });
+    PUMP_THREAD.store(0, Ordering::Release);
 }
 
-fn mark_served(ticket: u64) {
-    let mut queue = QUEUE.lock().unwrap_or_else(|p| p.into_inner());
-    queue.served = queue.served.max(ticket);
-    SERVED.notify_all();
+/// The notices queued since the last call.
+fn take() -> Vec<u32> {
+    std::mem::take(&mut *lock(&PENDING))
 }
 
 impl Controller {
     /// Pump step: act on the sleep/resume notices that arrived since the last tick.
     pub(crate) fn power_tick(&mut self, now: std::time::Instant) {
-        let (kinds, ticket) = take();
+        let kinds = take();
         if kinds.is_empty() {
             return;
         }
@@ -96,7 +111,6 @@ impl Controller {
                 self.apply_power_action(action, now);
             }
         }
-        mark_served(ticket);
     }
 
     fn apply_power_action(&mut self, action: PowerAction, now: std::time::Instant) {
@@ -114,5 +128,21 @@ impl Controller {
                 self.probe_foreground(now, false);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::record_power::PBT_SUSPEND;
+    use std::time::{Duration, Instant};
+
+    #[test]
+    fn the_suspend_callback_returns_at_once_with_no_pump() {
+        let started = Instant::now();
+        let code = unsafe { on_power(std::ptr::null(), PBT_SUSPEND, std::ptr::null()) };
+        assert_eq!(code, 0);
+        let waited = started.elapsed();
+        assert!(waited < Duration::from_millis(500), "the power thread was held for {waited:?}");
     }
 }
