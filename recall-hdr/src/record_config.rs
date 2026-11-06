@@ -73,6 +73,9 @@ pub struct RecordingCfg {
     pub stats_hotkey: String,
     /// Turns the overlay's notices (`overlay.enabled`) on / off ("" = off).
     pub overlay_hotkey: String,
+    /// Starts / saves the island editor: drag the island where it goes for
+    /// the game in front, kept for Dynamic placement ("" = off).
+    pub editor_hotkey: String,
     /// `h264` | `hevc` | `av1` (`RECALL_CODEC`).
     pub codec: String,
     /// Nominal capture/encode rate (`RECALL_FPS`).
@@ -122,6 +125,7 @@ impl Default for RecordingCfg {
             record_hotkey: crate::record_hotkeys::DEFAULT_RECORD.into(),
             stats_hotkey: crate::record_hotkeys::DEFAULT_STATS.into(),
             overlay_hotkey: crate::record_hotkeys::DEFAULT_OVERLAY.into(),
+            editor_hotkey: crate::record_hotkeys::DEFAULT_EDITOR.into(),
             codec: "h264".into(),
             fps: 60,
             bitrate_mbps: 25,

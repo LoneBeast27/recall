@@ -4,7 +4,8 @@
 //!
 //! - **Defaults**: one direct Alt combo per action -- Alt+N save, Alt+M mic,
 //!   Alt+B bookmark, Alt+S screenshot, Alt+L long recording, Alt+P stats,
-//!   Alt+O overlay (notices) on/off.
+//!   Alt+O overlay (notices) on/off, Alt+U island editor ("UI editor").
+//!   Alt+U was free: no other default, not a [`GAMER_COMBOS`] entry.
 //!   Rohan, 2026-11-05: the two-step chord (Alt+` then a digit) was on Alt
 //!   anyway, so it is gone. [`GAMER_COMBOS`] are never defaults. Bookmark,
 //!   screenshot, record and stats can be turned off ("").
@@ -36,6 +37,7 @@ pub const DEFAULT_SCREENSHOT: &str = "Alt+S";
 pub const DEFAULT_RECORD: &str = "Alt+L";
 pub const DEFAULT_STATS: &str = "Alt+P";
 pub const DEFAULT_OVERLAY: &str = "Alt+O";
+pub const DEFAULT_EDITOR: &str = "Alt+U";
 
 /// Combos games, launchers and overlays commonly own (GeForce/ShadowPlay,
 /// Xbox Game Bar, Steam, Discord, screenshot tools), plus Ctrl+Alt+R (a
@@ -58,6 +60,8 @@ pub enum HotkeyAction {
     Stats,
     /// Turn the overlay's notices (`overlay.enabled`) on or off.
     Overlay,
+    /// Start (or save) the island editor for the game in front.
+    Editor,
     ToggleHdr,
 }
 
@@ -105,6 +109,7 @@ pub fn bindings(rec: &RecordingCfg, hdr: Option<&str>) -> Vec<Binding> {
         (HotkeyAction::Record, "recording.record_hotkey", "long recording", rec.record_hotkey.as_str()),
         (HotkeyAction::Stats, "recording.stats_hotkey", "performance stats", rec.stats_hotkey.as_str()),
         (HotkeyAction::Overlay, "recording.overlay_hotkey", "overlay", rec.overlay_hotkey.as_str()),
+        (HotkeyAction::Editor, "recording.editor_hotkey", "island editor", rec.editor_hotkey.as_str()),
         (HotkeyAction::ToggleHdr, "hotkey.toggle_hdr", "HDR toggle", hdr.unwrap_or("")),
     ];
     for (action, key, label, accel) in singles {
@@ -229,6 +234,9 @@ pub fn migrate_loaded(rec: &mut RecordingCfg, toml_text: &str) {
     if !has("overlay_hotkey") {
         drop_taken_default(rec, HotkeyAction::Overlay);
     }
+    // Alt+U is on by default (Rohan asked for it), but never over a combo the
+    // user already gave another action, whether or not the file names it.
+    drop_taken_default(rec, HotkeyAction::Editor);
 }
 
 /// A key the file did not have came in as its serde default: turn it off
@@ -251,6 +259,7 @@ fn drop_taken_default(rec: &mut RecordingCfg, action: HotkeyAction) {
         match action {
             HotkeyAction::Stats => rec.stats_hotkey.clear(),
             HotkeyAction::Overlay => rec.overlay_hotkey.clear(),
+            HotkeyAction::Editor => rec.editor_hotkey.clear(),
             _ => {}
         }
     }
