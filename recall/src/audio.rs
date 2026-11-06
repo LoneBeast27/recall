@@ -7,11 +7,14 @@
 //! back to the Windows default and the status says so (`sources::opened`).
 //!
 //! Each track runs its own capture thread pushing interleaved f32 samples into a ring
-//! holding the last `buffer_secs`. The encoder snapshots rings at save time and encodes AAC
+//! holding the last `buffer_secs`. Every track is kept level with the wall clock
+//! (`apps::Leveller`): silence while its source sends nothing (loopback of a quiet output,
+//! a closed game), and a lost device is reopened every `REOPEN_EVERY` meanwhile. Gain and
+//! name change live (`sources::set_live`), so the Audio page never restarts the engine. The encoder snapshots rings at save time and encodes AAC
 //! per track — raw PCM in RAM keeps encoder state out of the ring (~23MB / 60s / stereo).
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
 use wasapi::{DeviceCollection, Direction, SampleType, StreamMode, WaveFormat};
@@ -78,12 +81,17 @@ impl AudioPcm {
 pub struct TrackRing {
     /// The source's id: unique in a run (long-recording lanes, thread names).
     pub name: &'static str,
-    /// The source's name: the clip's stream title.
-    pub title: &'static str,
+    /// The source's name: the clip's stream title. A rename on the Audio page replaces it
+    /// live (`set_title`), so it is read at save time.
+    title: Mutex<&'static str>,
     /// Where the track comes from (`edit_model::SOURCE_*` / `app:<exe>`).
     pub source: &'static str,
-    /// Linear gain applied to every captured sample.
-    gain: f32,
+    /// Linear gain applied to every captured sample, as `f32` bits: the Audio page's fader
+    /// changes it live (`set_gain_db`), with no engine restart.
+    gain: AtomicU32,
+    /// The gain has been above 0 dB at some point: samples in the ring may pass full scale,
+    /// so saves run the limiter until the engine restarts.
+    boosted: AtomicBool,
     /// An input device: silenced by the mic-mute hotkey.
     input: bool,
     /// Resolved endpoint friendly name (set by the capture thread at init).
@@ -105,9 +113,10 @@ impl TrackRing {
     fn for_source(spec: &SourceSpec, source: &'static str, buffer_secs: u32, endpoint: String) -> Self {
         TrackRing {
             name: Box::leak(spec.id.trim().to_owned().into_boxed_str()),
-            title: Box::leak(spec.name.trim().to_owned().into_boxed_str()),
+            title: Mutex::new(Box::leak(spec.name.trim().to_owned().into_boxed_str())),
             source,
-            gain: spec.gain(),
+            gain: AtomicU32::new(spec.gain().to_bits()),
+            boosted: AtomicBool::new(spec.gain() > 1.0),
             input: spec.kind() == Some(Kind::Input),
             endpoint: Mutex::new(endpoint),
             rate: RATE,
@@ -117,9 +126,41 @@ impl TrackRing {
         }
     }
 
-    /// The source's gain is above 0 dB: every output of this track goes through the peak limiter.
+    /// The source's gain is, or has been, above 0 dB: every output of this track goes through
+    /// the peak limiter (it leaves samples under the ceiling as they are).
     pub fn boosted(&self) -> bool {
-        self.gain > 1.0
+        self.boosted.load(Ordering::Relaxed)
+    }
+
+    fn gain(&self) -> f32 {
+        f32::from_bits(self.gain.load(Ordering::Relaxed))
+    }
+
+    /// New samples are scaled by `gain_db` (clamped like `SourceSpec::gain`); the replay
+    /// history keeps the gain it was captured with.
+    pub fn set_gain_db(&self, gain_db: f32) {
+        let gain = sources::gain_of(gain_db);
+        self.gain.store(gain.to_bits(), Ordering::Relaxed);
+        if gain > 1.0 {
+            self.boosted.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// The clip's stream title from now on.
+    pub fn title(&self) -> &'static str {
+        self.title.lock().map(|t| *t).unwrap_or("")
+    }
+
+    /// Rename the track for the saves that follow. Names are leaked like the first one; a
+    /// rename is a rare, hand-made change, so this stays small.
+    pub fn set_title(&self, name: &str) {
+        let name = name.trim();
+        if name.is_empty() || name == self.title() {
+            return;
+        }
+        if let Ok(mut t) = self.title.lock() {
+            *t = Box::leak(name.to_owned().into_boxed_str());
+        }
     }
 
     pub fn endpoint(&self) -> String {
@@ -182,7 +223,7 @@ impl TrackRing {
     pub fn snapshot_pcm_ending(&self, secs: f64, tail_secs: f64) -> AudioPcm {
         AudioPcm {
             name: self.name,
-            title: self.title,
+            title: self.title(),
             source: self.source,
             rate: self.rate,
             channels: self.channels,
@@ -195,9 +236,10 @@ impl TrackRing {
     /// only input sources, and only samples entering the ring: replay history never changes.
     fn push_capture(&self, data: &[f32], mute_inputs: bool) {
         let silence = mute_inputs && self.input;
+        let gain = self.gain();
         let gained: Vec<f32>;
-        let data = if self.gain != 1.0 && !silence {
-            gained = data.iter().map(|s| s * self.gain).collect();
+        let data = if gain != 1.0 && !silence {
+            gained = data.iter().map(|s| s * gain).collect();
             &gained[..]
         } else {
             data
@@ -243,7 +285,7 @@ pub fn start(buffer_secs: u32, mut report: impl FnMut(String)) -> Vec<Arc<TrackR
         };
         match start_track(spec, buffer_secs, target) {
             Ok(ring) => {
-                report(format!("audio track '{}' up: {} ({} Hz, {} ch)", ring.title, ring.endpoint(), ring.rate, ring.channels));
+                report(format!("audio track '{}' up: {} ({} Hz, {} ch)", ring.title(), ring.endpoint(), ring.rate, ring.channels));
                 sources::note_live(spec, &ring);
                 out.push(ring);
             }
@@ -382,6 +424,99 @@ fn start_track(spec: &SourceSpec, buffer_secs: u32, target: Option<LoopbackTarge
     }
 }
 
+/// How long a track waits between attempts to reopen a device or process it lost.
+const REOPEN_EVERY: std::time::Duration = std::time::Duration::from_secs(2);
+/// No packet for this long: the source is quiet (loopback sends nothing while nothing
+/// plays, a closed game's process sends nothing), so its track gets silence up to the clock.
+const IDLE: std::time::Duration = std::time::Duration::from_millis(200);
+/// Event wait per turn: short, so a quiet source is filled promptly.
+const WAIT_MS: u32 = 100;
+
+/// One open capture stream.
+struct Stream {
+    client: wasapi::AudioClient,
+    event: wasapi::Handle,
+    capture: wasapi::AudioCaptureClient,
+    endpoint: String,
+}
+
+/// Open `target`'s process loopback, else the source's endpoint, and start it. All COM
+/// objects live on the calling (capture) thread.
+fn open_stream(direction: &Direction, device: &str, ring: &TrackRing, target: &Option<LoopbackTarget>) -> Result<Stream, String> {
+    let format = WaveFormat::new(32, 32, &SampleType::Float, ring.rate as usize, ring.channels as usize, None);
+    let (mut client, endpoint, buffer_duration_hns) = match target {
+        Some(LoopbackTarget { pid, label }) => (
+            wasapi::AudioClient::new_application_loopback_client(*pid, true).map_err(|e| format!("process loopback for PID {pid}: {e}"))?,
+            label.clone(),
+            // Process-loopback clients do not support get_device_period.
+            // 20 ms is the wasapi example's documented safe event period.
+            200_000,
+        ),
+        None => {
+            let (device, endpoint) = pick_device(direction, device, ring.input)?;
+            let client = device.get_iaudioclient().map_err(|e| e.to_string())?;
+            let (_def_period, min_period) = client.get_device_period().map_err(|e| e.to_string())?;
+            (client, endpoint, min_period)
+        }
+    };
+    let mode = StreamMode::EventsShared { autoconvert: true, buffer_duration_hns };
+    // Loopback = a RENDER endpoint's client initialized Capture-direction.
+    client.initialize_client(&format, &Direction::Capture, &mode).map_err(|e| format!("initialize: {e}"))?;
+    let event = client.set_get_eventhandle().map_err(|e| e.to_string())?;
+    let capture = client.get_audiocaptureclient().map_err(|e| e.to_string())?;
+    client.start_stream().map_err(|e| e.to_string())?;
+    Ok(Stream { client, event, capture, endpoint })
+}
+
+/// Silence up to the wall clock (the source sends nothing right now).
+fn fill_silence(ring: &TrackRing, level: &mut apps::Leveller, started: std::time::Instant) {
+    let frames = level.idle(started.elapsed());
+    if frames > 0 {
+        ring.push_capture(&vec![0.0; frames as usize * ring.channels as usize], false);
+    }
+}
+
+/// Capture until the stream fails. Every packet goes through the track's `Leveller`, so
+/// the ring stays level with the wall clock: a save cuts every track on the same clock
+/// (`encoder::handoff`), quiet stretches included. Returns why the stream ended.
+fn run_stream(ring: &TrackRing, stream: &Stream, level: &mut apps::Leveller, started: std::time::Instant, device: bool) -> String {
+    let block = ring.channels as usize * 4; // f32 frame size in bytes
+    let channels = ring.channels as usize;
+    let mut raw: VecDeque<u8> = VecDeque::new();
+    let mut last_sound = std::time::Instant::now();
+    loop {
+        if stream.event.wait_for_event(WAIT_MS).is_ok() {
+            if let Err(e) = stream.capture.read_from_device_to_deque(&mut raw) {
+                return format!("read failed: {e}");
+            }
+            if raw.len() >= block {
+                let full = raw.len() - raw.len() % block;
+                let samples: Vec<f32> = raw.drain(..full).collect::<Vec<u8>>().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+                ring.push_capture(&level.live(started.elapsed(), &samples, channels), mic_muted());
+                last_sound = std::time::Instant::now();
+                continue;
+            }
+        } else if device {
+            // A device that was unplugged or invalidated answers this with an error.
+            if let Err(e) = stream.client.get_current_padding() {
+                return format!("device lost: {e}");
+            }
+        }
+        if last_sound.elapsed() >= IDLE {
+            fill_silence(ring, level, started);
+        }
+    }
+}
+
+fn set_endpoint(ring: &TrackRing, text: String) {
+    if let Ok(mut g) = ring.endpoint.lock() {
+        *g = text;
+    }
+}
+
+/// The capture thread of a device or game track: open, capture, and when the device or
+/// stream is lost, keep the track level with silence and reopen every `REOPEN_EVERY`.
+/// Only the first open is reported to `start_track` (a source that never opens has no track).
 fn capture_thread(
     direction: Direction,
     device: String,
@@ -389,70 +524,35 @@ fn capture_thread(
     init_tx: std::sync::mpsc::Sender<Result<(), String>>,
     target: Option<LoopbackTarget>,
 ) {
-    let init = || -> Result<_, String> {
-        // Per-thread COM init; already-initialized is fine.
-        let _ = wasapi::initialize_mta();
-        let format = WaveFormat::new(32, 32, &SampleType::Float, ring.rate as usize, ring.channels as usize, None);
-        let (mut client, endpoint, buffer_duration_hns) = match &target {
-            Some(LoopbackTarget { pid, label }) => (
-                wasapi::AudioClient::new_application_loopback_client(*pid, true)
-                    .map_err(|e| format!("process loopback for PID {pid}: {e}"))?,
-                label.clone(),
-                // Process-loopback clients do not support get_device_period.
-                // 20 ms is the wasapi example's documented safe event period.
-                200_000,
-            ),
-            None => {
-                let (device, endpoint) = pick_device(&direction, &device, ring.input)?;
-                let client = device.get_iaudioclient().map_err(|e| e.to_string())?;
-                let (_def_period, min_period) = client.get_device_period().map_err(|e| e.to_string())?;
-                (client, endpoint, min_period)
-            }
-        };
-        let mode = StreamMode::EventsShared { autoconvert: true, buffer_duration_hns };
-        // Loopback = a RENDER endpoint's client initialized Capture-direction.
-        client
-            .initialize_client(&format, &Direction::Capture, &mode)
-            .map_err(|e| format!("initialize: {e}"))?;
-        let event = client.set_get_eventhandle().map_err(|e| e.to_string())?;
-        let capture = client.get_audiocaptureclient().map_err(|e| e.to_string())?;
-        client.start_stream().map_err(|e| e.to_string())?;
-        if let Ok(mut g) = ring.endpoint.lock() {
-            *g = endpoint;
-        }
-        Ok((client, event, capture))
-    };
-
-    let (_client, event, capture) = match init() {
-        Ok(v) => {
-            let _ = init_tx.send(Ok(()));
-            v
-        }
-        Err(e) => {
-            let _ = init_tx.send(Err(e));
-            return;
-        }
-    };
-
-    let block = ring.channels as usize * 4; // f32 frame size in bytes
-    let mut raw: VecDeque<u8> = VecDeque::new();
+    // Per-thread COM init; already-initialized is fine.
+    let _ = wasapi::initialize_mta();
+    let started = std::time::Instant::now();
+    let mut level = apps::Leveller::new(ring.rate);
+    let mut init_tx = Some(init_tx);
     loop {
-        if event.wait_for_event(2000).is_err() {
-            continue; // silence timeout -- keep waiting
+        match open_stream(&direction, &device, &ring, &target) {
+            Ok(stream) => {
+                set_endpoint(&ring, stream.endpoint.clone());
+                if let Some(tx) = init_tx.take() {
+                    let _ = tx.send(Ok(()));
+                }
+                let why = run_stream(&ring, &stream, &mut level, started, target.is_none());
+                let _ = stream.client.stop_stream();
+                eprintln!("[recall] audio track '{}': {why}; reopening", ring.name);
+                set_endpoint(&ring, format!("{} (lost: {why}; reopening)", stream.endpoint));
+            }
+            Err(e) => {
+                if let Some(tx) = init_tx.take() {
+                    let _ = tx.send(Err(e));
+                    return;
+                }
+            }
         }
-        if capture.read_from_device_to_deque(&mut raw).is_err() {
-            continue;
+        let until = std::time::Instant::now() + REOPEN_EVERY;
+        while std::time::Instant::now() < until {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            fill_silence(&ring, &mut level, started);
         }
-        if raw.len() < block {
-            continue;
-        }
-        let full = raw.len() - raw.len() % block;
-        let bytes: Vec<u8> = raw.drain(..full).collect();
-        let mut samples = Vec::with_capacity(bytes.len() / 4);
-        for chunk in bytes.chunks_exact(4) {
-            samples.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-        }
-        ring.push_capture(&samples, mic_muted());
     }
 }
 

@@ -434,6 +434,16 @@ fn spawn_stdin_reader(
                     #[cfg(feature="encode")]
                     { audio::set_mic_muted(muted); protocol::emit(&protocol::Outbound::MicMuted { muted }); }
                 }
+                Ok(protocol::Command::SetSource { id, gain_db, name }) => {
+                    #[cfg(feature="encode")]
+                    {
+                        if !audio::sources::set_live(&id, gain_db, name.as_deref()) {
+                            eprintln!("[recall] set_source: no live track '{id}'");
+                        }
+                    }
+                    #[cfg(not(feature="encode"))]
+                    let _ = (id, gain_db, name);
+                }
                 Ok(
                     cmd @ (protocol::Command::Bookmark
                     | protocol::Command::Screenshot
