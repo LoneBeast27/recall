@@ -140,7 +140,8 @@ pub enum Outbound {
         part: u32,
         cause: Option<&'static str>,
     },
-    /// `seconds`/`bytes`: this file. `parts`: files so far, `total_seconds`: all of them.
+    /// `seconds`/`bytes`: this file. `parts`: files so far, `total_seconds`: all of them,
+    /// `gap_seconds`: time not recorded between the parts (0 for one file).
     /// `continued`: only this part ended (`cause` as above); the recording goes on
     /// in a new file, reported by the next `recording_started`.
     RecordingStopped {
@@ -150,13 +151,16 @@ pub enum Outbound {
         continued: bool,
         parts: u32,
         total_seconds: f64,
+        gap_seconds: f64,
         cause: Option<&'static str>,
     },
     /// `path`: the partial recording that was kept (renamed to its final name),
-    /// or null when nothing was written.
+    /// or null when nothing was written. `paths`: every file the recording left,
+    /// the finished parts of a continued recording first (it ended early).
     RecordingFailed {
         reason: String,
         path: Option<String>,
+        paths: Vec<String>,
     },
     /// A long recording left as `.part` by a crash was renamed into place.
     RecordingRecovered {

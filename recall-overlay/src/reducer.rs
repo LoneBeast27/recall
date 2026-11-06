@@ -261,6 +261,11 @@ impl Reducer {
                 }
                 None => false,
             },
+            Some("recording_failed") if crate::rec_notice::failed_notice(event).is_some() => {
+                let Some(n) = crate::rec_notice::failed_notice(event) else { return false };
+                let notice = NoticeView::new(n.tone, &n.title, n.detail, false).emphasized();
+                self.set_transient(&n.title, n.text, now + FAILURE_FOR, notice)
+            }
             Some(kind @ ("screenshot_failed" | "recording_failed")) => {
                 let reason = truncate(event.get("reason").and_then(Value::as_str).unwrap_or("unknown error"), 48);
                 let title = if kind == "screenshot_failed" { "Screenshot failed" } else { "Recording failed" };

@@ -26,7 +26,7 @@ fn waits_for_a_keyframe_then_writes_each_packet_one_step_late() {
     assert_eq!(log.videos(), vec![(0, 16 * MS, true, 2), (16 * MS, 34 * MS, false, 3)], "VFR durations from the next PTS");
     // The tail packet reuses the previous duration: (1070 + 34 - 1020) ms.
     let events = rec.stop();
-    assert_eq!(events, vec![Event::Stopped { path: path.clone(), seconds: 0.084, bytes: 4, marks: 0, parts: 1, total_seconds: 0.084 }]);
+    assert_eq!(events, vec![Event::Stopped { path: path.clone(), seconds: 0.084, bytes: 4, marks: 0, parts: 1, total_seconds: 0.084, gap_seconds: 0.0 }]);
     assert_eq!(log.videos().last(), Some(&(50 * MS, 34 * MS, false, 4)));
     assert!(path.is_file(), "renamed into place");
     assert!(!naming::part_of(&path).exists(), "no .part left");
@@ -161,7 +161,7 @@ fn marks_land_in_the_recording_sidecar_and_a_reopen_continues_in_a_new_file() {
     assert!(rec.encoder_reopened(later, Cause::Size, None).is_empty(), "armed: nothing to end");
     // Part 2 starts on the new encoder's first keyframe, with its own timeline.
     let second = path.with_file_name("G__2026-10-22__14-05-09__rec-2.mp4");
-    let settled = later + SETTLE; // the second reopen came while waiting
+    let settled = later + Duration::from_secs(2); // the second reopen came while waiting
     assert!(rec.video(1_150 * MS, false, pkt(3), false, settled).is_empty(), "waits for a keyframe");
     assert_eq!(rec.video(1_200 * MS, true, pkt(4), false, settled), vec![Event::PartStarted { path: second.clone(), part: 2, cause: Cause::Size }]);
     assert_eq!(log.calls().iter().rfind(|c| matches!(c, Call::Open(_))), Some(&Call::Open(naming::part_of(&second))));

@@ -5,10 +5,12 @@
 //! encoder's first keyframe (`PartStarted`). A stop, arm timeout or failure
 //! before that names the finished part.
 //!
-//! At most one new part per [`PART_GAP`]: a reopen inside that window (a size
-//! flap, a window being dragged) waits for the gap to pass, and every further
-//! reopen while waiting holds the next part until the stream has been steady
-//! for [`SETTLE`].
+//! At most one new part per [`PART_GAP`], and never later than that: the next
+//! part may start [`PART_GAP`] after the last one began, and starts by
+//! [`PART_GAP`] after the reopen that ended it whatever follows. Further reopens
+//! while it waits (a size flap, a window being dragged) only move it to the
+//! newest size. A reopen whose stream headers match (`Cause::Same`, e.g. GPU
+//! frames to CPU copies at the same size) needs no new file at all.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -16,10 +18,8 @@ use std::time::{Duration, Instant};
 use super::{finish, Event, Phase, Recorder, SinkFactory};
 use crate::naming;
 
-/// A new part starts at most this often.
+/// A new part starts at most this often, and at most this long after the reopen that ended a part.
 pub const PART_GAP: Duration = Duration::from_secs(10);
-/// After a reopen while waiting for the next part, the stream must stay put this long.
-pub const SETTLE: Duration = Duration::from_secs(2);
 
 /// Why the live encoder reopened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -30,6 +30,8 @@ pub enum Cause {
     Input,
     /// The encoder reopened with the same stream shape.
     Encoder,
+    /// Same codec, size and parameter sets: the packets go on in the same file.
+    Same,
 }
 
 impl Cause {
@@ -39,6 +41,7 @@ impl Cause {
             Cause::Size => "size",
             Cause::Input => "input",
             Cause::Encoder => "encoder",
+            Cause::Same => "same",
         }
     }
 
@@ -47,6 +50,7 @@ impl Cause {
             Cause::Size => "capture size changed",
             Cause::Input => "capture input changed (GPU / CPU frames)",
             Cause::Encoder => "video encoder reopened",
+            Cause::Same => "video encoder reopened with the same stream",
         }
     }
 }
@@ -61,7 +65,10 @@ pub(super) struct Series {
     /// The finished part's number and the seconds of every part so far.
     pub part: u32,
     pub total_seconds: f64,
-    /// The next part opens on the first keyframe at or after this.
+    /// Capture µs where the finished part ended (None if unknown) and the seconds missed so far.
+    pub end_us: Option<u64>,
+    pub gap_seconds: f64,
+    /// The next part opens on the first keyframe at or after this (fixed at the first reopen).
     pub not_before: Instant,
     /// Why the stream changed (the newest reopen's).
     pub cause: Cause,
@@ -70,8 +77,8 @@ pub(super) struct Series {
 impl Series {
     /// The recording stopped between two parts: it is the finished parts.
     pub fn stopped(self) -> Event {
-        let Series { path, seconds, bytes, marks, part, total_seconds, .. } = self;
-        Event::Stopped { path, seconds, bytes, marks, parts: part, total_seconds }
+        let Series { path, seconds, bytes, marks, part, total_seconds, gap_seconds, .. } = self;
+        Event::Stopped { path, seconds, bytes, marks, parts: part, total_seconds, gap_seconds }
     }
 }
 
@@ -89,11 +96,17 @@ impl<F: SinkFactory> Recorder<F> {
         self.video = video;
         match &mut self.phase {
             Phase::Idle | Phase::Armed { previous: None, .. } => Vec::new(),
-            // Waiting for the next part: the stream is still changing.
+            // Waiting for the next part: it starts at the newest size, on time.
             Phase::Armed { previous: Some(s), .. } => {
-                s.cause = cause;
-                s.not_before = s.not_before.max(now + SETTLE);
+                if cause != Cause::Same {
+                    s.cause = cause;
+                }
                 Vec::new()
+            }
+            // Headers match: same file, from the new encoder's first keyframe.
+            Phase::Recording(a) if cause == Cause::Same => {
+                a.need_key = true;
+                vec![Event::Log(format!("{}; the long recording goes on in the same file", cause.log_text()))]
             }
             Phase::Recording(_) => self.next_part(now, cause),
         }
@@ -103,19 +116,21 @@ impl<F: SinkFactory> Recorder<F> {
         let Phase::Recording(active) = std::mem::replace(&mut self.phase, Phase::Idle) else { return Vec::new() };
         let start = Some((active.base_us, active.wall_base));
         let began = active.began;
+        let base_us = active.base_us;
         let mut events = vec![Event::Log(format!("{}; the long recording continues in a new file", cause.log_text()))];
         let mut ended = finish(*active);
         let last = ended.pop();
         events.extend(ended);
-        let Some(Event::Stopped { path, seconds, bytes, marks, parts, total_seconds }) = last else {
+        let Some(Event::Stopped { path, seconds, bytes, marks, parts, total_seconds, gap_seconds }) = last else {
             events.extend(last);
             return events;
         };
         let next = naming::longrec_next_part(&path, Path::exists);
         events.push(Event::Continued { path: path.clone(), seconds, bytes, marks, part: parts, total_seconds, cause });
-        // Inside the gap since this part began: wait for it, and for the stream to settle.
-        let not_before = if now < began + PART_GAP { (began + PART_GAP).max(now + SETTLE) } else { now };
-        let previous = Some(Series { path, seconds, bytes, marks, part: parts, total_seconds, not_before, cause });
+        // Inside the gap since this part began: wait for it (fixed now: later reopens never push it).
+        let not_before = (began + PART_GAP).max(now);
+        let end_us = Some(base_us + (seconds * 1e6) as u64);
+        let previous = Some(Series { path, seconds, bytes, marks, part: parts, total_seconds, end_us, gap_seconds, not_before, cause });
         self.phase = Phase::Armed { path: next, start, requested: now, previous };
         events
     }
