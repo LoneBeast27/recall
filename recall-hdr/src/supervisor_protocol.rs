@@ -111,8 +111,9 @@ pub(super) fn read_protocol(shared: &Arc<Shared>, stdout: std::process::ChildStd
                 }
             }
             Some("hud_scan") => log!(
-                "supervisor: engine hud scan -- ok={} moving={}/{} {}",
+                "supervisor: engine hud scan -- ok={} kind={} moving={}/{} {}",
                 val.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+                val.get("kind").and_then(|v| v.as_str()).unwrap_or("game"),
                 val.get("moving").and_then(|v| v.as_u64()).unwrap_or(0),
                 val.get("bursts").and_then(|v| v.as_u64()).unwrap_or(0),
                 field(&val, "reason")

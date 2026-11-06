@@ -49,6 +49,24 @@ pub const PREFERENCE: [Anchor; 8] = [
     Anchor::BottomCentre,
 ];
 
+/// Every spot has more than this share of its footprint covered: a crowded
+/// picture (an app such as Discord, all panels and text). The pick then goes by
+/// the share covered, preferring the top and leaving the bottom left last,
+/// where apps keep their user and voice buttons.
+pub const CROWDED: f32 = 0.25;
+/// Crowded spots within this share of the clearest count as equally clear.
+const CROWDED_TIE: f32 = 0.05;
+pub const CROWDED_ORDER: [Anchor; 8] = [
+    Anchor::TopRight,
+    Anchor::TopCentre,
+    Anchor::TopLeft,
+    Anchor::RightMiddle,
+    Anchor::BottomRight,
+    Anchor::LeftMiddle,
+    Anchor::BottomCentre,
+    Anchor::BottomLeft,
+];
+
 /// Where the HUD sits over the game picture: `grid[r]` bit c = cell (c, r).
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HudGrid {
@@ -73,20 +91,35 @@ impl HudGrid {
         self.grid.get(r as usize).is_some_and(|bits| bits >> c & 1 == 1)
     }
 
-    /// HUD cells under the picture fraction `[x0, x1) x [y0, y1)`.
-    fn cover(&self, (x0, y0, x1, y1): (f32, f32, f32, f32)) -> u32 {
+    /// A `hud_scan` of a still picture (`kind` "ui": an app or a menu).
+    pub fn is_ui(event: &Value) -> bool {
+        event.get("kind").and_then(Value::as_str) == Some("ui")
+    }
+
+    /// The grid cells under the picture fraction `[x0, x1) x [y0, y1)`.
+    fn cells_under(&self, (x0, y0, x1, y1): (f32, f32, f32, f32)) -> (std::ops::Range<u32>, std::ops::Range<u32>) {
         let span = |from: f32, to: f32, n: u32| {
             let first = ((from * n as f32).floor().max(0.0) as u32).min(n);
             let last = ((to * n as f32).ceil().max(0.0) as u32).min(n);
             first..last
         };
-        let mut n = 0;
-        for r in span(y0, y1, self.rows) {
-            for c in span(x0, x1, self.cols) {
-                n += self.cell(c, r) as u32;
-            }
+        (span(x0, x1, self.cols), span(y0, y1, self.rows))
+    }
+
+    /// HUD cells under the picture fraction `[x0, x1) x [y0, y1)`.
+    fn cover(&self, rect: (f32, f32, f32, f32)) -> u32 {
+        let (cols, rows) = self.cells_under(rect);
+        rows.map(|r| cols.clone().filter(|&c| self.cell(c, r)).count() as u32).sum()
+    }
+
+    /// The share of the cells under `rect` that hold HUD (0 for an empty rect).
+    fn covered(&self, rect: (f32, f32, f32, f32)) -> f32 {
+        let (cols, rows) = self.cells_under(rect);
+        let all = cols.len() * rows.len();
+        if all == 0 {
+            return 0.0;
         }
-        n
+        self.cover(rect) as f32 / all as f32
     }
 }
 
@@ -113,8 +146,15 @@ fn footprint(anchor: Anchor, aspect: f32) -> (f32, f32, f32, f32) {
 }
 
 /// The clearest spot: the least HUD under the island's footprint, the
-/// current spot kept on a tie (no hopping), then [`PREFERENCE`] order.
+/// current spot kept on a tie (no hopping), then [`PREFERENCE`] order. When
+/// every spot is [`CROWDED`], the least covered share wins, in [`CROWDED_ORDER`].
 pub fn choose(hud: &HudGrid, aspect: f32, current: Option<Anchor>) -> Anchor {
+    let share = |a: Anchor| hud.covered(footprint(a, aspect));
+    let least = CROWDED_ORDER.iter().map(|&a| share(a)).fold(f32::INFINITY, f32::min);
+    if least > CROWDED {
+        // The current spot is not kept here: it may be the bottom left a stale pick left it on.
+        return CROWDED_ORDER.into_iter().find(|&a| share(a) <= least + CROWDED_TIE).unwrap_or(Anchor::TopRight);
+    }
     let cover = |a: Anchor| hud.cover(footprint(a, aspect));
     let best = PREFERENCE.iter().map(|&a| cover(a)).min().unwrap_or(0);
     match current.filter(|&a| cover(a) == best) {
@@ -132,18 +172,47 @@ struct Entry {
     /// When it was last scanned, as a count of scans kept in this file.
     #[serde(default)]
     seq: u64,
+    /// `ui` scans (a still picture), newest last: used only while the entry
+    /// has no `game` scan, and with no share limit (an app is mostly panels).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    ui: Vec<Vec<u64>>,
 }
 
 impl Entry {
     /// What `HudGrid::from_scan` would accept: 1..=64 columns and rows, a row per scan line.
     fn sane(&self) -> bool {
-        (1..=64).contains(&self.cols) && (1..=64).contains(&self.rows) && self.scans.iter().all(|s| s.len() == self.rows as usize)
+        let rows = |s: &Vec<u64>| s.len() == self.rows as usize;
+        (1..=64).contains(&self.cols) && (1..=64).contains(&self.rows) && self.scans.iter().all(rows) && self.ui.iter().all(rows)
     }
 }
 
 /// A plain exe-stem key: `[a-z0-9._-]{1,64}` (no spaces, no capitals).
 pub fn exe_stem_key(key: &str) -> bool {
     (1..=64).contains(&key.len()) && key.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b"._-".contains(&b))
+}
+
+/// Picture shapes told apart: width / height in steps of 0.2 (16:9 = 9, 16:10 = 8,
+/// 21:9 = 12, a portrait 9:16 monitor = 3). An app lays out in fixed pixels, so a
+/// grid learnt on a landscape window says nothing about the same app in portrait.
+pub fn shape(aspect: f32) -> u32 {
+    if aspect.is_finite() && aspect > 0.0 { (aspect * 5.0).round().clamp(1.0, 99.0) as u32 } else { 0 }
+}
+
+/// Saved scans written before shapes were kept were all landscape 16:9 play.
+const LEGACY_SHAPE: u32 = 9;
+
+/// The cache key of a game's scans at a picture shape: `<exe stem>@<shape>`
+/// ("" for the desktop or no exe).
+pub fn shape_key(stem: &str, aspect: f32) -> String {
+    if stem.is_empty() { String::new() } else { format!("{stem}@{}", shape(aspect)) }
+}
+
+/// A cache key: an exe stem, optionally `@<shape>` (1-2 digits).
+pub fn cache_key(key: &str) -> bool {
+    match key.split_once('@') {
+        Some((stem, shape)) => exe_stem_key(stem) && (1..=2).contains(&shape.len()) && shape.bytes().all(|b| b.is_ascii_digit()),
+        None => exe_stem_key(key),
+    }
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -175,8 +244,16 @@ impl HudCache {
         let mut cache = Self { path, file };
         let before = cache.file.games.len();
         // Keys are exe stems; anything else (a window title) is dropped and the file rewritten once.
-        cache.file.games.retain(|key, _| exe_stem_key(key));
-        let dropped = cache.file.games.len() != before;
+        cache.file.games.retain(|key, _| cache_key(key));
+        let mut dropped = cache.file.games.len() != before;
+        // A key without a shape was saved before shapes were kept: landscape 16:9.
+        let legacy: Vec<String> = cache.file.games.keys().filter(|k| !k.contains('@')).cloned().collect();
+        for key in legacy {
+            if let Some(entry) = cache.file.games.remove(&key) {
+                cache.file.games.entry(format!("{key}@{LEGACY_SHAPE}")).or_insert(entry);
+                dropped = true;
+            }
+        }
         cache.file.games.retain(|_, e| e.sane());
         cache.trim();
         if dropped {
@@ -185,33 +262,49 @@ impl HudCache {
         cache
     }
 
+    /// Kept scans of either kind.
     pub fn scans(&self, key: &str) -> usize {
-        self.file.games.get(key).map_or(0, |e| e.scans.len())
+        self.file.games.get(key).map_or(0, |e| e.scans.len() + e.ui.len())
     }
 
-    /// Every kept scan of the game, together (a cell is HUD when any scan saw it).
+    /// Every kept scan of the game, together (a cell is HUD when any scan saw
+    /// it): the `game` scans when there is a good one, else the `ui` scans.
     pub fn grid(&self, key: &str) -> Option<HudGrid> {
         let entry = self.file.games.get(key)?;
         let good: Vec<&Vec<u64>> = entry.scans.iter().filter(|s| share(s, entry.cols, entry.rows) <= MAX_HUD_SHARE).collect();
-        if good.is_empty() {
+        let use_scans = if good.is_empty() { entry.ui.iter().collect() } else { good };
+        if use_scans.is_empty() {
             return None;
         }
-        let grid = (0..entry.rows as usize).map(|r| good.iter().fold(0, |bits, s| bits | s.get(r).copied().unwrap_or(0))).collect();
+        let grid = (0..entry.rows as usize).map(|r| use_scans.iter().fold(0, |bits, s| bits | s.get(r).copied().unwrap_or(0))).collect();
         Some(HudGrid { cols: entry.cols, rows: entry.rows, grid })
     }
 
-    /// Keeps a new scan (a grid of another size starts the game over) and saves.
+    /// Keeps a new `game` scan (a grid of another size starts the game over) and saves.
     pub fn add(&mut self, key: &str, scan: HudGrid) {
-        if key.is_empty() || share(&scan.grid, scan.cols, scan.rows) > MAX_HUD_SHARE {
+        if share(&scan.grid, scan.cols, scan.rows) > MAX_HUD_SHARE {
+            return;
+        }
+        self.keep(key, scan, false);
+    }
+
+    /// Keeps a new `ui` scan (a still picture, no share limit) and saves.
+    pub fn add_ui(&mut self, key: &str, scan: HudGrid) {
+        self.keep(key, scan, true);
+    }
+
+    fn keep(&mut self, key: &str, scan: HudGrid, ui: bool) {
+        if key.is_empty() {
             return;
         }
         let entry = self.file.games.entry(key.to_string()).or_default();
         if (entry.cols, entry.rows) != (scan.cols, scan.rows) {
-            *entry = Entry { cols: scan.cols, rows: scan.rows, scans: Vec::new(), seq: 0 };
+            *entry = Entry { cols: scan.cols, rows: scan.rows, ..Entry::default() };
         }
-        entry.scans.push(scan.grid);
-        let extra = entry.scans.len().saturating_sub(KEEP);
-        entry.scans.drain(..extra);
+        let list = if ui { &mut entry.ui } else { &mut entry.scans };
+        list.push(scan.grid);
+        let extra = list.len().saturating_sub(KEEP);
+        list.drain(..extra);
         self.file.seq += 1;
         entry.seq = self.file.seq;
         if !entry.sane() {
