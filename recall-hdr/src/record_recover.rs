@@ -19,7 +19,7 @@
 use std::time::{Duration, Instant};
 
 use crate::log;
-use crate::record_recover_stale::StaleRecovering;
+use crate::record_recover_stale::{EngineWatch, Verdict};
 use crate::record_status::session_state;
 use crate::supervisor::EngineHealth;
 
@@ -78,8 +78,9 @@ pub struct EncoderRecovery {
     awaiting: bool,
     /// Recording since (after a restart): a stable minute ends the episode.
     healthy_since: Option<Instant>,
-    /// A "recovering" that stopped moving.
-    stale: StaleRecovering,
+    /// A hung engine, or a recovery getting nowhere (`record_recover_stale`). Kept across
+    /// the stable-minute reset: a hang gets one restart, not one per minute.
+    watch: EngineWatch,
 }
 
 impl EncoderRecovery {
@@ -116,11 +117,21 @@ impl EncoderRecovery {
         self.failed_since.is_some() || (self.awaiting && self.last_restart.is_some_and(|t| now.saturating_duration_since(t) < STABLE_AFTER))
     }
 
-    /// One pump tick from the session: `statuses` = status lines so far, `shown` = the game
-    /// can be seen. A stale "recovering" is fed as [`Seen::EncoderFailed`].
-    pub fn step(&mut self, now: Instant, state: &str, health: EngineHealth, statuses: u64, shown: bool, busy: bool) -> Recovery {
-        let seen = if self.stale.observe(state, statuses, shown, now) { Seen::EncoderFailed } else { Seen::of(state, health) };
-        self.observe(now, seen, busy)
+    /// One pump tick from the session: `progress` = the encoder heartbeat (or the status
+    /// line count on an engine without one), `shown` = the game can be seen. A hung engine
+    /// gets one restart at once; a recovery past its bound is fed as [`Seen::EncoderFailed`].
+    pub fn step(&mut self, now: Instant, state: &str, health: EngineHealth, progress: u64, shown: bool, busy: bool) -> Recovery {
+        match self.watch.observe(state, progress, shown, now) {
+            Some(Verdict::Hung) if !busy => {
+                self.watch.hang_restart_done();
+                self.awaiting = true;
+                self.last_restart = Some(now);
+                Recovery::Restart
+            }
+            Some(Verdict::Hung) => Recovery::Nothing,
+            Some(Verdict::Failed) => self.observe(now, Seen::EncoderFailed, busy),
+            None => self.observe(now, Seen::of(state, health), busy),
+        }
     }
 
     fn recording(&mut self, now: Instant) -> Recovery {
@@ -129,7 +140,8 @@ impl EncoderRecovery {
         }
         let since = *self.healthy_since.get_or_insert(now);
         if now.saturating_duration_since(since) >= STABLE_AFTER {
-            *self = EncoderRecovery::default();
+            let watch = std::mem::take(&mut self.watch);
+            *self = EncoderRecovery { watch, ..Default::default() };
             return Recovery::Nothing;
         }
         if std::mem::take(&mut self.awaiting) {
@@ -153,15 +165,18 @@ impl crate::record_app::Controller {
         let fresh = self.supervisor.hello_count() > self.hello_at_retarget;
         let wanted = self.wanted();
         let state = session_state(&wanted, health, view.encoder.as_deref(), fresh, self.paused);
+        let watched = matches!(state, "recovering" | "recording" | "degraded");
         let shown = match &wanted {
-            crate::record_engine::EngineTarget::Window(t) if state == "recovering" => crate::record_screen::sight(t).shown(),
+            crate::record_engine::EngineTarget::Window(t) if watched => crate::record_screen::sight(t).shown(),
             _ => true,
         };
+        // The encoder heartbeat when the engine sends one, else its status line count.
+        let progress = view.heartbeat.filter(|h| *h > 0).unwrap_or(view.statuses);
         // A capture-stuck restart in flight: never stack a second one on it.
         let busy = self.activity.busy(now) || self.capture_stuck.pending(now);
-        match self.recovery.step(now, state, health, view.statuses, shown, busy) {
+        match self.recovery.step(now, state, health, progress, shown, busy) {
             Recovery::Restart => {
-                log!("record: the encoder has failed (or its recovery stopped) for over {} s; restarting the engine (intended)", ERROR_GRACE.as_secs());
+                log!("record: the encoder failed, its recovery ran past its bound, or the engine hung; restarting the engine (intended)");
                 self.restart_engine_for_settings();
             }
             Recovery::Recovered => log!("record: recording again after the engine restart"),
@@ -173,3 +188,7 @@ impl crate::record_app::Controller {
 #[cfg(test)]
 #[path = "record_recover_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "record_recover_hang_tests.rs"]
+mod hang_tests;
