@@ -9,11 +9,19 @@
 //! the GPU has read it and copies it itself only when the surface cannot be bound), and the
 //! frame is released before the next acquire.
 //!
+//! While following a game window (`dda_window`), every `dda_logic::FOLLOW_CHECK` the capture
+//! looks at it: covered by another window, minimized (exclusive-fullscreen alt-tab, Win+D) or
+//! the lock screen hold frames (none reach the encoder, so the clip shows the last game
+//! frame and never the window on top); frames resume when the game is back. Only a move to
+//! another monitor, or a window that stays off its monitor (`dda_logic::LEAVE_GRACE`), asks
+//! for a capture restart (`dda_logic::Follower`).
+//!
 //! A lost duplication (mode change, exclusive fullscreen switch, UAC secure desktop, monitor
 //! sleep or replug) is made again, looking the monitor's output up again each time, on the
 //! same device with backoff, so the encoder and replay buffer keep running; a new size flows
 //! through the per-frame size handling WGC uses. A lost device, or re-creates failing for
-//! longer than `dda_logic::GIVE_UP`, marks Desktop Duplication failed for the run and asks
+//! longer than `dda_logic::GIVE_UP` while the user's desktop is on screen (the lock screen,
+//! UAC and a sleeping display never count: `dda_logic::FailClock`), marks Desktop Duplication failed for the run and asks
 //! the engine to restart capture, which then lands on WGC (`CaptureShared::restart_reason`).
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
@@ -30,14 +38,12 @@ use windows::Win32::System::Performance::QueryPerformanceFrequency;
 use windows::Win32::UI::HiDpi::{SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 
 use super::dda_dxgi::{device_on, find_target, present_or_now, Readback, Target, Timer};
-use super::dda_logic::{self as logic, Action, Pace, Pacer};
+use super::dda_logic::{self as logic, Action, FailClock, Follow, Follower, Hold, Pace, Pacer};
 use super::{CaptureError, CaptureShared, FrameSource, Handler, Source};
 use crate::framing::Rect;
 
 /// `AcquireNextFrame` timeout: how often an idle capture checks for stop.
 const ACQUIRE_TIMEOUT_MS: u32 = 100;
-/// How often a window-following capture checks that the window still covers its monitor.
-const FOLLOW_CHECK: Duration = Duration::from_secs(1);
 
 /// Counters for logs and the headless check.
 #[derive(Default)]
@@ -50,6 +56,8 @@ pub struct DdaStats {
     pub idle: AtomicU64,
     /// Frames with no new image (mouse-only updates).
     pub no_image: AtomicU64,
+    /// Frames not delivered while the followed game was covered, minimized or locked away.
+    pub held: AtomicU64,
     pub size: Mutex<(u32, u32)>,
     pub format: Mutex<&'static str>,
 }
@@ -72,9 +80,10 @@ impl DdaControl {
         let joined = thread.join().map_err(|_| "dda capture thread panicked".to_string());
         let s = &self.stats;
         eprintln!(
-            "[recall] capture: dda stopped ({} frames, {} over the rate cap, {} re-creates)",
+            "[recall] capture: dda stopped ({} frames, {} over the rate cap, {} held, {} re-creates)",
             s.delivered.load(Relaxed),
             s.skipped.load(Relaxed),
+            s.held.load(Relaxed),
             s.recreated.load(Relaxed)
         );
         joined
@@ -138,6 +147,8 @@ struct Capture {
     qpc_frequency: i64,
     timer: Timer,
     follow: Option<usize>,
+    /// Why frames are held now (`None`: delivered).
+    held: Option<Hold>,
     wrong_format_logged: bool,
 }
 
@@ -164,6 +175,7 @@ impl Capture {
             qpc_frequency,
             timer: Timer::new(),
             follow,
+            held: None,
             wrong_format_logged: false,
         };
         cap.duplicate()?;
@@ -221,22 +233,23 @@ impl Capture {
 
     fn run(&mut self, stop: &AtomicBool, interval: Duration) {
         let mut pacer = Pacer::new(interval);
-        let (mut first, mut attempt, mut failing_since) = (true, 0u32, None::<Instant>);
-        let mut followed = Instant::now();
+        let (mut first, mut attempt, mut fails) = (true, 0u32, FailClock::default());
+        let (mut follower, mut followed) = (Follower::default(), None::<Instant>);
         while !stop.load(Relaxed) {
             if let Some(hwnd) = self.follow {
-                if followed.elapsed() >= FOLLOW_CHECK {
-                    followed = Instant::now();
-                    if !super::dda_window::still_covers(hwnd, self.monitor) {
-                        eprintln!("[recall] capture: game window no longer covers its monitor; capture restarts");
-                        self.shared.restart.store(true, Relaxed);
-                        return;
+                if followed.is_none_or(|t| t.elapsed() >= logic::FOLLOW_CHECK) {
+                    followed = Some(Instant::now());
+                    let state = super::dda_window::snapshot(hwnd, self.monitor);
+                    let verdict = follower.decide(&state, self.monitor, super::dda_desktop::now(), Instant::now());
+                    match apply_follow(&self.shared, &mut self.held, verdict) {
+                        Applied::Ended => return,
+                        Applied::Resumed => first = true,
+                        Applied::Same => {}
                     }
                 }
             }
             if self.dupl.is_none() {
-                let now = Instant::now();
-                if logic::should_give_up(*failing_since.get_or_insert(now), now) {
+                if fails.give_up(Instant::now(), super::dda_desktop::now()) {
                     return self.give_up("re-create kept failing");
                 }
                 if !sleep_unless_stopped(logic::backoff(attempt), stop) {
@@ -247,7 +260,8 @@ impl Capture {
                     Ok(()) => {
                         eprintln!("[recall] capture: dda duplication re-created");
                         self.stats.recreated.fetch_add(1, Relaxed);
-                        (attempt, failing_since, first) = (0, None, true);
+                        (attempt, first) = (0, true);
+                        fails.recovered();
                     }
                     Err(e) if attempt == 1 || attempt.is_multiple_of(20) => eprintln!("[recall] capture: dda re-create failed ({e}), retrying"),
                     Err(_) => {}
@@ -292,6 +306,12 @@ impl Capture {
             self.stats.no_image.fetch_add(1, Relaxed);
             return false;
         }
+        if self.held.is_some() {
+            // Covered, minimized or locked away: nothing reaches the encoder (its CFR pacer
+            // repeats the last game frame), and the capture keeps running for the return.
+            self.stats.held.fetch_add(1, Relaxed);
+            return false;
+        }
         if let Pace::Skip(_) = pacer.offer(Instant::now()) {
             self.stats.skipped.fetch_add(1, Relaxed);
             return false;
@@ -319,6 +339,46 @@ impl Capture {
             eprintln!("[recall] capture: dda frame failed: {e}");
         }
         true
+    }
+}
+
+/// What a follow verdict did to the capture.
+#[derive(Debug, PartialEq, Eq)]
+enum Applied {
+    /// No change (still delivering, or still held).
+    Same,
+    /// Frames flow again: take the next frame even if it brings no new present.
+    Resumed,
+    /// A capture restart was asked; the capture thread ends.
+    Ended,
+}
+
+/// Apply a `Follower` verdict: hold or resume frames (logged on change), or ask the engine
+/// for a capture restart. Holding never touches `restart`, so the encoder and the replay
+/// buffer keep running.
+fn apply_follow(shared: &CaptureShared, held: &mut Option<Hold>, verdict: Follow) -> Applied {
+    let now = match verdict {
+        Follow::Deliver => None,
+        Follow::Hold(why) => Some(why),
+        Follow::Restart(why) => {
+            eprintln!("[recall] capture: {why}; capture restarts");
+            shared.restart.store(true, Relaxed);
+            return Applied::Ended;
+        }
+    };
+    if now == *held {
+        return Applied::Same;
+    }
+    let was = std::mem::replace(held, now);
+    match now {
+        Some(why) => {
+            eprintln!("[recall] capture: dda holding frames ({})", why.label());
+            Applied::Same
+        }
+        None => {
+            eprintln!("[recall] capture: dda frames resume ({} ended)", was.map_or("hold", Hold::label));
+            Applied::Resumed
+        }
     }
 }
 
