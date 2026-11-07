@@ -135,7 +135,8 @@ fn a_kept_copy_the_engine_did_not_mark_is_never_deleted() {
     std::fs::write(format!("{}:{}", marked.display(), kept::KEPT_MARK), b"").unwrap();
     kept::sweep_in(&root, &kept_dir, &clips, BUDGET);
     assert!(unmarked.exists(), "unmarked: not the engine's, left alone");
-    assert!(!marked.exists(), "the engine's marked copy with no clip is still cleaned up");
+    // RI2-1: the recorder's start-up check (it knows its clip folder) removes it, not the app.
+    assert!(marked.exists(), "the engine's marked copy with no clip is left for the recorder");
 }
 
 #[test]

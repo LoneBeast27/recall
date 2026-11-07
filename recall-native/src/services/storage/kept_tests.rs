@@ -58,11 +58,12 @@ fn a_kept_copy_becomes_the_clips_video_tier_entry() {
 }
 
 #[test]
-fn a_kept_copy_of_another_size_is_deleted() {
+fn a_kept_copy_of_another_size_is_left_for_the_recorder() {
+    // RI2-7: the clip differs from the copy, so the copy may be the whole one: the app keeps it.
     let (root, clips, kept_dir) = dirs("size");
     let (dest, kept) = clip(&clips, &kept_dir, "G__b.mp4", 5000, 4000);
     assert!(adopt_in(&root, &dest, &kept, BUDGET).unwrap_err().contains("4000 bytes"));
-    assert!(!kept.exists(), "a copy that is not the clip goes");
+    assert!(kept.exists(), "not the clip's copy: left for the recorder's check");
     assert!(crate::services::storage::cached_video_in(&root, &dest).is_none());
     cleanup(&root);
 }
@@ -91,7 +92,7 @@ fn a_clip_already_cached_drops_the_kept_copy() {
 }
 
 #[test]
-fn the_start_sweep_adopts_matches_and_deletes_the_rest() {
+fn the_start_sweep_adopts_matches_and_reports_the_rest() {
     let (root, clips, kept_dir) = dirs("sweep");
     let (good, good_kept) = clip(&clips, &kept_dir, "G__e.mp4", 2000, 2000);
     let (_, short_kept) = clip(&clips, &kept_dir, "G__f.mp4", 2000, 1500);
@@ -100,11 +101,11 @@ fn the_start_sweep_adopts_matches_and_deletes_the_rest() {
     mark(&orphan);
     std::fs::create_dir_all(kept_dir.join("sub")).unwrap();
 
-    assert_eq!(sweep_in(&root, &kept_dir, &clips, BUDGET), (1, 1));
+    assert_eq!(sweep_in(&root, &kept_dir, &clips, BUDGET), (1, 2));
     assert!(crate::services::storage::cached_video_in(&root, &good).is_some(), "the matching copy is cached");
-    assert!(!good_kept.exists() && !orphan.exists(), "a copy whose clip is gone goes");
-    // RI-2: only a clip proven gone lets its copy go; one still on disk (another size) keeps it.
-    assert!(short_kept.exists(), "the clip is still there: its copy stays");
+    assert!(!good_kept.exists(), "the adopted copy moved into the cache");
+    // RI2-1: the app never deletes the rest; the recorder's start-up check decides.
+    assert!(short_kept.exists() && orphan.exists(), "left for the recorder");
     assert!(kept_dir.join("sub").is_dir(), "folders are left alone");
     assert_eq!(sweep_in(&root, &kept_dir.join("missing"), &clips, BUDGET), (0, 0));
     cleanup(&root);
@@ -138,7 +139,7 @@ fn a_kept_copy_is_never_deleted_while_its_clip_is_only_a_part() {
     std::fs::write(&kept, vec![3u8; 1200]).unwrap();
     mark(&kept);
     std::fs::write(clips.join("G__p.mp4.part"), vec![3u8; 1200]).unwrap();
-    assert_eq!(sweep_in(&root, &kept_dir, &clips, BUDGET), (0, 0), "nothing adopted or deleted");
+    assert_eq!(sweep_in(&root, &kept_dir, &clips, BUDGET), (0, 1), "nothing adopted, one left");
     assert!(kept.is_file(), "the engine re-moves it at its next start");
     cleanup(&root);
 }
@@ -152,10 +153,26 @@ fn a_kept_copy_is_never_deleted_while_the_clip_folder_cannot_be_read() {
     std::fs::write(&kept, vec![4u8; 1300]).unwrap();
     mark(&kept);
     let asleep = clips.join("not-mounted");
-    assert_eq!(sweep_in(&root, &kept_dir, &asleep, BUDGET), (0, 0), "a missing clip folder deletes nothing");
+    assert_eq!(sweep_in(&root, &kept_dir, &asleep, BUDGET), (0, 1), "a missing clip folder deletes nothing");
     std::fs::write(clips.join("a-file"), b"x").unwrap();
-    assert_eq!(sweep_in(&root, &kept_dir, &clips.join("a-file"), BUDGET), (0, 0), "nor one that is not a folder");
+    assert_eq!(sweep_in(&root, &kept_dir, &clips.join("a-file"), BUDGET), (0, 1), "nor one that is not a folder");
     assert!(kept.is_file(), "the copy stays");
-    assert_eq!(sweep_in(&root, &kept_dir, &clips, BUDGET), (0, 1), "a readable folder without the clip lets it go");
+    cleanup(&root);
+}
+
+#[test]
+fn a_readable_folder_without_the_clip_never_deletes_its_copy() {
+    // RI2-1: the sweep's folder reads "no clip" while the clip's `.part` sits in another folder
+    // Recall manages (the engine moved it there; a power cut lost the rename): the copy may be
+    // the only whole clip, so the app never deletes it.
+    let (root, clips, kept_dir) = dirs("wrong-folder");
+    let other = clips.parent().unwrap().join("old-recordings");
+    std::fs::create_dir_all(&other).unwrap();
+    let kept = kept_dir.join("G__w.mp4");
+    std::fs::write(&kept, vec![8u8; 1400]).unwrap();
+    mark(&kept);
+    std::fs::write(other.join("G__w.mp4.part"), vec![8u8; 1400]).unwrap();
+    assert_eq!(sweep_in(&root, &kept_dir, &clips, BUDGET), (0, 1), "nothing adopted, the copy is reported");
+    assert!(kept.is_file(), "the copy stays for the recorder's check");
     cleanup(&root);
 }
