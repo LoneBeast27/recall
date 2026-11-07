@@ -95,10 +95,8 @@ impl Controller {
                     HotkeyAction::Screenshot => "screenshot",
                     _ => "record_toggle",
                 };
-                if self.engine_running() {
-                    crate::cues::tick();
-                }
-                self.engine_command(cmd, None);
+                // Queued first: the tick only for a command the engine got (as a save).
+                self.engine_command_as(cmd, None, true);
             }
             HotkeyAction::Stats => {
                 self.toggle_stats(None);
@@ -123,6 +121,12 @@ impl Controller {
     /// engine, or report why it cannot run (paused, no game, starting; a
     /// long recording or a screenshot cannot start while a closed game drains).
     pub(crate) fn engine_command(&mut self, cmd: &'static str, client: Option<u64>) {
+        self.engine_command_as(cmd, client, false);
+    }
+
+    /// As [`engine_command`](Self::engine_command); `hotkey`: a shortcut, which ticks once
+    /// the engine has the command, never on a refusal.
+    fn engine_command_as(&mut self, cmd: &'static str, client: Option<u64>, hotkey: bool) {
         let draining = self.planner.drain().is_some();
         let refused = capture_refusal(self.paused, self.engine_running(), &self.wanted())
             .or_else(|| self.activity.record_refusal(cmd, draining));
@@ -135,20 +139,8 @@ impl Controller {
             }
             return self.refuse_capture(cmd, reason);
         }
-        // Queued first: only a command the engine will see is marked in flight.
-        let sent = self.supervisor.send_engine_line(&json!({ "cmd": cmd }).to_string());
-        match sent.reason() {
-            None => log!("record: engine {cmd}"),
-            Some(reason) => log!("record: engine {cmd} (not sent: {reason})"),
-        }
-        for effect in crate::record_dispatch::command_effects(sent) {
-            match effect {
-                Effect::MarkPending => self.activity.command_sent(cmd, Instant::now()),
-                Effect::Announce => self.publish_status(),
-                Effect::Refused(reason) => self.command_not_sent(cmd, client, reason),
-                Effect::Cue | Effect::LogOnly | Effect::ReplyError | Effect::Proceed => {}
-            }
-        }
+        // Queued first: only a command the engine will see is marked in flight (and ticked).
+        crate::record_dispatch::command(&mut ControllerCommand { ctl: self, cmd, client }, cmd, hotkey);
     }
 
     /// A command the engine did not get: the same path a refusal takes, with why
@@ -396,5 +388,36 @@ impl Controller {
         let rec = &self.cfg.recording;
         let buffer = crate::record_free_space::buffer_bytes(rec.buffer_secs, rec.bitrate_mbps);
         self.janitor.tick(&dir, cap, buffer, now);
+    }
+}
+
+/// `engine_command`'s port to `record_dispatch::command`: the live path, run in the order
+/// `command` sets (queue, mark in flight, announce, tick).
+struct ControllerCommand<'a> {
+    ctl: &'a mut Controller,
+    cmd: &'static str,
+    client: Option<u64>,
+}
+
+impl crate::record_dispatch::CommandPort for ControllerCommand<'_> {
+    fn queue(&mut self, line: &str) -> crate::record_dispatch::Sent {
+        let sent = self.ctl.supervisor.send_engine_line(line);
+        match sent.reason() {
+            None => log!("record: engine {}", self.cmd),
+            Some(reason) => log!("record: engine {} (not sent: {reason})", self.cmd),
+        }
+        sent
+    }
+    fn mark_pending(&mut self) {
+        self.ctl.activity.command_sent(self.cmd, Instant::now());
+    }
+    fn announce(&mut self) {
+        self.ctl.publish_status();
+    }
+    fn cue(&mut self) {
+        crate::cues::tick();
+    }
+    fn refused(&mut self, reason: &'static str) {
+        self.ctl.command_not_sent(self.cmd, self.client, reason);
     }
 }

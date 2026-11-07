@@ -12,6 +12,7 @@
 //! The controller (`record_restart_host.rs`) and the transitions Sim both run this code
 //! through [`RestartHost`].
 
+use crate::record_dispatch::Sent;
 use crate::record_engine::{EnginePlanner, EngineTarget};
 
 /// The island notice for a settings restart that wiped a game's buffer.
@@ -33,6 +34,13 @@ impl RestartReason {
     /// A planned restart (settings, resume) as opposed to a recovery from a broken engine.
     pub fn planned(self) -> bool {
         self != RestartReason::Recovery
+    }
+
+    /// What a line sent while the old engine quits is told: "Recorder is restarting" for a
+    /// planned restart, "Recorder isn't responding" for a recovery (`Supervisor::restart`'s
+    /// `planned`, through `record_engine_ctl::switch_engine`).
+    pub fn refusal(self) -> Sent {
+        if self.planned() { Sent::Restarting } else { Sent::NotResponding }
     }
 
     /// Two deferred restarts are one: a settings change says "Settings applied".

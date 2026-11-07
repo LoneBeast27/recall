@@ -35,6 +35,8 @@ pub enum EngineTarget {
 /// Why a capture action (save, bookmark, screenshot, long recording) refuses
 /// right now: paused, waiting for a game, or the engine is still starting.
 pub const PAUSED_REASON: &str = "Recording is paused";
+/// No target: also what a line sent while the engine stops for Off is told (`Sent::Waiting`).
+pub const WAITING_REASON: &str = "Recall is waiting for a game; nothing is being recorded";
 
 pub fn capture_refusal(paused: bool, engine_running: bool, wanted: &EngineTarget) -> Option<&'static str> {
     if paused {
@@ -44,7 +46,7 @@ pub fn capture_refusal(paused: bool, engine_running: bool, wanted: &EngineTarget
         return None;
     }
     Some(match wanted {
-        EngineTarget::Off => "Recall is waiting for a game; nothing is being recorded",
+        EngineTarget::Off => WAITING_REASON,
         _ => "the recording engine is still starting; try again in a moment",
     })
 }

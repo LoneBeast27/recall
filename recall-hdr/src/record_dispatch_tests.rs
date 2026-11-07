@@ -195,3 +195,73 @@ fn a_save_during_a_planned_restart_says_the_recorder_is_restarting() {
     pipe.close();
     assert_eq!(after_quit(&rec.lines()), Vec::<String>::new());
 }
+
+// --- merge-gate P2: a refused shortcut plays no tick; a stop to Off says "waiting" -------
+
+/// A command port that keeps every step, the cue injected as a step.
+struct CmdShown<'a> {
+    pipe: &'a TestPipe,
+    log: Vec<String>,
+}
+
+impl CommandPort for CmdShown<'_> {
+    fn queue(&mut self, line: &str) -> Sent {
+        self.log.push("queue".into());
+        self.pipe.send(line)
+    }
+    fn mark_pending(&mut self) {
+        self.log.push("mark_pending".into());
+    }
+    fn announce(&mut self) {
+        self.log.push("announce".into());
+    }
+    fn cue(&mut self) {
+        self.log.push("tick".into());
+    }
+    fn refused(&mut self, reason: &'static str) {
+        self.log.push(format!("refused: {reason}"));
+    }
+}
+
+#[test]
+fn a_refused_bookmark_or_screenshot_shortcut_plays_no_tick() {
+    // `Controller::engine_command_as(cmd, None, true)` (the shortcuts) runs `command`.
+    let (quitting, rec) = TestPipe::quitting(Sent::Switching);
+    let full = TestPipe::wedged_and_full();
+    for cmd in ["bookmark", "screenshot", "record_toggle"] {
+        for (pipe, why) in [(&quitting, SWITCHING), (&full, NOT_RESPONDING)] {
+            let mut port = CmdShown { pipe, log: Vec::new() };
+            assert!(!command(&mut port, cmd, true).queued());
+            assert_eq!(port.log, ["queue".to_string(), format!("refused: {why}")], "{cmd}: no tick, nothing in flight");
+        }
+    }
+    quitting.close();
+    assert_eq!(after_quit(&rec.lines()), Vec::<String>::new());
+}
+
+#[test]
+fn a_queued_shortcut_ticks_after_the_queueing_and_a_pipe_command_never_ticks() {
+    let ok = TestPipe::healthy();
+    for cmd in ["bookmark", "screenshot", "record_toggle"] {
+        let mut port = CmdShown { pipe: &ok, log: Vec::new() };
+        assert!(command(&mut port, cmd, true).queued());
+        assert_eq!(port.log, ["queue", "mark_pending", "announce", "tick"], "{cmd}");
+        let mut pipe = CmdShown { pipe: &ok, log: Vec::new() };
+        assert!(command(&mut pipe, cmd, false).queued());
+        assert_eq!(pipe.log, ["queue", "mark_pending", "announce"], "{cmd} from the pipe: no tick");
+    }
+}
+
+#[test]
+fn a_save_while_the_engine_stops_for_off_says_waiting_for_a_game() {
+    // A drain that ends with no game, or a pause: `Supervisor::retarget(None)` quits with
+    // `Sent::Waiting` (supervisor_stop_tests.rs drives the real manager).
+    let (pipe, rec) = TestPipe::quitting(Sent::Waiting);
+    let mut port = Shown { pipe: &pipe, log: Vec::new() };
+    assert!(!save(&mut port, 30, false));
+    let waiting = crate::record_engine::capture_refusal(false, false, &crate::record_engine::EngineTarget::Off).unwrap();
+    assert_eq!(port.log, [format!("save_failed: {waiting}")], "not 'Switching games'");
+    assert!(waiting.contains("waiting for a game"));
+    pipe.close();
+    assert_eq!(after_quit(&rec.lines()), Vec::<String>::new());
+}

@@ -8,7 +8,34 @@ use crate::log;
 use crate::record_app::Controller;
 use crate::record_engine::{engine_env, EngineTarget};
 use crate::record_restart::{RestartReason, Restarted};
-use crate::supervisor::EngineHealth;
+use crate::supervisor::{EngineHealth, Supervisor};
+
+/// The two supervisor calls an engine (re)start or stop makes (the transitions Sim records
+/// them).
+pub trait EngineSwitch {
+    /// `Supervisor::retarget`: a game switch.
+    fn switch_to(&self, spec: Option<EngineSpec>);
+    /// `Supervisor::restart`: no game switch; `planned` = a settings change or a resume.
+    fn restart_to(&self, spec: Option<EngineSpec>, planned: bool);
+}
+
+impl EngineSwitch for Supervisor {
+    fn switch_to(&self, spec: Option<EngineSpec>) {
+        self.retarget(spec);
+    }
+    fn restart_to(&self, spec: Option<EngineSpec>, planned: bool) {
+        self.restart(spec, planned);
+    }
+}
+
+/// `refusal` (what a line sent while the old engine quits is told) picks the call:
+/// Switching = a game switch, Restarting = a planned restart, else a recovery restart.
+pub fn switch_engine(sw: &impl EngineSwitch, spec: Option<EngineSpec>, refusal: Sent) {
+    match refusal {
+        Sent::Switching => sw.switch_to(spec),
+        other => sw.restart_to(spec, other == Sent::Restarting),
+    }
+}
 
 impl Controller {
     /// Start, restart or stop the engine for `target` (an intended restart, a game switch:
@@ -41,10 +68,7 @@ impl Controller {
     }
 
     fn retarget(&self, spec: Option<EngineSpec>, refusal: Sent) {
-        match refusal {
-            Sent::Switching => self.supervisor.retarget(spec),
-            other => self.supervisor.restart(spec, other == Sent::Restarting),
-        }
+        switch_engine(&self.supervisor, spec, refusal);
     }
 
     fn engine_spec(&self, target: &EngineTarget) -> EngineSpec {
