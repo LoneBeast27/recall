@@ -228,17 +228,19 @@ pub fn default_moved(opened: Option<&str>, now: Option<&str>) -> bool {
     matches!((opened, now), (Some(opened), Some(now)) if opened != now)
 }
 
-/// Index of the endpoint `want` names: exactly that friendly name; else the one endpoint whose
-/// name equals `want`'s once both drop a leading "<digits>- " Windows index. Case included, no
-/// word matching; two or more such endpoints match none. A copy of the recorder's
+/// Index of the endpoint `want` names: the one endpoint with exactly that friendly name; else
+/// the one endpoint whose name equals `want`'s once both drop a leading "<digits>- " Windows
+/// index. Case included, no word matching; two or more exact matches, or two or more such
+/// endpoints, match none (the track waits, never a sibling). A copy of the recorder's
 /// `match_endpoint` (`recall` `audio/endpoints.rs`); both crates test the same table.
 pub fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
     let want = want.trim();
     if want.is_empty() {
         return None;
     }
-    if let Some(i) = names.iter().position(|n| n.trim() == want) {
-        return Some(i);
+    let mut exact = names.iter().enumerate().filter(|(_, n)| n.trim() == want).map(|(i, _)| i);
+    if let Some(first) = exact.next() {
+        return exact.next().is_none().then_some(first);
     }
     let want = strip_index(want);
     let mut hits = names.iter().enumerate().filter(|(_, n)| strip_index(n) == want).map(|(i, _)| i);

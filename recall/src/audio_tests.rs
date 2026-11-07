@@ -13,8 +13,7 @@ fn raw_ring(name: &'static str, input: bool, gain: f32, rate: u32, channels: u16
         gain: AtomicU32::new(gain.to_bits()),
         boosted: AtomicBool::new(gain > 1.0),
         input,
-        mic_pref: std::sync::atomic::AtomicU8::new(0),
-        endpoint_is_mic: AtomicBool::new(input),
+        mic_mute: AtomicBool::new(true),
         endpoint: Mutex::new(String::new()),
         rate,
         channels,
@@ -367,6 +366,9 @@ fn a_renumbered_endpoint_opens_only_when_it_is_the_one_match() {
     assert_eq!(super::match_endpoint(&two, "Line (Box One)"), None);
     assert_eq!(super::match_endpoint(&two, "5- Line (Box One)"), Some(1), "its own exact name is itself, not a sibling");
     assert_eq!(super::match_endpoint(&names(&["4- line (box one)"]), "3- Line (Box One)"), None, "case included");
+    // R3-deep-audio-2: two endpoints with the same exact name: wait, never the first one listed.
+    assert_eq!(super::match_endpoint(&names(&["Line (Box One)", "Line (Box One)"]), "Line (Box One)"), None, "two exact matches");
+    assert_eq!(super::match_endpoint(&names(&["Line (Box One)", "Speakers (Box)", "Line (Box One)"]), "3- Line (Box One)"), None);
 }
 
 /// 2026-11-07 audit A7: a ring holds its whole buffer from the start, so it never doubles
@@ -391,9 +393,6 @@ fn the_mute_hotkey_skips_an_input_marked_as_not_a_microphone() {
     let spec = |mic_mute: bool| SourceSpec { id: "in-1".into(), kind: "input".into(), device: String::new(), exe: String::new(), name: "In".into(), gain_db: 0.0, mic_mute: Some(mic_mute) };
     let mic = TrackRing::for_source(&spec(true), "mic", 1, String::new());
     let line = TrackRing::for_source(&spec(false), "mic", 1, String::new());
-    // The strip's own toggle wins over the endpoint: a line-in endpoint marked as a mic mutes.
-    mic.set_endpoint_form(Some(2));
-    line.set_endpoint_form(Some(4));
     mic.push_capture(&[0.5, 0.5], true);
     line.push_capture(&[0.5, 0.5], true);
     let held = |ring: &TrackRing| ring.samples.lock().unwrap().iter().copied().collect::<Vec<f32>>();
@@ -401,30 +400,28 @@ fn the_mute_hotkey_skips_an_input_marked_as_not_a_microphone() {
     assert_eq!(held(&line), [0.5, 0.5], "a line-in keeps its sound");
     let json = r#"[{"id":"in-1","kind":"input","name":"Console","mic_mute":false},{"id":"mic","kind":"input","name":"Mic"}]"#;
     let list = super::sources::parse(json).unwrap();
-    assert_eq!((list[0].mic_mute, list[1].mic_mute), (Some(false), None), "an input without the flag lets its endpoint decide");
+    assert_eq!((list[0].mic_mute, list[1].mic_mute), (Some(false), None), "an input without the flag is muted");
 }
 
-/// 2026-11-07 audit R2-deep-audio-3: an input whose source does not say (every config written
-/// before the flag, the default "mic") follows Alt+M by its endpoint's Windows form factor,
-/// never by its name: a microphone or headset mutes; a line-level input, S/PDIF, an HDMI capture
-/// or an unknown form factor keeps its sound. A form factor that cannot be read mutes.
+/// 2026-11-07 audit R3-deep-audio-1: an input whose source does not say (every config written
+/// before the flag, the default "mic") is muted by Alt+M whatever Windows calls its endpoint,
+/// as before the flag existed: a USB mixer or virtual mic reporting line-level or unknown must
+/// never stay live while the tray says "muted". Only the strip's own "off" keeps its sound.
 #[test]
-fn an_input_without_the_flag_mutes_by_its_endpoint_form_factor() {
+fn an_input_without_the_flag_is_muted_whatever_its_form_factor() {
     use super::sources::SourceSpec;
     let spec = SourceSpec { id: "in-1".into(), kind: "input".into(), device: String::new(), exe: String::new(), name: "In".into(), gain_db: 0.0, mic_mute: None };
-    let muted_with = |form: Option<u32>| {
-        let ring = TrackRing::for_source(&spec, "mic", 1, String::new());
-        ring.set_endpoint_form(form);
-        ring.push_capture(&[0.5, 0.5], true);
-        let held: Vec<f32> = ring.samples.lock().unwrap().iter().copied().collect();
-        held == [0.0, 0.0]
-    };
-    // EndpointFormFactor: 2 LineLevel, 4 Microphone, 5 Headset, 6 Handset, 8 SPDIF, 9 DigitalAudioDisplayDevice, 10 Unknown.
-    for (form, mutes) in [(Some(4), true), (Some(5), true), (Some(6), true), (Some(2), false), (Some(8), false), (Some(9), false), (Some(10), false), (None, true)] {
-        assert_eq!(muted_with(form), mutes, "form factor {form:?}");
-    }
+    // The engine reads no form factor (2 LineLevel, 10 Unknown, ...): nothing to inject.
+    let ring = TrackRing::for_source(&spec, "mic", 1, String::new());
+    ring.push_capture(&[0.5, 0.5], true);
+    assert_eq!(ring.samples.lock().unwrap().iter().copied().collect::<Vec<f32>>(), [0.0, 0.0], "an input without the flag left live");
+    assert!(!include_str!("audio/stream.rs").contains("form_factor") && !include_str!("audio.rs").contains("form_factor"), "Alt+M never decides by form factor");
+    // A config saved before the flag existed, as the controller hands it over.
+    let list = super::sources::parse(r#"[{"id":"mic","kind":"input","name":"Mic","device":"Line (Box One)"}]"#).unwrap();
+    let old = TrackRing::for_source(&list[0], "mic", 1, String::new());
+    old.push_capture(&[0.5, 0.5], true);
+    assert_eq!(old.samples.lock().unwrap().iter().copied().collect::<Vec<f32>>(), [0.0, 0.0], "an old config's line-level input is muted");
     let game = TrackRing::for_test("game", 1);
-    game.set_endpoint_form(Some(4));
     game.push_capture(&[0.5, 0.5], true);
     assert_eq!(game.samples.lock().unwrap().iter().copied().collect::<Vec<f32>>(), [0.5, 0.5], "only inputs mute");
 }

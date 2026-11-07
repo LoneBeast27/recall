@@ -71,25 +71,29 @@ pub struct Source {
     pub enabled: bool,
     pub gain_db: f32,
     /// Whether the mic-mute hotkey silences this input: `true` a microphone, `false` a line-in
-    /// or capture card (muting the mic leaves its sound); `None` = the endpoint's Windows form
-    /// factor decides (`endpoint_form`), as the recorder does. Other kinds ignore it.
+    /// or capture card (muting the mic leaves its sound); `None` (a config written before the
+    /// flag, the default mic) = muted, as the recorder does. "+ Add source" writes it. Other
+    /// kinds ignore it.
     pub mic_mute: Option<bool>,
 }
 
-/// What Alt+M does to `source` now: its own flag, else its endpoint's form factor (`mic_inputs`
-/// from the device lists; the Windows default's own when it has no device). An endpoint not
-/// listed (lists not read yet, not connected) shows as muted, the safe side.
-pub fn mutes(source: &Source, lists: Option<&crate::services::audio_devices::DeviceLists>) -> bool {
-    if let Some(on) = source.mic_mute {
-        return on;
-    }
-    let Some(lists) = lists else { return true };
+/// What Alt+M does to `source` now: its own flag; without one it is muted, whatever Windows
+/// calls its endpoint (R3-deep-audio-1: an input never goes live by itself on an update).
+pub fn mutes(source: &Source) -> bool {
+    source.mic_mute.unwrap_or(true)
+}
+
+/// A hint for the strip menu, never a decision: Windows reports the endpoint `source` opens (its
+/// device, else the Windows default) as something other than a microphone, headset or handset
+/// (`mic_inputs`, from `endpoint_form`). False when unknown (lists not read, not connected).
+pub fn windows_says_not_a_mic(source: &Source, lists: Option<&crate::services::audio_devices::DeviceLists>) -> bool {
+    let Some(lists) = lists.filter(|_| source.kind == Kind::Input) else { return false };
     if source.device.trim().is_empty() {
-        return lists.default_input_is_mic.unwrap_or(true);
+        return lists.default_input_is_mic == Some(false);
     }
     match crate::services::meters::match_endpoint(&lists.inputs, &source.device) {
-        Some(i) => lists.mic_inputs.iter().any(|m| m.trim() == lists.inputs[i].trim()),
-        None => true,
+        Some(i) => !lists.mic_inputs.iter().any(|m| m.trim() == lists.inputs[i].trim()),
+        None => false,
     }
 }
 

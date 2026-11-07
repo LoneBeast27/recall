@@ -176,9 +176,12 @@ impl Root {
             if source.kind == Kind::Input {
                 // A capture card or console line-in keeps its sound while the mic is muted.
                 rows.push(note("Turn this off for a line-in or capture card:"));
+                // The form factor only hints; Alt+M follows the strip's flag (none = muted).
+                if crate::services::audio_sources::windows_says_not_a_mic(source, lists) {
+                    rows.push(note("Windows reports this as a line-level input, not a microphone."));
+                }
                 let glyph = Some(icon(Icon::MicOff, 14., theme::MUTED).into_any_element());
-                // What Alt+M does now: the strip's flag, else the endpoint's form factor.
-                let muted = crate::services::audio_sources::mutes(source, lists);
+                let muted = crate::services::audio_sources::mutes(source);
                 rows.push(self.menu_row((&key, 950), glyph, "Muted by the mic hotkey".into(), muted, Pick::MicMute(source.id.clone(), !muted), cx));
             }
         }

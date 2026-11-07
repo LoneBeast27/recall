@@ -11,7 +11,7 @@ pub struct DeviceLists {
     pub default_input: Option<String>,
     pub default_output: Option<String>,
     /// The inputs whose Windows form factor is a microphone, headset or handset
-    /// (`endpoint_form`): Alt+M mutes them unless their strip says otherwise.
+    /// (`endpoint_form`). Only a hint in the strip menu: Alt+M follows the strip's flag.
     pub mic_inputs: Vec<String>,
     /// The default input is such a microphone (`None`: there is none).
     pub default_input_is_mic: Option<bool>,

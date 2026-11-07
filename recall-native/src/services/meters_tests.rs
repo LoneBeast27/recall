@@ -45,6 +45,9 @@ fn a_renumbered_endpoint_opens_only_when_it_is_the_one_match() {
     assert_eq!(match_endpoint(&two, "Line (Box One)"), None);
     assert_eq!(match_endpoint(&two, "5- Line (Box One)"), Some(1), "its own exact name is itself, not a sibling");
     assert_eq!(match_endpoint(&names(&["4- line (box one)"]), "3- Line (Box One)"), None, "case included");
+    // R3-deep-audio-2: two endpoints with the same exact name: wait, never the first one listed.
+    assert_eq!(match_endpoint(&names(&["Line (Box One)", "Line (Box One)"]), "Line (Box One)"), None, "two exact matches");
+    assert_eq!(match_endpoint(&names(&["Line (Box One)", "Speakers (Box)", "Line (Box One)"]), "3- Line (Box One)"), None);
 }
 
 /// 2026-11-07 audit A5: the meter shows what the recorder records. A named device that is not

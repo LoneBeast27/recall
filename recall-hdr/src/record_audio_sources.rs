@@ -42,8 +42,8 @@ pub struct AudioSource {
     pub gain_db: f32,
     /// Whether the mic-mute hotkey silences this `input`: `true` a microphone, `false` a line-in
     /// or capture card (muting the mic leaves its sound). Absent (every config written before
-    /// the flag, a new default source): the engine decides by the opened endpoint's Windows form
-    /// factor, never by its name (SPEC A12). Saved only when the strip says.
+    /// the flag, a new default source): muted, as before the flag (R3-deep-audio-1); the
+    /// endpoint's Windows form factor never decides. Saved only when the strip says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mic_mute: Option<bool>,
 }
@@ -149,7 +149,7 @@ fn track_shape(list: &[AudioSource]) -> Vec<AudioSource> {
     engine_list(list).into_iter().map(|s| AudioSource { gain_db: 0.0, name: String::new(), mic_mute: None, ..s }).collect()
 }
 
-/// A recorded source lost its mic-mute flag (back to its endpoint's form factor): `set_source`
+/// A recorded source lost its mic-mute flag (back to none, muted): `set_source`
 /// cannot say "no flag", so only a restart applies it. Setting a flag goes live.
 fn flag_dropped(old: &[AudioSource], new: &[AudioSource]) -> bool {
     let old = engine_list(old);

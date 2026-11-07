@@ -14,18 +14,20 @@ fn strip_index(name: &str) -> &str {
     }
 }
 
-/// Index of the endpoint `want` names (2026-11-07 merge-gate rule): the endpoint with exactly
-/// that friendly name; else the one endpoint whose name equals `want`'s once both drop a leading
-/// "<digits>- " index (the same endpoint renumbered by Windows). Case included, no word or fuzzy
-/// matching. Two or more such endpoints match none, so a track never records a sibling endpoint
-/// under its name; it waits for its own device.
+/// Index of the endpoint `want` names (2026-11-07 merge-gate rule): the one endpoint with
+/// exactly that friendly name; else the one endpoint whose name equals `want`'s once both drop a
+/// leading "<digits>- " index (the same endpoint renumbered by Windows). Case included, no word
+/// or fuzzy matching. Two or more exact matches (identical devices), or two or more such
+/// endpoints, match none, so a track never records a sibling endpoint under its name; it waits
+/// for its own device.
 pub(crate) fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
     let want = want.trim();
     if want.is_empty() {
         return None;
     }
-    if let Some(i) = names.iter().position(|n| n.trim() == want) {
-        return Some(i);
+    let mut exact = names.iter().enumerate().filter(|(_, n)| n.trim() == want).map(|(i, _)| i);
+    if let Some(first) = exact.next() {
+        return exact.next().is_none().then_some(first);
     }
     let want = strip_index(want);
     let mut hits = names.iter().enumerate().filter(|(_, n)| strip_index(n) == want).map(|(i, _)| i);
