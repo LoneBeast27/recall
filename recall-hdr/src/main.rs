@@ -247,6 +247,7 @@ fn single_instance(mode: fn() -> i32, launch: Launch) -> i32 {
             if let single_instance::Claim::Unavailable(code) = claim {
                 log!("single-instance mutex unavailable (error {code}); continuing without it");
             }
+            logging::own_log();
             mode()
         }
         Next::OpenWindowAndExit => {

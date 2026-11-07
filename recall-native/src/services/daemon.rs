@@ -16,7 +16,12 @@ use serde_json::Value;
 
 mod controller;
 mod protocol;
+mod reach;
 mod session;
+
+// The examples include this file without the views that use these.
+#[allow(unused_imports)]
+pub use reach::{reach, RecorderReach};
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -453,4 +458,9 @@ fn serve(shared: &Shared, stream: Stream) {
 /// when no controller is running. Ok(false) when one is already running.
 pub fn start_controller() -> Result<bool, String> {
     controller::start()
+}
+
+/// A recorder process runs in this Windows session (false when the list can't be read).
+pub fn controller_running() -> bool {
+    controller::process_running(controller::CONTROLLER_EXE).unwrap_or(false)
 }

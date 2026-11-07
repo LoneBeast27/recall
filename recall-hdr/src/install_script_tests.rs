@@ -31,7 +31,9 @@ fn autostart_is_sent_only_behind_the_autostart_switch() {
 fn every_pipe_and_process_check_is_scoped_to_this_session() {
     let quoted_bare = "'recall-hdr-control'";
     for (name, script) in [("install.ps1", INSTALL), ("Start-Recall.ps1", START)] {
-        assert!(!code_lines(script).any(|l| l.contains(quoted_bare)), "{name} still opens the machine-wide pipe");
+        // The one exception: Stop-Recorder's quit to a pre-session recorder (checked below).
+        let opens = code_lines(script).filter(|l| !l.starts_with("$legacyPipe = ")).any(|l| l.contains(quoted_bare));
+        assert!(!opens, "{name} still opens the machine-wide pipe");
         assert!(script.contains("(Get-Process -Id $PID).SessionId"), "{name} reads its session");
     }
     assert!(INSTALL.contains(r#"$pipeName = "recall-hdr-control-$session""#));
@@ -62,4 +64,28 @@ fn an_unclassified_drive_can_be_allowed_but_an_hdd_never() {
 fn the_install_marker_carries_the_installer_start_time() {
     assert!(SWAP.contains(r#"{ "$PID $created" }"#), "marker holds pid and start time");
     assert!(SWAP.contains("GetProcessTimes"));
+}
+
+/// The body of `function <name> {` up to its closing `}` at column 0.
+fn function_body<'a>(script: &'a str, name: &str) -> &'a str {
+    let open = format!("function {name} {{");
+    let at = script.find(&open).unwrap_or_else(|| panic!("{name} defined"));
+    let end = script[at..].find("\n}").map(|e| at + e).unwrap_or(script.len());
+    &script[at..end]
+}
+
+#[test]
+fn stop_recorder_also_quits_a_pre_session_recorder() {
+    // An install from before the per-session pipe runs a controller on the bare name; its
+    // first update must still reach it (audit R2-deep-startup-1), and only from Stop-Recorder.
+    assert!(INSTALL.contains("$legacyPipe = 'recall-hdr-control'"), "the old name, kept for one release");
+    let stop = function_body(INSTALL, "Stop-Recorder");
+    let session = stop.find("Send-Recorder '{\"cmd\":\"quit\"}'").expect("quit on the session pipe");
+    let legacy = stop.find("Send-Recorder '{\"cmd\":\"quit\"}' $legacyPipe").expect("quit on the legacy pipe");
+    assert!(session < legacy, "the session pipe is asked first");
+    // The legacy name is used nowhere else (status checks and the autostart patch stay per session).
+    let uses = INSTALL.lines().filter(|l| l.contains("$legacyPipe")).count();
+    assert_eq!(uses, 2, "defined once, used once in Stop-Recorder");
+    // Send-Recorder takes the pipe name, defaulting to this session's.
+    assert!(INSTALL.contains("function Send-Recorder([string]$line, [string]$name = $pipeName, [int]$tries = 5) {"));
 }
