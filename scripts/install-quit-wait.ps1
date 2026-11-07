@@ -33,7 +33,7 @@ function Format-QuitProgress($quit, [datetime]$since) {
   $s = Get-RecorderStatus $quit
   if ($s -and $s.finishing_clip) {
     $p = $s.finishing_progress
-    $what = if ($p -and $p.bytes) { "$([math]::Round($p.bytes / 1MB)) MB written" } elseif ($p -and $p.saves -gt 1) { "$($p.saves) clips still being written" } else { 'still being written' }
+    $what = if ($p -and $p.bytes) { "$([math]::Round($p.bytes / 1MB)) MB written" } elseif ($p -and $p.saves) { "$($p.saves) clips still being written" } else { 'still being written' }
     "Recall is finishing a clip ($what, $mins min so far); waiting. Ctrl+C stops the installer; Recall keeps saving and then quits."
   } else {
     "Waiting for Recall (pid $($quit.pid)) to exit ($mins min so far)... Ctrl+C stops the installer."

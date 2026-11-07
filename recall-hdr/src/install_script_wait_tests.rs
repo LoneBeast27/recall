@@ -129,3 +129,30 @@ fn an_owner_refusal_only_ends_its_own_phase() {
         "-Autostart warns when nothing answered"
     );
 }
+
+#[test]
+fn a_sandbox_never_repoints_the_real_shortcut_or_autostart() {
+    // Orchestrator decision (round 5): with RECALL_CONTROLLER_PATH set, the Start-menu shortcut and the
+    // Start with Windows write are both skipped, with one line saying so.
+    let skip = INSTALL.find("if ($env:RECALL_CONTROLLER_PATH) {\r\n  $Autostart = [switch]$false")
+        .or_else(|| INSTALL.find("if ($env:RECALL_CONTROLLER_PATH) {\n  $Autostart = [switch]$false"))
+        .expect("sandbox branch clears -Autostart");
+    let note = INSTALL.find("'Sandbox install (RECALL_CONTROLLER_PATH): skipped the Start menu shortcut and Start with Windows; the real ones are unchanged.'").expect("one line");
+    let shortcut = INSTALL.find("} elseif (-not $NoShortcut) {").expect("the shortcut is the else branch");
+    let lnk = INSTALL.find("$s = $shell.CreateShortcut($lnk)").unwrap();
+    assert!(skip < note && note < shortcut && shortcut < lnk);
+    assert!(!INSTALL.contains("\nif (-not $NoShortcut) {"), "no unguarded shortcut write");
+    // The only autostart send comes after the sandbox branch, so it sees -Autostart cleared.
+    let send = INSTALL.find(r#""autostart":true"#).unwrap();
+    assert!(skip < send);
+    // No other line writes the Run value (the recorder writes it when told to).
+    assert!(!INSTALL.contains(r"Set-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run'"));
+}
+
+#[test]
+fn without_a_byte_count_the_progress_line_counts_clips() {
+    let p = function_body(QUIT_WAIT, "Format-QuitProgress($quit, [datetime]$since)");
+    let mb = p.find("if ($p -and $p.bytes) { \"$([math]::Round($p.bytes / 1MB)) MB written\" }").expect("MB only with bytes");
+    let clips = p.find("elseif ($p -and $p.saves) { \"$($p.saves) clips still being written\" }").expect("else the clip count");
+    assert!(mb < clips, "{p}");
+}
