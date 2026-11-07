@@ -28,7 +28,7 @@ mod vram;
 pub use control::CaptureControlHandle;
 pub use start::{start_monitor, start_window};
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
 #[cfg(feature = "encode")]
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
@@ -121,9 +121,6 @@ pub struct CaptureShared {
     /// engine's HDR refresh: a start then picks fp16 even while the desktop is SDR, so HDR
     /// turning on mid-game needs no capture restart (`format::start_fp16`).
     pub hdr_capable: AtomicBool,
-    /// Dedicated VRAM (bytes) of the GPU the capture device runs on, 0 = not read yet
-    /// (`capture_vram`): 4 GiB or less keeps Bgra8 ahead of time (`format::start_fp16`).
-    pub capture_vram: AtomicU64,
     /// First WGC timestamp of the engine run, kept across capture restarts so PTS never
     /// jumps back.
     origin: Mutex<Option<i64>>,
@@ -149,7 +146,6 @@ impl CaptureShared {
             restart: AtomicBool::new(false),
             dda_failed: AtomicBool::new(false),
             hdr_capable: AtomicBool::new(false),
-            capture_vram: AtomicU64::new(0),
             origin: Mutex::new(None),
         })
     }
@@ -158,24 +154,14 @@ impl CaptureShared {
     /// (tonemap mode), for the CPU fallback and the dump harness (they read 8-byte pixels),
     /// and ahead of time on a display that can turn HDR on; else `Bgra8`.
     /// `RECALL_CAPTURE_FP16=1` forces fp16, `=0` keeps Bgra8 until HDR is on.
-    pub fn wants_fp16(&self) -> bool {
+    /// `read_vram` reads the capture adapter's dedicated VRAM (`vram::of_capture_device`;
+    /// tests inject it), only when it decides something: an HDR-capable display, no override.
+    /// Returns the choice and the VRAM read, if one was.
+    pub(crate) fn wants_fp16(&self, read_vram: impl FnOnce() -> Option<u64>) -> (bool, Option<u64>) {
         let env = std::env::var("RECALL_CAPTURE_FP16").ok();
         let capable = self.hdr_capable.load(Relaxed);
-        // VRAM is read only when it decides something (an HDR-capable display, no override).
-        let vram = (capable && format::forced_from_env(env.as_deref()).is_none()).then(|| self.capture_vram()).flatten();
-        format::needs_fp16(self.format_inputs()) || format::start_fp16(capable, vram, env.as_deref())
-    }
-
-    /// Dedicated VRAM of the capture adapter: the last capture device's (`gpu_path`), else
-    /// DXGI adapter 0, which the next device is made on (`vram`); kept for later starts.
-    fn capture_vram(&self) -> Option<u64> {
-        let known = self.capture_vram.load(Relaxed);
-        if known != 0 {
-            return Some(known);
-        }
-        let probed = vram::of_default_adapter()?;
-        self.capture_vram.store(probed, Relaxed);
-        Some(probed)
+        let vram = (capable && format::forced_from_env(env.as_deref()).is_none()).then(read_vram).flatten();
+        (format::needs_fp16(self.format_inputs()) || format::start_fp16(capable, vram, env.as_deref()), vram)
     }
 
     /// Why the running capture must be replaced, if it must: the capture thread asked
@@ -206,11 +192,16 @@ impl CaptureShared {
 
     /// Picks the format for a capture start and records it in `fp16`.
     fn start_format(&self) -> ColorFormat {
-        let fp16 = self.wants_fp16();
+        self.start_format_with(vram::of_capture_device)
+    }
+
+    /// [`Self::start_format`] with the VRAM read injected.
+    fn start_format_with(&self, read_vram: impl FnOnce() -> Option<u64>) -> ColorFormat {
+        let (fp16, vram) = self.wants_fp16(read_vram);
         self.fp16.store(fp16, Relaxed);
-        let vram_mb = self.capture_vram.load(Relaxed) / (1024 * 1024);
         let capable = if self.hdr_capable.load(Relaxed) { "HDR-capable" } else { "SDR-only" };
-        eprintln!("[recall] capture format {} ({capable} display, capture GPU {vram_mb} MB VRAM)", if fp16 { "Rgba16F" } else { "Bgra8" });
+        let vram = vram.map_or("not read".into(), |b| format!("{} MB", b / (1024 * 1024)));
+        eprintln!("[recall] capture format {} ({capable} display, capture GPU VRAM {vram})", if fp16 { "Rgba16F" } else { "Bgra8" });
         if fp16 { ColorFormat::Rgba16F } else { ColorFormat::Bgra8 }
     }
 
