@@ -20,6 +20,8 @@ mod protocol;
 mod tests;
 #[cfg(test)]
 mod tests_pipe;
+#[cfg(test)]
+mod tests_clock;
 
 const PIPE_NAME: &str = "recall-hdr-control";
 const RECONNECT: Duration = Duration::from_secs(1);
@@ -124,6 +126,10 @@ pub struct SessionStatus {
     pub fps_source: String,
     /// The closed game's last clip is still saveable until `ends_unix_ms` (state "draining").
     pub drain: Option<Drain>,
+    /// When this status arrived (the pipe reader stamps it): `remaining_secs` /
+    /// `elapsed_secs` count from here, so a wall-clock jump does not move them.
+    #[serde(skip)]
+    pub received: Option<std::time::Instant>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -132,12 +138,26 @@ pub struct Drain {
     pub name: String,
     pub total_secs: u64,
     pub ends_unix_ms: u64,
+    /// Seconds left when the status was sent (monotonic; newer controllers).
+    #[serde(rename = "remaining_secs")]
+    pub remaining: Option<f64>,
 }
 
 impl Drain {
     /// Seconds left at `now_unix_ms`, rounded up; 0 once the drain is over.
     pub fn remaining_secs(&self, now_unix_ms: u64) -> u64 {
         self.ends_unix_ms.saturating_sub(now_unix_ms).div_ceil(1000).min(self.total_secs)
+    }
+
+    /// Seconds left, rounded up: the status's `remaining_secs` less the time since
+    /// it arrived (`since_status`), else the wall-clock end (older controllers).
+    pub fn left(&self, now_unix_ms: u64, since_status: Option<Duration>) -> u64 {
+        match (self.remaining, since_status) {
+            (Some(at_status), Some(since)) => {
+                ((at_status - since.as_secs_f64()).max(0.0).ceil() as u64).min(self.total_secs)
+            }
+            _ => self.remaining_secs(now_unix_ms),
+        }
     }
 }
 
@@ -153,6 +173,20 @@ pub struct LongRecording {
     pub path: Option<String>,
     /// Unix seconds.
     pub started_secs: f64,
+    /// Seconds recorded when the status was sent (monotonic; newer controllers).
+    #[serde(rename = "elapsed_secs")]
+    pub elapsed: Option<f64>,
+}
+
+impl LongRecording {
+    /// Seconds recorded: the status's `elapsed_secs` plus the time since it arrived
+    /// (`since_status`), else counted from the wall-clock start (older controllers).
+    pub fn elapsed_at(&self, now_unix_secs: f64, since_status: Option<Duration>) -> f64 {
+        match (self.elapsed, since_status) {
+            (Some(at_status), Some(since)) => at_status.max(0.0) + since.as_secs_f64(),
+            _ => (now_unix_secs - self.started_secs).max(0.0),
+        }
+    }
 }
 
 /// `engine` status (about once per second while the recorder runs).
@@ -189,6 +223,16 @@ pub struct DaemonSnapshot {
 }
 
 impl SessionStatus {
+    /// Time since this status arrived (`None` for a snapshot built by hand).
+    pub fn since_status(&self, now: std::time::Instant) -> Option<Duration> {
+        self.received.map(|at| now.saturating_duration_since(at))
+    }
+
+    /// Drain seconds left now (`Drain::left`).
+    pub fn drain_left(&self, now_unix_ms: u64, now: std::time::Instant) -> Option<u64> {
+        self.drain.as_ref().map(|d| d.left(now_unix_ms, self.since_status(now)))
+    }
+
     /// A game (or the desktop) is being captured: background cache filling pauses.
     pub fn capturing(&self) -> bool {
         // `degraded`: CPU copies; `recovering`: the engine rebuilds its encoder, buffer kept.

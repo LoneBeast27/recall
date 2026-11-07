@@ -46,6 +46,8 @@ mod frame_timing;
 mod guard;
 mod hdr;
 mod hdr_exec;
+#[path = "../../recall/src/image_path.rs"]
+mod image_path;
 mod hdr_gate;
 mod hotkey;
 mod journal;

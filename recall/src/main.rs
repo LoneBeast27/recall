@@ -45,6 +45,7 @@ mod gpu_frames;
 mod gpu_route;
 #[cfg(test)]
 mod hw_skip;
+mod image_path;
 mod hdr;
 mod hud_probe;
 mod hybrid_gpu;
@@ -56,6 +57,7 @@ mod file_id;
 mod win_volume;
 mod thread_qos;
 mod source;
+mod stdin_commands;
 
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
@@ -411,38 +413,32 @@ fn spawn_stdin_reader(
     extras: engine_extras::Extras,
 ) {
     std::thread::spawn(move || {
-        use std::io::BufRead;
         let stdin = std::io::stdin();
-        for line in stdin.lock().lines() {
-            let Ok(line) = line else { break };
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<protocol::Command>(line) {
-                Ok(protocol::Command::SetMode { value }) => shared.set_select(&value),
-                Ok(protocol::Command::SaveClip { seconds, at_last_frame }) => match &save {
+        stdin_commands::read_commands(stdin.lock(), &shared.quit, |cmd| {
+            match cmd {
+                protocol::Command::SetMode { value } => shared.set_select(&value),
+                protocol::Command::SaveClip { seconds, at_last_frame }=> match &save {
                     Some(hook) => hook(seconds, at_last_frame),
                     None => protocol::emit(&protocol::Outbound::SaveFailed {
                         reason: "engine built without the encode feature".to_string(),
                     }),
                 },
-                Ok(protocol::Command::ExportClip { path, output, fps, edit }) => match &export {
+                protocol::Command::ExportClip { path, output, fps, edit }=> match &export {
                     Some(hook) => hook(path, output, fps, edit),
                     None => protocol::emit(&protocol::Outbound::ExportFailed {
                         source: path,
                         reason: "engine built without export support".into(),
                     }),
                 },
-                Ok(protocol::Command::ToggleMicMute) => {
+                protocol::Command::ToggleMicMute => {
                     #[cfg(feature="encode")]
                     protocol::emit(&protocol::Outbound::MicMuted { muted: audio::toggle_mic_mute() });
                 }
-                Ok(protocol::Command::SetMicMute { muted }) => {
+                protocol::Command::SetMicMute { muted } => {
                     #[cfg(feature="encode")]
                     { audio::set_mic_muted(muted); protocol::emit(&protocol::Outbound::MicMuted { muted }); }
                 }
-                Ok(protocol::Command::SetSource { id, gain_db, name }) => {
+                protocol::Command::SetSource { id, gain_db, name } => {
                     #[cfg(feature="encode")]
                     {
                         if !audio::sources::set_live(&id, gain_db, name.as_deref()) {
@@ -452,24 +448,18 @@ fn spawn_stdin_reader(
                     #[cfg(not(feature="encode"))]
                     let _ = (id, gain_db, name);
                 }
-                Ok(
-                    cmd @ (protocol::Command::Bookmark
+                cmd @ (protocol::Command::Bookmark
                     | protocol::Command::Screenshot
                     | protocol::Command::HudProbe
                     | protocol::Command::RecordStart
                     | protocol::Command::RecordStop
                     | protocol::Command::RecordToggle
-                    | protocol::Command::RecordFail { .. }),
-                ) => {
+                    | protocol::Command::RecordFail { .. }) => {
                     extras.handle(&cmd);
                 }
-                Ok(protocol::Command::Quit) => {
-                    shared.quit.store(true, Relaxed);
-                    break;
-                }
-                Err(_) => {} // ignore malformed lines
+                protocol::Command::Quit => {} // read_commands sets `quit`
             }
-        }
+        });
     });
 }
 

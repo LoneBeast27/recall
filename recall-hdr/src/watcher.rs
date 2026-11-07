@@ -33,13 +33,9 @@ use std::panic::catch_unwind;
 use std::sync::mpsc::Sender;
 use std::sync::{Mutex, OnceLock};
 
-use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, HWND, RECT};
+use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-};
-use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Accessibility::{
     HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent,
@@ -416,9 +412,9 @@ fn rect_covers(mon: &RECT, win: &RECT, tol: i32) -> bool {
 // Vendored Win32 helpers
 // ---------------------------------------------------------------------------
 
-// vendored from recall/src/source.rs (exe_stem): OpenProcess with
-// PROCESS_QUERY_LIMITED_INFORMATION + QueryFullProcessImageNameW, then take the
-// file stem. Kept local to avoid a cross-crate dependency for two small helpers.
+// vendored from recall/src/source.rs (exe_stem): the image path
+// (`image_path::exe_path`), then take the file stem. Kept local to avoid a
+// cross-crate dependency for two small helpers.
 pub(crate) fn exe_stem(pid: u32) -> Option<String> {
     exe_identity(pid).map(|(stem, _, _)| stem)
 }
@@ -435,18 +431,9 @@ fn exe_identity(pid: u32) -> Option<(String, String, bool)> {
 }
 
 /// The full path of `pid`'s executable image (Win32 form).
+/// Paths past `MAX_PATH` are read too (`image_path`).
 pub fn exe_path(pid: u32) -> Option<String> {
-    // SAFETY: a query-only handle, closed before return; the buffer outlives the call.
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        let mut buf = [0u16; 260];
-        let mut len = buf.len() as u32;
-        let res =
-            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
-        let _ = CloseHandle(handle);
-        res.ok()?;
-        Some(String::from_utf16_lossy(&buf[..len as usize]))
-    }
+    crate::image_path::exe_path(pid)
 }
 
 /// Whether `hwnd` is the foreground window now.
