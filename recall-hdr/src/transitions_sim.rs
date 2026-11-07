@@ -38,7 +38,7 @@ use crate::record_detect::{fed_key, FedKey};
 use crate::record_drain::drain_len;
 use crate::record_engine::{capture_refusal, wanted, EnginePlanner, EngineTarget, Step, EXIT_LINGER};
 use crate::record_notice::{NoticeTracker, Situation};
-use crate::record_restart::{pending_restart_tick, request_settings_restart, restart_engine, RestartHost, RestartReason, Restarted};
+use crate::record_restart::{pending_restart_tick, request_settings_restart, restart_engine, restart_for_recovery, RestartHost, RestartReason, Restarted};
 use crate::record_target::{classify_event, Target, TargetTracker, START_DEBOUNCE, TARGET_DEBOUNCE};
 use crate::record_transition::Transitions;
 use crate::watcher::WatchEvent;
@@ -279,6 +279,11 @@ impl Sim {
     /// A restart that is no game switch (resume, recovery): `Controller::restart_engine`.
     pub fn restart(&mut self, reason: RestartReason) -> Restarted {
         restart_engine(self, reason)
+    }
+
+    /// A recovery restart: `Controller::restart_for_recovery` (the real helper).
+    pub fn recover(&mut self) -> Restarted {
+        restart_for_recovery(self)
     }
 
     /// `recording.record_desktop_when_idle`.

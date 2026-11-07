@@ -65,6 +65,18 @@ pub enum HotkeyAction {
     ToggleHdr,
 }
 
+/// The engine command a capture shortcut sends, and `true`: it sends as a shortcut (the
+/// tick once queued, as a save; a pipe client's same command never ticks). `None`: the
+/// shortcut is no engine command.
+pub fn hotkey_command(action: HotkeyAction) -> Option<(&'static str, bool)> {
+    match action {
+        HotkeyAction::Bookmark => Some(("bookmark", true)),
+        HotkeyAction::Screenshot => Some(("screenshot", true)),
+        HotkeyAction::Record => Some(("record_toggle", true)),
+        _ => None,
+    }
+}
+
 /// One accelerator to register.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Binding {

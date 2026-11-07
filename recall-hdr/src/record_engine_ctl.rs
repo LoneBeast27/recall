@@ -35,12 +35,14 @@ impl EngineSwitch for Supervisor {
 
 /// `refusal` (what a line sent while the old engine quits is told) picks the call:
 /// Switching = a game switch, Restarting = a planned restart, Paused (a stop) = a pause,
-/// else a recovery restart.
+/// else a recovery restart. Paused with an engine wanted (no caller does this) is no
+/// pause: a planned restart, as a resume's, never "isn't responding".
 pub fn switch_engine(sw: &impl EngineSwitch, spec: Option<EngineSpec>, refusal: Sent) {
     match refusal {
         Sent::Switching => sw.switch_to(spec),
         Sent::Paused if spec.is_none() => sw.pause_to(),
-        other => sw.restart_to(spec, other == Sent::Restarting),
+        Sent::Paused | Sent::Restarting => sw.restart_to(spec, true),
+        _ => sw.restart_to(spec, false),
     }
 }
 
@@ -92,6 +94,12 @@ impl Controller {
     /// `record_restart::restart_engine`.
     pub(crate) fn restart_engine(&mut self, reason: RestartReason) -> Restarted {
         crate::record_restart::restart_engine(self, reason)
+    }
+
+    /// A broken engine (hang, encoder failed, ending early, capture stuck): restart at
+    /// once, drain or not, "Recorder isn't responding" meanwhile.
+    pub(crate) fn restart_for_recovery(&mut self) -> Restarted {
+        crate::record_restart::restart_for_recovery(self)
     }
 
     /// A fresh engine instance starts unmuted in `auto` mode: re-apply ours.

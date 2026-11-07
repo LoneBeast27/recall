@@ -500,7 +500,7 @@ fn main() {
     #[cfg(feature = "encode")]
     if let Some((ref input, ref cache)) = config.prepare_editor {
         match editor_media::prepare_clip(input, cache) {
-            Ok(info) => { println!("{}", serde_json::to_string(&info).expect("serialize media info")); return; }
+            Ok(info) => { use std::io::Write as _; let _ = writeln!(std::io::stdout(), "{}", serde_json::to_string(&info).expect("serialize media info")); return; }
             Err(e) => { eprintln!("prepare editor: {e}"); std::process::exit(1); }
         }
     }

@@ -264,23 +264,25 @@ fn a_save_while_the_engine_stops_for_off_says_waiting_for_a_game() {
     assert_eq!(after_quit(&rec.lines()), Vec::<String>::new());
 }
 
-/// The text of `fn <name>(` in `src`, up to its closing brace at 4-space indent (a method).
-fn method_body<'a>(src: &'a str, name: &str) -> &'a str {
-    let start = src.find(&format!("fn {name}(")).unwrap_or_else(|| panic!("fn {name} not found"));
-    let end = src[start..].find("\n    }").map(|e| start + e).unwrap_or_else(|| panic!("fn {name} has no end"));
-    &src[start..end]
+/// The capture shortcuts send as a shortcut (`hotkey` true: the tick once queued, tested
+/// above through `command`): `on_action` sends what `hotkey_command` answers.
+#[test]
+fn the_capture_shortcuts_send_with_the_shortcut_tick() {
+    use crate::record_hotkeys::{hotkey_command, HotkeyAction};
+    assert_eq!(hotkey_command(HotkeyAction::Bookmark), Some(("bookmark", true)));
+    assert_eq!(hotkey_command(HotkeyAction::Screenshot), Some(("screenshot", true)));
+    assert_eq!(hotkey_command(HotkeyAction::Record), Some(("record_toggle", true)));
+    for other in [HotkeyAction::Save { seconds: 30 }, HotkeyAction::Mic, HotkeyAction::Stats, HotkeyAction::Editor] {
+        assert_eq!(hotkey_command(other), None, "{other:?}");
+    }
 }
 
-/// Source guard on the controller's shortcut lines (no test builds a `Controller`): the
-/// bookmark / screenshot / record shortcuts send as a shortcut (`hotkey` true: the tick
-/// once queued, tested above through `command`); the pipe's commands never tick.
+/// Source guard on the pipe's side (no test builds a `Controller`): a pipe client's
+/// command never ticks.
 #[test]
-fn the_capture_shortcuts_send_with_the_shortcut_tick_and_pipe_commands_without() {
+fn pipe_commands_send_without_the_shortcut_tick() {
+    use crate::test_src::method_body;
     let actions = include_str!("record_actions.rs");
-    let on_action = method_body(actions, "on_action");
-    let arm = on_action.find("HotkeyAction::Bookmark | HotkeyAction::Screenshot | HotkeyAction::Record =>").expect("the shortcut arm");
-    let arm = &on_action[arm..on_action[arm..].find("HotkeyAction::Stats =>").map(|e| arm + e).expect("the arm's end")];
-    assert!(arm.contains("self.engine_command_as(cmd, None, true);"), "{arm}");
     assert!(method_body(actions, "engine_command").contains("self.engine_command_as(cmd, client, false);"));
     assert!(method_body(actions, "engine_command_as").contains("&mut ControllerCommand { ctl: self, cmd, client }, cmd, hotkey);"));
 }
