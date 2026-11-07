@@ -266,8 +266,13 @@ fn wide_str(text: &str) -> Vec<u16> {
 
 #[test]
 #[ignore]
-#[allow(unused_unsafe)]
 fn fileop_probe_hidden_desktop() {
+    run_on_hidden_desktop("win_fileop::tests::probe::fileop_live_probe");
+}
+
+/// Run one ignored probe test of this binary on a desktop nobody sees, and report.
+#[allow(unused_unsafe)]
+pub(super) fn run_on_hidden_desktop(test: &str) {
     const GENERIC_ALL: u32 = 0x1000_0000;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let name = format!("RecallProbe{}", std::process::id());
@@ -279,7 +284,7 @@ fn fileop_probe_hidden_desktop() {
     // SAFETY (env): this launcher runs alone (`--ignored`, exact filter); the child inherits it.
     unsafe { std::env::set_var("RECALL_PROBE_OUT", &out) };
     let exe = std::env::current_exe().unwrap();
-    let mut cmd = wide_str(&format!("\"{}\" win_fileop::tests::probe::fileop_live_probe --exact --ignored --nocapture --test-threads=1", exe.display()));
+    let mut cmd = wide_str(&format!("\"{}\" {test} --exact --ignored --nocapture --test-threads=1", exe.display()));
     let mut desktop = wide_str(&format!(r"WinSta0\{name}"));
     let si = StartupInfoW {
         cb: std::mem::size_of::<StartupInfoW>() as u32,
@@ -341,3 +346,6 @@ fn sandbox_out() -> PathBuf {
     std::fs::create_dir_all(&dir).unwrap();
     dir.join(format!("fileop-probe-{}.out", std::process::id()))
 }
+
+#[path = "win_fileop_private_probe.rs"]
+mod private;

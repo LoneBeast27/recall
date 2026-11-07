@@ -38,7 +38,7 @@ static TEST_SPAWNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicU
 fn a_call_while_an_earlier_one_is_stuck_is_refused_and_starts_no_thread() {
     // A path that does not exist: nothing could be deleted even if a worker ran.
     let ghost = std::env::temp_dir().join("recall-fileop-never-exists").join("ghost.txt");
-    let report = recycle_with_slot(std::slice::from_ref(&ghost), WAIT, OP_FLAGS, &TEST_STUCK, &TEST_SPAWNED);
+    let report = recycle_with_slot(std::slice::from_ref(&ghost), WAIT, OP_FLAGS, &TEST_STUCK, &TEST_SPAWNED, REAL_DESKTOP);
     assert_eq!(report.outcome, Outcome::Refused(STUCK_REFUSAL.into()));
     assert_eq!(TEST_SPAWNED.load(Ordering::SeqCst), 0, "no new STA thread");
 }
@@ -50,7 +50,7 @@ static RELEASE_SPAWNED: std::sync::atomic::AtomicUsize = std::sync::atomic::Atom
 fn the_stuck_slot_is_taken_on_a_timeout_and_released_when_that_thread_ends() {
     let ghost = std::env::temp_dir().join("recall-fileop-never-exists").join("ghost.txt");
     // A zero wait abandons the call at once; the worker then fails on the missing path and ends.
-    let report = recycle_with_slot(std::slice::from_ref(&ghost), Duration::ZERO, OP_FLAGS, &RELEASE_STUCK, &RELEASE_SPAWNED);
+    let report = recycle_with_slot(std::slice::from_ref(&ghost), Duration::ZERO, OP_FLAGS, &RELEASE_STUCK, &RELEASE_SPAWNED, REAL_DESKTOP);
     assert!(matches!(&report.outcome, Outcome::Refused(why) if why.contains("did not finish")), "{report:?}");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     while RELEASE_STUCK.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
@@ -58,6 +58,41 @@ fn the_stuck_slot_is_taken_on_a_timeout_and_released_when_that_thread_ends() {
     }
     assert!(!RELEASE_STUCK.load(Ordering::SeqCst), "released when the stuck thread ended");
     assert_eq!(RELEASE_SPAWNED.load(Ordering::SeqCst), 1);
+}
+
+// ---- The private desktop: no desktop, no call ----
+
+static DESK_STUCK: AtomicBool = AtomicBool::new(false);
+static DESK_SPAWNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+static CLOSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+fn no_desktop(_: &str) -> Option<isize> {
+    None
+}
+fn fake_desktop(_: &str) -> Option<isize> {
+    Some(42)
+}
+fn cannot_set(_: isize) -> bool {
+    false
+}
+fn count_close(desk: isize) {
+    assert_eq!(desk, 42);
+    CLOSED.fetch_add(1, Ordering::SeqCst);
+}
+
+#[test]
+fn without_a_private_desktop_the_call_is_refused_and_nothing_is_touched() {
+    // A path that does not exist: even a call that went ahead could delete nothing.
+    let ghost = std::env::temp_dir().join("recall-fileop-never-exists").join("ghost.txt");
+    let none = DesktopFns { create: no_desktop, set: cannot_set, close: count_close };
+    let report = recycle_with_slot(std::slice::from_ref(&ghost), WAIT, OP_FLAGS, &DESK_STUCK, &DESK_SPAWNED, none);
+    assert!(matches!(&report.outcome, Outcome::Refused(why) if why.contains("no private desktop")), "{report:?}");
+    assert_eq!(report.flags_seen, Vec::<u32>::new(), "no shell call");
+
+    let unset = DesktopFns { create: fake_desktop, set: cannot_set, close: count_close };
+    let report = recycle_with_slot(std::slice::from_ref(&ghost), WAIT, OP_FLAGS, &DESK_STUCK, &DESK_SPAWNED, unset);
+    assert!(matches!(&report.outcome, Outcome::Refused(why) if why.contains("private desktop")), "{report:?}");
+    assert_eq!(CLOSED.load(Ordering::SeqCst), 1, "the desktop it made is closed after the worker ended");
 }
 
 #[path = "win_fileop_probe.rs"]
