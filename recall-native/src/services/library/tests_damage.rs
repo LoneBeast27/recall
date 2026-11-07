@@ -104,6 +104,17 @@ fn a_damaged_folders_file_keeps_the_imported_folders_it_still_holds() {
 }
 
 #[test]
+fn a_damaged_folders_file_keeps_the_folders_recall_manages() {
+    let dir = temp_dir("folders-managed");
+    let path = dir.join("folders.json");
+    std::fs::write(&path, br#"{"recordings":"E:\\Clips","imported":["D:\\Old"],"former_recordings":["D:\\Old","F:\\Gone"],"x":"#).unwrap();
+    let folders = Folders::load_from(&path);
+    assert_eq!(folders.former_recordings, vec![r"D:\Old".to_owned(), r"F:\Gone".to_owned()], "still Recall's own after the damage");
+    assert!(folders.damaged.is_some());
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn leftover_temp_files_are_swept_when_the_library_loads() {
     let dir = temp_dir("temps");
     let path = dir.join("library.json");

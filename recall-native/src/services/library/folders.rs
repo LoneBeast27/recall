@@ -104,11 +104,14 @@ impl Folders {
         let found = crate::services::lenient_json::partial_object(bytes);
         let text = |v: &serde_json::Value| v.as_str().map(str::to_owned);
         let recordings = found.get("recordings").and_then(text);
-        let imported: Vec<String> = found.get("imported").and_then(|v| v.as_array()).map(|list| list.iter().filter_map(text).collect()).unwrap_or_default();
+        let list = |key: &str| -> Vec<String> { found.get(key).and_then(|v| v.as_array()).map(|list| list.iter().filter_map(text).collect()).unwrap_or_default() };
+        let imported = list("imported");
+        // L15: the folders Recall manages are read back too (their clips keep Delete-to-bin).
+        let former_recordings = list("former_recordings");
         let noun = if imported.len() == 1 { "folder" } else { "folders" };
         let kept = backup.and_then(Path::file_name).map(|n| format!(" The damaged file is kept as {}.", n.to_string_lossy())).unwrap_or_default();
         let damaged = Some(format!("{} imported {noun} read back; add any missing ones again in Settings.{kept}", imported.len()));
-        Self { recordings, imported, damaged, ..Self::default() }
+        Self { recordings, imported, former_recordings, damaged, ..Self::default() }
     }
 
     pub fn save(&self) -> Result<(), String> {
