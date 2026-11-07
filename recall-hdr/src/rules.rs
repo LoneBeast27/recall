@@ -8,6 +8,7 @@
 //! | 1 | empty / whitespace stem                     | `NonGame`                      |
 //! | 2 | stem in [`DENY_STEMS`] (shells, us, tools)  | `NonGame` (overrides all)      |
 //! | 3 | a `[[overrides]]` entry matches the stem    | map `RuleKind` -> `AppKind`    |
+//! | 3b| no override, a call / chat / office app      | `NonGame` (`private_apps`)     |
 //! | 4 | no override, `fullscreen_on_target`         | `default_game_class` mapped    |
 //! | 5 | no override, windowed                        | `NonGame` (conservative)       |
 //!
@@ -152,6 +153,11 @@ pub fn classify(fg: &Foreground, cfg: &Config) -> AppKind {
     // 3. Explicit per-exe override wins over the fullscreen default.
     if let Some(kind) = override_kind(cfg, stem) {
         return rule_to_app(kind);
+    }
+
+    // 3b. No override: a call, chat or office app is never a game (R4-detect-1).
+    if crate::private_apps::is_private(stem) {
+        return AppKind::NonGame;
     }
 
     // 4/5. No override: only a fullscreen-on-target window can be a game.

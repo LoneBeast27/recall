@@ -1,6 +1,6 @@
 use super::*;
 use crate::config::Override;
-use crate::rules::{classify, Foreground};
+use crate::rules::classify;
 use crate::types::{AppKind, RuleKind};
 
 /// A fullscreen UWP app resolved from its frame (G6) when `hosted`.
@@ -29,11 +29,14 @@ fn phone_link_fullscreen_without_trace_rights_is_no_target() {
     let phone = uwp("PhoneExperienceHost", "Phone Link", true);
     assert_eq!(no_rights(&phone, &cfg, None), None, "fallback never applies to a resolved identity");
     assert_eq!(no_rights(&phone, &cfg, Some(false)), None, "the vendor does not list it");
-    // With trace rights it is a candidate that must pass the check.
-    let checked = classify_checked(&phone, &cfg, true, true, || None).expect("checked candidate");
+    // Phone Link is a private app too (R4-detect-1): no candidate even with trace rights.
+    assert_eq!(classify_checked(&phone, &cfg, true, true, || None), None);
+    // An unknown Store app with trace rights is a candidate that must pass the check.
+    let store = uwp("SomeStoreApp", "Some App", true);
+    let checked = classify_checked(&store, &cfg, true, true, || None).expect("checked candidate");
     assert!(checked.needs_check);
     // The probe would not start for it: still no target.
-    assert_eq!(classify_checked(&phone, &cfg, true, false, || None), None);
+    assert_eq!(classify_checked(&store, &cfg, true, false, || None), None);
 }
 
 #[test]
@@ -75,13 +78,12 @@ fn a_hosted_candidate_with_no_probe_does_not_commit() {
 #[test]
 fn hdr_rules_skip_the_fullscreen_default_for_a_resolved_identity() {
     let cfg = Config::default();
-    let fg = |ev: &WatchEvent| Foreground {
-        exe_stem: ev.exe_stem.to_ascii_lowercase(),
-        title: ev.title.clone(),
-        fullscreen_on_target: hdr_fullscreen(ev),
-        pid: ev.pid,
-    };
+    // The HDR callers' own conversion (`app.rs`, `record_hdr.rs`).
+    let fg = |ev: &WatchEvent| crate::app::foreground_of(ev);
     assert_eq!(classify(&fg(&uwp("PhoneExperienceHost", "Phone Link", true)), &cfg), AppKind::NonGame);
+    // Phone Link is also a private app now: an unknown Store app tests the hosted rule alone.
+    assert_eq!(classify(&fg(&uwp("SomeStoreApp", "Some App", true)), &cfg), AppKind::NonGame);
+    assert!(hdr_fullscreen(&uwp("SomeStoreApp", "", false)), "plain: fullscreen flag kept");
     assert_ne!(classify(&fg(&uwp("Minecraft.Windows", "Minecraft", true)), &cfg), AppKind::NonGame, "known game");
     assert_ne!(classify(&fg(&uwp("UnknownGame", "x", false)), &cfg), AppKind::NonGame, "plain window: default class");
 }

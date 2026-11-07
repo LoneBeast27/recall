@@ -23,7 +23,7 @@ use std::time::Instant;
 use crate::gpu_games::KnownGames;
 use crate::log;
 use crate::record_app::Controller;
-use crate::record_composed::{composed_front, notice_text};
+use crate::record_composed::{composed_front, notice_step, notice_text};
 use crate::record_hosted::{classify_checked, commits_without_probe, Classified};
 use crate::record_engine::EngineTarget;
 use crate::record_target::{Admit, Target};
@@ -165,21 +165,22 @@ impl Controller {
     }
 
     /// `Some(steady)` when `ev` is a fullscreen window in front, last judged
-    /// composed by DWM, not what is recorded, and not a meeting / office app
-    /// or a desktop capture; `steady` = that watch saw a game-like rate
+    /// composed by DWM, not what is recorded, and not a Store app, a meeting /
+    /// office app or a desktop capture; `steady` = that watch saw a game-like rate
     /// (G4, `record_composed`).
     fn composed_in_front(&self, ev: &WatchEvent) -> Option<bool> {
         let recorded = self.tracker.current().is_some_and(|t| (t.pid, t.hwnd) == (ev.pid, ev.hwnd));
         let desktop = *self.planner.applied() == EngineTarget::Desktop;
         let stats = self.render.rejected.composed(ev.pid, ev.hwnd);
-        (ev.fullscreen && !self.paused && !recorded).then(|| composed_front(&ev.exe_stem, stats, desktop)).flatten()
+        (ev.fullscreen && !self.paused && !recorded).then(|| composed_front(&ev.exe_stem, ev.hosted, stats, desktop)).flatten()
     }
 
     /// G4: a composed fullscreen window in front for over 20 s is named
-    /// once per exe this run (island + log; no auto-record).
+    /// once per exe this run (island + log; no auto-record). Not counted
+    /// while notices are off, so it is not used up unseen (R4-detect-2).
     fn note_composed(&mut self, front: Option<(&WatchEvent, bool)>, now: Instant) {
         let seen = front.map(|(e, steady)| ((e.pid, e.hwnd, e.exe_name.as_str()), steady));
-        let Some(exe) = self.render.composed.observe_steady(seen, now) else { return };
+        let Some(exe) = notice_step(&mut self.render.composed, seen, self.cfg.overlay.enabled, now) else { return };
         let (title, detail) = notice_text(&exe);
         log!("record: {title}: {detail} (DWM composes its fullscreen window; no game signal for over 20 s)");
         self.shortcut_notice(&title, detail);

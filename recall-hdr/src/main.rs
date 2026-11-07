@@ -56,6 +56,7 @@ mod liveness;
 mod logging;
 mod matrix;
 mod overlay_proc;
+mod private_apps;
 mod record_actions;
 mod record_activity;
 mod record_app;

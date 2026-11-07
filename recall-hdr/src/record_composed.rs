@@ -7,16 +7,22 @@
 //! A composed verdict alone is not enough (round 2, R2-2): meeting apps,
 //! office slideshows, Electron apps in F11 and Store media apps are composed
 //! too. So the notice also needs:
-//! - a stem that is not on [`NOTICE_DENY_STEMS`] (meeting, office, chat,
-//!   music and note apps: fullscreen there is a call or a presentation), and
+//! - a plain window (not a Store app Recall resolved from its frame,
+//!   R4-detect-3) whose stem is not a call / chat / office app
+//!   (`private_apps`, the recording deny list) or a denied Store app, and
 //! - a steady game-like rate in some 1.5 s watch of the 20 s streak: at
 //!   least [`STEADY_PRESENTS`] kernel presents (24 fps) and no video swap
 //!   chain. A slower recheck does not reset the streak while the verdict
 //!   stays composed (R3-detect-1: a game capped at 30 fps reads ~43-46),
 //! - and the engine not capturing the desktop (`record_desktop_when_idle`):
 //!   then the window is on the clip after all (R2-7).
+//!
+//! With notices off (`overlay.enabled`) nothing can show it, so the streak is
+//! not counted and the once-per-exe notice is not used up (R4-detect-2).
 
-use crate::render_verdict::RenderStats;
+use std::time::Instant;
+
+use crate::render_verdict::{ComposedNotice, RenderStats};
 
 /// The notice's detail line; title + ": " + detail is the SPEC text
 /// "Not recording <exe>: add it as a game in Settings" (merge gate ruling).
@@ -31,56 +37,33 @@ pub(crate) fn notice_text(exe: &str) -> (String, &'static str) {
 /// (24 fps). A slideshow, a chat window or an idle call presents less.
 pub(crate) const STEADY_PRESENTS: u32 = 36;
 
-/// Stems whose fullscreen window is not a game the player expects recorded:
-/// the notice never names them. Matching is case-insensitive.
-const NOTICE_DENY_STEMS: &[&str] = &[
-    // Meetings and calls.
-    "zoom",
-    "ms-teams",
-    "teams",
-    "msteams",
-    "webex",
-    "ciscocollabhost",
-    "skype",
-    "slack",
-    "whatsapp",
-    "telegram",
-    "signal",
-    // Office, slideshows, documents, notes.
-    "powerpnt",
-    "winword",
-    "excel",
-    "onenote",
-    "outlook",
-    "olk",
-    "acrobat",
-    "acrord32",
-    "notion",
-    "obsidian",
-    "figma",
-    // Music, video and other Electron-type apps.
-    "spotify",
-    "electron",
-    "netflix",
-    "video.ui",
-    "microsoft.media.player",
-    "microsoft.photos",
-];
-
 /// The notice may name this composed window: `stats` = what the probe saw
 /// (`Rejected::composed`), `desktop` = the engine is capturing the desktop.
 #[cfg(test)]
 pub(crate) fn notice_wanted(stem: &str, stats: Option<RenderStats>, desktop: bool) -> bool {
-    composed_front(stem, stats, desktop) == Some(true)
+    composed_front(stem, false, stats, desktop) == Some(true)
 }
 
 /// `Some(steady)` while the notice's 20 s clock may run for this window (a
-/// composed verdict, not a denied stem, no desktop capture); `steady` = the
-/// last watch saw a game-like rate (`ComposedNotice::observe_steady`).
-pub(crate) fn composed_front(stem: &str, stats: Option<RenderStats>, desktop: bool) -> Option<bool> {
+/// composed verdict, a plain window, not a denied stem, no desktop capture);
+/// `steady` = the last watch saw a game-like rate
+/// (`ComposedNotice::observe_steady`). `hosted` = `WatchEvent::hosted`.
+pub(crate) fn composed_front(stem: &str, hosted: bool, stats: Option<RenderStats>, desktop: bool) -> Option<bool> {
     let s = stats.filter(|_| !desktop)?;
-    let denied = NOTICE_DENY_STEMS.iter().any(|d| d.eq_ignore_ascii_case(stem.trim()));
+    let stem = stem.trim();
+    let denied = hosted || crate::private_apps::is_private(stem) || crate::rules::is_denied(stem);
     (!denied).then_some(s.kernel_presents >= STEADY_PRESENTS && s.video_presents == 0)
+}
+
+/// One G4 observation (`ComposedNotice::observe_steady`); `shown` = notices
+/// are on. Off: no streak, so the exe is not marked as named.
+pub(crate) fn notice_step(
+    notice: &mut ComposedNotice,
+    front: Option<((u32, isize, &str), bool)>,
+    shown: bool,
+    now: Instant,
+) -> Option<String> {
+    notice.observe_steady(front.filter(|_| shown), now)
 }
 
 #[cfg(test)]
@@ -114,14 +97,14 @@ mod tests {
         let mut named = None;
         // Rechecks at 0, 2, 6, 14, 22 s alternate a steady and a slow watch.
         for (secs, kernel) in [(0, 50), (2, 20), (6, 50), (14, 20), (22, 20)] {
-            let front = composed_front("game", rate(kernel), false).map(|steady| ((7, 70, "Game.exe"), steady));
+            let front = composed_front("game", false, rate(kernel), false).map(|steady| ((7, 70, "Game.exe"), steady));
             named = named.or(n.observe_steady(front, t0 + Duration::from_secs(secs)));
         }
         assert_eq!(named.as_deref(), Some("Game.exe"));
         // Never steady in the streak: never named.
         let mut quiet = ComposedNotice::default();
         for secs in [0, 10, 21, 30] {
-            let front = composed_front("slides", rate(10), false).map(|steady| ((8, 80, "Slides.exe"), steady));
+            let front = composed_front("slides", false, rate(10), false).map(|steady| ((8, 80, "Slides.exe"), steady));
             assert_eq!(quiet.observe_steady(front, t0 + Duration::from_secs(secs)), None);
         }
     }
