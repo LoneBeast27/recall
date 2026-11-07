@@ -216,6 +216,11 @@ impl FakeNotices {
     pub(super) fn none(now: &Rc<Cell<Duration>>) -> Self {
         FakeNotices { now: now.clone(), devices_at: Cell::new(None), default: RefCell::new(None) }
     }
+
+    /// Devices change once, when the clock passes `at`.
+    pub(super) fn devices_at(now: &Rc<Cell<Duration>>, at: Duration) -> Self {
+        FakeNotices { devices_at: Cell::new(Some(at)), ..Self::none(now) }
+    }
 }
 
 impl Notices for FakeNotices {

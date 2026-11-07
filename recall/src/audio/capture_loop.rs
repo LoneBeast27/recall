@@ -123,6 +123,27 @@ pub(super) fn watch_for(device: &str, default_id: Option<String>) -> Option<Watc
     Some(Watch { id: default_id? })
 }
 
+/// A named stream on another endpoint than its own saved device (a fallback, or a twin): when a
+/// device comes or goes and the saved device would now open as its own (`back`), it ends at once
+/// so the loop opens that one (R6-deep-audio-3). Otherwise the track stayed on the other
+/// endpoint for the session.
+pub(super) struct Rebind {
+    back: Box<dyn Fn() -> bool>,
+}
+
+impl Rebind {
+    /// End the stream now: a device notice came and the saved device is back.
+    pub(super) fn check(&self, notices: &dyn Notices) -> Option<Ended> {
+        (notices.take_devices_changed() && (self.back)()).then(|| Ended { why: "the saved device is back".to_owned(), at_once: true })
+    }
+}
+
+/// The rebind for a stream that opened `device` (`own`: its own saved device): only a named
+/// device on another endpoint. `back` probes the endpoints again (on a device notice only).
+pub(super) fn rebind_for(device: &str, own: bool, back: impl Fn() -> bool + 'static) -> Option<Rebind> {
+    (!device.trim().is_empty() && !own).then(|| Rebind { back: Box::new(back) })
+}
+
 /// A device source that does not open at start still gets its track (silence) and waits: a
 /// named device for itself, a source on the Windows default for a default to appear (the
 /// headset is off, or an app holds the default in exclusive mode). Not for process loopback (a

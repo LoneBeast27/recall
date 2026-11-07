@@ -104,7 +104,7 @@ pub fn strip_note(source: &Source, lists: Option<&crate::services::audio_devices
         Found::Missing => Some("Not connected".to_owned()),
         Found::Twins(n) => Some(format!("{n} devices share this name")),
         Found::Ambiguous(n) => Some(format!("{n} devices match this name")),
-        _ if crate::services::audio_mute::opens_other(source, lists) => Some(crate::services::audio_mute::OPENED_OTHER.to_owned()),
+        _ if crate::services::audio_mute::opens_other(source, lists) => crate::services::audio_mute::other_note(source, lists).map(str::to_owned),
         _ if line_in_on_default(source) => Some(LINE_IN_ON_DEFAULT.to_owned()),
         _ => None,
     }
@@ -144,7 +144,8 @@ pub fn from_config(value: Option<&Value>) -> Vec<Source> {
                 id: Some(text("id")).filter(|id| !id.trim().is_empty())?,
                 kind: Kind::from_token(&text("kind"))?,
                 device: text("device"),
-                device_id: text("device_id"),
+                // A malformed id is read as none: it follows Alt+M (R6-deep-audio-5).
+                device_id: Some(text("device_id")).filter(|id| crate::services::meters::id_ok(id)).unwrap_or_default(),
                 exe: text("exe"),
                 name: text("name"),
                 enabled: v.get("enabled").and_then(Value::as_bool).unwrap_or(true),
@@ -164,7 +165,7 @@ pub fn to_config(list: &[Source]) -> Value {
                 if let Some(on) = s.mic_mute {
                     entry["mic_mute"] = Value::Bool(on);
                 }
-                if !s.device_id.trim().is_empty() {
+                if crate::services::meters::id_ok(&s.device_id) {
                     entry["device_id"] = Value::String(s.device_id.trim().to_owned());
                 }
                 entry

@@ -37,8 +37,9 @@ pub struct SourceSpec {
     #[serde(default)]
     pub device: String,
     /// The endpoint id (`IMMDevice::GetId`) the Audio page saved with `device` when it was
-    /// picked; "" = none (a config written before the id, or a hand-made one). Only decides
-    /// whether a line-in may skip Alt+M (`endpoints::opened_own`), never which endpoint opens.
+    /// picked; "" = none (a config written before the id, or a hand-made one), and so is a
+    /// malformed one (`endpoints::id_ok`). Only decides whether a line-in may skip Alt+M (only
+    /// with an id, `endpoints::opened_own`), never which endpoint opens.
     #[serde(default)]
     pub device_id: String,
     #[serde(default)]

@@ -35,15 +35,24 @@ pub(crate) fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
     hits.next().is_none().then_some(first)
 }
 
-/// The endpoint a named source opened is its own device (R5-deep-audio-1): its friendly name is
-/// exactly the saved `want` and, when the source saved an endpoint id at pick time (`want_id`),
-/// its id is that id. A renumbered fallback ("Mic (Box)" saved, "2- Mic (Box)" opened), a twin
-/// that took the saved name, or any other open is not, so a line-in there follows Alt+M. A
-/// config without an id: an exact-name open only. The Audio page keeps a copy (`recall-native`
-/// `services/meters.rs` `opened_own`); keep the two equal (same test table in both).
-pub(crate) fn opened_own(opened: &str, opened_id: Option<&str>, want: &str, want_id: &str) -> bool {
-    let (want, want_id) = (want.trim(), want_id.trim());
-    !want.is_empty() && opened.trim() == want && (want_id.is_empty() || opened_id.map(str::trim) == Some(want_id))
+/// A saved endpoint id the recorder trusts (R6-deep-audio-5): 1 to 256 characters once trimmed,
+/// no control character. Anything else counts as no id: the source still records, and follows
+/// Alt+M. The Audio page keeps a copy (`recall-native` `services/meters.rs` `id_ok`).
+pub(crate) fn id_ok(id: &str) -> bool {
+    let id = id.trim();
+    !id.is_empty() && id.chars().count() <= 256 && !id.chars().any(char::is_control)
+}
+
+/// The endpoint a named source (`want`) opened is its own device (R6-deep-audio-1/2): the source
+/// saved an endpoint id at pick time (`want_id`, well formed) and the opened endpoint has that
+/// id. The id alone decides: a renumbered own device ("3- X" saved, "4- X" opened, same id) is
+/// own; any name match with another id, or with no saved id, is not, so a line-in there
+/// follows Alt+M (Windows can give the saved name to an identical dongle that is a microphone).
+/// The Audio page keeps a copy (`recall-native` `services/meters.rs` `opened_own`); keep the two
+/// equal (same test table in both).
+pub(crate) fn opened_own(opened_id: Option<&str>, want: &str, want_id: &str) -> bool {
+    let want_id = want_id.trim();
+    !want.trim().is_empty() && id_ok(want_id) && opened_id.map(str::trim) == Some(want_id)
 }
 
 /// Which endpoint a device source opens.

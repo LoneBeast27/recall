@@ -8,7 +8,7 @@ use std::time::Duration;
 use wasapi::{DeviceCollection, Direction, SampleType, StreamMode, WaveFormat};
 
 use super::apps::Leveller;
-use super::capture_loop::{silence_to_clock, watch_for, Capture, Clock, Ended, Notices, Watch};
+use super::capture_loop::{rebind_for, silence_to_clock, watch_for, Capture, Clock, Ended, Notices, Rebind, Watch};
 use super::endpoints::{choose_endpoint, opened_own, Pick};
 use super::{LoopbackTarget, TrackRing};
 
@@ -65,6 +65,8 @@ pub(super) struct Stream {
     watch: Option<Watch>,
     /// The endpoint is the source's own saved device (`endpoints::opened_own`).
     own: bool,
+    /// A named device on another endpoint: ends when its own comes back (`capture_loop::rebind_for`).
+    rebind: Option<Rebind>,
 }
 
 /// The endpoint `pick_device` opened.
@@ -73,7 +75,7 @@ struct Picked {
     endpoint: String,
     /// The Windows default was opened (the stream watches it).
     on_default: bool,
-    /// It is the saved device itself: exact name, and the saved id when there is one.
+    /// It is the saved device itself: the endpoint id it saved (`endpoints::opened_own`).
     own: bool,
 }
 
@@ -91,7 +93,7 @@ fn pick_device(direction: &Direction, (device, device_id): (&str, &str), input: 
         Pick::Named(i) => {
             let dev = devices.into_iter().nth(i).expect("index from names");
             // Against the saved device only: the test mic stands in for the default.
-            let own = opened_own(&names[i], dev.get_id().ok().as_deref(), device, device_id);
+            let own = opened_own(dev.get_id().ok().as_deref(), device, device_id);
             Ok(Picked { dev, endpoint: names[i].clone(), on_default: false, own })
         }
         Pick::Default => {
@@ -106,7 +108,7 @@ fn pick_device(direction: &Direction, (device, device_id): (&str, &str), input: 
 /// only), and start it.
 pub(super) fn open_stream(direction: &Direction, (device, device_id): (&str, &str), ring: &TrackRing, target: &Option<LoopbackTarget>) -> Result<Stream, String> {
     let format = WaveFormat::new(32, 32, &SampleType::Float, ring.rate as usize, ring.channels as usize, None);
-    let (mut watch, mut own) = (None, false);
+    let (mut watch, mut own, mut rebind) = (None, false, None);
     let (mut client, endpoint, buffer_duration_hns) = match target {
         Some(LoopbackTarget { pid, label }) => (
             wasapi::AudioClient::new_application_loopback_client(*pid, true).map_err(|e| format!("process loopback for PID {pid}: {e}"))?,
@@ -121,6 +123,10 @@ pub(super) fn open_stream(direction: &Direction, (device, device_id): (&str, &st
                 watch = watch_for(device, dev.get_id().ok());
             }
             own = is_own;
+            // On another endpoint than its own (R6-deep-audio-3): on a device notice, pick again
+            // and end this stream when the pick is now the saved device itself.
+            let (direction, saved, saved_id, input) = (*direction, device.to_owned(), device_id.to_owned(), ring.input);
+            rebind = rebind_for(device, own, move || pick_device(&direction, (&saved, &saved_id), input).is_ok_and(|p| p.own));
             let client = dev.get_iaudioclient().map_err(|e| e.to_string())?;
             let (_def_period, min_period) = client.get_device_period().map_err(|e| e.to_string())?;
             (client, endpoint, device_buffer_hns(min_period))
@@ -132,7 +138,7 @@ pub(super) fn open_stream(direction: &Direction, (device, device_id): (&str, &st
     let event = Event(client.set_get_eventhandle().map_err(|e| e.to_string())?);
     let started = client.get_audiocaptureclient().and_then(|capture| client.start_stream().map(|()| capture));
     match started {
-        Ok(capture) => Ok(Stream { client, event, capture, endpoint, device: target.is_none(), watch, own }),
+        Ok(capture) => Ok(Stream { client, event, capture, endpoint, device: target.is_none(), watch, own, rebind }),
         Err(e) => {
             // The client still holds the event: release it first, as a Stream's drop does.
             drop(client);
@@ -154,6 +160,9 @@ impl Stream {
         let mut last_sound = std::time::Instant::now();
         loop {
             if let Some(ended) = self.watch.as_mut().and_then(|w| w.check(notices)) {
+                return ended;
+            }
+            if let Some(ended) = self.rebind.as_ref().and_then(|r| r.check(notices)) {
                 return ended;
             }
             if self.event.0.wait_for_event(WAIT_MS).is_ok() {

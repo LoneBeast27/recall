@@ -70,6 +70,9 @@ pub struct AudioPage {
     pub reorder: Option<(String, usize)>,
     /// Each strip's window left edge, written while painting (places a dragged strip).
     pub lefts: HashMap<String, Rc<Cell<Option<f32>>>>,
+    /// The source whose "Muted by the mic hotkey" untick was refused (no endpoint id to save):
+    /// its strip says so until a device is picked or the page closes (R6-deep-audio-1).
+    pub mute_refused: Option<String>,
 }
 
 impl AudioPage {
@@ -80,6 +83,7 @@ impl AudioPage {
         self.renaming = None;
         self.fader = None;
         self.reorder = None;
+        self.mute_refused = None;
     }
 
     pub fn span(&mut self, id: &str) -> FaderSpan {
@@ -120,14 +124,17 @@ impl Root {
     }
 
     /// A strip's device: its name and, for an input, its endpoint id (a line-in skips Alt+M only
-    /// on that endpoint, R5-deep-audio-1). A line-in moved onto an endpoint Windows lists as a
-    /// microphone gets Alt+M back on, with a toast (R5-deep-audio-2); `index` is its place in
-    /// the inputs list.
-    pub(crate) fn set_source_device(&mut self, id: &str, device: String, device_id: String, index: Option<usize>) {
+    /// on that endpoint, R6-deep-audio-1). A line-in moved onto an endpoint Windows lists as a
+    /// microphone gets Alt+M back on, with a toast (R5-deep-audio-2); the device is looked up in
+    /// the lists at the click (R6-deep-audio-4).
+    pub(crate) fn set_source_device(&mut self, id: &str, device: String, device_id: String) {
         let lists = self.settings_ui.audio.devices.clone();
         let mut rearmed = false;
+        if self.settings_ui.audio.mute_refused.as_deref() == Some(id) {
+            self.settings_ui.audio.mute_refused = None;
+        }
         self.edit_source(id, |s| {
-            if let Some(on) = crate::services::audio_mute::device_pick_effect(s, lists.as_ref(), index) {
+            if let Some(on) = crate::services::audio_mute::device_pick_effect(s, lists.as_ref(), (&device, &device_id)) {
                 s.mic_mute = Some(on);
                 rearmed = true;
             }
@@ -139,9 +146,27 @@ impl Root {
         }
     }
 
-    /// Whether the mic-mute hotkey silences this input (off: a line-in or capture card).
+    /// Whether the mic-mute hotkey silences this input (off: a line-in or capture card). Off
+    /// saves the endpoint id too, as a line-in skips Alt+M only there; with no id to save it is
+    /// refused and the strip says so (R6-deep-audio-1).
     pub(crate) fn set_source_mic_mute(&mut self, id: &str, on: bool) {
-        self.edit_source(id, |s| s.mic_mute = Some(on));
+        let source = self.audio_sources().into_iter().find(|s| s.id == id);
+        let effect = match source {
+            Some(s) if !on => crate::services::audio_mute::mic_toggle_effect(&s, self.settings_ui.audio.devices.as_ref()),
+            _ => Ok((true, String::new())),
+        };
+        match effect {
+            Ok((on, device_id)) => {
+                self.settings_ui.audio.mute_refused = None;
+                self.edit_source(id, |s| {
+                    s.mic_mute = Some(on);
+                    if !on {
+                        s.device_id = device_id;
+                    }
+                });
+            }
+            Err(_) => self.settings_ui.audio.mute_refused = Some(id.to_owned()),
+        }
     }
 
     /// "+ Add source" → "Microphone" (`mic`) or "Line-in or capture card". A line-in opens its
