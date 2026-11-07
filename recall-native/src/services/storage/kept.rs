@@ -8,7 +8,8 @@
 //! Adoption renames on the same volume and copies otherwise, then indexes the file like
 //! [`super::video::cache_in`] (LRU touch, budget). A copy whose size differs from the clip, or
 //! a clip too large for the video tier, is deleted instead. At start [`sweep_kept`] adopts what
-//! the engine kept while the app was closed, and deletes what no longer matches a clip.
+//! the engine kept while the app was closed, and deletes a marked copy only once its clip is
+//! gone for sure (its folder readable, no clip and no `.part` in it).
 //!
 //! Only the engine's own copies are ever deleted: it marks each with the alternate stream
 //! [`KEPT_MARK`] (`recall/src/encoder/mover.rs`). An unmarked file (a user's, or a copy kept
@@ -94,18 +95,22 @@ fn copy_of(dest: &Path, kept: &Path) -> bool {
     matches!((dest.metadata(), kept.metadata()), (Ok(d), Ok(k)) if d.is_file() && d.len() == k.len() && super::mtime_secs(&d) == super::mtime_secs(&k))
 }
 
-/// The clip is missing but its `<clip>.part` is in the clip folder: a power cut lost the
-/// move's rename, the kept copy may be the only whole clip, and the engine moves it again at
-/// its next start (`recall/src/encoder/staging_kept.rs`). Its copy is never deleted then.
-fn only_a_part(dest: &Path) -> bool {
+/// The clip is gone for sure: its folder is there and readable, and neither the clip nor its
+/// `<clip>.part` is in it (`try_exists` said no; an error is not a no). Anything else keeps the
+/// copy (review RI-2): a folder asleep or unreadable (a NAS, a wrong folder list), a stat
+/// error, a clip still on disk, or only a `.part` (a power cut lost the move's rename, the kept
+/// copy may be the only whole clip, and the engine moves it again at its next start:
+/// `recall/src/encoder/staging_kept.rs`).
+fn clip_gone(dest: &Path) -> bool {
     let mut part = dest.as_os_str().to_owned();
     part.push(".part");
-    !dest.exists() && Path::new(&part).exists()
+    let folder_readable = dest.parent().is_some_and(|folder| std::fs::read_dir(folder).is_ok());
+    folder_readable && matches!(dest.try_exists(), Ok(false)) && matches!(Path::new(&part).try_exists(), Ok(false))
 }
 
 /// [`sweep_kept`] against explicit folders: a kept copy of a clip in `clip_folder` is
-/// adopted; a marked copy that matches no clip is deleted, unless the clip is only a `.part`
-/// ([`only_a_part`]); anything else stays. Returns (adopted, deleted).
+/// adopted; a marked copy is deleted only when its clip is gone for sure ([`clip_gone`]);
+/// anything else stays. Returns (adopted, deleted).
 pub(super) fn sweep_in(root: &Path, kept_dir: &Path, clip_folder: &Path, budget: u64) -> (usize, usize) {
     if super::guard::blocked(root).or_else(|| super::guard::blocked(kept_dir)).is_some() {
         return (0, 0);
@@ -120,7 +125,7 @@ pub(super) fn sweep_in(root: &Path, kept_dir: &Path, clip_folder: &Path, budget:
         let dest = clip_folder.join(entry.file_name());
         if copy_of(&dest, &kept) && adopt_in(root, &dest, &kept, budget).is_ok() {
             adopted += 1;
-        } else if marked(&kept) && !only_a_part(&dest) && std::fs::remove_file(&kept).is_ok() {
+        } else if marked(&kept) && clip_gone(&dest) && std::fs::remove_file(&kept).is_ok() {
             deleted += 1;
         }
     }
