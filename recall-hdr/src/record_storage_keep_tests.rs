@@ -143,7 +143,7 @@ fn the_keeps_are_read_under_the_recycle_lock() {
     // A star or open made while the run waited for the app's Delete must count for that clip.
     let moved: RecycleFn = |_| Ok(());
     run_once(Path::new(r"E:\Clips"), 500, plan_three, (&|| true, keeps_record_lock), (any_bin, no_files), moved).unwrap();
-    assert_eq!(KEEP_LOCK_SEEN.lock().unwrap().clone(), vec![false; 3], "read while the lock is held");
+    assert_eq!(KEEP_LOCK_SEEN.lock().unwrap().clone(), vec![false; 6], "read twice per clip, both while the lock is held");
 }
 
 #[test]
@@ -155,4 +155,30 @@ fn every_clip_in_the_open_list_is_kept_whoever_published_it() {
     let open = keep::open_clips(&file).unwrap();
     assert!(open.contains("x.mp4") && open.contains("y.mp4"), "{open:?}");
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+static STARRED_IN_CHECK: AtomicBool = AtomicBool::new(false);
+static CHECKED_CALLS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+
+/// The user stars A while the run sizes the Recycle Bin for it.
+fn bin_check_then_star(_: &Path, _: u64) -> Result<(), String> {
+    STARRED_IN_CHECK.store(true, SeqCst);
+    Ok(())
+}
+
+fn keeps_a_once_starred() -> Result<HashSet<String>, String> {
+    Ok(if STARRED_IN_CHECK.load(SeqCst) { [A.to_lowercase()].into_iter().collect() } else { HashSet::new() })
+}
+
+fn recycle_recorded(files: &[PathBuf]) -> Result<(), RecycleError> {
+    CHECKED_CALLS.lock().unwrap().push(files[0].file_name().unwrap().to_string_lossy().into_owned());
+    Ok(())
+}
+
+#[test]
+fn a_clip_starred_during_its_bin_check_is_not_recycled() {
+    // RI-10: the keeps were read before the room check only; a star made while the bin was
+    // sized still lost the clip to the Recycle Bin.
+    run_once(Path::new(r"E:\Clips"), 500, plan_three, (&|| true, keeps_a_once_starred), (bin_check_then_star, no_files), recycle_recorded).unwrap();
+    assert_eq!(CHECKED_CALLS.lock().unwrap().clone(), vec![B.to_string(), C.to_string()], "A was starred before its Recycle Bin call");
 }
