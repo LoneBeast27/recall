@@ -150,3 +150,33 @@ fn leftover_temp_files_are_swept_when_the_library_loads() {
     assert_eq!(names(&dir), vec!["library.json".to_owned()]);
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn a_damaged_folders_file_is_written_back_so_every_later_load_keeps_its_folders() {
+    // RI-1: each listing, the kept sweep and every Settings save load folders.json again; with
+    // the damaged file moved aside they all got defaults and the next save dropped the folders.
+    let dir = temp_dir("folders-again");
+    let path = dir.join("folders.json");
+    std::fs::write(&path, br#"{"recordings":"E:\\Clips","imported":["D:\\Old"],"former_recordings":["F:\\Gone"],"x":"#).unwrap();
+    let first = Folders::load_from(&path);
+    assert!(first.damaged.is_some(), "the damage is reported once");
+    let again = Folders::load_from(&path);
+    assert_eq!(again.imported, vec![r"D:\Old".to_owned()], "the imported folders");
+    assert_eq!(again.former_recordings, vec![r"F:\Gone".to_owned()], "the folders Recall manages");
+    assert_eq!(again.recordings.as_deref(), Some(r"E:\Clips"));
+    assert!(again.damaged.is_none() && again.write_block.is_none(), "a clean file now");
+    assert!(names(&dir).iter().any(|n| n.starts_with("folders.json.bad-")), "the damaged file is kept: {:?}", names(&dir));
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_folders_file_with_nothing_readable_is_moved_aside() {
+    let dir = temp_dir("folders-none");
+    let path = dir.join("folders.json");
+    std::fs::write(&path, b"\x00\x00\x00 not json").unwrap();
+    let folders = Folders::load_from(&path);
+    assert!(folders.imported.is_empty() && folders.recordings.is_none() && folders.damaged.is_some());
+    let kept = names(&dir);
+    assert!(!path.exists() && kept.len() == 1 && kept[0].starts_with("folders.json.bad-"), "moved, not copied: {kept:?}");
+    let _ = std::fs::remove_dir_all(dir);
+}
