@@ -48,6 +48,7 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
         }
         let Some(spec) = spec else {
             shared.set_health(EngineHealth::Stopped);
+            shared.end_quitting(); // stopped to Off: no engine follows
             if !wait_for_change(&shared, gen) {
                 break;
             }
@@ -88,7 +89,10 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
                     ChildExit::Signalled => log!("supervisor: engine terminated without an exit code"),
                 }
             }
-            Err(e) => log!("supervisor: failed to spawn engine: {e}"),
+            Err(e) => {
+                log!("supervisor: failed to spawn engine: {e}");
+                shared.end_quitting(); // no engine came up
+            }
         }
 
         match policy.on_unintended_exit(Instant::now(), started.elapsed()) {
