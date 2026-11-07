@@ -5,7 +5,7 @@
 //! autosave writes the working project to the SSD and the sidecar beside the clip is only
 //! written by [`flush_project`].
 use crate::edit_model::{ClipInfo, EditPlan, ExportMode, ExportSettings};
-use crate::services::library::{folders::{self, Folders},import_check,imports,watch::WatchRoot};
+use crate::services::library::{folders::{self, Folders},import_check,watch::WatchRoot};
 use crate::services::storage::{self, Priority, ProjectSource};
 use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
@@ -181,8 +181,10 @@ pub(crate) fn list_from(dir:&Path,imported:&[String],former:&[String])->Result<(
 /// SSD thumbnail for a library clip: cached, imported from the recorder's `thumbs` folder, or generated.
 /// Blocking; HDD work runs on the clip's disk lane (inline when already on it).
 pub fn thumbnail(path:&str)->Result<String,String>{storage::ensure_thumb(path)}
-/// The editor save: beside the clip, or on C: for a clip in an imported folder (compatibility mode).
-fn sidecar(source:&str)->Result<PathBuf,String>{let f=Folders::load();if imports::is_imported(source,&library_dir_from(&f),&f.imported,&f.former_recordings){return imports::edit_file(Path::new(source)).ok_or_else(||"APPDATA is not set".into());}let p=Path::new(source);let name=p.file_name().ok_or("source has no filename")?.to_string_lossy();Ok(p.with_file_name(format!("{name}.recall-edit.json")))}
+// The editor save: beside the clip, or on C: for a clip in an imported folder (`backend_edit_place.rs`).
+#[path="backend_edit_place.rs"] mod edit_place;
+use edit_place::sidecar;
+pub use edit_place::share_folders;
 fn validate_info(info:&ClipInfo)->Result<(),String>{
     let p=std::fs::canonicalize(&info.path).map_err(|e|format!("resolve source: {e}"))?;
     let m=p.metadata().map_err(|e|e.to_string())?;
@@ -320,10 +322,14 @@ pub fn read_marks(clip:&str)->Vec<f64>{
 /// exists but cannot be read or loaded may hold edits, so a later flush must leave it alone.
 pub(crate) fn load_project(info:&ClipInfo)->(Option<Project>,Option<String>,bool,bool){
     let (Ok(working),Ok(sidecar))=(working::load_path(info),sidecar(&info.path))else{return(None,None,false,false)};
-    let lane_sidecar=sidecar.clone();
+    // An imported clip with no edit file on C: yet may have one beside it from when its folder was
+    // Recall's: read it (never written); the first flush writes the C: one.
+    let fallback=edit_place::beside_fallback(&info.path,&sidecar);
+    let lane_sidecar=fallback.clone().unwrap_or_else(||sidecar.clone());
     let (sidecar_ms,sidecar_bytes)=storage::run_io(Path::new(&info.path),Priority::Interactive,move||(storage::projects_modified_ms(&lane_sidecar),std::fs::read(&lane_sidecar).ok())).unwrap_or((None,None));
     let parse=|bytes:&[u8],from:ProjectSource|serde_json::from_slice::<Project>(bytes).map_err(|e|e.to_string()).and_then(|p|{validate_project(&p,info,from)?;Ok(p)});
-    let present=sidecar_ms.is_some()||sidecar.exists();
+    // `present`/`ours` are about the file a flush writes (the C: one when reading the fallback).
+    let present=(fallback.is_none()&&sidecar_ms.is_some())||sidecar.exists();
     let ours=!present||sidecar_bytes.as_deref().is_some_and(|bytes|parse(bytes,ProjectSource::Sidecar).is_ok());
     let warning=(present&&sidecar_bytes.is_none()).then(||"Saved edits could not be read. They stay beside the clip.".to_owned());
     // A source that fails is reported only when no other one loads.
