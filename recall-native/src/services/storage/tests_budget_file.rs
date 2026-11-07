@@ -155,3 +155,23 @@ fn a_fixture_whose_test_panics_still_removes_its_folder() {
     .unwrap();
     assert!(!left.exists(), "{} was left behind", left.display());
 }
+
+#[test]
+fn leftover_copies_do_not_hold_the_cache_budget_but_show_in_the_usage() {
+    // RI3-4: kept\leaked\ counted as fixed bytes, so a few leftover copies made the budget pass
+    // empty every evictable tier.
+    let base = root("leaked-budget");
+    let (cache, clips) = (base.join("cache"), base.join("clips"));
+    std::fs::create_dir_all(&clips).unwrap();
+    let clip = clips.join("G__2026-11-07__13-00-00-000__aa.mp4");
+    std::fs::write(&clip, vec![9u8; 3 << 20]).unwrap();
+    let copy = super::video::cache_in(&cache, &clip, 20 << 20).unwrap();
+    let leaked = cache.join("staging").join("kept").join("leaked");
+    std::fs::create_dir_all(&leaked).unwrap();
+    std::fs::write(leaked.join("L__2026-11-07__13-01-00-000__ll.mp4"), vec![1u8; 6 << 20]).unwrap();
+    super::budget::enforce(&cache, 8 << 20, 0);
+    assert!(copy.exists(), "3 MiB of cache fits an 8 MiB budget; the 6 MiB of leftovers don't count");
+    let usage = super::ssd_usage::ssd_usage_in(&cache, &clips);
+    assert!(usage.kept >= 9 << 20, "the usage shown still holds the leftovers: {}", usage.kept);
+    let _ = std::fs::remove_dir_all(&base);
+}

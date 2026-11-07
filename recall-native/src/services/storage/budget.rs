@@ -67,6 +67,9 @@ pub(super) struct Inventory {
     pub heads: u64,
     pub staged: u64,
     pub proxy: u64,
+    /// The recorder's leftover copies (`staging\kept\leaked\`): not cache and not in the
+    /// budget (RI3-4); shown in the SSD row and Settings on their own.
+    pub leaked: u64,
 }
 
 impl Inventory {
@@ -214,15 +217,18 @@ fn inventory_with(root: &Path, score: &dyn Fn(&str) -> f64, listed: &std::collec
     // Clip heads from the filter probe (`head.rs`): at most a few hundred MB, never evicted.
     let heads = dir_size(&root.join("heads")).0;
     // The recorder's kept copies waiting to be adopted (`kept.rs`, up to 2 GiB): they hold SSD
-    // space the budget has to leave room for.
-    let staged = dir_size(&root.join("staging").join("kept")).0;
+    // space the budget has to leave room for. Leftover copies in `kept\leaked\` are the
+    // user's to decide about (Settings), not cache: they don't hold the budget (RI3-4).
+    let kept_dir = root.join("staging").join("kept");
+    let leaked = dir_size(&kept_dir.join("leaked")).0;
+    let staged = dir_size(&kept_dir).0.saturating_sub(leaked);
     // Preview copies (`proxy.rs`: today's failure proxies, light copies after it).
     let proxy = dir_size(&root.join("proxy")).0;
     other += heads + staged + proxy;
     for file in ["storage.json", "media.json", "interactions.json", "owned.json"] {
         other += root.join(file).metadata().map_or(0, |m| m.len());
     }
-    Inventory { units, projects, other, transient, heads, staged, proxy }
+    Inventory { units, projects, other, transient, heads, staged, proxy, leaked }
 }
 
 /// Deletes one unit; returns the bytes actually freed (files still open are skipped). Each
