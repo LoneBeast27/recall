@@ -15,8 +15,10 @@ powershell -NoProfile -File scripts\install.ps1
 
 - Installs to `%LOCALAPPDATA%\Programs\Recall` (no admin rights). `-InstallDir <folder>` picks
   another folder; it must be on an SSD, because the app keeps its preview cache there.
-- Adds **Recall** to the Start menu, starts the recorder, and sets it to start with Windows
-  (`-NoAutostart` skips that; Settings → General turns it off later).
+- Adds **Recall** to the Start menu and starts the recorder. Start with Windows is off unless
+  you ask: `-Autostart` turns it on, or Settings → General. An update leaves the setting as it is.
+- The folder must be on a drive Windows reports as an SSD. For an SSD it can't classify (USB,
+  RAID, Storage Spaces, VM disk), `-AllowUnknownDrive` installs with a warning.
 - Builds run on the background CPU cores (CCD1) through `nice-build.ps1`, so a running game
   is not slowed down.
 - Close Recall first: while the app runs, the installer stops with exit 3 and changes nothing.

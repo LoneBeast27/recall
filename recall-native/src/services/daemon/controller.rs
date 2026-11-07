@@ -74,20 +74,25 @@ fn spawn_detached(executable: &Path) -> Result<(), String> {
     }
 }
 
-/// Whether any process with this executable name runs (case-insensitive).
+/// Whether a process with this executable name runs in this Windows session
+/// (case-insensitive). Another account's recorder (fast user switching) does not count:
+/// this user still needs their own (`session::running_in_session`).
 pub(super) fn process_running(exe_name: &str) -> Result<bool, String> {
+    let rows = process_rows()?;
+    Ok(super::session::running_in_session(&rows, exe_name, super::session::current_session(), super::session::session_of))
+}
+
+/// Every process's (exe name, pid).
+fn process_rows() -> Result<Vec<(String, u32)>, String> {
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.map_err(|error| format!("list processes: {error}"))?;
     let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
-    let mut found = false;
+    let mut rows = Vec::new();
     let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
     while more {
         let len = entry.szExeFile.iter().position(|unit| *unit == 0).unwrap_or(entry.szExeFile.len());
-        if String::from_utf16_lossy(&entry.szExeFile[..len]).eq_ignore_ascii_case(exe_name) {
-            found = true;
-            break;
-        }
+        rows.push((String::from_utf16_lossy(&entry.szExeFile[..len]), entry.th32ProcessID));
         more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
     }
     let _ = unsafe { CloseHandle(snapshot) };
-    Ok(found)
+    Ok(rows)
 }

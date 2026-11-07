@@ -1,4 +1,4 @@
-//! Client for the controller's control pipe (`\\.\pipe\recall-hdr-control`).
+//! Client for the controller's control pipe (`\\.\pipe\recall-hdr-control-<session>`, `session`).
 //!
 //! A background thread connects, reconnects every second, parses newline JSON
 //! `{"mod":ns,"event":{..}}` messages into a shared snapshot plus a queue of
@@ -16,6 +16,7 @@ use serde_json::Value;
 
 mod controller;
 mod protocol;
+mod session;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -23,7 +24,6 @@ mod tests_pipe;
 #[cfg(test)]
 mod tests_clock;
 
-const PIPE_NAME: &str = "recall-hdr-control";
 const RECONNECT: Duration = Duration::from_secs(1);
 /// A `status` request this often: only the controller's pump answers it, so the
 /// replies show it is alive (engine lines come from another thread).
@@ -355,7 +355,8 @@ impl DaemonClient {
     /// `RECALL_CONTROL_PIPE` names another pipe (scripted checks keep off the real recorder).
     pub fn spawn() -> Self {
         let pipe = std::env::var("RECALL_CONTROL_PIPE").ok().filter(|p| !p.is_empty());
-        Self::spawn_on(pipe.as_deref().unwrap_or(PIPE_NAME))
+        // The real recorder's pipe is per Windows session (`session`).
+        Self::spawn_on(&pipe.unwrap_or_else(session::current_pipe_name))
     }
 
     /// `spawn` against any pipe name (tests use a private one).

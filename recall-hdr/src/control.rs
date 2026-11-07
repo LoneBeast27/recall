@@ -1,4 +1,5 @@
-//! Control IPC: a named-pipe server (`\\.\pipe\recall-hdr-control`) speaking
+//! Control IPC: a named-pipe server (`\\.\pipe\recall-hdr-control-<session>`, this user
+//! and SYSTEM only: `control_pipe`) speaking
 //! newline-JSON. The controller BROADCASTS namespaced events
 //! (`{"mod":"engine"|"session"|"hdr"|"hub","event":{...}}`) to every connected
 //! client and forwards each inbound line, tagged with its client id, to the pump
@@ -16,17 +17,20 @@
 //! synthetic `{"cmd":"status"}` from that client, so the pump replies with the
 //! current status (and the cached engine `hello`/`status`) to late joiners.
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 
 use interprocess::local_socket::traits::{Listener, Stream as _};
 use interprocess::local_socket::{GenericNamespaced, ListenerOptions, Stream, ToNsName};
+use interprocess::os::windows::local_socket::ListenerOptionsExt;
+
+use crate::control_lines::{read_lines_capped, LinesEnd, MAX_LINE};
+use crate::control_pipe;
 
 use crate::log;
 
-pub const PIPE_NAME: &str = "recall-hdr-control";
 /// Lines buffered per client before new lines for it are dropped.
 pub const CLIENT_QUEUE: usize = 256;
 
@@ -171,14 +175,12 @@ impl PipeHub {
         let _ = self.commands.send(Inbound { client, line: r#"{"cmd":"status"}"#.into() });
     }
 
-    /// Forward every line a client sends until EOF.
+    /// Forward every line a client sends until EOF. A line past `MAX_LINE` bytes with no
+    /// newline drops the client (it can't make the controller buffer without limit).
     fn read_client(&self, client: u64, reader: impl std::io::Read) {
-        for line in BufReader::new(reader).lines() {
-            let Ok(line) = line else { break };
-            let line = line.trim();
-            if !line.is_empty() && self.commands.send(Inbound { client, line: line.to_string() }).is_err() {
-                break;
-            }
+        let end = read_lines_capped(reader, MAX_LINE, |line| self.commands.send(Inbound { client, line: line.to_string() }).is_ok());
+        if end == LinesEnd::TooLong {
+            log!("control: client {client} sent a line over {MAX_LINE} bytes; dropping it");
         }
         // Prune now: an idle recorder may not broadcast again for a long time, and
         // until then the dead client's writer thread and pipe handle would stay.
@@ -201,21 +203,30 @@ fn envelope(module: &str, event_json: &str) -> String {
 }
 
 fn accept_loop(hub: Arc<PipeHub>) {
-    let name = match PIPE_NAME.to_ns_name::<GenericNamespaced>() {
+    let pipe = control_pipe::current_pipe_name();
+    let security = match control_pipe::owner_only_descriptor() {
+        Ok(sd) => sd,
+        Err(e) => {
+            // Never fall back to the default DACL (read access for every local account).
+            log!("control: pipe security could not be built ({e}); control IPC disabled");
+            return;
+        }
+    };
+    let name = match pipe.as_str().to_ns_name::<GenericNamespaced>() {
         Ok(n) => n,
         Err(e) => {
             log!("control: pipe name invalid ({e}); control IPC disabled");
             return;
         }
     };
-    let listener = match ListenerOptions::new().name(name).create_sync() {
+    let listener = match ListenerOptions::new().name(name).security_descriptor(security).create_sync() {
         Ok(l) => l,
         Err(e) => {
             log!("control: pipe listen failed ({e}); control IPC disabled");
             return;
         }
     };
-    log!("control: pipe listening (\\\\.\\pipe\\{PIPE_NAME})");
+    log!("control: pipe listening (\\\\.\\pipe\\{pipe}, this user and SYSTEM only)");
 
     loop {
         let stream: Stream = match listener.accept() {
@@ -356,6 +367,18 @@ mod tests {
         assert_eq!(rx.recv().unwrap(), Inbound { client: id, line: r#"{"cmd":"quit"}"#.into() });
         assert!(rx.try_recv().is_err());
         assert_eq!(hub.client_count(), 0, "EOF pruned the client");
+    }
+
+    /// G14: a client that writes 2 MiB with no newline is dropped; nothing reaches the pump.
+    #[test]
+    fn a_line_with_no_newline_past_the_cap_drops_the_client() {
+        let (tx, rx) = channel();
+        let hub = PipeHub::detached(tx);
+        let id = hub.add_client(Box::new(Sink::default()));
+        let flood = vec![b'x'; 2 << 20];
+        hub.read_client(id, &flood[..]);
+        assert!(rx.try_recv().is_err(), "the oversized line never reaches the pump");
+        assert_eq!(hub.client_count(), 0, "the client was pruned");
     }
 
     /// A client that hangs up is pruned at EOF with no broadcast after it: an idle
