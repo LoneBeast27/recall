@@ -111,6 +111,12 @@ impl EngineActivity {
         matches!(self.long, LongRec::Active { .. })
     }
 
+    /// A long recording running or still starting: a session end stops it (a start sent
+    /// just before the query would otherwise run on unsaved) and a cancel restarts it.
+    pub fn recording_or_starting(&self) -> bool {
+        matches!(self.long, LongRec::Active { .. } | LongRec::Starting { .. })
+    }
+
     /// A new engine instance: nothing of the old one is in flight any more.
     pub fn engine_restarted(&mut self) {
         *self = EngineActivity::default();
@@ -429,6 +435,20 @@ mod tests {
         a.command_sent("screenshot", t0 + s(2));
         assert!(a.busy(t0 + s(2) + s(59)), "a slow disk is not a lost screenshot");
         assert!(!a.busy(t0 + s(2) + SCREENSHOT_STALE), "a lost one does not block forever");
+    }
+
+    /// Gate 20b P2-b: a start sent just before a session end counts as recording there.
+    #[test]
+    fn a_starting_long_recording_counts_for_a_session_end() {
+        let t0 = Instant::now();
+        let mut a = EngineActivity::default();
+        assert!(!a.recording_or_starting());
+        a.command_sent("record_start", t0);
+        assert!(a.recording_or_starting() && !a.is_recording());
+        a.on_event(&json!({"type": "recording_started", "path": "E:/G__rec.mp4"}), 1.0);
+        assert!(a.recording_or_starting());
+        a.on_event(&json!({"type": "recording_stopped", "path": "E:/G__rec.mp4"}), 2.0);
+        assert!(!a.recording_or_starting());
     }
 
     #[test]

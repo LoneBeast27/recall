@@ -146,8 +146,8 @@ pub struct Controller {
     pub(crate) recovery: crate::record_recover::EncoderRecovery,
     /// A recovery restart waiting for the long recording to end early (`record_recover`).
     pub(crate) ending_early: Option<crate::record_recover::EndingEarly>,
-    /// Win+L during a long recording (`record_lock`).
-    pub(crate) lock: crate::record_lock::LockWatch,
+    /// Win+L during a long recording and a session end in progress (`record_session_host`).
+    pub(crate) session_watch: crate::record_session_host::SessionState,
     /// The clean shutdown already ran (a session end runs it from `WM_ENDSESSION`).
     shut_down: bool,
 }
@@ -250,7 +250,7 @@ pub fn run() -> i32 {
         power: Default::default(),
         recovery: Default::default(),
         ending_early: None,
-        lock: Default::default(),
+        session_watch: Default::default(),
         shut_down: false,
     };
     if !ctl.can_trace {

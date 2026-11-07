@@ -81,6 +81,7 @@ mod record_power;
 mod record_power_win;
 mod record_lock;
 mod record_session_end;
+mod record_session_host;
 mod record_session_win;
 mod record_quit;
 mod record_recover;

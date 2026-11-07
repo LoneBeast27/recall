@@ -5,8 +5,9 @@
 //! - The engine is told when the session locks and unlocks (`session_locked`); the final
 //!   `recording_stopped` carries `locked_seconds` (the app and the island add "12:00 locked").
 //! - On unlock, if a long recording ran during the lock, one notice: "Recording kept going
-//!   while locked" / "12:00 locked". A lock of a minute or less is not news ([`NOTICE_OVER`],
-//!   the same bar as the stop's note).
+//!   while locked" / "12:00 locked", or "Recording stopped while locked" when it ended
+//!   during the lock (disk full, the game closed). A lock of a minute or less is not news
+//!   ([`NOTICE_OVER`], the same bar as the stop's note).
 //!
 //! This module only decides; `record_session_win` receives the WTS notices.
 
@@ -14,15 +15,17 @@ use std::time::{Duration, Instant};
 
 /// A shorter lock gets no notice.
 pub const NOTICE_OVER: Duration = Duration::from_secs(60);
-/// The unlock notice's title.
-pub const NOTICE_TITLE: &str = "Recording kept going while locked";
+/// The unlock notice's title: the recording is still running, or it stopped during the lock.
+pub const KEPT_TITLE: &str = "Recording kept going while locked";
+pub const STOPPED_TITLE: &str = "Recording stopped while locked";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LockAction {
     /// Send the engine `session_locked` with this value.
     TellEngine(bool),
-    /// The unlock notice: the session was locked this long during a recording.
-    Notice(Duration),
+    /// The unlock notice: the session was locked `span` during a recording; `running`: it
+    /// still is at the unlock.
+    Notice { span: Duration, running: bool },
 }
 
 /// The session's lock state, as the WTS notices say.
@@ -62,7 +65,7 @@ impl LockWatch {
         let span = now.saturating_duration_since(at);
         let mut actions = vec![LockAction::TellEngine(false)];
         if ran && span > NOTICE_OVER {
-            actions.push(LockAction::Notice(span));
+            actions.push(LockAction::Notice { span, running: recording });
         }
         actions
     }
@@ -76,9 +79,16 @@ pub fn notice_detail(span: Duration) -> String {
     format!("{length} locked")
 }
 
-/// The app's event for the unlock notice (`session` / `recording_locked`).
-pub fn app_event_json(span: Duration) -> String {
-    serde_json::json!({"type": "recording_locked", "locked_seconds": span.as_secs_f64()}).to_string()
+/// The unlock notice's title.
+pub fn notice_title(running: bool) -> &'static str {
+    if running { KEPT_TITLE } else { STOPPED_TITLE }
+}
+
+/// The app's event for the unlock notice (`session` / `recording_locked`, or
+/// `recording_stopped_locked` when it ended during the lock).
+pub fn app_event_json(span: Duration, running: bool) -> String {
+    let kind = if running { "recording_locked" } else { "recording_stopped_locked" };
+    serde_json::json!({"type": kind, "locked_seconds": span.as_secs_f64()}).to_string()
 }
 
 /// The engine line for a lock change.
@@ -98,10 +108,9 @@ mod tests {
         let mut watch = LockWatch::default();
         assert_eq!(watch.on_lock(t0, true), vec![LockAction::TellEngine(true)]);
         watch.recording_seen(true);
-        assert_eq!(watch.on_unlock(t0 + 12 * MIN, true), vec![LockAction::TellEngine(false), LockAction::Notice(12 * MIN)]);
+        assert_eq!(watch.on_unlock(t0 + 12 * MIN, true), vec![LockAction::TellEngine(false), LockAction::Notice { span: 12 * MIN, running: true }]);
         assert_eq!(watch.on_unlock(t0 + 13 * MIN, true), vec![], "one notice per lock");
         assert_eq!(notice_detail(12 * MIN), "12:00 locked");
-        assert_eq!(NOTICE_TITLE, "Recording kept going while locked");
     }
 
     #[test]
@@ -120,6 +129,7 @@ mod tests {
         assert!(!watch.is_locked());
     }
 
+    /// Gate 20b P2-d: a recording that stopped during the lock is not said to have kept going.
     #[test]
     fn a_recording_that_ran_during_the_lock_counts_and_a_short_lock_is_quiet() {
         let t0 = Instant::now();
@@ -128,7 +138,9 @@ mod tests {
         assert!(watch.is_locked());
         watch.on_lock(t0 + MIN, true); // a repeated lock keeps the first time
         watch.recording_seen(true); // it ran for a while, then stopped (disk full)
-        assert_eq!(watch.on_unlock(t0 + 5 * MIN, false), vec![LockAction::TellEngine(false), LockAction::Notice(5 * MIN)]);
+        assert_eq!(watch.on_unlock(t0 + 5 * MIN, false), vec![LockAction::TellEngine(false), LockAction::Notice { span: 5 * MIN, running: false }]);
+        assert_eq!(notice_title(false), "Recording stopped while locked");
+        assert_eq!(notice_title(true), "Recording kept going while locked");
         watch.on_lock(t0 + 6 * MIN, true);
         assert_eq!(watch.on_unlock(t0 + 6 * MIN + Duration::from_secs(40), true), vec![LockAction::TellEngine(false)], "40 s is not news");
     }
@@ -136,9 +148,11 @@ mod tests {
     #[test]
     fn the_wire_shapes() {
         assert_eq!(engine_line(true), r#"{"cmd":"session_locked","locked":true}"#);
-        let app: serde_json::Value = serde_json::from_str(&app_event_json(12 * MIN)).unwrap();
+        let app: serde_json::Value = serde_json::from_str(&app_event_json(12 * MIN, true)).unwrap();
         assert_eq!(app["type"], "recording_locked");
         assert_eq!(app["locked_seconds"].as_f64(), Some(720.0));
+        let stopped: serde_json::Value = serde_json::from_str(&app_event_json(12 * MIN, false)).unwrap();
+        assert_eq!(stopped["type"], "recording_stopped_locked");
         assert_eq!(notice_detail(Duration::from_secs(3725)), "1:02:05 locked");
     }
 }

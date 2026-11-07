@@ -364,9 +364,8 @@ fn report(json: bool, event: Event) {
             let started = Outbound::RecordingStarted { path: path.clone(), continued: true, part, cause: Some(cause.as_str()) };
             emit_or_log(json, &started, || format!("long recording continues in part {part} ({}) -> {path}", cause.as_str()));
         }
-        Event::Stopped { path, seconds, bytes, marks, parts, total_seconds, gap_seconds, frozen_seconds } => {
-            stopped(json, &path, Stop { seconds, bytes, marks, parts, total_seconds, gap_seconds, frozen_seconds, locked_seconds: 0.0, cause: None })
-        }
+        // `Writer::events` reports the final stop itself (it adds the locked seconds).
+        Event::Stopped { .. } => {}
         Event::Continued { path, seconds, bytes, marks, part, total_seconds, cause } => {
             stopped(json, &path, Stop { seconds, bytes, marks, parts: part, total_seconds, gap_seconds: 0.0, frozen_seconds: 0.0, locked_seconds: 0.0, cause: Some(cause.as_str()) })
         }
@@ -418,6 +417,8 @@ fn stopped(json: bool, path: &Path, stop: Stop) {
     let (seconds, bytes, marks, parts, total_seconds, gap_seconds, frozen_seconds, cause) =
         (stop.seconds, stop.bytes, stop.marks, stop.parts, stop.total_seconds, stop.gap_seconds, stop.frozen_seconds, stop.cause);
     let out = stopped_outbound(&path, stop);
+    #[cfg(test)]
+    tests::LAST_STOP.with(|last| *last.borrow_mut() = serde_json::to_value(&out).ok());
     emit_or_log(json, &out, || {
         let what = match cause {
             Some(cause) => format!("part {parts} saved ({cause} changed; continuing in a new file)"),
