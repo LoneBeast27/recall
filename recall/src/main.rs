@@ -24,6 +24,10 @@ macro_rules! eprintln {
 }
 
 mod stderr_log;
+// Next: its non-panicking `println!` / `eprintln!` (stdout/stderr failure handling) shadow
+// std's and the one above in every module below; test builds keep the `stderr_log` one.
+#[macro_use]
+mod quiet_io;
 mod app_tick;
 #[cfg(feature = "encode")]
 mod audio;
