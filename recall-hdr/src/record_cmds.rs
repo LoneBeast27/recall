@@ -39,7 +39,7 @@ use crate::record_config::{apply_patch, parse_cpu_mask};
 use crate::record_notice::Situation;
 use crate::record_status::{config_event, error_event, status_json, tray_line, StatusInputs};
 use crate::record_engine::{capture_refusal, engine_settings_changed};
-use crate::record_dispatch::{command_effects, hud_probe_effects, mic_effects, pipe_setting_effects, Effect, SavePort, NOT_RESPONDING};
+use crate::record_dispatch::{command_effects, hud_probe_effects, mic_effects, pipe_setting_effects, refusal, Effect, SavePort, Sent, NOT_RESPONDING};
 use crate::supervisor::EngineHealth;
 
 /// `{"type":"saving","seconds":N}` (mod `session`): a save the controller
@@ -56,7 +56,7 @@ struct ControllerSave<'a> {
 }
 
 impl SavePort for ControllerSave<'_> {
-    fn queue(&mut self, line: &str) -> bool {
+    fn queue(&mut self, line: &str) -> Sent {
         self.ctl.supervisor.send_engine_line(line)
     }
     fn mark_pending(&mut self) {
@@ -69,8 +69,8 @@ impl SavePort for ControllerSave<'_> {
         // Heard at once; the chime follows when the clip is on disk (seconds for a long save to a hard drive).
         crate::cues::tick();
     }
-    fn not_responding(&mut self) {
-        self.ctl.refuse_capture("save_clip", NOT_RESPONDING);
+    fn refused(&mut self, reason: &'static str) {
+        self.ctl.refuse_capture("save_clip", reason);
     }
 }
 
@@ -108,8 +108,8 @@ impl Controller {
             "hud_probe" => {
                 if self.engine_running() && !self.paused {
                     log!("record: engine hud_probe");
-                    let queued = self.supervisor.send_engine_line(r#"{"cmd":"hud_probe"}"#);
-                    if hud_probe_effects(queued).contains(&Effect::LogOnly) {
+                    let sent = self.supervisor.send_engine_line(r#"{"cmd":"hud_probe"}"#);
+                    if hud_probe_effects(sent).contains(&Effect::LogOnly) {
                         log!("record: hud_probe not sent: {NOT_RESPONDING}");
                     }
                 } else {
@@ -154,9 +154,9 @@ impl Controller {
                 Some(v @ ("auto" | "sdr" | "hdr")) => {
                     // Kept as the intent either way: every new engine gets it.
                     self.mode_select = Some(v.to_string());
-                    let queued = self.supervisor.send_engine_line(&json!({"cmd": "set_mode", "value": v}).to_string());
+                    let sent = self.supervisor.send_engine_line(&json!({"cmd": "set_mode", "value": v}).to_string());
                     if self.engine_running() {
-                        self.setting_not_sent(pipe_setting_effects(queued), client, "Capture mode not changed", "set_mode");
+                        self.setting_not_sent(pipe_setting_effects(sent), client, "Capture mode not changed", "set_mode");
                     }
                 }
                 _ => self.reply_error(client, "set_mode needs \"value\": auto|sdr|hdr"),
@@ -197,18 +197,19 @@ impl Controller {
 
     /// A live setting the engine did not get: the refused pop-up + beep, and an error reply.
     fn setting_not_sent(&self, effects: Vec<Effect>, client: Option<u64>, title: &str, cmd: &str) {
+        let reason = refusal(&effects).unwrap_or(NOT_RESPONDING);
         for effect in effects {
             match effect {
-                Effect::NotResponding => {
-                    log!("record: {cmd} not sent: {NOT_RESPONDING}");
+                Effect::Refused(reason) => {
+                    log!("record: {cmd} not sent: {reason}");
                     if self.cfg.overlay.enabled {
-                        self.hub.event("session", &crate::record_notice::shortcut_notice_json(title, NOT_RESPONDING, true, false));
+                        self.hub.event("session", &crate::record_notice::shortcut_notice_json(title, reason, true, false));
                     }
                     crate::supervisor::beep_failure();
                 }
                 Effect::ReplyError => {
                     if let Some(c) = client {
-                        self.hub.event_to(c, "session", &error_event(&format!("{cmd}: {NOT_RESPONDING}")));
+                        self.hub.event_to(c, "session", &error_event(&format!("{cmd}: {reason}")));
                     }
                 }
                 _ => {}
@@ -218,9 +219,9 @@ impl Controller {
 
     fn export_clip(&mut self, val: &Value) {
         if self.engine_running() {
-            if command_effects(self.supervisor.send_engine_line(&val.to_string())).contains(&Effect::NotResponding) {
+            if let Some(reason) = refusal(&command_effects(self.supervisor.send_engine_line(&val.to_string()))) {
                 let source = val.get("path").and_then(Value::as_str).unwrap_or("");
-                self.hub.event("engine", &json!({"type": "export_failed", "source": source, "reason": NOT_RESPONDING}).to_string());
+                self.hub.event("engine", &json!({"type": "export_failed", "source": source, "reason": reason}).to_string());
                 crate::supervisor::beep_failure();
             }
         } else {
@@ -248,12 +249,12 @@ impl Controller {
     pub(crate) fn set_mic(&mut self, muted: bool) {
         self.mic_muted = muted;
         log!("record: microphone {}", if muted { "muted" } else { "live" });
-        let queued = self.supervisor.send_engine_line(&json!({"cmd": "set_mic_mute", "muted": muted}).to_string());
+        let sent = self.supervisor.send_engine_line(&json!({"cmd": "set_mic_mute", "muted": muted}).to_string());
         // The mute stays our intent either way: the next engine gets it (`reapply_engine_intents`).
-        if self.engine_running() && mic_effects(queued).contains(&Effect::NotResponding) {
-            log!("record: microphone change not sent: {NOT_RESPONDING}");
+        if let Some(reason) = refusal(&mic_effects(sent)).filter(|_| self.engine_running()) {
+            log!("record: microphone change not sent: {reason}");
             if self.cfg.overlay.enabled {
-                self.hub.event("session", &crate::record_notice::shortcut_notice_json("Microphone not changed", NOT_RESPONDING, true, false));
+                self.hub.event("session", &crate::record_notice::shortcut_notice_json("Microphone not changed", reason, true, false));
             }
             crate::supervisor::beep_failure();
         }
@@ -359,13 +360,13 @@ impl Controller {
         } else if self.engine_running() {
             // Gain and names reach the running engine's tracks: no restart, the buffer stays.
             // An engine started later reads them from its environment.
-            let mut all_queued = true;
+            let mut all_sent = Sent::Queued;
             for line in crate::record_audio_sources::live_updates(&o.audio_sources, &n.audio_sources) {
                 log!("record: audio source {line}");
-                all_queued &= self.supervisor.send_engine_line(&line);
+                all_sent = all_sent.then(self.supervisor.send_engine_line(&line));
             }
             // The config is saved either way; an engine started later reads it.
-            self.setting_not_sent(pipe_setting_effects(all_queued), client, "Audio change not applied", "set_source");
+            self.setting_not_sent(pipe_setting_effects(all_sent), client, "Audio change not applied", "set_source");
         }
         if old.storage.cap_gb != new.storage.cap_gb || o.output_dir != n.output_dir {
             log!("record: storage cap -> {} GiB", new.storage.cap_gb);
