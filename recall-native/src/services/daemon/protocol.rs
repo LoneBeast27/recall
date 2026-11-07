@@ -244,7 +244,7 @@ impl State {
         self.snapshot.session = self.session_raw.as_ref().map(lenient::<SessionStatus>);
         // The status's countdown fields are as of the last `session` status line.
         if let Some(session) = self.snapshot.session.as_mut() {
-            session.received = self.last_status;
+            session.received = super::Arrival(self.last_status);
         }
     }
 }

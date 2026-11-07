@@ -11,6 +11,19 @@
 //! stdin). See `protocol.rs`. The per-redraw [`App`] work lives in
 //! `app_tick.rs`, the export worker in `export_worker.rs`.
 
+/// The engine's `eprintln!`: written if it can be, never a panic (`stderr_log`).
+/// Defined before every module so it shadows std's for the whole crate; the
+/// controller's stderr pipe closes when it dies, and std's would panic then.
+macro_rules! eprintln {
+    () => {
+        $crate::stderr_log::line(format_args!(""))
+    };
+    ($($arg:tt)*) => {
+        $crate::stderr_log::line(format_args!($($arg)*))
+    };
+}
+
+mod stderr_log;
 mod app_tick;
 #[cfg(feature = "encode")]
 mod audio;

@@ -129,7 +129,18 @@ pub struct SessionStatus {
     /// When this status arrived (the pipe reader stamps it): `remaining_secs` /
     /// `elapsed_secs` count from here, so a wall-clock jump does not move them.
     #[serde(skip)]
-    pub received: Option<std::time::Instant>,
+    pub received: Arrival,
+}
+
+/// When a status line arrived. Not part of a status's equality: the same status
+/// arriving again is no change (no repaint), only a fresher base for the clocks.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Arrival(pub Option<std::time::Instant>);
+
+impl PartialEq for Arrival {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
@@ -225,7 +236,7 @@ pub struct DaemonSnapshot {
 impl SessionStatus {
     /// Time since this status arrived (`None` for a snapshot built by hand).
     pub fn since_status(&self, now: std::time::Instant) -> Option<Duration> {
-        self.received.map(|at| now.saturating_duration_since(at))
+        self.received.0.map(|at| now.saturating_duration_since(at))
     }
 
     /// Drain seconds left now (`Drain::left`).
