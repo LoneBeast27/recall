@@ -18,12 +18,13 @@ fn recording_toast(event: &DaemonEvent) -> Option<(ToastKind, String, Option<Str
     match event {
         DaemonEvent::RecordingStarted => Some((ToastKind::Info, "Recording started".into(), Some("Press the same shortcut again to stop.".into()))),
         DaemonEvent::RecordingContinued { part, cause } => Some((ToastKind::Info, format!("Recording continues in part {part}"), Some(cause_text(cause).into()))),
-        DaemonEvent::RecordingStopped { seconds, parts, gap_seconds, frozen_seconds, .. } => {
+        DaemonEvent::RecordingStopped { seconds, parts, gap_seconds, frozen_seconds, locked_seconds, .. } => {
             let mut notes = Vec::new();
             if *parts > 1 {
                 notes.push(format!("{parts} files"));
             }
             notes.extend(lost_notes(*parts > 1, *gap_seconds, *frozen_seconds));
+            notes.extend(locked_note(*locked_seconds));
             let detail = (!notes.is_empty()).then(|| notes.join(" · "));
             Some((ToastKind::Good, format!("Recording saved · {}", format_duration(*seconds)), detail))
         }
@@ -52,8 +53,19 @@ fn recording_toast(event: &DaemonEvent) -> Option<(ToastKind, String, Option<Str
             }
             Some((ToastKind::Bad, title.into(), Some(detail)))
         }
+        DaemonEvent::RecordingKeptLocked { seconds } => {
+            Some((ToastKind::Info, "Recording kept going while locked".into(), Some(format!("{} locked", format_duration(*seconds)))))
+        }
         _ => None,
     }
+}
+
+/// Time the PC sat locked during a recording is shown past this (seconds).
+const LOCKED_OVER: f64 = 60.0;
+
+/// "12:00 locked" past [`LOCKED_OVER`].
+fn locked_note(locked_seconds: f64) -> Option<String> {
+    (locked_seconds > LOCKED_OVER).then(|| format!("{} locked", format_duration(locked_seconds)))
 }
 
 /// Time missed between parts, or frozen, is shown past this (seconds).
@@ -127,7 +139,7 @@ impl Root {
             }
             DaemonEvent::ScreenshotFailed { reason } => self.show_toast(ToastKind::Bad, "Screenshot failed", Some(reason)),
             // Toasts: `recording_toast` above.
-            DaemonEvent::RecordingStarted | DaemonEvent::RecordingContinued { .. } => {}
+            DaemonEvent::RecordingStarted | DaemonEvent::RecordingContinued { .. } | DaemonEvent::RecordingKeptLocked { .. } => {}
             DaemonEvent::RecordingStopped { path, .. } | DaemonEvent::RecordingPartSaved { path } => {
                 record_interaction(Interaction::Saved(path));
                 self.workers.job(Job::List);
@@ -239,9 +251,9 @@ mod tests {
         assert_eq!(toast, Some((ToastKind::Info, "Recording continues in part 2".into(), Some("The game's size changed".into()))));
         let toast = recording_toast(&DaemonEvent::RecordingContinued { part: 3, cause: "input".into() });
         assert_eq!(toast.and_then(|t| t.2).as_deref(), Some("Capture switched between GPU and CPU frames"), "the reason matches the cause");
-        let toast = recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec-3.mp4".into(), seconds: 3725.0, parts: 3, gap_seconds: 0.4, frozen_seconds: 0.0 });
+        let toast = recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec-3.mp4".into(), seconds: 3725.0, parts: 3, gap_seconds: 0.4, frozen_seconds: 0.0, locked_seconds: 0.0 });
         assert_eq!(toast, Some((ToastKind::Good, "Recording saved · 1:02:05".into(), Some("3 files".into()))));
-        let toast = recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec.mp4".into(), seconds: 61.0, parts: 1, gap_seconds: 0.0, frozen_seconds: 0.0 });
+        let toast = recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec.mp4".into(), seconds: 61.0, parts: 1, gap_seconds: 0.0, frozen_seconds: 0.0, locked_seconds: 0.0 });
         assert_eq!(toast, Some((ToastKind::Good, "Recording saved · 1:01".into(), None)), "one file reads as before");
     }
 
@@ -249,7 +261,7 @@ mod tests {
     /// failure after a part change neither said it ended early nor named the files.
     #[test]
     fn the_final_toast_says_what_is_missing_and_a_failure_names_the_files() {
-        let toast = recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec-2.mp4".into(), seconds: 3600.0, parts: 2, gap_seconds: 7.2, frozen_seconds: 0.0 });
+        let toast = recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec-2.mp4".into(), seconds: 3600.0, parts: 2, gap_seconds: 7.2, frozen_seconds: 0.0, locked_seconds: 0.0 });
         assert_eq!(toast, Some((ToastKind::Good, "Recording saved · 1:00:00".into(), Some("2 files · 7 s missing".into()))));
         let files = vec!["E:/c/G__rec.mp4".to_string(), "E:/c/G__rec-2.mp4".to_string()];
         let toast = recording_toast(&DaemonEvent::RecordingFailed { reason: "the video encoder failed".into(), files: files.clone(), gap_seconds: 0.0, frozen_seconds: 0.0 });
@@ -286,11 +298,24 @@ mod tests {
     #[test]
     fn the_final_toast_says_how_long_the_picture_froze() {
         let stop = |parts: u32, gap_seconds: f64, frozen_seconds: f64| {
-            recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec.mp4".into(), seconds: 3600.0, parts, gap_seconds, frozen_seconds }).and_then(|t| t.2)
+            recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec.mp4".into(), seconds: 3600.0, parts, gap_seconds, frozen_seconds, locked_seconds: 0.0 }).and_then(|t| t.2)
         };
         assert_eq!(stop(1, 0.0, 40.2).as_deref(), Some("40 s frozen"));
         assert_eq!(stop(2, 7.2, 40.2).as_deref(), Some("2 files · 7 s missing · 40 s frozen"));
         assert_eq!(stop(2, 0.0, 95.0).as_deref(), Some("2 files · 1:35 frozen"));
         assert_eq!(stop(1, 0.0, 1.5), None, "a short freeze is not news");
+    }
+
+    /// Audit U8: a recording that ran on while the PC was locked says so on unlock, and its
+    /// final toast says for how long.
+    #[test]
+    fn a_lock_during_a_recording_is_named_on_unlock_and_in_the_final_toast() {
+        let toast = recording_toast(&DaemonEvent::RecordingKeptLocked { seconds: 720.0 });
+        assert_eq!(toast, Some((ToastKind::Info, "Recording kept going while locked".into(), Some("12:00 locked".into()))));
+        let stop = |locked_seconds: f64| {
+            recording_toast(&DaemonEvent::RecordingStopped { path: "E:/G__rec.mp4".into(), seconds: 1200.0, parts: 1, gap_seconds: 0.0, frozen_seconds: 0.0, locked_seconds }).and_then(|t| t.2)
+        };
+        assert_eq!(stop(720.0).as_deref(), Some("12:00 locked"));
+        assert_eq!(stop(45.0), None, "a short lock is not news");
     }
 }
