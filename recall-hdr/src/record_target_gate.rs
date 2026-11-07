@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use crate::config::Config;
 use crate::record_engine::EngineTarget;
-use crate::record_target::{is_fullscreen_game, is_target, Target};
+use crate::record_target::{game_evidence, is_fullscreen_game, is_target_with, Target};
 use crate::rules;
 use crate::watcher::WatchEvent;
 
@@ -103,7 +103,7 @@ pub fn too_small(traits: Traits, client: (i32, i32)) -> bool {
 /// (denied, a `none` override, Recall itself).
 pub fn adopted_candidate(ev: &WatchEvent, cfg: &Config, client: (i32, i32)) -> Option<Target> {
     let big = ev.fullscreen || (client.0 >= MIN_CLIENT.0 && client.1 >= MIN_CLIENT.1);
-    (big && is_target(&ev.exe_stem, true, cfg)).then(|| Target::from_event(ev))
+    (big && is_target_with(&ev.exe_stem, true, game_evidence(ev), cfg)).then(|| Target::from_event(ev))
 }
 
 /// The window that started when a retarget cut a drain short (any other

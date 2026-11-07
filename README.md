@@ -28,6 +28,13 @@ powershell -NoProfile -File scripts\install.ps1
 
 - **Play a game.** Recording starts by itself when a fullscreen game is in front and stops
   when it closes. The tray icon is red while recording and grey while paused.
+- **What counts as a game.** Call, chat, mail, office, media-player and music apps (Zoom, Teams,
+  WhatsApp, Kodi, Stremio, VLC, LibreOffice, Spotify and others) are never recorded on their own.
+  Discord is the exception: its fullscreen window, a fullscreen call or stream view included, is
+  recorded by default (config.toml `[detect] fullscreen_games = ["Discord"]`; remove it there to
+  stop). To record any other such app, add its exe to that list (`fullscreen_games =
+  ["Discord", "Zoom.exe"]`) or add an `[[overrides]]` entry (`exe = "zoom"`, `kind = "sdr_game"`).
+  `fullscreen_games` is only in config.toml, not in Settings.
 - **Alt+N** saves the last 2 minutes (Settings → Clip → Replay length). A soft tick confirms the
   press at once and a chime plays when the clip is safe; the small in-game notice shows it too.
   Clips are written to the SSD first (about a second) and moved to the clip folder in the

@@ -28,7 +28,57 @@ const APPS: &[&str] = &[
     "Zoom", "CptHost", "ms-teams", "msteams", "Teams", "webex", "CiscoCollabHost", "atmgr", "Skype", "lync", "slack",
     "WhatsApp", "WhatsApp.Root", "Telegram", "Signal", "Viber", "PhoneExperienceHost", "OUTLOOK", "olk", "thunderbird",
     "POWERPNT", "WINWORD", "EXCEL", "ONENOTE", "Acrobat", "AcroRd32", "Notion", "Obsidian", "Figma", "Spotify", "electron",
+    // R5-detect-1: more chat apps, media players / video apps, office suites, music apps.
+    "Messenger", "WeChat", "Weixin", "LINE", "Element", "KakaoTalk", "Mattermost", "Rocket.Chat", "Wire", "Zulip",
+    "Kodi", "Plex", "Plex HTPC", "Stremio", "stremio-shell-ng", "JellyfinMediaPlayer", "mpc-be", "mpc-be64",
+    "PotPlayer", "PotPlayer64", "PotPlayerMini", "smplayer", "mpvnet", "PrimeVideo", "DisneyPlus",
+    "soffice", "simpress", "swriter", "scalc", "wps", "wpp", "DesktopEditors",
+    "foobar2000", "TIDAL", "YouTube Music Desktop App", "iTunes", "AppleMusic",
 ];
+
+/// One representative per category added in R5-detect-1.
+const NEW_CATEGORIES: &[&str] = &["KakaoTalk", "Kodi", "soffice", "TIDAL"];
+
+#[test]
+fn a_new_category_representative_records_only_with_an_opt_in() {
+    for app in NEW_CATEGORIES {
+        let ev = plain(app);
+        assert_eq!(classify_checked(&ev, &Config::default(), false, false, || None), None, "{app}: no opt-in");
+        assert_eq!(classify_checked(&ev, &Config::default(), true, true, || None), None, "{app}: render check on");
+        let mut over = Config::default();
+        over.overrides.push(Override { exe: (*app).into(), kind: RuleKind::SdrGame, clamp: None });
+        assert!(classify_checked(&ev, &over, false, false, || None).is_some(), "{app}: game override");
+        let mut listed = Config::default();
+        listed.detect.fullscreen_games.push(format!("{app}.exe"));
+        assert!(classify_checked(&ev, &listed, false, false, || None).is_some(), "{app}: fullscreen_games");
+    }
+}
+
+#[test]
+fn a_steam_library_game_shipping_a_listed_exe_name_still_records() {
+    // R5-detect-2: an indie Steam game can ship a stock electron.exe (or be named Element.exe).
+    let cfg = Config::default();
+    for stem in ["electron", "Element"] {
+        let ev = WatchEvent { steam_game: true, ..plain(stem) };
+        let t = crate::record_target::classify_event(&ev, &cfg).unwrap_or_else(|| panic!("{stem}: Steam library"));
+        assert_eq!(t.exe, ev.exe_name);
+        let windowed = WatchEvent { fullscreen: false, fullscreen_on_target: false, ..ev.clone() };
+        assert!(crate::record_target::classify_event(&windowed, &cfg).is_some(), "{stem}: windowed Steam game");
+    }
+    assert_eq!(crate::record_target::classify_event(&plain("electron"), &cfg), None, "outside Steam: private");
+}
+
+#[test]
+fn hdr_rules_honour_a_fullscreen_games_opt_in() {
+    // R5-detect-3: a `detect.fullscreen_games` entry opts a private app in for the HDR rules too.
+    let mut cfg = Config::default();
+    cfg.detect.fullscreen_games.push("Zoom.exe".into());
+    let kind = classify(&crate::app::foreground_of(&plain("Zoom")), &cfg);
+    assert_eq!(kind, crate::rules::classify(&crate::app::foreground_of(&plain("UnknownGame")), &cfg), "game class");
+    assert_ne!(kind, AppKind::NonGame);
+    let windowed = WatchEvent { fullscreen: false, fullscreen_on_target: false, ..plain("Zoom") };
+    assert_eq!(classify(&crate::app::foreground_of(&windowed), &cfg), AppKind::NonGame, "windowed stays NonGame");
+}
 
 #[test]
 fn every_listed_app_is_private_by_exact_stem() {
