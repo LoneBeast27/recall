@@ -419,7 +419,7 @@ fn valorant_is_never_left_to_the_render_check() {
     let composed = crate::render_verdict::RenderStats { runtime_presents: 90, kernel_presents: 90, composed_frames: 90, ..Default::default() };
     assert!(matches!(crate::render_verdict::judge(&composed, true), crate::render_verdict::Verdict::NotGame(_)), "what the check would say");
     let windowed = ev("VALORANT-Win64-Shipping", "VALORANT", 10, 0x10, false);
-    assert!(classify_event(&windowed, &cfg).is_none(), "windowed: today's rules (not a target)");
+    assert!(classify_event(&windowed, &cfg).is_some(), "windowed: a known game is a candidate too (G10)");
     let mut off = cfg.clone();
     off.overrides.push(Override { exe: "valorant-win64-shipping".into(), kind: RuleKind::None, clamp: None });
     assert!(classify_event(&v, &off).is_none(), "a none override still wins");
@@ -431,10 +431,39 @@ fn known_games_skip_the_check_only_as_fullscreen_candidates() {
     for (stem, title) in [("FortniteClient-Win64-Shipping", "Fortnite"), ("Overwatch", "Overwatch"), ("League of Legends", "League of Legends (TM) Client"), ("r5apex_dx12", "Apex Legends"), ("javaw", "Minecraft 1.21.1")] {
         let e = ev(stem, title, 3, 0x3, true);
         assert!(classify_event(&e, &cfg).is_some() && skips_render_check(&e, &cfg), "{stem}");
-        assert!(classify_event(&ev(stem, title, 3, 0x3, false), &cfg).is_none(), "{stem} windowed");
+        // G10: a known game is a candidate windowed too (`known_game_windowed_is_a_candidate`).
+        assert!(classify_event(&ev(stem, title, 3, 0x3, false), &cfg).is_some(), "{stem} windowed");
     }
     let ide = ev("javaw", "IntelliJ IDEA", 4, 0x4, true);
     assert!(classify_event(&ide, &cfg).is_some(), "an unknown fullscreen Java app is a candidate");
     assert!(!skips_render_check(&ide, &cfg), "but it must render like a game");
     assert!(!skips_render_check(&ev("notepad", "x", 1, 1, true), &cfg));
+}
+
+#[test]
+fn known_game_windowed_is_a_candidate() {
+    // G10: Minecraft Java starts in an 854x480 window; it is a known game.
+    let cfg = Config::default();
+    let mc = ev("javaw", "Minecraft 1.21.1", 5, 0x5, false);
+    let t = classify_event(&mc, &cfg).expect("a windowed known game is a candidate");
+    assert_eq!((t.pid, t.hwnd), (5, 0x5));
+    assert!(skips_render_check(&mc, &cfg));
+    assert!(classify_event(&ev("javaw", "IntelliJ IDEA", 6, 0x6, false), &cfg).is_none(), "an unknown windowed Java app is not");
+    let mut off = cfg.clone();
+    off.overrides.push(Override { exe: "javaw".into(), kind: RuleKind::None, clamp: None });
+    assert!(classify_event(&mc, &off).is_none(), "a none override still wins");
+}
+
+#[test]
+fn screensaver_is_never_a_target() {
+    // G11: a .scr runs fullscreen and topmost.
+    let cfg = Config::default();
+    for name in ["Bubbles.scr", "ribbons.SCR", "Mystify.Scr"] {
+        let stem = name.rsplit_once('.').unwrap().0;
+        let e = WatchEvent { exe_name: name.into(), ..ev(stem, stem, 8, 0x8, true) };
+        assert!(classify_event(&e, &cfg).is_none(), "{name}");
+        let steam = WatchEvent { steam_game: true, ..e.clone() };
+        assert!(classify_event(&steam, &cfg).is_none(), "{name} in a Steam library");
+    }
+    assert!(classify_event(&ev("scrgame", "Scr Game", 9, 0x9, true), &cfg).is_some(), "only the .scr extension");
 }

@@ -344,7 +344,7 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
     if pid == 0 || pid == std::process::id() {
         return None;
     }
-    let (exe_stem, exe_name, steam_game) = exe_identity(pid)?;
+    let (pid, (exe_stem, exe_name, steam_game)) = identity::hosted_identity(hwnd, pid, exe_identity(pid)?);
     if exe_stem.trim().is_empty() {
         return None; // no stem -> not a real app window we can classify
     }
@@ -472,6 +472,9 @@ fn window_title(hwnd: HWND) -> String {
         String::from_utf16_lossy(&buf[..len as usize])
     }
 }
+
+#[path = "watcher_identity.rs"]
+mod identity;
 
 #[cfg(test)]
 #[path = "watcher_tests.rs"]

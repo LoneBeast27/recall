@@ -23,7 +23,7 @@ use crate::record_app::Controller;
 use crate::record_target::{classify_event, skips_render_check, Admit, Target};
 use crate::record_transition::Transitions;
 use crate::render_probe::{self, RenderProbe, StartError};
-use crate::render_verdict::{gate, Gate, Rejected, Verdict, Watch};
+use crate::render_verdict::{gate, ComposedNotice, Gate, Rejected, Verdict, Watch};
 use crate::watcher::WatchEvent;
 
 pub(crate) struct RenderCheck {
@@ -33,6 +33,8 @@ pub(crate) struct RenderCheck {
     /// (pid, hwnd) of the last classified candidate that needs the check.
     wanted: Option<(u32, isize)>,
     rejected: Rejected,
+    /// G4: names a composed fullscreen window left unrecorded, once per exe.
+    composed: ComposedNotice,
     /// A pid whose probe would not start: today's rule for it.
     failed_for: Option<u32>,
     /// The GPU vendor's game list (lazy worker, cached per exe path).
@@ -47,7 +49,7 @@ impl RenderCheck {
         if !available {
             log!("record: render check off (no trace rights): any fullscreen app that is not denied counts as a game");
         }
-        RenderCheck { available, probe: None, wanted: None, rejected: Rejected::default(), failed_for: None, games: KnownGames::new() }
+        RenderCheck { available, probe: None, wanted: None, rejected: Rejected::default(), composed: ComposedNotice::default(), failed_for: None, games: KnownGames::new() }
     }
 
     /// Drop the probe (stops its session).
@@ -123,7 +125,10 @@ impl Controller {
     /// [`classify_event`] plus the render check's bookkeeping: a window judged
     /// not a game is no candidate until its recheck time.
     pub(crate) fn classify(&mut self, ev: &WatchEvent, now: Instant) -> Option<Target> {
-        let candidate = classify_event(ev, &self.cfg)?;
+        let Some(candidate) = classify_event(ev, &self.cfg) else {
+            self.note_composed(None, now);
+            return None;
+        };
         // A Steam-library exe, an override, a `detect.fullscreen_games` entry or
         // a known game keeps the 300 ms rule with no check.
         let plain = !skips_render_check(ev, &self.cfg);
@@ -131,11 +136,29 @@ impl Controller {
         // fullscreen window commits anyway.
         let vendor = (plain && self.render.available).then(|| self.render.games.for_pid(ev.pid, &ev.exe_name)).flatten();
         let needs = needs_check(plain, vendor);
+        let composed = needs && self.composed_in_front(ev);
+        self.note_composed(composed.then_some(ev), now);
         if needs && self.render.rejected.holds(ev.pid, ev.hwnd, now) {
             return None;
         }
         self.render.wanted = needs.then_some((ev.pid, ev.hwnd));
         Some(candidate)
+    }
+
+    /// `ev` is a fullscreen window in front, last judged composed by DWM, and
+    /// not what is recorded (G4).
+    fn composed_in_front(&self, ev: &WatchEvent) -> bool {
+        let recorded = self.tracker.current().is_some_and(|t| (t.pid, t.hwnd) == (ev.pid, ev.hwnd));
+        ev.fullscreen && !self.paused && !recorded && self.render.rejected.composed(ev.pid, ev.hwnd)
+    }
+
+    /// G4: a composed fullscreen window in front for over 20 s is named
+    /// once per exe this run (island + log; no auto-record).
+    fn note_composed(&mut self, front: Option<&WatchEvent>, now: Instant) {
+        let seen = front.map(|e| (e.pid, e.hwnd, e.exe_name.as_str()));
+        let Some(exe) = self.render.composed.observe(seen, now) else { return };
+        log!("record: not recording {exe}: DWM composes its fullscreen window (no game signal for over 20 s); add it as a game in Settings");
+        self.shortcut_notice(&format!("Not recording {exe}"), "add it as a game in Settings");
     }
 
     /// Before the tracker polls: watch the pending candidate, if it needs it.
