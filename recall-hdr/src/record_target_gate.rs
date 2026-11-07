@@ -17,7 +17,11 @@
 //!   lives (a fullscreen <-> windowed switch re-makes the window): for
 //!   [`ADOPT_FOR`] that process's next foreground window is the session,
 //!   windowed or not, when fullscreen or at least [`MIN_CLIENT`]
-//!   ([`adopted_candidate`]).
+//!   ([`adopted_candidate`]); a `fullscreen_games`-only window only fullscreen.
+//! - **Fullscreen only** (R8-detect-1): a session whose only proof is a
+//!   `fullscreen_games` entry ends at once when its window goes windowed (Esc,
+//!   restore); alt-tab away from a still-fullscreen window keeps it, like a game
+//!   (`TargetTracker::on_windowed`, `Transitions::end_if_windowed`).
 //! - **Cool-down** (T9): after one live game replaced another, the session
 //!   cannot be replaced by another live game for [`REPLACE_COOLDOWN`], unless
 //!   its process exits or its window goes.
@@ -60,15 +64,19 @@ pub struct Traits {
     /// Vouched for only by `known_games` (no override): windowed, it still
     /// needs [`MIN_CLIENT`], so the game's own error box is no candidate (R2-4).
     pub known_only: bool,
+    /// Its only opt-in is a `detect.fullscreen_games` entry, windowed or not
+    /// ([`fullscreen_only_opt_in`]): its session lives only while its window
+    /// is fullscreen (R8-detect-1).
+    pub fullscreen_only: bool,
 }
 
 impl Traits {
     /// A plain fullscreen window (what `TargetTracker::on_foreground` assumes).
-    pub const FULLSCREEN: Traits = Traits { fullscreen: true, vouched: false, listed_only: false, known_only: false };
+    pub const FULLSCREEN: Traits = Traits { fullscreen: true, vouched: false, listed_only: false, known_only: false, fullscreen_only: false };
     /// A windowed Steam-library window on the look alone.
-    pub const WINDOWED: Traits = Traits { fullscreen: false, vouched: false, listed_only: false, known_only: false };
+    pub const WINDOWED: Traits = Traits { fullscreen: false, vouched: false, listed_only: false, known_only: false, fullscreen_only: false };
     /// A new window of the process whose session window was destroyed.
-    pub const ADOPTED: Traits = Traits { fullscreen: false, vouched: true, listed_only: false, known_only: false };
+    pub const ADOPTED: Traits = Traits { fullscreen: false, vouched: true, listed_only: false, known_only: false, fullscreen_only: false };
 
     /// A windowed window that is a candidate only by its Steam-library path.
     pub fn windowed_only(self) -> bool {
@@ -86,7 +94,19 @@ pub fn traits_of(ev: &WatchEvent, cfg: &Config) -> Traits {
         vouched: over || known,
         listed_only: listed && !over && !known && !crate::record_target_rules::official_install(ev),
         known_only: known && !over,
+        fullscreen_only: fullscreen_only_opt_in(ev, cfg),
     }
+}
+
+/// `ev`'s exe is a game only through a `detect.fullscreen_games` entry (no override,
+/// not a known game, no Steam / launcher / Store install), whether its window is
+/// fullscreen now or not (Rohan 2026-11-05: fullscreen Discord is a game, windowed
+/// Discord is not).
+pub fn fullscreen_only_opt_in(ev: &WatchEvent, cfg: &Config) -> bool {
+    is_fullscreen_game(cfg, &ev.exe_stem)
+        && rules::override_kind(cfg, &ev.exe_stem).is_none()
+        && !crate::known_games::is_known_game(&ev.exe_stem, &ev.title)
+        && !crate::record_target_rules::official_install(ev)
 }
 
 /// A windowed candidate that needs [`MIN_CLIENT`] (a windowed-only Steam
@@ -100,10 +120,12 @@ pub fn too_small(traits: Traits, client: (i32, i32)) -> bool {
 /// A foreground window of an adoptable process: the session when it is
 /// fullscreen or at least [`MIN_CLIENT`] (an error MessageBox or a small
 /// launcher of the same process is not), unless the stem is never a target
-/// (denied, a `none` override, Recall itself).
+/// (denied, a `none` override, Recall itself). A window whose only opt-in is
+/// `fullscreen_games` is adopted only fullscreen (R8-detect-1).
 pub fn adopted_candidate(ev: &WatchEvent, cfg: &Config, client: (i32, i32)) -> Option<Target> {
     let big = ev.fullscreen || (client.0 >= MIN_CLIENT.0 && client.1 >= MIN_CLIENT.1);
-    (big && is_target_with(&ev.exe_stem, true, game_evidence(ev), cfg)).then(|| Target::from_event(ev))
+    let looks_like_game = ev.fullscreen || !fullscreen_only_opt_in(ev, cfg);
+    (big && is_target_with(&ev.exe_stem, looks_like_game, game_evidence(ev), cfg)).then(|| Target::from_event(ev))
 }
 
 /// The window that started when a retarget cut a drain short (any other

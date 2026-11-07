@@ -167,6 +167,7 @@ impl Controller {
                 }
                 None => self.reply_error(client, "set_config needs a \"patch\" object"),
             },
+            "register_game" => self.register_game(&val, client),
             "" => self.reply_error(client, "missing \"cmd\""),
             other => self.reply_error(client, &format!("unknown command '{other}'")),
         }
