@@ -2,10 +2,33 @@
 
 use super::*;
 
-fn temp_dir(tag: &str) -> PathBuf {
+/// `%TEMP%\recall-staging-<tag>-<uuid>`, removed when the guard drops, also when the test
+/// panics (a failing run left 3-6 MB folders behind).
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+fn temp_dir(tag: &str) -> Scratch {
     let dir = std::env::temp_dir().join(format!("recall-staging-{tag}-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    Scratch(dir)
 }
 
 #[test]
@@ -310,4 +333,17 @@ fn a_full_length_clip_with_other_bytes_keeps_its_copy_and_a_busy_clip_is_asked_a
     assert_eq!(hand_back(&stage, &out).deleted, 1);
     assert!(!busy.exists());
     let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn a_staging_test_folder_is_removed_even_when_its_test_panics() {
+    let left = std::panic::catch_unwind(|| {
+        let dir = temp_dir("panics");
+        std::fs::write(dir.join("clip.mp4"), vec![1u8; 4096]).unwrap();
+        std::panic::panic_any(dir.to_path_buf());
+    })
+    .unwrap_err()
+    .downcast::<PathBuf>()
+    .unwrap();
+    assert!(!left.exists(), "{} was left behind", left.display());
 }
