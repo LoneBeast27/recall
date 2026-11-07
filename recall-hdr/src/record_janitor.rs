@@ -14,7 +14,7 @@ use crate::log;
 use crate::record_free_space::{self as free_space, FreeCheck, FreeFn, FreeWarner, Resolve};
 use crate::record_storage::{
     cleaned_event, plan_dir, preview_event, recycle, run_once, warning_event, BinCheck, PlanFn, RecycleFn, Warner, AFTER_SAVE, HOURLY,
-    REFUSED_NOTICE,
+    BUSY_NOTICE, REFUSED_NOTICE,
 };
 
 /// The first free-space check after start (the engine is up by then).
@@ -223,7 +223,8 @@ fn cap_run(job: &Job, current: &Mutex<Setting>, deps: Deps, warner: &mut Warner,
                 log!("storage: stopped before a clip that cannot go to the Recycle Bin ({why}); nothing deleted");
             }
             if warner.refusal(o.refused.is_some()) {
-                emit(&crate::record_status::error_event(REFUSED_NOTICE));
+                let busy = o.refused.as_deref() == Some(crate::win_fileop::STUCK_REFUSAL);
+                emit(&crate::record_status::error_event(if busy { BUSY_NOTICE } else { REFUSED_NOTICE }));
             }
             if o.removed > 0 {
                 log!("storage: cap {} GiB -> {} clip(s) to the Recycle Bin, {} bytes freed", job.cap_gb, o.removed, o.freed);
