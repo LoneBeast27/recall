@@ -13,7 +13,7 @@
 //! `recall-mover` thread (`mover.rs`) moves the clip there in the background.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::mpsc::{
     channel, sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError,
 };
@@ -24,6 +24,7 @@ pub(crate) use super::events::Events;
 use super::events::SavedReport;
 use super::mover::{self, MoverControl};
 use super::mux::OwnedParams;
+use super::save_progress::SaveProgress;
 use super::space::{self, FreeSpace};
 use super::staging::{self, Stage};
 use super::StillSpec;
@@ -147,7 +148,7 @@ pub(crate) struct SaverQueue {
     tx: SyncSender<SaveJob>,
     events: Events,
     /// Saves handed over and not yet finished (`status.save_writing`).
-    jobs: Arc<AtomicU32>,
+    progress: Arc<SaveProgress>,
 }
 
 impl SaverQueue {
@@ -159,13 +160,13 @@ impl SaverQueue {
     /// immediately instead of stalling capture behind the writer.
     pub fn submit(&self, mut job: SaveJob) -> bool {
         job.timing.queued_at = Some(Instant::now());
-        self.jobs.fetch_add(1, Relaxed); // counted before the saver can finish it
+        self.progress.jobs.fetch_add(1, Relaxed); // counted before the saver can finish it
         let reason = match self.tx.try_send(job) {
             Ok(()) => return true,
             Err(TrySendError::Full(_)) => QUEUE_FULL,
             Err(TrySendError::Disconnected(_)) => "save writer thread stopped",
         };
-        self.jobs.fetch_sub(1, Relaxed);
+        self.progress.jobs.fetch_sub(1, Relaxed);
         self.events.save_rejected(reason);
         false
     }
@@ -188,7 +189,7 @@ pub(crate) struct SaverControl {
     abort: Arc<AtomicBool>,
     current: Arc<Mutex<Option<PathBuf>>>,
     mover: Option<MoverControl>,
-    jobs: Arc<AtomicU32>,
+    progress: Arc<SaveProgress>,
 }
 
 impl SaverControl {
@@ -273,7 +274,7 @@ pub(crate) fn spawn_checked(
     let (done_tx, done_rx) = channel::<()>();
     let abort = Arc::new(AtomicBool::new(false));
     let current = Arc::new(Mutex::new(None));
-    let jobs = Arc::new(AtomicU32::new(0));
+    let progress = Arc::new(SaveProgress::default());
     let worker = Worker {
         events: events.clone(),
         mux,
@@ -282,7 +283,7 @@ pub(crate) fn spawn_checked(
         current: current.clone(),
         stage,
         free,
-        jobs: jobs.clone(),
+        progress: progress.clone(),
     };
     let spawned = std::thread::Builder::new()
         .name("recall-saver".into())
@@ -295,13 +296,13 @@ pub(crate) fn spawn_checked(
         events.log(&format!("saver thread failed to start: {e}"));
     }
     (
-        SaverQueue { tx, events, jobs: jobs.clone() },
+        SaverQueue { tx, events, progress: progress.clone() },
         SaverControl {
             done: done_rx,
             abort,
             current,
             mover,
-            jobs,
+            progress,
         },
     )
 }
@@ -314,7 +315,7 @@ struct Worker {
     current: Arc<Mutex<Option<PathBuf>>>,
     stage: Option<Stage>,
     free: FreeSpace,
-    jobs: Arc<AtomicU32>,
+    progress: Arc<SaveProgress>,
 }
 
 impl Worker {
@@ -323,7 +324,7 @@ impl Worker {
         while let Ok(job) = rx.recv() {
             self.take(&job);
             // Answered (after its event went out): `status.save_writing` no longer counts it.
-            self.jobs.fetch_sub(1, Relaxed);
+            self.progress.jobs.fetch_sub(1, Relaxed);
         }
     }
 

@@ -1,7 +1,7 @@
 //! `status.save_writing`: what the saver is writing now, read on the main thread at
-//! each status line. One stat of the in-progress `.part` (0 bytes before the file
-//! exists, e.g. while the audio still encodes), plus the saves queued behind it. A
-//! controller holds engine restarts while the bytes keep growing (`saver.rs` aborts
+//! each status line from the saver's own counters (`save_progress.rs`: steps from the
+//! audio encode on, packet bytes muxed; no file stat), plus the saves queued behind it.
+//! A controller holds engine restarts while the steps keep growing (`saver.rs` aborts
 //! the save in flight when the engine quits). Also one job's turn on the saver
 //! thread ([`Worker::take`]), between which the run loop counts jobs down.
 
@@ -15,13 +15,12 @@ use super::{SaveJob, SaverControl, Worker, QUIT_BEFORE_START};
 impl SaverControl {
     /// `None` when no save is in the saver.
     pub fn writing(&self) -> Option<SaveWriting> {
-        let jobs = self.jobs.load(Relaxed);
+        let jobs = self.progress.jobs.load(Relaxed);
         if jobs == 0 {
             return None;
         }
-        let part = self.current.lock().unwrap_or_else(|p| p.into_inner()).clone();
-        let bytes = part.and_then(|p| std::fs::metadata(p).ok()).map_or(0, |m| m.len());
-        Some(SaveWriting { bytes, queued: jobs - 1 })
+        let (step, bytes) = self.progress.read();
+        Some(SaveWriting { bytes, queued: jobs - 1, step })
     }
 }
 
@@ -32,6 +31,8 @@ impl Worker {
             self.events.save_failed(QUIT_BEFORE_START);
             return;
         }
+        self.progress.new_job();
+        let _entered = super::super::save_progress::enter(Some(self.progress.clone()));
         let outcome = catch_unwind(AssertUnwindSafe(|| self.process(job)));
         if outcome.is_err() {
             // A panicking stage must not kill the saver or leave a half file.

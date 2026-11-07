@@ -193,6 +193,13 @@ impl Supervisor {
         }
     }
 
+    /// Stop re-broadcasting engine lines (a quit that gave up on a save reports it itself).
+    pub fn detach_hub(&self) {
+        if let Ok(mut g) = self.shared.hub.lock() {
+            *g = None;
+        }
+    }
+
     /// Also hand the controller the engine events it acts on
     /// ([`FORWARDED_EVENTS`]: saves and the save writing, long recording, screenshots, bookmarks).
     pub fn attach_events(&self, tx: std::sync::mpsc::Sender<serde_json::Value>) {

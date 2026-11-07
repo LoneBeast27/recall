@@ -97,8 +97,13 @@ function Send-Recorder([string]$line) {
 function Get-Installed { Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) } }
 function Get-Controller { Get-CimInstance Win32_Process -Filter "Name = 'recall-hdr.exe'" }
 if (Get-Controller) { [void](Send-Recorder '{"cmd":"quit"}') }
-$deadline = (Get-Date).AddSeconds(8)
-while ((Get-Date) -lt $deadline -and ((Get-Installed) -or (Get-Controller))) { Start-Sleep -Milliseconds 300 }
+# A quit while a clip is still being saved waits for it (60 s, longer while the file still
+# grows): give that time before calling Recall stuck.
+$deadline = (Get-Date).AddSeconds(8); $longest = (Get-Date).AddMinutes(15); $told = $false
+while (((Get-Date) -lt $deadline -or ((Get-Controller) -and (Get-Date) -lt $longest)) -and ((Get-Installed) -or (Get-Controller))) {
+  if (-not $told -and (Get-Date) -ge $deadline) { Write-Host 'Recall is finishing a clip before it quits; waiting...'; $told = $true }
+  Start-Sleep -Milliseconds 300
+}
 $left = @(Get-Installed) + @(Get-Controller) | Where-Object { $_ }
 if ($left) { throw ("Recall is still running (" + (($left | ForEach-Object { $_.Name }) -join ', ') + "). Quit it from the tray, then re-run.") }
 

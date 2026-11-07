@@ -5,7 +5,7 @@
 //! `CONFIRM_FOR` says "Save not confirmed" instead of vanishing, and so does
 //! every save queued behind it (one window per engine answer, as the
 //! controller's `SAVE_STALE`, never one per save). The engine's status reports the
-//! bytes of the save it is writing (`save_writing`): while they grow the front
+//! progress of the save it is writing (`save_writing.step`, else `.bytes`): while it grows the front
 //! save is alive, so its ring stays ("Still saving…" past `SAVING_FOR`) and the
 //! `CONFIRM_FOR` wait counts from the last growth. A refusal
 //! (`refused`: never queued) takes no save's place, and an engine rejection
@@ -66,7 +66,7 @@ impl Outcome {
 pub(super) struct Saves {
     pending: VecDeque<Pending>,
     shown: Option<(Outcome, u32)>,
-    /// `status.save_writing.bytes` last seen, and when they last changed.
+    /// `status.save_writing`'s mark last seen (`writing_mark`), and when it last changed.
     writing: Option<u64>,
     grew: Option<Instant>,
 }
@@ -93,7 +93,7 @@ impl Saves {
     /// One engine status: true when the save being written grew (a save appeared,
     /// or its bytes changed) while a save waits here.
     fn progress(&mut self, status: &Value, now: Instant) -> bool {
-        let seen = status.get("save_writing").map(|w| w.get("bytes").and_then(Value::as_u64).unwrap_or(0));
+        let seen = writing_mark(status);
         let grew = seen.is_some() && seen != self.writing && !self.pending.is_empty();
         self.writing = seen;
         if grew {
@@ -128,6 +128,15 @@ impl Saves {
     fn slow(&self, now: Instant) -> bool {
         self.pending.front().is_some_and(|p| now >= p.since + SAVING_FOR)
     }
+}
+
+/// The progress mark of `status.save_writing`: the saver's `step` (it rises from the
+/// audio encode on, before any byte is written), else `bytes` (an older engine). `None`
+/// when no save is in the saver; `null` is none too.
+fn writing_mark(status: &Value) -> Option<u64> {
+    let w = status.get("save_writing").filter(|w| w.is_object())?;
+    let mark = w.get("step").and_then(Value::as_u64).or_else(|| w.get("bytes").and_then(Value::as_u64));
+    Some(mark.unwrap_or(0))
 }
 
 /// "<game> · m:ss" in at most 40 characters: a long name gives way, never the length.
