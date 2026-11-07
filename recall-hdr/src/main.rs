@@ -69,6 +69,7 @@ mod record_capture_watch;
 mod record_app_audio;
 mod record_audio_sources;
 mod record_config;
+mod record_config_apply;
 mod record_detect;
 mod record_visibility;
 mod record_dispatch;
