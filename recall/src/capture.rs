@@ -1,8 +1,8 @@
 //! Windows.Graphics.Capture pipeline for Recall.
 //!
 //! Captures a window or monitor on a dedicated thread: `Bgra8` while the zero-copy path
-//! records an SDR display (half the memory traffic of fp16), `Rgba16F` (scRGB-linear;
-//! carries HDR) for HDR, the CPU fallback and the dump harness (`CaptureShared::wants_fp16`). Recording takes the zero-copy path (`gpu_frames`): each frame is
+//! records an SDR-only display (half the memory traffic of fp16), `Rgba16F` (scRGB-linear;
+//! carries HDR) for HDR or a display that can turn HDR on mid-game (`format`), the CPU fallback and the dump harness (`CaptureShared::wants_fp16`). Recording takes the zero-copy path (`gpu_frames`): each frame is
 //! tonemapped on the capture device into an FFmpeg D3D11 frame and handed to the encoder,
 //! with no CPU readback. When that path cannot start (or `RECALL_DUMP*` asks for fp16
 //! pixels) the frame is read back to the CPU and parked in a shared slot for the render
@@ -18,10 +18,12 @@ mod dda_desktop;
 mod dda_dxgi;
 mod dda_logic;
 mod dda_window;
+pub(crate) mod format;
 #[cfg(feature = "encode")]
 mod gpu_path;
 pub mod screen;
 mod start;
+mod vram;
 
 pub use control::CaptureControlHandle;
 pub use start::{start_monitor, start_window};
@@ -115,6 +117,10 @@ pub struct CaptureShared {
     /// Desktop Duplication failed this run (device lost, re-create kept failing): later
     /// starts use WGC.
     pub dda_failed: AtomicBool,
+    /// The primary display can turn HDR on (Windows "advanced color" supported), set by the
+    /// engine's HDR refresh: a start then picks fp16 even while the desktop is SDR, so HDR
+    /// turning on mid-game needs no capture restart (`format::start_fp16`).
+    pub hdr_capable: AtomicBool,
     /// First WGC timestamp of the engine run, kept across capture restarts so PTS never
     /// jumps back.
     origin: Mutex<Option<i64>>,
@@ -139,28 +145,44 @@ impl CaptureShared {
             need_fp16: AtomicBool::new(false),
             restart: AtomicBool::new(false),
             dda_failed: AtomicBool::new(false),
+            hdr_capable: AtomicBool::new(false),
             origin: Mutex::new(None),
         })
     }
 
-    /// The capture format the next start should use: fp16 for HDR (tonemap mode), for the
-    /// CPU fallback and the dump harness (they read 8-byte pixels), else `Bgra8`.
-    /// `RECALL_CAPTURE_FP16=1` forces fp16.
-    pub fn wants_fp16(&self) -> bool {
-        !crate::gpu_route::gpu_path_possible()
-            || self.mode.load(Relaxed) == MODE_TONEMAP
-            || self.need_fp16.load(Relaxed)
-            || std::env::var_os("RECALL_CAPTURE_FP16").is_some_and(|v| v == "1")
+    /// The capture format the next start should use (`format::start_fp16`): fp16 for HDR
+    /// (tonemap mode), for the CPU fallback and the dump harness (they read 8-byte pixels),
+    /// and ahead of time on a display that can turn HDR on; else `Bgra8`.
+    /// `RECALL_CAPTURE_FP16=1` forces fp16, `=0` keeps Bgra8 until HDR is on.
+    /// `read_vram` reads the capture adapter's dedicated VRAM (`vram::of_capture_device`;
+    /// tests inject it), only when it decides something: an HDR-capable display, no override.
+    /// Returns the choice and the VRAM read, if one was.
+    pub(crate) fn wants_fp16(&self, read_vram: impl FnOnce() -> Option<u64>) -> (bool, Option<u64>) {
+        let env = std::env::var("RECALL_CAPTURE_FP16").ok();
+        let capable = self.hdr_capable.load(Relaxed);
+        let vram = (capable && format::forced_from_env(env.as_deref()).is_none()).then(read_vram).flatten();
+        (format::needs_fp16(self.format_inputs()) || format::start_fp16(capable, vram, env.as_deref()), vram)
     }
 
     /// Why the running capture must be replaced, if it must: the capture thread asked
-    /// (`restart`, taken here), or a Bgra8 capture needs fp16 (HDR display or CPU fallback).
+    /// (`restart`, taken here), or a Bgra8 capture now needs fp16 (`format::format_restart`:
+    /// HDR turned on, or the CPU fallback).
     pub fn restart_reason(&self) -> Option<&'static str> {
         // A plain load first: the engine asks every tick, and a swap is a locked write each time.
         if self.restart.load(Relaxed) && self.restart.swap(false, Relaxed) {
             return Some(if self.dda_failed.load(Relaxed) { "(desktop duplication stopped; WGC from now on)" } else { "(capture source changed)" });
         }
-        (!self.fp16.load(Relaxed) && self.wants_fp16()).then_some("in Rgba16F (HDR display or CPU fallback)")
+        format::format_restart(self.fp16.load(Relaxed), self.format_inputs())
+    }
+
+    /// What the format decision reads right now.
+    fn format_inputs(&self) -> format::FormatInputs {
+        format::FormatInputs {
+            gpu_path: crate::gpu_route::gpu_path_possible(),
+            hdr_on: self.mode.load(Relaxed) == MODE_TONEMAP,
+            cpu_fallback: self.need_fp16.load(Relaxed),
+            forced: format::forced_from_env(std::env::var("RECALL_CAPTURE_FP16").ok().as_deref()),
+        }
     }
 
     /// Whether this start may use Desktop Duplication (`dda_logic::dda_wanted`).
@@ -170,9 +192,16 @@ impl CaptureShared {
 
     /// Picks the format for a capture start and records it in `fp16`.
     fn start_format(&self) -> ColorFormat {
-        let fp16 = self.wants_fp16();
+        self.start_format_with(vram::of_capture_device)
+    }
+
+    /// [`Self::start_format`] with the VRAM read injected.
+    fn start_format_with(&self, read_vram: impl FnOnce() -> Option<u64>) -> ColorFormat {
+        let (fp16, vram) = self.wants_fp16(read_vram);
         self.fp16.store(fp16, Relaxed);
-        eprintln!("[recall] capture format {}", if fp16 { "Rgba16F" } else { "Bgra8" });
+        let capable = if self.hdr_capable.load(Relaxed) { "HDR-capable" } else { "SDR-only" };
+        let vram = vram.map_or("not read".into(), |b| format!("{} MB", b / (1024 * 1024)));
+        eprintln!("[recall] capture format {} ({capable} display, capture GPU VRAM {vram})", if fp16 { "Rgba16F" } else { "Bgra8" });
         if fp16 { ColorFormat::Rgba16F } else { ColorFormat::Bgra8 }
     }
 
@@ -375,7 +404,7 @@ impl Handler {
         }
         if !self.shared.fp16.load(Relaxed) {
             // The CPU path reads 8-byte fp16 pixels: drop Bgra8 frames until the engine
-            // restarts capture in fp16 (app_tick `restart_capture_if_needed`).
+            // restarts capture in fp16 (`capture_watchdog::restart_if_asked`).
             self.shared.need_fp16.store(true, Relaxed);
             return Ok(());
         }

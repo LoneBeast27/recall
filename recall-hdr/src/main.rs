@@ -67,6 +67,7 @@ mod record_dispatch;
 mod record_drain;
 mod record_engine;
 mod record_engine_ctl;
+mod record_engine_notice;
 mod record_env;
 mod record_editor_ask;
 mod record_fullscreen;
