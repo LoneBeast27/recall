@@ -57,6 +57,7 @@ fn a_size_that_may_be_a_guess_is_never_saved() {
         budget_note: Some("storage.json could not be read".into()),
         budget_reset: false,
         leftovers: None,
+        leftovers_busy: false,
         used_bytes: 0,
         tiers: Vec::new(),
         ssd_free: None,

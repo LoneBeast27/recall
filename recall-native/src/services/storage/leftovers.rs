@@ -1,10 +1,12 @@
 //! Leftover kept copies: the recorder's start-up check (`recall/src/encoder/staging_kept.rs`)
-//! sets a kept copy that matches no whole clip aside in `staging\kept\leaked\` (its clip has
-//! another size, or was deleted). Such a copy may be the only whole version of a clip (a
-//! damaged V: file has another size), so nothing empties the folder on its own: Settings ->
-//! Storage shows it, opens it, and sends it to the Recycle Bin on the user's click, through the
-//! same Recycle Bin path as a library Delete (room precheck under the shared bin lock,
-//! IFileOperation on a private desktop, never a permanent delete).
+//! and the app's adoption (`kept.rs`) set a kept copy that matches no whole clip aside in
+//! `staging\kept\leaked\` (its clip has another size or other bytes, or was deleted). Such a
+//! copy may be the only whole version of a clip (a damaged V: file), so nothing empties the
+//! folder on its own: Settings -> Media, "SSD cache" shows it, opens it, and sends exactly the
+//! copies shown to the Recycle Bin on the user's click, on the library lane, through the same
+//! Recycle Bin path as a library Delete (room precheck under the shared bin lock,
+//! IFileOperation on a private desktop, never a permanent delete). They don't hold the cache
+//! budget (`budget.rs`), but count in the C: usage shown.
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -65,16 +67,20 @@ pub fn leftovers() -> Option<Leftovers> {
     all
 }
 
-/// Settings -> Storage -> Send to Recycle Bin. Returns how many copies went.
-pub fn send_to_bin() -> Result<usize, String> {
-    send_in(leftovers(), RECYCLE)
+/// Settings -> Media -> SSD cache -> Send to Recycle Bin, on the library lane
+/// (`Job::RecycleLeftovers`). Sends the copies shown that are still leftover copies, nothing
+/// else (a copy set aside after the row was drawn stays). Returns how many went.
+pub fn send_to_bin(shown: &[PathBuf]) -> Result<usize, String> {
+    send_files(shown, leftovers(), RECYCLE)
 }
 
-pub(super) fn send_in(found: Option<Leftovers>, recycle: RecycleFn) -> Result<usize, String> {
-    match found {
-        Some(found) if !found.files.is_empty() => recycle(&found.files),
-        _ => Ok(0),
+pub(super) fn send_files(shown: &[PathBuf], listed: Option<Leftovers>, recycle: RecycleFn) -> Result<usize, String> {
+    let listed = listed.map(|found| found.files).unwrap_or_default();
+    let files: Vec<PathBuf> = shown.iter().filter(|file| listed.contains(file)).cloned().collect();
+    if files.is_empty() {
+        return Ok(0);
     }
+    recycle(&files)
 }
 
 static LOGGED: AtomicBool = AtomicBool::new(false);
@@ -119,9 +125,11 @@ mod tests {
             SENT.lock().unwrap().extend(files.iter().cloned());
             Ok(files.len())
         };
-        assert_eq!(send_in(Some(found.clone()), fake), Ok(2));
-        assert_eq!(*SENT.lock().unwrap(), found.files, "exactly the listed copies");
-        assert_eq!(send_in(None, fake), Ok(0), "nothing to send");
+        // RI3-3: exactly the copies shown, and only while they are still leftover copies.
+        let shown = vec![found.files[0].clone(), dir.join("not-a-leftover.mp4")];
+        assert_eq!(send_files(&shown, Some(found.clone()), fake), Ok(1));
+        assert_eq!(*SENT.lock().unwrap(), vec![found.files[0].clone()], "only the shown copy that is still listed");
+        assert_eq!(send_files(&shown, None, fake), Ok(0), "nothing listed: nothing sent");
         assert!(dir.join("A.mp4").exists(), "the test's fake bin moved nothing");
         let _ = std::fs::remove_dir_all(&dir);
     }
