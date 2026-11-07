@@ -56,6 +56,7 @@ pub fn game_ev(stem: &str, pid: u32, hwnd: isize) -> WatchEvent {
         fullscreen_on_target: true,
         steam_game: false,
         launcher_game: false,
+        store_game: false,
         hosted: false,
         hwnd,
     }

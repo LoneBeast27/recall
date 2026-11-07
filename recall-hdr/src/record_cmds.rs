@@ -316,6 +316,7 @@ impl Controller {
     /// React to the difference between the old and new effective config.
     fn apply_config_effects(&mut self, old: &crate::config::Config, client: Option<u64>) {
         let new = self.cfg.clone();
+        self.recheck_registration(old);
         if old.startup.autostart != new.startup.autostart {
             match sync_autostart(new.startup.autostart, RECORD_RUN_ARG) {
                 Ok(()) => log!("record: start with Windows -> {}", new.startup.autostart),

@@ -154,6 +154,10 @@ const OWN_STEMS: &[&str] = &["recall", "recall-hdr", "recall-native", "recall-hu
 /// a game override, then `looks_like_game` unless the stem is a call, chat or
 /// office app (`private_apps`: an override, `fullscreen_games` or
 /// `game_evidence` = [`game_evidence`] of the event opts it in).
+///
+/// `true` makes a window a *candidate*. A candidate with no official proof
+/// (a plain fullscreen window) is recorded only on a "game" render verdict;
+/// with no verdict it is not recorded (`record_hosted::check_proof`).
 pub fn is_target_with(stem: &str, looks_like_game: bool, game_evidence: bool, cfg: &Config) -> bool {
     let stem = strip_exe(stem.trim());
     if stem.is_empty() || OWN_STEMS.iter().any(|d| d.eq_ignore_ascii_case(stem)) {
@@ -198,11 +202,13 @@ fn strip_exe(s: &str) -> &str {
 }
 
 /// A candidate that commits on the 300 ms rule with no render check: a
-/// Steam- or launcher-library exe, an override, a `detect.fullscreen_games` entry, or a
-/// game Recall knows (`known_games`). Asked only after [`classify_event`]
-/// made it a candidate, so the deny lists and `none` overrides already ran.
+/// Steam- or launcher-library exe, an Xbox / Store game package (fullscreen:
+/// only then is it a candidate), an override, a `detect.fullscreen_games`
+/// entry, or a game Recall knows (`known_games`). Asked only after
+/// [`classify_event`] made it a candidate, so the deny lists, the private
+/// list and `none` overrides already ran.
 pub fn skips_render_check(ev: &WatchEvent, cfg: &Config) -> bool {
-    in_library(ev)
+    official_install(ev)
         || rules::override_kind(cfg, &ev.exe_stem).is_some()
         || is_fullscreen_game(cfg, &ev.exe_stem)
         || crate::known_games::is_known_game(&ev.exe_stem, &ev.title)
@@ -230,6 +236,12 @@ pub fn game_evidence(ev: &WatchEvent) -> bool {
 /// The exe lives in a Steam or another launcher's game library.
 pub fn in_library(ev: &WatchEvent) -> bool {
     ev.steam_game || ev.launcher_game
+}
+
+/// [`in_library`], or an Xbox / Store game package: an install that proves a
+/// fullscreen window is a game (official-proof ruling, 2026-11-07).
+pub fn official_install(ev: &WatchEvent) -> bool {
+    in_library(ev) || ev.store_game
 }
 
 /// The foreground could become a target by going fullscreen (the follow

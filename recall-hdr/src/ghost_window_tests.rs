@@ -35,6 +35,7 @@ fn event_for(hwnd: isize, hung_of: impl Fn(isize) -> isize) -> WatchEvent {
         fullscreen_on_target: true,
         steam_game: false,
         launcher_game: false,
+        store_game: false,
         hosted: false,
         hwnd,
     }

@@ -93,6 +93,7 @@ mod record_quit;
 mod record_recover;
 mod record_restart;
 mod record_restart_host;
+mod record_registry;
 mod record_render;
 mod record_startup;
 mod record_storage;
@@ -108,6 +109,7 @@ mod render_probe;
 mod render_verdict;
 mod game_library;
 mod ghost_window;
+mod store_games;
 mod gpu_games;
 mod rules;
 #[path = "../../recall/src/single_instance.rs"]
@@ -126,6 +128,8 @@ mod win_fileop;
 mod state;
 mod supervisor;
 mod tray;
+#[cfg(test)]
+mod record_proof_tests;
 #[cfg(test)]
 mod transitions_detect_tests;
 #[cfg(test)]

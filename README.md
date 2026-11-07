@@ -26,23 +26,39 @@ powershell -NoProfile -File scripts\install.ps1
 
 ## Use it
 
-- **Play a game.** Recording starts by itself when a fullscreen game is in front and stops
-  when it closes. The tray icon is red while recording and grey while paused.
-- **What counts as a game.** Call, chat, mail, office, media-player and music apps (Zoom, Teams,
-  WhatsApp, Kodi, Stremio, VLC, LibreOffice, Spotify and others) are never recorded on their own.
-  Discord is the exception: its fullscreen window, a fullscreen call or stream view included, is
-  recorded by default (config.toml `[detect] fullscreen_games = ["Discord"]`; remove it there to
-  stop). To record any other such app, add its exe to that list (`fullscreen_games =
-  ["Discord", "Zoom.exe"]`): that records it only while it is fullscreen. An `[[overrides]]`
-  entry (`exe = "zoom"`, `kind = "sdr_game"`) records every window of that exe instead, windowed
-  ones too (a meeting toolbar or a chat window). `fullscreen_games` is only in config.toml, not in
-  Settings. A game in a Steam library (`steamapps\common`) records even when its exe shares such
-  an app's name. A game in an Epic, GOG, Ubisoft Connect, EA app, Battle.net or itch install
-  folder (read from the launchers themselves, one folder per installed game) records windowed
-  too, but one named like a call or chat app needs the opt-in above. When a blocked fullscreen
-  app renders like a game (its own flip or exclusive fullscreen, not a composed video call) for
-  over 20 s, the notice says "Not recording <exe>: add it as a game in Settings" (once per exe
-  per run; the log names every blocked exe).
+- **Play a game.** Recording starts by itself when a game is in front and stops when it
+  closes. The tray icon is red while recording and grey while paused.
+- **What counts as a game.** Recall records an app on its own only with official proof that it
+  is a game:
+  - it is installed in a Steam library (`steamapps\common`), or in an Epic, GOG, Ubisoft
+    Connect, EA app, Battle.net or itch install folder (read from the launchers themselves, one
+    folder per installed game; a GOG entry whose folder is a broad parent such as `D:\Games`
+    counts only for the exe that entry names), windowed too;
+  - it is an Xbox / Microsoft Store game (its package holds `MicrosoftGame.config`, in an
+    `XboxGames` folder or `WindowsApps`), while fullscreen;
+  - Recall knows it (its built-in game list) or the NVIDIA driver lists it as a game;
+  - or, fullscreen, it draws like a game (exclusive fullscreen, its own flip, or tearing
+    presents). This check needs trace rights (the installer adds you to Performance Log Users).
+    Without them, or when the check cannot start, an app with none of the proof above is not
+    recorded.
+  Anything else is not recorded. After 20 s in front the notice says "Not recording <exe>: add it
+  as a game in Settings" (once per exe per run), and the tray menu gets "Add <exe> as a game".
+- **Settings → Games** lists the apps you registered. **Add app…** picks a running app (the one
+  that was in front comes first) or browses to an exe; it is then recorded in any window. Each
+  entry can be set to **Never record** (never recorded, even from a Steam library) or removed.
+  In config.toml these are `[[overrides]]` entries (`exe = "Game.exe"` or `"game"`, `kind =
+  "sdr_game"` / `"hdr_game"` / `"none"`).
+- **Call, chat, mail, office, media-player and music apps** (Zoom, Teams, WhatsApp, Kodi,
+  Stremio, VLC, LibreOffice, Spotify and others) are never recorded on their own, even when they
+  sit in a launcher folder or a Store game package or draw like a game; only a Steam library, a
+  game Recall knows, or your own entry beats that. Discord is the exception: its fullscreen
+  window, a fullscreen call or stream view included, is recorded by default (config.toml
+  `[detect] fullscreen_games = ["Discord"]`, shown in Settings → Games as "Recorded when
+  fullscreen"; remove it there to stop). Windowed Discord is never recorded. Adding an exe to
+  `fullscreen_games` records it only while it is fullscreen; a Settings → Games entry records
+  every window of that exe, windowed ones too (a meeting toolbar or a chat window). When a
+  blocked fullscreen app draws like a game (its own flip or exclusive fullscreen, not a composed
+  video call) for over 20 s, the same notice names it (the log names every blocked exe).
 - **Alt+N** saves the last 2 minutes (Settings → Clip → Replay length). A soft tick confirms the
   press at once and a chime plays when the clip is safe; the small in-game notice shows it too.
   Clips are written to the SSD first (about a second) and moved to the clip folder in the
@@ -57,7 +73,8 @@ powershell -NoProfile -File scripts\install.ps1
   Settings → General) toggles live performance stats: FPS with its 1% low, GPU and CPU rings,
   and the recording dot. Each game gets its own spot, measured from your clips so the Island
   stays clear of that game's HUD (`hud-spots.json`); unknown games use the top right.
-- **Tray menu:** status · Open Recall · Stop/Start recording · Quit Recall.
+- **Tray menu:** status · Open Recall · (after a "Not recording" notice: Add <exe> as a game) ·
+  Stop/Start recording · Quit Recall.
 - **The app** (Start menu → Recall): library grouped by day, hover a tile to scrub, favourite,
   rename, delete to the Recycle Bin, drag a clip into Discord or copy it. Right-click a tile for
   Open, Favourite, Rename, Copy, Show in folder and Delete (on the whole selection when the tile
