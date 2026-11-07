@@ -41,7 +41,7 @@ use windows::Win32::UI::Accessibility::{
     HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClientRect, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
+    GetClientRect, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
     GetWindowThreadProcessId, IsWindow, IsZoomed, EVENT_SYSTEM_FOREGROUND, GWL_STYLE, WINEVENT_OUTOFCONTEXT,
     WINEVENT_SKIPOWNPROCESS, WS_CAPTION,
 };
@@ -80,6 +80,12 @@ pub struct WatchEvent {
     /// True iff the executable lives in a Steam library (`steamapps\common`):
     /// the record mode's "is this a game?" signal for windowed games.
     pub steam_game: bool,
+    /// True iff the identity (pid, exe) was resolved by Recall rather than read
+    /// off the window: a UWP frame named by its hosted CoreWindow's process
+    /// (G6). Such an identity is a game only on positive evidence (a known
+    /// game, an override, the vendor's list, a "game" render verdict), never
+    /// by the "fullscreen = game" fallback (`record_hosted`).
+    pub hosted: bool,
     /// Raw `HWND` as an `isize` (not a live handle; re-wrap before use).
     pub hwnd: isize,
 }
@@ -97,6 +103,7 @@ impl WatchEvent {
             fullscreen: false,
             fullscreen_on_target: false,
             steam_game: false,
+            hosted: false,
             hwnd,
         }
     }
@@ -344,7 +351,8 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
     if pid == 0 || pid == std::process::id() {
         return None;
     }
-    let (exe_stem, exe_name, steam_game) = exe_identity(pid)?;
+    let frame_pid = pid;
+    let (pid, (exe_stem, exe_name, steam_game)) = identity::hosted_identity(hwnd, pid, exe_identity(pid)?);
     if exe_stem.trim().is_empty() {
         return None; // no stem -> not a real app window we can classify
     }
@@ -358,6 +366,7 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
         fullscreen,
         fullscreen_on_target: fullscreen && monitor == target_monitor,
         steam_game,
+        hosted: pid != frame_pid,
         hwnd: hwnd.0 as isize,
     })
 }
@@ -412,30 +421,6 @@ fn rect_covers(mon: &RECT, win: &RECT, tol: i32) -> bool {
 // Vendored Win32 helpers
 // ---------------------------------------------------------------------------
 
-// vendored from recall/src/source.rs (exe_stem): the image path
-// (`image_path::exe_path`), then take the file stem. Kept local to avoid a
-// cross-crate dependency for two small helpers.
-pub(crate) fn exe_stem(pid: u32) -> Option<String> {
-    exe_identity(pid).map(|(stem, _, _)| stem)
-}
-
-/// `(file stem, file name, in a Steam library)` of `pid`'s executable image.
-fn exe_identity(pid: u32) -> Option<(String, String, bool)> {
-    let full = exe_path(pid)?;
-    let path = std::path::Path::new(&full);
-    Some((
-        path.file_stem()?.to_string_lossy().into_owned(),
-        path.file_name()?.to_string_lossy().into_owned(),
-        is_steam_library_path(&full),
-    ))
-}
-
-/// The full path of `pid`'s executable image (Win32 form).
-/// Paths past `MAX_PATH` are read too (`image_path`).
-pub fn exe_path(pid: u32) -> Option<String> {
-    crate::image_path::exe_path(pid)
-}
-
 /// Whether `hwnd` is the foreground window now.
 pub fn is_foreground(hwnd: isize) -> bool {
     // SAFETY: plain query.
@@ -448,30 +433,15 @@ pub fn window_alive(hwnd: isize) -> bool {
     unsafe { IsWindow(Some(HWND(hwnd as *mut _))) }.as_bool()
 }
 
-/// Public identity lookup for env-pinned capture targets (`Start-Recall.ps1`).
-pub fn window_identity(hwnd: isize) -> Option<(u32, String, String, String)> {
-    let hwnd = HWND(hwnd as *mut _);
-    let mut pid = 0u32;
-    // SAFETY: GetWindowThreadProcessId tolerates a stale handle (pid stays 0).
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-    if pid == 0 {
-        return None;
-    }
-    let (stem, name, _) = exe_identity(pid)?;
-    Some((pid, stem, name, window_title(hwnd)))
-}
+#[path = "watcher_process.rs"]
+mod process;
+pub use process::{exe_path, window_identity};
+use process::{exe_identity, window_title};
+// `ghost_window` reads the stem of a hung window's process.
+pub(crate) use process::exe_stem;
 
-// vendored from recall/src/source.rs (window_title): GetWindowTextW into a fixed
-// buffer, UTF-16-lossy decode. Empty string on no title / error.
-fn window_title(hwnd: HWND) -> String {
-    let mut buf = [0u16; 512];
-    let len = unsafe { GetWindowTextW(hwnd, &mut buf) };
-    if len <= 0 {
-        String::new()
-    } else {
-        String::from_utf16_lossy(&buf[..len as usize])
-    }
-}
+#[path = "watcher_identity.rs"]
+mod identity;
 
 #[cfg(test)]
 #[path = "watcher_tests.rs"]

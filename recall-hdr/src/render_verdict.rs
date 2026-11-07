@@ -19,6 +19,7 @@
 //! through DWM or not at all. Rate is not used: a 60 fps video and a game
 //! capped at 60 on a 60 Hz laptop look alike.
 
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
 /// How long a candidate may be watched before the call is made on what was seen.
@@ -163,11 +164,15 @@ struct Entry {
     wait: Duration,
     /// No-frames rejections in a row.
     quiet: u32,
+    /// The last verdict.
+    why: Why,
+    /// What the probe saw for it (the G4 notice asks for a steady rate).
+    stats: RenderStats,
 }
 
 impl Rejected {
-    /// `(pid, hwnd)` was judged not a game (`why`) at `now`.
-    pub fn note(&mut self, pid: u32, hwnd: isize, why: Why, now: Instant) {
+    /// `(pid, hwnd)` was judged not a game (`why`, on `stats`) at `now`.
+    pub fn note(&mut self, pid: u32, hwnd: isize, why: Why, stats: RenderStats, now: Instant) {
         let (mut wait, mut quiet) = match self.last {
             Some(e) if e.pid == pid && e.hwnd == hwnd => (e.wait, e.quiet),
             _ => (Duration::ZERO, 0),
@@ -188,7 +193,7 @@ impl Rejected {
             wait = if wait.is_zero() { RECHECK_FIRST } else { (wait * 2).min(RECHECK_MAX) };
             wait
         };
-        self.last = Some(Entry { pid, hwnd, until: now + hold, wait, quiet });
+        self.last = Some(Entry { pid, hwnd, until: now + hold, wait, quiet, why, stats });
     }
 
     /// The window is still inside its wait.
@@ -196,9 +201,64 @@ impl Rejected {
         self.last.is_some_and(|e| e.pid == pid && e.hwnd == hwnd && now < e.until)
     }
 
+    /// The window's last verdict was "composed by DWM" (inside its wait or
+    /// not): what the probe saw, for the G4 notice.
+    pub fn composed(&self, pid: u32, hwnd: isize) -> Option<RenderStats> {
+        self.last.filter(|e| e.pid == pid && e.hwnd == hwnd && e.why == Why::Composed).map(|e| e.stats)
+    }
+
     /// When the held window may be watched again.
     pub fn until(&self) -> Option<Instant> {
         self.last.map(|e| e.until)
+    }
+}
+
+/// How long a fullscreen window last judged "composed by DWM" must stay in
+/// front before the player is told it is not recorded (G4).
+pub const COMPOSED_NOTICE_AFTER: Duration = Duration::from_secs(20);
+
+/// G4: a borderless game DWM composes (D3D9, Vulkan without independent
+/// flip, an overlay on top) is rejected on every recheck. Once such a window
+/// has stayed in front for more than [`COMPOSED_NOTICE_AFTER`], its exe is
+/// named once per run, so the player can add it as a game.
+#[derive(Debug, Default)]
+pub struct ComposedNotice {
+    /// (pid, hwnd) in front with a composed verdict, and since when.
+    streak: Option<(u32, isize, Instant)>,
+    /// A watch in the streak saw a game-like rate (`record_composed`).
+    steady: bool,
+    /// Exes already named this run (lower case).
+    shown: HashSet<String>,
+}
+
+impl ComposedNotice {
+    /// One foreground observation: `front` = (pid, hwnd, exe) when the
+    /// foreground is a fullscreen window whose last verdict was composed and
+    /// that is not recorded, else `None`. Returns the exe to name, once.
+    pub fn observe(&mut self, front: Option<(u32, isize, &str)>, now: Instant) -> Option<String> {
+        self.observe_steady(front.map(|f| (f, true)), now)
+    }
+
+    /// [`Self::observe`] where each composed observation says whether its
+    /// watch saw a steady rate: the clock keeps running through slow
+    /// rechecks, and the notice fires only if some watch in the streak was
+    /// steady (R3-detect-1).
+    pub fn observe_steady(&mut self, front: Option<((u32, isize, &str), bool)>, now: Instant) -> Option<String> {
+        let Some(((pid, hwnd, exe), steady)) = front else {
+            self.streak = None;
+            return None;
+        };
+        let since = match self.streak {
+            Some((p, h, since)) if (p, h) == (pid, hwnd) => since,
+            _ => {
+                self.streak = Some((pid, hwnd, now));
+                self.steady = false;
+                now
+            }
+        };
+        self.steady |= steady;
+        let due = self.steady && now.duration_since(since) > COMPOSED_NOTICE_AFTER;
+        (due && self.shown.insert(exe.to_ascii_lowercase())).then(|| exe.to_string())
     }
 }
 

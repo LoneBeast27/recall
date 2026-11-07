@@ -8,7 +8,8 @@
 //!   are the controller's own code (`record_transition::Transitions`, implemented here with
 //!   injected state); only the render check is not run: `classify_seen` is `classify_event`
 //!   and the games commit like known games / overrides do (`poll_admit` answering `Commit`).
-//!   A window's client area is [`Sim::client`].
+//!   A window's client area is [`Sim::client`]. [`Sim::seen`]: `on_foreground_seen` (the 1 s
+//!   probe), fed only when `record_detect::fed_key` changed.
 //! - [`Sim::exit`] / [`Sim::window_gone`]: `record_app::tick` (`target_watch.poll` ->
 //!   `on_process_exit`) and `record_detect::check_windows` (`on_window_gone_at`).
 //! - [`Sim::tick`]: `record_app::tick`: `poll_tracker` (`feed_drain`, poll) ->
@@ -33,6 +34,7 @@ use crate::engine_policy::EngineSpec;
 use crate::record_engine_ctl::{switch_engine, EngineSwitch};
 use crate::record_activity::{EngineActivity, LongRec, PendingPause, Trigger};
 use crate::record_config::RecordingCfg;
+use crate::record_detect::{fed_key, FedKey};
 use crate::record_drain::drain_len;
 use crate::record_engine::{capture_refusal, wanted, EnginePlanner, EngineTarget, Step, EXIT_LINGER};
 use crate::record_notice::{NoticeTracker, Situation};
@@ -53,6 +55,7 @@ pub fn game_ev(stem: &str, pid: u32, hwnd: isize) -> WatchEvent {
         fullscreen: true,
         fullscreen_on_target: true,
         steam_game: false,
+        hosted: false,
         hwnd,
     }
 }
@@ -101,6 +104,8 @@ pub struct Sim {
     pub notes: Vec<String>,
     /// The supervisor calls the restart code made (`RestartHost::restart_apply`).
     pub switches: SwitchLog,
+    /// The last foreground fed to the tracker (`Controller::last_fed`).
+    last_fed: Option<FedKey>,
 }
 
 /// A supervisor call (`record_engine_ctl::switch_engine`); `stop`: to Off (no spec).
@@ -163,6 +168,7 @@ impl Sim {
             pending_restart: None,
             notes: Vec::new(),
             switches: SwitchLog::default(),
+            last_fed: None,
         }
     }
 
@@ -186,8 +192,22 @@ impl Sim {
     pub fn focus(&mut self, ev: WatchEvent) {
         let now = self.now;
         let (candidate, traits) = self.candidate(&ev, now);
+        self.last_fed = Some(fed_key(ev.hwnd, candidate.is_some(), traits));
         self.foreground = Some(ev);
         self.tracker.on_foreground_with(candidate, traits, now);
+    }
+
+    /// A foreground from the 1 s probe or the follow probe:
+    /// `record_detect::on_foreground_seen`, fed only when its `fed_key` changed.
+    pub fn seen(&mut self, ev: WatchEvent) {
+        let now = self.now;
+        let (candidate, traits) = self.candidate(&ev, now);
+        let key = fed_key(ev.hwnd, candidate.is_some(), traits);
+        self.foreground = Some(ev);
+        if self.last_fed != Some(key) {
+            self.last_fed = Some(key);
+            self.tracker.on_foreground_with(candidate, traits, now);
+        }
     }
 
     /// A foreground the watcher cannot identify (OpenProcess fails): the hook and the

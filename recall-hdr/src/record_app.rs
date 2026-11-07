@@ -99,8 +99,8 @@ pub struct Controller {
     pub(crate) pending_notice: Option<(String, Instant)>,
     pub(crate) last_probe: Instant,
     last_hdr_refresh: Instant,
-    /// (hwnd, is_target) of the last foreground fed to the tracker.
-    pub(crate) last_fed: Option<(isize, bool)>,
+    /// The last foreground fed to the tracker (`record_detect::fed_key`).
+    pub(crate) last_fed: Option<crate::record_detect::FedKey>,
     /// The foreground window if it could become a target by going fullscreen.
     pub(crate) followable: Option<isize>,
     /// The followed foreground's fullscreen verdict (`record_detect`).

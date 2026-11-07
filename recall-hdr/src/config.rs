@@ -371,9 +371,8 @@ impl Config {
     /// `clamp` wins if present, else `default_clamp`. No match -> the behavior
     /// defaults (`default_game_class`, `default_clamp`).
     pub fn rule_for(&self, exe_stem: &str) -> (RuleKind, ClampMode) {
-        let needle = exe_stem.to_ascii_lowercase();
         for o in &self.overrides {
-            if o.exe.eq_ignore_ascii_case(&needle) {
+            if crate::rules::same_exe(&o.exe, exe_stem) {
                 return (o.kind, o.clamp.unwrap_or(self.behavior.default_clamp));
             }
         }

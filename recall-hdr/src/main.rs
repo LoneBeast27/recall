@@ -56,10 +56,13 @@ mod liveness;
 mod logging;
 mod matrix;
 mod overlay_proc;
+mod private_app_stems;
+mod private_apps;
 mod record_actions;
 mod record_activity;
 mod record_app;
 mod record_cmds;
+mod record_composed;
 mod record_capture_watch;
 mod record_app_audio;
 mod record_audio_sources;
@@ -74,6 +77,7 @@ mod record_env;
 mod record_editor_ask;
 mod record_fullscreen;
 mod record_hdr;
+mod record_hosted;
 mod record_hotkeys;
 mod record_recover_stale;
 mod record_screen;
@@ -117,6 +121,8 @@ mod win_fileop;
 mod state;
 mod supervisor;
 mod tray;
+#[cfg(test)]
+mod transitions_detect_tests;
 #[cfg(test)]
 mod transitions_gate_tests;
 #[cfg(test)]

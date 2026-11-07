@@ -19,18 +19,30 @@ use std::time::{Duration, Instant};
 
 use crate::log;
 use crate::record_app::Controller;
-use crate::record_target::is_target;
+use crate::record_target::{game_evidence, is_target_with};
+use crate::record_target_gate::Traits;
 use crate::record_transition::Transitions;
 use crate::watcher::{self, WatchEvent};
 
 /// How often the followed foreground's fullscreen verdict is re-read.
 pub(crate) const FOLLOW_EVERY: Duration = Duration::from_millis(100);
 
+/// What a seen foreground is compared on before it is fed again.
+pub(crate) type FedKey = (isize, bool, bool);
+
+/// The dedupe key of a foreground observation: (window, is a candidate,
+/// fullscreen). The fullscreen trait is in it so an in-place flip
+/// (Alt+Enter, a borderless toggle) reaches the tracker within the 1 s
+/// probe and a session that went fullscreen is protected (R2-3, G5).
+pub(crate) fn fed_key(hwnd: isize, candidate: bool, traits: Traits) -> FedKey {
+    (hwnd, candidate, traits.fullscreen)
+}
+
 impl Controller {
     /// A foreground change from the hook: feeds the tracker and HDR.
     pub(crate) fn on_foreground_event(&mut self, ev: &WatchEvent, now: Instant) {
         let (candidate, traits) = self.candidate(ev, now);
-        self.last_fed = Some((ev.hwnd, candidate.is_some()));
+        self.last_fed = Some(fed_key(ev.hwnd, candidate.is_some(), traits));
         self.note_followable(ev);
         // An unidentifiable window is "not a target" (cancels a pending game, T11).
         self.tracker.on_foreground_with(candidate, traits, now);
@@ -40,11 +52,11 @@ impl Controller {
     }
 
     /// A foreground observation from the probe or the location hook: fed to
-    /// the tracker only when (window, verdict) changed.
+    /// the tracker only when its [`fed_key`] changed.
     pub(crate) fn on_foreground_seen(&mut self, ev: &WatchEvent, now: Instant) {
         self.note_followable(ev);
         let (candidate, traits) = self.candidate(ev, now);
-        let key = (ev.hwnd, candidate.is_some());
+        let key = fed_key(ev.hwnd, candidate.is_some(), traits);
         if self.last_fed != Some(key) {
             self.last_fed = Some(key);
             self.tracker.on_foreground_with(candidate, traits, now);
@@ -54,7 +66,7 @@ impl Controller {
     /// Remember the foreground window when it could become a target by going
     /// fullscreen (not denied, no `none` override).
     fn note_followable(&mut self, ev: &WatchEvent) {
-        self.followable = is_target(&ev.exe_stem, true, &self.cfg).then_some(ev.hwnd);
+        self.followable = is_target_with(&ev.exe_stem, true, game_evidence(ev), &self.cfg).then_some(ev.hwnd);
     }
 
     /// Re-read the foreground (startup, the 1 s safety net, resume).
@@ -213,6 +225,16 @@ mod tests {
         assert_eq!(seen.borrow().len(), 1, "no read while nothing is followed");
         // Following the same window again is a new follow: probed at once.
         assert_eq!(f.step(Some(7), t0 + Duration::from_millis(1010), read), Some(7));
+    }
+
+    #[test]
+    fn a_fullscreen_flip_in_place_is_fed_again() {
+        // R2-3: Alt+Enter keeps the window and its candidate verdict.
+        let windowed = fed_key(7, true, Traits::WINDOWED);
+        assert_ne!(windowed, fed_key(7, true, Traits::FULLSCREEN));
+        assert_eq!(windowed, fed_key(7, true, Traits::WINDOWED));
+        assert_ne!(windowed, fed_key(7, false, Traits::WINDOWED));
+        assert_ne!(windowed, fed_key(8, true, Traits::WINDOWED));
     }
 
     #[test]
