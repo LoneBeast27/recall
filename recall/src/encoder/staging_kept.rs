@@ -1,20 +1,40 @@
-//! Start-up recovery of a kept copy whose clip never landed (`staging.rs` [`super::staging::recover`]).
+//! Start-up check of the kept copies (`staging.rs` [`super::staging::recover`]). The recorder
+//! is the only one that deletes a kept copy, because only it knows its own clip folder
+//! (`out_dir`); the app's start sweep only adopts and reports (`recall-native` `kept.rs`).
 //!
 //! The mover renames `<clip>.part` to `<clip>` on the clip folder's volume, flushes it there,
-//! then keeps the staged copy as `<staging>\kept\<clip>` (`mover.rs`, `mover_flush.rs`). A move
-//! made before that flush existed, or a flush Windows did not honour, can lose the rename to a
-//! power cut while the kept copy survives: the clip folder then holds only `<clip>.part`, with
-//! the clip's full length (its space is reserved up front, so the length alone does not prove
-//! the bytes are whole). Such a kept copy is handed back to the staging folder and queued as a
-//! move, so the mover copies it again over that `.part`. Nothing is deleted here, and the clip
-//! folder is only read.
+//! then keeps the staged copy as `<staging>\kept\<clip>` (`mover.rs`, `mover_flush.rs`). For
+//! each copy:
+//! - the clip landed whole (present, readable, the copy's size) and the copy is marked as the
+//!   recorder's own: the copy is deleted (the clip is the whole recording);
+//! - the clip is missing while a `<clip>.part` of the copy's length sits there (a power cut
+//!   lost the rename): the copy is handed back to staging and moved again over that `.part`;
+//! - the clip is present at another size, or gone with no `.part` (deleted by the user): the
+//!   copy is "leaked". It is moved into `kept\leaked\` (never deleted), logged, and no longer
+//!   counts against `kept_cap`, so leaked copies can't silently stop new keeps;
+//! - anything else (a clip folder asleep or unreadable, a `.part` of another length): left.
 
 use std::path::{Path, PathBuf};
 
 use super::events::Events;
 use super::mover::{MoveJob, MoverQueue};
-use super::mover_keep::KEPT_DIR;
+use super::mover_keep::{KEPT_DIR, KEPT_MARK};
 use crate::naming::part_of;
+
+/// `kept\leaked`: copies that match no whole clip (see the module notes).
+pub(crate) const LEAKED_DIR: &str = "leaked";
+
+/// What [`hand_back`] did.
+#[derive(Debug, Default)]
+pub(crate) struct HandBack {
+    /// Copies handed back to staging for their move.
+    pub back: Vec<PathBuf>,
+    /// Marked copies of clips that landed whole: deleted.
+    pub deleted: usize,
+    /// Copies moved into `kept\leaked\`, with their sizes.
+    pub leaked: Vec<(PathBuf, u64)>,
+    pub errors: Vec<String>,
+}
 
 /// `<dir>\kept` holds a clip copy (a local SSD listing, cheap at start).
 pub(crate) fn holds_kept(dir: &Path) -> bool {
@@ -25,11 +45,21 @@ pub(crate) fn holds_kept(dir: &Path) -> bool {
 /// queueing each copy handed back as a move to `out_dir`.
 pub(crate) fn hand_back_later(events: Events, queue: MoverQueue, dir: PathBuf, out_dir: PathBuf) {
     let _ = std::thread::Builder::new().name("recall-kept-check".into()).spawn(move || {
-        let (back, errors) = hand_back(&dir, &out_dir);
-        for error in errors {
+        let done = hand_back(&dir, &out_dir);
+        for error in &done.errors {
             events.log(&format!("staging: {error}"));
         }
-        for staged in back {
+        if !done.leaked.is_empty() {
+            let bytes: u64 = done.leaked.iter().map(|(_, len)| len).sum();
+            events.log(&format!(
+                "staging: {} kept cop(ies), {} MiB, match no whole clip in {}; set aside in {}\\{LEAKED_DIR} (not deleted, not counted against the keep limit)",
+                done.leaked.len(),
+                bytes >> 20,
+                out_dir.display(),
+                dir.join(KEPT_DIR).display()
+            ));
+        }
+        for staged in done.back {
             let Some(name) = staged.file_name() else { continue };
             let dest = out_dir.join(name);
             events.log(&format!("staging: {} was kept but its clip is only a .part; moving it again", dest.display()));
@@ -40,31 +70,71 @@ pub(crate) fn hand_back_later(events: Events, queue: MoverQueue, dir: PathBuf, o
     });
 }
 
-/// Moves each kept copy of `dir` whose clip in `out_dir` is missing while a same-length
-/// `<clip>.part` sits there back into `dir`. Returns (handed back, errors).
-pub(crate) fn hand_back(dir: &Path, out_dir: &Path) -> (Vec<PathBuf>, Vec<String>) {
-    let (mut back, mut errors) = (Vec::new(), Vec::new());
-    let Ok(listing) = std::fs::read_dir(dir.join(KEPT_DIR)) else { return (back, errors) };
+/// The recorder marked `kept` as its own copy (`mover_keep.rs`).
+fn marked(kept: &Path) -> bool {
+    std::fs::metadata(format!("{}:{KEPT_MARK}", kept.display())).is_ok()
+}
+
+/// The clip at `dest` is there whole: a readable file of `len` bytes.
+fn landed_whole(dest: &Path, len: u64) -> bool {
+    std::fs::metadata(dest).is_ok_and(|m| m.is_file() && m.len() == len) && std::fs::File::open(dest).is_ok()
+}
+
+/// Checks each kept copy of `dir` against its clip in `out_dir` (see the module notes).
+pub(crate) fn hand_back(dir: &Path, out_dir: &Path) -> HandBack {
+    let mut done = HandBack::default();
+    let kept_dir = dir.join(KEPT_DIR);
+    let Ok(listing) = std::fs::read_dir(&kept_dir) else { return done };
     for entry in listing.flatten() {
         let name = entry.file_name();
         let is_clip = name.to_string_lossy().to_ascii_lowercase().ends_with(".mp4");
         let Some(len) = entry.metadata().ok().filter(|m| m.is_file() && is_clip).map(|m| m.len()) else { continue };
-        let dest = out_dir.join(&name);
-        // The clip landed, or the clip folder cannot say (asleep, offline): nothing to do.
-        if !matches!(dest.try_exists(), Ok(false)) {
-            continue;
-        }
-        if !std::fs::metadata(part_of(&dest)).is_ok_and(|m| m.is_file() && m.len() == len) {
-            continue;
-        }
-        let staged = dir.join(&name);
-        if !matches!(staged.try_exists(), Ok(false)) {
-            continue;
-        }
-        match std::fs::rename(entry.path(), &staged) {
-            Ok(()) => back.push(staged),
-            Err(e) => errors.push(format!("kept copy {} not handed back for its move: {e}", entry.path().display())),
+        let (kept, dest) = (entry.path(), out_dir.join(&name));
+        match dest.try_exists() {
+            Ok(true) if landed_whole(&dest, len) => {
+                if marked(&kept) {
+                    match std::fs::remove_file(&kept) {
+                        Ok(()) => done.deleted += 1,
+                        Err(e) => done.errors.push(format!("kept copy {} of a landed clip not removed: {e}", kept.display())),
+                    }
+                }
+            }
+            Ok(true) => set_aside(&kept_dir, &kept, len, &mut done),
+            Ok(false) => match std::fs::metadata(part_of(&dest)) {
+                Ok(part) if part.is_file() && part.len() == len => hand_back_one(dir, &kept, &name, &mut done),
+                Ok(_) => {} // a `.part` of another length: the copy may be the only whole one
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound && std::fs::read_dir(out_dir).is_ok() => set_aside(&kept_dir, &kept, len, &mut done),
+                Err(_) => {}
+            },
+            // The clip folder cannot say (asleep, offline): nothing to do.
+            Err(_) => {}
         }
     }
-    (back, errors)
+    done
+}
+
+/// Renames `kept` back into staging, so the recovery queues it as a move again.
+fn hand_back_one(dir: &Path, kept: &Path, name: &std::ffi::OsStr, done: &mut HandBack) {
+    let staged = dir.join(name);
+    if !matches!(staged.try_exists(), Ok(false)) {
+        return;
+    }
+    match std::fs::rename(kept, &staged) {
+        Ok(()) => done.back.push(staged),
+        Err(e) => done.errors.push(format!("kept copy {} not handed back for its move: {e}", kept.display())),
+    }
+}
+
+/// Moves a leaked copy into `kept\leaked\` (never over a file there).
+fn set_aside(kept_dir: &Path, kept: &Path, len: u64, done: &mut HandBack) {
+    let leaked = kept_dir.join(LEAKED_DIR);
+    let Some(target) = kept.file_name().map(|n| leaked.join(n)) else { return };
+    if !matches!(target.try_exists(), Ok(false)) {
+        done.errors.push(format!("kept copy {} matches no whole clip; {} is taken, left in place", kept.display(), target.display()));
+        return;
+    }
+    match std::fs::create_dir_all(&leaked).and_then(|()| std::fs::rename(kept, &target)) {
+        Ok(()) => done.leaked.push((target, len)),
+        Err(e) => done.errors.push(format!("kept copy {} matches no whole clip; not set aside: {e}", kept.display())),
+    }
 }
