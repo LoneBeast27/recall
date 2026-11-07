@@ -397,8 +397,15 @@ pub(crate) fn load_checked(path: &std::path::Path) -> Result<Config, String> {
     let Some(bytes) = io::read_retrying(path, &std::thread::sleep).map_err(|e| e.to_string())? else {
         return Ok(Config::default());
     };
-    let Some((mut cfg, text)) = io::parse_or_recover(path, &bytes, now) else {
-        return Ok(Config::default());
+    Ok(load_bytes(path, &bytes, now))
+}
+
+/// The config in `bytes`, already read from `path`: parsed, or salvaged per key, or the
+/// last good load, else the defaults; migrated and repaired (`config_validate`). Also used
+/// by `config_watch` on the text it read, so a hand edit is never read twice.
+pub(crate) fn load_bytes(path: &std::path::Path, bytes: &[u8], now: std::time::SystemTime) -> Config {
+    let Some((mut cfg, text)) = io::parse_or_recover(path, bytes, now) else {
+        return Config::default();
     };
     // Legacy single `save_hotkey` -> `save_hotkeys` presets; a file from
     // the two-step-shortcut era gets the direct defaults.
@@ -410,7 +417,7 @@ pub(crate) fn load_checked(path: &std::path::Path) -> Result<Config, String> {
     // Out-of-range values clamp, bad entries go (one log line each), never the whole file.
     // Runs on every parsed load: full parse, per-key salvage and last-good.
     crate::config_repairs::remember(path, crate::config_validate::sanitize_loaded(&mut cfg));
-    Ok(cfg)
+    cfg
 }
 
 // ---------------------------------------------------------------------------
