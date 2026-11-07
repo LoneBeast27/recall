@@ -4,7 +4,7 @@
 //! bookkeeping, the engine plan with deferred restarts / retargets, and the
 //! storage schedule.
 
-use crate::record_dispatch::Effect;
+use crate::record_dispatch::{Effect, Sent};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use serde_json::json;
@@ -303,7 +303,8 @@ impl Controller {
         if paused {
             log!("record: PAUSED -- engine stopped, games ignored until resume");
             if self.planner.pause() {
-                self.apply_engine_target(&EngineTarget::Off);
+                // A line sent while the engine quits says "Recording is paused".
+                self.apply_engine_target_as(&EngineTarget::Off, Sent::Paused);
             }
         } else {
             log!("record: resumed");

@@ -107,6 +107,16 @@ impl TestPipe {
         (TestPipe(shared), rec)
     }
 
+    /// A pipe whose engine was told to stop (`retarget(None)`: `set_desired(None, asked)`)
+    /// and got its quit as the manager sends it (`send_retarget_quit`).
+    pub fn stopping(asked: Sent) -> (TestPipe, Recorded) {
+        let shared = Arc::new(Shared::new(None));
+        let rec = Recorded::attach(&shared);
+        shared.set_desired(None, asked);
+        assert!(shared.send_retarget_quit());
+        (TestPipe(shared), rec)
+    }
+
     /// The engine is gone: its writer ends (the recorder's lines are then complete).
     pub fn close(&self) {
         self.0.attach_writer(None);

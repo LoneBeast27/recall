@@ -42,6 +42,8 @@ pub enum Sent {
     /// Not written: the engine was told to stop with no engine to follow (Off: a closed
     /// game's drain ended with no game, a pause).
     Waiting,
+    /// Not written: the engine was told to stop for a pause (no engine until resume).
+    Paused,
     /// Not written: no engine, a full queue (the engine is not reading), or a quit that
     /// is neither a game switch nor planned (a hang, failure or watchdog restart, shutdown).
     NotResponding,
@@ -64,6 +66,7 @@ impl Sent {
             Sent::Switching => Some(SWITCHING),
             Sent::Restarting => Some(RESTARTING),
             Sent::Waiting => Some(crate::record_engine::WAITING_REASON),
+            Sent::Paused => Some(crate::record_engine::PAUSED_REASON),
             Sent::NotResponding => Some(NOT_RESPONDING),
         }
     }

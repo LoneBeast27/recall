@@ -254,14 +254,33 @@ fn a_queued_shortcut_ticks_after_the_queueing_and_a_pipe_command_never_ticks() {
 
 #[test]
 fn a_save_while_the_engine_stops_for_off_says_waiting_for_a_game() {
-    // A drain that ends with no game, or a pause: `Supervisor::retarget(None)` quits with
-    // `Sent::Waiting` (supervisor_stop_tests.rs drives the real manager).
-    let (pipe, rec) = TestPipe::quitting(Sent::Waiting);
+    // A drain that ends with no game: `Supervisor::retarget(None)` asks for Switching, and
+    // the stop's quit says Waiting (supervisor_stop_tests.rs drives the real manager).
+    let (pipe, rec) = TestPipe::stopping(Sent::Switching);
     let mut port = Shown { pipe: &pipe, log: Vec::new() };
     assert!(!save(&mut port, 30, false));
-    let waiting = crate::record_engine::capture_refusal(false, false, &crate::record_engine::EngineTarget::Off).unwrap();
-    assert_eq!(port.log, [format!("save_failed: {waiting}")], "not 'Switching games'");
-    assert!(waiting.contains("waiting for a game"));
+    assert_eq!(port.log, ["save_failed: Recall is waiting for a game; nothing is being recorded"], "not 'Switching games'");
     pipe.close();
     assert_eq!(after_quit(&rec.lines()), Vec::<String>::new());
+}
+
+/// The text of `fn <name>(` in `src`, up to its closing brace at 4-space indent (a method).
+fn method_body<'a>(src: &'a str, name: &str) -> &'a str {
+    let start = src.find(&format!("fn {name}(")).unwrap_or_else(|| panic!("fn {name} not found"));
+    let end = src[start..].find("\n    }").map(|e| start + e).unwrap_or_else(|| panic!("fn {name} has no end"));
+    &src[start..end]
+}
+
+/// Source guard on the controller's shortcut lines (no test builds a `Controller`): the
+/// bookmark / screenshot / record shortcuts send as a shortcut (`hotkey` true: the tick
+/// once queued, tested above through `command`); the pipe's commands never tick.
+#[test]
+fn the_capture_shortcuts_send_with_the_shortcut_tick_and_pipe_commands_without() {
+    let actions = include_str!("record_actions.rs");
+    let on_action = method_body(actions, "on_action");
+    let arm = on_action.find("HotkeyAction::Bookmark | HotkeyAction::Screenshot | HotkeyAction::Record =>").expect("the shortcut arm");
+    let arm = &on_action[arm..on_action[arm..].find("HotkeyAction::Stats =>").map(|e| arm + e).expect("the arm's end")];
+    assert!(arm.contains("self.engine_command_as(cmd, None, true);"), "{arm}");
+    assert!(method_body(actions, "engine_command").contains("self.engine_command_as(cmd, client, false);"));
+    assert!(method_body(actions, "engine_command_as").contains("&mut ControllerCommand { ctl: self, cmd, client }, cmd, hotkey);"));
 }
