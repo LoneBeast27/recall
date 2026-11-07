@@ -399,7 +399,7 @@ pub(crate) type PlanFn = fn(&Path, u32) -> Result<(Plan, Listing), String>;
 pub(crate) type RecycleFn = fn(&[PathBuf]) -> Result<(), RecycleError>;
 /// Lowercase names to keep now (production: [`keep::kept_now`]). Err = unknown: the run stops.
 pub(crate) type KeepFn = fn() -> Result<HashSet<String>, String>;
-pub(crate) use keep::kept_now;
+pub(crate) use keep::{file_key, kept_now};
 pub(crate) use crate::win_recycle::{BinCheck, SizeFn};
 
 /// Bytes one Recycle Bin call moves: the clip (its listed size) and its
