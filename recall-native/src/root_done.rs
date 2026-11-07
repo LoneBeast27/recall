@@ -68,6 +68,14 @@ impl Root {
                 }
                 self.cache.refresh();
             }
+            Done::LeftoversRecycled(result) => {
+                self.cache.leftovers_busy = false;
+                match result {
+                    Ok(n) => self.show_toast(ToastKind::Good, "Leftover copies sent to the Recycle Bin", Some(format!("{n} moved; restore them from the Recycle Bin if you need one"))),
+                    Err(error) => self.show_toast(ToastKind::Bad, "Leftover copies not moved", Some(error)),
+                }
+                self.cache.refresh();
+            }
         }
     }
 }

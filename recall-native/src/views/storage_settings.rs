@@ -30,6 +30,8 @@ pub struct CacheView {
     pub budget_reset: bool,
     /// The recorder's leftover kept copies (never emptied on their own).
     pub leftovers: Option<crate::services::storage::Leftovers>,
+    /// A Send to Recycle Bin is running on the library lane (`Done::LeftoversRecycled`).
+    pub leftovers_busy: bool,
     pub used_bytes: u64,
     /// (label, bytes) per kind of cached data.
     pub tiers: Vec<(&'static str, u64)>,
@@ -53,6 +55,7 @@ impl CacheView {
             budget_note: crate::cache::budget_note(),
             budget_reset: crate::cache::budget_resettable(),
             leftovers: None,
+            leftovers_busy: false,
             used_bytes: 0,
             tiers: Vec::new(),
             ssd_free,
@@ -438,13 +441,16 @@ impl Root {
 }
 
 impl Root {
-    /// "N leftover copies (X GB) on C:" with Open folder and Send to Recycle Bin, while the
+    /// Settings -> Media, "SSD cache": "N leftover copies (X GB) on C:" with Open folder and
+    /// Send to Recycle Bin, while the
     /// recorder's `kept\leaked` folder holds any. Nothing empties it on its own.
     fn render_leftovers(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let found = self.cache.leftovers.clone()?;
         let drive: String = self.cache.root.to_string_lossy().chars().take(2).collect();
         let line = crate::services::storage::leftover_line(found.files.len(), found.bytes, &drive)?;
         let open_dir = found.dir.clone();
+        let shown = found.files.clone();
+        let bin_label = if self.cache.leftovers_busy { "Sending to the Recycle Bin…" } else { "Send to Recycle Bin" };
         Some(
             div()
                 .flex()
@@ -459,12 +465,13 @@ impl Root {
                 .child(ui::button("leftover-open", Variant::Secondary).child(icon(Icon::Folder, 14., theme::TEXT)).child("Open folder").on_click(cx.listener(move |_, _, _, _| {
                     let _ = std::process::Command::new("explorer.exe").arg(&open_dir).spawn();
                 })))
-                .child(ui::button("leftover-bin", Variant::Ghost).border_1().border_color(c(theme::BORDER)).child(icon(Icon::Trash, 14., theme::MUTED)).child("Send to Recycle Bin").on_click(cx.listener(|this, _, _, cx| {
-                    match crate::cache::send_leftovers_to_bin() {
-                        Ok(n) => this.show_toast(ToastKind::Good, "Leftover copies sent to the Recycle Bin", Some(format!("{n} moved; restore them from the Recycle Bin if you need one"))),
-                        Err(error) => this.show_toast(ToastKind::Bad, "Leftover copies not moved", Some(error)),
+                .child(ui::button("leftover-bin", Variant::Ghost).border_1().border_color(c(theme::BORDER)).child(icon(Icon::Trash, 14., theme::MUTED)).child(bin_label).on_click(cx.listener(move |this, _, _, cx| {
+                    // Off the UI thread (RI3-3): the Recycle Bin lock can wait up to a minute.
+                    if this.cache.leftovers_busy {
+                        return;
                     }
-                    this.cache.refresh();
+                    this.cache.leftovers_busy = true;
+                    this.workers.job(crate::worker::Job::RecycleLeftovers(shown.clone()));
                     cx.notify();
                 })))
                 .into_any_element(),

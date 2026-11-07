@@ -60,6 +60,9 @@ pub enum Job {
     /// Settings "clear" for one tier, then a fresh report (`Done::Storage`, with a notice).
     /// (Whole-cache clear / budget: `storage::clear()` / `storage::set_budget_bytes()`.)
     ClearCache(CacheKind),
+    /// Settings -> Media -> SSD cache: the leftover kept copies shown, to the Recycle Bin
+    /// (`Done::LeftoversRecycled`). On the library lane, like a Delete: the bin lock can wait.
+    RecycleLeftovers(Vec<PathBuf>),
 }
 
 pub enum AssetJob {
@@ -101,6 +104,8 @@ pub enum Done {
     Storage(StorageReport),
     /// The clip folders changed on disk (`services::library::watch`).
     Library(LibraryChange),
+    /// How many leftover copies went to the Recycle Bin.
+    LeftoversRecycled(Result<usize, String>),
 }
 
 pub struct Workers {
@@ -248,7 +253,7 @@ impl Workers {
 /// Listings and deletes run apart from the editor's io: an export never holds them up.
 fn lane_of(job: &Job) -> Lane {
     match job {
-        Job::List | Job::Delete(..) => Lane::Library,
+        Job::List | Job::Delete(..) | Job::RecycleLeftovers(..) => Lane::Library,
         _ => Lane::Io,
     }
 }
@@ -283,6 +288,7 @@ fn run_job(job: Job, tx: &Sender<Done>, watcher: Option<&ClipWatcher>) -> Done {
         Job::FlushProject(info, plan, fps, export, ours) => Done::Flushed(info.path.clone(), backend::flush_project(&info, &plan, fps, &export, ours)),
         Job::Export(info, plan, fps, export) => Done::Exported(crate::services::pre_encode::export(&info, &plan, fps, &export)),
         Job::Delete(paths, folders) => delete_job(&paths, &folders),
+        Job::RecycleLeftovers(files) => Done::LeftoversRecycled(crate::cache::send_leftovers_to_bin(&files)),
         Job::StorageReport => Done::Storage(backend::storage_report(None)),
         Job::ClearCache(kind) => {
             let notice = match storage::clear_kind(kind) {

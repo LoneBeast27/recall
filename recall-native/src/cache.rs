@@ -35,9 +35,10 @@ pub fn leftovers() -> Option<storage::Leftovers> {
     storage::leftovers()
 }
 
-/// Sends the leftover copies to the Recycle Bin (never a permanent delete).
-pub fn send_leftovers_to_bin() -> Result<usize, String> {
-    storage::send_leftovers_to_bin()
+/// Sends the leftover copies shown to the Recycle Bin (never a permanent delete). Blocks: run
+/// it on a worker (`Job::RecycleLeftovers`).
+pub fn send_leftovers_to_bin(shown: &[std::path::PathBuf]) -> Result<usize, String> {
+    storage::send_leftovers_to_bin(shown)
 }
 
 /// (label, bytes) per kind of cached data.
