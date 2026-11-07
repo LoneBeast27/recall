@@ -314,7 +314,7 @@ impl Controller {
     /// Engine events forwarded by the supervisor.
     pub(crate) fn drain_engine_events(&mut self, now: Instant) {
         while let Ok(ev) = self.engine_events.try_recv() {
-            match self.activity.on_event(&ev, unix_now()) {
+            match self.activity.on_engine_event(&ev, unix_now(), now) {
                 Some(Trigger::Saved) => self.janitor.saved(now),
                 Some(Trigger::AutoStopped { game_closed }) => {
                     let detail = if game_closed { "the game closed" } else { "the recorded window changed" };

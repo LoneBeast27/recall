@@ -2,7 +2,9 @@
 //! time and answers oldest first, so only the save in front waits: its wait
 //! starts when it is sent or when the save ahead of it answers. Past
 //! `SAVING_FOR` the ring says "Still saving…"; one that never hears back by
-//! `CONFIRM_FOR` says "Save not confirmed" instead of vanishing. A refusal
+//! `CONFIRM_FOR` says "Save not confirmed" instead of vanishing, and so does
+//! every save queued behind it (one window per engine answer, as the
+//! controller's `SAVE_STALE`, never one per save). A refusal
 //! (`refused`: never queued) takes no save's place, and an engine rejection
 //! (`rejected`: failed before it was queued for writing) is the newest save's. While a save is still in flight after another's outcome (or
 //! after any other notice), the island goes back to its spinning ring. A
@@ -64,14 +66,14 @@ pub(super) struct Saves {
 }
 
 impl Saves {
-    /// Drops the saves whose wait ran out; returns how many.
+    /// The save in front has had no answer for `CONFIRM_FOR`: the engine is
+    /// not answering, so the whole queue is unconfirmed. Returns how many.
     fn overdue(&mut self, now: Instant) -> u32 {
-        let mut lost = 0;
-        while self.pending.front().is_some_and(|p| now >= p.since + CONFIRM_FOR) {
-            self.pending.pop_front();
-            self.restart_front(now);
-            lost += 1;
+        if self.pending.front().is_none_or(|p| now < p.since + CONFIRM_FOR) {
+            return 0;
         }
+        let lost = self.pending.len() as u32;
+        self.pending.clear();
         lost
     }
 

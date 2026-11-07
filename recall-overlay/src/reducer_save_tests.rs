@@ -214,3 +214,37 @@ fn an_engine_rejection_fails_the_newest_save() {
     r.tick(now + ms(5_000) + SAVED_FOR);
     assert!(!r.view().visible || notice(&r).save != Some(SavePhase::Saving), "nothing is left in flight");
 }
+
+#[test]
+fn unanswered_saves_end_together_in_one_notice() {
+    let now = Instant::now();
+    let mut r = Reducer::new();
+    r.apply_envelope(&status("VALORANT"), now);
+    for i in 0..3 {
+        r.apply_envelope(&saving(30), now + ms(i * 400));
+    }
+    r.tick(now + CONFIRM_FOR);
+    let n = notice(&r);
+    assert_eq!((n.title.as_str(), n.save), ("3 saves not confirmed", Some(SavePhase::Failed)), "one window for the queue");
+    r.tick(now + CONFIRM_FOR + Duration::from_secs(5) + FAILURE_FOR);
+    assert!(!r.view().visible || notice(&r).save != Some(SavePhase::Saving), "no ring comes back for 2 more minutes");
+}
+
+#[test]
+fn queued_saves_that_keep_answering_keep_their_ring() {
+    let now = Instant::now();
+    let s = Duration::from_secs;
+    let mut r = Reducer::new();
+    r.apply_envelope(&status("VALORANT"), now);
+    for _ in 0..3 {
+        r.apply_envelope(&saving(30), now);
+    }
+    r.apply_envelope(&saved(VALORANT, 30.0), now + s(90));
+    r.apply_envelope(&saved(VALORANT, 30.0), now + s(180));
+    r.tick(now + s(200));
+    assert_eq!(notice(&r).save, Some(SavePhase::Saving), "the third save is still being written");
+    r.tick(now + s(299));
+    assert_eq!(notice(&r).title, STILL_SAVING, "the engine answered 119 s ago");
+    r.apply_envelope(&saved(VALORANT, 30.0), now + s(299));
+    assert_eq!(notice(&r).title, "Clip saved", "it lands");
+}
