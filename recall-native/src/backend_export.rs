@@ -8,10 +8,15 @@ pub fn export_clip(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)
     if EXPORTING.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err(){return Err("Another export is running.".into());}
     let _guard=ExportGuard;
     let output=export_target(info,fps,export.mode==ExportMode::Lossless)?;
+    run_export(info,&output,plan,fps,export,storage::recorder_busy(),engine_export)
+}
+/// The engine run of [`export_clip`] (`engine` is [`engine_export`]; a test passes a fake).
+pub(crate) type Engine=fn(&ClipInfo,&Path,&EditPlan,u32,&ExportSettings,&'static AtomicBool,Option<storage::OnLine>,bool)->Result<ExportSummary,String>;
+pub(crate) fn run_export(info:&ClipInfo,output:&Path,plan:&EditPlan,fps:u32,export:&ExportSettings,recording:bool,engine:Engine)->Result<ExportSummary,String>{
     EXPORT_PROGRESS.store(NO_PROGRESS,Ordering::Relaxed);
     let on_line:storage::OnLine=Box::new(|line|{if let Some(share)=crate::services::pre_encode::progress_share(line){EXPORT_PROGRESS.store((share*1000.0) as u32,Ordering::Relaxed);}});
     // The export holds the output drive's lane: prefetch pauses instead of seeking against it.
-    let result=engine_export(info,&output,plan,fps,export,&EXPORT_CANCEL,Some(on_line),yields_to_recording(storage::recorder_busy()));
+    let result=engine(info,output,plan,fps,export,&EXPORT_CANCEL,Some(on_line),yields_to_recording(recording));
     EXPORT_PROGRESS.store(NO_PROGRESS,Ordering::Relaxed);
     result
 }
@@ -35,10 +40,21 @@ pub(crate) fn export_target(info:&ClipInfo,fps:u32,lossless:bool)->Result<PathBu
     let stem=source.file_stem().and_then(|v|v.to_str()).unwrap_or("clip");
     free_name(&outdir,&if lossless{format!("{stem}-trim")}else{format!("{stem}-edited-{fps}fps")})
 }
-/// `<outdir>\<base>-<n>.mp4` with the lowest `n` not taken yet (the names people drag into
-/// Discord; the engine still refuses to replace a file that appears meanwhile).
+/// `<outdir>\<base>-<n>.mp4` with `n` one past the highest taken (short names people drag into
+/// Discord, sorting by age even after one is deleted; the engine and the prepared copy still
+/// refuse to replace a file that appears meanwhile).
 pub(crate) fn free_name(outdir:&Path,base:&str)->Result<PathBuf,String>{
-    (1..10_000u32).map(|n|outdir.join(format!("{base}-{n}.mp4"))).find(|path|!path.exists()).ok_or_else(||format!("no free export name for {base} in {}",outdir.display()))
+    let prefix=format!("{base}-");
+    let number=|name:&str|name.strip_prefix(&prefix)?.strip_suffix(".mp4").filter(|n|!n.is_empty()&&n.bytes().all(|b|b.is_ascii_digit()))?.parse::<u64>().ok();
+    let highest=std::fs::read_dir(outdir).into_iter().flatten().flatten().filter_map(|item|number(&item.file_name().to_string_lossy())).max().unwrap_or(0);
+    (highest+1..highest+10_000).map(|n|outdir.join(format!("{base}-{n}.mp4"))).find(|path|!path.exists()).ok_or_else(||format!("no free export name for {base} in {}",outdir.display()))
+}
+/// The next free export name after `taken` (`<base>-<n>.mp4`), for a name that was taken
+/// while the export ran.
+pub(crate) fn name_after(taken:&Path)->Option<PathBuf>{
+    let (outdir,stem)=(taken.parent()?,taken.file_stem()?.to_str()?);
+    let (base,n)=stem.rsplit_once('-')?;n.parse::<u64>().ok()?;
+    free_name(outdir,base).ok()
 }
 /// Runs the engine's edited export of `info` into `output` on the output drive's lane, until it
 /// ends or `cancel` turns true. `on_line` sees the engine's stdout as it arrives (progress).

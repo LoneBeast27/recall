@@ -230,9 +230,56 @@ pub(crate) fn open_encoder(spec: &EncoderSpec) -> Result<(ff::encoder::Video, ff
     Ok((encoder, codec))
 }
 
+/// Adds `encoder`'s video stream to `octx`; HEVC as `hvc1` (FFmpeg's default `hev1` does not
+/// play through Media Foundation). Returns its index.
+pub(crate) fn add_video_stream(
+    octx: &mut ff::format::context::Output,
+    codec: ff::Codec,
+    encoder: &ff::encoder::Video,
+    time_base: ff::Rational,
+) -> Result<usize, String> {
+    let mut stream = octx.add_stream(Some(codec)).map_err(|e| format!("add output video stream: {e}"))?;
+    stream.set_parameters(encoder);
+    if let Some(tag) = crate::encoder::mp4_video_tag(codec.id()) {
+        // SAFETY: a plain field of the new stream's codecpar, set before the header is written.
+        unsafe { (*stream.parameters().as_mut_ptr()).codec_tag = tag };
+    }
+    stream.set_time_base(time_base);
+    Ok(stream.index())
+}
+
 #[cfg(test)]
 mod tests {
     use super::{nvenc_codec, output_dims};
+
+    /// R2-deep-export-5: the CFR export and the edited export add their video stream here, so
+    /// an HEVC encode (sources past 4096 px) is tagged `hvc1` in both.
+    #[test]
+    fn an_hevc_video_stream_is_tagged_hvc1() {
+        use super::*;
+        ff::init().unwrap();
+        let Some(codec) = ff::encoder::find_by_name("libx265") else {
+            eprintln!("libx265 missing in this FFmpeg build; skipped");
+            return;
+        };
+        let mut context = ff::codec::context::Context::new_with_codec(codec).encoder().video().unwrap();
+        context.set_width(64);
+        context.set_height(64);
+        context.set_format(ff::format::Pixel::YUV420P);
+        context.set_time_base(ff::Rational(1, 30));
+        context.set_flags(ff::codec::Flags::GLOBAL_HEADER);
+        let mut options = ff::Dictionary::new();
+        options.set("x265-params", "log-level=error");
+        let encoder = context.open_with(options).unwrap();
+        let path = std::env::temp_dir().join(format!("recall-hvc1-{}.mp4", uuid::Uuid::new_v4().simple()));
+        let mut octx = ff::format::output(&path).unwrap();
+        let index = add_video_stream(&mut octx, codec, &encoder, ff::Rational(1, 30)).unwrap();
+        // SAFETY: reading a plain field of a live stream's codecpar.
+        let tag = unsafe { (*octx.stream(index).unwrap().parameters().as_ptr()).codec_tag };
+        drop(octx);
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(&tag.to_le_bytes(), b"hvc1");
+    }
 
     #[test]
     fn frames_past_h264_nvenc_use_hevc_and_past_hevc_say_pick_1080p() {

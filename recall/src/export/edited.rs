@@ -17,7 +17,7 @@ use super::timeline::{
     us_to_seconds, EditTimeline,
 };
 use super::video_encoder::{
-    open_decoder, open_encoder, output_dims, probe_video, recommended_bitrate, scaler,
+    add_video_stream, open_decoder, open_encoder, output_dims, probe_video, recommended_bitrate, scaler,
     EncoderSpec, RateControl, SourceVideo, VideoBackend,
 };
 use crate::edit_audio::EncodedAudioTrack;
@@ -164,18 +164,7 @@ impl Attempt<'_> {
         let output_tb = ff::Rational(1, self.fps as i32);
         let mut octx = ff::format::output(self.temp)
             .map_err(|e| format!("create temporary output {}: {e}", self.temp.display()))?;
-        let video_out_index = {
-            let mut stream = octx
-                .add_stream(Some(codec))
-                .map_err(|e| format!("add output video stream: {e}"))?;
-            stream.set_parameters(&encoder);
-            // HEVC (frames past H.264 NVENC) as `hvc1`, which Media Foundation plays.
-            if let Some(tag) = crate::encoder::mp4_video_tag(codec.id()) {
-                unsafe { (*stream.parameters().as_mut_ptr()).codec_tag = tag };
-            }
-            stream.set_time_base(output_tb);
-            stream.index()
-        };
+        let video_out_index = add_video_stream(&mut octx, codec, &encoder, output_tb)?;
         let mut audio_output_indices = Vec::with_capacity(self.audio.len());
         for track in self.audio {
             let mut stream = octx
