@@ -177,6 +177,7 @@ impl Root {
             self.apply_typed_cache();
         }
         crate::services::pre_encode::discard();
+        crate::services::library::open_clips::publish(None);
     }
 
     pub fn show_toast(&mut self, kind: ToastKind, text: impl Into<String>, detail: Option<String>) {
@@ -243,6 +244,8 @@ impl Root {
     pub fn open_clip(&mut self, path: String) {
         crate::services::storage::record_interaction(crate::services::storage::Interaction::Opened(path.clone()));
         self.lib.mark_played(&path);
+        // The recorder's storage cap never recycles the clip open here.
+        crate::services::library::open_clips::publish(Some(&path));
         if !self.ed.is_open(&path) {
             self.ed.open(path, &self.workers);
         }

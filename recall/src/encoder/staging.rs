@@ -24,7 +24,10 @@
 //!   clip folder, and stale `*.mp4.part` mux files there are deleted. With
 //!   staging off the default folder is still scanned, so nothing is stranded.
 //!   Its `kept\` subfolder (copies of clips already moved, kept for the app's
-//!   SSD video cache, `mover.rs`) is not scanned: the app adopts or deletes them.
+//!   SSD video cache, `mover.rs`) is not scanned: the app adopts or deletes them. The one
+//!   exception: a kept copy whose clip is only a same-length `.part` in the clip folder (a
+//!   power cut lost the rename) is handed back and queued again (`staging_kept.rs`), on its
+//!   own thread once the mover runs: that check reads the clip folder.
 
 use std::path::{Component, Path, PathBuf, Prefix};
 
@@ -248,13 +251,17 @@ pub(crate) fn start(events: &Events, setup: Setup) -> (Option<Stage>, Option<Mov
         }
         recovered = found.moves.into_iter().map(|(staged, dest)| MoveJob { staged, dest }).collect();
     }
-    if setup.dir.is_none() && recovered.is_empty() {
+    let kept_check = setup.recover.clone().filter(|dir| super::staging_kept::holds_kept(dir));
+    if setup.dir.is_none() && recovered.is_empty() && kept_check.is_none() {
         return (None, None);
     }
     let same_volume = setup.mover.same_volume;
     let Some((queue, control)) = mover::spawn(events.clone(), setup.mover, recovered) else {
         return (None, None);
     };
+    if let Some(dir) = kept_check {
+        super::staging_kept::hand_back_later(events.clone(), queue.clone(), dir, setup.out_dir.clone());
+    }
     // No volume question here: on a sleeping NAS it would hold the encoder's
     // start. Each save asks it on the saver thread ([`Stage::target`]).
     let stage = setup.dir.map(|dir| {

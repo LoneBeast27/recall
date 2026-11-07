@@ -117,10 +117,17 @@ pub(super) fn recycle(clips: &[PathBuf]) -> Result<usize, String> {
     if files.is_empty() {
         return Ok(0);
     }
-    check_recyclable(&files, crate::win_recycle::can_recycle, crate::win_recycle::file_size)?;
+    // The room check and the move hold the Recycle Bin lock every Recall process shares
+    // (`win_recycle_lock.rs`), so the recorder's storage cap cannot pass the same room check.
     // IFileOperation with a sink that refuses any delete Windows would not recycle
-    // (`win_fileop.rs`); `check_recyclable` above is the second guard.
-    let report = crate::win_fileop::recycle_files(&files);
+    // (`win_fileop.rs`); `check_recyclable` is the second guard.
+    let checked = crate::win_fileop::bin_lock::held(|| {
+        check_recyclable(&files, crate::win_recycle::can_recycle, crate::win_recycle::file_size).map(|()| crate::win_fileop::recycle_files(&files))
+    });
+    let report = match checked {
+        Ok(step) => step?,
+        Err(why) => return Err(format!("Couldn't move these clips to the Recycle Bin: {why}")),
+    };
     // Count what actually left the folder (a refusal may come after some went to the bin).
     let moved = clips.iter().filter(|clip| !clip.exists()).count();
     if let crate::win_fileop::Outcome::Refused(why) = &report.outcome {

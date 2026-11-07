@@ -134,7 +134,7 @@ pub(super) fn plan_dry(root: &Path) -> (Vec<String>, Vec<String>) {
     let inventory = inventory_with(root, &super::prefetch::score_of, &listed);
     let budget = evict::read_settings(root).cache_budget_bytes.unwrap_or_else(|| {
         let (free, total) = super::drive_info(root).map_or((0, 0), |info| (info.free, info.total));
-        evict::default_budget(free, total)
+        evict::default_budget(free, total, super::drive::on_system_drive(root))
     });
     let evict = evict::plan(&inventory.units, inventory.projects + inventory.other, budget, budget / 2, 0, &kept());
     (adopt, evict)
