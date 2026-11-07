@@ -92,7 +92,10 @@ impl Controller {
             "status" => self.reply_status(inbound.client),
             "quit" => {
                 log!("record: control quit");
-                self.quit = Some(crate::record_quit::QuitReason::ControlPipe);
+                self.ask_quit(crate::record_quit::QuitReason::ControlPipe);
+                // The installer reads this to wait only while a clip is being finished.
+                let reply = crate::record_quit_wait::quitting_event(self.finishing_now(Instant::now()));
+                self.hub.event_to(inbound.client, "session", &reply);
             }
             "save_clip" => match val.get("seconds") {
                 None | Some(Value::Null) => self.save_clip(None),
@@ -389,7 +392,8 @@ impl Controller {
         let wanted = self.wanted();
         let view = self.supervisor.engine_view();
         let hdr = self.hdr.snapshot(&self.cfg);
-        status_json(&StatusInputs {
+        let finishing = self.finishing_now(Instant::now());
+        let mut status = status_json(&StatusInputs {
             wanted: &wanted,
             health: self.supervisor.health(),
             encoder: view.encoder.as_deref(),
@@ -405,7 +409,9 @@ impl Controller {
             pending_restart: self.pending_restart.is_some() || self.retarget_held,
             drain: self.drain_clock.status(self.planner.drain(), Instant::now()),
             hotkey_problems: &self.hotkey_problems,
-        })
+        });
+        crate::record_quit_wait::merge_fields(&mut status, finishing);
+        status
     }
 
     fn legacy_hdr_event(&self) -> Option<String> {

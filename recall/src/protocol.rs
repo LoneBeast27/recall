@@ -306,7 +306,7 @@ pub fn emit(msg: &Outbound) {
     }
     if let Ok(line) = serde_json::to_string(msg) {
         if !write_line(&mut std::io::stdout().lock(), &line) {
-            crate::stdin_reader::stdout_failed();
+            crate::stdin_reader::stream_failed(crate::stdin_reader::Stream::Out);
         }
     }
 }

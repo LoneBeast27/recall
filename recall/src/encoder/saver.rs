@@ -15,7 +15,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::mpsc::{
-    channel, sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError,
+    channel, sync_channel, Receiver, SyncSender, TrySendError,
 };
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,6 +25,7 @@ use super::events::SavedReport;
 use super::mover::{self, MoverControl};
 use super::mux::OwnedParams;
 use super::save_progress::SaveProgress;
+use super::saver_stop::stop_saver;
 use super::space::{self, FreeSpace};
 use super::staging::{self, Stage};
 use super::StillSpec;
@@ -199,37 +200,23 @@ impl SaverControl {
     /// Then the clip mover stops (up to `mover::STOP_WAIT`): a move in flight
     /// is abandoned, its staged copy kept for the next start.
     pub fn shutdown(self, budget: Duration) -> Shutdown {
-        let SaverControl { done, abort, current, mover, .. } = self;
-        let outcome = stop_saver(&done, &abort, &current, budget);
+        self.stop(budget, false)
+    }
+
+    /// [`shutdown`](Self::shutdown) for an orphaned engine: a save in flight runs on past
+    /// `budget` while it makes progress (`saver_stop::OrphanHold`).
+    pub fn shutdown_orphan(self, budget: Duration) -> Shutdown {
+        self.stop(budget, true)
+    }
+
+    fn stop(self, budget: Duration, orphan: bool) -> Shutdown {
+        let SaverControl { done, abort, current, mover, progress } = self;
+        let outcome = stop_saver(&done, &abort, &current, budget, orphan.then_some(&*progress));
         if let Some(mover) = mover {
             mover.shutdown(mover::STOP_WAIT);
         }
         outcome
     }
-}
-
-fn stop_saver(
-    done: &Receiver<()>,
-    abort: &AtomicBool,
-    current: &Mutex<Option<PathBuf>>,
-    budget: Duration,
-) -> Shutdown {
-    let reserve = (budget / 2).min(Duration::from_millis(500));
-    if wait_done(done, budget - reserve) {
-        return Shutdown::Drained;
-    }
-    abort.store(true, Relaxed);
-    if wait_done(done, reserve) {
-        return Shutdown::Aborted;
-    }
-    if let Some(part) = current.lock().unwrap_or_else(|p| p.into_inner()).take() {
-        let _ = std::fs::remove_file(part);
-    }
-    Shutdown::TimedOut
-}
-
-fn wait_done(done: &Receiver<()>, timeout: Duration) -> bool {
-    !matches!(done.recv_timeout(timeout), Err(RecvTimeoutError::Timeout))
 }
 
 /// Spawn the production saver (real mux + gallery thumbnail + SSD staging).

@@ -38,6 +38,7 @@ mod headers_tests;
 mod decode_tests;
 mod save_progress;
 mod saver;
+mod saver_stop;
 mod space;
 mod staging;
 mod staging_guard;
@@ -182,12 +183,14 @@ impl EncoderHandle {
     /// Then the clip mover stops (<= `mover::STOP_WAIT`): a background move in
     /// flight is abandoned, never leaving a partial file under the final name;
     /// its staged copy is moved by the next start.
-    pub fn shutdown(self, budget: Duration) {
+    /// An `orphan` (its controller gone) lets a save in flight finish past `budget` while
+    /// it still makes progress (`saver_stop`).
+    pub fn shutdown(self, budget: Duration, orphan: bool) {
         let EncoderHandle { frames, commands, saver, .. } = self;
         // Disconnecting frames ends the encoder loop, which drops the saver queue.
         drop((frames, commands));
         let started = Instant::now();
-        let outcome = saver.shutdown(budget);
+        let outcome = if orphan { saver.shutdown_orphan(budget) } else { saver.shutdown(budget) };
         eprintln!(
             "[recall] save writer shutdown: {outcome:?} after {:.0}ms",
             ms(started.elapsed())

@@ -181,3 +181,18 @@ mod tests {
         assert_eq!(got, ["first", "\u{fffd}\u{fffd} ffmpeg \u{fffd}", "third", "last without newline"]);
     }
 }
+
+#[cfg(test)]
+mod drain_tests {
+    use super::drain_lines;
+
+    #[test]
+    fn a_line_that_is_not_utf8_never_stops_the_stderr_reader() {
+        // R6-overlay-4: a stopped reader breaks the engine's stderr pipe.
+        let mut seen = Vec::new();
+        drain_lines(&b"\xff\xfe bad\nok\n\n  last  \n"[..], |l| seen.push(l.to_string()));
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        assert!(seen[0].ends_with("bad"), "lossy: {:?}", seen[0]);
+        assert_eq!(&seen[1..], ["ok", "last"]);
+    }
+}

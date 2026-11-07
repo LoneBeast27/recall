@@ -68,6 +68,7 @@ mod hud_probe;
 mod hybrid_gpu;
 mod protocol;
 mod ring;
+mod shutdown_order;
 mod single_instance;
 mod spill;
 mod stdin_reader;
@@ -499,6 +500,8 @@ fn main() {
     }
     // Held until the process ends: Windows frees it then, after a crash too.
     let _instance = claim_recorder(config.json);
+    // Asked to end after the controller at sign-out / shutdown: it holds the session for a save.
+    shutdown_order::apply();
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
@@ -523,7 +526,7 @@ fn main() {
     }
     #[cfg(feature = "encode")]
     if let Some(encoder) = app.encoder.take() {
-        encoder.shutdown(stdin_reader::save_budget(std::time::Duration::from_secs(3)));
+        encoder.shutdown(std::time::Duration::from_secs(3), stdin_reader::orphaned());
     }
 }
 

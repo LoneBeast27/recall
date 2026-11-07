@@ -4,7 +4,7 @@
 //! The controller always sends `quit` before it closes the pipe, so an end of stdin with
 //! no `quit` means the controller is gone (it crashed). The engine is then an orphan whose
 //! stdout and stderr lead nowhere: [`reader_ended`] quits it like `quit`, but the save in
-//! flight is finished first instead of aborted after 3 s ([`save_budget`]), and every
+//! flight is finished first instead of aborted after 3 s ([`orphaned`]), and every
 //! later write to stdout / stderr goes to NUL ([`quiet_std_streams`]) so no `println!` /
 //! `eprintln!` panics on the closed pipe.
 
@@ -49,40 +49,74 @@ pub fn reader_ended(end: ReaderEnd, quit: &AtomicBool, orphaned: &AtomicBool) {
     quit.store(true, Relaxed);
 }
 
-/// The saver's budget at quit: `normal`, or [`ORPHAN_SAVE_BUDGET`] for an orphan.
-pub fn save_budget(normal: Duration) -> Duration {
-    budget_for(ORPHANED.load(Relaxed), normal)
+/// The controller vanished: the saver finishes a save in flight at quit instead of
+/// aborting it after 3 s (`saver_stop`: only while the save still makes progress, at
+/// most [`ORPHAN_SAVE_BUDGET`]).
+pub fn orphaned() -> bool {
+    ORPHANED.load(Relaxed)
 }
 
-fn budget_for(orphaned: bool, normal: Duration) -> Duration {
-    if orphaned { ORPHAN_SAVE_BUDGET.max(normal) } else { normal }
+/// The engine's standard stream a write failed on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stream {
+    Out,
+    Err,
 }
 
-/// A write to stdout failed: its reader is gone. Later lines go to NUL; the stdin
-/// thread sees the end of the pipe and quits the engine after its saves.
-pub fn stdout_failed() {
-    ORPHANED.store(true, Relaxed);
-    quiet_std_streams();
+/// One standard stream pointed at NUL.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Quiet {
+    Stdout,
+    Stderr,
+}
+
+/// What a failed write to `stream` does: (the engine is an orphan, the streams to quiet).
+/// Stdout is the protocol: its reader gone means the controller is gone. Stderr is only
+/// the log: its reader gone quiets the log alone, the protocol keeps running.
+pub fn failure_plan(stream: Stream) -> (bool, &'static [Quiet]) {
+    match stream {
+        Stream::Out => (true, &[Quiet::Stdout, Quiet::Stderr]),
+        Stream::Err => (false, &[Quiet::Stderr]),
+    }
+}
+
+/// A write to `stream` failed: its reader is gone. Later lines on it go to NUL; a
+/// broken stdout also marks the engine orphaned (the stdin thread sees the end of the
+/// pipe and quits the engine after its saves).
+pub fn stream_failed(stream: Stream) {
+    let (orphan, quiet) = failure_plan(stream);
+    if orphan {
+        ORPHANED.store(true, Relaxed);
+    }
+    for which in quiet {
+        quiet_std_stream(*which);
+    }
 }
 
 /// Point stdout and stderr at NUL: their pipe's reader is gone.
 fn quiet_std_streams() {
+    quiet_std_stream(Quiet::Stdout);
+    quiet_std_stream(Quiet::Stderr);
+}
+
+/// Point one standard stream at NUL (once).
+fn quiet_std_stream(which: Quiet) {
     use std::os::windows::io::IntoRawHandle;
-    static QUIETED: AtomicBool = AtomicBool::new(false);
-    if QUIETED.swap(true, Relaxed) {
-        return;
-    }
+    static QUIETED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
     #[link(name = "kernel32")]
     extern "system" {
         fn SetStdHandle(which: u32, handle: *mut core::ffi::c_void) -> i32;
     }
-    const STD_OUTPUT_HANDLE: u32 = -11i32 as u32;
-    const STD_ERROR_HANDLE: u32 = -12i32 as u32;
-    for which in [STD_OUTPUT_HANDLE, STD_ERROR_HANDLE] {
-        if let Ok(nul) = std::fs::OpenOptions::new().write(true).open("NUL") {
-            // SAFETY: the handle is a fresh, owned NUL handle, handed over for good.
-            unsafe { SetStdHandle(which, nul.into_raw_handle()) };
-        }
+    let (slot, handle) = match which {
+        Quiet::Stdout => (0, -11i32 as u32), // STD_OUTPUT_HANDLE
+        Quiet::Stderr => (1, -12i32 as u32), // STD_ERROR_HANDLE
+    };
+    if QUIETED[slot].swap(true, Relaxed) {
+        return;
+    }
+    if let Ok(nul) = std::fs::OpenOptions::new().write(true).open("NUL") {
+        // SAFETY: the handle is a fresh, owned NUL handle, handed over for good.
+        unsafe { SetStdHandle(handle, nul.into_raw_handle()) };
     }
 }
 
@@ -178,7 +212,13 @@ mod tests {
         reader_ended(ReaderEnd::Eof, &quit, &orphaned);
         assert!(quit.load(Relaxed), "the orphaned engine quits");
         assert!(orphaned.load(Relaxed), "and lets the save in flight finish");
-        assert_eq!(budget_for(true, Duration::from_secs(3)), ORPHAN_SAVE_BUDGET);
-        assert_eq!(budget_for(false, Duration::from_secs(3)), Duration::from_secs(3));
+    }
+
+    #[test]
+    fn a_broken_stderr_quiets_the_log_only() {
+        // R6-overlay-4: the controller's log reader can stop alone; the protocol on
+        // stdout must keep running (no orphan, stdout untouched).
+        assert_eq!(failure_plan(Stream::Err), (false, &[Quiet::Stderr][..]));
+        assert_eq!(failure_plan(Stream::Out), (true, &[Quiet::Stdout, Quiet::Stderr][..]));
     }
 }

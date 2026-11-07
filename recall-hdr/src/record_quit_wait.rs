@@ -8,16 +8,17 @@
 
 use std::time::{Duration, Instant};
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::log;
 use crate::record_activity::EngineActivity;
+use crate::record_quit::QuitReason;
 
 /// The least a quit waits for a save still being written.
 pub const QUIT_SAVE_WAIT: Duration = Duration::from_secs(60);
 /// The island notice while a quit waits.
 pub const QUIT_WAIT_TITLE: &str = "Finishing the clip before quitting";
-pub const QUIT_WAIT_DETAIL: &str = "Recall quits once it is saved";
+pub const QUIT_WAIT_DETAIL: &str = "Recall quits once it is saved. Quit again to stop now";
 /// Why a save the quit gave up on failed.
 pub const CLOSED_DURING_SAVE: &str = "Recall was closed during the save";
 
@@ -36,6 +37,40 @@ pub enum QuitStep {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QuitWait {
     started: Option<Instant>,
+    /// The user asked to quit again during the wait: quit now (the save is reported lost).
+    forced: bool,
+}
+
+/// How long the pump sleeps per pass while a quit waits (no busy-spin on a passed deadline).
+pub const QUIT_PUMP_WAIT_MS: u32 = 250;
+
+/// The pump's sleep this pass: up to `cap` until the next deadline, but while a quit
+/// waits for a save the deadlines are not served (`tick` does not run), so a passed
+/// one must not turn the wait into a busy-spin: sleep [`QUIT_PUMP_WAIT_MS`] instead.
+pub fn pump_wait_ms(quitting: bool, deadline: Option<Instant>, now: Instant, cap: u32) -> u32 {
+    if quitting {
+        return QUIT_PUMP_WAIT_MS;
+    }
+    crate::app::wait_ms_at(deadline, now, cap)
+}
+
+/// A quit asked while `current` may already wait: the reason the quit now has. A tray
+/// Quit during the wait, or the same source asking again, quits at once (`forced`).
+pub fn on_quit_request(current: Option<QuitReason>, asked: QuitReason, wait: &mut QuitWait) -> Option<QuitReason> {
+    let Some(current) = current else { return Some(asked) };
+    if wait.waiting() && (asked == QuitReason::TrayMenu || asked == current) {
+        wait.forced = true;
+    }
+    Some(if asked == QuitReason::TrayMenu { asked } else { current })
+}
+
+/// The control pipe's view of a quit waiting for a save: `finishing_clip` (true while a
+/// quit was asked and a save is still written) and `finishing_progress` (`{"saves": N,
+/// "step": S, "bytes": B}`, `step` = the engine's progress mark, `bytes` = the bytes
+/// written so far, each null without a report; null when not finishing).
+pub fn finishing_fields(finishing: bool, saves: u32, mark: Option<u64>, bytes: Option<u64>) -> Value {
+    let progress = finishing.then(|| json!({"saves": saves, "step": mark, "bytes": bytes}));
+    json!({"finishing_clip": finishing, "finishing_progress": progress})
 }
 
 impl QuitWait {
@@ -44,6 +79,9 @@ impl QuitWait {
     pub fn step(&mut self, activity: &mut EngineActivity, now: Instant) -> QuitStep {
         if !activity.saves_writing(now) {
             return QuitStep::Go;
+        }
+        if self.forced {
+            return QuitStep::Lost(activity.saves_in_flight().max(1));
         }
         let first = self.started.is_none();
         let started = *self.started.get_or_insert(now);
@@ -56,8 +94,27 @@ impl QuitWait {
 
     /// The quit was called off (a cancelled session end): a later quit waits afresh.
     pub fn reset(&mut self) {
-        self.started = None;
+        *self = Self::default();
     }
+
+    /// A wait for a save is under way (its first tick passed).
+    pub fn waiting(&self) -> bool {
+        self.started.is_some()
+    }
+}
+
+/// Copy `fields` (an object) into the status object `status`.
+pub fn merge_fields(status: &mut Value, fields: Value) {
+    if let (Some(status), Value::Object(fields)) = (status.as_object_mut(), fields) {
+        status.extend(fields);
+    }
+}
+
+/// The answer to the control pipe's `quit`: `{"type":"quitting","finishing_clip":..,"finishing_progress":..}`.
+pub fn quitting_event(fields: Value) -> String {
+    let mut event = json!({"type": "quitting"});
+    merge_fields(&mut event, fields);
+    event.to_string()
 }
 
 /// The `save_failed` each save the quit gave up on gets (mod `engine`, as the engine's own).
@@ -90,6 +147,22 @@ impl crate::record_app::Controller {
         }
     }
 
+    /// A quit asked by `asked` (tray, pipe): a repeat during the wait quits at once.
+    pub(crate) fn ask_quit(&mut self, asked: QuitReason) {
+        let before = self.quit;
+        self.quit = on_quit_request(before, asked, &mut self.quit_wait);
+        if before.is_some() && self.quit_wait.forced {
+            log!("record: {} again during the save wait -- quitting now", asked.label());
+        }
+    }
+
+    /// `finishing_fields` now: a quit was asked and a save is still being written.
+    pub(crate) fn finishing_now(&mut self, now: Instant) -> Value {
+        let finishing = self.quit.is_some() && self.activity.saves_writing(now);
+        let a = &self.activity;
+        finishing_fields(finishing, a.saves_in_flight(), a.writing_mark(), a.writing_bytes())
+    }
+
     /// While a quit waits: engine events and the status only (no retarget, no restart).
     pub(crate) fn quitting_tick(&mut self, now: Instant) {
         self.drain_engine_events(now);
@@ -98,9 +171,12 @@ impl crate::record_app::Controller {
 }
 
 #[cfg(test)]
+#[path = "record_quit_wait_tests.rs"]
+mod more_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::Value;
 
     fn writing(step: u64) -> Value {
         json!({"type":"status","save_writing":{"bytes":0,"queued":0,"step":step}})
