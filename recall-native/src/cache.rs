@@ -11,6 +11,11 @@ pub fn budget_bytes() -> u64 {
     storage::budget_bytes()
 }
 
+/// Why the cache size is read-only right now, if it is.
+pub fn budget_note() -> Option<String> {
+    storage::budget_note()
+}
+
 pub fn set_budget_bytes(bytes: u64) {
     storage::set_budget_bytes(bytes)
 }
