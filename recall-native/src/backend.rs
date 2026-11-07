@@ -498,7 +498,7 @@ use working::working_path;
 pub use run_export::export_clip;
 #[allow(unused_imports)] // the editor reads it; the examples build backend without one
 pub use run_export::export_progress;
-pub(crate) use run_export::{engine_export,export_cancelled,export_queued,export_target};
+pub(crate) use run_export::{engine_export,export_cancelled,export_queued,export_target,name_after};
 /// Drive types and cache usage for Settings (walks the cache: call from a worker thread).
 pub fn storage_report(notice:Option<String>)->StorageReport{
     let cache=storage::usage_detail();

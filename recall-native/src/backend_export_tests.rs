@@ -27,8 +27,34 @@ fn a_failed_engine_run_leaves_none_of_its_temps() {
     assert!(others.iter().all(|name| sandbox.join(name).exists()), "other exports and files stay");
 }
 
+/// R2-6: the next export takes the highest number + 1, so names sort by age even after an
+/// older export was deleted.
 #[test]
-fn an_export_during_a_recording_runs_as_a_background_job() {
-    assert!(yields_to_recording(true), "EcoQoS while a game records");
-    assert!(!yields_to_recording(false), "full speed otherwise");
+fn a_deleted_export_number_is_not_reused() {
+    let sandbox = crate::test_temp::TempDir::sandbox("recall-export-names-max");
+    std::fs::write(sandbox.join("clip-edited-60fps-2.mp4"), b"x").unwrap(); // -1 was deleted
+    std::fs::write(sandbox.join("clip-edited-60fps-10.mp4"), b"x").unwrap();
+    std::fs::write(sandbox.join("clip-edited-60fps-x.mp4"), b"x").unwrap();
+    std::fs::write(sandbox.join("clip-edited-60fps-99-2.mp4"), b"x").unwrap();
+    assert_eq!(free_name(&sandbox, "clip-edited-60fps").unwrap(), sandbox.join("clip-edited-60fps-11.mp4"));
+    assert_eq!(free_name(&sandbox, "clip-edited").unwrap(), sandbox.join("clip-edited-1.mp4"), "another base's names do not count");
+}
+
+/// X11 through the export's own call path: `export_clip` hands the engine `background = true`
+/// while a game records (EcoQoS), and full speed otherwise.
+#[test]
+fn an_export_during_a_recording_asks_the_engine_for_a_background_run() {
+    static BACKGROUND: AtomicBool = AtomicBool::new(false);
+    #[allow(clippy::too_many_arguments)] // the shape of `engine_export`
+    fn fake_engine(_: &ClipInfo, output: &Path, _: &EditPlan, fps: u32, _: &ExportSettings, _: &'static AtomicBool, _: Option<storage::OnLine>, background: bool) -> Result<ExportSummary, String> {
+        BACKGROUND.store(background, Ordering::SeqCst);
+        Ok(ExportSummary { path: output.to_string_lossy().into_owned(), fps: Some(fps), frames: 1, seconds: 1.0, bytes: 1, lossless: false, width: 2, height: 2 })
+    }
+    let info = ClipInfo { path: "E:/Recall/Raw/a.mp4".into(), duration: 10.0, width: 1920, height: 1080, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() };
+    let plan = EditPlan { mix_down: None, ranges: vec![crate::edit_model::TimeRange::new(0.0, 5.0)], audio: Vec::new() };
+    let output = Path::new("E:/Recall/Edited/a-edited-60fps-1.mp4");
+    run_export(&info, output, &plan, 60, &ExportSettings::default(), true, fake_engine).unwrap();
+    assert!(BACKGROUND.load(Ordering::SeqCst), "EcoQoS while a game records");
+    run_export(&info, output, &plan, 60, &ExportSettings::default(), false, fake_engine).unwrap();
+    assert!(!BACKGROUND.load(Ordering::SeqCst), "full speed otherwise");
 }

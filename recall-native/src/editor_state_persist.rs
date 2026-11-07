@@ -74,7 +74,11 @@ impl EditorState {
             self.export_error = None;
             self.flush(workers);
             crate::backend::arm_export();
-            workers.job(self.export_job(info));
+            let job = self.export_job(info);
+            if let Job::Export(info, plan, fps, settings) = &job {
+                crate::services::pre_encode::await_export(crate::services::pre_encode::key(info, plan, *fps, settings));
+            }
+            workers.job(job);
         }
     }
 

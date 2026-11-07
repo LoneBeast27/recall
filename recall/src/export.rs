@@ -17,6 +17,7 @@ pub(crate) mod bad_audio;
 mod cfr;
 mod edited;
 pub(crate) mod edit_pcm;
+mod frame_placer;
 pub(crate) mod keyframes;
 mod lossless;
 pub(crate) mod mix_limit;
@@ -32,6 +33,8 @@ mod video_encoder;
 
 #[cfg(test)]
 mod bad_packet_tests;
+#[cfg(test)]
+mod bad_packet_reader_tests;
 #[cfg(test)]
 mod edited_tests;
 #[cfg(test)]
