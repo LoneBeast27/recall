@@ -9,7 +9,7 @@ use wasapi::{DeviceCollection, Direction, SampleType, StreamMode, WaveFormat};
 
 use super::apps::Leveller;
 use super::capture_loop::{silence_to_clock, watch_for, Capture, Clock, Ended, Notices, Watch};
-use super::endpoints::{choose_endpoint, opened_own, Pick};
+use super::endpoints::{choose_endpoint_by, opened_own, Pick};
 use super::rebind::{key_for, rebind_for, Key, Rebind, Run};
 use super::{LoopbackTarget, TrackRing};
 
@@ -92,7 +92,9 @@ fn pick_device(direction: &Direction, (device, device_id): (&str, &str), input: 
     let want = Some(device.trim().to_owned()).filter(|w| !w.is_empty()).or(test_mic).filter(|w| !w.trim().is_empty());
     let devices: Vec<wasapi::Device> = (0..n).filter_map(|i| collection.get_device_at_index(i).ok()).collect();
     let names: Vec<String> = devices.iter().map(|d| d.get_friendlyname().unwrap_or_default()).collect();
-    match choose_endpoint(&names, want.as_deref(), exact)? {
+    // The saved id tells same-named endpoints apart (A4 amendment); the test mic has none.
+    let want_id = if device.trim().is_empty() { "" } else { device_id };
+    match choose_endpoint_by(&names, (want.as_deref(), want_id), exact, |i| devices.get(i).and_then(|d| d.get_id().ok()))? {
         Pick::Named(i) => {
             let dev = devices.into_iter().nth(i).expect("index from names");
             // With no saved id the endpoint id is never read (R7-deep-audio-4): it cannot be own.

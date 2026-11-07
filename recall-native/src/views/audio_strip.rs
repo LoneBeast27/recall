@@ -7,7 +7,6 @@ use gpui::{AnyElement, Context, CursorStyle, Div, FontWeight, ImageSource, Mouse
 use crate::{
     root::Root,
     services::{
-        audio_devices,
         audio_sources::{self as sources, Kind, Source},
         audio_mute::shown_level,
         meters::{bar_fraction, with_gain},
@@ -107,12 +106,12 @@ impl Root {
                 .map_or_else(|| format!("{} (not running)", crate::services::audio_apps::exe_stem(&source.exe)), |p| p.label.clone()),
             kind => {
                 let lists = page.devices.as_ref();
-                let (names, default) = match lists {
-                    Some(l) if kind.uses_inputs() => (Some(l.inputs.as_slice()), l.default_input.as_deref()),
-                    Some(l) => (Some(l.outputs.as_slice()), l.default_output.as_deref()),
-                    None => (None, None),
+                let default = match lists {
+                    Some(l) if kind.uses_inputs() => l.default_input.as_deref(),
+                    Some(l) => l.default_output.as_deref(),
+                    None => None,
                 };
-                audio_devices::device_label(&source.device, names, default)
+                crate::services::audio_pick::source_device_label(source, lists, default)
             }
         }
     }

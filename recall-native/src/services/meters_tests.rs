@@ -7,7 +7,7 @@ fn source(kind: Kind, device: &str, exe: &str) -> Source {
 
 #[test]
 fn each_source_is_metered_the_way_the_recorder_captures_it() {
-    let device = |render: bool, d: &str| MeterTarget::Device { render, device: d.into() };
+    let device = |render: bool, d: &str| MeterTarget::Device { render, device: d.into(), device_id: String::new() };
     assert_eq!(spec_for(&source(Kind::Input, " Microphone (USB Audio Device) ", ""), None).target, device(false, "Microphone (USB Audio Device)"));
     assert_eq!(spec_for(&source(Kind::Output, "", ""), None).target, device(true, ""));
     assert_eq!(spec_for(&source(Kind::Game, "Speakers (USB Audio Device)", ""), None).target, device(true, "Speakers (USB Audio Device)"), "desktop: the output");

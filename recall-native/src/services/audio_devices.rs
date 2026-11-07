@@ -171,8 +171,14 @@ pub fn found(saved: &str, listed: Option<&[String]>) -> Found {
 /// a match shows the endpoint's real name (a saved "3- X" that opens "4- X" reads "4- X"); a
 /// name two or more endpoints share or match says how many (R5-deep-audio-4).
 pub fn device_label(saved: &str, listed: Option<&[String]>, default: Option<&str>) -> String {
+    label_for(saved, found(saved, listed), listed, default)
+}
+
+/// [`device_label`] for a [`Found`] already worked out (`audio_pick::source_found` adds the
+/// endpoint-id tie-break).
+pub fn label_for(saved: &str, found: Found, listed: Option<&[String]>, default: Option<&str>) -> String {
     let saved = saved.trim();
-    match found(saved, listed) {
+    match found {
         Found::Default => match default {
             Some(name) => format!("Windows default ({name})"),
             None => "Windows default".to_owned(),
