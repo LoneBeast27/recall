@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 const RATE: u32 = 100; // one frame per 10 ms, mono
 
-pub(super) fn ring() -> TrackRing {
+pub(in crate::audio) fn ring() -> TrackRing {
     TrackRing {
         name: "in-1",
         title: Mutex::new("Voice"),
@@ -33,9 +33,9 @@ fn len(ring: &TrackRing) -> usize {
 }
 
 /// Moves on by each pause; ends the loop once past `stop_at`.
-pub(super) struct FakeClock {
-    pub(super) now: Rc<Cell<Duration>>,
-    pub(super) stop_at: Duration,
+pub(in crate::audio) struct FakeClock {
+    pub(in crate::audio) now: Rc<Cell<Duration>>,
+    pub(in crate::audio) stop_at: Duration,
 }
 
 impl Clock for FakeClock {
@@ -206,19 +206,19 @@ fn a_moved_windows_default_reopens_at_once_without_a_gap() {
 
 /// Notices as Windows would send them: devices changed once the clock passes `devices_at`; a
 /// default id the test sets.
-pub(super) struct FakeNotices {
+pub(in crate::audio) struct FakeNotices {
     now: Rc<Cell<Duration>>,
     devices_at: Cell<Option<Duration>>,
     default: RefCell<Option<String>>,
 }
 
 impl FakeNotices {
-    pub(super) fn none(now: &Rc<Cell<Duration>>) -> Self {
+    pub(in crate::audio) fn none(now: &Rc<Cell<Duration>>) -> Self {
         FakeNotices { now: now.clone(), devices_at: Cell::new(None), default: RefCell::new(None) }
     }
 
     /// Devices change once, when the clock passes `at`.
-    pub(super) fn devices_at(now: &Rc<Cell<Duration>>, at: Duration) -> Self {
+    pub(in crate::audio) fn devices_at(now: &Rc<Cell<Duration>>, at: Duration) -> Self {
         FakeNotices { devices_at: Cell::new(Some(at)), ..Self::none(now) }
     }
 }

@@ -39,7 +39,9 @@ powershell -NoProfile -File scripts\install.ps1
   press at once and a chime plays when the clip is safe; the small in-game notice shows it too.
   Clips are written to the SSD first (about a second) and moved to the clip folder in the
   background, so the hard drive's speed never delays a save. **Alt+M** mutes your microphone
-  in clips.
+  in clips. A line-in or capture card can skip it (Audio page → the strip's menu); Recall knows
+  that device by its Windows endpoint, which for two identical USB devices without a serial
+  number follows the USB port, so keep each of them in the same port.
 - **Two-step shortcuts:** press **Alt + `** (the key left of 1), then
   **1** bookmark · **2** save the last 30 s · **3** screenshot · **4** start/stop a full
   recording. The game never receives the number. Turn them off in Settings → Shortcuts.
