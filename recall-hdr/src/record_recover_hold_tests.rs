@@ -134,3 +134,48 @@ fn a_hang_during_a_long_recording_end_to_end_ends_it_early_and_restarts_once() {
     assert_eq!(sent.len(), 1);
     assert!(sent[0].contains("\"cmd\":\"record_fail\""), "{sent:?}");
 }
+
+#[test]
+fn the_restart_waits_up_to_20_s_for_the_recording_to_end_early() {
+    // record_fail went out: the recording thread may need a while to finish the part on a
+    // slow HDD. The quit waits for `recording_failed` (the activity leaves recording), at
+    // most 20 s; then it quits anyway and the next start recovers the .part.
+    let t0 = Instant::now();
+    let wait = EndingEarly::new(t0, 0);
+    assert!(!wait.restart_now(t0 + Duration::from_secs(1), true), "still finishing the part");
+    assert!(!wait.restart_now(t0 + Duration::from_secs(19), true));
+    assert!(wait.restart_now(t0 + Duration::from_secs(3), false), "recording_failed came: quit now");
+    assert!(wait.restart_now(t0 + Duration::from_secs(20), true), "20 s: quit anyway");
+}
+
+#[test]
+fn a_healthy_minute_after_giving_up_lets_a_later_failure_restart_again() {
+    let t0 = Instant::now();
+    let up = EngineHealth::Running { pid: 9 };
+    let mut r = EncoderRecovery::default();
+    let mut outs = Vec::new();
+    for s in 0..=140u64 {
+        let (state, progress) = match s {
+            0..=10 => ("recording", 3),  // hung: restart at 10
+            11..=30 => ("recording", 4), // hung again at 21: gives up
+            31..=110 => ("recording", s), // then it beats: a healthy minute by 91
+            _ => ("error", s),           // a real `failed` later in the same game
+        };
+        let out = r.step_held(t0 + Duration::from_secs(s), state, up, progress, false, true, Hold::default(), "game-a");
+        if out != Recovery::Nothing && out != Recovery::Recovered {
+            outs.push((s, out));
+        }
+    }
+    assert_eq!(outs, [(10, Recovery::Restart), (21, Recovery::GaveUp), (127, Recovery::Restart)]);
+}
+
+#[test]
+fn a_new_engine_during_the_wait_cancels_the_restart() {
+    // The supervisor restarted a crashed engine while record_fail waited: the fresh engine
+    // (a new hello) must not be restarted again.
+    let t0 = Instant::now();
+    let wait = EndingEarly::new(t0, 3);
+    assert_eq!(wait.decide(t0 + Duration::from_secs(5), true, 3), EndDecision::Wait);
+    assert_eq!(wait.decide(t0 + Duration::from_secs(6), false, 4), EndDecision::Cancel, "a fresh engine restarted again");
+    assert_eq!(wait.decide(t0 + Duration::from_secs(6), false, 3), EndDecision::RestartNow);
+}

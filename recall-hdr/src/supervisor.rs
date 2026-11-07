@@ -35,8 +35,9 @@
 mod manager;
 #[path = "supervisor_protocol.rs"]
 mod protocol;
+#[path = "supervisor_stdin.rs"]
+mod stdin;
 
-use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -134,15 +135,16 @@ impl Supervisor {
         self.shared.health()
     }
 
-    /// Ask the live engine to save its replay buffer. Best-effort: a no-op when
-    /// no engine is running (Saved / SaveFailed events are the visible outcome).
-    pub fn send_save_clip(&self) {
-        self.shared.send_line(r#"{"cmd":"save_clip"}"#);
+    /// Ask the live engine to save its replay buffer. False when it was not queued (no
+    /// engine, or one not reading its stdin): the caller says so.
+    pub fn send_save_clip(&self) -> bool {
+        self.shared.send_line(r#"{"cmd":"save_clip"}"#)
     }
 
-    /// Forward an arbitrary engine protocol command line (control-pipe path).
-    pub fn send_engine_line(&self, line: &str) {
-        self.shared.send_line(line);
+    /// Forward an arbitrary engine protocol command line. False when it was not queued
+    /// (no engine, or a full queue: the engine is not reading); never blocks.
+    pub fn send_engine_line(&self, line: &str) -> bool {
+        self.shared.send_line(line)
     }
 
     /// Run the engine with `spec` (restarting it if one is live), or stop it
@@ -232,7 +234,9 @@ struct Shared {
     /// `(generation, spec)`: every retarget bumps the generation.
     desired: Mutex<(u64, Option<EngineSpec>)>,
     /// Stdin of the live child, so commands / quit can reach it.
-    child_stdin: Mutex<Option<std::process::ChildStdin>>,
+    /// The live child's stdin queue (`supervisor_stdin.rs`): held only to queue a line,
+    /// never across a write, so neither the pump nor the kill path blocks on a full pipe.
+    child_stdin: Mutex<Option<stdin::StdinQueue>>,
     hello_count: AtomicU32,
     spawn_count: AtomicU32,
     cache: Mutex<EngineCache>,
@@ -343,24 +347,29 @@ impl Shared {
     }
 
     fn set_child_stdin(&self, stdin: Option<std::process::ChildStdin>) {
-        if let Ok(mut g) = self.child_stdin.lock() {
-            *g = stdin;
-        }
+        self.attach_writer(stdin.map(|s| Box::new(s) as Box<dyn std::io::Write + Send>));
     }
 
-    /// Send one JSON command line to the child if we hold its stdin. Best-effort.
-    fn send_line(&self, line: &str) {
-        if let Ok(mut g) = self.child_stdin.lock() {
-            if let Some(stdin) = g.as_mut() {
-                let _ = stdin.write_all(line.as_bytes());
-                let _ = stdin.write_all(b"\n");
-                let _ = stdin.flush();
-            }
-        }
+    /// The engine's stdin (tests inject a writer): its own writer thread and queue.
+    fn attach_writer(&self, w: Option<Box<dyn std::io::Write + Send>>) {
+        let queue = w.map(stdin::StdinQueue::start);
+        let mut g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
+        *g = queue; // the old queue closes: its writer ends after its current write
     }
 
-    fn send_quit(&self) {
-        self.send_line(r#"{"cmd":"quit"}"#);
+    /// Queue one JSON command line for the child, if one runs. Never blocks: a line the
+    /// engine is not reading is dropped once its queue is full (`supervisor_stdin.rs`).
+    /// True when queued.
+    fn send_line(&self, line: &str) -> bool {
+        let g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
+        g.as_ref().is_some_and(|queue| queue.send(line))
+    }
+
+    /// `quit` takes the queue's reserved slot: a healthy engine behind a full queue still
+    /// gets its clean finish (`supervisor_stdin.rs`).
+    fn send_quit(&self) -> bool {
+        let g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
+        g.as_ref().is_some_and(|queue| queue.send_quit(r#"{"cmd":"quit"}"#))
     }
 
     fn clear_cache(&self) {
@@ -431,6 +440,34 @@ fn engine_command(path: &Path, spec: &EngineSpec) -> Command {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// An engine stdin for tests elsewhere: `send` answers as `Supervisor::send_engine_line`.
+#[cfg(test)]
+pub(crate) struct TestPipe(Arc<Shared>);
+
+#[cfg(test)]
+impl TestPipe {
+    /// A pipe whose engine reads nothing (every write blocks) and whose queue is full.
+    pub fn wedged_and_full() -> TestPipe {
+        let shared = Arc::new(Shared::new(None));
+        shared.attach_writer(Some(Box::new(tests::Wedged)));
+        for _ in 0..1_000 {
+            shared.send_line("{}");
+        }
+        TestPipe(shared)
+    }
+
+    /// A pipe whose engine reads every line.
+    pub fn healthy() -> TestPipe {
+        let shared = Arc::new(Shared::new(None));
+        shared.attach_writer(Some(Box::new(std::io::sink())));
+        TestPipe(shared)
+    }
+
+    pub fn send(&self, line: &str) -> bool {
+        self.0.send_line(line)
+    }
+}
 
 #[cfg(test)]
 #[path = "supervisor_tests.rs"]

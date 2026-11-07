@@ -18,14 +18,26 @@ impl App {
         match val.get("cmd").and_then(|c| c.as_str()) {
             Some("save_clip") => {
                 log!("app: control save_clip -> engine");
-                match val.get("seconds").and_then(|s| s.as_u64()) {
+                let queued = match val.get("seconds").and_then(|s| s.as_u64()) {
                     Some(s) => supervisor.send_engine_line(&format!(r#"{{"cmd":"save_clip","seconds":{s}}}"#)),
                     None => supervisor.send_save_clip(),
+                };
+                if crate::record_dispatch::legacy_save_effects(queued).contains(&crate::record_dispatch::Effect::NotResponding) {
+                    let reason = crate::record_dispatch::NOT_RESPONDING;
+                    log!("app: control save_clip not sent: {reason}");
+                    hub.event("engine", &serde_json::json!({"type": "save_failed", "reason": reason}).to_string());
+                    crate::supervisor::beep_failure();
                 }
             }
             Some("export_clip") => {
                 if matches!(supervisor.health(), EngineHealth::Running { .. }) {
-                    supervisor.send_engine_line(&val.to_string());
+                    if crate::record_dispatch::command_effects(supervisor.send_engine_line(&val.to_string())).contains(&crate::record_dispatch::Effect::NotResponding) {
+                        hub.event("engine", &serde_json::json!({
+                            "type": "export_failed", "source": val.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+                            "reason": crate::record_dispatch::NOT_RESPONDING
+                        }).to_string());
+                        crate::supervisor::beep_failure();
+                    }
                 } else {
                     hub.event("engine", &serde_json::json!({
                         "type": "export_failed", "source": val.get("path").and_then(|v| v.as_str()).unwrap_or(""),

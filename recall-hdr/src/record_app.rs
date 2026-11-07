@@ -144,6 +144,8 @@ pub struct Controller {
     pub(crate) power: crate::record_power::PowerPlanner,
     /// Engine restart after a lasting encoder failure (`record_recover`).
     pub(crate) recovery: crate::record_recover::EncoderRecovery,
+    /// A recovery restart waiting for the long recording to end early (`record_recover`).
+    pub(crate) ending_early: Option<crate::record_recover::EndingEarly>,
 }
 
 /// Entry point. Returns the process exit code.
@@ -243,6 +245,7 @@ pub fn run() -> i32 {
         render: RenderCheck::new(can_trace),
         power: Default::default(),
         recovery: Default::default(),
+        ending_early: None,
     };
     if !ctl.can_trace {
         log!("record: FPS needs Performance Log Users (run the installer, then sign in again); stats show FPS as -");
