@@ -70,17 +70,78 @@ else { Write-Warning "Install folder: $InstallDir ($($drive.model)): Windows can
 # The recorder's control pipe is per session too (recall-hdr control_pipe.rs).
 $session = (Get-Process -Id $PID).SessionId
 $pipeName = "recall-hdr-control-$session"
-# Which recorder this run may quit or talk to: only a controller started from exactly this path
-# (case-insensitive full path), and only through a pipe that controller itself serves. A
-# sandboxed install sets RECALL_CONTROLLER_PATH (and RECALL_LEGACY_PIPE) so it never reaches
-# the live recorder that owns this session's real pipe.
-$controllerPath = [IO.Path]::GetFullPath($(if ($env:RECALL_CONTROLLER_PATH) { $env:RECALL_CONTROLLER_PATH } else { Join-Path $InstallDir 'recall-hdr.exe' }))
+# Paths are compared by what they name, not how they are spelled: a \\?\ prefix is stripped,
+# junctions, symlinks, subst drives and 8.3 names resolve (GetFinalPathNameByHandleW when the
+# path opens, else GetLongPathNameW, else the parent folder resolved plus the name), case is
+# ignored by the callers. An elevated process's image path, which WMI leaves empty for a
+# non-elevated caller, is read with QueryFullProcessImageNameW.
+if (-not ('RecallInstall.PathId' -as [type])) {
+  Add-Type -Name PathId -Namespace RecallInstall -MemberDefinition @'
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern IntPtr CreateFileW(string name, uint access, uint share, IntPtr security, uint disposition, uint flags, IntPtr template);
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern uint GetFinalPathNameByHandleW(IntPtr file, System.Text.StringBuilder path, uint size, uint flags);
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern uint GetLongPathNameW(string shortPath, System.Text.StringBuilder longPath, uint size);
+[DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] public static extern bool QueryFullProcessImageNameW(IntPtr process, uint flags, System.Text.StringBuilder name, ref uint size);
+[DllImport("kernel32.dll", SetLastError = true)] public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+[DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+public static string Strip(string p) {
+  if (p.StartsWith(@"\\?\UNC\")) return @"\\" + p.Substring(8);
+  if (p.StartsWith(@"\\?\") || p.StartsWith(@"\??\")) return p.Substring(4);
+  return p;
+}
+public static string Normalize(string path) {
+  string full;
+  try { full = System.IO.Path.GetFullPath(Strip(path)); } catch (Exception) { return Strip(path).TrimEnd('\\'); }
+  // FILE_READ_ATTRIBUTES, share read/write/delete, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS (folders open too).
+  IntPtr file = CreateFileW(full, 0x80, 7, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero);
+  if (file != new IntPtr(-1)) {
+    try {
+      var resolved = new System.Text.StringBuilder(1024);
+      uint n = GetFinalPathNameByHandleW(file, resolved, 1024, 0);
+      if (n > 0 && n < 1024) return Strip(resolved.ToString()).TrimEnd('\\');
+    } finally { CloseHandle(file); }
+  }
+  var longName = new System.Text.StringBuilder(1024);
+  uint m = GetLongPathNameW(full, longName, 1024);
+  if (m > 0 && m < 1024) return longName.ToString().TrimEnd('\\');
+  // Not there yet (a first install): resolve the folder that holds it.
+  string parent = System.IO.Path.GetDirectoryName(full);
+  if (parent == null) return full.TrimEnd('\\');
+  return Normalize(parent).TrimEnd('\\') + "\\" + System.IO.Path.GetFileName(full);
+}
+public static string ImagePath(uint pid) {
+  // PROCESS_QUERY_LIMITED_INFORMATION: granted on this account's elevated processes too.
+  IntPtr process = OpenProcess(0x1000, false, pid);
+  if (process == IntPtr.Zero) return null;
+  try {
+    var name = new System.Text.StringBuilder(1024); uint size = 1024;
+    return QueryFullProcessImageNameW(process, 0, name, ref size) ? name.ToString() : null;
+  } finally { CloseHandle(process); }
+}
+'@
+}
+function Get-ExePath($p) { if ($p.ExecutablePath) { $p.ExecutablePath } else { [RecallInstall.PathId]::ImagePath([uint32]$p.ProcessId) } }
+function Format-Recorder($p) {
+  $path = Get-ExePath $p
+  "$($p.Name) (pid $($p.ProcessId), $(if ($path) { $path } else { 'path unreadable' }))"
+}
+# Which recorder this run may quit or talk to (Get-Controller below), and only through a pipe
+# that controller itself serves. A sandboxed install sets RECALL_CONTROLLER_PATH (and
+# RECALL_LEGACY_PIPE) so it never reaches the live recorder that owns this session's real pipe.
+$controllerPath = [RecallInstall.PathId]::Normalize($(if ($env:RECALL_CONTROLLER_PATH) { $env:RECALL_CONTROLLER_PATH } else { Join-Path $InstallDir 'recall-hdr.exe' }))
+$installRoot = [RecallInstall.PathId]::Normalize($InstallDir).TrimEnd('\') + '\'
+function Test-InInstallDir([string]$path) { $path -and [RecallInstall.PathId]::Normalize($path).StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase) }
+# A sandbox's controller must sit inside its own -InstallDir: the app close, the wait and the swap
+# below all act on -InstallDir, so a sandbox that set only the env var would replace the real
+# install and close the real app (audit R4-startup-4). Refused before anything is closed.
+if ($env:RECALL_CONTROLLER_PATH -and -not (Test-InInstallDir $controllerPath)) {
+  throw "RECALL_CONTROLLER_PATH ($controllerPath) is not inside -InstallDir ($InstallDir). A sandboxed install must pass its own folder as -InstallDir; nothing was closed or replaced."
+}
 
 # 2a. Never close the app under the user: refuse while the installed app runs (checked before any
 #     build work). Its window counts even when minimized; a hidden instance still locks the files.
 #     Run again after the build (Assert-Closed below): the build takes minutes, and an app reopened
 #     meanwhile would otherwise run on from `.old` next to the new engine.
-function Get-InstalledApp { Get-CimInstance Win32_Process -Filter "Name = 'recall-native.exe' AND SessionId = $session" | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) } }
+function Get-InstalledApp { Get-CimInstance Win32_Process -Filter "Name = 'recall-native.exe' AND SessionId = $session" | Where-Object { Test-InInstallDir (Get-ExePath $_) } }
 function Assert-AppClosed {
   $app = @(Get-InstalledApp)
   if ($app.Count -and -not $CloseApp) {
@@ -105,9 +166,13 @@ public delegate bool EnumProc(IntPtr h, IntPtr l);
 }
 Assert-AppClosed
 
-# 2. Quit the running recorder gracefully, wherever it runs from (only one controller can run;
-#    its quit also stops the engine and overlay). Done before building: a recorder started from
-#    target-dev\release locks the files the build replaces.
+# 2. Quit the running recorder gracefully (only one controller can run; its quit also stops the
+#    engine and overlay). Done before building: a recorder started from target-dev\release locks
+#    the files the build replaces.
+#    A real install quits every recall-hdr.exe in this session, wherever it runs from (another
+#    folder, an 8.3 or junction spelling, an elevated one WMI can't read), and stops with an
+#    error naming any that won't quit. Only a sandbox (RECALL_CONTROLLER_PATH) quits just the
+#    controller at that path and leaves every other recorder alone (Get-Controller).
 function Get-PipeServer($pipe) {
   if (-not ('RecallInstall.Pipe' -as [type])) {
     Add-Type -Name Pipe -Namespace RecallInstall -MemberDefinition @'
@@ -117,37 +182,69 @@ function Get-PipeServer($pipe) {
   $id = [uint32]0
   if ([RecallInstall.Pipe]::GetNamedPipeServerProcessId($pipe.SafePipeHandle.DangerousGetHandle(), [ref]$id)) { [int]$id } else { 0 }
 }
-# The account a process runs as (its token user SID), or $null when it can't be read.
+# The account a process runs as: its token user SID, else the SID the session list
+# (WTSEnumerateProcessesW) gives for it, or $null when neither can be read. A same-account
+# elevated recorder's token can't be opened from a non-elevated run; the list still names its
+# account (as recall-native pipe_owner.rs does).
 function Get-ProcessUserSid([int]$id) {
-  if (-not ('RecallInstall.Token' -as [type])) {
-    Add-Type -Name Token -Namespace RecallInstall -MemberDefinition @'
+  if (-not ('RecallInstall.Account' -as [type])) {
+    Add-Type -Name Account -Namespace RecallInstall -MemberDefinition @'
 [DllImport("kernel32.dll", SetLastError = true)] public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
 [DllImport("advapi32.dll", SetLastError = true)] public static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
 [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+[StructLayout(LayoutKind.Sequential)] public struct WtsProcessInfo { public uint SessionId; public uint ProcessId; public IntPtr pProcessName; public IntPtr pUserSid; }
+[DllImport("wtsapi32.dll", SetLastError = true)] public static extern bool WTSEnumerateProcessesW(IntPtr server, uint reserved, uint version, out IntPtr list, out uint count);
+[DllImport("wtsapi32.dll")] public static extern void WTSFreeMemory(IntPtr memory);
+public static string WtsSid(uint pid) {
+  IntPtr list; uint count;
+  if (!WTSEnumerateProcessesW(IntPtr.Zero, 0, 1, out list, out count)) return null;
+  try {
+    int size = Marshal.SizeOf(typeof(WtsProcessInfo));
+    for (long i = 0; i < count; i++) {
+      var info = (WtsProcessInfo)Marshal.PtrToStructure(new IntPtr(list.ToInt64() + i * size), typeof(WtsProcessInfo));
+      if (info.ProcessId == pid) return info.pUserSid == IntPtr.Zero ? null : new System.Security.Principal.SecurityIdentifier(info.pUserSid).Value;
+    }
+    return null;
+  } finally { WTSFreeMemory(list); }
+}
 '@
   }
+  $sid = Get-TokenUserSid $id; if ($sid) { $sid } else { [RecallInstall.Account]::WtsSid([uint32]$id) }
+}
+function Get-TokenUserSid([int]$id) {
   # PROCESS_QUERY_LIMITED_INFORMATION, TOKEN_QUERY.
-  $process = [RecallInstall.Token]::OpenProcess(0x1000, $false, [uint32]$id)
+  $process = [RecallInstall.Account]::OpenProcess(0x1000, $false, [uint32]$id)
   if ($process -eq [IntPtr]::Zero) { return $null }
   try {
     $token = [IntPtr]::Zero
-    if (-not [RecallInstall.Token]::OpenProcessToken($process, 8, [ref]$token)) { return $null }
-    try { ([Security.Principal.WindowsIdentity]::new($token)).User.Value } finally { [void][RecallInstall.Token]::CloseHandle($token) }
-  } finally { [void][RecallInstall.Token]::CloseHandle($process) }
+    if (-not [RecallInstall.Account]::OpenProcessToken($process, 8, [ref]$token)) { return $null }
+    try { ([Security.Principal.WindowsIdentity]::new($token)).User.Value } finally { [void][RecallInstall.Account]::CloseHandle($token) }
+  } finally { [void][RecallInstall.Account]::CloseHandle($process) }
 }
 $mySid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+# Each owner-check reason is warned once per run; a refusal also ends the status probe (step 6).
+$script:ownerWarned = @(); $script:ownerRefused = $false
 function Send-Recorder([string]$line, [string]$name = $pipeName, [int]$tries = 5) {
   # The controller serves one pipe instance at a time: retry a connect that lands between
   # instances, and keep the client open briefly so the line is read before it disconnects.
   # Nothing is written unless the pipe's server is the controller this run owns (Get-Controller):
   # another recorder on the same name (the live one, during a sandboxed install) is left alone.
-  # A server running as another account is refused first, with a warning (deep-startup-p3 a).
+  # A server running as another account, or one whose account can't be read, is refused first,
+  # with one warning per reason (deep-startup-p3 a, R4-startup-2).
   for ($attempt = 0; $attempt -lt $tries; $attempt++) {
     try {
       $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', $name, [IO.Pipes.PipeDirection]::InOut)
       $pipe.Connect(1500)
       $server = Get-PipeServer $pipe
-      if ($server -and (Get-ProcessUserSid $server) -ne $mySid) { $pipe.Dispose(); Write-Warning "another user owns the Recall pipe ($name, pid $server): nothing sent."; return $false }
+      if ($server) {
+        $owner = Get-ProcessUserSid $server
+        if ($owner -ne $mySid) {
+          $pipe.Dispose(); $script:ownerRefused = $true
+          $why = if ($owner) { "another user owns the Recall pipe ($name, pid $server runs as $owner)" } else { "can't tell which account runs the Recall pipe ($name, pid $server)" }
+          if ($script:ownerWarned -notcontains $why) { $script:ownerWarned += $why; Write-Warning "${why}: nothing sent." }
+          return $false
+        }
+      }
       if (-not $server -or -not (@(Get-Controller) | Where-Object { [int]$_.ProcessId -eq $server })) { $pipe.Dispose(); return $false }
       $w = [IO.StreamWriter]::new($pipe); $w.AutoFlush = $true; $w.WriteLine($line)
       Start-Sleep -Milliseconds 300; $pipe.Dispose(); return $true
@@ -156,20 +253,27 @@ function Send-Recorder([string]$line, [string]$name = $pipeName, [int]$tries = 5
   $false
 }
 function Get-Installed { Get-CimInstance Win32_Process -Filter "SessionId = $session" | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) } }
-# Every controller in this session, whatever its path: read only (the stray warnings).
+# Every controller in this session, whatever its path.
 function Get-SessionController { Get-CimInstance Win32_Process -Filter "Name = 'recall-hdr.exe' AND SessionId = $session" }
-function Test-OurController($p) { $p.ExecutablePath -and [string]::Equals([IO.Path]::GetFullPath($p.ExecutablePath), $controllerPath, [StringComparison]::OrdinalIgnoreCase) }
-# The controller this run may quit: this session's, started from $controllerPath.
-function Get-Controller { Get-CimInstance Win32_Process -Filter "Name = 'recall-hdr.exe' AND SessionId = $session" | Where-Object { Test-OurController $_ } }
+# Started from $controllerPath? Compared by what the two paths name (PathId.Normalize above).
+function Test-OurController($p) { $path = Get-ExePath $p; [bool]$path -and [string]::Equals([RecallInstall.PathId]::Normalize($path), $controllerPath, [StringComparison]::OrdinalIgnoreCase) }
+# The controllers this run quits and waits for (step 2): every one in this session for a real
+# install, only the one at RECALL_CONTROLLER_PATH for a sandbox.
+function Get-Controller {
+  $all = @(Get-SessionController)
+  if ($env:RECALL_CONTROLLER_PATH) { $all | Where-Object { Test-OurController $_ } } else { $all }
+}
 # A recorder installed before the per-session pipe listens on the bare name, so the first
-# update must ask it there (audit R2-deep-startup-1). Only when this session's controller from
-# $controllerPath runs (Get-Controller) and serves that pipe (Send-Recorder); another account's
+# update must ask it there (audit R2-deep-startup-1). Only when a controller this run quits
+# runs (Get-Controller) and serves that pipe (Send-Recorder); another account's
 # old pipe gives us read access only. RECALL_LEGACY_PIPE renames it for sandboxed runs. Drop
 # this fallback one release after the per-session pipe shipped.
 $legacyPipe = if ($env:RECALL_LEGACY_PIPE) { $env:RECALL_LEGACY_PIPE } else { 'recall-hdr-control' }
 function Stop-Recorder {
-  $others = @(Get-SessionController | Where-Object { -not (Test-OurController $_) })
-  if ($others) { Write-Host ("Left running (not $controllerPath): " + (($others | ForEach-Object { $_.ExecutablePath }) -join ', ')) }
+  if ($env:RECALL_CONTROLLER_PATH) {
+    $others = @(Get-SessionController | Where-Object { -not (Test-OurController $_) })
+    if ($others) { Write-Host ("Left running (not $controllerPath): " + (($others | ForEach-Object { Format-Recorder $_ }) -join ', ')) }
+  }
   if (Get-Controller) {
     # Either pipe answering counts: this build's session pipe first, then the old bare name.
     $sent = Send-Recorder '{"cmd":"quit"}'
@@ -178,7 +282,7 @@ function Stop-Recorder {
   $deadline = (Get-Date).AddSeconds(8)
   while ((Get-Date) -lt $deadline -and ((Get-Installed) -or (Get-Controller))) { Start-Sleep -Milliseconds 300 }
   $left = @(Get-Installed) + @(Get-Controller) | Where-Object { $_ }
-  if ($left) { throw ("Recall is still running (" + (($left | ForEach-Object { $_.Name }) -join ', ') + "). Quit it from the tray, then re-run.") }
+  if ($left) { throw ("Recall is still running (" + (($left | ForEach-Object { Format-Recorder $_ }) -join ', ') + "). Quit it from the tray, then re-run.") }
 }
 Stop-Recorder
 
@@ -288,13 +392,14 @@ if ($NoStart) {
 }
 Start-Process -FilePath (Join-Path $InstallDir 'recall-hdr.exe') -ArgumentList '--record' -WorkingDirectory $InstallDir
 $deadline = (Get-Date).AddSeconds(10); $up = $false
-while (-not $up -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500; $up = Send-Recorder '{"cmd":"status"}' }
+while (-not $up -and -not $script:ownerRefused -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500; $up = Send-Recorder '{"cmd":"status"}' }
 if (-not $up) { Write-Warning 'The recorder did not answer on its control pipe; start Recall from the Start menu.' }
-else {
-  # The answer must come from the recorder just installed, not an older one still running.
-  $mine = Join-Path $InstallDir 'recall-hdr.exe'
-  $stray = @(Get-SessionController | Where-Object { $_.ExecutablePath -and -not $_.ExecutablePath.Equals($mine, [StringComparison]::OrdinalIgnoreCase) })
-  if ($stray) { Write-Warning ("An older recorder is still running (" + (($stray | ForEach-Object { $_.ExecutablePath }) -join ', ') + "). Quit Recall from the tray, then start it again.") }
+# Name any other recorder still running in this session, whether or not one answered: it holds
+# the one-controller lock, so the recorder just installed can't take over (R4-startup-1). A
+# sandbox leaves the live recorder alone and names it in Stop-Recorder instead.
+if (-not $env:RECALL_CONTROLLER_PATH) {
+  $stray = @(Get-SessionController | Where-Object { -not (Test-OurController $_) })
+  if ($stray) { Write-Warning ("An older recorder is still running (" + (($stray | ForEach-Object { Format-Recorder $_ }) -join ', ') + "). Quit Recall from the tray, then start it again.") }
 }
 # Start with Windows is opt-in: only -Autostart sends the setting (an update never turns it on).
 if ($up -and $Autostart) {

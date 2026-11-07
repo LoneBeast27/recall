@@ -15,22 +15,40 @@ $ErrorActionPreference='Stop'
 $recallRoot=$PSScriptRoot
 # This Windows session's recorder only: the control pipe is per session (recall-hdr control_pipe.rs).
 $mySession=(Get-Process -Id $PID).SessionId
-# The pipe's server must run as this account (GetNamedPipeServerProcessId, then its token user SID).
-function Test-RecallPipeOwner($pipe){
- if(-not('RecallStart.Owner' -as [type])){Add-Type -Name Owner -Namespace RecallStart -MemberDefinition @'
+# The account the pipe's server runs as (GetNamedPipeServerProcessId, then its token user SID,
+# else the SID the session list WTSEnumerateProcessesW gives: a same-account elevated recorder's
+# token can't be opened from a non-elevated shell), or $null when neither can be read.
+function Get-RecallPipeOwner($pipe){
+ if(-not('RecallStart.Account' -as [type])){Add-Type -Name Account -Namespace RecallStart -MemberDefinition @'
 [DllImport("kernel32.dll", SetLastError = true)] public static extern bool GetNamedPipeServerProcessId(IntPtr h, out uint pid);
 [DllImport("kernel32.dll", SetLastError = true)] public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
 [DllImport("advapi32.dll", SetLastError = true)] public static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
 [DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+[StructLayout(LayoutKind.Sequential)] public struct WtsProcessInfo { public uint SessionId; public uint ProcessId; public IntPtr pProcessName; public IntPtr pUserSid; }
+[DllImport("wtsapi32.dll", SetLastError = true)] public static extern bool WTSEnumerateProcessesW(IntPtr server, uint reserved, uint version, out IntPtr list, out uint count);
+[DllImport("wtsapi32.dll")] public static extern void WTSFreeMemory(IntPtr memory);
+public static string WtsSid(uint pid) {
+  IntPtr list; uint count;
+  if (!WTSEnumerateProcessesW(IntPtr.Zero, 0, 1, out list, out count)) return null;
+  try {
+    int size = Marshal.SizeOf(typeof(WtsProcessInfo));
+    for (long i = 0; i < count; i++) {
+      var info = (WtsProcessInfo)Marshal.PtrToStructure(new IntPtr(list.ToInt64() + i * size), typeof(WtsProcessInfo));
+      if (info.ProcessId == pid) return info.pUserSid == IntPtr.Zero ? null : new System.Security.Principal.SecurityIdentifier(info.pUserSid).Value;
+    }
+    return null;
+  } finally { WTSFreeMemory(list); }
+}
 '@}
- $server=[uint32]0;if(-not[RecallStart.Owner]::GetNamedPipeServerProcessId($pipe.SafePipeHandle.DangerousGetHandle(),[ref]$server)){return $false}
- $process=[RecallStart.Owner]::OpenProcess(0x1000,$false,$server);if($process -eq [IntPtr]::Zero){return $false}
- $token=[IntPtr]::Zero;$ok=[RecallStart.Owner]::OpenProcessToken($process,8,[ref]$token);[void][RecallStart.Owner]::CloseHandle($process);if(-not $ok){return $false}
- try{([Security.Principal.WindowsIdentity]::new($token)).User.Value -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value}finally{[void][RecallStart.Owner]::CloseHandle($token)}
+ $server=[uint32]0;if(-not[RecallStart.Account]::GetNamedPipeServerProcessId($pipe.SafePipeHandle.DangerousGetHandle(),[ref]$server)){return $null}
+ $sid=$null;$process=[RecallStart.Account]::OpenProcess(0x1000,$false,$server)
+ if($process -ne [IntPtr]::Zero){$token=[IntPtr]::Zero;$ok=[RecallStart.Account]::OpenProcessToken($process,8,[ref]$token);[void][RecallStart.Account]::CloseHandle($process)
+  if($ok){try{$sid=([Security.Principal.WindowsIdentity]::new($token)).User.Value}finally{[void][RecallStart.Account]::CloseHandle($token)}}}
+ if($sid){$sid}else{[RecallStart.Account]::WtsSid($server)}
 }
 if($Stop){
  $pipe=[IO.Pipes.NamedPipeClientStream]::new('.',"recall-hdr-control-$mySession",[IO.Pipes.PipeDirection]::Out);$pipe.Connect(2000)
- if(-not(Test-RecallPipeOwner $pipe)){$pipe.Dispose();throw 'another user owns the Recall pipe: quit not sent.'}
+ $owner=Get-RecallPipeOwner $pipe;if($owner -ne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value){$pipe.Dispose();if($owner){throw "another user owns the Recall pipe (runs as $owner): quit not sent."};throw "can't tell which account runs the Recall pipe: quit not sent."}
  $writer=[IO.StreamWriter]::new($pipe);$writer.AutoFlush=$true;$writer.WriteLine('{"cmd":"quit"}');$writer.Dispose()
  Write-Output 'Recall recording stopped.';return
 }
