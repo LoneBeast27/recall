@@ -39,6 +39,18 @@
 //! holds the one [`STUCK`] slot until it ends: while it is held every new call
 //! is refused at once (no new thread), so a dialog nobody answers can never
 //! pile up stuck threads.
+//!
+//! Private desktop (a guard, never a way to delete): before any COM or shell
+//! call the worker thread moves to its own desktop that is never shown
+//! (`CreateDesktopW` with a unique `RecallRecycle<pid>-<n>` name and only the
+//! rights in [`DESKTOP_ACCESS`], then `SetThreadDesktop`). Any dialog Windows
+//! raises for the call, such as its "Delete File" question for a file too big
+//! for the bin, lands there, where nobody can see or answer it, so it can only
+//! end in the [`WAIT`] refusal. If the desktop cannot be made or set, the call
+//! is refused before anything is touched; it never falls back to the visible
+//! desktop. `CloseDesktop` fails while a thread is still on the desktop
+//! (ERROR_BUSY), so a keeper thread closes it after the worker ends; a worker
+//! stuck on a dialog keeps it open until it ends or the process exits.
 
 use std::collections::HashSet;
 use std::os::windows::ffi::OsStrExt;
@@ -64,6 +76,50 @@ pub const OP_FLAGS: u32 =
 
 /// How long a caller waits for one call before it counts as refused.
 pub const WAIT: Duration = Duration::from_secs(30);
+
+/// Rights on the private desktop: create the windows and menus COM and the
+/// shell make for the call, and read/write its own objects. No switching,
+/// hook or journal rights.
+pub const DESKTOP_ACCESS: u32 = 0x0001 | 0x0002 | 0x0004 | 0x0080; // READOBJECTS | CREATEWINDOW | CREATEMENU | WRITEOBJECTS
+
+#[link(name = "user32", kind = "raw-dylib")]
+unsafe extern "system" {
+    // Desktop handles as isize, as record_screen.rs declares CloseDesktop in recall-hdr.
+    fn CreateDesktopW(name: *const u16, device: *const u16, devmode: *const std::ffi::c_void, flags: u32, access: u32, sa: *const std::ffi::c_void) -> isize;
+    fn CloseDesktop(desktop: isize) -> i32;
+    fn SetThreadDesktop(desktop: isize) -> i32;
+}
+
+/// How the worker gets its private desktop (production: [`REAL_DESKTOP`]; tests inject failures).
+#[derive(Clone, Copy)]
+pub struct DesktopFns {
+    pub create: fn(&str) -> Option<isize>,
+    pub set: fn(isize) -> bool,
+    pub close: fn(isize),
+}
+
+fn create_desktop(name: &str) -> Option<isize> {
+    let name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: a NUL-terminated name; default device, mode and security.
+    let desk = unsafe { CreateDesktopW(name.as_ptr(), std::ptr::null(), std::ptr::null(), 0, DESKTOP_ACCESS, std::ptr::null()) };
+    (desk != 0).then_some(desk)
+}
+
+fn set_desktop(desk: isize) -> bool {
+    // SAFETY: a desktop handle from CreateDesktopW; the calling thread has no windows yet.
+    unsafe { SetThreadDesktop(desk) != 0 }
+}
+
+fn close_desktop(desk: isize) {
+    // SAFETY: a desktop handle from CreateDesktopW, closed once, after its thread ended.
+    unsafe { CloseDesktop(desk) };
+}
+
+pub const REAL_DESKTOP: DesktopFns = DesktopFns { create: create_desktop, set: set_desktop, close: close_desktop };
+
+static DESKTOPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+/// The name of the last private desktop (the live probe looks at it).
+pub static LAST_DESKTOP: Mutex<String> = Mutex::new(String::new());
 
 /// The sink's decision: a delete goes ahead only when Windows says it
 /// recycles, and never after the caller stopped waiting.
@@ -264,11 +320,18 @@ pub const STUCK_REFUSAL: &str = "an earlier Recycle Bin move is still waiting on
 
 /// [`recycle_files_within`] with another flag set (the live probe compares; production uses [`OP_FLAGS`]).
 fn recycle_with_flags(files: &[PathBuf], wait: Duration, flags: u32) -> Report {
-    recycle_with_slot(files, wait, flags, &STUCK, &SPAWNED)
+    recycle_with_slot(files, wait, flags, &STUCK, &SPAWNED, REAL_DESKTOP)
 }
 
 /// The call, with its stuck slot and thread counter (tests use their own).
-fn recycle_with_slot(files: &[PathBuf], wait: Duration, flags: u32, stuck: &'static AtomicBool, spawned_count: &'static std::sync::atomic::AtomicUsize) -> Report {
+fn recycle_with_slot(
+    files: &[PathBuf],
+    wait: Duration,
+    flags: u32,
+    stuck: &'static AtomicBool,
+    spawned_count: &'static std::sync::atomic::AtomicUsize,
+    desktop: DesktopFns,
+) -> Report {
     let empty = |outcome| Report { outcome, flags_seen: Vec::new(), calls: (0, 0), items: (0, files.len()), recycled: 0 };
     if files.is_empty() {
         return empty(Outcome::Recycled);
@@ -285,22 +348,42 @@ fn recycle_with_slot(files: &[PathBuf], wait: Duration, flags: u32, stuck: &'sta
     let abandoned = Arc::new(AtomicBool::new(false));
     let (list, flag, worker_state) = (files.to_vec(), abandoned.clone(), state.clone());
     spawned_count.fetch_add(1, Ordering::SeqCst);
-    let spawned = std::thread::Builder::new().name("recall-recycle".into()).spawn(move || {
-        // SAFETY: this thread owns its apartment; it is uninitialised below.
-        let init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
-        let report = if init.is_err() {
-            Report { outcome: Outcome::Failed(format!("COM did not start ({:#x})", init.0 as u32)), flags_seen: Vec::new(), calls: (0, 0), items: (0, list.len()), recycled: 0 }
-        } else {
+    let name = format!("RecallRecycle{}-{}", std::process::id(), DESKTOPS.fetch_add(1, Ordering::SeqCst));
+    *LAST_DESKTOP.lock().unwrap_or_else(|p| p.into_inner()) = name.clone();
+    let refusal = |why: &str, n: usize| Report { outcome: Outcome::Refused(why.into()), flags_seen: Vec::new(), calls: (0, 0), items: (0, n), recycled: 0 };
+    let spawned = std::thread::Builder::new().name("recall-recycle-keeper".into()).spawn(move || {
+        let finish = |report: Report| {
+            if worker_state.compare_exchange(RUNNING, DONE, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                // The caller gave up on this call and took the stuck slot for it: release it now.
+                stuck.store(false, Ordering::SeqCst);
+            }
+            let _ = tx.send(report);
+        };
+        let Some(desk) = (desktop.create)(&name) else {
+            return finish(refusal("no private desktop for the Recycle Bin move; nothing was touched", list.len()));
+        };
+        let worker = std::thread::Builder::new().name("recall-recycle".into()).spawn(move || {
+            // Before any COM or shell call: every window of this call lands on the private desktop.
+            if !(desktop.set)(desk) {
+                return refusal("could not move the Recycle Bin call to its private desktop; nothing was touched", list.len());
+            }
+            // SAFETY: this thread owns its apartment; it is uninitialised below.
+            let init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
+            if init.is_err() {
+                return Report { outcome: Outcome::Failed(format!("COM did not start ({:#x})", init.0 as u32)), flags_seen: Vec::new(), calls: (0, 0), items: (0, list.len()), recycled: 0 };
+            }
             let report = perform(&list, flag, flags);
             // SAFETY: matches the successful CoInitializeEx above.
             unsafe { CoUninitialize() };
             report
+        });
+        let report = match worker.map(|w| w.join()) {
+            Ok(Ok(report)) => report,
+            _ => Report { outcome: Outcome::Failed("Recycle Bin worker thread failed".into()), flags_seen: Vec::new(), calls: (0, 0), items: (0, 0), recycled: 0 },
         };
-        if worker_state.compare_exchange(RUNNING, DONE, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-            // The caller gave up on this call and took the stuck slot for it: release it now.
-            stuck.store(false, Ordering::SeqCst);
-        }
-        let _ = tx.send(report);
+        // The worker has left the desktop now that it ended: only then can it close.
+        (desktop.close)(desk);
+        finish(report);
     });
     if spawned.is_err() {
         return empty(Outcome::Failed("Recycle Bin worker thread failed to start".into()));
