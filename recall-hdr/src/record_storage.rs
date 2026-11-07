@@ -376,14 +376,16 @@ fn plan_listing(dir: &Path, favs: &HashSet<String>, cap: u64) -> Result<(Plan, L
 pub(crate) type PlanFn = fn(&Path, u32) -> Result<(Plan, Listing), String>;
 /// Moves files to the Recycle Bin (production: [`recycle`]; tests inject one).
 pub(crate) type RecycleFn = fn(&[PathBuf]) -> Result<(), RecycleError>;
-pub(crate) use crate::win_recycle::BinCheck;
+pub(crate) use crate::win_recycle::{BinCheck, SizeFn};
 
 /// Bytes one Recycle Bin call moves: the clip (its listed size) and its
 /// companions as they are on disk (a missing one counts 0).
-fn companions_bytes(files: &[PathBuf], clip: Option<&ClipFile>) -> u64 {
-    let clip_bytes = clip.map_or(0, |c| c.bytes);
-    let others: u64 = files.iter().skip(1).filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
-    clip_bytes + others
+fn companions_bytes(files: &[PathBuf], clip: Option<&ClipFile>, size: SizeFn) -> Result<u64, String> {
+    let clip_bytes = match clip {
+        Some(c) => c.bytes,
+        None => crate::win_recycle::total_size(&files[..1.min(files.len())], size)?,
+    };
+    Ok(clip_bytes + crate::win_recycle::total_size(files.get(1..).unwrap_or(&[]), size)?)
 }
 
 /// One cap run: one Recycle Bin call per clip (with its thumbnails and
@@ -394,7 +396,8 @@ fn companions_bytes(files: &[PathBuf], clip: Option<&ClipFile>) -> u64 {
 /// Recycle Bin that will take it (a share, a removable drive, a bin turned
 /// off or too small) stops the run, so nothing is ever deleted for good.
 /// The first failed call ends the run.
-pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: &dyn Fn() -> bool, bin: BinCheck, recycle: RecycleFn) -> Result<Outcome, String> {
+pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: &dyn Fn() -> bool, bin: (BinCheck, SizeFn), recycle: RecycleFn) -> Result<Outcome, String> {
+    let (bin, size) = bin;
     let (plan, listing) = plan(dir, cap_gb)?;
     let cap = cap_gb as u64 * GIB;
     let stuck = plan.stuck(cap);
@@ -406,8 +409,8 @@ pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: &dyn Fn() 
             break;
         }
         let files = companions(dir, name, &listing);
-        let bytes = companions_bytes(&files, listing.clips.iter().find(|c| c.name == *name));
-        if let Err(why) = bin(dir, bytes) {
+        let bytes = companions_bytes(&files, listing.clips.iter().find(|c| c.name == *name), size);
+        if let Err(why) = bytes.and_then(|bytes| bin(dir, bytes)) {
             out.refused = Some(why);
             break;
         }

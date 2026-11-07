@@ -31,5 +31,34 @@ fn outcomes_from_the_sinks_the_count_and_the_operation() {
     assert!(matches!(&unchecked, Outcome::Refused(why) if why.contains("1 of 2 items were not checked")), "{unchecked:?}");
 }
 
+static TEST_STUCK: AtomicBool = AtomicBool::new(true);
+static TEST_SPAWNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[test]
+fn a_call_while_an_earlier_one_is_stuck_is_refused_and_starts_no_thread() {
+    // A path that does not exist: nothing could be deleted even if a worker ran.
+    let ghost = std::env::temp_dir().join("recall-fileop-never-exists").join("ghost.txt");
+    let report = recycle_with_slot(std::slice::from_ref(&ghost), WAIT, OP_FLAGS, &TEST_STUCK, &TEST_SPAWNED);
+    assert_eq!(report.outcome, Outcome::Refused(STUCK_REFUSAL.into()));
+    assert_eq!(TEST_SPAWNED.load(Ordering::SeqCst), 0, "no new STA thread");
+}
+
+static RELEASE_STUCK: AtomicBool = AtomicBool::new(false);
+static RELEASE_SPAWNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+#[test]
+fn the_stuck_slot_is_taken_on_a_timeout_and_released_when_that_thread_ends() {
+    let ghost = std::env::temp_dir().join("recall-fileop-never-exists").join("ghost.txt");
+    // A zero wait abandons the call at once; the worker then fails on the missing path and ends.
+    let report = recycle_with_slot(std::slice::from_ref(&ghost), Duration::ZERO, OP_FLAGS, &RELEASE_STUCK, &RELEASE_SPAWNED);
+    assert!(matches!(&report.outcome, Outcome::Refused(why) if why.contains("did not finish")), "{report:?}");
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    while RELEASE_STUCK.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert!(!RELEASE_STUCK.load(Ordering::SeqCst), "released when the stuck thread ended");
+    assert_eq!(RELEASE_SPAWNED.load(Ordering::SeqCst), 1);
+}
+
 #[path = "win_fileop_probe.rs"]
 mod probe;

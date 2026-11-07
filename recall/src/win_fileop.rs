@@ -35,7 +35,10 @@
 //! only, so every call runs on its own thread that initialises COM as an STA
 //! (`COINIT_APARTMENTTHREADED`). The caller waits at most [`WAIT`]; after that
 //! the call counts as refused and the sink refuses every later delete, so a
-//! thread still running cannot delete anything afterwards.
+//! thread still running cannot delete anything afterwards. Such a thread
+//! holds the one [`STUCK`] slot until it ends: while it is held every new call
+//! is refused at once (no new thread), so a dialog nobody answers can never
+//! pile up stuck threads.
 
 use std::collections::HashSet;
 use std::os::windows::ffi::OsStrExt;
@@ -89,6 +92,8 @@ pub struct Report {
     pub calls: (usize, usize),
     /// Distinct items the sinks saw, and items queued.
     pub items: (usize, usize),
+    /// Items Windows reported done (`PostDeleteItem` succeeded), counted as each went.
+    pub recycled: usize,
 }
 
 #[derive(Default)]
@@ -96,6 +101,7 @@ struct Seen {
     flags: Vec<u32>,
     calls: (usize, usize),
     paths: HashSet<String>,
+    done: HashSet<String>,
     refused: bool,
 }
 
@@ -156,7 +162,10 @@ impl IFileOperationProgressSink_Impl for RecycleGuard_Impl {
     fn PostCopyItem(&self, _: u32, _: Ref<IShellItem>, _: Ref<IShellItem>, _: &PCWSTR, _: HRESULT, _: Ref<IShellItem>) -> windows::core::Result<()> {
         Ok(())
     }
-    fn PostDeleteItem(&self, _: u32, _: Ref<IShellItem>, _: HRESULT, _: Ref<IShellItem>) -> windows::core::Result<()> {
+    fn PostDeleteItem(&self, _: u32, psiitem: Ref<IShellItem>, hrdelete: HRESULT, _: Ref<IShellItem>) -> windows::core::Result<()> {
+        if let Some(path) = item_path(&psiitem).filter(|_| hrdelete.is_ok()) {
+            self.seen.lock().unwrap_or_else(|p| p.into_inner()).done.insert(path);
+        }
         Ok(())
     }
     fn PreNewItem(&self, _: u32, _: Ref<IShellItem>, _: &PCWSTR) -> windows::core::Result<()> {
@@ -212,16 +221,23 @@ fn perform(files: &[PathBuf], abandoned: Arc<AtomicBool>, flags: u32) -> Report 
         let per_item: IFileOperationProgressSink = RecycleGuard { seen: seen.clone(), abandoned: abandoned.clone(), advised: false }.into();
         let whole: IFileOperationProgressSink = RecycleGuard { seen: seen.clone(), abandoned: abandoned.clone(), advised: true }.into();
         let cookie = unsafe { op.Advise(&whole)? };
-        for file in files {
-            let path = wide(file);
-            // SAFETY: a NUL-terminated path alive for the call.
-            let item: IShellItem = unsafe { SHCreateItemFromParsingName(PCWSTR(path.as_ptr()), None)? };
-            unsafe { op.DeleteItem(&item, &per_item)? };
-        }
-        let performed = unsafe { op.PerformOperations() }.map_err(|e| e.code().0 as u32);
-        let aborted = unsafe { op.GetAnyOperationsAborted() }.map(|b| b.as_bool()).unwrap_or(false);
+        let queued = (|| -> windows::core::Result<()> {
+            for file in files {
+                let path = wide(file);
+                // SAFETY: a NUL-terminated path alive for the call.
+                let item: IShellItem = unsafe { SHCreateItemFromParsingName(PCWSTR(path.as_ptr()), None)? };
+                unsafe { op.DeleteItem(&item, &per_item)? };
+            }
+            Ok(())
+        })();
+        let run = queued.map(|()| {
+            let performed = unsafe { op.PerformOperations() }.map_err(|e| e.code().0 as u32);
+            let aborted = unsafe { op.GetAnyOperationsAborted() }.map(|b| b.as_bool()).unwrap_or(false);
+            (performed, aborted)
+        });
+        // Unadvised on every path once advised, early errors included.
         let _ = unsafe { op.Unadvise(cookie) };
-        Ok((performed, aborted))
+        run
     })();
     let seen = seen.lock().unwrap_or_else(|p| p.into_inner());
     let items = (seen.paths.len(), files.len());
@@ -230,7 +246,7 @@ fn perform(files: &[PathBuf], abandoned: Arc<AtomicBool>, flags: u32) -> Report 
         Err(e) if seen.refused => classify(true, items, Err(e.code().0 as u32), false),
         Err(e) => Outcome::Failed(format!("Recycle Bin move could not start: {e}")),
     };
-    Report { outcome, flags_seen: seen.flags.clone(), calls: seen.calls, items }
+    Report { outcome, flags_seen: seen.flags.clone(), calls: seen.calls, items, recycled: seen.done.len() }
 }
 
 /// Recycle `files` in one operation on a fresh STA thread, waiting at most `wait`.
@@ -238,26 +254,52 @@ pub fn recycle_files_within(files: &[PathBuf], wait: Duration) -> Report {
     recycle_with_flags(files, wait, OP_FLAGS)
 }
 
+/// Held by a worker that outlived its caller's wait (a dialog nobody answers) until it ends.
+pub static STUCK: AtomicBool = AtomicBool::new(false);
+/// Worker threads started (tests check that a refused call starts none).
+pub static SPAWNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The refusal while an earlier call is stuck.
+pub const STUCK_REFUSAL: &str = "an earlier Recycle Bin move is still waiting on Windows; nothing was moved";
+
 /// [`recycle_files_within`] with another flag set (the live probe compares; production uses [`OP_FLAGS`]).
 fn recycle_with_flags(files: &[PathBuf], wait: Duration, flags: u32) -> Report {
-    let empty = |outcome| Report { outcome, flags_seen: Vec::new(), calls: (0, 0), items: (0, files.len()) };
+    recycle_with_slot(files, wait, flags, &STUCK, &SPAWNED)
+}
+
+/// The call, with its stuck slot and thread counter (tests use their own).
+fn recycle_with_slot(files: &[PathBuf], wait: Duration, flags: u32, stuck: &'static AtomicBool, spawned_count: &'static std::sync::atomic::AtomicUsize) -> Report {
+    let empty = |outcome| Report { outcome, flags_seen: Vec::new(), calls: (0, 0), items: (0, files.len()), recycled: 0 };
     if files.is_empty() {
         return empty(Outcome::Recycled);
     }
+    if stuck.load(Ordering::SeqCst) {
+        return empty(Outcome::Refused(STUCK_REFUSAL.into()));
+    }
+    // 0 running, 1 the worker finished in time, 2 the caller gave up: exactly one side wins.
+    const RUNNING: u8 = 0;
+    const DONE: u8 = 1;
+    const GAVE_UP: u8 = 2;
+    let state = Arc::new(std::sync::atomic::AtomicU8::new(RUNNING));
     let (tx, rx) = std::sync::mpsc::channel();
     let abandoned = Arc::new(AtomicBool::new(false));
-    let (list, flag) = (files.to_vec(), abandoned.clone());
+    let (list, flag, worker_state) = (files.to_vec(), abandoned.clone(), state.clone());
+    spawned_count.fetch_add(1, Ordering::SeqCst);
     let spawned = std::thread::Builder::new().name("recall-recycle".into()).spawn(move || {
         // SAFETY: this thread owns its apartment; it is uninitialised below.
         let init = unsafe { CoInitializeEx(None, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) };
         let report = if init.is_err() {
-            Report { outcome: Outcome::Failed(format!("COM did not start ({:#x})", init.0 as u32)), flags_seen: Vec::new(), calls: (0, 0), items: (0, list.len()) }
+            Report { outcome: Outcome::Failed(format!("COM did not start ({:#x})", init.0 as u32)), flags_seen: Vec::new(), calls: (0, 0), items: (0, list.len()), recycled: 0 }
         } else {
             let report = perform(&list, flag, flags);
             // SAFETY: matches the successful CoInitializeEx above.
             unsafe { CoUninitialize() };
             report
         };
+        if worker_state.compare_exchange(RUNNING, DONE, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+            // The caller gave up on this call and took the stuck slot for it: release it now.
+            stuck.store(false, Ordering::SeqCst);
+        }
         let _ = tx.send(report);
     });
     if spawned.is_err() {
@@ -266,8 +308,16 @@ fn recycle_with_flags(files: &[PathBuf], wait: Duration, flags: u32) -> Report {
     match rx.recv_timeout(wait) {
         Ok(report) => report,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            // From here the sink refuses every delete, so the thread cannot delete anything later.
+            // Take the slot first, so the worker can only release it after it was taken.
+            stuck.store(true, Ordering::SeqCst);
+            // The sink refuses from now on, before the race below is even decided.
             abandoned.store(true, Ordering::SeqCst);
+            if state.compare_exchange(RUNNING, GAVE_UP, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                // The worker finished at the deadline after all: keep its answer.
+                stuck.store(false, Ordering::SeqCst);
+                return rx.recv().unwrap_or_else(|_| empty(Outcome::Failed("Recycle Bin worker thread failed".into())));
+            }
+            // The sink refuses every later delete, so the thread cannot delete anything now.
             empty(Outcome::Refused(format!("the Recycle Bin move did not finish within {} s", wait.as_secs())))
         }
         Err(_) => empty(Outcome::Failed("Recycle Bin worker thread failed".into())),

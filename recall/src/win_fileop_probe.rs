@@ -195,15 +195,15 @@ fn run_cases(dir: &Path, letter_made: &mut Option<String>) {
     assert!(matches!(report.outcome, Outcome::Refused(_)), "{report:?}");
     assert!(file.exists(), "the too-big file is still there");
 
-    // 4b. The same without FOF_WANTNUKEWARNING (the earlier flag set): is the sink asked at all?
-    let file_b = dir.join("too-big-b.bin");
-    if sparse(&file_b, len).is_some_and(|a| a < (1 << 20)) {
-        let report = recycle_with_flags(std::slice::from_ref(&file_b), WAIT, OP_FLAGS & !FOF_WANTNUKEWARNING.0);
-        say(format!("PROBE 4b sparse (no nuke warning): {report:?}; file exists after: {}", file_b.exists()));
-        if report.outcome == Outcome::Recycled {
-            say(format!("PROBE 4b sparse: Windows recycled it; own bin entry removed: {:?}", unbin(&file_b)));
-        }
-    }
+    // 5. The worker of case 4 is still stuck on that dialog: the next call is refused at once and starts no thread.
+    let file_b = dir.join("after-stuck.txt");
+    std::fs::write(&file_b, b"recall probe").unwrap();
+    let before = SPAWNED.load(Ordering::SeqCst);
+    let report = recycle_files(std::slice::from_ref(&file_b));
+    say(format!("PROBE 5 while stuck: {report:?}; threads started: {}; file exists after: {}", SPAWNED.load(Ordering::SeqCst) - before, file_b.exists()));
+    assert_eq!(report.outcome, Outcome::Refused(STUCK_REFUSAL.into()));
+    assert_eq!(SPAWNED.load(Ordering::SeqCst), before, "no new thread");
+    assert!(file_b.exists());
     let _ = (std::fs::remove_file(&file), std::fs::remove_file(&file_b));
 }
 
