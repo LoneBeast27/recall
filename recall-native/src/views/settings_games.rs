@@ -1,18 +1,17 @@
 //! Settings → Games: the apps registered by hand (Rohan 2026-11-07: "use official proof +
 //! support for manual application registering"). The recorder records an unknown fullscreen
 //! app only with official proof; the island's "Not recording <exe>: add it as a game in
-//! Settings" leads here. "Add app…" offers the running apps (the one that was in front first)
-//! or any exe on disk; each entry can be set to "Never record" or removed. Every change is a
-//! `set_config` patch built by `services::game_apps`.
+//! Settings" leads here. "Add app…" offers the running apps (the foreground one first, marked
+//! "in front") or any exe on disk; each entry can be set to "Never record" or removed. Every
+//! change is one `register_game` command (`services::game_apps`), applied by the controller
+//! to its current config.
 use gpui::{AnyElement, Context, PathPromptOptions, SharedString, Stateful, deferred, div, prelude::*, px};
-use serde_json::Value;
 
 use crate::{
     root::Root,
     services::{
-        audio_apps::PlayingApp,
         daemon::DaemonCommand,
-        game_apps::{self, GameEntry, Registration},
+        game_apps::{self, GameEntry, Pickable, Registration},
         game_apps_win,
     },
     theme::{self, c},
@@ -26,7 +25,7 @@ pub struct GamesPage {
     /// "Add app…" is open.
     pub menu: bool,
     /// The running apps, once listed for this opening of the menu.
-    pub apps: Option<Vec<PlayingApp>>,
+    pub apps: Option<Pickable>,
 }
 
 /// What the Games tab explains above the list.
@@ -68,50 +67,56 @@ impl Root {
             items.push(note("No apps added yet."));
         }
         for (i, entry) in list.into_iter().enumerate() {
-            items.push(self.game_row(i, entry, &config, cx));
+            items.push(self.game_row(i, entry, cx));
         }
         let mut add = div().relative().child(ui::button("games-add", Variant::Ghost).border_1().border_color(c(theme::BORDER)).child(icon(Icon::Plus, 14., theme::MUTED)).child("Add app…").on_click(cx.listener(|this, _, _, cx| {
             this.open_games_menu(cx);
             cx.notify();
         })));
         if self.settings_ui.games.menu {
-            add = add.child(self.games_menu(&config, cx));
+            add = add.child(self.games_menu(cx));
         }
         items.push(div().flex().justify_end().child(add).into_any_element());
         items
     }
 
-    fn game_row(&self, i: usize, entry: GameEntry, config: &Value, cx: &mut Context<Self>) -> AnyElement {
+    fn game_row(&self, i: usize, entry: GameEntry, cx: &mut Context<Self>) -> AnyElement {
         let mut row = setting_row(&entry.exe, entry.how.label());
         if entry.how != Registration::Fullscreen {
             let mut track = ui::segment_track().w(px(220.));
             for (j, (how, label)) in [(Registration::Record, "Record"), (Registration::Never, "Never record")].into_iter().enumerate() {
-                let patch = game_apps::register_patch(config, &entry.exe, how);
+                // The selected segment sends nothing (R8-detect-4).
+                let command = game_apps::segment_command(&entry, how);
                 track = track.child(ui::segment(("game-how", i * 2 + j), label, entry.how == how).on_click(cx.listener(move |this, _, _, cx| {
-                    this.send_games_patch(patch.clone());
+                    if let Some(command) = command.clone() {
+                        this.send_games_command(command);
+                    }
                     cx.notify();
                 })));
             }
             row = row.child(track);
         }
-        let remove = game_apps::remove_patch(config, &entry);
+        let remove = game_apps::remove_command(&entry);
         row.child(ui::button(("game-remove", i), Variant::Ghost).child("Remove").on_click(cx.listener(move |this, _, _, cx| {
-            this.send_games_patch(remove.clone());
+            this.send_games_command(remove.clone());
             cx.notify();
         })))
         .into_any_element()
     }
 
-    fn send_games_patch(&mut self, patch: Value) {
-        self.send(DaemonCommand::SetConfig(patch));
+    /// One app's change (`register_game`): the controller applies it to its current config.
+    fn send_games_command(&mut self, command: DaemonCommand) {
+        self.send(command);
         self.send(DaemonCommand::GetConfig);
     }
 
     /// Open "Add app…" and list the running apps off the UI thread.
     fn open_games_menu(&mut self, cx: &mut Context<Self>) {
         self.settings_ui.games = GamesPage { menu: true, apps: None };
+        // The app in front is the foreground window now (R8-detect-3), not the first one found.
+        let front = game_apps_win::foreground_pid();
         cx.spawn(async move |this, cx| {
-            let apps = cx.background_executor().spawn(async move { game_apps_win::running_apps_blocking() }).await;
+            let apps = cx.background_executor().spawn(async move { game_apps_win::running_apps_blocking(front) }).await;
             let _ = this.update(cx, |this, cx| {
                 if this.settings_ui.games.menu {
                     this.settings_ui.games.apps = Some(apps);
@@ -122,18 +127,18 @@ impl Root {
         .detach();
     }
 
-    fn games_menu(&self, config: &Value, cx: &mut Context<Self>) -> AnyElement {
+    fn games_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut rows: Vec<AnyElement> = Vec::new();
         match self.settings_ui.games.apps.as_ref() {
             None => rows.push(note("Looking for running apps…")),
-            Some(apps) if apps.is_empty() => rows.push(note("No other app has a window open. Browse for its exe.")),
-            Some(apps) => {
-                for (i, app) in apps.iter().enumerate() {
-                    let label = if i == 0 { format!("{} · in front", app.label) } else { app.label.clone() };
-                    let patch = game_apps::register_patch(config, &app.exe, Registration::Record);
+            Some(pick) if pick.apps.is_empty() => rows.push(note("No other app has a window open. Browse for its exe.")),
+            Some(pick) => {
+                for (i, app) in pick.apps.iter().enumerate() {
+                    let label = if i == 0 && pick.in_front { format!("{} · in front", app.label) } else { app.label.clone() };
+                    let command = game_apps::add_command(&app.exe);
                     rows.push(menu_row(("games-app", i), label, &app.exe).on_click(cx.listener(move |this, _, _, cx| {
                         this.settings_ui.games = GamesPage::default();
-                        this.send_games_patch(patch.clone());
+                        this.send_games_command(command.clone());
                         cx.notify();
                     })).into_any_element());
                 }
@@ -158,9 +163,7 @@ impl Root {
             let Ok(Ok(Some(paths))) = picked.await else { return };
             let Some(exe) = paths.into_iter().next().and_then(|p| exe_name(&p)) else { return };
             let _ = this.update(cx, |this, cx| {
-                if let Some(config) = this.snap.config.clone() {
-                    this.send_games_patch(game_apps::register_patch(&config, &exe, Registration::Record));
-                }
+                this.send_games_command(game_apps::add_command(&exe));
                 cx.notify();
             });
         })

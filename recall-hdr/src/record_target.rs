@@ -24,7 +24,9 @@
 //!   deadline follows the session: if the session ends while a candidate
 //!   waits, the short debounce applies from when that candidate was first
 //!   seen. A non-target foreground (alt-tab) never ends the session; the
-//!   session ends when its process exits or its window is destroyed.
+//!   session ends when its process exits or its window is destroyed, and a
+//!   session whose only proof is `fullscreen_games` also when its window goes
+//!   windowed ([`TargetTracker::on_windowed`], R8-detect-1).
 //! - **Transitions** (`record_target_gate`): during the closed game's drain a
 //!   windowed Steam-library window waits; a `fullscreen_games` entry never
 //!   replaces a live session; a re-made window of the session's process is
@@ -100,6 +102,8 @@ pub struct TargetTracker {
     current: Option<Target>,
     /// The session's window was fullscreen when last seen in front (G5).
     current_fullscreen: bool,
+    /// The session's only proof is a `fullscreen_games` entry (R8-detect-1).
+    current_fullscreen_only: bool,
     /// A foreground observation and when it was first seen; `None` inside = a
     /// non-target foreground (it cancels a pending game, never the session).
     pending: Option<(Option<Target>, Instant)>,
@@ -134,6 +138,7 @@ impl TargetTracker {
             start,
             current: None,
             current_fullscreen: false,
+            current_fullscreen_only: false,
             pending: None,
             last_wait: None,
             held: None,
@@ -201,6 +206,7 @@ impl TargetTracker {
             (Some(c), Some(cur), _) if c.same_window(cur) => {
                 self.pending = None;
                 self.current_fullscreen = traits.fullscreen;
+                self.current_fullscreen_only = traits.fullscreen_only;
             }
             (Some(c), _, Some((Some(p), _))) if c.same_window(p) => self.traits = traits,
             (None, _, Some((None, _))) => {}
@@ -237,6 +243,7 @@ impl TargetTracker {
                     self.adoptable = None;
                     self.current = Some(c);
                     self.current_fullscreen = self.traits.fullscreen;
+                    self.current_fullscreen_only = self.traits.fullscreen_only;
                     self.last_wait = Some(now.duration_since(seen));
                     true
                 }
@@ -248,6 +255,30 @@ impl TargetTracker {
                 Admit::Reject => false,
             },
         }
+    }
+
+    /// The session's only proof is a `fullscreen_games` entry (R8-detect-1).
+    pub fn fullscreen_only(&self) -> bool {
+        self.current.is_some() && self.current_fullscreen_only
+    }
+
+    /// The session's window `hwnd` reads windowed. A session whose only proof is a
+    /// `fullscreen_games` entry (`only_by_list` = the config still says so) lives
+    /// only while that window is fullscreen: it ends at once, with no adoption of
+    /// the process's next window (R8-detect-1). Returns `true` when it ended.
+    pub fn on_windowed(&mut self, hwnd: isize, only_by_list: bool) -> bool {
+        if self.current.as_ref().is_none_or(|c| c.hwnd != hwnd) || !self.current_fullscreen_only {
+            return false;
+        }
+        if !only_by_list {
+            // Registered as a game since: a windowed session is kept from now on.
+            self.current_fullscreen_only = false;
+            return false;
+        }
+        self.current = None;
+        self.current_fullscreen_only = false;
+        self.replaced_at = None;
+        true
     }
 
     /// The closed game's drain: `Some(its pid)` while its last clip is still

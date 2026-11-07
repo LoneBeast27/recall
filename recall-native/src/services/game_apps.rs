@@ -10,14 +10,17 @@
 //! - `[detect] fullscreen_games` = "Record when fullscreen" (Discord by default, Rohan
 //!   2026-11-05).
 //!
-//! Changes go out as `set_config` patches through the existing patch path: the whole
-//! `overrides` array (the controller replaces arrays) or `detect.fullscreen_games`. An exe is
-//! matched like the controller does (G9): case-insensitive, `.exe` optional ("Game.exe" =
-//! "game"). Pure: the view (`views/settings_games.rs`) sends what these build.
+//! Changes go out one app at a time (`register_game`, R8-detect-7): the controller applies
+//! each to its current config (`record_game_ops`), so two quick edits or a tray "Add as a
+//! game" in between never overwrite each other, and an app already recorded keeps its class
+//! and clamp (R8-detect-4). An exe is matched like the controller does (G9): case-insensitive,
+//! `.exe` optional ("Game.exe" = "game"). Pure: the view (`views/settings_games.rs`) sends
+//! what these build.
 
-use serde_json::{Value, json};
+use serde_json::Value;
 
 use crate::services::audio_apps::PlayingApp;
+use crate::services::daemon::DaemonCommand;
 
 /// How an app is registered.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -31,6 +34,15 @@ pub enum Registration {
 }
 
 impl Registration {
+    /// The `register_game` command's `how`.
+    pub fn wire(self) -> &'static str {
+        match self {
+            Registration::Record => "record",
+            Registration::Never => "never",
+            Registration::Fullscreen => "fullscreen",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             Registration::Record => "Recorded",
@@ -88,40 +100,49 @@ pub fn entries(config: Option<&Value>) -> Vec<GameEntry> {
     out
 }
 
-/// The game kind a "Record" override gets: the config's default game class, else `sdr_game`.
-fn game_kind(config: &Value) -> &'static str {
-    match config.get("behavior").and_then(|b| b.get("default_game_class")).and_then(Value::as_str) {
-        Some("hdr_game") => "hdr_game",
-        _ => "sdr_game",
-    }
+/// The command for a segment click on `entry`: `None` when `how` is already its
+/// registration (no rewrite of its class or clamp, R8-detect-4).
+pub fn segment_command(entry: &GameEntry, how: Registration) -> Option<DaemonCommand> {
+    (entry.how != how).then(|| DaemonCommand::RegisterGame { exe: entry.exe.clone(), how: how.wire() })
 }
 
-/// The patch that registers `exe` (`Record` or `Never`) as an override, replacing any override
-/// of the same exe and keeping every other one (and its clamp) as it is. `Fullscreen` adds a
-/// `detect.fullscreen_games` entry instead.
-pub fn register_patch(config: &Value, exe: &str, how: Registration) -> Value {
-    let exe = exe.trim();
-    if how == Registration::Fullscreen {
-        let mut list = fullscreen_games(config);
-        if !list.iter().any(|g| same_exe(g, exe)) {
-            list.push(exe.to_owned());
-        }
-        return json!({ "detect": { "fullscreen_games": list } });
-    }
-    let kind = if how == Registration::Never { "none" } else { game_kind(config) };
-    let mut list: Vec<Value> = overrides(config).into_iter().filter(|o| !o.get("exe").and_then(Value::as_str).is_some_and(|e| same_exe(e, exe))).collect();
-    list.push(json!({ "exe": exe, "kind": kind }));
-    json!({ "overrides": list })
+/// "Add app…" / "Browse for an exe…": record `exe` (an app already recorded keeps its entry).
+pub fn add_command(exe: &str) -> DaemonCommand {
+    DaemonCommand::RegisterGame { exe: exe.trim().to_owned(), how: Registration::Record.wire() }
 }
 
-/// The patch that removes `entry` (its override, or its fullscreen-only entry).
-pub fn remove_patch(config: &Value, entry: &GameEntry) -> Value {
-    if entry.how == Registration::Fullscreen {
-        let list: Vec<String> = fullscreen_games(config).into_iter().filter(|g| !same_exe(g, &entry.exe)).collect();
-        return json!({ "detect": { "fullscreen_games": list } });
-    }
-    let list: Vec<Value> = overrides(config).into_iter().filter(|o| !o.get("exe").and_then(Value::as_str).is_some_and(|e| same_exe(e, &entry.exe))).collect();
-    json!({ "overrides": list })
+/// "Remove": its override, or its fullscreen-only entry.
+pub fn remove_command(entry: &GameEntry) -> DaemonCommand {
+    let how = if entry.how == Registration::Fullscreen { "unlist" } else { "remove" };
+    DaemonCommand::RegisterGame { exe: entry.exe.clone(), how }
+}
+
+/// A top-level window as `EnumWindows` reports it ("Add app…").
+#[derive(Clone, Copy, Debug, Default)]
+pub struct WinInfo {
+    pub visible: bool,
+    pub owned: bool,
+    pub exstyle: u32,
+    /// Window rect width, height.
+    pub size: (i32, i32),
+}
+
+const WS_EX_TOOLWINDOW: u32 = 0x0000_0080;
+const WS_EX_APPWINDOW: u32 = 0x0004_0000;
+
+/// An application window "Add app…" offers (R8-detect-3): visible, owner-less, not a tool
+/// window (unless it asks for a taskbar button), with a non-zero size, of any style: a
+/// borderless `WS_POPUP` game window (SDL's default) has no caption and no APPWINDOW bit.
+pub fn is_app_window(w: &WinInfo) -> bool {
+    let tool = w.exstyle & WS_EX_TOOLWINDOW != 0 && w.exstyle & WS_EX_APPWINDOW == 0;
+    w.visible && !w.owned && !tool && w.size.0 > 0 && w.size.1 > 0
+}
+
+/// The apps "Add app…" lists, and whether `apps[0]` is the one that was in front.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Pickable {
+    pub apps: Vec<PlayingApp>,
+    pub in_front: bool,
 }
 
 /// Exes never offered by "Add app…": Recall's own, and shell / frame processes whose windows
@@ -131,17 +152,24 @@ const NOT_OFFERED: &[&str] = &[
     "shellexperiencehost", "startmenuexperiencehost", "searchhost", "searchapp", "lockapp", "systemsettings",
 ];
 
-/// The running apps "Add app…" offers, in the order found (front-most window first): one row
-/// per exe, minus Recall and the shell. The first one is the app that was in front.
-pub fn pickable(found: Vec<PlayingApp>) -> Vec<PlayingApp> {
+/// The running apps "Add app…" offers, in z-order: one row per exe, minus Recall and the
+/// shell. The app of `front_pid` (the foreground window when the menu opened) goes first and
+/// is the only one labelled "in front"; Recall itself in front labels none (R8-detect-3).
+pub fn pickable(found: Vec<(u32, PlayingApp)>, front_pid: Option<u32>) -> Pickable {
+    let front_exe = found.iter().find(|(pid, _)| Some(*pid) == front_pid).map(|(_, a)| a.exe.clone());
     let mut out: Vec<PlayingApp> = Vec::new();
-    for app in found {
+    for (_, app) in found {
         let own = NOT_OFFERED.iter().any(|n| same_exe(n, &app.exe));
         if !own && !app.exe.trim().is_empty() && !out.iter().any(|a| same_exe(&a.exe, &app.exe)) {
             out.push(app);
         }
     }
-    out
+    let at = front_exe.and_then(|exe| out.iter().position(|a| same_exe(&a.exe, &exe)));
+    if let Some(i) = at {
+        let app = out.remove(i);
+        out.insert(0, app);
+    }
+    Pickable { in_front: at.is_some(), apps: out }
 }
 
 #[cfg(test)]

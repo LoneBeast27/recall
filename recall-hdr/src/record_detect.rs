@@ -41,6 +41,7 @@ pub(crate) fn fed_key(hwnd: isize, candidate: bool, traits: Traits) -> FedKey {
 impl Controller {
     /// A foreground change from the hook: feeds the tracker and HDR.
     pub(crate) fn on_foreground_event(&mut self, ev: &WatchEvent, now: Instant) {
+        self.end_if_windowed(ev);
         let (candidate, traits) = self.candidate(ev, now);
         self.last_fed = Some(fed_key(ev.hwnd, candidate.is_some(), traits));
         self.note_followable(ev);
@@ -54,6 +55,7 @@ impl Controller {
     /// A foreground observation from the probe or the location hook: fed to
     /// the tracker only when its [`fed_key`] changed.
     pub(crate) fn on_foreground_seen(&mut self, ev: &WatchEvent, now: Instant) {
+        self.end_if_windowed(ev);
         self.note_followable(ev);
         let (candidate, traits) = self.candidate(ev, now);
         let key = fed_key(ev.hwnd, candidate.is_some(), traits);
@@ -97,6 +99,21 @@ impl Controller {
             log!("record: target window {hwnd:#x} stayed hidden; the session ends");
             // Re-feed the window if it comes back (T5a adopts it).
             self.last_fed = None;
+        }
+        self.check_fullscreen_only();
+    }
+
+    /// R8-detect-1: a session whose only proof is `fullscreen_games` is read
+    /// every pump tick, so Esc then a quick alt-tab cannot leave its windowed
+    /// window recorded in the background. Minimized counts as still fullscreen
+    /// (alt-tab, like a game). A windowed read is confirmed by a full probe.
+    fn check_fullscreen_only(&mut self) {
+        let Some(hwnd) = self.tracker.current().filter(|_| self.tracker.fullscreen_only()).map(|t| t.hwnd) else { return };
+        if !watcher::window_alive(hwnd) || watcher::window_fullscreen(hwnd) || watcher::window_minimized(hwnd) {
+            return;
+        }
+        if let Some(ev) = watcher::probe_window(hwnd, self.target_monitor) {
+            self.end_if_windowed(&ev);
         }
     }
 

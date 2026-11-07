@@ -92,6 +92,7 @@ mod record_power_win;
 mod record_private_watch;
 mod record_quit;
 mod record_recover;
+mod record_game_ops;
 mod record_restart;
 mod record_restart_host;
 mod record_registry;
@@ -135,6 +136,8 @@ mod record_proof_tests;
 mod transitions_detect_tests;
 #[cfg(test)]
 mod transitions_gate_tests;
+#[cfg(test)]
+mod transitions_privacy_tests;
 #[cfg(test)]
 mod transitions_scope_tests;
 #[cfg(test)]

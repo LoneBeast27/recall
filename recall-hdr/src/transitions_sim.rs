@@ -6,8 +6,10 @@
 //! - [`Sim::focus`] / [`Sim::focus_unidentified`]: `record_detect::on_foreground_event`
 //!   (`Transitions::candidate` -> `TargetTracker::on_foreground_with`). The transition rules
 //!   are the controller's own code (`record_transition::Transitions`, implemented here with
-//!   injected state); only the render check is not run: `classify_seen` is `classify_event`
-//!   and the games commit like known games / overrides do (`poll_admit` answering `Commit`).
+//!   injected state); the render check itself is not run: `classify_seen` applies the proof
+//!   rule (`record_hosted::check_proof`, with [`Sim::can_check`]) and a checked candidate
+//!   commits on a "game" verdict unless [`Sim::not_games`] names it (R8-detect-6).
+//!   [`Sim::set_config`]: `recheck_registration`.
 //!   A window's client area is [`Sim::client`]. [`Sim::seen`]: `on_foreground_seen` (the 1 s
 //!   probe), fed only when `record_detect::fed_key` changed.
 //! - [`Sim::exit`] / [`Sim::window_gone`]: `record_app::tick` (`target_watch.poll` ->
@@ -39,7 +41,7 @@ use crate::record_drain::drain_len;
 use crate::record_engine::{capture_refusal, wanted, EnginePlanner, EngineTarget, Step, EXIT_LINGER};
 use crate::record_notice::{NoticeTracker, Situation};
 use crate::record_restart::{pending_restart_tick, request_settings_restart, restart_engine, restart_for_recovery, RestartHost, RestartReason, Restarted};
-use crate::record_target::{classify_event, Target, TargetTracker, START_DEBOUNCE, TARGET_DEBOUNCE};
+use crate::record_target::{Target, TargetTracker, START_DEBOUNCE, TARGET_DEBOUNCE};
 use crate::record_transition::Transitions;
 use crate::watcher::WatchEvent;
 
@@ -108,6 +110,14 @@ pub struct Sim {
     pub switches: SwitchLog,
     /// The last foreground fed to the tracker (`Controller::last_fed`).
     last_fed: Option<FedKey>,
+    /// The render check can run (trace rights): `record_hosted::check_proof`'s `can_check`.
+    pub can_check: bool,
+    /// Stems whose render check says "not a game" (every other checked window is a game).
+    pub not_games: Vec<String>,
+    /// `watcher::probe_window` of the session's window fails (`recheck_registration`).
+    pub probe_fails: bool,
+    /// The window the render check is asked about (`RenderCheck::wanted`).
+    checked: Option<(u32, isize)>,
 }
 
 /// A supervisor call (`record_engine_ctl::switch_engine`); `stop`: to Off (no spec).
@@ -171,6 +181,10 @@ impl Sim {
             notes: Vec::new(),
             switches: SwitchLog::default(),
             last_fed: None,
+            can_check: true,
+            not_games: Vec::new(),
+            probe_fails: false,
+            checked: None,
         }
     }
 
@@ -192,6 +206,7 @@ impl Sim {
     }
 
     pub fn focus(&mut self, ev: WatchEvent) {
+        self.end_if_windowed(&ev);
         let now = self.now;
         let (candidate, traits) = self.candidate(&ev, now);
         self.last_fed = Some(fed_key(ev.hwnd, candidate.is_some(), traits));
@@ -202,6 +217,7 @@ impl Sim {
     /// A foreground from the 1 s probe or the follow probe:
     /// `record_detect::on_foreground_seen`, fed only when its `fed_key` changed.
     pub fn seen(&mut self, ev: WatchEvent) {
+        self.end_if_windowed(&ev);
         let now = self.now;
         let (candidate, traits) = self.candidate(&ev, now);
         let key = fed_key(ev.hwnd, candidate.is_some(), traits);
@@ -240,7 +256,7 @@ impl Sim {
             self.apply_pause(true);
         }
         self.feed_drain(now);
-        self.tracker.poll(now);
+        self.poll_with_verdicts(now);
         self.planner.set_drain_len(drain_len(self.buffered, self.rec.buffer_secs));
         let busy = self.activity.retarget_busy(now);
         let drained = self.running_drain(now);
@@ -422,6 +438,15 @@ impl Transitions for Sim {
     fn planner(&self) -> &EnginePlanner {
         &self.planner
     }
+    fn planner_mut(&mut self) -> &mut EnginePlanner {
+        &mut self.planner
+    }
+    fn wanted_now(&self) -> EngineTarget {
+        self.wanted()
+    }
+    fn apply_now(&mut self, target: &EngineTarget) {
+        self.applied_engine(target.clone());
+    }
     fn pinned(&self) -> Option<&Target> {
         self.pinned.as_ref()
     }
@@ -429,7 +454,7 @@ impl Transitions for Sim {
         self.paused
     }
     fn classify_seen(&mut self, ev: &WatchEvent, _now: Instant) -> Option<Target> {
-        classify_event(ev, &self.cfg)
+        self.classify_with_proof(ev)
     }
     fn client_of(&self, _hwnd: isize) -> (i32, i32) {
         self.client
@@ -466,3 +491,8 @@ impl RestartHost for Sim {
         self.notes.push(line.into());
     }
 }
+
+/// The proof rule, the simulated render verdicts and `recheck_registration` (R8-detect-2,
+/// -5, -6), split out for file size.
+#[path = "transitions_sim_proof.rs"]
+mod proof;

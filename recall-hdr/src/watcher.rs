@@ -42,7 +42,7 @@ use windows::Win32::UI::Accessibility::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowThreadProcessId, IsWindow, IsZoomed, EVENT_SYSTEM_FOREGROUND, GWL_STYLE, WINEVENT_OUTOFCONTEXT,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsZoomed, EVENT_SYSTEM_FOREGROUND, GWL_STYLE, WINEVENT_OUTOFCONTEXT,
     WINEVENT_SKIPOWNPROCESS, WS_CAPTION,
 };
 
@@ -436,6 +436,12 @@ fn rect_covers(mon: &RECT, win: &RECT, tol: i32) -> bool {
 pub fn is_foreground(hwnd: isize) -> bool {
     // SAFETY: plain query.
     unsafe { GetForegroundWindow() }.0 as isize == hwnd
+}
+
+/// Whether `hwnd` is minimized.
+pub fn window_minimized(hwnd: isize) -> bool {
+    // SAFETY: IsIconic tolerates any handle value.
+    unsafe { IsIconic(HWND(hwnd as *mut _)) }.as_bool()
 }
 
 /// Whether `hwnd` still names a live window.
