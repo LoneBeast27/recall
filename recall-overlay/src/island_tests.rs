@@ -301,3 +301,10 @@ fn over_the_stats_the_card_unfolds_without_touching_the_pill() {
     assert_eq!(island.card(now + ms(620)), None);
     assert!(island.shown(), "the stats stay");
 }
+
+#[test]
+fn a_failed_frame_timing_session_says_fps_unavailable() {
+    assert_eq!(fps_note("etw", FpsSource::Error).as_deref(), Some("FPS unavailable"));
+    assert_eq!(fps_note("etw", FpsSource::NoPermission).as_deref(), Some("No frame timing"));
+    assert_eq!(fps_note("etw", FpsSource::Etw), None);
+}

@@ -80,6 +80,17 @@ pub enum Trigger {
     LongRecChanged,
     /// The long recording a retarget stopped ([`AutoStop`]) was saved.
     AutoStopped { game_closed: bool },
+    /// The engine stopped with this many saves in flight: they are lost.
+    SavesLost(u32),
+}
+
+/// Why a save in flight failed when the engine stopped.
+pub const LOST_SAVE_REASON: &str = "The recorder stopped during the save";
+
+/// The `save_failed` each lost save gets (mod `engine`, as the engine's own),
+/// so the island's ring ends in "Save failed" instead of silence.
+pub fn lost_save_event() -> String {
+    json!({"type": "save_failed", "reason": LOST_SAVE_REASON}).to_string()
 }
 
 impl EngineActivity {
@@ -130,6 +141,12 @@ impl EngineActivity {
             "save_failed" => {
                 self.pending_saves = self.pending_saves.saturating_sub(1);
                 None
+            }
+            // The supervisor's own event: the engine process ended. Its last
+            // events came first, so whatever is still pending is lost.
+            crate::supervisor::ENGINE_EXITED => {
+                let lost = std::mem::take(&mut self.pending_saves);
+                (lost > 0).then_some(Trigger::SavesLost(lost))
             }
             "screenshot" | "screenshot_failed" => {
                 self.pending_screenshots = self.pending_screenshots.saturating_sub(1);
@@ -279,6 +296,22 @@ mod tests {
         assert!(!a.busy(t0));
         a.save_sent(t0);
         assert!(!a.busy(t0 + SAVE_STALE), "a lost save does not block forever");
+    }
+
+    #[test]
+    fn an_engine_exit_with_saves_in_flight_reports_them_lost_once() {
+        let t0 = Instant::now();
+        let mut a = EngineActivity::default();
+        let exited = json!({"type": crate::supervisor::ENGINE_EXITED});
+        assert_eq!(a.on_event(&exited, 0.0), None, "nothing in flight: nothing lost");
+        a.save_sent(t0);
+        a.save_sent(t0);
+        assert_eq!(a.on_event(&json!({"type":"saved","path":"x.mp4"}), 0.0), Some(Trigger::Saved));
+        assert_eq!(a.on_event(&exited, 0.0), Some(Trigger::SavesLost(1)));
+        assert!(!a.busy(t0), "the lost save no longer holds a restart");
+        assert_eq!(a.on_event(&exited, 0.0), None, "reported once");
+        let line: Value = serde_json::from_str(&lost_save_event()).unwrap();
+        assert_eq!(line, json!({"type":"save_failed","reason":"The recorder stopped during the save"}));
     }
 
     #[test]

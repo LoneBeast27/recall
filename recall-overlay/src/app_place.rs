@@ -9,7 +9,7 @@ use serde_json::Value;
 
 use super::{App, Placed};
 use crate::dynamic::{self, HudCache, HudGrid};
-use crate::placement::{self, Anchor, Spot};
+use crate::placement::{self, Anchor, Rect, Spot};
 use crate::spot_edit::{self, effective};
 use crate::window::target_monitor;
 use crate::zorder::game_in_front;
@@ -23,9 +23,10 @@ impl App {
         let session = self.reducer.session();
         let key = session.game_key();
         let (pid, hwnd) = (session.target_pid, session.target_hwnd);
-        let fresh = self.placed.as_ref().is_some_and(|p| p.key == key && p.pid == pid && p.hwnd == hwnd);
-        if !fresh {
-            let (monitor, area) = target_monitor(hwnd, pid);
+        let probe = self.place_probe.take();
+        if needs_place(self.placed.as_ref(), &key, pid, hwnd, probe) {
+            let on_window = !session.desktop && self.dynamic();
+            let (monitor, area) = probe.unwrap_or_else(|| target_monitor(hwnd, pid, on_window));
             // Scans are kept per picture shape: a landscape grid never places a portrait window.
             let shaped = dynamic::shape_key(&session.hud_key(), area.aspect());
             let scanned = (!session.desktop).then(|| self.hud_cache.grid(&shaped)).flatten();
@@ -39,10 +40,8 @@ impl App {
                 None => {
                     let mut hud = None;
                     let (spot, custom) = spot_edit::dynamic_spot(placed_by_user, || match scanned {
-                        Some(grid) => {
-                            let aspect = (monitor.right - monitor.left) as f32 / monitor.height().max(1) as f32;
-                            Spot { anchor: dynamic::choose(&grid, aspect, current), free_px: None }
-                        }
+                        // The grid covers the game picture: the area's shape (the client rect when windowed).
+                        Some(grid) => Spot { anchor: dynamic::choose(&grid, area.aspect(), current), free_px: None },
                         None => {
                             hud = self.spots.hud(&key);
                             self.spots.lookup(&key)
@@ -51,7 +50,7 @@ impl App {
                     (spot, hud, custom)
                 }
             };
-            let scale = placement::scale(monitor.height(), &spot);
+            let scale = placement::scale(&monitor, &spot);
             let (grow, max_h) = (placement::grow(&spot), placement::free_depth(&spot, &monitor, scale));
             // The exe stem only: `key` comes from the window title and never reaches the log.
             let exe = match session.hud_key() {
@@ -67,6 +66,15 @@ impl App {
             self.placed = Some(Placed { key, pid, hwnd, monitor, area, spot, scale, grow, max_h, hud, custom });
         }
         self.placed.as_ref().map_or(1.0, |p| p.scale)
+    }
+
+    /// Once per base tick while the island shows: where the target is now, so
+    /// `place` notices a move to another monitor, a mode or resolution change
+    /// or (Dynamic) a windowed game moved or resized.
+    pub(super) fn probe_place(&mut self) {
+        let Some(p) = self.placed.as_ref().filter(|_| self.island.shown()) else { return };
+        let on_window = !self.reducer.session().desktop && self.dynamic();
+        self.place_probe = Some(target_monitor(p.hwnd, p.pid, on_window));
     }
 
     /// The Dynamic corner's kept scans (`--smoke-state` runs keep none).
@@ -113,8 +121,10 @@ impl App {
         let grid = HudGrid::from_scan(&event);
         let key = self.hud_cache_key();
         let scans = self.hud_cache.scans(&key) + grid.is_some() as usize;
-        let Some(for_key) = self.prober.answered(grid.is_some(), scans, now) else { return false };
+        let Some(asked) = self.prober.answered(grid.is_some(), scans, now) else { return false };
         let Some(grid) = grid else { return false };
+        // Kept under the shape the scan measured (the game picture), not the area's.
+        let for_key = dynamic::scan_key(&asked, &event);
         if HudGrid::is_ui(&event) { self.hud_cache.add_ui(&for_key, grid) } else { self.hud_cache.add(&for_key, grid) }
         let before = self.placed.as_ref().map(|p| p.spot.anchor);
         // Re-place now (the current spot is kept when it is still among the clearest).
@@ -124,5 +134,52 @@ impl App {
         }
         self.place();
         before != self.placed.as_ref().map(|p| p.spot.anchor)
+    }
+}
+
+/// True when the island must be placed again: no placement yet, another
+/// target or window, or (`probe`: this tick's monitor and area) the game
+/// moved monitor, changed size or mode.
+pub(super) fn needs_place(placed: Option<&Placed>, key: &str, pid: Option<u32>, hwnd: Option<isize>, probe: Option<(Rect, Rect)>) -> bool {
+    let same = |p: &Placed| p.key == key && p.pid == pid && p.hwnd == hwnd;
+    let moved = |p: &Placed| probe.is_some_and(|(monitor, area)| monitor != p.monitor || area != p.area);
+    !placed.is_some_and(|p| same(p) && !moved(p))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
+        Rect { left, top, right, bottom }
+    }
+
+    fn placed(monitor: Rect, area: Rect) -> Placed {
+        Placed {
+            key: "VALORANT".into(),
+            pid: Some(42),
+            hwnd: None,
+            monitor,
+            area,
+            spot: placement::DEFAULT_SPOT,
+            scale: 1.0,
+            grow: 1.0,
+            max_h: f32::INFINITY,
+            hud: None,
+            custom: None,
+        }
+    }
+
+    #[test]
+    fn a_game_that_moves_monitor_or_mode_is_placed_again() {
+        let (left, right) = (rect(0, 0, 2560, 1440), rect(2560, 0, 4480, 1080));
+        let p = placed(left, left);
+        assert!(!needs_place(Some(&p), "VALORANT", Some(42), None, Some((left, left))), "nothing changed");
+        assert!(!needs_place(Some(&p), "VALORANT", Some(42), None, None), "no probe this call");
+        assert!(needs_place(Some(&p), "VALORANT", Some(42), None, Some((right, right))), "moved to the other monitor");
+        let work = rect(0, 0, 2560, 1392);
+        assert!(needs_place(Some(&p), "VALORANT", Some(42), None, Some((left, work))), "borderless to windowed");
+        assert!(needs_place(Some(&p), "Other", Some(42), None, Some((left, left))));
+        assert!(needs_place(None, "VALORANT", Some(42), None, None));
     }
 }
