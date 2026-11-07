@@ -39,7 +39,7 @@ fn a_line_in_on_another_endpoint_follows_the_mic_hotkey() {
 #[test]
 fn the_mic_hotkey_row_is_inert_without_a_device() {
     assert_eq!(mic_row(&line_in("", "")), (true, None), "the Windows default: always muted, nothing to flip");
-    assert_eq!(mic_row(&line_in("Mic (Box)", "")), (false, Some(true)), "a named line-in: off, a click turns it on");
+    assert_eq!(mic_row(&line_in("Mic (Box)", "{a}")), (false, Some(true)), "a named line-in: off, a click turns it on");
     let mic = Source { mic_mute: None, ..line_in("Mic (Box)", "") };
     assert_eq!(mic_row(&mic), (true, Some(false)), "no flag: muted, a click makes it a line-in");
 }
@@ -123,4 +123,28 @@ fn the_pick_finds_the_device_in_the_lists_at_click_time() {
     assert_eq!(device_pick_effect(&source, Some(&now), ("Mic (Box)", "{a}")), Some(true), "Mic (Box) picked (index 1 at render)");
     assert_eq!(device_pick_effect(&source, Some(&now), ("Line (Box)", "{b}")), None, "Line (Box) picked (index 0 at render)");
     assert_eq!(device_pick_effect(&source, Some(&now), ("2- Mic (Box)", "")), Some(true), "no id: found by the name the recorder matches");
+}
+
+/// 2026-11-07 audit R7-deep-audio-5: a named line-in with no saved id IS muted by Alt+M, so its
+/// row shows checked (with the `NO_ID` note); a click unticks it, which saves the id.
+#[test]
+fn a_line_in_without_an_id_shows_the_mic_hotkey_row_checked() {
+    assert_eq!(mic_row(&line_in("Mic (Box)", "")), (true, Some(false)), "muted: checked, a click unticks");
+    assert_eq!(mic_row(&line_in("Mic (Box)", "x\u{7}")), (true, Some(false)), "a malformed id is no id");
+    assert_eq!(other_note(&line_in("Mic (Box)", ""), None), Some(NO_ID), "with its note");
+}
+
+/// 2026-11-07 audit R7-deep-audio-1 (page): with no saved id, the untick never guesses between
+/// identical dongles. Windows gave "Mic (Box)" to the headset dongle and "2- Mic (Box)" to the
+/// line-in one: refused, the user re-picks from the list (which saves the picked endpoint's id).
+#[test]
+fn unticking_is_refused_when_an_identical_device_shares_the_name() {
+    let mic = |device: &str| Source { mic_mute: Some(true), ..line_in(device, "") };
+    let twins = lists(&[("Mic (Box)", "{h}", Some(2)), ("2- Mic (Box)", "{c}", Some(2))]);
+    assert_eq!(mic_toggle_effect(&mic("Mic (Box)"), Some(&twins)), Err(CONFIRM_PICK), "a sibling with the same stripped name: refused");
+    assert!(CONFIRM_PICK.contains("Pick this device again to confirm it"));
+    let one = lists(&[("Mic (Box)", "{h}", Some(2)), ("Speakers (Box)", "{s}", None)]);
+    assert_eq!(mic_toggle_effect(&mic("Mic (Box)"), Some(&one)), Ok((false, "{h}".to_owned())), "the only one: its id");
+    let with_id = Source { device_id: "{c}".into(), ..mic("2- Mic (Box)") };
+    assert_eq!(mic_toggle_effect(&with_id, Some(&twins)), Ok((false, "{c}".to_owned())), "a saved id is not a guess: kept");
 }

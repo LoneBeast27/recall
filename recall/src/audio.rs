@@ -26,6 +26,7 @@ mod apps;
 mod capture_loop;
 mod endpoints;
 mod notify;
+mod rebind;
 pub mod sources;
 mod stream;
 mod voice;

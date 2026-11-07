@@ -13,6 +13,10 @@ pub const OPENED_OTHER: &str = "Using a different device: follows the mic hotkey
 pub const NO_ID: &str = "Follows the mic hotkey until you pick this device again";
 /// The strip note when unticking "Muted by the mic hotkey" was refused: no endpoint id to save.
 pub const REFUSED: &str = "Can't read this device's id: pick it again to turn off Muted by the mic hotkey";
+/// The strip note when unticking a line-in with no saved id was refused because another
+/// present endpoint has the same name once the "N- " index is dropped (identical dongles): the
+/// name cannot say which is the line-in, so the user picks it from the list (R7-deep-audio-1).
+pub const CONFIRM_PICK: &str = "Pick this device again to confirm it";
 
 /// A line-in (`mic_mute = false`, a named device) that the recorder mutes with Alt+M after all
 /// (`recall` `audio/endpoints.rs` `opened_own`, R6-deep-audio-1/2): it saved no well-formed
@@ -51,10 +55,15 @@ fn input_index(lists: &DeviceLists, device: &str, device_id: &str) -> Option<usi
 
 /// The "Muted by the mic hotkey" row of an input's menu: (shown checked, what a click saves).
 /// With no device it records the Windows default, which Alt+M always mutes: checked and inert,
-/// so a click never flips a flag the row cannot show (R5-deep-audio-3). Named: the strip's flag.
+/// so a click never flips a flag the row cannot show (R5-deep-audio-3). Named: the strip's flag,
+/// except a line-in with no saved id, which Alt+M mutes all the same: checked, and a click
+/// unticks it, which saves the id (`mic_toggle_effect`, R7-deep-audio-5).
 pub fn mic_row(source: &Source) -> (bool, Option<bool>) {
     if source.device.trim().is_empty() {
         return (true, None);
+    }
+    if source.mic_mute == Some(false) && !crate::services::meters::id_ok(&source.device_id) {
+        return (true, Some(false));
     }
     (source.mic_mute != Some(false), Some(source.mic_mute == Some(false)))
 }
@@ -63,15 +72,20 @@ pub fn mic_row(source: &Source) -> (bool, Option<bool>) {
 /// skips Alt+M only on its saved id (R6-deep-audio-1). The id: the saved one when it is listed,
 /// else the one endpoint with exactly the saved name. Refused ([`REFUSED`]) when the lists are
 /// not read, the saved id is not listed, the name opens no endpoint or only a renumbered one,
-/// or Windows gave no readable id.
+/// or Windows gave no readable id. With no saved id it is also refused ([`CONFIRM_PICK`]) when
+/// any other present endpoint has the same name once a leading "N- " index is dropped: two
+/// identical dongles, where Windows may have given the saved name to the other one (R7-deep-audio-1).
 pub fn mic_toggle_effect(source: &Source, lists: Option<&DeviceLists>) -> Result<(bool, String), &'static str> {
-    use crate::services::meters::id_ok;
+    use crate::services::meters::{id_ok, match_endpoint, stripped_hits};
     let lists = lists.ok_or(REFUSED)?;
     let device = source.device.trim();
     let i = if id_ok(&source.device_id) {
         lists.input_ids.iter().position(|id| id.trim() == source.device_id.trim())
     } else {
-        crate::services::meters::match_endpoint(&lists.inputs, device).filter(|&i| lists.inputs[i].trim() == device)
+        if stripped_hits(&lists.inputs, device) > 1 {
+            return Err(CONFIRM_PICK);
+        }
+        match_endpoint(&lists.inputs, device).filter(|&i| lists.inputs[i].trim() == device)
     };
     let id = i.and_then(|i| lists.input_ids.get(i)).map(|id| id.trim()).filter(|id| id_ok(id)).ok_or(REFUSED)?;
     Ok((false, id.to_owned()))

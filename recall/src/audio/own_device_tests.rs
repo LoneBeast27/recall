@@ -5,6 +5,7 @@
 use super::tests::{ring, FakeClock, FakeNotices};
 use super::*;
 use crate::audio::endpoints::{choose_endpoint, opened_own, Pick};
+use crate::audio::rebind::{rebind_for, Key, Probe, Rebind, Run};
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -128,7 +129,7 @@ impl Capture for Rebinding {
 
     fn run(&mut self, ring: &TrackRing, level: &mut Leveller, _clock: &dyn Clock, notices: &dyn Notices) -> Ended {
         for _ in 0..100 {
-            if let Some(ended) = self.rebind.as_ref().and_then(|r| r.check(notices)) {
+            if let Some(ended) = self.rebind.as_mut().and_then(|r| r.check(notices)) {
                 return ended;
             }
             self.now.set(self.now.get() + Duration::from_millis(20));
@@ -151,9 +152,10 @@ fn a_fallback_stream_goes_back_to_its_own_device_when_it_returns() {
     let (tx, _rx) = std::sync::mpsc::channel();
     let open = |_reopen: bool| {
         opens.set(opens.get() + 1);
-        let back = now.clone();
+        // The re-pick after the notice opens the saved id.
+        let back: Probe = std::sync::Arc::new(|| Some(Key::Id("{id-one}".into())));
         Ok::<_, String>(match opens.get() {
-            1 => Rebinding { now: now.clone(), endpoint: "2- Mic (Box)", own: false, rebind: rebind_for("Mic (Box)", false, move || back.get() >= Duration::from_millis(500)) },
+            1 => Rebinding { now: now.clone(), endpoint: "2- Mic (Box)", own: false, rebind: rebind_for("Mic (Box)", Key::Id("{id-two}".into()), back, Run::Inline) },
             _ => Rebinding { now: now.clone(), endpoint: "Mic (Box)", own: true, rebind: None },
         })
     };

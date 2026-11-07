@@ -91,8 +91,8 @@ impl Root {
     /// (R6-deep-audio-1), else `strip_note`.
     fn strip_warning(&self, source: &Source) -> Option<String> {
         let audio = &self.settings_ui.audio;
-        if audio.mute_refused.as_deref() == Some(source.id.as_str()) {
-            return Some(crate::services::audio_mute::REFUSED.to_owned());
+        if let Some((_, why)) = audio.mute_refused.as_ref().filter(|(id, _)| *id == source.id) {
+            return Some((*why).to_owned());
         }
         crate::services::audio_sources::strip_note(source, audio.devices.as_ref())
     }

@@ -8,8 +8,9 @@ use std::time::Duration;
 use wasapi::{DeviceCollection, Direction, SampleType, StreamMode, WaveFormat};
 
 use super::apps::Leveller;
-use super::capture_loop::{rebind_for, silence_to_clock, watch_for, Capture, Clock, Ended, Notices, Rebind, Watch};
+use super::capture_loop::{silence_to_clock, watch_for, Capture, Clock, Ended, Notices, Watch};
 use super::endpoints::{choose_endpoint, opened_own, Pick};
+use super::rebind::{key_for, rebind_for, Key, Rebind, Run};
 use super::{LoopbackTarget, TrackRing};
 
 /// No packet for this long: the source is quiet (loopback sends nothing while nothing
@@ -65,7 +66,7 @@ pub(super) struct Stream {
     watch: Option<Watch>,
     /// The endpoint is the source's own saved device (`endpoints::opened_own`).
     own: bool,
-    /// A named device on another endpoint: ends when its own comes back (`capture_loop::rebind_for`).
+    /// A named device: ends when a device notice changes its pick (`rebind::rebind_for`).
     rebind: Option<Rebind>,
 }
 
@@ -77,6 +78,8 @@ struct Picked {
     on_default: bool,
     /// It is the saved device itself: the endpoint id it saved (`endpoints::opened_own`).
     own: bool,
+    /// What a re-pick compares (`rebind::key_for`): the endpoint id, or the name with no saved id.
+    key: Key,
 }
 
 /// Open what `choose_endpoint` picks for the saved `(device, device_id)`; an input with no
@@ -92,16 +95,32 @@ fn pick_device(direction: &Direction, (device, device_id): (&str, &str), input: 
     match choose_endpoint(&names, want.as_deref(), exact)? {
         Pick::Named(i) => {
             let dev = devices.into_iter().nth(i).expect("index from names");
+            // With no saved id the endpoint id is never read (R7-deep-audio-4): it cannot be own.
+            let key = key_for(device_id, &names[i], || dev.get_id().ok());
             // Against the saved device only: the test mic stands in for the default.
-            let own = opened_own(dev.get_id().ok().as_deref(), device, device_id);
-            Ok(Picked { dev, endpoint: names[i].clone(), on_default: false, own })
+            let own = matches!(&key, Key::Id(id) if opened_own(Some(id), device, device_id));
+            Ok(Picked { dev, endpoint: names[i].clone(), on_default: false, own, key })
         }
         Pick::Default => {
             let dev = wasapi::get_default_device(direction).map_err(|e| format!("default endpoint failed: {e}"))?;
             let name = dev.get_friendlyname().unwrap_or_else(|_| "(default)".into());
-            Ok(Picked { dev, endpoint: format!("{name} (Windows default)"), on_default: true, own: false })
+            Ok(Picked { dev, endpoint: format!("{name} (Windows default)"), on_default: true, own: false, key: Key::Name(name) })
         }
     }
+}
+
+/// The re-pick of a named stream: what `pick_device` opens now (None: no single endpoint
+/// matches, A4). It runs on a probe thread (`rebind::Run::Thread`), which joins COM itself.
+fn repick(direction: Direction, (device, device_id): (&str, &str), input: bool) -> super::rebind::Probe {
+    let (saved, saved_id) = (device.to_owned(), device_id.to_owned());
+    std::sync::Arc::new(move || {
+        let joined = wasapi::initialize_mta().is_ok();
+        let key = pick_device(&direction, (&saved, &saved_id), input).ok().filter(|p| !p.on_default).map(|p| p.key);
+        if joined {
+            wasapi::deinitialize();
+        }
+        key
+    })
 }
 
 /// Open `target`'s process loopback, else the source's endpoint (a named one by its name
@@ -118,15 +137,14 @@ pub(super) fn open_stream(direction: &Direction, (device, device_id): (&str, &st
             200_000,
         ),
         None => {
-            let Picked { dev, endpoint, on_default, own: is_own } = pick_device(direction, (device, device_id), ring.input)?;
+            let Picked { dev, endpoint, on_default, own: is_own, key } = pick_device(direction, (device, device_id), ring.input)?;
             if on_default {
                 watch = watch_for(device, dev.get_id().ok());
             }
             own = is_own;
-            // On another endpoint than its own (R6-deep-audio-3): on a device notice, pick again
-            // and end this stream when the pick is now the saved device itself.
-            let (direction, saved, saved_id, input) = (*direction, device.to_owned(), device_id.to_owned(), ring.input);
-            rebind = rebind_for(device, own, move || pick_device(&direction, (&saved, &saved_id), input).is_ok_and(|p| p.own));
+            // A named device (R7-deep-audio-1): on a device notice, pick again (on its own thread)
+            // and end this stream when the pick is no longer this endpoint.
+            rebind = rebind_for(device, key, repick(*direction, (device, device_id), ring.input), Run::Thread);
             let client = dev.get_iaudioclient().map_err(|e| e.to_string())?;
             let (_def_period, min_period) = client.get_device_period().map_err(|e| e.to_string())?;
             (client, endpoint, device_buffer_hns(min_period))
@@ -162,7 +180,7 @@ impl Stream {
             if let Some(ended) = self.watch.as_mut().and_then(|w| w.check(notices)) {
                 return ended;
             }
-            if let Some(ended) = self.rebind.as_ref().and_then(|r| r.check(notices)) {
+            if let Some(ended) = self.rebind.as_mut().and_then(|r| r.check(notices)) {
                 return ended;
             }
             if self.event.0.wait_for_event(WAIT_MS).is_ok() {

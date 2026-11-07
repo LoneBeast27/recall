@@ -70,9 +70,10 @@ pub struct AudioPage {
     pub reorder: Option<(String, usize)>,
     /// Each strip's window left edge, written while painting (places a dragged strip).
     pub lefts: HashMap<String, Rc<Cell<Option<f32>>>>,
-    /// The source whose "Muted by the mic hotkey" untick was refused (no endpoint id to save):
-    /// its strip says so until a device is picked or the page closes (R6-deep-audio-1).
-    pub mute_refused: Option<String>,
+    /// The source whose "Muted by the mic hotkey" untick was refused, and the note why (no
+    /// endpoint id to save, or an identical device shares the name): its strip says so until a
+    /// device is picked or the page closes (R6/R7-deep-audio-1).
+    pub mute_refused: Option<(String, &'static str)>,
 }
 
 impl AudioPage {
@@ -130,7 +131,7 @@ impl Root {
     pub(crate) fn set_source_device(&mut self, id: &str, device: String, device_id: String) {
         let lists = self.settings_ui.audio.devices.clone();
         let mut rearmed = false;
-        if self.settings_ui.audio.mute_refused.as_deref() == Some(id) {
+        if self.settings_ui.audio.mute_refused.as_ref().is_some_and(|(s, _)| s == id) {
             self.settings_ui.audio.mute_refused = None;
         }
         self.edit_source(id, |s| {
@@ -165,7 +166,7 @@ impl Root {
                     }
                 });
             }
-            Err(_) => self.settings_ui.audio.mute_refused = Some(id.to_owned()),
+            Err(why) => self.settings_ui.audio.mute_refused = Some((id.to_owned(), why)),
         }
     }
 

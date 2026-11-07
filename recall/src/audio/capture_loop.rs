@@ -123,27 +123,6 @@ pub(super) fn watch_for(device: &str, default_id: Option<String>) -> Option<Watc
     Some(Watch { id: default_id? })
 }
 
-/// A named stream on another endpoint than its own saved device (a fallback, or a twin): when a
-/// device comes or goes and the saved device would now open as its own (`back`), it ends at once
-/// so the loop opens that one (R6-deep-audio-3). Otherwise the track stayed on the other
-/// endpoint for the session.
-pub(super) struct Rebind {
-    back: Box<dyn Fn() -> bool>,
-}
-
-impl Rebind {
-    /// End the stream now: a device notice came and the saved device is back.
-    pub(super) fn check(&self, notices: &dyn Notices) -> Option<Ended> {
-        (notices.take_devices_changed() && (self.back)()).then(|| Ended { why: "the saved device is back".to_owned(), at_once: true })
-    }
-}
-
-/// The rebind for a stream that opened `device` (`own`: its own saved device): only a named
-/// device on another endpoint. `back` probes the endpoints again (on a device notice only).
-pub(super) fn rebind_for(device: &str, own: bool, back: impl Fn() -> bool + 'static) -> Option<Rebind> {
-    (!device.trim().is_empty() && !own).then(|| Rebind { back: Box::new(back) })
-}
-
 /// A device source that does not open at start still gets its track (silence) and waits: a
 /// named device for itself, a source on the Windows default for a default to appear (the
 /// headset is off, or an app holds the default in exclusive mode). Not for process loopback (a
@@ -222,9 +201,10 @@ pub(super) fn capture_loop<C: Capture>(
                 if let Some(tx) = init_tx.take() {
                     let _ = tx.send(Ok(()));
                 }
-                // Device notices from before this stream are stale for the next loss.
-                notices.take_devices_changed();
-                let ended = stream.run(ring, &mut level, &*clock, notices);
+                // A device notice that came while the stream was opening is kept for the stream's
+                // own checks (its rebind re-picks once, R7-deep-audio-3), not dropped as stale.
+                let queued = Queued { missed: std::cell::Cell::new(notices.take_devices_changed()), notices };
+                let ended = stream.run(ring, &mut level, &*clock, &queued);
                 set_opened_own(ring, &endpoint, false, false);
                 // Nor do the ones that came while it was live (another device came or went):
                 // the first reopen after this loss keeps its backoff.
@@ -256,6 +236,23 @@ pub(super) fn capture_loop<C: Capture>(
     }
 }
 
+/// The notices a stream runs with: the device notice taken at its open (`missed`) comes back on
+/// its first `take_devices_changed`.
+struct Queued<'a> {
+    missed: std::cell::Cell<bool>,
+    notices: &'a dyn Notices,
+}
+
+impl Notices for Queued<'_> {
+    fn take_devices_changed(&self) -> bool {
+        self.missed.replace(false) | self.notices.take_devices_changed()
+    }
+
+    fn take_default(&self) -> Option<String> {
+        self.notices.take_default()
+    }
+}
+
 /// Silence for up to `wait`, cut short when a device comes or goes. False: the clock ended
 /// the loop (tests only).
 fn wait_to_reopen(ring: &TrackRing, level: &mut Leveller, clock: &mut dyn Clock, notices: &dyn Notices, wait: Duration) -> bool {
@@ -274,7 +271,7 @@ fn wait_to_reopen(ring: &TrackRing, level: &mut Leveller, clock: &mut dyn Clock,
 
 #[cfg(test)]
 #[path = "capture_loop_tests.rs"]
-mod tests;
+pub(super) mod tests;
 
 #[cfg(test)]
 #[path = "own_device_tests.rs"]
