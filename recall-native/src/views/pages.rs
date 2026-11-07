@@ -52,9 +52,9 @@ impl Root {
         }
         // A recorder that runs but never answers gets its reason, not "off" (`root_reach`).
         let (title, detail) = if self.recorder_reach == daemon::RecorderReach::Unreachable {
-            (reach::UNREACHABLE_TITLE, reach::UNREACHABLE_DETAIL)
+            (reach::UNREACHABLE_TITLE, self.unreachable_detail())
         } else {
-            ("The recorder is off", "Start it to see live status and change these settings.")
+            ("The recorder is off", "Start it to see live status and change these settings.".to_owned())
         };
         Some(
             card()

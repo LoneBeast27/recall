@@ -117,16 +117,37 @@ function Get-PipeServer($pipe) {
   $id = [uint32]0
   if ([RecallInstall.Pipe]::GetNamedPipeServerProcessId($pipe.SafePipeHandle.DangerousGetHandle(), [ref]$id)) { [int]$id } else { 0 }
 }
+# The account a process runs as (its token user SID), or $null when it can't be read.
+function Get-ProcessUserSid([int]$id) {
+  if (-not ('RecallInstall.Token' -as [type])) {
+    Add-Type -Name Token -Namespace RecallInstall -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError = true)] public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+[DllImport("advapi32.dll", SetLastError = true)] public static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+[DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+'@
+  }
+  # PROCESS_QUERY_LIMITED_INFORMATION, TOKEN_QUERY.
+  $process = [RecallInstall.Token]::OpenProcess(0x1000, $false, [uint32]$id)
+  if ($process -eq [IntPtr]::Zero) { return $null }
+  try {
+    $token = [IntPtr]::Zero
+    if (-not [RecallInstall.Token]::OpenProcessToken($process, 8, [ref]$token)) { return $null }
+    try { ([Security.Principal.WindowsIdentity]::new($token)).User.Value } finally { [void][RecallInstall.Token]::CloseHandle($token) }
+  } finally { [void][RecallInstall.Token]::CloseHandle($process) }
+}
+$mySid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value
 function Send-Recorder([string]$line, [string]$name = $pipeName, [int]$tries = 5) {
   # The controller serves one pipe instance at a time: retry a connect that lands between
   # instances, and keep the client open briefly so the line is read before it disconnects.
   # Nothing is written unless the pipe's server is the controller this run owns (Get-Controller):
   # another recorder on the same name (the live one, during a sandboxed install) is left alone.
+  # A server running as another account is refused first, with a warning (deep-startup-p3 a).
   for ($attempt = 0; $attempt -lt $tries; $attempt++) {
     try {
       $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', $name, [IO.Pipes.PipeDirection]::InOut)
       $pipe.Connect(1500)
       $server = Get-PipeServer $pipe
+      if ($server -and (Get-ProcessUserSid $server) -ne $mySid) { $pipe.Dispose(); Write-Warning "another user owns the Recall pipe ($name, pid $server): nothing sent."; return $false }
       if (-not $server -or -not (@(Get-Controller) | Where-Object { [int]$_.ProcessId -eq $server })) { $pipe.Dispose(); return $false }
       $w = [IO.StreamWriter]::new($pipe); $w.AutoFlush = $true; $w.WriteLine($line)
       Start-Sleep -Milliseconds 300; $pipe.Dispose(); return $true

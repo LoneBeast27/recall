@@ -15,8 +15,22 @@ $ErrorActionPreference='Stop'
 $recallRoot=$PSScriptRoot
 # This Windows session's recorder only: the control pipe is per session (recall-hdr control_pipe.rs).
 $mySession=(Get-Process -Id $PID).SessionId
+# The pipe's server must run as this account (GetNamedPipeServerProcessId, then its token user SID).
+function Test-RecallPipeOwner($pipe){
+ if(-not('RecallStart.Owner' -as [type])){Add-Type -Name Owner -Namespace RecallStart -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError = true)] public static extern bool GetNamedPipeServerProcessId(IntPtr h, out uint pid);
+[DllImport("kernel32.dll", SetLastError = true)] public static extern IntPtr OpenProcess(uint access, bool inherit, uint pid);
+[DllImport("advapi32.dll", SetLastError = true)] public static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+[DllImport("kernel32.dll")] public static extern bool CloseHandle(IntPtr h);
+'@}
+ $server=[uint32]0;if(-not[RecallStart.Owner]::GetNamedPipeServerProcessId($pipe.SafePipeHandle.DangerousGetHandle(),[ref]$server)){return $false}
+ $process=[RecallStart.Owner]::OpenProcess(0x1000,$false,$server);if($process -eq [IntPtr]::Zero){return $false}
+ $token=[IntPtr]::Zero;$ok=[RecallStart.Owner]::OpenProcessToken($process,8,[ref]$token);[void][RecallStart.Owner]::CloseHandle($process);if(-not $ok){return $false}
+ try{([Security.Principal.WindowsIdentity]::new($token)).User.Value -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value}finally{[void][RecallStart.Owner]::CloseHandle($token)}
+}
 if($Stop){
  $pipe=[IO.Pipes.NamedPipeClientStream]::new('.',"recall-hdr-control-$mySession",[IO.Pipes.PipeDirection]::Out);$pipe.Connect(2000)
+ if(-not(Test-RecallPipeOwner $pipe)){$pipe.Dispose();throw 'another user owns the Recall pipe: quit not sent.'}
  $writer=[IO.StreamWriter]::new($pipe);$writer.AutoFlush=$true;$writer.WriteLine('{"cmd":"quit"}');$writer.Dispose()
  Write-Output 'Recall recording stopped.';return
 }

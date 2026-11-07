@@ -137,6 +137,44 @@ pub fn stop_stale() -> bool {
     status == ERROR_SUCCESS
 }
 
+/// The machine-wide name every controller used before the per-session names. A controller of
+/// that build killed mid-probe leaves it running until reboot, so a starting controller stops
+/// it (merge-gate ruling, deep-startup-p3 c), and only this exact name: another Windows
+/// session's `RecallDetectRender-<id>` is never touched.
+pub(crate) const LEGACY_SESSION: &str = SESSION_BASE;
+
+/// What [`stop_left_sessions`] stopped.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct LeftSessions {
+    /// This session's own name (a killed controller of this build).
+    pub own: bool,
+    /// The legacy machine-wide name (a killed controller of an older build).
+    pub legacy: bool,
+}
+
+/// At controller start: stops this session's left-over session (`own`) and the legacy
+/// machine-wide one through `stop` (the live path passes [`stop_named`]).
+pub(crate) fn stop_left_sessions(own: &str, mut stop: impl FnMut(&str) -> bool) -> LeftSessions {
+    let own_stopped = stop(own);
+    // No session id: this session's name is the bare one, already stopped above.
+    let legacy = own != LEGACY_SESSION && stop(LEGACY_SESSION);
+    LeftSessions { own: own_stopped, legacy }
+}
+
+/// This Windows session's ETW session name.
+pub(crate) fn own_session_name() -> String {
+    session_name_for(crate::control_pipe::current_session())
+}
+
+/// Stops the ETW session called `name` (any process's). True when one was stopped.
+pub(crate) fn stop_named(name: &str) -> bool {
+    let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    let mut p = Properties::new();
+    // SAFETY: `wide` is NUL-terminated and outlives the call; `p` is a sized properties block.
+    let status = unsafe { ControlTraceW(CONTROLTRACE_HANDLE { Value: 0 }, PCWSTR(wide.as_ptr()), &mut p.props, EVENT_TRACE_CONTROL_STOP) };
+    status == ERROR_SUCCESS
+}
+
 /// This Windows session's `RecallDetectRender-<session>` exists (any process's).
 pub fn session_running() -> bool {
     let mut p = Properties::new();

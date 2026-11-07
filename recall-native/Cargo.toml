@@ -29,6 +29,8 @@ windows = { version = "0.62", features = [
     "Win32_System_Ole", "Win32_System_LibraryLoader",
     # Per-session controller pipe and recorder check (`services/daemon/session.rs`).
     "Win32_System_RemoteDesktop",
+    # The pipe server's account check (`services/daemon/pipe_owner.rs`).
+    "Win32_Security_Authorization",
 ] }
 
 # Release: see the workspace Cargo.toml (this crate is its own workspace). panic stays
