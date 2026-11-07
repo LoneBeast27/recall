@@ -63,8 +63,8 @@ impl Root {
     /// drain countdown reached its next second.
     pub(super) fn recorder_clock_tick(&mut self) -> bool {
         let unresponsive = self.daemon.unresponsive();
-        let drain = self.snap.session.as_ref().filter(|s| s.state == "draining").and_then(|s| s.drain.as_ref());
-        let left = drain.map(|d| d.remaining_secs(crate::services::daemon::unix_ms()));
+        let draining = self.snap.session.as_ref().filter(|s| s.state == "draining");
+        let left = draining.and_then(|s| s.drain_left(crate::services::daemon::unix_ms(), std::time::Instant::now()));
         if unresponsive == self.recorder_unresponsive && left == self.drain_drawn {
             return false;
         }

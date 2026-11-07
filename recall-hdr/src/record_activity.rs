@@ -32,8 +32,9 @@ pub const SCREENSHOT_STALE: Duration = Duration::from_secs(60);
 pub enum LongRec {
     Idle,
     Starting { since: Instant },
-    /// `started_unix`: Unix seconds when the engine reported it running.
-    Active { path: String, started_unix: f64 },
+    /// `started_unix`: Unix seconds when the engine reported it running; `since`:
+    /// the same moment on the monotonic clock (the status's `elapsed_secs`).
+    Active { path: String, started_unix: f64, since: Instant },
 }
 
 /// The long recording the controller stopped for a retarget (its
@@ -135,11 +136,11 @@ impl EngineActivity {
                 None
             }
             "recording_started" => {
-                let started_unix = match self.long {
-                    LongRec::Active { started_unix, .. } if continued => started_unix,
-                    _ => unix_now,
+                let (started_unix, since) = match self.long {
+                    LongRec::Active { started_unix, since, .. } if continued => (started_unix, since),
+                    _ => (unix_now, Instant::now()),
                 };
-                self.long = LongRec::Active { path: text("path"), started_unix };
+                self.long = LongRec::Active { path: text("path"), started_unix, since };
                 Some(Trigger::LongRecChanged)
             }
             // Only a part ended: the recording stays Active (no retarget slips in
@@ -206,8 +207,16 @@ impl EngineActivity {
 
     /// Session-status `long_recording`.
     pub fn long_recording_json(&self) -> Value {
+        self.long_recording_json_at(Instant::now())
+    }
+
+    /// `long_recording` at `now`.
+    pub fn long_recording_json_at(&self, now: Instant) -> Value {
         match &self.long {
-            LongRec::Active { path, started_unix } => json!({"active": true, "path": path, "started_secs": started_unix}),
+            LongRec::Active { path, started_unix, since } => {
+                let elapsed = now.saturating_duration_since(*since).as_millis() as f64 / 1000.0;
+                json!({"active": true, "path": path, "started_secs": started_unix, "elapsed_secs": elapsed})
+            }
             LongRec::Starting { .. } => json!({"active": false, "starting": true, "path": null, "started_secs": null}),
             LongRec::Idle => json!({"active": false, "path": null, "started_secs": null}),
         }
@@ -281,9 +290,10 @@ mod tests {
         assert!(a.busy(t0) && !a.is_recording());
         a.on_event(&json!({"type":"recording_started","path":"E:\\c\\G__rec.mp4"}), 1_790_000_000.5);
         assert!(a.is_recording());
+        let LongRec::Active { since, .. } = a.long.clone() else { panic!("active") };
         assert_eq!(
-            a.long_recording_json(),
-            json!({"active":true,"path":"E:\\c\\G__rec.mp4","started_secs":1_790_000_000.5})
+            a.long_recording_json_at(since),
+            json!({"active":true,"path":"E:\\c\\G__rec.mp4","started_secs":1_790_000_000.5,"elapsed_secs":0.0})
         );
         assert_eq!(a.on_event(&json!({"type":"recording_stopped","path":"p","seconds":3.0,"bytes":9}), 0.0), Some(Trigger::LongRecChanged));
         assert!(!a.busy(t0));
@@ -450,7 +460,7 @@ mod tests {
         assert!(a.is_recording(), "no gap between the parts for a retarget to slip into");
         assert!(a.retarget_busy(t0).long_rec);
         a.on_event(&json!({"type":"recording_started","path":"p2","continued":true}), 9.5);
-        assert_eq!(a.long, LongRec::Active { path: "p2".into(), started_unix: 5.0 }, "the timer counts from part 1");
+        assert!(matches!(&a.long, LongRec::Active { path, started_unix: 5.0, .. } if path == "p2"), "the timer counts from part 1");
         // A retarget's stop sent before the size change is answered by the last part's stop.
         assert!(a.auto_stop(t0, false));
         let ev = a.on_event(&json!({"type":"recording_stopped","path":"p2","seconds":1.0,"bytes":1,"continued":true}), 10.0);
@@ -459,5 +469,20 @@ mod tests {
         let ev = a.on_event(&json!({"type":"recording_stopped","path":"p3","seconds":1.0,"bytes":1,"continued":false}), 11.0);
         assert_eq!(ev, Some(Trigger::AutoStopped { game_closed: false }));
         assert_eq!(a.long, LongRec::Idle);
+    }
+
+    #[test]
+    fn the_elapsed_time_follows_the_monotonic_clock_not_the_wall_clock() {
+        let t0 = Instant::now();
+        // Started at Unix 1000 s; the wall clock then jumps an hour ahead (NTP, a manual change).
+        let long = LongRec::Active { path: "p".into(), started_unix: 1000.0, since: t0 };
+        let mut a = EngineActivity { long, ..Default::default() };
+        let v = a.long_recording_json_at(t0 + Duration::from_secs(90));
+        assert_eq!(v["started_secs"], 1000.0, "the old field stays for older apps");
+        assert_eq!(v["elapsed_secs"], 90.0, "90 s recorded, whatever the wall clock says");
+        // A continued part keeps the first part's start.
+        a.on_event(&json!({"type":"recording_started","path":"p2","continued":true}), 4600.0);
+        assert_eq!(a.long_recording_json_at(t0 + Duration::from_secs(95))["elapsed_secs"], 95.0);
+        assert_eq!(a.long_recording_json_at(t0)["elapsed_secs"], 0.0);
     }
 }

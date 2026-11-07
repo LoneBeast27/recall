@@ -416,13 +416,14 @@ impl Controller {
     /// Broadcast the session status (and tray line) when anything changed.
     pub(crate) fn publish_status(&mut self) {
         let status = self.status_value();
-        let line = status.to_string();
-        if line != self.last_session {
+        // The drain countdown / recording time tick every call: they do not count as a change.
+        let key = crate::record_status::dedup_key(&status);
+        if key != self.last_session {
             let state = status["state"].as_str().unwrap_or("waiting").to_string();
             self.tray.set_paused(self.paused);
             self.tray.set_status(&tray_line(&state, &self.wanted()));
-            self.hub.event("session", &line);
-            self.last_session = line;
+            self.hub.event("session", &status.to_string());
+            self.last_session = key;
             self.announce(&state);
         }
         if let Some(hdr) = self.legacy_hdr_event() {
