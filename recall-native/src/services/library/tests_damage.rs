@@ -56,10 +56,18 @@ fn a_star_edit_alone_does_not_end_the_hold() {
 
 #[test]
 fn starring_a_selection_keeps_the_hold_like_a_single_star() {
+    // An older build left a .bad newer than library.json and no hold file: the damage is
+    // open on this start, and only an edit's own hold write keeps it open after the star.
     let dir = temp_dir("batch-edit");
     let path = dir.join("library.json");
-    std::fs::write(&path, TRUNCATED).unwrap();
+    std::fs::write(&path, b"{}").unwrap();
+    let bad = dir.join("library.json.bad-2026-11-07");
+    std::fs::write(&bad, TRUNCATED).unwrap();
+    let at = |p: &Path, secs: u64| std::fs::OpenOptions::new().write(true).open(p).unwrap().set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(secs)).unwrap();
+    at(&path, 1_000);
+    at(&bad, 2_000);
     let mut store = MetaStore::load_from(path.clone());
+    assert!(store.damage().is_some() && !dir.join("library.json.hold").exists(), "open by the newer .bad alone");
     store.set_favourites(&["c.mp4".to_owned(), "d.mp4".to_owned()], true).unwrap();
     assert!(dir.join("library.json.hold").exists(), "the batch keeps the hold on disk: {:?}", names(&dir));
     drop(store);
