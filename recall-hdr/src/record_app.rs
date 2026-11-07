@@ -118,8 +118,8 @@ pub struct Controller {
     /// Saves / long recording in flight (from engine events).
     pub(crate) activity: EngineActivity,
     pub(crate) engine_events: Receiver<serde_json::Value>,
-    /// Engine settings changed while busy: restart once idle.
-    pub(crate) pending_restart: bool,
+    /// A settings / resume restart waits for a save, long recording or drain: restart once idle.
+    pub(crate) pending_restart: Option<crate::record_restart::RestartReason>,
     /// A retarget fell due while busy (the planner holds it until idle).
     pub(crate) retarget_held: bool,
     /// The closed game's drain as status (`record_drain`).
@@ -232,7 +232,7 @@ pub fn run() -> i32 {
         paused: false,
         activity: EngineActivity::default(),
         engine_events,
-        pending_restart: false,
+        pending_restart: None,
         retarget_held: false,
         drain_clock: Default::default(),
         pending_pause: None,
