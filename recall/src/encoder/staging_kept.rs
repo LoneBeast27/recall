@@ -5,14 +5,16 @@
 //! The mover renames `<clip>.part` to `<clip>` on the clip folder's volume, flushes it there,
 //! then keeps the staged copy as `<staging>\kept\<clip>` (`mover.rs`, `mover_flush.rs`). For
 //! each copy:
-//! - the clip landed whole (present, readable, the copy's size) and the copy is marked as the
-//!   recorder's own: the copy is deleted (the clip is the whole recording);
+//! - the clip landed whole (present, readable, the copy's size, and the same first 64 KiB and
+//!   last 1 MiB: a flush Windows did not honour can leave a full-length clip of zeros) and the
+//!   copy is marked as the recorder's own: the copy is deleted (the clip is the whole recording);
 //! - the clip is missing while a `<clip>.part` of the copy's length sits there (a power cut
 //!   lost the rename): the copy is handed back to staging and moved again over that `.part`;
-//! - the clip is present at another size, or gone with no `.part` (deleted by the user): the
-//!   copy is "leaked". It is moved into `kept\leaked\` (never deleted), logged, and no longer
+//! - the clip is present at another size or with other bytes, or gone with no `.part` (deleted
+//!   by the user): the copy is "leaked". It is moved into `kept\leaked\` (never deleted), logged, and no longer
 //!   counts against `kept_cap`, so leaked copies can't silently stop new keeps;
-//! - anything else (a clip folder asleep or unreadable, a `.part` of another length): left.
+//! - anything else (a clip folder asleep or unreadable, a clip that can't be opened or read
+//!   right now, a `.part` of another length): left, and checked again at the next start.
 
 use std::path::{Path, PathBuf};
 
@@ -75,9 +77,49 @@ fn marked(kept: &Path) -> bool {
     std::fs::metadata(format!("{}:{KEPT_MARK}", kept.display())).is_ok()
 }
 
-/// The clip at `dest` is there whole: a readable file of `len` bytes.
-fn landed_whole(dest: &Path, len: u64) -> bool {
-    std::fs::metadata(dest).is_ok_and(|m| m.is_file() && m.len() == len) && std::fs::File::open(dest).is_ok()
+/// How the clip at `dest` compares with its kept copy of `len` bytes.
+#[derive(Debug, PartialEq)]
+enum Landed {
+    /// Same size, same first 64 KiB and last 1 MiB.
+    Whole,
+    /// Another size or other bytes: the copy may be the only whole version.
+    Differs,
+    /// Could not be stat'ed, opened or read now (a scan, an exclusive open): ask again later.
+    Unknown,
+}
+
+/// Bytes compared at each end of a clip and its copy.
+const HEAD_BYTES: u64 = 64 << 10;
+const TAIL_BYTES: u64 = 1 << 20;
+
+fn landed(dest: &Path, kept: &Path, len: u64) -> Landed {
+    let Ok(meta) = std::fs::metadata(dest) else { return Landed::Unknown };
+    if !meta.is_file() || meta.len() != len {
+        return Landed::Differs;
+    }
+    match same_ends(dest, kept, len) {
+        Ok(true) => Landed::Whole,
+        Ok(false) => Landed::Differs,
+        Err(_) => Landed::Unknown,
+    }
+}
+
+/// The first [`HEAD_BYTES`] and last [`TAIL_BYTES`] of `a` and `b` (both `len` long) match.
+fn same_ends(a: &Path, b: &Path, len: u64) -> std::io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    let (mut a, mut b) = (std::fs::File::open(a)?, std::fs::File::open(b)?);
+    let tail = TAIL_BYTES.min(len);
+    for (at, count) in [(0, HEAD_BYTES.min(len)), (len - tail, tail)] {
+        let (mut x, mut y) = (vec![0u8; count as usize], vec![0u8; count as usize]);
+        a.seek(SeekFrom::Start(at))?;
+        b.seek(SeekFrom::Start(at))?;
+        a.read_exact(&mut x)?;
+        b.read_exact(&mut y)?;
+        if x != y {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// Checks each kept copy of `dir` against its clip in `out_dir` (see the module notes).
@@ -91,15 +133,16 @@ pub(crate) fn hand_back(dir: &Path, out_dir: &Path) -> HandBack {
         let Some(len) = entry.metadata().ok().filter(|m| m.is_file() && is_clip).map(|m| m.len()) else { continue };
         let (kept, dest) = (entry.path(), out_dir.join(&name));
         match dest.try_exists() {
-            Ok(true) if landed_whole(&dest, len) => {
-                if marked(&kept) {
-                    match std::fs::remove_file(&kept) {
-                        Ok(()) => done.deleted += 1,
-                        Err(e) => done.errors.push(format!("kept copy {} of a landed clip not removed: {e}", kept.display())),
-                    }
-                }
-            }
-            Ok(true) => set_aside(&kept_dir, &kept, len, &mut done),
+            Ok(true) => match landed(&dest, &kept, len) {
+                Landed::Whole if marked(&kept) => match std::fs::remove_file(&kept) {
+                    Ok(()) => done.deleted += 1,
+                    Err(e) => done.errors.push(format!("kept copy {} of a landed clip not removed: {e}", kept.display())),
+                },
+                Landed::Whole => {}
+                Landed::Differs => set_aside(&kept_dir, &kept, len, &mut done),
+                // RI3-5: a clip that is fine but busy right now is not "leaked"; next start asks again.
+                Landed::Unknown => {}
+            },
             Ok(false) => match std::fs::metadata(part_of(&dest)) {
                 Ok(part) if part.is_file() && part.len() == len => hand_back_one(dir, &kept, &name, &mut done),
                 Ok(_) => {} // a `.part` of another length: the copy may be the only whole one

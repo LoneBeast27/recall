@@ -277,3 +277,37 @@ fn only_a_copy_of_a_clip_that_landed_whole_is_deleted_and_leaked_copies_free_the
     assert!(super::mover::keep_staged_within(&staged, &out.join("N__2026-11-07__10-03-00-000__nn.mp4"), 1500).is_some());
     let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
 }
+
+#[test]
+fn a_full_length_clip_with_other_bytes_keeps_its_copy_and_a_busy_clip_is_asked_again_later() {
+    // RI3-2: a flush Windows did not honour can leave the clip at full length but zeroed; the
+    // size alone said "whole" and the only whole copy was deleted. RI3-5: a clip that can't be
+    // opened right now (exclusive open, a scan) is not "leaked".
+    use super::super::staging_kept::{hand_back, LEAKED_DIR};
+    use std::os::windows::fs::OpenOptionsExt;
+    let (stage, out) = (temp_dir("kept-bytes"), temp_dir("kept-bytes-out"));
+    let kept_dir = stage.join(super::mover::KEPT_DIR);
+    std::fs::create_dir_all(&kept_dir).unwrap();
+    let copy = |name: &str| {
+        let kept = kept_dir.join(name);
+        std::fs::write(&kept, vec![7u8; 3 << 20]).unwrap();
+        std::fs::write(format!("{}:{}", kept.display(), super::mover::KEPT_MARK), b"").unwrap();
+        kept
+    };
+    let zeroed = copy("Z__2026-11-07__11-00-00-000__zz.mp4");
+    std::fs::write(out.join("Z__2026-11-07__11-00-00-000__zz.mp4"), vec![0u8; 3 << 20]).unwrap();
+    let busy = copy("B__2026-11-07__11-01-00-000__bb.mp4");
+    let busy_clip = out.join("B__2026-11-07__11-01-00-000__bb.mp4");
+    std::fs::write(&busy_clip, vec![7u8; 3 << 20]).unwrap();
+    let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(&busy_clip).unwrap();
+    let done = hand_back(&stage, &out);
+    drop(held);
+    assert_eq!(done.deleted, 0, "{:?}", done.errors);
+    assert!(kept_dir.join(LEAKED_DIR).join(zeroed.file_name().unwrap()).is_file(), "other bytes: set aside, not deleted");
+    assert!(busy.is_file(), "a busy clip leaves its copy in kept\\ for the next start");
+    assert_eq!(done.leaked.len(), 1, "{:?}", done.leaked);
+    // Once the clip can be read and matches, the next start deletes the copy.
+    assert_eq!(hand_back(&stage, &out).deleted, 1);
+    assert!(!busy.exists());
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
