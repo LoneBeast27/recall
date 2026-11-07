@@ -92,18 +92,21 @@ pub(super) fn video_dir(root: &Path) -> PathBuf {
 /// The budget in `storage.json`. A first run (no budget set) picks one (`evict::default_budget`:
 /// 2 GiB on the system drive, else from the cache drive's free space) and saves it; Settings
 /// changes it from then on. A saved budget is never shrunk here. A file that is there but can't
-/// be read (locked, or not JSON) is never written over: the pick is used in memory only and the
-/// next call reads the file again, so a passing lock can't replace the user's budget.
+/// be read (locked, or not JSON) is never written over: the budget read earlier this session
+/// is used (else the pick, in memory only) and the next call reads the file again, so a passing
+/// lock can't replace the user's budget. While it can't be read, eviction never goes below what
+/// the cache already holds (`budget::enforce`) and Settings can't change the size.
 pub(super) fn budget_in(root: &Path) -> u64 {
     let mut settings = match lru::load_settings(root) {
         lru::Stored::Read(settings) => settings,
         lru::Stored::Absent => lru::Settings::default(),
         lru::Stored::Unusable(why) => {
-            eprintln!("cache budget: {why}; using the first-run pick for now, file left as it is");
-            return first_run_budget(root);
+            eprintln!("cache budget: {why}; using the last budget read (else the first-run pick) for now, file left as it is");
+            return remembered(root).unwrap_or_else(|| first_run_budget(root));
         }
     };
     if let Some(budget) = settings.cache_budget_bytes {
+        remember(root, budget);
         return budget;
     }
     let budget = first_run_budget(root);
@@ -113,6 +116,28 @@ pub(super) fn budget_in(root: &Path) -> u64 {
         eprintln!("save first-run cache budget: {error}");
     }
     budget
+}
+
+/// The last budget read from each cache root's storage.json in this process (review RI2-2).
+static LAST_READ: std::sync::Mutex<Vec<(PathBuf, u64)>> = std::sync::Mutex::new(Vec::new());
+
+fn remember(root: &Path, budget: u64) {
+    let mut last = LAST_READ.lock().unwrap_or_else(|p| p.into_inner());
+    last.retain(|(r, _)| r != root);
+    last.push((root.to_path_buf(), budget));
+}
+
+fn remembered(root: &Path) -> Option<u64> {
+    LAST_READ.lock().unwrap_or_else(|p| p.into_inner()).iter().find(|(r, _)| r == root).map(|(_, b)| *b)
+}
+
+/// Why the budget is not known right now: storage.json is there but locked, unreadable or not
+/// JSON. None when it was read (or is absent: a first run).
+pub(super) fn budget_note(root: &Path) -> Option<String> {
+    match lru::load_settings(root) {
+        lru::Stored::Unusable(why) => Some(why),
+        lru::Stored::Absent | lru::Stored::Read(_) => None,
+    }
 }
 
 /// The budget a first run picks for the cache at `root`.

@@ -289,7 +289,14 @@ pub(super) fn enforce(root: &Path, budget: u64, incoming_video: u64) -> u64 {
     let swept = sweep_old_stems_once(root);
     let inventory = inventory(root, &super::prefetch::score_of);
     let keep = kept();
-    let evicted = evict::plan(&inventory.units, inventory.projects + inventory.other, budget, budget / 2, incoming_video, &keep);
+    // storage.json can't be read (RI2-2): the budget is a guess, so nothing already cached goes.
+    let (budget, video_cap) = if super::video::budget_note(root).is_some() {
+        let held = budget.max(inventory.total().saturating_add(incoming_video));
+        (held, (held / 2).max(inventory.tier_bytes(Tier::Video).saturating_add(incoming_video)))
+    } else {
+        (budget, budget / 2)
+    };
+    let evicted = evict::plan(&inventory.units, inventory.projects + inventory.other, budget, video_cap, incoming_video, &keep);
     swept + remove(root, &inventory, &evicted)
 }
 

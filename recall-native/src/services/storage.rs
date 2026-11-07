@@ -132,8 +132,17 @@ pub fn budget_bytes() -> u64 {
     video::budget_in(&cache_root())
 }
 
-/// Saves `bytes` as the user's budget (no `first_run` marker: Settings set it).
+/// Why the cache size can't be changed right now (storage.json locked, unreadable or damaged).
+pub fn budget_note() -> Option<String> {
+    video::budget_note(&cache_root())
+}
+
+/// Saves `bytes` as the user's budget (no `first_run` marker: Settings set it). Refused while
+/// storage.json can't be read: the size on screen may be a guess, not the user's (RI2-2).
 fn save_budget_in(root: &Path, bytes: u64) -> Result<(), String> {
+    if let Some(why) = video::budget_note(root) {
+        return Err(format!("{why}; cache size not changed"));
+    }
     let mut settings = evict::read_settings(root);
     settings.cache_budget_bytes = Some(bytes);
     settings.first_run = None;

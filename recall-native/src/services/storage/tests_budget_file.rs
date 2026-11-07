@@ -69,3 +69,38 @@ fn a_20_gib_budget_on_the_system_drive_stays_20_gib() {
     assert_eq!(std::fs::read(root.join("storage.json")).unwrap(), USER.to_vec(), "unchanged on disk");
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn a_locked_storage_file_keeps_the_budget_read_earlier_and_refuses_a_save() {
+    // RI2-2: a passing lock gave the 2 GiB pick, which evicted the 20 GiB cache and could be
+    // saved by a stray click in Settings.
+    use std::os::windows::fs::OpenOptionsExt;
+    let root = root("locked-later");
+    let file = root.join("storage.json");
+    std::fs::write(&file, USER).unwrap();
+    assert_eq!(super::video::budget_in(&root), 20 << 30);
+    let held = std::fs::OpenOptions::new().read(true).share_mode(4).open(&file).unwrap();
+    assert_eq!(super::video::budget_in(&root), 20 << 30, "the budget read earlier, not the pick");
+    assert!(super::video::budget_note(&root).is_some(), "Settings shows the size read-only");
+    assert!(super::save_budget_in(&root, 2 << 30).is_err(), "a save is refused while it can't be read");
+    drop(held);
+    assert_eq!(std::fs::read(&file).unwrap(), USER.to_vec(), "byte for byte");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn eviction_never_goes_below_the_cache_on_disk_while_the_budget_is_unknown() {
+    let base = root("evict-unknown");
+    let (cache, clips) = (base.join("cache"), base.join("clips"));
+    std::fs::create_dir_all(&clips).unwrap();
+    let clip = clips.join("G__2026-11-07__10-00-00-000__aa.mp4");
+    std::fs::write(&clip, vec![9u8; 3 << 20]).unwrap();
+    let copy = super::video::cache_in(&cache, &clip, 20 << 20).unwrap();
+    std::fs::write(cache.join("storage.json"), br#"{ "cache_budget_bytes": 2147"#).unwrap();
+    super::budget::enforce(&cache, 0, 0);
+    assert!(copy.exists(), "a damaged storage.json evicts nothing already cached");
+    std::fs::remove_file(cache.join("storage.json")).unwrap();
+    super::budget::enforce(&cache, 0, 0);
+    assert!(!copy.exists(), "a known budget evicts as before");
+    let _ = std::fs::remove_dir_all(&base);
+}
