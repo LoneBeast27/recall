@@ -48,7 +48,7 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
         }
         let Some(spec) = spec else {
             shared.set_health(EngineHealth::Stopped);
-            shared.end_quitting(); // stopped to Off: no engine follows
+            shared.end_quitting(gen); // stopped to Off: no engine follows
             if !wait_for_change(&shared, gen) {
                 break;
             }
@@ -92,7 +92,7 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
             }
             Err(e) => {
                 log!("supervisor: failed to spawn engine: {e}");
-                shared.end_quitting(); // no engine came up
+                shared.end_quitting(gen); // no engine came up
             }
         }
 

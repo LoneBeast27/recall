@@ -128,6 +128,8 @@ mod transitions_planned_tests;
 #[cfg(test)]
 mod transitions_ghost_tests;
 #[cfg(test)]
+mod test_src;
+#[cfg(test)]
 mod transitions_sim;
 #[cfg(test)]
 mod transitions_tests;
