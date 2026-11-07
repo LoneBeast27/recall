@@ -70,6 +70,11 @@ else { Write-Warning "Install folder: $InstallDir ($($drive.model)): Windows can
 # The recorder's control pipe is per session too (recall-hdr control_pipe.rs).
 $session = (Get-Process -Id $PID).SessionId
 $pipeName = "recall-hdr-control-$session"
+# Which recorder this run may quit or talk to: only a controller started from exactly this path
+# (case-insensitive full path), and only through a pipe that controller itself serves. A
+# sandboxed install sets RECALL_CONTROLLER_PATH (and RECALL_LEGACY_PIPE) so it never reaches
+# the live recorder that owns this session's real pipe.
+$controllerPath = [IO.Path]::GetFullPath($(if ($env:RECALL_CONTROLLER_PATH) { $env:RECALL_CONTROLLER_PATH } else { Join-Path $InstallDir 'recall-hdr.exe' }))
 
 # 2a. Never close the app under the user: refuse while the installed app runs (checked before any
 #     build work). Its window counts even when minimized; a hidden instance still locks the files.
@@ -103,26 +108,47 @@ Assert-AppClosed
 # 2. Quit the running recorder gracefully, wherever it runs from (only one controller can run;
 #    its quit also stops the engine and overlay). Done before building: a recorder started from
 #    target-dev\release locks the files the build replaces.
+function Get-PipeServer($pipe) {
+  if (-not ('RecallInstall.Pipe' -as [type])) {
+    Add-Type -Name Pipe -Namespace RecallInstall -MemberDefinition @'
+[DllImport("kernel32.dll", SetLastError = true)] public static extern bool GetNamedPipeServerProcessId(IntPtr h, out uint pid);
+'@
+  }
+  $id = [uint32]0
+  if ([RecallInstall.Pipe]::GetNamedPipeServerProcessId($pipe.SafePipeHandle.DangerousGetHandle(), [ref]$id)) { [int]$id } else { 0 }
+}
 function Send-Recorder([string]$line, [string]$name = $pipeName, [int]$tries = 5) {
   # The controller serves one pipe instance at a time: retry a connect that lands between
   # instances, and keep the client open briefly so the line is read before it disconnects.
+  # Nothing is written unless the pipe's server is the controller this run owns (Get-Controller):
+  # another recorder on the same name (the live one, during a sandboxed install) is left alone.
   for ($attempt = 0; $attempt -lt $tries; $attempt++) {
     try {
       $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', $name, [IO.Pipes.PipeDirection]::InOut)
-      $pipe.Connect(1500); $w = [IO.StreamWriter]::new($pipe); $w.AutoFlush = $true; $w.WriteLine($line)
+      $pipe.Connect(1500)
+      $server = Get-PipeServer $pipe
+      if (-not $server -or -not (@(Get-Controller) | Where-Object { [int]$_.ProcessId -eq $server })) { $pipe.Dispose(); return $false }
+      $w = [IO.StreamWriter]::new($pipe); $w.AutoFlush = $true; $w.WriteLine($line)
       Start-Sleep -Milliseconds 300; $pipe.Dispose(); return $true
     } catch { Start-Sleep -Milliseconds 400 }
   }
   $false
 }
 function Get-Installed { Get-CimInstance Win32_Process -Filter "SessionId = $session" | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) } }
-function Get-Controller { Get-CimInstance Win32_Process -Filter "Name = 'recall-hdr.exe' AND SessionId = $session" }
+# Every controller in this session, whatever its path: read only (the stray warnings).
+function Get-SessionController { Get-CimInstance Win32_Process -Filter "Name = 'recall-hdr.exe' AND SessionId = $session" }
+function Test-OurController($p) { $p.ExecutablePath -and [string]::Equals([IO.Path]::GetFullPath($p.ExecutablePath), $controllerPath, [StringComparison]::OrdinalIgnoreCase) }
+# The controller this run may quit: this session's, started from $controllerPath.
+function Get-Controller { Get-CimInstance Win32_Process -Filter "Name = 'recall-hdr.exe' AND SessionId = $session" | Where-Object { Test-OurController $_ } }
 # A recorder installed before the per-session pipe listens on the bare name, so the first
-# update must ask it there (audit R2-deep-startup-1). Only this session's controller is
-# asked (Get-Controller), and another account's old pipe gives us read access only. Drop
+# update must ask it there (audit R2-deep-startup-1). Only when this session's controller from
+# $controllerPath runs (Get-Controller) and serves that pipe (Send-Recorder); another account's
+# old pipe gives us read access only. RECALL_LEGACY_PIPE renames it for sandboxed runs. Drop
 # this fallback one release after the per-session pipe shipped.
-$legacyPipe = 'recall-hdr-control'
+$legacyPipe = if ($env:RECALL_LEGACY_PIPE) { $env:RECALL_LEGACY_PIPE } else { 'recall-hdr-control' }
 function Stop-Recorder {
+  $others = @(Get-SessionController | Where-Object { -not (Test-OurController $_) })
+  if ($others) { Write-Host ("Left running (not $controllerPath): " + (($others | ForEach-Object { $_.ExecutablePath }) -join ', ')) }
   if (Get-Controller) {
     # Either pipe answering counts: this build's session pipe first, then the old bare name.
     $sent = Send-Recorder '{"cmd":"quit"}'
@@ -246,7 +272,7 @@ if (-not $up) { Write-Warning 'The recorder did not answer on its control pipe; 
 else {
   # The answer must come from the recorder just installed, not an older one still running.
   $mine = Join-Path $InstallDir 'recall-hdr.exe'
-  $stray = @(Get-Controller | Where-Object { $_.ExecutablePath -and -not $_.ExecutablePath.Equals($mine, [StringComparison]::OrdinalIgnoreCase) })
+  $stray = @(Get-SessionController | Where-Object { $_.ExecutablePath -and -not $_.ExecutablePath.Equals($mine, [StringComparison]::OrdinalIgnoreCase) })
   if ($stray) { Write-Warning ("An older recorder is still running (" + (($stray | ForEach-Object { $_.ExecutablePath }) -join ', ') + "). Quit Recall from the tray, then start it again.") }
 }
 # Start with Windows is opt-in: only -Autostart sends the setting (an update never turns it on).
