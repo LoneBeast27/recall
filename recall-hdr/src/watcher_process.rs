@@ -5,7 +5,7 @@
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextW, GetWindowThreadProcessId};
 
-use super::is_steam_library_path;
+use super::is_game_library_path;
 
 // vendored from recall/src/source.rs (exe_stem): the image path
 // (`image_path::exe_path`), then take the file stem. Kept local to avoid a
@@ -14,14 +14,15 @@ pub(crate) fn exe_stem(pid: u32) -> Option<String> {
     exe_identity(pid).map(|(stem, _, _)| stem)
 }
 
-/// `(file stem, file name, in a Steam library)` of `pid`'s executable image.
+/// `(file stem, file name, in a Steam or launcher game library)` of `pid`'s
+/// executable image.
 pub(super) fn exe_identity(pid: u32) -> Option<(String, String, bool)> {
     let full = exe_path(pid)?;
     let path = std::path::Path::new(&full);
     Some((
         path.file_stem()?.to_string_lossy().into_owned(),
         path.file_name()?.to_string_lossy().into_owned(),
-        is_steam_library_path(&full),
+        is_game_library_path(&full),
     ))
 }
 

@@ -77,8 +77,10 @@ pub struct WatchEvent {
     pub fullscreen: bool,
     /// True iff `fullscreen` AND that monitor is the managed one (HDR rules).
     pub fullscreen_on_target: bool,
-    /// True iff the executable lives in a Steam library (`steamapps\common`):
-    /// the record mode's "is this a game?" signal for windowed games.
+    /// True iff the executable lives in a Steam library (`steamapps\common`)
+    /// or another launcher's game library (Epic, GOG, Ubisoft, EA, Battle.net,
+    /// itch: `launcher_libraries`): the record mode's "is this a game?" signal
+    /// for windowed games, and game evidence against the private list.
     pub steam_game: bool,
     /// True iff the identity (pid, exe) was resolved by Recall rather than read
     /// off the window: a UWP frame named by its hosted CoreWindow's process
@@ -125,6 +127,18 @@ pub(crate) fn event_or_unknown(hwnd: isize, pid: u32, built: Option<WatchEvent>)
 pub(crate) fn is_steam_library_path(path: &str) -> bool {
     let path = path.to_ascii_lowercase().replace('/', "\\");
     path.contains("\\steamapps\\common\\") && !path.contains("\\steamapps\\common\\steamworks shared\\")
+}
+
+/// [`is_steam_library_path`] or a known launcher's game library (the cached
+/// folders of `launcher_libraries`): `WatchEvent::steam_game`.
+pub(crate) fn is_game_library_path(path: &str) -> bool {
+    is_steam_library_path(path) || crate::launcher_libraries::is_launcher_library_path(path)
+}
+
+/// [`is_game_library_path`] against given launcher folders (tests).
+#[cfg(test)]
+pub(crate) fn is_game_library_path_in(path: &str, roots: &[String]) -> bool {
+    is_steam_library_path(path) || crate::launcher_libraries::is_under(path, roots)
 }
 
 /// The single global slot the callback reads from. `SetWinEventHook` has no

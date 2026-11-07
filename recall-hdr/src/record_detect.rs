@@ -19,7 +19,7 @@ use std::time::{Duration, Instant};
 
 use crate::log;
 use crate::record_app::Controller;
-use crate::record_target::{game_evidence, is_target_with};
+use crate::record_target::followable;
 use crate::record_target_gate::Traits;
 use crate::record_transition::Transitions;
 use crate::watcher::{self, WatchEvent};
@@ -66,7 +66,7 @@ impl Controller {
     /// Remember the foreground window when it could become a target by going
     /// fullscreen (not denied, no `none` override).
     fn note_followable(&mut self, ev: &WatchEvent) {
-        self.followable = is_target_with(&ev.exe_stem, true, game_evidence(ev), &self.cfg).then_some(ev.hwnd);
+        self.followable = followable(ev, &self.cfg).then_some(ev.hwnd);
     }
 
     /// Re-read the foreground (startup, the 1 s safety net, resume).

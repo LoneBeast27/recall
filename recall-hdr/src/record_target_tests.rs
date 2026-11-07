@@ -1,5 +1,9 @@
 use super::*;
-use crate::config::Override;
+use crate::config::{Config, Override};
+#[allow(unused_imports)]
+use crate::record_target_rules::*;
+use crate::types::RuleKind;
+use crate::rules;
 
 fn ev(stem: &str, title: &str, pid: u32, hwnd: isize, fullscreen: bool) -> WatchEvent {
     WatchEvent {

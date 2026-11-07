@@ -207,6 +207,12 @@ impl Rejected {
         self.last.filter(|e| e.pid == pid && e.hwnd == hwnd && e.why == Why::Composed).map(|e| e.stats)
     }
 
+    /// The window's last verdict and what the probe saw (inside its wait or
+    /// not): the private-list notice (`record_private_watch`).
+    pub fn verdict(&self, pid: u32, hwnd: isize) -> Option<(Why, RenderStats)> {
+        self.last.filter(|e| e.pid == pid && e.hwnd == hwnd).map(|e| (e.why, e.stats))
+    }
+
     /// When the held window may be watched again.
     pub fn until(&self) -> Option<Instant> {
         self.last.map(|e| e.until)
@@ -237,6 +243,11 @@ impl ComposedNotice {
     /// that is not recorded, else `None`. Returns the exe to name, once.
     pub fn observe(&mut self, front: Option<(u32, isize, &str)>, now: Instant) -> Option<String> {
         self.observe_steady(front.map(|f| (f, true)), now)
+    }
+
+    /// `exe` was already named this run.
+    pub fn named(&self, exe: &str) -> bool {
+        self.shown.contains(&exe.to_ascii_lowercase())
     }
 
     /// [`Self::observe`] where each composed observation says whether its
