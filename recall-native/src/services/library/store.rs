@@ -160,7 +160,7 @@ impl MetaStore {
                 self.clips.remove(key);
             }
         }
-        if let Err(error) = self.write() {
+        if let Err(error) = self.write_user_edit() {
             for (key, meta) in previous {
                 match meta {
                     Some(meta) => self.clips.insert(key, meta),
@@ -283,13 +283,7 @@ impl MetaStore {
         if meta.is_empty() {
             self.clips.remove(file_name);
         }
-        // While the damage notice is open the edit is saved but the hold stays (on disk too,
-        // so a restart or the storage limit can't take the new file as the whole truth).
-        let held = match (&self.damage, &self.path) {
-            (Some(damage), Some(path)) => store_damage::set_hold(path, damage.backup.as_deref()),
-            _ => Ok(()),
-        };
-        if let Err(error) = held.and_then(|()| self.write()) {
+        if let Err(error) = self.write_user_edit() {
             match previous {
                 Some(meta) => self.clips.insert(file_name.to_owned(), meta),
                 None => self.clips.remove(file_name),
@@ -298,6 +292,16 @@ impl MetaStore {
         }
         self.dirty = false;
         Ok(())
+    }
+
+    /// A star or title edit (one clip or a batch). While the damage notice is open the edit is
+    /// saved but the hold stays (on disk too, so a restart or the storage limit can't take the
+    /// new file as the whole truth): only "Keep going" ends it.
+    fn write_user_edit(&mut self) -> Result<(), String> {
+        if let (Some(damage), Some(path)) = (&self.damage, &self.path) {
+            store_damage::set_hold(path, damage.backup.as_deref())?;
+        }
+        self.write()
     }
 
     /// Every whole-file write goes through here (counted, so a batch can prove it wrote once).

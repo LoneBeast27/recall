@@ -55,6 +55,21 @@ fn a_star_edit_alone_does_not_end_the_hold() {
 }
 
 #[test]
+fn starring_a_selection_keeps_the_hold_like_a_single_star() {
+    let dir = temp_dir("batch-edit");
+    let path = dir.join("library.json");
+    std::fs::write(&path, TRUNCATED).unwrap();
+    let mut store = MetaStore::load_from(path.clone());
+    store.set_favourites(&["c.mp4".to_owned(), "d.mp4".to_owned()], true).unwrap();
+    assert!(dir.join("library.json.hold").exists(), "the batch keeps the hold on disk: {:?}", names(&dir));
+    drop(store);
+    let back = MetaStore::load_from(path.clone());
+    assert!(back.damage().is_some(), "a restart still shows the notice: only Keep going ends the hold");
+    assert!(back.meta("c.mp4").is_some_and(|m| m.favourite) && back.meta("d.mp4").is_some_and(|m| m.favourite), "the stars are saved");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
 fn keep_going_writes_the_recovered_favourites_and_ends_the_hold() {
     let dir = temp_dir("keep-going");
     let path = dir.join("library.json");
