@@ -7,10 +7,12 @@
 //! the reconciler consumes.
 //!
 //! Persistence rules, all "never lose the user's display in a bad state":
-//! - [`Config::load_or_default`] never panics: a malformed TOML is backed up to
-//!   `config.toml.bad` and we fall back to [`Config::default`].
-//! - [`Config::save`] is atomic: write `config.toml.tmp`, then rename over the
-//!   real file, so a crash mid-write can't leave a truncated config.
+//! - [`Config::load_or_default`] never panics. A damaged file is backed up to a
+//!   dated `config.toml.bad-YYYY-MM-DD` (one a day, never overwritten); a bad
+//!   value costs only its own key, a file that is not TOML (or is empty) falls
+//!   back to `config.toml.last-good`, else [`Config::default`] (`config_io.rs`).
+//! - [`Config::save`] is durable: write a temp file, `sync_all`, then rename over
+//!   the real file, keeping the keys this build doesn't know (`durable.rs`).
 //! - [`Config::save`] also mirrors `startup.autostart` into the `HKCU` Run key
 //!   (best-effort -- a registry failure is logged, not fatal to the save).
 //!
@@ -18,6 +20,8 @@
 
 #[path = "config_autostart.rs"]
 mod autostart;
+#[path = "config_io.rs"]
+mod io;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -322,7 +326,7 @@ impl Config {
 
     /// Load the config, or fall back to [`Config::default`] on any error.
     ///
-    /// Never panics. A malformed file is backed up to `config.toml.bad` (so the
+    /// Never panics. A malformed file is backed up to a dated `config.toml.bad-*` (so the
     /// user can inspect/repair it) and defaults are returned. A missing file is
     /// the normal first-run path and returns defaults silently.
     pub fn load_or_default() -> Config {
@@ -349,20 +353,8 @@ impl Config {
     /// Atomicity: we write to `<path>.tmp` and rename over the target, so a
     /// crash mid-write can never truncate the live config.
     pub fn save_to(&self, path: &Path) -> Result<(), String> {
-        let toml_str =
-            toml::to_string_pretty(self).map_err(|e| format!("serialize config: {e}"))?;
-        if let Some(dir) = path.parent() {
-            let _ = fs::create_dir_all(dir);
-        }
-        let tmp = path.with_extension("toml.tmp");
-        fs::write(&tmp, toml_str.as_bytes())
-            .map_err(|e| format!("write {}: {e}", tmp.display()))?;
-        // rename is atomic on the same volume; on Windows it replaces the target.
-        fs::rename(&tmp, path).map_err(|e| {
-            // Best-effort cleanup so a failed rename doesn't strand the .tmp.
-            let _ = fs::remove_file(&tmp);
-            format!("rename {} -> {}: {e}", tmp.display(), path.display())
-        })
+        let toml_str = io::serialize_for(self, path)?;
+        crate::durable::write_durable(path, toml_str.as_bytes())
     }
 
     /// Resolve the (rule, clamp) pair for a foreground exe stem.
@@ -385,8 +377,8 @@ impl Config {
 
 /// Load a config from an explicit path (testable without touching `%APPDATA%`).
 pub(crate) fn load_from(path: &std::path::Path) -> Config {
-    let text = match fs::read_to_string(path) {
-        Ok(t) => t,
+    let bytes = match fs::read(path) {
+        Ok(b) => b,
         Err(e) => {
             // Missing file is the normal first-run case -- don't shout about it.
             if e.kind() != std::io::ErrorKind::NotFound {
@@ -396,30 +388,17 @@ pub(crate) fn load_from(path: &std::path::Path) -> Config {
         }
     };
 
-    match toml::from_str::<Config>(&text) {
-        Ok(mut cfg) => {
-            // Legacy single `save_hotkey` -> `save_hotkeys` presets; a file from
-            // the two-step-shortcut era gets the direct defaults.
-            crate::record_hotkeys::migrate_loaded(&mut cfg.recording, &text);
-            // Old audio keys -> `audio_sources`.
-            crate::record_audio_sources::migrate_loaded(&mut cfg.recording, &text);
-            // Pre-v2 corners were never honoured -> `dynamic`.
-            cfg.overlay.migrate_loaded(&text);
-            cfg
-        }
-        Err(e) => {
-            log!("config: parse {} failed: {e}; backing up + using defaults", path.display());
-            let bad = path.with_extension("toml.bad");
-            if let Err(be) = fs::rename(path, &bad) {
-                // If rename fails (e.g. cross-device), fall back to a copy so the
-                // bad file is preserved and the next save can overwrite the orig.
-                if let Err(ce) = fs::copy(path, &bad) {
-                    log!("config: could not back up bad config (rename: {be}, copy: {ce})");
-                }
-            }
-            Config::default()
-        }
-    }
+    let Some((mut cfg, text)) = io::parse_or_recover(path, &bytes, std::time::SystemTime::now()) else {
+        return Config::default();
+    };
+    // Legacy single `save_hotkey` -> `save_hotkeys` presets; a file from
+    // the two-step-shortcut era gets the direct defaults.
+    crate::record_hotkeys::migrate_loaded(&mut cfg.recording, &text);
+    // Old audio keys -> `audio_sources`.
+    crate::record_audio_sources::migrate_loaded(&mut cfg.recording, &text);
+    // Pre-v2 corners were never honoured -> `dynamic`.
+    cfg.overlay.migrate_loaded(&text);
+    cfg
 }
 
 // ---------------------------------------------------------------------------
@@ -429,3 +408,7 @@ pub(crate) fn load_from(path: &std::path::Path) -> Config {
 #[cfg(test)]
 #[path = "config_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "config_persist_tests.rs"]
+mod persist_tests;

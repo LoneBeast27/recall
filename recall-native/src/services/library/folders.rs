@@ -47,6 +47,10 @@ pub struct Folders {
     pub recordings: Option<String>,
     #[serde(default)]
     pub imported: Vec<String>,
+    /// Why saving is refused: the file exists but could not be read (an antivirus scan,
+    /// a sync client), so a save would replace the user's folders with this empty list.
+    #[serde(skip)]
+    pub(crate) write_block: Option<String>,
 }
 
 /// One clip found on disk.
@@ -72,8 +76,17 @@ impl Folders {
         folders_path().map(|p| Self::load_from(&p)).unwrap_or_default()
     }
 
+    /// Missing -> none. Damaged -> kept as a dated `.bad`, none. Unreadable -> none, and
+    /// [`Folders::save_to`] refuses to replace the file.
     pub(crate) fn load_from(path: &Path) -> Self {
-        std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+        match std::fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+                crate::services::durable::quarantine(path, std::time::SystemTime::now(), crate::services::durable::Keep::Move);
+                Self::default()
+            }),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(error) => Self { write_block: Some(format!("folders.json could not be read ({error}); not saved")), ..Self::default() },
+        }
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -81,15 +94,16 @@ impl Folders {
         self.save_to(&path)
     }
 
-    /// Atomic: write `folders.json.tmp`, then rename over the file.
+    /// Durable: a temp file, flushed, then renamed over the file.
     pub(crate) fn save_to(&self, path: &Path) -> Result<(), String> {
+        if let Some(reason) = &self.write_block {
+            return Err(reason.clone());
+        }
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
         }
-        let tmp = path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&tmp, bytes).map_err(|e| format!("write folders: {e}"))?;
-        std::fs::rename(&tmp, path).map_err(|e| format!("save folders: {e}"))
+        crate::services::durable::write_durable(path, &bytes).map_err(|e| format!("save folders: {e}"))
     }
 
     /// Adds a folder; false when it is already listed (or is the recordings folder).
@@ -309,7 +323,7 @@ mod tests {
 
     #[test]
     fn add_dedupes_case_and_slashes_and_skips_recordings() {
-        let mut folders = Folders { recordings: Some(r"E:\Clips".into()), imported: vec![] };
+        let mut folders = Folders { recordings: Some(r"E:\Clips".into()), ..Folders::default() };
         assert!(!folders.add(Path::new(r"e:\clips\")));
         assert!(folders.add(Path::new(r"D:\ShadowPlay")));
         assert!(!folders.add(Path::new("d:/shadowplay/")));
@@ -330,7 +344,7 @@ mod tests {
     fn save_and_load_round_trip() {
         let dir = temp("roundtrip");
         let path = dir.join("folders.json");
-        let folders = Folders { recordings: Some(r"E:\Clips".into()), imported: vec![r"D:\Old".into()] };
+        let folders = Folders { recordings: Some(r"E:\Clips".into()), imported: vec![r"D:\Old".into()], ..Folders::default() };
         folders.save_to(&path).unwrap();
         assert_eq!(Folders::load_from(&path), folders);
         assert_eq!(Folders::load_from(&dir.join("missing.json")), Folders::default());

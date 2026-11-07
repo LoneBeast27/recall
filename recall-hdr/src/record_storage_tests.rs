@@ -93,6 +93,31 @@ fn favourites_and_edited_clips_are_never_selected_but_still_count() {
     assert_eq!(p.total, 12 * GIB);
 }
 
+fn set_mtime(path: &Path, unix: u64) {
+    let file = std::fs::OpenOptions::new().write(true).open(path).unwrap();
+    file.set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(unix)).unwrap();
+}
+
+#[test]
+fn a_bad_copy_newer_than_the_library_cancels_the_run() {
+    let dir = std::env::temp_dir().join(format!("recall-storage-lib-{}-{}", std::process::id(), line!()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let lib = dir.join("library.json");
+    // The app quarantined a corrupt file, then wrote a fresh one without the favourites.
+    std::fs::write(&lib, b"{}").unwrap();
+    set_mtime(&lib, 2_000);
+    for name in ["library.json.bad", "library.json.bad-2026-11-07"] {
+        let bad = dir.join(name);
+        std::fs::write(&bad, br#"{"G__2026-10-22__14-05-09.mp4":{"favourite":true}"#).unwrap();
+        set_mtime(&bad, 3_000);
+        let err = favourites_at(&lib).expect_err("a .bad newer than the library = favourites unknown");
+        assert!(err.contains("quarantined"), "{err}");
+        set_mtime(&bad, 1_000);
+    }
+    assert!(favourites_at(&lib).unwrap().is_empty(), "the library was written after every .bad: known");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 #[test]
 fn a_quarantined_library_file_cancels_the_run() {
     let dir = std::env::temp_dir().join(format!("recall-storage-lib-{}-{}", std::process::id(), line!()));
@@ -103,6 +128,7 @@ fn a_quarantined_library_file_cancels_the_run() {
     std::fs::write(&lib, br#"{"G__2026-10-22__14-05-09.mp4":{"favourite":true}}"#).unwrap();
     assert_eq!(favourites_at(&lib).unwrap().len(), 1);
     std::fs::write(dir.join("library.json.bad"), b"{corrupt").unwrap();
+    set_mtime(&dir.join("library.json.bad"), 1_000);
     assert_eq!(favourites_at(&lib).unwrap().len(), 1, "a present library wins over an old .bad");
     std::fs::remove_file(&lib).unwrap();
     let err = favourites_at(&lib).expect_err("missing + .bad = favourites unknown");

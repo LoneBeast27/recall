@@ -4,6 +4,7 @@ pub mod audio_apps;
 pub mod audio_devices;
 pub mod audio_sources;
 pub mod daemon;
+pub mod durable;
 pub mod editor_prefs;
 pub mod library;
 pub mod meters;

@@ -4,7 +4,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use super::mp4::{duration_of, last_frame_of, last_presented, video_duration_of};
-use super::store::{meta_path, quarantine_path};
+use super::store::meta_path;
 use super::*;
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -67,8 +67,8 @@ fn corrupt_store_is_backed_up_and_replaced() {
     std::fs::write(&path, b"{ not json").unwrap();
     let mut store = MetaStore::load_from(path.clone());
     assert!(store.meta("x.mp4").is_none());
-    let bad = quarantine_path(&path);
-    assert_eq!(bad.file_name().unwrap(), "library.json.bad");
+    let bad = crate::services::durable::bad_path(&path, std::time::SystemTime::now());
+    assert!(bad.file_name().unwrap().to_string_lossy().starts_with("library.json.bad-"));
     assert_eq!(std::fs::read(&bad).unwrap(), b"{ not json");
     store.set_favourite("x.mp4", true).unwrap();
     assert!(MetaStore::load_from(path).meta("x.mp4").unwrap().favourite);
@@ -84,7 +84,7 @@ fn store_drops_only_malformed_entries() {
     assert!(store.meta("a.mp4").is_none());
     assert!(store.meta("b.mp4").unwrap().favourite);
     assert!(store.meta("c.mp4").is_none());
-    assert!(!quarantine_path(&path).exists(), "a valid object is not quarantined");
+    assert!(!crate::services::durable::bad_path(&path, std::time::SystemTime::now()).exists(), "a valid object is not quarantined");
     let _ = std::fs::remove_dir_all(dir);
 }
 

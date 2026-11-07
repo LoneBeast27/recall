@@ -2,12 +2,13 @@
 //! at `%APPDATA%\Recall\library.json` (`RECALL_LIBRARY_META` overrides the path).
 use std::collections::BTreeMap;
 use std::ffi::OsString;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use super::MetaStore;
+use crate::services::durable;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -44,13 +45,6 @@ pub(super) fn meta_path(override_path: Option<OsString>, appdata: Option<OsStrin
     appdata.filter(|p| !p.is_empty()).map(|root| PathBuf::from(root).join("Recall").join("library.json"))
 }
 
-/// `library.json` → `library.json.bad`.
-pub(super) fn quarantine_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().map(OsString::from).unwrap_or_else(|| OsString::from("library.json"));
-    name.push(".bad");
-    path.with_file_name(name)
-}
-
 /// Entries with the wrong shape are dropped one by one; None when the file is not a JSON object.
 fn parse_clips(bytes: &[u8]) -> Option<BTreeMap<String, ClipMeta>> {
     let Value::Object(map) = serde_json::from_slice::<Value>(bytes).ok()? else { return None };
@@ -65,19 +59,16 @@ impl MetaStore {
         }
     }
 
-    /// Missing file → empty store. Corrupt file → moved aside as `.bad`, empty store.
+    /// Missing file → empty store. Corrupt file → kept as a dated `.bad`, empty store
+    /// that holds background writes until a user edit.
     /// Unreadable file (locked, denied) → in-memory store that refuses to overwrite it.
     pub(crate) fn load_from(path: PathBuf) -> Self {
         match std::fs::read(&path) {
             Ok(bytes) => match parse_clips(&bytes) {
                 Some(clips) => Self { path: Some(path), clips, ..Self::default() },
                 None => {
-                    let bad = quarantine_path(&path);
-                    let _ = std::fs::remove_file(&bad);
-                    if std::fs::rename(&path, &bad).is_err() {
-                        let _ = std::fs::copy(&path, &bad);
-                    }
-                    Self { path: Some(path), ..Self::default() }
+                    durable::quarantine(&path, std::time::SystemTime::now(), durable::Keep::Move);
+                    Self { path: Some(path), hold: true, ..Self::default() }
                 }
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self { path: Some(path), ..Self::default() },
@@ -100,7 +91,13 @@ impl MetaStore {
     }
 
     /// Marks the clip as opened at `secs` (Unix seconds).
+    /// Not a user change: held in memory while [`MetaStore::hold`] is set.
     pub fn set_played(&mut self, file_name: &str, secs: u64) -> Result<(), String> {
+        if self.hold {
+            self.clips.entry(file_name.to_owned()).or_default().played = Some(secs);
+            self.dirty = true;
+            return Ok(());
+        }
         self.edit(file_name, |meta| meta.played = Some(secs))
     }
 
@@ -124,7 +121,7 @@ impl MetaStore {
 
     /// Persists pending duration-cache entries (debounced by the caller).
     pub fn flush(&mut self) -> Result<(), String> {
-        if !self.dirty {
+        if !self.dirty || self.hold {
             return Ok(());
         }
         self.persist()?;
@@ -141,7 +138,9 @@ impl MetaStore {
         if meta.is_empty() {
             self.clips.remove(file_name);
         }
+        let held = std::mem::replace(&mut self.hold, false);
         if let Err(error) = self.persist() {
+            self.hold = held;
             match previous {
                 Some(meta) => self.clips.insert(file_name.to_owned(), meta),
                 None => self.clips.remove(file_name),
@@ -152,7 +151,7 @@ impl MetaStore {
         Ok(())
     }
 
-    /// Whole-file write to a temp sibling, then rename over the original.
+    /// Whole-file write to a temp sibling, flushed to disk, then renamed over the original.
     fn persist(&self) -> Result<(), String> {
         if let Some(reason) = &self.write_block {
             return Err(reason.clone());
@@ -162,13 +161,6 @@ impl MetaStore {
             std::fs::create_dir_all(parent).map_err(|error| format!("create library metadata folder: {error}"))?;
         }
         let bytes = serde_json::to_vec(&self.clips).map_err(|error| error.to_string())?;
-        let mut temp_name = path.file_name().map(OsString::from).unwrap_or_default();
-        temp_name.push(format!(".{}.tmp", std::process::id()));
-        let temp = path.with_file_name(temp_name);
-        std::fs::write(&temp, bytes).map_err(|error| format!("write library metadata: {error}"))?;
-        std::fs::rename(&temp, path).map_err(|error| {
-            let _ = std::fs::remove_file(&temp);
-            format!("publish library metadata: {error}")
-        })
+        durable::write_durable(path, &bytes).map_err(|error| format!("write library metadata: {error}"))
     }
 }
