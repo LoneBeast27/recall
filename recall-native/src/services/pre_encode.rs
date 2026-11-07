@@ -278,7 +278,7 @@ fn remove_deliveries(folder: &Path) -> usize {
 
 /// The engine's export temp `.<stem>.recall-export-<pid>-<nonce>-<n>.mp4` whose `pid` no
 /// longer runs (`paths::temporary_output_path` in the engine). Strict: anything else is kept.
-fn dead_export_temp(name: &str, alive: fn(u32) -> bool) -> bool {
+pub(crate) fn dead_export_temp(name: &str, alive: fn(u32) -> bool) -> bool {
     let Some((stem, tail)) = name.strip_prefix('.').and_then(|rest| rest.rsplit_once(".recall-export-")) else { return false };
     let Some(tail) = tail.strip_suffix(".mp4") else { return false };
     let parts: Vec<&str> = tail.split('-').collect();
