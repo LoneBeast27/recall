@@ -249,3 +249,24 @@ fn a_volume_without_a_recycle_bin_deletes_nothing_and_tells_once() {
     let notice = crate::record_status::error_event(crate::record_storage::REFUSED_NOTICE);
     assert_eq!(events.iter().filter(|e| **e == notice).count(), 1, "one toast across runs: {events:?}");
 }
+
+static RECYCLED_BUSY: StdMutex<Vec<Instant>> = StdMutex::new(Vec::new());
+/// The Recycle Bin call refused because an earlier one is stuck.
+fn recycle_busy(_: &[PathBuf]) -> Result<(), crate::record_storage::RecycleError> {
+    RECYCLED_BUSY.lock().unwrap().push(Instant::now());
+    Err(crate::record_storage::RecycleError::Refused(crate::win_fileop::STUCK_REFUSAL.into()))
+}
+
+#[test]
+fn a_busy_recycle_bin_shows_the_busy_notice_once_per_streak() {
+    let deps = Deps { free: roomy, resolve: by_letter, plan: plan_one, bin: any_bin, recycle: recycle_busy };
+    let current = Mutex::new(Setting { dir: DIR.into(), cap_gb: 500 });
+    let (mut low, mut warner) = (FreeWarner::default(), Warner::default());
+    let mut events = Vec::new();
+    for _ in 0..3 {
+        run_batch(&cap_job(), &current, deps, &mut low, &mut warner, &mut |e| events.push(e.to_string()));
+    }
+    let busy = crate::record_status::error_event(crate::record_storage::BUSY_NOTICE);
+    assert_eq!(events.iter().filter(|e| **e == busy).count(), 1, "one busy toast across runs: {events:?}");
+    assert!(crate::record_storage::BUSY_NOTICE.contains("busy, try again"));
+}

@@ -202,6 +202,8 @@ pub struct Warner {
 
 /// The notice when a clip cannot go to the Recycle Bin (shown once until a run works again).
 pub const REFUSED_NOTICE: &str = "Couldn't move old clips to the Recycle Bin, so your limit wasn't applied.";
+/// The notice while an earlier Recycle Bin move is still stuck (shown once per streak, like [`REFUSED_NOTICE`]).
+pub const BUSY_NOTICE: &str = "The Recycle Bin is busy, try again: old clips weren't moved yet, so your limit wasn't applied.";
 
 impl Warner {
     /// The level to warn about now, if any. `pruned`: this run moved clips

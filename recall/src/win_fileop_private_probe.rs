@@ -104,14 +104,57 @@ fn watch(answer_yes: bool, stop: Arc<Flag>) -> std::thread::JoinHandle<(Vec<Win>
     })
 }
 
+/// Samples of the input desktop's top-level dialogs taken every 50 ms on a
+/// watcher thread for the whole of one call: (samples taken, samples readable,
+/// every #32770 that was not there when the watch began).
+struct InputWatch {
+    stop: Arc<Flag>,
+    handle: std::thread::JoinHandle<(usize, usize, Vec<Win>)>,
+}
+
+impl InputWatch {
+    fn start() -> Self {
+        let stop = Arc::new(Flag::new(false));
+        let flag = stop.clone();
+        let handle = std::thread::spawn(move || {
+            let baseline = input_dialogs().unwrap_or_default();
+            let (mut taken, mut readable, mut new) = (0usize, 0usize, Vec::<Win>::new());
+            loop {
+                taken += 1;
+                if let Some(now) = input_dialogs() {
+                    readable += 1;
+                    for w in now.into_iter().filter(|w| !baseline.contains(w)) {
+                        if !new.contains(&w) {
+                            new.push(w);
+                        }
+                    }
+                }
+                if flag.load(Ordering::SeqCst) {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            (taken, readable, new)
+        });
+        InputWatch { stop, handle }
+    }
+
+    /// Stop and assert that no sample showed a new dialog on the input desktop.
+    fn finish(self, case: &str) {
+        self.stop.store(true, Ordering::SeqCst);
+        let (taken, readable, new) = self.handle.join().unwrap();
+        say(format!("PRIVATE {case}: input desktop sampled every 50 ms: {taken} samples ({readable} readable); new #32770: {new:?}"));
+        assert!(readable > 0, "{case}: the input desktop could not be read (locked?)");
+        assert!(new.is_empty(), "{case}: a dialog appeared on the input desktop: {new:?}");
+    }
+}
+
 /// Run on purpose (see the module doc). Cases in order, each must pass first.
 #[test]
 #[ignore]
 fn fileop_private_probe() {
     let dir = sandbox();
-    let before = input_dialogs();
-    say(format!("PRIVATE input-desktop dialogs before: {before:?}"));
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| private_cases(&dir, &before)));
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| private_cases(&dir)));
     let _ = std::fs::remove_dir_all(&dir);
     say(format!("PRIVATE cleanup: sandbox exists after: {} (a stuck worker may still hold a file until the process exits)", dir.exists()));
     if let Err(panic) = result {
@@ -119,20 +162,28 @@ fn fileop_private_probe() {
     }
 }
 
-fn no_new_input_dialog(before: &Option<Vec<Win>>, case: &str) {
-    let after = input_dialogs();
-    say(format!("PRIVATE {case}: input-desktop dialogs now: {after:?}"));
-    if let (Some(before), Some(after)) = (before, &after) {
-        let new: Vec<&Win> = after.iter().filter(|w| !before.contains(w)).collect();
-        assert!(new.is_empty(), "{case}: a dialog appeared on the input desktop: {new:?}");
+/// The private desktop's DACL read back (read only), opened by name with READ_CONTROL.
+fn read_back_dacl(name: &str) -> Option<String> {
+    const READ_CONTROL: u32 = 0x0002_0000;
+    let wide = wide_str(name);
+    // SAFETY: a NUL-terminated name; closed below.
+    let desk = unsafe { OpenDesktopW(wide.as_ptr(), 0, 0, READ_CONTROL | DESKTOP_READOBJECTS) };
+    if desk == 0 {
+        return None;
     }
+    let dacl = super::super::dacl::desktop_dacl(desk);
+    // SAFETY: opened above.
+    unsafe { CloseDesktop(desk) };
+    dacl
 }
 
-fn private_cases(dir: &Path, before: &Option<Vec<Win>>) {
+fn private_cases(dir: &Path) {
     // 1. Recycling still works from the private desktop.
     let file = dir.join("recycle-me.txt");
     std::fs::write(&file, b"recall probe").unwrap();
+    let watch_input = InputWatch::start();
     let report = recycle_files(std::slice::from_ref(&file));
+    watch_input.finish("1");
     let desk = LAST_DESKTOP.lock().unwrap().clone();
     say(format!("PRIVATE 1 recycled on {desk}: {report:?}; file exists after: {}", file.exists()));
     assert_eq!(report.outcome, Outcome::Recycled);
@@ -140,37 +191,48 @@ fn private_cases(dir: &Path, before: &Option<Vec<Win>>) {
     assert_eq!(unbin(&file), Some(true), "own bin entry removed");
 
     let len = 120 * GIB; // more than L:'s 97,434 MB bin
-    // 2. The nuke dialog, answered Yes within the wait: what does the sink see?
+    // 2. The nuke dialog, answered Yes within the wait (only this probe can reach it).
     let f1 = dir.join("too-big-yes.bin");
     assert!(sparse(&f1, len).is_some_and(|a| a < (1 << 20)), "sparse");
     let stop = Arc::new(Flag::new(false));
     let watcher = watch(true, stop.clone());
+    let watch_input = InputWatch::start();
     let report = recycle_files(std::slice::from_ref(&f1));
+    watch_input.finish("2");
     stop.store(true, Ordering::SeqCst);
     let (seen, buttons, clicked) = watcher.join().unwrap();
     say(format!("PRIVATE 2 Yes: dialogs on the private desktop {seen:?}; buttons {buttons:?}; clicked Yes: {clicked}"));
     say(format!("PRIVATE 2 Yes: {report:?}; file exists after: {}; bin entry: {:?}", f1.exists(), bin_entry(&f1)));
     assert!(seen.iter().any(|w| w.2 == "Delete File"), "the dialog was on the private desktop");
-    no_new_input_dialog(before, "2");
     if bin_entry(&f1).is_some() {
         say(format!("PRIVATE 2 Yes: own bin entry removed: {:?}", unbin(&f1)));
     }
 
-    // 3. The same dialog left unanswered: the wait refuses and the file stays.
+    // 3. The same dialog left unanswered: the wait refuses and the file stays. While its
+    //    worker sits on the private desktop, read that desktop's DACL back.
     let f2 = dir.join("too-big-wait.bin");
     assert!(sparse(&f2, len).is_some_and(|a| a < (1 << 20)), "sparse");
     let stop = Arc::new(Flag::new(false));
     let watcher = watch(false, stop.clone());
+    let watch_input = InputWatch::start();
     let report = recycle_files(std::slice::from_ref(&f2));
+    watch_input.finish("3");
     stop.store(true, Ordering::SeqCst);
     let (seen, _, _) = watcher.join().unwrap();
     say(format!("PRIVATE 3 unanswered: dialogs on the private desktop {seen:?}; {report:?}; file exists after: {}", f2.exists()));
     assert!(matches!(&report.outcome, Outcome::Refused(why) if why.contains("did not finish")), "{report:?}");
     assert!(f2.exists(), "the too-big file stays");
     assert!(seen.iter().any(|w| w.2 == "Delete File"), "the dialog was on the private desktop");
-    no_new_input_dialog(before, "3");
+    let name = LAST_DESKTOP.lock().unwrap().clone();
+    let read = read_back_dacl(&name);
+    let sid = super::super::dacl::token_user_sid().expect("token user");
+    say(format!("PRIVATE 3 DACL of {name}: {read:?} (our SID {sid})"));
+    let read = read.expect("the DACL reads back");
+    assert_eq!(read.matches("(A;").count(), 1, "exactly one allow ACE: {read}");
+    assert_eq!(read.matches('(').count(), 1, "exactly one ACE of any kind: {read}");
+    assert!(read.starts_with("D:P") && read.contains(&sid), "{read}");
 
-    // 4. While that worker sits on its dialog, the next call is refused at once and starts no thread.
+    // 4. While that worker sits on its dialog, the next call gets the busy refusal and starts no thread.
     let f3 = dir.join("after-stuck.txt");
     std::fs::write(&f3, b"recall probe").unwrap();
     let threads = SPAWNED.load(Ordering::SeqCst);
