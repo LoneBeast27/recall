@@ -31,6 +31,8 @@ pub(crate) fn keep_staged(staged: &Path, dest: &Path) -> Option<PathBuf> {
     keep_staged_within(staged, dest, kept_cap(staged.parent()?))
 }
 
+/// Only files directly in `kept\` count: copies the start-up check set aside in
+/// `kept\leaked\` (`staging_kept.rs`) do not hold new keeps back.
 pub(crate) fn keep_staged_within(staged: &Path, dest: &Path, cap: u64) -> Option<PathBuf> {
     let dir = staged.parent()?.join(KEPT_DIR);
     let kept = dir.join(dest.file_name()?);
