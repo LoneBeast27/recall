@@ -69,6 +69,28 @@ fn a_steam_library_game_shipping_a_listed_exe_name_still_records() {
 }
 
 #[test]
+fn steam_evidence_counts_on_the_adoption_and_follow_routes() {
+    // R6-detect-3: dropping `game_evidence(ev)` on either route must fail a test.
+    let cfg = Config::default();
+    let steam = WatchEvent { steam_game: true, fullscreen: false, fullscreen_on_target: false, ..plain("electron") };
+    let outside = WatchEvent { steam_game: false, ..steam.clone() };
+    let adopt = crate::record_target_gate::adopted_candidate;
+    assert!(adopt(&steam, &cfg, (1920, 1080)).is_some(), "adoption: Steam game");
+    assert!(adopt(&outside, &cfg, (1920, 1080)).is_none(), "adoption: private outside Steam");
+    assert!(crate::record_target::followable(&steam, &cfg), "follow: Steam game");
+    assert!(!crate::record_target::followable(&outside, &cfg), "follow: private outside Steam");
+}
+
+#[test]
+fn hdr_rules_let_steam_evidence_beat_the_private_list() {
+    // R6-detect-1: a Steam game called Element.exe records, so HDR treats it as a game too.
+    let cfg = Config::default();
+    let steam = WatchEvent { steam_game: true, ..plain("Element") };
+    assert_ne!(classify(&crate::app::foreground_of(&steam), &cfg), AppKind::NonGame, "Steam: game class");
+    assert_eq!(classify(&crate::app::foreground_of(&plain("Element")), &cfg), AppKind::NonGame, "outside Steam");
+}
+
+#[test]
 fn hdr_rules_honour_a_fullscreen_games_opt_in() {
     // R5-detect-3: a `detect.fullscreen_games` entry opts a private app in for the HDR rules too.
     let mut cfg = Config::default();
