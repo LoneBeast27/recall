@@ -442,3 +442,6 @@ fn recover_in(dir: &Path) -> Vec<(PathBuf, std::io::Result<PathBuf>)> {
 #[cfg(test)]
 #[path = "longrec_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "longrec_quit_child_tests.rs"]
+mod quit_child_tests;
