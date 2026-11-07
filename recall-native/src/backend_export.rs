@@ -78,7 +78,7 @@ pub(crate) fn engine_export(info:&ClipInfo,output:&Path,plan:&EditPlan,fps:u32,e
         let result=match run{storage::Run::Finished(result)=>result,storage::Run::Cancelled{pid}=>{remove_export_temps(output,pid);return Err(EXPORT_CANCELLED.to_owned());},storage::Run::TimedOut{pid}=>{remove_export_temps(output,pid);return Err("Export stopped: the recorder did not finish in time.".to_owned());}};
         let events:Vec<serde_json::Value>=String::from_utf8_lossy(&result.stdout).lines().filter_map(|l|serde_json::from_str(l).ok()).collect();
         // A crashed engine leaves its hidden partial output: the name is this export's alone.
-        if !result.status.success(){remove_failed_temps(output);return Err(events.iter().find(|v|v["type"]=="export_failed").and_then(|v|v["reason"].as_str()).map(str::to_owned).unwrap_or_else(||format!("Export failed: {}",String::from_utf8_lossy(&result.stderr).trim())));}
+        if !result.status.success(){remove_failed_temps(output,crate::services::process_tree::alive);return Err(events.iter().find(|v|v["type"]=="export_failed").and_then(|v|v["reason"].as_str()).map(str::to_owned).unwrap_or_else(||format!("Export failed: {}",String::from_utf8_lossy(&result.stderr).trim())));}
         let done=events.iter().find(|v|v["type"]=="exported").ok_or("Recorder returned no completed export.")?;
         let report=events.iter().find(|v|v["type"]=="export_report");
         let field=|k:&str|report.and_then(|r|r[k].as_u64());
@@ -87,12 +87,13 @@ pub(crate) fn engine_export(info:&ClipInfo,output:&Path,plan:&EditPlan,fps:u32,e
     })();
     let _=std::fs::remove_file(&project);result
 }
-/// The engine's hidden temporaries of `output` (`.<stem>.recall-export-<pid>-<nonce>-<n>.mp4`),
-/// whatever pid wrote them: after a failed run nothing else writes this export's name.
-fn remove_failed_temps(output:&Path){
+/// The engine's hidden temporaries of `output` (`.<stem>.recall-export-<pid>-<nonce>-<n>.mp4`)
+/// whose engine no longer runs (`alive`, review RI-6): the failed run's own, and a crashed
+/// one's; a temp of an engine still running is left to it.
+fn remove_failed_temps(output:&Path,alive:fn(u32)->bool){
     let (Some(outdir),Some(stem))=(output.parent(),output.file_stem().and_then(|v|v.to_str())) else{return};
     let prefix=format!(".{stem}.recall-export-");
-    for item in std::fs::read_dir(outdir).into_iter().flatten().flatten(){let name=item.file_name().to_string_lossy().into_owned();if name.starts_with(&prefix)&&name.ends_with(".mp4"){let _=std::fs::remove_file(item.path());}}
+    for item in std::fs::read_dir(outdir).into_iter().flatten().flatten(){let name=item.file_name().to_string_lossy().into_owned();if name.starts_with(&prefix)&&crate::services::pre_encode::dead_export_temp(&name,alive){let _=std::fs::remove_file(item.path());}}
 }
 #[cfg(test)]
 #[path="backend_export_tests.rs"]

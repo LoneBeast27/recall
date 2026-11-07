@@ -22,9 +22,23 @@ fn a_failed_engine_run_leaves_none_of_its_temps() {
     for name in ours.iter().chain(&others) {
         std::fs::write(sandbox.join(name), b"x").unwrap();
     }
-    remove_failed_temps(&output);
+    remove_failed_temps(&output, |_| false);
     assert!(ours.iter().all(|name| !sandbox.join(name).exists()), "this export's partial outputs go");
     assert!(others.iter().all(|name| sandbox.join(name).exists()), "other exports and files stay");
+}
+
+/// RI-6: the failed-run sweep takes only temps of engines that no longer run.
+#[test]
+fn a_failed_run_leaves_a_running_engines_temp_alone() {
+    let sandbox = crate::test_temp::TempDir::sandbox("recall-export-live-temp");
+    let output = sandbox.join("clip-trim-1.mp4");
+    let (dead, live) = (".clip-trim-1.recall-export-77-123-0.mp4", ".clip-trim-1.recall-export-91-5-1.mp4");
+    for name in [dead, live] {
+        std::fs::write(sandbox.join(name), b"x").unwrap();
+    }
+    remove_failed_temps(&output, |pid| pid == 91);
+    assert!(!sandbox.join(dead).exists(), "the dead engine's temp goes");
+    assert!(sandbox.join(live).exists(), "a running engine's temp stays");
 }
 
 /// R2-6: the next export takes the highest number + 1, so names sort by age even after an
