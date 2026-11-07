@@ -6,7 +6,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use super::{Done, Job};
+use super::{Done, Job, PathGate, gated_clip};
 use crate::backend;
 
 /// Which thread a job runs on.
@@ -63,22 +63,30 @@ impl Pending {
 
 static EDITS: Pending = Pending::new();
 
-/// Queues an edit write on the edits thread.
-pub(super) fn send(edits: &Sender<Job>, job: Job) {
+/// Queues an edit write on the edits thread. False when the thread is gone.
+pub(super) fn send(edits: &Sender<Job>, job: Job) -> bool {
     EDITS.begin();
-    if edits.send(job).is_err() {
+    let sent = edits.send(job).is_ok();
+    if !sent {
         EDITS.end();
     }
+    sent
 }
 
-/// The edits thread: one write at a time, in the order they were sent.
-pub(super) fn run(jobs: Receiver<Job>, tx: Sender<Done>) {
+/// The edits thread: one write at a time, in the order they were sent. Each job leaves `gate`
+/// once it finished, success or not (`Workers::job` entered it), so a delete of that clip
+/// waits for it and no longer.
+pub(super) fn run(jobs: Receiver<Job>, tx: Sender<Done>, gate: PathGate) {
     while let Ok(job) = jobs.recv() {
+        let gated = gated_clip(&job);
         let done = match job {
             Job::SaveProject(info, plan, fps, export) => Some(Done::Saved(info.path.clone(), backend::save_project(&info, &plan, fps, &export))),
             Job::FlushProject(info, plan, fps, export, ours) => Some(Done::Flushed(info.path.clone(), backend::flush_project(&info, &plan, fps, &export, ours))),
             _ => None,
         };
+        if let Some(key) = gated {
+            gate.leave(&key);
+        }
         EDITS.end();
         if let Some(done) = done {
             let _ = tx.send(done);
@@ -145,5 +153,35 @@ mod tests {
             writer.end(); // the lane is free: the queued flush runs
         };
         assert!(finish(&pending, export, Duration::from_millis(10)), "the limit counts from the end of the export");
+    }
+
+    #[test]
+    fn a_delete_of_a_clip_whose_flush_ran_on_the_edits_thread_goes_at_once() {
+        // library x editor: the edits thread runs saves and flushes; a delete waits for them
+        // through the PathGate, so the thread must leave it (else every delete of an edited clip
+        // waited 600 s). The clip does not exist, so the flush fails fast and writes nothing.
+        let info = ClipInfo { path: r"Z:\recall-gate-test\gone.mp4".into(), duration: 1.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() };
+        let key = crate::services::library::clip_key(&info.path);
+        let gate = PathGate::default();
+        let (jobs, rx) = std::sync::mpsc::channel::<Job>();
+        let (done_tx, done) = std::sync::mpsc::channel::<Done>();
+        let thread_gate = gate.clone();
+        let thread = std::thread::spawn(move || run(rx, done_tx, thread_gate));
+        gate.enter(key.clone());
+        assert!(send(&jobs, Job::FlushProject(info.clone(), EditPlan::default(), 60, ExportSettings::default(), true)));
+        match done.recv_timeout(Duration::from_secs(10)).expect("the flush answers") {
+            Done::Flushed(clip, result) => {
+                assert_eq!(clip, info.path, "Done::Flushed names the clip (library marks it Edited)");
+                assert!(result.is_err());
+            }
+            _ => panic!("expected Done::Flushed"),
+        }
+        let started = Instant::now();
+        let (ran_tx, ran) = std::sync::mpsc::channel();
+        let waited = gate.run_when_clear(vec![key], || {}, move || ran_tx.send(()).unwrap());
+        assert!(ran.recv_timeout(Duration::from_secs(2)).is_ok(), "the delete ran (waited: {waited})");
+        assert!(started.elapsed() < Duration::from_secs(2), "a delete after the flush does not wait for the gate limit");
+        drop(jobs);
+        thread.join().unwrap();
     }
 }
