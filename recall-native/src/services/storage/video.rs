@@ -89,15 +89,16 @@ pub(super) fn video_dir(root: &Path) -> PathBuf {
     root.join("video")
 }
 
-/// The budget in `storage.json`. A first run (no budget set) picks one from the cache drive's
-/// free space (`evict::default_budget`) and saves it; Settings changes it from then on.
+/// The budget in `storage.json`. A first run (no budget set) picks one (`evict::default_budget`:
+/// 2 GiB on the system drive, else from the cache drive's free space) and saves it; Settings
+/// changes it from then on. A saved budget is never shrunk here.
 pub(super) fn budget_in(root: &Path) -> u64 {
     let mut settings = lru::read_settings(root);
     if let Some(budget) = settings.cache_budget_bytes {
         return budget;
     }
     let (free, total) = super::drive_info(root).map_or((0, 0), |info| (info.free, info.total));
-    let budget = lru::default_budget(free, total);
+    let budget = lru::default_budget(free, total, super::drive::on_system_drive(root));
     settings.cache_budget_bytes = Some(budget);
     if let Err(error) = lru::write_settings(root, &settings) {
         eprintln!("save first-run cache budget: {error}");

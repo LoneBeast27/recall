@@ -20,6 +20,7 @@ fn cfg(same_volume: VolumeCheck) -> Config {
         stamp: stamp_mtime,
         identity: same_identity,
         stat: stat_dest,
+        flush_dest,
     }
 }
 
@@ -398,5 +399,53 @@ fn a_destination_windows_cannot_stat_is_never_replaced() {
     assert!(move_clip(&MoveJob { staged: src.clone(), dest: dest.clone() }, &denied, &AtomicBool::new(false)).is_err());
     assert!(!dest.exists(), "nothing was written over a destination it could not see");
     assert_eq!(std::fs::read(&src).unwrap(), bytes, "the staged copy stays");
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn a_clip_that_cannot_be_flushed_keeps_its_staged_copy_untouched() {
+    // C: must not lose the staged copy before V: has the clip on disk (power cut ordering).
+    let (stage, out) = (temp_dir("s"), temp_dir("o"));
+    let (src, bytes) = staged(&stage, "G.mp4", 9000);
+    let dest = out.join("G.mp4");
+    let unflushed = Config { flush_dest: |_| Err(std::io::Error::other("flush refused")), ..cfg(ACROSS) };
+    let moved = move_clip(&MoveJob { staged: src.clone(), dest: dest.clone() }, &unflushed, &AtomicBool::new(false)).unwrap();
+    assert_eq!((moved.kept.clone(), moved.staged_kept.clone()), (None, None));
+    assert!(moved.unflushed.as_deref().is_some_and(|e| e.contains("flush refused")), "{:?}", moved.unflushed);
+    assert_eq!(std::fs::read(&src).unwrap(), bytes, "staged copy neither deleted nor kept");
+    assert!(!stage.join(KEPT_DIR).join("G.mp4").exists());
+    // The retry finds the clip in place and, flushed this time, removes the staged copy.
+    let again = move_clip(&MoveJob { staged: src.clone(), dest: dest.clone() }, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
+    assert_eq!(again.how, "already in place");
+    assert!(!src.exists() && std::fs::read(&dest).unwrap() == bytes);
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+static FLUSHED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+#[test]
+fn the_mover_flushes_the_clip_before_keeping_and_retries_an_unflushed_one() {
+    let (stage, out) = (temp_dir("s"), temp_dir("o"));
+    let (src, _) = staged(&stage, "G.mp4", 9000);
+    let dest = out.join("G.mp4");
+    // The first flush fails, the retry's succeeds.
+    let flaky: FlushFn = |p| {
+        let mut seen = FLUSHED.lock().unwrap();
+        seen.push(p.to_path_buf());
+        if seen.len() == 1 { Err(std::io::Error::other("not yet")) } else { Ok(()) }
+    };
+    let (events, sink) = Events::capture(true);
+    let (queue, control) = spawn(events, Config { flush_dest: flaky, ..cfg(ACROSS) }, Vec::new()).unwrap();
+    assert!(queue.submit(MoveJob { staged: src.clone(), dest: dest.clone() }));
+    wait_for(&sink, "clip_moved", 1);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while src.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!src.exists(), "deleted only after a good flush: {:?}", lines(&sink));
+    assert_eq!(FLUSHED.lock().unwrap().clone(), vec![dest.clone(), dest.clone()], "flushed before every staged-copy step");
+    assert_eq!(of_type(&sink, "clip_moved").len(), 1, "announced once");
+    assert!(of_type(&sink, "clip_move_failed").is_empty(), "not a failed move");
+    assert!(control.shutdown(Duration::from_secs(1)));
     let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
 }

@@ -94,9 +94,18 @@ fn copy_of(dest: &Path, kept: &Path) -> bool {
     matches!((dest.metadata(), kept.metadata()), (Ok(d), Ok(k)) if d.is_file() && d.len() == k.len() && super::mtime_secs(&d) == super::mtime_secs(&k))
 }
 
+/// The clip is missing but its `<clip>.part` is in the clip folder: a power cut lost the
+/// move's rename, the kept copy may be the only whole clip, and the engine moves it again at
+/// its next start (`recall/src/encoder/staging_kept.rs`). Its copy is never deleted then.
+fn only_a_part(dest: &Path) -> bool {
+    let mut part = dest.as_os_str().to_owned();
+    part.push(".part");
+    !dest.exists() && Path::new(&part).exists()
+}
+
 /// [`sweep_kept`] against explicit folders: a kept copy of a clip in `clip_folder` is
-/// adopted; a marked copy that matches no clip is deleted; anything else stays. Returns
-/// (adopted, deleted).
+/// adopted; a marked copy that matches no clip is deleted, unless the clip is only a `.part`
+/// ([`only_a_part`]); anything else stays. Returns (adopted, deleted).
 pub(super) fn sweep_in(root: &Path, kept_dir: &Path, clip_folder: &Path, budget: u64) -> (usize, usize) {
     if super::guard::blocked(root).or_else(|| super::guard::blocked(kept_dir)).is_some() {
         return (0, 0);
@@ -111,7 +120,7 @@ pub(super) fn sweep_in(root: &Path, kept_dir: &Path, clip_folder: &Path, budget:
         let dest = clip_folder.join(entry.file_name());
         if copy_of(&dest, &kept) && adopt_in(root, &dest, &kept, budget).is_ok() {
             adopted += 1;
-        } else if marked(&kept) && std::fs::remove_file(&kept).is_ok() {
+        } else if marked(&kept) && !only_a_part(&dest) && std::fs::remove_file(&kept).is_ok() {
             deleted += 1;
         }
     }

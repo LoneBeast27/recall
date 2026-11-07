@@ -127,3 +127,16 @@ fn only_a_file_in_a_kept_folder_may_be_adopted() {
     assert!(dest.is_file(), "adopt_kept never touches a clip outside the kept folders");
     cleanup(&root);
 }
+
+#[test]
+fn a_kept_copy_is_never_deleted_while_its_clip_is_only_a_part() {
+    // A power cut lost V:'s `.part` -> `.mp4` rename: the kept copy may be the only whole clip.
+    let (root, clips, kept_dir) = dirs("part");
+    let kept = kept_dir.join("G__p.mp4");
+    std::fs::write(&kept, vec![3u8; 1200]).unwrap();
+    mark(&kept);
+    std::fs::write(clips.join("G__p.mp4.part"), vec![3u8; 1200]).unwrap();
+    assert_eq!(sweep_in(&root, &kept_dir, &clips, BUDGET), (0, 0), "nothing adopted or deleted");
+    assert!(kept.is_file(), "the engine re-moves it at its next start");
+    cleanup(&root);
+}

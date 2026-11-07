@@ -212,3 +212,33 @@ fn a_staging_folder_named_through_a_network_alias_is_still_refused() {
     assert!(refused(&alias, std::slice::from_ref(&clips)).is_some(), "one folder under two names");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn recovery_requeues_a_kept_copy_whose_clip_is_only_a_part() {
+    // A power cut right after a move: V: lost the `.part` -> `.mp4` rename, C: kept the copy.
+    let (stage, out) = (temp_dir("kept-part"), temp_dir("kept-part-out"));
+    let kept_dir = stage.join(super::mover::KEPT_DIR);
+    std::fs::create_dir_all(&kept_dir).unwrap();
+    let name = "A__2026-10-22__09-00-00-000__aa.mp4";
+    std::fs::write(kept_dir.join(name), vec![5u8; 1000]).unwrap();
+    std::fs::write(out.join(format!("{name}.part")), vec![5u8; 1000]).unwrap();
+    // A `.part` of another size is a half copy: that kept copy waits for the app as before.
+    let other = "B__2026-10-22__09-01-00-000__bb.mp4";
+    std::fs::write(kept_dir.join(other), vec![5u8; 1000]).unwrap();
+    std::fs::write(out.join(format!("{other}.part")), vec![5u8; 999]).unwrap();
+    // A clip that landed: nothing to recover.
+    let landed = "C__2026-10-22__09-02-00-000__cc.mp4";
+    std::fs::write(kept_dir.join(landed), vec![5u8; 1000]).unwrap();
+    std::fs::write(out.join(landed), vec![5u8; 1000]).unwrap();
+    std::fs::write(out.join(format!("{landed}.part")), vec![5u8; 1000]).unwrap();
+
+    assert!(super::super::staging_kept::holds_kept(&stage));
+    let (back, errors) = super::super::staging_kept::hand_back(&stage, &out);
+    assert_eq!(back, vec![stage.join(name)], "{errors:?}");
+    assert!(stage.join(name).is_file() && !kept_dir.join(name).exists(), "handed back to staging");
+    // Handed back, it is an ordinary staged clip: the next recovery queues it as well.
+    assert_eq!(recover(&stage, &out).moves, vec![(stage.join(name), out.join(name))]);
+    assert!(kept_dir.join(other).is_file() && kept_dir.join(landed).is_file(), "the rest stays kept");
+    assert!(out.join(format!("{name}.part")).is_file() && out.join(landed).is_file(), "the clip folder is only read");
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}

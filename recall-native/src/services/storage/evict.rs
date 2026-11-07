@@ -10,8 +10,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 const GIB: u64 = 1 << 30;
-/// The first-run budget is at most this (2026-11-02: 20 GiB, so recently opened clips and the
-/// idle warm-up have room)...
+/// The first-run budget off the system drive is at most this (2026-11-02: 20 GiB, so recently
+/// opened clips and the idle warm-up have room)...
 pub const DEFAULT_CACHE_BUDGET: u64 = 20 * GIB;
 /// ...and at most this share of the cache drive's free space...
 pub const DEFAULT_FREE_SHARE_PERCENT: u64 = 25;
@@ -21,10 +21,15 @@ pub const DEFAULT_KEEP_FREE_PERCENT: u64 = 10;
 pub const MIN_CACHE_BUDGET: u64 = 2 * GIB;
 
 /// The budget a first run picks (no `storage.json` yet) on a cache drive with `free` of
-/// `total` bytes: the smallest of [`DEFAULT_CACHE_BUDGET`], [`DEFAULT_FREE_SHARE_PERCENT`] of
-/// `free`, and `free` less [`DEFAULT_KEEP_FREE_PERCENT`] of `total`, in whole GiB, at least
-/// [`MIN_CACHE_BUDGET`].
-pub(super) fn default_budget(free: u64, total: u64) -> u64 {
+/// `total` bytes. On the system drive it is [`MIN_CACHE_BUDGET`] (Rohan 2026-11-03: "keep the
+/// cache on C: at 2 GB"; the engine's `kept\` copies count inside it). Elsewhere: the smallest
+/// of [`DEFAULT_CACHE_BUDGET`], [`DEFAULT_FREE_SHARE_PERCENT`] of `free`, and `free` less
+/// [`DEFAULT_KEEP_FREE_PERCENT`] of `total`, in whole GiB, at least [`MIN_CACHE_BUDGET`].
+/// A budget already in `storage.json` is never replaced by this.
+pub(super) fn default_budget(free: u64, total: u64, system_drive: bool) -> u64 {
+    if system_drive {
+        return MIN_CACHE_BUDGET;
+    }
     let percent = |bytes: u64, share: u64| (u128::from(bytes) * u128::from(share) / 100) as u64;
     let share = percent(free, DEFAULT_FREE_SHARE_PERCENT);
     let spare = free.saturating_sub(percent(total, DEFAULT_KEEP_FREE_PERCENT));

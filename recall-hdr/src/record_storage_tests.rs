@@ -3,6 +3,11 @@
 
 use super::*;
 
+/// Nothing became a favourite, was played or opened during the run.
+fn no_keeps() -> Result<HashSet<String>, String> {
+    Ok(HashSet::new())
+}
+
 /// A Recycle Bin that takes anything (the bin checks have their own tests).
 fn any_bin(_: &Path, _: u64) -> Result<(), String> {
     Ok(())
@@ -141,7 +146,7 @@ fn a_quarantined_library_file_cancels_the_run() {
 
 #[test]
 fn caps_below_the_minimum_never_run() {
-    let err = run_once(Path::new(r"Z:\does-not-matter"), STORAGE_CAP_MIN_GB - 1, plan_dir, &|| true, (any_bin, no_files), |_| panic!("no recycle"))
+    let err = run_once(Path::new(r"Z:\does-not-matter"), STORAGE_CAP_MIN_GB - 1, plan_dir, (&|| true, no_keeps), (any_bin, no_files), |_| panic!("no recycle"))
         .expect_err("refused");
     assert!(err.contains("minimum"), "{err}");
 }
@@ -360,7 +365,7 @@ fn recycle_then_limit_off(files: &[PathBuf]) -> Result<(), crate::record_storage
 #[test]
 fn turning_the_limit_off_between_clips_stops_the_run() {
     let wanted = || LIMIT_ON.load(SeqCst);
-    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, &wanted, (any_bin, no_files), recycle_then_limit_off).unwrap();
+    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, (&wanted, no_keeps), (any_bin, no_files), recycle_then_limit_off).unwrap();
     let calls = FLIP_CALLS.lock().unwrap().clone();
     let clips: Vec<&String> = calls.iter().flatten().filter(|n| n.ends_with(".mp4")).collect();
     assert_eq!(clips, vec![A], "exactly one clip recycled: {calls:?}");
@@ -376,7 +381,7 @@ fn recycle_recorded(files: &[PathBuf]) -> Result<(), crate::record_storage::Recy
 
 #[test]
 fn a_clip_and_its_companions_go_in_one_call() {
-    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, &|| true, (any_bin, no_files), recycle_recorded).unwrap();
+    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, (&|| true, no_keeps), (any_bin, no_files), recycle_recorded).unwrap();
     let mut calls = GROUP_CALLS.lock().unwrap().clone();
     for call in &mut calls {
         call.sort();
@@ -412,7 +417,7 @@ fn recycle_big(files: &[PathBuf]) -> Result<(), crate::record_storage::RecycleEr
 
 #[test]
 fn a_clip_too_big_for_the_bin_is_skipped_and_the_run_stops() {
-    let out = run_once(Path::new(r"E:\Clips"), 500, plan_big_middle, &|| true, (ten_gib_bin, no_files), recycle_big).unwrap();
+    let out = run_once(Path::new(r"E:\Clips"), 500, plan_big_middle, (&|| true, no_keeps), (ten_gib_bin, no_files), recycle_big).unwrap();
     assert_eq!(BIG_CALLS.lock().unwrap().clone(), vec![vec![A.to_string()]], "A went, B was refused, C was never tried");
     assert_eq!(out.removed, 1);
     assert!(out.refused.as_deref().is_some_and(|r| r.contains("bigger than the Recycle Bin")), "{out:?}");
@@ -433,7 +438,7 @@ fn recycle_share(files: &[PathBuf]) -> Result<(), crate::record_storage::Recycle
 #[test]
 fn clips_on_a_share_are_never_sent() {
     // A local-looking folder: the share is what `share_bin` reports (no network lookup in a test).
-    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, &|| true, (share_bin, no_files), recycle_share).unwrap();
+    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, (&|| true, no_keeps), (share_bin, no_files), recycle_share).unwrap();
     assert!(SHARE_CALLS.lock().unwrap().is_empty(), "no shell call: on a share it would delete for good");
     assert_eq!(out.removed, 0);
     assert!(out.refused.is_some());
@@ -459,7 +464,7 @@ fn recycle_declined(files: &[PathBuf]) -> Result<(), RecycleError> {
 
 #[test]
 fn a_declined_shell_call_stops_the_run_like_a_refusal() {
-    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, &|| true, (any_bin, no_files), recycle_declined).expect("a refusal, not an error");
+    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, (&|| true, no_keeps), (any_bin, no_files), recycle_declined).expect("a refusal, not an error");
     assert_eq!(DECLINED_CALLS.lock().unwrap().len(), 1, "no second clip after a declined call");
     assert_eq!(out.removed, 0);
     assert!(out.refused.as_deref().is_some_and(|r| r.contains("declined")), "{out:?}");
@@ -496,7 +501,7 @@ fn recycle_sum(files: &[PathBuf]) -> Result<(), crate::record_storage::RecycleEr
 #[test]
 fn companions_are_summed_with_the_clip_for_the_bin_check() {
     // Clip A is 1 GiB with 3 companions of 600 MiB each: 2.76 GiB, more than the 2 GiB of room.
-    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, &|| true, (two_gib_room, big_companions), recycle_sum).unwrap();
+    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, (&|| true, no_keeps), (two_gib_room, big_companions), recycle_sum).unwrap();
     assert!(SUM_CALLS.lock().unwrap().is_empty(), "nothing sent: {out:?}");
     assert!(out.refused.as_deref().is_some_and(|r| r.contains("no room")), "{out:?}");
 }
@@ -509,7 +514,7 @@ fn recycle_unreadable(files: &[PathBuf]) -> Result<(), crate::record_storage::Re
 
 #[test]
 fn a_companion_whose_size_cannot_be_read_refuses() {
-    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, &|| true, (any_bin, unreadable), recycle_unreadable).unwrap();
+    let out = run_once(Path::new(r"E:\Clips"), 500, plan_three, (&|| true, no_keeps), (any_bin, unreadable), recycle_unreadable).unwrap();
     assert!(UNREADABLE_CALLS.lock().unwrap().is_empty(), "nothing sent: {out:?}");
     assert!(out.refused.as_deref().is_some_and(|r| r.contains("couldn't read the size")), "{out:?}");
 }

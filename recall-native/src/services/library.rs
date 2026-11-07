@@ -15,6 +15,7 @@ pub mod import_check;
 pub mod imports;
 mod mp4;
 pub mod mp4_map;
+pub mod open_clips;
 mod names;
 mod scrub;
 mod settle;

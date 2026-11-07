@@ -40,6 +40,8 @@ impl Root {
         let workers = span("root: workers", Workers::spawn);
         workers.job(Job::List);
         span("root: sweep_kept", || crate::services::storage::sweep_kept(crate::backend::library_dir));
+        // Nothing is open yet: a list a crash left behind would keep its clip from the storage cap.
+        crate::services::library::open_clips::publish(None);
         span("root: pre_encode clear_dir", crate::services::pre_encode::clear_dir);
         span("root: pre_encode sweep_deliveries", crate::services::pre_encode::sweep_deliveries);
         let daemon = span("root: daemon client", DaemonClient::spawn);

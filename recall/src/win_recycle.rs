@@ -20,8 +20,11 @@
 //!   A bigger item is the one Windows offers to delete permanently. The item
 //!   must also fit the bin's FREE room (that size minus what the volume's bin
 //!   already holds, `SHQueryRecycleBinW`): otherwise Windows purges older bin
-//!   items to make room, which deletes those earlier files for good. An
-//!   unreadable bin size refuses.
+//!   items to make room, which deletes those earlier files for good. The
+//!   room must exceed the item by [`margin`] (max(1 GiB, 5% of the bin)):
+//!   Windows' accounting rounds and reports `used` late right after a move.
+//!   The check and the move run under one lock shared by every Recall
+//!   process (`win_recycle_lock.rs`). An unreadable bin size refuses.
 //!
 //! A refusal stops the caller, which tells the user, and nothing is deleted.
 //! This is the second guard: the call itself (`win_fileop.rs`) goes through
@@ -133,6 +136,11 @@ fn max_bytes(facts: &BinFacts) -> Option<u64> {
     }
 }
 
+/// Room the bin must keep beyond an item: max(1 GiB, 5% of its size `max`).
+pub fn margin(max: u64) -> u64 {
+    (max / 20).max(1 << 30)
+}
+
 /// May `bytes` from this volume go to its Recycle Bin?
 pub fn decide(facts: &BinFacts, bytes: u64) -> Result<(), String> {
     if facts.subst {
@@ -163,7 +171,7 @@ pub fn decide(facts: &BinFacts, bytes: u64) -> Result<(), String> {
         return Err(format!("couldn't read how full the Recycle Bin on {} is", volume.label));
     };
     let room = max.saturating_sub(used);
-    if bytes > room {
+    if bytes.saturating_add(margin(max)) > room {
         return Err(format!("not enough room left in the Recycle Bin on {} ({} MB free of {} MB)", volume.label, room / MIB, max / MIB));
     }
     Ok(())

@@ -13,7 +13,7 @@ use crate::control::PipeHub;
 use crate::log;
 use crate::record_free_space::{self as free_space, FreeCheck, FreeFn, FreeWarner, Resolve};
 use crate::record_storage::{
-    cleaned_event, plan_dir, preview_event, recycle, run_once, warning_event, BinCheck, PlanFn, RecycleFn, Warner, AFTER_SAVE, HOURLY,
+    cleaned_event, kept_now, plan_dir, preview_event, recycle, run_once, warning_event, BinCheck, KeepFn, PlanFn, RecycleFn, Warner, AFTER_SAVE, HOURLY,
     BUSY_NOTICE, REFUSED_NOTICE,
 };
 
@@ -51,6 +51,8 @@ pub(crate) struct Deps {
     /// Can a clip go to its volume's Recycle Bin (production `win_recycle::can_recycle`).
     pub bin: BinCheck,
     pub recycle: RecycleFn,
+    /// Clips to keep, read again before every call (production `record_storage::kept_now`).
+    pub keep: KeepFn,
 }
 
 /// Schedules runs (after saves, hourly, on demand) onto one worker thread.
@@ -72,7 +74,7 @@ impl Janitor {
     pub fn start(hub: Arc<PipeHub>) -> Self {
         let (tx, rx) = channel::<Job>();
         let janitor = Janitor::with_sender(tx, free_space::engine_staging_dir(), Instant::now(), crate::win_volume::volume_of);
-        let deps = Deps { free: free_space::free_bytes, resolve: janitor.resolve, plan: plan_dir, bin: crate::win_recycle::can_recycle, recycle };
+        let deps = Deps { free: free_space::free_bytes, resolve: janitor.resolve, plan: plan_dir, bin: crate::win_recycle::can_recycle, recycle, keep: kept_now };
         let current = janitor.current.clone();
         let _ = std::thread::Builder::new()
             .name("recall-storage".into())
@@ -217,7 +219,7 @@ fn cap_run(job: &Job, current: &Mutex<Setting>, deps: Deps, warner: &mut Warner,
         log!("storage: a queued run for {} at {} GiB is no longer the setting; skipped", job.dir.display(), job.cap_gb);
         return;
     }
-    match run_once(&job.dir, job.cap_gb, deps.plan, &wanted, (deps.bin, crate::win_recycle::file_size), deps.recycle) {
+    match run_once(&job.dir, job.cap_gb, deps.plan, (&wanted, deps.keep), (deps.bin, crate::win_recycle::file_size), deps.recycle) {
         Ok(o) => {
             if let Some(why) = &o.refused {
                 log!("storage: stopped before a clip that cannot go to the Recycle Bin ({why}); nothing deleted");

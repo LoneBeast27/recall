@@ -11,7 +11,9 @@
 //! cache, so a fresh clip opens from the SSD at once. If the stamp fails the
 //! move still completes, but the staged copy is not kept (its identity would
 //! not match the clip's) and one `encoder_log` line says so. If it cannot be kept it
-//! is deleted as before. On the same volume a move is a plain rename. A `<final>.part` left by an interrupted
+//! is deleted as before. Before the staged copy is deleted or kept, the clip and its folder
+//! are flushed on their volume (`mover_flush.rs`); if that fails the staged copy stays and the
+//! move is retried (it is then "already in place"). On the same volume a move is a plain rename. A `<final>.part` left by an interrupted
 //! move is overwritten by the retry; the final name only ever appears through
 //! the rename of a complete, flushed file.
 //!
@@ -70,9 +72,15 @@ pub(crate) struct Config {
     pub identity: IdentityFn,
     /// The destination's metadata (`std::fs::metadata`; a failing one in tests).
     pub stat: StatFn,
+    /// Makes the landed clip durable before the staged copy is touched (`mover_flush.rs`).
+    pub flush_dest: FlushFn,
 }
 
 pub(crate) use super::landed::{same_identity, stat_dest, IdentityFn, StatFn};
+pub(crate) use super::mover_flush::{flush_dest, FlushFn};
+use super::mover_keep::keep_staged;
+#[cfg(test)]
+pub(crate) use super::mover_keep::{keep_staged_within, kept_cap, KEPT_DIR, KEPT_MARK};
 
 /// `fn(open .part, staged mtime)`: [`stamp_mtime`], or a failing one in tests.
 pub(crate) type StampFn = fn(&std::fs::File, std::time::SystemTime) -> std::io::Result<()>;
@@ -92,6 +100,7 @@ impl Default for Config {
             stamp: stamp_mtime,
             identity: same_identity,
             stat: stat_dest,
+            flush_dest,
         }
     }
 }
@@ -165,11 +174,13 @@ struct Pending {
     job: MoveJob,
     queued: Instant,
     failures: u32,
+    /// `clip_moved` was sent (a move retried only to flush is not announced again).
+    announced: bool,
 }
 
 impl Pending {
     fn new(job: MoveJob) -> Self {
-        Pending { job, queued: Instant::now(), failures: 0 }
+        Pending { job, queued: Instant::now(), failures: 0, announced: false }
     }
 }
 
@@ -202,6 +213,9 @@ pub(crate) struct Moved {
     /// The destination could not take the staged file's modification time:
     /// moved, but nothing kept.
     pub unstamped: Option<String>,
+    /// The landed clip could not be flushed: the staged copy stays (neither kept nor
+    /// deleted) and the move is retried.
+    pub unflushed: Option<String>,
 }
 
 struct Mover {
@@ -274,7 +288,9 @@ impl Mover {
             Ok(moved) => {
                 let elapsed = started.elapsed();
                 let kept = moved.kept.as_ref().map(|p| p.to_string_lossy().into_owned());
-                self.events.clip_moved(&moved.dest.to_string_lossy(), elapsed.as_millis() as u64, kept.as_deref());
+                if !pending.announced {
+                    self.events.clip_moved(&moved.dest.to_string_lossy(), elapsed.as_millis() as u64, kept.as_deref());
+                }
                 let queue_wait = started.saturating_duration_since(pending.queued);
                 self.events.log(&timing_line(&moved, ms(elapsed), ms(queue_wait)));
                 if let Some(e) = &moved.unstamped {
@@ -285,6 +301,13 @@ impl Mover {
                     self.leftovers.push(job.staged.clone());
                 }
                 self.leftovers.retain(|p| std::fs::remove_file(p).is_err() && p.exists());
+                if let Some(e) = &moved.unflushed {
+                    // The retry finds the clip in place, flushes again, then deletes the staged copy.
+                    self.events.log(&format!("clip mover: {dest} not flushed yet ({e}); {staged} stays staged for a retry"));
+                    self.retry_at.get_or_insert(Instant::now() + self.cfg.retry_after);
+                    pending.announced = true;
+                    self.parked.push(pending);
+                }
             }
             Err(MoveError::Failed(reason)) => {
                 pending.failures += 1;
@@ -341,6 +364,7 @@ pub(crate) fn move_clip(job: &MoveJob, cfg: &Config, abort: &AtomicBool) -> Resu
         staged_kept: None,
         kept: None,
         unstamped: None,
+        unflushed: None,
     };
     match (cfg.stat)(&job.dest) {
         Ok(_) => match (cfg.identity)(&job.staged, &job.dest) {
@@ -372,6 +396,13 @@ pub(crate) fn move_clip(job: &MoveJob, cfg: &Config, abort: &AtomicBool) -> Resu
     }
     if moved.how == "copy" {
         copy_into_place(&job.staged, &mut moved, cfg, abort)?;
+    }
+    // Durable on the clip's volume before the staged copy on the other volume is touched.
+    if let Err(e) = (cfg.flush_dest)(&moved.dest) {
+        moved.unflushed = Some(format!("flush {}: {e}", moved.dest.display()));
+        return Ok(moved);
+    }
+    if moved.how == "copy" {
         // Unstamped, the app's identity of `dest` would not match a kept copy.
         moved.kept = moved.unstamped.is_none().then(|| keep_staged(&job.staged, &moved.dest)).flatten();
         if moved.kept.is_some() {
@@ -383,50 +414,6 @@ pub(crate) fn move_clip(job: &MoveJob, cfg: &Config, abort: &AtomicBool) -> Resu
     }
     Ok(moved)
 }
-
-/// `<staging>\kept`: staged copies of moved clips, waiting for the app.
-/// `recover` scans only the staging folder's own files, so these never move again.
-pub(crate) const KEPT_DIR: &str = "kept";
-
-/// The app's default cache budget, when `<cache>\storage.json` names none.
-const DEFAULT_CACHE_BUDGET: u64 = 2 << 30;
-
-/// Most bytes `kept\` may hold: half the app's cache budget. `kept\` counts against that
-/// budget and cannot be evicted, so at the whole budget (the old fixed 2 GiB) it left no
-/// room and the app's budget pass emptied every other tier (2026-11-05).
-pub(crate) fn kept_cap(staging: &Path) -> u64 {
-    let budget = staging
-        .parent()
-        .and_then(|cache| std::fs::read(cache.join("storage.json")).ok())
-        .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-        .and_then(|settings| settings.get("cache_budget_bytes").and_then(|v| v.as_u64()))
-        .unwrap_or(DEFAULT_CACHE_BUDGET);
-    budget / 2
-}
-
-/// Renames the staged copy to `<staging>\kept\<dest file name>`; `None` (the
-/// caller deletes it) when that folder or the rename fails, or the copy would
-/// take `kept\` past [`kept_cap`].
-fn keep_staged(staged: &Path, dest: &Path) -> Option<PathBuf> {
-    keep_staged_within(staged, dest, kept_cap(staged.parent()?))
-}
-
-fn keep_staged_within(staged: &Path, dest: &Path, cap: u64) -> Option<PathBuf> {
-    let dir = staged.parent()?.join(KEPT_DIR);
-    let kept = dir.join(dest.file_name()?);
-    let held: u64 = std::fs::read_dir(&dir).into_iter().flatten().flatten().filter_map(|e| e.metadata().ok()).filter(|m| m.is_file()).map(|m| m.len()).sum();
-    if held.saturating_add(std::fs::metadata(staged).ok()?.len()) > cap {
-        return None;
-    }
-    std::fs::create_dir_all(&dir).ok()?;
-    std::fs::rename(staged, &kept).ok()?;
-    // The app's kept sweep deletes only marked copies; unmarked ones it only adopts.
-    let _ = std::fs::write(format!("{}:{KEPT_MARK}", kept.display()), b"");
-    Some(kept)
-}
-
-/// Alternate stream on each kept copy: "the engine kept this" (`recall-native` `kept.rs`).
-pub(crate) const KEPT_MARK: &str = "recall.kept";
 
 /// Copy `staged` to `<dest>.part`, flush, rename to `dest`.
 fn copy_into_place(staged: &Path, moved: &mut Moved, cfg: &Config, abort: &AtomicBool) -> Result<(), MoveError> {

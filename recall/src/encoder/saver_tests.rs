@@ -302,6 +302,7 @@ fn mover_cfg(same_volume: staging::VolumeCheck) -> mover::Config {
         stamp: mover::stamp_mtime,
         identity: mover::same_identity,
         stat: mover::stat_dest,
+        flush_dest: mover::flush_dest,
     }
 }
 

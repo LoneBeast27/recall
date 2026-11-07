@@ -27,7 +27,8 @@ fn keyed(max_mb: u32) -> Settings {
 
 #[test]
 fn only_a_local_enabled_bin_big_enough_takes_a_clip() {
-    assert_eq!(decide(&local(keyed(1000)), 1000 << 20), Ok(()));
+    // 1,000 MB into a 3,000 MB bin: room for it and the 1 GiB margin.
+    assert_eq!(decide(&local(keyed(3000)), 1000 << 20), Ok(()));
     assert!(decide(&local(keyed(1000)), (1000 << 20) + 1).unwrap_err().contains("bigger than the Recycle Bin"));
     let share = BinFacts { volume: volume(r"\\nas\clips\", r"\\nas\clips"), ..local(keyed(1000)) };
     assert!(decide(&share, 1).unwrap_err().contains("no Recycle Bin"), "a share is never recycled into");
@@ -69,7 +70,7 @@ fn the_no_recycle_files_policy_refuses() {
 fn a_size_policy_wins_over_the_volume_setting() {
     // MaxCapacity says ~97 GB, the policy says 1% of 1 TiB (~10.2 GiB).
     let policy = Settings { policy_pct: Some(1), ..keyed(100_000) };
-    assert_eq!(decide(&local(policy.clone()), 10 * GIB), Ok(()));
+    assert_eq!(decide(&local(policy.clone()), 9 * GIB), Ok(()), "9 GiB + the 1 GiB margin fit 10.24 GiB");
     assert!(decide(&local(policy), 20 * GIB).unwrap_err().contains("bigger than the Recycle Bin"));
 }
 
@@ -145,10 +146,11 @@ fn this_machine_names_its_temp_drive_a_real_volume() {
 
 #[test]
 fn a_clip_must_fit_the_bins_free_room_not_just_its_size() {
-    // A 1,000 MB bin already holding 900 MB: a 200 MB clip fits the size but not the room left.
-    let full = BinFacts { bin_used: Some(900 << 20), ..local(keyed(1000)) };
-    assert!(decide(&full, 200 << 20).unwrap_err().contains("room"), "Windows would purge older bin items for it");
-    assert_eq!(decide(&full, 100 << 20), Ok(()), "it fits the free room");
+    // A 100 GiB bin already holding 90 GiB: a 6 GiB clip fits the size but not the room left
+    // less the 5 GiB margin.
+    let full = BinFacts { bin_used: Some(90 * GIB), ..local(keyed(100 * 1024)) };
+    assert!(decide(&full, 6 * GIB).unwrap_err().contains("room"), "Windows would purge older bin items for it");
+    assert_eq!(decide(&full, 5 * GIB), Ok(()), "it fits the free room");
     let unknown = BinFacts { bin_used: None, ..local(keyed(1000)) };
     assert!(decide(&unknown, 1).unwrap_err().contains("how full"), "an unreadable bin refuses");
 }
@@ -164,4 +166,18 @@ fn bin_usage_on_this_machine() {
             println!("BIN {letter}: used {:?} bytes; max {:?} MB; drive type {}", bin_used(&root), f.settings.max_mb, f.drive_type);
         }
     }
+}
+
+#[test]
+fn a_clip_needs_a_margin_of_room_left_in_the_bin() {
+    // A 100 GiB bin holding 50 GiB: room 50 GiB. A clip 1 KiB under the room would leave Windows
+    // no slack (cluster rounding, a late `used`): refused. The margin is max(1 GiB, 5% of the bin).
+    let half = BinFacts { bin_used: Some(50 * GIB), ..local(keyed(100 * 1024)) };
+    assert!(decide(&half, 50 * GIB - 1024).unwrap_err().contains("room"), "room minus 1 KiB is too tight");
+    assert!(decide(&half, 45 * GIB + 1).is_err(), "5% of a 100 GiB bin is 5 GiB");
+    assert_eq!(decide(&half, 45 * GIB), Ok(()), "room minus the 5 GiB margin fits");
+    // A small bin: the 1 GiB floor.
+    let small = BinFacts { bin_used: Some(0), ..local(keyed(10 * 1024)) };
+    assert!(decide(&small, 9 * GIB + 1).is_err());
+    assert_eq!(decide(&small, 9 * GIB), Ok(()));
 }

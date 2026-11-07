@@ -330,13 +330,41 @@ fn a_first_run_budget_is_20_gib_a_quarter_of_free_space_and_keeps_a_tenth_of_the
     use super::evict::{DEFAULT_CACHE_BUDGET, MIN_CACHE_BUDGET, default_budget};
     let gib = 1u64 << 30;
     assert_eq!(DEFAULT_CACHE_BUDGET, 20 * gib);
-    assert_eq!(default_budget(500 * gib, 1000 * gib), 20 * gib, "plenty of room: 20 GiB");
-    assert_eq!(default_budget(60 * gib, 100 * gib), 15 * gib, "a quarter of the free space");
-    assert_eq!(default_budget(40 * gib, 300 * gib), 10 * gib, "a quarter, when the drive keeps its tenth anyway");
-    assert_eq!(default_budget(40 * gib + gib / 2, 350 * gib), 5 * gib, "free less a tenth of the drive, whole GiB down");
+    assert_eq!(default_budget(500 * gib, 1000 * gib, false), 20 * gib, "plenty of room: 20 GiB");
+    assert_eq!(default_budget(60 * gib, 100 * gib, false), 15 * gib, "a quarter of the free space");
+    assert_eq!(default_budget(40 * gib, 300 * gib, false), 10 * gib, "a quarter, when the drive keeps its tenth anyway");
+    assert_eq!(default_budget(40 * gib + gib / 2, 350 * gib, false), 5 * gib, "free less a tenth of the drive, whole GiB down");
     // This PC: C: is 930.5 GiB with 38.7 GiB free, under a tenth of the drive already.
-    assert_eq!(default_budget(387 * gib / 10, 9305 * gib / 10), MIN_CACHE_BUDGET, "a nearly full drive gets the 2 GiB floor");
-    assert_eq!(default_budget(0, 0), MIN_CACHE_BUDGET, "unknown free space");
+    assert_eq!(default_budget(387 * gib / 10, 9305 * gib / 10, false), MIN_CACHE_BUDGET, "a nearly full drive gets the 2 GiB floor");
+    assert_eq!(default_budget(0, 0, false), MIN_CACHE_BUDGET, "unknown free space");
+}
+
+#[test]
+fn a_first_run_budget_on_the_system_drive_is_2_gib() {
+    use super::evict::{MIN_CACHE_BUDGET, default_budget};
+    let gib = 1u64 << 30;
+    // A 1 TiB C: with 300 GiB free picked 20 GiB before (Rohan 2026-11-03: "keep the cache on C: at 2 GB").
+    assert_eq!(default_budget(300 * gib, 1024 * gib, true), 2 * gib);
+    assert_eq!(MIN_CACHE_BUDGET, 2 * gib);
+    assert_eq!(default_budget(300 * gib, 1024 * gib, false), 20 * gib, "another SSD keeps the formula");
+    use super::drive::is_system_volume;
+    assert!(is_system_volume(Some("C:\\"), Some("C:")));
+    assert!(is_system_volume(Some("D:\\"), Some("d:")), "SystemDrive is not always C:");
+    assert!(!is_system_volume(Some("L:\\"), Some("C:")));
+    assert!(is_system_volume(Some("C:\\"), None), "no SystemDrive: C:");
+    assert!(is_system_volume(None, Some("C:")), "unknown volume: the smaller budget");
+    assert!(!is_system_volume(Some(r"\\?\VOLUME{1234}\"), Some("C:")));
+}
+
+#[test]
+fn a_saved_budget_is_never_shrunk_by_the_first_run_rule() {
+    let nonce = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let root = std::env::temp_dir().join(format!("recall-budget-kept-{}-{nonce}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let twenty = 20u64 << 30;
+    super::evict::write_settings(&root, &super::evict::Settings { cache_budget_bytes: Some(twenty) }).unwrap();
+    assert_eq!(super::video::budget_in(&root), twenty, "a user-set 20 GiB on C: stays 20 GiB");
+    let _ = std::fs::remove_dir_all(&root);
 }
 
 #[test]
