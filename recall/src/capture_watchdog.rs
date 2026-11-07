@@ -141,7 +141,7 @@ pub(crate) trait CaptureSlot {
     fn screen(&self) -> Screen;
     /// Why the capture must be replaced, if it must (taken: `CaptureShared::restart_reason`).
     fn restart_reason(&mut self) -> Option<&'static str>;
-    /// A held capture is about to be replaced for `why` (the replay buffer restarts).
+    /// A held capture is about to be replaced for `why` (the encoder decides about the ring).
     fn replacing(&mut self, _why: &'static str) {}
 }
 
@@ -201,7 +201,7 @@ pub(crate) fn restart_if_asked(slot: &mut impl CaptureSlot, now: Instant) {
             slot.backoff().deferred = Some(why);
             return;
         }
-        eprintln!("[recall] capture restarts {why}; the replay buffer restarts");
+        eprintln!("[recall] capture restarts {why}");
         slot.replacing(why);
         restart(slot, now);
     } else {
@@ -255,11 +255,10 @@ impl CaptureSlot for App {
         self.shared.as_ref().and_then(|s| s.restart_reason())
     }
 
-    /// HDR turning on under a Bgra8 capture is told to the controller (its notice).
+    /// Notes an HDR restart; the encoder says whether the replay buffer was reset
+    /// (`buffer_notice`: the controller's notice comes only then).
     fn replacing(&mut self, why: &'static str) {
-        if why == crate::capture::format::HDR_TURNED_ON && self.config.json {
-            crate::protocol::emit(&crate::protocol::Outbound::BufferRestarted { reason: "hdr_on" });
-        }
+        crate::buffer_notice::send(self.config.json, crate::buffer_notice::capture_replaced(why));
     }
 
 }

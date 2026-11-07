@@ -17,6 +17,7 @@ mod audio;
 #[cfg(feature = "encode")]
 mod audio_clock;
 mod bookmarks;
+mod buffer_notice;
 mod border;
 mod capture;
 mod capture_watchdog;
