@@ -91,20 +91,34 @@ pub(super) fn video_dir(root: &Path) -> PathBuf {
 
 /// The budget in `storage.json`. A first run (no budget set) picks one (`evict::default_budget`:
 /// 2 GiB on the system drive, else from the cache drive's free space) and saves it; Settings
-/// changes it from then on. A saved budget is never shrunk here.
+/// changes it from then on. A saved budget is never shrunk here. A file that is there but can't
+/// be read (locked, or not JSON) is never written over: the pick is used in memory only and the
+/// next call reads the file again, so a passing lock can't replace the user's budget.
 pub(super) fn budget_in(root: &Path) -> u64 {
-    let mut settings = lru::read_settings(root);
+    let mut settings = match lru::load_settings(root) {
+        lru::Stored::Read(settings) => settings,
+        lru::Stored::Absent => lru::Settings::default(),
+        lru::Stored::Unusable(why) => {
+            eprintln!("cache budget: {why}; using the first-run pick for now, file left as it is");
+            return first_run_budget(root);
+        }
+    };
     if let Some(budget) = settings.cache_budget_bytes {
         return budget;
     }
-    let (free, total) = super::drive_info(root).map_or((0, 0), |info| (info.free, info.total));
-    let budget = lru::default_budget(free, total, super::drive::on_system_drive(root));
+    let budget = first_run_budget(root);
     settings.cache_budget_bytes = Some(budget);
     settings.first_run = Some(true);
     if let Err(error) = lru::write_settings(root, &settings) {
         eprintln!("save first-run cache budget: {error}");
     }
     budget
+}
+
+/// The budget a first run picks for the cache at `root`.
+fn first_run_budget(root: &Path) -> u64 {
+    let (free, total) = super::drive_info(root).map_or((0, 0), |info| (info.free, info.total));
+    lru::default_budget(free, total, super::drive::on_system_drive(root))
 }
 
 /// Applies the current budget (after a list load, an editor open, ...). Returns bytes freed.

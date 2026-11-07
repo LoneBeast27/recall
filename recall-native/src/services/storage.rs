@@ -59,6 +59,8 @@ mod tests_owned;
 mod tests_safety;
 #[cfg(test)]
 mod tests_set_aside;
+#[cfg(test)]
+mod tests_budget_file;
 
 // Public API for the UI (Settings > Storage, editor playback); not every item is used yet.
 #[allow(unused_imports)]

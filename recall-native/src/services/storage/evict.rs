@@ -155,8 +155,39 @@ pub(super) struct Settings {
     pub first_run: Option<bool>,
 }
 
+/// What `storage.json` held when it was read.
+pub(super) enum Stored {
+    /// No file: a first run.
+    Absent,
+    Read(Settings),
+    /// Present but locked, unreadable or not JSON: the user's budget may be in it (a scan or a
+    /// sync client holding it, a write still under way), so nothing writes over it; the caller
+    /// uses the default in memory and the next read tries again. A file that is not JSON is
+    /// copied to a dated `storage.json.bad-*` first (once; never on a lock).
+    Unusable(String),
+}
+
+pub(super) fn load_settings(root: &Path) -> Stored {
+    let path = root.join("storage.json");
+    match std::fs::read(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Stored::Absent,
+        Err(error) => Stored::Unusable(format!("storage.json could not be read ({error})")),
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(settings) => Stored::Read(settings),
+            Err(error) => {
+                let kept = crate::services::durable::quarantine(&path, std::time::SystemTime::now(), crate::services::durable::Keep::Copy);
+                Stored::Unusable(format!("storage.json is damaged ({error}); a copy is kept as {kept:?}"))
+            }
+        },
+    }
+}
+
+/// The settings, or the defaults when there are none or they can't be read ([`load_settings`]).
 pub(super) fn read_settings(root: &Path) -> Settings {
-    std::fs::read(root.join("storage.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+    match load_settings(root) {
+        Stored::Read(settings) => settings,
+        Stored::Absent | Stored::Unusable(_) => Settings::default(),
+    }
 }
 
 pub(super) fn write_settings(root: &Path, settings: &Settings) -> Result<(), String> {
