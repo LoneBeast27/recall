@@ -79,15 +79,18 @@ fn stop_recorder_also_quits_a_pre_session_recorder() {
     // An install from before the per-session pipe runs a controller on the bare name; its
     // first update must still reach it (audit R2-deep-startup-1), and only from Stop-Recorder.
     assert!(INSTALL.contains("else { 'recall-hdr-control' }"), "the old name, kept for one release");
-    let stop = function_body(INSTALL, "Stop-Recorder");
+    // Stop-Recorder's quit is sent by Request-RecorderQuit (install-quit-wait.ps1, R6-startup-1).
+    let wait = include_str!("../../scripts/install-quit-wait.ps1");
+    let stop = function_body(wait, "Request-RecorderQuit");
     let session = stop.find("Send-Recorder '{\"cmd\":\"quit\"}'").expect("quit on the session pipe");
     let legacy = stop.find("Send-Recorder '{\"cmd\":\"quit\"}' $legacyPipe").expect("quit on the legacy pipe");
     assert!(session < legacy, "the session pipe is asked first");
     // The legacy name is used nowhere else (status checks and the autostart patch stay per session).
-    // Defined once, sent to once in Stop-Recorder, and named in Send-Recorder's retry on the
-    // shared bare pipe (R5-startup-5).
+    // Defined once and named in Send-Recorder's retry on the shared bare pipe (R5-startup-5) in
+    // install.ps1; sent to once, in Request-RecorderQuit.
     let uses: Vec<&str> = code_lines(INSTALL).filter(|l| l.contains("$legacyPipe")).collect();
-    assert_eq!(uses.len(), 4, "{uses:?}");
+    assert_eq!(uses.len(), 3, "{uses:?}");
+    assert_eq!(code_lines(wait).filter(|l| l.contains("$legacyPipe")).count(), 1, "{wait}");
     let send = function_body(INSTALL, "Send-Recorder([string]$line, [string]$name = $pipeName, [int]$tries = 5)");
     assert_eq!(send.matches("if ($name -eq $legacyPipe) { Start-Sleep -Milliseconds 300; continue }").count(), 2, "{send}");
     // Send-Recorder takes the pipe name, defaulting to this session's.
@@ -139,9 +142,9 @@ fn only_a_sandbox_limits_the_quit_to_the_controller_it_names() {
     // Stop-Recorder reaches either pipe only behind Get-Controller and waits on it; a recorder
     // that won't quit makes the run throw, naming it.
     let stop = function_body(INSTALL, "Stop-Recorder");
-    assert!(stop.contains("if (-not $sent -and (Get-Controller)) {"));
-    assert!(stop.contains("Wait-ForQuit $quit"), "{stop}");
     let wait = include_str!("../../scripts/install-quit-wait.ps1");
+    assert!(function_body(wait, "Request-RecorderQuit").contains("if (-not $sent -and (Get-Controller)) {"));
+    assert!(stop.contains("Wait-ForQuit $quit"), "{stop}");
     assert!(wait.contains("((Get-Installed) -or (Get-Controller))"), "waits on every controller it quits");
     assert!(
         stop.contains(r#"throw ("Recall is still running (" + (($left | ForEach-Object { Format-Recorder $_ }) -join ', ')"#),

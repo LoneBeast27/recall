@@ -14,7 +14,7 @@
     cache\              created by the app; capped (Settings → Storage)
 
   Usage (PowerShell):
-    powershell -NoProfile -File scripts\install.ps1 [-InstallDir <path on an SSD>] [-NoBuild] [-NoShortcut] [-Autostart] [-NoFrameTiming] [-CloseApp] [-AllowUnknownDrive]
+    powershell -NoProfile -File scripts\install.ps1 [-InstallDir <path on an SSD>] [-NoBuild] [-NoShortcut] [-Autostart] [-NoFrameTiming] [-CloseApp] [-AllowUnknownDrive] [-QuitWaitMinutes N]
   Default install folder: %LOCALAPPDATA%\Programs\Recall (per-user, no admin rights).
   After installing, the installed recorder starts. Start with Windows is opt-in: the installer
   leaves that setting as it is (off on a first install) unless -Autostart turns it on; Settings >
@@ -22,6 +22,10 @@
   and does nothing.)
   -AllowUnknownDrive: install on a drive Windows can't classify as SSD or HDD (USB SSD, RAID,
   Storage Spaces, VM disk) with a warning; a drive Windows reports as an HDD is always refused.
+  A recorder finishing a clip when it is asked to quit is waited for while its status says so
+  (finishing_clip), plus 2 min of grace once it does not; a re-run while it saves sends no second
+  quit and joins the wait. -QuitWaitMinutes N caps that wait at N minutes for unattended runs (the
+  merge gate); the run then stops with an error naming the pid and replaces nothing.
   Only this Windows session's Recall counts (another signed-in user's is left alone), and the
   recorder's control pipe is per session: \\.\pipe\recall-hdr-control-<session id>. A recorder
   from before that change (it listens on the bare recall-hdr-control) is asked to quit there too.
@@ -36,7 +40,7 @@
   Performance Log Users (SID S-1-5-32-559). When you are not in it, ONE administrator prompt
   adds you; it takes effect at your next sign-in. Declining the prompt only leaves FPS as "-".
 #>
-param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$Autostart, [switch]$NoAutostart, [switch]$NoFrameTiming, [switch]$NoStart, [switch]$CloseApp, [switch]$AllowUnknownDrive)
+param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$Autostart, [switch]$NoAutostart, [switch]$NoFrameTiming, [switch]$NoStart, [switch]$CloseApp, [switch]$AllowUnknownDrive, [int]$QuitWaitMinutes = 0)
 $ErrorActionPreference = 'Stop'
 # A relative -InstallDir or RECALL_CONTROLLER_PATH means the PowerShell location ($PWD), which
 # New-Item, the swap and Start-Process use; .NET would resolve it against the process folder
@@ -147,11 +151,13 @@ function Test-InInstallDir([string]$path) { $path -and (Get-PathId $path).Starts
 if ($env:RECALL_CONTROLLER_PATH -and -not (Test-InInstallDir $controllerPath)) {
   throw "RECALL_CONTROLLER_PATH ($controllerPath) is not inside -InstallDir ($InstallDir). A sandboxed install must pass its own folder as -InstallDir; nothing was closed or replaced."
 }
-# Nor may a sandbox name the real install folder (or a junction, subst or 8.3 spelling of it): it
-# would close the real app, quit the real recorder and swap the real program (audit R5-startup-2).
+# Nor may a sandbox name the real install folder or a folder holding it (%LOCALAPPDATA%\Programs),
+# in any junction, subst or 8.3 spelling: the app close, the wait and the swap act on everything
+# under -InstallDir, so it would close the real app and swap into the real folder (R5-startup-2,
+# R6-startup-4). Both roots end in '\', so the prefix test is by folder, and equal counts.
 $defaultRoot = [RecallInstall.PathId]::Normalize((Join-Path $env:LOCALAPPDATA 'Programs\Recall')).TrimEnd('\') + '\'
-if ($env:RECALL_CONTROLLER_PATH -and [string]::Equals($installRoot, $defaultRoot, [StringComparison]::OrdinalIgnoreCase)) {
-  throw "A sandboxed install (RECALL_CONTROLLER_PATH) can't use the real install folder ($InstallDir). Pass another -InstallDir, or unset RECALL_CONTROLLER_PATH for a real install; nothing was closed or replaced."
+if ($env:RECALL_CONTROLLER_PATH -and $defaultRoot.StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase)) {
+  throw "A sandboxed install (RECALL_CONTROLLER_PATH) can't use the real install folder or a folder that holds it ($InstallDir). Pass another -InstallDir, or unset RECALL_CONTROLLER_PATH for a real install; nothing was closed or replaced."
 }
 
 # 2a. Never close the app under the user: refuse while the installed app runs (checked before any
@@ -188,8 +194,9 @@ Assert-AppClosed
 #    the files the build replaces.
 #    A real install quits every recall-hdr.exe in this session, wherever it runs from (another
 #    folder, an 8.3 or junction spelling, an elevated one WMI can't read), and stops with an
-#    error naming any that won't quit. One that got the quit and is finishing a clip is waited
-#    for as long as it runs, with a line each minute (Wait-ForQuit). Only a sandbox (RECALL_CONTROLLER_PATH) quits just the
+#    error naming any that won't quit. One that got the quit is waited for while it says it is
+#    finishing a clip, with a line each minute; one already finishing gets no second quit
+#    (Request-RecorderQuit, Wait-ForQuit). Only a sandbox (RECALL_CONTROLLER_PATH) quits just the
 #    controller at that path and leaves every other recorder alone (Get-Controller).
 function Get-PipeServer($pipe) {
   if (-not ('RecallInstall.Pipe' -as [type])) {
@@ -302,18 +309,14 @@ $legacyPipe = if ($env:RECALL_LEGACY_PIPE) { $env:RECALL_LEGACY_PIPE } else { 'r
 . (Join-Path $PSScriptRoot 'install-quit-wait.ps1')
 function Stop-Recorder {
   # Each phase starts clean: a refusal here must not end step 6's status probe (R5-startup-5).
-  $script:ownerRefused = $false; $script:sentTo = $null; $sent = $false
+  $script:ownerRefused = $false; $script:sentTo = $null
   if ($env:RECALL_CONTROLLER_PATH) {
     $others = @(Get-SessionController | Where-Object { -not (Test-OurController $_) })
     if ($others) { Write-Host ("Left running (not $controllerPath): " + (($others | ForEach-Object { Format-Recorder $_ }) -join ', ')) }
   }
-  if (Get-Controller) {
-    # Either pipe answering counts: this build's session pipe first, then the old bare name.
-    $sent = Send-Recorder '{"cmd":"quit"}'
-    if (-not $sent -and (Get-Controller)) { $sent = Send-Recorder '{"cmd":"quit"}' $legacyPipe }
-  }
-  $quit = if ($sent) { $script:sentTo } else { $null }
-  Wait-ForQuit $quit
+  # One quit at most: a recorder already finishing a clip is joined, not asked again (R6-startup-1).
+  $quit = Request-RecorderQuit
+  Wait-ForQuit $quit $QuitWaitMinutes
   $left = @(Get-Installed) + @(Get-Controller) | Where-Object { $_ }
   if ($left) { throw ("Recall is still running (" + (($left | ForEach-Object { Format-Recorder $_ }) -join ', ') + "). Quit it from the tray, then re-run.") }
 }
@@ -424,6 +427,8 @@ if ($env:RECALL_CONTROLLER_PATH) {
 #    -NoStart leaves it stopped (e.g. mid-match: starting a capture can hitch the game once).
 if ($NoStart) {
   'Recorder left stopped (-NoStart); start Recall from the Start menu.'
+  # -Autostart is sent to a running recorder, and none was started (R6-startup-5).
+  if ($Autostart) { Write-Warning 'Start with Windows was not set (-NoStart). Turn it on in Recall > Settings > General.' }
   $size = (Get-ChildItem $InstallDir -Recurse -File -Exclude 'cache' | Where-Object { $_.FullName -notlike "*\cache\*" } | Measure-Object Length -Sum).Sum
   "Installed to $InstallDir ($([math]::Round($size / 1MB)) MB of program files; the cache is capped separately)."
   return
