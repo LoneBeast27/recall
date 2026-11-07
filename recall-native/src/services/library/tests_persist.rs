@@ -44,7 +44,7 @@ fn a_fresh_store_after_a_bad_file_is_not_written_until_a_user_edit() {
     store.set_favourite("c.mp4", true).unwrap();
     let back = MetaStore::load_from(path.clone());
     assert!(back.meta("c.mp4").unwrap().favourite, "a user edit writes");
-    assert_eq!(back.duration("b.mp4", 10, 20), Some(30.0), "with the held background entries");
+    assert_eq!(back.duration("b.mp4", "b.mp4", 10, 20), Some(30.0), "with the held background entries");
     let _ = std::fs::remove_dir_all(dir);
 }
 

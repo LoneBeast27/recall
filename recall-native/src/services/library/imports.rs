@@ -94,6 +94,7 @@ fn path_hash(path: &str) -> u64 {
 }
 
 /// The clip file name an edit file belongs to (`<hash>~` removed).
+#[cfg(test)]
 pub fn edit_file_clip_name(edit_name: &str) -> &str {
     match edit_name.split_once('~') {
         Some((hash, rest)) if hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()) => rest,
@@ -101,10 +102,13 @@ pub fn edit_file_clip_name(edit_name: &str) -> &str {
     }
 }
 
-/// True when `path` is inside one of `imported` and not directly in the recordings folder.
-pub fn is_imported(path: &str, recordings: &Path, imported: &[String]) -> bool {
+/// True when `path` is inside one of `imported` and not directly in the recordings folder or a
+/// folder that was the recordings folder before (`former`: those clips stay Recall's own, so
+/// Delete recycles them and their edits stay beside them).
+pub fn is_imported(path: &str, recordings: &Path, imported: &[String], former: &[String]) -> bool {
     let parent = Path::new(path).parent().map(|p| folder_key(&p.to_string_lossy())).unwrap_or_default();
-    parent != folder_key(&recordings.to_string_lossy()) && imported.iter().any(|folder| is_inside(path, folder))
+    let owned = parent == folder_key(&recordings.to_string_lossy()) || former.iter().any(|folder| folder_key(folder) == parent);
+    !owned && imported.iter().any(|folder| is_inside(path, folder))
 }
 
 fn with_table<T>(work: impl FnOnce(&mut Table) -> T) -> T {
@@ -193,7 +197,7 @@ pub fn record(path: &Path, bytes: u64, mtime: u64, verdict: &Verdict) -> bool {
         Verdict::Clip => (Kind::Clip, None),
         Verdict::Edited(name) => (Kind::Edited, Some((*name).to_owned())),
         Verdict::NoVideo => (Kind::NoVideo, None),
-        Verdict::Unready => return false,
+        Verdict::Unready | Verdict::Unreadable => return false,
     };
     let text = path.to_string_lossy().into_owned();
     with_table(|table| {
@@ -320,9 +324,18 @@ mod tests {
     #[test]
     fn recordings_folder_clips_are_never_imported() {
         let imported = vec![r"V:\".to_owned(), r"D:\Old".to_owned()];
-        assert!(!is_imported(r"V:\Recall\Raw\a.mp4", Path::new(r"V:\Recall\Raw"), &imported));
-        assert!(is_imported(r"V:\Other\a.mp4", Path::new(r"V:\Recall\Raw"), &imported));
-        assert!(is_imported(r"D:\Old\Game\a.mp4", Path::new(r"V:\Recall\Raw"), &imported));
-        assert!(!is_imported(r"E:\a.mp4", Path::new(r"V:\Recall\Raw"), &imported));
+        assert!(!is_imported(r"V:\Recall\Raw\a.mp4", Path::new(r"V:\Recall\Raw"), &imported, &[]));
+        assert!(is_imported(r"V:\Other\a.mp4", Path::new(r"V:\Recall\Raw"), &imported, &[]));
+        assert!(is_imported(r"D:\Old\Game\a.mp4", Path::new(r"V:\Recall\Raw"), &imported, &[]));
+        assert!(!is_imported(r"E:\a.mp4", Path::new(r"V:\Recall\Raw"), &imported, &[]));
+    }
+
+    #[test]
+    fn a_former_recordings_folder_stays_recall_owned() {
+        let imported = vec![r"D:\OldRecall".to_owned(), r"D:\Medal".to_owned()];
+        let former = vec![r"d:\oldrecall\".to_owned()];
+        assert!(!is_imported(r"D:\OldRecall\VALORANT__2026-10-01__10-00-00.mp4", Path::new(r"V:\Recall"), &imported, &former));
+        assert!(is_imported(r"D:\OldRecall\sub\x.mp4", Path::new(r"V:\Recall"), &imported, &former), "only its own top level, like the recordings folder");
+        assert!(is_imported(r"D:\Medal\x.mp4", Path::new(r"V:\Recall"), &imported, &former));
     }
 }

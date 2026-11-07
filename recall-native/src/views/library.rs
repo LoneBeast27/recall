@@ -340,7 +340,7 @@ impl Root {
     /// Selected clips that live in an imported folder (Delete only removes them from Recall).
     fn imported_in_selection(&self) -> usize {
         let recordings = crate::backend::library_dir_from(&self.folders);
-        self.lib.selection.iter().filter(|p| crate::services::library::imports::is_imported(p, &recordings, &self.folders.imported)).count()
+        self.lib.selection.iter().filter(|p| crate::services::library::imports::is_imported(p, &recordings, &self.folders.imported, &self.folders.former_recordings)).count()
     }
 }
 

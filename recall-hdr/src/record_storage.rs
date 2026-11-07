@@ -12,7 +12,8 @@
 //! `<GAME>__YYYY-MM-DD__HH-MM-SS[...].mp4`, long recordings included); other
 //! videos in the folder are left alone. Never touched: the newest clip and any
 //! clip modified in the last [`RECENT_SECS`], favourites
-//! (`%APPDATA%\Recall\library.json`, keyed by file name, `favourite: true`;
+//! (`%APPDATA%\Recall\library.json`, keyed by the clip's full path -- older
+//! files by file name -- `favourite: true`;
 //! `RECALL_LIBRARY_META` overrides the path), clips with an edit sidecar,
 //! anything in a subfolder (`exports\`, `screenshots\`, `thumbs\` except a
 //! removed clip's own thumbnails), and `.part` files. An unreadable or
@@ -136,7 +137,10 @@ pub fn candidates(clips: &[ClipFile], now_unix: u64, protected: impl Fn(&ClipFil
     order
 }
 
-/// Lowercase file names marked `favourite: true` in `library.json`.
+/// Lowercase file names marked `favourite: true` in `library.json`. The app keys
+/// clips by full path (older files by file name); the file name of either is
+/// kept, so a favourite anywhere with a clip's name protects that clip (never
+/// fewer protected than the app shows).
 pub fn favourites(json_bytes: &[u8]) -> Result<HashSet<String>, String> {
     let Value::Object(map) = serde_json::from_slice::<Value>(json_bytes).map_err(|e| format!("library.json: {e}"))? else {
         return Err("library.json is not an object".into());
@@ -144,7 +148,7 @@ pub fn favourites(json_bytes: &[u8]) -> Result<HashSet<String>, String> {
     Ok(map
         .into_iter()
         .filter(|(_, v)| v.get("favourite").and_then(Value::as_bool) == Some(true))
-        .map(|(name, _)| name.to_lowercase())
+        .map(|(key, _)| key.rsplit(['\\', '/']).next().unwrap_or(&key).to_lowercase())
         .collect())
 }
 

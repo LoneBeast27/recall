@@ -71,7 +71,7 @@ fn keep_going_writes_the_recovered_favourites_and_ends_the_hold() {
     assert!(back.meta("a.mp4").is_some_and(|m| m.favourite), "written back");
     back.set_duration("d.mp4", 1, 2, 3.0);
     back.flush().unwrap();
-    assert_eq!(MetaStore::load_from(path).duration("d.mp4", 1, 2), Some(3.0), "background writes again");
+    assert_eq!(MetaStore::load_from(path).duration("d.mp4", "d.mp4", 1, 2), Some(3.0), "background writes again");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -87,7 +87,7 @@ fn a_background_flush_lands_in_order_off_the_caller() {
     store.set_favourite("b.mp4", true).unwrap();
     store.wait_for_writes();
     let back = MetaStore::load_from(path);
-    assert_eq!(back.duration("a.mp4", 1, 2), Some(5.0), "the newest flush is on disk");
+    assert_eq!(back.duration("a.mp4", "a.mp4", 1, 2), Some(5.0), "the newest flush is on disk");
     assert!(back.meta("b.mp4").is_some_and(|m| m.favourite));
     let _ = std::fs::remove_dir_all(dir);
 }

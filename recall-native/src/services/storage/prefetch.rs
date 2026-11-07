@@ -322,7 +322,7 @@ impl Feed {
                 // screen do not wait for this; they ask on demand.
                 std::thread::sleep(thumb_rest(started.elapsed()));
             }
-            Step::Duration => sink(PrefetchEvent::Duration(path.clone(), crate::services::library::mp4_duration(Path::new(&path)))),
+            Step::Duration => sink(PrefetchEvent::Duration(path.clone(), crate::services::library::clip_duration(Path::new(&path)))),
             Step::Scrub => {
                 let result = crate::services::library::scrub_frames(&path);
                 match &result {

@@ -324,7 +324,8 @@ impl Settle {
         folders::patch_scans(&found, &gone, &gone_under);
         let recordings = roots.iter().find(|r| !r.recursive).map(|r| r.path.clone()).unwrap_or_default();
         let imported: Vec<String> = roots.iter().filter(|r| r.recursive).map(|r| r.path.to_string_lossy().into_owned()).collect();
-        let found = super::import_check::listable(found, &recordings, &imported);
+        let former = folders::Folders::load().former_recordings;
+        let found = super::import_check::listable(found, &recordings, &imported, &former);
         let added = found.into_iter().map(added_clip).collect();
         (self.sink)(LibraryChange::Clips(ClipChanges { added, gone, gone_under }));
     }

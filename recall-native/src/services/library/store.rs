@@ -1,5 +1,7 @@
-//! `MetaStore`: `{ "<file name>": {favourite, title, duration{bytes,mtime,secs}, played} }`
-//! at `%APPDATA%\Recall\library.json` (`RECALL_LIBRARY_META` overrides the path).
+//! `MetaStore`: `{ "<clip key>": {favourite, title, duration{bytes,mtime,secs}, played} }`
+//! at `%APPDATA%\Recall\library.json` (`RECALL_LIBRARY_META` overrides the path). The key is
+//! the clip's full path, lowercase ([`clip_key`]); older files keyed by file name are moved to
+//! path keys by [`MetaStore::migrate_names`] when the clips are listed.
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -45,6 +47,13 @@ pub(super) fn meta_path(override_path: Option<OsString>, appdata: Option<OsStrin
     appdata.filter(|p| !p.is_empty()).map(|root| PathBuf::from(root).join("Recall").join("library.json"))
 }
 
+/// The store key for a clip: its full path, lowercase, backslashes, no `\?\` prefix. Two
+/// same-named clips in different folders keep their own favourite, title and last played.
+pub fn clip_key(path: &str) -> String {
+    let plain = crate::services::storage::plain_path(std::path::Path::new(path));
+    super::folders::folder_key(&plain.to_string_lossy())
+}
+
 /// Entries with the wrong shape are dropped one by one; None when the file is not a JSON object.
 fn parse_clips(bytes: &[u8]) -> Option<BTreeMap<String, ClipMeta>> {
     let Value::Object(map) = serde_json::from_slice::<Value>(bytes).ok()? else { return None };
@@ -85,12 +94,20 @@ impl MetaStore {
         store_damage::check(store)
     }
 
-    pub(super) fn meta(&self, file_name: &str) -> Option<&ClipMeta> {
-        self.clips.get(file_name)
+    #[cfg(test)]
+    pub(super) fn meta(&self, key: &str) -> Option<&ClipMeta> {
+        self.clips.get(key)
     }
 
-    pub fn set_favourite(&mut self, file_name: &str, favourite: bool) -> Result<(), String> {
-        self.edit(file_name, |meta| meta.favourite = favourite)
+    /// The clip's entry: its path key, else an old file-name key not moved yet.
+    pub(super) fn meta_of(&self, path: &str, file_name: &str) -> Option<&ClipMeta> {
+        self.clips.get(&clip_key(path)).or_else(|| self.clips.get(file_name))
+    }
+
+    /// One clip (tests; the library sets favourites through [`Self::set_favourites`]).
+    #[cfg(test)]
+    pub fn set_favourite(&mut self, key: &str, favourite: bool) -> Result<(), String> {
+        self.edit(key, |meta| meta.favourite = favourite)
     }
 
     /// `None` or empty clears the custom title.
@@ -110,18 +127,62 @@ impl MetaStore {
         self.edit(file_name, |meta| meta.played = Some(secs))
     }
 
-    /// Cached duration keyed by (file name, bytes, mtime).
-    pub fn duration(&self, file_name: &str, bytes: u64, mtime: u64) -> Option<f64> {
-        let cached = self.clips.get(file_name)?.duration?;
+    /// Favourite on or off for many clips at once: one write, and nothing changes when it fails.
+    pub fn set_favourites(&mut self, keys: &[String], favourite: bool) -> Result<(), String> {
+        let previous: Vec<(String, Option<ClipMeta>)> = keys.iter().map(|key| (key.clone(), self.clips.get(key).cloned())).collect();
+        for key in keys {
+            let meta = self.clips.entry(key.clone()).or_default();
+            meta.favourite = favourite;
+            if meta.is_empty() {
+                self.clips.remove(key);
+            }
+        }
+        if let Err(error) = self.write() {
+            for (key, meta) in previous {
+                match meta {
+                    Some(meta) => self.clips.insert(key, meta),
+                    None => self.clips.remove(&key),
+                };
+            }
+            return Err(error);
+        }
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Moves entries still keyed by file name onto the listed clips' path keys. A name that
+    /// several listed clips share goes to each of them once; a name no listed clip has stays
+    /// (its folder may be offline). True when anything moved (flush to keep it).
+    pub fn migrate_names<'a>(&mut self, clips: impl IntoIterator<Item = (&'a str, &'a str)>) -> bool {
+        let mut by_name: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+        for (path, name) in clips {
+            if self.clips.contains_key(name) {
+                by_name.entry(name).or_default().push(path);
+            }
+        }
+        for (name, paths) in &by_name {
+            let Some(meta) = self.clips.remove(*name) else { continue };
+            for path in paths {
+                self.clips.entry(clip_key(path)).or_insert_with(|| meta.clone());
+            }
+        }
+        let moved = !by_name.is_empty();
+        self.dirty |= moved;
+        moved
+    }
+
+    /// Cached duration keyed by (clip, bytes, mtime).
+    pub fn duration(&self, path: &str, file_name: &str, bytes: u64, mtime: u64) -> Option<f64> {
+        let cached = self.meta_of(path, file_name)?.duration?;
         (cached.bytes == bytes && cached.mtime == mtime).then_some(cached.secs)
     }
 
-    pub fn set_duration(&mut self, file_name: &str, bytes: u64, mtime: u64, secs: f64) {
+    pub fn set_duration(&mut self, key: &str, bytes: u64, mtime: u64, secs: f64) {
         if !secs.is_finite() || secs <= 0.0 {
             return;
         }
         let next = Some(CachedDuration { bytes, mtime, secs });
-        let meta = self.clips.entry(file_name.to_owned()).or_default();
+        let meta = self.clips.entry(key.to_owned()).or_default();
         if meta.duration != next {
             meta.duration = next;
             self.dirty = true;
@@ -135,7 +196,7 @@ impl MetaStore {
         if !self.dirty || self.damage.is_some() {
             return Ok(());
         }
-        self.persist()?;
+        self.write()?;
         self.dirty = false;
         Ok(())
     }
@@ -189,7 +250,7 @@ impl MetaStore {
             (Some(damage), Some(path)) => store_damage::set_hold(path, damage.backup.as_deref()),
             _ => Ok(()),
         };
-        if let Err(error) = held.and_then(|()| self.persist()) {
+        if let Err(error) = held.and_then(|()| self.write()) {
             match previous {
                 Some(meta) => self.clips.insert(file_name.to_owned(), meta),
                 None => self.clips.remove(file_name),
@@ -198,6 +259,12 @@ impl MetaStore {
         }
         self.dirty = false;
         Ok(())
+    }
+
+    /// Every whole-file write goes through here (counted, so a batch can prove it wrote once).
+    fn write(&mut self) -> Result<(), String> {
+        self.writes += 1;
+        self.persist()
     }
 
     /// Whole-file write to a temp sibling, flushed to disk, then renamed over the original

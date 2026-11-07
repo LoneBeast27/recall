@@ -45,12 +45,12 @@ pub fn queue(files: Vec<(PathBuf, u64, u64)>) {
 /// The imported clips a listing shows: checked recordings, plus files not checked yet (queued
 /// for a check). Editors' exports, files without video and clips the user removed are left out.
 /// A clip directly in the recordings folder (an imported folder may hold it) is Recall's own.
-pub fn listable(found: Vec<FoundClip>, recordings: &Path, imported: &[String]) -> Vec<FoundClip> {
+pub fn listable(found: Vec<FoundClip>, recordings: &Path, imported: &[String], former: &[String]) -> Vec<FoundClip> {
     let mut pending = Vec::new();
     let kept = found
         .into_iter()
         .filter(|clip| {
-            if !imports::is_imported(&clip.path.to_string_lossy(), recordings, imported) {
+            if !imports::is_imported(&clip.path.to_string_lossy(), recordings, imported, former) {
                 return true;
             }
             match imports::status(&clip.path, clip.bytes, clip.mtime) {
@@ -109,9 +109,10 @@ pub(crate) fn check_batch(batch: Vec<(PathBuf, u64, u64)>) -> Vec<PathBuf> {
             continue;
         }
         let file = path.clone();
-        let mut verdict = storage::run_io(&path, Priority::Background, move || edit_marks::inspect(&file)).unwrap_or(edit_marks::Verdict::Unready);
+        let mut verdict = storage::run_io(&path, Priority::Background, move || edit_marks::inspect(&file)).unwrap_or(edit_marks::Verdict::Unreadable);
         // No index long after the last write: a recording that never finished (6 such files on
-        // Rohan's V:, all `ftyp free mdat` and zeros). It cannot play; stop looking at it.
+        // Rohan's V:, all `ftyp free mdat` and zeros). It cannot play; stop looking at it. A file
+        // that could not be opened at all (`Unreadable`) is only looked at again.
         if verdict == edit_marks::Verdict::Unready && settled(mtime) && path.metadata().is_ok_and(|m| m.len() == bytes) {
             verdict = edit_marks::Verdict::NoVideo;
         }
@@ -126,4 +127,26 @@ pub(crate) fn check_batch(batch: Vec<(PathBuf, u64, u64)>) -> Vec<PathBuf> {
 fn settled(mtime: u64) -> bool {
     let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs());
     now.saturating_sub(mtime) > 600
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::windows::fs::OpenOptionsExt;
+
+    #[test]
+    fn an_old_clip_that_cannot_be_opened_once_is_not_stored_as_no_video() {
+        let dir = std::env::temp_dir().join(format!("recall-import-check-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("locked.mp4");
+        std::fs::write(&path, b"not an mp4 header").unwrap();
+        let bytes = path.metadata().unwrap().len();
+        let old = 1_600_000_000; // long settled
+        // Held with no sharing: opening fails, the size still reads.
+        let lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap();
+        assert!(check_batch(vec![(path.clone(), bytes, old)]).is_empty());
+        assert_eq!(imports::status(&path, bytes, old), imports::Status::Check, "looked at again next listing");
+        drop(lock);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }
