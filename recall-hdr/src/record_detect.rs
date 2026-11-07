@@ -68,8 +68,9 @@ impl Controller {
         }
     }
 
-    /// Drop a target / pin whose window no longer exists. `IsWindow` only, so
-    /// it runs every pump tick (at most 50 ms after the window closes).
+    /// Drop a target / pin whose window no longer exists (`IsWindow`, every
+    /// pump tick: at most 50 ms after the window closes), and a target whose
+    /// window stayed hidden for over a second (U5, `record_visibility`).
     pub(crate) fn check_windows(&mut self) {
         if let Some(t) = self.pinned.as_ref().filter(|t| !watcher::window_alive(t.hwnd)) {
             log!("record: pinned window {:#x} is gone; auto-detection resumes", t.hwnd);
@@ -78,6 +79,12 @@ impl Controller {
         if let Some(hwnd) = self.tracker.current().map(|t| t.hwnd).filter(|h| !watcher::window_alive(*h)) {
             log!("record: target window {hwnd:#x} is gone");
             self.tracker.on_window_gone_at(hwnd, Instant::now());
+        }
+        let shown = crate::record_visibility::shown;
+        if let Some(hwnd) = crate::record_visibility::drop_hidden(&mut self.hidden, &mut self.tracker, Instant::now(), shown) {
+            log!("record: target window {hwnd:#x} stayed hidden; the session ends");
+            // Re-feed the window if it comes back (T5a adopts it).
+            self.last_fed = None;
         }
     }
 
