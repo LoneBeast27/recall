@@ -60,7 +60,8 @@ pub(super) fn ssd_usage_in(root: &Path, recordings: &Path) -> SsdUsage {
     let inventory = budget::inventory(root, &|_| 0.0);
     let tier = |t: Tier| inventory.tier_bytes(t);
     let previews = tier(Tier::Thumb) + tier(Tier::Scrub) + tier(Tier::EditorMedia) + inventory.proxy;
-    let kept = tier(Tier::Video) + inventory.staged;
+    // Leftover copies count in the C: usage shown, though not in the budget (RI3-4).
+    let kept = tier(Tier::Video) + inventory.staged + inventory.leaked;
     let other = (inventory.other + inventory.projects).saturating_sub(inventory.heads + inventory.staged + inventory.proxy);
     let pre_encoded = budget::dir_size(&root.join("tmp").join("pre-encode")).0;
     SsdUsage {
