@@ -19,6 +19,8 @@ pub struct DeleteReport {
     /// leave the library but nothing moved, so they are not counted as recycled.
     pub already_gone: usize,
     pub error: Option<String>,
+    /// How many clips this delete was asked to remove (the bar's count, review RI-8).
+    pub asked: usize,
 }
 
 /// Recycles or hides `clips`, deciding owned vs imported from `folders`: the folder list the
@@ -34,6 +36,7 @@ pub fn delete_or_hide(clips: &[PathBuf], folders: &folders::Folders) -> DeleteRe
     let mut report = settle(&imported, hidden, &present, recycled, |path| path.exists());
     report.already_gone = absent.len();
     report.left.extend(absent);
+    report.asked = clips.len();
     report
 }
 

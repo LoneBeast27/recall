@@ -7,6 +7,20 @@ use std::{collections::HashSet, path::PathBuf};
 use super::LibraryState;
 
 impl LibraryState {
+    /// A delete of `clips` clips was sent: the bar counts it with any delete still running.
+    pub fn delete_started(&mut self, clips: usize) {
+        self.deleting += clips;
+    }
+
+    /// A delete of `asked` clips came back: only its own clips leave the bar's count (review
+    /// RI-8: any report zeroed it while another delete waited for an edit save).
+    pub fn delete_finished(&mut self, asked: usize) {
+        self.deleting = self.deleting.saturating_sub(asked);
+        if self.deleting == 0 {
+            self.delete_waiting = false;
+        }
+    }
+
     /// A click on a tile with its modifier keys.
     pub fn click(&mut self, path: &str, ctrl: bool, shift: bool) {
         self.confirm_delete = false;
