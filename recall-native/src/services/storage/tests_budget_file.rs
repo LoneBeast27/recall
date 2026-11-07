@@ -4,11 +4,11 @@ use std::path::{Path, PathBuf};
 
 const USER: &[u8] = br#"{ "cache_budget_bytes": 21474836480 }"#;
 
-fn root(tag: &str) -> PathBuf {
+/// `%TEMP%\recall-budget-file-<tag>-<pid>-<nonce>`, removed when the guard drops, also when the
+/// test panics (a failing run left 2-3 MB folders behind).
+fn root(tag: &str) -> crate::test_temp::TempDir {
     let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let root = std::env::temp_dir().join(format!("recall-budget-file-{tag}-{}-{nonce}", std::process::id()));
-    std::fs::create_dir_all(&root).unwrap();
-    root
+    crate::test_temp::TempDir::new(format!("recall-budget-file-{tag}-{}-{nonce}", std::process::id()))
 }
 
 fn bads(root: &Path) -> Vec<PathBuf> {
@@ -141,4 +141,17 @@ fn a_damaged_storage_file_can_be_reset_and_a_locked_one_cannot() {
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
     assert_eq!(saved["cache_budget_bytes"].as_u64(), Some(20 << 30));
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn a_fixture_whose_test_panics_still_removes_its_folder() {
+    let left = std::panic::catch_unwind(|| {
+        let dir = root("panics");
+        std::fs::write(dir.join("storage.json"), vec![1u8; 4096]).unwrap();
+        std::panic::panic_any(dir.to_path_buf());
+    })
+    .unwrap_err()
+    .downcast::<PathBuf>()
+    .unwrap();
+    assert!(!left.exists(), "{} was left behind", left.display());
 }
