@@ -21,11 +21,13 @@ pub(crate) mod keyframes;
 mod lossless;
 pub(crate) mod mix_limit;
 mod paths;
+pub(crate) mod pcm_stream;
 pub mod project;
 mod size_cap;
 mod sources;
 pub(crate) mod tempo;
 pub(crate) mod timeline;
+pub(crate) mod track_reader;
 mod video_encoder;
 
 #[cfg(test)]
@@ -38,6 +40,8 @@ mod lossless_tests;
 mod mix_tests;
 #[cfg(test)]
 mod stamp_jitter_tests;
+#[cfg(test)]
+mod long_audio_tests;
 #[cfg(test)]
 mod test_media;
 

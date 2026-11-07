@@ -13,4 +13,6 @@ pub mod meters;
 pub mod process_tree;
 pub mod midi;
 pub mod pre_encode;
+pub mod pre_encode_room;
+mod pre_encode_copy;
 pub mod storage;

@@ -63,7 +63,7 @@ pub fn cancel_export(){EXPORT_CANCEL.store(true,Ordering::Release);}
 /// Its own time limit bounds a running export; 60 s bounds one the worker never starts.
 pub fn wait_for_export(){
     let start=std::time::Instant::now();
-    while EXPORT_QUEUED.load(Ordering::Acquire)&&(EXPORTING.load(Ordering::Acquire)||start.elapsed().as_secs()<60){std::thread::sleep(Duration::from_millis(50));}
+    while EXPORT_QUEUED.load(Ordering::Acquire)&&(EXPORTING.load(Ordering::Acquire)||crate::services::pre_encode::awaited()||start.elapsed().as_secs()<60){std::thread::sleep(Duration::from_millis(50));}
 }
 /// The engine's hidden temporary output, left behind when it is stopped mid-write.
 fn remove_export_temps(output:&Path,pid:u32){
@@ -496,6 +496,8 @@ fn export_limit(plan:&EditPlan,fps:u32)->Duration{
 #[path="backend_working.rs"] mod working;
 use working::working_path;
 pub use run_export::export_clip;
+#[allow(unused_imports)] // the editor reads it; the examples build backend without one
+pub use run_export::export_progress;
 pub(crate) use run_export::{engine_export,export_cancelled,export_queued,export_target};
 /// Drive types and cache usage for Settings (walks the cache: call from a worker thread).
 pub fn storage_report(notice:Option<String>)->StorageReport{

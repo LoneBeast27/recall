@@ -169,6 +169,10 @@ impl Attempt<'_> {
                 .add_stream(Some(codec))
                 .map_err(|e| format!("add output video stream: {e}"))?;
             stream.set_parameters(&encoder);
+            // HEVC (frames past H.264 NVENC) as `hvc1`, which Media Foundation plays.
+            if let Some(tag) = crate::encoder::mp4_video_tag(codec.id()) {
+                unsafe { (*stream.parameters().as_mut_ptr()).codec_tag = tag };
+            }
             stream.set_time_base(output_tb);
             stream.index()
         };

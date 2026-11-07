@@ -8,6 +8,15 @@ use crate::{
     worker::{Job, Workers},
 };
 
+/// The Export button's text while an export runs.
+pub(crate) fn export_label(lossless: bool, fps: u32, progress: Option<f32>) -> String {
+    let what = if lossless { "Exporting".to_owned() } else { format!("Exporting at {fps} fps") };
+    match progress {
+        Some(share) => format!("{what}… {}%", (share * 100.0).floor() as u32),
+        None => format!("{what}…"),
+    }
+}
+
 impl EditorState {
     /// An autosave finished. One of a clip no longer open only frees the next save (E9).
     pub fn on_saved(&mut self, clip: &str, result: Result<String, String>) {
@@ -32,6 +41,9 @@ impl EditorState {
             Ok(summary) if self.export_is_for_open_clip() => {
                 self.exported = Some(summary);
                 self.export_error = None;
+                // The plan just exported needs no pre-encode (Export came before it settled,
+                // or while recording held it).
+                self.pre_encode_exported();
             }
             Err(error) if self.export_is_for_open_clip() => self.export_error = Some(error),
             _ => {} // The toast reports it; this footer is another clip's.
@@ -69,7 +81,36 @@ impl EditorState {
     /// What Export sends the engine: the plan and the right page's settings. The listening
     /// levels left of the timeline are not in it.
     pub(super) fn export_job(&self, info: crate::edit_model::ClipInfo) -> Job {
-        Job::Export(info, self.export_plan(), self.fps, self.export_settings.clone())
+        Job::Export(info, self.export_plan(), self.fps, self.engine_settings())
+    }
+
+    /// The settings Export sends. Lossless hides the size limit and resolution and the engine
+    /// refuses them for a stream copy, so they are left out; the stored values stay for a
+    /// switch back to Re-encode.
+    pub(crate) fn engine_settings(&self) -> crate::edit_model::ExportSettings {
+        let mut settings = self.export_settings.clone();
+        if settings.mode == ExportMode::Lossless {
+            settings.max_bytes = None;
+            settings.height = None;
+        }
+        settings
+    }
+
+    /// Lossless cannot change speed: the inspector says so while a part has one.
+    pub fn lossless_blocked_by_speed(&self) -> bool {
+        self.lossless() && self.plan.has_speed_changes()
+    }
+
+    /// The Export button while it runs: the engine's progress when it reports it (frame rate
+    /// only for a re-encode; a stream copy keeps the recorded frames).
+    pub fn export_label(&self) -> String {
+        export_label(self.lossless(), self.fps, crate::backend::export_progress())
+    }
+
+    /// The output frame size: the source's for lossless, else after the Resolution choice.
+    pub fn export_size(&self) -> Option<(u32, u32)> {
+        let info = self.info.as_ref()?;
+        Some(if self.lossless() { (info.width, info.height) } else { crate::services::pre_encode_room::output_dims(info.width, info.height, self.export_settings.height) })
     }
 
     /// The plan the engine gets: "Mix tracks" filled in from the remembered default when these
