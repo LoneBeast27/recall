@@ -40,11 +40,19 @@ pub struct AudioSource {
     pub enabled: bool,
     /// Recorded gain, `GAIN_MIN_DB..=GAIN_MAX_DB`.
     pub gain_db: f32,
+    /// An `input` the mic-mute hotkey silences: a microphone. A line-in or capture card set
+    /// up as an input says `false`, so muting the mic leaves its sound. Saved only when false.
+    #[serde(skip_serializing_if = "is_true")]
+    pub mic_mute: bool,
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl Default for AudioSource {
     fn default() -> Self {
-        AudioSource { id: String::new(), kind: "input".into(), device: String::new(), exe: String::new(), name: String::new(), enabled: true, gain_db: 0.0 }
+        AudioSource { id: String::new(), kind: "input".into(), device: String::new(), exe: String::new(), name: String::new(), enabled: true, gain_db: 0.0, mic_mute: true }
     }
 }
 
@@ -138,28 +146,22 @@ fn engine_list(list: &[AudioSource]) -> Vec<AudioSource> {
         .collect()
 }
 
-/// The engine's tracks without what it can change live (gain, name).
+/// The engine's tracks without what it can change live (gain, name, mic-mute flag).
 fn track_shape(list: &[AudioSource]) -> Vec<AudioSource> {
-    engine_list(list).into_iter().map(|s| AudioSource { gain_db: 0.0, name: String::new(), ..s }).collect()
+    engine_list(list).into_iter().map(|s| AudioSource { gain_db: 0.0, name: String::new(), mic_mute: true, ..s }).collect()
 }
 
 /// Different tracks for the engine (a restart)? Order matters: it is the clip's track order.
-/// A gain or a name alone is not: [`live_updates`] sends those to the running engine, except a
-/// gain that rises from 0 dB or below to above it. A long recording picks its limiter when it
-/// starts (`longrec::TrackInfo::boosted`), so a boost it did not start with would clip there:
-/// that change restarts the engine, which waits for a running save or long recording to end.
+/// A gain, a name or the mic-mute flag alone is not: [`live_updates`] sends those to the running
+/// engine. A gain above 0 dB is live too: a long-recording track runs the -1 dBFS limiter from
+/// its first sample above the ceiling (`longrec::machine`), and a replay save limits a track that
+/// has been boosted.
 pub fn changed(old: &[AudioSource], new: &[AudioSource]) -> bool {
-    track_shape(old) != track_shape(new) || crosses_into_boost(old, new)
+    track_shape(old) != track_shape(new)
 }
 
-/// Some recorded source's gain goes from 0 dB or below to above 0 dB.
-fn crosses_into_boost(old: &[AudioSource], new: &[AudioSource]) -> bool {
-    let old = engine_list(old);
-    engine_list(new).iter().any(|n| n.gain_db > 0.0 && old.iter().any(|o| o.id == n.id && o.gain_db <= 0.0))
-}
-
-/// `set_source` lines for the recorded sources whose gain or name changed (the running
-/// engine applies them to its tracks; the replay buffer stays). Only meaningful when
+/// `set_source` lines for the recorded sources whose gain, name or mic-mute flag changed (the
+/// running engine applies them to its tracks; the replay buffer stays). Only meaningful when
 /// [`changed`] is false.
 pub fn live_updates(old: &[AudioSource], new: &[AudioSource]) -> Vec<String> {
     let old = engine_list(old);
@@ -175,6 +177,9 @@ pub fn live_updates(old: &[AudioSource], new: &[AudioSource]) -> Vec<String> {
             }
             if o.name != n.name {
                 cmd.insert("name".into(), n.name.clone().into());
+            }
+            if o.mic_mute != n.mic_mute {
+                cmd.insert("mic_mute".into(), n.mic_mute.into());
             }
             (cmd.len() > 2).then(|| serde_json::Value::Object(cmd).to_string())
         })

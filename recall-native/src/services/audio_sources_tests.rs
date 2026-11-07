@@ -92,3 +92,34 @@ fn a_let_go_fader_keeps_its_gain_until_the_save_comes_back() {
     assert_eq!(shown_gain(None, Some((-6.0, PENDING_GAIN_FOR)), 0.0), 0.0, "a save that never lands gives way");
     assert_eq!(shown_gain(None, None, 4.5), 4.5);
 }
+
+/// 2026-11-07 audit A11: Undo after a remove and an add of the same kind (the add took the
+/// freed id) restores the source under a fresh id instead of silently doing nothing.
+#[test]
+fn undo_restores_a_source_whose_id_was_reused() {
+    let sources = list();
+    let mut after = sources.clone();
+    let removed = after.remove(1);
+    let reused = with_new(&after, Kind::Input, "", "").unwrap();
+    let mut reused = reused;
+    reused[1].id = removed.id.clone(); // the add took the freed id
+    let back = restored(&reused, 1, removed.clone()).expect("Undo still restores it");
+    assert_eq!(back.len(), 3);
+    assert_eq!((back[1].name.as_str(), back[1].device.as_str()), ("Microphone", "Microphone (USB Audio Device)"), "the removed source, in its place");
+    assert_ne!(back[1].id.to_lowercase(), back[2].id.to_lowercase(), "ids stay unique");
+    let full: Vec<Source> = (0..SOURCES_MAX).map(|n| Source { id: format!("s{n}"), ..sources[1].clone() }).collect();
+    assert!(restored(&full, 0, removed).is_none(), "a full list cannot take it back");
+    let game = sources[0].clone();
+    let other_game = vec![Source { id: "game-1".into(), ..game.clone() }];
+    assert!(restored(&other_game, 0, game).is_none(), "never a second game");
+}
+
+/// 2026-11-07 audit A12: an input says whether the mic-mute hotkey silences it; a list saved
+/// before the flag keeps muting every input.
+#[test]
+fn an_input_keeps_its_mic_mute_flag() {
+    let sources = from_config(Some(&json!([{"id": "in-1", "kind": "input", "name": "Console", "mic_mute": false}, {"id": "mic", "kind": "input", "name": "Mic"}])));
+    assert_eq!((sources[0].mic_mute, sources[1].mic_mute), (false, true));
+    assert_eq!(from_config(Some(&to_config(&sources))), sources, "round trip");
+    assert!(with_new(&sources, Kind::Input, "", "").unwrap().last().unwrap().mic_mute, "a new input is a microphone");
+}

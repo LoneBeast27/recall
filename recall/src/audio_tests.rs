@@ -13,6 +13,7 @@ fn raw_ring(name: &'static str, input: bool, gain: f32, rate: u32, channels: u16
         gain: AtomicU32::new(gain.to_bits()),
         boosted: AtomicBool::new(gain > 1.0),
         input,
+        mutes: AtomicBool::new(input),
         endpoint: Mutex::new(String::new()),
         rate,
         channels,
@@ -346,4 +347,79 @@ fn a_block_bigger_than_the_ring_never_grows_it() {
     assert!(buf.capacity() < 2_000, "the ring grew to {} samples for a {}-sample block", buf.capacity(), block.len());
     assert_eq!(buf.front().copied(), Some(9_000.0 * 0.5), "the newest samples, with the gain");
     assert_eq!(buf.back().copied(), Some(9_999.0 * 0.5));
+}
+
+/// 2026-11-07 audit A2: the controller's mute reaches a new engine in its environment, so a
+/// muted mic is silent from the first sample of the run, not only after `hello`.
+#[test]
+fn the_engine_starts_muted_when_the_controller_says_so() {
+    let env = |value: Option<&'static str>| move |key: &str| (key == super::MIC_MUTED_ENV).then_some(value).flatten().map(str::to_owned);
+    assert!(super::initial_mute(env(Some("1"))), "RECALL_MIC_MUTED=1");
+    assert!(!super::initial_mute(env(Some("0"))));
+    assert!(!super::initial_mute(env(None)), "an engine started by hand starts unmuted");
+}
+
+/// 2026-11-07 audit A4: a missing named device opens another endpoint only when exactly one
+/// present endpoint is the same name once Windows' "N- " index is dropped.
+#[test]
+fn a_missing_device_opens_a_sibling_only_when_it_is_the_one_match() {
+    let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+    let two = names(&["Microphone (2- USB Audio Device)", "Microphone (3- USB Audio Device)"]);
+    assert_eq!(super::match_endpoint(&two, "Microphone (USB Audio Device)"), None, "two siblings: wait for its own device");
+    assert_eq!(super::match_endpoint(&two, "Microphone (2- USB Audio Device)"), Some(0), "exact still wins");
+    let renumbered = names(&["Microphone (2- USB Audio Device)"]);
+    assert_eq!(super::match_endpoint(&renumbered, "Microphone (USB Audio Device)"), Some(0), "the same model renumbered");
+    let unnumbered = names(&["Microphone (USB Audio Device)"]);
+    assert_eq!(super::match_endpoint(&unnumbered, "Microphone (2- USB Audio Device)"), Some(0), "renumbered the other way");
+    let pair = names(&["Virtual A (Mixer)", "Virtual A (Mixer Aux)"]);
+    assert_eq!(super::match_endpoint(&pair, "virtual a"), None, "two endpoints carry the words: neither is opened");
+}
+
+/// 2026-11-07 audit A7: a ring holds its whole buffer from the start, so it never doubles
+/// (and copies) under the lock while it fills.
+#[test]
+fn a_ring_reserves_its_buffer_and_never_doubles() {
+    let ring = TrackRing::for_test("g", 1);
+    let packet = vec![0.25f32; 960];
+    for _ in 0..(96_000 / 960 + 5) {
+        ring.push_capture(&packet, false);
+    }
+    let buf = ring.samples.lock().unwrap();
+    assert_eq!(buf.len(), 96_000, "full");
+    assert!(buf.capacity() < 96_000 + 4_096, "the ring grew to {} samples for a 96000-sample buffer", buf.capacity());
+}
+
+/// 2026-11-07 audit A12: the mic-mute hotkey silences microphone sources only. An input set up
+/// as a line-in or capture card (`mic_mute = false`) keeps its sound.
+#[test]
+fn the_mute_hotkey_skips_an_input_marked_as_not_a_microphone() {
+    use super::sources::SourceSpec;
+    let spec = |mic_mute: bool| SourceSpec { id: "in-1".into(), kind: "input".into(), device: String::new(), exe: String::new(), name: "In".into(), gain_db: 0.0, mic_mute };
+    let mic = TrackRing::for_source(&spec(true), "mic", 1, String::new());
+    let line = TrackRing::for_source(&spec(false), "mic", 1, String::new());
+    mic.push_capture(&[0.5, 0.5], true);
+    line.push_capture(&[0.5, 0.5], true);
+    let held = |ring: &TrackRing| ring.samples.lock().unwrap().iter().copied().collect::<Vec<f32>>();
+    assert_eq!(held(&mic), [0.0, 0.0], "a microphone is muted");
+    assert_eq!(held(&line), [0.5, 0.5], "a line-in keeps its sound");
+    let json = r#"[{"id":"in-1","kind":"input","name":"Console","mic_mute":false},{"id":"mic","kind":"input","name":"Mic"}]"#;
+    let list = super::sources::parse(json).unwrap();
+    assert_eq!((list[0].mic_mute, list[1].mic_mute), (false, true), "an input follows the mute unless it says not");
+}
+
+/// 2026-11-07 audit A13: device streams ask for a 100 ms WASAPI buffer, so a short stall of a
+/// BelowNormal capture thread does not overrun it.
+#[test]
+fn device_streams_ask_for_a_buffer_that_survives_a_stall() {
+    assert_eq!(super::stream::device_buffer_hns(30_000), 1_000_000, "3 ms minimum period -> 100 ms");
+    assert_eq!(super::stream::device_buffer_hns(2_000_000), 2_000_000, "never below the device's own period");
+}
+
+/// 2026-11-07 audit A8: every capture start closes its event handle (wasapi 0.19's `Handle` has
+/// no `Drop`), for app sources as for device tracks.
+#[test]
+fn app_capture_closes_its_event_handle() {
+    let apps = include_str!("audio/apps.rs");
+    assert!(!apps.contains("let event = client.set_get_eventhandle()"), "apps.rs keeps a bare wasapi::Handle");
+    assert!(apps.contains("Event(client.set_get_eventhandle()"), "apps.rs wraps the event in stream::Event");
 }

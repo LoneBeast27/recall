@@ -221,7 +221,7 @@ fn engine_quality(token: &str) -> &'static str {
     }
 }
 
-pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&str>) -> Vec<(String, Option<String>)> {
+pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&str>, mic_muted: bool) -> Vec<(String, Option<String>)> {
     let mut env = vec![
         ("RECALL_BUFFER_SECS".to_string(), Some(rec.buffer_secs.to_string())),
         ("RECALL_OUT_DIR".to_string(), Some(rec.output_dir.clone())),
@@ -238,6 +238,9 @@ pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&s
         ("RECALL_AUDIO_GAME".to_string(), None),
         ("RECALL_AUDIO_MIC_OFF".to_string(), None),
         (crate::record_app_audio::APPS_ENV.to_string(), None),
+        // The mic mute at spawn: the engine applies it before its first track opens, so a muted
+        // mic records nothing of the new run (the `set_mic_mute` after `hello` came too late).
+        ("RECALL_MIC_MUTED".to_string(), Some(if mic_muted { "1" } else { "0" }.to_string())),
     ];
     let (hwnd, name, pid) = match target {
         EngineTarget::Window(t) => (
@@ -408,14 +411,14 @@ mod tests {
     fn engine_env_sets_or_removes_every_target_variable() {
         let rec = RecordingCfg::default();
         let get = |env: &[(String, Option<String>)], k: &str| env.iter().find(|(n, _)| n == k).unwrap().1.clone();
-        let win = engine_env(&EngineTarget::Window(target(42, 0x1234, "VALORANT")), &rec, Some("ffff0000"));
+        let win = engine_env(&EngineTarget::Window(target(42, 0x1234, "VALORANT")), &rec, Some("ffff0000"), false);
         assert_eq!(get(&win, "RECALL_CPU_MASK").as_deref(), Some("ffff0000"));
         assert_eq!(get(&win, "RECALL_CAPTURE_HWND").as_deref(), Some("4660"));
         assert_eq!(get(&win, "RECALL_CAPTURE_NAME").as_deref(), Some("VALORANT"));
         assert_eq!(get(&win, "RECALL_AUDIO_GAME_PID").as_deref(), Some("42"));
         assert_eq!(get(&win, "RECALL_BUFFER_SECS").as_deref(), Some("120"));
         assert_eq!(get(&win, "RECALL_OUT_DIR"), Some(rec.output_dir.clone()));
-        let desk = engine_env(&EngineTarget::Desktop, &rec, None);
+        let desk = engine_env(&EngineTarget::Desktop, &rec, None, false);
         assert_eq!(get(&desk, "RECALL_CPU_MASK"), None, "unapplied mask is not passed (engine would exit)");
         assert_eq!(get(&desk, "RECALL_CAPTURE_HWND"), None, "removed, not inherited");
         assert_eq!(get(&desk, "RECALL_AUDIO_GAME_PID"), None);
@@ -433,18 +436,28 @@ mod tests {
             quality: "quality".into(),
             ..RecordingCfg::default()
         };
-        let env = engine_env(&EngineTarget::Desktop, &tuned, None);
+        let env = engine_env(&EngineTarget::Desktop, &tuned, None, false);
         assert_eq!(get(&env, "RECALL_CODEC").as_deref(), Some("av1"));
         assert_eq!(get(&env, "RECALL_FPS").as_deref(), Some("120"));
         assert_eq!(get(&env, "RECALL_BITRATE").as_deref(), Some("60000000"));
         assert_eq!(get(&env, "RECALL_QUALITY").as_deref(), Some("max"), "Quality = engine max (p7)");
     }
 
+    /// 2026-11-07 audit A2: a new engine learns the mute from its environment, before its first
+    /// track opens (the `set_mic_mute` after `hello` came after the tracks were recording).
+    #[test]
+    fn the_mute_reaches_a_new_engine_in_its_environment() {
+        let get = |env: &[(String, Option<String>)]| env.iter().find(|(n, _)| n == "RECALL_MIC_MUTED").and_then(|(_, v)| v.clone());
+        let rec = RecordingCfg::default();
+        assert_eq!(get(&engine_env(&EngineTarget::Desktop, &rec, None, true)).as_deref(), Some("1"));
+        assert_eq!(get(&engine_env(&EngineTarget::Desktop, &rec, None, false)).as_deref(), Some("0"), "set either way, never inherited");
+    }
+
     #[test]
     fn the_sources_list_reaches_the_engine_and_old_audio_variables_are_removed() {
         use crate::record_audio_sources::{AudioSource, SOURCES_ENV};
         let has = |env: &[(String, Option<String>)], k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        let plain = engine_env(&EngineTarget::Desktop, &RecordingCfg::default(), None);
+        let plain = engine_env(&EngineTarget::Desktop, &RecordingCfg::default(), None, false);
         let value = has(&plain, SOURCES_ENV).flatten().expect("always passed");
         assert!(value.contains(r#""id":"game""#) && value.contains(r#""id":"mic""#), "{value}");
         for key in ["RECALL_AUDIO_APPS", "RECALL_AUDIO_VOICE_EXE", "RECALL_AUDIO_GAME", "RECALL_AUDIO_MIC_OFF"] {
@@ -455,7 +468,7 @@ mod tests {
             audio_sources: vec![AudioSource { id: "in".into(), kind: "input".into(), device: "Microphone (USB Audio Device)".into(), name: "Voice".into(), ..AudioSource::default() }],
             ..RecordingCfg::default()
         };
-        let value = has(&engine_env(&EngineTarget::Desktop, &rec, None), SOURCES_ENV).flatten().unwrap();
+        let value = has(&engine_env(&EngineTarget::Desktop, &rec, None, false), SOURCES_ENV).flatten().unwrap();
         assert!(value.contains("Microphone (USB Audio Device)") && !value.contains(r#""id":"game""#), "{value}");
     }
 

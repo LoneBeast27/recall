@@ -28,18 +28,20 @@ impl Root {
                         .gap(px(10.))
                         .child(ui::button("midi-test", Variant::Secondary).child(icon(Icon::Play, 13., theme::TEXT)).child("Send test note").on_click(cx.listener(|this, _, _, cx| {
                             // The output with the chosen input's name (devices list both sides).
-                            let result = this.midi.as_ref().map_or(Err("MIDI is off".to_owned()), |m| {
-                                let target = m.wanted().to_owned();
-                                m.send(&target, &[0x90, 60, 127]).map(|_| target)
-                            });
-                            if let Some(midi) = this.midi.as_ref() {
-                                if let Ok(target) = &result {
-                                    std::thread::sleep(std::time::Duration::from_millis(120));
-                                    let _ = midi.send(target, &[0x80, 60, 0]);
-                                }
-                            }
-                            this.midi_result = Some(result);
-                            cx.notify();
+                            let Some(target) = this.midi.as_ref().map(|m| m.wanted().to_owned()) else {
+                                this.midi_result = Some(Err("MIDI is off".to_owned()));
+                                cx.notify();
+                                return;
+                            };
+                            // Opening the port and the 120 ms note run off the UI thread.
+                            cx.spawn(async move |this, cx| {
+                                let result = cx.background_executor().spawn(async move { crate::services::midi::send_test_note(&target).map(|()| target) }).await;
+                                let _ = this.update(cx, |this, cx| {
+                                    this.midi_result = Some(result);
+                                    cx.notify();
+                                });
+                            })
+                            .detach();
                         })))
                         .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(match &self.midi_result {
                             Some(Ok(target)) => format!("Sent to {target}"),
@@ -66,5 +68,18 @@ impl Root {
                         })),
                 )
                 .into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// 2026-11-07 audit A10: "Send test note" opened the MIDI output and slept 120 ms on the UI
+    /// thread; the click handler now hands the send to a background task.
+    #[test]
+    fn the_test_note_never_sleeps_on_the_ui_thread() {
+        let source = include_str!("audio_midi.rs");
+        let handler = source.split("#[cfg(test)]").next().unwrap();
+        assert!(!handler.contains(&["thread::", "sleep"].concat()), "the click handler sleeps on the UI thread");
+        assert!(handler.contains("background_executor()"), "the send runs on a background task");
     }
 }

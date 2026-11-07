@@ -123,6 +123,11 @@ impl Root {
         self.edit_source(id, |s| s.device = device);
     }
 
+    /// Whether the mic-mute hotkey silences this input (off: a line-in or capture card).
+    pub(crate) fn set_source_mic_mute(&mut self, id: &str, on: bool) {
+        self.edit_source(id, |s| s.mic_mute = on);
+    }
+
     /// Point an app source at another app; a name that was the old app's follows the new one.
     pub(crate) fn set_source_app(&mut self, id: &str, exe: String, label: String) {
         let old = self.audio_page_app_label(id);
@@ -210,13 +215,15 @@ impl Root {
 
     pub(crate) fn undo_remove_source(&mut self) {
         let Some((index, source, _)) = self.settings_ui.audio.removed.take() else { return };
-        let mut list = self.audio_sources();
-        if list.iter().any(|s| s.id.eq_ignore_ascii_case(&source.id)) || list.len() >= sources::SOURCES_MAX {
-            return;
+        let name = source.name.clone();
+        match sources::restored(&self.audio_sources(), index, source) {
+            Some(list) => {
+                self.save_sources(&list);
+                self.toast = None;
+            }
+            // Never a silent no-op with the Undo toast still up.
+            None => self.show_toast(ToastKind::Info, format!("Can't bring back {name}"), Some(format!("Up to {} sources, one of them the game.", sources::SOURCES_MAX))),
         }
-        list.insert(index.min(list.len()), source);
-        self.save_sources(&list);
-        self.toast = None;
     }
 
     pub(crate) fn start_rename(&mut self, id: &str, name: &str, window: &mut Window, cx: &mut Context<Self>) {
