@@ -8,7 +8,8 @@
 //! neither an elevated administrator nor in Performance Log Users) is not
 //! retried by this poller: membership only changes at the next sign-in, and
 //! the overlay never prompts. Any other failure is retried after
-//! [`RETRY_AFTER`].
+//! [`RETRY_AFTER`], then less and less often ([`retry_after`]). Every phase
+//! change leaves a note for the trace log (`take_note`), with the reason.
 
 use std::time::{Duration, Instant};
 
@@ -41,7 +42,8 @@ pub enum Phase {
     Idle,
     Running(u32),
     Denied,
-    Failed(Instant),
+    /// `tries`: failed starts in a row (the retry waits longer each time).
+    Failed { at: Instant, tries: u32 },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -52,6 +54,15 @@ pub enum Step {
     Stop,
 }
 
+/// How long a failed start waits before the next one: 5 s, 30 s, 2 min, then 10 min.
+pub fn retry_after(tries: u32) -> Duration {
+    const LATER: [u64; 3] = [30, 120, 600];
+    match tries {
+        0 => RETRY_AFTER,
+        n => Duration::from_secs(LATER[(n as usize - 1).min(LATER.len() - 1)]),
+    }
+}
+
 /// The session's next step for the wanted pid.
 pub fn decide(phase: Phase, wanted: Option<u32>, now: Instant) -> Step {
     match (phase, wanted) {
@@ -60,8 +71,8 @@ pub fn decide(phase: Phase, wanted: Option<u32>, now: Instant) -> Step {
         (Phase::Running(pid), Some(want)) if pid != want => Step::Retarget(want),
         (Phase::Running(_), Some(_)) => Step::Nothing,
         (Phase::Idle, Some(want)) => Step::Start(want),
-        (Phase::Failed(at), Some(want)) if now.saturating_duration_since(at) >= RETRY_AFTER => Step::Start(want),
-        (Phase::Idle | Phase::Failed(_), _) => Step::Nothing,
+        (Phase::Failed { at, tries }, Some(want)) if now.saturating_duration_since(at) >= retry_after(tries) => Step::Start(want),
+        (Phase::Idle | Phase::Failed { .. }, _) => Step::Nothing,
     }
 }
 
@@ -71,7 +82,7 @@ pub fn source_for(phase: Phase) -> FpsSource {
         Phase::Idle => FpsSource::NoTarget,
         Phase::Running(_) => FpsSource::Etw,
         Phase::Denied => FpsSource::NoPermission,
-        Phase::Failed(_) => FpsSource::Error,
+        Phase::Failed { .. } => FpsSource::Error,
     }
 }
 
@@ -79,20 +90,28 @@ pub fn source_for(phase: Phase) -> FpsSource {
 pub struct FrameTiming {
     phase: Phase,
     session: Option<EtwSession>,
+    /// The last phase change, for the trace log (the overlay's stderr goes nowhere).
+    note: Option<String>,
 }
 
 impl FrameTiming {
     pub fn new() -> Self {
-        Self { phase: Phase::Idle, session: None }
+        Self { phase: Phase::Idle, session: None, note: None }
+    }
+
+    /// The last phase change since the previous call ("running for pid 42",
+    /// "failed (try 2, next in 120 s): StartTraceW 1450").
+    pub fn take_note(&mut self) -> Option<String> {
+        self.note.take()
     }
 
     /// One 4 Hz poll for `wanted` (the target pid).
     pub fn poll(&mut self, wanted: Option<u32>) -> (FpsSource, FrameStats) {
         let now = Instant::now();
         if matches!(self.phase, Phase::Running(_)) && !self.session.as_ref().is_some_and(EtwSession::alive) {
-            eprintln!("recall-overlay: frame timing session ended; restarting");
             self.session = None;
-            self.phase = Phase::Failed(now);
+            self.phase = Phase::Failed { at: now, tries: 0 };
+            self.note = Some("session ended; restarting".into());
         }
         match decide(self.phase, wanted, now) {
             Step::Nothing => {}
@@ -106,6 +125,7 @@ impl FrameTiming {
             Step::Stop => {
                 self.session = None;
                 self.phase = Phase::Idle;
+                self.note = Some("stopped (no target)".into());
             }
         }
         let stats = self.session.as_ref().map(EtwSession::stats).unwrap_or_default();
@@ -113,20 +133,23 @@ impl FrameTiming {
     }
 
     fn start(&mut self, pid: u32, now: Instant) {
-        self.phase = match EtwSession::start(pid) {
+        let tries = match self.phase {
+            Phase::Failed { tries, .. } => tries + 1,
+            _ => 0,
+        };
+        let (phase, note) = match EtwSession::start(pid) {
             Ok(session) => {
                 self.session = Some(session);
-                Phase::Running(pid)
+                (Phase::Running(pid), format!("running for pid {pid}"))
             }
-            Err(StartError::Denied) => {
-                eprintln!("recall-overlay: frame timing refused (not in Performance Log Users); FPS shows —");
-                Phase::Denied
-            }
+            Err(StartError::Denied) => (Phase::Denied, "refused (not in Performance Log Users); FPS shows —".into()),
             Err(StartError::Failed(why)) => {
-                eprintln!("recall-overlay: frame timing failed: {why}");
-                Phase::Failed(now)
+                let next = retry_after(tries).as_secs();
+                (Phase::Failed { at: now, tries }, format!("failed (try {}, next in {next} s): {why}", tries + 1))
             }
         };
+        self.phase = phase;
+        self.note = Some(note);
     }
 }
 
@@ -156,7 +179,7 @@ mod tests {
     #[test]
     fn other_failures_retry_after_a_pause() {
         let failed = Instant::now();
-        let phase = Phase::Failed(failed);
+        let phase = Phase::Failed { at: failed, tries: 0 };
         assert_eq!(decide(phase, Some(42), failed + RETRY_AFTER - Duration::from_millis(1)), Step::Nothing);
         assert_eq!(decide(phase, Some(42), failed + RETRY_AFTER), Step::Start(42));
         assert_eq!(decide(phase, None, failed + RETRY_AFTER), Step::Nothing);
@@ -173,5 +196,15 @@ mod tests {
             .map(|s| serde_json::to_value(s).unwrap().as_str().unwrap().to_owned())
             .collect();
         assert_eq!(names, ["off", "etw", "no_permission", "no_target", "error"]);
+    }
+
+    #[test]
+    fn repeated_failures_back_off() {
+        let secs = Duration::from_secs;
+        assert_eq!([0, 1, 2, 3, 9].map(retry_after), [secs(5), secs(30), secs(120), secs(600), secs(600)]);
+        let at = Instant::now();
+        let again = Phase::Failed { at, tries: 1 };
+        assert_eq!(decide(again, Some(42), at + RETRY_AFTER), Step::Nothing, "the second retry waits longer");
+        assert_eq!(decide(again, Some(42), at + secs(30)), Step::Start(42));
     }
 }

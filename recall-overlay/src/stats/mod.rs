@@ -7,15 +7,18 @@ pub mod cpu;
 mod etw_session;
 mod frame_math;
 pub mod frame_timing;
+pub mod gpu_watch;
 pub mod nvml;
 mod present_events;
 pub mod probe;
 
+use std::time::Instant;
+
 use serde::Serialize;
-use windows::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
 
 use cpu::CpuMeter;
 use frame_timing::{FpsSource, FrameTiming};
+use gpu_watch::GpuWatch;
 use nvml::Nvml;
 
 pub use etw_session::install_cleanup;
@@ -26,7 +29,7 @@ pub struct StatsSnapshot {
     pub low1: Option<u32>,
     /// Where the FPS comes from right now (`no_permission` = FPS shows "—").
     pub fps_source: FpsSource,
-    /// The process measured (the game, else the foreground window's).
+    /// The process measured (the game).
     pub fps_pid: Option<u32>,
     pub gpu: Option<u32>,
     pub gpu_temp: Option<u32>,
@@ -56,7 +59,7 @@ impl StatsSnapshot {
 /// Lives exactly while the stats island is on: dropping it stops the frame
 /// timing session and unloads NVML.
 pub struct StatsPoller {
-    nvml: Option<Nvml>,
+    nvml: GpuWatch<Nvml>,
     cpu: CpuMeter,
     frames: FrameTiming,
 }
@@ -65,19 +68,24 @@ impl StatsPoller {
     pub fn start() -> Self {
         let mut cpu = CpuMeter::default();
         let _ = cpu.sample(); // prime the delta
-        Self { nvml: Nvml::open(), cpu, frames: FrameTiming::new() }
+        Self { nvml: GpuWatch::start(Box::new(Nvml::open), Instant::now()), cpu, frames: FrameTiming::new() }
     }
 
     pub fn nvml_loaded(&self) -> bool {
-        self.nvml.is_some()
+        self.nvml.loaded()
     }
 
-    /// One 4 Hz sample. `pid` = the session target's process; without one
-    /// (desktop recording) the foreground window's process is measured.
+    /// The frame timing session's last phase change (for the trace log).
+    pub fn take_note(&mut self) -> Option<String> {
+        self.frames.take_note()
+    }
+
+    /// One 4 Hz sample. `pid` = the game's process (the poller runs only
+    /// while the stats pill can show, so never for the desktop).
     pub fn poll(&mut self, pid: Option<u32>) -> StatsSnapshot {
-        let fps_pid = pid.or_else(foreground_pid);
+        let fps_pid = pid;
         let (fps_source, frames) = self.frames.poll(fps_pid);
-        let gpu = self.nvml.as_ref().and_then(Nvml::sample);
+        let gpu = self.nvml.sample(Instant::now());
         StatsSnapshot {
             fps: frames.fps,
             low1: frames.low1.map(|low| low.round() as u32),
@@ -88,17 +96,4 @@ impl StatsPoller {
             cpu: self.cpu.sample(),
         }
     }
-}
-
-/// The process owning the foreground window (never this overlay's own).
-fn foreground_pid() -> Option<u32> {
-    let mut pid = 0u32;
-    unsafe {
-        let hwnd = GetForegroundWindow();
-        if hwnd.0.is_null() {
-            return None;
-        }
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-    }
-    (pid != 0 && pid != std::process::id()).then_some(pid)
 }

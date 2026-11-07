@@ -171,11 +171,14 @@ pub fn stats_content(reducer: &Reducer, stats: &StatsSnapshot) -> StatsContent {
     }
 }
 
-/// Why there is no framerate, short enough for the "1% low" slot: only a
-/// missing permission (the controller's `fps_source`, or the overlay's own
-/// refused session) has a note; anything else is a plain "—".
+/// Why there is no framerate, short enough for the "1% low" slot: a missing
+/// permission (the controller's `fps_source`, or the overlay's own refused
+/// session), or a session that failed to start; anything else is a plain "—".
 fn fps_note(controller: &str, overlay: FpsSource) -> Option<String> {
-    (controller == "no_permission" || overlay == FpsSource::NoPermission).then(|| "No frame timing".into())
+    if controller == "no_permission" || overlay == FpsSource::NoPermission {
+        return Some("No frame timing".into());
+    }
+    (overlay == FpsSource::Error).then(|| "FPS unavailable".into())
 }
 
 pub struct Island {

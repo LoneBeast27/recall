@@ -1,6 +1,6 @@
 //! The running overlay: controller feed → reducer → island content → layout →
 //! Direct2D frame → layered window, and the 4 Hz stats poller (alive only
-//! while the stats toggle is on).
+//! while the stats pill can show, plus a short grace: `stats_gate`).
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -29,6 +29,7 @@ use crate::render::{Layers, Outgoing, Renderer};
 use crate::smoke::Smoke;
 use crate::spot_edit::{Editor, LookBox, SavedSpot};
 use crate::stats::{StatsPoller, StatsSnapshot};
+use crate::stats_gate::StatsGate;
 use crate::trace::Trace;
 use crate::zorder::{self, game_in_front, keep_on_top, Names, Raise};
 
@@ -100,7 +101,10 @@ pub struct App {
     pub fonts: Fonts,
     spots: Spots,
     pub placed: Option<Placed>,
+    /// This base tick's look at the target's monitor and area (`probe_place`).
+    place_probe: Option<(Rect, Rect)>,
     poller: Option<StatsPoller>,
+    stats_gate: StatsGate,
     last_poll: Option<Instant>,
     pub stats: StatsSnapshot,
     scene: Scene,
@@ -146,7 +150,9 @@ impl App {
             fonts,
             spots: Spots::embedded(),
             placed: None,
+            place_probe: None,
             poller: None,
+            stats_gate: StatsGate::default(),
             last_poll: None,
             stats: StatsSnapshot::default(),
             scene: Scene::default(),
@@ -207,6 +213,7 @@ impl App {
         }
         changed |= self.poll_stats(now);
         changed |= self.watch_editor(hwnd, now);
+        self.probe_place();
         let was_shown = self.island.shown();
         self.refresh(hwnd, now);
         if self.trace.enabled() {
@@ -225,7 +232,11 @@ impl App {
     }
 
     fn poll_stats(&mut self, now: Instant) -> bool {
-        if !self.reducer.session().overlay_stats {
+        let (view, session) = (self.reducer.view(), self.reducer.session());
+        let pid = session.target_pid.filter(|_| !session.desktop);
+        let in_game = self.smoke.is_some() || game_in_front(pid);
+        let can_show = island::stats_shown(view, session, in_game);
+        if !self.stats_gate.keep(session.overlay_stats, can_show, self.poller.is_some(), now) {
             self.last_poll = None;
             let stopped = self.poller.take().is_some();
             let cleared = self.stats != StatsSnapshot::default();
@@ -240,8 +251,11 @@ impl App {
         if self.last_poll.is_some_and(|at| now.saturating_duration_since(at) < POLL_EVERY) {
             return false;
         }
-        let pid = self.reducer.session().target_pid;
-        let next = self.poller.get_or_insert_with(StatsPoller::start).poll(pid);
+        let poller = self.poller.get_or_insert_with(StatsPoller::start);
+        let next = poller.poll(pid);
+        if let Some(note) = poller.take_note() {
+            self.trace.note("frame timing", note);
+        }
         self.last_poll = Some(now);
         let changed = next != self.stats;
         self.stats = next;
@@ -257,8 +271,10 @@ impl App {
         let laid = match content {
             Content::Notice(notice) => {
                 let grow = self.placed.as_ref().map_or(1.0, |p| p.grow);
-                let under = || stats_under.then(|| stats(self).w);
-                island::notice_layout(notice, scale, grow, under, &self.fonts)
+                let under = stats_under.then(|| stats(self).w);
+                // A horizontal pill stops at its area's width less the edge margins.
+                let max = self.placed.as_ref().map_or(f32::INFINITY, |p| ((p.area.right - p.area.left) as f32 - 2.0 * EDGE * p.scale).max(0.0));
+                crate::fit_width::fit_notice(notice, max, |n| island::notice_layout(n, scale, grow, || under, &self.fonts))
             }
             Content::Stats => {
                 let scene = stats(self);

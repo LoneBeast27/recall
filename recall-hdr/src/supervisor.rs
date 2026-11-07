@@ -265,6 +265,9 @@ struct EngineStdin {
     /// Set with the `quit`: why every line is refused until the next engine's stdin.
     quitting: Option<Sent>,
 }
+/// The event the manager hands the controller each time an engine process
+/// ends (any reason): saves still in flight are lost (`EngineActivity`).
+pub const ENGINE_EXITED: &str = "engine_exited";
 
 /// Engine event types handed to the controller via `attach_events`.
 pub const FORWARDED_EVENTS: [&str; 9] = [
@@ -305,6 +308,16 @@ impl Shared {
         if let Ok(g) = self.events.lock() {
             if let Some(tx) = g.as_ref() {
                 let _ = tx.send(val.clone());
+            }
+        }
+    }
+
+    /// Tell the controller an engine process ended ([`ENGINE_EXITED`]); sent
+    /// after its stdout reader is joined, so after every event it wrote.
+    fn forward_exit(&self) {
+        if let Ok(g) = self.events.lock() {
+            if let Some(tx) = g.as_ref() {
+                let _ = tx.send(serde_json::json!({ "type": ENGINE_EXITED }));
             }
         }
     }

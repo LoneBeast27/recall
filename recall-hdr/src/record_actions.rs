@@ -325,6 +325,12 @@ impl Controller {
                     log!("record: long recording saved -- {detail}");
                     self.shortcut_notice("Long recording saved", detail);
                 }
+                Some(Trigger::SavesLost(lost)) => {
+                    log!("record: the engine stopped with {lost} save(s) in flight; reporting them failed");
+                    for _ in 0..lost {
+                        self.hub.event("engine", &crate::record_activity::lost_save_event());
+                    }
+                }
                 Some(Trigger::LongRecChanged) | None => {}
             }
         }

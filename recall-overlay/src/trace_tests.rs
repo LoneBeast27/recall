@@ -68,3 +68,20 @@ fn no_path_writes_nothing() {
     assert!(!trace.note("raise", "clear"));
     assert!(!trace.event("start"));
 }
+
+#[test]
+fn a_log_held_without_delete_sharing_still_stays_under_the_limit() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let path = temp("held");
+    let limit = 4096;
+    let mut trace = Trace::open(Some(path.clone()), limit);
+    assert!(trace.event("first"));
+    // FILE_SHARE_READ | FILE_SHARE_WRITE, no FILE_SHARE_DELETE: the rename to .old fails.
+    let _held = OpenOptions::new().read(true).share_mode(1 | 2).open(&path).unwrap();
+    for i in 0..400 {
+        trace.event(&format!("line {i} {}", "x".repeat(40)));
+    }
+    let len = fs::metadata(&path).unwrap().len();
+    assert!(len <= limit, "the log grew to {len} bytes past its {limit} limit");
+    assert!(!old_path(&path).exists());
+}

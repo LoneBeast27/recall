@@ -79,6 +79,7 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
                 shared.set_child_stdin(None);
                 let _ = reader.join();
                 shared.clear_cache();
+                shared.forward_exit();
                 match exit {
                     ChildExit::StopRequested => break,
                     ChildExit::Retarget => {
