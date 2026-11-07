@@ -8,24 +8,39 @@ use super::{folders, imports, win};
 /// What one delete did.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DeleteReport {
-    /// Clips that left the library: recycled ones no longer on disk, plus the hidden ones.
+    /// Clips that left the library: recycled ones no longer on disk, the hidden ones, and
+    /// clips that were already gone before the delete.
     pub left: Vec<PathBuf>,
     pub recycled: usize,
     pub hidden: usize,
     /// Clips Recall owns that are still on disk (in use, refused).
     pub stayed: usize,
+    /// Own clips that were not on disk when the delete started (removed outside Recall): they
+    /// leave the library but nothing moved, so they are not counted as recycled.
+    pub already_gone: usize,
     pub error: Option<String>,
 }
 
-/// Recycles or hides `clips`. Reads and moves files: call it off the UI thread.
-pub fn delete_or_hide(clips: &[PathBuf]) -> DeleteReport {
-    let folders = folders::Folders::load();
-    let recordings = crate::backend::library_dir_from(&folders);
-    let (imported, own): (Vec<PathBuf>, Vec<PathBuf>) =
-        clips.iter().cloned().partition(|c| imports::is_imported(&c.to_string_lossy(), &recordings, &folders.imported, &folders.former_recordings));
+/// Recycles or hides `clips`, deciding owned vs imported from `folders`: the folder list the
+/// confirm dialog used, never a fresh read (a failed read would make every clip "owned" and
+/// send another recorder's clips to the Recycle Bin). Reads and moves files: call it off the
+/// UI thread.
+pub fn delete_or_hide(clips: &[PathBuf], folders: &folders::Folders) -> DeleteReport {
+    let (imported, own) = partition_for_delete(clips, folders);
+    // Only a clip proven missing counts as already gone; an access error goes to the bin's check.
+    let (absent, present): (Vec<PathBuf>, Vec<PathBuf>) = own.into_iter().partition(|path| matches!(path.try_exists(), Ok(false)));
     let hidden = if imported.is_empty() { Ok(0) } else { imports::hide(&imported) };
-    let recycled = if own.is_empty() { Ok(0) } else { win::recycle(&own) };
-    settle(&imported, hidden, &own, recycled, |path| path.exists())
+    let recycled = if present.is_empty() { Ok(0) } else { win::recycle(&present) };
+    let mut report = settle(&imported, hidden, &present, recycled, |path| path.exists());
+    report.already_gone = absent.len();
+    report.left.extend(absent);
+    report
+}
+
+/// (imported: only removed from Recall, own: to the Recycle Bin), by `folders` alone.
+pub(crate) fn partition_for_delete(clips: &[PathBuf], folders: &folders::Folders) -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let recordings = crate::backend::library_dir_from(folders);
+    clips.iter().cloned().partition(|c| imports::is_imported(&c.to_string_lossy(), &recordings, &folders.imported, &folders.former_recordings))
 }
 
 /// The report from both halves' results and which own clips are still on disk.
@@ -51,8 +66,23 @@ pub(crate) fn settle(imported: &[PathBuf], hidden: Result<usize, String>, own: &
 
 /// The toast after a delete: (is it an error, title, detail).
 pub fn delete_toast(report: &DeleteReport) -> (bool, String, Option<String>) {
+    let gone = report.already_gone;
+    if gone == 0 {
+        return moved_toast(report);
+    }
+    if report.left.len() == gone && report.error.is_none() && report.stayed == 0 {
+        let title = if gone == 1 { "That clip was already gone".to_owned() } else { format!("Those {gone} clips were already gone") };
+        return (false, title, Some("Nothing moved; removed from Recall.".into()));
+    }
+    let note = if gone == 1 { "1 was already gone.".to_owned() } else { format!("{gone} were already gone.") };
+    let (bad, title, detail) = moved_toast(report);
+    (bad, title, Some(detail.map_or_else(|| note.clone(), |detail| format!("{detail} {note}"))))
+}
+
+/// [`delete_toast`] for the clips that were on disk.
+fn moved_toast(report: &DeleteReport) -> (bool, String, Option<String>) {
     let clips = |n: usize| format!("{n} {}", if n == 1 { "clip" } else { "clips" });
-    if report.left.is_empty() {
+    if report.left.len() == report.already_gone {
         let why = report.error.clone().or_else(|| (report.stayed > 0).then(|| format!("{} in use and stayed.", is_are(report.stayed))));
         return (report.error.is_some() || report.stayed > 0, "Delete failed".into(), why);
     }
@@ -123,5 +153,27 @@ mod tests {
         let own = paths(&[r"V:\R\a.mp4"]);
         let report = settle(&paths(&[r"D:\Old\x.mp4"]), Ok(1), &own, Ok(1), |_| false);
         assert_eq!(delete_toast(&report), (false, "Removed 2 clips".into(), Some("1 went to the Recycle Bin. 1 from other folders stay where they are.".into())));
+    }
+
+    #[test]
+    fn the_dialogs_folder_list_decides_what_is_only_hidden() {
+        // Whatever folders.json on disk says (unreadable, defaults), the dialog's list wins.
+        let folders = folders::Folders { recordings: Some(r"V:\Recall".into()), imported: vec![r"D:\Medal".into()], ..Default::default() };
+        let (imported, own) = partition_for_delete(&paths(&[r"D:\Medal\Game\x.mp4", r"V:\Recall\a.mp4"]), &folders);
+        assert_eq!(imported, paths(&[r"D:\Medal\Game\x.mp4"]), "an imported clip is never sent to the Recycle Bin");
+        assert_eq!(own, paths(&[r"V:\Recall\a.mp4"]));
+    }
+
+    #[test]
+    fn a_clip_missing_before_the_delete_is_not_counted_as_recycled() {
+        let dir = std::env::temp_dir().join(format!("recall-delete-gone-{}", std::process::id()));
+        let missing = dir.join("never-there.mp4");
+        let folders = folders::Folders { recordings: Some(dir.to_string_lossy().into_owned()), ..Default::default() };
+        let report = delete_or_hide(std::slice::from_ref(&missing), &folders);
+        assert_eq!((report.recycled, report.already_gone, report.stayed), (0, 1, 0));
+        assert_eq!(report.left, [missing], "it still leaves the library");
+        let (bad, title, _) = delete_toast(&report);
+        assert!(!bad);
+        assert_eq!(title, "That clip was already gone");
     }
 }

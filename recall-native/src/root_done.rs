@@ -37,8 +37,10 @@ impl Root {
                 }
                 self.ed.on_exported(result);
             }
+            Done::DeleteWaiting => self.lib.delete_waiting = true,
             Done::Deleted(report) => {
                 self.lib.deleting = 0;
+                self.lib.delete_waiting = false;
                 // Only the clips that really left: one still in use keeps its tile.
                 self.lib.forget(&report.left);
                 let (bad, title, detail) = crate::services::library::delete_toast(&report);

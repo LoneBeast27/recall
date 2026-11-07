@@ -23,6 +23,17 @@ impl LibraryState {
         }
     }
 
+    /// Clips an earlier run could not read a length for (same size and mtime): shown as "—"
+    /// at once and not queued for another probe.
+    pub(super) fn recall_failed_durations(&mut self) {
+        for record in self.records.iter().filter(|r| r.duration.is_none()) {
+            if self.store.duration_unknown(&record.path, &record.file_name, record.bytes, record.mtime) {
+                self.duration_failed.insert(record.path.clone());
+                self.duration_queued.insert(record.path.clone());
+            }
+        }
+    }
+
     /// A day group's total counts once every clip in it has a length or is known not to have one.
     pub(super) fn count_failed_durations(&mut self) {
         if self.duration_failed.is_empty() {

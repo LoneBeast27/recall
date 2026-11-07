@@ -187,7 +187,9 @@ impl Root {
         if self.lib.deleting > 0 {
             let moving = self.lib.deleting;
             let noun = if moving == 1 { "clip" } else { "clips" };
-            return bar.child(icon(Icon::Trash, 16., theme::MUTED)).child(div().text_color(c(theme::MUTED)).child(format!("Moving {moving} {noun} to the Recycle Bin…"))).into_any_element();
+            // A delete of a clip whose edits are still being saved waits for that save first.
+            let text = if self.lib.delete_waiting { "Waiting for the edit save…".to_owned() } else { format!("Moving {moving} {noun} to the Recycle Bin…") };
+            return bar.child(icon(Icon::Trash, 16., theme::MUTED)).child(div().text_color(c(theme::MUTED)).child(text)).into_any_element();
         }
         if self.lib.confirm_delete {
             let (question, detail, action) = delete_wording(count, self.imported_in_selection());
@@ -204,7 +206,8 @@ impl Root {
                     let paths = this.lib.selected_paths();
                     this.lib.confirm_delete = false;
                     this.lib.deleting = paths.len();
-                    this.workers.job(Job::Delete(paths));
+                    // The folder list the question above was worded from decides owned vs imported.
+                    this.workers.job(Job::Delete(paths, this.folders.clone()));
                     cx.notify();
                 })))
                 .into_any_element();

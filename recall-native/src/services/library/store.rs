@@ -24,12 +24,35 @@ pub(super) struct ClipMeta {
     /// When the clip was last opened (Unix seconds).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub played: Option<u64>,
+    /// Neither the MP4 index nor ffprobe could read this file's length: not probed again on the
+    /// next start while the file keeps this size and mtime.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_duration: Option<FileStamp>,
 }
 
 impl ClipMeta {
     fn is_empty(&self) -> bool {
-        !self.favourite && self.title.is_none() && self.duration.is_none() && self.played.is_none()
+        !self.favourite && self.title.is_none() && self.duration.is_none() && self.played.is_none() && self.no_duration.is_none()
     }
+
+    /// Folds an old file-name entry into this path entry: a field set on either side survives
+    /// (the path entry wins where both are set; the later "last played" wins).
+    fn merge_from(&mut self, name: &ClipMeta) {
+        self.favourite |= name.favourite;
+        if self.title.is_none() {
+            self.title.clone_from(&name.title);
+        }
+        self.duration = self.duration.or(name.duration);
+        self.played = self.played.max(name.played);
+        self.no_duration = self.no_duration.or(name.no_duration);
+    }
+}
+
+/// A file's size and mtime, the identity a cached probe result is valid for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub(super) struct FileStamp {
+    pub bytes: u64,
+    pub mtime: u64,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -163,7 +186,7 @@ impl MetaStore {
         for (name, paths) in &by_name {
             let Some(meta) = self.clips.remove(*name) else { continue };
             for path in paths {
-                self.clips.entry(clip_key(path)).or_insert_with(|| meta.clone());
+                self.clips.entry(clip_key(path)).or_default().merge_from(&meta);
             }
         }
         let moved = !by_name.is_empty();
@@ -183,10 +206,26 @@ impl MetaStore {
         }
         let next = Some(CachedDuration { bytes, mtime, secs });
         let meta = self.clips.entry(key.to_owned()).or_default();
-        if meta.duration != next {
+        if meta.duration != next || meta.no_duration.is_some() {
             meta.duration = next;
+            meta.no_duration = None;
             self.dirty = true;
         }
+    }
+
+    /// Remembers that the clip's length could not be read at this size and mtime.
+    pub fn set_duration_unknown(&mut self, key: &str, bytes: u64, mtime: u64) {
+        let next = Some(FileStamp { bytes, mtime });
+        let meta = self.clips.entry(key.to_owned()).or_default();
+        if meta.no_duration != next {
+            meta.no_duration = next;
+            self.dirty = true;
+        }
+    }
+
+    /// True when an earlier probe of this exact file (same size and mtime) found no length.
+    pub fn duration_unknown(&self, path: &str, file_name: &str, bytes: u64, mtime: u64) -> bool {
+        self.meta_of(path, file_name).and_then(|m| m.no_duration) == Some(FileStamp { bytes, mtime })
     }
 
     /// Persists pending duration-cache entries on this thread (tests; the app uses
@@ -282,3 +321,7 @@ impl MetaStore {
         self.writer.write(ticket, path, &bytes).map_err(|error| format!("write library metadata: {error}"))
     }
 }
+
+#[cfg(test)]
+#[path = "store_tests.rs"]
+mod tests;

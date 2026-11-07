@@ -210,11 +210,19 @@ pub(crate) fn scale_image(source: &Path, width: u32, target: &Path) -> Result<()
     publish(&temporary, target)
 }
 
+/// Longest a length probe may run: a hung ffprobe must not hold its disk's lane for good.
+const PROBE_LIMIT: Duration = Duration::from_secs(15);
+
 /// Container duration via ffprobe (fallback when the MP4 box parser cannot answer).
 pub(crate) fn probe_duration(source: &Path, lowered: bool) -> Result<f64, String> {
     let mut command = Command::new(binary("RECALL_FFPROBE", "ffprobe.exe")?);
     command.args(["-v", "error", "-show_entries", "format=duration", "-of", "default=nw=1:nk=1"]).arg(source);
-    let output = run_hidden(&mut command, lowered).map_err(|error| format!("start ffprobe: {error}"))?;
+    probe_duration_with(&mut command, lowered, PROBE_LIMIT)
+}
+
+/// [`probe_duration`] for a built command, killed after `limit`.
+fn probe_duration_with(command: &mut Command, lowered: bool, limit: Duration) -> Result<f64, String> {
+    let output = run_watched(command, lowered, limit, &|| false).map_err(|error| format!("ffprobe duration: {error}"))?;
     if !output.status.success() {
         return Err(format!("ffprobe duration: {}", String::from_utf8_lossy(&output.stderr).trim()));
     }
@@ -266,6 +274,14 @@ mod tests {
         let started = Instant::now();
         let error = run_watched(&mut slow_process(), false, Duration::from_millis(300), &|| false).unwrap_err();
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(started.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_length_probe_that_hangs_is_stopped() {
+        let started = Instant::now();
+        let error = probe_duration_with(&mut slow_process(), false, Duration::from_millis(300)).unwrap_err();
+        assert!(error.contains("took too long"), "{error}");
         assert!(started.elapsed() < Duration::from_secs(5));
     }
 

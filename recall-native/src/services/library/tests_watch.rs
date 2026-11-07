@@ -65,6 +65,15 @@ fn scope_matches_what_the_listing_shows() {
 }
 
 #[test]
+fn the_settle_step_takes_ownership_from_the_listing_not_from_disk() {
+    let watcher = ClipWatcher::start(|_| {});
+    assert!(watcher.owned().is_empty());
+    watcher.set_owned(vec![r"E:\Old Recall".into()]);
+    assert_eq!(watcher.owned(), [r"E:\Old Recall".to_owned()]);
+    watcher.stop();
+}
+
+#[test]
 fn a_cached_walk_learns_changes_without_a_rewalk() {
     let dir = temp("patch");
     fs::create_dir_all(dir.join("g")).unwrap();
