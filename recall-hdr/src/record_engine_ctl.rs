@@ -17,6 +17,8 @@ pub trait EngineSwitch {
     fn switch_to(&self, spec: Option<EngineSpec>);
     /// `Supervisor::restart`: no game switch; `planned` = a settings change or a resume.
     fn restart_to(&self, spec: Option<EngineSpec>, planned: bool);
+    /// `Supervisor::pause`: a stop for a pause.
+    fn pause_to(&self);
 }
 
 impl EngineSwitch for Supervisor {
@@ -26,13 +28,18 @@ impl EngineSwitch for Supervisor {
     fn restart_to(&self, spec: Option<EngineSpec>, planned: bool) {
         self.restart(spec, planned);
     }
+    fn pause_to(&self) {
+        self.pause();
+    }
 }
 
 /// `refusal` (what a line sent while the old engine quits is told) picks the call:
-/// Switching = a game switch, Restarting = a planned restart, else a recovery restart.
+/// Switching = a game switch, Restarting = a planned restart, Paused (a stop) = a pause,
+/// else a recovery restart.
 pub fn switch_engine(sw: &impl EngineSwitch, spec: Option<EngineSpec>, refusal: Sent) {
     match refusal {
         Sent::Switching => sw.switch_to(spec),
+        Sent::Paused if spec.is_none() => sw.pause_to(),
         other => sw.restart_to(spec, other == Sent::Restarting),
     }
 }

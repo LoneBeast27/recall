@@ -108,6 +108,8 @@ pub struct Sim {
 pub enum Switch {
     Retarget { stop: bool },
     Restart { stop: bool, planned: bool },
+    /// `Supervisor::pause`.
+    Pause,
 }
 
 /// Records the calls in place of the supervisor.
@@ -120,6 +122,9 @@ impl EngineSwitch for SwitchLog {
     }
     fn restart_to(&self, spec: Option<EngineSpec>, planned: bool) {
         self.0.borrow_mut().push(Switch::Restart { stop: spec.is_none(), planned });
+    }
+    fn pause_to(&self) {
+        self.0.borrow_mut().push(Switch::Pause);
     }
 }
 

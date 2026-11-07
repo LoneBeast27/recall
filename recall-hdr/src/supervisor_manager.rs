@@ -64,9 +64,10 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
                 log!("supervisor: engine started (pid {pid})");
                 let exit = supervise_child(&shared, &mut child, gen);
                 // Shutdown is no game switch: a line sent meanwhile is told "not responding".
+                // A retarget's reason is read with its quit (`None`: `send_retarget_quit`).
                 let stop = match exit {
-                    ChildExit::StopRequested => Some((shared.grace(), Sent::NotResponding)),
-                    ChildExit::Retarget => Some((shared.restart_grace(), shared.retarget_refusal())),
+                    ChildExit::StopRequested => Some((shared.grace(), Some(Sent::NotResponding))),
+                    ChildExit::Retarget => Some((shared.restart_grace(), None)),
                     _ => None,
                 };
                 if let Some((grace, refusal)) = stop {
@@ -176,12 +177,15 @@ fn supervise_child(shared: &Arc<Shared>, child: &mut Child, gen: u64) -> ChildEx
 }
 
 /// Ordered stop of a still-running child: send `quit` (from then on every line is
-/// refused with `refusal`, until the next engine's stdin), wait up to `grace`
-/// polling `try_wait`, then hard-kill any survivor.
-fn finish_shutdown(shared: &Arc<Shared>, mut child: Child, grace: Duration, refusal: Sent) {
+/// refused with `refusal`, `None` = the last retarget's, until the next engine's stdin),
+/// wait up to `grace` polling `try_wait`, then hard-kill any survivor.
+fn finish_shutdown(shared: &Arc<Shared>, mut child: Child, grace: Duration, refusal: Option<Sent>) {
     let pid = child.id();
     // First, even for a child already gone: no line may go to an engine that is ending.
-    shared.send_quit(refusal);
+    match refusal {
+        Some(refusal) => shared.send_quit(refusal),
+        None => shared.send_retarget_quit(),
+    };
     if let Ok(Some(_)) = child.try_wait() {
         log!("supervisor: engine (pid {pid}) already exited before shutdown");
         return;

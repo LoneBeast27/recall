@@ -35,6 +35,8 @@
 mod manager;
 #[path = "supervisor_protocol.rs"]
 mod protocol;
+#[path = "supervisor_refusal.rs"]
+mod refusal;
 #[path = "supervisor_stdin.rs"]
 mod stdin;
 
@@ -155,6 +157,11 @@ impl Supervisor {
     /// otherwise (a hung or failed engine, the capture watchdog) as [`Sent::NotResponding`].
     pub fn restart(&self, spec: Option<EngineSpec>, planned: bool) {
         self.shared.set_desired(spec, if planned { Sent::Restarting } else { Sent::NotResponding });
+    }
+
+    /// Stop the engine for a pause: lines sent while it quits are refused as [`Sent::Paused`].
+    pub fn pause(&self) {
+        self.shared.set_desired(None, Sent::Paused);
     }
 
     /// The last engine `hello` and `status` lines (raw JSON), for late joiners.
@@ -350,23 +357,8 @@ impl Shared {
         (g.0, g.1.clone())
     }
 
-    /// What a line sent while the engine quits for the last retarget is told.
-    fn retarget_refusal(&self) -> Sent {
-        self.desired.lock().unwrap_or_else(|p| p.into_inner()).2
-    }
-
     fn generation(&self) -> u64 {
         self.desired.lock().unwrap_or_else(|p| p.into_inner()).0
-    }
-
-    /// `refusal`: what a line sent while the old engine quits is told; a stop (`None`) is
-    /// always [`Sent::Waiting`]: no engine follows, whatever the cause.
-    fn set_desired(&self, spec: Option<EngineSpec>, refusal: Sent) {
-        let refusal = if spec.is_none() { Sent::Waiting } else { refusal };
-        let mut g = self.desired.lock().unwrap_or_else(|p| p.into_inner());
-        g.0 += 1;
-        g.1 = spec;
-        g.2 = refusal;
     }
 
     fn set_child_stdin(&self, stdin: Option<std::process::ChildStdin>) {
@@ -392,21 +384,6 @@ impl Shared {
             return refusal; // the engine was told to quit: it would never read this
         }
         if g.queue.as_ref().is_some_and(|queue| queue.send(line)) { Sent::Queued } else { Sent::NotResponding }
-    }
-
-    /// The quit window ended with no engine (a stop to Off, a failed respawn): the
-    /// refusal ends with it, and a line now says the engine is gone, not why it quit.
-    fn end_quitting(&self) {
-        self.child_stdin.lock().unwrap_or_else(|p| p.into_inner()).quitting = None;
-    }
-
-    /// `quit` takes the queue's reserved slot: a healthy engine behind a full queue still
-    /// gets its clean finish (`supervisor_stdin.rs`). From here on every line is refused
-    /// with `refusal` (set under the same lock), until the next engine's stdin.
-    fn send_quit(&self, refusal: Sent) -> bool {
-        let mut g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
-        g.quitting = Some(refusal);
-        g.queue.as_ref().is_some_and(|queue| queue.send_quit(r#"{"cmd":"quit"}"#))
     }
 
     fn clear_cache(&self) {
@@ -493,3 +470,7 @@ pub(crate) mod quit_tests;
 #[cfg(test)]
 #[path = "supervisor_stop_tests.rs"]
 mod stop_tests;
+
+#[cfg(test)]
+#[path = "supervisor_refusal_tests.rs"]
+mod refusal_tests;

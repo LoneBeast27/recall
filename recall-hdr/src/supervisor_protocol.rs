@@ -145,11 +145,39 @@ fn field(val: &serde_json::Value, key: &str) -> String {
 
 /// Log the engine's stderr, line by line, so a broken engine is diagnosable.
 pub(super) fn drain_stderr(stderr: std::process::ChildStderr) {
-    for line in BufReader::new(stderr).lines() {
-        let Ok(line) = line else { break };
+    drain_lines(BufReader::new(stderr), |line| log!("supervisor: engine-stderr: {line}"));
+}
+
+/// Every non-empty, trimmed line of `reader` to `sink`, until EOF or a read error. Read as
+/// bytes: a line that is not UTF-8 (FFmpeg's C logger can print one) is shown lossily, never
+/// taken as the end, or the engine would block on its next log once the pipe filled.
+fn drain_lines(mut reader: impl BufRead, mut sink: impl FnMut(&str)) {
+    let mut buf = Vec::new();
+    loop {
+        buf.clear();
+        match reader.read_until(b'\n', &mut buf) {
+            Ok(0) => break,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+        let line = String::from_utf8_lossy(&buf);
         let line = line.trim();
         if !line.is_empty() {
-            log!("supervisor: engine-stderr: {line}");
+            sink(line);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::drain_lines;
+
+    #[test]
+    fn a_line_that_is_not_utf8_does_not_stop_the_stderr_drain() {
+        let bytes: &[u8] = b"first\n\xff\xfe ffmpeg \xe9\n\nthird\r\nlast without newline";
+        let mut got = Vec::new();
+        drain_lines(bytes, |line| got.push(line.to_string()));
+        assert_eq!(got, ["first", "\u{fffd}\u{fffd} ffmpeg \u{fffd}", "third", "last without newline"]);
     }
 }
