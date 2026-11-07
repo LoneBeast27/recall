@@ -166,11 +166,13 @@ struct Entry {
     quiet: u32,
     /// The last verdict.
     why: Why,
+    /// What the probe saw for it (the G4 notice asks for a steady rate).
+    stats: RenderStats,
 }
 
 impl Rejected {
-    /// `(pid, hwnd)` was judged not a game (`why`) at `now`.
-    pub fn note(&mut self, pid: u32, hwnd: isize, why: Why, now: Instant) {
+    /// `(pid, hwnd)` was judged not a game (`why`, on `stats`) at `now`.
+    pub fn note(&mut self, pid: u32, hwnd: isize, why: Why, stats: RenderStats, now: Instant) {
         let (mut wait, mut quiet) = match self.last {
             Some(e) if e.pid == pid && e.hwnd == hwnd => (e.wait, e.quiet),
             _ => (Duration::ZERO, 0),
@@ -191,7 +193,7 @@ impl Rejected {
             wait = if wait.is_zero() { RECHECK_FIRST } else { (wait * 2).min(RECHECK_MAX) };
             wait
         };
-        self.last = Some(Entry { pid, hwnd, until: now + hold, wait, quiet, why });
+        self.last = Some(Entry { pid, hwnd, until: now + hold, wait, quiet, why, stats });
     }
 
     /// The window is still inside its wait.
@@ -200,9 +202,9 @@ impl Rejected {
     }
 
     /// The window's last verdict was "composed by DWM" (inside its wait or
-    /// not), for the G4 notice.
-    pub fn composed(&self, pid: u32, hwnd: isize) -> bool {
-        self.last.is_some_and(|e| e.pid == pid && e.hwnd == hwnd && e.why == Why::Composed)
+    /// not): what the probe saw, for the G4 notice.
+    pub fn composed(&self, pid: u32, hwnd: isize) -> Option<RenderStats> {
+        self.last.filter(|e| e.pid == pid && e.hwnd == hwnd && e.why == Why::Composed).map(|e| e.stats)
     }
 
     /// When the held window may be watched again.

@@ -24,7 +24,8 @@
 //! - **Windowed start** (T10): with no session, a windowed Steam-library
 //!   window needs [`WINDOWED_START`] and a client area of at least
 //!   [`MIN_CLIENT`] ([`too_small`]): a splash or launcher window does not
-//!   start the engine. Fullscreen keeps the 300 ms start.
+//!   start the engine. Fullscreen keeps the 300 ms start. A windowed known
+//!   game keeps the 300 ms start but needs the same size (R2-4).
 
 use std::time::Duration;
 
@@ -56,15 +57,18 @@ pub struct Traits {
     /// Only a `detect.fullscreen_games` entry: starts a session, never
     /// replaces a live one.
     pub listed_only: bool,
+    /// Vouched for only by `known_games` (no override): windowed, it still
+    /// needs [`MIN_CLIENT`], so the game's own error box is no candidate (R2-4).
+    pub known_only: bool,
 }
 
 impl Traits {
     /// A plain fullscreen window (what `TargetTracker::on_foreground` assumes).
-    pub const FULLSCREEN: Traits = Traits { fullscreen: true, vouched: false, listed_only: false };
+    pub const FULLSCREEN: Traits = Traits { fullscreen: true, vouched: false, listed_only: false, known_only: false };
     /// A windowed Steam-library window on the look alone.
-    pub const WINDOWED: Traits = Traits { fullscreen: false, vouched: false, listed_only: false };
+    pub const WINDOWED: Traits = Traits { fullscreen: false, vouched: false, listed_only: false, known_only: false };
     /// A new window of the process whose session window was destroyed.
-    pub const ADOPTED: Traits = Traits { fullscreen: false, vouched: true, listed_only: false };
+    pub const ADOPTED: Traits = Traits { fullscreen: false, vouched: true, listed_only: false, known_only: false };
 
     /// A windowed window that is a candidate only by its Steam-library path.
     pub fn windowed_only(self) -> bool {
@@ -77,12 +81,20 @@ pub fn traits_of(ev: &WatchEvent, cfg: &Config) -> Traits {
     let over = rules::override_kind(cfg, &ev.exe_stem).is_some();
     let known = crate::known_games::is_known_game(&ev.exe_stem, &ev.title);
     let listed = ev.fullscreen && is_fullscreen_game(cfg, &ev.exe_stem);
-    Traits { fullscreen: ev.fullscreen, vouched: over || known, listed_only: listed && !over && !known && !ev.steam_game }
+    Traits {
+        fullscreen: ev.fullscreen,
+        vouched: over || known,
+        listed_only: listed && !over && !known && !ev.steam_game,
+        known_only: known && !over,
+    }
 }
 
-/// A windowed-only candidate whose client area is under [`MIN_CLIENT`].
+/// A windowed candidate that needs [`MIN_CLIENT`] (a windowed-only Steam
+/// window, or a known game's window with no override: the 300 ms start
+/// stays, the floor applies, R2-4) whose client area is under it.
 pub fn too_small(traits: Traits, client: (i32, i32)) -> bool {
-    traits.windowed_only() && (client.0 < MIN_CLIENT.0 || client.1 < MIN_CLIENT.1)
+    let sized = traits.windowed_only() || (!traits.fullscreen && traits.known_only);
+    sized && (client.0 < MIN_CLIENT.0 || client.1 < MIN_CLIENT.1)
 }
 
 /// A foreground window of an adoptable process: the session when it is

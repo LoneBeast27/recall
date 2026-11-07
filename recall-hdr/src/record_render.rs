@@ -20,6 +20,8 @@ use std::time::Instant;
 use crate::gpu_games::KnownGames;
 use crate::log;
 use crate::record_app::Controller;
+use crate::record_composed::{notice_wanted, NOTICE_DETAIL};
+use crate::record_engine::EngineTarget;
 use crate::record_target::{classify_event, skips_render_check, Admit, Target};
 use crate::record_transition::Transitions;
 use crate::render_probe::{self, RenderProbe, StartError};
@@ -107,7 +109,7 @@ impl RenderCheck {
             }
             (Gate::Commit, _) => {}
             (Gate::Reject(why), _) => {
-                self.rejected.note(t.pid, t.hwnd, why, now);
+                self.rejected.note(t.pid, t.hwnd, why, stats, now);
                 let again = self.rejected.until().map_or(0, |u| u.saturating_duration_since(now).as_secs());
                 log!(
                     "record: render check: {} is not a game ({}) after {watched} ms: {stats:?}; checked again in {again} s",
@@ -145,11 +147,14 @@ impl Controller {
         Some(candidate)
     }
 
-    /// `ev` is a fullscreen window in front, last judged composed by DWM, and
-    /// not what is recorded (G4).
+    /// `ev` is a fullscreen window in front, last judged composed by DWM at a
+    /// game-like rate, not what is recorded, and not a meeting / office app
+    /// or a desktop capture (G4, `record_composed`).
     fn composed_in_front(&self, ev: &WatchEvent) -> bool {
         let recorded = self.tracker.current().is_some_and(|t| (t.pid, t.hwnd) == (ev.pid, ev.hwnd));
-        ev.fullscreen && !self.paused && !recorded && self.render.rejected.composed(ev.pid, ev.hwnd)
+        let desktop = *self.planner.applied() == EngineTarget::Desktop;
+        let stats = self.render.rejected.composed(ev.pid, ev.hwnd);
+        ev.fullscreen && !self.paused && !recorded && notice_wanted(&ev.exe_stem, stats, desktop)
     }
 
     /// G4: a composed fullscreen window in front for over 20 s is named
@@ -157,8 +162,8 @@ impl Controller {
     fn note_composed(&mut self, front: Option<&WatchEvent>, now: Instant) {
         let seen = front.map(|e| (e.pid, e.hwnd, e.exe_name.as_str()));
         let Some(exe) = self.render.composed.observe(seen, now) else { return };
-        log!("record: not recording {exe}: DWM composes its fullscreen window (no game signal for over 20 s); add it as a game in Settings");
-        self.shortcut_notice(&format!("Not recording {exe}"), "add it as a game in Settings");
+        log!("record: not recording {exe}: DWM composes its fullscreen window (no game signal for over 20 s)");
+        self.shortcut_notice(&format!("Not recording {exe}"), NOTICE_DETAIL);
     }
 
     /// Before the tracker polls: watch the pending candidate, if it needs it.

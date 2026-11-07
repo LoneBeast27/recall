@@ -467,3 +467,14 @@ fn screensaver_is_never_a_target() {
     }
     assert!(classify_event(&ev("scrgame", "Scr Game", 9, 0x9, true), &cfg).is_some(), "only the .scr extension");
 }
+
+#[test]
+fn store_media_apps_are_denied() {
+    // R2-5: with G6 a UWP frame resolves to the hosted exe, no longer the denied
+    // ApplicationFrameHost; without trace rights a fullscreen one would count as a game.
+    let cfg = Config::default();
+    for stem in ["Video.UI", "Microsoft.Media.Player", "Microsoft.Photos", "WinStore.App", "SystemSettings", "Netflix", "WWAHost"] {
+        assert!(!is_target(stem, true, &cfg), "{stem}");
+    }
+    assert!(is_target("Minecraft.Windows", true, &cfg), "a Store game still is");
+}
