@@ -67,3 +67,19 @@ fn an_unreadable_bad_copy_leaves_favourites_unknown() {
     drop(held);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_path_keyed_favourite_in_a_bad_copy_protects_the_clip_by_name() {
+    // library L14 keys library.json by full path; a .bad written after that holds path keys,
+    // and the plan looks clips up by file name.
+    let dir = temp_dir("path-key");
+    let lib = dir.join("library.json");
+    let bad = dir.join("library.json.bad-2026-11-07");
+    std::fs::write(&bad, format!(r#"{{"v:\\recall\\{}":{{"favourite":true}},"x":{{"dura"#, FAV.to_lowercase())).unwrap();
+    set_mtime(&bad, 1_000);
+    std::fs::write(&lib, b"{}").unwrap();
+    set_mtime(&lib, 2_000);
+    let favs = favourites_at(&lib).expect("readable");
+    assert!(favs.contains(&FAV.to_lowercase()), "the .bad copy's path-keyed favourite keeps the clip: {favs:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

@@ -34,7 +34,8 @@ pub fn lenient_favourites(bytes: &[u8]) -> HashSet<String> {
     crate::lenient_json::partial_object(bytes)
         .into_iter()
         .filter(|(_, v)| v.get("favourite").and_then(Value::as_bool) == Some(true))
-        .map(|(name, _)| name.to_lowercase())
+        // Path keys (library L14) and old name keys both reduce to the file name the plan uses.
+        .map(|(key, _)| crate::record_storage::file_key(&key))
         .collect()
 }
 
