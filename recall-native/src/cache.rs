@@ -20,6 +20,16 @@ pub fn set_budget_bytes(bytes: u64) {
     storage::set_budget_bytes(bytes)
 }
 
+/// The recorder's leftover kept copies (`staging\kept\leaked`), if any.
+pub fn leftovers() -> Option<storage::Leftovers> {
+    storage::leftovers()
+}
+
+/// Sends the leftover copies to the Recycle Bin (never a permanent delete).
+pub fn send_leftovers_to_bin() -> Result<usize, String> {
+    storage::send_leftovers_to_bin()
+}
+
 /// (label, bytes) per kind of cached data.
 pub fn usage() -> Vec<(&'static str, u64)> {
     storage::usage()

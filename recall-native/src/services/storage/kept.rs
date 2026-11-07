@@ -37,7 +37,7 @@ fn engine_kept_dir() -> Option<PathBuf> {
 }
 
 /// The folders a kept copy may come from: the engine's (beside the exe) and the cache's own.
-fn kept_dirs() -> Vec<PathBuf> {
+pub(super) fn kept_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = engine_kept_dir().into_iter().collect();
     dirs.push(super::cache_root().join("staging").join("kept"));
     dirs
@@ -68,7 +68,7 @@ pub fn adopt_kept(dest: String, kept: String) {
             eprintln!("kept clip not cached: {error}");
         }
     });
-    if spawned.is_err() && marked(&file) && copy_of(&clip, &file) {
+    if spawned.is_err() && marked(&file) && clip_whole(&clip, &file) {
         let _ = std::fs::remove_file(file);
     }
 }
@@ -82,6 +82,7 @@ pub fn sweep_kept(clip_folder: impl FnOnce() -> PathBuf + Send + 'static) {
         let root = super::cache_root();
         let budget = budget_in(&root);
         let (adopted, left) = sweep_in(&root, &kept_dir, &clip_folder(), budget);
+        super::leftovers::log_once();
         if adopted + left > 0 {
             eprintln!("kept clips: {adopted} cached, {left} left for the recorder's check");
         }
@@ -97,6 +98,13 @@ pub(super) fn marked(kept: &Path) -> bool {
 /// cache identity): the engine stamps the clip with the staged copy's time.
 fn copy_of(dest: &Path, kept: &Path) -> bool {
     matches!((dest.metadata(), kept.metadata()), (Ok(d), Ok(k)) if d.is_file() && d.len() == k.len() && super::mtime_secs(&d) == super::mtime_secs(&k))
+}
+
+/// The guard on every app-side delete of a kept copy, the same as the recorder's
+/// (`staging_kept.rs landed_whole`): the clip is on disk, a readable file, with the copy's size
+/// (and time, [`copy_of`]). Then the copy is not the only whole version of the clip.
+fn clip_whole(dest: &Path, kept: &Path) -> bool {
+    copy_of(dest, kept) && std::fs::File::open(dest).is_ok()
 }
 
 /// [`sweep_kept`] against explicit folders: a kept copy of a clip in `clip_folder` is
@@ -135,7 +143,7 @@ pub(super) fn adopt_in(root: &Path, dest: &Path, kept: &Path, budget: u64) -> Re
     let result = adopt_locked(root, dest, kept, budget);
     // Only a copy of a clip that is on disk with its size and time goes (too large for the
     // tier, or the move failed); a clip that can't be read or differs keeps its copy.
-    if result.is_err() && marked(kept) && copy_of(dest, kept) {
+    if result.is_err() && marked(kept) && clip_whole(dest, kept) {
         let _ = std::fs::remove_file(kept);
     }
     result
@@ -155,7 +163,7 @@ fn adopt_locked(root: &Path, dest: &Path, kept: &Path, budget: u64) -> Result<Pa
     let file = format!("{id}.mp4");
     let target = directory.join(&file);
     if target.metadata().is_ok_and(|m| m.len() == bytes) {
-        if marked(kept) {
+        if marked(kept) && clip_whole(dest, kept) {
             let _ = std::fs::remove_file(kept);
         }
     } else {

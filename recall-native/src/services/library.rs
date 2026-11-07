@@ -22,6 +22,13 @@ mod settle;
 mod store;
 mod store_damage;
 pub use store::clip_key;
+
+/// The library Delete's Recycle Bin call (room precheck under the shared bin lock,
+/// IFileOperation on a private desktop, a sink that refuses a permanent delete), for other
+/// user files the app sends to the bin (Settings -> Storage leftover copies).
+pub(crate) fn recycle_to_bin(paths: &[std::path::PathBuf]) -> Result<usize, String> {
+    win::recycle(paths)
+}
 pub mod watch;
 mod watch_win;
 mod win;

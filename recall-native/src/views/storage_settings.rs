@@ -26,6 +26,8 @@ pub struct CacheView {
     pub budget_bytes: u64,
     /// Set while storage.json can't be read: the size is read-only (a guess must not be saved).
     pub budget_note: Option<String>,
+    /// The recorder's leftover kept copies (never emptied on their own).
+    pub leftovers: Option<crate::services::storage::Leftovers>,
     pub used_bytes: u64,
     /// (label, bytes) per kind of cached data.
     pub tiers: Vec<(&'static str, u64)>,
@@ -47,6 +49,7 @@ impl CacheView {
             root,
             budget_bytes: crate::cache::budget_bytes(),
             budget_note: crate::cache::budget_note(),
+            leftovers: None,
             used_bytes: 0,
             tiers: Vec::new(),
             ssd_free,
@@ -65,6 +68,7 @@ impl CacheView {
         self.tiers = usage;
         self.budget_bytes = crate::cache::budget_bytes();
         self.budget_note = crate::cache::budget_note();
+        self.leftovers = crate::cache::leftovers();
         self.ssd_free = crate::services::library::drive_space(&self.root).map(|(free, _)| free);
         self.smart = crate::cache::smart_status();
     }
@@ -411,7 +415,46 @@ impl Root {
                 cx.notify();
             })));
 
-        vec![size_card.into_any_element(), location.into_any_element()]
+        let mut out = vec![size_card.into_any_element(), location.into_any_element()];
+        if let Some(row) = self.render_leftovers(cx) {
+            out.push(row);
+        }
+        out
+    }
+}
+
+impl Root {
+    /// "N leftover copies (X GB) on C:" with Open folder and Send to Recycle Bin, while the
+    /// recorder's `kept\leaked` folder holds any. Nothing empties it on its own.
+    fn render_leftovers(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let found = self.cache.leftovers.clone()?;
+        let drive: String = self.cache.root.to_string_lossy().chars().take(2).collect();
+        let line = crate::services::storage::leftover_line(found.files.len(), found.bytes, &drive)?;
+        let open_dir = found.dir.clone();
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap(px(24.))
+                .py(px(4.))
+                .child(
+                    div().flex_1().min_w_0().flex().flex_col().gap(px(2.)).child(div().font_weight(FontWeight::MEDIUM).child(line)).child(
+                        div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child("Copies that match no whole clip. One may be the only good version of a clip; check before you remove them."),
+                    ),
+                )
+                .child(ui::button("leftover-open", Variant::Secondary).child(icon(Icon::Folder, 14., theme::TEXT)).child("Open folder").on_click(cx.listener(move |_, _, _, _| {
+                    let _ = std::process::Command::new("explorer.exe").arg(&open_dir).spawn();
+                })))
+                .child(ui::button("leftover-bin", Variant::Ghost).border_1().border_color(c(theme::BORDER)).child(icon(Icon::Trash, 14., theme::MUTED)).child("Send to Recycle Bin").on_click(cx.listener(|this, _, _, cx| {
+                    match crate::cache::send_leftovers_to_bin() {
+                        Ok(n) => this.show_toast(ToastKind::Good, "Leftover copies sent to the Recycle Bin", Some(format!("{n} moved; restore them from the Recycle Bin if you need one"))),
+                        Err(error) => this.show_toast(ToastKind::Bad, "Leftover copies not moved", Some(error)),
+                    }
+                    this.cache.refresh();
+                    cx.notify();
+                })))
+                .into_any_element(),
+        )
     }
 }
 
