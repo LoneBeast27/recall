@@ -72,11 +72,11 @@ pub fn run(instance: Option<crate::instance::Guard>) -> Result<(), String> {
     // The window is gone: a new start may open one now. Helpers end with this process, so a
     // running export finishes first.
     drop(instance);
-    // Edit writes still queued (the sidecar flush on leaving the editor) reach the disk first.
-    if !crate::worker::wait_for_edits(std::time::Duration::from_secs(30)) {
+    // The running export, then the edit writes still queued (the sidecar flush on leaving the
+    // editor or closing) reach the disk before the helpers go.
+    if !crate::worker::finish_writes(crate::backend::wait_for_export, std::time::Duration::from_secs(30)) {
         eprintln!("closing with edit writes still queued");
     }
-    crate::backend::wait_for_export();
     crate::services::storage::close_helpers();
     Ok(())
 }

@@ -72,3 +72,28 @@ fn a_bad_audio_packet_does_not_stop_the_edited_audio() {
     assert_eq!(tracks.len(), 1);
     assert!(!tracks[0].packets.is_empty());
 }
+
+/// Lag (samples) that best lines `bad` up with `good` around `at` seconds.
+fn best_lag(good: &[f64], bad: &[f64], at: f64) -> i64 {
+    let start = (at * 48_000.0) as i64;
+    let sample = |s: &[f64], i: i64| s.get(i as usize).copied().unwrap_or(0.0);
+    let cost = |lag: i64| (0..4800).map(|i| (sample(good, start + i) - sample(bad, start + i + lag)).powi(2)).sum::<f64>();
+    (-80i64..=80).min_by(|a, b| cost(*a).total_cmp(&cost(*b))).unwrap()
+}
+
+#[test]
+fn a_skipped_audio_packet_leaves_its_time_silent_and_the_rest_in_place() {
+    // R2-4: the 21 ms of a skipped packet were closed up, so the rest of the track played
+    // 1024 samples early in the preview and in the export.
+    let Some((clip, bad)) = bad_clip("bad-packet-timing") else { return };
+    let stem = |input: &Path, name: &str| {
+        let info = crate::editor_media::prepare_clip(&input.to_string_lossy(), &clip.dir.join(name).to_string_lossy()).unwrap();
+        crate::editor_media::read_stem(Path::new(&info.audio[0].preview_path)).unwrap()
+    };
+    let left = |(samples, channels): (Vec<i16>, u16)| samples.iter().step_by(usize::from(channels)).map(|&s| f64::from(s)).collect::<Vec<_>>();
+    let good = left(stem(&clip.path, "cache-good"));
+    let broken = left(stem(&bad, "cache-bad"));
+    let lag = best_lag(&good, &broken, 2.0);
+    assert!(lag.abs() <= 2, "after the bad packet the stem is {lag} samples off");
+}
+

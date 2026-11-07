@@ -172,6 +172,9 @@ fn decode_track(
             break;
         }
         bad.send(&mut decoder, &packet, &what)?;
+        // A skipped packet's time stays silent (`bad_audio`): the next frame goes after it.
+        let gap = bad.take_gap().rescale(stream_tb, ff::Rational(1, rate as i32));
+        next_source_sample = next_source_sample.map(|next| next.saturating_add(gap));
         receive_audio_frames(
             &mut decoder,
             &mut resampler,

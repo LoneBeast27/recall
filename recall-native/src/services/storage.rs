@@ -31,6 +31,7 @@ mod history;
 mod io_priority;
 mod kept;
 mod lane;
+mod lane_brief;
 mod light;
 mod owned;
 mod prefetch;
@@ -78,6 +79,7 @@ pub use evict::DEFAULT_CACHE_BUDGET;
 pub use history::{Interaction, record_interaction};
 #[allow(unused_imports)]
 pub use lane::{LaneStats, Priority, lane_wait_ms, run_io, stats, submit_io};
+pub use lane_brief::run_io_brief;
 #[allow(unused_imports)]
 pub use prefetch::{GoneClip, PrefetchClip, PrefetchEvent, PrepareEditor, forget_clips, gpu_work_allowed, recorder_busy, recorder_holds, set_recorder_busy, set_recorder_connected, smart_status, start_prefetch};
 pub use projects::{ProjectSource, SidecarStep, export_dir, has_export, project_order, sidecar_step, working_copy_path, write_atomic};

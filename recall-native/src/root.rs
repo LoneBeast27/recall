@@ -168,7 +168,8 @@ impl Root {
     /// The polling task holds this view for a tick after the window goes, and the app can quit
     /// first, so `drop` alone may never run.
     pub fn flush_on_close(&mut self) {
-        self.ed.flush_now();
+        // Queued behind the edit writes already sent; app.rs waits for them before exiting.
+        self.ed.flush_on_close(|job| self.workers.job(job));
         // A fader still held is saved, as a release would.
         self.commit_dragged_fader();
         // A cache size still being typed is applied, as a click elsewhere would.
