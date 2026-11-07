@@ -55,6 +55,7 @@ impl Root {
         let before = crate::backend::library_dir();
         let old = self.folders.recordings.clone();
         let kept_old = folders_sync::retarget(&mut self.folders, dir, None);
+        crate::backend::share_folders(&self.folders);
         let _ = self.folders.save();
         // A recorder pointed into the cache (by hand, or before this check existed) blocks it.
         self.recheck_cache_overlap();
@@ -75,6 +76,7 @@ impl Root {
         match folders.save() {
             Ok(()) => {
                 self.folders = folders;
+                crate::backend::share_folders(&self.folders);
                 self.recheck_cache_overlap();
                 crate::services::library::folders::forget_scans();
                 self.workers.job(Job::List);
@@ -172,6 +174,7 @@ impl Root {
         match folders.save() {
             Ok(()) => {
                 self.folders = folders;
+                crate::backend::share_folders(&self.folders);
                 self.recheck_cache_overlap();
                 crate::services::library::folders::forget_scans();
                 self.workers.job(Job::List);
@@ -189,6 +192,7 @@ impl Root {
         match folders.save() {
             Ok(()) => {
                 self.folders = folders;
+                crate::backend::share_folders(&self.folders);
                 self.recheck_cache_overlap();
                 crate::services::library::folders::forget_scans();
                 self.workers.job(Job::List);
@@ -208,6 +212,7 @@ impl Root {
         match folders.save() {
             Ok(()) => {
                 self.folders = folders;
+                crate::backend::share_folders(&self.folders);
                 crate::services::library::folders::forget_scans();
                 self.workers.job(Job::List);
                 self.show_toast(ToastKind::Info, "Recall no longer manages that folder", Some("Its clips still show. Delete now only removes them from Recall.".into()));

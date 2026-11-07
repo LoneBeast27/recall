@@ -33,6 +33,8 @@ impl Root {
         });
         let preview = span("root: native preview", || parent_hwnd(window).and_then(NativePreview::new));
         let folders = span("root: folders load", crate::services::library::folders::Folders::load);
+        // Edit saves place files by the UI's list, not by a fresh read per save.
+        crate::backend::share_folders(&folders);
         // Before any worker or sweep: a clip folder inside the cache (or the cache inside one) blocks it.
         let cache_overlap = span("root: cache guard", || crate::services::library::folders::check_cache_overlap(&folders));
         let workers = span("root: workers", Workers::spawn);
