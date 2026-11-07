@@ -8,6 +8,7 @@ mod app;
 mod badge;
 mod cue;
 mod diagnostics;
+mod durable;
 mod dynamic;
 mod export;
 mod export_sim;

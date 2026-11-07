@@ -40,6 +40,7 @@ mod clamp;
 mod config;
 mod control;
 mod display;
+mod durable;
 mod edid;
 mod engine_policy;
 mod frame_timing;

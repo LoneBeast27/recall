@@ -25,6 +25,8 @@ mod tests;
 #[cfg(test)]
 mod tests_io;
 #[cfg(test)]
+mod tests_persist;
+#[cfg(test)]
 mod tests_settle;
 #[cfg(test)]
 mod tests_watch;
@@ -308,6 +310,10 @@ pub struct MetaStore {
     dirty: bool,
     /// Why writes are refused (an unreadable existing file must not be overwritten).
     write_block: Option<String>,
+    /// The file was damaged and kept as `.bad`: background entries (durations, played)
+    /// stay in memory until the user changes something, so a fresh file without the old
+    /// favourites never appears on its own (the storage limit reads it).
+    hold: bool,
 }
 
 /// Reads an MP4's duration from its `moov/mvhd` box without decoding.

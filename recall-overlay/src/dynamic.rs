@@ -15,6 +15,9 @@ use serde_json::Value;
 use crate::placement::{Anchor, EDGE, NOTICE_H, REF_HEIGHT};
 use crate::spot_edit::SavedSpot;
 
+#[path = "dynamic_file.rs"]
+mod file;
+
 /// A scan marking more of the picture than this as HUD came from menus or
 /// replays, not play (the engine refuses these too; older saved ones are skipped).
 pub const MAX_HUD_SHARE: f32 = 0.30;
@@ -235,6 +238,8 @@ struct CacheFile {
 pub struct HudCache {
     path: Option<PathBuf>,
     file: CacheFile,
+    /// The file could not be read this run: never replace it (`dynamic_file.rs`).
+    read_only: bool,
 }
 
 impl HudCache {
@@ -244,12 +249,11 @@ impl HudCache {
     }
 
     pub fn load(path: Option<PathBuf>) -> Self {
-        let file = path
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
-        let mut cache = Self { path, file };
+        let (file, writable) = match path.as_ref() {
+            Some(p) => file::read(p, std::time::SystemTime::now()),
+            None => (CacheFile::default(), true),
+        };
+        let mut cache = Self { path, file, read_only: !writable };
         let before = (cache.file.games.len(), cache.file.spots.len());
         // Keys are exe stems; anything else (a window title) is dropped and the file rewritten once.
         cache.file.games.retain(|key, _| cache_key(key));
@@ -365,17 +369,12 @@ impl HudCache {
         }
     }
 
-    /// Written whole to `<path>.tmp`, then renamed over the old file.
+    /// Written whole to a temp file, flushed, then renamed over the old file;
+    /// never over a file this run could not read.
     fn save(&self) {
-        let Some(path) = self.path.as_ref() else { return };
+        let Some(path) = self.path.as_ref().filter(|_| !self.read_only) else { return };
         let Ok(text) = serde_json::to_string(&self.file) else { return };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, text).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
-        }
+        let _ = crate::durable::write_durable(path, text.as_bytes());
     }
 }
 
@@ -468,3 +467,7 @@ pub fn hud_scan(value: &Value) -> Option<Value> {
 #[cfg(test)]
 #[path = "dynamic_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "dynamic_persist_tests.rs"]
+mod persist_tests;
