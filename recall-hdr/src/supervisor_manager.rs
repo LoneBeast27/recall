@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use super::protocol::{drain_stderr, read_protocol};
 use super::{engine_command, EngineHealth, Shared, SHUTDOWN_POLL, SLEEP_CHUNK};
-use crate::engine_policy::{EngineSpec, Next, RestartPolicy, GIVEUP_WINDOW};
+use crate::engine_policy::{EngineSpec, Next, RestartPolicy, EXIT_SLOT_BUSY, GIVEUP_WINDOW};
 use crate::record_dispatch::Sent;
 use crate::log;
 
@@ -57,6 +57,7 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
 
         shared.set_health(EngineHealth::Running { pid: 0 });
         let started = Instant::now();
+        let mut code = None;
         match spawn_engine(&path, &shared, &spec) {
             Ok((mut child, reader)) => {
                 let pid = child.id();
@@ -87,7 +88,14 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
                         policy.on_intended_restart();
                         continue;
                     }
-                    ChildExit::Clean(code) => log!("supervisor: engine exited (code {code})"),
+                    ChildExit::Clean(c) => {
+                        code = Some(c);
+                        if c == EXIT_SLOT_BUSY {
+                            log!("supervisor: another engine still holds the recorder (code {c}); retrying, not a failure");
+                        } else {
+                            log!("supervisor: engine exited (code {c})");
+                        }
+                    }
                     ChildExit::Signalled => log!("supervisor: engine terminated without an exit code"),
                 }
             }
@@ -97,7 +105,7 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
             }
         }
 
-        match policy.on_unintended_exit(Instant::now(), started.elapsed()) {
+        match policy.on_exit(code, Instant::now(), started.elapsed()) {
             Next::GiveUp => {
                 log!(
                     "supervisor: giving up -- {} engine failures within {}s; not restarting until the target changes.",

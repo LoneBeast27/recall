@@ -2,8 +2,9 @@
 //! the controller; when the controller dies, std's `println!` / `eprintln!` panic on the
 //! next write (`ERROR_NO_DATA`). This module is declared first in `main.rs` with
 //! `#[macro_use]`, so its `println!` / `eprintln!` shadow std's in every engine module:
-//! a line that cannot be written is dropped, and the first failure points both streams
-//! at NUL (`stdin_reader::stdout_failed`). Test builds keep std's macros, so cargo's
+//! a line that cannot be written is dropped; a failed stdout points both streams at NUL
+//! and marks the engine orphaned, a failed stderr quiets stderr only
+//! (`stdin_reader::stream_failed`). Test builds keep std's macros, so cargo's
 //! output capture still works; the writer itself is tested directly.
 
 use std::fmt::Arguments;
@@ -18,7 +19,7 @@ pub fn write_line_to(out: &mut impl Write, args: Arguments<'_>) -> bool {
 #[cfg_attr(test, allow(dead_code))]
 pub fn out(args: Arguments<'_>) {
     if !write_line_to(&mut std::io::stdout().lock(), args) {
-        crate::stdin_reader::stdout_failed();
+        crate::stdin_reader::stream_failed(crate::stdin_reader::Stream::Out);
     }
 }
 
@@ -26,7 +27,7 @@ pub fn out(args: Arguments<'_>) {
 #[cfg_attr(test, allow(dead_code))]
 pub fn err(args: Arguments<'_>) {
     if !write_line_to(&mut std::io::stderr().lock(), args) {
-        crate::stdin_reader::stdout_failed();
+        crate::stdin_reader::stream_failed(crate::stdin_reader::Stream::Err);
     }
 }
 

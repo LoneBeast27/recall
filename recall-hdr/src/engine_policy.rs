@@ -19,10 +19,15 @@ const BACKOFF_BASE_MS: u64 = 500;
 const BACKOFF_CAP_MS: u64 = 30_000;
 /// A child that stays up at least this long is "healthy" -- reset the backoff.
 pub const STABLE_UPTIME: Duration = Duration::from_secs(60);
+/// The longest wait between retries while another engine holds the recorder.
+pub const BUSY_RETRY_MAX: Duration = Duration::from_secs(5);
 /// Give-up window: this many failures inside it trips the circuit breaker.
 pub const GIVEUP_WINDOW: Duration = Duration::from_secs(120);
 /// Failures within `GIVEUP_WINDOW` that trip give-up (anti fork-bomb).
 pub const GIVEUP_THRESHOLD: usize = 6;
+
+/// The engine's exit code for "another engine already records" (`recall/src/main.rs`).
+pub const EXIT_SLOT_BUSY: i32 = 3;
 
 /// Environment edits for one engine spawn: `Some` sets, `None` removes. The
 /// default (empty) spec inherits the controller's environment unchanged.
@@ -68,6 +73,8 @@ pub enum Next {
 pub struct RestartPolicy {
     attempt: u32,
     failures: Vec<Instant>,
+    /// Retries in a row while another engine holds the recorder (not failures).
+    busy: u32,
 }
 
 impl RestartPolicy {
@@ -87,6 +94,19 @@ impl RestartPolicy {
         Next::Backoff { delay, attempt: self.attempt }
     }
 
+    /// An engine exit (`code`: its exit code, None without one) the controller did not ask for.
+    /// [`EXIT_SLOT_BUSY`] means another engine still holds the recorder (an orphan of a
+    /// crashed controller finishing its save): not a failure.
+    pub fn on_exit(&mut self, code: Option<i32>, now: Instant, uptime: Duration) -> Next {
+        if code == Some(EXIT_SLOT_BUSY) {
+            let delay = backoff_delay(self.busy).min(BUSY_RETRY_MAX);
+            self.busy = self.busy.saturating_add(1);
+            return Next::Backoff { delay, attempt: self.busy };
+        }
+        self.busy = 0;
+        self.on_unintended_exit(now, uptime)
+    }
+
     /// The controller restarted the engine on purpose: deliberately NOT a
     /// failure (no give-up count, no backoff).
     pub fn on_intended_restart(&mut self) {}
@@ -94,6 +114,7 @@ impl RestartPolicy {
     /// A new target: forget the old target's failures.
     pub fn reset(&mut self) {
         self.attempt = 0;
+        self.busy = 0;
         self.failures.clear();
     }
 
@@ -190,6 +211,28 @@ mod tests {
         p.reset(); // a new target gets a fresh breaker
         assert_eq!(p.recent_failures(), 0);
         assert!(matches!(p.on_unintended_exit(t0 + Duration::from_secs(6), Duration::ZERO), Next::Backoff { attempt: 1, .. }));
+    }
+
+    #[test]
+    fn an_engine_slot_still_held_by_an_orphan_never_gives_up() {
+        // R6-overlay-2: the old controller's orphan finishes its save while the new
+        // controller's engine exits 3 on every try.
+        let t0 = Instant::now();
+        let mut p = RestartPolicy::default();
+        for i in 0..20 {
+            let next = p.on_exit(Some(EXIT_SLOT_BUSY), t0 + Duration::from_secs(i * 6), Duration::ZERO);
+            match next {
+                Next::Backoff { delay, .. } => assert!(delay <= BUSY_RETRY_MAX, "retry {i}: {delay:?}"),
+                Next::GiveUp => panic!("busy exit {i} gave up"),
+            }
+        }
+        assert_eq!(p.recent_failures(), 0, "busy exits are not failures");
+        // Once the slot frees, a real crash starts the backoff at its base.
+        assert_eq!(
+            p.on_exit(Some(1), t0 + Duration::from_secs(200), Duration::ZERO),
+            Next::Backoff { delay: Duration::from_millis(500), attempt: 1 }
+        );
+        assert!(matches!(p.on_exit(None, t0 + Duration::from_secs(201), Duration::ZERO), Next::Backoff { attempt: 2, .. }));
     }
 
     #[test]

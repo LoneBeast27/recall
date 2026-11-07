@@ -287,7 +287,7 @@ pub fn run() -> i32 {
 impl Controller {
     fn pump(&mut self, watch_rx: &Receiver<WatchEvent>, ctl_rx: &Receiver<Inbound>) -> i32 {
         loop {
-            let timeout = app::wait_ms(self.next_deadline(), MAX_WAIT_MS);
+            let timeout = crate::record_quit_wait::pump_wait_ms(self.quit.is_some(), self.next_deadline(), Instant::now(), MAX_WAIT_MS);
             unsafe {
                 MsgWaitForMultipleObjectsEx(None, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             }
@@ -426,7 +426,7 @@ impl Controller {
             RecordingTrayCmd::TogglePause => self.set_paused(!self.paused),
             RecordingTrayCmd::Quit => {
                 log!("record: tray quit");
-                self.quit = Some(QuitReason::TrayMenu);
+                self.ask_quit(QuitReason::TrayMenu);
             }
         }
     }

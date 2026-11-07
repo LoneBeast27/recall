@@ -49,6 +49,8 @@ pub fn hold_cap(estimate: u64) -> Duration {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct WriteWatch {
     last: Option<u64>,
+    /// The packet bytes of the last report (`save_writing.bytes`; none: no report).
+    bytes: Option<u64>,
     moved: Option<Instant>,
     since: Option<Instant>,
     /// The save in front ran past its cap (its queue was let go once).
@@ -74,6 +76,7 @@ impl WriteWatch {
             self.moved = Some(now);
         }
         self.last = seen;
+        self.bytes = ev.get("save_writing").and_then(|w| w.get("bytes")).and_then(Value::as_u64).filter(|_| seen.is_some());
         moved
     }
 
@@ -163,6 +166,16 @@ impl EngineActivity {
     pub fn save_growing(&mut self, now: Instant) -> bool {
         let cap = self.hold_cap();
         self.write.moved_within(now, GROWING_WITHIN, cap)
+    }
+
+    /// The last progress mark the engine reported for the save in front (none: no report).
+    pub fn writing_mark(&self) -> Option<u64> {
+        self.write.last
+    }
+
+    /// The bytes the engine last reported written for the save in front (none: no report).
+    pub fn writing_bytes(&self) -> Option<u64> {
+        self.write.bytes
     }
 
     /// Saves in flight a quit now would lose.

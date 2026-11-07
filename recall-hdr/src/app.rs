@@ -43,7 +43,7 @@ use crate::tray::{self, Tray, TrayCmd};
 use crate::types::RuleKind;
 use crate::watcher::{WatchEvent, Watcher};
 use helpers::log_file_path;
-pub(crate) use helpers::{drain_messages, foreground_of, health_summary, primary_monitor_isize, wait_ms};
+pub(crate) use helpers::{drain_messages, foreground_of, health_summary, primary_monitor_isize, wait_ms, wait_ms_at};
 
 /// Cap on the pump wait so `poll()` stays lively even with no pending deadline
 /// (session-liveness + supervisor-health checks want to tick regularly).
