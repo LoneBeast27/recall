@@ -178,12 +178,6 @@ pub enum Outbound {
         path: String,
         paths: Vec<String>,
     },
-    /// The replay buffer restarted under a running capture; `reason` "hdr_on": Windows HDR
-    /// turned on under a Bgra8 capture, which had to restart in Rgba16F (the controller
-    /// shows a notice).
-    BufferRestarted {
-        reason: &'static str,
-    },
     /// A `hud_probe` finished: where the game's HUD sits over the picture, one
     /// number per grid row (bit c = column c holds HUD). `ok` false: too little
     /// moving play to tell (`grid` empty, `reason` says why). `kind` "game" is

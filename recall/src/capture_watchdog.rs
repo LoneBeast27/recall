@@ -141,8 +141,6 @@ pub(crate) trait CaptureSlot {
     fn screen(&self) -> Screen;
     /// Why the capture must be replaced, if it must (taken: `CaptureShared::restart_reason`).
     fn restart_reason(&mut self) -> Option<&'static str>;
-    /// A held capture is about to be replaced for `why` (the encoder decides about the ring).
-    fn replacing(&mut self, _why: &'static str) {}
 }
 
 /// `periodic_update`'s capture step: [`watch`], then [`restart_if_asked`] only when watch
@@ -202,7 +200,6 @@ pub(crate) fn restart_if_asked(slot: &mut impl CaptureSlot, now: Instant) {
             return;
         }
         eprintln!("[recall] capture restarts {why}");
-        slot.replacing(why);
         restart(slot, now);
     } else {
         eprintln!("[recall] capture restart asked {why} with no capture; the next start uses it");
@@ -253,12 +250,6 @@ impl CaptureSlot for App {
 
     fn restart_reason(&mut self) -> Option<&'static str> {
         self.shared.as_ref().and_then(|s| s.restart_reason())
-    }
-
-    /// Notes an HDR restart; the encoder says whether the replay buffer was reset
-    /// (`buffer_notice`: the controller's notice comes only then).
-    fn replacing(&mut self, why: &'static str) {
-        crate::buffer_notice::send(self.config.json, crate::buffer_notice::capture_replaced(why));
     }
 
 }

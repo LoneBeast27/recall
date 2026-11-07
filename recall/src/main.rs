@@ -17,7 +17,6 @@ mod audio;
 #[cfg(feature = "encode")]
 mod audio_clock;
 mod bookmarks;
-mod buffer_notice;
 mod border;
 mod capture;
 mod capture_watchdog;
@@ -47,7 +46,6 @@ mod gpu_route;
 #[cfg(test)]
 mod hw_skip;
 mod hdr;
-mod hdr_capable;
 mod hud_probe;
 mod hybrid_gpu;
 mod protocol;
@@ -363,8 +361,7 @@ impl ApplicationHandler for App {
         self.shared = Some(shared);
         self.window = Some(window);
 
-        // The display mode picks the capture format (Bgra8 for SDR only, fp16 for HDR or a
-        // display that can turn HDR on).
+        // The display mode picks the capture format (Bgra8 for SDR, fp16 for HDR).
         self.refresh_hdr_mode();
         self.start_capture();
         self.emit_status();
