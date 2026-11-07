@@ -12,6 +12,9 @@
 //! | 4 | no override, `fullscreen_on_target`         | `default_game_class` mapped    |
 //! | 5 | no override, windowed                        | `NonGame` (conservative)       |
 //!
+//! Step 3b is skipped for a fullscreen window whose stem is in
+//! `detect.fullscreen_games` (the user's opt-in, R5-detect-3).
+//!
 //! The deny-list (#2) intentionally beats a config override (#3): a shell/capture
 //! tool must never be driven into a game rule even if a user mis-lists it. An
 //! override (#3) beats the fullscreen default (#4/#5) so an explicit rule fires
@@ -155,8 +158,10 @@ pub fn classify(fg: &Foreground, cfg: &Config) -> AppKind {
         return rule_to_app(kind);
     }
 
-    // 3b. No override: a call, chat or office app is never a game (R4-detect-1).
-    if crate::private_apps::is_private(stem) {
+    // 3b. No override: a call, chat or office app is never a game (R4-detect-1),
+    // unless `detect.fullscreen_games` opts its fullscreen window in (R5-detect-3).
+    let opted_in = fg.fullscreen_on_target && crate::record_target::is_fullscreen_game(cfg, stem);
+    if crate::private_apps::is_private(stem) && !opted_in {
         return AppKind::NonGame;
     }
 

@@ -204,8 +204,9 @@ const OWN_STEMS: &[&str] = &["recall", "recall-hdr", "recall-native", "recall-hu
 /// Order: Recall's own processes, then a `none` override, then
 /// `detect.fullscreen_games` (beats the deny lists), then the deny lists, then
 /// a game override, then `looks_like_game` unless the stem is a call, chat or
-/// office app (`private_apps`: an override or `fullscreen_games` opts it in).
-pub fn is_target(stem: &str, looks_like_game: bool, cfg: &Config) -> bool {
+/// office app (`private_apps`: an override, `fullscreen_games` or
+/// `game_evidence` = [`game_evidence`] of the event opts it in).
+pub fn is_target_with(stem: &str, looks_like_game: bool, game_evidence: bool, cfg: &Config) -> bool {
     let stem = strip_exe(stem.trim());
     if stem.is_empty() || OWN_STEMS.iter().any(|d| d.eq_ignore_ascii_case(stem)) {
         return false;
@@ -222,8 +223,14 @@ pub fn is_target(stem: &str, looks_like_game: bool, cfg: &Config) -> bool {
     }
     match kind {
         Some(_) => true,
-        None => looks_like_game && !crate::private_apps::is_private(stem),
+        None => looks_like_game && !crate::private_apps::blocks_recording(stem, game_evidence),
     }
+}
+
+/// [`is_target_with`] with no game evidence (tests).
+#[cfg(test)]
+pub fn is_target(stem: &str, looks_like_game: bool, cfg: &Config) -> bool {
+    is_target_with(stem, looks_like_game, false, cfg)
 }
 
 /// `stem` is in `detect.fullscreen_games` (case-insensitive, `.exe` optional):
@@ -259,8 +266,13 @@ pub fn classify_event(ev: &WatchEvent, cfg: &Config) -> Option<Target> {
     if is_screensaver(&ev.exe_name) || crate::known_games::is_minecraft_server(&ev.exe_stem, &ev.title) {
         return None;
     }
-    let looks = ev.fullscreen || ev.steam_game || crate::known_games::is_known_game(&ev.exe_stem, &ev.title);
-    is_target(&ev.exe_stem, looks, cfg).then(|| Target::from_event(ev))
+    let evidence = game_evidence(ev);
+    is_target_with(&ev.exe_stem, ev.fullscreen || evidence, evidence, cfg).then(|| Target::from_event(ev))
+}
+
+/// The exe lives in a Steam library or Recall knows the game (R5-detect-2).
+pub fn game_evidence(ev: &WatchEvent) -> bool {
+    ev.steam_game || crate::known_games::is_known_game(&ev.exe_stem, &ev.title)
 }
 
 /// The image is a screensaver (`*.scr`, any case).
