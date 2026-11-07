@@ -25,6 +25,8 @@ pub enum Effect {
 pub const NOT_RESPONDING: &str = "Recorder isn't responding";
 /// A line refused because the engine was told to quit for a game switch (`Supervisor::retarget`).
 pub const SWITCHING: &str = "Switching games; try again in a moment";
+/// A line refused while the engine quits for a planned restart (a settings change, a resume).
+pub const RESTARTING: &str = "Recorder is restarting, try again in a moment";
 
 /// What became of one engine line (`Supervisor::send_engine_line`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,8 +36,11 @@ pub enum Sent {
     /// Not written: the engine was told to quit for a game switch (a retarget), and the
     /// next engine is not up yet.
     Switching,
+    /// Not written: the engine was told to quit for a planned restart (new settings, a
+    /// resume from sleep), and the next engine is not up yet.
+    Restarting,
     /// Not written: no engine, a full queue (the engine is not reading), or a quit that
-    /// is no game switch (a hang or failure restart, a settings restart, shutdown).
+    /// is neither a game switch nor planned (a hang, failure or watchdog restart, shutdown).
     NotResponding,
 }
 
@@ -54,6 +59,7 @@ impl Sent {
         match self {
             Sent::Queued => None,
             Sent::Switching => Some(SWITCHING),
+            Sent::Restarting => Some(RESTARTING),
             Sent::NotResponding => Some(NOT_RESPONDING),
         }
     }

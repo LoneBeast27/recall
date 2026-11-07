@@ -183,3 +183,15 @@ fn the_legacy_save_hotkey_and_pipe_save_after_the_quit_are_refused_and_never_wri
     let ok = TestPipe::healthy();
     assert_eq!(legacy_save(|l| ok.send(l), None), None, "a live engine takes it");
 }
+
+#[test]
+fn a_save_during_a_planned_restart_says_the_recorder_is_restarting() {
+    // A settings change or a resume (`restart_engine_for_settings(true)`).
+    let (pipe, rec) = TestPipe::quitting(Sent::Restarting);
+    let mut port = Shown { pipe: &pipe, log: Vec::new() };
+    assert!(!save(&mut port, 30, false));
+    assert_eq!(port.log, ["save_failed: Recorder is restarting, try again in a moment"], "no saving, no tick");
+    assert_eq!(command_effects(pipe.send(r#"{"cmd":"bookmark"}"#)), [Effect::Refused(RESTARTING)]);
+    pipe.close();
+    assert_eq!(after_quit(&rec.lines()), Vec::<String>::new());
+}
