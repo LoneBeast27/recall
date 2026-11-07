@@ -138,6 +138,11 @@ impl Supervisor {
         self.shared.health()
     }
 
+    /// Whether another recorder holds the engine slot (busy retries, or given up on it).
+    pub fn slot_held(&self) -> crate::engine_slot::SlotHeld {
+        self.shared.slot.get(self.shared.hello_count.load(Ordering::SeqCst))
+    }
+
     /// Forward an arbitrary engine protocol command line; never blocks. Not queued (no
     /// engine, a full queue, or an engine told to quit) says why ([`Sent`]).
     pub fn send_engine_line(&self, line: &str) -> Sent {
@@ -261,6 +266,8 @@ struct Shared {
     hub: Mutex<Option<Arc<crate::control::PipeHub>>>,
     /// The controller's engine-event channel (record mode).
     events: Mutex<Option<std::sync::mpsc::Sender<serde_json::Value>>>,
+    /// Another recorder holds the engine slot (`engine_slot`).
+    slot: crate::engine_slot::SlotFlag,
 }
 
 /// The live child's stdin and whether it was told to quit, under one lock: the check and
@@ -272,6 +279,7 @@ struct EngineStdin {
     /// Set with the `quit`: why every line is refused until the next engine's stdin.
     quitting: Option<Sent>,
 }
+
 /// The event the manager hands the controller each time an engine process
 /// ends (any reason): saves still in flight are lost (`EngineActivity`).
 pub const ENGINE_EXITED: &str = "engine_exited";
@@ -305,6 +313,7 @@ impl Shared {
             cache: Mutex::new(EngineCache::default()),
             hub: Mutex::new(None),
             events: Mutex::new(None),
+            slot: Default::default(),
         }
     }
 

@@ -14,6 +14,8 @@
 /// The engine's `eprintln!`: written if it can be, never a panic (`stderr_log`).
 /// Defined before every module so it shadows std's for the whole crate; the
 /// controller's stderr pipe closes when it dies, and std's would panic then.
+/// Outside tests `quiet_io`'s (below) shadows it everywhere.
+#[cfg_attr(not(test), allow(unused_macros))]
 macro_rules! eprintln {
     () => {
         $crate::stderr_log::line(format_args!(""))
@@ -175,8 +177,9 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Args {
 
 /// How long a new recorder waits for an engine that is still ending (a restart).
 const ENGINE_WAIT: Duration = Duration::from_secs(3);
-/// Exit code when another engine already records.
-const EXIT_ALREADY_RUNNING: i32 = 3;
+/// Exit code when another engine already records (recall-hdr `engine_policy::EXIT_SLOT_BUSY`:
+/// retried, not a crash). 86 collides with nothing common: not abort() (3), not a panic (101).
+const EXIT_ALREADY_RUNNING: i32 = 86;
 
 /// Claims the recorder guard. Only the recorder takes it: one-shot commands (prepare,
 /// export, smoke tests) run beside a recording engine.
@@ -191,6 +194,7 @@ fn claim_recorder(json: bool) -> Option<single_instance::Guard> {
     match single_instance::claim_within(&single_instance::mutex_name(single_instance::ENGINE), ENGINE_WAIT) {
         single_instance::Claim::First(guard) => Some(guard),
         single_instance::Claim::Taken => {
+            // The controller logs this once a minute while it retries (`engine_slot`).
             say("another Recall engine is already recording; exiting".into());
             std::process::exit(EXIT_ALREADY_RUNNING);
         }
@@ -533,6 +537,12 @@ fn main() {
 #[cfg(test)]
 mod args_tests {
     use super::{parse_args_from, Args};
+
+    #[test]
+    fn the_slot_held_exit_code_is_its_own() {
+        // R7-overlay-3: abort() exits 3; the controller must not read a crash as "slot held".
+        assert_eq!(super::EXIT_ALREADY_RUNNING, 86);
+    }
 
     fn parse(args: &[&str]) -> Args {
         parse_args_from(args.iter().map(|a| a.to_string()))

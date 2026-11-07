@@ -4,7 +4,7 @@
 //! `#[macro_use]`, so its `println!` / `eprintln!` shadow std's in every engine module:
 //! a line that cannot be written is dropped; a failed stdout points both streams at NUL
 //! and marks the engine orphaned, a failed stderr quiets stderr only
-//! (`stdin_reader::stream_failed`). Test builds keep std's macros, so cargo's
+//! (`stdin_reader::stream_failed`). Test builds keep `stderr_log`'s `eprintln!` and std's `println!`, so cargo's
 //! output capture still works; the writer itself is tested directly.
 
 use std::fmt::Arguments;

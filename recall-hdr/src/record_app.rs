@@ -426,7 +426,7 @@ impl Controller {
             RecordingTrayCmd::TogglePause => self.set_paused(!self.paused),
             RecordingTrayCmd::Quit => {
                 log!("record: tray quit");
-                self.ask_quit(QuitReason::TrayMenu);
+                self.ask_quit(QuitReason::TrayMenu, false);
             }
         }
     }

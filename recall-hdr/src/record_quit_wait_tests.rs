@@ -1,4 +1,5 @@
-//! The quit wait's pump sleep, a 2nd Quit, and the pipe's `finishing_clip` (R6-overlay-1/3/5).
+//! The quit wait's pump sleep, a 2nd Quit, and the pipe's `finishing_clip` (R6-overlay-1/3/5,
+//! R7-overlay-1/4).
 
 use std::time::{Duration, Instant};
 
@@ -28,12 +29,12 @@ fn a_second_quit_during_the_save_wait_quits_at_once_and_reports_the_loss() {
     let t0 = Instant::now();
     let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
     a.save_sent(t0);
-    let reason = on_quit_request(None, QuitReason::TrayMenu, &mut q);
+    let reason = on_quit_request(None, QuitReason::TrayMenu, false, t0, &mut q);
     assert_eq!(reason, Some(QuitReason::TrayMenu));
     assert_eq!(q.step(&mut a, t0), QuitStep::Wait { first: true });
-    let reason = on_quit_request(reason, QuitReason::TrayMenu, &mut q);
+    let reason = on_quit_request(reason, QuitReason::TrayMenu, false, t0 + Duration::from_secs(2), &mut q);
     assert_eq!(reason, Some(QuitReason::TrayMenu));
-    assert_eq!(q.step(&mut a, t0 + Duration::from_secs(1)), QuitStep::Lost(1), "quit now, the save reported lost");
+    assert_eq!(q.step(&mut a, t0 + Duration::from_secs(2)), QuitStep::Lost(1), "quit now, the save reported lost");
     let line: Value = serde_json::from_str(&closed_during_save_event()).unwrap();
     assert_eq!(line["reason"], "Recall was closed during the save");
 }
@@ -48,20 +49,21 @@ fn which_repeat_counts_as_quit_now() {
         q
     };
     // A quit before the wait started is just the first quit.
+    let later = t0 + Duration::from_secs(2);
     let mut fresh = QuitWait::default();
-    assert_eq!(on_quit_request(Some(QuitReason::ControlPipe), QuitReason::ControlPipe, &mut fresh), Some(QuitReason::ControlPipe));
+    assert_eq!(on_quit_request(Some(QuitReason::ControlPipe), QuitReason::ControlPipe, false, later, &mut fresh), Some(QuitReason::ControlPipe));
     assert!(!fresh.forced);
-    // The pipe again after a pipe quit (a script asking twice): quit now.
+    // The pipe again after a pipe quit (an installer re-run, a double click in the app): join the wait.
     let mut q = a_wait();
-    on_quit_request(Some(QuitReason::ControlPipe), QuitReason::ControlPipe, &mut q);
-    assert!(q.forced);
+    on_quit_request(Some(QuitReason::ControlPipe), QuitReason::ControlPipe, false, later, &mut q);
+    assert!(!q.forced, "a plain repeat never throws the clip away");
     // The installer's pipe quit while a tray quit waits: keep waiting, keep the tray's reason.
     let mut q = a_wait();
-    assert_eq!(on_quit_request(Some(QuitReason::TrayMenu), QuitReason::ControlPipe, &mut q), Some(QuitReason::TrayMenu));
+    assert_eq!(on_quit_request(Some(QuitReason::TrayMenu), QuitReason::ControlPipe, false, later, &mut q), Some(QuitReason::TrayMenu));
     assert!(!q.forced, "an install never throws the user's clip away");
     // A tray Quit while a session end or a pipe quit waits: the user wants out now.
     let mut q = a_wait();
-    assert_eq!(on_quit_request(Some(QuitReason::SessionEnd), QuitReason::TrayMenu, &mut q), Some(QuitReason::TrayMenu));
+    assert_eq!(on_quit_request(Some(QuitReason::SessionEnd), QuitReason::TrayMenu, false, later, &mut q), Some(QuitReason::TrayMenu));
     assert!(q.forced);
     q.reset();
     assert!(!q.forced && !q.waiting(), "a cancelled quit waits afresh next time");
@@ -99,4 +101,61 @@ fn the_finishing_bytes_come_from_the_engines_save_report() {
     assert_eq!((a.writing_mark(), a.writing_bytes()), (Some(12), Some(4_000_000)));
     a.on_engine_event(&json!({"type":"status","save_writing":null}), 0.0, t0 + Duration::from_secs(1));
     assert_eq!(a.writing_bytes(), None, "no save in the saver: no bytes");
+}
+
+#[test]
+fn a_repeated_plain_pipe_quit_joins_the_wait_and_only_force_stops_now() {
+    // R7-overlay-1: "Stop recorder" clicked twice must not throw the clip away.
+    let t0 = Instant::now();
+    let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
+    a.save_sent(t0);
+    let r = on_quit_request(None, QuitReason::ControlPipe, false, t0, &mut q);
+    assert_eq!(q.step(&mut a, t0), QuitStep::Wait { first: true });
+    let r = on_quit_request(r, QuitReason::ControlPipe, false, t0 + Duration::from_millis(300), &mut q);
+    assert!(!q.forced, "a double click joins the wait");
+    assert_eq!(q.step(&mut a, t0 + Duration::from_secs(1)), QuitStep::Wait { first: false });
+    on_quit_request(r, QuitReason::ControlPipe, true, t0 + Duration::from_secs(5), &mut q);
+    assert!(q.forced, "\"force\":true stops now");
+    assert_eq!(q.step(&mut a, t0 + Duration::from_secs(5)), QuitStep::Lost(1));
+    // Force on the first quit, or while a tray quit waits, stops now too.
+    let mut q = a_wait_at(t0);
+    on_quit_request(Some(QuitReason::TrayMenu), QuitReason::ControlPipe, true, t0, &mut q);
+    assert!(q.forced);
+    let line: Value = serde_json::from_str("{\"cmd\":\"quit\",\"force\":true}").unwrap();
+    assert!(quit_force(&line));
+    assert!(!quit_force(&json!({"cmd": "quit"})) && !quit_force(&json!({"cmd": "quit", "force": "yes"})));
+}
+
+fn a_wait_at(t0: Instant) -> QuitWait {
+    let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
+    a.save_sent(t0);
+    q.step(&mut a, t0);
+    q
+}
+
+#[test]
+fn a_second_tray_quit_forces_only_a_second_after_the_first() {
+    let t0 = Instant::now();
+    let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
+    a.save_sent(t0);
+    let r = on_quit_request(None, QuitReason::TrayMenu, false, t0, &mut q);
+    q.step(&mut a, t0);
+    let r = on_quit_request(r, QuitReason::TrayMenu, false, t0 + Duration::from_millis(400), &mut q);
+    assert!(!q.forced, "a double click on Quit just joins");
+    on_quit_request(r, QuitReason::TrayMenu, false, t0 + TRAY_FORCE_GAP, &mut q);
+    assert!(q.forced, "a deliberate 2nd Quit stops now");
+}
+
+#[test]
+fn a_quit_asked_during_a_sign_out_wait_survives_a_cancelled_sign_out() {
+    // R7-overlay-4: the installer's quit must not vanish with the cancelled sign-out.
+    let t0 = Instant::now();
+    let mut q = a_wait_at(t0);
+    let r = on_quit_request(Some(QuitReason::SessionEnd), QuitReason::ControlPipe, false, t0 + Duration::from_secs(1), &mut q);
+    assert_eq!(r, Some(QuitReason::SessionEnd));
+    assert_eq!(resume_after_session_end(&mut q), Some(QuitReason::ControlPipe), "the pipe quit goes on");
+    assert!(!q.waiting() && !q.forced, "and waits afresh");
+    // A sign-out alone, cancelled: nothing goes on.
+    let mut q = a_wait_at(t0);
+    assert_eq!(resume_after_session_end(&mut q), None);
 }

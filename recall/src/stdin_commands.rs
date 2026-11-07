@@ -13,6 +13,9 @@ use crate::protocol::Command;
 
 /// Hands each well-formed command to `apply` until `quit` arrives or `reader`
 /// ends; either way `quit` is set on return. Blank and malformed lines are ignored.
+/// The engine itself reads through `stdin_reader` ([`read_until_end`]: an end of stdin
+/// marks it orphaned first); this stays for the tests and the long-recording child test.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn read_commands<R: BufRead>(reader: R, quit: &AtomicBool, apply: impl FnMut(Command)) {
     read_commands_logged(reader, quit, apply, |line| eprintln!("{line}"));
 }
@@ -21,6 +24,7 @@ pub fn read_commands<R: BufRead>(reader: R, quit: &AtomicBool, apply: impl FnMut
 /// stored first: with the controller dead its stderr pipe is closed too, and a
 /// log line that fails must not stop the quit. A line that is not UTF-8 is
 /// skipped like any malformed line (it is not the end of stdin).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn read_commands_logged<R: BufRead>(reader: R, quit: &AtomicBool, apply: impl FnMut(Command), log: impl FnOnce(&str)) {
     if read_until_end(reader, apply) {
         quit.store(true, Relaxed);

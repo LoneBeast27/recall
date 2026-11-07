@@ -39,7 +39,14 @@ pub struct QuitWait {
     started: Option<Instant>,
     /// The user asked to quit again during the wait: quit now (the save is reported lost).
     forced: bool,
+    /// When the first quit was asked through [`on_quit_request`] (else the wait's start).
+    asked_at: Option<Instant>,
+    /// A quit asked while a sign-out waits: it goes on if the sign-out is cancelled.
+    also: Option<QuitReason>,
 }
+
+/// A 2nd tray Quit forces only this long after the first (a double click just joins).
+pub const TRAY_FORCE_GAP: Duration = Duration::from_secs(1);
 
 /// How long the pump sleeps per pass while a quit waits (no busy-spin on a passed deadline).
 pub const QUIT_PUMP_WAIT_MS: u32 = 250;
@@ -54,14 +61,39 @@ pub fn pump_wait_ms(quitting: bool, deadline: Option<Instant>, now: Instant, cap
     crate::app::wait_ms_at(deadline, now, cap)
 }
 
-/// A quit asked while `current` may already wait: the reason the quit now has. A tray
-/// Quit during the wait, or the same source asking again, quits at once (`forced`).
-pub fn on_quit_request(current: Option<QuitReason>, asked: QuitReason, wait: &mut QuitWait) -> Option<QuitReason> {
-    let Some(current) = current else { return Some(asked) };
-    if wait.waiting() && (asked == QuitReason::TrayMenu || asked == current) {
+/// A quit asked while `current` may already wait: the reason the quit now has. It quits
+/// at once (`forced`) only when it says so (`force`: the pipe's `"force":true`), or for a
+/// tray Quit during the wait at least [`TRAY_FORCE_GAP`] after the first quit. A repeated
+/// plain pipe quit (an installer re-run, a double click in the app) just joins the wait.
+/// A quit asked while a sign-out waits is kept for [`resume_after_session_end`].
+pub fn on_quit_request(current: Option<QuitReason>, asked: QuitReason, force: bool, now: Instant, wait: &mut QuitWait) -> Option<QuitReason> {
+    let Some(current) = current else {
+        wait.asked_at = Some(now);
+        wait.forced |= force;
+        return Some(asked);
+    };
+    let first = wait.asked_at.or(wait.started).unwrap_or(now);
+    let tray_again = asked == QuitReason::TrayMenu && wait.waiting() && now.saturating_duration_since(first) >= TRAY_FORCE_GAP;
+    if force || tray_again {
         wait.forced = true;
     }
+    if current == QuitReason::SessionEnd && asked != QuitReason::SessionEnd {
+        wait.also = Some(asked);
+    }
     Some(if asked == QuitReason::TrayMenu { asked } else { current })
+}
+
+/// The pipe's `{"cmd":"quit","force":true}`: stop now, even during a save.
+pub fn quit_force(cmd: &Value) -> bool {
+    cmd.get("force").and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// The sign-out was cancelled: the quit it started is called off, but a quit asked
+/// meanwhile (the installer, the tray) goes on, waiting afresh.
+pub fn resume_after_session_end(wait: &mut QuitWait) -> Option<QuitReason> {
+    let kept = wait.also.take();
+    wait.reset();
+    kept
 }
 
 /// The control pipe's view of a quit waiting for a save: `finishing_clip` (true while a
@@ -147,12 +179,14 @@ impl crate::record_app::Controller {
         }
     }
 
-    /// A quit asked by `asked` (tray, pipe): a repeat during the wait quits at once.
-    pub(crate) fn ask_quit(&mut self, asked: QuitReason) {
-        let before = self.quit;
-        self.quit = on_quit_request(before, asked, &mut self.quit_wait);
-        if before.is_some() && self.quit_wait.forced {
-            log!("record: {} again during the save wait -- quitting now", asked.label());
+    /// A quit asked by `asked` (tray, pipe; `force`: the pipe's `"force":true`).
+    pub(crate) fn ask_quit(&mut self, asked: QuitReason, force: bool) {
+        let (before, was_forced) = (self.quit, self.quit_wait.forced);
+        self.quit = on_quit_request(before, asked, force, Instant::now(), &mut self.quit_wait);
+        if self.quit_wait.forced && !was_forced {
+            log!("record: {} {}-- quitting now, a save in flight is lost", asked.label(), if force { "with force " } else { "again during the save wait " });
+        } else if before.is_some() {
+            log!("record: {} joins the quit already waiting", asked.label());
         }
     }
 

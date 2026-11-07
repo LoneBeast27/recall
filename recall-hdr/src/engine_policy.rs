@@ -13,6 +13,8 @@
 
 use std::time::{Duration, Instant};
 
+use crate::engine_slot::SLOT_HELD_GIVE_UP;
+
 /// Base backoff before the first restart; doubles each attempt up to the cap.
 const BACKOFF_BASE_MS: u64 = 500;
 /// Ceiling on the restart backoff -- a crash-looping engine retries at most this often.
@@ -26,8 +28,11 @@ pub const GIVEUP_WINDOW: Duration = Duration::from_secs(120);
 /// Failures within `GIVEUP_WINDOW` that trip give-up (anti fork-bomb).
 pub const GIVEUP_THRESHOLD: usize = 6;
 
-/// The engine's exit code for "another engine already records" (`recall/src/main.rs`).
-pub const EXIT_SLOT_BUSY: i32 = 3;
+/// The engine's exit code for "another engine already records" (`recall/src/main.rs`
+/// `EXIT_ALREADY_RUNNING`). 86 is used by nothing else here: not the C runtime's `abort()`
+/// (3), not a Rust panic (101), not an NTSTATUS crash (0xC...), not a loader failure
+/// (`engine_exit`). Any other exit is a normal failure.
+pub const EXIT_SLOT_BUSY: i32 = 86;
 
 /// Environment edits for one engine spawn: `Some` sets, `None` removes. The
 /// default (empty) spec inherits the controller's environment unchanged.
@@ -66,6 +71,9 @@ pub enum Next {
     Backoff { delay: Duration, attempt: u32 },
     /// Circuit breaker tripped: park until the next retarget.
     GiveUp,
+    /// Another recorder held the engine slot for [`SLOT_HELD_GIVE_UP`]: park until the
+    /// next retarget, saying so (`engine_slot`).
+    Blocked,
 }
 
 /// Failure accounting across engine lifetimes.
@@ -75,6 +83,8 @@ pub struct RestartPolicy {
     failures: Vec<Instant>,
     /// Retries in a row while another engine holds the recorder (not failures).
     busy: u32,
+    /// The first of those retries.
+    busy_since: Option<Instant>,
 }
 
 impl RestartPolicy {
@@ -99,12 +109,27 @@ impl RestartPolicy {
     /// crashed controller finishing its save): not a failure.
     pub fn on_exit(&mut self, code: Option<i32>, now: Instant, uptime: Duration) -> Next {
         if code == Some(EXIT_SLOT_BUSY) {
+            let since = *self.busy_since.get_or_insert(now);
+            if now.saturating_duration_since(since) >= SLOT_HELD_GIVE_UP {
+                return Next::Blocked;
+            }
             let delay = backoff_delay(self.busy).min(BUSY_RETRY_MAX);
             self.busy = self.busy.saturating_add(1);
             return Next::Backoff { delay, attempt: self.busy };
         }
         self.busy = 0;
+        self.busy_since = None;
         self.on_unintended_exit(now, uptime)
+    }
+
+    /// How long the slot has been held (busy retries in a row), None when it is not.
+    pub fn busy_for(&self, now: Instant) -> Option<Duration> {
+        self.busy_since.map(|t| now.saturating_duration_since(t))
+    }
+
+    /// Busy retries in a row so far.
+    pub fn busy_tries(&self) -> u32 {
+        self.busy
     }
 
     /// The controller restarted the engine on purpose: deliberately NOT a
@@ -115,6 +140,7 @@ impl RestartPolicy {
     pub fn reset(&mut self) {
         self.attempt = 0;
         self.busy = 0;
+        self.busy_since = None;
         self.failures.clear();
     }
 
@@ -223,7 +249,7 @@ mod tests {
             let next = p.on_exit(Some(EXIT_SLOT_BUSY), t0 + Duration::from_secs(i * 6), Duration::ZERO);
             match next {
                 Next::Backoff { delay, .. } => assert!(delay <= BUSY_RETRY_MAX, "retry {i}: {delay:?}"),
-                Next::GiveUp => panic!("busy exit {i} gave up"),
+                other => panic!("busy exit {i} gave up: {other:?}"),
             }
         }
         assert_eq!(p.recent_failures(), 0, "busy exits are not failures");
@@ -233,6 +259,40 @@ mod tests {
             Next::Backoff { delay: Duration::from_millis(500), attempt: 1 }
         );
         assert!(matches!(p.on_exit(None, t0 + Duration::from_secs(201), Duration::ZERO), Next::Backoff { attempt: 2, .. }));
+    }
+
+    #[test]
+    fn a_slot_held_past_32_min_gives_up_with_its_own_reason() {
+        // R7-overlay-2: a wedged orphan or a hand-run engine never frees the slot.
+        let t0 = Instant::now();
+        let mut p = RestartPolicy::default();
+        let mut end = None;
+        for i in 0..(34 * 60 / 8) {
+            let now = t0 + Duration::from_secs(i * 8);
+            match p.on_exit(Some(EXIT_SLOT_BUSY), now, Duration::ZERO) {
+                Next::Backoff { delay, .. } => assert!(delay <= BUSY_RETRY_MAX),
+                other => {
+                    end = Some((other, now - t0));
+                    break;
+                }
+            }
+        }
+        let (next, after) = end.expect("the busy retry gives up");
+        assert_eq!(next, Next::Blocked, "its own reason, not the crash breaker");
+        assert!(after >= SLOT_HELD_GIVE_UP && after < SLOT_HELD_GIVE_UP + Duration::from_secs(10), "{after:?}");
+        p.reset();
+        assert_eq!(p.busy_for(t0), None, "a new target retries afresh");
+    }
+
+    #[test]
+    fn an_abort_exit_3_counts_as_a_crash_again() {
+        // R7-overlay-3: the C runtime's abort() exits 3; the busy code must not collide.
+        assert_ne!(EXIT_SLOT_BUSY, 3);
+        assert!(![0, 1, 2, 3, 101, 0xC000_0409u32 as i32].contains(&EXIT_SLOT_BUSY));
+        let t0 = Instant::now();
+        let mut p = RestartPolicy::default();
+        let nexts: Vec<Next> = (0..6).map(|i| p.on_exit(Some(3), t0 + Duration::from_secs(i), Duration::ZERO)).collect();
+        assert_eq!(nexts[5], Next::GiveUp, "six abort() crashes in 2 min trip the breaker: {nexts:?}");
     }
 
     #[test]
