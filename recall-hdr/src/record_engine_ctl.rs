@@ -9,26 +9,37 @@ use crate::record_engine::{engine_env, EngineTarget};
 use crate::supervisor::EngineHealth;
 
 impl Controller {
-    /// Start, restart or stop the engine for `target` (an intended restart).
+    /// Start, restart or stop the engine for `target` (an intended restart, a game switch:
+    /// a line sent while the old engine quits is told "Switching games").
     pub(crate) fn apply_engine_target(&mut self, target: &EngineTarget) {
+        self.apply_engine_target_as(target, true);
+    }
+
+    /// `switching` false: a restart that is no game switch (hang, failure, settings,
+    /// resume); a line sent while the old engine quits is told "Recorder isn't responding".
+    fn apply_engine_target_as(&mut self, target: &EngineTarget, switching: bool) {
         self.hello_at_retarget = self.supervisor.hello_count();
         // Any (re)start or stop picks up the current settings.
         self.pending_restart = false;
         match target {
             EngineTarget::Off => {
                 log!("record: no target -> engine stopped (waiting for a game)");
-                self.supervisor.retarget(None);
+                self.retarget(None, switching);
             }
             EngineTarget::Window(t) => {
                 let detected = self.take_detected(t.hwnd);
                 log!("record: target -> {:?} ({}, pid {}, hwnd {:#x}){detected}", t.name, t.exe, t.pid, t.hwnd);
-                self.supervisor.retarget(Some(self.engine_spec(target)));
+                self.retarget(Some(self.engine_spec(target)), switching);
             }
             EngineTarget::Desktop => {
                 log!("record: no game -> desktop capture");
-                self.supervisor.retarget(Some(self.engine_spec(target)));
+                self.retarget(Some(self.engine_spec(target)), switching);
             }
         }
+    }
+
+    fn retarget(&self, spec: Option<EngineSpec>, switching: bool) {
+        if switching { self.supervisor.retarget(spec) } else { self.supervisor.restart(spec) }
     }
 
     fn engine_spec(&self, target: &EngineTarget) -> EngineSpec {
@@ -46,7 +57,7 @@ impl Controller {
         }
         let wanted = self.wanted();
         self.planner.force(wanted.clone());
-        self.apply_engine_target(&wanted);
+        self.apply_engine_target_as(&wanted, false);
     }
 
     /// A fresh engine instance starts unmuted in `auto` mode: re-apply ours.

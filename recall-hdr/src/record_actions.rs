@@ -136,22 +136,24 @@ impl Controller {
             return self.refuse_capture(cmd, reason);
         }
         // Queued first: only a command the engine will see is marked in flight.
-        let queued = self.supervisor.send_engine_line(&json!({ "cmd": cmd }).to_string());
-        log!("record: engine {cmd}{}", if queued { "" } else { " (not sent: the engine is not reading)" });
-        for effect in crate::record_dispatch::command_effects(queued) {
+        let sent = self.supervisor.send_engine_line(&json!({ "cmd": cmd }).to_string());
+        match sent.reason() {
+            None => log!("record: engine {cmd}"),
+            Some(reason) => log!("record: engine {cmd} (not sent: {reason})"),
+        }
+        for effect in crate::record_dispatch::command_effects(sent) {
             match effect {
                 Effect::MarkPending => self.activity.command_sent(cmd, Instant::now()),
                 Effect::Announce => self.publish_status(),
-                Effect::NotResponding => self.command_not_sent(cmd, client),
+                Effect::Refused(reason) => self.command_not_sent(cmd, client, reason),
                 Effect::Cue | Effect::LogOnly | Effect::ReplyError | Effect::Proceed => {}
             }
         }
     }
 
-    /// A command the engine is not reading: the same path a refusal takes, with
-    /// "Recorder isn't responding".
-    fn command_not_sent(&self, cmd: &str, client: Option<u64>) {
-        let reason = crate::record_dispatch::NOT_RESPONDING;
+    /// A command the engine did not get: the same path a refusal takes, with why
+    /// ("Recorder isn't responding", or "Switching games" while the engine quits for a retarget).
+    fn command_not_sent(&self, cmd: &str, client: Option<u64>, reason: &'static str) {
         if cmd == "bookmark" && client.is_none() {
             return self.refuse_bookmark(reason);
         }
@@ -276,17 +278,17 @@ impl Controller {
             }
             if let Some(wait) = PendingPause::needed(&self.activity, Instant::now()) {
                 log!("record: pause -- stopping the long recording first (up to {} s)", PAUSE_STOP_WAIT.as_secs());
-                let queued = self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#);
-                for effect in crate::record_dispatch::pause_stop_effects(queued) {
+                let sent = self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#);
+                for effect in crate::record_dispatch::pause_stop_effects(sent) {
                     match effect {
                         Effect::MarkPending => {
                             self.pending_pause = Some(wait);
                             return;
                         }
-                        Effect::NotResponding => {
-                            log!("record: pause -- record_stop not sent ({}); pausing now", crate::record_dispatch::NOT_RESPONDING);
+                        Effect::Refused(reason) => {
+                            log!("record: pause -- record_stop not sent ({reason}); pausing now");
                             if self.cfg.overlay.enabled {
-                                self.hub.event("session", &shortcut_notice_json("Pausing now", crate::record_dispatch::NOT_RESPONDING, true, false));
+                                self.hub.event("session", &shortcut_notice_json("Pausing now", reason, true, false));
                             }
                             crate::supervisor::beep_failure();
                         }
