@@ -394,7 +394,7 @@ pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: (&dyn Fn()
         let files = companions(dir, name, &listing);
         let clip = listing.clips.iter().find(|c| c.name == *name);
         // The keeps are read under the lock too: a star or open made while it waited counts.
-        let checked = crate::win_fileop::bin_lock::held(|| keep::turn(name, keep, || companions_bytes(&files, clip, size).and_then(|bytes| bin(dir, bytes)).map(|()| recycle(&files))));
+        let checked = crate::win_fileop::bin_lock::held(|| keep::turn(name, keep, || companions_bytes(&files, clip, size).and_then(|bytes| bin(dir, bytes)), || recycle(&files)));
         let moved = match checked.unwrap_or_else(keep::Turn::Refused) {
             keep::Turn::Unknown(e) => {
                 log!("storage: favourites unknown ({e}); stopped after {} clip(s)", out.removed);

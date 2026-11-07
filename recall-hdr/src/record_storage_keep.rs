@@ -82,12 +82,22 @@ pub enum Turn {
     Moved(Result<(), super::RecycleError>),
 }
 
-/// Reads the keeps for `name`, then runs `check_and_move` (room check + Recycle Bin call)
-/// unless the clip is kept now.
-pub fn turn(name: &str, keep: super::KeepFn, check_and_move: impl FnOnce() -> Result<Result<(), super::RecycleError>, String>) -> Turn {
-    match keep() {
-        Err(e) => Turn::Unknown(e),
-        Ok(kept) if kept.contains(&name.to_lowercase()) => Turn::Kept,
-        Ok(_) => check_and_move().map_or_else(Turn::Refused, Turn::Moved),
+/// Reads the keeps for `name`, runs `check` (the Recycle Bin room check), reads the keeps
+/// again and only then runs `recycle`: the room check sizes the bin and can take a while, so a
+/// star, play or open made during it still counts (review RI-10). What is left is a star made
+/// during the Recycle Bin call itself (the app's star does not take the bin lock); that clip is
+/// in the Recycle Bin, not gone.
+pub fn turn(name: &str, keep: super::KeepFn, check: impl FnOnce() -> Result<(), String>, recycle: impl FnOnce() -> Result<(), super::RecycleError>) -> Turn {
+    let kept = || match keep() {
+        Err(e) => Some(Turn::Unknown(e)),
+        Ok(kept) if kept.contains(&name.to_lowercase()) => Some(Turn::Kept),
+        Ok(_) => None,
+    };
+    if let Some(turn) = kept() {
+        return turn;
     }
+    if let Err(why) = check() {
+        return Turn::Refused(why);
+    }
+    kept().unwrap_or_else(|| Turn::Moved(recycle()))
 }
