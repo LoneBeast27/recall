@@ -132,6 +132,8 @@ mod install_script_tests;
 #[cfg(test)]
 mod install_script_wait_tests;
 #[cfg(test)]
+mod install_script_quit_tests;
+#[cfg(test)]
 mod hub_pipe_tests;
 #[cfg(test)]
 mod transitions_gate_tests;

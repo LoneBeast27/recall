@@ -13,35 +13,42 @@ fn a_delivered_quit_is_waited_for_while_that_recorder_lives() {
     // R5-startup-1: a quit can wait for a clip being saved for longer than any fixed cap, so after
     // the first 8 s the run waits only on the recorder that got the quit, with no cap.
     let stop = function_body(INSTALL, "Stop-Recorder");
-    // Both sends keep their result; the legacy one is no longer thrown away.
-    assert!(stop.lines().any(|l| l.trim() == format!("$sent = Send-Recorder {QUIT}")), "{stop}");
-    assert!(stop.contains(&format!("if (-not $sent -and (Get-Controller)) {{ $sent = Send-Recorder {QUIT} $legacyPipe }}")), "{stop}");
-    assert!(!stop.contains("[void](Send-Recorder"), "{stop}");
+    // The sends live in Request-RecorderQuit (install-quit-wait.ps1, R6-startup-1). Both keep their
+    // result; the legacy one is not thrown away.
+    let req = function_body(QUIT_WAIT, "Request-RecorderQuit");
+    assert!(req.lines().any(|l| l.trim() == format!("$sent = Send-Recorder {QUIT}")), "{req}");
+    assert!(req.contains(&format!("if (-not $sent -and (Get-Controller)) {{ $sent = Send-Recorder {QUIT} $legacyPipe }}")), "{req}");
+    assert!(!req.contains("[void](Send-Recorder") && !stop.contains("Send-Recorder"), "{req}");
     // The recorder that got it is the one written to (recorded after the write, with its start time).
     let send = function_body(INSTALL, "Send-Recorder([string]$line, [string]$name = $pipeName, [int]$tries = 5)");
     let write = send.find("$w.WriteLine($line)").unwrap();
     let rec = send.find("$script:sentTo = @{ pid = $server; created = $ours.CreationDate; pipe = $name }").expect("records the pid");
     assert!(write < rec, "{send}");
-    // Order in Stop-Recorder: reset, sends, which recorder, wait, throw for what is left.
+    // Order in Stop-Recorder: reset, the quit, wait, throw for what is left.
     let reset = stop.find("$script:sentTo = $null").expect("reset per call");
-    let first_send = stop.find("Send-Recorder").unwrap();
-    let pick = stop.find("$quit = if ($sent) { $script:sentTo } else { $null }").expect("only a delivered quit is waited on");
-    let wait = stop.find("Wait-ForQuit $quit").expect("the wait");
+    let ask = stop.find("$quit = Request-RecorderQuit").expect("the quit");
+    let wait = stop.find("Wait-ForQuit $quit $QuitWaitMinutes").expect("the wait");
     let throw = stop.find("throw (\"Recall is still running (").unwrap();
-    assert!(reset < first_send && first_send < pick && pick < wait && wait < throw, "{stop}");
-    // The wait: 8 s for everything, then only while THAT pid lives (no cap), then 8 s for the rest.
+    assert!(reset < ask && ask < wait && wait < throw, "{stop}");
+    // In Request-RecorderQuit: sends, then only a delivered quit is waited on.
+    let first_send = req.find("Send-Recorder").unwrap();
+    let pick = req.find("if ($sent) { $script:sentTo } else { $null }").expect("only a delivered quit is waited on");
+    assert!(first_send < pick, "{req}");
+    // The wait: 8 s for everything, then only while THAT pid lives (R6-startup-2 adds the
+    // finishing_clip grace and the optional cap), then 8 s for the rest.
     // The wait lives in install-quit-wait.ps1, loaded before Stop-Recorder is defined.
     let load = INSTALL.find(". (Join-Path $PSScriptRoot 'install-quit-wait.ps1')").expect("dot-sourced");
     assert!(load < INSTALL.find("function Stop-Recorder {").unwrap());
-    let w = function_body(QUIT_WAIT, "Wait-ForQuit($quit)");
-    let all = w.find("while ((Get-Date) -lt $deadline -and ((Get-Installed) -or (Get-Controller))) {").expect("8 s for all");
+    let w = function_body(QUIT_WAIT, "Wait-ForQuit($quit, [int]$capMinutes = 0)");
+    let all = w.find("while ((Get-Date) -lt $deadline -and (Test-AnyRecorder)) {").expect("8 s for all");
     let gate = w.find("if (-not $quit -or -not (Test-QuitPidAlive $quit)) { return }").expect("nothing delivered: no long wait");
-    let long = w.find("while (Test-QuitPidAlive $quit) {").expect("keyed on the quit pid only");
-    let note = w.find("Write-Host (Format-QuitProgress $quit $since)").expect("progress line");
-    let rest = w.rfind("while ((Get-Date) -lt $deadline -and ((Get-Installed) -or (Get-Controller))) {").unwrap();
+    let long = w.find("$step = Get-QuitWaitStep $w (Get-Date) (Test-QuitPidAlive $quit) $finishing").expect("keyed on the quit pid");
+    let note = w.find("Write-Host (Format-QuitProgress $quit $since $s)").expect("progress line");
+    let rest = w.rfind("while ((Get-Date) -lt $deadline -and (Test-AnyRecorder)) {").unwrap();
     assert!(all < gate && gate < long && long < note && note < rest && all != rest, "{w}");
     assert!(w.contains("$next = (Get-Date).AddMinutes(1)"), "one line a minute: {w}");
     assert!(!INSTALL.contains("AddMinutes(15)") && !QUIT_WAIT.contains("AddMinutes(15)") && !w.contains("$longest"), "no fixed cap");
+    assert!(w.contains("if ($step -eq 'exited') { break }"), "{w}");
     // The pid is matched with its start time (a reused pid is not Recall).
     let alive = function_body(QUIT_WAIT, "Test-QuitPidAlive($quit)");
     assert!(alive.contains("\"ProcessId = $($quit.pid)\"") && alive.contains("$_.CreationDate -eq $quit.created"), "{alive}");
@@ -49,10 +56,11 @@ fn a_delivered_quit_is_waited_for_while_that_recorder_lives() {
 
 #[test]
 fn the_progress_line_says_whether_a_clip_is_being_finished() {
-    let p = function_body(QUIT_WAIT, "Format-QuitProgress($quit, [datetime]$since)");
-    let status = p.find("$s = Get-RecorderStatus $quit").expect("asks the recorder");
-    let finishing = p.find("if ($s -and $s.finishing_clip) {").expect("finishing_clip");
-    assert!(status < finishing);
+    // The status is read by the wait loop (every 2 s) and handed to the line.
+    let p = function_body(QUIT_WAIT, "Format-QuitProgress($quit, [datetime]$since, $s)");
+    let w = function_body(QUIT_WAIT, "Wait-ForQuit($quit, [int]$capMinutes = 0)");
+    assert!(w.contains("$s = Get-RecorderStatus $quit"), "asks the recorder: {w}");
+    assert!(p.contains("if ($s -and $s.finishing_clip) {"), "finishing_clip: {p}");
     assert!(p.contains("\"Recall is finishing a clip ($what, $mins min so far); waiting."), "{p}");
     assert!(p.contains("\"Waiting for Recall (pid $($quit.pid)) to exit ($mins min so far)"), "{p}");
     assert!(p.contains("MB written"), "{p}");
@@ -70,11 +78,12 @@ fn the_progress_line_says_whether_a_clip_is_being_finished() {
 #[test]
 fn a_sandbox_naming_the_real_install_folder_is_refused() {
     // R5-startup-2: a sandbox -InstallDir that is (an alias of) the default folder is the real install.
+    // R6-startup-4 widens the guard to a folder that holds it (one prefix test covers both).
     let real = INSTALL
         .find(r"$defaultRoot = [RecallInstall.PathId]::Normalize((Join-Path $env:LOCALAPPDATA 'Programs\Recall')).TrimEnd('\') + '\'")
         .expect("the default folder, normalized");
     let guard = INSTALL
-        .find("if ($env:RECALL_CONTROLLER_PATH -and [string]::Equals($installRoot, $defaultRoot, [StringComparison]::OrdinalIgnoreCase)) {")
+        .find("if ($env:RECALL_CONTROLLER_PATH -and $defaultRoot.StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase)) {")
         .expect("guard");
     assert!(INSTALL[guard..].contains("throw \"A sandboxed install (RECALL_CONTROLLER_PATH) can't use the real install folder"));
     let first_close = INSTALL.find("\nAssert-AppClosed").unwrap();
@@ -151,8 +160,11 @@ fn a_sandbox_never_repoints_the_real_shortcut_or_autostart() {
 
 #[test]
 fn without_a_byte_count_the_progress_line_counts_clips() {
-    let p = function_body(QUIT_WAIT, "Format-QuitProgress($quit, [datetime]$since)");
+    let p = function_body(QUIT_WAIT, "Format-QuitProgress($quit, [datetime]$since, $s)");
     let mb = p.find("if ($p -and $p.bytes) { \"$([math]::Round($p.bytes / 1MB)) MB written\" }").expect("MB only with bytes");
     let clips = p.find("elseif ($p -and $p.saves) { \"$($p.saves) clips still being written\" }").expect("else the clip count");
+    // R6-startup-6: one save is "1 clip".
+    let one = p.find("elseif ($p -and $p.saves -eq 1) { '1 clip still being written' }").expect("singular");
+    assert!(mb < one && one < clips, "{p}");
     assert!(mb < clips, "{p}");
 }
