@@ -14,10 +14,16 @@
     cache\              created by the app; capped (Settings → Storage)
 
   Usage (PowerShell):
-    powershell -NoProfile -File scripts\install.ps1 [-InstallDir <path on an SSD>] [-NoBuild] [-NoShortcut] [-NoAutostart] [-NoFrameTiming] [-CloseApp]
+    powershell -NoProfile -File scripts\install.ps1 [-InstallDir <path on an SSD>] [-NoBuild] [-NoShortcut] [-Autostart] [-NoFrameTiming] [-CloseApp] [-AllowUnknownDrive]
   Default install folder: %LOCALAPPDATA%\Programs\Recall (per-user, no admin rights).
-  After installing, the installed recorder starts and is set to start with Windows
-  (Settings > General turns that off; -NoAutostart skips it).
+  After installing, the installed recorder starts. Start with Windows is opt-in: the installer
+  leaves that setting as it is (off on a first install) unless -Autostart turns it on; Settings >
+  General changes it later. An update never turns it back on. (-NoAutostart is still accepted
+  and does nothing.)
+  -AllowUnknownDrive: install on a drive Windows can't classify as SSD or HDD (USB SSD, RAID,
+  Storage Spaces, VM disk) with a warning; a drive Windows reports as an HDD is always refused.
+  Only this Windows session's Recall counts (another signed-in user's is left alone), and the
+  recorder's control pipe is per session: \\.\pipe\recall-hdr-control-<session id>.
   Builds run through nice-build.ps1 (CCD1, BelowNormal) when it is installed, so a running game is not disturbed.
   While the installed Recall app runs, the installer refuses before doing anything (exit 3):
   replacing the program would close it under you. Close Recall and re-run, or pass -CloseApp
@@ -29,7 +35,7 @@
   Performance Log Users (SID S-1-5-32-559). When you are not in it, ONE administrator prompt
   adds you; it takes effect at your next sign-in. Declining the prompt only leaves FPS as "-".
 #>
-param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$NoAutostart, [switch]$NoFrameTiming, [switch]$NoStart, [switch]$CloseApp)
+param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$Autostart, [switch]$NoAutostart, [switch]$NoFrameTiming, [switch]$NoStart, [switch]$CloseApp, [switch]$AllowUnknownDrive)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $stage = Join-Path $repo 'dist'
@@ -51,33 +57,47 @@ function Get-DriveKind([string]$path) {
 
 # 1. The install folder must be on an SSD (checked before any build work).
 $drive = Get-DriveKind $InstallDir
-if ($drive.kind -ne 'SSD') {
+if ($drive.kind -eq 'HDD' -or ($drive.kind -ne 'SSD' -and -not $AllowUnknownDrive)) {
+  $hint = if ($drive.kind -eq 'HDD') { '' } else { " If it is an SSD that Windows can't classify (USB, RAID, Storage Spaces, VM disk), pass -AllowUnknownDrive." }
   throw ("Recall must be installed on an SSD so its cache loads instantly. '$InstallDir' is on " +
-    "$($drive.model) ($($drive.kind)). Pick a folder on an SSD with -InstallDir.")
+    "$($drive.model) ($($drive.kind)). Pick a folder on an SSD with -InstallDir.$hint")
 }
-"Install folder: $InstallDir  ($($drive.model), SSD)"
+if ($drive.kind -eq 'SSD') { "Install folder: $InstallDir  ($($drive.model), SSD)" }
+else { Write-Warning "Install folder: $InstallDir ($($drive.model)): Windows can't tell whether this is an SSD; continuing (-AllowUnknownDrive)." }
+
+# Only this Windows session's Recall counts: another signed-in user's app and recorder are theirs.
+# The recorder's control pipe is per session too (recall-hdr control_pipe.rs).
+$session = (Get-Process -Id $PID).SessionId
+$pipeName = "recall-hdr-control-$session"
 
 # 2a. Never close the app under the user: refuse while the installed app runs (checked before any
 #     build work). Its window counts even when minimized; a hidden instance still locks the files.
-function Get-InstalledApp { Get-CimInstance Win32_Process -Filter "Name = 'recall-native.exe'" | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) } }
-$app = @(Get-InstalledApp)
-if ($app.Count -and -not $CloseApp) {
-  Add-Type -Name Win -Namespace RecallInstall -MemberDefinition @'
+#     Run again after the build (Assert-Closed below): the build takes minutes, and an app reopened
+#     meanwhile would otherwise run on from `.old` next to the new engine.
+function Get-InstalledApp { Get-CimInstance Win32_Process -Filter "Name = 'recall-native.exe' AND SessionId = $session" | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) } }
+function Assert-AppClosed {
+  $app = @(Get-InstalledApp)
+  if ($app.Count -and -not $CloseApp) {
+    if (-not ('RecallInstall.Win' -as [type])) {
+      Add-Type -Name Win -Namespace RecallInstall -MemberDefinition @'
 [DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr h);
 public delegate bool EnumProc(IntPtr h, IntPtr l);
 [DllImport("user32.dll")] public static extern bool EnumWindows(EnumProc f, IntPtr l);
 [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
 '@
-  $ids = @($app | ForEach-Object { [int]$_.ProcessId }); $script:shown = 0
-  [void][RecallInstall.Win]::EnumWindows({ param($h, $l) $p = [uint32]0; [void][RecallInstall.Win]::GetWindowThreadProcessId($h, [ref]$p); if ($ids -contains [int]$p -and [RecallInstall.Win]::IsWindowVisible($h)) { $script:shown++ }; $true }, [IntPtr]::Zero)
-  $how = if ($script:shown) { "is open ($($script:shown) window(s))" } else { 'is running in the background' }
-  Write-Host "Recall $how (pid $($ids -join ', ')). Installing now would close it. Close Recall, then re-run; or pass -CloseApp to close it first."
-  exit 3
+    }
+    $ids = @($app | ForEach-Object { [int]$_.ProcessId }); $script:shown = 0
+    [void][RecallInstall.Win]::EnumWindows({ param($h, $l) $p = [uint32]0; [void][RecallInstall.Win]::GetWindowThreadProcessId($h, [ref]$p); if ($ids -contains [int]$p -and [RecallInstall.Win]::IsWindowVisible($h)) { $script:shown++ }; $true }, [IntPtr]::Zero)
+    $how = if ($script:shown) { "is open ($($script:shown) window(s))" } else { 'is running in the background' }
+    Write-Host "Recall $how (pid $($ids -join ', ')). Installing now would close it. Close Recall, then re-run; or pass -CloseApp to close it first."
+    exit 3
+  }
+  if ($app.Count) {
+    # -CloseApp: ask each instance to close the way its own X button does, then wait below.
+    foreach ($p in $app) { try { [void](Get-Process -Id $p.ProcessId -ErrorAction Stop).CloseMainWindow() } catch { } }
+  }
 }
-if ($app.Count) {
-  # -CloseApp: ask each instance to close the way its own X button does, then wait below.
-  foreach ($p in $app) { try { [void](Get-Process -Id $p.ProcessId -ErrorAction Stop).CloseMainWindow() } catch { } }
-}
+Assert-AppClosed
 
 # 2. Quit the running recorder gracefully, wherever it runs from (only one controller can run;
 #    its quit also stops the engine and overlay). Done before building: a recorder started from
@@ -87,20 +107,23 @@ function Send-Recorder([string]$line) {
   # instances, and keep the client open briefly so the line is read before it disconnects.
   for ($attempt = 0; $attempt -lt 5; $attempt++) {
     try {
-      $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', 'recall-hdr-control', [IO.Pipes.PipeDirection]::InOut)
+      $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', $pipeName, [IO.Pipes.PipeDirection]::InOut)
       $pipe.Connect(1500); $w = [IO.StreamWriter]::new($pipe); $w.AutoFlush = $true; $w.WriteLine($line)
       Start-Sleep -Milliseconds 300; $pipe.Dispose(); return $true
     } catch { Start-Sleep -Milliseconds 400 }
   }
   $false
 }
-function Get-Installed { Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) } }
-function Get-Controller { Get-CimInstance Win32_Process -Filter "Name = 'recall-hdr.exe'" }
-if (Get-Controller) { [void](Send-Recorder '{"cmd":"quit"}') }
-$deadline = (Get-Date).AddSeconds(8)
-while ((Get-Date) -lt $deadline -and ((Get-Installed) -or (Get-Controller))) { Start-Sleep -Milliseconds 300 }
-$left = @(Get-Installed) + @(Get-Controller) | Where-Object { $_ }
-if ($left) { throw ("Recall is still running (" + (($left | ForEach-Object { $_.Name }) -join ', ') + "). Quit it from the tray, then re-run.") }
+function Get-Installed { Get-CimInstance Win32_Process -Filter "SessionId = $session" | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) } }
+function Get-Controller { Get-CimInstance Win32_Process -Filter "Name = 'recall-hdr.exe' AND SessionId = $session" }
+function Stop-Recorder {
+  if (Get-Controller) { [void](Send-Recorder '{"cmd":"quit"}') }
+  $deadline = (Get-Date).AddSeconds(8)
+  while ((Get-Date) -lt $deadline -and ((Get-Installed) -or (Get-Controller))) { Start-Sleep -Milliseconds 300 }
+  $left = @(Get-Installed) + @(Get-Controller) | Where-Object { $_ }
+  if ($left) { throw ("Recall is still running (" + (($left | ForEach-Object { $_.Name }) -join ', ') + "). Quit it from the tray, then re-run.") }
+}
+Stop-Recorder
 
 # 3. Build.
 if (-not $NoBuild) {
@@ -115,6 +138,13 @@ if (-not $NoBuild) {
   Invoke-Build cargo build --release --manifest-path (Join-Path $repo 'recall-native\Cargo.toml') --offline
   if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'app release build failed' }
   Pop-Location
+}
+
+# 3b. Recall may have been reopened during the build (the app also starts the recorder): check
+#     again right before the swap, so nothing old keeps running from `.old`.
+if (-not $NoBuild) {
+  Assert-AppClosed
+  Stop-Recorder
 }
 
 # 4. Stage.
@@ -203,12 +233,19 @@ Start-Process -FilePath (Join-Path $InstallDir 'recall-hdr.exe') -ArgumentList '
 $deadline = (Get-Date).AddSeconds(10); $up = $false
 while (-not $up -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500; $up = Send-Recorder '{"cmd":"status"}' }
 if (-not $up) { Write-Warning 'The recorder did not answer on its control pipe; start Recall from the Start menu.' }
-elseif (-not $NoAutostart) {
+else {
+  # The answer must come from the recorder just installed, not an older one still running.
+  $mine = Join-Path $InstallDir 'recall-hdr.exe'
+  $stray = @(Get-Controller | Where-Object { $_.ExecutablePath -and -not $_.ExecutablePath.Equals($mine, [StringComparison]::OrdinalIgnoreCase) })
+  if ($stray) { Write-Warning ("An older recorder is still running (" + (($stray | ForEach-Object { $_.ExecutablePath }) -join ', ') + "). Quit Recall from the tray, then start it again.") }
+}
+# Start with Windows is opt-in: only -Autostart sends the setting (an update never turns it on).
+if ($up -and $Autostart) {
   [void](Send-Recorder '{"cmd":"set_config","patch":{"startup":{"autostart":true}}}')
   Start-Sleep -Milliseconds 500
   $run = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'recall-hdr' -ErrorAction SilentlyContinue).'recall-hdr'
   if ($run -and $run -like "*$InstallDir*") { "Recorder running; it starts with Windows ($run)." }
   else { Write-Warning 'Start with Windows was not set; turn it on in Recall > Settings > General.' }
-} else { 'Recorder running.' }
+} elseif ($up) { 'Recorder running. Start with Windows is unchanged (Recall > Settings > General; -Autostart turns it on).' }
 $size = (Get-ChildItem $InstallDir -Recurse -File -Exclude 'cache' | Where-Object { $_.FullName -notlike "*\cache\*" } | Measure-Object Length -Sum).Sum
 "Installed to $InstallDir ($([math]::Round($size / 1MB)) MB of program files; the cache is capped separately)."

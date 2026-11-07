@@ -13,12 +13,14 @@
 param([switch]$Stop,[switch]$OpenUI,[switch]$Overlay,[switch]$Valorant,[string]$OutputDirectory)
 $ErrorActionPreference='Stop'
 $recallRoot=$PSScriptRoot
+# This Windows session's recorder only: the control pipe is per session (recall-hdr control_pipe.rs).
+$mySession=(Get-Process -Id $PID).SessionId
 if($Stop){
- $pipe=[IO.Pipes.NamedPipeClientStream]::new('.','recall-hdr-control',[IO.Pipes.PipeDirection]::Out);$pipe.Connect(2000)
+ $pipe=[IO.Pipes.NamedPipeClientStream]::new('.',"recall-hdr-control-$mySession",[IO.Pipes.PipeDirection]::Out);$pipe.Connect(2000)
  $writer=[IO.StreamWriter]::new($pipe);$writer.AutoFlush=$true;$writer.WriteLine('{"cmd":"quit"}');$writer.Dispose()
  Write-Output 'Recall recording stopped.';return
 }
-if(Get-Process -Name recall,recall-hdr -ErrorAction SilentlyContinue){throw 'A recorder is already running. Stop that session (-Stop) before starting another.'}
+if(Get-Process -Name recall,recall-hdr -ErrorAction SilentlyContinue|Where-Object{$_.SessionId -eq $mySession}){throw 'A recorder is already running. Stop that session (-Stop) before starting another.'}
 $controllerExe=Join-Path $recallRoot 'target-dev\debug\recall-hdr.exe'
 if(-not(Test-Path -LiteralPath $controllerExe)){throw "Controller not built: $controllerExe"}
 $session=[ordered]@{mode='record';started_utc=[DateTime]::UtcNow.ToString('o')}

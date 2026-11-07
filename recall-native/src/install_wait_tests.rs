@@ -163,3 +163,53 @@ fn a_swapped_program_file_has_a_new_identity_and_restarts_only_after_a_wait() {
     assert!(!needs_restart(&Waited::Cleared { polls: 3 }, first, first), "waited but not swapped: carry on");
     assert!(!needs_restart(&Waited::Cleared { polls: 3 }, None, swapped), "unknown identity: never restart");
 }
+
+/// G12: a marker left by a killed installer whose pid now names a later process.
+#[test]
+fn a_marker_whose_pid_started_after_the_marker_is_stale() {
+    let marker_start: u64 = 133_000_000_000_000_000;
+    let later = marker_start + 36_000_000_000; // an hour later: another process with the pid
+    let marker = format!("{INSTALLER} {marker_start}").into_bytes();
+    let reuse = Reuse { age: |_: &Path| Some(Duration::from_secs(5)), started: |_: u32| Some(later) };
+    let got = wait_while_installing_checked(Path::new("x"), MS250, S30, |_| Ok(marker.clone()), |_| true, reuse, |_| {});
+    assert!(matches!(got, Waited::Stale { polls: 0, ref reason } if reason.contains("another process")), "{got:?}");
+}
+
+#[test]
+fn a_marker_older_than_ten_minutes_is_stale_even_for_an_unqueryable_pid() {
+    // Access denied counts as alive and gives no start time: only the age can tell.
+    let reuse = Reuse { age: |_: &Path| Some(MAX_AGE + Duration::from_secs(1)), started: |_: u32| None };
+    let got = wait_while_installing_checked(Path::new("x"), MS250, S30, |_| pid_file(INSTALLER), |_| true, reuse, |_| {});
+    assert!(matches!(got, Waited::Stale { polls: 0, ref reason } if reason.contains("min old")), "{got:?}");
+}
+
+#[test]
+fn the_running_installer_with_its_own_start_time_is_still_waited_on() {
+    let start: u64 = 133_000_000_000_000_000;
+    let marker = format!("{INSTALLER} {start}").into_bytes();
+    let reads = Cell::new(0);
+    let reuse = Reuse { age: |_: &Path| Some(Duration::from_secs(3)), started: |_: u32| Some(start) };
+    let got = wait_while_installing_checked(
+        Path::new("x"),
+        MS250,
+        S30,
+        |_| {
+            reads.set(reads.get() + 1);
+            if reads.get() <= 2 { Ok(marker.clone()) } else { missing() }
+        },
+        |_| true,
+        reuse,
+        |_| {},
+    );
+    assert_eq!(got, Waited::Cleared { polls: 2 });
+}
+
+#[test]
+fn the_marker_parses_with_and_without_a_start_time() {
+    assert_eq!(parse_marker(b"4242"), Some((4242, None)));
+    assert_eq!(parse_marker(b"4242 133000000000000000"), Some((4242, Some(133_000_000_000_000_000))));
+    assert_eq!(parse_marker(b"4242 133000000000000000\r\n"), Some((4242, Some(133_000_000_000_000_000))));
+    assert_eq!(parse_marker(b"4242 x"), None);
+    assert_eq!(parse_marker(b"4242 1 2"), None);
+    assert!(process_start(std::process::id()).is_some(), "our own start time reads");
+}
