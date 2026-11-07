@@ -2,7 +2,8 @@
 //! start-up kept sweep and each Settings save, so the folders still readable in it must be on
 //! disk, not only in the UI's copy: moving the damaged file aside left every later load with
 //! defaults, and the next folder save wrote the imported folders and "Folders Recall manages"
-//! away for good.
+//! away for good. The damaged file is never replaced before a `.bad` copy of it exists
+//! (RI2-4), and a repair never writes over a save that landed after the damaged read (RI2-3).
 use std::path::Path;
 use std::time::SystemTime;
 
@@ -12,17 +13,29 @@ use crate::services::durable::{quarantine, Keep};
 impl Folders {
     /// `bytes`, read from `path`, did not parse. When some folders are still readable, the
     /// damaged file is copied to a dated `.bad` and those folders are written back durably;
-    /// when none are, it is moved aside. With no backup, or a failed write-back, the damaged
-    /// file stays where it is, so the next load reads the same folders back from it.
-    pub(super) fn recover(path: &Path, bytes: &[u8], now: SystemTime) -> Self {
+    /// when none are, it is moved aside. A file that changed since `bytes` were read (a save
+    /// landed) is used as it is now when it parses. With no backup, every save is refused
+    /// (`write_block`), so the damaged file stays until it can be backed up; a failed
+    /// write-back leaves it too, and the next load reads the same folders back from it.
+    pub(crate) fn recover(path: &Path, bytes: &[u8], now: SystemTime) -> Self {
+        let current = std::fs::read(path).ok();
+        if let Some(newer) = current.as_deref().filter(|c| *c != bytes).and_then(|c| serde_json::from_slice::<Self>(c).ok()) {
+            return newer;
+        }
         let mut folders = Self::salvage(bytes);
         let found = folders.recordings.is_some() || !folders.imported.is_empty() || !folders.former_recordings.is_empty();
         let backup = quarantine(path, now, if found { Keep::Copy } else { Keep::Move });
         let mut notice = notice(&folders, backup.as_deref());
-        let written = if found && backup.is_some() { folders.save_to(path) } else { Ok(()) };
-        if let Err(error) = written {
-            eprintln!("folders.json: the folders read back were not written back: {error}");
-            notice.push_str(" They could not be saved yet.");
+        if backup.is_none() {
+            folders.write_block = Some("folders.json is damaged and could not be backed up; folder changes are not saved for now".into());
+            notice.push_str(" It could not be backed up, so folder changes are not saved for now.");
+        } else if found {
+            let unchanged = std::fs::read(path).is_ok_and(|c| c == bytes);
+            let written = if unchanged { folders.save_to(path) } else { Err("folders.json changed while it was being repaired".into()) };
+            if let Err(error) = written {
+                eprintln!("folders.json: the folders read back were not written back: {error}");
+                notice.push_str(" They could not be saved yet.");
+            }
         }
         folders.damaged = Some(notice);
         folders

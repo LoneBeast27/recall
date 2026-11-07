@@ -180,3 +180,37 @@ fn a_folders_file_with_nothing_readable_is_moved_aside() {
     assert!(!path.exists() && kept.len() == 1 && kept[0].starts_with("folders.json.bad-"), "moved, not copied: {kept:?}");
     let _ = std::fs::remove_dir_all(dir);
 }
+
+#[test]
+fn a_damaged_folders_file_that_cannot_be_backed_up_is_never_overwritten() {
+    // RI2-4: no `.bad` copy could be made (all of today's names taken): the next folder save
+    // replaced the damaged file anyway.
+    let dir = temp_dir("folders-nobackup");
+    let path = dir.join("folders.json");
+    let damaged: &[u8] = br#"{"imported":["D:\\Old"],"x":"#;
+    std::fs::write(&path, damaged).unwrap();
+    let day = crate::services::durable::utc_day(std::time::SystemTime::now());
+    std::fs::write(dir.join(format!("folders.json.bad-{day}")), b"old 1").unwrap();
+    for n in 2..=20 {
+        std::fs::write(dir.join(format!("folders.json.bad-{day}-{n}")), format!("old {n}")).unwrap();
+    }
+    let folders = Folders::load_from(&path);
+    assert_eq!(folders.imported, vec![r"D:\Old".to_owned()], "still read back");
+    assert!(folders.save_to(&path).is_err(), "a folder save is refused");
+    assert_eq!(std::fs::read(&path).unwrap(), damaged.to_vec(), "the damaged file stays byte for byte");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_repair_never_writes_old_bytes_over_a_newer_save() {
+    // RI2-3: a Settings save landed between the damaged read and the write-back.
+    let dir = temp_dir("folders-newer");
+    let path = dir.join("folders.json");
+    let newer: &[u8] = br#"{"imported":["D:\\New"]}"#;
+    std::fs::write(&path, newer).unwrap();
+    let folders = Folders::recover(&path, br#"{"imported":["D:\\Old"],"x":"#, std::time::SystemTime::now());
+    assert_eq!(folders.imported, vec![r"D:\New".to_owned()], "the file as it is now");
+    assert_eq!(std::fs::read(&path).unwrap(), newer.to_vec(), "not written over");
+    assert_eq!(names(&dir), vec!["folders.json".to_owned()], "no .bad of the good file");
+    let _ = std::fs::remove_dir_all(dir);
+}
