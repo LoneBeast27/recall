@@ -148,6 +148,12 @@ pub fn restart_engine(h: &mut impl RestartHost, reason: RestartReason) -> Restar
     Restarted::Now
 }
 
+/// Every recovery restart (`encoder_recover_tick`, `capture_stuck_tick`): the engine is
+/// broken, so it never waits for a drain and is no planned restart.
+pub fn restart_for_recovery(h: &mut impl RestartHost) -> Restarted {
+    restart_engine(h, RestartReason::Recovery)
+}
+
 /// Every pump tick (`activity_tick`): a deferred restart once nothing is in flight. A
 /// settings one goes through the settings path ("Settings applied" mid-game); a resume
 /// one restarts quietly, as a resume does.

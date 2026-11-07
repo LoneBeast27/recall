@@ -13,7 +13,7 @@ use crate::log;
 use crate::record_activity::{LongRec, PendingPause, Trigger, PAUSE_STOP_WAIT};
 use crate::record_app::Controller;
 use crate::record_engine::{capture_refusal, EngineTarget, Step};
-use crate::record_hotkeys::{bindings, HotkeyAction};
+use crate::record_hotkeys::{bindings, hotkey_command, HotkeyAction};
 use crate::record_notice::shortcut_notice_json;
 use crate::record_status::error_event;
 use crate::record_transition::Transitions;
@@ -90,13 +90,10 @@ impl Controller {
             }
             HotkeyAction::Mic => self.set_mic(!self.mic_muted),
             HotkeyAction::Bookmark | HotkeyAction::Screenshot | HotkeyAction::Record => {
-                let cmd = match action {
-                    HotkeyAction::Bookmark => "bookmark",
-                    HotkeyAction::Screenshot => "screenshot",
-                    _ => "record_toggle",
-                };
                 // Queued first: the tick only for a command the engine got (as a save).
-                self.engine_command_as(cmd, None, true);
+                if let Some((cmd, hotkey)) = hotkey_command(action) {
+                    self.engine_command_as(cmd, None, hotkey);
+                }
             }
             HotkeyAction::Stats => {
                 self.toggle_stats(None);
@@ -308,6 +305,7 @@ impl Controller {
             }
         } else {
             log!("record: resumed");
+            self.supervisor.unpause(); // no game in front: no longer "Recording is paused"
             self.last_fed = None;
             self.probe_foreground(now, false);
         }

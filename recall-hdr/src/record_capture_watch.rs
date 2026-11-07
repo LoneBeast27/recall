@@ -181,7 +181,7 @@ impl Controller {
         let target = crate::record_status::target_json(&wanted);
         if act.restart {
             log!("record: no first frame after {} s for {target:?}; restarting the engine once", STUCK_AFTER.as_secs());
-            self.restart_engine(crate::record_restart::RestartReason::Recovery);
+            self.restart_for_recovery();
         } else {
             log!("record: still no frame for {target:?} after the restart; told the player, no more restarts until something changes");
         }

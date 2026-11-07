@@ -5,11 +5,14 @@
 //! (`restart(.., false)`: "Recorder isn't responding"). Driven through the controller's
 //! own restart code (`record_restart::restart_engine` / `request_settings_restart` /
 //! `pending_restart_tick`, the Sim as `RestartHost`) down to `record_engine_ctl::switch_engine`.
-//! That every recovery call site passes `RestartReason::Recovery` is a source guard in
-//! `record_restart_tests.rs` (`every_recovery_restart_call_site_is_no_planned_restart`).
+//! Every recovery call site (`encoder_recover_tick`, `capture_stuck_tick`) calls
+//! `Controller::restart_for_recovery` -> `record_restart::restart_for_recovery` (`Sim::recover`).
 
 use crate::record_restart::{RestartReason, Restarted};
-use crate::transitions_sim::{game_ev, Sim, Switch};
+use crate::engine_policy::EngineSpec;
+use crate::record_dispatch::Sent;
+use crate::record_engine_ctl::switch_engine;
+use crate::transitions_sim::{game_ev, Sim, Switch, SwitchLog};
 
 const VAL: &str = "VALORANT-Win64-Shipping";
 
@@ -68,4 +71,30 @@ fn a_recovery_during_a_drain_restarts_at_once_unplanned() {
     assert!(s.planner.drain().is_some(), "setup: A drains");
     assert_eq!(s.restart(RestartReason::Recovery), Restarted::Now);
     assert_eq!(s.switches.last(), Some(Switch::Restart { stop: true, planned: false }), "to Off: no game is wanted");
+}
+
+/// `restart_for_recovery`, the helper every recovery call site uses: mid-game and during a
+/// drain it restarts at once, never planned ("Recorder isn't responding" meanwhile).
+#[test]
+fn the_recovery_helper_restarts_at_once_unplanned() {
+    let mut s = in_game();
+    assert_eq!(s.recover(), Restarted::Now);
+    restarted(&s, false, "mid-game");
+    let mut s = in_game();
+    s.window_gone(0x10);
+    s.run_to(5_100);
+    assert!(s.planner.drain().is_some(), "setup: A's window drains");
+    assert_eq!(s.recover(), Restarted::Now, "a broken engine never waits for the drain");
+    assert_eq!(s.switches.last().map(|w| matches!(w, Switch::Restart { planned: false, .. })), Some(true));
+}
+
+/// No caller pauses with an engine wanted; if one did, it is no pause and no recovery: a
+/// planned restart ("Recorder is restarting"), not "isn't responding".
+#[test]
+fn a_pause_refusal_with_an_engine_wanted_is_a_planned_restart() {
+    let log = SwitchLog::default();
+    switch_engine(&log, Some(EngineSpec::default()), Sent::Paused);
+    assert_eq!(log.last(), Some(Switch::Restart { stop: false, planned: true }));
+    switch_engine(&log, None, Sent::Paused);
+    assert_eq!(log.last(), Some(Switch::Pause));
 }
