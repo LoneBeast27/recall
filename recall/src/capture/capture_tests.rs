@@ -40,9 +40,8 @@ mod hdr_flip_tests {
     fn hdr_turning_on_mid_game_keeps_the_capture_on_an_hdr_capable_display() {
         let shared = CaptureShared::new();
         shared.hdr_capable.store(true, Relaxed);
-        shared.capture_vram.store(6 * GIB, Relaxed); // read from the capture device
         shared.mode.store(MODE_PASSTHROUGH, Relaxed); // the desktop is SDR at the start
-        let _ = shared.start_format();
+        let _ = shared.start_format_with(|| Some(6 * GIB)); // the capture adapter's VRAM
         assert!(shared.fp16.load(Relaxed), "an HDR-capable display starts in Rgba16F");
         shared.mode.store(MODE_TONEMAP, Relaxed); // HDR turned on
         assert_eq!(shared.restart_reason(), None, "no capture restart, so no encoder reopen");
@@ -56,9 +55,8 @@ mod hdr_flip_tests {
     fn a_4_gib_card_keeps_bgra8_and_restarts_when_hdr_turns_on() {
         let shared = CaptureShared::new();
         shared.hdr_capable.store(true, Relaxed);
-        shared.capture_vram.store(4 * GIB, Relaxed);
         shared.mode.store(MODE_PASSTHROUGH, Relaxed);
-        let _ = shared.start_format();
+        let _ = shared.start_format_with(|| Some(4 * GIB));
         assert!(!shared.fp16.load(Relaxed), "4 GiB: Bgra8");
         shared.mode.store(MODE_TONEMAP, Relaxed);
         assert_eq!(shared.restart_reason(), Some(super::super::format::HDR_TURNED_ON));
@@ -70,10 +68,28 @@ mod hdr_flip_tests {
     fn hdr_turning_on_on_an_sdr_only_display_still_restarts_and_says_why() {
         let shared = CaptureShared::new();
         shared.mode.store(MODE_PASSTHROUGH, Relaxed);
-        let _ = shared.start_format();
+        let _ = shared.start_format_with(|| panic!("no VRAM read on an SDR-only display"));
         assert!(!shared.fp16.load(Relaxed), "SDR-only display keeps Bgra8");
         shared.mode.store(MODE_TONEMAP, Relaxed);
         assert_eq!(shared.restart_reason(), Some(super::super::format::HDR_TURNED_ON));
+    }
+
+    /// Each start reads the capture adapter again (no cache): a start on a 4 GiB adapter
+    /// then one on an 8 GiB adapter pick Bgra8 then fp16. No read when it decides nothing.
+    #[test]
+    fn each_start_reads_the_capture_adapter_it_is_given() {
+        let shared = CaptureShared::new();
+        shared.hdr_capable.store(true, Relaxed);
+        shared.mode.store(MODE_PASSTHROUGH, Relaxed);
+        let _ = shared.start_format_with(|| Some(4 * GIB));
+        assert!(!shared.fp16.load(Relaxed), "4 GiB adapter: Bgra8");
+        let _ = shared.start_format_with(|| Some(8 * GIB));
+        assert!(shared.fp16.load(Relaxed), "8 GiB adapter: fp16");
+        let _ = shared.start_format_with(|| None);
+        assert!(!shared.fp16.load(Relaxed), "adapter unreadable: Bgra8");
+        shared.hdr_capable.store(false, Relaxed);
+        let _ = shared.start_format_with(|| panic!("an SDR-only display needs no VRAM read"));
+        assert!(!shared.fp16.load(Relaxed));
     }
 
     /// Learning that the display can do HDR does not restart an SDR capture by itself; only
