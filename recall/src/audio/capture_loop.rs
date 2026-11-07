@@ -276,3 +276,7 @@ pub(super) mod tests;
 #[cfg(test)]
 #[path = "own_device_tests.rs"]
 mod own_device_tests;
+
+#[cfg(test)]
+#[path = "id_pick_loop_tests.rs"]
+mod id_pick_loop_tests;

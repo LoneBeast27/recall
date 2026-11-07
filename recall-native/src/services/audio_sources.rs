@@ -99,8 +99,8 @@ pub const LINE_IN_ON_DEFAULT: &str = "Follows the mic hotkey until you pick a de
 /// default. Lists not read yet: only the last.
 pub fn strip_note(source: &Source, lists: Option<&crate::services::audio_devices::DeviceLists>) -> Option<String> {
     use crate::services::audio_devices::{Found, found};
-    let names = lists.map(|l| if source.kind.uses_inputs() { l.inputs.as_slice() } else { l.outputs.as_slice() });
-    match found(&source.device, names.filter(|_| source.kind != Kind::App)) {
+    let picked = if source.kind == Kind::App { found(&source.device, None) } else { crate::services::audio_pick::source_found(source, lists) };
+    match picked {
         Found::Missing => Some("Not connected".to_owned()),
         Found::Twins(n) => Some(format!("{n} devices share this name")),
         Found::Ambiguous(n) => Some(format!("{n} devices match this name")),
@@ -125,9 +125,9 @@ pub fn windows_says_line_level(source: &Source, lists: Option<&crate::services::
     if source.device.trim().is_empty() {
         return lists.default_input_is_line == Some(true);
     }
-    match crate::services::meters::match_endpoint(&lists.inputs, &source.device) {
-        Some(i) => lists.line_inputs.iter().any(|m| m.trim() == lists.inputs[i].trim()),
-        None => false,
+    match crate::services::audio_pick::source_found(source, Some(lists)) {
+        crate::services::audio_devices::Found::Opens(i) => lists.line_inputs.iter().any(|m| m.trim() == lists.inputs[i].trim()),
+        _ => false,
     }
 }
 

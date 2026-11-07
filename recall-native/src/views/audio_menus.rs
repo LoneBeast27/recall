@@ -176,7 +176,11 @@ impl Root {
             let saved = source.device.trim().to_owned();
             // (name, endpoint id, label): an input saves the endpoint id too.
             let mut entries = vec![(String::new(), String::new(), audio_devices::device_label("", lists.map(|_| names.as_slice()), default.as_deref()))];
-            let matched = (!saved.is_empty()).then(|| crate::services::meters::match_endpoint(&names, &saved)).flatten();
+            // With the endpoint-id tie-break, as the recorder picks it (`audio_pick`).
+            let matched = match crate::services::audio_pick::source_found(source, lists) {
+                audio_devices::Found::Opens(i) if !saved.is_empty() => Some(i),
+                _ => None,
+            };
             // A twin name is listed already (marked "1 of 2"): no extra "not connected" row.
             if !saved.is_empty() && lists.is_some() && matched.is_none() && !names.iter().any(|n| n.trim() == saved) {
                 entries.push((saved.clone(), source.device_id.clone(), format!("{saved} (not connected)")));

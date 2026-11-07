@@ -42,6 +42,8 @@ powershell -NoProfile -File scripts\install.ps1
   in clips. A line-in or capture card can skip it (Audio page → the strip's menu); Recall knows
   that device by its Windows endpoint, which for two identical USB devices without a serial
   number follows the USB port, so keep each of them in the same port.
+  Two devices with the same name are told apart by that endpoint: a source records the one it
+  was picked on, and waits (silent) when neither is it.
 - **Two-step shortcuts:** press **Alt + `** (the key left of 1), then
   **1** bookmark · **2** save the last 30 s · **3** screenshot · **4** start/stop a full
   recording. The game never receives the number. Turn them off in Settings → Shortcuts.

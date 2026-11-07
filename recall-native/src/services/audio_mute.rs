@@ -3,7 +3,7 @@
 //! the nudge when a line-in is moved onto a microphone (R5-deep-audio-2), and the level its
 //! meter shows while muted (R5-deep-audio-5). Pure: lists and states are passed in.
 use crate::services::{
-    audio_devices::{DeviceLists, Found, found},
+    audio_devices::{DeviceLists, Found},
     audio_sources::{Kind, Source},
 };
 
@@ -36,7 +36,7 @@ pub fn other_note(source: &Source, lists: Option<&DeviceLists>) -> Option<&'stat
         return Some(NO_ID);
     }
     let lists = lists?;
-    match found(&source.device, Some(&lists.inputs)) {
+    match crate::services::audio_pick::source_found(source, Some(lists)) {
         Found::Opens(i) => {
             let id = lists.input_ids.get(i).map(String::as_str).filter(|id| !id.is_empty());
             (!opened_own(id, &source.device, &source.device_id)).then_some(OPENED_OTHER)

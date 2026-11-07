@@ -35,6 +35,30 @@ pub(crate) fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
     hits.next().is_none().then_some(first)
 }
 
+/// Index of the endpoint `want` names when it was saved with the endpoint id `want_id`: the
+/// endpoint-id tie-break (A4 amendment, merge gate 2026-11-07 08:29 UTC) on top of
+/// `match_endpoint`. When two or more endpoints have `want`'s name once a leading "<digits>- "
+/// index is dropped (exact twins included), the one whose id (`id_of`, by index of `names`) is
+/// the saved id opens. An id that matches none or several of them decides nothing: the rule
+/// without ids (one exact name, else wait). Only same-named endpoints are candidates, so an id
+/// never opens an endpoint by another name; ids are read only for the tie-break, and only with
+/// a well-formed saved id. The Audio page's meter keeps a copy (`recall-native`
+/// `services/meters.rs` `pick_endpoint`); keep the two equal (same test table in both).
+pub(crate) fn pick_endpoint(names: &[String], want: &str, want_id: &str, id_of: impl Fn(usize) -> Option<String>) -> Option<usize> {
+    let want_id = want_id.trim();
+    if !want.trim().is_empty() && id_ok(want_id) {
+        let stripped = strip_index(want);
+        let candidates: Vec<usize> = names.iter().enumerate().filter(|(_, n)| strip_index(n) == stripped).map(|(i, _)| i).collect();
+        if candidates.len() >= 2 {
+            let mut hits = candidates.into_iter().filter(|&i| id_of(i).is_some_and(|id| id.trim() == want_id));
+            if let (Some(i), None) = (hits.next(), hits.next()) {
+                return Some(i);
+            }
+        }
+    }
+    match_endpoint(names, want)
+}
+
 /// A saved endpoint id the recorder trusts (R6-deep-audio-5): 1 to 256 characters once trimmed,
 /// no control character. Anything else counts as no id: the source still records, and follows
 /// Alt+M. The Audio page keeps a copy (`recall-native` `services/meters.rs` `id_ok`).
@@ -63,15 +87,22 @@ pub(crate) enum Pick {
     Default,
 }
 
+/// [`choose_endpoint_by`] with no saved endpoint id (tests).
+#[cfg(test)]
+pub(crate) fn choose_endpoint(names: &[String], want: Option<&str>, exact: bool) -> Result<Pick, String> {
+    choose_endpoint_by(names, (want, ""), exact, |_| None)
+}
+
 /// The endpoint a device source asks for, from the connected endpoints' `names`: its
-/// device `want` (`match_endpoint`), else (no device) the Windows default. A named device opens
+/// device `want` with the endpoint id saved with it (`pick_endpoint`, `id_of` reads an
+/// endpoint's id by index), else (no device) the Windows default. A named device opens
 /// by its own name only, at start and on every reopen, never as the Windows default: that would
 /// record another device under this track's name (the track waits for it instead,
 /// `capture_loop`). Under `RECALL_AUDIO_EXACT` (tests) only a named endpoint may open, so a test
 /// never records the person's real devices.
-pub(crate) fn choose_endpoint(names: &[String], want: Option<&str>, exact: bool) -> Result<Pick, String> {
+pub(crate) fn choose_endpoint_by(names: &[String], (want, want_id): (Option<&str>, &str), exact: bool, id_of: impl Fn(usize) -> Option<String>) -> Result<Pick, String> {
     let want = want.map(str::trim).filter(|w| !w.is_empty());
-    if let Some(i) = want.and_then(|w| match_endpoint(names, w)) {
+    if let Some(i) = want.and_then(|w| pick_endpoint(names, w, want_id, &id_of)) {
         return Ok(Pick::Named(i));
     }
     if exact {
@@ -82,6 +113,10 @@ pub(crate) fn choose_endpoint(names: &[String], want: Option<&str>, exact: bool)
         None => Ok(Pick::Default),
     }
 }
+
+#[cfg(test)]
+#[path = "id_pick_tests.rs"]
+mod id_pick_tests;
 
 #[cfg(test)]
 mod tests {

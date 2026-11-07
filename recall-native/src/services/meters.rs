@@ -30,8 +30,9 @@ pub struct MeterReading {
 /// What one meter listens to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeterTarget {
-    /// An endpoint ("" = the Windows default): loopback of an output, or an input.
-    Device { render: bool, device: String },
+    /// An endpoint ("" = the Windows default): loopback of an output, or an input. `device_id`
+    /// is the endpoint id saved with it: it tells same-named endpoints apart (`pick_endpoint`).
+    Device { render: bool, device: String, device_id: String },
     /// The largest running process tree of an exe.
     App { exe: String },
     /// One process tree (the recorded game).
@@ -48,14 +49,14 @@ pub struct MeterSpec {
 /// The meter for a source, the way the recorder captures it: the game's process while a game
 /// is recorded (`game_pid`), else its output device.
 pub fn spec_for(source: &Source, game_pid: Option<u32>) -> MeterSpec {
-    let device = source.device.trim().to_owned();
+    let (device, device_id) = (source.device.trim().to_owned(), source.device_id.trim().to_owned());
     let target = match source.kind {
         Kind::Game => match game_pid {
             Some(pid) => MeterTarget::Process { pid },
-            None => MeterTarget::Device { render: true, device },
+            None => MeterTarget::Device { render: true, device, device_id },
         },
-        Kind::Output => MeterTarget::Device { render: true, device },
-        Kind::Input => MeterTarget::Device { render: false, device },
+        Kind::Output => MeterTarget::Device { render: true, device, device_id },
+        Kind::Input => MeterTarget::Device { render: false, device, device_id },
         Kind::App => MeterTarget::App { exe: source.exe.trim().to_owned() },
     };
     MeterSpec { label: source.id.clone(), target }
@@ -180,16 +181,17 @@ fn meter_thread(shared: &Shared, index: usize) {
     }
 }
 
-/// The endpoint the recorder opens for `name` (`recall` `audio::pick_device`), and for a source
-/// with no device the Windows default's id (the meter follows it when it moves). A saved device
-/// that is not connected is metered as missing: the recorder records silence for it, so a live
-/// meter of the default there would claim a recording that is not happening.
-fn find_device(direction: &Direction, name: &str) -> Result<Option<(Device, Option<String>)>, String> {
+/// The endpoint the recorder opens for `name` and its saved `id` (`recall` `audio::pick_device`),
+/// and for a source with no device the Windows default's id (the meter follows it when it
+/// moves). A saved device that is not connected is metered as missing: the recorder records
+/// silence for it, so a live meter of the default there would claim a recording that is not
+/// happening. Endpoint ids are read only to tell same-named endpoints apart.
+fn find_device(direction: &Direction, (name, id): (&str, &str)) -> Result<Option<(Device, Option<String>)>, String> {
     let collection = DeviceCollection::new(direction).map_err(|error| error.to_string())?;
     let count = collection.get_nbr_devices().map_err(|error| error.to_string())?;
     let devices: Vec<Device> = (0..count).filter_map(|i| collection.get_device_at_index(i).ok()).collect();
     let names: Vec<String> = devices.iter().map(|d| d.get_friendlyname().unwrap_or_default()).collect();
-    match meter_pick(&names, name) {
+    match meter_pick_id(&names, name, id, |i| devices.get(i).and_then(|d| d.get_id().ok())) {
         Some(DevicePick::Named(i)) => Ok(devices.into_iter().nth(i).map(|d| (d, None))),
         Some(DevicePick::Default) => Ok(wasapi::get_default_device(direction).ok().map(|d| {
             let id = d.get_id().ok();
@@ -215,11 +217,18 @@ pub enum DevicePick {
 
 /// The endpoint a device meter opens for the saved device `want`, from the connected endpoints'
 /// `names`, the way the recorder picks it (`recall` `audio::choose_endpoint`).
+#[cfg(test)]
 pub fn meter_pick(names: &[String], want: &str) -> Option<DevicePick> {
+    meter_pick_id(names, want, "", |_| None)
+}
+
+/// [`meter_pick`] with the endpoint id saved with `want` (`want_id`) and each endpoint's id
+/// (`id_of`, by index of `names`, read only for a tie-break): `pick_endpoint`.
+pub fn meter_pick_id(names: &[String], want: &str, want_id: &str, id_of: impl Fn(usize) -> Option<String>) -> Option<DevicePick> {
     if want.trim().is_empty() {
         return Some(DevicePick::Default);
     }
-    match_endpoint(names, want).map(DevicePick::Named)
+    pick_endpoint(names, want, want_id, id_of).map(DevicePick::Named)
 }
 
 /// A default-device meter should reopen: the Windows default it opened (`opened`) is no longer
@@ -246,6 +255,30 @@ pub fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
     let mut hits = names.iter().enumerate().filter(|(_, n)| strip_index(n) == want).map(|(i, _)| i);
     let first = hits.next()?;
     hits.next().is_none().then_some(first)
+}
+
+/// Index of the endpoint `want` names when it was saved with the endpoint id `want_id`: the
+/// endpoint-id tie-break (A4 amendment, merge gate 2026-11-07 08:29 UTC) on top of
+/// `match_endpoint`. When two or more endpoints have `want`'s name once a leading "<digits>- "
+/// index is dropped (exact twins included), the one whose id (`id_of`, by index of `names`) is
+/// the saved id opens. An id that matches none or several of them decides nothing: the rule
+/// without ids (one exact name, else wait). Only same-named endpoints are candidates, so an id
+/// never opens an endpoint by another name; ids are read only for the tie-break, and only with
+/// a well-formed saved id. A copy of the recorder's `pick_endpoint` (`recall`
+/// `audio/endpoints.rs`); both crates test the same table.
+pub fn pick_endpoint(names: &[String], want: &str, want_id: &str, id_of: impl Fn(usize) -> Option<String>) -> Option<usize> {
+    let want_id = want_id.trim();
+    if !want.trim().is_empty() && id_ok(want_id) {
+        let stripped = strip_index(want);
+        let candidates: Vec<usize> = names.iter().enumerate().filter(|(_, n)| strip_index(n) == stripped).map(|(i, _)| i).collect();
+        if candidates.len() >= 2 {
+            let mut hits = candidates.into_iter().filter(|&i| id_of(i).is_some_and(|id| id.trim() == want_id));
+            if let (Some(i), None) = (hits.next(), hits.next()) {
+                return Some(i);
+            }
+        }
+    }
+    match_endpoint(names, want)
 }
 
 /// How many endpoints equal `want` once both drop a leading "<digits>- " index: two or more
@@ -309,9 +342,9 @@ fn open(target: &MeterTarget) -> Result<Option<Opened>, String> {
         Ok(Some(Opened { client: AudioClient::new_application_loopback_client(pid, true).map_err(text)?, period: 200_000, pid: Some(pid), default: None }))
     };
     match target {
-        MeterTarget::Device { render, device } => {
+        MeterTarget::Device { render, device, device_id } => {
             let direction = if *render { Direction::Render } else { Direction::Capture };
-            let Some((device, default)) = find_device(&direction, device)? else { return Ok(None) };
+            let Some((device, default)) = find_device(&direction, (device, device_id))? else { return Ok(None) };
             let client = device.get_iaudioclient().map_err(text)?;
             let (_, min_period) = client.get_device_period().map_err(text)?;
             Ok(Some(Opened { client, period: min_period, pid: None, default: default.map(|id| (direction, id)) }))
@@ -439,3 +472,7 @@ fn round_tenth(value: f32) -> f32 {
 #[cfg(test)]
 #[path = "meters_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "meters_id_tests.rs"]
+mod id_tests;
