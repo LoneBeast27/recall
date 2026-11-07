@@ -459,7 +459,8 @@ fn spawn_stdin_reader(
                     | protocol::Command::RecordStart
                     | protocol::Command::RecordStop
                     | protocol::Command::RecordToggle
-                    | protocol::Command::RecordFail { .. }),
+                    | protocol::Command::RecordFail { .. }
+                    | protocol::Command::SessionLocked { .. }),
                 ) => {
                     extras.handle(&cmd);
                 }

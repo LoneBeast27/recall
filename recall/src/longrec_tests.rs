@@ -11,7 +11,7 @@ const G: u64 = 1_000_000;
 fn writer(tag: &str, generation: u64) -> (Writer<FakeFactory>, PathBuf) {
     let dir = temp_dir(tag);
     let recorder = Recorder::new(FakeFactory::default(), tracks());
-    (Writer { out_dir: dir.to_string_lossy().into_owned(), json: false, recorder, generation, skew: Duration::ZERO, parts_so_far: Vec::new(), missed: (0.0, 0.0) }, dir)
+    (Writer { out_dir: dir.to_string_lossy().into_owned(), json: false, recorder, generation, skew: Duration::ZERO, parts_so_far: Vec::new(), missed: (0.0, 0.0), lock: LockClock::default() }, dir)
 }
 
 fn video(pts_ms: u64, keyframe: bool, generation: u64) -> Data {
@@ -179,7 +179,7 @@ fn a_failure_reports_the_seconds_frozen_before_it() {
     let dir = temp_dir("failfrozen");
     let factory = FakeFactory { causes: vec![(generation + 1, machine::Cause::Same)], ..Default::default() };
     let recorder = Recorder::new(factory, tracks());
-    let mut w = Writer { out_dir: dir.to_string_lossy().into_owned(), json: false, recorder, generation, skew: Duration::ZERO, parts_so_far: Vec::new(), missed: (0.0, 0.0) };
+    let mut w = Writer { out_dir: dir.to_string_lossy().into_owned(), json: false, recorder, generation, skew: Duration::ZERO, parts_so_far: Vec::new(), missed: (0.0, 0.0), lock: LockClock::default() };
     let t0 = Instant::now();
     w.start("G", Some((0, t0)));
     w.generation = generation;
@@ -205,7 +205,7 @@ fn the_writer_counts_a_freeze_from_the_encode_error() {
     let dir = temp_dir("errfrozen");
     let factory = FakeFactory { causes: vec![(generation + 1, machine::Cause::Same)], ..Default::default() };
     let recorder = Recorder::new(factory, tracks());
-    let mut w = Writer { out_dir: dir.to_string_lossy().into_owned(), json: false, recorder, generation, skew: Duration::ZERO, parts_so_far: Vec::new(), missed: (0.0, 0.0) };
+    let mut w = Writer { out_dir: dir.to_string_lossy().into_owned(), json: false, recorder, generation, skew: Duration::ZERO, parts_so_far: Vec::new(), missed: (0.0, 0.0), lock: LockClock::default() };
     let t0 = Instant::now();
     w.start("G", Some((0, t0)));
     w.generation = generation;
@@ -280,4 +280,34 @@ fn several_recovered_parts_are_one_event_that_lists_them() {
     assert_eq!(v["type"], "recording_recovered");
     assert_eq!(v["path"], "E:/c/G__rec.mp4", "older readers still get the first file");
     assert_eq!(v["paths"], serde_json::json!(["E:/c/G__rec.mp4", "E:/c/H__rec.mp4"]));
+}
+
+/// Audit U8: the time the PC sat locked (Win+L) during a recording is counted on the
+/// writer's clock and reset by the stop.
+#[test]
+fn a_twelve_minute_lock_during_a_recording_is_counted_and_reset_by_the_stop() {
+    let (mut w, dir) = writer("locked", G + 50);
+    let (_tx, rx) = sync_channel::<Data>(4);
+    w.start("G", Some((0, Instant::now())));
+    w.generation = G + 50;
+    w.data(video(0, true, G + 50));
+    w.control(Control::Locked(true), &rx);
+    w.skew = Duration::from_secs(720);
+    w.control(Control::Locked(false), &rx);
+    let locked = w.lock.seconds(w.now());
+    assert!((locked - 720.0).abs() < 0.5, "{locked}");
+    w.data(video(16, false, G + 50));
+    w.stop(&rx);
+    assert_eq!(w.lock.seconds(w.now()), 0.0, "the next recording starts from zero");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Audit U8: `recording_stopped` carries `locked_seconds`.
+#[test]
+fn the_stop_message_carries_the_locked_seconds() {
+    let stop = Stop { seconds: 1200.0, bytes: 1, marks: 0, parts: 1, total_seconds: 1200.0, gap_seconds: 0.0, frozen_seconds: 0.0, locked_seconds: 720.0, cause: None };
+    let out = serde_json::to_value(stopped_outbound("E:/c/G__rec.mp4", stop)).unwrap();
+    assert_eq!(out["type"], "recording_stopped");
+    assert_eq!(out["locked_seconds"].as_f64(), Some(720.0), "{out}");
+    assert_eq!(out["continued"], false);
 }

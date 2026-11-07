@@ -51,6 +51,7 @@ impl Controller {
 
     /// A fresh engine instance starts unmuted in `auto` mode: re-apply ours.
     pub(crate) fn reapply_engine_intents(&mut self) {
+        self.reapply_lock();
         // Not a user action: a line the new engine does not take is logged.
         if self.mic_muted && !crate::record_dispatch::automatic_effects(self.supervisor.send_engine_line(r#"{"cmd":"set_mic_mute","muted":true}"#)).is_empty() {
             log!("record: the new engine did not take the mic mute ({})", crate::record_dispatch::NOT_RESPONDING);

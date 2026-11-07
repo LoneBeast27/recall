@@ -227,8 +227,11 @@ pub enum DaemonEvent {
     RecordingPartSaved { path: String },
     /// `seconds`: the whole recording, every part; `parts`: the files it took; `gap_seconds`:
     /// time not recorded between the parts; `frozen_seconds`: time the picture held still
-    /// (a same-header encoder reopen waiting for its keyframe).
-    RecordingStopped { path: String, seconds: f64, parts: u32, gap_seconds: f64, frozen_seconds: f64 },
+    /// (a same-header encoder reopen waiting for its keyframe); `locked_seconds`: time the PC
+    /// sat locked (Win+L) while it ran.
+    RecordingStopped { path: String, seconds: f64, parts: u32, gap_seconds: f64, frozen_seconds: f64, locked_seconds: f64 },
+    /// The PC unlocked after a lock during which a long recording kept going (`seconds` locked).
+    RecordingKeptLocked { seconds: f64 },
     /// `files`: what the recording left (it ended early), empty when nothing was saved.
     RecordingFailed { reason: String, files: Vec<String>, gap_seconds: f64, frozen_seconds: f64 },
     /// Long recordings a crash or a kill left as `.part`, renamed into place on the next
