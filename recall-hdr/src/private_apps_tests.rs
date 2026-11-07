@@ -18,6 +18,7 @@ fn plain(stem: &str) -> WatchEvent {
         fullscreen: true,
         fullscreen_on_target: true,
         steam_game: false,
+        launcher_game: false,
         hosted: false,
         hwnd: 0x500,
     }

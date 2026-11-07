@@ -1,7 +1,10 @@
 //! Game libraries of the other PC launchers: an exe under one of these
-//! folders is game evidence exactly like a Steam library path
-//! (`watcher::is_steam_library_path`, R6 merge gate). The folders are read at
-//! run time from what each launcher writes, never from hard-coded drives:
+//! folders is a windowed game like one in a Steam library
+//! (`game_library::is_steam_library_path`, R6 merge gate), but unlike Steam it
+//! does not beat the private list (R7-detect-1: a folder the user or the
+//! registry names can hold a chat app). Each folder is one game's install
+//! folder, never a parent that holds other things. They are read at run time
+//! from what each launcher writes, never from hard-coded drives:
 //!
 //! - Epic: `%ProgramData%\Epic\EpicGamesLauncher\Data\Manifests\*.item`
 //!   (JSON), `InstallLocation`; an entry whose `AppCategories` does not say
@@ -14,13 +17,19 @@
 //! - Battle.net: the uninstall entries (`...\CurrentVersion\Uninstall\*`)
 //!   whose `Publisher` is Blizzard Entertainment, `InstallLocation`, minus
 //!   the Battle.net client itself;
-//! - itch: `%APPDATA%\itch\apps` (its default install location) and the
-//!   install locations in `%APPDATA%\itch\preferences.json`. Locations kept
-//!   only in itch's `butler.db` (SQLite) are not read.
+//! - itch: each folder in `%APPDATA%\itch\apps` (its default install
+//!   location) and in the install locations of
+//!   `%APPDATA%\itch\preferences.json` that holds itch's install receipt
+//!   (`<game>\.itch\receipt.json.gz`). The locations themselves are parents
+//!   (one in Downloads holds everything else there too). Locations kept only
+//!   in itch's `butler.db` (SQLite) are not read.
 //!
 //! A missing launcher reads as nothing, a malformed manifest or value is
-//! skipped. A folder that would cover far more than one game (a drive root,
-//! Program Files, the user profile) is dropped. Lookups read a cached list
+//! skipped. A folder that would cover far more than one game is dropped
+//! (`too_broad`): a drive root, Program Files, ProgramData, Windows, the user
+//! profile, any folder above it or directly in it (Downloads, Documents,
+//! Desktop, AppData, ...), AppData's own folders and `AppData\Local\Programs`.
+//! Lookups read a cached list
 //! (`is_launcher_library_path`); a background thread rescans every
 //! [`REFRESH_EVERY`] (`launcher_libraries_win`), so the pump never touches
 //! the registry or the disk for it.
@@ -81,7 +90,8 @@ pub(crate) fn collect_roots(src: &dyn LibrarySources) -> Vec<String> {
     found.extend(battlenet_roots(src));
     found.extend(itch_roots(src));
     let broad = broad_folders(src);
-    let mut roots: Vec<String> = found.iter().map(|p| normalize(p)).filter(|r| !too_broad(r, &broad)).collect();
+    let profile = src.env("USERPROFILE").filter(|p| !p.trim().is_empty()).map(|p| normalize(&p));
+    let mut roots: Vec<String> = found.iter().map(|p| normalize(p)).filter(|r| !too_broad(r, &broad, profile.as_deref())).collect();
     roots.sort();
     roots.dedup();
     roots
@@ -93,13 +103,32 @@ fn broad_folders(src: &dyn LibrarySources) -> Vec<String> {
     vars.iter().filter_map(|v| src.env(v)).filter(|p| !p.trim().is_empty()).map(|p| normalize(&p)).collect()
 }
 
-/// A drive root (`c:\`), a share root, a bare relative name or a broad folder.
-fn too_broad(root: &str, broad: &[String]) -> bool {
-    let parts = root.trim_end_matches('\\').split('\\').filter(|s| !s.is_empty()).count();
+/// A drive root (`c:\`), a share root, a bare relative name, a broad folder,
+/// or the top of a user profile ([`profile_top`]): the `USERPROFILE` one
+/// wherever it lives, and any `X:\Users\<name>\`.
+fn too_broad(root: &str, broad: &[String], profile: Option<&str>) -> bool {
+    let parts: Vec<&str> = root.trim_end_matches('\\').split('\\').filter(|s| !s.is_empty()).collect();
     let drive = root.as_bytes().get(1) == Some(&b':');
     let unc = root.starts_with("\\\\");
-    let shallow = if unc { parts <= 2 } else { !drive || parts <= 1 };
-    shallow || broad.iter().any(|b| b == root) || root.ends_with(":\\users\\")
+    let shallow = if unc { parts.len() <= 2 } else { !drive || parts.len() <= 1 };
+    let users = (drive && parts.len() >= 3 && parts[1] == "users").then(|| format!("{}\\users\\{}\\", parts[0], parts[2]));
+    shallow
+        || broad.iter().any(|b| b == root)
+        || root.ends_with(":\\users\\")
+        || profile.is_some_and(|p| profile_top(root, p))
+        || users.is_some_and(|p| profile_top(root, &p))
+}
+
+/// `root` (normalized) is `profile`, a folder above it, a folder directly in
+/// it, one of its AppData folders (`Local`, `Roaming`, `LocalLow`) or
+/// `AppData\Local\Programs` (per-user installs of every kind of app).
+fn profile_top(root: &str, profile: &str) -> bool {
+    if profile.starts_with(root) {
+        return true;
+    }
+    let Some(rest) = root.strip_prefix(profile) else { return false };
+    let segs: Vec<&str> = rest.trim_end_matches('\\').split('\\').collect();
+    matches!(segs.as_slice(), [_] | ["appdata", _] | ["appdata", "local", "programs"])
 }
 
 fn epic_roots(src: &dyn LibrarySources) -> Vec<String> {
@@ -162,14 +191,20 @@ fn battlenet_roots(src: &dyn LibrarySources) -> Vec<String> {
 fn itch_roots(src: &dyn LibrarySources) -> Vec<String> {
     let Some(appdata) = src.env("APPDATA") else { return Vec::new() };
     let base = format!("{}\\itch", appdata.trim_end_matches('\\'));
-    let mut out = Vec::new();
-    if !src.list_dir(&format!("{base}\\apps")).is_empty() {
-        out.push(format!("{base}\\apps"));
-    }
+    let mut locations = vec![format!("{base}\\apps")];
     if let Some(text) = src.read_file(&format!("{base}\\preferences.json")) {
-        out.extend(itch_locations(&text));
+        locations.extend(itch_locations(&text));
     }
-    out
+    locations.iter().flat_map(|loc| itch_installs(src, loc)).collect()
+}
+
+/// The folders of an itch install location that hold itch's install receipt
+/// (`.itch\receipt.json.gz`): one game each. Nothing else in the location
+/// counts (a location can be `Downloads`).
+fn itch_installs(src: &dyn LibrarySources, location: &str) -> Vec<String> {
+    let loc = location.trim().trim_end_matches(['\\', '/']);
+    let receipted = |sub: &String| src.list_dir(&format!("{loc}\\{sub}\\.itch")).iter().any(|n| n.eq_ignore_ascii_case("receipt.json.gz"));
+    src.list_dir(loc).into_iter().filter(|sub| receipted(sub)).map(|sub| format!("{loc}\\{sub}")).collect()
 }
 
 /// The install locations in itch's `preferences.json`

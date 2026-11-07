@@ -8,8 +8,9 @@
 //!   watched like an unknown fullscreen window (`record_render`), but its
 //!   verdict never commits it: [`private_admit`] turns every outcome into a
 //!   rejection, a "game" verdict included;
-//! - when that window renders like a game (a game verdict, or composed at a
-//!   steady game-like rate: the G4 gate, [`private_front`]) and stays in front
+//! - when that window renders like a game (a game verdict: independent flip,
+//!   exclusive fullscreen or tearing, [`private_front`]; composed frames at
+//!   any rate are not enough, a video call draws so) and stays in front
 //!   for over 20 s, the G4 notice names it once per exe: "Not recording
 //!   <exe>: add it as a game in Settings". After that it is not watched again
 //!   this run.
@@ -21,7 +22,6 @@ use std::collections::HashSet;
 use std::time::Instant;
 
 use crate::config::Config;
-use crate::record_composed::steady_rate;
 use crate::record_target::{classify_event, is_target_with};
 use crate::render_verdict::{Gate, RenderStats, Verdict, Why};
 use crate::watcher::WatchEvent;
@@ -57,14 +57,17 @@ pub(crate) fn private_admit(gate: Gate, verdict: Verdict) -> Result<Why, Instant
 }
 
 /// `Some(game_like)` while the G4 clock may run for a blocked window whose
-/// last verdict was `last`: a game verdict, or composed (`game_like` = at a
-/// steady rate). `None` (the streak resets) for video, no frames, no verdict
-/// yet, or while the desktop is recorded (the window is on the clip).
+/// last verdict was `last`: `game_like` only for a game verdict; composed
+/// keeps the clock running but never names the exe on its own. `None` (the
+/// streak resets) for video, no frames, no verdict yet, or while the desktop
+/// is recorded (the window is on the clip).
 pub(crate) fn private_front(last: Option<(Why, RenderStats)>, desktop: bool) -> Option<bool> {
-    let (why, stats) = last.filter(|_| !desktop)?;
+    let (why, _stats) = last.filter(|_| !desktop)?;
     match why {
         Why::ExclusiveFullscreen | Why::IndependentFlip | Why::Tearing => Some(true),
-        Why::Composed => Some(steady_rate(&stats)),
+        // A fullscreen video call draws composed at a steady rate in its own
+        // pid (Zoom, Telegram): no notice telling the user to opt it in (R7-detect-2).
+        Why::Composed => Some(false),
         Why::VideoSwapChain | Why::NoFrames => None,
     }
 }

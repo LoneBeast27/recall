@@ -13,6 +13,7 @@ fn uwp(stem: &str, title: &str, hosted: bool) -> WatchEvent {
         fullscreen: true,
         fullscreen_on_target: true,
         steam_game: false,
+        launcher_game: false,
         hosted,
         hwnd: 0x400,
     }

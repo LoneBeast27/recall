@@ -6,9 +6,11 @@
 //!
 //! Opt-ins that beat the list:
 //! - recording: a game override (`[[overrides]]`), a `detect.fullscreen_games`
-//!   entry, or positive game evidence (the exe lives in a Steam or launcher
-//!   game library, or `known_games` lists it) -- an indie game can ship a
-//!   stock `electron.exe` or be called `Element.exe` (R5-detect-2);
+//!   entry, or positive game evidence (the exe lives in a Steam library, or
+//!   `known_games` lists it) -- an indie game can ship a stock `electron.exe`
+//!   or be called `Element.exe` (R5-detect-2). Another launcher's folder
+//!   (Epic, GOG, itch, ...) is not such evidence: the user or the registry
+//!   names it, so a chat app can sit there (R7-detect-1);
 //! - HDR rules: a game override, a `detect.fullscreen_games` entry for a
 //!   fullscreen window, or the same game evidence (`rules::classify`,
 //!   R5-detect-3, R6-detect-1).
@@ -37,7 +39,8 @@ pub(crate) fn is_private(stem: &str) -> bool {
 }
 
 /// `stem` is a private app and nothing says it is a game: `game_evidence` =
-/// the exe lives in a Steam library or `known_games` lists it (R5-detect-2).
+/// the exe lives in a Steam library or `known_games` lists it (R5-detect-2;
+/// a launcher folder is not, R7-detect-1).
 pub(crate) fn blocks_recording(stem: &str, game_evidence: bool) -> bool {
     !game_evidence && is_private(stem)
 }

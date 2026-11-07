@@ -120,7 +120,20 @@ pub(crate) const REMOTE_CLIENT_STEMS: &[&str] = &[
     "nxplayer",
     "splashtop",
     "strwinclt",
+    // Citrix Workspace, VMware Horizon, Amazon WorkSpaces, Shadow PC (R7-detect-3).
+    "wfica32",
+    "cdviewer",
+    "vmware-view",
+    "workspaces",
+    "shadow",
+    "shadowpc",
+    "shadow pc",
 ];
+
+/// Remote clients whose bare exe name a game may share: Steam evidence or
+/// `known_games` ([`game_evidence`]) makes them a game; the G4 notice never
+/// names them.
+const GAME_NAMED_REMOTE_STEMS: &[&str] = &["shadow"];
 
 /// `stem` (`.exe` optional) is a remote desktop / streaming client.
 pub(crate) fn is_remote_client(stem: &str) -> bool {
@@ -132,7 +145,9 @@ pub(crate) fn is_remote_client(stem: &str) -> bool {
 const OWN_STEMS: &[&str] = &["recall", "recall-hdr", "recall-native", "recall-hub", "recall-overlay"];
 
 /// Whether an exe stem is a capture target under `cfg`. `looks_like_game` =
-/// fullscreen on its monitor, or the exe lives in a Steam or launcher library.
+/// fullscreen on its monitor, or the exe lives in a Steam or launcher library;
+/// `game_evidence` = [`game_evidence`] (Steam or `known_games`, not a launcher
+/// folder, R7-detect-1).
 ///
 /// Order: Recall's own processes, then a `none` override, then
 /// `detect.fullscreen_games` (beats the deny lists), then the deny lists, then
@@ -151,7 +166,8 @@ pub fn is_target_with(stem: &str, looks_like_game: bool, game_evidence: bool, cf
     if looks_like_game && is_fullscreen_game(cfg, stem) {
         return true;
     }
-    if rules::is_denied(stem) || TARGET_DENY_STEMS.iter().any(|d| d.eq_ignore_ascii_case(stem)) || is_remote_client(stem) {
+    let remote = is_remote_client(stem) && !(game_evidence && GAME_NAMED_REMOTE_STEMS.iter().any(|d| d.eq_ignore_ascii_case(stem)));
+    if rules::is_denied(stem) || TARGET_DENY_STEMS.iter().any(|d| d.eq_ignore_ascii_case(stem)) || remote {
         return false;
     }
     match kind {
@@ -182,11 +198,11 @@ fn strip_exe(s: &str) -> &str {
 }
 
 /// A candidate that commits on the 300 ms rule with no render check: a
-/// Steam-library exe, an override, a `detect.fullscreen_games` entry, or a
+/// Steam- or launcher-library exe, an override, a `detect.fullscreen_games` entry, or a
 /// game Recall knows (`known_games`). Asked only after [`classify_event`]
 /// made it a candidate, so the deny lists and `none` overrides already ran.
 pub fn skips_render_check(ev: &WatchEvent, cfg: &Config) -> bool {
-    ev.steam_game
+    in_library(ev)
         || rules::override_kind(cfg, &ev.exe_stem).is_some()
         || is_fullscreen_game(cfg, &ev.exe_stem)
         || crate::known_games::is_known_game(&ev.exe_stem, &ev.title)
@@ -200,13 +216,20 @@ pub fn classify_event(ev: &WatchEvent, cfg: &Config) -> Option<Target> {
         return None;
     }
     let evidence = game_evidence(ev);
-    is_target_with(&ev.exe_stem, ev.fullscreen || evidence, evidence, cfg).then(|| Target::from_event(ev))
+    is_target_with(&ev.exe_stem, ev.fullscreen || evidence || ev.launcher_game, evidence, cfg).then(|| Target::from_event(ev))
 }
 
-/// The exe lives in a Steam or launcher game library (`WatchEvent::steam_game`)
-/// or Recall knows the game (R5-detect-2).
+/// Evidence that beats the private list: the exe lives in a Steam library
+/// (`WatchEvent::steam_game`) or Recall knows the game (R5-detect-2). A
+/// launcher folder is not (R7-detect-1): it makes a windowed exe a candidate
+/// ([`in_library`]) but a chat app there stays private without an opt-in.
 pub fn game_evidence(ev: &WatchEvent) -> bool {
     ev.steam_game || crate::known_games::is_known_game(&ev.exe_stem, &ev.title)
+}
+
+/// The exe lives in a Steam or another launcher's game library.
+pub fn in_library(ev: &WatchEvent) -> bool {
+    ev.steam_game || ev.launcher_game
 }
 
 /// The foreground could become a target by going fullscreen (the follow

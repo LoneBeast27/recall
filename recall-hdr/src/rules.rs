@@ -85,9 +85,9 @@ pub struct Foreground {
     pub fullscreen_on_target: bool,
     /// Owning process id.
     pub pid: u32,
-    /// The exe lives in a Steam or launcher game library, or Recall knows the
-    /// game (`record_target::game_evidence`): it beats the private list here
-    /// as it does for recording (R6-detect-1).
+    /// The exe lives in a Steam library, or Recall knows the game
+    /// (`record_target::game_evidence`; a launcher folder is not, R7-detect-1):
+    /// it beats the private list here as it does for recording (R6-detect-1).
     pub game_evidence: bool,
 }
 

@@ -143,7 +143,8 @@ mod tests {
 
     #[test]
     fn remote_desktop_and_streaming_clients_never_get_the_notice() {
-        for stem in ["mstsc", "msrdc", "msrdcw", "parsecd", "Moonlight", "MSTSC.exe"] {
+        let more = ["wfica32", "CDViewer", "vmware-view", "workspaces", "Shadow", "ShadowPC", "Shadow PC.exe"];
+        for stem in ["mstsc", "msrdc", "msrdcw", "parsecd", "Moonlight", "MSTSC.exe"].into_iter().chain(more) {
             assert!(!notice_wanted(stem, rate(90), false), "{stem}");
         }
         assert!(notice_wanted("game", rate(90), false), "a plain composed game still does");

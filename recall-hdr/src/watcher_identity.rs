@@ -13,6 +13,7 @@
 use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::WindowsAndMessaging::{FindWindowExW, GetWindowThreadProcessId};
+use crate::game_library::Library;
 
 /// The exe stem of the UWP frame host.
 const FRAME_HOST_STEM: &str = "ApplicationFrameHost";
@@ -35,7 +36,7 @@ pub(crate) fn effective_identity<T>(frame_stem: &str, frame: (u32, T), hosted: O
 /// The identity of a window owned by `pid`: for a UWP frame
 /// (`ApplicationFrameHost`) the process of its hosted CoreWindow, so a Store
 /// game is judged by its own exe; the frame `hwnd` stays the window (G6).
-pub(super) fn hosted_identity(hwnd: HWND, pid: u32, frame: (String, String, bool)) -> (u32, (String, String, bool)) {
+pub(super) fn hosted_identity(hwnd: HWND, pid: u32, frame: (String, String, Library)) -> (u32, (String, String, Library)) {
     if !is_frame_host(&frame.0) {
         return (pid, frame);
     }

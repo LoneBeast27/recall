@@ -15,6 +15,7 @@ fn plain(stem: &str) -> WatchEvent {
         fullscreen: true,
         fullscreen_on_target: true,
         steam_game: false,
+        launcher_game: false,
         hosted: false,
         hwnd: 0x600,
     }
@@ -63,11 +64,15 @@ fn a_blocked_window_that_renders_like_a_game_gets_the_notice_once() {
 }
 
 #[test]
-fn a_composed_blocked_window_needs_a_game_like_rate() {
-    assert_eq!(run_blocked(&plain("Zoom"), composed(90), 40, true), vec!["Zoom.exe".to_string()], "steady composed");
+fn a_composed_blocked_window_never_gets_the_notice() {
+    // R7-detect-2: a fullscreen Zoom / Telegram video call draws composed at
+    // 25-90 fps in its own pid; only a real game verdict may name the exe.
+    assert!(run_blocked(&plain("Zoom"), composed(90), 40, true).is_empty(), "a steady composed call");
+    assert!(run_blocked(&plain("Telegram"), composed(40), 40, true).is_empty(), "a 25 fps call");
     assert!(run_blocked(&plain("Zoom"), composed(10), 40, true).is_empty(), "an idle call");
     let video = RenderStats { video_presents: 60, ..composed(60) };
     assert!(run_blocked(&plain("Plex"), video, 40, true).is_empty(), "a film");
+    assert_eq!(run_blocked(&plain("Zoom"), flips(90), 25, true), vec!["Zoom.exe".to_string()], "a game verdict still does");
     assert!(run_blocked(&plain("Element"), flips(90), 40, false).is_empty(), "notices off: not used up");
 }
 
