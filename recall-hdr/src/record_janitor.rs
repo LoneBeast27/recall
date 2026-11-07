@@ -217,7 +217,7 @@ fn cap_run(job: &Job, current: &Mutex<Setting>, deps: Deps, warner: &mut Warner,
         log!("storage: a queued run for {} at {} GiB is no longer the setting; skipped", job.dir.display(), job.cap_gb);
         return;
     }
-    match run_once(&job.dir, job.cap_gb, deps.plan, &wanted, deps.bin, deps.recycle) {
+    match run_once(&job.dir, job.cap_gb, deps.plan, &wanted, (deps.bin, crate::win_recycle::file_size), deps.recycle) {
         Ok(o) => {
             if let Some(why) = &o.refused {
                 log!("storage: stopped before a clip that cannot go to the Recycle Bin ({why}); nothing deleted");

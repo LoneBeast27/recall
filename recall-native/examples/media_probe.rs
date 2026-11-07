@@ -16,6 +16,9 @@ mod edit_model;
 #[path = "../../recall/src/win_recycle.rs"]
 mod win_recycle;
 #[allow(dead_code)]
+#[path = "../../recall/src/win_fileop.rs"]
+mod win_fileop;
+#[allow(dead_code)]
 #[path = "../../recall/src/win_volume.rs"]
 mod win_volume;
 #[allow(dead_code)]

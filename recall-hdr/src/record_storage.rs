@@ -1,9 +1,10 @@
 //! Storage cap + auto-clean (`[storage] cap_gb`: 0 = off, else at least
 //! [`STORAGE_CAP_MIN_GB`]). After each saved clip (debounced) and hourly,
 //! when the top-level Recall clips in `recording.output_dir` total more than
-//! the cap, the OLDEST clips go to the Recycle Bin (`SHFileOperationW` +
-//! `FOF_ALLOWUNDO`, with their recorder thumbnails and `.recall-edit.json` /
-//! `.recall-marks.json` sidecars) until the folder is under the cap. A clip
+//! the cap, the OLDEST clips go to the Recycle Bin, with their recorder
+//! thumbnails and `.recall-edit.json` / `.recall-marks.json` sidecars, through
+//! `IFileOperation` with a sink that refuses a permanent delete
+//! (`win_fileop.rs`), until the folder is under the cap. A clip
 //! goes only when its volume has a Recycle Bin that will take it
 //! (`win_recycle.rs`); otherwise the run stops there and nothing is deleted.
 //!
@@ -314,61 +315,27 @@ pub fn favourites_at(path: &Path) -> Result<HashSet<String>, String> {
 
 /// Move `files` (one clip and its companions) to the Recycle Bin in one shell operation.
 pub fn recycle(files: &[PathBuf]) -> Result<(), RecycleError> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::{BOOL, PCWSTR};
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::Shell::{
-        SHFileOperationW, FO_DELETE, SHFILEOPSTRUCTW,
-    };
-    if files.is_empty() {
-        return Ok(());
-    }
-    let mut list: Vec<u16> = Vec::new();
-    for f in files {
-        list.extend(f.as_os_str().encode_wide());
-        list.push(0);
-    }
-    list.push(0);
-    let mut op = SHFILEOPSTRUCTW {
-        hwnd: HWND(std::ptr::null_mut()),
-        wFunc: FO_DELETE,
-        pFrom: PCWSTR(list.as_ptr()),
-        pTo: PCWSTR::null(),
-        // The checked flag set (`win_recycle::recycles_only`): recycle, and ask before any permanent delete.
-        fFlags: crate::win_recycle::RECYCLE_FLAGS,
-        fAnyOperationsAborted: BOOL(0),
-        hNameMappings: std::ptr::null_mut(),
-        lpszProgressTitle: PCWSTR::null(),
-    };
-    // SAFETY: `list` is a double-NUL-terminated wide path list alive for the call.
-    let code = unsafe { SHFileOperationW(&mut op) };
-    shell_outcome(code, op.fAnyOperationsAborted.as_bool())
+    from_outcome(crate::win_fileop::recycle_files(files).outcome)
 }
 
 /// Why one Recycle Bin call did not go through.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RecycleError {
-    /// The clip could not or would not go to the Recycle Bin: Windows asked
-    /// (the precheck missed something) and the call was declined or
+    /// The clip would not go to the Recycle Bin: the `IFileOperation` sink
+    /// refused a delete Windows would have made permanent, or the call was
     /// cancelled. The run stops and the user is told, as for a precheck refusal.
     Refused(String),
     Failed(String),
 }
 
-/// `ERROR_CANCELLED` and the shell's own `DE_OPCANCELLED`.
-const CANCEL_CODES: [i32; 2] = [0x4C7, 0x75];
-
-/// What `SHFileOperationW` returned, as a [`RecycleError`]: a call the user
-/// declined or cancelled (Windows asked, e.g. before a permanent delete) is a
-/// refusal, never retried.
-pub fn shell_outcome(code: i32, aborted: bool) -> Result<(), RecycleError> {
-    if aborted || CANCEL_CODES.contains(&code) {
-        return Err(RecycleError::Refused(format!("the Recycle Bin move was declined or cancelled (shell code {code:#x})")));
+/// One `win_fileop` outcome as the cap run's result.
+pub fn from_outcome(outcome: crate::win_fileop::Outcome) -> Result<(), RecycleError> {
+    use crate::win_fileop::Outcome;
+    match outcome {
+        Outcome::Recycled => Ok(()),
+        Outcome::Refused(why) => Err(RecycleError::Refused(why)),
+        Outcome::Failed(why) => Err(RecycleError::Failed(why)),
     }
-    if code != 0 {
-        return Err(RecycleError::Failed(format!("Recycle Bin move failed (shell error {code:#x})")));
-    }
-    Ok(())
 }
 
 /// What a run did.
@@ -409,14 +376,16 @@ fn plan_listing(dir: &Path, favs: &HashSet<String>, cap: u64) -> Result<(Plan, L
 pub(crate) type PlanFn = fn(&Path, u32) -> Result<(Plan, Listing), String>;
 /// Moves files to the Recycle Bin (production: [`recycle`]; tests inject one).
 pub(crate) type RecycleFn = fn(&[PathBuf]) -> Result<(), RecycleError>;
-pub(crate) use crate::win_recycle::BinCheck;
+pub(crate) use crate::win_recycle::{BinCheck, SizeFn};
 
 /// Bytes one Recycle Bin call moves: the clip (its listed size) and its
 /// companions as they are on disk (a missing one counts 0).
-fn companions_bytes(files: &[PathBuf], clip: Option<&ClipFile>) -> u64 {
-    let clip_bytes = clip.map_or(0, |c| c.bytes);
-    let others: u64 = files.iter().skip(1).filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
-    clip_bytes + others
+fn companions_bytes(files: &[PathBuf], clip: Option<&ClipFile>, size: SizeFn) -> Result<u64, String> {
+    let clip_bytes = match clip {
+        Some(c) => c.bytes,
+        None => crate::win_recycle::total_size(&files[..1.min(files.len())], size)?,
+    };
+    Ok(clip_bytes + crate::win_recycle::total_size(files.get(1..).unwrap_or(&[]), size)?)
 }
 
 /// One cap run: one Recycle Bin call per clip (with its thumbnails and
@@ -427,7 +396,8 @@ fn companions_bytes(files: &[PathBuf], clip: Option<&ClipFile>) -> u64 {
 /// Recycle Bin that will take it (a share, a removable drive, a bin turned
 /// off or too small) stops the run, so nothing is ever deleted for good.
 /// The first failed call ends the run.
-pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: &dyn Fn() -> bool, bin: BinCheck, recycle: RecycleFn) -> Result<Outcome, String> {
+pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: &dyn Fn() -> bool, bin: (BinCheck, SizeFn), recycle: RecycleFn) -> Result<Outcome, String> {
+    let (bin, size) = bin;
     let (plan, listing) = plan(dir, cap_gb)?;
     let cap = cap_gb as u64 * GIB;
     let stuck = plan.stuck(cap);
@@ -439,8 +409,8 @@ pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: &dyn Fn() 
             break;
         }
         let files = companions(dir, name, &listing);
-        let bytes = companions_bytes(&files, listing.clips.iter().find(|c| c.name == *name));
-        if let Err(why) = bin(dir, bytes) {
+        let bytes = companions_bytes(&files, listing.clips.iter().find(|c| c.name == *name), size);
+        if let Err(why) = bytes.and_then(|bytes| bin(dir, bytes)) {
             out.refused = Some(why);
             break;
         }

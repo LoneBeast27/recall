@@ -105,6 +105,9 @@ mod win_volume;
 #[allow(dead_code)]
 #[path = "../../recall/src/win_recycle.rs"]
 mod win_recycle;
+// Recycle through IFileOperation with a sink that refuses a permanent delete (shared with the app).
+#[path = "../../recall/src/win_fileop.rs"]
+mod win_fileop;
 mod state;
 mod supervisor;
 mod tray;

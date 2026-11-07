@@ -5,7 +5,10 @@
 //!
 //! - a local fixed volume with a volume GUID (a `\\nas` share, a mapped
 //!   network drive or a removable drive has no Recycle Bin: Windows would
-//!   delete for good, or ask whether to);
+//!   delete for good, or ask whether to). A `subst` drive letter is refused
+//!   before anything is resolved (`QueryDosDeviceW` names a `\??\` path:
+//!   Windows deletes there for good, measured 2026-11-07), and so is a folder
+//!   that resolves to a UNC path;
 //! - the bin not turned off: neither the `NoRecycleFiles` policy (HKLM, else
 //!   HKCU `Software\Microsoft\Windows\CurrentVersion\Policies\Explorer`) nor
 //!   the volume's own `NukeOnDelete` (HKCU `...\Explorer\BitBucket\Volume\
@@ -14,36 +17,20 @@
 //!   the `RecycleBinSize` policy (percent of the volume; HKLM, else HKCU)
 //!   when set, else the volume's `MaxCapacity` (MB), else Windows' default
 //!   for a volume that has no `BitBucket\Volume` key yet ([`default_max_mb`]).
-//!   A bigger item is the one Windows offers to delete permanently.
+//!   A bigger item is the one Windows offers to delete permanently. The item
+//!   must also fit the bin's FREE room (that size minus what the volume's bin
+//!   already holds, `SHQueryRecycleBinW`): otherwise Windows purges older bin
+//!   items to make room, which deletes those earlier files for good. An
+//!   unreadable bin size refuses.
 //!
 //! A refusal stops the caller, which tells the user, and nothing is deleted.
-//! The shell call itself uses [`RECYCLE_FLAGS`]: `FOF_ALLOWUNDO` always, and
-//! `FOF_NOCONFIRMATION` (no "move to the Recycle Bin?" box) only together
-//! with `FOF_WANTNUKEWARNING`. If this check were ever wrong, Windows would
-//! then ask before a permanent delete instead of doing one silently, and the
-//! storage limit counts a declined or cancelled call as a refusal.
+//! This is the second guard: the call itself (`win_fileop.rs`) goes through
+//! `IFileOperation` with a progress sink that refuses any delete Windows
+//! would not recycle.
 
 use std::path::Path;
 
 use crate::win_volume::Volume;
-
-/// `FOF_SILENT`: no progress window.
-pub const FOF_SILENT: u16 = 0x0004;
-/// Auto-answers "yes" to confirmations. Safe only with `FOF_WANTNUKEWARNING`.
-pub const FOF_NOCONFIRMATION: u16 = 0x0010;
-/// Recycle Bin instead of delete.
-pub const FOF_ALLOWUNDO: u16 = 0x0040;
-pub const FOF_NOERRORUI: u16 = 0x0400;
-/// Ask before a delete that cannot go to the Recycle Bin, even with `FOF_NOCONFIRMATION`.
-pub const FOF_WANTNUKEWARNING: u16 = 0x4000;
-/// The one flag set Recall passes to `SHFileOperationW(FO_DELETE)`.
-pub const RECYCLE_FLAGS: u16 = FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING;
-
-/// A flag set that can never delete for good without asking: it recycles,
-/// and it does not auto-confirm a permanent delete.
-pub fn recycles_only(flags: u16) -> bool {
-    flags & FOF_ALLOWUNDO != 0 && (flags & FOF_NOCONFIRMATION == 0 || flags & FOF_WANTNUKEWARNING != 0)
-}
 
 const DRIVE_FIXED: u32 = 3;
 const MIB: u64 = 1 << 20;
@@ -62,11 +49,17 @@ pub fn default_max_mb(total_bytes: u64) -> u64 {
 /// What Windows says about one volume's Recycle Bin.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BinFacts {
+    /// The path's drive letter is a `subst` onto a folder (`QueryDosDeviceW` gives `\??\...`).
+    pub subst: bool,
+    /// The folder resolves to a UNC path (a share, wherever it is mounted).
+    pub resolved_unc: bool,
     pub volume: Option<Volume>,
     /// `GetDriveTypeW` of the volume's root.
     pub drive_type: u32,
     /// Volume size (`None`: unknown).
     pub total_bytes: Option<u64>,
+    /// Bytes the volume's Recycle Bin already holds (`None`: could not be read).
+    pub bin_used: Option<u64>,
     pub settings: Settings,
 }
 
@@ -110,6 +103,23 @@ pub fn read_settings(guid: &str, read: RegRead) -> Settings {
     }
 }
 
+/// `fn(file) -> its size in bytes` (`None`: could not be read; tests inject one).
+pub type SizeFn = fn(&Path) -> Option<u64>;
+
+/// The production [`SizeFn`].
+pub fn file_size(path: &Path) -> Option<u64> {
+    std::fs::metadata(path).ok().map(|m| m.len())
+}
+
+/// The bytes one Recycle Bin call moves: every file summed; a size that cannot
+/// be read refuses (it could be anything, and the bin must not overflow).
+pub fn total_size(files: &[std::path::PathBuf], size: SizeFn) -> Result<u64, String> {
+    files.iter().try_fold(0u64, |sum, f| match size(f) {
+        Some(n) => Ok(sum + n),
+        None => Err(format!("couldn't read the size of {}", f.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default())),
+    })
+}
+
 /// `fn(folder, bytes) -> Ok, or why these bytes cannot go to its Recycle Bin`.
 pub type BinCheck = fn(&Path, u64) -> Result<(), String>;
 
@@ -125,6 +135,12 @@ fn max_bytes(facts: &BinFacts) -> Option<u64> {
 
 /// May `bytes` from this volume go to its Recycle Bin?
 pub fn decide(facts: &BinFacts, bytes: u64) -> Result<(), String> {
+    if facts.subst {
+        return Err("the folder is on a subst drive, which has no Recycle Bin".into());
+    }
+    if facts.resolved_unc {
+        return Err("the folder is on a network share, which has no Recycle Bin".into());
+    }
     let Some(volume) = facts.volume.as_ref().filter(|v| v.id.starts_with(r"\\?\Volume{")) else {
         return Err("the drive has no Recycle Bin (a network share or an unknown drive)".into());
     };
@@ -143,12 +159,71 @@ pub fn decide(facts: &BinFacts, bytes: u64) -> Result<(), String> {
     if bytes > max {
         return Err(format!("the clip is bigger than the Recycle Bin on {} ({} MB)", volume.label, max / MIB));
     }
+    let Some(used) = facts.bin_used else {
+        return Err(format!("couldn't read how full the Recycle Bin on {} is", volume.label));
+    };
+    let room = max.saturating_sub(used);
+    if bytes > room {
+        return Err(format!("not enough room left in the Recycle Bin on {} ({} MB free of {} MB)", volume.label, room / MIB, max / MIB));
+    }
     Ok(())
 }
 
 #[link(name = "kernel32", kind = "raw-dylib")]
 unsafe extern "system" {
     fn GetDriveTypeW(root: *const u16) -> u32;
+    fn QueryDosDeviceW(device: *const u16, target: *mut u16, max: u32) -> u32;
+}
+
+#[repr(C)]
+struct QueryRbInfo {
+    size_of: u32,
+    bytes: i64,
+    items: i64,
+}
+
+#[link(name = "shell32", kind = "raw-dylib")]
+unsafe extern "system" {
+    fn SHQueryRecycleBinW(root: *const u16, info: *mut QueryRbInfo) -> i32;
+}
+
+/// Bytes the Recycle Bin of the volume at `root` (`L:\\`) holds now (read only).
+pub fn bin_used(root: &str) -> Option<u64> {
+    let path = wide(root);
+    let mut info = QueryRbInfo { size_of: std::mem::size_of::<QueryRbInfo>() as u32, bytes: 0, items: 0 };
+    // SAFETY: a NUL-terminated root path; `info` is sized as cbSize says.
+    let code = unsafe { SHQueryRecycleBinW(path.as_ptr(), &mut info) };
+    (code == 0 && info.bytes >= 0).then_some(info.bytes as u64)
+}
+
+/// `fn(drive letter) -> its DOS device target` (`QueryDosDeviceW`; tests inject one).
+pub type DosQuery = fn(char) -> Option<String>;
+
+/// The first target of `X:` (`\Device\HarddiskVolume3`, or `\??\D:\folder` for a subst).
+pub fn dos_target(letter: char) -> Option<String> {
+    let name = wide(&format!("{letter}:"));
+    let mut out = [0u16; 1024];
+    // SAFETY: a NUL-terminated device name; `out` is writable for the length given.
+    let n = unsafe { QueryDosDeviceW(name.as_ptr(), out.as_mut_ptr(), out.len() as u32) };
+    let end = out[..n as usize].iter().position(|c| *c == 0).unwrap_or(n as usize);
+    (n > 0).then(|| String::from_utf16_lossy(&out[..end]))
+}
+
+/// The drive letter of `dir` as written (before anything is resolved).
+fn letter_of(dir: &Path) -> Option<char> {
+    let abs = std::path::absolute(dir).ok()?;
+    match abs.components().next()? {
+        std::path::Component::Prefix(p) => match p.kind() {
+            std::path::Prefix::Disk(d) | std::path::Prefix::VerbatimDisk(d) => Some((d as char).to_ascii_uppercase()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// Is `dir`'s drive letter a subst (checked before resolving)?
+pub fn is_subst(dir: &Path, dos: DosQuery) -> bool {
+    letter_of(dir).and_then(dos).is_some_and(|t| t.starts_with(r"\??\"))
 }
 
 #[link(name = "advapi32", kind = "raw-dylib")]
@@ -178,14 +253,27 @@ pub fn reg_dword(hive: Hive, sub_key: &str, value: &str) -> Option<u32> {
 
 /// The facts for the volume `dir` really lives on (read only).
 pub fn facts(dir: &Path) -> BinFacts {
+    facts_with(dir, dos_target)
+}
+
+/// [`facts`] with an injected `QueryDosDeviceW`.
+pub fn facts_with(dir: &Path, dos: DosQuery) -> BinFacts {
+    let none = |subst, resolved_unc| BinFacts { subst, resolved_unc, volume: None, drive_type: 0, total_bytes: None, bin_used: None, settings: Settings::default() };
+    if is_subst(dir, dos) {
+        return none(true, false);
+    }
+    if crate::win_volume::resolve(dir).is_some_and(|r| r.to_string_lossy().starts_with(r"\\")) {
+        return none(false, true);
+    }
     let volume = crate::win_volume::volume_of(dir);
-    let Some(v) = volume.clone() else { return BinFacts { volume, drive_type: 0, total_bytes: None, settings: Settings::default() } };
+    let Some(v) = volume.clone() else { return BinFacts { volume, ..none(false, false) } };
     let root = wide(&format!("{}\\", v.label));
     // SAFETY: a NUL-terminated root path.
     let drive_type = unsafe { GetDriveTypeW(root.as_ptr()) };
     let guid = v.id.trim_start_matches(r"\\?\Volume").trim_end_matches('\\');
     let total_bytes = crate::win_volume::total_bytes(dir);
-    BinFacts { volume, drive_type, total_bytes, settings: read_settings(guid, reg_dword) }
+    let bin_used = bin_used(&format!("{}\\", v.label));
+    BinFacts { subst: false, resolved_unc: false, volume, drive_type, total_bytes, bin_used, settings: read_settings(guid, reg_dword) }
 }
 
 /// [`decide`] for the real volume of `dir` (production [`BinCheck`]).

@@ -15,6 +15,9 @@ mod edit_model;
 #[path = "../../recall/src/win_recycle.rs"]
 mod win_recycle;
 #[allow(dead_code)]
+#[path = "../../recall/src/win_fileop.rs"]
+mod win_fileop;
+#[allow(dead_code)]
 #[path = "../../recall/src/win_volume.rs"]
 mod win_volume;
 // Which file a path names, by volume serial + file index (shared with the engine's mover).

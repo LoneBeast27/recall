@@ -11,9 +11,12 @@ fn volume(id: &str, label: &str) -> Option<Volume> {
 
 fn local(settings: Settings) -> BinFacts {
     BinFacts {
+        subst: false,
+        resolved_unc: false,
         volume: volume(r"\\?\Volume{6b9a6f8e-84ea-42bb-8615-8aea7bdcfa86}\", "C:"),
         drive_type: DRIVE_FIXED,
         total_bytes: Some(1024 * GIB),
+        bin_used: Some(0),
         settings,
     }
 }
@@ -30,6 +33,9 @@ fn only_a_local_enabled_bin_big_enough_takes_a_clip() {
     assert!(decide(&share, 1).unwrap_err().contains("no Recycle Bin"), "a share is never recycled into");
     assert!(decide(&BinFacts { volume: None, ..local(keyed(1000)) }, 1).is_err(), "unknown drive");
     assert!(decide(&BinFacts { drive_type: 2, ..local(keyed(1000)) }, 1).unwrap_err().contains("removable"));
+    assert!(decide(&BinFacts { drive_type: 4, ..local(keyed(1000)) }, 1).unwrap_err().contains("network"), "DRIVE_REMOTE");
+    assert!(decide(&BinFacts { subst: true, ..local(keyed(1000)) }, 1).unwrap_err().contains("subst"));
+    assert!(decide(&BinFacts { resolved_unc: true, ..local(keyed(1000)) }, 1).unwrap_err().contains("network share"));
     let off = Settings { nuke: Some(1), ..keyed(1000) };
     assert!(decide(&local(off), 1).unwrap_err().contains("turned off"));
 }
@@ -96,14 +102,6 @@ fn settings_read_the_volume_key_and_both_policy_hives() {
 }
 
 #[test]
-fn the_recycle_flags_never_delete_for_good_unasked() {
-    assert!(recycles_only(RECYCLE_FLAGS));
-    assert!(!recycles_only(FOF_NOCONFIRMATION | FOF_SILENT), "no FOF_ALLOWUNDO: a plain delete");
-    assert!(!recycles_only(FOF_ALLOWUNDO | FOF_NOCONFIRMATION), "auto-yes to a permanent delete");
-    assert!(recycles_only(FOF_ALLOWUNDO | FOF_SILENT));
-}
-
-#[test]
 fn this_machine_reports_its_temp_volume_bin() {
     // Read only: the temp folder's volume is local and fixed with a bin; the answer is printed for the record.
     let f = facts(&std::env::temp_dir());
@@ -111,4 +109,55 @@ fn this_machine_reports_its_temp_volume_bin() {
     assert_eq!(f.drive_type, DRIVE_FIXED, "{f:?}");
     assert!(f.volume.is_some_and(|v| v.id.starts_with(r"\\?\Volume{")));
     assert!(f.total_bytes.is_some_and(|t| t > 0));
+}
+
+fn subst_of_l(letter: char) -> Option<String> {
+    (letter == 'Q').then(|| r"\??\L:\General\sandbox".to_string())
+}
+
+fn real_volume(_: char) -> Option<String> {
+    Some(r"\Device\HarddiskVolume3".into())
+}
+
+#[test]
+fn a_subst_drive_is_refused_before_it_is_resolved() {
+    assert!(is_subst(Path::new(r"Q:\Clips"), subst_of_l));
+    assert!(!is_subst(Path::new(r"C:\Clips"), subst_of_l));
+    assert!(!is_subst(Path::new(r"Q:\Clips"), real_volume));
+    assert!(!is_subst(Path::new(r"\\nas\clips"), subst_of_l), "no drive letter");
+    let f = facts_with(Path::new(r"Q:\Clips"), subst_of_l);
+    assert!(f.subst && f.volume.is_none(), "{f:?}");
+    assert!(decide(&f, 1).unwrap_err().contains("subst"));
+}
+
+#[test]
+fn this_machine_names_its_temp_drive_a_real_volume() {
+    let temp = std::env::temp_dir();
+    let letter = letter_of(&temp).expect("temp has a drive letter");
+    let target = dos_target(letter);
+    println!("temp drive {letter}: -> {target:?}");
+    assert!(target.is_some_and(|t| t.starts_with(r"\Device\")));
+}
+
+#[test]
+fn a_clip_must_fit_the_bins_free_room_not_just_its_size() {
+    // A 1,000 MB bin already holding 900 MB: a 200 MB clip fits the size but not the room left.
+    let full = BinFacts { bin_used: Some(900 << 20), ..local(keyed(1000)) };
+    assert!(decide(&full, 200 << 20).unwrap_err().contains("room"), "Windows would purge older bin items for it");
+    assert_eq!(decide(&full, 100 << 20), Ok(()), "it fits the free room");
+    let unknown = BinFacts { bin_used: None, ..local(keyed(1000)) };
+    assert!(decide(&unknown, 1).unwrap_err().contains("how full"), "an unreadable bin refuses");
+}
+
+#[test]
+#[ignore]
+fn bin_usage_on_this_machine() {
+    // Read only. Run: cargo test -p recall-hdr --offline bin_usage_on_this_machine -- --ignored --nocapture
+    for letter in 'A'..='Z' {
+        let root = format!("{letter}:\\");
+        if Path::new(&root).exists() {
+            let f = facts(Path::new(&root));
+            println!("BIN {letter}: used {:?} bytes; max {:?} MB; drive type {}", bin_used(&root), f.settings.max_mb, f.drive_type);
+        }
+    }
 }
