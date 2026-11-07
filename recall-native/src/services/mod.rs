@@ -5,6 +5,7 @@ pub mod audio_devices;
 pub mod audio_mute;
 pub mod audio_pick;
 pub mod audio_sources;
+pub mod endpoint_choice;
 pub mod endpoint_form;
 pub mod daemon;
 pub mod editor_prefs;

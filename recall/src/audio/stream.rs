@@ -68,6 +68,8 @@ pub(super) struct Stream {
     own: bool,
     /// A named device: ends when a device notice changes its pick (`rebind::rebind_for`).
     rebind: Option<Rebind>,
+    /// An input's unsure exact-name sibling (A4 ruling): held muted, with its endpoint id.
+    unsure: Option<Option<String>>,
 }
 
 /// The endpoint `pick_device` opened.
@@ -80,6 +82,18 @@ struct Picked {
     own: bool,
     /// What a re-pick compares (`rebind::key_for`): the endpoint id, or the name with no saved id.
     key: Key,
+    /// An unsure sibling (A4 ruling) and its endpoint id, offered as the source's own on unmute.
+    unsure: Option<Option<String>>,
+}
+
+/// The re-pick key of the endpoint `name` that `device` (saved with `device_id`) opened, and
+/// whether it is the saved device itself (`endpoints::opened_own`). With no saved id the
+/// endpoint id is never read (R7-deep-audio-4): it cannot be own.
+pub(super) fn own_decision(device: &str, device_id: &str, name: &str, id: impl FnOnce() -> Option<String>) -> (Key, bool) {
+    let key = key_for(device_id, name, id);
+    // Against the saved device only: the test mic stands in for the default.
+    let own = matches!(&key, Key::Id(id) if opened_own(Some(id), device, device_id));
+    (key, own)
 }
 
 /// Open what `choose_endpoint` picks for the saved `(device, device_id)`; an input with no
@@ -94,19 +108,23 @@ fn pick_device(direction: &Direction, (device, device_id): (&str, &str), input: 
     let names: Vec<String> = devices.iter().map(|d| d.get_friendlyname().unwrap_or_default()).collect();
     // The saved id tells same-named endpoints apart (A4 amendment); the test mic has none.
     let want_id = if device.trim().is_empty() { "" } else { device_id };
-    match choose_endpoint_by(&names, (want.as_deref(), want_id), exact, |i| devices.get(i).and_then(|d| d.get_id().ok()))? {
+    match choose_endpoint_by(&names, (want.as_deref(), want_id), (exact, input), |i| devices.get(i).and_then(|d| d.get_id().ok()))? {
         Pick::Named(i) => {
             let dev = devices.into_iter().nth(i).expect("index from names");
-            // With no saved id the endpoint id is never read (R7-deep-audio-4): it cannot be own.
-            let key = key_for(device_id, &names[i], || dev.get_id().ok());
-            // Against the saved device only: the test mic stands in for the default.
-            let own = matches!(&key, Key::Id(id) if opened_own(Some(id), device, device_id));
-            Ok(Picked { dev, endpoint: names[i].clone(), on_default: false, own, key })
+            let (key, own) = own_decision(device, device_id, &names[i], || dev.get_id().ok());
+            Ok(Picked { dev, endpoint: names[i].clone(), on_default: false, own, key, unsure: None })
+        }
+        Pick::Unsure(i) => {
+            let dev = devices.into_iter().nth(i).expect("index from names");
+            // Its id is read to offer it as the source's own once a fresh Alt+M unmutes it.
+            let id = dev.get_id().ok();
+            let key = key_for(device_id, &names[i], || id.clone());
+            Ok(Picked { dev, endpoint: names[i].clone(), on_default: false, own: false, key, unsure: Some(id) })
         }
         Pick::Default => {
             let dev = wasapi::get_default_device(direction).map_err(|e| format!("default endpoint failed: {e}"))?;
             let name = dev.get_friendlyname().unwrap_or_else(|_| "(default)".into());
-            Ok(Picked { dev, endpoint: format!("{name} (Windows default)"), on_default: true, own: false, key: Key::Name(name) })
+            Ok(Picked { dev, endpoint: format!("{name} (Windows default)"), on_default: true, own: false, key: Key::Name(name), unsure: None })
         }
     }
 }
@@ -129,7 +147,7 @@ fn repick(direction: Direction, (device, device_id): (&str, &str), input: bool) 
 /// only), and start it.
 pub(super) fn open_stream(direction: &Direction, (device, device_id): (&str, &str), ring: &TrackRing, target: &Option<LoopbackTarget>) -> Result<Stream, String> {
     let format = WaveFormat::new(32, 32, &SampleType::Float, ring.rate as usize, ring.channels as usize, None);
-    let (mut watch, mut own, mut rebind) = (None, false, None);
+    let (mut watch, mut own, mut rebind, mut unsure) = (None, false, None, None);
     let (mut client, endpoint, buffer_duration_hns) = match target {
         Some(LoopbackTarget { pid, label }) => (
             wasapi::AudioClient::new_application_loopback_client(*pid, true).map_err(|e| format!("process loopback for PID {pid}: {e}"))?,
@@ -139,14 +157,15 @@ pub(super) fn open_stream(direction: &Direction, (device, device_id): (&str, &st
             200_000,
         ),
         None => {
-            let Picked { dev, endpoint, on_default, own: is_own, key } = pick_device(direction, (device, device_id), ring.input)?;
+            let Picked { dev, endpoint, on_default, own: is_own, key, unsure: held } = pick_device(direction, (device, device_id), ring.input)?;
+            unsure = held;
             if on_default {
                 watch = watch_for(device, dev.get_id().ok());
             }
             own = is_own;
             // A named device (R7-deep-audio-1): on a device notice, pick again (on its own thread)
             // and end this stream when the pick is no longer this endpoint.
-            rebind = rebind_for(device, key, repick(*direction, (device, device_id), ring.input), Run::Thread);
+            rebind = rebind_for(device, key, repick(*direction, (device, device_id), ring.input), (Run::Thread, ring.live.repick_slot.clone()));
             let client = dev.get_iaudioclient().map_err(|e| e.to_string())?;
             let (_def_period, min_period) = client.get_device_period().map_err(|e| e.to_string())?;
             (client, endpoint, device_buffer_hns(min_period))
@@ -158,7 +177,7 @@ pub(super) fn open_stream(direction: &Direction, (device, device_id): (&str, &st
     let event = Event(client.set_get_eventhandle().map_err(|e| e.to_string())?);
     let started = client.get_audiocaptureclient().and_then(|capture| client.start_stream().map(|()| capture));
     match started {
-        Ok(capture) => Ok(Stream { client, event, capture, endpoint, device: target.is_none(), watch, own, rebind }),
+        Ok(capture) => Ok(Stream { client, event, capture, endpoint, device: target.is_none(), watch, own, rebind, unsure }),
         Err(e) => {
             // The client still holds the event: release it first, as a Stream's drop does.
             drop(client);
@@ -185,6 +204,10 @@ impl Stream {
             if let Some(ended) = self.rebind.as_mut().and_then(|r| r.check(notices)) {
                 return ended;
             }
+            // The controller saved another id for this source (P1-B): reopen on it.
+            if ring.live.take_repick() {
+                return Ended { why: "the saved device id changed".to_owned(), at_once: true };
+            }
             if self.event.0.wait_for_event(WAIT_MS).is_ok() {
                 if let Err(e) = self.capture.read_from_device_to_deque(&mut raw) {
                     return lost(format!("read failed: {e}"));
@@ -192,7 +215,8 @@ impl Stream {
                 if raw.len() >= block {
                     let full = raw.len() - raw.len() % block;
                     let samples: Vec<f32> = raw.drain(..full).collect::<Vec<u8>>().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-                    ring.push_capture(&level.live(clock.elapsed(), &samples, channels), super::mic_muted());
+                    // Alt+M as it is now, for every packet (an early press applies at once).
+                    ring.push_live(&level.live(clock.elapsed(), &samples, channels), super::MuteNow::read());
                     last_sound = std::time::Instant::now();
                     continue;
                 }
@@ -218,9 +242,17 @@ impl Capture for Stream {
         self.own
     }
 
+    fn unsure(&self) -> Option<Option<String>> {
+        self.unsure.clone()
+    }
+
     fn run(&mut self, ring: &TrackRing, level: &mut Leveller, clock: &dyn Clock, notices: &dyn Notices) -> Ended {
         let ended = self.capture(ring, level, clock, notices);
         let _ = self.client.stop_stream();
         ended
     }
 }
+
+#[cfg(test)]
+#[path = "stream_own_tests.rs"]
+mod own_tests;

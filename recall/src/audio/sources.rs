@@ -149,9 +149,20 @@ pub fn from_env() -> Result<Vec<SourceSpec>, String> {
     resolve(|key| std::env::var(key).ok())
 }
 
-/// The Audio page changed a source's gain, name or mic-mute flag: apply it to the live track
-/// (no engine restart, so the replay buffer stays). False when no live track has that id.
-pub fn set_live(id: &str, gain_db: Option<f32>, name: Option<&str>, mic_mute: Option<bool>) -> bool {
+/// A change the Audio page makes to a running source: gain, name, mic-mute flag, and the
+/// endpoint id saved with its device (P1-B; the track reopens on it).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct LiveChange<'a> {
+    pub gain_db: Option<f32>,
+    pub name: Option<&'a str>,
+    pub mic_mute: Option<bool>,
+    pub device_id: Option<&'a str>,
+}
+
+/// Apply `change` to the live track (no engine restart, so the replay buffer stays). False
+/// when no live track has that id.
+pub fn set_live(id: &str, change: LiveChange) -> bool {
+    let LiveChange { gain_db, name, mic_mute, device_id } = change;
     let Ok(mut states) = STATES.lock() else { return false };
     let mut found = false;
     for (sid, sname, state) in states.iter_mut() {
@@ -170,6 +181,10 @@ pub fn set_live(id: &str, gain_db: Option<f32>, name: Option<&str>, mic_mute: Op
         if let (Some(on), State::Live(ring)) = (mic_mute, &*state) {
             ring.set_mic_mute(on);
         }
+        if let (Some(device_id), State::Live(ring)) = (device_id, &*state) {
+            // A malformed id counts as none (`endpoints::id_ok`), as at spawn.
+            ring.live.set_saved_id(if super::endpoints::id_ok(device_id) { device_id } else { "" });
+        }
         found |= matches!(state, State::Live(_));
     }
     found
@@ -185,6 +200,8 @@ pub struct Opened {
     /// track.
     pub opened: String,
     pub live: bool,
+    /// The endpoint id an unsure sibling offers as the source's own (`hold.rs`).
+    pub adopt_id: Option<String>,
 }
 
 enum State {
@@ -212,8 +229,8 @@ pub fn opened() -> Vec<Opened> {
     states
         .iter()
         .map(|(id, name, state)| match state {
-            State::Live(ring) => Opened { id: id.clone(), name: name.clone(), opened: ring.endpoint(), live: true },
-            State::Failed(why) => Opened { id: id.clone(), name: name.clone(), opened: why.clone(), live: false },
+            State::Live(ring) => Opened { id: id.clone(), name: name.clone(), opened: ring.endpoint(), live: true, adopt_id: ring.live.adopted() },
+            State::Failed(why) => Opened { id: id.clone(), name: name.clone(), opened: why.clone(), live: false, adopt_id: None },
         })
         .collect()
 }

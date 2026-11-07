@@ -25,6 +25,8 @@ use wasapi::{DeviceCollection, Direction};
 mod apps;
 mod capture_loop;
 mod endpoints;
+mod hold;
+mod mute;
 mod notify;
 mod rebind;
 pub mod sources;
@@ -38,31 +40,15 @@ pub(crate) use endpoints::{choose_endpoint, Pick};
 #[cfg(test)]
 use endpoints::match_endpoint;
 
-static MIC_MUTED: AtomicBool = AtomicBool::new(false);
+pub(crate) use mute::{initial_mute, MuteNow};
+#[cfg(test)]
+pub(crate) use mute::MIC_MUTED_ENV;
+pub use mute::{mic_muted, set_mic_muted, toggle_mic_mute};
 
-/// The controller's mute at engine spawn (`1` = muted).
-pub(crate) const MIC_MUTED_ENV: &str = "RECALL_MIC_MUTED";
-
-/// The mute a new engine starts with, from its environment (`get`): the controller passes its
-/// state at spawn, so a muted mic is silent from the run's first sample (the `set_mic_mute`
-/// after `hello` comes after every track has started recording).
-pub(crate) fn initial_mute(get: impl Fn(&str) -> Option<String>) -> bool {
-    get(MIC_MUTED_ENV).is_some_and(|v| v.trim() == "1")
-}
-
-/// Set whether newly captured input samples enter the replay buffer as silence.
-pub fn set_mic_muted(muted: bool) {
-    MIC_MUTED.store(muted, Ordering::Relaxed);
-}
-
-/// Toggle microphone capture muting and return the new state.
-pub fn toggle_mic_mute() -> bool {
-    MIC_MUTED.fetch_xor(true, Ordering::Relaxed) ^ true
-}
-
-/// Return whether newly captured input samples are muted.
-pub fn mic_muted() -> bool {
-    MIC_MUTED.load(Ordering::Relaxed)
+/// The spawn-time mute (`RECALL_MIC_MUTED`), applied before stdin is read and before any track
+/// opens: a muted mic records nothing of this run, and an Alt+M that comes early is kept.
+pub fn apply_spawn_mute() {
+    set_mic_muted(initial_mute(|key| std::env::var(key).ok()));
 }
 
 /// A process tree captured by process loopback (include-tree mode).
@@ -133,6 +119,8 @@ pub struct TrackRing {
     pub channels: u16,
     samples: Mutex<VecDeque<f32>>,
     capacity: usize,
+    /// The saved id, an unsure sibling's hold and the re-pick slot (`hold.rs`).
+    live: hold::Live,
 }
 
 /// Fixed 48 kHz stereo f32 for every track; WASAPI autoconverts from the endpoint's format.
@@ -161,6 +149,7 @@ impl TrackRing {
             // ring (up to ~134 MB) under the lock a save and the capture thread share.
             samples: Mutex::new(VecDeque::with_capacity(buffer_secs as usize * RATE as usize * CHANNELS as usize)),
             capacity: buffer_secs as usize * RATE as usize * CHANNELS as usize,
+            live: hold::Live::with_saved_id(&spec.device_id),
         }
     }
 
@@ -302,8 +291,13 @@ impl TrackRing {
     /// A block bigger than the ring keeps only its newest `capacity` samples, and the ring
     /// makes room before it takes them, so it never grows past its capacity.
     fn push_capture(&self, data: &[f32], mute_inputs: bool) {
+        self.push_samples(data, mute_inputs, false);
+    }
+
+    /// [`Self::push_capture`]; `held` stores silence whatever Alt+M says (`hold.rs`).
+    fn push_samples(&self, data: &[f32], mute_inputs: bool, held: bool) {
         let data = &data[data.len().saturating_sub(self.capacity)..];
-        let silence = mute_inputs && self.mutes();
+        let silence = held || (mute_inputs && self.mutes());
         let gain = self.gain();
         let gained: Vec<f32>;
         let data = if gain != 1.0 && !silence {
@@ -327,8 +321,7 @@ impl TrackRing {
 /// Resolve + start every source in list order. Failures are per-source (a broken input
 /// must not kill game audio); returns whatever started, with a report line each.
 pub fn start(buffer_secs: u32, mut report: impl FnMut(String)) -> Vec<Arc<TrackRing>> {
-    // Before any track opens: a muted mic records nothing of this run.
-    set_mic_muted(initial_mute(|key| std::env::var(key).ok()));
+    // The spawn mute was applied before stdin is read (`apply_spawn_mute`, main.rs).
     report(format!(
         "audio endpoints -- render: {:?} | capture: {:?}",
         list_endpoints(&Direction::Render),
@@ -449,7 +442,7 @@ fn start_track(spec: &SourceSpec, buffer_secs: u32, target: Option<LoopbackTarge
 /// not there at start still gets its track and waits for it (by name, or for a Windows default).
 fn capture_thread(
     direction: Direction,
-    (device, device_id): (String, String),
+    (device, _): (String, String),
     ring: Arc<TrackRing>,
     init_tx: std::sync::mpsc::Sender<Result<(), String>>,
     target: Option<LoopbackTarget>,
@@ -471,7 +464,8 @@ fn capture_thread(
         Some(Ok(n)) => n,
         _ => &capture_loop::NoNotices,
     };
-    let open = |_reopen| stream::open_stream(&direction, (&device, &device_id), &ring, &target);
+    // The saved id as the controller sends it now (`set_source device_id`, P1-B).
+    let open = |_reopen| stream::open_stream(&direction, (&device, &ring.live.saved_id()), &ring, &target);
     capture_loop::capture_loop(&ring, &device, wait_absent, open, init_tx, &mut clock, notices);
 }
 

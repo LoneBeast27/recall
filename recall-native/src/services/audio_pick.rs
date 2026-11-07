@@ -2,18 +2,16 @@
 //! endpoint-id tie-break (A4 amendment, merge gate 2026-11-07 08:29 UTC; `meters::pick_endpoint`):
 //! among two or more endpoints with the source's name, the one with its saved id. Only inputs
 //! carry endpoint ids on the page (an output saves none), so an output never tie-breaks.
-use crate::services::audio_devices::{found, label_for, DeviceLists, Found};
+use crate::services::audio_devices::{found, found_from, label_for, DeviceLists, Found};
 use crate::services::audio_sources::Source;
-use crate::services::meters::pick_endpoint;
+use crate::services::endpoint_choice::choose;
 
 /// [`found`] for `saved` (and the endpoint id saved with it) among `listed`, whose ids are `ids`
 /// by index ("" unreadable): the one same-named endpoint with the saved id opens.
 pub fn found_with_ids(saved: &str, saved_id: &str, listed: Option<&[String]>, ids: Option<&[String]>) -> Found {
-    if let (Some(names), Some(ids)) = (listed, ids) {
+    if let (Some(names), Some(ids), false) = (listed, ids, saved.trim().is_empty()) {
         let id_of = |i: usize| ids.get(i).map(|id| id.trim().to_owned()).filter(|id| !id.is_empty());
-        if let Some(i) = (!saved.trim().is_empty()).then(|| pick_endpoint(names, saved, saved_id, id_of)).flatten() {
-            return Found::Opens(i);
-        }
+        return found_from(choose(names, saved, saved_id, id_of), names, saved);
     }
     found(saved, listed)
 }

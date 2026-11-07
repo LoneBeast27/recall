@@ -41,6 +41,8 @@ pub fn other_note(source: &Source, lists: Option<&DeviceLists>) -> Option<&'stat
             let id = lists.input_ids.get(i).map(String::as_str).filter(|id| !id.is_empty());
             (!opened_own(id, &source.device, &source.device_id)).then_some(OPENED_OTHER)
         }
+        // An unsure sibling (A4 ruling) is never its own until the recorder saves its id.
+        Found::Unsure { .. } => Some(OPENED_OTHER),
         _ => None,
     }
 }

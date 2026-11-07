@@ -10,6 +10,7 @@
 //! time; notices that come meanwhile, or while the stream was opening (R7-deep-audio-3), queue
 //! one more.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::Arc;
 
@@ -53,6 +54,9 @@ pub(super) struct Rebind {
     running: Option<Receiver<Option<Key>>>,
     /// A notice came that no re-pick has seen yet.
     queued: bool,
+    /// Taken while a re-pick thread of this track runs, shared by its streams (p9 gate item 3):
+    /// at most one runs at a time, also after a stream ended with one still in flight.
+    slot: Arc<AtomicBool>,
 }
 
 impl Rebind {
@@ -60,8 +64,10 @@ impl Rebind {
     /// Never waits on the re-pick (`Run::Thread`).
     pub(super) fn check(&mut self, notices: &dyn Notices) -> Option<Ended> {
         self.queued |= notices.take_devices_changed();
-        if self.running.is_none() && std::mem::take(&mut self.queued) {
-            self.running = Some(self.start());
+        if self.running.is_none() && self.queued {
+            // One still running (a slow audiosrv): skip; the queued notice waits for the slot.
+            self.running = self.start();
+            self.queued = self.running.is_none();
         }
         let answer = match self.running.as_ref()?.try_recv() {
             Ok(answer) => answer,
@@ -82,7 +88,8 @@ impl Rebind {
         Some(Ended { why: why.to_owned(), at_once: true })
     }
 
-    fn start(&self) -> Receiver<Option<Key>> {
+    /// Start a re-pick; None while this track's slot is taken.
+    fn start(&self) -> Option<Receiver<Option<Key>>> {
         let (tx, rx) = channel();
         let probe = self.probe.clone();
         match self.run {
@@ -90,21 +97,35 @@ impl Rebind {
                 let _ = tx.send(probe());
             }
             Run::Thread => {
-                // A failed spawn drops `tx`: the answer is lost, as for a panic.
+                if self.slot.compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst).is_err() {
+                    return None;
+                }
+                let slot = Slot(self.slot.clone());
+                // A failed spawn drops `tx` and the slot: the answer is lost, as for a panic.
                 let _ = std::thread::Builder::new().name("recall-audio-repick".into()).spawn(move || {
+                    let _slot = slot;
                     let _ = tx.send(probe());
                 });
             }
         }
-        rx
+        Some(rx)
+    }
+}
+
+/// Frees a track's re-pick slot when its thread ends, a panic included.
+struct Slot(Arc<AtomicBool>);
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        self.0.store(false, Ordering::SeqCst);
     }
 }
 
 /// The rebind for a stream that opened `opened` for `device`: every named device (input or
 /// output, own or not). A source with no device records the Windows default and is watched
 /// instead (`capture_loop::watch_for`).
-pub(super) fn rebind_for(device: &str, opened: Key, probe: Probe, run: Run) -> Option<Rebind> {
-    (!device.trim().is_empty()).then(|| Rebind { opened, probe, run, running: None, queued: false })
+pub(super) fn rebind_for(device: &str, opened: Key, probe: Probe, (run, slot): (Run, Arc<AtomicBool>)) -> Option<Rebind> {
+    (!device.trim().is_empty()).then(|| Rebind { opened, probe, run, running: None, queued: false, slot })
 }
 
 #[cfg(test)]

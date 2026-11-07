@@ -21,6 +21,7 @@ fn raw_ring(name: &'static str, input: bool, gain: f32, rate: u32, channels: u16
         channels,
         samples: Mutex::new(VecDeque::new()),
         capacity,
+        live: Default::default(),
     }
 }
 

@@ -101,6 +101,9 @@ pub fn strip_note(source: &Source, lists: Option<&crate::services::audio_devices
     use crate::services::audio_devices::{Found, found};
     let picked = if source.kind == Kind::App { found(&source.device, None) } else { crate::services::audio_pick::source_found(source, lists) };
     match picked {
+        Found::Unsure { .. } if source.kind.uses_inputs() => Some(crate::services::endpoint_choice::unsure_note(&source.device)),
+        Found::Unsure { twins, .. } => Some(crate::services::endpoint_choice::twins_note(&source.device, twins)),
+        Found::CaseOnly => Some(crate::services::endpoint_choice::case_note(&source.device)),
         Found::Missing => Some("Not connected".to_owned()),
         Found::Twins(n) => Some(format!("{n} devices share this name")),
         Found::Ambiguous(n) => Some(format!("{n} devices match this name")),

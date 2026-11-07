@@ -191,7 +191,8 @@ fn find_device(direction: &Direction, (name, id): (&str, &str)) -> Result<Option
     let count = collection.get_nbr_devices().map_err(|error| error.to_string())?;
     let devices: Vec<Device> = (0..count).filter_map(|i| collection.get_device_at_index(i).ok()).collect();
     let names: Vec<String> = devices.iter().map(|d| d.get_friendlyname().unwrap_or_default()).collect();
-    match meter_pick_id(&names, name, id, |i| devices.get(i).and_then(|d| d.get_id().ok())) {
+    let input = !matches!(direction, Direction::Render);
+    match meter_pick_for(input, &names, (name, id), |i| devices.get(i).and_then(|d| d.get_id().ok())) {
         Some(DevicePick::Named(i)) => Ok(devices.into_iter().nth(i).map(|d| (d, None))),
         Some(DevicePick::Default) => Ok(wasapi::get_default_device(direction).ok().map(|d| {
             let id = d.get_id().ok();
@@ -224,11 +225,19 @@ pub fn meter_pick(names: &[String], want: &str) -> Option<DevicePick> {
 
 /// [`meter_pick`] with the endpoint id saved with `want` (`want_id`) and each endpoint's id
 /// (`id_of`, by index of `names`, read only for a tie-break): `pick_endpoint`.
+#[cfg(test)]
 pub fn meter_pick_id(names: &[String], want: &str, want_id: &str, id_of: impl Fn(usize) -> Option<String>) -> Option<DevicePick> {
+    meter_pick_for(true, names, (want, want_id), id_of)
+}
+
+/// [`meter_pick_id`] for an `input` or an output: an output's unsure sibling is not metered (the
+/// recorder waits for the original, A4 ruling).
+pub fn meter_pick_for(input: bool, names: &[String], (want, want_id): (&str, &str), id_of: impl Fn(usize) -> Option<String>) -> Option<DevicePick> {
     if want.trim().is_empty() {
         return Some(DevicePick::Default);
     }
-    pick_endpoint(names, want, want_id, id_of).map(DevicePick::Named)
+    use crate::services::endpoint_choice::{choose, opens};
+    opens(choose(names, want, want_id, id_of), input).map(DevicePick::Named)
 }
 
 /// A default-device meter should reopen: the Windows default it opened (`opened`) is no longer
@@ -257,28 +266,12 @@ pub fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
     hits.next().is_none().then_some(first)
 }
 
-/// Index of the endpoint `want` names when it was saved with the endpoint id `want_id`: the
-/// endpoint-id tie-break (A4 amendment, merge gate 2026-11-07 08:29 UTC) on top of
-/// `match_endpoint`. When two or more endpoints have `want`'s name once a leading "<digits>- "
-/// index is dropped (exact twins included), the one whose id (`id_of`, by index of `names`) is
-/// the saved id opens. An id that matches none or several of them decides nothing: the rule
-/// without ids (one exact name, else wait). Only same-named endpoints are candidates, so an id
-/// never opens an endpoint by another name; ids are read only for the tie-break, and only with
-/// a well-formed saved id. A copy of the recorder's `pick_endpoint` (`recall`
-/// `audio/endpoints.rs`); both crates test the same table.
+/// Index of the endpoint `want` (saved with the endpoint id `want_id`) opens: its own, or an
+/// unsure exact-name sibling (`endpoint_choice::choose`, A4 ruling). A copy of the recorder's
+/// `pick_endpoint` (`recall` `audio/endpoints.rs`); both crates test the same table.
+#[cfg(test)]
 pub fn pick_endpoint(names: &[String], want: &str, want_id: &str, id_of: impl Fn(usize) -> Option<String>) -> Option<usize> {
-    let want_id = want_id.trim();
-    if !want.trim().is_empty() && id_ok(want_id) {
-        let stripped = strip_index(want);
-        let candidates: Vec<usize> = names.iter().enumerate().filter(|(_, n)| strip_index(n) == stripped).map(|(i, _)| i).collect();
-        if candidates.len() >= 2 {
-            let mut hits = candidates.into_iter().filter(|&i| id_of(i).is_some_and(|id| id.trim() == want_id));
-            if let (Some(i), None) = (hits.next(), hits.next()) {
-                return Some(i);
-            }
-        }
-    }
-    match_endpoint(names, want)
+    crate::services::endpoint_choice::opens(crate::services::endpoint_choice::choose(names, want, want_id, id_of), true)
 }
 
 /// How many endpoints equal `want` once both drop a leading "<digits>- " index: two or more
@@ -306,7 +299,7 @@ pub fn opened_own(opened_id: Option<&str>, want: &str, want_id: &str) -> bool {
 }
 
 /// `name` without a leading "<digits>- " Windows endpoint index; nothing else is dropped.
-fn strip_index(name: &str) -> &str {
+pub(crate) fn strip_index(name: &str) -> &str {
     let name = name.trim();
     let digits = name.len() - name.trim_start_matches(|d: char| d.is_ascii_digit()).len();
     match name[digits..].strip_prefix("- ") {

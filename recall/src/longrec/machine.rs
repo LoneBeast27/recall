@@ -388,7 +388,7 @@ impl<S: Sink> Active<S> {
     /// Samples for `track`, through its limiter (the newest ~10 ms stay held as look-ahead).
     fn write_audio(&mut self, track: usize, samples: &[f32]) -> Result<(), String> {
         let out = self.lanes[track].limiter.push(samples);
-        if out.is_empty() { Ok(()) } else { self.sink.audio(track, &out) }
+        if out.is_empty() { Ok(()) } else { self.sink.audio(track, out) }
     }
 
     /// Silence for `track`, behind the frames its limiter still holds. While the limiter is
@@ -396,12 +396,14 @@ impl<S: Sink> Active<S> {
     /// silence takes the sink's fast path; else it passes through the limiter as zeros, until
     /// the limiter is quiet again.
     fn write_silence(&mut self, track: usize, frames: u64) -> Result<(), String> {
-        let channels = self.lanes[track].channels;
-        let zeros = vec![0.0f32; 4_800 * channels];
+        // A static zero block (p9 gate P2-c): no 38 KB allocation per call.
+        static ZEROS: [f32; 9_600] = [0.0; 9_600];
+        let channels = self.lanes[track].channels.max(1);
+        let step = (ZEROS.len() / channels).max(1);
         let mut left = frames as usize;
         while left > 0 && !self.lanes[track].limiter.quiet() {
-            let n = left.min(4_800);
-            self.write_audio(track, &zeros[..n * channels])?;
+            let n = left.min(step);
+            self.write_audio(track, &ZEROS[..n * channels])?;
             left -= n;
         }
         if left == 0 {
@@ -409,7 +411,7 @@ impl<S: Sink> Active<S> {
         }
         let held = self.lanes[track].limiter.drain();
         if !held.is_empty() {
-            self.sink.audio(track, &held)?;
+            self.sink.audio(track, held)?;
         }
         self.sink.silence(track, left as u64)
     }
@@ -419,7 +421,7 @@ impl<S: Sink> Active<S> {
         for track in 0..self.lanes.len() {
             let out = self.lanes[track].limiter.finish();
             if !out.is_empty() {
-                self.sink.audio(track, &out)?;
+                self.sink.audio(track, out)?;
             }
         }
         Ok(())

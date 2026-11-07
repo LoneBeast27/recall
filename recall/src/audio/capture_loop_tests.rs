@@ -25,6 +25,7 @@ pub(in crate::audio) fn ring() -> TrackRing {
         channels: 1,
         samples: Mutex::new(VecDeque::new()),
         capacity: RATE as usize * 120,
+        live: Default::default(),
     }
 }
 
@@ -263,7 +264,7 @@ fn a_named_source_never_opens_the_default_and_opens_by_name_when_it_appears() {
         attempts.borrow_mut().push((reopen, now.get(), ring.endpoint()));
         let mut stream = fake(&now, 1, false);
         stream.endpoint = match choose_endpoint(&names, Some("Headset (USB)"), false)? {
-            Pick::Named(i) => names[i].clone(),
+            Pick::Named(i) | Pick::Unsure(i) => names[i].clone(),
             Pick::Default => "Mic (Realtek) (Windows default)".to_owned(),
         };
         Ok::<_, String>(stream)

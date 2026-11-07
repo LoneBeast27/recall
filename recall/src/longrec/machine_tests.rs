@@ -383,3 +383,20 @@ fn a_track_that_goes_hot_mid_stream_has_no_gain_step() {
     let peak = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     assert!(peak <= crate::export::mix_limit::CEILING + 1e-6, "peak {peak}");
 }
+
+/// p9 gate P2-c: padding a quiet track with silence allocates no zero block per call (it was
+/// 38 KB each); the fake sink logs calls only.
+#[test]
+fn silence_padding_allocates_no_zero_block() {
+    let log = Log::default();
+    let mut rec = Recorder::new(FakeFactory { log: log.clone(), no_pcm: true, ..Default::default() }, tracks());
+    let path = temp_dir("silence-alloc").join("G__2026-11-07__12-00-00__rec.mp4");
+    let t0 = Instant::now();
+    rec.start(path, None, t0);
+    rec.video(0, true, pkt(1), false, t0 + Duration::from_secs(5));
+    rec.tick(t0 + Duration::from_secs(6));
+    let (_, bytes) = crate::test_alloc::bytes_in(|| rec.tick(t0 + Duration::from_secs(8)));
+    assert_eq!(log.audio(0).len(), 2, "the second tick padded again");
+    assert!(bytes < 8_192, "two silence pads allocated {bytes} bytes");
+    rec.stop();
+}

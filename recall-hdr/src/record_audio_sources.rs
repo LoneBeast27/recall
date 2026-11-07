@@ -152,9 +152,11 @@ fn engine_list(list: &[AudioSource]) -> Vec<AudioSource> {
         .collect()
 }
 
-/// The engine's tracks without what it can change live (gain, name, mic-mute flag).
+/// The engine's tracks without what it can change live (gain, name, mic-mute flag, and the
+/// endpoint id saved with an unchanged device name: P1-B, a new id is sent live and the track
+/// reopens on it, so unmuting a line-in or picking the same device again keeps the buffer).
 fn track_shape(list: &[AudioSource]) -> Vec<AudioSource> {
-    engine_list(list).into_iter().map(|s| AudioSource { gain_db: 0.0, name: String::new(), mic_mute: None, ..s }).collect()
+    engine_list(list).into_iter().map(|s| AudioSource { gain_db: 0.0, name: String::new(), mic_mute: None, device_id: String::new(), ..s }).collect()
 }
 
 /// A recorded source lost its mic-mute flag (back to none, muted): `set_source`
@@ -193,6 +195,9 @@ pub fn live_updates(old: &[AudioSource], new: &[AudioSource]) -> Vec<String> {
             }
             if let Some(on) = n.mic_mute.filter(|_| o.mic_mute != n.mic_mute) {
                 cmd.insert("mic_mute".into(), on.into());
+            }
+            if o.device_id != n.device_id {
+                cmd.insert("device_id".into(), n.device_id.clone().into());
             }
             (cmd.len() > 2).then(|| serde_json::Value::Object(cmd).to_string())
         })
