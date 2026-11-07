@@ -228,11 +228,23 @@ fn quit_grace_outlasts_the_engines_own_quit_path() {
 
 // --- a wedged engine stdin (gate P2-c) ----------------------------------
 
-/// An engine stdin whose pipe is full and never read: every write blocks for good.
-pub(crate) struct Wedged;
+/// An engine stdin whose pipe is full and never read: every write blocks for good. With
+/// `parked`, it says so once its writer thread has taken a line and is stuck in `write`.
+pub(crate) struct Wedged {
+    parked: Option<std::sync::mpsc::Sender<()>>,
+}
+
+impl Wedged {
+    pub(crate) fn new() -> Wedged {
+        Wedged { parked: None }
+    }
+}
 
 impl std::io::Write for Wedged {
     fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        if let Some(parked) = self.parked.take() {
+            let _ = parked.send(());
+        }
         loop {
             thread::park();
         }
@@ -245,7 +257,7 @@ impl std::io::Write for Wedged {
 #[test]
 fn a_wedged_engine_stdin_never_blocks_the_pump() {
     let shared = Arc::new(Shared::new(None));
-    shared.attach_writer(Some(Box::new(Wedged)));
+    shared.attach_writer(Some(Box::new(Wedged::new())));
     let pump = shared.clone();
     let (tx, rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
@@ -268,7 +280,7 @@ fn a_wedged_engine_stdin_still_gets_killed_within_its_grace() {
     sup.retarget(Some(EngineSpec::default()));
     assert!(wait_for(5, || matches!(sup.health(), EngineHealth::Running { pid } if pid != 0)));
     // The engine stops reading its stdin (the pipe fills); the pump writes on.
-    sup.shared.attach_writer(Some(Box::new(Wedged)));
+    sup.shared.attach_writer(Some(Box::new(Wedged::new())));
     let pump = sup.shared.clone();
     thread::spawn(move || pump.send_line(r#"{"cmd":"save_clip"}"#));
     thread::sleep(Duration::from_millis(100));
@@ -284,20 +296,38 @@ fn a_wedged_engine_stdin_still_gets_killed_within_its_grace() {
 fn a_line_to_a_full_queue_is_reported_not_queued() {
     let shared = Arc::new(Shared::new(None));
     assert!(!shared.send_line(r#"{"cmd":"save_clip"}"#), "no engine: nothing queued");
-    shared.attach_writer(Some(Box::new(Wedged)));
-    let queued = (0..200).filter(|_| shared.send_line(r#"{"cmd":"save_clip"}"#)).count();
-    assert!(queued <= stdin::QUEUE + 1, "{queued} lines queued to a 64-line queue");
+    // The writer takes one line and wedges on it; only then is the queue filled, so no line
+    // the writer takes late can free a slot after the fill (the 11-08 flake).
+    let queued = wedge_and_fill(&shared);
+    assert_eq!(queued, stdin::QUEUE, "{queued} lines queued behind the wedged one");
     assert!(!shared.send_line(r#"{"cmd":"save_clip"}"#), "a full queue said it queued the line");
 }
 
-/// A writer that takes lines only once `open` says so (a healthy engine that is busy).
+/// Attach a wedged writer, wait until it has taken one line and parked, then fill the queue
+/// until a send says no. The number of lines the fill queued.
+pub(crate) fn wedge_and_fill(shared: &Shared) -> usize {
+    let (tx, rx) = std::sync::mpsc::channel();
+    shared.attach_writer(Some(Box::new(Wedged { parked: Some(tx) })));
+    assert!(shared.send_line("{}"), "the first line was not queued");
+    rx.recv_timeout(Duration::from_secs(5)).expect("the wedged writer never took its line");
+    let queued = (0..1_000).take_while(|_| shared.send_line("{}")).count();
+    assert!(queued < 1_000, "the queue never said it was full");
+    queued
+}
+
+/// A writer that takes lines only once `open` says so (a healthy engine that is busy). It
+/// says once (`entered`) when its writer thread is stuck on its first line.
 struct Gated {
     open: Arc<AtomicBool>,
     seen: Arc<Mutex<Vec<String>>>,
+    entered: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl std::io::Write for Gated {
     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        if let Some(entered) = self.entered.take() {
+            let _ = entered.send(());
+        }
         while !self.open.load(Ordering::SeqCst) {
             thread::sleep(Duration::from_millis(5));
         }
@@ -314,9 +344,13 @@ fn quit_keeps_a_slot_so_a_busy_engine_behind_a_full_queue_still_finishes_cleanly
     let shared = Arc::new(Shared::new(None));
     let open = Arc::new(AtomicBool::new(false));
     let seen = Arc::new(Mutex::new(Vec::new()));
-    shared.attach_writer(Some(Box::new(Gated { open: open.clone(), seen: seen.clone() })));
+    let (tx, rx) = std::sync::mpsc::channel();
+    shared.attach_writer(Some(Box::new(Gated { open: open.clone(), seen: seen.clone(), entered: Some(tx) })));
+    // The writer is stuck on its first line before the fill, so the fill really ends full.
+    assert!(shared.send_line(r#"{"cmd":"bookmark"}"#));
+    rx.recv_timeout(Duration::from_secs(5)).expect("the writer never took its first line");
     let filled = (0..1_000).take_while(|_| shared.send_line(r#"{"cmd":"bookmark"}"#)).count();
-    assert!(filled < 1_000, "the queue never said it was full");
+    assert_eq!(filled, stdin::QUEUE, "the queue never said it was full");
     assert!(shared.send_quit(), "quit found the queue full");
     open.store(true, Ordering::SeqCst);
     assert!(wait_for(5, || seen.lock().unwrap().iter().any(|l| l.contains("quit"))), "quit never reached the engine");
