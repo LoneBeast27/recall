@@ -68,3 +68,21 @@ fn trimming_a_part_shorter_than_the_minimum_does_not_panic() {
         assert!(ranges.iter().all(|r| r.end > r.start), "{drag:?}: every part still valid {ranges:?}");
     }
 }
+
+#[test]
+fn in_or_out_at_a_shared_edge_makes_no_empty_undo_step() {
+    // R2-6: I right after a split (the playhead on the shared edge) changed nothing but still
+    // pushed an undo step, cleared redo and set off an autosave and a flush.
+    for out in [false, true] {
+        let mut ed = editor(vec![TimeRange::new(0.0, 5.0), TimeRange::new(5.0, 60.0)]);
+        let kept = ed.plan.clone();
+        ed.redo.push(kept.clone());
+        ed.needs_flush = false;
+        ed.pending_seek = Some(5.0);
+        if out { ed.set_out() } else { ed.set_in() }
+        assert_eq!(ed.plan.ranges, kept.ranges, "out={out}");
+        assert!(ed.undo.is_empty(), "out={out}: no empty undo step");
+        assert_eq!(ed.redo.len(), 1, "out={out}: redo is kept");
+        assert!(!ed.needs_flush, "out={out}: nothing to save");
+    }
+}

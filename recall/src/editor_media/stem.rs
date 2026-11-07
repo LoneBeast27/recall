@@ -136,11 +136,17 @@ fn drain(
                     pts.rescale(tb, ff::Rational(1, input_rate as i32))
                         .saturating_sub(origin_samples)
                 });
-                let (source_start, discontinuity) = crate::audio_clock::frame_start(
-                    *next_source_sample,
+                // A skipped packet's time stays silent: this frame goes after it, placed by
+                // `append_at` (which pads), not closed up against the previous one.
+                let gap = bad.take_gap().rescale(tb, ff::Rational(1, input_rate as i32));
+                let skipped = gap > 0 && next_source_sample.is_some();
+                let expected = next_source_sample.map(|next| next.saturating_add(gap));
+                let (source_start, reseeded) = crate::audio_clock::frame_start(
+                    expected,
                     stamped,
                     crate::audio_clock::drift_tolerance(input_rate),
                 );
+                let discontinuity = reseeded || skipped;
                 if discontinuity {
                     flush_resampler(resampler, writer, cursor, total, peaks, channels)?;
                     let input = *resampler.input();

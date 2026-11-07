@@ -108,6 +108,12 @@ impl EditorState {
     /// Writes the edit file beside the clip (HDD) when the open clip changed since the last
     /// flush. Autosave only touches the SSD working copy; this runs on leave / switch / export / close.
     pub fn flush(&mut self, workers: &Workers) {
+        self.flush_on_close(|job| workers.job(job));
+    }
+
+    /// [`Self::flush`] with the job handed to `send`. App close sends it to the edits thread too:
+    /// that thread writes in order, so an older autosave still queued cannot land after it.
+    pub fn flush_on_close(&mut self, mut send: impl FnMut(Job)) {
         if !self.needs_flush {
             return;
         }
@@ -117,18 +123,7 @@ impl EditorState {
             if let Err(error) = crate::backend::save_working(&info, &self.plan, self.fps, &self.export_settings) {
                 self.save_error = Some(error);
             }
-            workers.job(Job::FlushProject(info, self.plan.clone(), self.fps, self.export_settings.clone(), self.may_touch_sidecar()));
-        }
-    }
-
-    /// Synchronous flush for app close (the worker thread may not outlive the window).
-    pub fn flush_now(&mut self) {
-        if !self.needs_flush {
-            return;
-        }
-        if let Some(info) = self.info.as_ref() {
-            self.needs_flush = false;
-            let _ = crate::backend::flush_project(info, &self.plan, self.fps, &self.export_settings, self.may_touch_sidecar());
+            send(Job::FlushProject(info, self.plan.clone(), self.fps, self.export_settings.clone(), self.may_touch_sidecar()));
         }
     }
 
@@ -317,5 +312,20 @@ mod sound_tests {
         assert_eq!(ed.save_error, None, "a.mp4's failure is not b.mp4's");
         ed.on_saved("b.mp4", Err("disk full".into()));
         assert_eq!(ed.save_error.as_deref(), Some("disk full"));
+    }
+
+    #[test]
+    fn closing_queues_the_last_flush_behind_the_edit_writes_already_sent() {
+        // R2-3: the close flush wrote from the UI thread, and an older autosave still queued on
+        // the disk lane landed after it: the last edit was gone on the next open.
+        let mut ed = EditorState::new(Err("no preview".into()));
+        ed.info = Some(crate::edit_model::ClipInfo { path: "r2-3-close.mp4".into(), duration: 10.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() });
+        ed.plan.ranges = vec![crate::edit_model::TimeRange::new(1.0, 9.0)];
+        ed.needs_flush = true;
+        let mut sent = Vec::new();
+        ed.flush_on_close(|job| sent.push(job));
+        assert!(matches!(sent.as_slice(), [crate::worker::Job::FlushProject(..)]), "the close flush goes to the in-order edits thread");
+        ed.flush_on_close(|job| sent.push(job));
+        assert_eq!(sent.len(), 1, "nothing new to flush");
     }
 }

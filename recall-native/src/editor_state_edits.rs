@@ -73,9 +73,11 @@ impl EditorState {
         let at = self.position();
         let ranges = &self.plan.ranges;
         let Some(index) = ranges.iter().rposition(|r| r.start <= at && at <= r.end).or_else(|| ranges.iter().position(|r| r.start > at)) else { return };
-        if at < ranges[index].end - MIN_RANGE {
+        let start = at.max(self.prev_end(index));
+        // At a shared edge nothing moves: no undo step, no save.
+        if at < ranges[index].end - MIN_RANGE && start != ranges[index].start {
             self.revise();
-            self.plan.ranges[index].start = at.max(self.prev_end(index));
+            self.plan.ranges[index].start = start;
             self.selected = index;
         }
     }
@@ -85,9 +87,10 @@ impl EditorState {
         let at = self.position();
         let ranges = &self.plan.ranges;
         let Some(index) = ranges.iter().position(|r| r.start <= at && at <= r.end).or_else(|| ranges.iter().rposition(|r| r.end < at)) else { return };
-        if at > ranges[index].start + MIN_RANGE {
+        let end = at.min(self.next_start(index));
+        if at > ranges[index].start + MIN_RANGE && end != ranges[index].end {
             self.revise();
-            self.plan.ranges[index].end = at.min(self.next_start(index));
+            self.plan.ranges[index].end = end;
             self.selected = index;
         }
     }

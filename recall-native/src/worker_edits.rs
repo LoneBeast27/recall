@@ -86,9 +86,16 @@ pub(super) fn run(jobs: Receiver<Job>, tx: Sender<Done>) {
     }
 }
 
-/// App close: waits up to `limit` for the edit writes still queued. False when some were left.
-pub fn wait_for_edits(limit: Duration) -> bool {
-    EDITS.wait_idle(limit)
+/// App close: the running export, then the edit writes queued (`limit` for those). False when
+/// some were left.
+pub fn finish_writes(wait_export: impl FnOnce(), limit: Duration) -> bool {
+    finish(&EDITS, wait_export, limit)
+}
+
+fn finish(pending: &Pending, wait_export: impl FnOnce(), limit: Duration) -> bool {
+    // A flush queued behind the export on its disk lane can only start once the export ends.
+    wait_export();
+    pending.wait_idle(limit)
 }
 
 #[cfg(test)]
@@ -124,5 +131,19 @@ mod tests {
         assert!(pending.wait_idle(Duration::from_secs(10)), "the close waits for the write");
         assert!(started.elapsed() >= Duration::from_millis(70));
         thread.join().unwrap();
+    }
+
+    #[test]
+    fn close_waits_for_the_export_before_it_times_the_edit_writes() {
+        // R2-2: a flush queued behind an export on the HDD lane gave up after 30 s, then the
+        // process exited the moment the export ended, while the flush was only starting.
+        let pending = Arc::new(Pending::new());
+        pending.begin();
+        let writer = Arc::clone(&pending);
+        let export = move || {
+            std::thread::sleep(Duration::from_millis(100));
+            writer.end(); // the lane is free: the queued flush runs
+        };
+        assert!(finish(&pending, export, Duration::from_millis(10)), "the limit counts from the end of the export");
     }
 }

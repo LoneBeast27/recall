@@ -14,18 +14,51 @@ fn project(path: &str) -> Project {
 fn edits_still_load_after_the_drive_letter_or_folder_changes() {
     // E4: a USB drive back as F: instead of E:, or Recall\Raw moved: the same clip.
     let saved = project(r"\\?\E:\Recall\Raw\clip.mp4");
-    assert!(validate_project(&saved, &info(r"\\?\F:\Recall\Raw\clip.mp4")).is_ok());
-    assert!(validate_project(&saved, &info(r"\\?\E:\Moved\CLIP.mp4")).is_ok(), "the name compares like Windows does");
+    assert!(validate_project(&saved, &info(r"\\?\F:\Recall\Raw\clip.mp4"), ProjectSource::Sidecar).is_ok());
+    assert!(validate_project(&saved, &info(r"\\?\E:\Moved\CLIP.mp4"), ProjectSource::Sidecar).is_ok(), "the name compares like Windows does");
 }
 
 #[test]
 fn edits_of_another_clip_or_revision_still_do_not_load() {
     let saved = project(r"\\?\E:\Recall\Raw\clip.mp4");
-    assert!(validate_project(&saved, &info(r"\\?\F:\Recall\Raw\other.mp4")).is_err(), "another name");
+    assert!(validate_project(&saved, &info(r"\\?\F:\Recall\Raw\other.mp4"), ProjectSource::Sidecar).is_err(), "another name");
     let mut changed = info(r"\\?\E:\Recall\Raw\clip.mp4");
     changed.source_bytes += 1;
-    assert!(validate_project(&saved, &changed).is_err(), "another size");
+    assert!(validate_project(&saved, &changed, ProjectSource::Sidecar).is_err(), "another size");
     let mut touched = info(r"\\?\E:\Recall\Raw\clip.mp4");
     touched.source_modified_ms += 1;
-    assert!(validate_project(&saved, &touched).is_err(), "another write time");
+    assert!(validate_project(&saved, &touched, ProjectSource::Sidecar).is_err(), "another write time");
+}
+
+#[test]
+fn a_moved_clip_on_a_gone_path_keeps_its_working_copy() {
+    // The recorded path no longer exists (another drive letter): a move, not a copy.
+    let saved = project(r"\\?\Q:\Gone\Recall\clip.mp4");
+    assert!(validate_project(&saved, &info(r"\\?\F:\Recall\Raw\clip.mp4"), ProjectSource::WorkingCopy).is_ok());
+}
+
+#[test]
+fn a_byte_identical_copy_starts_clean_and_the_moved_clip_keeps_its_edits() {
+    // R2-1: an Explorer copy keeps name, size and write time, so both copies shared one SSD
+    // working copy; the copy opened the other's cut and its next flush overwrote that sidecar.
+    let dir = std::env::temp_dir().join(format!("recall-copy-edits-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for side in ["a", "b"] {
+        std::fs::create_dir_all(dir.join(side)).unwrap();
+        std::fs::write(dir.join(side).join("r2-1-copy.mp4"), b"same bytes").unwrap();
+    }
+    let path = |side: &str| std::fs::canonicalize(dir.join(side).join("r2-1-copy.mp4")).unwrap().to_string_lossy().into_owned();
+    let (a, b) = (info(&path("a")), info(&path("b")));
+    let plan = EditPlan { mix_down: None, ranges: vec![TimeRange::new(2.0, 8.0)], audio: Vec::new() };
+    save_working(&a, &plan, 60, &ExportSettings::default()).unwrap();
+    assert!(load_project(&b).0.is_none(), "the copy must not open the other copy's cut");
+    assert_eq!(load_project(&a).0.map(|p| p.plan.ranges), Some(plan.ranges.clone()), "the clip itself keeps its edits");
+    // A sidecar beside the clip always counts: its place names the clip.
+    let mut beside = project(&path("a"));
+    beside.source_bytes = b.source_bytes;
+    assert!(validate_project(&beside, &b, ProjectSource::Sidecar).is_ok());
+    // A moved clip: the old path is gone, and the copy at the new place keeps the edits.
+    std::fs::remove_file(dir.join("a").join("r2-1-copy.mp4")).unwrap();
+    assert_eq!(load_project(&b).0.map(|p| p.plan.ranges), Some(plan.ranges));
+    let _ = std::fs::remove_dir_all(&dir);
 }

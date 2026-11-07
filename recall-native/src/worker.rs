@@ -375,7 +375,7 @@ fn prefetch(entries: &[ClipEntry], complete: bool, tx: Sender<Done>) {
 
 #[path = "worker_edits.rs"]
 mod edits;
-pub use edits::wait_for_edits;
+pub use edits::finish_writes;
 
 fn spawn_named(name: &str, body: impl FnOnce() + Send + 'static) {
     if let Err(error) = thread::Builder::new().name(name.into()).spawn(body) {

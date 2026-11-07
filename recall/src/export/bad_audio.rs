@@ -1,7 +1,8 @@
 //! Undecodable audio packets. The ffmpeg CLI logs one and carries on; the editor stems and the
-//! edited export do the same (that packet's time stays silent, the stem is padded anyway), and
-//! give up only when the decoder rejects many packets in a row: then the stream is broken, not
-//! one packet.
+//! edited export do the same (that packet's time stays silent: [`BadPackets::take_gap`] moves the
+//! next frame on by the skipped duration, else the rest of the track would play that much early),
+//! and give up only when the decoder rejects many packets in a row: then the stream is broken,
+//! not one packet.
 
 use ffmpeg_next as ff;
 
@@ -12,6 +13,8 @@ const BROKEN_AFTER: u32 = 50;
 pub(crate) struct BadPackets {
     in_a_row: u32,
     total: u64,
+    /// Duration of the packets skipped since the last [`Self::take_gap`], in the stream's time base.
+    gap: i64,
 }
 
 impl BadPackets {
@@ -22,8 +25,16 @@ impl BadPackets {
                 self.in_a_row = 0;
                 Ok(())
             }
-            Err(error) => self.skip(error, what),
+            Err(error) => {
+                self.gap = self.gap.saturating_add(packet.duration().max(0));
+                self.skip(error, what)
+            }
         }
+    }
+
+    /// Time of the packets skipped since the last call (stream time base); 0 when none.
+    pub(crate) fn take_gap(&mut self) -> i64 {
+        std::mem::take(&mut self.gap)
     }
 
     /// A decode error (from sending a packet or receiving its frame): Err once too many came in

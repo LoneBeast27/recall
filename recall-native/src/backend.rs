@@ -193,7 +193,12 @@ fn validate_info(info:&ClipInfo)->Result<(),String>{
 /// Saved edits belong to the clip by name, size and write time, not by its absolute path: a USB
 /// drive back under another letter, or a moved clips folder, keeps them. The next flush writes
 /// the new path.
-fn validate_project(project:&Project,info:&ClipInfo)->Result<(),String>{
+/// A byte-identical copy (Explorer keeps the write time) shares the SSD working copy, so the
+/// working copy counts for another path only when that path is gone (a move, not a copy). The
+/// sidecar beside the clip always counts: its place names the clip.
+fn validate_project(project:&Project,info:&ClipInfo,source:ProjectSource)->Result<(),String>{
+    let elsewhere=!project.source_path.eq_ignore_ascii_case(&info.path)&&Path::new(&project.source_path).exists();
+    if source==ProjectSource::WorkingCopy&&elsewhere{return Err("Saved edits belong to a copy of this clip.".into());}
     let name=|p:&str|Path::new(p).file_name().map(|n|n.to_string_lossy().to_lowercase());
     if project.version!=1||name(&project.source_path)!=name(&info.path)||project.source_bytes!=info.source_bytes||project.source_modified_ms!=info.source_modified_ms{return Err("Saved edits belong to another source revision.".into());}
     validate_fps(project.export_fps)?;
@@ -321,16 +326,16 @@ pub(crate) fn load_project(info:&ClipInfo)->(Option<Project>,Option<String>,bool
     let (Ok(working),Ok(sidecar))=(working_path(info),sidecar(&info.path))else{return(None,None,false,false)};
     let lane_sidecar=sidecar.clone();
     let (sidecar_ms,sidecar_bytes)=storage::run_io(Path::new(&info.path),Priority::Interactive,move||(storage::projects_modified_ms(&lane_sidecar),std::fs::read(&lane_sidecar).ok())).unwrap_or((None,None));
-    let parse=|bytes:&[u8]|serde_json::from_slice::<Project>(bytes).map_err(|e|e.to_string()).and_then(|p|{validate_project(&p,info)?;Ok(p)});
+    let parse=|bytes:&[u8],from:ProjectSource|serde_json::from_slice::<Project>(bytes).map_err(|e|e.to_string()).and_then(|p|{validate_project(&p,info,from)?;Ok(p)});
     let present=sidecar_ms.is_some()||sidecar.exists();
-    let ours=!present||sidecar_bytes.as_deref().is_some_and(|bytes|parse(bytes).is_ok());
+    let ours=!present||sidecar_bytes.as_deref().is_some_and(|bytes|parse(bytes,ProjectSource::Sidecar).is_ok());
     let warning=(present&&sidecar_bytes.is_none()).then(||"Saved edits could not be read. They stay beside the clip.".to_owned());
     // A source that fails is reported only when no other one loads.
     let mut failed=None;
     for source in storage::project_order(storage::projects_modified_ms(&working),sidecar_ms.filter(|_|sidecar_bytes.is_some())){
         let bytes=match source{ProjectSource::WorkingCopy=>std::fs::read(&working).ok(),ProjectSource::Sidecar=>sidecar_bytes.clone()};
         let Some(bytes)=bytes else{continue};
-        match parse(&bytes){
+        match parse(&bytes,source){
             Ok(mut p)=>{normalize_project_audio(&mut p.plan,info);return(Some(p),warning,ours,present)},
             Err(e)=>{failed.get_or_insert(format!("Saved edits were not loaded: {e}"));}
         }
@@ -470,18 +475,8 @@ pub fn flush_project(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSetting
     validate_info(info)?;let bytes=project_bytes(info,plan,fps,export)?;
     let working=working_path(info)?;let default=plan_is_default(plan,info);
     let path=sidecar(&info.path)?;let lane_bytes=bytes.clone();let clip=PathBuf::from(&info.path);
-    let flushed=storage::run_io(Path::new(&info.path),Priority::Interactive,move||->Result<Flushed,String>{
-        let existing=std::fs::read(&path).ok();let name=path.to_string_lossy().into_owned();
-        let ours=ours&&(existing.is_some()||!path.exists());
-        match storage::sidecar_step(existing.as_deref(),&lane_bytes,default&&!storage::has_export(&clip,&library_dir()),ours){
-            storage::SidecarStep::Keep=>Ok(Flushed::Current(name)),
-            storage::SidecarStep::Write=>{storage::write_atomic(&path,&lane_bytes)?;Ok(Flushed::Current(name))}
-            storage::SidecarStep::Remove=>{
-                if existing.is_none(){return Ok(Flushed::Nothing);}
-                std::fs::remove_file(&path).map_err(|e|format!("remove {name}: {e}"))?;Ok(Flushed::Removed(name))
-            }
-        }
-    })??;
+    // A few KB: it does not wait for an export that holds the disk lane for its whole run.
+    let flushed=storage::run_io_brief(Path::new(&info.path),Priority::Interactive,move||sidecar_flush::sidecar_task(&path,&clip,&lane_bytes,default,ours))??;
     if !matches!(flushed,Flushed::Nothing){storage::write_atomic(&working,&bytes)?;}
     Ok(flushed)
 }
@@ -495,6 +490,7 @@ fn export_limit(plan:&EditPlan,fps:u32)->Duration{
     Duration::from_secs_f64(600.0+seconds.max(0.0)*20.0*(f64::from(fps)/60.0).max(1.0))
 }
 #[path="backend_export.rs"] mod run_export;
+#[path="backend_sidecar.rs"] mod sidecar_flush;
 pub use run_export::export_clip;
 pub(crate) use run_export::{engine_export,export_cancelled,export_queued,export_target};
 /// Drive types and cache usage for Settings (walks the cache: call from a worker thread).
