@@ -38,6 +38,11 @@
 #>
 param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$Autostart, [switch]$NoAutostart, [switch]$NoFrameTiming, [switch]$NoStart, [switch]$CloseApp, [switch]$AllowUnknownDrive)
 $ErrorActionPreference = 'Stop'
+# A relative -InstallDir or RECALL_CONTROLLER_PATH means the PowerShell location ($PWD), which
+# New-Item, the swap and Start-Process use; .NET would resolve it against the process folder
+# instead. Resolved once here, so every step names the same folder (audit R5-startup-4).
+$InstallDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($InstallDir)
+$envController = if ($env:RECALL_CONTROLLER_PATH) { $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($env:RECALL_CONTROLLER_PATH) }
 $repo = Split-Path $PSScriptRoot -Parent
 $stage = Join-Path $repo 'dist'
 # Gyan FFmpeg 7.1.1 full shared build: same ABI as the 7.1 bindings, and it includes av1_nvenc.
@@ -127,14 +132,26 @@ function Format-Recorder($p) {
 # Which recorder this run may quit or talk to (Get-Controller below), and only through a pipe
 # that controller itself serves. A sandboxed install sets RECALL_CONTROLLER_PATH (and
 # RECALL_LEGACY_PIPE) so it never reaches the live recorder that owns this session's real pipe.
-$controllerPath = [RecallInstall.PathId]::Normalize($(if ($env:RECALL_CONTROLLER_PATH) { $env:RECALL_CONTROLLER_PATH } else { Join-Path $InstallDir 'recall-hdr.exe' }))
+$controllerPath = [RecallInstall.PathId]::Normalize($(if ($envController) { $envController } else { Join-Path $InstallDir 'recall-hdr.exe' }))
 $installRoot = [RecallInstall.PathId]::Normalize($InstallDir).TrimEnd('\') + '\'
-function Test-InInstallDir([string]$path) { $path -and [RecallInstall.PathId]::Normalize($path).StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase) }
+# Each spelling is resolved once per run: the waits below poll every process several times a second.
+$script:pathIds = @{}
+function Get-PathId([string]$path) {
+  if (-not $script:pathIds.ContainsKey($path)) { $script:pathIds[$path] = [RecallInstall.PathId]::Normalize($path) }
+  $script:pathIds[$path]
+}
+function Test-InInstallDir([string]$path) { $path -and (Get-PathId $path).StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase) }
 # A sandbox's controller must sit inside its own -InstallDir: the app close, the wait and the swap
 # below all act on -InstallDir, so a sandbox that set only the env var would replace the real
 # install and close the real app (audit R4-startup-4). Refused before anything is closed.
 if ($env:RECALL_CONTROLLER_PATH -and -not (Test-InInstallDir $controllerPath)) {
   throw "RECALL_CONTROLLER_PATH ($controllerPath) is not inside -InstallDir ($InstallDir). A sandboxed install must pass its own folder as -InstallDir; nothing was closed or replaced."
+}
+# Nor may a sandbox name the real install folder (or a junction, subst or 8.3 spelling of it): it
+# would close the real app, quit the real recorder and swap the real program (audit R5-startup-2).
+$defaultRoot = [RecallInstall.PathId]::Normalize((Join-Path $env:LOCALAPPDATA 'Programs\Recall')).TrimEnd('\') + '\'
+if ($env:RECALL_CONTROLLER_PATH -and [string]::Equals($installRoot, $defaultRoot, [StringComparison]::OrdinalIgnoreCase)) {
+  throw "A sandboxed install (RECALL_CONTROLLER_PATH) can't use the real install folder ($InstallDir). Pass another -InstallDir, or unset RECALL_CONTROLLER_PATH for a real install; nothing was closed or replaced."
 }
 
 # 2a. Never close the app under the user: refuse while the installed app runs (checked before any
@@ -171,7 +188,8 @@ Assert-AppClosed
 #    the files the build replaces.
 #    A real install quits every recall-hdr.exe in this session, wherever it runs from (another
 #    folder, an 8.3 or junction spelling, an elevated one WMI can't read), and stops with an
-#    error naming any that won't quit. Only a sandbox (RECALL_CONTROLLER_PATH) quits just the
+#    error naming any that won't quit. One that got the quit and is finishing a clip is waited
+#    for as long as it runs, with a line each minute (Wait-ForQuit). Only a sandbox (RECALL_CONTROLLER_PATH) quits just the
 #    controller at that path and leaves every other recorder alone (Get-Controller).
 function Get-PipeServer($pipe) {
   if (-not ('RecallInstall.Pipe' -as [type])) {
@@ -242,17 +260,29 @@ function Send-Recorder([string]$line, [string]$name = $pipeName, [int]$tries = 5
           $pipe.Dispose(); $script:ownerRefused = $true
           $why = if ($owner) { "another user owns the Recall pipe ($name, pid $server runs as $owner)" } else { "can't tell which account runs the Recall pipe ($name, pid $server)" }
           if ($script:ownerWarned -notcontains $why) { $script:ownerWarned += $why; Write-Warning "${why}: nothing sent." }
+          # The bare legacy name is machine-wide: another server may serve its next instance, and
+          # ours the one after (R5-startup-5). This session's own pipe has one server.
+          if ($name -eq $legacyPipe) { Start-Sleep -Milliseconds 300; continue }
           return $false
         }
       }
-      if (-not $server -or -not (@(Get-Controller) | Where-Object { [int]$_.ProcessId -eq $server })) { $pipe.Dispose(); return $false }
+      $ours = @(Get-Controller) | Where-Object { [int]$_.ProcessId -eq $server } | Select-Object -First 1
+      if (-not $server -or -not $ours) {
+        $pipe.Dispose()
+        if ($name -eq $legacyPipe) { Start-Sleep -Milliseconds 300; continue }
+        return $false
+      }
       $w = [IO.StreamWriter]::new($pipe); $w.AutoFlush = $true; $w.WriteLine($line)
+      # The recorder that got this line (Stop-Recorder waits on it), with its start time.
+      $script:sentTo = @{ pid = $server; created = $ours.CreationDate; pipe = $name }
       Start-Sleep -Milliseconds 300; $pipe.Dispose(); return $true
     } catch { Start-Sleep -Milliseconds 400 }
   }
   $false
 }
-function Get-Installed { Get-CimInstance Win32_Process -Filter "SessionId = $session" | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) } }
+# Every process of this session running from -InstallDir, matched by folder like Get-InstalledApp
+# (alias spellings resolve; an elevated one is read with QueryFullProcessImageNameW; R5-startup-3).
+function Get-Installed { Get-CimInstance Win32_Process -Filter "SessionId = $session" | Where-Object { Test-InInstallDir (Get-ExePath $_) } }
 # Every controller in this session, whatever its path.
 function Get-SessionController { Get-CimInstance Win32_Process -Filter "Name = 'recall-hdr.exe' AND SessionId = $session" }
 # Started from $controllerPath? Compared by what the two paths name (PathId.Normalize above).
@@ -269,7 +299,10 @@ function Get-Controller {
 # old pipe gives us read access only. RECALL_LEGACY_PIPE renames it for sandboxed runs. Drop
 # this fallback one release after the per-session pipe shipped.
 $legacyPipe = if ($env:RECALL_LEGACY_PIPE) { $env:RECALL_LEGACY_PIPE } else { 'recall-hdr-control' }
+. (Join-Path $PSScriptRoot 'install-quit-wait.ps1')
 function Stop-Recorder {
+  # Each phase starts clean: a refusal here must not end step 6's status probe (R5-startup-5).
+  $script:ownerRefused = $false; $script:sentTo = $null; $sent = $false
   if ($env:RECALL_CONTROLLER_PATH) {
     $others = @(Get-SessionController | Where-Object { -not (Test-OurController $_) })
     if ($others) { Write-Host ("Left running (not $controllerPath): " + (($others | ForEach-Object { Format-Recorder $_ }) -join ', ')) }
@@ -277,10 +310,10 @@ function Stop-Recorder {
   if (Get-Controller) {
     # Either pipe answering counts: this build's session pipe first, then the old bare name.
     $sent = Send-Recorder '{"cmd":"quit"}'
-    if (-not $sent -and (Get-Controller)) { [void](Send-Recorder '{"cmd":"quit"}' $legacyPipe) }
+    if (-not $sent -and (Get-Controller)) { $sent = Send-Recorder '{"cmd":"quit"}' $legacyPipe }
   }
-  $deadline = (Get-Date).AddSeconds(8)
-  while ((Get-Date) -lt $deadline -and ((Get-Installed) -or (Get-Controller))) { Start-Sleep -Milliseconds 300 }
+  $quit = if ($sent) { $script:sentTo } else { $null }
+  Wait-ForQuit $quit
   $left = @(Get-Installed) + @(Get-Controller) | Where-Object { $_ }
   if ($left) { throw ("Recall is still running (" + (($left | ForEach-Object { Format-Recorder $_ }) -join ', ') + "). Quit it from the tray, then re-run.") }
 }
@@ -392,6 +425,8 @@ if ($NoStart) {
 }
 Start-Process -FilePath (Join-Path $InstallDir 'recall-hdr.exe') -ArgumentList '--record' -WorkingDirectory $InstallDir
 $deadline = (Get-Date).AddSeconds(10); $up = $false
+# A refusal during Stop-Recorder (the bare legacy pipe, say) is not one here (R5-startup-5).
+$script:ownerRefused = $false
 while (-not $up -and -not $script:ownerRefused -and (Get-Date) -lt $deadline) { Start-Sleep -Milliseconds 500; $up = Send-Recorder '{"cmd":"status"}' }
 if (-not $up) { Write-Warning 'The recorder did not answer on its control pipe; start Recall from the Start menu.' }
 # Name any other recorder still running in this session, whether or not one answered: it holds
@@ -409,5 +444,7 @@ if ($up -and $Autostart) {
   if ($run -and $run -like "*$InstallDir*") { "Recorder running; it starts with Windows ($run)." }
   else { Write-Warning 'Start with Windows was not set; turn it on in Recall > Settings > General.' }
 } elseif ($up) { 'Recorder running. Start with Windows is unchanged (Recall > Settings > General; -Autostart turns it on).' }
+# -Autostart is never dropped without a word.
+if ($Autostart -and -not $up) { Write-Warning 'Start with Windows was not set: the recorder did not answer. Turn it on in Recall > Settings > General.' }
 $size = (Get-ChildItem $InstallDir -Recurse -File -Exclude 'cache' | Where-Object { $_.FullName -notlike "*\cache\*" } | Measure-Object Length -Sum).Sum
 "Installed to $InstallDir ($([math]::Round($size / 1MB)) MB of program files; the cache is capped separately)."
