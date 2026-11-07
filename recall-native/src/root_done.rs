@@ -28,7 +28,7 @@ impl Root {
                     }
                 }
             }
-            Done::Saved(result) => self.ed.on_saved(result),
+            Done::Saved(clip, result) => self.ed.on_saved(&clip, result),
             Done::Exported(result) => {
                 match &result {
                     Err(error) if error == crate::backend::EXPORT_CANCELLED => self.show_toast(ToastKind::Info, "Export cancelled", None),

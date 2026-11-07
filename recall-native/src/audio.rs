@@ -1,9 +1,7 @@
-//! Preview audio: prepared WAV stems mixed on a worker thread into WinMM wave-out.
-//! Device/buffers in `audio_wave.rs`, the worker loop in `audio_worker.rs`.
+//! Preview audio: prepared stems mixed on a worker thread into WinMM wave-out.
+//! Device/buffers in `audio_wave.rs`, the worker loop in `audio_worker.rs`, stems read from
+//! disk as they play in `audio_stem.rs`.
 use std::cell::Cell;
-use std::fs::{self, File};
-use std::io::Read;
-use std::mem::size_of;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -25,7 +23,6 @@ const SAMPLE_RATE: u32 = 48_000;
 const OUTPUT_CHANNELS: usize = 2;
 const FRAMES_PER_BUFFER: usize = 960; // 20 ms
 const BUFFER_COUNT: usize = 4;
-const MAX_DECODED_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Default)]
 struct SharedStatus {
@@ -272,25 +269,36 @@ impl Drop for AudioMixer {
     }
 }
 
-/// A track's samples: the whole stem, or what has been decoded so far.
+/// A track's samples: the stem on disk, or what has been decoded so far.
 enum Samples {
-    Stem(Vec<f32>),
+    Stem(stem::StemReader),
     Live(Arc<stream::LivePcm>),
+    #[cfg(test)]
+    Memory(Vec<f32>),
 }
 
 impl Samples {
+    /// Interleaved samples (frames x channels) the track holds.
     fn len(&self) -> usize {
         match self {
-            Samples::Stem(samples) => samples.len(),
+            Samples::Stem(stem) => stem.frames() * stem.channels(),
             Samples::Live(pcm) => pcm.len(),
+            #[cfg(test)]
+            Samples::Memory(samples) => samples.len(),
         }
     }
 
-    fn at(&self, index: usize) -> f32 {
+    /// Interleaved samples of frames `[from, from + count)` into `out`; silence past the end.
+    fn read(&mut self, channels: usize, from: usize, count: usize, out: &mut Vec<f32>) -> Result<(), String> {
+        let values = from * channels..(from + count) * channels;
+        out.clear();
         match self {
-            Samples::Stem(samples) => samples[index],
-            Samples::Live(pcm) => pcm.sample(index),
+            Samples::Stem(stem) => return stem.read(from, count, out),
+            Samples::Live(pcm) => out.extend(values.map(|i| if i < pcm.len() { pcm.sample(i) } else { 0.0 })),
+            #[cfg(test)]
+            Samples::Memory(samples) => out.extend(values.map(|i| samples.get(i).copied().unwrap_or(0.0))),
         }
+        Ok(())
     }
 }
 
@@ -317,28 +325,13 @@ fn load_tracks(specs: &[PreviewTrack]) -> Result<Vec<LoadedTrack>, String> {
     if specs.is_empty() {
         return Err("preview requires at least one prepared audio stem".into());
     }
-    let mut loaded = Vec::new();
-    loaded
-        .try_reserve_exact(specs.len())
-        .map_err(|_| "not enough memory for preview track metadata")?;
-    let mut decoded_bytes = 0usize;
-    for spec in specs {
-        let bytes = read_bounded(&spec.path)?;
-        let remaining = MAX_DECODED_BYTES.saturating_sub(decoded_bytes);
-        let parsed = if flac::is_flac(&bytes) { flac::parse_flac(&bytes, remaining, SAMPLE_RATE) } else { parse_wav(&bytes, remaining) };
-        let (samples, channels) = parsed.map_err(|e| format!("invalid preview stem '{}': {e}", spec.path))?;
-        decoded_bytes = decoded_bytes
-            .checked_add(samples.len() * size_of::<f32>())
-            .ok_or("preview decoded-audio size overflow")?;
-        loaded.push(LoadedTrack {
-            stream_index: spec.stream_index,
-            samples: Samples::Stem(samples),
-            channels,
-            gain_db: spec.gain_db,
-            muted: spec.muted,
-        });
-    }
-    Ok(loaded)
+    specs
+        .iter()
+        .map(|spec| {
+            let stem = stem::StemReader::open(&spec.path)?;
+            Ok(LoadedTrack { stream_index: spec.stream_index, channels: stem.channels(), samples: Samples::Stem(stem), gain_db: spec.gain_db, muted: spec.muted })
+        })
+        .collect()
 }
 
 fn live_tracks(tracks: Vec<stream::LiveTrack>) -> Vec<LoadedTrack> {
@@ -348,142 +341,30 @@ fn live_tracks(tracks: Vec<stream::LiveTrack>) -> Vec<LoadedTrack> {
         .collect()
 }
 
-fn read_bounded(path: &str) -> Result<Vec<u8>, String> {
-    let metadata =
-        fs::metadata(path).map_err(|e| format!("could not inspect preview stem '{path}': {e}"))?;
-    let length = usize::try_from(metadata.len())
-        .map_err(|_| format!("preview stem is too large for this process: '{path}'"))?;
-    if length > MAX_DECODED_BYTES {
-        return Err(format!(
-            "preview stem exceeds the 256 MiB pilot limit: '{path}'"
-        ));
-    }
-    let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(length)
-        .map_err(|_| format!("not enough memory to load preview stem '{path}'"))?;
-    bytes.resize(length, 0);
-    File::open(path)
-        .and_then(|mut file| file.read_exact(&mut bytes))
-        .map_err(|e| format!("could not read preview stem '{path}': {e}"))?;
-    Ok(bytes)
-}
-
 #[path = "audio_flac.rs"]
 mod flac;
+#[path = "audio_stem.rs"]
+mod stem;
 
-#[cfg(test)]
-pub(crate) fn parse_wav_for_tests(bytes: &[u8]) -> (Vec<f32>, usize) {
-    parse_wav(bytes, MAX_DECODED_BYTES).unwrap()
-}
-
-fn parse_wav(bytes: &[u8], decoded_budget: usize) -> Result<(Vec<f32>, usize), String> {
-    if bytes.len() < 12 || &bytes[..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
-        return Err("expected a RIFF/WAVE file".into());
-    }
-    let mut offset = 12usize;
-    let mut format = None;
-    let mut data = None;
-    while offset.checked_add(8).is_some_and(|end| end <= bytes.len()) {
-        let id = &bytes[offset..offset + 4];
-        let size = u32::from_le_bytes(bytes[offset + 4..offset + 8].try_into().unwrap()) as usize;
-        let start = offset + 8;
-        let end = start.checked_add(size).ok_or("WAV chunk size overflow")?;
-        if end > bytes.len() {
-            return Err("truncated WAV chunk".into());
+fn mix_frames(tracks: &mut [LoadedTrack], start: usize, frames: usize, output: &mut [i16]) -> Result<(), String> {
+    let mut mixed = vec![0.0f32; frames * OUTPUT_CHANNELS];
+    let mut block = Vec::with_capacity(frames * OUTPUT_CHANNELS);
+    for track in tracks.iter_mut() {
+        if track.muted {
+            continue;
         }
-        if id == b"fmt " {
-            format = Some(&bytes[start..end]);
-        } else if id == b"data" {
-            data = Some(&bytes[start..end]);
+        let channels = track.channels;
+        track.samples.read(channels, start, frames, &mut block)?;
+        let gain = 10.0f32.powf((track.gain_db as f32).clamp(-96.0, 24.0) / 20.0);
+        for (frame, pair) in block.chunks_exact(channels).zip(mixed.chunks_exact_mut(2)) {
+            pair[0] += frame[0] * gain;
+            pair[1] += frame[channels - 1] * gain;
         }
-        offset = end
-            .checked_add(size & 1)
-            .ok_or("WAV chunk offset overflow")?;
     }
-    let fmt = format.ok_or("missing fmt chunk")?;
-    let payload = data.ok_or("missing data chunk")?;
-    if fmt.len() < 16 {
-        return Err("truncated fmt chunk".into());
+    for (slot, value) in output.iter_mut().zip(&mixed) {
+        *slot = float_to_i16(*value);
     }
-    let mut tag = u16::from_le_bytes(fmt[0..2].try_into().unwrap());
-    let channels = u16::from_le_bytes(fmt[2..4].try_into().unwrap()) as usize;
-    let sample_rate = u32::from_le_bytes(fmt[4..8].try_into().unwrap());
-    let bits = u16::from_le_bytes(fmt[14..16].try_into().unwrap());
-    if tag == 0xfffe {
-        if fmt.len() < 40 {
-            return Err("truncated extensible fmt chunk".into());
-        }
-        tag = u16::from_le_bytes(fmt[24..26].try_into().unwrap());
-    }
-    if !(channels == 1 || channels == 2) {
-        return Err(format!(
-            "expected mono or stereo PCM, got {channels} channels"
-        ));
-    }
-    if sample_rate != SAMPLE_RATE {
-        return Err(format!(
-            "expected {SAMPLE_RATE} Hz prepared PCM, got {sample_rate} Hz"
-        ));
-    }
-    let sample_width = match (tag, bits) {
-        (1, 16) => 2,
-        (3, 32) => 4,
-        _ => return Err(format!("unsupported WAV encoding tag {tag}, {bits} bits")),
-    };
-    if payload.len() % sample_width != 0 {
-        return Err(format!("{bits}-bit PCM data is not sample-aligned"));
-    }
-    let sample_count = payload.len() / sample_width;
-    let decoded_size = sample_count
-        .checked_mul(size_of::<f32>())
-        .ok_or("decoded PCM size overflow")?;
-    if decoded_size > decoded_budget {
-        return Err("decoded preview audio exceeds the 256 MiB pilot limit".into());
-    }
-    let mut samples = Vec::new();
-    samples
-        .try_reserve_exact(sample_count)
-        .map_err(|_| "not enough memory to decode preview audio")?;
-    match (tag, bits) {
-        (1, 16) => {
-            for sample in payload.chunks_exact(2) {
-                samples.push(i16::from_le_bytes([sample[0], sample[1]]) as f32 / 32768.0);
-            }
-        }
-        (3, 32) => {
-            for sample in payload.chunks_exact(4) {
-                samples.push(f32::from_le_bytes(sample.try_into().unwrap()));
-            }
-        }
-        _ => unreachable!(),
-    }
-    if samples.len() % channels != 0 {
-        return Err("PCM data is not frame-aligned".into());
-    }
-    Ok((samples, channels))
-}
-
-fn mix_frames(tracks: &[LoadedTrack], start: usize, frames: usize, output: &mut [i16]) {
-    for frame in 0..frames {
-        let mut left = 0.0f32;
-        let mut right = 0.0f32;
-        for track in tracks {
-            if track.muted {
-                continue;
-            }
-            let source_frame = start + frame;
-            let source_index = source_frame * track.channels;
-            if source_index >= track.samples.len() {
-                continue;
-            }
-            let gain = 10.0f32.powf((track.gain_db as f32).clamp(-96.0, 24.0) / 20.0);
-            left += track.samples.at(source_index) * gain;
-            right += track.samples.at(source_index + usize::from(track.channels == 2)) * gain;
-        }
-        output[frame * 2] = float_to_i16(left);
-        output[frame * 2 + 1] = float_to_i16(right);
-    }
+    Ok(())
 }
 
 fn float_to_i16(value: f32) -> i16 {
