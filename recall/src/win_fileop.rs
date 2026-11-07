@@ -90,18 +90,34 @@ unsafe extern "system" {
     fn SetThreadDesktop(desktop: isize) -> i32;
 }
 
+#[path = "win_fileop_dacl.rs"]
+pub mod dacl;
+
 /// How the worker gets its private desktop (production: [`REAL_DESKTOP`]; tests inject failures).
 #[derive(Clone, Copy)]
 pub struct DesktopFns {
-    pub create: fn(&str) -> Option<isize>,
+    /// The desktop's access list as SDDL (`None`: it cannot be built, so the call is refused).
+    pub dacl: fn() -> Option<String>,
+    pub create: fn(&str, &str) -> Option<isize>,
     pub set: fn(isize) -> bool,
     pub close: fn(isize),
 }
 
-fn create_desktop(name: &str) -> Option<isize> {
+#[repr(C)]
+struct SecurityAttributes {
+    length: u32,
+    descriptor: *mut std::ffi::c_void,
+    inherit: i32,
+}
+
+/// The desktop `name` with exactly the access list `sddl` (never the default one).
+fn create_desktop(name: &str, sddl: &str) -> Option<isize> {
+    let sd = dacl::sd_from(sddl)?;
+    let sa = SecurityAttributes { length: std::mem::size_of::<SecurityAttributes>() as u32, descriptor: sd, inherit: 0 };
     let name: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
-    // SAFETY: a NUL-terminated name; default device, mode and security.
-    let desk = unsafe { CreateDesktopW(name.as_ptr(), std::ptr::null(), std::ptr::null(), 0, DESKTOP_ACCESS, std::ptr::null()) };
+    // SAFETY: a NUL-terminated name; `sa` and its descriptor are alive for the call.
+    let desk = unsafe { CreateDesktopW(name.as_ptr(), std::ptr::null(), std::ptr::null(), 0, DESKTOP_ACCESS, (&sa as *const SecurityAttributes).cast()) };
+    dacl::free_sd(sd);
     (desk != 0).then_some(desk)
 }
 
@@ -115,7 +131,7 @@ fn close_desktop(desk: isize) {
     unsafe { CloseDesktop(desk) };
 }
 
-pub const REAL_DESKTOP: DesktopFns = DesktopFns { create: create_desktop, set: set_desktop, close: close_desktop };
+pub const REAL_DESKTOP: DesktopFns = DesktopFns { dacl: dacl::own_sddl, create: create_desktop, set: set_desktop, close: close_desktop };
 
 static DESKTOPS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 /// The name of the last private desktop (the live probe looks at it).
@@ -310,13 +326,21 @@ pub fn recycle_files_within(files: &[PathBuf], wait: Duration) -> Report {
     recycle_with_flags(files, wait, OP_FLAGS)
 }
 
-/// Held by a worker that outlived its caller's wait (a dialog nobody answers) until it ends.
-pub static STUCK: AtomicBool = AtomicBool::new(false);
+/// The stuck slot: 0 free, else the token of the call that outlived its
+/// caller's wait (a dialog nobody answers). That call's thread releases it with
+/// its own token when it finally ends, so an old thread never frees a newer holder.
+pub static STUCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static TOKENS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// Free the slot only if `token` still holds it.
+pub fn release_slot(slot: &std::sync::atomic::AtomicU64, token: u64) -> bool {
+    token != 0 && slot.compare_exchange(token, 0, Ordering::SeqCst, Ordering::SeqCst).is_ok()
+}
 /// Worker threads started (tests check that a refused call starts none).
 pub static SPAWNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// The refusal while an earlier call is stuck.
-pub const STUCK_REFUSAL: &str = "an earlier Recycle Bin move is still waiting on Windows; nothing was moved";
+pub const STUCK_REFUSAL: &str = "the Recycle Bin is busy with an earlier move that is still waiting on Windows; nothing was moved, try again";
 
 /// [`recycle_files_within`] with another flag set (the live probe compares; production uses [`OP_FLAGS`]).
 fn recycle_with_flags(files: &[PathBuf], wait: Duration, flags: u32) -> Report {
@@ -328,7 +352,7 @@ fn recycle_with_slot(
     files: &[PathBuf],
     wait: Duration,
     flags: u32,
-    stuck: &'static AtomicBool,
+    stuck: &'static std::sync::atomic::AtomicU64,
     spawned_count: &'static std::sync::atomic::AtomicUsize,
     desktop: DesktopFns,
 ) -> Report {
@@ -336,7 +360,7 @@ fn recycle_with_slot(
     if files.is_empty() {
         return empty(Outcome::Recycled);
     }
-    if stuck.load(Ordering::SeqCst) {
+    if stuck.load(Ordering::SeqCst) != 0 {
         return empty(Outcome::Refused(STUCK_REFUSAL.into()));
     }
     // 0 running, 1 the worker finished in time, 2 the caller gave up: exactly one side wins.
@@ -346,7 +370,8 @@ fn recycle_with_slot(
     let state = Arc::new(std::sync::atomic::AtomicU8::new(RUNNING));
     let (tx, rx) = std::sync::mpsc::channel();
     let abandoned = Arc::new(AtomicBool::new(false));
-    let (list, flag, worker_state) = (files.to_vec(), abandoned.clone(), state.clone());
+    let my_token = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let (list, flag, worker_state, worker_token) = (files.to_vec(), abandoned.clone(), state.clone(), my_token.clone());
     spawned_count.fetch_add(1, Ordering::SeqCst);
     let name = format!("RecallRecycle{}-{}", std::process::id(), DESKTOPS.fetch_add(1, Ordering::SeqCst));
     *LAST_DESKTOP.lock().unwrap_or_else(|p| p.into_inner()) = name.clone();
@@ -354,12 +379,17 @@ fn recycle_with_slot(
     let spawned = std::thread::Builder::new().name("recall-recycle-keeper".into()).spawn(move || {
         let finish = |report: Report| {
             if worker_state.compare_exchange(RUNNING, DONE, Ordering::SeqCst, Ordering::SeqCst).is_err() {
-                // The caller gave up on this call and took the stuck slot for it: release it now.
-                stuck.store(false, Ordering::SeqCst);
+                // The caller gave up on this call and took the stuck slot for it: release it now,
+                // with this call's own token only.
+                release_slot(stuck, worker_token.load(Ordering::SeqCst));
             }
             let _ = tx.send(report);
         };
-        let Some(desk) = (desktop.create)(&name) else {
+        // The desktop gets an explicit access list (`win_fileop_dacl.rs`) or the call does not happen.
+        let Some(sddl) = (desktop.dacl)() else {
+            return finish(refusal("couldn't build the private desktop's access list; nothing was touched", list.len()));
+        };
+        let Some(desk) = (desktop.create)(&name, &sddl) else {
             return finish(refusal("no private desktop for the Recycle Bin move; nothing was touched", list.len()));
         };
         let worker = std::thread::Builder::new().name("recall-recycle".into()).spawn(move || {
@@ -391,13 +421,15 @@ fn recycle_with_slot(
     match rx.recv_timeout(wait) {
         Ok(report) => report,
         Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            // Take the slot first, so the worker can only release it after it was taken.
-            stuck.store(true, Ordering::SeqCst);
+            // Take the slot first (with this call's token), so the worker can only release it after it was taken.
+            let token = TOKENS.fetch_add(1, Ordering::SeqCst);
+            my_token.store(token, Ordering::SeqCst);
+            let _ = stuck.compare_exchange(0, token, Ordering::SeqCst, Ordering::SeqCst);
             // The sink refuses from now on, before the race below is even decided.
             abandoned.store(true, Ordering::SeqCst);
             if state.compare_exchange(RUNNING, GAVE_UP, Ordering::SeqCst, Ordering::SeqCst).is_err() {
                 // The worker finished at the deadline after all: keep its answer.
-                stuck.store(false, Ordering::SeqCst);
+                release_slot(stuck, token);
                 return rx.recv().unwrap_or_else(|_| empty(Outcome::Failed("Recycle Bin worker thread failed".into())));
             }
             // The sink refuses every later delete, so the thread cannot delete anything now.

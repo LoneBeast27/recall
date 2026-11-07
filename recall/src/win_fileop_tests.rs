@@ -31,45 +31,70 @@ fn outcomes_from_the_sinks_the_count_and_the_operation() {
     assert!(matches!(&unchecked, Outcome::Refused(why) if why.contains("1 of 2 items were not checked")), "{unchecked:?}");
 }
 
-static TEST_STUCK: AtomicBool = AtomicBool::new(true);
+use std::sync::atomic::AtomicU64;
+
+/// A path that does not exist: even a call that went ahead could delete nothing.
+fn ghost() -> PathBuf {
+    std::env::temp_dir().join("recall-fileop-never-exists").join("ghost.txt")
+}
+
+static TEST_STUCK: AtomicU64 = AtomicU64::new(99);
 static TEST_SPAWNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 #[test]
-fn a_call_while_an_earlier_one_is_stuck_is_refused_and_starts_no_thread() {
-    // A path that does not exist: nothing could be deleted even if a worker ran.
-    let ghost = std::env::temp_dir().join("recall-fileop-never-exists").join("ghost.txt");
-    let report = recycle_with_slot(std::slice::from_ref(&ghost), WAIT, OP_FLAGS, &TEST_STUCK, &TEST_SPAWNED, REAL_DESKTOP);
+fn a_call_while_the_slot_is_held_gets_the_busy_notice_and_starts_no_thread() {
+    let report = recycle_with_slot(&[ghost()], WAIT, OP_FLAGS, &TEST_STUCK, &TEST_SPAWNED, REAL_DESKTOP);
     assert_eq!(report.outcome, Outcome::Refused(STUCK_REFUSAL.into()));
+    assert!(STUCK_REFUSAL.contains("busy") && STUCK_REFUSAL.contains("try again"), "{STUCK_REFUSAL}");
     assert_eq!(TEST_SPAWNED.load(Ordering::SeqCst), 0, "no new STA thread");
 }
 
-static RELEASE_STUCK: AtomicBool = AtomicBool::new(false);
+static RELEASE_STUCK: AtomicU64 = AtomicU64::new(0);
 static RELEASE_SPAWNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 #[test]
-fn the_stuck_slot_is_taken_on_a_timeout_and_released_when_that_thread_ends() {
-    let ghost = std::env::temp_dir().join("recall-fileop-never-exists").join("ghost.txt");
+fn a_stuck_call_that_returns_frees_the_slot_and_the_next_call_proceeds() {
     // A zero wait abandons the call at once; the worker then fails on the missing path and ends.
-    let report = recycle_with_slot(std::slice::from_ref(&ghost), Duration::ZERO, OP_FLAGS, &RELEASE_STUCK, &RELEASE_SPAWNED, REAL_DESKTOP);
+    let report = recycle_with_slot(&[ghost()], Duration::ZERO, OP_FLAGS, &RELEASE_STUCK, &RELEASE_SPAWNED, REAL_DESKTOP);
     assert!(matches!(&report.outcome, Outcome::Refused(why) if why.contains("did not finish")), "{report:?}");
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
-    while RELEASE_STUCK.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+    while RELEASE_STUCK.load(Ordering::SeqCst) != 0 && std::time::Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(!RELEASE_STUCK.load(Ordering::SeqCst), "released when the stuck thread ended");
-    assert_eq!(RELEASE_SPAWNED.load(Ordering::SeqCst), 1);
+    assert_eq!(RELEASE_STUCK.load(Ordering::SeqCst), 0, "released when the stuck thread ended");
+    // No app restart: the next call goes ahead (and fails only on the missing path).
+    let next = recycle_with_slot(&[ghost()], WAIT, OP_FLAGS, &RELEASE_STUCK, &RELEASE_SPAWNED, REAL_DESKTOP);
+    assert!(matches!(&next.outcome, Outcome::Failed(why) if why.contains("cannot find")), "{next:?}");
+    assert_eq!(RELEASE_SPAWNED.load(Ordering::SeqCst), 2);
 }
 
-// ---- The private desktop: no desktop, no call ----
+#[test]
+fn an_old_token_cannot_release_a_newer_holder() {
+    let slot = AtomicU64::new(7);
+    assert!(!release_slot(&slot, 3), "an older call's thread");
+    assert_eq!(slot.load(Ordering::SeqCst), 7);
+    assert!(!release_slot(&slot, 0), "no token, no release");
+    assert!(release_slot(&slot, 7));
+    assert_eq!(slot.load(Ordering::SeqCst), 0);
+}
 
-static DESK_STUCK: AtomicBool = AtomicBool::new(false);
+// ---- The private desktop: no access list or no desktop, no call ----
+
+static DESK_STUCK: AtomicU64 = AtomicU64::new(0);
 static DESK_SPAWNED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static CLOSED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
-fn no_desktop(_: &str) -> Option<isize> {
+fn no_dacl() -> Option<String> {
     None
 }
-fn fake_desktop(_: &str) -> Option<isize> {
+fn some_dacl() -> Option<String> {
+    Some("D:P(A;;0x87;;;S-1-5-21-1-2-3-1001)".into())
+}
+fn no_desktop(_: &str, _: &str) -> Option<isize> {
+    None
+}
+fn fake_desktop(_: &str, sddl: &str) -> Option<isize> {
+    assert!(sddl.starts_with("D:P(A;;"), "always an explicit access list: {sddl}");
     Some(42)
 }
 fn cannot_set(_: isize) -> bool {
@@ -80,19 +105,40 @@ fn count_close(desk: isize) {
     CLOSED.fetch_add(1, Ordering::SeqCst);
 }
 
+static MADE_WITHOUT_DACL: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+fn count_made(_: &str, _: &str) -> Option<isize> {
+    MADE_WITHOUT_DACL.fetch_add(1, Ordering::SeqCst);
+    None
+}
+
+#[test]
+fn without_an_access_list_the_call_is_refused_and_nothing_is_made() {
+    let none = DesktopFns { dacl: no_dacl, create: count_made, set: cannot_set, close: count_close };
+    let report = recycle_with_slot(&[ghost()], WAIT, OP_FLAGS, &DESK_STUCK, &DESK_SPAWNED, none);
+    assert!(matches!(&report.outcome, Outcome::Refused(why) if why.contains("access list")), "{report:?}");
+    assert_eq!(report.flags_seen, Vec::<u32>::new(), "no shell call");
+    assert_eq!(MADE_WITHOUT_DACL.load(Ordering::SeqCst), 0, "no desktop made");
+}
+
 #[test]
 fn without_a_private_desktop_the_call_is_refused_and_nothing_is_touched() {
-    // A path that does not exist: even a call that went ahead could delete nothing.
-    let ghost = std::env::temp_dir().join("recall-fileop-never-exists").join("ghost.txt");
-    let none = DesktopFns { create: no_desktop, set: cannot_set, close: count_close };
-    let report = recycle_with_slot(std::slice::from_ref(&ghost), WAIT, OP_FLAGS, &DESK_STUCK, &DESK_SPAWNED, none);
+    let none = DesktopFns { dacl: some_dacl, create: no_desktop, set: cannot_set, close: count_close };
+    let report = recycle_with_slot(&[ghost()], WAIT, OP_FLAGS, &DESK_STUCK, &DESK_SPAWNED, none);
     assert!(matches!(&report.outcome, Outcome::Refused(why) if why.contains("no private desktop")), "{report:?}");
     assert_eq!(report.flags_seen, Vec::<u32>::new(), "no shell call");
 
-    let unset = DesktopFns { create: fake_desktop, set: cannot_set, close: count_close };
-    let report = recycle_with_slot(std::slice::from_ref(&ghost), WAIT, OP_FLAGS, &DESK_STUCK, &DESK_SPAWNED, unset);
+    let unset = DesktopFns { dacl: some_dacl, create: fake_desktop, set: cannot_set, close: count_close };
+    let closed = CLOSED.load(Ordering::SeqCst);
+    let report = recycle_with_slot(&[ghost()], WAIT, OP_FLAGS, &DESK_STUCK, &DESK_SPAWNED, unset);
     assert!(matches!(&report.outcome, Outcome::Refused(why) if why.contains("private desktop")), "{report:?}");
-    assert_eq!(CLOSED.load(Ordering::SeqCst), 1, "the desktop it made is closed after the worker ended");
+    assert_eq!(CLOSED.load(Ordering::SeqCst), closed + 1, "the desktop it made is closed after the worker ended");
+}
+
+#[test]
+fn the_access_list_is_one_ace_for_this_user_with_the_desktop_rights() {
+    let sid = dacl::token_user_sid().expect("token user");
+    assert!(sid.starts_with("S-1-5-"), "{sid}");
+    assert_eq!(dacl::own_sddl(), Some(format!("D:P(A;;0x87;;;{sid})")));
 }
 
 #[path = "win_fileop_probe.rs"]
