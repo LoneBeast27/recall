@@ -80,16 +80,32 @@ pub fn failure_plan(stream: Stream) -> (bool, &'static [Quiet]) {
     }
 }
 
+/// The one line a failed `stream` leaves on the protocol (the controller logs it), so a
+/// quieted stderr is not silent: stderr's own failure cannot be written to stderr.
+pub fn lost_stream_notice(stream: Stream) -> Option<&'static str> {
+    match stream {
+        Stream::Err => Some(STDERR_LOST),
+        Stream::Out => None,
+    }
+}
+
+/// [`lost_stream_notice`] for stderr.
+pub const STDERR_LOST: &str = "engine log (stderr) lost: its reader is gone; later engine log lines are dropped";
+
 /// A write to `stream` failed: its reader is gone. Later lines on it go to NUL; a
 /// broken stdout also marks the engine orphaned (the stdin thread sees the end of the
-/// pipe and quits the engine after its saves).
+/// pipe and quits the engine after its saves). A broken stderr says so once on stdout.
 pub fn stream_failed(stream: Stream) {
     let (orphan, quiet) = failure_plan(stream);
     if orphan {
         ORPHANED.store(true, Relaxed);
     }
+    let mut first = false;
     for which in quiet {
-        quiet_std_stream(*which);
+        first |= quiet_std_stream(*which);
+    }
+    if let Some(message) = lost_stream_notice(stream).filter(|_| first) {
+        protocol::emit(&protocol::Outbound::EncoderLog { message: message.into() });
     }
 }
 
@@ -99,8 +115,8 @@ fn quiet_std_streams() {
     quiet_std_stream(Quiet::Stderr);
 }
 
-/// Point one standard stream at NUL (once).
-fn quiet_std_stream(which: Quiet) {
+/// Point one standard stream at NUL (once): true the first time.
+fn quiet_std_stream(which: Quiet) -> bool {
     use std::os::windows::io::IntoRawHandle;
     static QUIETED: [AtomicBool; 2] = [AtomicBool::new(false), AtomicBool::new(false)];
     #[link(name = "kernel32")]
@@ -112,12 +128,13 @@ fn quiet_std_stream(which: Quiet) {
         Quiet::Stderr => (1, -12i32 as u32), // STD_ERROR_HANDLE
     };
     if QUIETED[slot].swap(true, Relaxed) {
-        return;
+        return false;
     }
     if let Ok(nul) = std::fs::OpenOptions::new().write(true).open("NUL") {
         // SAFETY: the handle is a fresh, owned NUL handle, handed over for good.
         unsafe { SetStdHandle(handle, nul.into_raw_handle()) };
     }
+    true
 }
 
 /// Start the stdin thread. `save` triggers a replay-buffer save (None when encode is off).
@@ -220,5 +237,14 @@ mod tests {
         // stdout must keep running (no orphan, stdout untouched).
         assert_eq!(failure_plan(Stream::Err), (false, &[Quiet::Stderr][..]));
         assert_eq!(failure_plan(Stream::Out), (true, &[Quiet::Stdout, Quiet::Stderr][..]));
+    }
+
+    #[test]
+    fn a_quieted_stderr_leaves_one_line_on_the_protocol() {
+        // R7-overlay-5: the controller's log shows that the engine's log went quiet.
+        assert_eq!(lost_stream_notice(Stream::Err), Some(STDERR_LOST));
+        assert_eq!(lost_stream_notice(Stream::Out), None, "a broken stdout has no protocol to say it on");
+        let line = serde_json::to_value(protocol::Outbound::EncoderLog { message: STDERR_LOST.into() }).unwrap();
+        assert_eq!(line["type"], "encoder_log", "the controller logs encoder_log lines");
     }
 }

@@ -42,6 +42,7 @@ mod control;
 mod display;
 mod edid;
 mod engine_policy;
+mod engine_slot;
 mod frame_timing;
 mod guard;
 mod hdr;

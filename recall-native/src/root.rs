@@ -145,6 +145,8 @@ pub struct Root {
     pub storage_asking: Option<(u32, Instant)>,
     /// That dry run would move clips now: the confirm bar under the limit row.
     pub storage_confirm: Option<crate::views::storage_limit::Preview>,
+    /// Settings → "Stop now (lose the clip)" was clicked: its confirm shows.
+    pub stop_confirm: bool,
 }
 
 #[path = "root_events.rs"]

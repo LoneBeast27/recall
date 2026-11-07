@@ -298,6 +298,7 @@ fn commands_serialize_to_controller_json() {
     let cases: Vec<(DaemonCommand, Value)> = vec![
         (DaemonCommand::Status, json!({"cmd":"status"})),
         (DaemonCommand::Quit, json!({"cmd":"quit"})),
+        (DaemonCommand::QuitNow, json!({"cmd":"quit","force":true})),
         (DaemonCommand::SaveClip { seconds: None }, json!({"cmd":"save_clip"})),
         (DaemonCommand::SaveClip { seconds: Some(30) }, json!({"cmd":"save_clip","seconds":30})),
         (DaemonCommand::SetMicMute(true), json!({"cmd":"set_mic_mute","muted":true})),
@@ -404,4 +405,14 @@ fn a_message_type_the_app_does_not_know_is_ignored() {
     let mut state = connected();
     apply(&mut state, json!({"mod":"session","event":{"type":"disk_low_v2","drive":"C:","free_bytes":3,"need_bytes":5}}));
     assert_eq!(state.events, Vec::<DaemonEvent>::new());
+}
+
+#[test]
+fn the_status_says_when_a_quit_is_finishing_a_clip() {
+    // R7-overlay-1: the settings row shows "Finishing a clip…" from this.
+    let mut state = State::default();
+    apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"recording","finishing_clip":true}}));
+    assert!(state.snapshot.session.as_ref().unwrap().finishing_clip);
+    apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"recording","finishing_clip":false}}));
+    assert!(!state.snapshot.session.as_ref().unwrap().finishing_clip);
 }

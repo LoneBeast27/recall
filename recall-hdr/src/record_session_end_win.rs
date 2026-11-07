@@ -127,9 +127,11 @@ impl Controller {
                     self.quit.get_or_insert(QuitReason::SessionEnd);
                 }
                 SessionAction::Resume if self.quit == Some(QuitReason::SessionEnd) => {
-                    log!("record: the session end was cancelled; Recall keeps running");
-                    self.quit = None;
-                    self.quit_wait.reset();
+                    self.quit = crate::record_quit_wait::resume_after_session_end(&mut self.quit_wait);
+                    match self.quit {
+                        None => log!("record: the session end was cancelled; Recall keeps running"),
+                        Some(r) => log!("record: the session end was cancelled; the {} asked meanwhile goes on", r.label()),
+                    }
                 }
                 SessionAction::Resume | SessionAction::Nothing => {}
             }

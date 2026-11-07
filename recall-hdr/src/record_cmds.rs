@@ -4,7 +4,7 @@
 //! | cmd | args | effect / reply |
 //! |---|---|---|
 //! | `status` | | session status + cached engine hello/status (+ legacy `hdr` status) to the caller |
-//! | `quit` | | stop recording and exit (the Recall app stays open) |
+//! | `quit` | `force?` | stop recording and exit (the Recall app stays open). While a save is written the quit waits for it (`record_quit_wait`); a repeated plain `quit` joins that wait, `"force":true` stops now and loses the save. Reply: `session` `quitting{finishing_clip,finishing_progress}` |
 //! | `save_clip` | `seconds?` | engine save (default = `recording.buffer_secs`) + `session` `saving{seconds}` broadcast (the island's saving ring); no engine / paused -> `engine` `save_failed` |
 //! | `bookmark` | | engine bookmark (marks land in the next saves' `.recall-marks.json`) |
 //! | `screenshot` | | engine PNG -> `engine` `screenshot{path}`; refused -> `screenshot_failed` |
@@ -92,7 +92,7 @@ impl Controller {
             "status" => self.reply_status(inbound.client),
             "quit" => {
                 log!("record: control quit");
-                self.ask_quit(crate::record_quit::QuitReason::ControlPipe);
+                self.ask_quit(crate::record_quit::QuitReason::ControlPipe, crate::record_quit_wait::quit_force(&val));
                 // The installer reads this to wait only while a clip is being finished.
                 let reply = crate::record_quit_wait::quitting_event(self.finishing_now(Instant::now()));
                 self.hub.event_to(inbound.client, "session", &reply);
@@ -411,6 +411,7 @@ impl Controller {
             hotkey_problems: &self.hotkey_problems,
         });
         crate::record_quit_wait::merge_fields(&mut status, finishing);
+        status["other_recorder"] = json!(self.supervisor.slot_held() != crate::engine_slot::SlotHeld::Free);
         status
     }
 
@@ -428,7 +429,8 @@ impl Controller {
         if key != self.last_session {
             let state = status["state"].as_str().unwrap_or("waiting").to_string();
             self.tray.set_paused(self.paused);
-            self.tray.set_status(&tray_line(&state, &self.wanted()));
+            let slot = crate::engine_slot::slot_tray_line(&state, self.supervisor.slot_held());
+            self.tray.set_status(&slot.map_or_else(|| tray_line(&state, &self.wanted()), str::to_owned));
             self.hub.event("session", &status.to_string());
             self.last_session = key;
             self.announce(&state);
@@ -445,9 +447,10 @@ impl Controller {
     /// follows the state; with notices off nothing is sent or heard.
     fn announce(&mut self, state: &str) {
         let gave_up = self.supervisor.health() == EngineHealth::GivenUp;
+        let slot = crate::engine_slot::slot_situation(state, self.supervisor.slot_held());
         let next = match (state, self.planner.drain()) {
             ("draining", Some((_, _, len))) => Some(Situation::Draining { secs: len.as_secs_f32().round() as u64 }),
-            _ => Situation::of(state, &self.wanted(), gave_up),
+            _ => slot.or_else(|| Situation::of(state, &self.wanted(), gave_up)),
         };
         let Some(notice) = self.notices.observe(next, Instant::now()) else { return };
         if !self.cfg.overlay.enabled {
