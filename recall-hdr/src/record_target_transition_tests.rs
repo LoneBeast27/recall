@@ -224,6 +224,12 @@ fn a_tiny_windowed_steam_window_is_not_a_candidate() {
     assert!(!too_small(Traits::WINDOWED, MIN_CLIENT));
     assert!(!too_small(Traits::FULLSCREEN, (320, 200)), "fullscreen is never sized out");
     assert!(!too_small(Traits::ADOPTED, (320, 200)), "an adopted window is the game");
+    // R2-4: a known game's windowed box needs the floor, an override does not.
+    let known = Traits { vouched: true, known_only: true, ..Traits::WINDOWED };
+    assert!(too_small(known, (400, 150)), "the game's error box");
+    assert!(!too_small(known, (854, 480)), "Minecraft Java's default window");
+    assert!(!too_small(Traits { fullscreen: true, ..known }, (400, 150)));
+    assert!(!too_small(Traits { vouched: true, ..Traits::WINDOWED }, (400, 150)), "an override is the user's choice");
 }
 
 // --- T11: an unidentifiable foreground ---------------------------------------

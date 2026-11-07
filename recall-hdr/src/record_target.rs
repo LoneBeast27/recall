@@ -150,6 +150,18 @@ const TARGET_DENY_STEMS: &[&str] = &[
     "werfault",
     "werfaultsecure",
     "crashreporter",
+    // Store apps (G6 resolves their frame to the hosted exe, no longer the
+    // denied ApplicationFrameHost; R2-5): media, photos, the Store, settings.
+    "video.ui",
+    "music.ui",
+    "microsoft.media.player",
+    "microsoft.photos",
+    "photos",
+    "winstore.app",
+    "systemsettings",
+    "netflix",
+    "wwahost",
+    "hxoutlook",
 ];
 
 /// A window the engine can capture. `exe` is the image file name.
