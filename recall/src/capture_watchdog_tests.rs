@@ -251,9 +251,9 @@ fn a_request_inside_the_backoff_is_kept_for_when_it_runs_out() {
 }
 
 /// HDR turning on under a Bgra8 capture (a <= 4 GiB card) replaces the capture and tells
-/// `replacing` why, which sends the controller its "HDR turned on" notice.
+/// `replacing` why once (`buffer_notice` then waits for the encoder's ring decision).
 #[test]
-fn an_hdr_restart_of_a_held_capture_is_announced_once() {
+fn an_hdr_restart_of_a_held_capture_is_passed_to_replacing_once() {
     let t0 = Instant::now();
     let mut f = Fake { capture: true, start_ok: true, screen: SHOWN, ..Default::default() };
     f.backoff.started(t0);
@@ -262,5 +262,5 @@ fn an_hdr_restart_of_a_held_capture_is_announced_once() {
     assert_eq!((f.starts, f.stops), (1, 1), "replaced once");
     assert_eq!(f.replaced, vec![crate::capture::format::HDR_TURNED_ON]);
     restart_if_asked(&mut f, t0 + secs(61));
-    assert_eq!(f.replaced.len(), 1, "one notice per restart");
+    assert_eq!(f.replaced.len(), 1, "once per restart");
 }

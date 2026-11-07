@@ -116,10 +116,12 @@ impl Live {
             self.enc = None;
             self.replay = None;
             stats.clear_buffer();
+            crate::buffer_notice::send(cfg.json, crate::buffer_notice::encoder_input(true));
         }
         if self.enc.as_ref().is_some_and(|e| e.gpu_pool != gpu_pool_of(&frame)) {
             report(cfg.json, "capture input changed (GPU / CPU frames); reopening NVENC, the replay buffer is kept");
             self.enc = None;
+            crate::buffer_notice::send(cfg.json, crate::buffer_notice::encoder_input(false));
         }
         let input = Input { width: frame.width, height: frame.height, pool: gpu_pool_of(&frame) };
         if self.enc.is_none() && self.reopen.may_open(input, Instant::now()) {
