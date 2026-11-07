@@ -51,11 +51,14 @@ impl Controller {
 
     /// A fresh engine instance starts unmuted in `auto` mode: re-apply ours.
     pub(crate) fn reapply_engine_intents(&mut self) {
-        if self.mic_muted {
-            self.supervisor.send_engine_line(r#"{"cmd":"set_mic_mute","muted":true}"#);
+        // Not a user action: a line the new engine does not take is logged.
+        if self.mic_muted && !crate::record_dispatch::automatic_effects(self.supervisor.send_engine_line(r#"{"cmd":"set_mic_mute","muted":true}"#)).is_empty() {
+            log!("record: the new engine did not take the mic mute ({})", crate::record_dispatch::NOT_RESPONDING);
         }
         if let Some(mode) = self.mode_select.as_deref().filter(|m| *m != "auto") {
-            self.supervisor.send_engine_line(&serde_json::json!({"cmd": "set_mode", "value": mode}).to_string());
+            if !crate::record_dispatch::automatic_effects(self.supervisor.send_engine_line(&serde_json::json!({"cmd": "set_mode", "value": mode}).to_string())).is_empty() {
+                log!("record: the new engine did not take the capture mode ({})", crate::record_dispatch::NOT_RESPONDING);
+            }
         }
     }
 

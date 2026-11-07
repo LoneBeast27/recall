@@ -52,7 +52,14 @@ impl App {
             Some("set_mode") => {
                 if let Some(v) = val.get("value").and_then(|v| v.as_str()) {
                     if matches!(v, "auto" | "sdr" | "hdr") {
-                        supervisor.send_engine_line(&format!(r#"{{"cmd":"set_mode","value":"{v}"}}"#));
+                        let queued = supervisor.send_engine_line(&format!(r#"{{"cmd":"set_mode","value":"{v}"}}"#));
+                        // The legacy app has no notice path or client to reply to: logged + beep.
+                        if crate::record_dispatch::pipe_setting_effects(queued).contains(&crate::record_dispatch::Effect::NotResponding)
+                            && matches!(supervisor.health(), EngineHealth::Running { .. })
+                        {
+                            log!("app: control set_mode not sent: {}", crate::record_dispatch::NOT_RESPONDING);
+                            crate::supervisor::beep_failure();
+                        }
                     }
                 }
             }
