@@ -143,7 +143,7 @@ impl Controller {
                 Effect::MarkPending => self.activity.command_sent(cmd, Instant::now()),
                 Effect::Announce => self.publish_status(),
                 Effect::NotResponding => self.command_not_sent(cmd, client),
-                Effect::Cue | Effect::LogOnly => {}
+                Effect::Cue | Effect::LogOnly | Effect::ReplyError | Effect::Proceed => {}
             }
         }
     }
@@ -276,9 +276,24 @@ impl Controller {
             }
             if let Some(wait) = PendingPause::needed(&self.activity, Instant::now()) {
                 log!("record: pause -- stopping the long recording first (up to {} s)", PAUSE_STOP_WAIT.as_secs());
-                self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#);
-                self.pending_pause = Some(wait);
-                return;
+                let queued = self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#);
+                for effect in crate::record_dispatch::pause_stop_effects(queued) {
+                    match effect {
+                        Effect::MarkPending => {
+                            self.pending_pause = Some(wait);
+                            return;
+                        }
+                        Effect::NotResponding => {
+                            log!("record: pause -- record_stop not sent ({}); pausing now", crate::record_dispatch::NOT_RESPONDING);
+                            if self.cfg.overlay.enabled {
+                                self.hub.event("session", &shortcut_notice_json("Pausing now", crate::record_dispatch::NOT_RESPONDING, true, false));
+                            }
+                            crate::supervisor::beep_failure();
+                        }
+                        Effect::Proceed => break, // the pause applies below, at once
+                        _ => {}
+                    }
+                }
             }
         }
         self.apply_pause(paused);
@@ -368,7 +383,10 @@ impl Controller {
                 if self.activity.auto_stop(now, game_closed) {
                     let why = if game_closed { "the game closed" } else { "a new game is wanted" };
                     log!("record: {why} -- stopping the long recording before the retarget (up to {} s)", PAUSE_STOP_WAIT.as_secs());
-                    self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#);
+                    // Not a user action: logged; the auto-stop deadline bounds the wait.
+                    if !crate::record_dispatch::automatic_effects(self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#)).is_empty() {
+                        log!("record: record_stop not sent ({}); the retarget goes ahead after {} s", crate::record_dispatch::NOT_RESPONDING, PAUSE_STOP_WAIT.as_secs());
+                    }
                 }
                 self.retarget_held = true;
             }

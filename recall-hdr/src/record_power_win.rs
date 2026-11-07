@@ -117,7 +117,10 @@ impl Controller {
         match action {
             PowerAction::StopRecording => {
                 log!("record: sleeping -- stopping the long recording");
-                self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#);
+                // Not a user action: logged (the engine restarts on resume either way).
+                if !crate::record_dispatch::automatic_effects(self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#)).is_empty() {
+                    log!("record: sleeping -- record_stop not sent ({})", crate::record_dispatch::NOT_RESPONDING);
+                }
             }
             PowerAction::RestartEngine => {
                 log!("record: resumed from sleep -- restarting the engine (fresh replay buffer)");

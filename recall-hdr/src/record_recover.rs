@@ -341,7 +341,10 @@ impl crate::record_app::Controller {
                 // The quit waits (up to 20 s) for the recording thread to finish the part.
                 log!("record: ending the long recording early; the restart follows once it reports");
                 for line in lines {
-                    self.supervisor.send_engine_line(&line);
+                    // Not a user action: logged; the 20 s wait bounds it (then the restart).
+                    if !crate::record_dispatch::automatic_effects(self.supervisor.send_engine_line(&line)).is_empty() {
+                        log!("record: record_fail not sent ({}); the restart follows within {} s", crate::record_dispatch::NOT_RESPONDING, END_EARLY_WAIT.as_secs());
+                    }
                 }
                 self.ending_early = Some(EndingEarly::new(now, self.supervisor.hello_count()));
             }
