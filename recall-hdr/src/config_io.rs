@@ -1,8 +1,11 @@
 //! config.toml load/save IO (deep-audit S3, S6, S11).
 //!
-//! - A file that parses is remembered as `config.toml.last-good`.
-//! - A wrongly typed value costs only its own key: the rest is salvaged key by
-//!   key over the defaults, and the original is copied to a dated `.bad`.
+//! - A file that parses, and every save, is remembered as `config.toml.last-good`.
+//! - A file that exists but can't be read (a backup tool holding it) is retried
+//!   briefly; then the caller gets an error and must not save over it.
+//! - A wrongly typed value costs only its own key (or its own element of an
+//!   array: one bad audio source drops only itself): the rest is salvaged over
+//!   the defaults, and the original is copied to a dated `.bad`.
 //! - A file that is not TOML (NUL-filled after a power cut, garbage) is moved to
 //!   a dated `.bad`; the last good load is used, else the defaults. An empty file
 //!   (a power cut before the data reached the disk) also gets the last good load.
@@ -10,7 +13,7 @@
 //!   section) from the file it replaces, and is written with `sync_all`.
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use toml::{Table, Value};
 
@@ -23,6 +26,28 @@ use crate::log;
 const RETIRED: &[&str] = &["hotkeys"];
 /// Schema keys absent from the serialized form when unset.
 const OPTIONAL: &[(&str, &str)] = &[("display", "target_device_path")];
+
+/// Reads of a file that exists but can't be read, and the pause between them.
+const READ_TRIES: u32 = 3;
+const READ_PAUSE: Duration = Duration::from_millis(200);
+
+/// The bytes at `path`, None when it is missing. A failed read (locked, denied) is
+/// retried [`READ_TRIES`] times, `pause` apart.
+pub(super) fn read_retrying(path: &Path, pause: &dyn Fn(Duration)) -> std::io::Result<Option<Vec<u8>>> {
+    let mut tries = 1;
+    loop {
+        match fs::read(path) {
+            Ok(bytes) => return Ok(Some(bytes)),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if tries >= READ_TRIES => return Err(e),
+            Err(e) => {
+                log!("config: read {} failed ({e}); trying again", path.display());
+                tries += 1;
+                pause(READ_PAUSE);
+            }
+        }
+    }
+}
 
 /// `config.toml.last-good`.
 pub(super) fn last_good_path(path: &Path) -> PathBuf {
@@ -71,7 +96,8 @@ fn last_good(path: &Path) -> Option<(Config, String)> {
     Some((cfg, text))
 }
 
-fn remember_good(path: &Path, bytes: &[u8]) {
+/// Keeps `bytes` (a config that parses) as `config.toml.last-good`.
+pub(super) fn remember_good(path: &Path, bytes: &[u8]) {
     let good = last_good_path(path);
     if fs::read(&good).ok().as_deref() != Some(bytes) {
         if let Err(e) = durable::write_durable(&good, bytes) {
@@ -87,38 +113,78 @@ fn defaults_table() -> Table {
     }
 }
 
-/// The defaults with every key of `disk` that parses on its own laid over them.
+/// The defaults with every part of `disk` that parses on its own laid over them.
 fn salvage(disk: &Table) -> Config {
     let mut merged = defaults_table();
     for (key, value) in disk {
-        match (value, merged.get(key)) {
-            (Value::Table(inner), Some(Value::Table(_))) => {
-                for (leaf, v) in inner {
-                    try_set(&mut merged, Some(key), leaf, v);
-                }
-            }
-            _ => try_set(&mut merged, None, key, value),
-        }
+        lay(&mut merged, &[key.as_str()], value);
     }
     Value::Table(merged).try_into().unwrap_or_default()
 }
 
-fn try_set(merged: &mut Table, section: Option<&str>, key: &str, value: &Value) {
-    let mut trial = merged.clone();
-    let slot = match section {
-        Some(s) => match trial.get_mut(s) {
-            Some(Value::Table(t)) => t,
-            _ => return,
-        },
-        None => &mut trial,
-    };
-    slot.insert(key.to_string(), value.clone());
-    if Value::Table(trial.clone()).try_into::<Config>().is_ok() {
-        *merged = trial;
-    } else {
-        let name = section.map_or(key.to_string(), |s| format!("{s}.{key}"));
-        log!("config: {name} has a bad value; reset to the default");
+/// Lays `value` at `at` when the config still parses with it; else, for a table, each
+/// of its keys, and for an array, each element (a bad one drops only itself).
+fn lay(merged: &mut Table, at: &[&str], value: &Value) {
+    if try_set(merged, at, value.clone()) {
+        return;
     }
+    let name = at.join(".");
+    match value {
+        Value::Table(inner) if table_at(merged, at) => {
+            for (leaf, v) in inner {
+                let mut next = at.to_vec();
+                next.push(leaf);
+                lay(merged, &next, v);
+            }
+        }
+        Value::Array(items) => {
+            let mut kept: Vec<Value> = Vec::new();
+            for (i, item) in items.iter().enumerate() {
+                let mut trial = kept.clone();
+                trial.push(item.clone());
+                if try_set(merged, at, Value::Array(trial)) {
+                    kept.push(item.clone());
+                } else {
+                    log!("config: {name}[{i}] has a bad value; dropped");
+                }
+            }
+            if kept.is_empty() {
+                log!("config: {name} has no readable entry; reset to the default");
+            }
+        }
+        _ => log!("config: {name} has a bad value; reset to the default"),
+    }
+}
+
+/// Whether `merged` holds a table at `at`.
+fn table_at(merged: &Table, at: &[&str]) -> bool {
+    let mut cur = merged;
+    for key in at {
+        match cur.get(*key) {
+            Some(Value::Table(t)) => cur = t,
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Sets `merged[at] = value` when the config still parses with it.
+fn try_set(merged: &mut Table, at: &[&str], value: Value) -> bool {
+    let Some((last, parents)) = at.split_last() else { return false };
+    let mut trial = merged.clone();
+    let mut slot = &mut trial;
+    for key in parents {
+        slot = match slot.get_mut(*key) {
+            Some(Value::Table(t)) => t,
+            _ => return false,
+        };
+    }
+    slot.insert((*last).to_string(), value);
+    if Value::Table(trial.clone()).try_into::<Config>().is_err() {
+        return false;
+    }
+    *merged = trial;
+    true
 }
 
 /// Keys of `disk` (the file being replaced) this build's schema doesn't have.

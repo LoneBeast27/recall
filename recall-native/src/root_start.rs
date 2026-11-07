@@ -45,6 +45,9 @@ impl Root {
         if let Some(message) = cache_overlap {
             root.show_toast_for(ToastKind::Bad, "Cache and clip folders overlap", Some(message), 30);
         }
+        if let Some(detail) = root.folders.damaged.take() {
+            root.show_toast_for(ToastKind::Bad, "Your clip folder list was damaged", Some(detail), 30);
+        }
         if let Some(path) = std::env::var_os("RECALL_NATIVE_CLIP") {
             root.open_clip(path.to_string_lossy().into_owned());
         }

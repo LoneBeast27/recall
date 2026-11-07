@@ -118,6 +118,7 @@ fn with_table<T>(work: impl FnOnce(&mut Table) -> T) -> T {
 /// parsed, copied when only some entries did). Unreadable -> empty, and saving is refused.
 pub(crate) fn load_table(path: &Path) -> Table {
     use crate::services::durable::{quarantine, Keep};
+    crate::services::durable::sweep_temps(path, std::time::SystemTime::now());
     let bytes = match std::fs::read(path) {
         Ok(bytes) => bytes,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Table::default(),
@@ -240,24 +241,39 @@ pub fn skipped_under(folder: &str) -> usize {
     with_table(|table| table.files.values().filter(|l| l.kind == Kind::Edited && !l.hidden && is_inside(&l.path, folder)).count())
 }
 
-/// Durable: a temp file, flushed, then renamed over the file.
+/// Durable: a temp file, flushed, then renamed over the file. The table is serialized
+/// under its lock and written after it is released, so `status` callers never wait on
+/// the drive; the ticket keeps an older snapshot from landing over a newer one.
 pub fn save() -> Result<(), String> {
     let path = table_path().ok_or("APPDATA is not set")?;
-    with_table(|table| {
+    let (ticket, bytes) = with_table(|table| {
         table.version = 1;
-        save_table(&path, table)
-    })
+        snapshot(table).map(|bytes| (WRITER.ticket(), bytes))
+    })?;
+    write_snapshot(&path, ticket, &bytes)
 }
 
-/// Writes `table` to `path` (temp file, flushed, then renamed); refused after a failed read.
-pub(crate) fn save_table(path: &Path, table: &Table) -> Result<(), String> {
+static WRITER: std::sync::LazyLock<crate::services::ordered_write::OrderedWriter> = std::sync::LazyLock::new(Default::default);
+
+/// `table` as JSON; refused after a failed read.
+fn snapshot(table: &Table) -> Result<Vec<u8>, String> {
     if let Some(reason) = &table.write_block {
         return Err(reason.clone());
     }
-    let bytes = serde_json::to_vec(table).map_err(|e| e.to_string())?;
+    serde_json::to_vec(table).map_err(|e| e.to_string())
+}
+
+fn write_snapshot(path: &Path, ticket: u64, bytes: &[u8]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
+    WRITER.write(ticket, path, bytes).map_err(|e| format!("save imports: {e}"))
+}
+
+/// Writes `table` to `path` (temp file, flushed, then renamed); refused after a failed read.
+#[cfg(test)]
+pub(crate) fn save_table(path: &Path, table: &Table) -> Result<(), String> {
+    let bytes = snapshot(table)?;
     crate::services::durable::write_durable(path, &bytes).map_err(|e| format!("save imports: {e}"))
 }
 

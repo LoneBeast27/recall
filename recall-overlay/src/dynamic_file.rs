@@ -15,6 +15,7 @@ use crate::durable::{self, Keep};
 
 /// What loading found: the cache, and whether saving over the file is allowed.
 pub(super) fn read(path: &Path, now: SystemTime) -> (CacheFile, bool) {
+    durable::sweep_temps(path, now);
     let text = match std::fs::read_to_string(path) {
         Ok(text) => text,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return (CacheFile::default(), true),

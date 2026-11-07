@@ -5,6 +5,8 @@ pub mod audio_devices;
 pub mod audio_sources;
 pub mod daemon;
 pub mod durable;
+pub mod lenient_json;
+pub mod ordered_write;
 pub mod editor_prefs;
 pub mod library;
 pub mod meters;

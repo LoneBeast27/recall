@@ -53,6 +53,8 @@ mod hdr_gate;
 mod hotkey;
 mod journal;
 mod known_games;
+mod lenient_json;
+mod library_damage;
 mod liveness;
 mod logging;
 mod matrix;

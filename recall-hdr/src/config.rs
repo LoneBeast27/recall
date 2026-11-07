@@ -354,7 +354,10 @@ impl Config {
     /// crash mid-write can never truncate the live config.
     pub fn save_to(&self, path: &Path) -> Result<(), String> {
         let toml_str = io::serialize_for(self, path)?;
-        crate::durable::write_durable(path, toml_str.as_bytes())
+        crate::durable::write_durable(path, toml_str.as_bytes())?;
+        // The last good config is the last one saved, not the one read at start.
+        io::remember_good(path, toml_str.as_bytes());
+        Ok(())
     }
 
     /// Resolve the (rule, clamp) pair for a foreground exe stem.
@@ -376,20 +379,26 @@ impl Config {
 }
 
 /// Load a config from an explicit path (testable without touching `%APPDATA%`).
+/// A file that exists but can't be read gives the defaults (logged); a caller that
+/// saves uses [`load_checked`] instead, so it never saves the defaults over it.
 pub(crate) fn load_from(path: &std::path::Path) -> Config {
-    let bytes = match fs::read(path) {
-        Ok(b) => b,
-        Err(e) => {
-            // Missing file is the normal first-run case -- don't shout about it.
-            if e.kind() != std::io::ErrorKind::NotFound {
-                log!("config: read {} failed: {e}; using defaults", path.display());
-            }
-            return Config::default();
-        }
-    };
+    load_checked(path).unwrap_or_else(|e| {
+        log!("config: read {} failed: {e}; using defaults", path.display());
+        Config::default()
+    })
+}
 
-    let Some((mut cfg, text)) = io::parse_or_recover(path, &bytes, std::time::SystemTime::now()) else {
-        return Config::default();
+/// [`load_from`], with Err when the file exists but could not be read (retried
+/// briefly first: a backup tool or a sync client can hold it for a moment).
+pub(crate) fn load_checked(path: &std::path::Path) -> Result<Config, String> {
+    let now = std::time::SystemTime::now();
+    crate::durable::sweep_temps(path, now);
+    // Missing file is the normal first-run case -- don't shout about it.
+    let Some(bytes) = io::read_retrying(path, &std::thread::sleep).map_err(|e| e.to_string())? else {
+        return Ok(Config::default());
+    };
+    let Some((mut cfg, text)) = io::parse_or_recover(path, &bytes, now) else {
+        return Ok(Config::default());
     };
     // Legacy single `save_hotkey` -> `save_hotkeys` presets; a file from
     // the two-step-shortcut era gets the direct defaults.
@@ -398,7 +407,7 @@ pub(crate) fn load_from(path: &std::path::Path) -> Config {
     crate::record_audio_sources::migrate_loaded(&mut cfg.recording, &text);
     // Pre-v2 corners were never honoured -> `dynamic`.
     cfg.overlay.migrate_loaded(&text);
-    cfg
+    Ok(cfg)
 }
 
 // ---------------------------------------------------------------------------

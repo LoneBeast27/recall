@@ -345,10 +345,16 @@ impl LibraryState {
         true
     }
 
+    /// Debounced duration-cache save; the write itself runs off the UI thread.
     pub fn flush_meta_if_due(&mut self) {
+        if let Some(error) = self.store.take_write_failure() {
+            self.notice = Some(format!("Couldn't save library data: {error}"));
+            // Try again after the usual delay.
+            self.meta_dirty_since.get_or_insert_with(Instant::now);
+        }
         if self.meta_dirty_since.is_some_and(|t| t.elapsed() >= META_FLUSH_AFTER) {
             self.meta_dirty_since = None;
-            if let Err(error) = self.store.flush() {
+            if let Err(error) = self.store.flush_in_background() {
                 self.notice = Some(format!("Couldn't save library data: {error}"));
             }
         }

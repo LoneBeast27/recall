@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use super::MetaStore;
+use super::{store_damage, MetaStore};
 use crate::services::durable;
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -59,21 +59,30 @@ impl MetaStore {
         }
     }
 
-    /// Missing file → empty store. Corrupt file → kept as a dated `.bad`, empty store
-    /// that holds background writes until a user edit.
+    /// Missing file → empty store. Corrupt file → kept as a dated `.bad`, empty store that
+    /// holds background writes until "Keep going" on the damage notice (`store_damage`;
+    /// the hold also opens on a later start while the damage is unconfirmed).
     /// Unreadable file (locked, denied) → in-memory store that refuses to overwrite it.
     pub(crate) fn load_from(path: PathBuf) -> Self {
-        match std::fs::read(&path) {
+        let now = std::time::SystemTime::now();
+        durable::sweep_temps(&path, now);
+        let store = match std::fs::read(&path) {
             Ok(bytes) => match parse_clips(&bytes) {
                 Some(clips) => Self { path: Some(path), clips, ..Self::default() },
                 None => {
-                    durable::quarantine(&path, std::time::SystemTime::now(), durable::Keep::Move);
-                    Self { path: Some(path), hold: true, ..Self::default() }
+                    let Some(backup) = durable::quarantine(&path, now, durable::Keep::Move) else {
+                        return Self { write_block: Some("library metadata is damaged and could not be backed up; changes are not saved".into()), ..Self::default() };
+                    };
+                    // Best effort: without it the hold still opens while the .bad is newer than
+                    // library.json, and the first edit writes it again.
+                    let _ = store_damage::set_hold(&path, Some(&backup));
+                    Self { path: Some(path), ..Self::default() }
                 }
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self { path: Some(path), ..Self::default() },
-            Err(error) => Self { write_block: Some(format!("library metadata unreadable ({error}); changes are not saved")), ..Self::default() },
-        }
+            Err(error) => return Self { write_block: Some(format!("library metadata unreadable ({error}); changes are not saved")), ..Self::default() },
+        };
+        store_damage::check(store)
     }
 
     pub(super) fn meta(&self, file_name: &str) -> Option<&ClipMeta> {
@@ -91,9 +100,9 @@ impl MetaStore {
     }
 
     /// Marks the clip as opened at `secs` (Unix seconds).
-    /// Not a user change: held in memory while [`MetaStore::hold`] is set.
+    /// Not a user change: held in memory while the damage notice is open.
     pub fn set_played(&mut self, file_name: &str, secs: u64) -> Result<(), String> {
-        if self.hold {
+        if self.damage.is_some() {
             self.clips.entry(file_name.to_owned()).or_default().played = Some(secs);
             self.dirty = true;
             return Ok(());
@@ -119,14 +128,50 @@ impl MetaStore {
         }
     }
 
-    /// Persists pending duration-cache entries (debounced by the caller).
+    /// Persists pending duration-cache entries on this thread (tests; the app uses
+    /// [`MetaStore::flush_in_background`]).
+    #[cfg(test)]
     pub fn flush(&mut self) -> Result<(), String> {
-        if !self.dirty || self.hold {
+        if !self.dirty || self.damage.is_some() {
             return Ok(());
         }
         self.persist()?;
         self.dirty = false;
         Ok(())
+    }
+
+    /// [`MetaStore::flush`] with the disk write (and its fsync) on a background thread, so
+    /// the UI never waits on the drive. A failed earlier write is reported here and retried.
+    pub fn flush_in_background(&mut self) -> Result<(), String> {
+        if let Some(error) = self.writer.take_failure() {
+            self.dirty = true;
+            return Err(error);
+        }
+        if !self.dirty || self.damage.is_some() {
+            return Ok(());
+        }
+        if let Some(reason) = &self.write_block {
+            return Err(reason.clone());
+        }
+        let Some(path) = self.path.clone() else { return Ok(()) };
+        let bytes = serde_json::to_vec(&self.clips).map_err(|error| error.to_string())?;
+        let ticket = self.writer.ticket();
+        self.writer.write_in_background(ticket, path, bytes);
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// The error of a background flush that failed, once.
+    pub fn take_write_failure(&mut self) -> Option<String> {
+        let error = self.writer.take_failure()?;
+        self.dirty = true;
+        Some(error)
+    }
+
+    /// Blocks until every background flush is on disk.
+    #[cfg(test)]
+    pub fn wait_for_writes(&self) {
+        self.writer.wait();
     }
 
     /// Applies a user edit and writes immediately; on a failed write the edit is undone
@@ -138,9 +183,13 @@ impl MetaStore {
         if meta.is_empty() {
             self.clips.remove(file_name);
         }
-        let held = std::mem::replace(&mut self.hold, false);
-        if let Err(error) = self.persist() {
-            self.hold = held;
+        // While the damage notice is open the edit is saved but the hold stays (on disk too,
+        // so a restart or the storage limit can't take the new file as the whole truth).
+        let held = match (&self.damage, &self.path) {
+            (Some(damage), Some(path)) => store_damage::set_hold(path, damage.backup.as_deref()),
+            _ => Ok(()),
+        };
+        if let Err(error) = held.and_then(|()| self.persist()) {
             match previous {
                 Some(meta) => self.clips.insert(file_name.to_owned(), meta),
                 None => self.clips.remove(file_name),
@@ -151,8 +200,9 @@ impl MetaStore {
         Ok(())
     }
 
-    /// Whole-file write to a temp sibling, flushed to disk, then renamed over the original.
-    fn persist(&self) -> Result<(), String> {
+    /// Whole-file write to a temp sibling, flushed to disk, then renamed over the original
+    /// (in order with the background flushes).
+    pub(super) fn persist(&self) -> Result<(), String> {
         if let Some(reason) = &self.write_block {
             return Err(reason.clone());
         }
@@ -161,6 +211,7 @@ impl MetaStore {
             std::fs::create_dir_all(parent).map_err(|error| format!("create library metadata folder: {error}"))?;
         }
         let bytes = serde_json::to_vec(&self.clips).map_err(|error| error.to_string())?;
-        durable::write_durable(path, &bytes).map_err(|error| format!("write library metadata: {error}"))
+        let ticket = self.writer.ticket();
+        self.writer.write(ticket, path, &bytes).map_err(|error| format!("write library metadata: {error}"))
     }
 }

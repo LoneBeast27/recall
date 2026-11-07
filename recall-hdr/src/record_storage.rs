@@ -297,51 +297,35 @@ pub fn quarantine_path(path: &Path) -> PathBuf {
     path.with_file_name(name)
 }
 
-/// The newest `library.json.bad*` copy beside `path` (the app keeps one a
-/// day, `library.json.bad-YYYY-MM-DD`, stamped when it found the damage).
-fn newest_quarantine(path: &Path) -> Result<Option<(PathBuf, std::time::SystemTime)>, String> {
-    let prefix = quarantine_path(path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let Some(dir) = path.parent() else { return Ok(None) };
-    let entries = match std::fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-        Err(e) => return Err(format!("{}: {e}", dir.display())),
-    };
-    let mut newest: Option<(PathBuf, std::time::SystemTime)> = None;
-    for entry in entries.flatten() {
-        if !entry.file_name().to_string_lossy().starts_with(&prefix) {
-            continue;
-        }
-        let at = entry.metadata().and_then(|m| m.modified()).map_err(|e| format!("{}: {e}", entry.path().display()))?;
-        if newest.as_ref().is_none_or(|(_, t)| at > *t) {
-            newest = Some((entry.path(), at));
-        }
-    }
-    Ok(newest)
-}
-
-/// Favourites in the library file at `path`. Missing means none -- unless the
-/// app quarantined a corrupt copy beside it. A copy newer than the library file
-/// (the app wrote a fresh one without the old favourites) also leaves favourites
-/// unknown, like an unreadable or corrupt file, so the run is cancelled.
+/// Favourites in the library file at `path`, plus every favourite still readable
+/// in a quarantined `.bad` copy (a former favourite is never recycled). Unknown
+/// (Err, the run is cancelled) while the app's damage notice is unconfirmed
+/// (`library.json.hold`), when the file is unreadable or corrupt, when it is
+/// missing beside a `.bad`, or when a `.bad` is newer than it (the app wrote a
+/// fresh one without the old favourites).
 pub fn favourites_at(path: &Path) -> Result<HashSet<String>, String> {
-    let bad = newest_quarantine(path)?;
-    match std::fs::read(path) {
+    crate::library_damage::check_hold(path)?;
+    let bads = crate::library_damage::quarantines(&quarantine_path(path))?;
+    let newest = bads.iter().max_by_key(|(_, at)| *at).cloned();
+    let mut favs = match std::fs::read(path) {
         Ok(bytes) => {
-            if let Some((bad, at)) = bad {
+            if let Some((bad, at)) = newest {
                 let lib_at = std::fs::metadata(path).and_then(|m| m.modified()).map_err(|e| format!("{}: {e}", path.display()))?;
                 if at > lib_at {
                     return Err(format!("{} holds a quarantined corrupt copy newer than {}", bad.display(), path.display()));
                 }
             }
-            favourites(&bytes)
+            favourites(&bytes)?
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match bad {
-            None => Ok(HashSet::new()),
-            Some((bad, _)) => Err(format!("{} is missing and {} holds a quarantined corrupt copy", path.display(), bad.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => match newest {
+            None => HashSet::new(),
+            Some((bad, _)) => return Err(format!("{} is missing and {} holds a quarantined corrupt copy", path.display(), bad.display())),
         },
-        Err(e) => Err(format!("{}: {e}", path.display())),
-    }
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+    };
+    let copies: Vec<PathBuf> = bads.into_iter().map(|(bad, _)| bad).collect();
+    favs.extend(crate::library_damage::quarantined_favourites(&copies)?);
+    Ok(favs)
 }
 
 /// Move `files` (one clip and its companions) to the Recycle Bin in one shell operation.
@@ -494,3 +478,7 @@ pub fn preview_event(cap_gb: u32, plan: &Plan) -> String {
 #[cfg(test)]
 #[path = "record_storage_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "record_storage_damage_tests.rs"]
+mod damage_tests;

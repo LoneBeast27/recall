@@ -103,3 +103,78 @@ fn a_save_leaves_no_temp_file_and_reloads() {
     assert!(!names.iter().any(|n| n.ends_with(".tmp")), "{names:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Opens `path` with no sharing (as a backup tool or a sync client can).
+fn lock(path: &Path) -> std::fs::File {
+    use std::os::windows::fs::OpenOptionsExt;
+    std::fs::OpenOptions::new().read(true).share_mode(0).open(path).unwrap()
+}
+
+#[test]
+fn a_locked_config_is_never_replaced_by_defaults() {
+    let dir = temp_dir("locked");
+    let path = dir.join("config.toml");
+    let text = "[recording]\noutput_dir = 'E:\\Clips'\nbuffer_secs = 300\n";
+    std::fs::write(&path, text).unwrap();
+    let store = crate::record_config::ConfigStore::at(&path);
+    let held = lock(&path);
+    let cfg = store.load();
+    drop(held);
+    let mut patched = cfg.clone();
+    patched.recording.buffer_secs = 120;
+    assert!(store.save(&patched).is_err(), "a save after an unreadable start is refused");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), text, "the user's file is untouched");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn one_bad_array_element_drops_only_itself() {
+    let dir = temp_dir("elements");
+    let path = dir.join("config.toml");
+    let text = "[recording]\noutput_dir = 'E:\\Clips'\n\n\
+        [[recording.audio_sources]]\nid = 'mic'\nkind = 'input'\ndevice = 'Desk Mic'\nname = 'Mic'\nenabled = true\ngain_db = 3.0\n\n\
+        [[recording.audio_sources]]\nid = 'game'\nkind = 'game'\nname = 'Game'\nenabled = true\ngain_db = 'loud'\n\n\
+        [[overrides]]\nexe = 'one'\nkind = 'hdr_game'\n\n\
+        [[overrides]]\nexe = 'two'\nkind = 'HdrGame'\n";
+    std::fs::write(&path, text).unwrap();
+    let cfg = load_from(&path);
+    let ids: Vec<&str> = cfg.recording.audio_sources.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(ids, vec!["mic"], "the good source is kept, the bad one dropped");
+    assert_eq!(cfg.recording.audio_sources[0].device, "Desk Mic");
+    let exes: Vec<&str> = cfg.overrides.iter().map(|o| o.exe.as_str()).collect();
+    assert_eq!(exes, vec!["one"]);
+    assert_eq!(cfg.recording.output_dir, r"E:\Clips");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn last_good_follows_every_save() {
+    let dir = temp_dir("lastgood-save");
+    let path = dir.join("config.toml");
+    std::fs::write(&path, "[recording]\nbuffer_secs = 300\n").unwrap();
+    let mut cfg = load_from(&path);
+    cfg.recording.buffer_secs = 240;
+    cfg.save_to(&path).unwrap();
+    std::fs::write(&path, b"").unwrap();
+    assert_eq!(load_from(&path).recording.buffer_secs, 240, "the last save, not the start-up config");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn leftover_temp_files_are_swept_at_load() {
+    let dir = temp_dir("temps");
+    let path = dir.join("config.toml");
+    std::fs::write(&path, "[recording]\nbuffer_secs = 300\n").unwrap();
+    let old = std::time::SystemTime::now() - std::time::Duration::from_secs(3_600);
+    for name in ["config.toml.4242.tmp", "config.toml.tmp"] {
+        let tmp = dir.join(name);
+        std::fs::write(&tmp, b"partial").unwrap();
+        std::fs::OpenOptions::new().write(true).open(&tmp).unwrap().set_modified(old).unwrap();
+    }
+    std::fs::write(dir.join("config.toml.99.tmp"), b"a live writer's").unwrap();
+    let _ = load_from(&path);
+    let mut names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    names.sort();
+    assert_eq!(names, vec!["config.toml", "config.toml.99.tmp", "config.toml.last-good"], "old temps gone, a fresh one kept");
+    let _ = std::fs::remove_dir_all(&dir);
+}
