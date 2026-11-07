@@ -31,6 +31,7 @@ use std::time::Instant;
 use serde_json::{json, Value};
 
 use crate::config::{sync_autostart, RECORD_RUN_ARG};
+use crate::config_watch::Base;
 use crate::control::Inbound;
 use crate::hdr_exec;
 use crate::log;
@@ -281,9 +282,18 @@ impl Controller {
     /// new config + status are broadcast. Returns whether it applied.
     pub(crate) fn apply_config_patch(&mut self, patch: &Value, client: Option<u64>) -> bool {
         // A hand edit made while running is the base, not overwritten (`config_watch`).
-        if let Some(edited) = crate::config_watch::base_for_patch(&self.store, &mut self.config_stamp) {
-            self.file_cfg = edited;
-            self.config_repairs = crate::config_repairs::ConfigRepairs::after_load(self.store.path());
+        let mut broken_edit = None;
+        match crate::config_watch::base_for_patch(&self.store, &mut self.config_stamp, std::time::SystemTime::now()) {
+            Base::Memory => {}
+            Base::Edited(edited) => {
+                self.file_cfg = edited;
+                self.config_repairs = crate::config_repairs::ConfigRepairs::after_load(self.store.path());
+            }
+            Base::Broken(line) => broken_edit = Some(line),
+            Base::Busy => {
+                self.reply_error(client, "config.toml was changed on disk a moment ago; settings not saved, try again");
+                return false;
+            }
         }
         let out = match apply_patch(&self.file_cfg, patch) {
             Ok(o) => o,
@@ -309,6 +319,9 @@ impl Controller {
                 return false;
             }
             self.config_stamp = crate::config_watch::FileStamp::of(self.store.path());
+            if let Some(line) = broken_edit {
+                self.reply_error(client, &line);
+            }
             log!("record: config updated ({})", out.changed.join(", "));
         }
         let old = std::mem::replace(&mut self.cfg, effective);
