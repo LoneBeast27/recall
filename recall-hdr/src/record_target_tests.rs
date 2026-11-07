@@ -10,6 +10,7 @@ fn ev(stem: &str, title: &str, pid: u32, hwnd: isize, fullscreen: bool) -> Watch
         fullscreen,
         fullscreen_on_target: fullscreen,
         steam_game: false,
+        hosted: false,
         hwnd,
     }
 }
@@ -455,6 +456,14 @@ fn known_game_windowed_is_a_candidate() {
 }
 
 #[test]
+fn the_minecraft_server_gui_is_never_a_target() {
+    let cfg = Config::default();
+    assert!(classify_event(&ev("javaw", "Minecraft server", 6, 0x6, false), &cfg).is_none(), "windowed");
+    assert!(classify_event(&ev("java", "Minecraft server", 6, 0x6, true), &cfg).is_none(), "even fullscreen");
+    assert!(classify_event(&ev("javaw", "Minecraft 1.21.1", 6, 0x6, false), &cfg).is_some(), "the game client");
+}
+
+#[test]
 fn screensaver_is_never_a_target() {
     // G11: a .scr runs fullscreen and topmost.
     let cfg = Config::default();
@@ -473,7 +482,19 @@ fn store_media_apps_are_denied() {
     // R2-5: with G6 a UWP frame resolves to the hosted exe, no longer the denied
     // ApplicationFrameHost; without trace rights a fullscreen one would count as a game.
     let cfg = Config::default();
-    for stem in ["Video.UI", "Microsoft.Media.Player", "Microsoft.Photos", "WinStore.App", "SystemSettings", "Netflix", "WWAHost"] {
+    for stem in [
+        "Video.UI",
+        "Microsoft.Media.Player",
+        "Microsoft.Photos",
+        "WinStore.App",
+        "SystemSettings",
+        "Netflix",
+        "WWAHost",
+        // R3-detect-2 (exe names read from the AppxManifests).
+        "WindowsCamera",
+        "HxCalendarAppImm",
+        "XboxPcAppCE",
+    ] {
         assert!(!is_target(stem, true, &cfg), "{stem}");
     }
     assert!(is_target("Minecraft.Windows", true, &cfg), "a Store game still is");

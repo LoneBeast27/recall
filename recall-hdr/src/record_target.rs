@@ -150,18 +150,8 @@ const TARGET_DENY_STEMS: &[&str] = &[
     "werfault",
     "werfaultsecure",
     "crashreporter",
-    // Store apps (G6 resolves their frame to the hosted exe, no longer the
-    // denied ApplicationFrameHost; R2-5): media, photos, the Store, settings.
-    "video.ui",
-    "music.ui",
-    "microsoft.media.player",
-    "microsoft.photos",
-    "photos",
-    "winstore.app",
-    "systemsettings",
-    "netflix",
-    "wwahost",
-    "hxoutlook",
+    // Store apps (media, photos, the Store, settings, camera, mail): in
+    // `rules::STORE_APP_STEMS`, which `rules::is_denied` checks.
 ];
 
 /// A window the engine can capture. `exe` is the image file name.
@@ -265,7 +255,7 @@ pub fn skips_render_check(ev: &WatchEvent, cfg: &Config) -> bool {
 /// is one windowed too (G10; an override already is); a screensaver
 /// (`.scr`) never is (G11).
 pub fn classify_event(ev: &WatchEvent, cfg: &Config) -> Option<Target> {
-    if is_screensaver(&ev.exe_name) {
+    if is_screensaver(&ev.exe_name) || crate::known_games::is_minecraft_server(&ev.exe_stem, &ev.title) {
         return None;
     }
     let looks = ev.fullscreen || ev.steam_game || crate::known_games::is_known_game(&ev.exe_stem, &ev.title);

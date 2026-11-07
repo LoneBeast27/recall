@@ -225,6 +225,8 @@ pub const COMPOSED_NOTICE_AFTER: Duration = Duration::from_secs(20);
 pub struct ComposedNotice {
     /// (pid, hwnd) in front with a composed verdict, and since when.
     streak: Option<(u32, isize, Instant)>,
+    /// A watch in the streak saw a game-like rate (`record_composed`).
+    steady: bool,
     /// Exes already named this run (lower case).
     shown: HashSet<String>,
 }
@@ -234,7 +236,15 @@ impl ComposedNotice {
     /// foreground is a fullscreen window whose last verdict was composed and
     /// that is not recorded, else `None`. Returns the exe to name, once.
     pub fn observe(&mut self, front: Option<(u32, isize, &str)>, now: Instant) -> Option<String> {
-        let Some((pid, hwnd, exe)) = front else {
+        self.observe_steady(front.map(|f| (f, true)), now)
+    }
+
+    /// [`Self::observe`] where each composed observation says whether its
+    /// watch saw a steady rate: the clock keeps running through slow
+    /// rechecks, and the notice fires only if some watch in the streak was
+    /// steady (R3-detect-1).
+    pub fn observe_steady(&mut self, front: Option<((u32, isize, &str), bool)>, now: Instant) -> Option<String> {
+        let Some(((pid, hwnd, exe), steady)) = front else {
             self.streak = None;
             return None;
         };
@@ -242,10 +252,12 @@ impl ComposedNotice {
             Some((p, h, since)) if (p, h) == (pid, hwnd) => since,
             _ => {
                 self.streak = Some((pid, hwnd, now));
+                self.steady = false;
                 now
             }
         };
-        let due = now.duration_since(since) > COMPOSED_NOTICE_AFTER;
+        self.steady |= steady;
+        let due = self.steady && now.duration_since(since) > COMPOSED_NOTICE_AFTER;
         (due && self.shown.insert(exe.to_ascii_lowercase())).then(|| exe.to_string())
     }
 }
