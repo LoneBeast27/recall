@@ -420,3 +420,12 @@ fn a_lock_during_a_recording_reaches_the_app() {
         ]
     );
 }
+
+/// Gate 20b: the stopped-while-locked notice and a cancelled shutdown reach the app.
+#[test]
+fn a_stop_during_the_lock_and_a_cancelled_shutdown_reach_the_app() {
+    let mut state = connected();
+    apply(&mut state, json!({"mod":"session","event":{"type":"recording_stopped_locked","locked_seconds":300.0}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"shutdown_cancelled","title":"Shutdown cancelled","detail":"Recording continues in a new file"}}));
+    assert_eq!(state.events, vec![DaemonEvent::RecordingStoppedLocked { seconds: 300.0 }, DaemonEvent::ShutdownCancelled]);
+}

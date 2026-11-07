@@ -56,6 +56,10 @@ fn recording_toast(event: &DaemonEvent) -> Option<(ToastKind, String, Option<Str
         DaemonEvent::RecordingKeptLocked { seconds } => {
             Some((ToastKind::Info, "Recording kept going while locked".into(), Some(format!("{} locked", format_duration(*seconds)))))
         }
+        DaemonEvent::RecordingStoppedLocked { seconds } => {
+            Some((ToastKind::Info, "Recording stopped while locked".into(), Some(format!("{} locked", format_duration(*seconds)))))
+        }
+        DaemonEvent::ShutdownCancelled => Some((ToastKind::Info, "Shutdown cancelled".into(), Some("Recording continues in a new file".into()))),
         _ => None,
     }
 }
@@ -139,7 +143,11 @@ impl Root {
             }
             DaemonEvent::ScreenshotFailed { reason } => self.show_toast(ToastKind::Bad, "Screenshot failed", Some(reason)),
             // Toasts: `recording_toast` above.
-            DaemonEvent::RecordingStarted | DaemonEvent::RecordingContinued { .. } | DaemonEvent::RecordingKeptLocked { .. } => {}
+            DaemonEvent::RecordingStarted
+            | DaemonEvent::RecordingContinued { .. }
+            | DaemonEvent::RecordingKeptLocked { .. }
+            | DaemonEvent::RecordingStoppedLocked { .. }
+            | DaemonEvent::ShutdownCancelled => {}
             DaemonEvent::RecordingStopped { path, .. } | DaemonEvent::RecordingPartSaved { path } => {
                 record_interaction(Interaction::Saved(path));
                 self.workers.job(Job::List);
@@ -317,5 +325,15 @@ mod tests {
         };
         assert_eq!(stop(720.0).as_deref(), Some("12:00 locked"));
         assert_eq!(stop(45.0), None, "a short lock is not news");
+    }
+
+    /// Gate 20b: a recording that ended during the lock is not said to have kept going; a
+    /// cancelled shutdown says the recording goes on.
+    #[test]
+    fn a_recording_stopped_while_locked_and_a_cancelled_shutdown_have_their_own_toasts() {
+        let toast = recording_toast(&DaemonEvent::RecordingStoppedLocked { seconds: 300.0 });
+        assert_eq!(toast, Some((ToastKind::Info, "Recording stopped while locked".into(), Some("5:00 locked".into()))));
+        let toast = recording_toast(&DaemonEvent::ShutdownCancelled);
+        assert_eq!(toast, Some((ToastKind::Info, "Shutdown cancelled".into(), Some("Recording continues in a new file".into()))));
     }
 }

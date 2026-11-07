@@ -84,6 +84,9 @@ impl State {
             }
             // The PC unlocked; a long recording kept going while it was locked.
             ("session", "recording_locked") => self.push(DaemonEvent::RecordingKeptLocked { seconds: f64_of(event, "locked_seconds") }),
+            // The same, but the recording ended during the lock.
+            ("session", "recording_stopped_locked") => self.push(DaemonEvent::RecordingStoppedLocked { seconds: f64_of(event, "locked_seconds") }),
+            ("session", "shutdown_cancelled") => self.push(DaemonEvent::ShutdownCancelled),
             ("session", "storage_preview") => self.push(DaemonEvent::StoragePreview {
                 cap_gb: u64_of(event, "cap_gb").min(u64::from(u32::MAX)) as u32,
                 used_bytes: u64_of(event, "used_bytes"),

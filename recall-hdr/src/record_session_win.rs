@@ -9,9 +9,10 @@
 //! The session-end messages need an answer before the handler returns, so the handler acts
 //! on the controller directly: the pump's message drain lends it (`drain_messages`), and the
 //! handler takes it out while in use, so a nested message cannot reach it twice. A
-//! session-end query that arrives outside the drain is queued instead and answered at once
-//! (the stop then goes out on the next pump pass, best-effort). Lock notices are always
-//! queued for the pump.
+//! session-end message that arrives outside the drain is queued instead (a query is
+//! answered at once; the stop then goes out on the next pump pass, best-effort). Lock
+//! notices are always queued for the pump. What each message does is
+//! `record_session_host`; this file adds the Win32 calls and the controller as its host.
 
 use std::cell::Cell;
 use std::sync::atomic::{AtomicIsize, Ordering};
@@ -27,9 +28,9 @@ use windows::Win32::UI::WindowsAndMessaging::{
 
 use crate::log;
 use crate::record_app::Controller;
-use crate::record_lock::{app_event_json, engine_line, notice_detail, LockAction, NOTICE_TITLE};
 use crate::record_quit::QuitReason;
-use crate::record_session_end::{on_end, on_query_end, EndAction, SessionMsg, BLOCK_REASON, QUERY_ANSWER};
+use crate::record_session_end::{RegisterRetry, SessionMsg};
+use crate::record_session_host::{self as host, SessionHost, SessionState};
 
 /// `NOTIFY_FOR_THIS_SESSION`.
 const NOTIFY_FOR_THIS_SESSION: u32 = 0;
@@ -51,10 +52,12 @@ thread_local! {
     static CONTROLLER: Cell<*mut Controller> = const { Cell::new(std::ptr::null_mut()) };
 }
 
-/// Messages for the pump (lock notices; a session-end query nobody could answer in place).
+/// Messages for the pump (lock notices; session-end messages nobody could handle in place).
 static PENDING: Mutex<Vec<SessionMsg>> = Mutex::new(Vec::new());
 /// The hidden window (0 = none).
 static WINDOW: AtomicIsize = AtomicIsize::new(0);
+/// Retries of a lock-notice registration that failed at start-up.
+static REGISTER_RETRY: Mutex<RegisterRetry> = Mutex::new(RegisterRetry::NONE);
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
     m.lock().unwrap_or_else(|p| p.into_inner())
@@ -84,10 +87,30 @@ pub(crate) fn start() {
         Err(e) => return log!("record: session-end and lock notices unavailable ({e}); a shutdown leaves the recording to recovery"),
     };
     WINDOW.store(hwnd.0 as isize, Ordering::Release);
-    if unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) } == 0 {
-        log!("record: lock notices unavailable ({}); listening for sign-out and shutdown only", std::io::Error::last_os_error());
-    } else {
+    if register(hwnd) {
         log!("record: listening for sign-out, shutdown and lock");
+    } else {
+        log!("record: lock notices unavailable ({}); listening for sign-out and shutdown, retrying", std::io::Error::last_os_error());
+        *lock(&REGISTER_RETRY) = RegisterRetry::failed_at(Instant::now());
+    }
+}
+
+fn register(hwnd: HWND) -> bool {
+    unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) != 0 }
+}
+
+/// Pump step: a lock-notice registration that failed at boot (the WTS service not up yet)
+/// is tried again every 10 s, up to 5 times.
+fn retry_register(now: Instant) {
+    let mut retry = lock(&REGISTER_RETRY);
+    let Some(hwnd) = window().filter(|_| retry.due(now)) else { return };
+    let ok = register(hwnd);
+    let error = std::io::Error::last_os_error();
+    retry.tried(ok, now);
+    match (ok, retry.due(now + crate::record_session_end::REGISTER_RETRY_EVERY)) {
+        (true, _) => log!("record: listening for lock notices (retry)"),
+        (false, true) => log!("record: lock notices still unavailable ({error}); retrying"),
+        (false, false) => log!("record: lock notices unavailable ({error}); gave up"),
     }
 }
 
@@ -95,6 +118,7 @@ pub(crate) fn start() {
 pub(crate) fn stop() {
     let Some(hwnd) = window() else { return };
     WINDOW.store(0, Ordering::Release);
+    *lock(&REGISTER_RETRY) = RegisterRetry::NONE;
     unsafe {
         let _ = WTSUnRegisterSessionNotification(hwnd);
         let _ = DestroyWindow(hwnd);
@@ -110,139 +134,109 @@ pub(crate) fn drain_messages(ctl: &mut Controller) -> bool {
     quit
 }
 
-/// Run `f` on the lent controller; false when none is lent (or it is in use already).
-fn with_controller(f: impl FnOnce(&mut Controller)) -> bool {
+/// Run `f` on the lent controller; `None` when none is lent (or it is in use already).
+fn with_controller<R>(f: impl FnOnce(Option<&mut Controller>) -> R) -> R {
     let ptr = CONTROLLER.with(|c| c.replace(std::ptr::null_mut()));
     if ptr.is_null() {
-        return false;
+        return f(None);
     }
     // SAFETY: lent by `drain_messages` from the pump's `&mut Controller`, which is not used
     // until the drain returns; taken out while `f` runs, so nothing else can reach it.
-    f(unsafe { &mut *ptr });
+    let out = f(Some(unsafe { &mut *ptr }));
     CONTROLLER.with(|c| c.set(ptr));
-    true
+    out
 }
 
 unsafe extern "system" fn session_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    match SessionMsg::classify(message, wparam.0) {
-        Some(SessionMsg::QueryEnd) => {
-            if !with_controller(|ctl| ctl.on_query_end_session(hwnd)) {
-                lock(&PENDING).push(SessionMsg::QueryEnd);
-            }
-            LRESULT(QUERY_ANSWER)
-        }
-        Some(SessionMsg::End { ending }) => {
-            if !with_controller(|ctl| ctl.on_end_session(ending)) && ending {
-                log!("record: the session is ending outside the pump; the engine is left to Windows");
-            }
-            LRESULT(0)
-        }
-        Some(msg @ (SessionMsg::Lock | SessionMsg::Unlock)) => {
-            lock(&PENDING).push(msg);
-            LRESULT(0)
-        }
+    let mut queued = Vec::new();
+    let answer = with_controller(|ctl| match ctl {
+        Some(ctl) => host::dispatch(Some(&mut WinHost { ctl, hwnd: Some(hwnd) }), message, wparam.0, &mut queued),
+        None => host::dispatch::<WinHost>(None, message, wparam.0, &mut queued),
+    });
+    lock(&PENDING).extend(queued);
+    match answer {
+        Some(answer) => LRESULT(answer),
         None => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
 }
 
-impl Controller {
-    /// Pump step: the lock notices (and any unanswered session-end query) since the last pass.
-    pub(crate) fn session_tick(&mut self, now: Instant) {
-        let recording = self.activity.is_recording();
-        self.lock.recording_seen(recording);
-        let pending = std::mem::take(&mut *lock(&PENDING));
-        for msg in pending {
-            let actions = match msg {
-                SessionMsg::Lock => self.lock.on_lock(now, recording),
-                SessionMsg::Unlock => self.lock.on_unlock(now, recording),
-                SessionMsg::QueryEnd => {
-                    if recording {
-                        log!("record: the session is ending -- stopping the long recording (late)");
-                        self.send_session_stop();
-                    }
-                    continue;
-                }
-                SessionMsg::End { .. } => continue,
-            };
-            log!("record: session {msg:?} (long recording running: {recording})");
-            for action in actions {
-                self.apply_lock_action(action);
-            }
-        }
+/// The controller as the session messages' host; `hwnd` for the shutdown block reason.
+struct WinHost<'a> {
+    ctl: &'a mut Controller,
+    hwnd: Option<HWND>,
+}
+
+impl SessionHost for WinHost<'_> {
+    fn recording(&self) -> bool {
+        self.ctl.activity.recording_or_starting()
     }
 
-    fn apply_lock_action(&mut self, action: LockAction) {
-        match action {
-            LockAction::TellEngine(locked) => {
-                // Not a user action: an engine that does not take it only loses the count.
-                let _ = self.supervisor.send_engine_line(&engine_line(locked));
-            }
-            LockAction::Notice(span) => {
-                let detail = notice_detail(span);
-                log!("record: unlocked -- the long recording kept going while locked ({detail})");
-                self.hub.event("session", &app_event_json(span));
-                self.shortcut_notice(NOTICE_TITLE, &detail);
-            }
-        }
-    }
-
-    /// A fresh engine learns that the session is locked (it counts from now).
-    pub(crate) fn reapply_lock(&self) {
-        if self.lock.is_locked() {
-            let _ = self.supervisor.send_engine_line(&engine_line(true));
-        }
-    }
-
-    /// `WM_QUERYENDSESSION`, on the pump thread inside the message drain.
-    pub(crate) fn on_query_end_session(&mut self, hwnd: HWND) {
-        let recording = self.activity.is_recording();
-        log!("record: the session is ending (long recording running: {recording})");
-        for action in on_query_end(recording) {
-            match action {
-                EndAction::Block(_) => {
-                    let reason: Vec<u16> = BLOCK_REASON.encode_utf16().chain(Some(0)).collect();
-                    let _ = unsafe { ShutdownBlockReasonCreate(hwnd, PCWSTR(reason.as_ptr())) };
-                }
-                EndAction::StopRecording => self.send_session_stop(),
-                EndAction::WaitStopped(wait) => self.wait_recording_stopped(wait),
-                EndAction::Unblock => {
-                    let _ = unsafe { ShutdownBlockReasonDestroy(hwnd) };
-                }
-                EndAction::Shutdown(_) => {}
-            }
-        }
-    }
-
-    /// `WM_ENDSESSION`: the clean shutdown runs before Windows may end the process.
-    pub(crate) fn on_end_session(&mut self, ending: bool) {
-        for action in on_end(ending) {
-            if let EndAction::Shutdown(grace) = action {
-                log!("record: the session is ending -- shutting down");
-                self.quit.get_or_insert(QuitReason::SessionEnd);
-                self.shutdown_now(grace);
-            }
-        }
-    }
-
-    fn send_session_stop(&mut self) {
-        if !crate::record_dispatch::automatic_effects(self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#)).is_empty() {
+    fn send_stop(&mut self) {
+        let sent = self.ctl.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#);
+        if !crate::record_dispatch::automatic_effects(sent).is_empty() {
             log!("record: session end -- record_stop not sent ({})", crate::record_dispatch::NOT_RESPONDING);
         }
     }
 
-    /// Take engine events until the long recording reports stopping, or `wait` runs out.
-    fn wait_recording_stopped(&mut self, wait: Duration) {
-        let started = Instant::now();
-        loop {
-            let now = Instant::now();
-            self.drain_engine_events(now);
-            if !self.activity.is_recording() {
-                return log!("record: session end -- long recording saved in {:?}", now - started);
-            }
-            if now - started >= wait {
-                return log!("record: session end -- no recording_stopped in {wait:?}; the .part is recovered on the next start");
-            }
-            std::thread::sleep(Duration::from_millis(20));
+    fn start_recording(&mut self) -> bool {
+        self.ctl.engine_command("record_start", None);
+        self.ctl.activity.recording_or_starting()
+    }
+
+    fn drain_engine(&mut self) {
+        self.ctl.drain_engine_events(Instant::now());
+    }
+
+    fn block(&mut self, reason: &str) {
+        let Some(hwnd) = self.hwnd else { return };
+        let reason: Vec<u16> = reason.encode_utf16().chain(Some(0)).collect();
+        let _ = unsafe { ShutdownBlockReasonCreate(hwnd, PCWSTR(reason.as_ptr())) };
+    }
+
+    fn unblock(&mut self) {
+        if let Some(hwnd) = self.hwnd {
+            let _ = unsafe { ShutdownBlockReasonDestroy(hwnd) };
         }
+    }
+
+    fn shutdown(&mut self, grace: Duration) {
+        self.ctl.quit.get_or_insert(QuitReason::SessionEnd);
+        self.ctl.shutdown_now(grace);
+    }
+
+    fn tell_engine(&mut self, line: &str) {
+        let _ = self.ctl.supervisor.send_engine_line(line);
+    }
+
+    fn notice(&mut self, title: &str, detail: &str, app_event: &str) {
+        self.ctl.hub.event("session", app_event);
+        self.ctl.shortcut_notice(title, detail);
+    }
+
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn pause(&mut self, d: Duration) {
+        std::thread::sleep(d);
+    }
+
+    fn state(&mut self) -> &mut SessionState {
+        &mut self.ctl.session_watch
+    }
+}
+
+impl Controller {
+    /// Pump step: the lock notices (and any session-end message the window could not
+    /// handle in place) since the last pass; a failed lock registration's retries.
+    pub(crate) fn session_tick(&mut self, now: Instant) {
+        retry_register(now);
+        let pending = std::mem::take(&mut *lock(&PENDING));
+        host::session_tick(&mut WinHost { ctl: self, hwnd: window() }, pending, now);
+    }
+
+    /// A fresh engine learns that the session is locked (it counts from now).
+    pub(crate) fn reapply_lock(&mut self) {
+        host::reapply_lock(&mut WinHost { ctl: self, hwnd: None });
     }
 }

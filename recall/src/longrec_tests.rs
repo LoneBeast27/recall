@@ -5,6 +5,11 @@ use super::*;
 use std::sync::mpsc::sync_channel;
 use test_sink::{pkt, temp_dir, tracks, Call, FakeFactory, Log, MS};
 
+thread_local! {
+    /// The last `recording_stopped` this thread's writer sent (`stopped`).
+    pub(super) static LAST_STOP: std::cell::RefCell<Option<serde_json::Value>> = const { std::cell::RefCell::new(None) };
+}
+
 /// Generations far above the live encoder tests' (the failure slot is global).
 const G: u64 = 1_000_000;
 
@@ -302,12 +307,25 @@ fn a_twelve_minute_lock_during_a_recording_is_counted_and_reset_by_the_stop() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Audit U8: `recording_stopped` carries `locked_seconds`.
+/// Audit U8 / gate 20b P2-e: the `recording_stopped` the writer sends at the stop carries the
+/// time locked (no hand-built message: the stop's own outbound).
 #[test]
-fn the_stop_message_carries_the_locked_seconds() {
-    let stop = Stop { seconds: 1200.0, bytes: 1, marks: 0, parts: 1, total_seconds: 1200.0, gap_seconds: 0.0, frozen_seconds: 0.0, locked_seconds: 720.0, cause: None };
-    let out = serde_json::to_value(stopped_outbound("E:/c/G__rec.mp4", stop)).unwrap();
+fn the_writers_stop_message_carries_the_locked_seconds() {
+    let (mut w, dir) = writer("locked-stop", G + 51);
+    let (_tx, rx) = sync_channel::<Data>(4);
+    w.start("G", Some((0, Instant::now())));
+    w.generation = G + 51;
+    w.data(video(0, true, G + 51));
+    w.control(Control::Locked(true), &rx);
+    w.skew = Duration::from_secs(720);
+    w.control(Control::Locked(false), &rx);
+    w.data(video(16, false, G + 51));
+    LAST_STOP.with(|last| last.borrow_mut().take());
+    w.stop(&rx);
+    let out = LAST_STOP.with(|last| last.borrow_mut().take()).expect("a recording_stopped was sent");
     assert_eq!(out["type"], "recording_stopped");
-    assert_eq!(out["locked_seconds"].as_f64(), Some(720.0), "{out}");
     assert_eq!(out["continued"], false);
+    let locked = out["locked_seconds"].as_f64().unwrap();
+    assert!((locked - 720.0).abs() < 0.5, "{out}");
+    let _ = std::fs::remove_dir_all(&dir);
 }

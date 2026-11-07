@@ -232,6 +232,11 @@ pub enum DaemonEvent {
     RecordingStopped { path: String, seconds: f64, parts: u32, gap_seconds: f64, frozen_seconds: f64, locked_seconds: f64 },
     /// The PC unlocked after a lock during which a long recording kept going (`seconds` locked).
     RecordingKeptLocked { seconds: f64 },
+    /// The PC unlocked after a lock during which a long recording ran and then stopped.
+    RecordingStoppedLocked { seconds: f64 },
+    /// A sign-out / shutdown another app cancelled: the long recording it stopped goes on in
+    /// a new file.
+    ShutdownCancelled,
     /// `files`: what the recording left (it ended early), empty when nothing was saved.
     RecordingFailed { reason: String, files: Vec<String>, gap_seconds: f64, frozen_seconds: f64 },
     /// Long recordings a crash or a kill left as `.part`, renamed into place on the next
