@@ -33,6 +33,11 @@ pub struct AudioSource {
     pub kind: String,
     /// Endpoint friendly name for `game`/`output`/`input` ("" = the Windows default).
     pub device: String,
+    /// The endpoint id (`IMMDevice::GetId`) the Audio page saved with `device` ("" = none). A
+    /// line-in skips Alt+M only on the endpoint with this id (R5-deep-audio-1); it never picks
+    /// which endpoint opens.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub device_id: String,
     /// Image file name for `app`, e.g. `player.exe`.
     pub exe: String,
     /// Track name in clips.
@@ -50,7 +55,7 @@ pub struct AudioSource {
 
 impl Default for AudioSource {
     fn default() -> Self {
-        AudioSource { id: String::new(), kind: "input".into(), device: String::new(), exe: String::new(), name: String::new(), enabled: true, gain_db: 0.0, mic_mute: None }
+        AudioSource { id: String::new(), kind: "input".into(), device: String::new(), device_id: String::new(), exe: String::new(), name: String::new(), enabled: true, gain_db: 0.0, mic_mute: None }
     }
 }
 
@@ -122,6 +127,9 @@ pub fn validate(list: &[AudioSource]) -> Result<(), String> {
         if !one_line(&s.device, 256) {
             return Err(format!("recording.audio_sources '{id}' device must be one line of at most 256 characters"));
         }
+        if !one_line(&s.device_id, 256) {
+            return Err(format!("recording.audio_sources '{id}' device_id must be one line of at most 256 characters"));
+        }
         let exe = s.exe.trim();
         if s.kind == "app" && (exe.is_empty() || exe.len() > 64 || exe.chars().any(|c| matches!(c, '\\' | '/' | ':') || c.is_control())) {
             return Err(format!("recording.audio_sources '{id}' needs an exe file name (no folders)"));
@@ -140,7 +148,7 @@ pub fn validate(list: &[AudioSource]) -> Result<(), String> {
 fn engine_list(list: &[AudioSource]) -> Vec<AudioSource> {
     list.iter()
         .filter(|s| s.enabled)
-        .map(|s| AudioSource { id: s.id.trim().into(), device: s.device.trim().into(), exe: s.exe.trim().into(), name: s.name.trim().into(), ..s.clone() })
+        .map(|s| AudioSource { id: s.id.trim().into(), device: s.device.trim().into(), device_id: s.device_id.trim().into(), exe: s.exe.trim().into(), name: s.name.trim().into(), ..s.clone() })
         .collect()
 }
 

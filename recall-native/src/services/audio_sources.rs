@@ -65,6 +65,9 @@ pub struct Source {
     pub kind: Kind,
     /// Endpoint name ("" = the Windows default).
     pub device: String,
+    /// The endpoint id saved when `device` was picked ("" = none: an older config). A line-in
+    /// skips Alt+M only on the endpoint with this id (R5-deep-audio-1).
+    pub device_id: String,
     /// App image name, e.g. `player.exe` (app sources only).
     pub exe: String,
     pub name: String,
@@ -78,27 +81,32 @@ pub struct Source {
 }
 
 /// What Alt+M does to `source` now, as the recorder decides it: an input is muted unless it is a
-/// line-in (`mic_mute = false`) on a named device. Without a flag it is muted whatever Windows
-/// calls its endpoint (R3-deep-audio-1); on the Windows default it is muted whatever the flag
-/// says, as that is normally the microphone (R4-deep-audio-1).
-pub fn mutes(source: &Source) -> bool {
-    source.kind == Kind::Input && (source.mic_mute != Some(false) || source.device.trim().is_empty())
+/// line-in (`mic_mute = false`) on a named device that opens as itself. Without a flag it is
+/// muted whatever Windows calls its endpoint (R3-deep-audio-1); on the Windows default it is
+/// muted whatever the flag says, as that is normally the microphone (R4-deep-audio-1); on any
+/// other endpoint than the saved one (a renumbered fallback, a twin that took its name, another
+/// id) it is muted (R5-deep-audio-1, `audio_mute::opens_other`). Lists not read yet: the flag.
+pub fn mutes(source: &Source, lists: Option<&crate::services::audio_devices::DeviceLists>) -> bool {
+    source.kind == Kind::Input && (source.mic_mute != Some(false) || source.device.trim().is_empty() || crate::services::audio_mute::opens_other(source, lists))
 }
 
 /// The note a line-in on the Windows default carries (strip and device menu).
 pub const LINE_IN_ON_DEFAULT: &str = "Follows the mic hotkey until you pick a device";
 
-/// The warning line under a strip's device button, from its label: a device that is gone, two
-/// endpoints sharing its name (neither is recorded), or a line-in still on the Windows default.
-pub fn strip_note(label: &str, source: &Source) -> Option<&'static str> {
-    if label.ends_with("(not connected)") {
-        Some("Not connected")
-    } else if label.ends_with("rename one in Windows)") {
-        Some("Two devices share this name")
-    } else if line_in_on_default(source) {
-        Some(LINE_IN_ON_DEFAULT)
-    } else {
-        None
+/// The warning line under a strip's device button: a device that is gone, endpoints sharing or
+/// matching its name (none is recorded; counted, R5-deep-audio-4), a line-in that opened another
+/// endpoint than its own (it follows Alt+M, R5-deep-audio-1), or a line-in still on the Windows
+/// default. Lists not read yet: only the last.
+pub fn strip_note(source: &Source, lists: Option<&crate::services::audio_devices::DeviceLists>) -> Option<String> {
+    use crate::services::audio_devices::{Found, found};
+    let names = lists.map(|l| if source.kind.uses_inputs() { l.inputs.as_slice() } else { l.outputs.as_slice() });
+    match found(&source.device, names.filter(|_| source.kind != Kind::App)) {
+        Found::Missing => Some("Not connected".to_owned()),
+        Found::Twins(n) => Some(format!("{n} devices share this name")),
+        Found::Ambiguous(n) => Some(format!("{n} devices match this name")),
+        _ if crate::services::audio_mute::opens_other(source, lists) => Some(crate::services::audio_mute::OPENED_OTHER.to_owned()),
+        _ if line_in_on_default(source) => Some(LINE_IN_ON_DEFAULT.to_owned()),
+        _ => None,
     }
 }
 
@@ -136,6 +144,7 @@ pub fn from_config(value: Option<&Value>) -> Vec<Source> {
                 id: Some(text("id")).filter(|id| !id.trim().is_empty())?,
                 kind: Kind::from_token(&text("kind"))?,
                 device: text("device"),
+                device_id: text("device_id"),
                 exe: text("exe"),
                 name: text("name"),
                 enabled: v.get("enabled").and_then(Value::as_bool).unwrap_or(true),
@@ -154,6 +163,9 @@ pub fn to_config(list: &[Source]) -> Value {
                 let mut entry = json!({ "id": s.id, "kind": s.kind.token(), "device": s.device, "exe": s.exe, "name": s.name, "enabled": s.enabled, "gain_db": s.gain_db });
                 if let Some(on) = s.mic_mute {
                     entry["mic_mute"] = Value::Bool(on);
+                }
+                if !s.device_id.trim().is_empty() {
+                    entry["device_id"] = Value::String(s.device_id.trim().to_owned());
                 }
                 entry
             })
@@ -192,7 +204,7 @@ pub fn with_new(list: &[Source], kind: Kind, exe: &str, app_name: &str) -> Optio
     }
     let base = if kind == Kind::App && !app_name.trim().is_empty() { clip_name(app_name) } else { kind.default_name().to_owned() };
     let mut out = list.to_vec();
-    out.push(Source { id: fresh_id(list, kind), kind, device: String::new(), exe: exe.trim().to_owned(), name: fresh_name(list, &base), enabled: true, gain_db: 0.0, mic_mute: None });
+    out.push(Source { id: fresh_id(list, kind), kind, device: String::new(), device_id: String::new(), exe: exe.trim().to_owned(), name: fresh_name(list, &base), enabled: true, gain_db: 0.0, mic_mute: None });
     Some(out)
 }
 

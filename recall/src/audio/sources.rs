@@ -36,6 +36,11 @@ pub struct SourceSpec {
     pub kind: String,
     #[serde(default)]
     pub device: String,
+    /// The endpoint id (`IMMDevice::GetId`) the Audio page saved with `device` when it was
+    /// picked; "" = none (a config written before the id, or a hand-made one). Only decides
+    /// whether a line-in may skip Alt+M (`endpoints::opened_own`), never which endpoint opens.
+    #[serde(default)]
+    pub device_id: String,
     #[serde(default)]
     pub exe: String,
     pub name: String,
@@ -72,7 +77,7 @@ pub fn gain_of(gain_db: f32) -> f32 {
 }
 
 fn spec(id: &str, kind: &str, name: &str, device: &str, exe: &str) -> SourceSpec {
-    SourceSpec { id: id.into(), kind: kind.into(), device: device.trim().into(), exe: exe.trim().into(), name: name.into(), gain_db: 0.0, mic_mute: None }
+    SourceSpec { device_id: String::new(), id: id.into(), kind: kind.into(), device: device.trim().into(), exe: exe.trim().into(), name: name.into(), gain_db: 0.0, mic_mute: None }
 }
 
 /// The sources in `json`, with every bad entry skipped and logged: one broken entry (a

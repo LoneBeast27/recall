@@ -2,7 +2,7 @@
 use super::*;
 
 fn source(kind: Kind, device: &str, exe: &str) -> Source {
-    Source { id: format!("{}-1", kind.token()), kind, device: device.into(), exe: exe.into(), name: "S".into(), enabled: true, gain_db: 0.0, mic_mute: None }
+    Source { id: format!("{}-1", kind.token()), kind, device: device.into(), device_id: String::new(), exe: exe.into(), name: "S".into(), enabled: true, gain_db: 0.0, mic_mute: None }
 }
 
 #[test]
@@ -138,4 +138,24 @@ fn set_bumps_revision_only_on_visible_change() {
     shared.set(0, -20.01, -10.0, MeterState::Live);
     assert_eq!(shared.revision.load(Ordering::Acquire), 1);
     assert_eq!(shared.readings.lock().unwrap()[0].rms_db, -20.0);
+}
+
+/// 2026-11-07 audit R5-deep-audio-1: the page's copy of the recorder's `opened_own` (`recall`
+/// `audio/own_device_tests.rs`, the same table): the exact saved name, and the saved id if any.
+#[test]
+fn opened_own_needs_the_exact_name_and_the_saved_id() {
+    let table = [
+        ("Mic (Box)", Some("{a}"), "Mic (Box)", "{a}", true),
+        ("Mic (Box)", Some("{a}"), " Mic (Box) ", "", true),
+        ("Mic (Box)", Some("{b}"), "Mic (Box)", "{a}", false),
+        ("Mic (Box)", None, "Mic (Box)", "{a}", false),
+        ("2- Mic (Box)", Some("{a}"), "Mic (Box)", "{a}", false),
+        ("Mic (Box)", Some("{a}"), "3- Mic (Box)", "", false),
+        ("Mic (Box)", Some("{a}"), "", "", false),
+    ];
+    for (opened, id, want, want_id, own) in table {
+        assert_eq!(super::opened_own(opened, id, want, want_id), own, "{opened:?} {id:?} for {want:?} {want_id:?}");
+    }
+    let names = |list: &[&str]| list.iter().map(|n| (*n).to_owned()).collect::<Vec<String>>();
+    assert_eq!(super::stripped_hits(&names(&["4- X", "5- X", "Y"]), "3- X"), 2);
 }

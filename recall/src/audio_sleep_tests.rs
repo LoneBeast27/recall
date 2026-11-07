@@ -23,6 +23,7 @@ fn ring(capacity: usize) -> TrackRing {
         input: false,
         mic_mute: AtomicBool::new(true),
         on_default: true,
+        opened_own: AtomicBool::new(false),
         endpoint: Mutex::new(String::new()),
         rate: RATE,
         channels: 2,

@@ -5,10 +5,11 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
+use wasapi::{DeviceCollection, Direction, SampleType, StreamMode, WaveFormat};
 
 use super::apps::Leveller;
 use super::capture_loop::{silence_to_clock, watch_for, Capture, Clock, Ended, Notices, Watch};
+use super::endpoints::{choose_endpoint, opened_own, Pick};
 use super::{LoopbackTarget, TrackRing};
 
 /// No packet for this long: the source is quiet (loopback sends nothing while nothing
@@ -62,13 +63,50 @@ pub(super) struct Stream {
     device: bool,
     /// Set when a source with no device records the Windows default (`capture_loop::watch_for`).
     watch: Option<Watch>,
+    /// The endpoint is the source's own saved device (`endpoints::opened_own`).
+    own: bool,
+}
+
+/// The endpoint `pick_device` opened.
+struct Picked {
+    dev: wasapi::Device,
+    endpoint: String,
+    /// The Windows default was opened (the stream watches it).
+    on_default: bool,
+    /// It is the saved device itself: exact name, and the saved id when there is one.
+    own: bool,
+}
+
+/// Open what `choose_endpoint` picks for the saved `(device, device_id)`; an input with no
+/// device takes `RECALL_AUDIO_MIC`'s under `RECALL_AUDIO_EXACT`.
+fn pick_device(direction: &Direction, (device, device_id): (&str, &str), input: bool) -> Result<Picked, String> {
+    let collection = DeviceCollection::new(direction).map_err(|e| format!("enumerate: {e}"))?;
+    let n = collection.get_nbr_devices().map_err(|e| e.to_string())?;
+    let exact = std::env::var_os("RECALL_AUDIO_EXACT").is_some();
+    let test_mic = (exact && input).then(|| std::env::var("RECALL_AUDIO_MIC").ok()).flatten();
+    let want = Some(device.trim().to_owned()).filter(|w| !w.is_empty()).or(test_mic).filter(|w| !w.trim().is_empty());
+    let devices: Vec<wasapi::Device> = (0..n).filter_map(|i| collection.get_device_at_index(i).ok()).collect();
+    let names: Vec<String> = devices.iter().map(|d| d.get_friendlyname().unwrap_or_default()).collect();
+    match choose_endpoint(&names, want.as_deref(), exact)? {
+        Pick::Named(i) => {
+            let dev = devices.into_iter().nth(i).expect("index from names");
+            // Against the saved device only: the test mic stands in for the default.
+            let own = opened_own(&names[i], dev.get_id().ok().as_deref(), device, device_id);
+            Ok(Picked { dev, endpoint: names[i].clone(), on_default: false, own })
+        }
+        Pick::Default => {
+            let dev = wasapi::get_default_device(direction).map_err(|e| format!("default endpoint failed: {e}"))?;
+            let name = dev.get_friendlyname().unwrap_or_else(|_| "(default)".into());
+            Ok(Picked { dev, endpoint: format!("{name} (Windows default)"), on_default: true, own: false })
+        }
+    }
 }
 
 /// Open `target`'s process loopback, else the source's endpoint (a named one by its name
 /// only), and start it.
-pub(super) fn open_stream(direction: &Direction, device: &str, ring: &TrackRing, target: &Option<LoopbackTarget>) -> Result<Stream, String> {
+pub(super) fn open_stream(direction: &Direction, (device, device_id): (&str, &str), ring: &TrackRing, target: &Option<LoopbackTarget>) -> Result<Stream, String> {
     let format = WaveFormat::new(32, 32, &SampleType::Float, ring.rate as usize, ring.channels as usize, None);
-    let mut watch = None;
+    let (mut watch, mut own) = (None, false);
     let (mut client, endpoint, buffer_duration_hns) = match target {
         Some(LoopbackTarget { pid, label }) => (
             wasapi::AudioClient::new_application_loopback_client(*pid, true).map_err(|e| format!("process loopback for PID {pid}: {e}"))?,
@@ -78,10 +116,11 @@ pub(super) fn open_stream(direction: &Direction, device: &str, ring: &TrackRing,
             200_000,
         ),
         None => {
-            let (dev, endpoint, on_default) = super::pick_device(direction, device, ring.input)?;
+            let Picked { dev, endpoint, on_default, own: is_own } = pick_device(direction, (device, device_id), ring.input)?;
             if on_default {
                 watch = watch_for(device, dev.get_id().ok());
             }
+            own = is_own;
             let client = dev.get_iaudioclient().map_err(|e| e.to_string())?;
             let (_def_period, min_period) = client.get_device_period().map_err(|e| e.to_string())?;
             (client, endpoint, device_buffer_hns(min_period))
@@ -93,7 +132,7 @@ pub(super) fn open_stream(direction: &Direction, device: &str, ring: &TrackRing,
     let event = Event(client.set_get_eventhandle().map_err(|e| e.to_string())?);
     let started = client.get_audiocaptureclient().and_then(|capture| client.start_stream().map(|()| capture));
     match started {
-        Ok(capture) => Ok(Stream { client, event, capture, endpoint, device: target.is_none(), watch }),
+        Ok(capture) => Ok(Stream { client, event, capture, endpoint, device: target.is_none(), watch, own }),
         Err(e) => {
             // The client still holds the event: release it first, as a Stream's drop does.
             drop(client);
@@ -144,6 +183,10 @@ impl Stream {
 impl Capture for Stream {
     fn endpoint(&self) -> String {
         self.endpoint.clone()
+    }
+
+    fn own(&self) -> bool {
+        self.own
     }
 
     fn run(&mut self, ring: &TrackRing, level: &mut Leveller, clock: &dyn Clock, notices: &dyn Notices) -> Ended {

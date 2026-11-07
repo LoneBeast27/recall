@@ -139,8 +139,8 @@ fn an_old_input_is_muted_by_the_mic_hotkey_whatever_its_form_factor() {
     };
     let old = from_config(Some(&json!([{"id": "mic", "kind": "input", "name": "Mic", "device": "Line (Box One)"}, {"id": "in-2", "kind": "input", "name": "Default"}])));
     assert_eq!((old[0].mic_mute, old[1].mic_mute), (None, None));
-    assert!(mutes(&old[0]), "an old line-level input is muted");
-    assert!(mutes(&old[1]), "an old input on a line-level Windows default is muted");
+    assert!(mutes(&old[0], None), "an old line-level input is muted");
+    assert!(mutes(&old[1], None), "an old input on a line-level Windows default is muted");
     // The form factor is only a hint in the strip menu.
     assert!(windows_says_line_level(&old[0], Some(&lists)) && windows_says_line_level(&old[1], Some(&lists)));
     let mic_endpoint = Source { device: "Mic (Box Two)".into(), ..old[0].clone() };
@@ -150,10 +150,10 @@ fn an_old_input_is_muted_by_the_mic_hotkey_whatever_its_form_factor() {
     let line = with_new_input(&base, false).unwrap();
     let added = line.last().unwrap();
     assert_eq!((added.kind, added.mic_mute, added.name.as_str()), (Kind::Input, Some(false), "Line-in"));
-    assert!(mutes(added), "a new line-in on the Windows default follows the mic hotkey (R4-deep-audio-1)");
-    assert!(!mutes(&Source { device: "Line (Box One)".into(), ..added.clone() }), "a named line-in keeps its sound");
+    assert!(mutes(added, None), "a new line-in on the Windows default follows the mic hotkey (R4-deep-audio-1)");
+    assert!(!mutes(&Source { device: "Line (Box One)".into(), ..added.clone() }, None), "a named line-in keeps its sound");
     let mic = with_new_input(&base, true).unwrap();
-    assert!(mutes(mic.last().unwrap()), "a new microphone is muted");
+    assert!(mutes(mic.last().unwrap(), None), "a new microphone is muted");
 }
 
 /// 2026-11-07 audit R4-deep-audio-1: a line-in or capture card skips Alt+M only on a named device.
@@ -164,31 +164,35 @@ fn a_line_in_follows_the_mic_hotkey_until_it_names_a_device() {
     let base = from_config(Some(&json!([{"id": "game", "kind": "game", "name": "Game"}])));
     let added = with_new_input(&base, false).unwrap().pop().unwrap();
     assert_eq!((added.mic_mute, added.device.as_str()), (Some(false), ""));
-    assert!(mutes(&added), "a new line-in on the Windows default is muted by the mic hotkey");
+    assert!(mutes(&added, None), "a new line-in on the Windows default is muted by the mic hotkey");
     assert!(line_in_on_default(&added), "the strip notes it");
     let named = Source { device: "Line (Box One)".into(), ..added.clone() };
-    assert!(!mutes(&named) && !line_in_on_default(&named), "a named line-in keeps its sound");
+    assert!(!mutes(&named, None) && !line_in_on_default(&named), "a named line-in keeps its sound");
     let reset = Source { device: " ".into(), ..named.clone() };
-    assert!(mutes(&reset) && line_in_on_default(&reset), "set back to the Windows default: follows Alt+M again");
+    assert!(mutes(&reset, None) && line_in_on_default(&reset), "set back to the Windows default: follows Alt+M again");
     let mic = Source { mic_mute: Some(true), ..added.clone() };
-    assert!(mutes(&mic) && !line_in_on_default(&mic), "a microphone: no note");
+    assert!(mutes(&mic, None) && !line_in_on_default(&mic), "a microphone: no note");
     let output = Source { kind: Kind::Output, mic_mute: None, ..added.clone() };
-    assert!(!mutes(&output), "only inputs mute");
+    assert!(!mutes(&output, None), "only inputs mute");
 }
 
 /// The strip's warning line: a line-in on the Windows default says it follows the mic hotkey;
-/// a missing device and twin names keep their own words.
+/// a missing device and twin names keep their own words (counted: R5-deep-audio-4).
 #[test]
 fn the_strip_notes_a_line_in_on_the_windows_default() {
+    use crate::services::audio_devices::DeviceLists;
     let base = from_config(Some(&json!([{"id": "game", "kind": "game", "name": "Game"}])));
     let added = with_new_input(&base, false).unwrap().pop().unwrap();
-    assert_eq!(strip_note("Windows default (Mic (Box Two))", &added), Some(LINE_IN_ON_DEFAULT));
+    assert_eq!(strip_note(&added, None).as_deref(), Some(LINE_IN_ON_DEFAULT));
     let named = Source { device: "Line (Box One)".into(), ..added.clone() };
-    assert_eq!(strip_note("Line (Box One)", &named), None);
-    assert_eq!(strip_note("Line (Box One) (not connected)", &named), Some("Not connected"));
-    assert_eq!(strip_note("Line (Box One) (2 devices have this name; rename one in Windows)", &named), Some("Two devices share this name"));
+    let at = |inputs: &[&str]| DeviceLists { inputs: inputs.iter().map(|n| (*n).to_owned()).collect(), ..DeviceLists::default() };
+    assert_eq!(strip_note(&named, Some(&at(&["Line (Box One)"]))), None);
+    assert_eq!(strip_note(&named, Some(&at(&["Mic (Box Two)"]))).as_deref(), Some("Not connected"));
+    assert_eq!(strip_note(&named, Some(&at(&["Line (Box One)"; 3]))).as_deref(), Some("3 devices share this name"));
+    let renumbered = Source { device: "3- Line (Box One)".into(), ..named.clone() };
+    assert_eq!(strip_note(&renumbered, Some(&at(&["4- Line (Box One)", "5- Line (Box One)"]))).as_deref(), Some("2 devices match this name"), "both connected: ambiguous, not missing");
     let mic = with_new_input(&base, true).unwrap().pop().unwrap();
-    assert_eq!(strip_note("Windows default", &mic), None, "a microphone on the default: no note");
+    assert_eq!(strip_note(&mic, None), None, "a microphone on the default: no note");
 }
 
 /// 2026-11-07 audit R4-deep-audio-2: the "line-level" hint shows only for an endpoint Windows
@@ -202,7 +206,7 @@ fn the_line_level_hint_names_only_line_level_endpoints() {
         default_input_is_line: Some(false),
         ..DeviceLists::default()
     };
-    let at = |device: &str| Source { id: "in-1".into(), kind: Kind::Input, device: device.into(), exe: String::new(), name: "In".into(), enabled: true, gain_db: 0.0, mic_mute: None };
+    let at = |device: &str| Source { id: "in-1".into(), kind: Kind::Input, device: device.into(), device_id: String::new(), exe: String::new(), name: "In".into(), enabled: true, gain_db: 0.0, mic_mute: None };
     assert!(windows_says_line_level(&at("Line (Box One)"), Some(&lists)), "line-level: hint");
     assert!(!windows_says_line_level(&at("Mic (Box Two)"), Some(&lists)), "a microphone: no hint");
     assert!(!windows_says_line_level(&at("Virtual (Box Three)"), Some(&lists)), "an unknown form factor is not called line-level");

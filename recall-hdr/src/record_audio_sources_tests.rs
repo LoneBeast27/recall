@@ -151,3 +151,20 @@ name = \"Mic\"").unwrap();
     assert_eq!(saved.mic_mute, None, "a config written before the flag: muted by Alt+M");
     assert_eq!(AudioSource::default().mic_mute, None, "a new default source: muted by Alt+M");
 }
+
+/// 2026-11-07 audit R5-deep-audio-1: the endpoint id the Audio page saves with a picked device
+/// reaches the engine (a line-in skips Alt+M only on that endpoint), and a new id restarts it.
+#[test]
+fn the_saved_endpoint_id_reaches_the_engine() {
+    let json = serde_json::json!({"id": "line-in", "kind": "input", "name": "Line-in", "device": "Mic (Box)", "device_id": " {id-one} ", "mic_mute": false});
+    let line: AudioSource = serde_json::from_value(json).unwrap();
+    let list = vec![line.clone()];
+    assert!(validate(&list).is_ok());
+    let value = engine_value(&list);
+    assert!(value.contains(r#""device_id":"{id-one}""#), "{value}");
+    let mut other = list.clone();
+    other[0] = serde_json::from_value(serde_json::json!({"id": "line-in", "kind": "input", "name": "Line-in", "device": "Mic (Box)", "device_id": "{id-two}", "mic_mute": false})).unwrap();
+    assert!(changed(&list, &other), "another endpoint id is another track shape");
+    let old: AudioSource = serde_json::from_value(serde_json::json!({"id": "mic", "kind": "input", "name": "Mic", "device": "Mic (Box)"})).unwrap();
+    assert!(!engine_value(&[old]).contains("device_id"), "no id saved: none sent");
+}

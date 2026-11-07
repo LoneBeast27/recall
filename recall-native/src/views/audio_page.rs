@@ -119,8 +119,24 @@ impl Root {
         }
     }
 
-    pub(crate) fn set_source_device(&mut self, id: &str, device: String) {
-        self.edit_source(id, |s| s.device = device);
+    /// A strip's device: its name and, for an input, its endpoint id (a line-in skips Alt+M only
+    /// on that endpoint, R5-deep-audio-1). A line-in moved onto an endpoint Windows lists as a
+    /// microphone gets Alt+M back on, with a toast (R5-deep-audio-2); `index` is its place in
+    /// the inputs list.
+    pub(crate) fn set_source_device(&mut self, id: &str, device: String, device_id: String, index: Option<usize>) {
+        let lists = self.settings_ui.audio.devices.clone();
+        let mut rearmed = false;
+        self.edit_source(id, |s| {
+            if let Some(on) = crate::services::audio_mute::device_pick_effect(s, lists.as_ref(), index) {
+                s.mic_mute = Some(on);
+                rearmed = true;
+            }
+            s.device = device;
+            s.device_id = device_id;
+        });
+        if rearmed {
+            self.show_toast(ToastKind::Info, "Muted by the mic hotkey", Some(crate::services::audio_mute::REARMED.into()));
+        }
     }
 
     /// Whether the mic-mute hotkey silences this input (off: a line-in or capture card).
