@@ -248,3 +248,49 @@ fn queued_saves_that_keep_answering_keep_their_ring() {
     r.apply_envelope(&saved(VALORANT, 30.0), now + s(299));
     assert_eq!(notice(&r).title, "Clip saved", "it lands");
 }
+
+fn engine_writing(bytes: Option<u64>) -> Value {
+    let mut event = json!({"type":"status","source":"VALORANT","fps":60,"buffer_secs":1800.0,"encoder":"h264_nvenc","encoder_error":null});
+    if let Some(bytes) = bytes {
+        event["save_writing"] = json!({"bytes": bytes, "queued": 0});
+    }
+    json!({"mod":"engine","event":event})
+}
+
+#[test]
+fn a_save_whose_bytes_keep_growing_keeps_still_saving_past_120_s() {
+    let now = Instant::now();
+    let s = Duration::from_secs;
+    let mut r = Reducer::new();
+    r.apply_envelope(&status("VALORANT"), now);
+    r.apply_envelope(&saving(1800), now);
+    for t in 1..=265u64 {
+        r.apply_envelope(&engine_writing(Some(t * 42_000_000)), now + s(t));
+        r.tick(now + s(t) + ms(500));
+        let n = notice(&r);
+        assert_eq!(n.save, Some(SavePhase::Saving), "{t} s: the ring holds while the bytes grow");
+        if t >= SAVING_FOR.as_secs() {
+            assert_eq!(n.title, STILL_SAVING, "{t} s");
+        }
+    }
+    r.apply_envelope(&saved(VALORANT, 1800.0), now + s(266));
+    assert_eq!(notice(&r).title, "Clip saved");
+}
+
+#[test]
+fn a_save_whose_bytes_stop_growing_is_unconfirmed_120_s_later() {
+    let now = Instant::now();
+    let s = Duration::from_secs;
+    let mut r = Reducer::new();
+    r.apply_envelope(&status("VALORANT"), now);
+    r.apply_envelope(&saving(1800), now);
+    r.apply_envelope(&engine_writing(Some(1_000)), now + s(50));
+    for t in 51..=169u64 {
+        r.apply_envelope(&engine_writing(Some(1_000)), now + s(t)); // stuck
+        r.tick(now + s(t) + ms(1));
+    }
+    r.tick(now + s(169) + ms(999));
+    assert_eq!(notice(&r).save, Some(SavePhase::Saving), "120 s since the last growth not yet up");
+    r.tick(now + s(170));
+    assert_eq!(notice(&r).title, "Save not confirmed");
+}
