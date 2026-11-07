@@ -355,6 +355,9 @@ impl Controller {
         let hellos = self.supervisor.hello_count();
         if hellos != self.seen_hello {
             self.seen_hello = hellos;
+            // The old engine's exit is queued before the new hello: read it first, so the saves
+            // it lost are reported before the slate is wiped.
+            self.drain_engine_events(now);
             self.activity.engine_restarted();
             self.reapply_engine_intents();
         }

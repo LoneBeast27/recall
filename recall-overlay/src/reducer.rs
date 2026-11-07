@@ -26,8 +26,10 @@ const FAILURE_FOR: Duration = Duration::from_secs(4);
 const MIC_FOR: Duration = Duration::from_secs(2);
 /// 2 s (was 1.5 s): from nothing the pill opens before its text shows.
 const MARK_FOR: Duration = Duration::from_secs(2);
-/// A `saving` with no outcome says "Save not confirmed" after this.
+/// A save in front of the queue with no outcome after this says "Still saving…".
 pub const SAVING_FOR: Duration = Duration::from_secs(30);
+/// ... and "Save not confirmed" after this (the controller's own `SAVE_STALE`).
+pub const CONFIRM_FOR: Duration = Duration::from_secs(120);
 /// Controller notices (game picked up, desktop, paused, waiting, encoder).
 pub const NOTICE_FOR: Duration = Duration::from_secs(3);
 /// The advanced-shortcut hint lives as long as the chord window (the
@@ -184,7 +186,7 @@ impl Reducer {
             if self.transient.as_ref().is_none_or(|t| t.hint.is_none()) {
                 return false; // an action's toast already replaced the hint
             }
-            return self.expire_transient() | self.resume_saving();
+            return self.expire_transient() | self.resume_saving(now);
         }
         let options: Vec<HintOption> = event
             .get("options")
@@ -273,7 +275,7 @@ impl Reducer {
         if self.transient.as_ref().is_some_and(|transient| now >= transient.until) {
             changed |= self.expire_transient();
         }
-        changed |= self.resume_saving();
+        changed |= self.resume_saving(now);
         if self.last_status.is_some_and(|last| now.saturating_duration_since(last) > STALE_AFTER) {
             changed |= self.mark_stale(now);
         }

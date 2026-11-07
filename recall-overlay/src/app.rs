@@ -63,6 +63,8 @@ pub struct Placed {
     /// Where the island may sit: the monitor, or its work area when the game
     /// does not cover it (the taskbar shows).
     pub area: Rect,
+    /// The game picture whose shape keys the HUD scans (`window::Where`).
+    picture: Rect,
     pub spot: Spot,
     pub scale: f32,
     /// Action notices lay out at `scale * grow` (the HUD-aware growth).
@@ -102,7 +104,7 @@ pub struct App {
     spots: Spots,
     pub placed: Option<Placed>,
     /// This base tick's look at the target's monitor and area (`probe_place`).
-    place_probe: Option<(Rect, Rect)>,
+    place_probe: Option<crate::window::Where>,
     poller: Option<StatsPoller>,
     stats_gate: StatsGate,
     last_poll: Option<Instant>,
@@ -234,7 +236,7 @@ impl App {
     fn poll_stats(&mut self, now: Instant) -> bool {
         let (view, session) = (self.reducer.view(), self.reducer.session());
         let pid = session.target_pid.filter(|_| !session.desktop);
-        let in_game = self.smoke.is_some() || game_in_front(pid);
+        let in_game = self.smoke.is_some() || game_in_front(pid, session.target_hwnd.filter(|_| !session.desktop));
         let can_show = island::stats_shown(view, session, in_game);
         if !self.stats_gate.keep(session.overlay_stats, can_show, self.poller.is_some(), now) {
             self.last_poll = None;
@@ -328,7 +330,7 @@ impl App {
 
     fn refresh(&mut self, hwnd: HWND, now: Instant) {
         let (view, session) = (self.reducer.view(), self.reducer.session());
-        let in_game = self.smoke.is_some() || game_in_front(session.target_pid.filter(|_| !session.desktop));
+        let in_game = self.smoke.is_some() || game_in_front(session.target_pid.filter(|_| !session.desktop), session.target_hwnd.filter(|_| !session.desktop));
         let under = island::stats_shown(view, session, in_game);
         let content = self.editor_content().or_else(|| island::content(view, session, in_game));
         if self.trace.enabled() {

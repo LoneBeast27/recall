@@ -1,7 +1,10 @@
-//! Clip saves as the reducer follows them. Each `saving` the controller sends
-//! waits for its own outcome (the engine answers oldest first) for
-//! `SAVING_FOR`; one that never hears back says "Save not confirmed" instead
-//! of vanishing. While a save is still in flight after another's outcome (or
+//! Clip saves as the reducer follows them. The engine writes saves one at a
+//! time and answers oldest first, so only the save in front waits: its wait
+//! starts when it is sent or when the save ahead of it answers. Past
+//! `SAVING_FOR` the ring says "Still saving…"; one that never hears back by
+//! `CONFIRM_FOR` says "Save not confirmed" instead of vanishing. A refusal
+//! (`refused`: never queued) takes no save's place, and an engine rejection
+//! (`rejected`: failed before it was queued for writing) is the newest save's. While a save is still in flight after another's outcome (or
 //! after any other notice), the island goes back to its spinning ring. A
 //! second outcome while the first one's notice still shows counts up ("2
 //! clips saved"), so it reads as a new result. "Clip saved" keeps the game
@@ -13,20 +16,23 @@ use std::time::Instant;
 
 use serde_json::Value;
 
-use super::{truncate, Reducer, FAILURE_FOR, SAVED_FOR, SAVING_FOR};
+use super::{truncate, Reducer, CONFIRM_FOR, FAILURE_FOR, SAVED_FOR, SAVING_FOR};
 use crate::notice::{NoticeView, SavePhase, Tone};
 
 /// The detail line's length cap ("<game> · m:ss").
 const DETAIL_MAX: usize = 40;
 /// What an unanswered save says.
 pub const UNCONFIRMED: &str = "The recorder did not answer";
+/// The ring's title for a save past `SAVING_FOR` (still waiting, not failed).
+pub const STILL_SAVING: &str = "Still saving…";
 
 /// One save the controller sent that the engine has not answered.
 #[derive(Clone, Debug)]
 struct Pending {
     game: String,
     secs: u64,
-    until: Instant,
+    /// When its wait began: sent, or when the save ahead of it answered.
+    since: Instant,
 }
 
 /// What a save's outcome notice says (outcomes of one kind count up).
@@ -61,11 +67,39 @@ impl Saves {
     /// Drops the saves whose wait ran out; returns how many.
     fn overdue(&mut self, now: Instant) -> u32 {
         let mut lost = 0;
-        while self.pending.front().is_some_and(|p| now >= p.until) {
+        while self.pending.front().is_some_and(|p| now >= p.since + CONFIRM_FOR) {
             self.pending.pop_front();
+            self.restart_front(now);
             lost += 1;
         }
         lost
+    }
+
+    /// The save now in front is the one being written: its wait starts now.
+    fn restart_front(&mut self, now: Instant) {
+        if let Some(p) = self.pending.front_mut() {
+            p.since = now;
+        }
+    }
+
+    /// The save an outcome answers: none for a refusal, the newest for an
+    /// engine rejection, else the oldest (and the next one starts its wait).
+    fn answer(&mut self, event: &Value, now: Instant) -> Option<Pending> {
+        let flag = |key: &str| event.get(key).and_then(Value::as_bool) == Some(true);
+        if flag("refused") {
+            return None;
+        }
+        if flag("rejected") && self.pending.len() > 1 {
+            return self.pending.pop_back();
+        }
+        let answered = self.pending.pop_front();
+        self.restart_front(now);
+        answered
+    }
+
+    /// The save in front has waited past `SAVING_FOR`.
+    fn slow(&self, now: Instant) -> bool {
+        self.pending.front().is_some_and(|p| now >= p.since + SAVING_FOR)
     }
 }
 
@@ -98,21 +132,24 @@ impl Reducer {
         let secs = event.get("seconds").and_then(Value::as_u64).unwrap_or(0);
         let name = self.session.target_name.trim();
         let game = if !name.is_empty() { name } else if self.session.desktop { "Desktop" } else { "clip" };
-        self.saves.pending.push_back(Pending { game: game.to_string(), secs, until: now + SAVING_FOR });
-        self.show_saving()
+        self.saves.pending.push_back(Pending { game: game.to_string(), secs, since: now });
+        self.show_saving(now)
     }
 
-    /// The newest save in flight: its ring, held until the last wait ends.
-    fn show_saving(&mut self) -> bool {
+    /// The newest save in flight: its ring ("Still saving…" once the save in
+    /// front is slow), held until the front save's wait ends.
+    fn show_saving(&mut self, now: Instant) -> bool {
         let Some(p) = self.saves.pending.back() else { return false };
-        let (detail, until) = (save_detail(&p.game, p.secs), p.until);
-        let notice = NoticeView::new(Tone::Recording, "Saving", detail.clone(), true).emphasized().saving(SavePhase::Saving);
-        self.set_transient("Saving", detail, until, notice)
+        let detail = save_detail(&p.game, p.secs);
+        let until = self.saves.pending.front().map_or(now, |f| f.since + CONFIRM_FOR);
+        let (tone, title) = if self.saves.slow(now) { (Tone::Neutral, STILL_SAVING) } else { (Tone::Recording, "Saving") };
+        let notice = NoticeView::new(tone, title, detail.clone(), true).emphasized().saving(SavePhase::Saving);
+        self.set_transient(title, detail, until, notice)
     }
 
     /// Back to the ring when nothing else shows and a save is still in flight.
-    pub(super) fn resume_saving(&mut self) -> bool {
-        self.transient.is_none() && self.show_saving()
+    pub(super) fn resume_saving(&mut self, now: Instant) -> bool {
+        self.transient.is_none() && self.show_saving(now)
     }
 
     /// The count for this outcome: one more when the same kind of outcome
@@ -131,7 +168,7 @@ impl Reducer {
 
     /// The engine's `saved`: "Clip saved" over the name the ring showed.
     pub(super) fn apply_saved(&mut self, event: &Value, now: Instant) -> bool {
-        let pending = self.saves.pending.pop_front();
+        let pending = self.saves.answer(event, now);
         let secs = event.get("seconds").and_then(Value::as_f64).unwrap_or(0.0).max(0.0).round() as u64;
         let game = pending.map_or_else(|| slug_name(event), |p| p.game);
         let detail = save_detail(&game, secs);
@@ -140,10 +177,10 @@ impl Reducer {
         self.set_transient(&title, detail, now + SAVED_FOR, notice)
     }
 
-    /// `save_failed` (the engine's, or the controller's when the engine
-    /// stopped with the save in flight).
+    /// `save_failed` (the engine's, or the controller's: a refusal, or the
+    /// engine stopped with the save in flight).
     pub(super) fn apply_save_failed(&mut self, event: &Value, now: Instant) -> bool {
-        self.saves.pending.pop_front();
+        self.saves.answer(event, now);
         let reason = truncate(event.get("reason").and_then(Value::as_str).unwrap_or("unknown error"), 44);
         self.show_failure(Outcome::Failed, 1, reason, now)
     }
@@ -154,11 +191,17 @@ impl Reducer {
         self.set_transient(&title, format!("{title}: {reason}"), now + FAILURE_FOR, notice)
     }
 
-    /// Each tick: saves whose wait ran out say so.
+    /// Each tick: saves whose wait ran out say so, and the ring turns to
+    /// "Still saving…" (or back, when the next save starts its wait).
     pub(super) fn expire_saves(&mut self, now: Instant) -> bool {
-        match self.saves.overdue(now) {
-            0 => false,
-            lost => self.show_failure(Outcome::Unconfirmed, lost, UNCONFIRMED.into(), now),
+        let lost = self.saves.overdue(now);
+        if lost > 0 {
+            return self.show_failure(Outcome::Unconfirmed, lost, UNCONFIRMED.into(), now);
+        }
+        let ring = self.transient.as_ref().and_then(|t| t.notice.as_ref()).filter(|n| n.save == Some(SavePhase::Saving));
+        match ring.map(|n| n.title == STILL_SAVING) {
+            Some(shown) if shown != self.saves.slow(now) => self.show_saving(now),
+            _ => false,
         }
     }
 

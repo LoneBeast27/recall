@@ -171,7 +171,8 @@ fn queue_is_fifo_one_at_a_time_and_rejects_when_full() {
     );
     assert_eq!(
         of_type(&all, "save_failed"),
-        vec![r#"{"type":"save_failed","reason":"previous save still writing"}"#]
+        vec![r#"{"type":"save_failed","reason":"previous save still writing","rejected":true}"#],
+        "the newest save, failed before it was queued: marked so the island ends its ring, not the oldest's"
     );
     let saved = of_type(&all, "saved");
     for (line, p) in saved.iter().zip(&paths) {
