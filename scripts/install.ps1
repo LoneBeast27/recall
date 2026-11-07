@@ -404,7 +404,12 @@ if (-not $NoFrameTiming) {
   }
 }
 
-if (-not $NoShortcut) {
+# A sandbox (RECALL_CONTROLLER_PATH) never repoints the user's real Start menu shortcut or Start
+# with Windows entry at itself: both are skipped, with one line saying so.
+if ($env:RECALL_CONTROLLER_PATH) {
+  $Autostart = [switch]$false
+  'Sandbox install (RECALL_CONTROLLER_PATH): skipped the Start menu shortcut and Start with Windows; the real ones are unchanged.'
+} elseif (-not $NoShortcut) {
   $lnk = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Recall.lnk'
   $shell = New-Object -ComObject WScript.Shell
   $s = $shell.CreateShortcut($lnk)
