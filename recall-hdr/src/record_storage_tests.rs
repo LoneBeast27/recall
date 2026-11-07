@@ -155,6 +155,14 @@ fn edit_sidecars_protect_by_name_or_stem_case_insensitively() {
 }
 
 #[test]
+fn library_favourites_keyed_by_path_protect_the_clip_by_name() {
+    let favs = favourites(br#"{"v:\\recall\\valorant__2026-10-22__14-05-09.mp4":{"favourite":true},"d:\\old\\x.mp4":{"title":"t"},"Apex__2026-10-01__10-00-00.mp4":{"favourite":true}}"#).unwrap();
+    let mut names: Vec<_> = favs.into_iter().collect();
+    names.sort();
+    assert_eq!(names, ["apex__2026-10-01__10-00-00.mp4", "valorant__2026-10-22__14-05-09.mp4"]);
+}
+
+#[test]
 fn library_favourites_parse_and_corruption_is_an_error() {
     let favs = favourites(br#"{"VALORANT__2026-10-22__14-05-09.mp4":{"favourite":true,"title":"ace"},"x.mp4":{"title":"t"},"y.mp4":{"favourite":false}}"#).unwrap();
     assert_eq!(favs, ["valorant__2026-10-22__14-05-09.mp4".to_string()].into_iter().collect());

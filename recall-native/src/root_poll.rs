@@ -102,6 +102,8 @@ impl Root {
             changed = true;
         }
         changed |= self.lib.fit_columns();
+        // Past midnight "Today" becomes "Yesterday" without a new listing.
+        changed |= self.lib.roll_day();
         if self.route == Route::Library {
             self.lib.queue_visible(&self.workers);
             self.lib.note_scroll_depth();

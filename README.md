@@ -65,10 +65,12 @@ powershell -NoProfile -File scripts\install.ps1
   an export. Cancel export stops
   a running export and leaves nothing behind.
 - **Old clips:** Settings → Media → Add folder lists clips from ShadowPlay, Medal, OBS or any
-  folder in the library. Nothing is moved.
+  folder in the library. Nothing is moved. A folder that was the recordings folder before stays
+  Recall's own: Delete still sends its clips to the Recycle Bin and their edits stay beside them.
 - **Clip folders stay in step:** while the app is open, a clip another program copies, renames or
-  deletes in a clip folder shows up within seconds, once the file is finished. A renamed clip
-  loses its favourite and title, which are stored by file name. An imported folder on a USB drive
+  deletes in a clip folder shows up within seconds, once the file is finished. A renamed or moved
+  clip loses its favourite and title, which are stored by the clip's full path (two clips with the
+  same name in different folders keep their own). An imported folder on a USB drive
   may need the app closed before Windows lets you safely remove the drive.
 
 ### FPS numbers (Windows frame timing)

@@ -37,15 +37,12 @@ impl Root {
                 }
                 self.ed.on_exported(result);
             }
-            Done::Deleted(paths, Ok((recycled, hidden))) => {
+            Done::Deleted(report) => {
                 self.lib.deleting = 0;
-                self.lib.forget(&paths);
-                let (title, detail) = crate::services::library::delete_message(recycled, hidden);
-                self.show_toast(ToastKind::Info, title, detail);
-            }
-            Done::Deleted(_, Err(error)) => {
-                self.lib.deleting = 0;
-                self.show_toast(ToastKind::Bad, "Delete failed", Some(error));
+                // Only the clips that really left: one still in use keeps its tile.
+                self.lib.forget(&report.left);
+                let (bad, title, detail) = crate::services::library::delete_toast(&report);
+                self.show_toast(if bad { ToastKind::Bad } else { ToastKind::Info }, title, detail);
             }
             Done::Thumb(path, result) => {
                 self.lib.on_thumb(path, result);
@@ -60,10 +57,10 @@ impl Root {
             Done::VideoCached(clip, Ok(copy)) => self.ed.on_video_cached(&clip, &copy),
             Done::VideoCached(_, Err(_)) => {} // keeps playing from the clip drive
             Done::Proxy(clip, result) => self.ed.on_proxy(&clip, result),
-            Done::Flushed(Ok(crate::backend::Flushed::Current(sidecar))) => self.lib.mark_edited_by_sidecar(&sidecar, true),
-            Done::Flushed(Ok(crate::backend::Flushed::Removed(sidecar))) => self.lib.mark_edited_by_sidecar(&sidecar, false),
-            Done::Flushed(Ok(crate::backend::Flushed::Nothing)) => {}
-            Done::Flushed(Err(error)) => self.show_toast(ToastKind::Bad, "Couldn't save edits beside the clip", Some(error)),
+            Done::Flushed(clip, Ok(crate::backend::Flushed::Current(_))) => self.lib.mark_edited(&clip, true),
+            Done::Flushed(clip, Ok(crate::backend::Flushed::Removed(_))) => self.lib.mark_edited(&clip, false),
+            Done::Flushed(_, Ok(crate::backend::Flushed::Nothing)) => {}
+            Done::Flushed(_, Err(error)) => self.show_toast(ToastKind::Bad, "Couldn't save edits beside the clip", Some(error)),
             Done::Storage(report) => {
                 if let Some(notice) = report.notice {
                     self.show_toast(ToastKind::Info, notice, None);

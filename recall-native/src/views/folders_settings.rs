@@ -158,9 +158,11 @@ impl Root {
         }
         let mut folders = Folders::load();
         folders.recordings = self.folders.recordings.clone().or_else(|| Some(self.recordings_folder()));
-        let added = paths.iter().filter(|p| folders.add(p)).count();
-        // Clips removed from Recall while the folder was listed before come back with it.
-        for path in &paths {
+        let new = folders.add_all(&paths);
+        let added = new.len();
+        // Clips removed from Recall while the folder was listed before come back with it, only
+        // for a folder that was not listed already.
+        for path in &new {
             let _ = crate::services::library::imports::unhide_under(&path.to_string_lossy());
         }
         if added == 0 {
