@@ -143,3 +143,18 @@ fn a_failed_preview_stops_waiting_and_an_unknown_length_counts_as_known() {
     lib.refilter();
     assert!(lib.groups[0].durations_complete, "still complete after a refilter");
 }
+
+#[test]
+fn two_deletes_at_once_keep_the_count_of_the_one_still_running() {
+    // RI-8: the first report set the count to 0 while the second delete still ran.
+    let mut lib = library(&[]);
+    lib.delete_started(2);
+    lib.delete_started(3);
+    assert_eq!(lib.deleting, 5);
+    lib.delete_waiting = true;
+    lib.delete_finished(2);
+    assert_eq!(lib.deleting, 3, "the delete still running keeps its count");
+    assert!(lib.delete_waiting, "and its wait for the edit save");
+    lib.delete_finished(3);
+    assert_eq!((lib.deleting, lib.delete_waiting), (0, false));
+}

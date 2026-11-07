@@ -205,7 +205,7 @@ impl Root {
                 .child(ui::button("delete-confirm", Variant::Primary).child(action).on_click(cx.listener(|this, _, _, cx| {
                     let paths = this.lib.selected_paths();
                     this.lib.confirm_delete = false;
-                    this.lib.deleting = paths.len();
+                    this.lib.delete_started(paths.len());
                     // The folder list the question above was worded from decides owned vs imported.
                     this.workers.job(Job::Delete(paths, this.folders.clone()));
                     cx.notify();
