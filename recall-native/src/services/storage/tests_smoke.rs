@@ -166,6 +166,7 @@ fn storage_smoke_smart_fill() {
             mtime_secs: e.mtime,
             has_thumb: e.thumb.is_some(),
             duration: r.duration,
+            duration_unknown: false,
             game_key: r.game_key,
             favourite: r.favourite,
             edited: r.edited,

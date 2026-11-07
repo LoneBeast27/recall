@@ -34,6 +34,19 @@ fn rec<'a>(lib: &'a LibraryState, path: &str) -> &'a ClipRecord {
 }
 
 #[test]
+fn a_length_no_probe_could_read_is_not_probed_again_on_the_next_start() {
+    let path = r"D:\croken.mkv";
+    let mut first = library(&[path]);
+    first.on_duration(path.into(), None);
+    // The next start: a store holding what the first run learned.
+    let mut store = MetaStore::default();
+    std::mem::swap(&mut store, &mut first.store);
+    let next = library_with(store, &[path]);
+    assert!(next.duration_unknown(path), "shown as unknown at once");
+    assert!(next.duration_queued.contains(path), "never queued for ffprobe again");
+}
+
+#[test]
 fn favouriting_a_big_selection_writes_the_library_once() {
     let paths: Vec<String> = (0..500).map(|i| format!(r"D:\c\G__2026-10-01__10-00-00-{i:03}.mp4")).collect();
     let refs: Vec<&str> = paths.iter().map(String::as_str).collect();

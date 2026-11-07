@@ -47,7 +47,10 @@ pub enum Job {
     /// Leave / close / export: the sidecar beside the clip, only if it changed (`Done::Flushed`).
     FlushProject(ClipInfo, EditPlan, u32, ExportSettings, bool),
     Export(ClipInfo, EditPlan, u32, ExportSettings),
-    Delete(Vec<PathBuf>),
+    /// The clips, and the folder list the confirm dialog used: it alone decides which clips go
+    /// to the Recycle Bin and which are only removed from Recall (never a fresh read of
+    /// folders.json, which could fail and make every clip look like Recall's own).
+    Delete(Vec<PathBuf>, library::folders::Folders),
     /// Free space of the recordings drive (`Done::Drive`).
     DriveSpace,
     /// Drive types + cache usage for Settings (`Done::Storage`).
@@ -81,6 +84,8 @@ pub enum Done {
     Exported(Result<ExportSummary, String>),
     /// Which clips left (Recycle Bin, removed from Recall) and which stayed.
     Deleted(library::DeleteReport),
+    /// The delete waits for an edit save of one of its clips (`Done::Deleted` follows).
+    DeleteWaiting,
     Thumb(String, Result<String, String>),
     Duration(String, Option<f64>),
     Scrub(String, Result<Vec<String>, String>),
@@ -137,11 +142,24 @@ impl Workers {
             }
             io_tx.send(done).is_ok()
         };
-        let library = move |job: Job| {
-            if let Job::Delete(paths) = &job {
-                lib_gate.wait_clear(&paths.iter().map(|p| library::clip_key(&p.to_string_lossy())).collect::<Vec<_>>());
+        let library = move |job: Job| match job {
+            // A delete of a clip with a save or flush pending waits on a thread of its own, so
+            // listings (new saves, added folders) keep coming meanwhile.
+            Job::Delete(paths, folders) => {
+                let keys = paths.iter().map(|p| library::clip_key(&p.to_string_lossy())).collect();
+                let (waiting, done) = (lib_tx.clone(), lib_tx.clone());
+                lib_gate.run_when_clear(
+                    keys,
+                    move || {
+                        let _ = waiting.send(Done::DeleteWaiting);
+                    },
+                    move || {
+                        let _ = done.send(delete_job(&paths, &folders));
+                    },
+                );
+                true
             }
-            lib_tx.send(run_job(job, &lib_tx, Some(&watcher))).is_ok()
+            job => lib_tx.send(run_job(job, &lib_tx, Some(&watcher))).is_ok(),
         };
         let jobs = Lanes::spawn(lane_of, io, library);
 
@@ -209,7 +227,7 @@ impl Workers {
 /// Listings and deletes run apart from the editor's io: an export never holds them up.
 fn lane_of(job: &Job) -> Lane {
     match job {
-        Job::List | Job::Delete(_) => Lane::Library,
+        Job::List | Job::Delete(..) => Lane::Library,
         _ => Lane::Io,
     }
 }
@@ -226,13 +244,16 @@ fn gated_clip(job: &Job) -> Option<String> {
 fn run_job(job: Job, tx: &Sender<Done>, watcher: Option<&ClipWatcher>) -> Done {
     match job {
         Job::List => {
-            // Every folder change ends in a listing. Armed first, so nothing falls between.
+            // One read of folders.json per listing. Every folder change ends in a listing.
+            // Armed first, so nothing falls between.
+            let folders = library::folders::Folders::load();
             if let Some(watcher) = watcher {
-                watcher.set_roots(backend::clip_roots());
+                watcher.set_roots(backend::clip_roots_from(&folders));
+                watcher.set_owned(folders.former_recordings.clone());
             }
-            let result = backend::list_clips_checked().map(|(entries, complete)| {
+            let result = backend::list_clips_checked_from(&folders).map(|(entries, complete)| {
                 prefetch(&entries, complete, tx.clone());
-                Listing { sidecars: library::sidecar_index(&entries), drive: library::drive_space(&backend::library_dir()), entries }
+                Listing { sidecars: library::sidecar_index(&entries), drive: library::drive_space(&backend::library_dir_from(&folders)), entries }
             });
             Done::Clips(result)
         }
@@ -240,11 +261,7 @@ fn run_job(job: Job, tx: &Sender<Done>, watcher: Option<&ClipWatcher>) -> Done {
         Job::SaveProject(info, plan, fps, export) => Done::Saved(backend::save_project(&info, &plan, fps, &export)),
         Job::FlushProject(info, plan, fps, export, ours) => Done::Flushed(info.path.clone(), backend::flush_project(&info, &plan, fps, &export, ours)),
         Job::Export(info, plan, fps, export) => Done::Exported(crate::services::pre_encode::export(&info, &plan, fps, &export)),
-        Job::Delete(paths) => {
-            let report = library::delete_or_hide(&paths);
-            library::folders::forget_scans();
-            Done::Deleted(report)
-        }
+        Job::Delete(paths, folders) => delete_job(&paths, &folders),
         Job::StorageReport => Done::Storage(backend::storage_report(None)),
         Job::ClearCache(kind) => {
             let notice = match storage::clear_kind(kind) {
@@ -254,6 +271,13 @@ fn run_job(job: Job, tx: &Sender<Done>, watcher: Option<&ClipWatcher>) -> Done {
             Done::Storage(backend::storage_report(Some(notice)))
         }
     }
+}
+
+/// Recycle or hide, then drop cached folder walks.
+fn delete_job(paths: &[PathBuf], folders: &library::folders::Folders) -> Done {
+    let report = library::delete_or_hide(paths, folders);
+    library::folders::forget_scans();
+    Done::Deleted(report)
 }
 
 /// Thumbnails / durations are queued on the clip's disk lane at `Visible` priority (the
@@ -327,6 +351,7 @@ fn prefetch(entries: &[ClipEntry], complete: bool, tx: Sender<Done>) {
             mtime_secs: entry.mtime,
             has_thumb: entry.thumb.is_some(),
             duration: record.duration,
+            duration_unknown: record.duration.is_none() && store.duration_unknown(&entry.path, &entry.name, entry.bytes, entry.mtime),
             game_key: record.game_key,
             favourite: record.favourite,
             edited: record.edited,

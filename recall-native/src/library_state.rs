@@ -102,6 +102,8 @@ pub struct LibraryState {
     pub confirm_delete: bool,
     /// Clips on their way to the Recycle Bin (a hard drive can take a while).
     pub deleting: usize,
+    /// The delete waits for an edit save of one of its clips to finish first.
+    pub delete_waiting: bool,
     pub content_width: Rc<Cell<f32>>,
     pub drive: Option<(u64, u64)>,
     pub ssd: crate::ssd_meter::SsdMeter,
@@ -158,6 +160,7 @@ impl LibraryState {
             renaming: None,
             confirm_delete: false,
             deleting: 0,
+            delete_waiting: false,
             content_width: Rc::new(Cell::new(0.0)),
             drive: None,
             ssd: Default::default(),
@@ -192,6 +195,7 @@ impl LibraryState {
         // The meter shows the recordings drive, not whichever drive the newest import is on.
         self.drive = listing.drive;
         self.records = library::records_with(&self.entries, &listing.sidecars, &self.store);
+        self.recall_failed_durations();
         self.reindex();
         self.restore_scroll(anchor);
     }
@@ -356,6 +360,10 @@ impl LibraryState {
         let Some(index) = self.by_path.get(&path).copied() else { return false };
         let Some(secs) = secs else {
             // Neither the MP4 index nor ffprobe could say: a definite "unknown", not "loading".
+            // Kept with the file's size and mtime, so the next start does not probe it again.
+            let record = &self.records[index];
+            self.store.set_duration_unknown(&library::clip_key(&record.path), record.bytes, record.mtime);
+            self.meta_dirty_since.get_or_insert_with(Instant::now);
             self.duration_failed.insert(path);
             self.count_failed_durations();
             return true;

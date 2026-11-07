@@ -184,7 +184,8 @@ impl Root {
 
     fn remove_clip_folder(&mut self, folder: &str) {
         let mut folders = Folders::load();
-        folders.remove(folder);
+        // Gone from the library, and no longer a folder Recall manages.
+        folders.forget(folder);
         match folders.save() {
             Ok(()) => {
                 self.folders = folders;
@@ -195,6 +196,51 @@ impl Root {
             }
             Err(error) => self.show_toast(ToastKind::Bad, "Couldn't remove the folder", Some(error)),
         }
+    }
+
+    /// Settings → Folders Recall manages → remove: the folder's clips stay listed, but Delete
+    /// now only removes them from Recall (they count as another recorder's).
+    fn release_managed_folder(&mut self, folder: &str) {
+        let mut folders = self.folders.clone();
+        if !folders.release(folder) {
+            return;
+        }
+        match folders.save() {
+            Ok(()) => {
+                self.folders = folders;
+                crate::services::library::folders::forget_scans();
+                self.workers.job(Job::List);
+                self.show_toast(ToastKind::Info, "Recall no longer manages that folder", Some("Its clips still show. Delete now only removes them from Recall.".into()));
+            }
+            Err(error) => self.show_toast(ToastKind::Bad, "Couldn't update the library folders", Some(error)),
+        }
+    }
+
+    /// "Folders Recall manages": every folder that was the recordings folder before, so its
+    /// clips' Delete-to-Recycle-Bin is never hidden from the user. Empty when there are none.
+    fn render_managed_folders(&mut self, recordings: &str, cx: &mut Context<Self>) -> Option<Div> {
+        let managed = self.folders.managed(recordings);
+        if managed.is_empty() {
+            return None;
+        }
+        let mut list = div()
+            .pt(px(16.))
+            .flex()
+            .flex_col()
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("Folders Recall manages"))
+            .child(div().pt(px(2.)).text_size(px(12.)).text_color(c(theme::TERTIARY)).child(MANAGED_NOTE));
+        for (i, folder) in managed.into_iter().enumerate() {
+            let name = std::path::Path::new(&folder).file_name().map_or_else(|| folder.clone(), |n| n.to_string_lossy().into_owned());
+            let release = folder.clone();
+            let row = folder_row(("managed", i), &name, &folder, "Recycle Bin on delete".into(), false, cx).child(
+                ui::icon_button((SharedString::from(format!("managed-{i}-release")), 0usize), Icon::X, 28., theme::MUTED, false).on_click(cx.listener(move |this, _, _, cx| {
+                    this.release_managed_folder(&release);
+                    cx.notify();
+                })),
+            );
+            list = list.child(row);
+        }
+        Some(list)
     }
 
     pub fn render_folder_section(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -224,7 +270,8 @@ impl Root {
             })))
             .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(c(theme::TERTIARY)).child("Bring in old clips from ShadowPlay, SteelSeries, Medal or OBS. Files stay as they are; videos made in an editor like Premiere Pro are skipped."));
 
-        vec![section_title("Clip folders"), crate::views::pages::card().child(list).child(add).into_any_element()]
+        let managed = self.render_managed_folders(&recordings, cx);
+        vec![section_title("Clip folders"), crate::views::pages::card().child(list).child(add).children(managed).into_any_element()]
     }
 }
 
@@ -261,6 +308,9 @@ fn folder_row(id: impl Into<gpui::ElementId> + Clone, title: &str, path: &str, c
             })))
         })
 }
+
+/// Why a folder is in "Folders Recall manages", and what removing it does.
+const MANAGED_NOTE: &str = "Your recordings folder was here before. Deleting a clip saved directly in it moves it to the Recycle Bin, and its edits are saved beside it. Remove a folder to treat it like any other imported folder.";
 
 /// `path` lies inside `folder` (case-insensitive, no allocation).
 pub(crate) fn inside(path: &str, folder: &str) -> bool {

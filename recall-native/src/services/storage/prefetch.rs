@@ -40,6 +40,8 @@ pub struct PrefetchClip {
     pub has_thumb: bool,
     /// Cached duration (metadata store), if any.
     pub duration: Option<f64>,
+    /// An earlier probe of this exact file found no length (metadata store): not probed again.
+    pub duration_unknown: bool,
     pub game_key: String,
     pub favourite: bool,
     pub edited: bool,
@@ -128,7 +130,7 @@ pub(super) fn plan(clips: &[PrefetchClip], ranked: &[usize], cached: &dyn Fn(Ste
         if !clip.has_thumb && !cached(Step::Thumb, clip) {
             order.push((Step::Thumb, index));
         }
-        if clip.duration.is_none() {
+        if clip.duration.is_none() && !clip.duration_unknown {
             order.push((Step::Duration, index));
         }
     }

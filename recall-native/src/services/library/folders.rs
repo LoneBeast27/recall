@@ -144,6 +144,39 @@ impl Folders {
         self.imported.retain(|f| folder_key(f) != key);
     }
 
+    /// Settings → Clip folders → remove: the folder leaves the library and is no longer one
+    /// Recall manages (re-adding it later lists it as an ordinary imported folder).
+    pub fn forget(&mut self, folder: &str) {
+        self.remove(folder);
+        self.release(folder);
+    }
+
+    /// Settings → Folders Recall manages → remove: its clips stay listed but count as imported
+    /// (Delete only removes them from Recall). True when it was managed.
+    pub fn release(&mut self, folder: &str) -> bool {
+        let key = folder_key(folder);
+        let before = self.former_recordings.len();
+        self.former_recordings.retain(|f| folder_key(f) != key);
+        self.former_recordings.len() != before
+    }
+
+    /// The former recordings folders Settings lists as "Folders Recall manages" (the current
+    /// recordings folder has its own row).
+    pub fn managed(&self, recordings: &str) -> Vec<String> {
+        let current = folder_key(recordings);
+        self.former_recordings.iter().filter(|f| folder_key(f) != current).cloned().collect()
+    }
+
+    /// The recordings folder becomes `new`; `old`, the folder it pointed at, stays Recall's own.
+    /// Every recordings change goes through here (`change_recordings`, `sync_recordings_folder`,
+    /// later `folders_sync::retarget` once per old folder), so no change forgets to retire one.
+    pub fn move_recordings(&mut self, new: &str, old: Option<&str>) {
+        if let Some(old) = old.filter(|old| folder_key(old) != folder_key(new)) {
+            self.retire_recordings(old);
+        }
+        self.recordings = Some(new.to_owned());
+    }
+
     /// Remembers `folder` as a former recordings folder (once).
     pub fn retire_recordings(&mut self, folder: &str) {
         let key = folder_key(folder);
@@ -156,8 +189,7 @@ impl Folders {
     /// showing, and stays Recall-owned. True when `old` was added to the list.
     pub fn change_recordings(&mut self, new: &str, old: &str) -> bool {
         self.remove(new);
-        self.recordings = Some(new.to_owned());
-        self.retire_recordings(old);
+        self.move_recordings(new, Some(old));
         self.add(Path::new(old))
     }
 
@@ -400,6 +432,25 @@ mod tests {
         assert_eq!(folders.former_recordings, [r"E:\Clips".to_owned(), r"F:\New".to_owned()]);
         let recordings = Path::new(r"E:\Clips");
         assert!(!super::super::imports::is_imported(r"F:\New\VALORANT__2026-11-01__10-00-00.mp4", recordings, &folders.imported, &folders.former_recordings));
+    }
+
+    #[test]
+    fn a_managed_folder_can_be_released_or_forgotten() {
+        let mut folders = Folders { recordings: Some(r"E:\Clips".into()), ..Folders::default() };
+        folders.change_recordings(r"F:\New", r"E:\Clips");
+        folders.move_recordings(r"G:\Third", Some(r"F:\New"));
+        assert_eq!(folders.managed(r"G:\Third"), [r"E:\Clips".to_owned(), r"F:\New".to_owned()], "shown, not hidden");
+        let recordings = Path::new(r"G:\Third");
+        let clip = r"E:\Clips\VALORANT__2026-11-01__10-00-00.mp4";
+        // Removing it from "Folders Recall manages": still listed, but imported now.
+        assert!(folders.release(r"e:\clips\"));
+        assert_eq!(folders.imported, [r"E:\Clips".to_owned()]);
+        assert!(super::super::imports::is_imported(clip, recordings, &folders.imported, &folders.former_recordings));
+        // Removing a folder from Clip folders drops both.
+        folders.change_recordings(r"H:\Fourth", r"G:\Third");
+        folders.forget(r"G:\Third");
+        assert!(!folders.imported.iter().any(|f| f == r"G:\Third") && !folders.former_recordings.iter().any(|f| f == r"G:\Third"));
+        assert_eq!(folders.managed(r"H:\Fourth"), [r"F:\New".to_owned()]);
     }
 
     #[test]
