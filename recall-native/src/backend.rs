@@ -315,15 +315,11 @@ pub fn read_marks(clip:&str)->Vec<f64>{
     let mut marks:Vec<f64>=value.get("marks").and_then(|m|m.as_array()).map(|a|a.iter().filter_map(|v|v.as_f64()).filter(|t|t.is_finite()&&*t>=0.0).collect()).unwrap_or_default();
     marks.sort_by(f64::total_cmp);marks
 }
-fn working_path(info:&ClipInfo)->Result<PathBuf,String>{
-    let name=Path::new(&info.path).file_name().ok_or("source has no filename")?.to_string_lossy().into_owned();
-    Ok(storage::working_copy_path(&storage::cache_root(),&name,info.source_bytes,info.source_modified_ms/1000))
-}
 /// Newer of the SSD working copy and the sidecar (falling back to the other when the newer one is invalid).
 /// The project to open, a warning, and whether this session owns the sidecar: a sidecar that
 /// exists but cannot be read or loaded may hold edits, so a later flush must leave it alone.
 pub(crate) fn load_project(info:&ClipInfo)->(Option<Project>,Option<String>,bool,bool){
-    let (Ok(working),Ok(sidecar))=(working_path(info),sidecar(&info.path))else{return(None,None,false,false)};
+    let (Ok(working),Ok(sidecar))=(working::load_path(info),sidecar(&info.path))else{return(None,None,false,false)};
     let lane_sidecar=sidecar.clone();
     let (sidecar_ms,sidecar_bytes)=storage::run_io(Path::new(&info.path),Priority::Interactive,move||(storage::projects_modified_ms(&lane_sidecar),std::fs::read(&lane_sidecar).ok())).unwrap_or((None,None));
     let parse=|bytes:&[u8],from:ProjectSource|serde_json::from_slice::<Project>(bytes).map_err(|e|e.to_string()).and_then(|p|{validate_project(&p,info,from)?;Ok(p)});
@@ -491,6 +487,8 @@ fn export_limit(plan:&EditPlan,fps:u32)->Duration{
 }
 #[path="backend_export.rs"] mod run_export;
 #[path="backend_sidecar.rs"] mod sidecar_flush;
+#[path="backend_working.rs"] mod working;
+use working::working_path;
 pub use run_export::export_clip;
 pub(crate) use run_export::{engine_export,export_cancelled,export_queued,export_target};
 /// Drive types and cache usage for Settings (walks the cache: call from a worker thread).
