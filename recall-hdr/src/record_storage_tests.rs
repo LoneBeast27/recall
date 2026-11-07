@@ -114,7 +114,8 @@ fn a_bad_copy_newer_than_the_library_cancels_the_run() {
         assert!(err.contains("quarantined"), "{err}");
         set_mtime(&bad, 1_000);
     }
-    assert!(favourites_at(&lib).unwrap().is_empty(), "the library was written after every .bad: known");
+    let favs = favourites_at(&lib).expect("the library was written after every .bad: known");
+    assert!(favs.contains("g__2026-10-22__14-05-09.mp4"), "the .bad copies' favourites still count: {favs:?}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

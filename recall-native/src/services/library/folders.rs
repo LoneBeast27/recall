@@ -51,6 +51,9 @@ pub struct Folders {
     /// a sync client), so a save would replace the user's folders with this empty list.
     #[serde(skip)]
     pub(crate) write_block: Option<String>,
+    /// The notice to show once: folders.json was damaged; what was read back of it.
+    #[serde(skip)]
+    pub damaged: Option<String>,
 }
 
 /// One clip found on disk.
@@ -76,17 +79,32 @@ impl Folders {
         folders_path().map(|p| Self::load_from(&p)).unwrap_or_default()
     }
 
-    /// Missing -> none. Damaged -> kept as a dated `.bad`, none. Unreadable -> none, and
+    /// Missing -> none. Damaged -> kept as a dated `.bad`; the folders still readable in it
+    /// are kept and [`Folders::damaged`] says so. Unreadable -> none, and
     /// [`Folders::save_to`] refuses to replace the file.
     pub(crate) fn load_from(path: &Path) -> Self {
+        let now = std::time::SystemTime::now();
+        crate::services::durable::sweep_temps(path, now);
         match std::fs::read(path) {
             Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| {
-                crate::services::durable::quarantine(path, std::time::SystemTime::now(), crate::services::durable::Keep::Move);
-                Self::default()
+                let backup = crate::services::durable::quarantine(path, now, crate::services::durable::Keep::Move);
+                Self::salvage(&bytes, backup.as_deref())
             }),
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
             Err(error) => Self { write_block: Some(format!("folders.json could not be read ({error}); not saved")), ..Self::default() },
         }
+    }
+
+    /// The folders still readable in a damaged file, and the notice that says what was lost.
+    fn salvage(bytes: &[u8], backup: Option<&Path>) -> Self {
+        let found = crate::services::lenient_json::partial_object(bytes);
+        let text = |v: &serde_json::Value| v.as_str().map(str::to_owned);
+        let recordings = found.get("recordings").and_then(text);
+        let imported: Vec<String> = found.get("imported").and_then(|v| v.as_array()).map(|list| list.iter().filter_map(text).collect()).unwrap_or_default();
+        let noun = if imported.len() == 1 { "folder" } else { "folders" };
+        let kept = backup.and_then(Path::file_name).map(|n| format!(" The damaged file is kept as {}.", n.to_string_lossy())).unwrap_or_default();
+        let damaged = Some(format!("{} imported {noun} read back; add any missing ones again in Settings.{kept}", imported.len()));
+        Self { recordings, imported, damaged, ..Self::default() }
     }
 
     pub fn save(&self) -> Result<(), String> {

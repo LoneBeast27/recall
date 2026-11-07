@@ -17,6 +17,7 @@ mod names;
 mod scrub;
 mod settle;
 mod store;
+mod store_damage;
 pub mod watch;
 mod watch_win;
 mod win;
@@ -26,6 +27,8 @@ mod tests;
 mod tests_io;
 #[cfg(test)]
 mod tests_persist;
+#[cfg(test)]
+mod tests_damage;
 #[cfg(test)]
 mod tests_settle;
 #[cfg(test)]
@@ -310,10 +313,13 @@ pub struct MetaStore {
     dirty: bool,
     /// Why writes are refused (an unreadable existing file must not be overwritten).
     write_block: Option<String>,
-    /// The file was damaged and kept as `.bad`: background entries (durations, played)
-    /// stay in memory until the user changes something, so a fresh file without the old
-    /// favourites never appears on its own (the storage limit reads it).
-    hold: bool,
+    /// The file was damaged and kept as `.bad` and the user has not pressed "Keep going"
+    /// on the notice yet: background entries (durations, played) stay in memory, so a
+    /// fresh file without the old favourites never appears on its own (the storage limit
+    /// reads it). Survives restarts (`store_damage`).
+    damage: Option<store_damage::Damage>,
+    /// Writes in order, the background flush off the UI thread.
+    writer: std::sync::Arc<crate::services::ordered_write::OrderedWriter>,
 }
 
 /// Reads an MP4's duration from its `moov/mvhd` box without decoding.

@@ -18,6 +18,8 @@ const CONTENT_PAD: f32 = 24.0;
 mod grid;
 #[path = "library_sidebar.rs"]
 mod sidebar;
+#[path = "library_damage.rs"]
+mod damage;
 
 impl Root {
     /// Fixed frame for every non-editor page: the same sidebar and the same panel,
@@ -32,6 +34,7 @@ impl Root {
                 .flex()
                 .flex_col()
                 .child(self.render_library_header(window, cx))
+                .children(self.render_library_damage(cx))
                 .child(self.render_library_body(cx))
                 .into_any_element(),
         };
