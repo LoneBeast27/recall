@@ -10,13 +10,13 @@
 //!  "bookmark_hotkey":S,"screenshot_hotkey":S,"record_hotkey":S,"stats_hotkey":S,"overlay_hotkey":S,"editor_hotkey":S,  // "" = off
 //!  "hotkey_problems":[S],   // hotkeys that did not register (taken by another app)
 //!  "mic_muted":B,
-//!  "long_recording":{"active":B,"path":S|null,"started_secs":F|null},  // Unix seconds
+//!  "long_recording":{"active":B,"path":S|null,"started_secs":F|null,"elapsed_secs":F},  // Unix seconds; elapsed: monotonic, as of this line
 //!  "pending_restart":B,   // a settings restart / retarget waits for a save / long recording to end
 //!  "overlay":{"enabled":B,"corner":S,"running":B,"stats_style":S},"autostart":B,
 //!  "overlay_stats":B,     // the performance-stats island is on
 //!  "fps_source":"etw|no_permission|off",   // `frame_timing` (off while stats are off)
 //!  "storage":{"cap_gb":N},
-//!  "drain":{"name":S,"total_secs":N,"ends_unix_ms":N}|null,  // `record_drain`: the closed game's last clip
+//!  "drain":{"name":S,"total_secs":N,"ends_unix_ms":N,"remaining_secs":F}|null,  // `record_drain`: the closed game's last clip
 //!  "hdr":{"available":B,"display":S|null,"hdr_on":B,"manual_pin":B,"auto":B}}
 //! ```
 
@@ -146,6 +146,20 @@ pub fn status_json(i: &StatusInputs) -> Value {
         "hdr": i.hdr.to_json(),
         "drain": drain,
     })
+}
+
+/// The status line with its per-tick clocks (`drain.remaining_secs`,
+/// `long_recording.elapsed_secs`) left out: a status is re-broadcast only when
+/// this changes, and each one sent carries fresh clocks.
+pub fn dedup_key(status: &Value) -> String {
+    let mut key = status.clone();
+    if let Some(drain) = key.get_mut("drain").and_then(Value::as_object_mut) {
+        drain.remove("remaining_secs");
+    }
+    if let Some(long) = key.get_mut("long_recording").and_then(Value::as_object_mut) {
+        long.remove("elapsed_secs");
+    }
+    key.to_string()
 }
 
 /// The tray status line for a state.
@@ -326,5 +340,17 @@ mod tests {
         let c: Value = serde_json::from_str(&config_event(&Config::default())).unwrap();
         assert_eq!(c["type"], "config");
         assert_eq!(c["config"]["recording"]["buffer_secs"], 120);
+    }
+
+    #[test]
+    fn the_ticking_clocks_do_not_re_broadcast_the_status() {
+        let line = |left: f64, elapsed: f64, name: &str| json!({"type":"status","state":"draining",
+            "drain":{"name":name,"total_secs":120,"ends_unix_ms":5,"remaining_secs":left},
+            "long_recording":{"active":true,"path":"p","started_secs":1.0,"elapsed_secs":elapsed}});
+        assert_eq!(dedup_key(&line(120.0, 3.0, "g")), dedup_key(&line(117.0, 6.0, "g")), "only the clocks moved");
+        assert_ne!(dedup_key(&line(120.0, 3.0, "g")), dedup_key(&line(120.0, 3.0, "h")));
+        assert!(!dedup_key(&line(1.0, 1.0, "g")).contains("remaining_secs"));
+        let idle = json!({"type":"status","drain":null,"long_recording":{"active":false,"path":null,"started_secs":null}});
+        assert_eq!(dedup_key(&idle), idle.to_string());
     }
 }

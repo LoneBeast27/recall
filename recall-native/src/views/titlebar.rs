@@ -171,8 +171,7 @@ impl Root {
         // The game closed: its last clip stays saveable while this counts down to 0:00.
         let drain = session
             .filter(|s| s.state == "draining")
-            .and_then(|s| s.drain.as_ref())
-            .map(|d| (d, d.remaining_secs(daemon::unix_ms())))
+            .and_then(|s| Some((s.drain.as_ref()?, s.drain_left(daemon::unix_ms(), std::time::Instant::now())?)))
             .filter(|(_, left)| *left > 0);
         let waiting = drain.is_none() && session.is_some_and(|s| s.state == "waiting" || s.state == "draining");
         let name = drain
@@ -255,7 +254,7 @@ impl Root {
         });
         if long.active {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
-            let elapsed = (now - long.started_secs).max(0.0);
+            let elapsed = long.elapsed_at(now, session.and_then(|s| s.since_status(std::time::Instant::now())));
             return ui::button("long-rec", Variant::Secondary)
                 .h(px(30.))
                 .gap(px(8.))

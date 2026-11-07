@@ -242,6 +242,10 @@ impl State {
 
     fn reparse_session(&mut self) {
         self.snapshot.session = self.session_raw.as_ref().map(lenient::<SessionStatus>);
+        // The status's countdown fields are as of the last `session` status line.
+        if let Some(session) = self.snapshot.session.as_mut() {
+            session.received = super::Arrival(self.last_status);
+        }
     }
 }
 

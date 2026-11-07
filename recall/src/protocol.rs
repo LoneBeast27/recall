@@ -279,13 +279,15 @@ pub fn set_observer(observer: impl Fn(&Outbound) + Send + Sync + 'static) {
     let _ = OBSERVER.set(Box::new(observer));
 }
 
-/// Serialize and print one outbound message as a JSON line.
+/// Serialize and print one outbound message as a JSON line. A closed stdout
+/// (the controller is gone) is ignored, not a panic: stdin EOF quits cleanly.
 pub fn emit(msg: &Outbound) {
+    use std::io::Write;
     if let Some(observer) = OBSERVER.get() {
         observer(msg);
     }
     if let Ok(line) = serde_json::to_string(msg) {
-        println!("{line}");
+        let _ = writeln!(std::io::stdout().lock(), "{line}");
     }
 }
 
