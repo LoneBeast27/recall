@@ -12,7 +12,6 @@
 //! `Saved` then reports the FINAL path with `staged: true` and the
 //! `recall-mover` thread (`mover.rs`) moves the clip there in the background.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc::{
@@ -325,21 +324,6 @@ impl Worker {
             self.take(&job);
             // Answered (after its event went out): `status.save_writing` no longer counts it.
             self.jobs.fetch_sub(1, Relaxed);
-        }
-    }
-
-    fn take(&mut self, job: &SaveJob) {
-        if self.abort.load(Relaxed) {
-            self.events.save_failed(QUIT_BEFORE_START);
-            return;
-        }
-        let outcome = catch_unwind(AssertUnwindSafe(|| self.process(job)));
-        if outcome.is_err() {
-            // A panicking stage must not kill the saver or leave a half file.
-            if let Some(part) = self.current.lock().unwrap_or_else(|p| p.into_inner()).take() {
-                let _ = std::fs::remove_file(part);
-            }
-            self.events.save_failed("internal error while writing the clip");
         }
     }
 
