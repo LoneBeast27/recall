@@ -133,8 +133,8 @@ fn an_old_input_is_muted_by_the_mic_hotkey_whatever_its_form_factor() {
     // The form factor (injected): "Line (Box One)" is line-level, so it is not a microphone.
     let lists = DeviceLists {
         inputs: vec!["Line (Box One)".into(), "Mic (Box Two)".into()],
-        mic_inputs: vec!["Mic (Box Two)".into()],
-        default_input_is_mic: Some(false),
+        line_inputs: vec!["Line (Box One)".into()],
+        default_input_is_line: Some(true),
         ..DeviceLists::default()
     };
     let old = from_config(Some(&json!([{"id": "mic", "kind": "input", "name": "Mic", "device": "Line (Box One)"}, {"id": "in-2", "kind": "input", "name": "Default"}])));
@@ -142,17 +142,74 @@ fn an_old_input_is_muted_by_the_mic_hotkey_whatever_its_form_factor() {
     assert!(mutes(&old[0]), "an old line-level input is muted");
     assert!(mutes(&old[1]), "an old input on a line-level Windows default is muted");
     // The form factor is only a hint in the strip menu.
-    assert!(windows_says_not_a_mic(&old[0], Some(&lists)) && windows_says_not_a_mic(&old[1], Some(&lists)));
+    assert!(windows_says_line_level(&old[0], Some(&lists)) && windows_says_line_level(&old[1], Some(&lists)));
     let mic_endpoint = Source { device: "Mic (Box Two)".into(), ..old[0].clone() };
-    assert!(!windows_says_not_a_mic(&mic_endpoint, Some(&lists)), "a microphone endpoint: no hint");
-    assert!(!windows_says_not_a_mic(&old[0], None), "lists not read yet: no hint");
+    assert!(!windows_says_line_level(&mic_endpoint, Some(&lists)), "a microphone endpoint: no hint");
+    assert!(!windows_says_line_level(&old[0], None), "lists not read yet: no hint");
     let base = from_config(Some(&json!([{"id": "game", "kind": "game", "name": "Game"}])));
     let line = with_new_input(&base, false).unwrap();
     let added = line.last().unwrap();
     assert_eq!((added.kind, added.mic_mute, added.name.as_str()), (Kind::Input, Some(false), "Line-in"));
-    assert!(!mutes(added), "a new line-in keeps its sound");
+    assert!(mutes(added), "a new line-in on the Windows default follows the mic hotkey (R4-deep-audio-1)");
+    assert!(!mutes(&Source { device: "Line (Box One)".into(), ..added.clone() }), "a named line-in keeps its sound");
     let mic = with_new_input(&base, true).unwrap();
     assert!(mutes(mic.last().unwrap()), "a new microphone is muted");
+}
+
+/// 2026-11-07 audit R4-deep-audio-1: a line-in or capture card skips Alt+M only on a named device.
+/// On the Windows default (a new "Line-in", or one set back to it) it records the default input,
+/// normally the user's microphone, so it follows the mic hotkey and the strip says so.
+#[test]
+fn a_line_in_follows_the_mic_hotkey_until_it_names_a_device() {
+    let base = from_config(Some(&json!([{"id": "game", "kind": "game", "name": "Game"}])));
+    let added = with_new_input(&base, false).unwrap().pop().unwrap();
+    assert_eq!((added.mic_mute, added.device.as_str()), (Some(false), ""));
+    assert!(mutes(&added), "a new line-in on the Windows default is muted by the mic hotkey");
+    assert!(line_in_on_default(&added), "the strip notes it");
+    let named = Source { device: "Line (Box One)".into(), ..added.clone() };
+    assert!(!mutes(&named) && !line_in_on_default(&named), "a named line-in keeps its sound");
+    let reset = Source { device: " ".into(), ..named.clone() };
+    assert!(mutes(&reset) && line_in_on_default(&reset), "set back to the Windows default: follows Alt+M again");
+    let mic = Source { mic_mute: Some(true), ..added.clone() };
+    assert!(mutes(&mic) && !line_in_on_default(&mic), "a microphone: no note");
+    let output = Source { kind: Kind::Output, mic_mute: None, ..added.clone() };
+    assert!(!mutes(&output), "only inputs mute");
+}
+
+/// The strip's warning line: a line-in on the Windows default says it follows the mic hotkey;
+/// a missing device and twin names keep their own words.
+#[test]
+fn the_strip_notes_a_line_in_on_the_windows_default() {
+    let base = from_config(Some(&json!([{"id": "game", "kind": "game", "name": "Game"}])));
+    let added = with_new_input(&base, false).unwrap().pop().unwrap();
+    assert_eq!(strip_note("Windows default (Mic (Box Two))", &added), Some(LINE_IN_ON_DEFAULT));
+    let named = Source { device: "Line (Box One)".into(), ..added.clone() };
+    assert_eq!(strip_note("Line (Box One)", &named), None);
+    assert_eq!(strip_note("Line (Box One) (not connected)", &named), Some("Not connected"));
+    assert_eq!(strip_note("Line (Box One) (2 devices have this name; rename one in Windows)", &named), Some("Two devices share this name"));
+    let mic = with_new_input(&base, true).unwrap().pop().unwrap();
+    assert_eq!(strip_note("Windows default", &mic), None, "a microphone on the default: no note");
+}
+
+/// 2026-11-07 audit R4-deep-audio-2: the "line-level" hint shows only for an endpoint Windows
+/// calls line-level, not for an unknown (many virtual mics), S/PDIF or HDMI one.
+#[test]
+fn the_line_level_hint_names_only_line_level_endpoints() {
+    use crate::services::audio_devices::DeviceLists;
+    let lists = DeviceLists {
+        inputs: vec!["Line (Box One)".into(), "Mic (Box Two)".into(), "Virtual (Box Three)".into()],
+        line_inputs: vec!["Line (Box One)".into()],
+        default_input_is_line: Some(false),
+        ..DeviceLists::default()
+    };
+    let at = |device: &str| Source { id: "in-1".into(), kind: Kind::Input, device: device.into(), exe: String::new(), name: "In".into(), enabled: true, gain_db: 0.0, mic_mute: None };
+    assert!(windows_says_line_level(&at("Line (Box One)"), Some(&lists)), "line-level: hint");
+    assert!(!windows_says_line_level(&at("Mic (Box Two)"), Some(&lists)), "a microphone: no hint");
+    assert!(!windows_says_line_level(&at("Virtual (Box Three)"), Some(&lists)), "an unknown form factor is not called line-level");
+    assert!(!windows_says_line_level(&at(""), Some(&lists)), "a default that is not line-level: no hint");
+    let line_default = DeviceLists { default_input_is_line: Some(true), ..lists.clone() };
+    assert!(windows_says_line_level(&at(""), Some(&line_default)), "a line-level default: hint");
+    assert!(!windows_says_line_level(&at("Line (Box One)"), None), "lists not read yet: no hint");
 }
 
 /// 2026-11-07 audit R2-deep-audio-5: a repeated id (case-insensitive) is shown once, as the

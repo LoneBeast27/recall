@@ -161,13 +161,13 @@ impl Root {
         let menu_open = self.settings_ui.audio.menu == Some(StripMenu::Device(id.clone()));
         let label = self.source_label(source);
         // A saved device that is gone records silence until it is back (its meter shows nothing).
-        // Every strip keeps this line so meters line up.
+        // Every strip keeps this line so meters line up (a line-in on the default wraps it).
         let missing = div()
-            .h(px(14.))
+            .min_h(px(14.))
             .text_size(px(11.))
             .line_height(px(14.))
             .text_color(c(theme::WARNING))
-            .when(label.ends_with("(not connected)"), |d| d.child("Not connected"));
+            .when_some(crate::services::audio_sources::strip_note(&label, source), |d, note| d.child(note));
         let picker_id = id.clone();
         let picker = div()
             .relative()

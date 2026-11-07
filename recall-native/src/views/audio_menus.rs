@@ -160,11 +160,12 @@ impl Root {
             let saved = source.device.trim().to_owned();
             let mut entries = vec![(String::new(), audio_devices::device_label("", lists.map(|_| names.as_slice()), default.as_deref()))];
             let matched = (!saved.is_empty()).then(|| crate::services::meters::match_endpoint(&names, &saved)).flatten();
-            if !saved.is_empty() && lists.is_some() && matched.is_none() {
+            // A twin name is listed already (marked "1 of 2"): no extra "not connected" row.
+            if !saved.is_empty() && lists.is_some() && matched.is_none() && !names.iter().any(|n| n.trim() == saved) {
                 entries.push((saved.clone(), format!("{saved} (not connected)")));
             }
             let first_name = entries.len();
-            entries.extend(names.iter().map(|n| (n.clone(), n.clone())));
+            entries.extend(names.iter().cloned().zip(audio_devices::picker_labels(&names)));
             for (i, (value, label)) in entries.into_iter().enumerate() {
                 // The endpoint the recorder opens for the saved name (its real name may differ).
                 let selected = match matched {
@@ -177,12 +178,18 @@ impl Root {
                 // A capture card or console line-in keeps its sound while the mic is muted.
                 rows.push(note("Turn this off for a line-in or capture card:"));
                 // The form factor only hints; Alt+M follows the strip's flag (none = muted).
-                if crate::services::audio_sources::windows_says_not_a_mic(source, lists) {
+                if crate::services::audio_sources::windows_says_line_level(source, lists) {
                     rows.push(note("Windows reports this as a line-level input, not a microphone."));
                 }
+                // On the Windows default a line-in records the default input (normally the mic).
+                if crate::services::audio_sources::line_in_on_default(source) {
+                    rows.push(note(crate::services::audio_sources::LINE_IN_ON_DEFAULT));
+                }
                 let glyph = Some(icon(Icon::MicOff, 14., theme::MUTED).into_any_element());
+                // Shows what Alt+M does now; a click flips the strip's own flag (on the Windows
+                // default it stays muted either way, and the note above says why).
                 let muted = crate::services::audio_sources::mutes(source);
-                rows.push(self.menu_row((&key, 950), glyph, "Muted by the mic hotkey".into(), muted, Pick::MicMute(source.id.clone(), !muted), cx));
+                rows.push(self.menu_row((&key, 950), glyph, "Muted by the mic hotkey".into(), muted, Pick::MicMute(source.id.clone(), source.mic_mute == Some(false)), cx));
             }
         }
         let panel = panel(SharedString::from(format!("strip-menu-{}", source.id)), 280.).left_0().children(rows).on_mouse_down_out(cx.listener(|this, _, _, cx| {

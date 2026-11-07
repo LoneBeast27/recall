@@ -14,6 +14,7 @@ fn raw_ring(name: &'static str, input: bool, gain: f32, rate: u32, channels: u16
         boosted: AtomicBool::new(gain > 1.0),
         input,
         mic_mute: AtomicBool::new(true),
+        on_default: true,
         endpoint: Mutex::new(String::new()),
         rate,
         channels,
@@ -390,7 +391,8 @@ fn a_ring_reserves_its_buffer_and_never_doubles() {
 #[test]
 fn the_mute_hotkey_skips_an_input_marked_as_not_a_microphone() {
     use super::sources::SourceSpec;
-    let spec = |mic_mute: bool| SourceSpec { id: "in-1".into(), kind: "input".into(), device: String::new(), exe: String::new(), name: "In".into(), gain_db: 0.0, mic_mute: Some(mic_mute) };
+    // A line-in skips Alt+M only on a named device (R4-deep-audio-1).
+    let spec = |mic_mute: bool| SourceSpec { id: "in-1".into(), kind: "input".into(), device: "Line (Box One)".into(), exe: String::new(), name: "In".into(), gain_db: 0.0, mic_mute: Some(mic_mute) };
     let mic = TrackRing::for_source(&spec(true), "mic", 1, String::new());
     let line = TrackRing::for_source(&spec(false), "mic", 1, String::new());
     mic.push_capture(&[0.5, 0.5], true);
@@ -398,9 +400,40 @@ fn the_mute_hotkey_skips_an_input_marked_as_not_a_microphone() {
     let held = |ring: &TrackRing| ring.samples.lock().unwrap().iter().copied().collect::<Vec<f32>>();
     assert_eq!(held(&mic), [0.0, 0.0], "a microphone is muted");
     assert_eq!(held(&line), [0.5, 0.5], "a line-in keeps its sound");
-    let json = r#"[{"id":"in-1","kind":"input","name":"Console","mic_mute":false},{"id":"mic","kind":"input","name":"Mic"}]"#;
+    let json = r#"[{"id":"in-1","kind":"input","name":"Console","device":"Line (Box One)","mic_mute":false},{"id":"mic","kind":"input","name":"Mic"}]"#;
     let list = super::sources::parse(json).unwrap();
-    assert_eq!((list[0].mic_mute, list[1].mic_mute), (Some(false), None), "an input without the flag is muted");
+    assert_eq!((list[0].mic_mute, list[1].mic_mute), (Some(false), None), "parsed with and without the flag");
+    let (console, plain) = (TrackRing::for_source(&list[0], "mic", 1, String::new()), TrackRing::for_source(&list[1], "mic", 1, String::new()));
+    console.push_capture(&[0.5, 0.5], true);
+    plain.push_capture(&[0.5, 0.5], true);
+    assert_eq!((held(&console), held(&plain)), (vec![0.5, 0.5], vec![0.0, 0.0]), "the flagged line-in keeps its sound; the input without the flag is muted");
+}
+
+/// 2026-11-07 audit R4-deep-audio-1: a line-in or capture card (`mic_mute = false`) that has no
+/// device records the Windows default input, normally the user's microphone, so Alt+M mutes it
+/// until a device is named. A named line-in keeps its sound.
+#[test]
+fn a_line_in_on_the_windows_default_is_muted_by_the_mic_hotkey() {
+    use super::sources::SourceSpec;
+    let spec = |device: &str| SourceSpec { id: "line-in".into(), kind: "input".into(), device: device.into(), exe: String::new(), name: "Line-in".into(), gain_db: 0.0, mic_mute: Some(false) };
+    let held = |ring: &TrackRing| ring.samples.lock().unwrap().iter().copied().collect::<Vec<f32>>();
+    for device in ["", "  "] {
+        let ring = TrackRing::for_source(&spec(device), "mic", 1, String::new());
+        ring.push_capture(&[0.5, 0.5], true);
+        assert_eq!(held(&ring), [0.0, 0.0], "a line-in on the Windows default ({device:?}) left live while muted");
+        let ring = TrackRing::for_source(&spec(device), "mic", 1, String::new());
+        ring.set_mic_mute(false);
+        ring.push_capture(&[0.5, 0.5], true);
+        assert_eq!(held(&ring), [0.0, 0.0], "the strip toggle does not unmute the Windows default");
+    }
+    let named = TrackRing::for_source(&spec("Line (Box One)"), "mic", 1, String::new());
+    named.push_capture(&[0.5, 0.5], true);
+    assert_eq!(held(&named), [0.5, 0.5], "a named line-in keeps its sound");
+    // The page set the picker back to "Windows default": the engine restarts with device "".
+    let list = super::sources::parse(r#"[{"id":"line-in","kind":"input","name":"Line-in","device":"","mic_mute":false}]"#).unwrap();
+    let reset = TrackRing::for_source(&list[0], "mic", 1, String::new());
+    reset.push_capture(&[0.5, 0.5], true);
+    assert_eq!(held(&reset), [0.0, 0.0], "a line-in reset to the Windows default follows Alt+M again");
 }
 
 /// 2026-11-07 audit R3-deep-audio-1: an input whose source does not say (every config written
@@ -415,7 +448,17 @@ fn an_input_without_the_flag_is_muted_whatever_its_form_factor() {
     let ring = TrackRing::for_source(&spec, "mic", 1, String::new());
     ring.push_capture(&[0.5, 0.5], true);
     assert_eq!(ring.samples.lock().unwrap().iter().copied().collect::<Vec<f32>>(), [0.0, 0.0], "an input without the flag left live");
-    assert!(!include_str!("audio/stream.rs").contains("form_factor") && !include_str!("audio.rs").contains("form_factor"), "Alt+M never decides by form factor");
+    // The behaviour above is a regression guard (a fresh ring has nothing to read a form factor
+    // from); the source scan is what failed on the form-factor code (6ebdfe1: stream.rs,
+    // form_factor.rs). Every engine audio file, so a read re-added anywhere fails here.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("audio");
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|x| x == "rs") && !p.ends_with("audio_tests.rs")).collect();
+    files.push(dir.with_extension("rs"));
+    assert!(files.len() > 5, "the scan found the audio sources: {files:?}");
+    for file in &files {
+        let text = std::fs::read_to_string(file).unwrap();
+        assert!(!text.contains("form_factor") && !text.contains("FormFactor"), "Alt+M never decides by form factor: {}", file.display());
+    }
     // A config saved before the flag existed, as the controller hands it over.
     let list = super::sources::parse(r#"[{"id":"mic","kind":"input","name":"Mic","device":"Line (Box One)"}]"#).unwrap();
     let old = TrackRing::for_source(&list[0], "mic", 1, String::new());
