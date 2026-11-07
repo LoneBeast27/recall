@@ -1,0 +1,63 @@
+//! Classification tests for `record_target` (known games, screensavers, Store
+//! apps, the Minecraft server GUI); split from `record_target_tests.rs`.
+
+use super::*;
+
+#[test]
+fn known_game_windowed_is_a_candidate() {
+    // G10: Minecraft Java starts in an 854x480 window; it is a known game.
+    let cfg = Config::default();
+    let mc = ev("javaw", "Minecraft 1.21.1", 5, 0x5, false);
+    let t = classify_event(&mc, &cfg).expect("a windowed known game is a candidate");
+    assert_eq!((t.pid, t.hwnd), (5, 0x5));
+    assert!(skips_render_check(&mc, &cfg));
+    assert!(classify_event(&ev("javaw", "IntelliJ IDEA", 6, 0x6, false), &cfg).is_none(), "an unknown windowed Java app is not");
+    let mut off = cfg.clone();
+    off.overrides.push(Override { exe: "javaw".into(), kind: RuleKind::None, clamp: None });
+    assert!(classify_event(&mc, &off).is_none(), "a none override still wins");
+}
+
+#[test]
+fn the_minecraft_server_gui_is_never_a_target() {
+    let cfg = Config::default();
+    assert!(classify_event(&ev("javaw", "Minecraft server", 6, 0x6, false), &cfg).is_none(), "windowed");
+    assert!(classify_event(&ev("java", "Minecraft server", 6, 0x6, true), &cfg).is_none(), "even fullscreen");
+    assert!(classify_event(&ev("javaw", "Minecraft 1.21.1", 6, 0x6, false), &cfg).is_some(), "the game client");
+}
+
+#[test]
+fn screensaver_is_never_a_target() {
+    // G11: a .scr runs fullscreen and topmost.
+    let cfg = Config::default();
+    for name in ["Bubbles.scr", "ribbons.SCR", "Mystify.Scr"] {
+        let stem = name.rsplit_once('.').unwrap().0;
+        let e = WatchEvent { exe_name: name.into(), ..ev(stem, stem, 8, 0x8, true) };
+        assert!(classify_event(&e, &cfg).is_none(), "{name}");
+        let steam = WatchEvent { steam_game: true, ..e.clone() };
+        assert!(classify_event(&steam, &cfg).is_none(), "{name} in a Steam library");
+    }
+    assert!(classify_event(&ev("scrgame", "Scr Game", 9, 0x9, true), &cfg).is_some(), "only the .scr extension");
+}
+
+#[test]
+fn store_media_apps_are_denied() {
+    // R2-5: with G6 a UWP frame resolves to the hosted exe, no longer the denied
+    // ApplicationFrameHost; without trace rights a fullscreen one would count as a game.
+    let cfg = Config::default();
+    for stem in [
+        "Video.UI",
+        "Microsoft.Media.Player",
+        "Microsoft.Photos",
+        "WinStore.App",
+        "SystemSettings",
+        "Netflix",
+        "WWAHost",
+        // R3-detect-2 (exe names read from the AppxManifests).
+        "WindowsCamera",
+        "HxCalendarAppImm",
+        "XboxPcAppCE",
+    ] {
+        assert!(!is_target(stem, true, &cfg), "{stem}");
+    }
+    assert!(is_target("Minecraft.Windows", true, &cfg), "a Store game still is");
+}

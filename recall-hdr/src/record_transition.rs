@@ -42,7 +42,7 @@ pub(crate) trait Transitions {
         let client = self.client_of(ev.hwnd);
         if self.tracker().adopts(ev.pid, now) {
             if let Some(t) = adopted_candidate(ev, self.cfg(), client) {
-                return (Some(t), Traits::ADOPTED);
+                return (Some(t), Traits { fullscreen: ev.fullscreen, ..Traits::ADOPTED });
             }
         }
         let Some(t) = self.classify_seen(ev, now) else { return (None, Traits::FULLSCREEN) };

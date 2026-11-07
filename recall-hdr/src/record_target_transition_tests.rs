@@ -16,6 +16,7 @@ fn ev(stem: &str, pid: u32, hwnd: isize, fullscreen: bool, steam: bool) -> Watch
         fullscreen,
         fullscreen_on_target: fullscreen,
         steam_game: steam,
+        hosted: false,
         hwnd,
     }
 }
@@ -224,6 +225,12 @@ fn a_tiny_windowed_steam_window_is_not_a_candidate() {
     assert!(!too_small(Traits::WINDOWED, MIN_CLIENT));
     assert!(!too_small(Traits::FULLSCREEN, (320, 200)), "fullscreen is never sized out");
     assert!(!too_small(Traits::ADOPTED, (320, 200)), "an adopted window is the game");
+    // R2-4: a known game's windowed box needs the floor, an override does not.
+    let known = Traits { vouched: true, known_only: true, ..Traits::WINDOWED };
+    assert!(too_small(known, (400, 150)), "the game's error box");
+    assert!(!too_small(known, (854, 480)), "Minecraft Java's default window");
+    assert!(!too_small(Traits { fullscreen: true, ..known }, (400, 150)));
+    assert!(!too_small(Traits { vouched: true, ..Traits::WINDOWED }, (400, 150)), "an override is the user's choice");
 }
 
 // --- T11: an unidentifiable foreground ---------------------------------------
@@ -247,4 +254,57 @@ fn an_unidentifiable_foreground_is_fed_as_not_a_target() {
     assert!(event_or_unknown(0x99, std::process::id(), None).is_none());
     let known = ev("game", 3, 0x3, true, false);
     assert_eq!(event_or_unknown(0x3, 3, Some(known.clone())), Some(known));
+}
+
+// --- G5: a Steam-distributed tool must not steal a fullscreen session -------
+
+#[test]
+fn windowed_steam_window_never_replaces_a_live_fullscreen_session() {
+    // Fullscreen game (pid 1) is recorded; Blender from a Steam library (pid 2,
+    // windowed) holds the foreground for 5 s.
+    let t0 = Instant::now();
+    let mut tr = live(target(1, 0x10, "Game"), t0);
+    let t1 = t0 + Duration::from_secs(1);
+    tr.on_foreground_with(Some(target(2, 0x20, "Blender")), Traits::WINDOWED, t1);
+    assert!(!tr.poll(t1 + Duration::from_secs(5)), "a windowed Steam tool never replaces it");
+    assert_eq!(tr.next_deadline(), None, "nothing to wake for while the session lives");
+    assert_eq!(tr.current().map(|t| t.pid), Some(1));
+    // Once the game exits it may start a session (short debounce from first seen).
+    assert!(tr.on_process_exit(1));
+    assert!(tr.poll(t1 + Duration::from_secs(6)), "commits once the session ended");
+    assert_eq!(tr.current().map(|t| t.pid), Some(2));
+}
+
+#[test]
+fn fullscreen_and_vouched_windows_still_replace_a_fullscreen_session() {
+    let t0 = Instant::now();
+    let t1 = t0 + Duration::from_secs(1);
+    let mut tr = live(target(1, 0x10, "Game"), t0);
+    tr.on_foreground_with(Some(target(3, 0x30, "Other")), Traits::FULLSCREEN, t1);
+    assert!(tr.poll(t1 + TARGET_DEBOUNCE), "fullscreen: the 2 s rule");
+    let mut tr = live(target(1, 0x10, "Game"), t0);
+    let vouched = Traits { vouched: true, ..Traits::WINDOWED };
+    tr.on_foreground_with(Some(target(4, 0x40, "Known")), vouched, t1);
+    assert!(tr.poll(t1 + TARGET_DEBOUNCE), "an override / known game: the 2 s rule");
+}
+
+#[test]
+fn a_windowed_session_can_still_be_replaced_by_a_windowed_steam_game() {
+    // The rule is about fullscreen sessions only: two windowed Steam games swap
+    // after the 2 s debounce as before.
+    let t0 = Instant::now();
+    let mut tr = tracker();
+    tr.on_foreground_with(Some(target(1, 0x10, "Windowed A")), Traits::WINDOWED, t0);
+    assert!(tr.poll(t0 + WINDOWED_START));
+    let t1 = t0 + Duration::from_secs(3);
+    tr.on_foreground_with(Some(target(2, 0x20, "Windowed B")), Traits::WINDOWED, t1);
+    assert!(tr.poll(t1 + TARGET_DEBOUNCE));
+    assert_eq!(tr.current().map(|t| t.pid), Some(2));
+    // A session that went fullscreen on re-focus is protected from then on.
+    let mut tr = tracker();
+    tr.on_foreground_with(Some(target(1, 0x10, "A")), Traits::WINDOWED, t0);
+    assert!(tr.poll(t0 + WINDOWED_START));
+    tr.on_foreground_with(Some(target(1, 0x10, "A")), Traits::FULLSCREEN, t1);
+    tr.on_foreground_with(Some(target(2, 0x20, "B")), Traits::WINDOWED, t1);
+    assert!(!tr.poll(t1 + Duration::from_secs(5)), "the session is fullscreen now");
 }

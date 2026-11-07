@@ -8,8 +8,12 @@
 //! | 1 | empty / whitespace stem                     | `NonGame`                      |
 //! | 2 | stem in [`DENY_STEMS`] (shells, us, tools)  | `NonGame` (overrides all)      |
 //! | 3 | a `[[overrides]]` entry matches the stem    | map `RuleKind` -> `AppKind`    |
+//! | 3b| no override, a call / chat / office app      | `NonGame` (`private_apps`)     |
 //! | 4 | no override, `fullscreen_on_target`         | `default_game_class` mapped    |
 //! | 5 | no override, windowed                        | `NonGame` (conservative)       |
+//!
+//! Step 3b is skipped for a fullscreen window whose stem is in
+//! `detect.fullscreen_games` (the user's opt-in, R5-detect-3).
 //!
 //! The deny-list (#2) intentionally beats a config override (#3): a shell/capture
 //! tool must never be driven into a game rule even if a user mis-lists it. An
@@ -48,6 +52,28 @@ const DENY_STEMS: &[&str] = &[
     "devenv",
 ];
 
+/// Store and media apps that go fullscreen without being games: with G6 a UWP
+/// frame is named by its hosted exe, no longer the denied
+/// `applicationframehost` (R2-5, merge gate P2). Photos is a Win32 app.
+/// Checked here (HDR rules) and in `record_target::is_target` (recording).
+pub(crate) const STORE_APP_STEMS: &[&str] = &[
+    "video.ui",
+    "music.ui",
+    "microsoft.media.player",
+    "microsoft.photos",
+    "photos",
+    "winstore.app",
+    "store",
+    "systemsettings",
+    "netflix",
+    "wwahost",
+    "hxoutlook",
+    "hxcalendarappimm",
+    "windowscamera",
+    "xboxpcapp",
+    "xboxpcappce",
+];
+
 /// Everything the watcher knows about a foreground change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Foreground {
@@ -77,6 +103,7 @@ fn rule_to_app(kind: RuleKind) -> AppKind {
 pub(crate) fn is_denied(stem: &str) -> bool {
     DENY_STEMS
         .iter()
+        .chain(STORE_APP_STEMS)
         .any(|d| d.eq_ignore_ascii_case(stem))
 }
 
@@ -91,8 +118,21 @@ pub(crate) fn is_denied(stem: &str) -> bool {
 pub(crate) fn override_kind(cfg: &Config, stem: &str) -> Option<RuleKind> {
     cfg.overrides
         .iter()
-        .find(|o| o.exe.eq_ignore_ascii_case(stem))
+        .find(|o| same_exe(&o.exe, stem))
         .map(|o| o.kind)
+}
+
+/// `a` and `b` name the same exe: case-insensitive, `.exe` optional on
+/// either side (`"Game.exe"` = `"game"`, G9).
+pub(crate) fn same_exe(a: &str, b: &str) -> bool {
+    strip_exe_suffix(a.trim()).eq_ignore_ascii_case(strip_exe_suffix(b.trim()))
+}
+
+fn strip_exe_suffix(s: &str) -> &str {
+    match s.len().checked_sub(4) {
+        Some(i) if s.is_char_boundary(i) && s[i..].eq_ignore_ascii_case(".exe") => &s[..i],
+        _ => s,
+    }
 }
 
 /// Classify a foreground into what the reconciler should treat it as.
@@ -116,6 +156,13 @@ pub fn classify(fg: &Foreground, cfg: &Config) -> AppKind {
     // 3. Explicit per-exe override wins over the fullscreen default.
     if let Some(kind) = override_kind(cfg, stem) {
         return rule_to_app(kind);
+    }
+
+    // 3b. No override: a call, chat or office app is never a game (R4-detect-1),
+    // unless `detect.fullscreen_games` opts its fullscreen window in (R5-detect-3).
+    let opted_in = fg.fullscreen_on_target && crate::record_target::is_fullscreen_game(cfg, stem);
+    if crate::private_apps::is_private(stem) && !opted_in {
+        return AppKind::NonGame;
     }
 
     // 4/5. No override: only a fullscreen-on-target window can be a game.
@@ -203,6 +250,15 @@ mod tests {
             clamp: None,
         });
         assert_eq!(classify(&fg("obs64", true), &cfg), AppKind::NonGame);
+    }
+
+    #[test]
+    fn fullscreen_store_media_apps_are_not_hdr_games() {
+        let cfg = cfg_with_default(RuleKind::HdrGame);
+        for stem in ["Netflix", "Video.UI", "Microsoft.Media.Player", "Photos", "WindowsCamera", "HxCalendarAppImm"] {
+            assert_eq!(classify(&fg(stem, true), &cfg), AppKind::NonGame, "{stem}");
+        }
+        assert_eq!(classify(&fg("minecraft.windows", true), &cfg), AppKind::HdrGame, "a Store game still is");
     }
 
     #[test]
@@ -321,5 +377,16 @@ mod tests {
         });
         assert_eq!(override_kind(&cfg, "x"), Some(RuleKind::None));
         assert_eq!(override_kind(&cfg, "not-listed"), None);
+    }
+
+    #[test]
+    fn override_with_exe_suffix_matches() {
+        // G9: `exe = "Game.exe"` is the form `detect.fullscreen_games` accepts.
+        let mut cfg = cfg_with_default(RuleKind::HdrGame);
+        cfg.overrides.push(Override { exe: "Game.exe".into(), kind: RuleKind::None, clamp: None });
+        assert_eq!(override_kind(&cfg, "game"), Some(RuleKind::None));
+        assert_eq!(override_kind(&cfg, "Game.exe"), Some(RuleKind::None), "a stem with the suffix too");
+        assert_eq!(cfg.rule_for("game").0, RuleKind::None, "the HDR side reads the same entry");
+        assert_eq!(override_kind(&cfg, "gam"), None);
     }
 }

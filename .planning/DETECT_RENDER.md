@@ -51,7 +51,7 @@ check is off and today's rule applies (fullscreen + not denied = game); the log 
 | UWP video (Netflix, Movies & TV, Media Player) | decode swap chain (55) or composed | not a game; an independent-flip video without 55 would still count |
 | Discord, Spotify, Teams, Zoom share (Chromium/Electron) | composed flip | not a game |
 | PowerPoint slideshow, Photos | composed or no frames | not a game |
-| Resolve, Premiere, Plex, Kodi | unknown; Kodi renders like a game (D3D11 swap chain, may get independent flip) | Kodi likely a game |
+| Resolve, Premiere, Plex, Kodi | unknown; Kodi renders like a game (D3D11 swap chain, may get independent flip) | Kodi would pass as a game, so Kodi, Plex, Stremio, Jellyfin and the other players are on `recall-hdr/src/private_app_stems.rs` and are never a target without an opt-in (R5-detect-1) |
 
 ## Known gaps
 
