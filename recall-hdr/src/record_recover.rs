@@ -30,8 +30,10 @@ pub const RESTART_GAPS: [Duration; 4] =
     [Duration::from_secs(30), Duration::from_secs(60), Duration::from_secs(120), Duration::from_secs(300)];
 /// Recording this long after a restart forgets the backoff.
 pub const STABLE_AFTER: Duration = Duration::from_secs(60);
-/// A save in flight holds a hang restart this long at most (a hung encoder answers no save).
+/// A save in flight that shows no progress holds a hang restart this long at most.
 pub const HANG_SAVE_HOLD: Duration = Duration::from_secs(15);
+/// A save that keeps growing holds a hang restart this long at most.
+pub const HANG_GROW_HOLD: Duration = Duration::from_secs(300);
 /// Why a recording ends early when the engine restarts under it (`record_fail`).
 pub const ENDED_EARLY_REASON: &str = "the encoder isn't responding";
 
@@ -56,6 +58,9 @@ pub struct Hold {
     pub long_rec: bool,
     /// A capture-stuck restart in flight (never stack a second one).
     pub stuck: bool,
+    /// The save in flight still makes progress (`EngineActivity::save_growing`): the
+    /// saver is a stream copy on its own thread, so a hung encoder does not stop it.
+    pub growing: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,7 +159,7 @@ impl EncoderRecovery {
     /// [`Self::step`] with what holds a restart told apart. A hang verdict and the 90 s
     /// bound are not held by a long recording (a hung encoder sends it nothing, so it would
     /// wait forever; the restart ends it early, `restart_lines`); a save in flight holds a
-    /// hang restart [`HANG_SAVE_HOLD`] at most; a capture-stuck restart in flight holds
+    /// hang restart [`HANG_SAVE_HOLD`] at most, [`HANG_GROW_HOLD`] while it still grows; a capture-stuck restart in flight holds
     /// everything. `opening`: the engine says an NVENC open is in progress. `target`: what
     /// is recorded; a new one, like new settings, ends a give-up.
     #[allow(clippy::too_many_arguments)]
@@ -188,7 +193,9 @@ impl EncoderRecovery {
 
     fn hang_restart(&mut self, now: Instant, hold: Hold) -> Recovery {
         let held = *self.hang_held_since.get_or_insert(now);
-        if hold.stuck || (hold.saving && now.saturating_duration_since(held) < HANG_SAVE_HOLD) {
+        let waited = now.saturating_duration_since(held);
+        let save_holds = hold.saving && (waited < HANG_SAVE_HOLD || (hold.growing && waited < HANG_GROW_HOLD));
+        if hold.stuck || save_holds {
             return Recovery::Nothing;
         }
         self.hang_held_since = None;
@@ -324,7 +331,7 @@ impl crate::record_app::Controller {
         let progress = view.heartbeat.filter(|h| *h > 0).unwrap_or(view.statuses);
         let saving = self.activity.retarget_busy(now).saving;
         // A capture-stuck restart in flight: never stack a second one on it.
-        let hold = Hold { saving, long_rec: self.activity.busy(now) && !saving, stuck: self.capture_stuck.pending(now) };
+        let hold = Hold { saving, long_rec: self.activity.busy(now) && !saving, stuck: self.capture_stuck.pending(now), growing: self.activity.save_growing(now) };
         let target = match &wanted {
             crate::record_engine::EngineTarget::Window(t) => format!("{}:{}", t.exe, t.pid),
             crate::record_engine::EngineTarget::Desktop => "desktop".into(),

@@ -139,12 +139,15 @@ pub(crate) fn produce(
 /// the sum (2 tracks of 119 s took 5.3 s one after another, 2026-11-04). Each worker runs at
 /// below-normal priority with EcoQoS, so a save mid-game stays off the game's cores.
 fn encode_tracks(audio: &[AudioPcm], abort: &AtomicBool) -> Result<Vec<AacTrack>, String> {
+    let progress = super::save_progress::current();
     std::thread::scope(|scope| {
         let workers: Vec<_> = audio
             .iter()
             .map(|pcm| {
+                let progress = progress.clone();
                 scope.spawn(move || {
                     crate::thread_qos::eco_background();
+                    let _entered = super::save_progress::enter(progress);
                     // A source above 0 dB can pass full scale: limit it, never a hard clip in the encode.
                     let limited = pcm.boosted.then(|| pcm.limited());
                     encode_aac(limited.as_ref().unwrap_or(pcm), abort).map_err(|e| format!("audio track '{}': {e}", pcm.name))
@@ -251,6 +254,7 @@ pub(crate) fn encode_aac_with(pcm: &AudioPcm, abort: &AtomicBool, coder: AacCode
         if abort.load(Relaxed) {
             return Err(ABORTED.into());
         }
+        super::save_progress::step();
         let n = frame_size.min(total_frames - pos);
         let mut af = ff::frame::Audio::new(format, frame_size, layout);
         af.set_rate(pcm.rate);
@@ -431,8 +435,10 @@ pub(crate) fn mux_mp4(
         }
         pkt.set_stream(stream_idx);
         pkt.rescale_ts(src_tb, out_tbs[stream_idx]);
+        let size = pkt.size() as u64;
         pkt.write_interleaved(&mut octx)
             .map_err(|e| e.to_string())?;
+        super::save_progress::wrote(size);
     }
     let mux_ms = ms(started.elapsed());
     let trailer = Instant::now();

@@ -66,6 +66,7 @@ mod protocol;
 mod ring;
 mod single_instance;
 mod spill;
+mod stdin_reader;
 mod file_id;
 mod win_volume;
 mod thread_qos;
@@ -363,7 +364,7 @@ impl ApplicationHandler for App {
                 monitors: capture::list_monitors(),
                 live_sources: true,
             });
-            spawn_stdin_reader(shared.clone(), save_hook, export_hook, extras);
+            stdin_reader::spawn(shared.clone(), save_hook, export_hook, extras);
         }
 
         self.source_name = std::env::var("RECALL_CAPTURE_NAME").unwrap_or_else(|_| INITIAL_TITLE.trim_end_matches(" SDR").to_string());
@@ -415,66 +416,6 @@ impl ApplicationHandler for App {
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         self.idle_tick(event_loop);
     }
-}
-
-/// Read newline-delimited JSON commands from stdin and apply them to shared
-/// state. `save` triggers a replay-buffer save (None when encode is off).
-fn spawn_stdin_reader(
-    shared: Arc<CaptureShared>,
-    save: Option<SaveHook>,
-    export: Option<ExportHook>,
-    extras: engine_extras::Extras,
-) {
-    std::thread::spawn(move || {
-        let stdin = std::io::stdin();
-        stdin_commands::read_commands(stdin.lock(), &shared.quit, |cmd| {
-            match cmd {
-                protocol::Command::SetMode { value } => shared.set_select(&value),
-                protocol::Command::SaveClip { seconds, at_last_frame }=> match &save {
-                    Some(hook) => hook(seconds, at_last_frame),
-                    None => protocol::emit(&protocol::Outbound::SaveFailed {
-                        reason: "engine built without the encode feature".to_string(),
-                        rejected: true,
-                    }),
-                },
-                protocol::Command::ExportClip { path, output, fps, edit }=> match &export {
-                    Some(hook) => hook(path, output, fps, edit),
-                    None => protocol::emit(&protocol::Outbound::ExportFailed {
-                        source: path,
-                        reason: "engine built without export support".into(),
-                    }),
-                },
-                protocol::Command::ToggleMicMute => {
-                    #[cfg(feature="encode")]
-                    protocol::emit(&protocol::Outbound::MicMuted { muted: audio::toggle_mic_mute() });
-                }
-                protocol::Command::SetMicMute { muted } => {
-                    #[cfg(feature="encode")]
-                    { audio::set_mic_muted(muted); protocol::emit(&protocol::Outbound::MicMuted { muted }); }
-                }
-                protocol::Command::SetSource { id, gain_db, name } => {
-                    #[cfg(feature="encode")]
-                    {
-                        if !audio::sources::set_live(&id, gain_db, name.as_deref()) {
-                            eprintln!("[recall] set_source: no live track '{id}'");
-                        }
-                    }
-                    #[cfg(not(feature="encode"))]
-                    let _ = (id, gain_db, name);
-                }
-                cmd @ (protocol::Command::Bookmark
-                    | protocol::Command::Screenshot
-                    | protocol::Command::HudProbe
-                    | protocol::Command::RecordStart
-                    | protocol::Command::RecordStop
-                    | protocol::Command::RecordToggle
-                    | protocol::Command::RecordFail { .. }) => {
-                    extras.handle(&cmd);
-                }
-                protocol::Command::Quit => {} // read_commands sets `quit`
-            }
-        });
-    });
 }
 
 fn main() {
@@ -563,7 +504,8 @@ fn main() {
     event_loop.run_app(&mut app).expect("run app");
     // Quit: finalize a running long recording first (a kill after this point
     // leaves a `.part` that the next start recovers), then let an in-flight
-    // save finish (or remove its .part) inside the supervisor's grace.
+    // save finish (or remove its .part) inside the supervisor's grace. An engine whose
+    // controller vanished (stdin ended with no `quit`) lets its saves finish instead.
     #[cfg(feature = "encode")]
     if let Some(longrec) = app.longrec.take() {
         longrec.shutdown(std::time::Duration::from_millis(1500));
@@ -577,7 +519,7 @@ fn main() {
     }
     #[cfg(feature = "encode")]
     if let Some(encoder) = app.encoder.take() {
-        encoder.shutdown(std::time::Duration::from_secs(3));
+        encoder.shutdown(stdin_reader::save_budget(std::time::Duration::from_secs(3)));
     }
 }
 

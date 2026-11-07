@@ -148,6 +148,11 @@ pub struct Controller {
     pub(crate) recovery: crate::record_recover::EncoderRecovery,
     /// A recovery restart waiting for the long recording to end early (`record_recover`).
     pub(crate) ending_early: Option<crate::record_recover::EndingEarly>,
+    /// A quit waiting for the save being written (`record_quit_wait`).
+    pub(crate) quit_wait: crate::record_quit_wait::QuitWait,
+    /// The shutdown block reason, held while a save is written (`record_session_end`).
+    pub(crate) block_reason: crate::record_session_end::BlockReason,
+    pub(crate) session_end: crate::record_session_end::SessionEnd,
 }
 
 /// Entry point. Returns the process exit code.
@@ -249,6 +254,9 @@ pub fn run() -> i32 {
         power: Default::default(),
         recovery: Default::default(),
         ending_early: None,
+        quit_wait: Default::default(),
+        block_reason: Default::default(),
+        session_end: Default::default(),
     };
     if !ctl.can_trace {
         log!("record: FPS needs Performance Log Users (run the installer, then sign in again); stats show FPS as -");
@@ -257,6 +265,7 @@ pub fn run() -> i32 {
     ctl.overlay.sync(&ctl.cfg.overlay);
     ctl.probe_foreground(now, true);
     crate::record_power_win::register();
+    crate::record_session_end_win::create();
     log!(
         "record: controller up (auto_record={}, buffer={}s, save={}, mic={}, out={:?}, storage cap={} GiB)",
         ctl.cfg.recording.auto_record,
@@ -284,9 +293,10 @@ impl Controller {
             }
             // Drives the WinEvent hook callback, tray menu, and hotkeys.
             if app::drain_messages() {
-                log!("record: WM_QUIT received");
+                if self.quit.is_none() {
+                    log!("record: WM_QUIT received");
+                }
                 self.quit.get_or_insert(QuitReason::WindowsQuit);
-                return 0;
             }
             let now = Instant::now();
             while let Ok(ev) = watch_rx.try_recv() {
@@ -304,8 +314,14 @@ impl Controller {
             while let Ok(inbound) = ctl_rx.try_recv() {
                 self.handle_inbound(inbound);
             }
+            self.session_end_tick(now);
+            // A quit waits for the save being written (`record_quit_wait`), then returns.
             if self.quit.is_some() {
-                return 0;
+                if self.quit_ready(now) {
+                    return 0;
+                }
+                self.quitting_tick(now);
+                continue;
             }
             self.power_tick(now);
             self.tick(now);
@@ -415,14 +431,15 @@ impl Controller {
         }
     }
 
-    /// Ordered shutdown: display restore first (if HDR was managed), then the
-    /// overlay (and its frame-timing session) and the UI, then the engine. Only the tray
-    /// Quit closes the app; any other quit leaves it open to reconnect to the next recorder.
+    /// Ordered shutdown (after `quit_ready` let a save in flight finish): display
+    /// restore first (if HDR was managed), then the UI, then the engine, then the
+    /// overlay (and its frame-timing session): the island shows the save to its end.
+    /// Only the tray Quit closes the app; any other quit leaves it open to reconnect
+    /// to the next recorder.
     fn shutdown(mut self) {
         crate::record_power_win::unregister();
         self.render.stop();
         self.hdr.shutdown();
-        self.overlay.stop();
         let reason = self.quit.unwrap_or(QuitReason::WindowsQuit);
         if reason.closes_ui() {
             let matched = self.ui.close();
@@ -432,6 +449,8 @@ impl Controller {
         }
         self.hotkeys = None;
         self.supervisor.shutdown(crate::supervisor::QUIT_GRACE);
+        self.overlay.stop();
+        crate::record_session_end_win::destroy();
         log!("record: clean shutdown (pipe lines dropped for stalled clients: {})", self.hub.dropped());
     }
 }

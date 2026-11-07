@@ -223,3 +223,102 @@ fn a_save_writing_across_a_sleep_gets_a_fresh_window_on_resume() {
     assert!(a.saves_writing(woke + s(100)));
     assert!(!a.saves_writing(woke + s(125)), "stuck after the wake: bounded as ever");
 }
+
+// ---- round 5: pause, cap, progress steps (R5-overlay-1/4/7/8) ----
+
+fn stepping(step: u64) -> serde_json::Value {
+    json!({"type":"status","encoder":"h264_nvenc","save_writing":{"bytes":0,"queued":0,"step":step}})
+}
+
+#[test]
+fn a_pause_waits_for_the_save_being_written() {
+    let t0 = Instant::now();
+    let s = Duration::from_secs;
+    let mut a = EngineActivity::default();
+    a.save_sent(t0);
+    a.on_engine_event(&writing(1_000_000_000), 0.0, t0 + s(5));
+    let wait = PendingPause::needed(&mut a, t0 + s(6)).expect("a save is being written: the pause waits");
+    assert!(!wait.ready(&mut a, t0 + s(7)));
+    assert!(!wait.ready(&mut a, t0 + s(6) + PAUSE_STOP_WAIT), "the long recording's 10 s does not end a save's wait");
+    a.on_engine_event(&saved(), 0.0, t0 + s(20));
+    a.on_engine_event(&idle_status(), 0.0, t0 + s(21));
+    assert!(wait.ready(&mut a, t0 + s(21)), "saved: pause now");
+    assert_eq!(PendingPause::needed(&mut a, t0 + s(22)), None, "nothing in flight: pause at once");
+}
+
+#[test]
+fn the_aac_phase_counts_as_progress_through_its_steps() {
+    // R5-overlay-4: no `.part` yet (bytes 0), the saver's step counter rises.
+    let t0 = Instant::now();
+    let s = Duration::from_secs;
+    let mut a = EngineActivity::default();
+    a.save_sent(t0);
+    for (i, at) in [50u64, 100, 150].into_iter().enumerate() {
+        a.on_engine_event(&stepping(i as u64 + 1), 0.0, t0 + s(at));
+    }
+    assert!(a.busy(t0 + s(160)), "the encode moves on: a restart waits");
+    assert!(a.busy(t0 + s(269)));
+    assert!(!a.busy(t0 + s(270)), "120 s with no step: stale as before");
+}
+
+#[test]
+fn a_null_save_writing_is_not_a_save() {
+    let t0 = Instant::now();
+    let mut a = EngineActivity::default();
+    a.on_engine_event(&json!({"type":"status","save_writing":null}), 0.0, t0);
+    assert!(!a.busy(t0 + Duration::from_secs(1)), "null reads as no save in the saver");
+}
+
+#[test]
+fn a_growing_save_holds_restarts_at_most_10_min_or_its_size_at_5_mb_s() {
+    let t0 = Instant::now();
+    let s = Duration::from_secs;
+    let mut a = EngineActivity::default();
+    a.set_save_estimate(1_000_000_000); // 1 GB: 200 s at 5 MB/s, so the 10 min floor applies
+    a.save_sent(t0);
+    for sec in 0..=700u64 {
+        a.on_engine_event(&writing(sec * 1_000_000), 0.0, t0 + s(sec)); // 1 MB/s: a dying drive
+    }
+    assert!(a.busy(t0 + s(599)), "still under the cap");
+    assert!(!a.busy(t0 + s(700)), "past 10 min the next game wins (today's behaviour after the cap)");
+    // An 11 GB clip: 2200 s at 5 MB/s.
+    let mut b = EngineActivity::default();
+    b.set_save_estimate(11_000_000_000);
+    b.save_sent(t0);
+    for sec in 0..=2300u64 {
+        b.on_engine_event(&writing(sec * 1_000_000), 0.0, t0 + s(sec));
+    }
+    assert!(b.busy(t0 + s(2199)));
+    assert!(!b.busy(t0 + s(2200)));
+}
+
+#[test]
+fn a_restart_held_30_s_by_a_save_says_so_once() {
+    let t0 = Instant::now();
+    let s = Duration::from_secs;
+    let mut a = EngineActivity::default();
+    a.save_sent(t0);
+    let mut shown = Vec::new();
+    for sec in 0..=200u64 {
+        a.on_engine_event(&writing(sec * 1_000_000), 0.0, t0 + s(sec));
+        let held = sec >= 10; // a game switch falls due at 10 s
+        if a.hold_notice(t0 + s(sec), held) {
+            shown.push(sec);
+        }
+    }
+    assert_eq!(shown, [40], "held 30 s: one notice per save");
+    assert!(!a.hold_notice(t0 + s(201), false));
+}
+
+#[test]
+fn a_save_still_growing_is_told_apart_from_one_only_counted() {
+    let t0 = Instant::now();
+    let s = Duration::from_secs;
+    let mut a = EngineActivity::default();
+    a.save_sent(t0);
+    assert!(!a.save_growing(t0 + s(1)), "counted, no progress report: not growing");
+    a.on_engine_event(&stepping(1), 0.0, t0 + s(2));
+    assert!(a.save_growing(t0 + s(11)));
+    assert!(!a.save_growing(t0 + s(12)), "no step for 10 s");
+    assert_eq!(a.saves_in_flight(), 1);
+}

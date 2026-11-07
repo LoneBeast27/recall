@@ -36,6 +36,7 @@ mod recover_tests;
 mod headers_tests;
 #[cfg(test)]
 mod decode_tests;
+mod save_progress;
 mod saver;
 mod space;
 mod staging;

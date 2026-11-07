@@ -294,3 +294,34 @@ fn a_save_whose_bytes_stop_growing_is_unconfirmed_120_s_later() {
     r.tick(now + s(170));
     assert_eq!(notice(&r).title, "Save not confirmed");
 }
+
+fn engine_status_with(save_writing: Value) -> Value {
+    json!({"mod":"engine","event":{"type":"status","source":"VALORANT","encoder":"h264_nvenc","save_writing":save_writing}})
+}
+
+#[test]
+fn the_aac_steps_keep_the_ring_while_no_bytes_are_written_yet() {
+    // R5-overlay-4: the audio encode runs before the `.part` exists: bytes 0, steps rise.
+    let now = Instant::now();
+    let s = Duration::from_secs;
+    let mut r = Reducer::new();
+    r.apply_envelope(&status("VALORANT"), now);
+    r.apply_envelope(&saving(1800), now);
+    for t in 1..=200u64 {
+        r.apply_envelope(&engine_status_with(json!({"bytes": 0, "queued": 0, "step": t * 40})), now + s(t));
+        r.tick(now + s(t) + ms(500));
+        assert_eq!(notice(&r).save, Some(SavePhase::Saving), "{t} s: the encode moves on, the ring holds");
+    }
+}
+
+#[test]
+fn a_null_save_writing_is_no_progress() {
+    let now = Instant::now();
+    let s = Duration::from_secs;
+    let mut r = Reducer::new();
+    r.apply_envelope(&status("VALORANT"), now);
+    r.apply_envelope(&saving(30), now);
+    r.apply_envelope(&engine_status_with(Value::Null), now + s(100));
+    r.tick(now + CONFIRM_FOR);
+    assert_eq!(notice(&r).title, "Save not confirmed", "null is not a save growing");
+}

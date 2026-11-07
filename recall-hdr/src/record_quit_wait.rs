@@ -1,0 +1,157 @@
+//! A quit (tray Quit, the control pipe's `quit` from the installer or a script, WM_QUIT,
+//! a session end) while the engine still writes a save: the engine's quit would abort it
+//! and the clip would be gone, so the quit waits for the save first. Up to
+//! [`QUIT_SAVE_WAIT`], and on while the save keeps making progress (bounded by the save's
+//! own hold cap, `record_activity_writing::hold_cap`). The island says "Finishing the clip
+//! before quitting" meanwhile. A save still in flight when the wait runs out is reported
+//! once as "Save failed: Recall was closed during the save", then the quit goes on.
+
+use std::time::{Duration, Instant};
+
+use serde_json::json;
+
+use crate::log;
+use crate::record_activity::EngineActivity;
+
+/// The least a quit waits for a save still being written.
+pub const QUIT_SAVE_WAIT: Duration = Duration::from_secs(60);
+/// The island notice while a quit waits.
+pub const QUIT_WAIT_TITLE: &str = "Finishing the clip before quitting";
+pub const QUIT_WAIT_DETAIL: &str = "Recall quits once it is saved";
+/// Why a save the quit gave up on failed.
+pub const CLOSED_DURING_SAVE: &str = "Recall was closed during the save";
+
+/// What a quit does this pump tick.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum QuitStep {
+    /// A save is still being written: keep the engine (`first`: the wait starts now).
+    Wait { first: bool },
+    /// Nothing is being written: quit now.
+    Go,
+    /// The wait ran out with this many saves in flight: report them, then quit.
+    Lost(u32),
+}
+
+/// The quit's wait, from the first tick a quit was asked.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct QuitWait {
+    started: Option<Instant>,
+}
+
+impl QuitWait {
+    /// This tick's step: go once nothing is written; wait [`QUIT_SAVE_WAIT`] from the
+    /// first tick, and on while the save still makes progress; then give up on it.
+    pub fn step(&mut self, activity: &mut EngineActivity, now: Instant) -> QuitStep {
+        if !activity.saves_writing(now) {
+            return QuitStep::Go;
+        }
+        let first = self.started.is_none();
+        let started = *self.started.get_or_insert(now);
+        if now.saturating_duration_since(started) < QUIT_SAVE_WAIT || activity.save_growing(now) {
+            QuitStep::Wait { first }
+        } else {
+            QuitStep::Lost(activity.saves_in_flight())
+        }
+    }
+
+    /// The quit was called off (a cancelled session end): a later quit waits afresh.
+    pub fn reset(&mut self) {
+        self.started = None;
+    }
+}
+
+/// The `save_failed` each save the quit gave up on gets (mod `engine`, as the engine's own).
+pub fn closed_during_save_event() -> String {
+    json!({"type": "save_failed", "reason": CLOSED_DURING_SAVE}).to_string()
+}
+
+impl crate::record_app::Controller {
+    /// Pump step once a quit was asked: true = shut down now. While a save is still
+    /// written the engine keeps running; a save the wait gave up on is reported once
+    /// (the engine's own abort failure is not broadcast after it).
+    pub(crate) fn quit_ready(&mut self, now: Instant) -> bool {
+        match self.quit_wait.step(&mut self.activity, now) {
+            QuitStep::Go => true,
+            QuitStep::Wait { first } => {
+                if first {
+                    log!("record: quit -- waiting for the save being written (at least {} s, on while it grows)", QUIT_SAVE_WAIT.as_secs());
+                    self.shortcut_notice(QUIT_WAIT_TITLE, QUIT_WAIT_DETAIL);
+                }
+                false
+            }
+            QuitStep::Lost(lost) => {
+                log!("record: quit -- {lost} save(s) still being written after the wait; quitting anyway (reported failed)");
+                self.supervisor.detach_hub();
+                for _ in 0..lost {
+                    self.hub.event("engine", &closed_during_save_event());
+                }
+                true
+            }
+        }
+    }
+
+    /// While a quit waits: engine events and the status only (no retarget, no restart).
+    pub(crate) fn quitting_tick(&mut self, now: Instant) {
+        self.drain_engine_events(now);
+        self.publish_status();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    fn writing(step: u64) -> Value {
+        json!({"type":"status","save_writing":{"bytes":0,"queued":0,"step":step}})
+    }
+
+    #[test]
+    fn a_quit_waits_for_the_save_being_written_then_goes() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
+        assert_eq!(q.step(&mut a, t0), QuitStep::Go, "nothing saving: quit at once");
+        a.save_sent(t0);
+        assert_eq!(q.step(&mut a, t0 + s(1)), QuitStep::Wait { first: true }, "the island says so once");
+        assert_eq!(q.step(&mut a, t0 + s(2)), QuitStep::Wait { first: false });
+        a.on_engine_event(&json!({"type":"saved","path":"G__x.mp4"}), 0.0, t0 + s(5));
+        a.on_engine_event(&json!({"type":"status"}), 0.0, t0 + s(6));
+        assert_eq!(q.step(&mut a, t0 + s(6)), QuitStep::Go, "saved: the quit goes on");
+    }
+
+    #[test]
+    fn a_quit_waits_60_s_then_on_while_the_save_grows_and_reports_a_loss_after() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
+        a.save_sent(t0);
+        // The save grows every second until 100 s, then stops (a wedged writer).
+        let mut out = Vec::new();
+        for sec in 0..=200u64 {
+            let now = t0 + s(sec);
+            if sec <= 100 {
+                a.on_engine_event(&writing(sec + 1), 0.0, now);
+            }
+            out.push(q.step(&mut a, now));
+        }
+        assert!(out[..110].iter().all(|o| matches!(o, QuitStep::Wait { .. })), "60 s, then on while growing (+10 s)");
+        let lost = out.iter().position(|o| matches!(o, QuitStep::Lost(_))).expect("the wait ends");
+        assert_eq!(lost, 110, "growth stopped at 100 s: 10 s later the quit gives up");
+        assert_eq!(out[lost], QuitStep::Lost(1));
+        let line: Value = serde_json::from_str(&closed_during_save_event()).unwrap();
+        assert_eq!(line, json!({"type":"save_failed","reason":"Recall was closed during the save"}));
+    }
+
+    #[test]
+    fn a_save_with_no_progress_report_gives_the_quit_60_s() {
+        // An engine without `save_writing`: only the counted save, 60 s.
+        let t0 = Instant::now();
+        let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
+        a.save_sent(t0);
+        let quit = t0 + Duration::from_secs(1); // the quit is asked 1 s after the save
+        assert_eq!(q.step(&mut a, quit), QuitStep::Wait { first: true });
+        assert!(matches!(q.step(&mut a, quit + QUIT_SAVE_WAIT - Duration::from_millis(1)), QuitStep::Wait { .. }));
+        assert_eq!(q.step(&mut a, quit + QUIT_SAVE_WAIT), QuitStep::Lost(1), "60 s from the quit, no growth to wait on");
+    }
+}
