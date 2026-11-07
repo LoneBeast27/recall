@@ -192,7 +192,7 @@ fn a_save_while_the_old_engine_quits_for_a_hang_restart_says_not_responding() {
     assert_eq!(after_quit(&lines), Vec::<String>::new(), "a save went behind the quit");
 }
 
-/// A settings change: `restart_engine_for_settings(true)` (record_actions.rs `request_engine_restart`).
+/// A settings change: `restart_engine(RestartReason::Settings)` (record_actions.rs `request_engine_restart`).
 #[test]
 fn a_save_while_the_old_engine_quits_for_a_settings_restart_says_restarting() {
     let (refused, lines) = quit_window(|sup, next| sup.restart(next, true));
@@ -201,7 +201,7 @@ fn a_save_while_the_old_engine_quits_for_a_settings_restart_says_restarting() {
     assert_eq!(after_quit(&lines), Vec::<String>::new(), "a save went behind the quit");
 }
 
-/// A resume from sleep: `restart_engine_for_settings(true)` (record_power_win.rs RestartEngine),
+/// A resume from sleep: `restart_engine(RestartReason::Resume)` (record_power_win.rs RestartEngine),
 /// the same engine spec again.
 #[test]
 fn a_save_while_the_old_engine_quits_for_a_resume_restart_says_restarting() {

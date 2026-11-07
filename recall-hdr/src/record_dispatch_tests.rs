@@ -186,7 +186,7 @@ fn the_legacy_save_hotkey_and_pipe_save_after_the_quit_are_refused_and_never_wri
 
 #[test]
 fn a_save_during_a_planned_restart_says_the_recorder_is_restarting() {
-    // A settings change or a resume (`restart_engine_for_settings(true)`).
+    // A settings change or a resume (`restart_engine` with a planned `RestartReason`).
     let (pipe, rec) = TestPipe::quitting(Sent::Restarting);
     let mut port = Shown { pipe: &pipe, log: Vec::new() };
     assert!(!save(&mut port, 30, false));

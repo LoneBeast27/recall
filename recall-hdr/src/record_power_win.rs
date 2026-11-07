@@ -124,7 +124,7 @@ impl Controller {
             }
             PowerAction::RestartEngine => {
                 log!("record: resumed from sleep -- restarting the engine (fresh replay buffer)");
-                self.restart_engine_for_settings(true); // planned: "Recorder is restarting"
+                self.restart_engine(crate::record_restart::RestartReason::Resume); // waits for a drain
             }
             PowerAction::Reprobe => {
                 self.last_fed = None;
