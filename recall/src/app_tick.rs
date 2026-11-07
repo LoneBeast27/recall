@@ -212,6 +212,12 @@ impl App {
         self.max_nits = info.max_nits;
         let changed = self.last_hdr != Some(info.is_hdr);
         self.last_hdr = Some(info.is_hdr);
+        // Whether HDR can come on decides the next capture's format (fp16 ahead of time); read
+        // at the first check (before the first capture starts) and when HDR flips.
+        if let Some(shared) = self.shared.as_ref().filter(|_| changed) {
+            let capable = info.is_hdr || crate::hdr_capable::primary_hdr_capable().unwrap_or(shared.hdr_capable.load(Relaxed));
+            shared.hdr_capable.store(capable, Relaxed);
+        }
 
         // Only auto-detect drives the mode; a forced selector is left alone.
         if let Some(shared) = &self.shared {
