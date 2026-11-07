@@ -125,7 +125,7 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
 /// Spawn the engine. Hands the child's stdin to `shared` and spawns the stdout
 /// reader thread. Returns the child and the reader's join handle.
 fn spawn_engine(path: &Path, shared: &Arc<Shared>, spec: &EngineSpec) -> std::io::Result<(Child, JoinHandle<()>)> {
-    let mut child = engine_command(path, spec).spawn()?;
+    let mut child = engine_command(path, spec, shared.spawn_mute.get()).spawn()?;
     shared.spawn_count.fetch_add(1, Ordering::SeqCst);
     shared.set_child_stdin(child.stdin.take());
 

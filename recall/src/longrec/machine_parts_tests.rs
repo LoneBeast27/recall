@@ -76,7 +76,11 @@ fn flap_parts_keep_their_sound(calls: &[Call]) {
         let video_frames = ((last.0 + last.1 - first.0) * 48 / 1_000) as i64;
         let sound: i64 = audio.iter().map(|f| f.abs()).sum();
         if i > 0 {
-            assert_eq!(audio.first(), Some(&480), "part {} starts its sound at its first frame: {audio:?}", i + 1);
+            // The limiter holds ~10 ms of look-ahead, so call sizes moved; what matters is that a
+            // part's first write is sound (no silence ahead of it) and that it holds whole chunks
+            // (none cut at its start), every frame flushed at the part change.
+            assert!(audio.first().is_some_and(|f| *f > 0), "part {} starts its sound at its first frame: {audio:?}", i + 1);
+            assert_eq!(sound % 480, 0, "part {}: whole 10 ms chunks only: {audio:?}", i + 1);
         }
         assert!(audio.iter().all(|f| *f > -800), "part {}: no silence over a frame: {audio:?}", i + 1);
         assert!((sound - video_frames).abs() <= 48 * 500, "part {}: {sound} audio frames for {video_frames} of video", i + 1);
@@ -134,6 +138,7 @@ fn part_two_audio_starts_with_its_first_video_frame() {
     // A 10 ms chunk arriving at 12.008 s covers 11.998 .. 12.008: 5 ms of it are before the frame.
     rec.audio(0, &[0.3; 960], t0 + ms(12_008));
     rec.audio(0, &[0.3; 960], t0 + ms(12_018));
+    rec.stop(); // the limiter hands on the ~10 ms it holds
     let after: Vec<i64> = log.calls()[opened..]
         .iter()
         .filter_map(|c| match c {
@@ -142,8 +147,10 @@ fn part_two_audio_starts_with_its_first_video_frame() {
             _ => None,
         })
         .collect();
-    // 48 kHz: 5 ms = 240 frames dropped from the front; one video frame is 800.
-    assert_eq!(after.first(), Some(&(480 - 240)), "part 2's audio begins at its first frame: {after:?}");
+    // 48 kHz: 5 ms = 240 frames dropped from the front; one video frame is 800. The limiter's
+    // look-ahead moves call sizes, so count frames: 240 + 480, sound first.
+    assert!(after.first().is_some_and(|f| *f > 0), "part 2's audio begins with sound: {after:?}");
+    assert_eq!(after.iter().filter(|f| **f > 0).sum::<i64>(), 480 - 240 + 480, "part 2's audio begins at its first frame: {after:?}");
     assert!(after.iter().all(|f| *f > -800), "no silence over a frame: {after:?}");
 }
 

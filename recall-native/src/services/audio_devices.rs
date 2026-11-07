@@ -10,6 +10,11 @@ pub struct DeviceLists {
     pub outputs: Vec<String>,
     pub default_input: Option<String>,
     pub default_output: Option<String>,
+    /// The inputs whose Windows form factor is a microphone, headset or handset
+    /// (`endpoint_form`): Alt+M mutes them unless their strip says otherwise.
+    pub mic_inputs: Vec<String>,
+    /// The default input is such a microphone (`None`: there is none).
+    pub default_input_is_mic: Option<bool>,
     /// MIDI input ports (Settings → General → MIDI device).
     pub midi_inputs: Vec<String>,
 }
@@ -50,6 +55,8 @@ pub fn enumerate_blocking() -> DeviceLists {
             outputs: names(&Direction::Render),
             default_input: default_name(&Direction::Capture),
             default_output: default_name(&Direction::Render),
+            mic_inputs: mic_inputs(),
+            default_input_is_mic: wasapi::get_default_device(&Direction::Capture).ok().map(|d| is_mic(&d)),
             midi_inputs: crate::services::midi::input_names(),
         };
         wasapi::deinitialize();
@@ -67,12 +74,24 @@ fn names(direction: &Direction) -> Vec<String> {
     out
 }
 
+fn is_mic(device: &wasapi::Device) -> bool {
+    crate::services::endpoint_form::mutes_by_default(device.get_id().ok().and_then(|id| crate::services::endpoint_form::read(&id)))
+}
+
+/// Capture endpoints whose form factor mutes by default, by friendly name.
+fn mic_inputs() -> Vec<String> {
+    let Ok(collection) = DeviceCollection::new(&Direction::Capture) else { return Vec::new() };
+    let n = collection.get_nbr_devices().unwrap_or(0);
+    (0..n).filter_map(|i| collection.get_device_at_index(i).ok()).filter(is_mic).filter_map(|d| d.get_friendlyname().ok()).collect()
+}
+
 fn default_name(direction: &Direction) -> Option<String> {
     wasapi::get_default_device(direction).ok()?.get_friendlyname().ok()
 }
 
 /// The row label for a saved device name: "" = the Windows default (named when known); a name
-/// that matches no listed endpoint the way the recorder matches it = "<name> (not connected)".
+/// that matches no listed endpoint the way the recorder matches it = "<name> (not connected)";
+/// a match shows the endpoint's real name (a saved "3- X" that opens "4- X" reads "4- X").
 pub fn device_label(saved: &str, listed: Option<&[String]>, default: Option<&str>) -> String {
     let saved = saved.trim();
     if saved.is_empty() {
@@ -81,9 +100,10 @@ pub fn device_label(saved: &str, listed: Option<&[String]>, default: Option<&str
             None => "Windows default".to_owned(),
         };
     }
-    match listed {
-        Some(list) if crate::services::meters::match_endpoint(list, saved).is_none() => format!("{saved} (not connected)"),
-        _ => saved.to_owned(),
+    match listed.map(|list| (list, crate::services::meters::match_endpoint(list, saved))) {
+        Some((list, Some(i))) => list[i].trim().to_owned(),
+        Some((_, None)) => format!("{saved} (not connected)"),
+        None => saved.to_owned(),
     }
 }
 
@@ -108,9 +128,19 @@ mod tests {
         let list = vec!["Microphone (USB)".to_owned(), "Microphone (USB Audio Device)".to_owned()];
         assert_eq!(device_label("", Some(&list), Some("Microphone (USB)")), "Windows default (Microphone (USB))");
         assert_eq!(device_label("", None, None), "Windows default");
-        assert_eq!(device_label("microphone (usb)", Some(&list), None), "microphone (usb)", "case-insensitive like the engine");
+        assert_eq!(device_label("microphone (usb)", Some(&list), None), "microphone (usb) (not connected)", "case included, like the engine");
         assert_eq!(device_label("Headset (BT)", Some(&list), None), "Headset (BT) (not connected)");
         assert_eq!(device_label("Headset (BT)", None, None), "Headset (BT)", "not listed yet: no claim either way");
-        assert_eq!(device_label("usb audio microphone", Some(&list), None), "usb audio microphone", "the recorder finds it by its words");
+        assert_eq!(device_label("usb audio microphone", Some(&list), None), "usb audio microphone (not connected)", "no word matching");
+    }
+
+    /// 2026-11-07 merge-gate A4 rule: the page shows the endpoint the recorder opens by its real
+    /// name, so a saved "3- X" that opens "4- X" reads "4- X".
+    #[test]
+    fn a_renumbered_device_shows_its_real_name() {
+        let list = vec!["Speakers (Box)".to_owned(), "4- Line (Box One)".to_owned()];
+        assert_eq!(device_label("3- Line (Box One)", Some(&list), None), "4- Line (Box One)");
+        let two = vec!["4- Line (Box One)".to_owned(), "5- Line (Box One)".to_owned()];
+        assert_eq!(device_label("3- Line (Box One)", Some(&two), None), "3- Line (Box One) (not connected)", "two matches: waiting");
     }
 }

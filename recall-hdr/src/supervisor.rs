@@ -33,6 +33,8 @@
 
 #[path = "supervisor_manager.rs"]
 mod manager;
+#[path = "supervisor_mute.rs"]
+mod mute;
 #[path = "supervisor_protocol.rs"]
 mod protocol;
 #[path = "supervisor_refusal.rs"]
@@ -170,6 +172,11 @@ impl Supervisor {
         self.shared.unpause();
     }
 
+    /// The mic mute every later spawn starts with, a crash respawn included (`supervisor_mute.rs`).
+    pub fn set_mic_muted(&self, muted: bool) {
+        self.shared.spawn_mute.set(muted);
+    }
+
     /// The last engine `hello` and `status` lines (raw JSON), for late joiners.
     pub fn cached_engine_events(&self) -> Vec<String> {
         let cache = self.shared.cache.lock().unwrap_or_else(|p| p.into_inner());
@@ -260,6 +267,8 @@ struct Shared {
     child_stdin: Mutex<EngineStdin>,
     hello_count: AtomicU32,
     spawn_count: AtomicU32,
+    /// The mic mute each spawn starts with, over the spec's (`supervisor_mute.rs`).
+    spawn_mute: mute::SpawnMute,
     cache: Mutex<EngineCache>,
     /// Control-pipe hub: engine protocol lines are re-broadcast to hub clients.
     hub: Mutex<Option<Arc<crate::control::PipeHub>>>,
@@ -301,6 +310,7 @@ impl Shared {
             child_stdin: Mutex::new(EngineStdin::default()),
             hello_count: AtomicU32::new(0),
             spawn_count: AtomicU32::new(0),
+            spawn_mute: mute::SpawnMute::new(),
             cache: Mutex::new(EngineCache::default()),
             hub: Mutex::new(None),
             events: Mutex::new(None),
@@ -443,9 +453,9 @@ fn locate_engine_from(current_exe: &Path) -> Option<PathBuf> {
     locate_sibling_from(current_exe, "recall.exe")
 }
 
-/// Build `recall.exe --json` with piped stdio, no console, and the spec's
-/// environment edits.
-fn engine_command(path: &Path, spec: &EngineSpec) -> Command {
+/// Build `recall.exe --json` with piped stdio, no console, the spec's environment edits, and
+/// the controller's latest mic mute over the spec's (`supervisor_mute.rs`).
+fn engine_command(path: &Path, spec: &EngineSpec, mute: Option<bool>) -> Command {
     use std::os::windows::process::CommandExt;
     let mut cmd = Command::new(path);
     cmd.arg("--json")
@@ -458,6 +468,9 @@ fn engine_command(path: &Path, spec: &EngineSpec) -> Command {
             Some(v) => cmd.env(key, v),
             None => cmd.env_remove(key),
         };
+    }
+    if let Some(muted) = mute {
+        cmd.env(mute::MIC_MUTED_ENV, if muted { "1" } else { "0" });
     }
     cmd
 }

@@ -2,58 +2,33 @@
 //! Audio page's meter (`recall-native` `services/meters.rs`) keeps a copy of `match_endpoint`,
 //! so it meters the endpoint this records; keep the two equal (same test table in both).
 
-/// Lowercase, ø→o (a name typed without the ø still matches), split into words.
-fn words(text: &str) -> Vec<String> {
-    let folded: String = text.to_lowercase().chars().map(|c| if c == 'ø' { 'o' } else { c }).collect();
-    folded.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_owned).collect()
-}
-
-/// True when every word of `want` is a whole word of `name`: "a" never matches inside
-/// another word.
-fn name_matches(name: &str, want: &str) -> bool {
-    let name = words(name);
-    let want = words(want);
-    !want.is_empty() && want.iter().all(|w| name.contains(w))
-}
-
-/// `name` without Windows' "N- " endpoint index at its start or at the start of a bracket:
-/// "Microphone (2- USB Audio Device)" → "Microphone (USB Audio Device)".
-fn strip_index(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    let mut rest = name.trim();
-    let mut at_start = true;
-    while let Some(c) = rest.chars().next() {
-        if at_start {
-            let digits = rest.len() - rest.trim_start_matches(|d: char| d.is_ascii_digit()).len();
-            if digits > 0 && rest[digits..].starts_with('-') {
-                rest = rest[digits + 1..].trim_start();
-                at_start = false;
-                continue;
-            }
-        }
-        at_start = c == '(';
-        out.push(c);
-        rest = &rest[c.len_utf8()..];
+/// `name` without a leading "<digits>- " Windows endpoint index: "4- Line (Box One)" → "Line
+/// (Box One)". Nothing else is dropped or folded: an index inside a bracket, the case and every
+/// other character stay.
+fn strip_index(name: &str) -> &str {
+    let name = name.trim();
+    let digits = name.len() - name.trim_start_matches(|d: char| d.is_ascii_digit()).len();
+    match name[digits..].strip_prefix("- ") {
+        Some(rest) if digits > 0 => rest.trim_start(),
+        _ => name,
     }
-    out
 }
 
-/// Index of the endpoint `want` names: an exact (case-insensitive) friendly name first; else
-/// the one endpoint whose words hold `want`'s once both drop their "N- " index (the same
-/// model renumbered after a port change). Two or more such endpoints match none: two
-/// "USB Audio Device"s can't be told apart, so the track waits for its own device instead of
-/// recording a sibling under its name.
+/// Index of the endpoint `want` names (2026-11-07 merge-gate rule): the endpoint with exactly
+/// that friendly name; else the one endpoint whose name equals `want`'s once both drop a leading
+/// "<digits>- " index (the same endpoint renumbered by Windows). Case included, no word or fuzzy
+/// matching. Two or more such endpoints match none, so a track never records a sibling endpoint
+/// under its name; it waits for its own device.
 pub(crate) fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
     let want = want.trim();
     if want.is_empty() {
         return None;
     }
-    let lower = want.to_lowercase();
-    if let Some(i) = names.iter().position(|n| n.trim().to_lowercase() == lower) {
+    if let Some(i) = names.iter().position(|n| n.trim() == want) {
         return Some(i);
     }
     let want = strip_index(want);
-    let mut hits = names.iter().enumerate().filter(|(_, n)| name_matches(&strip_index(n), &want)).map(|(i, _)| i);
+    let mut hits = names.iter().enumerate().filter(|(_, n)| strip_index(n) == want).map(|(i, _)| i);
     let first = hits.next()?;
     hits.next().is_none().then_some(first)
 }
@@ -91,10 +66,10 @@ mod tests {
     use super::strip_index;
 
     #[test]
-    fn the_windows_index_is_dropped_only_where_windows_puts_it() {
-        assert_eq!(strip_index("Microphone (2- USB Audio Device)"), "Microphone (USB Audio Device)");
-        assert_eq!(strip_index("12- Speakers"), "Speakers");
-        assert_eq!(strip_index("Mic 2 (USB)"), "Mic 2 (USB)", "a number that is part of the name stays");
-        assert_eq!(strip_index("Line (Mixér 2-3)"), "Line (Mixér 2-3)");
+    fn only_a_leading_windows_index_is_dropped() {
+        assert_eq!(strip_index("12- Speakers (Box One)"), "Speakers (Box One)");
+        assert_eq!(strip_index("Microphone (2- Box One)"), "Microphone (2- Box One)", "an index in a bracket stays");
+        assert_eq!(strip_index("Mic 2 (Box)"), "Mic 2 (Box)", "a number that is part of the name stays");
+        assert_eq!(strip_index("2-3 Line"), "2-3 Line", "no space after the dash: not an index");
     }
 }

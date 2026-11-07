@@ -64,12 +64,39 @@ impl StreamLimiter {
         self.emit(true)
     }
 
+    /// Nothing held or seen needs limiting and the release ramp is back at full gain: every
+    /// frame still held goes out exactly as it came in, whatever follows. The long recording
+    /// then writes silence through the sink's fast path (`longrec::machine`).
+    pub(crate) fn quiet(&self) -> bool {
+        self.last_gain >= 1.0 && self.needed.iter().all(|g| *g >= 1.0)
+    }
+
+    /// Hands on the frames still held (as they came in when `quiet`) and starts over, as fresh.
+    pub(crate) fn drain(&mut self) -> Vec<f32> {
+        let out = self.emit(true);
+        self.needed.clear();
+        self.pending.clear();
+        (self.gain_base, self.emitted, self.taken, self.last_gain) = (0, 0, 0, f32::MAX);
+        out
+    }
+
     fn emit(&mut self, end: bool) -> Vec<f32> {
         // The hold window is final for frames under `known`; the attack ramp for frames under `ready`.
         let known = if end { self.taken } else { self.taken.saturating_sub(self.ramps.hold) };
         let ready = if end { self.taken } else { known.saturating_sub(self.reach) };
         if ready <= self.emitted {
             return Vec::new();
+        }
+        if self.quiet() {
+            // Under the ceiling throughout: every gain is 1, so skip the window maths.
+            let count = ready - self.emitted;
+            let out: Vec<f32> = self.pending.drain(..count * self.channels).collect();
+            self.last_gain = 1.0;
+            self.emitted = ready;
+            let keep_from = self.emitted.saturating_sub(self.ramps.hold).max(self.gain_base);
+            self.needed.drain(..keep_from - self.gain_base);
+            self.gain_base = keep_from;
+            return out;
         }
         let needed: Vec<f32> = self.needed.iter().copied().collect();
         let held = window_min(&needed, self.ramps.hold);

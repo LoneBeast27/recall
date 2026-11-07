@@ -248,6 +248,8 @@ impl Controller {
     /// the shortcut still gets its pop-up.
     pub(crate) fn set_mic(&mut self, muted: bool) {
         self.mic_muted = muted;
+        // A crash respawn reuses the last spec: it must start with this mute, not the spec's.
+        self.supervisor.set_mic_muted(muted);
         log!("record: microphone {}", if muted { "muted" } else { "live" });
         let sent = self.supervisor.send_engine_line(&json!({"cmd": "set_mic_mute", "muted": muted}).to_string());
         // The mute stays our intent either way: the next engine gets it (`reapply_engine_intents`).

@@ -122,7 +122,7 @@ pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, report
         let source: &'static str = Box::leak(format!("{}{exe}", crate::edit_model::APP_SOURCE_PREFIX).into_boxed_str());
         let is_game = game_exe.as_deref().is_some_and(|g| level::same_exe(g, &exe));
         let id = if app.id.trim().is_empty() { format!("app-{}", n + 1) } else { app.id.trim().to_owned() };
-        let spec = SourceSpec { id, kind: "app".into(), device: String::new(), exe: exe.clone(), name: app.track_name(), gain_db: app.gain_db, mic_mute: false };
+        let spec = SourceSpec { id, kind: "app".into(), device: String::new(), exe: exe.clone(), name: app.track_name(), gain_db: app.gain_db, mic_mute: Some(false) };
         let ring = Arc::new(TrackRing::for_source(&spec, source, buffer_secs, format!("{exe} (not running)")));
         let name = ring.title();
         let (thread_ring, thread_scanner) = (Arc::clone(&ring), Arc::clone(&scanner));

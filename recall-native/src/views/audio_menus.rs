@@ -24,6 +24,8 @@ enum Pick {
     Device(String, String),
     App(String, String, String),
     Add(Kind),
+    /// A new input: a microphone (true) or a line-in or capture card (false).
+    AddInput(bool),
     /// An input's "Muted by the mic hotkey" (the source, the new value).
     MicMute(String, bool),
     OpenApps,
@@ -82,6 +84,7 @@ impl Root {
             Pick::App(id, exe, label) if id.is_empty() => self.add_source(Kind::App, &exe, &label),
             Pick::App(id, exe, label) => self.set_source_app(&id, exe, label),
             Pick::Add(kind) => self.add_source(kind, "", ""),
+            Pick::AddInput(mic) => self.add_input(mic),
             Pick::MicMute(id, on) => self.set_source_mic_mute(&id, on),
             Pick::OpenApps => self.settings_ui.audio.menu = Some(StripMenu::AddApp),
             Pick::Browse(id) => self.browse_for_app(id, cx),
@@ -156,19 +159,27 @@ impl Root {
             }
             let saved = source.device.trim().to_owned();
             let mut entries = vec![(String::new(), audio_devices::device_label("", lists.map(|_| names.as_slice()), default.as_deref()))];
-            if !saved.is_empty() && lists.is_some() && crate::services::meters::match_endpoint(&names, &saved).is_none() {
+            let matched = (!saved.is_empty()).then(|| crate::services::meters::match_endpoint(&names, &saved)).flatten();
+            if !saved.is_empty() && lists.is_some() && matched.is_none() {
                 entries.push((saved.clone(), format!("{saved} (not connected)")));
             }
+            let first_name = entries.len();
             entries.extend(names.iter().map(|n| (n.clone(), n.clone())));
             for (i, (value, label)) in entries.into_iter().enumerate() {
-                let selected = value.trim().eq_ignore_ascii_case(&saved);
+                // The endpoint the recorder opens for the saved name (its real name may differ).
+                let selected = match matched {
+                    Some(m) => i == first_name + m,
+                    None => value.trim() == saved,
+                };
                 rows.push(self.menu_row((&key, i), None, label, selected, Pick::Device(source.id.clone(), value), cx));
             }
             if source.kind == Kind::Input {
                 // A capture card or console line-in keeps its sound while the mic is muted.
                 rows.push(note("Turn this off for a line-in or capture card:"));
                 let glyph = Some(icon(Icon::MicOff, 14., theme::MUTED).into_any_element());
-                rows.push(self.menu_row((&key, 950), glyph, "Muted by the mic hotkey".into(), source.mic_mute, Pick::MicMute(source.id.clone(), !source.mic_mute), cx));
+                // What Alt+M does now: the strip's flag, else the endpoint's form factor.
+                let muted = crate::services::audio_sources::mutes(source, lists);
+                rows.push(self.menu_row((&key, 950), glyph, "Muted by the mic hotkey".into(), muted, Pick::MicMute(source.id.clone(), !muted), cx));
             }
         }
         let panel = panel(SharedString::from(format!("strip-menu-{}", source.id)), 280.).left_0().children(rows).on_mouse_down_out(cx.listener(|this, _, _, cx| {
@@ -186,13 +197,13 @@ impl Root {
             rows.push(note("Record one app's sound on its own track:"));
             rows.extend(self.app_rows("add-app", None, "", cx));
         } else {
-            for (i, kind) in crate::services::audio_sources::addable(list).into_iter().enumerate() {
-                let (glyph, label, pick) = match kind {
-                    Kind::Input => (Icon::Mic, "Microphone or line-in", Pick::Add(kind)),
-                    Kind::Output => (Icon::Volume, "Desktop or output device", Pick::Add(kind)),
-                    Kind::App => (Icon::AudioLines, "Application audio", Pick::OpenApps),
-                    Kind::Game => (Icon::Gamepad, "Game audio", Pick::Add(kind)),
-                };
+            let choices = crate::services::audio_sources::addable(list).into_iter().flat_map(|kind| match kind {
+                Kind::Input => vec![(Icon::Mic, "Microphone", Pick::AddInput(true)), (Icon::Mic, "Line-in or capture card", Pick::AddInput(false))],
+                Kind::Output => vec![(Icon::Volume, "Desktop or output device", Pick::Add(kind))],
+                Kind::App => vec![(Icon::AudioLines, "Application audio", Pick::OpenApps)],
+                Kind::Game => vec![(Icon::Gamepad, "Game audio", Pick::Add(kind))],
+            });
+            for (i, (glyph, label, pick)) in choices.enumerate() {
                 rows.push(self.menu_row(("add", i), Some(icon(glyph, 14., theme::MUTED).into_any_element()), label.into(), false, pick, cx));
             }
         }

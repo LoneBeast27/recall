@@ -40,19 +40,17 @@ pub struct AudioSource {
     pub enabled: bool,
     /// Recorded gain, `GAIN_MIN_DB..=GAIN_MAX_DB`.
     pub gain_db: f32,
-    /// An `input` the mic-mute hotkey silences: a microphone. A line-in or capture card set
-    /// up as an input says `false`, so muting the mic leaves its sound. Saved only when false.
-    #[serde(skip_serializing_if = "is_true")]
-    pub mic_mute: bool,
-}
-
-fn is_true(value: &bool) -> bool {
-    *value
+    /// Whether the mic-mute hotkey silences this `input`: `true` a microphone, `false` a line-in
+    /// or capture card (muting the mic leaves its sound). Absent (every config written before
+    /// the flag, a new default source): the engine decides by the opened endpoint's Windows form
+    /// factor, never by its name (SPEC A12). Saved only when the strip says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic_mute: Option<bool>,
 }
 
 impl Default for AudioSource {
     fn default() -> Self {
-        AudioSource { id: String::new(), kind: "input".into(), device: String::new(), exe: String::new(), name: String::new(), enabled: true, gain_db: 0.0, mic_mute: true }
+        AudioSource { id: String::new(), kind: "input".into(), device: String::new(), exe: String::new(), name: String::new(), enabled: true, gain_db: 0.0, mic_mute: None }
     }
 }
 
@@ -148,7 +146,14 @@ fn engine_list(list: &[AudioSource]) -> Vec<AudioSource> {
 
 /// The engine's tracks without what it can change live (gain, name, mic-mute flag).
 fn track_shape(list: &[AudioSource]) -> Vec<AudioSource> {
-    engine_list(list).into_iter().map(|s| AudioSource { gain_db: 0.0, name: String::new(), mic_mute: true, ..s }).collect()
+    engine_list(list).into_iter().map(|s| AudioSource { gain_db: 0.0, name: String::new(), mic_mute: None, ..s }).collect()
+}
+
+/// A recorded source lost its mic-mute flag (back to its endpoint's form factor): `set_source`
+/// cannot say "no flag", so only a restart applies it. Setting a flag goes live.
+fn flag_dropped(old: &[AudioSource], new: &[AudioSource]) -> bool {
+    let old = engine_list(old);
+    engine_list(new).iter().any(|n| n.mic_mute.is_none() && old.iter().any(|o| o.id == n.id && o.mic_mute.is_some()))
 }
 
 /// Different tracks for the engine (a restart)? Order matters: it is the clip's track order.
@@ -157,7 +162,7 @@ fn track_shape(list: &[AudioSource]) -> Vec<AudioSource> {
 /// its first sample above the ceiling (`longrec::machine`), and a replay save limits a track that
 /// has been boosted.
 pub fn changed(old: &[AudioSource], new: &[AudioSource]) -> bool {
-    track_shape(old) != track_shape(new)
+    track_shape(old) != track_shape(new) || flag_dropped(old, new)
 }
 
 /// `set_source` lines for the recorded sources whose gain, name or mic-mute flag changed (the
@@ -178,8 +183,8 @@ pub fn live_updates(old: &[AudioSource], new: &[AudioSource]) -> Vec<String> {
             if o.name != n.name {
                 cmd.insert("name".into(), n.name.clone().into());
             }
-            if o.mic_mute != n.mic_mute {
-                cmd.insert("mic_mute".into(), n.mic_mute.into());
+            if let Some(on) = n.mic_mute.filter(|_| o.mic_mute != n.mic_mute) {
+                cmd.insert("mic_mute".into(), on.into());
             }
             (cmd.len() > 2).then(|| serde_json::Value::Object(cmd).to_string())
         })

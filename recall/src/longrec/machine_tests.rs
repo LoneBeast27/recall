@@ -70,17 +70,21 @@ fn audio_is_placed_by_wall_clock_padded_and_trimmed() {
     // 600 ms of nothing (silent loopback), then a chunk: the gap is padded so
     // the chunk sits at its real-time position (30_000 frames in).
     rec.audio(0, &chunk(480), at(635));
-    assert_eq!(log.audio(0), vec![480, 480, -29_040, 480]);
     // A device running ahead of real time: the excess is trimmed at the front.
     rec.audio(1, &chunk(48_000), at(1_000));
     rec.audio(1, &chunk(480), at(1_010));
     rec.audio(1, &chunk(9_600), at(1_020)); // 200 ms claimed, only the last 10 ms are new
-    assert_eq!(log.audio(1), vec![48_000, 480, 480]);
     rec.audio(1, &chunk(480), at(900)); // entirely behind what was written
-    assert_eq!(log.audio(1).len(), 3, "a fully overlapping chunk writes nothing");
-    let mic_written: i64 = log.audio(1).iter().sum();
-    assert_eq!(mic_written, 48_960, "track 1 ends exactly at 1020 ms of real time");
     rec.stop();
+    // Where the samples land (the limiter holds ~10 ms until stop, so call sizes say nothing):
+    // two chunks from frame 0, 29_040 frames of padding, the late chunk at its real time.
+    let frames = |track: usize| log.pcm(track).iter().step_by(2).copied().collect::<Vec<f32>>();
+    let game = frames(0);
+    assert_eq!(game.len(), 30_480);
+    assert!(game[..960].iter().all(|s| *s == 0.1) && game[960..30_000].iter().all(|s| *s == 0.0) && game[30_000..].iter().all(|s| *s == 0.1), "placed by wall clock");
+    let mic = frames(1);
+    assert_eq!(mic.len(), 48_960, "track 1 ends exactly at 1020 ms of real time: the excess was trimmed, the overlapping chunk wrote nothing");
+    assert!(mic.iter().all(|s| *s == 0.1), "no padding inside track 1");
 }
 
 #[test]
@@ -231,8 +235,9 @@ fn audio_timing_uses_the_instant_sampled_with_the_capture_clock() {
     rec.start(path, Some((10_000 * MS, t0)), armed);
     rec.video(10_040 * MS, true, pkt(1), false, armed);
     rec.audio(0, &chunk(480), t0 + Duration::from_millis(55));
-    assert_eq!(log.audio(0), vec![480], "no 2 s of silence first: audio does not lead video");
     rec.stop();
+    // The chunk is the track's first 480 frames (the limiter held it until stop).
+    assert_eq!(log.pcm(0), chunk(480), "no 2 s of silence first: audio does not lead video");
 }
 
 #[test]
@@ -339,4 +344,42 @@ fn a_source_boosted_after_the_engine_started_is_limited_too() {
     let peak = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
     assert!(peak <= CEILING + 1e-6, "a live boost clipped the long recording: peak {peak}");
     assert_eq!(log.pcm(1), quiet, "a track under the ceiling is written as captured");
+}
+
+/// 2026-11-07 audit R2-deep-audio-2: a track under the ceiling that goes hot mid-stream (a game
+/// transient at 0 dB, a plosive on a boosted mic). The limiter runs from the track's first frame,
+/// so it ramps the gain down ahead of the peak instead of stepping it at the chunk where the peak
+/// arrives (a click). The burst starts 27 frames into chunk 11, where the chunk boundary sits on
+/// the sine's peak, and at a zero crossing, so the input itself has no step.
+#[test]
+fn a_track_that_goes_hot_mid_stream_has_no_gain_step() {
+    let log = Log::default();
+    let mut rec = Recorder::new(FakeFactory { log: log.clone(), ..Default::default() }, tracks());
+    let path = temp_dir("hot-mid-stream").join("G__2026-11-07__12-00-00__rec.mp4");
+    let t0 = Instant::now();
+    rec.start(path.clone(), Some((1_000 * MS, t0)), t0);
+    rec.video(1_000 * MS, true, pkt(1), false, t0);
+    let burst = 10 * 480 + 27;
+    let tone: Vec<f32> = (0..16 * 480)
+        .flat_map(|n| {
+            let amp = if n < burst { 0.85 } else { 1.0 };
+            let s = (n as f32 / 48_000.0 * 437.5 * std::f32::consts::TAU).sin() * amp;
+            [s, s]
+        })
+        .collect();
+    let silent = vec![0.0f32; tone.len()];
+    for (k, (hot, zero)) in tone.chunks(960).zip(silent.chunks(960)).enumerate() {
+        let at = t0 + Duration::from_millis(10 * (k as u64 + 1));
+        rec.audio(0, hot, at);
+        rec.audio(1, zero, at);
+    }
+    assert!(matches!(rec.stop()[..], [Event::Stopped { .. }]));
+    let out: Vec<f32> = log.pcm(0).into_iter().step_by(2).collect();
+    let input: Vec<f32> = tone.iter().step_by(2).copied().collect();
+    assert_eq!(out.len(), input.len(), "every frame in place");
+    let steepest = |x: &[f32]| x.windows(2).fold(0.0f32, |m, w| m.max((w[1] - w[0]).abs()));
+    let (got, limit) = (steepest(&out), steepest(&input) + 0.02);
+    assert!(got <= limit, "a gain step where the limiter engaged: largest step {got}, input's + 0.02 = {limit}");
+    let peak = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!(peak <= crate::export::mix_limit::CEILING + 1e-6, "peak {peak}");
 }

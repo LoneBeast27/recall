@@ -79,6 +79,10 @@ pub(super) fn open_stream(direction: &Direction, device: &str, ring: &TrackRing,
         ),
         None => {
             let (dev, endpoint, on_default) = super::pick_device(direction, device, ring.input)?;
+            if ring.input {
+                // Alt+M mutes a microphone by its form factor, never by its name (SPEC A12).
+                ring.set_endpoint_form(dev.get_id().ok().and_then(|id| super::form_factor::read(&id)));
+            }
             if on_default {
                 watch = watch_for(device, dev.get_id().ok());
             }
