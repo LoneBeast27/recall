@@ -228,44 +228,32 @@ pub fn default_moved(opened: Option<&str>, now: Option<&str>) -> bool {
     matches!((opened, now), (Some(opened), Some(now)) if opened != now)
 }
 
-/// Index of the endpoint `want` names: exact (case-insensitive) first; else the one endpoint
-/// whose words hold `want`'s once both drop Windows' "N- " index. Two or more such endpoints
-/// match none. A copy of the recorder's `match_endpoint` (`recall` `audio/endpoints.rs`); both
-/// crates test the same table.
+/// Index of the endpoint `want` names: exactly that friendly name; else the one endpoint whose
+/// name equals `want`'s once both drop a leading "<digits>- " Windows index. Case included, no
+/// word matching; two or more such endpoints match none. A copy of the recorder's
+/// `match_endpoint` (`recall` `audio/endpoints.rs`); both crates test the same table.
 pub fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
     let want = want.trim();
     if want.is_empty() {
         return None;
     }
-    let want_lower = want.to_lowercase();
-    if let Some(i) = names.iter().position(|n| n.trim().to_lowercase() == want_lower) {
+    if let Some(i) = names.iter().position(|n| n.trim() == want) {
         return Some(i);
     }
     let want = strip_index(want);
-    let mut hits = names.iter().enumerate().filter(|(_, n)| name_matches(&strip_index(n), &want)).map(|(i, _)| i);
+    let mut hits = names.iter().enumerate().filter(|(_, n)| strip_index(n) == want).map(|(i, _)| i);
     let first = hits.next()?;
     hits.next().is_none().then_some(first)
 }
 
-/// `name` without Windows' "N- " endpoint index at its start or at the start of a bracket.
-fn strip_index(name: &str) -> String {
-    let mut out = String::with_capacity(name.len());
-    let mut rest = name.trim();
-    let mut at_start = true;
-    while let Some(c) = rest.chars().next() {
-        if at_start {
-            let digits = rest.len() - rest.trim_start_matches(|d: char| d.is_ascii_digit()).len();
-            if digits > 0 && rest[digits..].starts_with('-') {
-                rest = rest[digits + 1..].trim_start();
-                at_start = false;
-                continue;
-            }
-        }
-        at_start = c == '(';
-        out.push(c);
-        rest = &rest[c.len_utf8()..];
+/// `name` without a leading "<digits>- " Windows endpoint index; nothing else is dropped.
+fn strip_index(name: &str) -> &str {
+    let name = name.trim();
+    let digits = name.len() - name.trim_start_matches(|d: char| d.is_ascii_digit()).len();
+    match name[digits..].strip_prefix("- ") {
+        Some(rest) if digits > 0 => rest.trim_start(),
+        _ => name,
     }
-    out
 }
 
 /// One opened meter client.
@@ -420,19 +408,6 @@ fn db(value: f32) -> f32 {
 
 fn round_tenth(value: f32) -> f32 {
     (value * 10.0).round() / 10.0
-}
-
-/// Lowercase, ø→o (so a name typed without the ø still matches), split into words.
-fn words(text: &str) -> Vec<String> {
-    let folded: String = text.to_lowercase().chars().map(|c| if c == 'ø' { 'o' } else { c }).collect();
-    folded.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()).map(str::to_owned).collect()
-}
-
-/// Every token must appear as a whole word of the friendly name.
-fn name_matches(name: &str, tokens: &str) -> bool {
-    let name_words = words(name);
-    let want = words(tokens);
-    !want.is_empty() && want.iter().all(|token| name_words.contains(token))
 }
 
 #[cfg(test)]

@@ -41,14 +41,11 @@ pub struct SourceSpec {
     pub name: String,
     #[serde(default)]
     pub gain_db: f32,
-    /// An input the mic-mute hotkey silences (a microphone). A line-in or capture card says
-    /// `false`. Ignored for other kinds.
-    #[serde(default = "yes")]
-    pub mic_mute: bool,
-}
-
-fn yes() -> bool {
-    true
+    /// Whether the mic-mute hotkey silences this input: `true` a microphone, `false` a line-in
+    /// or capture card, absent = the opened endpoint's form factor decides (`form_factor.rs`).
+    /// Ignored for other kinds.
+    #[serde(default)]
+    pub mic_mute: Option<bool>,
 }
 
 impl SourceSpec {
@@ -75,7 +72,7 @@ pub fn gain_of(gain_db: f32) -> f32 {
 }
 
 fn spec(id: &str, kind: &str, name: &str, device: &str, exe: &str) -> SourceSpec {
-    SourceSpec { id: id.into(), kind: kind.into(), device: device.trim().into(), exe: exe.trim().into(), name: name.into(), gain_db: 0.0, mic_mute: true }
+    SourceSpec { id: id.into(), kind: kind.into(), device: device.trim().into(), exe: exe.trim().into(), name: name.into(), gain_db: 0.0, mic_mute: None }
 }
 
 /// The sources in `json`, with every bad entry skipped and logged: one broken entry (a

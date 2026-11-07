@@ -180,6 +180,8 @@ pub(super) fn capture_loop<C: Capture>(
             Ok(mut stream) => {
                 failures = 0;
                 let endpoint = stream.endpoint();
+                // The endpoint's real name: a renumbered "4- X" for a saved "3- X" shows as itself.
+                eprintln!("[recall] audio track '{}': opened {endpoint}", ring.name);
                 set_endpoint(ring, endpoint.clone());
                 if let Some(tx) = init_tx.take() {
                     let _ = tx.send(Ok(()));

@@ -17,7 +17,8 @@ fn ring() -> TrackRing {
         gain: AtomicU32::new(1.0f32.to_bits()),
         boosted: AtomicBool::new(false),
         input: true,
-        mutes: AtomicBool::new(true),
+        mic_pref: std::sync::atomic::AtomicU8::new(0),
+        endpoint_is_mic: AtomicBool::new(true),
         endpoint: Mutex::new(String::new()),
         rate: RATE,
         channels: 1,
@@ -279,7 +280,8 @@ fn a_named_source_never_opens_the_default_and_opens_by_name_when_it_appears() {
 fn choose_endpoint_never_falls_back_for_a_named_source() {
     use crate::audio::{choose_endpoint, Pick};
     let names = ["Mic (Realtek)".to_owned(), "Headset (USB)".to_owned()];
-    assert_eq!(choose_endpoint(&names, Some("headset usb"), false), Ok(Pick::Named(1)));
+    assert_eq!(choose_endpoint(&names, Some("Headset (USB)"), false), Ok(Pick::Named(1)));
+    assert_eq!(choose_endpoint(&names, Some("headset usb"), false), Err("'headset usb' is not connected".to_owned()), "no word matching");
     assert_eq!(choose_endpoint(&names[..1], Some("Headset (USB)"), false), Err("'Headset (USB)' is not connected".to_owned()));
     assert_eq!(choose_endpoint(&names, None, false), Ok(Pick::Default), "only a source with no device follows the default");
     assert_eq!(choose_endpoint(&names, Some("  "), false), Ok(Pick::Default));

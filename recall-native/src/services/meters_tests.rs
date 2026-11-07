@@ -2,7 +2,7 @@
 use super::*;
 
 fn source(kind: Kind, device: &str, exe: &str) -> Source {
-    Source { id: format!("{}-1", kind.token()), kind, device: device.into(), exe: exe.into(), name: "S".into(), enabled: true, gain_db: 0.0, mic_mute: true }
+    Source { id: format!("{}-1", kind.token()), kind, device: device.into(), exe: exe.into(), name: "S".into(), enabled: true, gain_db: 0.0, mic_mute: None }
 }
 
 #[test]
@@ -18,41 +18,33 @@ fn each_source_is_metered_the_way_the_recorder_captures_it() {
     assert_eq!(labels, ["game-1", "input-1"], "readings are keyed by source id");
 }
 
+/// 2026-11-07 merge-gate A4 rule. Same table as `recall` `audio_tests.rs`: the meter picks what
+/// the recorder records. No word, case or bracket-index matching any more.
 #[test]
-fn whole_word_matching_rejects_neighbours() {
-    assert!(name_matches("Virtual A (Mixer)", "virtual a"));
-    assert!(!name_matches("Virtual B (Mixer)", "virtual a"), "hub bug: 'a' inside another word");
-    assert!(name_matches("Microphone (USB Audio Device)", "microphone usb"));
-    assert!(!name_matches("Game Capture HD60", "game mixer"));
-}
-
-/// Same table as `recall` `audio_tests.rs`: the meter picks what the recorder records.
-#[test]
-fn endpoint_matching_is_whole_word_and_folds_the_slashed_o() {
-    let names: Vec<String> = ["Virtual B (Mixer)", "Virtual A (Mixer)", "Line (Mixér)", "System (MØNITOR)"].map(String::from).to_vec();
-    assert_eq!(match_endpoint(&names, "virtual a"), Some(1), "'a' is not found inside another word");
+fn only_a_leading_index_is_dropped_and_the_rest_matches_exactly() {
+    let names: Vec<String> = ["Virtual B (Mixer)", "Virtual A (Mixer)", "Line (2- Box One)", "System (MØNITOR)"].map(String::from).to_vec();
     assert_eq!(match_endpoint(&names, "System (MØNITOR)"), Some(3), "exact, non-ASCII");
-    assert_eq!(match_endpoint(&names, "system monitor"), Some(3), "ø typed as o");
-    assert_eq!(match_endpoint(&names, "SYSTEM (mønitor)"), Some(3), "case-insensitive Ø/ø");
-    assert_eq!(match_endpoint(&names, "line mixér"), Some(2));
-    assert_eq!(match_endpoint(&names, "mix"), None, "a part of a word is not a word");
+    assert_eq!(match_endpoint(&names, "virtual a"), None, "words are not a name");
+    assert_eq!(match_endpoint(&names, "System (MONITOR)"), None, "ø is not o");
+    assert_eq!(match_endpoint(&names, "SYSTEM (mønitor)"), None, "case included");
+    assert_eq!(match_endpoint(&names, "Line (Box One)"), None, "an index inside a bracket is part of the name");
+    assert_eq!(match_endpoint(&names, "Virtual A"), None, "a prefix is not a name");
     assert_eq!(match_endpoint(&names, "  "), None, "empty = Windows default");
 }
 
-/// 2026-11-07 audit A4: same table as `recall` `audio_tests.rs`. A missing named device
-/// matches another endpoint only when exactly one is the same name once the "N- " index goes.
+/// 2026-11-07 merge-gate A4 rule: a saved "3- X" opens the one present "4- X"; with two present
+/// endpoints that both read "X" once the index goes, neither.
 #[test]
-fn a_missing_device_opens_a_sibling_only_when_it_is_the_one_match() {
+fn a_renumbered_endpoint_opens_only_when_it_is_the_one_match() {
     let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<String>>();
-    let two = names(&["Microphone (2- USB Audio Device)", "Microphone (3- USB Audio Device)"]);
-    assert_eq!(match_endpoint(&two, "Microphone (USB Audio Device)"), None, "two siblings: wait for its own device");
-    assert_eq!(match_endpoint(&two, "Microphone (2- USB Audio Device)"), Some(0), "exact still wins");
-    let renumbered = names(&["Microphone (2- USB Audio Device)"]);
-    assert_eq!(match_endpoint(&renumbered, "Microphone (USB Audio Device)"), Some(0), "the same model renumbered");
-    let unnumbered = names(&["Microphone (USB Audio Device)"]);
-    assert_eq!(match_endpoint(&unnumbered, "Microphone (2- USB Audio Device)"), Some(0), "renumbered the other way");
-    let pair = names(&["Virtual A (Mixer)", "Virtual A (Mixer Aux)"]);
-    assert_eq!(match_endpoint(&pair, "virtual a"), None, "two endpoints carry the words: neither is opened");
+    assert_eq!(match_endpoint(&names(&["Speakers (Box)", "4- Line (Box One)"]), "3- Line (Box One)"), Some(1), "renumbered");
+    assert_eq!(match_endpoint(&names(&["Line (Box One)"]), "3- Line (Box One)"), Some(0), "the index went");
+    assert_eq!(match_endpoint(&names(&["4- Line (Box One)"]), "Line (Box One)"), Some(0), "the index came");
+    let two = names(&["4- Line (Box One)", "5- Line (Box One)"]);
+    assert_eq!(match_endpoint(&two, "3- Line (Box One)"), None, "two matches: wait, never a sibling");
+    assert_eq!(match_endpoint(&two, "Line (Box One)"), None);
+    assert_eq!(match_endpoint(&two, "5- Line (Box One)"), Some(1), "its own exact name is itself, not a sibling");
+    assert_eq!(match_endpoint(&names(&["4- line (box one)"]), "3- Line (Box One)"), None, "case included");
 }
 
 /// 2026-11-07 audit A5: the meter shows what the recorder records. A named device that is not

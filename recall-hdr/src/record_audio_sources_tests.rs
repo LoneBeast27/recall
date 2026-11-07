@@ -127,19 +127,27 @@ fn gain_and_names_go_live_and_everything_else_restarts() {
     assert!(!changed(&louder, &base), "-4.5 -> 0 dB: live (0 dB is not a boost)");
 }
 
-/// 2026-11-07 audit A12: whether the mic-mute hotkey silences an input goes to the running
-/// engine live; a line-in reaches a new engine as `mic_mute: false`, a microphone as nothing.
+/// 2026-11-07 audit A12 / R2-deep-audio-3: the strip's mic-mute toggle goes to the running engine
+/// live; a line-in reaches a new engine as `mic_mute: false`. A source that does not say sends
+/// nothing (the engine decides by the endpoint's form factor), and a config written before the
+/// flag says nothing, so a line-in there no longer follows Alt+M by default.
 #[test]
 fn the_mic_mute_flag_goes_live_and_reaches_the_engine() {
     let base = default_sources();
     let mut line = base.clone();
-    line[1].mic_mute = false;
-    assert!(!changed(&base, &line), "no restart: the replay buffer stays");
+    line[1].mic_mute = Some(false);
+    let mut mic = line.clone();
+    mic[1].mic_mute = Some(true);
+    assert!(!changed(&line, &mic), "no restart between on and off: the replay buffer stays");
+    assert_eq!(json_lines(&live_updates(&line, &mic)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","id":"mic","mic_mute":true}"#).unwrap()]);
+    assert!(!changed(&base, &line), "the first toggle goes live too");
+    assert!(changed(&line, &base), "back to the form factor: only a restart can say it");
     assert_eq!(json_lines(&live_updates(&base, &line)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","id":"mic","mic_mute":false}"#).unwrap()]);
     assert!(engine_value(&line).contains(r#""mic_mute":false"#), "{}", engine_value(&line));
-    assert!(!engine_value(&base).contains("mic_mute"), "a microphone needs no flag (the engine's default)");
+    assert!(!engine_value(&base).contains("mic_mute"), "no flag: the engine reads the endpoint's form factor");
     let saved: AudioSource = toml::from_str("id = \"in\"
 kind = \"input\"
 name = \"Mic\"").unwrap();
-    assert!(saved.mic_mute, "a config written before the flag keeps muting its inputs");
+    assert_eq!(saved.mic_mute, None, "a config written before the flag: the form factor decides");
+    assert_eq!(AudioSource::default().mic_mute, None, "a new source: the form factor decides");
 }

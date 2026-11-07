@@ -125,7 +125,15 @@ impl Root {
 
     /// Whether the mic-mute hotkey silences this input (off: a line-in or capture card).
     pub(crate) fn set_source_mic_mute(&mut self, id: &str, on: bool) {
-        self.edit_source(id, |s| s.mic_mute = on);
+        self.edit_source(id, |s| s.mic_mute = Some(on));
+    }
+
+    /// "+ Add source" → "Microphone" (`mic`) or "Line-in or capture card".
+    pub(crate) fn add_input(&mut self, mic: bool) {
+        match sources::with_new_input(&self.audio_sources(), mic) {
+            Some(list) => self.save_sources(&list),
+            None => self.show_toast(ToastKind::Info, "Can't add that source", Some(format!("Up to {} sources, one of them the game.", sources::SOURCES_MAX))),
+        }
     }
 
     /// Point an app source at another app; a name that was the old app's follows the new one.

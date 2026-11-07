@@ -3,8 +3,8 @@
 //! A track = one recorded source (`sources.rs`, the Audio page's strips): the game's process
 //! tree, an output device by loopback, a microphone or line-in, or an app's process tree
 //! (`apps.rs`). Each is titled with the source's name, scaled by its gain before anything is
-//! stored, and the mic-mute hotkey silences every microphone input (an input marked as a
-//! line-in keeps its sound, `SourceSpec::mic_mute`). A named device only ever records itself: while it is not connected its track is silent and the status says
+//! stored, and the mic-mute hotkey silences every microphone input (by the endpoint's form
+//! factor, `form_factor.rs`, unless the source says, `SourceSpec::mic_mute`). A named device only ever records itself: while it is not connected its track is silent and the status says
 //! "<name> (not connected; waiting)" (`sources::opened`); a source with no device follows the
 //! Windows default as it moves (`notify.rs`).
 //!
@@ -17,7 +17,7 @@
 //! per track — raw PCM in RAM keeps encoder state out of the ring (~23MB / 60s / stereo).
 
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 use wasapi::{DeviceCollection, Direction};
@@ -25,6 +25,7 @@ use wasapi::{DeviceCollection, Direction};
 mod apps;
 mod capture_loop;
 mod endpoints;
+mod form_factor;
 mod notify;
 pub mod sources;
 mod stream;
@@ -115,8 +116,10 @@ pub struct TrackRing {
     boosted: AtomicBool,
     /// An input device (opens a capture endpoint).
     input: bool,
-    /// Silenced by the mic-mute hotkey: a microphone input (`SourceSpec::mic_mute`).
-    mutes: AtomicBool,
+    /// The source's own say on the mic-mute hotkey (`SourceSpec::mic_mute`): `MUTE_*`.
+    mic_pref: AtomicU8,
+    /// The opened endpoint is a microphone by its form factor (`form_factor`); true until one opens.
+    endpoint_is_mic: AtomicBool,
     /// Resolved endpoint friendly name (set by the capture thread at init).
     endpoint: Mutex<String>,
     pub rate: u32,
@@ -141,7 +144,8 @@ impl TrackRing {
             gain: AtomicU32::new(spec.gain().to_bits()),
             boosted: AtomicBool::new(spec.gain() > 1.0),
             input: spec.kind() == Some(Kind::Input),
-            mutes: AtomicBool::new(spec.kind() == Some(Kind::Input) && spec.mic_mute),
+            mic_pref: AtomicU8::new(form_factor::pref(spec.mic_mute)),
+            endpoint_is_mic: AtomicBool::new(true),
             endpoint: Mutex::new(endpoint),
             rate: RATE,
             channels: CHANNELS,
@@ -155,7 +159,7 @@ impl TrackRing {
     /// A 48 kHz stereo game-audio ring of `buffer_secs` fed by the test (no WASAPI).
     #[cfg(test)]
     pub(crate) fn for_test(name: &'static str, buffer_secs: u32) -> Self {
-        let spec = SourceSpec { id: name.into(), kind: "game".into(), device: String::new(), exe: String::new(), name: name.into(), gain_db: 0.0, mic_mute: true };
+        let spec = SourceSpec { id: name.into(), kind: "game".into(), device: String::new(), exe: String::new(), name: name.into(), gain_db: 0.0, mic_mute: None };
         Self::for_source(&spec, "game", buffer_secs, String::new())
     }
 
@@ -165,9 +169,21 @@ impl TrackRing {
         self.push_capture(data, false);
     }
 
-    /// Whether the mic-mute hotkey silences this track from now on (an input only).
+    /// Whether the mic-mute hotkey silences this track from now on (an input only): the
+    /// per-strip toggle, over the endpoint's form factor.
     pub fn set_mic_mute(&self, on: bool) {
-        self.mutes.store(on && self.input, Ordering::Relaxed);
+        self.mic_pref.store(form_factor::pref(Some(on)), Ordering::Relaxed);
+    }
+
+    /// The capture thread opened an endpoint of this form factor (`None`: unreadable).
+    pub(crate) fn set_endpoint_form(&self, form: Option<u32>) {
+        self.endpoint_is_mic.store(form_factor::mutes_by_default(form), Ordering::Relaxed);
+    }
+
+    /// The mic-mute hotkey silences this track: an input whose source says so, else whose
+    /// endpoint is a microphone, headset or handset (SPEC A12).
+    fn mutes(&self) -> bool {
+        self.input && form_factor::decide(self.mic_pref.load(Ordering::Relaxed), self.endpoint_is_mic.load(Ordering::Relaxed))
     }
 
     /// The source's gain is, or has been, above 0 dB: every output of this track goes through
@@ -283,7 +299,7 @@ impl TrackRing {
     /// makes room before it takes them, so it never grows past its capacity.
     fn push_capture(&self, data: &[f32], mute_inputs: bool) {
         let data = &data[data.len().saturating_sub(self.capacity)..];
-        let silence = mute_inputs && self.mutes.load(Ordering::Relaxed);
+        let silence = mute_inputs && self.mutes();
         let gain = self.gain();
         let gained: Vec<f32>;
         let data = if gain != 1.0 && !silence {

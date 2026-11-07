@@ -70,14 +70,35 @@ pub struct Source {
     pub name: String,
     pub enabled: bool,
     pub gain_db: f32,
-    /// An input the mic-mute hotkey silences (a microphone). A line-in or capture card says
-    /// false, so muting the mic leaves its sound. Other kinds ignore it.
-    pub mic_mute: bool,
+    /// Whether the mic-mute hotkey silences this input: `true` a microphone, `false` a line-in
+    /// or capture card (muting the mic leaves its sound); `None` = the endpoint's Windows form
+    /// factor decides (`endpoint_form`), as the recorder does. Other kinds ignore it.
+    pub mic_mute: Option<bool>,
 }
 
-/// The saved list (`recording.audio_sources`), skipping entries the controller would refuse.
+/// What Alt+M does to `source` now: its own flag, else its endpoint's form factor (`mic_inputs`
+/// from the device lists; the Windows default's own when it has no device). An endpoint not
+/// listed (lists not read yet, not connected) shows as muted, the safe side.
+pub fn mutes(source: &Source, lists: Option<&crate::services::audio_devices::DeviceLists>) -> bool {
+    if let Some(on) = source.mic_mute {
+        return on;
+    }
+    let Some(lists) = lists else { return true };
+    if source.device.trim().is_empty() {
+        return lists.default_input_is_mic.unwrap_or(true);
+    }
+    match crate::services::meters::match_endpoint(&lists.inputs, &source.device) {
+        Some(i) => lists.mic_inputs.iter().any(|m| m.trim() == lists.inputs[i].trim()),
+        None => true,
+    }
+}
+
+/// The saved list (`recording.audio_sources`), skipping entries the controller would refuse and,
+/// like the engine, a repeated id (case-insensitive): a strip whose track is never recorded
+/// would meter live sound for nothing.
 pub fn from_config(value: Option<&Value>) -> Vec<Source> {
     let Some(list) = value.and_then(Value::as_array) else { return Vec::new() };
+    let mut ids = std::collections::HashSet::new();
     list.iter()
         .filter_map(|v| {
             let text = |key: &str| v.get(key).and_then(Value::as_str).unwrap_or("").to_owned();
@@ -89,16 +110,23 @@ pub fn from_config(value: Option<&Value>) -> Vec<Source> {
                 name: text("name"),
                 enabled: v.get("enabled").and_then(Value::as_bool).unwrap_or(true),
                 gain_db: v.get("gain_db").and_then(Value::as_f64).unwrap_or(0.0) as f32,
-                mic_mute: v.get("mic_mute").and_then(Value::as_bool).unwrap_or(true),
+                mic_mute: v.get("mic_mute").and_then(Value::as_bool),
             })
         })
+        .filter(|s| ids.insert(s.id.trim().to_lowercase()))
         .collect()
 }
 
 pub fn to_config(list: &[Source]) -> Value {
     Value::Array(
         list.iter()
-            .map(|s| json!({ "id": s.id, "kind": s.kind.token(), "device": s.device, "exe": s.exe, "name": s.name, "enabled": s.enabled, "gain_db": s.gain_db, "mic_mute": s.mic_mute }))
+            .map(|s| {
+                let mut entry = json!({ "id": s.id, "kind": s.kind.token(), "device": s.device, "exe": s.exe, "name": s.name, "enabled": s.enabled, "gain_db": s.gain_db });
+                if let Some(on) = s.mic_mute {
+                    entry["mic_mute"] = Value::Bool(on);
+                }
+                entry
+            })
             .collect(),
     )
 }
@@ -134,7 +162,19 @@ pub fn with_new(list: &[Source], kind: Kind, exe: &str, app_name: &str) -> Optio
     }
     let base = if kind == Kind::App && !app_name.trim().is_empty() { clip_name(app_name) } else { kind.default_name().to_owned() };
     let mut out = list.to_vec();
-    out.push(Source { id: fresh_id(list, kind), kind, device: String::new(), exe: exe.trim().to_owned(), name: fresh_name(list, &base), enabled: true, gain_db: 0.0, mic_mute: true });
+    out.push(Source { id: fresh_id(list, kind), kind, device: String::new(), exe: exe.trim().to_owned(), name: fresh_name(list, &base), enabled: true, gain_db: 0.0, mic_mute: None });
+    Some(out)
+}
+
+/// "+ Add source" → "Microphone" (`mic`) or "Line-in or capture card": a new input that says
+/// whether Alt+M mutes it, whatever its endpoint's form factor.
+pub fn with_new_input(list: &[Source], mic: bool) -> Option<Vec<Source>> {
+    let mut out = with_new(list, Kind::Input, "", "")?;
+    let added = out.last_mut().expect("with_new adds one");
+    added.mic_mute = Some(mic);
+    if !mic {
+        added.name = fresh_name(list, "Line-in");
+    }
     Some(out)
 }
 

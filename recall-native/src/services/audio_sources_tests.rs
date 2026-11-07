@@ -115,11 +115,47 @@ fn undo_restores_a_source_whose_id_was_reused() {
 }
 
 /// 2026-11-07 audit A12: an input says whether the mic-mute hotkey silences it; a list saved
-/// before the flag keeps muting every input.
+/// before the flag says nothing, so the endpoint's form factor decides.
 #[test]
 fn an_input_keeps_its_mic_mute_flag() {
     let sources = from_config(Some(&json!([{"id": "in-1", "kind": "input", "name": "Console", "mic_mute": false}, {"id": "mic", "kind": "input", "name": "Mic"}])));
-    assert_eq!((sources[0].mic_mute, sources[1].mic_mute), (false, true));
+    assert_eq!((sources[0].mic_mute, sources[1].mic_mute), (Some(false), None));
     assert_eq!(from_config(Some(&to_config(&sources))), sources, "round trip");
-    assert!(with_new(&sources, Kind::Input, "", "").unwrap().last().unwrap().mic_mute, "a new input is a microphone");
+    assert!(to_config(&sources)[1].get("mic_mute").is_none(), "no flag is saved as none");
+}
+
+/// 2026-11-07 audit R2-deep-audio-3: Alt+M mutes only microphones (SPEC A12). "+ Add source"
+/// offers "Microphone" and "Line-in or capture card", each saying so; an input without a flag
+/// (an old config, the default mic) follows its endpoint's form factor, never its name.
+#[test]
+fn a_line_in_is_not_muted_by_the_mic_hotkey() {
+    use crate::services::audio_devices::DeviceLists;
+    let base = from_config(Some(&json!([{"id": "game", "kind": "game", "name": "Game"}])));
+    let line = with_new_input(&base, false).unwrap();
+    let added = line.last().unwrap();
+    assert_eq!((added.kind, added.mic_mute, added.name.as_str()), (Kind::Input, Some(false), "Line-in"));
+    assert_eq!(with_new_input(&base, true).unwrap().last().unwrap().mic_mute, Some(true));
+    // The form factor (injected: the device lists say which endpoints are microphones).
+    let lists = DeviceLists {
+        inputs: vec!["Capture In (Box One)".into(), "Mic (Box Two)".into()],
+        mic_inputs: vec!["Mic (Box Two)".into()],
+        default_input_is_mic: Some(false),
+        ..DeviceLists::default()
+    };
+    let input = |device: &str, flag: Option<bool>| Source { id: "in-1".into(), kind: Kind::Input, device: device.into(), exe: String::new(), name: "In".into(), enabled: true, gain_db: 0.0, mic_mute: flag };
+    assert!(!mutes(&input("Capture In (Box One)", None), Some(&lists)), "a line-level endpoint keeps its sound");
+    assert!(mutes(&input("Mic (Box Two)", None), Some(&lists)), "a microphone endpoint mutes");
+    assert!(!mutes(&input("", None), Some(&lists)), "the Windows default, by its own form factor");
+    assert!(mutes(&input("Capture In (Box One)", Some(true)), Some(&lists)), "the strip's toggle wins");
+    assert!(!mutes(&input("Mic (Box Two)", Some(false)), Some(&lists)));
+    assert!(mutes(&input("Capture In (Box One)", None), None), "lists not read yet: shown as muted");
+}
+
+/// 2026-11-07 audit R2-deep-audio-5: a repeated id (case-insensitive) is shown once, as the
+/// engine records it once; the first entry wins, like the engine.
+#[test]
+fn a_duplicate_source_id_is_shown_once() {
+    let sources = from_config(Some(&json!([{"id": "mic", "kind": "input", "name": "First"}, {"id": " MIC ", "kind": "input", "name": "Copy"}, {"id": "game", "kind": "game", "name": "Game"}])));
+    let names: Vec<&str> = sources.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, ["First", "Game"]);
 }
