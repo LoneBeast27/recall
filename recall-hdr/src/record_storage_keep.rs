@@ -68,3 +68,26 @@ pub fn kept_now() -> Result<HashSet<String>, String> {
     }
     Ok(keep)
 }
+
+/// One clip's turn in a cap run, decided under the Recycle Bin lock (`record_storage.rs`
+/// `run_once`).
+pub enum Turn {
+    /// The keeps could not be read: the run stops.
+    Unknown(String),
+    /// Starred, played or opened since the plan: skipped.
+    Kept,
+    /// The bin check refused, or the lock could not be taken: the run stops.
+    Refused(String),
+    /// The Recycle Bin call ran.
+    Moved(Result<(), super::RecycleError>),
+}
+
+/// Reads the keeps for `name`, then runs `check_and_move` (room check + Recycle Bin call)
+/// unless the clip is kept now.
+pub fn turn(name: &str, keep: super::KeepFn, check_and_move: impl FnOnce() -> Result<Result<(), super::RecycleError>, String>) -> Turn {
+    match keep() {
+        Err(e) => Turn::Unknown(e),
+        Ok(kept) if kept.contains(&name.to_lowercase()) => Turn::Kept,
+        Ok(_) => check_and_move().map_or_else(Turn::Refused, Turn::Moved),
+    }
+}

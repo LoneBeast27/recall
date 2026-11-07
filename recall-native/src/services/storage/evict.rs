@@ -149,6 +149,10 @@ pub(super) fn write_index(path: &Path, index: &BTreeMap<String, u64>) -> Result<
 pub(super) struct Settings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_budget_bytes: Option<u64>,
+    /// `true` beside a budget the first run picked (`video::budget_in`); absent once the user
+    /// sets one in Settings. A budget without it may be the user's and is never changed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_run: Option<bool>,
 }
 
 pub(super) fn read_settings(root: &Path) -> Settings {

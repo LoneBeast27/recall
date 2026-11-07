@@ -362,7 +362,7 @@ fn a_saved_budget_is_never_shrunk_by_the_first_run_rule() {
     let root = std::env::temp_dir().join(format!("recall-budget-kept-{}-{nonce}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let twenty = 20u64 << 30;
-    super::evict::write_settings(&root, &super::evict::Settings { cache_budget_bytes: Some(twenty) }).unwrap();
+    super::evict::write_settings(&root, &super::evict::Settings { cache_budget_bytes: Some(twenty), ..Default::default() }).unwrap();
     assert_eq!(super::video::budget_in(&root), twenty, "a user-set 20 GiB on C: stays 20 GiB");
     let _ = std::fs::remove_dir_all(&root);
 }
@@ -471,4 +471,25 @@ fn background_thumbnails_rest_three_times_their_work_up_to_100_ms() {
     assert_eq!(super::prefetch::thumb_rest(Duration::from_millis(5)), Duration::from_millis(15));
     assert_eq!(super::prefetch::thumb_rest(Duration::from_millis(60)), Duration::from_millis(100));
     assert_eq!(super::prefetch::thumb_rest(Duration::ZERO), Duration::ZERO, "a cache hit does not rest");
+}
+
+#[test]
+fn an_automatic_budget_is_marked_first_run_and_a_saved_one_is_left_as_it_is() {
+    let nonce = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let root = std::env::temp_dir().join(format!("recall-budget-auto-{}-{nonce}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let picked = super::video::budget_in(&root);
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("storage.json")).unwrap()).unwrap();
+    assert_eq!((saved["cache_budget_bytes"].as_u64(), saved["first_run"].as_bool()), (Some(picked), Some(true)), "{saved}");
+    // A budget the user set (no marker) is read, never rewritten.
+    let user = br#"{ "cache_budget_bytes": 21474836480 }"#;
+    std::fs::write(root.join("storage.json"), user).unwrap();
+    assert_eq!(super::video::budget_in(&root), 20 << 30);
+    assert_eq!(std::fs::read(root.join("storage.json")).unwrap(), user.to_vec(), "byte for byte");
+    // A budget set in Settings drops the marker.
+    std::fs::remove_file(root.join("storage.json")).unwrap();
+    super::video::budget_in(&root);
+    super::save_budget_in(&root, 5 << 30).unwrap();
+    assert_eq!(super::evict::read_settings(&root), super::evict::Settings { cache_budget_bytes: Some(5 << 30), first_run: None });
+    let _ = std::fs::remove_dir_all(&root);
 }
