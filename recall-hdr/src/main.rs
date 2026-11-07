@@ -93,6 +93,7 @@ mod record_transition;
 mod record_tray;
 mod render_probe;
 mod render_verdict;
+mod ghost_window;
 mod gpu_games;
 mod rules;
 #[path = "../../recall/src/single_instance.rs"]
@@ -115,6 +116,8 @@ mod tray;
 mod transitions_gate_tests;
 #[cfg(test)]
 mod transitions_scope_tests;
+#[cfg(test)]
+mod transitions_ghost_tests;
 #[cfg(test)]
 mod transitions_sim;
 #[cfg(test)]
