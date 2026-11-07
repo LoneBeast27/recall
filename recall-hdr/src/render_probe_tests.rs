@@ -184,3 +184,14 @@ mod hidden {
         }
     }
 }
+
+#[test]
+fn the_render_session_name_differs_per_windows_session() {
+    // Two signed-in users each run a controller; one's stale-session stop must not end the
+    // other's probe (audit G3 leftover, R2-deep-startup-8).
+    assert_eq!(session_name_for(Some(1)), "RecallDetectRender-1");
+    assert_eq!(session_name_for(Some(2)), "RecallDetectRender-2");
+    assert_eq!(session_name_for(None), "RecallDetectRender", "no session id: the bare name");
+    let longest = session_name_for(Some(u32::MAX));
+    assert!(longest.encode_utf16().count() < 64, "fits the properties' name buffer");
+}

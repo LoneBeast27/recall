@@ -125,6 +125,12 @@ impl RecordingTray {
         let _ = self.menu.show_context_menu_for_hwnd(hwnd.0 as isize, None);
     }
 
+    /// The shell holds the icon: `Shell_NotifyIconGetRect` finds it. tray-icon's `build`
+    /// returns Ok even when its `NIM_ADD` failed (`record_tray_slot` rebuilds then).
+    pub fn is_shown(&self) -> bool {
+        self.tray.rect().is_some()
+    }
+
     pub fn diagnostic_icon_rect(&self) -> Option<String> {
         self.tray.rect().map(|r| {
             format!(

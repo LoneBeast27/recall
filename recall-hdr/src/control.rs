@@ -18,7 +18,7 @@
 //! current status (and the cached engine `hello`/`status`) to late joiners.
 
 use std::io::Write;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{sync_channel, Sender, SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 
@@ -30,6 +30,20 @@ use crate::control_lines::{read_lines_capped, LinesEnd, MAX_LINE};
 use crate::control_pipe;
 
 use crate::log;
+
+/// The pipe server gave up (security, name or listen failed): set once, never cleared.
+static LINK_DOWN: AtomicBool = AtomicBool::new(false);
+
+/// The control pipe is off for this run, so no app or island can reach the recorder. The
+/// tray says so (`record_tray_slot`, audit R2-deep-startup-3); the reason is in the log.
+pub fn link_down() -> bool {
+    LINK_DOWN.load(Ordering::Acquire)
+}
+
+fn give_up(why: &str) {
+    log!("control: {why}; control IPC disabled");
+    LINK_DOWN.store(true, Ordering::Release);
+}
 
 /// Lines buffered per client before new lines for it are dropped.
 pub const CLIENT_QUEUE: usize = 256;
@@ -208,21 +222,21 @@ fn accept_loop(hub: Arc<PipeHub>) {
         Ok(sd) => sd,
         Err(e) => {
             // Never fall back to the default DACL (read access for every local account).
-            log!("control: pipe security could not be built ({e}); control IPC disabled");
+            give_up(&format!("pipe security could not be built ({e})"));
             return;
         }
     };
     let name = match pipe.as_str().to_ns_name::<GenericNamespaced>() {
         Ok(n) => n,
         Err(e) => {
-            log!("control: pipe name invalid ({e}); control IPC disabled");
+            give_up(&format!("pipe name invalid ({e})"));
             return;
         }
     };
     let listener = match ListenerOptions::new().name(name).security_descriptor(security).create_sync() {
         Ok(l) => l,
         Err(e) => {
-            log!("control: pipe listen failed ({e}); control IPC disabled");
+            give_up(&format!("pipe listen failed ({e})"));
             return;
         }
     };

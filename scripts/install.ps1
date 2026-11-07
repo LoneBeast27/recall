@@ -23,7 +23,8 @@
   -AllowUnknownDrive: install on a drive Windows can't classify as SSD or HDD (USB SSD, RAID,
   Storage Spaces, VM disk) with a warning; a drive Windows reports as an HDD is always refused.
   Only this Windows session's Recall counts (another signed-in user's is left alone), and the
-  recorder's control pipe is per session: \\.\pipe\recall-hdr-control-<session id>.
+  recorder's control pipe is per session: \\.\pipe\recall-hdr-control-<session id>. A recorder
+  from before that change (it listens on the bare recall-hdr-control) is asked to quit there too.
   Builds run through nice-build.ps1 (CCD1, BelowNormal) when it is installed, so a running game is not disturbed.
   While the installed Recall app runs, the installer refuses before doing anything (exit 3):
   replacing the program would close it under you. Close Recall and re-run, or pass -CloseApp
@@ -102,12 +103,12 @@ Assert-AppClosed
 # 2. Quit the running recorder gracefully, wherever it runs from (only one controller can run;
 #    its quit also stops the engine and overlay). Done before building: a recorder started from
 #    target-dev\release locks the files the build replaces.
-function Send-Recorder([string]$line) {
+function Send-Recorder([string]$line, [string]$name = $pipeName, [int]$tries = 5) {
   # The controller serves one pipe instance at a time: retry a connect that lands between
   # instances, and keep the client open briefly so the line is read before it disconnects.
-  for ($attempt = 0; $attempt -lt 5; $attempt++) {
+  for ($attempt = 0; $attempt -lt $tries; $attempt++) {
     try {
-      $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', $pipeName, [IO.Pipes.PipeDirection]::InOut)
+      $pipe = [IO.Pipes.NamedPipeClientStream]::new('.', $name, [IO.Pipes.PipeDirection]::InOut)
       $pipe.Connect(1500); $w = [IO.StreamWriter]::new($pipe); $w.AutoFlush = $true; $w.WriteLine($line)
       Start-Sleep -Milliseconds 300; $pipe.Dispose(); return $true
     } catch { Start-Sleep -Milliseconds 400 }
@@ -116,8 +117,17 @@ function Send-Recorder([string]$line) {
 }
 function Get-Installed { Get-CimInstance Win32_Process -Filter "SessionId = $session" | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($InstallDir, [StringComparison]::OrdinalIgnoreCase) } }
 function Get-Controller { Get-CimInstance Win32_Process -Filter "Name = 'recall-hdr.exe' AND SessionId = $session" }
+# A recorder installed before the per-session pipe listens on the bare name, so the first
+# update must ask it there (audit R2-deep-startup-1). Only this session's controller is
+# asked (Get-Controller), and another account's old pipe gives us read access only. Drop
+# this fallback one release after the per-session pipe shipped.
+$legacyPipe = 'recall-hdr-control'
 function Stop-Recorder {
-  if (Get-Controller) { [void](Send-Recorder '{"cmd":"quit"}') }
+  if (Get-Controller) {
+    # Either pipe answering counts: this build's session pipe first, then the old bare name.
+    $sent = Send-Recorder '{"cmd":"quit"}'
+    if (-not $sent -and (Get-Controller)) { [void](Send-Recorder '{"cmd":"quit"}' $legacyPipe) }
+  }
   $deadline = (Get-Date).AddSeconds(8)
   while ((Get-Date) -lt $deadline -and ((Get-Installed) -or (Get-Controller))) { Start-Sleep -Milliseconds 300 }
   $left = @(Get-Installed) + @(Get-Controller) | Where-Object { $_ }

@@ -131,7 +131,7 @@ drives are detected); thumbnails, hover frames and recently watched clips are ke
 | Folder | Program | Job |
 |---|---|---|
 | `recall/` | `recall.exe` | capture engine: Windows Graphics Capture → NVENC → memory ring; saves, exports, long recordings |
-| `recall-hdr/` | `recall-hdr.exe --record` | controller + tray: finds the game, runs the engine, hotkeys, HDR switching, config, control pipe `\\.\pipe\recall-hdr-control` |
+| `recall-hdr/` | `recall-hdr.exe --record` | controller + tray: finds the game, runs the engine, hotkeys, HDR switching, config, control pipe `\\.\pipe\recall-hdr-control-<session id>` (this user and SYSTEM only) |
 | `recall-overlay/` | `recall-overlay.exe` | the small in-game save notice and two-step shortcut hint |
 | `recall-native/` | `recall-native.exe` | the app (GPUI): library, editor, HDR, audio, settings |
 | `recall-hub/` | — | the old Svelte/Tauri window; replaced by `recall-native`, kept for reference |
