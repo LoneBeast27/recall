@@ -81,6 +81,8 @@ mod record_power;
 mod record_power_win;
 mod record_quit;
 mod record_recover;
+mod record_restart;
+mod record_restart_host;
 mod record_render;
 mod record_startup;
 mod record_storage;
@@ -116,6 +118,8 @@ mod tray;
 mod transitions_gate_tests;
 #[cfg(test)]
 mod transitions_scope_tests;
+#[cfg(test)]
+mod transitions_restart_tests;
 #[cfg(test)]
 mod transitions_ghost_tests;
 #[cfg(test)]

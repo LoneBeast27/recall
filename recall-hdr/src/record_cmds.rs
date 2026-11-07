@@ -402,7 +402,7 @@ impl Controller {
             paused: self.paused,
             long_recording: self.activity.long_recording_json(),
             // Settings restart or a held retarget: both wait for idle.
-            pending_restart: self.pending_restart || self.retarget_held,
+            pending_restart: self.pending_restart.is_some() || self.retarget_held,
             drain: self.drain_clock.status(self.planner.drain(), Instant::now()),
             hotkey_problems: &self.hotkey_problems,
         })

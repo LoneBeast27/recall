@@ -148,7 +148,7 @@ fn retargets_restart_on_purpose_and_never_trip_give_up() {
 
 #[test]
 fn encoder_recovery_restarts_to_the_same_target_never_raise_give_up() {
-    // `record_recover` restarts with the SAME spec (`restart_engine_for_settings`).
+    // `record_recover` restarts with the SAME spec (`restart_engine(RestartReason::Recovery)`).
     let engine = fake_engine();
     let sup = Supervisor::start_with_locator(move || Some(engine), None);
     sup.shared.restart_grace_ms.store(50, Ordering::SeqCst);
