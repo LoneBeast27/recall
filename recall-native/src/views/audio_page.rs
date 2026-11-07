@@ -128,10 +128,16 @@ impl Root {
         self.edit_source(id, |s| s.mic_mute = Some(on));
     }
 
-    /// "+ Add source" → "Microphone" (`mic`) or "Line-in or capture card".
+    /// "+ Add source" → "Microphone" (`mic`) or "Line-in or capture card". A line-in opens its
+    /// device picker: until a device is picked it follows the mic hotkey (R4-deep-audio-1).
     pub(crate) fn add_input(&mut self, mic: bool) {
         match sources::with_new_input(&self.audio_sources(), mic) {
-            Some(list) => self.save_sources(&list),
+            Some(list) => {
+                if !mic {
+                    self.settings_ui.audio.menu = list.last().map(|s| StripMenu::Device(s.id.clone()));
+                }
+                self.save_sources(&list);
+            }
             None => self.show_toast(ToastKind::Info, "Can't add that source", Some(format!("Up to {} sources, one of them the game.", sources::SOURCES_MAX))),
         }
     }

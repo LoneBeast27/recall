@@ -4,7 +4,7 @@
 //! tree, an output device by loopback, a microphone or line-in, or an app's process tree
 //! (`apps.rs`). Each is titled with the source's name, scaled by its gain before anything is
 //! stored, and the mic-mute hotkey silences every input unless its source says it is a line-in
-//! or capture card (`SourceSpec::mic_mute = false`). A named device only ever records itself: while it is not connected its track is silent and the status says
+//! or capture card (`SourceSpec::mic_mute = false`) on a named device. A named device only ever records itself: while it is not connected its track is silent and the status says
 //! "<name> (not connected; waiting)" (`sources::opened`); a source with no device follows the
 //! Windows default as it moves (`notify.rs`).
 //!
@@ -118,6 +118,10 @@ pub struct TrackRing {
     /// The mic-mute hotkey silences this input: `SourceSpec::mic_mute`, absent = true (every
     /// config written before the flag, the default mic), whatever Windows calls the endpoint.
     mic_mute: AtomicBool,
+    /// The source names no device: it records the Windows default input, normally the user's
+    /// microphone, so Alt+M mutes it whatever `mic_mute` says (R4-deep-audio-1). A device
+    /// change restarts the engine, so this is fixed for the ring's life.
+    on_default: bool,
     /// Resolved endpoint friendly name (set by the capture thread at init).
     endpoint: Mutex<String>,
     pub rate: u32,
@@ -143,6 +147,7 @@ impl TrackRing {
             boosted: AtomicBool::new(spec.gain() > 1.0),
             input: spec.kind() == Some(Kind::Input),
             mic_mute: AtomicBool::new(spec.mic_mute.unwrap_or(true)),
+            on_default: spec.device.trim().is_empty(),
             endpoint: Mutex::new(endpoint),
             rate: RATE,
             channels: CHANNELS,
@@ -173,9 +178,10 @@ impl TrackRing {
     }
 
     /// The mic-mute hotkey silences this track: an input, unless its source says it is a line-in
-    /// or capture card (SPEC A12, R3-deep-audio-1).
+    /// or capture card on a named device (SPEC A12, R3/R4-deep-audio-1). The Windows default is
+    /// always muted: it is normally the microphone.
     fn mutes(&self) -> bool {
-        self.input && self.mic_mute.load(Ordering::Relaxed)
+        self.input && (self.mic_mute.load(Ordering::Relaxed) || self.on_default)
     }
 
     /// The source's gain is, or has been, above 0 dB: every output of this track goes through

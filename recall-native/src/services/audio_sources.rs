@@ -71,28 +71,54 @@ pub struct Source {
     pub enabled: bool,
     pub gain_db: f32,
     /// Whether the mic-mute hotkey silences this input: `true` a microphone, `false` a line-in
-    /// or capture card (muting the mic leaves its sound); `None` (a config written before the
-    /// flag, the default mic) = muted, as the recorder does. "+ Add source" writes it. Other
-    /// kinds ignore it.
+    /// or capture card (muting the mic leaves its sound, once it names a device); `None` (a
+    /// config written before the flag, the default mic) = muted, as the recorder does.
+    /// "+ Add source" writes it. Other kinds ignore it.
     pub mic_mute: Option<bool>,
 }
 
-/// What Alt+M does to `source` now: its own flag; without one it is muted, whatever Windows
-/// calls its endpoint (R3-deep-audio-1: an input never goes live by itself on an update).
+/// What Alt+M does to `source` now, as the recorder decides it: an input is muted unless it is a
+/// line-in (`mic_mute = false`) on a named device. Without a flag it is muted whatever Windows
+/// calls its endpoint (R3-deep-audio-1); on the Windows default it is muted whatever the flag
+/// says, as that is normally the microphone (R4-deep-audio-1).
 pub fn mutes(source: &Source) -> bool {
-    source.mic_mute.unwrap_or(true)
+    source.kind == Kind::Input && (source.mic_mute != Some(false) || source.device.trim().is_empty())
+}
+
+/// The note a line-in on the Windows default carries (strip and device menu).
+pub const LINE_IN_ON_DEFAULT: &str = "Follows the mic hotkey until you pick a device";
+
+/// The warning line under a strip's device button, from its label: a device that is gone, two
+/// endpoints sharing its name (neither is recorded), or a line-in still on the Windows default.
+pub fn strip_note(label: &str, source: &Source) -> Option<&'static str> {
+    if label.ends_with("(not connected)") {
+        Some("Not connected")
+    } else if label.ends_with("rename one in Windows)") {
+        Some("Two devices share this name")
+    } else if line_in_on_default(source) {
+        Some(LINE_IN_ON_DEFAULT)
+    } else {
+        None
+    }
+}
+
+/// A line-in on the Windows default: its strip says it follows the mic hotkey until a device is
+/// picked (R4-deep-audio-1).
+pub fn line_in_on_default(source: &Source) -> bool {
+    source.kind == Kind::Input && source.mic_mute == Some(false) && source.device.trim().is_empty()
 }
 
 /// A hint for the strip menu, never a decision: Windows reports the endpoint `source` opens (its
-/// device, else the Windows default) as something other than a microphone, headset or handset
-/// (`mic_inputs`, from `endpoint_form`). False when unknown (lists not read, not connected).
-pub fn windows_says_not_a_mic(source: &Source, lists: Option<&crate::services::audio_devices::DeviceLists>) -> bool {
+/// device, else the Windows default) as a line-level input (`line_inputs`, from `endpoint_form`).
+/// Unknown, S/PDIF and HDMI endpoints get no hint (R4-deep-audio-2), nor do lists not read yet or
+/// a device not connected.
+pub fn windows_says_line_level(source: &Source, lists: Option<&crate::services::audio_devices::DeviceLists>) -> bool {
     let Some(lists) = lists.filter(|_| source.kind == Kind::Input) else { return false };
     if source.device.trim().is_empty() {
-        return lists.default_input_is_mic == Some(false);
+        return lists.default_input_is_line == Some(true);
     }
     match crate::services::meters::match_endpoint(&lists.inputs, &source.device) {
-        Some(i) => !lists.mic_inputs.iter().any(|m| m.trim() == lists.inputs[i].trim()),
+        Some(i) => lists.line_inputs.iter().any(|m| m.trim() == lists.inputs[i].trim()),
         None => false,
     }
 }
@@ -171,7 +197,8 @@ pub fn with_new(list: &[Source], kind: Kind, exe: &str, app_name: &str) -> Optio
 }
 
 /// "+ Add source" → "Microphone" (`mic`) or "Line-in or capture card": a new input that says
-/// whether Alt+M mutes it, whatever its endpoint's form factor.
+/// whether Alt+M mutes it, whatever its endpoint's form factor. A line-in starts on the Windows
+/// default, so Alt+M still mutes it until its device is picked (`mutes`).
 pub fn with_new_input(list: &[Source], mic: bool) -> Option<Vec<Source>> {
     let mut out = with_new(list, Kind::Input, "", "")?;
     let added = out.last_mut().expect("with_new adds one");

@@ -1,19 +1,14 @@
-//! Whether Windows calls an input endpoint a microphone (`PKEY_AudioEndpoint_FormFactor`). Only
-//! a hint in the strip menu ("Windows reports this as a line-level input"): Alt+M follows the
+//! Whether Windows calls an input endpoint line-level (`PKEY_AudioEndpoint_FormFactor`). Only a
+//! hint in the strip menu ("Windows reports this as a line-level input"): Alt+M follows the
 //! strip's own flag and mutes an input without one (R3-deep-audio-1), never by form factor.
 
-/// `EndpointFormFactor` values (mmdeviceapi.h).
-const MICROPHONE: u32 = 4;
-const HEADSET: u32 = 5;
-const HANDSET: u32 = 6;
+/// `EndpointFormFactor::LineLevel` (mmdeviceapi.h).
+const LINE_LEVEL: u32 = 2;
 
-/// A microphone, headset or handset is a mic; a line-level input, S/PDIF, an HDMI/DisplayPort
-/// capture or an unknown form factor is not a microphone. `None` (unreadable) counts as one.
-pub fn mutes_by_default(form: Option<u32>) -> bool {
-    match form {
-        None => true,
-        Some(f) => matches!(f, MICROPHONE | HEADSET | HANDSET),
-    }
+/// Only a line-level form factor: unknown (many virtual mics), S/PDIF, HDMI/DisplayPort and an
+/// unreadable one are not called line-level (R4-deep-audio-2).
+pub fn is_line_level(form: Option<u32>) -> bool {
+    form == Some(LINE_LEVEL)
 }
 
 /// The form factor of the endpoint `id` (`IMMDevice::GetId`), on a thread with COM initialized.
@@ -35,12 +30,14 @@ pub fn read(id: &str) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::mutes_by_default;
+    use super::is_line_level;
 
+    /// 2026-11-07 audit R4-deep-audio-2: only a line-level form factor (2) is called line-level;
+    /// unknown (10), S/PDIF (8), HDMI/DisplayPort (9) and unreadable are not.
     #[test]
-    fn only_microphone_form_factors_mute_by_default() {
-        for (form, mutes) in [(Some(4), true), (Some(5), true), (Some(6), true), (Some(2), false), (Some(8), false), (Some(9), false), (Some(10), false), (None, true)] {
-            assert_eq!(mutes_by_default(form), mutes, "form factor {form:?}");
+    fn only_a_line_level_form_factor_is_called_line_level() {
+        for (form, line) in [(Some(2), true), (Some(10), false), (Some(8), false), (Some(9), false), (Some(4), false), (None, false)] {
+            assert_eq!(is_line_level(form), line, "form factor {form:?}");
         }
     }
 }
