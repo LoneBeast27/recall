@@ -7,21 +7,22 @@
 //! tool window, no `WS_VISIBLE`), so no target scan or UI lookup sees it.
 //!
 //! The session-end messages need an answer before the handler returns, so the handler acts
-//! on the controller directly: the pump's message drain lends it (`drain_messages`), and the
-//! handler takes it out while in use, so a nested message cannot reach it twice. A
+//! on the controller directly: the pump's message drain lends it (`drain_messages`,
+//! `record_session_host::Lender`), and the handler takes it out while in use, so a nested
+//! message cannot reach it twice. A
 //! session-end message that arrives outside the drain is queued instead (a query is
 //! answered at once; the stop then goes out on the next pump pass, best-effort). Lock
 //! notices are always queued for the pump. What each message does is
 //! `record_session_host`; this file adds the Win32 calls and the controller as its host.
 
-use std::cell::Cell;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 use windows::core::{w, PCWSTR};
-use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, LRESULT, WAIT_TIMEOUT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+use windows::Win32::System::Threading::{OpenEventW, WaitForSingleObject, SYNCHRONIZATION_SYNCHRONIZE};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, RegisterClassW, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
 };
@@ -29,8 +30,8 @@ use windows::Win32::UI::WindowsAndMessaging::{
 use crate::log;
 use crate::record_app::Controller;
 use crate::record_quit::QuitReason;
-use crate::record_session_end::{RegisterRetry, SessionMsg};
-use crate::record_session_host::{self as host, SessionHost, SessionState};
+use crate::record_session_end::{LongState, RegisterRetry, SessionMsg};
+use crate::record_session_host::{self as host, Lender, SessionHost, SessionState};
 
 /// `NOTIFY_FOR_THIS_SESSION`.
 const NOTIFY_FOR_THIS_SESSION: u32 = 0;
@@ -49,7 +50,7 @@ extern "system" {
 
 thread_local! {
     /// The controller, lent by `drain_messages` for the length of one drain.
-    static CONTROLLER: Cell<*mut Controller> = const { Cell::new(std::ptr::null_mut()) };
+    static CONTROLLER: Lender<Controller> = const { Lender::new() };
 }
 
 /// Messages for the pump (lock notices; session-end messages nobody could handle in place).
@@ -104,6 +105,9 @@ fn register(hwnd: HWND) -> bool {
 fn retry_register(now: Instant) {
     let mut retry = lock(&REGISTER_RETRY);
     let Some(hwnd) = window().filter(|_| retry.due(now)) else { return };
+    if !terminal_services_ready() && retry.wait_for_service(now) {
+        return; // a slow boot: the tries start once the service says it is up (capped)
+    }
     let ok = register(hwnd);
     let error = std::io::Error::last_os_error();
     retry.tried(ok, now);
@@ -112,6 +116,16 @@ fn retry_register(now: Instant) {
         (false, true) => log!("record: lock notices still unavailable ({error}); retrying"),
         (false, false) => log!("record: lock notices unavailable ({error}); gave up"),
     }
+}
+
+/// `Global\TermSrvReadyEvent` is set (or does not exist): the WTS service takes registrations.
+fn terminal_services_ready() -> bool {
+    let Ok(event) = (unsafe { OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, false, w!("Global\\TermSrvReadyEvent")) }) else {
+        return true;
+    };
+    let waited = unsafe { WaitForSingleObject(event, 0) };
+    let _ = unsafe { CloseHandle(event) };
+    waited != WAIT_TIMEOUT
 }
 
 /// Stop listening and destroy the window. At controller shutdown; safe to call again.
@@ -127,102 +141,78 @@ pub(crate) fn stop() {
 
 /// The pump's message drain, with the controller lent to the session-end handler.
 pub(crate) fn drain_messages(ctl: &mut Controller) -> bool {
-    let ptr: *mut Controller = ctl;
-    CONTROLLER.with(|c| c.set(ptr));
-    let quit = crate::app::drain_messages();
-    CONTROLLER.with(|c| c.set(std::ptr::null_mut()));
-    quit
-}
-
-/// Run `f` on the lent controller; `None` when none is lent (or it is in use already).
-fn with_controller<R>(f: impl FnOnce(Option<&mut Controller>) -> R) -> R {
-    let ptr = CONTROLLER.with(|c| c.replace(std::ptr::null_mut()));
-    if ptr.is_null() {
-        return f(None);
-    }
-    // SAFETY: lent by `drain_messages` from the pump's `&mut Controller`, which is not used
-    // until the drain returns; taken out while `f` runs, so nothing else can reach it.
-    let out = f(Some(unsafe { &mut *ptr }));
-    CONTROLLER.with(|c| c.set(ptr));
-    out
+    CONTROLLER.with(|lender| lender.lend(ctl, crate::app::drain_messages))
 }
 
 unsafe extern "system" fn session_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-    let mut queued = Vec::new();
-    let answer = with_controller(|ctl| match ctl {
-        Some(ctl) => host::dispatch(Some(&mut WinHost { ctl, hwnd: Some(hwnd) }), message, wparam.0, &mut queued),
-        None => host::dispatch::<WinHost>(None, message, wparam.0, &mut queued),
-    });
-    lock(&PENDING).extend(queued);
-    match answer {
+    match CONTROLLER.with(|lender| host::handle(lender, message, wparam.0, &PENDING)) {
         Some(answer) => LRESULT(answer),
         None => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
 }
 
-/// The controller as the session messages' host; `hwnd` for the shutdown block reason.
-struct WinHost<'a> {
-    ctl: &'a mut Controller,
-    hwnd: Option<HWND>,
-}
-
-impl SessionHost for WinHost<'_> {
-    fn recording(&self) -> bool {
-        self.ctl.activity.recording_or_starting()
+/// The controller as the session messages' host (the window for the shutdown block reason).
+impl SessionHost for Controller {
+    fn long_recording(&self) -> bool {
+        self.activity.is_recording()
     }
 
-    fn send_stop(&mut self) {
-        let sent = self.ctl.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#);
-        if !crate::record_dispatch::automatic_effects(sent).is_empty() {
+    fn long_state(&self) -> LongState {
+        LongState::of(self.activity.recording_or_starting(), self.activity.stop_in_flight())
+    }
+
+    fn send_record_stop_now(&mut self) {
+        if !crate::record_dispatch::automatic_effects(self.send_record_stop()).is_empty() {
             log!("record: session end -- record_stop not sent ({})", crate::record_dispatch::NOT_RESPONDING);
         }
     }
 
-    fn start_recording(&mut self) -> bool {
-        self.ctl.engine_command("record_start", None);
-        self.ctl.activity.recording_or_starting()
+    fn start_long_recording(&mut self) -> bool {
+        let was_idle = !self.activity.recording_or_starting();
+        self.engine_command("record_start", None);
+        crate::record_session_end::start_went_out(was_idle, self.activity.is_starting())
     }
 
     fn drain_engine(&mut self) {
-        self.ctl.drain_engine_events(Instant::now());
+        self.drain_engine_events(Instant::now());
     }
 
-    fn block(&mut self, reason: &str) {
-        let Some(hwnd) = self.hwnd else { return };
+    fn block_shutdown(&mut self, reason: &str) {
+        let Some(hwnd) = window() else { return };
         let reason: Vec<u16> = reason.encode_utf16().chain(Some(0)).collect();
         let _ = unsafe { ShutdownBlockReasonCreate(hwnd, PCWSTR(reason.as_ptr())) };
     }
 
-    fn unblock(&mut self) {
-        if let Some(hwnd) = self.hwnd {
+    fn unblock_shutdown(&mut self) {
+        if let Some(hwnd) = window() {
             let _ = unsafe { ShutdownBlockReasonDestroy(hwnd) };
         }
     }
 
-    fn shutdown(&mut self, grace: Duration) {
-        self.ctl.quit.get_or_insert(QuitReason::SessionEnd);
-        self.ctl.shutdown_now(grace);
+    fn session_shutdown(&mut self, grace: Duration) {
+        self.quit.get_or_insert(QuitReason::SessionEnd);
+        self.shutdown_now(grace);
     }
 
     fn tell_engine(&mut self, line: &str) {
-        let _ = self.ctl.supervisor.send_engine_line(line);
+        let _ = self.supervisor.send_engine_line(line);
     }
 
-    fn notice(&mut self, title: &str, detail: &str, app_event: &str) {
-        self.ctl.hub.event("session", app_event);
-        self.ctl.shortcut_notice(title, detail);
+    fn session_notice(&mut self, title: &str, detail: &str, app_event: &str) {
+        self.hub.event("session", app_event);
+        self.shortcut_notice(title, detail);
     }
 
-    fn now(&self) -> Instant {
+    fn clock(&self) -> Instant {
         Instant::now()
     }
 
-    fn pause(&mut self, d: Duration) {
+    fn pause_for(&mut self, d: Duration) {
         std::thread::sleep(d);
     }
 
-    fn state(&mut self) -> &mut SessionState {
-        &mut self.ctl.session_watch
+    fn session_state(&mut self) -> &mut SessionState {
+        &mut self.session_watch
     }
 }
 
@@ -232,11 +222,11 @@ impl Controller {
     pub(crate) fn session_tick(&mut self, now: Instant) {
         retry_register(now);
         let pending = std::mem::take(&mut *lock(&PENDING));
-        host::session_tick(&mut WinHost { ctl: self, hwnd: window() }, pending, now);
+        host::session_tick(self, pending, now);
     }
 
     /// A fresh engine learns that the session is locked (it counts from now).
     pub(crate) fn reapply_lock(&mut self) {
-        host::reapply_lock(&mut WinHost { ctl: self, hwnd: None });
+        host::reapply_lock(self);
     }
 }

@@ -148,6 +148,16 @@ impl Controller {
         }
     }
 
+    /// `record_stop` from the controller itself (pause, retarget, sleep, session end): true when
+    /// queued, and then a stop is in flight (`EngineActivity::stop_in_flight`).
+    pub(crate) fn send_record_stop(&mut self) -> bool {
+        let queued = self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#);
+        if queued {
+            self.activity.stop_sent();
+        }
+        queued
+    }
+
     /// A command the engine is not reading: the same path a refusal takes, with
     /// "Recorder isn't responding".
     fn command_not_sent(&self, cmd: &str, client: Option<u64>) {
@@ -276,7 +286,7 @@ impl Controller {
             }
             if let Some(wait) = PendingPause::needed(&self.activity, Instant::now()) {
                 log!("record: pause -- stopping the long recording first (up to {} s)", PAUSE_STOP_WAIT.as_secs());
-                let queued = self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#);
+                let queued = self.send_record_stop();
                 for effect in crate::record_dispatch::pause_stop_effects(queued) {
                     match effect {
                         Effect::MarkPending => {
@@ -384,7 +394,7 @@ impl Controller {
                     let why = if game_closed { "the game closed" } else { "a new game is wanted" };
                     log!("record: {why} -- stopping the long recording before the retarget (up to {} s)", PAUSE_STOP_WAIT.as_secs());
                     // Not a user action: logged; the auto-stop deadline bounds the wait.
-                    if !crate::record_dispatch::automatic_effects(self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#)).is_empty() {
+                    if !crate::record_dispatch::automatic_effects(self.send_record_stop()).is_empty() {
                         log!("record: record_stop not sent ({}); the retarget goes ahead after {} s", crate::record_dispatch::NOT_RESPONDING, PAUSE_STOP_WAIT.as_secs());
                     }
                 }

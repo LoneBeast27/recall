@@ -59,6 +59,9 @@ fn recording_toast(event: &DaemonEvent) -> Option<(ToastKind, String, Option<Str
         DaemonEvent::RecordingStoppedLocked { seconds } => {
             Some((ToastKind::Info, "Recording stopped while locked".into(), Some(format!("{} locked", format_duration(*seconds)))))
         }
+        DaemonEvent::RecordingPartlyLocked { seconds } => {
+            Some((ToastKind::Info, "Recording ran for part of the lock".into(), Some(format!("{} locked", format_duration(*seconds)))))
+        }
         DaemonEvent::ShutdownCancelled => Some((ToastKind::Info, "Shutdown cancelled".into(), Some("Recording continues in a new file".into()))),
         _ => None,
     }
@@ -147,6 +150,7 @@ impl Root {
             | DaemonEvent::RecordingContinued { .. }
             | DaemonEvent::RecordingKeptLocked { .. }
             | DaemonEvent::RecordingStoppedLocked { .. }
+            | DaemonEvent::RecordingPartlyLocked { .. }
             | DaemonEvent::ShutdownCancelled => {}
             DaemonEvent::RecordingStopped { path, .. } | DaemonEvent::RecordingPartSaved { path } => {
                 record_interaction(Interaction::Saved(path));
@@ -333,6 +337,8 @@ mod tests {
     fn a_recording_stopped_while_locked_and_a_cancelled_shutdown_have_their_own_toasts() {
         let toast = recording_toast(&DaemonEvent::RecordingStoppedLocked { seconds: 300.0 });
         assert_eq!(toast, Some((ToastKind::Info, "Recording stopped while locked".into(), Some("5:00 locked".into()))));
+        let toast = recording_toast(&DaemonEvent::RecordingPartlyLocked { seconds: 720.0 });
+        assert_eq!(toast, Some((ToastKind::Info, "Recording ran for part of the lock".into(), Some("12:00 locked".into()))));
         let toast = recording_toast(&DaemonEvent::ShutdownCancelled);
         assert_eq!(toast, Some((ToastKind::Info, "Shutdown cancelled".into(), Some("Recording continues in a new file".into()))));
     }

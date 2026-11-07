@@ -427,5 +427,9 @@ fn a_stop_during_the_lock_and_a_cancelled_shutdown_reach_the_app() {
     let mut state = connected();
     apply(&mut state, json!({"mod":"session","event":{"type":"recording_stopped_locked","locked_seconds":300.0}}));
     apply(&mut state, json!({"mod":"session","event":{"type":"shutdown_cancelled","title":"Shutdown cancelled","detail":"Recording continues in a new file"}}));
-    assert_eq!(state.events, vec![DaemonEvent::RecordingStoppedLocked { seconds: 300.0 }, DaemonEvent::ShutdownCancelled]);
+    apply(&mut state, json!({"mod":"session","event":{"type":"recording_partly_locked","locked_seconds":720.0}}));
+    assert_eq!(
+        state.events,
+        vec![DaemonEvent::RecordingStoppedLocked { seconds: 300.0 }, DaemonEvent::ShutdownCancelled, DaemonEvent::RecordingPartlyLocked { seconds: 720.0 }]
+    );
 }

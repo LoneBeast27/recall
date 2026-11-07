@@ -42,6 +42,9 @@ pub const CANCEL_DETAIL: &str = "Recording continues in a new file";
 /// A failed `WTSRegisterSessionNotification` is tried again this often, this many times.
 pub const REGISTER_RETRY_EVERY: Duration = Duration::from_secs(10);
 pub const REGISTER_RETRIES: u32 = 5;
+/// While `Global\TermSrvReadyEvent` is unset the retries wait (uncounted), at most this long
+/// after the first failure.
+pub const REGISTER_SERVICE_WAIT: Duration = Duration::from_secs(300);
 
 /// The hidden window's messages that matter.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -81,6 +84,34 @@ pub enum EndAction {
     Restart,
 }
 
+/// The long recording as a session-end query finds it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LongState {
+    /// None running or starting.
+    Idle,
+    /// Running or starting, no stop sent.
+    Running,
+    /// A `record_stop` is on its way (the user's, a pause, a retarget, sleep, or ours).
+    Stopping,
+}
+
+impl LongState {
+    /// From the controller's activity: a recording running or starting, a stop on its way.
+    pub fn of(recording_or_starting: bool, stop_in_flight: bool) -> Self {
+        match (recording_or_starting, stop_in_flight) {
+            (false, _) => LongState::Idle,
+            (true, false) => LongState::Running,
+            (true, true) => LongState::Stopping,
+        }
+    }
+}
+
+/// A cancel's restart went out: the engine was idle before it and is starting now (a refused
+/// start, one the engine is not reading, or one sent to a recording still running is not).
+pub fn start_went_out(was_idle: bool, starting_now: bool) -> bool {
+    was_idle && starting_now
+}
+
 /// What a session end has done so far.
 #[derive(Debug, Default)]
 pub struct SessionEnd {
@@ -89,22 +120,36 @@ pub struct SessionEnd {
 }
 
 impl SessionEnd {
-    /// `WM_QUERYENDSESSION`: with a long recording running or starting, save it before answering.
-    pub fn on_query_end(&mut self, recording: bool) -> Vec<EndAction> {
-        if !recording {
-            return Vec::new();
+    /// `WM_QUERYENDSESSION`: a long recording running or starting is stopped and saved before
+    /// the answer, and only that one is restarted on a cancel. One already stopping (a stop
+    /// the user or Recall sent) is waited for but never restarted; with none, nothing.
+    pub fn on_query_end(&mut self, long: LongState) -> Vec<EndAction> {
+        match long {
+            LongState::Idle => {
+                self.stopped_at_query = false; // a stale arm (the recording ended since) restarts nothing
+                Vec::new()
+            }
+            LongState::Stopping => vec![EndAction::Block(BLOCK_REASON), EndAction::WaitStopped(STOP_WAIT), EndAction::Unblock],
+            LongState::Running => {
+                self.stopped_at_query = true;
+                vec![EndAction::Block(BLOCK_REASON), EndAction::StopRecording, EndAction::WaitStopped(STOP_WAIT), EndAction::Unblock]
+            }
         }
-        self.stopped_at_query = true;
-        vec![EndAction::Block(BLOCK_REASON), EndAction::StopRecording, EndAction::WaitStopped(STOP_WAIT), EndAction::Unblock]
     }
 
     /// A query that arrived outside the pump's drain (already answered): stop, no wait.
-    pub fn on_late_query_end(&mut self, recording: bool) -> Vec<EndAction> {
-        if !recording {
-            return Vec::new();
+    pub fn on_late_query_end(&mut self, long: LongState) -> Vec<EndAction> {
+        match long {
+            LongState::Idle => {
+                self.stopped_at_query = false;
+                Vec::new()
+            }
+            LongState::Stopping => Vec::new(),
+            LongState::Running => {
+                self.stopped_at_query = true;
+                vec![EndAction::StopRecording]
+            }
         }
-        self.stopped_at_query = true;
-        vec![EndAction::StopRecording]
     }
 
     /// `WM_ENDSESSION`: shut down cleanly when the session really ends; when it was
@@ -132,15 +177,17 @@ pub const QUERY_ANSWER: isize = 1;
 pub struct RegisterRetry {
     next: Option<Instant>,
     left: u32,
+    /// The first failure (the service wait counts from it).
+    since: Option<Instant>,
 }
 
 impl RegisterRetry {
     /// Nothing to retry.
-    pub const NONE: RegisterRetry = RegisterRetry { next: None, left: 0 };
+    pub const NONE: RegisterRetry = RegisterRetry { next: None, left: 0, since: None };
 
     /// The first registration failed at `now`.
     pub fn failed_at(now: Instant) -> Self {
-        RegisterRetry { next: Some(now + REGISTER_RETRY_EVERY), left: REGISTER_RETRIES }
+        RegisterRetry { next: Some(now + REGISTER_RETRY_EVERY), left: REGISTER_RETRIES, since: Some(now) }
     }
 
     /// A retry is due now.
@@ -148,12 +195,22 @@ impl RegisterRetry {
         self.next.is_some_and(|at| now >= at)
     }
 
+    /// The WTS service is not up yet at a due retry: wait another round without spending a
+    /// try, while within [`REGISTER_SERVICE_WAIT`] of the first failure. False = try anyway.
+    pub fn wait_for_service(&mut self, now: Instant) -> bool {
+        let waiting = self.since.is_some_and(|since| now.saturating_duration_since(since) < REGISTER_SERVICE_WAIT);
+        if waiting {
+            self.next = Some(now + REGISTER_RETRY_EVERY);
+        }
+        waiting
+    }
+
     /// The outcome of a retry made at `now`: a success or the last failure ends the retries.
     pub fn tried(&mut self, ok: bool, now: Instant) {
         self.left = self.left.saturating_sub(1);
         self.next = (!ok && self.left > 0).then(|| now + REGISTER_RETRY_EVERY);
-        if ok {
-            self.left = 0;
+        if self.next.is_none() {
+            *self = RegisterRetry::NONE;
         }
     }
 }
@@ -167,7 +224,7 @@ mod tests {
     #[test]
     fn a_shutdown_with_no_recording_does_nothing_until_the_session_ends() {
         let mut end = SessionEnd::default();
-        assert_eq!(end.on_query_end(false), vec![]);
+        assert_eq!(end.on_query_end(LongState::Idle), vec![]);
         assert_eq!(end.on_end(false), vec![], "a cancelled shutdown with nothing stopped");
         assert_eq!(end.on_end(true), vec![EndAction::Shutdown(SESSION_END_GRACE)]);
     }
@@ -176,13 +233,48 @@ mod tests {
     #[test]
     fn a_cancelled_shutdown_restarts_the_recording_the_query_stopped_once() {
         let mut end = SessionEnd::default();
-        assert!(end.on_query_end(true).contains(&EndAction::StopRecording));
-        assert_eq!(end.on_query_end(false), vec![], "a second query: already stopped");
+        assert!(end.on_query_end(LongState::Running).contains(&EndAction::StopRecording));
+        assert!(!end.on_query_end(LongState::Stopping).contains(&EndAction::StopRecording), "a second query while our stop runs");
         assert_eq!(end.on_end(false), vec![EndAction::Restart]);
         assert_eq!(end.on_end(false), vec![], "one restart per stop");
-        end.on_late_query_end(true);
+        end.on_late_query_end(LongState::Running);
         assert_eq!(end.on_end(true), vec![EndAction::Shutdown(SESSION_END_GRACE)], "a real end never restarts");
         assert_eq!(end.on_end(false), vec![]);
+    }
+
+    /// Gate 20b v3 P1: a stop the user (or a pause / retarget / sleep) sent before the query
+    /// is waited for, never undone by a cancel.
+    #[test]
+    fn a_stop_already_in_flight_at_the_query_is_saved_but_never_restarted() {
+        let mut end = SessionEnd::default();
+        assert_eq!(end.on_query_end(LongState::Stopping), vec![EndAction::Block(BLOCK_REASON), EndAction::WaitStopped(STOP_WAIT), EndAction::Unblock]);
+        assert_eq!(end.on_end(false), vec![]);
+        assert_eq!(end.on_late_query_end(LongState::Stopping), vec![]);
+        assert_eq!(end.on_end(false), vec![]);
+    }
+
+    /// Gate 20b v3 P2-1: a query that finds nothing recording clears an earlier arm.
+    #[test]
+    fn a_query_that_finds_nothing_recording_clears_a_stale_arm() {
+        let mut end = SessionEnd::default();
+        end.on_query_end(LongState::Running);
+        end.on_query_end(LongState::Idle);
+        assert_eq!(end.on_end(false), vec![]);
+        end.on_late_query_end(LongState::Running);
+        end.on_late_query_end(LongState::Idle);
+        assert_eq!(end.on_end(false), vec![]);
+    }
+
+    /// Gate 20b v3 P2-2/P2-5 (the controller host's pieces): a stop in flight is Stopping, only
+    /// an idle-to-starting change counts as the restart going out.
+    #[test]
+    fn the_controller_state_maps_and_only_a_real_start_counts() {
+        assert_eq!(LongState::of(false, true), LongState::Idle);
+        assert_eq!(LongState::of(true, false), LongState::Running);
+        assert_eq!(LongState::of(true, true), LongState::Stopping);
+        assert!(start_went_out(true, true));
+        assert!(!start_went_out(true, false), "refused / not read: no notice next to the failure beep");
+        assert!(!start_went_out(false, true), "already running or starting before");
     }
 
     #[test]
@@ -212,6 +304,29 @@ mod tests {
         retry.tried(true, t0 + T10);
         assert!(!retry.due(t0 + 5 * T10), "a success ends the retries");
         assert!(!RegisterRetry::NONE.due(t0 + T10));
+    }
+
+    /// Gate 20b v3 (optional): while the service is not up the retries wait, uncounted, for
+    /// up to 5 minutes; then the five tries run.
+    #[test]
+    fn a_slow_boot_waits_for_the_service_before_spending_the_tries() {
+        let t0 = Instant::now();
+        let mut retry = RegisterRetry::failed_at(t0);
+        let (mut waited, mut tries) = (0, 0);
+        for step in 1..=60u32 {
+            let now = t0 + step * T10;
+            if !retry.due(now) {
+                continue;
+            }
+            if retry.wait_for_service(now) {
+                waited += 1;
+            } else {
+                tries += 1;
+                retry.tried(false, now);
+            }
+        }
+        assert_eq!((waited, tries), (29, 5), "10 s .. 290 s waited, then 5 tries");
+        assert_eq!(retry, RegisterRetry::NONE);
     }
 
     #[test]

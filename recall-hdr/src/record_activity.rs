@@ -55,6 +55,9 @@ pub struct EngineActivity {
     last_screenshot_sent: Option<Instant>,
     pub long: LongRec,
     auto_stop: Option<AutoStop>,
+    /// A `record_stop` (any sender: the user, a pause, a retarget, sleep, a session end) went
+    /// to the engine and its `recording_stopped` has not come yet.
+    stop_requested: bool,
 }
 
 impl Default for EngineActivity {
@@ -66,6 +69,7 @@ impl Default for EngineActivity {
             last_screenshot_sent: None,
             long: LongRec::Idle,
             auto_stop: None,
+            stop_requested: false,
         }
     }
 }
@@ -91,7 +95,9 @@ impl EngineActivity {
     /// a screenshot is now in flight.
     pub fn command_sent(&mut self, cmd: &str, now: Instant) {
         let starts = cmd == "record_start" || (cmd == "record_toggle" && !self.is_recording());
-        if starts {
+        if cmd == "record_stop" || (cmd == "record_toggle" && self.is_recording()) {
+            self.stop_sent();
+        } else if starts {
             self.record_requested(now);
         }
         if cmd == "screenshot" {
@@ -109,6 +115,22 @@ impl EngineActivity {
 
     pub fn is_recording(&self) -> bool {
         matches!(self.long, LongRec::Active { .. })
+    }
+
+    /// A `record_stop` went to the engine (the caller checked it was queued). With no long
+    /// recording there is nothing to wait for.
+    pub fn stop_sent(&mut self) {
+        self.stop_requested = self.long != LongRec::Idle;
+    }
+
+    /// A stop is on its way: a session end must not restart this recording on a cancel.
+    pub fn stop_in_flight(&self) -> bool {
+        self.stop_requested
+    }
+
+    /// A long recording the controller asked to start has not reported running yet.
+    pub fn is_starting(&self) -> bool {
+        matches!(self.long, LongRec::Starting { .. })
     }
 
     /// A long recording running or still starting: a session end stops it (a start sent
@@ -153,6 +175,7 @@ impl EngineActivity {
             "recording_stopped" if continued => Some(Trigger::LongRecChanged),
             kind @ ("recording_stopped" | "recording_failed") => {
                 self.long = LongRec::Idle;
+                self.stop_requested = false;
                 match self.auto_stop.take() {
                     Some(stop) if kind == "recording_stopped" => Some(Trigger::AutoStopped { game_closed: stop.game_closed }),
                     _ => Some(Trigger::LongRecChanged),
@@ -171,6 +194,7 @@ impl EngineActivity {
         if let LongRec::Starting { since } = self.long {
             if now.duration_since(since) >= START_STALE {
                 self.long = LongRec::Idle;
+                self.stop_requested = false;
             }
         }
         if self.last_screenshot_sent.is_some_and(|t| now.duration_since(t) >= SCREENSHOT_STALE) {
@@ -449,6 +473,29 @@ mod tests {
         assert!(a.recording_or_starting());
         a.on_event(&json!({"type": "recording_stopped", "path": "E:/G__rec.mp4"}), 2.0);
         assert!(!a.recording_or_starting());
+    }
+
+    /// Gate 20b v3 P1: a stop from any sender is in flight until `recording_stopped` (a
+    /// continued part's stop is not the end); a stop with nothing recording is not.
+    #[test]
+    fn a_stop_is_in_flight_until_the_recording_reports_stopping() {
+        let t0 = Instant::now();
+        let mut a = EngineActivity::default();
+        a.stop_sent();
+        assert!(!a.stop_in_flight(), "nothing to stop");
+        a.command_sent("record_start", t0);
+        a.on_event(&json!({"type": "recording_started", "path": "E:/G__rec.mp4"}), 1.0);
+        a.command_sent("record_toggle", t0);
+        assert!(a.stop_in_flight() && a.is_recording(), "the toggle stops it; still Active until the engine says so");
+        a.on_event(&json!({"type": "recording_stopped", "path": "E:/G__rec.mp4", "continued": true}), 2.0);
+        assert!(a.stop_in_flight(), "only a part ended");
+        a.on_event(&json!({"type": "recording_stopped", "path": "E:/G__rec.mp4"}), 3.0);
+        assert!(!a.stop_in_flight());
+        a.command_sent("record_start", t0);
+        a.stop_sent(); // a pause / retarget / sleep stop while starting
+        assert!(a.stop_in_flight() && a.is_starting());
+        a.on_event(&json!({"type": "recording_failed", "reason": "x"}), 4.0);
+        assert!(!a.stop_in_flight());
     }
 
     #[test]
