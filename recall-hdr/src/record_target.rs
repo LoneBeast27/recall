@@ -76,7 +76,6 @@ const TARGET_DENY_STEMS: &[&str] = &[
     "uplay",
     "ubisoftconnect",
     "origin",
-    "xboxpcapp",
     "xboxapp",
     "gamingservicesui",
     "amazongames",
@@ -150,8 +149,9 @@ const TARGET_DENY_STEMS: &[&str] = &[
     "werfault",
     "werfaultsecure",
     "crashreporter",
-    // Store apps (media, photos, the Store, settings, camera, mail): in
-    // `rules::STORE_APP_STEMS`, which `rules::is_denied` checks.
+    // Store apps (media, photos, the Store, settings, camera, mail, the Xbox
+    // app): in `rules::STORE_APP_STEMS`, which `rules::is_denied` checks.
+    // Call, chat, mail and office apps: `private_apps` (opt-in only).
 ];
 
 /// A window the engine can capture. `exe` is the image file name.
@@ -203,7 +203,8 @@ const OWN_STEMS: &[&str] = &["recall", "recall-hdr", "recall-native", "recall-hu
 ///
 /// Order: Recall's own processes, then a `none` override, then
 /// `detect.fullscreen_games` (beats the deny lists), then the deny lists, then
-/// a game override, then `looks_like_game`.
+/// a game override, then `looks_like_game` unless the stem is a call, chat or
+/// office app (`private_apps`: an override or `fullscreen_games` opts it in).
 pub fn is_target(stem: &str, looks_like_game: bool, cfg: &Config) -> bool {
     let stem = strip_exe(stem.trim());
     if stem.is_empty() || OWN_STEMS.iter().any(|d| d.eq_ignore_ascii_case(stem)) {
@@ -221,7 +222,7 @@ pub fn is_target(stem: &str, looks_like_game: bool, cfg: &Config) -> bool {
     }
     match kind {
         Some(_) => true,
-        None => looks_like_game,
+        None => looks_like_game && !crate::private_apps::is_private(stem),
     }
 }
 

@@ -26,7 +26,8 @@ use crate::record_target::Target;
 /// One look at the target and the screen.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sight {
-    /// The foreground window belongs to the target's process.
+    /// The foreground window is the target's own window or one of its
+    /// process's (a UWP target's frame counts too: [`front_is`]).
     pub in_front: bool,
     pub iconic: bool,
     /// The input desktop is not the user's (lock screen, UAC, Ctrl+Alt+Del).
