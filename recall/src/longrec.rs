@@ -28,6 +28,7 @@
 //! delete-sharing), so recovery never touches a live recording.
 
 mod fmp4;
+mod lock_clock;
 pub(crate) mod machine;
 pub mod tap;
 #[cfg(test)]
@@ -40,6 +41,7 @@ use std::time::{Duration, Instant};
 
 use crate::naming;
 use crate::protocol::{emit_or_log, Outbound};
+use lock_clock::LockClock;
 use machine::{Event, Recorder, SinkFactory};
 
 /// Data items the writer may queue (~40 s of 60 fps video + 3 audio tracks).
@@ -77,6 +79,8 @@ enum Control {
     Mark { at_us: u64 },
     /// End a running recording as failed (every part kept, `recording_failed`).
     Fail { reason: String },
+    /// The session locked / unlocked (`lock_clock`).
+    Locked(bool),
     Shutdown,
 }
 
@@ -94,7 +98,7 @@ pub fn spawn(out_dir: String, json: bool, tracks: Vec<TrackInfo>) -> LongRec {
     let (done_tx, done) = channel::<()>();
     let spawned = std::thread::Builder::new().name("recall-longrec".into()).spawn(move || {
         let _done = done_tx; // dropped when the thread ends
-        Writer { out_dir, json, recorder: Recorder::new(fmp4::Fmp4Factory, tracks), generation: tap::generation(), skew: Duration::ZERO, parts_so_far: Vec::new(), missed: (0.0, 0.0) }
+        Writer { out_dir, json, recorder: Recorder::new(fmp4::Fmp4Factory, tracks), generation: tap::generation(), skew: Duration::ZERO, parts_so_far: Vec::new(), missed: (0.0, 0.0), lock: LockClock::default() }
             .run(&ctl_rx, &data_rx);
     });
     if let Err(e) = spawned {
@@ -127,6 +131,11 @@ impl LongRec {
         let _ = self.ctl.send(Control::Mark { at_us });
     }
 
+    /// The Windows session locked or unlocked (`session_locked`).
+    pub fn set_locked(&self, locked: bool) {
+        let _ = self.ctl.send(Control::Locked(locked));
+    }
+
     /// Quit path: finalize a running recording within `budget`. Past it the
     /// process may exit; the `.part` is then recovered on the next start.
     pub fn shutdown(&self, budget: Duration) {
@@ -147,6 +156,8 @@ struct Writer<F: SinkFactory> {
     parts_so_far: Vec<PathBuf>,
     /// (gap, frozen) seconds of the running recording as of the last step (a failure reports them).
     missed: (f64, f64),
+    /// Time locked during the running recording (`recording_stopped.locked_seconds`).
+    lock: LockClock,
 }
 
 impl<F: SinkFactory> Writer<F> {
@@ -204,6 +215,7 @@ impl<F: SinkFactory> Writer<F> {
             }
             Control::Mark { at_us } => self.recorder.mark(at_us),
             Control::Fail { reason } => self.fail(&reason, data),
+            Control::Locked(locked) => self.lock.set_locked(locked, self.now()),
             Control::Shutdown => {}
         }
     }
@@ -311,7 +323,16 @@ impl<F: SinkFactory> Writer<F> {
     fn events(&mut self, events: Vec<Event>) {
         for e in events {
             match e {
-                Event::Started { .. } | Event::Stopped { .. } => self.parts_so_far.clear(),
+                Event::Started { .. } => {
+                    self.parts_so_far.clear();
+                    self.lock.started(self.now());
+                }
+                Event::Stopped { path, seconds, bytes, marks, parts, total_seconds, gap_seconds, frozen_seconds } => {
+                    self.parts_so_far.clear();
+                    let locked_seconds = self.lock.stopped(self.now());
+                    stopped(self.json, &path, Stop { seconds, bytes, marks, parts, total_seconds, gap_seconds, frozen_seconds, locked_seconds, cause: None });
+                    continue;
+                }
                 Event::Continued { ref path, .. } => self.parts_so_far.push(path.clone()),
                 Event::Failed { reason, kept } => {
                     let files = std::mem::take(&mut self.parts_so_far);
@@ -343,11 +364,10 @@ fn report(json: bool, event: Event) {
             let started = Outbound::RecordingStarted { path: path.clone(), continued: true, part, cause: Some(cause.as_str()) };
             emit_or_log(json, &started, || format!("long recording continues in part {part} ({}) -> {path}", cause.as_str()));
         }
-        Event::Stopped { path, seconds, bytes, marks, parts, total_seconds, gap_seconds, frozen_seconds } => {
-            stopped(json, &path, Stop { seconds, bytes, marks, parts, total_seconds, gap_seconds, frozen_seconds, cause: None })
-        }
+        // `Writer::events` reports the final stop itself (it adds the locked seconds).
+        Event::Stopped { .. } => {}
         Event::Continued { path, seconds, bytes, marks, part, total_seconds, cause } => {
-            stopped(json, &path, Stop { seconds, bytes, marks, parts: part, total_seconds, gap_seconds: 0.0, frozen_seconds: 0.0, cause: Some(cause.as_str()) })
+            stopped(json, &path, Stop { seconds, bytes, marks, parts: part, total_seconds, gap_seconds: 0.0, frozen_seconds: 0.0, locked_seconds: 0.0, cause: Some(cause.as_str()) })
         }
         Event::Failed { reason, kept } => report_failed(json, &reason, kept.as_deref(), &[], (0.0, 0.0)),
         Event::Log(message) => emit_or_log(json, &Outbound::EncoderLog { message: message.clone() }, || message),
@@ -383,14 +403,22 @@ struct Stop {
     total_seconds: f64,
     gap_seconds: f64,
     frozen_seconds: f64,
+    locked_seconds: f64,
     cause: Option<&'static str>,
+}
+
+fn stopped_outbound(path: &str, stop: Stop) -> Outbound {
+    let Stop { seconds, bytes, marks: _, parts, total_seconds, gap_seconds, frozen_seconds, locked_seconds, cause } = stop;
+    Outbound::RecordingStopped { path: path.to_string(), seconds, bytes, continued: cause.is_some(), parts, total_seconds, gap_seconds, frozen_seconds, locked_seconds, cause }
 }
 
 fn stopped(json: bool, path: &Path, stop: Stop) {
     let path = path.to_string_lossy().into_owned();
-    let Stop { seconds, bytes, marks, parts, total_seconds, gap_seconds, frozen_seconds, cause } = stop;
-    let continued = cause.is_some();
-    let out = Outbound::RecordingStopped { path: path.clone(), seconds, bytes, continued, parts, total_seconds, gap_seconds, frozen_seconds, cause };
+    let (seconds, bytes, marks, parts, total_seconds, gap_seconds, frozen_seconds, cause) =
+        (stop.seconds, stop.bytes, stop.marks, stop.parts, stop.total_seconds, stop.gap_seconds, stop.frozen_seconds, stop.cause);
+    let out = stopped_outbound(&path, stop);
+    #[cfg(test)]
+    tests::LAST_STOP.with(|last| *last.borrow_mut() = serde_json::to_value(&out).ok());
     emit_or_log(json, &out, || {
         let what = match cause {
             Some(cause) => format!("part {parts} saved ({cause} changed; continuing in a new file)"),

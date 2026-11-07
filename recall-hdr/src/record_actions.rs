@@ -140,6 +140,16 @@ impl Controller {
         crate::record_dispatch::command(&mut ControllerCommand { ctl: self, cmd, client }, cmd, hotkey);
     }
 
+    /// `record_stop` from the controller itself (pause, retarget, sleep, session end): queued
+    /// or not, and when queued a stop is in flight (`EngineActivity::stop_sent`).
+    pub(crate) fn send_record_stop(&mut self) -> Sent {
+        let sent = self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#);
+        if sent.queued() {
+            self.activity.stop_sent();
+        }
+        sent
+    }
+
     /// A command the engine did not get: the same path a refusal takes, with why
     /// ("Recorder isn't responding", or "Switching games" while the engine quits for a retarget).
     fn command_not_sent(&self, cmd: &str, client: Option<u64>, reason: &'static str) {
@@ -267,7 +277,7 @@ impl Controller {
             }
             if let Some(wait) = PendingPause::needed(&self.activity, Instant::now()) {
                 log!("record: pause -- stopping the long recording first (up to {} s)", PAUSE_STOP_WAIT.as_secs());
-                let sent = self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#);
+                let sent = self.send_record_stop();
                 for effect in crate::record_dispatch::pause_stop_effects(sent) {
                     match effect {
                         Effect::MarkPending => {
@@ -364,7 +374,7 @@ impl Controller {
                     let why = if game_closed { "the game closed" } else { "a new game is wanted" };
                     log!("record: {why} -- stopping the long recording before the retarget (up to {} s)", PAUSE_STOP_WAIT.as_secs());
                     // Not a user action: logged; the auto-stop deadline bounds the wait.
-                    if !crate::record_dispatch::automatic_effects(self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#)).is_empty() {
+                    if !crate::record_dispatch::automatic_effects(self.send_record_stop()).is_empty() {
                         log!("record: record_stop not sent ({}); the retarget goes ahead after {} s", crate::record_dispatch::NOT_RESPONDING, PAUSE_STOP_WAIT.as_secs());
                     }
                 }

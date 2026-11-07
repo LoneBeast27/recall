@@ -30,6 +30,7 @@ impl Extras {
             Command::Screenshot => self.shots.request(),
             Command::HudProbe => self.hud.request(),
             Command::RecordStart | Command::RecordStop | Command::RecordToggle | Command::RecordFail { .. } => self.record(cmd),
+            Command::SessionLocked { locked } => self.session_locked(*locked),
             _ => return false,
         }
         true
@@ -50,6 +51,16 @@ impl Extras {
         }
         let at_secs = at_us as f64 / 1_000_000.0;
         emit_or_log(self.json, &Outbound::Bookmarked { at_secs }, || format!("bookmark at {at_secs:.3}s"));
+    }
+
+    /// The session locked or unlocked: the long recording counts the time (`lock_clock`).
+    fn session_locked(&self, locked: bool) {
+        #[cfg(feature = "encode")]
+        if let Some(lr) = &self.longrec {
+            lr.set_locked(locked);
+        }
+        #[cfg(not(feature = "encode"))]
+        let _ = locked;
     }
 
     #[cfg(feature = "encode")]

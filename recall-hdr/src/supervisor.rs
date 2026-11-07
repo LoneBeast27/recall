@@ -211,6 +211,11 @@ impl Supervisor {
     /// child's stdin, wait up to `grace` for a clean exit, then hard-kill any
     /// survivor and join the manager thread.
     pub fn shutdown(mut self, grace: Duration) {
+        self.stop(grace);
+    }
+
+    /// `shutdown` in place (a session end runs it from a window handler). Safe to call again.
+    pub fn stop(&mut self, grace: Duration) {
         self.shared.request_stop(grace);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();

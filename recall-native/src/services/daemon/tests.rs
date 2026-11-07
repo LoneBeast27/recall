@@ -167,7 +167,7 @@ fn hotkey_and_recording_events_and_session_fields() {
             DaemonEvent::Bookmarked,
             DaemonEvent::Screenshot { path: "E:/shots/a.png".into() },
             DaemonEvent::RecordingStarted,
-            DaemonEvent::RecordingStopped { path: "E:/rec.mp4".into(), seconds: 61.0, parts: 1, gap_seconds: 0.0, frozen_seconds: 0.0 },
+            DaemonEvent::RecordingStopped { path: "E:/rec.mp4".into(), seconds: 61.0, parts: 1, gap_seconds: 0.0, frozen_seconds: 0.0, locked_seconds: 0.0 },
             DaemonEvent::StorageCleaned { removed: 3, freed_bytes: 1000, through: None, used_bytes: 0, cap_bytes: 0 },
             DaemonEvent::StorageCleaned { removed: 2, freed_bytes: 9, through: Some(1_790_000_000), used_bytes: 80, cap_bytes: 100 },
             DaemonEvent::StorageWarning { level: 90, used_bytes: 91, cap_bytes: 100, next_through: Some(1_780_000_000) },
@@ -223,7 +223,7 @@ fn a_continued_recording_maps_to_its_own_events() {
             DaemonEvent::RecordingStarted,
             DaemonEvent::RecordingPartSaved { path: "E:/G__rec.mp4".into() },
             DaemonEvent::RecordingContinued { part: 2, cause: "size".into() },
-            DaemonEvent::RecordingStopped { path: "E:/G__rec-2.mp4".into(), seconds: 3600.0, parts: 2, gap_seconds: 7.5, frozen_seconds: 40.0 },
+            DaemonEvent::RecordingStopped { path: "E:/G__rec-2.mp4".into(), seconds: 3600.0, parts: 2, gap_seconds: 7.5, frozen_seconds: 40.0, locked_seconds: 0.0 },
             DaemonEvent::RecordingFailed { reason: "the video encoder failed".into(), files: vec!["E:/H__rec.mp4".into(), "E:/H__rec-2.mp4".into()], gap_seconds: 0.0, frozen_seconds: 0.0 },
             DaemonEvent::RecordingFailed { reason: "old engine".into(), files: vec!["E:/I__rec.mp4".into()], gap_seconds: 0.0, frozen_seconds: 0.0 },
         ]
@@ -404,4 +404,32 @@ fn a_message_type_the_app_does_not_know_is_ignored() {
     let mut state = connected();
     apply(&mut state, json!({"mod":"session","event":{"type":"disk_low_v2","drive":"C:","free_bytes":3,"need_bytes":5}}));
     assert_eq!(state.events, Vec::<DaemonEvent>::new());
+}
+
+/// Audit U8: the time locked during a recording and the unlock notice reach the app.
+#[test]
+fn a_lock_during_a_recording_reaches_the_app() {
+    let mut state = connected();
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_stopped","path":"E:/G__rec.mp4","seconds":1200.0,"bytes":9,"continued":false,"parts":1,"total_seconds":1200.0,"gap_seconds":0.0,"frozen_seconds":0.0,"locked_seconds":720.0,"cause":null}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"recording_locked","locked_seconds":720.0}}));
+    assert_eq!(
+        state.events,
+        vec![
+            DaemonEvent::RecordingStopped { path: "E:/G__rec.mp4".into(), seconds: 1200.0, parts: 1, gap_seconds: 0.0, frozen_seconds: 0.0, locked_seconds: 720.0 },
+            DaemonEvent::RecordingKeptLocked { seconds: 720.0 },
+        ]
+    );
+}
+
+/// Gate 20b: the stopped-while-locked notice and a cancelled shutdown reach the app.
+#[test]
+fn a_stop_during_the_lock_and_a_cancelled_shutdown_reach_the_app() {
+    let mut state = connected();
+    apply(&mut state, json!({"mod":"session","event":{"type":"recording_stopped_locked","locked_seconds":300.0}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"shutdown_cancelled","title":"Shutdown cancelled","detail":"Recording continues in a new file"}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"recording_partly_locked","locked_seconds":720.0}}));
+    assert_eq!(
+        state.events,
+        vec![DaemonEvent::RecordingStoppedLocked { seconds: 300.0 }, DaemonEvent::ShutdownCancelled, DaemonEvent::RecordingPartlyLocked { seconds: 720.0 }]
+    );
 }
