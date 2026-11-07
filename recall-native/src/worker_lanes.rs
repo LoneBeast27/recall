@@ -73,7 +73,11 @@ pub struct PathGate {
     inner: Arc<(Mutex<HashMap<String, usize>>, Condvar)>,
 }
 
-/// Longest a delete waits for a clip's flush (a flush stuck behind a long export).
+/// Longest a delete waits for a clip's flush (a flush stuck behind a long export). After it the
+/// delete runs even if the flush is still blocked on an unresponsive drive (review RI-9): the
+/// clip goes to the Recycle Bin and the late sidecar write may leave a `.recall-edit.json`
+/// beside where it was. No clip is lost; the orphan sidecar is harmless and small. Raising the
+/// limit would only hold every delete of that clip longer.
 const GATE_WAIT: Duration = Duration::from_secs(600);
 
 impl PathGate {

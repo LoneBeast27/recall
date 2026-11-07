@@ -77,13 +77,26 @@ pub(super) fn send(edits: &Sender<Job>, job: Job) -> bool {
 /// once it finished, success or not (`Workers::job` entered it), so a delete of that clip
 /// waits for it and no longer.
 pub(super) fn run(jobs: Receiver<Job>, tx: Sender<Done>, gate: PathGate) {
+    run_with(jobs, tx, gate, write);
+}
+
+/// One edit write and its answer.
+fn write(job: Job) -> Option<Done> {
+    match job {
+        Job::SaveProject(info, plan, fps, export) => Some(Done::Saved(info.path.clone(), backend::save_project(&info, &plan, fps, &export))),
+        Job::FlushProject(info, plan, fps, export, ours) => Some(Done::Flushed(info.path.clone(), backend::flush_project(&info, &plan, fps, &export, ours))),
+        _ => None,
+    }
+}
+
+/// [`run`] with the write passed in. A write that panics answers an error for its clip and the
+/// thread keeps going (review RI-5): before, the thread ended with the gate still entered, so
+/// later saves were dropped with no message and a delete of that clip waited the gate limit.
+fn run_with(jobs: Receiver<Job>, tx: Sender<Done>, gate: PathGate, write: impl Fn(Job) -> Option<Done>) {
     while let Ok(job) = jobs.recv() {
         let gated = gated_clip(&job);
-        let done = match job {
-            Job::SaveProject(info, plan, fps, export) => Some(Done::Saved(info.path.clone(), backend::save_project(&info, &plan, fps, &export))),
-            Job::FlushProject(info, plan, fps, export, ours) => Some(Done::Flushed(info.path.clone(), backend::flush_project(&info, &plan, fps, &export, ours))),
-            _ => None,
-        };
+        let lost = failed(&job);
+        let done = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| write(job))).unwrap_or(lost);
         if let Some(key) = gated {
             gate.leave(&key);
         }
@@ -91,6 +104,16 @@ pub(super) fn run(jobs: Receiver<Job>, tx: Sender<Done>, gate: PathGate) {
         if let Some(done) = done {
             let _ = tx.send(done);
         }
+    }
+}
+
+/// The answer for a write that panicked.
+fn failed(job: &Job) -> Option<Done> {
+    const WHY: &str = "Recall hit an internal error while saving these edits";
+    match job {
+        Job::SaveProject(info, ..) => Some(Done::Saved(info.path.clone(), Err(WHY.to_owned()))),
+        Job::FlushProject(info, ..) => Some(Done::Flushed(info.path.clone(), Err(WHY.to_owned()))),
+        _ => None,
     }
 }
 
@@ -181,6 +204,43 @@ mod tests {
         let waited = gate.run_when_clear(vec![key], || {}, move || ran_tx.send(()).unwrap());
         assert!(ran.recv_timeout(Duration::from_secs(2)).is_ok(), "the delete ran (waited: {waited})");
         assert!(started.elapsed() < Duration::from_secs(2), "a delete after the flush does not wait for the gate limit");
+        drop(jobs);
+        thread.join().unwrap();
+    }
+
+    #[test]
+    fn a_write_that_panics_leaves_the_gate_and_the_thread_keeps_writing() {
+        // RI-5: a panic in a save ended the thread with the gate entered: later saves were lost
+        // and a delete of that clip waited the 600 s gate limit.
+        let info = ClipInfo { path: r"Z:\recall-panic-test\p.mp4".into(), duration: 1.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() };
+        let key = crate::services::library::clip_key(&info.path);
+        let gate = PathGate::default();
+        let (jobs, rx) = std::sync::mpsc::channel::<Job>();
+        let (done_tx, done) = std::sync::mpsc::channel::<Done>();
+        let (thread_gate, calls) = (gate.clone(), std::sync::atomic::AtomicUsize::new(0));
+        let thread = std::thread::spawn(move || {
+            run_with(rx, done_tx, thread_gate, move |job| {
+                if calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst) == 0 {
+                    panic!("test: the first write panics");
+                }
+                match job {
+                    Job::SaveProject(info, ..) => Some(Done::Saved(info.path, Ok("saved".into()))),
+                    _ => None,
+                }
+            })
+        });
+        for _ in 0..2 {
+            gate.enter(key.clone());
+            assert!(send(&jobs, Job::SaveProject(info.clone(), EditPlan::default(), 60, ExportSettings::default())));
+        }
+        let answers: Vec<bool> = (0..2)
+            .map(|_| match done.recv_timeout(Duration::from_secs(10)).expect("every write answers") {
+                Done::Saved(clip, result) => clip == info.path && result.is_ok(),
+                _ => panic!("expected Done::Saved"),
+            })
+            .collect();
+        assert_eq!(answers, vec![false, true], "the panicked write answers an error; the next one still runs");
+        assert!(gate.is_clear(&[key]), "both writes left the gate");
         drop(jobs);
         thread.join().unwrap();
     }
