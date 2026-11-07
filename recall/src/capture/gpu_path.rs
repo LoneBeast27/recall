@@ -30,6 +30,10 @@ impl Handler {
             self.gpu = GpuState::Untried;
         }
         if let GpuState::Untried = self.gpu {
+            // The next start's format reads this device's VRAM (`format::start_fp16`).
+            if let Some(bytes) = super::vram::of_device(src.device) {
+                self.shared.capture_vram.store(bytes, std::sync::atomic::Ordering::Relaxed);
+            }
             match crate::gpu_frames::adapter::remember(src.device) {
                 Some(gpu) => (sink.log)(format!("capture: device on {}", gpu.describe())),
                 None => (sink.log)("capture: device adapter unknown".into()),

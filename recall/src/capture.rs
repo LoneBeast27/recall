@@ -23,11 +23,12 @@ pub(crate) mod format;
 mod gpu_path;
 pub mod screen;
 mod start;
+mod vram;
 
 pub use control::CaptureControlHandle;
 pub use start::{start_monitor, start_window};
 
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicU8, AtomicUsize, Ordering::Relaxed};
 #[cfg(feature = "encode")]
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
@@ -120,6 +121,9 @@ pub struct CaptureShared {
     /// engine's HDR refresh: a start then picks fp16 even while the desktop is SDR, so HDR
     /// turning on mid-game needs no capture restart (`format::start_fp16`).
     pub hdr_capable: AtomicBool,
+    /// Dedicated VRAM (bytes) of the GPU the capture device runs on, 0 = not read yet
+    /// (`capture_vram`): 4 GiB or less keeps Bgra8 ahead of time (`format::start_fp16`).
+    pub capture_vram: AtomicU64,
     /// First WGC timestamp of the engine run, kept across capture restarts so PTS never
     /// jumps back.
     origin: Mutex<Option<i64>>,
@@ -145,6 +149,7 @@ impl CaptureShared {
             restart: AtomicBool::new(false),
             dda_failed: AtomicBool::new(false),
             hdr_capable: AtomicBool::new(false),
+            capture_vram: AtomicU64::new(0),
             origin: Mutex::new(None),
         })
     }
@@ -154,7 +159,23 @@ impl CaptureShared {
     /// and ahead of time on a display that can turn HDR on; else `Bgra8`.
     /// `RECALL_CAPTURE_FP16=1` forces fp16, `=0` keeps Bgra8 until HDR is on.
     pub fn wants_fp16(&self) -> bool {
-        format::start_fp16(self.format_inputs())
+        let env = std::env::var("RECALL_CAPTURE_FP16").ok();
+        let capable = self.hdr_capable.load(Relaxed);
+        // VRAM is read only when it decides something (an HDR-capable display, no override).
+        let vram = (capable && format::forced_from_env(env.as_deref()).is_none()).then(|| self.capture_vram()).flatten();
+        format::needs_fp16(self.format_inputs()) || format::start_fp16(capable, vram, env.as_deref())
+    }
+
+    /// Dedicated VRAM of the capture adapter: the last capture device's (`gpu_path`), else
+    /// DXGI adapter 0, which the next device is made on (`vram`); kept for later starts.
+    fn capture_vram(&self) -> Option<u64> {
+        let known = self.capture_vram.load(Relaxed);
+        if known != 0 {
+            return Some(known);
+        }
+        let probed = vram::of_default_adapter()?;
+        self.capture_vram.store(probed, Relaxed);
+        Some(probed)
     }
 
     /// Why the running capture must be replaced, if it must: the capture thread asked
@@ -174,8 +195,7 @@ impl CaptureShared {
             gpu_path: crate::gpu_route::gpu_path_possible(),
             hdr_on: self.mode.load(Relaxed) == MODE_TONEMAP,
             cpu_fallback: self.need_fp16.load(Relaxed),
-            forced: format::forced_from_env(std::env::var_os("RECALL_CAPTURE_FP16").as_deref()),
-            hdr_capable: self.hdr_capable.load(Relaxed),
+            forced: format::forced_from_env(std::env::var("RECALL_CAPTURE_FP16").ok().as_deref()),
         }
     }
 
@@ -188,7 +208,9 @@ impl CaptureShared {
     fn start_format(&self) -> ColorFormat {
         let fp16 = self.wants_fp16();
         self.fp16.store(fp16, Relaxed);
-        eprintln!("[recall] capture format {}", if fp16 { "Rgba16F" } else { "Bgra8" });
+        let vram_mb = self.capture_vram.load(Relaxed) / (1024 * 1024);
+        let capable = if self.hdr_capable.load(Relaxed) { "HDR-capable" } else { "SDR-only" };
+        eprintln!("[recall] capture format {} ({capable} display, capture GPU {vram_mb} MB VRAM)", if fp16 { "Rgba16F" } else { "Bgra8" });
         if fp16 { ColorFormat::Rgba16F } else { ColorFormat::Bgra8 }
     }
 

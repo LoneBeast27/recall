@@ -40,11 +40,28 @@ mod hdr_flip_tests {
     fn hdr_turning_on_mid_game_keeps_the_capture_on_an_hdr_capable_display() {
         let shared = CaptureShared::new();
         shared.hdr_capable.store(true, Relaxed);
+        shared.capture_vram.store(6 * GIB, Relaxed); // read from the capture device
         shared.mode.store(MODE_PASSTHROUGH, Relaxed); // the desktop is SDR at the start
         let _ = shared.start_format();
         assert!(shared.fp16.load(Relaxed), "an HDR-capable display starts in Rgba16F");
         shared.mode.store(MODE_TONEMAP, Relaxed); // HDR turned on
         assert_eq!(shared.restart_reason(), None, "no capture restart, so no encoder reopen");
+    }
+
+    const GIB: u64 = 1024 * 1024 * 1024;
+
+    /// A card with 4 GiB of VRAM keeps today's Bgra8 start on an HDR-capable display; HDR
+    /// turning on restarts capture and says it was HDR (the controller's notice).
+    #[test]
+    fn a_4_gib_card_keeps_bgra8_and_restarts_when_hdr_turns_on() {
+        let shared = CaptureShared::new();
+        shared.hdr_capable.store(true, Relaxed);
+        shared.capture_vram.store(4 * GIB, Relaxed);
+        shared.mode.store(MODE_PASSTHROUGH, Relaxed);
+        let _ = shared.start_format();
+        assert!(!shared.fp16.load(Relaxed), "4 GiB: Bgra8");
+        shared.mode.store(MODE_TONEMAP, Relaxed);
+        assert_eq!(shared.restart_reason(), Some(super::super::format::HDR_TURNED_ON));
     }
 
     /// A display that cannot do HDR keeps the cheaper Bgra8 capture; if HDR still turns on
