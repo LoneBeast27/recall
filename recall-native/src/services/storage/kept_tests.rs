@@ -100,9 +100,11 @@ fn the_start_sweep_adopts_matches_and_deletes_the_rest() {
     mark(&orphan);
     std::fs::create_dir_all(kept_dir.join("sub")).unwrap();
 
-    assert_eq!(sweep_in(&root, &kept_dir, &clips, BUDGET), (1, 2));
+    assert_eq!(sweep_in(&root, &kept_dir, &clips, BUDGET), (1, 1));
     assert!(crate::services::storage::cached_video_in(&root, &good).is_some(), "the matching copy is cached");
-    assert!(!good_kept.exists() && !short_kept.exists() && !orphan.exists());
+    assert!(!good_kept.exists() && !orphan.exists(), "a copy whose clip is gone goes");
+    // RI-2: only a clip proven gone lets its copy go; one still on disk (another size) keeps it.
+    assert!(short_kept.exists(), "the clip is still there: its copy stays");
     assert!(kept_dir.join("sub").is_dir(), "folders are left alone");
     assert_eq!(sweep_in(&root, &kept_dir.join("missing"), &clips, BUDGET), (0, 0));
     cleanup(&root);
@@ -138,5 +140,22 @@ fn a_kept_copy_is_never_deleted_while_its_clip_is_only_a_part() {
     std::fs::write(clips.join("G__p.mp4.part"), vec![3u8; 1200]).unwrap();
     assert_eq!(sweep_in(&root, &kept_dir, &clips, BUDGET), (0, 0), "nothing adopted or deleted");
     assert!(kept.is_file(), "the engine re-moves it at its next start");
+    cleanup(&root);
+}
+
+#[test]
+fn a_kept_copy_is_never_deleted_while_the_clip_folder_cannot_be_read() {
+    // RI-2: an asleep NAS (or a wrong folder list) reads as "no clip": the copy may be the only
+    // whole clip after a lost rename, so a folder that can't be read keeps it.
+    let (root, clips, kept_dir) = dirs("asleep");
+    let kept = kept_dir.join("G__n.mp4");
+    std::fs::write(&kept, vec![4u8; 1300]).unwrap();
+    mark(&kept);
+    let asleep = clips.join("not-mounted");
+    assert_eq!(sweep_in(&root, &kept_dir, &asleep, BUDGET), (0, 0), "a missing clip folder deletes nothing");
+    std::fs::write(clips.join("a-file"), b"x").unwrap();
+    assert_eq!(sweep_in(&root, &kept_dir, &clips.join("a-file"), BUDGET), (0, 0), "nor one that is not a folder");
+    assert!(kept.is_file(), "the copy stays");
+    assert_eq!(sweep_in(&root, &kept_dir, &clips, BUDGET), (0, 1), "a readable folder without the clip lets it go");
     cleanup(&root);
 }
