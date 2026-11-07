@@ -22,6 +22,9 @@ mod changes;
 mod played;
 #[path = "library_select.rs"]
 mod select;
+#[cfg(test)]
+#[cfg(test)]
+use select::menu_targets;
 #[path = "library_scroll.rs"]
 mod scroll;
 #[path = "library_meta.rs"]
@@ -455,23 +458,6 @@ impl LibraryState {
         }
     }
 
-    /// Clips a tile menu acts on: the whole selection (in display order) when `path` is part
-    /// of it, else just `path`.
-    pub fn menu_targets(&self, path: &str) -> Vec<String> {
-        menu_targets(&self.selection, self.display_order(), path)
-    }
-
-    /// Selects exactly `paths` and asks the inline "Move to Recycle Bin?" question.
-    pub fn ask_delete(&mut self, paths: &[String]) {
-        self.selection = paths.iter().cloned().collect();
-        self.anchor = paths.first().cloned();
-        self.confirm_delete = !self.selection.is_empty();
-    }
-
-    pub fn selected_paths(&self) -> Vec<PathBuf> {
-        self.display_order().into_iter().filter(|p| self.selection.contains(p)).map(PathBuf::from).collect()
-    }
-
     /// Removes deleted clips from the model without a full rescan. They are logged as gone, so
     /// a listing that still holds a watcher's report of them does not bring them back.
     pub fn forget(&mut self, paths: &[PathBuf]) {
@@ -481,14 +467,6 @@ impl LibraryState {
         self.records.retain(|r| !gone.contains(&r.path));
         self.clear_selection();
         self.reindex();
-    }
-}
-
-fn menu_targets(selection: &HashSet<String>, display_order: Vec<String>, path: &str) -> Vec<String> {
-    if selection.contains(path) {
-        display_order.into_iter().filter(|p| selection.contains(p)).collect()
-    } else {
-        vec![path.to_owned()]
     }
 }
 

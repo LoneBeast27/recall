@@ -48,7 +48,7 @@ pub enum Base {
     /// The config in memory (the file is unchanged, gone, unreadable or empty).
     Memory,
     /// The file changed on disk: this is its config (salvaged and repaired like a load).
-    Edited(Config),
+    Edited(Box<Config>),
     /// The file changed but is not TOML: the config in memory is the base, and this line
     /// (naming the backup) goes to the app once the patch is saved.
     Broken(String),
@@ -75,7 +75,7 @@ pub fn base_for_patch(store: &ConfigStore, seen: &mut Option<FileStamp>, now: Sy
         log!("config: config.toml is empty on disk; keeping the settings in use");
         return Base::Memory;
     }
-    if !text.is_some_and(|t| toml::from_str::<toml::Table>(t).is_ok()) {
+    if text.is_none_or(|t| toml::from_str::<toml::Table>(t).is_err()) {
         *seen = Some(stamp);
         let kept = durable::quarantine(path, now, Keep::Copy);
         let name = kept.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned());
@@ -87,7 +87,7 @@ pub fn base_for_patch(store: &ConfigStore, seen: &mut Option<FileStamp>, now: Sy
     }
     *seen = Some(stamp);
     log!("config: config.toml changed on disk; applying the edit before this change");
-    Base::Edited(crate::config::load_bytes(path, &bytes, now))
+    Base::Edited(Box::new(crate::config::load_bytes(path, &bytes, now)))
 }
 
 #[cfg(test)]
