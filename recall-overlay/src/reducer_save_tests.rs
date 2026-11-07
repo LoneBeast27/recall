@@ -1,6 +1,7 @@
 //! Saves in flight (O2 backstop, O6 one name, O7 close saves).
 
 use super::*;
+use super::save::STILL_SAVING;
 use crate::notice::SavePhase;
 use serde_json::json;
 
@@ -36,9 +37,9 @@ fn a_save_with_no_outcome_says_save_not_confirmed() {
     let mut r = Reducer::new();
     r.apply_envelope(&status("VALORANT"), now);
     r.apply_envelope(&saving(30), now);
-    r.tick(now + SAVING_FOR - ms(1));
+    r.tick(now + CONFIRM_FOR - ms(1));
     assert_eq!(notice(&r).save, Some(SavePhase::Saving));
-    r.tick(now + SAVING_FOR);
+    r.tick(now + CONFIRM_FOR);
     let n = notice(&r);
     assert_eq!((n.title.as_str(), n.save, n.tone), ("Save not confirmed", Some(SavePhase::Failed), Tone::Failure));
 }
@@ -51,7 +52,7 @@ fn the_controllers_save_failed_ends_the_ring_and_nothing_follows() {
     r.apply_envelope(&saving(30), now);
     r.apply_envelope(&failed("The recorder stopped during the save"), now + ms(500));
     assert_eq!((notice(&r).title.as_str(), notice(&r).save), ("Save failed", Some(SavePhase::Failed)));
-    r.tick(now + SAVING_FOR + ms(1));
+    r.tick(now + CONFIRM_FOR + ms(1));
     assert!(!r.view().visible, "the failed save is not reported again as unconfirmed");
 }
 
@@ -131,4 +132,85 @@ fn the_detail_never_passes_forty_characters() {
     assert_eq!(save::save_detail("VALORANT", 0), "VALORANT");
     let long = save::save_detail(&"x".repeat(60), 125);
     assert_eq!((long.chars().count(), long.ends_with("… · 2:05")), (40, true), "{long}");
+}
+
+fn refused(reason: &str) -> Value {
+    json!({"mod":"engine","event":{"type":"save_failed","reason":reason,"refused":true}})
+}
+
+fn rejected(reason: &str) -> Value {
+    json!({"mod":"engine","event":{"type":"save_failed","reason":reason,"rejected":true}})
+}
+
+#[test]
+fn a_queued_save_waits_from_when_the_one_ahead_answers() {
+    let now = Instant::now();
+    let mut r = Reducer::new();
+    r.apply_envelope(&status("VALORANT"), now);
+    r.apply_envelope(&saving(30), now);
+    r.apply_envelope(&saving(30), now);
+    r.apply_envelope(&saved(VALORANT, 30.0), now + Duration::from_secs(25));
+    r.tick(now + Duration::from_secs(35));
+    let n = notice(&r);
+    assert_eq!((n.title.as_str(), n.save), ("Saving", Some(SavePhase::Saving)), "the second save's wait began at 25 s");
+}
+
+#[test]
+fn a_slow_save_says_still_saving_then_not_confirmed_at_two_minutes() {
+    let now = Instant::now();
+    let mut r = Reducer::new();
+    r.apply_envelope(&status("VALORANT"), now);
+    r.apply_envelope(&saving(30), now);
+    assert!(r.tick(now + SAVING_FOR), "a visible change at 30 s");
+    let n = notice(&r);
+    assert_eq!((n.title.as_str(), n.save, n.tone), (STILL_SAVING, Some(SavePhase::Saving), Tone::Neutral));
+    assert_eq!(n.detail, "VALORANT · 0:30");
+    r.tick(now + CONFIRM_FOR - ms(1));
+    assert_eq!(notice(&r).title, STILL_SAVING);
+    r.tick(now + CONFIRM_FOR);
+    assert_eq!(notice(&r).title, "Save not confirmed");
+}
+
+#[test]
+fn a_slow_save_that_lands_says_clip_saved_and_nothing_else() {
+    let now = Instant::now();
+    let mut r = Reducer::new();
+    r.apply_envelope(&status("VALORANT"), now);
+    r.apply_envelope(&saving(600), now);
+    r.tick(now + Duration::from_secs(70));
+    assert_eq!(notice(&r).title, STILL_SAVING);
+    r.apply_envelope(&saved(VALORANT, 600.0), now + Duration::from_secs(80));
+    assert_eq!(notice(&r).title, "Clip saved");
+    r.tick(now + CONFIRM_FOR + ms(1));
+    assert!(!r.view().visible, "no late failure for the landed save");
+}
+
+#[test]
+fn a_refused_save_takes_no_saves_slot() {
+    let now = Instant::now();
+    let mut r = Reducer::new();
+    r.apply_envelope(&status("Counter-Strike 2"), now);
+    r.apply_envelope(&saving(30), now);
+    let ring = notice(&r).detail;
+    r.apply_envelope(&refused("Recorder isn't responding"), now + ms(300));
+    assert_eq!(notice(&r).title, "Save failed");
+    r.tick(now + ms(300) + FAILURE_FOR);
+    assert_eq!(notice(&r).save, Some(SavePhase::Saving), "the real save's ring comes back");
+    r.apply_envelope(&saved(r"E:\c\Counter-Strike-2__x.mp4", 30.0), now + ms(6_000));
+    assert_eq!(notice(&r).detail, ring, "the real save keeps the name Saving showed");
+}
+
+#[test]
+fn an_engine_rejection_fails_the_newest_save() {
+    let now = Instant::now();
+    let mut r = Reducer::new();
+    r.apply_envelope(&status("Alpha"), now);
+    r.apply_envelope(&saving(30), now);
+    r.apply_envelope(&status("Beta"), now + ms(400));
+    r.apply_envelope(&saving(30), now + ms(500));
+    r.apply_envelope(&rejected("previous save still writing"), now + ms(600));
+    r.apply_envelope(&saved(r"E:\c\x__y.mp4", 30.0), now + ms(5_000));
+    assert_eq!(notice(&r).detail, "Alpha · 0:30", "the oldest save is the one that landed");
+    r.tick(now + ms(5_000) + SAVED_FOR);
+    assert!(!r.view().visible || notice(&r).save != Some(SavePhase::Saving), "nothing is left in flight");
 }

@@ -75,9 +75,20 @@ impl Events {
         });
     }
 
+    /// A save that failed while being written (the oldest in flight).
     pub fn save_failed(&self, reason: &str) {
+        self.failed(reason, false);
+    }
+
+    /// A save that failed before it was queued for writing (the newest).
+    pub fn save_rejected(&self, reason: &str) {
+        self.failed(reason, true);
+    }
+
+    fn failed(&self, reason: &str, rejected: bool) {
         let msg = Outbound::SaveFailed {
             reason: reason.to_string(),
+            rejected,
         };
         self.out(msg, || format!("[recall] save FAILED: {reason}"));
     }

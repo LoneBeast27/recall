@@ -160,11 +160,7 @@ impl Controller {
     /// engine had failed it), so the overlay and the app show the reason.
     pub(crate) fn refuse_capture(&self, cmd: &str, reason: &str) {
         log!("record: {cmd} refused -- {reason}");
-        let event = match cmd {
-            "screenshot" => json!({"type": "screenshot_failed", "reason": reason}),
-            "save_clip" => json!({"type": "save_failed", "reason": reason}),
-            _ => json!({"type": "recording_failed", "reason": reason, "path": null}),
-        };
+        let event = crate::record_refusal::refusal_event(cmd, reason);
         self.hub.event("engine", &event.to_string());
         crate::supervisor::beep_failure();
     }

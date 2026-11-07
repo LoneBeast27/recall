@@ -60,6 +60,7 @@ mod private_app_stems;
 mod private_apps;
 mod record_actions;
 mod record_activity;
+mod record_refusal;
 mod record_app;
 mod record_cmds;
 mod record_composed;

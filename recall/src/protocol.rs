@@ -93,9 +93,12 @@ pub enum Outbound {
         staged_path: String,
         reason: String,
     },
-    /// A `save_clip` failed.
+    /// A `save_clip` failed. `rejected`: it failed before it was queued for
+    /// writing (the newest request, while older saves may still be writing).
     SaveFailed {
         reason: String,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        rejected: bool,
     },
     /// Sent after microphone capture muting changes.
     MicMuted {

@@ -161,11 +161,11 @@ impl SaverQueue {
         match self.tx.try_send(job) {
             Ok(()) => true,
             Err(TrySendError::Full(_)) => {
-                self.events.save_failed(QUEUE_FULL);
+                self.events.save_rejected(QUEUE_FULL);
                 false
             }
             Err(TrySendError::Disconnected(_)) => {
-                self.events.save_failed("save writer thread stopped");
+                self.events.save_rejected("save writer thread stopped");
                 false
             }
         }

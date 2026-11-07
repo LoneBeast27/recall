@@ -6,7 +6,7 @@ use super::*;
 use crate::badge::{Glyph, SETTLED, SWEEP_AFTER};
 use crate::layout::{ACTIVE, ERROR, SIGNAL};
 use crate::notice::{SavePhase, Tone};
-use crate::reducer::{Reducer, SAVING_FOR};
+use crate::reducer::{Reducer, CONFIRM_FOR, SAVING_FOR};
 use serde_json::{json, Value};
 use std::time::Duration;
 
@@ -124,19 +124,22 @@ fn saving_then_failed_settles_with_a_bang_in_the_failure_colour_and_holds_four_s
 }
 
 #[test]
-fn a_saving_with_no_outcome_says_not_confirmed_after_thirty_seconds() {
+fn a_saving_with_no_outcome_says_still_saving_then_not_confirmed_after_two_minutes() {
     let now = Instant::now();
     let mut rig = Rig::new(now);
-    let thirty = Duration::from_secs(30);
-    assert_eq!(SAVING_FOR, thirty);
+    let (thirty, two_min) = (Duration::from_secs(30), Duration::from_secs(120));
+    assert_eq!((SAVING_FOR, CONFIRM_FOR), (thirty, two_min));
     rig.send(&saving(30), now);
-    rig.refresh(now + thirty - ms(1));
-    assert!(rig.notice().is_some(), "still saving at 29.999 s");
     rig.refresh(now + thirty);
+    let slow = rig.notice().expect("still the ring at 30 s");
+    assert_eq!((slow.title.as_str(), slow.save), ("Still saving…", Some(SavePhase::Saving)));
+    rig.refresh(now + two_min - ms(1));
+    assert_eq!(rig.notice().unwrap().save, Some(SavePhase::Saving), "still saving at 1:59.999");
+    rig.refresh(now + two_min);
     let notice = rig.notice().expect("the failure, not silence");
     assert_eq!((notice.title.as_str(), notice.save), ("Save not confirmed", Some(SavePhase::Failed)));
-    assert_eq!(rig.island.badge(now + thirty + SETTLED).unwrap().glyph, Glyph::Bang);
-    rig.refresh(now + thirty + ms(4_000));
+    assert_eq!(rig.island.badge(now + two_min + SETTLED).unwrap().glyph, Glyph::Bang);
+    rig.refresh(now + two_min + ms(4_000));
     assert_eq!(rig.island.content(), Some(&Content::Stats), "then back to the stats");
 }
 
@@ -164,8 +167,8 @@ fn a_second_save_while_saving_keeps_the_ring_and_extends_the_wait() {
     rig.refresh(now + ms(5_000));
     let notice = rig.notice().expect("the second save's ring is back");
     assert_eq!((notice.detail.as_str(), notice.save), ("VALORANT · 1:00", Some(SavePhase::Saving)));
-    rig.refresh(now + ms(700) + SAVING_FOR - ms(1));
-    assert_eq!(rig.notice().unwrap().save, Some(SavePhase::Saving), "30 s from the second save");
+    rig.refresh(now + ms(2_000) + SAVING_FOR - ms(1));
+    assert_eq!(rig.notice().unwrap().save, Some(SavePhase::Saving), "its wait began when the first one landed");
 }
 
 #[test]

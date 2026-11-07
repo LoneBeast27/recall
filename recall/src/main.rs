@@ -434,6 +434,7 @@ fn spawn_stdin_reader(
                     Some(hook) => hook(seconds, at_last_frame),
                     None => protocol::emit(&protocol::Outbound::SaveFailed {
                         reason: "engine built without the encode feature".to_string(),
+                        rejected: true,
                     }),
                 },
                 protocol::Command::ExportClip { path, output, fps, edit }=> match &export {

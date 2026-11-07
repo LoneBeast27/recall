@@ -9,9 +9,9 @@ use serde_json::Value;
 
 use super::{App, Placed};
 use crate::dynamic::{self, HudCache, HudGrid};
-use crate::placement::{self, Anchor, Rect, Spot};
+use crate::placement::{self, Anchor, Spot};
 use crate::spot_edit::{self, effective};
-use crate::window::target_monitor;
+use crate::window::{target_monitor, Where};
 use crate::zorder::game_in_front;
 
 impl App {
@@ -26,9 +26,11 @@ impl App {
         let probe = self.place_probe.take();
         if needs_place(self.placed.as_ref(), &key, pid, hwnd, probe) {
             let on_window = !session.desktop && self.dynamic();
-            let (monitor, area) = probe.unwrap_or_else(|| target_monitor(hwnd, pid, on_window));
-            // Scans are kept per picture shape: a landscape grid never places a portrait window.
-            let shaped = dynamic::shape_key(&session.hud_key(), area.aspect());
+            let probe = usable_probe(self.placed.as_ref(), &key, pid, hwnd, probe);
+            let Where { monitor, area, picture } = probe.unwrap_or_else(|| target_monitor(hwnd, pid, on_window));
+            // Scans are kept per picture shape (the shape the engine measured):
+            // a landscape grid never places a portrait window.
+            let shaped = dynamic::shape_key(&session.hud_key(), picture.aspect());
             let scanned = (!session.desktop).then(|| self.hud_cache.grid(&shaped)).flatten();
             let current = self.placed.as_ref().filter(|p| p.key == key).map(|p| p.spot.anchor);
             // Dynamic: a spot the user placed (or is placing) wins over the HUD pick.
@@ -63,7 +65,7 @@ impl App {
                 hwnd.unwrap_or(0)
             );
             self.trace.note("placed", line);
-            self.placed = Some(Placed { key, pid, hwnd, monitor, area, spot, scale, grow, max_h, hud, custom });
+            self.placed = Some(Placed { key, pid, hwnd, monitor, area, picture, spot, scale, grow, max_h, hud, custom });
         }
         self.placed.as_ref().map_or(1.0, |p| p.scale)
     }
@@ -82,13 +84,13 @@ impl App {
         self.hud_cache = HudCache::load(path);
     }
 
-    /// The current target's scan key, `<exe stem>@<shape>` of the area it was
-    /// placed in ("" until it is placed, and for the desktop).
+    /// The current target's scan key, `<exe stem>@<shape>` of the game picture
+    /// it was placed on ("" until it is placed, and for the desktop).
     fn hud_cache_key(&self) -> String {
         let session = self.reducer.session();
         let game = session.game_key();
         match self.placed.as_ref().filter(|p| p.key == game && !session.desktop) {
-            Some(p) => dynamic::shape_key(&session.hud_key(), p.area.aspect()),
+            Some(p) => dynamic::shape_key(&session.hud_key(), p.picture.aspect()),
             None => String::new(),
         }
     }
@@ -105,7 +107,7 @@ impl App {
         }
         let session = self.reducer.session();
         let key = self.hud_cache_key();
-        let active = session.recording() && game_in_front(session.target_pid.filter(|_| !session.desktop));
+        let active = session.recording() && game_in_front(session.target_pid.filter(|_| !session.desktop), session.target_hwnd.filter(|_| !session.desktop));
         let scans = self.hud_cache.scans(&key);
         if self.prober.due(&key, active, scans, now) {
             let sent = self.out.lock().ok().and_then(|mut slot| Some(slot.as_mut()?.write_all(b"{\"cmd\":\"hud_probe\"}\n").is_ok()));
@@ -140,15 +142,25 @@ impl App {
 /// True when the island must be placed again: no placement yet, another
 /// target or window, or (`probe`: this tick's monitor and area) the game
 /// moved monitor, changed size or mode.
-pub(super) fn needs_place(placed: Option<&Placed>, key: &str, pid: Option<u32>, hwnd: Option<isize>, probe: Option<(Rect, Rect)>) -> bool {
-    let same = |p: &Placed| p.key == key && p.pid == pid && p.hwnd == hwnd;
-    let moved = |p: &Placed| probe.is_some_and(|(monitor, area)| monitor != p.monitor || area != p.area);
-    !placed.is_some_and(|p| same(p) && !moved(p))
+pub(super) fn needs_place(placed: Option<&Placed>, key: &str, pid: Option<u32>, hwnd: Option<isize>, probe: Option<Where>) -> bool {
+    let moved = |p: &Placed| probe.is_some_and(|w| w.monitor != p.monitor || w.area != p.area || w.picture != p.picture);
+    !placed.is_some_and(|p| same_target(p, key, pid, hwnd) && !moved(p))
+}
+
+fn same_target(p: &Placed, key: &str, pid: Option<u32>, hwnd: Option<isize>) -> bool {
+    p.key == key && p.pid == pid && p.hwnd == hwnd
+}
+
+/// This tick's probe, only while it describes the session's target: it was
+/// taken of the placed window, so a new target looks its own window up.
+pub(super) fn usable_probe(placed: Option<&Placed>, key: &str, pid: Option<u32>, hwnd: Option<isize>, probe: Option<Where>) -> Option<Where> {
+    probe.filter(|_| placed.is_some_and(|p| same_target(p, key, pid, hwnd)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::placement::Rect;
 
     fn rect(left: i32, top: i32, right: i32, bottom: i32) -> Rect {
         Rect { left, top, right, bottom }
@@ -161,6 +173,7 @@ mod tests {
             hwnd: None,
             monitor,
             area,
+            picture: area,
             spot: placement::DEFAULT_SPOT,
             scale: 1.0,
             grow: 1.0,
@@ -170,16 +183,32 @@ mod tests {
         }
     }
 
+    fn at(monitor: Rect, area: Rect) -> Option<Where> {
+        Some(Where { monitor, area, picture: area })
+    }
+
     #[test]
     fn a_game_that_moves_monitor_or_mode_is_placed_again() {
         let (left, right) = (rect(0, 0, 2560, 1440), rect(2560, 0, 4480, 1080));
         let p = placed(left, left);
-        assert!(!needs_place(Some(&p), "VALORANT", Some(42), None, Some((left, left))), "nothing changed");
+        assert!(!needs_place(Some(&p), "VALORANT", Some(42), None, at(left, left)), "nothing changed");
         assert!(!needs_place(Some(&p), "VALORANT", Some(42), None, None), "no probe this call");
-        assert!(needs_place(Some(&p), "VALORANT", Some(42), None, Some((right, right))), "moved to the other monitor");
+        assert!(needs_place(Some(&p), "VALORANT", Some(42), None, at(right, right)), "moved to the other monitor");
         let work = rect(0, 0, 2560, 1392);
-        assert!(needs_place(Some(&p), "VALORANT", Some(42), None, Some((left, work))), "borderless to windowed");
-        assert!(needs_place(Some(&p), "Other", Some(42), None, Some((left, left))));
+        assert!(needs_place(Some(&p), "VALORANT", Some(42), None, at(left, work)), "borderless to windowed");
+        assert!(needs_place(Some(&p), "Other", Some(42), None, at(left, left)));
         assert!(needs_place(None, "VALORANT", Some(42), None, None));
+    }
+
+    #[test]
+    fn a_new_target_is_never_placed_with_the_old_windows_probe() {
+        let (left, right) = (rect(0, 0, 2560, 1440), rect(2560, 0, 4480, 1080));
+        let p = placed(left, left);
+        let old = at(left, left);
+        assert_eq!(usable_probe(Some(&p), "VALORANT", Some(42), None, old), old, "same target: this tick's probe");
+        assert_eq!(usable_probe(Some(&p), "VALORANT", Some(42), Some(0x77), old), None, "the splash handed over to a new window");
+        assert_eq!(usable_probe(Some(&p), "VALORANT", Some(43), None, old), None, "another process");
+        assert_eq!(usable_probe(Some(&p), "Other", Some(42), None, old), None, "another game");
+        assert_eq!(usable_probe(None, "VALORANT", Some(42), None, at(right, right)), None, "nothing placed yet");
     }
 }

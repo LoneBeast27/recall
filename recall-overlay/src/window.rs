@@ -50,11 +50,21 @@ pub(super) fn create_window() -> Result<HWND, String> {
     }
 }
 
+/// Where the target is: its monitor, the area the island may use on it, and
+/// the game picture (a windowed game's whole client rect, else the area): the
+/// shape the engine's HUD scans measure, so scans are kept and looked up by it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Where {
+    pub monitor: Rect,
+    pub area: Rect,
+    pub picture: Rect,
+}
+
 /// The monitor of the game window (`hwnd` while it exists and shows, else
 /// the pid's largest visible top-level window), else the primary monitor,
 /// and the area the island may use on it ([`island_area`]). `on_window`:
 /// Dynamic, which places a windowed game's island on the game picture.
-pub(super) fn target_monitor(hwnd: Option<isize>, pid: Option<u32>, on_window: bool) -> (Rect, Rect) {
+pub(super) fn target_monitor(hwnd: Option<isize>, pid: Option<u32>, on_window: bool) -> Where {
     let window = hwnd
         .map(|h| HWND(h as *mut _))
         .filter(|&h| unsafe { IsWindow(Some(h)).as_bool() && IsWindowVisible(h).as_bool() })
@@ -68,21 +78,55 @@ pub(super) fn target_monitor(hwnd: Option<isize>, pid: Option<u32>, on_window: b
         let mut r = Default::default();
         unsafe { GetWindowRect(w, &mut r) }.ok().map(|()| rect(r))
     });
-    (full, island_area(full, work, frame, window.and_then(client_rect), on_window))
+    let client = window.and_then(client_rect);
+    let area = island_area(full, work, frame, client, on_window);
+    Where { monitor: full, area, picture: picture(full, frame, client, on_window, area) }
+}
+
+/// The game picture: a windowed game's whole client rect (unclipped: the
+/// engine measures all of it), else the island's area.
+pub fn picture(full: Rect, window: Option<Rect>, client: Option<Rect>, on_window: bool, area: Rect) -> Rect {
+    let windowed = on_window && !window.is_some_and(|r| covers(r, full));
+    match client {
+        Some(c) if windowed && c.right > c.left && c.height() > 0 => c,
+        _ => area,
+    }
+}
+
+fn covers(window: Rect, full: Rect) -> bool {
+    window.left <= full.left && window.top <= full.top && window.right >= full.right && window.bottom >= full.bottom
+}
+
+/// A grown island (an action notice) is about this wide at 1440p.
+const ISLAND_W: f32 = 340.0;
+
+/// Room for the island in a windowed game: at least twice its width, and
+/// that width's 16:9 height, at the monitor's scale (smaller windows keep
+/// the monitor corners).
+fn room_for_island(r: &Rect, full: &Rect) -> bool {
+    let k = (full.right - full.left).min(full.height()).max(1) as f32 / crate::placement::REF_HEIGHT;
+    let width = 2.0 * ISLAND_W * k;
+    (r.right - r.left) as f32 >= width && r.height() as f32 >= width * 9.0 / 16.0
 }
 
 fn rect(r: windows::Win32::Foundation::RECT) -> Rect {
     Rect { left: r.left, top: r.top, right: r.right, bottom: r.bottom }
 }
 
-/// The window's client area in screen coordinates (the game picture).
+/// The window's client area in screen coordinates (the game picture). Both
+/// corners go through `ClientToScreen`, so a DPI-virtualized window's size
+/// is mapped the same way as its origin.
 fn client_rect(window: HWND) -> Option<Rect> {
     let mut r = Default::default();
     unsafe { GetClientRect(window, &mut r) }.ok()?;
-    let mut origin = POINT { x: 0, y: 0 };
-    unsafe { ClientToScreen(window, &mut origin) }
-        .as_bool()
-        .then(|| Rect { left: origin.x, top: origin.y, right: origin.x + r.right, bottom: origin.y + r.bottom })
+    let mut corners = [POINT { x: 0, y: 0 }, POINT { x: r.right, y: r.bottom }];
+    let mapped = corners.iter_mut().all(|p| unsafe { ClientToScreen(window, p) }.as_bool());
+    mapped.then(|| client_from_points(corners[0], corners[1]))
+}
+
+/// The client rect from its two corners in screen coordinates.
+fn client_from_points(top_left: POINT, bottom_right: POINT) -> Rect {
+    Rect { left: top_left.x, top: top_left.y, right: bottom_right.x, bottom: bottom_right.y }
 }
 
 pub(super) fn monitor_rects(monitor: HMONITOR) -> (Rect, Rect) {
@@ -127,11 +171,10 @@ unsafe extern "system" fn visit(hwnd: HWND, lparam: LPARAM) -> BOOL {
 /// it, else the work area; with `on_window` (Dynamic) a windowed game's client
 /// rectangle within the work area, so the HUD grid maps onto the game picture
 /// (fullscreen hides the taskbar; the work area keeps it clear). A client
-/// rectangle too small for the island (under 320 x 180 within the work area)
-/// falls back to the work area.
+/// rectangle under about twice the island within the work area
+/// ([`room_for_island`]) falls back to the work area's corners.
 pub fn island_area(full: Rect, work: Rect, window: Option<Rect>, client: Option<Rect>, on_window: bool) -> Rect {
-    let covers = window.is_some_and(|r| r.left <= full.left && r.top <= full.top && r.right >= full.right && r.bottom >= full.bottom);
-    if covers {
+    if window.is_some_and(|r| covers(r, full)) {
         return full;
     }
     let inside = client.filter(|_| on_window).map(|c| Rect {
@@ -140,7 +183,7 @@ pub fn island_area(full: Rect, work: Rect, window: Option<Rect>, client: Option<
         right: c.right.min(work.right),
         bottom: c.bottom.min(work.bottom),
     });
-    inside.filter(|r| r.right - r.left >= 320 && r.height() >= 180).unwrap_or(work)
+    inside.filter(|r| room_for_island(r, &full)).unwrap_or(work)
 }
 
 #[cfg(test)]
@@ -160,10 +203,43 @@ mod tests {
         assert_eq!(island_area(full, work, Some(frame), Some(client), false), work, "a fixed corner keeps the monitor");
         assert_eq!(island_area(full, work, Some(full), Some(full), true), full, "a covering game is the monitor");
         let hanging = rect(2000, 1000, 3280, 1720);
-        assert_eq!(island_area(full, work, Some(hanging), Some(hanging), true), rect(2000, 1000, 2560, 1392), "clipped to the work area");
+        assert_eq!(island_area(full, work, Some(hanging), Some(hanging), true), work, "560 x 392 left on screen: under twice the island");
         let minimised = rect(-32000, -32000, -31840, -31972);
         assert_eq!(island_area(full, work, Some(minimised), Some(minimised), true), work);
+        let wide = rect(1200, 600, 2800, 1500);
+        assert_eq!(island_area(full, work, Some(wide), Some(wide), true), rect(1200, 600, 2560, 1392), "clipped, still big enough");
         let tiny = rect(10, 10, 110, 60);
         assert_eq!(island_area(full, work, Some(tiny), Some(tiny), true), work, "too small for the island");
+    }
+
+    #[test]
+    fn a_window_under_twice_the_island_keeps_the_monitor_corners() {
+        let (full, work) = (rect(0, 0, 2560, 1440), rect(0, 0, 2560, 1392));
+        let small = rect(100, 100, 740, 460);
+        assert_eq!(island_area(full, work, Some(small), Some(small), true), work, "640 x 360 on a 1440p monitor");
+        let enough = rect(100, 100, 900, 550);
+        assert_eq!(island_area(full, work, Some(enough), Some(enough), true), enough, "800 x 450 fits twice the island");
+        let (full_hd, work_hd) = (rect(0, 0, 1920, 1080), rect(0, 0, 1920, 1040));
+        assert_eq!(island_area(full_hd, work_hd, Some(small), Some(small), true), small, "640 x 360 on 1080p: the island is smaller there");
+    }
+
+    #[test]
+    fn the_scan_shape_is_the_whole_game_picture_not_the_clipped_area() {
+        let (full, work) = (rect(0, 0, 2560, 1440), rect(0, 0, 2560, 1392));
+        let client = rect(1000, 600, 2600, 1500); // 1600 x 900 (16:9), partly off the monitor
+        let area = island_area(full, work, Some(client), Some(client), true);
+        assert_eq!(area, rect(1000, 600, 2560, 1392));
+        let seen = picture(full, Some(client), Some(client), true, area);
+        let scan = serde_json::json!({"aspect": 1600.0 / 900.0});
+        let stored = crate::dynamic::scan_key("game@10", &scan);
+        assert_eq!(crate::dynamic::shape_key("game", seen.aspect()), stored, "looked up where it was kept");
+        assert_eq!(picture(full, Some(full), Some(full), true, full), full, "a covering game: the monitor");
+        assert_eq!(picture(full, Some(client), Some(client), false, work), work, "a fixed corner: the area");
+    }
+
+    #[test]
+    fn the_client_rect_is_both_mapped_corners() {
+        let r = client_from_points(POINT { x: 150, y: 150 }, POINT { x: 2070, y: 1230 });
+        assert_eq!(r, rect(150, 150, 2070, 1230));
     }
 }
