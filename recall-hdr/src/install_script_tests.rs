@@ -39,7 +39,7 @@ fn every_pipe_and_process_check_is_scoped_to_this_session() {
     assert!(INSTALL.contains(r#"$pipeName = "recall-hdr-control-$session""#));
     assert_eq!(crate::control_pipe::pipe_name(Some(7)), "recall-hdr-control-7", "the same form as the scripts");
     assert!(START.contains(r#""recall-hdr-control-$mySession""#));
-    for query in ["Get-InstalledApp", "Get-Installed", "Get-Controller"] {
+    for query in ["Get-InstalledApp", "Get-Installed", "Get-SessionController"] {
         let def = INSTALL.lines().find(|l| l.starts_with(&format!("function {query} "))).unwrap_or_else(|| panic!("{query}"));
         assert!(def.contains("SessionId = $session"), "{query}: {def}");
     }
@@ -108,7 +108,7 @@ fn a_sandboxed_install_names_its_own_legacy_pipe_and_controller() {
     let path = assignment(INSTALL, "controllerPath");
     assert!(path.contains("if ($env:RECALL_CONTROLLER_PATH) { $env:RECALL_CONTROLLER_PATH }"), "{path}");
     assert!(path.contains("else { Join-Path $InstallDir 'recall-hdr.exe' }"), "{path}");
-    assert!(path.starts_with("$controllerPath = [IO.Path]::GetFullPath("), "compared as a full path: {path}");
+    assert!(path.starts_with("$controllerPath = [RecallInstall.PathId]::Normalize("), "compared as a normalized path: {path}");
     // Both are set before the first Stop-Recorder call.
     let first_stop = INSTALL.find("
 Stop-Recorder").expect("Stop-Recorder called");
@@ -116,23 +116,102 @@ Stop-Recorder").expect("Stop-Recorder called");
 }
 
 #[test]
-fn only_the_controller_from_the_named_path_is_quit() {
-    // Today any recall-hdr.exe in the session let the installer fall back to the bare pipe.
+fn only_a_sandbox_limits_the_quit_to_the_controller_it_names() {
+    // R4-startup-1: with RECALL_CONTROLLER_PATH unset (the real install) every recall-hdr.exe in
+    // this session is quit and waited for, wherever it runs from. Only a sandbox filters by path.
     let ours = INSTALL.lines().find(|l| l.starts_with("function Test-OurController")).expect("path filter");
     assert!(
-        ours.contains("[string]::Equals([IO.Path]::GetFullPath($p.ExecutablePath), $controllerPath, [StringComparison]::OrdinalIgnoreCase)"),
-        "case-insensitive full-path compare: {ours}"
+        ours.contains("[string]::Equals([RecallInstall.PathId]::Normalize($path), $controllerPath, [StringComparison]::OrdinalIgnoreCase)"),
+        "case-insensitive normalized-path compare: {ours}"
     );
-    let ctl = INSTALL.lines().find(|l| l.starts_with("function Get-Controller ")).unwrap();
-    assert!(ctl.contains("Where-Object { Test-OurController $_ }"), "{ctl}");
-    // Stop-Recorder reaches either pipe only behind Get-Controller and waits only on it.
+    assert!(ours.contains("$path = Get-ExePath $p"), "the image path, also for an elevated process: {ours}");
+    let ctl = function_body(INSTALL, "Get-Controller");
+    assert!(ctl.contains("$all = @(Get-SessionController)"), "{ctl}");
+    assert!(
+        ctl.contains("if ($env:RECALL_CONTROLLER_PATH) { $all | Where-Object { Test-OurController $_ } } else { $all }"),
+        "the path filter applies only in a sandbox: {ctl}"
+    );
+    // Stop-Recorder reaches either pipe only behind Get-Controller and waits on it; a recorder
+    // that won't quit makes the run throw, naming it.
     let stop = function_body(INSTALL, "Stop-Recorder");
     assert!(stop.contains("if (-not $sent -and (Get-Controller)) {"));
-    assert!(!stop.contains("(Get-SessionController)"), "an unmatched recorder is never waited on or quit");
-    // The unfiltered list is read only: the stray warnings, never a send or a wait.
+    assert!(stop.contains("((Get-Installed) -or (Get-Controller))"), "waits on every controller it quits");
+    assert!(
+        stop.contains(r#"throw ("Recall is still running (" + (($left | ForEach-Object { Format-Recorder $_ }) -join ', ')"#),
+        "names it: {stop}"
+    );
+    assert!(function_body(INSTALL, "Format-Recorder($p)").contains("Get-ExePath $p"), "with its path");
+    // The "left running" note is a sandbox note: a real install leaves nothing running.
+    let note = stop.find("Left running").unwrap();
+    assert!(stop[..note].contains("if ($env:RECALL_CONTROLLER_PATH) {"), "{stop}");
+    // The unfiltered list is never a send or a wait.
     for line in code_lines(INSTALL).filter(|l| l.contains("Get-SessionController")) {
         assert!(!line.contains("Send-Recorder") && !line.contains("while"), "{line}");
     }
+    // The header comment says so.
+    assert!(INSTALL.contains("#    A real install quits every recall-hdr.exe in this session"), "comment updated");
+}
+
+#[test]
+fn an_old_recorder_is_named_whether_or_not_one_answered() {
+    // R4-startup-1: the stray warning sat in the `else` of `if (-not $up)`, so it never showed
+    // when the old recorder kept the new one from answering.
+    let warn = INSTALL.find("An older recorder is still running").expect("stray warning");
+    let did_not = INSTALL.find("if (-not $up) { Write-Warning 'The recorder did not answer").expect("no-answer warning");
+    assert!(did_not < warn);
+    let block = &INSTALL[did_not..warn];
+    assert!(!block.contains("else"), "not inside the else branch: {block}");
+    assert!(block.contains("if (-not $env:RECALL_CONTROLLER_PATH) {"), "a sandbox leaves the live recorder alone");
+    assert!(block.contains("$stray = @(Get-SessionController | Where-Object { -not (Test-OurController $_) })"), "{block}");
+}
+
+#[test]
+fn controller_paths_are_compared_by_what_they_name() {
+    // R4-startup-1 (sandbox): 8.3 names, \\?\ prefixes, junctions and subst drives normalize to
+    // one spelling; an elevated process's image path comes from QueryFullProcessImageNameW.
+    let at = INSTALL.find("Add-Type -Name PathId -Namespace RecallInstall").expect("path type");
+    let ty = &INSTALL[at..at + INSTALL[at..].find("'@").unwrap()];
+    for api in ["GetFinalPathNameByHandleW", "GetLongPathNameW", "QueryFullProcessImageNameW", "CreateFileW", "System.IO.Path.GetFullPath"] {
+        assert!(ty.contains(api), "{api}");
+    }
+    assert!(ty.contains(r#"p.StartsWith(@"\\?\UNC\")"#) && ty.contains(r#"p.StartsWith(@"\\?\")"#), "the long-path prefix is stripped");
+    assert!(ty.contains("0x02000000"), "FILE_FLAG_BACKUP_SEMANTICS: folders open too");
+    let exe = INSTALL.lines().find(|l| l.starts_with("function Get-ExePath")).expect("Get-ExePath");
+    assert!(
+        exe.contains("if ($p.ExecutablePath) { $p.ExecutablePath } else { [RecallInstall.PathId]::ImagePath([uint32]$p.ProcessId) }"),
+        "{exe}"
+    );
+    // The type is loaded before the first use.
+    assert!(at < INSTALL.find("$controllerPath = ").unwrap());
+}
+
+#[test]
+fn a_sandbox_outside_its_install_dir_is_refused_before_anything_closes() {
+    // R4-startup-4: RECALL_CONTROLLER_PATH outside -InstallDir would close the real app, wait on
+    // the real recorder and swap the real install. Refused before any of that.
+    let guard = INSTALL
+        .find("if ($env:RECALL_CONTROLLER_PATH -and -not (Test-InInstallDir $controllerPath)) {")
+        .expect("guard");
+    let next = &INSTALL[guard..];
+    let throw = &next[..next.find("\n}").unwrap()];
+    assert!(throw.contains(r#"throw "RECALL_CONTROLLER_PATH ($controllerPath) is not inside -InstallDir"#), "{throw}");
+    let first_close = INSTALL.find("\nAssert-AppClosed").expect("first app check");
+    let first_stop = INSTALL.find("\nStop-Recorder").unwrap();
+    assert!(guard < first_close && guard < first_stop);
+    assert!(
+        INSTALL.contains(r"$installRoot = [RecallInstall.PathId]::Normalize($InstallDir).TrimEnd('\') + '\'"),
+        "a folder prefix, not a name prefix"
+    );
+    let inside = INSTALL.lines().find(|l| l.starts_with("function Test-InInstallDir")).unwrap();
+    assert!(
+        inside.contains("[RecallInstall.PathId]::Normalize($path).StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase)"),
+        "{inside}"
+    );
+    // -CloseApp closes only what Get-InstalledApp lists: app processes inside -InstallDir.
+    let app = INSTALL.lines().find(|l| l.starts_with("function Get-InstalledApp ")).unwrap();
+    assert!(app.contains("Where-Object { Test-InInstallDir (Get-ExePath $_) }"), "{app}");
+    let close = function_body(INSTALL, "Assert-AppClosed");
+    assert!(close.contains("$app = @(Get-InstalledApp)") && close.contains("foreach ($p in $app)"));
 }
 
 #[test]
@@ -153,18 +232,45 @@ fn nothing_is_sent_unless_our_controller_serves_the_pipe() {
 fn script_clients_refuse_a_pipe_served_by_another_account() {
     // deep-startup-p3 a: the pipe's server process must run as this account (token user SID).
     let send = function_body(INSTALL, "Send-Recorder([string]$line, [string]$name = $pipeName, [int]$tries = 5)");
-    let owner = send
-        .find(r#"if ($server -and (Get-ProcessUserSid $server) -ne $mySid) { $pipe.Dispose(); Write-Warning "another user owns the Recall pipe"#)
-        .expect("installer: owner SID check");
-    assert!(owner < send.find("$w.WriteLine($line)").unwrap(), "checked before anything is written");
+    let owner = send.find("$owner = Get-ProcessUserSid $server").expect("installer: owner SID read");
+    let refuse = send.find("if ($owner -ne $mySid) {").expect("refused unless it is this account");
+    assert!(owner < refuse && refuse < send.find("$w.WriteLine($line)").unwrap(), "checked before anything is written");
     assert!(INSTALL.contains("$mySid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value"));
-    let sid = function_body(INSTALL, "Get-ProcessUserSid([int]$id)");
+    let sid = function_body(INSTALL, "Get-TokenUserSid([int]$id)");
     assert!(sid.contains("OpenProcessToken($process, 8, [ref]$token)") && sid.contains("([Security.Principal.WindowsIdentity]::new($token)).User.Value"));
     // Start-Recall.ps1 -Stop: the same check before the quit line.
-    let check = START.find("function Test-RecallPipeOwner($pipe){").expect("Start-Recall: owner check");
+    let check = START.find("function Get-RecallPipeOwner($pipe){").expect("Start-Recall: owner check");
     assert!(START[check..].contains("GetNamedPipeServerProcessId($pipe.SafePipeHandle.DangerousGetHandle(),[ref]$server)"));
-    assert!(START[check..].contains(".User.Value -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value"));
-    let refuse = START.find("if(-not(Test-RecallPipeOwner $pipe)){$pipe.Dispose();throw 'another user owns the Recall pipe").expect("-Stop refuses");
+    let refuse = START
+        .find("$owner=Get-RecallPipeOwner $pipe;if($owner -ne [Security.Principal.WindowsIdentity]::GetCurrent().User.Value){$pipe.Dispose();")
+        .expect("-Stop refuses");
     let quit = START.find(r#"$writer.WriteLine('{"cmd":"quit"}')"#).unwrap();
     assert!(check < refuse && refuse < quit);
+}
+
+#[test]
+fn an_unreadable_token_falls_back_to_the_session_list_and_warns_once() {
+    // R4-startup-2: a same-account elevated recorder's token can't be opened from a
+    // non-elevated script; WTSEnumerateProcessesW still lists its SID (as pipe_owner.rs does).
+    for (name, script) in [("install.ps1", INSTALL), ("Start-Recall.ps1", START)] {
+        assert!(script.contains("WTSEnumerateProcessesW(IntPtr.Zero, 0, 1, out list, out count)"), "{name}: WTS list");
+        assert!(script.contains("WTSFreeMemory(list)"), "{name}: freed");
+        assert!(script.contains("new System.Security.Principal.SecurityIdentifier(info.pUserSid).Value"), "{name}: SID text");
+    }
+    // Up to the next function: the C# here-string has `}` at column 0, which ends function_body.
+    let at = INSTALL.find("function Get-ProcessUserSid([int]$id) {").expect("Get-ProcessUserSid");
+    let sid = &INSTALL[at..at + INSTALL[at..].find("\nfunction Get-TokenUserSid").expect("next function")];
+    assert!(
+        sid.contains("$sid = Get-TokenUserSid $id; if ($sid) { $sid } else { [RecallInstall.Account]::WtsSid([uint32]$id) }"),
+        "{sid}"
+    );
+    assert!(START.contains("if($sid){$sid}else{[RecallStart.Account]::WtsSid($server)}"));
+    // Unreadable is not "another user", and each reason is warned once.
+    let send = function_body(INSTALL, "Send-Recorder([string]$line, [string]$name = $pipeName, [int]$tries = 5)");
+    assert!(send.contains(r#"else { "can't tell which account runs the Recall pipe ($name, pid $server)" }"#), "{send}");
+    assert!(send.contains("if ($script:ownerWarned -notcontains $why) { $script:ownerWarned += $why; Write-Warning"), "{send}");
+    assert!(send.contains("$script:ownerRefused = $true"));
+    assert!(START.contains(r#"throw "can't tell which account runs the Recall pipe: quit not sent.""#));
+    // The status probe stops at the first refusal instead of repeating it every 500 ms.
+    assert!(INSTALL.contains("while (-not $up -and -not $script:ownerRefused -and (Get-Date) -lt $deadline) {"));
 }

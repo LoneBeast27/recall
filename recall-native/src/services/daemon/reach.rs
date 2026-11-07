@@ -48,7 +48,8 @@ pub fn reach_or_refused(refused: bool, running: bool, disconnected_for: Duration
 pub fn unreachable_detail(refused: Option<&str>, fallback: &str) -> String {
     match refused {
         Some(reason) => format!(
-            "{reason}. Recall sends it nothing: a recorder under another account must not get this account's commands.              Quit it from that account (its tray icon), then open Recall again."
+            "{reason}. Recall sends it nothing: a recorder under another account must not get this account's commands. \
+             Quit it from that account (its tray icon), then open Recall again."
         ),
         None => fallback.to_owned(),
     }
@@ -65,6 +66,14 @@ mod tests {
         assert_eq!(reach_or_refused(false, false, Duration::ZERO), RecorderReach::Off);
         assert!(unreachable_detail(Some(refused), "fallback").starts_with(refused));
         assert_eq!(unreachable_detail(None, "fallback"), "fallback");
+    }
+
+    #[test]
+    fn the_refusal_text_has_no_run_of_spaces() {
+        // R4-startup-3: a line break inside the literal put 14 spaces into the toast.
+        let text = unreachable_detail(Some("x"), "f");
+        assert!(!text.contains("  "), "{text:?}");
+        assert!(text.contains("commands. Quit it from that account"), "{text:?}");
     }
 
     #[test]
