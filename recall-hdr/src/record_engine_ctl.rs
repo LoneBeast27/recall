@@ -3,31 +3,46 @@
 //! (split out of `record_app`).
 
 use crate::engine_policy::EngineSpec;
+use crate::record_dispatch::Sent;
 use crate::log;
 use crate::record_app::Controller;
 use crate::record_engine::{engine_env, EngineTarget};
 use crate::supervisor::EngineHealth;
 
 impl Controller {
-    /// Start, restart or stop the engine for `target` (an intended restart).
+    /// Start, restart or stop the engine for `target` (an intended restart, a game switch:
+    /// a line sent while the old engine quits is told "Switching games").
     pub(crate) fn apply_engine_target(&mut self, target: &EngineTarget) {
+        self.apply_engine_target_as(target, Sent::Switching);
+    }
+
+    /// `refusal`: what a line sent while the old engine quits is told (Switching for a game
+    /// switch, Restarting for a planned restart, NotResponding for a recovery restart).
+    fn apply_engine_target_as(&mut self, target: &EngineTarget, refusal: Sent) {
         self.hello_at_retarget = self.supervisor.hello_count();
         // Any (re)start or stop picks up the current settings.
         self.pending_restart = false;
         match target {
             EngineTarget::Off => {
                 log!("record: no target -> engine stopped (waiting for a game)");
-                self.supervisor.retarget(None);
+                self.retarget(None, refusal);
             }
             EngineTarget::Window(t) => {
                 let detected = self.take_detected(t.hwnd);
                 log!("record: target -> {:?} ({}, pid {}, hwnd {:#x}){detected}", t.name, t.exe, t.pid, t.hwnd);
-                self.supervisor.retarget(Some(self.engine_spec(target)));
+                self.retarget(Some(self.engine_spec(target)), refusal);
             }
             EngineTarget::Desktop => {
                 log!("record: no game -> desktop capture");
-                self.supervisor.retarget(Some(self.engine_spec(target)));
+                self.retarget(Some(self.engine_spec(target)), refusal);
             }
+        }
+    }
+
+    fn retarget(&self, spec: Option<EngineSpec>, refusal: Sent) {
+        match refusal {
+            Sent::Switching => self.supervisor.retarget(spec),
+            other => self.supervisor.restart(spec, other == Sent::Restarting),
         }
     }
 
@@ -39,14 +54,16 @@ impl Controller {
         EngineSpec { env: engine_env(target, &self.cfg.recording, self.applied_mask.as_deref()) }
     }
 
-    /// Restart a running engine so new buffer/output/affinity settings apply.
-    pub(crate) fn restart_engine_for_settings(&mut self) {
+    /// Restart a running engine so new buffer/output/affinity settings apply. `planned`: a
+    /// settings change or a resume ("Recorder is restarting" meanwhile); false: a hang,
+    /// failure or watchdog recovery ("Recorder isn't responding").
+    pub(crate) fn restart_engine_for_settings(&mut self, planned: bool) {
         if *self.planner.applied() == EngineTarget::Off {
             return; // the next start already uses the new settings
         }
         let wanted = self.wanted();
         self.planner.force(wanted.clone());
-        self.apply_engine_target(&wanted);
+        self.apply_engine_target_as(&wanted, if planned { Sent::Restarting } else { Sent::NotResponding });
     }
 
     /// A fresh engine instance starts unmuted in `auto` mode: re-apply ours.

@@ -12,6 +12,7 @@ use std::time::{Duration, Instant};
 use super::protocol::{drain_stderr, read_protocol};
 use super::{engine_command, EngineHealth, Shared, SHUTDOWN_POLL, SLEEP_CHUNK};
 use crate::engine_policy::{EngineSpec, Next, RestartPolicy, GIVEUP_WINDOW};
+use crate::record_dispatch::Sent;
 use crate::log;
 
 /// Why a supervised child stopped.
@@ -61,16 +62,17 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
                 shared.set_health(EngineHealth::Running { pid });
                 log!("supervisor: engine started (pid {pid})");
                 let exit = supervise_child(&shared, &mut child, gen);
-                let grace = match exit {
-                    ChildExit::StopRequested => Some(shared.grace()),
-                    ChildExit::Retarget => Some(shared.restart_grace()),
+                // Shutdown is no game switch: a line sent meanwhile is told "not responding".
+                let stop = match exit {
+                    ChildExit::StopRequested => Some((shared.grace(), Sent::NotResponding)),
+                    ChildExit::Retarget => Some((shared.restart_grace(), shared.retarget_refusal())),
                     _ => None,
                 };
-                if let Some(grace) = grace {
+                if let Some((grace, refusal)) = stop {
                     // Run quit->grace->kill FIRST, while the stdin queue is open (`quit` is queued,
                     // never written here: a wedged pipe cannot hold the kill back);
                     // only a dead child closes stdout and unblocks the reader.
-                    finish_shutdown(&shared, child, grace);
+                    finish_shutdown(&shared, child, grace, refusal);
                 }
                 shared.set_child_stdin(None);
                 let _ = reader.join();
@@ -169,16 +171,18 @@ fn supervise_child(shared: &Arc<Shared>, child: &mut Child, gen: u64) -> ChildEx
     }
 }
 
-/// Ordered stop of a still-running child: send `quit`, wait up to `grace`
+/// Ordered stop of a still-running child: send `quit` (from then on every line is
+/// refused with `refusal`, until the next engine's stdin), wait up to `grace`
 /// polling `try_wait`, then hard-kill any survivor.
-fn finish_shutdown(shared: &Arc<Shared>, mut child: Child, grace: Duration) {
+fn finish_shutdown(shared: &Arc<Shared>, mut child: Child, grace: Duration, refusal: Sent) {
     let pid = child.id();
+    // First, even for a child already gone: no line may go to an engine that is ending.
+    shared.send_quit(refusal);
     if let Ok(Some(_)) = child.try_wait() {
         log!("supervisor: engine (pid {pid}) already exited before shutdown");
         return;
     }
     log!("supervisor: stopping engine (pid {pid}); grace {}ms", grace.as_millis());
-    shared.send_quit();
     let deadline = Instant::now() + grace;
     while Instant::now() < deadline {
         match child.try_wait() {
