@@ -19,7 +19,7 @@ fn settled(store: &ConfigStore) -> SystemTime {
 
 fn edited(base: Base) -> Option<Config> {
     match base {
-        Base::Edited(cfg) => Some(cfg),
+        Base::Edited(cfg) => Some(*cfg),
         _ => None,
     }
 }

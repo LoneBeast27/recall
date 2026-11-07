@@ -188,6 +188,8 @@ impl Folders {
         }
     }
 
+    // Tests only: the app changes folders through `folders_sync::retarget`.
+    #[cfg(test)]
     /// Settings: new clips save to `new`; `old` joins the imported folders so its clips keep
     /// showing, and stays Recall-owned. True when `old` was added to the list.
     pub fn change_recordings(&mut self, new: &str, old: &str) -> bool {
