@@ -107,8 +107,12 @@ fn this_machine_reports_its_temp_volume_bin() {
     let f = facts(&std::env::temp_dir());
     println!("temp volume bin facts: {f:?}; default size {} MB", f.total_bytes.map_or(0, default_max_mb));
     assert_eq!(f.drive_type, DRIVE_FIXED, "{f:?}");
-    assert!(f.volume.is_some_and(|v| v.id.starts_with(r"\\?\Volume{")));
+    assert!(f.volume.as_ref().is_some_and(|v| v.id.starts_with(r"\\?\Volume{")));
     assert!(f.total_bytes.is_some_and(|t| t > 0));
+    // Review 11-07: the bin's used bytes must read on a real drive (a wrong SHQUERYRBINFO
+    // size gives E_INVALIDARG, and refuse-when-unreadable would then refuse every delete).
+    let root = format!("{}\\", f.volume.as_ref().map(|v| v.label.as_str()).unwrap_or_default());
+    assert!(bin_used(&root).is_some(), "SHQueryRecycleBinW failed for {root}");
 }
 
 fn subst_of_l(letter: char) -> Option<String> {
