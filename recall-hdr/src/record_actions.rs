@@ -323,10 +323,6 @@ impl Controller {
     /// Engine events forwarded by the supervisor.
     pub(crate) fn drain_engine_events(&mut self, now: Instant) {
         while let Ok(ev) = self.engine_events.try_recv() {
-            if let Some((title, detail)) = crate::record_engine_notice::engine_notice(&ev) {
-                log!("record: {title} -- {detail}");
-                self.shortcut_notice(title, detail);
-            }
             match self.activity.on_event(&ev, unix_now()) {
                 Some(Trigger::Saved) => self.janitor.saved(now),
                 Some(Trigger::AutoStopped { game_closed }) => {
