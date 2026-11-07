@@ -277,6 +277,7 @@ impl App {
             recording_mode: "vfr".to_string(),
             encoder_heartbeat: self.encoder_heartbeat(),
             encoder_opening: self.encoder_opening(),
+            save_writing: self.save_writing(),
             mic_muted: { #[cfg(feature="encode")] { audio::mic_muted() } #[cfg(not(feature="encode"))] { false } },
             audio: { #[cfg(feature="encode")] { audio_opened() } #[cfg(not(feature="encode"))] { Vec::new() } },
         });
@@ -314,6 +315,15 @@ impl App {
             return enc.stats.heartbeat.load(Relaxed);
         }
         0
+    }
+
+    /// `status.save_writing` (`EncoderHandle::save_writing`; none without an encoder).
+    fn save_writing(&self) -> Option<protocol::SaveWriting> {
+        #[cfg(feature = "encode")]
+        if let Some(enc) = &self.encoder {
+            return enc.save_writing();
+        }
+        None
     }
 
     /// `status.encoder_opening` (`EncStats::opening`).

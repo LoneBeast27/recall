@@ -55,6 +55,10 @@ pub enum Outbound {
         /// What each recorded source opened, in track order (`audio::sources::opened`).
         #[serde(skip_serializing_if = "Vec::is_empty")]
         audio: Vec<AudioOpened>,
+        /// The save the saver is writing now (absent when none is in the saver). Bytes that
+        /// keep growing tell the controller the save is alive: a restart would abort it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        save_writing: Option<SaveWriting>,
     },
     /// A `save_clip` completed: the clip is on disk. `path` is always the
     /// clip's FINAL place in the clip folder. With `staged: true` the finished
@@ -198,6 +202,14 @@ pub enum Outbound {
         aspect: f32,
         reason: Option<String>,
     },
+}
+
+/// `status.save_writing`: the `.part` bytes written so far of the save in progress (one
+/// stat; 0 before its file exists), and the saves queued behind it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct SaveWriting {
+    pub bytes: u64,
+    pub queued: u32,
 }
 
 /// One recorded source in `status.audio`: what it captures right now.

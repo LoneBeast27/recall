@@ -6,7 +6,9 @@
 //!   the sleep (a fragmented MP4 also plays up to its last fragment if the stop is cut short).
 //! - Resume (`PBT_APMRESUMEAUTOMATIC`, sent once per wake): the engine restarts as an
 //!   intended restart (a fresh replay buffer, not counted against the supervisor's give-up),
-//!   and the foreground is read again as if it were new.
+//!   and the foreground is read again as if it were new. While the engine is still writing a
+//!   save (`EngineActivity::saves_writing`), that restart and re-probe wait for it
+//!   ([`PowerPlanner::gate`]): the restart would abort the save. The suspend is never held.
 //!
 //! This module only decides; `record_power_win` registers for the notices and applies the
 //! actions on the pump thread.
@@ -53,6 +55,8 @@ pub enum PowerAction {
 #[derive(Debug, Default)]
 pub struct PowerPlanner {
     restarted_since_suspend: bool,
+    /// A resume's restart waits for the save being written.
+    held: bool,
 }
 
 impl PowerPlanner {
@@ -68,6 +72,27 @@ impl PowerPlanner {
                 vec![PowerAction::RestartEngine, PowerAction::Reprobe]
             }
         }
+    }
+}
+
+impl PowerPlanner {
+    /// Every pump tick, with what [`on_event`](Self::on_event) asked for now: a resume's
+    /// restart (and its re-probe) is held while `saving`, then goes on the first tick
+    /// without. Everything else passes through at once.
+    pub fn gate(&mut self, mut actions: Vec<PowerAction>, saving: bool) -> Vec<PowerAction> {
+        if actions.contains(&PowerAction::RestartEngine) {
+            self.held = true;
+            actions.retain(|a| !matches!(a, PowerAction::RestartEngine | PowerAction::Reprobe));
+        }
+        if self.held && !saving {
+            self.held = false;
+            actions.extend([PowerAction::RestartEngine, PowerAction::Reprobe]);
+        }
+        actions
+    }
+
+    pub fn held(&self) -> bool {
+        self.held
     }
 }
 
@@ -168,6 +193,23 @@ mod tests {
         assert_eq!(planner.on_event(PowerEvent::Resume, false), vec![], "a repeated resume notice");
         planner.on_event(PowerEvent::Suspend, false);
         assert_eq!(planner.on_event(PowerEvent::Resume, true).len(), 2, "the next wake restarts again");
+    }
+
+    #[test]
+    fn a_resume_restart_waits_for_the_save_being_written() {
+        use PowerAction::{Reprobe, RestartEngine, StopRecording};
+        let mut planner = PowerPlanner::default();
+        let asked = planner.on_event(PowerEvent::Suspend, true);
+        assert_eq!(planner.gate(asked, true), vec![StopRecording], "the suspend is never held");
+        let asked = planner.on_event(PowerEvent::Resume, false);
+        assert_eq!(planner.gate(asked, true), vec![], "a save is still being written: the restart would abort it");
+        assert!(planner.held());
+        assert_eq!(planner.gate(Vec::new(), true), vec![], "still writing");
+        assert_eq!(planner.gate(Vec::new(), false), vec![RestartEngine, Reprobe], "the save ended: restart now");
+        assert_eq!(planner.gate(Vec::new(), false), vec![], "once");
+        planner.on_event(PowerEvent::Suspend, false);
+        let asked = planner.on_event(PowerEvent::Resume, false);
+        assert_eq!(planner.gate(asked, false), vec![RestartEngine, Reprobe], "nothing writing: at once");
     }
 
     #[test]

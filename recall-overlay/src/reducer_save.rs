@@ -4,7 +4,10 @@
 //! `SAVING_FOR` the ring says "Still saving…"; one that never hears back by
 //! `CONFIRM_FOR` says "Save not confirmed" instead of vanishing, and so does
 //! every save queued behind it (one window per engine answer, as the
-//! controller's `SAVE_STALE`, never one per save). A refusal
+//! controller's `SAVE_STALE`, never one per save). The engine's status reports the
+//! bytes of the save it is writing (`save_writing`): while they grow the front
+//! save is alive, so its ring stays ("Still saving…" past `SAVING_FOR`) and the
+//! `CONFIRM_FOR` wait counts from the last growth. A refusal
 //! (`refused`: never queued) takes no save's place, and an engine rejection
 //! (`rejected`: failed before it was queued for writing) is the newest save's. While a save is still in flight after another's outcome (or
 //! after any other notice), the island goes back to its spinning ring. A
@@ -63,18 +66,40 @@ impl Outcome {
 pub(super) struct Saves {
     pending: VecDeque<Pending>,
     shown: Option<(Outcome, u32)>,
+    /// `status.save_writing.bytes` last seen, and when they last changed.
+    writing: Option<u64>,
+    grew: Option<Instant>,
 }
 
 impl Saves {
     /// The save in front has had no answer for `CONFIRM_FOR`: the engine is
     /// not answering, so the whole queue is unconfirmed. Returns how many.
     fn overdue(&mut self, now: Instant) -> u32 {
-        if self.pending.front().is_none_or(|p| now < p.since + CONFIRM_FOR) {
+        if self.front_wait().is_none_or(|since| now < since + CONFIRM_FOR) {
             return 0;
         }
         let lost = self.pending.len() as u32;
         self.pending.clear();
         lost
+    }
+
+    /// When the front save last showed life: sent, the save ahead answered, or the
+    /// bytes being written grew since.
+    fn front_wait(&self) -> Option<Instant> {
+        let since = self.pending.front()?.since;
+        Some(self.grew.map_or(since, |grew| grew.max(since)))
+    }
+
+    /// One engine status: true when the save being written grew (a save appeared,
+    /// or its bytes changed) while a save waits here.
+    fn progress(&mut self, status: &Value, now: Instant) -> bool {
+        let seen = status.get("save_writing").map(|w| w.get("bytes").and_then(Value::as_u64).unwrap_or(0));
+        let grew = seen.is_some() && seen != self.writing && !self.pending.is_empty();
+        self.writing = seen;
+        if grew {
+            self.grew = Some(now);
+        }
+        grew
     }
 
     /// The save now in front is the one being written: its wait starts now.
@@ -138,12 +163,18 @@ impl Reducer {
         self.show_saving(now)
     }
 
+    /// An engine status: a save whose bytes grow keeps its ring (and its wait) going.
+    pub(super) fn apply_save_progress(&mut self, status: &Value, now: Instant) -> bool {
+        let ring = self.transient.as_ref().and_then(|t| t.notice.as_ref()).is_some_and(|n| n.save == Some(SavePhase::Saving));
+        self.saves.progress(status, now) && ring && self.show_saving(now)
+    }
+
     /// The newest save in flight: its ring ("Still saving…" once the save in
     /// front is slow), held until the front save's wait ends.
     fn show_saving(&mut self, now: Instant) -> bool {
         let Some(p) = self.saves.pending.back() else { return false };
         let detail = save_detail(&p.game, p.secs);
-        let until = self.saves.pending.front().map_or(now, |f| f.since + CONFIRM_FOR);
+        let until = self.saves.front_wait().map_or(now, |since| since + CONFIRM_FOR);
         let (tone, title) = if self.saves.slow(now) { (Tone::Neutral, STILL_SAVING) } else { (Tone::Recording, "Saving") };
         let notice = NoticeView::new(tone, title, detail.clone(), true).emphasized().saving(SavePhase::Saving);
         self.set_transient(title, detail, until, notice)

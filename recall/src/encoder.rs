@@ -170,6 +170,11 @@ impl EncStats {
 }
 
 impl EncoderHandle {
+    /// `status.save_writing`: the save being written now, if any (`saver_writing.rs`).
+    pub fn save_writing(&self) -> Option<crate::protocol::SaveWriting> {
+        self.saver.writing()
+    }
+
     /// Quit path: stop the encoder thread (it hands any already-requested saves
     /// to the saver first), then give in-flight saves up to `budget` to finish.
     /// Past the drain share the saver aborts and removes its `.part` file.

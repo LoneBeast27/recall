@@ -13,8 +13,9 @@ use serde_json::{json, Value};
 use crate::record_engine::Busy;
 
 /// Saves in flight with no `saved` / `save_failed` this long after the queue
-/// started or the engine last answered one are assumed lost (one window for
-/// the queue while the engine keeps answering, not one per save).
+/// started, the engine last answered one, or the save being written last grew
+/// (`status.save_writing`, [`writing`]) are assumed lost (one window for the
+/// queue while the engine keeps answering or writing, not one per save).
 pub const SAVE_STALE: Duration = Duration::from_secs(120);
 /// A `record_start` with no `recording_started` / `_failed` after this is dropped
 /// (the engine's own keyframe wait is 30 s).
@@ -52,8 +53,13 @@ pub struct AutoStop {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineActivity {
     pending_saves: u32,
-    /// When the queue of saves started, or the engine last answered one of it.
+    /// When the queue of saves started, or the engine last answered one of it
+    /// (or reported its bytes growing).
     save_progress: Option<Instant>,
+    /// Saves of a queue that expired unanswered: their late answers land here.
+    expired_saves: u32,
+    /// The engine's own report of the save it is writing.
+    write: writing::WriteWatch,
     /// Screenshots sent and not yet reported (their PNGs are still being written).
     pending_screenshots: u32,
     last_screenshot_sent: Option<Instant>,
@@ -66,6 +72,8 @@ impl Default for EngineActivity {
         EngineActivity {
             pending_saves: 0,
             save_progress: None,
+            expired_saves: 0,
+            write: writing::WriteWatch::default(),
             pending_screenshots: 0,
             last_screenshot_sent: None,
             long: LongRec::Idle,
@@ -111,7 +119,7 @@ impl EngineActivity {
     /// never gets here while saves still write.
     fn expire_saves(&mut self, now: Instant) {
         if self.save_progress.is_some_and(|t| now.duration_since(t) >= SAVE_STALE) {
-            self.pending_saves = 0;
+            self.expired_saves += std::mem::take(&mut self.pending_saves);
         }
     }
 
@@ -151,16 +159,17 @@ impl EngineActivity {
         let continued = ev.get("continued").and_then(Value::as_bool).unwrap_or(false);
         match ev.get("type").and_then(Value::as_str)? {
             "saved" => {
-                self.pending_saves = self.pending_saves.saturating_sub(1);
+                self.answered(ev);
                 Some(Trigger::Saved)
             }
             "save_failed" => {
-                self.pending_saves = self.pending_saves.saturating_sub(1);
+                self.answered(ev);
                 None
             }
             // The supervisor's own event: the engine process ended. Its last
             // events came first, so whatever is still pending is lost.
             crate::supervisor::ENGINE_EXITED => {
+                (self.expired_saves, self.write) = (0, writing::WriteWatch::default());
                 let lost = std::mem::take(&mut self.pending_saves);
                 (lost > 0).then_some(Trigger::SavesLost(lost))
             }
@@ -191,9 +200,17 @@ impl EngineActivity {
     }
 
     /// One engine event as it arrives at `now` (the live path): a save's
-    /// answer shows the engine alive, so the saves still queued get a new window.
+    /// answer shows the engine alive, so the saves still queued get a new window,
+    /// and so does a `status` whose `save_writing` bytes grew. A rejection only
+    /// shows the main loop alive, not the writer: it moves no window.
     pub fn on_engine_event(&mut self, ev: &Value, unix_now: f64, now: Instant) -> Option<Trigger> {
-        let answer = matches!(ev.get("type").and_then(Value::as_str), Some("saved" | "save_failed"));
+        let kind = ev.get("type").and_then(Value::as_str);
+        if kind == Some("status") {
+            self.on_status(ev, now);
+            return None;
+        }
+        let rejected = ev.get("rejected").and_then(Value::as_bool) == Some(true);
+        let answer = matches!(kind, Some("saved" | "save_failed")) && !rejected;
         let trigger = self.on_event(ev, unix_now);
         if answer && self.pending_saves > 0 {
             self.save_progress = Some(now);
@@ -213,7 +230,7 @@ impl EngineActivity {
         if self.last_screenshot_sent.is_some_and(|t| now.duration_since(t) >= SCREENSHOT_STALE) {
             self.pending_screenshots = 0;
         }
-        self.pending_saves > 0 || self.pending_screenshots > 0 || self.long != LongRec::Idle
+        self.saves_writing(now) || self.pending_screenshots > 0 || self.long != LongRec::Idle
     }
 
     /// What holds a due retarget now (see `EnginePlanner::step`): saves or a
@@ -223,7 +240,7 @@ impl EngineActivity {
     pub fn retarget_busy(&mut self, now: Instant) -> Busy {
         self.busy(now); // expire stale saves / starts
         let given_up = self.auto_stop.is_some_and(|s| now >= s.deadline);
-        let saving = self.pending_saves > 0 || self.pending_screenshots > 0;
+        let saving = self.saves_writing(now) || self.pending_screenshots > 0;
         Busy { saving, long_rec: self.is_recording() && !given_up }
     }
 
@@ -492,6 +509,9 @@ mod tests {
         assert_eq!(a.long_recording_json_at(t0)["elapsed_secs"], 0.0);
     }
 }
+
+#[path = "record_activity_writing.rs"]
+mod writing;
 
 #[cfg(test)]
 #[path = "record_activity_queue_tests.rs"]

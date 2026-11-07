@@ -194,7 +194,7 @@ impl Supervisor {
     }
 
     /// Also hand the controller the engine events it acts on
-    /// ([`FORWARDED_EVENTS`]: saves, long recording, screenshots, bookmarks).
+    /// ([`FORWARDED_EVENTS`]: saves and the save writing, long recording, screenshots, bookmarks).
     pub fn attach_events(&self, tx: std::sync::mpsc::Sender<serde_json::Value>) {
         if let Ok(mut g) = self.shared.events.lock() {
             *g = Some(tx);
@@ -269,8 +269,10 @@ struct EngineStdin {
 /// ends (any reason): saves still in flight are lost (`EngineActivity`).
 pub const ENGINE_EXITED: &str = "engine_exited";
 
-/// Engine event types handed to the controller via `attach_events`.
-pub const FORWARDED_EVENTS: [&str; 9] = [
+/// Engine event types handed to the controller via `attach_events`. `status`
+/// carries `save_writing`, the save the engine is still writing.
+pub const FORWARDED_EVENTS: [&str; 10] = [
+    "status",
     "saved",
     "save_failed",
     "recording_started",

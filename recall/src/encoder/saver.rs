@@ -14,7 +14,7 @@
 
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering::Relaxed};
 use std::sync::mpsc::{
     channel, sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError,
 };
@@ -147,6 +147,8 @@ pub(crate) fn window_secs(packets: &[EncodedPacket]) -> f64 {
 pub(crate) struct SaverQueue {
     tx: SyncSender<SaveJob>,
     events: Events,
+    /// Saves handed over and not yet finished (`status.save_writing`).
+    jobs: Arc<AtomicU32>,
 }
 
 impl SaverQueue {
@@ -158,17 +160,15 @@ impl SaverQueue {
     /// immediately instead of stalling capture behind the writer.
     pub fn submit(&self, mut job: SaveJob) -> bool {
         job.timing.queued_at = Some(Instant::now());
-        match self.tx.try_send(job) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) => {
-                self.events.save_rejected(QUEUE_FULL);
-                false
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                self.events.save_rejected("save writer thread stopped");
-                false
-            }
-        }
+        self.jobs.fetch_add(1, Relaxed); // counted before the saver can finish it
+        let reason = match self.tx.try_send(job) {
+            Ok(()) => return true,
+            Err(TrySendError::Full(_)) => QUEUE_FULL,
+            Err(TrySendError::Disconnected(_)) => "save writer thread stopped",
+        };
+        self.jobs.fetch_sub(1, Relaxed);
+        self.events.save_rejected(reason);
+        false
     }
 }
 
@@ -189,6 +189,7 @@ pub(crate) struct SaverControl {
     abort: Arc<AtomicBool>,
     current: Arc<Mutex<Option<PathBuf>>>,
     mover: Option<MoverControl>,
+    jobs: Arc<AtomicU32>,
 }
 
 impl SaverControl {
@@ -198,7 +199,7 @@ impl SaverControl {
     /// Then the clip mover stops (up to `mover::STOP_WAIT`): a move in flight
     /// is abandoned, its staged copy kept for the next start.
     pub fn shutdown(self, budget: Duration) -> Shutdown {
-        let SaverControl { done, abort, current, mover } = self;
+        let SaverControl { done, abort, current, mover, .. } = self;
         let outcome = stop_saver(&done, &abort, &current, budget);
         if let Some(mover) = mover {
             mover.shutdown(mover::STOP_WAIT);
@@ -273,6 +274,7 @@ pub(crate) fn spawn_checked(
     let (done_tx, done_rx) = channel::<()>();
     let abort = Arc::new(AtomicBool::new(false));
     let current = Arc::new(Mutex::new(None));
+    let jobs = Arc::new(AtomicU32::new(0));
     let worker = Worker {
         events: events.clone(),
         mux,
@@ -281,6 +283,7 @@ pub(crate) fn spawn_checked(
         current: current.clone(),
         stage,
         free,
+        jobs: jobs.clone(),
     };
     let spawned = std::thread::Builder::new()
         .name("recall-saver".into())
@@ -293,12 +296,13 @@ pub(crate) fn spawn_checked(
         events.log(&format!("saver thread failed to start: {e}"));
     }
     (
-        SaverQueue { tx, events },
+        SaverQueue { tx, events, jobs: jobs.clone() },
         SaverControl {
             done: done_rx,
             abort,
             current,
             mover,
+            jobs,
         },
     )
 }
@@ -311,24 +315,31 @@ struct Worker {
     current: Arc<Mutex<Option<PathBuf>>>,
     stage: Option<Stage>,
     free: FreeSpace,
+    jobs: Arc<AtomicU32>,
 }
 
 impl Worker {
     fn run(mut self, rx: Receiver<SaveJob>) {
         lower_thread_priority(&self.events);
         while let Ok(job) = rx.recv() {
-            if self.abort.load(Relaxed) {
-                self.events.save_failed(QUIT_BEFORE_START);
-                continue;
+            self.take(&job);
+            // Answered (after its event went out): `status.save_writing` no longer counts it.
+            self.jobs.fetch_sub(1, Relaxed);
+        }
+    }
+
+    fn take(&mut self, job: &SaveJob) {
+        if self.abort.load(Relaxed) {
+            self.events.save_failed(QUIT_BEFORE_START);
+            return;
+        }
+        let outcome = catch_unwind(AssertUnwindSafe(|| self.process(job)));
+        if outcome.is_err() {
+            // A panicking stage must not kill the saver or leave a half file.
+            if let Some(part) = self.current.lock().unwrap_or_else(|p| p.into_inner()).take() {
+                let _ = std::fs::remove_file(part);
             }
-            let outcome = catch_unwind(AssertUnwindSafe(|| self.process(&job)));
-            if outcome.is_err() {
-                // A panicking stage must not kill the saver or leave a half file.
-                if let Some(part) = self.current.lock().unwrap_or_else(|p| p.into_inner()).take() {
-                    let _ = std::fs::remove_file(part);
-                }
-                self.events.save_failed("internal error while writing the clip");
-            }
+            self.events.save_failed("internal error while writing the clip");
         }
     }
 
@@ -497,3 +508,5 @@ pub fn clip_path(out_dir: &str, source: &str) -> String {
 #[cfg(test)]
 #[path = "saver_tests.rs"]
 mod tests;
+#[path = "saver_writing.rs"]
+mod writing;

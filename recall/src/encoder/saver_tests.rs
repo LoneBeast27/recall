@@ -411,3 +411,49 @@ fn same_volume_saves_in_place_and_start_recovers_leftovers_even_with_staging_off
     assert_eq!(control.shutdown(Duration::from_secs(3)), Shutdown::Drained);
     let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
 }
+
+// ---- status.save_writing (R4-overlay-1) ----
+
+#[test]
+fn the_save_being_written_reports_its_growing_part_and_the_queue_behind_it() {
+    use crate::protocol::SaveWriting;
+    let dir = temp_dir("writing");
+    let (events, _sink) = Events::capture(true);
+    let (wrote_tx, wrote_rx) = channel::<()>();
+    let (gate_tx, gate_rx) = channel::<()>();
+    // Writes the `.part` in three steps, waiting for the test between them.
+    let mux: MuxFn = Box::new(move |part, _job, _abort, _timing| {
+        for n in 1..=3usize {
+            std::fs::write(part, vec![7u8; n * 1000]).unwrap();
+            wrote_tx.send(()).unwrap();
+            gate_rx.recv().unwrap();
+        }
+        Ok(Muxed { frames: 1, secs: 1.5 })
+    });
+    let (queue, control) = spawn(events, mux, no_gallery());
+    let wait = Duration::from_secs(5);
+    assert_eq!(control.writing(), None, "nothing in the saver");
+    assert!(queue.submit(job(&dir.join("a.mp4"))));
+    wrote_rx.recv_timeout(wait).unwrap();
+    assert_eq!(control.writing(), Some(SaveWriting { bytes: 1000, queued: 0 }));
+    assert!(queue.submit(job(&dir.join("b.mp4"))));
+    gate_tx.send(()).unwrap();
+    wrote_rx.recv_timeout(wait).unwrap();
+    assert_eq!(control.writing(), Some(SaveWriting { bytes: 2000, queued: 1 }), "the bytes grow; b waits");
+    assert!(queue.submit(job(&dir.join("c.mp4"))));
+    assert!(!queue.submit(job(&dir.join("d.mp4"))), "queue full: rejected");
+    assert_eq!(control.writing().map(|w| w.queued), Some(2), "a rejected save is not counted");
+    for _ in 0..7 {
+        gate_tx.send(()).unwrap();
+        let _ = wrote_rx.recv_timeout(wait);
+    }
+    gate_tx.send(()).unwrap();
+    let deadline = Instant::now() + wait;
+    while control.writing().is_some() {
+        assert!(Instant::now() < deadline, "the saver never went idle: {:?}", control.writing());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(queue);
+    assert_eq!(control.shutdown(Duration::from_secs(3)), Shutdown::Drained);
+    let _ = std::fs::remove_dir_all(&dir);
+}

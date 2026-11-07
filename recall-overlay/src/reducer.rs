@@ -214,7 +214,7 @@ impl Reducer {
     pub fn apply_engine_event(&mut self, event: &Value, now: Instant) -> bool {
         use Tone::{Failure, Neutral, Success};
         match event.get("type").and_then(Value::as_str) {
-            Some("status") => self.apply_status(event, now),
+            Some("status") => self.apply_save_progress(event, now) | self.apply_status(event, now),
             Some("mic_muted") => {
                 self.mic_muted = event.get("muted").and_then(Value::as_bool).unwrap_or(self.mic_muted);
                 let title = if self.mic_muted { "Microphone muted" } else { "Microphone live" };
