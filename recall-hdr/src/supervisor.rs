@@ -164,6 +164,12 @@ impl Supervisor {
         self.shared.set_desired(None, Sent::Paused);
     }
 
+    /// A resume: lines sent while the paused engine still quits say "waiting for a game"
+    /// from now (a game taking the engine says "Switching games" through `retarget`).
+    pub fn unpause(&self) {
+        self.shared.unpause();
+    }
+
     /// The last engine `hello` and `status` lines (raw JSON), for late joiners.
     pub fn cached_engine_events(&self) -> Vec<String> {
         let cache = self.shared.cache.lock().unwrap_or_else(|p| p.into_inner());

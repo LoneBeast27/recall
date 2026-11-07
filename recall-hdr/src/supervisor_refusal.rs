@@ -20,18 +20,37 @@ impl Shared {
         g.0 += 1;
         g.1 = spec;
         g.2 = refusal;
-        if !self.stop_requested() {
-            let mut stdin = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
-            if stdin.quitting.is_some() {
-                stdin.quitting = Some(refusal);
-            }
+        let mut stdin = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
+        // Read under the lock: shutdown's quit ("isn't responding") is set after the stop
+        // flag and under this lock, so a late retarget never replaces it.
+        if stdin.quitting.is_some() && !self.stop_requested() {
+            stdin.quitting = Some(refusal);
         }
     }
 
-    /// The quit window ended with no engine (a stop to Off, a failed respawn): the
-    /// refusal ends with it, and a line now says the engine is gone, not why it quit.
-    pub(super) fn end_quitting(&self) {
-        self.child_stdin.lock().unwrap_or_else(|p| p.into_inner()).quitting = None;
+    /// A resume: a pause's stop is now a stop with no game. If no game takes the
+    /// engine, a line meanwhile says "waiting for a game", not "Recording is paused".
+    pub(super) fn unpause(&self) {
+        let mut g = self.desired.lock().unwrap_or_else(|p| p.into_inner());
+        if g.2 != Sent::Paused {
+            return; // a game, a restart or shutdown since: its refusal stands
+        }
+        g.2 = Sent::Waiting;
+        let mut stdin = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
+        if stdin.quitting == Some(Sent::Paused) {
+            stdin.quitting = Some(Sent::Waiting);
+        }
+    }
+
+    /// The quit window ended with no engine (a stop to Off, a failed respawn) for
+    /// generation `gen`: the refusal ends with it, and a line now says the engine is
+    /// gone, not why it quit. A target set since keeps its own refusal until its spawn
+    /// (checked under the `desired` lock, so none lands in between).
+    pub(super) fn end_quitting(&self, gen: u64) {
+        let g = self.desired.lock().unwrap_or_else(|p| p.into_inner());
+        if g.0 == gen {
+            self.child_stdin.lock().unwrap_or_else(|p| p.into_inner()).quitting = None;
+        }
     }
 
     /// `quit` takes the queue's reserved slot: a healthy engine behind a full queue still
