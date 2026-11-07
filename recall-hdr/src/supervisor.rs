@@ -447,13 +447,12 @@ pub(crate) struct TestPipe(Arc<Shared>);
 
 #[cfg(test)]
 impl TestPipe {
-    /// A pipe whose engine reads nothing (every write blocks) and whose queue is full.
+    /// A pipe whose engine reads nothing (every write blocks) and whose queue is full. The
+    /// fill starts only once the writer has taken its line and parked, so no slot can free
+    /// up afterwards (`tests::wedge_and_fill`).
     pub fn wedged_and_full() -> TestPipe {
         let shared = Arc::new(Shared::new(None));
-        shared.attach_writer(Some(Box::new(tests::Wedged)));
-        for _ in 0..1_000 {
-            shared.send_line("{}");
-        }
+        tests::wedge_and_fill(&shared);
         TestPipe(shared)
     }
 
