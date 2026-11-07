@@ -63,7 +63,7 @@ fn track(opened: Key, repick: Option<Key>, later: Option<&'static str>, notice: 
         opens.set(opens.get() + 1);
         now.set(now.get() + open_takes);
         if opens.get() == 1 {
-            let rebind = rebind_for("Mic (Box)", opened.take().unwrap(), probe(repick.take().unwrap()), Run::Inline);
+            let rebind = rebind_for("Mic (Box)", opened.take().unwrap(), probe(repick.take().unwrap()), (Run::Inline, Default::default()));
             return Ok(Playing { now: now.clone(), endpoint: "2- Mic (Box)", rebind });
         }
         later.map(|endpoint| Playing { now: now.clone(), endpoint, rebind: None }).ok_or_else(|| "no unique endpoint".to_owned())
@@ -129,7 +129,7 @@ fn a_slow_repick_never_holds_the_capture_loop() {
         std::thread::sleep(Duration::from_millis(300));
         None
     });
-    let mut rebind = rebind_for("Mic (Box)", id("{two}"), slow, Run::Thread).expect("a named stream rebinds");
+    let mut rebind = rebind_for("Mic (Box)", id("{two}"), slow, (Run::Thread, Default::default())).expect("a named stream rebinds");
     let start = Instant::now();
     let first = rebind.check(&notices);
     assert!(start.elapsed() < Duration::from_millis(100), "the check waited {:?} for the enumeration", start.elapsed());
@@ -144,6 +144,50 @@ fn a_slow_repick_never_holds_the_capture_loop() {
 
 #[test]
 fn only_a_named_device_rebinds() {
-    assert!(rebind_for(" ", name("Speakers (Box)"), probe(None), Run::Inline).is_none(), "the Windows default is watched instead");
-    assert!(rebind_for("Speakers (Box)", name("Speakers (Box)"), probe(None), Run::Inline).is_some(), "a named output too");
+    assert!(rebind_for(" ", name("Speakers (Box)"), probe(None), (Run::Inline, Default::default())).is_none(), "the Windows default is watched instead");
+    assert!(rebind_for("Speakers (Box)", name("Speakers (Box)"), probe(None), (Run::Inline, Default::default())).is_some(), "a named output too");
+}
+
+/// p9 gate item 3: at most one re-pick thread per track. A new stream's rebind while the last
+/// stream's re-pick still runs skips (it keeps its notice) instead of spawning another.
+#[test]
+fn at_most_one_repick_thread_runs_per_track() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let started = Arc::new(AtomicUsize::new(0));
+    let (release, gate) = std::sync::mpsc::channel::<()>();
+    let gate = Arc::new(std::sync::Mutex::new(gate));
+    let counted = started.clone();
+    let blocked: Probe = Arc::new(move || {
+        counted.fetch_add(1, Ordering::SeqCst);
+        let _ = gate.lock().unwrap().recv_timeout(Duration::from_secs(5));
+        None
+    });
+    let slot: Arc<AtomicBool> = Arc::default();
+    let now = Rc::new(Cell::new(Duration::ZERO));
+    let notices = FakeNotices::devices_at(&now, Duration::ZERO);
+    let mut first = rebind_for("Mic (Box)", id("{a}"), blocked.clone(), (Run::Thread, slot.clone())).unwrap();
+    assert!(first.check(&notices).is_none());
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while started.load(Ordering::SeqCst) == 0 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    // The stream ended with its re-pick in flight; the reopened stream gets a notice.
+    drop(first);
+    let mut second = rebind_for("Mic (Box)", id("{a}"), blocked, (Run::Thread, slot.clone())).unwrap();
+    second.queued = true;
+    for _ in 0..5 {
+        assert!(second.check(&notices).is_none());
+    }
+    std::thread::sleep(Duration::from_millis(50));
+    assert_eq!(started.load(Ordering::SeqCst), 1, "one re-pick thread at a time");
+    assert!(second.queued, "the skipped notice waits for the slot");
+    release.send(()).unwrap();
+    release.send(()).unwrap();
+    let mut ended = None;
+    while ended.is_none() && Instant::now() < deadline {
+        ended = second.check(&notices);
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(started.load(Ordering::SeqCst), 2, "the queued notice ran once the slot was free");
+    assert!(ended.is_some(), "and its answer came back");
 }

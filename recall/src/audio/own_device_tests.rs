@@ -155,7 +155,7 @@ fn a_fallback_stream_goes_back_to_its_own_device_when_it_returns() {
         // The re-pick after the notice opens the saved id.
         let back: Probe = std::sync::Arc::new(|| Some(Key::Id("{id-one}".into())));
         Ok::<_, String>(match opens.get() {
-            1 => Rebinding { now: now.clone(), endpoint: "2- Mic (Box)", own: false, rebind: rebind_for("Mic (Box)", Key::Id("{id-two}".into()), back, Run::Inline) },
+            1 => Rebinding { now: now.clone(), endpoint: "2- Mic (Box)", own: false, rebind: rebind_for("Mic (Box)", Key::Id("{id-two}".into()), back, (Run::Inline, Default::default())) },
             _ => Rebinding { now: now.clone(), endpoint: "Mic (Box)", own: true, rebind: None },
         })
     };

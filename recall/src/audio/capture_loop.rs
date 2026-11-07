@@ -96,6 +96,11 @@ pub(super) trait Capture {
     fn own(&self) -> bool {
         false
     }
+    /// An input's unsure exact-name sibling (A4 ruling, `endpoints::Choice::Unsure`), with its
+    /// endpoint id when read: it records silence until a fresh Alt+M (`hold.rs`).
+    fn unsure(&self) -> Option<Option<String>> {
+        None
+    }
     /// Capture into `ring` until the stream fails or must move; the stream is stopped on return.
     fn run(&mut self, ring: &TrackRing, level: &mut Leveller, clock: &dyn Clock, notices: &dyn Notices) -> Ended;
 }
@@ -197,7 +202,13 @@ pub(super) fn capture_loop<C: Capture>(
                 // The endpoint's real name: a renumbered "4- X" for a saved "3- X" shows as itself.
                 eprintln!("[recall] audio track '{}': opened {endpoint}", ring.name);
                 set_opened_own(ring, &endpoint, stream.own(), true);
-                set_endpoint(ring, endpoint.clone());
+                match stream.unsure() {
+                    Some(id) => {
+                        ring.live.start_hold(&endpoint, id);
+                        set_endpoint(ring, super::endpoints::unsure_notice(&endpoint));
+                    }
+                    None => set_endpoint(ring, endpoint.clone()),
+                }
                 if let Some(tx) = init_tx.take() {
                     let _ = tx.send(Ok(()));
                 }
@@ -206,6 +217,7 @@ pub(super) fn capture_loop<C: Capture>(
                 let queued = Queued { missed: std::cell::Cell::new(notices.take_devices_changed()), notices };
                 let ended = stream.run(ring, &mut level, &*clock, &queued);
                 set_opened_own(ring, &endpoint, false, false);
+                ring.live.end_hold();
                 // Nor do the ones that came while it was live (another device came or went):
                 // the first reopen after this loss keeps its backoff.
                 notices.take_devices_changed();
@@ -217,12 +229,17 @@ pub(super) fn capture_loop<C: Capture>(
                 wait = !ended.at_once;
             }
             Err(e) => {
+                // Two devices share the name, or only its case matches: the status says so.
+                if super::endpoints::is_notice(&e) && ring.endpoint() != e {
+                    eprintln!("[recall] audio track '{}': {e}", ring.name);
+                    set_endpoint(ring, e.clone());
+                }
                 if let Some(tx) = init_tx.take() {
                     if !wait_absent {
                         let _ = tx.send(Err(e));
                         return;
                     }
-                    let label = waiting_label(device);
+                    let label = if super::endpoints::is_notice(&e) { e.clone() } else { waiting_label(device) };
                     eprintln!("[recall] audio track '{}': {e}; {label}", ring.name);
                     set_endpoint(ring, label);
                     let _ = tx.send(Ok(()));

@@ -31,6 +31,8 @@
 //! The manager thread lives in `supervisor_manager.rs`, the stdout protocol
 //! reader in `supervisor_protocol.rs`.
 
+#[path = "supervisor_hello.rs"]
+mod hello;
 #[path = "supervisor_manager.rs"]
 mod manager;
 #[path = "supervisor_mute.rs"]
@@ -187,13 +189,6 @@ impl Supervisor {
         self.shared.cache.lock().unwrap_or_else(|p| p.into_inner()).view.clone()
     }
 
-    /// The running engine said it applies `set_source` live (`hello.live_sources`); older
-    /// engines ignore that command, so their gain and name changes need a restart.
-    pub fn engine_takes_live_sources(&self) -> bool {
-        let cache = self.shared.cache.lock().unwrap_or_else(|p| p.into_inner());
-        cache.hello.as_deref().and_then(|h| serde_json::from_str::<serde_json::Value>(h).ok()).and_then(|v| v.get("live_sources")?.as_bool()).unwrap_or(false)
-    }
-
     /// Engine `hello`s parsed so far: a change means a fresh engine instance.
     pub fn hello_count(&self) -> u32 {
         self.shared.hello_count.load(Ordering::SeqCst)
@@ -287,8 +282,9 @@ struct EngineStdin {
 }
 
 /// Engine event types handed to the controller via `attach_events`.
-pub const FORWARDED_EVENTS: [&str; 9] = [
+pub const FORWARDED_EVENTS: [&str; 10] = [
     "saved",
+    "source_adopted",
     "save_failed",
     "recording_started",
     "recording_stopped",

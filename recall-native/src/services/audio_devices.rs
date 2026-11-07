@@ -145,6 +145,11 @@ pub enum Found {
     Twins(usize),
     /// `n` endpoints match once a leading "<digits>- " index is dropped: it opens none.
     Ambiguous(usize),
+    /// `twins` endpoints share the name, none by the saved id; this one has exactly the saved
+    /// name. An input records it muted until a fresh Alt+M; an output waits (A4 ruling).
+    Unsure { index: usize, twins: usize },
+    /// Only a name in another case is listed: it waits (P2-d).
+    CaseOnly,
     /// No endpoint matches.
     Missing,
 }
@@ -156,13 +161,19 @@ pub fn found(saved: &str, listed: Option<&[String]>) -> Found {
         return Found::Default;
     }
     let Some(list) = listed else { return Found::Unknown };
-    match crate::services::meters::match_endpoint(list, saved) {
-        Some(i) => Found::Opens(i),
-        None if twins(list, saved) > 1 => Found::Twins(twins(list, saved)),
-        None => match crate::services::meters::stripped_hits(list, saved) {
-            n if n > 1 => Found::Ambiguous(n),
-            _ => Found::Missing,
-        },
+    found_from(crate::services::endpoint_choice::choose(list, saved, "", |_| None), list, saved)
+}
+
+/// [`Found`] for the recorder's pick `choice` of `saved` among `list`.
+pub fn found_from(choice: crate::services::endpoint_choice::Choice, list: &[String], saved: &str) -> Found {
+    use crate::services::endpoint_choice::Choice;
+    match choice {
+        Choice::Opens(i) => Found::Opens(i),
+        Choice::Unsure { index, twins } => Found::Unsure { index, twins },
+        Choice::Twins(_) if twins(list, saved) > 1 => Found::Twins(twins(list, saved)),
+        Choice::Twins(n) => Found::Ambiguous(n),
+        Choice::CaseOnly => Found::CaseOnly,
+        Choice::Missing => Found::Missing,
     }
 }
 
@@ -183,7 +194,8 @@ pub fn label_for(saved: &str, found: Found, listed: Option<&[String]>, default: 
             Some(name) => format!("Windows default ({name})"),
             None => "Windows default".to_owned(),
         },
-        Found::Opens(i) => listed.map_or(saved, |l| l[i].trim()).to_owned(),
+        Found::Opens(i) | Found::Unsure { index: i, .. } => listed.map_or(saved, |l| l[i].trim()).to_owned(),
+        Found::CaseOnly => format!("{saved} (not found exactly; pick it again)"),
         Found::Twins(n) => format!("{saved} ({n} devices have this name; rename one in Windows)"),
         Found::Ambiguous(n) => format!("{saved} ({n} devices match; rename one in Windows)"),
         Found::Missing => format!("{saved} (not connected)"),
@@ -212,7 +224,7 @@ mod tests {
         let list = vec!["Microphone (USB)".to_owned(), "Microphone (USB Audio Device)".to_owned()];
         assert_eq!(device_label("", Some(&list), Some("Microphone (USB)")), "Windows default (Microphone (USB))");
         assert_eq!(device_label("", None, None), "Windows default");
-        assert_eq!(device_label("microphone (usb)", Some(&list), None), "microphone (usb) (not connected)", "case included, like the engine");
+        assert_eq!(device_label("microphone (usb)", Some(&list), None), "microphone (usb) (not found exactly; pick it again)", "case included, like the engine (P2-d)");
         assert_eq!(device_label("Headset (BT)", Some(&list), None), "Headset (BT) (not connected)");
         assert_eq!(device_label("Headset (BT)", None, None), "Headset (BT)", "not listed yet: no claim either way");
         assert_eq!(device_label("usb audio microphone", Some(&list), None), "usb audio microphone (not connected)", "no word matching");

@@ -29,6 +29,7 @@ fn ring(capacity: usize) -> TrackRing {
         channels: 2,
         samples: Mutex::new(VecDeque::new()),
         capacity,
+        live: Default::default(),
     }
 }
 
