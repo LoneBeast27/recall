@@ -236,6 +236,8 @@ pub struct DaemonSnapshot {
     pub config_overridden: Vec<String>,
     /// Shortcuts on a combo games and overlays often use (a warning, they stay bound).
     pub hotkey_warnings: Vec<String>,
+    /// Counts `config` events (each one is a fresh answer, even when the config is unchanged).
+    pub config_seq: u64,
 }
 
 impl SessionStatus {
@@ -309,6 +311,8 @@ pub enum DaemonEvent {
     DiskLow { drive: String, free_bytes: u64, need_bytes: u64 },
     /// Dry run of a limit the user picked (answer to `StoragePreview`); nothing moved.
     StoragePreview { cap_gb: u32, used_bytes: u64, removed: u64, freed_bytes: u64, through: Option<u64> },
+    /// The recorder repaired `count` invalid settings when it loaded config.toml (once per load).
+    ConfigRepaired { count: u64 },
     Error(String),
 }
 

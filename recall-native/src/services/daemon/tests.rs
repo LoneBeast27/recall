@@ -418,3 +418,19 @@ fn a_message_type_the_app_does_not_know_is_ignored() {
     apply(&mut state, json!({"mod":"session","event":{"type":"disk_low_v2","drive":"C:","free_bytes":3,"need_bytes":5}}));
     assert_eq!(state.events, Vec::<DaemonEvent>::new());
 }
+
+#[test]
+fn every_config_event_counts_and_a_loads_repairs_queue_one_notice() {
+    let mut state = connected();
+    let line = json!({"mod":"session","event":{"type":"config","config":{"a":1},
+        "config_repaired":{"id":42,"count":2,"notes":["x","y"]}}});
+    apply(&mut state, line.clone());
+    assert!(apply(&mut state, line), "the same config again is still a fresh answer");
+    assert_eq!(state.snapshot.config_seq, 2);
+    let notices: Vec<_> = state.events.iter().filter(|e| matches!(e, DaemonEvent::ConfigRepaired { .. })).cloned().collect();
+    assert_eq!(notices, vec![DaemonEvent::ConfigRepaired { count: 2 }], "one notice per load id");
+    // A clean load (id 0) and an older recorder (no field) say nothing.
+    apply(&mut state, json!({"mod":"session","event":{"type":"config","config":{"a":1},"config_repaired":{"id":0,"count":0}}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"config","config":{"a":1}}}));
+    assert_eq!(state.events.iter().filter(|e| matches!(e, DaemonEvent::ConfigRepaired { .. })).count(), 1);
+}

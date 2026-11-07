@@ -333,7 +333,7 @@ mod tests {
     fn error_and_config_events_are_valid_json() {
         let e: Value = serde_json::from_str(&error_event(r#"bad "quote" \ here"#)).unwrap();
         assert_eq!(e, json!({"type":"error","message":r#"bad "quote" \ here"#}));
-        let c: Value = serde_json::from_str(&crate::record_config_event::config_event(&Config::default(), &Default::default())).unwrap();
+        let c: Value = serde_json::from_str(&crate::record_config_event::config_event(&Config::default(), &Default::default(), &Default::default())).unwrap();
         assert_eq!(c["type"], "config");
         assert_eq!(c["config"]["recording"]["buffer_secs"], 120);
     }

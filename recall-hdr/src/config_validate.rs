@@ -51,10 +51,9 @@ fn numbers(cfg: &mut Config, notes: &mut Vec<String>) {
     clamp_u32("recording.bitrate_mbps", &mut rec.bitrate_mbps, BITRATE_MBPS_MIN, BITRATE_MBPS_MAX, notes);
     let cap = cfg.storage.cap_gb;
     if (1..STORAGE_CAP_MIN_GB).contains(&cap) {
-        // Nearest valid value: off (0) or the floor; a tie goes to the floor (a cap was meant).
-        let fixed = if cap * 2 < STORAGE_CAP_MIN_GB { 0 } else { STORAGE_CAP_MIN_GB };
-        notes.push(format!("storage.cap_gb {cap} -> {fixed} (0 = off, else at least {STORAGE_CAP_MIN_GB})"));
-        cfg.storage.cap_gb = fixed;
+        // A cap was meant: the floor, never off (off lets the folder grow until the disk fills).
+        notes.push(format!("storage.cap_gb {cap} -> {STORAGE_CAP_MIN_GB} (0 = off, else at least {STORAGE_CAP_MIN_GB})"));
+        cfg.storage.cap_gb = STORAGE_CAP_MIN_GB;
     }
 }
 
@@ -105,7 +104,8 @@ fn text_fields(cfg: &mut Config, notes: &mut Vec<String>) {
         notes.push(format!("recording.output_dir was empty -> '{}'", rec.output_dir));
     }
     for (key, name) in [("recording.mic_device", &mut rec.mic_device), ("recording.desktop_audio_device", &mut rec.desktop_audio_device)] {
-        if !one_line(name, 256) {
+        // Bytes, as `record_config::validate` counts them (a long non-ASCII name is > 256 bytes).
+        if name.len() > 256 || name.chars().any(char::is_control) {
             clear(key, name, notes);
         }
     }
