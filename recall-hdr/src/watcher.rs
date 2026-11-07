@@ -86,6 +86,11 @@ pub struct WatchEvent {
     /// Ubisoft, EA, Battle.net, itch: `launcher_libraries`): a windowed game
     /// like `steam_game`, but no evidence against the private list (R7-detect-1).
     pub launcher_game: bool,
+    /// True iff it lives in an Xbox / Microsoft Store game package (a folder
+    /// with `MicrosoftGame.config`, `store_games`): official proof for a
+    /// fullscreen window, no evidence against the private list, not a
+    /// windowed candidate.
+    pub store_game: bool,
     /// True iff the identity (pid, exe) was resolved by Recall rather than read
     /// off the window: a UWP frame named by its hosted CoreWindow's process
     /// (G6). Such an identity is a game only on positive evidence (a known
@@ -110,6 +115,7 @@ impl WatchEvent {
             fullscreen_on_target: false,
             steam_game: false,
             launcher_game: false,
+            store_game: false,
             hosted: false,
             hwnd,
         }
@@ -370,6 +376,7 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
         fullscreen_on_target: fullscreen && monitor == target_monitor,
         steam_game: library == Library::Steam,
         launcher_game: library == Library::Launcher,
+        store_game: library == Library::Store,
         hosted: pid != frame_pid,
         hwnd: hwnd.0 as isize,
     })

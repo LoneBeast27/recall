@@ -19,6 +19,7 @@ fn plain(stem: &str) -> WatchEvent {
         fullscreen_on_target: true,
         steam_game: false,
         launcher_game: false,
+        store_game: false,
         hosted: false,
         hwnd: 0x500,
     }
@@ -143,7 +144,7 @@ fn an_override_or_fullscreen_games_entry_opts_one_in() {
 #[test]
 fn a_real_game_is_unaffected() {
     let cfg = Config::default();
-    let unknown = classify_checked(&plain("UnknownGame"), &cfg, false, false, || None).expect("today's rule");
+    let unknown = classify_checked(&plain("UnknownGame"), &cfg, true, true, || None).expect("the render check decides");
     assert!(unknown.needs_check);
     let known = classify_checked(&plain("VALORANT-Win64-Shipping"), &cfg, false, false, || None).expect("known game");
     assert!(!known.needs_check);

@@ -8,6 +8,10 @@
 //!   Steam owns `steamapps\common`; a launcher folder is whatever the user or
 //!   the registry says, so a chat app there stays private unless opted in.
 //!
+//! An Xbox / Microsoft Store game package (`store_games`, a folder with
+//! `MicrosoftGame.config`) is a third kind: official proof for a fullscreen
+//! window only (`WatchEvent::store_game`), no evidence against the private list.
+//!
 //! A prerequisite installer shipped inside a game folder (`_CommonRedist`,
 //! `__redist`, `__Installer`, `Engine\Extras\Redist`, `DirectX`, `vcredist`)
 //! is no game in either (R7-detect-5).
@@ -21,6 +25,8 @@ pub(crate) enum Library {
     Steam,
     /// Another launcher's game folder (Epic, GOG, Ubisoft, EA, Battle.net, itch).
     Launcher,
+    /// An Xbox / Microsoft Store game package (`store_games`).
+    Store,
 }
 
 /// Folder names (whole path segments, any case) that hold a game's
@@ -44,9 +50,13 @@ pub(crate) fn is_steam_library_path(path: &str) -> bool {
 }
 
 /// The library `path` lives in: Steam, else a known launcher's game folder
-/// (the cached folders of `launcher_libraries`), minus prerequisite folders.
+/// (the cached folders of `launcher_libraries`), else a Store game package,
+/// minus prerequisite folders.
 pub(crate) fn game_library(path: &str) -> Library {
-    library_with(path, crate::launcher_libraries::is_launcher_library_path)
+    match library_with(path, crate::launcher_libraries::is_launcher_library_path) {
+        Library::None if !is_prereq_path(path) && crate::store_games::is_store_game_path(path) => Library::Store,
+        found => found,
+    }
 }
 
 /// [`game_library`] against given launcher folders (tests).

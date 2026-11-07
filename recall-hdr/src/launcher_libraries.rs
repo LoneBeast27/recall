@@ -9,7 +9,11 @@
 //! - Epic: `%ProgramData%\Epic\EpicGamesLauncher\Data\Manifests\*.item`
 //!   (JSON), `InstallLocation`; an entry whose `AppCategories` does not say
 //!   `games` (the Unreal Engine, plugins) is skipped;
-//! - GOG: `HKLM\SOFTWARE\WOW6432Node\GOG.com\Games\*` value `path`;
+//! - GOG: `HKLM\SOFTWARE\WOW6432Node\GOG.com\Games\*` value `path`. A
+//!   `path` that is a broad parent (one folder under a drive, like `D:\Games`,
+//!   a folder that holds another library folder, or a too-broad folder)
+//!   counts only for the exe its entry names (`exe`, else `path\exeFile`,
+//!   else the first token of `launchCommand`), not for every exe under it;
 //! - Ubisoft Connect: `HKLM\SOFTWARE\WOW6432Node\Ubisoft\Launcher\Installs\*`
 //!   value `InstallDir`;
 //! - EA app (and Origin): `HKLM\SOFTWARE\WOW6432Node\Electronic Arts\*` and
@@ -71,20 +75,26 @@ pub(crate) fn normalize(path: &str) -> String {
     p
 }
 
-/// `exe_path` lies under one of `roots` (as [`normalize`] made them).
+/// A root that is one exe, not a folder: `exe|` + the normalized exe path.
+const EXE_ENTRY: &str = "exe|";
+
+/// `exe_path` lies under one of `roots` (as [`normalize`] made them), or is
+/// one of the exe-only entries.
 pub(crate) fn is_under(exe_path: &str, roots: &[String]) -> bool {
     if roots.is_empty() {
         return false;
     }
     let p = normalize(exe_path);
-    roots.iter().any(|r| p.len() > r.len() && p.starts_with(r.as_str()))
+    roots.iter().any(|r| match r.strip_prefix(EXE_ENTRY) {
+        Some(exe) => p == exe,
+        None => p.len() > r.len() && p.starts_with(r.as_str()),
+    })
 }
 
 /// Every launcher's game folders, normalized, de-duplicated, broad folders
 /// dropped.
 pub(crate) fn collect_roots(src: &dyn LibrarySources) -> Vec<String> {
     let mut found = epic_roots(src);
-    found.extend(gog_roots(src));
     found.extend(ubisoft_roots(src));
     found.extend(ea_roots(src));
     found.extend(battlenet_roots(src));
@@ -92,6 +102,18 @@ pub(crate) fn collect_roots(src: &dyn LibrarySources) -> Vec<String> {
     let broad = broad_folders(src);
     let profile = src.env("USERPROFILE").filter(|p| !p.trim().is_empty()).map(|p| normalize(&p));
     let mut roots: Vec<String> = found.iter().map(|p| normalize(p)).filter(|r| !too_broad(r, &broad, profile.as_deref())).collect();
+    let gog = gog_entries(src);
+    let folders: Vec<String> = roots.iter().cloned().chain(gog.iter().map(|e| normalize(&e.path))).collect();
+    for entry in &gog {
+        let r = normalize(&entry.path);
+        let parent = folders.iter().any(|o| o.len() > r.len() && o.starts_with(&r));
+        let depth = r.trim_end_matches('\\').split('\\').count();
+        if !parent && depth > 2 && !too_broad(&r, &broad, profile.as_deref()) {
+            roots.push(r);
+        } else if let Some(exe) = &entry.exe {
+            roots.push(format!("{EXE_ENTRY}{}", normalize(exe)));
+        }
+    }
     roots.sort();
     roots.dedup();
     roots
@@ -155,8 +177,38 @@ fn reg_values(src: &dyn LibrarySources, path: &str, value: &str) -> Vec<(String,
     keys.into_iter().filter_map(|(k, vals)| vals.into_iter().next().flatten().filter(|v| !v.trim().is_empty()).map(|v| (k, v))).collect()
 }
 
-fn gog_roots(src: &dyn LibrarySources) -> Vec<String> {
-    reg_values(src, "SOFTWARE\\WOW6432Node\\GOG.com\\Games", "path").into_iter().map(|(_, v)| v).collect()
+/// One GOG game: its install folder and the exe the entry names.
+struct GogEntry {
+    path: String,
+    exe: Option<String>,
+}
+
+fn gog_entries(src: &dyn LibrarySources) -> Vec<GogEntry> {
+    let keys = src.reg_subkeys(Hive::LocalMachine, "SOFTWARE\\WOW6432Node\\GOG.com\\Games", &["path", "exe", "exeFile", "launchCommand"]);
+    keys.into_iter()
+        .filter_map(|(_, vals)| {
+            let [path, exe, file, launch] = <[Option<String>; 4]>::try_from(vals).ok()?;
+            let path = path.filter(|p| !p.trim().is_empty())?;
+            let exe = gog_exe(&path, exe, file, launch);
+            Some(GogEntry { path, exe })
+        })
+        .collect()
+}
+
+/// The exe a GOG entry names: `exe`, else `exeFile` in `path`, else the
+/// first (quoted) token of `launchCommand`; relative names are in `path`.
+pub(crate) fn gog_exe(path: &str, exe: Option<String>, file: Option<String>, launch: Option<String>) -> Option<String> {
+    let set = |v: Option<String>| v.map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+    let named = set(exe).or_else(|| set(file)).or_else(|| {
+        let l = set(launch)?;
+        let first = match l.strip_prefix('"') {
+            Some(rest) => rest.split('"').next()?.to_string(),
+            None => l.split_whitespace().next()?.to_string(),
+        };
+        Some(first).filter(|f| !f.trim().is_empty())
+    })?;
+    let absolute = named.as_bytes().get(1) == Some(&b':') || named.starts_with("\\\\");
+    Some(if absolute { named } else { format!("{}\\{}", path.trim().trim_end_matches(['\\', '/']), named) })
 }
 
 fn ubisoft_roots(src: &dyn LibrarySources) -> Vec<String> {

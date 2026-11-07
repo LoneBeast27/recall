@@ -147,6 +147,7 @@ fn event_at(path: &str, stem: &str, roots: &[String]) -> WatchEvent {
         fullscreen_on_target: false,
         steam_game: game_library_in(path, roots) == Library::Steam,
         launcher_game: game_library_in(path, roots) == Library::Launcher,
+        store_game: false,
         hosted: false,
         hwnd: 0x700,
     }
@@ -262,4 +263,40 @@ fn the_cache_answers_lookups() {
     assert!(!store_roots(roots), "unchanged");
     assert!(is_launcher_library_path("H:\\GOG Games\\Witcher 3\\bin\\x64\\witcher3.exe"));
     assert!(!is_launcher_library_path("H:\\Elsewhere\\x.exe"));
+}
+
+#[test]
+fn a_broad_gog_path_counts_only_for_the_exe_its_entry_names() {
+    let f = machine()
+        .key(GOG, "g1", &[("path", r"D:\Games"), ("exe", r"D:\Games\Foo\foo.exe")])
+        .key(GOG, "g2", &[("path", r"E:\Library"), ("launchCommand", r#""E:\Library\bar.exe" -windowed"#)])
+        .key(GOG, "g3", &[("path", r"F:\Shared\Stuff"), ("exeFile", r"baz\baz.exe")])
+        .key(GOG, "g4", &[("path", r"F:\Shared\Stuff\Other")])
+        .key(GOG, "g5", &[("path", r"M:\Parent")]);
+    let roots = collect_roots(&f);
+    for exe in [r"D:\Games\Foo\foo.exe", r"E:\Library\bar.exe", r"F:\Shared\Stuff\baz\baz.exe", r"F:\Shared\Stuff\Other\o.exe"] {
+        assert!(is_game_library_path_in(exe, &roots), "{exe}: named by its entry: {roots:?}");
+    }
+    for exe in [
+        r"D:\Games\Telegram\Telegram.exe",
+        r"D:\Games\Foo\launcher.exe",
+        r"E:\Library\tool.exe",
+        r"F:\Shared\Stuff\chat\chat.exe",
+        r"M:\Parent\x\x.exe",
+    ] {
+        assert!(!is_game_library_path_in(exe, &roots), "{exe}: under a broad GOG path: {roots:?}");
+    }
+    assert!(is_game_library_path_in(r"H:\GOG Games\Witcher 3\bin\x64\any.exe", &roots), "a one-game folder keeps every exe");
+}
+
+#[test]
+fn an_epic_manifest_game_is_a_target_without_trace_rights() {
+    let roots = collect_roots(&machine());
+    let ev = event_at(r"G:\Epic Games\RocketLeague\Binaries\Win64\RocketLeague.exe", "RocketLeague", &roots);
+    let fs = WatchEvent { fullscreen: true, fullscreen_on_target: true, ..ev };
+    let c = crate::record_hosted::classify_checked(&fs, &Config::default(), false, false, || Some(false)).expect("Epic manifest is official proof");
+    assert!(!c.needs_check);
+    let tool = event_at(r"G:\Elsewhere\Tool\Tool.exe", "Tool", &roots);
+    let tool = WatchEvent { fullscreen: true, fullscreen_on_target: true, ..tool };
+    assert!(crate::record_hosted::classify_checked(&tool, &Config::default(), false, false, || Some(false)).is_none(), "outside every library: no proof");
 }

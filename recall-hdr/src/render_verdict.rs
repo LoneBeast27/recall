@@ -131,13 +131,14 @@ pub enum Gate {
 /// The probe's state for the candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Watch {
-    /// No trace rights, or the session failed: today's rule (fullscreen = game).
+    /// No trace rights, or the session failed: no verdict, so not a game
+    /// (official-proof ruling, 2026-11-07; no "fullscreen = game" fallback).
     Unavailable,
     Watching { since: Instant, stats: RenderStats },
 }
 
 pub fn gate(watch: Watch, now: Instant) -> (Gate, Verdict) {
-    let Watch::Watching { since, stats } = watch else { return (Gate::Commit, Verdict::Unsure) };
+    let Watch::Watching { since, stats } = watch else { return (Gate::Reject(Why::NoFrames), Verdict::Unsure) };
     let end = since + MAX_WATCH;
     let verdict = judge(&stats, now >= end);
     let gate = match verdict {

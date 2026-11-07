@@ -15,6 +15,7 @@ fn ev(stem: &str, title: &str, pid: u32, hwnd: isize, fullscreen: bool) -> Watch
         fullscreen_on_target: fullscreen,
         steam_game: false,
         launcher_game: false,
+        store_game: false,
         hosted: false,
         hwnd,
     }

@@ -7,27 +7,29 @@
 //! commits, is rejected, or stops being the candidate.
 //!
 //! Without trace rights (not an elevated administrator, not in Performance
-//! Log Users) or when the session cannot start, today's rule stands: an
-//! unknown fullscreen window is a game, the deny lists still apply.
+//! Log Users) or when the session cannot start there is no verdict, and an
+//! unknown fullscreen window with no other official proof is not recorded
+//! (Rohan 2026-11-07: "use official proof + support for manual application
+//! registering"): it is logged once and, after 20 s in front, named once by
+//! the G4 notice "Not recording <exe>: add it as a game in Settings"
+//! (`record_hosted::check_proof`, [`Controller::classify_unproven`]).
 //!
 //! A fullscreen exe that the GPU vendor's driver lists as a game
 //! (`gpu_games`) skips the check: it commits on the 300 ms rule, which also
 //! records composed borderless games the check would reject. The vendor is
 //! asked only after the deny lists passed the window (`classify_event`).
 //!
-//! A UWP identity Recall resolved itself (`WatchEvent::hosted`) never gets
-//! today's rule: with no check it is no candidate (`record_hosted`).
-//!
 //! A fullscreen window only the private list blocks is watched too, but never
 //! committed: its verdict feeds the G4 notice (`record_private_watch`).
 
+use std::collections::HashSet;
 use std::time::Instant;
 
 use crate::gpu_games::KnownGames;
 use crate::log;
 use crate::record_app::Controller;
 use crate::record_composed::{composed_front, notice_step, notice_text};
-use crate::record_hosted::{classify_checked, commits_without_probe, Classified};
+use crate::record_hosted::{check_proof, Checked, Classified};
 use crate::record_private_watch::{blocked_private, private_admit, private_front, watch_wanted, PrivateWatch};
 use crate::record_engine::EngineTarget;
 use crate::record_target::{Admit, Target};
@@ -42,18 +44,17 @@ pub(crate) struct RenderCheck {
     probe: Option<RenderProbe>,
     /// (pid, hwnd) of the last classified candidate that needs the check.
     wanted: Option<(u32, isize)>,
-    /// That candidate's identity was resolved by Recall (a UWP frame's
-    /// hosted app): it commits only on a "game" verdict.
-    wanted_hosted: bool,
     rejected: Rejected,
     /// G4: names a composed fullscreen window left unrecorded, once per exe.
     composed: ComposedNotice,
-    /// A pid whose probe would not start: today's rule for it.
+    /// A pid whose probe would not start: no verdict for it.
     failed_for: Option<u32>,
     /// The GPU vendor's game list (lazy worker, cached per exe path).
     games: KnownGames,
     /// A fullscreen window the private list blocks, watched for G4 only.
     private: PrivateWatch,
+    /// Exes (lower case) not recorded for want of proof, logged once each.
+    unproven: HashSet<String>,
 }
 
 impl RenderCheck {
@@ -62,9 +63,11 @@ impl RenderCheck {
             log!("record: render check: stopped a session left by an earlier controller");
         }
         if !available {
-            log!("record: render check off (no trace rights): any fullscreen app that is not denied counts as a game (a Store app only when Recall knows it, an override or the GPU vendor lists it)");
+            log!("record: render check off (no trace rights): an unknown fullscreen app is recorded only with official proof (Steam, launcher or Xbox/Store install, known game, GPU vendor list) or when added as a game in Settings");
         }
-        RenderCheck { available, probe: None, wanted: None, wanted_hosted: false, rejected: Rejected::default(), composed: ComposedNotice::default(), failed_for: None, games: KnownGames::new(), private: PrivateWatch::default() }
+        let (rejected, composed) = (Rejected::default(), ComposedNotice::default());
+        let (games, private, unproven) = (KnownGames::new(), PrivateWatch::default(), HashSet::new());
+        RenderCheck { available, probe: None, wanted: None, rejected, composed, failed_for: None, games, private, unproven }
     }
 
     /// The check can run for `pid`: trace rights, and its probe did not fail.
@@ -95,11 +98,11 @@ impl RenderCheck {
         match RenderProbe::start(pid) {
             Ok(probe) => self.probe = Some(probe),
             Err(StartError::Denied) => {
-                log!("record: render check refused (no trace rights); fullscreen apps count as games");
+                log!("record: render check refused (no trace rights); unknown fullscreen apps need official proof or a Settings entry");
                 self.available = false;
             }
             Err(StartError::Failed(why)) => {
-                log!("record: render check could not start for pid {pid} ({why}); today's rule applies to it");
+                log!("record: render check could not start for pid {pid} ({why}); no verdict for it, so it is not recorded without other proof");
                 self.failed_for = Some(pid);
             }
         }
@@ -119,12 +122,11 @@ impl RenderCheck {
             return Admit::Commit;
         }
         let Some(probe) = self.probe.as_ref().filter(|p| p.pid == t.pid) else {
-            if commits_without_probe(self.wanted_hosted) {
-                return Admit::Commit;
-            }
-            // A resolved UWP identity with no probe: no verdict, not a game.
-            log!("record: render check: {} not recorded (no render check for a Store app, and Recall does not know it)", t.exe);
-            self.rejected.note(t.pid, t.hwnd, Why::NoFrames, RenderStats::default(), now);
+            // No probe (it would not start, or trace rights went away): no
+            // verdict, so not a game (no "fullscreen = game" fallback).
+            let (Gate::Reject(why), _) = gate(Watch::Unavailable, now) else { return Admit::Reject };
+            log!("record: render check: {} not recorded (no render verdict and no other proof that it is a game)", t.exe);
+            self.rejected.note(t.pid, t.hwnd, why, RenderStats::default(), now);
             return Admit::Reject;
         };
         let stats = probe.stats();
@@ -176,11 +178,13 @@ impl Controller {
     /// [`classify_event`] plus the render check's bookkeeping: a window judged
     /// not a game is no candidate until its recheck time.
     pub(crate) fn classify(&mut self, ev: &WatchEvent, now: Instant) -> Option<Target> {
-        let (available, can_check) = (self.render.available, self.render.can_check(ev.pid));
+        let can_check = self.render.can_check(ev.pid);
         let games = &mut self.render.games;
         let vendor = || games.for_pid(ev.pid, &ev.exe_name);
-        let Some(Classified { target: candidate, needs_check: needs }) = classify_checked(ev, &self.cfg, available, can_check, vendor) else {
-            return self.classify_private(ev, now);
+        let Classified { target: candidate, needs_check: needs } = match check_proof(ev, &self.cfg, can_check, vendor) {
+            Checked::Candidate(c) => c,
+            Checked::NoVerdict => return self.classify_unproven(ev, now),
+            Checked::No => return self.classify_private(ev, now),
         };
         if self.render.private.is_watched(ev.pid, ev.hwnd) {
             // Opted in since (an override, `fullscreen_games`): no longer watched only.
@@ -192,7 +196,6 @@ impl Controller {
             return None;
         }
         self.render.wanted = needs.then_some((ev.pid, ev.hwnd));
-        self.render.wanted_hosted = ev.hosted;
         Some(candidate)
     }
 
@@ -230,8 +233,22 @@ impl Controller {
         }
         self.render.private.window = Some((ev.pid, ev.hwnd));
         self.render.wanted = Some((ev.pid, ev.hwnd));
-        self.render.wanted_hosted = false;
         Some(Target::from_event(ev))
+    }
+
+    /// A candidate with no proof and no verdict possible (`Checked::NoVerdict`):
+    /// not recorded. Logged once per exe; while it stays in front, fullscreen,
+    /// unrecorded and not on a desktop capture, the G4 clock runs and names it
+    /// once after 20 s ("Not recording <exe>: add it as a game in Settings").
+    pub(crate) fn classify_unproven(&mut self, ev: &WatchEvent, now: Instant) -> Option<Target> {
+        if self.render.unproven.insert(ev.exe_name.to_ascii_lowercase()) {
+            log!("record: not recording {}: no proof that it is a game and no render verdict (no trace rights, or the check would not start); add it as a game in Settings to record it", ev.exe_name);
+        }
+        let recorded = self.tracker.current().is_some_and(|t| (t.pid, t.hwnd) == (ev.pid, ev.hwnd));
+        let desktop = *self.planner.applied() == EngineTarget::Desktop;
+        let front = unproven_front(ev, self.paused, recorded, desktop);
+        self.note_composed(front.map(|steady| (ev, steady)), now);
+        None
     }
 
     /// G4: a composed fullscreen window in front for over 20 s is named
@@ -241,12 +258,16 @@ impl Controller {
         let seen = front.map(|(e, steady)| ((e.pid, e.hwnd, e.exe_name.as_str()), steady));
         let Some(exe) = notice_step(&mut self.render.composed, seen, self.cfg.overlay.enabled, now) else { return };
         let (title, detail) = notice_text(&exe);
-        if crate::private_apps::is_private(&exe) {
+        if self.render.unproven.contains(&exe.to_ascii_lowercase()) {
+            log!("record: {title}: {detail} (no proof that it is a game, and no render verdict)");
+        } else if crate::private_apps::is_private(&exe) {
             log!("record: {title}: {detail} (on the private list, but it renders like a game)");
         } else {
             log!("record: {title}: {detail} (DWM composes its fullscreen window; no game signal for over 20 s)");
         }
         self.shortcut_notice(&title, detail);
+        // The tray's "Add <exe> as a game" registers it in one click.
+        self.tray.offer_game(Some(&exe));
     }
 
     /// Before the tracker polls: watch the pending candidate, if it needs it.
@@ -274,6 +295,14 @@ impl Controller {
 /// vendor lists it as a game. `vendor` = `None` while the lookup is on its way.
 pub(crate) fn needs_check(plain: bool, vendor: Option<bool>) -> bool {
     plain && vendor != Some(true)
+}
+
+/// `Some(true)` while the G4 clock may run for a fullscreen window left
+/// unrecorded for want of proof: in front, not paused, not the recorded
+/// window, no desktop capture (then it is on the clip), and a plain window
+/// (a Store app Recall resolved from its frame is never named, R4-detect-3).
+pub(crate) fn unproven_front(ev: &WatchEvent, paused: bool, recorded: bool, desktop: bool) -> Option<bool> {
+    (ev.fullscreen && !ev.hosted && !paused && !recorded && !desktop).then_some(true)
 }
 
 /// Which way [`RenderCheck::admit`] takes a due candidate.

@@ -9,8 +9,10 @@
 //!   denied stem (the rules deny list,
 //!   Recall's own processes, explorer, browsers, media players, overlays,
 //!   launchers) or an exe with a `none` override. A window that is a
-//!   candidate by the fullscreen rule alone must also render like a game
-//!   before it commits (`record_render`, asked through [`Admit`]).
+//!   candidate by the fullscreen rule alone needs official proof: a game
+//!   render verdict before it commits (`record_render`, asked through
+//!   [`Admit`]), the GPU vendor's list, or an Xbox / Store game package; with
+//!   no verdict possible it is not recorded (`record_hosted::check_proof`).
 //! - **Session** ([`TargetTracker`]): the same rules as the HDR `Reconciler`
 //!   session, applied to capture. With nothing recorded (no session, or the
 //!   engine lingering after a game exited) a candidate commits once it holds

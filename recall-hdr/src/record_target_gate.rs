@@ -84,7 +84,7 @@ pub fn traits_of(ev: &WatchEvent, cfg: &Config) -> Traits {
     Traits {
         fullscreen: ev.fullscreen,
         vouched: over || known,
-        listed_only: listed && !over && !known && !crate::record_target_rules::in_library(ev),
+        listed_only: listed && !over && !known && !crate::record_target_rules::official_install(ev),
         known_only: known && !over,
     }
 }

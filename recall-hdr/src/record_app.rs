@@ -405,6 +405,7 @@ impl Controller {
                 log!("record: tray open, matched UI windows={}", matched.len());
             }
             RecordingTrayCmd::TogglePause => self.set_paused(!self.paused),
+            RecordingTrayCmd::AddGame => self.add_offered_game(),
             RecordingTrayCmd::Quit => {
                 log!("record: tray quit");
                 self.quit = Some(QuitReason::TrayMenu);
