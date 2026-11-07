@@ -4,7 +4,7 @@
 //! session-filtered process checks (G3), the re-check after the build (G2), the unknown-drive
 //! switch (G16) and the marker's start time (G12).
 
-const INSTALL: &str = include_str!("../../scripts/install.ps1");
+pub(crate) const INSTALL: &str = include_str!("../../scripts/install.ps1");
 const SWAP: &str = include_str!("../../scripts/install-swap.ps1");
 const START: &str = include_str!("../../Start-Recall.ps1");
 
@@ -67,7 +67,7 @@ fn the_install_marker_carries_the_installer_start_time() {
 }
 
 /// The body of `function <name> {` up to its closing `}` at column 0.
-fn function_body<'a>(script: &'a str, name: &str) -> &'a str {
+pub(crate) fn function_body<'a>(script: &'a str, name: &str) -> &'a str {
     let open = format!("function {name} {{");
     let at = script.find(&open).unwrap_or_else(|| panic!("{name} defined"));
     let end = script[at..].find("\n}").map(|e| at + e).unwrap_or(script.len());
@@ -84,8 +84,12 @@ fn stop_recorder_also_quits_a_pre_session_recorder() {
     let legacy = stop.find("Send-Recorder '{\"cmd\":\"quit\"}' $legacyPipe").expect("quit on the legacy pipe");
     assert!(session < legacy, "the session pipe is asked first");
     // The legacy name is used nowhere else (status checks and the autostart patch stay per session).
-    let uses = code_lines(INSTALL).filter(|l| l.contains("$legacyPipe")).count();
-    assert_eq!(uses, 2, "defined once, used once in Stop-Recorder");
+    // Defined once, sent to once in Stop-Recorder, and named in Send-Recorder's retry on the
+    // shared bare pipe (R5-startup-5).
+    let uses: Vec<&str> = code_lines(INSTALL).filter(|l| l.contains("$legacyPipe")).collect();
+    assert_eq!(uses.len(), 4, "{uses:?}");
+    let send = function_body(INSTALL, "Send-Recorder([string]$line, [string]$name = $pipeName, [int]$tries = 5)");
+    assert_eq!(send.matches("if ($name -eq $legacyPipe) { Start-Sleep -Milliseconds 300; continue }").count(), 2, "{send}");
     // Send-Recorder takes the pipe name, defaulting to this session's.
     assert!(INSTALL.contains("function Send-Recorder([string]$line, [string]$name = $pipeName, [int]$tries = 5) {"));
 }
@@ -106,7 +110,8 @@ fn a_sandboxed_install_names_its_own_legacy_pipe_and_controller() {
     let legacy = assignment(INSTALL, "legacyPipe");
     assert_eq!(legacy, "$legacyPipe = if ($env:RECALL_LEGACY_PIPE) { $env:RECALL_LEGACY_PIPE } else { 'recall-hdr-control' }");
     let path = assignment(INSTALL, "controllerPath");
-    assert!(path.contains("if ($env:RECALL_CONTROLLER_PATH) { $env:RECALL_CONTROLLER_PATH }"), "{path}");
+    // The env value as resolved against the PowerShell location (R5-startup-4).
+    assert!(path.contains("if ($envController) { $envController }"), "{path}");
     assert!(path.contains("else { Join-Path $InstallDir 'recall-hdr.exe' }"), "{path}");
     assert!(path.starts_with("$controllerPath = [RecallInstall.PathId]::Normalize("), "compared as a normalized path: {path}");
     // Both are set before the first Stop-Recorder call.
@@ -135,7 +140,9 @@ fn only_a_sandbox_limits_the_quit_to_the_controller_it_names() {
     // that won't quit makes the run throw, naming it.
     let stop = function_body(INSTALL, "Stop-Recorder");
     assert!(stop.contains("if (-not $sent -and (Get-Controller)) {"));
-    assert!(stop.contains("((Get-Installed) -or (Get-Controller))"), "waits on every controller it quits");
+    assert!(stop.contains("Wait-ForQuit $quit"), "{stop}");
+    let wait = include_str!("../../scripts/install-quit-wait.ps1");
+    assert!(wait.contains("((Get-Installed) -or (Get-Controller))"), "waits on every controller it quits");
     assert!(
         stop.contains(r#"throw ("Recall is still running (" + (($left | ForEach-Object { Format-Recorder $_ }) -join ', ')"#),
         "names it: {stop}"
@@ -204,7 +211,7 @@ fn a_sandbox_outside_its_install_dir_is_refused_before_anything_closes() {
     );
     let inside = INSTALL.lines().find(|l| l.starts_with("function Test-InInstallDir")).unwrap();
     assert!(
-        inside.contains("[RecallInstall.PathId]::Normalize($path).StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase)"),
+        inside.contains("(Get-PathId $path).StartsWith($installRoot, [StringComparison]::OrdinalIgnoreCase)"),
         "{inside}"
     );
     // -CloseApp closes only what Get-InstalledApp lists: app processes inside -InstallDir.
@@ -220,9 +227,9 @@ fn nothing_is_sent_unless_our_controller_serves_the_pipe() {
     // process of each connection must be the path-matched controller, else nothing is written.
     let send = function_body(INSTALL, "Send-Recorder([string]$line, [string]$name = $pipeName, [int]$tries = 5)");
     let check = send.find("$server = Get-PipeServer $pipe").expect("server pid read after connect");
-    let refuse = send
-        .find("if (-not $server -or -not (@(Get-Controller) | Where-Object { [int]$_.ProcessId -eq $server })) { $pipe.Dispose(); return $false }")
-        .expect("refuse a foreign server");
+    let ours = send.find("$ours = @(Get-Controller) | Where-Object { [int]$_.ProcessId -eq $server } | Select-Object -First 1").expect("the server is ours");
+    let refuse = send.find("if (-not $server -or -not $ours) {").expect("refuse a foreign server");
+    assert!(ours < refuse && send[refuse..].contains("$pipe.Dispose()"));
     let write = send.find("$w.WriteLine($line)").expect("the write");
     assert!(send.find("$pipe.Connect(1500)").unwrap() < check && check < refuse && refuse < write);
     assert!(function_body(INSTALL, "Get-PipeServer($pipe)").contains("GetNamedPipeServerProcessId"));
