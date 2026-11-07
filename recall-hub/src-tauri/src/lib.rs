@@ -8,6 +8,7 @@ mod editor_media;
 mod editor_export;
 mod overlay;
 mod midi;
+mod pipe_name;
 
 use std::io::{BufRead, BufReader, Write};
 use std::sync::Mutex;
@@ -15,8 +16,6 @@ use std::sync::Mutex;
 use interprocess::local_socket::traits::Stream as _;
 use interprocess::local_socket::{GenericNamespaced, SendHalf, Stream, ToNsName};
 use tauri::{AppHandle, Emitter, Manager};
-
-const PIPE_NAME: &str = "recall-hdr-control";
 
 /// Writer half of the live pipe connection (None while disconnected).
 struct PipeState(Mutex<Option<SendHalf>>);
@@ -98,8 +97,10 @@ fn show_in_folder(path: String) {
 /// Pipe client with auto-reconnect: forwards every line as a `daemon` event and
 /// stores the writer half for `daemon_send`.
 fn pipe_client_loop(app: AppHandle) {
+    // Per Windows session: this user's recorder (`pipe_name`).
+    let pipe = pipe_name::current_pipe_name();
     loop {
-        let name = match PIPE_NAME.to_ns_name::<GenericNamespaced>() {
+        let name = match pipe.as_str().to_ns_name::<GenericNamespaced>() {
             Ok(n) => n,
             Err(_) => return,
         };

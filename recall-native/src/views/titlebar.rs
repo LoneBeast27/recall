@@ -139,7 +139,8 @@ impl Root {
                 .child(ui::dot(theme::WARNING, 7.))
                 .child(div().text_color(c(theme::MUTED)).child(reach::UNREACHABLE_TITLE))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    this.show_toast(ToastKind::Bad, reach::UNREACHABLE_TITLE, Some(reach::UNREACHABLE_DETAIL.to_owned()));
+                    let detail = this.unreachable_detail();
+                    this.show_toast(ToastKind::Bad, reach::UNREACHABLE_TITLE, Some(detail));
                     cx.notify();
                 }))
                 .into_any_element();

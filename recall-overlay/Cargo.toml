@@ -34,4 +34,7 @@ windows = { version = "0.62", features = [
     "Win32_UI_WindowsAndMessaging",
     # The per-session controller pipe name (`pipe_name`).
     "Win32_System_RemoteDesktop",
+    # The pipe server's account check (`pipe_owner`).
+    "Win32_Security",
+    "Win32_Security_Authorization",
 ] }

@@ -31,6 +31,13 @@ impl State {
 
     /// A disconnect drops the live status (it would be stale); the last config stays
     /// so settings can still be shown while the controller restarts.
+    /// The owner check's last verdict (None: accepted). Kept across disconnects.
+    pub fn set_refused(&mut self, reason: Option<String>) -> bool {
+        let changed = self.snapshot.refused != reason;
+        self.snapshot.refused = reason;
+        changed
+    }
+
     pub fn set_connected(&mut self, connected: bool) -> bool {
         let before = self.snapshot.clone();
         self.snapshot.connected = connected;

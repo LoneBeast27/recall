@@ -32,9 +32,40 @@ pub fn reach(running: bool, disconnected_for: Duration) -> RecorderReach {
     }
 }
 
+/// [`reach`], except that a connect refused by the owner check (`pipe_owner`: the pipe's
+/// server runs as another account) is unreachable at once: that recorder is not in this
+/// session's process list, and Start can't help.
+pub fn reach_or_refused(refused: bool, running: bool, disconnected_for: Duration) -> RecorderReach {
+    if refused {
+        RecorderReach::Unreachable
+    } else {
+        reach(running, disconnected_for)
+    }
+}
+
+/// The unreachable reason for the toast and the Settings banner: the refusal when the owner
+/// check refused the pipe, else `fallback` (a recorder that runs but never answers).
+pub fn unreachable_detail(refused: Option<&str>, fallback: &str) -> String {
+    match refused {
+        Some(reason) => format!(
+            "{reason}. Recall sends it nothing: a recorder under another account must not get this account's commands.              Quit it from that account (its tray icon), then open Recall again."
+        ),
+        None => fallback.to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_refused_pipe_is_unreachable_with_its_reason() {
+        let refused = "another user owns the Recall pipe (server pid 9 runs as S-1-5-21-2)";
+        assert_eq!(reach_or_refused(true, false, Duration::ZERO), RecorderReach::Unreachable, "no recorder of ours runs");
+        assert_eq!(reach_or_refused(false, false, Duration::ZERO), RecorderReach::Off);
+        assert!(unreachable_detail(Some(refused), "fallback").starts_with(refused));
+        assert_eq!(unreachable_detail(None, "fallback"), "fallback");
+    }
 
     #[test]
     fn a_recorder_that_runs_but_never_answers_is_unreachable() {

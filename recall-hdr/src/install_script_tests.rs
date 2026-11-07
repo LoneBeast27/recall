@@ -148,3 +148,23 @@ fn nothing_is_sent_unless_our_controller_serves_the_pipe() {
     assert!(send.find("$pipe.Connect(1500)").unwrap() < check && check < refuse && refuse < write);
     assert!(function_body(INSTALL, "Get-PipeServer($pipe)").contains("GetNamedPipeServerProcessId"));
 }
+
+#[test]
+fn script_clients_refuse_a_pipe_served_by_another_account() {
+    // deep-startup-p3 a: the pipe's server process must run as this account (token user SID).
+    let send = function_body(INSTALL, "Send-Recorder([string]$line, [string]$name = $pipeName, [int]$tries = 5)");
+    let owner = send
+        .find(r#"if ($server -and (Get-ProcessUserSid $server) -ne $mySid) { $pipe.Dispose(); Write-Warning "another user owns the Recall pipe"#)
+        .expect("installer: owner SID check");
+    assert!(owner < send.find("$w.WriteLine($line)").unwrap(), "checked before anything is written");
+    assert!(INSTALL.contains("$mySid = [Security.Principal.WindowsIdentity]::GetCurrent().User.Value"));
+    let sid = function_body(INSTALL, "Get-ProcessUserSid([int]$id)");
+    assert!(sid.contains("OpenProcessToken($process, 8, [ref]$token)") && sid.contains("([Security.Principal.WindowsIdentity]::new($token)).User.Value"));
+    // Start-Recall.ps1 -Stop: the same check before the quit line.
+    let check = START.find("function Test-RecallPipeOwner($pipe){").expect("Start-Recall: owner check");
+    assert!(START[check..].contains("GetNamedPipeServerProcessId($pipe.SafePipeHandle.DangerousGetHandle(),[ref]$server)"));
+    assert!(START[check..].contains(".User.Value -eq [Security.Principal.WindowsIdentity]::GetCurrent().User.Value"));
+    let refuse = START.find("if(-not(Test-RecallPipeOwner $pipe)){$pipe.Dispose();throw 'another user owns the Recall pipe").expect("-Stop refuses");
+    let quit = START.find(r#"$writer.WriteLine('{"cmd":"quit"}')"#).unwrap();
+    assert!(check < refuse && refuse < quit);
+}

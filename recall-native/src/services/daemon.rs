@@ -15,13 +15,14 @@ use serde::Deserialize;
 use serde_json::Value;
 
 mod controller;
+mod pipe_owner;
 mod protocol;
 mod reach;
 mod session;
 
 // The examples include this file without the views that use these.
 #[allow(unused_imports)]
-pub use reach::{reach, RecorderReach};
+pub use reach::{reach, reach_or_refused, unreachable_detail, RecorderReach};
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -236,6 +237,8 @@ pub struct DaemonSnapshot {
     pub engine: Option<EngineStatus>,
     /// Full config object from the last `config` event.
     pub config: Option<Value>,
+    /// The last connect was refused: the pipe's server runs as another account (`pipe_owner`).
+    pub refused: Option<String>,
 }
 
 impl SessionStatus {
@@ -366,10 +369,15 @@ impl DaemonClient {
 
     /// `spawn` against any pipe name (tests use a private one).
     fn spawn_on(pipe: &str) -> Self {
+        Self::spawn_checked(pipe, pipe_owner::check)
+    }
+
+    /// `spawn_on` with the server-owner check injected (tests fake another account).
+    fn spawn_checked(pipe: &str, owner: OwnerCheck) -> Self {
         let shared = Arc::new(Shared::new());
         let worker = shared.clone();
         let pipe = pipe.to_owned();
-        let spawned = std::thread::Builder::new().name("recall-daemon-pipe".into()).spawn(move || connection_loop(&worker, &pipe));
+        let spawned = std::thread::Builder::new().name("recall-daemon-pipe".into()).spawn(move || connection_loop(&worker, &pipe, owner));
         if let Err(error) = spawned {
             eprintln!("Recall native: controller pipe thread failed to start: {error}");
         }
@@ -405,13 +413,27 @@ impl Drop for DaemonClient {
     }
 }
 
-/// Connect, serve until EOF/error, mark disconnected, retry every second.
-fn connection_loop(shared: &Shared, pipe: &str) {
+/// Whether a fresh connection's server may be used (`pipe_owner::check`).
+type OwnerCheck = fn(&Stream) -> Result<(), String>;
+
+/// Connect, check the server runs as this account, serve until EOF/error, mark
+/// disconnected, retry every second. A refused server gets nothing written to it.
+fn connection_loop(shared: &Shared, pipe: &str, owner: OwnerCheck) {
     while !shared.stop.load(Ordering::Acquire) {
         if let Ok(name) = pipe.to_ns_name::<GenericNamespaced>()
             && let Ok(stream) = Stream::connect(name)
         {
-            serve(shared, stream);
+            let verdict = owner(&stream);
+            let refused = verdict.as_ref().err().cloned();
+            if let Some(reason) = &refused
+                && shared.read(|state| state.snapshot.refused.as_ref() != Some(reason))
+            {
+                eprintln!("Recall native: {reason}; not using the control pipe");
+            }
+            shared.update(|state| state.set_refused(refused));
+            if verdict.is_ok() {
+                serve(shared, stream);
+            }
         }
         shared.set_writer(None);
         shared.update(|state| state.set_connected(false));
