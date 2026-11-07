@@ -161,7 +161,7 @@ fn first_refusal(sup: &Supervisor) -> Sent {
 
 /// The manager path: `retarget` (a game switch) and `restart` (a hang) each quit the old
 /// engine; a save in that window gets the matching reason and never lands behind the quit.
-fn quit_window(switch: bool) -> (Sent, Vec<String>) {
+fn quit_window(quit: impl FnOnce(&Supervisor, Option<EngineSpec>)) -> (Sent, Vec<String>) {
     let engine = std::env::var_os("ComSpec").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
     let sup = Supervisor::start_with_locator(move || Some(engine), None);
     sup.shared.restart_grace_ms.store(1_000, Ordering::SeqCst);
@@ -169,7 +169,7 @@ fn quit_window(switch: bool) -> (Sent, Vec<String>) {
     assert!(wait_for(5, || matches!(sup.health(), EngineHealth::Running { pid } if pid != 0)));
     let rec = Recorded::attach(&sup.shared); // stands in for the engine's stdin
     let next = Some(EngineSpec { env: vec![("RECALL_CAPTURE_NAME".into(), Some("next".into()))] });
-    if switch { sup.retarget(next) } else { sup.restart(next) }
+    quit(&sup, next);
     let refused = first_refusal(&sup);
     assert!(matches!(sup.health(), EngineHealth::Running { pid } if pid != 0), "refused while the old engine still runs");
     assert!(wait_for(5, || sup.shared.spawn_count.load(Ordering::SeqCst) == 2), "the next engine never started");
@@ -180,14 +180,33 @@ fn quit_window(switch: bool) -> (Sent, Vec<String>) {
 
 #[test]
 fn a_save_while_the_old_engine_quits_for_a_retarget_says_switching() {
-    let (refused, lines) = quit_window(true);
+    let (refused, lines) = quit_window(|sup, next| sup.retarget(next));
     assert_eq!(refused, Sent::Switching);
     assert_eq!(after_quit(&lines), Vec::<String>::new(), "a save went behind the quit");
 }
 
 #[test]
 fn a_save_while_the_old_engine_quits_for_a_hang_restart_says_not_responding() {
-    let (refused, lines) = quit_window(false);
+    let (refused, lines) = quit_window(|sup, next| sup.restart(next, false));
     assert_eq!(refused, Sent::NotResponding, "a hang restart is no game switch");
     assert_eq!(after_quit(&lines), Vec::<String>::new(), "a save went behind the quit");
 }
+
+/// A settings change: `restart_engine_for_settings(true)` (record_actions.rs `request_engine_restart`).
+#[test]
+fn a_save_while_the_old_engine_quits_for_a_settings_restart_says_restarting() {
+    let (refused, lines) = quit_window(|sup, next| sup.restart(next, true));
+    assert_eq!(refused, Sent::Restarting, "a planned restart");
+    assert_eq!(refused.reason(), Some("Recorder is restarting, try again in a moment"));
+    assert_eq!(after_quit(&lines), Vec::<String>::new(), "a save went behind the quit");
+}
+
+/// A resume from sleep: `restart_engine_for_settings(true)` (record_power_win.rs RestartEngine),
+/// the same engine spec again.
+#[test]
+fn a_save_while_the_old_engine_quits_for_a_resume_restart_says_restarting() {
+    let (refused, lines) = quit_window(|sup, _next| sup.restart(Some(EngineSpec::default()), true));
+    assert_eq!(refused, Sent::Restarting);
+    assert_eq!(after_quit(&lines), Vec::<String>::new(), "a save went behind the quit");
+}
+

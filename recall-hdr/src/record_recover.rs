@@ -307,7 +307,7 @@ impl crate::record_app::Controller {
             if self.activity.is_recording() {
                 log!("record: the long recording did not end within {} s; restarting anyway (the next start recovers its .part)", END_EARLY_WAIT.as_secs());
             }
-            self.restart_engine_for_settings();
+            self.restart_engine_for_settings(false);
             return;
         }
         let health = self.supervisor.health();
@@ -335,7 +335,7 @@ impl crate::record_app::Controller {
                 log!("record: the encoder failed, its recovery ran past its bound, or the engine hung; restarting the engine (intended)");
                 let lines = restart_lines(self.activity.is_recording());
                 if lines.is_empty() {
-                    self.restart_engine_for_settings();
+                    self.restart_engine_for_settings(false);
                     return;
                 }
                 // The quit waits (up to 20 s) for the recording thread to finish the part.

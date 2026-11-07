@@ -150,11 +150,11 @@ impl Supervisor {
         self.shared.set_desired(spec, Sent::Switching);
     }
 
-    /// As [`retarget`](Self::retarget), for a restart that is no game switch (a hung or
-    /// failed engine, new settings, a resume): lines sent meanwhile are refused as
-    /// [`Sent::NotResponding`].
-    pub fn restart(&self, spec: Option<EngineSpec>) {
-        self.shared.set_desired(spec, Sent::NotResponding);
+    /// As [`retarget`](Self::retarget), for a restart that is no game switch. `planned`
+    /// (new settings, a resume): lines sent meanwhile are refused as [`Sent::Restarting`];
+    /// otherwise (a hung or failed engine, the capture watchdog) as [`Sent::NotResponding`].
+    pub fn restart(&self, spec: Option<EngineSpec>, planned: bool) {
+        self.shared.set_desired(spec, if planned { Sent::Restarting } else { Sent::NotResponding });
     }
 
     /// The last engine `hello` and `status` lines (raw JSON), for late joiners.

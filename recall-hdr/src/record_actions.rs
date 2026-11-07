@@ -354,7 +354,7 @@ impl Controller {
             return;
         }
         log!("record: engine settings changed; restarting the engine (the replay buffer restarts)");
-        self.restart_engine_for_settings();
+        self.restart_engine_for_settings(true);
     }
 
     /// Planner -> engine, every pump tick. A retarget that falls due while
