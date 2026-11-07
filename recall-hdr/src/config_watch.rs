@@ -50,7 +50,7 @@ pub enum Base {
     /// The file changed on disk: this is its config (salvaged and repaired like a load).
     Edited(Box<Config>),
     /// The file changed but is not TOML: the config in memory is the base, and this line
-    /// (naming the backup) goes to the app once the patch is saved.
+    /// (naming the backup) goes to the app after the patch ([`patch_notice`]).
     Broken(String),
     /// The file changed in the last [`SETTLE`]: the patch is refused, so a save can't race
     /// the editor still writing it.
@@ -81,13 +81,20 @@ pub fn base_for_patch(store: &ConfigStore, seen: &mut Option<FileStamp>, now: Sy
         let name = kept.as_deref().and_then(Path::file_name).map(|n| n.to_string_lossy().into_owned());
         log!("config: config.toml changed on disk but is not valid TOML; kept as {name:?}, keeping the settings in use");
         return Base::Broken(match name {
-            Some(name) => format!("config.toml had an error (kept as {name}); your other settings were saved"),
-            None => "config.toml had an error and could not be backed up; your other settings were saved".into(),
+            Some(name) => format!("config.toml had an error (kept as {name})"),
+            None => "config.toml had an error and could not be backed up".into(),
         });
     }
     *seen = Some(stamp);
     log!("config: config.toml changed on disk; applying the edit before this change");
     Base::Edited(Box::new(crate::config::load_bytes(path, &bytes, now)))
+}
+
+/// The line the app gets after a patch whose base was `Base::Broken(broken)`, whether the patch
+/// saved or changed nothing (review RI-7: a no-op patch dropped it, and `seen` had already
+/// moved, so the broken edit was never reported).
+pub fn patch_notice(broken: Option<&str>, saved: bool) -> Option<String> {
+    broken.map(|line| if saved { format!("{line}; your other settings were saved") } else { format!("{line}; the settings in use are unchanged") })
 }
 
 #[cfg(test)]

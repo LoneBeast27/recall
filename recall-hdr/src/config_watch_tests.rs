@@ -123,3 +123,12 @@ fn a_file_written_moments_ago_is_not_merged_or_saved_over() {
     let early = base_for_patch(&store, &mut seen, written - Duration::from_secs(60));
     assert!(!matches!(early, Base::Busy), "a write time ahead of the clock never blocks for good");
 }
+
+#[test]
+fn a_broken_hand_edit_is_reported_whether_or_not_the_patch_saved() {
+    // RI-7: the notice went out only when the patch saved; a patch that changed nothing lost it.
+    let line = "config.toml had an error (kept as config.toml.bad-2026-11-07)";
+    assert_eq!(patch_notice(Some(line), false).as_deref(), Some("config.toml had an error (kept as config.toml.bad-2026-11-07); the settings in use are unchanged"));
+    assert_eq!(patch_notice(Some(line), true).as_deref(), Some("config.toml had an error (kept as config.toml.bad-2026-11-07); your other settings were saved"));
+    assert_eq!(patch_notice(None, true), None);
+}
