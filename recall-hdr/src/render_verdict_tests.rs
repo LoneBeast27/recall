@@ -125,3 +125,53 @@ fn no_frames_backoff_resets_on_frames_or_a_new_window() {
     r.note(9, 71, Why::NoFrames, t0);
     assert_eq!(r.until(), Some(t0 + RECHECK_NO_FRAMES), "a new process too");
 }
+
+// --- G4: a composed fullscreen window the player is looking at -------------
+
+#[test]
+fn rejected_remembers_a_composed_verdict_per_window() {
+    let t0 = Instant::now();
+    let mut r = Rejected::default();
+    assert!(!r.composed(7, 70));
+    r.note(7, 70, Why::Composed, t0);
+    assert!(r.composed(7, 70));
+    assert!(r.composed(7, 70), "after its wait too, until the next verdict");
+    assert!(!r.composed(7, 71), "another window");
+    r.note(7, 70, Why::NoFrames, t0);
+    assert!(!r.composed(7, 70), "no frames is not composed");
+    r.note(7, 70, Why::VideoSwapChain, t0);
+    assert!(!r.composed(7, 70), "a video is not");
+}
+
+#[test]
+fn composed_notice_fires_once_per_exe_after_20_s_in_front() {
+    let t0 = Instant::now();
+    let s = |n: u64| t0 + Duration::from_secs(n);
+    let mut n = ComposedNotice::default();
+    let game = Some((7, 70, "Game.exe"));
+    assert_eq!(n.observe(game, t0), None);
+    assert_eq!(n.observe(game, s(20)), None, "20 s is not more than 20 s");
+    assert_eq!(n.observe(game, s(21)).as_deref(), Some("Game.exe"));
+    assert_eq!(n.observe(game, s(60)), None, "once per exe");
+    // A new window of the same exe (a restart) is still the same exe this run.
+    assert_eq!(n.observe(Some((9, 90, "game.EXE")), s(61)), None);
+    assert_eq!(n.observe(Some((9, 90, "game.EXE")), s(90)), None);
+    // Another exe has its own clock, reset by any other foreground.
+    let other = Some((8, 80, "Other.exe"));
+    assert_eq!(n.observe(other, s(100)), None);
+    assert_eq!(n.observe(None, s(110)), None, "alt-tab away");
+    assert_eq!(n.observe(other, s(115)), None, "the clock starts over");
+    assert_eq!(n.observe(other, s(130)), None);
+    assert_eq!(n.observe(other, s(136)).as_deref(), Some("Other.exe"));
+}
+
+#[test]
+fn composed_notice_needs_the_same_window_throughout() {
+    let t0 = Instant::now();
+    let s = |n: u64| t0 + Duration::from_secs(n);
+    let mut n = ComposedNotice::default();
+    assert_eq!(n.observe(Some((7, 70, "a.exe")), t0), None);
+    assert_eq!(n.observe(Some((7, 71, "a.exe")), s(15)), None, "another window starts over");
+    assert_eq!(n.observe(Some((7, 71, "a.exe")), s(30)), None);
+    assert_eq!(n.observe(Some((7, 71, "a.exe")), s(36)).as_deref(), Some("a.exe"));
+}

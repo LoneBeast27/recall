@@ -4,7 +4,8 @@
 //!
 //! - **Classification** ([`classify_event`]): a target is a foreground window
 //!   that is fullscreen/borderless on its own monitor, an exe in a Steam library
-//!   (windowed games), or an exe with an `hdr_game|sdr_game` override; never a
+//!   (windowed games), a known game (`known_games`, windowed too), or an exe
+//!   with an `hdr_game|sdr_game` override; never a screensaver (`.scr`), a
 //!   denied stem (the rules deny list,
 //!   Recall's own processes, explorer, browsers, media players, overlays,
 //!   launchers) or an exe with a `none` override. A window that is a
@@ -248,9 +249,24 @@ pub fn skips_render_check(ev: &WatchEvent, cfg: &Config) -> bool {
         || crate::known_games::is_known_game(&ev.exe_stem, &ev.title)
 }
 
-/// `Some(target)` if this foreground event is a capture target.
+/// `Some(target)` if this foreground event is a capture target. A known game
+/// is one windowed too (G10; an override already is); a screensaver
+/// (`.scr`) never is (G11).
 pub fn classify_event(ev: &WatchEvent, cfg: &Config) -> Option<Target> {
-    is_target(&ev.exe_stem, ev.fullscreen || ev.steam_game, cfg).then(|| Target::from_event(ev))
+    if is_screensaver(&ev.exe_name) {
+        return None;
+    }
+    let looks = ev.fullscreen || ev.steam_game || crate::known_games::is_known_game(&ev.exe_stem, &ev.title);
+    is_target(&ev.exe_stem, looks, cfg).then(|| Target::from_event(ev))
+}
+
+/// The image is a screensaver (`*.scr`, any case).
+fn is_screensaver(exe_name: &str) -> bool {
+    let name = exe_name.trim();
+    match name.len().checked_sub(4) {
+        Some(i) => name.is_char_boundary(i) && name[i..].eq_ignore_ascii_case(".scr"),
+        None => false,
+    }
 }
 
 /// The debounced capture session (see the module docs).
@@ -260,6 +276,8 @@ pub struct TargetTracker {
     /// Starting a session from nothing, or a new window of the session's process.
     start: Duration,
     current: Option<Target>,
+    /// The session's window was fullscreen when last seen in front (G5).
+    current_fullscreen: bool,
     /// A foreground observation and when it was first seen; `None` inside = a
     /// non-target foreground (it cancels a pending game, never the session).
     pending: Option<(Option<Target>, Instant)>,
@@ -293,6 +311,7 @@ impl TargetTracker {
             debounce,
             start,
             current: None,
+            current_fullscreen: false,
             pending: None,
             last_wait: None,
             held: None,
@@ -323,7 +342,10 @@ impl TargetTracker {
         let mut due = *seen + self.hold_for(candidate);
         match (candidate, &self.current) {
             (Some(c), Some(cur)) if c.pid != cur.pid => {
-                if self.traits.listed_only {
+                // T3: a `fullscreen_games` entry, and G5: a windowed
+                // Steam-library window (Blender, Krita) over a fullscreen
+                // session, wait for the session to end.
+                if self.traits.listed_only || (self.traits.windowed_only() && self.current_fullscreen) {
                     return None;
                 }
                 if let Some(at) = self.replaced_at {
@@ -354,7 +376,10 @@ impl TargetTracker {
     pub fn on_foreground_with(&mut self, candidate: Option<Target>, traits: Traits, now: Instant) {
         match (&candidate, &self.current, &self.pending) {
             // Re-focusing the live target: nothing pending, nothing to do.
-            (Some(c), Some(cur), _) if c.same_window(cur) => self.pending = None,
+            (Some(c), Some(cur), _) if c.same_window(cur) => {
+                self.pending = None;
+                self.current_fullscreen = traits.fullscreen;
+            }
             (Some(c), _, Some((Some(p), _))) if c.same_window(p) => self.traits = traits,
             (None, _, Some((None, _))) => {}
             _ => {
@@ -389,6 +414,7 @@ impl TargetTracker {
                     }
                     self.adoptable = None;
                     self.current = Some(c);
+                    self.current_fullscreen = self.traits.fullscreen;
                     self.last_wait = Some(now.duration_since(seen));
                     true
                 }

@@ -1,8 +1,8 @@
 //! Games Recall knows by exe stem. A fullscreen window of one of these skips
 //! the render check and commits on the 300 ms rule, the same as a Steam-library
-//! exe (`record_render`). The list does not make a window a target: it must
-//! still be fullscreen (or in a Steam library), and the deny lists and a
-//! `none` override still win (`record_target::is_target` runs first).
+//! exe (`record_render`). A known game is a candidate windowed too (G10,
+//! Minecraft Java starts in a window); the deny lists and a `none` override
+//! still win (`record_target::is_target` runs first).
 //!
 //! The one place to extend by hand. The GPU vendor's list (`gpu_games`) is asked
 //! after this one, only for exes it does not skip. Stems are matched case-insensitively,

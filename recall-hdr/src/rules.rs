@@ -91,8 +91,21 @@ pub(crate) fn is_denied(stem: &str) -> bool {
 pub(crate) fn override_kind(cfg: &Config, stem: &str) -> Option<RuleKind> {
     cfg.overrides
         .iter()
-        .find(|o| o.exe.eq_ignore_ascii_case(stem))
+        .find(|o| same_exe(&o.exe, stem))
         .map(|o| o.kind)
+}
+
+/// `a` and `b` name the same exe: case-insensitive, `.exe` optional on
+/// either side (`"Game.exe"` = `"game"`, G9).
+pub(crate) fn same_exe(a: &str, b: &str) -> bool {
+    strip_exe_suffix(a.trim()).eq_ignore_ascii_case(strip_exe_suffix(b.trim()))
+}
+
+fn strip_exe_suffix(s: &str) -> &str {
+    match s.len().checked_sub(4) {
+        Some(i) if s.is_char_boundary(i) && s[i..].eq_ignore_ascii_case(".exe") => &s[..i],
+        _ => s,
+    }
 }
 
 /// Classify a foreground into what the reconciler should treat it as.
@@ -321,5 +334,16 @@ mod tests {
         });
         assert_eq!(override_kind(&cfg, "x"), Some(RuleKind::None));
         assert_eq!(override_kind(&cfg, "not-listed"), None);
+    }
+
+    #[test]
+    fn override_with_exe_suffix_matches() {
+        // G9: `exe = "Game.exe"` is the form `detect.fullscreen_games` accepts.
+        let mut cfg = cfg_with_default(RuleKind::HdrGame);
+        cfg.overrides.push(Override { exe: "Game.exe".into(), kind: RuleKind::None, clamp: None });
+        assert_eq!(override_kind(&cfg, "game"), Some(RuleKind::None));
+        assert_eq!(override_kind(&cfg, "Game.exe"), Some(RuleKind::None), "a stem with the suffix too");
+        assert_eq!(cfg.rule_for("game").0, RuleKind::None, "the HDR side reads the same entry");
+        assert_eq!(override_kind(&cfg, "gam"), None);
     }
 }
