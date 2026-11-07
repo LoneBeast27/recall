@@ -39,6 +39,9 @@ pub enum Sent {
     /// Not written: the engine was told to quit for a planned restart (new settings, a
     /// resume from sleep), and the next engine is not up yet.
     Restarting,
+    /// Not written: the engine was told to stop with no engine to follow (Off: a closed
+    /// game's drain ended with no game, a pause).
+    Waiting,
     /// Not written: no engine, a full queue (the engine is not reading), or a quit that
     /// is neither a game switch nor planned (a hang, failure or watchdog restart, shutdown).
     NotResponding,
@@ -60,6 +63,7 @@ impl Sent {
             Sent::Queued => None,
             Sent::Switching => Some(SWITCHING),
             Sent::Restarting => Some(RESTARTING),
+            Sent::Waiting => Some(crate::record_engine::WAITING_REASON),
             Sent::NotResponding => Some(NOT_RESPONDING),
         }
     }
@@ -94,6 +98,12 @@ pub fn save_effects(sent: Sent) -> Vec<Effect> {
 /// record_stop: the error reply; export: `export_failed`).
 pub fn command_effects(sent: Sent) -> Vec<Effect> {
     queued_or(sent, vec![Effect::MarkPending, Effect::Announce], &[])
+}
+
+/// A capture shortcut's command (bookmark, screenshot, record toggle): as
+/// [`command_effects`], then the tick, so a refused one plays none (as a save).
+pub fn hotkey_effects(sent: Sent) -> Vec<Effect> {
+    queued_or(sent, vec![Effect::MarkPending, Effect::Announce, Effect::Cue], &[])
 }
 
 /// Mic mute (to a running engine): not queued shows the refused pop-up + beep (the mute
@@ -180,6 +190,38 @@ pub fn save(port: &mut impl SavePort, seconds: u32, at_last_frame: bool) -> bool
         }
     }
     sent.queued()
+}
+
+/// The controller's engine command (bookmark, screenshot, record start / stop / toggle),
+/// step by step: `Controller::engine_command` drives it through its own port
+/// (`record_actions.rs`), tests through a recorder of steps.
+pub trait CommandPort {
+    /// Queue the engine line.
+    fn queue(&mut self, line: &str) -> Sent;
+    fn mark_pending(&mut self);
+    /// Publish the status (the command is in flight).
+    fn announce(&mut self);
+    /// The tick cue (a shortcut's).
+    fn cue(&mut self);
+    /// The command's refusal path, with why.
+    fn refused(&mut self, reason: &'static str);
+}
+
+/// The command `cmd`, in order: queue first; only a queued one is marked in flight,
+/// announced and, for a shortcut (`hotkey`), ticked. What became of the line.
+pub fn command(port: &mut impl CommandPort, cmd: &str, hotkey: bool) -> Sent {
+    let sent = port.queue(&serde_json::json!({ "cmd": cmd }).to_string());
+    let effects = if hotkey { hotkey_effects(sent) } else { command_effects(sent) };
+    for effect in effects {
+        match effect {
+            Effect::MarkPending => port.mark_pending(),
+            Effect::Announce => port.announce(),
+            Effect::Cue => port.cue(),
+            Effect::Refused(reason) => port.refused(reason),
+            Effect::LogOnly | Effect::ReplyError | Effect::Proceed => {}
+        }
+    }
+    sent
 }
 
 #[cfg(test)]

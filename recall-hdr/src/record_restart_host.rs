@@ -5,7 +5,6 @@ use std::time::Instant;
 
 use crate::log;
 use crate::record_app::Controller;
-use crate::record_dispatch::Sent;
 use crate::record_engine::{EnginePlanner, EngineTarget};
 use crate::record_restart::{RestartHost, RestartReason};
 
@@ -23,7 +22,7 @@ impl RestartHost for Controller {
         &mut self.pending_restart
     }
     fn restart_apply(&mut self, target: &EngineTarget, reason: RestartReason) {
-        self.apply_engine_target_as(target, if reason.planned() { Sent::Restarting } else { Sent::NotResponding });
+        self.apply_engine_target_as(target, reason.refusal());
     }
     fn restart_notice(&mut self, title: &str, detail: &str) {
         self.shortcut_notice(title, detail);

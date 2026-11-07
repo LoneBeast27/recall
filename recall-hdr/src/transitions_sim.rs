@@ -29,6 +29,8 @@
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
+use crate::engine_policy::EngineSpec;
+use crate::record_engine_ctl::{switch_engine, EngineSwitch};
 use crate::record_activity::{EngineActivity, LongRec, PendingPause, Trigger};
 use crate::record_config::RecordingCfg;
 use crate::record_drain::drain_len;
@@ -97,6 +99,37 @@ pub struct Sim {
     pub pending_restart: Option<RestartReason>,
     /// Controller log lines the shared restart code wrote (`log!`).
     pub notes: Vec<String>,
+    /// The supervisor calls the restart code made (`RestartHost::restart_apply`).
+    pub switches: SwitchLog,
+}
+
+/// A supervisor call (`record_engine_ctl::switch_engine`); `stop`: to Off (no spec).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Switch {
+    Retarget { stop: bool },
+    Restart { stop: bool, planned: bool },
+}
+
+/// Records the calls in place of the supervisor.
+#[derive(Debug, Default)]
+pub struct SwitchLog(pub std::cell::RefCell<Vec<Switch>>);
+
+impl EngineSwitch for SwitchLog {
+    fn switch_to(&self, spec: Option<EngineSpec>) {
+        self.0.borrow_mut().push(Switch::Retarget { stop: spec.is_none() });
+    }
+    fn restart_to(&self, spec: Option<EngineSpec>, planned: bool) {
+        self.0.borrow_mut().push(Switch::Restart { stop: spec.is_none(), planned });
+    }
+}
+
+impl SwitchLog {
+    pub fn last(&self) -> Option<Switch> {
+        self.0.borrow().last().copied()
+    }
+    pub fn count(&self) -> usize {
+        self.0.borrow().len()
+    }
 }
 
 impl Sim {
@@ -124,6 +157,7 @@ impl Sim {
             island_said: Vec::new(),
             pending_restart: None,
             notes: Vec::new(),
+            switches: SwitchLog::default(),
         }
     }
 
@@ -387,7 +421,10 @@ impl RestartHost for Sim {
     fn restart_pending(&mut self) -> &mut Option<RestartReason> {
         &mut self.pending_restart
     }
-    fn restart_apply(&mut self, target: &EngineTarget, _reason: RestartReason) {
+    fn restart_apply(&mut self, target: &EngineTarget, reason: RestartReason) {
+        // As `Controller::restart_apply` -> `apply_engine_target_as` -> `switch_engine`.
+        let spec = (*target != EngineTarget::Off).then(EngineSpec::default);
+        switch_engine(&self.switches, spec, reason.refusal());
         self.applied_engine(target.clone());
     }
     fn restart_notice(&mut self, title: &str, detail: &str) {
