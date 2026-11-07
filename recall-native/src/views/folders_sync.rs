@@ -62,12 +62,15 @@ pub fn plan(recordings: Option<&str>, reported: &str, pending: Option<&PendingFo
 /// Make `new` the recordings folder: it leaves the imported list, and the old ones join it:
 /// `old` (the folder the recorder used, an env override's during one) and the recordings folder
 /// folders.json named until now (kept by the override skip). True when an old folder was added.
+/// Every old folder goes through [`Folders::move_recordings`], so none stops being Recall's.
 pub fn retarget(folders: &mut Folders, new: &str, old: Option<&str>) -> bool {
     let olds: Vec<String> = old.map(str::to_owned).into_iter().chain(folders.recordings.clone()).collect();
     folders.remove(new);
-    folders.recordings = Some(new.to_owned());
+    folders.move_recordings(new, None);
     let mut added = false;
     for o in olds.iter().filter(|o| !o.trim().is_empty() && !same(o, new)) {
+        // Each old folder stays one Recall manages (L15: Delete-to-Recycle-Bin, edits beside).
+        folders.move_recordings(new, Some(o));
         added |= folders.add(Path::new(o));
     }
     added
@@ -123,5 +126,17 @@ mod tests {
         let o = PendingFolder { new: r"E:\New".into(), old: r"D:\Tmp".into(), config_seq: 7 };
         assert_eq!(plan(Some(r"D:\Real"), r"D:\Tmp", Some(&o), true, 7), FolderPlan::Skip, "no answer yet");
         assert_eq!(plan(Some(r"D:\Real"), r"D:\Tmp", Some(&o), true, 8), FolderPlan::Rejected);
+    }
+
+    #[test]
+    fn every_old_folder_a_retarget_leaves_stays_one_recall_manages() {
+        // A change during an override (D:\Tmp) away from the real folder D:\Real, then a folder
+        // moved behind the app's back: every folder clips were saved to stays Recall-owned.
+        let mut folders = Folders { recordings: Some(r"D:\Real".into()), ..Folders::default() };
+        retarget(&mut folders, r"E:\New", Some(r"D:\Tmp"));
+        retarget(&mut folders, r"F:\Moved", None);
+        assert_eq!(folders.recordings.as_deref(), Some(r"F:\Moved"));
+        assert_eq!(folders.former_recordings, vec![r"D:\Tmp".to_string(), r"D:\Real".to_string(), r"E:\New".to_string()]);
+        assert_eq!(folders.managed(r"F:\Moved").len(), 3, "listed under Folders Recall manages");
     }
 }
