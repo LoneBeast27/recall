@@ -190,3 +190,32 @@ fn a_kept_copy_of_a_clip_that_cannot_be_read_is_never_deleted() {
     assert!(kept.exists(), "the clip could not be read: its copy stays");
     cleanup(&root);
 }
+
+#[test]
+fn a_clip_with_other_bytes_never_takes_its_copy_into_the_cache() {
+    // RI3-2: a full-length clip of zeros (a lost data write) looked whole by size and time; the
+    // copy moved into the evictable cache. Now it is set aside in kept\leaked\.
+    let (root, clips, kept_dir) = dirs("zeroed");
+    let (dest, kept) = clip(&clips, &kept_dir, "G__z.mp4", 5000, 5000);
+    std::fs::write(&kept, vec![9u8; 5000]).unwrap();
+    let saved = dest.metadata().unwrap().modified().unwrap();
+    std::fs::File::options().write(true).open(&kept).unwrap().set_modified(saved).unwrap();
+    std::fs::write(&dest, vec![0u8; 5000]).unwrap();
+    std::fs::File::options().write(true).open(&dest).unwrap().set_modified(saved).unwrap();
+    assert!(adopt_in(&root, &dest, &kept, BUDGET).unwrap_err().contains("differ"));
+    assert!(kept_dir.join("leaked").join("G__z.mp4").is_file(), "set aside, not deleted or cached");
+    assert!(crate::services::storage::cached_video_in(&root, &dest).is_none());
+    cleanup(&root);
+}
+
+#[test]
+fn an_unknown_cache_size_takes_no_kept_copy() {
+    // RI3-1: a damaged storage.json evicted nothing while every fresh clip still came in.
+    let (root, clips, kept_dir) = dirs("unknown");
+    let (dest, kept) = clip(&clips, &kept_dir, "G__k.mp4", 5000, 5000);
+    std::fs::write(root.join("storage.json"), b"\0\0\0").unwrap();
+    assert!(adopt_in(&root, &dest, &kept, BUDGET).unwrap_err().contains("unknown"));
+    assert!(kept.is_file(), "the copy waits, not deleted");
+    assert!(crate::services::storage::cached_video_in(&root, &dest).is_none(), "nothing cached");
+    cleanup(&root);
+}
