@@ -144,6 +144,16 @@ pub fn budget_note() -> Option<String> {
     video::budget_note(&cache_root())
 }
 
+/// storage.json is damaged and backed up as `.bad`: Settings offers "Reset cache size".
+pub fn budget_resettable() -> bool {
+    video::budget_resettable(&cache_root())
+}
+
+/// Settings "Reset cache size": the last budget read, else the first-run pick. Returns it.
+pub fn reset_budget() -> Result<u64, String> {
+    video::reset_budget(&cache_root())
+}
+
 /// Saves `bytes` as the user's budget (no `first_run` marker: Settings set it). Refused while
 /// storage.json can't be read: the size on screen may be a guess, not the user's (RI2-2).
 fn save_budget_in(root: &Path, bytes: u64) -> Result<(), String> {

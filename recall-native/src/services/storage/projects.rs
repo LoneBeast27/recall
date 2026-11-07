@@ -81,7 +81,15 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|error| format!("create {}: {error}", parent.display()))?;
     }
     let temporary = super::temp_sibling(path);
-    std::fs::write(&temporary, bytes).map_err(|error| format!("write {}: {error}", path.display()))?;
+    // Flushed before the rename: an unclean shutdown can't leave a NUL-filled file (RI3-1).
+    let written = std::fs::File::create(&temporary).and_then(|mut file| {
+        std::io::Write::write_all(&mut file, bytes)?;
+        file.sync_all()
+    });
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!("write {}: {error}", path.display()));
+    }
     std::fs::rename(&temporary, path).map_err(|error| {
         let _ = std::fs::remove_file(&temporary);
         format!("publish {}: {error}", path.display())

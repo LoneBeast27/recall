@@ -165,6 +165,8 @@ pub(super) enum Stored {
     /// uses the default in memory and the next read tries again. A file that is not JSON is
     /// copied to a dated `storage.json.bad-*` first (once; never on a lock).
     Unusable(String),
+    /// Not JSON, and a `.bad` copy of it exists: Settings may offer "Reset cache size".
+    Damaged(String),
 }
 
 pub(super) fn load_settings(root: &Path) -> Stored {
@@ -175,8 +177,10 @@ pub(super) fn load_settings(root: &Path) -> Stored {
         Ok(bytes) => match serde_json::from_slice(&bytes) {
             Ok(settings) => Stored::Read(settings),
             Err(error) => {
-                let kept = crate::services::durable::quarantine(&path, std::time::SystemTime::now(), crate::services::durable::Keep::Copy);
-                Stored::Unusable(format!("storage.json is damaged ({error}); a copy is kept as {kept:?}"))
+                match crate::services::durable::quarantine(&path, std::time::SystemTime::now(), crate::services::durable::Keep::Copy) {
+                    Some(kept) => Stored::Damaged(format!("storage.json is damaged ({error}); a copy is kept as {}", kept.display())),
+                    None => Stored::Unusable(format!("storage.json is damaged ({error}) and could not be backed up")),
+                }
             }
         },
     }
@@ -186,11 +190,14 @@ pub(super) fn load_settings(root: &Path) -> Stored {
 pub(super) fn read_settings(root: &Path) -> Settings {
     match load_settings(root) {
         Stored::Read(settings) => settings,
-        Stored::Absent | Stored::Unusable(_) => Settings::default(),
+        Stored::Absent | Stored::Unusable(_) | Stored::Damaged(_) => Settings::default(),
     }
 }
 
+/// Durable (tmp, `sync_all`, rename: `durable::write_durable`): a crash can't leave storage.json
+/// NUL-filled, which made the budget unknown (RI3-1).
 pub(super) fn write_settings(root: &Path, settings: &Settings) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
-    super::projects::write_atomic(&root.join("storage.json"), &bytes)
+    std::fs::create_dir_all(root).map_err(|error| format!("create {}: {error}", root.display()))?;
+    crate::services::durable::write_durable(&root.join("storage.json"), &bytes)
 }

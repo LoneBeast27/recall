@@ -16,6 +16,16 @@ pub fn budget_note() -> Option<String> {
     storage::budget_note()
 }
 
+/// storage.json is damaged and backed up: "Reset cache size" may be offered.
+pub fn budget_resettable() -> bool {
+    storage::budget_resettable()
+}
+
+/// Writes a fresh storage.json with the last budget read, else the first-run pick.
+pub fn reset_budget() -> Result<u64, String> {
+    storage::reset_budget()
+}
+
 pub fn set_budget_bytes(bytes: u64) {
     storage::set_budget_bytes(bytes)
 }

@@ -100,11 +100,47 @@ fn copy_of(dest: &Path, kept: &Path) -> bool {
     matches!((dest.metadata(), kept.metadata()), (Ok(d), Ok(k)) if d.is_file() && d.len() == k.len() && super::mtime_secs(&d) == super::mtime_secs(&k))
 }
 
-/// The guard on every app-side delete of a kept copy, the same as the recorder's
-/// (`staging_kept.rs landed_whole`): the clip is on disk, a readable file, with the copy's size
-/// (and time, [`copy_of`]). Then the copy is not the only whole version of the clip.
+/// The guard on every app-side delete of a kept copy, the recorder's check plus the time
+/// (`staging_kept.rs landed`, which checks size and bytes only): the clip is on disk with the
+/// copy's size and time ([`copy_of`]), and its first 64 KiB and last 1 MiB read and match the
+/// copy's ([`same_ends`]). Then the copy is not the only whole version of the clip.
 fn clip_whole(dest: &Path, kept: &Path) -> bool {
-    copy_of(dest, kept) && std::fs::File::open(dest).is_ok()
+    copy_of(dest, kept) && kept.metadata().is_ok_and(|m| matches!(same_ends(dest, kept, m.len()), Ok(true)))
+}
+
+/// Bytes compared at each end of a clip and its copy (the recorder's `staging_kept.rs`).
+const HEAD_BYTES: u64 = 64 << 10;
+const TAIL_BYTES: u64 = 1 << 20;
+
+/// The first [`HEAD_BYTES`] and last [`TAIL_BYTES`] of `a` and `b` (both `len` long) match. A
+/// flush Windows did not honour can leave a clip at full length with zeroed data (RI3-2).
+fn same_ends(a: &Path, b: &Path, len: u64) -> std::io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    let (mut a, mut b) = (std::fs::File::open(a)?, std::fs::File::open(b)?);
+    let tail = TAIL_BYTES.min(len);
+    for (at, count) in [(0, HEAD_BYTES.min(len)), (len - tail, tail)] {
+        let (mut x, mut y) = (vec![0u8; count as usize], vec![0u8; count as usize]);
+        a.seek(SeekFrom::Start(at))?;
+        b.seek(SeekFrom::Start(at))?;
+        a.read_exact(&mut x)?;
+        b.read_exact(&mut y)?;
+        if x != y {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Moves a kept copy whose clip has other bytes into `kept\leaked\` (never over a file there),
+/// where Settings lists it; the recorder does the same (`staging_kept.rs set_aside`).
+fn set_aside(kept: &Path) -> Result<PathBuf, String> {
+    let (Some(dir), Some(name)) = (kept.parent(), kept.file_name()) else { return Err("no folder".into()) };
+    let target = dir.join("leaked").join(name);
+    if !matches!(target.try_exists(), Ok(false)) {
+        return Err(format!("{} is taken", target.display()));
+    }
+    std::fs::create_dir_all(target.parent().unwrap_or(dir)).and_then(|()| std::fs::rename(kept, &target)).map_err(|e| e.to_string())?;
+    Ok(target)
 }
 
 /// [`sweep_kept`] against explicit folders: a kept copy of a clip in `clip_folder` is
@@ -139,6 +175,10 @@ pub(super) fn adopt_in(root: &Path, dest: &Path, kept: &Path, budget: u64) -> Re
     if let Some(why) = super::guard::blocked(root).or_else(|| super::guard::blocked(kept)) {
         return Err(format!("kept copy left alone: {why}"));
     }
+    // RI3-1: while storage.json can't be read the cache takes no new copies; the copy waits.
+    if let Some(why) = super::video::budget_note(root) {
+        return Err(format!("kept copy left alone: the cache size is unknown ({why})"));
+    }
     let _guard = ADOPT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let result = adopt_locked(root, dest, kept, budget);
     // Only a copy of a clip that is on disk with its size and time goes (too large for the
@@ -154,6 +194,15 @@ fn adopt_locked(root: &Path, dest: &Path, kept: &Path, budget: u64) -> Result<Pa
     let kept_bytes = kept.metadata().map_err(|error| format!("stat {}: {error}", kept.display()))?.len();
     if kept_bytes != bytes {
         return Err(format!("{} is {kept_bytes} bytes, the clip {bytes}", kept.display()));
+    }
+    // RI3-2: same size is not proof; other bytes at either end make the copy the one to keep.
+    match same_ends(dest, kept, bytes) {
+        Ok(true) => {}
+        Ok(false) => {
+            let kept_as = set_aside(kept).map_or_else(|e| format!("left in place: {e}"), |t| format!("set aside as {}", t.display()));
+            return Err(format!("the clip's bytes differ from its kept copy; {kept_as}"));
+        }
+        Err(error) => return Err(format!("compare {} with its kept copy: {error}", dest.display())),
     }
     if bytes > budget / 2 {
         return Err(format!("clip ({bytes} bytes) is larger than the video tier allows"));

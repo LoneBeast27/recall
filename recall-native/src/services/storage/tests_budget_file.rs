@@ -104,3 +104,41 @@ fn eviction_never_goes_below_the_cache_on_disk_while_the_budget_is_unknown() {
     assert!(!copy.exists(), "a known budget evicts as before");
     let _ = std::fs::remove_dir_all(&base);
 }
+
+#[test]
+fn an_unknown_cache_size_copies_no_clip_on_open() {
+    // RI3-1: copy-on-open kept growing the C: cache while storage.json was damaged.
+    let base = root("open-unknown");
+    let (cache, clips) = (base.join("cache"), base.join("clips"));
+    std::fs::create_dir_all(&clips).unwrap();
+    let clip = clips.join("G__2026-11-07__12-00-00-000__aa.mp4");
+    std::fs::write(&clip, vec![9u8; 1 << 20]).unwrap();
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(cache.join("storage.json"), b"\0\0\0").unwrap();
+    assert!(super::video::cache_in(&cache, &clip, 20 << 20).unwrap_err().contains("unknown"));
+    assert!(super::cached_video_in(&cache, &clip).is_none(), "the clip plays from its own drive");
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn a_damaged_storage_file_can_be_reset_and_a_locked_one_cannot() {
+    // RI3-1: a damaged storage.json left the size read-only for good, with no way out in the app.
+    use std::os::windows::fs::OpenOptionsExt;
+    let root = root("reset");
+    let file = root.join("storage.json");
+    std::fs::write(&file, USER).unwrap();
+    assert_eq!(super::video::budget_in(&root), 20 << 30, "read once this session");
+    let held = std::fs::OpenOptions::new().read(true).share_mode(4).open(&file).unwrap();
+    assert!(!super::video::budget_resettable(&root), "a lock is not damage");
+    assert!(super::video::reset_budget(&root).is_err());
+    drop(held);
+    std::fs::write(&file, b"\0\0\0\0").unwrap();
+    assert!(super::video::budget_resettable(&root), "damaged, and the .bad copy exists");
+    assert!(!bads(&root).is_empty());
+    assert_eq!(super::video::reset_budget(&root), Ok(20 << 30), "the budget read earlier");
+    assert!(super::video::budget_note(&root).is_none(), "known again");
+    assert_eq!(super::video::budget_in(&root), 20 << 30);
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(saved["cache_budget_bytes"].as_u64(), Some(20 << 30));
+    let _ = std::fs::remove_dir_all(&root);
+}
