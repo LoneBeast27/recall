@@ -234,6 +234,9 @@ pub enum DaemonEvent {
     RecordingKeptLocked { seconds: f64 },
     /// The PC unlocked after a lock during which a long recording ran and then stopped.
     RecordingStoppedLocked { seconds: f64 },
+    /// The PC unlocked; a long recording ran for part of the lock (it stopped and started
+    /// again, or started during it) and is running now.
+    RecordingPartlyLocked { seconds: f64 },
     /// A sign-out / shutdown another app cancelled: the long recording it stopped goes on in
     /// a new file.
     ShutdownCancelled,

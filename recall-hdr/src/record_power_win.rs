@@ -118,7 +118,7 @@ impl Controller {
             PowerAction::StopRecording => {
                 log!("record: sleeping -- stopping the long recording");
                 // Not a user action: logged (the engine restarts on resume either way).
-                if !crate::record_dispatch::automatic_effects(self.supervisor.send_engine_line(r#"{"cmd":"record_stop"}"#)).is_empty() {
+                if !crate::record_dispatch::automatic_effects(self.send_record_stop()).is_empty() {
                     log!("record: sleeping -- record_stop not sent ({})", crate::record_dispatch::NOT_RESPONDING);
                 }
             }
