@@ -38,7 +38,7 @@ fn a_moved_clip_on_a_gone_path_keeps_its_working_copy() {
 }
 
 #[test]
-fn a_byte_identical_copy_starts_clean_and_the_moved_clip_keeps_its_edits() {
+fn a_byte_identical_copy_starts_clean_even_once_the_other_is_gone() {
     // R2-1: an Explorer copy keeps name, size and write time, so both copies shared one SSD
     // working copy; the copy opened the other's cut and its next flush overwrote that sidecar.
     let dir = std::env::temp_dir().join(format!("recall-copy-edits-{}", std::process::id()));
@@ -57,8 +57,43 @@ fn a_byte_identical_copy_starts_clean_and_the_moved_clip_keeps_its_edits() {
     let mut beside = project(&path("a"));
     beside.source_bytes = b.source_bytes;
     assert!(validate_project(&beside, &b, ProjectSource::Sidecar).is_ok());
-    // A moved clip: the old path is gone, and the copy at the new place keeps the edits.
+    // The other copy gone: b is still another file (another file id) and starts clean.
     std::fs::remove_file(dir.join("a").join("r2-1-copy.mp4")).unwrap();
-    assert_eq!(load_project(&b).0.map(|p| p.plan.ranges), Some(plan.ranges));
+    assert!(load_project(&b).0.is_none());
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn two_copies_edited_in_turn_each_keep_their_own_edits_and_a_move_keeps_its_id() {
+    // R2-1 follow-up: both copies shared one working-copy file, so each save overwrote the other's.
+    use super::working::tests::inject;
+    let dir = std::env::temp_dir().join(format!("recall-copy-ids-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    for side in ["a", "b", "moved"] {
+        std::fs::create_dir_all(dir.join(side)).unwrap();
+    }
+    for side in ["a", "b"] {
+        std::fs::write(dir.join(side).join("r2-1-ids.mp4"), b"same bytes").unwrap();
+    }
+    let path = |side: &str| std::fs::canonicalize(dir.join(side)).unwrap().join("r2-1-ids.mp4").to_string_lossy().into_owned();
+    let (a, b) = (info(&path("a")), info(&path("b")));
+    inject(&a.path, Some((7, 100)));
+    inject(&b.path, Some((7, 101)));
+    let plan = |start: f64| EditPlan { mix_down: None, ranges: vec![TimeRange::new(start, 9.0)], audio: Vec::new() };
+    let ranges = |clip: &ClipInfo| load_project(clip).0.map(|p| p.plan.ranges);
+    save_working(&a, &plan(2.0), 60, &ExportSettings::default()).unwrap();
+    save_working(&b, &plan(3.0), 60, &ExportSettings::default()).unwrap();
+    save_working(&a, &plan(4.0), 60, &ExportSettings::default()).unwrap();
+    assert_eq!(ranges(&a), Some(plan(4.0).ranges), "copy a keeps its own edits");
+    assert_eq!(ranges(&b), Some(plan(3.0).ranges), "copy b keeps its own edits");
+    // A move within the volume keeps the file id, and with it the edits.
+    std::fs::rename(dir.join("a").join("r2-1-ids.mp4"), dir.join("moved").join("r2-1-ids.mp4")).unwrap();
+    let moved = info(&path("moved"));
+    inject(&moved.path, Some((7, 100)));
+    assert_eq!(ranges(&moved), Some(plan(4.0).ranges), "the moved clip keeps its edits");
+    // No id (network share, FAT): the name, size and write time key, as before.
+    inject(&b.path, None);
+    save_working(&b, &plan(5.0), 60, &ExportSettings::default()).unwrap();
+    assert_eq!(ranges(&b), Some(plan(5.0).ranges));
     let _ = std::fs::remove_dir_all(&dir);
 }
