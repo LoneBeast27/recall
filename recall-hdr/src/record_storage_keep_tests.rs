@@ -130,3 +130,29 @@ fn the_bin_check_and_the_move_run_under_the_shared_recycle_lock() {
     run_once(Path::new(r"E:\Clips"), 500, plan_three, (&|| true, none), (bin_records_lock, no_files), recycle_records_lock).unwrap();
     assert_eq!(LOCK_SEEN.lock().unwrap().clone(), vec![false; 6], "held across every check and every call");
 }
+
+static KEEP_LOCK_SEEN: Mutex<Vec<bool>> = Mutex::new(Vec::new());
+
+fn keeps_record_lock() -> Result<HashSet<String>, String> {
+    KEEP_LOCK_SEEN.lock().unwrap().push(lock_free_elsewhere());
+    Ok(HashSet::new())
+}
+
+#[test]
+fn the_keeps_are_read_under_the_recycle_lock() {
+    // A star or open made while the run waited for the app's Delete must count for that clip.
+    let moved: RecycleFn = |_| Ok(());
+    run_once(Path::new(r"E:\Clips"), 500, plan_three, (&|| true, keeps_record_lock), (any_bin, no_files), moved).unwrap();
+    assert_eq!(KEEP_LOCK_SEEN.lock().unwrap().clone(), vec![false; 3], "read while the lock is held");
+}
+
+#[test]
+fn every_clip_in_the_open_list_is_kept_whoever_published_it() {
+    // The app's file with an export source and the editor clip from two processes.
+    let dir = temp_dir("owners");
+    let file = dir.join("open-clips.json");
+    std::fs::write(&file, br#"{"paths":["E:\\Clips\\X.mp4","E:\\Clips\\Y.mp4"],"owners":{"1":["E:\\Clips\\X.mp4"],"2":["E:\\Clips\\Y.mp4"]}}"#).unwrap();
+    let open = keep::open_clips(&file).unwrap();
+    assert!(open.contains("x.mp4") && open.contains("y.mp4"), "{open:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}

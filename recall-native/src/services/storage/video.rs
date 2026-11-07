@@ -100,6 +100,7 @@ pub(super) fn budget_in(root: &Path) -> u64 {
     let (free, total) = super::drive_info(root).map_or((0, 0), |info| (info.free, info.total));
     let budget = lru::default_budget(free, total, super::drive::on_system_drive(root));
     settings.cache_budget_bytes = Some(budget);
+    settings.first_run = Some(true);
     if let Err(error) = lru::write_settings(root, &settings) {
         eprintln!("save first-run cache budget: {error}");
     }

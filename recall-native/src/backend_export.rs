@@ -26,6 +26,8 @@ pub(crate) fn export_target(info:&ClipInfo,fps:u32,lossless:bool)->Result<PathBu
 /// Runs the engine's edited export of `info` into `output` on the output drive's lane, until it
 /// ends or `cancel` turns true. `on_line` sees the engine's stdout as it arrives (progress).
 pub(crate) fn engine_export(info:&ClipInfo,output:&Path,plan:&EditPlan,fps:u32,export:&ExportSettings,cancel:&'static AtomicBool,on_line:Option<storage::OnLine>,background:bool)->Result<ExportSummary,String>{
+    // The recorder's storage cap keeps the source while it is read (`open_clips.rs`).
+    let _open=crate::services::library::open_clips::exporting(&info.path);
     let lossless=export.mode==ExportMode::Lossless;
     let nonce=SystemTime::now().duration_since(UNIX_EPOCH).map_err(|e|e.to_string())?.as_nanos();
     let outdir=output.parent().ok_or("export path has no directory")?.to_path_buf();

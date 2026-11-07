@@ -29,6 +29,7 @@ mod landed;
 mod mover;
 mod mover_flush;
 mod mover_keep;
+mod mover_timing;
 mod mux;
 pub(crate) mod reopen;
 mod replay;

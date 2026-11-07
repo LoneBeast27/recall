@@ -130,12 +130,18 @@ pub fn budget_bytes() -> u64 {
     video::budget_in(&cache_root())
 }
 
+/// Saves `bytes` as the user's budget (no `first_run` marker: Settings set it).
+fn save_budget_in(root: &Path, bytes: u64) -> Result<(), String> {
+    let mut settings = evict::read_settings(root);
+    settings.cache_budget_bytes = Some(bytes);
+    settings.first_run = None;
+    evict::write_settings(root, &settings)
+}
+
 /// Persists the budget, then evicts down to it and re-plans the fill (in the background).
 pub fn set_budget_bytes(bytes: u64) {
     let root = cache_root();
-    let mut settings = evict::read_settings(&root);
-    settings.cache_budget_bytes = Some(bytes);
-    if let Err(error) = evict::write_settings(&root, &settings) {
+    if let Err(error) = save_budget_in(&root, bytes) {
         eprintln!("save cache budget: {error}");
     }
     let _ = std::thread::Builder::new().name("recall-cache-budget".into()).spawn(|| {

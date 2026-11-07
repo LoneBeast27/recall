@@ -416,9 +416,9 @@ fn companions_bytes(files: &[PathBuf], clip: Option<&ClipFile>, size: SizeFn) ->
 /// sidecars), oldest first. `wanted` is asked before EVERY call: the listing
 /// can take long on a sleeping NAS and each call takes a moment on an HDD,
 /// and once the cap or folder is no longer the user's setting nothing more
-/// moves. `keep` is read again before every call too: a clip starred, played
-/// or opened since the plan is skipped. `bin` is asked before every call, and
-/// it and the call run under the one Recycle Bin lock every Recall process
+/// moves. `keep` is read again before every call too, under the lock: a clip
+/// starred, played or opened since the plan is skipped. `bin` is asked before
+/// every call, and it, `keep` and the call run under the one Recycle Bin lock every Recall process
 /// shares (`win_recycle_lock.rs`), so two moves never pass one room check: a
 /// clip whose volume has no Recycle Bin that will take it (a share, a
 /// removable drive, a bin turned off or too small) stops the run, so nothing
@@ -436,23 +436,21 @@ pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: (&dyn Fn()
             log!("storage: the storage limit or folder changed during the run; stopped after {} clip(s)", out.removed);
             break;
         }
-        match keep() {
-            Err(e) => {
+        let files = companions(dir, name, &listing);
+        let clip = listing.clips.iter().find(|c| c.name == *name);
+        // The keeps are read under the lock too: a star or open made while it waited counts.
+        let checked = crate::win_fileop::bin_lock::held(|| keep::turn(name, keep, || companions_bytes(&files, clip, size).and_then(|bytes| bin(dir, bytes)).map(|()| recycle(&files))));
+        let moved = match checked.unwrap_or_else(keep::Turn::Refused) {
+            keep::Turn::Unknown(e) => {
                 log!("storage: favourites unknown ({e}); stopped after {} clip(s)", out.removed);
                 break;
             }
-            Ok(kept) if kept.contains(&name.to_lowercase()) => {
+            keep::Turn::Kept => {
                 log!("storage: {name} became a favourite, was played or opened during the run; kept");
                 continue;
             }
-            Ok(_) => {}
-        }
-        let files = companions(dir, name, &listing);
-        let clip = listing.clips.iter().find(|c| c.name == *name);
-        let checked = crate::win_fileop::bin_lock::held(|| companions_bytes(&files, clip, size).and_then(|bytes| bin(dir, bytes)).map(|()| recycle(&files)));
-        let moved = match checked.and_then(|step| step) {
-            Ok(moved) => moved,
-            Err(why) => {
+            keep::Turn::Moved(moved) => moved,
+            keep::Turn::Refused(why) => {
                 out.refused = Some(why);
                 break;
             }

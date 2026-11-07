@@ -1,31 +1,28 @@
-//! `recall-mover`: moves staged clips (`staging.rs`) from the SSD into the
-//! clip folder, one at a time, FIFO, on a below-normal thread in background
-//! mode (very low I/O priority, `bg_io.rs`), so the HDD write never competes
-//! with anything in the foreground.
+//! `recall-mover`: moves staged clips (`staging.rs`) from the SSD into the clip folder, one at
+//! a time, FIFO, on a below-normal thread in background mode (very low I/O priority,
+//! `bg_io.rs`), so the HDD write never competes with anything in the foreground.
 //!
-//! A move: copy `<staged>` into `<final>.part` in large sequential chunks
-//! (space reserved up front, flushed every [`Config::sync_every`] and at the
-//! end, stamped with the staged file's modification time), rename to
-//! `<final>`, then keep the staged copy as `<staging>\kept\<final name>` and
-//! emit `clip_moved` with its `kept_path`: the app adopts it into its SSD video
-//! cache, so a fresh clip opens from the SSD at once. If the stamp fails the
-//! move still completes, but the staged copy is not kept (its identity would
-//! not match the clip's) and one `encoder_log` line says so. If it cannot be kept it
-//! is deleted as before. Before the staged copy is deleted or kept, the clip and its folder
-//! are flushed on their volume (`mover_flush.rs`); if that fails the staged copy stays and the
-//! move is retried (it is then "already in place"). On the same volume a move is a plain rename. A `<final>.part` left by an interrupted
-//! move is overwritten by the retry; the final name only ever appears through
-//! the rename of a complete, flushed file.
+//! A move: copy `<staged>` into `<final>.part` in large sequential chunks (space reserved up
+//! front, flushed every [`Config::sync_every`] and at the end, stamped with the staged file's
+//! modification time), rename to `<final>`, then keep the staged copy as
+//! `<staging>\kept\<final name>` and emit `clip_moved` with its `kept_path`: the app adopts it
+//! into its SSD video cache, so a fresh clip opens from the SSD at once. If the stamp fails the
+//! move still completes, but the staged copy is not kept (its identity would not match the
+//! clip's) and one `encoder_log` line says so. If it cannot be kept it is deleted as before.
+//! Before the staged copy is deleted or kept, the clip and its folder are flushed on their
+//! volume (`mover_flush.rs`); if that fails the staged copy stays and the move is retried
+//! (`mover_retry.rs`). On the same volume a move is a plain rename. A `<final>.part` left by an
+//! interrupted move is overwritten by the retry; the final name only ever appears through the
+//! rename of a complete, flushed file.
 //!
-//! Failure keeps the staged copy and parks the move: it is retried on the next
-//! save and every [`Config::retry_after`]. Only its first failure emits
-//! `clip_move_failed` (one failure cue per clip, not one per retry); later
-//! ones are `encoder_log` lines. A staged copy that cannot be deleted after a
-//! good move (open elsewhere) is retried after each later move and cleaned at
+//! Failure keeps the staged copy and parks the move: it is retried on the next save and every
+//! [`Config::retry_after`]. Only its first failure emits `clip_move_failed` (one failure cue per
+//! clip, not one per retry); later ones are `encoder_log` lines. A staged copy that cannot be
+//! deleted after a good move (open elsewhere) is retried after each later move and cleaned at
 //! the next start (its destination then already holds the same bytes).
 //!
-//! Quit: [`MoverControl::shutdown`] aborts an in-flight copy at the next chunk,
-//! removes its `.part` and leaves the staged copy for the next start.
+//! Quit: [`MoverControl::shutdown`] aborts an in-flight copy at the next chunk, removes its
+//! `.part` and leaves the staged copy for the next start.
 
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
@@ -79,6 +76,10 @@ pub(crate) struct Config {
 pub(crate) use super::landed::{same_identity, stat_dest, IdentityFn, StatFn};
 pub(crate) use super::mover_flush::{flush_dest, FlushFn};
 use super::mover_keep::keep_staged;
+use super::mover_timing::timing_line;
+#[path = "mover_retry.rs"]
+mod retry;
+use retry::Landed;
 #[cfg(test)]
 pub(crate) use super::mover_keep::{keep_staged_within, kept_cap, KEPT_DIR, KEPT_MARK};
 
@@ -176,11 +177,14 @@ struct Pending {
     failures: u32,
     /// `clip_moved` was sent (a move retried only to flush is not announced again).
     announced: bool,
+    /// Tries whose clip landed but was not flushed (`mover_retry.rs`).
+    unflushed: u32,
+    landed: Landed,
 }
 
 impl Pending {
     fn new(job: MoveJob) -> Self {
-        Pending { job, queued: Instant::now(), failures: 0, announced: false }
+        Pending { job, queued: Instant::now(), failures: 0, announced: false, unflushed: 0, landed: Landed::default() }
     }
 }
 
@@ -193,6 +197,8 @@ pub(crate) enum MoveError {
     Missing,
     /// Quit: the `.part` was removed, the staged copy kept.
     Aborted,
+    /// The clip landed on an earlier try and the user deleted it since (`mover_retry.rs`).
+    Deleted,
 }
 
 /// A completed move.
@@ -281,7 +287,7 @@ impl Mover {
     fn attempt(&mut self, mut pending: Pending) {
         let started = Instant::now();
         let job = &pending.job;
-        let result = catch_unwind(AssertUnwindSafe(|| move_clip(job, &self.cfg, &self.abort)))
+        let result = catch_unwind(AssertUnwindSafe(|| move_landed(job, &self.cfg, &self.abort, pending.landed)))
             .unwrap_or_else(|_| Err(MoveError::Failed("internal error while moving the clip".into())));
         let (dest, staged) = (job.dest.to_string_lossy().into_owned(), job.staged.to_string_lossy().into_owned());
         match result {
@@ -301,12 +307,8 @@ impl Mover {
                     self.leftovers.push(job.staged.clone());
                 }
                 self.leftovers.retain(|p| std::fs::remove_file(p).is_err() && p.exists());
-                if let Some(e) = &moved.unflushed {
-                    // The retry finds the clip in place, flushes again, then deletes the staged copy.
-                    self.events.log(&format!("clip mover: {dest} not flushed yet ({e}); {staged} stays staged for a retry"));
-                    self.retry_at.get_or_insert(Instant::now() + self.cfg.retry_after);
-                    pending.announced = true;
-                    self.parked.push(pending);
+                if let Some(e) = moved.unflushed.clone() {
+                    self.park_unflushed(pending, &moved, &e);
                 }
             }
             Err(MoveError::Failed(reason)) => {
@@ -320,6 +322,7 @@ impl Mover {
                 self.retry_at.get_or_insert(Instant::now() + self.cfg.retry_after);
                 self.parked.push(pending);
             }
+            Err(MoveError::Deleted) => self.drop_deleted(job),
             Err(MoveError::Missing) => self.events.clip_move_failed(&dest, &staged, "staged file is missing; nothing to move"),
             Err(MoveError::Aborted) => {
                 self.events.log(&format!("clip move to {dest} stopped at quit; {staged} stays staged for the next start"));
@@ -328,27 +331,19 @@ impl Mover {
     }
 }
 
-fn timing_line(m: &Moved, total_ms: f64, queue_wait_ms: f64) -> String {
-    let mb_s = if m.copy_ms > 0.0 { m.bytes as f64 / 1e6 / (m.copy_ms / 1000.0) } else { 0.0 };
-    format!(
-        "move timing ({}): bytes={} queue_wait={queue_wait_ms:.1}ms copy={:.1}ms ({mb_s:.1} MB/s) \
-         flush={:.1}ms rename={:.1}ms total={total_ms:.1}ms -> {}",
-        m.how,
-        m.bytes,
-        m.copy_ms,
-        m.flush_ms,
-        m.rename_ms,
-        m.dest.display()
-    )
-}
-
 fn failed(what: &str, path: &Path, e: std::io::Error) -> MoveError {
     MoveError::Failed(format!("{what} {}: {e}", path.display()))
 }
 
 /// Move one staged clip (see the module doc). Never leaves a partial file
 /// under the destination name; on any error the `.part` is removed.
+#[cfg(test)]
 pub(crate) fn move_clip(job: &MoveJob, cfg: &Config, abort: &AtomicBool) -> Result<Moved, MoveError> {
+    move_landed(job, cfg, abort, Landed::default())
+}
+
+/// [`move_clip`] for a job an earlier try left `landed` (`mover_retry.rs`).
+fn move_landed(job: &MoveJob, cfg: &Config, abort: &AtomicBool, landed: Landed) -> Result<Moved, MoveError> {
     let len = match std::fs::metadata(&job.staged) {
         Ok(m) => m.len(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(MoveError::Missing),
@@ -378,11 +373,15 @@ pub(crate) fn move_clip(job: &MoveJob, cfg: &Config, abort: &AtomicBool) -> Resu
             // delete the only one. Keep both; the move is retried later.
             None => return Err(MoveError::Failed(format!("cannot tell whether {} is the staged clip; both kept", job.dest.display()))),
             // The rename landed before a crash or quit kept the staged copy (`landed.rs`).
-            Some(false) if super::landed::same_clip(&job.staged, &job.dest) => moved.how = "already in place",
+            Some(false) if retry::landed_here(&job.staged, &job.dest, landed) => moved.how = "already in place",
             // Never overwrite a different finished file: land beside it.
             Some(false) => moved.dest = recovered_path(&part_of(&job.dest), Path::exists),
         },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Some(gone) = retry::deleted_since(&job.dest, landed) {
+                return Err(gone);
+            }
+        }
         // Any other error: the destination may exist. Never replace it; keep the staged copy.
         Err(e) => return Err(failed("check", &job.dest, e)),
     }
@@ -485,3 +484,7 @@ fn copy_to_part(staged: &Path, part: &Path, moved: &mut Moved, cfg: &Config, abo
 #[cfg(test)]
 #[path = "mover_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "mover_retry_tests.rs"]
+mod retry_tests;
