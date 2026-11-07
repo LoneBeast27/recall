@@ -5,19 +5,24 @@
 //! tray, kept the session: no drain, a long recording writing over a frozen
 //! frame, and the next game on the 2 s replace debounce instead of 300 ms.
 //!
-//! Now a window that is not `IsWindowVisible` for more than [`HIDDEN_FOR`]
+//! Now a window that is not `IsWindowVisible` for more than [`HIDDEN_FOR`] (5 s)
 //! counts as gone and takes the same path as a destroyed one
 //! (`TargetTracker::on_window_gone_at`: the drain starts, and the process
 //! stays adoptable, so a game that shows a window again is the session again).
 //! A minimized window (`IsIconic`) and a window cloaked by a virtual-desktop
-//! switch (`DWMWA_CLOAKED`) are kept: the player can come back to them.
+//! switch (`DWMWA_CLOAKED`) are kept: the player can come back to them. So is
+//! a hung window (`IsHungAppWindow`): DWM hides it behind a "Not Responding"
+//! ghost that the watcher maps back to it (`ghost_window`), so dropping it
+//! would end and re-adopt the session over and over during a long load.
 
 use std::time::{Duration, Instant};
 
 use crate::record_target::TargetTracker;
 
-/// How long the session window may stay hidden before it counts as gone.
-pub const HIDDEN_FOR: Duration = Duration::from_secs(1);
+/// How long the session window may stay hidden before it counts as gone. A
+/// device re-create or a borderless <-> exclusive restyle hides a window for
+/// 1-3 s, and a window that comes back retitled would restart the engine.
+pub const HIDDEN_FOR: Duration = Duration::from_secs(5);
 
 /// What a window looks like to the player right now.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,6 +33,8 @@ pub enum Shown {
     Minimized,
     /// On another virtual desktop (or otherwise cloaked by DWM).
     Cloaked,
+    /// Not responding (`IsHungAppWindow`): DWM hides it behind a ghost.
+    Hung,
 }
 
 /// When the session window was first seen hidden.
@@ -73,16 +80,20 @@ pub fn drop_hidden(watch: &mut HiddenWatch, tracker: &mut TargetTracker, now: In
 }
 
 /// The live read: `IsWindowVisible` first (the common case, one call); only
-/// a window that is not visible is asked `IsIconic` and `DWMWA_CLOAKED`.
+/// a window that is not visible is asked `IsHungAppWindow`, `IsIconic` and
+/// `DWMWA_CLOAKED`.
 pub fn shown(hwnd: isize) -> Shown {
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Dwm::{DwmGetWindowAttribute, DWMWA_CLOAKED};
-    use windows::Win32::UI::WindowsAndMessaging::{IsIconic, IsWindowVisible};
+    use windows::Win32::UI::WindowsAndMessaging::{IsHungAppWindow, IsIconic, IsWindowVisible};
     let h = HWND(hwnd as *mut _);
     // SAFETY: plain queries; each tolerates a stale handle.
     unsafe {
         if IsWindowVisible(h).as_bool() {
             return Shown::Visible;
+        }
+        if IsHungAppWindow(h).as_bool() {
+            return Shown::Hung;
         }
         if IsIconic(h).as_bool() {
             return Shown::Minimized;
@@ -96,3 +107,7 @@ pub fn shown(hwnd: isize) -> Shown {
 #[cfg(test)]
 #[path = "record_visibility_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "record_visibility_sim_tests.rs"]
+mod sim_tests;

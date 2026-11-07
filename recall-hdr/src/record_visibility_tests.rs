@@ -37,13 +37,13 @@ fn run(watch: &mut HiddenWatch, tr: &mut TargetTracker, from: Instant, len: Dura
 }
 
 #[test]
-fn a_window_hidden_for_1_5_s_ends_the_session_and_its_process_stays_adoptable() {
+fn a_window_hidden_for_over_5_s_ends_the_session_and_its_process_stays_adoptable() {
     let (mut tr, t0) = live(Instant::now());
     let mut w = HiddenWatch::default();
     let state = Cell::new(Shown::Hidden);
-    assert_eq!(run(&mut w, &mut tr, t0, ms(1500), &state), Some(GAME), "hidden 1.5 s: gone");
+    assert_eq!(run(&mut w, &mut tr, t0, ms(5500), &state), Some(GAME), "hidden 5.5 s: gone");
     assert!(tr.current().is_none(), "the session ended (the drain starts)");
-    assert!(tr.adopts(1, t0 + ms(1600)), "T5a: the game's next window is the session again");
+    assert!(tr.adopts(1, t0 + ms(5600)), "T5a: the game's next window is the session again");
 }
 
 #[test]

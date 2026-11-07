@@ -70,7 +70,7 @@ impl Controller {
 
     /// Drop a target / pin whose window no longer exists (`IsWindow`, every
     /// pump tick: at most 50 ms after the window closes), and a target whose
-    /// window stayed hidden for over a second (U5, `record_visibility`).
+    /// window stayed hidden (not hung) for over 5 s (U5, `record_visibility`).
     pub(crate) fn check_windows(&mut self) {
         if let Some(t) = self.pinned.as_ref().filter(|t| !watcher::window_alive(t.hwnd)) {
             log!("record: pinned window {:#x} is gone; auto-detection resumes", t.hwnd);
