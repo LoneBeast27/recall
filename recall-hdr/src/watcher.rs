@@ -80,6 +80,12 @@ pub struct WatchEvent {
     /// True iff the executable lives in a Steam library (`steamapps\common`):
     /// the record mode's "is this a game?" signal for windowed games.
     pub steam_game: bool,
+    /// True iff the identity (pid, exe) was resolved by Recall rather than read
+    /// off the window: a UWP frame named by its hosted CoreWindow's process
+    /// (G6). Such an identity is a game only on positive evidence (a known
+    /// game, an override, the vendor's list, a "game" render verdict), never
+    /// by the "fullscreen = game" fallback (`record_hosted`).
+    pub hosted: bool,
     /// Raw `HWND` as an `isize` (not a live handle; re-wrap before use).
     pub hwnd: isize,
 }
@@ -97,6 +103,7 @@ impl WatchEvent {
             fullscreen: false,
             fullscreen_on_target: false,
             steam_game: false,
+            hosted: false,
             hwnd,
         }
     }
@@ -344,6 +351,7 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
     if pid == 0 || pid == std::process::id() {
         return None;
     }
+    let frame_pid = pid;
     let (pid, (exe_stem, exe_name, steam_game)) = identity::hosted_identity(hwnd, pid, exe_identity(pid)?);
     if exe_stem.trim().is_empty() {
         return None; // no stem -> not a real app window we can classify
@@ -358,6 +366,7 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
         fullscreen,
         fullscreen_on_target: fullscreen && monitor == target_monitor,
         steam_game,
+        hosted: pid != frame_pid,
         hwnd: hwnd.0 as isize,
     })
 }

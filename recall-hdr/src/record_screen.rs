@@ -144,21 +144,30 @@ pub fn sight(t: &Target) -> Sight {
     let mut rect = RECT::default();
     let mut monitor = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
     // SAFETY: plain queries; each tolerates a stale handle.
-    let (iconic, style) = unsafe {
-        GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut front));
+    let (front_hwnd, iconic, style) = unsafe {
+        let front_hwnd = GetForegroundWindow();
+        GetWindowThreadProcessId(front_hwnd, Some(&mut front));
         let _ = GetWindowRect(hwnd, &mut rect);
         let _ = GetMonitorInfoW(MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST), &mut monitor);
-        (IsIconic(hwnd).as_bool(), GetWindowLongPtrW(hwnd, GWL_STYLE) as u32)
+        (front_hwnd, IsIconic(hwnd).as_bool(), GetWindowLongPtrW(hwnd, GWL_STYLE) as u32)
     };
     let edges = |r: RECT| [r.left, r.top, r.right, r.bottom];
     let locked = !LOCKED.lock().unwrap_or_else(|p| p.into_inner()).get(Instant::now(), input_is_users);
     Sight {
-        in_front: front != 0 && front == t.pid,
+        in_front: front_is(t, front_hwnd.0 as isize, front),
         iconic,
         locked,
         display_off: DISPLAY.load(Relaxed) == 0,
         frame: Frame { style, rect: edges(rect), monitor: edges(monitor.rcMonitor) },
     }
+}
+
+/// The foreground window (`front_hwnd`, owned by `front_pid`) is the target's:
+/// its own window, or any window of its process. A UWP target's pid is the
+/// hosted app's (G6) while the foreground is its frame, owned by
+/// `ApplicationFrameHost`: so the frame's hwnd is compared too.
+pub(crate) fn front_is(t: &Target, front_hwnd: isize, front_pid: u32) -> bool {
+    (front_hwnd != 0 && front_hwnd == t.hwnd) || (front_pid != 0 && front_pid == t.pid)
 }
 
 /// Opening the input desktop works (it fails on the Winlogon desktop).
@@ -202,6 +211,19 @@ mod tests {
     use super::*;
 
     const TITLED: u32 = WS_CAPTION.0 | 0x0004_0000; // + WS_THICKFRAME
+
+    #[test]
+    fn a_uwp_target_is_in_front_when_its_frame_is() {
+        // G6: the target is the hosted app (pid 7) in the frame 0x50, owned by
+        // ApplicationFrameHost (pid 3).
+        let uwp = Target { hwnd: 0x50, pid: 7, name: "Game".into(), exe: "Game.exe".into() };
+        assert!(front_is(&uwp, 0x50, 3), "its frame is the foreground");
+        assert!(!front_is(&uwp, 0x60, 3), "another UWP frame");
+        let plain = Target { hwnd: 0x70, pid: 9, name: "Game".into(), exe: "Game.exe".into() };
+        assert!(front_is(&plain, 0x71, 9), "another window of the game's process");
+        assert!(!front_is(&plain, 0x80, 4), "another app");
+        assert!(!front_is(&plain, 0, 0), "no foreground");
+    }
 
     #[test]
     fn fullscreen_is_a_window_covering_its_monitor_with_no_title_bar() {

@@ -59,21 +59,40 @@ const KNOWN_GAME_STEMS: &[&str] = &[
 /// "Minecraft* 1.20.4 - Multiplayer (3rd-party Server)").
 const JAVA_STEMS: &[&str] = &["javaw", "java"];
 const MINECRAFT_TITLE: &str = "minecraft";
+/// The dedicated server's GUI window ("Minecraft server", `server.jar`
+/// without `nogui`) also runs in Java: it is not the game.
+const MINECRAFT_SERVER_TITLE: &str = "minecraft server";
 
 /// `stem` (with `title`) is a game Recall knows.
 pub fn is_known_game(stem: &str, title: &str) -> bool {
-    let stem = stem.trim();
-    let stem = match stem.len().checked_sub(4) {
-        Some(i) if stem.is_char_boundary(i) && stem[i..].eq_ignore_ascii_case(".exe") => &stem[..i],
-        _ => stem,
-    };
-    if JAVA_STEMS.iter().any(|j| j.eq_ignore_ascii_case(stem)) {
-        let t = title.trim_start();
-        return t.len() >= MINECRAFT_TITLE.len()
-            && t.is_char_boundary(MINECRAFT_TITLE.len())
-            && t[..MINECRAFT_TITLE.len()].eq_ignore_ascii_case(MINECRAFT_TITLE);
+    let stem = strip_exe(stem.trim());
+    if is_java(stem) {
+        return starts_with_ignore_case(title.trim_start(), MINECRAFT_TITLE) && !is_minecraft_server(stem, title);
     }
     KNOWN_GAME_STEMS.iter().any(|g| g.eq_ignore_ascii_case(stem))
+}
+
+/// `stem` (with `title`) is the Minecraft dedicated server's GUI: never a
+/// game, not even fullscreen (`record_target::classify_event`).
+pub fn is_minecraft_server(stem: &str, title: &str) -> bool {
+    is_java(stem.trim()) && starts_with_ignore_case(title.trim_start(), MINECRAFT_SERVER_TITLE)
+}
+
+fn is_java(stem: &str) -> bool {
+    let stem = strip_exe(stem);
+    JAVA_STEMS.iter().any(|j| j.eq_ignore_ascii_case(stem))
+}
+
+/// `"javaw.exe"` -> `"javaw"` (case-insensitive); a bare stem is unchanged.
+fn strip_exe(stem: &str) -> &str {
+    match stem.len().checked_sub(4) {
+        Some(i) if stem.is_char_boundary(i) && stem[i..].eq_ignore_ascii_case(".exe") => &stem[..i],
+        _ => stem,
+    }
+}
+
+fn starts_with_ignore_case(s: &str, prefix: &str) -> bool {
+    s.len() >= prefix.len() && s.is_char_boundary(prefix.len()) && s[..prefix.len()].eq_ignore_ascii_case(prefix)
 }
 
 #[cfg(test)]
@@ -99,5 +118,13 @@ mod tests {
         assert!(!is_known_game("javaw", ""), "empty title");
         assert!(!is_known_game("javaw", "My Minecraft Notes"), "must start with Minecraft");
         assert!(!is_known_game("javaw", "Mine"));
+    }
+
+    #[test]
+    fn the_minecraft_server_gui_is_not_the_game() {
+        assert!(!is_known_game("javaw", "Minecraft server"));
+        assert!(!is_known_game("java", "Minecraft Server"));
+        assert!(is_known_game("javaw", "Minecraft* 1.20.4 - Multiplayer (3rd-party Server)"), "the client on a server");
+        assert!(is_known_game("javaw", "Minecraft 1.21.1"));
     }
 }

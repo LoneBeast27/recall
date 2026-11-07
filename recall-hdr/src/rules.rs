@@ -48,6 +48,28 @@ const DENY_STEMS: &[&str] = &[
     "devenv",
 ];
 
+/// Store and media apps that go fullscreen without being games: with G6 a UWP
+/// frame is named by its hosted exe, no longer the denied
+/// `applicationframehost` (R2-5, merge gate P2). Photos is a Win32 app.
+/// Checked here (HDR rules) and in `record_target::is_target` (recording).
+pub(crate) const STORE_APP_STEMS: &[&str] = &[
+    "video.ui",
+    "music.ui",
+    "microsoft.media.player",
+    "microsoft.photos",
+    "photos",
+    "winstore.app",
+    "store",
+    "systemsettings",
+    "netflix",
+    "wwahost",
+    "hxoutlook",
+    "hxcalendarappimm",
+    "windowscamera",
+    "xboxpcapp",
+    "xboxpcappce",
+];
+
 /// Everything the watcher knows about a foreground change.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Foreground {
@@ -77,6 +99,7 @@ fn rule_to_app(kind: RuleKind) -> AppKind {
 pub(crate) fn is_denied(stem: &str) -> bool {
     DENY_STEMS
         .iter()
+        .chain(STORE_APP_STEMS)
         .any(|d| d.eq_ignore_ascii_case(stem))
 }
 
@@ -216,6 +239,15 @@ mod tests {
             clamp: None,
         });
         assert_eq!(classify(&fg("obs64", true), &cfg), AppKind::NonGame);
+    }
+
+    #[test]
+    fn fullscreen_store_media_apps_are_not_hdr_games() {
+        let cfg = cfg_with_default(RuleKind::HdrGame);
+        for stem in ["Netflix", "Video.UI", "Microsoft.Media.Player", "Photos", "WindowsCamera", "HxCalendarAppImm"] {
+            assert_eq!(classify(&fg(stem, true), &cfg), AppKind::NonGame, "{stem}");
+        }
+        assert_eq!(classify(&fg("minecraft.windows", true), &cfg), AppKind::HdrGame, "a Store game still is");
     }
 
     #[test]

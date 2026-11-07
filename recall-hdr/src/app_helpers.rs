@@ -47,7 +47,8 @@ pub(crate) fn foreground_of(ev: &WatchEvent) -> Foreground {
     Foreground {
         exe_stem: ev.exe_stem.to_ascii_lowercase(),
         title: ev.title.clone(),
-        fullscreen_on_target: ev.fullscreen_on_target,
+        // A resolved UWP identity earns the fullscreen default only as a known game.
+        fullscreen_on_target: crate::record_hosted::hdr_fullscreen(ev),
         pid: ev.pid,
     }
 }
