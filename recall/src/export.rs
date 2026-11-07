@@ -13,6 +13,7 @@
 //! publishes it with a rename, so a failed export never leaves a partial file.
 
 mod audio_mux;
+pub(crate) mod bad_audio;
 mod cfr;
 mod edited;
 pub(crate) mod edit_pcm;
@@ -27,6 +28,8 @@ pub(crate) mod tempo;
 pub(crate) mod timeline;
 mod video_encoder;
 
+#[cfg(test)]
+mod bad_packet_tests;
 #[cfg(test)]
 mod edited_tests;
 #[cfg(test)]

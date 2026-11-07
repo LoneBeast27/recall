@@ -190,8 +190,12 @@ fn validate_info(info:&ClipInfo)->Result<(),String>{
     if !m.is_file()||m.len()!=info.source_bytes||modified!=info.source_modified_ms{return Err("Source changed since it was opened; reopen the clip.".into());}
     Ok(())
 }
+/// Saved edits belong to the clip by name, size and write time, not by its absolute path: a USB
+/// drive back under another letter, or a moved clips folder, keeps them. The next flush writes
+/// the new path.
 fn validate_project(project:&Project,info:&ClipInfo)->Result<(),String>{
-    if project.version!=1||project.source_path!=info.path||project.source_bytes!=info.source_bytes||project.source_modified_ms!=info.source_modified_ms{return Err("Saved edits belong to another source revision.".into());}
+    let name=|p:&str|Path::new(p).file_name().map(|n|n.to_string_lossy().to_lowercase());
+    if project.version!=1||name(&project.source_path)!=name(&info.path)||project.source_bytes!=info.source_bytes||project.source_modified_ms!=info.source_modified_ms{return Err("Saved edits belong to another source revision.".into());}
     validate_fps(project.export_fps)?;
     project.plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())
 }
@@ -320,16 +324,18 @@ pub(crate) fn load_project(info:&ClipInfo)->(Option<Project>,Option<String>,bool
     let parse=|bytes:&[u8]|serde_json::from_slice::<Project>(bytes).map_err(|e|e.to_string()).and_then(|p|{validate_project(&p,info)?;Ok(p)});
     let present=sidecar_ms.is_some()||sidecar.exists();
     let ours=!present||sidecar_bytes.as_deref().is_some_and(|bytes|parse(bytes).is_ok());
-    let mut warning=(present&&sidecar_bytes.is_none()).then(||"Saved edits could not be read. They stay beside the clip.".to_owned());
+    let warning=(present&&sidecar_bytes.is_none()).then(||"Saved edits could not be read. They stay beside the clip.".to_owned());
+    // A source that fails is reported only when no other one loads.
+    let mut failed=None;
     for source in storage::project_order(storage::projects_modified_ms(&working),sidecar_ms.filter(|_|sidecar_bytes.is_some())){
         let bytes=match source{ProjectSource::WorkingCopy=>std::fs::read(&working).ok(),ProjectSource::Sidecar=>sidecar_bytes.clone()};
         let Some(bytes)=bytes else{continue};
         match parse(&bytes){
             Ok(mut p)=>{normalize_project_audio(&mut p.plan,info);return(Some(p),warning,ours,present)},
-            Err(e)=>{warning.get_or_insert(format!("Saved edits were not loaded: {e}"));}
+            Err(e)=>{failed.get_or_insert(format!("Saved edits were not loaded: {e}"));}
         }
     }
-    (None,warning,ours,present)
+    (None,warning.or(failed),ours,present)
 }
 fn normalize_project_audio(plan:&mut EditPlan,info:&ClipInfo){
     let mut normalized=Vec::with_capacity(info.audio.len());
@@ -350,6 +356,8 @@ fn language_code(name:&str)->bool{
     !name.is_empty()&&name.len()<=3&&one_case&&!matches!(name.to_ascii_lowercase().as_str(),"mic"|"sfx"|"bgm")
 }
 fn recall_generated_path(path:&str)->bool{let stem=Path::new(path).file_stem().and_then(|value|value.to_str()).unwrap_or("");let parts:Vec<_>=stem.split("__").collect();parts.len()==4&&parts[1].len()==10&&parts[1].chars().enumerate().all(|(index,c)|matches!(index,4|7) && c=='-' || index!=4&&index!=7&&c.is_ascii_digit())&&parts[2].len()>=8&&parts[3].len()>=16&&parts[3].chars().all(|c|c.is_ascii_hexdigit())}
+#[cfg(test)]
+#[path="backend_project_tests.rs"] mod project_tests;
 #[cfg(test)]
 mod tests {
     use super::*;

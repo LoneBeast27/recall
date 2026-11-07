@@ -342,6 +342,9 @@ impl EditorState {
             }
             Some((Ok(false), _)) | None => {}
         }
+        if let Some(notice) = self.preview.as_mut().and_then(NativePreview::take_sound_notice) {
+            changed |= self.on_sound_notice(notice);
+        }
         if let Some(at) = self.pending_seek {
             if self.preview.as_ref().is_some_and(|p| p.is_ready()) {
                 self.pending_seek = None;

@@ -9,8 +9,12 @@ use crate::{
 };
 
 impl EditorState {
-    pub fn on_saved(&mut self, result: Result<String, String>) {
+    /// An autosave finished. One of a clip no longer open only frees the next save (E9).
+    pub fn on_saved(&mut self, clip: &str, result: Result<String, String>) {
         self.saving = false;
+        if !self.is_open(clip) {
+            return;
+        }
         match result {
             Ok(_) => {
                 self.saved = self.dirty_since.is_none();
@@ -153,6 +157,18 @@ impl EditorState {
         workers.asset(crate::worker::AssetJob::Proxy(info.path.clone()));
     }
 
+    /// The sound failed (or came back) while the picture plays: say so; no preview copy, which
+    /// could not bring the sound back (`media_sound.rs`).
+    pub(super) fn on_sound_notice(&mut self, notice: crate::media::SoundNotice) -> bool {
+        const LOST: &str = "Sound unavailable: ";
+        match notice {
+            crate::media::SoundNotice::Lost(reason) => self.status = format!("{LOST}{reason}"),
+            crate::media::SoundNotice::Back if self.status.starts_with(LOST) => self.status.clear(),
+            crate::media::SoundNotice::Back => return false,
+        }
+        true
+    }
+
     /// The player was reading an SSD copy that is gone (the cache let it go, or Settings
     /// cleared it): play the clip from its own drive, at the same spot, instead of a dead
     /// preview. False when there is no such copy to fall back from.
@@ -269,5 +285,37 @@ impl EditorState {
             self.fps = fps;
             self.touch();
         }
+    }
+}
+
+#[cfg(test)]
+mod sound_tests {
+    use crate::editor_state::EditorState;
+    use crate::media::SoundNotice;
+
+    #[test]
+    fn lost_sound_is_said_without_failing_the_preview() {
+        // E1/E5: an audio-only failure hid the picture and queued a full preview-copy transcode.
+        let mut ed = EditorState::new(Err("no preview".into()));
+        assert!(ed.on_sound_notice(SoundNotice::Lost("could not open wave output (WinMM error 2)".into())));
+        assert_eq!(ed.status, "Sound unavailable: could not open wave output (WinMM error 2)");
+        assert!(!ed.preview_failed && ed.proxy_for.is_none(), "the picture stays and no copy is made");
+        assert!(ed.on_sound_notice(SoundNotice::Back));
+        assert!(ed.status.is_empty());
+        ed.status = "Exported".into();
+        assert!(!ed.on_sound_notice(SoundNotice::Back), "another message stays");
+    }
+
+    #[test]
+    fn a_save_of_another_clip_frees_the_next_save_and_reports_nothing_here() {
+        // E9: a save that finished after an export landed on whatever clip was open by then.
+        let mut ed = EditorState::new(Err("no preview".into()));
+        ed.info = Some(crate::edit_model::ClipInfo { path: "b.mp4".into(), duration: 1.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() });
+        ed.saving = true;
+        ed.on_saved("a.mp4", Err("disk full".into()));
+        assert!(!ed.saving, "the next autosave may go");
+        assert_eq!(ed.save_error, None, "a.mp4's failure is not b.mp4's");
+        ed.on_saved("b.mp4", Err("disk full".into()));
+        assert_eq!(ed.save_error.as_deref(), Some("disk full"));
     }
 }

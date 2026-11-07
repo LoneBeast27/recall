@@ -80,7 +80,8 @@ pub enum Done {
     /// What an open without streaming is doing now.
     OpenStep(u64, &'static str),
     Prepared(u64, Result<PreparedClip, String>),
-    Saved(Result<String, String>),
+    /// (clip path, working-copy path).
+    Saved(String, Result<String, String>),
     Exported(Result<ExportSummary, String>),
     /// Which clips left (Recycle Bin, removed from Recall) and which stayed.
     Deleted(library::DeleteReport),
@@ -258,7 +259,7 @@ fn run_job(job: Job, tx: &Sender<Done>, watcher: Option<&ClipWatcher>) -> Done {
             Done::Clips(result)
         }
         Job::DriveSpace => Done::Drive(library::drive_space(&backend::library_dir())),
-        Job::SaveProject(info, plan, fps, export) => Done::Saved(backend::save_project(&info, &plan, fps, &export)),
+        Job::SaveProject(info, plan, fps, export) => Done::Saved(info.path.clone(), backend::save_project(&info, &plan, fps, &export)),
         Job::FlushProject(info, plan, fps, export, ours) => Done::Flushed(info.path.clone(), backend::flush_project(&info, &plan, fps, &export, ours)),
         Job::Export(info, plan, fps, export) => Done::Exported(crate::services::pre_encode::export(&info, &plan, fps, &export)),
         Job::Delete(paths, folders) => delete_job(&paths, &folders),
@@ -371,6 +372,10 @@ fn prefetch(entries: &[ClipEntry], complete: bool, tx: Sender<Done>) {
         backend::prefetch_editor_media,
     );
 }
+
+#[path = "worker_edits.rs"]
+mod edits;
+pub use edits::wait_for_edits;
 
 fn spawn_named(name: &str, body: impl FnOnce() + Send + 'static) {
     if let Err(error) = thread::Builder::new().name(name.into()).spawn(body) {

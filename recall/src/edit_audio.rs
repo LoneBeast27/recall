@@ -6,6 +6,7 @@ use ff::Rescale;
 use ffmpeg_next as ff;
 
 use crate::edit_model::{AudioOutput, AudioSetting, EditPlan, TimeRange};
+use crate::export::bad_audio::BadPackets;
 use crate::export::edit_pcm::{gain_multiplier, EditedPcm};
 use crate::export::timeline;
 
@@ -158,6 +159,8 @@ fn decode_track(
         i64::MAX
     };
 
+    let what = format!("decode audio packet for stream {stream_index}");
+    let mut bad = BadPackets::default();
     for (stream, packet) in ictx.packets() {
         if stream.index() != stream_index {
             continue;
@@ -168,9 +171,7 @@ fn decode_track(
         if packet_us.is_some_and(|us| us > stop_us) {
             break;
         }
-        decoder
-            .send_packet(&packet)
-            .map_err(|e| format!("decode audio packet for stream {stream_index}: {e}"))?;
+        bad.send(&mut decoder, &packet, &what)?;
         receive_audio_frames(
             &mut decoder,
             &mut resampler,
@@ -199,6 +200,7 @@ fn decode_track(
         &mut next_source_sample,
         stream_index,
     )?;
+    bad.report(&format!("audio stream {stream_index}"));
     flush_resampler(&mut resampler, &mut pcm, &mut next_source_sample, stream_index)?;
 
     Ok((rate, layout, pcm.finish(rate, layout)?))
