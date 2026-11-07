@@ -19,6 +19,9 @@
 //!   `activity_tick` (pending pause) -> `record_cmds::announce` (island notices).
 //! - [`Sim::save`]: `record_cmds::save_clip`; [`Sim::long_start`]: `engine_command("record_start")`;
 //!   [`Sim::pause`] / [`Sim::resume`]: `record_actions::set_paused` / `apply_pause`.
+//! - [`Sim::settings_changed`] / [`Sim::restart`] / the deferred retry in [`Sim::tick`]: the
+//!   controller's own `record_restart` code (the Sim is a `RestartHost`), as
+//!   `request_engine_restart`, `Controller::restart_engine` and `activity_tick` call it.
 //!
 //! Every `Step::Apply` is one engine (re)spawn or stop (`Supervisor::retarget`), and every
 //! spawn starts a new replay ring: "buffer kept" = no `Apply` since the mark.
@@ -31,6 +34,7 @@ use crate::record_config::RecordingCfg;
 use crate::record_drain::drain_len;
 use crate::record_engine::{capture_refusal, wanted, EnginePlanner, EngineTarget, Step, EXIT_LINGER};
 use crate::record_notice::{NoticeTracker, Situation};
+use crate::record_restart::{pending_restart_tick, request_settings_restart, restart_engine, RestartHost, RestartReason, Restarted};
 use crate::record_target::{classify_event, Target, TargetTracker, START_DEBOUNCE, TARGET_DEBOUNCE};
 use crate::record_transition::Transitions;
 use crate::watcher::WatchEvent;
@@ -89,6 +93,10 @@ pub struct Sim {
     pub pinned: Option<Target>,
     /// Shortcut-style island notices (title, detail): `Transitions::island`.
     pub island_said: Vec<(String, String)>,
+    /// A restart waits for a save / drain (`Controller::pending_restart`).
+    pub pending_restart: Option<RestartReason>,
+    /// Controller log lines the shared restart code wrote (`log!`).
+    pub notes: Vec<String>,
 }
 
 impl Sim {
@@ -114,6 +122,8 @@ impl Sim {
             client: (1920, 1080),
             pinned: None,
             island_said: Vec::new(),
+            pending_restart: None,
+            notes: Vec::new(),
         }
     }
 
@@ -188,6 +198,7 @@ impl Sim {
             }
             Step::Keep => {}
         }
+        pending_restart_tick(self); // `activity_tick`
         self.announce();
     }
 
@@ -196,7 +207,24 @@ impl Sim {
             // The new engine's hello (`record_app::tick`): nothing of the old one is in flight.
             self.activity.engine_restarted();
         }
+        // `apply_engine_target`: any (re)start or stop picks up the current settings.
+        self.pending_restart = None;
         self.applied.push((self.now, target));
+    }
+
+    /// An engine setting changed in the app: `request_engine_restart` (the real code).
+    pub fn settings_changed(&mut self) {
+        request_settings_restart(self);
+    }
+
+    /// A restart that is no game switch (resume, recovery): `Controller::restart_engine`.
+    pub fn restart(&mut self, reason: RestartReason) -> Restarted {
+        restart_engine(self, reason)
+    }
+
+    /// `recording.record_desktop_when_idle`.
+    pub fn set_desktop_when_idle(&mut self, on: bool) {
+        self.rec.record_desktop_when_idle = on;
     }
 
     /// `record_cmds::announce` with a healthy, fresh engine (`session_state` "recording").
@@ -283,7 +311,7 @@ impl Sim {
         self.pending_pause = None;
         self.paused = paused;
         if self.planner.pause() {
-            self.applied.push((self.now, EngineTarget::Off));
+            self.applied_engine(EngineTarget::Off); // `apply_engine_target(Off)`
         }
     }
 
@@ -342,5 +370,30 @@ impl Transitions for Sim {
     }
     fn island(&mut self, title: &str, detail: &str) {
         self.island_said.push((title.into(), detail.into()));
+    }
+}
+
+/// The Sim as the controller's restart host: the same planner, activity and flag fields.
+impl RestartHost for Sim {
+    fn restart_planner(&mut self) -> &mut EnginePlanner {
+        &mut self.planner
+    }
+    fn restart_busy(&mut self) -> bool {
+        self.activity.busy(self.now)
+    }
+    fn restart_wanted(&self) -> EngineTarget {
+        self.wanted()
+    }
+    fn restart_pending(&mut self) -> &mut Option<RestartReason> {
+        &mut self.pending_restart
+    }
+    fn restart_apply(&mut self, target: &EngineTarget, _reason: RestartReason) {
+        self.applied_engine(target.clone());
+    }
+    fn restart_notice(&mut self, title: &str, detail: &str) {
+        self.island_said.push((title.into(), detail.into()));
+    }
+    fn restart_log(&mut self, line: &str) {
+        self.notes.push(line.into());
     }
 }

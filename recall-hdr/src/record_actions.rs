@@ -337,24 +337,11 @@ impl Controller {
         }
     }
 
-    /// Engine settings changed: restart now, or once no save / long
-    /// recording is in flight (`pending_restart` in the status meanwhile).
+    /// Engine settings changed: restart now, or once no save / long recording / closed
+    /// game's drain is in flight (`pending_restart` in the status meanwhile); a mid-game
+    /// restart tells the island (`record_restart::request_settings_restart`).
     pub(crate) fn request_engine_restart(&mut self) {
-        // New settings: an encoder recovery that gave up on a hung engine tries again.
-        self.recovery.settings_changed();
-        if *self.planner.applied() == EngineTarget::Off {
-            self.pending_restart = false; // the next start uses the new settings
-            return;
-        }
-        if self.activity.busy(Instant::now()) {
-            if !self.pending_restart {
-                log!("record: engine settings changed; restart deferred until the save / long recording ends");
-            }
-            self.pending_restart = true;
-            return;
-        }
-        log!("record: engine settings changed; restarting the engine (the replay buffer restarts)");
-        self.restart_engine_for_settings(true);
+        crate::record_restart::request_settings_restart(self);
     }
 
     /// Planner -> engine, every pump tick. A retarget that falls due while
@@ -404,9 +391,7 @@ impl Controller {
             }
             self.apply_pause(true);
         }
-        if self.pending_restart && !self.activity.busy(now) {
-            self.request_engine_restart();
-        }
+        crate::record_restart::pending_restart_tick(self);
         let (dir, cap) = (self.cfg.recording.output_dir.clone(), self.cfg.storage.cap_gb);
         let rec = &self.cfg.recording;
         let buffer = crate::record_free_space::buffer_bytes(rec.buffer_secs, rec.bitrate_mbps);
