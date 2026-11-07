@@ -37,7 +37,8 @@ use crate::log;
 use crate::record_app::{apply_affinity, Controller};
 use crate::record_config::{apply_patch, parse_cpu_mask};
 use crate::record_notice::Situation;
-use crate::record_status::{config_event, error_event, status_json, tray_line, StatusInputs};
+use crate::record_config_event::config_event;
+use crate::record_status::{error_event, status_json, tray_line, StatusInputs};
 use crate::record_engine::{capture_refusal, engine_settings_changed};
 use crate::record_dispatch::{command_effects, hud_probe_effects, mic_effects, pipe_setting_effects, refusal, Effect, SavePort, Sent, NOT_RESPONDING};
 use crate::supervisor::EngineHealth;
@@ -162,7 +163,7 @@ impl Controller {
                 _ => self.reply_error(client, "set_mode needs \"value\": auto|sdr|hdr"),
             },
             "set_ac_profile" => self.set_ac_profile(client, &val),
-            "get_config" => self.hub.event_to(inbound.client, "session", &config_event(&self.cfg)),
+            "get_config" => self.hub.event_to(inbound.client, "session", &config_event(&self.cfg, &self.overrides)),
             "set_config" => match val.get("patch") {
                 Some(patch) => {
                     self.apply_config_patch(patch, client);
@@ -279,6 +280,10 @@ impl Controller {
     /// Validate, persist and apply a config patch. `client` gets errors; the
     /// new config + status are broadcast. Returns whether it applied.
     pub(crate) fn apply_config_patch(&mut self, patch: &Value, client: Option<u64>) -> bool {
+        // A hand edit made while running is the base, not overwritten (`config_watch`).
+        if let Some(edited) = crate::config_watch::base_for_patch(&self.store, &mut self.config_stamp) {
+            self.file_cfg = edited;
+        }
         let out = match apply_patch(&self.file_cfg, patch) {
             Ok(o) => o,
             Err(e) => {
@@ -293,7 +298,7 @@ impl Controller {
         if out.changed.is_empty() && effective == self.cfg {
             // Nothing to persist (keeps the user's hand-written file untouched).
             if let Some(c) = client {
-                self.hub.event_to(c, "session", &config_event(&self.cfg));
+                self.hub.event_to(c, "session", &config_event(&self.cfg, &self.overrides));
             }
             return true;
         }
@@ -302,13 +307,14 @@ impl Controller {
                 self.reply_error(client, &format!("config save failed: {e}"));
                 return false;
             }
+            self.config_stamp = crate::config_watch::FileStamp::of(self.store.path());
             log!("record: config updated ({})", out.changed.join(", "));
         }
         let old = std::mem::replace(&mut self.cfg, effective);
         self.file_cfg = out.config;
         self.overrides = overrides;
         self.apply_config_effects(&old, client);
-        self.hub.event("session", &config_event(&self.cfg));
+        self.hub.event("session", &config_event(&self.cfg, &self.overrides));
         self.publish_status();
         true
     }

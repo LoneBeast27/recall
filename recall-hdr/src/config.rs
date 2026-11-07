@@ -407,6 +407,9 @@ pub(crate) fn load_checked(path: &std::path::Path) -> Result<Config, String> {
     crate::record_audio_sources::migrate_loaded(&mut cfg.recording, &text);
     // Pre-v2 corners were never honoured -> `dynamic`.
     cfg.overlay.migrate_loaded(&text);
+    // Out-of-range values clamp, bad entries go (one log line each), never the whole file.
+    // Runs on every parsed load: full parse, per-key salvage and last-good.
+    crate::config_validate::sanitize_loaded(&mut cfg);
     Ok(cfg)
 }
 

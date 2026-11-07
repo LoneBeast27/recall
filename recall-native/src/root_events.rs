@@ -193,6 +193,11 @@ impl Root {
                 if message.starts_with("storage preview") || message.starts_with("storage_preview") || message.contains("'storage_preview'") {
                     self.storage_asking = None;
                 }
+                // A rejected patch while a folder change waits: folders.json was never touched.
+                if !message.contains("hotkey") && let Some(p) = self.pending_folder.take() {
+                    self.show_toast(ToastKind::Bad, "Recordings folder not changed", Some(format!("{} stays the folder: {message}", p.old)));
+                    return;
+                }
                 self.show_toast(ToastKind::Bad, "Recorder", Some(message));
             }
             DaemonEvent::MicMuted(_) | DaemonEvent::ExportStarted { .. } | DaemonEvent::Exported { .. } => {}

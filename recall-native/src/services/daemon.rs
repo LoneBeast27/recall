@@ -231,6 +231,11 @@ pub struct DaemonSnapshot {
     pub engine: Option<EngineStatus>,
     /// Full config object from the last `config` event.
     pub config: Option<Value>,
+    /// Config keys a startup env override sets (`recording.output_dir` from
+    /// `Start-Recall.ps1 -OutDir`), from the same event.
+    pub config_overridden: Vec<String>,
+    /// Shortcuts on a combo games and overlays often use (a warning, they stay bound).
+    pub hotkey_warnings: Vec<String>,
 }
 
 impl SessionStatus {

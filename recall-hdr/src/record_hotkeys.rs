@@ -193,6 +193,16 @@ pub fn is_gamer_combo(accel: &str) -> bool {
     win_alt || GAMER_COMBOS.iter().filter_map(|c| parse_accel(c).ok()).any(|c| c.id() == hk.id())
 }
 
+/// One line per configured shortcut that [`is_gamer_combo`] flags. Shown in Settings as a
+/// warning; the shortcut stays bound (shortcuts are global while Recall runs).
+pub fn clash_warnings(rec: &RecordingCfg) -> Vec<String> {
+    bindings(rec, None)
+        .iter()
+        .filter(|b| is_gamer_combo(&b.accel))
+        .map(|b| format!("{} uses {}, which games and overlays (GeForce, Steam, Discord, Game Bar) often use", b.label, b.accel))
+        .collect()
+}
+
 /// The legacy `save_hotkey` value: the first full-buffer preset, else the
 /// first preset, else "".
 pub fn legacy_save_hotkey(list: &[SaveHotkey]) -> String {

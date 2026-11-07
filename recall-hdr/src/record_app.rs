@@ -65,6 +65,8 @@ pub struct Controller {
     pub(crate) store: ConfigStore,
     /// What `config.toml` says (what `set_config` patches and saves).
     pub(crate) file_cfg: Config,
+    /// config.toml as last read or written (a hand edit since then is merged, `config_watch`).
+    pub(crate) config_stamp: Option<crate::config_watch::FileStamp>,
     pub(crate) overrides: EnvOverrides,
     /// `file_cfg` + startup env overrides: what is running.
     pub(crate) cfg: Config,
@@ -196,6 +198,7 @@ pub fn run() -> i32 {
     let now = Instant::now();
     let can_trace = crate::frame_timing::can_trace();
     let mut ctl = Controller {
+        config_stamp: crate::config_watch::FileStamp::of(store.path()),
         store,
         file_cfg,
         overrides,
@@ -301,6 +304,7 @@ impl Controller {
             if let Some(fired) = self.hotkeys.as_ref().map(|h| h.poll()) {
                 self.on_hotkeys(fired);
             }
+            self.hotkey_retry_tick(now);
             while let Ok(inbound) = ctl_rx.try_recv() {
                 self.handle_inbound(inbound);
             }

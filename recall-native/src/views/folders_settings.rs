@@ -10,6 +10,7 @@ use crate::{
     services::library::folders::Folders,
     theme::{self, c},
     ui::{self, Icon, Variant, icon},
+    views::folders_sync::{self, FolderPlan, PendingFolder},
     views::pages::section_title,
     worker::Job,
 };
@@ -25,19 +26,53 @@ impl Root {
             .unwrap_or_else(|| crate::services::library::folders::default_recordings_dir().to_string_lossy().into_owned())
     }
 
-    /// Keeps `folders.json` in step with the recorder's output folder; re-lists when it moved.
+    /// Keeps `folders.json` in step with the recorder's output folder (`folders_sync`): commits a
+    /// Change-button change once the recorder reports it, follows a folder moved behind the
+    /// app's back (the old one stays imported), and leaves an env-overridden folder alone.
     pub fn sync_recordings_folder(&mut self) {
         let Some(dir) = self.config_value("recording", "output_dir").and_then(Value::as_str).map(str::to_owned) else { return };
-        if self.folders.recordings.as_deref() == Some(dir.as_str()) {
-            return;
+        let overridden = self.snap.config_overridden.iter().any(|k| k == "recording.output_dir");
+        match folders_sync::plan(self.folders.recordings.as_deref(), &dir, self.pending_folder.as_ref(), overridden) {
+            FolderPlan::Nothing | FolderPlan::Skip => {}
+            FolderPlan::Commit => {
+                let old = self.pending_folder.take().map(|p| p.old);
+                self.commit_recordings_folder(&dir, old);
+            }
+            FolderPlan::Follow => self.follow_recordings_folder(&dir),
         }
+    }
+
+    fn follow_recordings_folder(&mut self, dir: &str) {
         let before = crate::backend::library_dir();
-        self.folders.recordings = Some(dir);
+        let old = self.folders.recordings.clone();
+        let kept_old = folders_sync::retarget(&mut self.folders, dir, None);
         let _ = self.folders.save();
         // A recorder pointed into the cache (by hand, or before this check existed) blocks it.
         self.recheck_cache_overlap();
-        if crate::backend::library_dir() != before {
+        if kept_old {
+            crate::services::library::folders::forget_scans();
+            let detail = format!("Clips in {} still show.", old.unwrap_or_default());
+            self.show_toast(ToastKind::Info, "Recordings folder changed", Some(detail));
+        }
+        if kept_old || crate::backend::library_dir() != before {
             self.workers.job(Job::List);
+        }
+    }
+
+    /// The recorder took the folder the Change button asked for: update the library folders.
+    fn commit_recordings_folder(&mut self, new: &str, old: Option<String>) {
+        let mut folders = Folders::load();
+        let kept_old = folders_sync::retarget(&mut folders, new, old.as_deref());
+        match folders.save() {
+            Ok(()) => {
+                self.folders = folders;
+                self.recheck_cache_overlap();
+                crate::services::library::folders::forget_scans();
+                self.workers.job(Job::List);
+                let detail = if kept_old { "New clips save here. Clips already saved stay in the old folder and still show." } else { "New clips save here." };
+                self.show_toast(ToastKind::Good, "Recordings folder changed", Some(detail.into()));
+            }
+            Err(error) => self.show_toast(ToastKind::Bad, "Couldn't update the library folders", Some(error)),
         }
     }
 
@@ -102,22 +137,9 @@ impl Root {
             self.show_toast(ToastKind::Info, "Already your recordings folder", None);
             return;
         }
+        // folders.json changes once the recorder reports the new folder (`sync_recordings_folder`).
+        self.pending_folder = Some(PendingFolder { new: new.clone(), old });
         self.set_config("recording", "output_dir", json!(new));
-        let mut folders = Folders::load();
-        folders.remove(&new);
-        folders.recordings = Some(new);
-        let kept_old = folders.add(std::path::Path::new(&old));
-        match folders.save() {
-            Ok(()) => {
-                self.folders = folders;
-                self.recheck_cache_overlap();
-                crate::services::library::folders::forget_scans();
-                self.workers.job(Job::List);
-                let detail = if kept_old { "New clips save here. Clips already saved stay in the old folder and still show." } else { "New clips save here." };
-                self.show_toast(ToastKind::Good, "Recordings folder changed", Some(detail.into()));
-            }
-            Err(error) => self.show_toast(ToastKind::Bad, "Couldn't update the library folders", Some(error)),
-        }
     }
 
     fn add_clip_folders(&mut self, paths: Vec<PathBuf>) {

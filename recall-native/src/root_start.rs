@@ -102,6 +102,7 @@ impl Root {
             settings_ui: Default::default(),
             title_drag: None,
             folders,
+            pending_folder: None,
             controller_check_at: std::env::var_os("RECALL_NO_CONTROLLER").is_none().then(|| Instant::now() + Duration::from_millis(1500)),
             frame_at: Instant::now(),
             hwnd: parent_hwnd(window).ok(),
