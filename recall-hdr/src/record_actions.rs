@@ -58,6 +58,16 @@ impl Controller {
         log!("record: hotkeys bound {bound:?}");
     }
 
+    /// A shortcut another app held at bind time is tried again every 10 s (`record_hotkey_retry`).
+    pub(crate) fn hotkey_retry_tick(&mut self, now: Instant) {
+        let Some(hk) = self.hotkeys.as_mut() else { return };
+        let Some(won) = hk.retry_refused(now) else { return };
+        if !won.is_empty() {
+            log!("record: hotkeys registered on retry: {}", won.join(", "));
+            self.hotkey_problems = hk.problems();
+        }
+    }
+
     pub(crate) fn on_hotkeys(&mut self, fired: Vec<HotkeyAction>) {
         let now = Instant::now();
         for action in fired {

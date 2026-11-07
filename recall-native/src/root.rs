@@ -129,6 +129,8 @@ pub struct Root {
     pub title_drag: Option<gpui::Point<gpui::Pixels>>,
     /// Recordings folder (last reported) + imported folders of old clips.
     pub folders: crate::services::library::folders::Folders,
+    /// A Change-button folder change waiting for the recorder to report it (`folders_sync`).
+    pub pending_folder: Option<crate::views::folders_sync::PendingFolder>,
     /// When to check whether the recorder is running and start it (once per launch).
     controller_check_at: Option<Instant>,
     pub frame_at: Instant,

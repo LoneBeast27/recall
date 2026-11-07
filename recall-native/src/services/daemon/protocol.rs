@@ -55,7 +55,12 @@ impl State {
                 self.merge_session(event);
                 self.drop_stale_engine();
             }
-            ("session", "config") => self.snapshot.config = Some(config_of(event)),
+            ("session", "config") => {
+                self.snapshot.config = Some(config_of(event));
+                // Older recorders send neither list: both read empty.
+                self.snapshot.config_overridden = strings_of(event, "overridden");
+                self.snapshot.hotkey_warnings = strings_of(event, "hotkey_warnings");
+            }
             ("session", "storage_cleaned") => self.push(DaemonEvent::StorageCleaned {
                 removed: u64_of(event, "removed"),
                 freed_bytes: u64_of(event, "freed_bytes"),
@@ -274,6 +279,10 @@ fn config_of(event: &Map<String, Value>) -> Value {
             Value::Object(rest)
         }
     }
+}
+
+fn strings_of(event: &Map<String, Value>, key: &str) -> Vec<String> {
+    event.get(key).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default()
 }
 
 fn error_text(event: &Map<String, Value>) -> String {
