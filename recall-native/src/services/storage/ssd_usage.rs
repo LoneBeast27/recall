@@ -30,12 +30,13 @@ pub struct SsdUsage {
     pub kept: u64,
     /// Clip heads from the filter probe.
     pub heads: u64,
-    /// Working edit projects, settings and indexes.
+    /// Working edit projects, settings and indexes, and the pre-encoded export waiting in the
+    /// cache (held against the budget: `pre_encode_room`).
     pub other: u64,
     /// The one cache budget.
     pub budget: u64,
-    /// Exports on the cache drive: the pre-encoded export waiting in the cache, plus the
-    /// `Edited` folder when it is on the same volume. Not held against the budget.
+    /// Finished exports on the cache drive: the `Edited` folder when it is on the same volume.
+    /// Not held against the budget.
     pub exports: u64,
     /// Free space on the cache drive.
     pub free: Option<u64>,
@@ -66,9 +67,9 @@ pub(super) fn ssd_usage_in(root: &Path, recordings: &Path) -> SsdUsage {
         previews,
         kept,
         heads: inventory.heads,
-        other,
+        other: other + pre_encoded,
         budget: super::video::budget_in(root),
-        exports: pre_encoded + edited_on(root, recordings),
+        exports: edited_on(root, recordings),
         free: super::drive_info(root).map(|info| info.free),
     }
 }
@@ -144,10 +145,10 @@ mod tests {
         assert_eq!(usage.heads, 800);
         // The ownership list (`owned.rs`) the inventory wrote when it adopted this cache.
         let listed = root.join("owned.json").metadata().map_or(0, |m| m.len());
-        assert_eq!(usage.other, 10 + settings + listed);
+        assert_eq!(usage.other, 10 + settings + listed + 900, "the pre-encode is cache work");
         assert_eq!(usage.budget, 2 << 30);
-        assert_eq!(usage.exports, 900 + 1000, "pre-encode plus finished exports, no hidden part files");
-        assert_eq!(usage.used(), 1000 + 6300 + 800 + 10 + settings + listed, "the pre-encode is not held against the budget");
+        assert_eq!(usage.exports, 1000, "finished exports, no hidden part files");
+        assert_eq!(usage.used(), 1000 + 6300 + 800 + 10 + settings + listed + 900, "the pre-encode is held against the budget");
         assert!(raw.join("clip.mp4").exists() && dir.join("Recall").join("Edited").join("clip-edited-1.mp4").exists(), "read only");
         let _ = std::fs::remove_dir_all(&dir);
     }

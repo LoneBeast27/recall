@@ -137,3 +137,44 @@ fn clearing_the_pre_encode_folder_spares_files_recall_did_not_make() {
     assert!(user.exists() && shaped.exists(), "a file Recall did not make is left alone");
     assert!(!own.exists() && !own_temp.exists(), "Recall's prepared file and its engine temp go");
 }
+
+/// An engine that crashed, or was killed with the app, leaves its hidden temp beside the
+/// export for good: the start sweep removes it when its process is gone, nothing else.
+#[test]
+fn the_start_sweep_removes_a_dead_engines_export_temp() {
+    let sandbox = crate::test_temp::TempDir::sandbox("recall-export-temp-sweep");
+    let folder = sandbox.join("Edited");
+    std::fs::create_dir_all(&folder).unwrap();
+    let dead = ".a-edited-60fps-1.recall-export-4000000000-5-0.mp4";
+    let live = format!(".b-edited-60fps-1.recall-export-{}-5-0.mp4", std::process::id());
+    let keep = [".a.mp4", "a-edited-60fps-1.mp4", ".a.recall-export-x-5-0.mp4", ".a.recall-export-1-5.mp4", live.as_str()];
+    for name in keep.iter().chain([&dead]) {
+        std::fs::write(folder.join(name), b"x").unwrap();
+    }
+    assert_eq!(remove_deliveries(&folder), 1);
+    assert!(!folder.join(dead).exists(), "the dead engine's partial export goes");
+    for name in keep {
+        assert!(folder.join(name).exists(), "{name} must stay");
+    }
+}
+
+/// Closing the window while Export waits on a running pre-encode of the same plan: that
+/// pre-encode keeps running (the export then only copies it); nothing re-encodes from zero.
+#[test]
+fn closing_spares_the_pre_encode_a_queued_export_waits_on() {
+    let _slot = test_slot_lock();
+    CANCEL.store(false, Ordering::Release);
+    {
+        let mut slot = slot();
+        slot.running = Some(41);
+        slot.awaited = Some(41);
+    }
+    discard();
+    assert!(!CANCEL.load(Ordering::Acquire), "the awaited pre-encode is not stopped");
+    assert!(awaited(), "closing waits for that export");
+    slot().awaited = None;
+    cancel_other(None);
+    assert!(CANCEL.load(Ordering::Acquire), "with no export waiting it is stopped");
+    slot().running = None;
+    CANCEL.store(false, Ordering::Release);
+}

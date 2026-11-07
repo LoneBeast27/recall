@@ -27,6 +27,8 @@ pub(super) struct Spec {
     pub amplitude: f32,
     /// The recorder's per-track sources tag (`edit_model::AUDIO_SOURCES_TAG`), when set.
     pub sources: Option<&'static str>,
+    /// The CPU encoder standing in for NVENC: `libx264` or `libx265`.
+    pub codec: &'static str,
 }
 
 /// Track names written like the recorder does: as the MP4 `handler_name`.
@@ -34,7 +36,7 @@ pub(super) const TRACK_NAMES: [&str; 2] = ["Game", "Microphone"];
 
 impl Default for Spec {
     fn default() -> Self {
-        Self { width: 320, height: 240, fps: 60, seconds: 5.0, gop: 30, tones: vec![440.0, 660.0], moments_audio_stamps: false, amplitude: 0.4, sources: None }
+        Self { width: 320, height: 240, fps: 60, seconds: 5.0, gop: 30, tones: vec![440.0, 660.0], moments_audio_stamps: false, amplitude: 0.4, sources: None, codec: "libx264" }
     }
 }
 
@@ -62,10 +64,10 @@ fn xorshift(state: &mut u32) -> u8 {
     (*state >> 24) as u8
 }
 
-/// Build a clip in a fresh temp dir; `None` when libx264 is missing.
+/// Build a clip in a fresh temp dir; `None` when the spec's encoder is missing.
 pub(super) fn synth(tag: &str, spec: &Spec) -> Option<Clip> {
     ff::init().unwrap();
-    let codec = ff::encoder::find_by_name("libx264")?;
+    let codec = ff::encoder::find_by_name(spec.codec)?;
     let dir = std::env::temp_dir().join(format!("recall-export-{tag}-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("source.mp4");
@@ -84,7 +86,11 @@ pub(super) fn synth(tag: &str, spec: &Spec) -> Option<Clip> {
     let mut options = ff::Dictionary::new();
     options.set("preset", "ultrafast");
     options.set("bf", "0");
-    options.set("x264-params", &format!("keyint={0}:min-keyint={0}:scenecut=0", spec.gop));
+    if spec.codec == "libx265" {
+        options.set("x265-params", &format!("keyint={0}:min-keyint={0}:scenecut=0:bframes=0:log-level=error", spec.gop));
+    } else {
+        options.set("x264-params", &format!("keyint={0}:min-keyint={0}:scenecut=0", spec.gop));
+    }
     let mut video = ctx.open_with(options).unwrap();
     let video_index = {
         let mut stream = octx.add_stream(Some(codec)).unwrap();

@@ -60,18 +60,27 @@ pub fn run_cancellable_lines(command: &mut Command, lowered: bool, cancel: &Atom
         None => drain(Box::new(pipe)),
     });
     let stderr = child.stderr.take().map(|pipe| drain(Box::new(pipe)));
-    let collect = |thread: Option<std::thread::JoinHandle<Vec<u8>>>| thread.and_then(|t| t.join().ok()).unwrap_or_default();
+    wait_child(child, stdout, stderr, cancel, limit)
+}
+
+type Drained = Option<std::thread::JoinHandle<Vec<u8>>>;
+
+/// Waits for `child`, killing it at `limit` or once `cancel` turns true. A helper that already
+/// exited is `Finished` even when cancel came at the same moment: its work (a published
+/// export) is done, and reporting it as cancelled would hide it.
+fn wait_child(mut child: std::process::Child, stdout: Drained, stderr: Drained, cancel: &AtomicBool, limit: Duration) -> io::Result<Run> {
+    let collect = |thread: Drained| thread.and_then(|t| t.join().ok()).unwrap_or_default();
     let started = Instant::now();
     loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Run::Finished(Output { status, stdout: collect(stdout), stderr: collect(stderr) }));
+        }
         let late = started.elapsed() >= limit;
         if late || cancel.load(Ordering::Acquire) {
             let pid = child.id();
             let _ = child.kill();
             child.wait()?;
             return Ok(if late { Run::TimedOut { pid } } else { Run::Cancelled { pid } });
-        }
-        if let Some(status) = child.try_wait()? {
-            return Ok(Run::Finished(Output { status, stdout: collect(stdout), stderr: collect(stderr) }));
         }
         std::thread::sleep(Duration::from_millis(50));
     }
@@ -262,6 +271,30 @@ pub(crate) fn publish(temporary: &Path, target: &Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Cancel pressed just as the helper finished (the engine had published its export): the
+    /// run is reported as finished, not cancelled.
+    #[test]
+    fn a_helper_that_already_exited_is_finished_even_when_cancel_came_too() {
+        let mut command = Command::new("cmd");
+        command.args(["/c", "exit 0"]).stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+        let mut child = io_priority::spawn(&mut command, false).unwrap();
+        let (stdout, stderr) = (child.stdout.take(), child.stderr.take());
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(10) {
+            // Poll the OS handle without reaping, until the helper is gone.
+            let gone = unsafe { windows::Win32::System::Threading::WaitForSingleObject(windows::Win32::Foundation::HANDLE(std::os::windows::io::AsRawHandle::as_raw_handle(&child)), 0) } == windows::Win32::Foundation::WAIT_OBJECT_0;
+            if gone {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let drain = |pipe: Option<std::process::ChildStdout>| pipe.map(|mut p| std::thread::spawn(move || { let mut b = Vec::new(); let _ = p.read_to_end(&mut b); b }));
+        let drain_err = |pipe: Option<std::process::ChildStderr>| pipe.map(|mut p| std::thread::spawn(move || { let mut b = Vec::new(); let _ = p.read_to_end(&mut b); b }));
+        let cancel = AtomicBool::new(true);
+        let run = wait_child(child, drain(stdout), drain_err(stderr), &cancel, Duration::from_secs(10)).unwrap();
+        assert!(matches!(run, Run::Finished(ref output) if output.status.success()), "cancelled after it finished");
+    }
 
     fn slow_process() -> Command {
         let mut command = Command::new("ping.exe");

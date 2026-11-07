@@ -1,9 +1,10 @@
-//! Source video probing, the pixel converter/downscaler, and the H.264 encoder
+//! Source video probing, the pixel converter/downscaler, and the video encoder
 //! used by re-encoding exports.
 //!
-//! Production always encodes with `h264_nvenc` (no CPU fallback). The encoder
-//! is a parameter so CPU-only tests can drive the identical pipeline with
-//! libx264; that variant only exists in test builds.
+//! Production always encodes with NVENC (no CPU fallback): `h264_nvenc`, or
+//! `hevc_nvenc` for a frame wider or taller than H.264 NVENC allows (see
+//! [`nvenc_codec`]). The encoder is a parameter so CPU-only tests can drive the
+//! identical pipeline with libx264; that variant only exists in test builds.
 
 use ffmpeg_next as ff;
 
@@ -14,12 +15,31 @@ pub(crate) enum VideoBackend {
     X264,
 }
 
+/// NVENC's H.264 encoder takes frames up to 4096 px a side; HEVC goes to 8192.
+const H264_NVENC_MAX: u32 = 4096;
+const HEVC_NVENC_MAX: u32 = 8192;
+
+/// The NVENC encoder for a `width` x `height` export: H.264 (plays everywhere) when it fits,
+/// else HEVC (32:9 5120x1440 and 8K sources), else an error that says what to pick.
+pub(crate) fn nvenc_codec(width: u32, height: u32) -> Result<&'static str, String> {
+    let side = width.max(height);
+    if side <= H264_NVENC_MAX {
+        Ok("h264_nvenc")
+    } else if side <= HEVC_NVENC_MAX {
+        Ok("hevc_nvenc")
+    } else {
+        Err(format!(
+            "this clip is {width}x{height}; NVIDIA encoders take at most {HEVC_NVENC_MAX} px a side, so pick 1080p (or 720p) under Resolution"
+        ))
+    }
+}
+
 impl VideoBackend {
-    fn codec_name(self) -> &'static str {
+    fn codec_name(self, width: u32, height: u32) -> Result<&'static str, String> {
         match self {
-            Self::Nvenc => "h264_nvenc",
+            Self::Nvenc => nvenc_codec(width, height),
             #[cfg(test)]
-            Self::X264 => "libx264",
+            Self::X264 => Ok("libx264"),
         }
     }
 
@@ -43,10 +63,10 @@ impl VideoBackend {
         options
     }
 
-    fn unavailable(self) -> String {
+    fn unavailable(self, name: &str) -> String {
         match self {
             Self::Nvenc => {
-                "NVIDIA NVENC encoder h264_nvenc is unavailable; no CPU fallback is permitted".into()
+                format!("NVIDIA NVENC encoder {name} is unavailable; no CPU fallback is permitted")
             }
             #[cfg(test)]
             Self::X264 => "libx264 is unavailable in this FFmpeg build".into(),
@@ -175,11 +195,11 @@ pub(crate) struct EncoderSpec {
     pub rate: RateControl,
 }
 
-/// Open the H.264 encoder (CFR `1/fps` timebase, one keyframe per second, no
+/// Open the video encoder (CFR `1/fps` timebase, one keyframe per second, no
 /// B-frames, global headers for MP4).
 pub(crate) fn open_encoder(spec: &EncoderSpec) -> Result<(ff::encoder::Video, ff::Codec), String> {
-    let name = spec.backend.codec_name();
-    let codec = ff::encoder::find_by_name(name).ok_or_else(|| spec.backend.unavailable())?;
+    let name = spec.backend.codec_name(spec.width, spec.height)?;
+    let codec = ff::encoder::find_by_name(name).ok_or_else(|| spec.backend.unavailable(name))?;
     let mut context = ff::codec::context::Context::new_with_codec(codec)
         .encoder()
         .video()
@@ -201,7 +221,8 @@ pub(crate) fn open_encoder(spec: &EncoderSpec) -> Result<(ff::encoder::Video, ff
     }
     let encoder = context.open_with(options).map_err(|e| match spec.backend {
         VideoBackend::Nvenc => format!(
-            "open NVIDIA NVENC encoder h264_nvenc: {e}; no CPU fallback is permitted"
+            "open NVIDIA NVENC encoder {name} at {}x{}: {e}; no CPU fallback is permitted (a smaller Resolution such as 1080p may work)",
+            spec.width, spec.height
         ),
         #[cfg(test)]
         VideoBackend::X264 => format!("open libx264: {e}"),
@@ -211,7 +232,18 @@ pub(crate) fn open_encoder(spec: &EncoderSpec) -> Result<(ff::encoder::Video, ff
 
 #[cfg(test)]
 mod tests {
-    use super::output_dims;
+    use super::{nvenc_codec, output_dims};
+
+    #[test]
+    fn frames_past_h264_nvenc_use_hevc_and_past_hevc_say_pick_1080p() {
+        assert_eq!(nvenc_codec(3840, 2160), Ok("h264_nvenc"));
+        assert_eq!(nvenc_codec(4096, 2160), Ok("h264_nvenc"));
+        assert_eq!(nvenc_codec(5120, 1440), Ok("hevc_nvenc"), "32:9 at Original");
+        assert_eq!(nvenc_codec(7680, 4320), Ok("hevc_nvenc"));
+        assert_eq!(nvenc_codec(1440, 5120), Ok("hevc_nvenc"), "portrait counts the long side");
+        let error = nvenc_codec(10240, 1440).unwrap_err();
+        assert!(error.contains("pick 1080p"), "{error}");
+    }
 
     #[test]
     fn downscale_keeps_aspect_with_even_sides_and_never_upscales() {
