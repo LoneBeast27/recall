@@ -1,7 +1,9 @@
 //! Background threads. The UI thread never blocks on disk, ffmpeg or the engine.
-//! `io`: save / flush / export / storage (serial, in order). `library`: list / delete (serial,
-//! in order, never behind an export: `worker_lanes.rs`). Each clip open runs on its own thread
-//! (`clip_open.rs`).
+//! Three serial job threads, each in order: `io`: export / drive space / storage. `library`:
+//! list / delete (never behind an export: `worker_lanes.rs`). `edits`: autosave and the sidecar
+//! flush (never behind an export: `worker_edits.rs`). A delete waits for the saves and flushes of
+//! its clips queued before it ([`PathGate`]: entered here on send, left by the edits thread once
+//! each one finished). Each clip open runs on its own thread (`clip_open.rs`).
 //! `assets`: thumbnails, durations, video copies. `scrub`: hover-scrub frames.
 //!
 //! Work that reads an HDD is routed onto that disk's I/O lane (`services::storage`): one
@@ -103,6 +105,8 @@ pub enum Done {
 
 pub struct Workers {
     jobs: Lanes<Job>,
+    /// Autosave and sidecar flushes (`worker_edits.rs`).
+    edits: Sender<Job>,
     /// Clips with a save or flush queued: a delete of one waits for it.
     gate: PathGate,
     assets: Sender<AssetJob>,
@@ -114,6 +118,10 @@ pub struct Workers {
 impl Workers {
     pub fn spawn() -> Self {
         let (done_tx, done) = mpsc::channel::<Done>();
+        let gate = PathGate::default();
+        let (edits, edit_rx) = mpsc::channel::<Job>();
+        let (tx, edit_gate) = (done_tx.clone(), gate.clone());
+        spawn_named("recall-edits", move || edits::run(edit_rx, tx, edit_gate));
         let (assets, asset_rx) = mpsc::channel::<AssetJob>();
         let (scrub, scrub_rx) = mpsc::channel::<String>();
 
@@ -133,7 +141,6 @@ impl Workers {
         });
 
         let (io_tx, lib_tx) = (done_tx.clone(), done_tx.clone());
-        let gate = PathGate::default();
         let (io_gate, lib_gate) = (gate.clone(), gate.clone());
         let io = move |job: Job| {
             let gated = gated_clip(&job);
@@ -182,7 +189,7 @@ impl Workers {
             }
         });
 
-        Self { jobs, gate, assets, scrub, done, open_tx }
+        Self { jobs, edits, gate, assets, scrub, done, open_tx }
     }
 
     /// Opens a clip on a thread of its own: a running export or listing never holds it up.
@@ -209,11 +216,24 @@ impl Workers {
         });
     }
 
+    /// A save or flush enters the gate before it is sent (a delete sent later waits for it) and
+    /// goes to the edits thread; everything else to its lane.
     pub fn job(&self, job: Job) {
-        if let Some(key) = gated_clip(&job) {
-            self.gate.enter(key);
+        let gated = gated_clip(&job);
+        if let Some(key) = &gated {
+            self.gate.enter(key.clone());
         }
-        self.jobs.send(job);
+        match edits::lane(&job) {
+            edits::Lane::Edits => {
+                if !edits::send(&self.edits, job) {
+                    // The edits thread is gone: nothing will leave for this job.
+                    if let Some(key) = gated {
+                        self.gate.leave(&key);
+                    }
+                }
+            }
+            edits::Lane::Io => self.jobs.send(job),
+        }
     }
 
     pub fn asset(&self, job: AssetJob) {
