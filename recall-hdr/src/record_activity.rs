@@ -56,6 +56,9 @@ pub struct EngineActivity {
     last_screenshot_sent: Option<Instant>,
     pub long: LongRec,
     auto_stop: Option<AutoStop>,
+    /// A `record_stop` (any sender: the user, a pause, a retarget, sleep, a session end) went
+    /// to the engine and its `recording_stopped` has not come yet.
+    stop_requested: bool,
 }
 
 impl Default for EngineActivity {
@@ -67,6 +70,7 @@ impl Default for EngineActivity {
             last_screenshot_sent: None,
             long: LongRec::Idle,
             auto_stop: None,
+            stop_requested: false,
         }
     }
 }
@@ -92,7 +96,9 @@ impl EngineActivity {
     /// a screenshot is now in flight.
     pub fn command_sent(&mut self, cmd: &str, now: Instant) {
         let starts = cmd == "record_start" || (cmd == "record_toggle" && !self.is_recording());
-        if starts {
+        if cmd == "record_stop" || (cmd == "record_toggle" && self.is_recording()) {
+            self.stop_sent();
+        } else if starts {
             self.record_requested(now);
         }
         if cmd == "screenshot" {
@@ -110,6 +116,28 @@ impl EngineActivity {
 
     pub fn is_recording(&self) -> bool {
         matches!(self.long, LongRec::Active { .. })
+    }
+
+    /// A `record_stop` went to the engine (the caller checked it was queued). With no long
+    /// recording there is nothing to wait for.
+    pub fn stop_sent(&mut self) {
+        self.stop_requested = self.long != LongRec::Idle;
+    }
+
+    /// A stop is on its way: a session end must not restart this recording on a cancel.
+    pub fn stop_in_flight(&self) -> bool {
+        self.stop_requested
+    }
+
+    /// A long recording the controller asked to start has not reported running yet.
+    pub fn is_starting(&self) -> bool {
+        matches!(self.long, LongRec::Starting { .. })
+    }
+
+    /// A long recording running or still starting: a session end stops it (a start sent
+    /// just before the query would otherwise run on unsaved) and a cancel restarts it.
+    pub fn recording_or_starting(&self) -> bool {
+        matches!(self.long, LongRec::Active { .. } | LongRec::Starting { .. })
     }
 
     /// A new engine instance: nothing of the old one is in flight any more.
@@ -148,6 +176,7 @@ impl EngineActivity {
             "recording_stopped" if continued => Some(Trigger::LongRecChanged),
             kind @ ("recording_stopped" | "recording_failed") => {
                 self.long = LongRec::Idle;
+                self.stop_requested = false;
                 match self.auto_stop.take() {
                     Some(stop) if kind == "recording_stopped" => Some(Trigger::AutoStopped { game_closed: stop.game_closed }),
                     _ => Some(Trigger::LongRecChanged),
@@ -166,6 +195,7 @@ impl EngineActivity {
         if let LongRec::Starting { since } = self.long {
             if now.duration_since(since) >= START_STALE {
                 self.long = LongRec::Idle;
+                self.stop_requested = false;
             }
         }
         if self.last_screenshot_sent.is_some_and(|t| now.duration_since(t) >= SCREENSHOT_STALE) {
@@ -486,3 +516,7 @@ mod tests {
         assert_eq!(a.long_recording_json_at(t0)["elapsed_secs"], 0.0);
     }
 }
+
+#[cfg(test)]
+#[path = "record_activity_session_tests.rs"]
+mod session_tests;

@@ -148,6 +148,10 @@ pub struct Controller {
     pub(crate) recovery: crate::record_recover::EncoderRecovery,
     /// A recovery restart waiting for the long recording to end early (`record_recover`).
     pub(crate) ending_early: Option<crate::record_recover::EndingEarly>,
+    /// Win+L during a long recording and a session end in progress (`record_session_host`).
+    pub(crate) session_watch: crate::record_session_host::SessionState,
+    /// The clean shutdown already ran (a session end runs it from `WM_ENDSESSION`).
+    shut_down: bool,
 }
 
 /// Entry point. Returns the process exit code.
@@ -249,6 +253,8 @@ pub fn run() -> i32 {
         power: Default::default(),
         recovery: Default::default(),
         ending_early: None,
+        session_watch: Default::default(),
+        shut_down: false,
     };
     if !ctl.can_trace {
         log!("record: FPS needs Performance Log Users (run the installer, then sign in again); stats show FPS as -");
@@ -257,6 +263,7 @@ pub fn run() -> i32 {
     ctl.overlay.sync(&ctl.cfg.overlay);
     ctl.probe_foreground(now, true);
     crate::record_power_win::register();
+    crate::record_session_win::start();
     log!(
         "record: controller up (auto_record={}, buffer={}s, save={}, mic={}, out={:?}, storage cap={} GiB)",
         ctl.cfg.recording.auto_record,
@@ -282,11 +289,14 @@ impl Controller {
             unsafe {
                 MsgWaitForMultipleObjectsEx(None, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             }
-            // Drives the WinEvent hook callback, tray menu, and hotkeys.
-            if app::drain_messages() {
+            // Drives the WinEvent hook callback, tray menu, hotkeys and the session window.
+            if crate::record_session_win::drain_messages(self) {
                 log!("record: WM_QUIT received");
                 self.quit.get_or_insert(QuitReason::WindowsQuit);
                 return 0;
+            }
+            if self.shut_down {
+                return 0; // the session ended (`WM_ENDSESSION`)
             }
             let now = Instant::now();
             while let Ok(ev) = watch_rx.try_recv() {
@@ -308,6 +318,7 @@ impl Controller {
                 return 0;
             }
             self.power_tick(now);
+            self.session_tick(now);
             self.tick(now);
         }
     }
@@ -416,6 +427,16 @@ impl Controller {
     /// overlay (and its frame-timing session) and the UI, then the engine. Only the tray
     /// Quit closes the app; any other quit leaves it open to reconnect to the next recorder.
     fn shutdown(mut self) {
+        self.shutdown_now(crate::supervisor::QUIT_GRACE);
+    }
+
+    /// The shutdown in place, once; `grace` caps the engine's quit. A session end runs it
+    /// from `WM_ENDSESSION` (`record_session_win`).
+    pub(crate) fn shutdown_now(&mut self, grace: Duration) {
+        if std::mem::replace(&mut self.shut_down, true) {
+            return;
+        }
+        crate::record_session_win::stop();
         crate::record_power_win::unregister();
         self.render.stop();
         self.hdr.shutdown();
@@ -428,7 +449,7 @@ impl Controller {
             log!("record: {} leaves the Recall app open", reason.label());
         }
         self.hotkeys = None;
-        self.supervisor.shutdown(crate::supervisor::QUIT_GRACE);
+        self.supervisor.stop(grace);
         log!("record: clean shutdown (pipe lines dropped for stalled clients: {})", self.hub.dropped());
     }
 }

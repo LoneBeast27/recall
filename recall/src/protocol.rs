@@ -147,7 +147,8 @@ pub enum Outbound {
     },
     /// `seconds`/`bytes`: this file. `parts`: files so far, `total_seconds`: all of them,
     /// `gap_seconds`: time not recorded between the parts (0 for one file); `frozen_seconds`:
-    /// time the picture held still after a same-header encoder reopen (0 if none).
+    /// time the picture held still after a same-header encoder reopen (0 if none);
+    /// `locked_seconds`: time the PC sat locked during the recording (`session_locked`; 0 if none).
     /// `continued`: only this part ended (`cause` as above); the recording goes on
     /// in a new file, reported by the next `recording_started`.
     RecordingStopped {
@@ -159,6 +160,7 @@ pub enum Outbound {
         total_seconds: f64,
         gap_seconds: f64,
         frozen_seconds: f64,
+        locked_seconds: f64,
         cause: Option<&'static str>,
     },
     /// `path`: the partial recording that was kept (renamed to its final name),
@@ -265,6 +267,9 @@ pub enum Command {
     /// End a running long recording as failed now, keeping every part (the controller
     /// sends it before restarting a hung engine; the app says "Recording ended early").
     RecordFail { reason: String },
+    /// The Windows session locked (Win+L) or unlocked: a long recording keeps going and
+    /// counts the time (`recording_stopped.locked_seconds`).
+    SessionLocked { locked: bool },
     /// Ask the engine to exit cleanly.
     Quit,
 }
@@ -318,6 +323,13 @@ mod tests {
         // The controller ends a running long recording early before restarting a hung engine.
         let v = serde_json::from_str::<super::Command>(r#"{"cmd":"record_fail","reason":"the encoder isn't responding"}"#);
         assert!(matches!(v, Ok(super::Command::RecordFail { ref reason }) if reason == "the encoder isn't responding"), "not a record_fail");
+    }
+
+    #[test]
+    fn session_locked_parses() {
+        // The controller says when the Windows session locks / unlocks (audit U8).
+        let v = serde_json::from_str::<super::Command>(r#"{"cmd":"session_locked","locked":true}"#);
+        assert!(matches!(v, Ok(super::Command::SessionLocked { locked: true })), "not a session_locked");
     }
 
     fn wire(msg: &Outbound) -> String {

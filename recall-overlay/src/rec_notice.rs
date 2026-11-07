@@ -32,6 +32,9 @@ pub fn cause_text(cause: Option<&str>) -> &'static str {
 /// Time missed between parts, or frozen (a same-header encoder reopen), is shown past this (seconds).
 pub const MISSING_OVER: f64 = 2.0;
 
+/// Time the PC sat locked during the recording (`locked_seconds`) is shown past this (seconds).
+pub const LOCKED_OVER: f64 = 60.0;
+
 /// "7 s", "1:05".
 fn missing(secs: f64) -> String {
     let s = secs.round() as u64;
@@ -62,8 +65,9 @@ pub fn failed_notice(event: &Value) -> Option<RecNotice> {
     Some(RecNotice { tone: Tone::Failure, title: "Recording ended early".into(), text, detail })
 }
 
-/// " · 7 s missing · 40 s frozen" from the event's `gap_seconds` (only past one file) and
-/// `frozen_seconds`, each past [`MISSING_OVER`]; empty when neither is.
+/// " · 7 s missing · 40 s frozen · 12:00 locked" from the event's `gap_seconds` (only past
+/// one file) and `frozen_seconds`, each past [`MISSING_OVER`], and `locked_seconds` past
+/// [`LOCKED_OVER`]; empty when none is.
 fn notes(event: &Value, several: bool) -> String {
     let secs = |key: &str| event.get(key).and_then(Value::as_f64).unwrap_or(0.0);
     let (gap, frozen) = (secs("gap_seconds"), secs("frozen_seconds"));
@@ -73,6 +77,10 @@ fn notes(event: &Value, several: bool) -> String {
     }
     if frozen > MISSING_OVER {
         tail += &format!(" · {} frozen", missing(frozen));
+    }
+    let locked = secs("locked_seconds");
+    if locked > LOCKED_OVER {
+        tail += &format!(" · {} locked", missing(locked));
     }
     tail
 }
@@ -173,5 +181,14 @@ mod tests {
         assert_eq!(failed_notice(&failed).unwrap().text, "Saved G__rec.mp4, G__rec-2.mp4 · 7 s missing · 40 s frozen");
         let quiet = json!({"type":"recording_failed","reason":"x","path":"E:/c/G__rec.mp4","paths":["E:/c/G__rec.mp4"],"gap_seconds":0.0,"frozen_seconds":1.0});
         assert_eq!(failed_notice(&quiet).unwrap().text, "Saved G__rec.mp4", "short spans are not news");
+    }
+
+    /// Audit U8: a recording that ran on while the PC was locked says for how long.
+    #[test]
+    fn the_last_stop_says_how_long_the_pc_was_locked() {
+        let stop = |locked: f64| json!({"type":"recording_stopped","path":"E:/c/G__rec.mp4","seconds":1200.0,"continued":false,
+            "parts":1,"total_seconds":1200.0,"gap_seconds":0.0,"frozen_seconds":0.0,"locked_seconds":locked});
+        assert_eq!(recording_notice("recording_stopped", &stop(720.0), "G__rec.mp4".into()).unwrap().text, "G__rec.mp4 · 20:00 · 12:00 locked");
+        assert_eq!(recording_notice("recording_stopped", &stop(45.0), "G__rec.mp4".into()).unwrap().text, "G__rec.mp4 · 20:00", "a short lock is not news");
     }
 }
