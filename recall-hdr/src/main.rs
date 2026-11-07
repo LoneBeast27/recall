@@ -121,6 +121,8 @@ mod transitions_scope_tests;
 #[cfg(test)]
 mod transitions_restart_tests;
 #[cfg(test)]
+mod transitions_planned_tests;
+#[cfg(test)]
 mod transitions_ghost_tests;
 #[cfg(test)]
 mod transitions_sim;

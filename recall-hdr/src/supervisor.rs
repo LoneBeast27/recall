@@ -145,7 +145,7 @@ impl Supervisor {
     /// Run the engine with `spec` (restarting it if one is live), or stop it
     /// (`None`), for a game switch. Always an intended restart: never a failure, never
     /// backoff. Lines sent from the old engine's `quit` until the next engine is up
-    /// are refused as [`Sent::Switching`].
+    /// are refused as [`Sent::Switching`]; for a stop, [`Sent::Waiting`] (no game follows).
     pub fn retarget(&self, spec: Option<EngineSpec>) {
         self.shared.set_desired(spec, Sent::Switching);
     }
@@ -359,7 +359,10 @@ impl Shared {
         self.desired.lock().unwrap_or_else(|p| p.into_inner()).0
     }
 
+    /// `refusal`: what a line sent while the old engine quits is told; a stop (`None`) is
+    /// always [`Sent::Waiting`]: no engine follows, whatever the cause.
     fn set_desired(&self, spec: Option<EngineSpec>, refusal: Sent) {
+        let refusal = if spec.is_none() { Sent::Waiting } else { refusal };
         let mut g = self.desired.lock().unwrap_or_else(|p| p.into_inner());
         g.0 += 1;
         g.1 = spec;
@@ -389,6 +392,12 @@ impl Shared {
             return refusal; // the engine was told to quit: it would never read this
         }
         if g.queue.as_ref().is_some_and(|queue| queue.send(line)) { Sent::Queued } else { Sent::NotResponding }
+    }
+
+    /// The quit window ended with no engine (a stop to Off, a failed respawn): the
+    /// refusal ends with it, and a line now says the engine is gone, not why it quit.
+    fn end_quitting(&self) {
+        self.child_stdin.lock().unwrap_or_else(|p| p.into_inner()).quitting = None;
     }
 
     /// `quit` takes the queue's reserved slot: a healthy engine behind a full queue still
@@ -480,3 +489,7 @@ mod tests;
 #[cfg(test)]
 #[path = "supervisor_quit_tests.rs"]
 pub(crate) mod quit_tests;
+
+#[cfg(test)]
+#[path = "supervisor_stop_tests.rs"]
+mod stop_tests;
