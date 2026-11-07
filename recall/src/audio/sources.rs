@@ -42,7 +42,7 @@ pub struct SourceSpec {
     #[serde(default)]
     pub gain_db: f32,
     /// Whether the mic-mute hotkey silences this input: `true` a microphone, `false` a line-in
-    /// or capture card, absent = the opened endpoint's form factor decides (`form_factor.rs`).
+    /// or capture card; absent = muted (every config written before the flag, the default mic).
     /// Ignored for other kinds.
     #[serde(default)]
     pub mic_mute: Option<bool>,

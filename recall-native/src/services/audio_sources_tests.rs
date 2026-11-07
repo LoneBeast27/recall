@@ -124,31 +124,35 @@ fn an_input_keeps_its_mic_mute_flag() {
     assert!(to_config(&sources)[1].get("mic_mute").is_none(), "no flag is saved as none");
 }
 
-/// 2026-11-07 audit R2-deep-audio-3: Alt+M mutes only microphones (SPEC A12). "+ Add source"
-/// offers "Microphone" and "Line-in or capture card", each saying so; an input without a flag
-/// (an old config, the default mic) follows its endpoint's form factor, never its name.
+/// 2026-11-07 audit R3-deep-audio-1: an input without a flag (a config written before it, the
+/// default mic) is muted by Alt+M whatever Windows calls its endpoint, as before the flag. Only
+/// "+ Add source" writes a flag: "Microphone" mutes, "Line-in or capture card" keeps its sound.
 #[test]
-fn a_line_in_is_not_muted_by_the_mic_hotkey() {
+fn an_old_input_is_muted_by_the_mic_hotkey_whatever_its_form_factor() {
     use crate::services::audio_devices::DeviceLists;
-    let base = from_config(Some(&json!([{"id": "game", "kind": "game", "name": "Game"}])));
-    let line = with_new_input(&base, false).unwrap();
-    let added = line.last().unwrap();
-    assert_eq!((added.kind, added.mic_mute, added.name.as_str()), (Kind::Input, Some(false), "Line-in"));
-    assert_eq!(with_new_input(&base, true).unwrap().last().unwrap().mic_mute, Some(true));
-    // The form factor (injected: the device lists say which endpoints are microphones).
+    // The form factor (injected): "Line (Box One)" is line-level, so it is not a microphone.
     let lists = DeviceLists {
-        inputs: vec!["Capture In (Box One)".into(), "Mic (Box Two)".into()],
+        inputs: vec!["Line (Box One)".into(), "Mic (Box Two)".into()],
         mic_inputs: vec!["Mic (Box Two)".into()],
         default_input_is_mic: Some(false),
         ..DeviceLists::default()
     };
-    let input = |device: &str, flag: Option<bool>| Source { id: "in-1".into(), kind: Kind::Input, device: device.into(), exe: String::new(), name: "In".into(), enabled: true, gain_db: 0.0, mic_mute: flag };
-    assert!(!mutes(&input("Capture In (Box One)", None), Some(&lists)), "a line-level endpoint keeps its sound");
-    assert!(mutes(&input("Mic (Box Two)", None), Some(&lists)), "a microphone endpoint mutes");
-    assert!(!mutes(&input("", None), Some(&lists)), "the Windows default, by its own form factor");
-    assert!(mutes(&input("Capture In (Box One)", Some(true)), Some(&lists)), "the strip's toggle wins");
-    assert!(!mutes(&input("Mic (Box Two)", Some(false)), Some(&lists)));
-    assert!(mutes(&input("Capture In (Box One)", None), None), "lists not read yet: shown as muted");
+    let old = from_config(Some(&json!([{"id": "mic", "kind": "input", "name": "Mic", "device": "Line (Box One)"}, {"id": "in-2", "kind": "input", "name": "Default"}])));
+    assert_eq!((old[0].mic_mute, old[1].mic_mute), (None, None));
+    assert!(mutes(&old[0]), "an old line-level input is muted");
+    assert!(mutes(&old[1]), "an old input on a line-level Windows default is muted");
+    // The form factor is only a hint in the strip menu.
+    assert!(windows_says_not_a_mic(&old[0], Some(&lists)) && windows_says_not_a_mic(&old[1], Some(&lists)));
+    let mic_endpoint = Source { device: "Mic (Box Two)".into(), ..old[0].clone() };
+    assert!(!windows_says_not_a_mic(&mic_endpoint, Some(&lists)), "a microphone endpoint: no hint");
+    assert!(!windows_says_not_a_mic(&old[0], None), "lists not read yet: no hint");
+    let base = from_config(Some(&json!([{"id": "game", "kind": "game", "name": "Game"}])));
+    let line = with_new_input(&base, false).unwrap();
+    let added = line.last().unwrap();
+    assert_eq!((added.kind, added.mic_mute, added.name.as_str()), (Kind::Input, Some(false), "Line-in"));
+    assert!(!mutes(added), "a new line-in keeps its sound");
+    let mic = with_new_input(&base, true).unwrap();
+    assert!(mutes(mic.last().unwrap()), "a new microphone is muted");
 }
 
 /// 2026-11-07 audit R2-deep-audio-5: a repeated id (case-insensitive) is shown once, as the

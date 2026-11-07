@@ -1,15 +1,14 @@
-//! Whether an input follows the mic-mute hotkey when its source does not say: from the
-//! endpoint's Windows form factor (`PKEY_AudioEndpoint_FormFactor`), never from its name
-//! (SPEC A12). A copy of the recorder's rule (`recall` `audio/form_factor.rs`), so the strip's
-//! "Muted by the mic hotkey" shows what Alt+M does.
+//! Whether Windows calls an input endpoint a microphone (`PKEY_AudioEndpoint_FormFactor`). Only
+//! a hint in the strip menu ("Windows reports this as a line-level input"): Alt+M follows the
+//! strip's own flag and mutes an input without one (R3-deep-audio-1), never by form factor.
 
 /// `EndpointFormFactor` values (mmdeviceapi.h).
 const MICROPHONE: u32 = 4;
 const HEADSET: u32 = 5;
 const HANDSET: u32 = 6;
 
-/// A microphone, headset or handset mutes; a line-level input, S/PDIF, an HDMI/DisplayPort
-/// capture or an unknown form factor keeps its sound. `None` (unreadable) mutes.
+/// A microphone, headset or handset is a mic; a line-level input, S/PDIF, an HDMI/DisplayPort
+/// capture or an unknown form factor is not a microphone. `None` (unreadable) counts as one.
 pub fn mutes_by_default(form: Option<u32>) -> bool {
     match form {
         None => true,
@@ -38,7 +37,6 @@ pub fn read(id: &str) -> Option<u32> {
 mod tests {
     use super::mutes_by_default;
 
-    /// Same table as `recall` `audio_tests.rs`.
     #[test]
     fn only_microphone_form_factors_mute_by_default() {
         for (form, mutes) in [(Some(4), true), (Some(5), true), (Some(6), true), (Some(2), false), (Some(8), false), (Some(9), false), (Some(10), false), (None, true)] {
