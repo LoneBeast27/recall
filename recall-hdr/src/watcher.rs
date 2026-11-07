@@ -46,6 +46,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     WINEVENT_SKIPOWNPROCESS, WS_CAPTION,
 };
 
+use crate::game_library::Library;
 use crate::log;
 
 /// Half-tolerance (px) when deciding a window "covers" its monitor. Borderless
@@ -77,11 +78,14 @@ pub struct WatchEvent {
     pub fullscreen: bool,
     /// True iff `fullscreen` AND that monitor is the managed one (HDR rules).
     pub fullscreen_on_target: bool,
-    /// True iff the executable lives in a Steam library (`steamapps\common`)
-    /// or another launcher's game library (Epic, GOG, Ubisoft, EA, Battle.net,
-    /// itch: `launcher_libraries`): the record mode's "is this a game?" signal
-    /// for windowed games, and game evidence against the private list.
+    /// True iff the executable lives in a Steam library (`steamapps\common`):
+    /// the record mode's "is this a game?" signal for windowed games, and game
+    /// evidence against the private list (`game_library`).
     pub steam_game: bool,
+    /// True iff it lives in another launcher's game folder (Epic, GOG,
+    /// Ubisoft, EA, Battle.net, itch: `launcher_libraries`): a windowed game
+    /// like `steam_game`, but no evidence against the private list (R7-detect-1).
+    pub launcher_game: bool,
     /// True iff the identity (pid, exe) was resolved by Recall rather than read
     /// off the window: a UWP frame named by its hosted CoreWindow's process
     /// (G6). Such an identity is a game only on positive evidence (a known
@@ -105,6 +109,7 @@ impl WatchEvent {
             fullscreen: false,
             fullscreen_on_target: false,
             steam_game: false,
+            launcher_game: false,
             hosted: false,
             hwnd,
         }
@@ -122,24 +127,8 @@ pub(crate) fn event_or_unknown(hwnd: isize, pid: u32, built: Option<WatchEvent>)
     built.or_else(|| (hwnd != 0 && pid != 0 && pid != std::process::id()).then(|| WatchEvent::unknown(pid, hwnd)))
 }
 
-/// Whether an executable path is a game in a Steam library. Steamworks Shared
-/// (the redistributable installers Steam runs before a first launch) is not.
-pub(crate) fn is_steam_library_path(path: &str) -> bool {
-    let path = path.to_ascii_lowercase().replace('/', "\\");
-    path.contains("\\steamapps\\common\\") && !path.contains("\\steamapps\\common\\steamworks shared\\")
-}
-
-/// [`is_steam_library_path`] or a known launcher's game library (the cached
-/// folders of `launcher_libraries`): `WatchEvent::steam_game`.
-pub(crate) fn is_game_library_path(path: &str) -> bool {
-    is_steam_library_path(path) || crate::launcher_libraries::is_launcher_library_path(path)
-}
-
-/// [`is_game_library_path`] against given launcher folders (tests).
 #[cfg(test)]
-pub(crate) fn is_game_library_path_in(path: &str, roots: &[String]) -> bool {
-    is_steam_library_path(path) || crate::launcher_libraries::is_under(path, roots)
-}
+pub(crate) use crate::game_library::is_steam_library_path;
 
 /// The single global slot the callback reads from. `SetWinEventHook` has no
 /// user-data pointer, so the callback cannot be handed a `&Watcher`; it must reach
@@ -366,7 +355,7 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
         return None;
     }
     let frame_pid = pid;
-    let (pid, (exe_stem, exe_name, steam_game)) = identity::hosted_identity(hwnd, pid, exe_identity(pid)?);
+    let (pid, (exe_stem, exe_name, library)) = identity::hosted_identity(hwnd, pid, exe_identity(pid)?);
     if exe_stem.trim().is_empty() {
         return None; // no stem -> not a real app window we can classify
     }
@@ -379,7 +368,8 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
         title: window_title(hwnd),
         fullscreen,
         fullscreen_on_target: fullscreen && monitor == target_monitor,
-        steam_game,
+        steam_game: library == Library::Steam,
+        launcher_game: library == Library::Launcher,
         hosted: pid != frame_pid,
         hwnd: hwnd.0 as isize,
     })

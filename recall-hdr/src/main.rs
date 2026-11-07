@@ -106,6 +106,7 @@ mod record_transition;
 mod record_tray;
 mod render_probe;
 mod render_verdict;
+mod game_library;
 mod ghost_window;
 mod gpu_games;
 mod rules;

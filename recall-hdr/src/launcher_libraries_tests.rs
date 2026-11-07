@@ -1,6 +1,7 @@
 use super::*;
 use crate::config::Config;
-use crate::watcher::{is_game_library_path_in, WatchEvent};
+use crate::game_library::{game_library_in, is_game_library_path_in, Library};
+use crate::watcher::WatchEvent;
 use std::collections::HashMap;
 
 /// Subkeys of one registry key: (name, values).
@@ -19,6 +20,12 @@ impl Fixture {
     fn file(mut self, dir: &str, name: &str, text: &str) -> Self {
         self.dirs.entry(dir.to_string()).or_default().push(name.to_string());
         self.files.insert(format!("{dir}\\{name}"), text.to_string());
+        self
+    }
+    /// `game` in `parent` with itch's install receipt (`.itch\receipt.json.gz`).
+    fn receipt(mut self, parent: &str, game: &str) -> Self {
+        self.dirs.entry(parent.to_string()).or_default().push(game.to_string());
+        self.dirs.entry(format!("{parent}\\{game}\\.itch")).or_default().push("receipt.json.gz".to_string());
         self
     }
     fn key(mut self, path: &str, sub: &str, values: &[(&str, &str)]) -> Self {
@@ -45,6 +52,8 @@ impl LibrarySources for Fixture {
 }
 
 const EPIC: &str = "X:\\PD\\Epic\\EpicGamesLauncher\\Data\\Manifests";
+const GOG: &str = "SOFTWARE\\WOW6432Node\\GOG.com\\Games";
+const ITCH: &str = "X:\\Users\\me\\AppData\\Roaming\\itch";
 const UNINSTALL: &str = "SOFTWARE\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall";
 
 /// One install per launcher, on made-up drives (nothing hard-coded in the code).
@@ -68,7 +77,8 @@ fn machine() -> Fixture {
         .key(UNINSTALL, "Battle.net", &[("Publisher", "Blizzard Entertainment"), ("InstallLocation", "K:\\Battle.net")])
         .key(UNINSTALL, "Notepad++", &[("Publisher", "Notepad++ Team"), ("InstallLocation", "X:\\Program Files\\Notepad++")])
         .key(UNINSTALL, "BadGame", &[("Publisher", "Blizzard Entertainment"), ("InstallLocation", "C:\\")])
-        .file(&format!("{itch}\\apps"), "celeste", "")
+        .receipt(&format!("{itch}\\apps"), "celeste")
+        .receipt("L:\\itch games", "some-jam-game")
         .file(itch, "preferences.json", r#"{"installLocations":{"a1":{"path":"L:\\itch games"}}}"#)
 }
 
@@ -125,7 +135,8 @@ fn missing_launchers_and_malformed_data_read_as_nothing() {
     assert!(itch_locations("[1,2]").is_empty());
 }
 
-/// A plain (windowed) window of an exe at `path`, `steam_game` as the watcher sets it.
+/// A plain (windowed) window of an exe at `path`, `steam_game` and
+/// `launcher_game` as the watcher sets them.
 fn event_at(path: &str, stem: &str, roots: &[String]) -> WatchEvent {
     WatchEvent {
         pid: 70,
@@ -134,28 +145,114 @@ fn event_at(path: &str, stem: &str, roots: &[String]) -> WatchEvent {
         title: stem.into(),
         fullscreen: false,
         fullscreen_on_target: false,
-        steam_game: is_game_library_path_in(path, roots),
+        steam_game: game_library_in(path, roots) == Library::Steam,
+        launcher_game: game_library_in(path, roots) == Library::Launcher,
         hosted: false,
         hwnd: 0x700,
     }
 }
 
 #[test]
-fn a_launcher_game_counts_on_every_live_route() {
+fn a_launcher_game_is_a_candidate_but_does_not_beat_the_private_list() {
+    use crate::record_target_gate::adopted_candidate;
+    use crate::record_target_rules::{classify_event, followable, game_evidence, skips_render_check};
     let roots = collect_roots(&machine());
     let cfg = Config::default();
-    // An Epic game called Element.exe (on the private list), windowed.
-    let ev = event_at("G:\\Epic Games\\RocketLeague\\Element.exe", "Element", &roots);
-    assert!(crate::record_target::game_evidence(&ev));
-    assert!(crate::record_target::classify_event(&ev, &cfg).is_some(), "foreground route");
-    assert!(crate::record_target_gate::adopted_candidate(&ev, &cfg, (1280, 720)).is_some(), "adoption route");
-    assert!(crate::record_target::is_target_with(&ev.exe_stem, true, crate::record_target::game_evidence(&ev), &cfg), "follow route");
-    let fs = WatchEvent { fullscreen: true, fullscreen_on_target: true, ..ev.clone() };
-    assert_ne!(crate::rules::classify(&crate::app::foreground_of(&fs), &cfg), crate::types::AppKind::NonGame, "HDR rules");
-    // The same exe outside any library stays private everywhere.
-    let outside = event_at("D:\\Apps\\Element\\Element.exe", "Element", &roots);
-    assert!(crate::record_target::classify_event(&outside, &cfg).is_none());
-    assert!(crate::record_target_gate::adopted_candidate(&outside, &cfg, (1280, 720)).is_none());
+    // An unknown exe in an Epic install, windowed: a candidate, no render check.
+    let game = event_at("G:\\Epic Games\\RocketLeague\\Binaries\\Win64\\RocketLeague.exe", "RocketLeague", &roots);
+    assert!(classify_event(&game, &cfg).is_some(), "foreground route");
+    assert!(skips_render_check(&game, &cfg));
+    assert!(adopted_candidate(&game, &cfg, (1280, 720)).is_some(), "adoption route");
+    // R7-detect-1 (B): a private-list stem inside a GOG install is not a target.
+    let chat = event_at("H:\\GOG Games\\Witcher 3\\Element.exe", "Element", &roots);
+    assert!(!game_evidence(&chat), "launcher evidence does not beat the private list");
+    assert!(classify_event(&chat, &cfg).is_none(), "foreground route");
+    assert!(adopted_candidate(&chat, &cfg, (1280, 720)).is_none(), "adoption route");
+    assert!(!followable(&chat, &cfg), "follow route");
+    let fs = WatchEvent { fullscreen: true, fullscreen_on_target: true, ..chat.clone() };
+    assert!(classify_event(&fs, &cfg).is_none(), "fullscreen");
+    assert_eq!(crate::rules::classify(&crate::app::foreground_of(&fs), &cfg), crate::types::AppKind::NonGame, "HDR rules");
+    // Steam still beats it, and an opt-in still records the GOG one.
+    let steam = event_at("Z:\\SteamLibrary\\steamapps\\common\\Game\\Element.exe", "Element", &roots);
+    assert!(classify_event(&steam, &cfg).is_some(), "Steam evidence");
+    let mut listed = Config::default();
+    listed.detect.fullscreen_games.push("Element".into());
+    assert!(classify_event(&fs, &listed).is_some(), "fullscreen_games opt-in");
+}
+
+#[test]
+fn itch_counts_only_folders_with_an_install_receipt() {
+    let dl = "X:\\Users\\me\\Downloads";
+    let prefs = r#"{"installLocations":{"a1":{"path":"L:\\itch games"},"dl":{"path":"X:\\Users\\me\\Downloads"}}}"#;
+    let f = machine().file(ITCH, "preferences.json", prefs).file(dl, "Telegram", "").receipt(dl, "jam");
+    let f = f.file(&format!("{ITCH}\\apps"), "stray", "");
+    let roots = collect_roots(&f);
+    let cfg = Config::default();
+    // A portable Telegram next to an itch install location in Downloads.
+    let telegram = event_at("X:\\Users\\me\\Downloads\\Telegram\\Telegram.exe", "Telegram", &roots);
+    assert!(!is_game_library_path_in("X:\\Users\\me\\Downloads\\Telegram\\Telegram.exe", &roots), "{roots:?}");
+    assert!(crate::record_target::classify_event(&telegram, &cfg).is_none(), "not a target");
+    let tool = event_at("X:\\Users\\me\\Downloads\\SomeTool\\tool.exe", "tool", &roots);
+    assert!(crate::record_target::classify_event(&tool, &cfg).is_none(), "an unknown windowed exe in Downloads");
+    assert!(!is_game_library_path_in(&format!("{ITCH}\\apps\\stray\\x.exe"), &roots), "apps\\stray: no receipt");
+    for exe in ["X:\\Users\\me\\Downloads\\jam\\Jam.exe", "L:\\itch games\\some-jam-game\\Game.exe", &format!("{ITCH}\\apps\\celeste\\Celeste.exe")] {
+        assert!(is_game_library_path_in(exe, &roots), "{exe}: receipted install");
+    }
+}
+
+#[test]
+fn shared_and_profile_folders_are_never_a_library() {
+    let mut f = machine();
+    f.env.insert("ProgramFiles(x86)".into(), "X:\\Program Files (x86)".into());
+    f.env.insert("LOCALAPPDATA".into(), "X:\\Users\\me\\AppData\\Local".into());
+    let broad = [
+        "X:\\Users\\me\\Downloads",
+        "X:\\Users\\me\\Documents",
+        "X:\\Users\\me\\Desktop",
+        "X:\\Users\\me\\Videos",
+        "X:\\Users\\me",
+        "X:\\Users",
+        "X:\\Users\\me\\AppData",
+        "X:\\Users\\me\\AppData\\LocalLow",
+        "X:\\Users\\me\\AppData\\Local\\Programs",
+        "X:\\Users\\other\\Downloads",
+        "X:\\Program Files",
+        "X:\\Program Files (x86)",
+        "D:\\",
+    ];
+    for (i, p) in broad.iter().enumerate() {
+        f = f.key(GOG, &format!("b{i}"), &[("path", p)]);
+    }
+    let f = f.key(GOG, "foo", &[("path", "D:\\Games\\Foo")]);
+    let roots = collect_roots(&f);
+    for p in broad {
+        assert!(!is_game_library_path_in(&format!("{p}\\Telegram\\Telegram.exe"), &roots), "{p}: too broad");
+    }
+    // A GOG game in D:\Games\Foo with that exact install path is game evidence.
+    let foo = event_at("D:\\Games\\Foo\\Foo.exe", "Foo", &roots);
+    assert!(crate::record_target::classify_event(&foo, &Config::default()).is_some(), "windowed GOG game");
+    // A profile elsewhere: its ancestors and children are broad too.
+    let mut moved = Fixture::default();
+    moved.env.insert("USERPROFILE".into(), "D:\\Profiles\\me".into());
+    let moved = moved.key(GOG, "a", &[("path", "D:\\Profiles")]).key(GOG, "b", &[("path", "D:\\Profiles\\me\\Downloads")]);
+    assert!(collect_roots(&moved).is_empty(), "{:?}", collect_roots(&moved));
+}
+
+#[test]
+fn prerequisite_installers_in_a_game_folder_are_not_evidence() {
+    for exe in [
+        "G:\\Epic Games\\RocketLeague\\Engine\\Extras\\Redist\\en-us\\UEPrereqSetup_x64.exe",
+        "H:\\GOG Games\\Witcher 3\\__redist\\DirectX\\DXSETUP.exe",
+        "J:\\EA Games\\Apex\\__Installer\\Cleanup.exe",
+        "Z:\\SteamLibrary\\steamapps\\common\\Game\\_CommonRedist\\vcredist\\2019\\VC_redist.x64.exe",
+        "Z:\\SteamLibrary\\steamapps\\common\\Game\\Redist\\setup.exe",
+        "Z:\\SteamLibrary\\steamapps\\common\\Game\\DirectX\\DXSETUP.exe",
+        "Z:\\SteamLibrary\\steamapps\\common\\Game\\vcredist\\vc.exe",
+    ] {
+        assert!(!exe_in(exe), "{exe}");
+    }
+    assert!(exe_in("Z:\\SteamLibrary\\steamapps\\common\\Redist Heroes\\game.exe"), "a whole segment, not a substring");
+    assert!(exe_in("Z:\\SteamLibrary\\steamapps\\common\\Game\\redist.exe"), "the exe's own name is not a folder");
 }
 
 #[test]

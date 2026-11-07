@@ -107,12 +107,10 @@ impl RenderCheck {
 
     /// The tracker's question for a due candidate.
     fn admit(&mut self, t: &Target, session_pid: Option<u32>, now: Instant) -> Admit {
-        // First: a private-list window is never committed, whatever else holds.
-        if self.private.is_watched(t.pid, t.hwnd) {
-            return self.admit_private(t, now);
-        }
-        if !self.needed_for(t, session_pid) {
-            return Admit::Commit;
+        match admit_route(self.private.is_watched(t.pid, t.hwnd), self.needed_for(t, session_pid)) {
+            Route::Private => return self.admit_private(t, now),
+            Route::Commit => return Admit::Commit,
+            Route::Check => {}
         }
         // The vendor's answer can arrive while the candidate waits.
         if self.games.for_pid(t.pid, &t.exe) == Some(true) {
@@ -278,9 +276,41 @@ pub(crate) fn needs_check(plain: bool, vendor: Option<bool>) -> bool {
     plain && vendor != Some(true)
 }
 
+/// Which way [`RenderCheck::admit`] takes a due candidate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Route {
+    /// A watched private-list window: never committed (`admit_private`).
+    Private,
+    /// No render check needed: the 300 ms rule commits it.
+    Commit,
+    /// The render check decides.
+    Check,
+}
+
+/// `watched` = the candidate is the watched private-list window, `needed` =
+/// it needs the render check. A watched window takes the private route first,
+/// whatever else holds, so a game verdict never commits it (R7-detect-4).
+pub(crate) fn admit_route(watched: bool, needed: bool) -> Route {
+    if watched {
+        Route::Private
+    } else if needed {
+        Route::Check
+    } else {
+        Route::Commit
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::needs_check;
+    use super::{admit_route, needs_check, Route};
+
+    #[test]
+    fn a_watched_private_window_never_takes_a_committing_route() {
+        assert_eq!(admit_route(true, true), Route::Private, "watched wins over the check");
+        assert_eq!(admit_route(true, false), Route::Private, "watched wins over the 300 ms rule");
+        assert_eq!(admit_route(false, true), Route::Check);
+        assert_eq!(admit_route(false, false), Route::Commit);
+    }
 
     #[test]
     fn a_vendor_listed_game_skips_the_render_check() {

@@ -36,11 +36,13 @@ powershell -NoProfile -File scripts\install.ps1
   ["Discord", "Zoom.exe"]`): that records it only while it is fullscreen. An `[[overrides]]`
   entry (`exe = "zoom"`, `kind = "sdr_game"`) records every window of that exe instead, windowed
   ones too (a meeting toolbar or a chat window). `fullscreen_games` is only in config.toml, not in
-  Settings. A game in a Steam, Epic, GOG, Ubisoft Connect, EA app, Battle.net or itch library
-  records even when its exe shares such an app's name; those libraries are read from the
-  launchers themselves. When a blocked fullscreen app renders like a game for over 20 s, the
-  notice says "Not recording <exe>: add it as a game in Settings" (once per exe per run; the log
-  names every blocked exe).
+  Settings. A game in a Steam library (`steamapps\common`) records even when its exe shares such
+  an app's name. A game in an Epic, GOG, Ubisoft Connect, EA app, Battle.net or itch install
+  folder (read from the launchers themselves, one folder per installed game) records windowed
+  too, but one named like a call or chat app needs the opt-in above. When a blocked fullscreen
+  app renders like a game (its own flip or exclusive fullscreen, not a composed video call) for
+  over 20 s, the notice says "Not recording <exe>: add it as a game in Settings" (once per exe
+  per run; the log names every blocked exe).
 - **Alt+N** saves the last 2 minutes (Settings → Clip → Replay length). A soft tick confirms the
   press at once and a chime plays when the clip is safe; the small in-game notice shows it too.
   Clips are written to the SSD first (about a second) and moved to the clip folder in the
