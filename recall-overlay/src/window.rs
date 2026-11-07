@@ -93,6 +93,13 @@ pub fn picture(full: Rect, window: Option<Rect>, client: Option<Rect>, on_window
     }
 }
 
+/// The window's HUD scans place the island only when the island's area lies
+/// on the game picture they measured (else the area fell back to the monitor
+/// corners: a small window).
+pub fn scans_apply(area: Rect, picture: Rect) -> bool {
+    area.left >= picture.left && area.top >= picture.top && area.right <= picture.right && area.bottom <= picture.bottom
+}
+
 fn covers(window: Rect, full: Rect) -> bool {
     window.left <= full.left && window.top <= full.top && window.right >= full.right && window.bottom >= full.bottom
 }
@@ -241,5 +248,20 @@ mod tests {
     fn the_client_rect_is_both_mapped_corners() {
         let r = client_from_points(POINT { x: 150, y: 150 }, POINT { x: 2070, y: 1230 });
         assert_eq!(r, rect(150, 150, 2070, 1230));
+    }
+
+    #[test]
+    fn a_small_windows_scans_never_place_the_island_on_the_monitor() {
+        let (full, work) = (rect(0, 0, 2560, 1440), rect(0, 0, 2560, 1392));
+        let shape = |client: Rect| {
+            let area = island_area(full, work, Some(client), Some(client), true);
+            scans_apply(area, picture(full, Some(client), Some(client), true, area))
+        };
+        assert!(!shape(rect(100, 100, 740, 460)), "640 x 360 on 1440p: the monitor corners, not the window's grid");
+        assert!(shape(rect(100, 100, 900, 550)), "800 x 450: on the game picture");
+        assert!(shape(rect(1000, 600, 2600, 1500)), "clipped by the screen edge, still the picture");
+        assert!(!shape(rect(2000, 1000, 3280, 1720)), "hanging off the screen: the work area");
+        assert!(shape(full), "a covering game");
+        assert!(scans_apply(work, work), "a fixed corner or the desktop");
     }
 }

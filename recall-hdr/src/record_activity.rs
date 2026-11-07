@@ -12,7 +12,9 @@ use serde_json::{json, Value};
 
 use crate::record_engine::Busy;
 
-/// A save with no `saved` / `save_failed` after this is assumed lost.
+/// Saves in flight with no `saved` / `save_failed` this long after the queue
+/// started or the engine last answered one are assumed lost (one window for
+/// the queue while the engine keeps answering, not one per save).
 pub const SAVE_STALE: Duration = Duration::from_secs(120);
 /// A `record_start` with no `recording_started` / `_failed` after this is dropped
 /// (the engine's own keyframe wait is 30 s).
@@ -50,7 +52,8 @@ pub struct AutoStop {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineActivity {
     pending_saves: u32,
-    last_save_sent: Option<Instant>,
+    /// When the queue of saves started, or the engine last answered one of it.
+    save_progress: Option<Instant>,
     /// Screenshots sent and not yet reported (their PNGs are still being written).
     pending_screenshots: u32,
     last_screenshot_sent: Option<Instant>,
@@ -62,7 +65,7 @@ impl Default for EngineActivity {
     fn default() -> Self {
         EngineActivity {
             pending_saves: 0,
-            last_save_sent: None,
+            save_progress: None,
             pending_screenshots: 0,
             last_screenshot_sent: None,
             long: LongRec::Idle,
@@ -94,9 +97,22 @@ pub fn lost_save_event() -> String {
 }
 
 impl EngineActivity {
+    /// A save went to the engine. A save queued behind others waits in their
+    /// window: only a new queue (or an answer) starts one.
     pub fn save_sent(&mut self, now: Instant) {
+        self.expire_saves(now);
+        if self.pending_saves == 0 {
+            self.save_progress = Some(now);
+        }
         self.pending_saves += 1;
-        self.last_save_sent = Some(now);
+    }
+
+    /// Saves whose window ran out are lost: an engine that keeps answering
+    /// never gets here while saves still write.
+    fn expire_saves(&mut self, now: Instant) {
+        if self.save_progress.is_some_and(|t| now.duration_since(t) >= SAVE_STALE) {
+            self.pending_saves = 0;
+        }
     }
 
     /// `cmd` (`engine_command`) went to the engine: a long-recording start or
@@ -174,12 +190,21 @@ impl EngineActivity {
         }
     }
 
+    /// One engine event as it arrives at `now` (the live path): a save's
+    /// answer shows the engine alive, so the saves still queued get a new window.
+    pub fn on_engine_event(&mut self, ev: &Value, unix_now: f64, now: Instant) -> Option<Trigger> {
+        let answer = matches!(ev.get("type").and_then(Value::as_str), Some("saved" | "save_failed"));
+        let trigger = self.on_event(ev, unix_now);
+        if answer && self.pending_saves > 0 {
+            self.save_progress = Some(now);
+        }
+        trigger
+    }
+
     /// Saves or a screenshot in flight, or a long recording starting / running: an engine
     /// restart now would lose work.
     pub fn busy(&mut self, now: Instant) -> bool {
-        if self.last_save_sent.is_some_and(|t| now.duration_since(t) >= SAVE_STALE) {
-            self.pending_saves = 0;
-        }
+        self.expire_saves(now);
         if let LongRec::Starting { since } = self.long {
             if now.duration_since(since) >= START_STALE {
                 self.long = LongRec::Idle;
@@ -423,58 +448,6 @@ mod tests {
     }
 
     #[test]
-    fn a_screenshot_is_refused_while_a_closed_game_drains() {
-        let a = EngineActivity::default();
-        assert_eq!(a.record_refusal("screenshot", true), Some(DRAIN_SCREENSHOT_REASON), "the closed game's last frame");
-        assert_eq!(a.record_refusal("screenshot", false), None, "on target it is taken");
-        assert_eq!(a.record_refusal("bookmark", true), None);
-    }
-
-    #[test]
-    fn a_screenshot_in_flight_holds_a_retarget_until_reported_or_stale() {
-        use crate::record_engine::{EnginePlanner, EngineTarget, Step, EXIT_LINGER};
-        use crate::record_target::Target;
-        let t0 = Instant::now();
-        let s = Duration::from_secs;
-        let win = |pid, hwnd| EngineTarget::Window(Target { hwnd, pid, name: "G".into(), exe: "G.exe".into() });
-        let (mut p, mut a) = (EnginePlanner::new(EXIT_LINGER), EngineActivity::default());
-        assert_eq!(p.step(&win(7, 1), t0, a.retarget_busy(t0)), Step::Apply(win(7, 1)));
-        a.command_sent("screenshot", t0);
-        assert!(a.busy(t0), "a settings restart waits for the PNG");
-        assert_eq!(p.step(&win(8, 2), t0 + s(1), a.retarget_busy(t0 + s(1))), Step::Held, "a new game waits for the PNG");
-        a.on_event(&json!({"type":"screenshot","path":"G.png"}), 0.0);
-        assert!(!a.busy(t0 + s(1)));
-        assert_eq!(p.step(&win(8, 2), t0 + s(1), a.retarget_busy(t0 + s(1))), Step::Apply(win(8, 2)));
-        a.command_sent("screenshot", t0 + s(2));
-        a.on_event(&json!({"type":"screenshot_failed","reason":"r"}), 0.0);
-        assert!(!a.busy(t0 + s(2)), "a failed screenshot is over too");
-        a.command_sent("screenshot", t0 + s(3));
-        assert!(a.busy(t0 + s(3) + SCREENSHOT_STALE - Duration::from_millis(1)));
-        assert!(!a.busy(t0 + s(3) + SCREENSHOT_STALE), "a lost screenshot does not block forever");
-        assert_eq!(a.retarget_busy(t0 + s(3) + SCREENSHOT_STALE), Busy::default());
-    }
-
-    #[test]
-    fn screenshots_in_flight_are_counted_and_go_stale_after_60_s() {
-        let t0 = Instant::now();
-        let s = Duration::from_secs;
-        let mut a = EngineActivity::default();
-        a.command_sent("screenshot", t0);
-        a.command_sent("screenshot", t0 + s(1));
-        a.on_event(&json!({"type":"screenshot","path":"a.png"}), 0.0);
-        assert!(a.busy(t0 + s(1)), "the second PNG is still being written");
-        assert!(a.retarget_busy(t0 + s(1)).saving, "and it holds a retarget");
-        a.on_event(&json!({"type":"screenshot_failed","reason":"r"}), 0.0);
-        assert!(!a.busy(t0 + s(1)), "both reported");
-        a.on_event(&json!({"type":"screenshot","path":"x.png"}), 0.0);
-        assert!(!a.busy(t0 + s(1)), "a stray report does not underflow");
-        assert_eq!(SCREENSHOT_STALE, s(60), "a PNG can go to a sleeping hard drive");
-        a.command_sent("screenshot", t0 + s(2));
-        assert!(a.busy(t0 + s(2) + s(59)), "a slow disk is not a lost screenshot");
-        assert!(!a.busy(t0 + s(2) + SCREENSHOT_STALE), "a lost one does not block forever");
-    }
-
-    #[test]
     fn a_fresh_engine_clears_everything() {
         let t0 = Instant::now();
         let mut a = EngineActivity::default();
@@ -519,3 +492,7 @@ mod tests {
         assert_eq!(a.long_recording_json_at(t0)["elapsed_secs"], 0.0);
     }
 }
+
+#[cfg(test)]
+#[path = "record_activity_queue_tests.rs"]
+mod queue_tests;

@@ -28,6 +28,7 @@ use crate::reducer::Reducer;
 use crate::render::{Layers, Outgoing, Renderer};
 use crate::smoke::Smoke;
 use crate::spot_edit::{Editor, LookBox, SavedSpot};
+use crate::stats::gpu_watch::GpuBackoff;
 use crate::stats::{StatsPoller, StatsSnapshot};
 use crate::stats_gate::StatsGate;
 use crate::trace::Trace;
@@ -106,6 +107,8 @@ pub struct App {
     /// This base tick's look at the target's monitor and area (`probe_place`).
     place_probe: Option<crate::window::Where>,
     poller: Option<StatsPoller>,
+    /// The last poller's NVML back-off, kept across pill showings.
+    gpu_backoff: Option<GpuBackoff>,
     stats_gate: StatsGate,
     last_poll: Option<Instant>,
     pub stats: StatsSnapshot,
@@ -154,6 +157,7 @@ impl App {
             placed: None,
             place_probe: None,
             poller: None,
+            gpu_backoff: None,
             stats_gate: StatsGate::default(),
             last_poll: None,
             stats: StatsSnapshot::default(),
@@ -240,7 +244,7 @@ impl App {
         let can_show = island::stats_shown(view, session, in_game);
         if !self.stats_gate.keep(session.overlay_stats, can_show, self.poller.is_some(), now) {
             self.last_poll = None;
-            let stopped = self.poller.take().is_some();
+            let stopped = self.poller.take().map(|p| self.gpu_backoff = Some(p.gpu_backoff())).is_some();
             let cleared = self.stats != StatsSnapshot::default();
             self.stats = StatsSnapshot::default();
             return stopped || cleared;
@@ -253,7 +257,8 @@ impl App {
         if self.last_poll.is_some_and(|at| now.saturating_duration_since(at) < POLL_EVERY) {
             return false;
         }
-        let poller = self.poller.get_or_insert_with(StatsPoller::start);
+        let gpu = self.gpu_backoff;
+        let poller = self.poller.get_or_insert_with(|| StatsPoller::start(gpu));
         let next = poller.poll(pid);
         if let Some(note) = poller.take_note() {
             self.trace.note("frame timing", note);

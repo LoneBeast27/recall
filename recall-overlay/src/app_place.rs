@@ -11,7 +11,7 @@ use super::{App, Placed};
 use crate::dynamic::{self, HudCache, HudGrid};
 use crate::placement::{self, Anchor, Spot};
 use crate::spot_edit::{self, effective};
-use crate::window::{target_monitor, Where};
+use crate::window::{scans_apply, target_monitor, Where};
 use crate::zorder::game_in_front;
 
 impl App {
@@ -31,7 +31,8 @@ impl App {
             // Scans are kept per picture shape (the shape the engine measured):
             // a landscape grid never places a portrait window.
             let shaped = dynamic::shape_key(&session.hud_key(), picture.aspect());
-            let scanned = (!session.desktop).then(|| self.hud_cache.grid(&shaped)).flatten();
+            // A small window's island sits on the monitor corners: its scans do not map there.
+            let scanned = (!session.desktop && scans_apply(area, picture)).then(|| self.hud_cache.grid(&shaped)).flatten();
             let current = self.placed.as_ref().filter(|p| p.key == key).map(|p| p.spot.anchor);
             // Dynamic: a spot the user placed (or is placing) wins over the HUD pick.
             let placed_by_user = (!session.desktop && self.dynamic())
@@ -85,11 +86,12 @@ impl App {
     }
 
     /// The current target's scan key, `<exe stem>@<shape>` of the game picture
-    /// it was placed on ("" until it is placed, and for the desktop).
+    /// it was placed on ("" until it is placed, for the desktop, and for a
+    /// window too small for its scans to place the island: no probes then).
     fn hud_cache_key(&self) -> String {
         let session = self.reducer.session();
         let game = session.game_key();
-        match self.placed.as_ref().filter(|p| p.key == game && !session.desktop) {
+        match self.placed.as_ref().filter(|p| p.key == game && !session.desktop && scans_apply(p.area, p.picture)) {
             Some(p) => dynamic::shape_key(&session.hud_key(), p.picture.aspect()),
             None => String::new(),
         }

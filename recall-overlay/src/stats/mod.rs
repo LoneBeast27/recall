@@ -18,7 +18,7 @@ use serde::Serialize;
 
 use cpu::CpuMeter;
 use frame_timing::{FpsSource, FrameTiming};
-use gpu_watch::GpuWatch;
+use gpu_watch::{GpuBackoff, GpuWatch};
 use nvml::Nvml;
 
 pub use etw_session::install_cleanup;
@@ -65,10 +65,17 @@ pub struct StatsPoller {
 }
 
 impl StatsPoller {
-    pub fn start() -> Self {
+    /// `gpu`: the last poller's NVML back-off (`gpu_backoff`), so a pill shown
+    /// again does not reopen an NVML that never sampled.
+    pub fn start(gpu: Option<GpuBackoff>) -> Self {
         let mut cpu = CpuMeter::default();
         let _ = cpu.sample(); // prime the delta
-        Self { nvml: GpuWatch::start(Box::new(Nvml::open), Instant::now()), cpu, frames: FrameTiming::new() }
+        Self { nvml: GpuWatch::resume(Box::new(Nvml::open), gpu, Instant::now()), cpu, frames: FrameTiming::new() }
+    }
+
+    /// What the next poller keeps of this one's NVML opens.
+    pub fn gpu_backoff(&self) -> GpuBackoff {
+        self.nvml.backoff()
     }
 
     pub fn nvml_loaded(&self) -> bool {
