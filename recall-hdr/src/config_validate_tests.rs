@@ -57,13 +57,15 @@ fn out_of_range_values_and_unknown_tokens_are_repaired_one_by_one() {
 }
 
 #[test]
-fn small_cap_rounds_to_off_and_empty_folder_gets_the_default() {
-    let mut cfg = Config::default();
-    cfg.storage.cap_gb = 3;
-    cfg.recording.output_dir = "  ".into();
-    sanitize_loaded(&mut cfg);
-    assert_eq!(cfg.storage.cap_gb, 0, "3 GiB is nearer off than the 20 GiB floor");
-    assert_eq!(cfg.recording.output_dir, crate::record_config::default_output_dir());
+fn a_small_cap_becomes_the_floor_never_off_and_empty_folder_gets_the_default() {
+    for cap in [1, 3, 9, 10, 19] {
+        let mut cfg = Config::default();
+        cfg.storage.cap_gb = cap;
+        cfg.recording.output_dir = "  ".into();
+        sanitize_loaded(&mut cfg);
+        assert_eq!(cfg.storage.cap_gb, 20, "a cap of {cap} GiB was meant as a cap: the 20 GiB floor, not off");
+        assert_eq!(cfg.recording.output_dir, crate::record_config::default_output_dir());
+    }
 }
 
 #[test]
@@ -127,4 +129,52 @@ fn a_valid_config_is_left_alone() {
     let before = cfg.clone();
     assert!(sanitize_loaded(&mut cfg).is_empty());
     assert_eq!(cfg, before);
+}
+
+#[test]
+fn a_mic_shortcut_on_a_save_preset_moves_and_the_save_stays() {
+    let mut cfg = Config::default();
+    cfg.recording.mic_hotkey = "Alt+N".into(); // the default save preset's combo
+    sanitize_loaded(&mut cfg);
+    let rec = &cfg.recording;
+    assert_eq!(rec.save_hotkeys.first().map(|s| s.hotkey.as_str()), Some("Alt+N"), "the save preset keeps its key");
+    assert_eq!(rec.mic_hotkey, "Alt+M", "the mic moves to its default");
+    validate(&cfg).expect("validates");
+
+    // Alt+M taken by a preset too: the first free fallback.
+    let mut cfg = Config::default();
+    cfg.recording.mic_hotkey = "Alt+N".into();
+    cfg.recording.save_hotkeys.push(crate::record_config::SaveHotkey { hotkey: "Alt+M".into(), seconds: 30 });
+    sanitize_loaded(&mut cfg);
+    let presets: Vec<&str> = cfg.recording.save_hotkeys.iter().map(|s| s.hotkey.as_str()).collect();
+    assert_eq!(presets, vec!["Alt+N", "Alt+M"]);
+    assert_eq!(cfg.recording.mic_hotkey, "Ctrl+Alt+M");
+    validate(&cfg).expect("validates");
+    for f in crate::config_validate_lists::MIC_FALLBACKS {
+        crate::hotkey::parse_accel(f).expect("every mic fallback parses");
+    }
+}
+
+#[test]
+fn a_long_non_ascii_device_name_is_cleared_by_bytes() {
+    let mut cfg = Config::default();
+    cfg.recording.mic_device = "\u{9ea6}".repeat(100); // 100 chars, 300 bytes
+    cfg.recording.desktop_audio_device = "\u{9ea6}".repeat(80); // 240 bytes: kept
+    sanitize_loaded(&mut cfg);
+    assert_eq!(cfg.recording.mic_device, "", "validate counts bytes, so the repair does too");
+    assert_eq!(cfg.recording.desktop_audio_device.chars().count(), 80);
+    validate(&cfg).expect("a repaired config validates");
+}
+
+#[test]
+fn a_loads_repairs_are_kept_for_the_controller_once() {
+    let path = temp_file("notes", "[recording]\noutput_dir = 'E:\\Clips'\nfps = 480\n[storage]\ncap_gb = 5\n");
+    let cfg = crate::config::load_from(&path);
+    assert_eq!(cfg.recording.fps, 240);
+    let notes = crate::config_repairs::take(&path);
+    assert_eq!(notes.len(), 2, "fps and cap: {notes:?}");
+    assert!(crate::config_repairs::take(&path).is_empty(), "taken once");
+    let clean = temp_file("clean", "[recording]\noutput_dir = 'E:\\Clips'\n");
+    crate::config::load_from(&clean);
+    assert!(crate::config_repairs::take(&clean).is_empty());
 }

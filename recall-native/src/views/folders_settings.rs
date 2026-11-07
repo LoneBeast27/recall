@@ -32,8 +32,17 @@ impl Root {
     pub fn sync_recordings_folder(&mut self) {
         let Some(dir) = self.config_value("recording", "output_dir").and_then(Value::as_str).map(str::to_owned) else { return };
         let overridden = self.snap.config_overridden.iter().any(|k| k == "recording.output_dir");
-        match folders_sync::plan(self.folders.recordings.as_deref(), &dir, self.pending_folder.as_ref(), overridden) {
+        match folders_sync::plan(self.folders.recordings.as_deref(), &dir, self.pending_folder.as_ref(), overridden, self.snap.config_seq) {
             FolderPlan::Nothing | FolderPlan::Skip => {}
+            FolderPlan::Rejected => {
+                // The recorder refused the patch: nothing was touched. Its error usually came just
+                // before; keep its text, as this toast takes the one toast slot.
+                if let Some(p) = self.pending_folder.take() {
+                    let why = self.toast.as_ref().filter(|t| t.kind == ToastKind::Bad && t.text == "Recorder").and_then(|t| t.detail.clone());
+                    let detail = why.map_or_else(|| format!("{} stays the folder.", p.old), |w| format!("{} stays the folder: {w}", p.old));
+                    self.show_toast(ToastKind::Bad, "Recordings folder not changed", Some(detail));
+                }
+            }
             FolderPlan::Commit => {
                 let old = self.pending_folder.take().map(|p| p.old);
                 self.commit_recordings_folder(&dir, old);
@@ -138,7 +147,7 @@ impl Root {
             return;
         }
         // folders.json changes once the recorder reports the new folder (`sync_recordings_folder`).
-        self.pending_folder = Some(PendingFolder { new: new.clone(), old });
+        self.pending_folder = Some(PendingFolder { new: new.clone(), old, config_seq: self.snap.config_seq });
         self.set_config("recording", "output_dir", json!(new));
     }
 

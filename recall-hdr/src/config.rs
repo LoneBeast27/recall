@@ -409,7 +409,7 @@ pub(crate) fn load_checked(path: &std::path::Path) -> Result<Config, String> {
     cfg.overlay.migrate_loaded(&text);
     // Out-of-range values clamp, bad entries go (one log line each), never the whole file.
     // Runs on every parsed load: full parse, per-key salvage and last-good.
-    crate::config_validate::sanitize_loaded(&mut cfg);
+    crate::config_repairs::remember(path, crate::config_validate::sanitize_loaded(&mut cfg));
     Ok(cfg)
 }
 

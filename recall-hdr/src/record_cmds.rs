@@ -163,7 +163,7 @@ impl Controller {
                 _ => self.reply_error(client, "set_mode needs \"value\": auto|sdr|hdr"),
             },
             "set_ac_profile" => self.set_ac_profile(client, &val),
-            "get_config" => self.hub.event_to(inbound.client, "session", &config_event(&self.cfg, &self.overrides)),
+            "get_config" => self.hub.event_to(inbound.client, "session", &config_event(&self.cfg, &self.overrides, &self.config_repairs)),
             "set_config" => match val.get("patch") {
                 Some(patch) => {
                     self.apply_config_patch(patch, client);
@@ -283,6 +283,7 @@ impl Controller {
         // A hand edit made while running is the base, not overwritten (`config_watch`).
         if let Some(edited) = crate::config_watch::base_for_patch(&self.store, &mut self.config_stamp) {
             self.file_cfg = edited;
+            self.config_repairs = crate::config_repairs::ConfigRepairs::after_load(self.store.path());
         }
         let out = match apply_patch(&self.file_cfg, patch) {
             Ok(o) => o,
@@ -298,7 +299,7 @@ impl Controller {
         if out.changed.is_empty() && effective == self.cfg {
             // Nothing to persist (keeps the user's hand-written file untouched).
             if let Some(c) = client {
-                self.hub.event_to(c, "session", &config_event(&self.cfg, &self.overrides));
+                self.hub.event_to(c, "session", &config_event(&self.cfg, &self.overrides, &self.config_repairs));
             }
             return true;
         }
@@ -314,7 +315,7 @@ impl Controller {
         self.file_cfg = out.config;
         self.overrides = overrides;
         self.apply_config_effects(&old, client);
-        self.hub.event("session", &config_event(&self.cfg, &self.overrides));
+        self.hub.event("session", &config_event(&self.cfg, &self.overrides, &self.config_repairs));
         self.publish_status();
         true
     }

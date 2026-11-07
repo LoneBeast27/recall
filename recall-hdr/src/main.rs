@@ -38,6 +38,7 @@ mod cues;
 mod app;
 mod clamp;
 mod config;
+mod config_repairs;
 mod config_validate;
 mod config_validate_lists;
 mod config_watch;

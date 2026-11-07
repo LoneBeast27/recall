@@ -10,7 +10,10 @@ use crate::record_audio_sources::{AudioSource, GAIN_MAX_DB, GAIN_MIN_DB, KINDS, 
 use crate::record_config::{RecordingCfg, BUFFER_SECS_MAX};
 use crate::record_hotkeys::{legacy_save_hotkey, MAX_SAVE_HOTKEYS};
 
-const DEFAULT_MIC: &str = "Alt+M";
+/// Where the mic shortcut goes when its own combo does not parse or a save preset holds it, in
+/// order. More entries than `MAX_SAVE_HOTKEYS`, so one is always free.
+pub(crate) const MIC_FALLBACKS: [&str; 10] =
+    ["Alt+M", "Ctrl+Alt+M", "Alt+Shift+M", "Ctrl+Shift+M", "Ctrl+Alt+Shift+M", "Alt+F8", "Alt+F9", "Alt+F10", "Alt+F11", "Alt+F12"];
 
 /// Combos already taken, by `HotKey::id`, with their config key (for the note).
 struct Held(HashMap<u32, String>);
@@ -27,32 +30,12 @@ impl Held {
     }
 }
 
-/// Mic first (it must keep a key), then the save presets, then the optional shortcuts.
+/// The save presets first (the order `record_hotkeys::bindings` binds them in, so a clash keeps
+/// Save as it always did), then the mic (it must keep a key, so it moves), then the optional ones.
 pub(crate) fn hotkeys(rec: &mut RecordingCfg, notes: &mut Vec<String>) {
     let mut held = Held(HashMap::new());
-    if parse_accel(&rec.mic_hotkey).is_err() {
-        notes.push(format!("recording.mic_hotkey '{}' -> '{DEFAULT_MIC}'", rec.mic_hotkey));
-        rec.mic_hotkey = DEFAULT_MIC.into();
-    }
-    let _ = held.take("recording.mic_hotkey", &rec.mic_hotkey);
-    if rec.save_hotkeys.len() > MAX_SAVE_HOTKEYS {
-        notes.push(format!("recording.save_hotkeys: kept the first {MAX_SAVE_HOTKEYS} of {}", rec.save_hotkeys.len()));
-        rec.save_hotkeys.truncate(MAX_SAVE_HOTKEYS);
-    }
-    let mut i = 0;
-    rec.save_hotkeys.retain_mut(|s| {
-        let key = format!("recording.save_hotkeys[{i}]");
-        i += 1;
-        if let Err(why) = held.take(&key, &s.hotkey) {
-            notes.push(format!("{key} '{}' dropped: {why}", s.hotkey));
-            return false;
-        }
-        if s.seconds > BUFFER_SECS_MAX {
-            notes.push(format!("{key}.seconds {} -> {BUFFER_SECS_MAX}", s.seconds));
-            s.seconds = BUFFER_SECS_MAX;
-        }
-        true
-    });
+    save_presets(rec, &mut held, notes);
+    mic(rec, &mut held, notes);
     let singles = [
         ("recording.bookmark_hotkey", &mut rec.bookmark_hotkey),
         ("recording.screenshot_hotkey", &mut rec.screenshot_hotkey),
@@ -71,6 +54,40 @@ pub(crate) fn hotkeys(rec: &mut RecordingCfg, notes: &mut Vec<String>) {
         }
     }
     rec.save_hotkey = legacy_save_hotkey(&rec.save_hotkeys);
+}
+
+/// The mic shortcut keeps its combo when it parses and is free, else takes the first free one
+/// of `MIC_FALLBACKS` (Alt+M first).
+fn mic(rec: &mut RecordingCfg, held: &mut Held, notes: &mut Vec<String>) {
+    let Err(why) = held.take("recording.mic_hotkey", &rec.mic_hotkey) else { return };
+    let Some(free) = MIC_FALLBACKS.iter().find(|f| held.take("recording.mic_hotkey", f).is_ok()) else {
+        notes.push(format!("recording.mic_hotkey '{}' kept: no free fallback ({why})", rec.mic_hotkey));
+        return;
+    };
+    notes.push(format!("recording.mic_hotkey '{}' -> '{free}': {why}", rec.mic_hotkey));
+    rec.mic_hotkey = (*free).to_owned();
+}
+
+/// At most `MAX_SAVE_HOTKEYS`; a preset that does not parse or repeats an earlier one goes.
+fn save_presets(rec: &mut RecordingCfg, held: &mut Held, notes: &mut Vec<String>) {
+    if rec.save_hotkeys.len() > MAX_SAVE_HOTKEYS {
+        notes.push(format!("recording.save_hotkeys: kept the first {MAX_SAVE_HOTKEYS} of {}", rec.save_hotkeys.len()));
+        rec.save_hotkeys.truncate(MAX_SAVE_HOTKEYS);
+    }
+    let mut i = 0;
+    rec.save_hotkeys.retain_mut(|s| {
+        let key = format!("recording.save_hotkeys[{i}]");
+        i += 1;
+        if let Err(why) = held.take(&key, &s.hotkey) {
+            notes.push(format!("{key} '{}' dropped: {why}", s.hotkey));
+            return false;
+        }
+        if s.seconds > BUFFER_SECS_MAX {
+            notes.push(format!("{key}.seconds {} -> {BUFFER_SECS_MAX}", s.seconds));
+            s.seconds = BUFFER_SECS_MAX;
+        }
+        true
+    });
 }
 
 /// Why `s` can't be recorded as it is, after the fixable parts (kind spelling, gain) are fixed.

@@ -67,6 +67,8 @@ pub struct Controller {
     pub(crate) file_cfg: Config,
     /// config.toml as last read or written (a hand edit since then is merged, `config_watch`).
     pub(crate) config_stamp: Option<crate::config_watch::FileStamp>,
+    /// The last load's repairs of config.toml, sent with the `config` event (`config_repairs`).
+    pub(crate) config_repairs: crate::config_repairs::ConfigRepairs,
     pub(crate) overrides: EnvOverrides,
     /// `file_cfg` + startup env overrides: what is running.
     pub(crate) cfg: Config,
@@ -199,6 +201,7 @@ pub fn run() -> i32 {
     let can_trace = crate::frame_timing::can_trace();
     let mut ctl = Controller {
         config_stamp: crate::config_watch::FileStamp::of(store.path()),
+        config_repairs: crate::config_repairs::ConfigRepairs::after_load(store.path()),
         store,
         file_cfg,
         overrides,
