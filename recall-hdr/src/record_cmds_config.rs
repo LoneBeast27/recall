@@ -33,6 +33,9 @@ impl Controller {
         let effective = overrides.apply(&out.config);
         if out.changed.is_empty() && effective == self.cfg {
             // Nothing to persist (keeps the user's hand-written file untouched).
+            if let Some(line) = crate::config_watch::patch_notice(broken_edit.as_deref(), false) {
+                self.reply_error(client, &line);
+            }
             if let Some(c) = client {
                 self.hub.event_to(c, "session", &config_event(&self.cfg, &self.overrides, &self.config_repairs));
             }
@@ -44,10 +47,10 @@ impl Controller {
                 return false;
             }
             self.config_stamp = crate::config_watch::FileStamp::of(self.store.path());
-            if let Some(line) = broken_edit {
-                self.reply_error(client, &line);
-            }
             log!("record: config updated ({})", out.changed.join(", "));
+        }
+        if let Some(line) = crate::config_watch::patch_notice(broken_edit.as_deref(), !out.changed.is_empty()) {
+            self.reply_error(client, &line);
         }
         let old = std::mem::replace(&mut self.cfg, effective);
         self.file_cfg = out.config;
