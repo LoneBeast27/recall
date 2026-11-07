@@ -242,10 +242,20 @@ fn library_delete_refuses_files_their_bin_cannot_take() {
     fn no_bin(_: &Path, _: u64) -> Result<(), String> {
         Err("the drive has no Recycle Bin".into())
     }
-    let err = win::check_recyclable(std::slice::from_ref(&clip), no_bin).unwrap_err();
+    let err = win::check_recyclable(std::slice::from_ref(&clip), no_bin, crate::win_recycle::file_size).unwrap_err();
     assert!(err.contains("Nothing was deleted"), "{err}");
     assert!(clip.exists(), "the clip stays");
-    assert!(win::check_recyclable(std::slice::from_ref(&clip), |_, _| Ok(())).is_ok());
+    assert!(win::check_recyclable(std::slice::from_ref(&clip), |_, _| Ok(()), crate::win_recycle::file_size).is_ok());
+    // The clip and its companions are summed: two 600 MB files do not fit 1 GB of room.
+    let pair = [clip.clone(), dir.join("RecallNativeTest__2026-10-22__11-00-00.mp4.recall-edit.json")];
+    fn one_gb_room(_: &Path, bytes: u64) -> Result<(), String> {
+        if bytes > 1_000_000_000 { Err("no room left".into()) } else { Ok(()) }
+    }
+    let err = win::check_recyclable(&pair, one_gb_room, |_| Some(600_000_000)).unwrap_err();
+    assert!(err.contains("no room left"), "{err}");
+    // A size that cannot be read refuses instead of counting 0.
+    let err = win::check_recyclable(&pair, |_, _| Ok(()), |p| (!p.to_string_lossy().ends_with(".json")).then_some(1)).unwrap_err();
+    assert!(err.contains("couldn't read the size"), "{err}");
     let _ = std::fs::remove_dir_all(&dir);
 }
 

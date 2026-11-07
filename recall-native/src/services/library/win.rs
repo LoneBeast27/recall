@@ -97,13 +97,16 @@ pub(super) fn recycle_targets(clips: &[PathBuf]) -> (Vec<PathBuf>, Vec<PathBuf>)
 /// Every file must fit its volume's Recycle Bin (`win_recycle.rs`), or nothing
 /// is sent: on a share, a removable drive, a bin turned off or too small,
 /// Windows would delete for good. The user is told why and nothing is deleted.
-pub(super) fn check_recyclable(files: &[PathBuf], bin: crate::win_recycle::BinCheck) -> Result<(), String> {
-    for file in files {
-        let bytes = std::fs::metadata(file).map(|m| m.len()).unwrap_or(0);
-        let folder = file.parent().unwrap_or(file);
-        if let Err(why) = bin(folder, bytes) {
-            let name = file.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            return Err(format!("Couldn't move {name} to the Recycle Bin: {why}. Nothing was deleted."));
+pub(super) fn check_recyclable(files: &[PathBuf], bin: crate::win_recycle::BinCheck, size: crate::win_recycle::SizeFn) -> Result<(), String> {
+    // One call moves them all: the clips and their companions are summed, and each
+    // folder's bin must have room for the whole lot. An unreadable size refuses.
+    let total = crate::win_recycle::total_size(files, size).map_err(|why| format!("Couldn't move these clips to the Recycle Bin: {why}. Nothing was deleted."))?;
+    let mut folders: Vec<&Path> = files.iter().map(|f| f.parent().unwrap_or(f)).collect();
+    folders.sort();
+    folders.dedup();
+    for folder in folders {
+        if let Err(why) = bin(folder, total) {
+            return Err(format!("Couldn't move these clips to the Recycle Bin: {why}. Nothing was deleted."));
         }
     }
     Ok(())
@@ -114,15 +117,19 @@ pub(super) fn recycle(clips: &[PathBuf]) -> Result<usize, String> {
     if files.is_empty() {
         return Ok(0);
     }
-    check_recyclable(&files, crate::win_recycle::can_recycle)?;
+    check_recyclable(&files, crate::win_recycle::can_recycle, crate::win_recycle::file_size)?;
     // IFileOperation with a sink that refuses any delete Windows would not recycle
     // (`win_fileop.rs`); `check_recyclable` above is the second guard.
-    let outcome = crate::win_fileop::recycle_files(&files).outcome;
-    if let crate::win_fileop::Outcome::Refused(why) = &outcome {
-        return Err(format!("Couldn't move these clips to the Recycle Bin: {why}. Nothing was deleted for good."));
-    }
-    // Count what actually left the folder; a partial move returns the smaller count.
+    let report = crate::win_fileop::recycle_files(&files);
+    // Count what actually left the folder (a refusal may come after some went to the bin).
     let moved = clips.iter().filter(|clip| !clip.exists()).count();
+    if let crate::win_fileop::Outcome::Refused(why) = &report.outcome {
+        return Err(match moved {
+            0 => format!("Couldn't move these clips to the Recycle Bin: {why}. Nothing was deleted."),
+            n => format!("Moved {n} of {} clips to the Recycle Bin; the rest stayed: {why}.", clips.len()),
+        });
+    }
+    let outcome = report.outcome;
     if moved == 0 && !clips.is_empty() {
         let why = match outcome {
             crate::win_fileop::Outcome::Failed(why) => why,

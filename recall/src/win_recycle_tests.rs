@@ -16,6 +16,7 @@ fn local(settings: Settings) -> BinFacts {
         volume: volume(r"\\?\Volume{6b9a6f8e-84ea-42bb-8615-8aea7bdcfa86}\", "C:"),
         drive_type: DRIVE_FIXED,
         total_bytes: Some(1024 * GIB),
+        bin_used: Some(0),
         settings,
     }
 }
@@ -136,4 +137,27 @@ fn this_machine_names_its_temp_drive_a_real_volume() {
     let target = dos_target(letter);
     println!("temp drive {letter}: -> {target:?}");
     assert!(target.is_some_and(|t| t.starts_with(r"\Device\")));
+}
+
+#[test]
+fn a_clip_must_fit_the_bins_free_room_not_just_its_size() {
+    // A 1,000 MB bin already holding 900 MB: a 200 MB clip fits the size but not the room left.
+    let full = BinFacts { bin_used: Some(900 << 20), ..local(keyed(1000)) };
+    assert!(decide(&full, 200 << 20).unwrap_err().contains("room"), "Windows would purge older bin items for it");
+    assert_eq!(decide(&full, 100 << 20), Ok(()), "it fits the free room");
+    let unknown = BinFacts { bin_used: None, ..local(keyed(1000)) };
+    assert!(decide(&unknown, 1).unwrap_err().contains("how full"), "an unreadable bin refuses");
+}
+
+#[test]
+#[ignore]
+fn bin_usage_on_this_machine() {
+    // Read only. Run: cargo test -p recall-hdr --offline bin_usage_on_this_machine -- --ignored --nocapture
+    for letter in 'A'..='Z' {
+        let root = format!("{letter}:\\");
+        if Path::new(&root).exists() {
+            let f = facts(Path::new(&root));
+            println!("BIN {letter}: used {:?} bytes; max {:?} MB; drive type {}", bin_used(&root), f.settings.max_mb, f.drive_type);
+        }
+    }
 }
