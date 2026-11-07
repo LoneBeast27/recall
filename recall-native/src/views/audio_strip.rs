@@ -87,6 +87,16 @@ impl Render for StripDrag {
 
 impl Root {
     /// The picker label: the device (or "Windows default (…)"), the app, or a missing one.
+    /// The warning under a strip's device button: a refused "Muted by the mic hotkey" untick
+    /// (R6-deep-audio-1), else `strip_note`.
+    fn strip_warning(&self, source: &Source) -> Option<String> {
+        let audio = &self.settings_ui.audio;
+        if audio.mute_refused.as_deref() == Some(source.id.as_str()) {
+            return Some(crate::services::audio_mute::REFUSED.to_owned());
+        }
+        crate::services::audio_sources::strip_note(source, audio.devices.as_ref())
+    }
+
     fn source_label(&self, source: &Source) -> String {
         let page = &self.settings_ui.audio;
         match source.kind {
@@ -172,7 +182,7 @@ impl Root {
             .text_size(px(11.))
             .line_height(px(14.))
             .text_color(c(theme::WARNING))
-            .when_some(crate::services::audio_sources::strip_note(source, self.settings_ui.audio.devices.as_ref()), |d, note| d.child(note));
+            .when_some(self.strip_warning(source), |d, note| d.child(note));
         let picker_id = id.clone();
         let picker = div()
             .relative()

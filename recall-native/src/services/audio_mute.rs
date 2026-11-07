@@ -7,22 +7,46 @@ use crate::services::{
     audio_sources::{Kind, Source},
 };
 
-/// The strip note of a line-in on another endpoint than the one it saved.
-pub const OPENED_OTHER: &str = "Opened a different device: follows the mic hotkey";
+/// The strip note of a line-in the recorder opens on another endpoint than the one it saved.
+pub const OPENED_OTHER: &str = "Using a different device: follows the mic hotkey";
+/// The strip note of a named line-in with no saved endpoint id (a config from before ids).
+pub const NO_ID: &str = "Follows the mic hotkey until you pick this device again";
+/// The strip note when unticking "Muted by the mic hotkey" was refused: no endpoint id to save.
+pub const REFUSED: &str = "Can't read this device's id: pick it again to turn off Muted by the mic hotkey";
 
-/// A line-in (`mic_mute = false`, a named device) that the recorder opens on another endpoint
-/// than its own: a renumbered fallback ("Mic (Box)" saved, only "2- Mic (Box)" there), or the
-/// saved name on an endpoint with another id (a twin took it). The recorder mutes it with Alt+M
-/// (`recall` `audio/endpoints.rs` `opened_own`); the page says so. Lists not read yet: false.
+/// A line-in (`mic_mute = false`, a named device) that the recorder mutes with Alt+M after all
+/// (`recall` `audio/endpoints.rs` `opened_own`, R6-deep-audio-1/2): it saved no well-formed
+/// endpoint id (lists not needed), or the endpoint its name opens has another id (a fallback
+/// onto another dongle, or a twin that took the name). With an id and lists not read: false.
 pub fn opens_other(source: &Source, lists: Option<&DeviceLists>) -> bool {
-    let Some(lists) = lists.filter(|_| source.kind == Kind::Input && source.mic_mute == Some(false)) else { return false };
+    other_note(source, lists).is_some()
+}
+
+/// The note for [`opens_other`]: [`NO_ID`] or [`OPENED_OTHER`].
+pub fn other_note(source: &Source, lists: Option<&DeviceLists>) -> Option<&'static str> {
+    use crate::services::meters::{id_ok, opened_own};
+    if source.kind != Kind::Input || source.mic_mute != Some(false) || source.device.trim().is_empty() {
+        return None;
+    }
+    if !id_ok(&source.device_id) {
+        return Some(NO_ID);
+    }
+    let lists = lists?;
     match found(&source.device, Some(&lists.inputs)) {
         Found::Opens(i) => {
             let id = lists.input_ids.get(i).map(String::as_str).filter(|id| !id.is_empty());
-            !crate::services::meters::opened_own(&lists.inputs[i], id, &source.device, &source.device_id)
+            (!opened_own(id, &source.device, &source.device_id)).then_some(OPENED_OTHER)
         }
-        _ => false,
+        _ => None,
     }
+}
+
+/// The index in `lists` of the input a pick names: its well-formed endpoint id when listed,
+/// else the endpoint its name opens (`match_endpoint`). Read at click time, never kept from a
+/// render (R6-deep-audio-4).
+fn input_index(lists: &DeviceLists, device: &str, device_id: &str) -> Option<usize> {
+    let by_id = crate::services::meters::id_ok(device_id).then(|| lists.input_ids.iter().position(|id| id.trim() == device_id.trim())).flatten();
+    by_id.or_else(|| (!device.trim().is_empty()).then(|| crate::services::meters::match_endpoint(&lists.inputs, device)).flatten())
 }
 
 /// The "Muted by the mic hotkey" row of an input's menu: (shown checked, what a click saves).
@@ -35,17 +59,36 @@ pub fn mic_row(source: &Source) -> (bool, Option<bool>) {
     (source.mic_mute != Some(false), Some(source.mic_mute == Some(false)))
 }
 
+/// What unticking "Muted by the mic hotkey" saves: (the flag, the endpoint id), as a line-in
+/// skips Alt+M only on its saved id (R6-deep-audio-1). The id: the saved one when it is listed,
+/// else the one endpoint with exactly the saved name. Refused ([`REFUSED`]) when the lists are
+/// not read, the saved id is not listed, the name opens no endpoint or only a renumbered one,
+/// or Windows gave no readable id.
+pub fn mic_toggle_effect(source: &Source, lists: Option<&DeviceLists>) -> Result<(bool, String), &'static str> {
+    use crate::services::meters::id_ok;
+    let lists = lists.ok_or(REFUSED)?;
+    let device = source.device.trim();
+    let i = if id_ok(&source.device_id) {
+        lists.input_ids.iter().position(|id| id.trim() == source.device_id.trim())
+    } else {
+        crate::services::meters::match_endpoint(&lists.inputs, device).filter(|&i| lists.inputs[i].trim() == device)
+    };
+    let id = i.and_then(|i| lists.input_ids.get(i)).map(|id| id.trim()).filter(|id| id_ok(id)).ok_or(REFUSED)?;
+    Ok((false, id.to_owned()))
+}
+
 /// Windows calls this form factor a microphone (`EndpointFormFactor` Microphone 4, Headset 5,
 /// Handset 6). A page-side nudge only; the recorder never decides by form factor.
 pub fn is_microphone(form: Option<u32>) -> bool {
     matches!(form, Some(4..=6))
 }
 
-/// The flag to save when `source` picks the input at `index` of `lists` (`None` = leave it): a
+/// The flag to save when `source` picks the input `(device, device_id)` (`None` = leave it): a
 /// line-in moved onto an endpoint Windows lists as a microphone gets Alt+M back on, in the safe
-/// direction; the page shows a toast and the user can turn it off again (R5-deep-audio-2).
-pub fn device_pick_effect(source: &Source, lists: Option<&DeviceLists>, index: Option<usize>) -> Option<bool> {
-    let form = lists.zip(index).and_then(|(l, i)| l.input_forms.get(i).copied().flatten());
+/// direction; the page shows a toast and the user can turn it off again (R5-deep-audio-2). The
+/// device is found in `lists` as they are at the click (R6-deep-audio-4).
+pub fn device_pick_effect(source: &Source, lists: Option<&DeviceLists>, (device, device_id): (&str, &str)) -> Option<bool> {
+    let form = lists.and_then(|l| input_index(l, device, device_id).and_then(|i| l.input_forms.get(i).copied().flatten()));
     (source.kind == Kind::Input && source.mic_mute == Some(false) && is_microphone(form)).then_some(true)
 }
 

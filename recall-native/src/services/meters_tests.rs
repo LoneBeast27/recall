@@ -140,21 +140,23 @@ fn set_bumps_revision_only_on_visible_change() {
     assert_eq!(shared.readings.lock().unwrap()[0].rms_db, -20.0);
 }
 
-/// 2026-11-07 audit R5-deep-audio-1: the page's copy of the recorder's `opened_own` (`recall`
-/// `audio/own_device_tests.rs`, the same table): the exact saved name, and the saved id if any.
+/// 2026-11-07 audit R6-deep-audio-1/2: the page's copy of the recorder's `opened_own` (`recall`
+/// `audio/own_device_tests.rs`, the same table): the saved id alone decides.
 #[test]
-fn opened_own_needs_the_exact_name_and_the_saved_id() {
+fn opened_own_is_the_saved_id_alone() {
+    let long = "x".repeat(257);
     let table = [
-        ("Mic (Box)", Some("{a}"), "Mic (Box)", "{a}", true),
-        ("Mic (Box)", Some("{a}"), " Mic (Box) ", "", true),
-        ("Mic (Box)", Some("{b}"), "Mic (Box)", "{a}", false),
-        ("Mic (Box)", None, "Mic (Box)", "{a}", false),
-        ("2- Mic (Box)", Some("{a}"), "Mic (Box)", "{a}", false),
-        ("Mic (Box)", Some("{a}"), "3- Mic (Box)", "", false),
-        ("Mic (Box)", Some("{a}"), "", "", false),
+        (Some("{a}"), "Mic (Box)", "{a}", true),
+        (Some(" {a} "), "3- Mic (Box)", "{a}", true),
+        (Some("{a}"), "Mic (Box)", "", false),
+        (Some("{b}"), "Mic (Box)", "{a}", false),
+        (None, "Mic (Box)", "{a}", false),
+        (Some("{a}"), "", "{a}", false),
+        (Some(long.as_str()), "Mic (Box)", long.as_str(), false),
+        (Some("{a}\nb"), "Mic (Box)", "{a}\nb", false),
     ];
-    for (opened, id, want, want_id, own) in table {
-        assert_eq!(super::opened_own(opened, id, want, want_id), own, "{opened:?} {id:?} for {want:?} {want_id:?}");
+    for (id, want, want_id, own) in table {
+        assert_eq!(super::opened_own(id, want, want_id), own, "{id:?} for {want:?} {want_id:?}");
     }
     let names = |list: &[&str]| list.iter().map(|n| (*n).to_owned()).collect::<Vec<String>>();
     assert_eq!(super::stripped_hits(&names(&["4- X", "5- X", "Y"]), "3- X"), 2);

@@ -255,13 +255,21 @@ pub fn stripped_hits(names: &[String], want: &str) -> usize {
     names.iter().filter(|n| strip_index(n) == want).count()
 }
 
-/// The endpoint the recorder opened (`opened`, its id `opened_id`) is the source's own saved
-/// device (`want`, the id saved with it, "" = none): the exact name and, when an id was saved,
-/// that id. Only then may a line-in skip Alt+M (R5-deep-audio-1). A copy of the recorder's
-/// `opened_own` (`recall` `audio/endpoints.rs`); both crates test the same table.
-pub fn opened_own(opened: &str, opened_id: Option<&str>, want: &str, want_id: &str) -> bool {
-    let (want, want_id) = (want.trim(), want_id.trim());
-    !want.is_empty() && opened.trim() == want && (want_id.is_empty() || opened_id.map(str::trim) == Some(want_id))
+/// A saved endpoint id the recorder trusts: 1 to 256 characters once trimmed, no control
+/// character; anything else counts as no id (R6-deep-audio-5). A copy of the recorder's `id_ok`
+/// (`recall` `audio/endpoints.rs`).
+pub fn id_ok(id: &str) -> bool {
+    let id = id.trim();
+    !id.is_empty() && id.chars().count() <= 256 && !id.chars().any(char::is_control)
+}
+
+/// The endpoint the recorder opened (its id `opened_id`) is the source's own saved device
+/// (`want`, the id saved with it): a well-formed saved id equal to the opened one. The id alone
+/// decides; no id = not own. Only then may a line-in skip Alt+M (R6-deep-audio-1/2). A copy of
+/// the recorder's `opened_own` (`recall` `audio/endpoints.rs`); both crates test the same table.
+pub fn opened_own(opened_id: Option<&str>, want: &str, want_id: &str) -> bool {
+    let want_id = want_id.trim();
+    !want.trim().is_empty() && id_ok(want_id) && opened_id.map(str::trim) == Some(want_id)
 }
 
 /// `name` without a leading "<digits>- " Windows endpoint index; nothing else is dropped.

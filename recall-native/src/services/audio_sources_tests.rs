@@ -151,7 +151,8 @@ fn an_old_input_is_muted_by_the_mic_hotkey_whatever_its_form_factor() {
     let added = line.last().unwrap();
     assert_eq!((added.kind, added.mic_mute, added.name.as_str()), (Kind::Input, Some(false), "Line-in"));
     assert!(mutes(added, None), "a new line-in on the Windows default follows the mic hotkey (R4-deep-audio-1)");
-    assert!(!mutes(&Source { device: "Line (Box One)".into(), ..added.clone() }, None), "a named line-in keeps its sound");
+    assert!(!mutes(&Source { device: "Line (Box One)".into(), device_id: "{one}".into(), ..added.clone() }, None), "a named line-in with its id keeps its sound");
+    assert!(mutes(&Source { device: "Line (Box One)".into(), ..added.clone() }, None), "no id saved: follows the mic hotkey (R6-deep-audio-1)");
     let mic = with_new_input(&base, true).unwrap();
     assert!(mutes(mic.last().unwrap(), None), "a new microphone is muted");
 }
@@ -166,8 +167,8 @@ fn a_line_in_follows_the_mic_hotkey_until_it_names_a_device() {
     assert_eq!((added.mic_mute, added.device.as_str()), (Some(false), ""));
     assert!(mutes(&added, None), "a new line-in on the Windows default is muted by the mic hotkey");
     assert!(line_in_on_default(&added), "the strip notes it");
-    let named = Source { device: "Line (Box One)".into(), ..added.clone() };
-    assert!(!mutes(&named, None) && !line_in_on_default(&named), "a named line-in keeps its sound");
+    let named = Source { device: "Line (Box One)".into(), device_id: "{one}".into(), ..added.clone() };
+    assert!(!mutes(&named, None) && !line_in_on_default(&named), "a named line-in with its id keeps its sound");
     let reset = Source { device: " ".into(), ..named.clone() };
     assert!(mutes(&reset, None) && line_in_on_default(&reset), "set back to the Windows default: follows Alt+M again");
     let mic = Source { mic_mute: Some(true), ..added.clone() };
@@ -184,9 +185,11 @@ fn the_strip_notes_a_line_in_on_the_windows_default() {
     let base = from_config(Some(&json!([{"id": "game", "kind": "game", "name": "Game"}])));
     let added = with_new_input(&base, false).unwrap().pop().unwrap();
     assert_eq!(strip_note(&added, None).as_deref(), Some(LINE_IN_ON_DEFAULT));
-    let named = Source { device: "Line (Box One)".into(), ..added.clone() };
-    let at = |inputs: &[&str]| DeviceLists { inputs: inputs.iter().map(|n| (*n).to_owned()).collect(), ..DeviceLists::default() };
+    let named = Source { device: "Line (Box One)".into(), device_id: "{one}".into(), ..added.clone() };
+    let at = |inputs: &[&str]| DeviceLists { inputs: inputs.iter().map(|n| (*n).to_owned()).collect(), input_ids: vec!["{one}".into(); inputs.len()], ..DeviceLists::default() };
     assert_eq!(strip_note(&named, Some(&at(&["Line (Box One)"]))), None);
+    let no_id = Source { device_id: String::new(), ..named.clone() };
+    assert_eq!(strip_note(&no_id, Some(&at(&["Line (Box One)"]))).as_deref(), Some(crate::services::audio_mute::NO_ID), "no id saved (R6-deep-audio-1)");
     assert_eq!(strip_note(&named, Some(&at(&["Mic (Box Two)"]))).as_deref(), Some("Not connected"));
     assert_eq!(strip_note(&named, Some(&at(&["Line (Box One)"; 3]))).as_deref(), Some("3 devices share this name"));
     let renumbered = Source { device: "3- Line (Box One)".into(), ..named.clone() };
