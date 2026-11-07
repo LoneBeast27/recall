@@ -105,6 +105,8 @@ pub struct Controller {
     pub(crate) followable: Option<isize>,
     /// The followed foreground's fullscreen verdict (`record_detect`).
     pub(crate) follow: Follow,
+    /// When the session window was first seen hidden (`record_visibility`).
+    pub(crate) hidden: crate::record_visibility::HiddenWatch,
     /// (hwnd, wait) of the last committed target, for the retarget log line.
     pub(crate) detected: Option<(isize, Duration)>,
     pub(crate) target_monitor: isize,
@@ -225,6 +227,7 @@ pub fn run() -> i32 {
         last_fed: None,
         followable: None,
         follow: Follow::new(now),
+        hidden: Default::default(),
         detected: None,
         target_monitor,
         primary: crate::record_monitor::PrimaryWatch::new(crate::record_monitor::read_primary(), now),
