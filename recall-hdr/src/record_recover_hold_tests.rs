@@ -68,7 +68,7 @@ fn giving_up_ends_with_a_new_game_or_a_settings_change() {
     let t0 = Instant::now();
     let up = EngineHealth::Running { pid: 9 };
     let mut r = EncoderRecovery::default();
-    let mut step = |r: &mut EncoderRecovery, s: u64, state, progress, target| {
+    let step = |r: &mut EncoderRecovery, s: u64, state, progress, target| {
         r.step_held(t0 + Duration::from_secs(s), state, up, progress, false, true, Hold::default(), target)
     };
     for s in 0..=10 {
