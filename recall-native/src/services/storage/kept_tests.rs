@@ -176,3 +176,17 @@ fn a_readable_folder_without_the_clip_never_deletes_its_copy() {
     assert!(kept.is_file(), "the copy stays for the recorder's check");
     cleanup(&root);
 }
+
+#[test]
+fn a_kept_copy_of_a_clip_that_cannot_be_read_is_never_deleted() {
+    // The app's delete guard matches the recorder's: present, readable, same size. A clip held
+    // open with no sharing (being written, or a damaged file a tool holds) keeps its copy.
+    use std::os::windows::fs::OpenOptionsExt;
+    let (root, clips, kept_dir) = dirs("unreadable");
+    let (dest, kept) = clip(&clips, &kept_dir, "G__u.mp4", 5000, 5000);
+    let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(&dest).unwrap();
+    assert!(adopt_in(&root, &dest, &kept, 8000).is_err(), "too large for the tier");
+    drop(held);
+    assert!(kept.exists(), "the clip could not be read: its copy stays");
+    cleanup(&root);
+}

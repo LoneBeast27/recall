@@ -30,6 +30,7 @@ mod head;
 mod history;
 mod io_priority;
 mod kept;
+mod leftovers;
 mod lane;
 mod lane_brief;
 mod light;
@@ -124,8 +125,14 @@ pub fn cached_video_in(root: &Path, source: &Path) -> Option<String> {
 /// Never blocks after the first call (a stale snapshot refreshes in the background).
 pub fn usage() -> Vec<(&'static str, u64)> {
     let summary = prefetch::summary();
-    vec![("Thumbnails", summary.thumbs), ("Hover previews", summary.scrub), ("Editor media", summary.editor), ("Recent clips", summary.video)]
+    // The recorder's leftover kept copies hold C: space until the user sends them to the bin.
+    let leftover = leftovers::leftovers().map_or(0, |found| found.bytes);
+    vec![("Thumbnails", summary.thumbs), ("Hover previews", summary.scrub), ("Editor media", summary.editor), ("Recent clips", summary.video), ("Leftover copies", leftover)]
 }
+
+// The examples include this file without Settings.
+#[allow(unused_imports)]
+pub use leftovers::{leftover_line, leftovers, send_to_bin as send_leftovers_to_bin, Leftovers};
 
 /// The one cache budget in bytes (first run: `evict::default_budget`).
 pub fn budget_bytes() -> u64 {
