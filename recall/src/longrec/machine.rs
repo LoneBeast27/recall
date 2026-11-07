@@ -25,6 +25,7 @@ use std::time::{Duration, Instant};
 
 use super::TrackInfo;
 use crate::export::mix_limit::stream::StreamLimiter;
+use crate::export::mix_limit::CEILING;
 use crate::naming;
 
 /// How long `Armed` waits for a keyframe.
@@ -79,9 +80,11 @@ pub enum Event {
 struct Lane {
     rate: u64,
     channels: usize,
-    /// Frames placed on the track so far (a boosted track's limiter may still hold the newest ~10 ms).
+    /// Frames placed on the track so far (a limited track's limiter may still hold the newest ~10 ms).
     written: u64,
-    /// A source above 0 dB: every frame, silence included, passes through the -1 dBFS limiter in order.
+    /// From the first chunk with a sample above the -1 dBFS ceiling on (a source boosted live
+    /// on the Audio page, no engine restart), every frame, silence included, passes through the
+    /// limiter in order. A track that never goes above the ceiling is written as captured.
     limiter: Option<StreamLimiter>,
 }
 
@@ -243,7 +246,7 @@ impl<F: SinkFactory> Recorder<F> {
                 rate: t.rate as u64,
                 channels: t.channels.max(1) as usize,
                 written: 0,
-                limiter: t.boosted.then(|| StreamLimiter::new(t.channels, t.rate)),
+                limiter: None,
             })
             .collect();
         let mut active = Box::new(Active {
@@ -381,9 +384,13 @@ impl<S: Sink> Active<S> {
         Ok(())
     }
 
-    /// Samples for `track`, through its limiter when the source is boosted.
+    /// Samples for `track`, through its limiter once the track has gone above the ceiling.
     fn write_audio(&mut self, track: usize, samples: &[f32]) -> Result<(), String> {
-        match self.lanes[track].limiter.as_mut() {
+        let lane = &mut self.lanes[track];
+        if lane.limiter.is_none() && samples.iter().any(|s| s.abs() > CEILING) {
+            lane.limiter = Some(StreamLimiter::new(lane.channels as u16, lane.rate as u32));
+        }
+        match lane.limiter.as_mut() {
             Some(limiter) => {
                 let out = limiter.push(samples);
                 if out.is_empty() { Ok(()) } else { self.sink.audio(track, &out) }
@@ -392,7 +399,7 @@ impl<S: Sink> Active<S> {
         }
     }
 
-    /// Silence for `track`. A boosted track's silence goes through its limiter as zeros, so it
+    /// Silence for `track`. A limited track's silence goes through its limiter as zeros, so it
     /// stays behind the frames the limiter still holds.
     fn write_silence(&mut self, track: usize, frames: u64) -> Result<(), String> {
         if self.lanes[track].limiter.is_none() {

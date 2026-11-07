@@ -114,13 +114,32 @@ fn gain_and_names_go_live_and_everything_else_restarts() {
     let mut off_and_louder = off.clone();
     off_and_louder[1].gain_db = 3.0;
     assert!(live_updates(&off, &off_and_louder).is_empty(), "a disabled source has no live track");
-    // Into boost: a long recording that started unlimited would clip, so this restarts.
+    // 2026-11-07 audit A3: into boost is live too. Every long-recording track runs the limiter,
+    // so a crossing never restarts the engine (that wiped the replay buffer).
     let mut boosted = base.clone();
     boosted[1].gain_db = 2.0;
-    assert!(changed(&base, &boosted), "0 dB -> +2 dB: restart (the limiter is chosen at start)");
+    assert!(!changed(&base, &boosted), "0 dB -> +2 dB: live, the replay buffer stays");
+    assert_eq!(json_lines(&live_updates(&base, &boosted)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","gain_db":2.0,"id":"mic"}"#).unwrap()]);
     let mut more = boosted.clone();
     more[1].gain_db = 6.0;
     assert!(!changed(&boosted, &more), "+2 -> +6 dB: live (the track already runs the limiter)");
     assert!(!changed(&more, &louder), "+6 -> -4.5 dB: live (lowering never clips)");
     assert!(!changed(&louder, &base), "-4.5 -> 0 dB: live (0 dB is not a boost)");
+}
+
+/// 2026-11-07 audit A12: whether the mic-mute hotkey silences an input goes to the running
+/// engine live; a line-in reaches a new engine as `mic_mute: false`, a microphone as nothing.
+#[test]
+fn the_mic_mute_flag_goes_live_and_reaches_the_engine() {
+    let base = default_sources();
+    let mut line = base.clone();
+    line[1].mic_mute = false;
+    assert!(!changed(&base, &line), "no restart: the replay buffer stays");
+    assert_eq!(json_lines(&live_updates(&base, &line)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","id":"mic","mic_mute":false}"#).unwrap()]);
+    assert!(engine_value(&line).contains(r#""mic_mute":false"#), "{}", engine_value(&line));
+    assert!(!engine_value(&base).contains("mic_mute"), "a microphone needs no flag (the engine's default)");
+    let saved: AudioSource = toml::from_str("id = \"in\"
+kind = \"input\"
+name = \"Mic\"").unwrap();
+    assert!(saved.mic_mute, "a config written before the flag keeps muting its inputs");
 }

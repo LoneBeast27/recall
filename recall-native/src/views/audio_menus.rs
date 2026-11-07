@@ -24,6 +24,8 @@ enum Pick {
     Device(String, String),
     App(String, String, String),
     Add(Kind),
+    /// An input's "Muted by the mic hotkey" (the source, the new value).
+    MicMute(String, bool),
     OpenApps,
     Browse(Option<String>),
 }
@@ -80,6 +82,7 @@ impl Root {
             Pick::App(id, exe, label) if id.is_empty() => self.add_source(Kind::App, &exe, &label),
             Pick::App(id, exe, label) => self.set_source_app(&id, exe, label),
             Pick::Add(kind) => self.add_source(kind, "", ""),
+            Pick::MicMute(id, on) => self.set_source_mic_mute(&id, on),
             Pick::OpenApps => self.settings_ui.audio.menu = Some(StripMenu::AddApp),
             Pick::Browse(id) => self.browse_for_app(id, cx),
         }
@@ -160,6 +163,12 @@ impl Root {
             for (i, (value, label)) in entries.into_iter().enumerate() {
                 let selected = value.trim().eq_ignore_ascii_case(&saved);
                 rows.push(self.menu_row((&key, i), None, label, selected, Pick::Device(source.id.clone(), value), cx));
+            }
+            if source.kind == Kind::Input {
+                // A capture card or console line-in keeps its sound while the mic is muted.
+                rows.push(note("Turn this off for a line-in or capture card:"));
+                let glyph = Some(icon(Icon::MicOff, 14., theme::MUTED).into_any_element());
+                rows.push(self.menu_row((&key, 950), glyph, "Muted by the mic hotkey".into(), source.mic_mute, Pick::MicMute(source.id.clone(), !source.mic_mute), cx));
             }
         }
         let panel = panel(SharedString::from(format!("strip-menu-{}", source.id)), 280.).left_0().children(rows).on_mouse_down_out(cx.listener(|this, _, _, cx| {

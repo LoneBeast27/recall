@@ -118,17 +118,21 @@ pub(super) fn watch_for(device: &str, default_id: Option<String>) -> Option<Watc
     Some(Watch { id: default_id? })
 }
 
-/// A named device that does not open at start still gets its track (silence) and waits for
-/// the device by its own name. Not for process loopback (a bad target is reported, never
-/// waited on), a Windows-default source (no name to wait for), or `RECALL_AUDIO_EXACT`
-/// (tests: a missing test endpoint means no track, as before).
-pub(super) fn waits_when_absent(device: &str, loopback: bool, exact: bool) -> bool {
-    !device.trim().is_empty() && !loopback && !exact
+/// A device source that does not open at start still gets its track (silence) and waits: a
+/// named device for itself, a source on the Windows default for a default to appear (the
+/// headset is off, or an app holds the default in exclusive mode). Not for process loopback (a
+/// bad target is reported, never waited on), or `RECALL_AUDIO_EXACT` (tests: a missing test
+/// endpoint means no track, as before).
+pub(super) fn waits_when_absent(loopback: bool, exact: bool) -> bool {
+    !loopback && !exact
 }
 
-/// The status of a named device that has not appeared yet (`sources::opened`).
+/// The status of a device that has not appeared yet (`sources::opened`).
 pub(super) fn waiting_label(device: &str) -> String {
-    format!("{} (not connected; waiting)", device.trim())
+    match device.trim() {
+        "" => "Windows default (none yet; waiting)".to_owned(),
+        name => format!("{name} (not connected; waiting)"),
+    }
 }
 
 /// Silence up to the clock (the source sends nothing right now).
@@ -199,8 +203,9 @@ pub(super) fn capture_loop<C: Capture>(
                         let _ = tx.send(Err(e));
                         return;
                     }
-                    eprintln!("[recall] audio track '{}': {e}; waiting for '{}'", ring.name, device.trim());
-                    set_endpoint(ring, waiting_label(device));
+                    let label = waiting_label(device);
+                    eprintln!("[recall] audio track '{}': {e}; {label}", ring.name);
+                    set_endpoint(ring, label);
                     let _ = tx.send(Ok(()));
                 }
                 failures = failures.saturating_add(1);

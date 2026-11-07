@@ -70,6 +70,9 @@ pub struct Source {
     pub name: String,
     pub enabled: bool,
     pub gain_db: f32,
+    /// An input the mic-mute hotkey silences (a microphone). A line-in or capture card says
+    /// false, so muting the mic leaves its sound. Other kinds ignore it.
+    pub mic_mute: bool,
 }
 
 /// The saved list (`recording.audio_sources`), skipping entries the controller would refuse.
@@ -86,6 +89,7 @@ pub fn from_config(value: Option<&Value>) -> Vec<Source> {
                 name: text("name"),
                 enabled: v.get("enabled").and_then(Value::as_bool).unwrap_or(true),
                 gain_db: v.get("gain_db").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                mic_mute: v.get("mic_mute").and_then(Value::as_bool).unwrap_or(true),
             })
         })
         .collect()
@@ -94,7 +98,7 @@ pub fn from_config(value: Option<&Value>) -> Vec<Source> {
 pub fn to_config(list: &[Source]) -> Value {
     Value::Array(
         list.iter()
-            .map(|s| json!({ "id": s.id, "kind": s.kind.token(), "device": s.device, "exe": s.exe, "name": s.name, "enabled": s.enabled, "gain_db": s.gain_db }))
+            .map(|s| json!({ "id": s.id, "kind": s.kind.token(), "device": s.device, "exe": s.exe, "name": s.name, "enabled": s.enabled, "gain_db": s.gain_db, "mic_mute": s.mic_mute }))
             .collect(),
     )
 }
@@ -130,7 +134,22 @@ pub fn with_new(list: &[Source], kind: Kind, exe: &str, app_name: &str) -> Optio
     }
     let base = if kind == Kind::App && !app_name.trim().is_empty() { clip_name(app_name) } else { kind.default_name().to_owned() };
     let mut out = list.to_vec();
-    out.push(Source { id: fresh_id(list, kind), kind, device: String::new(), exe: exe.trim().to_owned(), name: fresh_name(list, &base), enabled: true, gain_db: 0.0 });
+    out.push(Source { id: fresh_id(list, kind), kind, device: String::new(), exe: exe.trim().to_owned(), name: fresh_name(list, &base), enabled: true, gain_db: 0.0, mic_mute: true });
+    Some(out)
+}
+
+/// `list` with a removed `source` back at `index` (Undo); `None` when it cannot come back (the
+/// list is full, or it is a game and another game was added). A source added since may have
+/// taken its freed id: then it comes back under a fresh one.
+pub fn restored(list: &[Source], index: usize, mut source: Source) -> Option<Vec<Source>> {
+    if list.len() >= SOURCES_MAX || (source.kind == Kind::Game && list.iter().any(|s| s.kind == Kind::Game)) {
+        return None;
+    }
+    if list.iter().any(|s| s.id.eq_ignore_ascii_case(&source.id)) {
+        source.id = fresh_id(list, source.kind);
+    }
+    let mut out = list.to_vec();
+    out.insert(index.min(out.len()), source);
     Some(out)
 }
 

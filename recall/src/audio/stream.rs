@@ -17,9 +17,27 @@ const IDLE: Duration = Duration::from_millis(200);
 /// Event wait per turn: short, so a quiet source is filled promptly.
 const WAIT_MS: u32 = 100;
 
+/// The WASAPI buffer a device stream asks for: 100 ms, or the device's own period when it is
+/// longer. The minimum period (about 3 ms, rounded up to one ~10 ms engine period) let a
+/// short stall of this BelowNormal process overrun the buffer and drop samples (a crackle).
+pub(super) fn device_buffer_hns(min_period: i64) -> i64 {
+    min_period.max(1_000_000)
+}
+
+/// Join the calling capture thread to MMCSS's "Audio" task, so Windows schedules it ahead of
+/// ordinary work (it stays on the cores the engine is pinned to). A refusal is logged, not fatal.
+pub(super) fn join_mmcss_audio(track: &str) {
+    let mut index = 0u32;
+    // SAFETY: a static wide string and a valid out pointer; the task stays joined for the
+    // thread's life (Windows reverts it when the thread ends).
+    if let Err(e) = unsafe { windows::Win32::System::Threading::AvSetMmThreadCharacteristicsW(windows::core::w!("Audio"), &mut index) } {
+        eprintln!("[recall] audio track '{track}': no MMCSS audio scheduling ({e})");
+    }
+}
+
 /// wasapi's event handle, closed on drop: wasapi 0.19's `Handle` has no `Drop`, so every
-/// reopen used to leak one event handle.
-struct Event(wasapi::Handle);
+/// reopen used to leak one event handle. Drop it after the client that signals it.
+pub(super) struct Event(pub(super) wasapi::Handle);
 
 // `Handle` is one `HANDLE` field (wasapi 0.19 api.rs): the same size means it sits at offset 0.
 const _: () = assert!(std::mem::size_of::<wasapi::Handle>() == std::mem::size_of::<*mut std::ffi::c_void>());
@@ -66,7 +84,7 @@ pub(super) fn open_stream(direction: &Direction, device: &str, ring: &TrackRing,
             }
             let client = dev.get_iaudioclient().map_err(|e| e.to_string())?;
             let (_def_period, min_period) = client.get_device_period().map_err(|e| e.to_string())?;
-            (client, endpoint, min_period)
+            (client, endpoint, device_buffer_hns(min_period))
         }
     };
     let mode = StreamMode::EventsShared { autoconvert: true, buffer_duration_hns };

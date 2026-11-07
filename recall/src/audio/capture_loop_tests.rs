@@ -17,6 +17,7 @@ fn ring() -> TrackRing {
         gain: AtomicU32::new(1.0f32.to_bits()),
         boosted: AtomicBool::new(false),
         input: true,
+        mutes: AtomicBool::new(true),
         endpoint: Mutex::new(String::new()),
         rate: RATE,
         channels: 1,
@@ -147,12 +148,41 @@ fn without_waiting_a_failed_first_open_ends_the_track_as_before() {
 }
 
 #[test]
-fn only_a_named_device_outside_tests_waits_for_its_device() {
-    assert!(waits_when_absent("Headset (USB)", false, false));
-    assert!(!waits_when_absent("  ", false, false), "the Windows default has no name to wait for");
-    assert!(!waits_when_absent("Headset (USB)", true, false), "a process-loopback target is reported, not waited on");
-    assert!(!waits_when_absent("Headset (USB)", false, true), "RECALL_AUDIO_EXACT keeps no track for a missing endpoint");
+fn a_device_source_outside_tests_waits_for_its_device() {
+    assert!(waits_when_absent(false, false));
+    assert!(!waits_when_absent(true, false), "a process-loopback target is reported, not waited on");
+    assert!(!waits_when_absent(false, true), "RECALL_AUDIO_EXACT keeps no track for a missing endpoint");
     assert_eq!(waiting_label(" Headset (USB) "), "Headset (USB) (not connected; waiting)");
+}
+
+/// 2026-11-07 audit A1: a source on the Windows default (the fresh-install Microphone) with no
+/// default device at engine start (headset off, endpoint held in exclusive mode) still gets its
+/// track: silent and waiting, and it records once a default appears.
+#[test]
+fn a_default_source_with_nothing_to_open_at_start_waits_for_a_default() {
+    assert_eq!(waiting_label("  "), "Windows default (none yet; waiting)");
+
+    let ring = ring();
+    let now = Rc::new(Cell::new(Duration::ZERO));
+    let mut clock = FakeClock { now: now.clone(), stop_at: Duration::from_secs(5) };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let opened = Cell::new(false);
+    let open = |_reopen: bool| {
+        // No default until 2 s; the default opens once, then is gone again.
+        if now.get() < Duration::from_secs(2) || opened.replace(true) {
+            return Err("default endpoint failed: element not found".to_owned());
+        }
+        let mut stream = fake(&now, 1, false);
+        stream.endpoint = "Headset (USB) (Windows default)".into();
+        Ok(stream)
+    };
+    capture_loop(&ring, "", waits_when_absent(false, false), open, tx, &mut clock, &FakeNotices::none(&now));
+    assert_eq!(rx.try_recv().unwrap(), Ok(()), "the track starts while there is no default");
+    let samples = ring.snapshot(5.0);
+    assert_eq!(len(&ring), 500, "level with the clock");
+    assert!(samples[..200].iter().all(|&s| s == 0.0), "silence while there is no default");
+    assert!(samples[200..300].iter().all(|&s| s == 0.5), "the new default's sound from 2 s");
+    assert!(samples[300..].iter().all(|&s| s == 0.0), "silence once it is gone again");
 }
 
 #[test]

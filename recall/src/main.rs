@@ -311,7 +311,7 @@ impl ApplicationHandler for App {
             });
             let track_infos = tracks
                 .iter()
-                .map(|t| longrec::TrackInfo { name: t.name, rate: t.rate, channels: t.channels, boosted: t.boosted() })
+                .map(|t| longrec::TrackInfo { name: t.name, rate: t.rate, channels: t.channels })
                 .collect();
             self.longrec = Some(Arc::new(longrec::spawn(out_dir.clone(), json, track_infos)));
             longrec::recover_parts(out_dir.clone(), json);
@@ -451,15 +451,15 @@ fn spawn_stdin_reader(
                     #[cfg(feature="encode")]
                     { audio::set_mic_muted(muted); protocol::emit(&protocol::Outbound::MicMuted { muted }); }
                 }
-                protocol::Command::SetSource { id, gain_db, name } => {
+                protocol::Command::SetSource { id, gain_db, name, mic_mute } => {
                     #[cfg(feature="encode")]
                     {
-                        if !audio::sources::set_live(&id, gain_db, name.as_deref()) {
+                        if !audio::sources::set_live(&id, gain_db, name.as_deref(), mic_mute) {
                             eprintln!("[recall] set_source: no live track '{id}'");
                         }
                     }
                     #[cfg(not(feature="encode"))]
-                    let _ = (id, gain_db, name);
+                    let _ = (id, gain_db, name, mic_mute);
                 }
                 cmd @ (protocol::Command::Bookmark
                     | protocol::Command::Screenshot

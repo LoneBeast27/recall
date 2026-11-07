@@ -21,6 +21,7 @@ fn ring(capacity: usize) -> TrackRing {
         gain: AtomicU32::new(1.0f32.to_bits()),
         boosted: AtomicBool::new(false),
         input: false,
+        mutes: AtomicBool::new(false),
         endpoint: Mutex::new(String::new()),
         rate: RATE,
         channels: 2,

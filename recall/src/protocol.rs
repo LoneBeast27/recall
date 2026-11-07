@@ -245,6 +245,9 @@ pub enum Command {
         gain_db: Option<f32>,
         #[serde(default)]
         name: Option<String>,
+        /// Whether the mic-mute hotkey silences this input (false: a line-in or capture card).
+        #[serde(default)]
+        mic_mute: Option<bool>,
     },
     /// Export an existing VFR clip to a separate NVENC CFR file (60 fps default).
     ExportClip {
@@ -313,9 +316,11 @@ mod tests {
     fn set_source_parses_with_either_field() {
         use super::Command;
         let both: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"mic","gain_db":-3.5,"name":"Voice"}"#).unwrap();
-        assert!(matches!(both, Command::SetSource { ref id, gain_db: Some(g), name: Some(ref n) } if id == "mic" && g == -3.5 && n == "Voice"));
+        assert!(matches!(both, Command::SetSource { ref id, gain_db: Some(g), name: Some(ref n), mic_mute: None } if id == "mic" && g == -3.5 && n == "Voice"));
         let gain: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"game","gain_db":6}"#).unwrap();
         assert!(matches!(gain, Command::SetSource { gain_db: Some(_), name: None, .. }));
+        let line_in: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"in-1","mic_mute":false}"#).unwrap();
+        assert!(matches!(line_in, Command::SetSource { mic_mute: Some(false), gain_db: None, name: None, .. }));
     }
 
     #[test]

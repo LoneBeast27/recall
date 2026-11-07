@@ -276,9 +276,7 @@ fn a_failed_encoder_ends_the_recording_and_reports_the_saved_file() {
 fn a_boosted_track_is_limited_with_every_frame_in_place() {
     use crate::export::mix_limit::{limit_interleaved, CEILING};
     let log = Log::default();
-    let mut boosted = tracks();
-    boosted[0].boosted = true;
-    let mut rec = Recorder::new(FakeFactory { log: log.clone(), ..Default::default() }, boosted);
+    let mut rec = Recorder::new(FakeFactory { log: log.clone(), ..Default::default() }, tracks());
     let path = temp_dir("limit").join("G__2026-11-05__16-50-00__rec.mp4");
     let t0 = Instant::now();
     rec.start(path.clone(), Some((1_000 * MS, t0)), t0);
@@ -309,4 +307,36 @@ fn a_boosted_track_is_limited_with_every_frame_in_place() {
     let left: Vec<f32> = out.iter().step_by(2).copied().collect();
     assert!(!left.windows(3).any(|w| w[0] == w[1] && w[1] == w[2] && w[0].abs() > 0.5), "no flat top");
     assert_eq!(log.pcm(1), quiet, "a 0 dB track is written exactly as captured");
+}
+
+/// 2026-11-07 audit A3: a source that started at 0 dB and was boosted live (no engine restart)
+/// is still limited in a long recording: a track's limiter starts at its first sample above the
+/// ceiling, so a fader crossing 0 dB never needs a restart. A track under the ceiling is written
+/// exactly as captured.
+#[test]
+fn a_source_boosted_after_the_engine_started_is_limited_too() {
+    use crate::export::mix_limit::CEILING;
+    let log = Log::default();
+    let mut rec = Recorder::new(FakeFactory { log: log.clone(), ..Default::default() }, tracks());
+    let path = temp_dir("live-boost").join("G__2026-11-07__10-00-00__rec.mp4");
+    let t0 = Instant::now();
+    rec.start(path.clone(), Some((1_000 * MS, t0)), t0);
+    rec.video(1_000 * MS, true, pkt(1), false, t0);
+    let gain = 10f32.powf(9.0 / 20.0);
+    let tone: Vec<f32> = (0..24_000).flat_map(|n| {
+        let s = (n as f32 / 48_000.0 * 440.0 * std::f32::consts::TAU).sin() * gain;
+        [s, s]
+    }).collect();
+    let quiet: Vec<f32> = tone.iter().map(|s| s / gain * 0.5).collect();
+    for (k, (loud, soft)) in tone.chunks(960).zip(quiet.chunks(960)).enumerate() {
+        let at = t0 + Duration::from_millis(10 * (k as u64 + 1));
+        rec.audio(0, loud, at);
+        rec.audio(1, soft, at);
+    }
+    assert!(matches!(rec.stop()[..], [Event::Stopped { .. }]));
+    let out = log.pcm(0);
+    assert_eq!(out.len(), tone.len(), "every frame in place");
+    let peak = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!(peak <= CEILING + 1e-6, "a live boost clipped the long recording: peak {peak}");
+    assert_eq!(log.pcm(1), quiet, "a track under the ceiling is written as captured");
 }

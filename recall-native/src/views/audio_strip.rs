@@ -160,7 +160,7 @@ impl Root {
 
         let menu_open = self.settings_ui.audio.menu == Some(StripMenu::Device(id.clone()));
         let label = self.source_label(source);
-        // A saved device that is gone records from the Windows default until it is back.
+        // A saved device that is gone records silence until it is back (its meter shows nothing).
         // Every strip keeps this line so meters line up.
         let missing = div()
             .h(px(14.))

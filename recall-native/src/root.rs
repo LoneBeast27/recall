@@ -226,6 +226,10 @@ impl Root {
         }
         if route == Route::Settings {
             self.cache.refresh();
+            // A MIDI device plugged in since Settings last showed is listed again.
+            if self.route != Route::Settings {
+                self.settings_ui.devices.stale();
+            }
         }
         if matches!(route, Route::Settings | Route::Hdr | Route::Audio) {
             self.daemon.send(DaemonCommand::GetConfig);
