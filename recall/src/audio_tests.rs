@@ -15,6 +15,7 @@ fn raw_ring(name: &'static str, input: bool, gain: f32, rate: u32, channels: u16
         input,
         mic_mute: AtomicBool::new(true),
         on_default: true,
+        opened_own: AtomicBool::new(false),
         endpoint: Mutex::new(String::new()),
         rate,
         channels,
@@ -392,9 +393,13 @@ fn a_ring_reserves_its_buffer_and_never_doubles() {
 fn the_mute_hotkey_skips_an_input_marked_as_not_a_microphone() {
     use super::sources::SourceSpec;
     // A line-in skips Alt+M only on a named device (R4-deep-audio-1).
-    let spec = |mic_mute: bool| SourceSpec { id: "in-1".into(), kind: "input".into(), device: "Line (Box One)".into(), exe: String::new(), name: "In".into(), gain_db: 0.0, mic_mute: Some(mic_mute) };
+    let spec = |mic_mute: bool| SourceSpec { device_id: String::new(), id: "in-1".into(), kind: "input".into(), device: "Line (Box One)".into(), exe: String::new(), name: "In".into(), gain_db: 0.0, mic_mute: Some(mic_mute) };
     let mic = TrackRing::for_source(&spec(true), "mic", 1, String::new());
     let line = TrackRing::for_source(&spec(false), "mic", 1, String::new());
+    // Both opened their own saved device (R5-deep-audio-1: `opened_own`).
+    for ring in [&mic, &line] {
+        ring.opened_own.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     mic.push_capture(&[0.5, 0.5], true);
     line.push_capture(&[0.5, 0.5], true);
     let held = |ring: &TrackRing| ring.samples.lock().unwrap().iter().copied().collect::<Vec<f32>>();
@@ -404,6 +409,9 @@ fn the_mute_hotkey_skips_an_input_marked_as_not_a_microphone() {
     let list = super::sources::parse(json).unwrap();
     assert_eq!((list[0].mic_mute, list[1].mic_mute), (Some(false), None), "parsed with and without the flag");
     let (console, plain) = (TrackRing::for_source(&list[0], "mic", 1, String::new()), TrackRing::for_source(&list[1], "mic", 1, String::new()));
+    for ring in [&console, &plain] {
+        ring.opened_own.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     console.push_capture(&[0.5, 0.5], true);
     plain.push_capture(&[0.5, 0.5], true);
     assert_eq!((held(&console), held(&plain)), (vec![0.5, 0.5], vec![0.0, 0.0]), "the flagged line-in keeps its sound; the input without the flag is muted");
@@ -415,7 +423,7 @@ fn the_mute_hotkey_skips_an_input_marked_as_not_a_microphone() {
 #[test]
 fn a_line_in_on_the_windows_default_is_muted_by_the_mic_hotkey() {
     use super::sources::SourceSpec;
-    let spec = |device: &str| SourceSpec { id: "line-in".into(), kind: "input".into(), device: device.into(), exe: String::new(), name: "Line-in".into(), gain_db: 0.0, mic_mute: Some(false) };
+    let spec = |device: &str| SourceSpec { device_id: String::new(), id: "line-in".into(), kind: "input".into(), device: device.into(), exe: String::new(), name: "Line-in".into(), gain_db: 0.0, mic_mute: Some(false) };
     let held = |ring: &TrackRing| ring.samples.lock().unwrap().iter().copied().collect::<Vec<f32>>();
     for device in ["", "  "] {
         let ring = TrackRing::for_source(&spec(device), "mic", 1, String::new());
@@ -427,6 +435,7 @@ fn a_line_in_on_the_windows_default_is_muted_by_the_mic_hotkey() {
         assert_eq!(held(&ring), [0.0, 0.0], "the strip toggle does not unmute the Windows default");
     }
     let named = TrackRing::for_source(&spec("Line (Box One)"), "mic", 1, String::new());
+    named.opened_own.store(true, std::sync::atomic::Ordering::Relaxed); // its own device
     named.push_capture(&[0.5, 0.5], true);
     assert_eq!(held(&named), [0.5, 0.5], "a named line-in keeps its sound");
     // The page set the picker back to "Windows default": the engine restarts with device "".
@@ -443,7 +452,7 @@ fn a_line_in_on_the_windows_default_is_muted_by_the_mic_hotkey() {
 #[test]
 fn an_input_without_the_flag_is_muted_whatever_its_form_factor() {
     use super::sources::SourceSpec;
-    let spec = SourceSpec { id: "in-1".into(), kind: "input".into(), device: String::new(), exe: String::new(), name: "In".into(), gain_db: 0.0, mic_mute: None };
+    let spec = SourceSpec { device_id: String::new(), id: "in-1".into(), kind: "input".into(), device: String::new(), exe: String::new(), name: "In".into(), gain_db: 0.0, mic_mute: None };
     // The engine reads no form factor (2 LineLevel, 10 Unknown, ...): nothing to inject.
     let ring = TrackRing::for_source(&spec, "mic", 1, String::new());
     ring.push_capture(&[0.5, 0.5], true);

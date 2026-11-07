@@ -248,6 +248,22 @@ pub fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
     hits.next().is_none().then_some(first)
 }
 
+/// How many endpoints equal `want` once both drop a leading "<digits>- " index: two or more
+/// with no exact match is why `match_endpoint` opens none ("3- X" saved, "4- X" and "5- X" there).
+pub fn stripped_hits(names: &[String], want: &str) -> usize {
+    let want = strip_index(want);
+    names.iter().filter(|n| strip_index(n) == want).count()
+}
+
+/// The endpoint the recorder opened (`opened`, its id `opened_id`) is the source's own saved
+/// device (`want`, the id saved with it, "" = none): the exact name and, when an id was saved,
+/// that id. Only then may a line-in skip Alt+M (R5-deep-audio-1). A copy of the recorder's
+/// `opened_own` (`recall` `audio/endpoints.rs`); both crates test the same table.
+pub fn opened_own(opened: &str, opened_id: Option<&str>, want: &str, want_id: &str) -> bool {
+    let (want, want_id) = (want.trim(), want_id.trim());
+    !want.is_empty() && opened.trim() == want && (want_id.is_empty() || opened_id.map(str::trim) == Some(want_id))
+}
+
 /// `name` without a leading "<digits>- " Windows endpoint index; nothing else is dropped.
 fn strip_index(name: &str) -> &str {
     let name = name.trim();

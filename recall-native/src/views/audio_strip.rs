@@ -9,6 +9,7 @@ use crate::{
     services::{
         audio_devices,
         audio_sources::{self as sources, Kind, Source},
+        audio_mute::shown_level,
         meters::{bar_fraction, with_gain},
     },
     theme::{self, c},
@@ -111,9 +112,13 @@ impl Root {
         let renaming = self.settings_ui.audio.renaming.as_deref() == Some(id.as_str());
         let gain = self.strip_gain(source);
         let (rms, hold, live) = level.unwrap_or((-90., -90., false));
+        // Alt+M on and this source muted by it: flat, as the clip records it (R5-deep-audio-5).
+        let session_muted = self.snap.session.as_ref().is_some_and(|s| s.mic_muted) || self.snap.engine.as_ref().is_some_and(|e| e.mic_muted);
+        let mutes = sources::mutes(source, self.settings_ui.audio.devices.as_ref());
+        let muted = session_muted && mutes;
         // Bar, hold line and number all after the gain, so they move together with the fader.
-        let (rms, hold) = (with_gain(rms, gain), with_gain(hold, gain));
-        let level_text = if !live { "—".to_owned() } else if rms <= -89.0 { "-∞".to_owned() } else { format!("{:.0} dB", rms) };
+        let (rms, hold) = (shown_level(with_gain(rms, gain), session_muted, mutes), shown_level(with_gain(hold, gain), session_muted, mutes));
+        let level_text = if !live { "—".to_owned() } else if muted { "Muted".to_owned() } else if rms <= -89.0 { "-∞".to_owned() } else { format!("{:.0} dB", rms) };
 
         let type_icon: AnyElement = match self.settings_ui.audio.icon(&source.exe).filter(|_| source.kind == Kind::App) {
             Some(image) => img(ImageSource::Render(image)).size(px(16.)).flex_none().into_any_element(),
@@ -167,7 +172,7 @@ impl Root {
             .text_size(px(11.))
             .line_height(px(14.))
             .text_color(c(theme::WARNING))
-            .when_some(crate::services::audio_sources::strip_note(&label, source), |d, note| d.child(note));
+            .when_some(crate::services::audio_sources::strip_note(source, self.settings_ui.audio.devices.as_ref()), |d, note| d.child(note));
         let picker_id = id.clone();
         let picker = div()
             .relative()

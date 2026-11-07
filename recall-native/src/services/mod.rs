@@ -2,6 +2,7 @@
 pub mod app_icons;
 pub mod audio_apps;
 pub mod audio_devices;
+pub mod audio_mute;
 pub mod audio_sources;
 pub mod endpoint_form;
 pub mod daemon;

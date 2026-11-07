@@ -91,6 +91,11 @@ pub(super) fn notices_for<N>(loopback: bool, register: impl FnOnce() -> Result<N
 pub(super) trait Capture {
     /// The endpoint or process it captures, for the status.
     fn endpoint(&self) -> String;
+    /// The endpoint is the source's own saved device (`endpoints::opened_own`): only then may
+    /// a line-in skip Alt+M. Unsure = false, so the input follows the mic hotkey.
+    fn own(&self) -> bool {
+        false
+    }
     /// Capture into `ring` until the stream fails or must move; the stream is stopped on return.
     fn run(&mut self, ring: &TrackRing, level: &mut Leveller, clock: &dyn Clock, notices: &dyn Notices) -> Ended;
 }
@@ -150,6 +155,15 @@ impl TrackRing {
     }
 }
 
+/// Whether the stream just opened (false once it ends) is the source's own saved device. A named
+/// input on another endpoint says so in the log: it follows Alt+M (R5-deep-audio-1).
+fn set_opened_own(ring: &TrackRing, endpoint: &str, own: bool, opening: bool) {
+    ring.opened_own.store(own, std::sync::atomic::Ordering::Relaxed);
+    if opening && ring.input && !ring.on_default && !own {
+        eprintln!("[recall] audio track '{}': {endpoint} is not the saved device; it follows the mic hotkey", ring.name);
+    }
+}
+
 fn set_endpoint(ring: &TrackRing, text: String) {
     if let Ok(mut g) = ring.endpoint.lock() {
         *g = text;
@@ -182,6 +196,7 @@ pub(super) fn capture_loop<C: Capture>(
                 let endpoint = stream.endpoint();
                 // The endpoint's real name: a renumbered "4- X" for a saved "3- X" shows as itself.
                 eprintln!("[recall] audio track '{}': opened {endpoint}", ring.name);
+                set_opened_own(ring, &endpoint, stream.own(), true);
                 set_endpoint(ring, endpoint.clone());
                 if let Some(tx) = init_tx.take() {
                     let _ = tx.send(Ok(()));
@@ -189,6 +204,7 @@ pub(super) fn capture_loop<C: Capture>(
                 // Device notices from before this stream are stale for the next loss.
                 notices.take_devices_changed();
                 let ended = stream.run(ring, &mut level, &*clock, notices);
+                set_opened_own(ring, &endpoint, false, false);
                 // Nor do the ones that came while it was live (another device came or went):
                 // the first reopen after this loss keeps its backoff.
                 notices.take_devices_changed();
@@ -238,3 +254,7 @@ fn wait_to_reopen(ring: &TrackRing, level: &mut Leveller, clock: &mut dyn Clock,
 #[cfg(test)]
 #[path = "capture_loop_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "own_device_tests.rs"]
+mod own_device_tests;

@@ -7,6 +7,11 @@ use wasapi::{DeviceCollection, Direction};
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DeviceLists {
     pub inputs: Vec<String>,
+    /// Each input's endpoint id (`IMMDevice::GetId`), by index of `inputs` ("" unreadable):
+    /// saved with a picked device, so a line-in skips Alt+M only on that endpoint.
+    pub input_ids: Vec<String>,
+    /// Each input's Windows form factor, by index of `inputs` (`None` unreadable). A hint only.
+    pub input_forms: Vec<Option<u32>>,
     pub outputs: Vec<String>,
     pub default_input: Option<String>,
     pub default_output: Option<String>,
@@ -50,12 +55,16 @@ impl AudioDevices {
 pub fn enumerate_blocking() -> DeviceLists {
     let worker = std::thread::Builder::new().name("recall-audio-devices".into()).spawn(|| {
         let _ = wasapi::initialize_mta();
+        let (inputs, input_ids, input_forms) = inputs();
+        let line_inputs = inputs.iter().zip(&input_forms).filter(|(_, form)| crate::services::endpoint_form::is_line_level(**form)).map(|(n, _)| n.clone()).collect();
         let lists = DeviceLists {
-            inputs: names(&Direction::Capture),
+            inputs,
+            input_ids,
+            input_forms,
             outputs: names(&Direction::Render),
             default_input: default_name(&Direction::Capture),
             default_output: default_name(&Direction::Render),
-            line_inputs: line_inputs(),
+            line_inputs,
             default_input_is_line: wasapi::get_default_device(&Direction::Capture).ok().map(|d| is_line(&d)),
             midi_inputs: crate::services::midi::input_names(),
         };
@@ -101,33 +110,78 @@ fn is_line(device: &wasapi::Device) -> bool {
     crate::services::endpoint_form::is_line_level(device.get_id().ok().and_then(|id| crate::services::endpoint_form::read(&id)))
 }
 
-/// Capture endpoints whose form factor is line-level, by friendly name.
-fn line_inputs() -> Vec<String> {
-    let Ok(collection) = DeviceCollection::new(&Direction::Capture) else { return Vec::new() };
+/// Capture endpoints: names sorted like `sorted`, with each one's id and form factor.
+fn inputs() -> (Vec<String>, Vec<String>, Vec<Option<u32>>) {
+    let Ok(collection) = DeviceCollection::new(&Direction::Capture) else { return Default::default() };
     let n = collection.get_nbr_devices().unwrap_or(0);
-    (0..n).filter_map(|i| collection.get_device_at_index(i).ok()).filter(is_line).filter_map(|d| d.get_friendlyname().ok()).collect()
+    let mut out: Vec<(String, String, Option<u32>)> = (0..n)
+        .filter_map(|i| collection.get_device_at_index(i).ok())
+        .filter_map(|d| {
+            let id = d.get_id().unwrap_or_default();
+            let form = Some(id.as_str()).filter(|id| !id.is_empty()).and_then(crate::services::endpoint_form::read);
+            Some((d.get_friendlyname().ok()?, id, form))
+        })
+        .collect();
+    out.sort_by_key(|(n, _, _)| n.to_lowercase());
+    let forms = out.iter().map(|(_, _, f)| *f).collect();
+    let ids = out.iter().map(|(_, id, _)| id.clone()).collect();
+    (out.into_iter().map(|(n, _, _)| n).collect(), ids, forms)
 }
 
 fn default_name(direction: &Direction) -> Option<String> {
     wasapi::get_default_device(direction).ok()?.get_friendlyname().ok()
 }
 
-/// The row label for a saved device name: "" = the Windows default (named when known); a name
-/// that matches no listed endpoint the way the recorder matches it = "<name> (not connected)";
-/// a match shows the endpoint's real name (a saved "3- X" that opens "4- X" reads "4- X").
-pub fn device_label(saved: &str, listed: Option<&[String]>, default: Option<&str>) -> String {
+/// What the recorder does with a saved device name, from the listed endpoints (`match_endpoint`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Found {
+    /// No device: the Windows default.
+    Default,
+    /// The lists are not read yet: no claim either way.
+    Unknown,
+    /// It opens the endpoint at this index.
+    Opens(usize),
+    /// `n` endpoints carry exactly this name: it opens none.
+    Twins(usize),
+    /// `n` endpoints match once a leading "<digits>- " index is dropped: it opens none.
+    Ambiguous(usize),
+    /// No endpoint matches.
+    Missing,
+}
+
+/// [`Found`] for `saved` among `listed`.
+pub fn found(saved: &str, listed: Option<&[String]>) -> Found {
     let saved = saved.trim();
     if saved.is_empty() {
-        return match default {
+        return Found::Default;
+    }
+    let Some(list) = listed else { return Found::Unknown };
+    match crate::services::meters::match_endpoint(list, saved) {
+        Some(i) => Found::Opens(i),
+        None if twins(list, saved) > 1 => Found::Twins(twins(list, saved)),
+        None => match crate::services::meters::stripped_hits(list, saved) {
+            n if n > 1 => Found::Ambiguous(n),
+            _ => Found::Missing,
+        },
+    }
+}
+
+/// The row label for a saved device name: "" = the Windows default (named when known); a name
+/// that matches no listed endpoint the way the recorder matches it = "<name> (not connected)";
+/// a match shows the endpoint's real name (a saved "3- X" that opens "4- X" reads "4- X"); a
+/// name two or more endpoints share or match says how many (R5-deep-audio-4).
+pub fn device_label(saved: &str, listed: Option<&[String]>, default: Option<&str>) -> String {
+    let saved = saved.trim();
+    match found(saved, listed) {
+        Found::Default => match default {
             Some(name) => format!("Windows default ({name})"),
             None => "Windows default".to_owned(),
-        };
-    }
-    match listed.map(|list| (list, crate::services::meters::match_endpoint(list, saved))) {
-        Some((list, None)) if twins(list, saved) > 1 => format!("{saved} ({} devices have this name; rename one in Windows)", twins(list, saved)),
-        Some((list, Some(i))) => list[i].trim().to_owned(),
-        Some((_, None)) => format!("{saved} (not connected)"),
-        None => saved.to_owned(),
+        },
+        Found::Opens(i) => listed.map_or(saved, |l| l[i].trim()).to_owned(),
+        Found::Twins(n) => format!("{saved} ({n} devices have this name; rename one in Windows)"),
+        Found::Ambiguous(n) => format!("{saved} ({n} devices match; rename one in Windows)"),
+        Found::Missing => format!("{saved} (not connected)"),
+        Found::Unknown => saved.to_owned(),
     }
 }
 
@@ -181,6 +235,20 @@ mod tests {
         let list = vec!["Speakers (Box)".to_owned(), "4- Line (Box One)".to_owned()];
         assert_eq!(device_label("3- Line (Box One)", Some(&list), None), "4- Line (Box One)");
         let two = vec!["4- Line (Box One)".to_owned(), "5- Line (Box One)".to_owned()];
-        assert_eq!(device_label("3- Line (Box One)", Some(&two), None), "3- Line (Box One) (not connected)", "two matches: waiting");
+        assert!(!device_label("3- Line (Box One)", Some(&two), None).ends_with("(not connected)"), "two matches: connected, but ambiguous");
+    }
+
+    /// 2026-11-07 audit R5-deep-audio-4: a saved "3- X" with "4- X" and "5- X" both there reads
+    /// as ambiguous (both are connected; neither is recorded), and twins say how many there are.
+    #[test]
+    fn ambiguous_and_twin_names_count_the_devices() {
+        let two = vec!["4- Line (Box One)".to_owned(), "5- Line (Box One)".to_owned()];
+        assert_eq!(device_label("3- Line (Box One)", Some(&two), None), "3- Line (Box One) (2 devices match; rename one in Windows)");
+        assert_eq!(found("3- Line (Box One)", Some(&two)), Found::Ambiguous(2));
+        let three = vec!["Line (Box One)".to_owned(); 3];
+        assert_eq!(found("Line (Box One)", Some(&three)), Found::Twins(3));
+        assert!(device_label("Line (Box One)", Some(&three), None).contains("3 devices"));
+        assert_eq!(found("Line (Box One)", None), Found::Unknown);
+        assert_eq!(found(" ", Some(&three)), Found::Default);
     }
 }

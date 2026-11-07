@@ -35,6 +35,17 @@ pub(crate) fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
     hits.next().is_none().then_some(first)
 }
 
+/// The endpoint a named source opened is its own device (R5-deep-audio-1): its friendly name is
+/// exactly the saved `want` and, when the source saved an endpoint id at pick time (`want_id`),
+/// its id is that id. A renumbered fallback ("Mic (Box)" saved, "2- Mic (Box)" opened), a twin
+/// that took the saved name, or any other open is not, so a line-in there follows Alt+M. A
+/// config without an id: an exact-name open only. The Audio page keeps a copy (`recall-native`
+/// `services/meters.rs` `opened_own`); keep the two equal (same test table in both).
+pub(crate) fn opened_own(opened: &str, opened_id: Option<&str>, want: &str, want_id: &str) -> bool {
+    let (want, want_id) = (want.trim(), want_id.trim());
+    !want.is_empty() && opened.trim() == want && (want_id.is_empty() || opened_id.map(str::trim) == Some(want_id))
+}
+
 /// Which endpoint a device source opens.
 #[derive(Debug, PartialEq)]
 pub(crate) enum Pick {

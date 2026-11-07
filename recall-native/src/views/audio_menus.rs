@@ -21,7 +21,8 @@ use crate::{
 /// What a menu row does.
 #[derive(Clone)]
 enum Pick {
-    Device(String, String),
+    /// A strip's device: the source, the name, the endpoint id, its index in the inputs list.
+    Device(String, String, String, Option<usize>),
     App(String, String, String),
     Add(Kind),
     /// A new input: a microphone (true) or a line-in or capture card (false).
@@ -48,6 +49,21 @@ fn panel(id: SharedString, width: f32) -> Stateful<gpui::Div> {
         .border_color(c(theme::BORDER))
         .flex()
         .flex_col()
+}
+
+/// A checked row that does nothing on click (muted text): a state the strip cannot change.
+fn inert_row(leading: Option<AnyElement>, label: &str) -> AnyElement {
+    div()
+        .min_h(px(30.))
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .gap(px(8.))
+        .text_color(c(theme::TERTIARY))
+        .children(leading)
+        .child(div().flex_1().min_w_0().truncate().child(label.to_owned()))
+        .child(icon(Icon::Check, 14., theme::TERTIARY))
+        .into_any_element()
 }
 
 fn note(text: &str) -> AnyElement {
@@ -80,7 +96,7 @@ impl Root {
         let page = &mut self.settings_ui.audio;
         page.menu = None;
         match pick {
-            Pick::Device(id, device) => self.set_source_device(&id, device),
+            Pick::Device(id, device, device_id, index) => self.set_source_device(&id, device, device_id, index),
             Pick::App(id, exe, label) if id.is_empty() => self.add_source(Kind::App, &exe, &label),
             Pick::App(id, exe, label) => self.set_source_app(&id, exe, label),
             Pick::Add(kind) => self.add_source(kind, "", ""),
@@ -158,25 +174,33 @@ impl Root {
                 rows.push(note("Looking for devices…"));
             }
             let saved = source.device.trim().to_owned();
-            let mut entries = vec![(String::new(), audio_devices::device_label("", lists.map(|_| names.as_slice()), default.as_deref()))];
+            // (name, endpoint id, index in the inputs, label): an input saves the endpoint id too.
+            let mut entries = vec![(String::new(), String::new(), None, audio_devices::device_label("", lists.map(|_| names.as_slice()), default.as_deref()))];
             let matched = (!saved.is_empty()).then(|| crate::services::meters::match_endpoint(&names, &saved)).flatten();
             // A twin name is listed already (marked "1 of 2"): no extra "not connected" row.
             if !saved.is_empty() && lists.is_some() && matched.is_none() && !names.iter().any(|n| n.trim() == saved) {
-                entries.push((saved.clone(), format!("{saved} (not connected)")));
+                entries.push((saved.clone(), source.device_id.clone(), None, format!("{saved} (not connected)")));
             }
             let first_name = entries.len();
-            entries.extend(names.iter().cloned().zip(audio_devices::picker_labels(&names)));
-            for (i, (value, label)) in entries.into_iter().enumerate() {
+            let ids = lists.filter(|_| source.kind.uses_inputs()).map(|l| l.input_ids.clone()).unwrap_or_default();
+            for (i, (name, label)) in names.iter().cloned().zip(audio_devices::picker_labels(&names)).enumerate() {
+                let id = if source.kind.uses_inputs() { ids.get(i).cloned().unwrap_or_default() } else { String::new() };
+                entries.push((name, id, Some(i), label));
+            }
+            for (i, (value, value_id, index, label)) in entries.into_iter().enumerate() {
                 // The endpoint the recorder opens for the saved name (its real name may differ).
                 let selected = match matched {
                     Some(m) => i == first_name + m,
                     None => value.trim() == saved,
                 };
-                rows.push(self.menu_row((&key, i), None, label, selected, Pick::Device(source.id.clone(), value), cx));
+                rows.push(self.menu_row((&key, i), None, label, selected, Pick::Device(source.id.clone(), value, value_id, index), cx));
             }
             if source.kind == Kind::Input {
-                // A capture card or console line-in keeps its sound while the mic is muted.
-                rows.push(note("Turn this off for a line-in or capture card:"));
+                // A capture card or console line-in keeps its sound while the mic is muted; on
+                // the Windows default there is nothing to turn off (R5-deep-audio-3).
+                if !saved.is_empty() {
+                    rows.push(note("Turn this off for a line-in or capture card:"));
+                }
                 // The form factor only hints; Alt+M follows the strip's flag (none = muted).
                 if crate::services::audio_sources::windows_says_line_level(source, lists) {
                     rows.push(note("Windows reports this as a line-level input, not a microphone."));
@@ -185,11 +209,17 @@ impl Root {
                 if crate::services::audio_sources::line_in_on_default(source) {
                     rows.push(note(crate::services::audio_sources::LINE_IN_ON_DEFAULT));
                 }
+                // A line-in the recorder opens on another endpoint follows Alt+M (R5-deep-audio-1).
+                if crate::services::audio_mute::opens_other(source, lists) {
+                    rows.push(note(crate::services::audio_mute::OPENED_OTHER));
+                }
                 let glyph = Some(icon(Icon::MicOff, 14., theme::MUTED).into_any_element());
-                // Shows what Alt+M does now; a click flips the strip's own flag (on the Windows
-                // default it stays muted either way, and the note above says why).
-                let muted = crate::services::audio_sources::mutes(source);
-                rows.push(self.menu_row((&key, 950), glyph, "Muted by the mic hotkey".into(), muted, Pick::MicMute(source.id.clone(), source.mic_mute == Some(false)), cx));
+                // The strip's own flag; with no device the row is checked and inert: the Windows
+                // default is always muted (R5-deep-audio-3).
+                match crate::services::audio_mute::mic_row(source) {
+                    (checked, Some(on)) => rows.push(self.menu_row((&key, 950), glyph, "Muted by the mic hotkey".into(), checked, Pick::MicMute(source.id.clone(), on), cx)),
+                    (_, None) => rows.push(inert_row(glyph, "Muted by the mic hotkey")),
+                }
             }
         }
         let panel = panel(SharedString::from(format!("strip-menu-{}", source.id)), 280.).left_0().children(rows).on_mouse_down_out(cx.listener(|this, _, _, cx| {
