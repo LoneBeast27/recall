@@ -120,3 +120,38 @@ fn process_lookup_finds_this_test_binary_only() {
     assert!(process_running(&name).unwrap());
     assert!(!process_running("recall-native-no-such-process-7f3a.exe").unwrap());
 }
+
+/// The pipe's server runs as another account (the SID lookup is faked): the client writes
+/// nothing to it, stays disconnected and names the refusal; the real check accepts this
+/// process's own fake controller (the round-trip tests above go through it).
+#[test]
+fn a_pipe_whose_server_runs_as_another_account_is_refused() {
+    use interprocess::local_socket::traits::Listener as _;
+    use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName};
+    use std::io::Read as _;
+
+    fn other_account(stream: &Stream) -> Result<(), String> {
+        pipe_owner::verdict(pipe_owner::server_pid(stream), Ok("S-1-5-21-1-1-1-1001".into()), |_| Ok("S-1-5-21-2-2-2-1002".into()))
+    }
+    let pipe = format!("recall-native-foreign-test-{}", std::process::id());
+    let listener = ListenerOptions::new().name(pipe.as_str().to_ns_name::<GenericNamespaced>().unwrap()).create_sync().unwrap();
+    let client = DaemonClient::spawn_checked(&pipe, other_account);
+    let mut stream = listener.accept().unwrap();
+    wait_until("refusal", || client.snapshot().refused.is_some());
+    let refused = client.snapshot().refused.unwrap();
+    assert!(refused.starts_with(pipe_owner::FOREIGN), "{refused}");
+    // Nothing was written: the client dropped the connection, so the read ends at EOF.
+    let mut got = Vec::new();
+    let _ = stream.read_to_end(&mut got);
+    assert!(got.is_empty(), "sent {:?}", String::from_utf8_lossy(&got));
+    assert!(!client.snapshot().connected);
+    assert!(!client.send(DaemonCommand::Status), "no writer for a refused server");
+    drop(client);
+    // The live check accepts a server of this account.
+    let own = format!("recall-native-own-test-{}", std::process::id());
+    let listener = ListenerOptions::new().name(own.as_str().to_ns_name::<GenericNamespaced>().unwrap()).create_sync().unwrap();
+    let real = DaemonClient::spawn_checked(&own, pipe_owner::check);
+    let _accepted = listener.accept().unwrap();
+    wait_until("connected", || real.snapshot().connected);
+    assert_eq!(real.snapshot().refused, None);
+}

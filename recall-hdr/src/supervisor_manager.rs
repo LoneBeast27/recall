@@ -86,7 +86,18 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
                         policy.on_intended_restart();
                         continue;
                     }
-                    ChildExit::Clean(code) => log!("supervisor: engine exited (code {code})"),
+                    ChildExit::Clean(code) => match crate::engine_exit::fatal_reason(code) {
+                        // A broken install: every retry would fail the same way.
+                        Some(why) => {
+                            log!("supervisor: engine could not start (code {:#x}): {why}; not restarting until the target changes.", code as u32);
+                            shared.set_health(EngineHealth::GivenUp);
+                            if !wait_for_change(&shared, gen) {
+                                break;
+                            }
+                            continue;
+                        }
+                        None => log!("supervisor: engine exited (code {code})"),
+                    },
                     ChildExit::Signalled => log!("supervisor: engine terminated without an exit code"),
                 }
             }

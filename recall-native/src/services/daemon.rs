@@ -1,4 +1,4 @@
-//! Client for the controller's control pipe (`\\.\pipe\recall-hdr-control`).
+//! Client for the controller's control pipe (`\\.\pipe\recall-hdr-control-<session>`, `session`).
 //!
 //! A background thread connects, reconnects every second, parses newline JSON
 //! `{"mod":ns,"event":{..}}` messages into a shared snapshot plus a queue of
@@ -15,7 +15,14 @@ use serde::Deserialize;
 use serde_json::Value;
 
 mod controller;
+mod pipe_owner;
 mod protocol;
+mod reach;
+mod session;
+
+// The examples include this file without the views that use these.
+#[allow(unused_imports)]
+pub use reach::{reach, reach_or_refused, unreachable_detail, RecorderReach};
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -23,7 +30,6 @@ mod tests_pipe;
 #[cfg(test)]
 mod tests_clock;
 
-const PIPE_NAME: &str = "recall-hdr-control";
 const RECONNECT: Duration = Duration::from_secs(1);
 /// A `status` request this often: only the controller's pump answers it, so the
 /// replies show it is alive (engine lines come from another thread).
@@ -238,6 +244,8 @@ pub struct DaemonSnapshot {
     pub hotkey_warnings: Vec<String>,
     /// Counts `config` events (each one is a fresh answer, even when the config is unchanged).
     pub config_seq: u64,
+    /// The last connect was refused: the pipe's server runs as another account (`pipe_owner`).
+    pub refused: Option<String>,
 }
 
 impl SessionStatus {
@@ -375,15 +383,21 @@ impl DaemonClient {
     /// `RECALL_CONTROL_PIPE` names another pipe (scripted checks keep off the real recorder).
     pub fn spawn() -> Self {
         let pipe = std::env::var("RECALL_CONTROL_PIPE").ok().filter(|p| !p.is_empty());
-        Self::spawn_on(pipe.as_deref().unwrap_or(PIPE_NAME))
+        // The real recorder's pipe is per Windows session (`session`).
+        Self::spawn_on(&pipe.unwrap_or_else(session::current_pipe_name))
     }
 
     /// `spawn` against any pipe name (tests use a private one).
     fn spawn_on(pipe: &str) -> Self {
+        Self::spawn_checked(pipe, pipe_owner::check)
+    }
+
+    /// `spawn_on` with the server-owner check injected (tests fake another account).
+    fn spawn_checked(pipe: &str, owner: OwnerCheck) -> Self {
         let shared = Arc::new(Shared::new());
         let worker = shared.clone();
         let pipe = pipe.to_owned();
-        let spawned = std::thread::Builder::new().name("recall-daemon-pipe".into()).spawn(move || connection_loop(&worker, &pipe));
+        let spawned = std::thread::Builder::new().name("recall-daemon-pipe".into()).spawn(move || connection_loop(&worker, &pipe, owner));
         if let Err(error) = spawned {
             eprintln!("Recall native: controller pipe thread failed to start: {error}");
         }
@@ -419,13 +433,27 @@ impl Drop for DaemonClient {
     }
 }
 
-/// Connect, serve until EOF/error, mark disconnected, retry every second.
-fn connection_loop(shared: &Shared, pipe: &str) {
+/// Whether a fresh connection's server may be used (`pipe_owner::check`).
+type OwnerCheck = fn(&Stream) -> Result<(), String>;
+
+/// Connect, check the server runs as this account, serve until EOF/error, mark
+/// disconnected, retry every second. A refused server gets nothing written to it.
+fn connection_loop(shared: &Shared, pipe: &str, owner: OwnerCheck) {
     while !shared.stop.load(Ordering::Acquire) {
         if let Ok(name) = pipe.to_ns_name::<GenericNamespaced>()
             && let Ok(stream) = Stream::connect(name)
         {
-            serve(shared, stream);
+            let verdict = owner(&stream);
+            let refused = verdict.as_ref().err().cloned();
+            if let Some(reason) = &refused
+                && shared.read(|state| state.snapshot.refused.as_ref() != Some(reason))
+            {
+                eprintln!("Recall native: {reason}; not using the control pipe");
+            }
+            shared.update(|state| state.set_refused(refused));
+            if verdict.is_ok() {
+                serve(shared, stream);
+            }
         }
         shared.set_writer(None);
         shared.update(|state| state.set_connected(false));
@@ -472,4 +500,9 @@ fn serve(shared: &Shared, stream: Stream) {
 /// when no controller is running. Ok(false) when one is already running.
 pub fn start_controller() -> Result<bool, String> {
     controller::start()
+}
+
+/// A recorder process runs in this Windows session (false when the list can't be read).
+pub fn controller_running() -> bool {
+    controller::process_running(controller::CONTROLLER_EXE).unwrap_or(false)
 }

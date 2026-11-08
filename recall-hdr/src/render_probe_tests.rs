@@ -184,3 +184,35 @@ mod hidden {
         }
     }
 }
+
+#[test]
+fn a_starting_controller_also_stops_the_legacy_machine_wide_session_and_nothing_else() {
+    // Faked stop: the real one would end a probe running on this PC.
+    let mut asked = Vec::new();
+    let left = stop_left_sessions("RecallDetectRender-1", |name| {
+        asked.push(name.to_string());
+        name == "RecallDetectRender"
+    });
+    assert_eq!(asked, ["RecallDetectRender-1", "RecallDetectRender"], "own, then the old bare name; never another session's");
+    assert_eq!(left, LeftSessions { own: false, legacy: true });
+    // No session id: the own name is the bare one, stopped once.
+    let mut asked = Vec::new();
+    let left = stop_left_sessions("RecallDetectRender", |name| {
+        asked.push(name.to_string());
+        true
+    });
+    assert_eq!(asked, ["RecallDetectRender"]);
+    assert_eq!(left, LeftSessions { own: true, legacy: false });
+    assert_eq!(own_session_name(), session_name_for(crate::control_pipe::current_session()));
+}
+
+#[test]
+fn the_render_session_name_differs_per_windows_session() {
+    // Two signed-in users each run a controller; one's stale-session stop must not end the
+    // other's probe (audit G3 leftover, R2-deep-startup-8).
+    assert_eq!(session_name_for(Some(1)), "RecallDetectRender-1");
+    assert_eq!(session_name_for(Some(2)), "RecallDetectRender-2");
+    assert_eq!(session_name_for(None), "RecallDetectRender", "no session id: the bare name");
+    let longest = session_name_for(Some(u32::MAX));
+    assert!(longest.encode_utf16().count() < 64, "fits the properties' name buffer");
+}

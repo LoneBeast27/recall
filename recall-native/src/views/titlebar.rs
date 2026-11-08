@@ -3,7 +3,7 @@ use gpui::{AnyElement, Context, FontWeight, MouseButton, Window, div, prelude::*
 
 use crate::{
     views::window_frame::{Caption, caption_button},
-    root::{Root, Route, ToastKind},
+    root::{Root, Route, ToastKind, reach},
     services::{daemon::{self, DaemonCommand}, library},
     theme::{self, c},
     ui::{self, Icon, Variant, icon},
@@ -131,6 +131,26 @@ impl Root {
             .bg(c(theme::RAISED))
             .border_1()
             .border_color(c(theme::BORDER_SUBTLE));
+        if !snap.connected && self.recorder_reach == daemon::RecorderReach::Unreachable {
+            // A recorder runs but never answers: say so (Start can't help).
+            return pill
+                .cursor_pointer()
+                .hover(|s| s.bg(c(theme::OVERLAY)))
+                .child(ui::dot(theme::WARNING, 7.))
+                .child(div().text_color(c(theme::MUTED)).child(reach::UNREACHABLE_TITLE))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let detail = this.unreachable_detail();
+                    this.show_toast(ToastKind::Bad, reach::UNREACHABLE_TITLE, Some(detail));
+                    cx.notify();
+                }))
+                .into_any_element();
+        }
+        if !snap.connected && self.recorder_reach == daemon::RecorderReach::Starting {
+            return pill
+                .child(ui::dot(theme::DISABLED, 7.))
+                .child(div().text_color(c(theme::MUTED)).child("Recorder starting…"))
+                .into_any_element();
+        }
         if !snap.connected {
             return pill
                 .cursor_pointer()
@@ -139,10 +159,7 @@ impl Root {
                 .child(div().text_color(c(theme::MUTED)).child("Recorder off"))
                 .child(div().text_color(c(theme::TEXT)).font_weight(FontWeight::MEDIUM).child("Start"))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    match daemon::start_controller() {
-                        Ok(_) => this.show_toast(ToastKind::Info, "Starting the recorder…", None),
-                        Err(error) => this.show_toast(ToastKind::Bad, "Couldn't start the recorder", Some(error)),
-                    }
+                    this.start_recorder();
                     cx.notify();
                 }))
                 .into_any_element();

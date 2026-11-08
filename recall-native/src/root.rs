@@ -140,6 +140,10 @@ pub struct Root {
     status_stale: bool,
     /// The pill's clock (`root_poll::recorder_clock_tick`): no status replies, drain seconds drawn.
     pub(crate) recorder_unresponsive: bool,
+    /// Disconnected: is a recorder running that never answers (`root_reach`)?
+    pub(crate) recorder_reach: crate::services::daemon::RecorderReach,
+    reach_since: Option<Instant>,
+    reach_checked: Option<Instant>,
     drain_drawn: Option<u64>,
     /// The startup timeline marks the first render once.
     first_render_marked: bool,
@@ -157,6 +161,8 @@ mod exits;
 mod keys;
 #[path = "root_poll.rs"]
 mod poll;
+#[path = "root_reach.rs"]
+pub(crate) mod reach;
 #[path = "root_render.rs"]
 mod render;
 #[path = "root_start.rs"]

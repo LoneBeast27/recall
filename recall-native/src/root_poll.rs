@@ -94,6 +94,7 @@ impl Root {
         }
         changed |= self.poll_daemon();
         changed |= self.recorder_clock_tick();
+        changed |= self.reach_tick();
         changed |= self.ed.tick(self.route == Route::Editor, &self.workers);
         crate::trace::record(self.route.name(), &self.ed, self.lib.records.len());
         crate::trace::dump_layout(self.route.name(), self.lib.records.len());
