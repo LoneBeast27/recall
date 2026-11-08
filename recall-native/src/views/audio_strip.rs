@@ -7,8 +7,8 @@ use gpui::{AnyElement, Context, CursorStyle, Div, FontWeight, ImageSource, Mouse
 use crate::{
     root::Root,
     services::{
-        audio_devices,
         audio_sources::{self as sources, Kind, Source},
+        audio_mute::shown_level,
         meters::{bar_fraction, with_gain},
     },
     theme::{self, c},
@@ -86,6 +86,16 @@ impl Render for StripDrag {
 
 impl Root {
     /// The picker label: the device (or "Windows default (…)"), the app, or a missing one.
+    /// The warning under a strip's device button: a refused "Muted by the mic hotkey" untick
+    /// (R6-deep-audio-1), else `strip_note`.
+    fn strip_warning(&self, source: &Source) -> Option<String> {
+        let audio = &self.settings_ui.audio;
+        if let Some((_, why)) = audio.mute_refused.as_ref().filter(|(id, _)| *id == source.id) {
+            return Some((*why).to_owned());
+        }
+        crate::services::audio_sources::strip_note(source, audio.devices.as_ref())
+    }
+
     fn source_label(&self, source: &Source) -> String {
         let page = &self.settings_ui.audio;
         match source.kind {
@@ -96,12 +106,12 @@ impl Root {
                 .map_or_else(|| format!("{} (not running)", crate::services::audio_apps::exe_stem(&source.exe)), |p| p.label.clone()),
             kind => {
                 let lists = page.devices.as_ref();
-                let (names, default) = match lists {
-                    Some(l) if kind.uses_inputs() => (Some(l.inputs.as_slice()), l.default_input.as_deref()),
-                    Some(l) => (Some(l.outputs.as_slice()), l.default_output.as_deref()),
-                    None => (None, None),
+                let default = match lists {
+                    Some(l) if kind.uses_inputs() => l.default_input.as_deref(),
+                    Some(l) => l.default_output.as_deref(),
+                    None => None,
                 };
-                audio_devices::device_label(&source.device, names, default)
+                crate::services::audio_pick::source_device_label(source, lists, default)
             }
         }
     }
@@ -111,9 +121,13 @@ impl Root {
         let renaming = self.settings_ui.audio.renaming.as_deref() == Some(id.as_str());
         let gain = self.strip_gain(source);
         let (rms, hold, live) = level.unwrap_or((-90., -90., false));
+        // Alt+M on and this source muted by it: flat, as the clip records it (R5-deep-audio-5).
+        let session_muted = self.snap.session.as_ref().is_some_and(|s| s.mic_muted) || self.snap.engine.as_ref().is_some_and(|e| e.mic_muted);
+        let mutes = sources::mutes(source, self.settings_ui.audio.devices.as_ref());
+        let muted = session_muted && mutes;
         // Bar, hold line and number all after the gain, so they move together with the fader.
-        let (rms, hold) = (with_gain(rms, gain), with_gain(hold, gain));
-        let level_text = if !live { "—".to_owned() } else if rms <= -89.0 { "-∞".to_owned() } else { format!("{:.0} dB", rms) };
+        let (rms, hold) = (shown_level(with_gain(rms, gain), session_muted, mutes), shown_level(with_gain(hold, gain), session_muted, mutes));
+        let level_text = if !live { "—".to_owned() } else if muted { "Muted".to_owned() } else if rms <= -89.0 { "-∞".to_owned() } else { format!("{:.0} dB", rms) };
 
         let type_icon: AnyElement = match self.settings_ui.audio.icon(&source.exe).filter(|_| source.kind == Kind::App) {
             Some(image) => img(ImageSource::Render(image)).size(px(16.)).flex_none().into_any_element(),
@@ -160,14 +174,14 @@ impl Root {
 
         let menu_open = self.settings_ui.audio.menu == Some(StripMenu::Device(id.clone()));
         let label = self.source_label(source);
-        // A saved device that is gone records from the Windows default until it is back.
-        // Every strip keeps this line so meters line up.
+        // A saved device that is gone records silence until it is back (its meter shows nothing).
+        // Every strip keeps this line so meters line up (a line-in on the default wraps it).
         let missing = div()
-            .h(px(14.))
+            .min_h(px(14.))
             .text_size(px(11.))
             .line_height(px(14.))
             .text_color(c(theme::WARNING))
-            .when(label.ends_with("(not connected)"), |d| d.child("Not connected"));
+            .when_some(self.strip_warning(source), |d, note| d.child(note));
         let picker_id = id.clone();
         let picker = div()
             .relative()

@@ -30,8 +30,9 @@ pub struct MeterReading {
 /// What one meter listens to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MeterTarget {
-    /// An endpoint ("" = the Windows default): loopback of an output, or an input.
-    Device { render: bool, device: String },
+    /// An endpoint ("" = the Windows default): loopback of an output, or an input. `device_id`
+    /// is the endpoint id saved with it: it tells same-named endpoints apart (`pick_endpoint`).
+    Device { render: bool, device: String, device_id: String },
     /// The largest running process tree of an exe.
     App { exe: String },
     /// One process tree (the recorded game).
@@ -48,14 +49,14 @@ pub struct MeterSpec {
 /// The meter for a source, the way the recorder captures it: the game's process while a game
 /// is recorded (`game_pid`), else its output device.
 pub fn spec_for(source: &Source, game_pid: Option<u32>) -> MeterSpec {
-    let device = source.device.trim().to_owned();
+    let (device, device_id) = (source.device.trim().to_owned(), source.device_id.trim().to_owned());
     let target = match source.kind {
         Kind::Game => match game_pid {
             Some(pid) => MeterTarget::Process { pid },
-            None => MeterTarget::Device { render: true, device },
+            None => MeterTarget::Device { render: true, device, device_id },
         },
-        Kind::Output => MeterTarget::Device { render: true, device },
-        Kind::Input => MeterTarget::Device { render: false, device },
+        Kind::Output => MeterTarget::Device { render: true, device, device_id },
+        Kind::Input => MeterTarget::Device { render: false, device, device_id },
         Kind::App => MeterTarget::App { exe: source.exe.trim().to_owned() },
     };
     MeterSpec { label: source.id.clone(), target }
@@ -160,8 +161,10 @@ fn meter_thread(shared: &Shared, index: usize) {
     let spec = shared.specs[index].clone();
     while !shared.stopped() {
         let state = match open(&spec.target) {
-            Ok(Some((client, period, pid))) => match capture(shared, index, client, period, pid) {
-                Ok(()) => MeterState::Missing,
+            Ok(Some(opened)) => match capture(shared, index, opened) {
+                // The Windows default moved: meter the new one at once, as the recorder does.
+                Ok(Ended::DefaultMoved) => continue,
+                Ok(Ended::Closed) => MeterState::Missing,
                 Err(error) => MeterState::Error(error),
             },
             Ok(None) => MeterState::Missing,
@@ -178,48 +181,166 @@ fn meter_thread(shared: &Shared, index: usize) {
     }
 }
 
-/// The endpoint the recorder opens for `name` (`recall` `audio.rs` `pick_device`): exact name
-/// first, then a whole-word match, else the Windows default. A saved device that is gone
-/// records from the default, so the meter shows the default too; the strip says "Not connected".
-fn find_device(is_render: bool, name: &str) -> Result<Option<Device>, String> {
-    let direction = if is_render { Direction::Render } else { Direction::Capture };
-    if !name.is_empty() {
-        let collection = DeviceCollection::new(&direction).map_err(|error| error.to_string())?;
-        let count = collection.get_nbr_devices().map_err(|error| error.to_string())?;
-        let devices: Vec<Device> = (0..count).filter_map(|i| collection.get_device_at_index(i).ok()).collect();
-        let names: Vec<String> = devices.iter().map(|d| d.get_friendlyname().unwrap_or_default()).collect();
-        if let Some(device) = match_endpoint(&names, name).and_then(|i| devices.into_iter().nth(i)) {
-            return Ok(Some(device));
-        }
+/// The endpoint the recorder opens for `name` and its saved `id` (`recall` `audio::pick_device`),
+/// and for a source with no device the Windows default's id (the meter follows it when it
+/// moves). A saved device that is not connected is metered as missing: the recorder records
+/// silence for it, so a live meter of the default there would claim a recording that is not
+/// happening. Endpoint ids are read only to tell same-named endpoints apart.
+fn find_device(direction: &Direction, (name, id): (&str, &str)) -> Result<Option<(Device, Option<String>)>, String> {
+    let collection = DeviceCollection::new(direction).map_err(|error| error.to_string())?;
+    let count = collection.get_nbr_devices().map_err(|error| error.to_string())?;
+    let devices: Vec<Device> = (0..count).filter_map(|i| collection.get_device_at_index(i).ok()).collect();
+    let names: Vec<String> = devices.iter().map(|d| d.get_friendlyname().unwrap_or_default()).collect();
+    let input = !matches!(direction, Direction::Render);
+    match meter_pick_for(input, &names, (name, id), |i| devices.get(i).and_then(|d| d.get_id().ok())) {
+        Some(DevicePick::Named(i)) => Ok(devices.into_iter().nth(i).map(|d| (d, None))),
+        Some(DevicePick::Default) => Ok(wasapi::get_default_device(direction).ok().map(|d| {
+            let id = d.get_id().ok();
+            (d, id)
+        })),
+        None => Ok(None),
     }
-    Ok(wasapi::get_default_device(&direction).ok())
 }
 
-/// Index of the endpoint `want` names: exact (case-insensitive) first, then the first whole-word
-/// match. A copy of the recorder's `match_endpoint`; both crates test the same table.
+/// The id of the Windows default endpoint for `direction` right now.
+fn default_id(direction: &Direction) -> Option<String> {
+    wasapi::get_default_device(direction).ok()?.get_id().ok()
+}
+
+/// What a device meter opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DevicePick {
+    /// The endpoint at this index of the names.
+    Named(usize),
+    /// The Windows default.
+    Default,
+}
+
+/// The endpoint a device meter opens for the saved device `want`, from the connected endpoints'
+/// `names`, the way the recorder picks it (`recall` `audio::choose_endpoint`).
+#[cfg(test)]
+pub fn meter_pick(names: &[String], want: &str) -> Option<DevicePick> {
+    meter_pick_id(names, want, "", |_| None)
+}
+
+/// [`meter_pick`] with the endpoint id saved with `want` (`want_id`) and each endpoint's id
+/// (`id_of`, by index of `names`, read only for a tie-break): `pick_endpoint`.
+#[cfg(test)]
+pub fn meter_pick_id(names: &[String], want: &str, want_id: &str, id_of: impl Fn(usize) -> Option<String>) -> Option<DevicePick> {
+    meter_pick_for(true, names, (want, want_id), id_of)
+}
+
+/// [`meter_pick_id`] for an `input` or an output: an output's unsure sibling is not metered (the
+/// recorder waits for the original, A4 ruling).
+pub fn meter_pick_for(input: bool, names: &[String], (want, want_id): (&str, &str), id_of: impl Fn(usize) -> Option<String>) -> Option<DevicePick> {
+    if want.trim().is_empty() {
+        return Some(DevicePick::Default);
+    }
+    use crate::services::endpoint_choice::{choose, opens};
+    opens(choose(names, want, want_id, id_of), input).map(DevicePick::Named)
+}
+
+/// A default-device meter should reopen: the Windows default it opened (`opened`) is no longer
+/// the default (`now`). No default right now is not a move: the stream reports the loss itself.
+pub fn default_moved(opened: Option<&str>, now: Option<&str>) -> bool {
+    matches!((opened, now), (Some(opened), Some(now)) if opened != now)
+}
+
+/// Index of the endpoint `want` names: the one endpoint with exactly that friendly name; else
+/// the one endpoint whose name equals `want`'s once both drop a leading "<digits>- " Windows
+/// index. Case included, no word matching; two or more exact matches, or two or more such
+/// endpoints, match none (the track waits, never a sibling). A copy of the recorder's
+/// `match_endpoint` (`recall` `audio/endpoints.rs`); both crates test the same table.
 pub fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
     let want = want.trim();
     if want.is_empty() {
         return None;
     }
-    let want_lower = want.to_lowercase();
-    names.iter().position(|n| n.trim().to_lowercase() == want_lower).or_else(|| names.iter().position(|n| name_matches(n, want)))
+    let mut exact = names.iter().enumerate().filter(|(_, n)| n.trim() == want).map(|(i, _)| i);
+    if let Some(first) = exact.next() {
+        return exact.next().is_none().then_some(first);
+    }
+    let want = strip_index(want);
+    let mut hits = names.iter().enumerate().filter(|(_, n)| strip_index(n) == want).map(|(i, _)| i);
+    let first = hits.next()?;
+    hits.next().is_none().then_some(first)
 }
 
-/// An audio client for a target, with its event period and, for a process, its pid; `None`
-/// while the device is missing or the app is closed.
-fn open(target: &MeterTarget) -> Result<Option<(AudioClient, i64, Option<u32>)>, String> {
+/// Index of the endpoint `want` (saved with the endpoint id `want_id`) opens: its own, or an
+/// unsure exact-name sibling (`endpoint_choice::choose`, A4 ruling). A copy of the recorder's
+/// `pick_endpoint` (`recall` `audio/endpoints.rs`); both crates test the same table.
+#[cfg(test)]
+pub fn pick_endpoint(names: &[String], want: &str, want_id: &str, id_of: impl Fn(usize) -> Option<String>) -> Option<usize> {
+    crate::services::endpoint_choice::opens(crate::services::endpoint_choice::choose(names, want, want_id, id_of), true)
+}
+
+/// How many endpoints equal `want` once both drop a leading "<digits>- " index: two or more
+/// with no exact match is why `match_endpoint` opens none ("3- X" saved, "4- X" and "5- X" there).
+pub fn stripped_hits(names: &[String], want: &str) -> usize {
+    let want = strip_index(want);
+    names.iter().filter(|n| strip_index(n) == want).count()
+}
+
+/// A saved endpoint id the recorder trusts: 1 to 256 characters once trimmed, no control
+/// character; anything else counts as no id (R6-deep-audio-5). A copy of the recorder's `id_ok`
+/// (`recall` `audio/endpoints.rs`).
+pub fn id_ok(id: &str) -> bool {
+    let id = id.trim();
+    !id.is_empty() && id.chars().count() <= 256 && !id.chars().any(char::is_control)
+}
+
+/// The endpoint the recorder opened (its id `opened_id`) is the source's own saved device
+/// (`want`, the id saved with it): a well-formed saved id equal to the opened one. The id alone
+/// decides; no id = not own. Only then may a line-in skip Alt+M (R6-deep-audio-1/2). A copy of
+/// the recorder's `opened_own` (`recall` `audio/endpoints.rs`); both crates test the same table.
+pub fn opened_own(opened_id: Option<&str>, want: &str, want_id: &str) -> bool {
+    let want_id = want_id.trim();
+    !want.trim().is_empty() && id_ok(want_id) && opened_id.map(str::trim) == Some(want_id)
+}
+
+/// `name` without a leading "<digits>- " Windows endpoint index; nothing else is dropped.
+pub(crate) fn strip_index(name: &str) -> &str {
+    let name = name.trim();
+    let digits = name.len() - name.trim_start_matches(|d: char| d.is_ascii_digit()).len();
+    match name[digits..].strip_prefix("- ") {
+        Some(rest) if digits > 0 => rest.trim_start(),
+        _ => name,
+    }
+}
+
+/// One opened meter client.
+struct Opened {
+    client: AudioClient,
+    /// Event period (hns).
+    period: i64,
+    /// A captured process (the recorded game, an app).
+    pid: Option<u32>,
+    /// A source with no device: the direction and the Windows default's id it opened.
+    default: Option<(Direction, String)>,
+}
+
+/// How a capture ended without an error.
+enum Ended {
+    /// Stopped, or the captured process exited.
+    Closed,
+    /// The Windows default moved to another endpoint.
+    DefaultMoved,
+}
+
+/// An audio client for a target; `None` while the device is missing or the app is closed.
+fn open(target: &MeterTarget) -> Result<Option<Opened>, String> {
     let text = |error: wasapi::WasapiError| error.to_string();
-    let process = |pid: u32| -> Result<Option<(AudioClient, i64, Option<u32>)>, String> {
+    let process = |pid: u32| -> Result<Option<Opened>, String> {
         // Process-loopback clients have no device period; 20 ms as the recorder uses.
-        Ok(Some((AudioClient::new_application_loopback_client(pid, true).map_err(text)?, 200_000, Some(pid))))
+        Ok(Some(Opened { client: AudioClient::new_application_loopback_client(pid, true).map_err(text)?, period: 200_000, pid: Some(pid), default: None }))
     };
     match target {
-        MeterTarget::Device { render, device } => {
-            let Some(device) = find_device(*render, device)? else { return Ok(None) };
+        MeterTarget::Device { render, device, device_id } => {
+            let direction = if *render { Direction::Render } else { Direction::Capture };
+            let Some((device, default)) = find_device(&direction, (device, device_id))? else { return Ok(None) };
             let client = device.get_iaudioclient().map_err(text)?;
             let (_, min_period) = client.get_device_period().map_err(text)?;
-            Ok(Some((client, min_period, None)))
+            Ok(Some(Opened { client, period: min_period, pid: None, default: default.map(|id| (direction, id)) }))
         }
         MeterTarget::App { exe } => match crate::services::process_tree::tree_root(exe) {
             Some(pid) => process(pid),
@@ -229,24 +350,61 @@ fn open(target: &MeterTarget) -> Result<Option<(AudioClient, i64, Option<u32>)>,
     }
 }
 
-/// Streams levels at ~10 Hz. Returns Ok(()) when asked to stop or when a captured process
-/// exits; device loss surfaces as an error from the read or the padding probe.
-fn capture(shared: &Shared, index: usize, mut client: AudioClient, period: i64, pid: Option<u32>) -> Result<(), String> {
-    let text = |error: wasapi::WasapiError| error.to_string();
+/// wasapi's event handle, closed on drop: wasapi 0.19's `Handle` has no `Drop`, so every meter
+/// reopen leaked one. Drop it after the client that signals it.
+struct Event(wasapi::Handle);
+
+// `Handle` is one `HANDLE` field (wasapi 0.19 api.rs): the same size means it sits at offset 0.
+const _: () = assert!(std::mem::size_of::<wasapi::Handle>() == std::mem::size_of::<*mut std::ffi::c_void>());
+
+impl Drop for Event {
+    fn drop(&mut self) {
+        // SAFETY: the size check above; the handle came from CreateEventA and is closed once.
+        let raw: *mut std::ffi::c_void = unsafe { std::mem::transmute_copy(&self.0) };
+        if !raw.is_null() {
+            let _ = unsafe { windows::Win32::Foundation::CloseHandle(windows::Win32::Foundation::HANDLE(raw)) };
+        }
+    }
+}
+
+/// How often a default-device meter checks that the default has not moved.
+const DEFAULT_CHECK: Duration = Duration::from_secs(1);
+
+/// Streams levels at ~10 Hz until asked to stop, a captured process exits, or the Windows
+/// default it meters moves; device loss surfaces as an error from the read or the padding probe.
+fn capture(shared: &Shared, index: usize, opened: Opened) -> Result<Ended, String> {
+    let Opened { mut client, period, pid, default } = opened;
     let format = WaveFormat::new(32, 32, &SampleType::Float, 48000, 2, None);
     client
         .initialize_client(&format, &Direction::Capture, &StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: period })
-        .map_err(text)?;
+        .map_err(|error| error.to_string())?;
+    let event = Event(client.set_get_eventhandle().map_err(|error| error.to_string())?);
+    let ended = levels_until_end(shared, index, &mut client, &event, pid, default.as_ref());
+    drop(client);
+    drop(event);
+    ended
+}
+
+/// The capture loop of [`capture`].
+fn levels_until_end(shared: &Shared, index: usize, client: &mut AudioClient, event: &Event, pid: Option<u32>, default: Option<&(Direction, String)>) -> Result<Ended, String> {
+    let text = |error: wasapi::WasapiError| error.to_string();
     let process = pid.and_then(crate::services::process_tree::Waitable::open);
-    let event = client.set_get_eventhandle().map_err(text)?;
     let capture = client.get_audiocaptureclient().map_err(text)?;
     client.start_stream().map_err(text)?;
     let mut raw: VecDeque<u8> = VecDeque::new();
     let mut levels = Levels::default();
     let mut last = Instant::now();
+    let mut checked = Instant::now();
     while !shared.stopped() {
+        if let Some((direction, opened)) = default.filter(|_| checked.elapsed() >= DEFAULT_CHECK) {
+            checked = Instant::now();
+            if default_moved(Some(opened), default_id(direction).as_deref()) {
+                let _ = client.stop_stream();
+                return Ok(Ended::DefaultMoved);
+            }
+        }
         // Loopback streams raise no events while nothing renders: a timeout is silence.
-        if event.wait_for_event(200).is_ok() {
+        if event.0.wait_for_event(200).is_ok() {
             capture.read_from_device_to_deque(&mut raw).map_err(|error| format!("read failed: {error}"))?;
             let full = raw.len() - raw.len() % 4;
             levels.push_bytes(&raw.make_contiguous()[..full]);
@@ -264,7 +422,7 @@ fn capture(shared: &Shared, index: usize, mut client: AudioClient, period: i64, 
         }
     }
     let _ = client.stop_stream();
-    Ok(())
+    Ok(Ended::Closed)
 }
 
 /// RMS + peak accumulator over interleaved f32 samples (all channels together).
@@ -304,125 +462,10 @@ fn round_tenth(value: f32) -> f32 {
     (value * 10.0).round() / 10.0
 }
 
-/// Lowercase, ø→o (so a name typed without the ø still matches), split into words.
-fn words(text: &str) -> Vec<String> {
-    let folded: String = text.to_lowercase().chars().map(|c| if c == 'ø' { 'o' } else { c }).collect();
-    folded.split(|c: char| !c.is_alphanumeric()).filter(|word| !word.is_empty()).map(str::to_owned).collect()
-}
-
-/// Every token must appear as a whole word of the friendly name.
-fn name_matches(name: &str, tokens: &str) -> bool {
-    let name_words = words(name);
-    let want = words(tokens);
-    !want.is_empty() && want.iter().all(|token| name_words.contains(token))
-}
+#[cfg(test)]
+#[path = "meters_tests.rs"]
+mod tests;
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    fn source(kind: Kind, device: &str, exe: &str) -> Source {
-        Source { id: format!("{}-1", kind.token()), kind, device: device.into(), exe: exe.into(), name: "S".into(), enabled: true, gain_db: 0.0 }
-    }
-
-    #[test]
-    fn each_source_is_metered_the_way_the_recorder_captures_it() {
-        let device = |render: bool, d: &str| MeterTarget::Device { render, device: d.into() };
-        assert_eq!(spec_for(&source(Kind::Input, " Microphone (USB Audio Device) ", ""), None).target, device(false, "Microphone (USB Audio Device)"));
-        assert_eq!(spec_for(&source(Kind::Output, "", ""), None).target, device(true, ""));
-        assert_eq!(spec_for(&source(Kind::Game, "Speakers (USB Audio Device)", ""), None).target, device(true, "Speakers (USB Audio Device)"), "desktop: the output");
-        assert_eq!(spec_for(&source(Kind::Game, "", ""), Some(42)).target, MeterTarget::Process { pid: 42 }, "in game: its process");
-        assert_eq!(spec_for(&source(Kind::App, "", "player.exe"), None).target, MeterTarget::App { exe: "player.exe".into() });
-        let specs = vec![spec_for(&source(Kind::Game, "", ""), None), spec_for(&source(Kind::Input, "", ""), None)];
-        let labels: Vec<_> = Shared::new(specs).readings.lock().unwrap().iter().map(|r| r.label.clone()).collect();
-        assert_eq!(labels, ["game-1", "input-1"], "readings are keyed by source id");
-    }
-
-    #[test]
-    fn whole_word_matching_rejects_neighbours() {
-        assert!(name_matches("Virtual A (Mixer)", "virtual a"));
-        assert!(!name_matches("Virtual B (Mixer)", "virtual a"), "hub bug: 'a' inside another word");
-        assert!(name_matches("Microphone (USB Audio Device)", "microphone usb"));
-        assert!(!name_matches("Game Capture HD60", "game mixer"));
-    }
-
-    /// Same table as `recall` `audio_tests.rs`: the meter picks what the recorder records.
-    #[test]
-    fn endpoint_matching_is_whole_word_and_folds_the_slashed_o() {
-        let names: Vec<String> = ["Virtual B (Mixer)", "Virtual A (Mixer)", "Line (Mixér)", "System (MØNITOR)"].map(String::from).to_vec();
-        assert_eq!(match_endpoint(&names, "virtual a"), Some(1), "'a' is not found inside another word");
-        assert_eq!(match_endpoint(&names, "System (MØNITOR)"), Some(3), "exact, non-ASCII");
-        assert_eq!(match_endpoint(&names, "system monitor"), Some(3), "ø typed as o");
-        assert_eq!(match_endpoint(&names, "SYSTEM (mønitor)"), Some(3), "case-insensitive Ø/ø");
-        assert_eq!(match_endpoint(&names, "line mixér"), Some(2));
-        assert_eq!(match_endpoint(&names, "mix"), None, "a part of a word is not a word");
-        assert_eq!(match_endpoint(&names, "  "), None, "empty = Windows default");
-    }
-
-    #[test]
-    fn levels_compute_rms_and_peak_over_both_channels() {
-        let bytes = |samples: &[f32]| samples.iter().flat_map(|s| s.to_le_bytes()).collect::<Vec<u8>>();
-        let mut levels = Levels::default();
-        levels.push_bytes(&bytes(&[0.5, -0.5, 0.5, -0.5]));
-        let (rms, peak) = levels.take();
-        assert!((rms - -6.0206).abs() < 0.01 && (peak - -6.0206).abs() < 0.01, "{rms} {peak}");
-        levels.push_bytes(&bytes(&[1.0, 0.0, 1.0, 0.0]));
-        let (rms, peak) = levels.take();
-        assert!((rms - -3.0103).abs() < 0.01 && peak.abs() < 1e-6, "{rms} {peak}");
-        assert_eq!(levels.take(), (FLOOR_DB, FLOOR_DB), "empty window is silence");
-        levels.push_bytes(&[0, 0, 0]);
-        assert_eq!(levels.take(), (FLOOR_DB, FLOOR_DB), "partial sample ignored");
-    }
-
-    #[test]
-    fn db_floor_and_bar_fraction() {
-        assert_eq!(db(0.0), -90.0);
-        assert_eq!(db(1e-12), -90.0);
-        assert_eq!(db(1.0), 0.0);
-        assert!((db(0.1) - -20.0).abs() < 1e-4);
-        assert_eq!(bar_fraction(-90.0), 0.0);
-        assert_eq!(bar_fraction(-30.0), 0.5);
-        assert_eq!(bar_fraction(3.0), 1.0);
-    }
-
-    #[test]
-    #[ignore = "live hardware: opens shared-mode WASAPI loopback/capture on the default endpoints"]
-    fn live_meters_report_every_endpoint() {
-        let meters = Meters::spawn(vec![spec_for(&source(Kind::Output, "", ""), None), spec_for(&source(Kind::Input, "", ""), None)]);
-        std::thread::sleep(Duration::from_millis(1500));
-        let snapshot = meters.snapshot();
-        for r in &snapshot {
-            eprintln!("{:<10} {:?} rms {:.1} dB peak {:.1} dB", r.label, r.state, r.rms_db, r.peak_db);
-        }
-        assert_eq!(snapshot.len(), 2);
-        assert!(meters.revision() > 0, "threads published readings");
-    }
-
-    #[test]
-    fn gain_moves_bar_hold_and_number_together_and_keeps_silence() {
-        assert_eq!(with_gain(-30.0, 6.0), -24.0);
-        assert_eq!(with_gain(-30.0, -12.5), -42.5);
-        assert_eq!(with_gain(FLOOR_DB, 12.0), FLOOR_DB, "silence is not lifted to -78 dB");
-        assert_eq!(with_gain(-80.0, -60.0), FLOOR_DB, "clamped at the floor");
-        assert_eq!(with_gain(-2.0, 12.0), 10.0);
-        assert_eq!(with_gain(3.0, 12.0), 12.0, "clamped at the top");
-        // A small fader step never makes the bar or the hold line jump: the change is the step.
-        for gain in [-60.0_f32, -20.0, 0.0, 6.5, 12.0] {
-            let (rms, hold) = (-35.0, -18.0);
-            let step = 0.5;
-            assert!((bar_fraction(with_gain(rms, gain + step)) - bar_fraction(with_gain(rms, gain))).abs() <= step / 60.0 + 1e-6);
-            assert!(with_gain(hold, gain) >= with_gain(rms, gain), "hold stays at or above the bar for gain {gain}");
-        }
-    }
-
-    #[test]
-    fn set_bumps_revision_only_on_visible_change() {
-        let shared = Shared::new(vec![spec_for(&source(Kind::Output, "", ""), None)]);
-        shared.set(0, -90.0, -90.0, MeterState::Missing);
-        assert_eq!(shared.revision.load(Ordering::Acquire), 0);
-        shared.set(0, -20.04, -10.0, MeterState::Live);
-        shared.set(0, -20.01, -10.0, MeterState::Live);
-        assert_eq!(shared.revision.load(Ordering::Acquire), 1);
-        assert_eq!(shared.readings.lock().unwrap()[0].rms_db, -20.0);
-    }
-}
+#[path = "meters_id_tests.rs"]
+mod id_tests;

@@ -98,11 +98,31 @@ fn engine_command_sets_and_removes_spec_env() {
             ("RECALL_CAPTURE_HWND".into(), None),
         ],
     };
-    let cmd = engine_command(Path::new("recall.exe"), &spec);
+    let cmd = engine_command(Path::new("recall.exe"), &spec, None);
     let envs: Vec<_> = cmd.get_envs().map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned()))).collect();
     assert!(envs.contains(&("RECALL_CAPTURE_NAME".into(), Some("VALORANT".into()))));
     assert!(envs.contains(&("RECALL_CAPTURE_HWND".into(), None)), "None removes an inherited value");
     assert_eq!(cmd.get_args().collect::<Vec<_>>(), vec!["--json"]);
+}
+
+/// 2026-11-07 audit R2-deep-audio-1: the mic was muted after the engine started, then the engine
+/// crashed. The respawn reuses the spec built at the last retarget (`RECALL_MIC_MUTED=0`), so it
+/// must take the mute the controller set since, not the spec's.
+#[test]
+fn a_crash_respawn_starts_with_the_current_mute() {
+    let sup = Supervisor::start_with_locator(|| None, None);
+    let spec = EngineSpec { env: vec![("RECALL_MIC_MUTED".into(), Some("0".into()))] };
+    let mute_env = |cmd: &Command| -> Option<String> {
+        cmd.get_envs().find(|(k, _)| *k == "RECALL_MIC_MUTED").and_then(|(_, v)| v).map(|v| v.to_string_lossy().into_owned())
+    };
+    // The spawn the manager runs (`supervisor_manager.rs` `spawn_engine`).
+    let spawn = |shared: &Shared| engine_command(Path::new("recall.exe"), &spec, shared.spawn_mute.get());
+    assert_eq!(mute_env(&spawn(&sup.shared)).as_deref(), Some("0"), "no mute change yet: the spec's");
+    sup.set_mic_muted(true);
+    assert_eq!(mute_env(&spawn(&sup.shared)).as_deref(), Some("1"), "muted since the spawn: the respawn starts muted");
+    sup.set_mic_muted(false);
+    assert_eq!(mute_env(&spawn(&sup.shared)).as_deref(), Some("0"));
+    sup.shutdown(Duration::from_millis(200));
 }
 
 // --- intended restarts (fake engine: cmd.exe idles on its piped stdin) --

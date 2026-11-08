@@ -65,16 +65,81 @@ pub struct Source {
     pub kind: Kind,
     /// Endpoint name ("" = the Windows default).
     pub device: String,
+    /// The endpoint id saved when `device` was picked ("" = none: an older config). A line-in
+    /// skips Alt+M only on the endpoint with this id (R5-deep-audio-1).
+    pub device_id: String,
     /// App image name, e.g. `player.exe` (app sources only).
     pub exe: String,
     pub name: String,
     pub enabled: bool,
     pub gain_db: f32,
+    /// Whether the mic-mute hotkey silences this input: `true` a microphone, `false` a line-in
+    /// or capture card (muting the mic leaves its sound, once it names a device); `None` (a
+    /// config written before the flag, the default mic) = muted, as the recorder does.
+    /// "+ Add source" writes it. Other kinds ignore it.
+    pub mic_mute: Option<bool>,
 }
 
-/// The saved list (`recording.audio_sources`), skipping entries the controller would refuse.
+/// What Alt+M does to `source` now, as the recorder decides it: an input is muted unless it is a
+/// line-in (`mic_mute = false`) on a named device that opens as itself. Without a flag it is
+/// muted whatever Windows calls its endpoint (R3-deep-audio-1); on the Windows default it is
+/// muted whatever the flag says, as that is normally the microphone (R4-deep-audio-1); on any
+/// other endpoint than the saved one (a renumbered fallback, a twin that took its name, another
+/// id) it is muted (R5-deep-audio-1, `audio_mute::opens_other`). Lists not read yet: the flag.
+pub fn mutes(source: &Source, lists: Option<&crate::services::audio_devices::DeviceLists>) -> bool {
+    source.kind == Kind::Input && (source.mic_mute != Some(false) || source.device.trim().is_empty() || crate::services::audio_mute::opens_other(source, lists))
+}
+
+/// The note a line-in on the Windows default carries (strip and device menu).
+pub const LINE_IN_ON_DEFAULT: &str = "Follows the mic hotkey until you pick a device";
+
+/// The warning line under a strip's device button: a device that is gone, endpoints sharing or
+/// matching its name (none is recorded; counted, R5-deep-audio-4), a line-in that opened another
+/// endpoint than its own (it follows Alt+M, R5-deep-audio-1), or a line-in still on the Windows
+/// default. Lists not read yet: only the last.
+pub fn strip_note(source: &Source, lists: Option<&crate::services::audio_devices::DeviceLists>) -> Option<String> {
+    use crate::services::audio_devices::{Found, found};
+    let picked = if source.kind == Kind::App { found(&source.device, None) } else { crate::services::audio_pick::source_found(source, lists) };
+    match picked {
+        Found::Unsure { .. } if source.kind.uses_inputs() => Some(crate::services::endpoint_choice::unsure_note(&source.device)),
+        Found::Unsure { twins, .. } => Some(crate::services::endpoint_choice::twins_note(&source.device, twins)),
+        Found::CaseOnly => Some(crate::services::endpoint_choice::case_note(&source.device)),
+        Found::Missing => Some("Not connected".to_owned()),
+        Found::Twins(n) => Some(format!("{n} devices share this name")),
+        Found::Ambiguous(n) => Some(format!("{n} devices match this name")),
+        _ if crate::services::audio_mute::opens_other(source, lists) => crate::services::audio_mute::other_note(source, lists).map(str::to_owned),
+        _ if line_in_on_default(source) => Some(LINE_IN_ON_DEFAULT.to_owned()),
+        _ => None,
+    }
+}
+
+/// A line-in on the Windows default: its strip says it follows the mic hotkey until a device is
+/// picked (R4-deep-audio-1).
+pub fn line_in_on_default(source: &Source) -> bool {
+    source.kind == Kind::Input && source.mic_mute == Some(false) && source.device.trim().is_empty()
+}
+
+/// A hint for the strip menu, never a decision: Windows reports the endpoint `source` opens (its
+/// device, else the Windows default) as a line-level input (`line_inputs`, from `endpoint_form`).
+/// Unknown, S/PDIF and HDMI endpoints get no hint (R4-deep-audio-2), nor do lists not read yet or
+/// a device not connected.
+pub fn windows_says_line_level(source: &Source, lists: Option<&crate::services::audio_devices::DeviceLists>) -> bool {
+    let Some(lists) = lists.filter(|_| source.kind == Kind::Input) else { return false };
+    if source.device.trim().is_empty() {
+        return lists.default_input_is_line == Some(true);
+    }
+    match crate::services::audio_pick::source_found(source, Some(lists)) {
+        crate::services::audio_devices::Found::Opens(i) => lists.line_inputs.iter().any(|m| m.trim() == lists.inputs[i].trim()),
+        _ => false,
+    }
+}
+
+/// The saved list (`recording.audio_sources`), skipping entries the controller would refuse and,
+/// like the engine, a repeated id (case-insensitive): a strip whose track is never recorded
+/// would meter live sound for nothing.
 pub fn from_config(value: Option<&Value>) -> Vec<Source> {
     let Some(list) = value.and_then(Value::as_array) else { return Vec::new() };
+    let mut ids = std::collections::HashSet::new();
     list.iter()
         .filter_map(|v| {
             let text = |key: &str| v.get(key).and_then(Value::as_str).unwrap_or("").to_owned();
@@ -82,19 +147,32 @@ pub fn from_config(value: Option<&Value>) -> Vec<Source> {
                 id: Some(text("id")).filter(|id| !id.trim().is_empty())?,
                 kind: Kind::from_token(&text("kind"))?,
                 device: text("device"),
+                // A malformed id is read as none: it follows Alt+M (R6-deep-audio-5).
+                device_id: Some(text("device_id")).filter(|id| crate::services::meters::id_ok(id)).unwrap_or_default(),
                 exe: text("exe"),
                 name: text("name"),
                 enabled: v.get("enabled").and_then(Value::as_bool).unwrap_or(true),
                 gain_db: v.get("gain_db").and_then(Value::as_f64).unwrap_or(0.0) as f32,
+                mic_mute: v.get("mic_mute").and_then(Value::as_bool),
             })
         })
+        .filter(|s| ids.insert(s.id.trim().to_lowercase()))
         .collect()
 }
 
 pub fn to_config(list: &[Source]) -> Value {
     Value::Array(
         list.iter()
-            .map(|s| json!({ "id": s.id, "kind": s.kind.token(), "device": s.device, "exe": s.exe, "name": s.name, "enabled": s.enabled, "gain_db": s.gain_db }))
+            .map(|s| {
+                let mut entry = json!({ "id": s.id, "kind": s.kind.token(), "device": s.device, "exe": s.exe, "name": s.name, "enabled": s.enabled, "gain_db": s.gain_db });
+                if let Some(on) = s.mic_mute {
+                    entry["mic_mute"] = Value::Bool(on);
+                }
+                if crate::services::meters::id_ok(&s.device_id) {
+                    entry["device_id"] = Value::String(s.device_id.trim().to_owned());
+                }
+                entry
+            })
             .collect(),
     )
 }
@@ -130,7 +208,35 @@ pub fn with_new(list: &[Source], kind: Kind, exe: &str, app_name: &str) -> Optio
     }
     let base = if kind == Kind::App && !app_name.trim().is_empty() { clip_name(app_name) } else { kind.default_name().to_owned() };
     let mut out = list.to_vec();
-    out.push(Source { id: fresh_id(list, kind), kind, device: String::new(), exe: exe.trim().to_owned(), name: fresh_name(list, &base), enabled: true, gain_db: 0.0 });
+    out.push(Source { id: fresh_id(list, kind), kind, device: String::new(), device_id: String::new(), exe: exe.trim().to_owned(), name: fresh_name(list, &base), enabled: true, gain_db: 0.0, mic_mute: None });
+    Some(out)
+}
+
+/// "+ Add source" → "Microphone" (`mic`) or "Line-in or capture card": a new input that says
+/// whether Alt+M mutes it, whatever its endpoint's form factor. A line-in starts on the Windows
+/// default, so Alt+M still mutes it until its device is picked (`mutes`).
+pub fn with_new_input(list: &[Source], mic: bool) -> Option<Vec<Source>> {
+    let mut out = with_new(list, Kind::Input, "", "")?;
+    let added = out.last_mut().expect("with_new adds one");
+    added.mic_mute = Some(mic);
+    if !mic {
+        added.name = fresh_name(list, "Line-in");
+    }
+    Some(out)
+}
+
+/// `list` with a removed `source` back at `index` (Undo); `None` when it cannot come back (the
+/// list is full, or it is a game and another game was added). A source added since may have
+/// taken its freed id: then it comes back under a fresh one.
+pub fn restored(list: &[Source], index: usize, mut source: Source) -> Option<Vec<Source>> {
+    if list.len() >= SOURCES_MAX || (source.kind == Kind::Game && list.iter().any(|s| s.kind == Kind::Game)) {
+        return None;
+    }
+    if list.iter().any(|s| s.id.eq_ignore_ascii_case(&source.id)) {
+        source.id = fresh_id(list, source.kind);
+    }
+    let mut out = list.to_vec();
+    out.insert(index.min(out.len()), source);
     Some(out)
 }
 

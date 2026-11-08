@@ -91,6 +91,16 @@ pub(super) fn notices_for<N>(loopback: bool, register: impl FnOnce() -> Result<N
 pub(super) trait Capture {
     /// The endpoint or process it captures, for the status.
     fn endpoint(&self) -> String;
+    /// The endpoint is the source's own saved device (`endpoints::opened_own`): only then may
+    /// a line-in skip Alt+M. Unsure = false, so the input follows the mic hotkey.
+    fn own(&self) -> bool {
+        false
+    }
+    /// An input's unsure exact-name sibling (A4 ruling, `endpoints::Choice::Unsure`), with its
+    /// endpoint id when read: it records silence until a fresh Alt+M (`hold.rs`).
+    fn unsure(&self) -> Option<Option<String>> {
+        None
+    }
     /// Capture into `ring` until the stream fails or must move; the stream is stopped on return.
     fn run(&mut self, ring: &TrackRing, level: &mut Leveller, clock: &dyn Clock, notices: &dyn Notices) -> Ended;
 }
@@ -118,17 +128,21 @@ pub(super) fn watch_for(device: &str, default_id: Option<String>) -> Option<Watc
     Some(Watch { id: default_id? })
 }
 
-/// A named device that does not open at start still gets its track (silence) and waits for
-/// the device by its own name. Not for process loopback (a bad target is reported, never
-/// waited on), a Windows-default source (no name to wait for), or `RECALL_AUDIO_EXACT`
-/// (tests: a missing test endpoint means no track, as before).
-pub(super) fn waits_when_absent(device: &str, loopback: bool, exact: bool) -> bool {
-    !device.trim().is_empty() && !loopback && !exact
+/// A device source that does not open at start still gets its track (silence) and waits: a
+/// named device for itself, a source on the Windows default for a default to appear (the
+/// headset is off, or an app holds the default in exclusive mode). Not for process loopback (a
+/// bad target is reported, never waited on), or `RECALL_AUDIO_EXACT` (tests: a missing test
+/// endpoint means no track, as before).
+pub(super) fn waits_when_absent(loopback: bool, exact: bool) -> bool {
+    !loopback && !exact
 }
 
-/// The status of a named device that has not appeared yet (`sources::opened`).
+/// The status of a device that has not appeared yet (`sources::opened`).
 pub(super) fn waiting_label(device: &str) -> String {
-    format!("{} (not connected; waiting)", device.trim())
+    match device.trim() {
+        "" => "Windows default (none yet; waiting)".to_owned(),
+        name => format!("{name} (not connected; waiting)"),
+    }
 }
 
 /// Silence up to the clock (the source sends nothing right now).
@@ -143,6 +157,15 @@ impl TrackRing {
     /// The ring's length in frames (the most silence a `Leveller` may owe).
     pub(super) fn capacity_frames(&self) -> u64 {
         (self.capacity / self.channels.max(1) as usize) as u64
+    }
+}
+
+/// Whether the stream just opened (false once it ends) is the source's own saved device. A named
+/// input on another endpoint says so in the log: it follows Alt+M (R5-deep-audio-1).
+fn set_opened_own(ring: &TrackRing, endpoint: &str, own: bool, opening: bool) {
+    ring.opened_own.store(own, std::sync::atomic::Ordering::Relaxed);
+    if opening && ring.input && !ring.on_default && !own {
+        eprintln!("[recall] audio track '{}': {endpoint} is not the saved device; it follows the mic hotkey", ring.name);
     }
 }
 
@@ -176,13 +199,25 @@ pub(super) fn capture_loop<C: Capture>(
             Ok(mut stream) => {
                 failures = 0;
                 let endpoint = stream.endpoint();
-                set_endpoint(ring, endpoint.clone());
+                // The endpoint's real name: a renumbered "4- X" for a saved "3- X" shows as itself.
+                eprintln!("[recall] audio track '{}': opened {endpoint}", ring.name);
+                set_opened_own(ring, &endpoint, stream.own(), true);
+                match stream.unsure() {
+                    Some(id) => {
+                        ring.live.start_hold(&endpoint, id);
+                        set_endpoint(ring, super::endpoints::unsure_notice(&endpoint));
+                    }
+                    None => set_endpoint(ring, endpoint.clone()),
+                }
                 if let Some(tx) = init_tx.take() {
                     let _ = tx.send(Ok(()));
                 }
-                // Device notices from before this stream are stale for the next loss.
-                notices.take_devices_changed();
-                let ended = stream.run(ring, &mut level, &*clock, notices);
+                // A device notice that came while the stream was opening is kept for the stream's
+                // own checks (its rebind re-picks once, R7-deep-audio-3), not dropped as stale.
+                let queued = Queued { missed: std::cell::Cell::new(notices.take_devices_changed()), notices };
+                let ended = stream.run(ring, &mut level, &*clock, &queued);
+                set_opened_own(ring, &endpoint, false, false);
+                ring.live.end_hold();
                 // Nor do the ones that came while it was live (another device came or went):
                 // the first reopen after this loss keeps its backoff.
                 notices.take_devices_changed();
@@ -194,13 +229,19 @@ pub(super) fn capture_loop<C: Capture>(
                 wait = !ended.at_once;
             }
             Err(e) => {
+                // Two devices share the name, or only its case matches: the status says so.
+                if super::endpoints::is_notice(&e) && ring.endpoint() != e {
+                    eprintln!("[recall] audio track '{}': {e}", ring.name);
+                    set_endpoint(ring, e.clone());
+                }
                 if let Some(tx) = init_tx.take() {
                     if !wait_absent {
                         let _ = tx.send(Err(e));
                         return;
                     }
-                    eprintln!("[recall] audio track '{}': {e}; waiting for '{}'", ring.name, device.trim());
-                    set_endpoint(ring, waiting_label(device));
+                    let label = if super::endpoints::is_notice(&e) { e.clone() } else { waiting_label(device) };
+                    eprintln!("[recall] audio track '{}': {e}; {label}", ring.name);
+                    set_endpoint(ring, label);
                     let _ = tx.send(Ok(()));
                 }
                 failures = failures.saturating_add(1);
@@ -209,6 +250,23 @@ pub(super) fn capture_loop<C: Capture>(
         if !wait_to_reopen(ring, &mut level, clock, notices, if wait { reopen_wait(failures) } else { Duration::ZERO }) {
             return;
         }
+    }
+}
+
+/// The notices a stream runs with: the device notice taken at its open (`missed`) comes back on
+/// its first `take_devices_changed`.
+struct Queued<'a> {
+    missed: std::cell::Cell<bool>,
+    notices: &'a dyn Notices,
+}
+
+impl Notices for Queued<'_> {
+    fn take_devices_changed(&self) -> bool {
+        self.missed.replace(false) | self.notices.take_devices_changed()
+    }
+
+    fn take_default(&self) -> Option<String> {
+        self.notices.take_default()
     }
 }
 
@@ -230,4 +288,12 @@ fn wait_to_reopen(ring: &TrackRing, level: &mut Leveller, clock: &mut dyn Clock,
 
 #[cfg(test)]
 #[path = "capture_loop_tests.rs"]
-mod tests;
+pub(super) mod tests;
+
+#[cfg(test)]
+#[path = "own_device_tests.rs"]
+mod own_device_tests;
+
+#[cfg(test)]
+#[path = "id_pick_loop_tests.rs"]
+mod id_pick_loop_tests;
