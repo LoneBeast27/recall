@@ -42,10 +42,11 @@ use windows::Win32::UI::Accessibility::{
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
-    GetWindowThreadProcessId, IsWindow, IsZoomed, EVENT_SYSTEM_FOREGROUND, GWL_STYLE, WINEVENT_OUTOFCONTEXT,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsZoomed, EVENT_SYSTEM_FOREGROUND, GWL_STYLE, WINEVENT_OUTOFCONTEXT,
     WINEVENT_SKIPOWNPROCESS, WS_CAPTION,
 };
 
+use crate::game_library::Library;
 use crate::log;
 
 /// Half-tolerance (px) when deciding a window "covers" its monitor. Borderless
@@ -78,8 +79,18 @@ pub struct WatchEvent {
     /// True iff `fullscreen` AND that monitor is the managed one (HDR rules).
     pub fullscreen_on_target: bool,
     /// True iff the executable lives in a Steam library (`steamapps\common`):
-    /// the record mode's "is this a game?" signal for windowed games.
+    /// the record mode's "is this a game?" signal for windowed games, and game
+    /// evidence against the private list (`game_library`).
     pub steam_game: bool,
+    /// True iff it lives in another launcher's game folder (Epic, GOG,
+    /// Ubisoft, EA, Battle.net, itch: `launcher_libraries`): a windowed game
+    /// like `steam_game`, but no evidence against the private list (R7-detect-1).
+    pub launcher_game: bool,
+    /// True iff it lives in an Xbox / Microsoft Store game package (a folder
+    /// with `MicrosoftGame.config`, `store_games`): official proof for a
+    /// fullscreen window, no evidence against the private list, not a
+    /// windowed candidate.
+    pub store_game: bool,
     /// True iff the identity (pid, exe) was resolved by Recall rather than read
     /// off the window: a UWP frame named by its hosted CoreWindow's process
     /// (G6). Such an identity is a game only on positive evidence (a known
@@ -103,6 +114,8 @@ impl WatchEvent {
             fullscreen: false,
             fullscreen_on_target: false,
             steam_game: false,
+            launcher_game: false,
+            store_game: false,
             hosted: false,
             hwnd,
         }
@@ -120,12 +133,8 @@ pub(crate) fn event_or_unknown(hwnd: isize, pid: u32, built: Option<WatchEvent>)
     built.or_else(|| (hwnd != 0 && pid != 0 && pid != std::process::id()).then(|| WatchEvent::unknown(pid, hwnd)))
 }
 
-/// Whether an executable path is a game in a Steam library. Steamworks Shared
-/// (the redistributable installers Steam runs before a first launch) is not.
-pub(crate) fn is_steam_library_path(path: &str) -> bool {
-    let path = path.to_ascii_lowercase().replace('/', "\\");
-    path.contains("\\steamapps\\common\\") && !path.contains("\\steamapps\\common\\steamworks shared\\")
-}
+#[cfg(test)]
+pub(crate) use crate::game_library::is_steam_library_path;
 
 /// The single global slot the callback reads from. `SetWinEventHook` has no
 /// user-data pointer, so the callback cannot be handed a `&Watcher`; it must reach
@@ -352,7 +361,7 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
         return None;
     }
     let frame_pid = pid;
-    let (pid, (exe_stem, exe_name, steam_game)) = identity::hosted_identity(hwnd, pid, exe_identity(pid)?);
+    let (pid, (exe_stem, exe_name, library)) = identity::hosted_identity(hwnd, pid, exe_identity(pid)?);
     if exe_stem.trim().is_empty() {
         return None; // no stem -> not a real app window we can classify
     }
@@ -365,7 +374,9 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
         title: window_title(hwnd),
         fullscreen,
         fullscreen_on_target: fullscreen && monitor == target_monitor,
-        steam_game,
+        steam_game: library == Library::Steam,
+        launcher_game: library == Library::Launcher,
+        store_game: library == Library::Store,
         hosted: pid != frame_pid,
         hwnd: hwnd.0 as isize,
     })
@@ -425,6 +436,12 @@ fn rect_covers(mon: &RECT, win: &RECT, tol: i32) -> bool {
 pub fn is_foreground(hwnd: isize) -> bool {
     // SAFETY: plain query.
     unsafe { GetForegroundWindow() }.0 as isize == hwnd
+}
+
+/// Whether `hwnd` is minimized.
+pub fn window_minimized(hwnd: isize) -> bool {
+    // SAFETY: IsIconic tolerates any handle value.
+    unsafe { IsIconic(HWND(hwnd as *mut _)) }.as_bool()
 }
 
 /// Whether `hwnd` still names a live window.

@@ -37,7 +37,7 @@ const PING: Duration = Duration::from_secs(2);
 /// No `session` status for this long on an open pipe = the recorder is not responding.
 pub const UNRESPONSIVE: Duration = Duration::from_secs(5);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DaemonCommand {
     Status,
     Quit,
@@ -62,6 +62,10 @@ pub enum DaemonCommand {
     GetConfig,
     /// Partial config object with the TOML section structure, e.g. {"overlay":{"enabled":true}}.
     SetConfig(Value),
+    /// Settings → Games, one app at a time: `how` = "record" | "never" | "fullscreen" |
+    /// "remove" | "unlist". The controller applies it to its current config, so two quick
+    /// edits (or a tray "Add as a game" in between) never overwrite each other (R8-detect-7).
+    RegisterGame { exe: String, how: &'static str },
     /// What `storage.cap_gb` = this would move to the Recycle Bin now (answered by a
     /// `StoragePreview` event; nothing moves).
     StoragePreview(u32),

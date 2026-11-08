@@ -20,7 +20,7 @@
 //! | `set_mode` | `value: auto|sdr|hdr` | engine tonemap selector, re-applied after restarts |
 //! | `set_ac_profile` | `variant: punchy|accurate` | `hdr` `ac_profile` result event |
 //! | `get_config` | | `config` event to the caller |
-//! | `set_config` | `patch: {...}` | validated deep-merge, saved; `config` + status broadcast |
+//! | `set_config` | `patch: {...}` | validated deep-merge, saved; `config` + status broadcast (`record_config_apply`) |
 //!
 //! Rejected commands get `{"type":"error","message":S}` (mod `session`) sent to
 //! the requesting client only. Recording changes also broadcast a `session`
@@ -171,6 +171,7 @@ impl Controller {
                 }
                 None => self.reply_error(client, "set_config needs a \"patch\" object"),
             },
+            "register_game" => self.register_game(&val, client),
             "" => self.reply_error(client, "missing \"cmd\""),
             other => self.reply_error(client, &format!("unknown command '{other}'")),
         }
@@ -198,7 +199,7 @@ impl Controller {
     }
 
     /// A live setting the engine did not get: the refused pop-up + beep, and an error reply.
-    fn setting_not_sent(&self, effects: Vec<Effect>, client: Option<u64>, title: &str, cmd: &str) {
+    pub(crate) fn setting_not_sent(&self, effects: Vec<Effect>, client: Option<u64>, title: &str, cmd: &str) {
         let reason = refusal(&effects).unwrap_or(NOT_RESPONDING);
         for effect in effects {
             match effect {
@@ -281,6 +282,7 @@ impl Controller {
     /// React to the difference between the old and new effective config.
     fn apply_config_effects(&mut self, old: &crate::config::Config, client: Option<u64>) {
         let new = self.cfg.clone();
+        self.recheck_registration(old);
         if old.startup.autostart != new.startup.autostart {
             match sync_autostart(new.startup.autostart, RECORD_RUN_ARG) {
                 Ok(()) => log!("record: start with Windows -> {}", new.startup.autostart),

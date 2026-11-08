@@ -131,13 +131,14 @@ pub enum Gate {
 /// The probe's state for the candidate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Watch {
-    /// No trace rights, or the session failed: today's rule (fullscreen = game).
+    /// No trace rights, or the session failed: no verdict, so not a game
+    /// (official-proof ruling, 2026-11-07; no "fullscreen = game" fallback).
     Unavailable,
     Watching { since: Instant, stats: RenderStats },
 }
 
 pub fn gate(watch: Watch, now: Instant) -> (Gate, Verdict) {
-    let Watch::Watching { since, stats } = watch else { return (Gate::Commit, Verdict::Unsure) };
+    let Watch::Watching { since, stats } = watch else { return (Gate::Reject(Why::NoFrames), Verdict::Unsure) };
     let end = since + MAX_WATCH;
     let verdict = judge(&stats, now >= end);
     let gate = match verdict {
@@ -207,6 +208,12 @@ impl Rejected {
         self.last.filter(|e| e.pid == pid && e.hwnd == hwnd && e.why == Why::Composed).map(|e| e.stats)
     }
 
+    /// The window's last verdict and what the probe saw (inside its wait or
+    /// not): the private-list notice (`record_private_watch`).
+    pub fn verdict(&self, pid: u32, hwnd: isize) -> Option<(Why, RenderStats)> {
+        self.last.filter(|e| e.pid == pid && e.hwnd == hwnd).map(|e| (e.why, e.stats))
+    }
+
     /// When the held window may be watched again.
     pub fn until(&self) -> Option<Instant> {
         self.last.map(|e| e.until)
@@ -237,6 +244,11 @@ impl ComposedNotice {
     /// that is not recorded, else `None`. Returns the exe to name, once.
     pub fn observe(&mut self, front: Option<(u32, isize, &str)>, now: Instant) -> Option<String> {
         self.observe_steady(front.map(|f| (f, true)), now)
+    }
+
+    /// `exe` was already named this run.
+    pub fn named(&self, exe: &str) -> bool {
+        self.shown.contains(&exe.to_ascii_lowercase())
     }
 
     /// [`Self::observe`] where each composed observation says whether its

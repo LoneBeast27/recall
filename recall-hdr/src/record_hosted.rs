@@ -1,15 +1,17 @@
-//! An identity Recall resolved itself (`WatchEvent::hosted`: a UWP frame
-//! named by its hosted CoreWindow's process, G6) never gets the "fullscreen =
-//! game" fallback. Before G6 every UWP frame was `ApplicationFrameHost`, which
-//! is denied; resolving it must not turn every fullscreen Store app (Phone
-//! Link, WhatsApp, Clipchamp) into a recorded game when the render check is
-//! off (no trace rights) or could not start.
-//!
-//! So a hosted identity is a target only on positive evidence: a known game,
-//! an override or `detect.fullscreen_games` (`skips_render_check`), the GPU
-//! vendor's list, or a "game" verdict from the render check. Pure decisions;
-//! `record_render` (record path) and `app_helpers::foreground_of` (HDR rules)
-//! call them.
+//! Official proof for a fullscreen-rule candidate (Rohan 2026-11-07 07:46
+//! UTC: "use official proof + support for manual application registering").
+//! A window `classify_event` made a candidate is recorded on its own proof:
+//! a Steam or launcher install, an Xbox / Store game package, an override or
+//! `detect.fullscreen_games` entry, a known game (`skips_render_check`), the
+//! GPU vendor's list, or a "game" render verdict where the check can run.
+//! With no verdict possible (no trace rights, or the check would not start
+//! for the pid) and none of the rest, it is not recorded: [`Checked::NoVerdict`]
+//! (the record path names it once, "Not recording <exe>: add it as a game in
+//! Settings"). There is no "any fullscreen app is a game" fallback any more,
+//! for a plain window or for an identity Recall resolved itself
+//! (`WatchEvent::hosted`, a UWP frame's CoreWindow process, G6).
+//! Pure decisions; `record_render` (record path) and
+//! `app_helpers::foreground_of` (HDR rules) call them.
 
 use crate::config::Config;
 use crate::record_target::{classify_event, skips_render_check, Target};
@@ -22,36 +24,48 @@ pub(crate) struct Classified {
     pub needs_check: bool,
 }
 
-/// [`classify_event`] plus the render-check bookkeeping and the hosted rule.
-/// `can_check` = the render check can run for this pid (trace rights, no
-/// failed start); `vendor` asks the GPU vendor's list (`None` while pending).
+/// What the proof rule says about a foreground window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Checked {
+    /// A candidate: proven, or the render check decides.
+    Candidate(Classified),
+    /// It would be a candidate, but nothing proves it a game and the render
+    /// check cannot run for it: not recorded (the G4 notice names it).
+    NoVerdict,
+    /// Not a candidate at all (denied, private, `none`, windowed, ...).
+    No,
+}
+
+/// [`classify_event`] plus the proof rule. `can_check` = the render check
+/// can run for this pid (trace rights, no failed start); `vendor` asks the GPU
+/// vendor's list (`None` while pending), only for a window with no other proof.
+pub(crate) fn check_proof(ev: &WatchEvent, cfg: &Config, can_check: bool, vendor: impl FnOnce() -> Option<bool>) -> Checked {
+    let Some(target) = classify_event(ev, cfg) else { return Checked::No };
+    // A Steam/launcher/Store install, an override, a `detect.fullscreen_games`
+    // entry or a known game keeps the 300 ms rule with no check.
+    let plain = !skips_render_check(ev, cfg);
+    let vendor = plain.then(vendor).flatten();
+    let needs_check = crate::record_render::needs_check(plain, vendor);
+    if needs_check && !can_check {
+        return Checked::NoVerdict;
+    }
+    Checked::Candidate(Classified { target, needs_check })
+}
+
+/// [`check_proof`] as an option: `None` = not a candidate, or no verdict.
+/// `_available` (trace rights at all) is folded into `can_check` (tests).
+#[cfg(test)]
 pub(crate) fn classify_checked(
     ev: &WatchEvent,
     cfg: &Config,
-    available: bool,
+    _available: bool,
     can_check: bool,
     vendor: impl FnOnce() -> Option<bool>,
 ) -> Option<Classified> {
-    let target = classify_event(ev, cfg)?;
-    // A Steam-library exe, an override, a `detect.fullscreen_games` entry or
-    // a known game keeps the 300 ms rule with no check.
-    let plain = !skips_render_check(ev, cfg);
-    // The vendor is asked only when the check would run (without trace rights
-    // every plain fullscreen window commits anyway), and for a hosted identity,
-    // whose only other way in is the check.
-    let vendor = (plain && (available || ev.hosted)).then(vendor).flatten();
-    let needs_check = crate::record_render::needs_check(plain, vendor);
-    if ev.hosted && needs_check && !can_check {
-        return None;
+    match check_proof(ev, cfg, can_check, vendor) {
+        Checked::Candidate(c) => Some(c),
+        Checked::NoVerdict | Checked::No => None,
     }
-    Some(Classified { target, needs_check })
-}
-
-/// The render check had no probe for a due candidate (it would not start, or
-/// trace rights went away): a plain window commits on today's rule, a hosted
-/// identity does not (it needs a "game" verdict).
-pub(crate) fn commits_without_probe(hosted: bool) -> bool {
-    !hosted
 }
 
 /// The HDR rules' managed-monitor fullscreen flag for `ev`: a hosted identity

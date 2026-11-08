@@ -18,6 +18,8 @@ fn plain(stem: &str) -> WatchEvent {
         fullscreen: true,
         fullscreen_on_target: true,
         steam_game: false,
+        launcher_game: false,
+        store_game: false,
         hosted: false,
         hwnd: 0x500,
     }
@@ -66,6 +68,28 @@ fn a_steam_library_game_shipping_a_listed_exe_name_still_records() {
         assert!(crate::record_target::classify_event(&windowed, &cfg).is_some(), "{stem}: windowed Steam game");
     }
     assert_eq!(crate::record_target::classify_event(&plain("electron"), &cfg), None, "outside Steam: private");
+}
+
+#[test]
+fn steam_evidence_counts_on_the_adoption_and_follow_routes() {
+    // R6-detect-3: dropping `game_evidence(ev)` on either route must fail a test.
+    let cfg = Config::default();
+    let steam = WatchEvent { steam_game: true, fullscreen: false, fullscreen_on_target: false, ..plain("electron") };
+    let outside = WatchEvent { steam_game: false, ..steam.clone() };
+    let adopt = crate::record_target_gate::adopted_candidate;
+    assert!(adopt(&steam, &cfg, (1920, 1080)).is_some(), "adoption: Steam game");
+    assert!(adopt(&outside, &cfg, (1920, 1080)).is_none(), "adoption: private outside Steam");
+    assert!(crate::record_target::followable(&steam, &cfg), "follow: Steam game");
+    assert!(!crate::record_target::followable(&outside, &cfg), "follow: private outside Steam");
+}
+
+#[test]
+fn hdr_rules_let_steam_evidence_beat_the_private_list() {
+    // R6-detect-1: a Steam game called Element.exe records, so HDR treats it as a game too.
+    let cfg = Config::default();
+    let steam = WatchEvent { steam_game: true, ..plain("Element") };
+    assert_ne!(classify(&crate::app::foreground_of(&steam), &cfg), AppKind::NonGame, "Steam: game class");
+    assert_eq!(classify(&crate::app::foreground_of(&plain("Element")), &cfg), AppKind::NonGame, "outside Steam");
 }
 
 #[test]
@@ -120,7 +144,7 @@ fn an_override_or_fullscreen_games_entry_opts_one_in() {
 #[test]
 fn a_real_game_is_unaffected() {
     let cfg = Config::default();
-    let unknown = classify_checked(&plain("UnknownGame"), &cfg, false, false, || None).expect("today's rule");
+    let unknown = classify_checked(&plain("UnknownGame"), &cfg, true, true, || None).expect("the render check decides");
     assert!(unknown.needs_check);
     let known = classify_checked(&plain("VALORANT-Win64-Shipping"), &cfg, false, false, || None).expect("known game");
     assert!(!known.needs_check);

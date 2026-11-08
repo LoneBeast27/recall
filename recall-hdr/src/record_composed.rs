@@ -8,8 +8,10 @@
 //! office slideshows, Electron apps in F11 and Store media apps are composed
 //! too. So the notice also needs:
 //! - a plain window (not a Store app Recall resolved from its frame,
-//!   R4-detect-3) whose stem is not a call / chat / office app
-//!   (`private_apps`, the recording deny list) or a denied Store app, and
+//!   R4-detect-3) whose stem is not a denied Store app or a remote desktop /
+//!   streaming client ([`notice_denied`]); a call / chat / office app
+//!   (`private_apps`) is named only through `record_private_watch` (it
+//!   renders like a game while the private list blocks it), and
 //! - a steady game-like rate in some 1.5 s watch of the 20 s streak: at
 //!   least [`STEADY_PRESENTS`] kernel presents (24 fps) and no video swap
 //!   chain. A slower recheck does not reset the streak while the verdict
@@ -51,8 +53,20 @@ pub(crate) fn notice_wanted(stem: &str, stats: Option<RenderStats>, desktop: boo
 pub(crate) fn composed_front(stem: &str, hosted: bool, stats: Option<RenderStats>, desktop: bool) -> Option<bool> {
     let s = stats.filter(|_| !desktop)?;
     let stem = stem.trim();
-    let denied = hosted || crate::private_apps::is_private(stem) || crate::rules::is_denied(stem);
-    (!denied).then_some(s.kernel_presents >= STEADY_PRESENTS && s.video_presents == 0)
+    let denied = hosted || crate::private_apps::is_private(stem) || crate::rules::is_denied(stem) || notice_denied(stem);
+    (!denied).then_some(steady_rate(&s))
+}
+
+/// Never named by the notice: remote desktop and streaming clients (mstsc,
+/// msrdc, Parsec, Moonlight, ...; R6 merge gate). Their fullscreen session is
+/// another PC's desktop or game.
+pub(crate) fn notice_denied(stem: &str) -> bool {
+    crate::record_target_rules::is_remote_client(stem)
+}
+
+/// A game-like rate: [`STEADY_PRESENTS`] kernel presents and no video swap chain.
+pub(crate) fn steady_rate(s: &RenderStats) -> bool {
+    s.kernel_presents >= STEADY_PRESENTS && s.video_presents == 0
 }
 
 /// One G4 observation (`ComposedNotice::observe_steady`); `shown` = notices
@@ -125,6 +139,15 @@ mod tests {
         for stem in ["Zoom", "ms-teams", "Teams", "POWERPNT", "Spotify", "slack", "WhatsApp"] {
             assert!(!notice_wanted(stem, rate(90), false), "{stem}");
         }
+    }
+
+    #[test]
+    fn remote_desktop_and_streaming_clients_never_get_the_notice() {
+        let more = ["wfica32", "CDViewer", "vmware-view", "workspaces", "Shadow", "ShadowPC", "Shadow PC.exe"];
+        for stem in ["mstsc", "msrdc", "msrdcw", "parsecd", "Moonlight", "MSTSC.exe"].into_iter().chain(more) {
+            assert!(!notice_wanted(stem, rate(90), false), "{stem}");
+        }
+        assert!(notice_wanted("game", rate(90), false), "a plain composed game still does");
     }
 
     #[test]

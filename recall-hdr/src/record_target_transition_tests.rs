@@ -16,6 +16,8 @@ fn ev(stem: &str, pid: u32, hwnd: isize, fullscreen: bool, steam: bool) -> Watch
         fullscreen,
         fullscreen_on_target: fullscreen,
         steam_game: steam,
+        launcher_game: false,
+        store_game: false,
         hosted: false,
         hwnd,
     }
@@ -307,4 +309,51 @@ fn a_windowed_session_can_still_be_replaced_by_a_windowed_steam_game() {
     tr.on_foreground_with(Some(target(1, 0x10, "A")), Traits::FULLSCREEN, t1);
     tr.on_foreground_with(Some(target(2, 0x20, "B")), Traits::WINDOWED, t1);
     assert!(!tr.poll(t1 + Duration::from_secs(5)), "the session is fullscreen now");
+}
+
+#[test]
+fn a_fullscreen_games_session_ends_when_its_window_goes_windowed_r8_detect_1() {
+    // Rohan 2026-11-05: fullscreen Discord is a game, windowed Discord is not.
+    let cfg = Config::default();
+    let full = ev("Discord", 30, 0x30, true, false);
+    let traits = traits_of(&full, &cfg);
+    assert!(traits.fullscreen_only && traits.listed_only, "{traits:?}");
+    let t0 = Instant::now();
+    let mut tr = tracker();
+    tr.on_foreground_with(classify_event(&full, &cfg), traits, t0);
+    assert!(tr.poll(t0 + START_DEBOUNCE), "fullscreen: recorded");
+    let t1 = t0 + Duration::from_secs(5);
+    // Alt-tab away while it stays fullscreen: kept, like a game.
+    tr.on_foreground_with(None, Traits::FULLSCREEN, t1);
+    assert!(!tr.poll(t1 + TARGET_DEBOUNCE));
+    assert!(!tr.on_windowed(0x31, true), "another window: nothing");
+    assert_eq!(tr.current().map(|t| t.pid), Some(30), "alt-tab keeps it");
+    // Esc: the same window, now windowed.
+    let windowed = ev("Discord", 30, 0x30, false, false);
+    assert!(tr.on_windowed(0x30, fullscreen_only_opt_in(&windowed, &cfg)), "windowed: the session ends");
+    assert!(tr.current().is_none());
+    assert!(!tr.adopts(30, t1), "no adoption of its next window");
+}
+
+#[test]
+fn a_game_session_survives_going_windowed() {
+    // A game (Steam, an override) keeps its session windowed (Alt+Enter): only a
+    // `fullscreen_games`-only session ends.
+    let cfg = Config::default();
+    let game = ev("SomeGame", 1, 0x10, true, true);
+    assert!(!fullscreen_only_opt_in(&game, &cfg));
+    let t0 = Instant::now();
+    let mut tr = tracker();
+    tr.on_foreground_with(classify_event(&game, &cfg), traits_of(&game, &cfg), t0);
+    assert!(tr.poll(t0 + START_DEBOUNCE));
+    assert!(!tr.on_windowed(0x10, false));
+    assert_eq!(tr.current().map(|t| t.pid), Some(1));
+}
+
+#[test]
+fn a_remade_windowed_window_is_not_adopted_on_fullscreen_games_alone_r8_detect_1() {
+    let cfg = Config::default();
+    assert!(adopted_candidate(&ev("Discord", 30, 0x31, false, false), &cfg, (1920, 1080)).is_none(), "windowed Discord");
+    assert!(adopted_candidate(&ev("Discord", 30, 0x31, true, false), &cfg, (1920, 1080)).is_some(), "fullscreen Discord");
+    assert!(adopted_candidate(&ev("SomeGame", 1, 0x11, false, true), &cfg, (1920, 1080)).is_some(), "a game's windowed re-made window");
 }

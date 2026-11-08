@@ -6,6 +6,15 @@ impl Controller {
     /// Validate, persist and apply a config patch. `client` gets errors; the
     /// new config + status are broadcast. Returns whether it applied.
     pub(crate) fn apply_config_patch(&mut self, patch: &Value, client: Option<u64>) -> bool {
+        self.apply_config_change(client, |_| Some(patch.clone()))
+    }
+
+    /// Build per-app changes from the current config, including any settled hand edit.
+    pub(crate) fn apply_config_change(
+        &mut self,
+        client: Option<u64>,
+        make_patch: impl FnOnce(&crate::config::Config) -> Option<Value>,
+    ) -> bool {
         // A hand edit made while running is the base, not overwritten (`config_watch`).
         let mut broken_edit = None;
         match crate::config_watch::base_for_patch(&self.store, &mut self.config_stamp, std::time::SystemTime::now()) {
@@ -20,7 +29,8 @@ impl Controller {
                 return false;
             }
         }
-        let out = match apply_patch(&self.file_cfg, patch) {
+        let patch = make_patch(&self.file_cfg).unwrap_or_else(|| json!({}));
+        let out = match apply_patch(&self.file_cfg, &patch) {
             Ok(o) => o,
             Err(e) => {
                 self.reply_error(client, &e);
@@ -29,7 +39,7 @@ impl Controller {
         };
         // A patched key also retires its startup env override.
         let mut overrides = self.overrides.clone();
-        overrides.forget(patch);
+        overrides.forget(&patch);
         let effective = overrides.apply(&out.config);
         if out.changed.is_empty() && effective == self.cfg {
             // Nothing to persist (keeps the user's hand-written file untouched).

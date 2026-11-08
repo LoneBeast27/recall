@@ -50,6 +50,7 @@ pub(crate) fn foreground_of(ev: &WatchEvent) -> Foreground {
         // A resolved UWP identity earns the fullscreen default only as a known game.
         fullscreen_on_target: crate::record_hosted::hdr_fullscreen(ev),
         pid: ev.pid,
+        game_evidence: crate::record_target::game_evidence(ev),
     }
 }
 
