@@ -129,7 +129,7 @@ impl App {
         let session = self.reducer.session();
         let key = session.hud_key();
         let has_game = !session.desktop && !key.is_empty();
-        let refused = refusal(self.dynamic(), has_game, game_in_front(session.target_pid), exclusive_fullscreen());
+        let refused = refusal(self.dynamic(), has_game, game_in_front(session.target_pid, session.target_hwnd), exclusive_fullscreen());
         let mut window = Window::new(hwnd, &mut self.guide);
         let begun = begin(&mut window, refused, &key, self.hud_cache.spot(&key), now);
         if let Some(error) = window.error.take() {
@@ -172,7 +172,8 @@ impl App {
     /// focus, or when a drag lost the mouse capture.
     pub(super) fn watch_editor(&mut self, hwnd: HWND, now: Instant) -> bool {
         let Some(editor) = self.editor.as_ref() else { return false };
-        let in_front = game_in_front(self.reducer.session().target_pid);
+        let session = self.reducer.session();
+        let in_front = game_in_front(session.target_pid, session.target_hwnd);
         let captured = unsafe { GetCapture() } == hwnd;
         match editor.watch(now, in_front, captured) {
             Some(how) => self.finish_editor(hwnd, how),

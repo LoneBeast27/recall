@@ -14,6 +14,8 @@
 /// The engine's `eprintln!`: written if it can be, never a panic (`stderr_log`).
 /// Defined before every module so it shadows std's for the whole crate; the
 /// controller's stderr pipe closes when it dies, and std's would panic then.
+/// Outside tests `quiet_io`'s (below) shadows it everywhere.
+#[cfg(test)]
 macro_rules! eprintln {
     () => {
         $crate::stderr_log::line(format_args!(""))
@@ -23,7 +25,12 @@ macro_rules! eprintln {
     };
 }
 
+#[cfg(test)]
 mod stderr_log;
+// Next: its non-panicking `println!` / `eprintln!` (stdout/stderr failure handling) shadow
+// std's and the one above in every module below; test builds keep the `stderr_log` one.
+#[macro_use]
+mod quiet_io;
 mod app_tick;
 #[cfg(feature = "encode")]
 mod audio;
@@ -66,8 +73,10 @@ mod hud_probe;
 mod hybrid_gpu;
 mod protocol;
 mod ring;
+mod shutdown_order;
 mod single_instance;
 mod spill;
+mod stdin_reader;
 mod file_id;
 mod win_volume;
 mod thread_qos;
@@ -111,8 +120,9 @@ static ENGINE_CAPS: [u8; 46] = *b"recall-engine-caps:prepare-editor,export-edit;
 
 /// How long a new recorder waits for an engine that is still ending (a restart).
 const ENGINE_WAIT: Duration = Duration::from_secs(3);
-/// Exit code when another engine already records.
-const EXIT_ALREADY_RUNNING: i32 = 3;
+/// Exit code when another engine already records (recall-hdr `engine_policy::EXIT_SLOT_BUSY`:
+/// retried, not a crash). 86 collides with nothing common: not abort() (3), not a panic (101).
+const EXIT_ALREADY_RUNNING: i32 = 86;
 
 /// Claims the recorder guard. Only the recorder takes it: one-shot commands (prepare,
 /// export, smoke tests) run beside a recording engine.
@@ -127,6 +137,7 @@ fn claim_recorder(json: bool) -> Option<single_instance::Guard> {
     match single_instance::claim_within(&single_instance::mutex_name(single_instance::ENGINE), ENGINE_WAIT) {
         single_instance::Claim::First(guard) => Some(guard),
         single_instance::Claim::Taken => {
+            // The controller logs this once a minute while it retries (`engine_slot`).
             say("another Recall engine is already recording; exiting".into());
             std::process::exit(EXIT_ALREADY_RUNNING);
         }
@@ -444,6 +455,8 @@ fn main() {
     }
     // Held until the process ends: Windows frees it then, after a crash too.
     let _instance = claim_recorder(config.json);
+    // Asked to end after the controller at sign-out / shutdown: it holds the session for a save.
+    shutdown_order::apply();
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
@@ -453,7 +466,8 @@ fn main() {
     event_loop.run_app(&mut app).expect("run app");
     // Quit: finalize a running long recording first (a kill after this point
     // leaves a `.part` that the next start recovers), then let an in-flight
-    // save finish (or remove its .part) inside the supervisor's grace.
+    // save finish (or remove its .part) inside the supervisor's grace. An engine whose
+    // controller vanished (stdin ended with no `quit`) lets its saves finish instead.
     #[cfg(feature = "encode")]
     if let Some(longrec) = app.longrec.take() {
         longrec.shutdown(std::time::Duration::from_millis(1500));
@@ -467,6 +481,6 @@ fn main() {
     }
     #[cfg(feature = "encode")]
     if let Some(encoder) = app.encoder.take() {
-        encoder.shutdown(std::time::Duration::from_secs(3));
+        encoder.shutdown(std::time::Duration::from_secs(3), stdin_reader::orphaned());
     }
 }

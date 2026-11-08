@@ -12,7 +12,10 @@ use serde_json::{json, Value};
 
 use crate::record_engine::Busy;
 
-/// A save with no `saved` / `save_failed` after this is assumed lost.
+/// Saves in flight with no `saved` / `save_failed` this long after the queue
+/// started, the engine last answered one, or the save being written last grew
+/// (`status.save_writing`, [`writing`]) are assumed lost (one window for the
+/// queue while the engine keeps answering or writing, not one per save).
 pub const SAVE_STALE: Duration = Duration::from_secs(120);
 /// A `record_start` with no `recording_started` / `_failed` after this is dropped
 /// (the engine's own keyframe wait is 30 s).
@@ -21,6 +24,12 @@ pub const START_STALE: Duration = Duration::from_secs(35);
 pub const DRAIN_RECORD_REASON: &str = "The game closed; nothing to record";
 /// How long a pause waits for the long recording to report stopping.
 pub const PAUSE_STOP_WAIT: Duration = Duration::from_secs(10);
+/// The island while a pause waits for the save being written (R5-overlay-1).
+pub const PAUSE_AFTER_SAVE: &str = "Pausing after the save";
+pub const PAUSE_AFTER_SAVE_DETAIL: &str = "Recording stops once the clip is saved";
+/// The island once a restart has waited 30 s for a save (`writing::HOLD_NOTICE_AFTER`).
+pub const SAVE_HOLD_TITLE: &str = "Waiting for the clip to finish saving";
+pub const SAVE_HOLD_DETAIL: &str = "The recorder restarts once it is saved";
 /// Why a screenshot is refused while a closed game drains (it would be the
 /// closed game's last frame).
 pub const DRAIN_SCREENSHOT_REASON: &str = "The game closed";
@@ -50,7 +59,13 @@ pub struct AutoStop {
 #[derive(Debug, Clone, PartialEq)]
 pub struct EngineActivity {
     pending_saves: u32,
-    last_save_sent: Option<Instant>,
+    /// When the queue of saves started, or the engine last answered one of it
+    /// (or reported its bytes growing).
+    save_progress: Option<Instant>,
+    /// Saves of a queue that expired unanswered: their late answers land here.
+    expired_saves: u32,
+    /// The engine's own report of the save it is writing.
+    write: writing::WriteWatch,
     /// Screenshots sent and not yet reported (their PNGs are still being written).
     pending_screenshots: u32,
     last_screenshot_sent: Option<Instant>,
@@ -59,18 +74,24 @@ pub struct EngineActivity {
     /// A `record_stop` (any sender: the user, a pause, a retarget, sleep, a session end) went
     /// to the engine and its `recording_stopped` has not come yet.
     stop_requested: bool,
+    /// The clip size a save is expected to reach: sets how long a growing save
+    /// may hold restarts (`writing::hold_cap`). Kept across engine instances.
+    save_estimate: u64,
 }
 
 impl Default for EngineActivity {
     fn default() -> Self {
         EngineActivity {
             pending_saves: 0,
-            last_save_sent: None,
+            save_progress: None,
+            expired_saves: 0,
+            write: writing::WriteWatch::default(),
             pending_screenshots: 0,
             last_screenshot_sent: None,
             long: LongRec::Idle,
             auto_stop: None,
             stop_requested: false,
+            save_estimate: 0,
         }
     }
 }
@@ -84,12 +105,36 @@ pub enum Trigger {
     LongRecChanged,
     /// The long recording a retarget stopped ([`AutoStop`]) was saved.
     AutoStopped { game_closed: bool },
+    /// The engine stopped with this many saves in flight: they are lost.
+    SavesLost(u32),
+}
+
+/// Why a save in flight failed when the engine stopped.
+pub const LOST_SAVE_REASON: &str = "The recorder stopped during the save";
+
+/// The `save_failed` each lost save gets (mod `engine`, as the engine's own),
+/// so the island's ring ends in "Save failed" instead of silence.
+pub fn lost_save_event() -> String {
+    json!({"type": "save_failed", "reason": LOST_SAVE_REASON}).to_string()
 }
 
 impl EngineActivity {
+    /// A save went to the engine. A save queued behind others waits in their
+    /// window: only a new queue (or an answer) starts one.
     pub fn save_sent(&mut self, now: Instant) {
+        self.expire_saves(now);
+        if self.pending_saves == 0 {
+            self.save_progress = Some(now);
+        }
         self.pending_saves += 1;
-        self.last_save_sent = Some(now);
+    }
+
+    /// Saves whose window ran out are lost: an engine that keeps answering
+    /// never gets here while saves still write.
+    fn expire_saves(&mut self, now: Instant) {
+        if self.save_progress.is_some_and(|t| now.duration_since(t) >= SAVE_STALE) {
+            self.expired_saves += std::mem::take(&mut self.pending_saves);
+        }
     }
 
     /// `cmd` (`engine_command`) went to the engine: a long-recording start or
@@ -142,7 +187,8 @@ impl EngineActivity {
 
     /// A new engine instance: nothing of the old one is in flight any more.
     pub fn engine_restarted(&mut self) {
-        *self = EngineActivity::default();
+        let save_estimate = self.save_estimate;
+        *self = EngineActivity { save_estimate, ..EngineActivity::default() };
     }
 
     /// Track one engine event; `unix_now` stamps a recording start.
@@ -152,12 +198,19 @@ impl EngineActivity {
         let continued = ev.get("continued").and_then(Value::as_bool).unwrap_or(false);
         match ev.get("type").and_then(Value::as_str)? {
             "saved" => {
-                self.pending_saves = self.pending_saves.saturating_sub(1);
+                self.answered(ev);
                 Some(Trigger::Saved)
             }
             "save_failed" => {
-                self.pending_saves = self.pending_saves.saturating_sub(1);
+                self.answered(ev);
                 None
+            }
+            // The supervisor's own event: the engine process ended. Its last
+            // events came first, so whatever is still pending is lost.
+            crate::supervisor::ENGINE_EXITED => {
+                (self.expired_saves, self.write) = (0, writing::WriteWatch::default());
+                let lost = std::mem::take(&mut self.pending_saves);
+                (lost > 0).then_some(Trigger::SavesLost(lost))
             }
             "screenshot" | "screenshot_failed" => {
                 self.pending_screenshots = self.pending_screenshots.saturating_sub(1);
@@ -186,12 +239,32 @@ impl EngineActivity {
         }
     }
 
+    /// One engine event as it arrives at `now` (the live path): a save's
+    /// answer shows the engine alive, so the saves still queued get a new window,
+    /// and so does a `status` whose `save_writing` bytes grew. A rejection only
+    /// shows the main loop alive, not the writer: it moves no window.
+    pub fn on_engine_event(&mut self, ev: &Value, unix_now: f64, now: Instant) -> Option<Trigger> {
+        let kind = ev.get("type").and_then(Value::as_str);
+        if kind == Some("status") {
+            self.on_status(ev, now);
+            return None;
+        }
+        let rejected = ev.get("rejected").and_then(Value::as_bool) == Some(true);
+        let answer = matches!(kind, Some("saved" | "save_failed")) && !rejected;
+        let trigger = self.on_event(ev, unix_now);
+        if answer {
+            self.front_answered(now);
+        }
+        if answer && self.pending_saves > 0 {
+            self.save_progress = Some(now);
+        }
+        trigger
+    }
+
     /// Saves or a screenshot in flight, or a long recording starting / running: an engine
     /// restart now would lose work.
     pub fn busy(&mut self, now: Instant) -> bool {
-        if self.last_save_sent.is_some_and(|t| now.duration_since(t) >= SAVE_STALE) {
-            self.pending_saves = 0;
-        }
+        self.expire_saves(now);
         if let LongRec::Starting { since } = self.long {
             if now.duration_since(since) >= START_STALE {
                 self.long = LongRec::Idle;
@@ -201,7 +274,7 @@ impl EngineActivity {
         if self.last_screenshot_sent.is_some_and(|t| now.duration_since(t) >= SCREENSHOT_STALE) {
             self.pending_screenshots = 0;
         }
-        self.pending_saves > 0 || self.pending_screenshots > 0 || self.long != LongRec::Idle
+        self.saves_writing(now) || self.pending_screenshots > 0 || self.long != LongRec::Idle
     }
 
     /// What holds a due retarget now (see `EnginePlanner::step`): saves or a
@@ -211,7 +284,7 @@ impl EngineActivity {
     pub fn retarget_busy(&mut self, now: Instant) -> Busy {
         self.busy(now); // expire stale saves / starts
         let given_up = self.auto_stop.is_some_and(|s| now >= s.deadline);
-        let saving = self.pending_saves > 0 || self.pending_screenshots > 0;
+        let saving = self.saves_writing(now) || self.pending_screenshots > 0;
         Busy { saving, long_rec: self.is_recording() && !given_up }
     }
 
@@ -254,268 +327,40 @@ impl EngineActivity {
 }
 
 /// A pause held back while the long recording stops (its `record_stop` is
-/// sent): it applies once the engine reports `recording_stopped` /
-/// `recording_failed`, or after [`PAUSE_STOP_WAIT`].
+/// sent) and while a save is still being written (the engine's quit would abort
+/// it): it applies once the engine reports `recording_stopped` /
+/// `recording_failed` (or after [`PAUSE_STOP_WAIT`]) and no save is written any
+/// more (bounded by the save's own window and cap, `writing`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PendingPause {
     deadline: Instant,
 }
 
 impl PendingPause {
-    /// `Some` when a pause asked at `now` must first stop the long recording
-    /// (starting or running).
-    pub fn needed(activity: &EngineActivity, now: Instant) -> Option<PendingPause> {
-        (activity.long != LongRec::Idle).then(|| PendingPause { deadline: now + PAUSE_STOP_WAIT })
+    /// `Some` when a pause asked at `now` must wait: the long recording (starting
+    /// or running) is stopped first, a save being written finishes first.
+    pub fn needed(activity: &mut EngineActivity, now: Instant) -> Option<PendingPause> {
+        let wait = activity.long != LongRec::Idle || activity.saves_writing(now);
+        wait.then(|| PendingPause { deadline: now + PAUSE_STOP_WAIT })
     }
 
-    /// The recording reported its end, or the wait ran out.
-    pub fn ready(&self, activity: &EngineActivity, now: Instant) -> bool {
-        activity.long == LongRec::Idle || now >= self.deadline
+    /// The recording reported its end (or its wait ran out), and no save is
+    /// still being written.
+    pub fn ready(&self, activity: &mut EngineActivity, now: Instant) -> bool {
+        (activity.long == LongRec::Idle || now >= self.deadline) && !activity.saves_writing(now)
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
+#[path = "record_activity_tests.rs"]
+mod tests;
 
-    #[test]
-    fn a_pause_waits_for_the_long_recording_to_stop_but_not_forever() {
-        let t0 = Instant::now();
-        let mut a = EngineActivity::default();
-        assert_eq!(PendingPause::needed(&a, t0), None, "nothing recording: pause at once");
-        a.record_requested(t0);
-        assert!(PendingPause::needed(&a, t0).is_some(), "a starting recording is stopped first too");
-        a.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
-        let wait = PendingPause::needed(&a, t0).expect("recording: stop first");
-        assert!(!wait.ready(&a, t0 + Duration::from_secs(1)));
-        a.on_event(&json!({"type":"recording_stopped","path":"p","seconds":1.0,"bytes":1}), 0.0);
-        assert!(wait.ready(&a, t0 + Duration::from_secs(1)), "stopped: pause now");
-        a.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
-        assert!(!wait.ready(&a, t0 + PAUSE_STOP_WAIT - Duration::from_millis(1)));
-        assert!(wait.ready(&a, t0 + PAUSE_STOP_WAIT), "an engine that never answers does not block the pause");
-    }
+#[path = "record_activity_writing.rs"]
+mod writing;
 
-    #[test]
-    fn saves_in_flight_block_restarts_until_reported_or_stale() {
-        let t0 = Instant::now();
-        let mut a = EngineActivity::default();
-        assert!(!a.busy(t0));
-        a.save_sent(t0);
-        a.save_sent(t0);
-        assert!(a.busy(t0));
-        assert_eq!(a.on_event(&json!({"type":"saved","path":"x.mp4"}), 0.0), Some(Trigger::Saved));
-        assert!(a.busy(t0), "one more in flight");
-        assert_eq!(a.on_event(&json!({"type":"save_failed","reason":"r"}), 0.0), None);
-        assert!(!a.busy(t0));
-        a.save_sent(t0);
-        assert!(!a.busy(t0 + SAVE_STALE), "a lost save does not block forever");
-    }
-
-    #[test]
-    fn long_recording_lifecycle_and_status_shape() {
-        let t0 = Instant::now();
-        let mut a = EngineActivity::default();
-        assert_eq!(a.long_recording_json(), json!({"active":false,"path":null,"started_secs":null}));
-        a.record_requested(t0);
-        assert!(a.busy(t0) && !a.is_recording());
-        a.on_event(&json!({"type":"recording_started","path":"E:\\c\\G__rec.mp4"}), 1_790_000_000.5);
-        assert!(a.is_recording());
-        let LongRec::Active { since, .. } = a.long.clone() else { panic!("active") };
-        assert_eq!(
-            a.long_recording_json_at(since),
-            json!({"active":true,"path":"E:\\c\\G__rec.mp4","started_secs":1_790_000_000.5,"elapsed_secs":0.0})
-        );
-        assert_eq!(a.on_event(&json!({"type":"recording_stopped","path":"p","seconds":3.0,"bytes":9}), 0.0), Some(Trigger::LongRecChanged));
-        assert!(!a.busy(t0));
-        a.record_requested(t0);
-        assert!(!a.busy(t0 + START_STALE), "a start that never answered expires");
-        a.record_requested(t0);
-        a.on_event(&json!({"type":"recording_failed","reason":"x","path":null}), 0.0);
-        assert_eq!(a.long, LongRec::Idle);
-    }
-
-    #[test]
-    fn a_retarget_stops_the_long_recording_once_and_waits_for_it_bounded() {
-        let t0 = Instant::now();
-        let s = Duration::from_secs;
-        let mut a = EngineActivity::default();
-        assert!(!a.auto_stop(t0, true), "nothing recording: nothing to stop");
-        a.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
-        assert_eq!(a.retarget_busy(t0), Busy { saving: false, long_rec: true });
-        assert!(a.auto_stop(t0, true), "first ask sends record_stop");
-        assert!(!a.auto_stop(t0 + s(1), true), "sent once per recording");
-        assert!(a.retarget_busy(t0 + s(1)).long_rec, "waits for the engine to report it");
-        let ev = a.on_event(&json!({"type":"recording_stopped","path":"p","seconds":9.0,"bytes":1}), 0.0);
-        assert_eq!(ev, Some(Trigger::AutoStopped { game_closed: true }), "the island says why it stopped");
-        assert_eq!(a.retarget_busy(t0 + s(1)), Busy::default(), "stopped: retarget now");
-        // An engine that never answers holds the retarget only PAUSE_STOP_WAIT.
-        a.on_event(&json!({"type":"recording_started","path":"q"}), 1.0);
-        assert!(a.auto_stop(t0 + s(20), false));
-        assert!(a.retarget_busy(t0 + s(20) + PAUSE_STOP_WAIT - Duration::from_millis(1)).long_rec);
-        assert!(!a.retarget_busy(t0 + s(20) + PAUSE_STOP_WAIT).long_rec, "gave up on the stop");
-        // A user's own stop (no auto stop) is the plain event.
-        let mut b = EngineActivity::default();
-        b.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
-        assert_eq!(b.on_event(&json!({"type":"recording_stopped","path":"p"}), 0.0), Some(Trigger::LongRecChanged));
-        // A save in flight still holds, bounded by SAVE_STALE.
-        b.save_sent(t0);
-        assert_eq!(b.retarget_busy(t0 + s(1)), Busy { saving: true, long_rec: false });
-        assert_eq!(b.retarget_busy(t0 + SAVE_STALE), Busy::default());
-    }
-
-    #[test]
-    fn a_long_recording_cannot_start_while_a_closed_game_drains() {
-        let mut a = EngineActivity::default();
-        for cmd in ["record_start", "record_toggle"] {
-            assert_eq!(a.record_refusal(cmd, true), Some(DRAIN_RECORD_REASON), "{cmd}");
-            assert_eq!(a.record_refusal(cmd, false), None, "{cmd}: on target it starts");
-        }
-        assert_eq!(a.record_refusal("record_stop", true), None);
-        a.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
-        assert_eq!(a.record_refusal("record_toggle", true), None, "a toggle that stops is never refused");
-        assert_eq!(a.record_refusal("record_start", true), Some(DRAIN_RECORD_REASON));
-    }
-
-    #[test]
-    fn a_starting_long_recording_never_holds_a_retarget() {
-        let t0 = Instant::now();
-        let mut a = EngineActivity::default();
-        a.record_requested(t0);
-        assert_eq!(a.retarget_busy(t0 + Duration::from_secs(1)), Busy::default(), "not yet recording: nothing to save");
-        assert!(!a.auto_stop(t0 + Duration::from_secs(1), true), "nothing to stop either");
-        a.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
-        assert!(a.retarget_busy(t0 + Duration::from_secs(2)).long_rec, "an active recording is stopped first");
-    }
-
-    #[test]
-    fn a_game_recreating_its_window_during_a_long_recording_is_never_held_forever() {
-        use crate::record_engine::{EnginePlanner, EngineTarget, Step, EXIT_LINGER};
-        use crate::record_target::Target;
-        let t0 = Instant::now();
-        let s = Duration::from_secs;
-        let win = |hwnd| EngineTarget::Window(Target { hwnd, pid: 7, name: "G".into(), exe: "G.exe".into() });
-        let (mut p, mut a) = (EnginePlanner::new(EXIT_LINGER), EngineActivity::default());
-        assert_eq!(p.step(&win(1), t0, a.retarget_busy(t0)), Step::Apply(win(1)));
-        a.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
-        // Fullscreen -> windowed: same pid, new hwnd. The engine never answers the stop.
-        let mut sent = 0;
-        let mut applied_at = None;
-        for tick in 1..=3600u64 {
-            let now = t0 + s(tick);
-            match p.step(&win(2), now, a.retarget_busy(now)) {
-                Step::StopLongRec { game_closed } => {
-                    assert!(!game_closed);
-                    sent += a.auto_stop(now, game_closed) as u32;
-                }
-                Step::Apply(t) => {
-                    assert_eq!(t, win(2));
-                    applied_at = Some(tick);
-                    break;
-                }
-                other => panic!("tick {tick}: {other:?}"),
-            }
-        }
-        assert_eq!(sent, 1, "record_stop sent once");
-        assert_eq!(applied_at, Some(1 + PAUSE_STOP_WAIT.as_secs()), "retargeted once the stop timed out");
-    }
-
-    #[test]
-    fn a_screenshot_is_refused_while_a_closed_game_drains() {
-        let a = EngineActivity::default();
-        assert_eq!(a.record_refusal("screenshot", true), Some(DRAIN_SCREENSHOT_REASON), "the closed game's last frame");
-        assert_eq!(a.record_refusal("screenshot", false), None, "on target it is taken");
-        assert_eq!(a.record_refusal("bookmark", true), None);
-    }
-
-    #[test]
-    fn a_screenshot_in_flight_holds_a_retarget_until_reported_or_stale() {
-        use crate::record_engine::{EnginePlanner, EngineTarget, Step, EXIT_LINGER};
-        use crate::record_target::Target;
-        let t0 = Instant::now();
-        let s = Duration::from_secs;
-        let win = |pid, hwnd| EngineTarget::Window(Target { hwnd, pid, name: "G".into(), exe: "G.exe".into() });
-        let (mut p, mut a) = (EnginePlanner::new(EXIT_LINGER), EngineActivity::default());
-        assert_eq!(p.step(&win(7, 1), t0, a.retarget_busy(t0)), Step::Apply(win(7, 1)));
-        a.command_sent("screenshot", t0);
-        assert!(a.busy(t0), "a settings restart waits for the PNG");
-        assert_eq!(p.step(&win(8, 2), t0 + s(1), a.retarget_busy(t0 + s(1))), Step::Held, "a new game waits for the PNG");
-        a.on_event(&json!({"type":"screenshot","path":"G.png"}), 0.0);
-        assert!(!a.busy(t0 + s(1)));
-        assert_eq!(p.step(&win(8, 2), t0 + s(1), a.retarget_busy(t0 + s(1))), Step::Apply(win(8, 2)));
-        a.command_sent("screenshot", t0 + s(2));
-        a.on_event(&json!({"type":"screenshot_failed","reason":"r"}), 0.0);
-        assert!(!a.busy(t0 + s(2)), "a failed screenshot is over too");
-        a.command_sent("screenshot", t0 + s(3));
-        assert!(a.busy(t0 + s(3) + SCREENSHOT_STALE - Duration::from_millis(1)));
-        assert!(!a.busy(t0 + s(3) + SCREENSHOT_STALE), "a lost screenshot does not block forever");
-        assert_eq!(a.retarget_busy(t0 + s(3) + SCREENSHOT_STALE), Busy::default());
-    }
-
-    #[test]
-    fn screenshots_in_flight_are_counted_and_go_stale_after_60_s() {
-        let t0 = Instant::now();
-        let s = Duration::from_secs;
-        let mut a = EngineActivity::default();
-        a.command_sent("screenshot", t0);
-        a.command_sent("screenshot", t0 + s(1));
-        a.on_event(&json!({"type":"screenshot","path":"a.png"}), 0.0);
-        assert!(a.busy(t0 + s(1)), "the second PNG is still being written");
-        assert!(a.retarget_busy(t0 + s(1)).saving, "and it holds a retarget");
-        a.on_event(&json!({"type":"screenshot_failed","reason":"r"}), 0.0);
-        assert!(!a.busy(t0 + s(1)), "both reported");
-        a.on_event(&json!({"type":"screenshot","path":"x.png"}), 0.0);
-        assert!(!a.busy(t0 + s(1)), "a stray report does not underflow");
-        assert_eq!(SCREENSHOT_STALE, s(60), "a PNG can go to a sleeping hard drive");
-        a.command_sent("screenshot", t0 + s(2));
-        assert!(a.busy(t0 + s(2) + s(59)), "a slow disk is not a lost screenshot");
-        assert!(!a.busy(t0 + s(2) + SCREENSHOT_STALE), "a lost one does not block forever");
-    }
-
-    #[test]
-    fn a_fresh_engine_clears_everything() {
-        let t0 = Instant::now();
-        let mut a = EngineActivity::default();
-        a.save_sent(t0);
-        a.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
-        a.engine_restarted();
-        assert_eq!(a, EngineActivity::default());
-    }
-
-    #[test]
-    fn a_continued_recording_stays_active_between_its_parts() {
-        let t0 = Instant::now();
-        let mut a = EngineActivity::default();
-        a.on_event(&json!({"type":"recording_started","path":"p1","continued":false}), 5.0);
-        a.on_event(&json!({"type":"recording_stopped","path":"p1","seconds":9.0,"bytes":1,"continued":true}), 9.0);
-        assert!(a.is_recording(), "no gap between the parts for a retarget to slip into");
-        assert!(a.retarget_busy(t0).long_rec);
-        a.on_event(&json!({"type":"recording_started","path":"p2","continued":true}), 9.5);
-        assert!(matches!(&a.long, LongRec::Active { path, started_unix: 5.0, .. } if path == "p2"), "the timer counts from part 1");
-        // A retarget's stop sent before the size change is answered by the last part's stop.
-        assert!(a.auto_stop(t0, false));
-        let ev = a.on_event(&json!({"type":"recording_stopped","path":"p2","seconds":1.0,"bytes":1,"continued":true}), 10.0);
-        assert_ne!(ev, Some(Trigger::AutoStopped { game_closed: false }));
-        assert!(a.is_recording());
-        let ev = a.on_event(&json!({"type":"recording_stopped","path":"p3","seconds":1.0,"bytes":1,"continued":false}), 11.0);
-        assert_eq!(ev, Some(Trigger::AutoStopped { game_closed: false }));
-        assert_eq!(a.long, LongRec::Idle);
-    }
-
-    #[test]
-    fn the_elapsed_time_follows_the_monotonic_clock_not_the_wall_clock() {
-        let t0 = Instant::now();
-        // Started at Unix 1000 s; the wall clock then jumps an hour ahead (NTP, a manual change).
-        let long = LongRec::Active { path: "p".into(), started_unix: 1000.0, since: t0 };
-        let mut a = EngineActivity { long, ..Default::default() };
-        let v = a.long_recording_json_at(t0 + Duration::from_secs(90));
-        assert_eq!(v["started_secs"], 1000.0, "the old field stays for older apps");
-        assert_eq!(v["elapsed_secs"], 90.0, "90 s recorded, whatever the wall clock says");
-        // A continued part keeps the first part's start.
-        a.on_event(&json!({"type":"recording_started","path":"p2","continued":true}), 4600.0);
-        assert_eq!(a.long_recording_json_at(t0 + Duration::from_secs(95))["elapsed_secs"], 95.0);
-        assert_eq!(a.long_recording_json_at(t0)["elapsed_secs"], 0.0);
-    }
-}
+#[cfg(test)]
+#[path = "record_activity_queue_tests.rs"]
+mod queue_tests;
 
 #[cfg(test)]
 #[path = "record_activity_session_tests.rs"]

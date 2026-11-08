@@ -40,7 +40,10 @@ pub const UNRESPONSIVE: Duration = Duration::from_secs(5);
 #[derive(Debug, Clone, PartialEq)]
 pub enum DaemonCommand {
     Status,
+    /// Stop the recorder; it finishes a clip being saved first (a repeat joins that wait).
     Quit,
+    /// Stop now, even while a clip is being saved (the clip is lost): `"force":true`.
+    QuitNow,
     SaveClip { seconds: Option<u32> },
     SetMicMute(bool),
     ToggleMicMute,
@@ -140,6 +143,8 @@ pub struct SessionStatus {
     /// `elapsed_secs` count from here, so a wall-clock jump does not move them.
     #[serde(skip)]
     pub received: Arrival,
+    /// A quit waits for a clip still being saved (false on builds without it).
+    pub finishing_clip: bool,
 }
 
 /// When a status line arrived. Not part of a status's equality: the same status

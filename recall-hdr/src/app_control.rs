@@ -21,7 +21,7 @@ impl App {
                 let seconds = val.get("seconds").and_then(|s| s.as_u64());
                 if let Some(reason) = crate::record_dispatch::legacy_save(|line| supervisor.send_engine_line(line), seconds) {
                     log!("app: control save_clip not sent: {reason}");
-                    hub.event("engine", &serde_json::json!({"type": "save_failed", "reason": reason}).to_string());
+                    hub.event("engine", &crate::record_refusal::refusal_event("save_clip", reason).to_string());
                     crate::supervisor::beep_failure();
                 }
             }

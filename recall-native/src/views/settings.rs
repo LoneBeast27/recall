@@ -6,9 +6,8 @@ use serde_json::{Value, json};
 
 use crate::{
     root::Root,
-    services::daemon::DaemonCommand,
     theme::{self, c},
-    ui::{self, Icon, Variant, icon},
+    ui,
     views::{
         pages::{section_title, setting_row},
         settings_keys::ShortcutSlot,
@@ -123,15 +122,8 @@ impl Root {
         let corner_row = setting_row("Corner", corner_detail).child(corners).into_any_element();
         items.push(corner_row);
         items.extend(self.render_midi_device(cx));
-        items.extend([
-            section_title("Recorder"),
-            setting_row("Quit Recall", "Stops recording and closes the tray icon.")
-                .child(ui::button("quit-recorder", Variant::Ghost).border_1().border_color(c(theme::BORDER)).child(icon(Icon::Power, 14., theme::MUTED)).child("Stop recorder").on_click(cx.listener(|this, _, _, cx| {
-                    this.send(DaemonCommand::Quit);
-                    cx.notify();
-                })))
-                .into_any_element(),
-        ]);
+        items.push(section_title("Recorder"));
+        items.push(self.render_stop_row(cx));
         items
     }
 

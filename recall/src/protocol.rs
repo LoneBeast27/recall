@@ -59,6 +59,10 @@ pub enum Outbound {
         /// What each recorded source opened, in track order (`audio::sources::opened`).
         #[serde(skip_serializing_if = "Vec::is_empty")]
         audio: Vec<AudioOpened>,
+        /// The save the saver is writing now (absent when none is in the saver). Bytes that
+        /// keep growing tell the controller the save is alive: a restart would abort it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        save_writing: Option<SaveWriting>,
     },
     /// A `save_clip` completed: the clip is on disk. `path` is always the
     /// clip's FINAL place in the clip folder. With `staged: true` the finished
@@ -97,9 +101,12 @@ pub enum Outbound {
         staged_path: String,
         reason: String,
     },
-    /// A `save_clip` failed.
+    /// A `save_clip` failed. `rejected`: it failed before it was queued for
+    /// writing (the newest request, while older saves may still be writing).
     SaveFailed {
         reason: String,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        rejected: bool,
     },
     /// An input opened on an unsure sibling was unmuted by a fresh Alt+M (A4 ruling): the
     /// controller saves `device_id` as source `id`'s own endpoint.
@@ -209,6 +216,17 @@ pub enum Outbound {
     },
 }
 
+/// `status.save_writing`: the save in progress and the saves queued behind it. `step`
+/// counts the saver's work (an AAC frame encoded, a packet muxed) and only grows, from
+/// the audio encode on, before the `.part` exists; `bytes` = the packet bytes muxed so
+/// far (about the `.part` size). Both come from the saver's counters, no file stat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct SaveWriting {
+    pub bytes: u64,
+    pub queued: u32,
+    pub step: u64,
+}
+
 /// One recorded source in `status.audio`: what it captures right now.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct AudioOpened {
@@ -305,15 +323,23 @@ pub fn set_observer(observer: impl Fn(&Outbound) + Send + Sync + 'static) {
 }
 
 /// Serialize and print one outbound message as a JSON line. A closed stdout
-/// (the controller is gone) is ignored, not a panic: stdin EOF quits cleanly.
+/// (the controller is gone) is not a panic: the line is dropped and the engine is
+/// marked orphaned (`stdin_reader::stdout_failed`); stdin EOF quits it after its saves.
 pub fn emit(msg: &Outbound) {
-    use std::io::Write;
     if let Some(observer) = OBSERVER.get() {
         observer(msg);
     }
     if let Ok(line) = serde_json::to_string(msg) {
-        let _ = writeln!(std::io::stdout().lock(), "{line}");
+        if !write_line(&mut std::io::stdout().lock(), &line) {
+            crate::stdin_reader::stream_failed(crate::stdin_reader::Stream::Out);
+        }
     }
+}
+
+/// One line to `out`; false when it could not be written (the controller is gone: the
+/// line is dropped, never a panic as `println!` would).
+pub fn write_line(out: &mut impl std::io::Write, line: &str) -> bool {
+    writeln!(out, "{line}").and_then(|()| out.flush()).is_ok()
 }
 
 /// `emit` in sidecar (`--json`) mode, else a human `[recall]` line on stderr.
@@ -328,6 +354,28 @@ pub fn emit_or_log(json: bool, msg: &Outbound, human: impl FnOnce() -> String) {
 #[cfg(test)]
 mod tests {
     use super::Outbound;
+
+    /// A pipe whose reader is gone (`ERROR_NO_DATA`).
+    struct ClosedPipe;
+    impl std::io::Write for ClosedPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from_raw_os_error(232))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_line_to_a_closed_pipe_is_dropped_without_a_panic() {
+        // R5-overlay-6: the controller crashed; the engine must not panic on its next line.
+        let wrote = std::panic::catch_unwind(|| super::write_line(&mut ClosedPipe, "{\"type\":\"status\"}"));
+        assert_eq!(wrote.ok(), Some(false), "dropped, reported, no panic");
+        let mut ok = Vec::new();
+        assert!(super::write_line(&mut ok, "x"));
+        assert_eq!(ok, b"x
+");
+    }
 
     #[test]
     fn set_source_parses_with_either_field() {

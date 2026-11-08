@@ -44,6 +44,8 @@ pub enum Situation {
     Encoder { gave_up: bool },
     /// The engine is rebuilding its encoder; the replay buffer is kept.
     Recovering,
+    /// Another recorder held the engine slot until the supervisor gave up (`engine_slot`).
+    OtherRecorder,
 }
 
 impl Situation {
@@ -73,7 +75,7 @@ impl Situation {
             Situation::Desktop => "desktop",
             Situation::Paused => "paused",
             Situation::Waiting | Situation::Draining { .. } => "waiting",
-            Situation::Encoder { .. } | Situation::Recovering => "encoder",
+            Situation::Encoder { .. } | Situation::Recovering | Situation::OtherRecorder => "encoder",
         }
     }
 
@@ -85,6 +87,7 @@ impl Situation {
             Situation::Draining { .. } => "Game closed",
             Situation::Encoder { gave_up: false } | Situation::Recovering => "Encoder problem",
             Situation::Encoder { gave_up: true } => "Recorder stopped",
+            Situation::OtherRecorder => crate::engine_slot::OTHER_RECORDER,
         }
     }
 
@@ -98,12 +101,13 @@ impl Situation {
             Situation::Encoder { gave_up: false } => "Clips are not being recorded".into(),
             Situation::Recovering => "Retrying; the replay buffer is kept".into(),
             Situation::Encoder { gave_up: true } => "It failed repeatedly (see recall-hdr.log)".into(),
+            Situation::OtherRecorder => crate::engine_slot::OTHER_RECORDER_DETAIL.into(),
         }
     }
 
     /// Announced with the failure tone instead of the tick.
     pub fn is_failure(&self) -> bool {
-        matches!(self, Situation::Encoder { .. } | Situation::Recovering)
+        matches!(self, Situation::Encoder { .. } | Situation::Recovering | Situation::OtherRecorder)
     }
 }
 

@@ -10,7 +10,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use serde_json::json;
 
 use crate::log;
-use crate::record_activity::{LongRec, PendingPause, Trigger, PAUSE_STOP_WAIT};
+use crate::record_activity::{LongRec, PendingPause, Trigger, PAUSE_AFTER_SAVE, PAUSE_AFTER_SAVE_DETAIL, PAUSE_STOP_WAIT, SAVE_HOLD_DETAIL, SAVE_HOLD_TITLE};
 use crate::record_app::Controller;
 use crate::record_engine::{capture_refusal, EngineTarget, Step};
 use crate::record_hotkeys::{bindings, hotkey_command, HotkeyAction};
@@ -177,11 +177,7 @@ impl Controller {
     /// engine had failed it), so the overlay and the app show the reason.
     pub(crate) fn refuse_capture(&self, cmd: &str, reason: &str) {
         log!("record: {cmd} refused -- {reason}");
-        let event = match cmd {
-            "screenshot" => json!({"type": "screenshot_failed", "reason": reason}),
-            "save_clip" => json!({"type": "save_failed", "reason": reason}),
-            _ => json!({"type": "recording_failed", "reason": reason, "path": null}),
-        };
+        let event = crate::record_refusal::refusal_event(cmd, reason);
         self.hub.event("engine", &event.to_string());
         crate::supervisor::beep_failure();
     }
@@ -276,8 +272,8 @@ impl Controller {
     /// Pause stops the engine now (no linger) and ignores games until resume;
     /// resume re-reads the foreground so the current game starts at once. A
     /// long recording is stopped (and saved) first: the pause applies when the
-    /// engine reports it ended, or after [`PAUSE_STOP_WAIT`]. Resume cancels a
-    /// pause still waiting.
+    /// engine reports it ended, or after [`PAUSE_STOP_WAIT`]; a save being written
+    /// finishes first ("Pausing after the save"). Resume cancels a pause still waiting.
     pub(crate) fn set_paused(&mut self, paused: bool) {
         if !paused {
             self.pending_pause = None;
@@ -285,7 +281,14 @@ impl Controller {
             if self.pending_pause.is_some() {
                 return; // already stopping the recording
             }
-            if let Some(wait) = PendingPause::needed(&self.activity, Instant::now()) {
+            if let Some(wait) = PendingPause::needed(&mut self.activity, Instant::now()) {
+                if self.activity.long == LongRec::Idle {
+                    // Only a save in flight: the engine stops once it is written.
+                    log!("record: pause -- waiting for the save being written first");
+                    self.shortcut_notice(PAUSE_AFTER_SAVE, PAUSE_AFTER_SAVE_DETAIL);
+                    self.pending_pause = Some(wait);
+                    return;
+                }
                 log!("record: pause -- stopping the long recording first (up to {} s)", PAUSE_STOP_WAIT.as_secs());
                 let sent = self.send_record_stop();
                 for effect in crate::record_dispatch::pause_stop_effects(sent) {
@@ -337,12 +340,18 @@ impl Controller {
     pub(crate) fn drain_engine_events(&mut self, now: Instant) {
         while let Ok(ev) = self.engine_events.try_recv() {
             crate::record_audio_live::on_engine_event(self, &ev);
-            match self.activity.on_event(&ev, unix_now()) {
+            match self.activity.on_engine_event(&ev, unix_now(), now) {
                 Some(Trigger::Saved) => self.janitor.saved(now),
                 Some(Trigger::AutoStopped { game_closed }) => {
                     let detail = if game_closed { "the game closed" } else { "the recorded window changed" };
                     log!("record: long recording saved -- {detail}");
                     self.shortcut_notice("Long recording saved", detail);
+                }
+                Some(Trigger::SavesLost(lost)) => {
+                    log!("record: the engine stopped with {lost} save(s) in flight; reporting them failed");
+                    for _ in 0..lost {
+                        self.hub.event("engine", &crate::record_activity::lost_save_event());
+                    }
                 }
                 Some(Trigger::LongRecChanged) | None => {}
             }
@@ -397,7 +406,7 @@ impl Controller {
 
     /// Pending pause + deferred restart + storage schedule, every pump tick.
     pub(crate) fn activity_tick(&mut self, now: Instant) {
-        if self.pending_pause.is_some_and(|p| p.ready(&self.activity, now)) {
+        if self.pending_pause.map(|p| p.ready(&mut self.activity, now)) == Some(true) {
             if self.activity.long != LongRec::Idle {
                 log!("record: the long recording did not report stopping; pausing anyway");
             }
@@ -407,6 +416,13 @@ impl Controller {
         let (dir, cap) = (self.cfg.recording.output_dir.clone(), self.cfg.storage.cap_gb);
         let rec = &self.cfg.recording;
         let buffer = crate::record_free_space::buffer_bytes(rec.buffer_secs, rec.bitrate_mbps);
+        // A growing save holds restarts at most max(10 min, this size at 5 MB/s).
+        self.activity.set_save_estimate(buffer);
+        let held = self.retarget_held || self.pending_restart.is_some() || self.power.held();
+        if self.activity.hold_notice(now, held) {
+            log!("record: a restart has waited 30 s for the save being written; told the user");
+            self.shortcut_notice(SAVE_HOLD_TITLE, SAVE_HOLD_DETAIL);
+        }
         self.janitor.tick(&dir, cap, buffer, now);
     }
 }

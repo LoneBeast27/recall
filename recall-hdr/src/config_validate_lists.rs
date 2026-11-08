@@ -136,6 +136,13 @@ pub(crate) fn audio_sources(list: &mut Vec<AudioSource>, notes: &mut Vec<String>
                 false
             }
             None => {
+                let device_id = s.device_id.trim();
+                if !one_line(device_id, 256) {
+                    s.device_id.clear();
+                    notes.push(format!("recording.audio_sources '{}' device_id was invalid; cleared", s.id));
+                } else if device_id.len() != s.device_id.len() {
+                    s.device_id = device_id.to_owned();
+                }
                 if kind != s.kind {
                     notes.push(format!("recording.audio_sources '{}' kind '{kind}' -> '{}'", s.id, s.kind));
                 }

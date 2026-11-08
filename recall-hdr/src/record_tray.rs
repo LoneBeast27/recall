@@ -50,7 +50,7 @@ pub enum RecordingTrayCmd {
     /// "Stop recording" (pause) / "Start recording" (resume).
     TogglePause,
     Quit,
-    /// Register the exe the last G4 notice named ([`RecordingTray::offered_game`]).
+    /// Register the exe the last G4 notice named.
     AddGame,
 }
 
@@ -143,11 +143,6 @@ impl RecordingTray {
             }
             None => {}
         }
-    }
-
-    /// The exe "Add as a game" names, if it is in the menu.
-    pub fn offered_game(&self) -> Option<&str> {
-        self.offered.as_deref()
     }
 
     /// Used only by the no-capture smoke host; this is muda's real native menu.

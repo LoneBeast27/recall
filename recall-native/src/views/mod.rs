@@ -9,6 +9,7 @@ pub mod folders_sync;
 pub mod library;
 pub mod pages;
 pub mod quality_preview;
+pub mod recorder_stop;
 pub mod settings;
 pub mod settings_audio;
 pub mod settings_capture;

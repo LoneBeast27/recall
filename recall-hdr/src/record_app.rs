@@ -158,6 +158,11 @@ pub struct Controller {
     pub(crate) session_watch: crate::record_session_host::SessionState,
     /// The clean shutdown already ran (a session end runs it from `WM_ENDSESSION`).
     shut_down: bool,
+    /// A quit waiting for the save being written (`record_quit_wait`).
+    pub(crate) quit_wait: crate::record_quit_wait::QuitWait,
+    /// The shutdown block reason, held while a save is written (`record_session_end`).
+    pub(crate) block_reason: crate::record_session_save::BlockReason,
+    pub(crate) session_end: crate::record_session_save::SessionEnd,
 }
 
 /// Entry point. Returns the process exit code.
@@ -258,6 +263,9 @@ pub fn run() -> i32 {
         ending_early: None,
         session_watch: Default::default(),
         shut_down: false,
+        quit_wait: Default::default(),
+        block_reason: Default::default(),
+        session_end: Default::default(),
     };
     if !ctl.can_trace {
         log!("record: FPS needs Performance Log Users (run the installer, then sign in again); stats show FPS as -");
@@ -288,7 +296,7 @@ pub fn run() -> i32 {
 impl Controller {
     fn pump(&mut self, watch_rx: &Receiver<WatchEvent>, ctl_rx: &Receiver<Inbound>) -> i32 {
         loop {
-            let timeout = app::wait_ms(self.next_deadline(), MAX_WAIT_MS);
+            let timeout = crate::record_quit_wait::pump_wait_ms(self.quit.is_some(), self.next_deadline(), Instant::now(), MAX_WAIT_MS);
             unsafe {
                 MsgWaitForMultipleObjectsEx(None, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
             }
@@ -296,7 +304,6 @@ impl Controller {
             if crate::record_session_win::drain_messages(self) {
                 log!("record: WM_QUIT received");
                 self.quit.get_or_insert(QuitReason::WindowsQuit);
-                return 0;
             }
             if self.shut_down {
                 return 0; // the session ended (`WM_ENDSESSION`)
@@ -318,8 +325,14 @@ impl Controller {
             while let Ok(inbound) = ctl_rx.try_recv() {
                 self.handle_inbound(inbound);
             }
+            self.session_end_tick(now);
+            // A quit waits for the save being written (`record_quit_wait`), then returns.
             if self.quit.is_some() {
-                return 0;
+                if self.quit_ready(now) {
+                    return 0;
+                }
+                self.quitting_tick(now);
+                continue;
             }
             self.power_tick(now);
             self.session_tick(now);
@@ -370,6 +383,9 @@ impl Controller {
         let hellos = self.supervisor.hello_count();
         if hellos != self.seen_hello {
             self.seen_hello = hellos;
+            // The old engine's exit is queued before the new hello: read it first, so the saves
+            // it lost are reported before the slate is wiped.
+            self.drain_engine_events(now);
             self.activity.engine_restarted();
             self.reapply_engine_intents();
         }
@@ -423,14 +439,16 @@ impl Controller {
             RecordingTrayCmd::AddGame => self.add_offered_game(),
             RecordingTrayCmd::Quit => {
                 log!("record: tray quit");
-                self.quit = Some(QuitReason::TrayMenu);
+                self.ask_quit(QuitReason::TrayMenu, false);
             }
         }
     }
 
-    /// Ordered shutdown: display restore first (if HDR was managed), then the
-    /// overlay (and its frame-timing session) and the UI, then the engine. Only the tray
-    /// Quit closes the app; any other quit leaves it open to reconnect to the next recorder.
+    /// Ordered shutdown (after `quit_ready` let a save in flight finish): display
+    /// restore first (if HDR was managed), then the UI, then the engine, then the
+    /// overlay (and its frame-timing session): the island shows the save to its end.
+    /// Only the tray Quit closes the app; any other quit leaves it open to reconnect
+    /// to the next recorder.
     fn shutdown(mut self) {
         self.shutdown_now(crate::supervisor::QUIT_GRACE);
     }
@@ -445,7 +463,6 @@ impl Controller {
         crate::record_power_win::unregister();
         self.render.stop();
         self.hdr.shutdown();
-        self.overlay.stop();
         let reason = self.quit.unwrap_or(QuitReason::WindowsQuit);
         if reason.closes_ui() {
             let matched = self.ui.close();
@@ -455,6 +472,7 @@ impl Controller {
         }
         self.hotkeys = None;
         self.supervisor.stop(grace);
+        self.overlay.stop();
         log!("record: clean shutdown (pipe lines dropped for stalled clients: {})", self.hub.dropped());
     }
 }

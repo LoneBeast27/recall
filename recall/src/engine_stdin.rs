@@ -4,13 +4,12 @@
 //! other commands wait in a channel until the encoder and hooks exist ([`serve`]).
 
 use std::io::BufRead;
-use std::sync::atomic::AtomicBool;
 use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 
 use crate::capture::CaptureShared;
 use crate::protocol::{self, Command};
-use crate::{engine_extras, stdin_commands, ExportHook, SaveHook};
+use crate::{engine_extras, stdin_reader, ExportHook, SaveHook};
 #[cfg(feature = "encode")]
 use crate::audio;
 
@@ -22,17 +21,18 @@ pub(crate) fn spawn_early(shared: Arc<CaptureShared>) -> Early {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         let stdin = std::io::stdin();
-        read_early(stdin.lock(), &shared.quit, |cmd| {
+        let end = read_early(stdin.lock(), |cmd| {
             let _ = tx.send(cmd);
         });
+        stdin_reader::finish(end, &shared.quit);
     });
     Early(rx)
 }
 
 /// Every command of `reader` to `forward`, the mic mute applied first (a toggle goes on as the
 /// state it set, so the later handler sets the same value again and reports it).
-pub(crate) fn read_early<R: BufRead>(reader: R, quit: &AtomicBool, mut forward: impl FnMut(Command)) {
-    stdin_commands::read_commands(reader, quit, |cmd| forward(apply_mute(cmd)));
+pub(crate) fn read_early<R: BufRead>(reader: R, mut forward: impl FnMut(Command)) -> stdin_reader::ReaderEnd {
+    stdin_reader::read_commands(reader, |cmd| forward(apply_mute(cmd)))
 }
 
 #[cfg(feature = "encode")]
@@ -67,25 +67,16 @@ fn apply(cmd: Command, shared: &CaptureShared, (save, export): (&Option<SaveHook
         Command::SetMode { value } => shared.set_select(&value),
         Command::SaveClip { seconds, at_last_frame } => match save {
             Some(hook) => hook(seconds, at_last_frame),
-            None => protocol::emit(&protocol::Outbound::SaveFailed { reason: "engine built without the encode feature".to_string() }),
+            None => protocol::emit(&protocol::Outbound::SaveFailed { reason: "engine built without the encode feature".to_string(), rejected: true }),
         },
         Command::ExportClip { path, output, fps, edit } => match export {
             Some(hook) => hook(path, output, fps, edit),
             None => protocol::emit(&protocol::Outbound::ExportFailed { source: path, reason: "engine built without export support".into() }),
         },
-        // `read_early` turned every toggle into the state it set; report what is in force.
-        Command::ToggleMicMute => {
+        // The reader applied the mute in order. Report the current state without replaying an older mute.
+        Command::ToggleMicMute | Command::SetMicMute { .. } => {
             #[cfg(feature = "encode")]
             protocol::emit(&protocol::Outbound::MicMuted { muted: audio::mic_muted() });
-        }
-        Command::SetMicMute { muted } => {
-            #[cfg(feature = "encode")]
-            {
-                audio::set_mic_muted(muted);
-                protocol::emit(&protocol::Outbound::MicMuted { muted });
-            }
-            #[cfg(not(feature = "encode"))]
-            let _ = muted;
         }
         Command::SetSource { id, gain_db, name, mic_mute, device_id } => {
             #[cfg(feature = "encode")]

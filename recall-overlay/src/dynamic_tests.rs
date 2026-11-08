@@ -376,3 +376,13 @@ fn placed_spots_are_capped_at_64_games_the_oldest_going_first() {
     cache.set_spot("fresh", None);
     assert!(!cache.file.spots_seq.contains_key("fresh"), "a cleared spot leaves no order behind");
 }
+
+#[test]
+fn a_scan_is_kept_under_the_shape_it_measured() {
+    let portrait = json!({"type":"hud_scan","ok":true,"aspect":0.5625});
+    assert_eq!(scan_key("game@9", &portrait), "game@3", "a portrait window on a landscape monitor");
+    assert_eq!(scan_key("game@9", &json!({"aspect":2.37})), "game@12");
+    assert_eq!(scan_key("game@9", &json!({"aspect":0.0})), "game@9", "no measured shape: as asked");
+    assert_eq!(scan_key("game@9", &json!({})), "game@9");
+    assert_eq!(scan_key("game", &json!({"aspect":1.7778})), "game@9");
+}

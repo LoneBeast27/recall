@@ -99,17 +99,25 @@ fn take() -> Vec<u32> {
 
 impl Controller {
     /// Pump step: act on the sleep/resume notices that arrived since the last tick.
+    /// A resume's restart waits while the engine is still writing a save (it would abort it).
     pub(crate) fn power_tick(&mut self, now: std::time::Instant) {
-        let kinds = take();
-        if kinds.is_empty() {
-            return;
-        }
-        for event in kinds.into_iter().filter_map(PowerEvent::from_pbt) {
+        let mut asked = Vec::new();
+        for event in take().into_iter().filter_map(PowerEvent::from_pbt) {
             let recording = self.activity.is_recording();
             log!("record: power notice {event:?} (long recording running: {recording})");
-            for action in self.power.on_event(event, recording) {
-                self.apply_power_action(action, now);
+            if event == PowerEvent::Resume {
+                self.activity.resumed(now);
             }
+            asked.extend(self.power.on_event(event, recording));
+        }
+        let was_held = self.power.held();
+        let saving = self.activity.saves_writing(now);
+        let actions = self.power.gate(asked, saving);
+        if self.power.held() && !was_held {
+            log!("record: resumed from sleep -- engine restart deferred until the save being written ends");
+        }
+        for action in actions {
+            self.apply_power_action(action, now);
         }
     }
 

@@ -11,8 +11,9 @@ use std::time::{Duration, Instant};
 
 use super::protocol::{drain_stderr, read_protocol};
 use super::{engine_command, EngineHealth, Shared, SHUTDOWN_POLL, SLEEP_CHUNK};
-use crate::engine_policy::{EngineSpec, Next, RestartPolicy, GIVEUP_WINDOW};
+use crate::engine_policy::{EngineSpec, Next, RestartPolicy, EXIT_SLOT_BUSY, GIVEUP_WINDOW};
 use crate::record_dispatch::Sent;
+use crate::engine_slot::{LogEvery, SlotHeld, SLOT_HELD_GIVE_UP, SLOT_HELD_SHOW};
 use crate::log;
 
 /// Why a supervised child stopped.
@@ -37,6 +38,8 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
 
     let mut policy = RestartPolicy::default();
     let mut seen_gen = shared.generation();
+    // Busy retries (another recorder holds the slot) log once a minute, not per try.
+    let (mut busy_log, mut quiet) = (LogEvery::default(), false);
     loop {
         if shared.stop_requested() {
             break;
@@ -44,7 +47,9 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
         let (gen, spec) = shared.desired();
         if gen != seen_gen {
             policy.reset(); // a new target gets a fresh circuit breaker
-            seen_gen = gen;
+            set_slot(&shared, SlotHeld::Free);
+            (quiet, seen_gen) = (false, gen);
+            shared.slot.set_quiet(false);
         }
         let Some(spec) = spec else {
             shared.set_health(EngineHealth::Stopped);
@@ -57,11 +62,14 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
 
         shared.set_health(EngineHealth::Running { pid: 0 });
         let started = Instant::now();
+        let mut code = None;
         match spawn_engine(&path, &shared, &spec) {
             Ok((mut child, reader)) => {
                 let pid = child.id();
                 shared.set_health(EngineHealth::Running { pid });
-                log!("supervisor: engine started (pid {pid})");
+                if !quiet {
+                    log!("supervisor: engine started (pid {pid})");
+                }
                 let exit = supervise_child(&shared, &mut child, gen);
                 // Shutdown is no game switch: a line sent meanwhile is told "not responding".
                 // A retarget's reason is read with its quit (`None`: `send_retarget_quit`).
@@ -79,6 +87,7 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
                 shared.set_child_stdin(None);
                 let _ = reader.join();
                 shared.clear_cache();
+                shared.forward_exit();
                 match exit {
                     ChildExit::StopRequested => break,
                     ChildExit::Retarget => {
@@ -86,18 +95,26 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
                         policy.on_intended_restart();
                         continue;
                     }
-                    ChildExit::Clean(code) => match crate::engine_exit::fatal_reason(code) {
-                        // A broken install: every retry would fail the same way.
-                        Some(why) => {
-                            log!("supervisor: engine could not start (code {:#x}): {why}; not restarting until the target changes.", code as u32);
+                    ChildExit::Clean(c) => {
+                        if let Some(why) = crate::engine_exit::fatal_reason(c) {
+                            log!("supervisor: engine could not start (code {:#x}): {why}; not restarting until the target changes.", c as u32);
                             shared.set_health(EngineHealth::GivenUp);
                             if !wait_for_change(&shared, gen) {
                                 break;
                             }
                             continue;
                         }
-                        None => log!("supervisor: engine exited (code {code})"),
-                    },
+                        code = Some(c);
+                        if c == EXIT_SLOT_BUSY {
+                            if !quiet {
+                                let secs = policy.busy_for(Instant::now()).unwrap_or_default().as_secs();
+                                let tries = policy.busy_tries() + 1;
+                                log!("supervisor: another Recall recorder still holds the engine slot (code {c}; try {tries}, {secs} s so far); retrying, not a failure");
+                            }
+                        } else {
+                            log!("supervisor: engine exited (code {c})");
+                        }
+                    }
                     ChildExit::Signalled => log!("supervisor: engine terminated without an exit code"),
                 }
             }
@@ -107,7 +124,29 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
             }
         }
 
-        match policy.on_unintended_exit(Instant::now(), started.elapsed()) {
+        let now = Instant::now();
+        let next = policy.on_exit(code, now, started.elapsed());
+        note_slot(&shared, &policy, next, now);
+        let was_quiet = quiet;
+        quiet = match policy.busy_for(now) {
+            Some(_) => busy_log.next_quiet(!was_quiet, now),
+            None => {
+                busy_log.clear();
+                false
+            }
+        };
+        shared.slot.set_quiet(quiet);
+        match next {
+            Next::Blocked => {
+                log!(
+                    "supervisor: giving up -- another Recall recorder has held the engine slot for {} min; not restarting until the target changes.",
+                    SLOT_HELD_GIVE_UP.as_secs() / 60
+                );
+                shared.set_health(EngineHealth::GivenUp);
+                if !wait_for_change(&shared, gen) {
+                    break;
+                }
+            }
             Next::GiveUp => {
                 log!(
                     "supervisor: giving up -- {} engine failures within {}s; not restarting until the target changes.",
@@ -121,7 +160,9 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
             }
             Next::Backoff { delay, attempt } => {
                 shared.set_health(EngineHealth::Restarting { attempt });
-                log!("supervisor: restarting engine in {}ms (attempt {attempt})", delay.as_millis());
+                if !was_quiet {
+                    log!("supervisor: restarting engine in {}ms (attempt {attempt})", delay.as_millis());
+                }
                 if !sleep_unless_change(&shared, delay, gen) {
                     break;
                 }
@@ -131,6 +172,20 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
 
     shared.set_health(EngineHealth::Stopped);
     log!("supervisor: manager thread stopped");
+}
+
+/// The slot state after an exit: given up, held long enough to say so, or free.
+fn note_slot(shared: &Arc<Shared>, policy: &RestartPolicy, next: Next, now: Instant) {
+    let held = match (next, policy.busy_for(now)) {
+        (Next::Blocked, _) => SlotHeld::GaveUp,
+        (_, Some(d)) if d >= SLOT_HELD_SHOW => SlotHeld::Held,
+        _ => SlotHeld::Free,
+    };
+    set_slot(shared, held);
+}
+
+fn set_slot(shared: &Arc<Shared>, held: SlotHeld) {
+    shared.slot.set(held, shared.hello_count.load(Ordering::SeqCst));
 }
 
 /// Spawn the engine. Hands the child's stdin to `shared` and spawns the stdout

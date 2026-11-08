@@ -151,7 +151,7 @@ pub(super) fn handle_save(
             .ok()
             .and_then(|e| e.clone())
             .unwrap_or_else(|| "encoder not initialized (no frames yet)".into());
-        saver.events().save_failed(&reason);
+        saver.events().save_rejected(&reason);
         return;
     };
     match replay.build_job(req, audio, started) {
@@ -159,7 +159,7 @@ pub(super) fn handle_save(
             job.timing.encoder_blocked_ms = ms(started.elapsed());
             saver.submit(job);
         }
-        Err(reason) => saver.events().save_failed(&reason),
+        Err(reason) => saver.events().save_rejected(&reason),
     }
 }
 

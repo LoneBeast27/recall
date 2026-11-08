@@ -120,6 +120,7 @@ impl Root {
             first_render_marked: false,
             storage_asking: None,
             storage_confirm: None,
+            stop_confirm: false,
         }
     }
 

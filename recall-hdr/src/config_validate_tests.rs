@@ -178,3 +178,26 @@ fn a_loads_repairs_are_kept_for_the_controller_once() {
     crate::config::load_from(&clean);
     assert!(crate::config_repairs::take(&clean).is_empty());
 }
+
+#[test]
+fn bad_optional_endpoint_ids_leave_the_sources_and_report_repairs() {
+    let path = temp_file("endpoint-id", r#"
+[[recording.audio_sources]]
+id = "mic"
+kind = "input"
+name = "Microphone"
+device_id = 123
+
+[[recording.audio_sources]]
+id = "line"
+kind = "input"
+name = "Line in"
+device_id = "bad\nid"
+"#);
+    let cfg = crate::config::load_from(&path);
+    assert_eq!(cfg.recording.audio_sources.len(), 2);
+    assert!(cfg.recording.audio_sources.iter().all(|s| s.device_id.is_empty()));
+    assert_eq!(crate::config_repairs::take(&path).iter().filter(|n| n.contains("device_id")).count(), 2);
+    validate(&cfg).unwrap();
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}

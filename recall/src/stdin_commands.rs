@@ -13,6 +13,9 @@ use crate::protocol::Command;
 
 /// Hands each well-formed command to `apply` until `quit` arrives or `reader`
 /// ends; either way `quit` is set on return. Blank and malformed lines are ignored.
+/// The engine itself reads through `stdin_reader` ([`read_until_end`]: an end of stdin
+/// marks it orphaned first); this stays for the tests and the long-recording child test.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn read_commands<R: BufRead>(reader: R, quit: &AtomicBool, apply: impl FnMut(Command)) {
     read_commands_logged(reader, quit, apply, |line| eprintln!("{line}"));
 }
@@ -21,7 +24,20 @@ pub fn read_commands<R: BufRead>(reader: R, quit: &AtomicBool, apply: impl FnMut
 /// stored first: with the controller dead its stderr pipe is closed too, and a
 /// log line that fails must not stop the quit. A line that is not UTF-8 is
 /// skipped like any malformed line (it is not the end of stdin).
-pub fn read_commands_logged<R: BufRead>(mut reader: R, quit: &AtomicBool, mut apply: impl FnMut(Command), log: impl FnOnce(&str)) {
+#[cfg_attr(not(test), allow(dead_code))]
+pub fn read_commands_logged<R: BufRead>(reader: R, quit: &AtomicBool, apply: impl FnMut(Command), log: impl FnOnce(&str)) {
+    if read_until_end(reader, apply) {
+        quit.store(true, Relaxed);
+        return;
+    }
+    quit.store(true, Relaxed);
+    log("[recall] stdin closed (the controller is gone): quitting");
+}
+
+/// The loop of [`read_commands`] without the `quit` flag: true when a `quit` line ended
+/// it, false at the end of stdin (the controller is gone). `stdin_reader` uses it to tell
+/// the two apart (an orphan finishes its saves first).
+pub fn read_until_end<R: BufRead>(mut reader: R, mut apply: impl FnMut(Command)) -> bool {
     let mut raw = Vec::new();
     loop {
         raw.clear();
@@ -36,16 +52,12 @@ pub fn read_commands_logged<R: BufRead>(mut reader: R, quit: &AtomicBool, mut ap
             continue;
         }
         match serde_json::from_str::<Command>(line) {
-            Ok(Command::Quit) => {
-                quit.store(true, Relaxed);
-                return;
-            }
+            Ok(Command::Quit) => return true,
             Ok(cmd) => apply(cmd),
             Err(_) => {} // ignore malformed lines
         }
     }
-    quit.store(true, Relaxed);
-    log("[recall] stdin closed (the controller is gone): quitting");
+    false
 }
 
 #[cfg(test)]

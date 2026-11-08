@@ -3,6 +3,7 @@
 //! (µs time base, bf=0, global header). No GPU work.
 
 use super::*;
+use crate::audio::AudioPcm;
 use crate::encoder::saver::{part_path, write_now};
 use crate::ring::PacketRing;
 use ff::Rescale;
