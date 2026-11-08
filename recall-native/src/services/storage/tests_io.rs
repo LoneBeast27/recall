@@ -317,11 +317,11 @@ fn a_listing_is_complete_only_when_every_folder_was_read() {
     std::fs::write(imported.join("b.mp4"), b"x").unwrap();
     let text = |p: &std::path::Path| p.to_string_lossy().into_owned();
     crate::services::library::folders::forget_scans();
-    let (clips, complete) = crate::backend::list_from(&recordings, &[text(&imported)]).unwrap();
+    let (clips, complete) = crate::backend::list_from(&recordings, &[text(&imported)], &[]).unwrap();
     assert_eq!((clips.len(), complete), (2, true), "both folders read whole");
-    let (_, complete) = crate::backend::list_from(&root.join("offline-recordings"), &[text(&imported)]).unwrap();
+    let (_, complete) = crate::backend::list_from(&root.join("offline-recordings"), &[text(&imported)], &[]).unwrap();
     assert!(!complete, "a missing recordings folder makes the listing partial");
-    let (clips, complete) = crate::backend::list_from(&recordings, &[text(&root.join("offline-import"))]).unwrap();
+    let (clips, complete) = crate::backend::list_from(&recordings, &[text(&root.join("offline-import"))], &[]).unwrap();
     assert_eq!((clips.len(), complete), (1, false), "a missing imported folder makes the listing partial");
     crate::services::library::folders::forget_scans();
     let _ = std::fs::remove_dir_all(root);

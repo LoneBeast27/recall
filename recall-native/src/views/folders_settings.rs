@@ -10,6 +10,7 @@ use crate::{
     services::library::folders::Folders,
     theme::{self, c},
     ui::{self, Icon, Variant, icon},
+    views::folders_sync::{self, FolderPlan, PendingFolder},
     views::pages::section_title,
     worker::Job,
 };
@@ -25,19 +26,64 @@ impl Root {
             .unwrap_or_else(|| crate::services::library::folders::default_recordings_dir().to_string_lossy().into_owned())
     }
 
-    /// Keeps `folders.json` in step with the recorder's output folder; re-lists when it moved.
+    /// Keeps `folders.json` in step with the recorder's output folder (`folders_sync`): commits a
+    /// Change-button change once the recorder reports it, follows a folder moved behind the
+    /// app's back (the old one stays imported), and leaves an env-overridden folder alone.
     pub fn sync_recordings_folder(&mut self) {
         let Some(dir) = self.config_value("recording", "output_dir").and_then(Value::as_str).map(str::to_owned) else { return };
-        if self.folders.recordings.as_deref() == Some(dir.as_str()) {
-            return;
+        let overridden = self.snap.config_overridden.iter().any(|k| k == "recording.output_dir");
+        match folders_sync::plan(self.folders.recordings.as_deref(), &dir, self.pending_folder.as_ref(), overridden, self.snap.config_seq) {
+            FolderPlan::Nothing | FolderPlan::Skip => {}
+            FolderPlan::Rejected => {
+                // The recorder refused the patch: nothing was touched. Its error usually came just
+                // before; keep its text, as this toast takes the one toast slot.
+                if let Some(p) = self.pending_folder.take() {
+                    let why = self.toast.as_ref().filter(|t| t.kind == ToastKind::Bad && t.text == "Recorder").and_then(|t| t.detail.clone());
+                    let detail = why.map_or_else(|| format!("{} stays the folder.", p.old), |w| format!("{} stays the folder: {w}", p.old));
+                    self.show_toast(ToastKind::Bad, "Recordings folder not changed", Some(detail));
+                }
+            }
+            FolderPlan::Commit => {
+                let old = self.pending_folder.take().map(|p| p.old);
+                self.commit_recordings_folder(&dir, old);
+            }
+            FolderPlan::Follow => self.follow_recordings_folder(&dir),
         }
+    }
+
+    fn follow_recordings_folder(&mut self, dir: &str) {
         let before = crate::backend::library_dir();
-        self.folders.recordings = Some(dir);
+        let old = self.folders.recordings.clone();
+        let kept_old = folders_sync::retarget(&mut self.folders, dir, None);
+        crate::backend::share_folders(&self.folders);
         let _ = self.folders.save();
         // A recorder pointed into the cache (by hand, or before this check existed) blocks it.
         self.recheck_cache_overlap();
-        if crate::backend::library_dir() != before {
+        if kept_old {
+            crate::services::library::folders::forget_scans();
+            let detail = format!("Clips in {} still show.", old.unwrap_or_default());
+            self.show_toast(ToastKind::Info, "Recordings folder changed", Some(detail));
+        }
+        if kept_old || crate::backend::library_dir() != before {
             self.workers.job(Job::List);
+        }
+    }
+
+    /// The recorder took the folder the Change button asked for: update the library folders.
+    fn commit_recordings_folder(&mut self, new: &str, old: Option<String>) {
+        let mut folders = Folders::load();
+        let kept_old = folders_sync::retarget(&mut folders, new, old.as_deref());
+        match folders.save() {
+            Ok(()) => {
+                self.folders = folders;
+                crate::backend::share_folders(&self.folders);
+                self.recheck_cache_overlap();
+                crate::services::library::folders::forget_scans();
+                self.workers.job(Job::List);
+                let detail = if kept_old { "New clips save here. Clips already saved stay in the old folder and still show." } else { "New clips save here." };
+                self.show_toast(ToastKind::Good, "Recordings folder changed", Some(detail.into()));
+            }
+            Err(error) => self.show_toast(ToastKind::Bad, "Couldn't update the library folders", Some(error)),
         }
     }
 
@@ -102,22 +148,9 @@ impl Root {
             self.show_toast(ToastKind::Info, "Already your recordings folder", None);
             return;
         }
+        // folders.json changes once the recorder reports the new folder (`sync_recordings_folder`).
+        self.pending_folder = Some(PendingFolder { new: new.clone(), old, config_seq: self.snap.config_seq });
         self.set_config("recording", "output_dir", json!(new));
-        let mut folders = Folders::load();
-        folders.remove(&new);
-        folders.recordings = Some(new);
-        let kept_old = folders.add(std::path::Path::new(&old));
-        match folders.save() {
-            Ok(()) => {
-                self.folders = folders;
-                self.recheck_cache_overlap();
-                crate::services::library::folders::forget_scans();
-                self.workers.job(Job::List);
-                let detail = if kept_old { "New clips save here. Clips already saved stay in the old folder and still show." } else { "New clips save here." };
-                self.show_toast(ToastKind::Good, "Recordings folder changed", Some(detail.into()));
-            }
-            Err(error) => self.show_toast(ToastKind::Bad, "Couldn't update the library folders", Some(error)),
-        }
     }
 
     fn add_clip_folders(&mut self, paths: Vec<PathBuf>) {
@@ -127,9 +160,11 @@ impl Root {
         }
         let mut folders = Folders::load();
         folders.recordings = self.folders.recordings.clone().or_else(|| Some(self.recordings_folder()));
-        let added = paths.iter().filter(|p| folders.add(p)).count();
-        // Clips removed from Recall while the folder was listed before come back with it.
-        for path in &paths {
+        let new = folders.add_all(&paths);
+        let added = new.len();
+        // Clips removed from Recall while the folder was listed before come back with it, only
+        // for a folder that was not listed already.
+        for path in &new {
             let _ = crate::services::library::imports::unhide_under(&path.to_string_lossy());
         }
         if added == 0 {
@@ -139,6 +174,7 @@ impl Root {
         match folders.save() {
             Ok(()) => {
                 self.folders = folders;
+                crate::backend::share_folders(&self.folders);
                 self.recheck_cache_overlap();
                 crate::services::library::folders::forget_scans();
                 self.workers.job(Job::List);
@@ -151,10 +187,12 @@ impl Root {
 
     fn remove_clip_folder(&mut self, folder: &str) {
         let mut folders = Folders::load();
-        folders.remove(folder);
+        // Gone from the library, and no longer a folder Recall manages.
+        folders.forget(folder);
         match folders.save() {
             Ok(()) => {
                 self.folders = folders;
+                crate::backend::share_folders(&self.folders);
                 self.recheck_cache_overlap();
                 crate::services::library::folders::forget_scans();
                 self.workers.job(Job::List);
@@ -162,6 +200,52 @@ impl Root {
             }
             Err(error) => self.show_toast(ToastKind::Bad, "Couldn't remove the folder", Some(error)),
         }
+    }
+
+    /// Settings → Folders Recall manages → remove: the folder's clips stay listed, but Delete
+    /// now only removes them from Recall (they count as another recorder's).
+    fn release_managed_folder(&mut self, folder: &str) {
+        let mut folders = self.folders.clone();
+        if !folders.release(folder) {
+            return;
+        }
+        match folders.save() {
+            Ok(()) => {
+                self.folders = folders;
+                crate::backend::share_folders(&self.folders);
+                crate::services::library::folders::forget_scans();
+                self.workers.job(Job::List);
+                self.show_toast(ToastKind::Info, "Recall no longer manages that folder", Some("Its clips still show. Delete now only removes them from Recall.".into()));
+            }
+            Err(error) => self.show_toast(ToastKind::Bad, "Couldn't update the library folders", Some(error)),
+        }
+    }
+
+    /// "Folders Recall manages": every folder that was the recordings folder before, so its
+    /// clips' Delete-to-Recycle-Bin is never hidden from the user. Empty when there are none.
+    fn render_managed_folders(&mut self, recordings: &str, cx: &mut Context<Self>) -> Option<Div> {
+        let managed = self.folders.managed(recordings);
+        if managed.is_empty() {
+            return None;
+        }
+        let mut list = div()
+            .pt(px(16.))
+            .flex()
+            .flex_col()
+            .child(div().font_weight(FontWeight::SEMIBOLD).child("Folders Recall manages"))
+            .child(div().pt(px(2.)).text_size(px(12.)).text_color(c(theme::TERTIARY)).child(MANAGED_NOTE));
+        for (i, folder) in managed.into_iter().enumerate() {
+            let name = std::path::Path::new(&folder).file_name().map_or_else(|| folder.clone(), |n| n.to_string_lossy().into_owned());
+            let release = folder.clone();
+            let row = folder_row(("managed", i), &name, &folder, "Recycle Bin on delete".into(), false, cx).child(
+                ui::icon_button((SharedString::from(format!("managed-{i}-release")), 0usize), Icon::X, 28., theme::MUTED, false).on_click(cx.listener(move |this, _, _, cx| {
+                    this.release_managed_folder(&release);
+                    cx.notify();
+                })),
+            );
+            list = list.child(row);
+        }
+        Some(list)
     }
 
     pub fn render_folder_section(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -191,7 +275,8 @@ impl Root {
             })))
             .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(c(theme::TERTIARY)).child("Bring in old clips from ShadowPlay, SteelSeries, Medal or OBS. Files stay as they are; videos made in an editor like Premiere Pro are skipped."));
 
-        vec![section_title("Clip folders"), crate::views::pages::card().child(list).child(add).into_any_element()]
+        let managed = self.render_managed_folders(&recordings, cx);
+        vec![section_title("Clip folders"), crate::views::pages::card().child(list).child(add).children(managed).into_any_element()]
     }
 }
 
@@ -228,6 +313,9 @@ fn folder_row(id: impl Into<gpui::ElementId> + Clone, title: &str, path: &str, c
             })))
         })
 }
+
+/// Why a folder is in "Folders Recall manages", and what removing it does.
+const MANAGED_NOTE: &str = "Your recordings folder was here before. Deleting a clip saved directly in it moves it to the Recycle Bin, and its edits are saved beside it. Remove a folder to treat it like any other imported folder.";
 
 /// `path` lies inside `folder` (case-insensitive, no allocation).
 pub(crate) fn inside(path: &str, folder: &str) -> bool {

@@ -12,13 +12,16 @@
 //! `<GAME>__YYYY-MM-DD__HH-MM-SS[...].mp4`, long recordings included); other
 //! videos in the folder are left alone. Never touched: the newest clip and any
 //! clip modified in the last [`RECENT_SECS`], favourites
-//! (`%APPDATA%\Recall\library.json`, keyed by file name, `favourite: true`;
-//! `RECALL_LIBRARY_META` overrides the path), clips with an edit sidecar,
+//! (`%APPDATA%\Recall\library.json`, keyed by the clip's full path -- older
+//! files by file name -- `favourite: true`;
+//! `RECALL_LIBRARY_META` overrides the path), clips played in the last ten
+//! minutes or open in the app (`record_storage_keep.rs`; all three are read
+//! again before every Recycle Bin call), clips with an edit sidecar,
 //! anything in a subfolder (`exports\`, `screenshots\`, `thumbs\` except a
 //! removed clip's own thumbnails), and `.part` files. An unreadable or
-//! corrupt library file -- or a missing one beside the app's quarantined
-//! `library.json.bad` -- cancels the run (favourites unknown = delete
-//! nothing). `FOF_WANTNUKEWARNING` makes Windows ask before it would delete
+//! corrupt library file -- or a missing one, or one older than the app's
+//! quarantined `library.json.bad*` copy -- cancels the run (favourites
+//! unknown = delete nothing). `FOF_WANTNUKEWARNING` makes Windows ask before it would delete
 //! permanently (a clip bigger than the Recycle Bin), never silently.
 //!
 //! Runs on its own background-I/O thread (`record_janitor.rs`, which also
@@ -136,7 +139,10 @@ pub fn candidates(clips: &[ClipFile], now_unix: u64, protected: impl Fn(&ClipFil
     order
 }
 
-/// Lowercase file names marked `favourite: true` in `library.json`.
+/// Lowercase file names marked `favourite: true` in `library.json`. The app keys
+/// clips by full path (older files by file name); the file name of either is
+/// kept, so a favourite anywhere with a clip's name protects that clip (never
+/// fewer protected than the app shows).
 pub fn favourites(json_bytes: &[u8]) -> Result<HashSet<String>, String> {
     let Value::Object(map) = serde_json::from_slice::<Value>(json_bytes).map_err(|e| format!("library.json: {e}"))? else {
         return Err("library.json is not an object".into());
@@ -144,7 +150,7 @@ pub fn favourites(json_bytes: &[u8]) -> Result<HashSet<String>, String> {
     Ok(map
         .into_iter()
         .filter(|(_, v)| v.get("favourite").and_then(Value::as_bool) == Some(true))
-        .map(|(name, _)| name.to_lowercase())
+        .map(|(name, _)| keep::file_key(&name))
         .collect())
 }
 
@@ -276,44 +282,12 @@ pub fn scan(dir: &Path) -> std::io::Result<Listing> {
     Ok(listing)
 }
 
-/// `RECALL_LIBRARY_META`, else `%APPDATA%\Recall\library.json`.
-pub fn library_path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("RECALL_LIBRARY_META").filter(|p| !p.is_empty()) {
-        return Some(PathBuf::from(p));
-    }
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Recall").join("library.json"))
-}
-
-/// Favourites from disk ([`favourites_at`] the [`library_path`]).
-fn load_favourites() -> Result<HashSet<String>, String> {
-    let Some(path) = library_path() else { return Ok(HashSet::new()) };
-    favourites_at(&path)
-}
-
-/// `library.json` -> `library.json.bad` (where the app moves a corrupt file).
-pub fn quarantine_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_else(|| "library.json".into());
-    name.push(".bad");
-    path.with_file_name(name)
-}
-
-/// Favourites in the library file at `path`. Missing means none -- unless the
-/// app quarantined a corrupt copy beside it, which (like an unreadable or
-/// corrupt file) leaves favourites unknown, so the run is cancelled.
-pub fn favourites_at(path: &Path) -> Result<HashSet<String>, String> {
-    match std::fs::read(path) {
-        Ok(bytes) => favourites(&bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let bad = quarantine_path(path);
-            match bad.try_exists() {
-                Ok(false) => Ok(HashSet::new()),
-                Ok(true) => Err(format!("{} is missing and {} holds a quarantined corrupt copy", path.display(), bad.display())),
-                Err(e) => Err(format!("{}: {e}", bad.display())),
-            }
-        }
-        Err(e) => Err(format!("{}: {e}", path.display())),
-    }
-}
+#[path = "record_storage_library.rs"]
+mod library_file;
+pub use library_file::library_path;
+#[cfg(test)]
+use library_file::{favourites_at, quarantine_path};
+use library_file::load_favourites;
 
 /// Move `files` (one clip and its companions) to the Recycle Bin in one shell operation.
 pub fn recycle(files: &[PathBuf]) -> Result<(), RecycleError> {
@@ -363,7 +337,7 @@ pub(crate) fn plan_dir(dir: &Path, cap_gb: u32) -> Result<(Plan, Listing), Strin
         // `set_config` rejects this; a hand-edited config.toml does not.
         return Err(format!("storage.cap_gb {cap_gb} is below the {STORAGE_CAP_MIN_GB} GiB minimum; nothing removed"));
     }
-    let favs = load_favourites().map_err(|e| format!("favourites unknown ({e}); nothing removed"))?;
+    let favs = keep::kept_now().map_err(|e| format!("favourites unknown ({e}); nothing removed"))?;
     plan_listing(dir, &favs, cap_gb as u64 * GIB)
 }
 
@@ -378,6 +352,9 @@ fn plan_listing(dir: &Path, favs: &HashSet<String>, cap: u64) -> Result<(Plan, L
 pub(crate) type PlanFn = fn(&Path, u32) -> Result<(Plan, Listing), String>;
 /// Moves files to the Recycle Bin (production: [`recycle`]; tests inject one).
 pub(crate) type RecycleFn = fn(&[PathBuf]) -> Result<(), RecycleError>;
+/// Lowercase names to keep now (production: [`keep::kept_now`]). Err = unknown: the run stops.
+pub(crate) type KeepFn = fn() -> Result<HashSet<String>, String>;
+pub(crate) use keep::{file_key, kept_now};
 pub(crate) use crate::win_recycle::{BinCheck, SizeFn};
 
 /// Bytes one Recycle Bin call moves: the clip (its listed size) and its
@@ -394,11 +371,15 @@ fn companions_bytes(files: &[PathBuf], clip: Option<&ClipFile>, size: SizeFn) ->
 /// sidecars), oldest first. `wanted` is asked before EVERY call: the listing
 /// can take long on a sleeping NAS and each call takes a moment on an HDD,
 /// and once the cap or folder is no longer the user's setting nothing more
-/// moves. `bin` is asked before every call too: a clip whose volume has no
-/// Recycle Bin that will take it (a share, a removable drive, a bin turned
-/// off or too small) stops the run, so nothing is ever deleted for good.
-/// The first failed call ends the run.
-pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: &dyn Fn() -> bool, bin: (BinCheck, SizeFn), recycle: RecycleFn) -> Result<Outcome, String> {
+/// moves. `keep` is read again before every call too, under the lock: a clip
+/// starred, played or opened since the plan is skipped. `bin` is asked before
+/// every call, and it, `keep` and the call run under the one Recycle Bin lock every Recall process
+/// shares (`win_recycle_lock.rs`), so two moves never pass one room check: a
+/// clip whose volume has no Recycle Bin that will take it (a share, a
+/// removable drive, a bin turned off or too small) stops the run, so nothing
+/// is ever deleted for good. The first failed call ends the run.
+pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: (&dyn Fn() -> bool, KeepFn), bin: (BinCheck, SizeFn), recycle: RecycleFn) -> Result<Outcome, String> {
+    let (wanted, keep) = wanted;
     let (bin, size) = bin;
     let (plan, listing) = plan(dir, cap_gb)?;
     let cap = cap_gb as u64 * GIB;
@@ -411,12 +392,24 @@ pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: &dyn Fn() 
             break;
         }
         let files = companions(dir, name, &listing);
-        let bytes = companions_bytes(&files, listing.clips.iter().find(|c| c.name == *name), size);
-        if let Err(why) = bytes.and_then(|bytes| bin(dir, bytes)) {
-            out.refused = Some(why);
-            break;
-        }
-        let moved = recycle(&files);
+        let clip = listing.clips.iter().find(|c| c.name == *name);
+        // The keeps are read under the lock too: a star or open made while it waited counts.
+        let checked = crate::win_fileop::bin_lock::held(|| keep::turn(name, keep, || companions_bytes(&files, clip, size).and_then(|bytes| bin(dir, bytes)), || recycle(&files)));
+        let moved = match checked.unwrap_or_else(keep::Turn::Refused) {
+            keep::Turn::Unknown(e) => {
+                log!("storage: favourites unknown ({e}); stopped after {} clip(s)", out.removed);
+                break;
+            }
+            keep::Turn::Kept => {
+                log!("storage: {name} became a favourite, was played or opened during the run; kept");
+                continue;
+            }
+            keep::Turn::Moved(moved) => moved,
+            keep::Turn::Refused(why) => {
+                out.refused = Some(why);
+                break;
+            }
+        };
         // A declined or cancelled call moved nothing; otherwise count what left the folder.
         let gone = !matches!(moved, Err(RecycleError::Refused(_)));
         if let Some(c) = listing.clips.iter().find(|c| c.name == *name).filter(|c| gone && !dir.join(&c.name).exists()) {
@@ -462,6 +455,17 @@ pub fn preview_event(cap_gb: u32, plan: &Plan) -> String {
         .to_string()
 }
 
+#[path = "record_storage_keep.rs"]
+mod keep;
+
 #[cfg(test)]
 #[path = "record_storage_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "record_storage_damage_tests.rs"]
+mod damage_tests;
+
+#[cfg(test)]
+#[path = "record_storage_keep_tests.rs"]
+mod keep_tests;

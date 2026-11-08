@@ -113,6 +113,7 @@ pub(super) fn clip(name: &str, has_thumb: bool, has_duration: bool) -> PrefetchC
         mtime_secs: 1,
         has_thumb,
         duration: has_duration.then_some(60.0),
+        duration_unknown: false,
         game_key: "game".into(),
         favourite: false,
         edited: false,
@@ -139,6 +140,14 @@ fn planner_fills_thumbs_first_then_climbs_the_cascade_by_rank() {
     assert_eq!(order.iter().filter(|(s, _)| *s == Step::Scrub).count(), 30);
     let none = plan(&clips, &ranked, &|step, _| step != Step::Duration);
     assert!(none.iter().all(|(s, _)| *s == Step::Duration), "cached work is not planned");
+}
+
+#[test]
+fn a_clip_known_to_have_no_readable_length_is_not_probed_again() {
+    let mut broken = clip("broken.mkv", true, false);
+    broken.duration_unknown = true;
+    let order = plan(&[broken], &[0], &|_, _| true);
+    assert!(order.iter().all(|(s, _)| *s != Step::Duration), "ffprobe is not run again for it");
 }
 
 #[test]

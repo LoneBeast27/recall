@@ -207,6 +207,8 @@ pub struct NativePreview {
     media_status: Arc<MediaStatus>,
     audio: AudioMixer,
     has_audio: bool,
+    /// The sound failed for this clip and the picture plays on (`media_sound.rs`).
+    sound: sound::SoundFallback,
     com_initialized: bool,
     last_drift_check: Cell<Instant>,
     /// Times the video was re-seeked to follow the audio clock (test trace).
@@ -263,6 +265,9 @@ mod stream;
 pub(crate) use stream::{open_file_source, open_source};
 #[path = "media_transport.rs"]
 mod transport;
+#[path = "media_sound.rs"]
+mod sound;
+pub use sound::SoundNotice;
 
 impl Drop for NativePreview {
     fn drop(&mut self) {

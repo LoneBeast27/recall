@@ -186,7 +186,7 @@ fn batch_with_limit_off_midway(deps: Deps) -> Instant {
 
 #[test]
 fn a_slow_free_space_check_never_lets_a_stale_cap_recycle() {
-    let deps = Deps { free: roomy, resolve: slow_resolve, plan: plan_one, bin: any_bin, recycle: recycle_a };
+    let deps = Deps { free: roomy, resolve: slow_resolve, plan: plan_one, bin: any_bin, recycle: recycle_a, keep: no_keeps };
     let changed = batch_with_limit_off_midway(deps);
     let late: Vec<_> = RECYCLED_A.lock().unwrap().iter().filter(|at| **at >= changed).copied().collect();
     assert!(late.is_empty(), "recycled {} time(s) after the limit was turned off", late.len());
@@ -194,14 +194,14 @@ fn a_slow_free_space_check_never_lets_a_stale_cap_recycle() {
 
 #[test]
 fn a_limit_change_during_the_listing_moves_nothing() {
-    let deps = Deps { free: roomy, resolve: by_letter, plan: slow_plan, bin: any_bin, recycle: recycle_b };
+    let deps = Deps { free: roomy, resolve: by_letter, plan: slow_plan, bin: any_bin, recycle: recycle_b, keep: no_keeps };
     batch_with_limit_off_midway(deps);
     assert_eq!(RECYCLED_B.lock().unwrap().len(), 0, "the run listed under 500 GB but the limit is now off");
 }
 
 #[test]
 fn a_job_for_another_folder_or_cap_moves_nothing() {
-    let deps = Deps { free: roomy, resolve: by_letter, plan: plan_one, bin: any_bin, recycle: recycle_c };
+    let deps = Deps { free: roomy, resolve: by_letter, plan: plan_one, bin: any_bin, recycle: recycle_c, keep: no_keeps };
     let (mut low, mut warner) = (FreeWarner::default(), Warner::default());
     for now in [Setting { dir: DIR.into(), cap_gb: 0 }, Setting { dir: r"G:\NewClips".into(), cap_gb: 500 }, Setting { dir: DIR.into(), cap_gb: 250 }] {
         run_batch(&cap_job(), &Mutex::new(now), deps, &mut low, &mut warner, &mut |_| {});
@@ -221,6 +221,10 @@ fn the_pump_publishes_the_current_setting() {
     assert_eq!(*j.current().lock().unwrap(), Setting { dir: r"G:\NewClips".into(), cap_gb: 0 });
 }
 
+fn no_keeps() -> Result<std::collections::HashSet<String>, String> {
+    Ok(Default::default())
+}
+
 fn any_bin(_: &Path, _: u64) -> Result<(), String> {
     Ok(())
 }
@@ -238,7 +242,7 @@ fn recycle_d(_: &[PathBuf]) -> Result<(), crate::record_storage::RecycleError> {
 
 #[test]
 fn a_volume_without_a_recycle_bin_deletes_nothing_and_tells_once() {
-    let deps = Deps { free: roomy, resolve: by_letter, plan: plan_one, bin: no_bin, recycle: recycle_d };
+    let deps = Deps { free: roomy, resolve: by_letter, plan: plan_one, bin: no_bin, recycle: recycle_d, keep: no_keeps };
     let current = Mutex::new(Setting { dir: DIR.into(), cap_gb: 500 });
     let (mut low, mut warner) = (FreeWarner::default(), Warner::default());
     let mut events = Vec::new();
@@ -259,7 +263,7 @@ fn recycle_busy(_: &[PathBuf]) -> Result<(), crate::record_storage::RecycleError
 
 #[test]
 fn a_busy_recycle_bin_shows_the_busy_notice_once_per_streak() {
-    let deps = Deps { free: roomy, resolve: by_letter, plan: plan_one, bin: any_bin, recycle: recycle_busy };
+    let deps = Deps { free: roomy, resolve: by_letter, plan: plan_one, bin: any_bin, recycle: recycle_busy, keep: no_keeps };
     let current = Mutex::new(Setting { dir: DIR.into(), cap_gb: 500 });
     let (mut low, mut warner) = (FreeWarner::default(), Warner::default());
     let mut events = Vec::new();

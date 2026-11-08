@@ -279,6 +279,11 @@ impl Root {
             .child(field("Audio tracks", mixing.into_any_element()).child(note(mixing_note.into())));
         if lossless {
             column = column.child(note("Copies the video untouched, in seconds. Each cut starts at the nearest earlier keyframe (shaded on the timeline). Frame rate, size and speed stay as recorded.".into()));
+            if self.ed.lossless_blocked_by_speed() {
+                column = column.child(
+                    div().text_size(px(11.)).line_height(px(15.)).text_color(c(theme::WARNING)).child("A part has a speed change. Lossless can't change speed: set it back to 1× or export with Re-encode."),
+                );
+            }
         } else {
             column = column
                 .child(
@@ -315,7 +320,7 @@ impl Root {
                     .gap(px(6.))
                     .text_size(px(12.))
                     .child(detail_row("Length", format!("{} of {}", timecode(kept), timecode(self.ed.duration())), true))
-                    .child(detail_row("Size", info.as_ref().map_or_else(String::new, |i| format!("{} × {}", i.width, i.height)), false))
+                    .child(detail_row("Size", self.ed.export_size().map_or_else(String::new, |(w, h)| format!("{w} × {h}")), false))
                     .child(detail_row("Audio", audio_note, false))
                     .child(detail_row(
                         "Saves to",
@@ -419,7 +424,7 @@ impl Root {
                     .w_full()
                     .when(self.ed.info.is_none() || self.ed.exporting, |b| b.opacity(0.5))
                     .child(icon(if self.ed.exporting { Icon::Refresh } else { Icon::Upload }, 15., theme::BASE))
-                    .child(if self.ed.exporting { format!("Exporting at {} fps…", self.ed.fps) } else { "Export clip".to_owned() })
+                    .child(if self.ed.exporting { self.ed.export_label() } else { "Export clip".to_owned() })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.ed.export(&this.workers);
                         cx.notify();

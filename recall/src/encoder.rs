@@ -27,7 +27,12 @@ mod live;
 pub(crate) use handoff::{audio_tail_us, video_end_us};
 mod landed;
 mod mover;
+mod mover_flush;
+mod mover_keep;
+mod mover_timing;
 mod mux;
+/// The MP4 sample-entry tag Media Foundation plays, for exports that write video too.
+pub(crate) use mux::mp4_video_tag;
 pub(crate) mod reopen;
 mod replay;
 #[cfg(test)]
@@ -40,6 +45,7 @@ mod saver;
 mod space;
 mod staging;
 mod staging_guard;
+mod staging_kept;
 pub mod settings;
 mod smoke;
 mod still;

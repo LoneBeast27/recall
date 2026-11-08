@@ -92,6 +92,8 @@ unsafe extern "system" {
 
 #[path = "win_fileop_dacl.rs"]
 pub mod dacl;
+#[path = "win_recycle_lock.rs"]
+pub mod bin_lock;
 
 /// How the worker gets its private desktop (production: [`REAL_DESKTOP`]; tests inject failures).
 #[derive(Clone, Copy)]

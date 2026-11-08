@@ -67,6 +67,9 @@ pub(super) struct Inventory {
     pub heads: u64,
     pub staged: u64,
     pub proxy: u64,
+    /// The recorder's leftover copies (`staging\kept\leaked\`): not cache and not in the
+    /// budget (RI3-4); shown in the SSD row and Settings on their own.
+    pub leaked: u64,
 }
 
 impl Inventory {
@@ -134,7 +137,7 @@ pub(super) fn plan_dry(root: &Path) -> (Vec<String>, Vec<String>) {
     let inventory = inventory_with(root, &super::prefetch::score_of, &listed);
     let budget = evict::read_settings(root).cache_budget_bytes.unwrap_or_else(|| {
         let (free, total) = super::drive_info(root).map_or((0, 0), |info| (info.free, info.total));
-        evict::default_budget(free, total)
+        evict::default_budget(free, total, super::drive::on_system_drive(root))
     });
     let evict = evict::plan(&inventory.units, inventory.projects + inventory.other, budget, budget / 2, 0, &kept());
     (adopt, evict)
@@ -214,15 +217,18 @@ fn inventory_with(root: &Path, score: &dyn Fn(&str) -> f64, listed: &std::collec
     // Clip heads from the filter probe (`head.rs`): at most a few hundred MB, never evicted.
     let heads = dir_size(&root.join("heads")).0;
     // The recorder's kept copies waiting to be adopted (`kept.rs`, up to 2 GiB): they hold SSD
-    // space the budget has to leave room for.
-    let staged = dir_size(&root.join("staging").join("kept")).0;
+    // space the budget has to leave room for. Leftover copies in `kept\leaked\` are the
+    // user's to decide about (Settings), not cache: they don't hold the budget (RI3-4).
+    let kept_dir = root.join("staging").join("kept");
+    let leaked = dir_size(&kept_dir.join("leaked")).0;
+    let staged = dir_size(&kept_dir).0.saturating_sub(leaked);
     // Preview copies (`proxy.rs`: today's failure proxies, light copies after it).
     let proxy = dir_size(&root.join("proxy")).0;
     other += heads + staged + proxy;
     for file in ["storage.json", "media.json", "interactions.json", "owned.json"] {
         other += root.join(file).metadata().map_or(0, |m| m.len());
     }
-    Inventory { units, projects, other, transient, heads, staged, proxy }
+    Inventory { units, projects, other, transient, heads, staged, proxy, leaked }
 }
 
 /// Deletes one unit; returns the bytes actually freed (files still open are skipped). Each
@@ -289,7 +295,14 @@ pub(super) fn enforce(root: &Path, budget: u64, incoming_video: u64) -> u64 {
     let swept = sweep_old_stems_once(root);
     let inventory = inventory(root, &super::prefetch::score_of);
     let keep = kept();
-    let evicted = evict::plan(&inventory.units, inventory.projects + inventory.other, budget, budget / 2, incoming_video, &keep);
+    // storage.json can't be read (RI2-2): the budget is a guess, so nothing already cached goes.
+    let (budget, video_cap) = if super::video::budget_note(root).is_some() {
+        let held = budget.max(inventory.total().saturating_add(incoming_video));
+        (held, (held / 2).max(inventory.tier_bytes(Tier::Video).saturating_add(incoming_video)))
+    } else {
+        (budget, budget / 2)
+    };
+    let evicted = evict::plan(&inventory.units, inventory.projects + inventory.other, budget, video_cap, incoming_video, &keep);
     swept + remove(root, &inventory, &evicted)
 }
 

@@ -58,11 +58,12 @@ fn a_kept_copy_becomes_the_clips_video_tier_entry() {
 }
 
 #[test]
-fn a_kept_copy_of_another_size_is_deleted() {
+fn a_kept_copy_of_another_size_is_left_for_the_recorder() {
+    // RI2-7: the clip differs from the copy, so the copy may be the whole one: the app keeps it.
     let (root, clips, kept_dir) = dirs("size");
     let (dest, kept) = clip(&clips, &kept_dir, "G__b.mp4", 5000, 4000);
     assert!(adopt_in(&root, &dest, &kept, BUDGET).unwrap_err().contains("4000 bytes"));
-    assert!(!kept.exists(), "a copy that is not the clip goes");
+    assert!(kept.exists(), "not the clip's copy: left for the recorder's check");
     assert!(crate::services::storage::cached_video_in(&root, &dest).is_none());
     cleanup(&root);
 }
@@ -91,7 +92,7 @@ fn a_clip_already_cached_drops_the_kept_copy() {
 }
 
 #[test]
-fn the_start_sweep_adopts_matches_and_deletes_the_rest() {
+fn the_start_sweep_adopts_matches_and_reports_the_rest() {
     let (root, clips, kept_dir) = dirs("sweep");
     let (good, good_kept) = clip(&clips, &kept_dir, "G__e.mp4", 2000, 2000);
     let (_, short_kept) = clip(&clips, &kept_dir, "G__f.mp4", 2000, 1500);
@@ -102,7 +103,9 @@ fn the_start_sweep_adopts_matches_and_deletes_the_rest() {
 
     assert_eq!(sweep_in(&root, &kept_dir, &clips, BUDGET), (1, 2));
     assert!(crate::services::storage::cached_video_in(&root, &good).is_some(), "the matching copy is cached");
-    assert!(!good_kept.exists() && !short_kept.exists() && !orphan.exists());
+    assert!(!good_kept.exists(), "the adopted copy moved into the cache");
+    // RI2-1: the app never deletes the rest; the recorder's start-up check decides.
+    assert!(short_kept.exists() && orphan.exists(), "left for the recorder");
     assert!(kept_dir.join("sub").is_dir(), "folders are left alone");
     assert_eq!(sweep_in(&root, &kept_dir.join("missing"), &clips, BUDGET), (0, 0));
     cleanup(&root);
@@ -125,5 +128,94 @@ fn only_a_file_in_a_kept_folder_may_be_adopted() {
     // The public entry point leaves a refused clip exactly where it is.
     adopt_kept(dest.to_string_lossy().into_owned(), dest.to_string_lossy().into_owned());
     assert!(dest.is_file(), "adopt_kept never touches a clip outside the kept folders");
+    cleanup(&root);
+}
+
+#[test]
+fn a_kept_copy_is_never_deleted_while_its_clip_is_only_a_part() {
+    // A power cut lost V:'s `.part` -> `.mp4` rename: the kept copy may be the only whole clip.
+    let (root, clips, kept_dir) = dirs("part");
+    let kept = kept_dir.join("G__p.mp4");
+    std::fs::write(&kept, vec![3u8; 1200]).unwrap();
+    mark(&kept);
+    std::fs::write(clips.join("G__p.mp4.part"), vec![3u8; 1200]).unwrap();
+    assert_eq!(sweep_in(&root, &kept_dir, &clips, BUDGET), (0, 1), "nothing adopted, one left");
+    assert!(kept.is_file(), "the engine re-moves it at its next start");
+    cleanup(&root);
+}
+
+#[test]
+fn a_kept_copy_is_never_deleted_while_the_clip_folder_cannot_be_read() {
+    // RI-2: an asleep NAS (or a wrong folder list) reads as "no clip": the copy may be the only
+    // whole clip after a lost rename, so a folder that can't be read keeps it.
+    let (root, clips, kept_dir) = dirs("asleep");
+    let kept = kept_dir.join("G__n.mp4");
+    std::fs::write(&kept, vec![4u8; 1300]).unwrap();
+    mark(&kept);
+    let asleep = clips.join("not-mounted");
+    assert_eq!(sweep_in(&root, &kept_dir, &asleep, BUDGET), (0, 1), "a missing clip folder deletes nothing");
+    std::fs::write(clips.join("a-file"), b"x").unwrap();
+    assert_eq!(sweep_in(&root, &kept_dir, &clips.join("a-file"), BUDGET), (0, 1), "nor one that is not a folder");
+    assert!(kept.is_file(), "the copy stays");
+    cleanup(&root);
+}
+
+#[test]
+fn a_readable_folder_without_the_clip_never_deletes_its_copy() {
+    // RI2-1: the sweep's folder reads "no clip" while the clip's `.part` sits in another folder
+    // Recall manages (the engine moved it there; a power cut lost the rename): the copy may be
+    // the only whole clip, so the app never deletes it.
+    let (root, clips, kept_dir) = dirs("wrong-folder");
+    let other = clips.parent().unwrap().join("old-recordings");
+    std::fs::create_dir_all(&other).unwrap();
+    let kept = kept_dir.join("G__w.mp4");
+    std::fs::write(&kept, vec![8u8; 1400]).unwrap();
+    mark(&kept);
+    std::fs::write(other.join("G__w.mp4.part"), vec![8u8; 1400]).unwrap();
+    assert_eq!(sweep_in(&root, &kept_dir, &clips, BUDGET), (0, 1), "nothing adopted, the copy is reported");
+    assert!(kept.is_file(), "the copy stays for the recorder's check");
+    cleanup(&root);
+}
+
+#[test]
+fn a_kept_copy_of_a_clip_that_cannot_be_read_is_never_deleted() {
+    // The app's delete guard matches the recorder's: present, readable, same size. A clip held
+    // open with no sharing (being written, or a damaged file a tool holds) keeps its copy.
+    use std::os::windows::fs::OpenOptionsExt;
+    let (root, clips, kept_dir) = dirs("unreadable");
+    let (dest, kept) = clip(&clips, &kept_dir, "G__u.mp4", 5000, 5000);
+    let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(&dest).unwrap();
+    assert!(adopt_in(&root, &dest, &kept, 8000).is_err(), "too large for the tier");
+    drop(held);
+    assert!(kept.exists(), "the clip could not be read: its copy stays");
+    cleanup(&root);
+}
+
+#[test]
+fn a_clip_with_other_bytes_never_takes_its_copy_into_the_cache() {
+    // RI3-2: a full-length clip of zeros (a lost data write) looked whole by size and time; the
+    // copy moved into the evictable cache. Now it is set aside in kept\leaked\.
+    let (root, clips, kept_dir) = dirs("zeroed");
+    let (dest, kept) = clip(&clips, &kept_dir, "G__z.mp4", 5000, 5000);
+    std::fs::write(&kept, vec![9u8; 5000]).unwrap();
+    let saved = dest.metadata().unwrap().modified().unwrap();
+    std::fs::File::options().write(true).open(&kept).unwrap().set_modified(saved).unwrap();
+    std::fs::write(&dest, vec![0u8; 5000]).unwrap();
+    std::fs::File::options().write(true).open(&dest).unwrap().set_modified(saved).unwrap();
+    assert!(adopt_in(&root, &dest, &kept, BUDGET).unwrap_err().contains("differ"));
+    assert!(kept_dir.join("leaked").join("G__z.mp4").is_file(), "set aside, not deleted or cached");
+    assert!(crate::services::storage::cached_video_in(&root, &dest).is_none());
+    cleanup(&root);
+}
+
+#[test]
+fn an_unknown_cache_size_takes_no_kept_copy() {
+    // RI3-1: a damaged storage.json evicted nothing while every fresh clip still came in.
+    let (root, clips, kept_dir) = dirs("unknown");
+    let (dest, kept) = clip(&clips, &kept_dir, "G__k.mp4", 5000, 5000);
+    std::fs::write(root.join("storage.json"), b"\0\0\0").unwrap();
+    assert!(adopt_in(&root, &dest, &kept, BUDGET).unwrap_err().contains("unknown"));
+    assert!(kept.is_file(), "the copy waits, not deleted");
+    assert!(crate::services::storage::cached_video_in(&root, &dest).is_none(), "nothing cached");
     cleanup(&root);
 }

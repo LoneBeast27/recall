@@ -123,6 +123,19 @@ pub(super) fn parse_descriptor(buffer: &[u8]) -> Option<Descriptor> {
     Some(Descriptor { vendor: text(u32_at(12)?), product: text(u32_at(16)?), bus: u32_at(28)? })
 }
 
+/// The cache at `path` is on the system drive (`%SystemDrive%`, else `C:`). A path whose
+/// volume cannot be told counts as the system drive (the smaller first-run budget).
+pub(super) fn on_system_drive(path: &Path) -> bool {
+    is_system_volume(volume_root(path).as_deref(), std::env::var("SystemDrive").ok().as_deref())
+}
+
+/// [`on_system_drive`] for a volume root (`C:\`, a mount folder, `\\?\Volume{..}\`) and a
+/// `SystemDrive` value.
+pub(super) fn is_system_volume(volume: Option<&str>, system_drive: Option<&str>) -> bool {
+    let system = system_drive.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("C:");
+    volume.is_none_or(|v| v.trim_end_matches('\\').eq_ignore_ascii_case(system.trim_end_matches('\\')))
+}
+
 /// Volume root for `path` (`E:\`), uppercase. Drive-letter paths need no system call.
 pub(super) fn volume_root(path: &Path) -> Option<String> {
     let plain = super::plain_path(path);

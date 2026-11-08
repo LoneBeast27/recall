@@ -16,8 +16,18 @@ const MIB: u64 = 1 << 20;
 
 /// `dest` holds the same clip as `staged` (see the module doc).
 pub(crate) fn same_clip(staged: &Path, dest: &Path) -> bool {
+    compare(staged, dest, true)
+}
+
+/// [`same_clip`] without the modification time: for a copy the mover itself landed but could
+/// not stamp (`mover_retry.rs`).
+pub(crate) fn same_bytes(staged: &Path, dest: &Path) -> bool {
+    compare(staged, dest, false)
+}
+
+fn compare(staged: &Path, dest: &Path, timed: bool) -> bool {
     let (Ok(a), Ok(b)) = (std::fs::metadata(staged), std::fs::metadata(dest)) else { return false };
-    if a.len() != b.len() || a.modified().ok().is_none() || a.modified().ok() != b.modified().ok() {
+    if a.len() != b.len() || (timed && (a.modified().ok().is_none() || a.modified().ok() != b.modified().ok())) {
         return false;
     }
     let len = a.len();
