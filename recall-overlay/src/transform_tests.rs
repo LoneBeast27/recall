@@ -193,10 +193,10 @@ fn an_action_notice_lays_out_grown_and_over_the_stats_but_others_at_their_own_si
     use crate::placement::{grow, DEFAULT_SPOT, NOTICE_H};
     let Content::Notice(saved) = saved() else { unreachable!() };
     let g = grow(&DEFAULT_SPOT);
-    let (scene, scale, size) = notice_layout(&saved, 1.5, g, || Some(1450.0), &Fake);
+    let (scene, scale, size) = notice_layout(&saved, 1.5, g, || Some(450.0), &Fake);
     assert_eq!(scale, 1.5 * g, "text and marks grow with the pill");
     assert!((scene.h - NOTICE_H * 1.5).abs() < 1e-3, "58 px at 1440p, scaled: {}", scene.h);
-    assert_eq!(size, (1450.0 + GROW_W * 1.5, NOTICE_H * 1.5), "wider than the stats under it");
+    assert_eq!(size, (450.0 + GROW_W * 1.5, NOTICE_H * 1.5), "wider than the stats under it");
     let (_, _, alone) = notice_layout(&saved, 1.0, g, || None, &Fake);
     assert_eq!(alone, (notice_scene(&saved, g, &Fake).w, NOTICE_H), "no stats under it: its own grown size, whole px");
     let game = NoticeView::new(Tone::Recording, "Recording", "VALORANT", true);

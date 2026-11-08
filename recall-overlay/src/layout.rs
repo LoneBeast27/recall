@@ -2,7 +2,6 @@
 //! pixels, measured through [`Measure`] (DirectWrite live, a fake in tests).
 //! Every size below is in 1440p pixels and multiplied by the island scale.
 
-use crate::cells::{count, Cells, Fill};
 use crate::notice::{NoticeView, SavePhase, Tone};
 use crate::placement::ISLAND_H;
 
@@ -47,28 +46,31 @@ pub enum Role {
     Key,
     /// A shortcut hint option's label ("Bookmark").
     Option,
-    /// A stats number cell (a replay timer part, fps, 1% low, temperature):
-    /// 3 tabular digits fit a cell with [`crate::cells::MARGIN`] either side.
+    Replay,
     Fps,
-    /// A notice's number cell (a timer part in the detail): the size of
-    /// [`Role::Fps`], fading with the detail line.
-    NoticeNumber,
+    /// [`Role::Fps`] a little smaller, for a side spot's upright column: 3
+    /// digits at 18 px are 33.7 px, past the 32 px a 44 px pill leaves.
+    FpsUpright,
     Small,
     RingNumber,
+    Temp,
 }
 
 impl Role {
     /// Font size in 1440p pixels.
     pub fn size(self) -> f32 {
         match self {
-            Role::NoticeTitle => 12.0,
+            Role::NoticeTitle => 11.0,
             Role::NoticeGame => 15.0,
             Role::NoticeUi => 14.0,
             Role::Key => 12.0,
             Role::Option => 13.0,
-            Role::Fps | Role::NoticeNumber => 16.0,
-            Role::Small => 10.0,
+            Role::Replay => 14.0,
+            Role::Fps => 18.0,
+            Role::FpsUpright => 16.5,
+            Role::Small => 9.5,
             Role::RingNumber => 10.5,
+            Role::Temp => 11.0,
         }
     }
 
@@ -139,15 +141,8 @@ pub struct Scene {
     /// pill changes width.
     pub lead: bool,
     /// Re-flowed for a side spot ([`crate::stack`]): each text is one upright
-    /// cell's content (or a ring's number) centred on its `x`, `y`.
+    /// glyph (or a ring's number) centred on its `x`, `y`.
     pub stacked: bool,
-    /// Laid out on the square cell grid ([`crate::cells`]): how many cells,
-    /// and the pitch from one cell's start to the next (0: not a grid).
-    pub cells: usize,
-    pub pitch: f32,
-    /// A horizontal pill that draws prose whole: its cells, which the side
-    /// pill stacks instead ([`crate::stack`]).
-    pub tall: Option<Box<Scene>>,
 }
 
 /// The stats island's numbers, ready to draw.
@@ -187,10 +182,37 @@ impl Pen<'_> {
         self.scene.texts.push(Text { role, text: text.into(), x, y, color });
     }
 
-    fn centred_baseline(&self, role: Role, text: &str) -> f32 {
-        (self.scene.h + self.m.measure(role, self.s, text).cap) / 2.0
+    fn cap(&self, role: Role, text: &str) -> f32 {
+        self.m.measure(role, self.s, text).cap
     }
 
+    /// Baselines for two stacked lines whose caps are centred together.
+    fn two_lines(&self, top: (Role, &str), bottom: (Role, &str), gap: f32) -> (f32, f32) {
+        let (c1, c2) = (self.cap(top.0, top.1), self.cap(bottom.0, bottom.1));
+        let first = (self.scene.h - (c1 + gap + c2)) / 2.0 + c1;
+        (first, first + gap + c2)
+    }
+
+    fn centred_baseline(&self, role: Role, text: &str) -> f32 {
+        (self.scene.h + self.cap(role, text)) / 2.0
+    }
+
+    fn mark(&mut self, tone: Tone, x: f32, badge: Option<SavePhase>) {
+        let (cy, r, color) = (self.scene.h / 2.0, self.u(4.0), tone_color(tone));
+        let shape = match tone {
+            Tone::Waiting => Shape::Hollow { cx: x + r, cy, r, stroke: self.u(1.5), color },
+            Tone::Paused => Shape::Pause {
+                x: x + self.u(0.5),
+                cy,
+                bar_w: self.u(2.5),
+                bar_h: self.u(9.0),
+                gap: self.u(2.0),
+                color,
+            },
+            _ => Shape::Dot { cx: x + r, cy, r, color },
+        };
+        self.scene.icon = Some(Icon { shape, cx: x + r, cy, r, badge });
+    }
 }
 
 /// The colour of a tone's mark (the action notice's sweep reuses it).
@@ -211,38 +233,30 @@ fn pen(s: f32, m: &dyn Measure) -> Pen<'_> {
 /// A clip save's titles, stage by stage.
 pub const SAVE_TITLES: [&str; 3] = ["Saving", "Clip saved", "Save failed"];
 
-/// Mark, then the title, then the detail ([`crate::cells`]): compact
-/// fields in square cells, prose as continuous runs on a horizontal pill.
+/// Mark + small title over a bold detail (or a single bold line).
 pub fn notice_scene(notice: &NoticeView, s: f32, m: &dyn Measure) -> Scene {
-    let mut cells = Cells::new(s, m);
-    cells.push(Fill::Mark(notice.tone, notice.save));
-    if notice.detail.is_empty() {
-        cells.text(&notice.title, Role::NoticeUi, Role::NoticeNumber, TEXT, 0.0);
+    let mut p = pen(s, m);
+    let (pad_l, mark_w, gap, pad_r) = (p.u(16.0), p.u(8.0), p.u(10.0), p.u(20.0));
+    p.mark(notice.tone, pad_l, notice.save);
+    p.scene.lead = notice.save.is_some();
+    // The shutter ring is twice the dot: its text steps right to keep the gap.
+    let x = pad_l + mark_w + gap + if notice.save.is_some() { p.u(4.0) } else { 0.0 };
+    let text_w = if notice.detail.is_empty() {
+        let baseline = p.centred_baseline(Role::NoticeUi, &notice.title);
+        p.text_at_baseline(Role::NoticeUi, &notice.title, x, baseline, TEXT);
+        p.width(Role::NoticeUi, &[&notice.title])
     } else {
-        // A save's title changes word by stage: room for the longest, so the
-        // pill and the detail never move when the clip lands.
-        let hold = notice.save.is_some();
-        let widest = if hold { SAVE_TITLES.iter().map(|t| m.measure(Role::NoticeTitle, s, t).width).fold(0.0, f32::max) } else { 0.0 };
-        cells.text(&notice.title, Role::NoticeTitle, Role::NoticeTitle, MUTED, widest);
-        if hold {
-            let most = SAVE_TITLES.iter().map(|t| count(t, Role::NoticeTitle, Role::NoticeTitle, s, m)).max().unwrap_or(0);
-            let title = count(&notice.title, Role::NoticeTitle, Role::NoticeTitle, s, m);
-            (title..most).for_each(|_| cells.push(Fill::Blank));
-            // The held cells belong to the title's run on a horizontal pill.
-            let end = cells.out.len();
-            if let Some(span) = cells.spans.last_mut() {
-                span.end = end;
-            }
-        }
         let detail_role = if notice.game_font { Role::NoticeGame } else { Role::NoticeUi };
-        cells.text(&notice.detail, detail_role, Role::NoticeNumber, TEXT, 0.0);
-    }
-    let mut scene = cells.scene();
-    scene.lead = notice.save.is_some();
-    if let Some(tall) = scene.tall.as_mut() {
-        tall.lead = scene.lead;
-    }
-    scene
+        let (b1, b2) = p.two_lines((Role::NoticeTitle, &notice.title), (detail_role, &notice.detail), p.u(5.5));
+        p.text_at_baseline(Role::NoticeTitle, &notice.title, x, b1, MUTED);
+        p.text_at_baseline(detail_role, &notice.detail, x, b2, TEXT);
+        // A save's title changes word by stage: room for the widest, so the
+        // pill and the content never move when the clip lands.
+        let titles: &[&str] = if notice.save.is_some() { &[&notice.title, SAVE_TITLES[0], SAVE_TITLES[1], SAVE_TITLES[2]] } else { &[&notice.title] };
+        p.width(Role::NoticeTitle, titles).max(p.width(detail_role, &[&notice.detail]))
+    };
+    p.scene.w = (x + text_w + pad_r).max(p.scene.h * 2.0).ceil();
+    p.scene
 }
 
 /// The island's small pill while the shortcut hint is open and nothing else
@@ -266,45 +280,74 @@ pub fn clock(secs: u64) -> String {
     }
 }
 
-/// Minimal style, one cell each: rec mark · replay minutes | seconds · fps
-/// · "1% low" · its number · GPU ring · "GPU" · temperature · CPU ring ·
-/// "CPU". The cell count holds still as numbers change (3 digits a cell).
+/// Minimal style: rec mark + replay length · FPS over "1% low" · GPU ring
+/// (+ temperature) · CPU ring. Slots reserve room for 3-digit values so the
+/// pill does not twitch as numbers change.
 pub fn stats_scene(st: &StatsContent, s: f32, m: &dyn Measure) -> Scene {
-    let mut cells = Cells::new(s, m);
+    let mut p = pen(s, m);
+    p.scene.lead = true; // the record dot stays on the pill's left padding through a transformation
+    let group_gap = p.u(16.0);
+    let mut x = p.u(16.0);
     let tone = if st.paused { Tone::Paused } else if st.recording { Tone::Recording } else { Tone::Waiting };
-    cells.push(Fill::Mark(tone, None));
-    cells.run(&clock(st.replay_secs), Role::Small, Role::Fps, if st.recording { TEXT } else { MUTED });
-    let dash = |cells: &mut Cells, role, color| cells.push(Fill::Text(role, "—".into(), color));
-    match st.fps {
-        Some(fps) => cells.run(&fps.to_string(), Role::Small, Role::Fps, TEXT),
-        None => dash(&mut cells, Role::Fps, TEXT),
-    }
-    match (st.fps, st.low1, &st.fps_note) {
-        (None, _, Some(note)) => cells.text(note, Role::Small, Role::Small, TERTIARY, 0.0),
-        (_, low, _) => {
-            cells.push(Fill::Pair(Role::Small, ["1%", "low"], TERTIARY));
-            match low {
-                Some(low) => cells.run(&low.to_string(), Role::Small, Role::Fps, MUTED),
-                None => dash(&mut cells, Role::Fps, MUTED),
-            }
-        }
-    }
+    p.mark(tone, x, None);
+    x += p.u(8.0) + p.u(7.0);
+
+    let replay = clock(st.replay_secs);
+    let baseline = p.centred_baseline(Role::Replay, "0");
+    p.text_at_baseline(Role::Replay, &replay, x, baseline, if st.recording { TEXT } else { MUTED });
+    x += p.width(Role::Replay, &[&replay, "0:00"]) + group_gap;
+
+    let fps = st.fps.map_or("—".to_string(), |f| f.to_string());
+    let low = match (st.fps, st.low1, &st.fps_note) {
+        (None, _, Some(note)) => note.clone(),
+        (_, Some(low), _) => format!("1% low {low}"),
+        _ => "1% low —".to_string(),
+    };
+    let (b1, b2) = p.two_lines((Role::Fps, "0"), (Role::Small, "1"), p.u(4.5));
+    p.text_at_baseline(Role::Fps, &fps, x, b1, TEXT);
+    p.text_at_baseline(Role::Small, &low, x, b2, TERTIARY);
+    x += p.width(Role::Fps, &[&fps, "000"]).max(p.width(Role::Small, &[&low, "1% low 000"])) + group_gap;
+
     if let Some(gpu) = st.gpu {
         let hot = st.gpu_temp.is_some_and(|t| t >= HOT_GPU_C);
-        cells.push(Fill::Ring(Some(gpu), if hot { WARNING } else { TEXT }));
-        cells.push(Fill::Text(Role::Small, "GPU".into(), TERTIARY));
-        if let Some(temp) = st.gpu_temp {
-            cells.run(&format!("{temp}°"), Role::Small, Role::Fps, if hot { WARNING } else { TEXT });
+        x = ring(&mut p, x, Some(gpu), if hot { WARNING } else { TEXT });
+        let temp = st.gpu_temp.map(|t| format!("{t}°C"));
+        let col = p.width(Role::Small, &["GPU"]).max(p.width(Role::Temp, &[temp.as_deref().unwrap_or(""), "00°C"]));
+        match &temp {
+            Some(temp) => {
+                let (b1, b2) = p.two_lines((Role::Small, "G"), (Role::Temp, "0"), p.u(4.0));
+                p.text_at_baseline(Role::Small, "GPU", x, b1, TERTIARY);
+                p.text_at_baseline(Role::Temp, temp, x, b2, if hot { WARNING } else { TEXT });
+            }
+            None => {
+                let baseline = p.centred_baseline(Role::Small, "G");
+                p.text_at_baseline(Role::Small, "GPU", x, baseline, TERTIARY);
+            }
         }
+        x += col + group_gap;
     }
-    cells.push(Fill::Ring(st.cpu, TEXT));
-    cells.push(Fill::Text(Role::Small, "CPU".into(), TERTIARY));
-    let mut scene = cells.scene();
-    scene.lead = true; // the record dot stays put through a transformation
-    if let Some(tall) = scene.tall.as_mut() {
-        tall.lead = true;
-    }
-    scene
+
+    x = ring(&mut p, x, st.cpu, TEXT);
+    let baseline = p.centred_baseline(Role::Small, "C");
+    p.text_at_baseline(Role::Small, "CPU", x, baseline, TERTIARY);
+    x += p.width(Role::Small, &["CPU"]) + p.u(18.0);
+    p.scene.w = x.ceil();
+    p.scene
+}
+
+/// A usage ring at `x` with its number inside (a dash before the first
+/// reading); returns the x after it.
+fn ring(p: &mut Pen, x: f32, value: Option<u32>, color: Rgba) -> f32 {
+    let (d, stroke) = (p.u(30.0), p.u(2.75));
+    let (cx, cy) = (x + d / 2.0, p.scene.h / 2.0);
+    let value = value.map(|v| v.min(100));
+    let frac = value.unwrap_or(0) as f32 / 100.0;
+    p.scene.shapes.push(Shape::Ring { cx, cy, r: (d - stroke) / 2.0, stroke, frac, color });
+    let number = value.map_or("—".to_string(), |v| v.to_string());
+    let metrics = p.m.measure(Role::RingNumber, p.s, &number);
+    let baseline = cy + metrics.cap / 2.0;
+    p.text_at_baseline(Role::RingNumber, &number, cx - metrics.width / 2.0, baseline, TEXT);
+    x + d + p.u(6.0)
 }
 
 /// How a usage ring's value arc is drawn: clockwise from 12 o'clock.

@@ -214,7 +214,7 @@ impl Renderer {
                 let layout = fonts.layout(text.role, scale, &text.text)?;
                 let alpha = match text.role {
                     Role::NoticeTitle => alphas.1,
-                    Role::NoticeGame | Role::NoticeUi | Role::NoticeNumber => alphas.2,
+                    Role::NoticeGame | Role::NoticeUi => alphas.2,
                     _ => alphas.0,
                 };
                 self.paint(text.color, alpha);
@@ -239,7 +239,7 @@ impl Renderer {
                 let metrics = crate::layout::Measure::measure(fonts, text.role, scale, &text.text);
                 let alpha = match text.role {
                     Role::NoticeTitle => alphas.1,
-                    Role::NoticeGame | Role::NoticeUi | Role::NoticeNumber => alphas.2,
+                    Role::NoticeGame | Role::NoticeUi => alphas.2,
                     _ => alphas.0,
                 };
                 self.upright((text.x, text.y), k, at((text.x, text.y)));
