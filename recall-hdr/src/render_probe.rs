@@ -1,4 +1,4 @@
-//! A short real-time ETW session (`RecallDetectRender`) that watches how one
+//! A short real-time ETW session (`RecallDetectRender-<session>`) that watches how one
 //! process presents while it waits to be committed as a game
 //! (`record_render`). It runs only while such a candidate is pending, then is
 //! dropped, which stops it. Nothing is injected: the D3D runtime, the graphics
@@ -22,7 +22,7 @@
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, OnceLock, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -39,8 +39,27 @@ use windows::Win32::System::Diagnostics::Etw::{
 
 use crate::render_verdict::RenderStats;
 
-const SESSION: PCWSTR = w!("RecallDetectRender");
-const SESSION_STR: &str = "RecallDetectRender";
+/// The ETW session's name, per Windows session: ETW names are machine-wide, and a second
+/// signed-in user's controller stopping a "stale" session must not end this one's probe
+/// (audit G3, R2-deep-startup-8).
+const SESSION_BASE: &str = "RecallDetectRender";
+/// `RecallDetectRender-<session>`, or the bare name when the session id can't be read.
+pub(crate) fn session_name_for(session: Option<u32>) -> String {
+    match session {
+        Some(id) => format!("{SESSION_BASE}-{id}"),
+        None => SESSION_BASE.to_string(),
+    }
+}
+
+/// This session's name, NUL-terminated for the ETW calls (built once).
+fn session_wide() -> &'static [u16] {
+    static NAME: OnceLock<Vec<u16>> = OnceLock::new();
+    NAME.get_or_init(|| session_name_for(crate::control_pipe::current_session()).encode_utf16().chain([0]).collect())
+}
+
+fn session() -> PCWSTR {
+    PCWSTR(session_wide().as_ptr())
+}
 /// `EVENT_TRACE_USE_MS_FLUSH_TIMER`: `FlushTimer` is in milliseconds.
 const MS_FLUSH_TIMER: u32 = 0x10;
 /// Events reach the callback within this (the start debounce is 300 ms).
@@ -109,19 +128,57 @@ impl Properties {
     }
 }
 
-/// Stops a `RecallDetectRender` session left by a killed controller. (A panic
+/// Stops this session's `RecallDetectRender-<session>` left by a killed controller. (A panic
 /// on the pump thread unwinds through the controller, whose probe's drop
 /// stops the session; only a killed process leaves one, for the next start.)
 pub fn stop_stale() -> bool {
     let mut p = Properties::new();
-    let status = unsafe { ControlTraceW(CONTROLTRACE_HANDLE { Value: 0 }, SESSION, &mut p.props, EVENT_TRACE_CONTROL_STOP) };
+    let status = unsafe { ControlTraceW(CONTROLTRACE_HANDLE { Value: 0 }, session(), &mut p.props, EVENT_TRACE_CONTROL_STOP) };
     status == ERROR_SUCCESS
 }
 
-/// A `RecallDetectRender` session exists (any process's).
+/// The machine-wide name every controller used before the per-session names. A controller of
+/// that build killed mid-probe leaves it running until reboot, so a starting controller stops
+/// it (merge-gate ruling, deep-startup-p3 c), and only this exact name: another Windows
+/// session's `RecallDetectRender-<id>` is never touched.
+pub(crate) const LEGACY_SESSION: &str = SESSION_BASE;
+
+/// What [`stop_left_sessions`] stopped.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct LeftSessions {
+    /// This session's own name (a killed controller of this build).
+    pub own: bool,
+    /// The legacy machine-wide name (a killed controller of an older build).
+    pub legacy: bool,
+}
+
+/// At controller start: stops this session's left-over session (`own`) and the legacy
+/// machine-wide one through `stop` (the live path passes [`stop_named`]).
+pub(crate) fn stop_left_sessions(own: &str, mut stop: impl FnMut(&str) -> bool) -> LeftSessions {
+    let own_stopped = stop(own);
+    // No session id: this session's name is the bare one, already stopped above.
+    let legacy = own != LEGACY_SESSION && stop(LEGACY_SESSION);
+    LeftSessions { own: own_stopped, legacy }
+}
+
+/// This Windows session's ETW session name.
+pub(crate) fn own_session_name() -> String {
+    session_name_for(crate::control_pipe::current_session())
+}
+
+/// Stops the ETW session called `name` (any process's). True when one was stopped.
+pub(crate) fn stop_named(name: &str) -> bool {
+    let wide: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    let mut p = Properties::new();
+    // SAFETY: `wide` is NUL-terminated and outlives the call; `p` is a sized properties block.
+    let status = unsafe { ControlTraceW(CONTROLTRACE_HANDLE { Value: 0 }, PCWSTR(wide.as_ptr()), &mut p.props, EVENT_TRACE_CONTROL_STOP) };
+    status == ERROR_SUCCESS
+}
+
+/// This Windows session's `RecallDetectRender-<session>` exists (any process's).
 pub fn session_running() -> bool {
     let mut p = Properties::new();
-    let status = unsafe { ControlTraceW(CONTROLTRACE_HANDLE { Value: 0 }, SESSION, &mut p.props, EVENT_TRACE_CONTROL_QUERY) };
+    let status = unsafe { ControlTraceW(CONTROLTRACE_HANDLE { Value: 0 }, session(), &mut p.props, EVENT_TRACE_CONTROL_QUERY) };
     status == ERROR_SUCCESS
 }
 
@@ -155,10 +212,10 @@ impl RenderProbe {
         stop_stale();
         let mut p = Properties::new();
         let mut control = CONTROLTRACE_HANDLE { Value: 0 };
-        match unsafe { StartTraceW(&mut control, SESSION, &mut p.props) } {
+        match unsafe { StartTraceW(&mut control, session(), &mut p.props) } {
             ERROR_SUCCESS => {}
             ERROR_ACCESS_DENIED => return Err(StartError::Denied),
-            other => return Err(StartError::Failed(format!("StartTrace {SESSION_STR}: error {}", other.0))),
+            other => return Err(StartError::Failed(format!("StartTrace {}: error {}", session_name_for(crate::control_pipe::current_session()), other.0))),
         }
         let shared = Arc::new(Shared { pid: AtomicU32::new(pid), tally: Mutex::new(Tally::default()) });
         // From here on, dropping `probe` stops the session on any error.
@@ -202,7 +259,7 @@ impl RenderProbe {
     }
 
     fn consume(&mut self) -> Result<(), StartError> {
-        let mut name: Vec<u16> = SESSION_STR.encode_utf16().chain([0]).collect();
+        let mut name: Vec<u16> = session_wide().to_vec();
         let mut logfile = EVENT_TRACE_LOGFILEW { LoggerName: PWSTR(name.as_mut_ptr()), ..Default::default() };
         logfile.Anonymous1.ProcessTraceMode =
             PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD | PROCESS_TRACE_MODE_RAW_TIMESTAMP;

@@ -1,5 +1,5 @@
 //! Control-pipe API of the unified record mode (the controller is the single
-//! config writer). Commands, newline JSON on `\\.\pipe\recall-hdr-control`:
+//! config writer). Commands, newline JSON on `\\.\pipe\recall-hdr-control-<session>` (`control_pipe`):
 //!
 //! | cmd | args | effect / reply |
 //! |---|---|---|

@@ -47,7 +47,8 @@ use crate::record_render::RenderCheck;
 use crate::record_janitor::Janitor;
 use crate::record_startup::{apply_niceness, pinned_target_from_env};
 use crate::record_target::{Target, TargetTracker, START_DEBOUNCE, TARGET_DEBOUNCE};
-use crate::record_tray::{RecallUi, RecordingTray, RecordingTrayCmd};
+use crate::record_tray::{RecallUi, RecordingTrayCmd};
+use crate::record_tray_slot::TraySlot;
 use crate::supervisor::Supervisor;
 use crate::watcher::{WatchEvent, Watcher};
 
@@ -74,7 +75,8 @@ pub struct Controller {
     pub(crate) cfg: Config,
     pub(crate) supervisor: Supervisor,
     pub(crate) hub: Arc<PipeHub>,
-    pub(crate) tray: RecordingTray,
+    /// Retried until Explorer's notification area takes it (`record_tray_slot`).
+    pub(crate) tray: TraySlot,
     pub(crate) hotkeys: Option<RecordHotkeys>,
     pub(crate) overlay: OverlayProc,
     pub(crate) ui: RecallUi,
@@ -171,13 +173,8 @@ pub fn run() -> i32 {
     let applied_mask = apply_niceness(&cfg.recording.cpu_mask);
     let pinned = pinned_target_from_env();
 
-    let tray = match RecordingTray::build() {
-        Ok(t) => t,
-        Err(e) => {
-            log!("record: FATAL -- tray unavailable: {e}");
-            return 2;
-        }
-    };
+    // A tray that fails (Explorer not ready at sign-in) never stops the recorder: the pump retries it.
+    let tray = TraySlot::recording(Instant::now());
     let target_monitor = app::primary_monitor_isize();
     let (watch_tx, watch_rx) = channel::<WatchEvent>();
     let watcher = Watcher::install(watch_tx, target_monitor)

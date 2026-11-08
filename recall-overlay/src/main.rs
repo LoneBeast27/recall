@@ -21,6 +21,8 @@ mod hint;
 mod island;
 mod layout;
 mod notice;
+mod pipe_name;
+mod pipe_owner;
 mod placement;
 mod png;
 mod presence;
@@ -69,7 +71,6 @@ use render::Renderer;
 use smoke::Smoke;
 use window::create_window;
 
-const PIPE_NAME: &str = "recall-hdr-control";
 /// How long a new island waits for one that is ending (the controller restarts it).
 const INSTANCE_WAIT: Duration = Duration::from_secs(3);
 /// Posted by the pipe thread so a notice lands at once, not on the next tick.
@@ -276,33 +277,50 @@ fn spawn_pipe_client(tx: Sender<Feed>, hwnd: isize, out: app::PipeOut) {
     };
     std::thread::Builder::new()
         .name("recall-overlay-pipe".into())
-        .spawn(move || loop {
-            let Ok(name) = PIPE_NAME.to_ns_name::<GenericNamespaced>() else { return };
-            if let Ok(stream) = Stream::connect(name) {
-                let (reader, mut writer) = stream.split();
-                let _ = tx.send(Feed::Connected);
-                let _ = writer.write_all(b"{\"cmd\":\"status\"}\n");
-                if let Ok(mut slot) = out.lock() {
-                    *slot = Some(Box::new(writer));
-                }
-                for line in BufReader::new(reader).lines() {
-                    let Ok(line) = line else { break };
-                    if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
-                        if tx.send(Feed::Json(value)).is_err() {
-                            return;
+        .spawn(move || {
+            // Per Windows session: this user's recorder, never another signed-in account's.
+            let pipe = pipe_name::current_pipe_name();
+            let mut refused: Option<String> = None;
+            loop {
+                let Ok(name) = pipe.as_str().to_ns_name::<GenericNamespaced>() else { return };
+                // Only a server of this account (`pipe_owner`): a refused one gets nothing.
+                let stream = Stream::connect(name).ok().filter(|stream| match pipe_owner::check(stream) {
+                    Ok(()) => true,
+                    Err(reason) => {
+                        if refused.as_deref() != Some(reason.as_str()) {
+                            eprintln!("recall-overlay: {reason}; not using the control pipe");
                         }
-                        wake();
+                        refused = Some(reason);
+                        false
+                    }
+                });
+                if let Some(stream) = stream {
+                    refused = None;
+                    let (reader, mut writer) = stream.split();
+                    let _ = tx.send(Feed::Connected);
+                    let _ = writer.write_all(b"{\"cmd\":\"status\"}\n");
+                    if let Ok(mut slot) = out.lock() {
+                        *slot = Some(Box::new(writer));
+                    }
+                    for line in BufReader::new(reader).lines() {
+                        let Ok(line) = line else { break };
+                        if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
+                            if tx.send(Feed::Json(value)).is_err() {
+                                return;
+                            }
+                            wake();
+                        }
                     }
                 }
+                if let Ok(mut slot) = out.lock() {
+                    *slot = None;
+                }
+                if tx.send(Feed::Disconnected).is_err() {
+                    return;
+                }
+                wake();
+                std::thread::sleep(Duration::from_secs(1));
             }
-            if let Ok(mut slot) = out.lock() {
-                *slot = None;
-            }
-            if tx.send(Feed::Disconnected).is_err() {
-                return;
-            }
-            wake();
-            std::thread::sleep(Duration::from_secs(1));
         })
         .expect("spawn overlay pipe client");
 }

@@ -15,8 +15,10 @@ powershell -NoProfile -File scripts\install.ps1
 
 - Installs to `%LOCALAPPDATA%\Programs\Recall` (no admin rights). `-InstallDir <folder>` picks
   another folder; it must be on an SSD, because the app keeps its preview cache there.
-- Adds **Recall** to the Start menu, starts the recorder, and sets it to start with Windows
-  (`-NoAutostart` skips that; Settings → General turns it off later).
+- Adds **Recall** to the Start menu and starts the recorder. Start with Windows is off unless
+  you ask: `-Autostart` turns it on, or Settings → General. An update leaves the setting as it is.
+- The folder must be on a drive Windows reports as an SSD. For an SSD it can't classify (USB,
+  RAID, Storage Spaces, VM disk), `-AllowUnknownDrive` installs with a warning.
 - Builds run on the background CPU cores (CCD1) through `nice-build.ps1`, so a running game
   is not slowed down.
 - Close Recall first: while the app runs, the installer stops with exit 3 and changes nothing.
@@ -132,7 +134,7 @@ drives are detected); thumbnails, hover frames and recently watched clips are ke
 | Folder | Program | Job |
 |---|---|---|
 | `recall/` | `recall.exe` | capture engine: Windows Graphics Capture → NVENC → memory ring; saves, exports, long recordings |
-| `recall-hdr/` | `recall-hdr.exe --record` | controller + tray: finds the game, runs the engine, hotkeys, HDR switching, config, control pipe `\\.\pipe\recall-hdr-control` |
+| `recall-hdr/` | `recall-hdr.exe --record` | controller + tray: finds the game, runs the engine, hotkeys, HDR switching, config, control pipe `\\.\pipe\recall-hdr-control-<session id>` (this user and SYSTEM only) |
 | `recall-overlay/` | `recall-overlay.exe` | the small in-game save notice and two-step shortcut hint |
 | `recall-native/` | `recall-native.exe` | the app (GPUI): library, editor, HDR, audio, settings |
 | `recall-hub/` | — | the old Svelte/Tauri window; replaced by `recall-native`, kept for reference |

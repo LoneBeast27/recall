@@ -52,8 +52,12 @@ pub(crate) struct RenderCheck {
 
 impl RenderCheck {
     pub(crate) fn new(available: bool) -> Self {
-        if render_probe::stop_stale() {
+        let left = render_probe::stop_left_sessions(&render_probe::own_session_name(), render_probe::stop_named);
+        if left.own {
             log!("record: render check: stopped a session left by an earlier controller");
+        }
+        if left.legacy {
+            log!("record: render check: stopped the machine-wide {} session an older controller left", render_probe::LEGACY_SESSION);
         }
         if !available {
             log!("record: render check off (no trace rights): any fullscreen app that is not denied counts as a game (a Store app only when Recall knows it, an override or the GPU vendor lists it)");

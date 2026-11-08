@@ -43,9 +43,12 @@ mod config_validate;
 mod config_validate_lists;
 mod config_watch;
 mod control;
+mod control_lines;
+mod control_pipe;
 mod display;
 mod durable;
 mod edid;
+mod engine_exit;
 mod engine_policy;
 mod frame_timing;
 mod guard;
@@ -113,6 +116,7 @@ mod record_target;
 mod record_target_gate;
 mod record_transition;
 mod record_tray;
+mod record_tray_slot;
 mod render_probe;
 mod render_verdict;
 mod ghost_window;
@@ -136,6 +140,14 @@ mod supervisor;
 mod tray;
 #[cfg(test)]
 mod transitions_detect_tests;
+#[cfg(test)]
+mod install_script_tests;
+#[cfg(test)]
+mod install_script_wait_tests;
+#[cfg(test)]
+mod install_script_quit_tests;
+#[cfg(test)]
+mod hub_pipe_tests;
 #[cfg(test)]
 mod transitions_gate_tests;
 #[cfg(test)]
@@ -169,6 +181,8 @@ const RESTART_WAIT: Duration = Duration::from_secs(5);
 const USAGE: &str = "usage: recall-hdr [--record|--record-only|--legacy-hdr|--record-tray-smoke|--probe|--clamp-test|--restore|--help] (no args = record mode; a second start opens the Recall window)";
 
 fn main() {
+    // Before any child exists: a missing engine DLL must not raise a system box over the game.
+    engine_exit::quiet_error_dialogs();
     let arg = std::env::args().nth(1);
     let arg = arg.as_deref().unwrap_or("");
     if !matches!(arg, "" | "--record" | "--record-only" | "--legacy-hdr" | "--record-tray-smoke") {
@@ -246,11 +260,15 @@ fn single_instance(mode: fn() -> i32, launch: Launch) -> i32 {
     };
     match next_step(&claim, launch) {
         // `claim` holds the guard until the process exits.
-        Next::Run => mode(),
+        Next::Run => {
+            logging::new_run("the one controller");
+            mode()
+        }
         Next::RunUnguarded => {
             if let single_instance::Claim::Unavailable(code) = claim {
                 log!("single-instance mutex unavailable (error {code}); continuing without it");
             }
+            logging::own_log();
             mode()
         }
         Next::OpenWindowAndExit => {
