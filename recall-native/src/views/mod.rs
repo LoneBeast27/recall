@@ -5,6 +5,7 @@ pub mod audio_page;
 pub mod audio_strip;
 pub mod editor;
 pub mod folders_settings;
+pub mod folders_sync;
 pub mod library;
 pub mod pages;
 pub mod quality_preview;

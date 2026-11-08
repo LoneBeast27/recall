@@ -185,11 +185,15 @@ impl Root {
         let problems = problems.into_iter().map(|p| {
             div().text_size(px(12.)).text_color(c(theme::WARNING)).child(format!("Not working: {p}. Pick another key below.")).into_any_element()
         });
+        // A combo games and overlays often use still works here, but may be taken from them.
+        let clashes = self.snap.hotkey_warnings.clone().into_iter().map(|w| {
+            div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(format!("Heads up: {w}.")).into_any_element()
+        });
         vec![
             div()
                 .text_size(px(12.))
                 .text_color(c(theme::TERTIARY))
-                .child("These work everywhere, even when Recall is closed.")
+                .child("These work everywhere while the recorder runs, even when Recall is closed. Other apps can't use these keys then.")
                 .into_any_element(),
             div()
                 .flex()
@@ -201,6 +205,7 @@ impl Root {
         ]
         .into_iter()
         .chain(problems)
+        .chain(clashes)
         .collect()
     }
 }

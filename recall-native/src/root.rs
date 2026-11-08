@@ -129,6 +129,8 @@ pub struct Root {
     pub title_drag: Option<gpui::Point<gpui::Pixels>>,
     /// Recordings folder (last reported) + imported folders of old clips.
     pub folders: crate::services::library::folders::Folders,
+    /// A Change-button folder change waiting for the recorder to report it (`folders_sync`).
+    pub pending_folder: Option<crate::views::folders_sync::PendingFolder>,
     /// When to check whether the recorder is running and start it (once per launch).
     controller_check_at: Option<Instant>,
     pub frame_at: Instant,
@@ -166,7 +168,8 @@ impl Root {
     /// The polling task holds this view for a tick after the window goes, and the app can quit
     /// first, so `drop` alone may never run.
     pub fn flush_on_close(&mut self) {
-        self.ed.flush_now();
+        // Queued behind the edit writes already sent; app.rs waits for them before exiting.
+        self.ed.flush_on_close(|job| self.workers.job(job));
         // A fader still held is saved, as a release would.
         self.commit_dragged_fader();
         // A cache size still being typed is applied, as a click elsewhere would.
@@ -174,6 +177,7 @@ impl Root {
             self.apply_typed_cache();
         }
         crate::services::pre_encode::discard();
+        crate::services::library::open_clips::publish(None);
     }
 
     pub fn show_toast(&mut self, kind: ToastKind, text: impl Into<String>, detail: Option<String>) {
@@ -240,6 +244,8 @@ impl Root {
     pub fn open_clip(&mut self, path: String) {
         crate::services::storage::record_interaction(crate::services::storage::Interaction::Opened(path.clone()));
         self.lib.mark_played(&path);
+        // The recorder's storage cap never recycles the clip open here.
+        crate::services::library::open_clips::publish(Some(&path));
         if !self.ed.is_open(&path) {
             self.ed.open(path, &self.workers);
         }

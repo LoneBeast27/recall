@@ -4,7 +4,7 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 
 use super::mp4::{duration_of, last_frame_of, last_presented, video_duration_of};
-use super::store::{meta_path, quarantine_path};
+use super::store::meta_path;
 use super::*;
 
 fn temp_dir(name: &str) -> PathBuf {
@@ -19,7 +19,7 @@ fn store_round_trip_prunes_and_validates_duration_identity() {
     let dir = temp_dir("store");
     let path = dir.join("Recall").join("library.json");
     let mut store = MetaStore::load_from(path.clone());
-    assert_eq!(store.duration("a.mp4", 1, 2), None);
+    assert_eq!(store.duration("a.mp4", "a.mp4", 1, 2), None);
     store.set_favourite("a.mp4", true).unwrap();
     store.set_title("a.mp4", Some("  Ace  ")).unwrap();
     store.set_title("b.mp4", Some("temp")).unwrap();
@@ -32,9 +32,9 @@ fn store_round_trip_prunes_and_validates_duration_identity() {
     assert_eq!(reloaded.meta("a.mp4").unwrap().title.as_deref(), Some("Ace"));
     assert!(reloaded.meta("b.mp4").is_none(), "cleared title leaves no entry");
     assert!(reloaded.meta("bad.mp4").is_none());
-    assert_eq!(reloaded.duration("c.mp4", 100, 200), Some(119.146));
-    assert_eq!(reloaded.duration("c.mp4", 101, 200), None, "size changed");
-    assert_eq!(reloaded.duration("c.mp4", 100, 201), None, "mtime changed");
+    assert_eq!(reloaded.duration("c.mp4", "c.mp4", 100, 200), Some(119.146));
+    assert_eq!(reloaded.duration("c.mp4", "c.mp4", 101, 200), None, "size changed");
+    assert_eq!(reloaded.duration("c.mp4", "c.mp4", 100, 201), None, "mtime changed");
     let json: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
     assert_eq!(json["a.mp4"], serde_json::json!({"favourite": true, "title": "Ace"}));
     assert_eq!(json["c.mp4"]["duration"], serde_json::json!({"bytes": 100, "mtime": 200, "secs": 119.146}));
@@ -67,8 +67,8 @@ fn corrupt_store_is_backed_up_and_replaced() {
     std::fs::write(&path, b"{ not json").unwrap();
     let mut store = MetaStore::load_from(path.clone());
     assert!(store.meta("x.mp4").is_none());
-    let bad = quarantine_path(&path);
-    assert_eq!(bad.file_name().unwrap(), "library.json.bad");
+    let bad = crate::services::durable::bad_path(&path, std::time::SystemTime::now());
+    assert!(bad.file_name().unwrap().to_string_lossy().starts_with("library.json.bad-"));
     assert_eq!(std::fs::read(&bad).unwrap(), b"{ not json");
     store.set_favourite("x.mp4", true).unwrap();
     assert!(MetaStore::load_from(path).meta("x.mp4").unwrap().favourite);
@@ -84,7 +84,7 @@ fn store_drops_only_malformed_entries() {
     assert!(store.meta("a.mp4").is_none());
     assert!(store.meta("b.mp4").unwrap().favourite);
     assert!(store.meta("c.mp4").is_none());
-    assert!(!quarantine_path(&path).exists(), "a valid object is not quarantined");
+    assert!(!crate::services::durable::bad_path(&path, std::time::SystemTime::now()).exists(), "a valid object is not quarantined");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -368,5 +368,29 @@ fn scrub_frames_extract_then_hit_cache() {
     let modified = std::fs::metadata(&frames[0]).unwrap().modified().unwrap();
     assert_eq!(scrub::frames_in(&cache, &clip.to_string_lossy()).unwrap(), frames);
     assert_eq!(std::fs::metadata(&frames[0]).unwrap().modified().unwrap(), modified, "served from cache");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// MKV (OBS's default) has no MP4 index: its length comes from ffprobe (skips without ffmpeg).
+#[test]
+fn an_mkv_clip_gets_its_length_from_ffprobe() {
+    assert_eq!(resolve_duration(Path::new("x.mkv"), |_| None, |_| Some(12.5)), Some(12.5));
+    assert_eq!(resolve_duration(Path::new("x.mp4"), |_| Some(3.0), |_| panic!("the index answered")), Some(3.0));
+    assert_eq!(resolve_duration(Path::new("x.mp4"), |_| None, |_| Some(f64::NAN)), None);
+    let Ok(ffmpeg) = scrub::binary("RECALL_FFMPEG", "ffmpeg.exe") else {
+        eprintln!("skipped: ffmpeg not found");
+        return;
+    };
+    let dir = temp_dir("mkv-duration");
+    let clip = dir.join("obs.mkv");
+    let status = std::process::Command::new(&ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-threads", "2", "-f", "lavfi", "-i", "testsrc=duration=2:size=160x90:rate=10", "-c:v", "mpeg4", "-y"])
+        .arg(&clip)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(mp4_duration(&clip), None, "not an MP4");
+    let secs = clip_duration(&clip).expect("ffprobe duration");
+    assert!((secs - 2.0).abs() < 0.1, "{secs}");
     let _ = std::fs::remove_dir_all(dir);
 }

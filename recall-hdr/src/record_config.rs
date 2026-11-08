@@ -468,34 +468,9 @@ pub fn config_json(cfg: &Config) -> Value {
     serde_json::to_value(cfg).unwrap_or(Value::Null)
 }
 
-/// Where the unified mode loads/saves its config. Tests point it at a temp dir.
-#[derive(Debug, Clone)]
-pub struct ConfigStore {
-    path: PathBuf,
-}
-
-impl ConfigStore {
-    /// `%APPDATA%\recall-hdr\config.toml` -- the user's real config.
-    pub fn user() -> Self {
-        ConfigStore { path: Config::path() }
-    }
-
-    pub fn at(path: impl Into<PathBuf>) -> Self {
-        ConfigStore { path: path.into() }
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub fn load(&self) -> Config {
-        crate::config::load_from(&self.path)
-    }
-
-    pub fn save(&self, cfg: &Config) -> Result<(), String> {
-        cfg.save_to(&self.path)
-    }
-}
+#[path = "record_config_store.rs"]
+mod store;
+pub use store::ConfigStore;
 
 #[cfg(test)]
 #[path = "record_config_tests.rs"]

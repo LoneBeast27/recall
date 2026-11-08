@@ -2,10 +2,33 @@
 
 use super::*;
 
-fn temp_dir(tag: &str) -> PathBuf {
+/// `%TEMP%\recall-staging-<tag>-<uuid>`, removed when the guard drops, also when the test
+/// panics (a failing run left 3-6 MB folders behind).
+struct Scratch(PathBuf);
+
+impl Drop for Scratch {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+impl std::ops::Deref for Scratch {
+    type Target = PathBuf;
+    fn deref(&self) -> &PathBuf {
+        &self.0
+    }
+}
+
+impl AsRef<Path> for Scratch {
+    fn as_ref(&self) -> &Path {
+        &self.0
+    }
+}
+
+fn temp_dir(tag: &str) -> Scratch {
     let dir = std::env::temp_dir().join(format!("recall-staging-{tag}-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&dir).unwrap();
-    dir
+    Scratch(dir)
 }
 
 #[test]
@@ -211,4 +234,116 @@ fn a_staging_folder_named_through_a_network_alias_is_still_refused() {
     }
     assert!(refused(&alias, std::slice::from_ref(&clips)).is_some(), "one folder under two names");
     let _ = std::fs::remove_dir_all(&base);
+}
+
+#[test]
+fn recovery_requeues_a_kept_copy_whose_clip_is_only_a_part() {
+    // A power cut right after a move: V: lost the `.part` -> `.mp4` rename, C: kept the copy.
+    let (stage, out) = (temp_dir("kept-part"), temp_dir("kept-part-out"));
+    let kept_dir = stage.join(super::mover::KEPT_DIR);
+    std::fs::create_dir_all(&kept_dir).unwrap();
+    let name = "A__2026-10-22__09-00-00-000__aa.mp4";
+    std::fs::write(kept_dir.join(name), vec![5u8; 1000]).unwrap();
+    std::fs::write(out.join(format!("{name}.part")), vec![5u8; 1000]).unwrap();
+    // A `.part` of another size is a half copy: that kept copy waits for the app as before.
+    let other = "B__2026-10-22__09-01-00-000__bb.mp4";
+    std::fs::write(kept_dir.join(other), vec![5u8; 1000]).unwrap();
+    std::fs::write(out.join(format!("{other}.part")), vec![5u8; 999]).unwrap();
+    // A clip that landed: nothing to recover.
+    let landed = "C__2026-10-22__09-02-00-000__cc.mp4";
+    std::fs::write(kept_dir.join(landed), vec![5u8; 1000]).unwrap();
+    std::fs::write(out.join(landed), vec![5u8; 1000]).unwrap();
+    std::fs::write(out.join(format!("{landed}.part")), vec![5u8; 1000]).unwrap();
+
+    assert!(super::super::staging_kept::holds_kept(&stage));
+    let done = super::super::staging_kept::hand_back(&stage, &out);
+    assert_eq!(done.back, vec![stage.join(name)], "{:?}", done.errors);
+    assert!(stage.join(name).is_file() && !kept_dir.join(name).exists(), "handed back to staging");
+    // Handed back, it is an ordinary staged clip: the next recovery queues it as well.
+    assert_eq!(recover(&stage, &out).moves, vec![(stage.join(name), out.join(name))]);
+    assert!(kept_dir.join(other).is_file() && kept_dir.join(landed).is_file(), "the rest stays kept");
+    assert!(out.join(format!("{name}.part")).is_file() && out.join(landed).is_file(), "the clip folder is only read");
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn only_a_copy_of_a_clip_that_landed_whole_is_deleted_and_leaked_copies_free_the_keep_limit() {
+    // RI2-7: the recorder alone decides; a marked copy goes only when its clip is present,
+    // readable and the same size. Copies that match no whole clip are set aside, never deleted,
+    // and no longer stop new keeps.
+    use super::super::staging_kept::{hand_back, LEAKED_DIR};
+    let (stage, out) = (temp_dir("kept-check"), temp_dir("kept-check-out"));
+    let kept_dir = stage.join(super::mover::KEPT_DIR);
+    std::fs::create_dir_all(&kept_dir).unwrap();
+    let copy = |name: &str, len: usize| {
+        let kept = kept_dir.join(name);
+        std::fs::write(&kept, vec![6u8; len]).unwrap();
+        std::fs::write(format!("{}:{}", kept.display(), super::mover::KEPT_MARK), b"").unwrap();
+        kept
+    };
+    let whole = copy("W__2026-11-07__10-00-00-000__ww.mp4", 1000);
+    std::fs::write(out.join("W__2026-11-07__10-00-00-000__ww.mp4"), vec![6u8; 1000]).unwrap();
+    let other_size = copy("S__2026-11-07__10-01-00-000__ss.mp4", 1000);
+    std::fs::write(out.join("S__2026-11-07__10-01-00-000__ss.mp4"), vec![6u8; 700]).unwrap();
+    let deleted_clip = copy("D__2026-11-07__10-02-00-000__dd.mp4", 1000);
+    let done = hand_back(&stage, &out);
+    assert!(done.errors.is_empty(), "{:?}", done.errors);
+    assert_eq!(done.deleted, 1, "the copy of the clip that landed whole");
+    assert!(!whole.exists());
+    assert_eq!(done.leaked.len(), 2, "{:?}", done.leaked);
+    for kept in [&other_size, &deleted_clip] {
+        assert!(!kept.exists() && kept_dir.join(LEAKED_DIR).join(kept.file_name().unwrap()).is_file(), "set aside, not deleted: {}", kept.display());
+    }
+    // The keep limit counts only kept\ itself: a new 1000-byte keep fits a 1500-byte limit.
+    let staged = stage.join("N__2026-11-07__10-03-00-000__nn.mp4");
+    std::fs::write(&staged, vec![6u8; 1000]).unwrap();
+    assert!(super::mover::keep_staged_within(&staged, &out.join("N__2026-11-07__10-03-00-000__nn.mp4"), 1500).is_some());
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn a_full_length_clip_with_other_bytes_keeps_its_copy_and_a_busy_clip_is_asked_again_later() {
+    // RI3-2: a flush Windows did not honour can leave the clip at full length but zeroed; the
+    // size alone said "whole" and the only whole copy was deleted. RI3-5: a clip that can't be
+    // opened right now (exclusive open, a scan) is not "leaked".
+    use super::super::staging_kept::{hand_back, LEAKED_DIR};
+    use std::os::windows::fs::OpenOptionsExt;
+    let (stage, out) = (temp_dir("kept-bytes"), temp_dir("kept-bytes-out"));
+    let kept_dir = stage.join(super::mover::KEPT_DIR);
+    std::fs::create_dir_all(&kept_dir).unwrap();
+    let copy = |name: &str| {
+        let kept = kept_dir.join(name);
+        std::fs::write(&kept, vec![7u8; 3 << 20]).unwrap();
+        std::fs::write(format!("{}:{}", kept.display(), super::mover::KEPT_MARK), b"").unwrap();
+        kept
+    };
+    let zeroed = copy("Z__2026-11-07__11-00-00-000__zz.mp4");
+    std::fs::write(out.join("Z__2026-11-07__11-00-00-000__zz.mp4"), vec![0u8; 3 << 20]).unwrap();
+    let busy = copy("B__2026-11-07__11-01-00-000__bb.mp4");
+    let busy_clip = out.join("B__2026-11-07__11-01-00-000__bb.mp4");
+    std::fs::write(&busy_clip, vec![7u8; 3 << 20]).unwrap();
+    let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(&busy_clip).unwrap();
+    let done = hand_back(&stage, &out);
+    drop(held);
+    assert_eq!(done.deleted, 0, "{:?}", done.errors);
+    assert!(kept_dir.join(LEAKED_DIR).join(zeroed.file_name().unwrap()).is_file(), "other bytes: set aside, not deleted");
+    assert!(busy.is_file(), "a busy clip leaves its copy in kept\\ for the next start");
+    assert_eq!(done.leaked.len(), 1, "{:?}", done.leaked);
+    // Once the clip can be read and matches, the next start deletes the copy.
+    assert_eq!(hand_back(&stage, &out).deleted, 1);
+    assert!(!busy.exists());
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn a_staging_test_folder_is_removed_even_when_its_test_panics() {
+    let left = std::panic::catch_unwind(|| {
+        let dir = temp_dir("panics");
+        std::fs::write(dir.join("clip.mp4"), vec![1u8; 4096]).unwrap();
+        std::panic::panic_any(dir.to_path_buf());
+    })
+    .unwrap_err()
+    .downcast::<PathBuf>()
+    .unwrap();
+    assert!(!left.exists(), "{} was left behind", left.display());
 }

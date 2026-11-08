@@ -280,6 +280,19 @@ fn config_ac_profile_and_error_events() {
 }
 
 #[test]
+fn config_event_carries_overridden_keys_and_hotkey_warnings() {
+    let mut state = connected();
+    let line = json!({"mod":"session","event":{"type":"config","config":{"recording":{"output_dir":r"D:\Tmp"}},
+        "overridden":["recording.output_dir"],"hotkey_warnings":["bookmark uses Alt+Z"]}});
+    assert!(apply(&mut state, line));
+    assert_eq!(state.snapshot.config_overridden, vec!["recording.output_dir".to_string()]);
+    assert_eq!(state.snapshot.hotkey_warnings, vec!["bookmark uses Alt+Z".to_string()]);
+    // An older recorder sends neither: both read empty.
+    apply(&mut state, json!({"mod":"session","event":{"type":"config","config":{"a":1}}}));
+    assert!(state.snapshot.config_overridden.is_empty() && state.snapshot.hotkey_warnings.is_empty());
+}
+
+#[test]
 fn disconnect_clears_live_status_and_garbage_is_ignored() {
     let mut state = connected();
     apply(&mut state, json!({"mod":"engine","event":{"type":"status","encoder":"h264_nvenc","buffer_secs":5.0}}));
@@ -432,4 +445,20 @@ fn a_stop_during_the_lock_and_a_cancelled_shutdown_reach_the_app() {
         state.events,
         vec![DaemonEvent::RecordingStoppedLocked { seconds: 300.0 }, DaemonEvent::ShutdownCancelled, DaemonEvent::RecordingPartlyLocked { seconds: 720.0 }]
     );
+}
+
+#[test]
+fn every_config_event_counts_and_a_loads_repairs_queue_one_notice() {
+    let mut state = connected();
+    let line = json!({"mod":"session","event":{"type":"config","config":{"a":1},
+        "config_repaired":{"id":42,"count":2,"notes":["x","y"]}}});
+    apply(&mut state, line.clone());
+    assert!(apply(&mut state, line), "the same config again is still a fresh answer");
+    assert_eq!(state.snapshot.config_seq, 2);
+    let notices: Vec<_> = state.events.iter().filter(|e| matches!(e, DaemonEvent::ConfigRepaired { .. })).cloned().collect();
+    assert_eq!(notices, vec![DaemonEvent::ConfigRepaired { count: 2 }], "one notice per load id");
+    // A clean load (id 0) and an older recorder (no field) say nothing.
+    apply(&mut state, json!({"mod":"session","event":{"type":"config","config":{"a":1},"config_repaired":{"id":0,"count":0}}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"config","config":{"a":1}}}));
+    assert_eq!(state.events.iter().filter(|e| matches!(e, DaemonEvent::ConfigRepaired { .. })).count(), 1);
 }

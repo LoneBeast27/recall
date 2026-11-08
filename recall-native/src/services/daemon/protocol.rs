@@ -18,6 +18,8 @@ pub(super) struct State {
     session_raw: Option<Map<String, Value>>,
     /// The last `session` status (only the controller's pump sends one), or the connect.
     last_status: Option<std::time::Instant>,
+    /// `config_repaired.id` of the last load-repair notice queued (one notice per load).
+    repair_notice_id: u64,
 }
 
 impl State {
@@ -55,7 +57,14 @@ impl State {
                 self.merge_session(event);
                 self.drop_stale_engine();
             }
-            ("session", "config") => self.snapshot.config = Some(config_of(event)),
+            ("session", "config") => {
+                self.snapshot.config = Some(config_of(event));
+                // Older recorders send neither list: both read empty.
+                self.snapshot.config_overridden = strings_of(event, "overridden");
+                self.snapshot.hotkey_warnings = strings_of(event, "hotkey_warnings");
+                self.snapshot.config_seq += 1;
+                self.config_repaired(event);
+            }
             ("session", "storage_cleaned") => self.push(DaemonEvent::StorageCleaned {
                 removed: u64_of(event, "removed"),
                 freed_bytes: u64_of(event, "freed_bytes"),
@@ -126,6 +135,17 @@ impl State {
         let health = self.snapshot.session.as_ref().map_or("", |s| s.engine_health.as_str());
         if !health.is_empty() && health != "running" {
             self.snapshot.engine = None;
+        }
+    }
+
+    /// The recorder repaired config.toml at its last load: one notice per load id (0 = none).
+    fn config_repaired(&mut self, event: &Map<String, Value>) {
+        let Some(repaired) = event.get("config_repaired").and_then(Value::as_object) else { return };
+        let id = u64_of(repaired, "id");
+        let count = u64_of(repaired, "count");
+        if id != 0 && count > 0 && id != self.repair_notice_id {
+            self.repair_notice_id = id;
+            self.push(DaemonEvent::ConfigRepaired { count });
         }
     }
 
@@ -281,6 +301,10 @@ fn config_of(event: &Map<String, Value>) -> Value {
             Value::Object(rest)
         }
     }
+}
+
+fn strings_of(event: &Map<String, Value>, key: &str) -> Vec<String> {
+    event.get(key).and_then(Value::as_array).map(|a| a.iter().filter_map(Value::as_str).map(str::to_owned).collect()).unwrap_or_default()
 }
 
 fn error_text(event: &Map<String, Value>) -> String {

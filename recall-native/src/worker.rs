@@ -1,6 +1,9 @@
 //! Background threads. The UI thread never blocks on disk, ffmpeg or the engine.
-//! `io`: list / save / flush / export / delete / storage (serial, in order). Each clip open
-//! runs on its own thread (`clip_open.rs`).
+//! Three serial job threads, each in order: `io`: export / drive space / storage. `library`:
+//! list / delete (never behind an export: `worker_lanes.rs`). `edits`: autosave and the sidecar
+//! flush (never behind an export: `worker_edits.rs`). A delete waits for the saves and flushes of
+//! its clips queued before it ([`PathGate`]: entered here on send, left by the edits thread once
+//! each one finished). Each clip open runs on its own thread (`clip_open.rs`).
 //! `assets`: thumbnails, durations, video copies. `scrub`: hover-scrub frames.
 //!
 //! Work that reads an HDD is routed onto that disk's I/O lane (`services::storage`): one
@@ -19,6 +22,7 @@ use std::{
 
 use crate::{
     backend::{self, ClipEntry, ExportSummary, PreparedClip, StorageReport},
+    worker_lanes::{Lane, Lanes, PathGate},
     clip_open::StreamedClip,
     edit_model::{ClipInfo, EditPlan, ExportSettings},
     services::{
@@ -45,7 +49,10 @@ pub enum Job {
     /// Leave / close / export: the sidecar beside the clip, only if it changed (`Done::Flushed`).
     FlushProject(ClipInfo, EditPlan, u32, ExportSettings, bool),
     Export(ClipInfo, EditPlan, u32, ExportSettings),
-    Delete(Vec<PathBuf>),
+    /// The clips, and the folder list the confirm dialog used: it alone decides which clips go
+    /// to the Recycle Bin and which are only removed from Recall (never a fresh read of
+    /// folders.json, which could fail and make every clip look like Recall's own).
+    Delete(Vec<PathBuf>, library::folders::Folders),
     /// Free space of the recordings drive (`Done::Drive`).
     DriveSpace,
     /// Drive types + cache usage for Settings (`Done::Storage`).
@@ -53,6 +60,9 @@ pub enum Job {
     /// Settings "clear" for one tier, then a fresh report (`Done::Storage`, with a notice).
     /// (Whole-cache clear / budget: `storage::clear()` / `storage::set_budget_bytes()`.)
     ClearCache(CacheKind),
+    /// Settings -> Media -> SSD cache: the leftover kept copies shown, to the Recycle Bin
+    /// (`Done::LeftoversRecycled`). On the library lane, like a Delete: the bin lock can wait.
+    RecycleLeftovers(Vec<PathBuf>),
 }
 
 pub enum AssetJob {
@@ -75,26 +85,35 @@ pub enum Done {
     /// What an open without streaming is doing now.
     OpenStep(u64, &'static str),
     Prepared(u64, Result<PreparedClip, String>),
-    Saved(Result<String, String>),
+    /// (clip path, working-copy path).
+    Saved(String, Result<String, String>),
     Exported(Result<ExportSummary, String>),
-    /// The clips asked for: (moved to the Recycle Bin, removed from Recall only).
-    Deleted(Vec<PathBuf>, Result<(usize, usize), String>),
+    /// Which clips left (Recycle Bin, removed from Recall) and which stayed.
+    Deleted(library::DeleteReport),
+    /// The delete waits for an edit save of one of its clips (`Done::Deleted` follows).
+    DeleteWaiting,
     Thumb(String, Result<String, String>),
     Duration(String, Option<f64>),
     Scrub(String, Result<Vec<String>, String>),
     /// (clip path, SSD copy path — or the clip itself when it already lives on an SSD).
     VideoCached(String, Result<String, String>),
-    /// Sidecar path when current; "" when there was nothing to write.
-    Flushed(Result<backend::Flushed, String>),
+    /// (clip path, what the flush left beside it).
+    Flushed(String, Result<backend::Flushed, String>),
     /// (clip path, preview copy path).
     Proxy(String, Result<String, String>),
     Storage(StorageReport),
     /// The clip folders changed on disk (`services::library::watch`).
     Library(LibraryChange),
+    /// How many leftover copies went to the Recycle Bin.
+    LeftoversRecycled(Result<usize, String>),
 }
 
 pub struct Workers {
-    jobs: Sender<Job>,
+    jobs: Lanes<Job>,
+    /// Autosave and sidecar flushes (`worker_edits.rs`).
+    edits: Sender<Job>,
+    /// Clips with a save or flush queued: a delete of one waits for it.
+    gate: PathGate,
     assets: Sender<AssetJob>,
     scrub: Sender<String>,
     open_tx: Sender<Done>,
@@ -104,7 +123,10 @@ pub struct Workers {
 impl Workers {
     pub fn spawn() -> Self {
         let (done_tx, done) = mpsc::channel::<Done>();
-        let (jobs, job_rx) = mpsc::channel::<Job>();
+        let gate = PathGate::default();
+        let (edits, edit_rx) = mpsc::channel::<Job>();
+        let (tx, edit_gate) = (done_tx.clone(), gate.clone());
+        spawn_named("recall-edits", move || edits::run(edit_rx, tx, edit_gate));
         let (assets, asset_rx) = mpsc::channel::<AssetJob>();
         let (scrub, scrub_rx) = mpsc::channel::<String>();
 
@@ -123,14 +145,36 @@ impl Workers {
             library::cache_watch::start(storage::counted_dirs(&backend::library_dir()), storage::note_outside_change);
         });
 
-        let tx = done_tx.clone();
-        spawn_named("recall-io", move || {
-            while let Ok(job) = job_rx.recv() {
-                if tx.send(run_job(job, &tx, &watcher)).is_err() {
-                    break;
-                }
+        let (io_tx, lib_tx) = (done_tx.clone(), done_tx.clone());
+        let (io_gate, lib_gate) = (gate.clone(), gate.clone());
+        let io = move |job: Job| {
+            let gated = gated_clip(&job);
+            let done = run_job(job, &io_tx, None);
+            if let Some(key) = gated {
+                io_gate.leave(&key);
             }
-        });
+            io_tx.send(done).is_ok()
+        };
+        let library = move |job: Job| match job {
+            // A delete of a clip with a save or flush pending waits on a thread of its own, so
+            // listings (new saves, added folders) keep coming meanwhile.
+            Job::Delete(paths, folders) => {
+                let keys = paths.iter().map(|p| library::clip_key(&p.to_string_lossy())).collect();
+                let (waiting, done) = (lib_tx.clone(), lib_tx.clone());
+                lib_gate.run_when_clear(
+                    keys,
+                    move || {
+                        let _ = waiting.send(Done::DeleteWaiting);
+                    },
+                    move || {
+                        let _ = done.send(delete_job(&paths, &folders));
+                    },
+                );
+                true
+            }
+            job => lib_tx.send(run_job(job, &lib_tx, Some(&watcher))).is_ok(),
+        };
+        let jobs = Lanes::spawn(lane_of, io, library);
 
         let tx = done_tx.clone();
         spawn_named("recall-assets", move || {
@@ -150,7 +194,7 @@ impl Workers {
             }
         });
 
-        Self { jobs, assets, scrub, done, open_tx }
+        Self { jobs, edits, gate, assets, scrub, done, open_tx }
     }
 
     /// Opens a clip on a thread of its own: a running export or listing never holds it up.
@@ -177,8 +221,24 @@ impl Workers {
         });
     }
 
+    /// A save or flush enters the gate before it is sent (a delete sent later waits for it) and
+    /// goes to the edits thread; everything else to its lane.
     pub fn job(&self, job: Job) {
-        let _ = self.jobs.send(job);
+        let gated = gated_clip(&job);
+        if let Some(key) = &gated {
+            self.gate.enter(key.clone());
+        }
+        match edits::lane(&job) {
+            edits::Lane::Edits => {
+                if !edits::send(&self.edits, job) {
+                    // The edits thread is gone: nothing will leave for this job.
+                    if let Some(key) = gated {
+                        self.gate.leave(&key);
+                    }
+                }
+            }
+            edits::Lane::Io => self.jobs.send(job),
+        }
     }
 
     pub fn asset(&self, job: AssetJob) {
@@ -190,26 +250,45 @@ impl Workers {
     }
 }
 
-fn run_job(job: Job, tx: &Sender<Done>, watcher: &ClipWatcher) -> Done {
+/// Listings and deletes run apart from the editor's io: an export never holds them up.
+fn lane_of(job: &Job) -> Lane {
+    match job {
+        Job::List | Job::Delete(..) | Job::RecycleLeftovers(..) => Lane::Library,
+        _ => Lane::Io,
+    }
+}
+
+/// The clip a save or flush writes beside (or for): a delete of it waits.
+fn gated_clip(job: &Job) -> Option<String> {
+    match job {
+        Job::SaveProject(info, ..) | Job::FlushProject(info, ..) => Some(library::clip_key(&info.path)),
+        _ => None,
+    }
+}
+
+/// `watcher` is the library lane's (listings arm it).
+fn run_job(job: Job, tx: &Sender<Done>, watcher: Option<&ClipWatcher>) -> Done {
     match job {
         Job::List => {
-            // Every folder change ends in a listing. Armed first, so nothing falls between.
-            watcher.set_roots(backend::clip_roots());
-            let result = backend::list_clips_checked().map(|(entries, complete)| {
+            // One read of folders.json per listing. Every folder change ends in a listing.
+            // Armed first, so nothing falls between.
+            let folders = library::folders::Folders::load();
+            if let Some(watcher) = watcher {
+                watcher.set_roots(backend::clip_roots_from(&folders));
+                watcher.set_owned(folders.former_recordings.clone());
+            }
+            let result = backend::list_clips_checked_from(&folders).map(|(entries, complete)| {
                 prefetch(&entries, complete, tx.clone());
-                Listing { sidecars: library::sidecar_index(&entries), drive: library::drive_space(&backend::library_dir()), entries }
+                Listing { sidecars: library::sidecar_index(&entries), drive: library::drive_space(&backend::library_dir_from(&folders)), entries }
             });
             Done::Clips(result)
         }
         Job::DriveSpace => Done::Drive(library::drive_space(&backend::library_dir())),
-        Job::SaveProject(info, plan, fps, export) => Done::Saved(backend::save_project(&info, &plan, fps, &export)),
-        Job::FlushProject(info, plan, fps, export, ours) => Done::Flushed(backend::flush_project(&info, &plan, fps, &export, ours)),
+        Job::SaveProject(info, plan, fps, export) => Done::Saved(info.path.clone(), backend::save_project(&info, &plan, fps, &export)),
+        Job::FlushProject(info, plan, fps, export, ours) => Done::Flushed(info.path.clone(), backend::flush_project(&info, &plan, fps, &export, ours)),
         Job::Export(info, plan, fps, export) => Done::Exported(crate::services::pre_encode::export(&info, &plan, fps, &export)),
-        Job::Delete(paths) => {
-            let result = library::delete_or_hide(&paths);
-            library::folders::forget_scans();
-            Done::Deleted(paths, result)
-        }
+        Job::Delete(paths, folders) => delete_job(&paths, &folders),
+        Job::RecycleLeftovers(files) => Done::LeftoversRecycled(crate::cache::send_leftovers_to_bin(&files)),
         Job::StorageReport => Done::Storage(backend::storage_report(None)),
         Job::ClearCache(kind) => {
             let notice = match storage::clear_kind(kind) {
@@ -219,6 +298,13 @@ fn run_job(job: Job, tx: &Sender<Done>, watcher: &ClipWatcher) -> Done {
             Done::Storage(backend::storage_report(Some(notice)))
         }
     }
+}
+
+/// Recycle or hide, then drop cached folder walks.
+fn delete_job(paths: &[PathBuf], folders: &library::folders::Folders) -> Done {
+    let report = library::delete_or_hide(paths, folders);
+    library::folders::forget_scans();
+    Done::Deleted(report)
 }
 
 /// Thumbnails / durations are queued on the clip's disk lane at `Visible` priority (the
@@ -231,7 +317,7 @@ fn route_asset(job: AssetJob, tx: &Sender<Done>) {
             let _ = tx.send(Done::Thumb(path, result));
         }),
         AssetJob::Duration(path) => storage::submit_io(&PathBuf::from(&path), Priority::Visible, move || {
-            let secs = library::mp4_duration(Path::new(&path));
+            let secs = library::clip_duration(Path::new(&path));
             let _ = tx.send(Done::Duration(path, secs));
         }),
         AssetJob::Proxy(path) => spawn_named("recall-preview-copy", move || {
@@ -292,6 +378,7 @@ fn prefetch(entries: &[ClipEntry], complete: bool, tx: Sender<Done>) {
             mtime_secs: entry.mtime,
             has_thumb: entry.thumb.is_some(),
             duration: record.duration,
+            duration_unknown: record.duration.is_none() && store.duration_unknown(&entry.path, &entry.name, entry.bytes, entry.mtime),
             game_key: record.game_key,
             favourite: record.favourite,
             edited: record.edited,
@@ -311,6 +398,10 @@ fn prefetch(entries: &[ClipEntry], complete: bool, tx: Sender<Done>) {
         backend::prefetch_editor_media,
     );
 }
+
+#[path = "worker_edits.rs"]
+mod edits;
+pub use edits::finish_writes;
 
 fn spawn_named(name: &str, body: impl FnOnce() + Send + 'static) {
     if let Err(error) = thread::Builder::new().name(name.into()).spawn(body) {

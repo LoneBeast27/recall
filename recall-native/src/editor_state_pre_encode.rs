@@ -40,6 +40,8 @@ pub struct PreEncodeState {
     keyed: Option<(KeyInputs, Instant)>,
     /// Times the key was computed (tests check idle ticks skip it).
     key_runs: u64,
+    /// Export progress (per cent) the button last showed.
+    shown_export: Option<u32>,
 }
 
 /// Everything the key reads that lives in the editor (the engine build is rechecked by age).
@@ -60,12 +62,20 @@ impl EditorState {
         if !self.exporting {
             self.follow_pre_encode();
         }
+        let progress = crate::backend::export_progress().filter(|_| self.exporting).map(|share| (share * 100.0) as u32);
+        let moved = progress != self.pre.shown_export;
+        self.pre.shown_export = progress;
         let line = self.pre_encode_line();
         if line == self.pre.shown {
-            return false;
+            return moved;
         }
         self.pre.shown = line;
         true
+    }
+
+    /// An export of the current plan finished: nothing is pending for it any more.
+    pub(super) fn pre_encode_exported(&mut self) {
+        self.pre.pending_since = None;
     }
 
     fn follow_pre_encode(&mut self) {

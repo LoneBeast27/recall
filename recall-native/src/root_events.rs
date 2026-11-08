@@ -219,6 +219,11 @@ impl Root {
                 }
                 self.show_toast(ToastKind::Bad, "Recorder", Some(message));
             }
+            DaemonEvent::ConfigRepaired { count } => {
+                let what = if count == 1 { "1 setting was".to_owned() } else { format!("{count} settings were") };
+                let detail = format!("{what} not valid in config.toml and got a safe value. The recorder log lists them.");
+                self.show_toast_for(ToastKind::Info, "Some settings were reset", Some(detail), 10);
+            }
             DaemonEvent::MicMuted(_) | DaemonEvent::ExportStarted { .. } | DaemonEvent::Exported { .. } => {}
         }
     }

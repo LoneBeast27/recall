@@ -5,7 +5,7 @@
 //! autosave writes the working project to the SSD and the sidecar beside the clip is only
 //! written by [`flush_project`].
 use crate::edit_model::{ClipInfo, EditPlan, ExportMode, ExportSettings};
-use crate::services::library::{folders::{self, Folders},import_check,imports,watch::WatchRoot};
+use crate::services::library::{folders::{self, Folders},import_check,watch::WatchRoot};
 use crate::services::storage::{self, Priority, ProjectSource};
 use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
@@ -63,7 +63,7 @@ pub fn cancel_export(){EXPORT_CANCEL.store(true,Ordering::Release);}
 /// Its own time limit bounds a running export; 60 s bounds one the worker never starts.
 pub fn wait_for_export(){
     let start=std::time::Instant::now();
-    while EXPORT_QUEUED.load(Ordering::Acquire)&&(EXPORTING.load(Ordering::Acquire)||start.elapsed().as_secs()<60){std::thread::sleep(Duration::from_millis(50));}
+    while EXPORT_QUEUED.load(Ordering::Acquire)&&(EXPORTING.load(Ordering::Acquire)||crate::services::pre_encode::awaited()||start.elapsed().as_secs()<60){std::thread::sleep(Duration::from_millis(50));}
 }
 /// The engine's hidden temporary output, left behind when it is stopped mid-write.
 fn remove_export_temps(output:&Path,pid:u32){
@@ -135,20 +135,22 @@ pub fn library_dir_from(folders:&Folders)->PathBuf{
     folders.recordings.clone().filter(|r|!r.trim().is_empty()).map(PathBuf::from).unwrap_or_else(crate::services::library::folders::default_recordings_dir)
 }
 /// The folders [`list_clips`] reads, in its order.
-pub fn clip_roots()->Vec<WatchRoot>{
-    let mut roots=vec![WatchRoot{path:library_dir(),recursive:false}];
-    roots.extend(Folders::load().imported.into_iter().map(|folder|WatchRoot{path:PathBuf::from(folder),recursive:true}));
+/// From folders already read (the listing's copy).
+pub fn clip_roots_from(f:&Folders)->Vec<WatchRoot>{
+    let mut roots=vec![WatchRoot{path:library_dir_from(f),recursive:false}];
+    roots.extend(f.imported.iter().map(|folder|WatchRoot{path:PathBuf::from(folder),recursive:true}));
     roots
 }
 /// The recordings folder (one listing) plus every imported folder (searched a few levels
 /// deep), and one listing of the SSD thumbnail tier; a clip's `thumb` is set only when its
 /// thumbnail is already on the SSD (misses are filled by `AssetJob::Thumb` and idle prefetch
 /// through the disk lane). A clip reachable from two folders is listed once.
-pub fn list_clips()->Result<Vec<ClipEntry>,String>{list_clips_checked().map(|(clips,_)|clips)}
+pub fn list_clips()->Result<Vec<ClipEntry>,String>{list_clips_checked_from(&Folders::load()).map(|(clips,_)|clips)}
 /// [`list_clips`], and whether the listing saw every configured folder whole (each existed, was
 /// read, and no entry failed). Only a complete listing may prove a clip is gone.
-pub fn list_clips_checked()->Result<(Vec<ClipEntry>,bool),String>{list_from(&library_dir(),&Folders::load().imported)}
-pub(crate) fn list_from(dir:&Path,imported:&[String])->Result<(Vec<ClipEntry>,bool),String>{
+/// From folders already read (one read per listing).
+pub fn list_clips_checked_from(f:&Folders)->Result<(Vec<ClipEntry>,bool),String>{list_from(&library_dir_from(f),&f.imported,&f.former_recordings)}
+pub(crate) fn list_from(dir:&Path,imported:&[String],former:&[String])->Result<(Vec<ClipEntry>,bool),String>{
     let thumbs=storage::thumb_index();
     let mut complete=true;
     let mut clips=Vec::new();
@@ -172,15 +174,18 @@ pub(crate) fn list_from(dir:&Path,imported:&[String])->Result<(Vec<ClipEntry>,bo
     for root in imported{
         let (found,whole)=folders::scan_imported_cached_checked(Path::new(root),&skip);
         complete&=whole;
-        for clip in import_check::listable(found,dir,imported){push(clip.path,clip.bytes,clip.mtime,clip.folder);}
+        for clip in import_check::listable(found,dir,imported,former){push(clip.path,clip.bytes,clip.mtime,clip.folder);}
     }
     clips.sort_by(|a,b|b.mtime.cmp(&a.mtime));Ok((clips,complete))
 }
 /// SSD thumbnail for a library clip: cached, imported from the recorder's `thumbs` folder, or generated.
 /// Blocking; HDD work runs on the clip's disk lane (inline when already on it).
 pub fn thumbnail(path:&str)->Result<String,String>{storage::ensure_thumb(path)}
-/// The editor save: beside the clip, or on C: for a clip in an imported folder (compatibility mode).
-fn sidecar(source:&str)->Result<PathBuf,String>{let f=Folders::load();if imports::is_imported(source,&library_dir_from(&f),&f.imported){return imports::edit_file(Path::new(source)).ok_or_else(||"APPDATA is not set".into());}let p=Path::new(source);let name=p.file_name().ok_or("source has no filename")?.to_string_lossy();Ok(p.with_file_name(format!("{name}.recall-edit.json")))}
+// The editor save: beside the clip, or on C: for a clip in an imported folder (`backend_edit_place.rs`).
+#[path="backend_edit_place.rs"] mod edit_place;
+use edit_place::sidecar;
+#[allow(unused_imports)] // the examples build backend.rs without Root, its only caller
+pub use edit_place::share_folders;
 fn validate_info(info:&ClipInfo)->Result<(),String>{
     let p=std::fs::canonicalize(&info.path).map_err(|e|format!("resolve source: {e}"))?;
     let m=p.metadata().map_err(|e|e.to_string())?;
@@ -188,8 +193,17 @@ fn validate_info(info:&ClipInfo)->Result<(),String>{
     if !m.is_file()||m.len()!=info.source_bytes||modified!=info.source_modified_ms{return Err("Source changed since it was opened; reopen the clip.".into());}
     Ok(())
 }
-fn validate_project(project:&Project,info:&ClipInfo)->Result<(),String>{
-    if project.version!=1||project.source_path!=info.path||project.source_bytes!=info.source_bytes||project.source_modified_ms!=info.source_modified_ms{return Err("Saved edits belong to another source revision.".into());}
+/// Saved edits belong to the clip by name, size and write time, not by its absolute path: a USB
+/// drive back under another letter, or a moved clips folder, keeps them. The next flush writes
+/// the new path.
+/// A byte-identical copy (Explorer keeps the write time) shares the SSD working copy, so the
+/// working copy counts for another path only when that path is gone (a move, not a copy). The
+/// sidecar beside the clip always counts: its place names the clip.
+fn validate_project(project:&Project,info:&ClipInfo,source:ProjectSource)->Result<(),String>{
+    let elsewhere=!project.source_path.eq_ignore_ascii_case(&info.path)&&Path::new(&project.source_path).exists();
+    if source==ProjectSource::WorkingCopy&&elsewhere{return Err("Saved edits belong to a copy of this clip.".into());}
+    let name=|p:&str|Path::new(p).file_name().map(|n|n.to_string_lossy().to_lowercase());
+    if project.version!=1||name(&project.source_path)!=name(&info.path)||project.source_bytes!=info.source_bytes||project.source_modified_ms!=info.source_modified_ms{return Err("Saved edits belong to another source revision.".into());}
     validate_fps(project.export_fps)?;
     project.plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())
 }
@@ -304,30 +318,32 @@ pub fn read_marks(clip:&str)->Vec<f64>{
     let mut marks:Vec<f64>=value.get("marks").and_then(|m|m.as_array()).map(|a|a.iter().filter_map(|v|v.as_f64()).filter(|t|t.is_finite()&&*t>=0.0).collect()).unwrap_or_default();
     marks.sort_by(f64::total_cmp);marks
 }
-fn working_path(info:&ClipInfo)->Result<PathBuf,String>{
-    let name=Path::new(&info.path).file_name().ok_or("source has no filename")?.to_string_lossy().into_owned();
-    Ok(storage::working_copy_path(&storage::cache_root(),&name,info.source_bytes,info.source_modified_ms/1000))
-}
 /// Newer of the SSD working copy and the sidecar (falling back to the other when the newer one is invalid).
 /// The project to open, a warning, and whether this session owns the sidecar: a sidecar that
 /// exists but cannot be read or loaded may hold edits, so a later flush must leave it alone.
 pub(crate) fn load_project(info:&ClipInfo)->(Option<Project>,Option<String>,bool,bool){
-    let (Ok(working),Ok(sidecar))=(working_path(info),sidecar(&info.path))else{return(None,None,false,false)};
-    let lane_sidecar=sidecar.clone();
+    let (Ok(working),Ok(sidecar))=(working::load_path(info),sidecar(&info.path))else{return(None,None,false,false)};
+    // An imported clip with no edit file on C: yet may have one beside it from when its folder was
+    // Recall's: read it (never written); the first flush writes the C: one.
+    let fallback=edit_place::beside_fallback(&info.path,&sidecar);
+    let lane_sidecar=fallback.clone().unwrap_or_else(||sidecar.clone());
     let (sidecar_ms,sidecar_bytes)=storage::run_io(Path::new(&info.path),Priority::Interactive,move||(storage::projects_modified_ms(&lane_sidecar),std::fs::read(&lane_sidecar).ok())).unwrap_or((None,None));
-    let parse=|bytes:&[u8]|serde_json::from_slice::<Project>(bytes).map_err(|e|e.to_string()).and_then(|p|{validate_project(&p,info)?;Ok(p)});
-    let present=sidecar_ms.is_some()||sidecar.exists();
-    let ours=!present||sidecar_bytes.as_deref().is_some_and(|bytes|parse(bytes).is_ok());
-    let mut warning=(present&&sidecar_bytes.is_none()).then(||"Saved edits could not be read. They stay beside the clip.".to_owned());
+    let parse=|bytes:&[u8],from:ProjectSource|serde_json::from_slice::<Project>(bytes).map_err(|e|e.to_string()).and_then(|p|{validate_project(&p,info,from)?;Ok(p)});
+    // `present`/`ours` are about the file a flush writes (the C: one when reading the fallback).
+    let present=(fallback.is_none()&&sidecar_ms.is_some())||sidecar.exists();
+    let ours=!present||sidecar_bytes.as_deref().is_some_and(|bytes|parse(bytes,ProjectSource::Sidecar).is_ok());
+    let warning=(present&&sidecar_bytes.is_none()).then(||"Saved edits could not be read. They stay beside the clip.".to_owned());
+    // A source that fails is reported only when no other one loads.
+    let mut failed=None;
     for source in storage::project_order(storage::projects_modified_ms(&working),sidecar_ms.filter(|_|sidecar_bytes.is_some())){
         let bytes=match source{ProjectSource::WorkingCopy=>std::fs::read(&working).ok(),ProjectSource::Sidecar=>sidecar_bytes.clone()};
         let Some(bytes)=bytes else{continue};
-        match parse(&bytes){
+        match parse(&bytes,source){
             Ok(mut p)=>{normalize_project_audio(&mut p.plan,info);return(Some(p),warning,ours,present)},
-            Err(e)=>{warning.get_or_insert(format!("Saved edits were not loaded: {e}"));}
+            Err(e)=>{failed.get_or_insert(format!("Saved edits were not loaded: {e}"));}
         }
     }
-    (None,warning,ours,present)
+    (None,warning.or(failed),ours,present)
 }
 fn normalize_project_audio(plan:&mut EditPlan,info:&ClipInfo){
     let mut normalized=Vec::with_capacity(info.audio.len());
@@ -349,81 +365,9 @@ fn language_code(name:&str)->bool{
 }
 fn recall_generated_path(path:&str)->bool{let stem=Path::new(path).file_stem().and_then(|value|value.to_str()).unwrap_or("");let parts:Vec<_>=stem.split("__").collect();parts.len()==4&&parts[1].len()==10&&parts[1].chars().enumerate().all(|(index,c)|matches!(index,4|7) && c=='-' || index!=4&&index!=7&&c.is_ascii_digit())&&parts[2].len()>=8&&parts[3].len()>=16&&parts[3].chars().all(|c|c.is_ascii_hexdigit())}
 #[cfg(test)]
-mod tests {
-    use super::*;
-    #[test] fn library_dir_from_uses_the_recordings_folder_and_falls_back_when_blank(){
-        if std::env::var_os("RECALL_OUT_DIR").is_some(){return;} // the env var wins over both cases
-        let folders=|r:Option<&str>|Folders{recordings:r.map(str::to_owned),..Folders::default()};
-        assert_eq!(library_dir_from(&folders(Some(r"E:\Recall\Raw"))),PathBuf::from(r"E:\Recall\Raw"));
-        let default=crate::services::library::folders::default_recordings_dir();
-        assert!(default.is_absolute()&&default.ends_with("Recall"),"{default:?}");
-        assert_eq!(library_dir_from(&folders(Some("  "))),default);
-        assert_eq!(library_dir_from(&folders(None)),default);
-    }
-    #[test] fn recall_two_track_names_are_only_applied_to_matching_generated_sources(){
-        let mut info=ClipInfo{path:"C:/clips/VALORANT__2026-10-17__22-34-31-275__3d260146faca4115835ba29741d71fe3.mp4".into(),duration:1.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![crate::edit_model::AudioTrackInfo{stream_index:1,name:"und".into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new(),source:String::new()},crate::edit_model::AudioTrackInfo{stream_index:2,name:"und".into(),channels:1,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new(),source:String::new()}],keyframes:Vec::new()};
-        normalize_audio_names(&mut info);assert_eq!(info.audio[0].name,"Game audio");assert_eq!(info.audio[1].name,"Microphone");
-        info.path="C:/clips/imported.mp4".into();info.audio[0].name="und".into();info.audio[1].name="unknown".into();normalize_audio_names(&mut info);assert_eq!(info.audio[0].name,"Audio track 1");assert_eq!(info.audio[1].name,"Audio track 2");
-        assert_eq!(storage::recorder_thumb_stem("my-hyphenated-game__2026-10-17__22-34-31-275__abcdef0123456789-1783463424-thumb.jpg"),Some("my-hyphenated-game__2026-10-17__22-34-31-275__abcdef0123456789"));
-        assert_eq!(storage::recorder_thumb_stem("ordinary-name-thumb.jpg"),None);
-    }
-    #[test] fn short_track_labels_stay_and_language_codes_do_not(){
-        for label in ["Mic","mic","MIC","SFX","Bgm","Sub","Tom"]{assert!(!generic_audio_name(label),"{label}");}
-        for code in ["eng","en","fre","jpn","ENG","und"," eng ","","a"]{assert!(generic_audio_name(code),"{code}");}
-        let track=|name:&str,stream_index|crate::edit_model::AudioTrackInfo{stream_index,name:name.into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new(),source:String::new()};
-        let mut info=ClipInfo{path:"E:/clips/VALORANT__2025-03-01__20-10-11.mp4".into(),duration:1.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![track("eng",1),track("Game",2),track("Mic",3)],keyframes:Vec::new()};
-        normalize_audio_names(&mut info);
-        assert_eq!(info.audio.iter().map(|a|a.name.as_str()).collect::<Vec<_>>(),["Audio track 1","Game","Mic"]);
-    }
-    #[test] fn reads_marks_sidecar_and_ignores_garbage(){
-        let dir=std::env::temp_dir().join(format!("recall-marks-{}",std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let clip=dir.join("VALORANT__2026-10-22__01-02-03.mp4");
-        std::fs::write(dir.join("VALORANT__2026-10-22__01-02-03.recall-marks.json"),r#"{"version":1,"marks":[42.5,3.0,"x",-1]}"#).unwrap();
-        assert_eq!(read_marks(&clip.to_string_lossy()),vec![3.0,42.5]);
-        assert!(read_marks(&dir.join("none.mp4").to_string_lossy()).is_empty());
-        let _=std::fs::remove_dir_all(&dir);
-    }
-    #[test] fn only_the_stamped_marker_says_what_an_engine_can_do(){
-        let dir=std::env::temp_dir().join(format!("recall-engine-{}",std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let (old,prepare,new)=(dir.join("old.exe"),dir.join("prepare.exe"),dir.join("new.exe"));
-        std::fs::write(&old,b"MZ recorder --prepare-editor --export-edit").unwrap();
-        std::fs::write(&prepare,b"MZ recall-engine-caps:prepare-editor; rest").unwrap();
-        std::fs::write(&new,b"MZ \0recall-engine-caps:prepare-editor,export-edit;\0 rest").unwrap();
-        assert!(!engine_knows(&old,"prepare-editor").unwrap(),"flag names in a program file prove nothing");
-        assert!(!engine_knows(&old,"export-edit").unwrap());
-        assert!(engine_knows(&prepare,"prepare-editor").unwrap());
-        assert!(!engine_knows(&prepare,"export-edit").unwrap());
-        assert!(engine_knows(&new,"prepare-editor").unwrap());
-        assert!(engine_knows(&new,"export-edit").unwrap());
-        assert!(!engine_knows(&new,"prepare").unwrap(),"a whole capability, not a prefix");
-        let _=std::fs::remove_dir_all(&dir);
-    }
-    #[test] fn a_marker_with_no_end_counts_for_nothing(){
-        assert!(stamped_caps(b"recall-engine-caps:prepare-editor").is_empty());
-    }
-    #[test] fn an_export_has_an_end_that_grows_with_the_work(){
-        let range=|start:f64,end:f64,speed:f64|{let mut r=crate::edit_model::TimeRange::new(start,end);r.speed=speed;r};
-        let plan=|ranges|EditPlan{ranges,audio:Vec::new(),mix_down:None};
-        assert_eq!(export_limit(&plan(vec![]),60),Duration::from_secs(600));
-        assert_eq!(export_limit(&plan(vec![range(0.0,60.0,1.0)]),60),Duration::from_secs(1800));
-        assert_eq!(export_limit(&plan(vec![range(0.0,60.0,0.25)]),60),Duration::from_secs(5400),"a slowed part is longer");
-        assert_eq!(export_limit(&plan(vec![range(0.0,60.0,1.0)]),240),Duration::from_secs(5400),"more frames");
-    }
-    #[test] fn a_lost_publish_race_is_retried_and_other_failures_are_not(){
-        assert!(lost_publish_race("prepare media: prepare editor: publish cache: The directory is not empty. (os error 145)"));
-        assert!(!lost_publish_race("prepare media: open clip.mp4: Invalid data found when processing input"));
-    }
-    #[test] fn only_real_edits_count_as_non_default_plans(){
-        let info=ClipInfo{path:"C:/clips/a.mp4".into(),duration:10.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![crate::edit_model::AudioTrackInfo{stream_index:1,name:"Game audio".into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new(),source:String::new()}],keyframes:Vec::new()};
-        let untouched=EditPlan{mix_down:None,ranges:vec![crate::edit_model::TimeRange::new(0.0,10.0)],audio:vec![crate::edit_model::AudioSetting{stream_index:1,gain_db:0.0,muted:false,mix:true}]};
-        assert!(plan_is_default(&untouched,&info));
-        let mut trimmed=untouched.clone();trimmed.ranges[0].start=1.5;assert!(!plan_is_default(&trimmed,&info));
-        let mut split=untouched.clone();split.ranges=vec![crate::edit_model::TimeRange::new(0.0,4.0),crate::edit_model::TimeRange::new(4.0,10.0)];assert!(!plan_is_default(&split,&info));
-        let mut muted=untouched.clone();muted.audio[0].muted=true;assert!(!plan_is_default(&muted,&info));
-    }
-}
+#[path="backend_project_tests.rs"] mod project_tests;
+#[cfg(test)]
+#[path="backend_tests.rs"] mod tests;
 fn validate_fps(fps:u32)->Result<(),String>{if fps==0||fps>i32::MAX as u32{Err("Export rate must be a positive integer within the supported range.".into())}else{Ok(())}}
 fn project_bytes(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->Result<Vec<u8>,String>{
     validate_fps(fps)?;plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())?;
@@ -460,18 +404,8 @@ pub fn flush_project(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSetting
     validate_info(info)?;let bytes=project_bytes(info,plan,fps,export)?;
     let working=working_path(info)?;let default=plan_is_default(plan,info);
     let path=sidecar(&info.path)?;let lane_bytes=bytes.clone();let clip=PathBuf::from(&info.path);
-    let flushed=storage::run_io(Path::new(&info.path),Priority::Interactive,move||->Result<Flushed,String>{
-        let existing=std::fs::read(&path).ok();let name=path.to_string_lossy().into_owned();
-        let ours=ours&&(existing.is_some()||!path.exists());
-        match storage::sidecar_step(existing.as_deref(),&lane_bytes,default&&!storage::has_export(&clip,&library_dir()),ours){
-            storage::SidecarStep::Keep=>Ok(Flushed::Current(name)),
-            storage::SidecarStep::Write=>{storage::write_atomic(&path,&lane_bytes)?;Ok(Flushed::Current(name))}
-            storage::SidecarStep::Remove=>{
-                if existing.is_none(){return Ok(Flushed::Nothing);}
-                std::fs::remove_file(&path).map_err(|e|format!("remove {name}: {e}"))?;Ok(Flushed::Removed(name))
-            }
-        }
-    })??;
+    // A few KB: it does not wait for an export that holds the disk lane for its whole run.
+    let flushed=storage::run_io_brief(Path::new(&info.path),Priority::Interactive,move||sidecar_flush::sidecar_task(&path,&clip,&lane_bytes,default,ours))??;
     if !matches!(flushed,Flushed::Nothing){storage::write_atomic(&working,&bytes)?;}
     Ok(flushed)
 }
@@ -485,8 +419,13 @@ fn export_limit(plan:&EditPlan,fps:u32)->Duration{
     Duration::from_secs_f64(600.0+seconds.max(0.0)*20.0*(f64::from(fps)/60.0).max(1.0))
 }
 #[path="backend_export.rs"] mod run_export;
+#[path="backend_sidecar.rs"] mod sidecar_flush;
+#[path="backend_working.rs"] mod working;
+use working::working_path;
 pub use run_export::export_clip;
-pub(crate) use run_export::{engine_export,export_cancelled,export_queued,export_target};
+#[allow(unused_imports)] // the editor reads it; the examples build backend without one
+pub use run_export::export_progress;
+pub(crate) use run_export::{engine_export,export_cancelled,export_queued,export_target,name_after};
 /// Drive types and cache usage for Settings (walks the cache: call from a worker thread).
 pub fn storage_report(notice:Option<String>)->StorageReport{
     let cache=storage::usage_detail();

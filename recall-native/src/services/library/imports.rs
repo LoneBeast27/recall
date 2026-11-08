@@ -39,9 +39,12 @@ pub struct Link {
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 #[serde(default)]
-struct Table {
+pub(crate) struct Table {
     version: u32,
     files: BTreeMap<String, Link>,
+    /// Why saving is refused: the file exists but could not be read this run.
+    #[serde(skip)]
+    write_block: Option<String>,
 }
 
 /// What the library does with one imported file.
@@ -91,6 +94,7 @@ fn path_hash(path: &str) -> u64 {
 }
 
 /// The clip file name an edit file belongs to (`<hash>~` removed).
+#[cfg(test)]
 pub fn edit_file_clip_name(edit_name: &str) -> &str {
     match edit_name.split_once('~') {
         Some((hash, rest)) if hash.len() == 16 && hash.bytes().all(|b| b.is_ascii_hexdigit()) => rest,
@@ -98,16 +102,78 @@ pub fn edit_file_clip_name(edit_name: &str) -> &str {
     }
 }
 
-/// True when `path` is inside one of `imported` and not directly in the recordings folder.
-pub fn is_imported(path: &str, recordings: &Path, imported: &[String]) -> bool {
+/// True when `path` is inside one of `imported` and not directly in the recordings folder or a
+/// folder that was the recordings folder before (`former`: those clips stay Recall's own, so
+/// Delete recycles them and their edits stay beside them).
+pub fn is_imported(path: &str, recordings: &Path, imported: &[String], former: &[String]) -> bool {
     let parent = Path::new(path).parent().map(|p| folder_key(&p.to_string_lossy())).unwrap_or_default();
-    parent != folder_key(&recordings.to_string_lossy()) && imported.iter().any(|folder| is_inside(path, folder))
+    let owned = parent == folder_key(&recordings.to_string_lossy()) || former.iter().any(|folder| folder_key(folder) == parent);
+    !owned && imported.iter().any(|folder| is_inside(path, folder))
 }
 
 fn with_table<T>(work: impl FnOnce(&mut Table) -> T) -> T {
     let mut guard = TABLE.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let table = guard.get_or_insert_with(|| table_path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default());
+    let table = guard.get_or_insert_with(|| table_path().map(|p| load_table(&p)).unwrap_or_default());
     work(table)
+}
+
+/// The table at `path`, entry by entry (one entry this build can't read drops only
+/// itself). Missing -> empty. Damaged -> kept as a dated `.bad` first (moved when nothing
+/// parsed, copied when only some entries did). Unreadable -> empty, and saving is refused.
+pub(crate) fn load_table(path: &Path) -> Table {
+    use crate::services::durable::{quarantine, Keep};
+    crate::services::durable::sweep_temps(path, std::time::SystemTime::now());
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Table::default(),
+        Err(error) => return Table { write_block: Some(format!("imports.json could not be read ({error}); not saved")), ..Table::default() },
+    };
+    match parse_table(&bytes) {
+        Some((table, false)) => table,
+        Some((table, true)) => {
+            quarantine(path, std::time::SystemTime::now(), Keep::Copy);
+            table
+        }
+        None => {
+            quarantine(path, std::time::SystemTime::now(), Keep::Move);
+            Table::default()
+        }
+    }
+}
+
+/// The table and whether any part was dropped; None when `bytes` is not a JSON object.
+fn parse_table(bytes: &[u8]) -> Option<(Table, bool)> {
+    let serde_json::Value::Object(root) = serde_json::from_slice(bytes).ok()? else { return None };
+    let mut lossy = false;
+    let version = match root.get("version") {
+        Some(v) => v.as_u64().and_then(|v| u32::try_from(v).ok()).unwrap_or_else(|| {
+            lossy = true;
+            0
+        }),
+        None => 0,
+    };
+    let mut files = BTreeMap::new();
+    match root.get("files") {
+        Some(serde_json::Value::Object(map)) => {
+            for (key, value) in map {
+                match serde_json::from_value::<Link>(value.clone()) {
+                    Ok(link) => {
+                        files.insert(key.clone(), link);
+                    }
+                    Err(_) => lossy = true,
+                }
+            }
+        }
+        Some(_) => lossy = true,
+        None => {}
+    }
+    Some((Table { version, files, write_block: None }, lossy))
+}
+
+/// Whether the table hides the file with folder key `key` (tests).
+#[cfg(test)]
+pub(crate) fn table_hides(table: &Table, key: &str) -> bool {
+    table.files.get(key).is_some_and(|link| link.hidden)
 }
 
 pub fn status(path: &Path, bytes: u64, mtime: u64) -> Status {
@@ -131,7 +197,7 @@ pub fn record(path: &Path, bytes: u64, mtime: u64, verdict: &Verdict) -> bool {
         Verdict::Clip => (Kind::Clip, None),
         Verdict::Edited(name) => (Kind::Edited, Some((*name).to_owned())),
         Verdict::NoVideo => (Kind::NoVideo, None),
-        Verdict::Unready => return false,
+        Verdict::Unready | Verdict::Unreadable => return false,
     };
     let text = path.to_string_lossy().into_owned();
     with_table(|table| {
@@ -179,19 +245,40 @@ pub fn skipped_under(folder: &str) -> usize {
     with_table(|table| table.files.values().filter(|l| l.kind == Kind::Edited && !l.hidden && is_inside(&l.path, folder)).count())
 }
 
-/// Atomic: `imports.json.tmp`, then rename over the file.
+/// Durable: a temp file, flushed, then renamed over the file. The table is serialized
+/// under its lock and written after it is released, so `status` callers never wait on
+/// the drive; the ticket keeps an older snapshot from landing over a newer one.
 pub fn save() -> Result<(), String> {
     let path = table_path().ok_or("APPDATA is not set")?;
-    let bytes = with_table(|table| {
+    let (ticket, bytes) = with_table(|table| {
         table.version = 1;
-        serde_json::to_vec(table).map_err(|e| e.to_string())
+        snapshot(table).map(|bytes| (WRITER.ticket(), bytes))
     })?;
+    write_snapshot(&path, ticket, &bytes)
+}
+
+static WRITER: std::sync::LazyLock<crate::services::ordered_write::OrderedWriter> = std::sync::LazyLock::new(Default::default);
+
+/// `table` as JSON; refused after a failed read.
+fn snapshot(table: &Table) -> Result<Vec<u8>, String> {
+    if let Some(reason) = &table.write_block {
+        return Err(reason.clone());
+    }
+    serde_json::to_vec(table).map_err(|e| e.to_string())
+}
+
+fn write_snapshot(path: &Path, ticket: u64, bytes: &[u8]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
     }
-    let tmp = path.with_extension("json.tmp");
-    std::fs::write(&tmp, bytes).map_err(|e| format!("write imports: {e}"))?;
-    std::fs::rename(&tmp, &path).map_err(|e| format!("save imports: {e}"))
+    WRITER.write(ticket, path, bytes).map_err(|e| format!("save imports: {e}"))
+}
+
+/// Writes `table` to `path` (temp file, flushed, then renamed); refused after a failed read.
+#[cfg(test)]
+pub(crate) fn save_table(path: &Path, table: &Table) -> Result<(), String> {
+    let bytes = snapshot(table)?;
+    crate::services::durable::write_durable(path, &bytes).map_err(|e| format!("save imports: {e}"))
 }
 
 #[cfg(test)]
@@ -237,9 +324,18 @@ mod tests {
     #[test]
     fn recordings_folder_clips_are_never_imported() {
         let imported = vec![r"V:\".to_owned(), r"D:\Old".to_owned()];
-        assert!(!is_imported(r"V:\Recall\Raw\a.mp4", Path::new(r"V:\Recall\Raw"), &imported));
-        assert!(is_imported(r"V:\Other\a.mp4", Path::new(r"V:\Recall\Raw"), &imported));
-        assert!(is_imported(r"D:\Old\Game\a.mp4", Path::new(r"V:\Recall\Raw"), &imported));
-        assert!(!is_imported(r"E:\a.mp4", Path::new(r"V:\Recall\Raw"), &imported));
+        assert!(!is_imported(r"V:\Recall\Raw\a.mp4", Path::new(r"V:\Recall\Raw"), &imported, &[]));
+        assert!(is_imported(r"V:\Other\a.mp4", Path::new(r"V:\Recall\Raw"), &imported, &[]));
+        assert!(is_imported(r"D:\Old\Game\a.mp4", Path::new(r"V:\Recall\Raw"), &imported, &[]));
+        assert!(!is_imported(r"E:\a.mp4", Path::new(r"V:\Recall\Raw"), &imported, &[]));
+    }
+
+    #[test]
+    fn a_former_recordings_folder_stays_recall_owned() {
+        let imported = vec![r"D:\OldRecall".to_owned(), r"D:\Medal".to_owned()];
+        let former = vec![r"d:\oldrecall\".to_owned()];
+        assert!(!is_imported(r"D:\OldRecall\VALORANT__2026-10-01__10-00-00.mp4", Path::new(r"V:\Recall"), &imported, &former));
+        assert!(is_imported(r"D:\OldRecall\sub\x.mp4", Path::new(r"V:\Recall"), &imported, &former), "only its own top level, like the recordings folder");
+        assert!(is_imported(r"D:\Medal\x.mp4", Path::new(r"V:\Recall"), &imported, &former));
     }
 }

@@ -73,7 +73,6 @@ impl NativePreview {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .clone()
-            .or_else(|| self.audio.error())
             .or_else(|| {
                 self.window_state
                     .update_error
@@ -123,6 +122,8 @@ impl NativePreview {
     }
 
     pub fn play(&mut self) -> Result<(), String> {
+        self.settle_sound();
+        self.retry_sound();
         self.require_ready()?;
         self.prime_started = None;
         self.rest.set(None);
@@ -301,8 +302,10 @@ impl NativePreview {
         gain_db: f64,
         muted: bool,
     ) -> Result<(), String> {
+        // Kept for the sound coming back (`media_sound.rs`).
+        self.sound.set_level(stream_index, gain_db, muted);
         if !self.has_audio {
-            return Err("preview has no audio tracks".into());
+            return if self.sound.is_down() { Ok(()) } else { Err("preview has no audio tracks".into()) };
         }
         self.audio.set_audio(stream_index, gain_db, muted)
     }

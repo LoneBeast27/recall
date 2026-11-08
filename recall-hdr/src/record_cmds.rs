@@ -31,13 +31,15 @@ use std::time::Instant;
 use serde_json::{json, Value};
 
 use crate::config::{sync_autostart, RECORD_RUN_ARG};
+use crate::config_watch::Base;
 use crate::control::Inbound;
 use crate::hdr_exec;
 use crate::log;
 use crate::record_app::{apply_affinity, Controller};
 use crate::record_config::{apply_patch, parse_cpu_mask};
 use crate::record_notice::Situation;
-use crate::record_status::{config_event, error_event, status_json, tray_line, StatusInputs};
+use crate::record_config_event::config_event;
+use crate::record_status::{error_event, status_json, tray_line, StatusInputs};
 use crate::record_engine::{capture_refusal, engine_settings_changed};
 use crate::record_dispatch::{command_effects, hud_probe_effects, mic_effects, pipe_setting_effects, refusal, Effect, SavePort, Sent, NOT_RESPONDING};
 use crate::supervisor::EngineHealth;
@@ -162,7 +164,7 @@ impl Controller {
                 _ => self.reply_error(client, "set_mode needs \"value\": auto|sdr|hdr"),
             },
             "set_ac_profile" => self.set_ac_profile(client, &val),
-            "get_config" => self.hub.event_to(inbound.client, "session", &config_event(&self.cfg)),
+            "get_config" => self.hub.event_to(inbound.client, "session", &config_event(&self.cfg, &self.overrides, &self.config_repairs)),
             "set_config" => match val.get("patch") {
                 Some(patch) => {
                     self.apply_config_patch(patch, client);
@@ -274,43 +276,6 @@ impl Controller {
         }
         let result = self.hdr.set_ac_profile(&self.cfg, profile);
         self.hub.event("hdr", &hdr_exec::ac_profile_event(&result));
-    }
-
-    /// Validate, persist and apply a config patch. `client` gets errors; the
-    /// new config + status are broadcast. Returns whether it applied.
-    pub(crate) fn apply_config_patch(&mut self, patch: &Value, client: Option<u64>) -> bool {
-        let out = match apply_patch(&self.file_cfg, patch) {
-            Ok(o) => o,
-            Err(e) => {
-                self.reply_error(client, &e);
-                return false;
-            }
-        };
-        // A patched key also retires its startup env override.
-        let mut overrides = self.overrides.clone();
-        overrides.forget(patch);
-        let effective = overrides.apply(&out.config);
-        if out.changed.is_empty() && effective == self.cfg {
-            // Nothing to persist (keeps the user's hand-written file untouched).
-            if let Some(c) = client {
-                self.hub.event_to(c, "session", &config_event(&self.cfg));
-            }
-            return true;
-        }
-        if !out.changed.is_empty() {
-            if let Err(e) = self.store.save(&out.config) {
-                self.reply_error(client, &format!("config save failed: {e}"));
-                return false;
-            }
-            log!("record: config updated ({})", out.changed.join(", "));
-        }
-        let old = std::mem::replace(&mut self.cfg, effective);
-        self.file_cfg = out.config;
-        self.overrides = overrides;
-        self.apply_config_effects(&old, client);
-        self.hub.event("session", &config_event(&self.cfg));
-        self.publish_status();
-        true
     }
 
     /// React to the difference between the old and new effective config.
@@ -479,6 +444,9 @@ impl Controller {
         }
     }
 }
+
+#[path = "record_cmds_config.rs"]
+mod config_patch;
 
 #[cfg(test)]
 mod save_tests {

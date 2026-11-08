@@ -240,7 +240,7 @@ fn probe_a_real_config_copy() {
     let before = std::fs::read(&path).unwrap();
     let cfg = crate::config::load_from(&path);
     assert_eq!(std::fs::read(&path).unwrap(), before, "loading leaves the file as it was");
-    assert!(!path.with_extension("toml.bad").exists(), "no .bad backup");
+    assert!(!crate::durable::bad_path(&path, std::time::SystemTime::now()).exists(), "no .bad backup");
     crate::record_config::validate(&cfg).expect("the loaded config validates");
     let rec = &cfg.recording;
     println!("save {:?} mic {} bookmark {} screenshot {} record {} stats {}", rec.save_hotkeys, rec.mic_hotkey, rec.bookmark_hotkey, rec.screenshot_hotkey, rec.record_hotkey, rec.stats_hotkey);

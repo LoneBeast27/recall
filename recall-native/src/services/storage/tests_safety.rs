@@ -122,8 +122,8 @@ fn old_unmarked_kept_copies_are_never_deleted() {
     aged(&old, 30);
     let clips = sandbox.join("clips");
     std::fs::create_dir_all(&clips).unwrap();
-    let (_adopted, deleted) = kept::sweep_in(&root, &kept, &clips, 1 << 30);
-    assert_eq!(deleted, 0);
+    let (_adopted, left) = kept::sweep_in(&root, &kept, &clips, 1 << 30);
+    assert_eq!(left, 1, "reported, not deleted");
     assert!(old.exists(), "an old unmarked copy whose clip is gone stays");
 }
 

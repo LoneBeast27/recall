@@ -113,3 +113,51 @@ fn without_the_recorder_the_gpu_is_held() {
     crate::services::storage::set_recorder_connected(false);
 }
 
+
+/// An export pressed before the edit settled (or while recording held the pre-encode) must
+/// not be followed by a pre-encode of the plan it just exported.
+#[test]
+fn a_finished_export_disarms_the_pending_pre_encode() {
+    let _slot = crate::services::pre_encode::test_slot_lock();
+    let mut ed = editor();
+    ed.follow_pre_encode();
+    ed.plan.ranges = vec![TimeRange::new(98.0, 120.0)];
+    ed.follow_pre_encode();
+    assert!(ed.pre.pending_since.is_some(), "the trimmed plan waits to settle");
+    ed.exporting = true;
+    ed.export_of = ed.info.as_ref().map(|info| info.path.clone());
+    let summary = crate::backend::ExportSummary { path: "E:/Recall/Edited/x.mp4".into(), fps: Some(60), frames: 1, seconds: 1.0, bytes: 1, lossless: false, width: 2, height: 2 };
+    ed.on_exported(Ok(summary));
+    assert!(ed.pre.pending_since.is_none(), "the plan just exported is not prepared again");
+}
+
+/// Lossless hides the size limit and resolution: their stored values must not reach the
+/// engine, which refuses them for a stream copy.
+#[test]
+fn lossless_export_drops_the_hidden_reencode_settings() {
+    let mut ed = editor();
+    ed.export_settings.max_bytes = Some(10_000_000);
+    ed.export_settings.height = Some(720);
+    ed.export_settings.mode = ExportMode::Lossless;
+    let info = ed.info.clone().unwrap();
+    let crate::worker::Job::Export(_, plan, _, settings) = ed.export_job(info) else { panic!("an export job") };
+    assert_eq!(settings.validate(&plan), Ok(()), "{settings:?}");
+    assert_eq!((ed.export_settings.max_bytes, ed.export_settings.height), (Some(10_000_000), Some(720)), "switching back restores them");
+}
+
+/// The Export button and the summary say what the export does: progress once the engine
+/// reports it, no frame rate for a stream copy, and the output size after Resolution.
+#[test]
+fn the_export_button_and_size_describe_the_output() {
+    use crate::editor_state::persist::export_label;
+    assert_eq!(export_label(false, 60, None), "Exporting at 60 fps…");
+    assert_eq!(export_label(false, 60, Some(0.427)), "Exporting at 60 fps… 42%");
+    assert_eq!(export_label(true, 60, Some(0.5)), "Exporting… 50%");
+    assert_eq!(export_label(true, 60, None), "Exporting…");
+    let mut ed = editor();
+    assert_eq!(ed.export_size(), Some((2560, 1440)));
+    ed.export_settings.height = Some(720);
+    assert_eq!(ed.export_size(), Some((1280, 720)), "the Resolution choice");
+    ed.export_settings.mode = ExportMode::Lossless;
+    assert_eq!(ed.export_size(), Some((2560, 1440)), "a stream copy keeps the source size");
+}

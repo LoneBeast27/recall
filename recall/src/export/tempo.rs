@@ -40,6 +40,7 @@ fn layout_name(layout: ff::ChannelLayout) -> String {
 /// Stretch planar f32 PCM so it lasts `1/speed` as long, keeping pitch. The
 /// result is exactly `round(len / speed)` samples per channel (the filter's
 /// own length can differ by a few samples; it is trimmed or zero-padded).
+#[cfg(test)]
 pub(crate) fn stretch(
     pcm: &[Vec<f32>],
     rate: u32,
@@ -50,35 +51,69 @@ pub(crate) fn stretch(
     let target = (input_len as f64 / speed).round() as usize;
     let mut output: Vec<Vec<f32>> = (0..pcm.len()).map(|_| Vec::with_capacity(target)).collect();
     if input_len > 0 {
-        let mut graph = build_graph(rate, layout, speed)?;
-        let format = ff::format::Sample::F32(ff::format::sample::Type::Planar);
-        let mut position = 0usize;
-        while position < input_len {
-            let count = CHUNK.min(input_len - position);
-            let mut frame = ff::frame::Audio::new(format, count, layout);
-            frame.set_rate(rate);
-            frame.set_pts(Some(position as i64));
-            for (channel, source) in pcm.iter().enumerate() {
-                frame.plane_mut::<f32>(channel)[..count]
-                    .copy_from_slice(&source[position..position + count]);
-            }
-            source(&mut graph)?
-                .source()
-                .add(&frame)
-                .map_err(|e| format!("feed audio time-stretch: {e}"))?;
-            drain(&mut graph, &mut output)?;
-            position += count;
-        }
-        source(&mut graph)?
-            .source()
-            .flush()
-            .map_err(|e| format!("flush audio time-stretch: {e}"))?;
-        drain(&mut graph, &mut output)?;
+        let mut stretcher = Stretcher::new(rate, layout, speed)?;
+        let mut append = |part: Vec<Vec<f32>>| output.iter_mut().zip(part).for_each(|(all, part)| all.extend(part));
+        append(stretcher.push(pcm)?);
+        append(stretcher.finish()?);
     }
     for channel in &mut output {
         channel.resize(target, 0.0);
     }
     Ok(output)
+}
+
+/// A running `atempo` chain: source PCM in, stretched PCM out, in pieces of any size. The
+/// caller trims or pads the total to the length it expects (see [`stretch`]).
+pub(crate) struct Stretcher {
+    graph: ff::filter::Graph,
+    rate: u32,
+    layout: ff::ChannelLayout,
+    channels: usize,
+    /// Source samples fed so far (the frames' timestamps).
+    fed: usize,
+}
+
+impl Stretcher {
+    pub fn new(rate: u32, layout: ff::ChannelLayout, speed: f64) -> Result<Self, String> {
+        let channels = layout.channels().max(1) as usize;
+        Ok(Self { graph: build_graph(rate, layout, speed)?, rate, layout, channels, fed: 0 })
+    }
+
+    /// Feeds planar source samples; returns what the filter let out so far.
+    pub fn push(&mut self, pcm: &[Vec<f32>]) -> Result<Vec<Vec<f32>>, String> {
+        let input_len = pcm.first().map_or(0, Vec::len);
+        let format = ff::format::Sample::F32(ff::format::sample::Type::Planar);
+        let mut output = vec![Vec::new(); self.channels];
+        let mut position = 0usize;
+        while position < input_len {
+            let count = CHUNK.min(input_len - position);
+            let mut frame = ff::frame::Audio::new(format, count, self.layout);
+            frame.set_rate(self.rate);
+            frame.set_pts(Some((self.fed + position) as i64));
+            for (channel, source) in pcm.iter().enumerate() {
+                frame.plane_mut::<f32>(channel)[..count].copy_from_slice(&source[position..position + count]);
+            }
+            source(&mut self.graph)?
+                .source()
+                .add(&frame)
+                .map_err(|e| format!("feed audio time-stretch: {e}"))?;
+            drain(&mut self.graph, &mut output)?;
+            position += count;
+        }
+        self.fed += input_len;
+        Ok(output)
+    }
+
+    /// Ends the input; returns the filter's last samples.
+    pub fn finish(mut self) -> Result<Vec<Vec<f32>>, String> {
+        let mut output = vec![Vec::new(); self.channels];
+        source(&mut self.graph)?
+            .source()
+            .flush()
+            .map_err(|e| format!("flush audio time-stretch: {e}"))?;
+        drain(&mut self.graph, &mut output)?;
+        Ok(output)
+    }
 }
 
 fn build_graph(rate: u32, layout: ff::ChannelLayout, speed: f64) -> Result<ff::filter::Graph, String> {

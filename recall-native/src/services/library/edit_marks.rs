@@ -15,8 +15,11 @@ pub enum Verdict {
     Edited(&'static str),
     /// No video track (an audio file saved as .mp4, a broken file): skip it.
     NoVideo,
-    /// No `moov` yet (still recording, a copy in flight) or unreadable: list it, look again later.
+    /// No `moov` yet (still recording, a copy in flight): list it, look again later.
     Unready,
+    /// The file could not be opened or read this time (locked, a network blip): list it, look
+    /// again later, and never take it for a broken file.
+    Unreadable,
 }
 
 /// Lowercase needle → the editor's name. Names that a recorder from the same company also writes
@@ -56,13 +59,13 @@ const MKV_WINDOW: u64 = 1 << 20;
 const MAX_BOXES: usize = 4096;
 
 pub fn inspect(path: &Path) -> Verdict {
-    let Ok(mut file) = std::fs::File::open(path) else { return Verdict::Unready };
+    let Ok(mut file) = std::fs::File::open(path) else { return Verdict::Unreadable };
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or_default().to_ascii_lowercase();
     if ext == "mkv" || ext == "webm" { inspect_mkv(&mut file) } else { inspect_mp4(&mut file) }
 }
 
 pub(crate) fn inspect_mp4<R: Read + Seek>(reader: &mut R) -> Verdict {
-    let Ok(end) = reader.seek(SeekFrom::End(0)) else { return Verdict::Unready };
+    let Ok(end) = reader.seek(SeekFrom::End(0)) else { return Verdict::Unreadable };
     if end == 0 {
         // Stored as no video; a size change brings it back for another look.
         return Verdict::NoVideo;
@@ -75,7 +78,10 @@ pub(crate) fn inspect_mp4<R: Read + Seek>(reader: &mut R) -> Verdict {
         }
         let Some((kind, body, next)) = box_at(reader, at, end) else { break };
         match &kind {
-            b"moov" => moov = read_span(reader, body, next),
+            b"moov" => match read_span(reader, body, next) {
+                Some(bytes) => moov = Some(bytes),
+                None => return Verdict::Unreadable,
+            },
             b"uuid" | b"meta" | b"udta" | b"Xtra" => extra.extend(read_span(reader, body, next).unwrap_or_default()),
             _ => {}
         }
@@ -95,8 +101,8 @@ pub(crate) fn inspect_mp4<R: Read + Seek>(reader: &mut R) -> Verdict {
 }
 
 fn inspect_mkv<R: Read + Seek>(reader: &mut R) -> Verdict {
-    let Ok(end) = reader.seek(SeekFrom::End(0)) else { return Verdict::Unready };
-    let Some(mut bytes) = read_span(reader, 0, end.min(MKV_WINDOW)) else { return Verdict::Unready };
+    let Ok(end) = reader.seek(SeekFrom::End(0)) else { return Verdict::Unreadable };
+    let Some(mut bytes) = read_span(reader, 0, end.min(MKV_WINDOW)) else { return Verdict::Unreadable };
     if !bytes.starts_with(&[0x1A, 0x45, 0xDF, 0xA3]) {
         return Verdict::Unready;
     }

@@ -66,10 +66,12 @@ powershell -NoProfile -File scripts\install.ps1
   an export. Cancel export stops
   a running export and leaves nothing behind.
 - **Old clips:** Settings → Media → Add folder lists clips from ShadowPlay, Medal, OBS or any
-  folder in the library. Nothing is moved.
+  folder in the library. Nothing is moved. A folder that was the recordings folder before stays
+  Recall's own: Delete still sends its clips to the Recycle Bin and their edits stay beside them.
 - **Clip folders stay in step:** while the app is open, a clip another program copies, renames or
-  deletes in a clip folder shows up within seconds, once the file is finished. A renamed clip
-  loses its favourite and title, which are stored by file name. An imported folder on a USB drive
+  deletes in a clip folder shows up within seconds, once the file is finished. A renamed or moved
+  clip loses its favourite and title, which are stored by the clip's full path (two clips with the
+  same name in different folders keep their own). An imported folder on a USB drive
   may need the app closed before Windows lets you safely remove the drive.
 
 ### FPS numbers (Windows frame timing)
@@ -90,7 +92,7 @@ hook loaded crashed VALORANT, so it was removed on 2026-10-26.)
 |---|---|
 | General | Start with Windows, Island notices, performance stats, quit the recorder |
 | Clip | automatic recording, desktop between games, replay length, format (H.264 / HEVC / AV1), frame rate, bitrate, encoder effort, voice chat on its own track |
-| Media | clip folders, storage limit (oldest clips go to the Recycle Bin; favourites and edited clips stay), SSD cache size |
+| Media | clip folders, storage limit (oldest clips go to the Recycle Bin; favourites, edited clips, clips played in the last 10 minutes and the clip open in the app stay), SSD cache size |
 | Shortcuts | the in-game shortcuts and the two-step switch |
 
 The Audio page shows live meters for every source.
@@ -118,7 +120,7 @@ Switching back from HDR to SDR keeps the running capture and the buffer.
 | Recorder settings | `%APPDATA%\recall-hdr\config.toml` |
 | Favourites, titles, clip folders | `%APPDATA%\Recall\library.json`, `folders.json` |
 | Edits | `<clip>.recall-edit.json` beside each clip |
-| Preview cache | `<install folder>\cache`, one budget (2 GB by default) |
+| Preview cache | `<install folder>\cache`, one budget (2 GB by default on the system drive; set in Settings) |
 | Clips on their way to the clip folder | `<install folder>\cache\staging` (moved within seconds; recovered on next start) |
 | Player log (stalls, audio underruns) | `%APPDATA%\Recall\player.log` |
 

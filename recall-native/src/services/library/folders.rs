@@ -6,6 +6,9 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+#[path = "folders_salvage.rs"]
+mod salvage;
+
 /// Video files the library lists.
 pub const CLIP_EXTENSIONS: [&str; 4] = ["mp4", "m4v", "mov", "mkv"];
 /// How deep an imported folder is searched (Medal: `Medal\Clips\<game>\clip.mp4`).
@@ -47,6 +50,17 @@ pub struct Folders {
     pub recordings: Option<String>,
     #[serde(default)]
     pub imported: Vec<String>,
+    /// Why saving is refused: the file exists but could not be read (an antivirus scan,
+    /// a sync client), so a save would replace the user's folders with this empty list.
+    #[serde(skip)]
+    pub(crate) write_block: Option<String>,
+    /// The notice to show once: folders.json was damaged; what was read back of it.
+    #[serde(skip)]
+    pub damaged: Option<String>,
+    /// Folders that were the recordings folder before: their clips stay Recall's own (Delete
+    /// recycles them, edits stay beside them) even though they are listed as imported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub former_recordings: Vec<String>,
 }
 
 /// One clip found on disk.
@@ -72,8 +86,18 @@ impl Folders {
         folders_path().map(|p| Self::load_from(&p)).unwrap_or_default()
     }
 
+    /// Missing -> none. Damaged -> the folders still readable in it are kept (written back,
+    /// the damaged file copied to a dated `.bad`, `folders_salvage.rs`) and
+    /// [`Folders::damaged`] says so. Unreadable -> none, and [`Folders::save_to`] refuses to
+    /// replace the file.
     pub(crate) fn load_from(path: &Path) -> Self {
-        std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+        let now = std::time::SystemTime::now();
+        crate::services::durable::sweep_temps(path, now);
+        match std::fs::read(path) {
+            Ok(bytes) => serde_json::from_slice(&bytes).unwrap_or_else(|_| Self::recover(path, &bytes, now)),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Self::default(),
+            Err(error) => Self { write_block: Some(format!("folders.json could not be read ({error}); not saved")), ..Self::default() },
+        }
     }
 
     pub fn save(&self) -> Result<(), String> {
@@ -81,15 +105,16 @@ impl Folders {
         self.save_to(&path)
     }
 
-    /// Atomic: write `folders.json.tmp`, then rename over the file.
+    /// Durable: a temp file, flushed, then renamed over the file.
     pub(crate) fn save_to(&self, path: &Path) -> Result<(), String> {
+        if let Some(reason) = &self.write_block {
+            return Err(reason.clone());
+        }
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
         }
-        let tmp = path.with_extension("json.tmp");
         let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(&tmp, bytes).map_err(|e| format!("write folders: {e}"))?;
-        std::fs::rename(&tmp, path).map_err(|e| format!("save folders: {e}"))
+        crate::services::durable::write_durable(path, &bytes).map_err(|e| format!("save folders: {e}"))
     }
 
     /// Adds a folder; false when it is already listed (or is the recordings folder).
@@ -106,6 +131,64 @@ impl Folders {
     pub fn remove(&mut self, folder: &str) {
         let key = folder_key(folder);
         self.imported.retain(|f| folder_key(f) != key);
+    }
+
+    /// Settings → Clip folders → remove: the folder leaves the library and is no longer one
+    /// Recall manages (re-adding it later lists it as an ordinary imported folder).
+    pub fn forget(&mut self, folder: &str) {
+        self.remove(folder);
+        self.release(folder);
+    }
+
+    /// Settings → Folders Recall manages → remove: its clips stay listed but count as imported
+    /// (Delete only removes them from Recall). True when it was managed.
+    pub fn release(&mut self, folder: &str) -> bool {
+        let key = folder_key(folder);
+        let before = self.former_recordings.len();
+        self.former_recordings.retain(|f| folder_key(f) != key);
+        self.former_recordings.len() != before
+    }
+
+    /// The former recordings folders Settings lists as "Folders Recall manages" (the current
+    /// recordings folder has its own row).
+    pub fn managed(&self, recordings: &str) -> Vec<String> {
+        let current = folder_key(recordings);
+        self.former_recordings.iter().filter(|f| folder_key(f) != current).cloned().collect()
+    }
+
+    /// The recordings folder becomes `new`; `old`, the folder it pointed at, stays Recall's own.
+    /// Every recordings change goes through here (`change_recordings`, `sync_recordings_folder`,
+    /// later `folders_sync::retarget` once per old folder), so no change forgets to retire one.
+    pub fn move_recordings(&mut self, new: &str, old: Option<&str>) {
+        if let Some(old) = old.filter(|old| folder_key(old) != folder_key(new)) {
+            self.retire_recordings(old);
+        }
+        self.recordings = Some(new.to_owned());
+    }
+
+    /// Remembers `folder` as a former recordings folder (once).
+    pub fn retire_recordings(&mut self, folder: &str) {
+        let key = folder_key(folder);
+        if !folder.trim().is_empty() && !self.former_recordings.iter().any(|f| folder_key(f) == key) {
+            self.former_recordings.push(folder.to_owned());
+        }
+    }
+
+    // Tests only: the app changes folders through `folders_sync::retarget`.
+    #[cfg(test)]
+    /// Settings: new clips save to `new`; `old` joins the imported folders so its clips keep
+    /// showing, and stays Recall-owned. True when `old` was added to the list.
+    pub fn change_recordings(&mut self, new: &str, old: &str) -> bool {
+        self.remove(new);
+        self.move_recordings(new, Some(old));
+        self.add(Path::new(old))
+    }
+
+    /// Settings: adds `picked`; returns the ones that were new. Only those may bring back the
+    /// clips removed from Recall under them: a folder already listed (or a parent of one) leaves
+    /// removed clips removed.
+    pub fn add_all(&mut self, picked: &[PathBuf]) -> Vec<PathBuf> {
+        picked.iter().filter(|path| self.add(path)).cloned().collect()
     }
 }
 
@@ -309,13 +392,56 @@ mod tests {
 
     #[test]
     fn add_dedupes_case_and_slashes_and_skips_recordings() {
-        let mut folders = Folders { recordings: Some(r"E:\Clips".into()), imported: vec![] };
+        let mut folders = Folders { recordings: Some(r"E:\Clips".into()), ..Folders::default() };
         assert!(!folders.add(Path::new(r"e:\clips\")));
         assert!(folders.add(Path::new(r"D:\ShadowPlay")));
         assert!(!folders.add(Path::new("d:/shadowplay/")));
         assert_eq!(folders.imported, vec![r"D:\ShadowPlay".to_owned()]);
         folders.remove(r"d:\SHADOWPLAY");
         assert!(folders.imported.is_empty());
+    }
+
+    #[test]
+    fn adding_a_listed_folder_or_its_parent_brings_nothing_back() {
+        let mut folders = Folders { recordings: Some(r"E:\Clips".into()), imported: vec![r"D:\Medal\Clips".into()], ..Folders::default() };
+        let picked = [PathBuf::from(r"d:\medal\clips"), PathBuf::from(r"E:\Clips")];
+        assert!(folders.add_all(&picked).is_empty(), "already listed: no folder is new, so no clip is un-hidden");
+        assert_eq!(folders.add_all(&[PathBuf::from(r"D:\ShadowPlay")]), [PathBuf::from(r"D:\ShadowPlay")]);
+    }
+
+    #[test]
+    fn a_changed_recordings_folder_is_remembered_as_recall_owned() {
+        let mut folders = Folders { recordings: Some(r"E:\Clips".into()), ..Folders::default() };
+        assert!(folders.change_recordings(r"F:\New", r"E:\Clips"));
+        assert_eq!(folders.recordings.as_deref(), Some(r"F:\New"));
+        assert_eq!(folders.imported, [r"E:\Clips".to_owned()]);
+        assert_eq!(folders.former_recordings, [r"E:\Clips".to_owned()]);
+        // Back again: the new folder leaves the imported list; each former folder is listed once.
+        folders.change_recordings(r"E:\Clips", r"F:\New");
+        folders.retire_recordings(r"e:\clips\");
+        assert_eq!(folders.imported, [r"F:\New".to_owned()]);
+        assert_eq!(folders.former_recordings, [r"E:\Clips".to_owned(), r"F:\New".to_owned()]);
+        let recordings = Path::new(r"E:\Clips");
+        assert!(!super::super::imports::is_imported(r"F:\New\VALORANT__2026-11-01__10-00-00.mp4", recordings, &folders.imported, &folders.former_recordings));
+    }
+
+    #[test]
+    fn a_managed_folder_can_be_released_or_forgotten() {
+        let mut folders = Folders { recordings: Some(r"E:\Clips".into()), ..Folders::default() };
+        folders.change_recordings(r"F:\New", r"E:\Clips");
+        folders.move_recordings(r"G:\Third", Some(r"F:\New"));
+        assert_eq!(folders.managed(r"G:\Third"), [r"E:\Clips".to_owned(), r"F:\New".to_owned()], "shown, not hidden");
+        let recordings = Path::new(r"G:\Third");
+        let clip = r"E:\Clips\VALORANT__2026-11-01__10-00-00.mp4";
+        // Removing it from "Folders Recall manages": still listed, but imported now.
+        assert!(folders.release(r"e:\clips\"));
+        assert_eq!(folders.imported, [r"E:\Clips".to_owned()]);
+        assert!(super::super::imports::is_imported(clip, recordings, &folders.imported, &folders.former_recordings));
+        // Removing a folder from Clip folders drops both.
+        folders.change_recordings(r"H:\Fourth", r"G:\Third");
+        folders.forget(r"G:\Third");
+        assert!(!folders.imported.iter().any(|f| f == r"G:\Third") && !folders.former_recordings.iter().any(|f| f == r"G:\Third"));
+        assert_eq!(folders.managed(r"H:\Fourth"), [r"F:\New".to_owned()]);
     }
 
     #[test]
@@ -330,7 +456,7 @@ mod tests {
     fn save_and_load_round_trip() {
         let dir = temp("roundtrip");
         let path = dir.join("folders.json");
-        let folders = Folders { recordings: Some(r"E:\Clips".into()), imported: vec![r"D:\Old".into()] };
+        let folders = Folders { recordings: Some(r"E:\Clips".into()), imported: vec![r"D:\Old".into()], former_recordings: vec![r"D:\Old".into()], ..Folders::default() };
         folders.save_to(&path).unwrap();
         assert_eq!(Folders::load_from(&path), folders);
         assert_eq!(Folders::load_from(&dir.join("missing.json")), Folders::default());

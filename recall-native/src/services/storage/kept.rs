@@ -6,14 +6,17 @@
 //! without reading the hard drive the recorder is writing to.
 //!
 //! Adoption renames on the same volume and copies otherwise, then indexes the file like
-//! [`super::video::cache_in`] (LRU touch, budget). A copy whose size differs from the clip, or
-//! a clip too large for the video tier, is deleted instead. At start [`sweep_kept`] adopts what
-//! the engine kept while the app was closed, and deletes what no longer matches a clip.
+//! [`super::video::cache_in`] (LRU touch, budget). At start [`sweep_kept`] adopts what the
+//! engine kept while the app was closed and only reports the rest (review RI2-1): the app checks
+//! one folder, which may not be the one the engine moved the clip to, so it never decides that a
+//! clip is gone. The recorder's start-up check (`recall/src/encoder/staging_kept.rs`), which
+//! knows its own clip folder, is the only one that deletes a kept copy nobody adopted.
 //!
-//! Only the engine's own copies are ever deleted: it marks each with the alternate stream
-//! [`KEPT_MARK`] (`recall/src/encoder/mover.rs`). An unmarked file (a user's, or a copy kept
-//! before the mark existed) is adopted when it is the clip's copy by name, size and time,
-//! and otherwise left where it is. A cache the guard blocked (`guard.rs`) touches nothing.
+//! The app deletes a kept copy only when it is the engine's (marked with the alternate stream
+//! [`KEPT_MARK`]) and the clip is on disk with the copy's size and time ([`copy_of`]): the copy
+//! was moved into the cache, the cache already holds the clip, or the clip is too large for the
+//! video tier. An unmarked file (a user's, or a copy kept before the mark existed) is adopted
+//! when it is the clip's copy and otherwise left. A cache the guard blocked touches nothing.
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -34,7 +37,7 @@ fn engine_kept_dir() -> Option<PathBuf> {
 }
 
 /// The folders a kept copy may come from: the engine's (beside the exe) and the cache's own.
-fn kept_dirs() -> Vec<PathBuf> {
+pub(super) fn kept_dirs() -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = engine_kept_dir().into_iter().collect();
     dirs.push(super::cache_root().join("staging").join("kept"));
     dirs
@@ -57,6 +60,7 @@ pub fn adopt_kept(dest: String, kept: String) {
         eprintln!("kept clip ignored: {kept} is outside the kept-copy folders");
         return;
     }
+    let clip = PathBuf::from(&dest);
     let spawned = std::thread::Builder::new().name("recall-adopt".into()).spawn(move || {
         let root = super::cache_root();
         let budget = budget_in(&root);
@@ -64,21 +68,23 @@ pub fn adopt_kept(dest: String, kept: String) {
             eprintln!("kept clip not cached: {error}");
         }
     });
-    if spawned.is_err() && marked(&file) {
+    if spawned.is_err() && marked(&file) && clip_whole(&clip, &file) {
         let _ = std::fs::remove_file(file);
     }
 }
 
-/// Adopts or deletes every kept copy the engine left, on its own thread. `clip_folder` is
-/// read there (it may load `folders.json`).
+/// Adopts every kept copy the engine left that is a copy of a clip in `clip_folder`, on its own
+/// thread, and reports the rest (never deletes them). `clip_folder` is read there (it may load
+/// `folders.json`).
 pub fn sweep_kept(clip_folder: impl FnOnce() -> PathBuf + Send + 'static) {
     let Some(kept_dir) = engine_kept_dir().filter(|dir| dir.is_dir()) else { return };
     let _ = std::thread::Builder::new().name("recall-adopt-sweep".into()).spawn(move || {
         let root = super::cache_root();
         let budget = budget_in(&root);
-        let (adopted, deleted) = sweep_in(&root, &kept_dir, &clip_folder(), budget);
-        if adopted + deleted > 0 {
-            eprintln!("kept clips: {adopted} cached, {deleted} deleted");
+        let (adopted, left) = sweep_in(&root, &kept_dir, &clip_folder(), budget);
+        super::leftovers::log_once();
+        if adopted + left > 0 {
+            eprintln!("kept clips: {adopted} cached, {left} left for the recorder's check");
         }
     });
 }
@@ -94,15 +100,59 @@ fn copy_of(dest: &Path, kept: &Path) -> bool {
     matches!((dest.metadata(), kept.metadata()), (Ok(d), Ok(k)) if d.is_file() && d.len() == k.len() && super::mtime_secs(&d) == super::mtime_secs(&k))
 }
 
+/// The guard on every app-side delete of a kept copy, the recorder's check plus the time
+/// (`staging_kept.rs landed`, which checks size and bytes only): the clip is on disk with the
+/// copy's size and time ([`copy_of`]), and its first 64 KiB and last 1 MiB read and match the
+/// copy's ([`same_ends`]). Then the copy is not the only whole version of the clip.
+fn clip_whole(dest: &Path, kept: &Path) -> bool {
+    copy_of(dest, kept) && kept.metadata().is_ok_and(|m| matches!(same_ends(dest, kept, m.len()), Ok(true)))
+}
+
+/// Bytes compared at each end of a clip and its copy (the recorder's `staging_kept.rs`).
+const HEAD_BYTES: u64 = 64 << 10;
+const TAIL_BYTES: u64 = 1 << 20;
+
+/// The first [`HEAD_BYTES`] and last [`TAIL_BYTES`] of `a` and `b` (both `len` long) match. A
+/// flush Windows did not honour can leave a clip at full length with zeroed data (RI3-2).
+fn same_ends(a: &Path, b: &Path, len: u64) -> std::io::Result<bool> {
+    use std::io::{Read, Seek, SeekFrom};
+    let (mut a, mut b) = (std::fs::File::open(a)?, std::fs::File::open(b)?);
+    let tail = TAIL_BYTES.min(len);
+    for (at, count) in [(0, HEAD_BYTES.min(len)), (len - tail, tail)] {
+        let (mut x, mut y) = (vec![0u8; count as usize], vec![0u8; count as usize]);
+        a.seek(SeekFrom::Start(at))?;
+        b.seek(SeekFrom::Start(at))?;
+        a.read_exact(&mut x)?;
+        b.read_exact(&mut y)?;
+        if x != y {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// Moves a kept copy whose clip has other bytes into `kept\leaked\` (never over a file there),
+/// where Settings lists it; the recorder does the same (`staging_kept.rs set_aside`).
+fn set_aside(kept: &Path) -> Result<PathBuf, String> {
+    let (Some(dir), Some(name)) = (kept.parent(), kept.file_name()) else { return Err("no folder".into()) };
+    let target = dir.join("leaked").join(name);
+    if !matches!(target.try_exists(), Ok(false)) {
+        return Err(format!("{} is taken", target.display()));
+    }
+    std::fs::create_dir_all(target.parent().unwrap_or(dir)).and_then(|()| std::fs::rename(kept, &target)).map_err(|e| e.to_string())?;
+    Ok(target)
+}
+
 /// [`sweep_kept`] against explicit folders: a kept copy of a clip in `clip_folder` is
-/// adopted; a marked copy that matches no clip is deleted; anything else stays. Returns
-/// (adopted, deleted).
+/// adopted; every other copy stays for the recorder's start-up check (a folder that reads
+/// "no clip" may be the wrong folder: the clip's `.part` can sit in another one). Returns
+/// (adopted, left).
 pub(super) fn sweep_in(root: &Path, kept_dir: &Path, clip_folder: &Path, budget: u64) -> (usize, usize) {
     if super::guard::blocked(root).or_else(|| super::guard::blocked(kept_dir)).is_some() {
         return (0, 0);
     }
     let Ok(listing) = std::fs::read_dir(kept_dir) else { return (0, 0) };
-    let (mut adopted, mut deleted) = (0, 0);
+    let (mut adopted, mut left) = (0, 0);
     for entry in listing.flatten() {
         if !entry.file_type().is_ok_and(|t| t.is_file()) {
             continue;
@@ -111,13 +161,11 @@ pub(super) fn sweep_in(root: &Path, kept_dir: &Path, clip_folder: &Path, budget:
         let dest = clip_folder.join(entry.file_name());
         if copy_of(&dest, &kept) && adopt_in(root, &dest, &kept, budget).is_ok() {
             adopted += 1;
-        } else if marked(&kept) && std::fs::remove_file(&kept).is_ok() {
-            deleted += 1;
+        } else if kept.exists() {
+            left += 1;
         }
     }
-    // Copies kept before the mark existed stay where they are: one may be the only copy of
-    // its clip, and Recall never deletes a clip (review 11-07). They leak; they are not deleted.
-    (adopted, deleted)
+    (adopted, left)
 }
 
 /// Moves `kept` into the video tier as the copy of `dest`. Err when it is not a copy of `dest`
@@ -127,9 +175,15 @@ pub(super) fn adopt_in(root: &Path, dest: &Path, kept: &Path, budget: u64) -> Re
     if let Some(why) = super::guard::blocked(root).or_else(|| super::guard::blocked(kept)) {
         return Err(format!("kept copy left alone: {why}"));
     }
+    // RI3-1: while storage.json can't be read the cache takes no new copies; the copy waits.
+    if let Some(why) = super::video::budget_note(root) {
+        return Err(format!("kept copy left alone: the cache size is unknown ({why})"));
+    }
     let _guard = ADOPT_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let result = adopt_locked(root, dest, kept, budget);
-    if result.is_err() && marked(kept) {
+    // Only a copy of a clip that is on disk with its size and time goes (too large for the
+    // tier, or the move failed); a clip that can't be read or differs keeps its copy.
+    if result.is_err() && marked(kept) && clip_whole(dest, kept) {
         let _ = std::fs::remove_file(kept);
     }
     result
@@ -141,6 +195,15 @@ fn adopt_locked(root: &Path, dest: &Path, kept: &Path, budget: u64) -> Result<Pa
     if kept_bytes != bytes {
         return Err(format!("{} is {kept_bytes} bytes, the clip {bytes}", kept.display()));
     }
+    // RI3-2: same size is not proof; other bytes at either end make the copy the one to keep.
+    match same_ends(dest, kept, bytes) {
+        Ok(true) => {}
+        Ok(false) => {
+            let kept_as = set_aside(kept).map_or_else(|e| format!("left in place: {e}"), |t| format!("set aside as {}", t.display()));
+            return Err(format!("the clip's bytes differ from its kept copy; {kept_as}"));
+        }
+        Err(error) => return Err(format!("compare {} with its kept copy: {error}", dest.display())),
+    }
     if bytes > budget / 2 {
         return Err(format!("clip ({bytes} bytes) is larger than the video tier allows"));
     }
@@ -149,7 +212,7 @@ fn adopt_locked(root: &Path, dest: &Path, kept: &Path, budget: u64) -> Result<Pa
     let file = format!("{id}.mp4");
     let target = directory.join(&file);
     if target.metadata().is_ok_and(|m| m.len() == bytes) {
-        if marked(kept) {
+        if marked(kept) && clip_whole(dest, kept) {
             let _ = std::fs::remove_file(kept);
         }
     } else {

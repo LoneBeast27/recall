@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use crate::backend::ClipEntry;
 
 mod calendar;
+mod delete;
+pub use delete::{DeleteReport, delete_or_hide, delete_toast};
 pub mod cache_watch;
 pub mod edit_marks;
 pub mod folders;
@@ -13,10 +15,20 @@ pub mod import_check;
 pub mod imports;
 mod mp4;
 pub mod mp4_map;
+pub mod open_clips;
 mod names;
 mod scrub;
 mod settle;
 mod store;
+mod store_damage;
+pub use store::clip_key;
+
+/// The library Delete's Recycle Bin call (room precheck under the shared bin lock,
+/// IFileOperation on a private desktop, a sink that refuses a permanent delete), for other
+/// user files the app sends to the bin (Settings -> Storage leftover copies).
+pub(crate) fn recycle_to_bin(paths: &[std::path::PathBuf]) -> Result<usize, String> {
+    win::recycle(paths)
+}
 pub mod watch;
 mod watch_win;
 mod win;
@@ -24,6 +36,10 @@ mod win;
 mod tests;
 #[cfg(test)]
 mod tests_io;
+#[cfg(test)]
+mod tests_persist;
+#[cfg(test)]
+mod tests_damage;
 #[cfg(test)]
 mod tests_settle;
 #[cfg(test)]
@@ -147,7 +163,7 @@ pub fn records_with(entries: &[ClipEntry], sidecars: &HashSet<String>, store: &M
 pub fn build_record(entry: &ClipEntry, edited: bool, store: &MetaStore) -> ClipRecord {
     let (game_key, game) = normalize_game(&game_prefix(entry));
     let started = parse_file_name(&entry.name).map_or_else(|| local_from_unix(entry.mtime), |(_, s)| s);
-    let meta = store.meta(&entry.name);
+    let meta = store.meta_of(&entry.path, &entry.name);
     ClipRecord {
         path: entry.path.clone(),
         file_name: entry.name.clone(),
@@ -157,7 +173,7 @@ pub fn build_record(entry: &ClipEntry, edited: bool, store: &MetaStore) -> ClipR
         game_key,
         game,
         started,
-        duration: store.duration(&entry.name, entry.bytes, entry.mtime),
+        duration: store.duration(&entry.path, &entry.name, entry.bytes, entry.mtime),
         edited,
         favourite: meta.is_some_and(|m| m.favourite),
         title: meta.and_then(|m| m.title.clone()),
@@ -308,11 +324,31 @@ pub struct MetaStore {
     dirty: bool,
     /// Why writes are refused (an unreadable existing file must not be overwritten).
     write_block: Option<String>,
+    /// The file was damaged and kept as `.bad` and the user has not pressed "Keep going"
+    /// on the notice yet: background entries (durations, played) stay in memory, so a
+    /// fresh file without the old favourites never appears on its own (the storage limit
+    /// reads it). Survives restarts (`store_damage`).
+    damage: Option<store_damage::Damage>,
+    /// Writes in order, the background flush off the UI thread.
+    writer: std::sync::Arc<crate::services::ordered_write::OrderedWriter>,
+    /// Whole-file writes so far (tests: a batch edit writes once).
+    pub(crate) writes: u32,
 }
 
 /// Reads an MP4's duration from its `moov/mvhd` box without decoding.
 pub fn mp4_duration(path: &Path) -> Option<f64> {
     mp4::duration(path)
+}
+
+/// A clip's length: the MP4 index, else ffprobe (MKV, an MP4 whose index the parser cannot
+/// read). Reads the file; call it off the UI thread.
+pub fn clip_duration(path: &Path) -> Option<f64> {
+    let lowered = crate::services::storage::drive_kind(path).is_hdd();
+    resolve_duration(path, mp4_duration, |path| crate::services::storage::probe_duration(path, lowered).ok())
+}
+
+pub(crate) fn resolve_duration(path: &Path, index: impl Fn(&Path) -> Option<f64>, probe: impl Fn(&Path) -> Option<f64>) -> Option<f64> {
+    index(path).or_else(|| probe(path)).filter(|secs| secs.is_finite() && *secs > 0.0)
 }
 
 /// Length of an MP4's video track (where its last frame ends), without decoding.
@@ -341,28 +377,6 @@ pub fn video_limits(path: &str, duration: f64) -> (Option<f64>, Option<f64>) {
 /// Returns how many clips moved.
 pub fn delete_to_recycle_bin(clips: &[PathBuf]) -> Result<usize, String> {
     win::recycle(clips)
-}
-
-/// Delete from the library: clips in the recordings folder go to the Recycle Bin; clips in an
-/// imported folder are only removed from Recall (compatibility mode: their folder belongs to
-/// another recorder). Returns (recycled, removed from Recall).
-pub fn delete_or_hide(clips: &[PathBuf]) -> Result<(usize, usize), String> {
-    let folders = folders::Folders::load();
-    let recordings = crate::backend::library_dir_from(&folders);
-    let (imported, own): (Vec<PathBuf>, Vec<PathBuf>) = clips.iter().cloned().partition(|c| imports::is_imported(&c.to_string_lossy(), &recordings, &folders.imported));
-    let hidden = if imported.is_empty() { 0 } else { imports::hide(&imported)? };
-    let recycled = if own.is_empty() { 0 } else { win::recycle(&own)? };
-    Ok((recycled, hidden))
-}
-
-/// The toast after [`delete_or_hide`]: title and detail.
-pub fn delete_message(recycled: usize, hidden: usize) -> (String, Option<String>) {
-    let clips = |n: usize| format!("{n} {}", if n == 1 { "clip" } else { "clips" });
-    match (recycled, hidden) {
-        (r, 0) => (format!("Moved {} to the Recycle Bin", clips(r)), None),
-        (0, h) => (format!("Removed {} from Recall", clips(h)), Some("The files stay in their folder.".into())),
-        (r, h) => (format!("Removed {}", clips(r + h)), Some(format!("{r} went to the Recycle Bin. {h} from other folders stay where they are."))),
-    }
 }
 
 /// Eight low-resolution cached frames across the clip for hover-scrub.

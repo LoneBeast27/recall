@@ -44,6 +44,7 @@ mod transport_rules;
 mod ui;
 mod views;
 mod worker;
+mod worker_lanes;
 fn main() {
     startup::mark("main");
     // A GUI program has no stderr of its own: print to the terminal it was started from, if any,

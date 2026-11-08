@@ -20,8 +20,11 @@
 //!   A bigger item is the one Windows offers to delete permanently. The item
 //!   must also fit the bin's FREE room (that size minus what the volume's bin
 //!   already holds, `SHQueryRecycleBinW`): otherwise Windows purges older bin
-//!   items to make room, which deletes those earlier files for good. An
-//!   unreadable bin size refuses.
+//!   items to make room, which deletes those earlier files for good. The
+//!   room must exceed the item by [`margin`] (min(1 GiB, 10% of the bin)):
+//!   Windows' accounting rounds and reports `used` late right after a move.
+//!   The check and the move run under one lock shared by every Recall
+//!   process (`win_recycle_lock.rs`). An unreadable bin size refuses.
 //!
 //! A refusal stops the caller, which tells the user, and nothing is deleted.
 //! This is the second guard: the call itself (`win_fileop.rs`) goes through
@@ -133,6 +136,13 @@ fn max_bytes(facts: &BinFacts) -> Option<u64> {
     }
 }
 
+/// Room the bin must keep beyond an item: min(1 GiB, 10% of its size `max`). Windows deletes
+/// an item for good when the bin cannot take it (or purges older ones), so an item must fit
+/// with this spare; 10% lets a small bin (1,000 MB) still take a clip.
+pub fn margin(max: u64) -> u64 {
+    (max / 10).min(1 << 30)
+}
+
 /// May `bytes` from this volume go to its Recycle Bin?
 pub fn decide(facts: &BinFacts, bytes: u64) -> Result<(), String> {
     if facts.subst {
@@ -163,8 +173,16 @@ pub fn decide(facts: &BinFacts, bytes: u64) -> Result<(), String> {
         return Err(format!("couldn't read how full the Recycle Bin on {} is", volume.label));
     };
     let room = max.saturating_sub(used);
-    if bytes > room {
-        return Err(format!("not enough room left in the Recycle Bin on {} ({} MB free of {} MB)", volume.label, room / MIB, max / MIB));
+    let spare = margin(max);
+    if bytes.saturating_add(spare) > room {
+        let (mb, need) = (bytes.div_ceil(MIB), bytes.saturating_add(spare).div_ceil(MIB));
+        return Err(format!(
+            "not enough room left in the Recycle Bin on {}: {mb} MB needs {need} MB free ({} MB spare, so Windows never deletes anything for good), and it has {} MB free of {} MB; empty the Recycle Bin or make it bigger",
+            volume.label,
+            spare / MIB,
+            room / MIB,
+            max / MIB
+        ));
     }
     Ok(())
 }
