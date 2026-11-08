@@ -9,7 +9,7 @@ use std::sync::Mutex;
 
 const RATE: u32 = 100; // one frame per 10 ms, mono
 
-fn ring() -> TrackRing {
+pub(in crate::audio) fn ring() -> TrackRing {
     TrackRing {
         name: "in-1",
         title: Mutex::new("Voice"),
@@ -17,11 +17,15 @@ fn ring() -> TrackRing {
         gain: AtomicU32::new(1.0f32.to_bits()),
         boosted: AtomicBool::new(false),
         input: true,
+        mic_mute: AtomicBool::new(true),
+        on_default: true,
+        opened_own: AtomicBool::new(false),
         endpoint: Mutex::new(String::new()),
         rate: RATE,
         channels: 1,
         samples: Mutex::new(VecDeque::new()),
         capacity: RATE as usize * 120,
+        live: Default::default(),
     }
 }
 
@@ -30,9 +34,9 @@ fn len(ring: &TrackRing) -> usize {
 }
 
 /// Moves on by each pause; ends the loop once past `stop_at`.
-struct FakeClock {
-    now: Rc<Cell<Duration>>,
-    stop_at: Duration,
+pub(in crate::audio) struct FakeClock {
+    pub(in crate::audio) now: Rc<Cell<Duration>>,
+    pub(in crate::audio) stop_at: Duration,
 }
 
 impl Clock for FakeClock {
@@ -147,12 +151,41 @@ fn without_waiting_a_failed_first_open_ends_the_track_as_before() {
 }
 
 #[test]
-fn only_a_named_device_outside_tests_waits_for_its_device() {
-    assert!(waits_when_absent("Headset (USB)", false, false));
-    assert!(!waits_when_absent("  ", false, false), "the Windows default has no name to wait for");
-    assert!(!waits_when_absent("Headset (USB)", true, false), "a process-loopback target is reported, not waited on");
-    assert!(!waits_when_absent("Headset (USB)", false, true), "RECALL_AUDIO_EXACT keeps no track for a missing endpoint");
+fn a_device_source_outside_tests_waits_for_its_device() {
+    assert!(waits_when_absent(false, false));
+    assert!(!waits_when_absent(true, false), "a process-loopback target is reported, not waited on");
+    assert!(!waits_when_absent(false, true), "RECALL_AUDIO_EXACT keeps no track for a missing endpoint");
     assert_eq!(waiting_label(" Headset (USB) "), "Headset (USB) (not connected; waiting)");
+}
+
+/// 2026-11-07 audit A1: a source on the Windows default (the fresh-install Microphone) with no
+/// default device at engine start (headset off, endpoint held in exclusive mode) still gets its
+/// track: silent and waiting, and it records once a default appears.
+#[test]
+fn a_default_source_with_nothing_to_open_at_start_waits_for_a_default() {
+    assert_eq!(waiting_label("  "), "Windows default (none yet; waiting)");
+
+    let ring = ring();
+    let now = Rc::new(Cell::new(Duration::ZERO));
+    let mut clock = FakeClock { now: now.clone(), stop_at: Duration::from_secs(5) };
+    let (tx, rx) = std::sync::mpsc::channel();
+    let opened = Cell::new(false);
+    let open = |_reopen: bool| {
+        // No default until 2 s; the default opens once, then is gone again.
+        if now.get() < Duration::from_secs(2) || opened.replace(true) {
+            return Err("default endpoint failed: element not found".to_owned());
+        }
+        let mut stream = fake(&now, 1, false);
+        stream.endpoint = "Headset (USB) (Windows default)".into();
+        Ok(stream)
+    };
+    capture_loop(&ring, "", waits_when_absent(false, false), open, tx, &mut clock, &FakeNotices::none(&now));
+    assert_eq!(rx.try_recv().unwrap(), Ok(()), "the track starts while there is no default");
+    let samples = ring.snapshot(5.0);
+    assert_eq!(len(&ring), 500, "level with the clock");
+    assert!(samples[..200].iter().all(|&s| s == 0.0), "silence while there is no default");
+    assert!(samples[200..300].iter().all(|&s| s == 0.5), "the new default's sound from 2 s");
+    assert!(samples[300..].iter().all(|&s| s == 0.0), "silence once it is gone again");
 }
 
 #[test]
@@ -174,15 +207,20 @@ fn a_moved_windows_default_reopens_at_once_without_a_gap() {
 
 /// Notices as Windows would send them: devices changed once the clock passes `devices_at`; a
 /// default id the test sets.
-struct FakeNotices {
+pub(in crate::audio) struct FakeNotices {
     now: Rc<Cell<Duration>>,
     devices_at: Cell<Option<Duration>>,
     default: RefCell<Option<String>>,
 }
 
 impl FakeNotices {
-    fn none(now: &Rc<Cell<Duration>>) -> Self {
+    pub(in crate::audio) fn none(now: &Rc<Cell<Duration>>) -> Self {
         FakeNotices { now: now.clone(), devices_at: Cell::new(None), default: RefCell::new(None) }
+    }
+
+    /// Devices change once, when the clock passes `at`.
+    pub(in crate::audio) fn devices_at(now: &Rc<Cell<Duration>>, at: Duration) -> Self {
+        FakeNotices { devices_at: Cell::new(Some(at)), ..Self::none(now) }
     }
 }
 
@@ -226,7 +264,7 @@ fn a_named_source_never_opens_the_default_and_opens_by_name_when_it_appears() {
         attempts.borrow_mut().push((reopen, now.get(), ring.endpoint()));
         let mut stream = fake(&now, 1, false);
         stream.endpoint = match choose_endpoint(&names, Some("Headset (USB)"), false)? {
-            Pick::Named(i) => names[i].clone(),
+            Pick::Named(i) | Pick::Unsure(i) => names[i].clone(),
             Pick::Default => "Mic (Realtek) (Windows default)".to_owned(),
         };
         Ok::<_, String>(stream)
@@ -249,7 +287,8 @@ fn a_named_source_never_opens_the_default_and_opens_by_name_when_it_appears() {
 fn choose_endpoint_never_falls_back_for_a_named_source() {
     use crate::audio::{choose_endpoint, Pick};
     let names = ["Mic (Realtek)".to_owned(), "Headset (USB)".to_owned()];
-    assert_eq!(choose_endpoint(&names, Some("headset usb"), false), Ok(Pick::Named(1)));
+    assert_eq!(choose_endpoint(&names, Some("Headset (USB)"), false), Ok(Pick::Named(1)));
+    assert_eq!(choose_endpoint(&names, Some("headset usb"), false), Err("'headset usb' is not connected".to_owned()), "no word matching");
     assert_eq!(choose_endpoint(&names[..1], Some("Headset (USB)"), false), Err("'Headset (USB)' is not connected".to_owned()));
     assert_eq!(choose_endpoint(&names, None, false), Ok(Pick::Default), "only a source with no device follows the default");
     assert_eq!(choose_endpoint(&names, Some("  "), false), Ok(Pick::Default));

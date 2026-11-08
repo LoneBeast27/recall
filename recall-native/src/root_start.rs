@@ -89,6 +89,7 @@ impl Root {
             meters: None,
             midi: None,
             midi_result: None,
+            midi_sending: false,
             ac_profile: None,
             toast: None,
             sort_open: false,

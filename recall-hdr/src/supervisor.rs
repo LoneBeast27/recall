@@ -31,8 +31,12 @@
 //! The manager thread lives in `supervisor_manager.rs`, the stdout protocol
 //! reader in `supervisor_protocol.rs`.
 
+#[path = "supervisor_hello.rs"]
+mod hello;
 #[path = "supervisor_manager.rs"]
 mod manager;
+#[path = "supervisor_mute.rs"]
+mod mute;
 #[path = "supervisor_protocol.rs"]
 mod protocol;
 #[path = "supervisor_refusal.rs"]
@@ -170,6 +174,11 @@ impl Supervisor {
         self.shared.unpause();
     }
 
+    /// The mic mute every later spawn starts with, a crash respawn included (`supervisor_mute.rs`).
+    pub fn set_mic_muted(&self, muted: bool) {
+        self.shared.spawn_mute.set(muted);
+    }
+
     /// The last engine `hello` and `status` lines (raw JSON), for late joiners.
     pub fn cached_engine_events(&self) -> Vec<String> {
         let cache = self.shared.cache.lock().unwrap_or_else(|p| p.into_inner());
@@ -178,13 +187,6 @@ impl Supervisor {
 
     pub fn engine_view(&self) -> EngineView {
         self.shared.cache.lock().unwrap_or_else(|p| p.into_inner()).view.clone()
-    }
-
-    /// The running engine said it applies `set_source` live (`hello.live_sources`); older
-    /// engines ignore that command, so their gain and name changes need a restart.
-    pub fn engine_takes_live_sources(&self) -> bool {
-        let cache = self.shared.cache.lock().unwrap_or_else(|p| p.into_inner());
-        cache.hello.as_deref().and_then(|h| serde_json::from_str::<serde_json::Value>(h).ok()).and_then(|v| v.get("live_sources")?.as_bool()).unwrap_or(false)
     }
 
     /// Engine `hello`s parsed so far: a change means a fresh engine instance.
@@ -260,6 +262,8 @@ struct Shared {
     child_stdin: Mutex<EngineStdin>,
     hello_count: AtomicU32,
     spawn_count: AtomicU32,
+    /// The mic mute each spawn starts with, over the spec's (`supervisor_mute.rs`).
+    spawn_mute: mute::SpawnMute,
     cache: Mutex<EngineCache>,
     /// Control-pipe hub: engine protocol lines are re-broadcast to hub clients.
     hub: Mutex<Option<Arc<crate::control::PipeHub>>>,
@@ -278,8 +282,9 @@ struct EngineStdin {
 }
 
 /// Engine event types handed to the controller via `attach_events`.
-pub const FORWARDED_EVENTS: [&str; 9] = [
+pub const FORWARDED_EVENTS: [&str; 10] = [
     "saved",
+    "source_adopted",
     "save_failed",
     "recording_started",
     "recording_stopped",
@@ -301,6 +306,7 @@ impl Shared {
             child_stdin: Mutex::new(EngineStdin::default()),
             hello_count: AtomicU32::new(0),
             spawn_count: AtomicU32::new(0),
+            spawn_mute: mute::SpawnMute::new(),
             cache: Mutex::new(EngineCache::default()),
             hub: Mutex::new(None),
             events: Mutex::new(None),
@@ -443,9 +449,9 @@ fn locate_engine_from(current_exe: &Path) -> Option<PathBuf> {
     locate_sibling_from(current_exe, "recall.exe")
 }
 
-/// Build `recall.exe --json` with piped stdio, no console, and the spec's
-/// environment edits.
-fn engine_command(path: &Path, spec: &EngineSpec) -> Command {
+/// Build `recall.exe --json` with piped stdio, no console, the spec's environment edits, and
+/// the controller's latest mic mute over the spec's (`supervisor_mute.rs`).
+fn engine_command(path: &Path, spec: &EngineSpec, mute: Option<bool>) -> Command {
     use std::os::windows::process::CommandExt;
     let mut cmd = Command::new(path);
     cmd.arg("--json")
@@ -458,6 +464,9 @@ fn engine_command(path: &Path, spec: &EngineSpec) -> Command {
             Some(v) => cmd.env(key, v),
             None => cmd.env_remove(key),
         };
+    }
+    if let Some(muted) = mute {
+        cmd.env(mute::MIC_MUTED_ENV, if muted { "1" } else { "0" });
     }
     cmd
 }

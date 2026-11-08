@@ -152,7 +152,7 @@ fn encode_sized(enc: &mut ff::encoder::Video, n: usize, w: u32, h: u32) -> Vec<(
 }
 
 fn tracks() -> Vec<TrackInfo> {
-    vec![TrackInfo { name: "Game", rate: 48_000, channels: 2, boosted: false }, TrackInfo { name: "Mic", rate: 48_000, channels: 2, boosted: false }]
+    vec![TrackInfo { name: "Game", rate: 48_000, channels: 2 }, TrackInfo { name: "Mic", rate: 48_000, channels: 2 }]
 }
 
 fn temp_part(tag: &str) -> (std::path::PathBuf, std::path::PathBuf) {

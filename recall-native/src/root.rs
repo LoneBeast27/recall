@@ -100,6 +100,8 @@ pub struct Root {
     pub meters: Option<Meters>,
     pub midi: Option<Midi>,
     pub midi_result: Option<Result<String, String>>,
+    /// A test note is being sent: a second click waits for it (`audio_midi.rs`).
+    pub midi_sending: bool,
     pub ac_profile: Option<String>,
     pub toast: Option<Toast>,
     pub sort_open: bool,
@@ -236,6 +238,10 @@ impl Root {
         }
         if route == Route::Settings {
             self.cache.refresh();
+            // A MIDI device plugged in since Settings last showed is listed again.
+            if self.route != Route::Settings {
+                self.settings_ui.devices.stale();
+            }
         }
         if matches!(route, Route::Settings | Route::Hdr | Route::Audio) {
             self.daemon.send(DaemonCommand::GetConfig);

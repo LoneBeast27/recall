@@ -3,16 +3,16 @@
 //! A track = one recorded source (`sources.rs`, the Audio page's strips): the game's process
 //! tree, an output device by loopback, a microphone or line-in, or an app's process tree
 //! (`apps.rs`). Each is titled with the source's name, scaled by its gain before anything is
-//! stored, and the mic-mute hotkey silences every input source. A named device only ever
-//! records itself: while it is not connected its track is silent and the status says
+//! stored, and the mic-mute hotkey silences every input unless its source says it is a line-in
+//! or capture card (`SourceSpec::mic_mute = false`) on a named device. A named device only ever records itself: while it is not connected its track is silent and the status says
 //! "<name> (not connected; waiting)" (`sources::opened`); a source with no device follows the
 //! Windows default as it moves (`notify.rs`).
 //!
 //! Each track runs its own capture thread pushing interleaved f32 samples into a ring
 //! holding the last `buffer_secs`. Every track is kept level with the wall clock
 //! (`apps::Leveller`): silence while its source sends nothing (loopback of a quiet output,
-//! a closed game), and a lost device is reopened every `REOPEN_EVERY` meanwhile; a named
-//! device not connected at start waits for its device the same way (`capture_loop`). Gain and
+//! a closed game), and a lost device is reopened every `REOPEN_EVERY` meanwhile; a device
+//! not there at start (named, or no Windows default yet) waits for it the same way (`capture_loop`). Gain and
 //! name change live (`sources::set_live`), so the Audio page never restarts the engine. The encoder snapshots rings at save time and encodes AAC
 //! per track — raw PCM in RAM keeps encoder state out of the ring (~23MB / 60s / stereo).
 
@@ -24,28 +24,31 @@ use wasapi::{DeviceCollection, Direction};
 
 mod apps;
 mod capture_loop;
+mod endpoints;
+mod hold;
+mod mute;
 mod notify;
+mod rebind;
 pub mod sources;
 mod stream;
 mod voice;
 
 use sources::{Kind, SourceSpec};
 
-static MIC_MUTED: AtomicBool = AtomicBool::new(false);
+#[cfg(test)]
+pub(crate) use endpoints::{choose_endpoint, Pick};
+#[cfg(test)]
+use endpoints::match_endpoint;
 
-/// Set whether newly captured input samples enter the replay buffer as silence.
-pub fn set_mic_muted(muted: bool) {
-    MIC_MUTED.store(muted, Ordering::Relaxed);
-}
+pub(crate) use mute::{initial_mute, MuteNow};
+#[cfg(test)]
+pub(crate) use mute::MIC_MUTED_ENV;
+pub use mute::{mic_muted, set_mic_muted, toggle_mic_mute};
 
-/// Toggle microphone capture muting and return the new state.
-pub fn toggle_mic_mute() -> bool {
-    MIC_MUTED.fetch_xor(true, Ordering::Relaxed) ^ true
-}
-
-/// Return whether newly captured input samples are muted.
-pub fn mic_muted() -> bool {
-    MIC_MUTED.load(Ordering::Relaxed)
+/// The spawn-time mute (`RECALL_MIC_MUTED`), applied before stdin is read and before any track
+/// opens: a muted mic records nothing of this run, and an Alt+M that comes early is kept.
+pub fn apply_spawn_mute() {
+    set_mic_muted(initial_mute(|key| std::env::var(key).ok()));
 }
 
 /// A process tree captured by process loopback (include-tree mode).
@@ -98,14 +101,26 @@ pub struct TrackRing {
     /// The gain has been above 0 dB at some point: samples in the ring may pass full scale,
     /// so saves run the limiter until the engine restarts.
     boosted: AtomicBool,
-    /// An input device: silenced by the mic-mute hotkey.
+    /// An input device (opens a capture endpoint).
     input: bool,
+    /// The mic-mute hotkey silences this input: `SourceSpec::mic_mute`, absent = true (every
+    /// config written before the flag, the default mic), whatever Windows calls the endpoint.
+    mic_mute: AtomicBool,
+    /// The source names no device: it records the Windows default input, normally the user's
+    /// microphone, so Alt+M mutes it whatever `mic_mute` says (R4-deep-audio-1). A device
+    /// change restarts the engine, so this is fixed for the ring's life.
+    on_default: bool,
+    /// The open stream is the source's own saved device (`endpoints::opened_own`); false
+    /// before the first open and between streams. A line-in on any other endpoint follows Alt+M.
+    opened_own: AtomicBool,
     /// Resolved endpoint friendly name (set by the capture thread at init).
     endpoint: Mutex<String>,
     pub rate: u32,
     pub channels: u16,
     samples: Mutex<VecDeque<f32>>,
     capacity: usize,
+    /// The saved id, an unsure sibling's hold and the re-pick slot (`hold.rs`).
+    live: hold::Live,
 }
 
 /// Fixed 48 kHz stereo f32 for every track; WASAPI autoconverts from the endpoint's format.
@@ -124,18 +139,24 @@ impl TrackRing {
             gain: AtomicU32::new(spec.gain().to_bits()),
             boosted: AtomicBool::new(spec.gain() > 1.0),
             input: spec.kind() == Some(Kind::Input),
+            mic_mute: AtomicBool::new(spec.mic_mute.unwrap_or(true)),
+            on_default: spec.device.trim().is_empty(),
+            opened_own: AtomicBool::new(false),
             endpoint: Mutex::new(endpoint),
             rate: RATE,
             channels: CHANNELS,
-            samples: Mutex::new(VecDeque::new()),
+            // The whole buffer up front: growing by doubling wasted up to ~45% and copied the
+            // ring (up to ~134 MB) under the lock a save and the capture thread share.
+            samples: Mutex::new(VecDeque::with_capacity(buffer_secs as usize * RATE as usize * CHANNELS as usize)),
             capacity: buffer_secs as usize * RATE as usize * CHANNELS as usize,
+            live: hold::Live::with_saved_id(&spec.device_id),
         }
     }
 
     /// A 48 kHz stereo game-audio ring of `buffer_secs` fed by the test (no WASAPI).
     #[cfg(test)]
     pub(crate) fn for_test(name: &'static str, buffer_secs: u32) -> Self {
-        let spec = SourceSpec { id: name.into(), kind: "game".into(), device: String::new(), exe: String::new(), name: name.into(), gain_db: 0.0 };
+        let spec = SourceSpec { device_id: String::new(), id: name.into(), kind: "game".into(), device: String::new(), exe: String::new(), name: name.into(), gain_db: 0.0, mic_mute: None };
         Self::for_source(&spec, "game", buffer_secs, String::new())
     }
 
@@ -143,6 +164,19 @@ impl TrackRing {
     #[cfg(test)]
     pub(crate) fn push_for_test(&self, data: &[f32]) {
         self.push_capture(data, false);
+    }
+
+    /// Whether the mic-mute hotkey silences this track from now on (an input only): the
+    /// per-strip toggle.
+    pub fn set_mic_mute(&self, on: bool) {
+        self.mic_mute.store(on, Ordering::Relaxed);
+    }
+
+    /// The mic-mute hotkey silences this track: an input, unless its source says it is a line-in
+    /// or capture card on a named device and the stream is that device itself (SPEC A12,
+    /// R3/R4/R5-deep-audio-1). The Windows default and any other endpoint are always muted.
+    fn mutes(&self) -> bool {
+        self.input && (self.mic_mute.load(Ordering::Relaxed) || self.on_default || !self.opened_own.load(Ordering::Relaxed))
     }
 
     /// The source's gain is, or has been, above 0 dB: every output of this track goes through
@@ -252,13 +286,18 @@ impl TrackRing {
     }
 
     /// Append captured samples, scaled by the source's gain. The mic-mute hotkey silences
-    /// only input sources, and only samples entering the ring: replay history never changes.
+    /// only microphone inputs, and only samples entering the ring: replay history never changes.
     ///
     /// A block bigger than the ring keeps only its newest `capacity` samples, and the ring
     /// makes room before it takes them, so it never grows past its capacity.
     fn push_capture(&self, data: &[f32], mute_inputs: bool) {
+        self.push_samples(data, mute_inputs, false);
+    }
+
+    /// [`Self::push_capture`]; `held` stores silence whatever Alt+M says (`hold.rs`).
+    fn push_samples(&self, data: &[f32], mute_inputs: bool, held: bool) {
         let data = &data[data.len().saturating_sub(self.capacity)..];
-        let silence = mute_inputs && self.input;
+        let silence = held || (mute_inputs && self.mutes());
         let gain = self.gain();
         let gained: Vec<f32>;
         let data = if gain != 1.0 && !silence {
@@ -282,6 +321,7 @@ impl TrackRing {
 /// Resolve + start every source in list order. Failures are per-source (a broken input
 /// must not kill game audio); returns whatever started, with a report line each.
 pub fn start(buffer_secs: u32, mut report: impl FnMut(String)) -> Vec<Arc<TrackRing>> {
+    // The spawn mute was applied before stdin is read (`apply_spawn_mute`, main.rs).
     report(format!(
         "audio endpoints -- render: {:?} | capture: {:?}",
         list_endpoints(&Direction::Render),
@@ -342,83 +382,6 @@ pub fn list_endpoints(direction: &Direction) -> Vec<String> {
         .collect()
 }
 
-/// Lowercase, ø→o (a name typed without the ø still matches), split into words.
-/// The Audio page's meter (`recall-native` `services/meters.rs`) uses the same rule, so it
-/// meters the endpoint this records; keep the two copies equal (same test table in both).
-fn words(text: &str) -> Vec<String> {
-    let folded: String = text.to_lowercase().chars().map(|c| if c == 'ø' { 'o' } else { c }).collect();
-    folded.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_owned).collect()
-}
-
-/// True when every word of `want` is a whole word of `name` — survives vendor naming like
-/// "Speakers (2- USB Audio Device)" for "usb speakers", but "a" never matches inside
-/// another word.
-fn name_matches(name: &str, want: &str) -> bool {
-    let name = words(name);
-    let want = words(want);
-    !want.is_empty() && want.iter().all(|w| name.contains(w))
-}
-
-/// Index of the endpoint `want` names: an exact (case-insensitive) friendly
-/// name first, so "Microphone (2- USB)" never loses to a longer name that
-/// shares its tokens; then the first token-AND match.
-fn match_endpoint(names: &[String], want: &str) -> Option<usize> {
-    let want = want.trim();
-    if want.is_empty() {
-        return None;
-    }
-    let exact = names.iter().position(|n| n.trim().to_lowercase() == want.to_lowercase());
-    exact.or_else(|| names.iter().position(|n| name_matches(n, want)))
-}
-
-/// Which endpoint a device source opens.
-#[derive(Debug, PartialEq)]
-pub(super) enum Pick {
-    /// The connected endpoint at this index of the names.
-    Named(usize),
-    Default,
-}
-
-/// The endpoint a device source asks for, from the connected endpoints' `names`: its
-/// device `want`, else (no device) the Windows default. A named device opens by its own name
-/// only, at start and on every reopen, never as the Windows default: that would record another
-/// device under this track's name (the track waits for it instead, `capture_loop`). Under
-/// `RECALL_AUDIO_EXACT` (tests) only a named endpoint may open, so a test never records the
-/// person's real devices.
-pub(super) fn choose_endpoint(names: &[String], want: Option<&str>, exact: bool) -> Result<Pick, String> {
-    let want = want.map(str::trim).filter(|w| !w.is_empty());
-    if let Some(i) = want.and_then(|w| match_endpoint(names, w)) {
-        return Ok(Pick::Named(i));
-    }
-    if exact {
-        return Err(format!("no endpoint matches {:?} (RECALL_AUDIO_EXACT)", want.map(str::to_owned)));
-    }
-    match want {
-        Some(want) => Err(format!("'{want}' is not connected")),
-        None => Ok(Pick::Default),
-    }
-}
-
-/// Open what `choose_endpoint` picks; an input with no device takes `RECALL_AUDIO_MIC`'s under
-/// `RECALL_AUDIO_EXACT`. The flag: the Windows default was opened (the stream watches it).
-fn pick_device(direction: &Direction, device: &str, input: bool) -> Result<(wasapi::Device, String, bool), String> {
-    let collection = DeviceCollection::new(direction).map_err(|e| format!("enumerate: {e}"))?;
-    let n = collection.get_nbr_devices().map_err(|e| e.to_string())?;
-    let exact = std::env::var_os("RECALL_AUDIO_EXACT").is_some();
-    let test_mic = (exact && input).then(|| std::env::var("RECALL_AUDIO_MIC").ok()).flatten();
-    let want = Some(device.trim().to_owned()).filter(|w| !w.is_empty()).or(test_mic).filter(|w| !w.trim().is_empty());
-    let devices: Vec<wasapi::Device> = (0..n).filter_map(|i| collection.get_device_at_index(i).ok()).collect();
-    let names: Vec<String> = devices.iter().map(|d| d.get_friendlyname().unwrap_or_default()).collect();
-    match choose_endpoint(&names, want.as_deref(), exact)? {
-        Pick::Named(i) => Ok((devices.into_iter().nth(i).expect("index from names"), names[i].clone(), false)),
-        Pick::Default => {
-            let dev = wasapi::get_default_device(direction).map_err(|e| format!("default endpoint failed: {e}"))?;
-            let name = dev.get_friendlyname().unwrap_or_else(|_| "(default)".into());
-            Ok((dev, format!("{name} (Windows default)"), true))
-        }
-    }
-}
-
 /// Resolve the opt-in process-loopback target for Game capture. A supplied
 /// value deliberately never falls back to endpoint capture: that could record
 /// the wrong audio source while appearing to work.
@@ -459,7 +422,7 @@ fn source_of(kind: Option<Kind>, process: bool) -> &'static str {
 fn start_track(spec: &SourceSpec, buffer_secs: u32, target: Option<LoopbackTarget>) -> Result<Arc<TrackRing>, String> {
     let ring = Arc::new(TrackRing::for_source(spec, source_of(spec.kind(), target.is_some()), buffer_secs, String::new()));
     let direction = if spec.kind() == Some(Kind::Input) { Direction::Capture } else { Direction::Render };
-    let device = spec.device.clone();
+    let device = (spec.device.clone(), spec.device_id.clone());
     let tring = ring.clone();
     let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::Builder::new()
@@ -475,19 +438,20 @@ fn start_track(spec: &SourceSpec, buffer_secs: u32, target: Option<LoopbackTarge
 }
 
 /// The capture thread of a device or game track (`capture_loop`): open, capture, and when
-/// the device or stream is lost, keep the track level with silence and reopen. A named device
-/// that is not connected at start still gets its track and waits for it by name.
+/// the device or stream is lost, keep the track level with silence and reopen. A device that is
+/// not there at start still gets its track and waits for it (by name, or for a Windows default).
 fn capture_thread(
     direction: Direction,
-    device: String,
+    (device, _): (String, String),
     ring: Arc<TrackRing>,
     init_tx: std::sync::mpsc::Sender<Result<(), String>>,
     target: Option<LoopbackTarget>,
 ) {
     // Per-thread COM init; already-initialized is fine.
     let _ = wasapi::initialize_mta();
+    stream::join_mmcss_audio(ring.name);
     let exact = std::env::var_os("RECALL_AUDIO_EXACT").is_some();
-    let wait_absent = capture_loop::waits_when_absent(&device, target.is_some(), exact);
+    let wait_absent = capture_loop::waits_when_absent(target.is_some(), exact);
     let mut clock = capture_loop::WallClock::start();
     // Device and default changes arrive as notices (no polling on this thread); without them
     // the track still reopens on its backoff.
@@ -500,7 +464,8 @@ fn capture_thread(
         Some(Ok(n)) => n,
         _ => &capture_loop::NoNotices,
     };
-    let open = |_reopen| stream::open_stream(&direction, &device, &ring, &target);
+    // The saved id as the controller sends it now (`set_source device_id`, P1-B).
+    let open = |_reopen| stream::open_stream(&direction, (&device, &ring.live.saved_id()), &ring, &target);
     capture_loop::capture_loop(&ring, &device, wait_absent, open, init_tx, &mut clock, notices);
 }
 

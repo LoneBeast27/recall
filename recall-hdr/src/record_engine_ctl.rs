@@ -85,7 +85,7 @@ impl Controller {
         if let Err(e) = std::fs::create_dir_all(&self.cfg.recording.output_dir) {
             log!("record: cannot create clip folder {:?}: {e}", self.cfg.recording.output_dir);
         }
-        EngineSpec { env: engine_env(target, &self.cfg.recording, self.applied_mask.as_deref()) }
+        EngineSpec { env: engine_env(target, &self.cfg.recording, self.applied_mask.as_deref(), self.mic_muted) }
     }
 
     /// Restart a running engine with the wanted target (no game switch). A settings or
@@ -102,11 +102,14 @@ impl Controller {
         crate::record_restart::restart_for_recovery(self)
     }
 
-    /// A fresh engine instance starts unmuted in `auto` mode: re-apply ours.
+    /// A fresh engine instance starts in `auto` mode with the mute it was spawned with: re-apply
+    /// ours. The mute goes either way: a crash respawn reuses the spawn's environment, which may
+    /// hold a mute the user has lifted since.
     pub(crate) fn reapply_engine_intents(&mut self) {
         self.reapply_lock();
         // Not a user action: a line the new engine does not take is logged.
-        if self.mic_muted && !crate::record_dispatch::automatic_effects(self.supervisor.send_engine_line(r#"{"cmd":"set_mic_mute","muted":true}"#)).is_empty() {
+        let mute = serde_json::json!({"cmd": "set_mic_mute", "muted": self.mic_muted}).to_string();
+        if !crate::record_dispatch::automatic_effects(self.supervisor.send_engine_line(&mute)).is_empty() && self.mic_muted {
             log!("record: the new engine did not take the mic mute ({})", crate::record_dispatch::NOT_RESPONDING);
         }
         if let Some(mode) = self.mode_select.as_deref().filter(|m| *m != "auto") {

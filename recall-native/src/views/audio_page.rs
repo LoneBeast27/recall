@@ -70,6 +70,10 @@ pub struct AudioPage {
     pub reorder: Option<(String, usize)>,
     /// Each strip's window left edge, written while painting (places a dragged strip).
     pub lefts: HashMap<String, Rc<Cell<Option<f32>>>>,
+    /// The source whose "Muted by the mic hotkey" untick was refused, and the note why (no
+    /// endpoint id to save, or an identical device shares the name): its strip says so until a
+    /// device is picked or the page closes (R6/R7-deep-audio-1).
+    pub mute_refused: Option<(String, &'static str)>,
 }
 
 impl AudioPage {
@@ -80,6 +84,7 @@ impl AudioPage {
         self.renaming = None;
         self.fader = None;
         self.reorder = None;
+        self.mute_refused = None;
     }
 
     pub fn span(&mut self, id: &str) -> FaderSpan {
@@ -119,8 +124,64 @@ impl Root {
         }
     }
 
-    pub(crate) fn set_source_device(&mut self, id: &str, device: String) {
-        self.edit_source(id, |s| s.device = device);
+    /// A strip's device: its name and, for an input, its endpoint id (a line-in skips Alt+M only
+    /// on that endpoint, R6-deep-audio-1). A line-in moved onto an endpoint Windows lists as a
+    /// microphone gets Alt+M back on, with a toast (R5-deep-audio-2); the device is looked up in
+    /// the lists at the click (R6-deep-audio-4).
+    pub(crate) fn set_source_device(&mut self, id: &str, device: String, device_id: String) {
+        let lists = self.settings_ui.audio.devices.clone();
+        let mut rearmed = false;
+        if self.settings_ui.audio.mute_refused.as_ref().is_some_and(|(s, _)| s == id) {
+            self.settings_ui.audio.mute_refused = None;
+        }
+        self.edit_source(id, |s| {
+            if let Some(on) = crate::services::audio_mute::device_pick_effect(s, lists.as_ref(), (&device, &device_id)) {
+                s.mic_mute = Some(on);
+                rearmed = true;
+            }
+            s.device = device;
+            s.device_id = device_id;
+        });
+        if rearmed {
+            self.show_toast(ToastKind::Info, "Muted by the mic hotkey", Some(crate::services::audio_mute::REARMED.into()));
+        }
+    }
+
+    /// Whether the mic-mute hotkey silences this input (off: a line-in or capture card). Off
+    /// saves the endpoint id too, as a line-in skips Alt+M only there; with no id to save it is
+    /// refused and the strip says so (R6-deep-audio-1).
+    pub(crate) fn set_source_mic_mute(&mut self, id: &str, on: bool) {
+        let source = self.audio_sources().into_iter().find(|s| s.id == id);
+        let effect = match source {
+            Some(s) if !on => crate::services::audio_mute::mic_toggle_effect(&s, self.settings_ui.audio.devices.as_ref()),
+            _ => Ok((true, String::new())),
+        };
+        match effect {
+            Ok((on, device_id)) => {
+                self.settings_ui.audio.mute_refused = None;
+                self.edit_source(id, |s| {
+                    s.mic_mute = Some(on);
+                    if !on {
+                        s.device_id = device_id;
+                    }
+                });
+            }
+            Err(why) => self.settings_ui.audio.mute_refused = Some((id.to_owned(), why)),
+        }
+    }
+
+    /// "+ Add source" → "Microphone" (`mic`) or "Line-in or capture card". A line-in opens its
+    /// device picker: until a device is picked it follows the mic hotkey (R4-deep-audio-1).
+    pub(crate) fn add_input(&mut self, mic: bool) {
+        match sources::with_new_input(&self.audio_sources(), mic) {
+            Some(list) => {
+                if !mic {
+                    self.settings_ui.audio.menu = list.last().map(|s| StripMenu::Device(s.id.clone()));
+                }
+                self.save_sources(&list);
+            }
+            None => self.show_toast(ToastKind::Info, "Can't add that source", Some(format!("Up to {} sources, one of them the game.", sources::SOURCES_MAX))),
+        }
     }
 
     /// Point an app source at another app; a name that was the old app's follows the new one.
@@ -210,13 +271,15 @@ impl Root {
 
     pub(crate) fn undo_remove_source(&mut self) {
         let Some((index, source, _)) = self.settings_ui.audio.removed.take() else { return };
-        let mut list = self.audio_sources();
-        if list.iter().any(|s| s.id.eq_ignore_ascii_case(&source.id)) || list.len() >= sources::SOURCES_MAX {
-            return;
+        let name = source.name.clone();
+        match sources::restored(&self.audio_sources(), index, source) {
+            Some(list) => {
+                self.save_sources(&list);
+                self.toast = None;
+            }
+            // Never a silent no-op with the Undo toast still up.
+            None => self.show_toast(ToastKind::Info, format!("Can't bring back {name}"), Some(format!("Up to {} sources, one of them the game.", sources::SOURCES_MAX))),
         }
-        list.insert(index.min(list.len()), source);
-        self.save_sources(&list);
-        self.toast = None;
     }
 
     pub(crate) fn start_rename(&mut self, id: &str, name: &str, window: &mut Window, cx: &mut Context<Self>) {

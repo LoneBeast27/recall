@@ -79,10 +79,14 @@ pub enum Event {
 struct Lane {
     rate: u64,
     channels: usize,
-    /// Frames placed on the track so far (a boosted track's limiter may still hold the newest ~10 ms).
+    /// Frames placed on the track so far (its limiter may still hold the newest ~10 ms).
     written: u64,
-    /// A source above 0 dB: every frame, silence included, passes through the -1 dBFS limiter in order.
-    limiter: Option<StreamLimiter>,
+    /// Every frame passes through the limiter in order, from the track's first frame (SPEC A3:
+    /// the limiter always runs), so a track that first goes above the -1 dBFS ceiling mid-stream
+    /// (a source boosted live, a game transient) is ramped down ahead of its peak instead of
+    /// stepping in one sample. Under the ceiling its output is bit-identical to the input; a quiet
+    /// limiter lets silence take the sink's fast path (`write_silence`).
+    limiter: StreamLimiter,
 }
 
 struct Active<S> {
@@ -243,7 +247,7 @@ impl<F: SinkFactory> Recorder<F> {
                 rate: t.rate as u64,
                 channels: t.channels.max(1) as usize,
                 written: 0,
-                limiter: t.boosted.then(|| StreamLimiter::new(t.channels, t.rate)),
+                limiter: StreamLimiter::new(t.channels, t.rate),
             })
             .collect();
         let mut active = Box::new(Active {
@@ -381,41 +385,43 @@ impl<S: Sink> Active<S> {
         Ok(())
     }
 
-    /// Samples for `track`, through its limiter when the source is boosted.
+    /// Samples for `track`, through its limiter (the newest ~10 ms stay held as look-ahead).
     fn write_audio(&mut self, track: usize, samples: &[f32]) -> Result<(), String> {
-        match self.lanes[track].limiter.as_mut() {
-            Some(limiter) => {
-                let out = limiter.push(samples);
-                if out.is_empty() { Ok(()) } else { self.sink.audio(track, &out) }
-            }
-            None => self.sink.audio(track, samples),
-        }
+        let out = self.lanes[track].limiter.push(samples);
+        if out.is_empty() { Ok(()) } else { self.sink.audio(track, out) }
     }
 
-    /// Silence for `track`. A boosted track's silence goes through its limiter as zeros, so it
-    /// stays behind the frames the limiter still holds.
+    /// Silence for `track`, behind the frames its limiter still holds. While the limiter is
+    /// quiet (nothing near the ceiling, gain back at 1) those frames go out as captured and the
+    /// silence takes the sink's fast path; else it passes through the limiter as zeros, until
+    /// the limiter is quiet again.
     fn write_silence(&mut self, track: usize, frames: u64) -> Result<(), String> {
-        if self.lanes[track].limiter.is_none() {
-            return self.sink.silence(track, frames);
-        }
-        let channels = self.lanes[track].channels;
-        let zeros = vec![0.0f32; 4_800 * channels];
+        // A static zero block (p9 gate P2-c): no 38 KB allocation per call.
+        static ZEROS: [f32; 9_600] = [0.0; 9_600];
+        let channels = self.lanes[track].channels.max(1);
+        let step = (ZEROS.len() / channels).max(1);
         let mut left = frames as usize;
-        while left > 0 {
-            let n = left.min(4_800);
-            self.write_audio(track, &zeros[..n * channels])?;
+        while left > 0 && !self.lanes[track].limiter.quiet() {
+            let n = left.min(step);
+            self.write_audio(track, &ZEROS[..n * channels])?;
             left -= n;
         }
-        Ok(())
+        if left == 0 {
+            return Ok(());
+        }
+        let held = self.lanes[track].limiter.drain();
+        if !held.is_empty() {
+            self.sink.audio(track, held)?;
+        }
+        self.sink.silence(track, left as u64)
     }
 
     /// Stop: each limiter hands on the frames it still holds, so no sample is lost or moved.
     fn flush_limiters(&mut self) -> Result<(), String> {
         for track in 0..self.lanes.len() {
-            let Some(limiter) = self.lanes[track].limiter.as_mut() else { continue };
-            let out = limiter.finish();
+            let out = self.lanes[track].limiter.finish();
             if !out.is_empty() {
-                self.sink.audio(track, &out)?;
+                self.sink.audio(track, out)?;
             }
         }
         Ok(())

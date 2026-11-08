@@ -17,6 +17,10 @@ pub enum Outbound {
         /// This engine applies `set_source` (gain, name) to live tracks. A controller restarts
         /// engines that do not say so (older builds ignore the command).
         live_sources: bool,
+        /// This engine also applies `set_source`'s `mic_mute` and `device_id` live, and limits a
+        /// gain boosted live (P2-a). An engine without it (8111e31 and older) ignores those
+        /// fields, so the controller restarts it for them instead of sending them.
+        live_source_fields: bool,
     },
     /// Sent on change (and ~1/s for fps): current live state.
     Status {
@@ -96,6 +100,12 @@ pub enum Outbound {
     /// A `save_clip` failed.
     SaveFailed {
         reason: String,
+    },
+    /// An input opened on an unsure sibling was unmuted by a fresh Alt+M (A4 ruling): the
+    /// controller saves `device_id` as source `id`'s own endpoint.
+    SourceAdopted {
+        id: String,
+        device_id: String,
     },
     /// Sent after microphone capture muting changes.
     MicMuted {
@@ -209,6 +219,10 @@ pub struct AudioOpened {
     /// the source has no track.
     pub opened: String,
     pub live: bool,
+    /// An unsure sibling unmuted by a fresh Alt+M (A4 ruling): its endpoint id, for the
+    /// controller to save as the source's own (`audio::hold`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adopt_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -245,6 +259,12 @@ pub enum Command {
         gain_db: Option<f32>,
         #[serde(default)]
         name: Option<String>,
+        /// Whether the mic-mute hotkey silences this input (false: a line-in or capture card).
+        #[serde(default)]
+        mic_mute: Option<bool>,
+        /// The endpoint id saved with the source's device (P1-B): the track reopens on it.
+        #[serde(default)]
+        device_id: Option<String>,
     },
     /// Export an existing VFR clip to a separate NVENC CFR file (60 fps default).
     ExportClip {
@@ -313,9 +333,11 @@ mod tests {
     fn set_source_parses_with_either_field() {
         use super::Command;
         let both: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"mic","gain_db":-3.5,"name":"Voice"}"#).unwrap();
-        assert!(matches!(both, Command::SetSource { ref id, gain_db: Some(g), name: Some(ref n) } if id == "mic" && g == -3.5 && n == "Voice"));
+        assert!(matches!(both, Command::SetSource { ref id, gain_db: Some(g), name: Some(ref n), mic_mute: None, device_id: None } if id == "mic" && g == -3.5 && n == "Voice"));
         let gain: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"game","gain_db":6}"#).unwrap();
         assert!(matches!(gain, Command::SetSource { gain_db: Some(_), name: None, .. }));
+        let line_in: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"in-1","mic_mute":false}"#).unwrap();
+        assert!(matches!(line_in, Command::SetSource { mic_mute: Some(false), gain_db: None, name: None, .. }));
     }
 
     #[test]

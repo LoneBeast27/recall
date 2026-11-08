@@ -55,8 +55,6 @@ pub struct TrackInfo {
     pub name: &'static str,
     pub rate: u32,
     pub channels: u16,
-    /// The source's gain is above 0 dB: the recording limits this track to -1 dBFS.
-    pub boosted: bool,
 }
 
 /// Live-path items (from `tap`).
