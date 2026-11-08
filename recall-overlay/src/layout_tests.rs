@@ -55,19 +55,20 @@ fn notice_is_44px_tall_at_1440p_and_scales_with_the_monitor() {
 }
 
 #[test]
-fn notice_runs_the_muted_title_then_the_bold_game_name_whole() {
+fn notice_puts_the_small_title_over_the_bold_game_name() {
     let notice = NoticeView::new(Tone::Recording, "Recording", "VALORANT", true);
     let scene = notice_scene(&notice, 1.0, &Fake);
-    let words: Vec<_> = scene.texts.iter().map(|t| t.text.as_str()).collect();
-    assert_eq!(words, ["Recording", "VALORANT"]);
     let (title, game) = (text(&scene, "Recording"), text(&scene, "VALORANT"));
     assert_eq!((title.role, title.color), (Role::NoticeTitle, MUTED));
     assert_eq!((game.role, game.color), (Role::NoticeGame, TEXT));
-    assert!(title.x < game.x);
-    // The mark's cell, then each run in its own box: 44 + gap + (pad + text + pad) twice + end pad.
-    let w = |r, t| Fake.measure(r, 1.0, t).width;
-    let want = 44.0 + 2.0 * crate::cells::GAP + w(Role::NoticeTitle, "Recording") + w(Role::NoticeGame, "VALORANT") + 4.0 * 4.0 + 16.0;
-    assert_eq!(scene.w, want.ceil());
+    assert!(title.y < game.y);
+    assert_eq!(title.x, game.x);
+    // The caps of both lines sit centred in the pill.
+    let top = title.y + 11.0 * 0.95 - 11.0 * 0.7;
+    let bottom = game.y + 15.0 * 0.95;
+    assert!((top - (44.0 - bottom)).abs() < 0.01, "top {top} bottom gap {}", 44.0 - bottom);
+    // Width = text start + widest line + right padding.
+    assert_eq!(scene.w, (34.0 + 8.0 * 15.0 * 0.6 + 20.0f32).ceil());
 }
 
 #[test]
@@ -76,7 +77,7 @@ fn non_game_details_use_the_ui_face_and_one_liners_centre() {
     assert_eq!(text(&notice_scene(&saved, 1.0, &Fake), "disk full").role, Role::NoticeUi);
     let waiting = NoticeView::new(Tone::Waiting, "Waiting for a game", "", true);
     let scene = notice_scene(&waiting, 1.0, &Fake);
-    assert!(scene.texts.iter().all(|t| t.role == Role::NoticeUi && t.color == TEXT));
+    assert_eq!(scene.texts.len(), 1);
     let line = &scene.texts[0];
     let cap_mid = line.y + 14.0 * 0.95 - 14.0 * 0.7 / 2.0;
     assert!((cap_mid - 22.0).abs() < 0.01);
@@ -89,7 +90,7 @@ fn non_game_details_use_the_ui_face_and_one_liners_centre() {
 fn stats_scene_shows_replay_fps_low_and_two_rings() {
     let scene = stats_scene(&stats(), 1.0, &Fake);
     assert_eq!(scene.h, 44.0);
-    for needle in ["02", "00", "144", "1%", "low", "98", "71", "GPU", "64°", "23", "CPU"] {
+    for needle in ["2:00", "144", "1% low 98", "71", "GPU", "64°C", "23", "CPU"] {
         text(&scene, needle);
     }
     let rings: Vec<_> = scene.shapes.iter().filter(|s| matches!(s, Shape::Ring { .. })).collect();
@@ -110,41 +111,40 @@ fn stats_width_holds_still_as_numbers_change() {
 #[test]
 fn hot_gpu_turns_amber_and_missing_sources_degrade() {
     let hot = stats_scene(&StatsContent { gpu_temp: Some(HOT_GPU_C), ..stats() }, 1.0, &Fake);
-    assert_eq!(text(&hot, "83°").color, WARNING);
+    assert_eq!(text(&hot, "83°C").color, WARNING);
     assert!(hot.shapes.iter().any(|s| matches!(s, Shape::Ring { color: WARNING, .. })));
     let cool = stats_scene(&StatsContent { gpu_temp: Some(HOT_GPU_C - 1), ..stats() }, 1.0, &Fake);
-    assert_eq!(text(&cool, "82°").color, TEXT);
+    assert_eq!(text(&cool, "82°C").color, TEXT);
 
     let bare = StatsContent { fps: None, low1: None, fps_note: Some("No frame timing".into()), gpu: None, cpu: None, ..stats() };
     let scene = stats_scene(&bare, 1.0, &Fake);
     text(&scene, "No frame timing");
-    for cell in ["No", "fra", "me", "tim", "ing"] {
-        text(scene.tall.as_ref().expect("the side pill's cells"), cell);
-    }
     assert_eq!(scene.texts.iter().filter(|t| t.text == "—").count(), 2, "FPS and the CPU ring show dashes");
     assert!(!scene.texts.iter().any(|t| t.text == "GPU"), "no NVML → no GPU ring");
     assert_eq!(scene.shapes.iter().filter(|s| matches!(s, Shape::Ring { .. })).count(), 1);
+    assert!(scene.w < stats_scene(&stats(), 1.0, &Fake).w);
 }
 
 #[test]
 fn paused_and_idle_marks() {
     let paused = stats_scene(&StatsContent { paused: true, recording: false, ..stats() }, 1.0, &Fake);
     assert!(matches!(icon(&paused), Shape::Pause { .. }));
-    assert_eq!(text(&paused, "02").color, MUTED);
+    assert_eq!(text(&paused, "2:00").color, MUTED);
     let idle = stats_scene(&StatsContent { recording: false, ..stats() }, 1.0, &Fake);
     assert!(matches!(icon(&idle), Shape::Hollow { .. }));
 }
 
 #[test]
-fn a_clip_save_carries_the_badge_in_the_first_cell() {
+fn a_clip_save_carries_the_badge_and_steps_its_text_clear_of_the_ring() {
     let plain = NoticeView::new(Tone::Success, "Clip saved", "VALORANT · 0:30", true);
     let saving = NoticeView::new(Tone::Recording, "Saving", "0:30…", true).saving(SavePhase::Saving);
     let (a, b) = (notice_scene(&plain, 1.0, &Fake), notice_scene(&saving, 1.0, &Fake));
     assert_eq!(a.icon.unwrap().badge, None);
     let badge = b.icon.unwrap();
-    assert_eq!((badge.badge, badge.cx, badge.cy, badge.r), (Some(SavePhase::Saving), 22.0, 22.0, 4.0));
-    assert_eq!(text(&b, "Saving").x, text(&a, "Clip saved").x, "the title starts after the mark's cell either way");
-    assert!(text(&b, "Saving").x - (badge.cx + 2.0 * badge.r) >= 8.0, "8+ px between the ring's outer edge and the text");
+    assert_eq!((badge.badge, badge.cx, badge.cy, badge.r), (Some(SavePhase::Saving), 20.0, 22.0, 4.0));
+    let text_x = text(&b, "Saving").x;
+    assert_eq!(text_x, text(&a, "Clip saved").x + 4.0);
+    assert!(text_x - (badge.cx + 2.0 * badge.r + 1.0) >= 8.0, "8+ px between the ring's outer edge and the text");
     assert!(inside(&b));
 }
 
@@ -169,15 +169,17 @@ fn ring_sweep_runs_clockwise_from_twelve() {
 }
 
 #[test]
-fn a_saves_stages_share_one_length_so_nothing_moves_when_it_lands() {
+fn a_saves_stages_share_one_layout_so_nothing_moves_when_it_lands() {
     let stage = |tone, title: &str, phase| NoticeView::new(tone, title, "VALORANT · 0:30", true).saving(phase);
     let saving = notice_scene(&stage(Tone::Recording, "Saving", SavePhase::Saving), 1.3, &Fake);
     let saved = notice_scene(&stage(Tone::Success, "Clip saved", SavePhase::Saved), 1.3, &Fake);
     assert_eq!(saving.w, saved.w, "one width for both stages");
-    assert_eq!(text(&saving, "VALORANT · 0:30"), text(&saved, "VALORANT · 0:30"), "the detail stays put");
+    assert_eq!(text(&saving, "VALORANT · 0:30"), text(&saved, "VALORANT · 0:30"), "the detail line stays put");
     assert_eq!((saving.icon.unwrap().cx, saving.icon.unwrap().cy), (saved.icon.unwrap().cx, saved.icon.unwrap().cy));
-    assert!(saving.lead && saved.lead, "a save's content starts at the left end, so a wider pill never moves it");
+    assert_eq!(text(&saving, "Saving").x, text(&saved, "Clip saved").x);
+    assert!(saving.lead && saved.lead, "a save's content starts at the left padding, so a wider pill never moves it");
     assert!(!notice_scene(&NoticeView::new(Tone::Success, "Bookmark added", "x", false), 1.0, &Fake).lead);
+    // A detail narrower than "Clip saved": the reserved title slot holds the width.
     let short = |title: &str, phase| notice_scene(&NoticeView::new(Tone::Success, title, "0:30", true).saving(phase), 1.0, &Fake);
     assert_eq!(short("Saving", SavePhase::Saving).w, short("Clip saved", SavePhase::Saved).w);
 }

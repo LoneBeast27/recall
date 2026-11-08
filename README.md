@@ -49,6 +49,7 @@ powershell -NoProfile -File scripts\install.ps1
   Settings → General) toggles live performance stats: FPS with its 1% low, GPU and CPU rings,
   and the recording dot. Each game gets its own spot, measured from your clips so the Island
   stays clear of that game's HUD (`hud-spots.json`); unknown games use the top right.
+  The pill uses compact spacing and stacks text upright along a side edge.
 - **Tray menu:** status · Open Recall · Stop/Start recording · Quit Recall.
 - **The app** (Start menu → Recall): library grouped by day, hover a tile to scrub, favourite,
   rename, delete to the Recycle Bin, drag a clip into Discord or copy it. Right-click a tile for
@@ -135,6 +136,8 @@ drives are detected); thumbnails, hover frames and recently watched clips are ke
 | `recall-hub/` | — | the old Svelte/Tauri window; replaced by `recall-native`, kept for reference |
 
 ## Build and test (developers)
+
+Build the Windows setup screen with `powershell -NoProfile -File scripts/setup/build.ps1 -Preview`. Open `dist/setup/RecallSetupPreview.exe` to rehearse setup. The release setup build takes an explicit verified payload via `-PayloadDirectory` and uses the save-aware installer.
 
 ```powershell
 $env:FFMPEG_DIR    = "$PWD\tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared"   # has av1_nvenc

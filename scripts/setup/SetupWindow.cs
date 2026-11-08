@@ -1,0 +1,405 @@
+using System;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Reflection;
+using System.Runtime.InteropServices;
+using System.Threading.Tasks;
+using System.Windows.Forms;
+
+namespace Recall.Setup
+{
+    internal sealed class SetupWindow : Form
+    {
+        private static readonly Color Canvas = Color.FromArgb(10, 10, 10);
+        private static readonly Color Raised = Color.FromArgb(18, 18, 18);
+        private static readonly Color Border = Color.FromArgb(40, 40, 40);
+        private static readonly Color Ink = Color.FromArgb(237, 237, 237);
+        private static readonly Color Muted = Color.FromArgb(163, 163, 163);
+        private static readonly Color Signal = Color.FromArgb(255, 69, 58);
+        private static readonly Color Mint = Color.FromArgb(129, 201, 149);
+        private static readonly Color Error = Color.FromArgb(242, 139, 130);
+
+        private readonly SetupFonts fonts = new SetupFonts();
+        private readonly bool preview = !SetupPackage.HasPayload;
+        private readonly Panel options;
+        private readonly Panel result;
+        private readonly Label title;
+        private readonly Label description;
+        private readonly Label destinationNote;
+        private readonly Label resultTitle;
+        private readonly Label resultDetail;
+        private readonly TextBox destination;
+        private readonly CheckBox shortcut;
+        private readonly CheckBox launch;
+        private readonly CheckBox frameTiming;
+        private readonly Button cancel;
+        private readonly Button primary;
+        private readonly Label[] steps = new Label[3];
+        private readonly Rail rail;
+        private bool busy;
+        private bool complete;
+        private int step;
+        private bool failed;
+
+        public SetupWindow()
+        {
+            Text = "Recall Setup";
+            Icon = Icon.ExtractAssociatedIcon(Assembly.GetExecutingAssembly().Location);
+            StartPosition = FormStartPosition.CenterScreen;
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false;
+            MinimizeBox = false;
+            AutoScaleMode = AutoScaleMode.Dpi;
+            AutoScaleDimensions = new SizeF(96, 96);
+            ClientSize = new Size(764, 490);
+            BackColor = Canvas;
+            ForeColor = Ink;
+            Font = fonts.Body;
+            DoubleBuffered = true;
+
+            rail = new Rail { Bounds = new Rectangle(0, 0, 181, 490) };
+            Controls.Add(rail);
+            AddLabel(rail, "Recall", 49, 26, 106, 35, fonts.Mark, Ink);
+            for (int i = 0; i < steps.Length; i++)
+            {
+                steps[i] = AddLabel(rail, new[] { "Options", "Install", "Finish" }[i],
+                    50, 127 + i * 43, 112, 24, fonts.Body, Muted);
+            }
+            AddLabel(rail, "Game clips,\non your PC.", 24, 416, 140, 48, fonts.Body, Muted);
+
+            title = AddLabel(this, "Install Recall", 210, 34, 388, 54, fonts.Title, Ink);
+            description = AddLabel(this, "Set up your game recorder, clip library, and editor.",
+                211, 92, 525, 29, fonts.Body, Muted);
+            var status = new StatusPill(preview ? "Setup preview" : "Windows setup", fonts.Strong)
+                { Bounds = new Rectangle(589, 40, 146, 28) };
+            Controls.Add(status);
+
+            options = new Panel { Bounds = new Rectangle(210, 138, 525, 282) };
+            Controls.Add(options);
+            AddLabel(options, "Install location", 0, 5, 520, 24, fonts.Strong, Ink);
+            var field = new Panel { Bounds = new Rectangle(0, 34, 420, 37), BackColor = Raised };
+
+            options.Controls.Add(field);
+            destination = new TextBox {
+                Bounds = new Rectangle(10, 9, 400, 23), BorderStyle = BorderStyle.None,
+                BackColor = Raised, ForeColor = Ink, Font = fonts.SystemText,
+                AccessibleName = "Install location", TabIndex = 0,
+                Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Recall")
+            };
+            field.Paint += (s, e) =>
+            {
+                using (var edge = new Pen(destination.Focused ? Muted : Border))
+                    e.Graphics.DrawRectangle(edge, 0, 0, field.Width - 1, field.Height - 1);
+            };
+            field.Controls.Add(destination);
+            destination.GotFocus += (s, e) => field.Invalidate();
+            destination.LostFocus += (s, e) => field.Invalidate();
+            var browse = AddButton(options, "Browse…", 430, 34, 95, 37, false, 1);
+            browse.Click += (sender, args) => BrowseFolder();
+            destinationNote = AddLabel(options, "Choose an SSD for Recall and its preview cache.",
+                0, 75, 525, 27, fonts.Body, Muted);
+            shortcut = AddOption("Add a Start menu shortcut", 113, true, 2);
+            launch = AddOption("Start the recorder after setup", 149, false, 3);
+            frameTiming = AddOption("Enable game FPS measurements", 185, false, 4);
+            AddLabel(options, "Windows may request permission for FPS measurements.",
+                26, 216, 499, 22, fonts.Body, Muted);
+            AddLabel(options, "Game recording requires an NVIDIA GPU with NVENC.",
+                0, 254, 525, 24, fonts.Body, Muted);
+
+            result = new Panel { Bounds = options.Bounds, Visible = false };
+            Controls.Add(result);
+            resultTitle = AddLabel(result, "", 0, 39, 525, 38, fonts.Mark, Ink);
+            resultDetail = AddLabel(result, "", 0, 88, 525, 106, fonts.Body, Muted);
+            var progress = new ProgressBar {
+                Name = "progress", Style = ProgressBarStyle.Marquee, MarqueeAnimationSpeed = 32,
+                Bounds = new Rectangle(0, 12, 525, 4), Visible = false
+            };
+            result.Controls.Add(progress);
+
+            cancel = AddButton(this, "Cancel", 490, 441, 90, 34, false, 1);
+            primary = AddButton(this, preview ? "Preview install" : "Install Recall", 592, 441, 143, 34, true, 2);
+            options.TabIndex = 0;
+            result.TabStop = false;
+            cancel.Click += (sender, args) => Close();
+            primary.Click += async (sender, args) => await Install();
+            CancelButton = cancel;
+            AcceptButton = primary;
+            destination.TextChanged += (sender, args) => UpdateDestination();
+            FormClosing += (sender, args) => { if (busy) args.Cancel = true; };
+            UpdateDestination();
+            SetStep(0);
+        }
+
+        [DllImport("dwmapi.dll")]
+        private static extern int DwmSetWindowAttribute(IntPtr window, int attribute, ref int value, int size);
+
+        protected override void OnHandleCreated(EventArgs args)
+        {
+            base.OnHandleCreated(args);
+            int dark = 1;
+            DwmSetWindowAttribute(Handle, 20, ref dark, sizeof(int));
+        }
+
+        protected override void OnPaint(PaintEventArgs args)
+        {
+            base.OnPaint(args);
+            using (var line = new Pen(Border))
+            {
+                args.Graphics.DrawLine(line, 210, 129, 734, 129);
+                args.Graphics.DrawLine(line, 181, 425, ClientSize.Width, 425);
+            }
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            base.Dispose(disposing);
+            if (disposing) fonts.Dispose();
+        }
+
+        private CheckBox AddOption(string text, int y, bool initial, int tab)
+        {
+            var check = new CheckBox {
+                Text = text, Checked = initial, Bounds = new Rectangle(0, y, 525, 28),
+                FlatStyle = FlatStyle.Flat, ForeColor = Ink, BackColor = Canvas,
+                Font = fonts.Strong, UseCompatibleTextRendering = true, TabIndex = tab
+            };
+            check.FlatAppearance.BorderColor = Color.FromArgb(94, 94, 94);
+            check.FlatAppearance.CheckedBackColor = Raised;
+            options.Controls.Add(check);
+            return check;
+        }
+
+        private static Label AddLabel(Control parent, string text, int x, int y, int w, int h, Font font, Color ink)
+        {
+            var label = new Label {
+                Text = text, Bounds = new Rectangle(x, y, w, h), Font = font, ForeColor = ink,
+                UseCompatibleTextRendering = true, UseMnemonic = false
+            };
+            parent.Controls.Add(label);
+            return label;
+        }
+
+        private Button AddButton(Control parent, string text, int x, int y, int w, int h, bool accent, int tab)
+        {
+            var button = new Button {
+                Text = text, Bounds = new Rectangle(x, y, w, h), FlatStyle = FlatStyle.Flat,
+                BackColor = accent ? Signal : Raised, ForeColor = accent ? Canvas : Ink, Font = fonts.Strong,
+                UseCompatibleTextRendering = true, UseVisualStyleBackColor = false, TabIndex = tab
+            };
+            button.FlatAppearance.BorderColor = accent ? Signal : Border;
+            button.FlatAppearance.MouseOverBackColor = accent ? Color.FromArgb(255, 104, 95) : Border;
+            parent.Controls.Add(button);
+            return button;
+        }
+
+        private void UpdateDestination()
+        {
+            bool valid = SetupPackage.InstallPath(destination.Text) != null;
+            primary.Enabled = valid && !busy;
+            destinationNote.Text = valid ? "Choose an SSD for Recall and its preview cache." : "Enter a folder on a local drive, such as C:\\Apps\\Recall.";
+            destinationNote.ForeColor = valid ? Muted : Error;
+        }
+
+        private void BrowseFolder()
+        {
+            using (var dialog = new FolderBrowserDialog { Description = "Choose where to install Recall" })
+            {
+                var folder = SetupPackage.InstallPath(destination.Text);
+                if (folder != null && Directory.Exists(folder)) dialog.SelectedPath = folder;
+                if (dialog.ShowDialog(this) == DialogResult.OK) destination.Text = dialog.SelectedPath;
+            }
+        }
+
+        private void SetStep(int current)
+        {
+            step = current;
+            rail.Step = step;
+            for (int i = 0; i < steps.Length; i++)
+            {
+                steps[i].Font = i == step ? fonts.Strong : fonts.Body;
+                steps[i].ForeColor = i == step ? Ink : Muted;
+            }
+            rail.Invalidate();
+        }
+
+        private async Task Install()
+        {
+            if (failed)
+            {
+                Retry();
+                return;
+            }
+            if (complete)
+            {
+                Close();
+                return;
+            }
+            var path = SetupPackage.InstallPath(destination.Text);
+            if (path == null || busy) return;
+            var selection = new InstallOptions(path, shortcut.Checked, launch.Checked, frameTiming.Checked);
+            busy = true;
+            options.Hide();
+            result.Show();
+            var progress = result.Controls["progress"];
+            progress.Show();
+            primary.Enabled = cancel.Enabled = false;
+            SetStep(1);
+            title.Text = preview ? "Previewing setup" : "Installing Recall";
+            description.Text = preview ? "See how setup looks while it runs." : "Setup waits for Recall to finish saving before replacing files.";
+            resultTitle.Text = preview ? "Preparing the preview…" : "Preparing program files…";
+            resultTitle.ForeColor = Ink;
+            resultDetail.Text = selection.Path;
+
+            try
+            {
+                string warning = null;
+                if (preview) await Task.Delay(450);
+                else warning = await Task.Run(() => SetupPackage.Install(selection));
+                complete = true;
+                SetStep(2);
+                title.Text = preview ? "Preview complete" : "Recall is ready";
+                description.Text = preview ? "Your selections were rehearsed." : "Installation completed successfully.";
+                resultTitle.Text = preview ? "Selected install location" : "Installed to";
+                resultTitle.ForeColor = Mint;
+                resultDetail.Text = selection.Path;
+                if (warning != null)
+                {
+                    description.Text = "Recall was installed. Review the setup note below.";
+                    resultTitle.Text = "Setup note";
+                    resultTitle.ForeColor = Ink;
+                    resultDetail.Text = warning;
+                }
+                primary.Text = "Done";
+                cancel.Hide();
+            }
+            catch (Exception error)
+            {
+                title.Text = "Setup stopped";
+                description.Text = "Review the message below, then return to your options.";
+                resultTitle.Text = "Recall could not install";
+                resultTitle.ForeColor = Error;
+                resultDetail.Text = error.GetBaseException().Message;
+                primary.Text = "Back to options";
+                failed = true;
+            }
+            finally
+            {
+                busy = false;
+                progress.Hide();
+                primary.Enabled = cancel.Enabled = true;
+                primary.Focus();
+            }
+        }
+
+        private void Retry()
+        {
+            failed = false;
+            title.Text = "Install Recall";
+            description.Text = "Set up your game recorder, clip library, and editor.";
+            primary.Text = "Install Recall";
+            result.Hide();
+            options.Show();
+            SetStep(0);
+            UpdateDestination();
+        }
+
+#if PREVIEW
+        public void SavePreview(string path)
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            Opacity = 0;
+            string originalPath = destination.Text;
+            destination.Text = @"C:\Users\Player\AppData\Local\Programs\Recall";
+            ActiveControl = primary;
+            Show();
+            Application.DoEvents();
+            using (var bitmap = new Bitmap(ClientSize.Width, ClientSize.Height))
+            {
+                DrawToBitmap(bitmap, new Rectangle(Point.Empty, ClientSize));
+                bitmap.Save(path, ImageFormat.Png);
+            }
+            destination.Text = originalPath;
+        }
+
+        public void CheckPreview()
+        {
+            if (!preview || !shortcut.Checked || launch.Checked || frameTiming.Checked)
+                throw new InvalidOperationException("Preview defaults changed");
+            string folder = destination.Text;
+            destination.Text = "relative";
+            if (primary.Enabled) throw new InvalidOperationException("Invalid path did not disable setup");
+            destination.Text = folder;
+            if (!primary.Enabled) throw new InvalidOperationException("Valid path did not enable setup");
+            primary.PerformClick();
+            if (!busy || step != 1 || primary.Enabled) throw new InvalidOperationException("Install state was not engaged");
+            var deadline = DateTime.UtcNow.AddSeconds(3);
+            while (busy && DateTime.UtcNow < deadline)
+            {
+                Application.DoEvents();
+                System.Threading.Thread.Sleep(15);
+            }
+            if (busy || !complete || step != 2 || primary.Text != "Done")
+                throw new InvalidOperationException("Preview did not reach its finished state");
+        }
+#endif
+
+        private sealed class Rail : Panel
+        {
+            public int Step;
+            public Rail() { BackColor = Color.FromArgb(3, 3, 3); DoubleBuffered = true; }
+
+            protected override void OnPaint(PaintEventArgs args)
+            {
+                base.OnPaint(args);
+                var g = args.Graphics;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                using (var border = new Pen(Border))
+                using (var ring = new Pen(Ink, 1.5f))
+                using (var muted = new Pen(Muted, 1.3f))
+                using (var red = new SolidBrush(Signal))
+                {
+                    g.DrawLine(border, Width - 1, 0, Width - 1, Height);
+                    g.DrawEllipse(ring, 24, 34, 17, 17);
+                    g.FillEllipse(red, 29, 39, 7, 7);
+                    g.DrawLine(border, 30, 141, 30, 225);
+                    for (int i = 0; i < 3; i++)
+                    {
+                        int y = 135 + i * 43;
+                        g.FillEllipse(Brushes.Black, 24, y, 12, 12);
+                        if (i == Step) g.FillEllipse(red, 25, y + 1, 10, 10);
+                        else g.DrawEllipse(muted, 26, y + 2, 8, 8);
+                    }
+                }
+            }
+        }
+
+        private sealed class StatusPill : Control
+        {
+            public StatusPill(string text, Font font) { Text = text; Font = font; DoubleBuffered = true; }
+
+            protected override void OnPaint(PaintEventArgs args)
+            {
+                var g = args.Graphics;
+                g.SmoothingMode = SmoothingMode.AntiAlias;
+                using (var path = new GraphicsPath())
+                using (var fill = new SolidBrush(Raised))
+                using (var edge = new Pen(Border))
+                using (var dot = new SolidBrush(Muted))
+                using (var textFormat = new StringFormat { LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap })
+                {
+                    int h = Height - 1;
+                    path.AddArc(0, 0, h, h, 90, 180);
+                    path.AddArc(Width - h - 1, 0, h, h, 270, 180);
+                    path.CloseFigure();
+                    g.FillPath(fill, path);
+                    g.DrawPath(edge, path);
+                    g.FillEllipse(dot, 12, (Height - 6) / 2f, 6, 6);
+                    g.DrawString(Text, Font, dot, new RectangleF(25, 0, Width - 29, Height), textFormat);
+                }
+            }
+        }
+    }
+}
