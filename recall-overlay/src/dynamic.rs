@@ -211,6 +211,14 @@ pub fn shape_key(stem: &str, aspect: f32) -> String {
     if stem.is_empty() { String::new() } else { format!("{stem}@{}", shape(aspect)) }
 }
 
+/// The key a scan is kept under: the asked-for game's stem at the shape the
+/// scan itself measured (its `aspect`), else the asked-for key.
+pub fn scan_key(asked: &str, event: &Value) -> String {
+    let aspect = event.get("aspect").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+    let stem = asked.split_once('@').map_or(asked, |(stem, _)| stem);
+    if shape(aspect) == 0 { asked.to_string() } else { shape_key(stem, aspect) }
+}
+
 /// A cache key: an exe stem, optionally `@<shape>` (1-2 digits).
 pub fn cache_key(key: &str) -> bool {
     match key.split_once('@') {

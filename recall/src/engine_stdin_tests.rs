@@ -47,9 +47,10 @@ fn spawn(quit: Arc<AtomicBool>) -> (Sender<Vec<u8>>, Receiver<Command>) {
     let (tx, rx) = channel();
     std::thread::spawn(move || {
         let reader = std::io::BufReader::new(Pipe { rx: line_rx, buf: Vec::new() });
-        read_early(reader, &quit, |cmd| {
+        let end = read_early(reader, |cmd| {
             let _ = tx.send(cmd);
         });
+        crate::stdin_reader::reader_ended(end, &quit, &AtomicBool::new(false));
     });
     (line_tx, rx)
 }

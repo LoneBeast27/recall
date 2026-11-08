@@ -27,6 +27,7 @@ pub(crate) trait TrayUi {
     fn poll(&self) -> Vec<RecordingTrayCmd>;
     fn set_status(&mut self, line: &str);
     fn set_paused(&mut self, paused: bool);
+    fn offer_game(&mut self, exe: Option<&str>);
     /// The shell holds the icon (tray-icon's `build` succeeds even when NIM_ADD failed).
     fn is_shown(&self) -> bool;
 }
@@ -40,6 +41,9 @@ impl TrayUi for RecordingTray {
     }
     fn set_paused(&mut self, paused: bool) {
         RecordingTray::set_paused(self, paused)
+    }
+    fn offer_game(&mut self, exe: Option<&str>) {
+        RecordingTray::offer_game(self, exe)
     }
     fn is_shown(&self) -> bool {
         RecordingTray::is_shown(self)
@@ -56,6 +60,7 @@ pub(crate) struct TraySlot<T: TrayUi = RecordingTray> {
     delay: Duration,
     failures: u32,
     status: Option<String>,
+    offered: Option<String>,
     paused: bool,
     /// The shell showed the built tray (or it was kept after [`MAX_UNSHOWN`] rebuilds).
     confirmed: bool,
@@ -86,6 +91,7 @@ impl<T: TrayUi> TraySlot<T> {
             delay: FIRST_RETRY,
             failures: 0,
             status: None,
+            offered: None,
             paused: false,
             confirmed: false,
             unshown: 0,
@@ -124,6 +130,7 @@ impl<T: TrayUi> TraySlot<T> {
                     tray.set_status(&self.shown_line(line));
                 }
                 tray.set_paused(self.paused);
+                tray.offer_game(self.offered.as_deref());
                 self.tray = Some(tray);
                 // Ask the shell for the icon one backoff step from now (`check_shown`).
                 self.confirmed = false;
@@ -198,6 +205,17 @@ impl<T: TrayUi> TraySlot<T> {
         }
     }
 
+    pub(crate) fn offer_game(&mut self, exe: Option<&str>) {
+        self.offered = exe.map(str::to_owned);
+        if let Some(tray) = self.tray.as_mut() {
+            tray.offer_game(exe);
+        }
+    }
+
+    pub(crate) fn offered_game(&self) -> Option<&str> {
+        self.offered.as_deref()
+    }
+
     pub(crate) fn set_paused(&mut self, paused: bool) {
         self.paused = paused;
         if let Some(tray) = self.tray.as_mut() {
@@ -216,6 +234,7 @@ mod tests {
     struct Fake {
         status: Vec<String>,
         paused: Option<bool>,
+        offered: Option<String>,
         /// Answers to `is_shown`, in order; true once used up.
         shown: Vec<bool>,
     }
@@ -227,6 +246,9 @@ mod tests {
         }
         fn poll(&self) -> Vec<RecordingTrayCmd> {
             vec![RecordingTrayCmd::Open]
+        }
+        fn offer_game(&mut self, exe: Option<&str>) {
+            self.0.borrow_mut().offered = exe.map(str::to_owned);
         }
         fn set_status(&mut self, line: &str) {
             self.0.borrow_mut().status.push(line.to_string());
@@ -257,6 +279,7 @@ mod tests {
         assert!(!slot.is_built());
         slot.set_status("Recall: waiting for a game");
         slot.set_paused(true);
+        slot.offer_game(Some("ExampleGame.exe"));
         assert!(slot.poll_at(t0 + Duration::from_secs(1)).is_empty(), "no tray: no commands, no early retry");
         assert_eq!(*calls.borrow(), 1);
         slot.poll_at(t0 + Duration::from_secs(2)); // second failure; next try 4 s later
@@ -268,6 +291,7 @@ mod tests {
         assert_eq!(*calls.borrow(), 3);
         assert_eq!(fake.borrow().status, vec!["Recall: waiting for a game".to_string()]);
         assert_eq!(fake.borrow().paused, Some(true));
+        assert_eq!(fake.borrow().offered.as_deref(), Some("ExampleGame.exe"));
         slot.poll_at(t0 + Duration::from_secs(600));
         assert_eq!(*calls.borrow(), 3, "a built tray is never rebuilt");
     }

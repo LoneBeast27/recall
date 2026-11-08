@@ -252,7 +252,7 @@ impl Sim {
 
     pub fn tick(&mut self) {
         let now = self.now;
-        if self.pending_pause.is_some_and(|p| p.ready(&self.activity, now)) {
+        if self.pending_pause.map(|p| p.ready(&mut self.activity, now)) == Some(true) {
             self.apply_pause(true);
         }
         self.feed_drain(now);
@@ -370,8 +370,10 @@ impl Sim {
 
     pub fn pause(&mut self) {
         if !self.paused && self.engine_running() {
-            if let Some(wait) = PendingPause::needed(&self.activity, self.now) {
-                self.sent.push(("record_stop".into(), self.engine().clone()));
+            if let Some(wait) = PendingPause::needed(&mut self.activity, self.now) {
+                if self.activity.long != LongRec::Idle {
+                    self.sent.push(("record_stop".into(), self.engine().clone()));
+                }
                 self.pending_pause = Some(wait);
                 return;
             }

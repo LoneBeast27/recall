@@ -8,7 +8,7 @@
 //! anything else (including the `overrides` array) replaces. Unknown keys are
 //! rejected so a typo never silently does nothing.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};

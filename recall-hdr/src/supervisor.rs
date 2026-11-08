@@ -43,9 +43,12 @@ mod protocol;
 mod refusal;
 #[path = "supervisor_stdin.rs"]
 mod stdin;
+#[path = "supervisor_locate.rs"]
+mod locate;
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::PathBuf;
+#[cfg(test)]
+use std::{path::Path, process::Command};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -53,6 +56,10 @@ use std::time::Duration;
 
 use crate::engine_policy::EngineSpec;
 use crate::record_dispatch::Sent;
+use locate::{engine_command, locate_engine};
+#[cfg(test)]
+use locate::locate_engine_from;
+pub(crate) use locate::locate_sibling_from;
 use manager::run_manager;
 pub(crate) use protocol::beep_failure;
 
@@ -142,6 +149,11 @@ impl Supervisor {
         self.shared.health()
     }
 
+    /// Whether another recorder holds the engine slot (busy retries, or given up on it).
+    pub fn slot_held(&self) -> crate::engine_slot::SlotHeld {
+        self.shared.slot.get(self.shared.hello_count.load(Ordering::SeqCst))
+    }
+
     /// Forward an arbitrary engine protocol command line; never blocks. Not queued (no
     /// engine, a full queue, or an engine told to quit) says why ([`Sent`]).
     pub fn send_engine_line(&self, line: &str) -> Sent {
@@ -201,8 +213,15 @@ impl Supervisor {
         }
     }
 
+    /// Stop re-broadcasting engine lines (a quit that gave up on a save reports it itself).
+    pub fn detach_hub(&self) {
+        if let Ok(mut g) = self.shared.hub.lock() {
+            *g = None;
+        }
+    }
+
     /// Also hand the controller the engine events it acts on
-    /// ([`FORWARDED_EVENTS`]: saves, long recording, screenshots, bookmarks).
+    /// ([`FORWARDED_EVENTS`]: saves and the save writing, long recording, screenshots, bookmarks).
     pub fn attach_events(&self, tx: std::sync::mpsc::Sender<serde_json::Value>) {
         if let Ok(mut g) = self.shared.events.lock() {
             *g = Some(tx);
@@ -269,6 +288,8 @@ struct Shared {
     hub: Mutex<Option<Arc<crate::control::PipeHub>>>,
     /// The controller's engine-event channel (record mode).
     events: Mutex<Option<std::sync::mpsc::Sender<serde_json::Value>>>,
+    /// Another recorder holds the engine slot (`engine_slot`).
+    slot: crate::engine_slot::SlotFlag,
 }
 
 /// The live child's stdin and whether it was told to quit, under one lock: the check and
@@ -281,8 +302,14 @@ struct EngineStdin {
     quitting: Option<Sent>,
 }
 
-/// Engine event types handed to the controller via `attach_events`.
-pub const FORWARDED_EVENTS: [&str; 10] = [
+/// The event the manager hands the controller each time an engine process
+/// ends (any reason): saves still in flight are lost (`EngineActivity`).
+pub const ENGINE_EXITED: &str = "engine_exited";
+
+/// Engine event types handed to the controller via `attach_events`. `status`
+/// carries `save_writing`, the save the engine is still writing.
+pub const FORWARDED_EVENTS: [&str; 11] = [
+    "status",
     "saved",
     "source_adopted",
     "save_failed",
@@ -310,6 +337,7 @@ impl Shared {
             cache: Mutex::new(EngineCache::default()),
             hub: Mutex::new(None),
             events: Mutex::new(None),
+            slot: Default::default(),
         }
     }
 
@@ -322,6 +350,16 @@ impl Shared {
         if let Ok(g) = self.events.lock() {
             if let Some(tx) = g.as_ref() {
                 let _ = tx.send(val.clone());
+            }
+        }
+    }
+
+    /// Tell the controller an engine process ended ([`ENGINE_EXITED`]); sent
+    /// after its stdout reader is joined, so after every event it wrote.
+    fn forward_exit(&self) {
+        if let Ok(g) = self.events.lock() {
+            if let Some(tx) = g.as_ref() {
+                let _ = tx.send(serde_json::json!({ "type": ENGINE_EXITED }));
             }
         }
     }
@@ -406,69 +444,6 @@ impl Shared {
     fn clear_cache(&self) {
         *self.cache.lock().unwrap_or_else(|p| p.into_inner()) = EngineCache::default();
     }
-}
-
-// ---------------------------------------------------------------------------
-// Engine location
-// ---------------------------------------------------------------------------
-
-/// Locate the capture-engine exe.
-///
-/// Search order:
-/// 1. **Same directory as our own exe** -- the shipping layout.
-/// 2. **Dev fallback**: walk our exe's ancestors for a Cargo `target/` dir and
-///    probe `target/debug/recall.exe` then `target/release/recall.exe`.
-fn locate_engine() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    locate_sibling_from(&exe, "recall.exe")
-}
-
-/// Core of the sibling lookup (engine + overlay), unit-testable against a
-/// synthetic exe path under a temp dir.
-pub(crate) fn locate_sibling_from(current_exe: &Path, file: &str) -> Option<PathBuf> {
-    if let Some(dir) = current_exe.parent() {
-        let sibling = dir.join(file);
-        if sibling.is_file() {
-            return Some(sibling);
-        }
-    }
-    for ancestor in current_exe.ancestors() {
-        if ancestor.file_name().map(|n| n == "target").unwrap_or(false) {
-            for profile in ["debug", "release"] {
-                let candidate = ancestor.join(profile).join(file);
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-        }
-    }
-    None
-}
-
-fn locate_engine_from(current_exe: &Path) -> Option<PathBuf> {
-    locate_sibling_from(current_exe, "recall.exe")
-}
-
-/// Build `recall.exe --json` with piped stdio, no console, the spec's environment edits, and
-/// the controller's latest mic mute over the spec's (`supervisor_mute.rs`).
-fn engine_command(path: &Path, spec: &EngineSpec, mute: Option<bool>) -> Command {
-    use std::os::windows::process::CommandExt;
-    let mut cmd = Command::new(path);
-    cmd.arg("--json")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW);
-    for (key, value) in &spec.env {
-        match value {
-            Some(v) => cmd.env(key, v),
-            None => cmd.env_remove(key),
-        };
-    }
-    if let Some(muted) = mute {
-        cmd.env(mute::MIC_MUTED_ENV, if muted { "1" } else { "0" });
-    }
-    cmd
 }
 
 // ---------------------------------------------------------------------------

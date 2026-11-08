@@ -3,8 +3,7 @@
 //! a few seconds short, on the next start).
 //! - `WM_QUERYENDSESSION` with a long recording running: Windows is told why we hold on
 //!   ("Saving your recording"), the engine gets `record_stop`, and the pump waits up to
-//!   [`STOP_WAIT`] for `recording_stopped` before answering. The answer is always yes: Recall
-//!   never refuses a shutdown. With no recording nothing happens.
+//!   [`STOP_WAIT`] for `recording_stopped` before answering. The session window holds a query while a replay save is writing.
 //! - `WM_ENDSESSION` (the session really ends): the controller's clean shutdown runs before
 //!   the handler returns, the engine quit capped at [`SESSION_END_GRACE`] (Windows may end the
 //!   process as soon as the handler returns).
@@ -169,7 +168,7 @@ pub fn cancel_event_json() -> String {
     serde_json::json!({"type": "shutdown_cancelled", "title": CANCEL_TITLE, "detail": CANCEL_DETAIL}).to_string()
 }
 
-/// The answer to `WM_QUERYENDSESSION`: always TRUE (never hold up a shutdown).
+/// The answer to `WM_QUERYENDSESSION` when there is no replay save to hold it.
 pub const QUERY_ANSWER: isize = 1;
 
 /// Retries of a `WTSRegisterSessionNotification` that failed at start-up.

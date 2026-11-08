@@ -20,8 +20,8 @@ fn tick(to: u64, at: impl Fn(u64) -> (&'static str, u64, bool, Hold)) -> Vec<(u6
         .collect()
 }
 
-const LONG_REC: Hold = Hold { saving: false, long_rec: true, stuck: false };
-const SAVING_AND_LONG_REC: Hold = Hold { saving: true, long_rec: true, stuck: false };
+const LONG_REC: Hold = Hold { saving: false, long_rec: true, stuck: false, growing: false };
+const SAVING_AND_LONG_REC: Hold = Hold { saving: true, long_rec: true, stuck: false, growing: false };
 
 #[test]
 fn a_hang_during_a_long_recording_restarts_once_and_is_not_held_by_the_recording() {
@@ -36,6 +36,21 @@ fn a_save_in_flight_holds_a_hang_restart_for_15_s_only() {
     // A save that finishes first lets it go at once.
     let at = |s: u64| ("recording", 3, false, if s < 12 { SAVING_AND_LONG_REC } else { LONG_REC });
     assert_eq!(tick(20, at), [(12, Recovery::Restart)]);
+}
+
+#[test]
+fn a_hang_restart_waits_while_the_save_still_grows_capped_at_5_min() {
+    // R5-overlay-3: the encoder hangs (TDR) at second 0; the saver (a stream copy on its
+    // own thread) keeps writing. Hung from 10 s on: held while the save grows.
+    let growing = Hold { saving: true, growing: true, ..Hold::default() };
+    assert_eq!(tick(120, |_| ("recording", 3, false, growing)), Vec::<(u64, Recovery)>::new(), "60 s+ of hung verdicts: the growing save holds");
+    // It stops growing at 70 s: the 15 s no-growth hold has long run out, restart now.
+    let at = |s: u64| ("recording", 3, false, if s < 70 { growing } else { Hold { saving: true, ..Hold::default() } });
+    assert_eq!(tick(75, at), [(70, Recovery::Restart)]);
+    // A save that grows forever holds 5 min after the hang verdict (10 s), no longer.
+    assert_eq!(tick(315, |_| ("recording", 3, false, growing)), [(10 + HANG_GROW_HOLD.as_secs(), Recovery::Restart)]);
+    // No growth: 15 s as before.
+    assert_eq!(tick(30, |_| ("recording", 3, false, Hold { saving: true, ..Hold::default() })), [(25, Recovery::Restart)]);
 }
 
 #[test]

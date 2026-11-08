@@ -404,7 +404,7 @@ pub(crate) fn load_checked(path: &std::path::Path) -> Result<Config, String> {
 /// last good load, else the defaults; migrated and repaired (`config_validate`). Also used
 /// by `config_watch` on the text it read, so a hand edit is never read twice.
 pub(crate) fn load_bytes(path: &std::path::Path, bytes: &[u8], now: std::time::SystemTime) -> Config {
-    let Some((mut cfg, text)) = io::parse_or_recover(path, bytes, now) else {
+    let Some((mut cfg, text, mut repairs)) = io::parse_or_recover(path, bytes, now) else {
         return Config::default();
     };
     // Legacy single `save_hotkey` -> `save_hotkeys` presets; a file from
@@ -416,7 +416,8 @@ pub(crate) fn load_bytes(path: &std::path::Path, bytes: &[u8], now: std::time::S
     cfg.overlay.migrate_loaded(&text);
     // Out-of-range values clamp, bad entries go (one log line each), never the whole file.
     // Runs on every parsed load: full parse, per-key salvage and last-good.
-    crate::config_repairs::remember(path, crate::config_validate::sanitize_loaded(&mut cfg));
+    repairs.extend(crate::config_validate::sanitize_loaded(&mut cfg));
+    crate::config_repairs::remember(path, repairs);
     cfg
 }
 

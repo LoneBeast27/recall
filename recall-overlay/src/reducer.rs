@@ -3,8 +3,11 @@ use serde_json::Value;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+#[path = "reducer_save.rs"]
+mod save;
+
 use crate::hint::{HintOption, HintView};
-use crate::notice::{is_encoder_notice, session_notice, NoticeView, SavePhase, Tone};
+use crate::notice::{is_encoder_notice, session_notice, NoticeView, Tone};
 use crate::session::Session;
 
 /// The controller's `encoder` notice and the engine's failed status describe
@@ -23,8 +26,10 @@ const FAILURE_FOR: Duration = Duration::from_secs(4);
 const MIC_FOR: Duration = Duration::from_secs(2);
 /// 2 s (was 1.5 s): from nothing the pill opens before its text shows.
 const MARK_FOR: Duration = Duration::from_secs(2);
-/// A `saving` with no outcome ends quietly after this.
+/// A save in front of the queue with no outcome after this says "Still saving…".
 pub const SAVING_FOR: Duration = Duration::from_secs(30);
+/// ... and "Save not confirmed" after this (the controller's own `SAVE_STALE`).
+pub const CONFIRM_FOR: Duration = Duration::from_secs(120);
 /// Controller notices (game picked up, desktop, paused, waiting, encoder).
 pub const NOTICE_FOR: Duration = Duration::from_secs(3);
 /// The advanced-shortcut hint lives as long as the chord window (the
@@ -83,6 +88,8 @@ pub struct Reducer {
     session: Session,
     /// The last encoder-failure notice shown, and who reported it.
     encoder_shown: Option<(Instant, EncoderSource)>,
+    /// Clip saves in flight (`reducer_save.rs`).
+    saves: save::Saves,
 }
 
 impl Reducer {
@@ -98,6 +105,7 @@ impl Reducer {
             buffer_secs: 0,
             session: Session::default(),
             encoder_shown: None,
+            saves: save::Saves::default(),
         }
     }
 
@@ -139,6 +147,7 @@ impl Reducer {
     pub fn disconnected(&mut self) -> bool {
         self.last_status = None;
         self.transient = None;
+        self.clear_saves();
         self.buffer_secs = 0;
         let session_changed = self.session != Session::default();
         self.session = Session::default();
@@ -177,7 +186,7 @@ impl Reducer {
             if self.transient.as_ref().is_none_or(|t| t.hint.is_none()) {
                 return false; // an action's toast already replaced the hint
             }
-            return self.expire_transient();
+            return self.expire_transient() | self.resume_saving(now);
         }
         let options: Vec<HintOption> = event
             .get("options")
@@ -202,47 +211,18 @@ impl Reducer {
         changed || metrics_changed
     }
 
-    /// `{"type":"saving","seconds":N}`: the controller sent a save. "Saving"
-    /// over "<game> · m:ss" (the saved notice's own layout, so only the title
-    /// word changes when the clip lands) with the spinning ring, until the
-    /// engine's `saved` / `save_failed` replaces it or `SAVING_FOR` passes.
-    fn apply_saving(&mut self, event: &Value, now: Instant) -> bool {
-        let secs = event.get("seconds").and_then(Value::as_u64).unwrap_or(0);
-        let name = self.session.target_name.trim();
-        let game = if !name.is_empty() { name } else if self.session.desktop { "Desktop" } else { "clip" };
-        let detail = truncate(&format!("{game} · {}:{:02}", secs / 60, secs % 60), 40);
-        let notice = NoticeView::new(Tone::Recording, "Saving", detail.clone(), true).emphasized().saving(SavePhase::Saving);
-        self.set_transient("Saving", detail, now + SAVING_FOR, notice)
-    }
-
     pub fn apply_engine_event(&mut self, event: &Value, now: Instant) -> bool {
         use Tone::{Failure, Neutral, Success};
         match event.get("type").and_then(Value::as_str) {
-            Some("status") => self.apply_status(event, now),
+            Some("status") => self.apply_save_progress(event, now) | self.apply_status(event, now),
             Some("mic_muted") => {
                 self.mic_muted = event.get("muted").and_then(Value::as_bool).unwrap_or(self.mic_muted);
                 let title = if self.mic_muted { "Microphone muted" } else { "Microphone live" };
                 let detail = "Game audio continues";
                 self.set_transient(title, detail.into(), now + MIC_FOR, NoticeView::new(Neutral, title, detail, false))
             }
-            Some("saved") => {
-                let filename = event
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .and_then(|p| Path::new(p).file_name())
-                    .and_then(|p| p.to_str())
-                    .unwrap_or("clip");
-                let game = filename.split("__").next().unwrap_or(filename).replace(['-', '_'], " ");
-                let secs = event.get("seconds").and_then(Value::as_f64).unwrap_or(0.0).round() as u64;
-                let detail = if secs > 0 { format!("{game} · {}:{:02}", secs / 60, secs % 60) } else { game };
-                let notice = NoticeView::new(Success, "Clip saved", truncate(&detail, 40), true).emphasized().saving(SavePhase::Saved);
-                self.set_transient("Clip saved", detail, now + SAVED_FOR, notice)
-            }
-            Some("save_failed") => {
-                let reason = event.get("reason").and_then(Value::as_str).unwrap_or("unknown error");
-                let notice = NoticeView::new(Failure, "Save failed", truncate(reason, 44), false).emphasized().saving(SavePhase::Failed);
-                self.set_transient("Save failed", format!("Save failed: {}", truncate(reason, 44)), now + FAILURE_FOR, notice)
-            }
+            Some("saved") => self.apply_saved(event, now),
+            Some("save_failed") => self.apply_save_failed(event, now),
             Some("bookmarked") => {
                 let detail = "Marked in the clips you save next";
                 let notice = NoticeView::new(Success, "Bookmark added", detail, false).emphasized();
@@ -291,10 +271,11 @@ impl Reducer {
     }
 
     pub fn tick(&mut self, now: Instant) -> bool {
-        let mut changed = false;
+        let mut changed = self.expire_saves(now);
         if self.transient.as_ref().is_some_and(|transient| now >= transient.until) {
-            changed = self.expire_transient();
+            changed |= self.expire_transient();
         }
+        changed |= self.resume_saving(now);
         if self.last_status.is_some_and(|last| now.saturating_duration_since(last) > STALE_AFTER) {
             changed |= self.mark_stale(now);
         }
@@ -491,3 +472,7 @@ pub fn truncate(text: &str, max_chars: usize) -> String {
 #[cfg(test)]
 #[path = "reducer_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "reducer_save_tests.rs"]
+mod save_tests;

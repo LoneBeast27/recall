@@ -12,11 +12,10 @@
 //! `Saved` then reports the FINAL path with `staged: true` and the
 //! `recall-mover` thread (`mover.rs`) moves the clip there in the background.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
 use std::sync::mpsc::{
-    channel, sync_channel, Receiver, RecvTimeoutError, SyncSender, TrySendError,
+    channel, sync_channel, Receiver, SyncSender, TrySendError,
 };
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -25,6 +24,8 @@ pub(crate) use super::events::Events;
 use super::events::SavedReport;
 use super::mover::{self, MoverControl};
 use super::mux::OwnedParams;
+use super::save_progress::SaveProgress;
+use super::saver_stop::stop_saver;
 use super::space::{self, FreeSpace};
 use super::staging::{self, Stage};
 use super::StillSpec;
@@ -147,6 +148,8 @@ pub(crate) fn window_secs(packets: &[EncodedPacket]) -> f64 {
 pub(crate) struct SaverQueue {
     tx: SyncSender<SaveJob>,
     events: Events,
+    /// Saves handed over and not yet finished (`status.save_writing`).
+    progress: Arc<SaveProgress>,
 }
 
 impl SaverQueue {
@@ -158,17 +161,15 @@ impl SaverQueue {
     /// immediately instead of stalling capture behind the writer.
     pub fn submit(&self, mut job: SaveJob) -> bool {
         job.timing.queued_at = Some(Instant::now());
-        match self.tx.try_send(job) {
-            Ok(()) => true,
-            Err(TrySendError::Full(_)) => {
-                self.events.save_failed(QUEUE_FULL);
-                false
-            }
-            Err(TrySendError::Disconnected(_)) => {
-                self.events.save_failed("save writer thread stopped");
-                false
-            }
-        }
+        self.progress.jobs.fetch_add(1, Relaxed); // counted before the saver can finish it
+        let reason = match self.tx.try_send(job) {
+            Ok(()) => return true,
+            Err(TrySendError::Full(_)) => QUEUE_FULL,
+            Err(TrySendError::Disconnected(_)) => "save writer thread stopped",
+        };
+        self.progress.jobs.fetch_sub(1, Relaxed);
+        self.events.save_rejected(reason);
+        false
     }
 }
 
@@ -189,6 +190,7 @@ pub(crate) struct SaverControl {
     abort: Arc<AtomicBool>,
     current: Arc<Mutex<Option<PathBuf>>>,
     mover: Option<MoverControl>,
+    progress: Arc<SaveProgress>,
 }
 
 impl SaverControl {
@@ -198,37 +200,23 @@ impl SaverControl {
     /// Then the clip mover stops (up to `mover::STOP_WAIT`): a move in flight
     /// is abandoned, its staged copy kept for the next start.
     pub fn shutdown(self, budget: Duration) -> Shutdown {
-        let SaverControl { done, abort, current, mover } = self;
-        let outcome = stop_saver(&done, &abort, &current, budget);
+        self.stop(budget, false)
+    }
+
+    /// [`shutdown`](Self::shutdown) for an orphaned engine: a save in flight runs on past
+    /// `budget` while it makes progress (`saver_stop::OrphanHold`).
+    pub fn shutdown_orphan(self, budget: Duration) -> Shutdown {
+        self.stop(budget, true)
+    }
+
+    fn stop(self, budget: Duration, orphan: bool) -> Shutdown {
+        let SaverControl { done, abort, current, mover, progress } = self;
+        let outcome = stop_saver(&done, &abort, &current, budget, orphan.then_some(&*progress));
         if let Some(mover) = mover {
             mover.shutdown(mover::STOP_WAIT);
         }
         outcome
     }
-}
-
-fn stop_saver(
-    done: &Receiver<()>,
-    abort: &AtomicBool,
-    current: &Mutex<Option<PathBuf>>,
-    budget: Duration,
-) -> Shutdown {
-    let reserve = (budget / 2).min(Duration::from_millis(500));
-    if wait_done(done, budget - reserve) {
-        return Shutdown::Drained;
-    }
-    abort.store(true, Relaxed);
-    if wait_done(done, reserve) {
-        return Shutdown::Aborted;
-    }
-    if let Some(part) = current.lock().unwrap_or_else(|p| p.into_inner()).take() {
-        let _ = std::fs::remove_file(part);
-    }
-    Shutdown::TimedOut
-}
-
-fn wait_done(done: &Receiver<()>, timeout: Duration) -> bool {
-    !matches!(done.recv_timeout(timeout), Err(RecvTimeoutError::Timeout))
 }
 
 /// Spawn the production saver (real mux + gallery thumbnail + SSD staging).
@@ -273,6 +261,7 @@ pub(crate) fn spawn_checked(
     let (done_tx, done_rx) = channel::<()>();
     let abort = Arc::new(AtomicBool::new(false));
     let current = Arc::new(Mutex::new(None));
+    let progress = Arc::new(SaveProgress::default());
     let worker = Worker {
         events: events.clone(),
         mux,
@@ -281,6 +270,7 @@ pub(crate) fn spawn_checked(
         current: current.clone(),
         stage,
         free,
+        progress: progress.clone(),
     };
     let spawned = std::thread::Builder::new()
         .name("recall-saver".into())
@@ -293,12 +283,13 @@ pub(crate) fn spawn_checked(
         events.log(&format!("saver thread failed to start: {e}"));
     }
     (
-        SaverQueue { tx, events },
+        SaverQueue { tx, events, progress: progress.clone() },
         SaverControl {
             done: done_rx,
             abort,
             current,
             mover,
+            progress,
         },
     )
 }
@@ -311,24 +302,16 @@ struct Worker {
     current: Arc<Mutex<Option<PathBuf>>>,
     stage: Option<Stage>,
     free: FreeSpace,
+    progress: Arc<SaveProgress>,
 }
 
 impl Worker {
     fn run(mut self, rx: Receiver<SaveJob>) {
         lower_thread_priority(&self.events);
         while let Ok(job) = rx.recv() {
-            if self.abort.load(Relaxed) {
-                self.events.save_failed(QUIT_BEFORE_START);
-                continue;
-            }
-            let outcome = catch_unwind(AssertUnwindSafe(|| self.process(&job)));
-            if outcome.is_err() {
-                // A panicking stage must not kill the saver or leave a half file.
-                if let Some(part) = self.current.lock().unwrap_or_else(|p| p.into_inner()).take() {
-                    let _ = std::fs::remove_file(part);
-                }
-                self.events.save_failed("internal error while writing the clip");
-            }
+            self.take(&job);
+            // Answered (after its event went out): `status.save_writing` no longer counts it.
+            self.progress.jobs.fetch_sub(1, Relaxed);
         }
     }
 
@@ -497,3 +480,5 @@ pub fn clip_path(out_dir: &str, source: &str) -> String {
 #[cfg(test)]
 #[path = "saver_tests.rs"]
 mod tests;
+#[path = "saver_writing.rs"]
+mod writing;

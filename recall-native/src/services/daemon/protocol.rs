@@ -352,6 +352,7 @@ pub(super) fn command_line(command: &DaemonCommand) -> String {
     let value = match command {
         DaemonCommand::Status => json!({"cmd": "status"}),
         DaemonCommand::Quit => json!({"cmd": "quit"}),
+        DaemonCommand::QuitNow => json!({"cmd": "quit", "force": true}),
         DaemonCommand::SaveClip { seconds: None } => json!({"cmd": "save_clip"}),
         DaemonCommand::SaveClip { seconds: Some(seconds) } => json!({"cmd": "save_clip", "seconds": seconds}),
         DaemonCommand::SetMicMute(muted) => json!({"cmd": "set_mic_mute", "muted": muted}),

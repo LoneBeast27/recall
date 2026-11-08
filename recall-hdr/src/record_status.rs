@@ -82,7 +82,8 @@ pub fn session_state(wanted: &EngineTarget, health: EngineHealth, encoder: Optio
 
 pub fn target_json(wanted: &EngineTarget) -> Value {
     match wanted {
-        EngineTarget::Window(t) => json!({"name": t.name, "exe": t.exe, "pid": t.pid}),
+        // `hwnd`: the recorded window, so the island sits on its monitor.
+        EngineTarget::Window(t) => json!({"name": t.name, "exe": t.exe, "pid": t.pid, "hwnd": t.hwnd}),
         EngineTarget::Desktop => json!({"name": DESKTOP_NAME, "exe": null, "pid": null}),
         EngineTarget::Off => Value::Null,
     }
@@ -244,7 +245,7 @@ mod tests {
             v,
             json!({
                 "type":"status","mode":"record","state":"recording","paused":false,
-                "target":{"name":"VALORANT","exe":"VALORANT-Win64-Shipping.exe","pid":42},
+                "target":{"name":"VALORANT","exe":"VALORANT-Win64-Shipping.exe","pid":42,"hwnd":7},
                 "engine_health":"running","auto_record":true,
                 "save_hotkey":"Alt+N","mic_hotkey":"Alt+M","save_seconds":120,
                 "save_hotkeys":[{"hotkey":"Alt+N","seconds":0}],
@@ -318,6 +319,11 @@ mod tests {
         assert_eq!((stopped["state"].as_str(), &stopped["drain"]), (Some("waiting"), &Value::Null), "no engine, no clip");
         assert_eq!(status_json(&inputs(EngineHealth::Running { pid: 9 }, true))["state"], "paused");
         assert_eq!(tray_line("draining", &EngineTarget::Off), "Game closed: last clip kept");
+    }
+
+    #[test]
+    fn a_game_target_carries_its_window() {
+        assert_eq!(target_json(&game()), json!({"name":"VALORANT","exe":"VALORANT-Win64-Shipping.exe","pid":42,"hwnd":7}));
     }
 
     #[test]

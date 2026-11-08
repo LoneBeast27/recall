@@ -41,7 +41,9 @@ mod recover_tests;
 mod headers_tests;
 #[cfg(test)]
 mod decode_tests;
+mod save_progress;
 mod saver;
+mod saver_stop;
 mod space;
 mod staging;
 mod staging_guard;
@@ -176,18 +178,25 @@ impl EncStats {
 }
 
 impl EncoderHandle {
+    /// `status.save_writing`: the save being written now, if any (`saver_writing.rs`).
+    pub fn save_writing(&self) -> Option<crate::protocol::SaveWriting> {
+        self.saver.writing()
+    }
+
     /// Quit path: stop the encoder thread (it hands any already-requested saves
     /// to the saver first), then give in-flight saves up to `budget` to finish.
     /// Past the drain share the saver aborts and removes its `.part` file.
     /// Then the clip mover stops (<= `mover::STOP_WAIT`): a background move in
     /// flight is abandoned, never leaving a partial file under the final name;
     /// its staged copy is moved by the next start.
-    pub fn shutdown(self, budget: Duration) {
+    /// An `orphan` (its controller gone) lets a save in flight finish past `budget` while
+    /// it still makes progress (`saver_stop`).
+    pub fn shutdown(self, budget: Duration, orphan: bool) {
         let EncoderHandle { frames, commands, saver, .. } = self;
         // Disconnecting frames ends the encoder loop, which drops the saver queue.
         drop((frames, commands));
         let started = Instant::now();
-        let outcome = saver.shutdown(budget);
+        let outcome = if orphan { saver.shutdown_orphan(budget) } else { saver.shutdown(budget) };
         eprintln!(
             "[recall] save writer shutdown: {outcome:?} after {:.0}ms",
             ms(started.elapsed())

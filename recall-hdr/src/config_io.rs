@@ -58,7 +58,7 @@ pub(super) fn last_good_path(path: &Path) -> PathBuf {
 
 /// The config in `bytes` (read from `path`) and the text its migrations read;
 /// None = use the defaults.
-pub(super) fn parse_or_recover(path: &Path, bytes: &[u8], now: SystemTime) -> Option<(Config, String)> {
+pub(super) fn parse_or_recover(path: &Path, bytes: &[u8], now: SystemTime) -> Option<(Config, String, Vec<String>)> {
     let Ok(text) = std::str::from_utf8(bytes) else {
         log!("config: {} is not text; backing it up", path.display());
         durable::quarantine(path, now, Keep::Move);
@@ -71,14 +71,15 @@ pub(super) fn parse_or_recover(path: &Path, bytes: &[u8], now: SystemTime) -> Op
     match toml::from_str::<Config>(text) {
         Ok(cfg) => {
             remember_good(path, bytes);
-            Some((cfg, text.to_string()))
+            Some((cfg, text.to_string(), Vec::new()))
         }
         Err(e) => match toml::from_str::<Table>(text) {
-            Ok(table) => {
+            Ok(mut table) => {
                 log!("config: {} has a bad value ({e}); keeping the rest", path.display());
                 // Copy: the file stays, so a save still carries its unknown keys.
                 durable::quarantine(path, now, Keep::Copy);
-                Some((salvage(&table), text.to_string()))
+                let repairs = repair_audio_device_id_types(&mut table);
+                Some((salvage(&table), text.to_string(), repairs))
             }
             Err(_) => {
                 log!("config: parse {} failed: {e}; backing it up", path.display());
@@ -89,11 +90,11 @@ pub(super) fn parse_or_recover(path: &Path, bytes: &[u8], now: SystemTime) -> Op
     }
 }
 
-fn last_good(path: &Path) -> Option<(Config, String)> {
+fn last_good(path: &Path) -> Option<(Config, String, Vec<String>)> {
     let text = fs::read_to_string(last_good_path(path)).ok()?;
     let cfg = toml::from_str::<Config>(&text).ok()?;
     log!("config: using {}", last_good_path(path).display());
-    Some((cfg, text))
+    Some((cfg, text, Vec::new()))
 }
 
 /// Keeps `bytes` (a config that parses) as `config.toml.last-good`.
@@ -104,6 +105,28 @@ pub(super) fn remember_good(path: &Path, bytes: &[u8]) {
             log!("config: could not keep {}: {e}", good.display());
         }
     }
+}
+
+/// A malformed endpoint ID is optional. Retain the rest of the source during salvage.
+fn repair_audio_device_id_types(disk: &mut Table) -> Vec<String> {
+    let Some(sources) = disk.get_mut("recording")
+        .and_then(|recording| recording.get_mut("audio_sources"))
+        .and_then(Value::as_array_mut)
+    else {
+        return Vec::new();
+    };
+    let mut notes = Vec::new();
+    for (index, source) in sources.iter_mut().enumerate() {
+        if let Some(table) = source.as_table_mut() {
+            if table.get("device_id").is_some_and(|value| !value.is_str()) {
+                table.remove("device_id");
+                let note = format!("recording.audio_sources[{index}].device_id was not text; cleared");
+                log!("config: repaired {note}");
+                notes.push(note);
+            }
+        }
+    }
+    notes
 }
 
 fn defaults_table() -> Table {

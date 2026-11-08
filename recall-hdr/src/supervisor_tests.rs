@@ -186,6 +186,21 @@ fn encoder_recovery_restarts_to_the_same_target_never_raise_give_up() {
     sup.shutdown(Duration::from_millis(50));
 }
 
+#[test]
+fn every_engine_exit_reaches_the_controller_after_its_last_event() {
+    let engine = fake_engine();
+    let sup = Supervisor::start_with_locator(move || Some(engine), None);
+    sup.shared.restart_grace_ms.store(50, Ordering::SeqCst);
+    let (tx, rx) = std::sync::mpsc::channel();
+    sup.attach_events(tx);
+    sup.retarget(Some(EngineSpec { env: vec![("RECALL_CAPTURE_NAME".into(), Some("game-1".into()))] }));
+    assert!(wait_for(5, || matches!(sup.health(), EngineHealth::Running { pid } if pid != 0)));
+    sup.retarget(Some(EngineSpec { env: vec![("RECALL_CAPTURE_NAME".into(), Some("game-2".into()))] }));
+    let event = rx.recv_timeout(Duration::from_secs(5)).expect("the first engine's exit is reported");
+    assert_eq!(event["type"], ENGINE_EXITED);
+    sup.shutdown(Duration::from_millis(50));
+}
+
 // --- LIVE test against the real engine --------------------------------
 //
 // Requires the real capture engine. It starts screen capture for a few
