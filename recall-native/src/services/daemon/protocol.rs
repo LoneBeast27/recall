@@ -367,6 +367,7 @@ pub(super) fn command_line(command: &DaemonCommand) -> String {
         DaemonCommand::SetAcProfile(variant) => json!({"cmd": "set_ac_profile", "variant": variant}),
         DaemonCommand::GetConfig => json!({"cmd": "get_config"}),
         DaemonCommand::SetConfig(patch) => json!({"cmd": "set_config", "patch": patch}),
+        DaemonCommand::RegisterGame { exe, how } => json!({"cmd": "register_game", "exe": exe, "how": how}),
         DaemonCommand::StoragePreview(cap_gb) => json!({"cmd": "storage_preview", "cap_gb": cap_gb}),
     };
     value.to_string()

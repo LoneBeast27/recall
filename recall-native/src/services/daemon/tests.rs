@@ -327,6 +327,7 @@ fn commands_serialize_to_controller_json() {
         (DaemonCommand::SetAcProfile("punchy".into()), json!({"cmd":"set_ac_profile","variant":"punchy"})),
         (DaemonCommand::GetConfig, json!({"cmd":"get_config"})),
         (DaemonCommand::StoragePreview(500), json!({"cmd":"storage_preview","cap_gb":500})),
+        (DaemonCommand::RegisterGame { exe: "Game.exe".into(), how: "never" }, json!({"cmd":"register_game","exe":"Game.exe","how":"never"})),
         (DaemonCommand::SetConfig(json!({"overlay":{"enabled":true}})), json!({"cmd":"set_config","patch":{"overlay":{"enabled":true}}})),
     ];
     for (command, expected) in cases {

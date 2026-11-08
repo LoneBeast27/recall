@@ -59,7 +59,7 @@ fn nothing_presented_is_not_a_game() {
 #[test]
 fn the_gate_commits_holds_and_rejects() {
     let t0 = Instant::now();
-    assert_eq!(gate(Watch::Unavailable, t0).0, Gate::Commit, "no trace rights: today's rule");
+    assert_eq!(gate(Watch::Unavailable, t0).0, Gate::Reject(Why::NoFrames), "no trace rights: no verdict, not a game (official-proof ruling)");
     let game = RenderStats { independent_frames: 5, ..stats() };
     assert_eq!(gate(Watch::Watching { since: t0, stats: game }, t0).0, Gate::Commit);
     let unsure = Watch::Watching { since: t0, stats: stats() };

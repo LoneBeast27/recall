@@ -33,6 +33,8 @@ const ID_STATUS: &str = "record_status";
 const ID_OPEN: &str = "record_open";
 const ID_PAUSE: &str = "record_pause";
 const ID_QUIT: &str = "record_quit";
+/// "Add <exe> as a game": in the menu only after the G4 notice named an exe.
+const ID_ADD_GAME: &str = "record_add_game";
 
 /// The menu as shipped (ids, in order); the smoke host logs it.
 pub const MENU_ITEMS: &str = "status,open,pause,separator,quit";
@@ -48,6 +50,8 @@ pub enum RecordingTrayCmd {
     /// "Stop recording" (pause) / "Start recording" (resume).
     TogglePause,
     Quit,
+    /// Register the exe the last G4 notice named ([`RecordingTray::offered_game`]).
+    AddGame,
 }
 
 /// RAII owner for the recording tray icon and menu.
@@ -58,6 +62,9 @@ pub struct RecordingTray {
     pause: MenuItem,
     paused: bool,
     last_line: Option<String>,
+    /// "Add <exe> as a game" and the exe it names, while it is in the menu.
+    add_game: MenuItem,
+    offered: Option<String>,
 }
 
 impl RecordingTray {
@@ -74,7 +81,8 @@ impl RecordingTray {
             .with_icon(tray_icon(false)?)
             .build()
             .map_err(|e| format!("build recording tray icon: {e}"))?;
-        Ok(Self { tray, menu, status, pause, paused: false, last_line: None })
+        let add_game = MenuItem::with_id(ID_ADD_GAME, "Add as a game", true, None);
+        Ok(Self { tray, menu, status, pause, paused: false, last_line: None, add_game, offered: None })
     }
 
     /// Non-blocking drain of only this component's process-global menu events.
@@ -119,6 +127,29 @@ impl RecordingTray {
         }
     }
 
+    /// Offer "Add <exe> as a game" under "Open Recall" (`Some`), or take it
+    /// out of the menu (`None`).
+    pub fn offer_game(&mut self, exe: Option<&str>) {
+        match exe {
+            Some(exe) => {
+                self.add_game.set_text(add_game_label(exe));
+                if self.offered.is_none() {
+                    let _ = self.menu.insert(&self.add_game, 2);
+                }
+                self.offered = Some(exe.to_string());
+            }
+            None if self.offered.take().is_some() => {
+                let _ = self.menu.remove(&self.add_game);
+            }
+            None => {}
+        }
+    }
+
+    /// The exe "Add as a game" names, if it is in the menu.
+    pub fn offered_game(&self) -> Option<&str> {
+        self.offered.as_deref()
+    }
+
     /// Used only by the no-capture smoke host; this is muda's real native menu.
     pub unsafe fn show_for_hwnd(&self, hwnd: HWND) {
         diagnostic(&format!("menu-open rect={:?}", self.diagnostic_icon_rect()));
@@ -155,8 +186,14 @@ fn map_id(id: &str) -> Option<RecordingTrayCmd> {
         ID_OPEN => RecordingTrayCmd::Open,
         ID_PAUSE => RecordingTrayCmd::TogglePause,
         ID_QUIT => RecordingTrayCmd::Quit,
+        ID_ADD_GAME => RecordingTrayCmd::AddGame,
         _ => return None,
     })
+}
+
+/// The tray item for the exe the G4 notice named.
+pub fn add_game_label(exe: &str) -> String {
+    format!("Add {exe} as a game")
 }
 
 fn health_line(health: EngineHealth) -> String {
@@ -399,6 +436,8 @@ mod tests {
         assert_eq!(map_id(ID_OPEN), Some(RecordingTrayCmd::Open));
         assert_eq!(map_id(ID_PAUSE), Some(RecordingTrayCmd::TogglePause));
         assert_eq!(map_id(ID_QUIT), Some(RecordingTrayCmd::Quit));
+        assert_eq!(map_id(ID_ADD_GAME), Some(RecordingTrayCmd::AddGame));
+        assert_eq!(add_game_label("MysteryApp.exe"), "Add MysteryApp.exe as a game");
         assert_eq!(map_id(ID_STATUS), None);
         assert_eq!(map_id("record_save"), None, "Save replay now left the tray");
         assert_eq!(map_id("record_autostart"), None, "Start with Windows left the tray");

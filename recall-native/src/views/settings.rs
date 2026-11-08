@@ -1,5 +1,6 @@
 //! Settings, split into fixed tabs (user ruling 2026-10-22: "make it general, clip, media
-//! and shortcuts as settings menus"): General · Clip · Media · Shortcuts.
+//! and shortcuts as settings menus"): General · Clip · Media · Shortcuts, plus Games (the apps
+//! registered by hand, Rohan 2026-11-07: "support for manual application registering").
 use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px};
 use serde_json::{Value, json};
 
@@ -20,17 +21,19 @@ pub enum SettingsTab {
     General,
     Clip,
     Media,
+    Games,
     Shortcuts,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 4] = [SettingsTab::General, SettingsTab::Clip, SettingsTab::Media, SettingsTab::Shortcuts];
+    const ALL: [SettingsTab; 5] = [SettingsTab::General, SettingsTab::Clip, SettingsTab::Media, SettingsTab::Games, SettingsTab::Shortcuts];
 
     fn label(self) -> &'static str {
         match self {
             SettingsTab::General => "General",
             SettingsTab::Clip => "Clip",
             SettingsTab::Media => "Media",
+            SettingsTab::Games => "Games",
             SettingsTab::Shortcuts => "Shortcuts",
         }
     }
@@ -39,7 +42,7 @@ impl SettingsTab {
 impl Root {
     pub fn render_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let current = self.settings_tab;
-        let mut tabs = ui::segment_track().w(px(440.));
+        let mut tabs = ui::segment_track().w(px(520.));
         for tab in SettingsTab::ALL {
             tabs = tabs.child(ui::segment(SharedString::from(format!("settings-{}", tab.label())), tab.label(), tab == current).on_click(cx.listener(move |this, _, _, cx| {
                 this.settings_tab = tab;
@@ -55,6 +58,7 @@ impl Root {
             SettingsTab::General => self.settings_general(cx),
             SettingsTab::Clip => self.settings_clip(window, cx),
             SettingsTab::Media => self.settings_media(window, cx),
+            SettingsTab::Games => self.settings_games(cx),
             SettingsTab::Shortcuts => self.settings_shortcuts(cx),
         });
         self.page_shell_tabs("Settings", "", Some(tabs.into_any_element()), body)
@@ -151,7 +155,7 @@ impl Root {
         }
         vec![
             section_title("Recording"),
-            setting_row("Record games automatically", "Starts when a fullscreen game is in front; stops when it closes.")
+            setting_row("Record games automatically", "Starts when a game is in front; stops when it closes. Apps Recall does not know as games: Settings → Games.")
                 .child(ui::switch("auto-record", auto_record).on_click(cx.listener(move |this, _, _, cx| {
                     this.set_config("recording", "auto_record", json!(!auto_record));
                     cx.notify();

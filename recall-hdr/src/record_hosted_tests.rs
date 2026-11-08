@@ -13,6 +13,8 @@ fn uwp(stem: &str, title: &str, hosted: bool) -> WatchEvent {
         fullscreen: true,
         fullscreen_on_target: true,
         steam_game: false,
+        launcher_game: false,
+        store_game: false,
         hosted,
         hwnd: 0x400,
     }
@@ -63,16 +65,13 @@ fn a_known_game_uwp_override_or_vendor_listed_one_still_is() {
 }
 
 #[test]
-fn a_plain_fullscreen_window_keeps_todays_rule_without_trace_rights() {
+fn a_plain_fullscreen_window_without_trace_rights_is_no_target() {
+    // Official-proof ruling (2026-11-07): no verdict and no other proof = not recorded.
     let cfg = Config::default();
-    let plain = no_rights(&uwp("UnknownGame", "Unknown Game", false), &cfg, None).expect("fallback");
-    assert!(plain.needs_check, "the check would run if it could");
-    assert!(commits_without_probe(false));
-}
-
-#[test]
-fn a_hosted_candidate_with_no_probe_does_not_commit() {
-    assert!(!commits_without_probe(true));
+    assert_eq!(no_rights(&uwp("UnknownGame", "Unknown Game", false), &cfg, None), None, "no fallback");
+    assert_eq!(no_rights(&uwp("UnknownGame", "Unknown Game", false), &cfg, Some(false)), None, "the vendor does not list it");
+    let checked = classify_checked(&uwp("UnknownGame", "Unknown Game", false), &cfg, true, true, || None).expect("the check can run");
+    assert!(checked.needs_check);
 }
 
 #[test]

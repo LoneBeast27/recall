@@ -62,6 +62,8 @@ mod journal;
 mod known_games;
 mod lenient_json;
 mod library_damage;
+mod launcher_libraries;
+mod launcher_libraries_win;
 mod liveness;
 mod logging;
 mod matrix;
@@ -102,10 +104,13 @@ mod record_lock;
 mod record_session_end;
 mod record_session_host;
 mod record_session_win;
+mod record_private_watch;
 mod record_quit;
 mod record_recover;
+mod record_game_ops;
 mod record_restart;
 mod record_restart_host;
+mod record_registry;
 mod record_render;
 mod record_startup;
 mod record_storage;
@@ -114,12 +119,15 @@ mod record_janitor;
 mod record_monitor;
 mod record_target;
 mod record_target_gate;
+mod record_target_rules;
 mod record_transition;
 mod record_tray;
 mod record_tray_slot;
 mod render_probe;
 mod render_verdict;
+mod game_library;
 mod ghost_window;
+mod store_games;
 mod gpu_games;
 mod rules;
 #[path = "../../recall/src/single_instance.rs"]
@@ -139,6 +147,8 @@ mod state;
 mod supervisor;
 mod tray;
 #[cfg(test)]
+mod record_proof_tests;
+#[cfg(test)]
 mod transitions_detect_tests;
 #[cfg(test)]
 mod install_script_tests;
@@ -150,6 +160,8 @@ mod install_script_quit_tests;
 mod hub_pipe_tests;
 #[cfg(test)]
 mod transitions_gate_tests;
+#[cfg(test)]
+mod transitions_privacy_tests;
 #[cfg(test)]
 mod transitions_scope_tests;
 #[cfg(test)]

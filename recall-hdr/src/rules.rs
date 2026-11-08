@@ -85,6 +85,10 @@ pub struct Foreground {
     pub fullscreen_on_target: bool,
     /// Owning process id.
     pub pid: u32,
+    /// The exe lives in a Steam library, or Recall knows the game
+    /// (`record_target::game_evidence`; a launcher folder is not, R7-detect-1):
+    /// it beats the private list here as it does for recording (R6-detect-1).
+    pub game_evidence: bool,
 }
 
 /// Map a matched/defaulted [`RuleKind`] to the [`AppKind`] the reconciler acts on.
@@ -159,9 +163,10 @@ pub fn classify(fg: &Foreground, cfg: &Config) -> AppKind {
     }
 
     // 3b. No override: a call, chat or office app is never a game (R4-detect-1),
-    // unless `detect.fullscreen_games` opts its fullscreen window in (R5-detect-3).
+    // unless `detect.fullscreen_games` opts its fullscreen window in (R5-detect-3)
+    // or the exe is a library / known game (R6-detect-1).
     let opted_in = fg.fullscreen_on_target && crate::record_target::is_fullscreen_game(cfg, stem);
-    if crate::private_apps::is_private(stem) && !opted_in {
+    if crate::private_apps::blocks_recording(stem, fg.game_evidence) && !opted_in {
         return AppKind::NonGame;
     }
 
@@ -191,6 +196,7 @@ mod tests {
             title: "some window".to_string(),
             fullscreen_on_target: fullscreen,
             pid: 1234,
+            game_evidence: false,
         }
     }
 
