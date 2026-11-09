@@ -12,17 +12,23 @@
 //! target pid as well, so correctness never depends on a filter.
 //!
 //! Stopped on drop (stats off, overlay exit), by the panic hook / console
-//! handler ([`install_cleanup`]), by the next start (a stale session of the
-//! same name, e.g. from a killed overlay) and by the controller after it kills
-//! the overlay.
+//! handler ([`install_cleanup`]), by the next start that finds a stale session
+//! of the same name (e.g. from a killed overlay; [`takes_over`]) and by the
+//! controller after it kills the overlay.
+//!
+//! Two names ([`Kind`]): the overlay's `RecallFrameTiming` and the
+//! `--frame-timing-probe`'s `RecallFrameTimingProbe`, so a probe never stops
+//! the installed overlay's live session. The overlay stops an existing
+//! `RecallFrameTiming` only while it holds the one-island guard
+//! ([`set_sole_overlay`]): then no other live overlay can own it.
 
 use std::ffi::c_void;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 
 use windows::core::{w, BOOL, GUID, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SUCCESS, WIN32_ERROR};
+use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, WIN32_ERROR};
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::System::Diagnostics::Etw::{
     CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW, CONTROLTRACE_HANDLE,
@@ -39,18 +45,68 @@ use super::frame_math::{FrameStats, FrameWindow};
 use super::enable_plan::{self, Aimed, Enabler};
 use super::present_events::{classify, FrameMapper, Mapped, ProviderSpec, RawEvent, PROVIDERS};
 
-/// Also named in `recall-hdr/src/frame_timing.rs` (the controller stops it
-/// after killing the overlay).
-const SESSION_NAME: PCWSTR = w!("RecallFrameTiming");
-const SESSION_NAME_STR: &str = "RecallFrameTiming";
+/// Whose session this is: the name differs, and so does whether an existing
+/// session of that name may be stopped.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// The island's stats (`RecallFrameTiming`; also named in
+    /// `recall-hdr/src/frame_timing.rs`, which stops it after killing the
+    /// overlay).
+    Overlay,
+    /// `--frame-timing-probe` (`RecallFrameTimingProbe`).
+    Probe,
+}
+
+impl Kind {
+    fn name(self) -> PCWSTR {
+        match self {
+            Kind::Overlay => w!("RecallFrameTiming"),
+            Kind::Probe => w!("RecallFrameTimingProbe"),
+        }
+    }
+
+    fn name_str(self) -> &'static str {
+        match self {
+            Kind::Overlay => "RecallFrameTiming",
+            Kind::Probe => "RecallFrameTimingProbe",
+        }
+    }
+
+    fn code(self) -> u8 {
+        match self {
+            Kind::Overlay => 1,
+            Kind::Probe => 2,
+        }
+    }
+}
+
+/// StartTrace found a session of this kind's name already running: stop it
+/// and start again? A probe's is always a leftover (a second probe running at
+/// the same moment is stopped too: one probe at a time). The overlay's may be
+/// another live overlay's, unless this process holds the one-island guard.
+pub fn takes_over(kind: Kind, sole_overlay: bool) -> bool {
+    match kind {
+        Kind::Probe => true,
+        Kind::Overlay => sole_overlay,
+    }
+}
+
+/// This process holds the one-island guard (main, `Claim::First`).
+static SOLE_OVERLAY: AtomicBool = AtomicBool::new(false);
+
+/// Called once the island's single-instance guard is held: an existing
+/// `RecallFrameTiming` can then only be a dead overlay's.
+pub fn set_sole_overlay() {
+    SOLE_OVERLAY.store(true, Ordering::SeqCst);
+}
 /// `Wnode.ClientContext` = 1: query performance counter timestamps.
 const CLOCK_QPC: u32 = 1;
 /// `INVALID_PROCESSTRACE_HANDLE` on 64-bit Windows.
 const INVALID_TRACE: u64 = u64::MAX;
 
-/// This process has a session running (the panic hook and console handler
-/// stop it by name only then).
-static OWNED: AtomicBool = AtomicBool::new(false);
+/// The [`Kind::code`] of this process's running session, 0 = none (the panic
+/// hook and console handler stop it by name only then).
+static OWNED: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Debug)]
 pub enum StartError {
@@ -82,11 +138,11 @@ impl Properties {
     }
 }
 
-/// Stops a `RecallFrameTiming` session (any process's); `ERROR_SUCCESS` or
+/// Stops the session of `kind`'s name (any process's); `ERROR_SUCCESS` or
 /// the reason (4201 = none running, 5 = no permission).
-pub fn stop_by_name() -> WIN32_ERROR {
+fn stop_by_name(kind: Kind) -> WIN32_ERROR {
     let mut p = Properties::new();
-    unsafe { ControlTraceW(CONTROLTRACE_HANDLE { Value: 0 }, SESSION_NAME, &mut p.props, EVENT_TRACE_CONTROL_STOP) }
+    unsafe { ControlTraceW(CONTROLTRACE_HANDLE { Value: 0 }, kind.name(), &mut p.props, EVENT_TRACE_CONTROL_STOP) }
 }
 
 /// A panic or a console close/ctrl event still stops our session.
@@ -102,8 +158,14 @@ pub fn install_cleanup() {
 }
 
 fn stop_if_owned() {
-    if OWNED.swap(false, Ordering::SeqCst) {
-        let _ = stop_by_name();
+    match OWNED.swap(0, Ordering::SeqCst) {
+        1 => {
+            let _ = stop_by_name(Kind::Overlay);
+        }
+        2 => {
+            let _ = stop_by_name(Kind::Probe);
+        }
+        _ => {}
     }
 }
 
@@ -139,6 +201,7 @@ impl Shared {
 }
 
 pub struct EtwSession {
+    kind: Kind,
     control: CONTROLTRACE_HANDLE,
     guid: GUID,
     trace: Option<PROCESSTRACE_HANDLE>,
@@ -171,17 +234,24 @@ impl Enabler for Calls<'_> {
 }
 
 impl EtwSession {
-    pub fn start(pid: u32) -> Result<Self, StartError> {
+    pub fn start(pid: u32, kind: Kind) -> Result<Self, StartError> {
         let ticks_per_sec = qpc_frequency();
-        let _ = stop_by_name(); // a stale session of ours (a killed overlay)
+        let name = kind.name_str();
         let mut p = Properties::new();
         let mut control = CONTROLTRACE_HANDLE { Value: 0 };
-        match unsafe { StartTraceW(&mut control, SESSION_NAME, &mut p.props) } {
+        let mut status = unsafe { StartTraceW(&mut control, kind.name(), &mut p.props) };
+        if status == ERROR_ALREADY_EXISTS && takes_over(kind, SOLE_OVERLAY.load(Ordering::SeqCst)) {
+            let _ = stop_by_name(kind); // a stale session (a killed overlay or probe)
+            p = Properties::new();
+            status = unsafe { StartTraceW(&mut control, kind.name(), &mut p.props) };
+        }
+        match status {
             ERROR_SUCCESS => {}
             ERROR_ACCESS_DENIED => return Err(StartError::Denied),
-            other => return Err(StartError::Failed(format!("StartTrace {SESSION_NAME_STR}: error {}", other.0))),
+            ERROR_ALREADY_EXISTS => return Err(StartError::Failed(format!("{name} is another live process's"))),
+            other => return Err(StartError::Failed(format!("StartTrace {name}: error {}", other.0))),
         }
-        OWNED.store(true, Ordering::SeqCst);
+        OWNED.store(kind.code(), Ordering::SeqCst);
         let shared = Arc::new(Shared {
             target: AtomicU32::new(pid),
             running: AtomicBool::new(false),
@@ -191,6 +261,7 @@ impl EtwSession {
         // From here on, dropping `session` stops the trace on any error.
         let forced_off = pid_filter_forced_off();
         let mut session = EtwSession {
+            kind,
             control,
             guid: p.props.Wnode.Guid,
             trace: None,
@@ -282,7 +353,7 @@ impl EtwSession {
 
     /// Opens the real-time consumer and runs `ProcessTrace` on its own thread.
     fn consume(&mut self) -> Result<(), StartError> {
-        let mut name: Vec<u16> = SESSION_NAME_STR.encode_utf16().chain([0]).collect();
+        let mut name: Vec<u16> = self.kind.name_str().encode_utf16().chain([0]).collect();
         let mut logfile = EVENT_TRACE_LOGFILEW { LoggerName: PWSTR(name.as_mut_ptr()), ..Default::default() };
         logfile.Anonymous1.ProcessTraceMode =
             PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD | PROCESS_TRACE_MODE_RAW_TIMESTAMP;
@@ -319,7 +390,7 @@ impl Drop for EtwSession {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        OWNED.store(false, Ordering::SeqCst);
+        OWNED.store(0, Ordering::SeqCst);
     }
 }
 
@@ -363,3 +434,25 @@ fn qpc_now() -> i64 {
     now
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_probe_never_shares_the_overlays_session_name() {
+        assert_eq!(Kind::Overlay.name_str(), "RecallFrameTiming", "recall-hdr stops it by this name");
+        assert_eq!(Kind::Probe.name_str(), "RecallFrameTimingProbe");
+        for kind in [Kind::Overlay, Kind::Probe] {
+            assert_eq!(unsafe { kind.name().to_string() }.unwrap(), kind.name_str());
+        }
+        assert_ne!(Kind::Overlay.code(), Kind::Probe.code());
+    }
+
+    #[test]
+    fn an_existing_overlay_session_is_stopped_only_by_the_sole_overlay() {
+        assert!(takes_over(Kind::Overlay, true), "a dead overlay's leftover");
+        assert!(!takes_over(Kind::Overlay, false), "may be a live overlay's: never stopped");
+        assert!(takes_over(Kind::Probe, false), "a probe stops only probe sessions");
+        assert!(takes_over(Kind::Probe, true));
+    }
+}
