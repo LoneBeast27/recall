@@ -48,6 +48,9 @@ namespace Recall.Setup.Tests
             Run("a lock file a power cut left is not a lock", StaleLockFileIsNotALock);
             Run("a failing settings backup still reopens Recall and tells it", BackupFailureStillReopens);
             Run("a failure after the swap keeps the update and reopens Recall", FailureAfterSwapStillReopens);
+            Run("a resume file Setup cannot read never stops the update", UnreadableResumeFileNeverStopsTheUpdate);
+            Run("a guard failing before the update reopens Recall and tells it", GuardFailureReopensRecall);
+            Run("a Recover that throws inside Failed leaves Recall closed and says so", ThrowingRecoverInFailedSaysSo);
             Console.WriteLine(passed + " passed, " + failed + " failed");
             return failed == 0 ? 0 : 1;
         }
