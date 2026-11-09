@@ -28,11 +28,14 @@ pub(super) struct ClipMeta {
     /// next start while the file keeps this size and mtime.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_duration: Option<FileStamp>,
+    /// Fields a newer build wrote for this clip: kept as they are.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 impl ClipMeta {
     fn is_empty(&self) -> bool {
-        !self.favourite && self.title.is_none() && self.duration.is_none() && self.played.is_none() && self.no_duration.is_none()
+        !self.favourite && self.title.is_none() && self.duration.is_none() && self.played.is_none() && self.no_duration.is_none() && self.extra.is_empty()
     }
 
     /// Folds an old file-name entry into this path entry: a field set on either side survives
