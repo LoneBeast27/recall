@@ -233,3 +233,20 @@ fn a_privacy_stop_with_no_save_quits_the_engine_and_releases_nothing() {
     assert!(s.released.is_empty(), "no stop_capture without a save");
     assert!(!s.ring_kept_since(mark) && !s.recording_of(30), "stopped at once, as before");
 }
+
+/// R2-detect-r10-2: while an older engine's privacy stop is held for a save, no new save is
+/// taken (it would save the private ring and extend the hold).
+#[test]
+fn an_older_engine_takes_no_save_while_its_privacy_stop_is_held() {
+    let mut s = recording_discord();
+    s.engine_releases = false;
+    s.run_to(5_000);
+    assert!(s.save());
+    s.seen(app_ev("Discord", 30, 0x30, false));
+    s.run_to(5_500);
+    assert!(s.recording_of(30), "setup: held for the save");
+    assert!(!s.save(), "no save of the private ring during the hold");
+    s.saved();
+    s.run_to(5_600);
+    assert!(!s.recording_of(30), "the hold ends with the first save");
+}

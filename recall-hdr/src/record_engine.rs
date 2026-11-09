@@ -106,11 +106,13 @@ pub struct EnginePlanner {
     lost: Option<(Instant, Duration)>,
     /// The linger the next loss uses (the buffered length, kept current).
     next_linger: Duration,
+    /// [`Self::cut_drain`]'s stop is held for a save: no new save (R2-detect-r10-2).
+    privacy_hold: bool,
 }
 
 impl EnginePlanner {
     pub fn new(linger: Duration) -> Self {
-        EnginePlanner { applied: EngineTarget::Off, lost: None, next_linger: linger }
+        EnginePlanner { applied: EngineTarget::Off, lost: None, next_linger: linger, privacy_hold: false }
     }
 
     /// How long the engine outlives the game if it went away now. Read once,
@@ -155,6 +157,7 @@ impl EnginePlanner {
     pub fn step(&mut self, wanted: &EngineTarget, now: Instant, busy: Busy) -> Step {
         if *wanted == self.applied {
             self.lost = None;
+            self.privacy_hold = false;
             return Step::Keep;
         }
         let game_went_away = matches!(self.applied, EngineTarget::Window(_))
@@ -174,6 +177,7 @@ impl EnginePlanner {
             }
         }
         self.lost = None;
+        self.privacy_hold = false;
         self.applied = wanted.clone();
         Step::Apply(wanted.clone())
     }
@@ -183,6 +187,7 @@ impl EnginePlanner {
     pub fn force(&mut self, target: EngineTarget) {
         self.applied = target;
         self.lost = None;
+        self.privacy_hold = false;
     }
 
     /// A game's engine stops with no drain linger: at once, or when the save in flight
@@ -190,6 +195,16 @@ impl EnginePlanner {
     pub fn cut_drain(&mut self, now: Instant) {
         if matches!(self.applied, EngineTarget::Window(_)) {
             self.lost = Some((now, Duration::ZERO));
+            self.privacy_hold = true;
+        }
+    }
+
+    /// While [`Self::cut_drain`]'s stop waits for a save: why a new save is refused (it would
+    /// save the private app's ring, captured after the stop too, and hold the stop again).
+    pub fn privacy_refusal(&self) -> Option<String> {
+        match &self.applied {
+            EngineTarget::Window(t) if self.privacy_hold => Some(format!("Not saved: {} is no longer recorded", t.exe)),
+            _ => None,
         }
     }
 
