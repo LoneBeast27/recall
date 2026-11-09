@@ -53,3 +53,36 @@ fn a_released_engines_drain_progress_keeps_its_save_in_flight_past_120_s() {
     }
     assert!(a.retarget_busy(t0 + Duration::from_secs(300)).saving, "still writing at 300 s");
 }
+
+/// SPEC 26 C: the engine's recorder is active from its start (keyframe wait included), so a
+/// `record_toggle` while starting stops it: a stop in flight, and no drain refusal for it.
+#[test]
+fn a_toggle_during_the_keyframe_wait_is_a_stop() {
+    let t0 = Instant::now();
+    let mut a = EngineActivity::default();
+    a.command_sent("record_start", t0);
+    assert!(a.is_starting(), "setup: the keyframe wait");
+    assert_eq!(a.record_refusal("record_toggle", true), None, "a stop is never refused for a drain");
+    a.command_sent("record_toggle", t0);
+    assert!(a.stop_in_flight() && a.is_starting(), "the toggle stops it");
+    assert_eq!(a.record_refusal("record_toggle", true), None);
+}
+
+/// SPEC 26 B: the session end's own stop is ours until another stop is sent (or it ends).
+#[test]
+fn only_the_session_ends_own_stop_is_ours() {
+    let t0 = Instant::now();
+    let mut a = EngineActivity::default();
+    a.command_sent("record_start", t0);
+    a.stop_sent();
+    a.claim_stop();
+    assert!(a.stop_is_ours());
+    a.command_sent("record_stop", t0); // the user's
+    assert!(a.stop_in_flight() && !a.stop_is_ours());
+    a.stop_sent();
+    a.claim_stop();
+    a.on_event(&json!({"type": "recording_stopped", "path": "E:/G__rec.mp4"}), 2.0);
+    assert!(!a.stop_is_ours(), "it ended");
+    a.claim_stop();
+    assert!(!a.stop_is_ours(), "nothing in flight to claim");
+}

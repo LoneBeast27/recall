@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use crate::log;
 use crate::record_recover_stale::{EngineWatch, Verdict};
+use crate::record_recovery_act::EarlyStep;
 use crate::record_status::session_state;
 use crate::supervisor::EngineHealth;
 
@@ -301,20 +302,17 @@ impl crate::record_app::Controller {
     pub(crate) fn encoder_recover_tick(&mut self, now: Instant) {
         // A restart waiting for the long recording to end early (`record_fail` sent).
         if let Some(wait) = self.ending_early {
-            match wait.decide(now, self.activity.is_recording(), self.supervisor.hello_count()) {
-                EndDecision::Wait => return,
-                EndDecision::Cancel => {
-                    log!("record: a new engine started while the long recording ended early; no restart");
-                    self.ending_early = None;
-                    return;
-                }
-                EndDecision::RestartNow => {}
-            }
-            self.ending_early = None;
-            if self.activity.is_recording() {
+            let recording = self.activity.is_recording();
+            let decision = wait.decide(now, recording, self.supervisor.hello_count());
+            if decision == EndDecision::RestartNow && recording {
                 log!("record: the long recording did not end within {} s; restarting anyway (the next start recovers its .part)", END_EARLY_WAIT.as_secs());
             }
-            self.restart_for_recovery();
+            match crate::record_recovery_act::ending_early_step(self, decision) {
+                EarlyStep::Wait => return,
+                EarlyStep::Cancelled => log!("record: a new engine started while the long recording ended early; no restart"),
+                EarlyStep::Restarted => {}
+            }
+            self.ending_early = None;
             return;
         }
         let health = self.supervisor.health();
@@ -340,10 +338,9 @@ impl crate::record_app::Controller {
         match self.recovery.step_held(now, state, health, progress, view.opening, shown, hold, &target) {
             Recovery::Restart => {
                 log!("record: the encoder failed, its recovery ran past its bound, or the engine hung; restarting the engine (intended)");
-                let lines = restart_lines(self.activity.is_recording());
+                let lines = crate::record_recovery_act::recovery_restart(self, self.activity.is_recording());
                 if lines.is_empty() {
-                    self.restart_for_recovery();
-                    return;
+                    return; // restarted
                 }
                 // The quit waits (up to 20 s) for the recording thread to finish the part.
                 log!("record: ending the long recording early; the restart follows once it reports");

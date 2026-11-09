@@ -190,19 +190,23 @@ impl SessionHost for Controller {
     }
 
     fn long_state(&self) -> LongState {
-        LongState::of(self.activity.recording_or_starting(), self.activity.stop_in_flight())
+        LongState::of(self.activity.recording_or_starting(), self.activity.stop_in_flight(), self.activity.stop_is_ours())
     }
 
     fn send_record_stop_now(&mut self) {
-        if !crate::record_dispatch::automatic_effects(self.send_record_stop()).is_empty() {
+        let sent = self.send_record_stop();
+        if sent.queued() {
+            self.activity.claim_stop(); // a cancel may restart this one
+        }
+        if !crate::record_dispatch::automatic_effects(sent).is_empty() {
             log!("record: session end -- record_stop not sent ({})", crate::record_dispatch::NOT_RESPONDING);
         }
     }
 
     fn start_long_recording(&mut self) -> bool {
-        let was_idle = !self.activity.recording_or_starting();
-        self.engine_command("record_start", None);
-        crate::record_session_end::start_went_out(was_idle, self.activity.is_starting())
+        let before = self.long_state();
+        let queued = self.engine_command_queued("record_start");
+        crate::record_session_end::start_went_out(before, queued)
     }
 
     fn drain_engine(&mut self) {

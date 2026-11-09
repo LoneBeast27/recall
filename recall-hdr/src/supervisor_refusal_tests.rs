@@ -160,8 +160,8 @@ fn a_retarget_racing_shutdown_keeps_isnt_responding() {
             thread::yield_now(); // until the retarget holds `desired` (it waits on stdin next)
         }
         thread::sleep(Duration::from_millis(50));
-        shared.request_stop(Duration::ZERO);
-        stdin.quitting = Some(Sent::NotResponding); // `finish_shutdown`'s `send_quit`
+        shared.stop.store(true, Ordering::SeqCst); // `request_stop`'s flag (its lock step is the line below)
+        stdin.quitting = Some(Sent::NotResponding); // `shutdown_refusal` / `finish_shutdown`'s `send_quit`
         drop(stdin);
         late.join().unwrap();
     });
@@ -214,4 +214,28 @@ fn a_resume_before_the_pauses_quit_says_waiting() {
     shared.unpause();
     assert!(shared.send_retarget_quit());
     assert_eq!(shared.send_line(SAVE), Sent::Waiting);
+}
+
+/// SPEC 26d: a shutdown during a retarget's grace (its quit already out, "Switching games")
+/// is no game switch: from the stop on a line says "isn't responding".
+#[test]
+fn a_shutdown_inside_a_retarget_grace_says_isnt_responding() {
+    let sup = running_fake_engine(3_000);
+    switch_engine(&sup, Some(EngineSpec::default()), Sent::Switching);
+    assert_eq!(refused_in_quit_window(&sup, SAVE).reason(), Some(SWITCHING), "setup: the retarget's quit window");
+    sup.shared.request_stop(Duration::from_millis(50)); // `Supervisor::stop`'s first step
+    assert_eq!(refused_now(&sup, SAVE), Sent::NotResponding, "shutdown is no game switch");
+    sup.shutdown(Duration::from_millis(50));
+}
+
+/// The same when the stop lands before the retarget's quit goes out (`finish_shutdown`'s
+/// `send_retarget_quit` after the flag).
+#[test]
+fn a_retarget_quit_after_the_shutdown_flag_says_isnt_responding() {
+    let shared = Shared::new(None);
+    shared.attach_writer(Some(Box::new(std::io::sink())));
+    shared.set_desired(Some(EngineSpec::default()), Sent::Switching);
+    shared.request_stop(Duration::ZERO);
+    assert!(shared.send_retarget_quit());
+    assert_eq!(shared.send_line(SAVE), Sent::NotResponding);
 }
