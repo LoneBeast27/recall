@@ -68,7 +68,10 @@ try {
     if ($isTest) {
         $tests = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'tests') -Filter '*.cs' -File | ForEach-Object FullName)
         Invoke-Compiler ($common + $fonts + @('/target:exe', "/out:$OutputPath", '/main:Recall.Setup.Tests.TestRunner') + $sources + $tests)
-        & $OutputPath $PSScriptRoot
+        # A window-less stand-in for Recall's programs in the sandboxed update tests.
+        $fake = Join-Path (Split-Path $OutputPath -Parent) 'FakeRecall.exe'
+        Invoke-Compiler ($common + @('/target:winexe', "/out:$fake", (Join-Path $PSScriptRoot 'tests\fake\FakeRecall.cs')))
+        & $OutputPath $PSScriptRoot $fake
         if ($LASTEXITCODE -ne 0) { throw "Recall Setup tests failed ($LASTEXITCODE)" }
         return
     }

@@ -63,18 +63,14 @@ namespace Recall.Setup
             Report(progress, "Waiting for Recall to finish saving…");
             // An update may close the app (it asked for the update); a first install refuses while it runs.
             var quitter = new RecorderQuitter(targets, dir, options.Update, log);
-            quitter.EnsureAppClosed();
-            quitter.Stop(QuitWaitMinutes);
-
-            Report(progress, "Installing program files…");
-            var stage = Path.Combine(work, "stage");
-            Stage(package, stage);
-            Directory.CreateDirectory(dir);
-            var installed = InstallManifest.Describe(stage);
-            InstallSwap.Run(stage, dir);
-            InstallManifest.Write(dir, InstallManifest.Merge(installed, InstallManifest.Read(dir), e => InstallManifest.Unchanged(dir, e)));
-            RemoveOldBin(dir);
-            log("Program files swapped in: " + dir);
+            var update = options.Update ? new UpdateFlow(targets, dir, options.Resume, log) : null;
+            if (update != null) update.Begin(quitter);
+            try { Replace(package, work, dir, quitter, update, progress, log); }
+            catch (Exception error)
+            {
+                if (update != null) update.Failed(error, quitter, options);
+                throw;
+            }
 
             var notes = new List<string>();
             if (options.Shortcut && !options.Update)
@@ -85,11 +81,31 @@ namespace Recall.Setup
             }
             AppsEntry.Write(targets, dir, AppsEntry.ProgramSizeKb(dir));
             log("Apps & Features entry: HKCU\\" + targets.UninstallKey);
-            if (options.Launch) StartRecorder(targets, dir, options, quitter, log, notes);
+            if (update != null) update.Succeeded(quitter, options, notes);
+            else if (options.Launch) StartRecorder(targets, dir, options, quitter, log, notes);
             else if (options.Autostart) notes.Add("Start with Windows was not set (the recorder was not started). Turn it on in Recall > Settings > General.");
             foreach (var note in notes) log("WARNING: " + note);
             log("Installed to " + dir + ".");
             return notes.Count == 0 ? null : string.Join("\n", notes.ToArray());
+        }
+
+        /// App closed, recorder quit and waited for, then the staged, verified, all-or-nothing swap.
+        private static void Replace(string package, string work, string dir, RecorderQuitter quitter, UpdateFlow update,
+            IProgress<string> progress, Action<string> log)
+        {
+            quitter.EnsureAppClosed();
+            quitter.Stop(QuitWaitMinutes);
+            if (update != null) update.AfterQuit();
+
+            Report(progress, "Installing program files…");
+            var stage = Path.Combine(work, "stage");
+            Stage(package, stage);
+            Directory.CreateDirectory(dir);
+            var installed = InstallManifest.Describe(stage);
+            InstallSwap.Run(stage, dir);
+            InstallManifest.Write(dir, InstallManifest.Merge(installed, InstallManifest.Read(dir), e => InstallManifest.Unchanged(dir, e)));
+            RemoveOldBin(dir);
+            log("Program files swapped in: " + dir);
         }
 
         private static void Report(IProgress<string> progress, string text)
@@ -149,7 +165,7 @@ namespace Recall.Setup
         /// Starts the installed recorder detached (explorer as its parent), then waits up to 10 s
         /// for it to answer on its pipe. Exit 86 (another recorder holds the engine slot) is a note,
         /// not a failure. Start with Windows is sent only when opted in, never on an update.
-        private static void StartRecorder(SetupTargets targets, string dir, InstallOptions options, RecorderQuitter quitter,
+        internal static bool StartRecorder(SetupTargets targets, string dir, InstallOptions options, RecorderQuitter quitter,
             Action<string> log, List<string> notes)
         {
             bool answered = false, exited = false;
@@ -184,6 +200,7 @@ namespace Recall.Setup
             }
             else if (options.Autostart && !options.Update) notes.Add("Start with Windows was not set: the recorder did not answer. Turn it on in Recall > Settings > General.");
             else if (answered) log("Recorder running. Start with Windows is unchanged.");
+            return answered;
         }
     }
 }

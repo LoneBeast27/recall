@@ -20,9 +20,20 @@ namespace Recall.Setup
             TempCopy.Sweep(Path.GetTempPath(), line => { });
             int handled;
             if (SetupModes.TryRun(args, out handled)) return handled;
-            string updatePath = null;
-            if (args.Length == 2 && args[0].Equals("--update", StringComparison.OrdinalIgnoreCase))
+            string updatePath = null, resumePath = null;
+            bool update = (args.Length == 2 || (args.Length == 4 && args[2].Equals("--resume", StringComparison.OrdinalIgnoreCase)))
+                && args[0].Equals("--update", StringComparison.OrdinalIgnoreCase);
+            if (update)
+            {
                 updatePath = SetupPackage.ExistingInstallPath(args[1]);
+                if (args.Length == 4) resumePath = args[3];
+                // A swap an earlier run could not finish is undone before anything else (all old again).
+                if (updatePath != null)
+                {
+                    var why = InstallSwap.Recover(updatePath);
+                    if (why != null) SetupLog.For(null)("WARNING: an earlier update is not undone yet: " + why);
+                }
+            }
             else if (args.Length != 0
 #if PREVIEW
                 && !(args.Length == 2 && args[0] == "--check-preview")
@@ -33,13 +44,13 @@ namespace Recall.Setup
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return 2;
             }
-            if (args.Length == 2 && args[0].Equals("--update", StringComparison.OrdinalIgnoreCase) && updatePath == null)
+            if (update && updatePath == null)
             {
                 MessageBox.Show("Recall Setup could not verify the installed Recall folder.", "Recall Setup",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return 2;
             }
-            using (var window = new SetupWindow(updatePath))
+            using (var window = new SetupWindow(updatePath, resumePath))
             {
 #if PREVIEW
                 if (args.Length == 2 && args[0] == "--check-preview")

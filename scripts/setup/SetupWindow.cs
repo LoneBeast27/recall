@@ -52,9 +52,12 @@ namespace Recall.Setup
 
         public SetupWindow() : this(null) { }
 
-        public SetupWindow(string updatePath)
+        public SetupWindow(string updatePath) : this(updatePath, null) { }
+
+        public SetupWindow(string updatePath, string resumePath)
         {
             this.updatePath = updatePath;
+            this.resumePath = updatePath == null ? null : resumePath;
             updateMode = updatePath != null;
             Text = "Recall Setup";
             Icon = Icon.ExtractAssociatedIcon(Assembly.GetExecutingAssembly().Location);
@@ -301,6 +304,7 @@ namespace Recall.Setup
             var path = SetupPackage.InstallPath(destination.Text);
             if (path == null || busy) return;
             var selection = new InstallOptions(path, shortcut.Checked, false, frameTiming.Checked, updateMode);
+            selection.Resume = resumePath;
             busy = true;
             options.Hide();
             quick.Hide();
@@ -356,6 +360,7 @@ namespace Recall.Setup
                 primary.Text = preview ? "Done" : updateMode ? "Open Recall" : "Continue setup";
                 cancel.Hide();
                 complete = true;
+                if (ResumedUpdateDone()) return;
             }
             catch (SetupRestartRequired error)
             {

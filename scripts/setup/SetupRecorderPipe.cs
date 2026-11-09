@@ -17,6 +17,11 @@ namespace Recall.Setup
         public bool QuitForSignOut;
         public long Bytes;
         public long Saves;
+        /// A long recording is running (`long_recording.active`), to `LongPath`.
+        public bool LongActive;
+        public string LongPath;
+        /// The recorder captures a game or the desktop (`state`).
+        public bool Capturing;
 
         /// A `{"mod":"session","event":{"type":"status",...}}` line, else null.
         public static RecorderStatus Parse(string line)
@@ -33,6 +38,14 @@ namespace Recall.Setup
                 FinishingClip = true.Equals(Get(e, "finishing_clip")),
                 QuitForSignOut = true.Equals(Get(e, "quit_for_sign_out"))
             };
+            var state = Get(e, "state") as string;
+            status.Capturing = state == "recording" || state == "starting" || state == "degraded" || state == "recovering";
+            var longRec = Get(e, "long_recording") as Dictionary<string, object>;
+            if (longRec != null)
+            {
+                status.LongActive = true.Equals(Get(longRec, "active"));
+                status.LongPath = Get(longRec, "path") as string;
+            }
             var progress = Get(e, "finishing_progress") as Dictionary<string, object>;
             if (progress != null)
             {
