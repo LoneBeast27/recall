@@ -21,7 +21,7 @@ pub const DEFAULT_KEEP_FREE_PERCENT: u64 = 10;
 pub const MIN_CACHE_BUDGET: u64 = 2 * GIB;
 
 /// The budget a first run picks (no `storage.json` yet) on a cache drive with `free` of
-/// `total` bytes. On the system drive it is [`MIN_CACHE_BUDGET`] (Rohan 2026-11-03: "keep the
+/// `total` bytes. On the system drive it is [`MIN_CACHE_BUDGET`] (the maintainer 2026-11-03: "keep the
 /// cache on C: at 2 GB"; the engine's `kept\` copies count inside it). Elsewhere: the smallest
 /// of [`DEFAULT_CACHE_BUDGET`], [`DEFAULT_FREE_SHARE_PERCENT`] of `free`, and `free` less
 /// [`DEFAULT_KEEP_FREE_PERCENT`] of `total`, in whole GiB, at least [`MIN_CACHE_BUDGET`].

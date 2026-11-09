@@ -66,8 +66,8 @@ run_T1() {
   local logtxt; logtxt="$(log_since "$mark")"
   echo "  --- app log (T1 window) ---"; echo "$logtxt" | sed 's/^/    | /' | tail -25
 
-  assert_matches "log: HDR enable (set_hdr_state true)" "$logtxt" "set_hdr_state\(PG27AQDP, true\)"
-  assert_matches "log: SDR-white asserted"              "$logtxt" "set_sdr_white\(PG27AQDP"
+  assert_matches "log: HDR enable (set_hdr_state true)" "$logtxt" "set_hdr_state\($TARGET_MONITOR, true\)"
+  assert_matches "log: SDR-white asserted"              "$logtxt" "set_sdr_white\($TARGET_MONITOR"
   foreground_testcard   # give the capture engine the testcard, not a stray window
   oracle_dxgi_run T1; local hdr; hdr="$(dxgi_verdict T1)"; local pct; pct="$(dxgi_over_one T1)"
   echo "  DXGI oracle verdict: $hdr ; >1.0 pixels: ${pct}%"
@@ -110,7 +110,7 @@ run_T2() {
   echo "  --- app log (T2 window) ---"; echo "$logtxt" | sed 's/^/    | /' | tail -20
 
   assert_matches "log: session pid exited" "$logtxt" "session pid $dead_pid exited"
-  assert_matches "log: HDR disable (set_hdr_state false)" "$logtxt" "set_hdr_state\(PG27AQDP, false\)"
+  assert_matches "log: HDR disable (set_hdr_state false)" "$logtxt" "set_hdr_state\($TARGET_MONITOR, false\)"
   oracle_dxgi_run T2; local hdr; hdr="$(dxgi_verdict T2)"
   echo "  DXGI oracle verdict: $hdr"
   assert_eq "DXGI oracle: SDR" "$hdr" "SDR"
@@ -150,7 +150,7 @@ run_T3() {
   echo "  --- app log (alt-tab window) ---"; echo "$logtxt" | sed 's/^/    | /' | tail -20
   # CORE T3 feature: NO DisableHdr while a non-game is foreground (persistence).
   local pre_fails="$ASSERT_FAILS"
-  assert_not_matches "no DisableHdr during alt-tab" "$logtxt" "set_hdr_state\(PG27AQDP, false\)"
+  assert_not_matches "no DisableHdr during alt-tab" "$logtxt" "set_hdr_state\($TARGET_MONITOR, false\)"
   oracle_dxgi_run T3_mid; local hdrmid; hdrmid="$(dxgi_verdict T3_mid)"
   echo "  DXGI oracle (notepad foreground): $hdrmid"
   assert_eq "HDR REMAINS on during alt-tab" "$hdrmid" "HDR"
@@ -166,7 +166,7 @@ run_T3() {
   local logtxt2; logtxt2="$(log_since "$mark2")"
   local pre2="$ASSERT_FAILS"
   assert_matches "log: session exit after game killed" "$logtxt2" "session pid $dead exited"
-  assert_matches "log: HDR disable on revert" "$logtxt2" "set_hdr_state\(PG27AQDP, false\)"
+  assert_matches "log: HDR disable on revert" "$logtxt2" "set_hdr_state\($TARGET_MONITOR, false\)"
   oracle_dxgi_run T3_post; local hdrend; hdrend="$(dxgi_verdict T3_post)"
   echo "  DXGI oracle (after teardown): $hdrend"
   assert_eq "HDR reverted to SDR" "$hdrend" "SDR"
@@ -203,7 +203,7 @@ run_T2b() {
 
   # ENGAGE half (the punchy/accurate feature itself): no HDR flip + clamp on.
   local pre="$ASSERT_FAILS"
-  assert_not_matches "no HDR enable for SDR game" "$logtxt" "set_hdr_state\(PG27AQDP, true\)"
+  assert_not_matches "no HDR enable for SDR game" "$logtxt" "set_hdr_state\($TARGET_MONITOR, true\)"
   assert_matches "log: accurate sRGB clamp engaged" "$logtxt" "NvApiClamp.apply\(Accurate\)"
   local clamp; clamp="$(oracle_clamp_active)"    # probe oracle WHILE app live
   echo "  probe oracle: clamp active=$clamp"

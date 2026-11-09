@@ -131,7 +131,7 @@ fn steam_remote_play_and_exe_suffixed_games_stay_targets() {
 
 #[test]
 fn a_settings_entry_beats_the_deny_lists_but_never_windows_or_recall() {
-    // Final review F-detect-2 (Rohan 2026-11-07, "support for manual application registering"):
+    // Final review F-detect-2 (the maintainer 2026-11-07, "support for manual application registering"):
     // the user's own entry beats the remote-client, browser, media-player, launcher, Store-app
     // and private lists. It never makes Recall itself or a part of Windows a target.
     let mut cfg = user_cfg();
@@ -441,7 +441,7 @@ fn fullscreen_games_yield_to_none_overrides_and_recall_itself() {
 
 #[test]
 fn valorant_is_never_left_to_the_render_check() {
-    // Rohan's main game: even vsynced or DWM-composed (which the render check
+    // The maintainer's main game: even vsynced or DWM-composed (which the render check
     // would reject), its fullscreen window commits on the 300 ms rule.
     let cfg = Config::default();
     let v = ev("VALORANT-Win64-Shipping", "VALORANT  ", 10, 0x10, true);

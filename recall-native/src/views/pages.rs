@@ -160,8 +160,12 @@ impl Root {
                 cx.notify();
             })));
         }
-        // The colour profiles are made for one monitor model: the row shows only where they are installed.
-        if ac_profiles_installed() {
+        // The colour profiles are made per monitor: the row shows only when this machine's config
+        // names both (`[display] punchy_profile` / `accurate_profile`) and both are installed.
+        let named = |key: &str| self.config_value("display", key).and_then(Value::as_str).map(str::trim).filter(|f| !f.is_empty()).map(str::to_owned);
+        if let (Some(punchy), Some(accurate)) = (named("punchy_profile"), named("accurate_profile"))
+            && ac_profiles_installed(&punchy, &accurate)
+        {
             body.push(setting_row("Desktop colour in HDR", AC_PROFILE_DETAIL).child(profile_track).into_any_element());
         }
         let subtitle = format!("HDR switching for {}", if display == "Managed display" { "your main display" } else { display.as_str() });
@@ -187,14 +191,22 @@ pub(crate) fn section_title(text: &str) -> AnyElement {
     div().pt(px(8.)).child(ui::caption(text.to_owned())).into_any_element()
 }
 
-/// The Punchy/Accurate MHC2 profiles (`recall-hdr` `ac_profile_file`) are in the Windows colour
-/// store. Checked once per launch.
-fn ac_profiles_installed() -> bool {
-    static FOUND: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *FOUND.get_or_init(|| {
-        let store = std::env::var_os("WINDIR").map(std::path::PathBuf::from).unwrap_or_default().join(r"System32\spool\drivers\color");
-        ["PG27AQDP_Punchy-Gamma2.2_MHC2.icm", "PG27AQDP_sRGB-to-Gamma2.2_MHC2.icm"].iter().all(|f| store.join(f).is_file())
-    })
+/// The configured Punchy/Accurate MHC2 profiles (`recall-hdr` `ac_profile_file`) are plain file
+/// names in the Windows colour store. Checked once per pair of names, not on every frame.
+fn ac_profiles_installed(punchy: &str, accurate: &str) -> bool {
+    static FOUND: std::sync::Mutex<Option<(String, String, bool)>> = std::sync::Mutex::new(None);
+    let mut found = FOUND.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some((p, a, ok)) = found.as_ref()
+        && p == punchy
+        && a == accurate
+    {
+        return *ok;
+    }
+    let store = std::env::var_os("WINDIR").map(std::path::PathBuf::from).unwrap_or_default().join(r"System32\spool\drivers\color");
+    let plain = |f: &str| std::path::Path::new(f).file_name().is_some_and(|name| name == std::ffi::OsStr::new(f));
+    let ok = [punchy, accurate].iter().all(|f| plain(f) && store.join(f).is_file());
+    *found = Some((punchy.to_owned(), accurate.to_owned(), ok));
+    ok
 }
 
 pub(crate) fn setting_row(title: &str, detail: &str) -> Div {

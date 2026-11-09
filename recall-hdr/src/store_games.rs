@@ -1,4 +1,4 @@
-//! Xbox / Microsoft Store packaged games (official proof, Rohan 2026-11-07
+//! Xbox / Microsoft Store packaged games (official proof, the maintainer 2026-11-07
 //! 07:46 UTC): an exe inside a package whose install folder holds
 //! `MicrosoftGame.config`, the GDK game manifest. Gaming Services writes it
 //! into every game it installs, in `<drive>:\XboxGames\<game>\Content` (seen

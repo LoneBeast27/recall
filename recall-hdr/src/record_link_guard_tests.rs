@@ -41,11 +41,11 @@ fn links_come_from_the_apps_folder_list() {
     let dir = std::env::temp_dir().join(format!("recall-hdr-links-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let path = dir.join("folders.json");
-    let text = r#"{"recordings":"V:\\Recall","imported":["D:\\Moments","V:\\Old"],"former_recordings":["V:\\Old"],"extra":1}"#;
+    let text = r#"{"recordings":"X:\\Recall","imported":["D:\\Moments","X:\\Old"],"former_recordings":["X:\\Old"],"extra":1}"#;
     std::fs::write(&path, text).unwrap();
     let read = read_links_from(&path);
     let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(read, links(&[r"D:\Moments"], &[r"V:\Recall", r"V:\Old"]));
+    assert_eq!(read, links(&[r"D:\Moments"], &[r"X:\Recall", r"X:\Old"]));
     assert_eq!(read_links_from(&dir.join("missing.json")), Links::default());
 }
 

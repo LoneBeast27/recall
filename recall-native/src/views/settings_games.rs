@@ -1,4 +1,4 @@
-//! Settings → Games: the apps registered by hand (Rohan 2026-11-07: "use official proof +
+//! Settings → Games: the apps registered by hand (the maintainer 2026-11-07: "use official proof +
 //! support for manual application registering"). The recorder records an unknown fullscreen
 //! app only with official proof; the island's "Not recording <exe>: add it as a game in
 //! Settings" leads here. "Add app…" offers the running apps (the foreground one first, marked

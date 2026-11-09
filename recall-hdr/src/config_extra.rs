@@ -37,7 +37,7 @@ pub(super) fn unknown(disk: &Table, retired: &[&str]) -> Vec<(At, Value)> {
 }
 
 /// Schema keys absent from the serialized form when unset (never unknown).
-const OPTIONAL: &[(&str, &str)] = &[("display", "target_device_path")];
+const OPTIONAL: &[(&str, &str)] = &[("display", "target_device_path"), ("display", "punchy_profile"), ("display", "accurate_profile")];
 
 /// Keys of `disk` the default config's schema does not have: top-level ones, and those one level
 /// into a known table.

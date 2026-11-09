@@ -344,14 +344,14 @@ fn a_first_run_budget_is_20_gib_a_quarter_of_free_space_and_keeps_a_tenth_of_the
 fn a_first_run_budget_on_the_system_drive_is_2_gib() {
     use super::evict::{MIN_CACHE_BUDGET, default_budget};
     let gib = 1u64 << 30;
-    // A 1 TiB C: with 300 GiB free picked 20 GiB before (Rohan 2026-11-03: "keep the cache on C: at 2 GB").
+    // A 1 TiB C: with 300 GiB free picked 20 GiB before (the maintainer 2026-11-03: "keep the cache on C: at 2 GB").
     assert_eq!(default_budget(300 * gib, 1024 * gib, true), 2 * gib);
     assert_eq!(MIN_CACHE_BUDGET, 2 * gib);
     assert_eq!(default_budget(300 * gib, 1024 * gib, false), 20 * gib, "another SSD keeps the formula");
     use super::drive::is_system_volume;
     assert!(is_system_volume(Some("C:\\"), Some("C:")));
     assert!(is_system_volume(Some("D:\\"), Some("d:")), "SystemDrive is not always C:");
-    assert!(!is_system_volume(Some("L:\\"), Some("C:")));
+    assert!(!is_system_volume(Some("Y:\\"), Some("C:")));
     assert!(is_system_volume(Some("C:\\"), None), "no SystemDrive: C:");
     assert!(is_system_volume(None, Some("C:")), "unknown volume: the smaller budget");
     assert!(!is_system_volume(Some(r"\\?\VOLUME{1234}\"), Some("C:")));

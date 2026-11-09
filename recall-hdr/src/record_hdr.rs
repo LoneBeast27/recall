@@ -199,7 +199,7 @@ impl HdrManager {
 
     /// Set the Advanced Color default profile (call [`ready`](Self::ready)
     /// first; this is the WCS write whose failure is an `ac_profile` event).
-    pub fn set_ac_profile(&self, cfg: &Config, profile: &'static str) -> Result<&'static str, String> {
+    pub fn set_ac_profile<'a>(&self, cfg: &Config, profile: &'a str) -> Result<&'a str, String> {
         crate::wcs::set_advanced_color_default(&cfg.display.target_friendly_name, profile)?;
         log!("record-hdr: set_ac_profile -> {profile} (next HDR entry)");
         Ok(profile)
