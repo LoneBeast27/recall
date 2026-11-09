@@ -1,10 +1,13 @@
 [CmdletBinding(DefaultParameterSetName='Preview')]
 param(
     [Parameter(ParameterSetName='Preview')][switch]$Preview,
+    [Parameter(Mandatory=$true, ParameterSetName='Test')][switch]$Test,
     [Parameter(Mandatory=$true, ParameterSetName='Release')][string]$PayloadDirectory,
     [Parameter(ParameterSetName='Release')][string]$VCRedistPath,
     [Parameter(ParameterSetName='Release')][switch]$OnlineDependencies,
-    [string]$OutputPath
+    [string]$OutputPath,
+    # Shown in Apps & Features (DisplayVersion); release.ps1 sets RECALL_VERSION.
+    [ValidatePattern('^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$')][string]$DisplayVersion = $(if ($env:RECALL_VERSION) { $env:RECALL_VERSION } else { '0.0.0' })
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
@@ -12,8 +15,9 @@ $assets = Join-Path $repo 'recall-native\assets'
 $compiler = Join-Path $env:windir 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $nice = Join-Path $env:USERPROFILE '.claude\tools\nice-build.ps1'
 $isPreview = $PSCmdlet.ParameterSetName -eq 'Preview'
+$isTest = $PSCmdlet.ParameterSetName -eq 'Test'
 if (!$OutputPath) {
-    $name = if ($isPreview) { 'RecallSetupPreview.exe' } else { 'RecallSetup.exe' }
+    $name = if ($isTest) { 'RecallSetupTests.exe' } elseif ($isPreview) { 'RecallSetupPreview.exe' } else { 'RecallSetup.exe' }
     $OutputPath = Join-Path $repo "dist\setup\$name"
 }
 $OutputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
@@ -25,20 +29,47 @@ function Copy-PackageFile([string]$Source, [string]$Destination) {
     Copy-Item -LiteralPath $Source -Destination $Destination
 }
 
-$arguments = @(
-    '/nologo', '/warnaserror', '/target:winexe', '/platform:x64', '/optimize+', '/utf8output',
-    '/reference:System.Drawing.dll', '/reference:System.Windows.Forms.dll',
-    '/reference:System.IO.Compression.dll', '/reference:System.IO.Compression.FileSystem.dll',
-    "/out:$OutputPath", "/win32icon:$assets\recall.ico",
+# Every Setup source file. Setup is plain C#: it never starts PowerShell or runs a script.
+$sources = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.cs' -File | Sort-Object Name | ForEach-Object FullName)
+$common = @(
+    '/nologo', '/warnaserror', '/platform:x64', '/optimize+', '/utf8output',
+    '/reference:System.Drawing.dll', '/reference:System.Windows.Forms.dll', '/reference:System.Web.Extensions.dll',
+    '/reference:System.IO.Compression.dll', '/reference:System.IO.Compression.FileSystem.dll'
+)
+$fonts = @(
     "/resource:$assets\fonts\bricolage-grotesque-700.ttf,Recall.Display.ttf",
     "/resource:$assets\fonts\geist-400.ttf,Recall.Body.ttf",
-    "/resource:$assets\fonts\geist-600.ttf,Recall.Strong.ttf",
-    "$PSScriptRoot\Program.cs", "$PSScriptRoot\SetupWindow.cs", "$PSScriptRoot\SetupWindow.Guided.cs",
-    "$PSScriptRoot\SetupWindow.Preview.cs", "$PSScriptRoot\SetupWindow.Chrome.cs",
-    "$PSScriptRoot\SetupPackage.cs", "$PSScriptRoot\SetupPrerequisites.cs"
+    "/resource:$assets\fonts\geist-600.ttf,Recall.Strong.ttf"
 )
+function Invoke-Compiler([string[]]$CompilerArguments) {
+    if (Test-Path -LiteralPath $nice -PathType Leaf) {
+        & powershell -NoProfile -File $nice $compiler @CompilerArguments
+    } else {
+        & $compiler @CompilerArguments
+    }
+    if ($LASTEXITCODE -ne 0) { throw "Recall Setup compilation failed ($LASTEXITCODE)" }
+}
+$generatedRoot = Join-Path $repo '.tmp\setup'
+New-Item -ItemType Directory -Force -Path $generatedRoot | Out-Null
+$buildInfo = Join-Path $generatedRoot ("SetupBuildInfo-" + [Guid]::NewGuid().ToString('N') + '.cs')
+Set-Content -LiteralPath $buildInfo -Encoding UTF8 -Value @"
+[assembly: System.Reflection.AssemblyVersion("$DisplayVersion.0")]
+[assembly: System.Reflection.AssemblyFileVersion("$DisplayVersion.0")]
+[assembly: System.Reflection.AssemblyProduct("Recall")]
+[assembly: System.Reflection.AssemblyCompany("LoneBeast27")]
+namespace Recall.Setup { internal static class SetupBuildInfo { public const string Version = "$DisplayVersion"; } }
+"@
+$sources += $buildInfo
+$arguments = $common + $fonts + @('/target:winexe', "/out:$OutputPath", "/win32icon:$assets\recall.ico") + $sources
 $work = $null
 try {
+    if ($isTest) {
+        $tests = @(Get-ChildItem -LiteralPath (Join-Path $PSScriptRoot 'tests') -Filter '*.cs' -File | ForEach-Object FullName)
+        Invoke-Compiler ($common + $fonts + @('/target:exe', "/out:$OutputPath", '/main:Recall.Setup.Tests.TestRunner') + $sources + $tests)
+        & $OutputPath $PSScriptRoot
+        if ($LASTEXITCODE -ne 0) { throw "Recall Setup tests failed ($LASTEXITCODE)" }
+        return
+    }
     if ($isPreview) {
         $arguments += '/define:PREVIEW'
     } else {
@@ -69,10 +100,11 @@ try {
             }
             $arguments += "/resource:$($redist.FullName),Recall.VcRedist.x64.exe"
         }
-        $installerScripts = 'install.ps1', 'install-swap.ps1', 'install-quit-wait.ps1'
-        foreach ($name in $installerScripts) {
-            Copy-PackageFile (Join-Path $repo "scripts\$name") (Join-Path $package "scripts\$name")
-        }
+        # The install logic is Setup's own C# (Setup*.cs); install.ps1 and its helpers stay dev tools.
+        # The small uninstaller Setup copies into the install folder: the same sources, no payload.
+        $uninstaller = Join-Path $work 'RecallUninstall.exe'
+        Invoke-Compiler ($common + $fonts + @('/target:winexe', '/define:UNINSTALLER', "/out:$uninstaller", "/win32icon:$assets\recall.ico") + $sources)
+        $arguments += "/resource:$uninstaller,Recall.Uninstaller.exe"
         Copy-PackageFile (Join-Path $source 'recall-native.exe') (Join-Path $package 'target-gpui\release\recall-native.exe')
         foreach ($name in 'recall.exe','recall-hdr.exe','recall-overlay.exe') {
             Copy-PackageFile (Join-Path $source $name) (Join-Path $package "target-dev\release\$name")
@@ -100,14 +132,10 @@ try {
         [IO.Compression.ZipFile]::CreateFromDirectory($package, $zip)
         $arguments += "/resource:$zip,Recall.Payload.zip"
     }
-    if (Test-Path -LiteralPath $nice -PathType Leaf) {
-        & powershell -NoProfile -File $nice $compiler @arguments
-    } else {
-        & $compiler @arguments
-    }
-    if ($LASTEXITCODE -ne 0) { throw "Recall Setup compilation failed ($LASTEXITCODE)" }
+    Invoke-Compiler $arguments
     Get-Item -LiteralPath $OutputPath
 } finally {
+    Remove-Item -LiteralPath $buildInfo -Force -ErrorAction SilentlyContinue
     if ($work -and (Test-Path -LiteralPath $work)) {
         $resolved = (Resolve-Path -LiteralPath $work).ProviderPath
         if ([IO.Path]::GetDirectoryName($resolved) -ne (Resolve-Path -LiteralPath $workspace).ProviderPath -or

@@ -198,7 +198,7 @@ drives are detected); thumbnails, hover frames and recently watched clips are ke
 
 To sign a separate copy of a built installer, run `scripts/setup/sign.ps1` with `-InputPath`, a new `-OutputPath`, the `-CertificateThumbprint` of your trusted code-signing certificate, and its HTTPS `-TimestampUrl`. The script verifies the publisher and timestamp before writing the signed output.
 
-Build the Windows setup screen with `powershell -NoProfile -File scripts/setup/build.ps1 -Preview`. Open `dist/setup/RecallSetupPreview.exe` to rehearse setup. The release setup build takes a verified payload via `-PayloadDirectory` and uses the save-aware installer. Pass `-VCRedistPath` to bundle a local Microsoft-signed x64 Visual C++ package. By default the build uses a copy in the payload directory or downloads it from Microsoft.
+Build the Windows setup screen with `powershell -NoProfile -File scripts/setup/build.ps1 -Preview`. Open `dist/setup/RecallSetupPreview.exe` to rehearse setup. The release setup build takes a verified payload via `-PayloadDirectory`. Setup installs, updates and uninstalls in its own C# (`scripts/setup/Setup*.cs`) and never starts PowerShell; `scripts/install.ps1` and its helpers remain developer tools. Setup registers Recall in Apps & Features; `RecallSetup.exe /uninstall` removes only the files its `install-manifest.json` lists and keeps the cache unless asked. Run the Setup unit tests with `scripts/setup/build.ps1 -Test`. Pass `-VCRedistPath` to bundle a local Microsoft-signed x64 Visual C++ package. By default the build uses a copy in the payload directory or downloads it from Microsoft.
 
 ```powershell
 $env:FFMPEG_DIR    = "$PWD\tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared"   # has av1_nvenc
