@@ -78,6 +78,7 @@ mod single_instance;
 mod spill;
 mod stdin_reader;
 mod file_id;
+mod same_bytes;
 mod win_volume;
 mod thread_qos;
 mod source;
