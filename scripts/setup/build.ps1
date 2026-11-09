@@ -32,7 +32,7 @@ $arguments = @(
     "/resource:$assets\fonts\bricolage-grotesque-700.ttf,Recall.Display.ttf",
     "/resource:$assets\fonts\geist-400.ttf,Recall.Body.ttf",
     "/resource:$assets\fonts\geist-600.ttf,Recall.Strong.ttf",
-    "$PSScriptRoot\Program.cs", "$PSScriptRoot\SetupWindow.cs", "$PSScriptRoot\SetupPackage.cs"
+    "$PSScriptRoot\Program.cs", "$PSScriptRoot\SetupWindow.cs", "$PSScriptRoot\SetupWindow.Guided.cs", "$PSScriptRoot\SetupPackage.cs"
 )
 $work = $null
 try {

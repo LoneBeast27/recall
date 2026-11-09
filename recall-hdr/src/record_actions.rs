@@ -12,6 +12,7 @@ use serde_json::json;
 use crate::log;
 use crate::record_activity::{LongRec, PendingPause, Trigger, PAUSE_AFTER_SAVE, PAUSE_AFTER_SAVE_DETAIL, PAUSE_STOP_WAIT, SAVE_HOLD_DETAIL, SAVE_HOLD_TITLE};
 use crate::record_app::Controller;
+use crate::record_config::OverlayCfg;
 use crate::record_engine::{capture_refusal, EngineTarget, Step};
 use crate::record_hotkeys::{bindings, hotkey_command, HotkeyAction};
 use crate::record_notice::shortcut_notice_json;
@@ -35,6 +36,17 @@ fn debounce_of(action: HotkeyAction) -> (&'static str, Duration) {
 
 fn unix_now() -> f64 {
     SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0)
+}
+
+/// First use enables notices when neither overlay surface has been selected.
+pub(crate) fn overlay_hotkey_patch(overlay: &OverlayCfg) -> serde_json::Value {
+    if overlay.wants_process() {
+        json!({"overlay": {"hidden": true}})
+    } else if overlay.enabled || overlay.stats {
+        json!({"overlay": {"hidden": false}})
+    } else {
+        json!({"overlay": {"hidden": false, "enabled": true}})
+    }
 }
 
 impl Controller {
@@ -185,7 +197,7 @@ impl Controller {
     /// A bookmark shortcut that could not mark anything: its pop-up + beep.
     fn refuse_bookmark(&self, reason: &str) {
         log!("record: bookmark refused -- {reason}");
-        if self.cfg.overlay.enabled {
+        if self.cfg.overlay.shows_notices() {
             self.hub.event(
                 "session",
                 &shortcut_notice_json("Bookmark not added", reason, true, false),
@@ -197,7 +209,7 @@ impl Controller {
     /// The pop-up for a shortcut with no engine event of its own (stats,
     /// overlay on); shown while notices (`overlay.enabled`) are on.
     pub(crate) fn shortcut_notice(&self, title: &str, detail: &str) {
-        if self.cfg.overlay.enabled {
+        if self.cfg.overlay.shows_notices() {
             self.hub.event(
                 "session",
                 &shortcut_notice_json(title, detail, false, false),
@@ -205,29 +217,19 @@ impl Controller {
         }
     }
 
-    /// The overlay shortcut flips `overlay.enabled` (Settings "Show notices").
-    /// "Overlay off" is forced through, so turning it off is seen too.
+    /// Hide or show the whole overlay immediately. Resume the selected surfaces.
     fn toggle_overlay(&mut self) {
-        let on = !self.cfg.overlay.enabled;
-        let key = self.cfg.recording.overlay_hotkey.replace('+', " ");
-        let was_running = self.overlay.running();
-        if !on {
-            self.overlay.linger(); // with stats off too, keep it up to show this
-            let detail = format!("{key} shows it again");
-            self.hub.event(
-                "session",
-                &shortcut_notice_json("Overlay off", &detail, false, true),
-            );
+        let patch = overlay_hotkey_patch(&self.cfg.overlay);
+        if !self.apply_config_patch(&patch, None) {
+            return;
         }
-        self.apply_config_patch(&json!({"overlay": {"enabled": on}}), None);
-        if on && was_running {
-            self.shortcut_notice("Overlay on", "Notices show over any app");
-        } else if on {
-            // A fresh overlay process gets it with its first status.
-            let notice =
-                shortcut_notice_json("Overlay on", "Notices show over any app", false, false);
-            self.pending_notice = Some((notice, Instant::now() + crate::overlay_proc::LINGER));
-        }
+        let shown = self.cfg.overlay.wants_process();
+        log!("record: overlay {}", if shown { "shown" } else { "hidden" });
+        crate::cues::tick();
+        self.pending_notice = self.cfg.overlay.shows_notices().then(|| {
+            let notice = shortcut_notice_json("Overlay on", "Notices show over any app", false, false);
+            (notice, Instant::now() + Duration::from_secs(4))
+        });
     }
 
     /// The island editor shortcut: the overlay starts (or saves) it for the
@@ -276,6 +278,7 @@ impl Controller {
     /// finishes first ("Pausing after the save"). Resume cancels a pause still waiting.
     pub(crate) fn set_paused(&mut self, paused: bool) {
         if !paused {
+            self.setup_owner = None;
             self.pending_pause = None;
         } else if !self.paused && self.engine_running() {
             if self.pending_pause.is_some() {
@@ -299,7 +302,7 @@ impl Controller {
                         }
                         Effect::Refused(reason) => {
                             log!("record: pause -- record_stop not sent ({reason}); pausing now");
-                            if self.cfg.overlay.enabled {
+                            if self.cfg.overlay.shows_notices() {
                                 self.hub.event("session", &shortcut_notice_json("Pausing now", reason, true, false));
                             }
                             crate::supervisor::beep_failure();

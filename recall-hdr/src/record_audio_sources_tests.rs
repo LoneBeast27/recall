@@ -10,13 +10,32 @@ fn ids(list: &[AudioSource]) -> Vec<&str> {
 }
 
 #[test]
-fn a_fresh_install_records_the_game_and_the_default_microphone() {
+fn the_unreadable_profile_fallback_records_the_game_and_default_microphone() {
     let list = default_sources();
     assert_eq!(ids(&list), ["game", "mic"]);
     assert_eq!((list[0].kind.as_str(), list[1].kind.as_str()), ("game", "input"));
     assert!(list.iter().all(|s| s.device.is_empty() && s.enabled && s.gain_db == 0.0), "Windows defaults, no names");
     assert_eq!(RecordingCfg::default().audio_sources, list);
     assert!(validate(&list).is_ok());
+}
+
+#[test]
+fn fresh_profiles_split_playback_only_for_distinct_windows_roles() {
+    let shared = initial_sources(false);
+    let split = initial_sources(true);
+    assert_eq!(ids(&shared), ["mic", "system-output"]);
+    assert_eq!(ids(&split), ["mic", "system-output", "communications-output"]);
+    assert_eq!(&split[..2], shared.as_slice());
+    assert!(split[2].communications && split[2].device.is_empty());
+    assert!(validate(&split).is_ok());
+
+    let mut customized = split.clone();
+    customized[2].icon = "discord".into();
+    let saved: Vec<AudioSource> = serde_json::from_value(serde_json::to_value(&customized).unwrap()).unwrap();
+    assert_eq!(saved, customized);
+    assert!(!changed(&split, &customized));
+    assert!(live_updates(&split, &customized).is_empty());
+    assert_eq!(engine_value(&split), engine_value(&customized));
 }
 
 #[test]

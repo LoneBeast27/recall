@@ -78,6 +78,9 @@ fn change(state: &Mutex<Own>, edit: impl FnOnce(&mut Own), write: fn(&[String]))
 }
 
 fn write_own(paths: &[String]) {
+    if crate::TESTING {
+        return;
+    }
     let Some(library) = super::store::meta_path(std::env::var_os("RECALL_LIBRARY_META"), std::env::var_os("APPDATA")) else { return };
     // Best effort: a lock that cannot be had in 2 s (a stuck process) still lets this write go.
     let _lock = crate::win_fileop::bin_lock::acquire(LOCK, Duration::from_secs(2));

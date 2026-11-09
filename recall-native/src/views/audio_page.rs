@@ -39,10 +39,13 @@ pub type FaderSpan = Rc<Cell<Option<(f32, f32)>>>;
 pub enum StripMenu {
     /// A strip's device or app picker, by source id.
     Device(String),
+    Icon(String),
     /// "+ Add source".
     Add,
     /// "+ Add source" → Application audio.
     AddApp,
+    /// "+ Add source" → Output.
+    AddOutput,
 }
 
 /// Audio page state for the launch.
@@ -170,18 +173,12 @@ impl Root {
         }
     }
 
-    /// "+ Add source" → "Microphone" (`mic`) or "Line-in or capture card". A line-in opens its
-    /// device picker: until a device is picked it follows the mic hotkey (R4-deep-audio-1).
-    pub(crate) fn add_input(&mut self, mic: bool) {
-        match sources::with_new_input(&self.audio_sources(), mic) {
-            Some(list) => {
-                if !mic {
-                    self.settings_ui.audio.menu = list.last().map(|s| StripMenu::Device(s.id.clone()));
-                }
-                self.save_sources(&list);
+    pub(crate) fn set_source_icon(&mut self, id: &str, icon: String) {
+        self.edit_source(id, |source| {
+            if !source.is_primary() {
+                source.icon = icon;
             }
-            None => self.show_toast(ToastKind::Info, "Can't add that source", Some(format!("Up to {} sources, one of them the game.", sources::SOURCES_MAX))),
-        }
+        });
     }
 
     /// Point an app source at another app; a name that was the old app's follows the new one.
@@ -251,7 +248,12 @@ impl Root {
 
     pub(crate) fn add_source(&mut self, kind: Kind, exe: &str, name: &str) {
         match sources::with_new(&self.audio_sources(), kind, exe, name) {
-            Some(list) => self.save_sources(&list),
+            Some(list) => {
+                if matches!(kind, Kind::Input | Kind::Output) {
+                    self.settings_ui.audio.menu = list.last().map(|s| StripMenu::Device(s.id.clone()));
+                }
+                self.save_sources(&list);
+            }
             None => self.show_toast(ToastKind::Info, "Can't add that source", Some(format!("Up to {} sources, one of them the game.", sources::SOURCES_MAX))),
         }
     }
@@ -335,6 +337,12 @@ impl Root {
             return;
         }
         self.settings_ui.audio.loaded = true;
+        if crate::TESTING {
+            let (devices, apps) = super::setup_testing::audio_lists();
+            self.settings_ui.audio.devices = Some(devices);
+            self.settings_ui.audio.apps = Some(apps);
+            return;
+        }
         let saved: Vec<String> = self.audio_sources().into_iter().filter(|s| s.kind == Kind::App).map(|s| s.exe).collect();
         cx.spawn(async move |this, cx| {
             let (devices, apps) = cx
@@ -353,6 +361,9 @@ impl Root {
     /// Start or replace the meters and the MIDI monitor so they follow the settings: one meter
     /// per source, and the chosen MIDI input ("" = none).
     pub(crate) fn sync_audio_monitors(&mut self) {
+        if crate::TESTING {
+            return;
+        }
         let game_pid = self.snap.session.as_ref().and_then(|s| s.target.as_ref()).map(|t| t.pid).filter(|&pid| pid != 0);
         let specs: Vec<_> = self.audio_sources().iter().map(|s| spec_for(s, game_pid)).collect();
         if self.meters.as_ref().is_none_or(|m| m.specs() != specs.as_slice()) {
@@ -372,8 +383,17 @@ impl Root {
         let mut body = Vec::new();
         body.extend(self.offline_banner(cx));
         body.push(self.sources_card(window, cx));
-        body.push(self.midi_card(cx));
-        self.page_shell("Audio", "Sources and MIDI", body)
+        if !crate::TESTING {
+            body.push(self.midi_card(cx));
+        }
+        let subtitle = if crate::TESTING {
+            "Try adding or routing demo audio sources."
+        } else if self.setup.is_some() {
+            "New profiles use your Windows microphone and playback defaults. A separate communications device gets its own track."
+        } else {
+            "Sources and MIDI"
+        };
+        self.page_shell("Audio", subtitle, body)
     }
 
     fn sources_card(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {

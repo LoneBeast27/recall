@@ -52,6 +52,8 @@ pub struct SourceSpec {
     /// Ignored for other kinds.
     #[serde(default)]
     pub mic_mute: Option<bool>,
+    #[serde(default)]
+    pub communications: bool,
 }
 
 impl SourceSpec {
@@ -63,6 +65,10 @@ impl SourceSpec {
             "app" => Kind::App,
             _ => return None,
         })
+    }
+
+    pub fn uses_communications(&self) -> bool {
+        self.kind() == Some(Kind::Output) && self.device.trim().is_empty() && self.communications
     }
 
     /// Linear factor for `gain_db`, clamped to the controller's -60..+12 dB.
@@ -78,7 +84,7 @@ pub fn gain_of(gain_db: f32) -> f32 {
 }
 
 fn spec(id: &str, kind: &str, name: &str, device: &str, exe: &str) -> SourceSpec {
-    SourceSpec { device_id: String::new(), id: id.into(), kind: kind.into(), device: device.trim().into(), exe: exe.trim().into(), name: name.into(), gain_db: 0.0, mic_mute: None }
+    SourceSpec { communications: false, device_id: String::new(), id: id.into(), kind: kind.into(), device: device.trim().into(), exe: exe.trim().into(), name: name.into(), gain_db: 0.0, mic_mute: None }
 }
 
 /// The sources in `json`, with every bad entry skipped and logged: one broken entry (a

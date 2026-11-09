@@ -131,7 +131,7 @@ impl LibraryState {
             entries: vec![],
             records: vec![],
             by_path: HashMap::new(),
-            store: MetaStore::load(),
+            store: if crate::TESTING { MetaStore::default() } else { MetaStore::load() },
             filter: Filter::default(),
             sort: SortOrder::Newest,
             groups: vec![],

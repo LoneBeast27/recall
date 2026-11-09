@@ -395,7 +395,9 @@ pub(crate) fn load_checked(path: &std::path::Path) -> Result<Config, String> {
     crate::durable::sweep_temps(path, now);
     // Missing file is the normal first-run case -- don't shout about it.
     let Some(bytes) = io::read_retrying(path, &std::thread::sleep).map_err(|e| e.to_string())? else {
-        return Ok(Config::default());
+        let mut cfg = Config::default();
+        cfg.recording.audio_sources = crate::record_audio_sources::initialize_sources();
+        return Ok(cfg);
     };
     Ok(load_bytes(path, &bytes, now))
 }

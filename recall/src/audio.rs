@@ -156,7 +156,7 @@ impl TrackRing {
     /// A 48 kHz stereo game-audio ring of `buffer_secs` fed by the test (no WASAPI).
     #[cfg(test)]
     pub(crate) fn for_test(name: &'static str, buffer_secs: u32) -> Self {
-        let spec = SourceSpec { device_id: String::new(), id: name.into(), kind: "game".into(), device: String::new(), exe: String::new(), name: name.into(), gain_db: 0.0, mic_mute: None };
+        let spec = SourceSpec { communications: false, device_id: String::new(), id: name.into(), kind: "game".into(), device: String::new(), exe: String::new(), name: name.into(), gain_db: 0.0, mic_mute: None };
         Self::for_source(&spec, "game", buffer_secs, String::new())
     }
 
@@ -423,11 +423,12 @@ fn start_track(spec: &SourceSpec, buffer_secs: u32, target: Option<LoopbackTarge
     let ring = Arc::new(TrackRing::for_source(spec, source_of(spec.kind(), target.is_some()), buffer_secs, String::new()));
     let direction = if spec.kind() == Some(Kind::Input) { Direction::Capture } else { Direction::Render };
     let device = (spec.device.clone(), spec.device_id.clone());
+    let communications = spec.uses_communications();
     let tring = ring.clone();
     let (init_tx, init_rx) = std::sync::mpsc::channel::<Result<(), String>>();
     std::thread::Builder::new()
         .name(format!("recall-audio-{}", ring.name))
-        .spawn(move || capture_thread(direction, device, tring, init_tx, target))
+        .spawn(move || capture_thread(direction, device, tring, init_tx, target, communications))
         .map_err(|e| e.to_string())?;
 
     match init_rx.recv_timeout(std::time::Duration::from_secs(5)) {
@@ -446,6 +447,7 @@ fn capture_thread(
     ring: Arc<TrackRing>,
     init_tx: std::sync::mpsc::Sender<Result<(), String>>,
     target: Option<LoopbackTarget>,
+    communications: bool,
 ) {
     // Per-thread COM init; already-initialized is fine.
     let _ = wasapi::initialize_mta();
@@ -456,7 +458,7 @@ fn capture_thread(
     // Device and default changes arrive as notices (no polling on this thread); without them
     // the track still reopens on its backoff.
     // A process-loopback track follows its process, not an endpoint: no notices.
-    let notices = capture_loop::notices_for(target.is_some(), || notify::EndpointNotices::register(direction));
+    let notices = capture_loop::notices_for(target.is_some(), || notify::EndpointNotices::register(direction, communications));
     if let Some(Err(e)) = &notices {
         eprintln!("[recall] audio track '{}': no device notices ({e}); reopening on the backoff only", ring.name);
     }
@@ -465,7 +467,7 @@ fn capture_thread(
         _ => &capture_loop::NoNotices,
     };
     // The saved id as the controller sends it now (`set_source device_id`, P1-B).
-    let open = |_reopen| stream::open_stream(&direction, (&device, &ring.live.saved_id()), &ring, &target);
+    let open = |_reopen| stream::open_stream(&direction, (&device, &ring.live.saved_id()), &ring, &target, communications);
     capture_loop::capture_loop(&ring, &device, wait_absent, open, init_tx, &mut clock, notices);
 }
 

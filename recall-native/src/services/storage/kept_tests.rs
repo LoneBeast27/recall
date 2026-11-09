@@ -85,6 +85,8 @@ fn a_clip_already_cached_drops_the_kept_copy() {
     let (dest, kept) = clip(&clips, &kept_dir, "G__d.mp4", 3000, 3000);
     let first = adopt_in(&root, &dest, &kept, BUDGET).unwrap();
     std::fs::write(&kept, vec![7u8; 3000]).unwrap();
+    let saved = dest.metadata().unwrap().modified().unwrap();
+    std::fs::File::options().write(true).open(&kept).unwrap().set_modified(saved).unwrap();
     mark(&kept);
     assert_eq!(adopt_in(&root, &dest, &kept, BUDGET).unwrap(), first);
     assert!(!kept.exists() && first.exists());

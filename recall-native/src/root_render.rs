@@ -10,13 +10,22 @@ impl Render for Root {
             self.first_render_marked = true;
             crate::startup::mark("first render");
         }
-        self.settle_focus(window);
-        self.trace_ui(window);
-        crate::trace::clear_targets(window);
-        self.schedule_frames(window, cx);
-        let body = match self.route {
-            Route::Editor => self.render_editor(window, cx),
-            _ => self.render_shell(window, cx),
+        let body = if crate::TESTING {
+            self.settle_fps_input(window);
+            if self.setup.is_some() {
+                self.render_setup(window, cx)
+            } else {
+                self.render_testing_library(cx)
+            }
+        } else {
+            self.settle_focus(window);
+            self.trace_ui(window);
+            crate::trace::clear_targets(window);
+            self.schedule_frames(window, cx);
+            match self.route {
+                Route::Editor => self.render_editor(window, cx),
+                _ => self.render_shell(window, cx),
+            }
         };
         let backdrop = self.backdrop();
         let mut root = div();
@@ -31,7 +40,22 @@ impl Render for Root {
             .key_context("Recall")
             .track_focus(&self.focus)
             .capture_any_mouse_down(cx.listener(Self::on_press))
-            .on_key_down(cx.listener(Self::on_key))
+            .on_key_down(cx.listener(|this, event: &gpui::KeyDownEvent, window, cx| {
+                if crate::TESTING {
+                    if this.audio_drag_key(event, window, cx)
+                        || this.audio_name_key(event, None, window)
+                        || this.fps_input_key(event, None, window)
+                    {
+                        cx.notify();
+                    } else if event.keystroke.key == "escape" {
+                        this.settings_ui.audio.menu = None;
+                        this.settings_ui.quality_preview = None;
+                        cx.notify();
+                    }
+                } else {
+                    this.on_key(event, window, cx);
+                }
+            }))
             .flex_1()
             .min_h_0()
             .flex()

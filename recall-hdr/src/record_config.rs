@@ -71,7 +71,7 @@ pub struct RecordingCfg {
     pub record_hotkey: String,
     /// Show / hide the performance-stats island (`overlay.stats`; "" = off).
     pub stats_hotkey: String,
-    /// Turns the overlay's notices (`overlay.enabled`) on / off ("" = off).
+    /// Shows or hides the whole overlay ("" = off).
     pub overlay_hotkey: String,
     /// Starts / saves the island editor: drag the island where it goes for
     /// the game in front, kept for Dynamic placement ("" = off).
@@ -206,10 +206,12 @@ pub const STATS_STYLES: [&str; 1] = ["minimal"];
 
 /// `[overlay]` -- the controller-owned `recall-overlay.exe` (Recall Island):
 /// notices (`enabled`) and the performance-stats island (`stats`). The
-/// process runs while either is on.
+/// process runs while either is on and the overlay is visible.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverlayCfg {
+    /// The overlay shortcut hides both surfaces without changing their preferences.
+    pub hidden: bool,
     /// Show notices (saves, bookmarks, recording changes).
     pub enabled: bool,
     pub corner: String,
@@ -223,7 +225,7 @@ pub struct OverlayCfg {
 
 impl Default for OverlayCfg {
     fn default() -> Self {
-        OverlayCfg { enabled: false, corner: "dynamic".into(), corner_version: CORNER_VERSION, stats: false, stats_style: "minimal".into() }
+        OverlayCfg { hidden: false, enabled: false, corner: "dynamic".into(), corner_version: CORNER_VERSION, stats: false, stats_style: "minimal".into() }
     }
 }
 
@@ -244,9 +246,17 @@ impl OverlayCfg {
 }
 
 impl OverlayCfg {
-    /// The overlay process is wanted for notices or stats.
+    pub fn shows_notices(&self) -> bool {
+        self.enabled && !self.hidden
+    }
+
+    pub fn shows_stats(&self) -> bool {
+        self.stats && !self.hidden
+    }
+
+    /// The overlay process is wanted for visible notices or stats.
     pub fn wants_process(&self) -> bool {
-        self.enabled || self.stats
+        self.shows_notices() || self.shows_stats()
     }
 }
 

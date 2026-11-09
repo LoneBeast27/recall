@@ -32,25 +32,27 @@ pub fn run(instance: Option<crate::instance::Guard>) -> Result<(), String> {
         let bounds = Bounds::centered(None, size(px(width), px(height)), cx);
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
-            titlebar: Some(TitlebarOptions { title: Some("Recall".into()), appears_transparent: true, traffic_light_position: None }),
+            titlebar: Some(TitlebarOptions { title: Some(crate::APP_NAME.into()), appears_transparent: true, traffic_light_position: None }),
             window_min_size: Some(size(px(1000.), px(660.))),
             // GPUI's DirectComposition tree is drawn ABOVE child HWNDs; its swap chain keeps
             // per-pixel alpha, so Root paints everything except a hole over the native video.
             // Opaque only stops the desktop showing through not-yet-painted areas while resizing.
             window_background: WindowBackgroundAppearance::Opaque,
-            app_id: Some("Recall".into()),
+            app_id: Some(crate::APP_NAME.into()),
             focus: !background,
             show: !background,
             ..Default::default()
         };
         let opened = crate::startup::span("open_window", || cx.open_window(options, |window, cx| {
             let root = cx.new(|cx| Root::new(window, cx));
-            Root::start_polling(root.clone(), window, cx);
-            let closing = root.downgrade();
-            window.on_window_should_close(cx, move |_, cx| {
-                let _ = closing.update(cx, |root, _| root.flush_on_close());
-                true
-            });
+            if !crate::TESTING {
+                Root::start_polling(root.clone(), window, cx);
+                let closing = root.downgrade();
+                window.on_window_should_close(cx, move |_, cx| {
+                    let _ = closing.update(cx, |root, _| root.flush_on_close());
+                    true
+                });
+            }
             root
         }));
         let handle = match opened {
@@ -72,6 +74,9 @@ pub fn run(instance: Option<crate::instance::Guard>) -> Result<(), String> {
     // The window is gone: a new start may open one now. Helpers end with this process, so a
     // running export finishes first.
     drop(instance);
+    if crate::TESTING {
+        return Ok(());
+    }
     // The running export, then the edit writes still queued (the sidecar flush on leaving the
     // editor or closing) reach the disk before the helpers go.
     if !crate::worker::finish_writes(crate::backend::wait_for_export, std::time::Duration::from_secs(30)) {

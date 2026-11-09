@@ -35,6 +35,7 @@ pub enum MeterTarget {
     Device { render: bool, device: String, device_id: String },
     /// The largest running process tree of an exe.
     App { exe: String },
+    Communications,
     /// One process tree (the recorded game).
     Process { pid: u32 },
 }
@@ -55,6 +56,7 @@ pub fn spec_for(source: &Source, game_pid: Option<u32>) -> MeterSpec {
             Some(pid) => MeterTarget::Process { pid },
             None => MeterTarget::Device { render: true, device, device_id },
         },
+        Kind::Output if source.uses_communications() => MeterTarget::Communications,
         Kind::Output => MeterTarget::Device { render: true, device, device_id },
         Kind::Input => MeterTarget::Device { render: false, device, device_id },
         Kind::App => MeterTarget::App { exe: source.exe.trim().to_owned() },
@@ -317,6 +319,7 @@ struct Opened {
     pid: Option<u32>,
     /// A source with no device: the direction and the Windows default's id it opened.
     default: Option<(Direction, String)>,
+    communications: bool,
 }
 
 /// How a capture ended without an error.
@@ -332,15 +335,22 @@ fn open(target: &MeterTarget) -> Result<Option<Opened>, String> {
     let text = |error: wasapi::WasapiError| error.to_string();
     let process = |pid: u32| -> Result<Option<Opened>, String> {
         // Process-loopback clients have no device period; 20 ms as the recorder uses.
-        Ok(Some(Opened { client: AudioClient::new_application_loopback_client(pid, true).map_err(text)?, period: 200_000, pid: Some(pid), default: None }))
+        Ok(Some(Opened { client: AudioClient::new_application_loopback_client(pid, true).map_err(text)?, period: 200_000, pid: Some(pid), default: None, communications: false }))
     };
     match target {
+        MeterTarget::Communications => {
+            let Some(device) = super::audio_devices::communications_audio::distinct_device() else { return Ok(None) };
+            let id = device.get_id().map_err(text)?;
+            let client = device.get_iaudioclient().map_err(text)?;
+            let (_, period) = client.get_device_period().map_err(text)?;
+            Ok(Some(Opened { client, period, pid: None, default: Some((Direction::Render, id)), communications: true }))
+        }
         MeterTarget::Device { render, device, device_id } => {
             let direction = if *render { Direction::Render } else { Direction::Capture };
             let Some((device, default)) = find_device(&direction, (device, device_id))? else { return Ok(None) };
             let client = device.get_iaudioclient().map_err(text)?;
             let (_, min_period) = client.get_device_period().map_err(text)?;
-            Ok(Some(Opened { client, period: min_period, pid: None, default: default.map(|id| (direction, id)) }))
+            Ok(Some(Opened { client, period: min_period, pid: None, default: default.map(|id| (direction, id)), communications: false }))
         }
         MeterTarget::App { exe } => match crate::services::process_tree::tree_root(exe) {
             Some(pid) => process(pid),
@@ -373,20 +383,20 @@ const DEFAULT_CHECK: Duration = Duration::from_secs(1);
 /// Streams levels at ~10 Hz until asked to stop, a captured process exits, or the Windows
 /// default it meters moves; device loss surfaces as an error from the read or the padding probe.
 fn capture(shared: &Shared, index: usize, opened: Opened) -> Result<Ended, String> {
-    let Opened { mut client, period, pid, default } = opened;
+    let Opened { mut client, period, pid, default, communications } = opened;
     let format = WaveFormat::new(32, 32, &SampleType::Float, 48000, 2, None);
     client
         .initialize_client(&format, &Direction::Capture, &StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: period })
         .map_err(|error| error.to_string())?;
     let event = Event(client.set_get_eventhandle().map_err(|error| error.to_string())?);
-    let ended = levels_until_end(shared, index, &mut client, &event, pid, default.as_ref());
+    let ended = levels_until_end(shared, index, &mut client, &event, pid, default.as_ref(), communications);
     drop(client);
     drop(event);
     ended
 }
 
 /// The capture loop of [`capture`].
-fn levels_until_end(shared: &Shared, index: usize, client: &mut AudioClient, event: &Event, pid: Option<u32>, default: Option<&(Direction, String)>) -> Result<Ended, String> {
+fn levels_until_end(shared: &Shared, index: usize, client: &mut AudioClient, event: &Event, pid: Option<u32>, default: Option<&(Direction, String)>, communications: bool) -> Result<Ended, String> {
     let text = |error: wasapi::WasapiError| error.to_string();
     let process = pid.and_then(crate::services::process_tree::Waitable::open);
     let capture = client.get_audiocaptureclient().map_err(text)?;
@@ -398,7 +408,12 @@ fn levels_until_end(shared: &Shared, index: usize, client: &mut AudioClient, eve
     while !shared.stopped() {
         if let Some((direction, opened)) = default.filter(|_| checked.elapsed() >= DEFAULT_CHECK) {
             checked = Instant::now();
-            if default_moved(Some(opened), default_id(direction).as_deref()) {
+            let current = if communications {
+                super::audio_devices::communications_audio::distinct_device().and_then(|device| device.get_id().ok())
+            } else {
+                default_id(direction)
+            };
+            if (communications && current.is_none()) || default_moved(Some(opened), current.as_deref()) {
                 let _ = client.stop_stream();
                 return Ok(Ended::DefaultMoved);
             }

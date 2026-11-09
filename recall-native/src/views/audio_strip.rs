@@ -2,7 +2,7 @@
 //! the device or app picker, a tall meter with the gain fader beside it, then record-in-clips
 //! and remove. A row of dots on top drags the strip to another place (the list order is the
 //! clips' track order). The last tile adds a source. Levels shown include the source's gain.
-use gpui::{AnyElement, Context, CursorStyle, Div, FontWeight, ImageSource, MouseButton, MouseDownEvent, SharedString, Window, canvas, div, img, prelude::*, px, relative};
+use gpui::{AnyElement, Context, CursorStyle, Div, FontWeight, MouseButton, MouseDownEvent, SharedString, Window, canvas, div, prelude::*, px, relative};
 
 use crate::{
     root::Root,
@@ -20,10 +20,12 @@ pub const STRIP_W: f32 = 156.;
 /// Space between strips in the row.
 pub const STRIP_GAP: f32 = 12.;
 const METER_H: f32 = 176.;
+const READOUT_W: f32 = 52.;
+const READOUT_GAP: f32 = 12.;
 /// Level zones like a broadcast mixer: green to -20 dB, yellow to -9 dB, red above.
 const ZONES: [(f32, f32, u32); 3] = [(-60., -20., theme::ACTIVE), (-20., -9., theme::WARNING), (-9., 0., theme::ERROR)];
 
-fn kind_icon(kind: Kind) -> Icon {
+pub(crate) fn kind_icon(kind: Kind) -> Icon {
     match kind {
         Kind::Game => Icon::Gamepad,
         Kind::Output => Icon::Volume,
@@ -51,6 +53,29 @@ fn meter(rms_db: f32, hold_db: f32, live: bool) -> Div {
         }
     }
     bar
+}
+
+/// A fixed-width readout keeps each control centered as its value changes.
+fn meter_column(control: impl IntoElement, label: String, color: u32) -> Div {
+    div()
+        .w(px(READOUT_W))
+        .flex_none()
+        .flex()
+        .flex_col()
+        .items_center()
+        .gap(px(6.))
+        .child(control)
+        .child(
+            div()
+                .w_full()
+                .text_center()
+                .whitespace_nowrap()
+                .text_size(px(11.))
+                .line_height(px(16.))
+                .font_family(theme::mono())
+                .text_color(c(color))
+                .child(label),
+        )
 }
 
 /// A strip on the move: what the pointer carries, drawn as a small card under it.
@@ -93,6 +118,9 @@ impl Root {
         if let Some((_, why)) = audio.mute_refused.as_ref().filter(|(id, _)| *id == source.id) {
             return Some((*why).to_owned());
         }
+        if source.uses_communications() && audio.devices.as_ref().is_some_and(|lists| lists.communications_output.is_none()) {
+            return Some("No separate communications output".into());
+        }
         crate::services::audio_sources::strip_note(source, audio.devices.as_ref())
     }
 
@@ -104,6 +132,8 @@ impl Root {
                 .as_ref()
                 .and_then(|a| a.apps.iter().find(|p| p.exe.eq_ignore_ascii_case(&source.exe)))
                 .map_or_else(|| format!("{} (not running)", crate::services::audio_apps::exe_stem(&source.exe)), |p| p.label.clone()),
+            Kind::Output if source.uses_communications() => page.devices.as_ref().and_then(|lists| lists.communications_output.clone())
+                .unwrap_or_else(|| "Windows communications default".into()),
             kind => {
                 let lists = page.devices.as_ref();
                 let default = match lists {
@@ -129,9 +159,25 @@ impl Root {
         let (rms, hold) = (shown_level(with_gain(rms, gain), session_muted, mutes), shown_level(with_gain(hold, gain), session_muted, mutes));
         let level_text = if !live { "—".to_owned() } else if muted { "Muted".to_owned() } else if rms <= -89.0 { "-∞".to_owned() } else { format!("{:.0} dB", rms) };
 
-        let type_icon: AnyElement = match self.settings_ui.audio.icon(&source.exe).filter(|_| source.kind == Kind::App) {
-            Some(image) => img(ImageSource::Render(image)).size(px(16.)).flex_none().into_any_element(),
-            None => icon(kind_icon(source.kind), 16., theme::MUTED).into_any_element(),
+        let glyph = self.source_icon(source);
+        let type_icon = if source.is_primary() {
+            glyph
+        } else {
+            let icon_menu = StripMenu::Icon(id.clone());
+            let open = self.settings_ui.audio.menu.as_ref() == Some(&icon_menu);
+            div().relative().flex_none()
+                .child(ui::button(SharedString::from(format!("strip-icon-{id}")), Variant::Ghost)
+                    .h(px(24.)).px(px(3.)).gap(px(2.))
+                    .child(crate::trace::target(format!("strip-icon-{id}")))
+                    .child(glyph)
+                    .child(icon(Icon::ChevronDown, 9., theme::TERTIARY))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        let menu = &mut this.settings_ui.audio.menu;
+                        *menu = if menu.as_ref() == Some(&icon_menu) { None } else { Some(icon_menu.clone()) };
+                        cx.notify();
+                    })))
+                .when(open, |d| d.child(self.source_icon_menu(source, cx)))
+                .into_any_element()
         };
         let name: AnyElement = if renaming {
             match self.settings_ui.audio.name_field.as_ref() {
@@ -204,10 +250,10 @@ impl Root {
 
         let body = div()
             .flex()
-            .gap(px(10.))
+            .gap(px(READOUT_GAP))
             .justify_center()
             .when(!source.enabled, |d| d.opacity(0.4))
-            .child(div().flex().flex_col().items_center().gap(px(6.)).child(meter(rms, hold, live && source.enabled)).child(div().text_size(px(11.)).font_family(theme::mono()).text_color(c(theme::TERTIARY)).child(level_text)))
+            .child(meter_column(meter(rms, hold, live && source.enabled), level_text, theme::TERTIARY))
             .child(self.render_fader(&id, gain, cx));
 
         let (toggle_id, remove_id) = (id.clone(), id.clone());
@@ -266,7 +312,7 @@ impl Root {
     /// The gain fader: drag to set (-60..+12 dB), double-click for 0 dB; saved on release.
     /// Only the press is on the track: moves and the release are followed window-wide
     /// (`Root::drag_watch`), so a drag that leaves the track keeps going and ends anywhere.
-    fn render_fader(&mut self, id: &str, gain: f32, cx: &mut Context<Self>) -> AnyElement {
+    fn render_fader(&mut self, id: &str, gain: f32, cx: &mut Context<Self>) -> Div {
         let span = self.settings_ui.audio.span(id);
         let fraction = sources::fader_fraction(gain);
         let unity = sources::fader_fraction(0.0);
@@ -291,14 +337,7 @@ impl Root {
                 }
                 cx.notify();
             }));
-        div()
-            .flex()
-            .flex_col()
-            .items_center()
-            .gap(px(6.))
-            .child(track)
-            .child(div().text_size(px(11.)).font_family(theme::mono()).text_color(c(theme::MUTED)).child(sources::gain_label(gain)))
-            .into_any_element()
+        meter_column(track, sources::gain_label(gain), theme::MUTED)
     }
 
     /// The dragged fader follows the pointer's height, wherever the pointer is.
@@ -319,7 +358,7 @@ impl Root {
 
     pub(crate) fn render_add_tile(&mut self, list: &[Source], cx: &mut Context<Self>) -> AnyElement {
         let page = &self.settings_ui.audio;
-        let open = !page.add_in_header && matches!(page.menu, Some(StripMenu::Add | StripMenu::AddApp));
+        let open = !page.add_in_header && matches!(page.menu, Some(StripMenu::Add | StripMenu::AddApp | StripMenu::AddOutput));
         // A column so the tile stretches to the strips' full height.
         div()
             .relative()
@@ -359,10 +398,10 @@ impl Root {
     /// The Sources card's own "Add source" button (the tile can be scrolled out of view).
     pub(crate) fn render_add_button(&mut self, list: &[Source], cx: &mut Context<Self>) -> AnyElement {
         let page = &self.settings_ui.audio;
-        let open = page.add_in_header && matches!(page.menu, Some(StripMenu::Add | StripMenu::AddApp));
+        let open = page.add_in_header && matches!(page.menu, Some(StripMenu::Add | StripMenu::AddApp | StripMenu::AddOutput));
         div()
             .relative()
-            .child(ui::button("add-source-header", Variant::Ghost).border_1().border_color(c(theme::BORDER)).child(icon(Icon::Plus, 13., theme::TEXT)).child("Add source").on_click(cx.listener(|this, _, _, cx| {
+            .child(ui::button("add-source-header", Variant::Ghost).border_1().border_color(c(theme::BORDER)).child(icon(Icon::Plus, 13., theme::TEXT)).child("Add source").child(crate::trace::target("add-source-header".to_owned())).on_click(cx.listener(|this, _, _, cx| {
                 let page = &mut this.settings_ui.audio;
                 page.menu = if page.menu.is_some() { None } else { Some(StripMenu::Add) };
                 page.add_in_header = true;

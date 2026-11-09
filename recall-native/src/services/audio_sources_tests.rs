@@ -24,7 +24,7 @@ fn new_sources_get_unused_ids_and_names_and_one_game_at_most() {
     assert_eq!(addable(&sources), [Kind::Input, Kind::Output, Kind::App], "a game is already there");
     let more = with_new(&sources, Kind::Input, "", "").unwrap();
     let added = more.last().unwrap();
-    assert_eq!((added.id.as_str(), added.name.as_str(), added.device.as_str(), added.enabled), ("input-1", "Microphone 2", "", true));
+    assert_eq!((added.id.as_str(), added.name.as_str(), added.device.as_str(), added.enabled), ("input-1", "Input", "", true));
     let app = with_new(&more, Kind::App, " player.exe ", "Media Player\n").unwrap();
     assert_eq!((app[3].exe.as_str(), app[3].name.as_str(), app[3].id.as_str()), ("player.exe", "Media Player", "app-1"));
     assert!(with_new(&sources, Kind::App, " ", "x").is_none(), "an app source needs an exe");
@@ -126,7 +126,7 @@ fn an_input_keeps_its_mic_mute_flag() {
 
 /// 2026-11-07 audit R3-deep-audio-1: an input without a flag (a config written before it, the
 /// default mic) is muted by Alt+M whatever Windows calls its endpoint, as before the flag. Only
-/// "+ Add source" writes a flag: "Microphone" mutes, "Line-in or capture card" keeps its sound.
+/// A custom input follows Alt+M by default. Its saved device and mute flag control line-in behavior.
 #[test]
 fn an_old_input_is_muted_by_the_mic_hotkey_whatever_its_form_factor() {
     use crate::services::audio_devices::DeviceLists;
@@ -147,13 +147,13 @@ fn an_old_input_is_muted_by_the_mic_hotkey_whatever_its_form_factor() {
     assert!(!windows_says_line_level(&mic_endpoint, Some(&lists)), "a microphone endpoint: no hint");
     assert!(!windows_says_line_level(&old[0], None), "lists not read yet: no hint");
     let base = from_config(Some(&json!([{"id": "game", "kind": "game", "name": "Game"}])));
-    let line = with_new_input(&base, false).unwrap();
-    let added = line.last().unwrap();
-    assert_eq!((added.kind, added.mic_mute, added.name.as_str()), (Kind::Input, Some(false), "Line-in"));
+    let input = with_new(&base, Kind::Input, "", "").unwrap();
+    assert_eq!(input.last().unwrap().name, "Input");
+    let added = &Source { mic_mute: Some(false), ..input.last().unwrap().clone() };
     assert!(mutes(added, None), "a new line-in on the Windows default follows the mic hotkey (R4-deep-audio-1)");
     assert!(!mutes(&Source { device: "Line (Box One)".into(), device_id: "{one}".into(), ..added.clone() }, None), "a named line-in with its id keeps its sound");
     assert!(mutes(&Source { device: "Line (Box One)".into(), ..added.clone() }, None), "no id saved: follows the mic hotkey (R6-deep-audio-1)");
-    let mic = with_new_input(&base, true).unwrap();
+    let mic = with_new(&base, Kind::Input, "", "").unwrap();
     assert!(mutes(mic.last().unwrap(), None), "a new microphone is muted");
 }
 
@@ -163,7 +163,7 @@ fn an_old_input_is_muted_by_the_mic_hotkey_whatever_its_form_factor() {
 #[test]
 fn a_line_in_follows_the_mic_hotkey_until_it_names_a_device() {
     let base = from_config(Some(&json!([{"id": "game", "kind": "game", "name": "Game"}])));
-    let added = with_new_input(&base, false).unwrap().pop().unwrap();
+    let added = Source { mic_mute: Some(false), ..with_new(&base, Kind::Input, "", "").unwrap().pop().unwrap() };
     assert_eq!((added.mic_mute, added.device.as_str()), (Some(false), ""));
     assert!(mutes(&added, None), "a new line-in on the Windows default is muted by the mic hotkey");
     assert!(line_in_on_default(&added), "the strip notes it");
@@ -183,7 +183,7 @@ fn a_line_in_follows_the_mic_hotkey_until_it_names_a_device() {
 fn the_strip_notes_a_line_in_on_the_windows_default() {
     use crate::services::audio_devices::DeviceLists;
     let base = from_config(Some(&json!([{"id": "game", "kind": "game", "name": "Game"}])));
-    let added = with_new_input(&base, false).unwrap().pop().unwrap();
+    let added = Source { mic_mute: Some(false), ..with_new(&base, Kind::Input, "", "").unwrap().pop().unwrap() };
     assert_eq!(strip_note(&added, None).as_deref(), Some(LINE_IN_ON_DEFAULT));
     let named = Source { device: "Line (Box One)".into(), device_id: "{one}".into(), ..added.clone() };
     let at = |inputs: &[&str]| DeviceLists { inputs: inputs.iter().map(|n| (*n).to_owned()).collect(), input_ids: vec!["{one}".into(); inputs.len()], ..DeviceLists::default() };
@@ -194,7 +194,7 @@ fn the_strip_notes_a_line_in_on_the_windows_default() {
     assert_eq!(strip_note(&named, Some(&at(&["Line (Box One)"; 3]))).as_deref(), Some("3 devices share this name"));
     let renumbered = Source { device: "3- Line (Box One)".into(), ..named.clone() };
     assert_eq!(strip_note(&renumbered, Some(&at(&["4- Line (Box One)", "5- Line (Box One)"]))).as_deref(), Some("2 devices match this name"), "both connected: ambiguous, not missing");
-    let mic = with_new_input(&base, true).unwrap().pop().unwrap();
+    let mic = with_new(&base, Kind::Input, "", "").unwrap().pop().unwrap();
     assert_eq!(strip_note(&mic, None), None, "a microphone on the default: no note");
 }
 
@@ -209,7 +209,7 @@ fn the_line_level_hint_names_only_line_level_endpoints() {
         default_input_is_line: Some(false),
         ..DeviceLists::default()
     };
-    let at = |device: &str| Source { id: "in-1".into(), kind: Kind::Input, device: device.into(), device_id: String::new(), exe: String::new(), name: "In".into(), enabled: true, gain_db: 0.0, mic_mute: None };
+    let at = |device: &str| Source { communications: false, icon: String::new(), id: "in-1".into(), kind: Kind::Input, device: device.into(), device_id: String::new(), exe: String::new(), name: "In".into(), enabled: true, gain_db: 0.0, mic_mute: None };
     assert!(windows_says_line_level(&at("Line (Box One)"), Some(&lists)), "line-level: hint");
     assert!(!windows_says_line_level(&at("Mic (Box Two)"), Some(&lists)), "a microphone: no hint");
     assert!(!windows_says_line_level(&at("Virtual (Box Three)"), Some(&lists)), "an unknown form factor is not called line-level");

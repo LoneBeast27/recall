@@ -15,7 +15,7 @@ fn lists(inputs: &[(&str, &str)]) -> DeviceLists {
 }
 
 fn input(device: &str, device_id: &str, mic: bool) -> Source {
-    Source { id: "in-1".into(), kind: Kind::Input, device: device.into(), device_id: device_id.into(), exe: String::new(), name: "In".into(), enabled: true, gain_db: 0.0, mic_mute: Some(mic) }
+    Source { communications: false, icon: String::new(), id: "in-1".into(), kind: Kind::Input, device: device.into(), device_id: device_id.into(), exe: String::new(), name: "In".into(), enabled: true, gain_db: 0.0, mic_mute: Some(mic) }
 }
 
 const RENUMBERED: [(&str, &str); 3] = [("4- Line (Box)", "{sub}"), ("Speakers (Box)", "{spk}"), ("5- Line (Box)", "{own}")];

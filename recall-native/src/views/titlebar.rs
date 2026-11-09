@@ -42,7 +42,8 @@ impl Root {
                     .items_center()
                     .justify_center()
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::title_down))
-                    .child(self.render_status_pill(cx)),
+                    .when(crate::TESTING, |d| d.child(div().text_color(c(theme::MUTED)).child("Preview · Demo data")))
+                    .when(!crate::TESTING, |d| d.child(self.render_status_pill(cx))),
             )
             .child(
                 div()
@@ -53,9 +54,10 @@ impl Root {
                     .justify_end()
                     .gap(px(8.))
                     .child(div().flex_1().h_full().on_mouse_down(MouseButton::Left, cx.listener(Self::title_down)))
-                    .child(self.render_stats_button(cx))
-                    .child(self.render_record_button(cx))
-                    .child(self.render_save_button(cx))
+                    .when(!crate::TESTING, |d| d
+                        .child(self.render_stats_button(cx))
+                        .child(self.render_record_button(cx))
+                        .child(self.render_save_button(cx)))
                     .child(
                         div()
                             .flex()
@@ -74,7 +76,7 @@ impl Root {
                 .font_family(theme::display())
                 .text_size(px(16.))
                 .font_weight(FontWeight::BOLD)
-                .child("Recall")
+                .child(crate::APP_NAME)
                 .into_any_element();
         }
         let path = self.ed.info.as_ref().map(|i| i.path.clone()).or_else(|| self.ed.loading_path.clone());
@@ -169,6 +171,12 @@ impl Root {
             return pill
                 .child(ui::dot(theme::WARNING, 7.))
                 .child(div().text_color(c(theme::MUTED)).child("Recorder not responding"))
+                .into_any_element();
+        }
+        if self.setup.is_some() && session.is_some_and(|s| s.state == "paused") {
+            return pill
+                .child(ui::dot(theme::DISABLED, 7.))
+                .child(div().text_color(c(theme::MUTED)).child("Recording paused for setup"))
                 .into_any_element();
         }
         if session.is_some_and(|s| s.state == "paused") {

@@ -135,12 +135,12 @@ pub fn status_json(i: &StatusInputs) -> Value {
         "long_recording": i.long_recording,
         "pending_restart": i.pending_restart,
         "overlay": {
-            "enabled": cfg.overlay.enabled,
+            "enabled": cfg.overlay.shows_notices(),
             "corner": cfg.overlay.corner,
             "running": i.overlay_running,
             "stats_style": cfg.overlay.stats_style,
         },
-        "overlay_stats": cfg.overlay.stats,
+        "overlay_stats": cfg.overlay.shows_stats(),
         "fps_source": i.fps_source,
         "autostart": cfg.startup.autostart,
         "storage": {"cap_gb": cfg.storage.cap_gb},
@@ -268,7 +268,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.overlay.stats = true;
         let snap = hdr();
-        let v = status_json(&StatusInputs {
+        let input = StatusInputs {
             wanted: &EngineTarget::Off,
             health: EngineHealth::Stopped,
             encoder: None,
@@ -283,11 +283,18 @@ mod tests {
             pending_restart: false,
             drain: None,
             hotkey_problems: &[],
-        });
+        };
+        let v = status_json(&input);
         assert_eq!(v["overlay_stats"], true);
         assert_eq!(v["fps_source"], "no_permission");
         assert!(v.get("rtss").is_none(), "the RTSS field is gone");
         assert_eq!(v["overlay"], json!({"enabled":false,"corner":"dynamic","running":true,"stats_style":"minimal"}));
+        let mut hidden = cfg.clone();
+        hidden.overlay.hidden = true;
+        hidden.overlay.enabled = true;
+        let v = status_json(&StatusInputs { cfg: &hidden, overlay_running: false, ..input });
+        assert_eq!(v["overlay_stats"], false);
+        assert_eq!(v["overlay"]["enabled"], false);
     }
 
     #[test]

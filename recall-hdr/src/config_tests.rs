@@ -148,7 +148,10 @@ fn bad_toml_backs_up_and_returns_default() {
 fn missing_file_returns_default_silently() {
     let dir = temp_dir("missing");
     let path = dir.join("does-not-exist.toml");
-    let cfg = load_from(&path);
+    let mut cfg = load_from(&path);
+    let fresh = std::mem::take(&mut cfg.recording.audio_sources);
+    assert_eq!(fresh.iter().take(2).map(|s| s.id.as_str()).collect::<Vec<_>>(), ["mic", "system-output"]);
+    cfg.recording.audio_sources = crate::record_audio_sources::default_sources();
     assert_eq!(cfg, Config::default());
     // No .bad file for a simple missing config.
     assert!(!crate::durable::bad_path(&path, std::time::SystemTime::now()).exists());

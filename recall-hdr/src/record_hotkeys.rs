@@ -58,7 +58,7 @@ pub enum HotkeyAction {
     Record,
     /// Show / hide the performance-stats island.
     Stats,
-    /// Turn the overlay's notices (`overlay.enabled`) on or off.
+    /// Show or hide the whole overlay.
     Overlay,
     /// Start (or save) the island editor for the game in front.
     Editor,

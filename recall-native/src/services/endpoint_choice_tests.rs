@@ -36,7 +36,7 @@ fn an_input_meters_the_unsure_sibling_and_an_output_waits() {
 }
 
 fn source(kind: Kind, device: &str, device_id: &str) -> Source {
-    Source { id: "s".into(), kind, device: device.into(), device_id: device_id.into(), exe: String::new(), name: "S".into(), enabled: true, gain_db: 0.0, mic_mute: None }
+    Source { communications: false, icon: String::new(), id: "s".into(), kind, device: device.into(), device_id: device_id.into(), exe: String::new(), name: "S".into(), enabled: true, gain_db: 0.0, mic_mute: None }
 }
 
 #[test]

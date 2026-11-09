@@ -10,7 +10,7 @@ using System.Windows.Forms;
 
 namespace Recall.Setup
 {
-    internal sealed class SetupWindow : Form
+    internal sealed partial class SetupWindow : Form
     {
         private static readonly Color Canvas = Color.FromArgb(10, 10, 10);
         private static readonly Color Raised = Color.FromArgb(18, 18, 18);
@@ -24,6 +24,8 @@ namespace Recall.Setup
         private readonly SetupFonts fonts = new SetupFonts();
         private readonly bool preview = !SetupPackage.HasPayload;
         private readonly Panel options;
+        private readonly Panel quick;
+        private readonly Button mode;
         private readonly Panel result;
         private readonly Label title;
         private readonly Label description;
@@ -40,6 +42,7 @@ namespace Recall.Setup
         private readonly Rail rail;
         private bool busy;
         private bool complete;
+        private string installedPath;
         private int step;
         private bool failed;
 
@@ -64,7 +67,7 @@ namespace Recall.Setup
             AddLabel(rail, "Recall", 49, 26, 106, 35, fonts.Mark, Ink);
             for (int i = 0; i < steps.Length; i++)
             {
-                steps[i] = AddLabel(rail, new[] { "Options", "Install", "Finish" }[i],
+                steps[i] = AddLabel(rail, new[] { "Setup", "Install", "Finish" }[i],
                     50, 127 + i * 43, 112, 24, fonts.Body, Muted);
             }
             AddLabel(rail, "Game clips,\non your PC.", 24, 416, 140, 48, fonts.Body, Muted);
@@ -100,13 +103,19 @@ namespace Recall.Setup
             browse.Click += (sender, args) => BrowseFolder();
             destinationNote = AddLabel(options, "Choose an SSD for Recall and its preview cache.",
                 0, 75, 525, 27, fonts.Body, Muted);
-            shortcut = AddOption("Add a Start menu shortcut", 113, true, 2);
-            launch = AddOption("Start the recorder after setup", 149, false, 3);
-            frameTiming = AddOption("Enable game FPS measurements", 185, false, 4);
-            AddLabel(options, "Windows may request permission for FPS measurements.",
+            bool existing = File.Exists(Path.Combine(destination.Text, "recall-native.exe"));
+            string startMenu = Environment.GetFolderPath(Environment.SpecialFolder.Programs);
+            shortcut = AddOption("Add or refresh a Start menu shortcut", 113,
+                !existing || File.Exists(Path.Combine(startMenu, "Recall.lnk")), 2);
+            launch = AddOption("Start recording after guided setup", 149, false, 3);
+            frameTiming = AddOption("Set up game detection and FPS", 185, false, 4);
+            AddLabel(options, "Windows may ask for permission. It takes effect after sign-in.",
                 26, 216, 499, 22, fonts.Body, Muted);
             AddLabel(options, "Game recording requires an NVIDIA GPU with NVENC.",
                 0, 254, 525, 24, fonts.Body, Muted);
+
+            quick = CreateQuickSetup();
+            Controls.Add(quick);
 
             result = new Panel { Bounds = options.Bounds, Visible = false };
             Controls.Add(result);
@@ -118,17 +127,19 @@ namespace Recall.Setup
             };
             result.Controls.Add(progress);
 
-            cancel = AddButton(this, "Cancel", 490, 441, 90, 34, false, 1);
-            primary = AddButton(this, preview ? "Preview install" : "Install Recall", 592, 441, 143, 34, true, 2);
+            mode = AddButton(this, "Advanced", 210, 441, 124, 34, false, 1);
+            cancel = AddButton(this, "Cancel", 490, 441, 90, 34, false, 2);
+            primary = AddButton(this, preview ? "Preview install" : "Install Recall", 592, 441, 143, 34, true, 3);
             options.TabIndex = 0;
             result.TabStop = false;
+            mode.Click += (sender, args) => ShowOptions(!advanced);
             cancel.Click += (sender, args) => Close();
             primary.Click += async (sender, args) => await Install();
             CancelButton = cancel;
             AcceptButton = primary;
             destination.TextChanged += (sender, args) => UpdateDestination();
             FormClosing += (sender, args) => { if (busy) args.Cancel = true; };
-            UpdateDestination();
+            ShowOptions(false);
             SetStep(0);
         }
 
@@ -154,8 +165,9 @@ namespace Recall.Setup
 
         protected override void Dispose(bool disposing)
         {
+            bool releaseFonts = disposing && !IsDisposed;
             base.Dispose(disposing);
-            if (disposing) fonts.Dispose();
+            if (releaseFonts) fonts.Dispose();
         }
 
         private CheckBox AddOption(string text, int y, bool initial, int tab)
@@ -196,10 +208,12 @@ namespace Recall.Setup
 
         private void UpdateDestination()
         {
-            bool valid = SetupPackage.InstallPath(destination.Text) != null;
+            string path = SetupPackage.InstallPath(destination.Text);
+            bool valid = path != null;
             primary.Enabled = valid && !busy;
             destinationNote.Text = valid ? "Choose an SSD for Recall and its preview cache." : "Enter a folder on a local drive, such as C:\\Apps\\Recall.";
             destinationNote.ForeColor = valid ? Muted : Error;
+            RefreshQuickSummary(path);
         }
 
         private void BrowseFolder()
@@ -233,14 +247,27 @@ namespace Recall.Setup
             }
             if (complete)
             {
+                try
+                {
+                    if (!preview) SetupPackage.OpenGuidedSetup(installedPath, launch.Checked);
+                }
+                catch (Exception error)
+                {
+                    resultTitle.Text = "Recall setup could not open";
+                    resultTitle.ForeColor = Error;
+                    resultDetail.Text = error.GetBaseException().Message;
+                    return;
+                }
                 Close();
                 return;
             }
             var path = SetupPackage.InstallPath(destination.Text);
             if (path == null || busy) return;
-            var selection = new InstallOptions(path, shortcut.Checked, launch.Checked, frameTiming.Checked);
+            var selection = new InstallOptions(path, shortcut.Checked, false, frameTiming.Checked);
             busy = true;
             options.Hide();
+            quick.Hide();
+            mode.Hide();
             result.Show();
             var progress = result.Controls["progress"];
             progress.Show();
@@ -257,13 +284,12 @@ namespace Recall.Setup
                 string warning = null;
                 if (preview) await Task.Delay(450);
                 else warning = await Task.Run(() => SetupPackage.Install(selection));
-                complete = true;
                 SetStep(2);
                 title.Text = preview ? "Preview complete" : "Recall is ready";
                 description.Text = preview ? "Your selections were rehearsed." : "Installation completed successfully.";
                 resultTitle.Text = preview ? "Selected install location" : "Installed to";
                 resultTitle.ForeColor = Mint;
-                resultDetail.Text = selection.Path;
+                resultDetail.Text = selection.Path + "\n\nContinue to set up storage, audio, and recording quality.";
                 if (warning != null)
                 {
                     description.Text = "Recall was installed. Review the setup note below.";
@@ -271,8 +297,10 @@ namespace Recall.Setup
                     resultTitle.ForeColor = Ink;
                     resultDetail.Text = warning;
                 }
-                primary.Text = "Done";
+                installedPath = selection.Path;
+                primary.Text = preview ? "Done" : "Continue setup";
                 cancel.Hide();
+                complete = true;
             }
             catch (Exception error)
             {
@@ -296,13 +324,9 @@ namespace Recall.Setup
         private void Retry()
         {
             failed = false;
-            title.Text = "Install Recall";
-            description.Text = "Set up your game recorder, clip library, and editor.";
-            primary.Text = "Install Recall";
             result.Hide();
-            options.Show();
             SetStep(0);
-            UpdateDestination();
+            ShowOptions(advanced);
         }
 
 #if PREVIEW
@@ -316,23 +340,48 @@ namespace Recall.Setup
             ActiveControl = primary;
             Show();
             Application.DoEvents();
+            SaveFrame(path);
+            ShowOptions(true);
+            Application.DoEvents();
+            SaveFrame(Path.ChangeExtension(path, ".advanced.png"));
+            ShowOptions(false);
+            destination.Text = originalPath;
+        }
+
+        private void SaveFrame(string path)
+        {
             using (var bitmap = new Bitmap(ClientSize.Width, ClientSize.Height))
             {
                 DrawToBitmap(bitmap, new Rectangle(Point.Empty, ClientSize));
                 bitmap.Save(path, ImageFormat.Png);
             }
-            destination.Text = originalPath;
         }
 
         public void CheckPreview()
         {
-            if (!preview || !shortcut.Checked || launch.Checked || frameTiming.Checked)
-                throw new InvalidOperationException("Preview defaults changed");
+            if (!preview || advanced || !quick.Visible || launch.Checked || frameTiming.Checked)
+                throw new InvalidOperationException("Quick setup defaults changed");
+            if (!quickBrowse.Visible || !quickBrowse.Enabled || quickPath.Text != SetupPackage.InstallPath(destination.Text))
+                throw new InvalidOperationException("Quick setup does not show the current folder choice");
+            quickLaunch.Value = true;
+            quickTiming.Value = true;
+            mode.PerformClick();
+            if (!advanced || !options.Visible || !launch.Checked || !frameTiming.Checked)
+                throw new InvalidOperationException("Advanced lost the Yes choices");
+            launch.Checked = false;
+            frameTiming.Checked = false;
+            shortcut.Checked = false;
             string folder = destination.Text;
             destination.Text = "relative";
             if (primary.Enabled) throw new InvalidOperationException("Invalid path did not disable setup");
+            mode.PerformClick();
+            if (primary.Enabled || quickLaunch.Value || quickTiming.Value || !quickBrowse.Visible || !quickBrowse.Enabled)
+                throw new InvalidOperationException("Quick setup lost the Advanced choices or the folder picker");
+            mode.PerformClick();
             destination.Text = folder;
-            if (!primary.Enabled) throw new InvalidOperationException("Valid path did not enable setup");
+            if (!primary.Enabled || shortcut.Checked)
+                throw new InvalidOperationException("Advanced lost the selected shortcut preference");
+            mode.PerformClick();
             primary.PerformClick();
             if (!busy || step != 1 || primary.Enabled) throw new InvalidOperationException("Install state was not engaged");
             var deadline = DateTime.UtcNow.AddSeconds(3);

@@ -84,6 +84,8 @@ pub enum Field {
 
 pub struct Root {
     pub route: Route,
+    pub(crate) setup: Option<crate::views::setup_runner::SetupRunner>,
+    setup_resume_pending: bool,
     pub focus: FocusHandle,
     pub workers: Workers,
     pub daemon: DaemonClient,
@@ -178,6 +180,9 @@ impl Root {
     /// The polling task holds this view for a tick after the window goes, and the app can quit
     /// first, so `drop` alone may never run.
     pub fn flush_on_close(&mut self) {
+        if crate::TESTING {
+            return;
+        }
         // Queued behind the edit writes already sent; app.rs waits for them before exiting.
         self.ed.flush_on_close(|job| self.workers.job(job));
         // A fader still held is saved, as a release would.
@@ -202,10 +207,20 @@ impl Root {
     pub fn send(&mut self, command: DaemonCommand) {
         if !self.daemon.send(command) {
             self.show_toast(ToastKind::Bad, "Recorder is off", Some("Start it from the status pill".into()));
+        } else if crate::TESTING {
+            self.snap = self.daemon.snapshot();
         }
     }
 
     pub fn go(&mut self, route: Route) {
+        if crate::TESTING {
+            if route != Route::Audio {
+                self.commit_dragged_fader();
+                self.settings_ui.audio.closed();
+            }
+            self.route = route;
+            return;
+        }
         let route = reachable(route, hdr_page_enabled());
         self.lib.finish_rename(&self.rename.value, crate::library_state::RenameEnd::Away);
         self.lib.confirm_delete = false;
@@ -256,6 +271,9 @@ impl Root {
     }
 
     pub fn open_clip(&mut self, path: String) {
+        if crate::TESTING {
+            return;
+        }
         crate::services::storage::record_interaction(crate::services::storage::Interaction::Opened(path.clone()));
         self.lib.mark_played(&path);
         // The recorder's storage cap never recycles the clip open here.

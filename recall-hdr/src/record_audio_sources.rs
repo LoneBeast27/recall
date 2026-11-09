@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::record_config::RecordingCfg;
 
+#[path = "../../recall/src/communications_audio.rs"]
+mod communications_audio;
+
 pub const SOURCES_ENV: &str = "RECALL_AUDIO_SOURCES";
 /// Most sources a recording carries (each is one capture stream and one track).
 pub const SOURCES_MAX: usize = 8;
@@ -51,11 +54,17 @@ pub struct AudioSource {
     /// endpoint's Windows form factor never decides. Saved only when the strip says.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mic_mute: Option<bool>,
+    /// An unpinned output follows Windows' communications role.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub communications: bool,
+    /// The audio strip's selected glyph. Cosmetic and never sent to the engine.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub icon: String,
 }
 
 impl Default for AudioSource {
     fn default() -> Self {
-        AudioSource { id: String::new(), kind: "input".into(), device: String::new(), device_id: String::new(), exe: String::new(), name: String::new(), enabled: true, gain_db: 0.0, mic_mute: None }
+        AudioSource { id: String::new(), kind: "input".into(), device: String::new(), device_id: String::new(), exe: String::new(), name: String::new(), enabled: true, gain_db: 0.0, mic_mute: None, communications: false, icon: String::new() }
     }
 }
 
@@ -63,9 +72,27 @@ fn source(id: &str, kind: &str, name: &str) -> AudioSource {
     AudioSource { id: id.into(), kind: kind.into(), name: name.into(), ..AudioSource::default() }
 }
 
-/// A fresh install: the game and the Windows default microphone.
+/// Fallback settings when a profile could not be read. Keep game-only capture there.
 pub fn default_sources() -> Vec<AudioSource> {
     vec![source("game", "game", "Game"), source("mic", "input", "Microphone")]
+}
+
+/// The first profile follows Windows playback rather than a particular game process.
+fn initial_sources(split: bool) -> Vec<AudioSource> {
+    let mut list = vec![source("mic", "input", "Microphone"), source("system-output", "output", "System output")];
+    if split {
+        list.push(AudioSource { communications: true, ..source("communications-output", "output", "Communications output") });
+    }
+    list
+}
+
+pub fn initialize_sources() -> Vec<AudioSource> {
+    let joined = wasapi::initialize_mta().is_ok();
+    let split = communications_audio::distinct_device().is_some();
+    if joined {
+        wasapi::deinitialize();
+    }
+    initial_sources(split)
 }
 
 /// The list a config without `audio_sources` stands for, from its old keys.
@@ -148,7 +175,7 @@ pub fn validate(list: &[AudioSource]) -> Result<(), String> {
 fn engine_list(list: &[AudioSource]) -> Vec<AudioSource> {
     list.iter()
         .filter(|s| s.enabled)
-        .map(|s| AudioSource { id: s.id.trim().into(), device: s.device.trim().into(), device_id: s.device_id.trim().into(), exe: s.exe.trim().into(), name: s.name.trim().into(), ..s.clone() })
+        .map(|s| AudioSource { id: s.id.trim().into(), device: s.device.trim().into(), device_id: s.device_id.trim().into(), exe: s.exe.trim().into(), name: s.name.trim().into(), icon: String::new(), ..s.clone() })
         .collect()
 }
 

@@ -70,6 +70,14 @@ namespace Recall.Setup
             }
         }
 
+        public static void OpenGuidedSetup(string path, bool recordAfter)
+        {
+            var app = Path.Combine(path, "recall-native.exe");
+            var info = new ProcessStartInfo(app) { WorkingDirectory = path, UseShellExecute = false };
+            info.EnvironmentVariables["RECALL_SETUP"] = recordAfter ? "record" : "paused";
+            using (Process.Start(info)) { }
+        }
+
         private static string RunInstaller(string package, InstallOptions options)
         {
             var script = Path.Combine(package, "scripts", "install.ps1");

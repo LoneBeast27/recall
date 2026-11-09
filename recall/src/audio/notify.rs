@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 use windows::core::{implement, PCWSTR};
 use windows::Win32::Foundation::PROPERTYKEY;
 use windows::Win32::Media::Audio::{
-    eCapture, eConsole, eRender, EDataFlow, ERole, IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator,
+    eCapture, eCommunications, eConsole, eRender, EDataFlow, ERole, IMMDeviceEnumerator, IMMNotificationClient, IMMNotificationClient_Impl, MMDeviceEnumerator,
     DEVICE_STATE,
 };
 use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_ALL};
@@ -19,6 +19,7 @@ use super::capture_loop::Notices;
 /// What the callbacks saw since the capture loop last looked.
 struct Shared {
     flow: EDataFlow,
+    communications: bool,
     devices_changed: AtomicBool,
     default: Mutex<Option<String>>,
 }
@@ -51,8 +52,16 @@ impl IMMNotificationClient_Impl for Client_Impl {
     /// The role `wasapi::get_default_device` opens (console), for this track's direction. A
     /// null id (no default left) is not recorded: the stream reports its lost device itself.
     fn OnDefaultDeviceChanged(&self, flow: EDataFlow, role: ERole, id: &PCWSTR) -> windows::core::Result<()> {
-        if flow == self.0.flow && role == eConsole && !id.is_null() {
-            if let (Ok(id), Ok(mut last)) = (unsafe { id.to_string() }, self.0.default.lock()) {
+        if flow == self.0.flow {
+            let changed = if self.0.communications && (role == eConsole || role == eCommunications) {
+                // Recheck both roles, including convergence on the same device.
+                Some(String::new())
+            } else if !self.0.communications && role == eConsole && !id.is_null() {
+                unsafe { id.to_string() }.ok()
+            } else {
+                None
+            };
+            if let (Some(id), Ok(mut last)) = (changed, self.0.default.lock()) {
                 *last = Some(id);
             }
         }
@@ -73,12 +82,12 @@ pub(super) struct EndpointNotices {
 }
 
 impl EndpointNotices {
-    pub(super) fn register(direction: wasapi::Direction) -> Result<Self, String> {
+    pub(super) fn register(direction: wasapi::Direction, communications: bool) -> Result<Self, String> {
         let flow = match direction {
             wasapi::Direction::Render => eRender,
             wasapi::Direction::Capture => eCapture,
         };
-        let shared = Arc::new(Shared { flow, devices_changed: AtomicBool::new(false), default: Mutex::new(None) });
+        let shared = Arc::new(Shared { flow, communications, devices_changed: AtomicBool::new(false), default: Mutex::new(None) });
         let enumerator: IMMDeviceEnumerator = unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(|e| format!("device enumerator: {e}"))?;
         let client: IMMNotificationClient = Client(shared.clone()).into();
         unsafe { enumerator.RegisterEndpointNotificationCallback(&client) }.map_err(|e| format!("register device notices: {e}"))?;
