@@ -36,6 +36,7 @@
 
 mod cues;
 mod app;
+mod awake_clock;
 mod clamp;
 mod config;
 mod config_repairs;

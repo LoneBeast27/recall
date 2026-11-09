@@ -83,6 +83,8 @@ mod thread_qos;
 mod source;
 mod stdin_commands;
 mod stop_capture;
+#[path = "../../recall-hdr/src/awake_clock.rs"]
+mod awake_clock;
 #[cfg(test)]
 mod test_alloc;
 
