@@ -359,6 +359,12 @@ Get-ChildItem (Join-Path $ffmpegRoot 'bin\*.dll') | ForEach-Object {
 }
 Copy-Item (Join-Path $ffmpegRoot 'bin\ffmpeg.exe'), (Join-Path $ffmpegRoot 'bin\ffprobe.exe') $stage -Force
 Copy-Item (Join-Path $repo 'recall-native\assets\recall.ico') $stage -Force
+foreach ($notice in 'LICENSE','NOTICE.md','recall-native\assets\fonts\FONTS-LICENSE.txt','recall-native\assets\icons\LICENSE-lucide.txt','recall-native\assets\icons\brand-attribution.txt') {
+  Copy-Item -LiteralPath (Join-Path $repo $notice) -Destination $stage -Force
+}
+$ffmpegLicense = Join-Path $repo 'FFMPEG-LICENSE.txt'
+if (!(Test-Path -LiteralPath $ffmpegLicense -PathType Leaf)) { $ffmpegLicense = Join-Path $ffmpegRoot 'LICENSE' }
+Copy-Item -LiteralPath $ffmpegLicense -Destination (Join-Path $stage 'FFMPEG-LICENSE.txt') -Force
 
 # 5. Install (the cache folder is never touched).
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null

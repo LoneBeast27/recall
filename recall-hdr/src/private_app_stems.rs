@@ -67,7 +67,7 @@ pub(crate) const PRIVATE_APP_STEMS: &[&str] = &[
     "plex",
     "plex htpc",
     "stremio",          // Stremio 4.x
-    "stremio-shell-ng", // (seen) C:\Users\rohan\AppData\Local\Programs\Stremio, mpv inside
+    "stremio-shell-ng", // (seen) %LOCALAPPDATA%\Programs\Stremio, mpv inside
     "jellyfinmediaplayer",
     "vlc",
     "mpv",

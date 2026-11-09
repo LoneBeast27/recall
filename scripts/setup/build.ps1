@@ -17,7 +17,6 @@ if (!$OutputPath) {
 }
 $OutputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
 New-Item -ItemType Directory -Force -Path (Split-Path $OutputPath -Parent) | Out-Null
-if (!(Test-Path -LiteralPath $nice -PathType Leaf)) { throw "Build wrapper not found at $nice" }
 
 function Copy-PackageFile([string]$Source, [string]$Destination) {
     if (!(Test-Path -LiteralPath $Source -PathType Leaf)) { throw "Missing setup input: $Source" }
@@ -77,13 +76,27 @@ try {
         foreach ($name in $runtime) {
             Copy-PackageFile (Join-Path $source $name) (Join-Path $package "tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared\bin\$name")
         }
-        Copy-PackageFile (Join-Path $assets 'recall.ico') (Join-Path $package 'recall-native\assets\recall.ico')
+        foreach ($name in 'LICENSE', 'NOTICE.md') {
+            Copy-PackageFile (Join-Path $repo $name) (Join-Path $package $name)
+        }
+        foreach ($name in 'recall.ico','fonts\FONTS-LICENSE.txt','icons\LICENSE-lucide.txt','icons\brand-attribution.txt') {
+            Copy-PackageFile (Join-Path $assets $name) (Join-Path $package "recall-native\assets\$name")
+        }
+        $ffmpegLicense = Join-Path $source 'FFMPEG-LICENSE.txt'
+        if (!(Test-Path -LiteralPath $ffmpegLicense -PathType Leaf)) {
+            $ffmpegLicense = Join-Path $repo 'tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared\LICENSE'
+        }
+        Copy-PackageFile $ffmpegLicense (Join-Path $package 'FFMPEG-LICENSE.txt')
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $zip = Join-Path $work 'payload.zip'
         [IO.Compression.ZipFile]::CreateFromDirectory($package, $zip)
         $arguments += "/resource:$zip,Recall.Payload.zip"
     }
-    & powershell -NoProfile -File $nice $compiler @arguments
+    if (Test-Path -LiteralPath $nice -PathType Leaf) {
+        & powershell -NoProfile -File $nice $compiler @arguments
+    } else {
+        & $compiler @arguments
+    }
     if ($LASTEXITCODE -ne 0) { throw "Recall Setup compilation failed ($LASTEXITCODE)" }
     Get-Item -LiteralPath $OutputPath
 } finally {
