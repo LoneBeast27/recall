@@ -226,7 +226,7 @@ fn capture_events(ring: &TrackRing, client: &mut wasapi::AudioClient, event: &Ev
         if event.0.wait_for_event(100).is_ok() && capture.read_from_device_to_deque(&mut raw).is_ok() && raw.len() >= block {
             super::packet::decode(&mut raw, block, &mut samples);
             level.live_into(started.elapsed(), &samples, channels, &mut leveled);
-            ring.push_capture(&leveled, false);
+            ring.push_app_capture(&leveled); // a retired app source stores silence at once
             last_sound = Instant::now();
         } else if last_sound.elapsed() >= IDLE {
             // No active stream: the app is quiet, so silence up to the clock cuts nothing.
