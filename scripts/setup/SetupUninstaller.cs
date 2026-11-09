@@ -42,6 +42,12 @@ namespace Recall.Setup
         public static int Run(string dir, int parentPid, bool quiet, bool removeCache)
         {
             Action<string> log = line => { };
+            try { return Uninstall(dir, parentPid, quiet, removeCache, ref log); }
+            finally { TempCopy.ScheduleRemoval(log); }
+        }
+
+        private static int Uninstall(string dir, int parentPid, bool quiet, bool removeCache, ref Action<string> log)
+        {
             try
             {
                 var targets = SetupTargets.FromEnvironment();
@@ -210,6 +216,59 @@ namespace Recall.Setup
             }
             if (RunValue.RemoveIfInto(targets, dir)) log("Removed Start with Windows (HKCU\\" + targets.RunKey + ")");
             if (AppsEntry.Remove(targets, dir)) log("Removed the Apps & Features entry (HKCU\\" + targets.UninstallKey + ")");
+        }
+    }
+
+    /// The %TEMP%\Recall-Uninstall-&lt;guid&gt; copy removes itself: when it ends, a hidden cmd.exe
+    /// retries `rmdir` on that one folder for up to a minute (it can't go while this exe runs), and
+    /// the folder is also queued for removal at the next boot when Windows allows it.
+    internal static class TempCopy
+    {
+        public const string Prefix = "Recall-Uninstall-";
+
+        /// Only a folder named Recall-Uninstall-&lt;32 hex&gt; directly inside the temp folder.
+        public static bool IsOurFolder(string folder, string tempRoot)
+        {
+            if (string.IsNullOrEmpty(folder) || string.IsNullOrEmpty(tempRoot)) return false;
+            var parent = Path.GetDirectoryName(folder.TrimEnd('\\'));
+            var name = Path.GetFileName(folder.TrimEnd('\\'));
+            if (parent == null || !parent.TrimEnd('\\').Equals(tempRoot.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase)) return false;
+            if (!name.StartsWith(Prefix, StringComparison.Ordinal) || name.Length != Prefix.Length + 32) return false;
+            foreach (var c in name.Substring(Prefix.Length)) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
+            return true;
+        }
+
+        /// cmd.exe arguments: up to 60 tries, about a second apart, then it gives up.
+        public static string CleanupArguments(string folder)
+        {
+            return "/d /q /c \"for /l %i in (1,1,60) do (rmdir /s /q \"" + folder + "\" 2>nul & if not exist \"" + folder
+                + "\" exit /b 0 & ping -n 2 127.0.0.1 >nul)\"";
+        }
+
+        public static void ScheduleRemoval(Action<string> log)
+        {
+            try
+            {
+                var exe = Assembly.GetExecutingAssembly().Location;
+                var folder = Path.GetDirectoryName(exe);
+                var temp = Path.GetTempPath();
+                if (!IsOurFolder(folder, temp)) return;
+                // Next-boot removal needs administrator rights; a standard user's request is simply refused.
+                Native.MoveFileExW(exe, null, 0x4);    // MOVEFILE_DELAY_UNTIL_REBOOT
+                Native.MoveFileExW(folder, null, 0x4);
+                var cmd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
+                using (Process.Start(new ProcessStartInfo(cmd, CleanupArguments(folder)) {
+                    UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = temp
+                })) { }
+                log("Temporary copy " + folder + " will be removed once this uninstaller exits.");
+            }
+            catch (Exception error) { log("Could not schedule removal of the temporary copy: " + error.Message); }
+        }
+
+        private static class Native
+        {
+            [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode, SetLastError = true)]
+            public static extern bool MoveFileExW(string from, string to, uint flags);
         }
     }
 
