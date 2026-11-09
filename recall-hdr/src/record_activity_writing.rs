@@ -183,7 +183,8 @@ impl EngineActivity {
     /// Saves the engine is still writing: counted, or reported by the engine with
     /// its mark still moving. A restart now aborts them. A save past its cap lets
     /// its queue go (once): restarts go ahead as they did before this hold.
-    pub fn saves_writing(&mut self, now: Awake) -> bool {
+    pub fn saves_writing(&mut self, now: impl super::ActivityNow) -> bool {
+        let now = now.awake();
         self.expire_saves(now);
         let cap = self.hold_cap();
         if self.write.past_cap(now, cap) && !self.write.capped {

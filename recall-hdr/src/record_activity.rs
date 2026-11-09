@@ -125,6 +125,26 @@ impl Default for EngineActivity {
     }
 }
 
+/// A moment the activity's timers read: an awake time; or, for callers written before the awake
+/// clock (fix/deep-overlay-r9's `saves_in_progress` passes `Instant::now()`), an `Instant` that
+/// must be now, read as the awake clock now.
+pub trait ActivityNow {
+    fn awake(self) -> Awake;
+}
+
+impl ActivityNow for Awake {
+    fn awake(self) -> Awake {
+        self
+    }
+}
+
+impl ActivityNow for Instant {
+    fn awake(self) -> Awake {
+        debug_assert!(self.elapsed() < Duration::from_secs(1), "only Instant::now() may stand for the awake clock");
+        crate::awake_clock::awake_now()
+    }
+}
+
 /// An engine event the controller acts on beyond bookkeeping.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Trigger {
