@@ -36,7 +36,8 @@ use windows::Win32::System::Diagnostics::Etw::{
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
 use super::frame_math::{FrameStats, FrameWindow};
-use super::present_events::{classify, FrameMapper, Mapped, ProviderSpec, RawEvent, DXGI, DXGKRNL, PROVIDERS};
+use super::enable_plan::{self, Aimed, Enabler};
+use super::present_events::{classify, FrameMapper, Mapped, ProviderSpec, RawEvent, PROVIDERS};
 
 /// Also named in `recall-hdr/src/frame_timing.rs` (the controller stops it
 /// after killing the overlay).
@@ -143,8 +144,28 @@ pub struct EtwSession {
     trace: Option<PROCESSTRACE_HANDLE>,
     thread: Option<JoinHandle<()>>,
     shared: Arc<Shared>,
-    /// `EVENT_FILTER_TYPE_PID` was accepted (else the callback filters alone).
-    pid_filter: bool,
+    /// How the providers run for the current target (`enable_plan`).
+    aimed: Aimed,
+    /// `RECALL_ETW_NO_PID_FILTER=1` (dev: filtered vs unfiltered CPU A/B).
+    forced_off: bool,
+}
+
+/// `RECALL_ETW_NO_PID_FILTER=1`: never PID-filter (dev A/B only).
+fn pid_filter_forced_off() -> bool {
+    std::env::var("RECALL_ETW_NO_PID_FILTER").as_deref() == Ok("1")
+}
+
+/// The real provider calls for `enable_plan`.
+struct Calls<'a>(&'a EtwSession);
+
+impl Enabler for Calls<'_> {
+    fn enable(&mut self, spec: &ProviderSpec, pid: Option<u32>) -> WIN32_ERROR {
+        self.0.enable(spec, pid)
+    }
+
+    fn disable(&mut self, spec: &ProviderSpec) {
+        self.0.disable(spec);
+    }
 }
 
 impl EtwSession {
@@ -166,43 +187,33 @@ impl EtwSession {
             track: Mutex::new(Track { mapper: FrameMapper::new(pid, ticks_per_sec), window: FrameWindow::new(ticks_per_sec) }),
         });
         // From here on, dropping `session` stops the trace on any error.
+        let forced_off = pid_filter_forced_off();
+        let aimed = Aimed { dxgi: ERROR_SUCCESS, kernel: ERROR_SUCCESS, refused_by: None, filter_ok: !forced_off };
         let mut session =
-            EtwSession { control, guid: p.props.Wnode.Guid, trace: None, thread: None, shared, pid_filter: true };
+            EtwSession { control, guid: p.props.Wnode.Guid, trace: None, thread: None, shared, aimed, forced_off };
         session.enable_providers(pid)?;
         session.consume()?;
         Ok(session)
     }
 
-    /// Follow another process: new filter, fresh numbers.
+    /// Follow another process: new filter (asked filtered again, see
+    /// `enable_plan::retarget`), fresh numbers.
     pub fn retarget(&mut self, pid: u32) {
         self.shared.retarget(pid);
-        if !self.pid_filter {
-            return;
-        }
-        let mut refused = false;
-        for spec in PROVIDERS.iter().filter(|spec| spec.pid_filter) {
-            self.disable(spec);
-            refused |= self.enable(spec, Some(pid)) != ERROR_SUCCESS;
-        }
-        if !refused {
-            return;
-        }
-        // The new game refuses a PID filter (see `enable_providers`): the
-        // user-mode providers go unfiltered from here on.
-        self.pid_filter = false;
-        for spec in PROVIDERS.iter().filter(|spec| spec.pid_filter) {
-            self.disable(spec);
-            let status = self.enable(spec, None);
-            if status != ERROR_SUCCESS {
-                eprintln!("recall-overlay: frame timing re-enable for pid {pid} failed (error {})", status.0);
+        let providers = PROVIDERS;
+        let specs: Vec<&ProviderSpec> = providers.iter().collect();
+        let aimed = enable_plan::retarget(&specs, pid, self.aimed.filter_ok, &mut Calls(self));
+        if let Some(aimed) = aimed {
+            if aimed.dxgi != ERROR_SUCCESS {
+                eprintln!("recall-overlay: frame timing re-enable for pid {pid} failed (error {})", aimed.dxgi.0);
             }
+            self.aimed = Aimed { kernel: self.aimed.kernel, ..aimed };
         }
     }
 
-    /// A game refused the PID filter: the user-mode providers run unfiltered
-    /// and the callback alone picks the target's events.
-    pub fn unfiltered(&self) -> bool {
-        !self.pid_filter
+    /// The trace note's tail: empty while PID-filtered, else why not.
+    pub fn filter_note(&self) -> String {
+        enable_plan::filter_note(&self.aimed, self.forced_off)
     }
 
     pub fn stats(&self) -> FrameStats {
@@ -215,46 +226,16 @@ impl EtwSession {
     }
 
     /// DXGI (every D3D10/11/12 game) or the DxgKrnl fallback (any API) must
-    /// come up; D3D9 is best effort.
-    ///
-    /// A PID-filtered enable that fails, even with `ERROR_ACCESS_DENIED`, is
-    /// retried unfiltered (the callback filters on the pid anyway): Apex
-    /// Legends (Easy Anti-Cheat) refuses the filter with `ERROR_ACCESS_DENIED`
-    /// while the same session enables fine for every other game, so a refused
-    /// filter says nothing about the user's permission. Only an unfiltered
-    /// refusal does.
+    /// come up; D3D9 is best effort. Filter fallbacks: `enable_plan`.
     fn enable_providers(&mut self, pid: u32) -> Result<(), StartError> {
-        let (mut dxgi, mut kernel) = (ERROR_SUCCESS, ERROR_SUCCESS);
-        for spec in &PROVIDERS {
-            let filtered = spec.pid_filter && self.pid_filter;
-            let mut status = self.enable(spec, filtered.then_some(pid));
-            if status != ERROR_SUCCESS && filtered {
-                eprintln!("recall-overlay: PID filter refused (error {}); filtering in the callback", status.0);
-                self.pid_filter = false;
-                status = self.enable(spec, None);
-                // A provider enabled filtered before this one would stay on
-                // this pid after a retarget (which skips an unfiltered
-                // session): re-enable those unfiltered too.
-                for earlier in PROVIDERS.iter().take_while(|earlier| earlier.guid != spec.guid) {
-                    if earlier.pid_filter {
-                        self.disable(earlier);
-                        let again = self.enable(earlier, None);
-                        if earlier.guid == DXGI {
-                            dxgi = again;
-                        }
-                    }
-                }
-            }
-            if status != ERROR_SUCCESS {
-                eprintln!("recall-overlay: provider {:?} not enabled (error {})", spec.guid, status.0);
-            }
-            if spec.guid == DXGI {
-                dxgi = status;
-            } else if spec.guid == DXGKRNL {
-                kernel = status;
-            }
+        let providers = PROVIDERS;
+        let specs: Vec<&ProviderSpec> = providers.iter().collect();
+        let aimed = enable_plan::enable_for(&specs, pid, self.aimed.filter_ok, &mut Calls(self));
+        if let Some(name) = aimed.refused_by {
+            eprintln!("recall-overlay: {name} refused the PID filter for pid {pid}; filtering in the callback");
         }
-        enable_outcome(dxgi, kernel)
+        self.aimed = aimed;
+        enable_plan::outcome(&aimed)
     }
 
     fn enable(&self, spec: &ProviderSpec, pid: Option<u32>) -> WIN32_ERROR {
@@ -337,6 +318,9 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
     let Some(record) = (unsafe { record.as_ref() }) else { return };
     let Some(shared) = (unsafe { (record.UserContext as *const Shared).as_ref() }) else { return };
     let header = &record.EventHeader;
+    if header.ProcessId != shared.target.load(Ordering::Relaxed) {
+        return; // cheapest first: most events are other processes' when unfiltered
+    }
     let payload: &[u8] = if record.UserData.is_null() {
         &[]
     } else {
@@ -345,9 +329,6 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
     let pointer_size = if u32::from(header.Flags) & EVENT_HEADER_FLAG_32_BIT_HEADER != 0 { 4 } else { 8 };
     let event = RawEvent { provider: header.ProviderId, id: header.EventDescriptor.Id, pointer_size, payload };
     let Some(source) = classify(&event) else { return };
-    if header.ProcessId != shared.target.load(Ordering::Relaxed) {
-        return;
-    }
     let mut track = shared.track();
     match track.mapper.map(header.ProcessId, source, header.TimeStamp) {
         Mapped::Ignore => {}
@@ -356,16 +337,6 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
             track.window.clear();
             track.window.push(at);
         }
-    }
-}
-
-/// The session counts frames when DXGI or the DxgKrnl fallback is on. With
-/// neither, a refusal of DXGI (asked unfiltered by then) means no permission.
-fn enable_outcome(dxgi: WIN32_ERROR, kernel: WIN32_ERROR) -> Result<(), StartError> {
-    match (dxgi, kernel) {
-        (ERROR_SUCCESS, _) | (_, ERROR_SUCCESS) => Ok(()),
-        (ERROR_ACCESS_DENIED, _) => Err(StartError::Denied),
-        (other, _) => Err(StartError::Failed(format!("EnableTraceEx2 DXGI: error {}", other.0))),
     }
 }
 
@@ -381,21 +352,3 @@ fn qpc_now() -> i64 {
     now
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use windows::Win32::Foundation::ERROR_INVALID_PARAMETER;
-
-    #[test]
-    fn either_dxgi_or_the_kernel_fallback_is_enough() {
-        assert!(enable_outcome(ERROR_SUCCESS, ERROR_SUCCESS).is_ok());
-        assert!(enable_outcome(ERROR_ACCESS_DENIED, ERROR_SUCCESS).is_ok(), "kernel presents still count");
-        assert!(enable_outcome(ERROR_SUCCESS, ERROR_ACCESS_DENIED).is_ok());
-    }
-
-    #[test]
-    fn only_a_refusal_of_both_is_no_permission() {
-        assert!(matches!(enable_outcome(ERROR_ACCESS_DENIED, ERROR_ACCESS_DENIED), Err(StartError::Denied)));
-        assert!(matches!(enable_outcome(ERROR_INVALID_PARAMETER, ERROR_ACCESS_DENIED), Err(StartError::Failed(_))));
-    }
-}
