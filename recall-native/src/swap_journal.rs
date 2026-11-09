@@ -85,8 +85,7 @@ pub fn recover(dir: &Path) -> Result<bool, String> {
     let journal = dir.join(JOURNAL);
     let Ok(text) = std::fs::read_to_string(&journal) else { return Ok(false) };
     // The same lock Setup holds for its swap: a running swap is never undone under it.
-    let lock = std::fs::OpenOptions::new().write(true).create_new(true).open(dir.join(LOCK));
-    let Ok(lock) = lock else { return Err("Recall Setup is replacing files right now".into()) };
+    let Ok(lock) = take_lock(dir) else { return Err("Recall Setup is replacing files right now".into()) };
     let result = parse(&text).ok_or_else(|| "the swap journal is unreadable".to_string()).and_then(|entries| {
         let failures = roll_back(dir, &entries);
         if failures.is_empty() {
@@ -95,9 +94,24 @@ pub fn recover(dir: &Path) -> Result<bool, String> {
             Err(failures.join("; "))
         }
     });
-    drop(lock);
-    let _ = std::fs::remove_file(dir.join(LOCK));
+    drop(lock); // delete-on-close: the lock file goes with the handle
     result.map(|()| true)
+}
+
+/// Setup's swap lock: an exclusive handle on `.install-swap-lock`, not the file's existence, so a
+/// lock file a power cut left behind opens again; a held one fails with a sharing violation.
+fn take_lock(dir: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const GENERIC_WRITE: u32 = 0x4000_0000;
+    const DELETE: u32 = 0x0001_0000;
+    const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .access_mode(GENERIC_WRITE | DELETE)
+        .share_mode(0)
+        .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+        .open(dir.join(LOCK))
 }
 
 /// The folder that holds the running program.
@@ -164,5 +178,23 @@ mod tests {
         assert_eq!(std::fs::read_to_string(dir.join("a.exe")).unwrap(), "old a.exe");
         std::fs::write(dir.join(JOURNAL), "garbage").unwrap();
         assert!(recover(dir).is_err(), "an unreadable journal refuses");
+    }
+
+    #[test]
+    fn a_lock_file_a_power_cut_left_does_not_block_and_a_held_one_does() {
+        let d = folder();
+        let (dir, old) = (d.path(), d.path().join(".old"));
+        std::fs::create_dir_all(&old).unwrap();
+        std::fs::rename(dir.join("a.exe"), old.join("a.exe")).unwrap();
+        std::fs::write(dir.join("a.exe"), "new a.exe").unwrap();
+        std::fs::write(dir.join(JOURNAL), format!("{HEADER}\nm a.exe\nn1 a.exe\n")).unwrap();
+        {
+            let _held = take_lock(dir).unwrap();
+            assert!(recover(dir).is_err(), "Setup holds it: never undone under a running swap");
+        }
+        std::fs::write(dir.join(LOCK), "").unwrap(); // left by a power cut
+        assert_eq!(recover(dir), Ok(true));
+        assert_eq!(std::fs::read_to_string(dir.join("a.exe")).unwrap(), "old a.exe");
+        assert!(!dir.join(LOCK).exists(), "the lock file goes with the handle");
     }
 }

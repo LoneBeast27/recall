@@ -213,3 +213,11 @@ fn the_marker_parses_with_and_without_a_start_time() {
     assert_eq!(parse_marker(b"4242 1 2"), None);
     assert!(process_start(std::process::id()).is_some(), "our own start time reads");
 }
+
+#[test]
+fn an_unfinished_update_says_to_run_setup_first() {
+    let text = refuse_text("recall-native.exe: access denied");
+    assert!(text.contains("Run Recall Setup again"), "{text}");
+    assert!(text.find("Run Recall Setup again") < text.find("Releases page"), "Setup first, the download after");
+    assert!(text.contains(crate::repair::RELEASES_URL) && !text.contains("Restart Windows"));
+}

@@ -87,7 +87,9 @@ namespace Recall.Setup
         {
             try
             {
-                return new FileStream(Path.Combine(dir, ".install-swap-lock"), FileMode.CreateNew, FileAccess.Write,
+                // The lock is the exclusive handle, not the file: a lock file a power cut left behind
+                // opens again (and goes when this handle closes); a held one is a sharing violation.
+                return new FileStream(Path.Combine(dir, ".install-swap-lock"), FileMode.OpenOrCreate, FileAccess.Write,
                     FileShare.None, 4096, FileOptions.DeleteOnClose);
             }
             catch (IOException) { return null; }
