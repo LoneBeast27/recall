@@ -3,13 +3,9 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "recall-saver-{tag}-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// `%TEMP%\recall-saver-<tag>-<uuid>`, removed when the guard drops, also on a panic.
+fn temp_dir(tag: &str) -> crate::encoder::test_scratch::Scratch {
+    crate::encoder::test_scratch::scratch("recall-saver", tag)
 }
 
 /// A job whose video the injected mux never reads.
