@@ -22,7 +22,7 @@ Protocol v2 (one-shot masks, below) replaces the continuous rhythm.
 - Per-trial instrument gate: a trial counts only if `set_hdr_state` appears in
   recall-hdr.log within 4s (catches inert pins — see confounds).
 - Rig: `{flicker,flipper,run-trials}.ps1` (a local rig outside this repo); evidence in
-  `trials-log.txt` (00:53–00:55 IST run: 6/6 VALID, phases 161–254ms).
+  `trials-log.txt` (a 3-minute run: 6/6 VALID, phases 161–254ms).
 
 ## Confounds burned into the rig (do not relearn)
 
