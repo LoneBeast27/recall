@@ -45,6 +45,8 @@ mod refusal;
 mod stdin;
 #[path = "supervisor_locate.rs"]
 mod locate;
+#[path = "supervisor_sources.rs"]
+mod sources;
 
 use std::path::PathBuf;
 #[cfg(test)]
@@ -192,6 +194,12 @@ impl Supervisor {
         self.shared.set_mute_and_send(muted)
     }
 
+    /// The audio sources (`record_audio_sources::engine_value`) every later spawn starts with,
+    /// a crash respawn included (`supervisor_sources.rs`). Set on every change of the list.
+    pub fn set_spawn_sources(&self, value: &str) {
+        self.shared.spawn_sources.set(value);
+    }
+
     /// The last engine `hello` and `status` lines (raw JSON), for late joiners.
     pub fn cached_engine_events(&self) -> Vec<String> {
         let cache = self.shared.cache.lock().unwrap_or_else(|p| p.into_inner());
@@ -284,6 +292,8 @@ struct Shared {
     spawn_count: AtomicU32,
     /// The mic mute each spawn starts with, over the spec's (`supervisor_mute.rs`).
     spawn_mute: mute::SpawnMute,
+    /// The audio sources each spawn starts with, over the spec's (`supervisor_sources.rs`).
+    spawn_sources: sources::SpawnSources,
     cache: Mutex<EngineCache>,
     /// Control-pipe hub: engine protocol lines are re-broadcast to hub clients.
     hub: Mutex<Option<Arc<crate::control::PipeHub>>>,
@@ -335,6 +345,7 @@ impl Shared {
             hello_count: AtomicU32::new(0),
             spawn_count: AtomicU32::new(0),
             spawn_mute: mute::SpawnMute::new(),
+            spawn_sources: Default::default(),
             cache: Mutex::new(EngineCache::default()),
             hub: Mutex::new(None),
             events: Mutex::new(None),
@@ -410,7 +421,8 @@ impl Shared {
 
     fn desired(&self) -> (u64, Option<EngineSpec>) {
         let g = self.desired.lock().unwrap_or_else(|p| p.into_inner());
-        (g.0, g.1.clone())
+        // A crash respawn reuses the spec: it starts with the live source list, not the spec's.
+        (g.0, self.spawn_sources.apply(g.1.clone()))
     }
 
     fn generation(&self) -> u64 {
