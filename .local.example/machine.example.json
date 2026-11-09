@@ -1,0 +1,14 @@
+{
+  "hdrGammaFix": {
+    "targetDisplayId": "<WmiMonitorID InstanceName, from init-machine.ps1 -List>",
+    "targetInstance": "<4-digit ICM association key, from init-machine.ps1 -List>",
+    "profileDir": "<folder holding the generated .icm profiles>",
+    "accurateProfile": "<accurate profile file name>.icm",
+    "punchyProfile": "<punchy profile file name>.icm",
+    "stateDir": "<folder for rollback-state.json, e.g. %LOCALAPPDATA%\Recall\hdr-gamma-fix expanded>"
+  },
+  "paths": {
+    "devRoot": "<optional: folder holding the main checkout; detected from git when absent>",
+    "mainCheckout": "<optional: the main checkout; detected from git when absent>"
+  }
+}
