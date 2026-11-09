@@ -47,6 +47,8 @@ mod stdin;
 mod locate;
 #[path = "supervisor_sources.rs"]
 mod sources;
+#[path = "supervisor_floor.rs"]
+pub(crate) mod floor;
 
 use std::path::PathBuf;
 #[cfg(test)]

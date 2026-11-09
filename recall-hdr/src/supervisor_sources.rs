@@ -30,6 +30,11 @@ struct Inner {
     baked: Option<String>,
     /// The last sequence number given to an audio line.
     seq: u64,
+    /// The last spawn was below the protocol floor (`supervisor_floor.rs`), with whether its game
+    /// is captured by process tree: its list (and so the current one) withholds devices.
+    below_floor: Option<bool>,
+    /// A `hello` without `sync_hold`: every later spawn is below the floor.
+    forced_below: bool,
 }
 
 impl SpawnSources {
@@ -56,11 +61,36 @@ impl SpawnSources {
     }
 
     /// (the list the last spawn was given, the current list), as engine lists.
-    fn baked_and_current(&self) -> (Vec<AudioSource>, Vec<AudioSource>) {
+    pub(super) fn baked_and_current(&self) -> (Vec<AudioSource>, Vec<AudioSource>) {
         let g = self.lock();
         let read = |v: &Option<String>| v.as_deref().and_then(audio_intent::parse).unwrap_or_default();
         let current = if g.value.is_some() { read(&g.value) } else { read(&g.baked) };
+        let current = match g.below_floor {
+            Some(process_loopback) => crate::supervisor::floor::withhold_devices(&current, process_loopback),
+            None => current,
+        };
         (read(&g.baked), current)
+    }
+
+    pub(super) fn set_below_floor(&self, below: Option<bool>) {
+        self.lock().below_floor = below;
+    }
+
+    pub(super) fn below_floor(&self) -> bool {
+        self.lock().below_floor.is_some()
+    }
+
+    pub(super) fn force_below(&self) {
+        self.lock().forced_below = true;
+    }
+
+    pub(super) fn forced_below(&self) -> bool {
+        self.lock().forced_below
+    }
+
+    /// The list `spec` (as finally spawned) was given.
+    pub(super) fn rebake(&self, spec: &EngineSpec) {
+        self.lock().baked = spec.env.iter().find(|(k, _)| k == SOURCES_ENV).and_then(|(_, v)| v.clone());
     }
 
     /// The current list records other tracks than the last spawn was given (a restart).
@@ -134,6 +164,10 @@ impl super::Supervisor {
         if let Some(value) = value {
             s.spawn_sources.set(value);
         }
+        // Below the protocol floor the engine was given no input or picked device: none is sent.
+        let kept: Vec<String> = s.spawn_sources.baked_and_current().1.into_iter().map(|c| c.id).collect();
+        let below = s.spawn_sources.below_floor();
+        let lines: Vec<&Value> = lines.iter().filter(|l| !below || l["id"].as_str().is_some_and(|id| kept.iter().any(|k| k.trim() == id.trim()))).collect();
         lines.iter().fold(Sent::Queued, |sent, line| sent.then(s.queue_line(&g, &s.spawn_sources.stamp(&line.to_string()))))
     }
 

@@ -40,6 +40,7 @@ fn protocol_line(shared: &Arc<Shared>, line: &str, last: &mut Option<StatusDiges
             log!("supervisor: engine hello -- version {version}, {monitors} monitor(s)");
             shared.cache.lock().unwrap_or_else(|p| p.into_inner()).hello = Some(line.to_string());
             shared.hello_count.fetch_add(1, Ordering::SeqCst);
+            shared.on_hello_floor(&val); // P14: no sync_hold -> restarted with no device
         }
         Some("status") => {
             {

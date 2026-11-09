@@ -344,7 +344,7 @@ impl Controller {
         while let Ok(ev) = self.engine_events.try_recv() {
             crate::record_audio_live::on_engine_event(self, &ev);
             if let Some(notice) = crate::record_inputs_held::notice_for(&ev) {
-                log!("record: the engine holds every audio track: {}", ev.get("reason").and_then(serde_json::Value::as_str).unwrap_or(""));
+                log!("record: audio notice {}: {}", ev.get("type").and_then(serde_json::Value::as_str).unwrap_or(""), ev.get("reason").and_then(serde_json::Value::as_str).unwrap_or(""));
                 self.hub.event("session", &notice);
             }
             match self.activity.on_engine_event(&ev, unix_now(), now) {
