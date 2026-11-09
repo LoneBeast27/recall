@@ -193,7 +193,7 @@ impl Controller {
         if let Some(reason) = capture_refusal(self.paused, self.engine_running(), &self.wanted()) {
             return self.refuse_capture("save_clip", reason);
         }
-        if let Some(reason) = self.planner.privacy_refusal() {
+        if let Some(reason) = self.planner.privacy_command_refusal("save_clip", self.activity.is_recording()) {
             return self.refuse_capture("save_clip", &reason);
         }
         let draining = self.planner.drain().is_some();

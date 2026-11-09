@@ -170,3 +170,23 @@ fn the_planner_settles_a_release_once_its_saves_are_answered() {
     s.run_to(60_100);
     assert!(s.settles > at_release, "answered: settled on the next tick");
 }
+
+/// F3: during an older engine's privacy hold (no `stop_capture`), every capture of the held
+/// app is refused like a save: a screenshot (the latest frame to a PNG) and a long-recording
+/// start; a bookmark or a stop is not a capture.
+#[test]
+fn the_privacy_hold_refuses_every_capture_not_only_the_save() {
+    let mut s = Sim::new();
+    s.engine_releases = false;
+    s.focus(app_ev("Discord", 30, 0x30, true));
+    s.run_to(5_000);
+    assert!(s.save());
+    s.seen(app_ev("Discord", 30, 0x30, false));
+    let held = Some("Discord.exe is no longer recorded".to_string());
+    for cmd in ["screenshot", "record_start", "save_clip", "record_toggle"] {
+        assert_eq!(s.planner.privacy_command_refusal(cmd, false), held, "{cmd}");
+    }
+    assert_eq!(s.planner.privacy_command_refusal("bookmark", false), None);
+    assert_eq!(s.planner.privacy_command_refusal("record_toggle", true), None, "a toggle that stops is no capture");
+    assert!(!s.save(), "the save path reads the same refusal");
+}
