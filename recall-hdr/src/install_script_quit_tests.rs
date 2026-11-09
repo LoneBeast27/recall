@@ -9,8 +9,21 @@ const QUIT_WAIT: &str = include_str!("../../scripts/install-quit-wait.ps1");
 const CHECK: &str = include_str!("../../scripts/dev/install-quit-wait-check.ps1");
 
 #[test]
+fn no_install_script_sends_a_forced_quit() {
+    // F-startup-3: a plain quit never forces a save in the controller (overlay-p7); only "force":true
+    // does. No installer script may send it, and the skip's comment says it is for older builds.
+    let swap = include_str!("../../scripts/install-swap.ps1");
+    let start = include_str!("../../Start-Recall.ps1");
+    for (name, text) in [("install.ps1", INSTALL), ("install-quit-wait.ps1", QUIT_WAIT), ("install-swap.ps1", swap), ("Start-Recall.ps1", start)] {
+        assert!(!text.contains("\"force\""), "{name} sends a forced quit");
+    }
+    assert!(QUIT_WAIT.contains("# quit (only a force flag or a second tray Quit does, and no script sends one); the skip is kept"));
+    assert!(!QUIT_WAIT.contains("run: a second quit could force it"), "the stale reason is gone");
+}
+
+#[test]
 fn a_recorder_already_finishing_a_clip_gets_no_second_quit() {
-    // R6-startup-1: a second pipe quit during the save could force it and lose the clip.
+    // R6-startup-1: on an older recorder a second pipe quit during the save could force it and lose the clip.
     let req = function_body(QUIT_WAIT, "Request-RecorderQuit");
     let pending = req.find("$pending = Get-PendingQuit").expect("checks first");
     let join = req.find("return $pending").expect("joins the wait");
