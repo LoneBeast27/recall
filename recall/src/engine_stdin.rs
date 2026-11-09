@@ -28,7 +28,29 @@ pub(crate) fn spawn_early(shared: Arc<CaptureShared>) -> Early {
         });
         stdin_reader::finish(end, &shared.quit);
     });
+    #[cfg(feature = "encode")]
+    std::thread::spawn(|| watch_hold(std::thread::sleep, audio::sources::startup_released, protocol::emit));
     Early(rx)
+}
+
+/// How long the device tracks may wait for `sync` before the user is told (a normal start takes
+/// a few ms; R-fresh-4: no notice for that).
+pub(crate) const HELD_NOTICE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Why the device tracks are held (`inputs_held`, merge-gate F7).
+pub(crate) const INPUTS_HELD_LATE: &str = "the recorder is waiting for its settings";
+
+/// Tell the controller (it shows a notice) when the startup hold still holds after
+/// [`HELD_NOTICE_AFTER`] (`wait`: the clock). True when it told. The release says
+/// `inputs_released` (`audio::sources`).
+pub(crate) fn watch_hold(wait: impl FnOnce(std::time::Duration), released: impl Fn() -> bool, emit: impl FnOnce(&protocol::Outbound)) -> bool {
+    wait(HELD_NOTICE_AFTER);
+    if released() {
+        return false;
+    }
+    eprintln!("[recall] stdin: no sync from the controller after {HELD_NOTICE_AFTER:?}; the device audio tracks stay held");
+    emit(&protocol::Outbound::InputsHeld { reason: INPUTS_HELD_LATE.to_owned() });
+    true
 }
 
 /// Every command of `reader` to `forward`, the mic mute applied first (a toggle goes on as the
