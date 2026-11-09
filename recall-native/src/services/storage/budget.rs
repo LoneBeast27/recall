@@ -476,6 +476,19 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     text(a) == text(b)
 }
 
+/// Units no eviction or sweep may touch: the editor clip's (KEEP) plus the video copy, frames
+/// and thumbnail of every clip open in any Recall window (`open_clips`: editors, players and
+/// exports of every app process). Recall's readers share delete, so an open copy is not
+/// protected by Windows refusing the delete.
 pub(super) fn kept() -> Vec<String> {
-    KEEP.lock().map(|k| k.clone()).unwrap_or_default()
+    let mut keep = KEEP.lock().map(|k| k.clone()).unwrap_or_default();
+    for clip in crate::services::library::open_clips::all_open() {
+        let Ok((id, _, _)) = super::identity_of(Path::new(&clip)) else { continue };
+        for unit in [format!("video/{id}.mp4"), format!("visuals/{id}#editor"), format!("visuals/{id}#scrub"), format!("thumbs/{id}.jpg")] {
+            if !keep.contains(&unit) {
+                keep.push(unit);
+            }
+        }
+    }
+    keep
 }

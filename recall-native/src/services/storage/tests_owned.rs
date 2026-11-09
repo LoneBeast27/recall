@@ -181,3 +181,19 @@ fn the_start_check_blocks_a_cache_that_holds_the_recordings_folder() {
     assert!(clip.exists() && crashed.exists(), "nothing in the clip folder is touched, the crashed recording waits for recovery");
     assert!(video::copy_in(&root, &clip, BUDGET, &|_| true, &video::FULL_SPEED).is_err(), "and no new copies land in it");
 }
+
+#[test]
+fn a_clip_open_in_another_window_keeps_its_video_copy() {
+    // "In use" was only the editor's own clip (KEEP) and files Windows refused to delete; Recall's
+    // readers share delete, so the copy another window plays from could be evicted under it.
+    let (_sandbox, root, clips) = layout("open-elsewhere");
+    let copy = own_copy(&root, &clips, "G__2026-11-10__10-00-00.mp4");
+    let source = clips.join("G__2026-11-10__10-00-00.mp4");
+    let open = crate::services::library::open_clips::exporting(&source.to_string_lossy());
+    budget::enforce(&root, 0, 0);
+    let _ = budget::room_below(&root, 0, 0, 0, f64::MAX);
+    assert!(copy.is_file(), "the copy of a clip open in Recall was evicted");
+    drop(open);
+    budget::enforce(&root, 0, 0);
+    assert!(!copy.exists(), "once it closes, it may go");
+}
