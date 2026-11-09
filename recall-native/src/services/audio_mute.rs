@@ -9,6 +9,9 @@ use crate::services::{
 
 /// The strip note of a line-in the recorder opens on another endpoint than the one it saved.
 pub const OPENED_OTHER: &str = "Using a different device: follows the mic hotkey";
+/// The menu note of a line-in opened on an unsure sibling (A4 ruling): the recorder adopts no
+/// id for a line-in (P1-b), so it stays muted until the user picks the device.
+pub const UNSURE_PICK: &str = "May be a different device: stays muted until you pick it";
 /// The strip note of a named line-in with no saved endpoint id (a config from before ids).
 pub const NO_ID: &str = "Follows the mic hotkey until you pick this device again";
 /// The strip note when unticking "Muted by the mic hotkey" was refused: no endpoint id to save.
@@ -41,8 +44,9 @@ pub fn other_note(source: &Source, lists: Option<&DeviceLists>) -> Option<&'stat
             let id = lists.input_ids.get(i).map(String::as_str).filter(|id| !id.is_empty());
             (!opened_own(id, &source.device, &source.device_id)).then_some(OPENED_OTHER)
         }
-        // An unsure sibling (A4 ruling) is never its own until the recorder saves its id.
-        Found::Unsure { .. } => Some(OPENED_OTHER),
+        // An unsure sibling (A4 ruling) is never its own, and a line-in never adopts its id
+        // (P1-b): only a pick here makes it so.
+        Found::Unsure { .. } => Some(UNSURE_PICK),
         _ => None,
     }
 }

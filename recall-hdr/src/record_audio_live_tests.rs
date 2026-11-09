@@ -52,6 +52,17 @@ fn an_engine_without_the_fields_capability_is_restarted_for_them() {
     assert!(!cannot_take(&[], false, false), "nothing to send");
 }
 
+/// P1-b: a line-in (`mic_mute` false) never adopts an endpoint id (it would skip Alt+M from
+/// then on): the user picks the device on the Audio page instead.
+#[test]
+fn a_line_in_never_adopts_an_endpoint_id() {
+    let list = vec![AudioSource { mic_mute: Some(false), device_id: "{A}".into(), ..legacy() }];
+    let ev = serde_json::json!({"type": "source_adopted", "id": "in-1", "device_id": "{B}"});
+    assert_eq!(adopt_patch(&list, &ev), None, "a line-in's id is never adopted");
+    let mic = vec![AudioSource { mic_mute: Some(true), device_id: "{A}".into(), ..legacy() }];
+    assert_eq!(adopt_patch(&mic, &ev).expect("a microphone adopts")["recording"]["audio_sources"][0]["device_id"], "{B}");
+}
+
 #[test]
 fn an_adopted_endpoint_id_is_saved_as_the_sources_own() {
     let list = vec![AudioSource { device_id: "{A}".into(), ..legacy() }];

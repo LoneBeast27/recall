@@ -113,6 +113,8 @@ pub fn strip_note(source: &Source, lists: Option<&crate::services::audio_devices
     use crate::services::audio_devices::{Found, found};
     let picked = if source.kind == Kind::App { found(&source.device, None) } else { crate::services::audio_pick::source_found(source, lists) };
     match picked {
+        // A line-in is never unmuted onto a sibling by Alt+M (P1-b): the user picks it.
+        Found::Unsure { .. } if source.kind.uses_inputs() && source.mic_mute == Some(false) => Some(crate::services::endpoint_choice::unsure_line_in_note(&source.device)),
         Found::Unsure { .. } if source.kind.uses_inputs() => Some(crate::services::endpoint_choice::unsure_note(&source.device)),
         Found::Unsure { twins, .. } => Some(crate::services::endpoint_choice::twins_note(&source.device, twins)),
         Found::CaseOnly => Some(crate::services::endpoint_choice::case_note(&source.device)),
