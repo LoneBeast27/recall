@@ -159,12 +159,15 @@ fn a_source_change_during_a_spawn_respawns_the_engine_on_it() {
     let spec = |v: &str| Some(EngineSpec { env: vec![(SOURCES_ENV.into(), Some(v.into()))] });
     shared.set_desired(spec(A), crate::record_dispatch::Sent::Waiting);
     let (gen, _) = shared.desired(); // the manager reads the spec
+    shared.attach_writer(Some(Box::new(std::io::sink()))); // the stdin attach restates and syncs
     assert!(!shared.respawn_if_sources_moved(gen), "no change during the spawn: no respawn");
     shared.spawn_sources.set(A_FLAG); // a flag only: restated at the attach, no respawn
+    shared.attach_writer(Some(Box::new(std::io::sink())));
     assert!(!shared.respawn_if_sources_moved(gen), "a live change: no respawn");
     assert_eq!(shared.generation(), gen);
     let (gen, _) = shared.desired();
     shared.spawn_sources.set(B); // another device, while the pid is still 0
+    shared.attach_writer(Some(Box::new(std::io::sink()))); // no sync: withheld
     assert!(shared.respawn_if_sources_moved(gen), "the change during the spawn respawns");
     assert_eq!(shared.generation(), gen + 1, "a retarget to the same target");
     assert_eq!(shared.desired.lock().unwrap().2, crate::record_dispatch::Sent::Restarting, "a line meanwhile says restarting");
