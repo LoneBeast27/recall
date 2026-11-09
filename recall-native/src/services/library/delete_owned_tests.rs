@@ -182,3 +182,25 @@ fn a_hidden_game_folder_is_skipped() {
     }
     assert!(listed(&recordings, &[]).is_empty());
 }
+
+/// (b) "Use this folder": after adoption a Recall-named clip that was already in the folder is
+/// listed but not owned (Delete only hides it, edits go to the C: copy); a clip saved after is.
+#[test]
+fn an_adopted_folders_existing_clip_is_listed_but_not_owned() {
+    let root = crate::test_temp::TempDir::sandbox("owned-adopted");
+    let recordings = root.join("Recall");
+    let game = recordings.join("VALORANT");
+    let old = clip(&game, "VALORANT__2025-01-01__10-00-00.mp4");
+    crate::services::library::folders::rule::adopt(&game).unwrap();
+    let new = clip(&game, "VALORANT__2026-11-10__04-00-00-000__ab.mp4");
+    let folders = Folders { recordings: Some(text(&recordings)), ..Folders::default() };
+    assert!(!imports::is_owned(&old, &recordings, &[], &[]), "there before: the user's");
+    assert!(imports::is_owned(&new, &recordings, &[], &[]), "saved after: Recall's");
+    let mut both = vec![text(&old), text(&new)];
+    both.sort();
+    let mut seen = listed(&recordings, &[]);
+    seen.sort();
+    assert_eq!(seen, both, "both listed");
+    let (_, owned) = partition_for_delete(&[old.clone(), new.clone()], &folders);
+    assert_eq!(owned, vec![new], "only the new clip may go to the Recycle Bin");
+}

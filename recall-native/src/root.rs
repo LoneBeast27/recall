@@ -158,6 +158,9 @@ pub struct Root {
     pub update: crate::update::UpdateUi,
     /// Settings → "Stop now (lose the clip)" was clicked: its confirm shows.
     pub stop_confirm: bool,
+    /// "Use your existing <Game> folder?" questions still open, oldest first (kept in a small
+    /// file across starts: `views::game_folder_prompt`).
+    pub game_folder_prompts: Vec<crate::views::game_folder_prompt::Pending>,
 }
 
 #[path = "root_events.rs"]

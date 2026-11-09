@@ -463,7 +463,10 @@ fn recover_in(dir: &Path) -> Vec<(PathBuf, std::io::Result<PathBuf>)> {
     let is_file = |e: &std::fs::DirEntry| e.file_type().is_ok_and(|t| t.is_file());
     let mut files: Vec<_> = listing.flatten().filter(is_file).collect();
     for folder in crate::game_folder_rule::game_folders(dir) {
-        files.extend(std::fs::read_dir(folder).into_iter().flatten().flatten().filter(is_file));
+        // In an adopted folder the files that were there before stay the user's: left alone.
+        let Some(marker) = crate::game_folder_rule::game_folder_marker(&folder) else { continue };
+        let entries = std::fs::read_dir(folder).into_iter().flatten().flatten().filter(is_file);
+        files.extend(entries.filter(|e| marker.owns(&e.file_name().to_string_lossy())));
     }
     files
         .into_iter()

@@ -229,6 +229,12 @@ pub fn engine_settings_changed(old: &RecordingCfg, new: &RecordingCfg) -> bool {
         || crate::record_audio_sources::changed(&old.audio_sources, &new.audio_sources)
 }
 
+/// The stdin line that hands the running engine new "Use your existing <Game> folder?" answers
+/// (no restart: `recording.game_folder_choices` is not in [`engine_settings_changed`]).
+pub fn game_folder_choices_line(choices: &std::collections::BTreeMap<String, String>) -> String {
+    serde_json::json!({ "cmd": "set_game_folder_choices", "choices": choices }).to_string()
+}
+
 /// Environment for one engine spawn: `Some` sets, `None` removes. Every target
 /// variable is set or removed explicitly so values the controller inherited
 /// (e.g. from `Start-Recall.ps1`) never leak into a different target.
@@ -250,6 +256,7 @@ pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&s
         ("RECALL_BUFFER_SECS".to_string(), Some(rec.buffer_secs.to_string())),
         ("RECALL_OUT_DIR".to_string(), Some(rec.output_dir.clone())),
         ("RECALL_GAME_FOLDERS".to_string(), Some(if rec.game_folders { "1" } else { "0" }.to_string())),
+        ("RECALL_GAME_FOLDER_CHOICES".to_string(), Some(serde_json::to_string(&rec.game_folder_choices).unwrap_or_else(|_| "{}".into()))),
         ("RECALL_CPU_MASK".to_string(), cpu_mask.map(str::to_owned)),
         // Quality knobs (the engine side owns their meaning).
         ("RECALL_CODEC".to_string(), Some(rec.codec.clone())),

@@ -114,6 +114,10 @@ pub enum DaemonEvent {
     /// Long recordings a crash or a kill left as `.part`, renamed into place on the next
     /// engine start (`paths`, one event for all); gap / frozen seconds when known (else 0).
     RecordingRecovered { paths: Vec<String>, gap_seconds: f64, frozen_seconds: f64 },
+    /// "Sort clips into game folders" found the user's own folder with the game's name in
+    /// Recordings, not answered yet (the clip went straight into Recordings): ask "Use your
+    /// existing <Game> folder?" (`views::game_folder_prompt`).
+    GameFolderExists { game: String, folder: String },
     /// A clip saved to the SSD first reached the clip folder. `kept_path`: the engine kept its
     /// staged copy there for the SSD video cache (`storage::adopt_kept`).
     ClipMoved { path: String, kept_path: Option<String> },
