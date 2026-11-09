@@ -122,3 +122,11 @@ fn windows_settings_and_system_parts_are_refused() {
         assert!(refused(exe, GameOp::Record).is_some(), "{exe}");
     }
 }
+
+/// Gate p5-3: a screensaver, or Windows named by a path or in another case, is refused too.
+#[test]
+fn a_screensaver_or_a_windows_path_is_refused() {
+    for exe in ["Mystify.scr", r"C:\Windows\EXPLORER.EXE", "C:/Windows/System32/dwm.exe", "Explorer"] {
+        assert!(refused(exe, GameOp::Record).is_some(), "{exe}");
+    }
+}
