@@ -99,7 +99,7 @@ fn apply(cmd: Command, shared: &CaptureShared, (save, export): (&Option<SaveHook
         | Command::SessionLocked { .. }) => {
             extras.handle(&cmd);
         }
-        Command::Quit => {} // read_commands sets `quit`
+        Command::Quit | Command::StopCapture => {} // the reader ends on them (`stdin_reader`)
     }
 }
 

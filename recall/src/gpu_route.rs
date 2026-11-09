@@ -40,6 +40,9 @@ pub(crate) fn install_gpu_sink(shared: &Arc<CaptureShared>, handle: &encoder::En
         if stats.gpu_refused.load(Relaxed) {
             return false;
         }
+        if crate::stop_capture::stopped() {
+            return true; // the privacy stop: taken and dropped, no frame enters the ring
+        }
         let (width, height) = (gpu.width(), gpu.height());
         let frame = encoder::PacedFrame { idx: pts_us, width, height, rgba: Vec::new(), gpu: Some(gpu), content };
         let Ok(guard) = frames.lock() else { return false };

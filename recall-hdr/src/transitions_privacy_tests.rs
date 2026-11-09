@@ -41,7 +41,7 @@ fn fullscreen_discord_pressing_esc_ends_the_session_and_records_nothing_after() 
     assert!(s.current().is_none(), "the session ended");
     assert!(!s.recording_of(30), "the engine left Discord at once");
     assert!(s.planner.drain().is_none(), "no drain linger on the windowed window");
-    assert!(!s.ring_kept_since(mark), "the ring was dropped");
+    assert!(s.ring_dropped_since(mark), "the ring was dropped");
     s.run_to(30_000);
     assert!(!s.recording_of(30), "nothing recorded after");
 }
@@ -88,7 +88,7 @@ fn never_record_on_the_recorded_app_stops_capture_now_and_drops_the_ring() {
         assert!(s.current().is_none(), "the session ended (probe fails: {probe_fails})");
         s.run_to(5_050);
         assert!(!s.recording_of(50) && s.planner.drain().is_none(), "no linger (probe fails: {probe_fails})");
-        assert!(!s.ring_kept_since(mark));
+        assert!(s.ring_dropped_since(mark));
         s.run_to(20_000);
         assert!(!s.recording_of(50));
     }
@@ -153,4 +153,70 @@ fn the_matrix_applies_the_proof_rule_r8_detect_6() {
     s.focus(game_ev("MysteryGame", 62, 0x62));
     s.run_to(4_000);
     assert!(s.recording_of(62), "a 'game' render verdict");
+}
+
+/// Final review F-detect-1: Esc while a save is written must not stop the engine under it (the
+/// old engine's quit gives a save 3 s, then aborts it).
+#[test]
+fn esc_while_a_save_is_written_does_not_stop_the_engine_under_it() {
+    let mut s = recording_discord();
+    s.run_to(5_000);
+    assert!(s.save());
+    let mark = s.ms(4_999); // a stop applies at this very tick
+    s.seen(app_ev("Discord", 30, 0x30, false)); // Esc during the save
+    s.run_to(5_050);
+    assert!(s.ring_kept_since(mark), "engine stopped under an in-flight save");
+    s.saved();
+    s.run_to(5_200);
+    assert!(!s.recording_of(30), "then it leaves Discord");
+}
+
+/// F-detect-1 (option b): the engine is released, not quit: capture stops now, the save in
+/// flight finishes, and Discord is no longer counted as recorded.
+#[test]
+fn esc_during_a_save_releases_the_engine_and_takes_no_new_save() {
+    let mut s = recording_discord();
+    s.run_to(5_000);
+    assert!(s.save());
+    let mark = s.ms(4_999);
+    s.seen(app_ev("Discord", 30, 0x30, false));
+    s.run_to(5_050);
+    assert_eq!(s.released.len(), 1, "one stop_capture");
+    assert_eq!(s.released[0].1, EngineTarget::Off, "then no engine: nothing else is wanted");
+    assert!(s.ring_kept_since(mark), "no quit under the save");
+    assert!(!s.recording_of(30) && s.planner.drain().is_none(), "not counted as recording Discord, no drain");
+    assert!(!s.save(), "no new save from the released ring");
+    s.saved();
+    s.run_to(30_000);
+    assert_eq!(s.spawns_since(mark), 0, "nothing respawned for Discord");
+}
+
+/// F-detect-1 fallback (option a): an engine without `stop_capture` keeps the stop until the
+/// save lands, with no drain linger, then stops.
+#[test]
+fn an_older_engine_holds_the_privacy_stop_until_the_save_lands() {
+    let mut s = recording_discord();
+    s.engine_releases = false;
+    s.run_to(5_000);
+    assert!(s.save());
+    let mark = s.ms(4_999);
+    s.seen(app_ev("Discord", 30, 0x30, false));
+    s.run_to(6_000);
+    assert!(s.ring_kept_since(mark) && s.held_ticks > 0, "held for the save");
+    s.saved();
+    s.run_to(6_100);
+    assert!(!s.recording_of(30) && s.ring_dropped_since(mark), "stopped once the save landed, no 120 s drain");
+    assert!(s.released.is_empty());
+}
+
+/// Never record during a save: released too (R8-detect-2's path, end_for_registration).
+#[test]
+fn never_record_during_a_save_releases_the_engine() {
+    let mut s = recording_override("MysteryApp", false);
+    s.run_to(5_000);
+    assert!(s.save());
+    let mark = s.ms(4_999);
+    s.set_config(with("mysteryapp.exe", RuleKind::None));
+    s.run_to(5_050);
+    assert!(s.ring_kept_since(mark) && s.released.len() == 1 && !s.recording_of(50));
 }

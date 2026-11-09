@@ -46,6 +46,15 @@ pub fn switch_engine(sw: &impl EngineSwitch, spec: Option<EngineSpec>, refusal: 
     }
 }
 
+/// How the running engine ends before the next target.
+#[derive(Debug, Clone, Copy)]
+enum OldEngine {
+    /// `quit` (its saves get 3 s); the refusal for lines sent meanwhile.
+    Quit(Sent),
+    /// `stop_capture`: capture stops now, its saves finish (`supervisor_release.rs`).
+    Release,
+}
+
 impl Controller {
     /// Start, restart or stop the engine for `target` (an intended restart, a game switch:
     /// a line sent while the old engine quits is told "Switching games").
@@ -56,28 +65,46 @@ impl Controller {
     /// `refusal`: what a line sent while the old engine quits is told (Switching for a game
     /// switch, Restarting for a planned restart, NotResponding for a recovery restart).
     pub(crate) fn apply_engine_target_as(&mut self, target: &EngineTarget, refusal: Sent) {
+        self.apply_engine_target_how(target, OldEngine::Quit(refusal));
+    }
+
+    /// The privacy stop (final review F-detect-1): the old engine stops capture now and
+    /// finishes its saves, then `target` starts (`supervisor_release.rs`). `false`: the running
+    /// engine does not take `stop_capture` (an older build); nothing was done.
+    pub(crate) fn release_engine_to(&mut self, target: &EngineTarget) -> bool {
+        if !self.supervisor.engine_takes_stop_capture() {
+            return false;
+        }
+        self.apply_engine_target_how(target, OldEngine::Release);
+        true
+    }
+
+    fn apply_engine_target_how(&mut self, target: &EngineTarget, how: OldEngine) {
         self.hello_at_retarget = self.supervisor.hello_count();
         // Any (re)start or stop picks up the current settings.
         self.pending_restart = None;
         match target {
             EngineTarget::Off => {
                 log!("record: no target -> engine stopped (waiting for a game)");
-                self.retarget(None, refusal);
+                self.retarget(None, how);
             }
             EngineTarget::Window(t) => {
                 let detected = self.take_detected(t.hwnd);
                 log!("record: target -> {:?} ({}, pid {}, hwnd {:#x}){detected}", t.name, t.exe, t.pid, t.hwnd);
-                self.retarget(Some(self.engine_spec(target)), refusal);
+                self.retarget(Some(self.engine_spec(target)), how);
             }
             EngineTarget::Desktop => {
                 log!("record: no game -> desktop capture");
-                self.retarget(Some(self.engine_spec(target)), refusal);
+                self.retarget(Some(self.engine_spec(target)), how);
             }
         }
     }
 
-    fn retarget(&self, spec: Option<EngineSpec>, refusal: Sent) {
-        switch_engine(&self.supervisor, spec, refusal);
+    fn retarget(&self, spec: Option<EngineSpec>, how: OldEngine) {
+        match how {
+            OldEngine::Quit(refusal) => switch_engine(&self.supervisor, spec, refusal),
+            OldEngine::Release => self.supervisor.release(spec),
+        }
     }
 
     fn engine_spec(&self, target: &EngineTarget) -> EngineSpec {
