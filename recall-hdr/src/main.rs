@@ -127,6 +127,7 @@ mod record_quit;
 mod record_quit_save;
 mod record_quit_wait;
 mod record_recover;
+mod record_recovery_act;
 mod record_game_ops;
 mod record_restart;
 mod record_restart_host;
@@ -191,6 +192,8 @@ mod transitions_scope_tests;
 mod transitions_restart_tests;
 #[cfg(test)]
 mod transitions_planned_tests;
+#[cfg(test)]
+mod transitions_recovery_tests;
 #[cfg(test)]
 mod transitions_ghost_tests;
 #[cfg(test)]

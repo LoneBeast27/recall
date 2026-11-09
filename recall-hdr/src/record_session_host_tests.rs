@@ -13,6 +13,8 @@ struct Fake {
     recording: bool,
     /// A `record_stop` is on its way (any sender).
     stopping: bool,
+    /// That stop is the session end's own (`EngineActivity::stop_is_ours`).
+    ours: bool,
     /// Engine drains until a sent stop is reported (`None`: never).
     stops_after: Option<u32>,
     drains: u32,
@@ -26,7 +28,7 @@ struct Fake {
 
 impl Fake {
     fn new(recording: bool) -> Self {
-        Fake { t0: Instant::now(), clock: Duration::ZERO, recording, stopping: false, stops_after: Some(3), drains: 0, starts: true, saving: false, calls: Vec::new(), state: SessionState::default() }
+        Fake { t0: Instant::now(), clock: Duration::ZERO, recording, stopping: false, ours: false, stops_after: Some(3), drains: 0, starts: true, saving: false, calls: Vec::new(), state: SessionState::default() }
     }
 
     fn at(&self, d: Duration) -> Instant {
@@ -39,10 +41,11 @@ impl SessionHost for Fake {
         self.recording
     }
     fn long_state(&self) -> LongState {
-        LongState::of(self.recording, self.stopping)
+        LongState::of(self.recording, self.stopping, self.ours)
     }
     fn send_record_stop_now(&mut self) {
         self.stopping = true;
+        self.ours = true;
         self.calls.push("stop".into());
     }
     fn start_long_recording(&mut self) -> bool {
@@ -55,6 +58,7 @@ impl SessionHost for Fake {
         if self.stopping && self.stops_after.is_some_and(|n| self.drains >= n) {
             self.recording = false;
             self.stopping = false;
+            self.ours = false;
         }
     }
     fn block_shutdown(&mut self, reason: &str) {
@@ -294,4 +298,23 @@ fn a_late_session_end_during_a_save_finishes_it_before_the_shutdown() {
     cancelled.saving = true;
     session_tick(&mut cancelled, vec![SessionMsg::End { ending: false }], now);
     assert!(cancelled.calls.is_empty(), "a cancel waits for nothing: {:?}", cancelled.calls);
+}
+
+/// SPEC 26 B: the query's wait timed out (its stop still in flight), then the user sent a
+/// stop of their own: a second query finds someone else's stop, and a cancel restarts nothing.
+/// With only our stop still in flight the cancel restarts it.
+#[test]
+fn a_second_query_during_stopping_keeps_the_arm_only_for_our_own_stop() {
+    for (user_stopped, restarts) in [(true, false), (false, true)] {
+        let (lender, pending) = (Lender::new(), Mutex::new(Vec::new()));
+        let mut fake = Fake::new(true);
+        fake.stops_after = None; // the recording never reports in time
+        proc(&lender, &mut fake, WM_QUERYENDSESSION, 0, &pending);
+        assert!(fake.recording && fake.stopping, "setup: the 3 s wait timed out");
+        fake.ours = !user_stopped; // `stop_sent` from the user's record_stop clears ours
+        proc(&lender, &mut fake, WM_QUERYENDSESSION, 0, &pending);
+        let before = fake.calls.len();
+        proc(&lender, &mut fake, WM_ENDSESSION, 0, &pending);
+        assert_eq!(fake.calls[before..].contains(&"start".to_string()), restarts, "user stopped: {user_stopped}: {:?}", fake.calls);
+    }
 }
