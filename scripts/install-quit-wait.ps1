@@ -41,8 +41,10 @@ function Get-RecorderStatus($quit) {
   } catch { $null } finally { $pipe.Dispose() }
 }
 # A controller of ours (this account) that already says finishing_clip got its quit from an earlier
-# run: a second quit could force it and lose the clip (R6-startup-1). Only this build's session
-# pipe is asked; a pre-session recorder has no finishing_clip.
+# run, so no second quit is sent (R6-startup-1). A current recorder never forces a save on a plain
+# quit (only a force flag or a second tray Quit does, and no script sends one); the skip is kept
+# for older recorders, where a second quit could force the save and lose the clip. Only this
+# build's session pipe is asked; a pre-session recorder has no finishing_clip.
 function Get-PendingQuit {
   foreach ($c in @(Invoke-CimRetry { @(Get-Controller) } @())) {
     if ((Get-ProcessUserSid ([int]$c.ProcessId)) -ne $mySid) { continue }
