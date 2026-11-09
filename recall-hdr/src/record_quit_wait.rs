@@ -96,6 +96,13 @@ pub fn resume_after_session_end(wait: &mut QuitWait) -> Option<QuitReason> {
     kept
 }
 
+/// The quit under way is a held sign-out's alone (no other quit was asked): a cancelled
+/// sign-out calls it off, so an installer must still send its own plain quit, which joins the
+/// wait and is kept through a cancel ([`on_quit_request`]). Reported as `quit_for_sign_out`.
+pub fn sign_out_only(quit: Option<QuitReason>, wait: &QuitWait) -> bool {
+    quit == Some(QuitReason::SessionEnd) && wait.also.is_none()
+}
+
 /// The control pipe's view of a quit waiting for a save: `finishing_clip` (true while a
 /// quit was asked and a save is still written) and `finishing_progress` (`{"saves": N,
 /// "step": S, "bytes": B}`, `step` = the engine's progress mark, `bytes` = the bytes

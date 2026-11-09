@@ -79,7 +79,9 @@ pub fn key(info: &ClipInfo, plan: &EditPlan, fps: u32, export: &ExportSettings) 
         let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         (path, modified)
     });
-    let shape = serde_json::to_string(&(plan, export)).ok()?;
+    // Only the size-fit priority in force shapes the output (none without a size cap).
+    let export = ExportSettings { priority: export.active_priority(), ..export.clone() };
+    let shape = serde_json::to_string(&(plan, &export)).ok()?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (&info.path, info.source_bytes, info.source_modified_ms, shape, fps, engine).hash(&mut hasher);
     Some(hasher.finish())

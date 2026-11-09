@@ -175,7 +175,7 @@ impl Controller {
             paused: self.paused,
             running: self.engine_running(),
             held: self.planner.drain().is_some() || self.activity.busy(now) || self.recovery.pending(now),
-            overlay: self.cfg.overlay.enabled,
+            overlay: crate::record_private_watch::notices_visible(&self.cfg.overlay),
         };
         let Some(act) = stuck_step(&mut self.capture_stuck, &inputs, crate::record_screen::sight, now) else { return };
         let target = crate::record_status::target_json(&wanted);

@@ -88,6 +88,7 @@ namespace Recall.Setup
         {
             var parent = Path.Combine(Path.GetTempPath(), "Recall-Setup-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(parent);
+            bool installerStillRuns = false;
             try
             {
                 if (progress != null) progress.Report("Preparing program files…");
@@ -103,11 +104,19 @@ namespace Recall.Setup
                 SetupPrerequisites.Provision(parent, Assembly, progress);
                 return RunInstaller(package, options);
             }
+            catch (InstallerStillRunning)
+            {
+                installerStillRuns = true; // its scripts and payload are in use: leave them
+                throw;
+            }
             finally
             {
-                try { Directory.Delete(parent, true); }
-                catch (IOException) { }
-                catch (UnauthorizedAccessException) { }
+                if (!installerStillRuns)
+                {
+                    try { Directory.Delete(parent, true); }
+                    catch (IOException) { }
+                    catch (UnauthorizedAccessException) { }
+                }
             }
         }
 
@@ -216,6 +225,7 @@ namespace Recall.Setup
                     + (options.FrameTiming ? "" : " -NoFrameTiming")
                     + (options.Launch ? "" : " -NoStart")
                     + (options.Update ? " -CloseApp -UpdateExisting" : "")
+                    + " -QuitWaitMinutes " + InstallerQuitWaitMinutes
             };
             var output = new List<string>();
             var errors = new List<string>();
@@ -226,7 +236,11 @@ namespace Recall.Setup
                 process.Start();
                 process.BeginOutputReadLine();
                 process.BeginErrorReadLine();
-                process.WaitForExit();
+                // Never killed: past the limit the installer may be mid-swap, and install-swap's
+                // rollback must stay in charge. Setup only stops waiting and says so.
+                if (!process.WaitForExit(InstallerWaitMinutes * 60 * 1000))
+                    throw new InstallerStillRunning(InstallerTimeoutMessage(InstallerWaitMinutes));
+                process.WaitForExit(); // drain the redirected output
                 if (process.ExitCode == 0)
                 {
                     const string prefix = "WARNING:";
@@ -240,11 +254,29 @@ namespace Recall.Setup
             }
         }
 
+        // The installer caps its own wait for a recorder finishing a clip, before anything is
+        // replaced; Setup's wait covers that plus the copy and swap, with room to spare.
+        internal const int InstallerQuitWaitMinutes = 10;
+        internal const int InstallerWaitMinutes = 20;
+
+        internal static string InstallerTimeoutMessage(int minutes)
+        {
+            return "The installer is still running after " + minutes + " minutes, so Setup stopped waiting. "
+                + "It was left to finish on its own: it either completes or puts the previous version back. "
+                + "Wait a few minutes, then run Setup again.";
+        }
+
         private static void KeepLast(List<string> lines, string value)
         {
             if (string.IsNullOrWhiteSpace(value)) return;
             if (lines.Count == 18) lines.RemoveAt(0);
             lines.Add(value.Trim());
         }
+    }
+
+    /// Setup stopped waiting for the installer; the installer itself was left running.
+    internal sealed class InstallerStillRunning : TimeoutException
+    {
+        public InstallerStillRunning(string message) : base(message) { }
     }
 }

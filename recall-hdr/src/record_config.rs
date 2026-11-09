@@ -462,6 +462,7 @@ pub fn apply_patch(base: &Config, patch: &Value) -> Result<PatchOutcome, String>
     check_keys(schema, patch_map, "")?;
     // A legacy `recording.save_hotkey` moves the full-buffer preset.
     let patch = crate::record_hotkeys::rewrite_legacy_patch(&base.recording, patch);
+    let patch = crate::record_actions::unhide_on_enable(patch);
     let mut merged = before.clone();
     merge_json(&mut merged, &patch);
     let mut config: Config = serde_json::from_value(merged).map_err(|e| format!("invalid config: {e}"))?;

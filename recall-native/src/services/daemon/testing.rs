@@ -13,9 +13,8 @@ impl DaemonClient {
                 "recording": {
                     "codec": "h264", "fps": 60, "bitrate_mbps": 25, "quality": "balanced",
                     "audio_sources": [
-                        {"id": "mic", "kind": "input", "name": "Microphone"},
-                        {"id": "system-output", "kind": "output", "name": "System output"},
-                        {"id": "communications-output", "kind": "output", "name": "Communications", "communications": true}
+                        {"id": "game", "kind": "game", "name": "Game"},
+                        {"id": "mic", "kind": "input", "name": "Microphone"}
                     ]
                 },
                 "storage": {"demo_drive": 0, "cap_gb": 0, "cache_gib": 2, "cached_mib": 512}
@@ -58,7 +57,7 @@ mod tests {
         let snapshot = client.snapshot().config.unwrap();
         assert_eq!(snapshot["storage"]["cached_mib"], 0);
         assert_eq!(snapshot["storage"]["cache_gib"], 2);
-        assert_eq!(snapshot["recording"]["audio_sources"].as_array().unwrap().len(), 3);
+        assert_eq!(snapshot["recording"]["audio_sources"].as_array().unwrap().len(), 2, "the first-run profile: Game and Microphone");
         for command in [DaemonCommand::Quit, DaemonCommand::Resume, DaemonCommand::RecordToggle, DaemonCommand::StoragePreview(1)] {
             assert!(!client.send_testing(command));
         }
