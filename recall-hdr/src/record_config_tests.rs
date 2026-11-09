@@ -403,8 +403,8 @@ fn audio_sources_survive_a_patch_and_a_toml_round_trip() {
     let store = temp_store("sources");
     let base = store.load();
     let sources = &base.recording.audio_sources;
-    assert_eq!(sources.iter().take(2).map(|s| s.id.as_str()).collect::<Vec<_>>(), ["mic", "system-output"]);
-    assert!((2..=3).contains(&sources.len()));
+    assert_eq!(sources.iter().take(2).map(|s| s.id.as_str()).collect::<Vec<_>>(), ["game", "mic"]);
+    assert_eq!(sources.len(), 2, "no System or Communications output");
     let patch = json!({"recording": {"audio_sources": [
         {"id": "game", "kind": "game", "name": "Game"},
         {"id": "in-2", "kind": "input", "device": "Microphone (USB Audio Device)", "name": "Voice", "gain_db": -3.5},
