@@ -250,3 +250,40 @@ fn a_retarget_quit_after_the_shutdown_flag_says_isnt_responding() {
     assert!(shared.send_retarget_quit());
     assert_eq!(shared.send_line(SAVE), Sent::NotResponding);
 }
+
+/// Gate (v0.1.1): a shutdown during a pause's grace keeps "Recording is paused" (only a
+/// retarget's refusal becomes "isn't responding"), whether the stop lands while the quit
+/// window is open (`shutdown_refusal`) or before the pause's quit goes out (`send_quit`).
+#[test]
+fn a_shutdown_inside_a_pause_grace_still_says_paused() {
+    let sup = running_fake_engine(3_000);
+    switch_engine(&sup, None, Sent::Paused);
+    assert_eq!(refused_in_quit_window(&sup, SAVE).reason(), Some(PAUSED), "setup: the pause's quit window");
+    sup.shared.request_stop(Duration::from_millis(50));
+    assert_eq!(refused_now(&sup, SAVE), Sent::Paused, "shutdown_refusal path");
+    sup.shutdown(Duration::from_millis(50));
+    let shared = Shared::new(None);
+    shared.attach_writer(Some(Box::new(std::io::sink())));
+    shared.set_desired(None, Sent::Paused);
+    shared.request_stop(Duration::ZERO);
+    assert!(shared.send_retarget_quit());
+    assert_eq!(shared.send_line(SAVE), Sent::Paused, "send_quit path");
+}
+
+/// A planned restart's quit window ("Recorder is restarting") is a retarget's too: a
+/// shutdown makes it "isn't responding", in both paths.
+#[test]
+fn a_shutdown_inside_a_planned_restart_says_isnt_responding() {
+    let shared = Shared::new(None);
+    shared.attach_writer(Some(Box::new(std::io::sink())));
+    shared.set_desired(Some(EngineSpec::default()), Sent::Restarting);
+    assert!(shared.send_retarget_quit());
+    shared.request_stop(Duration::ZERO);
+    assert_eq!(shared.send_line(SAVE), Sent::NotResponding, "shutdown_refusal path");
+    let shared = Shared::new(None);
+    shared.attach_writer(Some(Box::new(std::io::sink())));
+    shared.set_desired(Some(EngineSpec::default()), Sent::Restarting);
+    shared.request_stop(Duration::ZERO);
+    assert!(shared.send_retarget_quit());
+    assert_eq!(shared.send_line(SAVE), Sent::NotResponding, "send_quit path");
+}

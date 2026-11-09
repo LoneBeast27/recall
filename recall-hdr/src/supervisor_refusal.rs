@@ -66,20 +66,20 @@ impl Shared {
     /// gets its clean finish (`supervisor_stdin.rs`). From here on every line is refused
     /// with `refusal` (set under the same lock), until the next engine's stdin.
     /// Shutdown is no game switch: once its stop flag is set (read under this lock, as
-    /// [`Self::shutdown_refusal`] writes under it) a retarget's quit says "isn't responding".
+    /// [`Self::shutdown_refusal`] writes under it) a retarget's quit says "isn't responding"
+    /// ([`at_shutdown`]).
     pub(super) fn send_quit(&self, refusal: Sent) -> bool {
         let mut g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
-        g.quitting = Some(if self.stop_requested() { Sent::NotResponding } else { refusal });
+        g.quitting = Some(if self.stop_requested() { at_shutdown(refusal) } else { refusal });
         g.queue.as_ref().is_some_and(|queue| queue.send_quit(r#"{"cmd":"quit"}"#))
     }
 
-    /// Shutdown, after its stop flag: a quit window already open (a retarget's grace, its
-    /// "Switching games") now says "isn't responding" until the engine is gone.
+    /// Shutdown, after its stop flag: a retarget's quit window already open ("Switching
+    /// games", "Recorder is restarting") now says "isn't responding" until the engine is
+    /// gone; a pause's or a stop's refusal stands ([`at_shutdown`]).
     pub(super) fn shutdown_refusal(&self) {
         let mut g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
-        if g.quitting.is_some() {
-            g.quitting = Some(Sent::NotResponding);
-        }
+        g.quitting = g.quitting.map(at_shutdown);
     }
 
     /// The quit for a retarget, refused with the last retarget's reason read under the
@@ -87,6 +87,16 @@ impl Shared {
     pub(super) fn send_retarget_quit(&self) -> bool {
         let g = self.desired.lock().unwrap_or_else(|p| p.into_inner());
         self.send_quit(g.2)
+    }
+}
+
+/// A quit window's refusal once shutdown runs: a retarget's (a game switch, a planned
+/// restart) promised an engine that will not come, so "isn't responding". A pause's
+/// "Recording is paused" and a stop's "waiting for a game" stay true: they promised none.
+fn at_shutdown(refusal: Sent) -> Sent {
+    match refusal {
+        Sent::Switching | Sent::Restarting => Sent::NotResponding,
+        other => other,
     }
 }
 
