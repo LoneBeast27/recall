@@ -40,6 +40,11 @@ struct Inner {
     /// The last attach withheld `sync` (the shape at the attach differed from the live list):
     /// that engine stays held, so it must be respawned (N3), whatever the list does after.
     withheld: bool,
+    /// The last attach sent `sync` (the engine records): a later restatement sends one too.
+    synced: bool,
+    /// An audio line to the attached engine was dropped by a full queue (F-1): the engine holds
+    /// on the gap, and the intent is restated until one restatement is queued whole.
+    dirty: bool,
 }
 
 impl SpawnSources {
@@ -110,22 +115,38 @@ impl SpawnSources {
         (audio_intent::stamped(line, g.seq), g.seq)
     }
 
-    /// What the engine must ack (`status.audio_seq`).
+    /// What the engine must ack (`status.audio_seq`): the last line actually queued.
     pub(super) fn last_sent(&self) -> u64 {
         self.lock().sent
+    }
+
+    /// A line was dropped and no whole restatement has been queued since (F-1).
+    pub(super) fn dirty(&self) -> bool {
+        self.lock().dirty
     }
 }
 
 impl super::Shared {
     /// One audio line to the engine with its sequence number (the caller holds `child_stdin`).
-    /// A line for an attached engine counts as sent even when a full queue drops it, so the ack
-    /// watch re-sends it (`record_audio_ack`); one refused at a quit or with no engine does not.
+    /// Only a queued line counts as sent (F-1). One a full queue drops leaves a gap in the seqs:
+    /// the engine holds every device track on it, and `dirty` makes the controller restate.
     pub(super) fn queue_audio(&self, g: &super::EngineStdin, line: &str) -> Sent {
         let (line, seq) = self.spawn_sources.stamp(line);
-        if g.quitting.is_none() && g.queue.is_some() {
+        let attached = g.quitting.is_none() && g.queue.is_some();
+        let sent = self.queue_line(g, &line);
+        if sent.queued() {
             self.spawn_sources.lock().sent = seq;
+        } else if attached {
+            self.spawn_sources.lock().dirty = true; // the safe state: restate until whole
         }
-        self.queue_line(g, &line)
+        sent
+    }
+
+    /// After a dropped line: queue a whole restatement now (it may drop again; `dirty` stays).
+    pub(super) fn restate_if_dirty(&self, g: &super::EngineStdin) {
+        if self.spawn_sources.dirty() && g.quitting.is_none() && g.queue.is_some() {
+            self.restate(g, false);
+        }
     }
 
     /// Right after a spawn shows its pid (review R2-audio-r9-1): when its attach withheld `sync`
@@ -152,24 +173,40 @@ impl super::Shared {
     /// that the current list no longer records the same way, then `sync`, which releases the
     /// engine's held tracks. No `sync` when the track shape moved: that engine stays held until
     /// the respawn quits it (B5). The caller holds `child_stdin`. False: a line was not queued.
-    pub(super) fn restate(&self, g: &super::EngineStdin) -> bool {
-        let mut lines: Vec<String> = Vec::new();
+    pub(super) fn restate(&self, g: &super::EngineStdin, at_attach: bool) -> bool {
+        // The engine's ack counts on from this line's seq (F-1).
+        let mut lines: Vec<String> = vec![serde_json::json!({"cmd": "restate"}).to_string()];
         if let Some(now) = self.spawn_mute.get() {
             lines.push(crate::record_dispatch::mic_line(now, false)); // never a press (R2-audio-r9-3)
         }
         let (baked, current) = self.spawn_sources.baked_and_current();
         lines.extend(audio_intent::restatement(&baked, &current).iter().map(Value::to_string));
         let same = audio_intent::same_shape(&baked, &current);
-        if same {
+        // A running engine (synced at its attach) always gets `sync` again: it releases the hold
+        // a gap set. At the attach only when the shape held (else no sync and respawn, N3).
+        let sync = same || (!at_attach && self.spawn_sources.lock().synced);
+        if sync {
             lines.push(serde_json::json!({"cmd": "sync"}).to_string());
         }
-        self.spawn_sources.lock().withheld = !same; // no sync: respawn at the pid (N3)
-        let all = lines.iter().fold(true, |all, l| self.queue_audio(g, l).queued() && all);
-        if !all {
+        if at_attach {
+            let mut s = self.spawn_sources.lock();
+            s.withheld = !same; // no sync: respawn at the pid (N3)
+            s.synced = same;
+        }
+        let all = queue_all(&lines, |l| self.queue_audio(g, l).queued());
+        if all {
+            self.spawn_sources.lock().dirty = false;
+        } else {
             crate::log!("supervisor: the engine's audio restatement could not be queued; its device tracks stay held");
         }
         all
     }
+}
+
+/// Queue `lines` in order and stop at the first one not queued (F-1): never a `sync` after a
+/// dropped line, which would release the engine's hold without the dropped change.
+pub(super) fn queue_all(lines: &[String], mut send: impl FnMut(&str) -> bool) -> bool {
+    lines.iter().all(|l| send(l))
 }
 
 impl super::Supervisor {
@@ -187,7 +224,9 @@ impl super::Supervisor {
         let kept: Vec<String> = s.spawn_sources.baked_and_current().1.into_iter().map(|c| c.id).collect();
         let below = s.spawn_sources.below_floor();
         let lines: Vec<&Value> = lines.iter().filter(|l| !below || l["id"].as_str().is_some_and(|id| kept.iter().any(|k| k.trim() == id.trim()))).collect();
-        lines.iter().fold(Sent::Queued, |sent, line| sent.then(s.queue_audio(&g, &line.to_string())))
+        let sent = lines.iter().fold(Sent::Queued, |sent, line| sent.then(s.queue_audio(&g, &line.to_string())));
+        s.restate_if_dirty(&g); // a line dropped: re-queue the whole intent (F-1)
+        sent
     }
 
     /// The sequence number of the last audio line queued (`status.audio_seq` acks it).
@@ -199,6 +238,11 @@ impl super::Supervisor {
     pub fn restate_audio(&self) -> bool {
         let s = &self.shared;
         let g = s.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
-        g.quitting.is_none() && g.queue.is_some() && s.restate(&g)
+        g.quitting.is_none() && g.queue.is_some() && s.restate(&g, false)
+    }
+
+    /// An audio line was dropped and no whole restatement is queued since (`record_audio_ack`).
+    pub fn audio_dirty(&self) -> bool {
+        self.shared.spawn_sources.dirty()
     }
 }
