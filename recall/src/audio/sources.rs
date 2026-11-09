@@ -268,6 +268,23 @@ pub fn startup_released() -> bool {
     early.synced && early.staged.is_none()
 }
 
+/// The controller's `quit` was read (no line reaches this engine after it): every listed device
+/// track is retired, so from its next packet it stores silence until the exit, the long
+/// recording's finalise included. The game's process tree and app tracks keep recording: no
+/// line can change what they capture. Never undone (the engine is ending).
+pub fn hold_for_quit() {
+    if let Ok(states) = STATES.lock() {
+        for (_, _, state) in states.iter() {
+            if let State::Live(ring) = state {
+                if ring.source != crate::edit_model::SOURCE_GAME_PROCESS && !ring.source.starts_with(crate::edit_model::APP_SOURCE_PREFIX) {
+                    ring.retire();
+                }
+            }
+        }
+    }
+    eprintln!("[recall] stdin: quit; every device audio track stores silence until the exit");
+}
+
 /// The startup hold of every listed track ends (called with `EARLY` held; lock order EARLY,
 /// then STATES).
 fn release_startup_holds() {

@@ -259,6 +259,12 @@ pub(crate) fn starts_held(hold: bool, process_loopback: bool) -> bool {
 }
 
 impl TrackRing {
+    /// Tests: a ring for `spec` with the saved source tag `source` (no WASAPI).
+    #[cfg(test)]
+    pub(crate) fn for_source_for_test(spec: &super::SourceSpec, source: &'static str) -> Self {
+        Self::for_source(spec, source, 2, String::new())
+    }
+
     /// A 48 kHz stereo input ring on the Windows default, fed by the test (no WASAPI).
     #[cfg(test)]
     pub(crate) fn input_for_test(name: &'static str) -> Self {

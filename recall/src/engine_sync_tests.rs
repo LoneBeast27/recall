@@ -197,3 +197,29 @@ fn the_a4_sibling_conditions_hold() {
     assert_eq!(MuteNow::read().presses, presses, "a restatement is no press: nothing is adopted");
     drop(ring);
 }
+
+/// The quit-grace gap: after `quit` the engine reads no line, so a mute sent then could never
+/// reach it. The reader holds every device track before `quit` is set: the long recording's
+/// finalise stores silence for them; the game's process tree keeps recording.
+#[test]
+fn a_quit_holds_every_device_track_before_the_finalise() {
+    let _restore = restore();
+    let _reopen = Reopen;
+    audio::set_mic_muted(false);
+    let mic = held_listed("quit-mic");
+    mic.release_startup_hold();
+    assert!(!silent(&mic), "recording before the quit");
+    let spec = crate::audio::sources::SourceSpec { communications: false, device_id: String::new(), id: "quit-game".into(), kind: "game".into(), device: String::new(), exe: String::new(), name: "Game".into(), gain_db: 0.0, mic_mute: None };
+    let game = Arc::new(TrackRing::for_source_for_test(&spec, crate::edit_model::SOURCE_GAME_PROCESS));
+    audio::sources::register_for_test("quit-game", &game);
+    let quit = Arc::new(AtomicBool::new(false));
+    let end = read_early(std::io::Cursor::new("{\"cmd\":\"quit\"}\n"), |_| {});
+    assert_eq!(end, crate::stdin_reader::ReaderEnd::Quit);
+    crate::stdin_reader::reader_ended(end, &quit, &AtomicBool::new(false)); // what `finish` does next
+    assert!(quit.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(mic.retired() && silent(&mic), "the mic stores silence for the finalise");
+    game.push_live(&[0.5; 960], MuteNow::read());
+    assert!(!game.retired() && game.snapshot(0.01).iter().any(|s| *s != 0.0), "the game's process tree records on");
+    let src = include_str!("engine_stdin.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(src.contains("if end == stdin_reader::ReaderEnd::Quit { audio::sources::hold_for_quit(); }"), "read_early holds before it returns (then `finish` sets quit)");
+}
