@@ -178,6 +178,17 @@ pub(crate) trait Transitions {
         self.island("Last clip dropped", &format!("{started} started"));
     }
 
+    /// Design P17, every tick: a privacy release still draining while a game is wanted keeps
+    /// that game unrecorded; after 30 s the island says so, once ("Finishing the last clip").
+    fn drain_block_notice(&mut self) {
+        let EngineTarget::Window(next) = self.wanted_now() else { return };
+        let now = self.awake_now();
+        if self.activity_mut().drain_notice_due(now, true) {
+            log!("record: the released engine is still saving; {} starts recording once it is saved", next.exe);
+            self.island(crate::record_activity::DRAIN_NOTICE_TITLE, &crate::record_activity::drain_notice_detail(&next.name));
+        }
+    }
+
     /// A long recording stopped for a retarget: the game closed when the
     /// planner says so, or when a closed game's drain was running (a window
     /// that waited for the drain commits on the tick it runs out).
