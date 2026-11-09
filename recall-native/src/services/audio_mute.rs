@@ -131,6 +131,12 @@ pub fn held(source: &Source, lists: Option<&DeviceLists>, engine: Option<bool>) 
     engine.unwrap_or_else(|| source.kind.uses_inputs() && matches!(crate::services::audio_pick::source_found(source, lists), Found::Unsure { .. }))
 }
 
+/// The recorder's `held` for source `id` (`status.audio[]`): both ids trimmed the same way, as
+/// the engine trims the config's (controller review P3-1).
+pub fn engine_held(audio: &[crate::services::daemon::EngineAudio], id: &str) -> Option<bool> {
+    audio.iter().find(|a| a.id.trim() == id.trim()).and_then(|a| a.held)
+}
+
 /// The meter's bar, hold line and number for a strip (levels after the gain): flat while Alt+M
 /// mutes the source, or while the recorder holds it ([`held`], gate review P2-e), as that is
 /// what the clip records. "—" when the meter has no live reading.
