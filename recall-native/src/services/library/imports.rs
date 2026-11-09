@@ -350,20 +350,20 @@ mod tests {
         assert!(is_imported(r"D:\Medal\x.mp4", Path::new(r"G:\Recall"), &imported, &former));
     }
 
-    /// The editor opens a clip by its canonical path (`\\?\L:\...`); the folder list holds plain
+    /// The editor opens a clip by its canonical path (`\\?\Y:\...`); the folder list holds plain
     /// paths. Ownership must not depend on which form either side is in.
     #[test]
     fn a_verbatim_path_to_an_owned_clip_is_owned() {
-        let recordings = Path::new(r"L:\Clips\Recall");
-        assert!(is_owned(Path::new(r"\\?\L:\Clips\Recall\a.mp4"), recordings, &[]), "verbatim clip, plain recordings");
-        assert!(is_owned(Path::new(r"l:/clips/recall/a.mp4"), Path::new(r"\\?\L:\Clips\Recall\"), &[]), "plain clip, verbatim recordings");
+        let recordings = Path::new(r"Y:\Clips\Recall");
+        assert!(is_owned(Path::new(r"\\?\Y:\Clips\Recall\a.mp4"), recordings, &[]), "verbatim clip, plain recordings");
+        assert!(is_owned(Path::new(r"y:/clips/recall/a.mp4"), Path::new(r"\\?\Y:\Clips\Recall\"), &[]), "plain clip, verbatim recordings");
         assert!(is_owned(Path::new(r"\\?\D:\Old\a.mp4"), recordings, &[r"d:/old/".to_owned()]), "former folder");
         assert!(is_owned(Path::new(r"\\?\UNC\nas\clips\a.mp4"), Path::new(r"\\NAS\Clips"), &[]), "network share");
-        assert!(!is_owned(Path::new(r"\\?\L:\Clips\Recall\sub\a.mp4"), recordings, &[]), "still only the top level");
-        assert!(!is_owned(Path::new(r"\\?\L:\Clips\Recall2\a.mp4"), recordings, &[]));
-        let imported = vec![r"L:\Clips".to_owned()];
-        assert!(!is_imported(r"\\?\L:\Clips\Recall\a.mp4", recordings, &imported, &[]), "an owned clip is never imported");
-        assert!(is_imported(r"\\?\L:\Clips\Medal\a.mp4", recordings, &imported, &[]), "inside a linked folder, verbatim");
+        assert!(!is_owned(Path::new(r"\\?\Y:\Clips\Recall\sub\a.mp4"), recordings, &[]), "still only the top level");
+        assert!(!is_owned(Path::new(r"\\?\Y:\Clips\Recall2\a.mp4"), recordings, &[]));
+        let imported = vec![r"Y:\Clips".to_owned()];
+        assert!(!is_imported(r"\\?\Y:\Clips\Recall\a.mp4", recordings, &imported, &[]), "an owned clip is never imported");
+        assert!(is_imported(r"\\?\Y:\Clips\Medal\a.mp4", recordings, &imported, &[]), "inside a linked folder, verbatim");
     }
 
     /// Edits of imported clips already saved under the verbatim path's hash keep their name.

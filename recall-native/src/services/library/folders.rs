@@ -214,7 +214,7 @@ pub fn check_cache_overlap(folders: &Folders) -> Option<String> {
 
 /// Case-insensitive, separator-normalized, no trailing slash.
 /// The comparable form of a path, used wherever ownership, links and folder membership are
-/// decided: no verbatim prefix (`\\?\L:\x` is `L:\x`, `\\?\UNC\nas\x` is `\\nas\x`; the editor
+/// decided: no verbatim prefix (`\\?\Y:\x` is `Y:\x`, `\\?\UNC\nas\x` is `\\nas\x`; the editor
 /// holds a clip by its canonical path, the folder list by the plain one), `\` separators, no
 /// trailing `\`, lowercase.
 pub fn folder_key(folder: &str) -> String {

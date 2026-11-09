@@ -351,7 +351,7 @@ fn a_first_run_budget_on_the_system_drive_is_2_gib() {
     use super::drive::is_system_volume;
     assert!(is_system_volume(Some("C:\\"), Some("C:")));
     assert!(is_system_volume(Some("D:\\"), Some("d:")), "SystemDrive is not always C:");
-    assert!(!is_system_volume(Some("L:\\"), Some("C:")));
+    assert!(!is_system_volume(Some("Y:\\"), Some("C:")));
     assert!(is_system_volume(Some("C:\\"), None), "no SystemDrive: C:");
     assert!(is_system_volume(None, Some("C:")), "unknown volume: the smaller budget");
     assert!(!is_system_volume(Some(r"\\?\VOLUME{1234}\"), Some("C:")));

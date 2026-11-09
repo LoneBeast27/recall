@@ -10,7 +10,7 @@ namespace Recall.Setup.Tests
 
         private static void UninstallOnlyManifest()
         {
-            const string root = @"L:\S\Programs\Recall\";
+            const string root = @"Y:\S\Programs\Recall\";
             var manifest = new List<ManifestEntry> { Entry("recall.exe"), Entry("changed.dll"), Entry("RecallSetup.exe") };
             var files = UninstallPlan.ProgramFiles(root, manifest, new string[0], e => e.Path != "changed.dll");
             Check(files.Count == 2 && files.Contains(root + "recall.exe") && files.Contains(root + "RecallSetup.exe"), "listed and unchanged only: " + string.Join(",", files.ToArray()));
@@ -20,7 +20,7 @@ namespace Recall.Setup.Tests
 
         private static void UninstallNeverOutside()
         {
-            const string root = @"L:\S\Programs\Recall\";
+            const string root = @"Y:\S\Programs\Recall\";
             var evil = new List<ManifestEntry> {
                 Entry(@"..\Other\x.dll"), Entry(@"C:\Windows\x.dll"), Entry(@"\Windows\x.dll"), Entry(@"sub\..\..\x.dll"),
                 Entry("clips\\game.mp4"), Entry(InstallManifest.Name), Entry("ok.dll"), Entry("a/b.dll"), Entry("*.dll")
@@ -28,7 +28,7 @@ namespace Recall.Setup.Tests
             var protectedRoots = new[] { root + @"clips\" };
             var files = UninstallPlan.ProgramFiles(root, evil, protectedRoots, e => true);
             Check(files.Count == 1 && files[0] == root + "ok.dll", "only ok.dll: " + string.Join(",", files.ToArray()));
-            Check(!UninstallPlan.Allowed(@"L:\S\Programs\Recall2\x.dll", root, new string[0]), "a sibling folder is outside");
+            Check(!UninstallPlan.Allowed(@"Y:\S\Programs\Recall2\x.dll", root, new string[0]), "a sibling folder is outside");
             Check(!UninstallPlan.Allowed(root + "cache", root, new[] { root + @"cache\clips\" }), "a folder holding a clip folder is kept");
             Check(!UninstallPlan.Allowed(root, root, new string[0]), "the folder itself is never a target");
             foreach (var f in files) Check(f.StartsWith(root, StringComparison.OrdinalIgnoreCase), "inside: " + f);
@@ -48,8 +48,8 @@ namespace Recall.Setup.Tests
 
         private static void KeptNoteCounts()
         {
-            var note = CachePlan.KeptNote(new[] { @"staging\kept\a.mp4", @"video\0123456789abcdef.mp4", "owned.json" }, @"L:\R\cache");
-            Check(note == @"2 clip copies kept in L:\R\cache, with 1 other file Recall can't recreate.", note);
+            var note = CachePlan.KeptNote(new[] { @"staging\kept\a.mp4", @"video\0123456789abcdef.mp4", "owned.json" }, @"Y:\R\cache");
+            Check(note == @"2 clip copies kept in Y:\R\cache, with 1 other file Recall can't recreate.", note);
             Check(CachePlan.KeptNote(new[] { @"staging\kept\a.MKV" }, "C") == "1 clip copy kept in C.", "one copy");
             Check(CachePlan.KeptNote(new string[0], "C") == null, "nothing kept, no note");
         }
@@ -59,7 +59,7 @@ namespace Recall.Setup.Tests
             const string temp = @"C:\Users\u\AppData\Local\Temp\";
             const string ours = temp + "Recall-Uninstall-0123456789abcdef0123456789abcdef";
             Check(TempCopy.IsOurFolder(ours, temp), "its own folder");
-            Check(!TempCopy.IsOurFolder(@"L:\Programs\Recall", temp), "never the install folder");
+            Check(!TempCopy.IsOurFolder(@"Y:\Programs\Recall", temp), "never the install folder");
             Check(!TempCopy.IsOurFolder(temp.TrimEnd('\\'), temp), "never %TEMP% itself");
             Check(!TempCopy.IsOurFolder(temp + "Recall-Uninstall-x", temp), "exact name only");
             Check(!TempCopy.IsOurFolder(temp + @"sub\Recall-Uninstall-0123456789abcdef0123456789abcdef", temp), "directly in %TEMP% only");
@@ -81,10 +81,10 @@ namespace Recall.Setup.Tests
 
         private static void RunValueAndFolders()
         {
-            const string root = @"L:\S\Programs\Recall\";
-            Check(RunValue.PointsInto("\"L:\\S\\Programs\\Recall\\recall-hdr.exe\" --record", root), "quoted, with --record");
+            const string root = @"Y:\S\Programs\Recall\";
+            Check(RunValue.PointsInto("\"Y:\\S\\Programs\\Recall\\recall-hdr.exe\" --record", root), "quoted, with --record");
             Check(!RunValue.PointsInto("\"C:\\Other\\recall-hdr.exe\" --record", root), "another folder");
-            Check(!RunValue.PointsInto("\"L:\\S\\Programs\\Recall2\\recall-hdr.exe\"", root), "a sibling folder");
+            Check(!RunValue.PointsInto("\"Y:\\S\\Programs\\Recall2\\recall-hdr.exe\"", root), "a sibling folder");
             var json = ClipFolders.FromFoldersJson("{\"recordings\":\"D:\\\\Clips\",\"imported\":[\"E:\\\\Old\"],\"former_recordings\":[\"F:\\\\Was\"]}");
             Check(json.Count == 3 && json.Contains(@"D:\Clips") && json.Contains(@"E:\Old") && json.Contains(@"F:\Was"), string.Join(",", json.ToArray()));
             var toml = ClipFolders.FromConfigToml("[recording]\noutput_dir = \"D:\\\\Videos\\\\Recall\"\n[x]\noutput_dir = 'E:\\Raw'\n");
