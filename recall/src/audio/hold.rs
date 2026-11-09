@@ -165,7 +165,12 @@ impl TrackRing {
         self.live.startup.store(false, Ordering::SeqCst);
     }
 
-    #[cfg(test)]
+    /// Whether this track stores silence whatever Alt+M says right now: an unsure stream held
+    /// (a line-in until picked included) or the startup hold. Reported in `status.audio[].held`.
+    pub(crate) fn held_now(&self) -> bool {
+        self.live.held.load(Ordering::SeqCst) || self.startup_held()
+    }
+
     pub(crate) fn startup_held(&self) -> bool {
         self.live.startup.load(Ordering::SeqCst)
     }

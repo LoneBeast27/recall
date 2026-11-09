@@ -241,6 +241,9 @@ pub struct AudioOpened {
     /// controller to save as the source's own (`audio::hold`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub adopt_id: Option<String>,
+    /// Silence is stored whatever Alt+M says (an unsure sibling held, or the startup hold): the
+    /// Audio page meter shows "Held" from this, not from its own guess (merge-gate P2).
+    pub held: bool,
 }
 
 #[derive(Serialize)]

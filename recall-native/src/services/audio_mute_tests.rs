@@ -174,11 +174,30 @@ fn a_held_input_meters_flat_and_says_held() {
     // Saved "Mic (Box)" with id A; present: "Mic (Box)" (id B) and "2- Mic (Box)" (id C).
     let twins = lists(&[("Mic (Box)", "{B}", Some(4)), ("2- Mic (Box)", "{C}", Some(4))]);
     let source = line_in("Mic (Box)", "{A}");
-    assert!(held(&source, Some(&twins)), "an unsure sibling is held");
-    assert_eq!(meter_reading((-12.0, -6.0, true), false, true, held(&source, Some(&twins))), (-90.0, -90.0, "Held".to_owned()), "Alt+M off: still flat");
+    assert!(held(&source, Some(&twins), None), "an unsure sibling is held");
+    assert_eq!(meter_reading((-12.0, -6.0, true), false, true, held(&source, Some(&twins), None)), (-90.0, -90.0, "Held".to_owned()), "Alt+M off: still flat");
     let own = lists(&[("Mic (Box)", "{A}", Some(4))]);
-    assert!(!held(&source, Some(&own)), "its own endpoint: not held");
+    assert!(!held(&source, Some(&own), None), "its own endpoint: not held");
     assert_eq!(meter_reading((-12.0, -6.0, true), false, false, false), (-12.0, -6.0, "-12 dB".to_owned()));
     assert_eq!(meter_reading((-12.0, -6.0, true), true, true, false), (-90.0, -90.0, "Muted".to_owned()));
     assert_eq!(meter_reading((-12.0, -6.0, false), false, false, true).2, "—", "no reading: a dash");
+}
+
+/// Merge-gate P2: the recorder says what it does. Its `held` wins over the guess from the
+/// device lists (a release they have not caught up with, an adopted id it could not use); an
+/// older recorder that sends no `held` leaves the guess.
+#[test]
+fn the_recorders_held_wins_over_the_device_list_guess() {
+    let twins = lists(&[("Mic (Box)", "{B}", Some(4)), ("2- Mic (Box)", "{C}", Some(4))]);
+    let source = line_in("Mic (Box)", "{A}");
+    assert!(!held(&source, Some(&twins), Some(false)), "the recorder records it live: not Held");
+    let own = lists(&[("Mic (Box)", "{A}", Some(4))]);
+    assert!(held(&source, Some(&own), Some(true)), "the recorder holds it (startup hold): Held");
+    assert!(held(&source, Some(&twins), None), "no word from the recorder: the guess");
+    let status: crate::services::daemon::EngineStatus = serde_json::from_value(serde_json::json!({"audio": [{"id": "line-in", "opened": "x", "live": true, "held": false}]})).unwrap();
+    assert_eq!(status.audio[0].held, Some(false));
+    let old: crate::services::daemon::EngineStatus = serde_json::from_value(serde_json::json!({"audio": [{"id": "line-in", "live": true}]})).unwrap();
+    assert_eq!(old.audio[0].held, None, "an older recorder: no field");
+    let view = include_str!("../views/audio_strip.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(view.contains("held(source, lists, engine_held)"), "the strip passes the recorder's word");
 }
