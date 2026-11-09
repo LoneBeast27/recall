@@ -160,6 +160,10 @@ pub fn from_env() -> Result<Vec<SourceSpec>, String> {
 pub fn resolve_for_start(get: impl Fn(&str) -> Option<String>) -> Result<Vec<SourceSpec>, String> {
     let mut list = resolve(get)?;
     let staged = lock_early().staged.clone();
+    // A source retired before the listing (removed or disabled during the spawn, F-3) gets no
+    // track at all: an app or process-tree track never starts held, so it would record.
+    let retired: Vec<String> = staged.iter().flatten().filter(|s| s.3).map(|s| s.0.trim().to_owned()).collect();
+    list.retain(|s| !retired.iter().any(|r| *r == s.id.trim()));
     for (id, mic_mute, device_id, _) in staged.into_iter().flatten() {
         for spec in list.iter_mut().filter(|s| s.id.trim() == id.trim()) {
             if let Some(on) = mic_mute {

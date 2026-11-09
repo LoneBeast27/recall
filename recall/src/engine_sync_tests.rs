@@ -328,3 +328,15 @@ fn a_twin_re_pick_silences_the_old_streams_next_packet() {
     mic.push_live_read(&[0.5; 960], MuteNow::read);
     assert!(mic.snapshot(0.01).iter().any(|s| *s != 0.0), "the reopened stream records");
 }
+
+/// F-3: a source removed during the spawn (the restatement's `retire`, read before the tracks
+/// are listed): it gets no track, so an app track (never held at start) records nothing.
+#[test]
+fn a_retire_read_before_the_listing_starts_no_track() {
+    let _restore = restore();
+    let _reopen = Reopen;
+    read_early(std::io::Cursor::new("{\"cmd\":\"set_source\",\"id\":\"app-1\",\"retire\":true}\n"), |_| {});
+    let env = r#"[{"id":"game","kind":"game","name":"Game"},{"id":"app-1","kind":"app","name":"Chat","exe":"chat.exe"}]"#;
+    let list = audio::sources::resolve_for_start(|key| (key == "RECALL_AUDIO_SOURCES").then(|| env.to_owned())).unwrap();
+    assert_eq!(list.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), vec!["game"], "the removed app opens nothing");
+}
