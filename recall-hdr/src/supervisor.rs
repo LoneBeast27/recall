@@ -186,9 +186,10 @@ impl Supervisor {
         self.shared.unpause();
     }
 
-    /// The mic mute every later spawn starts with, a crash respawn included (`supervisor_mute.rs`).
-    pub fn set_mic_muted(&self, muted: bool) {
-        self.shared.spawn_mute.set(muted);
+    /// Alt+M: the mic mute every later spawn starts with, a crash respawn included, and the
+    /// `set_mic_mute` line to the live engine, as one step (`supervisor_mute.rs`).
+    pub fn set_mic_muted(&self, muted: bool) -> Sent {
+        self.shared.set_mute_and_send(muted)
     }
 
     /// The last engine `hello` and `status` lines (raw JSON), for late joiners.
@@ -416,18 +417,15 @@ impl Shared {
         self.desired.lock().unwrap_or_else(|p| p.into_inner()).0
     }
 
-    fn set_child_stdin(&self, stdin: Option<std::process::ChildStdin>) {
-        self.attach_writer(stdin.map(|s| Box::new(s) as Box<dyn std::io::Write + Send>));
+    /// A spawned engine's stdin; `baked` is the mute its environment was given.
+    fn set_child_stdin(&self, stdin: Option<std::process::ChildStdin>, baked: Option<bool>) {
+        self.attach_spawned(stdin.map(|s| Box::new(s) as Box<dyn std::io::Write + Send>), baked);
     }
 
     /// The engine's stdin (tests inject a writer): its own writer thread and queue.
+    /// No mute check: the baked mute is taken as the current one.
     fn attach_writer(&self, w: Option<Box<dyn std::io::Write + Send>>) {
-        let queue = w.map(stdin::StdinQueue::start);
-        let mut g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
-        if queue.is_some() {
-            g.quitting = None; // a new engine takes lines
-        }
-        g.queue = queue; // the old queue closes: its writer ends after its current write
+        self.attach_spawned(w, self.spawn_mute.get());
     }
 
     /// Queue one JSON command line for the child, if one runs and was not told to quit.
@@ -435,6 +433,11 @@ impl Shared {
     /// (`supervisor_stdin.rs`).
     fn send_line(&self, line: &str) -> Sent {
         let g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
+        self.queue_line(&g, line)
+    }
+
+    /// [`send_line`](Self::send_line) under a `child_stdin` lock the caller holds.
+    fn queue_line(&self, g: &EngineStdin, line: &str) -> Sent {
         if let Some(refusal) = g.quitting {
             return refusal; // the engine was told to quit: it would never read this
         }
