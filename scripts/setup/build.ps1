@@ -55,6 +55,8 @@ $buildInfo = Join-Path $generatedRoot ("SetupBuildInfo-" + [Guid]::NewGuid().ToS
 Set-Content -LiteralPath $buildInfo -Encoding UTF8 -Value @"
 [assembly: System.Reflection.AssemblyVersion("$DisplayVersion.0")]
 [assembly: System.Reflection.AssemblyFileVersion("$DisplayVersion.0")]
+[assembly: System.Reflection.AssemblyTitle("Recall Setup")]
+[assembly: System.Reflection.AssemblyDescription("Recall Setup")]
 [assembly: System.Reflection.AssemblyProduct("Recall")]
 [assembly: System.Reflection.AssemblyCompany("LoneBeast27")]
 namespace Recall.Setup { internal static class SetupBuildInfo { public const string Version = "$DisplayVersion"; } }
