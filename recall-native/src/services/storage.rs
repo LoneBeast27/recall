@@ -35,6 +35,7 @@ mod lane;
 mod lane_brief;
 mod light;
 mod owned;
+mod prepare_leftovers;
 mod prefetch;
 mod probe;
 mod projects;
@@ -67,12 +68,13 @@ mod tests_budget_file;
 #[allow(unused_imports)]
 pub use drive::{DriveInfo, DriveKind, drive_info, drive_kind};
 pub(crate) use ffmpeg::{Seek, extract_frame, probe_duration};
-pub use ffmpeg::{OnLine, Run, binary, run_cancellable, run_cancellable_lines, run_hidden, run_watched};
+pub use ffmpeg::{OnLine, Run, binary, run_cancellable, run_cancellable_lines, run_hidden};
 pub use io_priority::close_helpers;
 #[allow(unused_imports)]
 pub use head::{ProbeClip, cancel_probe, probe_filter};
 #[allow(unused_imports)]
 pub use kept::{adopt_kept, sweep_kept};
+pub use prepare_leftovers::run_prepare;
 #[allow(unused_imports)]
 pub use light::light_copy;
 pub use probe::{ProbedClip, probe_clip};
