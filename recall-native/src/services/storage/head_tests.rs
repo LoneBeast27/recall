@@ -1,11 +1,9 @@
 //! Filter probe: which clips, which chunks, the head file round trip, cancelling.
 use super::*;
 
-fn scratch(tag: &str) -> PathBuf {
+fn scratch(tag: &str) -> crate::test_temp::TempDir {
     let nonce = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let dir = std::env::temp_dir().join(format!("recall-head-{tag}-{}-{nonce}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    crate::test_temp::TempDir::new(format!("recall-head-{tag}-{}-{nonce}", std::process::id()))
 }
 
 fn probe(name: &str, mtime_secs: u64) -> ProbeClip {

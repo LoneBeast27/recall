@@ -3,11 +3,9 @@
 use super::*;
 use std::time::SystemTime;
 
-fn scratch(tag: &str) -> PathBuf {
+fn scratch(tag: &str) -> crate::test_temp::TempDir {
     let nonce = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let dir = std::env::temp_dir().join(format!("recall-light-{tag}-{}-{nonce}", std::process::id()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+    crate::test_temp::TempDir::new(format!("recall-light-{tag}-{}-{nonce}", std::process::id()))
 }
 
 #[test]

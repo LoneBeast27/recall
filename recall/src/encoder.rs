@@ -41,6 +41,8 @@ mod recover_tests;
 mod headers_tests;
 #[cfg(test)]
 mod decode_tests;
+#[cfg(test)]
+pub(crate) mod test_scratch;
 mod save_progress;
 mod saver;
 mod saver_stop;

@@ -135,7 +135,8 @@ fn interactions_round_trip_through_the_history_file() {
     assert_eq!(history.clips[&name_of(&path("VALORANT", 4))].saved_at_ms, Some(NOW));
     assert_eq!(history.clips[&name_of(&path("VALORANT", 4))].interest.value, w.open_event, "a fresh save starts as one open");
     assert_eq!(history.browse_days.value, 12.0);
-    let file = std::env::temp_dir().join(format!("recall-history-{}-{}.json", std::process::id(), NOW));
+    let scratch = crate::test_temp::TempDir::new(format!("recall-history-{}-{}", std::process::id(), NOW));
+    let file = scratch.join("interactions.json");
     history.save(&file).unwrap();
     assert_eq!(History::load(&file), history);
     assert!(std::fs::metadata(&file).unwrap().len() < 2048, "small file");
@@ -263,7 +264,7 @@ fn planner_pauses_while_the_recorder_is_busy() {
 #[test]
 fn inventory_classifies_tiers_and_enforcement_frees_on_disk() {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let root = std::env::temp_dir().join(format!("recall-smart-{}-{nonce}", std::process::id()));
+    let root = crate::test_temp::TempDir::new(format!("recall-smart-{}-{nonce}", std::process::id()));
     let write = |rel: &str, len: usize| {
         let path = root.join(rel);
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -359,7 +360,7 @@ fn a_first_run_budget_on_the_system_drive_is_2_gib() {
 #[test]
 fn a_saved_budget_is_never_shrunk_by_the_first_run_rule() {
     let nonce = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let root = std::env::temp_dir().join(format!("recall-budget-kept-{}-{nonce}", std::process::id()));
+    let root = crate::test_temp::TempDir::new(format!("recall-budget-kept-{}-{nonce}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let twenty = 20u64 << 30;
     super::evict::write_settings(&root, &super::evict::Settings { cache_budget_bytes: Some(twenty), ..Default::default() }).unwrap();
@@ -370,7 +371,7 @@ fn a_saved_budget_is_never_shrunk_by_the_first_run_rule() {
 #[test]
 fn a_set_budget_always_wins_and_a_first_run_saves_its_pick() {
     let nonce = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let root = std::env::temp_dir().join(format!("recall-budget-{}-{nonce}", std::process::id()));
+    let root = crate::test_temp::TempDir::new(format!("recall-budget-{}-{nonce}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let picked = super::video::budget_in(&root);
     assert!((super::evict::MIN_CACHE_BUDGET..=super::evict::DEFAULT_CACHE_BUDGET).contains(&picked), "{picked}");
@@ -386,7 +387,7 @@ fn a_set_budget_always_wins_and_a_first_run_saves_its_pick() {
 #[test]
 fn a_clip_prepared_with_flac_stems_drops_its_wav_stems() {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let root = std::env::temp_dir().join(format!("recall-stems-{}-{nonce}", std::process::id()));
+    let root = crate::test_temp::TempDir::new(format!("recall-stems-{}-{nonce}", std::process::id()));
     let editor = root.join("editor");
     let write = |dir: &str, file: &str| {
         std::fs::create_dir_all(editor.join(dir)).unwrap();
@@ -410,7 +411,7 @@ fn a_clip_prepared_with_flac_stems_drops_its_wav_stems() {
 #[test]
 fn light_copies_are_video_units_ranked_and_evicted_by_their_clip() {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let root = std::env::temp_dir().join(format!("recall-light-units-{}-{nonce}", std::process::id()));
+    let root = crate::test_temp::TempDir::new(format!("recall-light-units-{}-{nonce}", std::process::id()));
     std::fs::create_dir_all(root.join("light")).unwrap();
     std::fs::write(root.join("light").join("aaaaaaaaaaaaaaaa.mp4"), vec![1u8; 3000]).unwrap();
     std::fs::write(root.join("light").join("bbbbbbbbbbbbbbbb.mp4"), vec![1u8; 3000]).unwrap();
@@ -430,7 +431,7 @@ fn light_copies_are_video_units_ranked_and_evicted_by_their_clip() {
 #[test]
 fn old_wav_stem_folders_go_except_the_open_clips() {
     let nonce = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
-    let root = std::env::temp_dir().join(format!("recall-old-stems-{}-{nonce}", std::process::id()));
+    let root = crate::test_temp::TempDir::new(format!("recall-old-stems-{}-{nonce}", std::process::id()));
     let editor = root.join("editor");
     let write = |dir: &str, file: &str| {
         std::fs::create_dir_all(editor.join(dir)).unwrap();
@@ -476,7 +477,7 @@ fn background_thumbnails_rest_three_times_their_work_up_to_100_ms() {
 #[test]
 fn an_automatic_budget_is_marked_first_run_and_a_saved_one_is_left_as_it_is() {
     let nonce = SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
-    let root = std::env::temp_dir().join(format!("recall-budget-auto-{}-{nonce}", std::process::id()));
+    let root = crate::test_temp::TempDir::new(format!("recall-budget-auto-{}-{nonce}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();
     let picked = super::video::budget_in(&root);
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("storage.json")).unwrap()).unwrap();
