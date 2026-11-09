@@ -21,7 +21,7 @@ Protocol v2 (one-shot masks, below) replaces the continuous rhythm.
   randomly scheduled black window; 6 flips over ~70s, ≥8s apart.
 - Per-trial instrument gate: a trial counts only if `set_hdr_state` appears in
   recall-hdr.log within 4s (catches inert pins — see confounds).
-- Rig: `Docker Speed Drive/.tmp/ab/{flicker,flipper,run-trials}.ps1`; evidence in
+- Rig: `{flicker,flipper,run-trials}.ps1` (a local rig outside this repo); evidence in
   `trials-log.txt` (00:53–00:55 IST run: 6/6 VALID, phases 161–254ms).
 
 ## Confounds burned into the rig (do not relearn)

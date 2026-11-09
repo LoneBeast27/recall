@@ -15,7 +15,7 @@ app's behaviour against both the oracles and its own timestamped log.
 ## Prerequisites (built once)
 
 ```bash
-# from L:/Projects/recall
+# from the repo root
 cargo build -p recall-hdr                         # target/debug/recall-hdr.exe
 # capture-engine oracle (already built as release):  target/release/recall.exe
 # fake game (standalone crate):

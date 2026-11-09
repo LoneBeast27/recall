@@ -11,7 +11,7 @@
   a closed window frees the guard; a killed instance never blocks the next start.
 
   Run through the build gate:
-    powershell -NoProfile -File L:\General\.tmp\recall-wave-a\gated.ps1 none powershell -NoProfile -File scripts\dev\instance-check.ps1 -Exe <recall-native.exe>
+    powershell -NoProfile -File <gate dir>\gated.ps1 none powershell -NoProfile -File scripts\dev\instance-check.ps1 -Exe <recall-native.exe>
 #>
 param([Parameter(Mandatory)][string]$Exe)
 $ErrorActionPreference = 'Stop'
