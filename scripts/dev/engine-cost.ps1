@@ -35,7 +35,7 @@ param(
   [string]$Json = '',
   # Every engine log line of the run, for checks that need to see which path ran.
   [string]$LogTo = '',
-  [string]$TestMic = 'microphone steam streaming',
+  [string]$TestMic = 'Microphone (Steam Streaming Microphone)',
   [switch]$Monitor,
   [int]$Fps = 60,
   [string]$CpuMask = 'ffff0000',
