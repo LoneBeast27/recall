@@ -403,6 +403,7 @@ impl Shared {
             *g = grace.as_millis() as u64;
         }
         self.stop.store(true, Ordering::SeqCst);
+        self.shutdown_refusal(); // a retarget's grace in flight: "isn't responding" from now
     }
 
     fn stop_requested(&self) -> bool {

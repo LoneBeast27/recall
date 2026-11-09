@@ -74,6 +74,8 @@ pub struct EngineActivity {
     /// A `record_stop` (any sender: the user, a pause, a retarget, sleep, a session end) went
     /// to the engine and its `recording_stopped` has not come yet.
     stop_requested: bool,
+    /// That stop is the session end's own (`claim_stop`); any later stop sent clears it.
+    stop_ours: bool,
     /// The clip size a save is expected to reach: sets how long a growing save
     /// may hold restarts (`writing::hold_cap`). Kept across engine instances.
     save_estimate: u64,
@@ -91,6 +93,7 @@ impl Default for EngineActivity {
             long: LongRec::Idle,
             auto_stop: None,
             stop_requested: false,
+            stop_ours: false,
             save_estimate: 0,
         }
     }
@@ -140,8 +143,8 @@ impl EngineActivity {
     /// `cmd` (`engine_command`) went to the engine: a long-recording start or
     /// a screenshot is now in flight.
     pub fn command_sent(&mut self, cmd: &str, now: Instant) {
-        let starts = cmd == "record_start" || (cmd == "record_toggle" && !self.is_recording());
-        if cmd == "record_stop" || (cmd == "record_toggle" && self.is_recording()) {
+        let starts = cmd == "record_start" || (cmd == "record_toggle" && !self.toggle_stops());
+        if cmd == "record_stop" || (cmd == "record_toggle" && self.toggle_stops()) {
             self.stop_sent();
         } else if starts {
             self.record_requested(now);
@@ -159,6 +162,12 @@ impl EngineActivity {
         }
     }
 
+    /// A `record_toggle` now stops: the engine's recorder is active from its start, the
+    /// keyframe wait included, not only once it reports running.
+    fn toggle_stops(&self) -> bool {
+        self.long != LongRec::Idle
+    }
+
     pub fn is_recording(&self) -> bool {
         matches!(self.long, LongRec::Active { .. })
     }
@@ -167,6 +176,17 @@ impl EngineActivity {
     /// recording there is nothing to wait for.
     pub fn stop_sent(&mut self) {
         self.stop_requested = self.long != LongRec::Idle;
+        self.stop_ours = false;
+    }
+
+    /// The stop just sent is the session end's own (a cancel may restart its recording).
+    pub fn claim_stop(&mut self) {
+        self.stop_ours = self.stop_requested;
+    }
+
+    /// The stop in flight is the session end's own: no other stop was sent since.
+    pub fn stop_is_ours(&self) -> bool {
+        self.stop_requested && self.stop_ours
     }
 
     /// A stop is on its way: a session end must not restart this recording on a cancel.
@@ -305,7 +325,7 @@ impl EngineActivity {
         if draining && cmd == "screenshot" {
             return Some(DRAIN_SCREENSHOT_REASON);
         }
-        let starts = cmd == "record_start" || (cmd == "record_toggle" && !self.is_recording());
+        let starts = cmd == "record_start" || (cmd == "record_toggle" && !self.toggle_stops());
         (draining && starts).then_some(DRAIN_RECORD_REASON)
     }
 

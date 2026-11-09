@@ -6,7 +6,7 @@
 //! own restart code (`record_restart::restart_engine` / `request_settings_restart` /
 //! `pending_restart_tick`, the Sim as `RestartHost`) down to `record_engine_ctl::switch_engine`.
 //! Every recovery call site (`encoder_recover_tick`, `capture_stuck_tick`) calls
-//! `Controller::restart_for_recovery` -> `record_restart::restart_for_recovery` (`Sim::recover`).
+//! `record_recovery_act` -> `record_restart::restart_for_recovery` (`transitions_recovery_tests`).
 
 use crate::record_restart::{RestartReason, Restarted};
 use crate::engine_policy::EngineSpec;

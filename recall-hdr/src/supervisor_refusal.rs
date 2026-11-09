@@ -65,10 +65,21 @@ impl Shared {
     /// `quit` takes the queue's reserved slot: a healthy engine behind a full queue still
     /// gets its clean finish (`supervisor_stdin.rs`). From here on every line is refused
     /// with `refusal` (set under the same lock), until the next engine's stdin.
+    /// Shutdown is no game switch: once its stop flag is set (read under this lock, as
+    /// [`Self::shutdown_refusal`] writes under it) a retarget's quit says "isn't responding".
     pub(super) fn send_quit(&self, refusal: Sent) -> bool {
         let mut g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
-        g.quitting = Some(refusal);
+        g.quitting = Some(if self.stop_requested() { Sent::NotResponding } else { refusal });
         g.queue.as_ref().is_some_and(|queue| queue.send_quit(r#"{"cmd":"quit"}"#))
+    }
+
+    /// Shutdown, after its stop flag: a quit window already open (a retarget's grace, its
+    /// "Switching games") now says "isn't responding" until the engine is gone.
+    pub(super) fn shutdown_refusal(&self) {
+        let mut g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
+        if g.quitting.is_some() {
+            g.quitting = Some(Sent::NotResponding);
+        }
     }
 
     /// The quit for a retarget, refused with the last retarget's reason read under the

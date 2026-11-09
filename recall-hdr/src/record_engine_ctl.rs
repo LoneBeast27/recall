@@ -123,12 +123,6 @@ impl Controller {
         crate::record_restart::restart_engine(self, reason)
     }
 
-    /// A broken engine (hang, encoder failed, ending early, capture stuck): restart at
-    /// once, drain or not, "Recorder isn't responding" meanwhile.
-    pub(crate) fn restart_for_recovery(&mut self) -> Restarted {
-        crate::record_restart::restart_for_recovery(self)
-    }
-
     /// A fresh engine instance starts in `auto` mode with the mute it was spawned with: re-apply
     /// ours. The mute goes either way: a crash respawn reuses the spawn's environment, which may
     /// hold a mute the user has lifted since.
