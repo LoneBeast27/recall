@@ -173,8 +173,9 @@ pub fn run() -> i32 {
     let file_cfg = store.load();
     let overrides = EnvOverrides::from_env();
     let mut cfg = overrides.apply(&file_cfg);
-    // Never record into a linked folder (logged; the app shows its own notice when it connects).
-    let _ = crate::record_link_guard::guard(&mut cfg, None, &crate::record_link_guard::read_links());
+    // Never record into a linked folder: logged, and shown to every client that joins in the
+    // first minute (the overlay starts after this).
+    let folder_notice = crate::record_link_guard::guard(&mut cfg, None, &crate::record_link_guard::read_links());
     if !overrides.is_empty() {
         log!("record: startup environment overrides active: {overrides:?}");
     }
@@ -239,7 +240,7 @@ pub fn run() -> i32 {
         last_hdr_event: String::new(),
         last_fired: Default::default(),
         hotkey_problems: Vec::new(),
-        pending_notice: None,
+        pending_notice: folder_notice.map(|n| (crate::record_notice::shortcut_notice_json("Recordings folder", &n, true, true), now + Duration::from_secs(60))),
         last_probe: now,
         last_hdr_refresh: now,
         last_fed: None,

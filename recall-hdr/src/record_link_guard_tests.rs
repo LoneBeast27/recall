@@ -48,3 +48,27 @@ fn links_come_from_the_apps_folder_list() {
     assert_eq!(read, links(&[r"D:\Moments"], &[r"V:\Recall", r"V:\Old"]));
     assert_eq!(read_links_from(&dir.join("missing.json")), Links::default());
 }
+
+#[test]
+fn every_fallback_refused_records_into_recalls_own_clips_folder() {
+    // Recall never records into a refused (linked) folder: when the last good folder, the app's
+    // recordings folder and the default are all refused, clips go to %LOCALAPPDATA%\Recall\Clips.
+    let tmp = std::env::temp_dir().join(format!("recall-hdr-final-fallback-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    let _root = crate::user_dirs::inject(&tmp);
+    let clips = tmp.join(r"AppData\Local\Recall\Clips");
+    let default = crate::record_config::default_output_dir();
+    let everything = [r"D:\SteelSeries\Moments", r"D:\Old", r"D:\Owned", default.as_str()];
+    let mut cfg = cfg_at(r"D:\SteelSeries\Moments");
+    let notice = guard(&mut cfg, Some(r"D:\Old"), &links(&everything, &[r"D:\Owned"])).expect("a notice");
+    assert_eq!(cfg.recording.output_dir, clips.to_string_lossy(), "{notice}");
+    assert!(clips.is_dir(), "created when missing");
+    assert_eq!(notice, format!("Recordings folder unavailable, saving to {}", clips.display()));
+    // It cannot be refused: even a link over the temp root itself does not keep the refused folder.
+    let mut cfg = cfg_at(r"D:\SteelSeries\Moments");
+    let tmp_text = tmp.to_string_lossy().into_owned();
+    let all = [r"D:\SteelSeries\Moments", r"D:\Old", r"D:\Owned", default.as_str(), tmp_text.as_str()];
+    guard(&mut cfg, Some(r"D:\Old"), &links(&all, &[r"D:\Owned"]));
+    assert_eq!(cfg.recording.output_dir, clips.to_string_lossy());
+    let _ = std::fs::remove_dir_all(&tmp);
+}
