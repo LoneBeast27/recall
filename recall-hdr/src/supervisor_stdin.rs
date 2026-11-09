@@ -40,7 +40,11 @@ impl StdinQueue {
             let mut out = out;
             for line in rx {
                 let _ = taken.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
-                let wrote = out.write_all(line.as_bytes()).and_then(|_| out.write_all(b"\n")).and_then(|_| out.flush());
+                // One write per line, its newline included: the engine's drain never sees the
+                // pipe empty halfway through a line (merge-gate P1-2).
+                let mut bytes = line.into_bytes();
+                bytes.push(b'\n');
+                let wrote = out.write_all(&bytes).and_then(|_| out.flush());
                 if wrote.is_err() {
                     break; // the engine is gone (or killed): nothing more reaches it
                 }
@@ -82,5 +86,42 @@ impl StdinQueue {
             log!("supervisor: engine is not reading its stdin; dropped {n} line(s) (now {line})");
         }
         false
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Mutex;
+
+    /// Each `write` call the engine's pipe would get, as one chunk.
+    struct Chunks(Arc<Mutex<Vec<Vec<u8>>>>);
+
+    impl Write for Chunks {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().push(buf.to_vec());
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Merge-gate P1-2: the text and its newline went out as two writes, so the engine could
+    /// see an empty pipe mid-line and confirm its drain before the line was whole.
+    #[test]
+    fn a_line_and_its_newline_go_out_in_one_write() {
+        let chunks = Arc::new(Mutex::new(Vec::new()));
+        let queue = StdinQueue::start(Box::new(Chunks(chunks.clone())));
+        let line = r#"{"cmd":"set_mic_mute","muted":true}"#;
+        assert!(queue.send(line));
+        drop(queue); // the writer ends once the queue is closed
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while chunks.lock().unwrap().is_empty() && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50)); // a second write, if any
+        assert_eq!(*chunks.lock().unwrap(), vec![format!("{line}\n").into_bytes()], "one write, newline included");
     }
 }
