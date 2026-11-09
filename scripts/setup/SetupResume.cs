@@ -32,9 +32,12 @@ namespace Recall.Setup
                 || !full.EndsWith(".json", StringComparison.OrdinalIgnoreCase) || !File.Exists(full))
                 return null;
             Dictionary<string, object> data = null;
+            // A file that cannot be read (held, denied) never stops the update: its state is unknown.
             try { data = new JavaScriptSerializer().DeserializeObject(File.ReadAllText(full)) as Dictionary<string, object>; }
             catch (ArgumentException) { }
             catch (InvalidOperationException) { }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
             return new ResumeFile(full, data ?? new Dictionary<string, object>());
         }
 

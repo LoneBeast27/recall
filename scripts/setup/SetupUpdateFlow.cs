@@ -92,8 +92,8 @@ namespace Recall.Setup
             try { if (backup != null && quitter.OurControllers().Count == 0) ConfigBackup.Restore(backup, roots, dir, log); }
             catch (Exception restore) { log("WARNING: settings restore failed: " + restore.Message); }
             // A rollback that could not finish: try again now, and never start a mismatched pair.
-            var why = InstallSwap.Recover(dir);
-            for (int i = 0; why != null && i < 5; i++) { Thread.Sleep(1000); why = InstallSwap.Recover(dir); }
+            var why = RecoverWhy();
+            for (int i = 0; why != null && i < 5; i++) { Thread.Sleep(1000); why = RecoverWhy(); }
             if (why != null)
             {
                 log("WARNING: the install folder is not consistent yet (" + why + "); Recall is not reopened.");
@@ -107,6 +107,31 @@ namespace Recall.Setup
                 Relaunch(quitter, options, new List<string>(), "failed", error.GetBaseException().Message);
             }
             catch (Exception relaunch) { log("WARNING: the previous Recall could not be reopened: " + relaunch.Message); }
+        }
+
+        /// Recover, with a throw counted as "not consistent" (Recall then stays closed and Setup says so).
+        private string RecoverWhy()
+        {
+            try { return InstallSwap.Recover(dir); }
+            catch (Exception error) { return error.Message; }
+        }
+
+        /// The update stopped before anything was closed or replaced (a guard, the resume file):
+        /// the files are all old and the recorder still runs, so only the app, which quit itself
+        /// for the update, is reopened, with the outcome. Never throws.
+        public static void FailedBeforeStart(SetupTargets targets, string dir, InstallOptions options, Action<string> log, Exception error)
+        {
+            log("Update failed before it started: " + error.GetBaseException().Message);
+            try
+            {
+                var flow = new UpdateFlow(targets, dir, options.Resume, log);
+                flow.Outcome("failed", error.GetBaseException().Message);
+                if (!File.Exists(Path.Combine(dir, "recall-native.exe"))) return;
+                var args = flow.resume == null ? null : "--resume \"" + flow.resume.Path + "\"";
+                using (var app = DetachedProcess.Start(Path.Combine(dir, "recall-native.exe"), args, null))
+                    log("Recall reopened: pid " + app.Pid + (args == null ? "" : " " + args));
+            }
+            catch (Exception reopen) { log("WARNING: the previous Recall could not be reopened: " + reopen.Message); }
         }
 
         /// The recorder first (when it ran and is gone), then the outcome, then the app, which reads it.
@@ -156,7 +181,9 @@ namespace Recall.Setup
             resume.Set("recovered", recovered);
             resume.Set("config_backup", backup);
             resume.Set("setup_version", SetupBuildInfo.Version);
-            resume.Save();
+            // The app still reopens without it (it then says nothing about the update).
+            try { resume.Save(); }
+            catch (Exception write) { log("WARNING: the resume file could not be written: " + write.Message); }
         }
     }
 }
