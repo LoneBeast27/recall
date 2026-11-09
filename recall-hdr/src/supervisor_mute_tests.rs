@@ -19,7 +19,10 @@ fn an_alt_m_between_spawn_and_attach_is_the_engines_first_line() {
     assert_eq!(shared.send_line(SAVE), Sent::Queued);
     shared.attach_writer(None);
     let lines = rec.lines();
-    assert_eq!(lines.first(), Some(&mute_line(true)), "the engine runs with live mic: {lines:?}");
+    // Not a press (review R2-audio-r9-3): it was made before any stream of this engine opened.
+    let catch_up = crate::record_dispatch::mic_line(true, false);
+    assert_eq!(lines.first(), Some(&catch_up), "the engine runs with live mic: {lines:?}");
+    assert!(!catch_up.contains("press"), "{catch_up}");
     assert_eq!(lines.len(), 2, "{lines:?}");
 }
 
