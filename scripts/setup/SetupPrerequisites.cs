@@ -250,8 +250,7 @@ namespace Recall.Setup
         private static int RunElevated(string path, string args)
         {
             var start = new ProcessStartInfo(path, args) {
-                UseShellExecute = true, Verb = "runas", WorkingDirectory = SystemDir,
-                WindowStyle = ProcessWindowStyle.Hidden
+                UseShellExecute = true, Verb = "runas", WorkingDirectory = SystemDir
             };
             using (var process = Process.Start(start))
             {
