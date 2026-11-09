@@ -22,6 +22,8 @@ telemetry or analytics. The only network traffic is:
 - **Setup:** downloads the pinned FFmpeg runtime from Gyan's GitHub release and, when it is
   missing, the Microsoft Visual C++ x64 runtime from Microsoft; on Windows N it can add the
   Media Feature Pack through Windows Update.
+- **Installing an update** keeps a backup of your settings and a small resume note in
+  `%LOCALAPPDATA%\Recall\updates\` on your PC; nothing about them is sent.
 
 Nothing else is sent. Details: [Code signing policy](CODE_SIGNING_POLICY.md).
 
