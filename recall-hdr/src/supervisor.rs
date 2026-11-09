@@ -315,9 +315,10 @@ pub const ENGINE_EXITED: &str = "engine_exited";
 
 /// Engine event types handed to the controller via `attach_events`. `status`
 /// carries `save_writing`, the save the engine is still writing.
-pub const FORWARDED_EVENTS: [&str; 12] = [
+pub const FORWARDED_EVENTS: [&str; 13] = [
     "status",
     "inputs_held",
+    "inputs_released",
     "saved",
     "source_adopted",
     "save_failed",

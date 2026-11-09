@@ -1,6 +1,7 @@
-//! The engine holds every audio track silent and opens no stream (`inputs_held`: its stdin was
-//! not drained in time, or a read failed; merge-gate F7). The user is told by a notice, not only
-//! by the Audio page meter: the microphones record nothing until the engine has its settings.
+//! The engine still holds its device tracks silent 2 s after its start (`inputs_held`: no
+//! `sync` from the controller yet; merge-gate F7, design-audio-mute R-fresh-4). The user is told
+//! by a notice, not only by the Audio page meter, and told again when they record
+//! (`inputs_released`), so the held notice does not stand after the release.
 //!
 //! Also the protocol floor's notice (`engine_outdated`, R1): the engine file is older than the
 //! app, so it was given no microphone and no picked device. Shown even with notices off, and it
@@ -8,8 +9,13 @@
 
 use serde_json::Value;
 
-pub(crate) const TITLE: &str = "Microphones held";
-pub(crate) const DETAIL: &str = "The recorder is waiting for its settings";
+pub(crate) const TITLE: &str = "Audio held";
+pub(crate) const DETAIL: &str = "The recorder is waiting for its settings: microphones and devices record nothing until then";
+pub(crate) const RELEASED_TITLE: &str = "Audio recording";
+pub(crate) const RELEASED_DETAIL: &str = "The recorder has its settings";
+
+/// A held notice was shown and no release notice since.
+static HELD_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The R1 notice, as decided (merge gate).
 pub(crate) const OUTDATED_TITLE: &str = "Reinstall Recall: this recorder is older than the app; microphones are off";
@@ -18,7 +24,12 @@ pub(crate) const OUTDATED_DETAIL: &str = "Picked devices are off too. Game audio
 /// The session notice for an engine event (shown even with notices off), or None.
 pub(crate) fn notice_for(ev: &Value) -> Option<String> {
     match ev.get("type").and_then(Value::as_str)? {
-        "inputs_held" => Some(crate::record_notice::shortcut_notice_json(TITLE, DETAIL, true, true)),
+        "inputs_held" => {
+            HELD_SHOWN.store(true, std::sync::atomic::Ordering::SeqCst);
+            Some(crate::record_notice::shortcut_notice_json(TITLE, DETAIL, true, true))
+        }
+        // Only after a held notice: a normal start says nothing.
+        "inputs_released" => HELD_SHOWN.swap(false, std::sync::atomic::Ordering::SeqCst).then(|| crate::record_notice::shortcut_notice_json(RELEASED_TITLE, RELEASED_DETAIL, false, true)),
         crate::supervisor::floor::ENGINE_OUTDATED => Some(crate::record_notice::shortcut_notice_json(OUTDATED_TITLE, OUTDATED_DETAIL, true, true)),
         _ => None,
     }
@@ -28,18 +39,32 @@ pub(crate) fn notice_for(ev: &Value) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// The held notice state is process-wide: these tests run one at a time.
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn shown(ev: Value) -> Value {
         serde_json::from_str(&notice_for(&ev).expect("a notice")).unwrap()
     }
 
     #[test]
     fn an_inputs_held_event_shows_a_notice() {
+        let _one = LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let notice = shown(serde_json::json!({"type": "inputs_held", "reason": "the recorder is waiting for its settings"}));
         assert_eq!((notice["title"].as_str(), notice["detail"].as_str(), notice["always"].as_bool()), (Some(TITLE), Some(DETAIL), Some(true)));
         assert_eq!(notice_for(&serde_json::json!({"type": "saved"})), None);
         assert!(crate::supervisor::FORWARDED_EVENTS.contains(&"inputs_held"), "the supervisor hands it to the controller");
         let actions = include_str!("record_actions.rs").split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(actions.contains("crate::record_inputs_held::notice_for(&ev)"), "the engine-event loop shows it");
+    }
+
+    /// R-fresh-4: the release is told only after a held notice.
+    #[test]
+    fn a_release_after_a_held_notice_says_so_once() {
+        let _one = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        assert!(crate::supervisor::FORWARDED_EVENTS.contains(&"inputs_released"));
+        shown(serde_json::json!({"type": "inputs_held"}));
+        assert_eq!(shown(serde_json::json!({"type": "inputs_released"}))["title"].as_str(), Some(RELEASED_TITLE));
+        assert_eq!(notice_for(&serde_json::json!({"type": "inputs_released"})), None, "once");
     }
 
     /// R1 condition 1: the floor's notice is a visible notice (even with notices off) that says
