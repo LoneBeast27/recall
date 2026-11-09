@@ -60,6 +60,9 @@ pub enum Outbound {
         mic_muted: bool,
         /// The last audio line's sequence number applied (the controller re-sends what is not).
         audio_seq: u64,
+        /// The engine's stdin ended (quit, end, read error): it reads and acks nothing more, and
+        /// its device tracks are held (the controller never recovers it for an unacked line).
+        stdin_ended: bool,
         /// What each recorded source opened, in track order (`audio::sources::opened`).
         #[serde(skip_serializing_if = "Vec::is_empty")]
         audio: Vec<AudioOpened>,

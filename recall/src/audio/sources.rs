@@ -271,7 +271,8 @@ pub fn startup_released() -> bool {
     early.synced && early.staged.is_none()
 }
 
-/// The controller's `quit` was read (no line reaches this engine after it): every listed device
+/// The reader ended (the controller's `quit`, the end of stdin or a read error: no line reaches
+/// this engine after it, `engine_stdin::reader_end`): every listed device
 /// track is retired, so from its next packet it stores silence until the exit, the long
 /// recording's finalise included. The game's process tree and app tracks keep recording: no
 /// line can change what they capture. Never undone (the engine is ending).
