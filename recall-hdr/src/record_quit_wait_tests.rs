@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::*;
+use crate::awake_clock::Awake;
 use crate::record_activity::EngineActivity;
 use crate::record_quit::QuitReason;
 
@@ -26,7 +27,7 @@ fn the_quit_wait_sleeps_even_when_a_deadline_has_passed() {
 #[test]
 fn a_second_quit_during_the_save_wait_quits_at_once_and_reports_the_loss() {
     // R6-overlay-5: a long save holds the quit; a 2nd tray Quit stops waiting.
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
     a.save_sent(t0);
     let reason = on_quit_request(None, QuitReason::TrayMenu, false, t0, &mut q);
@@ -41,7 +42,7 @@ fn a_second_quit_during_the_save_wait_quits_at_once_and_reports_the_loss() {
 
 #[test]
 fn which_repeat_counts_as_quit_now() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let a_wait = || {
         let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
         a.save_sent(t0);
@@ -94,7 +95,7 @@ fn the_pipe_says_whether_a_quit_is_finishing_a_clip() {
 
 #[test]
 fn the_finishing_bytes_come_from_the_engines_save_report() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut a = EngineActivity::default();
     a.save_sent(t0);
     a.on_engine_event(&json!({"type":"status","save_writing":{"bytes":4_000_000,"queued":0,"step":12}}), 0.0, t0);
@@ -106,7 +107,7 @@ fn the_finishing_bytes_come_from_the_engines_save_report() {
 #[test]
 fn a_repeated_plain_pipe_quit_joins_the_wait_and_only_force_stops_now() {
     // R7-overlay-1: "Stop recorder" clicked twice must not throw the clip away.
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
     a.save_sent(t0);
     let r = on_quit_request(None, QuitReason::ControlPipe, false, t0, &mut q);
@@ -126,7 +127,7 @@ fn a_repeated_plain_pipe_quit_joins_the_wait_and_only_force_stops_now() {
     assert!(!quit_force(&json!({"cmd": "quit"})) && !quit_force(&json!({"cmd": "quit", "force": "yes"})));
 }
 
-fn a_wait_at(t0: Instant) -> QuitWait {
+fn a_wait_at(t0: Awake) -> QuitWait {
     let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
     a.save_sent(t0);
     q.step(&mut a, t0);
@@ -135,7 +136,7 @@ fn a_wait_at(t0: Instant) -> QuitWait {
 
 #[test]
 fn a_second_tray_quit_forces_only_a_second_after_the_first() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
     a.save_sent(t0);
     let r = on_quit_request(None, QuitReason::TrayMenu, false, t0, &mut q);
@@ -149,7 +150,7 @@ fn a_second_tray_quit_forces_only_a_second_after_the_first() {
 #[test]
 fn a_quit_asked_during_a_sign_out_wait_survives_a_cancelled_sign_out() {
     // R7-overlay-4: the installer's quit must not vanish with the cancelled sign-out.
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut q = a_wait_at(t0);
     let r = on_quit_request(Some(QuitReason::SessionEnd), QuitReason::ControlPipe, false, t0 + Duration::from_secs(1), &mut q);
     assert_eq!(r, Some(QuitReason::SessionEnd));

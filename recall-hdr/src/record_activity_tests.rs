@@ -1,10 +1,11 @@
 //! `EngineActivity` / `PendingPause` basics (moved out of `record_activity.rs`).
 
 use super::*;
+use crate::awake_clock::Awake;
 
 #[test]
 fn a_pause_waits_for_the_long_recording_to_stop_but_not_forever() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut a = EngineActivity::default();
     assert_eq!(PendingPause::needed(&mut a, t0), None, "nothing recording: pause at once");
     a.record_requested(t0);
@@ -21,7 +22,7 @@ fn a_pause_waits_for_the_long_recording_to_stop_but_not_forever() {
 
 #[test]
 fn saves_in_flight_block_restarts_until_reported_or_stale() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut a = EngineActivity::default();
     assert!(!a.busy(t0));
     a.save_sent(t0);
@@ -37,7 +38,7 @@ fn saves_in_flight_block_restarts_until_reported_or_stale() {
 
 #[test]
 fn an_engine_exit_with_saves_in_flight_reports_them_lost_once() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut a = EngineActivity::default();
     let exited = json!({"type": crate::supervisor::ENGINE_EXITED});
     assert_eq!(a.on_event(&exited, 0.0), None, "nothing in flight: nothing lost");
@@ -53,7 +54,7 @@ fn an_engine_exit_with_saves_in_flight_reports_them_lost_once() {
 
 #[test]
 fn long_recording_lifecycle_and_status_shape() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut a = EngineActivity::default();
     assert_eq!(a.long_recording_json(), json!({"active":false,"path":null,"started_secs":null}));
     a.record_requested(t0);
@@ -76,7 +77,7 @@ fn long_recording_lifecycle_and_status_shape() {
 
 #[test]
 fn a_retarget_stops_the_long_recording_once_and_waits_for_it_bounded() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let mut a = EngineActivity::default();
     assert!(!a.auto_stop(t0, true), "nothing recording: nothing to stop");
@@ -118,7 +119,7 @@ fn a_long_recording_cannot_start_while_a_closed_game_drains() {
 
 #[test]
 fn a_starting_long_recording_never_holds_a_retarget() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut a = EngineActivity::default();
     a.record_requested(t0);
     assert_eq!(a.retarget_busy(t0 + Duration::from_secs(1)), Busy::default(), "not yet recording: nothing to save");
@@ -131,18 +132,18 @@ fn a_starting_long_recording_never_holds_a_retarget() {
 fn a_game_recreating_its_window_during_a_long_recording_is_never_held_forever() {
     use crate::record_engine::{EnginePlanner, EngineTarget, Step, EXIT_LINGER};
     use crate::record_target::Target;
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let win = |hwnd| EngineTarget::Window(Target { hwnd, pid: 7, name: "G".into(), exe: "G.exe".into() });
     let (mut p, mut a) = (EnginePlanner::new(EXIT_LINGER), EngineActivity::default());
-    assert_eq!(p.step(&win(1), t0, a.retarget_busy(t0)), Step::Apply(win(1)));
+    assert_eq!(p.step(&win(1), (t0).as_test_instant(), a.retarget_busy(t0)), Step::Apply(win(1)));
     a.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
     // Fullscreen -> windowed: same pid, new hwnd. The engine never answers the stop.
     let mut sent = 0;
     let mut applied_at = None;
     for tick in 1..=3600u64 {
         let now = t0 + s(tick);
-        match p.step(&win(2), now, a.retarget_busy(now)) {
+        match p.step(&win(2), (now).as_test_instant(), a.retarget_busy(now)) {
             Step::StopLongRec { game_closed } => {
                 assert!(!game_closed);
                 sent += a.auto_stop(now, game_closed) as u32;
@@ -161,7 +162,7 @@ fn a_game_recreating_its_window_during_a_long_recording_is_never_held_forever() 
 
 #[test]
 fn a_fresh_engine_clears_everything() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut a = EngineActivity::default();
     a.save_sent(t0);
     a.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
@@ -171,7 +172,7 @@ fn a_fresh_engine_clears_everything() {
 
 #[test]
 fn a_continued_recording_stays_active_between_its_parts() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut a = EngineActivity::default();
     a.on_event(&json!({"type":"recording_started","path":"p1","continued":false}), 5.0);
     a.on_event(&json!({"type":"recording_stopped","path":"p1","seconds":9.0,"bytes":1,"continued":true}), 9.0);

@@ -284,7 +284,8 @@ impl Controller {
             if self.pending_pause.is_some() {
                 return; // already stopping the recording
             }
-            if let Some(wait) = PendingPause::needed(&mut self.activity, Instant::now()) {
+            let now = self.awake();
+            if let Some(wait) = PendingPause::needed(&mut self.activity, now) {
                 if self.activity.long == LongRec::Idle {
                     // Only a save in flight: the engine stops once it is written.
                     log!("record: pause -- waiting for the save being written first");
@@ -343,7 +344,8 @@ impl Controller {
     pub(crate) fn drain_engine_events(&mut self, now: Instant) {
         while let Ok(ev) = self.engine_events.try_recv() {
             crate::record_audio_live::on_engine_event(self, &ev);
-            match self.activity.on_engine_event(&ev, unix_now(), now) {
+            let awake = self.awake();
+            match self.activity.on_engine_event(&ev, unix_now(), awake) {
                 Some(Trigger::Saved) => self.janitor.saved(now),
                 Some(Trigger::AutoStopped { game_closed }) => {
                     let detail = if game_closed { "the game closed" } else { "the recorded window changed" };
@@ -377,8 +379,9 @@ impl Controller {
         let buffered = self.supervisor.engine_view().buffer_secs;
         self.planner.set_drain_len(crate::record_drain::drain_len(buffered, self.cfg.recording.buffer_secs));
         let wanted = self.wanted();
-        let busy = self.activity.retarget_busy(now);
-        if self.activity.release_may_settle(now) {
+        let awake = self.awake();
+        let busy = self.activity.retarget_busy(awake);
+        if self.activity.release_may_settle(awake) {
             self.supervisor.release_settled(); // R2-detect-r10-1: a released engine's saves landed
         }
         let drained = self.running_drain(now);
@@ -396,7 +399,7 @@ impl Controller {
             }
             Step::StopLongRec { game_closed } => {
                 let game_closed = self.closed_game(game_closed);
-                if self.activity.auto_stop(now, game_closed) {
+                if self.activity.auto_stop(awake, game_closed) {
                     let why = if game_closed { "the game closed" } else { "a new game is wanted" };
                     log!("record: {why} -- stopping the long recording before the retarget (up to {} s)", PAUSE_STOP_WAIT.as_secs());
                     // Not a user action: logged; the auto-stop deadline bounds the wait.
@@ -412,7 +415,8 @@ impl Controller {
 
     /// Pending pause + deferred restart + storage schedule, every pump tick.
     pub(crate) fn activity_tick(&mut self, now: Instant) {
-        if self.pending_pause.map(|p| p.ready(&mut self.activity, now)) == Some(true) {
+        let awake = self.awake();
+        if self.pending_pause.map(|p| p.ready(&mut self.activity, awake)) == Some(true) {
             if self.activity.long != LongRec::Idle {
                 log!("record: the long recording did not report stopping; pausing anyway");
             }
@@ -425,7 +429,7 @@ impl Controller {
         // A growing save holds restarts at most max(10 min, this size at 5 MB/s).
         self.activity.set_save_estimate(buffer);
         let held = self.retarget_held || self.pending_restart.is_some() || self.power.held();
-        if self.activity.hold_notice(now, held) {
+        if self.activity.hold_notice(awake, held) {
             log!("record: a restart has waited 30 s for the save being written; told the user");
             self.shortcut_notice(SAVE_HOLD_TITLE, SAVE_HOLD_DETAIL);
         }
@@ -451,7 +455,8 @@ impl crate::record_dispatch::CommandPort for ControllerCommand<'_> {
         sent
     }
     fn mark_pending(&mut self) {
-        self.ctl.activity.command_sent(self.cmd, Instant::now());
+        let now = self.ctl.awake();
+        self.ctl.activity.command_sent(self.cmd, now);
     }
     fn announce(&mut self) {
         self.ctl.publish_status();

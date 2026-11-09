@@ -329,9 +329,10 @@ impl crate::record_app::Controller {
         };
         // The encoder heartbeat when the engine sends one, else its status line count.
         let progress = view.heartbeat.filter(|h| *h > 0).unwrap_or(view.statuses);
-        let saving = self.activity.retarget_busy(now).saving;
+        let awake = self.clock.awake();
+        let saving = self.activity.retarget_busy(awake).saving;
         // A capture-stuck restart in flight: never stack a second one on it.
-        let hold = Hold { saving, long_rec: self.activity.busy(now) && !saving, stuck: self.capture_stuck.pending(now), growing: self.activity.save_growing(now) };
+        let hold = Hold { saving, long_rec: self.activity.busy(awake) && !saving, stuck: self.capture_stuck.pending(now), growing: self.activity.save_growing(awake) };
         let target = match &wanted {
             crate::record_engine::EngineTarget::Window(t) => format!("{}:{}", t.exe, t.pid),
             crate::record_engine::EngineTarget::Desktop => "desktop".into(),

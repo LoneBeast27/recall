@@ -106,12 +106,12 @@ impl Controller {
             let recording = self.activity.is_recording();
             log!("record: power notice {event:?} (long recording running: {recording})");
             if event == PowerEvent::Resume {
-                self.activity.resumed(now);
+                self.activity.resumed(self.clock.awake());
             }
             asked.extend(self.power.on_event(event, recording));
         }
         let was_held = self.power.held();
-        let saving = self.activity.saves_writing(now);
+        let saving = self.activity.saves_writing(self.clock.awake());
         let actions = self.power.gate(asked, saving);
         if self.power.held() && !was_held {
             log!("record: resumed from sleep -- engine restart deferred until the save being written ends");
