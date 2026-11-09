@@ -60,38 +60,13 @@ use crate::game_folder_rule as rule;
 #[path = "naming_game_dir.rs"]
 mod game_dir;
 pub use game_dir::writable_game_dir;
+// The answers to "Use your existing <Game> folder?" and the one-per-run question.
+#[path = "naming_game_choices.rs"]
+mod game_choices;
+pub use game_choices::set_choices;
 
-/// Longest game folder name, in characters (Windows paths stay short).
-const GAME_FOLDER_MAX: usize = 60;
-
-/// Game name -> a folder name that is safe on Windows and readable: "Rocket League®" ->
-/// "Rocket League". Keeps letters, digits, spaces and a few harmless marks; drops the rest
-/// (`<>:"/\|?*`, control characters, symbols); collapses spaces; no leading or trailing dots
-/// or spaces; at most [`GAME_FOLDER_MAX`] characters; a Windows device name (`CON`, `COM1`,
-/// `COM¹`, ...) gets a `_` in front, a reserved folder name (`thumbs`, `raw`, ...) a `_` on the
-/// end (`game_folder_rule`). Empty -> "Desktop".
-pub fn game_folder_name(source: &str) -> String {
-    let kept: String = source
-        .chars()
-        .map(|c| if c.is_whitespace() { ' ' } else { c })
-        .filter(|&c| c.is_alphanumeric() || " -_.,'&()[]!+#=~;".contains(c))
-        .collect();
-    let mut name = kept.split(' ').filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ");
-    if name.chars().count() > GAME_FOLDER_MAX {
-        name = name.chars().take(GAME_FOLDER_MAX).collect();
-    }
-    let name = name.trim_matches(|c: char| c == '.' || c == ' ').to_string();
-    if name.is_empty() {
-        return "Desktop".to_string();
-    }
-    if rule::is_device_name(&name) {
-        return format!("_{name}");
-    }
-    if rule::is_reserved(&name) {
-        return format!("{name}_");
-    }
-    name
-}
+/// Game name -> its folder name (shared with the app: `game_folder_rule`).
+pub use rule::game_folder_name;
 
 /// The folder a new clip of `source` goes into now: [`writable_game_dir`] with "Sort clips
 /// into game folders" on ([`game_folders_on`]), else `out_dir`. Disk work: writer threads only.
@@ -213,7 +188,7 @@ mod tests {
         assert_eq!(game_folder_name("Line\nBreak\u{7}"), "Line Break");
         assert_eq!(game_folder_name("原神"), "原神");
         let long = "x".repeat(200);
-        assert_eq!(game_folder_name(&long).chars().count(), GAME_FOLDER_MAX);
+        assert_eq!(game_folder_name(&long).chars().count(), rule::GAME_FOLDER_MAX);
         assert_eq!(game_folder_name(&format!("{} .end", "y".repeat(59))), "y".repeat(59));
     }
 
@@ -224,7 +199,7 @@ mod tests {
         assert_eq!(game_folder_name("raw"), "raw_");
         let long = "Ab".repeat(150);
         assert_eq!(long.chars().count(), 300);
-        assert_eq!(game_folder_name(&long).chars().count(), GAME_FOLDER_MAX);
+        assert_eq!(game_folder_name(&long).chars().count(), rule::GAME_FOLDER_MAX);
         assert_eq!(source_slug(&long).chars().count(), SLUG_MAX);
         assert_eq!(source_slug("Rocket League®"), "Rocket-League-");
     }

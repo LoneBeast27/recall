@@ -288,15 +288,18 @@ pub fn at(dir: &Path, name: &str) -> PathBuf {
 /// Only Recall-named `.mp4`s are clips. Sizes and times come from the directory enumeration.
 pub fn scan(dir: &Path) -> std::io::Result<Listing> {
     let mut listing = Listing::default();
-    list_into(&mut listing, std::fs::read_dir(dir)?, "");
+    list_into(&mut listing, std::fs::read_dir(dir)?, "", &|_| true);
     if let Ok(thumbs) = std::fs::read_dir(dir.join("thumbs")) {
         listing.thumbs = thumbs.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     }
     // An unreadable game folder is skipped (its clips just don't count).
+    // In an adopted folder ("Use this folder") the files that were there before are the user's:
+    // never counted, never recycled (`Marker::owns`).
     for game in crate::game_folder_rule::game_folders(dir) {
+        let Some(marker) = crate::game_folder_rule::game_folder_marker(&game) else { continue };
         let Ok(entries) = std::fs::read_dir(&game) else { continue };
         let prefix = format!("{}/", game.file_name().unwrap_or_default().to_string_lossy());
-        list_into(&mut listing, entries, &prefix);
+        list_into(&mut listing, entries, &prefix, &|file| marker.owns(file));
         if let Ok(thumbs) = std::fs::read_dir(game.join("thumbs")) {
             listing.thumbs.extend(thumbs.flatten().map(|e| format!("{prefix}{}", e.file_name().to_string_lossy())));
         }
@@ -304,8 +307,9 @@ pub fn scan(dir: &Path) -> std::io::Result<Listing> {
     Ok(listing)
 }
 
-/// Files of one folder into `listing`, names prefixed with `prefix` (`""` or `Game/`).
-fn list_into(listing: &mut Listing, entries: std::fs::ReadDir, prefix: &str) {
+/// Files of one folder into `listing`, names prefixed with `prefix` (`""` or `Game/`). Only
+/// files `ours` accepts can be clips.
+fn list_into(listing: &mut Listing, entries: std::fs::ReadDir, prefix: &str, ours: &dyn Fn(&str) -> bool) {
     for entry in entries.flatten() {
         let Ok(meta) = entry.metadata() else { continue };
         if !meta.is_file() {
@@ -313,7 +317,7 @@ fn list_into(listing: &mut Listing, entries: std::fs::ReadDir, prefix: &str) {
         }
         let file = entry.file_name().to_string_lossy().into_owned();
         let name = format!("{prefix}{file}");
-        if is_recall_clip(&file) {
+        if is_recall_clip(&file) && ours(&file) {
             let modified = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
             listing.clips.push(ClipFile { name: name.clone(), bytes: meta.len(), modified });
         }

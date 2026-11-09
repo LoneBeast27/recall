@@ -166,6 +166,7 @@ impl Root {
                 note_saved(&self.folders, path);
                 self.workers.job(Job::List);
             }
+            DaemonEvent::GameFolderExists { game, folder } => self.on_game_folder_exists(game, folder),
             DaemonEvent::RecordingRecovered { paths, .. } => {
                 // Toast: `recording_toast`. The recovered files reach the library.
                 for path in paths {

@@ -492,3 +492,24 @@ fn overlay_hotkey_first_use_enables_notices_when_both_surfaces_are_off() {
     assert!(shown.config.overlay.shows_notices());
     assert!(!shown.config.overlay.shows_stats());
 }
+
+/// "Use your existing <Game> folder?" answers: a patch adds one, "" removes it (the app's reset),
+/// other values are dropped, and the map survives TOML as a table.
+#[test]
+fn game_folder_choices_survive_a_patch_and_a_toml_round_trip() {
+    let store = temp_store("gamefolderchoices");
+    let base = store.load();
+    assert!(base.recording.game_folder_choices.is_empty(), "no answers until the user gives one");
+    let out = apply_patch(&base, &json!({"recording": {"game_folder_choices": {"valorant": "merge"}}})).unwrap();
+    assert!(out.touched("recording.game_folder_choices"), "{:?}", out.changed);
+    let more = apply_patch(&out.config, &json!({"recording": {"game_folder_choices": {"rocket league": "separate", "junk": "maybe"}}})).unwrap();
+    let keys: Vec<&String> = more.config.recording.game_folder_choices.keys().collect();
+    assert_eq!(keys, ["rocket league", "valorant"], "added to, junk dropped");
+    store.save(&more.config).unwrap();
+    let text = std::fs::read_to_string(store.path()).unwrap();
+    assert!(text.contains("[recording.game_folder_choices]"), "a TOML table:\n{text}");
+    assert_eq!(store.load(), more.config);
+    let reset = apply_patch(&more.config, &json!({"recording": {"game_folder_choices": {"rocket league": "", "valorant": ""}}})).unwrap();
+    assert!(reset.config.recording.game_folder_choices.is_empty());
+    assert!(apply_patch(&base, &json!({"recording": {"game_folder_choices": {"valorant": 1}}})).is_err(), "answers are text");
+}

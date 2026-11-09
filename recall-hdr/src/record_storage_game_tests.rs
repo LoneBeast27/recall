@@ -123,3 +123,28 @@ fn game_folder_clips_keep_favourites_and_edits() {
     let p = plan(&l, &favs, 3 * GIB, 1_000_000);
     assert_eq!(p.remove, vec!["G__2026-10-22__14-05-11.mp4".to_string()], "A's clip is a favourite, B's has edits, the newest stays");
 }
+
+/// (a) "Use this folder": a Recall-named clip already in the user's folder is never counted and
+/// never in `plan.remove`, even at a tiny limit; clips saved there after adoption are.
+#[test]
+fn an_adopted_folders_existing_clips_are_never_counted_or_recycled() {
+    let (dir, _gone) = temp("adopted");
+    let game = dir.join("VALORANT");
+    std::fs::create_dir_all(&game).unwrap();
+    let old = "VALORANT__2025-01-01__10-00-00.mp4";
+    std::fs::write(game.join(old), vec![0u8; 50]).unwrap();
+    rule::adopt(&game).unwrap();
+    let new = ["VALORANT__2026-11-10__04-00-00-000__ab.mp4", "VALORANT__2026-11-10__05-00-00-000__cd.mp4"];
+    for name in new {
+        std::fs::write(game.join(name), vec![0u8; 20]).unwrap();
+    }
+    let l = scan(&dir).unwrap();
+    assert_eq!(names(&l), new.iter().map(|n| format!("VALORANT/{n}")).collect::<Vec<_>>(), "the existing clip is not counted");
+    let p = plan(&l, &HashSet::new(), 1, u64::MAX / 2);
+    assert_eq!(p.total, 40, "only the new clips count");
+    assert!(!p.remove.iter().any(|n| n.ends_with(old)), "{:?}", p.remove);
+    assert!(!p.remove.is_empty(), "a clip saved after adoption may go: {:?}", p.remove);
+    // A marker that can't be parsed: the folder is not a game folder, nothing in it counts.
+    std::fs::write(game.join(rule::MARKER), b"{broken").unwrap();
+    assert!(scan(&dir).unwrap().clips.is_empty());
+}

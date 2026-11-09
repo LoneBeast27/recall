@@ -541,5 +541,7 @@ fn a_game_folder_replaced_mid_run_sends_the_clip_to_the_clip_folder() {
     let lines = sink.lock().unwrap().clone();
     assert!(lines.iter().any(|l| l.contains("is not Recall's game folder now")), "{lines:?}");
     let next = place_in_game_folder(&text(&dir.join(file)), Some("VALORANT"), &out, &events);
-    assert_eq!(next, text(&dir.join("VALORANT (Recall)").join(file)), "the next save resolves again");
+    // The next save resolves again: now it is the user's folder, with no answer yet (asked once).
+    assert_eq!(next, text(&dir.join(file)), "the next save resolves again");
+    assert!(!rule::has_marker(&game));
 }

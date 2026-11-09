@@ -75,6 +75,7 @@ impl Render for Root {
             .child(body)
             .children(self.render_toast(cx))
             .children(self.render_update(cx))
+            .children(self.render_game_folder_prompt(cx))
     }
 }
 

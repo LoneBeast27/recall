@@ -308,6 +308,18 @@ impl Root {
         list = list.child(sort_row).child(
             div().pb(px(8.)).text_size(px(12.)).text_color(c(theme::TERTIARY)).truncate().child(saves_to_label(&recordings, sorted)),
         );
+        // Undo "Use your existing <Game> folder?" answers: the questions come back on the next
+        // save. Folders Recall already adopted keep their marker.
+        let answered = crate::views::game_folder_prompt::choices(self.config_value("recording", "game_folder_choices"));
+        if sorted && !answered.is_empty() {
+            let reset = crate::views::game_folder_prompt::reset_value(&answered);
+            list = list.child(div().pb(px(8.)).child(
+                ui::button("game-folder-reset", Variant::Ghost).child(crate::views::game_folder_prompt::RESET_LABEL).on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_config("recording", "game_folder_choices", reset.clone());
+                    cx.notify();
+                })),
+            ));
+        }
         let mut mapped = div().flex().flex_col().child(div().font_weight(FontWeight::SEMIBOLD).child("Folder Mapper"));
         for (i, folder) in self.folders.linked().enumerate() {
             let name = Path::new(folder).file_name().map_or_else(|| folder.to_owned(), |n| n.to_string_lossy().into_owned());

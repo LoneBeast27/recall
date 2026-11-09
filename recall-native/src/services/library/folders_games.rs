@@ -21,8 +21,8 @@ pub fn is_recall_named(name: &str) -> bool {
     (1..b.len()).any(|i| b.len() >= i + SHAPE.len() && SHAPE.iter().zip(&b[i..]).all(|(&s, &c)| if s == b'd' { c.is_ascii_digit() } else { s == c }))
 }
 
-/// `clip` is a recorder clip in a game folder Recall made in `folder` (`<folder>\<Game>\<clip>`).
-/// Looks at the disk (the marker).
+/// `clip` is Recall's recorder clip in a game folder of `folder` (`<folder>\<Game>\<clip>`): made
+/// by Recall, or saved after the folder was adopted. Looks at the disk (the marker).
 pub fn in_game_folder(clip: &Path, folder: &Path) -> bool {
     let Some(game) = clip.parent() else { return false };
     clip.file_name().is_some_and(|n| is_recall_named(&n.to_string_lossy()))
@@ -30,7 +30,9 @@ pub fn in_game_folder(clip: &Path, folder: &Path) -> bool {
             let key = folder_key(&folder.to_string_lossy());
             !key.is_empty() && folder_key(&parent.to_string_lossy()) == key
         })
-        && rule::is_game_folder(game)
+        // In an adopted folder ("Use this folder") the files that were there before stay the
+        // user's: not owned, so Delete only hides them and edits go beside, as for links.
+        && rule::game_folder_marker(game).is_some_and(|m| clip.file_name().is_some_and(|n| m.owns(&n.to_string_lossy())))
 }
 
 /// `path` is a linked folder in `linked`, or inside one, where that link is not the recordings

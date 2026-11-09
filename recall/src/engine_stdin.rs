@@ -78,6 +78,7 @@ fn apply(cmd: Command, shared: &CaptureShared, (save, export): (&Option<SaveHook
             #[cfg(feature = "encode")]
             protocol::emit(&protocol::Outbound::MicMuted { muted: audio::mic_muted() });
         }
+        Command::SetGameFolderChoices { choices } => crate::naming::set_choices(choices),
         Command::SetSource { id, gain_db, name, mic_mute, device_id } => {
             #[cfg(feature = "encode")]
             {

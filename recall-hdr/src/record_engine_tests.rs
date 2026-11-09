@@ -161,6 +161,15 @@ fn engine_env_sets_or_removes_every_target_variable() {
     assert_eq!(get(&win, "RECALL_GAME_FOLDERS").as_deref(), Some("0"), "off by default, set so an inherited value cannot turn it on");
     let sorted = engine_env(&EngineTarget::Desktop, &RecordingCfg { game_folders: true, ..rec.clone() }, None, false);
     assert_eq!(get(&sorted, "RECALL_GAME_FOLDERS").as_deref(), Some("1"));
+    assert_eq!(get(&win, "RECALL_GAME_FOLDER_CHOICES").as_deref(), Some("{}"), "set, so an inherited value cannot answer");
+    let mut answered = rec.clone();
+    answered.game_folder_choices.insert("valorant".into(), "merge".into());
+    answered.game_folder_choices.insert("rocket league".into(), "separate".into());
+    let env = engine_env(&EngineTarget::Desktop, &answered, None, false);
+    assert_eq!(get(&env, "RECALL_GAME_FOLDER_CHOICES").as_deref(), Some(r#"{"rocket league":"separate","valorant":"merge"}"#), "compact JSON");
+    assert!(!engine_settings_changed(&rec, &answered), "answers go live, no restart");
+    let line: serde_json::Value = serde_json::from_str(&crate::record_engine::game_folder_choices_line(&answered.game_folder_choices)).unwrap();
+    assert_eq!(line, serde_json::json!({"cmd": "set_game_folder_choices", "choices": {"valorant": "merge", "rocket league": "separate"}}));
     let desk = engine_env(&EngineTarget::Desktop, &rec, None, false);
     assert_eq!(get(&desk, "RECALL_CPU_MASK"), None, "unapplied mask is not passed (engine would exit)");
     assert_eq!(get(&desk, "RECALL_CAPTURE_HWND"), None, "removed, not inherited");
