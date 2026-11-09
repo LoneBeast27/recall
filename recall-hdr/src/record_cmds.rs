@@ -275,13 +275,14 @@ impl Controller {
 
     fn set_ac_profile(&mut self, client: Option<u64>, val: &Value) {
         let variant = val.get("variant").and_then(Value::as_str).unwrap_or("");
-        let Some(profile) = hdr_exec::ac_profile_file(variant) else {
-            return self.reply_error(client, &format!("unknown set_ac_profile variant '{variant}' (expected punchy | accurate)"));
+        let profile = match hdr_exec::ac_profile_file(&self.cfg.display, variant) {
+            Ok(profile) => profile,
+            Err(e) => return self.reply_error(client, &e),
         };
         if let Err(e) = self.hdr.ready() {
             return self.reply_error(client, &e);
         }
-        let result = self.hdr.set_ac_profile(&self.cfg, profile);
+        let result = self.hdr.set_ac_profile(&self.cfg, &profile);
         self.hub.event("hdr", &hdr_exec::ac_profile_event(&result));
     }
 

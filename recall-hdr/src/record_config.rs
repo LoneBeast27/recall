@@ -381,7 +381,7 @@ pub fn merge_json(base: &mut Value, patch: &Value) {
 }
 
 /// Optional schema keys that are absent from the serialized form when unset.
-const OPTIONAL_KEYS: &[&str] = &["display.target_device_path"];
+const OPTIONAL_KEYS: &[&str] = &["display.target_device_path", "display.punchy_profile", "display.accurate_profile"];
 
 /// Reject patch keys the schema does not have (typo guard) and `version`.
 fn check_keys(schema: &Map<String, Value>, patch: &Map<String, Value>, prefix: &str) -> Result<(), String> {

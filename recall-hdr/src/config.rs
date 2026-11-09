@@ -93,6 +93,14 @@ pub struct DisplayCfg {
     /// Optional exact device-path pin. Empty/absent -> select by friendly name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_device_path: Option<String>,
+    /// File name of this machine's "Punchy" MHC2 profile in the Windows colour store
+    /// (`set_ac_profile punchy`). Profiles are made per monitor, so nothing is built in:
+    /// absent -> the Desktop colour in HDR row is hidden and the command is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub punchy_profile: Option<String>,
+    /// File name of this machine's "Accurate" MHC2 profile (`set_ac_profile accurate`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accurate_profile: Option<String>,
 }
 
 /// `[behavior]` -- default rule/clamp when no per-exe override matches.

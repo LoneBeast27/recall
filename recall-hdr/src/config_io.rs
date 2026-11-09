@@ -25,7 +25,7 @@ use crate::log;
 /// never carried forward (the chord-era `[hotkeys]` would re-run its migration).
 const RETIRED: &[&str] = &["hotkeys"];
 /// Schema keys absent from the serialized form when unset.
-const OPTIONAL: &[(&str, &str)] = &[("display", "target_device_path")];
+const OPTIONAL: &[(&str, &str)] = &[("display", "target_device_path"), ("display", "punchy_profile"), ("display", "accurate_profile")];
 
 /// Reads of a file that exists but can't be read, and the pause between them.
 const READ_TRIES: u32 = 3;
