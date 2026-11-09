@@ -3,7 +3,7 @@
   records the dev capture target, for flame graphs per process (engine, app, overlay, dwm).
 
   Run from an ELEVATED PowerShell (WPR needs admin), with no game running:
-    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\dev\cost-trace.ps1 -Engine <recall.exe>
+    powershell -NoProfile -ExecutionPolicy Bypass -File scripts\dev\cost-trace.ps1 -Engine <recall.exe> [-Target <present_target.exe>]
 
   It refuses while a game runs. It starts WPR (profiles CPU and GPU, file mode), runs
   scripts\dev\engine-cost.ps1 for -Seconds with a -SaveSeconds save at the end (so the save's
@@ -13,6 +13,7 @@
 #>
 param(
   [string]$Engine = '',   # default: <dev root>\.tmp\recall-low-end-target\release\recall.exe (dev-paths.ps1)
+  [string]$Target = '',   # default: examples\present_target.exe from the same build as -Engine
   [double]$Seconds = 60,
   [int]$SaveSeconds = 30,
   [string]$Out = ''       # default: <dev root>\.tmp\recall-low-end-logs\cost-trace.etl
@@ -22,6 +23,7 @@ $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 . (Join-Path $PSScriptRoot 'dev-paths.ps1')
 $dev = Get-DevRoot $repo
 if (-not $Engine) { $Engine = Join-Path $dev '.tmp\recall-low-end-target\release\recall.exe' }
+if (-not $Target) { $Target = Join-Path (Split-Path $Engine) 'examples\present_target.exe' }
 if (-not $Out) { $Out = Join-Path $dev '.tmp\recall-low-end-logs\cost-trace.etl' }
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $admin) { Write-Error 'Run this from an elevated PowerShell: WPR needs admin.'; exit 2 }
