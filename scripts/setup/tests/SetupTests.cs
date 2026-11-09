@@ -57,9 +57,9 @@ namespace Recall.Setup.Tests
             Check(QuitPolicy.MayWrite(4242, null, Me, true) != null, "unreadable account: refused");
             Check(QuitPolicy.MayWrite(4242, Me, Me, false) != null, "a recorder from another folder (the live one): refused");
             Check(QuitPolicy.MayWrite(0, Me, Me, true) != null, "unknown server: refused");
-            Check(QuitPolicy.IsOurController(@"L:\Sandbox\Programs\Recall\recall-hdr.exe", @"l:\sandbox\programs\recall\RECALL-HDR.EXE"), "case-insensitive");
-            Check(!QuitPolicy.IsOurController(@"C:\Users\x\AppData\Local\Programs\Recall\recall-hdr.exe", @"L:\Sandbox\Programs\Recall\recall-hdr.exe"), "other folder");
-            Check(!QuitPolicy.IsOurController(null, @"L:\x\recall-hdr.exe"), "unreadable path is never ours");
+            Check(QuitPolicy.IsOurController(@"Y:\Sandbox\Programs\Recall\recall-hdr.exe", @"y:\sandbox\programs\recall\RECALL-HDR.EXE"), "case-insensitive");
+            Check(!QuitPolicy.IsOurController(@"C:\Users\x\AppData\Local\Programs\Recall\recall-hdr.exe", @"Y:\Sandbox\Programs\Recall\recall-hdr.exe"), "other folder");
+            Check(!QuitPolicy.IsOurController(null, @"Y:\x\recall-hdr.exe"), "unreadable path is never ours");
         }
 
         private static void BoundedWait()
@@ -121,12 +121,12 @@ namespace Recall.Setup.Tests
 
         private static void SandboxGuard()
         {
-            const string sandbox = @"L:\T\sandbox\", real = @"C:\Users\u\AppData\Local\Programs\Recall\";
-            Check(SandboxPolicy.Refusal(@"L:\T\sandbox\Programs\Recall\", sandbox, real, null) == null, "inside: allowed");
-            Check(SandboxPolicy.Refusal(@"L:\T\elsewhere\", sandbox, real, null) != null, "outside the sandbox: refused");
+            const string sandbox = @"Y:\T\sandbox\", real = @"C:\Users\u\AppData\Local\Programs\Recall\";
+            Check(SandboxPolicy.Refusal(@"Y:\T\sandbox\Programs\Recall\", sandbox, real, null) == null, "inside: allowed");
+            Check(SandboxPolicy.Refusal(@"Y:\T\elsewhere\", sandbox, real, null) != null, "outside the sandbox: refused");
             Check(SandboxPolicy.Refusal(real, @"C:\Users\u\AppData\Local\", real, null) != null, "the real folder: refused");
             Check(SandboxPolicy.Refusal(@"C:\Users\u\AppData\Local\Programs\", @"C:\Users\u\AppData\Local\", real, null) != null, "holding it: refused");
-            Check(SandboxPolicy.Refusal(@"L:\T\sandbox\R\", sandbox, real, real + "recall-hdr.exe") != null, "controller outside: refused");
+            Check(SandboxPolicy.Refusal(@"Y:\T\sandbox\R\", sandbox, real, real + "recall-hdr.exe") != null, "controller outside: refused");
             Check(SandboxPolicy.Refusal(real, null, real, null) == null, "a real run is not a sandbox");
         }
     }
