@@ -9,6 +9,13 @@
   },
   "paths": {
     "devRoot": "<optional: folder holding the main checkout; detected from git when absent>",
-    "mainCheckout": "<optional: the main checkout; detected from git when absent>"
+    "mainCheckout": "<optional: the main checkout; detected from git when absent>",
+    "clipLibrary": "<folder of real clips viewer-check.ps1 copies test clips from>"
+  },
+  "clips": {
+    "islandBackdrop": "<an .mp4 for island-preview.ps1 -WebDir>"
+  },
+  "tools": {
+    "python": "<optional: python.exe for island-preview.ps1; else the python on PATH>"
   }
 }
