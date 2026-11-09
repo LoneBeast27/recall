@@ -67,6 +67,7 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
             Ok((mut child, reader)) => {
                 let pid = child.id();
                 shared.set_health(EngineHealth::Running { pid });
+                shared.respawn_if_sources_moved(gen); // a source change during the spawn
                 if !quiet {
                     log!("supervisor: engine started (pid {pid})");
                 }
