@@ -11,6 +11,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use super::save_progress::SaveProgress;
+use crate::protocol::SaveWriting;
 use super::saver::Shutdown;
 use crate::stdin_reader::ORPHAN_SAVE_BUDGET;
 
@@ -32,7 +33,9 @@ pub(super) fn stop_saver(
     let reserve = (budget / 2).min(Duration::from_millis(500));
     let drained = match orphan {
         None => wait_done(done, budget - reserve),
-        Some(progress) => wait_orphan(done, progress, budget - reserve),
+        Some(progress) => wait_orphan(done, progress, budget - reserve, |save_writing| {
+            crate::protocol::emit(&crate::protocol::Outbound::SaveProgress { save_writing });
+        }),
     };
     if drained {
         return Shutdown::Drained;
@@ -51,12 +54,19 @@ fn wait_done(done: &Receiver<()>, timeout: Duration) -> bool {
     !matches!(done.recv_timeout(timeout), Err(RecvTimeoutError::Timeout))
 }
 
-/// An orphan's wait: true once the saver ended, false when the hold lets go.
-fn wait_orphan(done: &Receiver<()>, progress: &SaveProgress, normal: Duration) -> bool {
+/// An orphan's wait: true once the saver ended, false when the hold lets go. Each poll with
+/// a save in flight is `report`ed (`save_progress`): the event loop that sent `status` has
+/// ended, and a released engine's controller must see the save still writing.
+fn wait_orphan(done: &Receiver<()>, progress: &SaveProgress, normal: Duration, mut report: impl FnMut(SaveWriting)) -> bool {
     let mut hold = OrphanHold::new(Instant::now(), progress.read().0, normal);
     loop {
         if wait_done(done, ORPHAN_POLL.min(normal.max(Duration::from_millis(1)))) {
             return true;
+        }
+        let jobs = progress.jobs.load(Relaxed);
+        if jobs > 0 {
+            let (step, bytes) = progress.read();
+            report(SaveWriting { bytes, queued: jobs - 1, step });
         }
         if !hold.keep(progress.jobs.load(Relaxed), progress.read().0, Instant::now()) {
             return false;
@@ -123,6 +133,24 @@ mod tests {
 
         let mut long = OrphanHold::new(t0, 0, normal);
         assert!(!long.keep(1, 1, t0 + ORPHAN_SAVE_BUDGET), "never past the 30 min cap");
+    }
+
+    #[test]
+    fn a_draining_save_reports_its_progress_every_poll() {
+        // R2-detect-r10-p2-1: after stop_capture no `status` line goes out; the drain says
+        // the save still writes, so the controller does not give up on it at 120 s.
+        let progress = SaveProgress::default();
+        progress.jobs.store(2, Relaxed);
+        let (tx, done) = std::sync::mpsc::channel::<()>();
+        let ender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(2_500));
+            drop(tx);
+        });
+        let mut seen = Vec::new();
+        assert!(wait_orphan(&done, &progress, Duration::from_millis(10), |w| seen.push(w)), "the saver ended");
+        ender.join().unwrap();
+        assert!(seen.len() >= 2, "one per poll: {seen:?}");
+        assert_eq!(seen[0].queued, 1, "the one writing plus one behind it");
     }
 
     #[test]
