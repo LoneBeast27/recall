@@ -69,9 +69,14 @@ powershell -NoProfile -File scripts\install.ps1
   as a game in Settings" (once per exe per run), and the tray menu gets "Add <exe> as a game".
 - **Settings → Games** lists the apps you registered. **Add app…** picks a running app (the one
   that was in front comes first, borderless games included) or browses to an exe; it is then
-  recorded in any window. Each entry can be set to **Never record** (never recorded, even from a
-  Steam library) or removed. Never record or Remove on the app being recorded stops recording it
-  at once and throws away its unsaved replay buffer (saved clips are never touched).
+  recorded in any window. Your own entry beats every list below: a browser, a media player, a
+  launcher, a remote-desktop or game-streaming client (Parsec, Moonlight) or a call or chat app
+  you add is recorded. Recall itself and parts of Windows (the desktop and taskbar, the lock and
+  sign-in screens, screensavers, system processes) are never recorded and cannot be added. Each
+  entry can be set to **Never record** (never recorded, even from a Steam library) or removed.
+  Never record or Remove on the app being recorded stops recording it at once and throws away
+  its unsaved replay buffer; a clip already being saved still finishes (saved clips are never
+  touched).
   In config.toml these are `[[overrides]]` entries (`exe = "Game.exe"` or `"game"`, `kind =
   "sdr_game"` / `"hdr_game"` / `"none"`).
 - **Call, chat, mail, office, media-player and music apps** (Zoom, Teams, WhatsApp, Kodi,
@@ -81,7 +86,7 @@ powershell -NoProfile -File scripts\install.ps1
   window, a fullscreen call or stream view included, is recorded by default (config.toml
   `[detect] fullscreen_games = ["Discord"]`, shown in Settings → Games as "Recorded when
   fullscreen"; remove it there to stop). Windowed Discord is never recorded: pressing Esc
-  (or restoring the window) ends its recording at once; alt-tab away from a still-fullscreen
+  (or restoring the window) ends its recording at once (a clip being saved still finishes); alt-tab away from a still-fullscreen
   Discord keeps it, like a game. Adding an exe to
   `fullscreen_games` records it only while it is fullscreen; a Settings → Games entry records
   every window of that exe, windowed ones too (a meeting toolbar or a chat window). When a

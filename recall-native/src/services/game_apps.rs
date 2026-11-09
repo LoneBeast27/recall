@@ -145,11 +145,13 @@ pub struct Pickable {
     pub in_front: bool,
 }
 
-/// Exes never offered by "Add app…": Recall's own, and shell / frame processes whose windows
-/// are not the app itself.
+/// Exes never offered by "Add app…": Recall's own, and shell / frame / system processes whose
+/// windows are not the app itself. The controller never records Recall or Windows itself and
+/// refuses such an entry (recall-hdr `record_target_rules::never_recordable`).
 const NOT_OFFERED: &[&str] = &[
     "recall", "recall-native", "recall-hdr", "recall-hub", "recall-overlay", "explorer", "applicationframehost", "textinputhost",
-    "shellexperiencehost", "startmenuexperiencehost", "searchhost", "searchapp", "lockapp", "systemsettings",
+    "shellexperiencehost", "startmenuexperiencehost", "searchhost", "searchapp", "lockapp", "systemsettings", "dwm", "shellhost",
+    "logonui", "winlogon", "csrss", "sihost", "svchost", "conhost", "ctfmon", "taskhostw", "runtimebroker",
 ];
 
 /// The running apps "Add app…" offers, in z-order: one row per exe, minus Recall and the
