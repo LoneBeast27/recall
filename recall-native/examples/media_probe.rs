@@ -1,4 +1,7 @@
 //! Exercise Recall's actual native video child window and prepared-audio clock.
+#[path = "../src/build_flavor.rs"]
+mod build_flavor;
+pub(crate) use build_flavor::TESTING;
 #[path = "../src/audio.rs"]
 mod audio;
 #[path = "../src/backend.rs"]

@@ -102,6 +102,9 @@ fn db_floor_and_bar_fraction() {
 #[test]
 #[ignore = "live hardware: opens shared-mode WASAPI loopback/capture on the default endpoints"]
 fn live_meters_report_every_endpoint() {
+    if !crate::hw_gate::enabled("live_meters_report_every_endpoint") {
+        return;
+    }
     let meters = Meters::spawn(vec![spec_for(&source(Kind::Output, "", ""), None), spec_for(&source(Kind::Input, "", ""), None)]);
     std::thread::sleep(Duration::from_millis(1500));
     let snapshot = meters.snapshot();
@@ -160,4 +163,33 @@ fn opened_own_is_the_saved_id_alone() {
     }
     let names = |list: &[&str]| list.iter().map(|n| (*n).to_owned()).collect::<Vec<String>>();
     assert_eq!(super::stripped_hits(&names(&["4- X", "5- X", "Y"]), "3- X"), 2);
+}
+
+/// P2-d: an ignored test that opens real audio or MIDI devices, spawns the real engine (which
+/// opens the microphone), touches real displays, captures the screen or runs the render probe
+/// runs only with RECALL_HW_TESTS=1, so `--include-ignored` never does.
+/// Its first statement is the `hw_gate::enabled` check. Paths from this crate's manifest.
+#[test]
+fn every_hardware_test_is_behind_recall_hw_tests() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for (file, test) in [
+        ("src/services/meters_tests.rs", "live_meters_report_every_endpoint"),
+        ("src/services/audio_apps.rs", "live_inventory"),
+        ("src/services/midi.rs", "live_midi_lists_ports_and_monitors"),
+        ("src/audio_tests.rs", "audio_soak"),
+        ("../recall-hdr/src/supervisor_tests.rs", "live_spawn_hello_shutdown_no_orphan"),
+        ("../recall-hdr/src/display_tests.rs", "live_enumerate"),
+        ("../recall-hdr/src/display_tests.rs", "live_hdr_roundtrip"),
+        ("../recall-hdr/src/display_tests.rs", "live_sdr_white_get"),
+        ("../recall-hdr/src/display_tests.rs", "live_sdr_white_set_roundtrip"),
+        ("../recall-hdr/src/render_probe_tests.rs", "live_probe_counts_this_process_presents"),
+        ("../recall-hdr/src/render_probe_tests.rs", "live_probe_start_stop_cost"),
+        ("../recall-hdr/src/render_probe_tests.rs", "live_probe_cpu_under_load"),
+        ("../recall/src/capture/dda_tests.rs", "dda_headless_primary_monitor"),
+    ] {
+        let text = std::fs::read_to_string(root.join(file)).unwrap_or_else(|e| panic!("{file}: {e}"));
+        let at = text.find(&format!("fn {test}()")).unwrap_or_else(|| panic!("{test} not in {file}"));
+        let first = text[at..].lines().nth(1).unwrap_or("");
+        assert!(first.contains("hw_gate::enabled("), "{file} {test}: first line is {first:?}, not the RECALL_HW_TESTS gate");
+    }
 }

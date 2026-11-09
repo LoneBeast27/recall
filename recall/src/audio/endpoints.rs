@@ -109,6 +109,12 @@ pub(crate) fn unsure_notice(name: &str) -> String {
     format!("{} may be a different device (its ID changed). Started muted; press Alt+M to unmute.", name.trim())
 }
 
+/// The status of a line-in held on an unsure sibling after an unmuting Alt+M (P1-b): no id is
+/// adopted for a line-in, so the user picks the device on the Audio page.
+pub(crate) fn line_in_pick_notice(name: &str) -> String {
+    format!("{} may be a different device (its ID changed). Line-in stays muted: pick it on the Audio page.", name.trim())
+}
+
 /// The status of a track whose name matches an endpoint only in another case (P2-d).
 pub(crate) fn case_notice(name: &str) -> String {
     format!("{} not found exactly; pick it again", name.trim())

@@ -72,6 +72,12 @@ pub fn unsure_note(name: &str) -> String {
     format!("{} may be a different device (its ID changed). Started muted; press Alt+M to unmute.", name.trim())
 }
 
+/// [`unsure_note`] for a line-in, which Alt+M never unmutes onto a sibling (P1-b; the
+/// recorder's `endpoints::line_in_pick_notice`, same words).
+pub fn unsure_line_in_note(name: &str) -> String {
+    format!("{} may be a different device (its ID changed). Line-in stays muted: pick it on the Audio page.", name.trim())
+}
+
 /// The strip note of an output whose name two or more endpoints share (it waits).
 pub fn twins_note(name: &str, twins: usize) -> String {
     format!("{}: {twins} devices share this name; waiting for the original", name.trim())

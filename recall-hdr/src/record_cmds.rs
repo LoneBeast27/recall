@@ -253,9 +253,9 @@ impl Controller {
     pub(crate) fn set_mic(&mut self, muted: bool) {
         self.mic_muted = muted;
         // A crash respawn reuses the last spec: it must start with this mute, not the spec's.
-        self.supervisor.set_mic_muted(muted);
+        // The spawn mute and the line are one step: no spawn can fall between them.
         log!("record: microphone {}", if muted { "muted" } else { "live" });
-        let sent = self.supervisor.send_engine_line(&json!({"cmd": "set_mic_mute", "muted": muted}).to_string());
+        let sent = self.supervisor.set_mic_muted(muted);
         // The mute stays our intent either way: the next engine gets it (`reapply_engine_intents`).
         if let Some(reason) = refusal(&mic_effects(sent)).filter(|_| self.engine_running()) {
             log!("record: microphone change not sent: {reason}");

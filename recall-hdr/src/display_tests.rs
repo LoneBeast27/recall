@@ -43,6 +43,9 @@ const MANAGED: &str = ""; // the default: the primary display
 #[test]
 #[ignore = "live: touches real displays"]
 fn live_enumerate() {
+    if !crate::hw_gate::enabled("live_enumerate") {
+        return;
+    }
     let all = enumerate_targets().expect("enumerate_targets");
     println!("-- active displays --");
     for (name, t) in &all {
@@ -90,6 +93,9 @@ impl Drop for Restore<'_> {
 #[test]
 #[ignore = "live: flips HDR twice (two screen flashes, authorized)"]
 fn live_hdr_roundtrip() {
+    if !crate::hw_gate::enabled("live_hdr_roundtrip") {
+        return;
+    }
     let t = resolve_target(MANAGED).expect("resolve the primary display");
     let original = get_hdr_state(&t).expect("initial GET hdr");
     println!("HDR original = {original}");
@@ -116,6 +122,9 @@ fn live_hdr_roundtrip() {
 #[test]
 #[ignore = "live: reads real SDR white level"]
 fn live_sdr_white_get() {
+    if !crate::hw_gate::enabled("live_sdr_white_get") {
+        return;
+    }
     let t = resolve_target(MANAGED).expect("resolve the primary display");
     let nits = get_sdr_white(&t).expect("GET sdr white");
     println!("SDR white level = {nits} nits");
@@ -131,6 +140,9 @@ fn live_sdr_white_get() {
 #[test]
 #[ignore = "live: enables HDR + writes SDR white (screen flash, authorized)"]
 fn live_sdr_white_set_roundtrip() {
+    if !crate::hw_gate::enabled("live_sdr_white_set_roundtrip") {
+        return;
+    }
     let t = resolve_target(MANAGED).expect("resolve the primary display");
     let orig_hdr = get_hdr_state(&t).expect("GET hdr");
     // White level is only meaningful/settable while HDR is on.

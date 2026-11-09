@@ -213,6 +213,9 @@ mod tests {
     #[test]
     #[ignore = "live hardware: lists this PC's endpoints and sessions, opens process loopback"]
     fn live_inventory() {
+        if !crate::hw_gate::enabled("live_inventory") {
+            return;
+        }
         let lists = crate::services::audio_devices::enumerate_blocking();
         eprintln!("default output: {:?}\ndefault input: {:?}", lists.default_output, lists.default_input);
         lists.outputs.iter().for_each(|n| eprintln!("output: {n}"));
