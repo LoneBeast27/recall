@@ -230,7 +230,7 @@ pub fn engine_value(list: &[AudioSource]) -> String {
     serde_json::to_string(&engine_list(list)).unwrap_or_else(|_| "[]".into())
 }
 
-/// The list a later spawn must start with when it changed (`Supervisor::set_spawn_sources`):
+/// The list a later spawn must start with when it changed (`Supervisor::update_audio`):
 /// any change, the live ones (`set_source`) included, else a crash respawn opens the old list.
 pub fn spawn_update(old: &[AudioSource], new: &[AudioSource]) -> Option<String> {
     (old != new).then(|| engine_value(new))

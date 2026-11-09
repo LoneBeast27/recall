@@ -82,6 +82,23 @@ impl Recorded {
     }
 }
 
+impl Recorded {
+    /// The lines written once `sup`'s engine stdin is closed (its writer ends).
+    pub(crate) fn finish(&self, sup: &Supervisor) -> Vec<String> {
+        sup.shared.attach_writer(None);
+        self.raw_lines()
+    }
+}
+
+impl Supervisor {
+    /// A supervisor with no manager whose engine stdin is a recorder (as after an attach).
+    pub(crate) fn recorded_for_test() -> (Supervisor, Recorded) {
+        let sup = Supervisor { shared: Arc::new(Shared::new(None)), handle: None };
+        let rec = Recorded::attach(&sup.shared);
+        (sup, rec)
+    }
+}
+
 /// The lines written after the `quit` (none may be).
 pub(crate) fn after_quit(lines: &[String]) -> Vec<String> {
     let quit = lines.iter().position(|l| l.contains(r#""quit""#)).expect("quit was never written");
