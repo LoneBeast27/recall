@@ -23,21 +23,22 @@ namespace Recall.Setup
         }
 
         /// Null when the folder may be used, else why not. A drive Windows can't classify (USB,
-        /// RAID, Storage Spaces, VM disk) is refused as before (Setup never allowed one).
-        public static string Refusal(DriveKind kind, string model, string installDir)
+        /// RAID, Storage Spaces, VM disk) is refused unless the caller opted in (the dev installer's
+        /// -AllowUnknownDrive; the window never does); a hard drive is always refused.
+        public static string Refusal(DriveKind kind, string model, string installDir, bool allowUnknown)
         {
-            if (kind == DriveKind.Ssd) return null;
+            if (kind == DriveKind.Ssd || (kind == DriveKind.Unknown && allowUnknown)) return null;
             return "Recall must be installed on an SSD so its cache loads instantly. '" + installDir + "' is on "
                 + model + " (" + (kind == DriveKind.Hdd ? "HDD" : "Unknown") + "). Choose a folder on an SSD.";
         }
 
-        public static void Check(string installDir, Action<string> log)
+        public static void Check(string installDir, bool allowUnknown, Action<string> log)
         {
             string model;
             var kind = Query(installDir, out model);
-            var why = Refusal(kind, model, installDir);
+            var why = Refusal(kind, model, installDir, allowUnknown);
             if (why != null) throw new InvalidOperationException(why);
-            log("Install folder: " + installDir + "  (" + model + ", SSD)");
+            log("Install folder: " + installDir + "  (" + model + ", " + (kind == DriveKind.Ssd ? "SSD" : "unclassified drive, allowed by the caller") + ")");
         }
 
         public static DriveKind Query(string installDir, out string model)

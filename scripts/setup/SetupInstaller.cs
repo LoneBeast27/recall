@@ -57,7 +57,7 @@ namespace Recall.Setup
             log("Setup " + SetupBuildInfo.Version + (options.Update ? " update " : " install ") + dir
                 + (targets.IsSandbox ? " (sandbox " + targets.SandboxRoot + ")" : ""));
             targets.CheckInstallDir(dir);
-            InstallDrive.Check(dir, log);
+            InstallDrive.Check(dir, options.AllowUnknownDrive, log);
             if (options.Update && SetupPackage.ExistingInstallPath(dir) == null)
                 throw new InvalidOperationException("The selected Recall installation is incomplete or unavailable. No files were changed.");
             Report(progress, "Waiting for Recall to finish saving…");
