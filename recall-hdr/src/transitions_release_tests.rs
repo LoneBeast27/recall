@@ -50,8 +50,10 @@ fn a_heartbeat_engine_is_settled_only_by_its_answers() {
         assert!(!s.activity.release_may_settle(now), "settled at release + {k} s on a stall timer");
     }
     s.saved();
+    let idle = serde_json::json!({"type": "save_progress", "stalled_for": 0}); // the saver is empty now
     let now = s.awake();
-    assert!(s.activity.release_may_settle(now), "answered: settles");
+    s.activity.on_engine_event(&idle, 0.0, now);
+    assert!(s.activity.release_may_settle(now), "answered (and the saver empty): settles");
 }
 
 /// P8, no heartbeats: the save stalled 119 s before the stop. The settle counts 135 s from the
