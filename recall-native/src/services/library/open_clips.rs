@@ -82,7 +82,7 @@ fn registry() -> Option<PathBuf> {
     if crate::TESTING || cfg!(test) {
         return None;
     }
-    super::store::meta_path(std::env::var_os("RECALL_LIBRARY_META"), std::env::var_os("APPDATA")).map(|library| path_beside(&library))
+    super::store::meta_path(std::env::var_os("RECALL_LIBRARY_META"), crate::user_dirs::appdata().map(Into::into)).map(|library| path_beside(&library))
 }
 
 /// Every clip open in any Recall window: this process's own list plus the `paths` every app

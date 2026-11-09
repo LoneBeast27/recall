@@ -62,12 +62,12 @@ impl Journal {
     /// Resolve `%APPDATA%\recall-hdr\state.json`, creating the directory. Falls
     /// back to the OS temp dir if `%APPDATA%` is unset (matches `logging.rs`).
     pub fn path() -> PathBuf {
-        let base = std::env::var("APPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| std::env::temp_dir());
-        let dir = base.join("recall-hdr");
-        let _ = fs::create_dir_all(&dir);
-        dir.join("state.json")
+        let base = crate::user_dirs::appdata().unwrap_or_else(std::env::temp_dir);
+        let path = crate::user_dirs::checked(base.join("recall-hdr").join("state.json"));
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        path
     }
 
     /// Open the journal at the default [`Journal::path`], loading any existing

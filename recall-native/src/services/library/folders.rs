@@ -25,21 +25,8 @@ const SCAN_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 /// The recorder's default clip folder, `<Videos>\Recall` (the controller's
 /// `recording.output_dir` default): the Videos known folder, else `%USERPROFILE%\Videos`.
 pub fn default_recordings_dir() -> PathBuf {
-    videos_folder().unwrap_or_else(|| PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("Videos")).join("Recall")
-}
-
-fn videos_folder() -> Option<PathBuf> {
-    use windows::Win32::{
-        System::Com::CoTaskMemFree,
-        UI::Shell::{FOLDERID_Videos, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
-    };
-    // SAFETY: the returned buffer is copied, then freed with the allocator that made it.
-    unsafe {
-        let raw = SHGetKnownFolderPath(&FOLDERID_Videos, KF_FLAG_DEFAULT, None).ok()?;
-        let path = raw.to_string().ok();
-        CoTaskMemFree(Some(raw.0 as *const _));
-        path.filter(|p| !p.is_empty()).map(PathBuf::from)
-    }
+    let videos = crate::user_dirs::known(crate::user_dirs::Known::Videos);
+    crate::user_dirs::checked(videos.unwrap_or_else(|| PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("Videos")).join("Recall"))
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
@@ -78,7 +65,7 @@ fn folders_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("RECALL_FOLDERS").filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    std::env::var_os("APPDATA").filter(|p| !p.is_empty()).map(|root| PathBuf::from(root).join("Recall").join("folders.json"))
+    crate::user_dirs::appdata().map(|root| crate::user_dirs::checked(root.join("Recall").join("folders.json")))
 }
 
 impl Folders {

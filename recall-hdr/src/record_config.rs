@@ -146,20 +146,8 @@ impl Default for RecordingCfg {
 /// `<Videos>\Recall`: the Videos known folder (follows a moved or OneDrive Videos), else
 /// `%USERPROFILE%\Videos\Recall`.
 pub fn default_output_dir() -> String {
-    let videos = videos_folder().unwrap_or_else(|| PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("Videos"));
-    videos.join("Recall").to_string_lossy().into_owned()
-}
-
-fn videos_folder() -> Option<PathBuf> {
-    use windows::Win32::System::Com::CoTaskMemFree;
-    use windows::Win32::UI::Shell::{FOLDERID_Videos, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
-    // SAFETY: the returned buffer is copied, then freed with the allocator that made it.
-    unsafe {
-        let raw = SHGetKnownFolderPath(&FOLDERID_Videos, KF_FLAG_DEFAULT, None).ok()?;
-        let path = raw.to_string().ok();
-        CoTaskMemFree(Some(raw.0 as *const _));
-        path.filter(|p| !p.is_empty()).map(PathBuf::from)
-    }
+    let videos = crate::user_dirs::known(crate::user_dirs::Known::Videos).unwrap_or_else(|| PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("Videos"));
+    crate::user_dirs::checked(videos.join("Recall")).to_string_lossy().into_owned()
 }
 
 impl RecordingCfg {

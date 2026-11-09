@@ -9,7 +9,7 @@ pub fn library_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("RECALL_LIBRARY_META").filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(p));
     }
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Recall").join("library.json"))
+    crate::user_dirs::appdata().map(|a| crate::user_dirs::checked(a.join("Recall").join("library.json")))
 }
 
 /// Favourites from disk ([`favourites_at`] the [`library_path`]).

@@ -228,12 +228,13 @@ pub fn cache_root() -> PathBuf {
                 std::env::temp_dir().join(format!("recall-cache-test-{}", std::process::id()))
             }
             None => {
-                let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Recall");
+                let base = crate::user_dirs::local_appdata().unwrap_or_else(std::env::temp_dir).join("Recall");
                 let root = exe_cache_dir().unwrap_or_else(|| base.join("cache"));
                 migrate_editor_cache(&base.join("editor"), &root);
                 root
             }
         };
+        let root = crate::user_dirs::checked(root);
         let _ = std::fs::create_dir_all(&root);
         root
     })

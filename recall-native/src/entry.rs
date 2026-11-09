@@ -38,6 +38,7 @@ mod root;
 mod services;
 #[path = "services/update.rs"]
 mod update;
+mod user_dirs;
 mod shell;
 mod ssd_meter;
 mod startup;

@@ -316,12 +316,12 @@ impl Config {
     /// `%APPDATA%\recall-hdr\config.toml`, creating the directory if missing.
     /// Falls back to the temp dir if `APPDATA` is unset (parity with `logging`).
     pub fn path() -> PathBuf {
-        let base = std::env::var("APPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| std::env::temp_dir());
-        let dir = base.join("recall-hdr");
-        let _ = fs::create_dir_all(&dir);
-        dir.join("config.toml")
+        let base = crate::user_dirs::appdata().unwrap_or_else(std::env::temp_dir);
+        let path = crate::user_dirs::checked(base.join("recall-hdr").join("config.toml"));
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        path
     }
 
     /// Load the config, or fall back to [`Config::default`] on any error.
