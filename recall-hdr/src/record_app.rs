@@ -306,7 +306,9 @@ impl Controller {
             }
             // Drives the WinEvent hook callback, tray menu, hotkeys and the session window.
             if crate::record_session_win::drain_messages(self) {
-                log!("record: WM_QUIT received");
+                if self.quit.is_none() {
+                    log!("record: WM_QUIT received");
+                }
                 self.quit.get_or_insert(QuitReason::WindowsQuit);
             }
             if self.shut_down {
