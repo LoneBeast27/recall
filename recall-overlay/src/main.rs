@@ -142,11 +142,7 @@ fn run() -> Result<(), String> {
     let _instance = match options.smoke_state {
         Some(_) => None,
         None => match single_instance::claim_within(&single_instance::mutex_name(single_instance::OVERLAY), INSTANCE_WAIT) {
-            single_instance::Claim::First(guard) => {
-                // The only island now: a RecallFrameTiming already running is a dead one's.
-                stats::set_sole_overlay();
-                Some(guard)
-            }
+            single_instance::Claim::First(guard) => Some(guard),
             single_instance::Claim::Taken => {
                 eprintln!("recall-overlay: another island is already running; exiting");
                 return Ok(());
