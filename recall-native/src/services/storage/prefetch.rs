@@ -296,7 +296,7 @@ impl Feed {
         // out an encode.
         let stop = || recorder_busy() || super::lane::demand_waiting();
         let light = super::light::make_in(&self.root, &id, &read_from, seconds, &stop)?;
-        if on_ssd && !top && !budget::kept().contains(&format!("video/{id}.mp4")) {
+        if on_ssd && !top && !budget::kept(&self.root).contains(&format!("video/{id}.mp4")) {
             super::owned::remove(&self.root, "video", &format!("{id}.mp4"));
         }
         Ok(light.metadata().map_or(estimate, |m| m.len()))
@@ -402,7 +402,7 @@ pub fn forget_clips(gone: &[GoneClip]) {
     }
     let root = super::cache_root();
     let removed: HashSet<String> = gone.iter().filter(|g| g.removed).map(|g| super::identity(&g.name, g.bytes, g.mtime_secs)).collect();
-    let keep = budget::kept();
+    let keep = budget::kept(&root);
     for id in &removed {
         if !keep.iter().any(|unit| unit.contains(id.as_str())) {
             super::head::forget(&root, id);
