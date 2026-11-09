@@ -42,6 +42,8 @@ impl Controller {
         // The last audio line sent: the Audio page says "Applying…" until the engine's
         // `status.audio_seq` reaches it (design-audio-mute P20).
         status["audio_sent_seq"] = json!(self.supervisor.last_audio_seq());
+        // R1 + Rohan 22:00 UTC: an engine file older than the app asks for a Reinstall button.
+        status["repair"] = crate::record_inputs_held::repair_json(self.supervisor.engine_below_floor());
         status
     }
 

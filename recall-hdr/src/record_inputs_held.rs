@@ -30,9 +30,25 @@ pub(crate) fn notice_for(ev: &Value) -> Option<String> {
         }
         // Only after a held notice: a normal start says nothing.
         "inputs_released" => HELD_SHOWN.swap(false, std::sync::atomic::Ordering::SeqCst).then(|| crate::record_notice::shortcut_notice_json(RELEASED_TITLE, RELEASED_DETAIL, false, true)),
-        crate::supervisor::floor::ENGINE_OUTDATED => Some(crate::record_notice::shortcut_notice_json(OUTDATED_TITLE, OUTDATED_DETAIL, true, true)),
+        crate::supervisor::floor::ENGINE_OUTDATED => Some(outdated_notice()),
         _ => None,
     }
+}
+
+/// The machine-readable action on the R1 notice: the app shows a Reinstall button for it
+/// (Rohan 2026-11-10 22:00 UTC: "for half finished installs, ideal if we were to make user patch
+/// it with clicking a reinstall button,").
+pub(crate) const REINSTALL: &str = "reinstall";
+
+fn outdated_notice() -> String {
+    let mut v: Value = serde_json::from_str(&crate::record_notice::shortcut_notice_json(OUTDATED_TITLE, OUTDATED_DETAIL, true, true)).unwrap_or_default();
+    v["action"] = REINSTALL.into();
+    v.to_string()
+}
+
+/// `session.repair` (the app's Reinstall button): set while the engine is below the floor.
+pub(crate) fn repair_json(below_floor: bool) -> Value {
+    if below_floor { serde_json::json!({"title": OUTDATED_TITLE, "action": REINSTALL}) } else { Value::Null }
 }
 
 #[cfg(test)]
@@ -74,5 +90,10 @@ mod tests {
         let notice = shown(serde_json::json!({"type": crate::supervisor::floor::ENGINE_OUTDATED}));
         assert_eq!(notice["title"].as_str(), Some("Reinstall Recall: this recorder is older than the app; microphone and picked audio devices are off"));
         assert_eq!(notice["always"].as_bool(), Some(true), "shown even with notices off");
+        assert_eq!(notice["action"].as_str(), Some("reinstall"), "the app's Reinstall button");
+        assert_eq!(repair_json(true)["action"].as_str(), Some("reinstall"));
+        assert!(repair_json(false).is_null());
+        let status = include_str!("record_cmds_status.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(status.contains("status[\"repair\"] = crate::record_inputs_held::repair_json(self.supervisor.engine_below_floor());"), "the session status carries it");
     }
 }

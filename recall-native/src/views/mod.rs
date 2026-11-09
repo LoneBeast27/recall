@@ -12,6 +12,7 @@ pub mod quality_preview;
 pub mod setup_runner;
 mod setup_testing;
 pub mod recorder_stop;
+mod repair_banner;
 pub mod settings;
 pub mod settings_audio;
 pub mod settings_capture;

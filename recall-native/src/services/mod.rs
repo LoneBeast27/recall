@@ -17,6 +17,7 @@ pub mod game_apps_win;
 pub mod library;
 pub mod meters;
 pub mod process_tree;
+pub mod repair;
 pub mod midi;
 pub mod pre_encode;
 pub mod pre_encode_room;
