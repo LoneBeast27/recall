@@ -25,4 +25,5 @@ pub mod tile_click;
 pub mod tile_menu;
 pub mod timeline;
 pub mod titlebar;
+mod update_card;
 pub mod window_frame;

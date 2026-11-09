@@ -3,6 +3,7 @@ param(
     [Parameter(ParameterSetName='Preview')][switch]$Preview,
     [Parameter(Mandatory=$true, ParameterSetName='Release')][string]$PayloadDirectory,
     [Parameter(ParameterSetName='Release')][string]$VCRedistPath,
+    [Parameter(ParameterSetName='Release')][switch]$OnlineDependencies,
     [string]$OutputPath
 )
 $ErrorActionPreference = 'Stop'
@@ -46,23 +47,27 @@ try {
         $work = Join-Path $workspace ([Guid]::NewGuid().ToString('N'))
         $package = Join-Path $work 'payload'
         New-Item -ItemType Directory -Force -Path $work | Out-Null
-        if (!$VCRedistPath) {
-            $VCRedistPath = Join-Path $source 'vc_redist.x64.exe'
-            if (!(Test-Path -LiteralPath $VCRedistPath -PathType Leaf)) {
-                $VCRedistPath = Join-Path $work 'vc_redist.x64.exe'
-                Invoke-WebRequest -UseBasicParsing -Uri 'https://aka.ms/vc14/vc_redist.x64.exe' -OutFile $VCRedistPath -TimeoutSec 60
+        if ($OnlineDependencies) {
+            $arguments += '/define:ONLINE_DEPENDENCIES'
+        } else {
+            if (!$VCRedistPath) {
+                $VCRedistPath = Join-Path $source 'vc_redist.x64.exe'
+                if (!(Test-Path -LiteralPath $VCRedistPath -PathType Leaf)) {
+                    $VCRedistPath = Join-Path $work 'vc_redist.x64.exe'
+                    Invoke-WebRequest -UseBasicParsing -Uri 'https://aka.ms/vc14/vc_redist.x64.exe' -OutFile $VCRedistPath -TimeoutSec 60
+                }
             }
+            $redist = Get-Item -LiteralPath $VCRedistPath
+            $signature = Get-AuthenticodeSignature -LiteralPath $redist.FullName
+            $version = $redist.VersionInfo
+            $fileVersion = [Version]::new($version.FileMajorPart, $version.FileMinorPart, $version.FileBuildPart, $version.FilePrivatePart)
+            # Keep this minimum in step with SetupPrerequisites.VisualCppMinimum.
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(^|,\s*)CN=Microsoft Corporation(,|$)' -or
+                $version.OriginalFilename -ine 'vc_redist.x64.exe' -or $fileVersion -lt [Version]'14.44.35207.0') {
+                throw "Expected a valid Microsoft-signed x64 Visual C++ redistributable (14.44.35207 or newer): $VCRedistPath"
+            }
+            $arguments += "/resource:$($redist.FullName),Recall.VcRedist.x64.exe"
         }
-        $redist = Get-Item -LiteralPath $VCRedistPath
-        $signature = Get-AuthenticodeSignature -LiteralPath $redist.FullName
-        $version = $redist.VersionInfo
-        $fileVersion = [Version]::new($version.FileMajorPart, $version.FileMinorPart, $version.FileBuildPart, $version.FilePrivatePart)
-        # Keep this minimum in step with SetupPrerequisites.VisualCppMinimum.
-        if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(^|,\s*)CN=Microsoft Corporation(,|$)' -or
-            $version.OriginalFilename -ine 'vc_redist.x64.exe' -or $fileVersion -lt [Version]'14.44.35207.0') {
-            throw "Expected a valid Microsoft-signed x64 Visual C++ redistributable (14.44.35207 or newer): $VCRedistPath"
-        }
-        $arguments += "/resource:$($redist.FullName),Recall.VcRedist.x64.exe"
         $installerScripts = 'install.ps1', 'install-swap.ps1', 'install-quit-wait.ps1'
         foreach ($name in $installerScripts) {
             Copy-PackageFile (Join-Path $repo "scripts\$name") (Join-Path $package "scripts\$name")
@@ -71,10 +76,17 @@ try {
         foreach ($name in 'recall.exe','recall-hdr.exe','recall-overlay.exe') {
             Copy-PackageFile (Join-Path $source $name) (Join-Path $package "target-dev\release\$name")
         }
-        $runtime = 'ffmpeg.exe','ffprobe.exe','avcodec-61.dll','avdevice-61.dll','avfilter-10.dll',
-            'avformat-61.dll','avutil-59.dll','postproc-58.dll','swresample-5.dll','swscale-8.dll'
-        foreach ($name in $runtime) {
-            Copy-PackageFile (Join-Path $source $name) (Join-Path $package "tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared\bin\$name")
+        if (!$OnlineDependencies) {
+            $runtime = 'ffmpeg.exe','ffprobe.exe','avcodec-61.dll','avdevice-61.dll','avfilter-10.dll',
+                'avformat-61.dll','avutil-59.dll','postproc-58.dll','swresample-5.dll','swscale-8.dll'
+            foreach ($name in $runtime) {
+                Copy-PackageFile (Join-Path $source $name) (Join-Path $package "tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared\bin\$name")
+            }
+            $ffmpegLicense = Join-Path $source 'FFMPEG-LICENSE.txt'
+            if (!(Test-Path -LiteralPath $ffmpegLicense -PathType Leaf)) {
+                $ffmpegLicense = Join-Path $repo 'tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared\LICENSE'
+            }
+            Copy-PackageFile $ffmpegLicense (Join-Path $package 'FFMPEG-LICENSE.txt')
         }
         foreach ($name in 'LICENSE', 'NOTICE.md') {
             Copy-PackageFile (Join-Path $repo $name) (Join-Path $package $name)
@@ -82,11 +94,6 @@ try {
         foreach ($name in 'recall.ico','fonts\FONTS-LICENSE.txt','icons\LICENSE-lucide.txt','icons\brand-attribution.txt') {
             Copy-PackageFile (Join-Path $assets $name) (Join-Path $package "recall-native\assets\$name")
         }
-        $ffmpegLicense = Join-Path $source 'FFMPEG-LICENSE.txt'
-        if (!(Test-Path -LiteralPath $ffmpegLicense -PathType Leaf)) {
-            $ffmpegLicense = Join-Path $repo 'tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared\LICENSE'
-        }
-        Copy-PackageFile $ffmpegLicense (Join-Path $package 'FFMPEG-LICENSE.txt')
         Add-Type -AssemblyName System.IO.Compression.FileSystem
         $zip = Join-Path $work 'payload.zip'
         [IO.Compression.ZipFile]::CreateFromDirectory($package, $zip)

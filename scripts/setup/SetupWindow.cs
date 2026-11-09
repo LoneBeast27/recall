@@ -23,6 +23,8 @@ namespace Recall.Setup
 
         private readonly SetupFonts fonts = new SetupFonts();
         private readonly bool preview = !SetupPackage.HasPayload;
+        private readonly bool updateMode;
+        private readonly string updatePath;
         private readonly SetupPrerequisites prerequisites = SetupPrerequisites.Detect();
         private readonly Panel options;
         private readonly Panel quick;
@@ -48,8 +50,12 @@ namespace Recall.Setup
         private int step;
         private bool failed;
 
-        public SetupWindow()
+        public SetupWindow() : this(null) { }
+
+        public SetupWindow(string updatePath)
         {
+            this.updatePath = updatePath;
+            updateMode = updatePath != null;
             Text = "Recall Setup";
             Icon = Icon.ExtractAssociatedIcon(Assembly.GetExecutingAssembly().Location);
             StartPosition = FormStartPosition.CenterScreen;
@@ -91,7 +97,7 @@ namespace Recall.Setup
                 Bounds = new Rectangle(10, 9, 400, 23), BorderStyle = BorderStyle.None,
                 BackColor = Raised, ForeColor = Ink, Font = fonts.SystemText,
                 AccessibleName = "Install location", TabIndex = 0,
-                Text = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Recall")
+                Text = updatePath ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "Programs", "Recall")
             };
             field.Paint += (s, e) =>
             {
@@ -142,7 +148,25 @@ namespace Recall.Setup
             destination.TextChanged += (sender, args) => UpdateDestination();
             FormClosing += (sender, args) => { if (busy) args.Cancel = true; };
             ShowOptions(false);
+            if (updateMode) ConfigureUpdate();
             SetStep(0);
+        }
+
+        private void ConfigureUpdate()
+        {
+            destination.ReadOnly = true;
+            quickBrowse.Hide();
+            quickLaunch.Hide();
+            quickTiming.Hide();
+            quickClips.Bounds = new Rectangle(0, 105, 525, 48);
+            shortcut.Checked = File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "Recall.lnk"));
+            launch.Checked = false;
+            frameTiming.Checked = false;
+            mode.Hide();
+            title.Text = "Update Recall";
+            description.Text = "Review the installed folder, then update when you are ready.";
+            primary.Text = "Update Recall";
+            RefreshQuickSummary(updatePath);
         }
 
         [DllImport("dwmapi.dll")]
@@ -211,9 +235,11 @@ namespace Recall.Setup
         private void UpdateDestination()
         {
             string path = SetupPackage.InstallPath(destination.Text);
-            bool valid = path != null;
+            bool valid = path != null && (!updateMode
+                || string.Equals(SetupPackage.ExistingInstallPath(path), updatePath, StringComparison.OrdinalIgnoreCase));
             primary.Enabled = valid && !busy;
-            destinationNote.Text = valid ? "Choose an SSD for Recall and its preview cache." : "Enter a folder on a local drive, such as C:\\Apps\\Recall.";
+            destinationNote.Text = valid ? (updateMode ? "This verified Recall installation will be updated in place."
+                : "Choose an SSD for Recall and its preview cache.") : "Enter a folder on a local drive, such as C:\\Apps\\Recall.";
             destinationNote.ForeColor = valid ? Muted : Error;
             RefreshQuickSummary(path);
         }
@@ -256,7 +282,11 @@ namespace Recall.Setup
             {
                 try
                 {
-                    if (!preview) SetupPackage.OpenGuidedSetup(installedPath, launch.Checked && SetupPrerequisites.Detect().NvidiaDriver);
+                    if (!preview)
+                    {
+                        if (updateMode) SetupPackage.OpenRecall(installedPath);
+                        else SetupPackage.OpenGuidedSetup(installedPath, launch.Checked && SetupPrerequisites.Detect().NvidiaDriver);
+                    }
                 }
                 catch (Exception error)
                 {
@@ -270,7 +300,7 @@ namespace Recall.Setup
             }
             var path = SetupPackage.InstallPath(destination.Text);
             if (path == null || busy) return;
-            var selection = new InstallOptions(path, shortcut.Checked, false, frameTiming.Checked);
+            var selection = new InstallOptions(path, shortcut.Checked, false, frameTiming.Checked, updateMode);
             busy = true;
             options.Hide();
             quick.Hide();
@@ -280,7 +310,7 @@ namespace Recall.Setup
             progress.Show();
             primary.Enabled = cancel.Enabled = false;
             SetStep(1);
-            title.Text = preview ? "Previewing setup" : "Installing Recall";
+            title.Text = preview ? "Previewing setup" : updateMode ? "Updating Recall" : "Installing Recall";
             description.Text = preview ? "See how setup looks while it runs." : "Setup waits for Recall to finish saving before replacing files.";
             resultTitle.Text = preview ? "Preparing the preview…" : "Checking Windows components…";
             resultTitle.ForeColor = Ink;
@@ -296,11 +326,14 @@ namespace Recall.Setup
                     warning = await Task.Run(() => SetupPackage.Install(selection, updates));
                 }
                 SetStep(2);
-                title.Text = preview ? "Preview complete" : "Recall is ready";
-                description.Text = preview ? "Your selections were rehearsed." : "Installation completed successfully.";
-                resultTitle.Text = preview ? "Selected install location" : "Installed to";
+                title.Text = preview ? "Preview complete" : updateMode ? "Recall is updated" : "Recall is ready";
+                description.Text = preview ? "Your selections were rehearsed." : updateMode
+                    ? "The update completed successfully." : "Installation completed successfully.";
+                resultTitle.Text = preview ? "Selected install location" : updateMode ? "Updated in place" : "Installed to";
                 resultTitle.ForeColor = Mint;
-                resultDetail.Text = selection.Path + "\n\nContinue to set up storage, audio, and recording quality.";
+                resultDetail.Text = selection.Path + (updateMode
+                    ? "\n\nYour clips, cache, recording settings, and linked folders were kept."
+                    : "\n\nContinue to set up storage, audio, and recording quality.");
                 if (!preview && !SetupPrerequisites.Detect().NvidiaDriver)
                     resultDetail.Text += "\nAdd the NVIDIA recording driver before starting the recorder.";
                 if (warning != null)
@@ -311,7 +344,7 @@ namespace Recall.Setup
                     resultDetail.Text = warning;
                 }
                 installedPath = selection.Path;
-                primary.Text = preview ? "Done" : "Continue setup";
+                primary.Text = preview ? "Done" : updateMode ? "Open Recall" : "Continue setup";
                 cancel.Hide();
                 complete = true;
             }
@@ -350,7 +383,8 @@ namespace Recall.Setup
             failed = false;
             result.Hide();
             SetStep(0);
-            ShowOptions(advanced);
+            ShowOptions(updateMode ? false : advanced);
+            if (updateMode) mode.Hide();
         }
 
 #if PREVIEW

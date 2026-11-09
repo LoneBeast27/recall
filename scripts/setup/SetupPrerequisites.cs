@@ -2,9 +2,11 @@ using System;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
-using System.Linq;
 using System.Reflection;
+using System.Net;
+using System.Runtime.InteropServices;
 using System.Security.Cryptography;
+using System.Security.Cryptography.X509Certificates;
 using Microsoft.Win32;
 
 namespace Recall.Setup
@@ -20,6 +22,7 @@ namespace Recall.Setup
     {
         internal static readonly Version VisualCppMinimum = new Version(14, 44, 35207, 0);
         private const string VcResource = "Recall.VcRedist.x64.exe";
+        private const string VcUrl = "https://aka.ms/vc14/vc_redist.x64.exe";
         private static readonly string SystemDir = Environment.SystemDirectory;
         public readonly bool VisualCpp;
         public readonly bool WindowsMedia;
@@ -164,22 +167,85 @@ namespace Recall.Setup
         private static int RunVisualCpp(string folder, Assembly assembly)
         {
             string path = Path.Combine(folder, "vc_redist.x64.exe");
+#if ONLINE_DEPENDENCIES
+            ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
+            using (var client = new WebClient()) client.DownloadFile(VcUrl, path);
+#else
             using (var payload = assembly.GetManifestResourceStream(VcResource))
-            using (var hash = SHA256.Create())
             {
                 if (payload == null) throw new InvalidOperationException("The installer is missing its Microsoft Visual C++ package.");
-                var expected = hash.ComputeHash(payload);
-                payload.Position = 0;
                 using (var file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                     payload.CopyTo(file);
-                using (var file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
-                {
-                    if (!expected.SequenceEqual(hash.ComputeHash(file)))
-                        throw new InvalidOperationException("The Visual C++ package could not be verified.");
-                    return RunElevated(path, "/install /quiet /norestart");
-                }
             }
+#endif
+            VerifyVisualCpp(path);
+            return RunElevated(path, "/install /quiet /norestart");
         }
+
+        private static void VerifyVisualCpp(string path)
+        {
+            var info = FileVersionInfo.GetVersionInfo(path);
+            var version = new Version(info.FileMajorPart, info.FileMinorPart, info.FileBuildPart, info.FilePrivatePart);
+            if (!string.Equals(info.OriginalFilename, "vc_redist.x64.exe", StringComparison.OrdinalIgnoreCase)
+                || version < VisualCppMinimum || !HasTrustedMicrosoftSignature(path))
+                throw new InvalidOperationException("The Microsoft Visual C++ download could not be verified. Recall was not changed.");
+        }
+
+        private static bool HasTrustedMicrosoftSignature(string path)
+        {
+            var file = new WinTrustFileInfo {
+                Size = (uint)Marshal.SizeOf(typeof(WinTrustFileInfo)),
+                FilePath = path
+            };
+            IntPtr filePointer = Marshal.AllocCoTaskMem(Marshal.SizeOf(typeof(WinTrustFileInfo)));
+            try
+            {
+                Marshal.StructureToPtr(file, filePointer, false);
+                var data = new WinTrustData {
+                    Size = (uint)Marshal.SizeOf(typeof(WinTrustData)),
+                    UiChoice = 2,
+                    UnionChoice = 1,
+                    File = filePointer
+                };
+                var action = new Guid("00AAC56B-CD44-11D0-8CC2-00C04FC295EE");
+                if (WinVerifyTrust(IntPtr.Zero, action, ref data) != 0) return false;
+                using (var certificate = new X509Certificate2(X509Certificate.CreateFromSignedFile(path)))
+                    return certificate.GetNameInfo(X509NameType.SimpleName, false)
+                        .Equals("Microsoft Corporation", StringComparison.OrdinalIgnoreCase);
+            }
+            catch (CryptographicException) { return false; }
+            finally { Marshal.FreeCoTaskMem(filePointer); }
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WinTrustFileInfo
+        {
+            public uint Size;
+            [MarshalAs(UnmanagedType.LPWStr)] public string FilePath;
+            public IntPtr FileHandle;
+            public IntPtr KnownSubject;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        private struct WinTrustData
+        {
+            public uint Size;
+            public IntPtr PolicyCallbackData;
+            public IntPtr SipClientData;
+            public uint UiChoice;
+            public uint RevocationChecks;
+            public uint UnionChoice;
+            public IntPtr File;
+            public uint StateAction;
+            public IntPtr StateData;
+            public IntPtr UrlReference;
+            public uint ProviderFlags;
+            public uint UiContext;
+        }
+
+        [DllImport("wintrust.dll", ExactSpelling = true, CharSet = CharSet.Unicode)]
+        private static extern int WinVerifyTrust(IntPtr window, [MarshalAs(UnmanagedType.LPStruct)] Guid action,
+            ref WinTrustData data);
 
         private static int RunElevated(string path, string args)
         {

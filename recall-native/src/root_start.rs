@@ -138,6 +138,7 @@ impl Root {
             first_render_marked: false,
             storage_asking: None,
             storage_confirm: None,
+            update: crate::update::UpdateUi::new(),
             stop_confirm: false,
         }
     }
