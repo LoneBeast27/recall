@@ -115,3 +115,20 @@ fn a_set_source_queued_before_audio_start_is_in_force_at_the_first_packet() {
     assert_eq!(list[0].mic_mute, Some(true), "the line-in starts muted by Alt+M");
     assert_eq!(list[0].device_id, "{B}", "the twin the user picked");
 }
+
+/// Merge-gate P1-1: an input held at the start stores no live sample, whatever Alt+M or its
+/// flag says, until the hold is released.
+#[test]
+fn a_held_input_stores_silence_until_released() {
+    let _restore = restore();
+    audio::set_mic_muted(false);
+    let line_in = Arc::new(TrackRing::input_for_test("line"));
+    line_in.set_mic_mute(false);
+    line_in.hold_startup();
+    line_in.push_live(&[0.5; 960], MuteNow::read());
+    assert!(line_in.snapshot(0.01).iter().all(|s| *s == 0.0), "no live sample while held");
+    line_in.release_startup_hold();
+    assert!(!line_in.startup_held());
+    line_in.push_live(&[0.5; 960], MuteNow::read());
+    assert!(line_in.snapshot(0.01).iter().any(|s| *s != 0.0), "released: it records");
+}

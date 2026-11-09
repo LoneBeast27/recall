@@ -159,7 +159,7 @@ pub fn from_env() -> Result<Vec<SourceSpec>, String> {
 /// ([`stage_early`]) laid over it, so they are in force from the first packet.
 pub fn resolve_for_start(get: impl Fn(&str) -> Option<String>) -> Result<Vec<SourceSpec>, String> {
     let mut list = resolve(get)?;
-    let staged = std::mem::take(&mut *EARLY.lock().unwrap_or_else(|p| p.into_inner()));
+    let staged = EARLY.lock().unwrap_or_else(|p| p.into_inner()).clone();
     for (id, mic_mute, device_id) in staged.into_iter().flatten() {
         for spec in list.iter_mut().filter(|s| s.id.trim() == id.trim()) {
             if let Some(on) = mic_mute {
@@ -178,14 +178,25 @@ type Staged = Vec<(String, Option<bool>, Option<String>)>;
 static EARLY: Mutex<Option<Staged>> = Mutex::new(Some(Vec::new()));
 
 /// A `set_source` read from stdin (review R2-audio-r9-2): before the tracks start, its mic-mute
-/// flag and device id are noted for [`resolve_for_start`]; the live handler applies it again
-/// later (`set_live`, the same values). After the start this does nothing.
+/// flag and device id are noted for [`resolve_for_start`]; once they started ([`close_staging`])
+/// it goes to the live track at once, so a line read is a line applied (the startup hold,
+/// merge-gate P1-1, ends on that). `serve` applies it again later (the same values).
 pub fn stage_early(id: &str, mic_mute: Option<bool>, device_id: Option<&str>) {
     if mic_mute.is_none() && device_id.is_none() {
         return;
     }
     if let Some(staged) = EARLY.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
-        staged.push((id.to_owned(), mic_mute, device_id.map(str::to_owned)));
+        return staged.push((id.to_owned(), mic_mute, device_id.map(str::to_owned)));
+    }
+    set_live(id, LiveChange { mic_mute, device_id, ..LiveChange::default() });
+}
+
+/// The tracks started and are listed (`note_live`): every line staged so far goes to its live
+/// track (one read after the list was resolved included), and later ones go there at once.
+pub(super) fn close_staging() {
+    let staged = EARLY.lock().unwrap_or_else(|p| p.into_inner()).take();
+    for (id, mic_mute, device_id) in staged.into_iter().flatten() {
+        set_live(&id, LiveChange { mic_mute, device_id: device_id.as_deref(), ..LiveChange::default() });
     }
 }
 
