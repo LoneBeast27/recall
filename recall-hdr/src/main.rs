@@ -82,6 +82,7 @@ mod record_cmds;
 mod record_composed;
 mod record_capture_watch;
 mod record_app_audio;
+mod audio_intent;
 mod record_audio_live;
 mod record_audio_sources;
 mod record_config;

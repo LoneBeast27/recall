@@ -160,7 +160,7 @@ fn the_mic_mute_flag_goes_live_and_reaches_the_engine() {
     assert!(!changed(&line, &mic), "no restart between on and off: the replay buffer stays");
     assert_eq!(json_lines(&live_updates(&line, &mic)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","id":"mic","mic_mute":true}"#).unwrap()]);
     assert!(!changed(&base, &line), "the first toggle goes live too");
-    assert!(changed(&line, &base), "back to no flag (muted): only a restart can say it");
+    assert!(!changed(&line, &base), "back to no flag (muted): live, as its effective flag (audio_intent)");
     assert_eq!(json_lines(&live_updates(&base, &line)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","id":"mic","mic_mute":false}"#).unwrap()]);
     assert!(engine_value(&line).contains(r#""mic_mute":false"#), "{}", engine_value(&line));
     assert!(!engine_value(&base).contains("mic_mute"), "no flag: the engine mutes it");

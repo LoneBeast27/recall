@@ -172,7 +172,7 @@ pub fn validate(list: &[AudioSource]) -> Result<(), String> {
 }
 
 /// What the engine records: the enabled sources, trimmed.
-fn engine_list(list: &[AudioSource]) -> Vec<AudioSource> {
+pub(crate) fn engine_list(list: &[AudioSource]) -> Vec<AudioSource> {
     list.iter()
         .filter(|s| s.enabled)
         .map(|s| AudioSource { id: s.id.trim().into(), device: s.device.trim().into(), device_id: s.device_id.trim().into(), exe: s.exe.trim().into(), name: s.name.trim().into(), icon: String::new(), ..s.clone() })
@@ -182,15 +182,8 @@ fn engine_list(list: &[AudioSource]) -> Vec<AudioSource> {
 /// The engine's tracks without what it can change live (gain, name, mic-mute flag, and the
 /// endpoint id saved with an unchanged device name: P1-B, a new id is sent live and the track
 /// reopens on it, so unmuting a line-in or picking the same device again keeps the buffer).
-fn track_shape(list: &[AudioSource]) -> Vec<AudioSource> {
+pub(crate) fn track_shape(list: &[AudioSource]) -> Vec<AudioSource> {
     engine_list(list).into_iter().map(|s| AudioSource { gain_db: 0.0, name: String::new(), mic_mute: None, device_id: String::new(), ..s }).collect()
-}
-
-/// A recorded source lost its mic-mute flag (back to none, muted): `set_source`
-/// cannot say "no flag", so only a restart applies it. Setting a flag goes live.
-fn flag_dropped(old: &[AudioSource], new: &[AudioSource]) -> bool {
-    let old = engine_list(old);
-    engine_list(new).iter().any(|n| n.mic_mute.is_none() && old.iter().any(|o| o.id == n.id && o.mic_mute.is_some()))
 }
 
 /// Different tracks for the engine (a restart)? Order matters: it is the clip's track order.
@@ -199,7 +192,8 @@ fn flag_dropped(old: &[AudioSource], new: &[AudioSource]) -> bool {
 /// its first sample above the ceiling (`longrec::machine`), and a replay save limits a track that
 /// has been boosted.
 pub fn changed(old: &[AudioSource], new: &[AudioSource]) -> bool {
-    track_shape(old) != track_shape(new) || flag_dropped(old, new)
+    // A dropped flag goes live as its effective value (`audio_intent::effective_mic_mute`).
+    track_shape(old) != track_shape(new)
 }
 
 /// `set_source` lines for the recorded sources whose gain, name or mic-mute flag changed (the
