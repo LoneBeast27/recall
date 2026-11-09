@@ -36,8 +36,13 @@ pub(crate) fn drain_messages() -> bool {
 
 /// Milliseconds until `deadline` (0 if passed), capped at `cap`.
 pub(crate) fn wait_ms(deadline: Option<Instant>, cap: u32) -> u32 {
+    wait_ms_at(deadline, Instant::now(), cap)
+}
+
+/// [`wait_ms`] at `now`.
+pub(crate) fn wait_ms_at(deadline: Option<Instant>, now: Instant, cap: u32) -> u32 {
     match deadline {
-        Some(d) => d.saturating_duration_since(Instant::now()).as_millis().min(cap as u128) as u32,
+        Some(d) => d.saturating_duration_since(now).as_millis().min(cap as u128) as u32,
         None => cap,
     }
 }
@@ -47,8 +52,10 @@ pub(crate) fn foreground_of(ev: &WatchEvent) -> Foreground {
     Foreground {
         exe_stem: ev.exe_stem.to_ascii_lowercase(),
         title: ev.title.clone(),
-        fullscreen_on_target: ev.fullscreen_on_target,
+        // A resolved UWP identity earns the fullscreen default only as a known game.
+        fullscreen_on_target: crate::record_hosted::hdr_fullscreen(ev),
         pid: ev.pid,
+        game_evidence: crate::record_target::game_evidence(ev),
     }
 }
 

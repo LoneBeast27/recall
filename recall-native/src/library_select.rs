@@ -2,9 +2,25 @@
 //! (`views/tile_click.rs`), clears the selection and marks where a Shift run starts. Ctrl adds or
 //! removes one clip, Shift takes the run from the last clicked clip (or adds one when there is
 //! none); neither opens anything.
+use std::{collections::HashSet, path::PathBuf};
+
 use super::LibraryState;
 
 impl LibraryState {
+    /// A delete of `clips` clips was sent: the bar counts it with any delete still running.
+    pub fn delete_started(&mut self, clips: usize) {
+        self.deleting += clips;
+    }
+
+    /// A delete of `asked` clips came back: only its own clips leave the bar's count (review
+    /// RI-8: any report zeroed it while another delete waited for an edit save).
+    pub fn delete_finished(&mut self, asked: usize) {
+        self.deleting = self.deleting.saturating_sub(asked);
+        if self.deleting == 0 {
+            self.delete_waiting = false;
+        }
+    }
+
     /// A click on a tile with its modifier keys.
     pub fn click(&mut self, path: &str, ctrl: bool, shift: bool) {
         self.confirm_delete = false;
@@ -104,5 +120,32 @@ mod tests {
         lib.click(&o[0], true, false);
         assert_eq!(selected(&lib), [o[2].clone()]);
         assert_eq!(lib.only_selected().as_deref(), Some(o[2].as_str()));
+    }
+}
+
+impl LibraryState {
+    /// Clips a tile menu acts on: the whole selection (in display order) when `path` is part
+    /// of it, else just `path`.
+    pub fn menu_targets(&self, path: &str) -> Vec<String> {
+        menu_targets(&self.selection, self.display_order(), path)
+    }
+
+    /// Selects exactly `paths` and asks the inline "Move to Recycle Bin?" question.
+    pub fn ask_delete(&mut self, paths: &[String]) {
+        self.selection = paths.iter().cloned().collect();
+        self.anchor = paths.first().cloned();
+        self.confirm_delete = !self.selection.is_empty();
+    }
+
+    pub fn selected_paths(&self) -> Vec<PathBuf> {
+        self.display_order().into_iter().filter(|p| self.selection.contains(p)).map(PathBuf::from).collect()
+    }
+}
+
+pub(super) fn menu_targets(selection: &HashSet<String>, display_order: Vec<String>, path: &str) -> Vec<String> {
+    if selection.contains(path) {
+        display_order.into_iter().filter(|p| selection.contains(p)).collect()
+    } else {
+        vec![path.to_owned()]
     }
 }

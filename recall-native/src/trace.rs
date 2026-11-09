@@ -37,11 +37,17 @@ static WINDOW: AtomicIsize = AtomicIsize::new(0);
 static SCALE_MILLI: AtomicIsize = AtomicIsize::new(1000);
 
 pub fn enabled() -> bool {
+    if crate::TESTING {
+        return false;
+    }
     static ON: OnceLock<bool> = OnceLock::new();
     *ON.get_or_init(|| std::env::var_os("RECALL_NATIVE_TRACE").is_some() || layout_path().is_some())
 }
 
 fn layout_path() -> Option<&'static PathBuf> {
+    if crate::TESTING {
+        return None;
+    }
     static PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
     PATH.get_or_init(|| std::env::var_os("RECALL_NATIVE_LAYOUT").filter(|v| !v.is_empty()).map(PathBuf::from)).as_ref()
 }
@@ -126,6 +132,9 @@ pub fn note(what: &str) {
 }
 
 pub fn record(route: &str, ed: &EditorState, clips: usize) {
+    if crate::TESTING {
+        return;
+    }
     let Ok(mut slot) = TRACE.lock() else { return };
     let trace = slot.get_or_insert_with(|| {
         let path = std::env::var_os("RECALL_NATIVE_TRACE")?;
@@ -221,7 +230,7 @@ pub fn player_event(what: &str, detail: serde_json::Value) {
 pub fn player_log(what: &str, detail: serde_json::Value) -> serde_json::Value {
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
     let line = serde_json::json!({ "unix_ms": stamp as u64, "event": what, "detail": detail });
-    if let Some(root) = std::env::var_os("APPDATA") {
+    if !crate::TESTING && let Some(root) = std::env::var_os("APPDATA") {
         let dir = std::path::PathBuf::from(root).join("Recall");
         let path = dir.join("player.log");
         let _ = std::fs::create_dir_all(&dir);

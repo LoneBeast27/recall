@@ -11,8 +11,34 @@ pub fn budget_bytes() -> u64 {
     storage::budget_bytes()
 }
 
+/// Why the cache size is read-only right now, if it is.
+pub fn budget_note() -> Option<String> {
+    storage::budget_note()
+}
+
+/// storage.json is damaged and backed up: "Reset cache size" may be offered.
+pub fn budget_resettable() -> bool {
+    storage::budget_resettable()
+}
+
+/// Writes a fresh storage.json with the last budget read, else the first-run pick.
+pub fn reset_budget() -> Result<u64, String> {
+    storage::reset_budget()
+}
+
 pub fn set_budget_bytes(bytes: u64) {
     storage::set_budget_bytes(bytes)
+}
+
+/// The recorder's leftover kept copies (`staging\kept\leaked`), if any.
+pub fn leftovers() -> Option<storage::Leftovers> {
+    storage::leftovers()
+}
+
+/// Sends the leftover copies shown to the Recycle Bin (never a permanent delete). Blocks: run
+/// it on a worker (`Job::RecycleLeftovers`).
+pub fn send_leftovers_to_bin(shown: &[std::path::PathBuf]) -> Result<usize, String> {
+    storage::send_leftovers_to_bin(shown)
 }
 
 /// (label, bytes) per kind of cached data.

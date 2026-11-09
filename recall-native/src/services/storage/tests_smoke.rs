@@ -152,7 +152,7 @@ fn storage_smoke_smart_fill() {
     unsafe { std::env::set_var("RECALL_CACHE_DIR", &root) };
     assert_eq!(cache_root(), root, "run this test alone");
     let budget = env_num("RECALL_SMOKE_BUDGET_MB", 64) << 20;
-    evict::write_settings(&root, &evict::Settings { cache_budget_bytes: Some(budget) }).unwrap();
+    evict::write_settings(&root, &evict::Settings { cache_budget_bytes: Some(budget), ..Default::default() }).unwrap();
     let entries: Vec<_> = backend::list_clips().unwrap().into_iter().take(env_num("RECALL_SMOKE_CLIPS", 300) as usize).collect();
     let store = crate::services::library::MetaStore::load();
     let records = crate::services::library::build_records(&entries, &store);
@@ -166,6 +166,7 @@ fn storage_smoke_smart_fill() {
             mtime_secs: e.mtime,
             has_thumb: e.thumb.is_some(),
             duration: r.duration,
+            duration_unknown: false,
             game_key: r.game_key,
             favourite: r.favourite,
             edited: r.edited,
@@ -218,7 +219,7 @@ fn storage_smoke_smart_fill() {
     assert!(video <= usage.video_cap);
     // Halve the budget: lowest-score items go, thumbnails stay.
     let thumbs_before = usage.tiers.iter().find(|t| t.kind == CacheKind::Thumbs).unwrap().bytes;
-    evict::write_settings(&root, &evict::Settings { cache_budget_bytes: Some(budget / 2) }).unwrap();
+    evict::write_settings(&root, &evict::Settings { cache_budget_bytes: Some(budget / 2), ..Default::default() }).unwrap();
     let freed = enforce_budget();
     let after = tiers::usage_in(&root);
     println!("HALVED budget: freed {:.1} MB, total now {:.1} MB of {:.1} MB", freed as f64 / 1e6, after.total() as f64 / 1e6, (budget / 2) as f64 / 1e6);

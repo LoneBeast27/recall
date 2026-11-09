@@ -18,6 +18,9 @@ fn cfg(same_volume: VolumeCheck) -> Config {
         same_volume,
         background: false,
         stamp: stamp_mtime,
+        identity: same_identity,
+        stat: stat_dest,
+        flush_dest,
     }
 }
 
@@ -189,6 +192,8 @@ fn existing_destinations_are_never_overwritten() {
     // Same size: the rename landed before a crash kept the staged copy.
     let (src, bytes) = staged(&stage, "A.mp4", 1000);
     std::fs::write(out.join("A.mp4"), &bytes).unwrap();
+    // The landed copy carries the staged file's time (the mover stamps it).
+    std::fs::File::options().write(true).open(out.join("A.mp4")).unwrap().set_modified(mtime(&src)).unwrap();
     let job = MoveJob { staged: src.clone(), dest: out.join("A.mp4") };
     let moved = move_clip(&job, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
     assert_eq!(moved.how, "already in place");
@@ -295,4 +300,152 @@ fn background_mode_drops_this_threads_io_priority_to_very_low() {
     assert_eq!(before, Some(2), "a fresh thread starts at normal I/O priority");
     assert_eq!(after, Some(0), "background mode = very low I/O priority");
     assert!(cpu <= -1, "at or below THREAD_PRIORITY_BELOW_NORMAL, got {cpu}");
+}
+
+/// `len` patterned bytes with byte `at` flipped.
+fn flipped(bytes: &[u8], at: usize) -> Vec<u8> {
+    let mut other = bytes.to_vec();
+    other[at] ^= 0xff;
+    other
+}
+
+#[test]
+fn a_same_size_destination_with_other_bytes_or_time_is_not_taken_for_the_clip() {
+    let (stage, out) = (sandbox("s"), sandbox("o"));
+    let len = 3 << 20;
+    // Differs only in the last MiB, only in the first MiB, or only in its time.
+    for (name, at) in [("Tail.mp4", Some(len - 10)), ("Head.mp4", Some(10)), ("Time.mp4", None)] {
+        let (src, bytes) = staged(&stage, name, len);
+        let dest = out.join(name);
+        std::fs::write(&dest, at.map_or(bytes.clone(), |at| flipped(&bytes, at))).unwrap();
+        let when = if at.is_some() { mtime(&src) } else { mtime(&src) - Duration::from_secs(60) };
+        std::fs::File::options().write(true).open(&dest).unwrap().set_modified(when).unwrap();
+        let before = std::fs::read(&dest).unwrap();
+        let moved = move_clip(&MoveJob { staged: src.clone(), dest: dest.clone() }, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
+        assert_ne!(moved.how, "already in place", "{name}");
+        assert_eq!(std::fs::read(&moved.dest).unwrap(), bytes, "{name}: the new clip landed beside");
+        assert_eq!(std::fs::read(&dest).unwrap(), before, "{name}: the other file is untouched");
+    }
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn a_staged_file_that_is_its_own_destination_is_never_deleted() {
+    // Staging pointed at the clip folder: recovery queues each clip to itself.
+    let out = sandbox("self");
+    let (clip, bytes) = staged(&out, "A.mp4", 5000);
+    let moved = move_clip(&MoveJob { staged: clip.clone(), dest: clip.clone() }, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
+    assert_eq!(moved.how, "already in place");
+    assert_eq!(std::fs::read(&clip).unwrap(), bytes, "the clip is still there");
+    assert!(moved.kept.is_none());
+    let _ = std::fs::remove_dir_all(&out);
+}
+
+/// `<worktree>\.tmp\sandbox\<tag>-<uuid>`: tests that stand in for clip folders stay out of %TEMP%.
+fn sandbox(tag: &str) -> PathBuf {
+    let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(".tmp").join("sandbox").join(format!("{tag}-{}", uuid::Uuid::new_v4().simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn a_kept_copy_carries_the_engines_mark() {
+    // The app's start-up sweep deletes only marked copies, so a file someone else put in
+    // `kept\` is never the engine's to throw away.
+    let (stage, out) = (sandbox("mark-s"), sandbox("mark-o"));
+    let (src, _) = staged(&stage, "G.mp4", 30_000);
+    let moved = move_clip(&MoveJob { staged: src, dest: out.join("G.mp4") }, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
+    let kept = moved.kept.expect("staged copy kept");
+    assert!(std::fs::metadata(format!("{}:{KEPT_MARK}", kept.display())).is_ok(), "the kept copy is marked");
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn a_hard_link_to_the_staged_file_is_the_same_file() {
+    // Two names, one file: deleting the staged name would leave only the link.
+    let (stage, out) = (sandbox("link-s"), sandbox("link-o"));
+    let (src, bytes) = staged(&stage, "A.mp4", 5000);
+    let dest = out.join("A.mp4");
+    std::fs::hard_link(&src, &dest).unwrap();
+    let moved = move_clip(&MoveJob { staged: src.clone(), dest: dest.clone() }, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
+    assert_eq!(moved.how, "already in place");
+    assert!(src.exists(), "one file under two names: nothing is deleted");
+    assert_eq!(std::fs::read(&dest).unwrap(), bytes);
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn an_identity_windows_cannot_read_never_deletes_the_staged_copy() {
+    // A RAM disk or a user-mode file system that answers no file index: unknown is not "different".
+    let (stage, out) = (sandbox("noid-s"), sandbox("noid-o"));
+    let (src, bytes) = staged(&stage, "A.mp4", 5000);
+    let dest = out.join("A.mp4");
+    std::fs::write(&dest, &bytes).unwrap();
+    std::fs::File::options().write(true).open(&dest).unwrap().set_modified(mtime(&src)).unwrap();
+    let unknown = Config { identity: |_, _| None, ..cfg(ACROSS) };
+    assert!(move_clip(&MoveJob { staged: src.clone(), dest: dest.clone() }, &unknown, &AtomicBool::new(false)).is_err(), "parked, retried later");
+    assert_eq!(std::fs::read(&src).unwrap(), bytes, "the staged copy stays");
+    assert_eq!(std::fs::read(&dest).unwrap(), bytes, "the destination stays");
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn a_destination_windows_cannot_stat_is_never_replaced() {
+    // Access denied (or any error but "not found"): the destination may exist.
+    let (stage, out) = (sandbox("stat-s"), sandbox("stat-o"));
+    let (src, bytes) = staged(&stage, "A.mp4", 5000);
+    let dest = out.join("A.mp4");
+    let denied = Config { stat: |_| Err(std::io::Error::from_raw_os_error(5)), ..cfg(ACROSS) };
+    assert!(move_clip(&MoveJob { staged: src.clone(), dest: dest.clone() }, &denied, &AtomicBool::new(false)).is_err());
+    assert!(!dest.exists(), "nothing was written over a destination it could not see");
+    assert_eq!(std::fs::read(&src).unwrap(), bytes, "the staged copy stays");
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn a_clip_that_cannot_be_flushed_keeps_its_staged_copy_untouched() {
+    // C: must not lose the staged copy before V: has the clip on disk (power cut ordering).
+    let (stage, out) = (temp_dir("s"), temp_dir("o"));
+    let (src, bytes) = staged(&stage, "G.mp4", 9000);
+    let dest = out.join("G.mp4");
+    let unflushed = Config { flush_dest: |_| Err(std::io::Error::other("flush refused")), ..cfg(ACROSS) };
+    let moved = move_clip(&MoveJob { staged: src.clone(), dest: dest.clone() }, &unflushed, &AtomicBool::new(false)).unwrap();
+    assert_eq!((moved.kept.clone(), moved.staged_kept.clone()), (None, None));
+    assert!(moved.unflushed.as_deref().is_some_and(|e| e.contains("flush refused")), "{:?}", moved.unflushed);
+    assert_eq!(std::fs::read(&src).unwrap(), bytes, "staged copy neither deleted nor kept");
+    assert!(!stage.join(KEPT_DIR).join("G.mp4").exists());
+    // The retry finds the clip in place and, flushed this time, removes the staged copy.
+    let again = move_clip(&MoveJob { staged: src.clone(), dest: dest.clone() }, &cfg(ACROSS), &AtomicBool::new(false)).unwrap();
+    assert_eq!(again.how, "already in place");
+    assert!(!src.exists() && std::fs::read(&dest).unwrap() == bytes);
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+static FLUSHED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+
+#[test]
+fn the_mover_flushes_the_clip_before_keeping_and_retries_an_unflushed_one() {
+    let (stage, out) = (temp_dir("s"), temp_dir("o"));
+    let (src, _) = staged(&stage, "G.mp4", 9000);
+    let dest = out.join("G.mp4");
+    // The first flush fails, the retry's succeeds.
+    let flaky: FlushFn = |p| {
+        let mut seen = FLUSHED.lock().unwrap();
+        seen.push(p.to_path_buf());
+        if seen.len() == 1 { Err(std::io::Error::other("not yet")) } else { Ok(()) }
+    };
+    let (events, sink) = Events::capture(true);
+    let (queue, control) = spawn(events, Config { flush_dest: flaky, ..cfg(ACROSS) }, Vec::new()).unwrap();
+    assert!(queue.submit(MoveJob { staged: src.clone(), dest: dest.clone() }));
+    wait_for(&sink, "clip_moved", 1);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while src.exists() && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    assert!(!src.exists(), "deleted only after a good flush: {:?}", lines(&sink));
+    assert_eq!(FLUSHED.lock().unwrap().clone(), vec![dest.clone(), dest.clone()], "flushed before every staged-copy step");
+    assert_eq!(of_type(&sink, "clip_moved").len(), 1, "announced once");
+    assert!(of_type(&sink, "clip_move_failed").is_empty(), "not a failed move");
+    assert!(control.shutdown(Duration::from_secs(1)));
+    let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
 }

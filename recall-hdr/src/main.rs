@@ -38,53 +38,149 @@ mod cues;
 mod app;
 mod clamp;
 mod config;
+mod config_repairs;
+mod config_validate;
+mod config_validate_lists;
+mod config_watch;
 mod control;
+mod control_lines;
+mod control_pipe;
 mod display;
+mod durable;
 mod edid;
+mod engine_exit;
 mod engine_policy;
+mod engine_slot;
 mod frame_timing;
 mod guard;
 mod hdr;
 mod hdr_exec;
+#[path = "../../recall/src/image_path.rs"]
+mod image_path;
 mod hdr_gate;
 mod hotkey;
 mod journal;
 mod known_games;
+mod lenient_json;
+mod library_damage;
+mod launcher_libraries;
+mod launcher_libraries_win;
 mod liveness;
 mod logging;
 mod matrix;
 mod overlay_proc;
+mod private_app_stems;
+mod private_apps;
 mod record_actions;
 mod record_activity;
+mod record_refusal;
 mod record_app;
 mod record_cmds;
+mod record_composed;
+mod record_capture_watch;
 mod record_app_audio;
+mod record_audio_live;
 mod record_audio_sources;
 mod record_config;
+mod record_config_event;
 mod record_detect;
+mod record_visibility;
+mod record_dispatch;
 mod record_drain;
 mod record_engine;
+mod record_engine_ctl;
 mod record_env;
+mod record_editor_ask;
 mod record_fullscreen;
 mod record_hdr;
+mod record_hosted;
 mod record_hotkeys;
+mod record_hotkey_retry;
+mod record_recover_stale;
+mod record_screen;
 mod record_session;
+mod record_session_save;
 mod record_status;
 mod record_notice;
+mod record_power;
+mod record_power_win;
+mod record_lock;
+mod record_session_end;
+mod record_session_host;
+mod record_session_win;
+mod record_private_watch;
 mod record_quit;
+mod record_quit_wait;
+mod record_recover;
+mod record_game_ops;
+mod record_restart;
+mod record_restart_host;
+mod record_registry;
 mod record_render;
+mod record_startup;
 mod record_storage;
+mod record_free_space;
+mod record_janitor;
+mod record_monitor;
 mod record_target;
+mod record_target_gate;
+mod record_target_rules;
+mod record_transition;
 mod record_tray;
+mod record_tray_slot;
 mod render_probe;
 mod render_verdict;
+mod game_library;
+mod ghost_window;
+mod store_games;
 mod gpu_games;
 mod rules;
 #[path = "../../recall/src/single_instance.rs"]
 mod single_instance;
+// Volume + free-space calls shared with the engine (spill-only helpers unused here).
+#[allow(dead_code)]
+#[path = "../../recall/src/win_volume.rs"]
+mod win_volume;
+// Can a clip really go to the Recycle Bin (shared with the app's library delete).
+#[allow(dead_code)]
+#[path = "../../recall/src/win_recycle.rs"]
+mod win_recycle;
+// Recycle through IFileOperation with a sink that refuses a permanent delete (shared with the app).
+#[path = "../../recall/src/win_fileop.rs"]
+mod win_fileop;
 mod state;
 mod supervisor;
 mod tray;
+#[cfg(test)]
+mod record_proof_tests;
+#[cfg(test)]
+mod transitions_detect_tests;
+#[cfg(test)]
+mod install_script_tests;
+#[cfg(test)]
+mod install_script_wait_tests;
+#[cfg(test)]
+mod install_script_quit_tests;
+#[cfg(test)]
+mod hub_pipe_tests;
+#[cfg(test)]
+mod transitions_gate_tests;
+#[cfg(test)]
+mod transitions_privacy_tests;
+#[cfg(test)]
+mod transitions_scope_tests;
+#[cfg(test)]
+mod transitions_restart_tests;
+#[cfg(test)]
+mod transitions_planned_tests;
+#[cfg(test)]
+mod transitions_ghost_tests;
+#[cfg(test)]
+mod test_src;
+#[cfg(test)]
+mod transitions_sim;
+#[cfg(test)]
+mod transitions_tests;
 mod types;
 mod watcher;
 mod wcs;
@@ -102,6 +198,8 @@ const RESTART_WAIT: Duration = Duration::from_secs(5);
 const USAGE: &str = "usage: recall-hdr [--record|--record-only|--legacy-hdr|--record-tray-smoke|--probe|--clamp-test|--restore|--help] (no args = record mode; a second start opens the Recall window)";
 
 fn main() {
+    // Before any child exists: a missing engine DLL must not raise a system box over the game.
+    engine_exit::quiet_error_dialogs();
     let arg = std::env::args().nth(1);
     let arg = arg.as_deref().unwrap_or("");
     if !matches!(arg, "" | "--record" | "--record-only" | "--legacy-hdr" | "--record-tray-smoke") {
@@ -179,11 +277,15 @@ fn single_instance(mode: fn() -> i32, launch: Launch) -> i32 {
     };
     match next_step(&claim, launch) {
         // `claim` holds the guard until the process exits.
-        Next::Run => mode(),
+        Next::Run => {
+            logging::new_run("the one controller");
+            mode()
+        }
         Next::RunUnguarded => {
             if let single_instance::Claim::Unavailable(code) = claim {
                 log!("single-instance mutex unavailable (error {code}); continuing without it");
             }
+            logging::own_log();
             mode()
         }
         Next::OpenWindowAndExit => {

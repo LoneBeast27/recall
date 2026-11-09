@@ -76,6 +76,15 @@ impl Drop for Waitable {
 // SAFETY: a process handle may be waited on from any thread.
 unsafe impl Send for Waitable {}
 
+/// `pid` still runs. One this user may not open (access denied) counts as running.
+pub fn alive(pid: u32) -> bool {
+    match Waitable::open(pid) {
+        Some(process) => !process.exited(),
+        // SAFETY: reads this thread's last error, set by the failed OpenProcess just now.
+        None => (unsafe { windows::Win32::Foundation::GetLastError() }) == windows::Win32::Foundation::ERROR_ACCESS_DENIED,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

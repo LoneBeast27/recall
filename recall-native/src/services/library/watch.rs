@@ -85,6 +85,8 @@ pub struct ClipWatcher {
     tx: Sender<Raw>,
     roots: Mutex<HashMap<String, RootThread>>,
     scope: Arc<Mutex<Vec<WatchRoot>>>,
+    /// Former recordings folders (Recall-owned), set with each listing: no batch reads folders.json.
+    owned: Arc<Mutex<Vec<String>>>,
     settle: Mutex<Option<JoinHandle<()>>>,
     stopped: AtomicBool,
 }
@@ -94,9 +96,22 @@ impl ClipWatcher {
     pub fn start(sink: impl Fn(LibraryChange) + Send + 'static) -> Self {
         let (tx, rx) = mpsc::channel();
         let scope = Arc::new(Mutex::new(Vec::new()));
-        let settle = Settle { rx, scope: scope.clone(), sink: Box::new(sink), settler: Settler::new(), resync_at: None, last_resync: None };
+        let owned = Arc::new(Mutex::new(Vec::new()));
+        let settle = Settle { rx, scope: scope.clone(), owned: owned.clone(), sink: Box::new(sink), settler: Settler::new(), resync_at: None, last_resync: None };
         let settle = thread::Builder::new().name("recall-watch-settle".into()).spawn(move || settle.run()).ok();
-        Self { tx, roots: Mutex::new(HashMap::new()), scope, settle: Mutex::new(settle), stopped: AtomicBool::new(false) }
+        Self { tx, roots: Mutex::new(HashMap::new()), scope, owned, settle: Mutex::new(settle), stopped: AtomicBool::new(false) }
+    }
+
+    /// The former recordings folders whose clips stay Recall's own (the listing's copy of
+    /// folders.json); the settle thread uses it for every batch.
+    pub fn set_owned(&self, former: Vec<String>) {
+        *self.owned.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = former;
+    }
+
+    /// What [`Self::set_owned`] last set.
+    #[cfg(test)]
+    pub fn owned(&self) -> Vec<String> {
+        self.owned.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
 
     /// Makes `wanted` the watched folders. Returns once each new folder is armed, so a listing
@@ -212,6 +227,7 @@ pub(super) fn covering_folder(roots: &[WatchRoot], path: &Path, skip: &[PathBuf]
 struct Settle {
     rx: Receiver<Raw>,
     scope: Arc<Mutex<Vec<WatchRoot>>>,
+    owned: Arc<Mutex<Vec<String>>>,
     sink: Sink,
     settler: Settler,
     resync_at: Option<Instant>,
@@ -324,7 +340,8 @@ impl Settle {
         folders::patch_scans(&found, &gone, &gone_under);
         let recordings = roots.iter().find(|r| !r.recursive).map(|r| r.path.clone()).unwrap_or_default();
         let imported: Vec<String> = roots.iter().filter(|r| r.recursive).map(|r| r.path.to_string_lossy().into_owned()).collect();
-        let found = super::import_check::listable(found, &recordings, &imported);
+        let former = self.owned.lock().map(|owned| owned.clone()).unwrap_or_default();
+        let found = super::import_check::listable(found, &recordings, &imported, &former);
         let added = found.into_iter().map(added_clip).collect();
         (self.sink)(LibraryChange::Clips(ClipChanges { added, gone, gone_under }));
     }

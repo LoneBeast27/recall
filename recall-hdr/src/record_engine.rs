@@ -8,8 +8,10 @@
 //!   when it is unknown). A save in that window still has the last clip, and
 //!   the status counts it down (`draining`). Nothing new is captured: the
 //!   game's window is gone. A new game retargets immediately -- unless a
-//!   save or the long recording is in flight: the retarget is then held
-//!   ([`Step::Held`]) until the engine is idle.
+//!   save is in flight: the retarget is then held ([`Step::Held`]) until the
+//!   save lands (bounded by `SAVE_STALE`). A running long recording is never
+//!   held on: it is stopped ([`Step::StopLongRec`]) when the drain ends or at
+//!   once for a new game, and the retarget follows its stop.
 //! - [`engine_env`]: the per-spawn environment the engine reads at startup.
 
 use std::time::{Duration, Instant};
@@ -33,6 +35,8 @@ pub enum EngineTarget {
 /// Why a capture action (save, bookmark, screenshot, long recording) refuses
 /// right now: paused, waiting for a game, or the engine is still starting.
 pub const PAUSED_REASON: &str = "Recording is paused";
+/// No target: also what a line sent while the engine stops for Off is told (`Sent::Waiting`).
+pub const WAITING_REASON: &str = "Recall is waiting for a game; nothing is being recorded";
 
 pub fn capture_refusal(paused: bool, engine_running: bool, wanted: &EngineTarget) -> Option<&'static str> {
     if paused {
@@ -42,7 +46,7 @@ pub fn capture_refusal(paused: bool, engine_running: bool, wanted: &EngineTarget
         return None;
     }
     Some(match wanted {
-        EngineTarget::Off => "Recall is waiting for a game; nothing is being recorded",
+        EngineTarget::Off => WAITING_REASON,
         _ => "the recording engine is still starting; try again in a moment",
     })
 }
@@ -76,9 +80,22 @@ pub enum Step {
     Keep,
     /// Retarget the engine now.
     Apply(EngineTarget),
-    /// A retarget is due but the running engine is busy (a save or the long
-    /// recording in flight): it waits for the first idle tick.
+    /// A retarget is due but a save is in flight: it waits for the first
+    /// idle tick.
     Held,
+    /// A retarget is due while the long recording runs: stop it (once) and
+    /// retarget after its stop. `game_closed` = the drain ended (no new game).
+    StopLongRec { game_closed: bool },
+}
+
+/// What the running engine has in flight, for [`EnginePlanner::step`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Busy {
+    /// A replay save or a screenshot not yet reported (holds a retarget, bounded).
+    pub saving: bool,
+    /// The long recording is starting or running and has not been given up
+    /// on (its stop not yet timed out).
+    pub long_rec: bool,
 }
 
 /// Turns the wanted target into engine (re)starts, holding a game's engine for
@@ -123,17 +140,19 @@ impl EnginePlanner {
     /// `Some(new)` when an idle engine must be retargeted now (test shorthand).
     #[cfg(test)]
     pub fn update(&mut self, wanted: &EngineTarget, now: Instant) -> Option<EngineTarget> {
-        match self.step(wanted, now, false) {
+        match self.step(wanted, now, Busy::default()) {
             Step::Apply(target) => Some(target),
-            Step::Keep | Step::Held => None,
+            Step::Keep | Step::Held | Step::StopLongRec { .. } => None,
         }
     }
 
-    /// Plan one tick. `busy` = the engine has a save or the long recording in
-    /// flight: a due retarget is [`Step::Held`] (not applied) so neither is
-    /// cut short; the linger clock keeps running meanwhile. With no engine
-    /// (`Off` applied) there is nothing to protect.
-    pub fn step(&mut self, wanted: &EngineTarget, now: Instant, busy: bool) -> Step {
+    /// Plan one tick. A due retarget first stops a running long recording
+    /// ([`Step::StopLongRec`], each tick until it reports stopping or its stop
+    /// times out), then waits for a save in flight ([`Step::Held`]); the
+    /// linger clock keeps running meanwhile, and a closed game's long
+    /// recording is stopped only when its drain ends. With no engine (`Off`
+    /// applied) there is nothing to protect.
+    pub fn step(&mut self, wanted: &EngineTarget, now: Instant, busy: Busy) -> Step {
         if *wanted == self.applied {
             self.lost = None;
             return Step::Keep;
@@ -146,8 +165,13 @@ impl EnginePlanner {
                 return Step::Keep;
             }
         }
-        if busy && self.applied != EngineTarget::Off {
-            return Step::Held;
+        if self.applied != EngineTarget::Off {
+            if busy.long_rec {
+                return Step::StopLongRec { game_closed: game_went_away };
+            }
+            if busy.saving {
+                return Step::Held;
+            }
         }
         self.lost = None;
         self.applied = wanted.clone();
@@ -197,7 +221,7 @@ fn engine_quality(token: &str) -> &'static str {
     }
 }
 
-pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&str>) -> Vec<(String, Option<String>)> {
+pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&str>, mic_muted: bool) -> Vec<(String, Option<String>)> {
     let mut env = vec![
         ("RECALL_BUFFER_SECS".to_string(), Some(rec.buffer_secs.to_string())),
         ("RECALL_OUT_DIR".to_string(), Some(rec.output_dir.clone())),
@@ -214,6 +238,9 @@ pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&s
         ("RECALL_AUDIO_GAME".to_string(), None),
         ("RECALL_AUDIO_MIC_OFF".to_string(), None),
         (crate::record_app_audio::APPS_ENV.to_string(), None),
+        // The mic mute at spawn: the engine applies it before its first track opens, so a muted
+        // mic records nothing of the new run (the `set_mic_mute` after `hello` came too late).
+        ("RECALL_MIC_MUTED".to_string(), Some(if mic_muted { "1" } else { "0" }.to_string())),
     ];
     let (hwnd, name, pid) = match target {
         EngineTarget::Window(t) => (
@@ -332,38 +359,66 @@ mod tests {
     }
 
     #[test]
-    fn a_busy_engine_holds_retargets_until_idle() {
+    fn a_save_in_flight_holds_retargets_until_idle() {
         let t0 = Instant::now();
+        let saving = Busy { saving: true, long_rec: false };
+        let idle = Busy::default();
         let mut p = EnginePlanner::new(EXIT_LINGER);
         let a = EngineTarget::Window(target(1, 1, "A"));
         let b = EngineTarget::Window(target(2, 2, "B"));
-        assert_eq!(p.step(&a, t0, true), Step::Apply(a.clone()), "no engine yet: nothing to protect");
-        // A new game while the long recording runs: held, engine untouched.
-        assert_eq!(p.step(&b, t0 + Duration::from_secs(1), true), Step::Held);
+        assert_eq!(p.step(&a, t0, saving), Step::Apply(a.clone()), "no engine yet: nothing to protect");
+        // A new game while a save is in flight: held, engine untouched.
+        assert_eq!(p.step(&b, t0 + Duration::from_secs(1), saving), Step::Held);
         assert_eq!(*p.applied(), a, "still recording the old target");
-        assert_eq!(p.step(&a, t0 + Duration::from_secs(2), true), Step::Keep, "the game came back: nothing pending");
-        assert_eq!(p.step(&b, t0 + Duration::from_secs(3), true), Step::Held);
-        assert_eq!(p.step(&b, t0 + Duration::from_secs(4), false), Step::Apply(b.clone()), "idle: applies at once");
-        // The game exits mid-recording: linger first, then held past it.
-        assert_eq!(p.step(&EngineTarget::Off, t0 + Duration::from_secs(10), true), Step::Keep);
+        assert_eq!(p.step(&a, t0 + Duration::from_secs(2), saving), Step::Keep, "the game came back: nothing pending");
+        assert_eq!(p.step(&b, t0 + Duration::from_secs(3), saving), Step::Held);
+        assert_eq!(p.step(&b, t0 + Duration::from_secs(4), idle), Step::Apply(b.clone()), "idle: applies at once");
+        // The game exits mid-save: linger first, then held past it.
+        assert_eq!(p.step(&EngineTarget::Off, t0 + Duration::from_secs(10), saving), Step::Keep);
         let past_linger = t0 + Duration::from_secs(10) + EXIT_LINGER;
-        assert_eq!(p.step(&EngineTarget::Off, past_linger, true), Step::Held);
-        assert_eq!(p.step(&EngineTarget::Off, past_linger + Duration::from_secs(60), false), Step::Apply(EngineTarget::Off));
-        assert_eq!(p.step(&a, past_linger + Duration::from_secs(61), true), Step::Apply(a), "Off -> start never waits");
+        assert_eq!(p.step(&EngineTarget::Off, past_linger, saving), Step::Held);
+        assert_eq!(p.step(&EngineTarget::Off, past_linger + Duration::from_secs(60), idle), Step::Apply(EngineTarget::Off));
+        assert_eq!(p.step(&a, past_linger + Duration::from_secs(61), saving), Step::Apply(a), "Off -> start never waits");
+    }
+
+    #[test]
+    fn a_long_recording_is_stopped_for_a_retarget_never_held_on() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let rec = Busy { saving: false, long_rec: true };
+        let mut p = EnginePlanner::new(EXIT_LINGER);
+        let a = EngineTarget::Window(target(1, 1, "A"));
+        let b = EngineTarget::Window(target(2, 2, "B"));
+        assert_eq!(p.step(&a, t0, rec), Step::Apply(a.clone()));
+        // The game closes: its drain runs first, the recording is not cut short.
+        p.set_drain_len(s(40));
+        assert_eq!(p.step(&EngineTarget::Off, t0 + s(1), rec), Step::Keep);
+        assert_eq!(p.step(&EngineTarget::Off, t0 + s(40), rec), Step::Keep, "not before the drain ends");
+        assert_eq!(p.step(&EngineTarget::Off, t0 + s(41), rec), Step::StopLongRec { game_closed: true });
+        assert_eq!(*p.applied(), a, "the engine runs until the recording is saved");
+        // Stopped (or its stop timed out): the retarget applies.
+        assert_eq!(p.step(&EngineTarget::Off, t0 + s(42), Busy::default()), Step::Apply(EngineTarget::Off));
+        // A new game while the recording runs: stop at once, then retarget.
+        assert_eq!(p.step(&a, t0 + s(50), rec), Step::Apply(a.clone()));
+        assert_eq!(p.step(&b, t0 + s(51), rec), Step::StopLongRec { game_closed: false });
+        // Recording stopped, a save still landing: held, then applied.
+        let saving = Busy { saving: true, long_rec: false };
+        assert_eq!(p.step(&b, t0 + s(52), saving), Step::Held);
+        assert_eq!(p.step(&b, t0 + s(53), Busy::default()), Step::Apply(b));
     }
 
     #[test]
     fn engine_env_sets_or_removes_every_target_variable() {
         let rec = RecordingCfg::default();
         let get = |env: &[(String, Option<String>)], k: &str| env.iter().find(|(n, _)| n == k).unwrap().1.clone();
-        let win = engine_env(&EngineTarget::Window(target(42, 0x1234, "VALORANT")), &rec, Some("ffff0000"));
+        let win = engine_env(&EngineTarget::Window(target(42, 0x1234, "VALORANT")), &rec, Some("ffff0000"), false);
         assert_eq!(get(&win, "RECALL_CPU_MASK").as_deref(), Some("ffff0000"));
         assert_eq!(get(&win, "RECALL_CAPTURE_HWND").as_deref(), Some("4660"));
         assert_eq!(get(&win, "RECALL_CAPTURE_NAME").as_deref(), Some("VALORANT"));
         assert_eq!(get(&win, "RECALL_AUDIO_GAME_PID").as_deref(), Some("42"));
         assert_eq!(get(&win, "RECALL_BUFFER_SECS").as_deref(), Some("120"));
         assert_eq!(get(&win, "RECALL_OUT_DIR"), Some(rec.output_dir.clone()));
-        let desk = engine_env(&EngineTarget::Desktop, &rec, None);
+        let desk = engine_env(&EngineTarget::Desktop, &rec, None, false);
         assert_eq!(get(&desk, "RECALL_CPU_MASK"), None, "unapplied mask is not passed (engine would exit)");
         assert_eq!(get(&desk, "RECALL_CAPTURE_HWND"), None, "removed, not inherited");
         assert_eq!(get(&desk, "RECALL_AUDIO_GAME_PID"), None);
@@ -381,18 +436,28 @@ mod tests {
             quality: "quality".into(),
             ..RecordingCfg::default()
         };
-        let env = engine_env(&EngineTarget::Desktop, &tuned, None);
+        let env = engine_env(&EngineTarget::Desktop, &tuned, None, false);
         assert_eq!(get(&env, "RECALL_CODEC").as_deref(), Some("av1"));
         assert_eq!(get(&env, "RECALL_FPS").as_deref(), Some("120"));
         assert_eq!(get(&env, "RECALL_BITRATE").as_deref(), Some("60000000"));
         assert_eq!(get(&env, "RECALL_QUALITY").as_deref(), Some("max"), "Quality = engine max (p7)");
     }
 
+    /// 2026-11-07 audit A2: a new engine learns the mute from its environment, before its first
+    /// track opens (the `set_mic_mute` after `hello` came after the tracks were recording).
+    #[test]
+    fn the_mute_reaches_a_new_engine_in_its_environment() {
+        let get = |env: &[(String, Option<String>)]| env.iter().find(|(n, _)| n == "RECALL_MIC_MUTED").and_then(|(_, v)| v.clone());
+        let rec = RecordingCfg::default();
+        assert_eq!(get(&engine_env(&EngineTarget::Desktop, &rec, None, true)).as_deref(), Some("1"));
+        assert_eq!(get(&engine_env(&EngineTarget::Desktop, &rec, None, false)).as_deref(), Some("0"), "set either way, never inherited");
+    }
+
     #[test]
     fn the_sources_list_reaches_the_engine_and_old_audio_variables_are_removed() {
         use crate::record_audio_sources::{AudioSource, SOURCES_ENV};
         let has = |env: &[(String, Option<String>)], k: &str| env.iter().find(|(n, _)| n == k).map(|(_, v)| v.clone());
-        let plain = engine_env(&EngineTarget::Desktop, &RecordingCfg::default(), None);
+        let plain = engine_env(&EngineTarget::Desktop, &RecordingCfg::default(), None, false);
         let value = has(&plain, SOURCES_ENV).flatten().expect("always passed");
         assert!(value.contains(r#""id":"game""#) && value.contains(r#""id":"mic""#), "{value}");
         for key in ["RECALL_AUDIO_APPS", "RECALL_AUDIO_VOICE_EXE", "RECALL_AUDIO_GAME", "RECALL_AUDIO_MIC_OFF"] {
@@ -403,7 +468,7 @@ mod tests {
             audio_sources: vec![AudioSource { id: "in".into(), kind: "input".into(), device: "Microphone (USB Audio Device)".into(), name: "Voice".into(), ..AudioSource::default() }],
             ..RecordingCfg::default()
         };
-        let value = has(&engine_env(&EngineTarget::Desktop, &rec, None), SOURCES_ENV).flatten().unwrap();
+        let value = has(&engine_env(&EngineTarget::Desktop, &rec, None, false), SOURCES_ENV).flatten().unwrap();
         assert!(value.contains("Microphone (USB Audio Device)") && !value.contains(r#""id":"game""#), "{value}");
     }
 

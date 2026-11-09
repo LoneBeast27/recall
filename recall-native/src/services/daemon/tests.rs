@@ -1,6 +1,5 @@
 use serde_json::{Value, json};
 
-use super::controller::{process_running, repo_controller, workspace_lists_controller};
 use super::protocol::{State, command_line};
 use super::*;
 
@@ -117,6 +116,22 @@ fn engine_status_parses_and_drives_replay_ready() {
 }
 
 #[test]
+fn a_recovering_or_degraded_engine_still_has_a_saveable_replay_and_counts_as_recording() {
+    let mut state = connected();
+    // A recovering engine keeps its buffer and says why it is recovering; CPU copies record.
+    for (encoder, error) in [("recovering", json!("NVENC encode failed: x")), ("degraded", Value::Null)] {
+        apply(&mut state, json!({"mod":"engine","event":{"type":"status","buffer_secs":30.0,"encoder":encoder,"encoder_error":error}}));
+        assert!(state.snapshot.replay_ready(), "{encoder}: the buffered clip is saveable");
+    }
+    apply(&mut state, json!({"mod":"engine","event":{"type":"status","buffer_secs":30.0,"encoder":"failed","encoder_error":"x"}}));
+    assert!(!state.snapshot.replay_ready());
+    for (session, busy) in [("degraded", true), ("recovering", true), ("recording", true), ("starting", true), ("error", false), ("waiting", false)] {
+        let status = SessionStatus { state: session.into(), ..Default::default() };
+        assert_eq!(status.capturing(), busy, "{session}");
+    }
+}
+
+#[test]
 fn legacy_hdr_status_maps_into_session() {
     let mut state = connected();
     let line = json!({"mod":"hdr","event":{"type":"status","target":"Monitor 27Q","hdr":true,"manual_pin":true,"session_pid":null,"auto":false,"engine_health":"restarting"}});
@@ -141,6 +156,7 @@ fn hotkey_and_recording_events_and_session_fields() {
     apply(&mut state, json!({"mod":"session","event":{"type":"storage_cleaned","removed":2,"freed_bytes":9,"through":1_790_000_000u64,"used_bytes":80,"cap_bytes":100}}));
     apply(&mut state, json!({"mod":"session","event":{"type":"storage_warning","level":90,"used_bytes":91,"cap_bytes":100,"next_through":1_780_000_000u64}}));
     apply(&mut state, json!({"mod":"session","event":{"type":"storage_warning","level":100,"used_bytes":120,"cap_bytes":100,"next_through":null}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"disk_low","drive":"C:","free_bytes":3,"need_bytes":5}}));
     apply(&mut state, json!({"mod":"session","event":{"type":"storage_preview","cap_gb":1000,"used_bytes":5,"removed":4,"freed_bytes":3,"through":1_770_000_000u64}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"clip_moved","path":"E:/a.mp4","elapsed_ms":900}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"clip_moved","path":"E:/b.mp4","elapsed_ms":900,"kept_path":"F:/s/kept/b.mp4"}}));
@@ -151,11 +167,12 @@ fn hotkey_and_recording_events_and_session_fields() {
             DaemonEvent::Bookmarked,
             DaemonEvent::Screenshot { path: "E:/shots/a.png".into() },
             DaemonEvent::RecordingStarted,
-            DaemonEvent::RecordingStopped { path: "E:/rec.mp4".into(), seconds: 61.0 },
+            DaemonEvent::RecordingStopped { path: "E:/rec.mp4".into(), seconds: 61.0, parts: 1, gap_seconds: 0.0, frozen_seconds: 0.0, locked_seconds: 0.0 },
             DaemonEvent::StorageCleaned { removed: 3, freed_bytes: 1000, through: None, used_bytes: 0, cap_bytes: 0 },
             DaemonEvent::StorageCleaned { removed: 2, freed_bytes: 9, through: Some(1_790_000_000), used_bytes: 80, cap_bytes: 100 },
             DaemonEvent::StorageWarning { level: 90, used_bytes: 91, cap_bytes: 100, next_through: Some(1_780_000_000) },
             DaemonEvent::StorageWarning { level: 100, used_bytes: 120, cap_bytes: 100, next_through: None },
+            DaemonEvent::DiskLow { drive: "C:".into(), free_bytes: 3, need_bytes: 5 },
             DaemonEvent::StoragePreview { cap_gb: 1000, used_bytes: 5, removed: 4, freed_bytes: 3, through: Some(1_770_000_000) },
             DaemonEvent::ClipMoved { path: "E:/a.mp4".into(), kept_path: None },
             DaemonEvent::ClipMoved { path: "E:/b.mp4".into(), kept_path: Some("F:/s/kept/b.mp4".into()) },
@@ -163,11 +180,54 @@ fn hotkey_and_recording_events_and_session_fields() {
         ]
     );
     apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"recording","paused":false,
-        "stats_hotkey":"Alt+P","overlay_hotkey":"Alt+O","long_recording":{"active":true,"path":"E:/rec.mp4","started_secs":1792621900.0}}}));
+        "stats_hotkey":"Alt+P","overlay_hotkey":"Alt+O","editor_hotkey":"Alt+U","long_recording":{"active":true,"path":"E:/rec.mp4","started_secs":1792621900.0}}}));
     let session = state.snapshot.session.clone().unwrap();
     assert!(session.long_recording.active);
     assert_eq!(session.stats_hotkey, "Alt+P");
     assert_eq!(session.overlay_hotkey, "Alt+O");
+    assert_eq!(session.editor_hotkey, "Alt+U");
+}
+
+/// Gate P2-d: `recording_recovered` (a `.part` renamed after a kill) was only logged.
+#[test]
+fn a_recovered_recording_is_an_event() {
+    let mut state = connected();
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_recovered","path":"E:/c/G__rec.mp4"}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_recovered","path":"E:/c/H__rec.mp4","gap_seconds":7.5,"frozen_seconds":40.0}}));
+    // One event for several files (the engine lists them in `paths`; `path` is the first).
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_recovered","path":"E:/c/A__rec.mp4","paths":["E:/c/A__rec.mp4","E:/c/B__rec.mp4"]}}));
+    assert_eq!(
+        state.events,
+        vec![
+            DaemonEvent::RecordingRecovered { paths: vec!["E:/c/G__rec.mp4".into()], gap_seconds: 0.0, frozen_seconds: 0.0 },
+            DaemonEvent::RecordingRecovered { paths: vec!["E:/c/H__rec.mp4".into()], gap_seconds: 7.5, frozen_seconds: 40.0 },
+            DaemonEvent::RecordingRecovered { paths: vec!["E:/c/A__rec.mp4".into(), "E:/c/B__rec.mp4".into()], gap_seconds: 0.0, frozen_seconds: 0.0 },
+        ]
+    );
+}
+
+/// Merge gate 11-07 (P1): `continued` was ignored, so a part change read as
+/// "Recording saved" then "Recording started".
+#[test]
+fn a_continued_recording_maps_to_its_own_events() {
+    let mut state = connected();
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_started","path":"E:/G__rec.mp4","continued":false,"part":1,"cause":null}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_stopped","path":"E:/G__rec.mp4","seconds":3540.0,"bytes":9,"continued":true,"parts":1,"total_seconds":3540.0,"cause":"size"}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_started","path":"E:/G__rec-2.mp4","continued":true,"part":2,"cause":"size"}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_stopped","path":"E:/G__rec-2.mp4","seconds":60.0,"bytes":9,"continued":false,"parts":2,"total_seconds":3600.0,"gap_seconds":7.5,"frozen_seconds":40.0,"cause":null}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_failed","reason":"the video encoder failed","path":"E:/H__rec-2.mp4","paths":["E:/H__rec.mp4","E:/H__rec-2.mp4"]}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_failed","reason":"old engine","path":"E:/I__rec.mp4"}}));
+    assert_eq!(
+        state.events,
+        vec![
+            DaemonEvent::RecordingStarted,
+            DaemonEvent::RecordingPartSaved { path: "E:/G__rec.mp4".into() },
+            DaemonEvent::RecordingContinued { part: 2, cause: "size".into() },
+            DaemonEvent::RecordingStopped { path: "E:/G__rec-2.mp4".into(), seconds: 3600.0, parts: 2, gap_seconds: 7.5, frozen_seconds: 40.0, locked_seconds: 0.0 },
+            DaemonEvent::RecordingFailed { reason: "the video encoder failed".into(), files: vec!["E:/H__rec.mp4".into(), "E:/H__rec-2.mp4".into()], gap_seconds: 0.0, frozen_seconds: 0.0 },
+            DaemonEvent::RecordingFailed { reason: "old engine".into(), files: vec!["E:/I__rec.mp4".into()], gap_seconds: 0.0, frozen_seconds: 0.0 },
+        ]
+    );
 }
 
 #[test]
@@ -220,6 +280,19 @@ fn config_ac_profile_and_error_events() {
 }
 
 #[test]
+fn config_event_carries_overridden_keys_and_hotkey_warnings() {
+    let mut state = connected();
+    let line = json!({"mod":"session","event":{"type":"config","config":{"recording":{"output_dir":r"D:\Tmp"}},
+        "overridden":["recording.output_dir"],"hotkey_warnings":["bookmark uses Alt+Z"]}});
+    assert!(apply(&mut state, line));
+    assert_eq!(state.snapshot.config_overridden, vec!["recording.output_dir".to_string()]);
+    assert_eq!(state.snapshot.hotkey_warnings, vec!["bookmark uses Alt+Z".to_string()]);
+    // An older recorder sends neither: both read empty.
+    apply(&mut state, json!({"mod":"session","event":{"type":"config","config":{"a":1}}}));
+    assert!(state.snapshot.config_overridden.is_empty() && state.snapshot.hotkey_warnings.is_empty());
+}
+
+#[test]
 fn disconnect_clears_live_status_and_garbage_is_ignored() {
     let mut state = connected();
     apply(&mut state, json!({"mod":"engine","event":{"type":"status","encoder":"h264_nvenc","buffer_secs":5.0}}));
@@ -238,6 +311,7 @@ fn commands_serialize_to_controller_json() {
     let cases: Vec<(DaemonCommand, Value)> = vec![
         (DaemonCommand::Status, json!({"cmd":"status"})),
         (DaemonCommand::Quit, json!({"cmd":"quit"})),
+        (DaemonCommand::QuitNow, json!({"cmd":"quit","force":true})),
         (DaemonCommand::SaveClip { seconds: None }, json!({"cmd":"save_clip"})),
         (DaemonCommand::SaveClip { seconds: Some(30) }, json!({"cmd":"save_clip","seconds":30})),
         (DaemonCommand::SetMicMute(true), json!({"cmd":"set_mic_mute","muted":true})),
@@ -254,6 +328,7 @@ fn commands_serialize_to_controller_json() {
         (DaemonCommand::SetAcProfile("punchy".into()), json!({"cmd":"set_ac_profile","variant":"punchy"})),
         (DaemonCommand::GetConfig, json!({"cmd":"get_config"})),
         (DaemonCommand::StoragePreview(500), json!({"cmd":"storage_preview","cap_gb":500})),
+        (DaemonCommand::RegisterGame { exe: "Game.exe".into(), how: "never" }, json!({"cmd":"register_game","exe":"Game.exe","how":"never"})),
         (DaemonCommand::SetConfig(json!({"overlay":{"enabled":true}})), json!({"cmd":"set_config","patch":{"overlay":{"enabled":true}}})),
     ];
     for (command, expected) in cases {
@@ -271,123 +346,6 @@ fn send_without_connection_is_dropped() {
     assert!(!client.send(DaemonCommand::Status));
     assert_eq!(client.revision(), 0);
     assert!(!client.snapshot().connected);
-}
-
-fn wait_until(what: &str, condition: impl Fn() -> bool) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !condition() {
-        assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
-        std::thread::sleep(std::time::Duration::from_millis(10));
-    }
-}
-
-/// Real pipe, real threads: a fake controller on a private pipe name sees the two
-/// connect requests and a UI command; its lines reach the snapshot; closing it marks
-/// the client disconnected and sends are dropped.
-#[test]
-fn pipe_client_round_trip_against_a_fake_controller() {
-    use interprocess::local_socket::traits::{Listener as _, Stream as _};
-    use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName};
-    use std::io::{BufRead as _, BufReader, Write as _};
-
-    let pipe = format!("recall-native-test-{}", std::process::id());
-    let listener = ListenerOptions::new().name(pipe.as_str().to_ns_name::<GenericNamespaced>().unwrap()).create_sync().unwrap();
-    let client = DaemonClient::spawn_on(&pipe);
-    let (accepted_tx, accepted_rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
-        let stream = listener.accept().unwrap();
-        let _ = accepted_tx.send(stream);
-        std::thread::sleep(std::time::Duration::from_secs(5)); // keep the listener alive briefly
-    });
-    let stream = accepted_rx.recv_timeout(std::time::Duration::from_secs(10)).expect("client connected");
-    let (reader, mut writer) = stream.split();
-    let mut lines = BufReader::new(reader).lines();
-    assert_eq!(lines.next().unwrap().unwrap(), r#"{"cmd":"status"}"#);
-    assert_eq!(lines.next().unwrap().unwrap(), r#"{"cmd":"get_config"}"#);
-    wait_until("connected", || client.snapshot().connected);
-    writer.write_all(b"{\"mod\":\"session\",\"event\":{\"type\":\"status\",\"state\":\"recording\",\"save_seconds\":120}}\n").unwrap();
-    writer.write_all(b"{\"mod\":\"engine\",\"event\":{\"type\":\"saved\",\"path\":\"E:\\\\c.mp4\",\"seconds\":12.5,\"bytes\":9,\"elapsed_ms\":3}}\n").unwrap();
-    wait_until("session status", || client.snapshot().session.is_some_and(|s| s.state == "recording"));
-    wait_until("saved event", || client.revision() >= 3);
-    assert_eq!(client.drain_events(), vec![DaemonEvent::Saved { path: "E:\\c.mp4".into(), seconds: 12.5, bytes: 9, elapsed_ms: 3 }]);
-    assert!(client.drain_events().is_empty(), "drained once");
-    assert!(client.send(DaemonCommand::SaveClip { seconds: Some(30) }));
-    // A status ping (every 2 s) may come first on a slow run.
-    let sent = lines.by_ref().map(Result::unwrap).find(|l| l != r#"{"cmd":"status"}"#).unwrap();
-    assert_eq!(sent, r#"{"cmd":"save_clip","seconds":30}"#);
-    // Idle, the client asks for status by itself: only a live pump answers.
-    let t = std::time::Instant::now();
-    assert_eq!(lines.next().unwrap().unwrap(), r#"{"cmd":"status"}"#);
-    assert!(t.elapsed() < std::time::Duration::from_secs(4), "ping after {:?}", t.elapsed());
-    drop(writer);
-    drop(lines);
-    wait_until("disconnect", || !client.snapshot().connected);
-    assert_eq!(client.snapshot().session, None, "stale status cleared");
-}
-
-/// The recorder quits (an install) and a new one starts on the same pipe: the app keeps
-/// running, sees the disconnect, then reconnects by itself and asks for status again.
-#[test]
-fn pipe_client_reconnects_to_a_restarted_controller() {
-    use interprocess::local_socket::traits::{Listener as _, Stream as _};
-    use interprocess::local_socket::{GenericNamespaced, ListenerOptions, ToNsName};
-    use std::io::{BufRead as _, BufReader, Write as _};
-
-    let pipe = format!("recall-native-restart-test-{}", std::process::id());
-    let listen = || ListenerOptions::new().name(pipe.as_str().to_ns_name::<GenericNamespaced>().unwrap()).create_sync().unwrap();
-    let client = DaemonClient::spawn_on(&pipe);
-    for run in 1..=2 {
-        let stream = listen().accept().unwrap(); // the listener goes with this scope, like a quit recorder
-        let (reader, mut writer) = stream.split();
-        let mut lines = BufReader::new(reader).lines();
-        assert_eq!(lines.next().unwrap().unwrap(), r#"{"cmd":"status"}"#, "run {run} asks for status");
-        assert_eq!(lines.next().unwrap().unwrap(), r#"{"cmd":"get_config"}"#);
-        wait_until("connected", || client.snapshot().connected);
-        writer.write_all(b"{\"mod\":\"session\",\"event\":{\"type\":\"status\",\"state\":\"recording\",\"save_seconds\":120}}\n").unwrap();
-        wait_until("session status", || client.snapshot().session.is_some_and(|s| s.state == "recording"));
-        assert!(client.send(DaemonCommand::SaveClip { seconds: None }), "run {run} takes commands");
-        drop(writer);
-        drop(lines);
-        wait_until("disconnect", || !client.snapshot().connected);
-        assert!(!client.send(DaemonCommand::Status), "no recorder: commands are dropped, the app stays up");
-    }
-}
-
-#[test]
-fn workspace_manifest_detection() {
-    assert!(workspace_lists_controller("[workspace]\nresolver = \"2\"\nmembers = [\"recall\", \"recall-hdr\", \"recall-overlay\"]\n"));
-    assert!(workspace_lists_controller("[workspace]\nmembers = [\n  \"recall\",\n  \"recall-hdr\",\n]\n"));
-    assert!(!workspace_lists_controller("[workspace]\n"));
-    assert!(!workspace_lists_controller("[package]\nname = \"recall-hdr\"\n"));
-    assert!(!workspace_lists_controller("[workspace]\nmembers = [\"recall-hdr-extra\"]\n"));
-}
-
-#[test]
-fn repo_controller_walks_up_to_the_workspace() {
-    let root = std::env::temp_dir().join(format!("recall-native-controller-test-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&root);
-    let exe_dir = root.join("target-gpui").join("debug");
-    std::fs::create_dir_all(&exe_dir).unwrap();
-    std::fs::write(root.join("Cargo.toml"), "[workspace]\nmembers = [\"recall\", \"recall-hdr\"]\n").unwrap();
-    let exe = exe_dir.join("recall-native.exe");
-    assert_eq!(repo_controller(&exe), None, "no build yet");
-    let debug = root.join("target-dev").join("debug");
-    std::fs::create_dir_all(&debug).unwrap();
-    std::fs::write(debug.join("recall-hdr.exe"), b"stub").unwrap();
-    assert_eq!(repo_controller(&exe), Some(debug.join("recall-hdr.exe")));
-    let release = root.join("target-dev").join("release");
-    std::fs::create_dir_all(&release).unwrap();
-    std::fs::write(release.join("recall-hdr.exe"), b"stub").unwrap();
-    assert_eq!(repo_controller(&exe), Some(release.join("recall-hdr.exe")), "release preferred");
-    let _ = std::fs::remove_dir_all(root);
-}
-
-#[test]
-fn process_lookup_finds_this_test_binary_only() {
-    let me = std::env::current_exe().unwrap();
-    let name = me.file_name().unwrap().to_string_lossy().to_uppercase();
-    assert!(process_running(&name).unwrap());
-    assert!(!process_running("recall-native-no-such-process-7f3a.exe").unwrap());
 }
 
 /// 11-05: the engine stopped 30 s after sobosuba closed, the controller said
@@ -441,4 +399,78 @@ fn no_status_reply_for_five_seconds_is_unresponsive() {
     assert!(state.unresponsive(Instant::now() + Duration::from_secs(6), limit), "engine lines do not prove the pump is alive");
     apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"waiting"}}));
     assert!(!state.unresponsive(Instant::now() + Duration::from_secs(4), limit));
+}
+
+#[test]
+fn unknown_storage_warning_levels_never_toast() {
+    // A newer recorder may add levels; only a known numeric level (1..=100) is a cap warning.
+    let mut state = connected();
+    for level in [json!("free"), json!("bogus"), json!(0), json!(150), Value::Null] {
+        apply(&mut state, json!({"mod":"session","event":{"type":"storage_warning","level":level,"used_bytes":0,"cap_bytes":0}}));
+    }
+    apply(&mut state, json!({"mod":"session","event":{"type":"storage_warning","used_bytes":0,"cap_bytes":0}}));
+    assert_eq!(state.events, Vec::<DaemonEvent>::new(), "no cap toast for a level this app does not know");
+}
+
+#[test]
+fn a_message_type_the_app_does_not_know_is_ignored() {
+    // How an app built before `disk_low` treats it: its parser has the same catch-all
+    // `_ => {}` arm (protocol.rs before d57f46f, line 94), so no event and no toast.
+    let mut state = connected();
+    apply(&mut state, json!({"mod":"session","event":{"type":"disk_low_v2","drive":"C:","free_bytes":3,"need_bytes":5}}));
+    assert_eq!(state.events, Vec::<DaemonEvent>::new());
+}
+
+/// Audit U8: the time locked during a recording and the unlock notice reach the app.
+#[test]
+fn a_lock_during_a_recording_reaches_the_app() {
+    let mut state = connected();
+    apply(&mut state, json!({"mod":"engine","event":{"type":"recording_stopped","path":"E:/G__rec.mp4","seconds":1200.0,"bytes":9,"continued":false,"parts":1,"total_seconds":1200.0,"gap_seconds":0.0,"frozen_seconds":0.0,"locked_seconds":720.0,"cause":null}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"recording_locked","locked_seconds":720.0}}));
+    assert_eq!(
+        state.events,
+        vec![
+            DaemonEvent::RecordingStopped { path: "E:/G__rec.mp4".into(), seconds: 1200.0, parts: 1, gap_seconds: 0.0, frozen_seconds: 0.0, locked_seconds: 720.0 },
+            DaemonEvent::RecordingKeptLocked { seconds: 720.0 },
+        ]
+    );
+}
+
+/// Gate 20b: the stopped-while-locked notice and a cancelled shutdown reach the app.
+#[test]
+fn a_stop_during_the_lock_and_a_cancelled_shutdown_reach_the_app() {
+    let mut state = connected();
+    apply(&mut state, json!({"mod":"session","event":{"type":"recording_stopped_locked","locked_seconds":300.0}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"shutdown_cancelled","title":"Shutdown cancelled","detail":"Recording continues in a new file"}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"recording_partly_locked","locked_seconds":720.0}}));
+    assert_eq!(
+        state.events,
+        vec![DaemonEvent::RecordingStoppedLocked { seconds: 300.0 }, DaemonEvent::ShutdownCancelled, DaemonEvent::RecordingPartlyLocked { seconds: 720.0 }]
+    );
+}
+
+#[test]
+fn every_config_event_counts_and_a_loads_repairs_queue_one_notice() {
+    let mut state = connected();
+    let line = json!({"mod":"session","event":{"type":"config","config":{"a":1},
+        "config_repaired":{"id":42,"count":2,"notes":["x","y"]}}});
+    apply(&mut state, line.clone());
+    assert!(apply(&mut state, line), "the same config again is still a fresh answer");
+    assert_eq!(state.snapshot.config_seq, 2);
+    let notices: Vec<_> = state.events.iter().filter(|e| matches!(e, DaemonEvent::ConfigRepaired { .. })).cloned().collect();
+    assert_eq!(notices, vec![DaemonEvent::ConfigRepaired { count: 2 }], "one notice per load id");
+    // A clean load (id 0) and an older recorder (no field) say nothing.
+    apply(&mut state, json!({"mod":"session","event":{"type":"config","config":{"a":1},"config_repaired":{"id":0,"count":0}}}));
+    apply(&mut state, json!({"mod":"session","event":{"type":"config","config":{"a":1}}}));
+    assert_eq!(state.events.iter().filter(|e| matches!(e, DaemonEvent::ConfigRepaired { .. })).count(), 1);
+}
+
+#[test]
+fn the_status_says_when_a_quit_is_finishing_a_clip() {
+    // R7-overlay-1: the settings row shows "Finishing a clip…" from this.
+    let mut state = State::default();
+    apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"recording","finishing_clip":true}}));
+    assert!(state.snapshot.session.as_ref().unwrap().finishing_clip);
+    apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"recording","finishing_clip":false}}));
+    assert!(!state.snapshot.session.as_ref().unwrap().finishing_clip);
 }

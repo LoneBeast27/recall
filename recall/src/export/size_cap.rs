@@ -7,7 +7,9 @@
 //! window` bounds the video stream by the budget. The finished file is still
 //! measured, and [`RateControl`] is tightened for a retry if it came out over.
 
-use super::video_encoder::{RateControl, Vbv};
+use super::timeline::{ticks_before, us_to_seconds};
+use super::video_encoder::{output_dims, recommended_bitrate, RateControl, Vbv};
+use crate::edit_model::{ExportPriority, ExportSettings, MIN_EXPORT_HEIGHT};
 
 /// Container overhead reserved from the cap (MP4 boxes and sample tables).
 pub(crate) const MUX_OVERHEAD_FRACTION: f64 = 0.03;
@@ -25,6 +27,80 @@ pub(crate) struct CapInputs {
     pub audio_packets: u64,
     /// The bitrate the export would use without a cap.
     pub quality_bitrate: usize,
+}
+
+pub(crate) struct VideoPlan {
+    pub dims: (u32, u32),
+    pub fps: u32,
+    pub rate: RateControl,
+    pub cap: Option<CapInputs>,
+}
+
+/// Use the exact audio payload and the sample count at each candidate frame rate.
+pub(crate) fn plan_video(
+    source_dims: (u32, u32),
+    max_fps: u32,
+    duration_us: i64,
+    (audio_bytes, audio_packets): (u64, u64),
+    settings: &ExportSettings,
+) -> Result<VideoPlan, String> {
+    let bounds = output_dims(source_dims.0, source_dims.1, settings.output_height_limit());
+    let Some(max_bytes) = settings.max_bytes else {
+        return Ok(VideoPlan {
+            dims: bounds, fps: max_fps, cap: None,
+            rate: RateControl::quality(recommended_bitrate(bounds.0, bounds.1, max_fps)),
+        });
+    };
+
+    let priority = settings.active_priority();
+    let plan_at = |fps| -> Result<VideoPlan, String> {
+        let inputs = CapInputs {
+            max_bytes,
+            duration_s: us_to_seconds(duration_us),
+            audio_bytes,
+            video_frames: ticks_before(duration_us, fps),
+            audio_packets,
+            quality_bitrate: recommended_bitrate(bounds.0, bounds.1, fps),
+        };
+        let mut rate = plan_rate(&inputs)?;
+        let dims = match priority {
+            ExportPriority::Manual => bounds,
+            _ => fit_dimensions(source_dims, bounds, fps, rate.bitrate),
+        };
+        rate.bitrate = rate.bitrate.min(recommended_bitrate(dims.0, dims.1, fps));
+        Ok(VideoPlan { dims, fps, rate, cap: Some(inputs) })
+    };
+
+    let mut best = plan_at(max_fps);
+    if priority == ExportPriority::Detail {
+        for fps in [60, 30].into_iter().filter(|fps| *fps < max_fps) {
+            if let Ok(candidate) = plan_at(fps) {
+                // Ties keep the higher frame rate. The candidates are tried in descending order.
+                if best.as_ref().map_or(true, |current| candidate.dims.1 > current.dims.1) {
+                    best = Ok(candidate);
+                }
+            }
+        }
+    }
+    best
+}
+
+/// A quality heuristic for fast motion: at least 0.06 bits per pixel per frame.
+/// Keep the largest common tier within budget. A very tight cap can reach the existing
+/// minimum export height, where the hard size check still applies.
+fn fit_dimensions(source: (u32, u32), bounds: (u32, u32), fps: u32, bitrate: usize) -> (u32, u32) {
+    let adequate = |(w, h): (u32, u32)| {
+        bitrate as u128 * 100 >= u128::from(w) * u128::from(h) * u128::from(fps) * 6
+    };
+    if adequate(bounds) {
+        return bounds;
+    }
+    [2160, 1440, 1080, 900, 720, 540, 480, 360, 240]
+        .into_iter()
+        .filter(|height| *height < bounds.1)
+        .map(|height| output_dims(source.0, source.1, Some(height)))
+        .find(|dims| adequate(*dims))
+        .unwrap_or_else(|| output_dims(source.0, source.1, Some(MIN_EXPORT_HEIGHT.min(bounds.1))))
 }
 
 /// Bytes the container needs beyond the payloads: the larger of 3 % of the cap
@@ -136,6 +212,23 @@ mod tests {
         assert!(total <= cap as f64, "worst case {total} exceeds cap {cap}");
         assert!(rate.bitrate <= vbv.maxrate);
         assert!(vbv.maxrate > 2_000_000, "budget should not be wasted: {vbv:?}");
+    }
+
+    #[test]
+    fn priorities_fit_different_shapes_to_the_same_budget() {
+        let plan = |priority, cap| plan_video(
+            (2560, 1440), 60, 30_000_000, (1_440_000, 2800),
+            &ExportSettings { max_bytes: Some(cap), height: Some(720), priority, ..ExportSettings::default() },
+        ).unwrap();
+        let manual = plan(ExportPriority::Manual, 10_000_000);
+        assert_eq!((manual.dims, manual.fps), ((1280, 720), 60));
+        let motion = plan(ExportPriority::Motion, 10_000_000);
+        assert_eq!((motion.dims, motion.fps), ((960, 540), 60));
+        let detail = plan(ExportPriority::Detail, 10_000_000);
+        assert_eq!((detail.dims, detail.fps), ((1280, 720), 30));
+        assert_eq!(detail.cap.unwrap().video_frames, 900);
+        let roomy = plan(ExportPriority::Detail, 500_000_000);
+        assert_eq!((roomy.dims, roomy.fps), ((2560, 1440), 60));
     }
 
     #[test]

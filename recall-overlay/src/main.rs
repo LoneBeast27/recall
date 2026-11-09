@@ -8,28 +8,38 @@ mod app;
 mod badge;
 mod cue;
 mod diagnostics;
+mod durable;
 mod dynamic;
 mod export;
 mod export_sim;
 mod filmstrip;
+mod fit_width;
 mod fonts;
+mod guide;
+mod guide_render;
+mod guide_window;
 mod hint;
 mod island;
 mod layout;
 mod notice;
+mod pipe_name;
+mod pipe_owner;
 mod placement;
 mod png;
 mod presence;
 mod preview;
+mod rec_notice;
 mod reducer;
 mod render;
 mod session;
 #[path = "../../recall/src/single_instance.rs"]
 mod single_instance;
 mod smoke;
+mod spot_edit;
 mod stack;
 mod stack_lines;
 mod stats;
+mod stats_gate;
 mod trace;
 mod window;
 mod zorder;
@@ -49,9 +59,11 @@ use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::WindowsAndMessaging::{
     DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, PostMessageW, PostQuitMessage, SetTimer,
-    SetWindowDisplayAffinity, TranslateMessage, HTTRANSPARENT, MSG, WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_CLOSE,
-    WM_DESTROY, WM_ERASEBKGND, WM_NCHITTEST, WM_PAINT, WM_TIMER,
+    SetWindowDisplayAffinity, TranslateMessage, HTCLIENT, HTTRANSPARENT, MSG, WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_CLOSE,
+    WM_CAPTURECHANGED, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT,
+    WM_RBUTTONUP, WM_TIMER,
 };
+use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 
 use app::{App, Feed, ANIM_TIMER, BASE_MS, BASE_TIMER};
 use diagnostics::write_diagnostics;
@@ -61,7 +73,6 @@ use render::Renderer;
 use smoke::Smoke;
 use window::create_window;
 
-const PIPE_NAME: &str = "recall-hdr-control";
 /// How long a new island waits for one that is ending (the controller restarts it).
 const INSTANCE_WAIT: Duration = Duration::from_secs(3);
 /// Posted by the pipe thread so a notice lands at once, not on the next tick.
@@ -268,35 +279,57 @@ fn spawn_pipe_client(tx: Sender<Feed>, hwnd: isize, out: app::PipeOut) {
     };
     std::thread::Builder::new()
         .name("recall-overlay-pipe".into())
-        .spawn(move || loop {
-            let Ok(name) = PIPE_NAME.to_ns_name::<GenericNamespaced>() else { return };
-            if let Ok(stream) = Stream::connect(name) {
-                let (reader, mut writer) = stream.split();
-                let _ = tx.send(Feed::Connected);
-                let _ = writer.write_all(b"{\"cmd\":\"status\"}\n");
-                if let Ok(mut slot) = out.lock() {
-                    *slot = Some(Box::new(writer));
-                }
-                for line in BufReader::new(reader).lines() {
-                    let Ok(line) = line else { break };
-                    if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
-                        if tx.send(Feed::Json(value)).is_err() {
-                            return;
+        .spawn(move || {
+            // Per Windows session: this user's recorder, never another signed-in account's.
+            let pipe = pipe_name::current_pipe_name();
+            let mut refused: Option<String> = None;
+            loop {
+                let Ok(name) = pipe.as_str().to_ns_name::<GenericNamespaced>() else { return };
+                // Only a server of this account (`pipe_owner`): a refused one gets nothing.
+                let stream = Stream::connect(name).ok().filter(|stream| match pipe_owner::check(stream) {
+                    Ok(()) => true,
+                    Err(reason) => {
+                        if refused.as_deref() != Some(reason.as_str()) {
+                            eprintln!("recall-overlay: {reason}; not using the control pipe");
                         }
-                        wake();
+                        refused = Some(reason);
+                        false
+                    }
+                });
+                if let Some(stream) = stream {
+                    refused = None;
+                    let (reader, mut writer) = stream.split();
+                    let _ = tx.send(Feed::Connected);
+                    let _ = writer.write_all(b"{\"cmd\":\"status\"}\n");
+                    if let Ok(mut slot) = out.lock() {
+                        *slot = Some(Box::new(writer));
+                    }
+                    for line in BufReader::new(reader).lines() {
+                        let Ok(line) = line else { break };
+                        if let Ok(value) = serde_json::from_str::<Value>(line.trim()) {
+                            if tx.send(Feed::Json(value)).is_err() {
+                                return;
+                            }
+                            wake();
+                        }
                     }
                 }
+                if let Ok(mut slot) = out.lock() {
+                    *slot = None;
+                }
+                if tx.send(Feed::Disconnected).is_err() {
+                    return;
+                }
+                wake();
+                std::thread::sleep(Duration::from_secs(1));
             }
-            if let Ok(mut slot) = out.lock() {
-                *slot = None;
-            }
-            if tx.send(Feed::Disconnected).is_err() {
-                return;
-            }
-            wake();
-            std::thread::sleep(Duration::from_secs(1));
         })
         .expect("spawn overlay pipe client");
+}
+
+/// Runs `f` on the app unless it is already borrowed (a re-entrant message).
+fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
+    APP.with(|slot| slot.try_borrow_mut().ok().and_then(|mut slot| slot.as_mut().map(f)))
 }
 
 /// Runs a base tick (or an animation frame) unless the app is already
@@ -318,9 +351,51 @@ fn on_tick(hwnd: HWND, animation_frame: bool) {
     }
 }
 
+/// `WM_MOUSEMOVE`'s wParam bit: the left button is down (WinUser.h).
+const MK_LBUTTON: usize = 0x0001;
+
 extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match message {
-        WM_NCHITTEST => LRESULT(HTTRANSPARENT as isize),
+        // Click-through, except while the island editor runs (the pill takes the mouse).
+        WM_NCHITTEST => LRESULT(if with_app(|app| app.editing()) == Some(true) { HTCLIENT as isize } else { HTTRANSPARENT as isize }),
+        // The island editor is mouse only (no keys held): drag, release saves,
+        // right-click cancels, the pill's ⟲ end resets.
+        WM_LBUTTONDOWN => {
+            match with_app(|app| app.editor_press(hwnd, Instant::now())) {
+                Some(true) => unsafe {
+                    SetCapture(hwnd);
+                },
+                Some(false) => on_tick(hwnd, false),
+                None => {}
+            }
+            LRESULT(0)
+        }
+        WM_MOUSEMOVE => {
+            // No MK_LBUTTON: the release never reached the window (a stuck drag).
+            let held = wparam.0 & MK_LBUTTON != 0;
+            with_app(|app| app.editor_drag(hwnd, held, Instant::now()));
+            LRESULT(0)
+        }
+        WM_LBUTTONUP => {
+            with_app(|app| app.editor_release(Instant::now()));
+            unsafe {
+                let _ = ReleaseCapture();
+            }
+            LRESULT(0)
+        }
+        WM_RBUTTONUP => {
+            if with_app(|app| app.editor_cancel(hwnd)) == Some(true) {
+                on_tick(hwnd, false);
+            }
+            LRESULT(0)
+        }
+        // Another window took the mouse mid-drag: the editor ends, nothing more saved.
+        WM_CAPTURECHANGED => {
+            if HWND(lparam.0 as *mut _) != hwnd && with_app(|app| app.editor_capture_lost(hwnd)) == Some(true) {
+                on_tick(hwnd, false);
+            }
+            LRESULT(0)
+        }
         WM_ERASEBKGND => LRESULT(1),
         WM_PAINT => {
             // Pixels come from UpdateLayeredWindow; just validate.

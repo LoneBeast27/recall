@@ -7,7 +7,8 @@ use std::time::Instant;
 
 use ffmpeg_next as ff;
 
-use super::{open_encoder, saver, Config, Enc, EncStats, PacedFrame, SaveRequest};
+use super::replay::Replay;
+use super::{open_encoder, saver, Config, EncStats, PacedFrame, SaveRequest};
 
 /// Exercise the actual NVENC encoder and MP4 remux path without WGC or audio.
 /// The caller owns GPU/resource admission and may inspect this clip with ffprobe.
@@ -23,7 +24,9 @@ pub fn smoke_test(out_dir: &std::path::Path) -> Result<String, String> {
     for note in &cfg.notes {
         eprintln!("smoke: {note}");
     }
-    let (mut enc, fallback) = open_encoder(&cfg, cfg.codec, 256, 256, None, None)?;
+    let (mut enc, fallback) = open_encoder(&cfg, cfg.codec, 256, 256, None)?;
+    let mut replay = Replay::new(&cfg, None);
+    replay.begin(&enc);
     if let Some(note) = fallback {
         eprintln!("smoke: {note}");
     }
@@ -53,24 +56,25 @@ pub fn smoke_test(out_dir: &std::path::Path) -> Result<String, String> {
                 content: None,
             },
             &stats,
+            &mut replay,
         )?;
     }
     enc.encoder
         .send_eof()
         .map_err(|e| format!("NVENC flush: {e}"))?;
-    enc.drain(&stats)?;
+    enc.drain(&stats, &mut replay)?;
     let path = out_dir.join(format!("nvenc-vfr-smoke-{}.mp4", uuid::Uuid::new_v4()));
     let path_text = path.to_string_lossy().into_owned();
-    save_now(&enc, &path_text, 1, Some(220_000))?;
+    save_now(&replay, &path_text, 1, Some(220_000))?;
     // A long static tail must remain a decodable, exactly one-second still clip.
     let still_path = out_dir.join(format!("nvenc-static-smoke-{}.mp4", uuid::Uuid::new_v4()));
-    save_now(&enc, &still_path.to_string_lossy(), 1, Some(300_000_000))?;
+    save_now(&replay, &still_path.to_string_lossy(), 1, Some(300_000_000))?;
     eprintln!("static-tail smoke: {}", still_path.display());
     Ok(path_text)
 }
 
 /// Synchronous save through the saver's own build -> mux -> rename path.
-fn save_now(enc: &Enc, path: &str, seconds: u32, end_us: Option<u64>) -> Result<(), String> {
+fn save_now(replay: &Replay, path: &str, seconds: u32, end_us: Option<u64>) -> Result<(), String> {
     let now = Instant::now();
     let req = SaveRequest {
         path: path.to_string(),
@@ -79,5 +83,5 @@ fn save_now(enc: &Enc, path: &str, seconds: u32, end_us: Option<u64>) -> Result<
         at_last_frame: false,
         requested: now,
     };
-    saver::write_now(&enc.build_job(req, &[], now)?).map(|_| ())
+    saver::write_now(&replay.build_job(req, &[], now)?).map(|_| ())
 }

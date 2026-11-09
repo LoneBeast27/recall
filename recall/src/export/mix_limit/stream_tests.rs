@@ -52,3 +52,23 @@ fn nothing_is_held_once_finished_and_short_streams_survive() {
     assert_eq!(limiter.finish(), vec![0.5, 0.5, 0.25, 0.25], "under the ceiling: untouched");
     assert!(limiter.finish().is_empty());
 }
+
+/// p9 gate P2-c: once warm, a packet allocates nothing, on a quiet track (every unboosted one)
+/// and on one the limiter is working on.
+#[test]
+fn a_packet_allocates_nothing_once_the_limiter_is_warm() {
+    let quiet: Vec<f32> = (0..480).flat_map(|n| [(n as f32 * 0.01).sin() * 0.3; 2]).collect();
+    let loud = boosted_tone(480);
+    for (what, packet) in [("quiet", &quiet), ("loud", &loud)] {
+        let mut limiter = StreamLimiter::new(2, 48_000);
+        for _ in 0..20 {
+            limiter.push(packet);
+        }
+        let ((), bytes) = crate::test_alloc::bytes_in(|| {
+            for _ in 0..100 {
+                assert!(!limiter.push(packet).is_empty());
+            }
+        });
+        assert_eq!(bytes, 0, "{what}: 100 packets allocated {bytes} bytes");
+    }
+}

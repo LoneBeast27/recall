@@ -114,21 +114,6 @@ impl Midi {
     pub fn monitored_port(&self) -> Option<String> {
         lock(&self.shared.monitored).clone()
     }
-    /// Sends raw bytes to the first output whose name contains `port_match` (case-insensitive).
-    /// Opens a fresh connection per call.
-    pub fn send(&self, port_match: &str, bytes: &[u8]) -> Result<(), String> {
-        if bytes.is_empty() {
-            return Err("nothing to send".into());
-        }
-        let output = MidiOutput::new("recall-native-out").map_err(|error| error.to_string())?;
-        let ports = output.ports();
-        let names: Vec<String> = ports.iter().map(|port| output.port_name(port).unwrap_or_default()).collect();
-        let index = pick_output(&names, port_match).ok_or_else(|| format!("no MIDI output matching '{port_match}'"))?;
-        let mut connection = output.connect(&ports[index], "recall-native").map_err(|error| format!("open {}: {error}", names[index]))?;
-        let sent = connection.send(bytes).map_err(|error| format!("send to {}: {error}", names[index]));
-        connection.close();
-        sent
-    }
     /// Last 10 inbound messages, newest first.
     pub fn recent(&self) -> Vec<MidiMessage> {
         lock(&self.shared.recent).iter().cloned().collect()
@@ -136,6 +121,30 @@ impl Midi {
     pub fn revision(&self) -> u64 {
         self.shared.revision.load(Ordering::Acquire)
     }
+}
+
+/// Sends raw bytes to the first output whose name contains `port_match` (case-insensitive), on a
+/// fresh connection. Blocks while the port opens: call it off the UI thread.
+pub fn send_to(port_match: &str, bytes: &[u8]) -> Result<(), String> {
+    if bytes.is_empty() {
+        return Err("nothing to send".into());
+    }
+    let output = MidiOutput::new("recall-native-out").map_err(|error| error.to_string())?;
+    let ports = output.ports();
+    let names: Vec<String> = ports.iter().map(|port| output.port_name(port).unwrap_or_default()).collect();
+    let index = pick_output(&names, port_match).ok_or_else(|| format!("no MIDI output matching '{port_match}'"))?;
+    let mut connection = output.connect(&ports[index], "recall-native").map_err(|error| format!("open {}: {error}", names[index]))?;
+    let sent = connection.send(bytes).map_err(|error| format!("send to {}: {error}", names[index]));
+    connection.close();
+    sent
+}
+
+/// "Send test note": middle C on, 120 ms, off, to the output `port_match` names. Blocks for the
+/// note and the two port opens: run it on a background task.
+pub fn send_test_note(port_match: &str) -> Result<(), String> {
+    send_to(port_match, &[0x90, 60, 127])?;
+    std::thread::sleep(Duration::from_millis(120));
+    send_to(port_match, &[0x80, 60, 0])
 }
 
 impl Drop for Midi {
@@ -287,7 +296,6 @@ mod tests {
 
     #[test]
     fn empty_send_is_rejected_before_touching_devices() {
-        let midi = Midi { shared: Arc::new(Shared::new("MIDI Controller 1".into())) };
-        assert!(midi.send("MIDI Controller 1", &[]).is_err());
+        assert!(send_to("MIDI Controller 1", &[]).is_err());
     }
 }

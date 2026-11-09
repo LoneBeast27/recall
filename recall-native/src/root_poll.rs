@@ -3,11 +3,11 @@
 //! applied but not drawn; the view draws once when Recall comes back to the front.
 //! Measured 2026-11-04: the open library cost 1.95% of a core on its main thread while a
 //! game was recording, most of it this poll and the once-a-second status redraw.
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
-use gpui::{Entity, Timer, Window};
+use gpui::{Context, Entity, Timer, Window};
 
-use super::{Root, Route};
+use super::{Root, Route, ToastKind};
 
 const FRONT: Duration = Duration::from_millis(30);
 const BACK: Duration = Duration::from_millis(250);
@@ -63,8 +63,8 @@ impl Root {
     /// drain countdown reached its next second.
     pub(super) fn recorder_clock_tick(&mut self) -> bool {
         let unresponsive = self.daemon.unresponsive();
-        let drain = self.snap.session.as_ref().filter(|s| s.state == "draining").and_then(|s| s.drain.as_ref());
-        let left = drain.map(|d| d.remaining_secs(crate::services::daemon::unix_ms()));
+        let draining = self.snap.session.as_ref().filter(|s| s.state == "draining");
+        let left = draining.and_then(|s| s.drain_left(crate::services::daemon::unix_ms(), std::time::Instant::now()));
         if unresponsive == self.recorder_unresponsive && left == self.drain_drawn {
             return false;
         }
@@ -84,5 +84,118 @@ impl Root {
             return true;
         }
         false
+    }
+
+    pub(super) fn poll(&mut self, cx: &mut Context<Self>) {
+        let mut changed = self.back_in_front();
+        while let Ok(done) = self.workers.done.try_recv() {
+            changed = true;
+            self.on_done(done);
+        }
+        changed |= self.poll_daemon();
+        changed |= self.recorder_clock_tick();
+        changed |= self.reach_tick();
+        changed |= self.ed.tick(self.route == Route::Editor, &self.workers);
+        crate::trace::record(self.route.name(), &self.ed, self.lib.records.len());
+        crate::trace::dump_layout(self.route.name(), self.lib.records.len());
+        if let Some(error) = self.ed.last_error.take() {
+            self.show_toast(ToastKind::Bad, "Preview", Some(error));
+            changed = true;
+        }
+        changed |= self.lib.fit_columns();
+        // Past midnight "Today" becomes "Yesterday" without a new listing.
+        changed |= self.lib.roll_day();
+        if self.route == Route::Library {
+            self.lib.queue_visible(&self.workers);
+            self.lib.note_scroll_depth();
+        }
+        // A thumbnail rewritten larger in place: drop gpui's decode so the tile reloads the file.
+        for thumb in self.lib.refreshed_images.drain(..) {
+            gpui::ImageSource::from(std::path::PathBuf::from(thumb)).remove_asset(cx);
+            changed = true;
+        }
+        self.lib.flush_meta_if_due();
+        self.lib.ssd.poll(&self.workers, !self.lib.loading);
+        if let Some(notice) = self.lib.notice.take() {
+            self.show_toast(ToastKind::Bad, notice, None);
+            changed = true;
+        }
+        // The tile with the rename field left the screen: draw again so `settle_focus` sees it.
+        changed |= self.lib.renaming.is_some() && !self.rename_painted.get();
+        // Same for the cache size field when Settings → Storage closes while it's open.
+        changed |= self.cache.editing && !self.cache.painted.get();
+        changed |= self.poll_timers();
+        if changed {
+            cx.notify();
+        }
+    }
+
+    /// A new recorder snapshot: apply it, route its events. True when the status changed.
+    fn poll_daemon(&mut self) -> bool {
+        if self.daemon.revision() == self.daemon_rev {
+            return false;
+        }
+        self.daemon_rev = self.daemon.revision();
+        self.snap = self.daemon.snapshot();
+        self.resolve_setup_resume();
+        // Background cache filling pauses while a game is being recorded.
+        let busy = self.snap.session.as_ref().is_some_and(|s| s.capturing());
+        crate::services::storage::set_recorder_busy(busy);
+        crate::services::storage::set_recorder_connected(self.snap.connected);
+        self.sync_recordings_folder();
+        for event in self.daemon.drain_events() {
+            self.on_daemon_event(event);
+        }
+        self.status_changed()
+    }
+
+    pub(crate) fn finish_setup_recording(&mut self, record_after: bool) {
+        if record_after {
+            self.setup_resume_pending = true;
+            self.resolve_setup_resume();
+        } else {
+            self.controller_check_at = None;
+        }
+    }
+
+    fn resolve_setup_resume(&mut self) {
+        if !self.setup_resume_pending || !self.snap.connected {
+            return;
+        }
+        let Some(session) = self.snap.session.as_ref() else { return };
+        self.setup_resume_pending = false;
+        if session.setup_owner == Some(std::process::id()) {
+            self.send(crate::services::daemon::DaemonCommand::Resume);
+        }
+    }
+
+    /// Time-outs: the storage-limit dry run, the recorder's first start, the toast. True when
+    /// something changed on screen.
+    fn poll_timers(&mut self) -> bool {
+        let mut changed = false;
+        // A recorder that never answers the dry run (an older build, a dropped pipe) sets nothing.
+        if self.storage_asking.is_some_and(|(_, at)| at.elapsed() > crate::views::storage_limit::ASK_TIMEOUT) {
+            self.storage_asking = None;
+            self.show_toast(ToastKind::Bad, "Recorder didn't answer", Some("Storage limit not changed".to_owned()));
+            changed = true;
+        }
+        // Opening Recall means recording: start the recorder once if it isn't running.
+        if self.controller_check_at.is_some_and(|at| Instant::now() >= at) {
+            self.controller_check_at = None;
+            if !self.snap.connected && self.setup.is_some() {
+                self.start_setup_recorder();
+                changed = true;
+            } else if !self.snap.connected {
+                if let Err(error) = crate::services::daemon::start_controller() {
+                    self.show_toast(ToastKind::Bad, "Couldn't start the recorder", Some(error));
+                    changed = true;
+                }
+            }
+        }
+        if self.toast.as_ref().is_some_and(|t| Instant::now() >= t.until) {
+            self.toast = None;
+            changed = true;
+        }
+        changed
     }
 }

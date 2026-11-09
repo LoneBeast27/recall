@@ -2,6 +2,8 @@
 //! worker behind the `export_clip` command, and the shared run + report path
 //! also used by `--export-cfr` / `--export-edit`.
 
+#[cfg(feature = "encode")]
+use std::io::Write;
 use std::time::Instant;
 
 use crate::{edit_model, export, protocol, ExportHook};
@@ -16,7 +18,8 @@ pub(super) fn standalone_edit(json: bool) {
     }
     if json {
         export::set_progress_sink(|frames, total| {
-            println!("{}", serde_json::json!({"type": "export_progress", "frames": frames, "total": total}));
+            // A closed stdout (the controller died) drops the line, never a panic.
+            let _ = writeln!(std::io::stdout(), "{}", serde_json::json!({"type": "export_progress", "frames": frames, "total": total}));
         });
     }
 }
@@ -134,8 +137,8 @@ pub(super) fn run_export(request: &export::ExportRequest, edit: Option<(&edit_mo
     }
     let result = match edit {
         Some((plan, settings)) => export::export_edited(request, plan, settings).map(|report| {
-            if json { println!("{}", report.report_line(&request.input, &request.output)); }
-            else { println!("[recall] {:?} export: {} bytes, {}x{}, ranges {:?}", report.mode, report.bytes, report.width, report.height, report.ranges.iter().map(|r| (r.start, r.end, r.speed)).collect::<Vec<_>>()); }
+            if json { let _ = writeln!(std::io::stdout(), "{}", report.report_line(&request.input, &request.output)); }
+            else { let _ = writeln!(std::io::stdout(), "[recall] {:?} export: {} bytes, {}x{}, ranges {:?}", report.mode, report.bytes, report.width, report.height, report.ranges.iter().map(|r| (r.start, r.end, r.speed)).collect::<Vec<_>>()); }
             report.summary()
         }),
         None => export::export_cfr(request),
@@ -152,7 +155,8 @@ pub(super) fn run_export(request: &export::ExportRequest, edit: Option<(&edit_mo
                     elapsed_ms: start.elapsed().as_millis() as u64,
                 });
             } else {
-                println!(
+                let _ = writeln!(
+                    std::io::stdout(),
                     "[recall] exported {} at {} CFR fps",
                     request.output, request.fps
                 );

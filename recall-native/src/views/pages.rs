@@ -3,7 +3,7 @@ use gpui::{AnyElement, Context, Div, FontWeight, SharedString, Window, div, prel
 use serde_json::{Value, json};
 
 use crate::{
-    root::{Root, ToastKind},
+    root::{Root, reach},
     services::{
         daemon::{self, DaemonCommand},
         meters::MeterState,
@@ -50,20 +50,23 @@ impl Root {
         if self.snap.connected {
             return None;
         }
+        // A recorder that runs but never answers gets its reason, not "off" (`root_reach`).
+        let (title, detail) = if self.recorder_reach == daemon::RecorderReach::Unreachable {
+            (reach::UNREACHABLE_TITLE, self.unreachable_detail())
+        } else {
+            ("The recorder is off", "Start it to see live status and change these settings.".to_owned())
+        };
         Some(
             card()
                 .flex_row()
                 .items_center()
                 .gap(px(12.))
                 .child(ui::dot(theme::DISABLED, 8.))
-                .child(div().flex_1().flex().flex_col().child(div().font_weight(FontWeight::MEDIUM).child("The recorder is off")).child(
-                    div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child("Start it to see live status and change these settings."),
+                .child(div().flex_1().flex().flex_col().child(div().font_weight(FontWeight::MEDIUM).child(title)).child(
+                    div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(detail),
                 ))
                 .child(ui::button("start-recorder", Variant::Primary).child("Start recorder").on_click(cx.listener(|this, _, _, cx| {
-                    match daemon::start_controller() {
-                        Ok(_) => this.show_toast(ToastKind::Info, "Starting the recorder…", None),
-                        Err(error) => this.show_toast(ToastKind::Bad, "Couldn't start the recorder", Some(error)),
-                    }
+                    this.start_recorder();
                     cx.notify();
                 })))
                 .into_any_element(),

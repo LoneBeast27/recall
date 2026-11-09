@@ -25,12 +25,16 @@ mod drive;
 mod evict;
 mod ffmpeg;
 pub mod fill;
+pub mod guard;
 mod head;
 mod history;
 mod io_priority;
 mod kept;
+mod leftovers;
 mod lane;
+mod lane_brief;
 mod light;
+mod owned;
 mod prefetch;
 mod probe;
 mod projects;
@@ -40,6 +44,7 @@ mod smr;
 mod ssd_usage;
 mod thumbs;
 mod tiers;
+mod unit_files;
 mod video;
 #[cfg(test)]
 mod tests;
@@ -49,6 +54,14 @@ mod tests_io;
 mod tests_smart;
 #[cfg(test)]
 mod tests_smoke;
+#[cfg(test)]
+mod tests_owned;
+#[cfg(test)]
+mod tests_safety;
+#[cfg(test)]
+mod tests_set_aside;
+#[cfg(test)]
+mod tests_budget_file;
 
 // Public API for the UI (Settings > Storage, editor playback); not every item is used yet.
 #[allow(unused_imports)]
@@ -69,6 +82,7 @@ pub use evict::DEFAULT_CACHE_BUDGET;
 pub use history::{Interaction, record_interaction};
 #[allow(unused_imports)]
 pub use lane::{LaneStats, Priority, lane_wait_ms, run_io, stats, submit_io};
+pub use lane_brief::run_io_brief;
 #[allow(unused_imports)]
 pub use prefetch::{GoneClip, PrefetchClip, PrefetchEvent, PrepareEditor, forget_clips, gpu_work_allowed, recorder_busy, recorder_holds, set_recorder_busy, set_recorder_connected, smart_status, start_prefetch};
 pub use projects::{ProjectSource, SidecarStep, export_dir, has_export, project_order, sidecar_step, working_copy_path, write_atomic};
@@ -82,6 +96,26 @@ pub use tiers::{CacheKind, CacheUsage, TierUsage, clear_kind, usage_detail};
 #[allow(unused_imports)]
 pub use video::{cache_video, cached_video, copy_progress, enforce_budget, is_slow, start_fill, too_large};
 
+/// Dry run of the cache at `root`: (files a first load would adopt into `owned.json`, units the
+/// budget would evict now). Writes nothing at all. Outside the app every clip scores 0
+/// (`budget::plan_dry`).
+#[allow(dead_code)]
+pub fn plan_dry(root: &Path) -> (Vec<String>, Vec<String>) {
+    budget::plan_dry(root)
+}
+
+/// Records `rel` (`video/<id>.mp4`, `tmp/pre-encode/<key>.mp4`, ...) as a file Recall made in
+/// the cache at `root`: only such files are ever evicted or swept (`owned.rs`).
+pub(crate) fn mark_owned(root: &Path, rel: &str) {
+    owned::mark(root, rel);
+}
+
+/// Deletes `name` in `folder` of the cache at `root` only if Recall made it ([`mark_owned`])
+/// and the cache is not blocked (`guard.rs`). True when it went.
+pub(crate) fn remove_owned(root: &Path, folder: &str, name: &str) -> bool {
+    owned::remove(root, folder, name)
+}
+
 /// [`cached_video`] against an explicit cache root.
 pub fn cached_video_in(root: &Path, source: &Path) -> Option<String> {
     video::cached_in(root, source)
@@ -91,20 +125,51 @@ pub fn cached_video_in(root: &Path, source: &Path) -> Option<String> {
 /// Never blocks after the first call (a stale snapshot refreshes in the background).
 pub fn usage() -> Vec<(&'static str, u64)> {
     let summary = prefetch::summary();
-    vec![("Thumbnails", summary.thumbs), ("Hover previews", summary.scrub), ("Editor media", summary.editor), ("Recent clips", summary.video)]
+    // The recorder's leftover kept copies hold C: space until the user sends them to the bin.
+    let leftover = leftovers::leftovers().map_or(0, |found| found.bytes);
+    vec![("Thumbnails", summary.thumbs), ("Hover previews", summary.scrub), ("Editor media", summary.editor), ("Recent clips", summary.video), ("Leftover copies", leftover)]
 }
+
+// The examples include this file without Settings.
+#[allow(unused_imports)]
+pub use leftovers::{leftover_line, leftovers, send_to_bin as send_leftovers_to_bin, Leftovers};
 
 /// The one cache budget in bytes (first run: `evict::default_budget`).
 pub fn budget_bytes() -> u64 {
     video::budget_in(&cache_root())
 }
 
+/// Why the cache size can't be changed right now (storage.json locked, unreadable or damaged).
+pub fn budget_note() -> Option<String> {
+    video::budget_note(&cache_root())
+}
+
+/// storage.json is damaged and backed up as `.bad`: Settings offers "Reset cache size".
+pub fn budget_resettable() -> bool {
+    video::budget_resettable(&cache_root())
+}
+
+/// Settings "Reset cache size": the last budget read, else the first-run pick. Returns it.
+pub fn reset_budget() -> Result<u64, String> {
+    video::reset_budget(&cache_root())
+}
+
+/// Saves `bytes` as the user's budget (no `first_run` marker: Settings set it). Refused while
+/// storage.json can't be read: the size on screen may be a guess, not the user's (RI2-2).
+fn save_budget_in(root: &Path, bytes: u64) -> Result<(), String> {
+    if let Some(why) = video::budget_note(root) {
+        return Err(format!("{why}; cache size not changed"));
+    }
+    let mut settings = evict::read_settings(root);
+    settings.cache_budget_bytes = Some(bytes);
+    settings.first_run = None;
+    evict::write_settings(root, &settings)
+}
+
 /// Persists the budget, then evicts down to it and re-plans the fill (in the background).
 pub fn set_budget_bytes(bytes: u64) {
     let root = cache_root();
-    let mut settings = evict::read_settings(&root);
-    settings.cache_budget_bytes = Some(bytes);
-    if let Err(error) = evict::write_settings(&root, &settings) {
+    if let Err(error) = save_budget_in(&root, bytes) {
         eprintln!("save cache budget: {error}");
     }
     let _ = std::thread::Builder::new().name("recall-cache-budget".into()).spawn(|| {

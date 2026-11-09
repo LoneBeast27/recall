@@ -21,6 +21,9 @@ fn watchevent_to_foreground_lowercases_stem() {
         fullscreen: true,
         fullscreen_on_target: false,
         steam_game: false,
+        launcher_game: false,
+        store_game: false,
+        hosted: false,
         hwnd: 0x1234,
     };
     let fg = foreground_of(&ev);

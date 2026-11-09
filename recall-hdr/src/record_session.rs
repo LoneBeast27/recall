@@ -33,6 +33,7 @@ fn dispatch_tray_command(command: RecordingTrayCmd, ui: &mut RecallUi, tray: &mu
             false
         }
         RecordingTrayCmd::Quit => true,
+        RecordingTrayCmd::AddGame => false,
     }
 }
 

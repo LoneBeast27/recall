@@ -5,9 +5,23 @@ when you press a key, and gives you a library and editor to trim, cut and share 
 
 Recall needs an NVIDIA GPU (NVENC). There is no CPU video encoder.
 
+## Source and license
+
+Recall was created by **LoneBeast27**. Official Recall downloads are free. Recall’s own code is released under [GPL-3.0-or-later](LICENSE), which allows commercial use and redistribution. If you distribute a modified build, keep the copyright and license notices and clearly mark your changes and their dates. The [upstream Recall repository](https://github.com/LoneBeast27/recall) is the reference for the original source. See [NOTICE.md](NOTICE.md) for credits and third-party terms.
+
 ## Install
 
-Run from PowerShell in this folder:
+Open `dist/recall-current/RecallSetup.exe` for Quick Setup. Choose whether recording starts when setup is complete and whether to set up Windows game detection and FPS. **Change…** opens the SSD install folder picker from Quick Setup. **Advanced** also lets you type a folder or change the Start menu shortcut. After installation, **Continue setup** opens Storage, Audio, and Recording quality. Recording quality compares the same full frame before and after encoding, with a detail crop available. Choose **Open Recall** to reach your library. Updates keep your existing clip folder and recording settings.
+
+Setup checks the PC before copying Recall. It installs the bundled Microsoft Visual C++ x64 runtime when required. On Windows N, it adds the Media Feature Pack through Windows Update when needed. Windows may ask for administrator permission. If a restart is needed, reopen Setup after restarting. Game recording uses the NVIDIA driver installed for your GPU.
+
+Fresh profiles use the Windows default microphone and system output. A distinct Windows communications output gets its own track. Add extra devices or apps from **Input**, **Output**, and **Application audio**. Select the icon on a custom strip to change it.
+
+### RecallTesting
+
+Run `dist/recall-testing/RecallTesting.exe` to rehearse setup with demo drives, audio sources, and a demo library. Changes stay in memory for that session. The testing executable has no connection to the recorder and uses no Recall profile or clip files.
+
+To build and install Recall from source, run this in the repo:
 
 ```powershell
 powershell -NoProfile -File scripts\install.ps1
@@ -15,8 +29,10 @@ powershell -NoProfile -File scripts\install.ps1
 
 - Installs to `%LOCALAPPDATA%\Programs\Recall` (no admin rights). `-InstallDir <folder>` picks
   another folder; it must be on an SSD, because the app keeps its preview cache there.
-- Adds **Recall** to the Start menu, starts the recorder, and sets it to start with Windows
-  (`-NoAutostart` skips that; Settings → General turns it off later).
+- Adds **Recall** to the Start menu and starts the recorder. Start with Windows is off unless
+  you ask: `-Autostart` turns it on, or Settings → General. An update leaves the setting as it is.
+- The folder must be on a drive Windows reports as an SSD. For an SSD it can't classify (USB,
+  RAID, Storage Spaces, VM disk), `-AllowUnknownDrive` installs with a warning.
 - Builds run on the background CPU cores (CCD1) through `nice-build.ps1`, so a running game
   is not slowed down.
 - Close Recall first: while the app runs, the installer stops with exit 3 and changes nothing.
@@ -26,13 +42,52 @@ powershell -NoProfile -File scripts\install.ps1
 
 ## Use it
 
-- **Play a game.** Recording starts by itself when a fullscreen game is in front and stops
-  when it closes. The tray icon is red while recording and grey while paused.
+- **Play a game.** Recording starts by itself when a game is in front and stops when it
+  closes. The tray icon is red while recording and grey while paused.
+- **What counts as a game.** Recall records an app on its own only with official proof that it
+  is a game:
+  - it is installed in a Steam library (`steamapps\common`), or in an Epic, GOG, Ubisoft
+    Connect, EA app, Battle.net or itch install folder (read from the launchers themselves, one
+    folder per installed game; a GOG entry whose folder is a broad parent such as `D:\Games`
+    counts only for the exe that entry names), windowed too;
+  - it is an Xbox / Microsoft Store game (its package holds `MicrosoftGame.config`, in an
+    `XboxGames` folder or `WindowsApps`), while fullscreen;
+  - Recall knows it (its built-in game list) or the NVIDIA driver lists it as a game;
+  - or, fullscreen, it draws like a game (exclusive fullscreen, its own flip, or tearing
+    presents). This check needs trace rights (the installer adds you to Performance Log Users).
+    Without them, or when the check cannot start, an app with none of the proof above is not
+    recorded.
+  Anything else is not recorded. After 20 s in front the notice says "Not recording <exe>: add it
+  as a game in Settings" (once per exe per run), and the tray menu gets "Add <exe> as a game".
+- **Settings → Games** lists the apps you registered. **Add app…** picks a running app (the one
+  that was in front comes first, borderless games included) or browses to an exe; it is then
+  recorded in any window. Each entry can be set to **Never record** (never recorded, even from a
+  Steam library) or removed. Never record or Remove on the app being recorded stops recording it
+  at once and throws away its unsaved replay buffer (saved clips are never touched).
+  In config.toml these are `[[overrides]]` entries (`exe = "Game.exe"` or `"game"`, `kind =
+  "sdr_game"` / `"hdr_game"` / `"none"`).
+- **Call, chat, mail, office, media-player and music apps** (Zoom, Teams, WhatsApp, Kodi,
+  Stremio, VLC, LibreOffice, Spotify and others) are never recorded on their own, even when they
+  sit in a launcher folder or a Store game package or draw like a game; only a Steam library, a
+  game Recall knows, or your own entry beats that. Discord is the exception: its fullscreen
+  window, a fullscreen call or stream view included, is recorded by default (config.toml
+  `[detect] fullscreen_games = ["Discord"]`, shown in Settings → Games as "Recorded when
+  fullscreen"; remove it there to stop). Windowed Discord is never recorded: pressing Esc
+  (or restoring the window) ends its recording at once; alt-tab away from a still-fullscreen
+  Discord keeps it, like a game. Adding an exe to
+  `fullscreen_games` records it only while it is fullscreen; a Settings → Games entry records
+  every window of that exe, windowed ones too (a meeting toolbar or a chat window). When a
+  blocked fullscreen app draws like a game (its own flip or exclusive fullscreen, not a composed
+  video call) for over 20 s, the same notice names it (the log names every blocked exe).
 - **Alt+N** saves the last 2 minutes (Settings → Clip → Replay length). A soft tick confirms the
   press at once and a chime plays when the clip is safe; the small in-game notice shows it too.
   Clips are written to the SSD first (about a second) and moved to the clip folder in the
   background, so the hard drive's speed never delays a save. **Alt+M** mutes your microphone
-  in clips.
+  in clips. A line-in or capture card can skip it (Audio page → the strip's menu); Recall knows
+  that device by its Windows endpoint, which for two identical USB devices without a serial
+  number follows the USB port, so keep each of them in the same port.
+  Two devices with the same name are told apart by that endpoint: a source records the one it
+  was picked on, and waits (silent) when neither is it.
 - **Two-step shortcuts:** press **Alt + `** (the key left of 1), then
   **1** bookmark · **2** save the last 30 s · **3** screenshot · **4** start/stop a full
   recording. The game never receives the number. Turn them off in Settings → Shortcuts.
@@ -42,7 +97,10 @@ powershell -NoProfile -File scripts\install.ps1
   Settings → General) toggles live performance stats: FPS with its 1% low, GPU and CPU rings,
   and the recording dot. Each game gets its own spot, measured from your clips so the Island
   stays clear of that game's HUD (`hud-spots.json`); unknown games use the top right.
-- **Tray menu:** status · Open Recall · Stop/Start recording · Quit Recall.
+  The pill uses compact spacing and stacks text upright along a side edge.
+  The overlay shortcut (Alt+O by default) hides or shows notices and live stats together.
+- **Tray menu:** status · Open Recall · (after a "Not recording" notice: Add <exe> as a game) ·
+  Stop/Start recording · Quit Recall.
 - **The app** (Start menu → Recall): library grouped by day, hover a tile to scrub, favourite,
   rename, delete to the Recycle Bin, drag a clip into Discord or copy it. Right-click a tile for
   Open, Favourite, Rename, Copy, Show in folder and Delete (on the whole selection when the tile
@@ -57,11 +115,12 @@ powershell -NoProfile -File scripts\install.ps1
   never changes; undoing every edit removes that file and the Edited label, unless the clip has
   an export. Cancel export stops
   a running export and leaves nothing behind.
-- **Old clips:** Settings → Media → Add folder lists clips from ShadowPlay, Medal, OBS or any
-  folder in the library. Nothing is moved.
+- For a re-encoded export with a size limit, choose **Motion** to keep the selected FPS or **Detail** to trade frame rate for resolution. Both modes choose the resolution automatically. Switch to **Manual** to edit frame rate and resolution. The finished export shows its actual size, resolution, and FPS.
+- **Folder Mapper:** In Settings → Media or the Storage step in setup, select **Link folder** and choose a recording folder from ShadowPlay, Medal, or OBS. Recall watches for new clips and links them in place. Edits go into Recall’s library data and exports go to Recall’s export folder. Removing a linked clip only hides its entry in Recall. Former Recall recording folders remain listed under **Folders Recall manages**.
 - **Clip folders stay in step:** while the app is open, a clip another program copies, renames or
-  deletes in a clip folder shows up within seconds, once the file is finished. A renamed clip
-  loses its favourite and title, which are stored by file name. An imported folder on a USB drive
+  deletes in a clip folder shows up within seconds, once the file is finished. A renamed or moved
+  clip loses its favourite and title, which are stored by the clip's full path (two clips with the
+  same name in different folders keep their own). An imported folder on a USB drive
   may need the app closed before Windows lets you safely remove the drive.
 
 ### FPS numbers (Windows frame timing)
@@ -82,7 +141,7 @@ hook loaded crashed VALORANT, so it was removed on 2026-10-26.)
 |---|---|
 | General | Start with Windows, Island notices, performance stats, quit the recorder |
 | Clip | automatic recording, desktop between games, replay length, format (H.264 / HEVC / AV1), frame rate, bitrate, encoder effort, voice chat on its own track |
-| Media | clip folders, storage limit (oldest clips go to the Recycle Bin; favourites and edited clips stay), SSD cache size |
+| Media | clip folders, storage limit (oldest clips go to the Recycle Bin; favourites, edited clips, clips played in the last 10 minutes and the clip open in the app stay), SSD cache size |
 | Shortcuts | the in-game shortcuts and the two-step switch |
 
 The Audio page shows live meters for every source.
@@ -105,12 +164,12 @@ Switching back from HDR to SDR keeps the running capture and the buffer.
 
 | What | Where |
 |---|---|
-| Clips | `V:\ALL RECORDINGS` by default (`recording.output_dir`) |
+| Clips | `<Videos>\Recall` by default (Settings → Media) |
 | Screenshots | `<clips>\screenshots` |
 | Recorder settings | `%APPDATA%\recall-hdr\config.toml` |
 | Favourites, titles, clip folders | `%APPDATA%\Recall\library.json`, `folders.json` |
 | Edits | `<clip>.recall-edit.json` beside each clip |
-| Preview cache | `<install folder>\cache`, one budget (2 GB by default) |
+| Preview cache | `<install folder>\cache`, one budget (2 GB by default on the system drive; set in Settings) |
 | Clips on their way to the clip folder | `<install folder>\cache\staging` (moved within seconds; recovered on next start) |
 | Player log (stalls, audio underruns) | `%APPDATA%\Recall\player.log` |
 
@@ -122,20 +181,24 @@ drives are detected); thumbnails, hover frames and recently watched clips are ke
 | Folder | Program | Job |
 |---|---|---|
 | `recall/` | `recall.exe` | capture engine: Windows Graphics Capture → NVENC → memory ring; saves, exports, long recordings |
-| `recall-hdr/` | `recall-hdr.exe --record` | controller + tray: finds the game, runs the engine, hotkeys, HDR switching, config, control pipe `\\.\pipe\recall-hdr-control` |
+| `recall-hdr/` | `recall-hdr.exe --record` | controller + tray: finds the game, runs the engine, hotkeys, HDR switching, config, control pipe `\\.\pipe\recall-hdr-control-<session id>` (this user and SYSTEM only) |
 | `recall-overlay/` | `recall-overlay.exe` | the small in-game save notice and two-step shortcut hint |
 | `recall-native/` | `recall-native.exe` | the app (GPUI): library, editor, HDR, audio, settings |
 | `recall-hub/` | — | the old Svelte/Tauri window; replaced by `recall-native`, kept for reference |
 
 ## Build and test (developers)
 
+To sign a separate copy of a built installer, run `scripts/setup/sign.ps1` with `-InputPath`, a new `-OutputPath`, the `-CertificateThumbprint` of your trusted code-signing certificate, and its HTTPS `-TimestampUrl`. The script verifies the publisher and timestamp before writing the signed output.
+
+Build the Windows setup screen with `powershell -NoProfile -File scripts/setup/build.ps1 -Preview`. Open `dist/setup/RecallSetupPreview.exe` to rehearse setup. The release setup build takes a verified payload via `-PayloadDirectory` and uses the save-aware installer. Pass `-VCRedistPath` to bundle a local Microsoft-signed x64 Visual C++ package. By default the build uses a copy in the payload directory or downloads it from Microsoft.
+
 ```powershell
 $env:FFMPEG_DIR    = "$PWD\tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared"   # has av1_nvenc
 $env:LIBCLANG_PATH = "$PWD\.tmp\nvenc-vfr\clang18\clang\native"              # clang 18 for ffmpeg-sys
 $env:CARGO_TARGET_DIR = "$PWD\target-dev"
-powershell -NoProfile -File C:/Users/rohan/.claude/tools/nice-build.ps1 cargo test -p recall -p recall-hdr -p recall-overlay --offline
+cargo test -p recall -p recall-hdr -p recall-overlay --offline
 $env:CARGO_TARGET_DIR = "$PWD\target-gpui"
-powershell -NoProfile -File C:/Users/rohan/.claude/tools/nice-build.ps1 cargo test --manifest-path recall-native\Cargo.toml --offline
+cargo test --manifest-path recall-native\Cargo.toml --offline
 ```
 
 After any change to the clip folders' handling, run `scripts\dev\watch-check.ps1` (private

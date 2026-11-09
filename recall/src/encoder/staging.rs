@@ -12,6 +12,8 @@
 //!   `RECALL_STAGING_DIR=off` turns staging off.
 //! - A save is staged only when the staging folder is on a different volume
 //!   than its clip folder ([`same_volume`]); otherwise it is written in place.
+//!   It is also written in place when the staging drive is short of space or
+//!   fills up mid-mux (`space.rs`).
 //! - Per-clip sidecars are written against the FINAL path, straight into the
 //!   clip folder: the bookmark sidecar (`bookmarks.rs`, on the `saved` event)
 //!   and the gallery thumbnail (`mux::finish_gallery`, which
@@ -22,7 +24,10 @@
 //!   clip folder, and stale `*.mp4.part` mux files there are deleted. With
 //!   staging off the default folder is still scanned, so nothing is stranded.
 //!   Its `kept\` subfolder (copies of clips already moved, kept for the app's
-//!   SSD video cache, `mover.rs`) is not scanned: the app adopts or deletes them.
+//!   SSD video cache, `mover.rs`) is not scanned: the app adopts or deletes them. The one
+//!   exception: a kept copy whose clip is only a same-length `.part` in the clip folder (a
+//!   power cut lost the rename) is handed back and queued again (`staging_kept.rs`), on its
+//!   own thread once the mover runs: that check reads the clip folder.
 
 use std::path::{Component, Path, PathBuf, Prefix};
 
@@ -57,7 +62,7 @@ pub(crate) fn recovery_dir(env: Option<&str>, exe: Option<&Path>) -> Option<Path
 
 /// Comparable volume identity: `C:` for drive paths, `\\server\share` for UNC
 /// (case-folded); `None` when the path has no prefix to compare.
-fn volume_key(path: &Path) -> Option<String> {
+pub(crate) fn volume_key(path: &Path) -> Option<String> {
     let abs = std::path::absolute(path).ok()?;
     let Some(Component::Prefix(prefix)) = abs.components().next() else { return None };
     Some(match prefix.kind() {
@@ -69,10 +74,15 @@ fn volume_key(path: &Path) -> Option<String> {
     })
 }
 
-/// Same drive letter / UNC share. Folders mounted into another drive's tree
-/// count as that drive, and an unknown answer counts as "same", so the worst
-/// case is today's behaviour: write the clip in place.
+/// Same volume, as Windows resolves it (`win_volume.rs`: junctions, mounted
+/// folders and subst drives count as the volume they land on). When Windows
+/// cannot say, the drive letter / UNC share text decides, and an unknown
+/// answer counts as "same", so the worst case is writing the clip in place.
 pub(crate) fn same_volume(a: &Path, b: &Path) -> bool {
+    // Cached per folder on this thread: the saver asks once per save, the mover once per move.
+    if let (Some(x), Some(y)) = (crate::win_volume::volume_of_cached(a), crate::win_volume::volume_of_cached(b)) {
+        return x.id == y.id;
+    }
     match (volume_key(a), volume_key(b)) {
         (Some(x), Some(y)) => x == y,
         _ => true,
@@ -85,6 +95,24 @@ pub(crate) fn staged_path(dir: &Path, final_path: &Path, same: VolumeCheck) -> O
     let name = final_path.file_name()?;
     let out_dir = final_path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(Path::new("."));
     (!same(dir, out_dir)).then(|| dir.join(name))
+}
+
+/// Why `dir` may not be the staging folder: it is, holds or lies inside one of `clip_dirs`.
+/// Recovery would then queue the user's clips as leftovers and delete their `.part` files.
+pub(crate) fn refused(dir: &Path, clip_dirs: &[PathBuf]) -> Option<String> {
+    let staging = super::staging_guard::normalized(dir);
+    clip_dirs.iter().filter(|c| !c.as_os_str().is_empty()).find_map(|clips| {
+        let key = super::staging_guard::normalized(clips);
+        // The text, or the files themselves (`\\nas\x` and `\\10.0.0.5\x`, junctions).
+        let how = if super::staging_guard::within(&staging, &key) || crate::file_id::inside(dir, clips) == Some(true) {
+            "is inside the clip folder"
+        } else if super::staging_guard::within(&key, &staging) || crate::file_id::inside(clips, dir) == Some(true) {
+            "holds the clip folder"
+        } else {
+            return None;
+        };
+        Some(format!("staging folder {} {how} {}: staging is off and that folder is not scanned, so nothing in it is moved or deleted", dir.display(), clips.display()))
+    })
 }
 
 /// What a start-up scan of the staging folder found.
@@ -110,7 +138,8 @@ pub(crate) fn recover(dir: &Path, out_dir: &Path) -> Recovery {
         let name = entry.file_name();
         let lower = name.to_string_lossy().to_ascii_lowercase();
         let path = entry.path();
-        if lower.strip_suffix(PART_EXT).is_some_and(|stem| stem.ends_with(".mp4")) {
+        // A long recording's `.part` is `longrec::recover_parts`'s to rename, never stale.
+        if lower.strip_suffix(PART_EXT).is_some_and(|stem| stem.ends_with(".mp4")) && !crate::naming::is_longrec_part(&lower) {
             match std::fs::remove_file(&path) {
                 Ok(()) => found.removed.push(path),
                 Err(e) => found.errors.push(format!("stale {} not removed: {e}", path.display())),
@@ -164,6 +193,8 @@ pub(crate) struct Setup {
     /// The clip folder recovered clips move to.
     pub out_dir: PathBuf,
     pub mover: mover::Config,
+    /// Folders refused as overlapping a clip folder ([`refused`]), logged at start.
+    pub refused: Vec<String>,
 }
 
 impl Setup {
@@ -171,12 +202,30 @@ impl Setup {
     pub fn from_env() -> Self {
         let env = std::env::var(ENV).ok();
         let exe = std::env::current_exe().ok();
+        let out_dir = PathBuf::from(crate::naming::out_dir());
+        let mut clip_dirs = vec![out_dir.clone()];
+        clip_dirs.extend(super::staging_guard::library_dirs());
         Setup {
             dir: configured(env.as_deref(), exe.as_deref()),
             recover: recovery_dir(env.as_deref(), exe.as_deref()),
-            out_dir: PathBuf::from(crate::naming::out_dir()),
+            out_dir,
             mover: mover::Config::default(),
+            refused: Vec::new(),
         }
+        .guarded(&clip_dirs)
+    }
+
+    /// Drops a staging or recovery folder that overlaps one of `clip_dirs` ([`refused`]).
+    pub fn guarded(mut self, clip_dirs: &[PathBuf]) -> Self {
+        for slot in [&mut self.dir, &mut self.recover] {
+            if let Some(why) = slot.as_deref().and_then(|dir| refused(dir, clip_dirs)) {
+                if !self.refused.contains(&why) {
+                    self.refused.push(why);
+                }
+                *slot = None;
+            }
+        }
+        self
     }
 }
 
@@ -185,6 +234,9 @@ impl Setup {
 /// and the mover's quit handle.
 pub(crate) fn start(events: &Events, setup: Setup) -> (Option<Stage>, Option<MoverControl>) {
     let mut recovered = Vec::new();
+    for why in &setup.refused {
+        events.log(&format!("staging: {why}"));
+    }
     if let Some(dir) = &setup.recover {
         let found = recover(dir, &setup.out_dir);
         for path in &found.removed {
@@ -199,16 +251,21 @@ pub(crate) fn start(events: &Events, setup: Setup) -> (Option<Stage>, Option<Mov
         }
         recovered = found.moves.into_iter().map(|(staged, dest)| MoveJob { staged, dest }).collect();
     }
-    if setup.dir.is_none() && recovered.is_empty() {
+    let kept_check = setup.recover.clone().filter(|dir| super::staging_kept::holds_kept(dir));
+    if setup.dir.is_none() && recovered.is_empty() && kept_check.is_none() {
         return (None, None);
     }
     let same_volume = setup.mover.same_volume;
     let Some((queue, control)) = mover::spawn(events.clone(), setup.mover, recovered) else {
         return (None, None);
     };
+    if let Some(dir) = kept_check {
+        super::staging_kept::hand_back_later(events.clone(), queue.clone(), dir, setup.out_dir.clone());
+    }
+    // No volume question here: on a sleeping NAS it would hold the encoder's
+    // start. Each save asks it on the saver thread ([`Stage::target`]).
     let stage = setup.dir.map(|dir| {
-        let mode = if same_volume(&dir, &setup.out_dir) { "off (same volume as the clip folder)" } else { "on" };
-        events.log(&format!("staging {mode}: {} -> {}", dir.display(), setup.out_dir.display()));
+        events.log(&format!("staging: {} -> {} (used when the clip folder is on another volume)", dir.display(), setup.out_dir.display()));
         Stage { dir, queue, same_volume }
     });
     (stage, Some(control))

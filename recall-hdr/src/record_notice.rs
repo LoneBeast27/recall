@@ -1,7 +1,7 @@
 //! Recall Island notices (spec `.planning/ISLAND_SPEC.md`, "Build contract"):
 //! one `session` event, plus the soft tick, each time what Recall records
 //! changes -- a game picked up, desktop recording, paused, waiting for a game
-//! (stopped), an encoder problem (the failure tone). The overlay shows it in
+//! (stopped), an encoder problem (the failure tone), recording again after one. The overlay shows it in
 //! the island for 3 s.
 //!
 //! ```json
@@ -22,6 +22,9 @@ use serde_json::json;
 use crate::record_engine::EngineTarget;
 use crate::record_target::DESKTOP_NAME;
 
+/// The title once recording is back after an encoder problem (engine retry or restart).
+pub const RECOVERED_TITLE: &str = "Recording again";
+
 /// No repeat notice for the same situation within this long.
 pub const REPEAT_GAP: Duration = Duration::from_secs(5);
 
@@ -39,6 +42,10 @@ pub enum Situation {
     Draining { secs: u64 },
     /// The encoder failed; `gave_up` = the engine crashed repeatedly.
     Encoder { gave_up: bool },
+    /// The engine is rebuilding its encoder; the replay buffer is kept.
+    Recovering,
+    /// Another recorder held the engine slot until the supervisor gave up (`engine_slot`).
+    OtherRecorder,
 }
 
 impl Situation {
@@ -51,7 +58,9 @@ impl Situation {
             // The caller knows the drain's length (`Controller::announce`).
             "draining" => None,
             "error" => Some(Situation::Encoder { gave_up }),
-            "recording" => Some(match wanted {
+            "recovering" => Some(Situation::Recovering),
+            // CPU copies: still recording this game (the tray line says how).
+            "recording" | "degraded" => Some(match wanted {
                 EngineTarget::Window(t) => Situation::Game(t.name.clone()),
                 EngineTarget::Desktop => Situation::Desktop,
                 EngineTarget::Off => Situation::Waiting,
@@ -66,7 +75,7 @@ impl Situation {
             Situation::Desktop => "desktop",
             Situation::Paused => "paused",
             Situation::Waiting | Situation::Draining { .. } => "waiting",
-            Situation::Encoder { .. } => "encoder",
+            Situation::Encoder { .. } | Situation::Recovering | Situation::OtherRecorder => "encoder",
         }
     }
 
@@ -76,8 +85,9 @@ impl Situation {
             Situation::Paused => "Recording paused",
             Situation::Waiting => "Waiting for a game",
             Situation::Draining { .. } => "Game closed",
-            Situation::Encoder { gave_up: false } => "Encoder problem",
+            Situation::Encoder { gave_up: false } | Situation::Recovering => "Encoder problem",
             Situation::Encoder { gave_up: true } => "Recorder stopped",
+            Situation::OtherRecorder => crate::engine_slot::OTHER_RECORDER,
         }
     }
 
@@ -89,13 +99,15 @@ impl Situation {
             Situation::Waiting => "Not recording".into(),
             Situation::Draining { secs } => format!("Last clip kept for {}", crate::record_drain::clock(*secs)),
             Situation::Encoder { gave_up: false } => "Clips are not being recorded".into(),
+            Situation::Recovering => "Retrying; the replay buffer is kept".into(),
             Situation::Encoder { gave_up: true } => "It failed repeatedly (see recall-hdr.log)".into(),
+            Situation::OtherRecorder => crate::engine_slot::OTHER_RECORDER_DETAIL.into(),
         }
     }
 
     /// Announced with the failure tone instead of the tick.
     pub fn is_failure(&self) -> bool {
-        matches!(self, Situation::Encoder { .. })
+        matches!(self, Situation::Encoder { .. } | Situation::Recovering | Situation::OtherRecorder)
     }
 }
 
@@ -123,6 +135,8 @@ pub struct NoticeTracker {
     current: Option<Situation>,
     /// Situations announced within the last [`REPEAT_GAP`].
     recent: Vec<(Situation, Instant)>,
+    /// The last returned situation is recording again after an encoder problem.
+    recovered: bool,
 }
 
 impl NoticeTracker {
@@ -138,6 +152,7 @@ impl NoticeTracker {
             return None;
         }
         let first = self.current.is_none();
+        let was_failing = matches!(self.current, Some(Situation::Encoder { .. } | Situation::Recovering));
         let drain_ended = matches!(self.current, Some(Situation::Draining { .. }));
         self.current = Some(next.clone());
         if first && next == Situation::Waiting {
@@ -151,7 +166,17 @@ impl NoticeTracker {
             return None;
         }
         self.recent.push((next.clone(), now));
+        self.recovered = was_failing && matches!(next, Situation::Game(_) | Situation::Desktop);
         Some(next)
+    }
+
+    /// The notice body for `s` (the situation `observe` just returned).
+    /// Recording after an encoder problem says "Recording again".
+    pub fn notice_body(&self, s: &Situation) -> String {
+        if !self.recovered {
+            return notice_json(s);
+        }
+        json!({"type": "notice", "kind": s.kind(), "title": RECOVERED_TITLE, "detail": s.detail()}).to_string()
     }
 }
 
@@ -292,6 +317,50 @@ mod tests {
         assert!(tracker.observe(Some(Situation::Draining { secs: 120 }), at(31)).is_none(), "said once");
         assert!(tracker.observe(Situation::of("waiting", &EngineTarget::Off, false), at(150)).is_none(), "the end is silent");
         assert_eq!(Situation::of("draining", &EngineTarget::Off, false), None);
+    }
+
+    #[test]
+    fn recording_after_an_encoder_problem_says_recording_again() {
+        let t0 = Instant::now();
+        let mut tracker = NoticeTracker::new();
+        let mut said = Vec::new();
+        for (secs, state, target) in [
+            (0, "recording", game("VALORANT")),
+            (60, "error", game("VALORANT")),
+            (76, "starting", game("VALORANT")), // the controller restarted the engine
+            (78, "recording", game("VALORANT")),
+            (200, "waiting", EngineTarget::Off),
+            (300, "recording", EngineTarget::Desktop),
+        ] {
+            if let Some(s) = tracker.observe(Situation::of(state, &target, false), t0 + Duration::from_secs(secs)) {
+                said.push(serde_json::from_str::<Value>(&tracker.notice_body(&s)).unwrap());
+            }
+        }
+        assert_eq!(said[0]["title"], "Recording");
+        assert_eq!(said[1]["kind"], "encoder");
+        assert_eq!(said[2], serde_json::json!({"type":"notice","kind":"game","title":"Recording again","detail":"VALORANT"}));
+        assert_eq!(said[4]["title"], "Recording", "a later pickup is plain again");
+    }
+
+    #[test]
+    fn a_recovering_encoder_is_announced_and_recording_after_it_says_recording_again() {
+        let t0 = Instant::now();
+        let mut tracker = NoticeTracker::new();
+        let mut said = Vec::new();
+        for (secs, state, target) in [
+            (0, "recording", game("VALORANT")),
+            (60, "recovering", game("VALORANT")),
+            (62, "recording", game("VALORANT")), // the engine rebuilt its encoder
+            (120, "degraded", game("VALORANT")), // CPU copies: still this game, no new notice
+        ] {
+            if let Some(s) = tracker.observe(Situation::of(state, &target, false), t0 + Duration::from_secs(secs)) {
+                said.push(serde_json::from_str::<Value>(&tracker.notice_body(&s)).unwrap());
+            }
+        }
+        assert_eq!(said.len(), 3, "{said:?}");
+        assert_eq!(said[1], serde_json::json!({"type":"notice","kind":"encoder","title":"Encoder problem","detail":"Retrying; the replay buffer is kept"}));
+        assert_eq!(said[2]["title"], "Recording again");
+        assert!(Situation::of("recovering", &game("x"), false).unwrap().is_failure());
     }
 
     #[test]

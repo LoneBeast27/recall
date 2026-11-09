@@ -16,6 +16,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::record_config::RecordingCfg;
 
+#[path = "../../recall/src/communications_audio.rs"]
+mod communications_audio;
+
 pub const SOURCES_ENV: &str = "RECALL_AUDIO_SOURCES";
 /// Most sources a recording carries (each is one capture stream and one track).
 pub const SOURCES_MAX: usize = 8;
@@ -33,6 +36,11 @@ pub struct AudioSource {
     pub kind: String,
     /// Endpoint friendly name for `game`/`output`/`input` ("" = the Windows default).
     pub device: String,
+    /// The endpoint id (`IMMDevice::GetId`) the Audio page saved with `device` ("" = none). A
+    /// line-in skips Alt+M only on the endpoint with this id (R5-deep-audio-1); it never picks
+    /// which endpoint opens.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub device_id: String,
     /// Image file name for `app`, e.g. `player.exe`.
     pub exe: String,
     /// Track name in clips.
@@ -40,11 +48,23 @@ pub struct AudioSource {
     pub enabled: bool,
     /// Recorded gain, `GAIN_MIN_DB..=GAIN_MAX_DB`.
     pub gain_db: f32,
+    /// Whether the mic-mute hotkey silences this `input`: `true` a microphone, `false` a line-in
+    /// or capture card (muting the mic leaves its sound). Absent (every config written before
+    /// the flag, a new default source): muted, as before the flag (R3-deep-audio-1); the
+    /// endpoint's Windows form factor never decides. Saved only when the strip says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mic_mute: Option<bool>,
+    /// An unpinned output follows Windows' communications role.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub communications: bool,
+    /// The audio strip's selected glyph. Cosmetic and never sent to the engine.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub icon: String,
 }
 
 impl Default for AudioSource {
     fn default() -> Self {
-        AudioSource { id: String::new(), kind: "input".into(), device: String::new(), exe: String::new(), name: String::new(), enabled: true, gain_db: 0.0 }
+        AudioSource { id: String::new(), kind: "input".into(), device: String::new(), device_id: String::new(), exe: String::new(), name: String::new(), enabled: true, gain_db: 0.0, mic_mute: None, communications: false, icon: String::new() }
     }
 }
 
@@ -52,9 +72,27 @@ fn source(id: &str, kind: &str, name: &str) -> AudioSource {
     AudioSource { id: id.into(), kind: kind.into(), name: name.into(), ..AudioSource::default() }
 }
 
-/// A fresh install: the game and the Windows default microphone.
+/// Fallback settings when a profile could not be read. Keep game-only capture there.
 pub fn default_sources() -> Vec<AudioSource> {
     vec![source("game", "game", "Game"), source("mic", "input", "Microphone")]
+}
+
+/// The first profile follows Windows playback rather than a particular game process.
+fn initial_sources(split: bool) -> Vec<AudioSource> {
+    let mut list = vec![source("mic", "input", "Microphone"), source("system-output", "output", "System output")];
+    if split {
+        list.push(AudioSource { communications: true, ..source("communications-output", "output", "Communications output") });
+    }
+    list
+}
+
+pub fn initialize_sources() -> Vec<AudioSource> {
+    let joined = wasapi::initialize_mta().is_ok();
+    let split = communications_audio::distinct_device().is_some();
+    if joined {
+        wasapi::deinitialize();
+    }
+    initial_sources(split)
 }
 
 /// The list a config without `audio_sources` stands for, from its old keys.
@@ -116,6 +154,9 @@ pub fn validate(list: &[AudioSource]) -> Result<(), String> {
         if !one_line(&s.device, 256) {
             return Err(format!("recording.audio_sources '{id}' device must be one line of at most 256 characters"));
         }
+        if !one_line(&s.device_id, 256) {
+            return Err(format!("recording.audio_sources '{id}' device_id must be one line of at most 256 characters"));
+        }
         let exe = s.exe.trim();
         if s.kind == "app" && (exe.is_empty() || exe.len() > 64 || exe.chars().any(|c| matches!(c, '\\' | '/' | ':') || c.is_control())) {
             return Err(format!("recording.audio_sources '{id}' needs an exe file name (no folders)"));
@@ -134,32 +175,35 @@ pub fn validate(list: &[AudioSource]) -> Result<(), String> {
 fn engine_list(list: &[AudioSource]) -> Vec<AudioSource> {
     list.iter()
         .filter(|s| s.enabled)
-        .map(|s| AudioSource { id: s.id.trim().into(), device: s.device.trim().into(), exe: s.exe.trim().into(), name: s.name.trim().into(), ..s.clone() })
+        .map(|s| AudioSource { id: s.id.trim().into(), device: s.device.trim().into(), device_id: s.device_id.trim().into(), exe: s.exe.trim().into(), name: s.name.trim().into(), icon: String::new(), ..s.clone() })
         .collect()
 }
 
-/// The engine's tracks without what it can change live (gain, name).
+/// The engine's tracks without what it can change live (gain, name, mic-mute flag, and the
+/// endpoint id saved with an unchanged device name: P1-B, a new id is sent live and the track
+/// reopens on it, so unmuting a line-in or picking the same device again keeps the buffer).
 fn track_shape(list: &[AudioSource]) -> Vec<AudioSource> {
-    engine_list(list).into_iter().map(|s| AudioSource { gain_db: 0.0, name: String::new(), ..s }).collect()
+    engine_list(list).into_iter().map(|s| AudioSource { gain_db: 0.0, name: String::new(), mic_mute: None, device_id: String::new(), ..s }).collect()
+}
+
+/// A recorded source lost its mic-mute flag (back to none, muted): `set_source`
+/// cannot say "no flag", so only a restart applies it. Setting a flag goes live.
+fn flag_dropped(old: &[AudioSource], new: &[AudioSource]) -> bool {
+    let old = engine_list(old);
+    engine_list(new).iter().any(|n| n.mic_mute.is_none() && old.iter().any(|o| o.id == n.id && o.mic_mute.is_some()))
 }
 
 /// Different tracks for the engine (a restart)? Order matters: it is the clip's track order.
-/// A gain or a name alone is not: [`live_updates`] sends those to the running engine, except a
-/// gain that rises from 0 dB or below to above it. A long recording picks its limiter when it
-/// starts (`longrec::TrackInfo::boosted`), so a boost it did not start with would clip there:
-/// that change restarts the engine, which waits for a running save or long recording to end.
+/// A gain, a name or the mic-mute flag alone is not: [`live_updates`] sends those to the running
+/// engine. A gain above 0 dB is live too: a long-recording track runs the -1 dBFS limiter from
+/// its first sample above the ceiling (`longrec::machine`), and a replay save limits a track that
+/// has been boosted.
 pub fn changed(old: &[AudioSource], new: &[AudioSource]) -> bool {
-    track_shape(old) != track_shape(new) || crosses_into_boost(old, new)
+    track_shape(old) != track_shape(new) || flag_dropped(old, new)
 }
 
-/// Some recorded source's gain goes from 0 dB or below to above 0 dB.
-fn crosses_into_boost(old: &[AudioSource], new: &[AudioSource]) -> bool {
-    let old = engine_list(old);
-    engine_list(new).iter().any(|n| n.gain_db > 0.0 && old.iter().any(|o| o.id == n.id && o.gain_db <= 0.0))
-}
-
-/// `set_source` lines for the recorded sources whose gain or name changed (the running
-/// engine applies them to its tracks; the replay buffer stays). Only meaningful when
+/// `set_source` lines for the recorded sources whose gain, name or mic-mute flag changed (the
+/// running engine applies them to its tracks; the replay buffer stays). Only meaningful when
 /// [`changed`] is false.
 pub fn live_updates(old: &[AudioSource], new: &[AudioSource]) -> Vec<String> {
     let old = engine_list(old);
@@ -175,6 +219,12 @@ pub fn live_updates(old: &[AudioSource], new: &[AudioSource]) -> Vec<String> {
             }
             if o.name != n.name {
                 cmd.insert("name".into(), n.name.clone().into());
+            }
+            if let Some(on) = n.mic_mute.filter(|_| o.mic_mute != n.mic_mute) {
+                cmd.insert("mic_mute".into(), on.into());
+            }
+            if o.device_id != n.device_id {
+                cmd.insert("device_id".into(), n.device_id.clone().into());
             }
             (cmd.len() > 2).then(|| serde_json::Value::Object(cmd).to_string())
         })

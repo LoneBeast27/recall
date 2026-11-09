@@ -83,7 +83,15 @@ pub(crate) fn limit_interleaved(samples: &[f32], channels: u16, rate: u32) -> Ve
 /// Minimum of `values[n - radius ..= n + radius]` for every `n` (monotonic deque, O(n)).
 fn window_min(values: &[f32], radius: usize) -> Vec<f32> {
     let mut out = Vec::with_capacity(values.len());
-    let mut deque = std::collections::VecDeque::<usize>::new();
+    window_min_into(values, radius, &mut out, &mut std::collections::VecDeque::new());
+    out
+}
+
+/// [`window_min`] into `out`, with `deque` as its scratch (both cleared first): the streaming
+/// limiter reuses them, so a packet allocates nothing once they have grown.
+fn window_min_into(values: &[f32], radius: usize, out: &mut Vec<f32>, deque: &mut std::collections::VecDeque<usize>) {
+    out.clear();
+    deque.clear();
     let mut next = 0;
     for n in 0..values.len() {
         while next < values.len() && next <= n + radius {
@@ -98,7 +106,6 @@ fn window_min(values: &[f32], radius: usize) -> Vec<f32> {
         }
         out.push(values[*deque.front().expect("window holds n")]);
     }
-    out
 }
 
 #[cfg(test)]

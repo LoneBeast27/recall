@@ -8,7 +8,7 @@
 //! anything else (including the `overrides` array) replaces. Unknown keys are
 //! rejected so a typo never silently does nothing.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
@@ -71,8 +71,11 @@ pub struct RecordingCfg {
     pub record_hotkey: String,
     /// Show / hide the performance-stats island (`overlay.stats`; "" = off).
     pub stats_hotkey: String,
-    /// Turns the overlay's notices (`overlay.enabled`) on / off ("" = off).
+    /// Shows or hides the whole overlay ("" = off).
     pub overlay_hotkey: String,
+    /// Starts / saves the island editor: drag the island where it goes for
+    /// the game in front, kept for Dynamic placement ("" = off).
+    pub editor_hotkey: String,
     /// `h264` | `hevc` | `av1` (`RECALL_CODEC`).
     pub codec: String,
     /// Nominal capture/encode rate (`RECALL_FPS`).
@@ -122,6 +125,7 @@ impl Default for RecordingCfg {
             record_hotkey: crate::record_hotkeys::DEFAULT_RECORD.into(),
             stats_hotkey: crate::record_hotkeys::DEFAULT_STATS.into(),
             overlay_hotkey: crate::record_hotkeys::DEFAULT_OVERLAY.into(),
+            editor_hotkey: crate::record_hotkeys::DEFAULT_EDITOR.into(),
             codec: "h264".into(),
             fps: 60,
             bitrate_mbps: 25,
@@ -202,10 +206,12 @@ pub const STATS_STYLES: [&str; 1] = ["minimal"];
 
 /// `[overlay]` -- the controller-owned `recall-overlay.exe` (Recall Island):
 /// notices (`enabled`) and the performance-stats island (`stats`). The
-/// process runs while either is on.
+/// process runs while either is on and the overlay is visible.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct OverlayCfg {
+    /// The overlay shortcut hides both surfaces without changing their preferences.
+    pub hidden: bool,
     /// Show notices (saves, bookmarks, recording changes).
     pub enabled: bool,
     pub corner: String,
@@ -219,7 +225,7 @@ pub struct OverlayCfg {
 
 impl Default for OverlayCfg {
     fn default() -> Self {
-        OverlayCfg { enabled: false, corner: "dynamic".into(), corner_version: CORNER_VERSION, stats: false, stats_style: "minimal".into() }
+        OverlayCfg { hidden: false, enabled: false, corner: "dynamic".into(), corner_version: CORNER_VERSION, stats: false, stats_style: "minimal".into() }
     }
 }
 
@@ -240,9 +246,17 @@ impl OverlayCfg {
 }
 
 impl OverlayCfg {
-    /// The overlay process is wanted for notices or stats.
+    pub fn shows_notices(&self) -> bool {
+        self.enabled && !self.hidden
+    }
+
+    pub fn shows_stats(&self) -> bool {
+        self.stats && !self.hidden
+    }
+
+    /// The overlay process is wanted for visible notices or stats.
     pub fn wants_process(&self) -> bool {
-        self.enabled || self.stats
+        self.shows_notices() || self.shows_stats()
     }
 }
 
@@ -464,34 +478,9 @@ pub fn config_json(cfg: &Config) -> Value {
     serde_json::to_value(cfg).unwrap_or(Value::Null)
 }
 
-/// Where the unified mode loads/saves its config. Tests point it at a temp dir.
-#[derive(Debug, Clone)]
-pub struct ConfigStore {
-    path: PathBuf,
-}
-
-impl ConfigStore {
-    /// `%APPDATA%\recall-hdr\config.toml` -- the user's real config.
-    pub fn user() -> Self {
-        ConfigStore { path: Config::path() }
-    }
-
-    pub fn at(path: impl Into<PathBuf>) -> Self {
-        ConfigStore { path: path.into() }
-    }
-
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
-    pub fn load(&self) -> Config {
-        crate::config::load_from(&self.path)
-    }
-
-    pub fn save(&self, cfg: &Config) -> Result<(), String> {
-        cfg.save_to(&self.path)
-    }
-}
+#[path = "record_config_store.rs"]
+mod store;
+pub use store::ConfigStore;
 
 #[cfg(test)]
 #[path = "record_config_tests.rs"]

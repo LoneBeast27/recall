@@ -121,7 +121,7 @@ fn apps_for(pids: impl Iterator<Item = u32>) -> Vec<PlayingApp> {
 }
 
 /// Full path of a process's exe.
-fn image_path(pid: u32) -> Option<String> {
+pub(crate) fn image_path(pid: u32) -> Option<String> {
     // SAFETY: the handle is checked, used for one query and closed.
     unsafe {
         let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
