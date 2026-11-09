@@ -30,7 +30,7 @@ use crate::log;
 use crate::record_app::Controller;
 use crate::record_composed::{composed_front, notice_step, notice_text};
 use crate::record_hosted::{check_proof, Checked, Classified};
-use crate::record_private_watch::{blocked_private, private_admit, private_front, watch_wanted, PrivateWatch};
+use crate::record_private_watch::{blocked_private, notices_visible, private_admit, private_front, watch_wanted, PrivateWatch};
 use crate::record_engine::EngineTarget;
 use crate::record_target::{Admit, Target};
 use crate::record_transition::Transitions;
@@ -232,7 +232,7 @@ impl Controller {
         let front = (!self.paused && !recorded).then(|| private_front(last, desktop)).flatten();
         self.note_composed(front.map(|game_like| (ev, game_like)), now);
         let named = self.render.composed.named(&ev.exe_name);
-        if !watch_wanted(self.render.can_check(ev.pid), self.cfg.overlay.enabled, named) || self.render.rejected.holds(ev.pid, ev.hwnd, now) {
+        if !watch_wanted(self.render.can_check(ev.pid), notices_visible(&self.cfg.overlay), named) || self.render.rejected.holds(ev.pid, ev.hwnd, now) {
             return None;
         }
         self.render.private.window = Some((ev.pid, ev.hwnd));
@@ -260,7 +260,7 @@ impl Controller {
     /// while notices are off, so it is not used up unseen (R4-detect-2).
     fn note_composed(&mut self, front: Option<(&WatchEvent, bool)>, now: Instant) {
         let seen = front.map(|(e, steady)| ((e.pid, e.hwnd, e.exe_name.as_str()), steady));
-        let Some(exe) = notice_step(&mut self.render.composed, seen, self.cfg.overlay.enabled, now) else { return };
+        let Some(exe) = notice_step(&mut self.render.composed, seen, notices_visible(&self.cfg.overlay), now) else { return };
         let (title, detail) = notice_text(&exe);
         if self.render.unproven.contains(&exe.to_ascii_lowercase()) {
             log!("record: {title}: {detail} (no proof that it is a game, and no render verdict)");
