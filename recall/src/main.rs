@@ -262,7 +262,8 @@ impl ApplicationHandler for App {
             self.buffer_capacity_secs = buffer_secs;
             let out_dir = naming::out_dir();
             let json = self.config.json;
-            let tracks = audio::start(buffer_secs, false, |msg| { // the startup hold is set by the sync handshake
+            let hold = early_stdin.is_some() && engine_stdin::startup_hold(); // released by `sync` only
+            let tracks = audio::start(buffer_secs, hold, |msg| {
                 if json {
                     protocol::emit(&protocol::Outbound::EncoderLog { message: msg });
                 } else {

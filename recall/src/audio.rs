@@ -45,6 +45,7 @@ pub(crate) use mute::{initial_mute, MuteNow};
 #[cfg(test)]
 pub(crate) use mute::MIC_MUTED_ENV;
 pub use mute::{mic_muted, set_mic_muted, set_mic_muted_by, toggle_mic_mute};
+pub(crate) use hold::starts_held;
 
 /// The spawn-time mute (`RECALL_MIC_MUTED`), applied before stdin is read and before any track
 /// opens: a muted mic records nothing of this run, and an Alt+M that comes early is kept.
@@ -329,7 +330,8 @@ impl TrackRing {
 
 /// Resolve + start every source in list order. Failures are per-source (a broken input
 /// must not kill game audio); returns whatever started, with a report line each.
-/// `hold`: stdin was not drained in time; every input starts held (`TrackRing::hold_startup`).
+/// `hold`: every device track starts held (`TrackRing::hold_startup`) until the controller's
+/// `sync` (`sources::sync_read`); a process-loopback or app track records at once.
 pub fn start(buffer_secs: u32, hold: bool, mut report: impl FnMut(String)) -> Vec<Arc<TrackRing>> {
     // The spawn mute was applied before stdin is read (`apply_spawn_mute`, main.rs).
     report(format!(
@@ -432,7 +434,7 @@ fn source_of(kind: Option<Kind>, process: bool) -> &'static str {
 /// instead of the source's endpoint.
 fn start_track(spec: &SourceSpec, buffer_secs: u32, target: Option<LoopbackTarget>, hold: bool) -> Result<Arc<TrackRing>, String> {
     let ring = Arc::new(TrackRing::for_source(spec, source_of(spec.kind(), target.is_some()), buffer_secs, String::new()));
-    if hold {
+    if starts_held(hold, target.is_some()) {
         ring.hold_startup(); // before its capture thread starts: no stream opens while held (F4)
     }
     let direction = if spec.kind() == Some(Kind::Input) { Direction::Capture } else { Direction::Render };
