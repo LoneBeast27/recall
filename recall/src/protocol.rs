@@ -253,6 +253,10 @@ pub struct AudioOpened {
     /// Silence is stored whatever Alt+M says (an unsure sibling held, or the startup hold): the
     /// Audio page meter shows "Held" from this, not from its own guess (merge-gate P2).
     pub held: bool,
+    /// Alt+M silences it right now: the meter's "Muted" (design-audio-mute P20).
+    pub mutes: bool,
+    /// Retired (removed, disabled, re-picked): silent until the next engine (P11).
+    pub retired: bool,
 }
 
 #[derive(Serialize)]

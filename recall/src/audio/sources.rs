@@ -160,7 +160,7 @@ pub fn from_env() -> Result<Vec<SourceSpec>, String> {
 pub fn resolve_for_start(get: impl Fn(&str) -> Option<String>) -> Result<Vec<SourceSpec>, String> {
     let mut list = resolve(get)?;
     let staged = lock_early().staged.clone();
-    for (id, mic_mute, device_id) in staged.into_iter().flatten() {
+    for (id, mic_mute, device_id, _) in staged.into_iter().flatten() {
         for spec in list.iter_mut().filter(|s| s.id.trim() == id.trim()) {
             if let Some(on) = mic_mute {
                 spec.mic_mute = Some(on);
@@ -174,7 +174,7 @@ pub fn resolve_for_start(get: impl Fn(&str) -> Option<String>) -> Result<Vec<Sou
 }
 
 /// `set_source` flags and ids read before the tracks start, in order; None once they started.
-type Staged = Vec<(String, Option<bool>, Option<String>)>;
+type Staged = Vec<(String, Option<bool>, Option<String>, bool)>;
 
 /// The start of the stdin protocol, under one lock: the lines staged before the tracks are
 /// listed, and whether the controller's `sync` was read (the startup hold ends on both).
@@ -199,10 +199,20 @@ pub fn stage_early(id: &str, mic_mute: Option<bool>, device_id: Option<&str>) {
     if mic_mute.is_none() && device_id.is_none() {
         return;
     }
+    stage(id, LiveChange { mic_mute, device_id, ..LiveChange::default() });
+}
+
+/// A `set_source retire` read from stdin: staged before the tracks are listed (they start held,
+/// and the close retires the track), else applied to the live track at once.
+pub fn stage_retire(id: &str) {
+    stage(id, LiveChange { retire: true, ..LiveChange::default() });
+}
+
+fn stage(id: &str, change: LiveChange) {
     if let Some(staged) = lock_early().staged.as_mut() {
-        return staged.push((id.to_owned(), mic_mute, device_id.map(str::to_owned)));
+        return staged.push((id.to_owned(), change.mic_mute, change.device_id.map(str::to_owned), change.retire));
     }
-    set_live(id, LiveChange { mic_mute, device_id, ..LiveChange::default() });
+    set_live(id, change);
 }
 
 /// The tracks started and are listed (`note_live`): every line staged so far goes to its live
@@ -218,8 +228,8 @@ pub(super) fn close_staging() {
 /// live after the older staged ones, never before them (lock order EARLY, then STATES).
 fn close_staging_with(mut apply: impl FnMut(&str, LiveChange)) {
     let mut early = lock_early(); // held to the end: the safe state
-    for (id, mic_mute, device_id) in early.staged.take().into_iter().flatten() {
-        apply(&id, LiveChange { mic_mute, device_id: device_id.as_deref(), ..LiveChange::default() });
+    for (id, mic_mute, device_id, retire) in early.staged.take().into_iter().flatten() {
+        apply(&id, LiveChange { mic_mute, device_id: device_id.as_deref(), retire, ..LiveChange::default() });
     }
     if early.synced {
         release_startup_holds(); // `sync` came first: every line before it is now on its track
@@ -297,12 +307,14 @@ pub struct LiveChange<'a> {
     pub name: Option<&'a str>,
     pub mic_mute: Option<bool>,
     pub device_id: Option<&'a str>,
+    /// Retire the track (`TrackRing::retire`): never undone.
+    pub retire: bool,
 }
 
 /// Apply `change` to the live track (no engine restart, so the replay buffer stays). False
 /// when no live track has that id.
 pub fn set_live(id: &str, change: LiveChange) -> bool {
-    let LiveChange { gain_db, name, mic_mute, device_id } = change;
+    let LiveChange { gain_db, name, mic_mute, device_id, retire } = change;
     let Ok(mut states) = STATES.lock() else { return false };
     let mut found = false;
     for (sid, sname, state) in states.iter_mut() {
@@ -325,6 +337,9 @@ pub fn set_live(id: &str, change: LiveChange) -> bool {
             // A malformed id counts as none (`endpoints::id_ok`), as at spawn.
             ring.live.set_saved_id(if super::endpoints::id_ok(device_id) { device_id } else { "" });
         }
+        if let (true, State::Live(ring)) = (retire, &*state) {
+            ring.retire(); // silence from its next packet, its stream closed
+        }
         found |= matches!(state, State::Live(_));
     }
     found
@@ -344,6 +359,10 @@ pub struct Opened {
     pub adopt_id: Option<String>,
     /// The track stores silence whatever Alt+M says (`TrackRing::held_now`).
     pub held: bool,
+    /// Alt+M silences it right now (`TrackRing::mutes_now`): the meter's "Muted" is this.
+    pub mutes: bool,
+    /// Retired: recorded as nothing until the next engine (`TrackRing::retire`).
+    pub retired: bool,
 }
 
 enum State {
@@ -371,8 +390,8 @@ pub fn opened() -> Vec<Opened> {
     states
         .iter()
         .map(|(id, name, state)| match state {
-            State::Live(ring) => Opened { id: id.clone(), name: name.clone(), opened: ring.endpoint(), live: true, adopt_id: ring.live.adopted(), held: ring.held_now() },
-            State::Failed(why) => Opened { id: id.clone(), name: name.clone(), opened: why.clone(), live: false, adopt_id: None, held: false },
+            State::Live(ring) => Opened { id: id.clone(), name: name.clone(), opened: ring.endpoint(), live: true, adopt_id: ring.live.adopted(), held: ring.held_now(), mutes: ring.mutes_now(), retired: ring.retired() },
+            State::Failed(why) => Opened { id: id.clone(), name: name.clone(), opened: why.clone(), live: false, adopt_id: None, held: false, mutes: false, retired: false },
         })
         .collect()
 }

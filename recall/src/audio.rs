@@ -447,11 +447,7 @@ fn start_track(spec: &SourceSpec, buffer_secs: u32, target: Option<LoopbackTarge
         .spawn(move || capture_thread(direction, device, tring, init_tx, target, communications))
         .map_err(|e| e.to_string())?;
 
-    match init_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-        Ok(Ok(())) => Ok(ring),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err("audio init timed out".into()),
-    }
+    hold::await_init(&ring, &init_rx, std::time::Duration::from_secs(5)).map(|()| ring)
 }
 
 /// The capture thread of a device or game track (`capture_loop`): open, capture, and when
