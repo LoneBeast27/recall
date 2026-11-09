@@ -179,3 +179,21 @@ fn the_binary_carries_the_protocol_marker_and_hello_says_sync_hold() {
     let main_src = include_str!("main.rs").split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(main_src.contains("live_source_fields: true, sync_hold: true,"), "hello says it");
 }
+
+/// P17, the gate's 21:10 A4 conditions as invariants: (1) every device stream opens shared,
+/// never exclusive; (2) a held track says so in the status (`held`); (3) only the user's press
+/// counts toward adopting an id: a restatement's mute carries none.
+#[test]
+fn the_a4_sibling_conditions_hold() {
+    let stream = include_str!("audio/stream.rs");
+    assert_eq!(stream.matches("StreamMode::EventsShared").count(), 1, "one open mode: shared");
+    assert!(!stream.contains("Exclusive"), "never exclusive");
+    let _restore = restore();
+    let _reopen = Reopen;
+    let ring = held_listed("a4-mic");
+    assert!(audio::sources::opened().iter().any(|o| o.id == "a4-mic" && o.held), "held shows as held");
+    let presses = MuteNow::read().presses;
+    read_early(std::io::Cursor::new("{\"cmd\":\"set_mic_mute\",\"muted\":true,\"seq\":5}\n{\"cmd\":\"set_mic_mute\",\"muted\":false,\"seq\":6}\n"), |_| {});
+    assert_eq!(MuteNow::read().presses, presses, "a restatement is no press: nothing is adopted");
+    drop(ring);
+}
