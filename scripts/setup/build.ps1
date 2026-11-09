@@ -2,6 +2,7 @@
 param(
     [Parameter(ParameterSetName='Preview')][switch]$Preview,
     [Parameter(Mandatory=$true, ParameterSetName='Release')][string]$PayloadDirectory,
+    [Parameter(ParameterSetName='Release')][string]$VCRedistPath,
     [string]$OutputPath
 )
 $ErrorActionPreference = 'Stop'
@@ -32,7 +33,8 @@ $arguments = @(
     "/resource:$assets\fonts\bricolage-grotesque-700.ttf,Recall.Display.ttf",
     "/resource:$assets\fonts\geist-400.ttf,Recall.Body.ttf",
     "/resource:$assets\fonts\geist-600.ttf,Recall.Strong.ttf",
-    "$PSScriptRoot\Program.cs", "$PSScriptRoot\SetupWindow.cs", "$PSScriptRoot\SetupWindow.Guided.cs", "$PSScriptRoot\SetupPackage.cs"
+    "$PSScriptRoot\Program.cs", "$PSScriptRoot\SetupWindow.cs", "$PSScriptRoot\SetupWindow.Guided.cs",
+    "$PSScriptRoot\SetupPackage.cs", "$PSScriptRoot\SetupPrerequisites.cs"
 )
 $work = $null
 try {
@@ -44,6 +46,24 @@ try {
         New-Item -ItemType Directory -Force -Path $workspace | Out-Null
         $work = Join-Path $workspace ([Guid]::NewGuid().ToString('N'))
         $package = Join-Path $work 'payload'
+        New-Item -ItemType Directory -Force -Path $work | Out-Null
+        if (!$VCRedistPath) {
+            $VCRedistPath = Join-Path $source 'vc_redist.x64.exe'
+            if (!(Test-Path -LiteralPath $VCRedistPath -PathType Leaf)) {
+                $VCRedistPath = Join-Path $work 'vc_redist.x64.exe'
+                Invoke-WebRequest -UseBasicParsing -Uri 'https://aka.ms/vc14/vc_redist.x64.exe' -OutFile $VCRedistPath -TimeoutSec 60
+            }
+        }
+        $redist = Get-Item -LiteralPath $VCRedistPath
+        $signature = Get-AuthenticodeSignature -LiteralPath $redist.FullName
+        $version = $redist.VersionInfo
+        $fileVersion = [Version]::new($version.FileMajorPart, $version.FileMinorPart, $version.FileBuildPart, $version.FilePrivatePart)
+        # Keep this minimum in step with SetupPrerequisites.VisualCppMinimum.
+        if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.Subject -notmatch '(^|,\s*)CN=Microsoft Corporation(,|$)' -or
+            $version.OriginalFilename -ine 'vc_redist.x64.exe' -or $fileVersion -lt [Version]'14.44.35207.0') {
+            throw "Expected a valid Microsoft-signed x64 Visual C++ redistributable (14.44.35207 or newer): $VCRedistPath"
+        }
+        $arguments += "/resource:$($redist.FullName),Recall.VcRedist.x64.exe"
         $installerScripts = 'install.ps1', 'install-swap.ps1', 'install-quit-wait.ps1'
         foreach ($name in $installerScripts) {
             Copy-PackageFile (Join-Path $repo "scripts\$name") (Join-Path $package "scripts\$name")
