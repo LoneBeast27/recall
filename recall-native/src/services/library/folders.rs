@@ -134,19 +134,26 @@ impl Folders {
     }
 
     /// Settings → Clip folders → remove: the folder leaves the library and is no longer one
-    /// Recall manages (re-adding it later lists it as an ordinary imported folder).
+    /// Recall manages (re-adding it later lists it as an ordinary imported folder). A folder that
+    /// overlaps the recordings folder stays managed ([`Folders::release`]).
     pub fn forget(&mut self, folder: &str) {
         self.remove(folder);
-        self.release(folder);
+        let _ = self.release(folder);
     }
 
     /// Settings → Folders Recall manages → remove: its clips stay listed but count as imported
-    /// (Delete only removes them from Recall). True when it was managed.
-    pub fn release(&mut self, folder: &str) -> bool {
+    /// (Delete only removes them from Recall). `Ok(true)` when it was managed. Refused for a
+    /// folder that holds or lies in the recordings folder: it would turn into a link over
+    /// Recall's own clips (D:\Clips released after recording moved to D:\Clips\Recall).
+    pub fn release(&mut self, folder: &str) -> Result<bool, String> {
+        let recordings = crate::backend::library_dir_from(self);
+        if crate::services::storage::guard::folders_overlap(Path::new(folder), &recordings) {
+            return Err(format!("{folder} overlaps the recordings folder {}, so Recall keeps managing it.", recordings.display()));
+        }
         let key = folder_key(folder);
         let before = self.former_recordings.len();
         self.former_recordings.retain(|f| folder_key(f) != key);
-        self.former_recordings.len() != before
+        Ok(self.former_recordings.len() != before)
     }
 
     /// Linked sources appear separately from former recordings folders that Recall manages.
@@ -442,7 +449,7 @@ mod tests {
         let recordings = Path::new(r"G:\Third");
         let clip = r"E:\Clips\VALORANT__2026-11-01__10-00-00.mp4";
         // Removing it from "Folders Recall manages": still listed, but imported now.
-        assert!(folders.release(r"e:\clips\"));
+        assert!(folders.release(r"e:\clips\").unwrap());
         assert_eq!(folders.imported, [r"E:\Clips".to_owned()]);
         assert!(super::super::imports::is_imported(clip, recordings, &folders.imported, &folders.former_recordings));
         // Removing a folder from Clip folders drops both.
