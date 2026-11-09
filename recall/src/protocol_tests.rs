@@ -27,7 +27,7 @@ fn a_line_to_a_closed_pipe_is_dropped_without_a_panic() {
 fn set_source_parses_with_either_field() {
     use super::Command;
     let both: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"mic","gain_db":-3.5,"name":"Voice"}"#).unwrap();
-    assert!(matches!(both, Command::SetSource { ref id, gain_db: Some(g), name: Some(ref n), mic_mute: None, device_id: None } if id == "mic" && g == -3.5 && n == "Voice"));
+    assert!(matches!(both, Command::SetSource { ref id, gain_db: Some(g), name: Some(ref n), mic_mute: None, device_id: None, .. } if id == "mic" && g == -3.5 && n == "Voice"));
     let gain: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"game","gain_db":6}"#).unwrap();
     assert!(matches!(gain, Command::SetSource { gain_db: Some(_), name: None, .. }));
     let line_in: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"in-1","mic_mute":false}"#).unwrap();

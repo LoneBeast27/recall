@@ -61,19 +61,39 @@ pub(crate) fn read_early<R: BufRead>(reader: R, mut forward: impl FnMut(Command)
 
 #[cfg(feature = "encode")]
 fn apply_mute(cmd: Command) -> Command {
+    let seq = audio_seq(&cmd);
+    let cmd = apply_audio(cmd);
+    if let Some(seq) = seq {
+        audio::sources::note_seq(seq); // after the line is applied: an ack means "in force"
+    }
+    cmd
+}
+
+/// The sequence number an audio line carries.
+#[cfg(feature = "encode")]
+fn audio_seq(cmd: &Command) -> Option<u64> {
     match cmd {
-        Command::ToggleMicMute => Command::SetMicMute { muted: audio::toggle_mic_mute(), press: true },
-        Command::SetMicMute { muted, press } => {
+        Command::SetMicMute { seq, .. } | Command::SetSource { seq, .. } => *seq,
+        Command::Sync { seq } => Some(*seq),
+        _ => None,
+    }
+}
+
+#[cfg(feature = "encode")]
+fn apply_audio(cmd: Command) -> Command {
+    match cmd {
+        Command::ToggleMicMute => Command::SetMicMute { muted: audio::toggle_mic_mute(), press: true, seq: None },
+        Command::SetMicMute { muted, press, .. } => {
             audio::set_mic_muted_by(muted, press);
             cmd
         }
-        // A line-in's flag or a re-picked id read before the tracks start is in force at their
-        // first packet (review R2-audio-r9-2), and one read later goes to its live track now.
-        // Applied here once, in order: `serve` gets only gain and name, so it can never put an
-        // older flag or id back after a newer one (merge-gate F3).
-        Command::SetSource { id, gain_db, name, mic_mute, device_id } => {
+        // A line-in's flag or a re-picked id read before the tracks start is in force
+        // at their first packet (review R2-audio-r9-2), and one read later goes to its live
+        // track now. Applied here once, in order: `serve` gets only gain and name, so it can
+        // never put an older flag or id back after a newer one (merge-gate F3).
+        Command::SetSource { id, gain_db, name, mic_mute, device_id, retire: _, seq } => {
             audio::sources::stage_early(&id, mic_mute, device_id.as_deref());
-            Command::SetSource { id, gain_db, name, mic_mute: None, device_id: None } // the safe state
+            Command::SetSource { id, gain_db, name, mic_mute: None, device_id: None, retire: None, seq } // the safe state
         }
         // The controller's restatement is complete (the sync handshake): the startup hold ends
         // once every track is listed too (`sources::sync_read`).
@@ -129,10 +149,10 @@ fn apply(cmd: Command, shared: &CaptureShared, (save, export): (&Option<SaveHook
             #[cfg(feature = "encode")]
             protocol::emit(&protocol::Outbound::MicMuted { muted: audio::mic_muted() });
         }
-        Command::SetSource { id, gain_db, name, mic_mute, device_id } => {
+        Command::SetSource { id, gain_db, name, mic_mute, device_id, .. } => {
             #[cfg(feature = "encode")]
             {
-                let change = audio::sources::LiveChange { gain_db, name: name.as_deref(), mic_mute, device_id: device_id.as_deref() };
+                let change = audio::sources::LiveChange { gain_db, name: name.as_deref(), mic_mute, device_id: device_id.as_deref(), ..Default::default() };
                 if !audio::sources::set_live(&id, change) {
                     eprintln!("[recall] set_source: no live track '{id}'");
                 }

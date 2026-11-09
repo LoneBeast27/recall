@@ -135,3 +135,15 @@ fn inputs_held_is_said_only_after_2_s_still_held() {
     let sources = include_str!("audio/sources.rs").split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(sources.contains("crate::protocol::emit(&crate::protocol::Outbound::InputsReleased);"), "the release says so");
 }
+
+/// P13: each audio line's `seq` is acked (`status.audio_seq`) once it is applied, in order.
+#[test]
+fn an_applied_line_is_acked_by_its_seq() {
+    let _restore = restore();
+    read_early(std::io::Cursor::new("{\"cmd\":\"set_mic_mute\",\"muted\":true,\"seq\":1000000}
+"), |_| {});
+    assert!(audio::mic_muted());
+    assert_eq!(audio::sources::audio_seq(), 1_000_000, "acked after it was applied");
+    let tick = include_str!("app_tick.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(tick.contains("audio_seq: { #[cfg(feature=\"encode\")] { audio::sources::audio_seq() }"), "the status carries it");
+}
