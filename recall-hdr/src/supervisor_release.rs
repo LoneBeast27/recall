@@ -96,7 +96,7 @@ mod tests {
         assert!(!shared.release_asked(2), "an engine spawned for it is not released");
         assert!(shared.send_release_quit());
         assert_eq!(shared.send_line(r#"{"cmd":"save_clip"}"#), Sent::Waiting, "no save after it (a stop: no game follows)");
-        shared.set_child_stdin(None);
+        shared.set_child_stdin(None, None);
         let lines = rec.lines();
         assert_eq!(lines, vec![STOP_CAPTURE_LINE.to_string()], "stop_capture, no quit, nothing after");
     }
