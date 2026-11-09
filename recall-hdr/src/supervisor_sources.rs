@@ -37,6 +37,9 @@ struct Inner {
     below_floor: Option<bool>,
     /// A `hello` without `sync_hold`: every later spawn is below the floor.
     forced_below: bool,
+    /// The last attach withheld `sync` (the shape at the attach differed from the live list):
+    /// that engine stays held, so it must be respawned (N3), whatever the list does after.
+    withheld: bool,
 }
 
 impl SpawnSources {
@@ -95,10 +98,9 @@ impl SpawnSources {
         self.lock().baked = spec.env.iter().find(|(k, _)| k == SOURCES_ENV).and_then(|(_, v)| v.clone());
     }
 
-    /// The current list records other tracks than the last spawn was given (a restart).
-    fn shape_moved(&self) -> bool {
-        let (baked, current) = self.baked_and_current();
-        !audio_intent::same_shape(&baked, &current)
+    /// The last attach withheld `sync` (taken once).
+    fn take_withheld(&self) -> bool {
+        std::mem::take(&mut self.lock().withheld)
     }
 
     /// `line` with the next sequence number, and that number.
@@ -126,12 +128,13 @@ impl super::Shared {
         self.queue_line(g, &line)
     }
 
-    /// Right after a spawn shows its pid (review R2-audio-r9-1): a source change since the spec
-    /// read that moved the track shape got no `sync` at the attach, so that engine stays held.
-    /// Retarget generation `gen` to itself, so the manager quits it and respawns on the current
-    /// list. Any other change was restated at the attach. True when it did.
+    /// Right after a spawn shows its pid (review R2-audio-r9-1): when its attach withheld `sync`
+    /// (a source change since the spec read moved the track shape), that engine stays held for
+    /// good. Retarget generation `gen` to itself, so the manager quits it and respawns on the
+    /// current list, even if the list has moved back since (N3). Any other change was restated
+    /// at the attach. True when it did.
     pub(super) fn respawn_if_sources_moved(&self, gen: u64) -> bool {
-        if !self.spawn_sources.shape_moved() {
+        if !self.spawn_sources.take_withheld() {
             return false;
         }
         let mut g = self.desired.lock().unwrap_or_else(|p| p.into_inner());
@@ -156,9 +159,11 @@ impl super::Shared {
         }
         let (baked, current) = self.spawn_sources.baked_and_current();
         lines.extend(audio_intent::restatement(&baked, &current).iter().map(Value::to_string));
-        if audio_intent::same_shape(&baked, &current) {
+        let same = audio_intent::same_shape(&baked, &current);
+        if same {
             lines.push(serde_json::json!({"cmd": "sync"}).to_string());
         }
+        self.spawn_sources.lock().withheld = !same; // no sync: respawn at the pid (N3)
         let all = lines.iter().fold(true, |all, l| self.queue_audio(g, l).queued() && all);
         if !all {
             crate::log!("supervisor: the engine's audio restatement could not be queued; its device tracks stay held");

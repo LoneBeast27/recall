@@ -137,3 +137,20 @@ fn no_sync_after_quit() {
     let lines = rec.raw_lines();
     assert!(super::super::quit_tests::after_quit(&lines).is_empty(), "{lines:?}");
 }
+
+/// N3: the shape moves before the attach (no sync) and moves back before the pid shows. The
+/// engine that got no sync must still be respawned, or every device track stays held all run.
+#[test]
+fn a_withheld_sync_respawns_even_when_the_shape_moves_back() {
+    let shared = Shared::new(None);
+    shared.set_desired(Some(EngineSpec { env: vec![(SOURCES_ENV.into(), Some(LINE_IN.into()))] }), Sent::Waiting);
+    let (gen, _) = shared.desired();
+    shared.spawn_sources.set(OTHER_DEVICE);
+    let rec = Recorded::attach_spawned(&shared, None); // withholds sync
+    shared.spawn_sources.set(LINE_IN); // and back, before the pid
+    assert!(shared.respawn_if_sources_moved(gen), "respawned on the withheld sync");
+    shared.attach_writer(None);
+    assert!(rec.raw_lines().iter().all(|l| !l.contains("\"sync\"")), "that engine got no sync");
+    let src = include_str!("supervisor_sources.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(src.contains("self.spawn_sources.lock().withheld = !same;"), "the attach records it");
+}
