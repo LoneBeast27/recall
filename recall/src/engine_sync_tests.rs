@@ -242,7 +242,7 @@ fn a_quit_before_the_listing_leaves_later_tracks_silent() {
     assert!(late.retired() && late.startup_held(), "listed after the quit: retired, never released");
     assert!(silent(&late), "its first packet is silence");
     let sources = include_str!("audio/sources.rs").split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(sources.contains("if early.synced && !early.quitting { release_startup_holds();"), "the close never releases after it");
+    assert!(sources.contains("if early.synced && !early.quitting && !early.gapped { release_startup_holds();"), "the close never releases after it");
 }
 
 /// A stdin that fails mid-read, as a broken pipe would.

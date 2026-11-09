@@ -20,7 +20,7 @@ impl Bits {
             if self.len.is_multiple_of(8) {
                 self.out.push(0);
             }
-            if (value >> i) & 1 == 1 {
+            if value.checked_shr(i as u32).unwrap_or(0) & 1 == 1 {
                 let last = self.out.len() - 1;
                 self.out[last] |= 0x80 >> (self.len % 8);
             }
