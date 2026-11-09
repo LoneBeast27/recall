@@ -1,6 +1,6 @@
 # Runs the pre-encode demo against the sandbox library only. Usage: run-demo.ps1 <max MB or none>
 $b = 'L:\General\.tmp\recall-preencode-demo'
-$app = 'C:\Users\rohan\AppData\Local\Programs\Recall'
+$app = Join-Path $env:LOCALAPPDATA 'Programs\Recall'
 $env:PATH = "$app;$app\bin;$env:PATH"
 $env:RECALL_FOLDERS = "$b\folders.json"
 $env:RECALL_CACHE_DIR = "$b\cache"

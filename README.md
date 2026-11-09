@@ -5,6 +5,10 @@ when you press a key, and gives you a library and editor to trim, cut and share 
 
 Recall needs an NVIDIA GPU (NVENC). There is no CPU video encoder.
 
+## Source and license
+
+Recall was created by **LoneBeast27**. Official Recall downloads are free. Recall’s own code is released under [GPL-3.0-or-later](LICENSE), which allows commercial use and redistribution. If you distribute a modified build, keep the copyright and license notices and clearly mark your changes and their dates. The [upstream Recall repository](https://github.com/LoneBeast27/recall) is the reference for the original source. See [NOTICE.md](NOTICE.md) for credits and third-party terms.
+
 ## Install
 
 Open `dist/recall-current/RecallSetup.exe` for Quick Setup. Choose whether recording starts when setup is complete and whether to set up Windows game detection and FPS. **Change…** opens the SSD install folder picker from Quick Setup. **Advanced** also lets you type a folder or change the Start menu shortcut. After installation, **Continue setup** opens Storage, Audio, and Recording quality. Recording quality compares the same full frame before and after encoding, with a detail crop available. Choose **Open Recall** to reach your library. Updates keep your existing clip folder and recording settings.
@@ -192,9 +196,9 @@ Build the Windows setup screen with `powershell -NoProfile -File scripts/setup/b
 $env:FFMPEG_DIR    = "$PWD\tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared"   # has av1_nvenc
 $env:LIBCLANG_PATH = "$PWD\.tmp\nvenc-vfr\clang18\clang\native"              # clang 18 for ffmpeg-sys
 $env:CARGO_TARGET_DIR = "$PWD\target-dev"
-powershell -NoProfile -File C:/Users/rohan/.claude/tools/nice-build.ps1 cargo test -p recall -p recall-hdr -p recall-overlay --offline
+cargo test -p recall -p recall-hdr -p recall-overlay --offline
 $env:CARGO_TARGET_DIR = "$PWD\target-gpui"
-powershell -NoProfile -File C:/Users/rohan/.claude/tools/nice-build.ps1 cargo test --manifest-path recall-native\Cargo.toml --offline
+cargo test --manifest-path recall-native\Cargo.toml --offline
 ```
 
 After any change to the clip folders' handling, run `scripts\dev\watch-check.ps1` (private
