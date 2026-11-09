@@ -283,3 +283,15 @@ fn a_released_save_that_keeps_moving_is_never_settled_a_stalled_one_is() {
     let now = s.now;
     assert!(s.activity.release_may_settle(now), "answered: settles at once");
 }
+
+/// R2-detect-r10-p2-2: the old-engine refusal reads like the other refusals (under "Save failed").
+#[test]
+fn the_privacy_hold_refusal_names_the_app_only() {
+    let mut s = recording_discord();
+    s.engine_releases = false;
+    s.run_to(5_000);
+    assert!(s.save());
+    s.seen(app_ev("Discord", 30, 0x30, false));
+    s.run_to(5_500);
+    assert_eq!(s.planner.privacy_refusal().as_deref(), Some("Discord.exe is no longer recorded"));
+}

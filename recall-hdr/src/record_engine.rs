@@ -203,7 +203,7 @@ impl EnginePlanner {
     /// save the private app's ring, captured after the stop too, and hold the stop again).
     pub fn privacy_refusal(&self) -> Option<String> {
         match &self.applied {
-            EngineTarget::Window(t) if self.privacy_hold => Some(format!("Not saved: {} is no longer recorded", t.exe)),
+            EngineTarget::Window(t) if self.privacy_hold => Some(format!("{} is no longer recorded", t.exe)),
             _ => None,
         }
     }
