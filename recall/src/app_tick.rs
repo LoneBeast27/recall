@@ -35,6 +35,11 @@ impl App {
     /// A full ingress queue drops a frame instead of blocking capture or growing RAM.
     #[cfg(feature = "encode")]
     pub(super) fn encode_tick(&mut self) {
+        // The privacy stop (gate p5-2): the redraw's `quit` check can come a tick late; no
+        // CPU frame is read back or sent to the encoder after `stop_capture`.
+        if crate::stop_capture::stopped() {
+            return;
+        }
         let Some(enc) = &self.encoder else { return };
         let Some(gpu) = &mut self.gpu else { return };
         let Some(pts_us) = gpu.source_pts_us() else {

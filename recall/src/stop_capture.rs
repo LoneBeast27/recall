@@ -66,3 +66,16 @@ mod tests {
         assert!(matches!(cmd, crate::protocol::Command::StopCapture));
     }
 }
+
+/// Gate p5-2: the CPU path's encode checks the stop itself (the redraw's `quit` check can lag
+/// a tick), before a frame is read back for the encoder.
+#[cfg(test)]
+#[test]
+fn the_cpu_encode_tick_checks_the_stop_before_encoding() {
+    let src = include_str!("app_tick.rs");
+    let start = src.find("fn encode_tick").expect("encode_tick");
+    let body = &src[start..];
+    let stop = body.find("crate::stop_capture::stopped()").expect("encode_tick checks stop_capture");
+    let encode = body.find("gpu.encode_frame()").expect("encode_frame");
+    assert!(stop < encode, "the stop is checked before a frame is encoded");
+}
