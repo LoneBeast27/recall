@@ -119,6 +119,9 @@ pub struct SessionStatus {
     pub mic_hotkey: String,
     pub save_seconds: u32,
     pub mic_muted: bool,
+    /// The last audio line the controller sent the recorder (the meter says "Applying…" until
+    /// `engine.audio_seq` reaches it; None on older builds).
+    pub audio_sent_seq: Option<u64>,
     pub overlay: OverlayStatus,
     pub autostart: bool,
     pub hdr: HdrStatus,

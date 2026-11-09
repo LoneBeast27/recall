@@ -199,10 +199,42 @@ fn the_recorders_held_wins_over_the_device_list_guess() {
     let old: crate::services::daemon::EngineStatus = serde_json::from_value(serde_json::json!({"audio": [{"id": "line-in", "live": true}]})).unwrap();
     assert_eq!(old.audio[0].held, None, "an older recorder: no field");
     let view = include_str!("../views/audio_strip.rs").split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(view.contains("held(source, lists, engine_held)"), "the strip passes the recorder's word");
-    assert!(view.contains("crate::services::audio_mute::engine_held(&e.audio, &source.id)"), "looked up by the trimmed id");
+    assert!(view.contains("held(source, lists, engine.held) || engine.retired"), "the strip passes the recorder's word");
+    assert!(view.contains("crate::services::audio_mute::engine_meter(&e.audio, &source.id)"), "looked up by the trimmed id");
     // Controller review P3-1: the engine trims the config's id; the page matches it the same way.
-    let audio = vec![crate::services::daemon::EngineAudio { id: "line-in".into(), held: Some(false) }];
-    assert_eq!(engine_held(&audio, " line-in "), Some(false), "a config id with spaces still finds its track");
-    assert_eq!(engine_held(&audio, "other"), None);
+    let audio = vec![crate::services::daemon::EngineAudio { id: "line-in".into(), held: Some(false), ..Default::default() }];
+    assert_eq!(engine_meter(&audio, " line-in ").held, Some(false), "a config id with spaces still finds its track");
+    assert_eq!(engine_meter(&audio, "other"), EngineMeter::default());
+}
+
+/// design-audio-mute P20 (N2): the recorder's `mutes` wins over the page's guess, so the meter
+/// never says "Muted" for a line-in the recorder records live; and the reverse.
+#[test]
+fn the_engines_mutes_wins_over_the_guess() {
+    let live = EngineMeter { held: Some(false), mutes: Some(false), retired: false };
+    assert_eq!(muting(&live, true, true), (false, true), "Alt+M on, the page guesses muted: the recorder says live");
+    let (_, _, text) = meter_reading((-20.0, -20.0, true), muting(&live, true, true).0, muting(&live, true, true).1, false);
+    assert_ne!(text, "Muted", "never Muted while the recorder records it live");
+    let muted = EngineMeter { mutes: Some(true), ..live };
+    assert_eq!(meter_reading((-20.0, -20.0, true), muting(&muted, false, false).0, muting(&muted, false, false).1, false).2, "Muted");
+    assert_eq!(muting(&EngineMeter::default(), true, false), (true, false), "an older recorder: the guess");
+    let status: crate::services::daemon::EngineStatus = serde_json::from_value(serde_json::json!({"audio_seq": 7, "audio": [{"id": "line-in", "mutes": false, "retired": true}]})).unwrap();
+    assert_eq!((status.audio_seq, status.audio[0].mutes, status.audio[0].retired), (Some(7), Some(false), Some(true)));
+    let view = include_str!("../views/audio_strip.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(view.contains("let (muted_now, mutes) = crate::services::audio_mute::muting(&engine, session_muted, mutes);"), "the strip uses it");
+}
+
+/// P11 / P16 / P20: a retired source says when it applies; "Applying…" while the recorder is
+/// behind the controller's last audio line.
+#[test]
+fn a_retired_source_says_when_it_applies_and_applying_while_seq_behind() {
+    let retired = EngineMeter { retired: true, ..EngineMeter::default() };
+    assert_eq!(meter_text("-20 dB".into(), &retired, Some(9), Some(9)), "Off: applies after the recording");
+    assert_eq!(meter_text("-20 dB".into(), &EngineMeter::default(), Some(8), Some(9)), "Applying…");
+    assert_eq!(meter_text("-20 dB".into(), &EngineMeter::default(), Some(9), Some(9)), "-20 dB");
+    assert_eq!(meter_text("-20 dB".into(), &EngineMeter::default(), None, Some(9)), "-20 dB", "an older recorder");
+    let session: crate::services::daemon::SessionStatus = serde_json::from_value(serde_json::json!({"audio_sent_seq": 9})).unwrap();
+    assert_eq!(session.audio_sent_seq, Some(9));
+    let view = include_str!("../views/audio_strip.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(view.contains("crate::services::audio_mute::meter_text(level_text, &engine,"), "the strip shows it");
 }

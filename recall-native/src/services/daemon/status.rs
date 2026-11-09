@@ -97,6 +97,8 @@ pub struct EngineStatus {
     pub select: String,
     /// What each recorded source captures (`status.audio`); empty from an engine before it.
     pub audio: Vec<EngineAudio>,
+    /// The last audio line the engine applied (None: an engine that does not say).
+    pub audio_seq: Option<u64>,
 }
 
 /// One source in `status.audio`. `held`: the engine stores silence for it whatever Alt+M says
@@ -107,4 +109,8 @@ pub struct EngineStatus {
 pub struct EngineAudio {
     pub id: String,
     pub held: Option<bool>,
+    /// Alt+M silences it right now (the engine's truth; design-audio-mute P20).
+    pub mutes: Option<bool>,
+    /// Retired: removed, disabled or re-picked; silent until the next recorder (P11).
+    pub retired: Option<bool>,
 }
