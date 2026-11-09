@@ -37,7 +37,14 @@ fn daemon_send(state: tauri::State<PipeState>, line: String) -> Result<(), Strin
 /// Newest clips in the recordings dir (name, mtime seconds, size, thumb path).
 #[tauri::command]
 fn list_clips(app: AppHandle, limit: usize) -> Vec<serde_json::Value> {
-    let dir = std::env::var("RECALL_OUT_DIR").unwrap_or_else(|_| r"V:\ALL RECORDINGS".into());
+    // RECALL_OUT_DIR, else the recorder's default <Videos>\Recall (no machine path in the source).
+    let dir = match std::env::var_os("RECALL_OUT_DIR") {
+        Some(d) => std::path::PathBuf::from(d),
+        None => match app.path().video_dir() {
+            Ok(v) => v.join("Recall"),
+            Err(_) => return Vec::new(),
+        },
+    };
     let mut clips: Vec<(std::time::SystemTime, serde_json::Value)> = Vec::new();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
