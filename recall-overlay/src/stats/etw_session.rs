@@ -148,6 +148,8 @@ pub struct EtwSession {
     aimed: Aimed,
     /// `RECALL_ETW_NO_PID_FILTER=1` (dev: filtered vs unfiltered CPU A/B).
     forced_off: bool,
+    /// Enable problems not yet written to the trace log ([`Self::take_problems`]).
+    problems: Vec<String>,
 }
 
 /// `RECALL_ETW_NO_PID_FILTER=1`: never PID-filter (dev A/B only).
@@ -188,9 +190,16 @@ impl EtwSession {
         });
         // From here on, dropping `session` stops the trace on any error.
         let forced_off = pid_filter_forced_off();
-        let aimed = Aimed { dxgi: ERROR_SUCCESS, kernel: ERROR_SUCCESS, refused_by: None, filter_ok: !forced_off };
-        let mut session =
-            EtwSession { control, guid: p.props.Wnode.Guid, trace: None, thread: None, shared, aimed, forced_off };
+        let mut session = EtwSession {
+            control,
+            guid: p.props.Wnode.Guid,
+            trace: None,
+            thread: None,
+            shared,
+            aimed: Aimed::new(!forced_off),
+            forced_off,
+            problems: Vec::new(),
+        };
         session.enable_providers(pid)?;
         session.consume()?;
         Ok(session)
@@ -204,11 +213,15 @@ impl EtwSession {
         let specs: Vec<&ProviderSpec> = providers.iter().collect();
         let aimed = enable_plan::retarget(&specs, pid, self.aimed.filter_ok, &mut Calls(self));
         if let Some(aimed) = aimed {
-            if aimed.dxgi != ERROR_SUCCESS {
-                eprintln!("recall-overlay: frame timing re-enable for pid {pid} failed (error {})", aimed.dxgi.0);
-            }
+            self.problems.extend(enable_plan::problems(&aimed, pid));
             self.aimed = Aimed { kernel: self.aimed.kernel, ..aimed };
         }
+    }
+
+    /// Enable problems since the last call (lost filter, providers that did
+    /// not come up), for the trace log.
+    pub fn take_problems(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.problems)
     }
 
     /// The trace note's tail: empty while PID-filtered, else why not.
@@ -231,11 +244,9 @@ impl EtwSession {
         let providers = PROVIDERS;
         let specs: Vec<&ProviderSpec> = providers.iter().collect();
         let aimed = enable_plan::enable_for(&specs, pid, self.aimed.filter_ok, &mut Calls(self));
-        if let Some(name) = aimed.refused_by {
-            eprintln!("recall-overlay: {name} refused the PID filter for pid {pid}; filtering in the callback");
-        }
+        self.problems.extend(enable_plan::problems(&aimed, pid));
         self.aimed = aimed;
-        enable_plan::outcome(&aimed)
+        enable_plan::outcome(&self.aimed)
     }
 
     fn enable(&self, spec: &ProviderSpec, pid: Option<u32>) -> WIN32_ERROR {
