@@ -43,27 +43,28 @@ namespace Recall.Setup.Tests
             foreach (var r in new[] { @"staging\kept\VALORANT 2026-11-10.mp4", @"video\" + id + ".mp4", @"light\" + id + ".mp4", "owned.json",
                 "interactions.json", @"projects\p.json", @"thumbs\holiday.jpg", @"visuals\" + id + @"\movie.mp4", @"editor\" + id + @"\clip.mp4",
                 @"heads\" + id + ".head", @"tmp\pre-encode\" + id + ".mp4", @"proxy\ABCDEF0123456789.mp4", @"thumbs\" + id + @".jpg\x" })
-                Check(CachePlan.Classify(r) == CacheFileKind.Recycle, "never deleted: " + r);
+                Check(CachePlan.Classify(r) == CacheFileKind.Keep, "never moved or deleted: " + r);
         }
 
-        private static BinFacts GoodBin()
+        private static void KeptNoteCounts()
         {
-            return new BinFacts { VolumeId = @"\\?\Volume{1234}\", Label = "L:", DriveType = 3, TotalBytes = 1L << 40, BinUsed = 0 };
+            var note = CachePlan.KeptNote(new[] { @"staging\kept\a.mp4", @"video\0123456789abcdef.mp4", "owned.json" }, @"L:\R\cache");
+            Check(note == @"2 clip copies kept in L:\R\cache, with 1 other file Recall can't recreate.", note);
+            Check(CachePlan.KeptNote(new[] { @"staging\kept\a.MKV" }, "C") == "1 clip copy kept in C.", "one copy");
+            Check(CachePlan.KeptNote(new string[0], "C") == null, "nothing kept, no note");
         }
 
-        private static void RecycleDecide()
+        private static void TempCopyFolder()
         {
-            Check(RecycleBin.Decide(GoodBin(), 1 << 20) == null, "a fixed drive with room: OK");
-            var f = GoodBin(); f.Subst = true; Check(RecycleBin.Decide(f, 1) != null, "subst refused");
-            f = GoodBin(); f.ResolvedUnc = true; Check(RecycleBin.Decide(f, 1) != null, "share refused");
-            f = GoodBin(); f.DriveType = 2; Check(RecycleBin.Decide(f, 1) != null, "removable refused");
-            f = GoodBin(); f.Nuke = 1; Check(RecycleBin.Decide(f, 1) != null, "bin off refused");
-            f = GoodBin(); f.PolicyOff = true; Check(RecycleBin.Decide(f, 1) != null, "policy off refused");
-            f = GoodBin(); f.BinUsed = null; Check(RecycleBin.Decide(f, 1) != null, "unreadable bin refused");
-            f = GoodBin(); f.VolumeId = null; Check(RecycleBin.Decide(f, 1) != null, "no volume refused");
-            f = GoodBin(); f.MaxMb = 1000; f.BinUsed = 950L << 20; Check(RecycleBin.Decide(f, 1 << 20) != null, "no room with the margin: refused");
-            f = GoodBin(); f.MaxMb = 1000; Check(RecycleBin.Decide(f, 2000L << 20) != null, "bigger than the bin: refused");
-            Check(RecycleBin.DefaultMaxMb(40L * 1024 * (1 << 20)) == 4096, "Windows' default size");
+            const string temp = @"C:\Users\u\AppData\Local\Temp\";
+            const string ours = temp + "Recall-Uninstall-0123456789abcdef0123456789abcdef";
+            Check(TempCopy.IsOurFolder(ours, temp), "its own folder");
+            Check(!TempCopy.IsOurFolder(@"L:\Programs\Recall", temp), "never the install folder");
+            Check(!TempCopy.IsOurFolder(temp.TrimEnd('\\'), temp), "never %TEMP% itself");
+            Check(!TempCopy.IsOurFolder(temp + "Recall-Uninstall-x", temp), "exact name only");
+            Check(!TempCopy.IsOurFolder(temp + @"sub\Recall-Uninstall-0123456789abcdef0123456789abcdef", temp), "directly in %TEMP% only");
+            var args = TempCopy.CleanupArguments(ours);
+            Check(args.Contains("rmdir /s /q \"" + ours + "\"") && args.Contains("(1,1,60)") && !args.ToLowerInvariant().Contains("powershell"), args);
         }
 
         private static void ManifestMerge()
@@ -96,7 +97,10 @@ namespace Recall.Setup.Tests
             Check(InstallDrive.Classify(null, 17) == DriveKind.Ssd, "NVMe");
             Check(InstallDrive.Classify(true, 11) == DriveKind.Hdd, "seek penalty");
             Check(InstallDrive.Classify(null, 7) == DriveKind.Unknown, "unknown");
-            Check(InstallDrive.Refusal(DriveKind.Unknown, "USB", @"E:\R") != null && InstallDrive.Refusal(DriveKind.Hdd, "WD", @"E:\R") != null, "refused");
+            Check(InstallDrive.Refusal(DriveKind.Unknown, "USB", @"E:\R", false) != null && InstallDrive.Refusal(DriveKind.Hdd, "WD", @"E:\R", false) != null, "refused");
+            Check(InstallDrive.Refusal(DriveKind.Unknown, "Msft Virtual Disk", @"C:\R", true) == null, "an unclassified drive only when the caller opts in");
+            Check(InstallDrive.Refusal(DriveKind.Hdd, "WD", @"E:\R", true) != null, "a hard drive is refused even then");
+            Check(!new InstallOptions(@"C:\R", true, false, false, false).AllowUnknownDrive, "the window never opts in");
         }
 
         private static void SwapRollback()
@@ -147,7 +151,8 @@ namespace Recall.Setup.Tests
         private static void NoPowerShell()
         {
             Check(sourceDir != null && Directory.Exists(sourceDir), "build.ps1 -Test passes the source folder");
-            var banned = new[] { "powershell", "pwsh", ".ps1", "ExecutionPolicy", "EncodedCommand" };
+            // No PowerShell, and no code that could send a clip anywhere (Rohan: never a permanent delete).
+            var banned = new[] { "powershell", "pwsh", ".ps1", "ExecutionPolicy", "EncodedCommand", "SHFileOperation", "FOF_", "IFileOperation", "recycle" };
             int files = 0;
             foreach (var file in Directory.GetFiles(sourceDir, "*.cs"))
             {
