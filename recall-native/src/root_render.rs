@@ -74,6 +74,7 @@ impl Render for Root {
             .child(self.render_titlebar(window, cx))
             .child(body)
             .children(self.render_toast(cx))
+            .children(self.render_update(cx))
     }
 }
 

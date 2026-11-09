@@ -51,11 +51,13 @@ namespace Recall.Setup
 
         private void ShowOptions(bool showAdvanced)
         {
+            if (updateMode) showAdvanced = false;
             advanced = showAdvanced;
             options.Visible = advanced;
             quick.Visible = !advanced;
             mode.Text = advanced ? "Quick setup" : "Advanced";
             mode.Show();
+            if (updateMode) mode.Hide();
             quickLaunch.Value = launch.Checked;
             quickTiming.Value = frameTiming.Checked;
             UpdateDestination();
@@ -63,11 +65,12 @@ namespace Recall.Setup
 
         private void RefreshQuickSummary(string path)
         {
-            bool update = path != null && File.Exists(Path.Combine(path, "recall-native.exe"));
+            bool update = updateMode || path != null && File.Exists(Path.Combine(path, "recall-native.exe"));
             if (!busy && !failed && !complete)
             {
                 title.Text = advanced ? "Advanced setup" : update ? "Update Recall" : "Set up Recall";
                 description.Text = advanced ? "Choose the install folder, shortcut, and Windows permissions."
+                    : updateMode ? "Review the installed folder, then update when you are ready."
                     : "Quick setup installs Recall for your Windows account.";
                 primary.Text = preview ? "Preview install" : update ? "Update Recall" : "Install Recall";
             }
