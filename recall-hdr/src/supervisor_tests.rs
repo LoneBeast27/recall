@@ -260,7 +260,8 @@ fn every_engine_exit_reaches_the_controller_after_its_last_event() {
     sup.retarget(Some(EngineSpec { env: vec![("RECALL_CAPTURE_NAME".into(), Some("game-1".into()))] }));
     assert!(wait_for(5, || matches!(sup.health(), EngineHealth::Running { pid } if pid != 0)));
     sup.retarget(Some(EngineSpec { env: vec![("RECALL_CAPTURE_NAME".into(), Some("game-2".into()))] }));
-    let event = rx.recv_timeout(Duration::from_secs(5)).expect("the first engine's exit is reported");
+    // The fake engine has no protocol marker: its spawn also tells the controller so (P1).
+    let event = std::iter::from_fn(|| rx.recv_timeout(Duration::from_secs(5)).ok()).find(|e| e["type"] != crate::supervisor::floor::ENGINE_OUTDATED).expect("the first engine's exit is reported");
     assert_eq!(event["type"], ENGINE_EXITED);
     sup.shutdown(Duration::from_millis(50));
 }
