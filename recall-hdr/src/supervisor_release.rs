@@ -8,7 +8,7 @@
 //! [`STOP_CAPTURE_CAP`] is never sent it (the controller holds the stop instead).
 
 use std::sync::atomic::Ordering;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use super::{Shared, Supervisor, QUIT_GRACE};
 use crate::engine_policy::EngineSpec;
@@ -34,12 +34,38 @@ impl Supervisor {
     pub fn release(&self, spec: Option<EngineSpec>) {
         self.shared.set_desired_how(spec, Sent::Switching, true);
     }
+
+    /// The controller has no save in flight (R2-detect-r10-1): a released engine still running
+    /// gets the plain quit grace from now, so a wedged one is killed 8 s after its saves
+    /// landed (or after `SAVE_STALE` gave up on them), not 30 min later. Cheap; every tick.
+    pub fn release_settled(&self) {
+        let release = self.shared.release_gen.load(Ordering::SeqCst);
+        self.shared.settled_gen.store(release, Ordering::SeqCst);
+    }
+}
+
+/// A released engine's kill deadline now: its own, cut to [`QUIT_GRACE`] once its saves
+/// landed (`settled`) and to the stop's grace when the supervisor stops (`stopping`).
+pub(super) fn release_deadline(deadline: Instant, now: Instant, settled: bool, stopping: Option<Duration>) -> Instant {
+    let mut cut = deadline;
+    if settled {
+        cut = cut.min(now + QUIT_GRACE);
+    }
+    if let Some(grace) = stopping {
+        cut = cut.min(now + grace);
+    }
+    cut
 }
 
 impl Shared {
     /// A release was asked after the engine of generation `gen` was spawned.
     pub(super) fn release_asked(&self, gen: u64) -> bool {
         self.release_gen.load(Ordering::SeqCst) > gen
+    }
+
+    /// The release of generation `release` was settled (`Supervisor::release_settled` after it).
+    pub(super) fn release_is_settled(&self, release: u64) -> bool {
+        release > 0 && self.settled_gen.load(Ordering::SeqCst) >= release
     }
 
     /// `stop_capture` takes the quit slot; from here on every line is refused with the last
@@ -56,6 +82,7 @@ impl Shared {
 mod tests {
     use super::super::quit_tests::Recorded;
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn a_release_sends_stop_capture_in_place_of_quit_and_refuses_later_lines() {
@@ -72,6 +99,27 @@ mod tests {
         shared.set_child_stdin(None);
         let lines = rec.lines();
         assert_eq!(lines, vec![STOP_CAPTURE_LINE.to_string()], "stop_capture, no quit, nothing after");
+    }
+
+    #[test]
+    fn a_settled_release_is_killed_after_the_quit_grace_not_30_min() {
+        // R2-detect-r10-1 (b): a wedged released engine no longer holds the slot for 30 min.
+        let shared = Shared::new(None);
+        shared.set_desired_how(None, Sent::Switching, true);
+        let release = shared.release_gen.load(Ordering::SeqCst);
+        assert!(!shared.release_is_settled(release), "a save still in flight");
+        let sup = Supervisor { shared: Arc::new(shared), handle: None };
+        sup.release_settled();
+        assert!(sup.shared.release_is_settled(release));
+        let now = Instant::now();
+        let far = now + RELEASE_GRACE;
+        assert_eq!(release_deadline(far, now, false, None), far, "saving: the engine's own bound");
+        assert_eq!(release_deadline(far, now, true, None), now + QUIT_GRACE, "settled: 8 s");
+        let later = now + Duration::from_secs(5);
+        assert_eq!(release_deadline(now + QUIT_GRACE, later, true, None), now + QUIT_GRACE, "the cut does not slide");
+        assert_eq!(release_deadline(far, now, false, Some(Duration::from_secs(1))), now + Duration::from_secs(1), "app quit");
+        sup.shared.set_desired_how(None, Sent::Switching, true);
+        assert!(!sup.shared.release_is_settled(sup.shared.release_gen.load(Ordering::SeqCst)), "a newer release waits for its own saves");
     }
 
     #[test]

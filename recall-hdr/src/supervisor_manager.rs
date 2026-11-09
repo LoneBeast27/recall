@@ -267,9 +267,11 @@ fn finish_shutdown(shared: &Arc<Shared>, mut child: Child, grace: Duration, refu
         log!("supervisor: stopping engine (pid {pid}); grace {}ms", grace.as_millis());
     }
     let mut deadline = Instant::now() + grace;
+    let release_gen = shared.release_gen.load(std::sync::atomic::Ordering::SeqCst);
     while Instant::now() < deadline {
-        if release && shared.stop_requested() {
-            deadline = deadline.min(Instant::now() + shared.grace());
+        if release {
+            let stopping = shared.stop_requested().then(|| shared.grace());
+            deadline = super::release::release_deadline(deadline, Instant::now(), shared.release_is_settled(release_gen), stopping);
         }
         match child.try_wait() {
             Ok(Some(status)) => {

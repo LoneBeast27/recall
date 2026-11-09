@@ -220,3 +220,16 @@ fn never_record_during_a_save_releases_the_engine() {
     s.run_to(5_050);
     assert!(s.ring_kept_since(mark) && s.released.len() == 1 && !s.recording_of(50));
 }
+
+/// R2-detect-r10-1 (a): with no save in flight, a privacy stop is the plain quit (8 s), never a
+/// release (a released engine may hold the slot far longer).
+#[test]
+fn a_privacy_stop_with_no_save_quits_the_engine_and_releases_nothing() {
+    let mut s = recording_discord();
+    s.run_to(5_000);
+    let mark = s.ms(4_999);
+    s.seen(app_ev("Discord", 30, 0x30, false));
+    s.run_to(5_050);
+    assert!(s.released.is_empty(), "no stop_capture without a save");
+    assert!(!s.ring_kept_since(mark) && !s.recording_of(30), "stopped at once, as before");
+}

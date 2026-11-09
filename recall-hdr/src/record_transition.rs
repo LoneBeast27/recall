@@ -87,7 +87,8 @@ pub(crate) trait Transitions {
     /// drain linger on its still-open window, and its unsaved replay ring goes
     /// with the engine. No clip is made. A pin elsewhere takes over.
     ///
-    /// F-detect-1: a save in flight is never cut. The engine is released: it stops
+    /// F-detect-1: a save in flight is never cut. The engine is released (only then:
+    /// R2-detect-r10-1, a release can hold the engine slot while it drains): it stops
     /// capturing at once, takes no new save, and ends after the saves it has; the
     /// planner already counts the next target, so the app is not "recorded" meanwhile.
     /// An older engine without `stop_capture` keeps capturing until its save lands
@@ -100,7 +101,8 @@ pub(crate) trait Transitions {
         if wanted == *self.planner().applied() {
             return; // the user pinned this very window
         }
-        if self.release_now(&wanted) {
+        // R2-detect-r10-1: only a save in flight is worth a release; otherwise the plain quit.
+        if self.saving() && self.release_now(&wanted) {
             log!("record: {}'s replay buffer dropped (not saved); capture stopped now, saves in flight finish", t.exe);
             self.planner_mut().force(wanted);
             return;
