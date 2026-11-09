@@ -74,7 +74,7 @@ impl Live {
         let (tx, done) = std::sync::mpsc::channel();
         let waiter = shared.clone();
         let handle = std::thread::spawn(move || {
-            super::super::manager::finish_shutdown(&waiter, child, RELEASE_GRACE, None, true);
+            let _ = super::super::manager::finish_shutdown(&waiter, Box::new(child), RELEASE_GRACE, None, true);
             let _ = tx.send(());
         });
         let live = Live { clock, shared, done, handle: Some(handle) };

@@ -45,6 +45,8 @@ mod refusal;
 mod release;
 #[path = "supervisor_release_wait.rs"]
 mod release_wait;
+#[path = "supervisor_stuck.rs"]
+pub(crate) mod stuck;
 #[path = "supervisor_stdin.rs"]
 mod stdin;
 #[path = "supervisor_locate.rs"]
@@ -300,6 +302,8 @@ struct Shared {
     slot: crate::engine_slot::SlotFlag,
     /// The awake clock and the last drain heartbeat (`supervisor_release_wait`).
     beats: release_wait::Beats,
+    /// An engine left running after its kill (`supervisor_stuck`).
+    stuck: stuck::Stuck,
 }
 
 /// The live child's stdin and whether it was told to quit, under one lock: the check and
@@ -352,6 +356,7 @@ impl Shared {
             events: Mutex::new(None),
             slot: Default::default(),
             beats: Default::default(),
+            stuck: Default::default(),
         }
     }
 
