@@ -42,13 +42,9 @@ fn list_clips(app: AppHandle, limit: usize) -> Vec<serde_json::Value> {
     // <Videos>\Recall (no machine path in the source).
     let saved = app.path().app_local_data_dir().ok()
         .and_then(|d| hub_settings::saved_clip_folder(&hub_settings::settings_path(&d)));
-    let dir = match (std::env::var_os("RECALL_OUT_DIR"), saved) {
-        (Some(d), _) => std::path::PathBuf::from(d),
-        (None, Some(s)) => std::path::PathBuf::from(s),
-        (None, None) => match app.path().video_dir() {
-            Ok(v) => v.join("Recall"),
-            Err(_) => return Vec::new(),
-        },
+    let env = std::env::var_os("RECALL_OUT_DIR").map(std::path::PathBuf::from);
+    let Some(dir) = hub_settings::clip_dir(env, saved, app.path().video_dir().ok()) else {
+        return Vec::new();
     };
     let mut clips: Vec<(std::time::SystemTime, serde_json::Value)> = Vec::new();
     let Ok(entries) = std::fs::read_dir(&dir) else {
