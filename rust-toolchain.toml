@@ -1,4 +1,4 @@
 # The toolchain every Recall build uses (local, gated and the release workflow).
 [toolchain]
-channel = "1.95"
+channel = "1.95.0"
 profile = "minimal"
