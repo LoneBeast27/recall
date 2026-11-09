@@ -61,6 +61,14 @@ impl Recorded {
         Recorded { bytes, done, _child: child }
     }
 
+    /// A recorder attached as a spawn's stdin whose env was given mute `baked`.
+    pub(super) fn attach_spawned(shared: &Shared, baked: Option<bool>) -> Recorded {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let (tx, done) = channel();
+        shared.attach_spawned(Some(Box::new(Recorder { bytes: bytes.clone(), done: Some(tx) })), baked);
+        Recorded { bytes, done, _child: None }
+    }
+
     /// Every line written, once the writer ended (its queue closed: `attach_writer`).
     pub(crate) fn lines(&self) -> Vec<String> {
         self.done.recv_timeout(Duration::from_secs(5)).expect("the stdin writer never ended");

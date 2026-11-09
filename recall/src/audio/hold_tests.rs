@@ -112,13 +112,12 @@ fn the_unsure_sibling_opens_muted_whatever_alt_m_says() {
 
 #[test]
 fn only_a_fresh_alt_m_after_it_opens_unmutes_it_and_then_its_id_is_saved() {
-    for mic in [true, false] {
-        let (packets, status, adopted) = run(mic, muted_then_press);
-        assert!(packets.iter().any(|&live| live), "mic={mic}: unmuted by the press");
-        assert_eq!(adopted.as_deref(), Some("{B}"), "mic={mic}: B's id is offered as its own");
-        assert_eq!(status[5], "Mic (Box) may be a different device (its ID changed). Started muted; press Alt+M to unmute.");
-        assert_eq!(status.last().map(String::as_str), Some("Mic (Box)"), "the notice is gone");
-    }
+    // A microphone, which follows Alt+M: adoption stays as it was.
+    let (packets, status, adopted) = run(true, muted_then_press);
+    assert!(packets.iter().any(|&live| live), "unmuted by the press");
+    assert_eq!(adopted.as_deref(), Some("{B}"), "B's id is offered as its own");
+    assert_eq!(status[5], "Mic (Box) may be a different device (its ID changed). Started muted; press Alt+M to unmute.");
+    assert_eq!(status.last().map(String::as_str), Some("Mic (Box)"), "the notice is gone");
     // A press that mutes keeps it held; the next press that unmutes frees it.
     let (packets, status, adopted) = run(true, press_twice);
     assert!(packets.iter().any(|&live| live), "free after the unmuting press");
@@ -146,4 +145,22 @@ fn a_saved_id_sent_live_reopens_the_stream_once() {
     ring.live.set_saved_id(" {B} ");
     assert!(!ring.live.take_repick(), "the same id again changes nothing");
     assert_eq!(ring.live.saved_id(), "{B}");
+}
+
+/// P1-b, two identical dongles: a line-in saved with id A, B (the exact name) and C connected.
+/// An adopted id would make B "own", and Alt+M would never mute it again: no id is ever
+/// adopted for a line-in. B stays muted and the status says to pick it on the Audio page.
+#[test]
+fn a_line_in_sibling_stays_muted_after_alt_m_and_adopts_nothing() {
+    for alt_m in [muted_then_press, press_twice] {
+        let (packets, status, adopted) = run(false, alt_m);
+        assert!(packets.iter().all(|live| !live), "B stays muted through the unmuting press");
+        assert_eq!(adopted, None, "no endpoint id is adopted for a line-in");
+        assert_eq!(status[5], "Mic (Box) may be a different device (its ID changed). Started muted; press Alt+M to unmute.");
+        assert_eq!(
+            status.last().map(String::as_str),
+            Some("Mic (Box) may be a different device (its ID changed). Line-in stays muted: pick it on the Audio page."),
+            "the notice tells the user to pick the device"
+        );
+    }
 }

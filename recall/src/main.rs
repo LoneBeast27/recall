@@ -66,6 +66,8 @@ mod gpu;
 mod gpu_frames;
 mod gpu_route;
 #[cfg(test)]
+mod hw_gate;
+#[cfg(test)]
 mod hw_skip;
 mod image_path;
 mod hdr;

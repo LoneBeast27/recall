@@ -233,6 +233,9 @@ fn pid_alive(pid: u32) -> bool {
 #[test]
 #[ignore = "live: spawns the real recall.exe (screen capture) for a few seconds"]
 fn live_spawn_hello_shutdown_no_orphan() {
+    if !crate::hw_gate::enabled("live_spawn_hello_shutdown_no_orphan") {
+        return;
+    }
     let Some(engine) = real_engine_path() else {
         panic!("real recall.exe not found under {}", target_dir().display());
     };

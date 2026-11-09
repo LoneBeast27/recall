@@ -148,3 +148,21 @@ fn unticking_is_refused_when_an_identical_device_shares_the_name() {
     let with_id = Source { device_id: "{c}".into(), ..mic("2- Mic (Box)") };
     assert_eq!(mic_toggle_effect(&with_id, Some(&twins)), Ok((false, "{c}".to_owned())), "a saved id is not a guess: kept");
 }
+
+/// P1-b, two identical dongles: a line-in saved with id A, B (the exact name) and C connected.
+/// The recorder never adopts B's id for a line-in, so B stays muted after Alt+M: the strip and
+/// its menu say to pick the device, not to press Alt+M. A pick then goes through the re-arm.
+#[test]
+fn an_unsure_line_in_says_to_pick_the_device_not_to_press_alt_m() {
+    let dongles = lists(&[("Mic (Box)", "{B}", Some(4)), ("2- Mic (Box)", "{C}", Some(4))]);
+    let saved = line_in("Mic (Box)", "{A}");
+    assert!(mutes(&saved, Some(&dongles)), "the unsure sibling is muted");
+    assert_eq!(
+        strip_note(&saved, Some(&dongles)).as_deref(),
+        Some("Mic (Box) may be a different device (its ID changed). Line-in stays muted: pick it on the Audio page.")
+    );
+    assert_eq!(other_note(&saved, Some(&dongles)), Some("May be a different device: stays muted until you pick it"));
+    assert_eq!(device_pick_effect(&saved, Some(&dongles), ("Mic (Box)", "{B}")), Some(true), "a pick of a microphone re-arms Alt+M");
+    let mic = Source { mic_mute: Some(true), ..saved.clone() };
+    assert!(strip_note(&mic, Some(&dongles)).is_some_and(|n| n.ends_with("press Alt+M to unmute.")), "a microphone still follows Alt+M");
+}
