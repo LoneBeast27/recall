@@ -36,7 +36,7 @@ use windows::Win32::System::Diagnostics::Etw::{
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
 use super::frame_math::{FrameStats, FrameWindow};
-use super::present_events::{classify, FrameMapper, Mapped, ProviderSpec, RawEvent, DXGI, PROVIDERS};
+use super::present_events::{classify, FrameMapper, Mapped, ProviderSpec, RawEvent, DXGI, DXGKRNL, PROVIDERS};
 
 /// Also named in `recall-hdr/src/frame_timing.rs` (the controller stops it
 /// after killing the overlay).
@@ -179,13 +179,30 @@ impl EtwSession {
         if !self.pid_filter {
             return;
         }
+        let mut refused = false;
         for spec in PROVIDERS.iter().filter(|spec| spec.pid_filter) {
             self.disable(spec);
-            let status = self.enable(spec, Some(pid));
+            refused |= self.enable(spec, Some(pid)) != ERROR_SUCCESS;
+        }
+        if !refused {
+            return;
+        }
+        // The new game refuses a PID filter (see `enable_providers`): the
+        // user-mode providers go unfiltered from here on.
+        self.pid_filter = false;
+        for spec in PROVIDERS.iter().filter(|spec| spec.pid_filter) {
+            self.disable(spec);
+            let status = self.enable(spec, None);
             if status != ERROR_SUCCESS {
                 eprintln!("recall-overlay: frame timing re-enable for pid {pid} failed (error {})", status.0);
             }
         }
+    }
+
+    /// A game refused the PID filter: the user-mode providers run unfiltered
+    /// and the callback alone picks the target's events.
+    pub fn unfiltered(&self) -> bool {
+        !self.pid_filter
     }
 
     pub fn stats(&self) -> FrameStats {
@@ -197,24 +214,47 @@ impl EtwSession {
         self.shared.running.load(Ordering::SeqCst)
     }
 
-    /// DXGI is required (every D3D10/11/12 game); D3D9 and the DxgKrnl
-    /// fallback are best effort.
+    /// DXGI (every D3D10/11/12 game) or the DxgKrnl fallback (any API) must
+    /// come up; D3D9 is best effort.
+    ///
+    /// A PID-filtered enable that fails, even with `ERROR_ACCESS_DENIED`, is
+    /// retried unfiltered (the callback filters on the pid anyway): Apex
+    /// Legends (Easy Anti-Cheat) refuses the filter with `ERROR_ACCESS_DENIED`
+    /// while the same session enables fine for every other game, so a refused
+    /// filter says nothing about the user's permission. Only an unfiltered
+    /// refusal does.
     fn enable_providers(&mut self, pid: u32) -> Result<(), StartError> {
+        let (mut dxgi, mut kernel) = (ERROR_SUCCESS, ERROR_SUCCESS);
         for spec in &PROVIDERS {
-            let mut status = self.enable(spec, (spec.pid_filter && self.pid_filter).then_some(pid));
-            if status != ERROR_SUCCESS && status != ERROR_ACCESS_DENIED && spec.pid_filter && self.pid_filter {
+            let filtered = spec.pid_filter && self.pid_filter;
+            let mut status = self.enable(spec, filtered.then_some(pid));
+            if status != ERROR_SUCCESS && filtered {
                 eprintln!("recall-overlay: PID filter refused (error {}); filtering in the callback", status.0);
                 self.pid_filter = false;
                 status = self.enable(spec, None);
+                // A provider enabled filtered before this one would stay on
+                // this pid after a retarget (which skips an unfiltered
+                // session): re-enable those unfiltered too.
+                for earlier in PROVIDERS.iter().take_while(|earlier| earlier.guid != spec.guid) {
+                    if earlier.pid_filter {
+                        self.disable(earlier);
+                        let again = self.enable(earlier, None);
+                        if earlier.guid == DXGI {
+                            dxgi = again;
+                        }
+                    }
+                }
             }
-            match (status, spec.guid == DXGI) {
-                (ERROR_SUCCESS, _) => {}
-                (ERROR_ACCESS_DENIED, true) => return Err(StartError::Denied),
-                (other, true) => return Err(StartError::Failed(format!("EnableTraceEx2 DXGI: error {}", other.0))),
-                (other, false) => eprintln!("recall-overlay: provider {:?} not enabled (error {})", spec.guid, other.0),
+            if status != ERROR_SUCCESS {
+                eprintln!("recall-overlay: provider {:?} not enabled (error {})", spec.guid, status.0);
+            }
+            if spec.guid == DXGI {
+                dxgi = status;
+            } else if spec.guid == DXGKRNL {
+                kernel = status;
             }
         }
-        Ok(())
+        enable_outcome(dxgi, kernel)
     }
 
     fn enable(&self, spec: &ProviderSpec, pid: Option<u32>) -> WIN32_ERROR {
@@ -319,6 +359,16 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
     }
 }
 
+/// The session counts frames when DXGI or the DxgKrnl fallback is on. With
+/// neither, a refusal of DXGI (asked unfiltered by then) means no permission.
+fn enable_outcome(dxgi: WIN32_ERROR, kernel: WIN32_ERROR) -> Result<(), StartError> {
+    match (dxgi, kernel) {
+        (ERROR_SUCCESS, _) | (_, ERROR_SUCCESS) => Ok(()),
+        (ERROR_ACCESS_DENIED, _) => Err(StartError::Denied),
+        (other, _) => Err(StartError::Failed(format!("EnableTraceEx2 DXGI: error {}", other.0))),
+    }
+}
+
 fn qpc_frequency() -> i64 {
     let mut hz = 0i64;
     let _ = unsafe { QueryPerformanceFrequency(&mut hz) };
@@ -329,4 +379,23 @@ fn qpc_now() -> i64 {
     let mut now = 0i64;
     let _ = unsafe { QueryPerformanceCounter(&mut now) };
     now
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use windows::Win32::Foundation::ERROR_INVALID_PARAMETER;
+
+    #[test]
+    fn either_dxgi_or_the_kernel_fallback_is_enough() {
+        assert!(enable_outcome(ERROR_SUCCESS, ERROR_SUCCESS).is_ok());
+        assert!(enable_outcome(ERROR_ACCESS_DENIED, ERROR_SUCCESS).is_ok(), "kernel presents still count");
+        assert!(enable_outcome(ERROR_SUCCESS, ERROR_ACCESS_DENIED).is_ok());
+    }
+
+    #[test]
+    fn only_a_refusal_of_both_is_no_permission() {
+        assert!(matches!(enable_outcome(ERROR_ACCESS_DENIED, ERROR_ACCESS_DENIED), Err(StartError::Denied)));
+        assert!(matches!(enable_outcome(ERROR_INVALID_PARAMETER, ERROR_ACCESS_DENIED), Err(StartError::Failed(_))));
+    }
 }
