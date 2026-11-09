@@ -33,7 +33,7 @@ pub trait Enabler {
 }
 
 /// How the session's providers ended up for one target.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Aimed {
     /// DXGI's final status (`ERROR_SUCCESS` when DXGI was not asked).
     pub dxgi: WIN32_ERROR,
@@ -44,12 +44,25 @@ pub struct Aimed {
     pub refused_by: Option<&'static str>,
     /// The PID filter is available; false after any other refusal, for good.
     pub filter_ok: bool,
+    /// The refusal (not access denied) that just turned the filter off for
+    /// good: provider and error.
+    pub lost_by: Option<(&'static str, WIN32_ERROR)>,
+    /// Providers that did not come up even unfiltered: provider and error.
+    pub failed: Vec<(&'static str, WIN32_ERROR)>,
+}
+
+impl Aimed {
+    /// Before any provider was asked.
+    pub fn new(filter_ok: bool) -> Self {
+        let none = ERROR_SUCCESS;
+        Self { dxgi: none, kernel: none, refused_by: None, filter_ok, lost_by: None, failed: Vec::new() }
+    }
 }
 
 /// Enables `specs` (in order) for `pid`; PID-filtered where the spec allows
 /// it, while `filter_ok`.
 pub fn enable_for(specs: &[&ProviderSpec], pid: u32, filter_ok: bool, calls: &mut impl Enabler) -> Aimed {
-    let mut aimed = Aimed { dxgi: ERROR_SUCCESS, kernel: ERROR_SUCCESS, refused_by: None, filter_ok };
+    let mut aimed = Aimed::new(filter_ok);
     let mut status = vec![ERROR_SUCCESS; specs.len()];
     for (i, spec) in specs.iter().enumerate() {
         let filtered = spec.pid_filter && aimed.filter_ok && aimed.refused_by.is_none();
@@ -59,6 +72,7 @@ pub fn enable_for(specs: &[&ProviderSpec], pid: u32, filter_ok: bool, calls: &mu
                 aimed.refused_by = Some(spec.name);
             } else {
                 aimed.filter_ok = false;
+                aimed.lost_by = Some((spec.name, now));
             }
             for (earlier, was) in specs[..i].iter().zip(status.iter_mut()) {
                 if earlier.pid_filter && *was == ERROR_SUCCESS {
@@ -71,6 +85,9 @@ pub fn enable_for(specs: &[&ProviderSpec], pid: u32, filter_ok: bool, calls: &mu
         status[i] = now;
     }
     for (spec, now) in specs.iter().zip(status) {
+        if now != ERROR_SUCCESS {
+            aimed.failed.push((spec.name, now));
+        }
         if spec.guid == DXGI {
             aimed.dxgi = now;
         } else if spec.guid == DXGKRNL {
@@ -113,6 +130,19 @@ pub fn filter_note(aimed: &Aimed, forced_off: bool) -> String {
         (None, false) => " (unfiltered: no PID filter available)".into(),
         (None, true) => String::new(),
     }
+}
+
+/// The trace log's lines for what went wrong while aiming at `pid` (the
+/// overlay's stderr goes nowhere).
+pub fn problems(aimed: &Aimed, pid: u32) -> Vec<String> {
+    let lost = aimed.lost_by.map(|(name, error)| {
+        format!("PID filter unavailable ({name} error {}); unfiltered for the rest of the session", error.0)
+    });
+    let failed = aimed
+        .failed
+        .iter()
+        .map(|(name, error)| format!("{name} not enabled for pid {pid} (error {})", error.0));
+    lost.into_iter().chain(failed).collect()
 }
 
 #[cfg(test)]

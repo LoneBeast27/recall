@@ -118,12 +118,10 @@ impl FrameTiming {
             Step::Start(pid) => self.start(pid, now),
             Step::Retarget(pid) => {
                 if let Some(session) = self.session.as_mut() {
-                    let was = session.filter_note();
+                    // Noted on every switch, so each game that refuses the
+                    // filter (or loses a provider) shows in the trace log.
                     session.retarget(pid);
-                    let how = session.filter_note();
-                    if how != was {
-                        self.note = Some(format!("running for pid {pid}{how}"));
-                    }
+                    self.note = Some(running_note(pid, session));
                 }
                 self.phase = Phase::Running(pid);
             }
@@ -143,10 +141,10 @@ impl FrameTiming {
             _ => 0,
         };
         let (phase, note) = match EtwSession::start(pid) {
-            Ok(session) => {
-                let how = session.filter_note();
+            Ok(mut session) => {
+                let note = running_note(pid, &mut session);
                 self.session = Some(session);
-                (Phase::Running(pid), format!("running for pid {pid}{how}"))
+                (Phase::Running(pid), note)
             }
             Err(StartError::Denied) => (Phase::Denied, "refused (not in Performance Log Users); FPS shows —".into()),
             Err(StartError::Failed(why)) => {
@@ -157,6 +155,18 @@ impl FrameTiming {
         self.phase = phase;
         self.note = Some(note);
     }
+}
+
+/// "running for pid 42 (unfiltered: DXGI refused the PID filter for this
+/// game); D3D9 not enabled for pid 42 (error 87)".
+fn running_note(pid: u32, session: &mut EtwSession) -> String {
+    let problems = session.take_problems();
+    let mut note = format!("running for pid {pid}{}", session.filter_note());
+    for problem in problems {
+        note.push_str("; ");
+        note.push_str(&problem);
+    }
+    note
 }
 
 #[cfg(test)]
