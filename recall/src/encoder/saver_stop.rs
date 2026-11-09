@@ -153,6 +153,35 @@ mod tests {
         assert_eq!(seen[0].queued, 1, "the one writing plus one behind it");
     }
 
+    thread_local! {
+        static EMITTED: std::cell::RefCell<Vec<SaveWriting>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    #[test]
+    fn stop_saver_emits_save_progress_on_the_protocol_while_it_drains() {
+        // R2-detect-r10-p3-2: the live quit path (`stop_saver`, not `wait_orphan` with a test
+        // closure) puts `save_progress` on the protocol. The observer sees every emit; this
+        // thread's own lines are kept (other tests emit on their threads).
+        crate::protocol::set_observer(|msg| {
+            if let crate::protocol::Outbound::SaveProgress { save_writing } = msg {
+                EMITTED.with(|e| e.borrow_mut().push(*save_writing));
+            }
+        });
+        let progress = SaveProgress::default();
+        progress.jobs.store(1, Relaxed);
+        let (tx, done) = std::sync::mpsc::channel::<()>();
+        let ender = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(2_500));
+            drop(tx);
+        });
+        let (abort, current) = (AtomicBool::new(false), Mutex::new(None));
+        let outcome = stop_saver(&done, &abort, &current, Duration::from_millis(20), Some(&progress));
+        ender.join().unwrap();
+        assert_eq!(outcome, Shutdown::Drained);
+        let seen = EMITTED.with(|e| e.borrow().len());
+        assert!(seen >= 2, "save_progress lines while draining: {seen}");
+    }
+
     #[test]
     fn an_orphan_with_nothing_to_save_and_a_hung_encoder_exits_promptly() {
         // The encoder thread still holds the queue (a hung NVENC): the saver never ends.
