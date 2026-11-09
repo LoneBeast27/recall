@@ -197,3 +197,33 @@ fn a_clip_open_in_another_window_keeps_its_video_copy() {
     budget::enforce(&root, 0, 0);
     assert!(!copy.exists(), "once it closes, it may go");
 }
+
+/// `link` as a directory junction to `target` (`mklink /J`, no admin rights needed).
+fn junction(link: &Path, target: &Path) {
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(link).arg(target).output().unwrap();
+    assert!(made.status.success(), "mklink /J: {}", String::from_utf8_lossy(&made.stderr));
+}
+
+#[test]
+fn a_junction_tier_folder_is_never_adopted_from_or_deleted_through() {
+    // video\ (or editor\<id>) a junction into a user's folder: the first load adopted the
+    // Recall-named files there into owned.json, and eviction then deleted them through it.
+    let (sandbox, root, _clips) = layout("junction");
+    let (target, stems) = (sandbox.join("user-videos"), sandbox.join("user-stems"));
+    write(&target.join(format!("{HEX_NAME}.mp4")), 4096);
+    write(&stems.join("clip.json"), 64);
+    write(&stems.join("a.flac"), 4096);
+    junction(&root.join("video"), &target);
+    junction(&root.join("editor").join(HEX_NAME), &stems);
+    assert!(!owned::listed(&root).contains(&format!("video/{HEX_NAME}.mp4")), "adopted through a junction");
+    assert!(!owned::remove(&root, "video", &format!("{HEX_NAME}.mp4")));
+    budget::enforce(&root, 0, 0);
+    assert_eq!(super::unit_files::remove_engine_folder(&root.join("editor").join(HEX_NAME)), 0);
+    for file in [target.join(format!("{HEX_NAME}.mp4")), stems.join("clip.json"), stems.join("a.flac")] {
+        assert!(file.is_file(), "deleted through a junction: {}", file.display());
+    }
+    // The junctions go first, so the sandbox cleanup never walks into their targets.
+    let _ = std::fs::remove_dir(root.join("video"));
+    let _ = std::fs::remove_dir(root.join("editor").join(HEX_NAME));
+}
