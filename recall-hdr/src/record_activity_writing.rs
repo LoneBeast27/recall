@@ -22,6 +22,7 @@ use serde_json::Value;
 
 use super::{EngineActivity, SAVE_STALE, SETTLE_NO_HEARTBEAT};
 use crate::log;
+use crate::record_power::ResumeGate;
 
 /// The progress mark of `status.save_writing`: its `step` when the engine sends one,
 /// else its `bytes`. `None` when the line reports no save in the saver (an engine
@@ -182,17 +183,36 @@ impl EngineActivity {
         self.pending_saves > 0 || self.write.moved_within(now, SAVE_STALE, cap)
     }
 
-    /// The PC woke up: the clock ran on while the writer slept, so a save in flight
-    /// gets a fresh window (and a fresh cap) to show it is still writing
-    /// (`record_power_win`).
-    pub fn resumed(&mut self, now: Awake) {
-        if self.pending_saves > 0 {
-            self.save_progress = Some(now);
+    /// Design P15: may a resume's engine restart go now (`record_power_host`)? From facts on the
+    /// awake clock, which a sleep does not move: nothing the restart would cut (no counted or
+    /// expired save, nothing reported writing), or a privacy release (the restart re-targets the
+    /// next engine only; the released one drains on) → go. A save in flight that made progress
+    /// within [`SAVE_STALE`] holds it, past its cap too, up to [`RESUME_HOLD_MAX`] (`held_for`);
+    /// otherwise go and report each such save lost.
+    pub fn resume_gate(&self, now: Awake, held_for: Duration) -> ResumeGate {
+        let unanswered = self.unanswered();
+        if self.released_at.is_some() || unanswered == 0 {
+            return ResumeGate::Go;
         }
-        if self.write.last.is_some() {
-            self.write.moved = Some(now);
-            self.write.since = Some(now);
+        let last = self.save_progress.max(self.write.moved);
+        let moving = last.is_some_and(|t| now.saturating_duration_since(t) < SAVE_STALE);
+        if moving && held_for < super::RESUME_HOLD_MAX {
+            ResumeGate::Hold
+        } else {
+            ResumeGate::GoLost(unanswered)
         }
+    }
+
+    /// Saves the engine was sent and has not answered (counted or expired), or 1 for a save it
+    /// reports writing without a count: what a restart or quit now cuts.
+    pub fn unanswered(&self) -> u32 {
+        (self.pending_saves + self.expired_saves).max(self.write.last.is_some() as u32)
+    }
+
+    /// The saves a restart now cuts were reported (`record_power_host`): none is counted any
+    /// more, so the engine's exit does not report them again.
+    pub fn forget_lost(&mut self) {
+        (self.pending_saves, self.expired_saves, self.write) = (0, 0, WriteWatch::default());
     }
 
     /// The clip size a save is expected to have (`record_free_space::buffer_bytes`).

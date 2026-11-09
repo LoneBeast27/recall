@@ -30,6 +30,10 @@ pub const DRAIN_RECORD_REASON: &str = "The game closed; nothing to record";
 /// this long (awake): its own 120 s stall rule + one 1 s report + a 14 s margin (p6-1: the two
 /// clocks start a little apart).
 pub const SETTLE_NO_HEARTBEAT: Duration = Duration::from_secs(135);
+/// The longest a resume's restart holds for a save that keeps moving (awake): the engine's own
+/// budget for finishing saves (`recall` `ORPHAN_SAVE_BUDGET`). Product rule (2026-11-10): a save
+/// past its 10 min hold cap keeps the hold while it still makes progress.
+pub const RESUME_HOLD_MAX: Duration = Duration::from_secs(30 * 60);
 /// How long a pause waits for the long recording to report stopping.
 pub const PAUSE_STOP_WAIT: Duration = Duration::from_secs(10);
 /// The island while a pause waits for the save being written (R5-overlay-1).

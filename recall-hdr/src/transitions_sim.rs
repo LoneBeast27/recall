@@ -32,15 +32,13 @@
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
-use crate::engine_policy::EngineSpec;
-use crate::record_engine_ctl::switch_engine;
 use crate::record_activity::{EngineActivity, LongRec, PendingPause, Trigger};
 use crate::record_config::RecordingCfg;
 use crate::record_detect::{fed_key, FedKey};
 use crate::record_drain::drain_len;
 use crate::record_engine::{capture_refusal, wanted, EnginePlanner, EngineTarget, Step, EXIT_LINGER};
 use crate::record_notice::{NoticeTracker, Situation};
-use crate::record_restart::{pending_restart_tick, request_settings_restart, restart_engine, restart_for_recovery, RestartHost, RestartReason, Restarted};
+use crate::record_restart::{pending_restart_tick, request_settings_restart, restart_engine, restart_for_recovery, RestartReason, Restarted};
 use crate::record_target::{Target, TargetTracker, START_DEBOUNCE, TARGET_DEBOUNCE};
 use crate::record_transition::Transitions;
 use crate::watcher::WatchEvent;
@@ -126,6 +124,11 @@ pub struct Sim {
     pub released: Vec<(Instant, EngineTarget)>,
     /// Time the simulated PC slept (`Sim::sleep_for`): it moves `now`, never the awake clock.
     slept: Duration,
+    /// Sleep and resume (`Controller::power`), the notices queued for the next `power_tick`
+    /// (`Sim::power_notice`), and the `save_failed` lines the controller put on the hub.
+    pub power: crate::record_power::PowerPlanner,
+    pub power_notices: Vec<u32>,
+    pub hub_events: Vec<String>,
 }
 
 impl Sim {
@@ -163,6 +166,9 @@ impl Sim {
             engine_heartbeats: true,
             released: Vec::new(),
             slept: Duration::ZERO,
+            power: Default::default(),
+            power_notices: Vec::new(),
+            hub_events: Vec::new(),
         }
     }
 
@@ -259,8 +265,10 @@ impl Sim {
     }
 
     fn applied_engine(&mut self, target: EngineTarget) {
-        if target != EngineTarget::Off {
-            // The new engine's hello (`record_app::tick`): nothing of the old one is in flight.
+        // The new engine's hello (`record_app::tick`): nothing of the old one is in flight. A
+        // released engine drains first (the slot admits one recorder): its saves stay counted
+        // until it exits (`Sim::engine_exited`), as on the controller.
+        if target != EngineTarget::Off && self.activity.release().is_none() {
             self.activity.engine_restarted();
         }
         // `apply_engine_target`: any (re)start or stop picks up the current settings.
@@ -460,38 +468,13 @@ impl Transitions for Sim {
     }
 }
 
-/// The Sim as the controller's restart host: the same planner, activity and flag fields.
-impl RestartHost for Sim {
-    fn restart_planner(&mut self) -> &mut EnginePlanner {
-        &mut self.planner
-    }
-    fn restart_busy(&mut self) -> bool {
-        let now = self.awake();
-        self.activity.busy(now)
-    }
-    fn restart_wanted(&self) -> EngineTarget {
-        self.wanted()
-    }
-    fn restart_pending(&mut self) -> &mut Option<RestartReason> {
-        &mut self.pending_restart
-    }
-    fn restart_apply(&mut self, target: &EngineTarget, reason: RestartReason) {
-        // As `Controller::restart_apply` -> `apply_engine_target_as` -> `switch_engine`.
-        let spec = (*target != EngineTarget::Off).then(EngineSpec::default);
-        switch_engine(&self.switches, spec, reason.refusal());
-        self.applied_engine(target.clone());
-    }
-    fn restart_notice(&mut self, title: &str, detail: &str) {
-        self.island_said.push((title.into(), detail.into()));
-    }
-    fn restart_log(&mut self, line: &str) {
-        self.notes.push(line.into());
-    }
-}
-
 /// The Sim's awake-only clock and sleep, and the ring checks, split out for file size.
 #[path = "transitions_sim_clock.rs"]
 mod clock;
+
+/// The Sim as the controller's restart and power hosts (`record_restart`, `record_power_host`).
+#[path = "transitions_sim_hosts.rs"]
+mod hosts;
 
 #[path = "transitions_sim_switch.rs"]
 mod switch;

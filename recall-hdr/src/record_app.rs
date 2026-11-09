@@ -346,7 +346,7 @@ impl Controller {
                 self.quitting_tick(now);
                 continue;
             }
-            self.power_tick(now);
+            crate::record_power_host::PowerHost::power_tick(self);
             self.session_tick(now);
             self.tick(now);
         }
