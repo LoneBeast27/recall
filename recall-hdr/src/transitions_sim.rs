@@ -123,6 +123,8 @@ pub struct Sim {
     /// Privacy stops that released the engine (`release_engine_to`), with the next target:
     /// capture stopped, saves in flight finish, then that target starts.
     pub released: Vec<(Instant, EngineTarget)>,
+    /// Time the simulated PC slept (`Sim::sleep_for`): it moves `now`, never the awake clock.
+    slept: Duration,
 }
 
 impl Sim {
@@ -158,6 +160,7 @@ impl Sim {
             checked: None,
             engine_releases: true,
             released: Vec::new(),
+            slept: Duration::ZERO,
         }
     }
 
@@ -225,13 +228,14 @@ impl Sim {
 
     pub fn tick(&mut self) {
         let now = self.now;
-        if self.pending_pause.map(|p| p.ready(&mut self.activity, now)) == Some(true) {
+        let awake = self.awake();
+        if self.pending_pause.map(|p| p.ready(&mut self.activity, awake)) == Some(true) {
             self.apply_pause(true);
         }
         self.feed_drain(now);
         self.poll_with_verdicts(now);
         self.planner.set_drain_len(drain_len(self.buffered, self.rec.buffer_secs));
-        let busy = self.activity.retarget_busy(now);
+        let busy = self.activity.retarget_busy(awake);
         let drained = self.running_drain(now);
         match self.planner.step(&self.wanted(), now, busy) {
             Step::Apply(target) => {
@@ -242,7 +246,7 @@ impl Sim {
             // `plan_engine`: one record_stop per recording, the retarget follows its stop.
             Step::StopLongRec { game_closed } => {
                 let game_closed = self.closed_game(game_closed);
-                if self.activity.auto_stop(now, game_closed) {
+                if self.activity.auto_stop(awake, game_closed) {
                     self.sent.push(("record_stop".into(), self.engine().clone()));
                 }
             }
@@ -311,7 +315,8 @@ impl Sim {
         if capture_refusal(self.paused, self.engine_running(), &self.wanted()).is_some() || self.planner.privacy_refusal().is_some() {
             return false;
         }
-        self.activity.save_sent(self.now);
+        let now = self.awake();
+        self.activity.save_sent(now);
         self.sent.push(("save_clip".into(), self.engine().clone()));
         true
     }
@@ -328,7 +333,8 @@ impl Sim {
 
     /// Alt+L on an idle engine, and the engine reporting it started.
     pub fn long_start(&mut self) {
-        self.activity.record_requested(self.now);
+        let now = self.awake();
+        self.activity.record_requested(now);
         self.sent.push(("record_start".into(), self.engine().clone()));
         self.activity.on_event(&serde_json::json!({"type": "recording_started", "path": "r.mp4"}), 1.0);
     }
@@ -343,7 +349,8 @@ impl Sim {
 
     pub fn pause(&mut self) {
         if !self.paused && self.engine_running() {
-            if let Some(wait) = PendingPause::needed(&mut self.activity, self.now) {
+            let now = self.awake();
+            if let Some(wait) = PendingPause::needed(&mut self.activity, now) {
                 if self.activity.long != LongRec::Idle {
                     self.sent.push(("record_stop".into(), self.engine().clone()));
                 }
@@ -370,22 +377,6 @@ impl Sim {
         if self.planner.pause() {
             self.applied_engine(EngineTarget::Off); // `apply_engine_target(Off)`
         }
-    }
-
-    /// Engine spawns (not stops) since `since`.
-    pub fn spawns_since(&self, since: Instant) -> usize {
-        self.applied.iter().filter(|(at, t)| *at > since && *t != EngineTarget::Off).count()
-    }
-
-    /// No engine (re)spawn or stop since `since`: the replay ring is the same one, and a save
-    /// in flight was not cut.
-    pub fn ring_kept_since(&self, since: Instant) -> bool {
-        self.applied.iter().all(|(at, _)| *at <= since)
-    }
-
-    /// The ring stopped capturing since `since`: a stop or respawn, or a release.
-    pub fn ring_dropped_since(&self, since: Instant) -> bool {
-        !self.ring_kept_since(since) || self.released.iter().any(|(at, _)| *at > since)
     }
 
     pub fn current(&self) -> Option<&Target> {
@@ -464,7 +455,8 @@ impl RestartHost for Sim {
         &mut self.planner
     }
     fn restart_busy(&mut self) -> bool {
-        self.activity.busy(self.now)
+        let now = self.awake();
+        self.activity.busy(now)
     }
     fn restart_wanted(&self) -> EngineTarget {
         self.wanted()
@@ -485,6 +477,10 @@ impl RestartHost for Sim {
         self.notes.push(line.into());
     }
 }
+
+/// The Sim's awake-only clock and sleep, and the ring checks, split out for file size.
+#[path = "transitions_sim_clock.rs"]
+mod clock;
 
 #[path = "transitions_sim_switch.rs"]
 mod switch;

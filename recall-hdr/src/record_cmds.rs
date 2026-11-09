@@ -26,7 +26,6 @@
 //! the requesting client only. Recording changes also broadcast a `session`
 //! `notice` (`record_notice`) while `overlay.enabled`.
 
-use std::time::Instant;
 
 use serde_json::{json, Value};
 
@@ -60,7 +59,8 @@ impl SavePort for ControllerSave<'_> {
         self.ctl.supervisor.send_engine_line(line)
     }
     fn mark_pending(&mut self) {
-        self.ctl.activity.save_sent(std::time::Instant::now());
+        let now = self.ctl.awake();
+        self.ctl.activity.save_sent(now);
     }
     fn announce(&mut self, seconds: u32) {
         self.ctl.hub.event("session", &saving_event(seconds));
@@ -94,7 +94,7 @@ impl Controller {
                 log!("record: control quit");
                 self.ask_quit(crate::record_quit::QuitReason::ControlPipe, crate::record_quit_wait::quit_force(&val));
                 // The installer reads this to wait only while a clip is being finished.
-                let reply = crate::record_quit_wait::quitting_event(self.finishing_now(Instant::now()));
+                let reply = crate::record_quit_wait::quitting_event(self.finishing_now());
                 self.hub.event_to(inbound.client, "session", &reply);
             }
             "save_clip" => match val.get("seconds") {

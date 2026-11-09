@@ -14,7 +14,7 @@
 // Shared by two crates through `#[path]`: each uses a part of it.
 #![allow(dead_code)]
 
-use std::ops::{Add, AddAssign};
+use std::ops::{Add, AddAssign, Sub};
 use std::time::{Duration, Instant};
 
 /// A point on the awake-only clock, in 100 ns units since boot (sleep left out).
@@ -39,6 +39,14 @@ impl Awake {
     pub fn duration_since(self, earlier: Awake) -> Duration {
         self.saturating_duration_since(earlier)
     }
+
+    /// Tests: this point as an `Instant` on one fixed base, for code that still takes one
+    /// (the planner's own clock) in a test that drives both from one timeline.
+    #[cfg(test)]
+    pub fn as_test_instant(self) -> Instant {
+        static BASE: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+        *BASE.get_or_init(Instant::now) + self.saturating_duration_since(Awake::ZERO)
+    }
 }
 
 /// `d` in the clock's 100 ns ticks (saturating).
@@ -50,6 +58,14 @@ impl Add<Duration> for Awake {
     type Output = Awake;
     fn add(self, d: Duration) -> Awake {
         Awake(self.0.saturating_add(ticks(d)))
+    }
+}
+
+impl Sub<Duration> for Awake {
+    type Output = Awake;
+    /// Saturates at the clock's origin.
+    fn sub(self, d: Duration) -> Awake {
+        Awake(self.0.saturating_sub(ticks(d)))
     }
 }
 

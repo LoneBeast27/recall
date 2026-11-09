@@ -16,7 +16,7 @@ impl Controller {
         let wanted = self.wanted();
         let view = self.supervisor.engine_view();
         let hdr = self.hdr.snapshot(&self.cfg);
-        let finishing = self.finishing_now(Instant::now());
+        let finishing = self.finishing_now();
         let mut status = status_json(&StatusInputs {
             wanted: &wanted,
             health: self.supervisor.health(),

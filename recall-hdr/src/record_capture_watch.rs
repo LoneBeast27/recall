@@ -174,7 +174,7 @@ impl Controller {
             fresh: self.supervisor.hello_count() > self.hello_at_retarget,
             paused: self.paused,
             running: self.engine_running(),
-            held: self.planner.drain().is_some() || self.activity.busy(now) || self.recovery.pending(now),
+            held: self.planner.drain().is_some() || self.activity.busy(self.clock.awake()) || self.recovery.pending(now),
             overlay: self.cfg.overlay.enabled,
         };
         let Some(act) = stuck_step(&mut self.capture_stuck, &inputs, crate::record_screen::sight, now) else { return };

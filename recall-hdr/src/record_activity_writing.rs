@@ -14,7 +14,9 @@
 //! queue's count, never the queue sent since (an expired save's late `saved` would
 //! otherwise let a restart kill the newer saves).
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::awake_clock::Awake;
 
 use serde_json::Value;
 
@@ -51,12 +53,12 @@ pub struct WriteWatch {
     last: Option<u64>,
     /// The packet bytes of the last report (`save_writing.bytes`; none: no report).
     bytes: Option<u64>,
-    moved: Option<Instant>,
-    since: Option<Instant>,
+    moved: Option<Awake>,
+    since: Option<Awake>,
     /// The save in front ran past its cap (its queue was let go once).
     capped: bool,
     /// A restart held by the save in front: since when, and whether the island was told.
-    held_since: Option<Instant>,
+    held_since: Option<Awake>,
     told: bool,
 }
 
@@ -64,7 +66,7 @@ impl WriteWatch {
     /// One status line at `now`. True when the save moved on: a save appeared, or
     /// its mark changed (a new save in front starts small again). A press that
     /// only grows the queue is not progress.
-    pub fn status(&mut self, ev: &Value, now: Instant) -> bool {
+    pub fn status(&mut self, ev: &Value, now: Awake) -> bool {
         let seen = writing_mark(ev);
         if seen.is_none() {
             self.next_save(None);
@@ -81,17 +83,17 @@ impl WriteWatch {
     }
 
     /// The save in front changed at `now` (or the saver went empty: `None`).
-    fn next_save(&mut self, now: Option<Instant>) {
+    fn next_save(&mut self, now: Option<Awake>) {
         (self.since, self.capped, self.held_since, self.told) = (now, false, None, false);
     }
 
     /// The save in front has been written longer than `cap`.
-    fn past_cap(&self, now: Instant, cap: Duration) -> bool {
+    fn past_cap(&self, now: Awake, cap: Duration) -> bool {
         self.last.is_some() && self.since.is_some_and(|s| now.saturating_duration_since(s) >= cap)
     }
 
     /// The engine reports a save whose mark moved within `within`, under its cap.
-    fn moved_within(&self, now: Instant, within: Duration, cap: Duration) -> bool {
+    fn moved_within(&self, now: Awake, within: Duration, cap: Duration) -> bool {
         self.last.is_some() && self.moved.is_some_and(|t| now.saturating_duration_since(t) < within) && !self.past_cap(now, cap)
     }
 }
@@ -103,7 +105,7 @@ impl EngineActivity {
 
     /// A `status` line: a save whose mark moves keeps its queue's window open (not
     /// past its cap).
-    pub(super) fn on_status(&mut self, ev: &Value, now: Instant) {
+    pub(super) fn on_status(&mut self, ev: &Value, now: Awake) {
         let cap = self.hold_cap();
         if self.write.status(ev, now) && self.pending_saves > 0 && !self.write.past_cap(now, cap) {
             self.save_progress = Some(now);
@@ -123,7 +125,7 @@ impl EngineActivity {
     }
 
     /// A save was answered at `now`: the next one in the saver is in front now.
-    pub(super) fn front_answered(&mut self, now: Instant) {
+    pub(super) fn front_answered(&mut self, now: Awake) {
         if self.write.last.is_some() {
             self.write.next_save(Some(now));
         }
@@ -142,7 +144,7 @@ impl EngineActivity {
     /// engine exit answers them all), or none has shown progress for [`SAVE_STALE`] (the
     /// engine's own stall rule, `saver_stop::ORPHAN_STALL`). Unlike [`Self::saves_writing`],
     /// no timer or cap lets go while the drain still reports progress (`save_progress`).
-    pub fn release_may_settle(&mut self, now: Instant) -> bool {
+    pub fn release_may_settle(&mut self, now: Awake) -> bool {
         if self.pending_saves + self.expired_saves == 0 {
             return true;
         }
@@ -153,7 +155,7 @@ impl EngineActivity {
     /// Saves the engine is still writing: counted, or reported by the engine with
     /// its mark still moving. A restart now aborts them. A save past its cap lets
     /// its queue go (once): restarts go ahead as they did before this hold.
-    pub fn saves_writing(&mut self, now: Instant) -> bool {
+    pub fn saves_writing(&mut self, now: Awake) -> bool {
         self.expire_saves(now);
         let cap = self.hold_cap();
         if self.write.past_cap(now, cap) && !self.write.capped {
@@ -167,7 +169,7 @@ impl EngineActivity {
     /// The PC woke up: the clock ran on while the writer slept, so a save in flight
     /// gets a fresh window (and a fresh cap) to show it is still writing
     /// (`record_power_win`).
-    pub fn resumed(&mut self, now: Instant) {
+    pub fn resumed(&mut self, now: Awake) {
         if self.pending_saves > 0 {
             self.save_progress = Some(now);
         }
@@ -184,7 +186,7 @@ impl EngineActivity {
 
     /// The engine reports the save in front still making progress (within
     /// [`GROWING_WITHIN`], under its cap). An engine without the report never is.
-    pub fn save_growing(&mut self, now: Instant) -> bool {
+    pub fn save_growing(&mut self, now: Awake) -> bool {
         let cap = self.hold_cap();
         self.write.moved_within(now, GROWING_WITHIN, cap)
     }
@@ -206,7 +208,7 @@ impl EngineActivity {
 
     /// A restart is `held` now: true once per save when a save has held it for
     /// [`HOLD_NOTICE_AFTER`] (the island says "Waiting for the clip to finish saving").
-    pub fn hold_notice(&mut self, now: Instant, held: bool) -> bool {
+    pub fn hold_notice(&mut self, now: Awake, held: bool) -> bool {
         let writing = self.saves_writing(now);
         if !(held && writing) {
             self.write.held_since = None;

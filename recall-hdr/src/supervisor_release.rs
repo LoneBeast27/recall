@@ -153,7 +153,7 @@ mod tests {
         let shared = Shared::new(None);
         let (tx, rx) = std::sync::mpsc::channel();
         *shared.events.lock().unwrap() = Some(tx);
-        let t0 = Instant::now();
+        let t0 = crate::awake_clock::Awake::ZERO;
         let mut activity = EngineActivity::default();
         activity.save_sent(t0);
         let mut now = t0;

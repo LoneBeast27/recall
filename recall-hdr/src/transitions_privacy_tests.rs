@@ -260,7 +260,7 @@ fn a_released_save_that_keeps_moving_is_never_settled_a_stalled_one_is() {
     use std::time::Duration;
     let progress = |s: &mut Sim, step: u64| {
         let ev = serde_json::json!({"type": "save_progress", "save_writing": {"bytes": step, "queued": 0, "step": step}});
-        let now = s.now;
+        let now = s.awake();
         s.activity.on_engine_event(&ev, 0.0, now);
     };
     let mut s = recording_discord();
@@ -272,15 +272,15 @@ fn a_released_save_that_keeps_moving_is_never_settled_a_stalled_one_is() {
     for k in 1..=180u64 {
         s.now += Duration::from_secs(5); // 15 min of a save still writing
         progress(&mut s, k);
-        let now = s.now;
+        let now = s.awake();
         assert!(!s.activity.release_may_settle(now), "settled at {} s while the save moved", k * 5);
     }
-    let now = s.now + Duration::from_secs(119);
+    let now = s.awake() + Duration::from_secs(119);
     assert!(!s.activity.release_may_settle(now), "a 119 s pause is no stall");
-    let now = s.now + Duration::from_secs(120);
+    let now = s.awake() + Duration::from_secs(120);
     assert!(s.activity.release_may_settle(now), "120 s with no progress: the engine's own stall rule");
     s.saved();
-    let now = s.now;
+    let now = s.awake();
     assert!(s.activity.release_may_settle(now), "answered: settles at once");
 }
 
@@ -307,7 +307,7 @@ fn a_privacy_stop_waits_for_a_save_already_past_its_cap() {
     for k in 1..=132u64 {
         s.now += Duration::from_secs(5); // 11 min of a save still writing (the engine's status)
         let ev = serde_json::json!({"type": "status", "save_writing": {"bytes": k, "queued": 0, "step": k}});
-        let now = s.now;
+        let now = s.awake();
         s.activity.on_engine_event(&ev, 0.0, now);
     }
     s.seen(app_ev("Discord", 30, 0x30, false));
