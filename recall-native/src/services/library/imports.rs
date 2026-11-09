@@ -35,6 +35,9 @@ pub struct Link {
     /// Removed from Recall by the user; the file stays where it is.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// Fields a newer build wrote for this file: kept as they are.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -45,6 +48,9 @@ pub(crate) struct Table {
     /// Why saving is refused: the file exists but could not be read this run.
     #[serde(skip)]
     write_block: Option<String>,
+    /// Top-level keys a newer build wrote: kept as they are.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// What the library does with one imported file.
@@ -178,7 +184,8 @@ fn parse_table(bytes: &[u8]) -> Option<(Table, bool)> {
         Some(_) => lossy = true,
         None => {}
     }
-    Some((Table { version, files, write_block: None }, lossy))
+    let extra = root.into_iter().filter(|(k, _)| k != "version" && k != "files").collect();
+    Some((Table { version, files, write_block: None, extra }, lossy))
 }
 
 /// Whether the table hides the file with folder key `key` (tests).
@@ -213,8 +220,8 @@ pub fn record(path: &Path, bytes: u64, mtime: u64, verdict: &Verdict) -> bool {
     let text = path.to_string_lossy().into_owned();
     with_table(|table| {
         let link = table.files.entry(folder_key(&text)).or_default();
-        let hidden = link.hidden;
-        *link = Link { path: text, bytes, mtime, kind, editor, hidden };
+        let (hidden, extra) = (link.hidden, std::mem::take(&mut link.extra));
+        *link = Link { path: text, bytes, mtime, kind, editor, hidden, extra };
         hidden || kind != Kind::Clip
     })
 }
@@ -291,6 +298,10 @@ pub(crate) fn save_table(path: &Path, table: &Table) -> Result<(), String> {
     let bytes = snapshot(table)?;
     crate::services::durable::write_durable(path, &bytes).map_err(|e| format!("save imports: {e}"))
 }
+
+#[cfg(test)]
+#[path = "imports_keep_tests.rs"]
+mod keep_tests;
 
 #[cfg(test)]
 mod tests {
