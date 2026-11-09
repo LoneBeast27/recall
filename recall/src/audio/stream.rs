@@ -227,7 +227,7 @@ impl Stream {
                     super::packet::decode(&mut raw, block, &mut samples);
                     level.live_into(clock.elapsed(), &samples, channels, &mut leveled);
                     // Alt+M as it is now, for every packet (an early press applies at once).
-                    ring.push_live(&leveled, super::MuteNow::read());
+                    ring.push_live_read(&leveled, super::MuteNow::read); // the hold, then Alt+M (F1)
                     last_sound = std::time::Instant::now();
                     continue;
                 }
