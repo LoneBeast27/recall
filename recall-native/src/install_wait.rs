@@ -278,10 +278,19 @@ fn recover_swap() {
         Ok(true) => log("install recovered", format!("an unfinished update in {} was undone", dir.display()), serde_json::json!({ "dir": dir.display().to_string() })),
         Err(why) => {
             log("install mismatched", format!("an unfinished update in {} could not be undone: {why}", dir.display()), serde_json::json!({ "why": why }));
-            refuse(&format!("An update did not finish, and its files could not be put back yet ({why}).\n\nRestart Windows, then open Recall again, or run Recall Setup from the Releases page:\n{}", crate::repair::RELEASES_URL));
+            refuse(&refuse_text(&why));
             std::process::exit(3);
         }
     }
+}
+
+/// What Recall says when it cannot start over an unfinished update. Running Setup comes first:
+/// Recall cannot replace its own running program, Setup can.
+pub(crate) fn refuse_text(why: &str) -> String {
+    format!(
+        "An update did not finish, and Recall can't put its own files back while it runs ({why}).\n\nRun Recall Setup again to finish it. If you no longer have Setup, download it from the Releases page:\n{}",
+        crate::repair::RELEASES_URL
+    )
 }
 
 fn refuse(text: &str) {
