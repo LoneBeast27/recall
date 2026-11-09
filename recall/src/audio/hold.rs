@@ -185,6 +185,12 @@ impl TrackRing {
         self.live.held.load(Ordering::SeqCst) || self.startup_held()
     }
 
+    /// Tests: the source's "Alt+M mutes it" flag as set (live) now.
+    #[cfg(test)]
+    pub(crate) fn mic_mute_flag(&self) -> bool {
+        self.mic_mute.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     pub(crate) fn startup_held(&self) -> bool {
         self.live.startup.load(Ordering::SeqCst)
     }
