@@ -45,7 +45,7 @@ fn only_a_local_enabled_bin_big_enough_takes_a_clip() {
 fn windows_default_size_rule() {
     assert_eq!(default_max_mb(32 * GIB), 32 * 1024 / 10, "up to 40 GB: 10%");
     assert_eq!(default_max_mb(40 * GIB), 4096);
-    // This machine's V: (3,815,429 MiB) stores MaxCapacity 192,819; L: (1,907,727 MiB) 97,434.
+    // Measured on a dev PC: a 3,815,429 MiB volume stores MaxCapacity 192,819; a 1,907,727 MiB one 97,434.
     assert_eq!(default_max_mb(3_815_429 << 20), 192_819);
     assert_eq!(default_max_mb(1_907_727 << 20), 97_434);
 }
@@ -117,7 +117,7 @@ fn this_machine_reports_its_temp_volume_bin() {
 }
 
 fn subst_of_l(letter: char) -> Option<String> {
-    (letter == 'Q').then(|| r"\??\L:\General\sandbox".to_string())
+    (letter == 'Q').then(|| r"\??\D:\work\sandbox".to_string())
 }
 
 fn real_volume(_: char) -> Option<String> {

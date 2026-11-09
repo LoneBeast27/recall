@@ -78,8 +78,8 @@ fn machine() -> Fixture {
         .key(UNINSTALL, "Notepad++", &[("Publisher", "Notepad++ Team"), ("InstallLocation", "X:\\Program Files\\Notepad++")])
         .key(UNINSTALL, "BadGame", &[("Publisher", "Blizzard Entertainment"), ("InstallLocation", "C:\\")])
         .receipt(&format!("{itch}\\apps"), "celeste")
-        .receipt("L:\\itch games", "some-jam-game")
-        .file(itch, "preferences.json", r#"{"installLocations":{"a1":{"path":"L:\\itch games"}}}"#)
+        .receipt("Y:\\itch games", "some-jam-game")
+        .file(itch, "preferences.json", r#"{"installLocations":{"a1":{"path":"Y:\\itch games"}}}"#)
 }
 
 fn exe_in(path: &str) -> bool {
@@ -95,7 +95,7 @@ fn every_launcher_library_is_game_evidence() {
         "J:\\EA Games\\Apex\\r5apex.exe",
         "K:\\Blizzard\\Overwatch\\_retail_\\Overwatch.exe",
         "X:\\Users\\me\\AppData\\Roaming\\itch\\apps\\celeste\\Celeste.exe",
-        "L:\\itch games\\some-jam-game\\Game.exe",
+        "Y:\\itch games\\some-jam-game\\Game.exe",
         "\\\\?\\G:\\epic games\\rocketleague\\x.exe",
     ] {
         assert!(exe_in(exe), "{exe}");
@@ -184,7 +184,7 @@ fn a_launcher_game_is_a_candidate_but_does_not_beat_the_private_list() {
 #[test]
 fn itch_counts_only_folders_with_an_install_receipt() {
     let dl = "X:\\Users\\me\\Downloads";
-    let prefs = r#"{"installLocations":{"a1":{"path":"L:\\itch games"},"dl":{"path":"X:\\Users\\me\\Downloads"}}}"#;
+    let prefs = r#"{"installLocations":{"a1":{"path":"Y:\\itch games"},"dl":{"path":"X:\\Users\\me\\Downloads"}}}"#;
     let f = machine().file(ITCH, "preferences.json", prefs).file(dl, "Telegram", "").receipt(dl, "jam");
     let f = f.file(&format!("{ITCH}\\apps"), "stray", "");
     let roots = collect_roots(&f);
@@ -196,7 +196,7 @@ fn itch_counts_only_folders_with_an_install_receipt() {
     let tool = event_at("X:\\Users\\me\\Downloads\\SomeTool\\tool.exe", "tool", &roots);
     assert!(crate::record_target::classify_event(&tool, &cfg).is_none(), "an unknown windowed exe in Downloads");
     assert!(!is_game_library_path_in(&format!("{ITCH}\\apps\\stray\\x.exe"), &roots), "apps\\stray: no receipt");
-    for exe in ["X:\\Users\\me\\Downloads\\jam\\Jam.exe", "L:\\itch games\\some-jam-game\\Game.exe", &format!("{ITCH}\\apps\\celeste\\Celeste.exe")] {
+    for exe in ["X:\\Users\\me\\Downloads\\jam\\Jam.exe", "Y:\\itch games\\some-jam-game\\Game.exe", &format!("{ITCH}\\apps\\celeste\\Celeste.exe")] {
         assert!(is_game_library_path_in(exe, &roots), "{exe}: receipted install");
     }
 }
