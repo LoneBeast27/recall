@@ -68,6 +68,7 @@ impl Leveller {
     }
 
     /// Live sound (`channels`-interleaved) arriving `elapsed` after the start: what to write.
+    #[cfg(test)]
     pub fn live(&mut self, elapsed: Duration, samples: &[f32], channels: usize) -> Vec<f32> {
         let mut out = Vec::with_capacity(samples.len() + 4 * channels.max(1));
         self.live_into(elapsed, samples, channels, &mut out);

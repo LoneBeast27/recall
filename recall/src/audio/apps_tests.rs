@@ -141,3 +141,13 @@ fn a_short_sleep_inside_live_sound_lines_up_with_idle_tracks() {
     let (out, _) = run_live(1.0005, 60.0);
     assert!(longest_zero_run(&out) == 0);
 }
+
+/// Merge-gate P3: an app track's silence up to the clock allocates nothing once the ring is
+/// warm (it allocated one block per idle tick).
+#[test]
+fn an_app_tracks_silence_allocates_nothing() {
+    let ring = crate::audio::capture_loop::tests::ring();
+    super::push_silence(&ring, ring.capacity_frames());
+    let ((), bytes) = crate::test_alloc::bytes_in(|| (0..20).for_each(|_| super::push_silence(&ring, 100)));
+    assert_eq!(bytes, 0);
+}
