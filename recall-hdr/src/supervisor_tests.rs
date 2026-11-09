@@ -146,6 +146,30 @@ fn a_crash_respawn_starts_with_the_live_audio_sources() {
     sup.shutdown(Duration::from_millis(200));
 }
 
+/// Review R2-audio-r9-1: a source change between the manager's spec read and the spawn's pid
+/// reached neither the env nor the engine (no engine ran to send it to). The manager's check
+/// right after the pid (`supervisor_manager.rs`) retargets once; no change, no respawn.
+#[test]
+fn a_source_change_during_a_spawn_respawns_the_engine_on_it() {
+    use crate::record_audio_sources::SOURCES_ENV;
+    let shared = Shared::new(None);
+    let spec = |v: &str| Some(EngineSpec { env: vec![(SOURCES_ENV.into(), Some(v.into()))] });
+    shared.set_desired(spec("[a]"), crate::record_dispatch::Sent::Waiting);
+    let (gen, _) = shared.desired(); // the manager reads the spec
+    assert!(!shared.respawn_if_sources_moved(gen), "no change during the spawn: no respawn");
+    assert_eq!(shared.generation(), gen);
+    let (gen, _) = shared.desired();
+    shared.spawn_sources.set("[b]"); // the Audio page, while the pid is still 0
+    assert!(shared.respawn_if_sources_moved(gen), "the change during the spawn respawns");
+    assert_eq!(shared.generation(), gen + 1, "a retarget to the same target");
+    let (_, respawn) = shared.desired();
+    assert_eq!(respawn.unwrap().env, vec![(SOURCES_ENV.to_string(), Some("[b]".to_string()))], "on the new list");
+    assert!(!shared.respawn_if_sources_moved(gen + 1), "once");
+    // The manager calls it right after the pid shows (source guard: the loop needs an engine).
+    let manager: String = include_str!("supervisor_manager.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(manager.contains("shared.set_health(EngineHealth::Running { pid }); shared.respawn_if_sources_moved(gen);"), "the manager checks right after the pid");
+}
+
 /// F-audio-1, the controller side: every change of the list, the live-only ones included, gives
 /// the list a later spawn must start with; no change gives none.
 #[test]
