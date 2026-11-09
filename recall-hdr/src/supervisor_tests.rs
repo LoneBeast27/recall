@@ -141,7 +141,7 @@ fn a_crash_respawn_starts_with_the_live_audio_sources() {
         cmd.get_envs().find(|(k, _)| *k == SOURCES_ENV).and_then(|(_, v)| v).map(|v| v.to_string_lossy().into_owned())
     };
     assert_eq!(env(&sup.shared).as_deref(), Some(old), "no live change yet: the spec's");
-    sup.set_spawn_sources(live); // what apply_config_effects calls on the change
+    sup.update_audio(Some(live), &[]); // what apply_config_effects calls on the change
     assert_eq!(env(&sup.shared).as_deref(), Some(live), "the respawn starts with the live flag and the picked twin");
     sup.shutdown(Duration::from_millis(200));
 }

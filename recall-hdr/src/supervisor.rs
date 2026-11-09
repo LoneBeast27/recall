@@ -196,12 +196,6 @@ impl Supervisor {
         self.shared.set_mute_and_send(muted)
     }
 
-    /// The audio sources (`record_audio_sources::engine_value`) every later spawn starts with,
-    /// a crash respawn included (`supervisor_sources.rs`). Set on every change of the list.
-    pub fn set_spawn_sources(&self, value: &str) {
-        self.shared.spawn_sources.set(value);
-    }
-
     /// The last engine `hello` and `status` lines (raw JSON), for late joiners.
     pub fn cached_engine_events(&self) -> Vec<String> {
         let cache = self.shared.cache.lock().unwrap_or_else(|p| p.into_inner());
