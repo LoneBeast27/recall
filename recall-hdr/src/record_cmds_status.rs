@@ -39,6 +39,9 @@ impl Controller {
             status["setup_owner"] = json!(owner);
         }
         status["other_recorder"] = json!(self.supervisor.slot_held() != crate::engine_slot::SlotHeld::Free);
+        // The last audio line sent: the Audio page says "Applying…" until the engine's
+        // `status.audio_seq` reaches it (design-audio-mute P20).
+        status["audio_sent_seq"] = json!(self.supervisor.last_audio_seq());
         status
     }
 
