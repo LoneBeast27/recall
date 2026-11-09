@@ -40,7 +40,7 @@ fn an_old_folder_list_with_videos_linked_keeps_recalls_clips_its_own() {
 
 #[test]
 fn an_owned_clip_named_by_its_verbatim_path_still_goes_to_the_bin() {
-    // The editor holds a clip by its canonical path (`\\?\L:\...`); the folder list is plain.
+    // The editor holds a clip by its canonical path (`\\?\Y:\...`); the folder list is plain.
     let root = crate::test_temp::TempDir::sandbox("owned-verbatim");
     let own = clip(&root.join("Recall"), "undone.mp4");
     // The folder list holds the plain form (the sandbox path has a `..` in it).
