@@ -364,7 +364,7 @@ impl Worker {
                 }
             }
             Err(reason) => {
-                self.events.save_failed(&reason);
+                self.fail(&reason);
                 self.events.log(&timing.line("failed", job.secs as f32, 0, 0));
             }
         }
@@ -480,5 +480,8 @@ pub fn clip_path(out_dir: &str, source: &str) -> String {
 #[cfg(test)]
 #[path = "saver_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "saver_giveup_tests.rs"]
+mod giveup_tests;
 #[path = "saver_writing.rs"]
 mod writing;

@@ -24,6 +24,9 @@ pub enum Outbound {
         /// This engine takes `stop_capture` (`stop_capture.rs`); a controller holds a privacy
         /// stop for a save in flight on an engine that does not say so.
         stop_capture: bool,
+        /// A released engine sends `save_progress` at once and on every drain poll, and
+        /// reports its own give-up (R2-detect-r10-p6-1, design-detect-release P5/P6).
+        drain_heartbeat: bool,
     },
     /// Sent on change (and ~1/s for fps): current live state.
     Status {
@@ -107,7 +110,15 @@ pub enum Outbound {
     /// A released or orphaned engine draining its saves at quit (no `status` lines any more):
     /// `status.save_writing` once a second, so the controller sees the save still writing
     /// (R2-detect-r10-p2-1). Its own type: a bare `status` would blank the cached engine view.
-    SaveProgress { save_writing: SaveWriting },
+    /// The heartbeat (design-detect-release P5): sent at once and on every poll, the save
+    /// alive or stalled (`stalled_for`: whole awake seconds since its step counter last moved;
+    /// no `save_writing` when the saver is empty). The engine alone judges a stalled save; the
+    /// controller kills a released engine only when these stop (it is hung, not the save).
+    SaveProgress {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        save_writing: Option<SaveWriting>,
+        stalled_for: u64,
+    },
     /// A `save_clip` failed. `rejected`: it failed before it was queued for
     /// writing (the newest request, while older saves may still be writing).
     SaveFailed {
@@ -466,30 +477,7 @@ mod tests {
     }
 }
 
-/// Tests: what this thread emitted. `emit`'s one observer (`set_observer`, first call wins) is
-/// installed by [`test_emits::install`] and keeps each thread's lines apart, so tests that
-/// emit in parallel do not see each other's.
+/// Tests: what this thread emitted (`protocol_test_emits.rs`).
 #[cfg(test)]
-pub(crate) mod test_emits {
-    use std::cell::RefCell;
-
-    thread_local! {
-        static LINES: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
-    }
-
-    /// Start collecting (idempotent) and clear this thread's lines.
-    pub(crate) fn install() {
-        super::set_observer(|msg| {
-            if let Ok(line) = serde_json::to_string(msg) {
-                LINES.with(|l| l.borrow_mut().push(line));
-            }
-        });
-        LINES.with(|l| l.borrow_mut().clear());
-    }
-
-    /// This thread's lines since [`install`] whose JSON `type` is `kind`.
-    pub(crate) fn of(kind: &str) -> Vec<String> {
-        let tag = format!(r#""type":"{kind}""#);
-        LINES.with(|l| l.borrow().iter().filter(|line| line.contains(&tag)).cloned().collect())
-    }
-}
+#[path = "protocol_test_emits.rs"]
+pub(crate) mod test_emits;
