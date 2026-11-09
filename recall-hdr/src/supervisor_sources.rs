@@ -30,6 +30,8 @@ struct Inner {
     baked: Option<String>,
     /// The last sequence number given to an audio line.
     seq: u64,
+    /// The last one queued (or dropped by a full queue) to an attached engine: what it must ack.
+    sent: u64,
     /// The last spawn was below the protocol floor (`supervisor_floor.rs`), with whether its game
     /// is captured by process tree: its list (and so the current one) withholds devices.
     below_floor: Option<bool>,
@@ -99,19 +101,31 @@ impl SpawnSources {
         !audio_intent::same_shape(&baked, &current)
     }
 
-    /// `line` with the next sequence number.
-    pub(super) fn stamp(&self, line: &str) -> String {
+    /// `line` with the next sequence number, and that number.
+    fn stamp(&self, line: &str) -> (String, u64) {
         let mut g = self.lock();
         g.seq += 1;
-        audio_intent::stamped(line, g.seq)
+        (audio_intent::stamped(line, g.seq), g.seq)
     }
 
-    pub(super) fn last_seq(&self) -> u64 {
-        self.lock().seq
+    /// What the engine must ack (`status.audio_seq`).
+    pub(super) fn last_sent(&self) -> u64 {
+        self.lock().sent
     }
 }
 
 impl super::Shared {
+    /// One audio line to the engine with its sequence number (the caller holds `child_stdin`).
+    /// A line for an attached engine counts as sent even when a full queue drops it, so the ack
+    /// watch re-sends it (`record_audio_ack`); one refused at a quit or with no engine does not.
+    pub(super) fn queue_audio(&self, g: &super::EngineStdin, line: &str) -> Sent {
+        let (line, seq) = self.spawn_sources.stamp(line);
+        if g.quitting.is_none() && g.queue.is_some() {
+            self.spawn_sources.lock().sent = seq;
+        }
+        self.queue_line(g, &line)
+    }
+
     /// Right after a spawn shows its pid (review R2-audio-r9-1): a source change since the spec
     /// read that moved the track shape got no `sync` at the attach, so that engine stays held.
     /// Retarget generation `gen` to itself, so the manager quits it and respawns on the current
@@ -135,7 +149,7 @@ impl super::Shared {
     /// that the current list no longer records the same way, then `sync`, which releases the
     /// engine's held tracks. No `sync` when the track shape moved: that engine stays held until
     /// the respawn quits it (B5). The caller holds `child_stdin`. False: a line was not queued.
-    pub(super) fn restate(&self, queue: &super::stdin::StdinQueue) -> bool {
+    pub(super) fn restate(&self, g: &super::EngineStdin) -> bool {
         let mut lines: Vec<String> = Vec::new();
         if let Some(now) = self.spawn_mute.get() {
             lines.push(crate::record_dispatch::mic_line(now, false)); // never a press (R2-audio-r9-3)
@@ -145,7 +159,7 @@ impl super::Shared {
         if audio_intent::same_shape(&baked, &current) {
             lines.push(serde_json::json!({"cmd": "sync"}).to_string());
         }
-        let all = lines.iter().all(|l| queue.send(&self.spawn_sources.stamp(l)));
+        let all = lines.iter().fold(true, |all, l| self.queue_audio(g, l).queued() && all);
         if !all {
             crate::log!("supervisor: the engine's audio restatement could not be queued; its device tracks stay held");
         }
@@ -168,18 +182,18 @@ impl super::Supervisor {
         let kept: Vec<String> = s.spawn_sources.baked_and_current().1.into_iter().map(|c| c.id).collect();
         let below = s.spawn_sources.below_floor();
         let lines: Vec<&Value> = lines.iter().filter(|l| !below || l["id"].as_str().is_some_and(|id| kept.iter().any(|k| k.trim() == id.trim()))).collect();
-        lines.iter().fold(Sent::Queued, |sent, line| sent.then(s.queue_line(&g, &s.spawn_sources.stamp(&line.to_string()))))
+        lines.iter().fold(Sent::Queued, |sent, line| sent.then(s.queue_audio(&g, &line.to_string())))
     }
 
     /// The sequence number of the last audio line queued (`status.audio_seq` acks it).
     pub fn last_audio_seq(&self) -> u64 {
-        self.shared.spawn_sources.last_seq()
+        self.shared.spawn_sources.last_sent()
     }
 
     /// Queue the whole audio intent again (an unacknowledged line, `record_audio_ack`).
     pub fn restate_audio(&self) -> bool {
         let s = &self.shared;
         let g = s.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
-        g.quitting.is_none() && g.queue.as_ref().is_some_and(|q| s.restate(q))
+        g.quitting.is_none() && g.queue.is_some() && s.restate(&g)
     }
 }
