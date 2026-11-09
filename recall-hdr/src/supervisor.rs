@@ -43,6 +43,8 @@ mod protocol;
 mod refusal;
 #[path = "supervisor_release.rs"]
 mod release;
+#[path = "supervisor_release_wait.rs"]
+mod release_wait;
 #[path = "supervisor_stdin.rs"]
 mod stdin;
 #[path = "supervisor_locate.rs"]
@@ -296,6 +298,8 @@ struct Shared {
     events: Mutex<Option<std::sync::mpsc::Sender<serde_json::Value>>>,
     /// Another recorder holds the engine slot (`engine_slot`).
     slot: crate::engine_slot::SlotFlag,
+    /// The awake clock and the last drain heartbeat (`supervisor_release_wait`).
+    beats: release_wait::Beats,
 }
 
 /// The live child's stdin and whether it was told to quit, under one lock: the check and
@@ -347,6 +351,7 @@ impl Shared {
             hub: Mutex::new(None),
             events: Mutex::new(None),
             slot: Default::default(),
+            beats: Default::default(),
         }
     }
 

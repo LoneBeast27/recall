@@ -8,7 +8,7 @@
 //! [`STOP_CAPTURE_CAP`] is never sent it (the controller holds the stop instead).
 
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::{Shared, Supervisor, QUIT_GRACE};
 use crate::engine_policy::EngineSpec;
@@ -51,19 +51,6 @@ impl Supervisor {
         let release = self.shared.release_gen.load(Ordering::SeqCst);
         self.shared.settled_gen.store(release, Ordering::SeqCst);
     }
-}
-
-/// A released engine's kill deadline now: its own, cut to [`QUIT_GRACE`] once its saves
-/// landed (`settled`) and to the stop's grace when the supervisor stops (`stopping`).
-pub(super) fn release_deadline(deadline: Instant, now: Instant, settled: bool, stopping: Option<Duration>) -> Instant {
-    let mut cut = deadline;
-    if settled {
-        cut = cut.min(now + QUIT_GRACE);
-    }
-    if let Some(grace) = stopping {
-        cut = cut.min(now + grace);
-    }
-    cut
 }
 
 impl Shared {
@@ -120,13 +107,7 @@ mod tests {
         let sup = Supervisor { shared: Arc::new(shared), handle: None };
         sup.release_settled();
         assert!(sup.shared.release_is_settled(release));
-        let now = Instant::now();
-        let far = now + RELEASE_GRACE;
-        assert_eq!(release_deadline(far, now, false, None), far, "saving: the engine's own bound");
-        assert_eq!(release_deadline(far, now, true, None), now + QUIT_GRACE, "settled: 8 s");
-        let later = now + Duration::from_secs(5);
-        assert_eq!(release_deadline(now + QUIT_GRACE, later, true, None), now + QUIT_GRACE, "the cut does not slide");
-        assert_eq!(release_deadline(far, now, false, Some(Duration::from_secs(1))), now + Duration::from_secs(1), "app quit");
+        // The kill moment itself: `supervisor_release_wait` (design P10).
         sup.shared.set_desired_how(None, Sent::Switching, true);
         assert!(!sup.shared.release_is_settled(sup.shared.release_gen.load(Ordering::SeqCst)), "a newer release waits for its own saves");
     }
@@ -186,7 +167,7 @@ mod tests {
         let body = crate::test_src::method_body(include_str!("record_actions.rs"), "plan_engine");
         let settle = body.find("self.supervisor.release_settled()").expect("plan_engine settles releases");
         let guard = body[..settle].rfind("if ").map(|i| &body[i..settle]).unwrap_or("");
-        assert!(guard.contains("self.activity.release_may_settle(now)"), "guarded by: {guard}");
+        assert!(guard.contains("self.activity.release_may_settle(awake)"), "guarded by: {guard}");
         assert!(!guard.contains("busy.saving"), "guarded by: {guard}");
     }
 }
