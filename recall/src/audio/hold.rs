@@ -42,6 +42,8 @@ pub(crate) struct Live {
     repick: AtomicBool,
     /// A re-pick thread of this track runs (`rebind`): at most one at a time.
     pub(super) repick_slot: Arc<AtomicBool>,
+    /// Silence whatever Alt+M says: stdin was not drained before the start (merge-gate P1-1).
+    startup: AtomicBool,
 }
 
 /// What a packet does with the hold.
@@ -149,7 +151,23 @@ impl TrackRing {
                 true
             }
         };
-        self.push_samples(data, now.muted, held);
+        self.push_samples(data, now.muted, held || self.live.startup.load(Ordering::SeqCst));
+    }
+
+    /// Stdin was not drained before the start (merge-gate P1-1): this input stores silence
+    /// until [`Self::release_startup_hold`], whatever Alt+M or its flag says.
+    pub(crate) fn hold_startup(&self) {
+        self.live.startup.store(true, Ordering::SeqCst);
+    }
+
+    /// Every line queued before the start was applied: the input records as its flags say.
+    pub(crate) fn release_startup_hold(&self) {
+        self.live.startup.store(false, Ordering::SeqCst);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn startup_held(&self) -> bool {
+        self.live.startup.load(Ordering::SeqCst)
     }
 }
 

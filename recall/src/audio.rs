@@ -329,7 +329,8 @@ impl TrackRing {
 
 /// Resolve + start every source in list order. Failures are per-source (a broken input
 /// must not kill game audio); returns whatever started, with a report line each.
-pub fn start(buffer_secs: u32, mut report: impl FnMut(String)) -> Vec<Arc<TrackRing>> {
+/// `hold`: stdin was not drained in time; every input starts held (`TrackRing::hold_startup`).
+pub fn start(buffer_secs: u32, hold: bool, mut report: impl FnMut(String)) -> Vec<Arc<TrackRing>> {
     // The spawn mute was applied before stdin is read (`apply_spawn_mute`, main.rs).
     report(format!(
         "audio endpoints -- render: {:?} | capture: {:?}",
@@ -355,7 +356,7 @@ pub fn start(buffer_secs: u32, mut report: impl FnMut(String)) -> Vec<Arc<TrackR
             }
             _ => None,
         };
-        match start_track(spec, buffer_secs, target) {
+        match start_track(spec, buffer_secs, target, hold) {
             Ok(ring) => {
                 report(format!("audio track '{}' up: {} ({} Hz, {} ch)", ring.title(), ring.endpoint(), ring.rate, ring.channels));
                 sources::note_live(spec, &ring);
@@ -374,6 +375,7 @@ pub fn start(buffer_secs: u32, mut report: impl FnMut(String)) -> Vec<Arc<TrackR
         }
     }
     out.extend(app_rings);
+    sources::close_staging(); // every track is listed: later set_source lines apply at once
     sources::in_list_order(&list, out)
 }
 
@@ -428,8 +430,11 @@ fn source_of(kind: Option<Kind>, process: bool) -> &'static str {
 /// on the capture thread (they are !Send); init success/failure is reported
 /// back over a channel before this returns. `target` selects process loopback
 /// instead of the source's endpoint.
-fn start_track(spec: &SourceSpec, buffer_secs: u32, target: Option<LoopbackTarget>) -> Result<Arc<TrackRing>, String> {
+fn start_track(spec: &SourceSpec, buffer_secs: u32, target: Option<LoopbackTarget>, hold: bool) -> Result<Arc<TrackRing>, String> {
     let ring = Arc::new(TrackRing::for_source(spec, source_of(spec.kind(), target.is_some()), buffer_secs, String::new()));
+    if hold && ring.input {
+        ring.hold_startup(); // before its capture thread stores a packet (merge-gate P1-1)
+    }
     let direction = if spec.kind() == Some(Kind::Input) { Direction::Capture } else { Direction::Render };
     let device = (spec.device.clone(), spec.device_id.clone());
     let communications = spec.uses_communications();
