@@ -12,36 +12,14 @@ use std::path::{Path, PathBuf};
 pub const OLD_IDENTIFIER: &str = "com.rohan.recall-hub";
 pub const NEW_IDENTIFIER: &str = "io.github.lonebeast27.recall-hub";
 
-/// MIGRATION ONLY, never a default: the clip folder the hub used to hard-code before
-/// it had a saved setting. A hub that ran under OLD_IDENTIFIER, has no saved clip
-/// folder and finds this folder on disk gets it saved once (hub_settings), so its
-/// clips page does not move. Everyone else falls back to <Videos>\Recall.
-const LEGACY_CLIP_FOLDER: &str = r"V:\ALL RECORDINGS";
-
 /// Copies `<base>\OLD_IDENTIFIER` to `<base>\NEW_IDENTIFIER` for the roaming and
-/// local app-data bases, where the new folder is missing, then carries the legacy
-/// clip folder over. Best effort: a failure is logged and the hub starts with
-/// whatever is there.
+/// local app-data bases, where the new folder is missing. Best effort: a failure
+/// is logged and the hub starts with whatever is there.
 pub fn migrate_app_data() {
     for var in ["APPDATA", "LOCALAPPDATA"] {
         let Some(base) = std::env::var_os(var).map(PathBuf::from) else { continue };
         if let Err(e) = migrate_in(&base, OLD_IDENTIFIER, NEW_IDENTIFIER) {
             eprintln!("recall-hub: app data carry-over in %{var}% failed: {e}");
-        }
-    }
-    if let Some(local) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from) {
-        let ran_before = local.join(OLD_IDENTIFIER).is_dir();
-        let settings = crate::hub_settings::settings_path(&local.join(NEW_IDENTIFIER));
-        carry_legacy_clip_folder(&settings, ran_before, LEGACY_CLIP_FOLDER, Path::new(LEGACY_CLIP_FOLDER).is_dir());
-    }
-}
-
-/// Saves `legacy` as the hub's clip folder when [`crate::hub_settings::legacy_folder_to_save`] says so.
-fn carry_legacy_clip_folder(settings: &Path, ran_before: bool, legacy: &str, legacy_exists: bool) {
-    let saved = crate::hub_settings::saved_clip_folder(settings);
-    if let Some(folder) = crate::hub_settings::legacy_folder_to_save(saved.as_deref(), ran_before, legacy, legacy_exists) {
-        if let Err(e) = crate::hub_settings::save_clip_folder(settings, folder) {
-            eprintln!("recall-hub: saving the clip folder failed: {e}");
         }
     }
 }
@@ -88,21 +66,6 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
-    }
-
-    #[test]
-    fn legacy_clip_folder_is_saved_once_and_never_over_a_setting() {
-        use crate::hub_settings::{save_clip_folder, saved_clip_folder, settings_path};
-        let base = scratch("legacy");
-        let settings = settings_path(&base);
-        carry_legacy_clip_folder(&settings, true, r"Z:\Old", false);
-        assert!(!settings.exists(), "legacy folder missing -> no write");
-        carry_legacy_clip_folder(&settings, true, r"Z:\Old", true);
-        assert_eq!(saved_clip_folder(&settings).as_deref(), Some(r"Z:\Old"), "no setting + legacy exists -> saved");
-        save_clip_folder(&settings, r"D:\Mine").unwrap();
-        carry_legacy_clip_folder(&settings, true, r"Z:\Old", true);
-        assert_eq!(saved_clip_folder(&settings).as_deref(), Some(r"D:\Mine"), "saved setting untouched");
-        let _ = std::fs::remove_dir_all(&base);
     }
 
     #[test]
