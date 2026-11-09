@@ -65,9 +65,10 @@ impl super::Shared {
     }
 }
 
-/// The engine command that sets its mic mute.
+/// The engine command that sets its mic mute: always the user's Alt+M here (`set_mic`, or its
+/// catch-up at attach), so it is sent as a press (gate review P2-b; a resync is not one).
 pub(super) fn mute_line(muted: bool) -> String {
-    serde_json::json!({"cmd": "set_mic_mute", "muted": muted}).to_string()
+    crate::record_dispatch::mic_line(muted, true)
 }
 
 #[cfg(test)]

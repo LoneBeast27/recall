@@ -43,7 +43,7 @@ use endpoints::match_endpoint;
 pub(crate) use mute::{initial_mute, MuteNow};
 #[cfg(test)]
 pub(crate) use mute::MIC_MUTED_ENV;
-pub use mute::{mic_muted, set_mic_muted, toggle_mic_mute};
+pub use mute::{mic_muted, set_mic_muted, set_mic_muted_by, toggle_mic_mute};
 
 /// The spawn-time mute (`RECALL_MIC_MUTED`), applied before stdin is read and before any track
 /// opens: a muted mic records nothing of this run, and an Alt+M that comes early is kept.

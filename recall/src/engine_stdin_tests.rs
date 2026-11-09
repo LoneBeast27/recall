@@ -33,8 +33,16 @@ impl Read for Pipe {
     }
 }
 
-/// Puts the global mute back as it was.
-struct Restore(bool);
+/// Tests that move the engine's global mute run one at a time.
+static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Puts the global mute back as it was, then lets the next test in.
+struct Restore(bool, #[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+fn restore() -> Restore {
+    let lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    Restore(audio::mic_muted(), lock)
+}
 
 impl Drop for Restore {
     fn drop(&mut self) {
@@ -57,7 +65,7 @@ fn spawn(quit: Arc<AtomicBool>) -> (Sender<Vec<u8>>, Receiver<Command>) {
 
 #[test]
 fn an_alt_m_sent_within_50_ms_of_the_spawn_mutes_the_first_samples() {
-    let _restore = Restore(audio::mic_muted());
+    let _restore = restore();
     audio::set_mic_muted(false);
     let quit = Arc::new(AtomicBool::new(false));
     let spawned = Instant::now();
@@ -72,7 +80,7 @@ fn an_alt_m_sent_within_50_ms_of_the_spawn_mutes_the_first_samples() {
     let held = ring.snapshot(0.01);
     assert!(held.iter().all(|s| *s == 0.0), "the ring holds no live sample of a muted mic");
     // The later handler gets the state the toggle set (it reports it once `hello` is out).
-    assert!(matches!(commands.recv_timeout(Duration::from_secs(2)), Ok(Command::SetMicMute { muted: true })));
+    assert!(matches!(commands.recv_timeout(Duration::from_secs(2)), Ok(Command::SetMicMute { muted: true, .. })));
     drop(lines);
     let deadline = Instant::now() + Duration::from_secs(2);
     while !quit.load(std::sync::atomic::Ordering::Relaxed) && Instant::now() < deadline {
@@ -80,3 +88,18 @@ fn an_alt_m_sent_within_50_ms_of_the_spawn_mutes_the_first_samples() {
     }
     assert!(quit.load(std::sync::atomic::Ordering::Relaxed), "the end of stdin still quits");
 }
+
+/// Gate review P2-b: a resync (`set_mic_mute` with no `press`) is not a press, so it never
+/// releases an input held on an unsure sibling; the user's change (`press`) is one.
+#[test]
+fn a_resync_is_not_a_press() {
+    let _restore = restore();
+    audio::set_mic_muted(false);
+    let presses = MuteNow::read().presses;
+    let lines = "{\"cmd\":\"set_mic_mute\",\"muted\":true}\n{\"cmd\":\"set_mic_mute\",\"muted\":false}\n";
+    read_early(std::io::Cursor::new(lines), |_| {});
+    assert_eq!(MuteNow::read().presses, presses, "two resyncs that changed the state: no press");
+    read_early(std::io::Cursor::new("{\"cmd\":\"set_mic_mute\",\"muted\":true,\"press\":true}\n"), |_| {});
+    assert_eq!(MuteNow::read(), MuteNow { muted: true, presses: presses + 1 }, "the user's change is a press");
+}
+

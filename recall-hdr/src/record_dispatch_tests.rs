@@ -5,6 +5,15 @@
 use super::*;
 use crate::supervisor::TestPipe;
 
+/// Gate review P2-b: only the user's press says so; a resync never counts as a press.
+#[test]
+fn only_the_users_mic_change_is_sent_as_a_press() {
+    let press: serde_json::Value = serde_json::from_str(&mic_line(true, true)).unwrap();
+    assert_eq!(press, serde_json::json!({"cmd": "set_mic_mute", "muted": true, "press": true}));
+    let resync: serde_json::Value = serde_json::from_str(&mic_line(false, false)).unwrap();
+    assert_eq!(resync, serde_json::json!({"cmd": "set_mic_mute", "muted": false}));
+}
+
 #[test]
 fn a_save_to_a_wedged_engine_says_so_and_neither_ticks_nor_waits_for_it() {
     let full = TestPipe::wedged_and_full();
