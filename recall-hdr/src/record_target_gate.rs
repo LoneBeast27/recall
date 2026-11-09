@@ -100,7 +100,7 @@ pub fn traits_of(ev: &WatchEvent, cfg: &Config) -> Traits {
 
 /// `ev`'s exe is a game only through a `detect.fullscreen_games` entry (no override,
 /// not a known game, no Steam / launcher / Store install), whether its window is
-/// fullscreen now or not (Rohan 2026-11-05: fullscreen Discord is a game, windowed
+/// fullscreen now or not (the maintainer 2026-11-05: fullscreen Discord is a game, windowed
 /// Discord is not).
 pub fn fullscreen_only_opt_in(ev: &WatchEvent, cfg: &Config) -> bool {
     is_fullscreen_game(cfg, &ev.exe_stem)

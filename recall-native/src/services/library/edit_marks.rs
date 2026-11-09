@@ -26,7 +26,7 @@ pub enum Verdict {
 /// (CyberLink, TechSmith, Wondershare, Blackmagic) are left out: a raw clip must never be skipped.
 /// MainConcept is the H.264/AAC encoder inside Premiere Pro and Media Encoder; its handler names
 /// ("Mainconcept Video Media Handler") stay even when the export drops its XMP. The XMP toolkit
-/// tag marks any Adobe app. No recorder sampled on Rohan's disk (SteelSeries, GeForce, MeldStudio,
+/// tag marks any Adobe app. No recorder sampled on the maintainer's disk (SteelSeries, GeForce, MeldStudio,
 /// Recall: 35 files, 2026-11-05) writes either.
 const MARKERS: [(&str, &str); 21] = [
     ("adobe premiere", "Adobe Premiere Pro"),

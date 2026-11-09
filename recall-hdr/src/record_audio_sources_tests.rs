@@ -171,7 +171,7 @@ fn the_saved_endpoint_id_reaches_the_engine() {
     assert!(!engine_value(&[old]).contains("device_id"), "no id saved: none sent");
 }
 
-/// Item 9 (Rohan: "auto mic and game audio"): the first-run profile records the game and the
+/// Item 9 (the maintainer: "auto mic and game audio"): the first-run profile records the game and the
 /// Windows default microphone; no System output, and no Communications output in the Mix.
 /// The enumeration is injected: the endpoint below stands for what Windows reports.
 #[test]

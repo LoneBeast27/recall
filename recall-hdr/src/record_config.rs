@@ -31,7 +31,7 @@ pub const QUALITIES: [&str; 3] = ["performance", "balanced", "quality"];
 pub const FPS_MIN: u32 = 15;
 /// The recording rate is also the capture cap (1.1x): above 240 a fast game (VALORANT ~750 fps)
 /// would be copied and encoded nearly every frame it draws, the cost behind the 10-26 freezes.
-/// Exports keep their own higher rates. (Review 11-05; Rohan's call between 240 and 960 pending.)
+/// Exports keep their own higher rates. (Review 11-05; the maintainer's call between 240 and 960 pending.)
 pub const FPS_MAX: u32 = 240;
 pub const BITRATE_MBPS_MIN: u32 = 1;
 pub const BITRATE_MBPS_MAX: u32 = 200;
@@ -118,7 +118,7 @@ impl Default for RecordingCfg {
             buffer_secs: 120,
             save_hotkey: "Alt+N".into(),
             mic_hotkey: "Alt+M".into(),
-            // One direct Alt combo per action (Rohan, 2026-11-05: the old
+            // One direct Alt combo per action (the maintainer, 2026-11-05: the old
             // two-step chord was Alt too, so it bought nothing).
             bookmark_hotkey: crate::record_hotkeys::DEFAULT_BOOKMARK.into(),
             screenshot_hotkey: crate::record_hotkeys::DEFAULT_SCREENSHOT.into(),
@@ -184,7 +184,7 @@ pub struct DetectCfg {
 
 impl Default for DetectCfg {
     fn default() -> Self {
-        // Rohan, 2026-11-05: "discord i dont mind being in there as a personal decision".
+        // The maintainer, 2026-11-05: "discord i dont mind being in there as a personal decision".
         DetectCfg { fullscreen_games: vec!["Discord".into()] }
     }
 }
