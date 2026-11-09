@@ -343,6 +343,10 @@ impl App {
             log!("app: FocusedRule({kind:?}) ignored -- no focused app recorded yet");
             return;
         };
+        if focused_rule_refused(&stem, kind) {
+            log!("app: FocusedRule({kind:?}) refused -- {stem} is part of Windows or Recall (a game rule also records the app)");
+            return;
+        }
         if let Some(o) = self.cfg.overrides.iter_mut().find(|o| o.exe.eq_ignore_ascii_case(&stem)) {
             o.kind = kind;
         } else {
@@ -430,3 +434,10 @@ impl App {
 #[cfg(test)]
 #[path = "app_tests.rs"]
 mod tests;
+
+/// R2-detect-r10-5: the legacy tray's "mark focused app HDR/SDR" writes a game override, which
+/// also records the app (the user's own entry, F-detect-2): never for Recall or Windows itself
+/// (the shared `never_recorded` list). A `none` rule is always fine.
+pub(crate) fn focused_rule_refused(stem: &str, kind: RuleKind) -> bool {
+    kind != RuleKind::None && crate::never_recorded::never_recordable(stem)
+}

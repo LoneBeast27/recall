@@ -106,6 +106,13 @@ fn set_kind(cfg: &Config, exe: &str, kind: RuleKind) -> Option<Value> {
     Some(json!({ "overrides": list }))
 }
 
+/// Why `op` on `exe` is refused: Recall itself and Windows are never recorded, so Settings
+/// must not list them as "Recorded" (final review F-detect-2). Never / Remove still apply.
+pub(crate) fn refused(exe: &str, op: GameOp) -> Option<String> {
+    let adds = matches!(op, GameOp::Record | GameOp::Fullscreen);
+    (adds && crate::record_target_rules::never_recordable(exe)).then(|| format!("{exe} is part of Windows or Recall and is never recorded"))
+}
+
 /// The tray's "Add <exe> as a game": Record, but never over a Never record entry
 /// (R8-detect-8); `None` = leave the config as it is.
 pub(crate) fn tray_add_patch(cfg: &Config, exe: &str) -> Option<Value> {
@@ -129,6 +136,9 @@ impl Controller {
         let (Some(exe), Some(op)) = (exe, op) else {
             return self.reply_error(client, "register_game needs \"exe\" (an exe name, no folders) and \"how\": record|never|fullscreen|remove|unlist");
         };
+        if let Some(why) = refused(exe, op) {
+            return self.reply_error(client, &why);
+        }
         self.apply_config_change(client, |cfg| op_patch(cfg, exe, op));
     }
 }

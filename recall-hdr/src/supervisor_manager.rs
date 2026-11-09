@@ -73,8 +73,11 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
                 let exit = supervise_child(&shared, &mut child, gen);
                 // Shutdown is no game switch: a line sent meanwhile is told "not responding".
                 // A retarget's reason is read with its quit (`None`: `send_retarget_quit`).
+                // A release (`supervisor_release.rs`) lets the old engine finish its saves.
+                let release = matches!(exit, ChildExit::Retarget) && shared.release_asked(gen);
                 let stop = match exit {
                     ChildExit::StopRequested => Some((shared.grace(), Some(Sent::NotResponding))),
+                    ChildExit::Retarget if release => Some((super::release::RELEASE_GRACE, None)),
                     ChildExit::Retarget => Some((shared.restart_grace(), None)),
                     _ => None,
                 };
@@ -82,7 +85,7 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
                     // Run quit->grace->kill FIRST, while the stdin queue is open (`quit` is queued,
                     // never written here: a wedged pipe cannot hold the kill back);
                     // only a dead child closes stdout and unblocks the reader.
-                    finish_shutdown(&shared, child, grace, refusal);
+                    finish_shutdown(&shared, child, grace, refusal, release);
                 }
                 shared.set_child_stdin(None, None);
                 let _ = reader.join();
@@ -245,23 +248,34 @@ fn supervise_child(shared: &Arc<Shared>, child: &mut Child, gen: u64) -> ChildEx
     }
 }
 
-/// Ordered stop of a still-running child: send `quit` (from then on every line is
-/// refused with `refusal`, `None` = the last retarget's, until the next engine's stdin),
-/// wait up to `grace` polling `try_wait`, then hard-kill any survivor.
-fn finish_shutdown(shared: &Arc<Shared>, mut child: Child, grace: Duration, refusal: Option<Sent>) {
+/// Ordered stop of a still-running child: send `quit` (`release`: `stop_capture`; from
+/// then on every line is refused with `refusal`, `None` = the last retarget's, until the
+/// next engine's stdin), wait up to `grace` polling `try_wait`, then hard-kill any survivor.
+/// A released engine's wait is cut to the stop's grace when the supervisor stops.
+fn finish_shutdown(shared: &Arc<Shared>, mut child: Child, grace: Duration, refusal: Option<Sent>, release: bool) {
     let pid = child.id();
     // First, even for a child already gone: no line may go to an engine that is ending.
     match refusal {
         Some(refusal) => shared.send_quit(refusal),
+        None if release => shared.send_release_quit(),
         None => shared.send_retarget_quit(),
     };
     if let Ok(Some(_)) = child.try_wait() {
         log!("supervisor: engine (pid {pid}) already exited before shutdown");
         return;
     }
-    log!("supervisor: stopping engine (pid {pid}); grace {}ms", grace.as_millis());
-    let deadline = Instant::now() + grace;
+    if release {
+        log!("supervisor: engine (pid {pid}) told to stop capture; it exits once its saves are written (up to {} min)", grace.as_secs() / 60);
+    } else {
+        log!("supervisor: stopping engine (pid {pid}); grace {}ms", grace.as_millis());
+    }
+    let mut deadline = Instant::now() + grace;
+    let release_gen = shared.release_gen.load(std::sync::atomic::Ordering::SeqCst);
     while Instant::now() < deadline {
+        if release {
+            let stopping = shared.stop_requested().then(|| shared.grace());
+            deadline = super::release::release_deadline(deadline, Instant::now(), shared.release_is_settled(release_gen), stopping);
+        }
         match child.try_wait() {
             Ok(Some(status)) => {
                 log!("supervisor: engine exited cleanly on quit (code {})", status.code().unwrap_or(-1));

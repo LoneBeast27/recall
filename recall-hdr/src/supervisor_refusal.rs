@@ -15,9 +15,18 @@ impl Shared {
     /// [`Sent::Paused`] for a pause, else always [`Sent::Waiting`]: no engine follows.
     /// An engine already quitting (not for shutdown) refuses with the new reason from now.
     pub(super) fn set_desired(&self, spec: Option<EngineSpec>, refusal: Sent) {
+        self.set_desired_how(spec, refusal, false);
+    }
+
+    /// [`Self::set_desired`]; `release`: the running engine is released, not quit
+    /// (`supervisor_release.rs`), noted under the same lock as the new generation.
+    pub(super) fn set_desired_how(&self, spec: Option<EngineSpec>, refusal: Sent, release: bool) {
         let refusal = stop_refusal(spec.is_none(), refusal);
         let mut g = self.desired.lock().unwrap_or_else(|p| p.into_inner());
         g.0 += 1;
+        if release {
+            self.release_gen.store(g.0, std::sync::atomic::Ordering::SeqCst);
+        }
         g.1 = spec;
         g.2 = refusal;
         let mut stdin = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());

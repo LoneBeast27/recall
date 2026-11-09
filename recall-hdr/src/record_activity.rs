@@ -245,7 +245,8 @@ impl EngineActivity {
     /// shows the main loop alive, not the writer: it moves no window.
     pub fn on_engine_event(&mut self, ev: &Value, unix_now: f64, now: Instant) -> Option<Trigger> {
         let kind = ev.get("type").and_then(Value::as_str);
-        if kind == Some("status") {
+        // A released engine's drain reports `save_writing` alone (`save_progress`).
+        if matches!(kind, Some("status" | "save_progress")) {
             self.on_status(ev, now);
             return None;
         }

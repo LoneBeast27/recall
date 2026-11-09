@@ -21,6 +21,9 @@ pub enum Outbound {
         /// gain boosted live (P2-a). An engine without it (8111e31 and older) ignores those
         /// fields, so the controller restarts it for them instead of sending them.
         live_source_fields: bool,
+        /// This engine takes `stop_capture` (`stop_capture.rs`); a controller holds a privacy
+        /// stop for a save in flight on an engine that does not say so.
+        stop_capture: bool,
     },
     /// Sent on change (and ~1/s for fps): current live state.
     Status {
@@ -101,6 +104,10 @@ pub enum Outbound {
         staged_path: String,
         reason: String,
     },
+    /// A released or orphaned engine draining its saves at quit (no `status` lines any more):
+    /// `status.save_writing` once a second, so the controller sees the save still writing
+    /// (R2-detect-r10-p2-1). Its own type: a bare `status` would blank the cached engine view.
+    SaveProgress { save_writing: SaveWriting },
     /// A `save_clip` failed. `rejected`: it failed before it was queued for
     /// writing (the newest request, while older saves may still be writing).
     SaveFailed {
@@ -308,6 +315,9 @@ pub enum Command {
     /// The Windows session locked (Win+L) or unlocked: a long recording keeps going and
     /// counts the time (`recording_stopped.locked_seconds`).
     SessionLocked { locked: bool },
+    /// The privacy stop (`stop_capture.rs`): capture stops now, nothing more is read, and the
+    /// engine exits once the saves already asked for are written.
+    StopCapture,
     /// Ask the engine to exit cleanly.
     Quit,
 }

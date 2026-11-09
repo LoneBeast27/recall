@@ -30,6 +30,12 @@ pub(crate) trait Transitions {
     fn wanted_now(&self) -> EngineTarget;
     /// Start, restart or stop the engine for `target` now (`apply_engine_target`).
     fn apply_now(&mut self, target: &EngineTarget);
+    /// The privacy stop: the engine stops capture now, finishes its saves, then `target`
+    /// starts (`release_engine_to`). `false`: an older engine without `stop_capture`.
+    fn release_now(&mut self, target: &EngineTarget) -> bool;
+    /// A save or screenshot is in flight (`EngineActivity::retarget_busy`).
+    fn saving(&mut self) -> bool;
+    fn now(&self) -> Instant;
     fn pinned(&self) -> Option<&Target>;
     fn is_paused(&self) -> bool;
     /// The render check's classification (`Controller::classify`).
@@ -79,7 +85,14 @@ pub(crate) trait Transitions {
     /// R8-detect-2: a session that ended for privacy (windowed `fullscreen_games`
     /// app, Never record, a removed registration) stops being captured now: no
     /// drain linger on its still-open window, and its unsaved replay ring goes
-    /// with the engine restart. No clip is made. A pin elsewhere takes over.
+    /// with the engine. No clip is made. A pin elsewhere takes over.
+    ///
+    /// F-detect-1: a save in flight is never cut. The engine is released (only then:
+    /// R2-detect-r10-1, a release can hold the engine slot while it drains): it stops
+    /// capturing at once, takes no new save, and ends after the saves it has; the
+    /// planner already counts the next target, so the app is not "recorded" meanwhile.
+    /// An older engine without `stop_capture` keeps capturing until its save lands
+    /// (the planner holds the stop, no drain linger), then stops.
     fn drop_ring(&mut self, t: &Target) {
         if !matches!(self.planner().applied(), EngineTarget::Window(w) if w.pid == t.pid) {
             return;
@@ -87,6 +100,18 @@ pub(crate) trait Transitions {
         let wanted = self.wanted_now();
         if wanted == *self.planner().applied() {
             return; // the user pinned this very window
+        }
+        // R2-detect-r10-1: only a save in flight is worth a release; otherwise the plain quit.
+        if self.saving() && self.release_now(&wanted) {
+            log!("record: {}'s replay buffer dropped (not saved); capture stopped now, saves in flight finish", t.exe);
+            self.planner_mut().force(wanted);
+            return;
+        }
+        if self.saving() {
+            log!("record: {}'s session ended during a save; this engine stops when the save lands (no stop_capture)", t.exe);
+            let now = self.now();
+            self.planner_mut().cut_drain(now);
+            return;
         }
         log!("record: {}'s replay buffer dropped (not saved); the engine stops capturing it now", t.exe);
         self.planner_mut().force(wanted.clone());
@@ -171,6 +196,15 @@ impl Transitions for Controller {
     }
     fn apply_now(&mut self, target: &EngineTarget) {
         self.apply_engine_target(target);
+    }
+    fn release_now(&mut self, target: &EngineTarget) -> bool {
+        self.release_engine_to(target)
+    }
+    fn saving(&mut self) -> bool {
+        self.activity.retarget_busy(Instant::now()).saving
+    }
+    fn now(&self) -> Instant {
+        Instant::now()
     }
     fn pinned(&self) -> Option<&Target> {
         self.pinned.as_ref()

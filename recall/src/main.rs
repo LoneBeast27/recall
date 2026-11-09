@@ -86,6 +86,7 @@ mod win_volume;
 mod thread_qos;
 mod source;
 mod stdin_commands;
+mod stop_capture;
 #[cfg(test)]
 mod test_alloc;
 
@@ -325,6 +326,7 @@ impl ApplicationHandler for App {
                 monitors: capture::list_monitors(),
                 live_sources: true,
                 live_source_fields: true,
+                stop_capture: true,
             });
         }
         if let Some(early) = early_stdin {
@@ -485,6 +487,6 @@ fn main() {
     }
     #[cfg(feature = "encode")]
     if let Some(encoder) = app.encoder.take() {
-        encoder.shutdown(std::time::Duration::from_secs(3), stdin_reader::orphaned());
+        encoder.shutdown(std::time::Duration::from_secs(3), stdin_reader::saves_finish());
     }
 }
