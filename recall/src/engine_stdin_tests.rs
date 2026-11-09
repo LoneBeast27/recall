@@ -167,3 +167,31 @@ fn a_release_between_the_mute_read_and_the_hold_read_stores_no_live_sample() {
     let stream = include_str!("audio/stream.rs");
     assert!(stream.contains("ring.push_live_read(&leveled, super::MuteNow::read);"), "the capture thread reads the hold first");
 }
+
+/// Staging open again when a test that closed it ends, a panic included.
+struct Reopen;
+
+impl Drop for Reopen {
+    fn drop(&mut self) {
+        audio::sources::reopen_staging_for_test();
+    }
+}
+
+/// Merge-gate F2: a newer set_source (B: Alt+M mutes the line-in) is read while the start
+/// applies an older staged one (A: it does not). B must end in force, never A.
+#[test]
+fn a_set_source_read_while_staging_closes_is_not_overwritten_by_an_older_one() {
+    let _restore = restore();
+    let _reopen = Reopen;
+    let ring = Arc::new(TrackRing::input_for_test("f2-line"));
+    audio::sources::register_for_test("f2-line", &ring);
+    audio::sources::stage_early("f2-line", Some(false), None); // A, staged before the start
+    let mut newer = None;
+    audio::sources::close_staging_for_test(|id, change| {
+        newer = Some(std::thread::spawn(|| audio::sources::stage_early("f2-line", Some(true), None))); // B
+        std::thread::sleep(Duration::from_millis(100)); // B would go live here if it could
+        audio::sources::set_live(id, change); // A
+    });
+    newer.unwrap().join().unwrap();
+    assert!(ring.mic_mute_flag(), "the newer line wins: Alt+M mutes the line-in");
+}

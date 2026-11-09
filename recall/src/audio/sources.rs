@@ -194,10 +194,36 @@ pub fn stage_early(id: &str, mic_mute: Option<bool>, device_id: Option<&str>) {
 /// The tracks started and are listed (`note_live`): every line staged so far goes to its live
 /// track (one read after the list was resolved included), and later ones go there at once.
 pub(super) fn close_staging() {
-    let staged = EARLY.lock().unwrap_or_else(|p| p.into_inner()).take();
-    for (id, mic_mute, device_id) in staged.into_iter().flatten() {
-        set_live(&id, LiveChange { mic_mute, device_id: device_id.as_deref(), ..LiveChange::default() });
+    close_staging_with(|id, change| {
+        set_live(id, change);
+    });
+}
+
+/// [`close_staging`] with the applier passed in (tests). The `EARLY` lock is held across every
+/// apply (merge-gate F2): a newer `set_source` read meanwhile waits in [`stage_early`] and goes
+/// live after the older staged ones, never before them (lock order EARLY, then STATES).
+fn close_staging_with(mut apply: impl FnMut(&str, LiveChange)) {
+    let mut early = EARLY.lock().unwrap_or_else(|p| p.into_inner()); // held to the end: the safe state
+    for (id, mic_mute, device_id) in early.take().into_iter().flatten() {
+        apply(&id, LiveChange { mic_mute, device_id: device_id.as_deref(), ..LiveChange::default() });
     }
+}
+
+/// Tests: [`close_staging_with`], then staging open again (every staging test holds one lock).
+#[cfg(test)]
+pub(crate) fn close_staging_for_test(apply: impl FnMut(&str, LiveChange)) {
+    close_staging_with(apply);
+}
+
+#[cfg(test)]
+pub(crate) fn reopen_staging_for_test() {
+    *EARLY.lock().unwrap_or_else(|p| p.into_inner()) = Some(Vec::new());
+}
+
+/// Tests: list `ring` as the live track of input source `id` (as `audio::start` does).
+#[cfg(test)]
+pub(crate) fn register_for_test(id: &str, ring: &Arc<TrackRing>) {
+    note_live(&spec(id, "input", id, "", ""), ring);
 }
 
 /// A change the Audio page makes to a running source: gain, name, mic-mute flag, and the
