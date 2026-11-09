@@ -9,6 +9,9 @@
 
 use std::time::Instant;
 
+use crate::awake_clock::Awake;
+use crate::record_activity::EngineActivity;
+
 use crate::config::Config;
 use crate::log;
 use crate::record_app::Controller;
@@ -35,6 +38,11 @@ pub(crate) trait Transitions {
     fn release_now(&mut self, target: &EngineTarget) -> bool;
     /// A save or screenshot is in flight, past any timer or cap (`EngineActivity::save_in_flight`).
     fn saving(&mut self) -> bool;
+    fn activity_mut(&mut self) -> &mut EngineActivity;
+    /// The running engine's hello says `drain_heartbeat`.
+    fn engine_heartbeats(&self) -> bool;
+    /// Now on the awake-only clock (`Controller::awake`).
+    fn awake_now(&self) -> Awake;
     fn now(&self) -> Instant;
     fn pinned(&self) -> Option<&Target>;
     fn is_paused(&self) -> bool;
@@ -103,6 +111,9 @@ pub(crate) trait Transitions {
         }
         // R2-detect-r10-1: only a save in flight is worth a release; otherwise the plain quit.
         if self.saving() && self.release_now(&wanted) {
+            // Design P2: stamped here, in the shared rule, so the Sim runs this very stamp (p6-2).
+            let (now, heartbeats) = (self.awake_now(), self.engine_heartbeats());
+            self.activity_mut().released(now, heartbeats);
             log!("record: {}'s replay buffer dropped (not saved); capture stopped now, saves in flight finish", t.exe);
             self.planner_mut().force(wanted);
             return;
@@ -202,6 +213,15 @@ impl Transitions for Controller {
     }
     fn saving(&mut self) -> bool {
         self.activity.save_in_flight()
+    }
+    fn activity_mut(&mut self) -> &mut EngineActivity {
+        &mut self.activity
+    }
+    fn engine_heartbeats(&self) -> bool {
+        self.supervisor.engine_takes_drain_heartbeat()
+    }
+    fn awake_now(&self) -> Awake {
+        self.awake()
     }
     fn now(&self) -> Instant {
         Instant::now()

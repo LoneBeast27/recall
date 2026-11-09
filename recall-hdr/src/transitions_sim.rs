@@ -118,8 +118,9 @@ pub struct Sim {
     pub probe_fails: bool,
     /// The window the render check is asked about (`RenderCheck::wanted`).
     checked: Option<(u32, isize)>,
-    /// The engine says `stop_capture` in its hello (an older engine does not).
+    /// The engine says `stop_capture` / `drain_heartbeat` in its hello (older ones do not).
     pub engine_releases: bool,
+    pub engine_heartbeats: bool,
     /// Privacy stops that released the engine (`release_engine_to`), with the next target:
     /// capture stopped, saves in flight finish, then that target starts.
     pub released: Vec<(Instant, EngineTarget)>,
@@ -159,6 +160,7 @@ impl Sim {
             probe_fails: false,
             checked: None,
             engine_releases: true,
+            engine_heartbeats: true,
             released: Vec::new(),
             slept: Duration::ZERO,
         }
@@ -428,6 +430,15 @@ impl Transitions for Sim {
     }
     fn saving(&mut self) -> bool {
         self.activity.save_in_flight() // as `Controller::saving`
+    }
+    fn activity_mut(&mut self) -> &mut EngineActivity {
+        &mut self.activity
+    }
+    fn engine_heartbeats(&self) -> bool {
+        self.engine_heartbeats
+    }
+    fn awake_now(&self) -> crate::awake_clock::Awake {
+        self.awake()
     }
     fn now(&self) -> Instant {
         self.now

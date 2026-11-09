@@ -170,6 +170,8 @@ mod transitions_gate_tests;
 #[cfg(test)]
 mod transitions_privacy_tests;
 #[cfg(test)]
+mod transitions_release_tests;
+#[cfg(test)]
 mod transitions_scope_tests;
 #[cfg(test)]
 mod transitions_restart_tests;

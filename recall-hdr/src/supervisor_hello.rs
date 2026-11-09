@@ -11,7 +11,14 @@ impl Supervisor {
 
     /// The running engine's `hello` sets the capability `key` to true (absent: an older engine).
     pub fn hello_says(&self, key: &str) -> bool {
-        let cache = self.shared.cache.lock().unwrap_or_else(|p| p.into_inner());
+        self.shared.hello_says(key)
+    }
+}
+
+impl super::Shared {
+    /// [`Supervisor::hello_says`], for the manager thread.
+    pub(super) fn hello_says(&self, key: &str) -> bool {
+        let cache = self.cache.lock().unwrap_or_else(|p| p.into_inner());
         cache.hello.as_deref().and_then(|h| serde_json::from_str::<serde_json::Value>(h).ok()).and_then(|v| v.get(key)?.as_bool()).unwrap_or(false)
     }
 }

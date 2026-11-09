@@ -26,6 +26,10 @@ pub const SAVE_STALE: Duration = Duration::from_secs(120);
 pub const START_STALE: Duration = Duration::from_secs(35);
 /// Why a long recording cannot start while a closed game drains.
 pub const DRAIN_RECORD_REASON: &str = "The game closed; nothing to record";
+/// A released engine without drain heartbeats (design P8) settles once no save showed progress
+/// this long (awake): its own 120 s stall rule + one 1 s report + a 14 s margin (p6-1: the two
+/// clocks start a little apart).
+pub const SETTLE_NO_HEARTBEAT: Duration = Duration::from_secs(135);
 /// How long a pause waits for the long recording to report stopping.
 pub const PAUSE_STOP_WAIT: Duration = Duration::from_secs(10);
 /// The island while a pause waits for the save being written (R5-overlay-1).
@@ -81,6 +85,10 @@ pub struct EngineActivity {
     /// The clip size a save is expected to reach: sets how long a growing save
     /// may hold restarts (`writing::hold_cap`). Kept across engine instances.
     save_estimate: u64,
+    /// When this engine was released for a privacy stop (`Transitions::drop_ring`), and whether
+    /// its hello says it sends drain heartbeats (then only it judges a stalled save).
+    released_at: Option<Awake>,
+    drain_heartbeats: bool,
 }
 
 impl Default for EngineActivity {
@@ -96,6 +104,8 @@ impl Default for EngineActivity {
             auto_stop: None,
             stop_requested: false,
             save_estimate: 0,
+            released_at: None,
+            drain_heartbeats: false,
         }
     }
 }
