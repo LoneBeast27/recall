@@ -155,6 +155,8 @@ mod win_recycle;
 mod win_fileop;
 mod state;
 mod supervisor;
+// The one-time notice before the first display change (system_notice).
+mod system_notice;
 mod tray;
 #[cfg(test)]
 mod record_proof_tests;

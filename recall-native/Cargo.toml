@@ -2,6 +2,7 @@
 name = "recall-native"
 version = "0.1.0"
 edition = "2024"
+license = "GPL-3.0-or-later"
 description = "Recall native GPUI editor"
 
 [workspace]
@@ -15,7 +16,8 @@ path = "src/testing_main.rs"
 required-features = ["recall-testing"]
 
 [dependencies]
-gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
+# No "windows-manifest": build.rs embeds the one app manifest (GPUI's entries plus asInvoker).
+gpui = { version = "=0.2.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
@@ -41,6 +43,8 @@ windows = { version = "0.62", features = [
     "Win32_System_RemoteDesktop",
     # The pipe server's account check (`services/daemon/pipe_owner.rs`).
     "Win32_Security_Authorization",
+    # The updater: WinHTTP in-process, and ShellExecuteExW (its struct needs Registry's HKEY).
+    "Win32_Networking_WinHttp", "Win32_System_Registry",
 ] }
 
 # Release: see the workspace Cargo.toml (this crate is its own workspace). panic stays

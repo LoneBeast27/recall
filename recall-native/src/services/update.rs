@@ -1,22 +1,31 @@
 //! Official updates from stable releases whose tags are reachable from GitHub main.
+//! HTTPS in-process through WinHTTP to pinned GitHub hosts (`update_net.rs`); Setup is
+//! checked from a held handle and opened by the shell (`update_setup.rs`); automatic checks
+//! can be turned off in Settings (`update_prefs.rs`).
 use std::{
-    fs::File,
-    io,
-    os::windows::process::CommandExt,
-    path::{Path, PathBuf},
-    process::{Child, Command},
-    sync::mpsc::{Receiver, channel},
+    path::PathBuf,
+    sync::{
+        Arc,
+        mpsc::{Receiver, channel},
+    },
     time::{Duration, Instant},
 };
 
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
+
+#[path = "update_net.rs"]
+pub(crate) mod net;
+#[path = "update_prefs.rs"]
+mod prefs;
+#[path = "update_setup.rs"]
+mod setup;
 
 pub const REPO: &str = "LoneBeast27/recall";
 const SETUP: &str = "RecallSetup.exe";
 const MAX_SETUP: u64 = 128 * 1024 * 1024;
 const API_LIMIT: u64 = 1024 * 1024;
-const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+/// The first automatic check waits this long after start-up.
+const FIRST_CHECK: Duration = Duration::from_secs(8);
 
 pub fn current() -> Option<&'static str> {
     option_env!("RECALL_VERSION").filter(|v| version(v).is_some())
@@ -113,73 +122,15 @@ fn on_main(json: &[u8]) -> Result<bool, String> {
     Ok(comparison.behind_by == 0 && matches!(comparison.status.as_str(), "ahead" | "identical"))
 }
 
-fn curl(url: &str, file: Option<&Path>, limit: u64) -> Result<(u16, Vec<u8>), String> {
-    use windows::Win32::System::SystemInformation::GetSystemDirectoryW;
-    let mut system = [0u16; 260];
-    let len = unsafe { GetSystemDirectoryW(Some(&mut system)) } as usize;
-    if len == 0 || len >= system.len() {
-        return Err("Cannot locate Windows curl.exe.".into());
-    }
-    let exe = PathBuf::from(String::from_utf16_lossy(&system[..len])).join("curl.exe");
-    let mut cmd = Command::new(exe);
-    cmd.creation_flags(CREATE_NO_WINDOW)
-        .args([
-            "-q",
-            "--silent",
-            "--show-error",
-            "--location",
-            "--proto",
-            "=https",
-            "--proto-redir",
-            "=https",
-            "--max-redirs",
-            "5",
-            "--connect-timeout",
-            "10",
-            "--max-time",
-            if file.is_some() { "180" } else { "20" },
-            "--user-agent",
-            "Recall-updater",
-            "--write-out",
-            "\n%{http_code}",
-            "--max-filesize",
-        ])
-        .arg(limit.to_string());
-    if let Some(path) = file {
-        cmd.arg("--output").arg(path);
-    }
-    let output = cmd
-        .arg(url)
-        .output()
-        .map_err(|e| format!("Windows download failed: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "Download failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    let split = output
-        .stdout
-        .iter()
-        .rposition(|&b| b == b'\n')
-        .ok_or("Missing HTTP status.")?;
-    let status = std::str::from_utf8(&output.stdout[split + 1..])
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .ok_or("Invalid HTTP status.")?;
-    Ok((status, output.stdout[..split].to_vec()))
+fn api(net: &dyn net::Transport, path: &str) -> Result<(u16, Vec<u8>), String> {
+    let mut body = Vec::new();
+    let url = format!("https://api.github.com/repos/{REPO}/{path}");
+    let status = net::fetch(net, &url, API_LIMIT, Duration::from_secs(20), &mut body)?;
+    Ok((status, body))
 }
 
-fn api(path: &str) -> Result<(u16, Vec<u8>), String> {
-    curl(
-        &format!("https://api.github.com/repos/{REPO}/{path}"),
-        None,
-        API_LIMIT,
-    )
-}
-
-fn check(current: &str, manual: bool) -> Result<Option<Release>, String> {
-    let (status, body) = api("releases/latest")?;
+fn check(net: &dyn net::Transport, current: &str, manual: bool) -> Result<Option<Release>, String> {
+    let (status, body) = api(net, "releases/latest")?;
     if status == 404 {
         return Ok(None);
     }
@@ -193,7 +144,7 @@ fn check(current: &str, manual: bool) -> Result<Option<Release>, String> {
         return Ok(None);
     }
     // The first compare page includes changed files. Only the ancestry summary is needed.
-    let (status, body) = api(&format!("compare/v{}...main?per_page=1&page=2", release.version))?;
+    let (status, body) = api(net, &format!("compare/v{}...main?per_page=1&page=2", release.version))?;
     if status != 200 || !on_main(&body)? {
         return Err("The release tag could not be verified on main.".into());
     }
@@ -216,42 +167,14 @@ fn skip(version: &str) {
     }
 }
 
-fn verify_setup(path: &Path, release: &Release) -> Result<(), String> {
-    let mut file = File::open(path).map_err(|e| format!("Setup is unavailable: {e}"))?;
-    let mut hash = Sha256::new();
-    let bytes =
-        io::copy(&mut file, &mut hash).map_err(|e| format!("Setup could not be read: {e}"))?;
-    if bytes != release.size || format!("{:x}", hash.finalize()) != release.digest {
-        return Err("Setup did not match the GitHub checksum and size.".into());
-    }
-    Ok(())
-}
-
-fn download_and_open(release: &Release) -> Result<(Child, tempfile::TempDir), String> {
-    let folder = tempfile::Builder::new()
-        .prefix("Recall-Update-")
-        .tempdir()
-        .map_err(|e| e.to_string())?;
-    let path = folder.path().join(SETUP);
-    let url = format!(
-        "https://github.com/{REPO}/releases/download/v{}/{SETUP}",
-        release.version
-    );
-    let (status, _) = curl(&url, Some(&path), release.size)?;
-    if status != 200 {
-        return Err(format!("GitHub download returned HTTP {status}."));
-    }
-    verify_setup(&path, release)?;
+/// Download Setup to the per-user folder, verify it from a held handle, and open it through
+/// the shell with `--update <install folder>`. Returns the Setup process and its folder.
+fn download_and_open(net: &dyn net::Transport, release: &Release) -> Result<(windows::Win32::Foundation::HANDLE, tempfile::TempDir), String> {
+    let url = format!("https://github.com/{REPO}/releases/download/v{}/{SETUP}", release.version);
+    let verified = setup::download(net, &url, release, &setup::download_root()?)?;
     let app = std::env::current_exe().map_err(|e| e.to_string())?;
-    let install = app
-        .parent()
-        .ok_or("Cannot locate the Recall installation.")?;
-    let child = Command::new(path)
-        .arg("--update")
-        .arg(install)
-        .spawn()
-        .map_err(|e| format!("Windows could not open Setup: {e}"))?;
-    Ok((child, folder))
+    let install = app.parent().ok_or("Cannot locate the Recall installation.")?;
+    setup::launch(verified, install)
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -293,6 +216,12 @@ pub struct UpdateUi {
     check_at: Option<Instant>,
     rx: Option<Receiver<Msg>>,
     pub notice: Option<(bool, String)>,
+    /// "Check for updates automatically" (Settings, default on).
+    pub auto: bool,
+    /// This build's release version (`None` in dev builds: nothing to compare).
+    version: Option<&'static str>,
+    net: Arc<dyn net::Transport>,
+    prefs: Option<PathBuf>,
 }
 
 enum Msg {
@@ -304,33 +233,46 @@ enum Msg {
 impl UpdateUi {
     pub fn new() -> Self {
         let offscreen = crate::offscreen::enabled();
+        let prefs = prefs::settings_file();
+        let auto = prefs::load_auto(prefs.as_deref());
+        // Real checks only in a versioned, on-screen, non-testing build.
+        let armed = !offscreen && !crate::TESTING;
+        let mut ui = Self::with(Arc::new(net::WinHttp), current(), auto, armed, prefs);
         if offscreen && !crate::TESTING {
             if let Some(release) = std::env::var_os("RECALL_UPDATE_PREVIEW")
                 .and_then(|p| std::fs::read(p).ok())
                 .and_then(|json| offer(&json, "0.0.0").ok().flatten())
             {
-                return Self {
-                    phase: Phase::Offered(release),
-                    check_at: None,
-                    rx: None,
-                    notice: None,
-                };
+                ui.phase = Phase::Offered(release);
             }
         }
-        let check_at = (current().is_some() && !offscreen && !crate::TESTING)
-            .then(|| Instant::now() + Duration::from_secs(8));
-        Self {
-            phase: Phase::Idle,
-            check_at,
-            rx: None,
-            notice: None,
-        }
+        ui
+    }
+
+    /// With automatic checks off, nothing is scheduled: no request at start-up or later.
+    fn with(net: Arc<dyn net::Transport>, version: Option<&'static str>, auto: bool, armed: bool, prefs: Option<PathBuf>) -> Self {
+        let check_at = (auto && armed && version.is_some()).then(|| Instant::now() + FIRST_CHECK);
+        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, net, prefs }
     }
 
     pub fn busy(&self) -> bool {
         self.rx.is_some()
     }
 
+    /// The Settings switch: saved at once; off also cancels a pending automatic check.
+    pub fn set_auto(&mut self, on: bool) {
+        self.auto = on;
+        if !on {
+            self.check_at = None;
+        }
+        if let Some(file) = &self.prefs {
+            if let Err(e) = prefs::save_auto(file, on) {
+                self.notice = Some((false, format!("Couldn't save the update setting: {e}")));
+            }
+        }
+    }
+
+    /// "Check now": works whether or not automatic checks are on.
     pub fn check_now(&mut self) {
         if !crate::TESTING && !crate::offscreen::enabled() && self.rx.is_none() {
             self.start_check(true);
@@ -338,12 +280,13 @@ impl UpdateUi {
     }
 
     fn start_check(&mut self, manual: bool) {
-        let Some(current) = current() else { return };
+        let Some(current) = self.version else { return };
         self.check_at = None;
         let (tx, rx) = channel();
         self.rx = Some(rx);
+        let net = self.net.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(Msg::Checked(check(current, manual), manual));
+            let _ = tx.send(Msg::Checked(check(net.as_ref(), current, manual), manual));
         });
     }
 
@@ -389,10 +332,11 @@ impl UpdateUi {
         let (tx, rx) = channel();
         self.rx = Some(rx);
         let job = release.clone();
-        std::thread::spawn(move || match download_and_open(&job) {
-            Ok((mut child, folder)) => {
+        let net = self.net.clone();
+        std::thread::spawn(move || match download_and_open(net.as_ref(), &job) {
+            Ok((process, folder)) => {
                 let _ = tx.send(Msg::Opened(Ok(())));
-                let _ = child.wait();
+                setup::wait(process);
                 drop(folder);
                 let _ = tx.send(Msg::Closed);
             }
@@ -419,7 +363,7 @@ impl UpdateUi {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{net::fake::FakeNet, *};
 
     fn fixture() -> serde_json::Value {
         serde_json::json!({
@@ -455,18 +399,71 @@ mod tests {
         assert!(!on_main(br#"{"status":"behind","behind_by":1}"#).unwrap());
     }
 
+    /// The fixture's release: Setup is the 3 bytes "abc".
+    pub(super) fn fixture_release() -> Release {
+        offer(fixture().to_string().as_bytes(), "1.9.0").unwrap().unwrap()
+    }
+
+    const LATEST: &str = "https://api.github.com/repos/LoneBeast27/recall/releases/latest";
+
+    /// An updater on a fake network, armed like a versioned on-screen build.
+    fn ui(net: &Arc<FakeNet>, auto: bool) -> UpdateUi {
+        UpdateUi::with(net.clone(), Some("1.9.0"), auto, true, None)
+    }
+
+    /// Tick until the check thread answers (or 5 s pass).
+    fn settle(ui: &mut UpdateUi) {
+        let end = Instant::now() + Duration::from_secs(5);
+        while ui.busy() && Instant::now() < end {
+            ui.tick();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
     #[test]
-    fn a_tampered_download_never_passes_verification() {
-        let r = offer(fixture().to_string().as_bytes(), "1.9.0")
-            .unwrap()
-            .unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let exe = dir.path().join(SETUP);
-        std::fs::write(&exe, b"abc").unwrap();
-        verify_setup(&exe, &r).unwrap();
-        std::fs::write(&exe, b"abd").unwrap();
-        assert!(verify_setup(&exe, &r).is_err());
-        std::fs::write(&exe, b"ab").unwrap();
-        assert!(verify_setup(&exe, &r).is_err());
+    fn automatic_checks_off_send_nothing_until_check_now() {
+        let net = Arc::new(FakeNet::default());
+        let mut off = ui(&net, false);
+        assert_eq!(off.check_at, None, "nothing is scheduled");
+        for _ in 0..3 {
+            assert!(!off.tick());
+        }
+        assert!(net.calls().is_empty(), "off sends no request: {:?}", net.calls());
+        off.start_check(true); // what "Check now" runs
+        settle(&mut off);
+        assert_eq!(net.calls(), [LATEST], "Check now always works");
+        assert_eq!(off.notice, Some((true, "No newer stable release is available.".into())));
+    }
+
+    #[test]
+    fn automatic_checks_on_run_once_due_and_turning_off_cancels() {
+        let net = Arc::new(FakeNet::default());
+        let mut on = ui(&net, true);
+        assert!(on.check_at.is_some(), "on: a check is scheduled after start-up");
+        on.check_at = Some(Instant::now());
+        assert!(on.tick());
+        settle(&mut on);
+        assert_eq!(net.calls(), [LATEST]);
+        let mut cancelled = ui(&net, true);
+        cancelled.set_auto(false);
+        assert_eq!(cancelled.check_at, None);
+        assert!(!cancelled.auto);
+        assert!(UpdateUi::with(net.clone(), None, true, true, None).check_at.is_none(), "dev builds never check");
+        assert!(UpdateUi::with(net.clone(), Some("1.9.0"), true, false, None).check_at.is_none(), "tests and offscreen never check");
+    }
+
+    #[test]
+    fn a_newer_release_on_main_is_offered_and_an_older_one_is_not() {
+        let compare = "https://api.github.com/repos/LoneBeast27/recall/compare/v1.10.0...main?per_page=1&page=2";
+        let net = FakeNet::default()
+            .reply(LATEST, 200, None, fixture().to_string().as_bytes())
+            .reply(compare, 200, None, br#"{"status":"ahead","behind_by":0}"#);
+        assert_eq!(check(&net, "1.9.0", true).unwrap(), Some(fixture_release()));
+        assert_eq!(check(&net, "1.10.0", true).unwrap(), None, "same version");
+        assert_eq!(check(&net, "2.0.0", true).unwrap(), None, "never a downgrade");
+        let off_main = FakeNet::default()
+            .reply(LATEST, 200, None, fixture().to_string().as_bytes())
+            .reply(compare, 200, None, br#"{"status":"diverged","behind_by":1}"#);
+        assert!(check(&off_main, "1.9.0", true).is_err());
     }
 }

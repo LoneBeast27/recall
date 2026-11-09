@@ -136,7 +136,7 @@ impl Root {
                 .into_any_element(),
         );
         body.push(
-            setting_row("Switch HDR for HDR games", "Turns HDR on while an HDR game is in front, and off afterwards. Off leaves the display alone.")
+            setting_row("Switch HDR for HDR games", HDR_AUTO_DETAIL)
                 .child(ui::switch("hdr-auto", auto).on_click(cx.listener(move |this, _, _, cx| {
                     this.set_config("behavior", "hdr_auto", json!(!auto));
                     cx.notify();
@@ -162,7 +162,7 @@ impl Root {
         }
         // The colour profiles are made for one monitor model: the row shows only where they are installed.
         if ac_profiles_installed() {
-            body.push(setting_row("Desktop colour in HDR", "Gamma for SDR apps while HDR is on. Applies the next time HDR turns on.").child(profile_track).into_any_element());
+            body.push(setting_row("Desktop colour in HDR", AC_PROFILE_DETAIL).child(profile_track).into_any_element());
         }
         let subtitle = format!("HDR switching for {}", if display == "Managed display" { "your main display" } else { display.as_str() });
         self.page_shell("Display & HDR", &subtitle, body)
@@ -172,6 +172,12 @@ impl Root {
 
     // ---- Settings ---------------------------------------------------------
 }
+
+/// The HDR switch is the user's own consent to the display changes (recall-hdr
+/// `system_notice`): its label says what changes and that it is put back.
+pub(crate) const HDR_AUTO_DETAIL: &str = "Changes Windows settings on this display: HDR on while an HDR game is in front and off afterwards, SDR content brightness, and the NVIDIA colour clamp. Recall puts each back when it exits or this is turned off. Off leaves the display alone.";
+/// The colour profile is not journalled: say that it stays.
+pub(crate) const AC_PROFILE_DETAIL: &str = "Changes the Windows default colour profile for HDR on this display (gamma for SDR apps). Applies the next time HDR turns on and stays after Recall exits.";
 
 pub(crate) fn card() -> Div {
     div().p(px(16.)).rounded(px(10.)).bg(c(theme::RAISED)).border_1().border_color(c(theme::BORDER_SUBTLE)).flex().flex_col()

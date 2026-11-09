@@ -140,7 +140,7 @@ impl Root {
         items
     }
 
-    fn settings_about(&mut self, cx: &mut Context<Self>) -> [AnyElement; 3] {
+    fn settings_about(&mut self, cx: &mut Context<Self>) -> [AnyElement; 4] {
         use crate::update;
         let version = update::current();
         let label = version.map_or_else(|| "Recall (development build)".into(), |v| format!("Recall {v}"));
@@ -150,8 +150,18 @@ impl Root {
             "Updates are available in official versioned builds."
         };
         let busy = self.update.busy();
+        let auto = self.update.auto;
+        let auto_row = setting_row(
+            "Check for updates automatically",
+            "Asks GitHub for a newer stable release shortly after Recall opens. Off: nothing is sent until you press Check now.",
+        )
+        .child(ui::switch("update-auto", auto).on_click(cx.listener(move |this, _, _, cx| {
+            this.update.set_auto(!auto);
+            cx.notify();
+        })))
+        .into_any_element();
         let mut check = ui::button("update-check", ui::Variant::Secondary)
-            .child(if busy { "Update in progress…" } else { "Check for updates" });
+            .child(if busy { "Update in progress…" } else { "Check now" });
         if version.is_some() && !busy {
             check = check.on_click(cx.listener(|this, _, _, cx| {
                 this.update.check_now();
@@ -161,6 +171,7 @@ impl Root {
         [
             section_title("About"),
             setting_row(&label, detail).child(check).into_any_element(),
+            auto_row,
             setting_row("Third-party credits", "FFmpeg and Gyan builds, NVIDIA graphics, Microsoft, and other contributors.")
                 .child(ui::button("third-party-notices", ui::Variant::Secondary).child("View credits")
                     .on_click(cx.listener(|_, _, _, cx| {
