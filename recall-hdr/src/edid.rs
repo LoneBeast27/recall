@@ -43,7 +43,7 @@ fn wide_to_string(buf: &[u16]) -> String {
 }
 
 /// Find the primary monitor's device-instance registry path fragment, e.g.
-/// `AUS2740\5&14c483c&0&UID4357`. Returned as (hardware_id, instance_id).
+/// `ABC1234\5&1a2b3c4&0&UID1234`. Returned as (hardware_id, instance_id).
 fn primary_monitor_instance() -> Result<(String, String), String> {
     // Pull the monitor device-instance id for an adapter by name. Returns the
     // (hardware_id, instance_id) split from the monitor's DeviceID, if present.
@@ -56,7 +56,7 @@ fn primary_monitor_instance() -> Result<(String, String), String> {
         if !EnumDisplayDevicesW(PCWSTR(name_w.as_ptr()), 0, &mut monitor, 1).as_bool() {
             return None;
         }
-        // monitor.DeviceID: \\?\DISPLAY#AUS2740#5&14c483c&0&UID4357#{guid}
+        // monitor.DeviceID: \\?\DISPLAY#<hwid>#<instance>#{guid}
         let dev_id = wide_to_string(&monitor.DeviceID);
         let parts: Vec<&str> = dev_id.split('#').collect();
         if parts.len() >= 3 && !parts[1].is_empty() && !parts[2].is_empty() {
