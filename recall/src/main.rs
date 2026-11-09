@@ -324,6 +324,7 @@ impl ApplicationHandler for App {
                 monitors: capture::list_monitors(),
                 live_sources: true,
                 live_source_fields: true,
+                sync_hold: true,
             });
         }
         if let Some(early) = early_stdin {

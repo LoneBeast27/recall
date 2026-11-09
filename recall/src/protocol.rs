@@ -21,6 +21,8 @@ pub enum Outbound {
         /// gain boosted live (P2-a). An engine without it (8111e31 and older) ignores those
         /// fields, so the controller restarts it for them instead of sending them.
         live_source_fields: bool,
+        /// Device tracks start held until the controller's `sync` (the sync handshake).
+        sync_hold: bool,
     },
     /// Sent on change (and ~1/s for fps): current live state.
     Status {
