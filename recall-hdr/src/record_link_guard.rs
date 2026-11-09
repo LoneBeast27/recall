@@ -93,21 +93,34 @@ pub(crate) fn refusal(dir: &str, links: &Links) -> Option<String> {
 }
 
 /// Start, and every config change: an output folder [`refusal`] refuses becomes the last good
-/// one (`last_good`, else the app's recordings folder, else the default). Returns the notice.
+/// one (`last_good`, else the app's recordings folder, else the default), and when every one of
+/// those is refused, Recall's own [`own_clips_dir`]. A refused folder is never kept. Returns the
+/// notice.
 pub(crate) fn guard(cfg: &mut Config, last_good: Option<&str>, links: &Links) -> Option<String> {
     let why = refusal(&cfg.recording.output_dir, links)?;
     let default = crate::record_config::default_output_dir();
-    // Last resort when Videos\Recall itself sits in someone else's linked tree.
-    let profile = std::env::var_os("USERPROFILE").map(|p| PathBuf::from(p).join("Recall Clips").to_string_lossy().into_owned());
-    let candidates = last_good.into_iter().map(str::to_owned).chain(links.owned.first().cloned()).chain([default]).chain(profile);
-    let fallback = candidates.filter(|c| !c.trim().is_empty()).find(|c| refusal(c, links).is_none());
-    let Some(fallback) = fallback else {
-        log!("record: {why}; no other folder is free of linked folders, keeping it");
-        return Some(why);
-    };
-    log!("record: {why}; recording into {fallback:?} instead");
-    cfg.recording.output_dir = fallback.clone();
-    Some(format!("{why}. Clips save to {fallback}."))
+    let candidates = last_good.into_iter().map(str::to_owned).chain(links.owned.first().cloned()).chain([default]);
+    if let Some(fallback) = candidates.filter(|c| !c.trim().is_empty()).find(|c| refusal(c, links).is_none()) {
+        log!("record: {why}; recording into {fallback:?} instead");
+        cfg.recording.output_dir = fallback.clone();
+        return Some(format!("{why}. Clips save to {fallback}."));
+    }
+    // Recall's own folder: never refused, even inside a linked tree.
+    let own = own_clips_dir().to_string_lossy().into_owned();
+    log!("record: {why}; no other folder is free of linked folders, recording into {own:?}");
+    cfg.recording.output_dir = own.clone();
+    Some(format!("Recordings folder unavailable, saving to {own}"))
+}
+
+/// `%LOCALAPPDATA%\Recall\Clips` (the LocalAppData known folder), created when missing. Without a
+/// LocalAppData folder (never on a working profile): `<temp>\Recall\Clips`.
+pub(crate) fn own_clips_dir() -> PathBuf {
+    let base = crate::user_dirs::known(crate::user_dirs::Known::LocalAppData).unwrap_or_else(std::env::temp_dir);
+    let dir = base.join("Recall").join("Clips");
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        log!("record: could not create {} ({e})", dir.display());
+    }
+    dir
 }
 
 #[cfg(test)]
