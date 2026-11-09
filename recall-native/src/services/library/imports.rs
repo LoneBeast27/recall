@@ -114,16 +114,19 @@ pub fn edit_file_clip_name(edit_name: &str) -> &str {
 /// folder that was the recordings folder before (`former`: those clips stay Recall's own, so
 /// Delete recycles them and their edits stay beside them).
 pub fn is_imported(path: &str, recordings: &Path, imported: &[String], former: &[String]) -> bool {
-    !is_owned(Path::new(path), recordings, former) && imported.iter().any(|folder| is_inside(path, folder))
+    !is_owned(Path::new(path), recordings, former, imported) && imported.iter().any(|folder| is_inside(path, folder))
 }
 
-/// Only clips saved directly into a current or former recordings folder, or listed by exact path
-/// as recorded by Recall elsewhere (`recorded`), are managed.
-pub(crate) fn is_owned(clip: &Path, recordings: &Path, former: &[String]) -> bool {
+/// Only clips saved directly into a current or former recordings folder, recorder clips in a
+/// game folder Recall made in the recordings folder ("Sort clips into game folders"), or files
+/// listed by exact path as recorded by Recall elsewhere (`recorded`), are managed. A linked
+/// folder (`linked`) wins over the game-folder rule: a game folder that is linked is the link's.
+pub(crate) fn is_owned(clip: &Path, recordings: &Path, former: &[String], linked: &[String]) -> bool {
     let Some(parent) = clip.parent() else { return false };
     let parent = folder_key(&parent.to_string_lossy());
     !parent.is_empty() && (parent == folder_key(&recordings.to_string_lossy())
         || former.iter().any(|folder| folder_key(folder) == parent))
+        || (super::folders::in_game_folder(clip, recordings) && !super::folders::under_link(clip, recordings, linked))
         // A clip Recall recorded into a startup `-OutDir` folder: that exact file only.
         || super::recorded::contains(clip)
 }
@@ -366,12 +369,12 @@ mod tests {
     #[test]
     fn a_verbatim_path_to_an_owned_clip_is_owned() {
         let recordings = Path::new(r"Y:\Clips\Recall");
-        assert!(is_owned(Path::new(r"\\?\Y:\Clips\Recall\a.mp4"), recordings, &[]), "verbatim clip, plain recordings");
-        assert!(is_owned(Path::new(r"y:/clips/recall/a.mp4"), Path::new(r"\\?\Y:\Clips\Recall\"), &[]), "plain clip, verbatim recordings");
-        assert!(is_owned(Path::new(r"\\?\D:\Old\a.mp4"), recordings, &[r"d:/old/".to_owned()]), "former folder");
-        assert!(is_owned(Path::new(r"\\?\UNC\nas\clips\a.mp4"), Path::new(r"\\NAS\Clips"), &[]), "network share");
-        assert!(!is_owned(Path::new(r"\\?\Y:\Clips\Recall\sub\a.mp4"), recordings, &[]), "still only the top level");
-        assert!(!is_owned(Path::new(r"\\?\Y:\Clips\Recall2\a.mp4"), recordings, &[]));
+        assert!(is_owned(Path::new(r"\\?\Y:\Clips\Recall\a.mp4"), recordings, &[], &[]), "verbatim clip, plain recordings");
+        assert!(is_owned(Path::new(r"y:/clips/recall/a.mp4"), Path::new(r"\\?\Y:\Clips\Recall\"), &[], &[]), "plain clip, verbatim recordings");
+        assert!(is_owned(Path::new(r"\\?\D:\Old\a.mp4"), recordings, &[r"d:/old/".to_owned()], &[]), "former folder");
+        assert!(is_owned(Path::new(r"\\?\UNC\nas\clips\a.mp4"), Path::new(r"\\NAS\Clips"), &[], &[]), "network share");
+        assert!(!is_owned(Path::new(r"\\?\Y:\Clips\Recall\sub\a.mp4"), recordings, &[], &[]), "still only the top level");
+        assert!(!is_owned(Path::new(r"\\?\Y:\Clips\Recall2\a.mp4"), recordings, &[], &[]));
         let imported = vec![r"Y:\Clips".to_owned()];
         assert!(!is_imported(r"\\?\Y:\Clips\Recall\a.mp4", recordings, &imported, &[]), "an owned clip is never imported");
         assert!(is_imported(r"\\?\Y:\Clips\Medal\a.mp4", recordings, &imported, &[]), "inside a linked folder, verbatim");

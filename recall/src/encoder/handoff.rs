@@ -101,6 +101,7 @@ impl Replay {
         timing.snapshot_ms = ms(phase.elapsed());
         Ok(SaveJob {
             path: req.path,
+            game: req.game,
             seconds: req.seconds,
             requested: req.requested,
             secs,

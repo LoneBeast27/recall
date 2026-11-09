@@ -121,6 +121,13 @@ pub enum Outbound {
         id: String,
         device_id: String,
     },
+    /// "Sort clips into game folders" found the user's own folder with the game's name in the
+    /// clip folder (ShadowPlay's, say) and no answer for it yet: the clip went into the clip
+    /// folder itself. Once per game per run; the app asks "Use your existing <Game> folder?".
+    GameFolderExists {
+        game: String,
+        folder: String,
+    },
     /// Sent after microphone capture muting changes.
     MicMuted {
         muted: bool,
@@ -274,6 +281,12 @@ pub enum Command {
     },
     /// Set microphone capture muting for newly captured replay audio.
     SetMicMute { muted: bool },
+    /// The answers to "Use your existing <Game> folder?" changed (`recording.game_folder_choices`):
+    /// applied live, no restart.
+    SetGameFolderChoices {
+        #[serde(default)]
+        choices: std::collections::BTreeMap<String, String>,
+    },
     /// Toggle microphone capture muting for newly captured replay audio.
     ToggleMicMute,
     /// The Audio page changed a recorded source's gain or name: applied to its live track,

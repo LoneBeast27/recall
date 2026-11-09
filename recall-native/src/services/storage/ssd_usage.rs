@@ -99,6 +99,23 @@ pub fn note_outside_change() {
 fn edited_on(root: &Path, recordings: &Path) -> u64 {
     let Some(edited) = edited_dir_on(root, recordings) else { return 0 };
     let Ok(listing) = std::fs::read_dir(&edited) else { return 0 };
+    let mut total = 0;
+    for entry in listing.flatten().filter(|entry| !entry.file_name().to_string_lossy().starts_with('.')) {
+        let Ok(metadata) = entry.metadata() else { continue };
+        if metadata.is_file() {
+            total += metadata.len();
+        } else if metadata.is_dir() && crate::services::library::folders::rule::is_game_folder(&entry.path()) {
+            // A game's exports ("Sort clips into game folders": `Edited\<Game>\`, made by Recall
+            // with its marker), one level down. Other subfolders are the user's.
+            total += files_in(&entry.path());
+        }
+    }
+    total
+}
+
+/// Bytes of the visible files directly in `folder`.
+fn files_in(folder: &Path) -> u64 {
+    let Ok(listing) = std::fs::read_dir(folder) else { return 0 };
     listing
         .flatten()
         .filter(|entry| !entry.file_name().to_string_lossy().starts_with('.'))

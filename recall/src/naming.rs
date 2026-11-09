@@ -37,7 +37,44 @@ pub fn source_slug(source: &str) -> String {
     if name.is_empty() {
         "Desktop".to_string()
     } else {
-        name
+        name.chars().take(SLUG_MAX).collect()
+    }
+}
+
+/// Longest source slug in a file name, in characters (paths stay under `MAX_PATH`).
+pub const SLUG_MAX: usize = 60;
+
+/// `RECALL_GAME_FOLDERS=1` (Settings → Clip folders → "Sort clips into game folders"; the
+/// controller sets it from `recording.game_folders`): new clips and long recordings go into
+/// `<out_dir>\<Game>\` instead of `<out_dir>` itself. Clips already saved never move.
+pub const GAME_FOLDERS_ENV: &str = "RECALL_GAME_FOLDERS";
+
+/// Whether new recordings go into per-game folders (read at each save: cheap, and a test can set it).
+pub fn game_folders_on() -> bool {
+    std::env::var(GAME_FOLDERS_ENV).is_ok_and(|v| v.trim() == "1")
+}
+
+use crate::game_folder_rule as rule;
+
+// Where a game's clips go (`resolve_game_dir`) and the check before a write (`check_game_dir`).
+#[path = "naming_game_dir.rs"]
+mod game_dir;
+pub use game_dir::writable_game_dir;
+// The answers to "Use your existing <Game> folder?" and the one-per-run question.
+#[path = "naming_game_choices.rs"]
+mod game_choices;
+pub use game_choices::set_choices;
+
+/// Game name -> its folder name (shared with the app: `game_folder_rule`).
+pub use rule::game_folder_name;
+
+/// The folder a new clip of `source` goes into now: [`writable_game_dir`] with "Sort clips
+/// into game folders" on ([`game_folders_on`]), else `out_dir`. Disk work: writer threads only.
+pub fn clip_dir(out_dir: &str, source: &str, log: &dyn Fn(&str)) -> String {
+    if game_folders_on() {
+        writable_game_dir(out_dir, source, log).to_string_lossy().into_owned()
+    } else {
+        out_dir.to_string()
     }
 }
 
@@ -128,6 +165,43 @@ mod tests {
 
     fn at() -> DateTime<Local> {
         Local.with_ymd_and_hms(2026, 10, 22, 14, 5, 9).single().expect("valid local time")
+    }
+
+    #[test]
+    fn game_folder_names_are_safe_and_readable() {
+        assert_eq!(game_folder_name("Rocket League®"), "Rocket League");
+        assert_eq!(game_folder_name("Tom Clancy's Rainbow Six® Siege"), "Tom Clancy's Rainbow Six Siege");
+        assert_eq!(game_folder_name("Counter-Strike 2"), "Counter-Strike 2");
+        assert_eq!(game_folder_name(r#"a<b>c:d"e/f\g|h?i*j"#), "abcdefghij");
+        assert_eq!(game_folder_name("  THE   FINALS \t"), "THE FINALS");
+        assert_eq!(game_folder_name("Game..."), "Game");
+        assert_eq!(game_folder_name("..hidden"), "hidden");
+        assert_eq!(game_folder_name(""), "Desktop");
+        assert_eq!(game_folder_name("™®"), "Desktop");
+        assert_eq!(game_folder_name("..."), "Desktop");
+        assert_eq!(game_folder_name("CON"), "_CON");
+        assert_eq!(game_folder_name("com1"), "_com1");
+        assert_eq!(game_folder_name("nul.txt"), "_nul.txt");
+        assert_eq!(game_folder_name("Console"), "Console");
+        assert_eq!(game_folder_name("Thumbs"), "Thumbs_");
+        assert_eq!(game_folder_name("screenshots"), "screenshots_");
+        assert_eq!(game_folder_name("Line\nBreak\u{7}"), "Line Break");
+        assert_eq!(game_folder_name("原神"), "原神");
+        let long = "x".repeat(200);
+        assert_eq!(game_folder_name(&long).chars().count(), rule::GAME_FOLDER_MAX);
+        assert_eq!(game_folder_name(&format!("{} .end", "y".repeat(59))), "y".repeat(59));
+    }
+
+    #[test]
+    fn device_names_and_long_names_get_safe_folders() {
+        assert_eq!(game_folder_name("COM¹"), "_COM¹");
+        assert_eq!(game_folder_name("lpt³.txt"), "_lpt³.txt");
+        assert_eq!(game_folder_name("raw"), "raw_");
+        let long = "Ab".repeat(150);
+        assert_eq!(long.chars().count(), 300);
+        assert_eq!(game_folder_name(&long).chars().count(), rule::GAME_FOLDER_MAX);
+        assert_eq!(source_slug(&long).chars().count(), SLUG_MAX);
+        assert_eq!(source_slug("Rocket League®"), "Rocket-League-");
     }
 
     #[test]

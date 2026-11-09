@@ -48,6 +48,8 @@ mod engine_stdin;
 #[cfg(feature = "encode")]
 mod longrec;
 mod naming;
+// Which subfolders are game folders (shared with recall-hdr and recall-native).
+mod game_folder_rule;
 mod screenshot;
 mod debug_dump;
 mod edit_model;
@@ -286,13 +288,17 @@ impl ApplicationHandler for App {
             let save_marks = marks.clone();
             save_hook = Some(Box::new(move |secs: Option<u32>, at_last_frame: bool| {
                 let name = src.lock().map(|s| s.clone()).unwrap_or_default();
+                // No disk work here: the saver picks the game folder (`<out>\<Game>\`, "Sort clips
+                // into game folders") on its own thread and keeps this file name.
                 let path = encoder::clip_path(&out_dir, &name);
+                let game = naming::game_folders_on().then(|| name.clone());
                 let end_us = timeline.recording_now_us();
                 if let Some(end) = end_us {
                     save_marks.note_save(&path, end);
                 }
                 let _ = cmds.send(encoder::SaveRequest {
                     path,
+                    game,
                     seconds: secs.unwrap_or(buffer_secs),
                     end_us,
                     at_last_frame,

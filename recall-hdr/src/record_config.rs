@@ -8,6 +8,7 @@
 //! anything else (including the `overrides` array) replaces. Unknown keys are
 //! rejected so a typo never silently does nothing.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -55,6 +56,10 @@ pub struct RecordingCfg {
     pub auto_record: bool,
     /// Folder the engine writes clips into (`RECALL_OUT_DIR`).
     pub output_dir: String,
+    /// "Sort clips into game folders": new clips and long recordings go into
+    /// `<output_dir>\<Game>\` (`RECALL_GAME_FOLDERS=1`). Off by default; clips already
+    /// saved never move.
+    pub game_folders: bool,
     /// Replay-buffer length in seconds; also the full-buffer save length.
     pub buffer_secs: u32,
     /// Legacy single save accelerator. Mirrors the first full-buffer entry of
@@ -99,6 +104,12 @@ pub struct RecordingCfg {
     /// Render endpoint recorded as Game in Desktop mode ("" = the Windows
     /// default output; `RECALL_AUDIO_GAME`). Games record their own process.
     pub desktop_audio_device: String,
+    /// "Use your existing <Game> folder?" answers: folder name (lowercase) -> `merge` (adopt the
+    /// user's folder) or `separate` (`<Game> (Recall)`). The engine reads it at spawn
+    /// (`RECALL_GAME_FOLDER_CHOICES`) and live (`set_game_folder_choices`). A patch adds keys;
+    /// a value other than `merge` / `separate` (the app sends "" to reset) removes the key. A
+    /// table: TOML writes it after the plain keys.
+    pub game_folder_choices: BTreeMap<String, String>,
     /// Every recorded source, in track order (`RECALL_AUDIO_SOURCES`; the Audio page).
     /// A table array: TOML writes it after the plain keys. Built from the old audio keys
     /// above when a config has none (`record_audio_sources::migrate_loaded`).
@@ -115,6 +126,8 @@ impl Default for RecordingCfg {
         RecordingCfg {
             auto_record: true,
             output_dir: default_output_dir(),
+            game_folders: false,
+            game_folder_choices: BTreeMap::new(),
             buffer_secs: 120,
             save_hotkey: "Alt+N".into(),
             mic_hotkey: "Alt+M".into(),
@@ -380,6 +393,9 @@ pub fn merge_json(base: &mut Value, patch: &Value) {
     }
 }
 
+/// The answers map (`RecordingCfg::game_folder_choices`): its keys are folder names.
+const GAME_FOLDER_CHOICES: &str = "recording.game_folder_choices";
+
 /// Optional schema keys that are absent from the serialized form when unset.
 const OPTIONAL_KEYS: &[&str] = &["display.target_device_path", "display.punchy_profile", "display.accurate_profile"];
 
@@ -397,6 +413,8 @@ fn check_keys(schema: &Map<String, Value>, patch: &Map<String, Value>, prefix: &
             },
             Some(_) => {}
             None if OPTIONAL_KEYS.contains(&path.as_str()) => {}
+            // Free-form keys: one per folder name.
+            None if prefix == GAME_FOLDER_CHOICES => {}
             None => return Err(format!("unknown config key '{path}'")),
         }
     }
@@ -455,6 +473,8 @@ pub fn apply_patch(base: &Config, patch: &Value) -> Result<PatchOutcome, String>
     merge_json(&mut merged, &patch);
     let mut config: Config = serde_json::from_value(merged).map_err(|e| format!("invalid config: {e}"))?;
     config.recording.save_hotkey = crate::record_hotkeys::legacy_save_hotkey(&config.recording.save_hotkeys);
+    // A reset ("") or any other value removes the answer: only merge / separate are kept.
+    config.recording.game_folder_choices.retain(|_, v| matches!(v.as_str(), "merge" | "separate"));
     validate(&config)?;
     let after = serde_json::to_value(&config).map_err(|e| format!("serialize config: {e}"))?;
     let mut changed = Vec::new();

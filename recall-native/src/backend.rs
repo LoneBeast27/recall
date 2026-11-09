@@ -5,7 +5,7 @@
 //! autosave writes the working project to the SSD and the sidecar beside the clip is only
 //! written by [`flush_project`].
 use crate::edit_model::{ClipInfo, EditPlan, ExportMode, ExportSettings};
-use crate::services::library::{folders::{self, Folders},import_check,watch::WatchRoot};
+use crate::services::library::{folders::{self, Folders},import_check,imports,watch::WatchRoot};
 use crate::services::storage::{self, Priority, ProjectSource};
 use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
@@ -137,11 +137,17 @@ pub fn library_dir_from(folders:&Folders)->PathBuf{
 /// The folders [`list_clips`] reads, in its order.
 /// From folders already read (the listing's copy).
 pub fn clip_roots_from(f:&Folders)->Vec<WatchRoot>{
-    let mut roots=vec![WatchRoot{path:library_dir_from(f),recursive:false}];
+    let recordings=library_dir_from(f);
+    // Game folders Recall made ("Sort clips into game folders"), each watched like the recordings
+    // folder; a new one is picked up by the listing after its first save (every save ends in a
+    // listing). A linked one is watched as its link.
+    let games=folders::game_folders(&recordings,&f.imported);
+    let mut roots=vec![WatchRoot{path:recordings,recursive:false}];
+    roots.extend(games.into_iter().map(|path|WatchRoot{path,recursive:false}));
     roots.extend(f.imported.iter().map(|folder|WatchRoot{path:PathBuf::from(folder),recursive:true}));
     roots
 }
-/// The recordings folder (one listing) plus every imported folder (searched a few levels
+/// The recordings folder (one listing, plus one of each game folder in it) plus every imported folder (searched a few levels
 /// deep), and one listing of the SSD thumbnail tier; a clip's `thumb` is set only when its
 /// thumbnail is already on the SSD (misses are filled by `AssetJob::Thumb` and idle prefetch
 /// through the disk lane). A clip reachable from two folders is listed once.
@@ -168,6 +174,21 @@ pub(crate) fn list_from(dir:&Path,imported:&[String],former:&[String])->Result<(
             let Ok(m)=e.metadata()else{complete=false;continue};if !m.is_file(){continue;}
             let mtime=m.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
             push(path,m.len(),mtime,None);
+        }
+        // Game folders Recall made, one level down: recorder clips only (`folders::in_game_folder`).
+        // A marked folder whose marker no longer binds it (drive letter, moved folder) is listed
+        // too, its clips not owned, so they never vanish; one the user hid stays hidden.
+        let bound=folders::game_folders(dir,imported).into_iter().map(|g|(g,true));
+        for (game,is_bound) in bound.chain(folders::unbound_game_folders(dir,imported).into_iter().map(|g|(g,false))){
+            let Ok(listing)=std::fs::read_dir(&game)else{complete=false;continue};
+            for e in listing{
+                let Ok(e)=e else{complete=false;continue};
+                let path=e.path();if !folders::is_recall_named(&e.file_name().to_string_lossy()){continue;}
+                let Ok(m)=e.metadata()else{complete=false;continue};if !m.is_file(){continue;}
+                let mtime=m.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                if !is_bound&&matches!(imports::status(&path,m.len(),mtime),imports::Status::Skip){continue;}
+                push(path,m.len(),mtime,None);
+            }
         }
     }else{complete=false;}
     let skip=[storage::cache_root()];

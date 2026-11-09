@@ -120,7 +120,7 @@ fn cause_text(cause: &str) -> &'static str {
 /// `-OutDir` override) is listed by exact path so Delete recycles it (`library::recorded`).
 fn note_saved(folders: &crate::services::library::folders::Folders, path: String) {
     let recordings = crate::backend::library_dir_from(folders);
-    if !crate::services::library::imports::is_owned(std::path::Path::new(&path), &recordings, &folders.former_recordings) {
+    if !crate::services::library::imports::is_owned(std::path::Path::new(&path), &recordings, &folders.former_recordings, &folders.imported) {
         crate::services::library::recorded::note(&path);
     }
     record_interaction(Interaction::Saved(path));
@@ -166,6 +166,7 @@ impl Root {
                 note_saved(&self.folders, path);
                 self.workers.job(Job::List);
             }
+            DaemonEvent::GameFolderExists { game, folder } => self.on_game_folder_exists(game, folder),
             DaemonEvent::RecordingRecovered { paths, .. } => {
                 // Toast: `recording_toast`. The recovered files reach the library.
                 for path in paths {

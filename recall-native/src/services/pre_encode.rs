@@ -257,6 +257,11 @@ pub fn sweep_deliveries() {
         let lane = folder.clone();
         storage::submit_io(&lane, Priority::Background, move || {
             remove_deliveries(&folder);
+            // Game folders' exports (`Edited\<Game>\` with Recall's marker, "Sort clips into
+            // game folders"); other subfolders are the user's.
+            for game in crate::services::library::folders::rule::game_folders(&folder) {
+                remove_deliveries(&game);
+            }
         });
     };
     let _ = std::thread::Builder::new().name("recall-delivery-sweep".into()).spawn(body);

@@ -56,6 +56,9 @@ pub(crate) enum VideoSrc {
 /// Everything one save needs, detached from the live encoder and rings.
 pub(crate) struct SaveJob {
     pub path: String,
+    /// "Sort clips into game folders": the saver places the clip in this game's folder
+    /// ([`place_in_game_folder`]) before writing.
+    pub game: Option<String>,
     pub seconds: u32,
     /// When the save was requested; `elapsed_ms` is measured from here.
     pub requested: Instant,
@@ -308,7 +311,8 @@ struct Worker {
 impl Worker {
     fn run(mut self, rx: Receiver<SaveJob>) {
         lower_thread_priority(&self.events);
-        while let Ok(job) = rx.recv() {
+        while let Ok(mut job) = rx.recv() {
+            job.path = place_in_game_folder(&job.path, job.game.as_deref(), &crate::naming::out_dir(), &self.events);
             self.take(&job);
             // Answered (after its event went out): `status.save_writing` no longer counts it.
             self.progress.jobs.fetch_sub(1, Relaxed);
@@ -335,6 +339,10 @@ impl Worker {
         let target = target.as_path();
         match result {
             Ok(muxed) => {
+                // Saved in place into an adopted game folder: that folder owns it now.
+                if let Err(e) = crate::game_folder_rule::record_saved(target, None) {
+                    self.events.log(&format!("saver: {} not recorded in its game folder ({e}); it stays uncounted", target.display()));
+                }
                 let bytes = std::fs::metadata(target).map(|m| m.len()).unwrap_or(0);
                 let elapsed = job.requested.elapsed();
                 timing.ready_ms = ms(elapsed);
@@ -369,6 +377,18 @@ impl Worker {
             }
         }
     }
+}
+
+/// "Sort clips into game folders": the path `job` is written to. With a game, its file name
+/// inside that game's folder (`naming::writable_game_dir`: made again with its marker when it
+/// went missing; a link or a folder that is not Recall's now falls back to `clip_folder` with a
+/// log line). Here on the saver thread, so the hotkey never waits on the drive. Without a game
+/// the path is unchanged. The file name never changes (bookmarks match on it).
+pub(crate) fn place_in_game_folder(path: &str, game: Option<&str>, clip_folder: &str, events: &Events) -> String {
+    let Some(game) = game else { return path.to_string() };
+    let Some(file) = Path::new(path).file_name() else { return path.to_string() };
+    let dir = crate::naming::writable_game_dir(clip_folder, game, &|line: &str| events.log(&format!("saver: {line}")));
+    dir.join(file).to_string_lossy().into_owned()
 }
 
 /// `<path>.part`: the in-progress name, renamed to `path` only when complete.
@@ -454,21 +474,8 @@ fn lower_thread_priority(events: &Events) {
 /// Build a Moments-convention clip path: `<Game>__<YYYY-MM-DD>__<HH-MM-SS>.mp4`.
 /// Non-filename characters in the source name become dashes.
 pub fn clip_path(out_dir: &str, source: &str) -> String {
-    let mut name: String = source
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim()
-        .replace(' ', "-");
-    if name.is_empty() {
-        name = "Desktop".to_string();
-    }
+    // The `naming::source_slug` rule, at most `naming::SLUG_MAX` characters.
+    let name = crate::naming::source_slug(source);
     let stamp = chrono::Local::now().format("%Y-%m-%d__%H-%M-%S-%3f");
     let suffix = uuid::Uuid::new_v4().simple();
     std::path::Path::new(out_dir)

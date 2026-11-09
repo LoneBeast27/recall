@@ -94,7 +94,11 @@ pub struct PacedFrame {
 
 /// Ask the encoder thread to write the last `seconds` to `path`.
 pub struct SaveRequest {
+    /// The clip's path straight in the clip folder; with `game` set the saver moves it into that
+    /// game's folder (same file name).
     pub path: String,
+    /// "Sort clips into game folders": the game (source) whose folder the saver writes into.
+    pub game: Option<String>,
     pub seconds: u32,
     /// Capture-clock PTS at save request, used to retain a static tail.
     pub end_us: Option<u64>,
