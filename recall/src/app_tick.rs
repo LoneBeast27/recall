@@ -30,6 +30,9 @@ fn picture(w: u32, h: u32, rgba: Vec<u8>, content: Option<Rect>) -> (u32, u32, V
     }
 }
 
+/// Why a screenshot pending at the privacy stop is not saved.
+pub(crate) const STOPPED_SHOT: &str = "capture stopped; not saved";
+
 impl App {
     /// Encode each newly uploaded capture once, retaining its native timestamp.
     /// A full ingress queue drops a frame instead of blocking capture or growing RAM.
@@ -76,6 +79,11 @@ impl App {
         let Some(shots) = &self.shots else { return };
         if !shots.take_request() {
             return;
+        }
+        // The privacy stop (R2-detect-r10-p5-2): a frame read now may have been captured after
+        // `stop_capture` (the CPU upload, `latest_gpu`); the shot fails, both paths.
+        if crate::stop_capture::stopped() {
+            return shots.fail(STOPPED_SHOT);
         }
         #[cfg(feature = "encode")]
         if self.gpu.is_none() {
