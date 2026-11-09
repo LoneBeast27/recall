@@ -16,14 +16,14 @@ pub fn budget_note() -> Option<String> {
     storage::budget_note()
 }
 
-/// storage.json is damaged and backed up: "Reset cache size" may be offered.
-pub fn budget_resettable() -> bool {
-    storage::budget_resettable()
+/// storage.json is damaged and backed up: the size "Reset cache size" offers, and its source.
+pub fn reset_offer() -> Option<storage::ResetOffer> {
+    storage::reset_offer()
 }
 
-/// Writes a fresh storage.json with the last budget read, else the first-run pick.
-pub fn reset_budget() -> Result<u64, String> {
-    storage::reset_budget()
+/// Writes the size the Reset button showed (the user's number when one could be recovered).
+pub fn reset_budget(shown: u64) -> Result<u64, String> {
+    storage::reset_budget(shown)
 }
 
 pub fn set_budget_bytes(bytes: u64) {
