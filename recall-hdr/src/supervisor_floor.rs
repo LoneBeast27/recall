@@ -32,7 +32,12 @@ static CHECKED: Mutex<Option<Checked>> = Mutex::new(None);
 /// unreadable file has none for this spawn (the safe state), but that is never cached: the next
 /// spawn reads it again (N4: one failed read must not cost the mic for the whole session).
 pub(crate) fn has_marker(path: &Path) -> bool {
-    has_marker_with(path, std::fs::read)
+    has_marker_with(path, read_file)
+}
+
+/// The engine file's bytes (a plain fn: `std::fs::read` itself is generic over the path).
+pub(crate) fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
+    std::fs::read(path)
 }
 
 /// [`has_marker`] with the file read passed in (tests). Only a full read is cached.
