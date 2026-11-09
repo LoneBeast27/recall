@@ -2,6 +2,7 @@
 name = "recall"
 version = "0.0.1"
 edition = "2021"
+license = "GPL-3.0-or-later"
 description = "Lean HDR-aware clip recorder + live HDR->SDR source (Windows)"
 
 [features]
