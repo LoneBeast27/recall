@@ -40,7 +40,7 @@
   Performance Log Users (SID S-1-5-32-559). When you are not in it, ONE administrator prompt
   adds you; it takes effect at your next sign-in. Declining the prompt only leaves FPS as "-".
 #>
-param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$Autostart, [switch]$NoAutostart, [switch]$NoFrameTiming, [switch]$NoStart, [switch]$CloseApp, [switch]$AllowUnknownDrive, [int]$QuitWaitMinutes = 0)
+param([string]$InstallDir = (Join-Path $env:LOCALAPPDATA 'Programs\Recall'), [switch]$NoBuild, [switch]$NoShortcut, [switch]$Autostart, [switch]$NoAutostart, [switch]$NoFrameTiming, [switch]$NoStart, [switch]$CloseApp, [switch]$AllowUnknownDrive, [int]$QuitWaitMinutes = 0, [string]$StageDir, [switch]$UpdateExisting)
 $ErrorActionPreference = 'Stop'
 # A relative -InstallDir or RECALL_CONTROLLER_PATH means the PowerShell location ($PWD), which
 # New-Item, the swap and Start-Process use; .NET would resolve it against the process folder
@@ -50,10 +50,49 @@ $envController = if ($env:RECALL_CONTROLLER_PATH) { $ExecutionContext.SessionSta
 $repo = Split-Path $PSScriptRoot -Parent
 $stage = Join-Path $repo 'dist'
 # Gyan FFmpeg 7.1.1 full shared build: same ABI as the 7.1 bindings, and it includes av1_nvenc.
-$ffmpegRoot = Join-Path $repo 'tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared'
+$buildRoot = if ($StageDir -and $env:RECALL_TOOLS_ROOT) {
+  (Resolve-Path -LiteralPath $env:RECALL_TOOLS_ROOT).ProviderPath
+} else { $repo }
+$ffmpegRoot = Join-Path $buildRoot 'tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared'
 # Optional low-priority build wrapper (CCD1, BelowNormal); a plain cargo build when absent.
 $nice = Join-Path $env:USERPROFILE '.claude\tools\nice-build.ps1'
 function Invoke-Build { if (Test-Path $nice) { & powershell -NoProfile -File $nice @args } else { & $args[0] @($args | Select-Object -Skip 1) } }
+
+function Build-Recall {
+  $env:FFMPEG_DIR = $ffmpegRoot
+  if (!$env:LIBCLANG_PATH) { $env:LIBCLANG_PATH = Join-Path $buildRoot '.tmp\nvenc-vfr\clang18\clang\native' }
+  $env:CARGO_BUILD_JOBS = '12'
+  $env:CARGO_TARGET_DIR = Join-Path $buildRoot 'target-dev'
+  Push-Location $repo
+  try {
+    Invoke-Build cargo build --release -p recall -p recall-hdr -p recall-overlay --offline
+    if ($LASTEXITCODE -ne 0) { throw 'recorder release build failed' }
+    $env:CARGO_TARGET_DIR = Join-Path $buildRoot 'target-gpui'
+    Invoke-Build cargo build --release --manifest-path (Join-Path $repo 'recall-native\Cargo.toml') --offline
+    if ($LASTEXITCODE -ne 0) { throw 'app release build failed' }
+  } finally {
+    Pop-Location
+  }
+}
+
+function Copy-RecallExecutables([string]$destination) {
+  foreach ($exe in 'target-gpui\release\recall-native.exe','target-dev\release\recall-hdr.exe','target-dev\release\recall.exe','target-dev\release\recall-overlay.exe') {
+    $from = Join-Path $buildRoot $exe
+    if (!(Test-Path -LiteralPath $from -PathType Leaf)) { throw "Missing build output: $from" }
+    Copy-Item -LiteralPath $from -Destination $destination -Force
+  }
+}
+
+if ($StageDir) {
+  $StageDir = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($StageDir)
+  if ($NoBuild -or $UpdateExisting -or (Test-Path -LiteralPath $StageDir)) {
+    throw 'StageDir requires a build and an unused output folder.'
+  }
+  Build-Recall
+  New-Item -ItemType Directory -Path $StageDir | Out-Null
+  Copy-RecallExecutables $StageDir
+  return
+}
 
 function Get-DriveKind([string]$path) {
   $full = [IO.Path]::GetFullPath($path)
@@ -160,6 +199,14 @@ if ($env:RECALL_CONTROLLER_PATH -and $defaultRoot.StartsWith($installRoot, [Stri
   throw "A sandboxed install (RECALL_CONTROLLER_PATH) can't use the real install folder or a folder that holds it ($InstallDir). Pass another -InstallDir, or unset RECALL_CONTROLLER_PATH for a real install; nothing was closed or replaced."
 }
 
+if ($UpdateExisting) {
+  foreach ($name in 'recall-native.exe','recall-hdr.exe','recall.exe') {
+    if (!(Test-Path -LiteralPath (Join-Path $InstallDir $name) -PathType Leaf)) {
+      throw 'The selected Recall installation is incomplete or unavailable. No files were changed.'
+    }
+  }
+}
+
 # 2a. Never close the app under the user: refuse while the installed app runs (checked before any
 #     build work). Its window counts even when minimized; a hidden instance still locks the files.
 #     Run again after the build (Assert-Closed below): the build takes minutes, and an app reopened
@@ -196,8 +243,8 @@ Assert-AppClosed
 #    folder, an 8.3 or junction spelling, an elevated one WMI can't read), and stops with an
 #    error naming any that won't quit. One that got the quit is waited for while it says it is
 #    finishing a clip, with a line each minute; one already finishing gets no second quit
-#    (Request-RecorderQuit, Wait-ForQuit). Only a sandbox (RECALL_CONTROLLER_PATH) quits just the
-#    controller at that path and leaves every other recorder alone (Get-Controller).
+#    (Request-RecorderQuit, Wait-ForQuit). An update or sandbox quits only the controller in the
+#    selected installation and leaves other recorders alone (Get-Controller).
 function Get-PipeServer($pipe) {
   if (-not ('RecallInstall.Pipe' -as [type])) {
     Add-Type -Name Pipe -Namespace RecallInstall -MemberDefinition @'
@@ -295,10 +342,10 @@ function Get-SessionController { Get-CimInstance Win32_Process -Filter "Name = '
 # Started from $controllerPath? Compared by what the two paths name (PathId.Normalize above).
 function Test-OurController($p) { $path = Get-ExePath $p; [bool]$path -and [string]::Equals([RecallInstall.PathId]::Normalize($path), $controllerPath, [StringComparison]::OrdinalIgnoreCase) }
 # The controllers this run quits and waits for (step 2): every one in this session for a real
-# install, only the one at RECALL_CONTROLLER_PATH for a sandbox.
+# install, only the target controller for an update or sandbox.
 function Get-Controller {
   $all = @(Get-SessionController)
-  if ($env:RECALL_CONTROLLER_PATH) { $all | Where-Object { Test-OurController $_ } } else { $all }
+  if ($UpdateExisting -or $env:RECALL_CONTROLLER_PATH) { $all | Where-Object { Test-OurController $_ } } else { $all }
 }
 # A recorder installed before the per-session pipe listens on the bare name, so the first
 # update must ask it there (audit R2-deep-startup-1). Only when a controller this run quits
@@ -310,7 +357,7 @@ $legacyPipe = if ($env:RECALL_LEGACY_PIPE) { $env:RECALL_LEGACY_PIPE } else { 'r
 function Stop-Recorder {
   # Each phase starts clean: a refusal here must not end step 6's status probe (R5-startup-5).
   $script:ownerRefused = $false; $script:sentTo = $null
-  if ($env:RECALL_CONTROLLER_PATH) {
+  if ($UpdateExisting -or $env:RECALL_CONTROLLER_PATH) {
     $others = @(Get-SessionController | Where-Object { -not (Test-OurController $_) })
     if ($others) { Write-Host ("Left running (not $controllerPath): " + (($others | ForEach-Object { Format-Recorder $_ }) -join ', ')) }
   }
@@ -323,19 +370,7 @@ function Stop-Recorder {
 Stop-Recorder
 
 # 3. Build.
-if (-not $NoBuild) {
-  $env:FFMPEG_DIR = $ffmpegRoot
-  $env:LIBCLANG_PATH = Join-Path $repo '.tmp\nvenc-vfr\clang18\clang\native'
-  $env:CARGO_BUILD_JOBS = '12'
-  $env:CARGO_TARGET_DIR = Join-Path $repo 'target-dev'
-  Push-Location $repo
-  Invoke-Build cargo build --release -p recall -p recall-hdr -p recall-overlay --offline
-  if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'recorder release build failed' }
-  $env:CARGO_TARGET_DIR = Join-Path $repo 'target-gpui'
-  Invoke-Build cargo build --release --manifest-path (Join-Path $repo 'recall-native\Cargo.toml') --offline
-  if ($LASTEXITCODE -ne 0) { Pop-Location; throw 'app release build failed' }
-  Pop-Location
-}
+if (-not $NoBuild) { Build-Recall }
 
 # 3b. Recall may have been reopened during the build (the app also starts the recorder): check
 #     again right before the swap, so nothing old keeps running from `.old`.
@@ -349,11 +384,7 @@ New-Item -ItemType Directory -Force -Path $stage | Out-Null
 # Older installs kept a second copy of every FFmpeg DLL in bin\ (about 159 MB); ffmpeg.exe now sits next to them.
 $oldStageBin = Join-Path $stage 'bin'
 if (Test-Path $oldStageBin) { Remove-Item -LiteralPath $oldStageBin -Recurse -Force }
-foreach ($exe in @('target-gpui\release\recall-native.exe', 'target-dev\release\recall-hdr.exe', 'target-dev\release\recall.exe', 'target-dev\release\recall-overlay.exe')) {
-  $from = Join-Path $repo $exe
-  if (-not (Test-Path $from)) { throw "missing build output: $from" }
-  Copy-Item -LiteralPath $from -Destination $stage -Force
-}
+Copy-RecallExecutables $stage
 Get-ChildItem (Join-Path $ffmpegRoot 'bin\*.dll') | ForEach-Object {
   Copy-Item $_.FullName $stage -Force
 }
@@ -387,7 +418,7 @@ function Test-PerfLogMember([string]$userSid) {
   try { [bool](Get-LocalGroupMember -SID $perfLogUsers -ErrorAction Stop | Where-Object { $_.SID.Value -eq $userSid }) }
   catch { $false }
 }
-if (-not $NoFrameTiming) {
+if (-not $NoFrameTiming -and -not $UpdateExisting) {
   $me = [Security.Principal.WindowsIdentity]::GetCurrent()
   $userSid = $me.User.Value
   if ($me.Groups | Where-Object { $_.Value -eq $perfLogUsers }) {
@@ -418,7 +449,7 @@ if (-not $NoFrameTiming) {
 if ($env:RECALL_CONTROLLER_PATH) {
   $Autostart = [switch]$false
   'Sandbox install (RECALL_CONTROLLER_PATH): skipped the Start menu shortcut and Start with Windows; the real ones are unchanged.'
-} elseif (-not $NoShortcut) {
+} elseif (-not $NoShortcut -and -not $UpdateExisting) {
   $lnk = Join-Path $env:APPDATA 'Microsoft\Windows\Start Menu\Programs\Recall.lnk'
   $shell = New-Object -ComObject WScript.Shell
   $s = $shell.CreateShortcut($lnk)

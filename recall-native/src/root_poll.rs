@@ -125,6 +125,10 @@ impl Root {
         // Same for the cache size field when Settings → Storage closes while it's open.
         changed |= self.cache.editing && !self.cache.painted.get();
         changed |= self.poll_timers();
+        changed |= self.update.tick();
+        if let Some((good, notice)) = self.update.notice.take() {
+            self.show_toast(if good { ToastKind::Good } else { ToastKind::Bad }, notice, None);
+        }
         if changed {
             cx.notify();
         }

@@ -13,7 +13,15 @@ Recall was created by **LoneBeast27**. Official Recall downloads are free. Recal
 
 Open `dist/recall-current/RecallSetup.exe` for Quick Setup. Choose whether recording starts when setup is complete and whether to set up Windows game detection and FPS. **Change…** opens the SSD install folder picker from Quick Setup. **Advanced** also lets you type a folder or change the Start menu shortcut. After installation, **Continue setup** opens Storage, Audio, and Recording quality. Recording quality compares the same full frame before and after encoding, with a detail crop available. Choose **Open Recall** to reach your library. Updates keep your existing clip folder and recording settings.
 
-Setup checks the PC before copying Recall. It installs the bundled Microsoft Visual C++ x64 runtime when required. On Windows N, it adds the Media Feature Pack through Windows Update when needed. Windows may ask for administrator permission. If a restart is needed, reopen Setup after restarting. Game recording uses the NVIDIA driver installed for your GPU.
+Setup checks the PC before copying Recall. Release Setup downloads the pinned FFmpeg runtime from Gyan and the signed Microsoft Visual C++ x64 runtime when required. On Windows N, it adds the Media Feature Pack through Windows Update when needed. Windows may ask for administrator permission. If a restart is needed, reopen Setup after restarting. Game recording uses the NVIDIA driver installed for your GPU.
+
+### Updates
+
+Official versioned builds check [Recall's GitHub Releases](https://github.com/LoneBeast27/recall/releases) after launch. You can also check in **Settings → General → About**. Recall offers a newer stable release once it verifies that the tag is on `main`. It verifies the Setup download against GitHub's SHA-256 before opening Setup for confirmation.
+
+Run `powershell -NoProfile -File scripts\release.ps1 -Version <major.minor.patch>` from a clean checkout of the current public `main` to build without installing. The output contains `RecallSetup.exe`, `SHA256SUMS.txt`, `SOURCE-REVISION.txt`, and four Recall executables in `recall-app` for individual scans. Use a matching `v<major.minor.patch>` tag on that source revision. A draft can be verified before publishing.
+
+Run `Get-Help scripts/dev/scan-release.ps1 -Examples` for a per-file Defender scan of the installer, app binaries, and vendor downloads.
 
 Fresh profiles use the Windows default microphone and system output. A distinct Windows communications output gets its own track. Add extra devices or apps from **Input**, **Output**, and **Application audio**. Select the icon on a custom strip to change it.
 
