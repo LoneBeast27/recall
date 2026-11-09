@@ -122,6 +122,9 @@ pub struct SessionStatus {
     /// The last audio line the controller sent the recorder (the meter says "Applying…" until
     /// `engine.audio_seq` reaches it; None on older builds).
     pub audio_sent_seq: Option<u64>,
+    /// A repair the recorder asks for (its engine file is older than the app): the notice and
+    /// its action, shown with a Reinstall button (`services::repair`).
+    pub repair: Option<crate::services::repair::RepairNotice>,
     pub overlay: OverlayStatus,
     pub autostart: bool,
     pub hdr: HdrStatus,

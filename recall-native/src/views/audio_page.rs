@@ -382,6 +382,7 @@ impl Root {
         self.load_audio_lists(cx);
         let mut body = Vec::new();
         body.extend(self.offline_banner(cx));
+        body.extend(self.repair_banner(cx));
         body.push(self.sources_card(window, cx));
         if !crate::TESTING {
             body.push(self.midi_card(cx));
