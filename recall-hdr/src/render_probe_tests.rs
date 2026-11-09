@@ -25,6 +25,9 @@ fn stopping_a_session_that_does_not_run_is_harmless() {
 #[test]
 #[ignore]
 fn live_probe_counts_this_process_presents() {
+    if !crate::hw_gate::enabled("live_probe_counts_this_process_presents") {
+        return;
+    }
     assert!(!session_running(), "a RecallDetectRender session is already running");
     let pid = std::process::id();
     let presenter = hidden::Presenter::new();
@@ -69,6 +72,9 @@ fn live_probe_counts_this_process_presents() {
 #[test]
 #[ignore]
 fn live_probe_start_stop_cost() {
+    if !crate::hw_gate::enabled("live_probe_start_stop_cost") {
+        return;
+    }
     assert!(!session_running());
     for _ in 0..5 {
         let probe = RenderProbe::start(std::process::id()).expect("start");
@@ -87,6 +93,9 @@ fn live_probe_start_stop_cost() {
 #[test]
 #[ignore]
 fn live_probe_cpu_under_load() {
+    if !crate::hw_gate::enabled("live_probe_cpu_under_load") {
+        return;
+    }
     assert!(!session_running());
     let presenter = hidden::Presenter::new();
     let run = |probe: bool| {
