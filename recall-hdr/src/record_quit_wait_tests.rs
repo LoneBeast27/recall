@@ -160,3 +160,35 @@ fn a_quit_asked_during_a_sign_out_wait_survives_a_cancelled_sign_out() {
     let mut q = a_wait_at(t0);
     assert_eq!(resume_after_session_end(&mut q), None);
 }
+
+/// Design P16 (B13): quit (or sign-out) with a save still being written past its 10 min cap.
+/// The cap let its queue go, so the save no longer counts as writing; the quit used to Go and
+/// kill it 8 s later with no report. Now it is reported lost first.
+#[test]
+fn a_quit_with_a_save_past_its_cap_reports_it_lost_not_go() {
+    let t0 = Awake::ZERO;
+    let s = Duration::from_secs;
+    let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
+    a.save_sent(t0);
+    for sec in (0..=660u64).step_by(5) {
+        let line = json!({"type":"status","save_writing":{"bytes":sec,"queued":0,"step":sec + 1}});
+        a.on_engine_event(&line, 0.0, t0 + s(sec));
+        let _ = a.retarget_busy(t0 + s(sec)); // the pump's reads: the cap runs here
+    }
+    let quit = t0 + s(661);
+    assert!(!a.saves_writing(quit), "setup: past its cap the save no longer holds restarts");
+    assert_eq!(q.step(&mut a, quit), QuitStep::Lost(1), "reported, not a silent go");
+}
+
+/// Design P16: an expired save (no answer for 120 s, no report) is unanswered too.
+#[test]
+fn a_quit_after_a_save_expired_unanswered_reports_it() {
+    let t0 = Awake::ZERO;
+    let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
+    a.save_sent(t0);
+    let quit = t0 + Duration::from_secs(130);
+    assert!(!a.saves_writing(quit), "setup: expired");
+    assert_eq!(q.step(&mut a, quit), QuitStep::Lost(1));
+    a.on_engine_event(&json!({"type":"saved","path":"G__x.mp4"}), 0.0, quit + Duration::from_secs(1));
+    assert_eq!(QuitWait::default().step(&mut a, quit + Duration::from_secs(1)), QuitStep::Go, "answered late: nothing in flight");
+}
