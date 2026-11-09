@@ -133,6 +133,13 @@ impl super::Shared {
     pub(super) fn queue_audio(&self, g: &super::EngineStdin, line: &str) -> Sent {
         let (line, seq) = self.spawn_sources.stamp(line);
         let attached = g.quitting.is_none() && g.queue.is_some();
+        if let (Some(refusal), Some(queue)) = (g.quitting, g.queue.as_ref()) {
+            // Never refused to the engine (F-4 (a)): written ahead of its `quit`. The caller is
+            // still told why (the engine is ending); an unacked one marks its `.part` (F-4 (b)).
+            queue.send_ahead_of_quit(&line);
+            self.spawn_sources.lock().sent = seq;
+            return refusal;
+        }
         let sent = self.queue_line(g, &line);
         if sent.queued() {
             self.spawn_sources.lock().sent = seq;

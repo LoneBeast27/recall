@@ -59,7 +59,7 @@ impl Shared {
     pub(super) fn send_quit(&self, refusal: Sent) -> bool {
         let mut g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
         g.quitting = Some(refusal);
-        g.queue.as_ref().is_some_and(|queue| queue.send_quit(r#"{"cmd":"quit"}"#))
+        g.queue.as_ref().is_some_and(|queue| queue.send_quit(super::stdin::QUIT_LINE))
     }
 
     /// The quit for a retarget, refused with the last retarget's reason read under the

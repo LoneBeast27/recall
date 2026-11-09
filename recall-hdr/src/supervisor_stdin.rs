@@ -14,7 +14,7 @@
 
 use std::io::Write;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::mpsc::{sync_channel, SyncSender, TrySendError};
 
 use crate::log;
@@ -28,7 +28,13 @@ pub(super) struct StdinQueue {
     /// Lines queued and not yet taken by the writer (the reserved quit slot excluded).
     waiting: Arc<AtomicUsize>,
     dropped: AtomicU64,
+    /// Privacy lines sent after the `quit` was queued (F-4 (a)): the writer puts them AHEAD of
+    /// the `quit`, so an engine that still reads gets them before it stops reading.
+    ahead_of_quit: Arc<Mutex<Vec<String>>>,
 }
+
+/// The `quit` line (`Shared::send_quit`).
+pub(super) const QUIT_LINE: &str = r#"{"cmd":"quit"}"#;
 
 impl StdinQueue {
     /// Start the writer thread for `out` (the child's stdin).
@@ -36,16 +42,18 @@ impl StdinQueue {
         let (tx, rx) = sync_channel::<String>(QUEUE + 1);
         let waiting = Arc::new(AtomicUsize::new(0));
         let taken = waiting.clone();
+        let ahead_of_quit = Arc::new(Mutex::new(Vec::new()));
+        let ahead = ahead_of_quit.clone();
         let spawned = std::thread::Builder::new().name("recall-engine-stdin".into()).spawn(move || {
             let mut out = out;
             for line in rx {
                 let _ = taken.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
-                // One write per line, its newline included: the engine's drain never sees the
-                // pipe empty halfway through a line (merge-gate P1-2).
-                let mut bytes = line.into_bytes();
-                bytes.push(b'\n');
-                let wrote = out.write_all(&bytes).and_then(|_| out.flush());
-                if wrote.is_err() {
+                let mut lines = Vec::new();
+                if line == QUIT_LINE {
+                    lines.append(&mut ahead.lock().unwrap_or_else(|p| p.into_inner())); // F-4 (a)
+                }
+                lines.push(line);
+                if !lines.into_iter().all(|l| write_line(&mut out, l)) {
                     break; // the engine is gone (or killed): nothing more reaches it
                 }
             }
@@ -53,7 +61,12 @@ impl StdinQueue {
         if let Err(e) = spawned {
             log!("supervisor: engine stdin writer failed to start: {e}");
         }
-        StdinQueue { tx, waiting, dropped: AtomicU64::new(0) }
+        StdinQueue { tx, waiting, dropped: AtomicU64::new(0), ahead_of_quit }
+    }
+
+    /// A privacy line after the `quit` was queued: written just before the `quit` (F-4 (a)).
+    pub fn send_ahead_of_quit(&self, line: &str) {
+        self.ahead_of_quit.lock().unwrap_or_else(|p| p.into_inner()).push(line.to_owned());
     }
 
     /// `quit`: may take the slot kept beyond [`QUEUE`]; never blocks.
@@ -87,6 +100,13 @@ impl StdinQueue {
         }
         false
     }
+}
+
+/// One line and its newline in one write: the engine never sees half a line (merge-gate P1-2).
+fn write_line(out: &mut Box<dyn Write + Send>, line: String) -> bool {
+    let mut bytes = line.into_bytes();
+    bytes.push(b'\n');
+    out.write_all(&bytes).and_then(|_| out.flush()).is_ok()
 }
 
 #[cfg(test)]
@@ -123,5 +143,36 @@ mod tests {
         }
         std::thread::sleep(std::time::Duration::from_millis(50)); // a second write, if any
         assert_eq!(*chunks.lock().unwrap(), vec![format!("{line}\n").into_bytes()], "one write, newline included");
+    }
+
+    /// F-4 (a): a privacy line sent after the `quit` was queued is written AHEAD of it.
+    #[test]
+    fn a_privacy_line_after_the_quit_is_written_ahead_of_it() {
+        let chunks = Arc::new(Mutex::new(Vec::new()));
+        let gate = Arc::new(Mutex::new(()));
+        let held = gate.lock().unwrap(); // the writer waits on its first line until released
+        struct Slow(Arc<Mutex<Vec<Vec<u8>>>>, Arc<Mutex<()>>);
+        impl Write for Slow {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                let _wait = self.1.lock().unwrap();
+                self.0.lock().unwrap().push(buf.to_vec());
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        let queue = StdinQueue::start(Box::new(Slow(chunks.clone(), gate.clone())));
+        assert!(queue.send(r#"{"cmd":"bookmark"}"#));
+        assert!(queue.send_quit(QUIT_LINE));
+        queue.send_ahead_of_quit(r#"{"cmd":"set_mic_mute","muted":true,"seq":9}"#);
+        drop(held);
+        drop(queue);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while chunks.lock().unwrap().len() < 3 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let lines: Vec<String> = chunks.lock().unwrap().iter().map(|c| String::from_utf8_lossy(c).trim().to_owned()).collect();
+        assert_eq!(lines, vec![r#"{"cmd":"bookmark"}"#.to_owned(), r#"{"cmd":"set_mic_mute","muted":true,"seq":9}"#.to_owned(), QUIT_LINE.to_owned()]);
     }
 }
