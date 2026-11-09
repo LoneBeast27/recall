@@ -37,6 +37,14 @@ CONFIG_EXISTED_MARKER="$WORK_DIR/config_existed"
 
 mkdir -p "$WORK_DIR"
 
+# The HDR monitor under test: its Windows friendly name, as config.toml's
+# [display] target_friendly_name takes it. Machine-specific, so it is never committed.
+TARGET_MONITOR="${RECALL_E2E_MONITOR:-}"
+if [ -z "$TARGET_MONITOR" ]; then
+  echo "Set RECALL_E2E_MONITOR to the friendly name of the HDR monitor under test." >&2
+  exit 2
+fi
+
 # ---------------------------------------------------------------------------
 # Tracked spawned PIDs (Windows pids). Never kill by image name.
 # ---------------------------------------------------------------------------
@@ -378,7 +386,7 @@ write_config_override() {
     echo "version = 1"
     echo ""
     echo "[display]"
-    echo 'target_friendly_name = "PG27AQDP"'
+    echo "target_friendly_name = \"$TARGET_MONITOR\""
     echo ""
     echo "[behavior]"
     echo 'default_game_class = "sdr_game"'
