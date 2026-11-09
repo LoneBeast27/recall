@@ -10,14 +10,19 @@
 # GOP, so neither a keyframe nor the first frames after one) is cropped at the same spot from
 # every recording and from the lossless clip.
 #
-#   Bitrate:  15 / 25 / 40 / 60 Mbps at Balanced (p5).
-#   Effort:   Performance (p4) and Quality (p7 + qres multipass + spatial AQ) at 15 Mbps.
-#             Balanced at 15 Mbps is bitrate-15.png.
+# One recording per Settings combination, so every tab shows its own:
+#   Format:   H.264 / HEVC / AV1 (h264_nvenc / hevc_nvenc / av1_nvenc)
+#   Bitrate:  15 / 25 / 40 / 60 Mbps
+#   Effort:   Performance (p4), Balanced (p5), Quality (p7 + qres multipass + spatial AQ)
+# named <codec>-<mbps>-<effort>.png. The setup page's full frames are H.264 at Balanced
+# (<codec>-<mbps>-balanced-frame.png). previews.json records the arguments; the app's tests
+# read it to check the full frames and the crops are the same frame.
 #
 # Run it through the build gate (it uses NVENC): gated.ps1 none powershell -NoProfile -File ...
 # Usage: make-previews.ps1 -Source <panorama> -CropX <px> -CropY <px> [-Size 136] [-Yaw 0] [-Pitch 0] [-DegPerFrame 1.5]
 #   -Yaw/-Pitch aim the camera at frame 89 (degrees; yaw 0 = the picture's centre).
-#   -Size is the crop in source px; the PNG is 2x that (pixel-doubled). -CropX/-CropY pick the crop inside the 2560x1440 frame (choose foliage or fine texture);
+#   -Size is the crop in source px; the PNG is 2x that (pixel-doubled). -CropX/-CropY pick the crop inside the 2560x1440 frame (choose foliage or fine texture;
+#   all three must be multiples of 4, so the crop lands on whole pixels of the 640x360 full frame);
 #   the whole frame 89 is written to <Work>\frame.png to choose them.
 param(
     [Parameter(Mandatory)][string]$Source,
@@ -32,6 +37,7 @@ param(
     [string]$Ffmpeg
 )
 $ErrorActionPreference = 'Stop'
+if ($CropX % 4 -or $CropY % 4 -or $Size % 4) { throw '-CropX, -CropY and -Size must be multiples of 4' }
 # $PSScriptRoot is empty inside param() defaults under Windows PowerShell 5.1 when run via -File through the gate.
 $here = Split-Path -Parent $MyInvocation.MyCommand.Path
 if (-not $Out) { $Out = Join-Path $here '..\..\recall-native\assets\quality' }
@@ -69,14 +75,21 @@ try {
         '-frames:v', '120', '-c:v', 'ffv1', 'source.nut')
 } finally { Pop-Location }
 
-$variants = @(
-    @{ Name = 'bitrate-15'; Preset = 'p5'; Mbps = 15; Max = $false },
-    @{ Name = 'bitrate-25'; Preset = 'p5'; Mbps = 25; Max = $false },
-    @{ Name = 'bitrate-40'; Preset = 'p5'; Mbps = 40; Max = $false },
-    @{ Name = 'bitrate-60'; Preset = 'p5'; Mbps = 60; Max = $false },
-    @{ Name = 'effort-performance'; Preset = 'p4'; Mbps = 15; Max = $false },
-    @{ Name = 'effort-quality'; Preset = 'p7'; Mbps = 15; Max = $true }
+# recall/src/encoder/settings.rs: Quality::nvenc_options; Settings effort -> engine quality in
+# recall-hdr/src/record_engine.rs (performance = p4, balanced = p5, quality = p7 + extras).
+$efforts = @(
+    @{ Name = 'performance'; Preset = 'p4'; Max = $false },
+    @{ Name = 'balanced'; Preset = 'p5'; Max = $false },
+    @{ Name = 'quality'; Preset = 'p7'; Max = $true }
 )
+$variants = foreach ($codec in 'h264', 'hevc', 'av1') {
+    foreach ($mbps in 15, 25, 40, 60) {
+        foreach ($e in $efforts) {
+            @{ Name = "$codec-$mbps-$($e.Name)"; Encoder = "${codec}_nvenc"; Preset = $e.Preset; Mbps = $mbps; Max = $e.Max
+               Frame = ($codec -eq 'h264' -and $e.Name -eq 'balanced') }
+        }
+    }
+}
 Run @('-i', $lossless, '-vf', "select=eq(n\,$frame)", '-frames:v', '1', (Join-Path $Work 'frame.png'))
 # Pixel-doubled here (nearest neighbour), so the app shows each crop 1:1 in its 272 px tile and
 # the 2x zoom stays crisp instead of being smoothed by the GPU's linear upscale.
@@ -90,12 +103,12 @@ Run @('-i', $lossless, '-vf', $crop, '-frames:v', '1', '-compression_level', '9'
 foreach ($v in $variants) {
     $clip = Join-Path $Work "$($v.Name).mp4"
     $png = Join-Path $Out "$($v.Name).png"
-    $enc = @('-i', $lossless, '-c:v', 'h264_nvenc', '-preset', $v.Preset, '-tune', 'hq', '-rc', 'vbr',
+    $enc = @('-i', $lossless, '-c:v', $v.Encoder, '-preset', $v.Preset, '-tune', 'hq', '-rc', 'vbr',
         '-b:v', "$($v.Mbps)M", '-maxrate', "$($v.Mbps * 2)M", '-bf', '0', '-g', '60', '-r', '60')
     if ($v.Max) { $enc += @('-multipass', 'qres', '-spatial-aq', '1') }
     Run ($enc + @($clip))
     Run @('-i', $clip, '-vf', $crop, '-frames:v', '1', '-compression_level', '9', $png)
-    if ($v.Name.StartsWith('bitrate-')) {
+    if ($v.Frame) {
         Run @('-i', $clip, '-vf', $fullFrame, '-frames:v', '1', (Join-Path $Out "$($v.Name)-frame.png"))
     }
     # Whole-clip SSIM against the lossless clip, and PSNR of the shown crop against the original crop.
@@ -105,5 +118,7 @@ foreach ($v in $variants) {
     '{0,-20} {1,12:N1} {2,14} {3,12}' -f $v.Name, ($bytes * 8 / 2 / 1e6),
         ($ssim -replace '.*All:(\S+).*', '$1'), (($psnr -replace '.*average:(\S+).*', '$1') + ' dB')
 }
+[ordered]@{ source = (Split-Path -Leaf $Source); yaw = $Yaw; pitch = $Pitch; deg_per_frame = $DegPerFrame; frame = $frame
+    crop_x = $CropX; crop_y = $CropY; size = $Size } | ConvertTo-Json | Set-Content -Path (Join-Path $Out 'previews.json') -Encoding Ascii
 Get-ChildItem $Out -Filter *.png | Select-Object Name, Length | Format-Table -AutoSize
 'total PNG bytes: {0}' -f (Get-ChildItem $Out -Filter *.png | Measure-Object Length -Sum).Sum
