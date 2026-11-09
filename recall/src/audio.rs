@@ -28,6 +28,7 @@ mod endpoints;
 mod hold;
 mod mute;
 mod notify;
+mod packet;
 mod rebind;
 pub mod sources;
 mod stream;
@@ -296,16 +297,24 @@ impl TrackRing {
 
     /// [`Self::push_capture`]; `held` stores silence whatever Alt+M says (`hold.rs`).
     fn push_samples(&self, data: &[f32], mute_inputs: bool, held: bool) {
+        // The gained copy reuses one buffer per capture thread (gate review P2-c).
+        thread_local!(static GAINED: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) });
         let data = &data[data.len().saturating_sub(self.capacity)..];
         let silence = held || (mute_inputs && self.mutes());
         let gain = self.gain();
-        let gained: Vec<f32>;
-        let data = if gain != 1.0 && !silence {
-            gained = data.iter().map(|s| s * gain).collect();
-            &gained[..]
-        } else {
-            data
-        };
+        if gain != 1.0 && !silence {
+            return GAINED.with(|g| {
+                let mut gained = g.borrow_mut();
+                gained.clear();
+                gained.extend(data.iter().map(|s| s * gain));
+                self.store(&gained, false);
+            });
+        }
+        self.store(data, silence);
+    }
+
+    /// `data` (gain applied) into the ring and the long-recording tap; `silence` stores zeros.
+    fn store(&self, data: &[f32], silence: bool) {
         crate::longrec::tap::tap_audio(self.name, data, silence); // long-recording hook
         let mut buf = self.samples.lock().expect("ring lock");
         let over = (buf.len() + data.len()).saturating_sub(self.capacity);
