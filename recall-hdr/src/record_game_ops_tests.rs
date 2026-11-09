@@ -113,3 +113,12 @@ fn windows_and_recall_cannot_be_registered_as_recorded() {
     }
     assert!(refused("chrome.exe", GameOp::Record).is_none(), "a browser is the user's call");
 }
+
+/// R2-detect-r10-4: Windows Settings and the other Windows parts are refused too (README:
+/// "parts of Windows ... cannot be added"), the Browse route included.
+#[test]
+fn windows_settings_and_system_parts_are_refused() {
+    for exe in ["SystemSettings.exe", "fontdrvhost.exe", "smartscreen.exe", "consent.exe", "SearchApp.exe"] {
+        assert!(refused(exe, GameOp::Record).is_some(), "{exe}");
+    }
+}

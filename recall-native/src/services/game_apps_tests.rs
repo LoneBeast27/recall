@@ -90,3 +90,11 @@ fn every_games_edit_is_one_app_not_a_whole_list_r8_detect_7() {
     let discord = GameEntry { exe: "Discord".into(), how: Registration::Fullscreen };
     assert_eq!(remove_command(&discord), DaemonCommand::RegisterGame { exe: "Discord".into(), how: "unlist" });
 }
+
+/// R2-detect-r10-4: "Add app…" never offers what the controller refuses.
+#[test]
+fn add_app_never_offers_a_part_of_windows() {
+    let found = ["fontdrvhost.exe", "smartscreen.exe", "consent.exe", "SystemSettings.exe", "dwm.exe", "Game.exe"].iter().enumerate().map(|(i, e)| (i as u32 + 1, app(e))).collect();
+    let offered: Vec<String> = pickable(found, None).apps.into_iter().map(|a| a.exe).collect();
+    assert_eq!(offered, vec!["Game.exe".to_string()]);
+}

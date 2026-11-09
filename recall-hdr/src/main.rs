@@ -125,6 +125,7 @@ mod record_monitor;
 mod record_target;
 mod record_target_gate;
 mod record_target_rules;
+mod never_recorded;
 mod record_transition;
 mod record_tray;
 mod record_tray_slot;
