@@ -20,7 +20,7 @@ use crate::record_app::Controller;
 use crate::awake_clock::Awake;
 use crate::record_activity::EngineActivity;
 use crate::record_power::{enqueue, PowerAction, PowerPlanner, Registration};
-use crate::record_power_host::{resume_lost_event, PowerHost};
+use crate::record_power_host::PowerHost;
 
 /// `DEVICE_NOTIFY_CALLBACK`: the recipient is a `DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS`.
 const DEVICE_NOTIFY_CALLBACK: u32 = 2;
@@ -118,10 +118,12 @@ impl PowerHost for Controller {
     fn power_apply(&mut self, action: PowerAction) {
         self.apply_power_action(action, std::time::Instant::now());
     }
-    fn power_report_lost(&mut self, lost: u32) {
-        for _ in 0..lost {
-            self.hub.event("engine", &resume_lost_event());
-        }
+    fn power_restart(&mut self) -> bool {
+        log!("record: resumed from sleep -- restarting the engine (fresh replay buffer)");
+        self.restart_engine(crate::record_restart::RestartReason::Resume) == crate::record_restart::Restarted::Now
+    }
+    fn power_hub_event(&mut self, line: &str) {
+        self.hub.event("engine", line);
     }
     fn power_log(&mut self, line: &str) {
         log!("{line}");
@@ -139,8 +141,7 @@ impl Controller {
                 }
             }
             PowerAction::RestartEngine => {
-                log!("record: resumed from sleep -- restarting the engine (fresh replay buffer)");
-                self.restart_engine(crate::record_restart::RestartReason::Resume); // waits for a drain
+                PowerHost::power_restart(self); // waits for a drain
             }
             PowerAction::Reprobe => {
                 self.last_fed = None;
