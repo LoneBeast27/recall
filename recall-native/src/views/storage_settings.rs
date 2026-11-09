@@ -27,8 +27,9 @@ pub struct CacheView {
     pub budget_bytes: u64,
     /// Set while storage.json can't be read: the size is read-only (a guess must not be saved).
     pub budget_note: Option<String>,
-    /// storage.json is damaged and backed up: "Reset cache size" is shown (never for a lock).
-    pub budget_reset: bool,
+    /// storage.json is damaged and backed up: "Reset cache size to <size>" is shown with where
+    /// the size comes from (never for a lock).
+    pub budget_reset: Option<crate::services::storage::ResetOffer>,
     /// The recorder's leftover kept copies (never emptied on their own).
     pub leftovers: Option<crate::services::storage::Leftovers>,
     /// A Send to Recycle Bin is running on the library lane (`Done::LeftoversRecycled`).
@@ -57,7 +58,7 @@ impl CacheView {
             root,
             budget_bytes: crate::cache::budget_bytes(),
             budget_note: crate::cache::budget_note(),
-            budget_reset: crate::cache::budget_resettable(),
+            budget_reset: crate::cache::reset_offer(),
             leftovers: None,
             leftovers_busy: false,
             used_bytes: 0,
@@ -78,7 +79,7 @@ impl CacheView {
         self.tiers = usage;
         self.budget_bytes = crate::cache::budget_bytes();
         self.budget_note = crate::cache::budget_note();
-        self.budget_reset = crate::cache::budget_resettable();
+        self.budget_reset = crate::cache::reset_offer();
         self.leftovers = crate::cache::leftovers();
         self.ssd_free = crate::services::library::drive_space(&self.root).map(|(free, _)| free);
         self.smart = crate::cache::smart_status();
@@ -391,9 +392,10 @@ impl Root {
                     )
                     .child(div().h(px(4.)).rounded(px(2.)).bg(c(theme::TOP)).child(div().h_full().rounded(px(2.)).w(relative(usage_fraction.clamp(0.0, 1.0))).bg(c(theme::MUTED))))
                     .when_some(view.budget_note.clone(), |d, why| d.child(div().text_size(px(11.)).text_color(c(theme::ERROR)).child(format!("Size is read-only for now: {why}"))))
-                    .when(view.budget_reset, |d| {
-                        d.child(div().child(ui::button("cache-reset", Variant::Secondary).child("Reset cache size").on_click(cx.listener(|this, _, _, cx| {
-                            match crate::cache::reset_budget() {
+                    .when_some(view.budget_reset.clone(), |d, offer| {
+                        let (shown, source) = (offer.bytes, offer.source_line());
+                        d.child(div().text_size(px(11.)).text_color(c(theme::MUTED)).child(source)).child(div().child(ui::button("cache-reset", Variant::Secondary).child(format!("Reset cache size to {}", gb_label(shown))).on_click(cx.listener(move |this, _, _, cx| {
+                            match crate::cache::reset_budget(shown) {
                                 Ok(bytes) => this.show_toast(ToastKind::Good, format!("Cache size reset to {}", gb_label(bytes)), Some("The damaged settings file is kept as a .bad copy".to_owned())),
                                 Err(error) => this.show_toast(ToastKind::Bad, "Cache size not reset", Some(error)),
                             }

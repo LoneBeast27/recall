@@ -21,6 +21,7 @@ use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
 
 mod budget;
+mod budget_reset;
 mod drive;
 mod evict;
 mod ffmpeg;
@@ -146,14 +147,18 @@ pub fn budget_note() -> Option<String> {
     video::budget_note(&cache_root())
 }
 
-/// storage.json is damaged and backed up as `.bad`: Settings offers "Reset cache size".
-pub fn budget_resettable() -> bool {
-    video::budget_resettable(&cache_root())
+pub use budget_reset::ResetOffer;
+
+/// storage.json is damaged and backed up as `.bad`: the size "Reset cache size" would write
+/// (shown on the button) and where it comes from (`budget_reset.rs`).
+pub fn reset_offer() -> Option<ResetOffer> {
+    budget_reset::reset_offer(&cache_root())
 }
 
-/// Settings "Reset cache size": the last budget read, else the first-run pick. Returns it.
-pub fn reset_budget() -> Result<u64, String> {
-    video::reset_budget(&cache_root())
+/// Settings "Reset cache size": writes `shown`, the size on the button, if that is still the
+/// offer. Returns it.
+pub fn reset_budget(shown: u64) -> Result<u64, String> {
+    budget_reset::reset_budget(&cache_root(), shown)
 }
 
 /// Saves `bytes` as the user's budget (no `first_run` marker: Settings set it). Refused while

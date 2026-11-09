@@ -119,8 +119,7 @@ mod tests {
 
     #[test]
     fn splits_the_cache_into_previews_kept_copies_and_heads() {
-        let dir = std::env::temp_dir().join(format!("recall-ssd-usage-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::test_temp::TempDir::new(format!("recall-ssd-usage-{}", std::process::id()));
         let root = dir.join("cache");
         write(&root.join("thumbs").join("aaaaaaaaaaaaaaaa.jpg"), 100);
         write(&root.join("visuals").join("aaaaaaaaaaaaaaaa").join("scrub-0.jpg"), 200);

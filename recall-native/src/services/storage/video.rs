@@ -128,7 +128,7 @@ fn remember(root: &Path, budget: u64) {
     last.push((root.to_path_buf(), budget));
 }
 
-fn remembered(root: &Path) -> Option<u64> {
+pub(super) fn remembered(root: &Path) -> Option<u64> {
     LAST_READ.lock().unwrap_or_else(|p| p.into_inner()).iter().find(|(r, _)| r == root).map(|(_, b)| *b)
 }
 
@@ -141,27 +141,8 @@ pub(super) fn budget_note(root: &Path) -> Option<String> {
     }
 }
 
-/// storage.json is damaged and a `.bad` copy of it exists (never a merely locked file).
-pub(super) fn budget_resettable(root: &Path) -> bool {
-    matches!(lru::load_settings(root), lru::Stored::Damaged(_))
-}
-
-/// Settings "Reset cache size" (RI3-1): writes the budget read earlier this session, else the
-/// first-run pick, durably over a damaged storage.json whose `.bad` copy exists. Refused for a
-/// locked or unreadable file, or one that reads again. Returns the budget written.
-pub(super) fn reset_budget(root: &Path) -> Result<u64, String> {
-    if !budget_resettable(root) {
-        return Err("storage.json is not damaged (or has no backup yet); cache size not reset".into());
-    }
-    let last = remembered(root);
-    let budget = last.unwrap_or_else(|| first_run_budget(root));
-    let settings = lru::Settings { cache_budget_bytes: Some(budget), first_run: last.is_none().then_some(true) };
-    lru::write_settings(root, &settings)?;
-    Ok(budget)
-}
-
 /// The budget a first run picks for the cache at `root`.
-fn first_run_budget(root: &Path) -> u64 {
+pub(super) fn first_run_budget(root: &Path) -> u64 {
     let (free, total) = super::drive_info(root).map_or((0, 0), |info| (info.free, info.total));
     lru::default_budget(free, total, super::drive::on_system_drive(root))
 }

@@ -12,10 +12,9 @@ const MIB: u64 = 1 << 20;
 const CLIP: &str = "G__2026-11-07__10-00-00-000__ab12.mp4";
 const FULL: &str = "write_header: There is not enough space on the disk. (os error 112)";
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("recall-space-{tag}-{}", uuid::Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// `%TEMP%\recall-space-<tag>-<uuid>`, removed when the guard drops, also on a panic.
+fn temp_dir(tag: &str) -> crate::encoder::test_scratch::Scratch {
+    crate::encoder::test_scratch::scratch("recall-space", tag)
 }
 
 fn job(path: &Path, secs: f64) -> SaveJob {
@@ -298,4 +297,20 @@ fn disk_full_staged_mux_with_a_short_clip_drive_fails_with_the_space_reason() {
     assert_eq!(calls.load(SeqCst), 1, "no in-place retry onto a short drive");
     assert!(!final_path.exists());
     finish(queue, control, &[&stage, &out]);
+}
+
+#[test]
+fn a_panicking_test_still_removes_its_temp_folder() {
+    // F-storage-2: a failing test left its %TEMP% folder behind.
+    let left = std::panic::catch_unwind(|| {
+        let dir = temp_dir("panics");
+        std::fs::write(dir.join("clip.mp4"), vec![1u8; 4096]).unwrap();
+        std::panic::panic_any(dir.to_path_buf());
+    })
+    .unwrap_err()
+    .downcast::<PathBuf>()
+    .unwrap();
+    let gone = !left.exists();
+    let _ = std::fs::remove_dir_all(&*left);
+    assert!(gone, "{} was left behind", left.display());
 }
