@@ -10,6 +10,7 @@ mod overlay;
 mod midi;
 mod pipe_name;
 mod data_migrate;
+mod hub_settings;
 
 use std::io::{BufRead, BufReader, Write};
 use std::sync::Mutex;
@@ -37,10 +38,14 @@ fn daemon_send(state: tauri::State<PipeState>, line: String) -> Result<(), Strin
 /// Newest clips in the recordings dir (name, mtime seconds, size, thumb path).
 #[tauri::command]
 fn list_clips(app: AppHandle, limit: usize) -> Vec<serde_json::Value> {
-    // RECALL_OUT_DIR, else the recorder's default <Videos>\Recall (no machine path in the source).
-    let dir = match std::env::var_os("RECALL_OUT_DIR") {
-        Some(d) => std::path::PathBuf::from(d),
-        None => match app.path().video_dir() {
+    // RECALL_OUT_DIR, else the hub's saved clipFolder, else the recorder's default
+    // <Videos>\Recall (no machine path in the source).
+    let saved = app.path().app_local_data_dir().ok()
+        .and_then(|d| hub_settings::saved_clip_folder(&hub_settings::settings_path(&d)));
+    let dir = match (std::env::var_os("RECALL_OUT_DIR"), saved) {
+        (Some(d), _) => std::path::PathBuf::from(d),
+        (None, Some(s)) => std::path::PathBuf::from(s),
+        (None, None) => match app.path().video_dir() {
             Ok(v) => v.join("Recall"),
             Err(_) => return Vec::new(),
         },
