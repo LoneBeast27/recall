@@ -130,3 +130,12 @@ fn the_marker_matches_the_engine() {
     let engine = include_str!("../../recall/src/engine_stdin.rs");
     assert!(engine.contains(std::str::from_utf8(PROTOCOL_MARKER).unwrap()));
 }
+
+/// P2: every spawn tells the engine a `sync` will come (its env), the same name it reads.
+#[test]
+fn every_spawn_sets_the_sync_env() {
+    let cmd = super::super::locate::engine_command(std::path::Path::new("recall.exe"), &spec(), None);
+    assert!(cmd.get_envs().any(|(k, v)| k.to_str() == Some(super::super::locate::STDIN_SYNC_ENV) && v.and_then(|v| v.to_str()) == Some("1")));
+    let engine = include_str!("../../recall/src/engine_stdin.rs");
+    assert!(engine.contains("pub(crate) const SYNC_ENV: &str = \"RECALL_STDIN_SYNC\";"));
+}

@@ -64,5 +64,11 @@ pub(super) fn engine_command(path: &Path, spec: &EngineSpec, mute: Option<bool>)
     if let Some(muted) = mute {
         cmd.env(mute::MIC_MUTED_ENV, if muted { "1" } else { "0" });
     }
+    // This controller restates the audio intent and sends `sync` at the attach (P2, P8): the
+    // engine's device tracks record only after it (`recall` `engine_stdin::SYNC_ENV`).
+    cmd.env(STDIN_SYNC_ENV, "1");
     cmd
 }
+
+/// The engine's env var that says a `sync` line will come (`recall` `engine_stdin::SYNC_ENV`).
+pub(super) const STDIN_SYNC_ENV: &str = "RECALL_STDIN_SYNC";
