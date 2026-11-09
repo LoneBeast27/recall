@@ -157,8 +157,12 @@ impl Root {
         let mutes = sources::mutes(source, lists);
         // Bar, hold line and number all after the gain, so they move together with the fader; a
         // held input (an unsure sibling) is flat whatever Alt+M says (gate review P2-e).
-        let engine_held = self.snap.engine.as_ref().and_then(|e| crate::services::audio_mute::engine_held(&e.audio, &source.id));
-        let (rms, hold, level_text) = meter_reading((with_gain(rms, gain), with_gain(hold, gain), live), session_muted, mutes, held(source, lists, engine_held));
+        // The recorder's own held / mutes / retired win over the page's guess (P11, P20).
+        let engine = self.snap.engine.as_ref().map(|e| crate::services::audio_mute::engine_meter(&e.audio, &source.id)).unwrap_or_default();
+        let (muted_now, mutes) = crate::services::audio_mute::muting(&engine, session_muted, mutes);
+        let (rms, hold, level_text) = meter_reading((with_gain(rms, gain), with_gain(hold, gain), live), muted_now, mutes, held(source, lists, engine.held) || engine.retired);
+        let sent = self.snap.session.as_ref().and_then(|s| s.audio_sent_seq);
+        let level_text = crate::services::audio_mute::meter_text(level_text, &engine, self.snap.engine.as_ref().and_then(|e| e.audio_seq), sent);
 
         let glyph = self.source_icon(source);
         let type_icon = if source.is_primary() {

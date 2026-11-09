@@ -131,10 +131,39 @@ pub fn held(source: &Source, lists: Option<&DeviceLists>, engine: Option<bool>) 
     engine.unwrap_or_else(|| source.kind.uses_inputs() && matches!(crate::services::audio_pick::source_found(source, lists), Found::Unsure { .. }))
 }
 
-/// The recorder's `held` for source `id` (`status.audio[]`): both ids trimmed the same way, as
+/// What the recorder says for one source (`status.audio[]`): both ids trimmed the same way, as
 /// the engine trims the config's (controller review P3-1).
-pub fn engine_held(audio: &[crate::services::daemon::EngineAudio], id: &str) -> Option<bool> {
-    audio.iter().find(|a| a.id.trim() == id.trim()).and_then(|a| a.held)
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EngineMeter {
+    pub held: Option<bool>,
+    pub mutes: Option<bool>,
+    pub retired: bool,
+}
+
+pub fn engine_meter(audio: &[crate::services::daemon::EngineAudio], id: &str) -> EngineMeter {
+    audio.iter().find(|a| a.id.trim() == id.trim()).map_or_else(EngineMeter::default, |a| EngineMeter { held: a.held, mutes: a.mutes, retired: a.retired == Some(true) })
+}
+
+/// The meter's "muted now" and "Alt+M mutes it" (design-audio-mute P20): the recorder's own
+/// `mutes` when it says, so the meter never shows "Muted" for a track it records live; the
+/// page's guess (`session_muted`, `mutes`) only from a recorder that does not say.
+pub fn muting(engine: &EngineMeter, session_muted: bool, mutes: bool) -> (bool, bool) {
+    engine.mutes.map_or((session_muted, mutes), |m| (m, true))
+}
+
+/// A retired source's strip (P11, P16): it records nothing until the recording ends.
+pub const RETIRED: &str = "Off: applies after the recording";
+/// The recorder has not applied the last change yet (P20).
+pub const APPLYING: &str = "Applying…";
+
+/// The meter's text once the recorder's state is known: retired first, then "Applying…" while
+/// the recorder is behind the controller's last audio line (`sent`, the session status).
+pub fn meter_text(text: String, engine: &EngineMeter, applied: Option<u64>, sent: Option<u64>) -> String {
+    match () {
+        _ if engine.retired => RETIRED.to_owned(),
+        _ if applied.zip(sent).is_some_and(|(a, s)| a < s) => APPLYING.to_owned(),
+        _ => text,
+    }
 }
 
 /// The meter's bar, hold line and number for a strip (levels after the gain): flat while Alt+M
