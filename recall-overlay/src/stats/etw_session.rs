@@ -12,17 +12,29 @@
 //! target pid as well, so correctness never depends on a filter.
 //!
 //! Stopped on drop (stats off, overlay exit), by the panic hook / console
-//! handler ([`install_cleanup`]), by the next start (a stale session of the
-//! same name, e.g. from a killed overlay) and by the controller after it kills
-//! the overlay.
+//! handler ([`install_cleanup`]), by the next start that finds a stale session
+//! of the same name (a killed overlay or probe) and by the controller after it
+//! kills the overlay.
+//!
+//! Names ([`session_name`]): the island's `RecallFrameTiming`, the
+//! `--frame-timing-probe`'s `RecallFrameTimingProbe`, each with `.<tag>` when
+//! `RECALL_INSTANCE_TAG` is set (tests and the build gate), so a probe or a
+//! tagged overlay never touches the installed overlay's live session.
+//!
+//! ETW session names are machine-wide while the one-island guard is per user
+//! (`Local\`), so ownership is its own lock: `Global\<session name>.owner`,
+//! held for the session's life ([`owner_lock`]). An existing session is
+//! stopped and replaced only when that lock is free (its owner is dead). A
+//! held lock, including another user's (access denied), means a live owner:
+//! the start fails and is retried later.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 
-use windows::core::{w, BOOL, GUID, PCWSTR, PWSTR};
-use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SUCCESS, WIN32_ERROR};
+use windows::core::{BOOL, GUID, PCWSTR, PWSTR};
+use windows::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS, ERROR_SUCCESS, WIN32_ERROR};
 use windows::Win32::System::Console::SetConsoleCtrlHandler;
 use windows::Win32::System::Diagnostics::Etw::{
     CloseTrace, ControlTraceW, EnableTraceEx2, OpenTraceW, ProcessTrace, StartTraceW, CONTROLTRACE_HANDLE,
@@ -39,23 +51,64 @@ use super::frame_math::{FrameStats, FrameWindow};
 use super::enable_plan::{self, Aimed, Enabler};
 use super::present_events::{classify, FrameMapper, Mapped, ProviderSpec, RawEvent, PROVIDERS};
 
-/// Also named in `recall-hdr/src/frame_timing.rs` (the controller stops it
-/// after killing the overlay).
-const SESSION_NAME: PCWSTR = w!("RecallFrameTiming");
-const SESSION_NAME_STR: &str = "RecallFrameTiming";
+use crate::single_instance::{self, Claim, Guard};
+
+/// Whose session this is (its name).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Kind {
+    /// The island's stats (`RecallFrameTiming`; also named in
+    /// `recall-hdr/src/frame_timing.rs`, which stops it after killing the
+    /// overlay).
+    Overlay,
+    /// `--frame-timing-probe` (`RecallFrameTimingProbe`).
+    Probe,
+}
+
+/// The session name for `kind` and the (cleaned) instance tag; the tag is
+/// cut to 32 characters so the name fits the 64-character buffer.
+pub fn session_name(kind: Kind, tag: &str) -> String {
+    let base = match kind {
+        Kind::Overlay => "RecallFrameTiming",
+        Kind::Probe => "RecallFrameTimingProbe",
+    };
+    let tag: String = tag.chars().take(32).collect();
+    if tag.is_empty() {
+        base.to_owned()
+    } else {
+        format!("{base}.{tag}")
+    }
+}
+
+/// The lock a live owner of session `name` holds (machine-wide).
+pub fn owner_lock(name: &str) -> String {
+    format!("Global\\{name}.owner")
+}
+
+fn wide(text: &str) -> Vec<u16> {
+    text.encode_utf16().chain([0]).collect()
+}
+
 /// `Wnode.ClientContext` = 1: query performance counter timestamps.
 const CLOCK_QPC: u32 = 1;
 /// `INVALID_PROCESSTRACE_HANDLE` on 64-bit Windows.
 const INVALID_TRACE: u64 = u64::MAX;
 
-/// This process has a session running (the panic hook and console handler
-/// stop it by name only then).
-static OWNED: AtomicBool = AtomicBool::new(false);
+/// The name of this process's running session (the panic hook and console
+/// handler stop it by name only then).
+static OWNED: Mutex<Option<String>> = Mutex::new(None);
+
+fn owned() -> MutexGuard<'static, Option<String>> {
+    OWNED.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 #[derive(Debug)]
 pub enum StartError {
     /// Not an elevated administrator and not in Performance Log Users.
     Denied,
+    /// The session name is another live process's (another Recall, perhaps
+    /// another signed-in user's), or its owner lock could not be made while a
+    /// session of that name runs: retried later, and the island says so.
+    Owned(String),
     Failed(String),
 }
 
@@ -82,11 +135,19 @@ impl Properties {
     }
 }
 
-/// Stops a `RecallFrameTiming` session (any process's); `ERROR_SUCCESS` or
-/// the reason (4201 = none running, 5 = no permission).
-pub fn stop_by_name() -> WIN32_ERROR {
+/// Stops the session `name` (any process's); `ERROR_SUCCESS` or the reason
+/// (4201 = none running, 5 = no permission).
+fn stop_by_name(name: &str) -> WIN32_ERROR {
     let mut p = Properties::new();
-    unsafe { ControlTraceW(CONTROLTRACE_HANDLE { Value: 0 }, SESSION_NAME, &mut p.props, EVENT_TRACE_CONTROL_STOP) }
+    let name = wide(name);
+    unsafe {
+        ControlTraceW(CONTROLTRACE_HANDLE { Value: 0 }, PCWSTR(name.as_ptr()), &mut p.props, EVENT_TRACE_CONTROL_STOP)
+    }
+}
+
+/// `StartTraceW` for the NUL-terminated `name`.
+fn start_trace(name: &[u16], p: &mut Properties, control: &mut CONTROLTRACE_HANDLE) -> WIN32_ERROR {
+    unsafe { StartTraceW(control, PCWSTR(name.as_ptr()), &mut p.props) }
 }
 
 /// A panic or a console close/ctrl event still stops our session.
@@ -102,8 +163,8 @@ pub fn install_cleanup() {
 }
 
 fn stop_if_owned() {
-    if OWNED.swap(false, Ordering::SeqCst) {
-        let _ = stop_by_name();
+    if let Some(name) = owned().take() {
+        let _ = stop_by_name(&name);
     }
 }
 
@@ -139,6 +200,10 @@ impl Shared {
 }
 
 pub struct EtwSession {
+    name: String,
+    /// `Global\<name>.owner`, released after the trace stops (fields drop
+    /// after `Drop::drop`). `None`: the lock could not be made at all.
+    _owner: Option<Guard>,
     control: CONTROLTRACE_HANDLE,
     guid: GUID,
     trace: Option<PROCESSTRACE_HANDLE>,
@@ -171,17 +236,37 @@ impl Enabler for Calls<'_> {
 }
 
 impl EtwSession {
-    pub fn start(pid: u32) -> Result<Self, StartError> {
+    /// Starts `kind`'s session for `pid`, named with this process's
+    /// `RECALL_INSTANCE_TAG`.
+    pub fn start(pid: u32, kind: Kind) -> Result<Self, StartError> {
+        Self::start_named(pid, session_name(kind, &single_instance::tag()))
+    }
+
+    fn start_named(pid: u32, name: String) -> Result<Self, StartError> {
         let ticks_per_sec = qpc_frequency();
-        let _ = stop_by_name(); // a stale session of ours (a killed overlay)
+        let owner = match single_instance::claim(&owner_lock(&name)) {
+            Claim::First(guard) => Some(guard),
+            Claim::Taken => return Err(StartError::Owned(format!("{name} has a live owner"))),
+            Claim::Unavailable(_) => None, // no lock: never stop an existing session
+        };
+        let wide_name = wide(&name);
         let mut p = Properties::new();
         let mut control = CONTROLTRACE_HANDLE { Value: 0 };
-        match unsafe { StartTraceW(&mut control, SESSION_NAME, &mut p.props) } {
+        let mut status = start_trace(&wide_name, &mut p, &mut control);
+        if status == ERROR_ALREADY_EXISTS && owner.is_some() {
+            let _ = stop_by_name(&name); // its owner is dead: a killed overlay's or probe's
+            p = Properties::new();
+            status = start_trace(&wide_name, &mut p, &mut control);
+        }
+        match status {
             ERROR_SUCCESS => {}
             ERROR_ACCESS_DENIED => return Err(StartError::Denied),
-            other => return Err(StartError::Failed(format!("StartTrace {SESSION_NAME_STR}: error {}", other.0))),
+            ERROR_ALREADY_EXISTS => {
+                return Err(StartError::Owned(format!("{name} already runs (owner lock unavailable)")));
+            }
+            other => return Err(StartError::Failed(format!("StartTrace {name}: error {}", other.0))),
         }
-        OWNED.store(true, Ordering::SeqCst);
+        *owned() = Some(name.clone());
         let shared = Arc::new(Shared {
             target: AtomicU32::new(pid),
             running: AtomicBool::new(false),
@@ -191,6 +276,8 @@ impl EtwSession {
         // From here on, dropping `session` stops the trace on any error.
         let forced_off = pid_filter_forced_off();
         let mut session = EtwSession {
+            name,
+            _owner: owner,
             control,
             guid: p.props.Wnode.Guid,
             trace: None,
@@ -282,7 +369,7 @@ impl EtwSession {
 
     /// Opens the real-time consumer and runs `ProcessTrace` on its own thread.
     fn consume(&mut self) -> Result<(), StartError> {
-        let mut name: Vec<u16> = SESSION_NAME_STR.encode_utf16().chain([0]).collect();
+        let mut name = wide(&self.name);
         let mut logfile = EVENT_TRACE_LOGFILEW { LoggerName: PWSTR(name.as_mut_ptr()), ..Default::default() };
         logfile.Anonymous1.ProcessTraceMode =
             PROCESS_TRACE_MODE_REAL_TIME | PROCESS_TRACE_MODE_EVENT_RECORD | PROCESS_TRACE_MODE_RAW_TIMESTAMP;
@@ -319,7 +406,7 @@ impl Drop for EtwSession {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
-        OWNED.store(false, Ordering::SeqCst);
+        *owned() = None;
     }
 }
 
@@ -363,3 +450,6 @@ fn qpc_now() -> i64 {
     now
 }
 
+#[cfg(test)]
+#[path = "etw_session_tests.rs"]
+mod tests;
