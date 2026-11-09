@@ -166,3 +166,19 @@ fn an_unsure_line_in_says_to_pick_the_device_not_to_press_alt_m() {
     let mic = Source { mic_mute: Some(true), ..saved.clone() };
     assert!(strip_note(&mic, Some(&dongles)).is_some_and(|n| n.ends_with("press Alt+M to unmute.")), "a microphone still follows Alt+M");
 }
+
+/// Gate review P2-e: an input on an unsure same-named sibling records silence until a press after
+/// it opened unmutes it; the meter shows that (flat, "Held"), not the live level, with Alt+M off.
+#[test]
+fn a_held_input_meters_flat_and_says_held() {
+    // Saved "Mic (Box)" with id A; present: "Mic (Box)" (id B) and "2- Mic (Box)" (id C).
+    let twins = lists(&[("Mic (Box)", "{B}", Some(4)), ("2- Mic (Box)", "{C}", Some(4))]);
+    let source = line_in("Mic (Box)", "{A}");
+    assert!(held(&source, Some(&twins)), "an unsure sibling is held");
+    assert_eq!(meter_reading((-12.0, -6.0, true), false, true, held(&source, Some(&twins))), (-90.0, -90.0, "Held".to_owned()), "Alt+M off: still flat");
+    let own = lists(&[("Mic (Box)", "{A}", Some(4))]);
+    assert!(!held(&source, Some(&own)), "its own endpoint: not held");
+    assert_eq!(meter_reading((-12.0, -6.0, true), false, false, false), (-12.0, -6.0, "-12 dB".to_owned()));
+    assert_eq!(meter_reading((-12.0, -6.0, true), true, true, false), (-90.0, -90.0, "Muted".to_owned()));
+    assert_eq!(meter_reading((-12.0, -6.0, false), false, false, true).2, "—", "no reading: a dash");
+}
