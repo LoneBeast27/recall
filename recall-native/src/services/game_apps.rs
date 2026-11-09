@@ -31,6 +31,10 @@ pub enum Registration {
     Never,
     /// A `detect.fullscreen_games` entry: recorded while fullscreen.
     Fullscreen,
+    /// A game entry for Recall itself, a part of Windows or a screensaver (a hand edit): the
+    /// controller never records it (gate p5-3); only Remove applies. `fullscreen`: it is a
+    /// `fullscreen_games` entry.
+    Blocked { fullscreen: bool },
 }
 
 impl Registration {
@@ -40,6 +44,7 @@ impl Registration {
             Registration::Record => "record",
             Registration::Never => "never",
             Registration::Fullscreen => "fullscreen",
+            Registration::Blocked { .. } => "never",
         }
     }
 
@@ -48,6 +53,7 @@ impl Registration {
             Registration::Record => "Recorded",
             Registration::Never => "Never recorded",
             Registration::Fullscreen => "Recorded when fullscreen",
+            Registration::Blocked { .. } => "Not recorded: part of Windows or Recall",
         }
     }
 }
@@ -90,12 +96,17 @@ pub fn entries(config: Option<&Value>) -> Vec<GameEntry> {
         .iter()
         .filter_map(|o| {
             let exe = o.get("exe")?.as_str()?.trim().to_owned();
-            let how = if o.get("kind")?.as_str()? == "none" { Registration::Never } else { Registration::Record };
+            let how = match o.get("kind")?.as_str()? {
+                "none" => Registration::Never,
+                _ if never_recorded::never_recordable(&exe) => Registration::Blocked { fullscreen: false },
+                _ => Registration::Record,
+            };
             (!exe.is_empty()).then_some(GameEntry { exe, how })
         })
         .collect();
     for exe in fullscreen_games(config) {
-        out.push(GameEntry { exe, how: Registration::Fullscreen });
+        let how = if never_recorded::never_recordable(&exe) { Registration::Blocked { fullscreen: true } } else { Registration::Fullscreen };
+        out.push(GameEntry { exe, how });
     }
     out
 }
@@ -113,7 +124,7 @@ pub fn add_command(exe: &str) -> DaemonCommand {
 
 /// "Remove": its override, or its fullscreen-only entry.
 pub fn remove_command(entry: &GameEntry) -> DaemonCommand {
-    let how = if entry.how == Registration::Fullscreen { "unlist" } else { "remove" };
+    let how = if matches!(entry.how, Registration::Fullscreen | Registration::Blocked { fullscreen: true }) { "unlist" } else { "remove" };
     DaemonCommand::RegisterGame { exe: entry.exe.clone(), how }
 }
 
