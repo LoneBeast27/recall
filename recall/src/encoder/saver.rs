@@ -56,6 +56,9 @@ pub(crate) enum VideoSrc {
 /// Everything one save needs, detached from the live encoder and rings.
 pub(crate) struct SaveJob {
     pub path: String,
+    /// "Sort clips into game folders": the saver places the clip in this game's folder
+    /// ([`place_in_game_folder`]) before writing.
+    pub game: Option<String>,
     pub seconds: u32,
     /// When the save was requested; `elapsed_ms` is measured from here.
     pub requested: Instant,
@@ -308,7 +311,8 @@ struct Worker {
 impl Worker {
     fn run(mut self, rx: Receiver<SaveJob>) {
         lower_thread_priority(&self.events);
-        while let Ok(job) = rx.recv() {
+        while let Ok(mut job) = rx.recv() {
+            job.path = place_in_game_folder(&job.path, job.game.as_deref(), &crate::naming::out_dir(), &self.events);
             self.take(&job);
             // Answered (after its event went out): `status.save_writing` no longer counts it.
             self.progress.jobs.fetch_sub(1, Relaxed);
@@ -320,11 +324,6 @@ impl Worker {
     fn process(&mut self, job: &SaveJob) {
         let mut timing = job.timing;
         timing.queue_wait_ms = timing.queued_at.map(|t| ms(t.elapsed())).unwrap_or(0.0);
-        if let Err(reason) = ensure_game_folder(Path::new(&job.path), Path::new(&crate::naming::out_dir()), &self.events) {
-            self.events.save_failed(&reason);
-            self.events.log(&timing.line("failed", job.secs as f32, 0, 0));
-            return;
-        }
         let staged = self.stage.as_ref().and_then(|s| s.target(&job.path, &self.events));
         let (events, need) = (self.events.clone(), space::estimate(job));
         let log = |line: &str| events.log(line);
@@ -376,26 +375,17 @@ impl Worker {
     }
 }
 
-/// "Sort clips into game folders": before a save into `<clip folder>\<Game>\`, make that
-/// folder again (with its marker) if it went missing, and refuse a game folder that is a link
-/// (`naming::check_game_dir`): the save fails and nothing is written through it. Here on the
-/// saver thread, so the hotkey path never waits on the drive. A clip straight in the clip
-/// folder (the option off) passes unchanged.
-pub(crate) fn ensure_game_folder(clip: &Path, clip_folder: &Path, events: &Events) -> Result<(), String> {
-    let Some(folder) = clip.parent() else { return Ok(()) };
-    match crate::naming::check_game_dir(clip_folder, folder) {
-        Ok(()) => Ok(()),
-        Err(crate::naming::GameDirProblem::Link) => Err(GAME_FOLDER_LINK.to_string()),
-        Err(crate::naming::GameDirProblem::Io(e)) => {
-            // The write itself then fails with the real error.
-            events.log(&format!("saver: could not make the game folder {}: {e}", folder.display()));
-            Ok(())
-        }
-    }
+/// "Sort clips into game folders": the path `job` is written to. With a game, its file name
+/// inside that game's folder (`naming::writable_game_dir`: made again with its marker when it
+/// went missing; a link or a folder that is not Recall's now falls back to `clip_folder` with a
+/// log line). Here on the saver thread, so the hotkey never waits on the drive. Without a game
+/// the path is unchanged. The file name never changes (bookmarks match on it).
+pub(crate) fn place_in_game_folder(path: &str, game: Option<&str>, clip_folder: &str, events: &Events) -> String {
+    let Some(game) = game else { return path.to_string() };
+    let Some(file) = Path::new(path).file_name() else { return path.to_string() };
+    let dir = crate::naming::writable_game_dir(clip_folder, game, &|line: &str| events.log(&format!("saver: {line}")));
+    dir.join(file).to_string_lossy().into_owned()
 }
-
-/// `save_failed` reason when a game folder is a junction or symlink.
-pub(crate) const GAME_FOLDER_LINK: &str = "The game folder is a link; clip not saved";
 
 /// `<path>.part`: the in-progress name, renamed to `path` only when complete.
 pub(crate) fn part_path(path: &str) -> PathBuf {

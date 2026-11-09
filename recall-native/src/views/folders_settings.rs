@@ -172,6 +172,11 @@ impl Root {
     }
 
     fn add_clip_folders(&mut self, paths: Vec<PathBuf>) {
+        use crate::services::library::folders::rule;
+        if let Some(why) = paths.iter().find_map(|path| rule::link_refusal(path)) {
+            self.show_toast_for(ToastKind::Bad, "Can't add that folder", Some(why.to_string()), 10);
+            return;
+        }
         if let Some(why) = paths.iter().find_map(|path| crate::services::storage::guard::refuse_clip_folder(path)) {
             self.show_toast_for(ToastKind::Bad, "Can't add that folder", Some(why), 10);
             return;

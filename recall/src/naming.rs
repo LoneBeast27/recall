@@ -59,7 +59,7 @@ use crate::game_folder_rule as rule;
 // Where a game's clips go (`resolve_game_dir`) and the check before a write (`check_game_dir`).
 #[path = "naming_game_dir.rs"]
 mod game_dir;
-pub use game_dir::{check_game_dir, resolve_game_dir, GameDirProblem};
+pub use game_dir::writable_game_dir;
 
 /// Longest game folder name, in characters (Windows paths stay short).
 const GAME_FOLDER_MAX: usize = 60;
@@ -93,11 +93,11 @@ pub fn game_folder_name(source: &str) -> String {
     name
 }
 
-/// The folder a new clip of `source` goes into now: [`resolve_game_dir`] with "Sort clips into
-/// game folders" on ([`game_folders_on`]), else `out_dir`.
-pub fn clip_dir(out_dir: &str, source: &str) -> String {
+/// The folder a new clip of `source` goes into now: [`writable_game_dir`] with "Sort clips
+/// into game folders" on ([`game_folders_on`]), else `out_dir`. Disk work: writer threads only.
+pub fn clip_dir(out_dir: &str, source: &str, log: &dyn Fn(&str)) -> String {
     if game_folders_on() {
-        resolve_game_dir(out_dir, source).to_string_lossy().into_owned()
+        writable_game_dir(out_dir, source, log).to_string_lossy().into_owned()
     } else {
         out_dir.to_string()
     }

@@ -78,6 +78,7 @@ fn save_now(replay: &Replay, path: &str, seconds: u32, end_us: Option<u64>) -> R
     let now = Instant::now();
     let req = SaveRequest {
         path: path.to_string(),
+        game: None,
         seconds,
         end_us,
         at_last_frame: false,

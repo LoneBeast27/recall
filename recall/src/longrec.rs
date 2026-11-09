@@ -222,15 +222,14 @@ impl<F: SinkFactory> Writer<F> {
         if self.recorder.is_active() {
             return self.events(vec![Event::Log("record_start ignored: a long recording is already running".into())]);
         }
-        // Sort clips into game folders: `<out>\<Game>\` when on (`naming::resolve_game_dir`).
-        let dir = naming::clip_dir(&self.out_dir, source);
+        // Sort clips into game folders: `<out>\<Game>\` when on, checked here on the
+        // long-recording thread (never the hotkey); a folder that is not Recall's game folder now
+        // falls back to `<out>` (`naming::writable_game_dir`).
+        let notes = std::cell::RefCell::new(Vec::new());
+        let dir = naming::clip_dir(&self.out_dir, source, &|line: &str| notes.borrow_mut().push(Event::Log(format!("record: {line}"))));
+        self.events(notes.into_inner());
         let path = naming::longrec_path(&dir, source, &chrono::Local::now(), Path::exists);
-        let ready = match naming::check_game_dir(Path::new(&self.out_dir), Path::new(&dir)) {
-            Err(naming::GameDirProblem::Link) => Err("the game folder is a link; recording not started".to_string()),
-            Err(naming::GameDirProblem::Io(e)) => Err(e.to_string()),
-            Ok(()) => std::fs::create_dir_all(&dir).map_err(|e| e.to_string()),
-        };
-        if let Err(e) = ready {
+        if let Err(e) = std::fs::create_dir_all(&dir) {
             return self.events(vec![Event::Failed { reason: format!("output folder {dir}: {e}"), kept: None }]);
         }
         let (generation, video) = self.recorder.factory().newest();

@@ -20,6 +20,17 @@ pub(super) fn units(path: &Path) -> usize {
     path.to_string_lossy().encode_utf16().count()
 }
 
+type Cache = Mutex<HashMap<(String, String), PathBuf>>;
+
+fn cache() -> &'static Cache {
+    static CACHE: OnceLock<Cache> = OnceLock::new();
+    CACHE.get_or_init(Default::default)
+}
+
+fn cache_key(out_dir: &str, name: &str) -> (String, String) {
+    (out_dir.trim_end_matches(['\\', '/']).to_lowercase(), name.to_lowercase())
+}
+
 /// The folder new clips and long recordings of `source` go into with "Sort clips into game
 /// folders" on. For `name` = [`game_folder_name`]:
 /// - `<out>\<name>` missing: make it (`create_dir`, only when `<out>` exists) with the marker;
@@ -29,13 +40,12 @@ pub(super) fn units(path: &Path) -> usize {
 /// - neither works, an I/O error, or a clip path that would reach [`PATH_LIMIT`]: `<out>`.
 ///
 /// Cached per clip folder and game for the run, so the disk is checked once per game. A
-/// missing `<out>` is not cached (a drive that comes back gets its game folders).
+/// missing `<out>` is not cached (a drive that comes back gets its game folders). Disk work:
+/// call it from a writer thread (the saver, the long-recording thread), never a hotkey.
 pub fn resolve_game_dir(out_dir: &str, source: &str) -> PathBuf {
-    static CACHE: OnceLock<Mutex<HashMap<(String, String), PathBuf>>> = OnceLock::new();
     let name = game_folder_name(source);
-    let key = (out_dir.trim_end_matches(['\\', '/']).to_lowercase(), name.to_lowercase());
-    let cache = CACHE.get_or_init(Default::default);
-    if let Some(dir) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
+    let key = cache_key(out_dir, &name);
+    if let Some(dir) = cache().lock().unwrap_or_else(|p| p.into_inner()).get(&key) {
         return dir.clone();
     }
     let out = Path::new(out_dir);
@@ -43,8 +53,14 @@ pub fn resolve_game_dir(out_dir: &str, source: &str) -> PathBuf {
         return out.to_path_buf();
     }
     let dir = resolve_uncached(out, &name, source_slug(source).encode_utf16().count());
-    cache.lock().unwrap_or_else(|p| p.into_inner()).insert(key, dir.clone());
+    cache().lock().unwrap_or_else(|p| p.into_inner()).insert(key, dir.clone());
     dir
+}
+
+/// Drop the cached folder of `source` in `out_dir`, so the next [`resolve_game_dir`] checks the
+/// disk again (the cached one stopped being Recall's: [`GameDirProblem::NotOurs`]).
+pub fn forget_game_dir(out_dir: &str, source: &str) {
+    cache().lock().unwrap_or_else(|p| p.into_inner()).remove(&cache_key(out_dir, &game_folder_name(source)));
 }
 
 fn resolve_uncached(out: &Path, name: &str, slug_units: usize) -> PathBuf {
@@ -70,6 +86,9 @@ fn resolve_uncached(out: &Path, name: &str, slug_units: usize) -> PathBuf {
 pub enum GameDirProblem {
     /// The game folder is a junction or symlink: nothing is written through it.
     Link,
+    /// It exists but is not Recall's game folder now (no marker, hidden or system: the user made
+    /// their own folder in its place mid-run): nothing is written into it.
+    NotOurs,
     /// It was missing and could not be made again.
     Io(std::io::Error),
 }
@@ -80,22 +99,49 @@ fn same_dir(a: &Path, b: &Path) -> bool {
 }
 
 /// Before a write into `dir`: when `dir` is a game folder of `clip_folder` (one level down),
-/// make it again if it went missing (`create_dir` + marker, only while `clip_folder` exists)
-/// and refuse a link. Any other `dir` (the clip folder itself, somewhere else) passes.
+/// make it again if it went missing (`create_dir` + marker, only while `clip_folder` exists),
+/// refuse a link, and refuse a folder that is not [`rule::is_game_folder`]. Any other `dir`
+/// (the clip folder itself, somewhere else) passes.
 pub fn check_game_dir(clip_folder: &Path, dir: &Path) -> Result<(), GameDirProblem> {
     if dir.as_os_str().is_empty() || same_dir(dir, clip_folder) || !dir.parent().is_some_and(|p| same_dir(p, clip_folder)) {
         return Ok(());
     }
-    let link = || if rule::is_link(dir) { Err(GameDirProblem::Link) } else { Ok(()) };
+    let ours = || {
+        if rule::is_link(dir) {
+            Err(GameDirProblem::Link)
+        } else if !rule::is_game_folder(dir) {
+            Err(GameDirProblem::NotOurs)
+        } else {
+            Ok(())
+        }
+    };
     match std::fs::symlink_metadata(dir) {
-        Ok(_) => link(),
+        Ok(_) => ours(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound && clip_folder.is_dir() => match rule::make(dir) {
             Ok(()) => Ok(()),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => link(),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => ours(),
             Err(e) => Err(GameDirProblem::Io(e)),
         },
         Err(_) => Ok(()),
     }
+}
+
+/// The folder a clip or long recording of `source` is written into now: its game folder
+/// (resolved and checked here, on the writer's thread), or `clip_folder` itself when that
+/// folder is not usable (a link, not Recall's any more, can't be made). On a fallback the cache
+/// entry is dropped and `log` gets one line; the write never fails for it.
+pub fn writable_game_dir(clip_folder: &str, source: &str, log: &dyn Fn(&str)) -> PathBuf {
+    let out = Path::new(clip_folder);
+    let dir = resolve_game_dir(clip_folder, source);
+    let why = match check_game_dir(out, &dir) {
+        Ok(()) => return dir,
+        Err(GameDirProblem::Link) => "is a link".to_string(),
+        Err(GameDirProblem::NotOurs) => "is not Recall's game folder now".to_string(),
+        Err(GameDirProblem::Io(e)) => format!("could not be made ({e})"),
+    };
+    forget_game_dir(clip_folder, source);
+    log(&format!("game folder {} {why}; saving in {} instead", dir.display(), out.display()));
+    out.to_path_buf()
 }
 
 #[cfg(test)]
