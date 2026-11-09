@@ -56,6 +56,10 @@ inherits = "release"
 debug = "line-tables-only"
 strip = "none"
 
+[dev-dependencies]
+# PNG decode for the quality-preview asset checks (already in the tree via gpui's image).
+image = { version = "0.25", default-features = false, features = ["png"] }
+
 [build-dependencies]
 embed-resource = "3"
 
