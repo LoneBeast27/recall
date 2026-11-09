@@ -125,6 +125,40 @@ fn a_crash_respawn_starts_with_the_current_mute() {
     sup.shutdown(Duration::from_millis(200));
 }
 
+/// Final audit F-audio-1: a line-in flipped to "Alt+M mutes it" (sent live, the spec untouched),
+/// then the engine crashed. The respawn reads the spec the manager gets (`shared.desired()`,
+/// `supervisor_manager.rs`): it must start with the live list, not the retarget's.
+#[test]
+fn a_crash_respawn_starts_with_the_live_audio_sources() {
+    use crate::record_audio_sources::SOURCES_ENV;
+    let sup = Supervisor::start_with_locator(|| None, None);
+    let old = r#"[{"id":"line","kind":"input","device":"Line (Box)","device_id":"{A}","mic_mute":false}]"#;
+    let live = r#"[{"id":"line","kind":"input","device":"Line (Box)","device_id":"{B}","mic_mute":true}]"#;
+    sup.shared.set_desired(Some(EngineSpec { env: vec![(SOURCES_ENV.into(), Some(old.into()))] }), crate::record_dispatch::Sent::Waiting);
+    let env = |shared: &Shared| -> Option<String> {
+        let (_, spec) = shared.desired();
+        let cmd = engine_command(Path::new("recall.exe"), &spec.expect("a spec"), shared.spawn_mute.get());
+        cmd.get_envs().find(|(k, _)| *k == SOURCES_ENV).and_then(|(_, v)| v).map(|v| v.to_string_lossy().into_owned())
+    };
+    assert_eq!(env(&sup.shared).as_deref(), Some(old), "no live change yet: the spec's");
+    sup.set_spawn_sources(live); // what apply_config_effects calls on the change
+    assert_eq!(env(&sup.shared).as_deref(), Some(live), "the respawn starts with the live flag and the picked twin");
+    sup.shutdown(Duration::from_millis(200));
+}
+
+/// F-audio-1, the controller side: every change of the list, the live-only ones included, gives
+/// the list a later spawn must start with; no change gives none.
+#[test]
+fn every_source_change_reaches_the_spawn_list() {
+    use crate::record_audio_sources::{engine_value, spawn_update, AudioSource};
+    let line: AudioSource = serde_json::from_value(serde_json::json!({"id": "line", "kind": "input", "device": "Line (Box)", "device_id": "{A}", "mic_mute": false})).unwrap();
+    let muted = AudioSource { mic_mute: Some(true), ..line.clone() };
+    let repicked = AudioSource { device_id: "{B}".into(), ..line.clone() };
+    assert_eq!(spawn_update(std::slice::from_ref(&line), std::slice::from_ref(&line)), None);
+    assert_eq!(spawn_update(std::slice::from_ref(&line), std::slice::from_ref(&muted)), Some(engine_value(&[muted])));
+    assert_eq!(spawn_update(std::slice::from_ref(&line), std::slice::from_ref(&repicked)), Some(engine_value(&[repicked])));
+}
+
 // --- intended restarts (fake engine: cmd.exe idles on its piped stdin) --
 
 /// `cmd.exe` stands in for the engine: it ignores `--json`, idles reading

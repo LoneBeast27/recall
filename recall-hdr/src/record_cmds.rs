@@ -320,6 +320,11 @@ impl Controller {
                 self.applied_mask = apply_affinity(mask);
             }
         }
+        // Every later spawn, a crash respawn included, starts with this list (F-audio-1): set
+        // whether or not an engine runs now (none during a spawn or the backoff after a crash).
+        if let Some(value) = crate::record_audio_sources::spawn_update(&o.audio_sources, &n.audio_sources) {
+            self.supervisor.set_spawn_sources(&value);
+        }
         let live_change = crate::record_audio_sources::live_updates(&o.audio_sources, &n.audio_sources);
         if engine_settings_changed(o, n) {
             self.request_engine_restart();
@@ -329,13 +334,13 @@ impl Controller {
             self.request_engine_restart();
         } else if self.engine_running() {
             // Gain and names reach the running engine's tracks: no restart, the buffer stays.
-            // An engine started later reads them from its environment.
+            // A later spawn or crash respawn takes them from the spawn sources set above.
             let mut all_sent = Sent::Queued;
             for line in crate::record_audio_sources::live_updates(&o.audio_sources, &n.audio_sources) {
                 log!("record: audio source {line}");
                 all_sent = all_sent.then(self.supervisor.send_engine_line(&line));
             }
-            // The config is saved either way; an engine started later reads it.
+            // The config is saved either way; a later spawn starts with it (`set_spawn_sources`).
             self.setting_not_sent(pipe_setting_effects(all_sent), client, "Audio change not applied", "set_source");
         }
         if old.storage.cap_gb != new.storage.cap_gb || o.output_dir != n.output_dir {
