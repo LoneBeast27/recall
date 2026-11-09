@@ -197,7 +197,9 @@ pub(super) fn read_settings(root: &Path) -> Settings {
 /// Durable (tmp, `sync_all`, rename: `durable::write_durable`): a crash can't leave storage.json
 /// NUL-filled, which made the budget unknown (RI3-1).
 pub(super) fn write_settings(root: &Path, settings: &Settings) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
+    let path = root.join("storage.json");
+    // Keys a newer build wrote stay (`json_keep`); the two known ones follow `settings`.
+    let bytes = crate::services::json_keep::pretty_keeping(&path, settings, &["cache_budget_bytes", "first_run"])?;
     std::fs::create_dir_all(root).map_err(|error| format!("create {}: {error}", root.display()))?;
-    crate::services::durable::write_durable(&root.join("storage.json"), &bytes)
+    crate::services::durable::write_durable(&path, &bytes)
 }

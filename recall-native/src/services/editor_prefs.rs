@@ -54,7 +54,7 @@ impl EditorPrefs {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
         }
-        let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
+        let bytes = crate::services::json_keep::pretty_keeping(&path, self, &["mix_down"])?;
         crate::services::storage::write_atomic(&path, &bytes)
     }
 }
