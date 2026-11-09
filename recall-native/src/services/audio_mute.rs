@@ -124,8 +124,11 @@ pub fn shown_level(db: f32, muted_now: bool, mutes: bool) -> f32 {
 /// The recorder holds this input silent whatever Alt+M says: it opens an unsure same-named
 /// sibling (A4 ruling, `recall` `audio/hold.rs`): a microphone until a press unmutes it and
 /// its id is saved, a line-in until the user picks the device (it never adopts, P1-b).
-pub fn held(source: &Source, lists: Option<&DeviceLists>) -> bool {
-    source.kind.uses_inputs() && matches!(crate::services::audio_pick::source_found(source, lists), Found::Unsure { .. })
+/// `engine`: what the recorder says for this source (`status.audio[].held`, merge-gate P2), which
+/// wins over the guess: a release the device lists have not caught up with, or a hold they
+/// cannot see. None (an older recorder, or no status yet): the guess from the device lists.
+pub fn held(source: &Source, lists: Option<&DeviceLists>, engine: Option<bool>) -> bool {
+    engine.unwrap_or_else(|| source.kind.uses_inputs() && matches!(crate::services::audio_pick::source_found(source, lists), Found::Unsure { .. }))
 }
 
 /// The meter's bar, hold line and number for a strip (levels after the gain): flat while Alt+M

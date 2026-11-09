@@ -253,6 +253,8 @@ pub struct Opened {
     pub live: bool,
     /// The endpoint id an unsure sibling offers as the source's own (`hold.rs`).
     pub adopt_id: Option<String>,
+    /// The track stores silence whatever Alt+M says (`TrackRing::held_now`).
+    pub held: bool,
 }
 
 enum State {
@@ -280,8 +282,8 @@ pub fn opened() -> Vec<Opened> {
     states
         .iter()
         .map(|(id, name, state)| match state {
-            State::Live(ring) => Opened { id: id.clone(), name: name.clone(), opened: ring.endpoint(), live: true, adopt_id: ring.live.adopted() },
-            State::Failed(why) => Opened { id: id.clone(), name: name.clone(), opened: why.clone(), live: false, adopt_id: None },
+            State::Live(ring) => Opened { id: id.clone(), name: name.clone(), opened: ring.endpoint(), live: true, adopt_id: ring.live.adopted(), held: ring.held_now() },
+            State::Failed(why) => Opened { id: id.clone(), name: name.clone(), opened: why.clone(), live: false, adopt_id: None, held: false },
         })
         .collect()
 }

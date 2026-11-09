@@ -18,7 +18,7 @@ use crate::{App, IDLE_TICK, PERIODIC};
 fn audio_opened() -> Vec<protocol::AudioOpened> {
     audio::sources::opened()
         .into_iter()
-        .map(|o| protocol::AudioOpened { id: o.id, name: o.name, opened: o.opened, live: o.live, adopt_id: o.adopt_id })
+        .map(|o| protocol::AudioOpened { id: o.id, name: o.name, opened: o.opened, live: o.live, adopt_id: o.adopt_id, held: o.held })
         .collect()
 }
 

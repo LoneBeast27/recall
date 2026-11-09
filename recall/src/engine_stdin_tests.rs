@@ -132,3 +132,19 @@ fn a_held_input_stores_silence_until_released() {
     line_in.push_live(&[0.5; 960], MuteNow::read());
     assert!(line_in.snapshot(0.01).iter().any(|s| *s != 0.0), "released: it records");
 }
+
+/// Merge-gate P2: the engine says per track whether it stores silence whatever Alt+M says, so
+/// the Audio page meter shows "Held" from the recorder, not from its own guess.
+#[test]
+fn the_status_says_which_tracks_are_held() {
+    let ring = TrackRing::input_for_test("mic");
+    assert!(!ring.held_now(), "a free input");
+    ring.hold_startup();
+    assert!(ring.held_now(), "the startup hold");
+    ring.release_startup_hold();
+    assert!(!ring.held_now());
+    let line = crate::protocol::AudioOpened { id: "mic".into(), name: "Mic".into(), opened: "x".into(), live: true, adopt_id: None, held: true };
+    assert_eq!(serde_json::to_value(line).unwrap()["held"], true, "status.audio[].held");
+    let tick = include_str!("app_tick.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(tick.contains("held: o.held"), "the status carries it");
+}
