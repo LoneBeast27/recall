@@ -16,6 +16,7 @@ fn the_open_clip_is_published_beside_the_library_and_cleared() {
     assert_eq!(file.file_name().unwrap(), "open-clips.json");
     write_to(&file, 7, &[r"E:\Clips\G__a.mp4".into()], |_| true).unwrap();
     assert_eq!(read(&file)["paths"], serde_json::json!([r"E:\Clips\G__a.mp4"]), "the shape the recorder reads");
+    assert_eq!(read_paths(&file), vec![r"E:\Clips\G__a.mp4".to_string()], "and the cache reads");
     write_to(&file, 7, &[], |_| true).unwrap();
     assert_eq!(read(&file)["paths"], serde_json::json!([]));
     assert!(!file.with_extension("json.7.tmp").exists());

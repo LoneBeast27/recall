@@ -221,3 +221,26 @@ fn an_unknown_cache_size_takes_no_kept_copy() {
     assert!(crate::services::storage::cached_video_in(&root, &dest).is_none(), "nothing cached");
     cleanup(&root);
 }
+
+#[test]
+fn a_clip_whose_middle_differs_keeps_its_copy() {
+    // Head (64 KiB) and tail (1 MiB) match, one byte in the middle does not: the copy may be
+    // the only whole version, so it is neither cached (evictable) nor deleted.
+    let scratch = crate::test_temp::TempDir::new(format!("recall-kept-middle-{}", std::process::id()));
+    let (root, clips, kept_dir) = (scratch.join("cache"), scratch.join("clips"), scratch.join("cache").join("staging").join("kept"));
+    for dir in [&root, &clips, &kept_dir] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let mut middle = vec![7u8; 3 << 20];
+    middle[3 << 19] = 0;
+    for (name, budget) in [("G__m.mp4", BUDGET), ("G__s.mp4", 8000)] {
+        let (dest, kept) = clip(&clips, &kept_dir, name, 3 << 20, 3 << 20);
+        let saved = dest.metadata().unwrap().modified().unwrap();
+        std::fs::write(&dest, &middle).unwrap();
+        std::fs::File::options().write(true).open(&dest).unwrap().set_modified(saved).unwrap();
+        assert!(adopt_in(&root, &dest, &kept, budget).is_err(), "{name}");
+        let kept_now = if kept.exists() { kept.clone() } else { kept_dir.join("leaked").join(name) };
+        assert_eq!(std::fs::metadata(&kept_now).map(|m| m.len()).ok(), Some(3 << 20), "{name}: the copy is kept");
+        assert!(crate::services::storage::cached_video_in(&root, &dest).is_none(), "{name}: not cached");
+    }
+}

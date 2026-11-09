@@ -243,10 +243,14 @@ pub(super) fn delete(root: &Path, unit: &Unit) -> u64 {
             let bytes = root.join(folder).join(rest).metadata().map_or(0, |m| m.len());
             if owned::recall_mp4(rest).is_some() && owned::remove(root, folder, rest) { bytes } else { 0 }
         }
-        ("thumbs", None) if is_thumb(rest) => removed(&root.join(folder).join(rest)),
+        ("thumbs", None) if is_thumb(rest) && !super::unit_files::is_reparse(&root.join(folder)) => removed(&root.join(folder).join(rest)),
         ("editor", None) if is_id(rest) => remove_engine_folder(&root.join("editor").join(rest)),
         ("visuals", Some((id, part))) if is_id(id) => {
             let dir = root.join("visuals").join(id);
+            // A junction or link leads into another folder: nothing is deleted through it.
+            if super::unit_files::is_reparse(&dir) || super::unit_files::is_reparse(&root.join("visuals")) {
+                return 0;
+            }
             let freed = entries(&dir)
                 .iter()
                 .filter(|(name, file, _)| file.is_file() && is_frame(name) && name.starts_with("scrub-") == (part == "scrub"))
@@ -476,6 +480,19 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     text(a) == text(b)
 }
 
+/// Units no eviction or sweep may touch: the editor clip's (KEEP) plus the video copy, frames
+/// and thumbnail of every clip open in any Recall window (`open_clips`: editors, players and
+/// exports of every app process). Recall's readers share delete, so an open copy is not
+/// protected by Windows refusing the delete.
 pub(super) fn kept() -> Vec<String> {
-    KEEP.lock().map(|k| k.clone()).unwrap_or_default()
+    let mut keep = KEEP.lock().map(|k| k.clone()).unwrap_or_default();
+    for clip in crate::services::library::open_clips::all_open() {
+        let Ok((id, _, _)) = super::identity_of(Path::new(&clip)) else { continue };
+        for unit in [format!("video/{id}.mp4"), format!("visuals/{id}#editor"), format!("visuals/{id}#scrub"), format!("thumbs/{id}.jpg")] {
+            if !keep.contains(&unit) {
+                keep.push(unit);
+            }
+        }
+    }
+    keep
 }
