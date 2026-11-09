@@ -352,9 +352,10 @@ fn take_ready(key: u64, stop: fn() -> bool) -> Option<Prepared> {
     if slot.ready.as_ref().is_some_and(|ready| ready.key == key) { slot.ready.take() } else { None }
 }
 
-/// A clip moved or rewritten since the pre-encode (the SSD keeper, a re-save) is a mismatch.
+/// A clip moved or rewritten since the pre-encode (the SSD keeper, a re-save) is a mismatch:
+/// the same size and write time check a normal export makes (`backend::validate_info`).
 fn source_unchanged(info: &ClipInfo) -> bool {
-    std::fs::metadata(&info.path).is_ok_and(|meta| meta.len() == info.source_bytes)
+    backend::validate_info(info).is_ok()
 }
 
 /// What a delivery of `prepared` means for the export: its result, or `None` when it failed in a
