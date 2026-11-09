@@ -3,7 +3,7 @@ name = "recall-hdr"
 version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
-description = "HDR display-manager companion for Recall: auto HDR toggle + NvAPI sRGB gamut clamp (Windows, RTX 5090)"
+description = "HDR display-manager companion for Recall: auto HDR toggle + NvAPI sRGB gamut clamp (Windows, NVIDIA)"
 
 [[bin]]
 name = "recall-hdr"

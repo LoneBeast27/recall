@@ -26,6 +26,7 @@ cargo build -p recall-hdr                         # target/debug/recall-hdr.exe
 
 ```bash
 # Git Bash. All tests:
+export RECALL_E2E_MONITOR="<your HDR monitor's friendly name>"   # required
 bash tools/e2e/run_t_tests.sh
 # A subset:
 bash tools/e2e/run_t_tests.sh T1 T5

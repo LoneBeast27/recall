@@ -120,7 +120,7 @@ mod tests {
 
     #[test]
     fn the_notice_names_the_display_and_the_restore() {
-        let text = detail("PG27AQDP");
-        assert!(text.contains("PG27AQDP") && text.contains("put back when Recall exits"), "{text}");
+        let text = detail("Test Monitor");
+        assert!(text.contains("Test Monitor") && text.contains("put back when Recall exits"), "{text}");
     }
 }
