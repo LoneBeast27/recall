@@ -1,0 +1,78 @@
+using System;
+using System.Drawing;
+using System.Drawing.Imaging;
+using System.IO;
+using System.Windows.Forms;
+
+namespace Recall.Setup
+{
+    internal sealed partial class SetupWindow
+    {
+#if PREVIEW
+        public void SavePreview(string path)
+        {
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            Opacity = 0;
+            string originalPath = destination.Text;
+            destination.Text = @"C:\Users\Player\AppData\Local\Programs\Recall";
+            ActiveControl = primary;
+            Show();
+            Application.DoEvents();
+            SaveFrame(path);
+            ShowOptions(true);
+            Application.DoEvents();
+            SaveFrame(Path.ChangeExtension(path, ".advanced.png"));
+            ShowOptions(false);
+            destination.Text = originalPath;
+        }
+
+        private void SaveFrame(string path)
+        {
+            using (var bitmap = new Bitmap(ClientSize.Width, ClientSize.Height))
+            {
+                DrawToBitmap(bitmap, new Rectangle(Point.Empty, ClientSize));
+                bitmap.Save(path, ImageFormat.Png);
+            }
+        }
+
+        public void CheckPreview()
+        {
+            SetupPrerequisites.CheckPolicy();
+            if (!preview || advanced || !quick.Visible || launch.Checked || frameTiming.Checked)
+                throw new InvalidOperationException("Quick setup defaults changed");
+            if (!quickBrowse.Visible || !quickBrowse.Enabled || quickPath.Text != SetupPackage.InstallPath(destination.Text))
+                throw new InvalidOperationException("Quick setup does not show the current folder choice");
+            quickLaunch.Value = true;
+            quickTiming.Value = true;
+            mode.PerformClick();
+            if (!advanced || !options.Visible || !launch.Checked || !frameTiming.Checked)
+                throw new InvalidOperationException("Advanced lost the Yes choices");
+            launch.Checked = false;
+            frameTiming.Checked = false;
+            shortcut.Checked = false;
+            string folder = destination.Text;
+            destination.Text = "relative";
+            if (primary.Enabled) throw new InvalidOperationException("Invalid path did not disable setup");
+            mode.PerformClick();
+            if (primary.Enabled || quickLaunch.Value || quickTiming.Value || !quickBrowse.Visible || !quickBrowse.Enabled)
+                throw new InvalidOperationException("Quick setup lost the Advanced choices or the folder picker");
+            mode.PerformClick();
+            destination.Text = folder;
+            if (!primary.Enabled || shortcut.Checked)
+                throw new InvalidOperationException("Advanced lost the selected shortcut preference");
+            mode.PerformClick();
+            primary.PerformClick();
+            if (!busy || step != 1 || primary.Enabled) throw new InvalidOperationException("Install state was not engaged");
+            var deadline = DateTime.UtcNow.AddSeconds(3);
+            while (busy && DateTime.UtcNow < deadline)
+            {
+                Application.DoEvents();
+                System.Threading.Thread.Sleep(15);
+            }
+            if (busy || !complete || step != 2 || primary.Text != "Done")
+                throw new InvalidOperationException("Preview did not reach its finished state");
+        }
+#endif
+    }
+}
