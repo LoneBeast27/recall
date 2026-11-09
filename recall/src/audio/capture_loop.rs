@@ -149,7 +149,7 @@ pub(super) fn waiting_label(device: &str) -> String {
 pub(super) fn silence_to_clock(ring: &TrackRing, level: &mut Leveller, clock: &dyn Clock) {
     let frames = level.idle(clock.elapsed());
     if frames > 0 {
-        ring.push_capture(&vec![0.0; frames as usize * ring.channels as usize], false);
+        super::packet::push_silence(ring, frames as usize * ring.channels as usize);
     }
 }
 
@@ -297,3 +297,7 @@ mod own_device_tests;
 #[cfg(test)]
 #[path = "id_pick_loop_tests.rs"]
 mod id_pick_loop_tests;
+
+#[cfg(test)]
+#[path = "alloc_tests.rs"]
+mod alloc_tests;
