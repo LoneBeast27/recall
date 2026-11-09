@@ -323,11 +323,11 @@ mod release_wait_tests {
     use std::os::windows::process::CommandExt;
     use std::process::{Command, Stdio};
 
-    /// A fake engine that never exits on its own (cmd.exe idles on its piped stdin and takes
+    /// A fake engine that never exits on its own (cmd.exe, `/D`: no AutoRun; it idles on its piped stdin and takes
     /// `stop_capture` as an unknown command), with no window.
     fn wedged_engine() -> Child {
         let cmd = std::env::var_os("ComSpec").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
-        Command::new(cmd).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(super::super::CREATE_NO_WINDOW).spawn().expect("cmd.exe")
+        Command::new(cmd).args(["/D", "/Q"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(super::super::CREATE_NO_WINDOW).spawn().expect("cmd.exe")
     }
 
     /// Gate p5-4: `finish_shutdown`'s release wait end to end. A released engine that never
@@ -353,5 +353,14 @@ mod release_wait_tests {
         let took = rx.recv_timeout(super::super::QUIT_GRACE + Duration::from_secs(5)).expect("killed after the settle");
         assert!(settled.elapsed() <= super::super::QUIT_GRACE + Duration::from_secs(5) && took >= Duration::from_secs(10), "{took:?}");
         handle.join().unwrap();
+    }
+
+    /// R2-detect-r10-p5-4: the fake engine runs no user AutoRun (`cmd /D`).
+    #[test]
+    fn the_fake_engine_skips_cmd_autorun() {
+        let src = include_str!("supervisor_manager.rs");
+        let body = &src[src.find("fn wedged_engine").expect("wedged_engine")..];
+        let body = &body[..body.find(".spawn()").expect("spawn")];
+        assert!(body.contains(r#".args(["/D""#), "{body}");
     }
 }
