@@ -4,7 +4,10 @@
 //! [`QUIT_SAVE_WAIT`], and on while the save keeps making progress (bounded by the save's
 //! own hold cap, `record_activity_writing::hold_cap`). The island says "Finishing the clip
 //! before quitting" meanwhile. A save still in flight when the wait runs out is reported
-//! once as "Save failed: Recall was closed during the save", then the quit goes on.
+//! once as "Save failed: Recall was closed during the save", then the quit goes on. So is a
+//! save the timers already gave up on (past its cap, or no answer in time) but the engine has
+//! not answered: the quit no longer goes on as if nothing were in flight (design P16; it used
+//! to cut such a save 8 s later with no report). All on the awake-only clock.
 
 use std::time::{Duration, Instant};
 
@@ -107,21 +110,26 @@ pub fn finishing_fields(finishing: bool, saves: u32, mark: Option<u64>, bytes: O
 }
 
 impl QuitWait {
-    /// This tick's step: go once nothing is written; wait [`QUIT_SAVE_WAIT`] from the
-    /// first tick, and on while the save still makes progress; then give up on it.
+    /// This tick's step: go once nothing is in flight; wait [`QUIT_SAVE_WAIT`] from the
+    /// first tick, and on while the save still makes progress; then give up on it. A save the
+    /// engine never answered that no longer counts as writing (past its cap, or expired) is
+    /// reported lost at once (design P16), never a silent go.
     pub fn step(&mut self, activity: &mut EngineActivity, now: Awake) -> QuitStep {
         if !activity.saves_writing(now) {
-            return QuitStep::Go;
+            return match activity.unanswered() {
+                0 => QuitStep::Go,
+                lost => QuitStep::Lost(lost),
+            };
         }
         if self.forced {
-            return QuitStep::Lost(activity.saves_in_flight().max(1));
+            return QuitStep::Lost(activity.unanswered().max(1));
         }
         let first = self.started.is_none();
         let started = *self.started.get_or_insert(now);
         if now.saturating_duration_since(started) < QUIT_SAVE_WAIT || activity.save_growing(now) {
             QuitStep::Wait { first }
         } else {
-            QuitStep::Lost(activity.saves_in_flight())
+            QuitStep::Lost(activity.unanswered().max(1))
         }
     }
 
