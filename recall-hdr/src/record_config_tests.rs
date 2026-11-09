@@ -143,6 +143,26 @@ fn patch_replaces_overrides_array_and_allows_optional_device_path() {
 }
 
 #[test]
+fn colour_profile_keys_patch_save_and_reload() {
+    let store = temp_store("acprofiles");
+    std::fs::write(store.path(), USER_TOML).unwrap();
+    let base = store.load();
+    assert_eq!((base.display.punchy_profile.as_deref(), base.display.accurate_profile.as_deref()), (None, None));
+    store.save(&base).unwrap();
+    let text = std::fs::read_to_string(store.path()).unwrap();
+    assert!(!text.contains("punchy_profile") && !text.contains("accurate_profile"), "unset keys are not written:\n{text}");
+    let patch = json!({"display": {"punchy_profile": "Panel_Punchy_MHC2.icm", "accurate_profile": "Panel_sRGB_MHC2.icm"}});
+    let out = apply_patch(&base, &patch).unwrap();
+    assert!(out.touched("display.punchy_profile") && out.touched("display.accurate_profile"), "{:?}", out.changed);
+    store.save(&out.config).unwrap();
+    let back = store.load();
+    assert_eq!(back, out.config, "save -> load is identity");
+    assert_eq!(back.display.punchy_profile.as_deref(), Some("Panel_Punchy_MHC2.icm"));
+    assert_eq!(back.display.accurate_profile.as_deref(), Some("Panel_sRGB_MHC2.icm"));
+    let _ = std::fs::remove_dir_all(store.path().parent().unwrap());
+}
+
+#[test]
 fn merge_json_merges_objects_and_replaces_everything_else() {
     let mut base = json!({"a":{"x":1,"y":2},"list":[1,2],"s":"old"});
     merge_json(&mut base, &json!({"a":{"y":3},"list":[9],"s":"new"}));

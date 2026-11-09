@@ -50,10 +50,11 @@ on your computer; Recall has no account, telemetry or analytics. The only networ
   Microsoft Visual C++ x64 runtime is missing, Setup downloads it from Microsoft
   (`https://aka.ms/vc14/vc_redist.x64.exe`) and runs it only if Microsoft's signature verifies.
   On Windows N editions it can add the Media Feature Pack through Windows Update (DISM).
-- **Installing an update.** Before Setup replaces Recall, Recall saves any recording in progress,
-  copies your settings into `%LOCALAPPDATA%\Recall\updates\config-backup-<version>-<time>\`
-  (the last three are kept) and writes a small resume file there so it can reopen where you
-  were. These files stay on your PC; nothing about them is sent.
+- **Installing an update.** Before Setup replaces Recall, Recall saves any recording in progress
+  and writes a small resume file in `%LOCALAPPDATA%\Recall\updates\` so it can reopen where you
+  were, and Setup copies your settings into
+  `%LOCALAPPDATA%\Recall\updates\config-backup-<version>-<time>\` (the last three are kept).
+  These files stay on your PC; nothing about them is sent.
 - **Links you click.** Opening the third-party notices from Settings opens this repository in
   your browser.
 
