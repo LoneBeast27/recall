@@ -150,21 +150,32 @@ fn the_retarget_quit_takes_the_latest_refusal() {
 /// retarget that read the flag before shutdown but takes the lock after must not replace it.
 #[test]
 fn a_retarget_racing_shutdown_keeps_isnt_responding() {
-    let shared = Shared::new(None);
+    let shared = Arc::new(Shared::new(None));
     shared.attach_writer(Some(Box::new(std::io::sink())));
     shared.send_quit(Sent::Switching); // a quit window is open
-    thread::scope(|s| {
-        let mut stdin = shared.child_stdin.lock().unwrap();
-        let late = s.spawn(|| shared.set_desired(Some(EngineSpec::default()), Sent::Switching));
-        while shared.desired.try_lock().is_ok() {
-            thread::yield_now(); // until the retarget holds `desired` (it waits on stdin next)
-        }
-        thread::sleep(Duration::from_millis(50));
-        shared.stop.store(true, Ordering::SeqCst); // `request_stop`'s flag (its lock step is the line below)
-        stdin.quitting = Some(Sent::NotResponding); // `shutdown_refusal` / `finish_shutdown`'s `send_quit`
-        drop(stdin);
-        late.join().unwrap();
-    });
+    let (done, finished) = std::sync::mpsc::channel();
+    let mut stdin = shared.child_stdin.lock().unwrap();
+    let late = {
+        let shared = Arc::clone(&shared);
+        thread::spawn(move || {
+            shared.set_desired(Some(EngineSpec::default()), Sent::Switching);
+            let _ = done.send(());
+        })
+    };
+    // Bounded: a panic here drops `stdin`, so the retarget thread is never left blocked.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while shared.desired.try_lock().is_ok() {
+        assert!(Instant::now() < deadline, "the retarget never took `desired` in 5 s");
+        thread::yield_now(); // until the retarget holds `desired` (it waits on stdin next)
+    }
+    thread::sleep(Duration::from_millis(50));
+    // `request_stop`'s flag only: its `shutdown_refusal` takes the stdin lock held here
+    // (calling it would block this thread on its own lock); the line below is that step.
+    shared.stop.store(true, Ordering::SeqCst);
+    stdin.quitting = Some(Sent::NotResponding);
+    drop(stdin);
+    finished.recv_timeout(Duration::from_secs(5)).expect("the retarget did not finish in 5 s");
+    late.join().expect("the retarget thread panicked");
     assert_eq!(shared.send_line(SAVE), Sent::NotResponding, "shutdown is no game switch");
 }
 

@@ -270,6 +270,9 @@ struct EngineCache {
     view: EngineView,
 }
 
+/// Lock order: `desired` before `child_stdin`; never take `desired` while holding
+/// `child_stdin`. Neither is re-entrant: `request_stop` takes `child_stdin`
+/// (`shutdown_refusal`), so never call it while holding that lock.
 struct Shared {
     health: Mutex<EngineHealth>,
     stop: AtomicBool,
