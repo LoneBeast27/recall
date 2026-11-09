@@ -71,3 +71,12 @@ use super::*;
     let mut split=untouched.clone();split.ranges=vec![crate::edit_model::TimeRange::new(0.0,4.0),crate::edit_model::TimeRange::new(4.0,10.0)];assert!(!plan_is_default(&split,&info));
     let mut muted=untouched.clone();muted.audio[0].muted=true;assert!(!plan_is_default(&muted,&info));
 }
+/// F-editor-export-4: an export or save above the largest preset is refused; saved edits from
+/// before the cap still load (the editor caps them).
+#[test] fn export_rates_past_the_largest_preset_are_refused(){
+    let max=crate::editor_state::MAX_EXPORT_FPS;
+    assert!(validate_fps(max).is_ok());
+    assert!(validate_fps(max+1).is_err());
+    assert!(validate_fps(9_999_999).is_err());
+    assert!(validate_fps(0).is_err());
+}

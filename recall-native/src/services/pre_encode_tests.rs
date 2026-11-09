@@ -106,16 +106,29 @@ fn the_start_sweep_removes_only_cut_off_deliveries() {
 
 #[test]
 fn a_moved_or_rewritten_clip_is_a_mismatch() {
-    let folder = std::env::temp_dir().join(format!("recall-pre-encode-src-{}", std::process::id()));
-    std::fs::create_dir_all(&folder).unwrap();
-    let clip = folder.join("clip.mp4");
+    let sandbox = crate::test_temp::TempDir::sandbox("recall-pre-encode-src");
+    let clip = sandbox.join("clip.mp4");
     std::fs::write(&clip, b"12345").unwrap();
     let path = clip.to_string_lossy().into_owned();
-    assert!(source_unchanged(&info(&path, 5)));
-    assert!(!source_unchanged(&info(&path, 6)), "rewritten");
+    let written = |bytes| ClipInfo { source_modified_ms: backend::modified_ms(&clip.metadata().unwrap()), ..info(&path, bytes) };
+    assert!(source_unchanged(&written(5)));
+    assert!(!source_unchanged(&written(6)), "rewritten");
     std::fs::remove_file(&clip).unwrap();
     assert!(!source_unchanged(&info(&path, 5)), "moved away");
-    let _ = std::fs::remove_dir_all(folder);
+}
+
+/// F-editor-export-3: a clip rewritten to the same size (only its write time moved) must not
+/// get the old pre-encode; the normal export refuses it the same way.
+#[test]
+fn a_clip_rewritten_to_the_same_size_is_a_mismatch() {
+    let sandbox = crate::test_temp::TempDir::sandbox("recall-pre-encode-mtime");
+    let clip = sandbox.join("clip.mp4");
+    std::fs::write(&clip, b"12345").unwrap();
+    let path = clip.to_string_lossy().into_owned();
+    let opened = backend::modified_ms(&clip.metadata().unwrap());
+    let stale = ClipInfo { source_modified_ms: opened.saturating_sub(5_000), ..info(&path, 5) };
+    assert!(!source_unchanged(&stale), "same size, other write time");
+    assert!(source_unchanged(&ClipInfo { source_modified_ms: opened, ..info(&path, 5) }));
 }
 
 #[test]

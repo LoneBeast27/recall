@@ -133,10 +133,11 @@ impl Root {
             Field::Fps => {
                 let outcome = self.fps_field.key_down(event, clipboard);
                 if outcome == FieldEvent::Changed {
-                    if let Ok(fps) = self.fps_field.value.parse::<u32>() {
-                        if (1..=i32::MAX as u32).contains(&fps) {
-                            self.ed.set_fps(fps);
-                        }
+                    // set_fps caps a typo at the largest preset.
+                    if let Ok(fps) = self.fps_field.value.parse::<u32>()
+                        && fps >= 1
+                    {
+                        self.ed.set_fps(fps);
                     }
                 }
                 if outcome == FieldEvent::Cancel {
