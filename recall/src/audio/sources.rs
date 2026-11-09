@@ -183,9 +183,12 @@ struct Early {
     staged: Option<Staged>,
     /// `sync` was read: every line the controller queued before it was applied, in order.
     synced: bool,
+    /// The reader ended (`hold_for_quit`): nothing is released again, and a device track
+    /// listed from now on starts retired.
+    quitting: bool,
 }
 
-static EARLY: Mutex<Early> = Mutex::new(Early { staged: Some(Vec::new()), synced: false });
+static EARLY: Mutex<Early> = Mutex::new(Early { staged: Some(Vec::new()), synced: false, quitting: false });
 
 fn lock_early() -> std::sync::MutexGuard<'static, Early> {
     EARLY.lock().unwrap_or_else(|p| p.into_inner())
@@ -231,7 +234,7 @@ fn close_staging_with(mut apply: impl FnMut(&str, LiveChange)) {
     for (id, mic_mute, device_id, retire) in early.staged.take().into_iter().flatten() {
         apply(&id, LiveChange { mic_mute, device_id: device_id.as_deref(), retire, ..LiveChange::default() });
     }
-    if early.synced {
+    if early.synced && !early.quitting {
         release_startup_holds(); // `sync` came first: every line before it is now on its track
     }
 }
@@ -244,7 +247,7 @@ fn close_staging_with(mut apply: impl FnMut(&str, LiveChange)) {
 pub fn sync_read() {
     let mut early = lock_early();
     early.synced = true;
-    if early.staged.is_none() {
+    if early.staged.is_none() && !early.quitting {
         release_startup_holds();
     }
 }
@@ -273,16 +276,24 @@ pub fn startup_released() -> bool {
 /// recording's finalise included. The game's process tree and app tracks keep recording: no
 /// line can change what they capture. Never undone (the engine is ending).
 pub fn hold_for_quit() {
+    let mut early = lock_early(); // lock order EARLY, then STATES
+    early.quitting = true; // a track listed after this starts retired (`note_live`), N1
     if let Ok(states) = STATES.lock() {
         for (_, _, state) in states.iter() {
             if let State::Live(ring) = state {
-                if ring.source != crate::edit_model::SOURCE_GAME_PROCESS && !ring.source.starts_with(crate::edit_model::APP_SOURCE_PREFIX) {
+                if is_device(ring) {
                     ring.retire();
                 }
             }
         }
     }
     eprintln!("[recall] stdin: quit; every device audio track stores silence until the exit");
+}
+
+/// A track a line can change (an input or an output endpoint); not the game's process tree or
+/// an app track.
+fn is_device(ring: &TrackRing) -> bool {
+    ring.source != crate::edit_model::SOURCE_GAME_PROCESS && !ring.source.starts_with(crate::edit_model::APP_SOURCE_PREFIX)
 }
 
 /// The startup hold of every listed track ends (called with `EARLY` held; lock order EARLY,
@@ -307,7 +318,7 @@ pub(crate) fn close_staging_for_test(apply: impl FnMut(&str, LiveChange)) {
 
 #[cfg(test)]
 pub(crate) fn reopen_staging_for_test() {
-    *lock_early() = Early { staged: Some(Vec::new()), synced: false };
+    *lock_early() = Early { staged: Some(Vec::new()), synced: false, quitting: false };
 }
 
 /// Tests: list `ring` as the live track of input source `id` (as `audio::start` does).
@@ -390,6 +401,10 @@ enum State {
 static STATES: Mutex<Vec<(String, String, State)>> = Mutex::new(Vec::new());
 
 pub(super) fn note_live(spec: &SourceSpec, ring: &Arc<TrackRing>) {
+    let early = lock_early(); // lock order EARLY, then STATES: no `hold_for_quit` in between
+    if early.quitting && is_device(ring) {
+        ring.retire(); // listed after the reader ended: never released (N1)
+    }
     if let Ok(mut states) = STATES.lock() {
         states.push((spec.id.clone(), spec.name.clone(), State::Live(Arc::clone(ring))));
     }

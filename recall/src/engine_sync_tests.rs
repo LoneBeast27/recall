@@ -223,3 +223,20 @@ fn a_quit_holds_every_device_track_before_the_finalise() {
     let src = include_str!("engine_stdin.rs").split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(src.contains("if end == stdin_reader::ReaderEnd::Quit { audio::sources::hold_for_quit(); }"), "read_early holds before it returns (then `finish` sets quit)");
 }
+
+/// N1: `sync`, then `quit`, both read before `audio::start` has listed the tracks. A track
+/// listed after the quit starts retired, and the close never releases it.
+#[test]
+fn a_quit_before_the_listing_leaves_later_tracks_silent() {
+    let _restore = restore();
+    let _reopen = Reopen;
+    audio::set_mic_muted(false);
+    read_early(std::io::Cursor::new(SYNC), |_| {});
+    audio::sources::hold_for_quit(); // what the reader does at its end (`reader_end`)
+    let late = held_listed("n1-late");
+    close_staging();
+    assert!(late.retired() && late.startup_held(), "listed after the quit: retired, never released");
+    assert!(silent(&late), "its first packet is silence");
+    let sources = include_str!("audio/sources.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(sources.contains("if early.synced && !early.quitting { release_startup_holds();"), "the close never releases after it");
+}
