@@ -35,6 +35,9 @@ pub enum FpsSource {
     NoTarget,
     /// The session failed for another reason; retried shortly.
     Error,
+    /// Another Recall (perhaps another signed-in user's) owns the timing
+    /// trace; retried like `Error`, but the island says why.
+    Owned,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +79,19 @@ pub fn decide(phase: Phase, wanted: Option<u32>, now: Instant) -> Step {
     }
 }
 
+/// The trace note for a start refused because another Recall owns the trace.
+pub const OWNED_NOTE: &str =
+    "Frame stats are off: another Recall session owns the timing trace (restart the recorder or sign out the other user)";
+
+/// What the island reports: [`source_for`], or `Owned` while a failed start
+/// was refused for that reason.
+pub fn source(phase: Phase, owned: bool) -> FpsSource {
+    match phase {
+        Phase::Failed { .. } if owned => FpsSource::Owned,
+        _ => source_for(phase),
+    }
+}
+
 /// What the island reports for a phase.
 pub fn source_for(phase: Phase) -> FpsSource {
     match phase {
@@ -92,6 +108,8 @@ pub struct FrameTiming {
     session: Option<EtwSession>,
     /// The island's session or the probe's (its own session name).
     kind: Kind,
+    /// The last failed start was refused for another owner ([`OWNED_NOTE`]).
+    owned: bool,
     /// The last phase change, for the trace log (the overlay's stderr goes nowhere).
     note: Option<String>,
 }
@@ -99,7 +117,7 @@ pub struct FrameTiming {
 impl FrameTiming {
     /// The island's frame timing (`RecallFrameTiming`).
     pub fn new() -> Self {
-        Self { phase: Phase::Idle, session: None, kind: Kind::Overlay, note: None }
+        Self { phase: Phase::Idle, session: None, kind: Kind::Overlay, owned: false, note: None }
     }
 
     /// `--frame-timing-probe`'s (`RecallFrameTimingProbe`: never touches a
@@ -141,7 +159,7 @@ impl FrameTiming {
             }
         }
         let stats = self.session.as_ref().map(EtwSession::stats).unwrap_or_default();
-        (source_for(self.phase), stats)
+        (source(self.phase, self.owned), stats)
     }
 
     fn start(&mut self, pid: u32, now: Instant) {
@@ -149,6 +167,7 @@ impl FrameTiming {
             Phase::Failed { tries, .. } => tries + 1,
             _ => 0,
         };
+        self.owned = false;
         let (phase, note) = match EtwSession::start(pid, self.kind) {
             Ok(mut session) => {
                 let note = running_note(pid, &mut session);
@@ -156,6 +175,11 @@ impl FrameTiming {
                 (Phase::Running(pid), note)
             }
             Err(StartError::Denied) => (Phase::Denied, "refused (not in Performance Log Users); FPS shows —".into()),
+            Err(StartError::Owned(why)) => {
+                self.owned = true;
+                let next = retry_after(tries).as_secs();
+                (Phase::Failed { at: now, tries }, format!("{OWNED_NOTE} [{why}; try {}, next in {next} s]", tries + 1))
+            }
             Err(StartError::Failed(why)) => {
                 let next = retry_after(tries).as_secs();
                 (Phase::Failed { at: now, tries }, format!("failed (try {}, next in {next} s): {why}", tries + 1))
@@ -216,11 +240,21 @@ mod tests {
         assert_eq!(source_for(Phase::Running(1)), FpsSource::Etw);
         assert_eq!(source_for(Phase::Idle), FpsSource::NoTarget);
         assert_eq!(FpsSource::default(), FpsSource::Off);
-        let names: Vec<String> = [FpsSource::Off, FpsSource::Etw, FpsSource::NoPermission, FpsSource::NoTarget, FpsSource::Error]
+        let names: Vec<String> =
+            [FpsSource::Off, FpsSource::Etw, FpsSource::NoPermission, FpsSource::NoTarget, FpsSource::Error, FpsSource::Owned]
             .iter()
             .map(|s| serde_json::to_value(s).unwrap().as_str().unwrap().to_owned())
             .collect();
-        assert_eq!(names, ["off", "etw", "no_permission", "no_target", "error"]);
+        assert_eq!(names, ["off", "etw", "no_permission", "no_target", "error", "owned"]);
+    }
+
+    #[test]
+    fn a_trace_owned_by_another_recall_is_named_not_silent() {
+        let failed = Phase::Failed { at: Instant::now(), tries: 0 };
+        assert_eq!(source(failed, true), FpsSource::Owned);
+        assert_eq!(source(failed, false), FpsSource::Error);
+        assert_eq!(source(Phase::Running(42), true), FpsSource::Etw, "a later start that worked clears it");
+        assert!(OWNED_NOTE.starts_with("Frame stats are off: another Recall session owns the timing trace"));
     }
 
     #[test]
