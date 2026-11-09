@@ -171,7 +171,9 @@ pub fn run() -> i32 {
     let store = ConfigStore::user();
     let file_cfg = store.load();
     let overrides = EnvOverrides::from_env();
-    let cfg = overrides.apply(&file_cfg);
+    let mut cfg = overrides.apply(&file_cfg);
+    // Never record into a linked folder (logged; the app shows its own notice when it connects).
+    let _ = crate::record_link_guard::guard(&mut cfg, None, &crate::record_link_guard::read_links());
     if !overrides.is_empty() {
         log!("record: startup environment overrides active: {overrides:?}");
     }
