@@ -16,7 +16,26 @@ namespace Recall.Setup
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            using (var window = new SetupWindow())
+            string updatePath = null;
+            if (args.Length == 2 && args[0].Equals("--update", StringComparison.OrdinalIgnoreCase))
+                updatePath = SetupPackage.ExistingInstallPath(args[1]);
+            else if (args.Length != 0
+#if PREVIEW
+                && !(args.Length == 2 && args[0] == "--check-preview")
+#endif
+                )
+            {
+                MessageBox.Show("Recall Setup received unsupported options.", "Recall Setup",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return 2;
+            }
+            if (args.Length == 2 && args[0].Equals("--update", StringComparison.OrdinalIgnoreCase) && updatePath == null)
+            {
+                MessageBox.Show("Recall Setup could not verify the installed Recall folder.", "Recall Setup",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return 2;
+            }
+            using (var window = new SetupWindow(updatePath))
             {
 #if PREVIEW
                 if (args.Length == 2 && args[0] == "--check-preview")

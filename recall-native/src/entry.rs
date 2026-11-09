@@ -33,6 +33,8 @@ mod offscreen;
 mod playback_watch;
 mod root;
 mod services;
+#[path = "services/update.rs"]
+mod update;
 mod shell;
 mod ssd_meter;
 mod startup;

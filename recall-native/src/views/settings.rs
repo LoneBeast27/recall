@@ -124,7 +124,38 @@ impl Root {
         items.extend(self.render_midi_device(cx));
         items.push(section_title("Recorder"));
         items.push(self.render_stop_row(cx));
+        items.extend(self.settings_about(cx));
         items
+    }
+
+    fn settings_about(&mut self, cx: &mut Context<Self>) -> [AnyElement; 3] {
+        use crate::update;
+        let version = update::current();
+        let label = version.map_or_else(|| "Recall (development build)".into(), |v| format!("Recall {v}"));
+        let detail = if version.is_some() {
+            "Checks for stable releases from GitHub main."
+        } else {
+            "Updates are available in official versioned builds."
+        };
+        let busy = self.update.busy();
+        let mut check = ui::button("update-check", ui::Variant::Secondary)
+            .child(if busy { "Update in progress…" } else { "Check for updates" });
+        if version.is_some() && !busy {
+            check = check.on_click(cx.listener(|this, _, _, cx| {
+                this.update.check_now();
+                cx.notify();
+            }));
+        }
+        [
+            section_title("About"),
+            setting_row(&label, detail).child(check).into_any_element(),
+            setting_row("Third-party credits", "FFmpeg and Gyan builds, NVIDIA graphics, Microsoft, and other contributors.")
+                .child(ui::button("third-party-notices", ui::Variant::Secondary).child("View credits")
+                    .on_click(cx.listener(|_, _, _, cx| {
+                        cx.open_url("https://github.com/LoneBeast27/recall/blob/main/NOTICE.md");
+                    })))
+                .into_any_element(),
+        ]
     }
 
     /// The performance-stats island is on (config first, then the live status).

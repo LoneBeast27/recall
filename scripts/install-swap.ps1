@@ -34,9 +34,16 @@ function Install-Swap([string]$Stage, [string]$Dir) {
   $created = 0L; $e = 0L; $k = 0L; $u = 0L
   $me = [Diagnostics.Process]::GetCurrentProcess()
   $value = if ([InstallSwap.Native]::GetProcessTimes($me.Handle, [ref]$created, [ref]$e, [ref]$k, [ref]$u)) { "$PID $created" } else { "$PID" }
-  Set-Content -Path $marker -Value $value -NoNewline
   $new = Join-Path $Dir '.new'; $old = Join-Path $Dir '.old'
+  $lockPath = Join-Path $Dir '.install-swap-lock'
   try {
+    $lock = [IO.FileStream]::new($lockPath, [IO.FileMode]::CreateNew, [IO.FileAccess]::Write,
+      [IO.FileShare]::None, 4096, [IO.FileOptions]::DeleteOnClose)
+  } catch [IO.IOException] {
+    throw 'Another Recall install is swapping files in this folder. Wait for it to finish, then try again.'
+  }
+  try {
+    Set-Content -LiteralPath $marker -Value $value -NoNewline
     Remove-Item -LiteralPath $new -Recurse -Force -ErrorAction SilentlyContinue
     if (Test-Path $old) { Get-ChildItem $old -File | ForEach-Object { Remove-Item -LiteralPath $_.FullName -Force -ErrorAction SilentlyContinue } }
     New-Item -ItemType Directory -Force -Path $new, $old | Out-Null
@@ -68,5 +75,6 @@ function Install-Swap([string]$Stage, [string]$Dir) {
     Remove-Item -LiteralPath $new -Recurse -Force -ErrorAction SilentlyContinue
     if (-not (Get-ChildItem $old -Force -ErrorAction SilentlyContinue)) { Remove-Item -LiteralPath $old -Force -ErrorAction SilentlyContinue }
     Remove-Item -LiteralPath $marker -Force -ErrorAction SilentlyContinue
+    $lock.Dispose()
   }
 }
