@@ -5,6 +5,11 @@
 //! controller saves it and sends it back live (`set_source device_id`), and the track reopens on
 //! it as its own device.
 //!
+//! Never for a line-in (`SourceSpec::mic_mute = false`, P1-b): an adopted id would make the
+//! sibling its own device, which skips Alt+M from then on, and with two identical dongles that
+//! may be the microphone. Its stream stays held and the status says to pick the device on the
+//! Audio page, where the pick goes through the identical-name confirm and the mic re-arm.
+//!
 //! Also here: the source's saved id as the engine knows it now (changed live, then the stream
 //! reopens on it), and the re-pick slot (at most one re-pick thread per track).
 
@@ -19,6 +24,8 @@ struct Held {
     endpoint: String,
     id: Option<String>,
     since: Option<u64>,
+    /// A line-in's unmuting press was refused (the notice is shown once).
+    refused: bool,
 }
 
 /// The per-track state that changes while the engine runs, apart from gain, name and flags.
@@ -44,6 +51,8 @@ pub(super) enum Check {
     Held,
     /// Released by this packet: show this endpoint again.
     Released(String),
+    /// A line-in's unmuting press, refused: it stays held; show the pick notice for this endpoint.
+    Refused(String),
 }
 
 impl Live {
@@ -53,7 +62,7 @@ impl Live {
 
     /// Hold the stream that just opened `endpoint` (its id `id`, when read).
     pub(super) fn start_hold(&self, endpoint: &str, id: Option<String>) {
-        *self.hold.lock().unwrap_or_else(|p| p.into_inner()) = Some(Held { endpoint: endpoint.to_owned(), id, since: None });
+        *self.hold.lock().unwrap_or_else(|p| p.into_inner()) = Some(Held { endpoint: endpoint.to_owned(), id, since: None, refused: false });
         self.held.store(true, Ordering::SeqCst);
     }
 
@@ -64,8 +73,9 @@ impl Live {
     }
 
     /// Whether this packet enters as silence. The first packet notes the presses so far; a
-    /// later packet that sees more presses and the mic unmuted releases the hold.
-    pub(super) fn check(&self, now: MuteNow) -> Check {
+    /// later packet that sees more presses and the mic unmuted releases the hold, except on a
+    /// `line_in` (see the module notes), which stays held.
+    pub(super) fn check(&self, now: MuteNow, line_in: bool) -> Check {
         if !self.held.load(Ordering::SeqCst) {
             return Check::Free;
         }
@@ -74,6 +84,10 @@ impl Live {
         let since = *held.since.get_or_insert(now.presses);
         if now.presses == since || now.muted {
             return Check::Held;
+        }
+        if line_in {
+            let first = !std::mem::replace(&mut held.refused, true);
+            return if first { Check::Refused(held.endpoint.clone()) } else { Check::Held };
         }
         let held = hold.take().expect("checked above");
         self.held.store(false, Ordering::SeqCst);
@@ -111,7 +125,9 @@ impl TrackRing {
     /// Append a live packet: Alt+M as it is right now (`now`), and silence while the stream is
     /// held (see the module notes).
     pub(crate) fn push_live(&self, data: &[f32], now: MuteNow) {
-        let held = match self.live.check(now) {
+        // A line-in never takes a sibling's id (P1-b): read per packet, as the flag changes live.
+        let line_in = !self.mic_mute.load(std::sync::atomic::Ordering::Relaxed);
+        let held = match self.live.check(now, line_in) {
             Check::Free => false,
             Check::Held => true,
             Check::Released(endpoint) => {
@@ -124,6 +140,13 @@ impl TrackRing {
                     *e = endpoint;
                 }
                 false
+            }
+            Check::Refused(endpoint) => {
+                eprintln!("[recall] audio track '{}': {endpoint} is a line-in on an unsure device; it stays muted until picked on the Audio page", self.name);
+                if let Ok(mut e) = self.endpoint.lock() {
+                    *e = super::endpoints::line_in_pick_notice(&endpoint);
+                }
+                true
             }
         };
         self.push_samples(data, now.muted, held);
