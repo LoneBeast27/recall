@@ -340,20 +340,7 @@ impl crate::record_app::Controller {
         match self.recovery.step_held(now, state, health, progress, view.opening, shown, hold, &target) {
             Recovery::Restart => {
                 log!("record: the encoder failed, its recovery ran past its bound, or the engine hung; restarting the engine (intended)");
-                let lines = restart_lines(self.activity.is_recording());
-                if lines.is_empty() {
-                    self.restart_for_recovery();
-                    return;
-                }
-                // The quit waits (up to 20 s) for the recording thread to finish the part.
-                log!("record: ending the long recording early; the restart follows once it reports");
-                for line in lines {
-                    // Not a user action: logged; the 20 s wait bounds it (then the restart).
-                    if !crate::record_dispatch::automatic_effects(self.supervisor.send_engine_line(&line)).is_empty() {
-                        log!("record: record_fail not sent ({}); the restart follows within {} s", crate::record_dispatch::NOT_RESPONDING, END_EARLY_WAIT.as_secs());
-                    }
-                }
-                self.ending_early = Some(EndingEarly::new(now, self.supervisor.hello_count()));
+                self.recovery_restart(now);
             }
             Recovery::Recovered => log!("record: recording again after the engine restart"),
             Recovery::GaveUp => {
@@ -365,6 +352,31 @@ impl crate::record_app::Controller {
             }
             Recovery::Nothing => {}
         }
+    }
+}
+
+impl crate::record_app::Controller {
+    /// A recovery restart, the one way every recovery takes (encoder, hang, and the audio ack
+    /// watch, review F-5): a long recording is ended early first (`record_fail`, "Recording
+    /// ended early"; the restart follows once it reports, at most 20 s), then the restart.
+    pub(crate) fn recovery_restart(&mut self, now: Instant) {
+        if self.ending_early.is_some() {
+            return; // one already waits for the long recording to end
+        }
+        let lines = restart_lines(self.activity.is_recording());
+        if lines.is_empty() {
+            self.restart_for_recovery();
+            return;
+        }
+        // The quit waits (up to 20 s) for the recording thread to finish the part.
+        log!("record: ending the long recording early; the restart follows once it reports");
+        for line in lines {
+            // Not a user action: logged; the 20 s wait bounds it (then the restart).
+            if !crate::record_dispatch::automatic_effects(self.supervisor.send_engine_line(&line)).is_empty() {
+                log!("record: record_fail not sent ({}); the restart follows within {} s", crate::record_dispatch::NOT_RESPONDING, END_EARLY_WAIT.as_secs());
+            }
+        }
+        self.ending_early = Some(EndingEarly::new(now, self.supervisor.hello_count()));
     }
 }
 

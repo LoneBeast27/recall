@@ -121,7 +121,7 @@ pub(crate) fn on_engine_event(ctl: &mut Controller, ev: &Value, now: Instant) {
         }
         AckStep::Recover => {
             crate::log!("record: the engine still has not applied its audio lines; restarting it");
-            ctl.restart_for_recovery();
+            ctl.recovery_restart(now); // the encoder path's recovery (record_fail first), F-5
         }
     }
 }
@@ -192,5 +192,10 @@ mod tests {
         assert_eq!(recovers, 1, "at most one recovery in 10 min");
         let src = include_str!("record_audio_ack.rs").split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(src.contains("stdin_ended: ev.get(\"stdin_ended\").and_then(Value::as_bool) == Some(true), busy: ctl.activity.busy(now),"), "the live event feeds both");
+        // F-5: the ack recovery takes the encoder path's recovery (record_fail, the end-early wait).
+        assert!(src.contains("ctl.recovery_restart(now);"), "the ack watch recovers through it");
+        assert!(!src.contains("ctl.restart_for_recovery()"), "never the bare restart");
+        let recover = include_str!("record_recover.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(recover.contains("Recovery::Restart => { log!(\"record: the encoder failed, its recovery ran past its bound, or the engine hung; restarting the engine (intended)\"); self.recovery_restart(now); }"), "the encoder path uses the same one");
     }
 }
