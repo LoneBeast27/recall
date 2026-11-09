@@ -211,7 +211,7 @@ fn scans_that_mark_most_of_the_screen_are_ignored() {
     assert_eq!(choose(&cache.grid("rocketleague").unwrap(), WIDE, None), Anchor::TopRight);
 }
 
-/// Rohan's Rocket League scans from 2026-11-06: two good ones (score top centre,
+/// The maintainer's Rocket League scans from 2026-11-06: two good ones (score top centre,
 /// boost bottom right) and two taken in menus that marked ~65% of the screen.
 #[test]
 fn rocket_league_lands_top_right_once_menu_scans_are_skipped() {

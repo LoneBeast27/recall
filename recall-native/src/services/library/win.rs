@@ -15,7 +15,7 @@ use super::calendar::stamp_from_unix_offset;
 /// Seconds between 1601-01-01 (FILETIME epoch) and 1970-01-01.
 const FILETIME_UNIX_OFFSET: u64 = 11_644_473_600;
 
-/// Uses the machine's current time-zone rules (IST for this user); UTC if Win32 fails.
+/// Uses the machine's current time-zone rules (and its daylight-saving changes); UTC if Win32 fails.
 pub(super) fn local_from_unix(secs: u64) -> LocalStamp {
     let ticks = secs.checked_add(FILETIME_UNIX_OFFSET).and_then(|s| s.checked_mul(10_000_000)).filter(|t| *t < i64::MAX as u64);
     if let Some(ticks) = ticks {

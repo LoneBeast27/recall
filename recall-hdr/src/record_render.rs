@@ -9,7 +9,7 @@
 //! Without trace rights (not an elevated administrator, not in Performance
 //! Log Users) or when the session cannot start there is no verdict, and an
 //! unknown fullscreen window with no other official proof is not recorded
-//! (Rohan 2026-11-07: "use official proof + support for manual application
+//! (the maintainer 2026-11-07: "use official proof + support for manual application
 //! registering"): it is logged once and, after 20 s in front, named once by
 //! the G4 notice "Not recording <exe>: add it as a game in Settings"
 //! (`record_hosted::check_proof`, [`Controller::classify_unproven`]).

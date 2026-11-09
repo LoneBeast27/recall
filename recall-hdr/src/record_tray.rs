@@ -1,4 +1,4 @@
-//! The record mode's notification-area UI (user ruling 2026-10-22, 03:41 IST:
+//! The record mode's notification-area UI (maintainer ruling, 2026-10-22:
 //! "confirm recall system tray utility too. for start record stop record and
 //! quit"). The menu is exactly: status line (disabled: "Recording VALORANT" /
 //! "Waiting for a game" / "Recording paused") · Open Recall (focus or launch

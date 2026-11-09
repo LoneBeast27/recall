@@ -1,4 +1,4 @@
-//! recall-hdr: Recall's controller (Windows, RTX 5090).
+//! recall-hdr: Recall's controller (Windows, NVIDIA).
 //!
 //! Entry point. Modes:
 //! - (no args), `--record`, `--record-only` : the unified record mode

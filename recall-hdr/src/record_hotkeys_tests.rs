@@ -182,7 +182,7 @@ screenshot_hotkey = \"Alt+U\"
 ");
     assert_eq!((r.screenshot_hotkey.as_str(), r.editor_hotkey.as_str()), ("Alt+U", ""), "Alt+U stays the screenshot's");
     assert!(validate(&r).is_ok());
-    // Rohan's config shape (no editor_hotkey, nothing on Alt+U): the editor shortcut comes on.
+    // The maintainer's config shape (no editor_hotkey, nothing on Alt+U): the editor shortcut comes on.
     let existing = load("[recording]
 save_hotkey = \"Alt+N\"
 mic_hotkey = \"Alt+M\"

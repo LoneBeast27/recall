@@ -4,7 +4,7 @@
 //!
 //! # Why CCD (not NvAPI/DXGI) for HDR + white level
 //! The gamut clamp ([`crate::clamp`]) is NVIDIA-specific; HDR + SDR-white are
-//! *adapter-agnostic* and this box is a hybrid GPU (RTX 5090 + AMD iGPU). CCD
+//! *adapter-agnostic* and a PC can have hybrid GPUs (for example an NVIDIA GPU plus an AMD iGPU). CCD
 //! (`QueryDisplayConfig` + `DisplayConfigGetDeviceInfo`) addresses a display by
 //! its **(adapter LUID, target id)** pair regardless of which GPU drives it, and
 //! matches a *specific* panel by `monitorFriendlyDeviceName` -- critical: we

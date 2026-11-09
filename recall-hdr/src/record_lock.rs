@@ -1,4 +1,4 @@
-//! Win+L during a long recording (audit U8). Decision (coordinator, 2026-11-07; Rohan may
+//! Win+L during a long recording (audit U8). Decision (coordinator, 2026-11-07; the maintainer may
 //! override): a notice only, no auto-stop. A stopped recording cannot be got back, extra
 //! footage can be trimmed, and the disk-full guards cover the space. The mic and the replay
 //! ring are not touched.

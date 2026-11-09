@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SignPath artifact configuration "setup" (release.yml sign-setup): the GitHub artifact
+     RecallSetup-unsigned, a zip holding RecallSetup.exe, built around the already signed payload.
+     Paste into the SignPath project's artifact configuration. -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="RecallSetup.exe" product-name="Recall">
+      <authenticode-sign />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>
