@@ -100,6 +100,18 @@ impl Root {
                 })))
                 .into_any_element(),
             section_title("Overlay"),
+        ];
+        if let Some(title) = overlay_hidden_title(self.snap.config.as_ref(), &session.overlay_hotkey) {
+            items.push(
+                setting_row(&title, "Notices and stats stay hidden until you show them again, here or with the shortcut.")
+                    .child(ui::button("overlay-show", ui::Variant::Secondary).child("Show").on_click(cx.listener(|this, _, _, cx| {
+                        this.set_config("overlay", "hidden", json!(false));
+                        cx.notify();
+                    })))
+                    .into_any_element(),
+            );
+        }
+        items.extend([
             setting_row("Show notices", "Every shortcut, save and recording change pops up for a few seconds, over games and any other app. Hidden from your own captures.")
                 .child(ui::switch("overlay-on", overlay_on).on_click(cx.listener(move |this, _, _, cx| {
                     this.set_config("overlay", "enabled", json!(!overlay_on));
@@ -112,7 +124,7 @@ impl Root {
                     cx.notify();
                 })))
                 .into_any_element(),
-        ];
+        ]);
         items.extend(fps_line);
         let corner_detail = if corner == "dynamic" {
             "Finds each game's HUD from a few frames and takes a free corner or edge. On a side edge the island turns vertical."
@@ -261,5 +273,27 @@ mod tests {
         assert_eq!(fps_source_status("off"), None);
         assert_eq!(fps_source_status(""), None, "older controllers say nothing");
         assert_eq!(fps_source_status("running"), None, "old RTSS states are not shown");
+    }
+}
+
+/// "Hidden by Alt+O" while the overlay shortcut hides notices and stats (`overlay.hidden`).
+pub(crate) fn overlay_hidden_title(config: Option<&Value>, hotkey: &str) -> Option<String> {
+    let hidden = config?.get("overlay")?.get("hidden")?.as_bool()?;
+    let by = if hotkey.is_empty() { "the overlay shortcut" } else { hotkey };
+    hidden.then(|| format!("Hidden by {by}"))
+}
+
+#[cfg(test)]
+mod overlay_hidden_tests {
+    use super::overlay_hidden_title;
+    use serde_json::json;
+
+    #[test]
+    fn the_shortcut_hide_is_reported_with_its_key() {
+        let hidden = json!({"overlay": {"enabled": true, "hidden": true}});
+        assert_eq!(overlay_hidden_title(Some(&hidden), "Alt+O").as_deref(), Some("Hidden by Alt+O"));
+        assert_eq!(overlay_hidden_title(Some(&hidden), "").as_deref(), Some("Hidden by the overlay shortcut"));
+        assert_eq!(overlay_hidden_title(Some(&json!({"overlay": {"hidden": false}})), "Alt+O"), None);
+        assert_eq!(overlay_hidden_title(None, "Alt+O"), None, "no config yet: nothing claimed");
     }
 }

@@ -350,6 +350,7 @@ impl Controller {
             self.planner.linger_deadline(),
             self.hdr.next_deadline(),
             self.janitor.next_deadline(),
+            self.overlay.deadline(),
         ]
         .into_iter()
         .flatten()
