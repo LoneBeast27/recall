@@ -37,16 +37,22 @@ pub fn delete_or_hide(clips: &[PathBuf], folders: &folders::Folders) -> DeleteRe
     report.already_gone = absent.len();
     report.left.extend(absent);
     report.asked = clips.len();
+    // A clip recorded outside the recordings folders that left: a later file there is not Recall's.
+    super::recorded::forget(&report.left);
     report
 }
 
 /// (imported: only removed from Recall, own: to the Recycle Bin), by `folders` alone.
 pub(crate) fn partition_for_delete(clips: &[PathBuf], folders: &folders::Folders) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let recordings = crate::backend::library_dir_from(folders);
-    clips.iter().cloned().partition(|clip| {
-        !imports::is_owned(clip, &recordings, &folders.former_recordings)
-            || clip.parent().is_some_and(|parent| crate::backend::overlaps_link(parent, folders))
-    })
+    // Owned wins over linked: a recordings folder under a linked parent (Videos linked, clips in
+    // Videos\Recall) keeps Delete-to-Recycle-Bin; only clips Recall does not own are hidden.
+    clips.iter().cloned().partition(|clip| !imports::is_owned(clip, &recordings, &folders.former_recordings))
+}
+
+/// How many of `clips` a delete only hides (the confirm dialog's count).
+pub(crate) fn imported_count(clips: &[PathBuf], folders: &folders::Folders) -> usize {
+    partition_for_delete(clips, folders).0.len()
 }
 
 /// The report from both halves' results and which own clips are still on disk.
@@ -183,3 +189,7 @@ mod tests {
         assert_eq!(title, "That clip was already gone");
     }
 }
+
+#[cfg(test)]
+#[path = "delete_owned_tests.rs"]
+mod owned_tests;

@@ -116,6 +116,16 @@ fn cause_text(cause: &str) -> &'static str {
     }
 }
 
+/// A clip the recorder saved: Recall's own. One saved outside the recordings folders (a startup
+/// `-OutDir` override) is listed by exact path so Delete recycles it (`library::recorded`).
+fn note_saved(folders: &crate::services::library::folders::Folders, path: String) {
+    let recordings = crate::backend::library_dir_from(folders);
+    if !crate::services::library::imports::is_owned(std::path::Path::new(&path), &recordings, &folders.former_recordings) {
+        crate::services::library::recorded::note(&path);
+    }
+    record_interaction(Interaction::Saved(path));
+}
+
 impl Root {
     pub(super) fn on_daemon_event(&mut self, event: DaemonEvent) {
         if let Some((kind, text, detail)) = recording_toast(&event) {
@@ -123,7 +133,7 @@ impl Root {
         }
         match event {
             DaemonEvent::Saved { path, seconds, .. } => {
-                record_interaction(Interaction::Saved(path.clone()));
+                note_saved(&self.folders, path.clone());
                 let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned());
                 let game = name.as_deref().and_then(|n| n.split("__").next()).map(|g| normalize_game(g).1);
                 self.show_toast(ToastKind::Good, format!("Clip saved · {}", format_duration(seconds as f64)), game);
@@ -153,20 +163,20 @@ impl Root {
             | DaemonEvent::RecordingPartlyLocked { .. }
             | DaemonEvent::ShutdownCancelled => {}
             DaemonEvent::RecordingStopped { path, .. } | DaemonEvent::RecordingPartSaved { path } => {
-                record_interaction(Interaction::Saved(path));
+                note_saved(&self.folders, path);
                 self.workers.job(Job::List);
             }
             DaemonEvent::RecordingRecovered { paths, .. } => {
                 // Toast: `recording_toast`. The recovered files reach the library.
                 for path in paths {
-                    record_interaction(Interaction::Saved(path));
+                    note_saved(&self.folders, path);
                 }
                 self.workers.job(Job::List);
             }
             DaemonEvent::RecordingFailed { files, .. } => {
                 // Toast: `recording_toast`. Kept files reach the library.
                 for path in files {
-                    record_interaction(Interaction::Saved(path));
+                    note_saved(&self.folders, path);
                 }
                 self.workers.job(Job::List);
             }

@@ -109,12 +109,15 @@ pub fn is_imported(path: &str, recordings: &Path, imported: &[String], former: &
     !is_owned(Path::new(path), recordings, former) && imported.iter().any(|folder| is_inside(path, folder))
 }
 
-/// Only clips saved directly into a current or former recordings folder are managed.
+/// Only clips saved directly into a current or former recordings folder, or listed by exact path
+/// as recorded by Recall elsewhere (`recorded`), are managed.
 pub(crate) fn is_owned(clip: &Path, recordings: &Path, former: &[String]) -> bool {
     let Some(parent) = clip.parent() else { return false };
     let parent = folder_key(&parent.to_string_lossy());
     !parent.is_empty() && (parent == folder_key(&recordings.to_string_lossy())
         || former.iter().any(|folder| folder_key(folder) == parent))
+        // A clip Recall recorded into a startup `-OutDir` folder: that exact file only.
+        || super::recorded::contains(clip)
 }
 
 fn with_table<T>(work: impl FnOnce(&mut Table) -> T) -> T {

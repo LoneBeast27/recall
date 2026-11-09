@@ -59,11 +59,32 @@ pub fn plan(recordings: Option<&str>, reported: &str, pending: Option<&PendingFo
     FolderPlan::Follow
 }
 
+/// Why Recall won't record into `new`, if it won't. Linked folders are read-only to Recall:
+/// refused when `new` is a linked folder, holds one, or lies inside one without being a folder
+/// Recall already records into (the recordings folder or a former one). A linked parent of the
+/// recordings folder is fine (Videos linked, clips in Videos\Recall). The recorder applies the
+/// same rule (recall-hdr `record_link_guard`).
+pub fn link_refusal(new: &str, folders: &Folders) -> Option<String> {
+    use crate::services::storage::guard::folder_within;
+    let owned = folders.recordings.iter().chain(&folders.former_recordings).any(|f| same(f, new));
+    let new_path = Path::new(new);
+    folders.linked().find_map(|link| {
+        let link_path = Path::new(link);
+        let holds = folder_within(link_path, new_path);
+        let refused = same(link, new) || holds || (folder_within(new_path, link_path) && !owned);
+        refused.then(|| format!("{new} is a linked folder; Recall won't record into it"))
+    })
+}
+
 /// Make `new` the recordings folder: it leaves the imported list, and the old ones join it:
 /// `old` (the folder the recorder used, an env override's during one) and the recordings folder
-/// folders.json named until now (kept by the override skip). True when an old folder was added.
-/// Every old folder goes through [`Folders::move_recordings`], so none stops being Recall's.
-pub fn retarget(folders: &mut Folders, new: &str, old: Option<&str>) -> bool {
+/// folders.json named until now (kept by the override skip). `Ok(true)` when an old folder was
+/// added. Every old folder goes through [`Folders::move_recordings`], so none stops being
+/// Recall's. A folder [`link_refusal`] refuses changes nothing: the link stays linked.
+pub fn retarget(folders: &mut Folders, new: &str, old: Option<&str>) -> Result<bool, String> {
+    if let Some(why) = link_refusal(new, folders) {
+        return Err(why);
+    }
     let olds: Vec<String> = old.map(str::to_owned).into_iter().chain(folders.recordings.clone()).collect();
     folders.remove(new);
     folders.move_recordings(new, None);
@@ -73,7 +94,7 @@ pub fn retarget(folders: &mut Folders, new: &str, old: Option<&str>) -> bool {
         folders.move_recordings(new, Some(o));
         added |= folders.add(Path::new(o));
     }
-    added
+    Ok(added)
 }
 
 #[cfg(test)]
@@ -88,7 +109,7 @@ mod tests {
     fn a_folder_moved_behind_the_apps_back_keeps_the_old_one_listed() {
         assert_eq!(plan(Some(r"D:\Old"), r"C:\Users\me\Videos\Recall", None, false, 0), FolderPlan::Follow);
         let mut folders = Folders { recordings: Some(r"D:\Old".into()), imported: vec![r"F:\Medal".into()], ..Folders::default() };
-        assert!(retarget(&mut folders, r"C:\Users\me\Videos\Recall", None), "the old folder is kept");
+        assert!(retarget(&mut folders, r"C:\Users\me\Videos\Recall", None).unwrap(), "the old folder is kept");
         assert_eq!(folders.recordings.as_deref(), Some(r"C:\Users\me\Videos\Recall"));
         assert_eq!(folders.imported, vec![r"F:\Medal".to_string(), r"D:\Old".to_string()]);
     }
@@ -103,8 +124,9 @@ mod tests {
         let p = pending();
         assert_eq!(plan(Some(r"D:\Old"), r"D:\Old", Some(&p), false, 3), FolderPlan::Nothing, "no config event since the send");
         assert_eq!(plan(Some(r"D:\Old"), r"e:\new\", Some(&p), false, 4), FolderPlan::Commit);
-        let mut folders = Folders { recordings: Some(r"D:\Old".into()), imported: vec![r"E:\New".into()], ..Folders::default() };
-        assert!(retarget(&mut folders, &p.new, Some(&p.old)));
+        // E:\New was a recordings folder before (listed, managed): a linked folder would be refused.
+        let mut folders = Folders { recordings: Some(r"D:\Old".into()), imported: vec![r"E:\New".into()], former_recordings: vec![r"E:\New".into()], ..Folders::default() };
+        assert!(retarget(&mut folders, &p.new, Some(&p.old)).unwrap());
         assert_eq!(folders.recordings.as_deref(), Some(r"E:\New"));
         assert_eq!(folders.imported, vec![r"D:\Old".to_string()], "the new folder leaves the imported list");
     }
@@ -113,7 +135,7 @@ mod tests {
     fn a_change_during_an_override_keeps_the_real_folder() {
         // Started with -OutDir D:\Tmp; folders.json still names the real folder D:\Real.
         let mut folders = Folders { recordings: Some(r"D:\Real".into()), imported: vec![], ..Folders::default() };
-        assert!(retarget(&mut folders, r"E:\New", Some(r"D:\Tmp")));
+        assert!(retarget(&mut folders, r"E:\New", Some(r"D:\Tmp")).unwrap());
         assert_eq!(folders.recordings.as_deref(), Some(r"E:\New"));
         assert_eq!(folders.imported, vec![r"D:\Tmp".to_string(), r"D:\Real".to_string()], "both old folders still show");
     }
@@ -133,10 +155,40 @@ mod tests {
         // A change during an override (D:\Tmp) away from the real folder D:\Real, then a folder
         // moved behind the app's back: every folder clips were saved to stays Recall-owned.
         let mut folders = Folders { recordings: Some(r"D:\Real".into()), ..Folders::default() };
-        retarget(&mut folders, r"E:\New", Some(r"D:\Tmp"));
-        retarget(&mut folders, r"F:\Moved", None);
+        retarget(&mut folders, r"E:\New", Some(r"D:\Tmp")).unwrap();
+        retarget(&mut folders, r"F:\Moved", None).unwrap();
         assert_eq!(folders.recordings.as_deref(), Some(r"F:\Moved"));
         assert_eq!(folders.former_recordings, vec![r"D:\Tmp".to_string(), r"D:\Real".to_string(), r"E:\New".to_string()]);
         assert_eq!(folders.managed(r"F:\Moved").len(), 3, "listed under Folders Recall manages");
+    }
+
+    fn linked(recordings: &str, link: &str) -> Folders {
+        Folders { recordings: Some(recordings.into()), imported: vec![link.into()], ..Folders::default() }
+    }
+
+    #[test]
+    fn an_output_dir_set_to_a_linked_folder_never_unlinks_it() {
+        // (A) recording.output_dir hand-set to the linked Moments folder: Follow must refuse.
+        let link = r"D:\SteelSeries\Moments";
+        let mut folders = linked(r"D:\Old", link);
+        let before = folders.clone();
+        let _ = retarget(&mut folders, link, None);
+        assert_eq!(folders, before, "the link stays linked and D:\\Old stays the recordings folder");
+        let mut above = linked(r"D:\Old", link);
+        let _ = retarget(&mut above, r"D:\SteelSeries", None);
+        assert_eq!(above, linked(r"D:\Old", link), "a folder holding a link is refused too");
+    }
+
+    #[test]
+    fn a_linked_parent_keeps_the_owned_recordings_folder_but_refuses_others_inside() {
+        // (B) Videos linked (ShadowPlay's default) with recordings in Videos\Recall: allowed.
+        let folders = linked(r"C:\Users\me\Videos\Recall", r"C:\Users\me\Videos");
+        assert_eq!(link_refusal(r"C:\Users\me\Videos\Recall", &folders), None, "the owned folder stays usable");
+        // A move into someone else's part of the linked tree is refused.
+        let mut moved = folders.clone();
+        let _ = retarget(&mut moved, r"C:\Users\me\Videos\Moments", None);
+        assert_eq!(moved, folders, "Recall won't record into Videos\\Moments");
+        let why = link_refusal(r"C:\Users\me\Videos\Moments", &folders).expect("refused");
+        assert!(why.contains("Recall won't record into it"), "{why}");
     }
 }

@@ -52,9 +52,23 @@ pub(super) fn foreign_bytes(dir: &Path) -> u64 {
     entries(dir).iter().filter(|(name, meta, _)| !(meta.is_file() && is_engine_file(name))).map(|(_, meta, path)| size_of(meta, path)).sum()
 }
 
+/// `path` is a junction, symlink or other reparse point (`FILE_ATTRIBUTE_REPARSE_POINT`), read
+/// without following it. A tier folder that is one may lead into a user's folder: nothing is
+/// adopted from it or deleted through it.
+pub(super) fn is_reparse(path: &Path) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    std::fs::symlink_metadata(path).is_ok_and(|m| m.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0)
+}
+
 /// Deletes the engine's files in an editor folder, then the folder once empty. Anything else
-/// in it stays (and with it the folder). Returns bytes freed.
+/// in it stays (and with it the folder). A folder that is (or sits in) a reparse point is left
+/// whole. Returns bytes freed.
 pub(super) fn remove_engine_folder(dir: &Path) -> u64 {
+    if is_reparse(dir) || dir.parent().is_some_and(is_reparse) {
+        eprintln!("cache: {} is a junction or link; nothing deleted through it", dir.display());
+        return 0;
+    }
     let freed = entries(dir).iter().filter(|(name, meta, _)| meta.is_file() && is_engine_file(name)).map(|(_, _, path)| removed(path)).sum();
     let _ = std::fs::remove_dir(dir);
     freed

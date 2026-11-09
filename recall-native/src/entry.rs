@@ -22,6 +22,9 @@ mod win_volume;
 #[allow(dead_code)]
 #[path = "../../recall/src/file_id.rs"]
 mod file_id;
+// Whole-file compare of a clip and its kept copy (shared with the engine's start-up check).
+#[path = "../../recall/src/same_bytes.rs"]
+mod same_bytes;
 mod editor_state;
 mod install_wait;
 mod instance;

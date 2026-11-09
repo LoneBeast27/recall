@@ -33,6 +33,11 @@ pub(crate) fn folders_overlap(a: &Path, b: &Path) -> bool {
         || crate::file_id::inside(a, b) == Some(true) || crate::file_id::inside(b, a) == Some(true)
 }
 
+/// `inner` is the folder `outer` or lies inside it (text, junctions and aliases).
+pub(crate) fn folder_within(inner: &Path, outer: &Path) -> bool {
+    within(&normalized(inner), &normalized(outer)) || crate::file_id::inside(inner, outer) == Some(true)
+}
+
 /// The first clip folder that overlaps a cache folder, as a sentence for the user; `None`
 /// when they are all apart. Empty paths are ignored.
 pub fn overlap(cache: &[PathBuf], clips: &[PathBuf]) -> Option<String> {
