@@ -20,7 +20,7 @@ use crate::awake_clock::Awake;
 
 use serde_json::Value;
 
-use super::{EngineActivity, SAVE_STALE};
+use super::{EngineActivity, SAVE_STALE, SETTLE_NO_HEARTBEAT};
 use crate::log;
 
 /// The progress mark of `status.save_writing`: its `step` when the engine sends one,
@@ -139,17 +139,33 @@ impl EngineActivity {
         self.pending_saves + self.expired_saves > 0 || self.write.last.is_some() || self.pending_screenshots > 0
     }
 
-    /// A released engine may be cut to the quit grace (`Supervisor::release_settled`,
-    /// R2-detect-r10-p2-1): every save it was sent is answered (`saved` / `save_failed`; an
-    /// engine exit answers them all), or none has shown progress for [`SAVE_STALE`] (the
-    /// engine's own stall rule, `saver_stop::ORPHAN_STALL`). Unlike [`Self::saves_writing`],
-    /// no timer or cap lets go while the drain still reports progress (`save_progress`).
+    /// The engine was released at `now` (`Transitions::drop_ring`, design P2); `heartbeats`: its
+    /// hello says `drain_heartbeat` (`Supervisor::engine_takes_drain_heartbeat`).
+    pub fn released(&mut self, now: Awake, heartbeats: bool) {
+        (self.released_at, self.drain_heartbeats) = (Some(now), heartbeats);
+    }
+
+    /// When this engine was released, and whether it sends drain heartbeats.
+    pub fn release(&self) -> Option<(Awake, bool)> {
+        self.released_at.map(|at| (at, self.drain_heartbeats))
+    }
+
+    /// A released engine may be cut to the quit grace (`Supervisor::release_settled`): every
+    /// save it was sent is answered (`saved` / `save_failed`; an engine exit answers them all).
+    /// Design P7: an engine that sends drain heartbeats is the only judge of a stalled save (it
+    /// gives it up itself, with an answer), so no timer settles it here. P8: an older engine
+    /// with `stop_capture` but no heartbeat settles once no save showed progress for
+    /// [`SETTLE_NO_HEARTBEAT`] (awake), counted from the last progress or the release,
+    /// whichever is later (the engine's own stall clock starts at the release, p5-1).
     pub fn release_may_settle(&mut self, now: Awake) -> bool {
         if self.pending_saves + self.expired_saves == 0 {
             return true;
         }
-        let last = self.save_progress.max(self.write.moved);
-        last.is_none_or(|t| now.saturating_duration_since(t) >= SAVE_STALE)
+        if self.drain_heartbeats {
+            return false;
+        }
+        let last = self.save_progress.max(self.write.moved).max(self.released_at);
+        last.is_none_or(|t| now.saturating_duration_since(t) >= SETTLE_NO_HEARTBEAT)
     }
 
     /// Saves the engine is still writing: counted, or reported by the engine with

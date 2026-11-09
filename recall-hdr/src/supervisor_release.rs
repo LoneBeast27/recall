@@ -16,6 +16,9 @@ use crate::record_dispatch::Sent;
 
 /// The engine `hello` capability (`recall` `protocol::Outbound::Hello::stop_capture`).
 pub(super) const STOP_CAPTURE_CAP: &str = "stop_capture";
+/// The engine `hello` capability: a released engine sends `save_progress` at once and on every
+/// drain poll and answers its own give-up (`recall` `Outbound::Hello::drain_heartbeat`).
+pub(super) const DRAIN_HEARTBEAT_CAP: &str = "drain_heartbeat";
 /// The line sent in the quit slot.
 pub(super) const STOP_CAPTURE_LINE: &str = r#"{"cmd":"stop_capture"}"#;
 /// How long a released engine may run on: the engine's own cap for finishing saves
@@ -27,6 +30,12 @@ impl Supervisor {
     /// The running engine said it takes `stop_capture`.
     pub fn engine_takes_stop_capture(&self) -> bool {
         self.hello_says(STOP_CAPTURE_CAP)
+    }
+
+    /// The running engine sends drain heartbeats (design P7): the controller then never settles
+    /// it on a save-stall timer; the engine judges its own saves.
+    pub fn engine_takes_drain_heartbeat(&self) -> bool {
+        self.hello_says(DRAIN_HEARTBEAT_CAP)
     }
 
     /// A game switch whose old engine is released (see the module notes), then `spec` runs
@@ -165,8 +174,8 @@ mod tests {
             let _ = activity.retarget_busy(now); // plan_engine's read: expiry and the cap run here
             assert!(!activity.release_may_settle(now), "settled at {} s while the save moved", step * 5);
         }
-        let _ = activity.retarget_busy(now + Duration::from_secs(120));
-        assert!(activity.release_may_settle(now + Duration::from_secs(120)), "120 s with no progress settles");
+        let _ = activity.retarget_busy(now + Duration::from_secs(135));
+        assert!(activity.release_may_settle(now + Duration::from_secs(135)), "135 s with no progress settles (no heartbeats, P8)");
     }
 
     /// R2-detect-r10-p3-2: `plan_engine` settles a release on `release_may_settle`, never on

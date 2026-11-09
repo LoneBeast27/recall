@@ -264,6 +264,7 @@ fn a_released_save_that_keeps_moving_is_never_settled_a_stalled_one_is() {
         s.activity.on_engine_event(&ev, 0.0, now);
     };
     let mut s = recording_discord();
+    s.engine_heartbeats = false; // an older engine: the controller judges the stall (P8)
     s.run_to(5_000);
     assert!(s.save());
     s.seen(app_ev("Discord", 30, 0x30, false));
@@ -275,10 +276,10 @@ fn a_released_save_that_keeps_moving_is_never_settled_a_stalled_one_is() {
         let now = s.awake();
         assert!(!s.activity.release_may_settle(now), "settled at {} s while the save moved", k * 5);
     }
-    let now = s.awake() + Duration::from_secs(119);
-    assert!(!s.activity.release_may_settle(now), "a 119 s pause is no stall");
-    let now = s.awake() + Duration::from_secs(120);
-    assert!(s.activity.release_may_settle(now), "120 s with no progress: the engine's own stall rule");
+    let now = s.awake() + Duration::from_secs(134);
+    assert!(!s.activity.release_may_settle(now), "a 134 s pause is no stall");
+    let now = s.awake() + Duration::from_secs(135);
+    assert!(s.activity.release_may_settle(now), "135 s with no progress: the engine's 120 s rule + margin");
     s.saved();
     let now = s.awake();
     assert!(s.activity.release_may_settle(now), "answered: settles at once");
