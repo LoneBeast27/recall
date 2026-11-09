@@ -126,4 +126,58 @@ mod tests {
     fn release_waits_past_the_engines_own_save_bound() {
         assert!(RELEASE_GRACE > Duration::from_secs(30 * 60), "the engine's orphan budget, plus its exit");
     }
+    /// The engine's line as the reader hands it on: forwarded to the controller's channel.
+    fn forwarded(shared: &Shared, rx: &std::sync::mpsc::Receiver<serde_json::Value>, line: serde_json::Value) -> Option<serde_json::Value> {
+        shared.forward_event(&line);
+        rx.try_recv().ok()
+    }
+
+    /// R2-detect-r10-p3-2: a draining engine's `save_progress` reaches the controller
+    /// (dropped from FORWARDED_EVENTS, the -p2 P1 comes back: the save is killed at ~128 s).
+    #[test]
+    fn a_draining_engines_save_progress_is_forwarded_to_the_controller() {
+        let shared = Shared::new(None);
+        let (tx, rx) = std::sync::mpsc::channel();
+        *shared.events.lock().unwrap() = Some(tx);
+        let ev = serde_json::json!({"type": "save_progress", "save_writing": {"bytes": 1, "queued": 0, "step": 1}});
+        assert_eq!(forwarded(&shared, &rx, ev.clone()), Some(ev));
+    }
+
+    /// R2-detect-r10-p3-2, the live path end to end: engine line -> `forward_event` ->
+    /// `EngineActivity::on_engine_event` -> `retarget_busy` (as `plan_engine` reads it every
+    /// tick) -> `release_may_settle`. 15 min of progress (past the 120 s window and the 10 min
+    /// cap) never settles; a 120 s stall does.
+    #[test]
+    fn a_forwarded_drain_keeps_the_release_unsettled_until_it_stalls() {
+        use crate::record_activity::EngineActivity;
+        let shared = Shared::new(None);
+        let (tx, rx) = std::sync::mpsc::channel();
+        *shared.events.lock().unwrap() = Some(tx);
+        let t0 = Instant::now();
+        let mut activity = EngineActivity::default();
+        activity.save_sent(t0);
+        let mut now = t0;
+        for step in 1..=180u64 {
+            now = t0 + Duration::from_secs(step * 5);
+            let line = serde_json::json!({"type": "save_progress", "save_writing": {"bytes": step, "queued": 0, "step": step}});
+            let ev = forwarded(&shared, &rx, line).expect("forwarded");
+            activity.on_engine_event(&ev, 0.0, now);
+            let _ = activity.retarget_busy(now); // plan_engine's read: expiry and the cap run here
+            assert!(!activity.release_may_settle(now), "settled at {} s while the save moved", step * 5);
+        }
+        let _ = activity.retarget_busy(now + Duration::from_secs(120));
+        assert!(activity.release_may_settle(now + Duration::from_secs(120)), "120 s with no progress settles");
+    }
+
+    /// R2-detect-r10-p3-2: `plan_engine` settles a release on `release_may_settle`, never on
+    /// `!busy.saving` (which lets go on the 120 s / 10 min timers while the drain still moves).
+    /// The `Controller` needs a live supervisor, hub and display, so this guards its source.
+    #[test]
+    fn plan_engine_settles_on_release_may_settle_not_on_busy_saving() {
+        let body = crate::test_src::method_body(include_str!("record_actions.rs"), "plan_engine");
+        let settle = body.find("self.supervisor.release_settled()").expect("plan_engine settles releases");
+        let guard = body[..settle].rfind("if ").map(|i| &body[i..settle]).unwrap_or("");
+        assert!(guard.contains("self.activity.release_may_settle(now)"), "guarded by: {guard}");
+        assert!(!guard.contains("busy.saving"), "guarded by: {guard}");
+    }
 }
