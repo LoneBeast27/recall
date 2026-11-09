@@ -349,6 +349,13 @@ impl Controller {
             // The config is saved either way; an engine started later reads it.
             self.setting_not_sent(pipe_setting_effects(all_sent), client, "Audio change not applied", "set_source");
         }
+        // "Use your existing <Game> folder?" answers go live: the replay buffer stays. An engine
+        // started later reads them from its environment.
+        if o.game_folder_choices != n.game_folder_choices && self.engine_running() && !engine_settings_changed(o, n) {
+            log!("record: game folder choices -> {} answered", n.game_folder_choices.len());
+            let sent = self.supervisor.send_engine_line(&crate::record_engine::game_folder_choices_line(&n.game_folder_choices));
+            self.setting_not_sent(pipe_setting_effects(sent), client, "Folder choice not applied", "set_game_folder_choices");
+        }
         if old.storage.cap_gb != new.storage.cap_gb || o.output_dir != n.output_dir {
             log!("record: storage cap -> {} GiB", new.storage.cap_gb);
             self.janitor.run_now(&n.output_dir, new.storage.cap_gb, std::time::Instant::now());

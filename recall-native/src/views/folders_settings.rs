@@ -172,6 +172,12 @@ impl Root {
     }
 
     fn add_clip_folders(&mut self, paths: Vec<PathBuf>) {
+        use crate::services::library::folders::rule;
+        let recordings_now = PathBuf::from(self.recordings_folder());
+        if let Some(why) = paths.iter().find_map(|path| rule::link_refusal(path, &recordings_now)) {
+            self.show_toast_for(ToastKind::Bad, "Can't add that folder", Some(why.to_string()), 10);
+            return;
+        }
         if let Some(why) = paths.iter().find_map(|path| crate::services::storage::guard::refuse_clip_folder(path)) {
             self.show_toast_for(ToastKind::Bad, "Can't add that folder", Some(why), 10);
             return;
@@ -289,6 +295,32 @@ impl Root {
             this.prompt_recordings_folder(cx);
         }));
         list = list.child(folder_row("rec", "Recordings", &recordings, count(&recordings), false, cx).child(change));
+        // ShadowPlay-style per-game folders (`recording.game_folders`, off by default).
+        let sorted = self.config_bool("recording", "game_folders");
+        let sort_row = crate::views::pages::setting_row(
+            "Sort clips into game folders",
+            "New clips and recordings go into a folder for each game. Clips you already have stay where they are.",
+        )
+        .pt(px(8.))
+        .child(ui::switch("game-folders", sorted).on_click(cx.listener(move |this, _, _, cx| {
+            this.set_config("recording", "game_folders", json!(!sorted));
+            cx.notify();
+        })));
+        list = list.child(sort_row).child(
+            div().pb(px(8.)).text_size(px(12.)).text_color(c(theme::TERTIARY)).truncate().child(saves_to_label(&recordings, sorted)),
+        );
+        // Undo "Use your existing <Game> folder?" answers: the questions come back on the next
+        // save. Folders Recall already adopted keep their marker.
+        let answered = crate::views::game_folder_prompt::choices(self.config_value("recording", "game_folder_choices"));
+        if sorted && !answered.is_empty() {
+            let reset = crate::views::game_folder_prompt::reset_value(&answered);
+            list = list.child(div().pb(px(8.)).child(
+                ui::button("game-folder-reset", Variant::Ghost).child(crate::views::game_folder_prompt::RESET_LABEL).on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_config("recording", "game_folder_choices", reset.clone());
+                    cx.notify();
+                })),
+            ));
+        }
         let mut mapped = div().flex().flex_col().child(div().font_weight(FontWeight::SEMIBOLD).child("Folder Mapper"));
         for (i, folder) in self.folders.linked().enumerate() {
             let name = Path::new(folder).file_name().map_or_else(|| folder.to_owned(), |n| n.to_string_lossy().into_owned());
@@ -354,6 +386,12 @@ fn folder_row(id: impl Into<gpui::ElementId> + Clone, title: &str, path: &str, c
 /// Why a folder is in "Folders Recall manages", and what removing it does.
 const MANAGED_NOTE: &str = "Your recordings folder was here before. Deleting a clip saved directly in it moves it to the Recycle Bin, and its edits are saved beside it. Remove a folder to treat it like any other imported folder.";
 
+/// The folder new clips save to: `<recordings>\<Game name>` with game folders on, else `<recordings>`.
+pub(crate) fn saves_to_label(recordings: &str, sorted: bool) -> String {
+    let root = recordings.trim_end_matches(['\\', '/']);
+    if sorted { format!(r"Saves to {root}\<Game name>") } else { format!("Saves to {root}") }
+}
+
 /// `path` lies inside `folder` (case-insensitive, no allocation).
 pub(crate) fn inside(path: &str, folder: &str) -> bool {
     let folder = folder.trim_end_matches(['\\', '/']);
@@ -397,6 +435,14 @@ mod tests {
         assert!(inside(r"E:\Clips\a.mp4", r"e:\clips"));
         assert!(inside(r"D:\Medal\Clips\Rocket League\a.mp4", r"D:\Medal\"));
         assert!(!inside(r"E:\Clips 2\a.mp4", r"E:\Clips"));
+    }
+
+    #[test]
+    fn saves_to_label_follows_the_game_folders_switch() {
+        for root in [r"X:\Clips", r"X:\Clips\"] {
+            assert_eq!(saves_to_label(root, true), r"Saves to X:\Clips\<Game name>");
+            assert_eq!(saves_to_label(root, false), r"Saves to X:\Clips");
+        }
     }
 
     #[test]

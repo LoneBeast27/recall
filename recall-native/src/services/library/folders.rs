@@ -229,6 +229,11 @@ pub fn is_inside(path: &str, folder: &str) -> bool {
     path.len() > folder.len() && path.starts_with(&folder) && path.as_bytes()[folder.len()] == b'\\'
 }
 
+// "Sort clips into game folders": which subfolders are Recall's game folders (`folders_games.rs`).
+#[path = "folders_games.rs"]
+mod games;
+pub use games::{game_folders, in_game_folder, is_recall_named, rule, unbound_game_folders, under_link};
+
 pub fn is_clip(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| CLIP_EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
 }

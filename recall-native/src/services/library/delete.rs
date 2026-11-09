@@ -47,7 +47,7 @@ pub(crate) fn partition_for_delete(clips: &[PathBuf], folders: &folders::Folders
     let recordings = crate::backend::library_dir_from(folders);
     // Owned wins over linked: a recordings folder under a linked parent (Videos linked, clips in
     // Videos\Recall) keeps Delete-to-Recycle-Bin; only clips Recall does not own are hidden.
-    clips.iter().cloned().partition(|clip| !imports::is_owned(clip, &recordings, &folders.former_recordings))
+    clips.iter().cloned().partition(|clip| !imports::is_owned(clip, &recordings, &folders.former_recordings, &folders.imported))
 }
 
 /// How many of `clips` a delete only hides (the confirm dialog's count).

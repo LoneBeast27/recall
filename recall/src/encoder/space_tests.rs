@@ -20,6 +20,7 @@ fn temp_dir(tag: &str) -> crate::encoder::test_scratch::Scratch {
 fn job(path: &Path, secs: f64) -> SaveJob {
     SaveJob {
         path: path.to_string_lossy().into_owned(),
+        game: None,
         seconds: 2,
         requested: Instant::now(),
         secs,

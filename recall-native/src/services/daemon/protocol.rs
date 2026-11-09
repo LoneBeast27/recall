@@ -187,6 +187,7 @@ impl State {
                 cause: string_of(event, "cause").unwrap_or_default(),
             },
             "recording_started" => DaemonEvent::RecordingStarted,
+            "game_folder_exists" => DaemonEvent::GameFolderExists { game: string_of(event, "game").unwrap_or_default(), folder: string_of(event, "folder").unwrap_or_default() },
             "clip_moved" => DaemonEvent::ClipMoved { path: path(), kept_path: string_of(event, "kept_path") },
             "clip_move_failed" => DaemonEvent::ClipMoveFailed { path: path(), reason: string_of(event, "reason").unwrap_or_default() },
             "recording_stopped" if bool_of(event, "continued") => DaemonEvent::RecordingPartSaved { path: path() },

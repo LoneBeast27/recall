@@ -143,6 +143,7 @@ impl Root {
             storage_asking: None,
             storage_confirm: None,
             update: crate::update::UpdateUi::new(),
+            game_folder_prompts: crate::views::game_folder_prompt::load_open(),
             stop_confirm: false,
         }
     }

@@ -72,3 +72,43 @@ fn every_fallback_refused_records_into_recalls_own_clips_folder() {
     assert_eq!(cfg.recording.output_dir, clips.to_string_lossy());
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+/// One of Recall's game folders (it holds the marker) linked in folders.json is not a link: the
+/// recordings folder that holds it is not refused (`game_folder_rule::link_refusal`).
+#[test]
+fn a_linked_game_folder_is_ignored() {
+    let dir = std::env::temp_dir().join(format!("recall-hdr-link-gamefolder-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let game = dir.join("Recall").join("VALORANT");
+    std::fs::create_dir_all(&game).unwrap();
+    crate::game_folder_rule::write_marker(&game).unwrap();
+    let path = dir.join("folders.json");
+    let list = serde_json::json!({"recordings": dir.join("Recall"), "imported": [game, r"D:\Moments"]});
+    std::fs::write(&path, list.to_string()).unwrap();
+    let read = read_links_from(&path);
+    let recordings = dir.join("Recall").to_string_lossy().into_owned();
+    let refused = refusal(&recordings, &read);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(read.linked, vec![r"D:\Moments".to_string()]);
+    assert_eq!(refused, None, "the recordings folder holding its own game folder stays usable");
+}
+
+/// (R3) A marked folder outside the recordings folder (a backup copy, `D:\Backup\Apex Legends`)
+/// is linked like any folder: only the recordings folder's own game folders are ignored.
+#[test]
+fn a_marked_backup_elsewhere_stays_linked() {
+    let dir = std::env::temp_dir().join(format!("recall-hdr-link-backup-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let game = dir.join("Recall").join("Apex Legends");
+    std::fs::create_dir_all(dir.join("Recall")).unwrap();
+    crate::game_folder_rule::make(&game).unwrap();
+    let backup = dir.join("Backup").join("Apex Legends");
+    std::fs::create_dir_all(&backup).unwrap();
+    std::fs::copy(game.join(crate::game_folder_rule::MARKER), backup.join(crate::game_folder_rule::MARKER)).unwrap();
+    let path = dir.join("folders.json");
+    let list = serde_json::json!({"recordings": dir.join("Recall"), "imported": [game, backup]});
+    std::fs::write(&path, list.to_string()).unwrap();
+    let read = read_links_from(&path);
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(read.linked, vec![backup.to_string_lossy().into_owned()]);
+}

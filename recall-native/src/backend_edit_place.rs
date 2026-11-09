@@ -39,7 +39,7 @@ pub(super) fn sidecar_in(source: &str, folders: &Folders) -> Result<PathBuf, Str
     let recordings = library_dir_from(folders);
     // Owned wins over linked: a clip Recall recorded keeps its edits beside it, also under a
     // linked parent folder (Videos linked, clips in Videos\Recall).
-    if imports::is_owned(clip, &recordings, &folders.former_recordings) {
+    if imports::is_owned(clip, &recordings, &folders.former_recordings, &folders.imported) {
         return beside(source);
     }
     let sidecar = imports::edit_file(clip).ok_or("APPDATA is not set")?;
@@ -51,7 +51,7 @@ pub(super) fn sidecar_in(source: &str, folders: &Folders) -> Result<PathBuf, Str
 /// belongs to Recall's recordings export folder, including when the source was unlinked.
 pub(crate) fn export_dir_for(clip: &Path, folders: &Folders) -> Option<PathBuf> {
     let recordings = library_dir_from(folders);
-    if imports::is_owned(clip, &recordings, &folders.former_recordings) {
+    if imports::is_owned(clip, &recordings, &folders.former_recordings, &folders.imported) {
         storage::export_dir(clip, &recordings)
     } else {
         storage::export_dir(&recordings.join("clip.mp4"), &recordings)
@@ -64,7 +64,7 @@ pub(crate) fn checked_export_dir(clip: &Path, folders: &Folders) -> Result<PathB
         return Err(format!("{why}. Recall needs its folder list before it can write an export."));
     }
     let directory = export_dir_for(clip, folders).ok_or("The export has no destination folder")?;
-    let owned = imports::is_owned(clip, &library_dir_from(folders), &folders.former_recordings);
+    let owned = imports::is_owned(clip, &library_dir_from(folders), &folders.former_recordings, &folders.imported);
     check_write_dir(&directory, clip, folders, owned)?;
     Ok(directory)
 }
