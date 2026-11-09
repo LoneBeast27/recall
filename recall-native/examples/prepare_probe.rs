@@ -1,4 +1,7 @@
 //! Exercise the native editor's actual read-only media preparation and visual cache.
+#[path = "../src/build_flavor.rs"]
+mod build_flavor;
+pub(crate) use build_flavor::TESTING;
 #[path = "../../recall/src/edit_model.rs"]
 mod edit_model;
 #[allow(dead_code)]
