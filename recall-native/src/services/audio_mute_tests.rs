@@ -200,4 +200,9 @@ fn the_recorders_held_wins_over_the_device_list_guess() {
     assert_eq!(old.audio[0].held, None, "an older recorder: no field");
     let view = include_str!("../views/audio_strip.rs").split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(view.contains("held(source, lists, engine_held)"), "the strip passes the recorder's word");
+    assert!(view.contains("crate::services::audio_mute::engine_held(&e.audio, &source.id)"), "looked up by the trimmed id");
+    // Controller review P3-1: the engine trims the config's id; the page matches it the same way.
+    let audio = vec![crate::services::daemon::EngineAudio { id: "line-in".into(), held: Some(false) }];
+    assert_eq!(engine_held(&audio, " line-in "), Some(false), "a config id with spaces still finds its track");
+    assert_eq!(engine_held(&audio, "other"), None);
 }

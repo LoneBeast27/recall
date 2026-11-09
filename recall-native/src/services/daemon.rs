@@ -22,7 +22,7 @@ mod testing;
 mod session;
 mod status;
 
-pub use status::{unix_ms, Arrival, Drain, EngineStatus, LongRecording};
+pub use status::{unix_ms, Arrival, Drain, EngineAudio, EngineStatus, LongRecording};
 
 // The examples include this file without the views that use these.
 #[allow(unused_imports)]
