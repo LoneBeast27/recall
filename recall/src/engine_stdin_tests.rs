@@ -148,3 +148,22 @@ fn the_status_says_which_tracks_are_held() {
     let tick = include_str!("app_tick.rs").split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(tick.contains("held: o.held"), "the status carries it");
 }
+
+/// Merge-gate F1: the release of the startup hold lands between the capture thread's Alt+M
+/// read and its hold read. The hold is read first, so that packet is still silence.
+#[test]
+fn a_release_between_the_mute_read_and_the_hold_read_stores_no_live_sample() {
+    let _restore = restore();
+    audio::set_mic_muted(false);
+    let mic = TrackRing::input_for_test("mic");
+    mic.hold_startup();
+    mic.push_live_read(&[0.5; 960], || {
+        let stale = MuteNow::read(); // unmuted: the queued Alt+M is not applied yet
+        audio::set_mic_muted(true); // the reader applies it
+        mic.release_startup_hold(); // and the gate opens
+        stale
+    });
+    assert!(mic.snapshot(0.01).iter().all(|s| *s == 0.0), "no live sample of the muted mic");
+    let stream = include_str!("audio/stream.rs");
+    assert!(stream.contains("ring.push_live_read(&leveled, super::MuteNow::read);"), "the capture thread reads the hold first");
+}

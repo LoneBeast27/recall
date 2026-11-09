@@ -126,7 +126,21 @@ impl Live {
 impl TrackRing {
     /// Append a live packet: Alt+M as it is right now (`now`), and silence while the stream is
     /// held (see the module notes).
+    #[cfg(test)]
     pub(crate) fn push_live(&self, data: &[f32], now: MuteNow) {
+        self.push_live_as(data, now, self.live.startup.load(Ordering::SeqCst));
+    }
+
+    /// The capture thread's packet (`stream.rs`): the startup hold is loaded BEFORE Alt+M is
+    /// read (`read`, merge-gate F1). Seen released means the release came after every queued
+    /// line was applied, so the mute read next sees them; read the other way round, a release
+    /// between the two reads stored a stale "unmuted" packet live.
+    pub(crate) fn push_live_read(&self, data: &[f32], read: impl FnOnce() -> MuteNow) {
+        let startup = self.live.startup.load(Ordering::SeqCst); // the safe state: hold first
+        self.push_live_as(data, read(), startup);
+    }
+
+    fn push_live_as(&self, data: &[f32], now: MuteNow, startup: bool) {
         // A line-in never takes a sibling's id (P1-b): read per packet, as the flag changes live.
         let line_in = !self.mic_mute.load(std::sync::atomic::Ordering::Relaxed);
         let held = match self.live.check(now, line_in) {
@@ -151,7 +165,7 @@ impl TrackRing {
                 true
             }
         };
-        self.push_samples(data, now.muted, held || self.live.startup.load(Ordering::SeqCst));
+        self.push_samples(data, now.muted, held || startup);
     }
 
     /// Stdin was not drained before the start (merge-gate P1-1): this input stores silence
