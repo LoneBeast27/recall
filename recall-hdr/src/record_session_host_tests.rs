@@ -18,13 +18,15 @@ struct Fake {
     drains: u32,
     /// Whether a start is taken.
     starts: bool,
+    /// A replay save is being written.
+    saving: bool,
     calls: Vec<String>,
     state: SessionState,
 }
 
 impl Fake {
     fn new(recording: bool) -> Self {
-        Fake { t0: Instant::now(), clock: Duration::ZERO, recording, stopping: false, stops_after: Some(3), drains: 0, starts: true, calls: Vec::new(), state: SessionState::default() }
+        Fake { t0: Instant::now(), clock: Duration::ZERO, recording, stopping: false, stops_after: Some(3), drains: 0, starts: true, saving: false, calls: Vec::new(), state: SessionState::default() }
     }
 
     fn at(&self, d: Duration) -> Instant {
@@ -63,6 +65,13 @@ impl SessionHost for Fake {
     }
     fn session_shutdown(&mut self, grace: Duration) {
         self.calls.push(format!("shutdown {}s", grace.as_secs()));
+    }
+    fn saves_in_progress(&mut self) -> bool {
+        self.saving
+    }
+    fn finish_saves(&mut self) {
+        self.calls.push("finish saves".into());
+        self.saving = false;
     }
     fn tell_engine(&mut self, line: &str) {
         self.calls.push(format!("engine {line}"));
@@ -255,4 +264,34 @@ fn the_stop_wait_ends_when_the_recording_reports_stopping_or_after_3_s() {
     stuck.send_record_stop_now();
     assert!(!wait_recording_stopped(&mut stuck, STOP_WAIT));
     assert!(stuck.clock >= STOP_WAIT && stuck.clock < STOP_WAIT + Duration::from_millis(40), "{:?}", stuck.clock);
+}
+
+/// F-overlay-1 (P1): "Sign out anyway" or a forced update restart (`WM_ENDSESSION` TRUE) while
+/// a replay save is written waits it out (bounded) before the 3 s shutdown, in the handler.
+#[test]
+fn a_real_session_end_during_a_save_finishes_it_before_the_shutdown() {
+    let (lender, pending) = (Lender::new(), Mutex::new(Vec::new()));
+    let mut host = Fake::new(false);
+    host.saving = true;
+    assert_eq!(proc(&lender, &mut host, WM_ENDSESSION, 1, &pending), Some(0));
+    let finish = host.calls.iter().position(|c| c == "finish saves").expect("the quit wait runs");
+    let shut = host.calls.iter().position(|c| c.starts_with("shutdown")).unwrap();
+    assert!(finish < shut, "{:?}", host.calls);
+    let mut idle = Fake::new(false);
+    end(&mut idle, true);
+    assert_eq!(idle.calls, ["shutdown 3s"], "no save: straight to the shutdown");
+}
+
+/// F-overlay-1: the same for a session end handled late, from the pump (`session_tick`).
+#[test]
+fn a_late_session_end_during_a_save_finishes_it_before_the_shutdown() {
+    let mut host = Fake::new(false);
+    host.saving = true;
+    let now = host.at(Duration::ZERO);
+    session_tick(&mut host, vec![SessionMsg::End { ending: true }], now);
+    assert_eq!(host.calls, ["finish saves", "shutdown 3s"]);
+    let mut cancelled = Fake::new(false);
+    cancelled.saving = true;
+    session_tick(&mut cancelled, vec![SessionMsg::End { ending: false }], now);
+    assert!(cancelled.calls.is_empty(), "a cancel waits for nothing: {:?}", cancelled.calls);
 }

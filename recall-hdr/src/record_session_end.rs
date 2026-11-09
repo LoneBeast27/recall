@@ -6,7 +6,9 @@
 //!   [`STOP_WAIT`] for `recording_stopped` before answering. The session window holds a query while a replay save is writing.
 //! - `WM_ENDSESSION` (the session really ends): the controller's clean shutdown runs before
 //!   the handler returns, the engine quit capped at [`SESSION_END_GRACE`] (Windows may end the
-//!   process as soon as the handler returns).
+//!   process as soon as the handler returns). With a replay save still being written, the
+//!   handler first waits it out with the quit's bounded wait (`record_quit_wait`): a save that
+//!   is still not saved when the wait gives up is reported "Recall was closed during the save".
 //!
 //! - `WM_ENDSESSION` with `fEnding` FALSE (another app cancelled the shutdown): a long
 //!   recording the query stopped (or one still starting then) starts again in a new file,
@@ -81,6 +83,9 @@ pub enum EndAction {
     Shutdown(Duration),
     /// The shutdown was cancelled: start the long recording again, with the notice.
     Restart,
+    /// The session really ends while a replay save is written: wait for it with the quit's
+    /// bounded wait (60 s, on while it grows, its hold cap), reporting it lost if it gives up.
+    FinishSaves,
 }
 
 /// The long recording as a session-end query finds it.
@@ -151,11 +156,13 @@ impl SessionEnd {
         }
     }
 
-    /// `WM_ENDSESSION`: shut down cleanly when the session really ends; when it was
-    /// cancelled, restart a recording the query stopped.
-    pub fn on_end(&mut self, ending: bool) -> Vec<EndAction> {
+    /// `WM_ENDSESSION`: shut down cleanly when the session really ends, after a replay save
+    /// being written (`saving`) is finished; when it was cancelled, restart a recording the
+    /// query stopped.
+    pub fn on_end(&mut self, ending: bool, saving: bool) -> Vec<EndAction> {
         let stopped = std::mem::take(&mut self.stopped_at_query);
         match (ending, stopped) {
+            (true, _) if saving => vec![EndAction::FinishSaves, EndAction::Shutdown(SESSION_END_GRACE)],
             (true, _) => vec![EndAction::Shutdown(SESSION_END_GRACE)],
             (false, true) => vec![EndAction::Restart],
             (false, false) => Vec::new(),
@@ -224,8 +231,20 @@ mod tests {
     fn a_shutdown_with_no_recording_does_nothing_until_the_session_ends() {
         let mut end = SessionEnd::default();
         assert_eq!(end.on_query_end(LongState::Idle), vec![]);
-        assert_eq!(end.on_end(false), vec![], "a cancelled shutdown with nothing stopped");
-        assert_eq!(end.on_end(true), vec![EndAction::Shutdown(SESSION_END_GRACE)]);
+        assert_eq!(end.on_end(false, false), vec![], "a cancelled shutdown with nothing stopped");
+        assert_eq!(end.on_end(true, false), vec![EndAction::Shutdown(SESSION_END_GRACE)]);
+    }
+
+    /// F-overlay-1 (P1): a real session end while a replay save is written finishes the save
+    /// (bounded) before the 3 s shutdown; a cancel while saving changes nothing.
+    #[test]
+    fn a_real_session_end_during_a_save_finishes_it_first() {
+        assert_eq!(SessionEnd::default().on_end(true, true), vec![EndAction::FinishSaves, EndAction::Shutdown(SESSION_END_GRACE)]);
+        assert_eq!(SessionEnd::default().on_end(true, false), vec![EndAction::Shutdown(SESSION_END_GRACE)]);
+        assert_eq!(SessionEnd::default().on_end(false, true), vec![], "cancelled: nothing to finish");
+        let mut end = SessionEnd::default();
+        end.on_query_end(LongState::Running);
+        assert_eq!(end.on_end(false, true), vec![EndAction::Restart], "a cancel still restarts the stopped recording");
     }
 
     /// Gate 20b P1: a shutdown another app cancels restarts the recording the query stopped.
@@ -234,11 +253,11 @@ mod tests {
         let mut end = SessionEnd::default();
         assert!(end.on_query_end(LongState::Running).contains(&EndAction::StopRecording));
         assert!(!end.on_query_end(LongState::Stopping).contains(&EndAction::StopRecording), "a second query while our stop runs");
-        assert_eq!(end.on_end(false), vec![EndAction::Restart]);
-        assert_eq!(end.on_end(false), vec![], "one restart per stop");
+        assert_eq!(end.on_end(false, false), vec![EndAction::Restart]);
+        assert_eq!(end.on_end(false, false), vec![], "one restart per stop");
         end.on_late_query_end(LongState::Running);
-        assert_eq!(end.on_end(true), vec![EndAction::Shutdown(SESSION_END_GRACE)], "a real end never restarts");
-        assert_eq!(end.on_end(false), vec![]);
+        assert_eq!(end.on_end(true, false), vec![EndAction::Shutdown(SESSION_END_GRACE)], "a real end never restarts");
+        assert_eq!(end.on_end(false, false), vec![]);
     }
 
     /// Gate 20b v3 P1: a stop the user (or a pause / retarget / sleep) sent before the query
@@ -247,9 +266,9 @@ mod tests {
     fn a_stop_already_in_flight_at_the_query_is_saved_but_never_restarted() {
         let mut end = SessionEnd::default();
         assert_eq!(end.on_query_end(LongState::Stopping), vec![EndAction::Block(BLOCK_REASON), EndAction::WaitStopped(STOP_WAIT), EndAction::Unblock]);
-        assert_eq!(end.on_end(false), vec![]);
+        assert_eq!(end.on_end(false, false), vec![]);
         assert_eq!(end.on_late_query_end(LongState::Stopping), vec![]);
-        assert_eq!(end.on_end(false), vec![]);
+        assert_eq!(end.on_end(false, false), vec![]);
     }
 
     /// Gate 20b v3 P2-1: a query that finds nothing recording clears an earlier arm.
@@ -258,10 +277,10 @@ mod tests {
         let mut end = SessionEnd::default();
         end.on_query_end(LongState::Running);
         end.on_query_end(LongState::Idle);
-        assert_eq!(end.on_end(false), vec![]);
+        assert_eq!(end.on_end(false, false), vec![]);
         end.on_late_query_end(LongState::Running);
         end.on_late_query_end(LongState::Idle);
-        assert_eq!(end.on_end(false), vec![]);
+        assert_eq!(end.on_end(false, false), vec![]);
     }
 
     /// Gate 20b v3 P2-2/P2-5 (the controller host's pieces): a stop in flight is Stopping, only

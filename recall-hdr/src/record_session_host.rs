@@ -38,6 +38,11 @@ pub trait SessionHost {
     fn unblock_shutdown(&mut self);
     /// The controller's clean shutdown, the engine quit capped at `grace`.
     fn session_shutdown(&mut self, grace: Duration);
+    /// A replay save is being written (the quit's wait would hold for it).
+    fn saves_in_progress(&mut self) -> bool;
+    /// Wait for the saves being written, bounded by the quit's wait; a save it gives up on
+    /// is reported "Recall was closed during the save". Returns once the shutdown may go on.
+    fn finish_saves(&mut self);
     /// A line for the engine (not a user action: a failure only loses it).
     fn tell_engine(&mut self, line: &str);
     /// A notice on the island and, through `app_event`, a toast in the app.
@@ -109,7 +114,8 @@ pub fn query_end<H: SessionHost>(host: &mut H) {
 
 /// `WM_ENDSESSION`: `ending` false = the shutdown was cancelled.
 pub fn end<H: SessionHost>(host: &mut H, ending: bool) {
-    let actions = host.session_state().end.on_end(ending);
+    let saving = ending && host.saves_in_progress();
+    let actions = host.session_state().end.on_end(ending, saving);
     run(host, actions);
 }
 
@@ -127,6 +133,10 @@ fn run<H: SessionHost>(host: &mut H, actions: Vec<EndAction>) {
                 host.session_shutdown(grace);
             }
             EndAction::Restart => restart(host),
+            EndAction::FinishSaves => {
+                log!("record: the session is ending during a save -- finishing it before the shutdown");
+                host.finish_saves();
+            }
         }
     }
 }
