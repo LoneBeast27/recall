@@ -105,6 +105,16 @@ pub fn game_folders(root: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// Why `dir` may not be linked as an imported folder: it carries the [`MARKER`], so it is one of
+/// Recall's game folders and its clips are already listed. One rule for the app's "Link a
+/// recording folder" and the controller's link guard (`record_link_guard`).
+pub fn link_refusal(dir: &Path) -> Option<&'static str> {
+    has_marker(dir).then_some(LINK_REFUSAL)
+}
+
+/// The message [`link_refusal`] gives.
+pub const LINK_REFUSAL: &str = "This folder is one of Recall's game folders; it's already in your library.";
+
 /// Write the [`MARKER`] into `dir` (hidden on Windows). An existing marker is kept.
 pub fn write_marker(dir: &Path) -> std::io::Result<()> {
     let mut options = std::fs::OpenOptions::new();
@@ -185,5 +195,18 @@ mod tests {
         for name in ["Rocket League", "VALORANT", "Desktop", "Keepers"] {
             assert!(!is_reserved(name), "{name}");
         }
+    }
+
+    #[test]
+    fn a_marked_folder_is_never_linked() {
+        let dir = std::env::temp_dir().join(format!("recall-rule-link-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let plain = link_refusal(&dir);
+        write_marker(&dir).unwrap();
+        let marked = link_refusal(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(plain, None);
+        assert_eq!(marked, Some(LINK_REFUSAL));
     }
 }

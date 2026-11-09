@@ -92,3 +92,14 @@ fn check_game_dir_remakes_a_missing_one_only() {
     check_game_dir(&out, &out.join("a").join("b")).unwrap();
     assert!(!out.join("a").exists(), "two levels down is not a game folder");
 }
+
+#[test]
+fn check_game_dir_refuses_a_folder_that_is_not_ours_now() {
+    let (out, _gone) = temp("notours");
+    let game = out.join("VALORANT");
+    std::fs::create_dir_all(&game).unwrap();
+    assert!(matches!(check_game_dir(&out, &game), Err(GameDirProblem::NotOurs)));
+    assert!(!rule::has_marker(&game), "never marked by the check");
+    rule::write_marker(&game).unwrap();
+    check_game_dir(&out, &game).unwrap();
+}

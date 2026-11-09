@@ -136,6 +136,7 @@ fn cpu_window(name: &str) -> Option<(Vec<EncodedPacket>, OwnedParams)> {
 fn window_job(path: &str, packets: Vec<EncodedPacket>, params: OwnedParams, secs: f64) -> SaveJob {
     SaveJob {
         path: path.to_string(),
+        game: None,
         seconds: 1,
         requested: Instant::now(),
         secs,

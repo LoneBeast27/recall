@@ -12,6 +12,7 @@ fn temp_dir(tag: &str) -> crate::encoder::test_scratch::Scratch {
 fn job(path: &Path) -> SaveJob {
     SaveJob {
         path: path.to_string_lossy().into_owned(),
+        game: None,
         seconds: 2,
         requested: Instant::now(),
         secs: 1.5,
@@ -487,29 +488,58 @@ fn the_saver_reports_its_steps_before_any_file_exists() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// "Sort clips into game folders": a missing game folder is made again with its marker, a
-/// missing clip folder is not made, and a game folder that is a link fails the save.
+/// "Sort clips into game folders", on the saver thread: a missing game folder is made with its
+/// marker and the file name is kept; no game leaves the path alone; a missing clip folder is not
+/// made; a game folder that is a link is never written through.
 #[test]
-fn a_save_remakes_its_game_folder_and_refuses_a_link() {
+fn the_saver_places_a_clip_in_its_game_folder_and_never_through_a_link() {
     use crate::game_folder_rule as rule;
     let dir = temp_dir("gamefolder");
     let (events, _sink) = Events::capture(true);
-    let game = dir.join("Rocket League");
-    ensure_game_folder(&game.join("Rocket-League__2026-10-22__14-05-09-275__ab.mp4"), &dir, &events).unwrap();
-    assert!(rule::is_game_folder(&game));
+    let out = text(&dir);
+    let file = "Rocket-League__2026-10-22__14-05-09-275__ab.mp4";
+    let flat = text(&dir.join(file));
+    assert_eq!(place_in_game_folder(&flat, Some("Rocket League®"), &out, &events), text(&dir.join("Rocket League").join(file)));
+    assert!(rule::is_game_folder(&dir.join("Rocket League")));
+    assert_eq!(place_in_game_folder(&flat, None, &out, &events), flat, "game folders off");
     let lost = dir.join("gone");
-    ensure_game_folder(&lost.join("Game").join("G__2026-10-22__14-05-09-275__ab.mp4"), &lost, &events).unwrap();
-    assert!(!lost.exists());
-    ensure_game_folder(&dir.join("G__2026-10-22__14-05-09-275__ab.mp4"), &dir, &events).unwrap();
+    let lost_clip = text(&lost.join("G__2026-10-22__14-05-09-275__ab.mp4"));
+    assert_eq!(place_in_game_folder(&lost_clip, Some("Game"), &text(&lost), &events), lost_clip);
+    assert!(!lost.exists(), "a missing clip folder is never made");
     let target = dir.join("elsewhere");
     std::fs::create_dir_all(&target).unwrap();
     std::fs::write(target.join(rule::MARKER), b"").unwrap();
-    let link = dir.join("Apex Legends");
-    if !rule::junction_for_test(&target, &link) {
+    if !rule::junction_for_test(&target, &dir.join("Apex Legends")) {
         eprintln!("skipped: could not make a junction");
         return;
     }
-    let refused = ensure_game_folder(&link.join("Apex-Legends__2026-10-22__14-05-09-275__ab.mp4"), &dir, &events);
-    assert_eq!(refused.unwrap_err(), GAME_FOLDER_LINK);
+    let apex = "Apex-Legends__2026-10-22__14-05-09-275__ab.mp4";
+    let placed = place_in_game_folder(&text(&dir.join(apex)), Some("Apex Legends"), &out, &events);
+    assert_eq!(placed, text(&dir.join("Apex Legends (Recall)").join(apex)));
     assert_eq!(std::fs::read_dir(&target).unwrap().count(), 1, "nothing written through the link");
+}
+
+/// Gate fix: the marked game folder is deleted mid-run and the user makes their own folder with
+/// the same name. The cached folder is not Recall's now: the clip goes into the clip folder under
+/// the same name, no marker is written, and the next save looks again.
+#[test]
+fn a_game_folder_replaced_mid_run_sends_the_clip_to_the_clip_folder() {
+    use crate::game_folder_rule as rule;
+    let dir = temp_dir("replaced");
+    let (events, sink) = Events::capture(false);
+    let out = text(&dir);
+    let file = "VALORANT__2026-11-10__04-00-00-000__ab.mp4";
+    let game = dir.join("VALORANT");
+    assert_eq!(place_in_game_folder(&text(&dir.join(file)), Some("VALORANT"), &out, &events), text(&game.join(file)));
+    std::fs::remove_dir_all(&game).unwrap();
+    std::fs::create_dir_all(&game).unwrap();
+    std::fs::write(game.join("mine.txt"), b"user").unwrap();
+    let again = place_in_game_folder(&text(&dir.join(file)), Some("VALORANT"), &out, &events);
+    assert_eq!(again, text(&dir.join(file)), "saved straight in the clip folder");
+    assert!(!rule::has_marker(&game), "the user's folder gets no marker");
+    assert_eq!(std::fs::read_dir(&game).unwrap().count(), 1, "nothing else touched");
+    let lines = sink.lock().unwrap().clone();
+    assert!(lines.iter().any(|l| l.contains("is not Recall's game folder now")), "{lines:?}");
+    let next = place_in_game_folder(&text(&dir.join(file)), Some("VALORANT"), &out, &events);
+    assert_eq!(next, text(&dir.join("VALORANT (Recall)").join(file)), "the next save resolves again");
 }
