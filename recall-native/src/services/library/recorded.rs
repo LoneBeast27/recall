@@ -20,7 +20,11 @@ fn path() -> Option<PathBuf> {
 fn load() -> BTreeSet<String> {
     let Some(path) = path() else { return BTreeSet::new() };
     let Ok(bytes) = std::fs::read(&path) else { return BTreeSet::new() };
-    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_default();
+    let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+        // Kept for inspection (and for an update's restore) before the next note rewrites it.
+        let _ = crate::services::durable::quarantine(&path, std::time::SystemTime::now(), crate::services::durable::Keep::Copy);
+        serde_json::Value::default()
+    });
     value.get("clips").and_then(|c| c.as_array()).map(|a| a.iter().filter_map(|s| s.as_str()).map(folder_key).collect()).unwrap_or_default()
 }
 
@@ -34,7 +38,8 @@ fn save(set: &BTreeSet<String>) {
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
-    let bytes = serde_json::to_vec_pretty(&serde_json::json!({ "version": 1, "clips": set })).unwrap_or_default();
+    let value = crate::services::json_keep::with_unknown_keys(&path, serde_json::json!({ "version": 1, "clips": set }), &["version", "clips"]);
+    let bytes = serde_json::to_vec_pretty(&value).unwrap_or_default();
     if let Err(error) = crate::services::durable::write_durable(&path, &bytes) {
         eprintln!("recorded clips: save {}: {error}", path.display());
     }

@@ -36,3 +36,18 @@ fn an_unreadable_length_is_remembered_until_the_file_changes() {
     assert!(!fixed.duration_unknown(path, "broken.mkv", 100, 7));
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn a_clips_fields_from_a_newer_build_survive_a_save() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("library.json");
+    let key = clip_key(r"D:\Clips\a.mp4");
+    let text = serde_json::json!({ &key: {"favourite": true, "future_rating": 5}, "only-new.mp4": {"future_tag": "x"} });
+    std::fs::write(&file, text.to_string()).unwrap();
+    let mut store = MetaStore::load_from(file.clone());
+    store.set_title(&key, Some("Ace")).unwrap();
+    store.flush().unwrap();
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
+    assert_eq!(saved[&key], serde_json::json!({"favourite": true, "title": "Ace", "future_rating": 5}));
+    assert_eq!(saved["only-new.mp4"], serde_json::json!({"future_tag": "x"}), "an entry with only unknown fields stays");
+}

@@ -26,6 +26,11 @@ namespace Recall.Setup
         private readonly Action<string> log;
         private readonly int self = Process.GetCurrentProcess().Id;
         public readonly RecorderPipe Pipe;
+        /// An update's quit: the recorder saves what it records first (recall-hdr record_quit_save.rs).
+        public bool SaveFirst;
+
+        public const string QuitLine = "{\"cmd\":\"quit\"}";
+        public const string SaveFirstQuitLine = "{\"cmd\":\"quit\",\"save_first\":true}";
 
         public RecorderQuitter(SetupTargets targets, string installDir, bool closeApp, Action<string> log)
         {
@@ -126,10 +131,23 @@ namespace Recall.Setup
             if (OurControllers().Count > 0)
             {
                 // Either pipe answering counts: this build's session pipe first, then the old bare name.
-                sent = Pipe.Send("{\"cmd\":\"quit\"}");
-                if (!sent && OurControllers().Count > 0) sent = Pipe.Send("{\"cmd\":\"quit\"}", targets.LegacyPipe, 5);
+                var line = SaveFirst ? SaveFirstQuitLine : QuitLine;
+                sent = Pipe.Send(line);
+                if (!sent && OurControllers().Count > 0) sent = Pipe.Send(line, targets.LegacyPipe, 5);
             }
             return sent ? Pipe.SentTo : null;
+        }
+
+        /// The status of this installation's recorder (this account's, on this session's pipe), or null.
+        public RecorderStatus ReadOurStatus()
+        {
+            foreach (var c in OurControllers())
+            {
+                if (RecorderPipe.OwnerSid(c.Pid) != Pipe.MySid) continue;
+                var status = Pipe.ReadStatus(new QuitTarget(c.Pid, c.Created, targets.SessionPipe));
+                if (status != null) return status;
+            }
+            return null;
         }
 
         private QuitTarget PendingQuit()

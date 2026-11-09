@@ -40,6 +40,15 @@ mod cues;
 mod app;
 mod clamp;
 mod config;
+mod config_backup;
+/// A fresh temp folder for a unit test.
+#[cfg(test)]
+pub(crate) fn config_extra_tests_dir(tag: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("recall-hdr-{tag}-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
 mod config_repairs;
 mod config_validate;
 mod config_validate_lists;
@@ -115,6 +124,7 @@ mod record_session_win;
 mod record_setup_owner;
 mod record_private_watch;
 mod record_quit;
+mod record_quit_save;
 mod record_quit_wait;
 mod record_recover;
 mod record_game_ops;

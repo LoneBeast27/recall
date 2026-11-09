@@ -55,6 +55,8 @@ mod tests_io;
 #[cfg(test)]
 mod tests_smart;
 #[cfg(test)]
+mod tests_keep;
+#[cfg(test)]
 mod tests_smoke;
 #[cfg(test)]
 mod tests_owned;
