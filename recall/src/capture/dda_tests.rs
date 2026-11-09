@@ -33,8 +33,11 @@ fn run(fp16: bool, secs: f64) -> Report {
 }
 
 #[test]
-#[ignore = "needs a display; run through the gate with --ignored"]
+#[ignore = "needs a display; run through the gate with --ignored and RECALL_HW_TESTS=1"]
 fn dda_headless_primary_monitor() {
+    if !crate::hw_gate::enabled("dda_headless_primary_monitor") {
+        return;
+    }
     // RECALL_DDA_CHECK_SECS lengthens each run (an idle desktop changes at least once a
     // minute: the taskbar clock).
     let secs = std::env::var("RECALL_DDA_CHECK_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(3.0);

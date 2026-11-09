@@ -1,5 +1,6 @@
-//! Tests that open real audio or MIDI devices, or spawn the real engine (which opens the
-//! microphone), run only with RECALL_HW_TESTS=1 (P2-d): `--include-ignored` alone never
+//! Tests that open real audio or MIDI devices, spawn the real engine (which opens the
+//! microphone), read or change real displays (HDR, SDR white), capture the screen, or run the
+//! render probe run only with RECALL_HW_TESTS=1 (P2-d): `--include-ignored` alone never
 //! touches hardware. Each such test starts with `if !crate::hw_gate::enabled("<name>") { return; }`.
 
 /// The env var that lets hardware tests run.
