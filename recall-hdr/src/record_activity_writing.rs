@@ -136,8 +136,11 @@ impl EngineActivity {
     /// privacy stop must not cut (gate p5-1). No timer and no cap: a save past its 10 min
     /// cap is still written by the engine, and only `saved` / `save_failed`, a `status`
     /// without `save_writing` or the engine's exit end it.
+    /// F2/F7: the one "in flight" every release rule reads (`drop_ring`, the settle; the exit
+    /// reports [`Self::unanswered`]): a save the engine has not answered or reports writing,
+    /// or a screenshot whose PNG it has not reported.
     pub fn save_in_flight(&self) -> bool {
-        self.pending_saves + self.expired_saves > 0 || self.write.last.is_some() || self.pending_screenshots > 0
+        self.unanswered() > 0 || self.pending_screenshots > 0
     }
 
     /// The engine was released at `now` (`Transitions::drop_ring`, design P2); `heartbeats`: its
@@ -170,8 +173,8 @@ impl EngineActivity {
     /// [`SETTLE_NO_HEARTBEAT`] (awake), counted from the last progress or the release,
     /// whichever is later (the engine's own stall clock starts at the release, p5-1).
     pub fn release_may_settle(&mut self, now: Awake) -> bool {
-        if self.pending_saves + self.expired_saves == 0 {
-            return true;
+        if !self.save_in_flight() {
+            return true; // F2/F7: the same predicate as the release
         }
         if self.drain_heartbeats {
             return false;

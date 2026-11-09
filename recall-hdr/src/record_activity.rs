@@ -235,9 +235,21 @@ impl EngineActivity {
     }
 
     /// A new engine instance: nothing of the old one is in flight any more.
+    /// F2: the old engine's saves were settled by its exit (`ENGINE_EXITED`, read first:
+    /// `record_app::tick`), so a save or screenshot still counted here was sent to THIS engine
+    /// between its spawn and its hello: it is kept, never wiped unanswered.
     pub fn engine_restarted(&mut self) {
-        let save_estimate = self.save_estimate;
-        *self = EngineActivity { save_estimate, ..EngineActivity::default() };
+        let kept = EngineActivity {
+            save_estimate: self.save_estimate,
+            pending_saves: self.pending_saves,
+            save_progress: self.save_progress,
+            expired_saves: self.expired_saves,
+            write: self.write.clone(),
+            pending_screenshots: self.pending_screenshots,
+            last_screenshot_sent: self.last_screenshot_sent,
+            ..EngineActivity::default()
+        };
+        *self = kept;
     }
 
     /// Track one engine event; `unix_now` stamps a recording start.
@@ -258,8 +270,10 @@ impl EngineActivity {
             // first, so every save it was sent and never answered is lost: counted or expired
             // (design P13: an expired one was zeroed silently before), and a release is over.
             crate::supervisor::ENGINE_EXITED => {
-                let lost = std::mem::take(&mut self.pending_saves) + std::mem::take(&mut self.expired_saves);
-                (self.write, self.released_at) = (writing::WriteWatch::default(), None);
+                // F2: the same "in flight" as the release and the settle (`unanswered`).
+                let lost = self.unanswered();
+                (self.pending_saves, self.expired_saves, self.save_progress, self.write, self.released_at) = (0, 0, None, writing::WriteWatch::default(), None);
+                (self.pending_screenshots, self.last_screenshot_sent) = (0, None);
                 (lost > 0).then_some(Trigger::SavesLost(lost))
             }
             "screenshot" | "screenshot_failed" => {

@@ -161,13 +161,57 @@ fn a_game_recreating_its_window_during_a_long_recording_is_never_held_forever() 
 }
 
 #[test]
-fn a_fresh_engine_clears_everything() {
+fn a_fresh_engine_clears_everything_of_the_old_one() {
     let t0 = Awake::ZERO;
     let mut a = EngineActivity::default();
     a.save_sent(t0);
     a.on_event(&json!({"type":"recording_started","path":"p"}), 1.0);
+    a.on_event(&json!({"type": crate::supervisor::ENGINE_EXITED}), 0.0); // read before the hello
     a.engine_restarted();
     assert_eq!(a, EngineActivity::default());
+}
+
+/// F2: a save sent to the new engine between its spawn and its hello is not wiped at the
+/// hello: a privacy stop then waits for it, and the engine's exit reports it lost.
+#[test]
+fn a_save_sent_before_the_hello_survives_it_and_holds_the_release() {
+    let t0 = Awake::ZERO;
+    let s = Duration::from_secs;
+    let mut a = EngineActivity::default();
+    a.save_sent(t0);
+    a.engine_restarted(); // the new engine's hello
+    assert_eq!(a.unanswered(), 1, "still counted");
+    a.on_engine_event(&json!({"type":"status","save_writing":{"bytes":1,"queued":0,"step":1}}), 0.0, t0 + s(1));
+    a.released(t0 + s(2), true);
+    assert!(!a.release_may_settle(t0 + s(3)), "settled with the save writing: killed 8 s later");
+    let exited = json!({"type": crate::supervisor::ENGINE_EXITED});
+    assert_eq!(a.on_engine_event(&exited, 0.0, t0 + s(4)), Some(Trigger::SavesLost(1)));
+}
+
+/// F2: a save the engine reports writing that the controller does not count (an older run's
+/// count gone) is in flight for the settle and the exit report too, as for the release.
+#[test]
+fn a_reported_save_without_a_count_holds_the_settle_and_is_reported_at_exit() {
+    let t0 = Awake::ZERO;
+    let mut a = EngineActivity::default();
+    a.on_engine_event(&json!({"type":"save_progress","save_writing":{"bytes":1,"queued":0,"step":1},"stalled_for":0}), 0.0, t0);
+    assert!(a.save_in_flight(), "drop_ring releases for it");
+    a.released(t0, true);
+    assert!(!a.release_may_settle(t0), "and the settle waits for it");
+    let exited = json!({"type": crate::supervisor::ENGINE_EXITED});
+    assert_eq!(a.on_engine_event(&exited, 0.0, t0), Some(Trigger::SavesLost(1)), "reported, not 0");
+}
+
+/// F7: a screenshot whose PNG is still being written holds the settle (the kill would cut it).
+#[test]
+fn a_pending_screenshot_holds_the_settle() {
+    let t0 = Awake::ZERO;
+    let mut a = EngineActivity::default();
+    a.command_sent("screenshot", t0);
+    a.released(t0, false);
+    assert!(!a.release_may_settle(t0 + Duration::from_secs(1)), "settled with the PNG in flight");
+    a.on_event(&json!({"type":"screenshot","path":"G.png"}), 0.0);
+    assert!(a.release_may_settle(t0 + Duration::from_secs(1)));
 }
 
 #[test]

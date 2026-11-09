@@ -256,6 +256,8 @@ impl Sim {
         // released engine drains first (the slot admits one recorder): its saves stay counted
         // until it exits (`Sim::engine_exited`), as on the controller.
         if target != EngineTarget::Off && self.activity.release().is_none() {
+            let exited = serde_json::json!({"type": crate::supervisor::ENGINE_EXITED});
+            let _ = self.activity.on_event(&exited, 0.0); // the old engine's exit is read first
             self.activity.engine_restarted();
         }
         // `apply_engine_target`: any (re)start or stop picks up the current settings.

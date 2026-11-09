@@ -281,8 +281,10 @@ fn a_released_save_that_keeps_moving_is_never_settled_a_stalled_one_is() {
     let now = s.awake() + Duration::from_secs(135);
     assert!(s.activity.release_may_settle(now), "135 s with no progress: the engine's 120 s rule + margin");
     s.saved();
+    let idle = serde_json::json!({"type": "save_progress", "stalled_for": 0}); // the saver is empty now
     let now = s.awake();
-    assert!(s.activity.release_may_settle(now), "answered: settles at once");
+    s.activity.on_engine_event(&idle, 0.0, now);
+    assert!(s.activity.release_may_settle(now), "answered (and the saver empty): settles at once");
 }
 
 /// R2-detect-r10-p2-2: the old-engine refusal reads like the other refusals (under "Save failed").
