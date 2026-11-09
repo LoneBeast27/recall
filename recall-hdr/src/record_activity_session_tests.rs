@@ -39,3 +39,17 @@ fn a_stop_is_in_flight_until_the_recording_reports_stopping() {
     assert!(!a.stop_in_flight());
 }
 
+
+/// R2-detect-r10-p2-1: a released engine's drain sends `save_progress` (no `status` lines
+/// any more); while it moves, the save stays in flight past the 120 s window.
+#[test]
+fn a_released_engines_drain_progress_keeps_its_save_in_flight_past_120_s() {
+    let t0 = Instant::now();
+    let mut a = EngineActivity::default();
+    a.save_sent(t0);
+    for i in 1..=60u64 {
+        let ev = json!({"type": "save_progress", "save_writing": {"bytes": i * 1000, "queued": 0, "step": i}});
+        a.on_engine_event(&ev, 0.0, t0 + Duration::from_secs(i * 5));
+    }
+    assert!(a.retarget_busy(t0 + Duration::from_secs(300)).saving, "still writing at 300 s");
+}

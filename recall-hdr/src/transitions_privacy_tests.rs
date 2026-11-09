@@ -250,3 +250,36 @@ fn an_older_engine_takes_no_save_while_its_privacy_stop_is_held() {
     s.run_to(5_600);
     assert!(!s.recording_of(30), "the hold ends with the first save");
 }
+
+/// R2-detect-r10-p2-1 end to end: Esc during a long save releases the engine; while its
+/// drain reports progress (`save_progress`) for well past 120 s, and past the 10 min cap,
+/// the release never settles (the engine is not cut to 8 s). A stall of 120 s settles it, and
+/// so does the save's answer.
+#[test]
+fn a_released_save_that_keeps_moving_is_never_settled_a_stalled_one_is() {
+    use std::time::Duration;
+    let progress = |s: &mut Sim, step: u64| {
+        let ev = serde_json::json!({"type": "save_progress", "save_writing": {"bytes": step, "queued": 0, "step": step}});
+        let now = s.now;
+        s.activity.on_engine_event(&ev, 0.0, now);
+    };
+    let mut s = recording_discord();
+    s.run_to(5_000);
+    assert!(s.save());
+    s.seen(app_ev("Discord", 30, 0x30, false));
+    s.run_to(5_050);
+    assert_eq!(s.released.len(), 1, "released for the save");
+    for k in 1..=180u64 {
+        s.now += Duration::from_secs(5); // 15 min of a save still writing
+        progress(&mut s, k);
+        let now = s.now;
+        assert!(!s.activity.release_may_settle(now), "settled at {} s while the save moved", k * 5);
+    }
+    let now = s.now + Duration::from_secs(119);
+    assert!(!s.activity.release_may_settle(now), "a 119 s pause is no stall");
+    let now = s.now + Duration::from_secs(120);
+    assert!(s.activity.release_may_settle(now), "120 s with no progress: the engine's own stall rule");
+    s.saved();
+    let now = s.now;
+    assert!(s.activity.release_may_settle(now), "answered: settles at once");
+}
