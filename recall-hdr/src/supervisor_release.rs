@@ -69,11 +69,13 @@ impl Shared {
     }
 
     /// `stop_capture` takes the quit slot; from here on every line is refused with the last
-    /// retarget's reason (read under the `desired` lock, as `send_retarget_quit`).
+    /// retarget's reason (read under the `desired` lock, as `send_retarget_quit`). A shutdown
+    /// already under way (its stop flag, read under the stdin lock as in `send_quit`) turns a
+    /// game switch's reason into "isn't responding" (`at_shutdown`).
     pub(super) fn send_release_quit(&self) -> bool {
         let g = self.desired.lock().unwrap_or_else(|p| p.into_inner());
         let mut stdin = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
-        stdin.quitting = Some(g.2);
+        stdin.quitting = Some(if self.stop_requested() { super::refusal::at_shutdown(g.2) } else { g.2 });
         stdin.queue.as_ref().is_some_and(|queue| queue.send_quit(STOP_CAPTURE_LINE))
     }
 }
@@ -120,6 +122,24 @@ mod tests {
         assert_eq!(release_deadline(far, now, false, Some(Duration::from_secs(1))), now + Duration::from_secs(1), "app quit");
         sup.shared.set_desired_how(None, Sent::Switching, true);
         assert!(!sup.shared.release_is_settled(sup.shared.release_gen.load(Ordering::SeqCst)), "a newer release waits for its own saves");
+    }
+
+    /// A shutdown landing between a game switch's release and its `stop_capture` (the stop
+    /// flag set, no quit window open yet) is no game switch: lines say "isn't responding".
+    /// Run on a thread with a 5 s bound, so a lock taken twice fails the test, never hangs it.
+    #[test]
+    fn a_shutdown_before_the_release_quit_says_isnt_responding() {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let shared = Shared::new(None);
+            let _rec = Recorded::attach(&shared);
+            shared.set_desired_how(Some(EngineSpec::default()), Sent::Switching, true);
+            shared.request_stop(Duration::ZERO); // no quit window yet: nothing to turn
+            assert!(shared.send_release_quit());
+            let _ = done.send(shared.send_line(r#"{"cmd":"save_clip"}"#));
+        });
+        let sent = finished.recv_timeout(Duration::from_secs(5)).expect("the release quit did not finish in 5 s");
+        assert_eq!(sent, Sent::NotResponding, "shutdown is no game switch");
     }
 
     #[test]
