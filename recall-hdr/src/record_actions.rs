@@ -13,11 +13,10 @@ use crate::log;
 use crate::record_activity::{LongRec, PendingPause, Trigger, PAUSE_AFTER_SAVE, PAUSE_AFTER_SAVE_DETAIL, PAUSE_STOP_WAIT, SAVE_HOLD_DETAIL, SAVE_HOLD_TITLE};
 use crate::record_app::Controller;
 use crate::record_config::OverlayCfg;
-use crate::record_engine::{capture_refusal, EngineTarget, Step};
+use crate::record_engine::{capture_refusal, EngineTarget};
 use crate::record_hotkeys::{bindings, hotkey_command, HotkeyAction};
 use crate::record_notice::shortcut_notice_json;
 use crate::record_status::error_event;
-use crate::record_transition::Transitions;
 
 /// Minimum gap between two runs of the same action (key repeat / bounce).
 fn debounce_of(action: HotkeyAction) -> (&'static str, Duration) {
@@ -370,48 +369,10 @@ impl Controller {
         crate::record_restart::request_settings_restart(self);
     }
 
-    /// Planner -> engine, every pump tick. A retarget that falls due while
-    /// the long recording runs stops it first (one `record_stop`; the
-    /// retarget applies once it reports stopping, or after
-    /// [`PAUSE_STOP_WAIT`]); one due while a save is in flight waits for it.
-    /// Meanwhile the status says `pending_restart`.
+    /// Planner -> engine, every pump tick: the shared rule `record_plan::PlanHost::plan_tick`
+    /// (the Sim runs the same code); this controller supplies the reads and effects below.
     pub(crate) fn plan_engine(&mut self, now: Instant) {
-        let buffered = self.supervisor.engine_view().buffer_secs;
-        self.planner.set_drain_len(crate::record_drain::drain_len(buffered, self.cfg.recording.buffer_secs));
-        let wanted = self.wanted();
-        let awake = self.awake();
-        let busy = self.activity.retarget_busy(awake);
-        if self.activity.release_may_settle(awake) {
-            self.supervisor.release_settled(); // R2-detect-r10-1: a released engine's saves landed
-        }
-        let drained = self.running_drain(now);
-        match self.planner.step(&wanted, now, busy) {
-            Step::Apply(target) => {
-                self.retarget_held = false;
-                self.note_drain_cut(drained.as_ref(), &target);
-                self.apply_engine_target(&target);
-            }
-            Step::Held => {
-                if !self.retarget_held {
-                    log!("record: engine retarget deferred until the save ends");
-                }
-                self.retarget_held = true;
-            }
-            Step::StopLongRec { game_closed } => {
-                let game_closed = self.closed_game(game_closed);
-                if self.activity.auto_stop(awake, game_closed) {
-                    let why = if game_closed { "the game closed" } else { "a new game is wanted" };
-                    log!("record: {why} -- stopping the long recording before the retarget (up to {} s)", PAUSE_STOP_WAIT.as_secs());
-                    // Not a user action: logged; the auto-stop deadline bounds the wait.
-                    if !crate::record_dispatch::automatic_effects(self.send_record_stop()).is_empty() {
-                        log!("record: record_stop not sent ({}); the retarget goes ahead after {} s", crate::record_dispatch::NOT_RESPONDING, PAUSE_STOP_WAIT.as_secs());
-                    }
-                }
-                self.retarget_held = true;
-            }
-            Step::Keep => self.retarget_held = false,
-        }
-        self.drain_block_notice();
+        crate::record_plan::PlanHost::plan_tick(self, now);
     }
 
     /// Pending pause + deferred restart + storage schedule, every pump tick.
@@ -467,5 +428,31 @@ impl crate::record_dispatch::CommandPort for ControllerCommand<'_> {
     }
     fn refused(&mut self, reason: &'static str) {
         self.ctl.command_not_sent(self.cmd, self.client, reason);
+    }
+}
+
+/// The controller as the planner's host (`record_plan`): the supervisor's view and settle, the
+/// engine target, the long recording's stop, the log.
+impl crate::record_plan::PlanHost for Controller {
+    fn plan_buffered(&self) -> (Option<f32>, u32) {
+        (self.supervisor.engine_view().buffer_secs, self.cfg.recording.buffer_secs)
+    }
+    fn plan_settle_release(&mut self) {
+        self.supervisor.release_settled(); // R2-detect-r10-1: a released engine's saves landed
+    }
+    fn plan_apply(&mut self, target: &EngineTarget) {
+        self.apply_engine_target(target);
+    }
+    fn retarget_held(&mut self) -> &mut bool {
+        &mut self.retarget_held
+    }
+    fn plan_record_stop(&mut self) {
+        // Not a user action: logged; the auto-stop deadline bounds the wait.
+        if !crate::record_dispatch::automatic_effects(self.send_record_stop()).is_empty() {
+            log!("record: record_stop not sent ({}); the retarget goes ahead after {} s", crate::record_dispatch::NOT_RESPONDING, PAUSE_STOP_WAIT.as_secs());
+        }
+    }
+    fn plan_log(&mut self, line: &str) {
+        log!("{line}");
     }
 }

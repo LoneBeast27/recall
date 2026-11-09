@@ -158,16 +158,4 @@ mod tests {
         let _ = activity.retarget_busy(now + Duration::from_secs(135));
         assert!(activity.release_may_settle(now + Duration::from_secs(135)), "135 s with no progress settles (no heartbeats, P8)");
     }
-
-    /// R2-detect-r10-p3-2: `plan_engine` settles a release on `release_may_settle`, never on
-    /// `!busy.saving` (which lets go on the 120 s / 10 min timers while the drain still moves).
-    /// The `Controller` needs a live supervisor, hub and display, so this guards its source.
-    #[test]
-    fn plan_engine_settles_on_release_may_settle_not_on_busy_saving() {
-        let body = crate::test_src::method_body(include_str!("record_actions.rs"), "plan_engine");
-        let settle = body.find("self.supervisor.release_settled()").expect("plan_engine settles releases");
-        let guard = body[..settle].rfind("if ").map(|i| &body[i..settle]).unwrap_or("");
-        assert!(guard.contains("self.activity.release_may_settle(awake)"), "guarded by: {guard}");
-        assert!(!guard.contains("busy.saving"), "guarded by: {guard}");
-    }
 }

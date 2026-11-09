@@ -103,6 +103,7 @@ mod record_session;
 mod record_session_save;
 mod record_status;
 mod record_notice;
+mod record_plan;
 mod record_power;
 mod record_power_host;
 mod record_power_win;
