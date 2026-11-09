@@ -68,6 +68,7 @@ impl super::Shared {
             return false; // a retarget or stop since: its own spec reads the list
         }
         g.0 += 1;
+        g.2 = crate::record_dispatch::Sent::Restarting; // a line meanwhile: "Recorder is restarting"
         crate::log!("supervisor: audio sources changed during the spawn; restarting the engine on them");
         true
     }
