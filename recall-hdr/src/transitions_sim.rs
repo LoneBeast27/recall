@@ -308,7 +308,7 @@ impl Sim {
 
     /// `save_clip`: `true` when the engine was asked.
     pub fn save(&mut self) -> bool {
-        if capture_refusal(self.paused, self.engine_running(), &self.wanted()).is_some() {
+        if capture_refusal(self.paused, self.engine_running(), &self.wanted()).is_some() || self.planner.privacy_refusal().is_some() {
             return false;
         }
         self.activity.save_sent(self.now);
