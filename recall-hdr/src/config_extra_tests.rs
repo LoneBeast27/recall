@@ -115,3 +115,20 @@ fn without_a_backup_a_bad_value_is_reset_and_said() {
     assert!(crate::config_repairs::take(&path).iter().any(|n| n.contains("reset to the default")));
     let _ = std::fs::remove_dir_all(&root);
 }
+
+#[test]
+fn an_unknown_key_survives_a_save_after_a_bad_value_was_salvaged() {
+    let root = dir("salvaged");
+    let _home = crate::user_dirs::inject(&root);
+    let path = root.join("config.toml");
+    let text = v010_text().replace("cap_gb = 200", "cap_gb = \"lots\"").replacen("[recording]\n", "[recording]\nfuture_codec_tuning = \"x\"\n", 1)
+        + "\n[future_section]\nflag = true\n";
+    std::fs::write(&path, &text).unwrap();
+    let cfg = load_from(&path); // salvaged: the file on disk still holds the bad value
+    cfg.save_to(&path).unwrap();
+    let saved: toml::Table = std::fs::read_to_string(&path).unwrap().parse().unwrap();
+    assert_eq!(saved["recording"]["future_codec_tuning"].as_str(), Some("x"), "one level in");
+    assert_eq!(saved["future_section"]["flag"].as_bool(), Some(true), "a new section");
+    assert!(saved["storage"]["cap_gb"].as_integer().is_some(), "the bad value is not carried");
+    let _ = std::fs::remove_dir_all(&root);
+}

@@ -17,7 +17,9 @@ type At = Vec<String>;
 
 /// Every key of `disk` (the file being replaced) the parse ignores, with its value.
 pub(super) fn unknown(disk: &Table, retired: &[&str]) -> Vec<(At, Value)> {
-    let Ok(base) = Value::Table(disk.clone()).try_into::<Config>() else { return Vec::new() };
+    // A file with a value that does not read (salvaged at load, `config_io`) cannot be diffed by
+    // parse: its unknown keys are found by the schema instead, the top level and one level in.
+    let Ok(base) = Value::Table(disk.clone()).try_into::<Config>() else { return by_schema(disk, retired) };
     let mut out = Vec::new();
     walk(disk, &mut Vec::new(), &mut |at, value| {
         if at.len() == 1 && retired.contains(&at[0].as_str()) {
@@ -31,6 +33,33 @@ pub(super) fn unknown(disk: &Table, retired: &[&str]) -> Vec<(At, Value)> {
         }
         same // an unknown key is kept whole: its insides are not looked at
     });
+    out
+}
+
+/// Schema keys absent from the serialized form when unset (never unknown).
+const OPTIONAL: &[(&str, &str)] = &[("display", "target_device_path")];
+
+/// Keys of `disk` the default config's schema does not have: top-level ones, and those one level
+/// into a known table.
+fn by_schema(disk: &Table, retired: &[&str]) -> Vec<(At, Value)> {
+    let Ok(Value::Table(known)) = Value::try_from(Config::default()) else { return Vec::new() };
+    let mut out = Vec::new();
+    for (key, value) in disk {
+        if retired.contains(&key.as_str()) {
+            continue;
+        }
+        match (value, known.get(key)) {
+            (_, None) => out.push((vec![key.clone()], value.clone())),
+            (Value::Table(inner), Some(Value::Table(schema))) => {
+                for (leaf, v) in inner {
+                    if !schema.contains_key(leaf) && !OPTIONAL.contains(&(key.as_str(), leaf.as_str())) {
+                        out.push((vec![key.clone(), leaf.clone()], v.clone()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
     out
 }
 
