@@ -133,7 +133,7 @@ impl Controller {
             HotkeyAction::Bookmark | HotkeyAction::Screenshot | HotkeyAction::Record => {
                 // Queued first: the tick only for a command the engine got (as a save).
                 if let Some((cmd, hotkey)) = hotkey_command(action) {
-                    self.engine_command_as(cmd, None, hotkey);
+                    let _ = self.engine_command_as(cmd, None, hotkey);
                 }
             }
             HotkeyAction::Stats => {
@@ -162,23 +162,30 @@ impl Controller {
         self.engine_command_as(cmd, client, false);
     }
 
+    /// As [`engine_command`](Self::engine_command), from the controller itself: true when
+    /// the engine got the line (not refused, queued).
+    pub(crate) fn engine_command_queued(&mut self, cmd: &'static str) -> bool {
+        self.engine_command_as(cmd, None, false)
+    }
+
     /// As [`engine_command`](Self::engine_command); `hotkey`: a shortcut, which ticks once
-    /// the engine has the command, never on a refusal.
-    fn engine_command_as(&mut self, cmd: &'static str, client: Option<u64>, hotkey: bool) {
+    /// the engine has the command, never on a refusal. True when the line was queued.
+    fn engine_command_as(&mut self, cmd: &'static str, client: Option<u64>, hotkey: bool) -> bool {
         let draining = self.planner.drain().is_some();
         let refused = capture_refusal(self.paused, self.engine_running(), &self.wanted())
             .or_else(|| self.activity.record_refusal(cmd, draining));
         if let Some(reason) = refused {
             if cmd == "bookmark" && client.is_none() {
-                return self.refuse_bookmark(reason); // the hotkey
+                self.refuse_bookmark(reason); // the hotkey
+            } else if cmd == "record_stop" || cmd == "bookmark" {
+                self.reply_error(client, &format!("{cmd}: {reason}"));
+            } else {
+                self.refuse_capture(cmd, reason);
             }
-            if cmd == "record_stop" || cmd == "bookmark" {
-                return self.reply_error(client, &format!("{cmd}: {reason}"));
-            }
-            return self.refuse_capture(cmd, reason);
+            return false;
         }
         // Queued first: only a command the engine will see is marked in flight (and ticked).
-        crate::record_dispatch::command(&mut ControllerCommand { ctl: self, cmd, client }, cmd, hotkey);
+        crate::record_dispatch::command(&mut ControllerCommand { ctl: self, cmd, client }, cmd, hotkey).queued()
     }
 
     /// `record_stop` from the controller itself (pause, retarget, sleep, session end): queued

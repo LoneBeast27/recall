@@ -272,7 +272,7 @@ impl Sim {
         restart_engine(self, reason)
     }
 
-    /// A recovery restart: `Controller::restart_for_recovery` (the real helper).
+    /// A recovery restart: `record_restart::restart_for_recovery` (the real helper).
     pub fn recover(&mut self) -> Restarted {
         restart_for_recovery(self)
     }
