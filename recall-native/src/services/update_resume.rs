@@ -81,8 +81,10 @@ impl Resume {
         match self.outcome.as_deref() {
             Some("updated") => out.push((true, format!("Recall is updated{}", super::current().map(|v| format!(" to {v}")).unwrap_or_default()))),
             Some("failed") => {
-                let on = self.still_on.as_deref().or(self.from_version.as_deref()).unwrap_or("the previous version");
-                out.push((false, format!("Update failed, still on v{}", on.trim_start_matches('v'))));
+                match self.still_on.as_deref().or(self.from_version.as_deref()) {
+                    Some(on) => out.push((false, format!("Update failed, still on v{}", on.trim_start_matches('v')))),
+                    None => out.push((false, "Update failed; Recall was not changed".to_owned())),
+                }
             }
             _ => {}
         }

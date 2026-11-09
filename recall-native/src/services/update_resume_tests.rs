@@ -34,6 +34,8 @@ fn setups_outcome_becomes_the_reopened_apps_notices() {
     r.outcome = Some("failed".into());
     r.still_on = Some("0.1.0".into());
     assert_eq!(r.notices(), vec![(false, "Update failed, still on v0.1.0".to_owned())]);
+    let unknown = Resume { outcome: Some("failed".into()), ..Resume::default() };
+    assert_eq!(unknown.notices(), vec![(false, "Update failed; Recall was not changed".to_owned())], "a resume file Setup could not read");
     r.outcome = Some("updated".into());
     r.recovered = Some(r"D:\Clips\G__rec.mp4".into());
     let notes = r.notices();
