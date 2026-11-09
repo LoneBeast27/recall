@@ -245,7 +245,7 @@ fn a_helper_that_finishes_returns_its_output() {
 
 #[test]
 fn an_export_beside_the_clip_is_found_by_its_name() {
-    let dir = std::env::temp_dir().join(format!("recall-has-export-{}", std::process::id()));
+    let dir = crate::test_temp::TempDir::new(format!("recall-has-export-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("exports")).unwrap();
     let clip = dir.join("Clip.mp4");
     assert!(!super::has_export(&clip, super::export_dir(&clip, &dir)));
@@ -271,7 +271,7 @@ fn with_a_raw_folder_exports_go_to_edited_beside_it() {
 
 #[test]
 fn an_export_in_edited_protects_the_raw_clip() {
-    let root = std::env::temp_dir().join(format!("recall-edited-{}", std::process::id()));
+    let root = crate::test_temp::TempDir::new(format!("recall-edited-{}", std::process::id()));
     let (raw, edited) = (root.join("Raw"), root.join("Edited"));
     std::fs::create_dir_all(&raw).unwrap();
     std::fs::create_dir_all(&edited).unwrap();

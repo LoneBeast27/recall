@@ -2,33 +2,11 @@
 
 use super::*;
 
-/// `%TEMP%\recall-staging-<tag>-<uuid>`, removed when the guard drops, also when the test
-/// panics (a failing run left 3-6 MB folders behind).
-struct Scratch(PathBuf);
+use crate::encoder::test_scratch::Scratch;
 
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = PathBuf;
-    fn deref(&self) -> &PathBuf {
-        &self.0
-    }
-}
-
-impl AsRef<Path> for Scratch {
-    fn as_ref(&self) -> &Path {
-        &self.0
-    }
-}
-
+/// `%TEMP%\recall-staging-<tag>-<uuid>`, removed when the guard drops, also on a panic.
 fn temp_dir(tag: &str) -> Scratch {
-    let dir = std::env::temp_dir().join(format!("recall-staging-{tag}-{}", uuid::Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
-    Scratch(dir)
+    crate::encoder::test_scratch::scratch("recall-staging", tag)
 }
 
 #[test]

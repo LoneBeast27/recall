@@ -6,10 +6,9 @@ use super::*;
 use std::sync::atomic::AtomicUsize;
 use std::sync::Mutex;
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("recall-retry-{tag}-{}", uuid::Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// `%TEMP%\recall-retry-<tag>-<uuid>`, removed when the guard drops, also on a panic.
+fn temp_dir(tag: &str) -> crate::encoder::test_scratch::Scratch {
+    crate::encoder::test_scratch::scratch("recall-retry", tag)
 }
 
 fn cfg(flush: FlushFn, retry_after: Duration) -> Config {
