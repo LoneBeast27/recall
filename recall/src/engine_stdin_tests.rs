@@ -195,3 +195,17 @@ fn a_set_source_read_while_staging_closes_is_not_overwritten_by_an_older_one() {
     newer.unwrap().join().unwrap();
     assert!(ring.mic_mute_flag(), "the newer line wins: Alt+M mutes the line-in");
 }
+
+/// Merge-gate F3: two set_source lines for one line-in in one read (A: Alt+M does not mute
+/// it, B: it does). The reader applies both in order; `serve` must not apply A again after B.
+#[test]
+fn serve_never_reapplies_an_older_flag_or_id() {
+    let _restore = restore();
+    let lines = "{\"cmd\":\"set_source\",\"id\":\"f3-line\",\"mic_mute\":false,\"device_id\":\"{A}\"}\n{\"cmd\":\"set_source\",\"id\":\"f3-line\",\"mic_mute\":true,\"gain_db\":3}\n";
+    let mut forwarded = Vec::new();
+    read_early(std::io::Cursor::new(lines), |cmd| forwarded.push(cmd));
+    for cmd in &forwarded {
+        assert!(matches!(cmd, Command::SetSource { mic_mute: None, device_id: None, .. }), "serve gets no flag or id: {}", matches!(cmd, Command::SetSource { .. }));
+    }
+    assert!(matches!(forwarded[1], Command::SetSource { gain_db: Some(g), .. } if g == 3.0), "the gain still goes to serve");
+}

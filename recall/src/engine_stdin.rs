@@ -44,10 +44,12 @@ fn apply_mute(cmd: Command) -> Command {
             cmd
         }
         // A line-in's flag or a re-picked id read before the tracks start is in force at their
-        // first packet (review R2-audio-r9-2); `serve` applies it to the live track again.
-        Command::SetSource { ref id, mic_mute, ref device_id, .. } => {
-            audio::sources::stage_early(id, mic_mute, device_id.as_deref());
-            cmd
+        // first packet (review R2-audio-r9-2), and one read later goes to its live track now.
+        // Applied here once, in order: `serve` gets only gain and name, so it can never put an
+        // older flag or id back after a newer one (merge-gate F3).
+        Command::SetSource { id, gain_db, name, mic_mute, device_id } => {
+            audio::sources::stage_early(&id, mic_mute, device_id.as_deref());
+            Command::SetSource { id, gain_db, name, mic_mute: None, device_id: None } // the safe state
         }
         cmd => cmd,
     }
