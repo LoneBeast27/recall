@@ -84,7 +84,7 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
                     // only a dead child closes stdout and unblocks the reader.
                     finish_shutdown(&shared, child, grace, refusal);
                 }
-                shared.set_child_stdin(None);
+                shared.set_child_stdin(None, None);
                 let _ = reader.join();
                 shared.clear_cache();
                 shared.forward_exit();
@@ -191,9 +191,12 @@ fn set_slot(shared: &Arc<Shared>, held: SlotHeld) {
 /// Spawn the engine. Hands the child's stdin to `shared` and spawns the stdout
 /// reader thread. Returns the child and the reader's join handle.
 fn spawn_engine(path: &Path, shared: &Arc<Shared>, spec: &EngineSpec) -> std::io::Result<(Child, JoinHandle<()>)> {
-    let mut child = engine_command(path, spec, shared.spawn_mute.get()).spawn()?;
+    // The mute baked into this spawn's env: an Alt+M from here to the stdin attach is
+    // re-sent as the engine's first line (`Shared::attach_spawned`).
+    let baked = shared.spawn_mute.get();
+    let mut child = engine_command(path, spec, baked).spawn()?;
     shared.spawn_count.fetch_add(1, Ordering::SeqCst);
-    shared.set_child_stdin(child.stdin.take());
+    shared.set_child_stdin(child.stdin.take(), baked);
 
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
