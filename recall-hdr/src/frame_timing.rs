@@ -12,7 +12,7 @@
 //! The controller also stops the session by name whenever its overlay is
 //! killed or dies (a killed process cannot stop its own session).
 
-use windows::core::{w, BOOL, PCWSTR};
+use windows::core::{BOOL, PCWSTR};
 use windows::Win32::Security::{
     CheckTokenMembership, CreateWellKnownSid, WinBuiltinAdministratorsSid, WinBuiltinPerfLoggingUsersSid, PSID,
     SECURITY_MAX_SID_SIZE, WELL_KNOWN_SID_TYPE,
@@ -21,8 +21,8 @@ use windows::Win32::System::Diagnostics::Etw::{
     ControlTraceW, CONTROLTRACE_HANDLE, EVENT_TRACE_CONTROL_STOP, EVENT_TRACE_PROPERTIES, WNODE_FLAG_TRACED_GUID,
 };
 
-/// Must match `recall-overlay/src/stats/etw_session.rs`.
-pub const SESSION_NAME: PCWSTR = w!("RecallFrameTiming");
+/// Must match `recall-overlay/src/stats/etw_session.rs` (`session_name`).
+const SESSION_BASE: &str = "RecallFrameTiming";
 
 /// The status `fps_source` field.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,13 +80,28 @@ struct Properties {
     name: [u16; 64],
 }
 
+/// The overlay's session name: `RecallFrameTiming`, or
+/// `RecallFrameTiming.<tag>` under `RECALL_INSTANCE_TAG` (the overlay inherits
+/// this process's environment), so a tagged controller never stops the
+/// installed overlay's session. Same rule as the overlay's `session_name`.
+fn session_name(tag: &str) -> String {
+    let tag: String = tag.chars().take(32).collect();
+    if tag.is_empty() {
+        SESSION_BASE.to_owned()
+    } else {
+        format!("{SESSION_BASE}.{tag}")
+    }
+}
+
 /// Stop the overlay's frame-timing session; harmless when none runs.
 pub fn stop_session() {
+    let name: Vec<u16> = session_name(&crate::single_instance::tag()).encode_utf16().chain([0]).collect();
     let mut p = Box::new(Properties { props: EVENT_TRACE_PROPERTIES::default(), name: [0; 64] });
     p.props.Wnode.BufferSize = std::mem::size_of::<Properties>() as u32;
     p.props.Wnode.Flags = WNODE_FLAG_TRACED_GUID;
     p.props.LoggerNameOffset = std::mem::offset_of!(Properties, name) as u32;
-    let status = unsafe { ControlTraceW(CONTROLTRACE_HANDLE { Value: 0 }, SESSION_NAME, &mut p.props, EVENT_TRACE_CONTROL_STOP) };
+    let none = CONTROLTRACE_HANDLE { Value: 0 };
+    let status = unsafe { ControlTraceW(none, PCWSTR(name.as_ptr()), &mut p.props, EVENT_TRACE_CONTROL_STOP) };
     if status.0 == 0 {
         crate::log!("frame timing: stopped the overlay's ETW session");
     }
@@ -109,6 +124,7 @@ mod tests {
         // Whatever this machine answers, asking must not fail. (No stop here:
         // it would end a live overlay's session.)
         let _ = can_trace();
-        assert_eq!(unsafe { SESSION_NAME.to_string() }.unwrap(), "RecallFrameTiming");
+        assert_eq!(session_name(""), "RecallFrameTiming");
+        assert_eq!(session_name("gate1"), "RecallFrameTiming.gate1", "a tagged controller stops only its own overlay's");
     }
 }
