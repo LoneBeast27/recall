@@ -75,9 +75,19 @@ pub fn mutex_name(role: &str) -> String {
     name_with_tag(role, std::env::var(TAG_ENV).ok().as_deref())
 }
 
-fn name_with_tag(role: &str, tag: Option<&str>) -> String {
+/// [`TAG_ENV`] cleaned as the guards use it ("" when unset); other per-instance
+/// names (the overlay's ETW session) follow it too.
+pub fn tag() -> String {
+    clean_tag(std::env::var(TAG_ENV).ok().as_deref())
+}
+
+fn clean_tag(tag: Option<&str>) -> String {
     // A backslash would leave the Local namespace; keep only plain characters.
-    let tag: String = tag.unwrap_or("").chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect();
+    tag.unwrap_or("").chars().filter(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.')).collect()
+}
+
+fn name_with_tag(role: &str, tag: Option<&str>) -> String {
+    let tag = clean_tag(tag);
     if tag.is_empty() {
         format!("Local\\{role}")
     } else {
