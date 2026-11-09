@@ -205,7 +205,7 @@ fn validate_project(project:&Project,info:&ClipInfo,source:ProjectSource)->Resul
     if source==ProjectSource::WorkingCopy&&elsewhere{return Err("Saved edits belong to a copy of this clip.".into());}
     let name=|p:&str|Path::new(p).file_name().map(|n|n.to_string_lossy().to_lowercase());
     if project.version!=1||name(&project.source_path)!=name(&info.path)||project.source_bytes!=info.source_bytes||project.source_modified_ms!=info.source_modified_ms{return Err("Saved edits belong to another source revision.".into());}
-    validate_fps(project.export_fps)?;
+    validate_fps(project.export_fps.min(crate::editor_state::MAX_EXPORT_FPS))?;
     project.plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())
 }
 pub(crate) fn modified_ms(m:&std::fs::Metadata)->u64{m.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(u64::MAX as u128) as u64}
@@ -369,7 +369,7 @@ fn recall_generated_path(path:&str)->bool{let stem=Path::new(path).file_stem().a
 #[path="backend_project_tests.rs"] mod project_tests;
 #[cfg(test)]
 #[path="backend_tests.rs"] mod tests;
-fn validate_fps(fps:u32)->Result<(),String>{if fps==0||fps>i32::MAX as u32{Err("Export rate must be a positive integer within the supported range.".into())}else{Ok(())}}
+fn validate_fps(fps:u32)->Result<(),String>{let max=crate::editor_state::MAX_EXPORT_FPS;if fps==0||fps>max{Err(format!("Export rate must be between 1 and {max} fps."))}else{Ok(())}}
 fn project_bytes(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->Result<Vec<u8>,String>{
     validate_fps(fps)?;plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())?;
     let project=Project{version:1,source_path:info.path.clone(),source_bytes:info.source_bytes,source_modified_ms:info.source_modified_ms,plan:plan.clone(),export_fps:fps,export:export.clone()};
