@@ -34,6 +34,7 @@ $arguments = @(
     "/resource:$assets\fonts\geist-400.ttf,Recall.Body.ttf",
     "/resource:$assets\fonts\geist-600.ttf,Recall.Strong.ttf",
     "$PSScriptRoot\Program.cs", "$PSScriptRoot\SetupWindow.cs", "$PSScriptRoot\SetupWindow.Guided.cs",
+    "$PSScriptRoot\SetupWindow.Preview.cs", "$PSScriptRoot\SetupWindow.Chrome.cs",
     "$PSScriptRoot\SetupPackage.cs", "$PSScriptRoot\SetupPrerequisites.cs"
 )
 $work = $null
