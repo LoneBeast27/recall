@@ -303,8 +303,9 @@ impl Controller {
     /// engine reports it ended, or after [`PAUSE_STOP_WAIT`]; a save being written
     /// finishes first ("Pausing after the save"). Resume cancels a pause still waiting.
     pub(crate) fn set_paused(&mut self, paused: bool) {
+        // Any explicit pause or resume takes the pause over from Setup (`record_setup_owner`).
+        self.setup_owner = None;
         if !paused {
-            self.setup_owner = None;
             self.pending_pause = None;
         } else if !self.paused && self.engine_running() {
             if self.pending_pause.is_some() {
