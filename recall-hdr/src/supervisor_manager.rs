@@ -315,3 +315,43 @@ fn sleep_unless_change(shared: &Arc<Shared>, total: Duration, gen: u64) -> bool 
     }
     !shared.stop_requested()
 }
+
+#[cfg(test)]
+mod release_wait_tests {
+    use super::*;
+    use crate::supervisor::Supervisor;
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+
+    /// A fake engine that never exits on its own (cmd.exe idles on its piped stdin and takes
+    /// `stop_capture` as an unknown command), with no window.
+    fn wedged_engine() -> Child {
+        let cmd = std::env::var_os("ComSpec").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+        Command::new(cmd).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(super::super::CREATE_NO_WINDOW).spawn().expect("cmd.exe")
+    }
+
+    /// Gate p5-4: `finish_shutdown`'s release wait end to end. A released engine that never
+    /// exits is kept while its saves are unsettled (no 8 s kill), then killed within the quit
+    /// grace of `release_settled`.
+    #[test]
+    fn a_wedged_released_engine_is_kept_until_settled_then_killed_within_the_quit_grace() {
+        let shared = Arc::new(Shared::new(None));
+        let mut child = wedged_engine();
+        shared.set_child_stdin(child.stdin.take());
+        shared.set_desired_how(None, Sent::Switching, true);
+        let (tx, rx) = std::sync::mpsc::channel();
+        let waiter = shared.clone();
+        let started = Instant::now();
+        let handle = thread::spawn(move || {
+            finish_shutdown(&waiter, child, super::super::release::RELEASE_GRACE, None, true);
+            let _ = tx.send(started.elapsed());
+        });
+        assert!(rx.recv_timeout(Duration::from_secs(10)).is_err(), "killed while its saves were unsettled");
+        let sup = Supervisor { shared: shared.clone(), handle: None };
+        let settled = Instant::now();
+        sup.release_settled();
+        let took = rx.recv_timeout(super::super::QUIT_GRACE + Duration::from_secs(5)).expect("killed after the settle");
+        assert!(settled.elapsed() <= super::super::QUIT_GRACE + Duration::from_secs(5) && took >= Duration::from_secs(10), "{took:?}");
+        handle.join().unwrap();
+    }
+}
