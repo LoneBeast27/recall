@@ -17,9 +17,15 @@ fn game_folder_clips_are_recall_named_one_level_down_in_marked_folders() {
     let guard = crate::test_temp::TempDir::sandbox("games-named");
     let rec = guard.join("Raw");
     let game = marked(&rec.join("Rocket League"));
-    marked(&rec.join("VALORANT"));
+    let valorant = marked(&rec.join("VALORANT"));
     std::fs::create_dir_all(rec.join("Keepers")).unwrap();
+    for (dir, name) in [(&game, CLIP), (&valorant, "VALORANT__2026-10-22__14-05-09__rec.mp4")] {
+        std::fs::write(dir.join(name), b"clip").unwrap();
+        rule::record_saved(&dir.join(name), None).unwrap();
+    }
     assert!(in_game_folder(&game.join(CLIP), &rec));
+    std::fs::write(game.join("Rocket-League__2026-10-22__14-05-10-000__cd.mp4"), b"theirs").unwrap();
+    assert!(!in_game_folder(&game.join("Rocket-League__2026-10-22__14-05-10-000__cd.mp4"), &rec), "not saved by Recall");
     let upper = PathBuf::from(text(&rec).to_uppercase()).join("valorant").join("VALORANT__2026-10-22__14-05-09__rec.MP4");
     assert!(in_game_folder(&upper, &rec), "case-insensitive");
     assert!(!in_game_folder(&rec.join(CLIP), &rec), "top level is not a game folder");

@@ -55,10 +55,11 @@ pub(crate) fn read_links_from(path: &Path) -> Links {
         v.get(key).and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|s| s.as_str()).map(str::to_owned).collect()).unwrap_or_default()
     };
     let former = list("former_recordings");
+    let recordings = v.get("recordings").and_then(|r| r.as_str()).map(str::to_owned);
     let linked = list("imported")
         .into_iter()
         .filter(|f| !former.iter().any(|o| key(o) == key(f)))
-        .filter(|f| match crate::game_folder_rule::link_refusal(Path::new(f)) {
+        .filter(|f| match recordings.as_deref().and_then(|r| crate::game_folder_rule::link_refusal(Path::new(f), Path::new(r))) {
             // One of Recall's own game folders is never a link (the app refuses linking one).
             Some(why) => {
                 log!("record: folder list links {f:?}, ignored: {why}");
@@ -67,7 +68,7 @@ pub(crate) fn read_links_from(path: &Path) -> Links {
             None => true,
         })
         .collect();
-    let owned = v.get("recordings").and_then(|r| r.as_str()).map(str::to_owned).into_iter().chain(former).collect();
+    let owned = recordings.into_iter().chain(former).collect();
     Links { linked, owned }
 }
 

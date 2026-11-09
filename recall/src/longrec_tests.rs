@@ -264,8 +264,9 @@ fn recovery_reaches_game_folders_one_level_down() {
     let _gone = Gone(dir.clone());
     let game = dir.join("Rocket League");
     let deeper = game.join("old");
+    std::fs::create_dir_all(&dir).unwrap();
+    crate::game_folder_rule::make(&game).unwrap();
     std::fs::create_dir_all(&deeper).unwrap();
-    std::fs::write(game.join(crate::game_folder_rule::MARKER), b"").unwrap();
     let keepers = dir.join("Keepers");
     std::fs::create_dir_all(&keepers).unwrap();
     let top = dir.join("Desktop__2026-10-22__14-05-09__rec.mp4.part");
@@ -275,6 +276,7 @@ fn recovery_reaches_game_folders_one_level_down() {
     for p in [&top, &in_game, &too_deep, &unmarked] {
         std::fs::write(p, b"x").unwrap();
     }
+    crate::game_folder_rule::record_writing(&in_game).unwrap();
     let results = recover_in(&dir);
     assert_eq!(results.len(), 2);
     assert!(dir.join("Desktop__2026-10-22__14-05-09__rec.mp4").is_file());
@@ -310,6 +312,62 @@ fn record_fail_ends_a_continued_recording_early_and_keeps_every_part() {
 
 /// Gate P2-c (d1e057e): several `.part` files recovered at once were one event each, so
 /// the app showed a toast per file; one event lists them all.
+/// Gate A1, R2: in a game folder only the parts on the marker's `writing` list are recovered, and
+/// the recovered file joins `saved`; a part the user put there is left alone.
+#[test]
+fn recovery_in_an_adopted_folder_takes_only_recalls_parts() {
+    use crate::game_folder_rule as rule;
+    let dir = temp_dir("recover-adopted");
+    let _gone = scopeguard_dir(&dir);
+    let game = dir.join("VALORANT");
+    std::fs::create_dir_all(&game).unwrap();
+    rule::adopt(&game).unwrap();
+    let ours = game.join("VALORANT__2026-11-10__04-00-00__rec.mp4.part");
+    let theirs = game.join("VALORANT__2026-11-10__05-00-00__rec.mp4.part");
+    std::fs::write(&ours, b"x").unwrap();
+    rule::record_writing(&ours).unwrap();
+    std::fs::write(&theirs, b"y").unwrap();
+    let results = recover_in(&dir);
+    assert_eq!(results.len(), 1, "{results:?}");
+    let done = game.join("VALORANT__2026-11-10__04-00-00__rec.mp4");
+    assert!(done.is_file() && theirs.exists());
+    let marker = rule::game_folder_marker(&game).unwrap();
+    assert!(marker.owns("VALORANT__2026-11-10__04-00-00__rec.mp4"), "recovered: Recall's");
+    assert!(!marker.is_writing("VALORANT__2026-11-10__04-00-00__rec.mp4.part"), "the part name left `writing`");
+    assert!(!marker.owns("VALORANT__2026-11-10__05-00-00__rec.mp4.part"));
+}
+
+/// Gate A1: a long recording finished in an adopted folder is Recall's (its final name is saved).
+#[test]
+fn a_long_recording_finished_in_an_adopted_folder_is_recalls() {
+    let (mut w, dir) = writer("adopted-stop", G + 90);
+    let _gone = scopeguard_dir(&dir);
+    crate::game_folder_rule::adopt(&dir).unwrap();
+    let (_tx, rx) = sync_channel::<Data>(4);
+    w.start("G", Some((0, Instant::now())));
+    w.generation = G + 90;
+    w.data(video(0, true, G + 90));
+    w.data(video(16, false, G + 90));
+    w.stop(&rx);
+    let names: Vec<String> = finished(&dir).into_iter().filter(|n| n.ends_with(".mp4")).collect();
+    assert_eq!(names.len(), 1, "{names:?}");
+    let marker = crate::game_folder_rule::read_marker(&dir).unwrap();
+    assert!(marker.owns(&names[0]), "{marker:?}");
+    assert_eq!(marker.saved, vec![names[0].to_lowercase()]);
+    assert!(marker.writing.is_empty(), "the part name left `writing`");
+}
+
+/// Removes a test folder when dropped.
+fn scopeguard_dir(dir: &Path) -> impl Drop {
+    struct Gone(PathBuf);
+    impl Drop for Gone {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    Gone(dir.to_path_buf())
+}
+
 #[test]
 fn several_recovered_parts_are_one_event_that_lists_them() {
     assert!(recovered_outbound(Vec::new()).is_none());

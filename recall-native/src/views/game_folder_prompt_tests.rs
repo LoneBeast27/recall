@@ -74,3 +74,38 @@ fn only_a_plain_unmarked_unanswered_unlinked_folder_is_asked_about() {
     rule::adopt(&game).unwrap();
     assert!(!still_open(&p, &rec, &[], &none), "adopted: marked");
 }
+
+/// Gate A2: a failed adoption is reported and saves no "merge" answer; "Keep separate" never adopts.
+#[test]
+fn a_failed_adoption_saves_no_answer() {
+    let failed = answer(r"V:\Videos\VALORANT", true, |_| Err(std::io::Error::other("entry unreadable")));
+    assert_eq!(failed, Err("entry unreadable".to_string()));
+    let mut adopted = false;
+    let ok = answer(r"V:\Videos\VALORANT", true, |_| {
+        adopted = true;
+        Ok(())
+    });
+    assert_eq!(ok, Ok(Some(json!({"valorant": "merge"}))));
+    assert!(adopted);
+    let separate = answer(r"V:\Videos\VALORANT", false, |_| panic!("not adopted"));
+    assert_eq!(separate, Ok(Some(json!({"valorant": "separate"}))));
+}
+
+/// Gate A4: the prompts file follows its override, then the sandboxed library file, then app data;
+/// every result passes the test guard (a real profile path panics).
+#[test]
+fn the_prompts_file_follows_the_overrides() {
+    let (dir, _gone) = temp("path");
+    let own = dir.join("own.json");
+    let library = dir.join("meta").join("library.json");
+    let appdata = dir.join(r"AppData\Roaming");
+    assert_eq!(prompts_path_from(Some(own.clone().into()), Some(library.clone().into()), Some(appdata.clone())), Some(own));
+    assert_eq!(prompts_path_from(None, Some(library.clone().into()), Some(appdata.clone())), Some(dir.join("meta").join("game-folder-prompts.json")));
+    assert_eq!(prompts_path_from(Some("".into()), None, Some(appdata.clone())), Some(appdata.join("Recall").join("game-folder-prompts.json")));
+    assert_eq!(prompts_path_from(None, None, None), None);
+    let real = std::env::var_os("APPDATA").map(PathBuf::from).filter(|p| !p.as_os_str().is_empty());
+    if let Some(real) = real {
+        let hit = std::panic::catch_unwind(|| prompts_path_from(None, None, Some(real)));
+        assert!(hit.is_err(), "the real %APPDATA% is refused in tests");
+    }
+}

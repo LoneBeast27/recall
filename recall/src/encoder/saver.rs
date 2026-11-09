@@ -339,6 +339,10 @@ impl Worker {
         let target = target.as_path();
         match result {
             Ok(muxed) => {
+                // Saved in place into an adopted game folder: that folder owns it now.
+                if let Err(e) = crate::game_folder_rule::record_saved(target, None) {
+                    self.events.log(&format!("saver: {} not recorded in its game folder ({e}); it stays uncounted", target.display()));
+                }
                 let bytes = std::fs::metadata(target).map(|m| m.len()).unwrap_or(0);
                 let elapsed = job.requested.elapsed();
                 timing.ready_ms = ms(elapsed);

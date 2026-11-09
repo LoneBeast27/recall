@@ -100,11 +100,36 @@ pub fn add(list: &mut Vec<Pending>, p: Pending) -> bool {
     true
 }
 
-fn prompts_path() -> Option<PathBuf> {
-    if cfg!(test) {
-        return None;
+/// The answer to save for `folder`, or why there is none. "Use this folder" adopts it first
+/// (`adopt`: the marker; the files there stay the user's), so the library lists it before the
+/// next save. A failed adoption is `Err` (the toast's text): no answer is saved and the
+/// question stays open. `Ok(None)`: a folder with no name to key on.
+pub(crate) fn answer(folder: &str, merge: bool, adopt: impl FnOnce(&Path) -> std::io::Result<()>) -> Result<Option<Value>, String> {
+    let Some(value) = answer_value(folder, merge) else { return Ok(None) };
+    if merge {
+        adopt(Path::new(folder)).map_err(|e| e.to_string())?;
     }
-    crate::user_dirs::appdata().map(|root| crate::user_dirs::checked(root.join("Recall").join("game-folder-prompts.json")))
+    Ok(Some(value))
+}
+
+/// The open-questions file: `RECALL_GAME_FOLDER_PROMPTS`, else beside `RECALL_LIBRARY_META`
+/// (a sandboxed run's app data), else `%APPDATA%\Recall\game-folder-prompts.json`.
+fn prompts_path() -> Option<PathBuf> {
+    prompts_path_from(std::env::var_os("RECALL_GAME_FOLDER_PROMPTS"), std::env::var_os("RECALL_LIBRARY_META"), crate::user_dirs::appdata())
+}
+
+/// [`prompts_path`] from its inputs. Every result passes `user_dirs::checked`, so a unit test
+/// that reaches the real profile panics.
+pub(crate) fn prompts_path_from(own: Option<std::ffi::OsString>, library: Option<std::ffi::OsString>, appdata: Option<PathBuf>) -> Option<PathBuf> {
+    const FILE: &str = "game-folder-prompts.json";
+    let path = if let Some(own) = own.filter(|p| !p.is_empty()) {
+        PathBuf::from(own)
+    } else if let Some(library) = library.filter(|p| !p.is_empty()) {
+        PathBuf::from(library).with_file_name(FILE)
+    } else {
+        appdata?.join("Recall").join(FILE)
+    };
+    Some(crate::user_dirs::checked(path))
 }
 
 pub fn load_from(path: &Path) -> Vec<Pending> {
@@ -162,20 +187,17 @@ impl Root {
     }
 
     fn answer_game_folder(&mut self, p: Pending, merge: bool) {
+        let value = match answer(&p.folder, merge, rule::adopt) {
+            Ok(Some(value)) => value,
+            Ok(None) => return,
+            Err(e) => return self.show_toast(ToastKind::Bad, "Couldn't use that folder", Some(e)),
+        };
+        if merge {
+            crate::services::library::folders::forget_scans();
+            self.workers.job(crate::worker::Job::List);
+        }
         self.game_folder_prompts.retain(|q| q != &p);
         save(&self.game_folder_prompts);
-        let Some(value) = answer_value(&p.folder, merge) else { return };
-        if merge {
-            // The app adopts it too (marker with the files already there, which stay the
-            // user's), so the library lists the folder now, before the next save.
-            match rule::adopt(Path::new(&p.folder)) {
-                Ok(()) => {
-                    crate::services::library::folders::forget_scans();
-                    self.workers.job(crate::worker::Job::List);
-                }
-                Err(e) => self.show_toast(ToastKind::Bad, "Couldn't use that folder", Some(e.to_string())),
-            }
-        }
         self.set_config("recording", "game_folder_choices", value);
     }
 

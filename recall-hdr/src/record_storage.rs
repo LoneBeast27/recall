@@ -293,10 +293,9 @@ pub fn scan(dir: &Path) -> std::io::Result<Listing> {
         listing.thumbs = thumbs.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     }
     // An unreadable game folder is skipped (its clips just don't count).
-    // In an adopted folder ("Use this folder") the files that were there before are the user's:
-    // never counted, never recycled (`Marker::owns`).
-    for game in crate::game_folder_rule::game_folders(dir) {
-        let Some(marker) = crate::game_folder_rule::game_folder_marker(&game) else { continue };
+    // In an adopted folder ("Use this folder") only the clips Recall saved there are counted or
+    // recycled (`Marker::owns`); the user's files never are. One marker read per folder.
+    for (game, marker) in crate::game_folder_rule::game_folders_marked(dir) {
         let Ok(entries) = std::fs::read_dir(&game) else { continue };
         let prefix = format!("{}/", game.file_name().unwrap_or_default().to_string_lossy());
         list_into(&mut listing, entries, &prefix, &|file| marker.owns(file));

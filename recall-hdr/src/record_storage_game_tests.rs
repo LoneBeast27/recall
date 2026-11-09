@@ -24,6 +24,12 @@ fn game_folder(dir: &Path) {
     rule::write_marker(dir).unwrap();
 }
 
+/// A clip Recall saved into a game folder: written, then on the marker's `saved` list.
+fn saved_clip(path: &Path, bytes: usize) {
+    std::fs::write(path, vec![0u8; bytes]).unwrap();
+    rule::record_saved(path, None).unwrap();
+}
+
 fn names(l: &Listing) -> Vec<String> {
     let mut clips: Vec<String> = l.clips.iter().map(|c| c.name.clone()).collect();
     clips.sort();
@@ -45,7 +51,7 @@ fn scan_counts_marked_game_folder_clips_one_level_down() {
     let top = "Desktop__2026-10-22__14-05-09.mp4";
     let rl = "Rocket-League__2026-10-22__15-00-00-275__ab12.mp4";
     std::fs::write(dir.join(top), vec![0u8; 10]).unwrap();
-    std::fs::write(game.join(rl), vec![0u8; 20]).unwrap();
+    saved_clip(&game.join(rl), 20);
     std::fs::write(game.join("Rocket-League__2026-10-22__15-00-00-275__ab12.recall-marks.json"), b"{}").unwrap();
     std::fs::write(game.join("thumbs").join("Rocket-League__2026-10-22__15-00-00-275__ab12-1783463424-thumb.jpg"), b"j").unwrap();
     for d in [game.join("old"), dir.join("screenshots"), dir.join("exports"), dir.join(".hidden")] {
@@ -76,7 +82,7 @@ fn an_unmarked_folder_is_never_scanned_or_recycled() {
         std::fs::write(dir.join(name).join(CLIP), vec![0u8; 99]).unwrap();
     }
     game_folder(&dir.join("VALORANT (Recall)"));
-    std::fs::write(dir.join("VALORANT (Recall)").join("VALORANT__2026-10-22__17-00-00.mp4"), vec![0u8; 5]).unwrap();
+    saved_clip(&dir.join("VALORANT (Recall)").join("VALORANT__2026-10-22__17-00-00.mp4"), 5);
     let l = scan(&dir).unwrap();
     assert_eq!(names(&l), vec!["VALORANT (Recall)/VALORANT__2026-10-22__17-00-00.mp4".to_string()]);
     let p = plan(&l, &HashSet::new(), 0, u64::MAX / 2);
@@ -103,7 +109,7 @@ fn a_hidden_game_folder_is_skipped() {
     let (dir, _gone) = temp("hidden");
     let game = dir.join("Rocket League");
     game_folder(&game);
-    std::fs::write(game.join(CLIP), vec![0u8; 99]).unwrap();
+    saved_clip(&game.join(CLIP), 99);
     assert_eq!(scan(&dir).unwrap().clips.len(), 1);
     if !rule::hide_for_test(&game) {
         eprintln!("skipped: could not hide the folder");
@@ -124,8 +130,9 @@ fn game_folder_clips_keep_favourites_and_edits() {
     assert_eq!(p.remove, vec!["G__2026-10-22__14-05-11.mp4".to_string()], "A's clip is a favourite, B's has edits, the newest stays");
 }
 
-/// (a) "Use this folder": a Recall-named clip already in the user's folder is never counted and
-/// never in `plan.remove`, even at a tiny limit; clips saved there after adoption are.
+/// (a) "Use this folder": a Recall-named clip already in the user's folder, or one the user puts
+/// there after adoption, is never counted and never in `plan.remove`, even at a tiny limit; the
+/// clips Recall saved there (`rule::record_saved`) are.
 #[test]
 fn an_adopted_folders_existing_clips_are_never_counted_or_recycled() {
     let (dir, _gone) = temp("adopted");
@@ -137,14 +144,45 @@ fn an_adopted_folders_existing_clips_are_never_counted_or_recycled() {
     let new = ["VALORANT__2026-11-10__04-00-00-000__ab.mp4", "VALORANT__2026-11-10__05-00-00-000__cd.mp4"];
     for name in new {
         std::fs::write(game.join(name), vec![0u8; 20]).unwrap();
+        rule::record_saved(&game.join(name), None).unwrap();
     }
+    let dropped = "VALORANT__2026-11-10__06-00-00-000__ef.mp4";
+    std::fs::write(game.join(dropped), vec![0u8; 70]).unwrap();
     let l = scan(&dir).unwrap();
-    assert_eq!(names(&l), new.iter().map(|n| format!("VALORANT/{n}")).collect::<Vec<_>>(), "the existing clip is not counted");
+    assert_eq!(names(&l), new.iter().map(|n| format!("VALORANT/{n}")).collect::<Vec<_>>(), "the user's clips are not counted");
     let p = plan(&l, &HashSet::new(), 1, u64::MAX / 2);
-    assert_eq!(p.total, 40, "only the new clips count");
-    assert!(!p.remove.iter().any(|n| n.ends_with(old)), "{:?}", p.remove);
-    assert!(!p.remove.is_empty(), "a clip saved after adoption may go: {:?}", p.remove);
+    assert_eq!(p.total, 40, "only the clips Recall saved count");
+    assert!(!p.remove.iter().any(|n| n.ends_with(old) || n.ends_with(dropped)), "{:?}", p.remove);
+    assert!(!p.remove.is_empty(), "a clip Recall saved there may go: {:?}", p.remove);
     // A marker that can't be parsed: the folder is not a game folder, nothing in it counts.
     std::fs::write(game.join(rule::MARKER), b"{broken").unwrap();
     assert!(scan(&dir).unwrap().clips.is_empty());
+}
+
+/// (R1, R2) Only clips Recall saved into a folder its marker is bound to count: a copy of the
+/// folder ("G - Copy"), a renamed one, a legacy marker and a clip the user drops into a made
+/// folder are never counted or recycled.
+#[test]
+fn copies_legacy_markers_and_dropped_clips_never_count() {
+    let (dir, _gone) = temp("bound");
+    let game = dir.join("G");
+    game_folder(&game);
+    saved_clip(&game.join(CLIP), 10);
+    std::fs::write(game.join("G__2026-10-22__16-30-00.mp4"), vec![0u8; 70]).unwrap();
+    let copy = dir.join("G - Copy");
+    std::fs::create_dir_all(&copy).unwrap();
+    for name in [rule::MARKER, CLIP] {
+        std::fs::copy(game.join(name), copy.join(name)).unwrap();
+    }
+    let legacy = dir.join("H");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join(rule::MARKER), b"").unwrap();
+    std::fs::write(legacy.join("H__2026-10-22__16-00-00.mp4"), vec![0u8; 80]).unwrap();
+    let l = scan(&dir).unwrap();
+    assert_eq!(names(&l), vec![format!("G/{CLIP}")], "only the clip Recall saved into G");
+    let p = plan(&l, &HashSet::new(), 0, u64::MAX / 2);
+    assert_eq!(p.total, 10, "the copy, the legacy folder and the dropped clip count nothing");
+    assert!(p.remove.iter().all(|n| *n == format!("G/{CLIP}")), "{:?}", p.remove);
+    std::fs::rename(&game, dir.join("G old")).unwrap();
+    assert!(scan(&dir).unwrap().clips.is_empty(), "renamed: not Recall's");
 }

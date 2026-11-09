@@ -240,6 +240,9 @@ impl<F: SinkFactory> Recorder<F> {
                 return vec![Event::Failed { reason, kept: previous.map(|p| p.path) }];
             }
         };
+        // In a game folder the `.part` goes on the marker's `writing` list, so a crash leaves a
+        // part the next start recovers (never owned until its final rename).
+        let noted = note(crate::game_folder_rule::record_writing(&part), &part);
         let lanes = self
             .tracks
             .iter()
@@ -281,7 +284,7 @@ impl<F: SinkFactory> Recorder<F> {
             None => Event::Started { path },
         };
         self.phase = Phase::Recording(active);
-        vec![started]
+        std::iter::once(started).chain(noted).collect()
     }
 
     fn fail(&mut self, reason: String) -> Vec<Event> {
@@ -449,7 +452,7 @@ fn finish<S: Sink>(mut a: Active<S>) -> Vec<Event> {
         Err(e) => return vec![Event::Failed { reason: format!("finalize {}: {e}", a.path.display()), kept: None }],
     };
     let rel = crate::bookmarks::window_marks(a.marks.iter().copied(), a.base_us, a.base_us + (seconds * 1e6) as u64);
-    let mut events = Vec::new();
+    let mut events: Vec<Event> = note(crate::game_folder_rule::record_saved(&path, Some(&a.part)), &path).into_iter().collect();
     if !rel.is_empty() {
         if let Err(e) = crate::bookmarks::write_sidecar(&path, &rel) {
             events.push(Event::Log(format!("long recording marks not written: {e}")));
@@ -469,18 +472,12 @@ fn abandon_and_keep<S: Sink>(mut sink: S, part: &Path) -> Option<PathBuf> {
     keep_partial(part)
 }
 
-/// Rename a partial recording into place; `None` when that fails too.
-fn keep_partial(part: &Path) -> Option<PathBuf> {
-    let target = naming::recovered_path(part, Path::exists);
-    std::fs::rename(part, &target).ok().map(|_| target)
-}
-
 #[path = "machine_parts.rs"]
 mod parts;
 pub use parts::Cause;
 #[cfg(test)]
 pub use parts::PART_GAP;
-use parts::{arm_wait_from, Series};
+use parts::{arm_wait_from, keep_partial, note, Series};
 
 #[cfg(test)]
 #[path = "machine_tests.rs"]

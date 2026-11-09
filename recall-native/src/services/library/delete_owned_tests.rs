@@ -89,6 +89,13 @@ fn marked(dir: &Path) -> PathBuf {
     dir.to_path_buf()
 }
 
+/// A clip Recall saved into the game folder `dir` (on its marker's `saved` list).
+fn saved(dir: &Path, name: &str) -> PathBuf {
+    let path = clip(dir, name);
+    crate::services::library::folders::rule::record_saved(&path, None).unwrap();
+    path
+}
+
 fn listed(recordings: &Path, imported: &[String]) -> Vec<String> {
     let mut paths: Vec<String> = crate::backend::list_from(recordings, imported, &[]).unwrap().0.into_iter().map(|c| c.path).collect();
     paths.sort();
@@ -102,7 +109,7 @@ fn a_game_folder_clip_is_recalls_own() {
     let root = crate::test_temp::TempDir::sandbox("owned-game-folder");
     let recordings = root.join("Recall");
     let game = marked(&recordings.join("Rocket League"));
-    let own = clip(&game, "Rocket-League__2026-11-01__10-00-00-000__ab.mp4");
+    let own = saved(&game, "Rocket-League__2026-11-01__10-00-00-000__ab.mp4");
     let other = clip(&game, "holiday.mp4");
     let folders = Folders { recordings: Some(text(&recordings)), ..Folders::default() };
     assert!(imports::is_owned(&own, &recordings, &[], &[]));
@@ -137,7 +144,7 @@ fn a_linked_game_folder_is_not_owned() {
     let root = crate::test_temp::TempDir::sandbox("owned-linked-game");
     let recordings = root.join("Recall");
     let valorant = marked(&recordings.join("Valorant"));
-    let linked_clip = clip(&valorant, "VALORANT__2026-11-01__10-00-00-000__ab.mp4");
+    let linked_clip = saved(&valorant, "VALORANT__2026-11-01__10-00-00-000__ab.mp4");
     let folders = Folders { recordings: Some(text(&recordings)), imported: vec![text(&valorant)], ..Folders::default() };
     assert!(!imports::is_owned(&linked_clip, &recordings, &[], &folders.imported));
     assert!(imports::is_imported(&text(&linked_clip), &recordings, &folders.imported, &[]));
@@ -183,24 +190,61 @@ fn a_hidden_game_folder_is_skipped() {
     assert!(listed(&recordings, &[]).is_empty());
 }
 
-/// (b) "Use this folder": after adoption a Recall-named clip that was already in the folder is
-/// listed but not owned (Delete only hides it, edits go to the C: copy); a clip saved after is.
+/// (b) "Use this folder": after adoption a Recall-named clip that was already in the folder, or
+/// one the user puts there later, is listed but not owned (Delete only hides it, edits go to the
+/// C: copy); a clip Recall saved there (`rule::record_saved`) is owned.
 #[test]
 fn an_adopted_folders_existing_clip_is_listed_but_not_owned() {
+    use crate::services::library::folders::rule;
     let root = crate::test_temp::TempDir::sandbox("owned-adopted");
     let recordings = root.join("Recall");
     let game = recordings.join("VALORANT");
     let old = clip(&game, "VALORANT__2025-01-01__10-00-00.mp4");
-    crate::services::library::folders::rule::adopt(&game).unwrap();
+    rule::adopt(&game).unwrap();
     let new = clip(&game, "VALORANT__2026-11-10__04-00-00-000__ab.mp4");
+    rule::record_saved(&new, None).unwrap();
+    let dropped = clip(&game, "VALORANT__2026-11-10__05-00-00-000__cd.mp4");
     let folders = Folders { recordings: Some(text(&recordings)), ..Folders::default() };
     assert!(!imports::is_owned(&old, &recordings, &[], &[]), "there before: the user's");
-    assert!(imports::is_owned(&new, &recordings, &[], &[]), "saved after: Recall's");
-    let mut both = vec![text(&old), text(&new)];
-    both.sort();
+    assert!(!imports::is_owned(&dropped, &recordings, &[], &[]), "put there by the user after adoption: the user's");
+    assert!(imports::is_owned(&new, &recordings, &[], &[]), "saved by Recall: Recall's");
+    let mut all = vec![text(&old), text(&new), text(&dropped)];
+    all.sort();
     let mut seen = listed(&recordings, &[]);
     seen.sort();
-    assert_eq!(seen, both, "both listed");
-    let (_, owned) = partition_for_delete(&[old.clone(), new.clone()], &folders);
-    assert_eq!(owned, vec![new], "only the new clip may go to the Recycle Bin");
+    assert_eq!(seen, all, "all listed");
+    let (hidden, owned) = partition_for_delete(&[old.clone(), new.clone(), dropped.clone()], &folders);
+    assert_eq!(owned, vec![new], "only the clip Recall saved may go to the Recycle Bin");
+    assert_eq!(hidden, vec![old, dropped], "Delete only hides the user's clips");
+}
+
+/// (R1, R2) A copy of a game folder ("G - Copy"), the folder renamed, a legacy marker, and a clip
+/// the user drops into a made folder: not owned, so Delete only hides them. A clip Recall saved
+/// into its own folder is owned.
+#[test]
+fn copies_renames_legacy_markers_and_dropped_clips_are_not_owned() {
+    use crate::services::library::folders::rule;
+    let root = crate::test_temp::TempDir::sandbox("owned-bound");
+    let recordings = root.join("Recall");
+    let game = marked(&recordings.join("G"));
+    let own = saved(&game, "G__2026-11-10__04-00-00-000__ab.mp4");
+    let dropped = clip(&game, "G__2026-11-10__05-00-00-000__cd.mp4");
+    assert!(imports::is_owned(&own, &recordings, &[], &[]), "saved into its own folder");
+    assert!(!imports::is_owned(&dropped, &recordings, &[], &[]), "dropped in by the user");
+    let copy = recordings.join("G - Copy");
+    std::fs::create_dir_all(&copy).unwrap();
+    for name in [rule::MARKER, "G__2026-11-10__04-00-00-000__ab.mp4"] {
+        std::fs::copy(game.join(name), copy.join(name)).unwrap();
+    }
+    assert!(!imports::is_owned(&copy.join("G__2026-11-10__04-00-00-000__ab.mp4"), &recordings, &[], &[]), "a copy");
+    let legacy = recordings.join("H");
+    std::fs::create_dir_all(&legacy).unwrap();
+    std::fs::write(legacy.join(rule::MARKER), b"").unwrap();
+    assert!(!imports::is_owned(&clip(&legacy, "H__2026-11-10__04-00-00-000__ab.mp4"), &recordings, &[], &[]), "a legacy marker");
+    let renamed = recordings.join("G old");
+    std::fs::rename(&game, &renamed).unwrap();
+    assert!(!imports::is_owned(&renamed.join("G__2026-11-10__04-00-00-000__ab.mp4"), &recordings, &[], &[]), "renamed");
+    let folders = Folders { recordings: Some(text(&recordings)), ..Folders::default() };
+    let (_, owned) = partition_for_delete(&[copy.join("G__2026-11-10__04-00-00-000__ab.mp4"), dropped], &folders);
+    assert!(owned.is_empty(), "nothing goes to the Recycle Bin");
 }

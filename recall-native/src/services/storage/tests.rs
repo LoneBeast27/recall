@@ -282,6 +282,8 @@ fn a_game_folder_clip_exports_to_the_same_game_folder() {
     std::fs::create_dir_all(recordings.join("Keepers")).unwrap();
     let edited = root.join("Recall").join("Edited");
     let clip = game.join("Rocket-League__2026-11-02__10-00-00-000__ab.mp4");
+    std::fs::write(&clip, b"clip").unwrap();
+    rule::record_saved(&clip, None).unwrap();
     assert_eq!(super::export_dir(&clip, &recordings), Some(edited.join("Rocket League")));
     assert_eq!(super::export_dir(&game.join("holiday.mp4"), &recordings), Some(edited.clone()), "not a recorder clip: Edited itself");
     let unmarked = recordings.join("Keepers").join("Keepers__2026-11-02__10-00-00-000.mp4");
@@ -291,6 +293,8 @@ fn a_game_folder_clip_exports_to_the_same_game_folder() {
     std::fs::create_dir_all(&valorant).unwrap();
     rule::write_marker(&valorant).unwrap();
     let clip = valorant.join("VALORANT__2026-11-02__10-00-00-000.mp4");
+    std::fs::write(&clip, b"clip").unwrap();
+    rule::record_saved(&clip, None).unwrap();
     assert_eq!(super::export_dir(&clip, &flat), Some(valorant.join("exports")));
 }
 

@@ -462,11 +462,11 @@ fn recover_in(dir: &Path) -> Vec<(PathBuf, std::io::Result<PathBuf>)> {
     let Ok(listing) = std::fs::read_dir(dir) else { return Vec::new() };
     let is_file = |e: &std::fs::DirEntry| e.file_type().is_ok_and(|t| t.is_file());
     let mut files: Vec<_> = listing.flatten().filter(is_file).collect();
-    for folder in crate::game_folder_rule::game_folders(dir) {
-        // In an adopted folder the files that were there before stay the user's: left alone.
-        let Some(marker) = crate::game_folder_rule::game_folder_marker(&folder) else { continue };
+    for (folder, marker) in crate::game_folder_rule::game_folders_marked(dir) {
+        // In a game folder only the parts on the marker's `writing` list are Recall's: the rest
+        // (a copy, a file the user put there) is left alone.
         let entries = std::fs::read_dir(folder).into_iter().flatten().flatten().filter(is_file);
-        files.extend(entries.filter(|e| marker.owns(&e.file_name().to_string_lossy())));
+        files.extend(entries.filter(|e| marker.is_writing(&e.file_name().to_string_lossy())));
     }
     files
         .into_iter()
@@ -475,6 +475,11 @@ fn recover_in(dir: &Path) -> Vec<(PathBuf, std::io::Result<PathBuf>)> {
             let part = e.path();
             let target = naming::recovered_path(&part, Path::exists);
             let result = std::fs::rename(&part, &target).map(|_| target);
+            // Renamed: the recovered file is Recall's in a game folder (the rename stands even
+            // when the marker can't be updated; the file then stays unowned).
+            if let Ok(target) = &result {
+                let _ = crate::game_folder_rule::record_saved(target, Some(&part));
+            }
             (part, result)
         })
         .collect()
