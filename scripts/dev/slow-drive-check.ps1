@@ -10,14 +10,16 @@
 
   -Clip: at least 60 s and 100 MB; default .tmp\viewer-check\base.mp4.
   Needs an engine stamped recall-engine-caps: RECALL_ENGINE, else target-dev\debug\recall.exe under
-  -EngineRoot. An older engine does not fail: it starts a recorder and never returns.
+  -EngineRoot (default: the main checkout, see dev-paths.ps1). An older engine does not fail: it starts a recorder and never returns.
   The engine scenarios run stand-ins built here (slow-drive-stub.ps1), never a real older build.
   -RealClip <path>, ...: also opens each clip where it lies, unslowed and unlinked (read only).
   -Snap <png>: saves the window from that scenario while it loads.
 #>
-param([string]$Clip = '', [string]$Exe = '', [string[]]$Only = @(), [string]$EngineRoot = 'L:\General\recall', [string[]]$RealClip = @(), [string]$Snap = '')
+param([string]$Clip = '', [string]$Exe = '', [string[]]$Only = @(), [string]$EngineRoot = '', [string[]]$RealClip = @(), [string]$Snap = '')
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+. (Join-Path $PSScriptRoot 'dev-paths.ps1')
+if (-not $EngineRoot) { $EngineRoot = Get-MainCheckout $repo }
 . (Join-Path $PSScriptRoot 'viewer-check-lib.ps1')
 Initialize-ViewerCheck $repo $Exe
 $script:only = @($Only | ForEach-Object { if ($_ -like '*|*') { $_ -split '\|' } else { $_ -split ',' } } | Where-Object { $_ })  # '|' between names lets a name hold a comma

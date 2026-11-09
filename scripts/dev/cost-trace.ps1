@@ -12,13 +12,17 @@
   The trace (about 0.5-2 GB) is opened later in WPA or PerfView; nothing here uploads it.
 #>
 param(
-  [string]$Engine = 'L:\General\.tmp\recall-low-end-target\release\recall.exe',
+  [string]$Engine = '',   # default: <dev root>\.tmp\recall-low-end-target\release\recall.exe (dev-paths.ps1)
   [double]$Seconds = 60,
   [int]$SaveSeconds = 30,
-  [string]$Out = 'L:\General\.tmp\recall-low-end-logs\cost-trace.etl'
+  [string]$Out = ''       # default: <dev root>\.tmp\recall-low-end-logs\cost-trace.etl
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+. (Join-Path $PSScriptRoot 'dev-paths.ps1')
+$dev = Get-DevRoot $repo
+if (-not $Engine) { $Engine = Join-Path $dev '.tmp\recall-low-end-target\release\recall.exe' }
+if (-not $Out) { $Out = Join-Path $dev '.tmp\recall-low-end-logs\cost-trace.etl' }
 $admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $admin) { Write-Error 'Run this from an elevated PowerShell: WPR needs admin.'; exit 2 }
 $games = 'VALORANT-Win64-Shipping', 'cs2', 'RocketLeague', 'FortniteClient-Win64-Shipping', 'r5apex', 'r5apex_dx12', 'Overwatch'
@@ -28,7 +32,7 @@ foreach ($f in $Engine, $Target) { if (-not (Test-Path $f)) { Write-Error "Not f
 
 # The engine needs the FFmpeg DLLs: the main checkout keeps them (worktrees do not).
 $ff = Join-Path $repo 'tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared\bin'
-if (-not (Test-Path $ff)) { $ff = 'L:\General\recall\tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared\bin' }
+if (-not (Test-Path $ff)) { $ff = Join-Path (Get-MainCheckout $repo) 'tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared\bin' }
 $env:PATH = "$ff;$env:PATH"
 
 $clips = Join-Path $env:TEMP "recall-cost-trace-$PID"
