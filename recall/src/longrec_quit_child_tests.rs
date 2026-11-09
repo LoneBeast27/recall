@@ -1,10 +1,11 @@
 //! A dead controller: the engine's stdin hits EOF and its stderr pipe is broken.
 //! The test re-runs its own test exe as the "engine" (no capture or audio device):
-//! the child runs the real stdin-command thread (`stdin_commands`) with a real quit
-//! flag, logs through the engine's `eprintln!` (`stderr_log`), and has a long
-//! recording running on the writer thread with the fake sink. On quit it takes
-//! the engine's quit-time `LongRec::shutdown`, checks no `.part` is left, prints
-//! `quit-ok` and exits 0.
+//! the child runs the live stdin reader's body (`engine_stdin::spawn_early`: `read_early`,
+//! then `stdin_reader::finish`) with a real quit flag, logs one line through the release
+//! build's `eprintln!` (`quiet_io::err`) to the broken stderr, and has a long recording
+//! running on the writer thread with the fake sink. On quit it takes the engine's quit-time
+//! `LongRec::shutdown`, checks no `.part` is left, writes `quit-ok` to a marker file (the
+//! end of stdin points stdout at NUL, as in the engine) and exits 0.
 
 use super::*;
 
@@ -17,6 +18,16 @@ use test_sink::{pkt, temp_dir, tracks, FakeFactory, MS};
 
 const CHILD_ENV: &str = "RECALL_TEST_CHILD";
 const CHILD_TEST: &str = "longrec::quit_child_tests::closed_stderr_child";
+/// Where the child writes `quit-ok` (its stdout is NUL once stdin has ended).
+const CHILD_OK_ENV: &str = "RECALL_TEST_CHILD_OK";
+
+/// A temp dir removed on drop (also on a panic).
+struct TempDir(std::path::PathBuf);
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
 
 /// The child's body; a no-op unless the parent started this exe for it.
 #[test]
@@ -41,8 +52,13 @@ fn closed_stderr_child() {
         w.run(&ctl_rx, &data_rx);
     });
     let longrec = LongRec { ctl, done: std::sync::Mutex::new(done) };
-    std::thread::spawn(|| crate::stdin_commands::read_commands(std::io::stdin().lock(), &QUIT, |_| {}));
-    eprintln!("[recall] child up; stderr is a broken pipe");
+    // The release `eprintln!` to the broken stderr: quiets it and says so once on stdout,
+    // before the end of stdin quiets stdout too.
+    crate::quiet_io::err(format_args!("[recall] child up; stderr is a broken pipe"));
+    std::thread::spawn(|| {
+        let end = crate::engine_stdin::read_early(std::io::stdin().lock(), |_| {});
+        crate::stdin_reader::finish(end, &QUIT);
+    });
     let deadline = Instant::now() + Duration::from_secs(10);
     while !QUIT.load(Relaxed) {
         assert!(Instant::now() < deadline, "stdin EOF never set quit");
@@ -53,17 +69,20 @@ fn closed_stderr_child() {
     let names: Vec<String> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     let _ = std::fs::remove_dir_all(&dir);
     assert!(names.iter().all(|n| !n.ends_with(".part")) && names.len() == 1, "finalized, no .part: {names:?}");
-    println!("quit-ok");
+    std::fs::write(std::env::var(CHILD_OK_ENV).unwrap(), "quit-ok").unwrap();
     std::process::exit(0);
 }
 
-#[test]
-fn a_dead_controller_still_quits_the_engine_and_finalizes_the_recording() {
+/// The child's exit status, its stdout, and its marker file's text.
+fn run_child() -> (std::process::ExitStatus, String, String) {
     use std::os::windows::process::CommandExt;
     const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let marker_dir = TempDir(temp_dir("quit-child-ok"));
+    let marker = marker_dir.0.join("ok.txt");
     let mut child = Command::new(std::env::current_exe().unwrap())
         .args([CHILD_TEST, "--exact", "--nocapture", "--test-threads=1"])
         .env(CHILD_ENV, "closed_stderr")
+        .env(CHILD_OK_ENV, &marker)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -91,6 +110,27 @@ fn a_dead_controller_still_quits_the_engine_and_finalizes_the_recording() {
         std::thread::sleep(Duration::from_millis(20));
     };
     let out = reader.join().unwrap();
+    let ok = std::fs::read_to_string(&marker).unwrap_or_default();
+    (status, out, ok)
+}
+
+#[test]
+fn a_dead_controller_still_quits_the_engine_and_finalizes_the_recording() {
+    let (status, out, ok) = run_child();
     assert_eq!(status.code(), Some(0), "clean exit; child stdout: {out}");
-    assert!(out.contains("quit-ok"), "child stdout: {out}");
+    assert_eq!(ok, "quit-ok", "the child reached its end; stdout: {out}");
+}
+
+/// R8-overlay-4: a broken stderr leaves exactly one `encoder_log` line on the protocol
+/// (`stdin_reader::stream_failed`), so the controller's log shows the engine went quiet.
+#[test]
+fn a_broken_stderr_says_so_once_on_the_protocol() {
+    let (_, out, _) = run_child();
+    let notices = out
+        .lines()
+        // The harness may print `test <name> ... ` on the same line, before the protocol line.
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(&l[l.find('{')?..]).ok())
+        .filter(|v| v["type"] == "encoder_log" && v["message"] == crate::stdin_reader::STDERR_LOST)
+        .count();
+    assert_eq!(notices, 1, "child stdout: {out}");
 }
