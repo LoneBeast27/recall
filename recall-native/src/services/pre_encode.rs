@@ -323,7 +323,7 @@ pub fn export(info: &ClipInfo, plan: &EditPlan, fps: u32, settings: &ExportSetti
     let _run = export_run(wanted);
     if let Some(prepared) = wanted.and_then(|key| take_ready(key, backend::export_cancelled)) {
         if source_unchanged(info) {
-            let delivered = deliver(&prepared, info, fps);
+            let delivered = deliver(&prepared, info, fps, settings);
             if let Some(result) = settle(prepared, delivered) {
                 return result;
             }
@@ -386,8 +386,8 @@ fn keep_ready(prepared: Prepared, error: String) -> String {
 }
 
 /// Copies the prepared file into the export folder under a hidden name, then renames it.
-fn deliver(prepared: &Prepared, info: &ClipInfo, fps: u32) -> Result<ExportSummary, Delivery> {
-    let target = backend::export_target(info, fps, false).map_err(Delivery::Failed)?;
+fn deliver(prepared: &Prepared, info: &ClipInfo, fps: u32, settings: &ExportSettings) -> Result<ExportSummary, Delivery> {
+    let target = backend::export_target(info, fps, settings).map_err(Delivery::Failed)?;
     let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("export.mp4").to_owned();
     let hidden = target.with_file_name(format!(".{name}{DELIVERING}"));
     let outdir = target.parent().map(Path::to_path_buf).unwrap_or_default();

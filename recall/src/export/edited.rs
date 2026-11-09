@@ -11,13 +11,13 @@ use super::audio_mux::{payload_totals, EditedAudioMux};
 use super::paths::file_bytes;
 use super::project::{EditedExport, ExportedRange};
 use super::receive_is_drained;
-use super::size_cap::{self, CapInputs, MAX_ATTEMPTS};
+use super::size_cap::{self, MAX_ATTEMPTS};
 use super::timeline::{
     seek_near, ticks_before, timeline_duration_us, timeline_origin_us, trim_decode,
     us_to_seconds, EditTimeline,
 };
 use super::video_encoder::{
-    add_video_stream, open_decoder, open_encoder, output_dims, probe_video, recommended_bitrate, scaler,
+    add_video_stream, open_decoder, open_encoder, probe_video, scaler,
     EncoderSpec, RateControl, SourceVideo, VideoBackend,
 };
 use crate::edit_audio::EncodedAudioTrack;
@@ -48,25 +48,11 @@ pub(super) fn export(
     };
     plan.validate(us_to_seconds(source_duration_us), &audio_indices)?;
     let timeline = EditTimeline::from_plan(plan)?;
-    let (width, height) = output_dims(source.width, source.height, settings.height);
     let audio = crate::edit_audio::encode_edited_audio(input, origin_us, plan)?;
+    let size_cap::VideoPlan { dims: (width, height), fps, mut rate, cap } = size_cap::plan_video(
+        (source.width, source.height), fps, timeline.output_end(), payload_totals(&audio), settings,
+    )?;
     let frames = ticks_before(timeline.output_end(), fps);
-    let quality = recommended_bitrate(width, height, fps);
-    let cap = settings.max_bytes.map(|max_bytes| {
-        let (audio_bytes, audio_packets) = payload_totals(&audio);
-        CapInputs {
-            max_bytes,
-            duration_s: us_to_seconds(timeline.output_end()),
-            audio_bytes,
-            video_frames: frames,
-            audio_packets,
-            quality_bitrate: quality,
-        }
-    });
-    let mut rate = match &cap {
-        Some(inputs) => size_cap::plan_rate(inputs)?,
-        None => RateControl::quality(quality),
-    };
 
     let attempt = Attempt {
         input,

@@ -7,7 +7,7 @@ pub fn export_clip(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)
     validate_info(info)?;validate_fps(fps)?;plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())?;export.validate(plan)?;
     if EXPORTING.compare_exchange(false,true,Ordering::AcqRel,Ordering::Acquire).is_err(){return Err("Another export is running.".into());}
     let _guard=ExportGuard;
-    let output=export_target(info,fps,export.mode==ExportMode::Lossless)?;
+    let output=export_target(info,fps,export)?;
     run_export(info,&output,plan,fps,export,storage::recorder_busy(),engine_export)
 }
 /// The engine run of [`export_clip`] (`engine` is [`engine_export`]; a test passes a fake).
@@ -34,11 +34,18 @@ pub(crate) fn export_queued()->impl Drop{ExportQueueGuard}
 /// Cancel was pressed for the queued export.
 pub(crate) fn export_cancelled()->bool{EXPORT_CANCEL.load(Ordering::Acquire)}
 /// Where an export of `info` lands now (`Recall\Edited`, created if missing).
-pub(crate) fn export_target(info:&ClipInfo,fps:u32,lossless:bool)->Result<PathBuf,String>{
+pub(crate) fn export_target(info:&ClipInfo,fps:u32,export:&ExportSettings)->Result<PathBuf,String>{
     let source=Path::new(&info.path);let outdir=storage::export_dir(source,&library_dir()).ok_or("source has no directory")?;
     std::fs::create_dir_all(&outdir).map_err(|e|format!("create export directory: {e}"))?;
     let stem=source.file_stem().and_then(|v|v.to_str()).unwrap_or("clip");
-    free_name(&outdir,&if lossless{format!("{stem}-trim")}else{format!("{stem}-edited-{fps}fps")})
+    let base = if export.mode == ExportMode::Lossless {
+        format!("{stem}-trim")
+    } else if export.active_priority() == crate::edit_model::ExportPriority::Detail {
+        format!("{stem}-edited-fit")
+    } else {
+        format!("{stem}-edited-{fps}fps")
+    };
+    free_name(&outdir,&base)
 }
 /// `<outdir>\<base>-<n>.mp4` with `n` one past the highest taken (short names people drag into
 /// Discord, sorting by age even after one is deleted; the engine and the prepared copy still
@@ -83,7 +90,8 @@ pub(crate) fn engine_export(info:&ClipInfo,output:&Path,plan:&EditPlan,fps:u32,e
         let report=events.iter().find(|v|v["type"]=="export_report");
         let field=|k:&str|report.and_then(|r|r[k].as_u64());
         let bytes=field("bytes").or_else(||std::fs::metadata(output).ok().map(|m|m.len())).unwrap_or(0);
-        Ok(ExportSummary{path:output.to_string_lossy().into_owned(),fps:if lossless{None}else{Some(fps)},frames:done["frames"].as_u64().ok_or("Missing frame count.")?,seconds:done["seconds"].as_f64().ok_or("Missing duration.")?,bytes,lossless,width:field("width").unwrap_or(0) as u32,height:field("height").unwrap_or(0) as u32})
+        let actual_fps = (!lossless).then(|| field("fps").and_then(|n| u32::try_from(n).ok()).unwrap_or(fps));
+        Ok(ExportSummary{path:output.to_string_lossy().into_owned(),fps:actual_fps,frames:done["frames"].as_u64().ok_or("Missing frame count.")?,seconds:done["seconds"].as_f64().ok_or("Missing duration.")?,bytes,lossless,width:field("width").unwrap_or(0) as u32,height:field("height").unwrap_or(0) as u32})
     })();
     let _=std::fs::remove_file(&project);result
 }

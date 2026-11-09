@@ -109,6 +109,7 @@ powershell -NoProfile -File scripts\install.ps1
   never changes; undoing every edit removes that file and the Edited label, unless the clip has
   an export. Cancel export stops
   a running export and leaves nothing behind.
+- For a re-encoded export with a size limit, choose **Motion** to keep the selected FPS or **Detail** to trade frame rate for resolution. Both modes choose the resolution automatically. Switch to **Manual** to edit frame rate and resolution. The finished export shows its actual size, resolution, and FPS.
 - **Old clips:** Settings → Media → Add folder lists clips from ShadowPlay, Medal, OBS or any
   folder in the library. Nothing is moved. A folder that was the recordings folder before stays
   Recall's own: Delete still sends its clips to the Recycle Bin and their edits stay beside them.

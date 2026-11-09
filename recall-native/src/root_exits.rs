@@ -103,7 +103,8 @@ impl Root {
         let orphan = match self.focused_field(window) {
             Some(Field::Search) => self.route != Route::Library || !self.lib.selection.is_empty(),
             Some(Field::Rename) => self.lib.renaming.is_none(),
-            Some(Field::Fps) => self.route != Route::Editor || !self.fps_custom || self.ed.lossless(),
+            Some(Field::Fps) => self.route != Route::Editor || !self.fps_custom || self.ed.lossless()
+                || self.ed.export_settings.active_priority() != crate::edit_model::ExportPriority::Manual,
             Some(Field::CacheSize) => !self.cache.editing,
             None => false,
         };
