@@ -9,6 +9,22 @@ Recall needs an NVIDIA GPU (NVENC). There is no CPU video encoder.
 
 Recall was created by **LoneBeast27**. Official Recall downloads are free. Recall’s own code is released under [GPL-3.0-or-later](LICENSE), which allows commercial use and redistribution. If you distribute a modified build, keep the copyright and license notices and clearly mark your changes and their dates. The [upstream Recall repository](https://github.com/LoneBeast27/recall) is the reference for the original source. See [NOTICE.md](NOTICE.md) for credits and third-party terms.
 
+## Privacy
+
+Clips, screenshots, edits, the library and settings stay on your PC; Recall has no account,
+telemetry or analytics. The only network traffic is:
+
+- **Update check:** official versioned builds ask the GitHub API for the latest release
+  (`api.github.com/repos/LoneBeast27/recall/releases/latest`, then a compare of its tag with
+  `main`) shortly after the app opens. Turn it off with **Settings → General → Check for updates
+  automatically**; nothing is then sent unless you press **Check now**. An update's
+  `RecallSetup.exe` is downloaded from the GitHub release only when you choose to install it.
+- **Setup:** downloads the pinned FFmpeg runtime from Gyan's GitHub release and, when it is
+  missing, the Microsoft Visual C++ x64 runtime from Microsoft; on Windows N it can add the
+  Media Feature Pack through Windows Update.
+
+Nothing else is sent. Details: [Code signing policy](CODE_SIGNING_POLICY.md).
+
 ## Install
 
 Open `dist/recall-current/RecallSetup.exe` for Quick Setup. Choose whether recording starts when setup is complete and whether to set up Windows game detection and FPS. **Change…** opens the SSD install folder picker from Quick Setup. **Advanced** also lets you type a folder or change the Start menu shortcut. After installation, **Continue setup** opens Storage, Audio, and Recording quality. Recording quality compares the same full frame before and after encoding, with a detail crop available. Choose **Open Recall** to reach your library. Updates keep your existing clip folder and recording settings.
@@ -19,7 +35,7 @@ Setup checks the PC before copying Recall. Release Setup downloads the pinned FF
 
 Official versioned builds check [Recall's GitHub Releases](https://github.com/LoneBeast27/recall/releases) after launch. You can also check in **Settings → General → About**. Recall offers a newer stable release once it verifies that the tag is on `main`. It verifies the Setup download against GitHub's SHA-256 before opening Setup for confirmation.
 
-Run `powershell -NoProfile -File scripts\release.ps1 -Version <major.minor.patch>` from a clean checkout of the current public `main` to build without installing. The output contains `RecallSetup.exe`, `SHA256SUMS.txt`, `SOURCE-REVISION.txt`, and four Recall executables in `recall-app` for individual scans. Use a matching `v<major.minor.patch>` tag on that source revision. A draft can be verified before publishing.
+Official releases are built by the [release workflow](.github/workflows/release.yml) on a GitHub-hosted runner and signed under the [code signing policy](CODE_SIGNING_POLICY.md). `scripts\release.ps1 -Version <major.minor.patch> -ArtifactDirectory <extracted CI bundle>` checks a CI bundle (source revision, SHA-256, version) and refuses an unsigned Setup once signing is configured. Run `powershell -NoProfile -File scripts\release.ps1 -Version <major.minor.patch>` from a clean checkout of the current public `main` to build without installing. The output contains `RecallSetup.exe`, `SHA256SUMS.txt`, `SOURCE-REVISION.txt`, and four Recall executables in `recall-app` for individual scans. Use a matching `v<major.minor.patch>` tag on that source revision. A draft can be verified before publishing.
 
 Run `Get-Help scripts/dev/scan-release.ps1 -Examples` for a per-file Defender scan of the installer, app binaries, and vendor downloads.
 
@@ -159,6 +175,13 @@ hook loaded crashed VALORANT, so it was removed on 2026-10-26.)
 
 The Audio page shows live meters for every source.
 
+> **Warning:** the experimental HDR features below change Windows display settings for the
+> whole system: the monitor's HDR mode, the SDR content brightness, the desktop colour profile,
+> and the NVIDIA (NvAPI) colour gamut clamp. Recall puts them back when it exits, and the next
+> recorder start repairs what a crash left switched; until then they stay changed for every
+> app (reset them in Windows Settings → Display or the NVIDIA Control Panel, or run
+> `recall-hdr.exe --restore`). They are off unless you opt in.
+
 HDR switching (turning the monitor's HDR on for HDR games, the manual HDR toggle and its
 hotkey, the desktop colour profile, the NvAPI clamp test and the Display & HDR page) is
 experimental and shelved since 2026-11-04: the recorder never changes a display setting
@@ -266,6 +289,9 @@ powershell -NoProfile -File scripts\dev\engine-cost.ps1 [-Seconds 30] [-MaxMsPer
 ```
 
 The app uses its own target folder (`target-gpui`) because GPUI pins different dependency
-versions. Tests that need NVENC or a live game are `#[ignore]`d. Status, verification and
-open items: [.planning/STATE.md](.planning/STATE.md); the scope and every ruling:
-[.planning/FINISH_SPEC.md](.planning/FINISH_SPEC.md).
+versions. Tests that need NVENC or a live game are `#[ignore]`d; the release workflow runs
+the rest on a GitHub-hosted runner.
+
+Dev scripts that need this PC's values (monitor ids, clip folders, profile paths) read them from
+`.local/machine.json` (gitignored): run `scripts\dev\init-machine.ps1 -List`, then
+`init-machine.ps1` with the values; the template is `.local.example\machine.example.json`.
