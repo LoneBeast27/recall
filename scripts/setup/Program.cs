@@ -16,6 +16,8 @@ namespace Recall.Setup
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            int handled;
+            if (SetupModes.TryRun(args, out handled)) return handled;
             string updatePath = null;
             if (args.Length == 2 && args[0].Equals("--update", StringComparison.OrdinalIgnoreCase))
                 updatePath = SetupPackage.ExistingInstallPath(args[1]);
