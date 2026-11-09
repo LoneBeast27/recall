@@ -63,9 +63,49 @@ namespace Recall.Setup.Tests
             Check(!TempCopy.IsOurFolder(temp.TrimEnd('\\'), temp), "never %TEMP% itself");
             Check(!TempCopy.IsOurFolder(temp + "Recall-Uninstall-x", temp), "exact name only");
             Check(!TempCopy.IsOurFolder(temp + @"sub\Recall-Uninstall-0123456789abcdef0123456789abcdef", temp), "directly in %TEMP% only");
-            var args = TempCopy.CleanupArguments(ours);
-            Check(args.Contains("rmdir /s /q \"" + ours + "\"") && args.Contains("(1,1,60)") && !args.ToLowerInvariant().Contains("powershell"), args);
         }
+
+        private static void TempCopySweep()
+        {
+            var root = Path.Combine(Path.GetTempPath(), "recall-setup-sweep-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            try
+            {
+                var ours = Path.Combine(root, "Recall-Uninstall-0123456789abcdef0123456789abcdef");
+                Directory.CreateDirectory(ours);
+                File.WriteAllText(Path.Combine(ours, "RecallUninstall.exe"), "x");
+                var near = Path.Combine(root, "Recall-Uninstall-not-ours");
+                Directory.CreateDirectory(near);
+                var nested = Path.Combine(root, "Recall-Uninstall-11111111111111111111111111111111");
+                Directory.CreateDirectory(Path.Combine(nested, "sub"));
+                var other = Path.Combine(root, "Other");
+                Directory.CreateDirectory(other);
+                var target = Path.Combine(root, "target");
+                Directory.CreateDirectory(target);
+                File.WriteAllText(Path.Combine(target, "keep.txt"), "keep");
+                var link = Path.Combine(root, "Recall-Uninstall-22222222222222222222222222222222");
+                // Unprivileged directory symlink (needs Developer Mode); without it the link case is reported skipped.
+                var linked = CreateSymbolicLinkW(link, target, 0x1 | 0x2);
+                var removed = TempCopy.Sweep(root, line => { });
+                Check(!Directory.Exists(ours), "the matching copy is removed");
+                Check(Directory.Exists(near) && Directory.Exists(other), "non-matching folders kept");
+                Check(Directory.Exists(Path.Combine(nested, "sub")), "a matching folder with a subfolder is kept");
+                Check(File.Exists(Path.Combine(target, "keep.txt")), "a link's target is never touched");
+                Check(removed == 1, "exactly one removed (" + removed + ")");
+                if (linked) Check(Directory.Exists(link), "a reparse point named like ours is kept");
+                else Console.WriteLine("  (skipped: reparse-point case, symlink creation not permitted)");
+            }
+            finally
+            {
+                foreach (var dir in Directory.GetDirectories(root))
+                    if ((File.GetAttributes(dir) & FileAttributes.ReparsePoint) != 0) Directory.Delete(dir, false);
+                Directory.Delete(root, true);
+            }
+        }
+
+        [System.Runtime.InteropServices.DllImport("kernel32.dll", CharSet = System.Runtime.InteropServices.CharSet.Unicode)]
+        [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.I1)]
+        private static extern bool CreateSymbolicLinkW(string link, string target, int flags);
 
         private static void ManifestMerge()
         {

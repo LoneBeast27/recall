@@ -27,6 +27,7 @@ namespace Recall.Setup.Tests
             Run("cache: only provably regenerable files are deleted", CacheClassification);
             Run("kept clip copies are counted in the closing note", KeptNoteCounts);
             Run("the uninstaller's temporary copy cleans only its own folder", TempCopyFolder);
+            Run("the next Setup run sweeps only leftover uninstaller copies", TempCopySweep);
             Run("the manifest keeps earlier files still unchanged", ManifestMerge);
             Run("Run values and clip folder settings are read", RunValueAndFolders);
             Run("drive classification", DriveKinds);

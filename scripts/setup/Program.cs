@@ -16,6 +16,8 @@ namespace Recall.Setup
         {
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
+            // Leftover %TEMP%\Recall-Uninstall-<hex> copies from an earlier uninstall (best-effort).
+            TempCopy.Sweep(Path.GetTempPath(), line => { });
             int handled;
             if (SetupModes.TryRun(args, out handled)) return handled;
             string updatePath = null;
