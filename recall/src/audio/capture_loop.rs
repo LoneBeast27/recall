@@ -194,6 +194,9 @@ pub(super) fn capture_loop<C: Capture>(
     // Failed reopens back off: 2 s, 4 s, 8 s, then every 10 s, and back to 2 s once it opens.
     let mut failures = 0u32;
     loop {
+        if !wait_startup_hold(ring, &mut level, clock, &mut init_tx) {
+            return;
+        }
         let mut wait = true;
         match open(init_tx.is_none()) {
             Ok(mut stream) => {
@@ -253,6 +256,28 @@ pub(super) fn capture_loop<C: Capture>(
     }
 }
 
+/// The endpoint text of a track whose start is held (merge-gate F4/F7).
+pub(crate) const STARTUP_HELD: &str = "Held: waiting for the recorder's settings";
+
+/// While the startup hold is set (stdin not drained in time) no stream opens, input or output
+/// (merge-gate F4): the first open reads the device the last applied `set_source` names, never
+/// a stale one or a twin the user rejected. The track starts (`init_tx`) as held, level with
+/// silence. False: the clock ended the loop (tests only).
+fn wait_startup_hold(ring: &TrackRing, level: &mut Leveller, clock: &mut dyn Clock, init_tx: &mut Option<Sender<Result<(), String>>>) -> bool {
+    while ring.startup_held() {
+        // The safe state: no device stream exists while held.
+        if let Some(tx) = init_tx.take() {
+            set_endpoint(ring, STARTUP_HELD.to_owned());
+            let _ = tx.send(Ok(()));
+        }
+        if !clock.pause(TICK) {
+            return false;
+        }
+        silence_to_clock(ring, level, &*clock);
+    }
+    true
+}
+
 /// The notices a stream runs with: the device notice taken at its open (`missed`) comes back on
 /// its first `take_devices_changed`.
 struct Queued<'a> {
@@ -297,6 +322,10 @@ mod own_device_tests;
 #[cfg(test)]
 #[path = "id_pick_loop_tests.rs"]
 mod id_pick_loop_tests;
+
+#[cfg(test)]
+#[path = "startup_hold_tests.rs"]
+mod startup_hold_tests;
 
 #[cfg(test)]
 #[path = "alloc_tests.rs"]

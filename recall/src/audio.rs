@@ -432,8 +432,8 @@ fn source_of(kind: Option<Kind>, process: bool) -> &'static str {
 /// instead of the source's endpoint.
 fn start_track(spec: &SourceSpec, buffer_secs: u32, target: Option<LoopbackTarget>, hold: bool) -> Result<Arc<TrackRing>, String> {
     let ring = Arc::new(TrackRing::for_source(spec, source_of(spec.kind(), target.is_some()), buffer_secs, String::new()));
-    if hold && ring.input {
-        ring.hold_startup(); // before its capture thread stores a packet (merge-gate P1-1)
+    if hold {
+        ring.hold_startup(); // before its capture thread starts: no stream opens while held (F4)
     }
     let direction = if spec.kind() == Some(Kind::Input) { Direction::Capture } else { Direction::Render };
     let device = (spec.device.clone(), spec.device_id.clone());
