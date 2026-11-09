@@ -323,7 +323,12 @@ pub(crate) fn ac_profile_file(display: &crate::config::DisplayCfg, variant: &str
         "accurate" => &display.accurate_profile,
         _ => return Err(format!("unknown set_ac_profile variant '{variant}' (expected punchy | accurate)")),
     };
-    file.as_deref().map(str::trim).filter(|f| !f.is_empty()).map(str::to_owned).ok_or_else(|| format!("no {variant} colour profile is set in [display] {variant}_profile"))
+    let file = file.as_deref().map(str::trim).filter(|f| !f.is_empty()).ok_or_else(|| format!("no {variant} colour profile is set in [display] {variant}_profile"))?;
+    // A plain file name in the Windows colour store, as the app's row checks: no folder, drive or `..`.
+    if std::path::Path::new(file).file_name() != Some(std::ffi::OsStr::new(file)) {
+        return Err(format!("[display] {variant}_profile must be a file name in the Windows colour store, not a path: '{file}'"));
+    }
+    Ok(file.to_owned())
 }
 
 /// The `hdr` module's `ac_profile` result event, escaped by serde_json.
@@ -379,6 +384,10 @@ mod tests {
         display.accurate_profile = Some("  ".into());
         assert_eq!(ac_profile_file(&display, "punchy").unwrap(), "Panel_Punchy_MHC2.icm");
         assert!(ac_profile_file(&display, "accurate").is_err(), "a blank name counts as unset");
+        for path in [r"..\x.icm", r"C:\x.icm", "C:x.icm", "a/x.icm", ".."] {
+            display.accurate_profile = Some(path.into());
+            assert!(ac_profile_file(&display, "accurate").unwrap_err().contains("not a path"), "{path}");
+        }
         assert!(ac_profile_file(&display, "vivid").unwrap_err().contains("unknown"));
     }
 }
