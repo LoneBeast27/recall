@@ -49,6 +49,25 @@ pub(crate) fn overlay_hotkey_patch(overlay: &OverlayCfg) -> serde_json::Value {
     }
 }
 
+/// The overlay shortcut's own pop-up when it hides the overlay: forced through (`always`),
+/// since notices are hidden from now on.
+pub(crate) fn overlay_hidden_notice(hotkey: &str) -> String {
+    let detail = if hotkey.is_empty() { "Settings shows it again".to_owned() } else { format!("{hotkey} to show") };
+    shortcut_notice_json("Overlay hidden", &detail, false, true)
+}
+
+/// Turning notices or stats on (Settings, the stats shortcut) also clears the overlay
+/// shortcut's `hidden`, unless the patch names `hidden` itself: an enable must show.
+pub(crate) fn unhide_on_enable(mut patch: serde_json::Value) -> serde_json::Value {
+    if let Some(serde_json::Value::Object(overlay)) = patch.get_mut("overlay") {
+        let enables = ["enabled", "stats"].iter().any(|k| overlay.get(*k) == Some(&serde_json::Value::Bool(true)));
+        if enables && !overlay.contains_key("hidden") {
+            overlay.insert("hidden".into(), serde_json::Value::Bool(false));
+        }
+    }
+    patch
+}
+
 impl Controller {
     /// (Re)register every hotkey from config; conflicts and OS refusals are
     /// `session` error events, never fatal.
@@ -220,12 +239,19 @@ impl Controller {
     /// Hide or show the whole overlay immediately. Resume the selected surfaces.
     fn toggle_overlay(&mut self) {
         let patch = overlay_hotkey_patch(&self.cfg.overlay);
+        let hiding = self.cfg.overlay.wants_process();
+        if hiding {
+            self.overlay.linger(); // keep the process up to show the pop-up below
+        }
         if !self.apply_config_patch(&patch, None) {
             return;
         }
         let shown = self.cfg.overlay.wants_process();
         log!("record: overlay {}", if shown { "shown" } else { "hidden" });
         crate::cues::tick();
+        if hiding && !shown {
+            self.hub.event("session", &overlay_hidden_notice(&self.cfg.recording.overlay_hotkey));
+        }
         self.pending_notice = self.cfg.overlay.shows_notices().then(|| {
             let notice = shortcut_notice_json("Overlay on", "Notices show over any app", false, false);
             (notice, Instant::now() + Duration::from_secs(4))
@@ -460,3 +486,7 @@ impl crate::record_dispatch::CommandPort for ControllerCommand<'_> {
         self.ctl.command_not_sent(self.cmd, self.client, reason);
     }
 }
+
+#[cfg(test)]
+#[path = "record_overlay_hidden_tests.rs"]
+mod overlay_hidden_tests;
