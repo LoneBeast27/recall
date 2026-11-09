@@ -18,7 +18,8 @@ fn normalized(path: &Path) -> String {
         let tail = absolute.strip_prefix(ancestor).ok()?;
         Some(real.join(tail))
     }).unwrap_or(absolute);
-    real.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase()
+    // A path that does not exist yet keeps the form it was given: drop a `\\?\` prefix too.
+    super::plain_path(&real).to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase()
 }
 
 /// `inner` is `outer` or lies inside it (both normalized).

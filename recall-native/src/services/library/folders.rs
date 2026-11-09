@@ -213,8 +213,13 @@ pub fn check_cache_overlap(folders: &Folders) -> Option<String> {
 }
 
 /// Case-insensitive, separator-normalized, no trailing slash.
+/// The comparable form of a path, used wherever ownership, links and folder membership are
+/// decided: no verbatim prefix (`\\?\L:\x` is `L:\x`, `\\?\UNC\nas\x` is `\\nas\x`; the editor
+/// holds a clip by its canonical path, the folder list by the plain one), `\` separators, no
+/// trailing `\`, lowercase.
 pub fn folder_key(folder: &str) -> String {
-    folder.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+    let plain = crate::services::storage::plain_path(Path::new(folder));
+    plain.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase()
 }
 
 /// True when `path` lies inside `folder` (both plain absolute paths).
