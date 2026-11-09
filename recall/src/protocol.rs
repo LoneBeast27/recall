@@ -321,6 +321,13 @@ pub enum Command {
     /// The Windows session locked (Win+L) or unlocked: a long recording keeps going and
     /// counts the time (`recording_stopped.locked_seconds`).
     SessionLocked { locked: bool },
+    /// The controller restated its whole audio intent (mute, every source's flag and id):
+    /// every line before this one was queued first, so once it is read the device tracks may
+    /// record (`audio::sources::sync_read`). `seq`: the restatement's sequence number.
+    Sync {
+        #[serde(default)]
+        seq: u64,
+    },
     /// Ask the engine to exit cleanly.
     Quit,
 }

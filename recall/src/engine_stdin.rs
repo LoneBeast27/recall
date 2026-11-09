@@ -2,6 +2,8 @@
 //! (merge gate p9, mute race): an Alt+M the controller sends right after the spawn applies at
 //! once (`audio::set_mic_muted`, read by every packet), not after every track has started. The
 //! other commands wait in a channel until the encoder and hooks exist ([`serve`]).
+//! Every device track starts held and records only after the controller's `sync` line, read in
+//! order after its restatement (the sync handshake, `audio::sources::sync_read`): no timing guess.
 
 use std::io::BufRead;
 use std::sync::mpsc::{channel, Receiver};
@@ -51,9 +53,28 @@ fn apply_mute(cmd: Command) -> Command {
             audio::sources::stage_early(&id, mic_mute, device_id.as_deref());
             Command::SetSource { id, gain_db, name, mic_mute: None, device_id: None } // the safe state
         }
+        // The controller's restatement is complete (the sync handshake): the startup hold ends
+        // once every track is listed too (`sources::sync_read`).
+        Command::Sync { .. } => {
+            audio::sources::sync_read();
+            cmd
+        }
         cmd => cmd,
     }
 }
+
+/// Whether the device tracks start held. Always, when a controller drives this engine: only its
+/// `sync` releases them. A controller that never sends one (it does not set
+/// `RECALL_STDIN_SYNC`: an older build) leaves them held for the run, the safe state.
+pub(crate) fn startup_hold() -> bool {
+    if std::env::var_os(SYNC_ENV).is_none() {
+        eprintln!("[recall] stdin: {SYNC_ENV} is not set (an older controller); the device audio tracks stay held for this run");
+    }
+    true
+}
+
+/// The controller sets this when it will send `sync` after its restatement.
+pub(crate) const SYNC_ENV: &str = "RECALL_STDIN_SYNC";
 
 #[cfg(not(feature = "encode"))]
 fn apply_mute(cmd: Command) -> Command {
@@ -107,6 +128,7 @@ fn apply(cmd: Command, shared: &CaptureShared, (save, export): (&Option<SaveHook
         | Command::SessionLocked { .. }) => {
             extras.handle(&cmd);
         }
+        Command::Sync { .. } => {} // applied by the reader, in order
         Command::Quit => {} // read_commands sets `quit`
     }
 }
@@ -114,3 +136,7 @@ fn apply(cmd: Command, shared: &CaptureShared, (save, export): (&Option<SaveHook
 #[cfg(all(test, feature = "encode"))]
 #[path = "engine_stdin_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "encode"))]
+#[path = "engine_sync_tests.rs"]
+mod sync_tests;

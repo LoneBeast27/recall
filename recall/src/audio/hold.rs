@@ -42,7 +42,7 @@ pub(crate) struct Live {
     repick: AtomicBool,
     /// A re-pick thread of this track runs (`rebind`): at most one at a time.
     pub(super) repick_slot: Arc<AtomicBool>,
-    /// Silence whatever Alt+M says: stdin was not drained before the start (merge-gate P1-1).
+    /// Silence whatever Alt+M says: the controller's `sync` was not read yet (the sync handshake).
     startup: AtomicBool,
 }
 
@@ -168,7 +168,7 @@ impl TrackRing {
         self.push_samples(data, now.muted, held || startup);
     }
 
-    /// Stdin was not drained before the start (merge-gate P1-1): this input stores silence
+    /// Held until the controller's `sync` (the sync handshake): this input stores silence
     /// until [`Self::release_startup_hold`], whatever Alt+M or its flag says.
     pub(crate) fn hold_startup(&self) {
         self.live.startup.store(true, Ordering::SeqCst);
@@ -185,6 +185,12 @@ impl TrackRing {
         self.live.held.load(Ordering::SeqCst) || self.startup_held()
     }
 
+    /// Tests: the endpoint id the next open picks with.
+    #[cfg(test)]
+    pub(crate) fn saved_id_for_test(&self) -> String {
+        self.live.saved_id()
+    }
+
     /// Tests: the source's "Alt+M mutes it" flag as set (live) now.
     #[cfg(test)]
     pub(crate) fn mic_mute_flag(&self) -> bool {
@@ -194,6 +200,12 @@ impl TrackRing {
     pub(crate) fn startup_held(&self) -> bool {
         self.live.startup.load(Ordering::SeqCst)
     }
+}
+
+/// Whether a track starts held (the sync handshake): every device track under a controller
+/// (`hold`); a process-loopback track never, as no line can change what it captures.
+pub(crate) fn starts_held(hold: bool, process_loopback: bool) -> bool {
+    hold && !process_loopback
 }
 
 impl TrackRing {

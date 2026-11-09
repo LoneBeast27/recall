@@ -37,9 +37,9 @@ impl Read for Pipe {
 static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// Puts the global mute back as it was, then lets the next test in.
-struct Restore(bool, #[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+pub(super) struct Restore(bool, #[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
 
-fn restore() -> Restore {
+pub(super) fn restore() -> Restore {
     let lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
     Restore(audio::mic_muted(), lock)
 }
@@ -50,7 +50,7 @@ impl Drop for Restore {
     }
 }
 
-fn spawn(quit: Arc<AtomicBool>) -> (Sender<Vec<u8>>, Receiver<Command>) {
+pub(super) fn spawn(quit: Arc<AtomicBool>) -> (Sender<Vec<u8>>, Receiver<Command>) {
     let (line_tx, line_rx) = channel();
     let (tx, rx) = channel();
     std::thread::spawn(move || {
@@ -169,7 +169,7 @@ fn a_release_between_the_mute_read_and_the_hold_read_stores_no_live_sample() {
 }
 
 /// Staging open again when a test that closed it ends, a panic included.
-struct Reopen;
+pub(super) struct Reopen;
 
 impl Drop for Reopen {
     fn drop(&mut self) {

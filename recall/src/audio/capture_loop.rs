@@ -259,7 +259,7 @@ pub(super) fn capture_loop<C: Capture>(
 /// The endpoint text of a track whose start is held (merge-gate F4/F7).
 pub(crate) const STARTUP_HELD: &str = "Held: waiting for the recorder's settings";
 
-/// While the startup hold is set (stdin not drained in time) no stream opens, input or output
+/// While the startup hold is set (until the controller's `sync`) no stream opens, input or output
 /// (merge-gate F4): the first open reads the device the last applied `set_source` names, never
 /// a stale one or a twin the user rejected. The track starts (`init_tx`) as held, level with
 /// silence. False: the clock ended the loop (tests only).

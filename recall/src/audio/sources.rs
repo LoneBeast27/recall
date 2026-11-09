@@ -159,7 +159,7 @@ pub fn from_env() -> Result<Vec<SourceSpec>, String> {
 /// ([`stage_early`]) laid over it, so they are in force from the first packet.
 pub fn resolve_for_start(get: impl Fn(&str) -> Option<String>) -> Result<Vec<SourceSpec>, String> {
     let mut list = resolve(get)?;
-    let staged = EARLY.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let staged = lock_early().staged.clone();
     for (id, mic_mute, device_id) in staged.into_iter().flatten() {
         for spec in list.iter_mut().filter(|s| s.id.trim() == id.trim()) {
             if let Some(on) = mic_mute {
@@ -175,7 +175,21 @@ pub fn resolve_for_start(get: impl Fn(&str) -> Option<String>) -> Result<Vec<Sou
 
 /// `set_source` flags and ids read before the tracks start, in order; None once they started.
 type Staged = Vec<(String, Option<bool>, Option<String>)>;
-static EARLY: Mutex<Option<Staged>> = Mutex::new(Some(Vec::new()));
+
+/// The start of the stdin protocol, under one lock: the lines staged before the tracks are
+/// listed, and whether the controller's `sync` was read (the startup hold ends on both).
+struct Early {
+    /// `set_source` flags and ids read before the tracks start, in order; None once listed.
+    staged: Option<Staged>,
+    /// `sync` was read: every line the controller queued before it was applied, in order.
+    synced: bool,
+}
+
+static EARLY: Mutex<Early> = Mutex::new(Early { staged: Some(Vec::new()), synced: false });
+
+fn lock_early() -> std::sync::MutexGuard<'static, Early> {
+    EARLY.lock().unwrap_or_else(|p| p.into_inner())
+}
 
 /// A `set_source` read from stdin (review R2-audio-r9-2): before the tracks start, its mic-mute
 /// flag and device id are noted for [`resolve_for_start`]; once they started ([`close_staging`])
@@ -185,7 +199,7 @@ pub fn stage_early(id: &str, mic_mute: Option<bool>, device_id: Option<&str>) {
     if mic_mute.is_none() && device_id.is_none() {
         return;
     }
-    if let Some(staged) = EARLY.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
+    if let Some(staged) = lock_early().staged.as_mut() {
         return staged.push((id.to_owned(), mic_mute, device_id.map(str::to_owned)));
     }
     set_live(id, LiveChange { mic_mute, device_id, ..LiveChange::default() });
@@ -203,10 +217,45 @@ pub(super) fn close_staging() {
 /// apply (merge-gate F2): a newer `set_source` read meanwhile waits in [`stage_early`] and goes
 /// live after the older staged ones, never before them (lock order EARLY, then STATES).
 fn close_staging_with(mut apply: impl FnMut(&str, LiveChange)) {
-    let mut early = EARLY.lock().unwrap_or_else(|p| p.into_inner()); // held to the end: the safe state
-    for (id, mic_mute, device_id) in early.take().into_iter().flatten() {
+    let mut early = lock_early(); // held to the end: the safe state
+    for (id, mic_mute, device_id) in early.staged.take().into_iter().flatten() {
         apply(&id, LiveChange { mic_mute, device_id: device_id.as_deref(), ..LiveChange::default() });
     }
+    if early.synced {
+        release_startup_holds(); // `sync` came first: every line before it is now on its track
+    }
+}
+
+/// The controller's `sync` was read (the sync handshake): every line it queued before it was
+/// applied, in order (one writer, one FIFO pipe, one reader). The device tracks record once
+/// they are also listed ([`close_staging`]); whichever of the two comes second releases them,
+/// under the `EARLY` lock, after the staged lines went to their tracks. Nothing else releases
+/// them: no `sync` (an old controller, a read error, the end of stdin) keeps them held.
+pub fn sync_read() {
+    let mut early = lock_early();
+    early.synced = true;
+    if early.staged.is_none() {
+        release_startup_holds();
+    }
+}
+
+/// Whether the startup hold has ended (`sync` read and every track listed).
+pub fn startup_released() -> bool {
+    let early = lock_early();
+    early.synced && early.staged.is_none()
+}
+
+/// The startup hold of every listed track ends (called with `EARLY` held; lock order EARLY,
+/// then STATES).
+fn release_startup_holds() {
+    if let Ok(states) = STATES.lock() {
+        for (_, _, state) in states.iter() {
+            if let State::Live(ring) = state {
+                ring.release_startup_hold();
+            }
+        }
+    }
+    eprintln!("[recall] stdin: the controller's settings are applied; the audio tracks record");
 }
 
 /// Tests: [`close_staging_with`], then staging open again (every staging test holds one lock).
@@ -217,7 +266,7 @@ pub(crate) fn close_staging_for_test(apply: impl FnMut(&str, LiveChange)) {
 
 #[cfg(test)]
 pub(crate) fn reopen_staging_for_test() {
-    *EARLY.lock().unwrap_or_else(|p| p.into_inner()) = Some(Vec::new());
+    *lock_early() = Early { staged: Some(Vec::new()), synced: false };
 }
 
 /// Tests: list `ring` as the live track of input source `id` (as `audio::start` does).
