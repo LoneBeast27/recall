@@ -26,7 +26,7 @@ fn waits_for_a_keyframe_then_writes_each_packet_one_step_late() {
     assert_eq!(log.videos(), vec![(0, 16 * MS, true, 2), (16 * MS, 34 * MS, false, 3)], "VFR durations from the next PTS");
     // The tail packet reuses the previous duration: (1070 + 34 - 1020) ms.
     let events = rec.stop();
-    assert_eq!(events, vec![Event::Stopped { path: path.clone(), seconds: 0.084, bytes: 4, marks: 0 }]);
+    assert_eq!(events, vec![Event::Stopped { path: path.clone(), seconds: 0.084, bytes: 4, marks: 0, parts: 1, total_seconds: 0.084, gap_seconds: 0.0, frozen_seconds: 0.0 }]);
     assert_eq!(log.videos().last(), Some(&(50 * MS, 34 * MS, false, 4)));
     assert!(path.is_file(), "renamed into place");
     assert!(!naming::part_of(&path).exists(), "no .part left");
@@ -70,17 +70,21 @@ fn audio_is_placed_by_wall_clock_padded_and_trimmed() {
     // 600 ms of nothing (silent loopback), then a chunk: the gap is padded so
     // the chunk sits at its real-time position (30_000 frames in).
     rec.audio(0, &chunk(480), at(635));
-    assert_eq!(log.audio(0), vec![480, 480, -29_040, 480]);
     // A device running ahead of real time: the excess is trimmed at the front.
     rec.audio(1, &chunk(48_000), at(1_000));
     rec.audio(1, &chunk(480), at(1_010));
     rec.audio(1, &chunk(9_600), at(1_020)); // 200 ms claimed, only the last 10 ms are new
-    assert_eq!(log.audio(1), vec![48_000, 480, 480]);
     rec.audio(1, &chunk(480), at(900)); // entirely behind what was written
-    assert_eq!(log.audio(1).len(), 3, "a fully overlapping chunk writes nothing");
-    let mic_written: i64 = log.audio(1).iter().sum();
-    assert_eq!(mic_written, 48_960, "track 1 ends exactly at 1020 ms of real time");
     rec.stop();
+    // Where the samples land (the limiter holds ~10 ms until stop, so call sizes say nothing):
+    // two chunks from frame 0, 29_040 frames of padding, the late chunk at its real time.
+    let frames = |track: usize| log.pcm(track).iter().step_by(2).copied().collect::<Vec<f32>>();
+    let game = frames(0);
+    assert_eq!(game.len(), 30_480);
+    assert!(game[..960].iter().all(|s| *s == 0.1) && game[960..30_000].iter().all(|s| *s == 0.0) && game[30_000..].iter().all(|s| *s == 0.1), "placed by wall clock");
+    let mic = frames(1);
+    assert_eq!(mic.len(), 48_960, "track 1 ends exactly at 1020 ms of real time: the excess was trimmed, the overlapping chunk wrote nothing");
+    assert!(mic.iter().all(|s| *s == 0.1), "no padding inside track 1");
 }
 
 #[test]
@@ -140,8 +144,8 @@ fn a_failing_sink_keeps_the_partial_recording() {
 }
 
 #[test]
-fn marks_land_in_the_recording_sidecar_and_a_reopen_ends_it() {
-    let (mut rec, _log, path) = recorder("marks");
+fn marks_land_in_the_recording_sidecar_and_a_reopen_continues_in_a_new_file() {
+    let (mut rec, log, path) = recorder("marks");
     let t0 = Instant::now();
     rec.start(path.clone(), Some((0, t0)), t0);
     rec.mark(5 * MS); // before the first frame: ignored (armed)
@@ -149,12 +153,75 @@ fn marks_land_in_the_recording_sidecar_and_a_reopen_ends_it() {
     rec.mark(600 * MS);
     rec.video(1_100 * MS, false, pkt(2), false, t0);
     rec.mark(1_100 * MS);
-    let events = rec.encoder_reopened();
+    let later = t0 + PART_GAP; // part 1 is older than the part gap: part 2 may start at once
+    let events = rec.encoder_reopened(later, Cause::Size, None);
     assert!(matches!(&events[0], Event::Log(_)));
-    assert!(matches!(&events[1], Event::Stopped { marks: 2, .. }), "{events:?}");
+    assert!(matches!(&events[1], Event::Continued { path: p, marks: 2, .. } if *p == path), "{events:?}");
+    assert_eq!(events.len(), 2, "{events:?}");
     let sidecar = crate::bookmarks::sidecar_path(&path);
     assert_eq!(std::fs::read_to_string(sidecar).unwrap(), r#"{"version":1,"marks":[0.5,1.0]}"#);
-    assert!(rec.encoder_reopened().is_empty(), "nothing to end when idle");
+    assert!(path.is_file() && !naming::part_of(&path).exists(), "part 1 finished and renamed");
+    assert!(rec.is_active(), "armed for part 2");
+    assert!(rec.encoder_reopened(later, Cause::Size, None).is_empty(), "armed: nothing to end");
+    // Part 2 starts on the new encoder's first keyframe, with its own timeline.
+    let second = path.with_file_name("G__2026-10-22__14-05-09__rec-2.mp4");
+    let settled = later + Duration::from_secs(2); // the second reopen came while waiting
+    assert!(rec.video(1_150 * MS, false, pkt(3), false, settled).is_empty(), "waits for a keyframe");
+    assert_eq!(rec.video(1_200 * MS, true, pkt(4), false, settled), vec![Event::PartStarted { path: second.clone(), part: 2, cause: Cause::Size }]);
+    assert_eq!(log.calls().iter().rfind(|c| matches!(c, Call::Open(_))), Some(&Call::Open(naming::part_of(&second))));
+    rec.video(1_216 * MS, false, pkt(5), false, settled);
+    let events = rec.stop();
+    assert!(matches!(&events[..], [Event::Stopped { path: p, .. }] if *p == second), "{events:?}");
+    assert_eq!(log.videos().iter().find(|v| v.3 == 4).map(|v| v.0), Some(0), "part 2 starts at 0");
+    assert!(second.is_file() && path.is_file(), "both parts kept");
+    assert!(!rec.is_active());
+}
+
+#[test]
+fn each_reopen_takes_the_next_free_part_and_never_overwrites_a_clip() {
+    let (mut rec, _log, path) = recorder("parts");
+    let name = |n: &str| path.with_file_name(format!("G__2026-10-22__14-05-09__rec{n}.mp4"));
+    std::fs::write(name("-3"), b"keep").unwrap(); // another clip with the part-3 name
+    let t0 = Instant::now();
+    rec.start(path.clone(), Some((0, t0)), t0);
+    rec.video(0, true, pkt(1), false, t0);
+    rec.video(16 * MS, false, pkt(2), false, t0);
+    let (t1, t2) = (t0 + PART_GAP, t0 + PART_GAP * 2);
+    assert!(matches!(rec.encoder_reopened(t1, Cause::Size, None).last(), Some(Event::Continued { .. })));
+    assert_eq!(rec.video(33 * MS, true, pkt(3), false, t1), vec![Event::PartStarted { path: name("-2"), part: 2, cause: Cause::Size }]);
+    rec.video(50 * MS, false, pkt(4), false, t1);
+    let events = rec.encoder_reopened(t2, Cause::Size, None);
+    assert!(matches!(events.last(), Some(Event::Continued { path: p, .. }) if *p == name("-2")), "{events:?}");
+    assert_eq!(rec.video(66 * MS, true, pkt(5), false, t2), vec![Event::PartStarted { path: name("-4"), part: 3, cause: Cause::Size }]);
+    assert!(matches!(&rec.stop()[..], [Event::Stopped { path: p, .. }] if *p == name("-4")));
+    assert_eq!(std::fs::read(name("-3")).unwrap(), b"keep", "an existing clip is untouched");
+    assert!(path.is_file() && name("-2").is_file() && name("-4").is_file());
+}
+
+#[test]
+fn a_stop_timeout_or_failure_before_the_next_part_names_the_saved_part() {
+    let (mut rec, _log, path) = recorder("between");
+    let t0 = Instant::now();
+    let reopened = |rec: &mut Recorder<FakeFactory>, path: &PathBuf| {
+        rec.start(path.clone(), Some((0, t0)), t0);
+        rec.video(0, true, pkt(1), false, t0);
+        rec.video(16 * MS, false, pkt(2), false, t0);
+        assert!(matches!(rec.encoder_reopened(t0 + PART_GAP, Cause::Size, None).last(), Some(Event::Continued { .. })));
+    };
+    reopened(&mut rec, &path);
+    let events = rec.stop();
+    assert!(matches!(&events[..], [Event::Stopped { path: p, .. }] if *p == path), "the user's stop saves part 1: {events:?}");
+    assert!(!rec.is_active());
+    let path = path.with_file_name("G__2026-10-22__14-06-00__rec.mp4");
+    reopened(&mut rec, &path);
+    assert!(rec.tick(t0 + PART_GAP + ARM_TIMEOUT / 2).is_empty());
+    let events = rec.tick(t0 + PART_GAP + ARM_TIMEOUT);
+    assert!(matches!(&events[..], [Event::Failed { kept: Some(p), .. }] if *p == path), "{events:?}");
+    let path = path.with_file_name("G__2026-10-22__14-07-00__rec.mp4");
+    reopened(&mut rec, &path);
+    let events = rec.encoder_failed("NVENC encode failed: device lost");
+    assert!(matches!(&events[..], [Event::Failed { kept: Some(p), .. }] if *p == path), "{events:?}");
+    assert!(!rec.is_active());
 }
 
 #[test]
@@ -168,8 +235,9 @@ fn audio_timing_uses_the_instant_sampled_with_the_capture_clock() {
     rec.start(path, Some((10_000 * MS, t0)), armed);
     rec.video(10_040 * MS, true, pkt(1), false, armed);
     rec.audio(0, &chunk(480), t0 + Duration::from_millis(55));
-    assert_eq!(log.audio(0), vec![480], "no 2 s of silence first: audio does not lead video");
     rec.stop();
+    // The chunk is the track's first 480 frames (the limiter held it until stop).
+    assert_eq!(log.pcm(0), chunk(480), "no 2 s of silence first: audio does not lead video");
 }
 
 #[test]
@@ -213,9 +281,7 @@ fn a_failed_encoder_ends_the_recording_and_reports_the_saved_file() {
 fn a_boosted_track_is_limited_with_every_frame_in_place() {
     use crate::export::mix_limit::{limit_interleaved, CEILING};
     let log = Log::default();
-    let mut boosted = tracks();
-    boosted[0].boosted = true;
-    let mut rec = Recorder::new(FakeFactory { log: log.clone(), ..Default::default() }, boosted);
+    let mut rec = Recorder::new(FakeFactory { log: log.clone(), ..Default::default() }, tracks());
     let path = temp_dir("limit").join("G__2026-11-05__16-50-00__rec.mp4");
     let t0 = Instant::now();
     rec.start(path.clone(), Some((1_000 * MS, t0)), t0);
@@ -246,4 +312,91 @@ fn a_boosted_track_is_limited_with_every_frame_in_place() {
     let left: Vec<f32> = out.iter().step_by(2).copied().collect();
     assert!(!left.windows(3).any(|w| w[0] == w[1] && w[1] == w[2] && w[0].abs() > 0.5), "no flat top");
     assert_eq!(log.pcm(1), quiet, "a 0 dB track is written exactly as captured");
+}
+
+/// 2026-11-07 audit A3: a source that started at 0 dB and was boosted live (no engine restart)
+/// is still limited in a long recording: a track's limiter starts at its first sample above the
+/// ceiling, so a fader crossing 0 dB never needs a restart. A track under the ceiling is written
+/// exactly as captured.
+#[test]
+fn a_source_boosted_after_the_engine_started_is_limited_too() {
+    use crate::export::mix_limit::CEILING;
+    let log = Log::default();
+    let mut rec = Recorder::new(FakeFactory { log: log.clone(), ..Default::default() }, tracks());
+    let path = temp_dir("live-boost").join("G__2026-11-07__10-00-00__rec.mp4");
+    let t0 = Instant::now();
+    rec.start(path.clone(), Some((1_000 * MS, t0)), t0);
+    rec.video(1_000 * MS, true, pkt(1), false, t0);
+    let gain = 10f32.powf(9.0 / 20.0);
+    let tone: Vec<f32> = (0..24_000).flat_map(|n| {
+        let s = (n as f32 / 48_000.0 * 440.0 * std::f32::consts::TAU).sin() * gain;
+        [s, s]
+    }).collect();
+    let quiet: Vec<f32> = tone.iter().map(|s| s / gain * 0.5).collect();
+    for (k, (loud, soft)) in tone.chunks(960).zip(quiet.chunks(960)).enumerate() {
+        let at = t0 + Duration::from_millis(10 * (k as u64 + 1));
+        rec.audio(0, loud, at);
+        rec.audio(1, soft, at);
+    }
+    assert!(matches!(rec.stop()[..], [Event::Stopped { .. }]));
+    let out = log.pcm(0);
+    assert_eq!(out.len(), tone.len(), "every frame in place");
+    let peak = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!(peak <= CEILING + 1e-6, "a live boost clipped the long recording: peak {peak}");
+    assert_eq!(log.pcm(1), quiet, "a track under the ceiling is written as captured");
+}
+
+/// 2026-11-07 audit R2-deep-audio-2: a track under the ceiling that goes hot mid-stream (a game
+/// transient at 0 dB, a plosive on a boosted mic). The limiter runs from the track's first frame,
+/// so it ramps the gain down ahead of the peak instead of stepping it at the chunk where the peak
+/// arrives (a click). The burst starts 27 frames into chunk 11, where the chunk boundary sits on
+/// the sine's peak, and at a zero crossing, so the input itself has no step.
+#[test]
+fn a_track_that_goes_hot_mid_stream_has_no_gain_step() {
+    let log = Log::default();
+    let mut rec = Recorder::new(FakeFactory { log: log.clone(), ..Default::default() }, tracks());
+    let path = temp_dir("hot-mid-stream").join("G__2026-11-07__12-00-00__rec.mp4");
+    let t0 = Instant::now();
+    rec.start(path.clone(), Some((1_000 * MS, t0)), t0);
+    rec.video(1_000 * MS, true, pkt(1), false, t0);
+    let burst = 10 * 480 + 27;
+    let tone: Vec<f32> = (0..16 * 480)
+        .flat_map(|n| {
+            let amp = if n < burst { 0.85 } else { 1.0 };
+            let s = (n as f32 / 48_000.0 * 437.5 * std::f32::consts::TAU).sin() * amp;
+            [s, s]
+        })
+        .collect();
+    let silent = vec![0.0f32; tone.len()];
+    for (k, (hot, zero)) in tone.chunks(960).zip(silent.chunks(960)).enumerate() {
+        let at = t0 + Duration::from_millis(10 * (k as u64 + 1));
+        rec.audio(0, hot, at);
+        rec.audio(1, zero, at);
+    }
+    assert!(matches!(rec.stop()[..], [Event::Stopped { .. }]));
+    let out: Vec<f32> = log.pcm(0).into_iter().step_by(2).collect();
+    let input: Vec<f32> = tone.iter().step_by(2).copied().collect();
+    assert_eq!(out.len(), input.len(), "every frame in place");
+    let steepest = |x: &[f32]| x.windows(2).fold(0.0f32, |m, w| m.max((w[1] - w[0]).abs()));
+    let (got, limit) = (steepest(&out), steepest(&input) + 0.02);
+    assert!(got <= limit, "a gain step where the limiter engaged: largest step {got}, input's + 0.02 = {limit}");
+    let peak = out.iter().fold(0.0f32, |m, s| m.max(s.abs()));
+    assert!(peak <= crate::export::mix_limit::CEILING + 1e-6, "peak {peak}");
+}
+
+/// p9 gate P2-c: padding a quiet track with silence allocates no zero block per call (it was
+/// 38 KB each); the fake sink logs calls only.
+#[test]
+fn silence_padding_allocates_no_zero_block() {
+    let log = Log::default();
+    let mut rec = Recorder::new(FakeFactory { log: log.clone(), no_pcm: true, ..Default::default() }, tracks());
+    let path = temp_dir("silence-alloc").join("G__2026-11-07__12-00-00__rec.mp4");
+    let t0 = Instant::now();
+    rec.start(path, None, t0);
+    rec.video(0, true, pkt(1), false, t0 + Duration::from_secs(5));
+    rec.tick(t0 + Duration::from_secs(6));
+    let (_, bytes) = crate::test_alloc::bytes_in(|| rec.tick(t0 + Duration::from_secs(8)));
+    assert_eq!(log.audio(0).len(), 2, "the second tick padded again");
+    assert!(bytes < 8_192, "two silence pads allocated {bytes} bytes");
+    rec.stop();
 }

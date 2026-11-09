@@ -13,6 +13,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::placement::{Anchor, EDGE, NOTICE_H, REF_HEIGHT};
+use crate::spot_edit::SavedSpot;
+
+#[path = "dynamic_file.rs"]
+mod file;
 
 /// A scan marking more of the picture than this as HUD came from menus or
 /// replays, not play (the engine refuses these too; older saved ones are skipped).
@@ -207,6 +211,14 @@ pub fn shape_key(stem: &str, aspect: f32) -> String {
     if stem.is_empty() { String::new() } else { format!("{stem}@{}", shape(aspect)) }
 }
 
+/// The key a scan is kept under: the asked-for game's stem at the shape the
+/// scan itself measured (its `aspect`), else the asked-for key.
+pub fn scan_key(asked: &str, event: &Value) -> String {
+    let aspect = event.get("aspect").and_then(Value::as_f64).unwrap_or(0.0) as f32;
+    let stem = asked.split_once('@').map_or(asked, |(stem, _)| stem);
+    if shape(aspect) == 0 { asked.to_string() } else { shape_key(stem, aspect) }
+}
+
 /// A cache key: an exe stem, optionally `@<shape>` (1-2 digits).
 pub fn cache_key(key: &str) -> bool {
     match key.split_once('@') {
@@ -220,6 +232,13 @@ struct CacheFile {
     games: BTreeMap<String, Entry>,
     #[serde(default)]
     seq: u64,
+    /// Spots the user placed with the island editor, per exe stem.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    spots: BTreeMap<String, SavedSpot>,
+    /// When each spot was last placed (the file's `seq` then): the oldest go
+    /// past [`MAX_GAMES`]. A spot with none counts as the oldest.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    spots_seq: BTreeMap<String, u64>,
 }
 
 /// The per-game scans, on disk at `path` (None: in memory only, for tests).
@@ -227,6 +246,8 @@ struct CacheFile {
 pub struct HudCache {
     path: Option<PathBuf>,
     file: CacheFile,
+    /// The file could not be read this run: never replace it (`dynamic_file.rs`).
+    read_only: bool,
 }
 
 impl HudCache {
@@ -236,16 +257,16 @@ impl HudCache {
     }
 
     pub fn load(path: Option<PathBuf>) -> Self {
-        let file = path
-            .as_ref()
-            .and_then(|p| std::fs::read_to_string(p).ok())
-            .and_then(|text| serde_json::from_str(&text).ok())
-            .unwrap_or_default();
-        let mut cache = Self { path, file };
-        let before = cache.file.games.len();
+        let (file, writable) = match path.as_ref() {
+            Some(p) => file::read(p, std::time::SystemTime::now()),
+            None => (CacheFile::default(), true),
+        };
+        let mut cache = Self { path, file, read_only: !writable };
+        let before = (cache.file.games.len(), cache.file.spots.len());
         // Keys are exe stems; anything else (a window title) is dropped and the file rewritten once.
         cache.file.games.retain(|key, _| cache_key(key));
-        let mut dropped = cache.file.games.len() != before;
+        cache.file.spots.retain(|key, spot| exe_stem_key(key) && spot.sane());
+        let mut dropped = (cache.file.games.len(), cache.file.spots.len()) != before;
         // A key without a shape was saved before shapes were kept: landscape 16:9.
         let legacy: Vec<String> = cache.file.games.keys().filter(|k| !k.contains('@')).cloned().collect();
         for key in legacy {
@@ -260,6 +281,32 @@ impl HudCache {
             cache.save();
         }
         cache
+    }
+
+    /// The spot the user placed for the game (island editor).
+    pub fn spot(&self, key: &str) -> Option<SavedSpot> {
+        self.file.spots.get(key).copied()
+    }
+
+    /// Keeps (`Some`) or clears the game's placed spot and saves. Only an
+    /// exe-stem key is kept (never a window title).
+    pub fn set_spot(&mut self, key: &str, spot: Option<SavedSpot>) {
+        if !exe_stem_key(key) {
+            return;
+        }
+        match spot.filter(SavedSpot::sane) {
+            Some(spot) => {
+                self.file.seq += 1;
+                self.file.spots.insert(key.to_string(), spot);
+                self.file.spots_seq.insert(key.to_string(), self.file.seq);
+            }
+            None => {
+                self.file.spots.remove(key);
+                self.file.spots_seq.remove(key);
+            }
+        }
+        self.trim();
+        self.save();
     }
 
     /// Kept scans of either kind.
@@ -314,25 +361,28 @@ impl HudCache {
         self.save();
     }
 
-    /// At most [`MAX_GAMES`]: the games scanned longest ago go.
+    /// At most [`MAX_GAMES`] scanned games and [`MAX_GAMES`] placed spots:
+    /// the ones scanned or placed longest ago go.
     fn trim(&mut self) {
         while self.file.games.len() > MAX_GAMES {
             let Some(oldest) = self.file.games.iter().min_by_key(|(_, e)| e.seq).map(|(k, _)| k.clone()) else { break };
             self.file.games.remove(&oldest);
         }
+        let file = &mut self.file;
+        file.spots_seq.retain(|key, _| file.spots.contains_key(key));
+        while file.spots.len() > MAX_GAMES {
+            let Some(oldest) = file.spots.keys().min_by_key(|k| file.spots_seq.get(*k).copied().unwrap_or(0)).cloned() else { break };
+            file.spots.remove(&oldest);
+            file.spots_seq.remove(&oldest);
+        }
     }
 
-    /// Written whole to `<path>.tmp`, then renamed over the old file.
+    /// Written whole to a temp file, flushed, then renamed over the old file;
+    /// never over a file this run could not read.
     fn save(&self) {
-        let Some(path) = self.path.as_ref() else { return };
+        let Some(path) = self.path.as_ref().filter(|_| !self.read_only) else { return };
         let Ok(text) = serde_json::to_string(&self.file) else { return };
-        if let Some(dir) = path.parent() {
-            let _ = std::fs::create_dir_all(dir);
-        }
-        let tmp = path.with_extension("json.tmp");
-        if std::fs::write(&tmp, text).is_ok() {
-            let _ = std::fs::rename(&tmp, path);
-        }
+        let _ = crate::durable::write_durable(path, text.as_bytes());
     }
 }
 
@@ -425,3 +475,7 @@ pub fn hud_scan(value: &Value) -> Option<Value> {
 #[cfg(test)]
 #[path = "dynamic_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "dynamic_persist_tests.rs"]
+mod persist_tests;

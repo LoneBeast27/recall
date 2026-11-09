@@ -3,7 +3,7 @@ use gpui::{AnyElement, Context, FontWeight, MouseButton, Window, div, prelude::*
 
 use crate::{
     views::window_frame::{Caption, caption_button},
-    root::{Root, Route, ToastKind},
+    root::{Root, Route, ToastKind, reach},
     services::{daemon::{self, DaemonCommand}, library},
     theme::{self, c},
     ui::{self, Icon, Variant, icon},
@@ -42,7 +42,8 @@ impl Root {
                     .items_center()
                     .justify_center()
                     .on_mouse_down(MouseButton::Left, cx.listener(Self::title_down))
-                    .child(self.render_status_pill(cx)),
+                    .when(crate::TESTING, |d| d.child(div().text_color(c(theme::MUTED)).child("Preview · Demo data")))
+                    .when(!crate::TESTING, |d| d.child(self.render_status_pill(cx))),
             )
             .child(
                 div()
@@ -53,9 +54,10 @@ impl Root {
                     .justify_end()
                     .gap(px(8.))
                     .child(div().flex_1().h_full().on_mouse_down(MouseButton::Left, cx.listener(Self::title_down)))
-                    .child(self.render_stats_button(cx))
-                    .child(self.render_record_button(cx))
-                    .child(self.render_save_button(cx))
+                    .when(!crate::TESTING, |d| d
+                        .child(self.render_stats_button(cx))
+                        .child(self.render_record_button(cx))
+                        .child(self.render_save_button(cx)))
                     .child(
                         div()
                             .flex()
@@ -74,7 +76,7 @@ impl Root {
                 .font_family(theme::display())
                 .text_size(px(16.))
                 .font_weight(FontWeight::BOLD)
-                .child("Recall")
+                .child(crate::APP_NAME)
                 .into_any_element();
         }
         let path = self.ed.info.as_ref().map(|i| i.path.clone()).or_else(|| self.ed.loading_path.clone());
@@ -131,6 +133,26 @@ impl Root {
             .bg(c(theme::RAISED))
             .border_1()
             .border_color(c(theme::BORDER_SUBTLE));
+        if !snap.connected && self.recorder_reach == daemon::RecorderReach::Unreachable {
+            // A recorder runs but never answers: say so (Start can't help).
+            return pill
+                .cursor_pointer()
+                .hover(|s| s.bg(c(theme::OVERLAY)))
+                .child(ui::dot(theme::WARNING, 7.))
+                .child(div().text_color(c(theme::MUTED)).child(reach::UNREACHABLE_TITLE))
+                .on_click(cx.listener(|this, _, _, cx| {
+                    let detail = this.unreachable_detail();
+                    this.show_toast(ToastKind::Bad, reach::UNREACHABLE_TITLE, Some(detail));
+                    cx.notify();
+                }))
+                .into_any_element();
+        }
+        if !snap.connected && self.recorder_reach == daemon::RecorderReach::Starting {
+            return pill
+                .child(ui::dot(theme::DISABLED, 7.))
+                .child(div().text_color(c(theme::MUTED)).child("Recorder starting…"))
+                .into_any_element();
+        }
         if !snap.connected {
             return pill
                 .cursor_pointer()
@@ -139,10 +161,7 @@ impl Root {
                 .child(div().text_color(c(theme::MUTED)).child("Recorder off"))
                 .child(div().text_color(c(theme::TEXT)).font_weight(FontWeight::MEDIUM).child("Start"))
                 .on_click(cx.listener(|this, _, _, cx| {
-                    match daemon::start_controller() {
-                        Ok(_) => this.show_toast(ToastKind::Info, "Starting the recorder…", None),
-                        Err(error) => this.show_toast(ToastKind::Bad, "Couldn't start the recorder", Some(error)),
-                    }
+                    this.start_recorder();
                     cx.notify();
                 }))
                 .into_any_element();
@@ -152,6 +171,12 @@ impl Root {
             return pill
                 .child(ui::dot(theme::WARNING, 7.))
                 .child(div().text_color(c(theme::MUTED)).child("Recorder not responding"))
+                .into_any_element();
+        }
+        if self.setup.is_some() && session.is_some_and(|s| s.state == "paused") {
+            return pill
+                .child(ui::dot(theme::DISABLED, 7.))
+                .child(div().text_color(c(theme::MUTED)).child("Recording paused for setup"))
                 .into_any_element();
         }
         if session.is_some_and(|s| s.state == "paused") {
@@ -171,8 +196,7 @@ impl Root {
         // The game closed: its last clip stays saveable while this counts down to 0:00.
         let drain = session
             .filter(|s| s.state == "draining")
-            .and_then(|s| s.drain.as_ref())
-            .map(|d| (d, d.remaining_secs(daemon::unix_ms())))
+            .and_then(|s| Some((s.drain.as_ref()?, s.drain_left(daemon::unix_ms(), std::time::Instant::now())?)))
             .filter(|(_, left)| *left > 0);
         let waiting = drain.is_none() && session.is_some_and(|s| s.state == "waiting" || s.state == "draining");
         let name = drain
@@ -255,7 +279,7 @@ impl Root {
         });
         if long.active {
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0.0, |d| d.as_secs_f64());
-            let elapsed = (now - long.started_secs).max(0.0);
+            let elapsed = long.elapsed_at(now, session.and_then(|s| s.since_status(std::time::Instant::now())));
             return ui::button("long-rec", Variant::Secondary)
                 .h(px(30.))
                 .gap(px(8.))

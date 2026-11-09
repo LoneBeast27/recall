@@ -13,11 +13,15 @@ fn raw_ring(name: &'static str, input: bool, gain: f32, rate: u32, channels: u16
         gain: AtomicU32::new(gain.to_bits()),
         boosted: AtomicBool::new(gain > 1.0),
         input,
+        mic_mute: AtomicBool::new(true),
+        on_default: true,
+        opened_own: AtomicBool::new(false),
         endpoint: Mutex::new(String::new()),
         rate,
         channels,
         samples: Mutex::new(VecDeque::new()),
         capacity,
+        live: Default::default(),
     }
 }
 
@@ -163,31 +167,25 @@ fn bench_full_ring_snapshot() {
 }
 
 #[test]
-fn a_configured_name_matches_exactly_before_tokens() {
-    let names: Vec<String> = [
-        "Microphone (2- USB Audio Device Line)",
-        "Microphone (2- USB Audio Device Chat)",
-        "Microphone",
-    ]
-    .map(String::from)
-    .to_vec();
-    assert_eq!(super::match_endpoint(&names, "Microphone (2- USB Audio Device Chat)"), Some(1));
-    assert_eq!(super::match_endpoint(&names, "microphone"), Some(2), "exact beats the first token match");
-    assert_eq!(super::match_endpoint(&names, "device chat"), Some(1), "token-AND still works");
-    assert_eq!(super::match_endpoint(&names, "Headset (USB)"), None, "missing -> caller uses the default");
+fn a_configured_name_matches_exactly_and_nothing_else() {
+    let names: Vec<String> = ["Microphone (Box One Line)", "Microphone (Box One Chat)", "Microphone"].map(String::from).to_vec();
+    assert_eq!(super::match_endpoint(&names, "Microphone (Box One Chat)"), Some(1));
+    assert_eq!(super::match_endpoint(&names, " Microphone "), Some(2), "only outer spaces are trimmed");
+    assert_eq!(super::match_endpoint(&names, "Headset (Box)"), None, "missing: the track waits");
     assert_eq!(super::match_endpoint(&names, "  "), None, "empty = Windows default");
 }
 
-/// Same table as `recall-native` `services/meters.rs`: the meter must pick what this records.
+/// 2026-11-07 merge-gate A4 rule. Same table as `recall-native` `services/meters_tests.rs`: the
+/// meter must pick what this records. No word, case or bracket-index matching any more.
 #[test]
-fn endpoint_matching_is_whole_word_and_folds_the_slashed_o() {
-    let names: Vec<String> = ["Virtual B (Mixer)", "Virtual A (Mixer)", "Line (Mixér)", "System (MØNITOR)"].map(String::from).to_vec();
-    assert_eq!(super::match_endpoint(&names, "virtual a"), Some(1), "'a' is not found inside another word");
+fn only_a_leading_index_is_dropped_and_the_rest_matches_exactly() {
+    let names: Vec<String> = ["Virtual B (Mixer)", "Virtual A (Mixer)", "Line (2- Box One)", "System (MØNITOR)"].map(String::from).to_vec();
     assert_eq!(super::match_endpoint(&names, "System (MØNITOR)"), Some(3), "exact, non-ASCII");
-    assert_eq!(super::match_endpoint(&names, "system monitor"), Some(3), "ø typed as o");
-    assert_eq!(super::match_endpoint(&names, "SYSTEM (mønitor)"), Some(3), "case-insensitive Ø/ø");
-    assert_eq!(super::match_endpoint(&names, "line mixér"), Some(2));
-    assert_eq!(super::match_endpoint(&names, "mix"), None, "a part of a word is not a word");
+    assert_eq!(super::match_endpoint(&names, "virtual a"), None, "words are not a name");
+    assert_eq!(super::match_endpoint(&names, "System (MONITOR)"), None, "ø is not o");
+    assert_eq!(super::match_endpoint(&names, "SYSTEM (mønitor)"), None, "case included");
+    assert_eq!(super::match_endpoint(&names, "Line (Box One)"), None, "an index inside a bracket is part of the name");
+    assert_eq!(super::match_endpoint(&names, "Virtual A"), None, "a prefix is not a name");
 }
 
 /// A save's audio covers exactly its video window on the capture clock, whether
@@ -334,9 +332,166 @@ fn a_quiet_or_closed_source_stays_on_the_clock_for_a_later_save() {
     assert_eq!(clip[499], 10.0, "ends on the last second of sound");
 }
 
-/// A lost device is retried at 2 s, then backs off to 4 s, 8 s and at most 10 s.
+/// 2026-11-07 audit T1: a block bigger than the ring (silence owed after a sleep) went into the
+/// `VecDeque` whole before the trim, so the ring grew to the block's size and stayed that big.
 #[test]
-fn reopen_backs_off_to_ten_seconds() {
-    let s = |n| super::reopen_wait(n).as_secs();
-    assert_eq!((s(0), s(1), s(2), s(3), s(4), s(50)), (2, 2, 4, 8, 10, 10));
+fn a_block_bigger_than_the_ring_never_grows_it() {
+    let ring = raw_ring("big", false, 0.5, 48_000, 2, 1_000);
+    let block: Vec<f32> = (0..10_000).map(|i| i as f32).collect();
+    ring.push_capture(&block, false);
+    let buf = ring.samples.lock().unwrap();
+    assert_eq!(buf.len(), 1_000, "holds exactly the ring");
+    assert!(buf.capacity() < 2_000, "the ring grew to {} samples for a {}-sample block", buf.capacity(), block.len());
+    assert_eq!(buf.front().copied(), Some(9_000.0 * 0.5), "the newest samples, with the gain");
+    assert_eq!(buf.back().copied(), Some(9_999.0 * 0.5));
+}
+
+/// 2026-11-07 audit A2: the controller's mute reaches a new engine in its environment, so a
+/// muted mic is silent from the first sample of the run, not only after `hello`.
+#[test]
+fn the_engine_starts_muted_when_the_controller_says_so() {
+    let env = |value: Option<&'static str>| move |key: &str| (key == super::MIC_MUTED_ENV).then_some(value).flatten().map(str::to_owned);
+    assert!(super::initial_mute(env(Some("1"))), "RECALL_MIC_MUTED=1");
+    assert!(!super::initial_mute(env(Some("0"))));
+    assert!(!super::initial_mute(env(None)), "an engine started by hand starts unmuted");
+}
+
+/// 2026-11-07 merge-gate A4 rule: a saved "3- X" opens the one present "4- X" (Windows
+/// renumbered it); with two present endpoints that both read "X" once the index goes, neither.
+#[test]
+fn a_renumbered_endpoint_opens_only_when_it_is_the_one_match() {
+    let names = |list: &[&str]| list.iter().map(|s| s.to_string()).collect::<Vec<String>>();
+    assert_eq!(super::match_endpoint(&names(&["Speakers (Box)", "4- Line (Box One)"]), "3- Line (Box One)"), Some(1), "renumbered");
+    assert_eq!(super::match_endpoint(&names(&["Line (Box One)"]), "3- Line (Box One)"), Some(0), "the index went");
+    assert_eq!(super::match_endpoint(&names(&["4- Line (Box One)"]), "Line (Box One)"), Some(0), "the index came");
+    let two = names(&["4- Line (Box One)", "5- Line (Box One)"]);
+    assert_eq!(super::match_endpoint(&two, "3- Line (Box One)"), None, "two matches: wait, never a sibling");
+    assert_eq!(super::match_endpoint(&two, "Line (Box One)"), None);
+    assert_eq!(super::match_endpoint(&two, "5- Line (Box One)"), Some(1), "its own exact name is itself, not a sibling");
+    assert_eq!(super::match_endpoint(&names(&["4- line (box one)"]), "3- Line (Box One)"), None, "case included");
+    // R3-deep-audio-2: two endpoints with the same exact name: wait, never the first one listed.
+    assert_eq!(super::match_endpoint(&names(&["Line (Box One)", "Line (Box One)"]), "Line (Box One)"), None, "two exact matches");
+    assert_eq!(super::match_endpoint(&names(&["Line (Box One)", "Speakers (Box)", "Line (Box One)"]), "3- Line (Box One)"), None);
+}
+
+/// 2026-11-07 audit A7: a ring holds its whole buffer from the start, so it never doubles
+/// (and copies) under the lock while it fills.
+#[test]
+fn a_ring_reserves_its_buffer_and_never_doubles() {
+    let ring = TrackRing::for_test("g", 1);
+    let packet = vec![0.25f32; 960];
+    for _ in 0..(96_000 / 960 + 5) {
+        ring.push_capture(&packet, false);
+    }
+    let buf = ring.samples.lock().unwrap();
+    assert_eq!(buf.len(), 96_000, "full");
+    assert!(buf.capacity() < 96_000 + 4_096, "the ring grew to {} samples for a 96000-sample buffer", buf.capacity());
+}
+
+/// 2026-11-07 audit A12: the mic-mute hotkey silences microphone sources only. An input set up
+/// as a line-in or capture card (`mic_mute = false`) keeps its sound.
+#[test]
+fn the_mute_hotkey_skips_an_input_marked_as_not_a_microphone() {
+    use super::sources::SourceSpec;
+    // A line-in skips Alt+M only on a named device (R4-deep-audio-1).
+    let spec = |mic_mute: bool| SourceSpec { communications: false, device_id: String::new(), id: "in-1".into(), kind: "input".into(), device: "Line (Box One)".into(), exe: String::new(), name: "In".into(), gain_db: 0.0, mic_mute: Some(mic_mute) };
+    let mic = TrackRing::for_source(&spec(true), "mic", 1, String::new());
+    let line = TrackRing::for_source(&spec(false), "mic", 1, String::new());
+    // Both opened their own saved device (R5-deep-audio-1: `opened_own`).
+    for ring in [&mic, &line] {
+        ring.opened_own.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    mic.push_capture(&[0.5, 0.5], true);
+    line.push_capture(&[0.5, 0.5], true);
+    let held = |ring: &TrackRing| ring.samples.lock().unwrap().iter().copied().collect::<Vec<f32>>();
+    assert_eq!(held(&mic), [0.0, 0.0], "a microphone is muted");
+    assert_eq!(held(&line), [0.5, 0.5], "a line-in keeps its sound");
+    let json = r#"[{"id":"in-1","kind":"input","name":"Console","device":"Line (Box One)","mic_mute":false},{"id":"mic","kind":"input","name":"Mic"}]"#;
+    let list = super::sources::parse(json).unwrap();
+    assert_eq!((list[0].mic_mute, list[1].mic_mute), (Some(false), None), "parsed with and without the flag");
+    let (console, plain) = (TrackRing::for_source(&list[0], "mic", 1, String::new()), TrackRing::for_source(&list[1], "mic", 1, String::new()));
+    for ring in [&console, &plain] {
+        ring.opened_own.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    console.push_capture(&[0.5, 0.5], true);
+    plain.push_capture(&[0.5, 0.5], true);
+    assert_eq!((held(&console), held(&plain)), (vec![0.5, 0.5], vec![0.0, 0.0]), "the flagged line-in keeps its sound; the input without the flag is muted");
+}
+
+/// 2026-11-07 audit R4-deep-audio-1: a line-in or capture card (`mic_mute = false`) that has no
+/// device records the Windows default input, normally the user's microphone, so Alt+M mutes it
+/// until a device is named. A named line-in keeps its sound.
+#[test]
+fn a_line_in_on_the_windows_default_is_muted_by_the_mic_hotkey() {
+    use super::sources::SourceSpec;
+    let spec = |device: &str| SourceSpec { communications: false, device_id: String::new(), id: "line-in".into(), kind: "input".into(), device: device.into(), exe: String::new(), name: "Line-in".into(), gain_db: 0.0, mic_mute: Some(false) };
+    let held = |ring: &TrackRing| ring.samples.lock().unwrap().iter().copied().collect::<Vec<f32>>();
+    for device in ["", "  "] {
+        let ring = TrackRing::for_source(&spec(device), "mic", 1, String::new());
+        ring.push_capture(&[0.5, 0.5], true);
+        assert_eq!(held(&ring), [0.0, 0.0], "a line-in on the Windows default ({device:?}) left live while muted");
+        let ring = TrackRing::for_source(&spec(device), "mic", 1, String::new());
+        ring.set_mic_mute(false);
+        ring.push_capture(&[0.5, 0.5], true);
+        assert_eq!(held(&ring), [0.0, 0.0], "the strip toggle does not unmute the Windows default");
+    }
+    let named = TrackRing::for_source(&spec("Line (Box One)"), "mic", 1, String::new());
+    named.opened_own.store(true, std::sync::atomic::Ordering::Relaxed); // its own device
+    named.push_capture(&[0.5, 0.5], true);
+    assert_eq!(held(&named), [0.5, 0.5], "a named line-in keeps its sound");
+    // The page set the picker back to "Windows default": the engine restarts with device "".
+    let list = super::sources::parse(r#"[{"id":"line-in","kind":"input","name":"Line-in","device":"","mic_mute":false}]"#).unwrap();
+    let reset = TrackRing::for_source(&list[0], "mic", 1, String::new());
+    reset.push_capture(&[0.5, 0.5], true);
+    assert_eq!(held(&reset), [0.0, 0.0], "a line-in reset to the Windows default follows Alt+M again");
+}
+
+/// 2026-11-07 audit R3-deep-audio-1: an input whose source does not say (every config written
+/// before the flag, the default "mic") is muted by Alt+M whatever Windows calls its endpoint,
+/// as before the flag existed: a USB mixer or virtual mic reporting line-level or unknown must
+/// never stay live while the tray says "muted". Only the strip's own "off" keeps its sound.
+#[test]
+fn an_input_without_the_flag_is_muted_whatever_its_form_factor() {
+    use super::sources::SourceSpec;
+    let spec = SourceSpec { communications: false, device_id: String::new(), id: "in-1".into(), kind: "input".into(), device: String::new(), exe: String::new(), name: "In".into(), gain_db: 0.0, mic_mute: None };
+    // The engine reads no form factor (2 LineLevel, 10 Unknown, ...): nothing to inject.
+    let ring = TrackRing::for_source(&spec, "mic", 1, String::new());
+    ring.push_capture(&[0.5, 0.5], true);
+    assert_eq!(ring.samples.lock().unwrap().iter().copied().collect::<Vec<f32>>(), [0.0, 0.0], "an input without the flag left live");
+    // The behaviour above is a regression guard (a fresh ring has nothing to read a form factor
+    // from); the source scan is what failed on the form-factor code (6ebdfe1: stream.rs,
+    // form_factor.rs). Every engine audio file, so a read re-added anywhere fails here.
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src").join("audio");
+    let mut files: Vec<std::path::PathBuf> = std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().path()).filter(|p| p.extension().is_some_and(|x| x == "rs") && !p.ends_with("audio_tests.rs")).collect();
+    files.push(dir.with_extension("rs"));
+    assert!(files.len() > 5, "the scan found the audio sources: {files:?}");
+    for file in &files {
+        let text = std::fs::read_to_string(file).unwrap();
+        assert!(!text.contains("form_factor") && !text.contains("FormFactor"), "Alt+M never decides by form factor: {}", file.display());
+    }
+    // A config saved before the flag existed, as the controller hands it over.
+    let list = super::sources::parse(r#"[{"id":"mic","kind":"input","name":"Mic","device":"Line (Box One)"}]"#).unwrap();
+    let old = TrackRing::for_source(&list[0], "mic", 1, String::new());
+    old.push_capture(&[0.5, 0.5], true);
+    assert_eq!(old.samples.lock().unwrap().iter().copied().collect::<Vec<f32>>(), [0.0, 0.0], "an old config's line-level input is muted");
+    let game = TrackRing::for_test("game", 1);
+    game.push_capture(&[0.5, 0.5], true);
+    assert_eq!(game.samples.lock().unwrap().iter().copied().collect::<Vec<f32>>(), [0.5, 0.5], "only inputs mute");
+}
+
+/// 2026-11-07 audit A13: device streams ask for a 100 ms WASAPI buffer, so a short stall of a
+/// BelowNormal capture thread does not overrun it.
+#[test]
+fn device_streams_ask_for_a_buffer_that_survives_a_stall() {
+    assert_eq!(super::stream::device_buffer_hns(30_000), 1_000_000, "3 ms minimum period -> 100 ms");
+    assert_eq!(super::stream::device_buffer_hns(2_000_000), 2_000_000, "never below the device's own period");
+}
+
+/// 2026-11-07 audit A8: every capture start closes its event handle (wasapi 0.19's `Handle` has
+/// no `Drop`), for app sources as for device tracks.
+#[test]
+fn app_capture_closes_its_event_handle() {
+    let apps = include_str!("audio/apps.rs");
+    assert!(!apps.contains("let event = client.set_get_eventhandle()"), "apps.rs keeps a bare wasapi::Handle");
+    assert!(apps.contains("Event(client.set_get_eventhandle()"), "apps.rs wraps the event in stream::Event");
 }

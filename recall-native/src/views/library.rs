@@ -18,11 +18,16 @@ const CONTENT_PAD: f32 = 24.0;
 mod grid;
 #[path = "library_sidebar.rs"]
 mod sidebar;
+#[path = "library_damage.rs"]
+mod damage;
 
 impl Root {
     /// Fixed frame for every non-editor page: the same sidebar and the same panel,
     /// so navigation never moves; only the panel content changes.
     pub fn render_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.setup.is_some() {
+            return self.render_setup(window, cx);
+        }
         let content = match self.route {
             Route::Hdr => self.render_hdr(window, cx),
             Route::Audio => self.render_audio(window, cx),
@@ -32,6 +37,7 @@ impl Root {
                 .flex()
                 .flex_col()
                 .child(self.render_library_header(window, cx))
+                .children(self.render_library_damage(cx))
                 .child(self.render_library_body(cx))
                 .into_any_element(),
         };
@@ -184,7 +190,9 @@ impl Root {
         if self.lib.deleting > 0 {
             let moving = self.lib.deleting;
             let noun = if moving == 1 { "clip" } else { "clips" };
-            return bar.child(icon(Icon::Trash, 16., theme::MUTED)).child(div().text_color(c(theme::MUTED)).child(format!("Moving {moving} {noun} to the Recycle Bin…"))).into_any_element();
+            // A delete of a clip whose edits are still being saved waits for that save first.
+            let text = if self.lib.delete_waiting { "Waiting for the edit save…".to_owned() } else { format!("Moving {moving} {noun} to the Recycle Bin…") };
+            return bar.child(icon(Icon::Trash, 16., theme::MUTED)).child(div().text_color(c(theme::MUTED)).child(text)).into_any_element();
         }
         if self.lib.confirm_delete {
             let (question, detail, action) = delete_wording(count, self.imported_in_selection());
@@ -200,8 +208,9 @@ impl Root {
                 .child(ui::button("delete-confirm", Variant::Primary).child(action).on_click(cx.listener(|this, _, _, cx| {
                     let paths = this.lib.selected_paths();
                     this.lib.confirm_delete = false;
-                    this.lib.deleting = paths.len();
-                    this.workers.job(Job::Delete(paths));
+                    this.lib.delete_started(paths.len());
+                    // The folder list the question above was worded from decides owned vs imported.
+                    this.workers.job(Job::Delete(paths, this.folders.clone()));
                     cx.notify();
                 })))
                 .into_any_element();
@@ -337,7 +346,9 @@ impl Root {
     /// Selected clips that live in an imported folder (Delete only removes them from Recall).
     fn imported_in_selection(&self) -> usize {
         let recordings = crate::backend::library_dir_from(&self.folders);
-        self.lib.selection.iter().filter(|p| crate::services::library::imports::is_imported(p, &recordings, &self.folders.imported)).count()
+        self.lib.selection.iter().filter(|p| !crate::services::library::imports::is_owned(
+            std::path::Path::new(p), &recordings, &self.folders.former_recordings
+        )).count()
     }
 }
 

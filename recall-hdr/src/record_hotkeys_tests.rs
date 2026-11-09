@@ -19,6 +19,7 @@ fn defaults_are_one_direct_alt_combo_per_action() {
             (HotkeyAction::Record, "Alt+L"),
             (HotkeyAction::Stats, "Alt+P"),
             (HotkeyAction::Overlay, "Alt+O"),
+            (HotkeyAction::Editor, "Alt+U"),
         ]
     );
 }
@@ -39,7 +40,7 @@ fn defaults_avoid_combos_games_and_overlays_use() {
 fn defaults_do_not_conflict_with_each_other_or_the_hdr_key() {
     let (keep, warnings) = split_conflicts(bindings(&rec(), Some("Ctrl+Alt+H")));
     assert!(warnings.is_empty(), "{warnings:?}");
-    assert_eq!(keep.len(), 8);
+    assert_eq!(keep.len(), 9, "7 actions + the island editor + HDR");
     assert!(validate(&rec()).is_ok());
 }
 
@@ -67,7 +68,7 @@ fn direct_combos_stay_configurable() {
 #[test]
 fn optional_combos_can_be_turned_off() {
     let mut r = rec();
-    for slot in [&mut r.bookmark_hotkey, &mut r.screenshot_hotkey, &mut r.record_hotkey, &mut r.stats_hotkey, &mut r.overlay_hotkey] {
+    for slot in [&mut r.bookmark_hotkey, &mut r.screenshot_hotkey, &mut r.record_hotkey, &mut r.stats_hotkey, &mut r.overlay_hotkey, &mut r.editor_hotkey] {
         slot.clear();
     }
     let actions: Vec<HotkeyAction> = bindings(&r, None).iter().map(|b| b.action).collect();
@@ -175,6 +176,40 @@ fn a_new_default_never_takes_a_combo_the_file_already_uses() {
 }
 
 #[test]
+fn the_island_editor_default_never_takes_a_combo_the_file_uses() {
+    let r = load("[recording]
+screenshot_hotkey = \"Alt+U\"
+");
+    assert_eq!((r.screenshot_hotkey.as_str(), r.editor_hotkey.as_str()), ("Alt+U", ""), "Alt+U stays the screenshot's");
+    assert!(validate(&r).is_ok());
+    // Rohan's config shape (no editor_hotkey, nothing on Alt+U): the editor shortcut comes on.
+    let existing = load("[recording]
+save_hotkey = \"Alt+N\"
+mic_hotkey = \"Alt+M\"
+bookmark_hotkey = \"\"
+screenshot_hotkey = \"\"
+record_hotkey = \"\"
+");
+    assert_eq!(existing.editor_hotkey, "Alt+U", "nothing of his holds Alt+U: on, as he asked");
+    assert!(validate(&existing).is_ok());
+    assert!(!is_gamer_combo("Alt+U"), "not a combo games or overlays own");
+}
+
+#[test]
+fn alt_u_is_cleared_whenever_another_binding_holds_it_even_when_the_file_names_it() {
+    let both = load("[recording]
+editor_hotkey = \"Alt+U\"
+stats_hotkey = \"Alt+U\"
+");
+    assert_eq!((both.stats_hotkey.as_str(), both.editor_hotkey.as_str()), ("Alt+U", ""), "the other action keeps Alt+U");
+    assert!(validate(&both).is_ok(), "the loaded config still validates");
+    let mine = load("[recording]
+editor_hotkey = \"Alt+U\"
+");
+    assert_eq!(mine.editor_hotkey, "Alt+U", "nobody else holds it: kept");
+}
+
+#[test]
 fn a_new_era_config_keeps_its_empty_keys_off() {
     let text = "[recording]\nbookmark_hotkey = \"\"\nstats_hotkey = \"\"\n";
     let r = load(text);
@@ -205,7 +240,7 @@ fn probe_a_real_config_copy() {
     let before = std::fs::read(&path).unwrap();
     let cfg = crate::config::load_from(&path);
     assert_eq!(std::fs::read(&path).unwrap(), before, "loading leaves the file as it was");
-    assert!(!path.with_extension("toml.bad").exists(), "no .bad backup");
+    assert!(!crate::durable::bad_path(&path, std::time::SystemTime::now()).exists(), "no .bad backup");
     crate::record_config::validate(&cfg).expect("the loaded config validates");
     let rec = &cfg.recording;
     println!("save {:?} mic {} bookmark {} screenshot {} record {} stats {}", rec.save_hotkeys, rec.mic_hotkey, rec.bookmark_hotkey, rec.screenshot_hotkey, rec.record_hotkey, rec.stats_hotkey);

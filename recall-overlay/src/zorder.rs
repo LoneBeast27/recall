@@ -12,8 +12,8 @@ use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
-    IsWindowVisible, SetWindowPos, GWL_EXSTYLE, GW_HWNDPREV, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
+    GetAncestor, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
+    IsWindowVisible, SetWindowPos, GA_ROOT, GWL_EXSTYLE, GW_HWNDPREV, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOOWNERZORDER, SWP_NOSIZE, WS_EX_TOPMOST,
 };
 
@@ -22,6 +22,14 @@ use crate::window::monitor_rects;
 #[link(name = "shell32")]
 unsafe extern "system" {
     fn SHQueryUserNotificationState(state: *mut i32) -> i32;
+}
+
+/// A Direct3D app owns the display in exclusive fullscreen
+/// (`QUNS_RUNNING_D3D_FULL_SCREEN`): nothing can be dragged over it.
+pub fn exclusive_fullscreen() -> bool {
+    let mut state = 0i32;
+    let hr = unsafe { SHQueryUserNotificationState(&mut state) };
+    hr == 0 && state == 3
 }
 
 /// The shell's notification state, named (`QUNS_*`), or the failing HRESULT.
@@ -147,11 +155,38 @@ pub fn keep_on_top(hwnd: HWND, names: &mut Names) -> Raise {
     Raise::Clear
 }
 
-/// The stats are for the game only: true while the foreground window belongs
-/// to the target game's process.
-pub fn game_in_front(target_pid: Option<u32>) -> bool {
-    let Some(pid) = target_pid else { return false };
+/// The stats are for the game only: true while the foreground window is the
+/// target's window (`target_hwnd`, the controller's; a UWP game's frame
+/// belongs to ApplicationFrameHost, not the game's process) or belongs to
+/// the target game's process.
+pub fn game_in_front(target_pid: Option<u32>, target_hwnd: Option<isize>) -> bool {
+    let foreground = unsafe { GetForegroundWindow() };
+    let root = unsafe { GetAncestor(foreground, GA_ROOT) };
     let mut owner = 0u32;
-    unsafe { GetWindowThreadProcessId(GetForegroundWindow(), Some(&mut owner)) };
-    owner == pid
+    unsafe { GetWindowThreadProcessId(foreground, Some(&mut owner)) };
+    in_front(root.0 as isize, owner, target_hwnd, target_pid)
+}
+
+/// [`game_in_front`] on plain values: the foreground's root window and its
+/// process against the target's window and process.
+pub fn in_front(fg_root: isize, fg_pid: u32, target_hwnd: Option<isize>, target_pid: Option<u32>) -> bool {
+    let window = target_hwnd.is_some_and(|hwnd| hwnd != 0 && hwnd == fg_root);
+    let process = target_pid.is_some_and(|pid| pid != 0 && pid == fg_pid);
+    window || process
+}
+
+#[cfg(test)]
+mod tests {
+    use super::in_front;
+
+    #[test]
+    fn a_uwp_frame_in_front_counts_as_the_game() {
+        let (frame, host_pid, game_pid) = (0x1234, 900, 4242);
+        assert!(in_front(frame, host_pid, Some(frame), Some(game_pid)), "the frame window is the target's");
+        assert!(in_front(0x99, game_pid, Some(frame), Some(game_pid)), "another window of the game's own process");
+        assert!(!in_front(0x99, host_pid, Some(frame), Some(game_pid)), "another app's window");
+        assert!(!in_front(0x99, host_pid, None, Some(game_pid)), "no window known: by process only");
+        assert!(!in_front(0, 0, None, None), "no target");
+        assert!(!in_front(0, 0, Some(0), Some(0)), "no foreground window is no match");
+    }
 }

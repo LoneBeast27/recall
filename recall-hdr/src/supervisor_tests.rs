@@ -98,11 +98,31 @@ fn engine_command_sets_and_removes_spec_env() {
             ("RECALL_CAPTURE_HWND".into(), None),
         ],
     };
-    let cmd = engine_command(Path::new("recall.exe"), &spec);
+    let cmd = engine_command(Path::new("recall.exe"), &spec, None);
     let envs: Vec<_> = cmd.get_envs().map(|(k, v)| (k.to_owned(), v.map(|v| v.to_owned()))).collect();
     assert!(envs.contains(&("RECALL_CAPTURE_NAME".into(), Some("VALORANT".into()))));
     assert!(envs.contains(&("RECALL_CAPTURE_HWND".into(), None)), "None removes an inherited value");
     assert_eq!(cmd.get_args().collect::<Vec<_>>(), vec!["--json"]);
+}
+
+/// 2026-11-07 audit R2-deep-audio-1: the mic was muted after the engine started, then the engine
+/// crashed. The respawn reuses the spec built at the last retarget (`RECALL_MIC_MUTED=0`), so it
+/// must take the mute the controller set since, not the spec's.
+#[test]
+fn a_crash_respawn_starts_with_the_current_mute() {
+    let sup = Supervisor::start_with_locator(|| None, None);
+    let spec = EngineSpec { env: vec![("RECALL_MIC_MUTED".into(), Some("0".into()))] };
+    let mute_env = |cmd: &Command| -> Option<String> {
+        cmd.get_envs().find(|(k, _)| *k == "RECALL_MIC_MUTED").and_then(|(_, v)| v).map(|v| v.to_string_lossy().into_owned())
+    };
+    // The spawn the manager runs (`supervisor_manager.rs` `spawn_engine`).
+    let spawn = |shared: &Shared| engine_command(Path::new("recall.exe"), &spec, shared.spawn_mute.get());
+    assert_eq!(mute_env(&spawn(&sup.shared)).as_deref(), Some("0"), "no mute change yet: the spec's");
+    sup.set_mic_muted(true);
+    assert_eq!(mute_env(&spawn(&sup.shared)).as_deref(), Some("1"), "muted since the spawn: the respawn starts muted");
+    sup.set_mic_muted(false);
+    assert_eq!(mute_env(&spawn(&sup.shared)).as_deref(), Some("0"));
+    sup.shutdown(Duration::from_millis(200));
 }
 
 // --- intended restarts (fake engine: cmd.exe idles on its piped stdin) --
@@ -143,6 +163,41 @@ fn retargets_restart_on_purpose_and_never_trip_give_up() {
     sup.retarget(None);
     assert!(wait_for(5, || sup.health() == EngineHealth::Stopped));
     assert_eq!(sup.shared.spawn_count.load(Ordering::SeqCst), 8, "no respawn while idle");
+    sup.shutdown(Duration::from_millis(50));
+}
+
+#[test]
+fn encoder_recovery_restarts_to_the_same_target_never_raise_give_up() {
+    // `record_recover` restarts with the SAME spec (`restart_engine(RestartReason::Recovery)`).
+    let engine = fake_engine();
+    let sup = Supervisor::start_with_locator(move || Some(engine), None);
+    sup.shared.restart_grace_ms.store(50, Ordering::SeqCst);
+    let spec = EngineSpec { env: vec![("RECALL_CAPTURE_NAME".into(), Some("VALORANT".into()))] };
+    for n in 1..=8u32 {
+        sup.retarget(Some(spec.clone()));
+        assert!(
+            wait_for(5, || sup.shared.spawn_count.load(Ordering::SeqCst) == n
+                && matches!(sup.health(), EngineHealth::Running { pid } if pid != 0)),
+            "restart {n}: health {:?}",
+            sup.health()
+        );
+    }
+    assert!(!matches!(sup.health(), EngineHealth::GivenUp | EngineHealth::Restarting { .. }));
+    sup.shutdown(Duration::from_millis(50));
+}
+
+#[test]
+fn every_engine_exit_reaches_the_controller_after_its_last_event() {
+    let engine = fake_engine();
+    let sup = Supervisor::start_with_locator(move || Some(engine), None);
+    sup.shared.restart_grace_ms.store(50, Ordering::SeqCst);
+    let (tx, rx) = std::sync::mpsc::channel();
+    sup.attach_events(tx);
+    sup.retarget(Some(EngineSpec { env: vec![("RECALL_CAPTURE_NAME".into(), Some("game-1".into()))] }));
+    assert!(wait_for(5, || matches!(sup.health(), EngineHealth::Running { pid } if pid != 0)));
+    sup.retarget(Some(EngineSpec { env: vec![("RECALL_CAPTURE_NAME".into(), Some("game-2".into()))] }));
+    let event = rx.recv_timeout(Duration::from_secs(5)).expect("the first engine's exit is reported");
+    assert_eq!(event["type"], ENGINE_EXITED);
     sup.shutdown(Duration::from_millis(50));
 }
 
@@ -204,4 +259,134 @@ fn quit_grace_outlasts_the_engines_own_quit_path() {
     assert!(QUIT_GRACE >= engine_quit + Duration::from_secs(3), "{QUIT_GRACE:?}");
     assert_eq!(RETARGET_GRACE, QUIT_GRACE, "a retarget never kills a save either");
     assert_eq!(Shared::new(None).restart_grace(), QUIT_GRACE);
+}
+
+// --- a wedged engine stdin (gate P2-c) ----------------------------------
+
+/// An engine stdin whose pipe is full and never read: every write blocks for good. With
+/// `parked`, it says so once its writer thread has taken a line and is stuck in `write`.
+pub(crate) struct Wedged {
+    parked: Option<std::sync::mpsc::Sender<()>>,
+}
+
+impl Wedged {
+    pub(crate) fn new() -> Wedged {
+        Wedged { parked: None }
+    }
+}
+
+impl std::io::Write for Wedged {
+    fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+        if let Some(parked) = self.parked.take() {
+            let _ = parked.send(());
+        }
+        loop {
+            thread::park();
+        }
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn a_wedged_engine_stdin_never_blocks_the_pump() {
+    let shared = Arc::new(Shared::new(None));
+    shared.attach_writer(Some(Box::new(Wedged::new())));
+    let pump = shared.clone();
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let started = Instant::now();
+        for _ in 0..1_000 {
+            pump.send_line(r#"{"cmd":"record_fail","reason":"the encoder isn't responding"}"#);
+        }
+        let _ = tx.send(started.elapsed());
+    });
+    let took = rx.recv_timeout(Duration::from_secs(3)).expect("the pump blocked on a wedged engine stdin");
+    assert!(took < Duration::from_millis(500), "1000 lines took {took:?}");
+}
+
+#[test]
+fn a_wedged_engine_stdin_still_gets_killed_within_its_grace() {
+    let engine = fake_engine();
+    // Never dropped on a failure: a manager blocked on stdin would hang the drop.
+    let sup = std::mem::ManuallyDrop::new(Supervisor::start_with_locator(move || Some(engine), None));
+    sup.shared.restart_grace_ms.store(50, Ordering::SeqCst);
+    sup.retarget(Some(EngineSpec::default()));
+    assert!(wait_for(5, || matches!(sup.health(), EngineHealth::Running { pid } if pid != 0)));
+    // The engine stops reading its stdin (the pipe fills); the pump writes on.
+    sup.shared.attach_writer(Some(Box::new(Wedged::new())));
+    let pump = sup.shared.clone();
+    thread::spawn(move || pump.send_line(r#"{"cmd":"save_clip"}"#));
+    thread::sleep(Duration::from_millis(100));
+    let asked = Instant::now();
+    sup.retarget(Some(EngineSpec { env: vec![("RECALL_CAPTURE_NAME".into(), Some("next".into()))] }));
+    let replaced = wait_for(5, || sup.shared.spawn_count.load(Ordering::SeqCst) == 2);
+    assert!(replaced, "the wedged engine was never killed (manager stuck on its stdin)");
+    assert!(asked.elapsed() < Duration::from_secs(3), "the kill took {:?}", asked.elapsed());
+    std::mem::ManuallyDrop::into_inner(sup).shutdown(Duration::from_millis(50));
+}
+
+#[test]
+fn a_line_to_a_full_queue_is_reported_not_queued() {
+    let shared = Arc::new(Shared::new(None));
+    assert!(!shared.send_line(r#"{"cmd":"save_clip"}"#).queued(), "no engine: nothing queued");
+    // The writer takes one line and wedges on it; only then is the queue filled, so no line
+    // the writer takes late can free a slot after the fill (the 11-08 flake).
+    let queued = wedge_and_fill(&shared);
+    assert_eq!(queued, stdin::QUEUE, "{queued} lines queued behind the wedged one");
+    assert!(!shared.send_line(r#"{"cmd":"save_clip"}"#).queued(), "a full queue said it queued the line");
+}
+
+/// Attach a wedged writer, wait until it has taken one line and parked, then fill the queue
+/// until a send says no. The number of lines the fill queued.
+pub(crate) fn wedge_and_fill(shared: &Shared) -> usize {
+    let (tx, rx) = std::sync::mpsc::channel();
+    shared.attach_writer(Some(Box::new(Wedged { parked: Some(tx) })));
+    assert!(shared.send_line("{}").queued(), "the first line was not queued");
+    rx.recv_timeout(Duration::from_secs(5)).expect("the wedged writer never took its line");
+    let queued = (0..1_000).take_while(|_| shared.send_line("{}").queued()).count();
+    assert!(queued < 1_000, "the queue never said it was full");
+    queued
+}
+
+/// A writer that takes lines only once `open` says so (a healthy engine that is busy). It
+/// says once (`entered`) when its writer thread is stuck on its first line.
+struct Gated {
+    open: Arc<AtomicBool>,
+    seen: Arc<Mutex<Vec<String>>>,
+    entered: Option<std::sync::mpsc::Sender<()>>,
+}
+
+impl std::io::Write for Gated {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        if let Some(entered) = self.entered.take() {
+            let _ = entered.send(());
+        }
+        while !self.open.load(Ordering::SeqCst) {
+            thread::sleep(Duration::from_millis(5));
+        }
+        self.seen.lock().unwrap().push(String::from_utf8_lossy(b).into_owned());
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn quit_keeps_a_slot_so_a_busy_engine_behind_a_full_queue_still_finishes_cleanly() {
+    let shared = Arc::new(Shared::new(None));
+    let open = Arc::new(AtomicBool::new(false));
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let (tx, rx) = std::sync::mpsc::channel();
+    shared.attach_writer(Some(Box::new(Gated { open: open.clone(), seen: seen.clone(), entered: Some(tx) })));
+    // The writer is stuck on its first line before the fill, so the fill really ends full.
+    assert!(shared.send_line(r#"{"cmd":"bookmark"}"#).queued());
+    rx.recv_timeout(Duration::from_secs(5)).expect("the writer never took its first line");
+    let filled = (0..1_000).take_while(|_| shared.send_line(r#"{"cmd":"bookmark"}"#).queued()).count();
+    assert_eq!(filled, stdin::QUEUE, "the queue never said it was full");
+    assert!(shared.send_quit(Sent::Switching), "quit found the queue full");
+    open.store(true, Ordering::SeqCst);
+    assert!(wait_for(5, || seen.lock().unwrap().iter().any(|l| l.contains("quit"))), "quit never reached the engine");
 }

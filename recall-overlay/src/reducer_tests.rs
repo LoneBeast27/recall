@@ -17,6 +17,18 @@ fn normal_status_never_shows_the_overlay() {
 }
 
 #[test]
+fn a_recovering_engine_is_not_a_failure_and_cpu_copies_are_ready() {
+    let now = Instant::now();
+    let mut reducer = Reducer::new();
+    let recovering = json!({"mod":"engine","event":{"type":"status","source":"","fps":60,"buffer_secs":30.0,"encoder":"recovering","encoder_error":"NVENC encode failed: x"}});
+    reducer.apply_envelope(&recovering, now);
+    assert_eq!(reducer.view().state, RecorderState::Starting, "the engine rebuilds its encoder; the buffer is kept");
+    assert!(!reducer.view().visible, "no 'Encoder failed' pop-up for a recovery");
+    reducer.apply_envelope(&status("degraded"), now + Duration::from_secs(1));
+    assert_eq!(reducer.view().state, RecorderState::Ready);
+}
+
+#[test]
 fn saved_notification_hides_on_deadline_despite_status_updates() {
     let now = Instant::now();
     let mut reducer = Reducer::new();
@@ -245,4 +257,27 @@ fn disconnect_clears_ready_state_immediately() {
     assert!(reducer.disconnected());
     assert_eq!(reducer.view().state, RecorderState::Stopped);
     assert!(!reducer.view().connected);
+}
+
+/// Merge gate 11-07 (P1/P2): a continued recording showed two notices, always blamed the
+/// game's size, and the final notice gave only the last part's length.
+#[test]
+fn a_continued_long_recording_shows_one_notice_with_its_cause_then_the_whole_length() {
+    let now = Instant::now();
+    let mut reducer = Reducer::new();
+    reducer.apply_envelope(&status("h264_nvenc"), now);
+    reducer.apply_engine_event(&json!({"type":"recording_started","path":"E:/c/G__rec.mp4","continued":false,"part":1,"cause":null}), now);
+    assert_eq!(reducer.view().primary, "Recording started");
+    let stop = json!({"type":"recording_stopped","path":"E:/c/G__rec.mp4","seconds":3540.0,"bytes":1,"continued":true,"parts":1,"total_seconds":3540.0,"cause":"size"});
+    reducer.apply_engine_event(&stop, now);
+    assert_eq!(reducer.view().primary, "Recording started", "a part's stop shows nothing (no \"saved\")");
+    let view = |r: &Reducer| (r.view().primary.clone(), r.view().secondary.clone());
+    reducer.apply_engine_event(&json!({"type":"recording_started","path":"E:/c/G__rec-2.mp4","continued":true,"part":2,"cause":"size"}), now);
+    assert_eq!(view(&reducer), ("Recording continues in part 2".to_string(), "The game's size changed".to_string()));
+    // A frame-path change says so, not "size".
+    reducer.apply_engine_event(&json!({"type":"recording_started","path":"E:/c/G__rec-3.mp4","continued":true,"part":3,"cause":"input"}), now);
+    assert_eq!(view(&reducer), ("Recording continues in part 3".to_string(), "Capture switched between GPU and CPU frames".to_string()));
+    let last = json!({"type":"recording_stopped","path":"E:/c/G__rec-3.mp4","seconds":60.0,"bytes":1,"continued":false,"parts":3,"total_seconds":3725.0,"cause":null});
+    reducer.apply_engine_event(&last, now);
+    assert_eq!(view(&reducer), ("Recording saved".to_string(), "1:02:05 · 3 files".to_string()), "the whole length and the file count");
 }

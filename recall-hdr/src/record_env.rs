@@ -61,6 +61,17 @@ impl EnvOverrides {
         self.0.is_empty()
     }
 
+    /// The dotted keys these overrides set (`recording.output_dir`), sorted.
+    pub fn keys(&self) -> Vec<String> {
+        let mut keys: Vec<String> = self
+            .0
+            .iter()
+            .flat_map(|(section, v)| v.as_object().into_iter().flatten().map(move |(k, _)| format!("{section}.{k}")))
+            .collect();
+        keys.sort();
+        keys
+    }
+
     /// The effective config: `file` with these overrides on top. An override set
     /// that fails validation is logged and ignored (the file config wins).
     pub fn apply(&self, file: &Config) -> Config {

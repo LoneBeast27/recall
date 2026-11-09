@@ -31,20 +31,35 @@
 //! The manager thread lives in `supervisor_manager.rs`, the stdout protocol
 //! reader in `supervisor_protocol.rs`.
 
+#[path = "supervisor_hello.rs"]
+mod hello;
 #[path = "supervisor_manager.rs"]
 mod manager;
+#[path = "supervisor_mute.rs"]
+mod mute;
 #[path = "supervisor_protocol.rs"]
 mod protocol;
+#[path = "supervisor_refusal.rs"]
+mod refusal;
+#[path = "supervisor_stdin.rs"]
+mod stdin;
+#[path = "supervisor_locate.rs"]
+mod locate;
 
-use std::io::Write;
-use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::path::PathBuf;
+#[cfg(test)]
+use std::{path::Path, process::Command};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
 use crate::engine_policy::EngineSpec;
+use crate::record_dispatch::Sent;
+use locate::{engine_command, locate_engine};
+#[cfg(test)]
+use locate::locate_engine_from;
+pub(crate) use locate::locate_sibling_from;
 use manager::run_manager;
 pub(crate) use protocol::beep_failure;
 
@@ -89,6 +104,12 @@ pub struct EngineView {
     pub mic_muted: Option<bool>,
     /// Last engine `status.buffer_secs`: seconds of footage in the replay ring.
     pub buffer_secs: Option<f32>,
+    /// Status lines received (all engines): one that stops moving is a hung engine.
+    pub statuses: u64,
+    /// Last engine `status.encoder_heartbeat` (encoder-thread turns; older engines: none).
+    pub heartbeat: Option<u64>,
+    /// Last engine `status.encoder_opening`: an NVENC open is in progress.
+    pub opening: bool,
 }
 
 /// Supervises the capture engine on a background manager thread.
@@ -128,21 +149,46 @@ impl Supervisor {
         self.shared.health()
     }
 
-    /// Ask the live engine to save its replay buffer. Best-effort: a no-op when
-    /// no engine is running (Saved / SaveFailed events are the visible outcome).
-    pub fn send_save_clip(&self) {
-        self.shared.send_line(r#"{"cmd":"save_clip"}"#);
+    /// Whether another recorder holds the engine slot (busy retries, or given up on it).
+    pub fn slot_held(&self) -> crate::engine_slot::SlotHeld {
+        self.shared.slot.get(self.shared.hello_count.load(Ordering::SeqCst))
     }
 
-    /// Forward an arbitrary engine protocol command line (control-pipe path).
-    pub fn send_engine_line(&self, line: &str) {
-        self.shared.send_line(line);
+    /// Forward an arbitrary engine protocol command line; never blocks. Not queued (no
+    /// engine, a full queue, or an engine told to quit) says why ([`Sent`]).
+    pub fn send_engine_line(&self, line: &str) -> Sent {
+        self.shared.send_line(line)
     }
 
     /// Run the engine with `spec` (restarting it if one is live), or stop it
-    /// (`None`). Always an intended restart: never a failure, never backoff.
+    /// (`None`), for a game switch. Always an intended restart: never a failure, never
+    /// backoff. Lines sent from the old engine's `quit` until the next engine is up
+    /// are refused as [`Sent::Switching`]; for a stop, [`Sent::Waiting`] (no game follows).
     pub fn retarget(&self, spec: Option<EngineSpec>) {
-        self.shared.set_desired(spec);
+        self.shared.set_desired(spec, Sent::Switching);
+    }
+
+    /// As [`retarget`](Self::retarget), for a restart that is no game switch. `planned`
+    /// (new settings, a resume): lines sent meanwhile are refused as [`Sent::Restarting`];
+    /// otherwise (a hung or failed engine, the capture watchdog) as [`Sent::NotResponding`].
+    pub fn restart(&self, spec: Option<EngineSpec>, planned: bool) {
+        self.shared.set_desired(spec, if planned { Sent::Restarting } else { Sent::NotResponding });
+    }
+
+    /// Stop the engine for a pause: lines sent while it quits are refused as [`Sent::Paused`].
+    pub fn pause(&self) {
+        self.shared.set_desired(None, Sent::Paused);
+    }
+
+    /// A resume: lines sent while the paused engine still quits say "waiting for a game"
+    /// from now (a game taking the engine says "Switching games" through `retarget`).
+    pub fn unpause(&self) {
+        self.shared.unpause();
+    }
+
+    /// The mic mute every later spawn starts with, a crash respawn included (`supervisor_mute.rs`).
+    pub fn set_mic_muted(&self, muted: bool) {
+        self.shared.spawn_mute.set(muted);
     }
 
     /// The last engine `hello` and `status` lines (raw JSON), for late joiners.
@@ -153,13 +199,6 @@ impl Supervisor {
 
     pub fn engine_view(&self) -> EngineView {
         self.shared.cache.lock().unwrap_or_else(|p| p.into_inner()).view.clone()
-    }
-
-    /// The running engine said it applies `set_source` live (`hello.live_sources`); older
-    /// engines ignore that command, so their gain and name changes need a restart.
-    pub fn engine_takes_live_sources(&self) -> bool {
-        let cache = self.shared.cache.lock().unwrap_or_else(|p| p.into_inner());
-        cache.hello.as_deref().and_then(|h| serde_json::from_str::<serde_json::Value>(h).ok()).and_then(|v| v.get("live_sources")?.as_bool()).unwrap_or(false)
     }
 
     /// Engine `hello`s parsed so far: a change means a fresh engine instance.
@@ -174,8 +213,15 @@ impl Supervisor {
         }
     }
 
+    /// Stop re-broadcasting engine lines (a quit that gave up on a save reports it itself).
+    pub fn detach_hub(&self) {
+        if let Ok(mut g) = self.shared.hub.lock() {
+            *g = None;
+        }
+    }
+
     /// Also hand the controller the engine events it acts on
-    /// ([`FORWARDED_EVENTS`]: saves, long recording, screenshots, bookmarks).
+    /// ([`FORWARDED_EVENTS`]: saves and the save writing, long recording, screenshots, bookmarks).
     pub fn attach_events(&self, tx: std::sync::mpsc::Sender<serde_json::Value>) {
         if let Ok(mut g) = self.shared.events.lock() {
             *g = Some(tx);
@@ -186,6 +232,11 @@ impl Supervisor {
     /// child's stdin, wait up to `grace` for a clean exit, then hard-kill any
     /// survivor and join the manager thread.
     pub fn shutdown(mut self, grace: Duration) {
+        self.stop(grace);
+    }
+
+    /// `shutdown` in place (a session end runs it from a window handler). Safe to call again.
+    pub fn stop(&mut self, grace: Duration) {
         self.shared.request_stop(grace);
         if let Some(handle) = self.handle.take() {
             let _ = handle.join();
@@ -223,22 +274,44 @@ struct Shared {
     grace_ms: Mutex<u64>,
     /// Grace for intended restarts (tests shorten it).
     restart_grace_ms: AtomicU64,
-    /// `(generation, spec)`: every retarget bumps the generation.
-    desired: Mutex<(u64, Option<EngineSpec>)>,
-    /// Stdin of the live child, so commands / quit can reach it.
-    child_stdin: Mutex<Option<std::process::ChildStdin>>,
+    /// `(generation, spec, refusal while the old engine quits)`: every retarget bumps the generation.
+    desired: Mutex<(u64, Option<EngineSpec>, Sent)>,
+    /// The live child's stdin queue (`supervisor_stdin.rs`): held only to queue a line,
+    /// never across a write, so neither the pump nor the kill path blocks on a full pipe.
+    child_stdin: Mutex<EngineStdin>,
     hello_count: AtomicU32,
     spawn_count: AtomicU32,
+    /// The mic mute each spawn starts with, over the spec's (`supervisor_mute.rs`).
+    spawn_mute: mute::SpawnMute,
     cache: Mutex<EngineCache>,
     /// Control-pipe hub: engine protocol lines are re-broadcast to hub clients.
     hub: Mutex<Option<Arc<crate::control::PipeHub>>>,
     /// The controller's engine-event channel (record mode).
     events: Mutex<Option<std::sync::mpsc::Sender<serde_json::Value>>>,
+    /// Another recorder holds the engine slot (`engine_slot`).
+    slot: crate::engine_slot::SlotFlag,
 }
 
-/// Engine event types handed to the controller via `attach_events`.
-pub const FORWARDED_EVENTS: [&str; 9] = [
+/// The live child's stdin and whether it was told to quit, under one lock: the check and
+/// the queueing of a line are one step, so no line can land behind the `quit` (the engine
+/// stops reading there and would drop it unanswered: third audit U1).
+#[derive(Default)]
+struct EngineStdin {
+    queue: Option<stdin::StdinQueue>,
+    /// Set with the `quit`: why every line is refused until the next engine's stdin.
+    quitting: Option<Sent>,
+}
+
+/// The event the manager hands the controller each time an engine process
+/// ends (any reason): saves still in flight are lost (`EngineActivity`).
+pub const ENGINE_EXITED: &str = "engine_exited";
+
+/// Engine event types handed to the controller via `attach_events`. `status`
+/// carries `save_writing`, the save the engine is still writing.
+pub const FORWARDED_EVENTS: [&str; 11] = [
+    "status",
     "saved",
+    "source_adopted",
     "save_failed",
     "recording_started",
     "recording_stopped",
@@ -256,13 +329,15 @@ impl Shared {
             stop: AtomicBool::new(false),
             grace_ms: Mutex::new(0),
             restart_grace_ms: AtomicU64::new(RETARGET_GRACE.as_millis() as u64),
-            desired: Mutex::new((0, initial)),
-            child_stdin: Mutex::new(None),
+            desired: Mutex::new((0, initial, Sent::NotResponding)),
+            child_stdin: Mutex::new(EngineStdin::default()),
             hello_count: AtomicU32::new(0),
             spawn_count: AtomicU32::new(0),
+            spawn_mute: mute::SpawnMute::new(),
             cache: Mutex::new(EngineCache::default()),
             hub: Mutex::new(None),
             events: Mutex::new(None),
+            slot: Default::default(),
         }
     }
 
@@ -275,6 +350,16 @@ impl Shared {
         if let Ok(g) = self.events.lock() {
             if let Some(tx) = g.as_ref() {
                 let _ = tx.send(val.clone());
+            }
+        }
+    }
+
+    /// Tell the controller an engine process ended ([`ENGINE_EXITED`]); sent
+    /// after its stdout reader is joined, so after every event it wrote.
+    fn forward_exit(&self) {
+        if let Ok(g) = self.events.lock() {
+            if let Some(tx) = g.as_ref() {
+                let _ = tx.send(serde_json::json!({ "type": ENGINE_EXITED }));
             }
         }
     }
@@ -323,38 +408,37 @@ impl Shared {
     }
 
     fn desired(&self) -> (u64, Option<EngineSpec>) {
-        self.desired.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        let g = self.desired.lock().unwrap_or_else(|p| p.into_inner());
+        (g.0, g.1.clone())
     }
 
     fn generation(&self) -> u64 {
         self.desired.lock().unwrap_or_else(|p| p.into_inner()).0
     }
 
-    fn set_desired(&self, spec: Option<EngineSpec>) {
-        let mut g = self.desired.lock().unwrap_or_else(|p| p.into_inner());
-        g.0 += 1;
-        g.1 = spec;
-    }
-
     fn set_child_stdin(&self, stdin: Option<std::process::ChildStdin>) {
-        if let Ok(mut g) = self.child_stdin.lock() {
-            *g = stdin;
-        }
+        self.attach_writer(stdin.map(|s| Box::new(s) as Box<dyn std::io::Write + Send>));
     }
 
-    /// Send one JSON command line to the child if we hold its stdin. Best-effort.
-    fn send_line(&self, line: &str) {
-        if let Ok(mut g) = self.child_stdin.lock() {
-            if let Some(stdin) = g.as_mut() {
-                let _ = stdin.write_all(line.as_bytes());
-                let _ = stdin.write_all(b"\n");
-                let _ = stdin.flush();
-            }
+    /// The engine's stdin (tests inject a writer): its own writer thread and queue.
+    fn attach_writer(&self, w: Option<Box<dyn std::io::Write + Send>>) {
+        let queue = w.map(stdin::StdinQueue::start);
+        let mut g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
+        if queue.is_some() {
+            g.quitting = None; // a new engine takes lines
         }
+        g.queue = queue; // the old queue closes: its writer ends after its current write
     }
 
-    fn send_quit(&self) {
-        self.send_line(r#"{"cmd":"quit"}"#);
+    /// Queue one JSON command line for the child, if one runs and was not told to quit.
+    /// Never blocks: a line the engine is not reading is dropped once its queue is full
+    /// (`supervisor_stdin.rs`).
+    fn send_line(&self, line: &str) -> Sent {
+        let g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(refusal) = g.quitting {
+            return refusal; // the engine was told to quit: it would never read this
+        }
+        if g.queue.as_ref().is_some_and(|queue| queue.send(line)) { Sent::Queued } else { Sent::NotResponding }
     }
 
     fn clear_cache(&self) {
@@ -363,69 +447,25 @@ impl Shared {
 }
 
 // ---------------------------------------------------------------------------
-// Engine location
-// ---------------------------------------------------------------------------
-
-/// Locate the capture-engine exe.
-///
-/// Search order:
-/// 1. **Same directory as our own exe** -- the shipping layout.
-/// 2. **Dev fallback**: walk our exe's ancestors for a Cargo `target/` dir and
-///    probe `target/debug/recall.exe` then `target/release/recall.exe`.
-fn locate_engine() -> Option<PathBuf> {
-    let exe = std::env::current_exe().ok()?;
-    locate_sibling_from(&exe, "recall.exe")
-}
-
-/// Core of the sibling lookup (engine + overlay), unit-testable against a
-/// synthetic exe path under a temp dir.
-pub(crate) fn locate_sibling_from(current_exe: &Path, file: &str) -> Option<PathBuf> {
-    if let Some(dir) = current_exe.parent() {
-        let sibling = dir.join(file);
-        if sibling.is_file() {
-            return Some(sibling);
-        }
-    }
-    for ancestor in current_exe.ancestors() {
-        if ancestor.file_name().map(|n| n == "target").unwrap_or(false) {
-            for profile in ["debug", "release"] {
-                let candidate = ancestor.join(profile).join(file);
-                if candidate.is_file() {
-                    return Some(candidate);
-                }
-            }
-        }
-    }
-    None
-}
-
-fn locate_engine_from(current_exe: &Path) -> Option<PathBuf> {
-    locate_sibling_from(current_exe, "recall.exe")
-}
-
-/// Build `recall.exe --json` with piped stdio, no console, and the spec's
-/// environment edits.
-fn engine_command(path: &Path, spec: &EngineSpec) -> Command {
-    use std::os::windows::process::CommandExt;
-    let mut cmd = Command::new(path);
-    cmd.arg("--json")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .creation_flags(CREATE_NO_WINDOW);
-    for (key, value) in &spec.env {
-        match value {
-            Some(v) => cmd.env(key, v),
-            None => cmd.env_remove(key),
-        };
-    }
-    cmd
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+/// An engine stdin for tests elsewhere (`supervisor_quit_tests.rs`).
+#[cfg(test)]
+pub(crate) use quit_tests::TestPipe;
 
 #[cfg(test)]
 #[path = "supervisor_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "supervisor_quit_tests.rs"]
+pub(crate) mod quit_tests;
+
+#[cfg(test)]
+#[path = "supervisor_stop_tests.rs"]
+mod stop_tests;
+
+#[cfg(test)]
+#[path = "supervisor_refusal_tests.rs"]
+mod refusal_tests;

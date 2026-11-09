@@ -33,23 +33,20 @@ use std::panic::catch_unwind;
 use std::sync::mpsc::Sender;
 use std::sync::{Mutex, OnceLock};
 
-use windows::core::PWSTR;
-use windows::Win32::Foundation::{CloseHandle, HWND, RECT};
+use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MonitorFromWindow, MONITORINFO, MONITOR_DEFAULTTONEAREST,
-};
-use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::Accessibility::{
     HWINEVENTHOOK, SetWinEventHook, UnhookWinEvent,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetForegroundWindow, GetWindowLongPtrW, GetWindowRect, GetWindowTextW,
-    GetWindowThreadProcessId, IsWindow, IsZoomed, EVENT_SYSTEM_FOREGROUND, GWL_STYLE, WINEVENT_OUTOFCONTEXT,
+    GetClientRect, GetForegroundWindow, GetWindowLongPtrW, GetWindowRect,
+    GetWindowThreadProcessId, IsIconic, IsWindow, IsZoomed, EVENT_SYSTEM_FOREGROUND, GWL_STYLE, WINEVENT_OUTOFCONTEXT,
     WINEVENT_SKIPOWNPROCESS, WS_CAPTION,
 };
 
+use crate::game_library::Library;
 use crate::log;
 
 /// Half-tolerance (px) when deciding a window "covers" its monitor. Borderless
@@ -82,18 +79,62 @@ pub struct WatchEvent {
     /// True iff `fullscreen` AND that monitor is the managed one (HDR rules).
     pub fullscreen_on_target: bool,
     /// True iff the executable lives in a Steam library (`steamapps\common`):
-    /// the record mode's "is this a game?" signal for windowed games.
+    /// the record mode's "is this a game?" signal for windowed games, and game
+    /// evidence against the private list (`game_library`).
     pub steam_game: bool,
+    /// True iff it lives in another launcher's game folder (Epic, GOG,
+    /// Ubisoft, EA, Battle.net, itch: `launcher_libraries`): a windowed game
+    /// like `steam_game`, but no evidence against the private list (R7-detect-1).
+    pub launcher_game: bool,
+    /// True iff it lives in an Xbox / Microsoft Store game package (a folder
+    /// with `MicrosoftGame.config`, `store_games`): official proof for a
+    /// fullscreen window, no evidence against the private list, not a
+    /// windowed candidate.
+    pub store_game: bool,
+    /// True iff the identity (pid, exe) was resolved by Recall rather than read
+    /// off the window: a UWP frame named by its hosted CoreWindow's process
+    /// (G6). Such an identity is a game only on positive evidence (a known
+    /// game, an override, the vendor's list, a "game" render verdict), never
+    /// by the "fullscreen = game" fallback (`record_hosted`).
+    pub hosted: bool,
     /// Raw `HWND` as an `isize` (not a live handle; re-wrap before use).
     pub hwnd: isize,
 }
 
-/// Whether an executable path is a game in a Steam library. Steamworks Shared
-/// (the redistributable installers Steam runs before a first launch) is not.
-pub(crate) fn is_steam_library_path(path: &str) -> bool {
-    let path = path.to_ascii_lowercase().replace('/', "\\");
-    path.contains("\\steamapps\\common\\") && !path.contains("\\steamapps\\common\\steamworks shared\\")
+impl WatchEvent {
+    /// A foreground window whose process cannot be identified (`OpenProcess`
+    /// refused): no stem, never a target. Fed as "not a target" so it cancels
+    /// a pending game (T11); the HDR side ignores it.
+    pub fn unknown(pid: u32, hwnd: isize) -> WatchEvent {
+        WatchEvent {
+            pid,
+            exe_stem: String::new(),
+            exe_name: String::new(),
+            title: String::new(),
+            fullscreen: false,
+            fullscreen_on_target: false,
+            steam_game: false,
+            launcher_game: false,
+            store_game: false,
+            hosted: false,
+            hwnd,
+        }
+    }
+
+    pub fn is_unknown(&self) -> bool {
+        self.exe_stem.trim().is_empty()
+    }
 }
+
+/// The event for a foreground window: `built` when it was identified, else
+/// an [`WatchEvent::unknown`] for a real window of another process (`None`
+/// for no window, no owner, or our own process).
+pub(crate) fn event_or_unknown(hwnd: isize, pid: u32, built: Option<WatchEvent>) -> Option<WatchEvent> {
+    built.or_else(|| (hwnd != 0 && pid != 0 && pid != std::process::id()).then(|| WatchEvent::unknown(pid, hwnd)))
+}
+
+#[cfg(test)]
+pub(crate) use crate::game_library::is_steam_library_path;
 
 /// The single global slot the callback reads from. `SetWinEventHook` has no
 /// user-data pointer, so the callback cannot be handed a `&Watcher`; it must reach
@@ -202,6 +243,14 @@ impl Drop for Watcher {
     }
 }
 
+/// The managed monitor changed (`record_monitor`): later hook events use it.
+pub fn set_target_monitor(target_monitor: isize) {
+    let mut slot = state().lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(st) = slot.as_mut() {
+        st.target_monitor = target_monitor;
+    }
+}
+
 /// The Win32 `WINEVENTPROC`. Runs on the installing (message-pump) thread when the
 /// system foreground window changes.
 ///
@@ -241,7 +290,7 @@ fn handle_foreground(hwnd: HWND) {
         };
         (st.target_monitor, st.tx.clone())
     };
-    if let Some(event) = build_event(hwnd, target_monitor) {
+    if let Some(event) = build_or_unknown(hwnd, target_monitor) {
         // A closed receiver just means the reconciler shut down; drop the event.
         let _ = tx.send(event);
     }
@@ -253,7 +302,30 @@ fn handle_foreground(hwnd: HWND) {
 pub fn probe_foreground(target_monitor: isize) -> Option<WatchEvent> {
     // SAFETY: plain query; a null result is handled by `build_event`.
     let hwnd = unsafe { GetForegroundWindow() };
-    build_event(hwnd, target_monitor)
+    build_or_unknown(hwnd, target_monitor)
+}
+
+/// [`build_event`], or an unknown event for a window whose process cannot be
+/// identified ([`event_or_unknown`]): the hook and the 1 s probe feed it.
+fn build_or_unknown(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
+    let built = build_event(hwnd, target_monitor);
+    if built.is_some() || hwnd.0.is_null() {
+        return built;
+    }
+    let mut pid = 0u32;
+    // SAFETY: GetWindowThreadProcessId tolerates a stale handle (pid stays 0).
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    event_or_unknown(hwnd.0 as isize, pid, None)
+}
+
+/// The client area (width, height) of `hwnd`; (0, 0) when it is gone.
+pub fn client_size(hwnd: isize) -> (i32, i32) {
+    let mut r = RECT::default();
+    // SAFETY: GetClientRect tolerates a stale handle (it fails).
+    if unsafe { GetClientRect(HWND(hwnd as *mut _), &mut r) }.is_err() {
+        return (0, 0);
+    }
+    (r.right - r.left, r.bottom - r.top)
 }
 
 /// Probe one window (the record mode's followed foreground, after its
@@ -276,6 +348,8 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
     if hwnd.0.is_null() {
         return None;
     }
+    // A hung game's DWM ghost stands in for the game's own window (U3).
+    let hwnd = crate::ghost_window::resolve(hwnd);
 
     // PID + exe identity. Skip windows with no resolvable owning process.
     let mut pid = 0u32;
@@ -286,7 +360,8 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
     if pid == 0 || pid == std::process::id() {
         return None;
     }
-    let (exe_stem, exe_name, steam_game) = exe_identity(pid)?;
+    let frame_pid = pid;
+    let (pid, (exe_stem, exe_name, library)) = identity::hosted_identity(hwnd, pid, exe_identity(pid)?);
     if exe_stem.trim().is_empty() {
         return None; // no stem -> not a real app window we can classify
     }
@@ -299,7 +374,10 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
         title: window_title(hwnd),
         fullscreen,
         fullscreen_on_target: fullscreen && monitor == target_monitor,
-        steam_game,
+        steam_game: library == Library::Steam,
+        launcher_game: library == Library::Launcher,
+        store_game: library == Library::Store,
+        hosted: pid != frame_pid,
         hwnd: hwnd.0 as isize,
     })
 }
@@ -354,43 +432,16 @@ fn rect_covers(mon: &RECT, win: &RECT, tol: i32) -> bool {
 // Vendored Win32 helpers
 // ---------------------------------------------------------------------------
 
-// vendored from recall/src/source.rs (exe_stem): OpenProcess with
-// PROCESS_QUERY_LIMITED_INFORMATION + QueryFullProcessImageNameW, then take the
-// file stem. Kept local to avoid a cross-crate dependency for two small helpers.
-fn exe_stem(pid: u32) -> Option<String> {
-    exe_identity(pid).map(|(stem, _, _)| stem)
-}
-
-/// `(file stem, file name, in a Steam library)` of `pid`'s executable image.
-fn exe_identity(pid: u32) -> Option<(String, String, bool)> {
-    let full = exe_path(pid)?;
-    let path = std::path::Path::new(&full);
-    Some((
-        path.file_stem()?.to_string_lossy().into_owned(),
-        path.file_name()?.to_string_lossy().into_owned(),
-        is_steam_library_path(&full),
-    ))
-}
-
-/// The full path of `pid`'s executable image (Win32 form).
-pub fn exe_path(pid: u32) -> Option<String> {
-    // SAFETY: a query-only handle, closed before return; the buffer outlives the call.
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        let mut buf = [0u16; 260];
-        let mut len = buf.len() as u32;
-        let res =
-            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
-        let _ = CloseHandle(handle);
-        res.ok()?;
-        Some(String::from_utf16_lossy(&buf[..len as usize]))
-    }
-}
-
 /// Whether `hwnd` is the foreground window now.
 pub fn is_foreground(hwnd: isize) -> bool {
     // SAFETY: plain query.
     unsafe { GetForegroundWindow() }.0 as isize == hwnd
+}
+
+/// Whether `hwnd` is minimized.
+pub fn window_minimized(hwnd: isize) -> bool {
+    // SAFETY: IsIconic tolerates any handle value.
+    unsafe { IsIconic(HWND(hwnd as *mut _)) }.as_bool()
 }
 
 /// Whether `hwnd` still names a live window.
@@ -399,30 +450,15 @@ pub fn window_alive(hwnd: isize) -> bool {
     unsafe { IsWindow(Some(HWND(hwnd as *mut _))) }.as_bool()
 }
 
-/// Public identity lookup for env-pinned capture targets (`Start-Recall.ps1`).
-pub fn window_identity(hwnd: isize) -> Option<(u32, String, String, String)> {
-    let hwnd = HWND(hwnd as *mut _);
-    let mut pid = 0u32;
-    // SAFETY: GetWindowThreadProcessId tolerates a stale handle (pid stays 0).
-    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
-    if pid == 0 {
-        return None;
-    }
-    let (stem, name, _) = exe_identity(pid)?;
-    Some((pid, stem, name, window_title(hwnd)))
-}
+#[path = "watcher_process.rs"]
+mod process;
+pub use process::{exe_path, window_identity};
+use process::{exe_identity, window_title};
+// `ghost_window` reads the stem of a hung window's process.
+pub(crate) use process::exe_stem;
 
-// vendored from recall/src/source.rs (window_title): GetWindowTextW into a fixed
-// buffer, UTF-16-lossy decode. Empty string on no title / error.
-fn window_title(hwnd: HWND) -> String {
-    let mut buf = [0u16; 512];
-    let len = unsafe { GetWindowTextW(hwnd, &mut buf) };
-    if len <= 0 {
-        String::new()
-    } else {
-        String::from_utf16_lossy(&buf[..len as usize])
-    }
-}
+#[path = "watcher_identity.rs"]
+mod identity;
 
 #[cfg(test)]
 #[path = "watcher_tests.rs"]

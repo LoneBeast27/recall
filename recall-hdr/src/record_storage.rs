@@ -1,24 +1,31 @@
 //! Storage cap + auto-clean (`[storage] cap_gb`: 0 = off, else at least
 //! [`STORAGE_CAP_MIN_GB`]). After each saved clip (debounced) and hourly,
 //! when the top-level Recall clips in `recording.output_dir` total more than
-//! the cap, the OLDEST clips go to the Recycle Bin (`SHFileOperationW` +
-//! `FOF_ALLOWUNDO`, with their recorder thumbnails and `.recall-edit.json` /
-//! `.recall-marks.json` sidecars) until the folder is under the cap.
+//! the cap, the OLDEST clips go to the Recycle Bin, with their recorder
+//! thumbnails and `.recall-edit.json` / `.recall-marks.json` sidecars, through
+//! `IFileOperation` with a sink that refuses a permanent delete
+//! (`win_fileop.rs`), until the folder is under the cap. A clip
+//! goes only when its volume has a Recycle Bin that will take it
+//! (`win_recycle.rs`); otherwise the run stops there and nothing is deleted.
 //!
 //! Only Recall-named clips count and can go ([`is_recall_clip`]:
 //! `<GAME>__YYYY-MM-DD__HH-MM-SS[...].mp4`, long recordings included); other
 //! videos in the folder are left alone. Never touched: the newest clip and any
 //! clip modified in the last [`RECENT_SECS`], favourites
-//! (`%APPDATA%\Recall\library.json`, keyed by file name, `favourite: true`;
-//! `RECALL_LIBRARY_META` overrides the path), clips with an edit sidecar,
+//! (`%APPDATA%\Recall\library.json`, keyed by the clip's full path -- older
+//! files by file name -- `favourite: true`;
+//! `RECALL_LIBRARY_META` overrides the path), clips played in the last ten
+//! minutes or open in the app (`record_storage_keep.rs`; all three are read
+//! again before every Recycle Bin call), clips with an edit sidecar,
 //! anything in a subfolder (`exports\`, `screenshots\`, `thumbs\` except a
 //! removed clip's own thumbnails), and `.part` files. An unreadable or
-//! corrupt library file -- or a missing one beside the app's quarantined
-//! `library.json.bad` -- cancels the run (favourites unknown = delete
-//! nothing). `FOF_WANTNUKEWARNING` makes Windows ask before it would delete
+//! corrupt library file -- or a missing one, or one older than the app's
+//! quarantined `library.json.bad*` copy -- cancels the run (favourites
+//! unknown = delete nothing). `FOF_WANTNUKEWARNING` makes Windows ask before it would delete
 //! permanently (a clip bigger than the Recycle Bin), never silently.
 //!
-//! Runs on its own background-I/O thread (the clip folder is an SMR HDD); one
+//! Runs on its own background-I/O thread (`record_janitor.rs`, which also
+//! checks free space: `record_free_space.rs`; the clip folder is an SMR HDD); one
 //! directory listing per run, no per-file stats. Results (on `mod:"session"`):
 //! a log line and `{"type":"storage_cleaned","removed":N,"freed_bytes":B,
 //! "through":T,"used_bytes":U,"cap_bytes":C}` (`through` = last-write Unix
@@ -32,13 +39,10 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, Sender};
-use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use serde_json::{json, Value};
 
-use crate::control::PipeHub;
 use crate::log;
 use crate::record_config::STORAGE_CAP_MIN_GB;
 
@@ -135,7 +139,10 @@ pub fn candidates(clips: &[ClipFile], now_unix: u64, protected: impl Fn(&ClipFil
     order
 }
 
-/// Lowercase file names marked `favourite: true` in `library.json`.
+/// Lowercase file names marked `favourite: true` in `library.json`. The app keys
+/// clips by full path (older files by file name); the file name of either is
+/// kept, so a favourite anywhere with a clip's name protects that clip (never
+/// fewer protected than the app shows).
 pub fn favourites(json_bytes: &[u8]) -> Result<HashSet<String>, String> {
     let Value::Object(map) = serde_json::from_slice::<Value>(json_bytes).map_err(|e| format!("library.json: {e}"))? else {
         return Err("library.json is not an object".into());
@@ -143,7 +150,7 @@ pub fn favourites(json_bytes: &[u8]) -> Result<HashSet<String>, String> {
     Ok(map
         .into_iter()
         .filter(|(_, v)| v.get("favourite").and_then(Value::as_bool) == Some(true))
-        .map(|(name, _)| name.to_lowercase())
+        .map(|(name, _)| keep::file_key(&name))
         .collect())
 }
 
@@ -195,14 +202,21 @@ pub const REARM_POINTS: u64 = 5;
 pub struct Warner {
     cap: u64,
     level: u8,
+    /// The "couldn't move old clips" notice was shown and no run has worked since.
+    refused: bool,
 }
+
+/// The notice when a clip cannot go to the Recycle Bin (shown once until a run works again).
+pub const REFUSED_NOTICE: &str = "Couldn't move old clips to the Recycle Bin, so your limit wasn't applied.";
+/// The notice while an earlier Recycle Bin move is still stuck (shown once per streak, like [`REFUSED_NOTICE`]).
+pub const BUSY_NOTICE: &str = "The Recycle Bin is busy, try again: old clips weren't moved yet, so your limit wasn't applied.";
 
 impl Warner {
     /// The level to warn about now, if any. `pruned`: this run moved clips
     /// (their own toast says so), so the level is only recorded.
     pub fn update(&mut self, used: u64, cap: u64, stuck: bool, pruned: bool) -> Option<u8> {
         if cap != self.cap {
-            *self = Warner { cap, level: 0 };
+            *self = Warner { cap, level: 0, refused: self.refused };
         }
         if cap == 0 {
             return None;
@@ -217,6 +231,15 @@ impl Warner {
             self.level = now;
         }
         None
+    }
+}
+
+impl Warner {
+    /// Whether to show [`REFUSED_NOTICE`] for this run: once, until a run goes through again.
+    pub fn refusal(&mut self, refused: bool) -> bool {
+        let show = refused && !self.refused;
+        self.refused = refused;
+        show
     }
 }
 
@@ -259,79 +282,36 @@ pub fn scan(dir: &Path) -> std::io::Result<Listing> {
     Ok(listing)
 }
 
-/// `RECALL_LIBRARY_META`, else `%APPDATA%\Recall\library.json`.
-pub fn library_path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("RECALL_LIBRARY_META").filter(|p| !p.is_empty()) {
-        return Some(PathBuf::from(p));
-    }
-    std::env::var_os("APPDATA").map(|a| PathBuf::from(a).join("Recall").join("library.json"))
+#[path = "record_storage_library.rs"]
+mod library_file;
+pub use library_file::library_path;
+#[cfg(test)]
+use library_file::{favourites_at, quarantine_path};
+use library_file::load_favourites;
+
+/// Move `files` (one clip and its companions) to the Recycle Bin in one shell operation.
+pub fn recycle(files: &[PathBuf]) -> Result<(), RecycleError> {
+    from_outcome(crate::win_fileop::recycle_files(files).outcome)
 }
 
-/// Favourites from disk ([`favourites_at`] the [`library_path`]).
-fn load_favourites() -> Result<HashSet<String>, String> {
-    let Some(path) = library_path() else { return Ok(HashSet::new()) };
-    favourites_at(&path)
+/// Why one Recycle Bin call did not go through.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecycleError {
+    /// The clip would not go to the Recycle Bin: the `IFileOperation` sink
+    /// refused a delete Windows would have made permanent, or the call was
+    /// cancelled. The run stops and the user is told, as for a precheck refusal.
+    Refused(String),
+    Failed(String),
 }
 
-/// `library.json` -> `library.json.bad` (where the app moves a corrupt file).
-pub fn quarantine_path(path: &Path) -> PathBuf {
-    let mut name = path.file_name().map(|n| n.to_os_string()).unwrap_or_else(|| "library.json".into());
-    name.push(".bad");
-    path.with_file_name(name)
-}
-
-/// Favourites in the library file at `path`. Missing means none -- unless the
-/// app quarantined a corrupt copy beside it, which (like an unreadable or
-/// corrupt file) leaves favourites unknown, so the run is cancelled.
-pub fn favourites_at(path: &Path) -> Result<HashSet<String>, String> {
-    match std::fs::read(path) {
-        Ok(bytes) => favourites(&bytes),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-            let bad = quarantine_path(path);
-            match bad.try_exists() {
-                Ok(false) => Ok(HashSet::new()),
-                Ok(true) => Err(format!("{} is missing and {} holds a quarantined corrupt copy", path.display(), bad.display())),
-                Err(e) => Err(format!("{}: {e}", bad.display())),
-            }
-        }
-        Err(e) => Err(format!("{}: {e}", path.display())),
+/// One `win_fileop` outcome as the cap run's result.
+pub fn from_outcome(outcome: crate::win_fileop::Outcome) -> Result<(), RecycleError> {
+    use crate::win_fileop::Outcome;
+    match outcome {
+        Outcome::Recycled => Ok(()),
+        Outcome::Refused(why) => Err(RecycleError::Refused(why)),
+        Outcome::Failed(why) => Err(RecycleError::Failed(why)),
     }
-}
-
-/// Move `files` to the Recycle Bin in one shell operation.
-pub fn recycle(files: &[PathBuf]) -> Result<(), String> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows::core::{BOOL, PCWSTR};
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::UI::Shell::{
-        SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT, FOF_WANTNUKEWARNING, FO_DELETE,
-        SHFILEOPSTRUCTW,
-    };
-    if files.is_empty() {
-        return Ok(());
-    }
-    let mut list: Vec<u16> = Vec::new();
-    for f in files {
-        list.extend(f.as_os_str().encode_wide());
-        list.push(0);
-    }
-    list.push(0);
-    let mut op = SHFILEOPSTRUCTW {
-        hwnd: HWND(std::ptr::null_mut()),
-        wFunc: FO_DELETE,
-        pFrom: PCWSTR(list.as_ptr()),
-        pTo: PCWSTR::null(),
-        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI | FOF_WANTNUKEWARNING).0 as u16,
-        fAnyOperationsAborted: BOOL(0),
-        hNameMappings: std::ptr::null_mut(),
-        lpszProgressTitle: PCWSTR::null(),
-    };
-    // SAFETY: `list` is a double-NUL-terminated wide path list alive for the call.
-    let code = unsafe { SHFileOperationW(&mut op) };
-    if code != 0 || op.fAnyOperationsAborted.as_bool() {
-        return Err(format!("Recycle Bin move failed (shell error {code:#x})"));
-    }
-    Ok(())
 }
 
 /// What a run did.
@@ -347,15 +327,17 @@ pub struct Outcome {
     /// Oldest clip that may go next.
     pub next: Option<u64>,
     pub stuck: bool,
+    /// Why the run stopped before a clip that cannot go to the Recycle Bin.
+    pub refused: Option<String>,
 }
 
 /// List and plan (nothing moved). Errors leave favourites unknown or the folder unread.
-fn plan_dir(dir: &Path, cap_gb: u32) -> Result<(Plan, Listing), String> {
+pub(crate) fn plan_dir(dir: &Path, cap_gb: u32) -> Result<(Plan, Listing), String> {
     if cap_gb < STORAGE_CAP_MIN_GB {
         // `set_config` rejects this; a hand-edited config.toml does not.
         return Err(format!("storage.cap_gb {cap_gb} is below the {STORAGE_CAP_MIN_GB} GiB minimum; nothing removed"));
     }
-    let favs = load_favourites().map_err(|e| format!("favourites unknown ({e}); nothing removed"))?;
+    let favs = keep::kept_now().map_err(|e| format!("favourites unknown ({e}); nothing removed"))?;
     plan_listing(dir, &favs, cap_gb as u64 * GIB)
 }
 
@@ -366,27 +348,97 @@ fn plan_listing(dir: &Path, favs: &HashSet<String>, cap: u64) -> Result<(Plan, L
     Ok((plan(&listing, favs, cap, now_unix), listing))
 }
 
-fn run_once(dir: &Path, cap_gb: u32) -> Result<Outcome, String> {
-    let (plan, listing) = plan_dir(dir, cap_gb)?;
+/// Lists and plans a run (production: [`plan_dir`]; tests inject one).
+pub(crate) type PlanFn = fn(&Path, u32) -> Result<(Plan, Listing), String>;
+/// Moves files to the Recycle Bin (production: [`recycle`]; tests inject one).
+pub(crate) type RecycleFn = fn(&[PathBuf]) -> Result<(), RecycleError>;
+/// Lowercase names to keep now (production: [`keep::kept_now`]). Err = unknown: the run stops.
+pub(crate) type KeepFn = fn() -> Result<HashSet<String>, String>;
+pub(crate) use keep::{file_key, kept_now};
+pub(crate) use crate::win_recycle::{BinCheck, SizeFn};
+
+/// Bytes one Recycle Bin call moves: the clip (its listed size) and its
+/// companions as they are on disk (a missing one counts 0).
+fn companions_bytes(files: &[PathBuf], clip: Option<&ClipFile>, size: SizeFn) -> Result<u64, String> {
+    let clip_bytes = match clip {
+        Some(c) => c.bytes,
+        None => crate::win_recycle::total_size(&files[..1.min(files.len())], size)?,
+    };
+    Ok(clip_bytes + crate::win_recycle::total_size(files.get(1..).unwrap_or(&[]), size)?)
+}
+
+/// One cap run: one Recycle Bin call per clip (with its thumbnails and
+/// sidecars), oldest first. `wanted` is asked before EVERY call: the listing
+/// can take long on a sleeping NAS and each call takes a moment on an HDD,
+/// and once the cap or folder is no longer the user's setting nothing more
+/// moves. `keep` is read again before every call too, under the lock: a clip
+/// starred, played or opened since the plan is skipped. `bin` is asked before
+/// every call, and it, `keep` and the call run under the one Recycle Bin lock every Recall process
+/// shares (`win_recycle_lock.rs`), so two moves never pass one room check: a
+/// clip whose volume has no Recycle Bin that will take it (a share, a
+/// removable drive, a bin turned off or too small) stops the run, so nothing
+/// is ever deleted for good. The first failed call ends the run.
+pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: (&dyn Fn() -> bool, KeepFn), bin: (BinCheck, SizeFn), recycle: RecycleFn) -> Result<Outcome, String> {
+    let (wanted, keep) = wanted;
+    let (bin, size) = bin;
+    let (plan, listing) = plan(dir, cap_gb)?;
     let cap = cap_gb as u64 * GIB;
-    let mut out = Outcome { removed: 0, freed: 0, through: None, used: plan.total, cap, next: plan.next, stuck: plan.stuck(cap) };
-    if plan.remove.is_empty() {
-        return Ok(out);
+    let stuck = plan.stuck(cap);
+    let mut out = Outcome { removed: 0, freed: 0, through: None, used: plan.total, cap, next: plan.next, stuck, refused: None };
+    let mut failed = None;
+    for name in &plan.remove {
+        if !wanted() {
+            log!("storage: the storage limit or folder changed during the run; stopped after {} clip(s)", out.removed);
+            break;
+        }
+        let files = companions(dir, name, &listing);
+        let clip = listing.clips.iter().find(|c| c.name == *name);
+        // The keeps are read under the lock too: a star or open made while it waited counts.
+        let checked = crate::win_fileop::bin_lock::held(|| keep::turn(name, keep, || companions_bytes(&files, clip, size).and_then(|bytes| bin(dir, bytes)), || recycle(&files)));
+        let moved = match checked.unwrap_or_else(keep::Turn::Refused) {
+            keep::Turn::Unknown(e) => {
+                log!("storage: favourites unknown ({e}); stopped after {} clip(s)", out.removed);
+                break;
+            }
+            keep::Turn::Kept => {
+                log!("storage: {name} became a favourite, was played or opened during the run; kept");
+                continue;
+            }
+            keep::Turn::Moved(moved) => moved,
+            keep::Turn::Refused(why) => {
+                out.refused = Some(why);
+                break;
+            }
+        };
+        // A declined or cancelled call moved nothing; otherwise count what left the folder.
+        let gone = !matches!(moved, Err(RecycleError::Refused(_)));
+        if let Some(c) = listing.clips.iter().find(|c| c.name == *name).filter(|c| gone && !dir.join(&c.name).exists()) {
+            out.removed += 1;
+            out.freed += c.bytes;
+            out.through = out.through.max(Some(c.modified));
+        }
+        match moved {
+            Ok(()) => {}
+            Err(RecycleError::Refused(why)) => {
+                out.refused = Some(why);
+                break;
+            }
+            Err(RecycleError::Failed(why)) => {
+                failed = Some(why);
+                break;
+            }
+        }
     }
-    let files: Vec<PathBuf> = plan.remove.iter().flat_map(|c| companions(dir, c, &listing)).collect();
-    let moved = recycle(&files);
-    let gone: Vec<&ClipFile> = listing.clips.iter().filter(|c| plan.remove.contains(&c.name) && !dir.join(&c.name).exists()).collect();
-    out.removed = gone.len();
-    out.freed = gone.iter().map(|c| c.bytes).sum();
-    out.through = gone.iter().map(|c| c.modified).max();
     out.used = plan.total - out.freed;
-    // A partial move still reports what went (the toast names the date); the error follows.
-    if out.removed == 0 {
-        moved?;
-    } else if let Err(e) = moved {
-        log!("storage: {e} (after {} clip(s) went)", out.removed);
+    // A partial run still reports what went (the toast names the date); the error follows.
+    match failed {
+        Some(e) if out.removed == 0 => Err(e),
+        Some(e) => {
+            log!("storage: {e} (after {} clip(s) went)", out.removed);
+            Ok(out)
+        }
+        None => Ok(out),
     }
-    Ok(out)
 }
 
 pub fn cleaned_event(o: &Outcome) -> String {
@@ -403,99 +455,17 @@ pub fn preview_event(cap_gb: u32, plan: &Plan) -> String {
         .to_string()
 }
 
-struct Job {
-    dir: PathBuf,
-    cap_gb: u32,
-    /// `Some(client)`: a dry run answered to that client; nothing moves.
-    preview_for: Option<u64>,
-}
-
-/// Schedules runs (after saves, hourly, on demand) onto one worker thread.
-pub struct Janitor {
-    tx: Sender<Job>,
-    after_save: Option<Instant>,
-    next_hourly: Instant,
-}
-
-impl Janitor {
-    pub fn start(hub: Arc<PipeHub>) -> Self {
-        let (tx, rx) = channel::<Job>();
-        let _ = std::thread::Builder::new().name("recall-storage".into()).spawn(move || {
-            background_io();
-            let mut warner = Warner::default();
-            while let Ok(first) = rx.recv() {
-                // Previews are answered in order; queued runs coalesce into the newest.
-                let mut run = None;
-                for job in std::iter::once(first).chain(std::iter::from_fn(|| rx.try_recv().ok())) {
-                    match job.preview_for {
-                        Some(client) => match plan_dir(&job.dir, job.cap_gb) {
-                            Ok((plan, _)) => hub.event_to(client, "session", &preview_event(job.cap_gb, &plan)),
-                            Err(e) => hub.event_to(client, "session", &crate::record_status::error_event(&format!("storage preview: {e}"))),
-                        },
-                        None => run = Some(job),
-                    }
-                }
-                let Some(job) = run else { continue };
-                match run_once(&job.dir, job.cap_gb) {
-                    Ok(o) => {
-                        if o.removed > 0 {
-                            log!("storage: cap {} GiB -> {} clip(s) to the Recycle Bin, {} bytes freed", job.cap_gb, o.removed, o.freed);
-                            hub.event("session", &cleaned_event(&o));
-                        } else {
-                            log!("storage: {} uses {} of its {} GiB cap", job.dir.display(), o.used, job.cap_gb);
-                        }
-                        if let Some(level) = warner.update(o.used, o.cap, o.stuck, o.removed > 0) {
-                            log!("storage: {level}% warning ({} of {} bytes)", o.used, o.cap);
-                            hub.event("session", &warning_event(level, &o));
-                        }
-                    }
-                    Err(e) => {
-                        log!("storage: clean-up skipped -- {e}");
-                        hub.event("session", &crate::record_status::error_event(&format!("storage clean-up: {e}")));
-                    }
-                }
-            }
-        });
-        Janitor { tx, after_save: None, next_hourly: Instant::now() + HOURLY }
-    }
-
-    pub fn saved(&mut self, now: Instant) {
-        self.after_save = Some(now + AFTER_SAVE);
-    }
-
-    pub fn next_deadline(&self) -> Option<Instant> {
-        self.after_save
-    }
-
-    /// Run now (cap changed / pipe `storage_clean`); 0 = off.
-    pub fn run_now(&mut self, dir: &str, cap_gb: u32, now: Instant) {
-        self.after_save = None;
-        self.next_hourly = now + HOURLY;
-        if cap_gb > 0 {
-            let _ = self.tx.send(Job { dir: PathBuf::from(dir), cap_gb, preview_for: None });
-        }
-    }
-
-    /// Plan `cap_gb` without moving anything; the answer goes to `client` only.
-    pub fn preview(&mut self, dir: &str, cap_gb: u32, client: u64) {
-        let _ = self.tx.send(Job { dir: PathBuf::from(dir), cap_gb, preview_for: Some(client) });
-    }
-
-    pub fn tick(&mut self, dir: &str, cap_gb: u32, now: Instant) {
-        let due = self.after_save.is_some_and(|t| now >= t) || now >= self.next_hourly;
-        if due {
-            self.run_now(dir, cap_gb, now);
-        }
-    }
-}
-
-/// Background I/O + CPU priority for this thread (the HDD stays responsive).
-fn background_io() {
-    use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN};
-    // SAFETY: the current-thread pseudo-handle needs no closing.
-    let _ = unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN) };
-}
+#[path = "record_storage_keep.rs"]
+mod keep;
 
 #[cfg(test)]
 #[path = "record_storage_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "record_storage_damage_tests.rs"]
+mod damage_tests;
+
+#[cfg(test)]
+#[path = "record_storage_keep_tests.rs"]
+mod keep_tests;

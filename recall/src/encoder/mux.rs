@@ -8,7 +8,6 @@ use std::time::Instant;
 use ffmpeg_next as ff;
 
 use super::saver::{ms, window_secs, Events, Muxed, RawFrame, SaveJob, Timing, VideoSrc, ABORTED};
-use crate::audio::AudioPcm;
 use crate::ring::EncodedPacket;
 
 /// Codec parameters (incl. SPS/PPS extradata) copied out of an opened encoder.
@@ -23,22 +22,56 @@ impl OwnedParams {
     pub fn from_encoder(encoder: &ff::encoder::Video) -> Self {
         Self(ff::codec::Parameters::from(encoder))
     }
-}
 
-/// One audio track's AAC-encoded save window. The encoder context is kept so
-/// the muxer can copy its codec parameters (incl. AudioSpecificConfig).
-pub(crate) struct AacTrack {
-    rate: u32,
-    /// Stream `title` + `handler_name` ("Game", "Microphone", "Voice chat").
-    title: &'static str,
-    /// Saved in the clip's `edit_model::AUDIO_SOURCES_TAG`.
-    source: &'static str,
-    encoder: ff::encoder::Audio,
-    /// (pts in 1/rate, packet payload)
-    packets: Vec<(i64, Vec<u8>)>,
-    pub coder: AacCoder,
-    /// CPU time of the encoding thread.
-    pub cpu_ms: f64,
+    /// H.264 parameters of `w`x`h` with these parameter-set bytes (replay tests).
+    #[cfg(test)]
+    pub fn test_h264(w: i32, h: i32, extradata: &[u8]) -> Self {
+        let params = ff::codec::Parameters::new();
+        // SAFETY: a fresh owned AVCodecParameters; extradata is av_malloc'd with the
+        // padding FFmpeg requires and freed with the parameters.
+        unsafe {
+            let p = &mut *params.as_ptr().cast_mut();
+            p.codec_type = ff::ffi::AVMediaType::AVMEDIA_TYPE_VIDEO;
+            p.codec_id = ff::ffi::AVCodecID::AV_CODEC_ID_H264;
+            p.width = w;
+            p.height = h;
+            let pad = ff::ffi::AV_INPUT_BUFFER_PADDING_SIZE as usize;
+            let buf = ff::ffi::av_mallocz(extradata.len() + pad) as *mut u8;
+            std::ptr::copy_nonoverlapping(extradata.as_ptr(), buf, extradata.len());
+            p.extradata = buf;
+            p.extradata_size = extradata.len() as i32;
+        }
+        Self(params)
+    }
+
+    /// Both streams can share one MP4 sample entry: same codec, size and parameter sets
+    /// (SPS/PPS extradata), so packets of either decode with these. The input pixel
+    /// format (D3D11 or RGB0) is not part of the stream.
+    /// The parameter-set bytes (SPS/PPS, HEVC VPS, AV1 sequence header).
+    #[cfg(test)]
+    pub fn extradata(&self) -> Vec<u8> {
+        // SAFETY: a live, owned AVCodecParameters; extradata is valid for its size.
+        unsafe {
+            let p = &*self.0.as_ptr();
+            if p.extradata.is_null() || p.extradata_size <= 0 {
+                return Vec::new();
+            }
+            std::slice::from_raw_parts(p.extradata, p.extradata_size as usize).to_vec()
+        }
+    }
+
+    pub fn same_stream(&self, other: &OwnedParams) -> bool {
+        // SAFETY: both point at live, owned AVCodecParameters; the extradata pointer is
+        // valid for `extradata_size` bytes (or null with size 0).
+        unsafe {
+            let (a, b) = (&*self.0.as_ptr(), &*other.0.as_ptr());
+            let bytes = |p: &ff::ffi::AVCodecParameters| match p.extradata.is_null() || p.extradata_size <= 0 {
+                true => &[][..],
+                false => std::slice::from_raw_parts(p.extradata, p.extradata_size as usize),
+            };
+            a.codec_id == b.codec_id && a.width == b.width && a.height == b.height && bytes(a) == bytes(b)
+        }
+    }
 }
 
 /// Production `MuxFn`: still-encode a quiet tail if needed, encode every
@@ -82,175 +115,6 @@ pub(crate) fn produce(
     Ok(Muxed {
         frames: packets.len() as u64,
         secs: secs as f32,
-    })
-}
-
-/// Encode every track at once, one thread each: the save waits for the longest track, not
-/// the sum (2 tracks of 119 s took 5.3 s one after another, 2026-11-04). Each worker runs at
-/// below-normal priority with EcoQoS, so a save mid-game stays off the game's cores.
-fn encode_tracks(audio: &[AudioPcm], abort: &AtomicBool) -> Result<Vec<AacTrack>, String> {
-    std::thread::scope(|scope| {
-        let workers: Vec<_> = audio
-            .iter()
-            .map(|pcm| {
-                scope.spawn(move || {
-                    crate::thread_qos::eco_background();
-                    // A source above 0 dB can pass full scale: limit it, never a hard clip in the encode.
-                    let limited = pcm.boosted.then(|| pcm.limited());
-                    encode_aac(limited.as_ref().unwrap_or(pcm), abort).map_err(|e| format!("audio track '{}': {e}", pcm.name))
-                })
-            })
-            .collect();
-        workers.into_iter().map(|w| w.join().unwrap_or_else(|_| Err("audio encode thread panicked".into()))).collect()
-    })
-}
-
-/// Which AAC encoder made a track.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum AacCoder {
-    /// Windows' own AAC encoder (Media Foundation, through FFmpeg's `aac_mf`).
-    MediaFoundation,
-    /// FFmpeg's native encoder, fast coder: any rate and channel count.
-    Native,
-}
-
-impl AacCoder {
-    pub fn name(self) -> &'static str {
-        match self {
-            AacCoder::MediaFoundation => "mf",
-            AacCoder::Native => "native",
-        }
-    }
-}
-
-/// Media Foundation's encoder takes 16-bit PCM at 44.1 or 48 kHz only. A silent track (a muted
-/// or unused mic writes zeros) goes to FFmpeg's encoder too: Media Foundation is constant-rate,
-/// so silence costs the full 192 kb/s (about 3 MB per 2-minute track) against ~2 kb/s with
-/// FFmpeg's. `RECALL_AAC=native` forces FFmpeg's encoder (comparisons).
-fn mf_fits(pcm: &AudioPcm) -> bool {
-    matches!(pcm.rate, 44_100 | 48_000) && !silent(&pcm.samples) && std::env::var("RECALL_AAC").map_or(true, |v| v != "native")
-}
-
-/// Every sample at or below 1e-6 (-120 dBFS): nothing an AAC frame would keep.
-pub(crate) fn silent(samples: &[f32]) -> bool {
-    samples.iter().all(|s| s.abs() <= 1e-6)
-}
-
-/// Encode one snapshotted track to AAC: Media Foundation where it fits and opens, else
-/// FFmpeg's encoder.
-pub(crate) fn encode_aac(pcm: &AudioPcm, abort: &AtomicBool) -> Result<AacTrack, String> {
-    if mf_fits(pcm) {
-        match encode_aac_with(pcm, abort, AacCoder::MediaFoundation) {
-            Ok(track) => return Ok(track),
-            Err(e) if e == ABORTED => return Err(e),
-            Err(_) => {} // no Media Foundation (Windows N without the Media Feature Pack)
-        }
-    }
-    encode_aac_with(pcm, abort, AacCoder::Native)
-}
-
-/// Encode one snapshotted track to AAC (stereo/mono, native rate) with `coder`.
-/// The native encoder uses the fast coder: FFmpeg's default two-loop search costs several
-/// times the CPU for no audible gain at 192 kb/s.
-pub(crate) fn encode_aac_with(pcm: &AudioPcm, abort: &AtomicBool, coder: AacCoder) -> Result<AacTrack, String> {
-    let started_cpu = crate::thread_qos::thread_cpu_ms();
-    let samples = &pcm.samples;
-    let src_ch = pcm.channels.max(1) as usize;
-    let ch = src_ch.min(2); // fold >stereo down by taking the first two channels
-    let layout = if ch == 1 {
-        ff::ChannelLayout::MONO
-    } else {
-        ff::ChannelLayout::STEREO
-    };
-    let (codec, format) = match coder {
-        AacCoder::MediaFoundation => (
-            ff::encoder::find_by_name("aac_mf").ok_or("aac_mf encoder missing")?,
-            ff::format::Sample::I16(ff::format::sample::Type::Packed),
-        ),
-        AacCoder::Native => (
-            ff::encoder::find(ff::codec::Id::AAC).ok_or("aac encoder missing")?,
-            ff::format::Sample::F32(ff::format::sample::Type::Planar),
-        ),
-    };
-    let mut ctx = ff::codec::context::Context::new_with_codec(codec)
-        .encoder()
-        .audio()
-        .map_err(|e| e.to_string())?;
-    ctx.set_rate(pcm.rate as i32);
-    ctx.set_format(format);
-    ctx.set_channel_layout(layout);
-    ctx.set_bit_rate(192_000);
-    ctx.set_time_base(ff::Rational(1, pcm.rate as i32));
-    ctx.set_flags(ff::codec::Flags::GLOBAL_HEADER);
-    let mut opts = ff::Dictionary::new();
-    if coder == AacCoder::Native {
-        opts.set("aac_coder", "fast");
-    }
-    let mut enc = ctx.open_with(opts).map_err(|e| format!("aac open ({}): {e}", coder.name()))?;
-
-    let frame_size = if enc.frame_size() > 0 {
-        enc.frame_size() as usize
-    } else {
-        1024
-    };
-    let total_frames = samples.len() / src_ch;
-    let mut packets = Vec::new();
-    let mut pkt = ff::Packet::empty();
-    let mut pos = 0usize; // in sample-frames
-    while pos < total_frames {
-        if abort.load(Relaxed) {
-            return Err(ABORTED.into());
-        }
-        let n = frame_size.min(total_frames - pos);
-        let mut af = ff::frame::Audio::new(format, frame_size, layout);
-        af.set_rate(pcm.rate);
-        let src = &samples[pos * src_ch..(pos + n) * src_ch];
-        match coder {
-            AacCoder::Native => {
-                for c in 0..ch {
-                    let plane = af.plane_mut::<f32>(c);
-                    for (dst, frame) in plane[..n].iter_mut().zip(src.chunks_exact(src_ch)) {
-                        *dst = frame[c];
-                    }
-                    plane[n..frame_size].fill(0.0);
-                }
-            }
-            AacCoder::MediaFoundation => {
-                // Packed: one buffer of interleaved i16, addressed as raw bytes.
-                let data = af.data_mut(0);
-                let out: &mut [i16] = bytemuck::cast_slice_mut(&mut data[..frame_size * ch * 2]);
-                for (dst, frame) in out.chunks_exact_mut(ch).zip(src.chunks_exact(src_ch)) {
-                    for c in 0..ch {
-                        dst[c] = (frame[c].clamp(-1.0, 1.0) * 32767.0).round() as i16;
-                    }
-                }
-                out[n * ch..].fill(0);
-            }
-        }
-        af.set_pts(Some(pos as i64));
-        enc.send_frame(&af).map_err(|e| e.to_string())?;
-        while enc.receive_packet(&mut pkt).is_ok() {
-            if let (Some(pts), Some(data)) = (pkt.pts(), pkt.data()) {
-                packets.push((pts, data.to_vec()));
-            }
-        }
-        pos += n;
-    }
-    enc.send_eof().map_err(|e| e.to_string())?;
-    while enc.receive_packet(&mut pkt).is_ok() {
-        if let (Some(pts), Some(data)) = (pkt.pts(), pkt.data()) {
-            packets.push((pts, data.to_vec()));
-        }
-    }
-
-    Ok(AacTrack {
-        rate: pcm.rate,
-        title: pcm.title,
-        source: pcm.source,
-        encoder: enc,
-        packets,
-        coder,
-        cpu_ms: crate::thread_qos::thread_cpu_ms() - started_cpu,
     })
 }
 
@@ -381,8 +245,10 @@ pub(crate) fn mux_mp4(
         }
         pkt.set_stream(stream_idx);
         pkt.rescale_ts(src_tb, out_tbs[stream_idx]);
+        let size = pkt.size() as u64;
         pkt.write_interleaved(&mut octx)
             .map_err(|e| e.to_string())?;
+        super::save_progress::wrote(size);
     }
     let mux_ms = ms(started.elapsed());
     let trailer = Instant::now();
@@ -456,6 +322,13 @@ fn write_thumbnail(clip_path: &str, frame: &RawFrame) -> Result<String, String> 
     std::fs::write(&thumb, data).map_err(|e| e.to_string())?;
     Ok(thumb.to_string_lossy().into_owned())
 }
+
+#[path = "mux_aac.rs"]
+mod aac;
+pub(crate) use aac::AacTrack;
+#[cfg(test)]
+pub(crate) use aac::{encode_aac, encode_aac_with, silent, AacCoder};
+use aac::encode_tracks;
 
 #[cfg(test)]
 #[path = "mux_tests.rs"]

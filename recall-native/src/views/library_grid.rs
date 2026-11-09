@@ -130,6 +130,8 @@ impl Root {
         let badge = match (hovered, record.duration) {
             (true, Some(d)) => Some(format!("{} / {}", library::format_duration(d * self.lib.hover_frac as f64), library::format_duration(d))),
             (_, Some(d)) => Some(library::format_duration(d)),
+            // Read and failed (a broken file): a dash, not a wait that never ends.
+            _ if self.lib.duration_unknown(&path) => Some("—".to_owned()),
             _ => Some("…".to_owned()),
         };
         let scrub_waiting = self.lib.scrub_waiting(&path);

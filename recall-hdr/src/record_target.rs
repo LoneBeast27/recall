@@ -4,12 +4,15 @@
 //!
 //! - **Classification** ([`classify_event`]): a target is a foreground window
 //!   that is fullscreen/borderless on its own monitor, an exe in a Steam library
-//!   (windowed games), or an exe with an `hdr_game|sdr_game` override; never a
+//!   (windowed games), a known game (`known_games`, windowed too), or an exe
+//!   with an `hdr_game|sdr_game` override; never a screensaver (`.scr`), a
 //!   denied stem (the rules deny list,
 //!   Recall's own processes, explorer, browsers, media players, overlays,
 //!   launchers) or an exe with a `none` override. A window that is a
-//!   candidate by the fullscreen rule alone must also render like a game
-//!   before it commits (`record_render`, asked through [`Admit`]).
+//!   candidate by the fullscreen rule alone needs official proof: a game
+//!   render verdict before it commits (`record_render`, asked through
+//!   [`Admit`]), the GPU vendor's list, or an Xbox / Store game package; with
+//!   no verdict possible it is not recorded (`record_hosted::check_proof`).
 //! - **Session** ([`TargetTracker`]): the same rules as the HDR `Reconciler`
 //!   session, applied to capture. With nothing recorded (no session, or the
 //!   engine lingering after a game exited) a candidate commits once it holds
@@ -21,13 +24,21 @@
 //!   deadline follows the session: if the session ends while a candidate
 //!   waits, the short debounce applies from when that candidate was first
 //!   seen. A non-target foreground (alt-tab) never ends the session; the
-//!   session ends when its process exits or its window is destroyed.
+//!   session ends when its process exits or its window is destroyed, and a
+//!   session whose only proof is `fullscreen_games` also when its window goes
+//!   windowed ([`TargetTracker::on_windowed`], R8-detect-1).
+//! - **Transitions** (`record_target_gate`): during the closed game's drain a
+//!   windowed Steam-library window waits; a `fullscreen_games` entry never
+//!   replaces a live session; a re-made window of the session's process is
+//!   adopted; a 10 s cool-down after a retarget between live games; with no
+//!   session a windowed Steam-library window needs 1.5 s and 640x360.
 
 use std::time::{Duration, Instant};
 
-use crate::config::Config;
-use crate::rules;
-use crate::types::RuleKind;
+use crate::record_target_gate::{Traits, ADOPT_FOR, REPLACE_COOLDOWN, WINDOWED_START};
+#[cfg(test)]
+pub use crate::record_target_rules::is_target;
+pub use crate::record_target_rules::{classify_event, followable, game_evidence, is_fullscreen_game, is_target_with, skips_render_check};
 use crate::watcher::WatchEvent;
 
 /// How long a different game must hold the foreground before it replaces a
@@ -39,99 +50,6 @@ pub const START_DEBOUNCE: Duration = Duration::from_millis(300);
 /// Source name of the idle monitor capture.
 pub const DESKTOP_NAME: &str = "Desktop";
 
-/// Stems that are never a capture target even when fullscreen (on top of
-/// [`rules::is_denied`]): Recall's own processes, browsers, media players,
-/// full-screen overlays (which would otherwise steal the target from the game
-/// underneath and restart the engine), launchers, remote-desktop clients, and
-/// shell surfaces. Steam's `streaming_client` (Remote Play) is deliberately
-/// absent: a streamed game is recorded as a game.
-const TARGET_DENY_STEMS: &[&str] = &[
-    "recall-native",
-    "recall-hub",
-    "recall-overlay",
-    "nvidia overlay",
-    "nvidia share",
-    "gamebar",
-    "gamebarftserver",
-    "overwolf",
-    "steam",
-    "steamwebhelper",
-    "epicgameslauncher",
-    "riotclientux",
-    "riotclientservices",
-    "battle.net",
-    "eadesktop",
-    "galaxyclient",
-    "upc",
-    "uplay",
-    "ubisoftconnect",
-    "origin",
-    "xboxpcapp",
-    "xboxapp",
-    "gamingservicesui",
-    "amazongames",
-    "amazon games ui",
-    "playnite.fullscreenapp",
-    "playnite.desktopapp",
-    "shellhost",
-    "brave",
-    "chrome",
-    "chromium",
-    "msedge",
-    "msedgewebview2",
-    "firefox",
-    "librewolf",
-    "waterfox",
-    "opera",
-    "opera_gx",
-    "vivaldi",
-    "arc",
-    "zen",
-    "iexplore",
-    "vlc",
-    "mpv",
-    "mpc-hc",
-    "mpc-hc64",
-    "potplayermini64",
-    "wmplayer",
-    "lockapp",
-    "screenclippinghost",
-    "snippingtool",
-    // Remote desktop / remote viewer clients: a fullscreen session is a desktop,
-    // not a game (msrdc.exe was recorded as "Remote Desktop", 2026-11-04).
-    "mstsc",
-    "msrdc",
-    "msrdcw",
-    "rdclient",
-    "rdclient.windows",
-    "windows365",
-    "windowsapp",
-    "rdcman",
-    "vmconnect",
-    "vmware-remotemks",
-    "virtualboxvm",
-    "mremoteng",
-    "royalts",
-    "remotedesktopmanager",
-    "remotedesktopmanager64",
-    "anydesk",
-    "teamviewer",
-    "rustdesk",
-    "parsecd",
-    "moonlight",
-    "remoting_desktop",
-    "remoting_host",
-    "vncviewer",
-    "tvnviewer",
-    "nomachine",
-    "nxplayer",
-    "splashtop",
-    "strwinclt",
-    // Steam-library apps that are not games (the Steam-library rule would take them).
-    "wallpaper32",
-    "wallpaper64",
-    "ui32",
-];
 
 /// A window the engine can capture. `exe` is the image file name.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -174,66 +92,6 @@ pub fn display_name(title: &str, exe_stem: &str) -> String {
     if s.is_empty() { "Game".into() } else { s }
 }
 
-/// Recall's own processes: never a target, whatever the config lists.
-const OWN_STEMS: &[&str] = &["recall", "recall-hdr", "recall-native", "recall-hub", "recall-overlay"];
-
-/// Whether an exe stem is a capture target under `cfg`. `looks_like_game` =
-/// fullscreen on its monitor, or the exe lives in a Steam library.
-///
-/// Order: Recall's own processes, then a `none` override, then
-/// `detect.fullscreen_games` (beats the deny lists), then the deny lists, then
-/// a game override, then `looks_like_game`.
-pub fn is_target(stem: &str, looks_like_game: bool, cfg: &Config) -> bool {
-    let stem = strip_exe(stem.trim());
-    if stem.is_empty() || OWN_STEMS.iter().any(|d| d.eq_ignore_ascii_case(stem)) {
-        return false;
-    }
-    let kind = rules::override_kind(cfg, stem);
-    if kind == Some(RuleKind::None) {
-        return false;
-    }
-    if looks_like_game && is_fullscreen_game(cfg, stem) {
-        return true;
-    }
-    if rules::is_denied(stem) || TARGET_DENY_STEMS.iter().any(|d| d.eq_ignore_ascii_case(stem)) {
-        return false;
-    }
-    match kind {
-        Some(_) => true,
-        None => looks_like_game,
-    }
-}
-
-/// `stem` is in `detect.fullscreen_games` (case-insensitive, `.exe` optional):
-/// its fullscreen windows are games with no render check.
-pub fn is_fullscreen_game(cfg: &Config, stem: &str) -> bool {
-    let stem = strip_exe(stem.trim());
-    !stem.is_empty() && cfg.detect.fullscreen_games.iter().any(|g| strip_exe(g.trim()).eq_ignore_ascii_case(stem))
-}
-
-/// `"msrdc.exe"` -> `"msrdc"` (case-insensitive); a bare stem is unchanged.
-fn strip_exe(s: &str) -> &str {
-    match s.len().checked_sub(4) {
-        Some(i) if s.is_char_boundary(i) && s[i..].eq_ignore_ascii_case(".exe") => &s[..i],
-        _ => s,
-    }
-}
-
-/// A candidate that commits on the 300 ms rule with no render check: a
-/// Steam-library exe, an override, a `detect.fullscreen_games` entry, or a
-/// game Recall knows (`known_games`). Asked only after [`classify_event`]
-/// made it a candidate, so the deny lists and `none` overrides already ran.
-pub fn skips_render_check(ev: &WatchEvent, cfg: &Config) -> bool {
-    ev.steam_game
-        || rules::override_kind(cfg, &ev.exe_stem).is_some()
-        || is_fullscreen_game(cfg, &ev.exe_stem)
-        || crate::known_games::is_known_game(&ev.exe_stem, &ev.title)
-}
-
-/// `Some(target)` if this foreground event is a capture target.
-pub fn classify_event(ev: &WatchEvent, cfg: &Config) -> Option<Target> {
-    is_target(&ev.exe_stem, ev.fullscreen || ev.steam_game, cfg).then(|| Target::from_event(ev))
-}
 
 /// The debounced capture session (see the module docs).
 pub struct TargetTracker {
@@ -242,6 +100,10 @@ pub struct TargetTracker {
     /// Starting a session from nothing, or a new window of the session's process.
     start: Duration,
     current: Option<Target>,
+    /// The session's window was fullscreen when last seen in front (G5).
+    current_fullscreen: bool,
+    /// The session's only proof is a `fullscreen_games` entry (R8-detect-1).
+    current_fullscreen_only: bool,
     /// A foreground observation and when it was first seen; `None` inside = a
     /// non-target foreground (it cancels a pending game, never the session).
     pending: Option<(Option<Target>, Instant)>,
@@ -249,6 +111,14 @@ pub struct TargetTracker {
     last_wait: Option<Duration>,
     /// The render check asked to decide the pending candidate later.
     held: Option<Instant>,
+    /// What the pending candidate is (`record_target_gate`).
+    traits: Traits,
+    /// The closed game's pid while its drain runs (T2).
+    draining: Option<u32>,
+    /// When a live game last replaced another (T9 cool-down).
+    replaced_at: Option<Instant>,
+    /// A live process whose session window was destroyed, and when (T5a).
+    adoptable: Option<(u32, Instant)>,
 }
 
 /// What the render check says about a candidate that fell due.
@@ -263,7 +133,20 @@ pub enum Admit {
 
 impl TargetTracker {
     pub fn new(debounce: Duration, start: Duration) -> Self {
-        TargetTracker { debounce, start, current: None, pending: None, last_wait: None, held: None }
+        TargetTracker {
+            debounce,
+            start,
+            current: None,
+            current_fullscreen: false,
+            current_fullscreen_only: false,
+            pending: None,
+            last_wait: None,
+            held: None,
+            traits: Traits::FULLSCREEN,
+            draining: None,
+            replaced_at: None,
+            adoptable: None,
+        }
     }
 
     pub fn current(&self) -> Option<&Target> {
@@ -274,12 +157,34 @@ impl TargetTracker {
     fn hold_for(&self, candidate: &Option<Target>) -> Duration {
         match (candidate, &self.current) {
             (Some(c), Some(cur)) if c.pid != cur.pid => self.debounce,
+            (Some(_), None) if self.traits.windowed_only() => WINDOWED_START,
             _ => self.start,
         }
     }
 
+    /// When the pending candidate may commit; `None` while it waits for the
+    /// session or the drain to end (`record_target_gate`).
     pub fn next_deadline(&self) -> Option<Instant> {
-        let due = self.pending.as_ref().map(|(c, seen)| *seen + self.hold_for(c))?;
+        let (candidate, seen) = self.pending.as_ref()?;
+        let mut due = *seen + self.hold_for(candidate);
+        match (candidate, &self.current) {
+            (Some(c), Some(cur)) if c.pid != cur.pid => {
+                // T3: a `fullscreen_games` entry, and G5: a windowed
+                // Steam-library window (Blender, Krita) over a fullscreen
+                // session, wait for the session to end.
+                if self.traits.listed_only || (self.traits.windowed_only() && self.current_fullscreen) {
+                    return None;
+                }
+                if let Some(at) = self.replaced_at {
+                    due = due.max(at + REPLACE_COOLDOWN);
+                }
+            }
+            // The drain (T2): any windowed-only window waits, the same process's
+            // too (an adopted re-made window is vouched for); so does a
+            // `fullscreen_games` entry.
+            (Some(_), None) if (self.traits.windowed_only() || self.traits.listed_only) && self.draining.is_some() => return None,
+            _ => {}
+        }
         Some(self.held.map_or(due, |held| held.max(due)))
     }
 
@@ -291,14 +196,24 @@ impl TargetTracker {
     /// A foreground change was observed (`None` = not a target). Seeing the
     /// pending candidate again keeps its first-seen time.
     pub fn on_foreground(&mut self, candidate: Option<Target>, now: Instant) {
+        self.on_foreground_with(candidate, Traits::FULLSCREEN, now)
+    }
+
+    /// [`Self::on_foreground`] with what the candidate is (`record_target_gate`).
+    pub fn on_foreground_with(&mut self, candidate: Option<Target>, traits: Traits, now: Instant) {
         match (&candidate, &self.current, &self.pending) {
             // Re-focusing the live target: nothing pending, nothing to do.
-            (Some(c), Some(cur), _) if c.same_window(cur) => self.pending = None,
-            (Some(c), _, Some((Some(p), _))) if c.same_window(p) => {}
+            (Some(c), Some(cur), _) if c.same_window(cur) => {
+                self.pending = None;
+                self.current_fullscreen = traits.fullscreen;
+                self.current_fullscreen_only = traits.fullscreen_only;
+            }
+            (Some(c), _, Some((Some(p), _))) if c.same_window(p) => self.traits = traits,
             (None, _, Some((None, _))) => {}
             _ => {
                 self.pending = Some((candidate, now));
                 self.held = None;
+                self.traits = traits;
             }
         }
     }
@@ -322,7 +237,13 @@ impl TargetTracker {
             Some(c) if self.current.as_ref().is_some_and(|cur| cur.same_window(&c)) => false,
             Some(c) => match admit(&c) {
                 Admit::Commit => {
+                    if self.current.as_ref().is_some_and(|cur| cur.pid != c.pid) {
+                        self.replaced_at = Some(now);
+                    }
+                    self.adoptable = None;
                     self.current = Some(c);
+                    self.current_fullscreen = self.traits.fullscreen;
+                    self.current_fullscreen_only = self.traits.fullscreen_only;
                     self.last_wait = Some(now.duration_since(seen));
                     true
                 }
@@ -334,6 +255,42 @@ impl TargetTracker {
                 Admit::Reject => false,
             },
         }
+    }
+
+    /// The session's only proof is a `fullscreen_games` entry (R8-detect-1).
+    pub fn fullscreen_only(&self) -> bool {
+        self.current.is_some() && self.current_fullscreen_only
+    }
+
+    /// The session's window `hwnd` reads windowed. A session whose only proof is a
+    /// `fullscreen_games` entry (`only_by_list` = the config still says so) lives
+    /// only while that window is fullscreen: it ends at once, with no adoption of
+    /// the process's next window (R8-detect-1). Returns `true` when it ended.
+    pub fn on_windowed(&mut self, hwnd: isize, only_by_list: bool) -> bool {
+        if self.current.as_ref().is_none_or(|c| c.hwnd != hwnd) || !self.current_fullscreen_only {
+            return false;
+        }
+        if !only_by_list {
+            // Registered as a game since: a windowed session is kept from now on.
+            self.current_fullscreen_only = false;
+            return false;
+        }
+        self.current = None;
+        self.current_fullscreen_only = false;
+        self.replaced_at = None;
+        true
+    }
+
+    /// The closed game's drain: `Some(its pid)` while its last clip is still
+    /// saveable (or about to be: its session just ended).
+    pub fn set_draining(&mut self, pid: Option<u32>) {
+        self.draining = pid;
+    }
+
+    /// `pid`'s session window was destroyed under [`ADOPT_FOR`] ago while it
+    /// lives: its next foreground window is the session.
+    pub fn adopts(&self, pid: u32, now: Instant) -> bool {
+        self.adoptable.is_some_and(|(p, at)| p == pid && now < at + ADOPT_FOR)
     }
 
     /// How long the last committed target waited from first seen to commit
@@ -349,8 +306,12 @@ impl TargetTracker {
             self.pending = None;
             self.held = None;
         }
+        if self.adoptable.is_some_and(|(p, _)| p == pid) {
+            self.adoptable = None;
+        }
         if self.current.as_ref().is_some_and(|c| c.pid == pid) {
             self.current = None;
+            self.replaced_at = None;
             return true;
         }
         false
@@ -360,8 +321,15 @@ impl TargetTracker {
     /// game dropped back to an in-process launcher): end the session so the
     /// engine is not left capturing a dead window. Returns `true` on change.
     pub fn on_window_gone(&mut self, hwnd: isize) -> bool {
-        if self.current.as_ref().is_some_and(|c| c.hwnd == hwnd) {
-            self.current = None;
+        self.on_window_gone_at(hwnd, Instant::now())
+    }
+
+    /// [`Self::on_window_gone`] at `now`: the process stays adoptable for
+    /// [`ADOPT_FOR`] (its next foreground window is the session).
+    pub fn on_window_gone_at(&mut self, hwnd: isize, now: Instant) -> bool {
+        if let Some(c) = self.current.take_if(|c| c.hwnd == hwnd) {
+            self.adoptable = Some((c.pid, now));
+            self.replaced_at = None;
             return true;
         }
         false

@@ -12,6 +12,18 @@ mod services;
 mod startup;
 #[path = "../../recall/src/edit_model.rs"]
 mod edit_model;
+#[allow(dead_code)]
+#[path = "../../recall/src/win_recycle.rs"]
+mod win_recycle;
+#[allow(dead_code)]
+#[path = "../../recall/src/win_fileop.rs"]
+mod win_fileop;
+#[allow(dead_code)]
+#[path = "../../recall/src/win_volume.rs"]
+mod win_volume;
+#[allow(dead_code)]
+#[path = "../../recall/src/file_id.rs"]
+mod file_id;
 #[path = "../src/media.rs"]
 mod media;
 

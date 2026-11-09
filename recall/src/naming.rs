@@ -71,6 +71,24 @@ pub fn longrec_path(out_dir: &str, source: &str, at: &DateTime<Local>, taken: im
     first_free(Path::new(out_dir), &base, ".mp4", |p| taken(p) || taken(&part_of(p)))
 }
 
+/// The next part of the long recording that began at `first` (its stream
+/// changed): `<Game>__<date>__<time>__rec-2.mp4`, then `-3`, ... The first
+/// name with neither its final nor its `.part` form on disk, so an existing
+/// clip is never overwritten.
+pub fn longrec_next_part(first: &Path, taken: impl Fn(&Path) -> bool) -> PathBuf {
+    let dir = first.parent().map(Path::to_path_buf).unwrap_or_default();
+    let stem = first.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+    // A same-second `__rec-N` keeps its `__rec` base, so every part stays recoverable.
+    let base = match stem.rsplit_once('-') {
+        Some((head, n)) if head.ends_with("__rec") && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => head.to_string(),
+        _ => stem,
+    };
+    (2..10_000)
+        .map(|n| dir.join(format!("{base}-{n}.mp4")))
+        .find(|p| !taken(p) && !taken(&part_of(p)))
+        .unwrap_or_else(|| first_free(&dir, &format!("{base}-part"), ".mp4", |p| taken(p) || taken(&part_of(p))))
+}
+
 /// `<path>.part`.
 pub fn part_of(path: &Path) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
@@ -135,6 +153,21 @@ mod tests {
         let busy_part = part_of(&free);
         let next = longrec_path(r"E:\Clips", "THE FINALS", &at(), |p| p == busy_part);
         assert_eq!(next, Path::new(r"E:\Clips\THE-FINALS__2026-10-22__14-05-09__rec-2.mp4"));
+    }
+
+    #[test]
+    fn a_continued_recording_takes_the_next_free_part_name() {
+        let first = Path::new(r"E:\c\G__2026-10-22__14-05-09__rec.mp4");
+        let n = |name: &str| Path::new(r"E:\c").join(name);
+        assert_eq!(longrec_next_part(first, |p| p == first), n("G__2026-10-22__14-05-09__rec-2.mp4"));
+        // Part 2 is on disk, part 3 is being written by another recording: part 4.
+        let busy = [first.to_path_buf(), n("G__2026-10-22__14-05-09__rec-2.mp4"), part_of(&n("G__2026-10-22__14-05-09__rec-3.mp4"))];
+        assert_eq!(longrec_next_part(first, |p| busy.iter().any(|b| b == p)), n("G__2026-10-22__14-05-09__rec-4.mp4"));
+        // A same-second second recording (`rec-2`) continues under the same base, still recoverable.
+        let second = n("G__2026-10-22__14-05-09__rec-2.mp4");
+        let next = longrec_next_part(&second, |p| p == first || p == second);
+        assert_eq!(next, n("G__2026-10-22__14-05-09__rec-3.mp4"));
+        assert!(is_longrec_part(&part_of(&next).file_name().unwrap().to_string_lossy()));
     }
 
     #[test]

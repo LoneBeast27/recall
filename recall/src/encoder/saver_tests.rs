@@ -171,7 +171,8 @@ fn queue_is_fifo_one_at_a_time_and_rejects_when_full() {
     );
     assert_eq!(
         of_type(&all, "save_failed"),
-        vec![r#"{"type":"save_failed","reason":"previous save still writing"}"#]
+        vec![r#"{"type":"save_failed","reason":"previous save still writing","rejected":true}"#],
+        "the newest save, failed before it was queued: marked so the island ends its ring, not the oldest's"
     );
     let saved = of_type(&all, "saved");
     for (line, p) in saved.iter().zip(&paths) {
@@ -300,6 +301,9 @@ fn mover_cfg(same_volume: staging::VolumeCheck) -> mover::Config {
         same_volume,
         background: false,
         stamp: mover::stamp_mtime,
+        identity: mover::same_identity,
+        stat: mover::stat_dest,
+        flush_dest: mover::flush_dest,
     }
 }
 
@@ -309,6 +313,7 @@ fn setup(stage: Option<&Path>, recover: &Path, out: &Path, same: staging::Volume
         recover: Some(recover.to_path_buf()),
         out_dir: out.to_path_buf(),
         mover: mover_cfg(same),
+        refused: Vec::new(),
     }
 }
 
@@ -406,4 +411,82 @@ fn same_volume_saves_in_place_and_start_recovers_leftovers_even_with_staging_off
     drop(queue);
     assert_eq!(control.shutdown(Duration::from_secs(3)), Shutdown::Drained);
     let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+// ---- status.save_writing (R4-overlay-1) ----
+
+#[test]
+fn the_save_being_written_reports_its_growing_part_and_the_queue_behind_it() {
+    let dir = temp_dir("writing");
+    let (events, _sink) = Events::capture(true);
+    let (wrote_tx, wrote_rx) = channel::<()>();
+    let (gate_tx, gate_rx) = channel::<()>();
+    // Writes the `.part` in three steps, waiting for the test between them.
+    let mux: MuxFn = Box::new(move |part, _job, _abort, _timing| {
+        for n in 1..=3usize {
+            std::fs::write(part, vec![7u8; n * 1000]).unwrap();
+            super::super::save_progress::wrote(1000); // the mux counts what it writes
+            wrote_tx.send(()).unwrap();
+            gate_rx.recv().unwrap();
+        }
+        Ok(Muxed { frames: 1, secs: 1.5 })
+    });
+    let (queue, control) = spawn(events, mux, no_gallery());
+    let wait = Duration::from_secs(5);
+    assert_eq!(control.writing(), None, "nothing in the saver");
+    assert!(queue.submit(job(&dir.join("a.mp4"))));
+    wrote_rx.recv_timeout(wait).unwrap();
+    assert_eq!(control.writing().map(|w| (w.bytes, w.queued)), Some((1000, 0)));
+    assert!(queue.submit(job(&dir.join("b.mp4"))));
+    gate_tx.send(()).unwrap();
+    wrote_rx.recv_timeout(wait).unwrap();
+    assert_eq!(control.writing().map(|w| (w.bytes, w.queued)), Some((2000, 1)), "the bytes grow; b waits");
+    assert!(queue.submit(job(&dir.join("c.mp4"))));
+    assert!(!queue.submit(job(&dir.join("d.mp4"))), "queue full: rejected");
+    assert_eq!(control.writing().map(|w| w.queued), Some(2), "a rejected save is not counted");
+    for _ in 0..7 {
+        gate_tx.send(()).unwrap();
+        let _ = wrote_rx.recv_timeout(wait);
+    }
+    gate_tx.send(()).unwrap();
+    let deadline = Instant::now() + wait;
+    while control.writing().is_some() {
+        assert!(Instant::now() < deadline, "the saver never went idle: {:?}", control.writing());
+        std::thread::sleep(Duration::from_millis(5));
+    }
+    drop(queue);
+    assert_eq!(control.shutdown(Duration::from_secs(3)), Shutdown::Drained);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_saver_reports_its_steps_before_any_file_exists() {
+    // R5-overlay-4: the audio encode runs before the `.part` is opened; its frames count.
+    let dir = temp_dir("steps");
+    let (events, _sink) = Events::capture(true);
+    let (stepped_tx, stepped_rx) = channel::<()>();
+    let (gate_tx, gate_rx) = channel::<()>();
+    let mux: MuxFn = Box::new(move |_part, _job, _abort, _timing| {
+        for _ in 0..3 {
+            super::super::save_progress::step(); // an AAC frame, no file written
+            stepped_tx.send(()).unwrap();
+            gate_rx.recv().unwrap();
+        }
+        Err("stopped by the test".into())
+    });
+    let (queue, control) = spawn(events, mux, no_gallery());
+    let wait = Duration::from_secs(5);
+    assert!(queue.submit(job(&dir.join("a.mp4"))));
+    let mut steps = Vec::new();
+    for _ in 0..3 {
+        stepped_rx.recv_timeout(wait).unwrap();
+        let w = control.writing().expect("a save is in the saver");
+        assert_eq!(w.bytes, 0, "no packet muxed yet");
+        steps.push(w.step);
+        gate_tx.send(()).unwrap();
+    }
+    assert!(steps.windows(2).all(|p| p[1] > p[0]), "the step rises with the encode: {steps:?}");
+    drop(queue);
+    assert_eq!(control.shutdown(Duration::from_secs(3)), Shutdown::Drained);
+    let _ = std::fs::remove_dir_all(&dir);
 }

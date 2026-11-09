@@ -12,6 +12,8 @@ pub enum QuitReason {
     ControlPipe,
     /// WM_QUIT reached the message pump.
     WindowsQuit,
+    /// Sign-out, restart or shutdown (`WM_ENDSESSION`).
+    SessionEnd,
 }
 
 impl QuitReason {
@@ -24,6 +26,7 @@ impl QuitReason {
             Self::TrayMenu => "tray quit",
             Self::ControlPipe => "control quit",
             Self::WindowsQuit => "WM_QUIT",
+            Self::SessionEnd => "session end",
         }
     }
 }
@@ -37,6 +40,7 @@ mod tests {
         assert!(QuitReason::TrayMenu.closes_ui());
         assert!(!QuitReason::ControlPipe.closes_ui(), "an install or script quit keeps the app open");
         assert!(!QuitReason::WindowsQuit.closes_ui());
+        assert!(!QuitReason::SessionEnd.closes_ui(), "Windows closes the app itself");
     }
 
     #[test]

@@ -76,6 +76,15 @@ pub fn warning(level: u8, used: u64, cap: u64, next: Option<LocalStamp>, today: 
     (title, format!("{} of {label} used. Past the limit, {first}. Favourites and edited clips stay.", format_bytes(used)))
 }
 
+/// Toast when a clip or staging drive runs low on free space: (title, detail).
+pub fn disk_low(drive: &str, free: u64, need: u64) -> (String, String) {
+    let drive = if drive.is_empty() { "a recording drive" } else { drive };
+    (
+        format!("Low disk space on {drive}"),
+        format!("{} free; Recall wants at least {} to keep saving clips. Free some space or set a storage limit.", format_bytes(free), format_bytes(need)),
+    )
+}
+
 /// Confirm bar for a limit that would move clips now: (question, detail, action).
 pub fn confirm(p: &Preview, today: LocalStamp) -> (String, String, String) {
     let label = cap_label(u64::from(p.cap_gb) * GIB);
@@ -125,6 +134,14 @@ mod tests {
         let (t, d) = warning(100, cap + GIB, cap, None, TODAY);
         assert_eq!(t, "Recordings are over the 1 TB limit");
         assert!(d.contains("Raise the limit"));
+    }
+
+    #[test]
+    fn disk_low_wording() {
+        let (t, d) = disk_low("C:", 3 * GIB, 5 * GIB);
+        assert_eq!(t, "Low disk space on C:");
+        assert!(d.contains("free; Recall wants at least"), "{d}");
+        assert_eq!(disk_low("", 0, 0).0, "Low disk space on a recording drive");
     }
 
     #[test]
