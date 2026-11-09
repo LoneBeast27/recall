@@ -1,4 +1,5 @@
 use super::*;
+use crate::awake_clock::Awake;
 use crate::record_status::session_state;
 
 fn secs(s: f32) -> Duration {
@@ -6,7 +7,7 @@ fn secs(s: f32) -> Duration {
 }
 
 /// Feed `seen` every 100 ms from `from` to `to` seconds; the times (s) a restart was asked.
-fn run(r: &mut EncoderRecovery, t0: Instant, from: f32, to: f32, seen: Seen, busy: bool) -> Vec<f32> {
+fn run(r: &mut EncoderRecovery, t0: Awake, from: f32, to: f32, seen: Seen, busy: bool) -> Vec<f32> {
     let mut out = Vec::new();
     let mut t = from;
     while t <= to {
@@ -20,7 +21,7 @@ fn run(r: &mut EncoderRecovery, t0: Instant, from: f32, to: f32, seen: Seen, bus
 
 #[test]
 fn restarts_once_the_encoder_error_lasts_past_fifteen_seconds() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut r = EncoderRecovery::default();
     assert!(run(&mut r, t0, 0.0, 15.0, Seen::EncoderFailed, false).is_empty(), "not at or before 15 s");
     assert_eq!(run(&mut r, t0, 15.1, 15.1, Seen::EncoderFailed, false), vec![15.1]);
@@ -28,7 +29,7 @@ fn restarts_once_the_encoder_error_lasts_past_fifteen_seconds() {
 
 #[test]
 fn a_broken_error_starts_the_fifteen_seconds_over() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut r = EncoderRecovery::default();
     run(&mut r, t0, 0.0, 10.0, Seen::EncoderFailed, false);
     run(&mut r, t0, 10.1, 12.0, Seen::Recording, false); // the engine's own retry worked
@@ -38,7 +39,7 @@ fn a_broken_error_starts_the_fifteen_seconds_over() {
 
 #[test]
 fn restarts_never_loop_faster_than_the_backoff() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut r = EncoderRecovery::default();
     // The encoder keeps failing in every new engine (2 s of starting each time).
     let mut asked = Vec::new();
@@ -61,7 +62,7 @@ fn restarts_never_loop_faster_than_the_backoff() {
 
 #[test]
 fn waits_while_a_save_or_long_recording_is_in_flight() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut r = EncoderRecovery::default();
     assert!(run(&mut r, t0, 0.0, 30.0, Seen::EncoderFailed, true).is_empty());
     assert_eq!(run(&mut r, t0, 30.1, 30.1, Seen::EncoderFailed, false), vec![30.1]);
@@ -69,7 +70,7 @@ fn waits_while_a_save_or_long_recording_is_in_flight() {
 
 #[test]
 fn says_recovered_once_recording_returns_and_a_stable_minute_resets_the_backoff() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut r = EncoderRecovery::default();
     assert_eq!(run(&mut r, t0, 0.0, 15.1, Seen::EncoderFailed, false), vec![15.1]);
     assert_eq!(r.observe(t0 + secs(16.0), Seen::Starting, false), Recovery::Nothing);
@@ -92,14 +93,14 @@ fn the_engine_recovering_on_its_own_never_triggers_the_controller_restart() {
     assert_eq!(seen("recovering"), Seen::Starting);
     assert_eq!(seen("degraded"), Seen::Recording);
     assert_eq!(seen("failed"), Seen::EncoderFailed);
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut r = EncoderRecovery::default();
     assert!(run(&mut r, t0, 0.0, 120.0, seen("recovering"), false).is_empty());
 }
 
 #[test]
 fn idle_sessions_never_restart() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut r = EncoderRecovery::default();
     assert!(run(&mut r, t0, 0.0, 60.0, Seen::Idle, false).is_empty());
     assert!(run(&mut r, t0, 60.1, 120.0, Seen::Starting, false).is_empty());
@@ -108,7 +109,7 @@ fn idle_sessions_never_restart() {
 /// `step` (encoder_recover_tick's body) once a second for `0..=to`: (state, status
 /// count, shown) per second; the seconds a restart was asked.
 fn tick(to: u64, at: impl Fn(u64) -> (&'static str, u64, bool)) -> Vec<u64> {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut r = EncoderRecovery::default();
     let up = EngineHealth::Running { pid: 9 };
     (0..=to)
@@ -135,7 +136,7 @@ fn a_stale_recovering_restarts_nothing_while_the_game_cannot_be_seen() {
 
 #[test]
 fn a_timed_error_or_a_fresh_restart_is_pending_so_the_capture_stuck_watch_stands_aside() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut r = EncoderRecovery::default();
     assert!(!r.pending(t0));
     r.observe(t0, Seen::EncoderFailed, false);
@@ -148,7 +149,26 @@ fn a_timed_error_or_a_fresh_restart_is_pending_so_the_capture_stuck_watch_stands
 #[test]
 fn a_capture_stuck_restart_in_flight_holds_the_encoder_restart() {
     // encoder_recover_tick passes `busy` while `capture_stuck.pending()`: busy never restarts.
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut r = EncoderRecovery::default();
     assert!(run(&mut r, t0, 0.0, 60.0, Seen::EncoderFailed, true).is_empty());
+}
+
+/// F5: the hang watch runs on the awake clock (the controller feeds `self.clock.awake()`,
+/// `encoder_recover_tick`). The first look after a 2 h sleep, before the engine's next status,
+/// is no hang; on the sleep-counting clock (what Instant was) the same look was one.
+#[test]
+fn a_sleep_is_no_hang_for_the_watch() {
+    use crate::awake_clock::{Clock, FakeClock};
+    let clock = FakeClock::new();
+    let up = EngineHealth::Running { pid: 9 };
+    let (mut awake, mut biased) = (EncoderRecovery::default(), EncoderRecovery::default());
+    let base = clock.instant();
+    let ordinary = |c: &FakeClock| Awake::ZERO + c.instant().saturating_duration_since(base);
+    assert_eq!(awake.step(clock.awake(), "recording", up, 5, true, false), Recovery::Nothing);
+    assert_eq!(biased.step(ordinary(&clock), "recording", up, 5, true, false), Recovery::Nothing);
+    clock.sleep_for(Duration::from_secs(2 * 3600));
+    clock.advance_awake(Duration::from_secs(1));
+    assert_eq!(awake.step(clock.awake(), "recording", up, 5, true, false), Recovery::Nothing, "a sleep is no hang");
+    assert_eq!(biased.step(ordinary(&clock), "recording", up, 5, true, false), Recovery::Restart, "the old clock's false hang");
 }
