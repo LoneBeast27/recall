@@ -67,7 +67,7 @@ pub(super) fn meta_path(override_path: Option<OsString>, appdata: Option<OsStrin
     if let Some(path) = override_path.filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    appdata.filter(|p| !p.is_empty()).map(|root| PathBuf::from(root).join("Recall").join("library.json"))
+    appdata.filter(|p| !p.is_empty()).map(|root| crate::user_dirs::checked(PathBuf::from(root).join("Recall").join("library.json")))
 }
 
 /// The store key for a clip: its full path, lowercase, backslashes, no `\?\` prefix. Two
@@ -85,7 +85,7 @@ fn parse_clips(bytes: &[u8]) -> Option<BTreeMap<String, ClipMeta>> {
 
 impl MetaStore {
     pub fn load() -> Self {
-        match meta_path(std::env::var_os("RECALL_LIBRARY_META"), std::env::var_os("APPDATA")) {
+        match meta_path(std::env::var_os("RECALL_LIBRARY_META"), crate::user_dirs::appdata().map(Into::into)) {
             Some(path) => Self::load_from(path),
             None => Self::default(),
         }

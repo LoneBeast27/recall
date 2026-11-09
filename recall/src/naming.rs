@@ -20,8 +20,8 @@ pub const PART_EXT: &str = ".part";
 /// `%USERPROFILE%\Videos\Recall`).
 pub fn out_dir() -> String {
     std::env::var("RECALL_OUT_DIR").unwrap_or_else(|_| {
-        let home = std::path::PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default());
-        home.join("Videos").join("Recall").to_string_lossy().into_owned()
+        let home = crate::user_dirs::profile();
+        crate::user_dirs::checked(home.join("Videos").join("Recall")).to_string_lossy().into_owned()
     })
 }
 

@@ -30,7 +30,7 @@ fn folders_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("RECALL_FOLDERS").filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    std::env::var_os("APPDATA").filter(|p| !p.is_empty()).map(|root| PathBuf::from(root).join("Recall").join("folders.json"))
+    crate::user_dirs::appdata().map(|root| crate::user_dirs::checked(root.join("Recall").join("folders.json")))
 }
 
 /// The app's folder list now. Missing or unreadable: no links (logged when unreadable).
@@ -116,7 +116,7 @@ pub(crate) fn guard(cfg: &mut Config, last_good: Option<&str>, links: &Links) ->
 /// LocalAppData folder (never on a working profile): `<temp>\Recall\Clips`.
 pub(crate) fn own_clips_dir() -> PathBuf {
     let base = crate::user_dirs::known(crate::user_dirs::Known::LocalAppData).unwrap_or_else(std::env::temp_dir);
-    let dir = base.join("Recall").join("Clips");
+    let dir = crate::user_dirs::checked(base.join("Recall").join("Clips"));
     if let Err(e) = std::fs::create_dir_all(&dir) {
         log!("record: could not create {} ({e})", dir.display());
     }

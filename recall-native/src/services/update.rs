@@ -201,12 +201,7 @@ fn check(current: &str, manual: bool) -> Result<Option<Release>, String> {
 }
 
 fn skip_file() -> Option<PathBuf> {
-    std::env::var_os("LOCALAPPDATA").map(|p| {
-        PathBuf::from(p)
-            .join("Recall")
-            .join("updates")
-            .join("skipped.txt")
-    })
+    crate::user_dirs::local_appdata().map(|p| crate::user_dirs::checked(p.join("Recall").join("updates").join("skipped.txt")))
 }
 
 fn skipped() -> Option<String> {

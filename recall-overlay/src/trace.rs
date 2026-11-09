@@ -26,7 +26,7 @@ pub struct Trace {
 impl Trace {
     /// The live log under `%APPDATA%\recall-hdr` (none without APPDATA).
     pub fn default_path() -> Option<PathBuf> {
-        std::env::var_os("APPDATA").map(|dir| PathBuf::from(dir).join("recall-hdr").join("recall-overlay.log"))
+        crate::user_dirs::appdata().map(|dir| crate::user_dirs::checked(dir.join("recall-hdr").join("recall-overlay.log")))
     }
 
     /// A log at `path` (none: every call is a no-op) rotating past `limit` bytes.
