@@ -150,7 +150,7 @@ fn missing_file_returns_default_silently() {
     let path = dir.join("does-not-exist.toml");
     let mut cfg = load_from(&path);
     let fresh = std::mem::take(&mut cfg.recording.audio_sources);
-    assert_eq!(fresh.iter().take(2).map(|s| s.id.as_str()).collect::<Vec<_>>(), ["mic", "system-output"]);
+    assert_eq!(fresh.iter().take(2).map(|s| s.id.as_str()).collect::<Vec<_>>(), ["game", "mic"], "first run: the game and the default mic");
     cfg.recording.audio_sources = crate::record_audio_sources::default_sources();
     assert_eq!(cfg, Config::default());
     // No .bad file for a simple missing config.
