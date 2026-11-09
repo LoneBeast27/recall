@@ -30,12 +30,13 @@ pub struct SsdUsage {
     pub kept: u64,
     /// Clip heads from the filter probe.
     pub heads: u64,
-    /// Working edit projects, settings and indexes.
+    /// Working edit projects, settings and indexes, and the pre-encoded export waiting in the
+    /// cache (held against the budget: `pre_encode_room`).
     pub other: u64,
     /// The one cache budget.
     pub budget: u64,
-    /// Exports on the cache drive: the pre-encoded export waiting in the cache, plus the
-    /// `Edited` folder when it is on the same volume. Not held against the budget.
+    /// Finished exports on the cache drive: the `Edited` folder when it is on the same volume.
+    /// Not held against the budget.
     pub exports: u64,
     /// Free space on the cache drive.
     pub free: Option<u64>,
@@ -59,16 +60,17 @@ pub(super) fn ssd_usage_in(root: &Path, recordings: &Path) -> SsdUsage {
     let inventory = budget::inventory(root, &|_| 0.0);
     let tier = |t: Tier| inventory.tier_bytes(t);
     let previews = tier(Tier::Thumb) + tier(Tier::Scrub) + tier(Tier::EditorMedia) + inventory.proxy;
-    let kept = tier(Tier::Video) + inventory.staged;
+    // Leftover copies count in the C: usage shown, though not in the budget (RI3-4).
+    let kept = tier(Tier::Video) + inventory.staged + inventory.leaked;
     let other = (inventory.other + inventory.projects).saturating_sub(inventory.heads + inventory.staged + inventory.proxy);
     let pre_encoded = budget::dir_size(&root.join("tmp").join("pre-encode")).0;
     SsdUsage {
         previews,
         kept,
         heads: inventory.heads,
-        other,
+        other: other + pre_encoded,
         budget: super::video::budget_in(root),
-        exports: pre_encoded + edited_on(root, recordings),
+        exports: edited_on(root, recordings),
         free: super::drive_info(root).map(|info| info.free),
     }
 }
@@ -120,12 +122,12 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("recall-ssd-usage-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let root = dir.join("cache");
-        write(&root.join("thumbs").join("a.jpg"), 100);
-        write(&root.join("visuals").join("a").join("scrub-0.jpg"), 200);
-        write(&root.join("visuals").join("a").join("poster.jpg"), 300);
+        write(&root.join("thumbs").join("aaaaaaaaaaaaaaaa.jpg"), 100);
+        write(&root.join("visuals").join("aaaaaaaaaaaaaaaa").join("scrub-0.jpg"), 200);
+        write(&root.join("visuals").join("aaaaaaaaaaaaaaaa").join("poster.jpg"), 300);
         write(&root.join("proxy").join("p.mp4"), 400);
-        write(&root.join("video").join("a.mp4"), 5000);
-        write(&root.join("light").join("b.mp4"), 600);
+        write(&root.join("video").join("aaaaaaaaaaaaaaaa.mp4"), 5000);
+        write(&root.join("light").join("bbbbbbbbbbbbbbbb.mp4"), 600);
         write(&root.join("staging").join("kept").join("c.mp4"), 700);
         write(&root.join("heads").join("a.head"), 800);
         write(&root.join("projects").join("a.json"), 10);
@@ -142,10 +144,12 @@ mod tests {
         assert_eq!(usage.previews, 100 + 200 + 300 + 400);
         assert_eq!(usage.kept, 5000 + 600 + 700);
         assert_eq!(usage.heads, 800);
-        assert_eq!(usage.other, 10 + settings);
+        // The ownership list (`owned.rs`) the inventory wrote when it adopted this cache.
+        let listed = root.join("owned.json").metadata().map_or(0, |m| m.len());
+        assert_eq!(usage.other, 10 + settings + listed + 900, "the pre-encode is cache work");
         assert_eq!(usage.budget, 2 << 30);
-        assert_eq!(usage.exports, 900 + 1000, "pre-encode plus finished exports, no hidden part files");
-        assert_eq!(usage.used(), 1000 + 6300 + 800 + 10 + settings, "the pre-encode is not held against the budget");
+        assert_eq!(usage.exports, 1000, "finished exports, no hidden part files");
+        assert_eq!(usage.used(), 1000 + 6300 + 800 + 10 + settings + listed + 900, "the pre-encode is held against the budget");
         assert!(raw.join("clip.mp4").exists() && dir.join("Recall").join("Edited").join("clip-edited-1.mp4").exists(), "read only");
         let _ = std::fs::remove_dir_all(&dir);
     }

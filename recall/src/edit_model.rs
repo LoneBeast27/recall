@@ -128,6 +128,22 @@ pub enum ExportMode {
     Lossless,
 }
 
+/// Which video property to favor under a file size limit.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExportPriority {
+    #[default]
+    Manual,
+    Motion,
+    Detail,
+}
+
+impl ExportPriority {
+    fn is_manual(&self) -> bool {
+        *self == Self::Manual
+    }
+}
+
 /// Per-export options carried in the project JSON as `export`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct ExportSettings {
@@ -140,12 +156,26 @@ pub struct ExportSettings {
     /// both are rounded to even numbers. A height at or above the source keeps it.
     #[serde(default)]
     pub height: Option<u32>,
+    #[serde(default, skip_serializing_if = "ExportPriority::is_manual")]
+    pub priority: ExportPriority,
 }
 
 /// Smallest output height an export accepts.
 pub const MIN_EXPORT_HEIGHT: u32 = 144;
 
 impl ExportSettings {
+    pub fn active_priority(&self) -> ExportPriority {
+        if self.mode == ExportMode::Reencode && self.max_bytes.is_some() {
+            self.priority
+        } else {
+            ExportPriority::Manual
+        }
+    }
+
+    pub fn output_height_limit(&self) -> Option<u32> {
+        if self.active_priority() == ExportPriority::Manual { self.height } else { None }
+    }
+
     pub fn validate(&self, plan: &EditPlan) -> Result<(), String> {
         if let Some(height) = self.height {
             if height < MIN_EXPORT_HEIGHT { return Err(format!("export height must be at least {MIN_EXPORT_HEIGHT} pixels")); }
@@ -417,7 +447,7 @@ mod tests {
 
     #[test]
     fn export_settings_round_trip_as_snake_case() {
-        let settings = ExportSettings { mode: ExportMode::Lossless, max_bytes: None, height: None };
+        let settings = ExportSettings { mode: ExportMode::Lossless, ..ExportSettings::default() };
         let text = serde_json::to_string(&settings).unwrap();
         assert_eq!(text, r#"{"mode":"lossless","max_bytes":null,"height":null}"#);
         assert_eq!(serde_json::from_str::<ExportSettings>(&text).unwrap(), settings);

@@ -43,7 +43,7 @@ use crate::tray::{self, Tray, TrayCmd};
 use crate::types::RuleKind;
 use crate::watcher::{WatchEvent, Watcher};
 use helpers::log_file_path;
-pub(crate) use helpers::{drain_messages, foreground_of, health_summary, primary_monitor_isize, wait_ms};
+pub(crate) use helpers::{drain_messages, foreground_of, health_summary, primary_monitor_isize, wait_ms, wait_ms_at};
 
 /// Cap on the pump wait so `poll()` stays lively even with no pending deadline
 /// (session-liveness + supervisor-health checks want to tick regularly).
@@ -260,6 +260,9 @@ impl App {
     /// FocusedRule actions. The watcher does NOT lowercase the stem; we do.
     fn drain_watcher(&mut self, watch_rx: &Receiver<WatchEvent>) {
         while let Ok(ev) = watch_rx.try_recv() {
+            if ev.is_unknown() {
+                continue; // an unidentifiable window: the record mode's signal only
+            }
             let fg = foreground_of(&ev);
             let kind = rules::classify(&fg, &self.cfg);
             // Remember the last focused stem so FocusedRule targets the right one
@@ -327,7 +330,11 @@ impl App {
         }
         self.last_save_press = Some(now);
         log!("app: save_clip hotkey -> engine");
-        supervisor.send_save_clip();
+        if let Some(reason) = crate::record_dispatch::legacy_save(|line| supervisor.send_engine_line(line), None) {
+            // The legacy app's hotkey has no notice path of its own: logged, and the failure beep.
+            log!("app: save_clip not sent: {reason}");
+            crate::supervisor::beep_failure();
+        }
     }
 
     /// Upsert an override for the last focused stem to `kind`, then save.

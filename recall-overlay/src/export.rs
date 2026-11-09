@@ -110,7 +110,7 @@ fn record(spec: &Spec, renderer: &mut Renderer, fonts: &Fonts, atlas: &mut Atlas
     let spots = Spots::embedded();
     let spot = spec.spot.unwrap_or_else(|| spots.lookup("valorant"));
     let start = Instant::now();
-    let mut sim = Sim::new(fonts, spot, MONITOR, scale(MONITOR.height(), &spot), spec.legacy, start);
+    let mut sim = Sim::new(fonts, spot, MONITOR, scale(&MONITOR, &spot), spec.legacy, start);
     sim.hud = if spec.spot.is_some() { None } else { spots.hud("valorant") };
     let engine = json!({"mod":"engine","event":{"type":"status","source":"VALORANT","fps":60,"buffer_secs":120.0,"encoder":"h264_nvenc"}});
     sim.reducer.apply_envelope(&status(spec.stats), start);
@@ -185,7 +185,7 @@ pub fn export(dir: &Path) -> Result<(), String> {
     }
     let (aw, ah, origins) = atlas.layout(ATLAS_W);
     let spot = Spots::embedded().lookup("valorant");
-    let k = scale(MONITOR.height(), &spot);
+    let k = scale(&MONITOR, &spot);
     let edge = (EDGE * k).round() as i32;
     let anchor = (MONITOR.right - edge, MONITOR.top + edge); // top-right: the box's top-right corner
     let place = |(id, box_w, margin): (usize, f32, f32)| {

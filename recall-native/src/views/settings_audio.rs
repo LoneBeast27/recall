@@ -28,6 +28,8 @@ pub struct SettingsUi {
     pub quality_closed_at: Option<(crate::views::quality_preview::Preview, gpui::Point<gpui::Pixels>)>,
     /// Clip → Frame rate's Custom box.
     pub fps: crate::views::settings_fps::FpsInput,
+    /// Settings → Games ("Add app…" and its app list).
+    pub games: crate::views::settings_games::GamesPage,
 }
 
 /// Which device list is open.

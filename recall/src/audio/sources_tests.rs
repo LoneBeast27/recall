@@ -37,16 +37,31 @@ fn the_list_builds_tracks_in_order_with_names_devices_and_gain() {
 }
 
 #[test]
-fn bad_lists_are_refused() {
+fn bad_entries_are_skipped_and_unreadable_lists_refused() {
     for json in [
-        r#"[{"id":"a","kind":"input","name":"A"},{"id":"A","kind":"input","name":"B"}]"#,
         r#"[{"id":"a","kind":"bus","name":"A"}]"#,
         r#"[{"id":"a","kind":"app","name":"A"}]"#,
         r#"[{"id":"a","kind":"app","exe":"C:\\apps\\a.exe","name":"A"}]"#,
-        "not json",
+        r#"[{"id":" ","kind":"input","name":"A"}]"#,
+        r#"[{"id":"a","kind":"input","name":"A","gain_db":"loud"}]"#,
     ] {
-        assert!(resolve(env(&[(SOURCES_ENV, json)])).is_err(), "{json}");
+        assert_eq!(resolve(env(&[(SOURCES_ENV, json)])), Ok(Vec::new()), "{json}");
     }
+    assert!(resolve(env(&[(SOURCES_ENV, "not json")])).is_err(), "unreadable JSON");
+}
+
+/// The reason each skipped entry gives (logged by `parse`).
+#[test]
+fn skipped_entries_say_why() {
+    let json = r#"[{"id":"mic","kind":"input","name":"Mic"},{"id":"MIC","kind":"input","name":"Copy"},{"id":"x","kind":"Input","name":"Typo"}]"#;
+    let (list, skipped) = parse_entries(json).unwrap();
+    assert_eq!(list.len(), 1);
+    assert!(skipped[0].contains("'MIC'") && skipped[0].contains("used twice"), "{skipped:?}");
+    assert!(skipped[1].contains("unknown kind 'Input'"), "{skipped:?}");
+    let nine: Vec<String> = (1..=9).map(|n| format!(r#"{{"id":"o{n}","kind":"output","name":"{n}"}}"#)).collect();
+    let (list, skipped) = parse_entries(&format!("[{}]", nine.join(","))).unwrap();
+    assert_eq!(list.len(), 8);
+    assert!(skipped[0].contains("'o9'") && skipped[0].contains("at most 8"), "{skipped:?}");
 }
 
 #[test]
@@ -80,4 +95,22 @@ fn rings_follow_the_list_order_and_carry_title_and_tag() {
     let ordered = in_list_order(&list, vec![ring(&list[1], "mic"), ring(&list[0], "app:a.exe")]);
     let got: Vec<(&str, &str, &str)> = ordered.iter().map(|r| (r.name, r.title(), r.source)).collect();
     assert_eq!(got, [("app-1", "A", "app:a.exe"), ("in", "Voice", "mic")]);
+}
+
+/// 2026-11-07 audit A6 (engine side): one bad entry in the list (a duplicate id from a
+/// copy-pasted block, a typo in a kind, a ninth source) is skipped; the other sources, the game
+/// included, still record. The whole list used to be refused: clips had no audio at all.
+#[test]
+fn one_bad_entry_skips_only_itself() {
+    let json = r#"[
+        {"id":"game","kind":"game","name":"Game"},
+        {"id":"mic","kind":"input","name":"Mic"},
+        {"id":"MIC","kind":"input","name":"Copy"},
+        {"id":"x","kind":"Input","name":"Typo"},
+        {"id":"o1","kind":"output","name":"1"},{"id":"o2","kind":"output","name":"2"},{"id":"o3","kind":"output","name":"3"},
+        {"id":"o4","kind":"output","name":"4"},{"id":"o5","kind":"output","name":"5"},{"id":"o6","kind":"output","name":"6"},
+        {"id":"o7","kind":"output","name":"7"}
+    ]"#;
+    let ids: Vec<String> = parse(json).expect("the good entries").iter().map(|s| s.id.clone()).collect();
+    assert_eq!(ids, ["game", "mic", "o1", "o2", "o3", "o4", "o5", "o6"], "the first good eight");
 }

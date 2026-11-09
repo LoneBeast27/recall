@@ -15,8 +15,8 @@ impl LibraryState {
     pub(super) fn mark_played_at(&mut self, path: &str, secs: u64) {
         let Some(listed) = self.record(path).map(|r| r.path.clone()) else { return };
         let Some(index) = self.by_path.get(&listed).copied() else { return };
-        let name = self.records[index].file_name.clone();
-        match self.store.set_played(&name, secs) {
+        let key = crate::services::library::clip_key(&self.records[index].path);
+        match self.store.set_played(&key, secs) {
             Ok(()) => {
                 self.records[index].played = Some(secs);
                 self.played = latest(&self.records);

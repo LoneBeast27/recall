@@ -6,13 +6,10 @@
 //! the system-wide foreground app — so clicking a window on a *secondary*
 //! monitor never renames the source away from the game on the captured monitor.
 
-use windows::core::{BOOL, PWSTR};
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, POINT, RECT};
+use windows::core::BOOL;
+use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT};
 use windows::Win32::Graphics::Gdi::{
     MonitorFromPoint, MonitorFromWindow, HMONITOR, MONITOR_DEFAULTTONULL, MONITOR_DEFAULTTOPRIMARY,
-};
-use windows::Win32::System::Threading::{
-    OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowLongW, GetWindowRect, GetWindowTextW, GetWindowThreadProcessId, IsIconic,
@@ -135,36 +132,14 @@ pub fn captured_exe_path() -> Option<std::path::PathBuf> {
     exe_path(pid).map(std::path::PathBuf::from)
 }
 
+/// Paths past `MAX_PATH` are read too (`image_path`).
 fn exe_path(pid: u32) -> Option<String> {
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        let mut buf = [0u16; 1024];
-        let mut len = buf.len() as u32;
-        let res =
-            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
-        let _ = CloseHandle(handle);
-        res.ok()?;
-        Some(String::from_utf16_lossy(&buf[..len as usize]))
-    }
+    crate::image_path::exe_path(pid)
 }
 
 fn exe_stem(pid: u32) -> Option<String> {
-    unsafe {
-        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()?;
-        let mut buf = [0u16; 260];
-        let mut len = buf.len() as u32;
-        let res =
-            QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len);
-        let _ = CloseHandle(handle);
-        res.ok()?;
-        let path = String::from_utf16_lossy(&buf[..len as usize]);
-        Some(
-            std::path::Path::new(&path)
-                .file_stem()?
-                .to_string_lossy()
-                .into_owned(),
-        )
-    }
+    let path = exe_path(pid)?;
+    Some(std::path::Path::new(&path).file_stem()?.to_string_lossy().into_owned())
 }
 
 /// Collapse whitespace and cap length (on char boundaries) so titles stay tidy.

@@ -11,6 +11,7 @@ use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_SAMPLE_DESC};
 use windows::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
 
+use super::replay::Replay;
 use super::{gpu_pool_of, open_encoder, saver, Config, EncStats, PacedFrame, SaveRequest};
 use crate::framing::Layout;
 use crate::gpu_frames::{hardware_device, read_rgba, target_size, Pipeline};
@@ -80,6 +81,7 @@ pub fn gpu_smoke(out_dir: &std::path::Path) -> Result<String, String> {
     let mut pipe = Pipeline::new(&dev, &ctx)?;
     let stats = EncStats::default();
     let mut enc: Option<super::Enc> = None;
+    let mut replay = Replay::new(&cfg, None);
     let started = Instant::now();
     let cpu0 = thread_cpu();
     let (mut render_max, mut render_sum, mut reopens) = (Duration::ZERO, Duration::ZERO, 0u32);
@@ -96,9 +98,11 @@ pub fn gpu_smoke(out_dir: &std::path::Path) -> Result<String, String> {
             reopens += 1;
         }
         if enc.is_none() {
-            enc = Some(open_encoder(&cfg, cfg.codec, target.0, target.1, frame.gpu.as_ref(), None)?.0);
+            let opened = open_encoder(&cfg, cfg.codec, target.0, target.1, frame.gpu.as_ref())?.0;
+            replay.begin(&opened);
+            enc = Some(opened);
         }
-        enc.as_mut().expect("opened above").encode(frame, &stats)?;
+        enc.as_mut().expect("opened above").encode(frame, &stats, &mut replay)?;
         // Real time, like capture at 60 fps.
         let due = started + Duration::from_micros((i + 1) * 1_000_000 / 60);
         std::thread::sleep(due.saturating_duration_since(Instant::now()));
@@ -109,20 +113,20 @@ pub fn gpu_smoke(out_dir: &std::path::Path) -> Result<String, String> {
     }
     let mut enc = enc.ok_or("no frames encoded")?;
     enc.encoder.send_eof().map_err(|e| format!("NVENC flush: {e}"))?;
-    enc.drain(&stats)?;
-    let thumb = enc.raw_last().ok_or("thumbnail readback failed")?;
-    let probe = read_rgba(enc.last_gpu.as_ref().ok_or("no last frame")?)?;
+    enc.drain(&stats, &mut replay)?;
+    let thumb = replay.raw_last().ok_or("thumbnail readback failed")?;
+    let probe = read_rgba(replay.last_gpu.as_ref().ok_or("no last frame")?)?;
     let path = out_dir.join(format!("gpu-smoke-{}.mp4", uuid::Uuid::new_v4()));
     let path_text = path.to_string_lossy().into_owned();
     let now = Instant::now();
     let req = SaveRequest { path: path_text.clone(), seconds: 4, end_us: None, at_last_frame: false, requested: now };
-    saver::write_now(&enc.build_job(req, &[], now)?)?;
+    saver::write_now(&replay.build_job(req, &[], now)?)?;
     // The same last frame through the CPU path's encoder input (RGB0 from the readback),
     // as a quiet-tail still: decoding both shows whether D3D11 BGRA input colours match.
     let still = out_dir.join(format!("gpu-smoke-rgb0-{}.mp4", uuid::Uuid::new_v4()));
     let still_text = still.to_string_lossy().into_owned();
     let req = SaveRequest { path: still_text.clone(), seconds: 1, end_us: Some(300_000_000), at_last_frame: false, requested: now };
-    saver::write_now(&enc.build_job(req, &[], now)?)?;
+    saver::write_now(&replay.build_job(req, &[], now)?)?;
     let out = serde_json::json!({
         "clip": path_text,
         "rgb0_still": still_text,

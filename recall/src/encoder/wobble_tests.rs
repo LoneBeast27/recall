@@ -18,7 +18,7 @@ use super::super::{run, saver, try_open, Config, EncStats, PacedFrame, SaveReque
 use crate::framing::{Layout, MIN_ENCODE};
 use crate::gpu_frames::{hardware_device, Pipeline};
 
-const BIG: (u32, u32) = (640, 360);
+pub(crate) const BIG: (u32, u32) = (640, 360);
 const WOBBLE: (u32, u32) = (640, 358);
 /// A window on its way to the taskbar: NVENC refuses this (CS2, 2026-10-31).
 const TINY: (u32, u32) = (120, 30);
@@ -31,14 +31,14 @@ const PHASE: u64 = 60;
 /// One NVENC loop at a time: the tests measure buffers, not session limits.
 static NVENC: Mutex<()> = Mutex::new(());
 
-fn nvenc() -> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn nvenc() -> std::sync::MutexGuard<'static, ()> {
     NVENC.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
-struct Loop {
+pub(crate) struct Loop {
     frames: Option<SyncSender<PacedFrame>>,
     saves: Sender<SaveRequest>,
-    stats: Arc<EncStats>,
+    pub stats: Arc<EncStats>,
     thread: Option<JoinHandle<()>>,
     saver: Option<saver::SaverControl>,
     clip_secs: Receiver<f64>,
@@ -47,50 +47,75 @@ struct Loop {
 
 impl Loop {
     fn start() -> Self {
+        Self::start_with(Arc::new(EncStats::default()))
+    }
+
+    /// With `stats` set up first (faults, the capture-restart hook).
+    pub fn start_with(stats: Arc<EncStats>) -> Self {
+        Self::start_full(stats, Vec::new(), false)
+    }
+
+    /// With audio tracks, and `real_mux`: the saver writes a real MP4 (`mux::produce`)
+    /// instead of only reporting the clip length.
+    pub fn start_full(stats: Arc<EncStats>, audio: Vec<Arc<crate::audio::TrackRing>>, real_mux: bool) -> Self {
         let cfg = Config { fps: 60, buffer_secs: 30, bitrate: 2_000_000, ..Config::from_env(false) };
         let (ftx, frx) = sync_channel(3);
         let (stx, srx) = channel();
         let (ctx, crx) = channel();
-        let stats = Arc::new(EncStats::default());
-        let mux: saver::MuxFn = Box::new(move |_, job, _, _| {
+        let mux: saver::MuxFn = Box::new(move |part, job, abort, timing| {
             let _ = ctx.send(job.secs);
+            if real_mux {
+                return super::super::mux::produce(part, job, abort, timing);
+            }
             Err("wobble test: the clip length is all that is read".into())
         });
         let (queue, control) = saver::spawn(saver::Events::new(false), mux, Box::new(|_, _, _, _| {}));
         let shared = stats.clone();
-        let thread = std::thread::spawn(move || run(cfg, frx, srx, shared, Vec::new(), queue));
+        let thread = std::thread::spawn(move || run(cfg, frx, srx, shared, audio, queue));
         Self { frames: Some(ftx), saves: stx, stats, thread: Some(thread), saver: Some(control), clip_secs: crx, sent: 0 }
     }
 
-    fn pts(&self) -> u64 {
+    pub fn pts(&self) -> u64 {
         self.sent * FRAME_US
     }
 
-    fn send(&mut self, frame: PacedFrame) {
+    pub fn send(&mut self, frame: PacedFrame) {
         self.frames.as_ref().unwrap().send(frame).expect("encoder loop is alive");
         self.sent += 1;
     }
 
-    fn rgba(&mut self, (width, height): (u32, u32)) {
+    pub fn rgba(&mut self, (width, height): (u32, u32)) {
         let rgba = vec![0x40; (width * height * 4) as usize];
         self.send(PacedFrame { idx: self.pts(), width, height, rgba, gpu: None, content: None });
     }
 
-    /// False when this machine has no NVENC (the test then has nothing to say).
-    fn nvenc_opened(&self) -> bool {
+    /// False when this machine has no NVENC: the test then has nothing to say, and says
+    /// so (`hw_skip`: printed and counted, never a silent pass).
+    pub fn nvenc_opened(&self) -> bool {
+        if crate::hw_skip::faked_absent() {
+            crate::hw_skip::skipped("no NVENC (RECALL_FAKE_NO_NVENC)");
+            return false;
+        }
         let deadline = Instant::now() + Duration::from_secs(5);
         while self.stats.backend.load(Relaxed) == 0 && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(5));
         }
         let up = self.stats.backend.load(Relaxed) == 1;
         if !up {
-            eprintln!("no NVENC here; skipping ({:?})", self.error());
+            crate::hw_skip::skipped(&format!("no NVENC here ({:?})", self.error()));
         }
         up
     }
 
     /// Let NVENC's few frames of delay come out, then save: the clip's length in seconds.
-    fn clip_after_settling(&self) -> f64 {
+    pub fn clip_after_settling(&self) -> f64 {
+        let path = std::env::temp_dir().join(format!("recall-wobble-{}.mp4", uuid::Uuid::new_v4().simple()));
+        self.save_to(&path)
+    }
+
+    /// Save to `path` once NVENC has settled: the clip's length in seconds (the file is
+    /// complete once `path` exists, with a real mux).
+    pub fn save_to(&self, path: &std::path::Path) -> f64 {
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut last = (self.stats.encoded_frames.load(Relaxed), Instant::now());
         while Instant::now() < deadline && last.1.elapsed() < Duration::from_millis(300) {
@@ -100,14 +125,13 @@ impl Loop {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        let path = std::env::temp_dir().join(format!("recall-wobble-{}.mp4", uuid::Uuid::new_v4().simple()));
         let save = SaveRequest { path: path.to_string_lossy().into_owned(), seconds: 30, end_us: None, at_last_frame: false, requested: Instant::now() };
         self.saves.send(save).expect("encoder loop is alive");
         // The loop looks at saves between frames, at the latest after its 100 ms wait.
         self.clip_secs.recv_timeout(Duration::from_secs(5)).expect("the save reached the saver")
     }
 
-    fn error(&self) -> Option<String> {
+    pub fn error(&self) -> Option<String> {
         self.stats.error.lock().unwrap().clone()
     }
 }
@@ -144,19 +168,34 @@ fn surface(dev: &ID3D11Device, (w, h): (u32, u32)) -> ID3D11Texture2D {
 }
 
 /// The capture thread's zero-copy half, minus WGC.
-struct Capture {
+pub(crate) struct Capture {
     dev: ID3D11Device,
-    pipe: Pipeline,
+    pub pipe: Pipeline,
 }
 
 impl Capture {
-    fn new() -> Option<Self> {
-        let (dev, ctx) = hardware_device()?;
+    pub fn new() -> Option<Self> {
+        let Some((dev, ctx)) = hardware_device().filter(|_| !crate::hw_skip::faked_absent()) else {
+            crate::hw_skip::skipped("no hardware D3D11 device");
+            return None;
+        };
         let pipe = Pipeline::new(&dev, &ctx).expect("pipeline");
         Some(Self { dev, pipe })
     }
 
-    fn frames(&mut self, enc: &mut Loop, size: (u32, u32), count: u64) {
+    /// The frames pool this capture's frames of `size` come from.
+    pub fn pool(&mut self, size: (u32, u32)) -> usize {
+        self.render(size).pool_id()
+    }
+
+    /// One frame of `size` through the zero-copy pipeline (not sent anywhere).
+    pub fn render(&mut self, size: (u32, u32)) -> crate::gpu_frames::HwFrame {
+        let src = surface(&self.dev, size);
+        let layout = Layout::recorded(size, None, false, self.pipe.target()).expect("layout");
+        self.pipe.render(&src, &layout, 0).expect("render")
+    }
+
+    pub fn frames(&mut self, enc: &mut Loop, size: (u32, u32), count: u64) {
         let src = surface(&self.dev, size);
         for _ in 0..count {
             let Some(layout) = Layout::recorded(size, None, false, self.pipe.target()) else { continue };
@@ -295,12 +334,15 @@ fn smallest(opens: impl Fn(u32) -> bool) -> u32 {
 #[test]
 fn encode_minimum_is_what_the_driver_opens() {
     let _one = nvenc();
+    if crate::hw_skip::faked_absent() {
+        return crate::hw_skip::skipped("no NVENC (RECALL_FAKE_NO_NVENC)");
+    }
     ff::init().unwrap();
     let cfg = Config { fps: 60, buffer_secs: 5, bitrate: 2_000_000, ..Config::from_env(false) };
     let (mut most, mut opened) = ((0, 0), 0);
     for codec in [Codec::H264, Codec::Hevc, Codec::Av1] {
         if try_open(&cfg, codec, 256, 256, None).is_err() {
-            eprintln!("{} does not open here; skipping it", codec.nvenc());
+            crate::hw_skip::skipped(&format!("{} does not open here", codec.nvenc()));
             continue;
         }
         let w = smallest(|w| try_open(&cfg, codec, w, 256, None).is_ok());

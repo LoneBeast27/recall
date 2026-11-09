@@ -59,9 +59,13 @@ pub fn start_fill(source: &Path, metadata: &std::fs::Metadata, first: &[u64]) ->
     let id = super::identity(&name, bytes, super::mtime_secs(metadata));
     let budget = budget_in(&root);
     let free = super::drive_info(&root).map_or(u64::MAX, |info| info.free);
-    if bytes > budget / 2 || free < bytes.saturating_add(KEEP_FREE) {
+    // A cache that overlaps a clip folder takes no new copies (`guard.rs`), nor one whose size
+    // is unknown (storage.json unreadable, RI3-1): read in place.
+    if bytes > budget / 2 || free < bytes.saturating_add(KEEP_FREE) || super::guard::blocked(&root).is_some() || budget_note(&root).is_some() {
         return Ok(ClipFill::direct(source, bytes, modified, mega("RECALL_SLOW_DRIVE_FAIL")));
     }
+    // Listed before any file of it exists, so a crash's leftover part is still Recall's.
+    super::owned::mark(&root, &format!("video/{id}.mp4"));
     let directory = video_dir(&root);
     std::fs::create_dir_all(&directory).map_err(|error| format!("create fill folder: {error}"))?;
     remove_stale_parts(&directory);
@@ -86,20 +90,80 @@ pub(super) fn video_dir(root: &Path) -> PathBuf {
     root.join("video")
 }
 
-/// The budget in `storage.json`. A first run (no budget set) picks one from the cache drive's
-/// free space (`evict::default_budget`) and saves it; Settings changes it from then on.
+/// The budget in `storage.json`. A first run (no budget set) picks one (`evict::default_budget`:
+/// 2 GiB on the system drive, else from the cache drive's free space) and saves it; Settings
+/// changes it from then on. A saved budget is never shrunk here. A file that is there but can't
+/// be read (locked, or not JSON) is never written over: the budget read earlier this session
+/// is used (else the pick, in memory only) and the next call reads the file again, so a passing
+/// lock can't replace the user's budget. While it can't be read, eviction never goes below what
+/// the cache already holds (`budget::enforce`) and Settings can't change the size.
 pub(super) fn budget_in(root: &Path) -> u64 {
-    let mut settings = lru::read_settings(root);
+    let mut settings = match lru::load_settings(root) {
+        lru::Stored::Read(settings) => settings,
+        lru::Stored::Absent => lru::Settings::default(),
+        lru::Stored::Unusable(why) | lru::Stored::Damaged(why) => {
+            eprintln!("cache budget: {why}; using the last budget read (else the first-run pick) for now, file left as it is");
+            return remembered(root).unwrap_or_else(|| first_run_budget(root));
+        }
+    };
     if let Some(budget) = settings.cache_budget_bytes {
+        remember(root, budget);
         return budget;
     }
-    let (free, total) = super::drive_info(root).map_or((0, 0), |info| (info.free, info.total));
-    let budget = lru::default_budget(free, total);
+    let budget = first_run_budget(root);
     settings.cache_budget_bytes = Some(budget);
+    settings.first_run = Some(true);
     if let Err(error) = lru::write_settings(root, &settings) {
         eprintln!("save first-run cache budget: {error}");
     }
     budget
+}
+
+/// The last budget read from each cache root's storage.json in this process (review RI2-2).
+static LAST_READ: std::sync::Mutex<Vec<(PathBuf, u64)>> = std::sync::Mutex::new(Vec::new());
+
+fn remember(root: &Path, budget: u64) {
+    let mut last = LAST_READ.lock().unwrap_or_else(|p| p.into_inner());
+    last.retain(|(r, _)| r != root);
+    last.push((root.to_path_buf(), budget));
+}
+
+fn remembered(root: &Path) -> Option<u64> {
+    LAST_READ.lock().unwrap_or_else(|p| p.into_inner()).iter().find(|(r, _)| r == root).map(|(_, b)| *b)
+}
+
+/// Why the budget is not known right now: storage.json is there but locked, unreadable or not
+/// JSON. None when it was read (or is absent: a first run).
+pub(super) fn budget_note(root: &Path) -> Option<String> {
+    match lru::load_settings(root) {
+        lru::Stored::Unusable(why) | lru::Stored::Damaged(why) => Some(why),
+        lru::Stored::Absent | lru::Stored::Read(_) => None,
+    }
+}
+
+/// storage.json is damaged and a `.bad` copy of it exists (never a merely locked file).
+pub(super) fn budget_resettable(root: &Path) -> bool {
+    matches!(lru::load_settings(root), lru::Stored::Damaged(_))
+}
+
+/// Settings "Reset cache size" (RI3-1): writes the budget read earlier this session, else the
+/// first-run pick, durably over a damaged storage.json whose `.bad` copy exists. Refused for a
+/// locked or unreadable file, or one that reads again. Returns the budget written.
+pub(super) fn reset_budget(root: &Path) -> Result<u64, String> {
+    if !budget_resettable(root) {
+        return Err("storage.json is not damaged (or has no backup yet); cache size not reset".into());
+    }
+    let last = remembered(root);
+    let budget = last.unwrap_or_else(|| first_run_budget(root));
+    let settings = lru::Settings { cache_budget_bytes: Some(budget), first_run: last.is_none().then_some(true) };
+    lru::write_settings(root, &settings)?;
+    Ok(budget)
+}
+
+/// The budget a first run picks for the cache at `root`.
+fn first_run_budget(root: &Path) -> u64 {
+    let (free, total) = super::drive_info(root).map_or((0, 0), |info| (info.free, info.total));
+    lru::default_budget(free, total, super::drive::on_system_drive(root))
 }
 
 /// Applies the current budget (after a list load, an editor open, ...). Returns bytes freed.
@@ -150,6 +214,12 @@ pub(super) fn cache_in(root: &Path, source: &Path, budget: u64) -> Result<PathBu
 
 /// The copy, after `room(bytes)` made room for it (false: no room, nothing copied).
 pub(super) fn copy_in(root: &Path, source: &Path, budget: u64, room: &dyn Fn(u64) -> bool, pace: &Pace) -> Result<PathBuf, String> {
+    if let Some(why) = super::guard::blocked(root) {
+        return Err(format!("The SSD cache is paused. {why}"));
+    }
+    if let Some(why) = budget_note(root) {
+        return Err(format!("The SSD cache takes no new copies while its size is unknown ({why})."));
+    }
     let metadata = source.metadata().map_err(|error| format!("stat clip: {error}"))?;
     let bytes = metadata.len();
     let name = super::file_name(source).ok_or("clip has no file name")?;
@@ -166,6 +236,7 @@ pub(super) fn copy_in(root: &Path, source: &Path, budget: u64, room: &dyn Fn(u64
         return Err(format!("Clip ({}) is larger than the video cache allows ({}, half the cache size).", gib(bytes), gib(cap)));
     }
     remove_stale_parts(&directory);
+    super::owned::mark(root, &format!("video/{file}"));
     if !room(bytes) {
         return Err("No room in the video cache without dropping a clip you are more likely to open.".into());
     }
@@ -206,14 +277,16 @@ pub(super) fn touch(root: &Path, file: &str) {
     let _ = lru::write_index(&path, &index);
 }
 
-/// The part file an app closed mid-load left for this clip. A fill still running is not left.
+/// The part file an app closed mid-load left for this clip. A fill still running is not left,
+/// and nor is anything Recall did not make (`owned.rs`).
 fn remove_left_fills(directory: &Path, id: &str) {
-    let prefix = format!("{id}.mp4.");
+    let Some(root) = directory.parent() else { return };
+    let target = format!("{id}.mp4");
     let Ok(listing) = std::fs::read_dir(directory) else { return };
     for entry in listing.flatten() {
         let name = entry.file_name().to_string_lossy().into_owned();
-        if name.starts_with(&prefix) && name.ends_with(".part") && !super::fill::in_use(&entry.path()) {
-            let _ = std::fs::remove_file(entry.path());
+        if super::owned::temp_target(&name).as_deref() == Some(target.as_str()) && !super::fill::in_use(&entry.path()) {
+            super::owned::remove(root, "video", &name);
         }
     }
 }
@@ -224,43 +297,53 @@ mod left_fills {
 
     #[test]
     fn a_new_fill_clears_only_what_its_own_clip_left() {
-        let dir = std::env::temp_dir().join(format!("recall-left-fills-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let sandbox = crate::test_temp::TempDir::sandbox("recall-left-fills");
+        let (root, dir) = (sandbox.join("cache"), sandbox.join("cache").join("video"));
         std::fs::create_dir_all(&dir).unwrap();
-        let source = dir.join("clip.mp4");
+        let (a, b) = ("aaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbb");
+        super::super::owned::mark(&root, &format!("video/{a}.mp4"));
+        super::super::owned::mark(&root, &format!("video/{b}.mp4"));
+        let source = sandbox.join("clip.mp4");
         std::fs::write(&source, vec![1u8; 8192]).unwrap();
         let modified = source.metadata().unwrap().modified().unwrap();
-        let left = dir.join("aaaa.mp4.1-1.part");
-        let other = dir.join("bbbb.mp4.1-2.part");
+        let left = dir.join(format!("{a}.mp4.1-1.part"));
+        let other = dir.join(format!("{b}.mp4.1-2.part"));
+        let user = dir.join(format!("{a}.mp4 my copy.part"));
         std::fs::write(&left, b"left by a closed app").unwrap();
         std::fs::write(&other, b"another clip").unwrap();
-        let running = ClipFill::create(&source, &dir.join("aaaa.mp4.1-3.part"), &dir.join("aaaa.mp4"), 8192, modified, 0, 0).unwrap();
-        remove_left_fills(&dir, "aaaa");
+        std::fs::write(&user, b"not Recall's name").unwrap();
+        let running = ClipFill::create(&source, &dir.join(format!("{a}.mp4.1-3.part")), &dir.join(format!("{a}.mp4")), 8192, modified, 0, 0).unwrap();
+        remove_left_fills(&dir, a);
         assert!(!left.exists(), "what a closed app left goes");
         assert!(other.exists(), "another clip's part stays");
-        assert!(dir.join("aaaa.mp4.1-3.part").exists(), "a fill still running is not left");
+        assert!(user.exists(), "a name outside Recall's scheme stays");
+        assert!(dir.join(format!("{a}.mp4.1-3.part")).exists(), "a fill still running is not left");
         // A copy held open by another handle (a video-tier copy in flight) is not left either.
-        let copying = dir.join("aaaa.mp4.1-4.part");
+        let copying = dir.join(format!("{a}.mp4.1-4.part"));
         let handle = std::fs::File::create(&copying).unwrap();
-        remove_left_fills(&dir, "aaaa");
+        remove_left_fills(&dir, a);
         assert!(copying.exists(), "an open copy is not swept");
         drop(handle);
-        remove_left_fills(&dir, "aaaa");
+        remove_left_fills(&dir, a);
         assert!(!copying.exists(), "closed and unowned, it goes");
         drop(running);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
-/// Interrupted copies older than an hour (a crash mid-copy).
-fn remove_stale_parts(directory: &Path) {
+/// Recall's interrupted copies older than an hour (a crash mid-copy): `<id>.mp4.<pid>-<nanos>.part`
+/// of a listed copy (`owned.rs`). Any other `.part` (a user's, a long recording's) stays.
+pub(super) fn remove_stale_parts(directory: &Path) {
+    let Some(root) = directory.parent() else { return };
+    let listed = super::owned::listed(root);
     let Ok(listing) = std::fs::read_dir(directory) else { return };
     for entry in listing.flatten() {
-        let stale = entry.file_name().to_string_lossy().ends_with(".part")
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let stale = super::owned::temp_target(&name).is_some()
+            && super::owned::owns(&listed, "video", &name)
             && !super::fill::in_use(&entry.path())
             && entry.metadata().ok().and_then(|m| m.created().ok()).and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() > STALE_PART_SECS);
         if stale {
-            let _ = std::fs::remove_file(entry.path());
+            super::owned::remove(root, "video", &name);
         }
     }
 }

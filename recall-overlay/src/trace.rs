@@ -1,7 +1,8 @@
 //! The island's change-only log (`%APPDATA%\recall-hdr\recall-overlay.log`):
 //! one line per value that changed, never one per frame. Each key keeps its
 //! last value; a repeat only bumps a counter that the next change reports.
-//! The file moves to `.old` once it would pass `limit` bytes.
+//! The file moves to `.old` once it would pass `limit` bytes (or starts over
+//! in place when it can't be moved).
 
 use std::collections::HashMap;
 use std::fs::{self, File, OpenOptions};
@@ -71,9 +72,15 @@ impl Trace {
         }
         if self.size > 0 && self.size + text.len() as u64 > self.limit {
             self.file = None;
-            let _ = fs::rename(&path, old_path(&path));
-            self.file = open_append(&path);
-            self.size = 0;
+            // A log held open without delete sharing can't move: start it over in
+            // place; if even that fails, write nothing until it can rotate.
+            self.file = match fs::rename(&path, old_path(&path)) {
+                Ok(()) => open_append(&path),
+                Err(_) => truncate(&path),
+            };
+            if self.file.is_some() {
+                self.size = 0;
+            }
         }
         let Some(file) = self.file.as_mut() else { return false };
         if file.write_all(text.as_bytes()).is_err() {
@@ -90,6 +97,12 @@ fn open_append(path: &Path) -> Option<File> {
         let _ = fs::create_dir_all(dir);
     }
     OpenOptions::new().create(true).append(true).open(path).ok()
+}
+
+/// The log emptied in place, opened for appending.
+fn truncate(path: &Path) -> Option<File> {
+    OpenOptions::new().write(true).truncate(true).open(path).ok()?;
+    open_append(path)
 }
 
 /// `recall-overlay.log` → `recall-overlay.log.old`.

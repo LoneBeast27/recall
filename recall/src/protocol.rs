@@ -17,6 +17,10 @@ pub enum Outbound {
         /// This engine applies `set_source` (gain, name) to live tracks. A controller restarts
         /// engines that do not say so (older builds ignore the command).
         live_sources: bool,
+        /// This engine also applies `set_source`'s `mic_mute` and `device_id` live, and limits a
+        /// gain boosted live (P2-a). An engine without it (8111e31 and older) ignores those
+        /// fields, so the controller restarts it for them instead of sending them.
+        live_source_fields: bool,
     },
     /// Sent on change (and ~1/s for fps): current live state.
     Status {
@@ -34,7 +38,10 @@ pub enum Outbound {
         fps: u32,
         /// Seconds of replay currently buffered (0.0 when encode is off/down).
         buffer_secs: f32,
-        /// "h264_nvenc" (replay ready, for every codec) | "starting" | "off" | "failed".
+        /// "h264_nvenc" (replay ready, for every codec) | "degraded" (recording from CPU
+        /// copies after GPU frames were refused; replay ready) | "recovering" (encoder
+        /// being rebuilt; the buffer is kept and saveable) | "starting" | "off" | "failed"
+        /// (the engine's own recovery is spent).
         encoder: String,
         encoder_error: Option<String>,
         /// "h264" | "hevc" | "av1": the codec recording (H.264 after a
@@ -42,11 +49,20 @@ pub enum Outbound {
         /// without an encoder.
         codec: String,
         recording_mode: String,
+        /// Encoder-thread turns so far (about 10 a second, frames or not; 0 without an
+        /// encoder). A beat that stops while the game is visible is a hung encoder.
+        encoder_heartbeat: u64,
+        /// An NVENC open (or reopen) is running now: a hang clock allows it longer.
+        encoder_opening: bool,
         /// Whether new microphone samples are entering the replay buffer as silence.
         mic_muted: bool,
         /// What each recorded source opened, in track order (`audio::sources::opened`).
         #[serde(skip_serializing_if = "Vec::is_empty")]
         audio: Vec<AudioOpened>,
+        /// The save the saver is writing now (absent when none is in the saver). Bytes that
+        /// keep growing tell the controller the save is alive: a restart would abort it.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        save_writing: Option<SaveWriting>,
     },
     /// A `save_clip` completed: the clip is on disk. `path` is always the
     /// clip's FINAL place in the clip folder. With `staged: true` the finished
@@ -85,9 +101,18 @@ pub enum Outbound {
         staged_path: String,
         reason: String,
     },
-    /// A `save_clip` failed.
+    /// A `save_clip` failed. `rejected`: it failed before it was queued for
+    /// writing (the newest request, while older saves may still be writing).
     SaveFailed {
         reason: String,
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        rejected: bool,
+    },
+    /// An input opened on an unsure sibling was unmuted by a fresh Alt+M (A4 ruling): the
+    /// controller saves `device_id` as source `id`'s own endpoint.
+    SourceAdopted {
+        id: String,
+        device_id: String,
     },
     /// Sent after microphone capture muting changes.
     MicMuted {
@@ -128,23 +153,49 @@ pub enum Outbound {
     },
     /// A manual long recording is writing; `path` is the final name (the file
     /// is `<path>.part` until it stops).
+    /// `continued`: part `part` (2, 3, ...) of a running recording whose stream
+    /// changed (`cause`: "size" | "input" (GPU / CPU frames) | "encoder"); it
+    /// follows a `recording_stopped` with `continued`. A fresh start is part 1, cause null.
     RecordingStarted {
         path: String,
+        continued: bool,
+        part: u32,
+        cause: Option<&'static str>,
     },
+    /// `seconds`/`bytes`: this file. `parts`: files so far, `total_seconds`: all of them,
+    /// `gap_seconds`: time not recorded between the parts (0 for one file); `frozen_seconds`:
+    /// time the picture held still after a same-header encoder reopen (0 if none);
+    /// `locked_seconds`: time the PC sat locked during the recording (`session_locked`; 0 if none).
+    /// `continued`: only this part ended (`cause` as above); the recording goes on
+    /// in a new file, reported by the next `recording_started`.
     RecordingStopped {
         path: String,
         seconds: f64,
         bytes: u64,
+        continued: bool,
+        parts: u32,
+        total_seconds: f64,
+        gap_seconds: f64,
+        frozen_seconds: f64,
+        locked_seconds: f64,
+        cause: Option<&'static str>,
     },
     /// `path`: the partial recording that was kept (renamed to its final name),
-    /// or null when nothing was written.
+    /// or null when nothing was written. `paths`: every file the recording left,
+    /// the finished parts of a continued recording first (it ended early).
+    /// `gap_seconds` / `frozen_seconds`: as `recording_stopped`, up to the failure.
     RecordingFailed {
         reason: String,
         path: Option<String>,
+        paths: Vec<String>,
+        gap_seconds: f64,
+        frozen_seconds: f64,
     },
-    /// A long recording left as `.part` by a crash was renamed into place.
+    /// Long recordings left as `.part` by a crash or a kill, renamed into place on this
+    /// start: one event for all of them (`paths`; `path` is the first, for older readers).
     RecordingRecovered {
         path: String,
+        paths: Vec<String>,
     },
     /// A `hud_probe` finished: where the game's HUD sits over the picture, one
     /// number per grid row (bit c = column c holds HUD). `ok` false: too little
@@ -165,6 +216,17 @@ pub enum Outbound {
     },
 }
 
+/// `status.save_writing`: the save in progress and the saves queued behind it. `step`
+/// counts the saver's work (an AAC frame encoded, a packet muxed) and only grows, from
+/// the audio encode on, before the `.part` exists; `bytes` = the packet bytes muxed so
+/// far (about the `.part` size). Both come from the saver's counters, no file stat.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct SaveWriting {
+    pub bytes: u64,
+    pub queued: u32,
+    pub step: u64,
+}
+
 /// One recorded source in `status.audio`: what it captures right now.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct AudioOpened {
@@ -175,6 +237,10 @@ pub struct AudioOpened {
     /// the source has no track.
     pub opened: String,
     pub live: bool,
+    /// An unsure sibling unmuted by a fresh Alt+M (A4 ruling): its endpoint id, for the
+    /// controller to save as the source's own (`audio::hold`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adopt_id: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -211,6 +277,12 @@ pub enum Command {
         gain_db: Option<f32>,
         #[serde(default)]
         name: Option<String>,
+        /// Whether the mic-mute hotkey silences this input (false: a line-in or capture card).
+        #[serde(default)]
+        mic_mute: Option<bool>,
+        /// The endpoint id saved with the source's device (P1-B): the track reopens on it.
+        #[serde(default)]
+        device_id: Option<String>,
     },
     /// Export an existing VFR clip to a separate NVENC CFR file (60 fps default).
     ExportClip {
@@ -230,6 +302,12 @@ pub enum Command {
     RecordStart,
     RecordStop,
     RecordToggle,
+    /// End a running long recording as failed now, keeping every part (the controller
+    /// sends it before restarting a hung engine; the app says "Recording ended early").
+    RecordFail { reason: String },
+    /// The Windows session locked (Win+L) or unlocked: a long recording keeps going and
+    /// counts the time (`recording_stopped.locked_seconds`).
+    SessionLocked { locked: bool },
     /// Ask the engine to exit cleanly.
     Quit,
 }
@@ -244,14 +322,24 @@ pub fn set_observer(observer: impl Fn(&Outbound) + Send + Sync + 'static) {
     let _ = OBSERVER.set(Box::new(observer));
 }
 
-/// Serialize and print one outbound message as a JSON line.
+/// Serialize and print one outbound message as a JSON line. A closed stdout
+/// (the controller is gone) is not a panic: the line is dropped and the engine is
+/// marked orphaned (`stdin_reader::stdout_failed`); stdin EOF quits it after its saves.
 pub fn emit(msg: &Outbound) {
     if let Some(observer) = OBSERVER.get() {
         observer(msg);
     }
     if let Ok(line) = serde_json::to_string(msg) {
-        println!("{line}");
+        if !write_line(&mut std::io::stdout().lock(), &line) {
+            crate::stdin_reader::stream_failed(crate::stdin_reader::Stream::Out);
+        }
     }
+}
+
+/// One line to `out`; false when it could not be written (the controller is gone: the
+/// line is dropped, never a panic as `println!` would).
+pub fn write_line(out: &mut impl std::io::Write, line: &str) -> bool {
+    writeln!(out, "{line}").and_then(|()| out.flush()).is_ok()
 }
 
 /// `emit` in sidecar (`--json`) mode, else a human `[recall]` line on stderr.
@@ -267,13 +355,51 @@ pub fn emit_or_log(json: bool, msg: &Outbound, human: impl FnOnce() -> String) {
 mod tests {
     use super::Outbound;
 
+    /// A pipe whose reader is gone (`ERROR_NO_DATA`).
+    struct ClosedPipe;
+    impl std::io::Write for ClosedPipe {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::from_raw_os_error(232))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn a_line_to_a_closed_pipe_is_dropped_without_a_panic() {
+        // R5-overlay-6: the controller crashed; the engine must not panic on its next line.
+        let wrote = std::panic::catch_unwind(|| super::write_line(&mut ClosedPipe, "{\"type\":\"status\"}"));
+        assert_eq!(wrote.ok(), Some(false), "dropped, reported, no panic");
+        let mut ok = Vec::new();
+        assert!(super::write_line(&mut ok, "x"));
+        assert_eq!(ok, b"x
+");
+    }
+
     #[test]
     fn set_source_parses_with_either_field() {
         use super::Command;
         let both: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"mic","gain_db":-3.5,"name":"Voice"}"#).unwrap();
-        assert!(matches!(both, Command::SetSource { ref id, gain_db: Some(g), name: Some(ref n) } if id == "mic" && g == -3.5 && n == "Voice"));
+        assert!(matches!(both, Command::SetSource { ref id, gain_db: Some(g), name: Some(ref n), mic_mute: None, device_id: None } if id == "mic" && g == -3.5 && n == "Voice"));
         let gain: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"game","gain_db":6}"#).unwrap();
         assert!(matches!(gain, Command::SetSource { gain_db: Some(_), name: None, .. }));
+        let line_in: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"in-1","mic_mute":false}"#).unwrap();
+        assert!(matches!(line_in, Command::SetSource { mic_mute: Some(false), gain_db: None, name: None, .. }));
+    }
+
+    #[test]
+    fn record_fail_parses_with_its_reason() {
+        // The controller ends a running long recording early before restarting a hung engine.
+        let v = serde_json::from_str::<super::Command>(r#"{"cmd":"record_fail","reason":"the encoder isn't responding"}"#);
+        assert!(matches!(v, Ok(super::Command::RecordFail { ref reason }) if reason == "the encoder isn't responding"), "not a record_fail");
+    }
+
+    #[test]
+    fn session_locked_parses() {
+        // The controller says when the Windows session locks / unlocks (audit U8).
+        let v = serde_json::from_str::<super::Command>(r#"{"cmd":"session_locked","locked":true}"#);
+        assert!(matches!(v, Ok(super::Command::SessionLocked { locked: true })), "not a session_locked");
     }
 
     fn wire(msg: &Outbound) -> String {

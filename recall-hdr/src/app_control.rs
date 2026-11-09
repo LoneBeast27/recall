@@ -18,14 +18,22 @@ impl App {
         match val.get("cmd").and_then(|c| c.as_str()) {
             Some("save_clip") => {
                 log!("app: control save_clip -> engine");
-                match val.get("seconds").and_then(|s| s.as_u64()) {
-                    Some(s) => supervisor.send_engine_line(&format!(r#"{{"cmd":"save_clip","seconds":{s}}}"#)),
-                    None => supervisor.send_save_clip(),
+                let seconds = val.get("seconds").and_then(|s| s.as_u64());
+                if let Some(reason) = crate::record_dispatch::legacy_save(|line| supervisor.send_engine_line(line), seconds) {
+                    log!("app: control save_clip not sent: {reason}");
+                    hub.event("engine", &crate::record_refusal::refusal_event("save_clip", reason).to_string());
+                    crate::supervisor::beep_failure();
                 }
             }
             Some("export_clip") => {
                 if matches!(supervisor.health(), EngineHealth::Running { .. }) {
-                    supervisor.send_engine_line(&val.to_string());
+                    if let Some(reason) = crate::record_dispatch::refusal(&crate::record_dispatch::command_effects(supervisor.send_engine_line(&val.to_string()))) {
+                        hub.event("engine", &serde_json::json!({
+                            "type": "export_failed", "source": val.get("path").and_then(|v| v.as_str()).unwrap_or(""),
+                            "reason": reason
+                        }).to_string());
+                        crate::supervisor::beep_failure();
+                    }
                 } else {
                     hub.event("engine", &serde_json::json!({
                         "type": "export_failed", "source": val.get("path").and_then(|v| v.as_str()).unwrap_or(""),
@@ -40,7 +48,13 @@ impl App {
             Some("set_mode") => {
                 if let Some(v) = val.get("value").and_then(|v| v.as_str()) {
                     if matches!(v, "auto" | "sdr" | "hdr") {
-                        supervisor.send_engine_line(&format!(r#"{{"cmd":"set_mode","value":"{v}"}}"#));
+                        let queued = supervisor.send_engine_line(&format!(r#"{{"cmd":"set_mode","value":"{v}"}}"#));
+                        // The legacy app has no notice path or client to reply to: logged + beep.
+                        let refused = crate::record_dispatch::refusal(&crate::record_dispatch::pipe_setting_effects(queued));
+                        if let Some(reason) = refused.filter(|_| matches!(supervisor.health(), EngineHealth::Running { .. })) {
+                            log!("app: control set_mode not sent: {reason}");
+                            crate::supervisor::beep_failure();
+                        }
                     }
                 }
             }

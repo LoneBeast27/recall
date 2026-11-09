@@ -83,6 +83,12 @@ impl Nvml {
     }
 }
 
+impl super::gpu_watch::GpuSource for Nvml {
+    fn sample(&self) -> Option<GpuSample> {
+        Nvml::sample(self)
+    }
+}
+
 impl Drop for Nvml {
     fn drop(&mut self) {
         unsafe {

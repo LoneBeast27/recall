@@ -10,13 +10,32 @@ fn ids(list: &[AudioSource]) -> Vec<&str> {
 }
 
 #[test]
-fn a_fresh_install_records_the_game_and_the_default_microphone() {
+fn the_unreadable_profile_fallback_records_the_game_and_default_microphone() {
     let list = default_sources();
     assert_eq!(ids(&list), ["game", "mic"]);
     assert_eq!((list[0].kind.as_str(), list[1].kind.as_str()), ("game", "input"));
     assert!(list.iter().all(|s| s.device.is_empty() && s.enabled && s.gain_db == 0.0), "Windows defaults, no names");
     assert_eq!(RecordingCfg::default().audio_sources, list);
     assert!(validate(&list).is_ok());
+}
+
+#[test]
+fn fresh_profiles_split_playback_only_for_distinct_windows_roles() {
+    let shared = initial_sources(false);
+    let split = initial_sources(true);
+    assert_eq!(ids(&shared), ["mic", "system-output"]);
+    assert_eq!(ids(&split), ["mic", "system-output", "communications-output"]);
+    assert_eq!(&split[..2], shared.as_slice());
+    assert!(split[2].communications && split[2].device.is_empty());
+    assert!(validate(&split).is_ok());
+
+    let mut customized = split.clone();
+    customized[2].icon = "discord".into();
+    let saved: Vec<AudioSource> = serde_json::from_value(serde_json::to_value(&customized).unwrap()).unwrap();
+    assert_eq!(saved, customized);
+    assert!(!changed(&split, &customized));
+    assert!(live_updates(&split, &customized).is_empty());
+    assert_eq!(engine_value(&split), engine_value(&customized));
 }
 
 #[test]
@@ -114,13 +133,59 @@ fn gain_and_names_go_live_and_everything_else_restarts() {
     let mut off_and_louder = off.clone();
     off_and_louder[1].gain_db = 3.0;
     assert!(live_updates(&off, &off_and_louder).is_empty(), "a disabled source has no live track");
-    // Into boost: a long recording that started unlimited would clip, so this restarts.
+    // 2026-11-07 audit A3: into boost is live too. Every long-recording track runs the limiter,
+    // so a crossing never restarts the engine (that wiped the replay buffer).
     let mut boosted = base.clone();
     boosted[1].gain_db = 2.0;
-    assert!(changed(&base, &boosted), "0 dB -> +2 dB: restart (the limiter is chosen at start)");
+    assert!(!changed(&base, &boosted), "0 dB -> +2 dB: live, the replay buffer stays");
+    assert_eq!(json_lines(&live_updates(&base, &boosted)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","gain_db":2.0,"id":"mic"}"#).unwrap()]);
     let mut more = boosted.clone();
     more[1].gain_db = 6.0;
     assert!(!changed(&boosted, &more), "+2 -> +6 dB: live (the track already runs the limiter)");
     assert!(!changed(&more, &louder), "+6 -> -4.5 dB: live (lowering never clips)");
     assert!(!changed(&louder, &base), "-4.5 -> 0 dB: live (0 dB is not a boost)");
+}
+
+/// 2026-11-07 audit A12 / R2-deep-audio-3: the strip's mic-mute toggle goes to the running engine
+/// live; a line-in reaches a new engine as `mic_mute: false`. A source that does not say sends
+/// nothing (the engine mutes it), and a config written before the flag says nothing, so every
+/// input there still follows Alt+M (R3-deep-audio-1).
+#[test]
+fn the_mic_mute_flag_goes_live_and_reaches_the_engine() {
+    let base = default_sources();
+    let mut line = base.clone();
+    line[1].mic_mute = Some(false);
+    let mut mic = line.clone();
+    mic[1].mic_mute = Some(true);
+    assert!(!changed(&line, &mic), "no restart between on and off: the replay buffer stays");
+    assert_eq!(json_lines(&live_updates(&line, &mic)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","id":"mic","mic_mute":true}"#).unwrap()]);
+    assert!(!changed(&base, &line), "the first toggle goes live too");
+    assert!(changed(&line, &base), "back to no flag (muted): only a restart can say it");
+    assert_eq!(json_lines(&live_updates(&base, &line)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","id":"mic","mic_mute":false}"#).unwrap()]);
+    assert!(engine_value(&line).contains(r#""mic_mute":false"#), "{}", engine_value(&line));
+    assert!(!engine_value(&base).contains("mic_mute"), "no flag: the engine mutes it");
+    let saved: AudioSource = toml::from_str("id = \"in\"
+kind = \"input\"
+name = \"Mic\"").unwrap();
+    assert_eq!(saved.mic_mute, None, "a config written before the flag: muted by Alt+M");
+    assert_eq!(AudioSource::default().mic_mute, None, "a new default source: muted by Alt+M");
+}
+
+/// 2026-11-07 audit R5-deep-audio-1: the endpoint id the Audio page saves with a picked device
+/// reaches the engine (a line-in skips Alt+M only on that endpoint); a new id goes live (P1-B).
+#[test]
+fn the_saved_endpoint_id_reaches_the_engine() {
+    let json = serde_json::json!({"id": "line-in", "kind": "input", "name": "Line-in", "device": "Mic (Box)", "device_id": " {id-one} ", "mic_mute": false});
+    let line: AudioSource = serde_json::from_value(json).unwrap();
+    let list = vec![line.clone()];
+    assert!(validate(&list).is_ok());
+    let value = engine_value(&list);
+    assert!(value.contains(r#""device_id":"{id-one}""#), "{value}");
+    let mut other = list.clone();
+    other[0] = serde_json::from_value(serde_json::json!({"id": "line-in", "kind": "input", "name": "Line-in", "device": "Mic (Box)", "device_id": "{id-two}", "mic_mute": false})).unwrap();
+    assert!(!changed(&list, &other), "another endpoint id for the same device name goes live (P1-B)");
+    let lines = json_lines(&live_updates(&list, &other));
+    assert_eq!(lines, [serde_json::json!({"cmd": "set_source", "id": "line-in", "device_id": "{id-two}"})]);
+    let old: AudioSource = serde_json::from_value(serde_json::json!({"id": "mic", "kind": "input", "name": "Mic", "device": "Mic (Box)"})).unwrap();
+    assert!(!engine_value(&[old]).contains("device_id"), "no id saved: none sent");
 }

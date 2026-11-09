@@ -19,38 +19,56 @@ use std::time::{Duration, Instant};
 
 use crate::log;
 use crate::record_app::Controller;
-use crate::record_target::is_target;
+use crate::record_target::followable;
+use crate::record_target_gate::Traits;
+use crate::record_transition::Transitions;
 use crate::watcher::{self, WatchEvent};
 
 /// How often the followed foreground's fullscreen verdict is re-read.
 pub(crate) const FOLLOW_EVERY: Duration = Duration::from_millis(100);
 
+/// What a seen foreground is compared on before it is fed again.
+pub(crate) type FedKey = (isize, bool, bool);
+
+/// The dedupe key of a foreground observation: (window, is a candidate,
+/// fullscreen). The fullscreen trait is in it so an in-place flip
+/// (Alt+Enter, a borderless toggle) reaches the tracker within the 1 s
+/// probe and a session that went fullscreen is protected (R2-3, G5).
+pub(crate) fn fed_key(hwnd: isize, candidate: bool, traits: Traits) -> FedKey {
+    (hwnd, candidate, traits.fullscreen)
+}
+
 impl Controller {
     /// A foreground change from the hook: feeds the tracker and HDR.
     pub(crate) fn on_foreground_event(&mut self, ev: &WatchEvent, now: Instant) {
-        let candidate = self.classify(ev, now);
-        self.last_fed = Some((ev.hwnd, candidate.is_some()));
+        self.end_if_windowed(ev);
+        let (candidate, traits) = self.candidate(ev, now);
+        self.last_fed = Some(fed_key(ev.hwnd, candidate.is_some(), traits));
         self.note_followable(ev);
-        self.tracker.on_foreground(candidate, now);
-        self.hdr.on_foreground(ev, &self.cfg, now);
+        // An unidentifiable window is "not a target" (cancels a pending game, T11).
+        self.tracker.on_foreground_with(candidate, traits, now);
+        if !ev.is_unknown() {
+            self.hdr.on_foreground(ev, &self.cfg, now);
+        }
     }
 
     /// A foreground observation from the probe or the location hook: fed to
-    /// the tracker only when (window, verdict) changed.
+    /// the tracker only when its [`fed_key`] changed.
     pub(crate) fn on_foreground_seen(&mut self, ev: &WatchEvent, now: Instant) {
+        self.end_if_windowed(ev);
         self.note_followable(ev);
-        let candidate = self.classify(ev, now);
-        let key = (ev.hwnd, candidate.is_some());
+        let (candidate, traits) = self.candidate(ev, now);
+        let key = fed_key(ev.hwnd, candidate.is_some(), traits);
         if self.last_fed != Some(key) {
             self.last_fed = Some(key);
-            self.tracker.on_foreground(candidate, now);
+            self.tracker.on_foreground_with(candidate, traits, now);
         }
     }
 
     /// Remember the foreground window when it could become a target by going
     /// fullscreen (not denied, no `none` override).
     fn note_followable(&mut self, ev: &WatchEvent) {
-        self.followable = is_target(&ev.exe_stem, true, &self.cfg).then_some(ev.hwnd);
+        self.followable = followable(ev, &self.cfg).then_some(ev.hwnd);
     }
 
     /// Re-read the foreground (startup, the 1 s safety net, resume).
@@ -64,8 +82,9 @@ impl Controller {
         }
     }
 
-    /// Drop a target / pin whose window no longer exists. `IsWindow` only, so
-    /// it runs every pump tick (at most 50 ms after the window closes).
+    /// Drop a target / pin whose window no longer exists (`IsWindow`, every
+    /// pump tick: at most 50 ms after the window closes), and a target whose
+    /// window stayed hidden (not hung) for over 5 s (U5, `record_visibility`).
     pub(crate) fn check_windows(&mut self) {
         if let Some(t) = self.pinned.as_ref().filter(|t| !watcher::window_alive(t.hwnd)) {
             log!("record: pinned window {:#x} is gone; auto-detection resumes", t.hwnd);
@@ -73,7 +92,28 @@ impl Controller {
         }
         if let Some(hwnd) = self.tracker.current().map(|t| t.hwnd).filter(|h| !watcher::window_alive(*h)) {
             log!("record: target window {hwnd:#x} is gone");
-            self.tracker.on_window_gone(hwnd);
+            self.tracker.on_window_gone_at(hwnd, Instant::now());
+        }
+        let shown = crate::record_visibility::shown;
+        if let Some(hwnd) = crate::record_visibility::drop_hidden(&mut self.hidden, &mut self.tracker, Instant::now(), shown) {
+            log!("record: target window {hwnd:#x} stayed hidden; the session ends");
+            // Re-feed the window if it comes back (T5a adopts it).
+            self.last_fed = None;
+        }
+        self.check_fullscreen_only();
+    }
+
+    /// R8-detect-1: a session whose only proof is `fullscreen_games` is read
+    /// every pump tick, so Esc then a quick alt-tab cannot leave its windowed
+    /// window recorded in the background. Minimized counts as still fullscreen
+    /// (alt-tab, like a game). A windowed read is confirmed by a full probe.
+    fn check_fullscreen_only(&mut self) {
+        let Some(hwnd) = self.tracker.current().filter(|_| self.tracker.fullscreen_only()).map(|t| t.hwnd) else { return };
+        if !watcher::window_alive(hwnd) || watcher::window_fullscreen(hwnd) || watcher::window_minimized(hwnd) {
+            return;
+        }
+        if let Some(ev) = watcher::probe_window(hwnd, self.target_monitor) {
+            self.end_if_windowed(&ev);
         }
     }
 
@@ -202,6 +242,16 @@ mod tests {
         assert_eq!(seen.borrow().len(), 1, "no read while nothing is followed");
         // Following the same window again is a new follow: probed at once.
         assert_eq!(f.step(Some(7), t0 + Duration::from_millis(1010), read), Some(7));
+    }
+
+    #[test]
+    fn a_fullscreen_flip_in_place_is_fed_again() {
+        // R2-3: Alt+Enter keeps the window and its candidate verdict.
+        let windowed = fed_key(7, true, Traits::WINDOWED);
+        assert_ne!(windowed, fed_key(7, true, Traits::FULLSCREEN));
+        assert_eq!(windowed, fed_key(7, true, Traits::WINDOWED));
+        assert_ne!(windowed, fed_key(7, false, Traits::WINDOWED));
+        assert_ne!(windowed, fed_key(8, true, Traits::WINDOWED));
     }
 
     #[test]

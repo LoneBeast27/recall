@@ -248,8 +248,11 @@ fn write(
         out.set_parameters(stream.parameters());
         out.set_time_base(stream.time_base());
         out.set_metadata(stream.metadata().to_owned());
+        // The muxer picks the tag; video gets the one Media Foundation plays (`hvc1`, not
+        // FFmpeg's default `hev1`), as the recorder writes it.
+        let tag = if index == source.video_index { crate::encoder::mp4_video_tag(stream.parameters().id()) } else { None };
         unsafe {
-            (*out.parameters().as_mut_ptr()).codec_tag = 0;
+            (*out.parameters().as_mut_ptr()).codec_tag = tag.unwrap_or(0);
         }
         Ok(out.index())
     };

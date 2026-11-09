@@ -19,81 +19,91 @@ fn pcm16_wav(sample_rate: u32, data: &[u8]) -> Vec<u8> {
     wav
 }
 
+/// `bytes` as a stem file in a scratch folder, opened as the mixer opens stems.
+fn open_wav(name: &str, bytes: &[u8]) -> Result<stem::StemReader, String> {
+    let dir = crate::test_temp::TempDir::new(format!("recall-wav-{name}-{}", std::process::id()));
+    let path = dir.path().join("audio.wav");
+    std::fs::write(&path, bytes).unwrap();
+    stem::StemReader::open(&path.to_string_lossy())
+}
+
 #[test]
 fn parses_pcm16_with_unknown_chunks() {
     let mut wav = b"RIFF\0\0\0\0WAVEJUNK\x02\0\0\0xxfmt \x10\0\0\0\x01\0\x01\0\x80\xbb\0\0\0w\x01\0\x02\0\x10\0data\x04\0\0\0\0\x80\xff\x7f".to_vec();
     let size = (wav.len() - 8) as u32;
     wav[4..8].copy_from_slice(&size.to_le_bytes());
-    let (samples, channels) = parse_wav(&wav, MAX_DECODED_BYTES).unwrap();
-    assert_eq!(channels, 1);
-    assert_eq!(samples.len(), 2);
+    let mut stem = open_wav("chunks", &wav).unwrap();
+    assert_eq!((stem.channels(), stem.frames()), (1, 2));
+    let mut samples = Vec::new();
+    stem.read(0, 3, &mut samples).unwrap();
     assert_eq!(samples[0], -1.0);
     assert!(samples[1] > 0.99);
+    assert_eq!(samples[2], 0.0, "past the end: silence");
 }
 
 #[test]
 fn mixes_gain_mute_and_mono_to_stereo() {
-    let tracks = vec![
+    let mut tracks = vec![
         LoadedTrack {
             stream_index: 0,
-            samples: Samples::Stem(vec![0.5]),
+            samples: Samples::Memory(vec![0.5]),
             channels: 1,
             gain_db: 0.0,
             muted: false,
         },
         LoadedTrack {
             stream_index: 1,
-            samples: Samples::Stem(vec![1.0, 1.0]),
+            samples: Samples::Memory(vec![1.0, 1.0]),
             channels: 2,
             gain_db: -6.0206,
             muted: false,
         },
         LoadedTrack {
             stream_index: 2,
-            samples: Samples::Stem(vec![1.0]),
+            samples: Samples::Memory(vec![1.0]),
             channels: 1,
             gain_db: 0.0,
             muted: true,
         },
     ];
     let mut output = [0i16; 2];
-    mix_frames(&tracks, 0, 1, &mut output);
+    mix_frames(&mut tracks, 0, 1, &mut output).unwrap();
     assert!((output[0] as i32 - 32767).abs() < 4);
     assert!((output[1] as i32 - 32767).abs() < 4);
 }
 
 #[test]
 fn a_silent_buffer_carries_no_sound_and_a_normal_one_does() {
-    let tracks = [LoadedTrack { stream_index: 0, samples: Samples::Stem(vec![0.5; 4]), channels: 1, gain_db: 0.0, muted: false }];
+    let mut tracks = [LoadedTrack { stream_index: 0, samples: Samples::Memory(vec![0.5; 4]), channels: 1, gain_db: 0.0, muted: false }];
     let mut output = vec![1i16; FRAMES_PER_BUFFER * OUTPUT_CHANNELS];
-    worker::fill_buffer(&tracks, 0, 2, false, &mut output);
+    worker::fill_buffer(&mut tracks, 0, 2, false, &mut output).unwrap();
     assert!(output[0] > 16000);
     assert!(output[4..].iter().all(|s| *s == 0), "past the frames: padded");
-    worker::fill_buffer(&tracks, 0, 2, true, &mut output);
+    worker::fill_buffer(&mut tracks, 0, 2, true, &mut output).unwrap();
     assert!(output.iter().all(|s| *s == 0));
 }
 
 #[test]
 fn rejects_malformed_truncated_and_non_48k_wav() {
-    assert!(parse_wav(b"not a wave", MAX_DECODED_BYTES).is_err());
+    assert!(open_wav("garbage", b"not a wave").is_err());
     let mut truncated = pcm16_wav(SAMPLE_RATE, &[0, 0]);
     truncated.truncate(truncated.len() - 1);
-    assert!(parse_wav(&truncated, MAX_DECODED_BYTES).is_err());
+    assert!(open_wav("truncated", &truncated).is_err());
     let non_48k = pcm16_wav(44_100, &[0, 0]);
-    assert!(parse_wav(&non_48k, MAX_DECODED_BYTES).is_err());
+    assert!(open_wav("44k", &non_48k).is_err());
 }
 
 #[test]
 fn clips_mixed_output() {
-    let tracks = vec![LoadedTrack {
+    let mut tracks = vec![LoadedTrack {
         stream_index: 0,
-        samples: Samples::Stem(vec![1.0, -1.0]),
+        samples: Samples::Memory(vec![1.0, -1.0]),
         channels: 2,
         gain_db: 24.0,
         muted: false,
     }];
     let mut output = [0i16; 2];
-    mix_frames(&tracks, 0, 1, &mut output);
+    mix_frames(&mut tracks, 0, 1, &mut output).unwrap();
     assert_eq!(output, [i16::MAX, -i16::MAX]);
 }
 
@@ -240,4 +250,38 @@ fn the_clock_covers_the_whole_clip_when_stems_end_early() {
     assert_eq!(worker::clock_frames(501_744, 10.0), 501_744);
     assert_eq!(worker::clock_frames(1_000, 0.0), 1_000);
     assert_eq!(worker::clock_frames(1_000, f64::NAN), 1_000);
+}
+
+/// FFmpeg's FLAC of `seconds` of a stereo 48 kHz sine (left `hz`, right silent), as the engine
+/// writes stems; None when ffmpeg is not found.
+pub(super) fn flac_stem(dir: &std::path::Path, name: &str, seconds: u32, hz: u32) -> Option<String> {
+    let ffmpeg = crate::services::storage::binary("RECALL_FFMPEG", "ffmpeg.exe").unwrap_or_else(|_| "ffmpeg.exe".into());
+    let path = dir.join(name);
+    let filter = format!("sine=frequency={hz}:sample_rate=48000:duration={seconds},pan=stereo|c0=c0|c1=0*c0");
+    let made = std::process::Command::new(ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", &filter, "-c:a", "flac"])
+        .arg(&path)
+        .status();
+    made.is_ok_and(|status| status.success()).then(|| path.to_string_lossy().into_owned())
+}
+
+#[test]
+fn three_five_minute_stereo_stems_open_without_a_size_cliff() {
+    // E1 (deep audit 2026-11-07): 3 stereo tracks over 233 s passed the 256 MiB decoded limit,
+    // so the preview failed and a pointless proxy transcode ran.
+    let dir = crate::test_temp::TempDir::new(format!("recall-stem-cliff-{}", std::process::id()));
+    let stems: Option<Vec<String>> = (0..3).map(|i| flac_stem(dir.path(), &format!("audio-{i}.flac"), 300, 440 + i * 110)).collect();
+    let Some(stems) = stems else {
+        eprintln!("ffmpeg not found; skipped");
+        return;
+    };
+    let specs: Vec<PreviewTrack> = stems.iter().enumerate().map(|(i, path)| PreviewTrack { stream_index: i + 1, path: path.clone(), gain_db: 0.0, muted: false }).collect();
+    let loaded = load_tracks(&specs).expect("15 minutes of stems open");
+    assert_eq!(loaded.len(), 3);
+    assert!(loaded.iter().all(|track| track.samples.len() / track.channels == 300 * 48_000), "every stem is 5 minutes long");
+    // The last second plays: the sound is read from the files as it is needed.
+    let mut tracks = loaded;
+    let mut output = vec![0i16; FRAMES_PER_BUFFER * OUTPUT_CHANNELS];
+    mix_frames(&mut tracks, 299 * 48_000, FRAMES_PER_BUFFER, &mut output).unwrap();
+    assert!(output.iter().step_by(2).any(|s| s.unsigned_abs() > 1000), "the tones at 4:59 are heard");
 }

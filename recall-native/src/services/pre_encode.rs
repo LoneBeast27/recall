@@ -17,6 +17,7 @@ use std::{
     time::Duration,
 };
 
+use super::pre_encode_copy::Delivery;
 use crate::{
     backend::{self, ExportSummary},
     edit_model::{ClipInfo, EditPlan, ExportMode, ExportSettings},
@@ -47,9 +48,14 @@ struct Slot {
     running: Option<u64>,
     ready: Option<Prepared>,
     failed: Option<(u64, String)>,
+    /// The key a clicked Export waits on (set at the click, cleared when that export ends):
+    /// closing the editor or the app leaves that pre-encode alone.
+    awaited: Option<u64>,
 }
 
-static SLOT: Mutex<Slot> = Mutex::new(Slot { running: None, ready: None, failed: None });
+static SLOT: Mutex<Slot> = Mutex::new(Slot { running: None, ready: None, failed: None, awaited: None });
+/// `prepare`'s result when the file would not fit the cache (`pre_encode_room`): not an error.
+const SKIPPED: &str = "pre-encode skipped: no room in the cache";
 static ENDED: Condvar = Condvar::new();
 static CANCEL: AtomicBool = AtomicBool::new(false);
 /// Per-mille done of the running pre-encode; `UNKNOWN` until the engine reports.
@@ -98,6 +104,37 @@ pub fn running() -> bool {
     slot().running.is_some()
 }
 
+/// An Export runs on the io worker: it waits on a pre-encode, copies its file or encodes
+/// (closing the app waits for it, from its first step to its last).
+pub fn awaited() -> bool {
+    IN_EXPORT.load(Ordering::Acquire)
+}
+
+/// [`export`] is running.
+static IN_EXPORT: AtomicBool = AtomicBool::new(false);
+
+/// The Export click (before its job is queued): the pre-encode for `key` is spared from now
+/// on, so closing while the job still waits in the queue does not stop it.
+pub fn await_export(key: Option<u64>) {
+    slot().awaited = key;
+}
+
+/// Held for the whole of [`export`]: closing waits, and the awaited pre-encode is spared.
+pub(crate) struct ExportRun;
+
+impl Drop for ExportRun {
+    fn drop(&mut self) {
+        slot().awaited = None;
+        IN_EXPORT.store(false, Ordering::Release);
+    }
+}
+
+pub(crate) fn export_run(key: Option<u64>) -> ExportRun {
+    IN_EXPORT.store(true, Ordering::Release);
+    slot().awaited = key;
+    ExportRun
+}
+
 /// Starts preparing `key` on a thread of its own. Drops any other prepared file first (one at
 /// a time). Refused while another pre-encode still runs: cancel it and try again next tick.
 pub fn start(key: u64, info: ClipInfo, plan: EditPlan, fps: u32, export: ExportSettings) -> bool {
@@ -122,7 +159,7 @@ pub fn start(key: u64, info: ClipInfo, plan: EditPlan, fps: u32, export: ExportS
             Ok(prepared) => {
                 let _ = std::fs::remove_file(prepared.path);
             }
-            Err(error) if error == backend::EXPORT_CANCELLED => {}
+            Err(error) if error == backend::EXPORT_CANCELLED || error == SKIPPED => {}
             Err(error) => slot.failed = Some((key, error)),
         }
         ENDED.notify_all();
@@ -137,9 +174,17 @@ pub fn start(key: u64, info: ClipInfo, plan: EditPlan, fps: u32, export: ExportS
 }
 
 fn prepare(key: u64, info: &ClipInfo, plan: &EditPlan, fps: u32, export: &ExportSettings) -> Result<Prepared, String> {
+    // The prepared file counts against the cache budget and leaves 2 GiB free; when it would
+    // not, Export encodes as usual instead.
+    let estimate = super::pre_encode_room::estimate_bytes(info, plan, fps, export);
+    if !super::pre_encode_room::room_for(estimate) {
+        eprintln!("[pre-encode] skipped: about {} MB does not fit the cache budget or free space", estimate / 1_000_000);
+        return Err(SKIPPED.to_owned());
+    }
     let folder = dir();
     std::fs::create_dir_all(&folder).map_err(|e| format!("create pre-encode folder: {e}"))?;
     let path = folder.join(format!("{key:016x}.mp4"));
+    storage::mark_owned(&storage::cache_root(), &format!("tmp/pre-encode/{key:016x}.mp4"));
     let on_line: storage::OnLine = Box::new(|line| {
         if let Some(share) = progress_share(line) {
             PROGRESS.store((share * 1000.0) as u32, Ordering::Relaxed);
@@ -159,14 +204,23 @@ pub fn progress_share(line: &str) -> Option<f32> {
     (total > 0).then(|| (frames as f32 / total as f32).clamp(0.0, 1.0))
 }
 
-/// Stops the running pre-encode unless it is for `keep`, and drops a prepared file that is not.
+/// Stops the running pre-encode unless it is for `keep` (or the one a queued Export waits on),
+/// and drops a prepared file that is not.
 pub fn cancel_other(keep: Option<u64>) {
+    cancel_except(keep, true);
+}
+
+/// [`cancel_other`]; `spare_awaited` false stops the awaited one too (its export encodes).
+fn cancel_except(keep: Option<u64>, spare_awaited: bool) {
     let mut slot = slot();
-    if slot.running.is_some() && slot.running != keep {
+    let awaited = if spare_awaited { slot.awaited } else { None };
+    let spared = |key: Option<u64>| key == keep || (key.is_some() && key == awaited);
+    if slot.running.is_some() && !spared(slot.running) {
         CANCEL.store(true, Ordering::Release);
     }
-    if slot.ready.as_ref().is_some_and(|ready| Some(ready.key) != keep) {
-        if let Some(ready) = slot.ready.take() {
+    if slot.ready.as_ref().is_some_and(|ready| !spared(Some(ready.key))) {
+        let dropped = slot.ready.take();
+        if let Some(ready) = dropped {
             let _ = std::fs::remove_file(ready.path);
         }
     }
@@ -175,9 +229,14 @@ pub fn cancel_other(keep: Option<u64>) {
     }
 }
 
-/// Editor or app closing: stop, wait (bounded) and empty the folder.
+/// Editor or app closing: stop, wait (bounded) and empty the folder. A pre-encode a queued
+/// Export waits on keeps running: closing waits for that export (`wait_for_export`), which
+/// then only copies the file instead of encoding again in a window-less process.
 pub fn discard() {
     cancel_other(None);
+    if awaited() || slot().awaited.is_some() {
+        return; // the next app start empties the folder
+    }
     drop(wait_idle(slot(), Duration::from_secs(10)));
     clear_dir();
 }
@@ -192,7 +251,7 @@ const DELIVERING: &str = ".recall-pre-encode";
 pub fn sweep_deliveries() {
     let body = || {
         let recordings = backend::library_dir();
-        let Some(folder) = storage::export_dir(&recordings.join("clip.mp4"), &recordings) else { return };
+        let Ok(folder) = backend::checked_export_dir(&recordings.join("clip.mp4"), &backend::folders_now()) else { return };
         let lane = folder.clone();
         storage::submit_io(&lane, Priority::Background, move || {
             remove_deliveries(&folder);
@@ -201,26 +260,44 @@ pub fn sweep_deliveries() {
     let _ = std::thread::Builder::new().name("recall-delivery-sweep".into()).spawn(body);
 }
 
-/// Deletes the cut-off copies in `folder`; nothing else. Returns how many went.
+/// Deletes the cut-off copies in `folder`, and the partial output of an engine that crashed or
+/// was killed with the app (its process is gone); nothing else. Returns how many went.
 fn remove_deliveries(folder: &Path) -> usize {
     let Ok(entries) = std::fs::read_dir(folder) else { return 0 };
     entries
         .flatten()
         .filter(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
-            name.starts_with('.') && name.ends_with(DELIVERING) && name.len() > DELIVERING.len() + 1
+            let delivery = name.starts_with('.') && name.ends_with(DELIVERING) && name.len() > DELIVERING.len() + 1;
+            delivery || dead_export_temp(&name, super::process_tree::alive)
         })
         .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
         .filter(|entry| std::fs::remove_file(entry.path()).is_ok())
         .count()
 }
 
+/// The engine's export temp `.<stem>.recall-export-<pid>-<nonce>-<n>.mp4` whose `pid` no
+/// longer runs (`paths::temporary_output_path` in the engine). Strict: anything else is kept.
+pub(crate) fn dead_export_temp(name: &str, alive: fn(u32) -> bool) -> bool {
+    let Some((stem, tail)) = name.strip_prefix('.').and_then(|rest| rest.rsplit_once(".recall-export-")) else { return false };
+    let Some(tail) = tail.strip_suffix(".mp4") else { return false };
+    let parts: Vec<&str> = tail.split('-').collect();
+    let digits = |part: &&str| !part.is_empty() && part.bytes().all(|b| b.is_ascii_digit());
+    !stem.is_empty() && parts.len() == 3 && parts.iter().all(digits) && parts[0].parse::<u32>().is_ok_and(|pid| !alive(pid))
+}
+
 pub fn clear_dir() {
-    let Ok(entries) = std::fs::read_dir(dir()) else { return };
     let ready = slot().ready.as_ref().map(|ready| ready.path.clone());
+    clear_in(&storage::cache_root(), ready.as_deref());
+}
+
+/// [`clear_dir`] of the cache at `root`, sparing `ready`: only prepared files Recall listed
+/// (`<key>.mp4`) and the engine's temporaries of them; anything else in the folder stays.
+pub(crate) fn clear_in(root: &Path, ready: Option<&Path>) {
+    let Ok(entries) = std::fs::read_dir(root.join("tmp").join("pre-encode")) else { return };
     for entry in entries.flatten() {
-        if Some(entry.path()) != ready {
-            let _ = std::fs::remove_file(entry.path());
+        if Some(entry.path().as_path()) != ready {
+            storage::remove_owned(root, "tmp/pre-encode", &entry.file_name().to_string_lossy());
         }
     }
 }
@@ -242,12 +319,13 @@ fn wait_idle(mut slot: MutexGuard<'static, Slot>, limit: Duration) -> MutexGuard
 pub fn export(info: &ClipInfo, plan: &EditPlan, fps: u32, settings: &ExportSettings) -> Result<ExportSummary, String> {
     let _queued = backend::export_queued();
     let wanted = key(info, plan, fps, settings);
+    // From here to the end (wait, copy or encode) closing the app waits for this export.
+    let _run = export_run(wanted);
     if let Some(prepared) = wanted.and_then(|key| take_ready(key, backend::export_cancelled)) {
         if source_unchanged(info) {
-            let delivered = deliver(&prepared, info, fps);
-            let _ = std::fs::remove_file(&prepared.path);
-            if delivered.is_ok() {
-                return delivered;
+            let delivered = deliver(&prepared, info, fps, settings);
+            if let Some(result) = settle(prepared, delivered) {
+                return result;
             }
         } else {
             let _ = std::fs::remove_file(&prepared.path);
@@ -257,7 +335,7 @@ pub fn export(info: &ClipInfo, plan: &EditPlan, fps: u32, settings: &ExportSetti
         // Cancel pressed while it waited for the pre-encode: the prepared file stays for next time.
         return Err(backend::EXPORT_CANCELLED.to_owned());
     }
-    cancel_other(None);
+    cancel_except(None, false);
     drop(wait_idle(slot(), Duration::from_secs(30)));
     backend::export_clip(info, plan, fps, settings)
 }
@@ -279,21 +357,43 @@ fn source_unchanged(info: &ClipInfo) -> bool {
     std::fs::metadata(&info.path).is_ok_and(|meta| meta.len() == info.source_bytes)
 }
 
+/// What a delivery of `prepared` means for the export: its result, or `None` when it failed in a
+/// way an encode from scratch may not (the prepared file is gone and Export encodes).
+fn settle(prepared: Prepared, delivered: Result<ExportSummary, Delivery>) -> Option<Result<ExportSummary, String>> {
+    match delivered {
+        Ok(summary) => {
+            let _ = std::fs::remove_file(&prepared.path);
+            Some(Ok(summary))
+        }
+        // Cancelled, or the export folder is full or locked: an encode would fail the same way
+        // minutes later, so the prepared file stays for the next try.
+        Err(Delivery::Cancelled) => Some(Err(keep_ready(prepared, backend::EXPORT_CANCELLED.to_owned()))),
+        Err(Delivery::Kept(error)) => Some(Err(keep_ready(prepared, error))),
+        Err(Delivery::Failed(_)) => {
+            let _ = std::fs::remove_file(&prepared.path);
+            None
+        }
+    }
+}
+
+/// The prepared file goes back into the slot (when nothing else took its place); returns `error`.
+fn keep_ready(prepared: Prepared, error: String) -> String {
+    let mut slot = slot();
+    if slot.ready.is_none() && slot.running.is_none() {
+        slot.ready = Some(prepared);
+    }
+    error
+}
+
 /// Copies the prepared file into the export folder under a hidden name, then renames it.
-fn deliver(prepared: &Prepared, info: &ClipInfo, fps: u32) -> Result<ExportSummary, String> {
-    let target = backend::export_target(info, fps, false)?;
+fn deliver(prepared: &Prepared, info: &ClipInfo, fps: u32, settings: &ExportSettings) -> Result<ExportSummary, Delivery> {
+    let target = backend::export_target(info, fps, settings).map_err(Delivery::Failed)?;
     let name = target.file_name().and_then(|n| n.to_str()).unwrap_or("export.mp4").to_owned();
     let hidden = target.with_file_name(format!(".{name}{DELIVERING}"));
     let outdir = target.parent().map(Path::to_path_buf).unwrap_or_default();
-    let (from, to, temp) = (prepared.path.clone(), target.clone(), hidden.clone());
-    let copied = storage::run_io(&outdir, Priority::Interactive, move || -> Result<(), String> {
-        std::fs::copy(&from, &temp).map_err(|e| format!("copy prepared export: {e}"))?;
-        std::fs::rename(&temp, &to).map_err(|e| format!("publish prepared export: {e}"))
-    })?;
-    if let Err(error) = copied {
-        let _ = std::fs::remove_file(&hidden);
-        return Err(error);
-    }
+    let (from, to) = (prepared.path.clone(), target.clone());
+    let target = storage::run_io(&outdir, Priority::Interactive, move || super::pre_encode_copy::publish_copy(&from, &hidden, &to, backend::export_cancelled))
+        .map_err(Delivery::Failed)??;
     let bytes = std::fs::metadata(&target).map(|m| m.len()).unwrap_or(prepared.summary.bytes);
     Ok(ExportSummary { path: target.to_string_lossy().into_owned(), bytes, ..prepared.summary.clone() })
 }

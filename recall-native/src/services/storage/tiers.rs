@@ -105,6 +105,9 @@ pub fn clear_kind(kind: CacheKind) -> Result<u64, String> {
 }
 
 pub(super) fn clear_in(root: &Path, kind: CacheKind) -> Result<u64, String> {
+    if let Some(why) = super::guard::blocked(root) {
+        return Err(format!("Nothing was cleared. {why}"));
+    }
     let _guard = budget::INDEX_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let keep = budget::kept();
     let inventory = budget::inventory(root, &|_| 0.0);

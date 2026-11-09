@@ -124,7 +124,7 @@ pub(super) fn normalize_small_size_jitter(
 
 #[cfg(test)]
 #[path = "wobble_tests.rs"]
-mod wobble_tests;
+pub(super) mod wobble_tests;
 
 #[cfg(test)]
 mod tests {

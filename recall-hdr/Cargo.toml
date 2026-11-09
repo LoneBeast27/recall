@@ -9,13 +9,19 @@ name = "recall-hdr"
 path = "src/main.rs"
 
 [dependencies]
+# IFileOperation progress sink (`recall/src/win_fileop.rs`): `#[implement]` needs windows-core.
+windows-core = "0.62"
 interprocess = "2.2"
+# The pipe DACL as SDDL for interprocess's SecurityDescriptor::deserialize (`control_pipe`).
+widestring = "1"
 # Windows surface for HDR-state detection (DXGI), display enumeration, registry
 # EDID reads, and (Wave 3) the tray/message loop. Feature set is pinned to what
 # Wave 0/1 actually touch; tray-icon/global-hotkey are deliberately NOT added yet.
 windows = { version = "0.62", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    # A hidden session window ends the session unless DWM cloaked it (record_visibility).
+    "Win32_Graphics_Dwm",
     "Win32_Devices_Display",
     "Win32_System_Threading",
     "Win32_System_LibraryLoader",
@@ -25,7 +31,7 @@ windows = { version = "0.62", features = [
     "Win32_System_Console",
     "Win32_Graphics_Dxgi",
     "Win32_Graphics_Dxgi_Common",
-    # Storage cap: Recycle Bin moves (SHFileOperationW).
+    # Storage cap: Recycle Bin moves (IFileOperation + progress sink, `recall/src/win_fileop.rs`).
     "Win32_UI_Shell",
     # Default clip folder: SHGetKnownFolderPath's buffer is freed with CoTaskMemFree.
     "Win32_System_Com",
@@ -35,12 +41,18 @@ windows = { version = "0.62", features = [
     "Win32_System_Diagnostics_Etw",
     # The detection render check's real-time ETW consumer (OpenTraceW).
     "Win32_System_Time",
+    # Control pipe per session with a this-user-only DACL (`control_pipe`).
+    "Win32_System_RemoteDesktop",
+    "Win32_Security_Authorization",
+    # No loader error boxes over the game (`engine_exit`).
+    "Win32_System_Diagnostics_Debug",
 ] }
 
 # Config + rule persistence (Wave 1+) and structured log lines.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+wasapi = "0.19"
 
 # The entire NvAPI CSC surface is reached through nvapi64.dll's single exported
 # `nvapi_QueryInterface` entry point + magic function IDs. The typed `Csc` struct

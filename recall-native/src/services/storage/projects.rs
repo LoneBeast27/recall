@@ -62,10 +62,10 @@ pub fn export_dir(clip: &Path, recordings: &Path) -> Option<std::path::PathBuf> 
 /// `clip` has a finished export, in its export folder ([`export_dir`]) or in the older
 /// `exports` folder beside it. Exported clips stay protected from the storage limit, so their
 /// sidecar stays when the edits are undone.
-pub fn has_export(clip: &Path, recordings: &Path) -> bool {
+pub fn has_export(clip: &Path, target: Option<std::path::PathBuf>) -> bool {
     let Some(stem) = clip.file_stem().and_then(|s| s.to_str()) else { return false };
     let names = [format!("{stem}-edited-").to_lowercase(), format!("{stem}-trim-").to_lowercase()];
-    let mut folders: Vec<std::path::PathBuf> = export_dir(clip, recordings).into_iter().collect();
+    let mut folders: Vec<std::path::PathBuf> = target.into_iter().collect();
     if let Some(beside) = clip.parent().map(|folder| folder.join("exports")).filter(|beside| !folders.contains(beside)) {
         folders.push(beside);
     }
@@ -81,7 +81,15 @@ pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), String> {
         std::fs::create_dir_all(parent).map_err(|error| format!("create {}: {error}", parent.display()))?;
     }
     let temporary = super::temp_sibling(path);
-    std::fs::write(&temporary, bytes).map_err(|error| format!("write {}: {error}", path.display()))?;
+    // Flushed before the rename: an unclean shutdown can't leave a NUL-filled file (RI3-1).
+    let written = std::fs::File::create(&temporary).and_then(|mut file| {
+        std::io::Write::write_all(&mut file, bytes)?;
+        file.sync_all()
+    });
+    if let Err(error) = written {
+        let _ = std::fs::remove_file(&temporary);
+        return Err(format!("write {}: {error}", path.display()));
+    }
     std::fs::rename(&temporary, path).map_err(|error| {
         let _ = std::fs::remove_file(&temporary);
         format!("publish {}: {error}", path.display())

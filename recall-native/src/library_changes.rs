@@ -37,23 +37,30 @@ pub(super) struct ScrollAnchor {
 }
 
 impl LibraryState {
-    /// Sets Edited on the clip whose edit sidecar was just written or removed.
-    pub fn mark_edited_by_sidecar(&mut self, sidecar: &str, edited: bool) {
-        let name = Path::new(sidecar).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        let name = crate::services::library::imports::edit_file_clip_name(&name);
-        let Some(stem) = name.strip_suffix(".recall-edit.json").map(|s| s.trim_end_matches(".mp4").to_owned()) else { return };
-        for record in &mut self.records {
-            let file_stem = Path::new(&record.file_name).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-            if file_stem == stem {
-                record.edited = edited;
-            }
+    /// Sets Edited on the clip whose edit sidecar was just written or removed: that clip only,
+    /// whatever its extension, not every clip that shares its stem.
+    pub fn mark_edited(&mut self, clip: &str, edited: bool) {
+        let Some(path) = self.record(clip).map(|r| r.path.clone()) else { return };
+        if let Some(index) = self.by_path.get(&path).copied() {
+            self.records[index].edited = edited;
         }
+    }
+
+    /// Clips that left through Recall (deleted, removed): logged as gone, so a listing that
+    /// replays the watcher's log does not put them back.
+    pub(super) fn note_gone(&mut self, paths: &HashSet<String>) {
+        let now = Instant::now();
+        self.recent.extend(paths.iter().map(|path| (folder_key(path), (now, None))));
     }
 
     /// Returns the clips that left (or were replaced), for the SSD cache to let go of.
     pub fn apply_changes(&mut self, changes: ClipChanges) -> Vec<Retired> {
         let anchor = self.scroll_anchor();
         let now = Instant::now();
+        // A clip added after midnight is "Today" even with no listing since.
+        self.today = library::today();
+        let added: Vec<ClipEntry> = changes.added.iter().map(|clip| clip.entry.clone()).collect();
+        self.migrate_meta_keys(Some(&added));
         self.recent.retain(|_, (at, _)| now.duration_since(*at) < RECENT_KEEP);
         let mut retired = self.remove_gone(&changes, now);
         let mut index: HashMap<String, usize> = HashMap::new();
@@ -135,6 +142,8 @@ impl LibraryState {
         self.duration_queued.remove(path);
         self.scrub_requested.remove(path);
         self.scrub.remove(path);
+        self.scrub_failed.remove(path);
+        self.duration_failed.remove(path);
     }
 
     /// A listing may have started before the changes it is delivered after: they go on top.

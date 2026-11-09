@@ -87,7 +87,7 @@ fn a_second_recorder_exits_while_one_holds_the_guard() {
     assert!(held.is_first(), "the test stands in for the running engine");
     let started = Instant::now();
     let out = finish(engine(&["--json"], &tag), Duration::from_secs(20), "second recorder");
-    assert_eq!(out.status.code(), Some(3), "a second recorder exits 3; stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert_eq!(out.status.code(), Some(86), "a second recorder exits 86 (not abort()'s 3); stderr: {}", String::from_utf8_lossy(&out.stderr));
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("another Recall engine is already recording"), "the controller is told why: {stdout}");
     assert!(!stdout.contains("\"hello\""), "it never announced itself as a recorder: {stdout}");
