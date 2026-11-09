@@ -1,0 +1,252 @@
+# Release build: the five crates (recall, recall-hdr, recall-nvidia, recall-overlay,
+# recall-native) and the C# Setup, on a GitHub-hosted runner. CPU-only tests run first (tests
+# that need NVENC or a live game are #[ignore]d). The unsigned bundle is always uploaded.
+#
+# Code signing (CODE_SIGNING_POLICY.md) runs only when the SIGNPATH_API_TOKEN secret is set,
+# in a job bound to the `release-signing` environment (configure required reviewers there:
+# that is the manual approval gate). Without the secret the signing job is skipped and the
+# workflow still succeeds. Repository variables used by signing:
+#   SIGNPATH_ORGANIZATION_ID (required), SIGNPATH_PROJECT_SLUG (default "recall"),
+#   SIGNPATH_SIGNING_POLICY_SLUG (default "release-signing").
+#
+# Every third-party action is pinned to a full commit SHA.
+name: release
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (major.minor.patch). Empty: an unversioned build (no update checks)."
+        required: false
+        default: ""
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: pwsh
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 180
+    outputs:
+      signing: ${{ steps.gate.outputs.configured }}
+      version: ${{ steps.version.outputs.version }}
+      bundle: ${{ steps.bundle.outputs.name }}
+      setup-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+    env:
+      CARGO_TERM_COLOR: always
+      FFMPEG_URL: https://github.com/GyanD/codexffmpeg/releases/download/7.1.1/ffmpeg-7.1.1-full_build-shared.zip
+      # Same archive and digest Setup pins (scripts/setup/SetupPackage.cs FfmpegSha256).
+      FFMPEG_SHA256: 9F28727E8B472A04C1D2E520AAA425DCA82721B995139B35710091130EA6E699
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Signing gate
+        id: gate
+        env:
+          SIGNPATH_API_TOKEN: ${{ secrets.SIGNPATH_API_TOKEN }}
+        run: |
+          $configured = if ($env:SIGNPATH_API_TOKEN) { 'true' } else { 'false' }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "configured=$configured"
+          "Code signing configured: $configured"
+
+      - name: Release version
+        id: version
+        env:
+          INPUT_VERSION: ${{ github.event.inputs.version }}
+        run: |
+          $version = if ($env:GITHUB_REF_TYPE -eq 'tag') { $env:GITHUB_REF_NAME -replace '^v', '' } else { $env:INPUT_VERSION }
+          if ($version -and $version -notmatch '^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$') {
+            throw "Not a major.minor.patch version: '$version'"
+          }
+          if ($version) { Add-Content -LiteralPath $env:GITHUB_ENV -Value "RECALL_VERSION=$version" }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
+          "Version: $(if ($version) { $version } else { '(unversioned)' })"
+
+      - name: Rust toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+          cargo --version
+
+      - name: FFmpeg development files (Gyan 7.1.1 full shared, digest-checked)
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'ffmpeg-shared.zip'
+          Invoke-WebRequest -UseBasicParsing -Uri $env:FFMPEG_URL -OutFile $zip
+          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+          if ($hash -ne $env:FFMPEG_SHA256) { throw "FFmpeg archive digest mismatch: $hash" }
+          $dev = Join-Path $env:GITHUB_WORKSPACE 'tools\ffmpeg-dev'
+          Expand-Archive -LiteralPath $zip -DestinationPath $dev
+          $root = Join-Path $dev 'ffmpeg-7.1.1-gyan-full-shared'
+          Rename-Item -LiteralPath (Join-Path $dev 'ffmpeg-7.1.1-full_build-shared') -NewName 'ffmpeg-7.1.1-gyan-full-shared'
+          foreach ($need in 'include\libavcodec\avcodec.h', 'lib\avcodec.lib', 'bin\avcodec-61.dll') {
+            if (!(Test-Path -LiteralPath (Join-Path $root $need))) { throw "FFmpeg archive lacks $need" }
+          }
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "FFMPEG_DIR=$root"
+          # Tests start recall.exe, which loads the FFmpeg DLLs from PATH.
+          Add-Content -LiteralPath $env:GITHUB_PATH -Value (Join-Path $root 'bin')
+
+      - name: libclang for ffmpeg-sys bindgen
+        run: |
+          $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
+          if (!(Test-Path -LiteralPath (Join-Path $llvm 'libclang.dll'))) { throw "No libclang.dll in $llvm on this runner image." }
+          & (Join-Path $llvm 'clang.exe') --version
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "LIBCLANG_PATH=$llvm"
+
+      - name: CPU-only tests (recorder workspace)
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}\target-dev
+        run: |
+          cargo test --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay
+          if ($LASTEXITCODE -ne 0) { throw "recorder tests failed ($LASTEXITCODE)" }
+
+      - name: CPU-only tests (app)
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}\target-gpui
+        run: |
+          cargo test --locked --manifest-path recall-native\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw "app tests failed ($LASTEXITCODE)" }
+
+      - name: Setup unit tests
+        run: |
+          & .\scripts\setup\build.ps1 -Test -OutputPath (Join-Path $env:RUNNER_TEMP 'RecallSetupTests.exe')
+
+      - name: Release build (recorder workspace)
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}\target-dev
+        run: |
+          cargo build --release --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay
+          if ($LASTEXITCODE -ne 0) { throw "recorder release build failed ($LASTEXITCODE)" }
+
+      - name: Release build (app)
+        env:
+          CARGO_TARGET_DIR: ${{ github.workspace }}\target-gpui
+        run: |
+          cargo build --release --locked --manifest-path recall-native\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { throw "app release build failed ($LASTEXITCODE)" }
+
+      - name: Build Setup
+        id: bundle
+        env:
+          SIGNING: ${{ steps.gate.outputs.configured }}
+        run: |
+          $suffix = if ($env:RECALL_VERSION) { $env:RECALL_VERSION } else { "dev-$($env:GITHUB_SHA.Substring(0, 12))" }
+          $name = "recall-release-$suffix"
+          $out = Join-Path $env:RUNNER_TEMP $name
+          $payload = Join-Path $out 'recall-app'
+          New-Item -ItemType Directory -Path $payload | Out-Null
+          foreach ($exe in 'target-gpui\release\recall-native.exe', 'target-dev\release\recall-hdr.exe',
+                           'target-dev\release\recall.exe', 'target-dev\release\recall-overlay.exe') {
+            Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE $exe) -Destination $payload
+          }
+          $setup = Join-Path $out 'RecallSetup.exe'
+          & .\scripts\setup\build.ps1 -PayloadDirectory $payload -OnlineDependencies -OutputPath $setup
+          $sha = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath (Join-Path $out 'SHA256SUMS.txt') -Value "$sha  RecallSetup.exe" -Encoding ascii
+          Set-Content -LiteralPath (Join-Path $out 'SOURCE-REVISION.txt') -Value $env:GITHUB_SHA -Encoding ascii
+          # scripts/release.ps1 refuses an unsigned Setup from a bundle carrying this marker.
+          if ($env:SIGNING -eq 'true') {
+            Set-Content -LiteralPath (Join-Path $out 'SIGNPATH_CONFIGURED') -Value 'signing required' -Encoding ascii
+          }
+          $setupOnly = Join-Path $env:RUNNER_TEMP 'setup-unsigned'
+          New-Item -ItemType Directory -Path $setupOnly | Out-Null
+          Copy-Item -LiteralPath $setup -Destination $setupOnly
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "name=$name"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "dir=$out"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "setup-dir=$setupOnly"
+          "Built $name ($sha)"
+
+      - name: Upload the bundle (unsigned)
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ steps.bundle.outputs.name }}
+          path: ${{ steps.bundle.outputs.dir }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Upload Setup for signing (unsigned)
+        id: unsigned
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: RecallSetup-unsigned
+          path: ${{ steps.bundle.outputs.setup-dir }}
+          if-no-files-found: error
+          retention-days: 7
+
+  sign:
+    needs: build
+    if: needs.build.outputs.signing == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    # Required reviewers on this environment approve every signing request.
+    environment: release-signing
+    permissions:
+      contents: read
+      # SignPath fetches the unsigned artifact through the Actions API.
+      actions: read
+    steps:
+      - name: Submit the signing request
+        id: signpath
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'recall' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
+          github-artifact-id: ${{ needs.build.outputs.setup-artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: ${{ runner.temp }}\signed
+
+      - name: Fetch the unsigned bundle
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: ${{ needs.build.outputs.bundle }}
+          path: ${{ runner.temp }}\bundle
+
+      - name: Verify the signature and assemble the signed bundle
+        env:
+          SIGNED: ${{ runner.temp }}\signed
+          BUNDLE: ${{ runner.temp }}\bundle
+        run: |
+          $signed = Join-Path $env:SIGNED 'RecallSetup.exe'
+          if (!(Test-Path -LiteralPath $signed -PathType Leaf)) { throw "SignPath returned no RecallSetup.exe in $env:SIGNED" }
+          $signature = Get-AuthenticodeSignature -LiteralPath $signed
+          "Signature: $($signature.Status) | $($signature.SignerCertificate.Subject) | timestamp: $($signature.TimeStamperCertificate.Subject)"
+          if ($signature.Status -ne 'Valid') { throw "The signed Setup does not verify: $($signature.Status) $($signature.StatusMessage)" }
+          if (!$signature.TimeStamperCertificate) { throw 'The signed Setup carries no timestamp.' }
+          if ($signature.SignerCertificate.Subject -notmatch 'SignPath Foundation') {
+            throw "Unexpected signer: $($signature.SignerCertificate.Subject)"
+          }
+          $tool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -File -ErrorAction SilentlyContinue |
+            Sort-Object { [version]$_.Directory.Parent.Name } -Descending | Select-Object -First 1
+          if ($tool) {
+            & $tool.FullName verify /pa /all /tw $signed
+            if ($LASTEXITCODE -ne 0) { throw "SignTool verification failed ($LASTEXITCODE)." }
+          }
+          Copy-Item -LiteralPath $signed -Destination (Join-Path $env:BUNDLE 'RecallSetup.exe') -Force
+          $sha = (Get-FileHash -LiteralPath $signed -Algorithm SHA256).Hash.ToLowerInvariant()
+          Set-Content -LiteralPath (Join-Path $env:BUNDLE 'SHA256SUMS.txt') -Value "$sha  RecallSetup.exe" -Encoding ascii
+          Set-Content -LiteralPath (Join-Path $env:BUNDLE 'SIGNPATH_CONFIGURED') -Value 'signing required' -Encoding ascii
+          "Signed Setup: $sha"
+
+      - name: Upload the signed bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: ${{ needs.build.outputs.bundle }}-signed
+          path: ${{ runner.temp }}\bundle
+          if-no-files-found: error
+          retention-days: 30
