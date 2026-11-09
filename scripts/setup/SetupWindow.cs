@@ -23,6 +23,7 @@ namespace Recall.Setup
 
         private readonly SetupFonts fonts = new SetupFonts();
         private readonly bool preview = !SetupPackage.HasPayload;
+        private readonly SetupPrerequisites prerequisites = SetupPrerequisites.Detect();
         private readonly Panel options;
         private readonly Panel quick;
         private readonly Button mode;
@@ -42,6 +43,7 @@ namespace Recall.Setup
         private readonly Rail rail;
         private bool busy;
         private bool complete;
+        private bool restartRequired;
         private string installedPath;
         private int step;
         private bool failed;
@@ -111,7 +113,7 @@ namespace Recall.Setup
             frameTiming = AddOption("Set up game detection and FPS", 185, false, 4);
             AddLabel(options, "Windows may ask for permission. It takes effect after sign-in.",
                 26, 216, 499, 22, fonts.Body, Muted);
-            AddLabel(options, "Game recording requires an NVIDIA GPU with NVENC.",
+            AddLabel(options, prerequisites.Summary(),
                 0, 254, 525, 24, fonts.Body, Muted);
 
             quick = CreateQuickSetup();
@@ -240,6 +242,11 @@ namespace Recall.Setup
 
         private async Task Install()
         {
+            if (restartRequired)
+            {
+                Close();
+                return;
+            }
             if (failed)
             {
                 Retry();
@@ -249,7 +256,7 @@ namespace Recall.Setup
             {
                 try
                 {
-                    if (!preview) SetupPackage.OpenGuidedSetup(installedPath, launch.Checked);
+                    if (!preview) SetupPackage.OpenGuidedSetup(installedPath, launch.Checked && SetupPrerequisites.Detect().NvidiaDriver);
                 }
                 catch (Exception error)
                 {
@@ -275,7 +282,7 @@ namespace Recall.Setup
             SetStep(1);
             title.Text = preview ? "Previewing setup" : "Installing Recall";
             description.Text = preview ? "See how setup looks while it runs." : "Setup waits for Recall to finish saving before replacing files.";
-            resultTitle.Text = preview ? "Preparing the preview…" : "Preparing program files…";
+            resultTitle.Text = preview ? "Preparing the preview…" : "Checking Windows components…";
             resultTitle.ForeColor = Ink;
             resultDetail.Text = selection.Path;
 
@@ -283,13 +290,19 @@ namespace Recall.Setup
             {
                 string warning = null;
                 if (preview) await Task.Delay(450);
-                else warning = await Task.Run(() => SetupPackage.Install(selection));
+                else
+                {
+                    var updates = new Progress<string>(text => { if (busy) resultTitle.Text = text; });
+                    warning = await Task.Run(() => SetupPackage.Install(selection, updates));
+                }
                 SetStep(2);
                 title.Text = preview ? "Preview complete" : "Recall is ready";
                 description.Text = preview ? "Your selections were rehearsed." : "Installation completed successfully.";
                 resultTitle.Text = preview ? "Selected install location" : "Installed to";
                 resultTitle.ForeColor = Mint;
                 resultDetail.Text = selection.Path + "\n\nContinue to set up storage, audio, and recording quality.";
+                if (!preview && !SetupPrerequisites.Detect().NvidiaDriver)
+                    resultDetail.Text += "\nAdd the NVIDIA recording driver before starting the recorder.";
                 if (warning != null)
                 {
                     description.Text = "Recall was installed. Review the setup note below.";
@@ -301,6 +314,17 @@ namespace Recall.Setup
                 primary.Text = preview ? "Done" : "Continue setup";
                 cancel.Hide();
                 complete = true;
+            }
+            catch (SetupRestartRequired error)
+            {
+                title.Text = "Restart Windows";
+                description.Text = "Windows needs a restart before Recall can finish installing.";
+                resultTitle.Text = "Restart required";
+                resultTitle.ForeColor = Ink;
+                resultDetail.Text = error.Message;
+                primary.Text = "Close setup";
+                cancel.Hide();
+                restartRequired = true;
             }
             catch (Exception error)
             {
@@ -359,6 +383,7 @@ namespace Recall.Setup
 
         public void CheckPreview()
         {
+            SetupPrerequisites.CheckPolicy();
             if (!preview || advanced || !quick.Visible || launch.Checked || frameTiming.Checked)
                 throw new InvalidOperationException("Quick setup defaults changed");
             if (!quickBrowse.Visible || !quickBrowse.Enabled || quickPath.Text != SetupPackage.InstallPath(destination.Text))

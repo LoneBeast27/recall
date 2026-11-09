@@ -32,7 +32,7 @@ namespace Recall.Setup
                 "Windows may ask for permission. It takes effect after sign-in.",
                 "Set up game detection and FPS", value => frameTiming.Checked = value);
             quickClips = AddLabel(panel, "", 0, 241, 525, 20, fonts.Body, Muted);
-            AddLabel(panel, "Game recording requires an NVIDIA GPU with NVENC.", 0, 263, 525, 19, fonts.Body, Muted);
+            AddLabel(panel, prerequisites.Summary(), 0, 263, 525, 19, fonts.Body, Muted);
             return panel;
         }
 

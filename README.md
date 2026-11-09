@@ -9,6 +9,8 @@ Recall needs an NVIDIA GPU (NVENC). There is no CPU video encoder.
 
 Open `dist/recall-current/RecallSetup.exe` for Quick Setup. Choose whether recording starts when setup is complete and whether to set up Windows game detection and FPS. **Change…** opens the SSD install folder picker from Quick Setup. **Advanced** also lets you type a folder or change the Start menu shortcut. After installation, **Continue setup** opens Storage, Audio, and Recording quality. Recording quality compares the same full frame before and after encoding, with a detail crop available. Choose **Open Recall** to reach your library. Updates keep your existing clip folder and recording settings.
 
+Setup checks the PC before copying Recall. It installs the bundled Microsoft Visual C++ x64 runtime when required. On Windows N, it adds the Media Feature Pack through Windows Update when needed. Windows may ask for administrator permission. If a restart is needed, reopen Setup after restarting. Game recording uses the NVIDIA driver installed for your GPU.
+
 Fresh profiles use the Windows default microphone and system output. A distinct Windows communications output gets its own track. Add extra devices or apps from **Input**, **Output**, and **Application audio**. Select the icon on a custom strip to change it.
 
 ### RecallTesting
@@ -184,7 +186,7 @@ drives are detected); thumbnails, hover frames and recently watched clips are ke
 
 ## Build and test (developers)
 
-Build the Windows setup screen with `powershell -NoProfile -File scripts/setup/build.ps1 -Preview`. Open `dist/setup/RecallSetupPreview.exe` to rehearse setup. The release setup build takes an explicit verified payload via `-PayloadDirectory` and uses the save-aware installer.
+Build the Windows setup screen with `powershell -NoProfile -File scripts/setup/build.ps1 -Preview`. Open `dist/setup/RecallSetupPreview.exe` to rehearse setup. The release setup build takes a verified payload via `-PayloadDirectory` and uses the save-aware installer. Pass `-VCRedistPath` to bundle a local Microsoft-signed x64 Visual C++ package. By default the build uses a copy in the payload directory or downloads it from Microsoft.
 
 ```powershell
 $env:FFMPEG_DIR    = "$PWD\tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared"   # has av1_nvenc

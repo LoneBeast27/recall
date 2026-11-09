@@ -46,12 +46,14 @@ namespace Recall.Setup
             catch (PathTooLongException) { return null; }
         }
 
-        public static string Install(InstallOptions options)
+        public static string Install(InstallOptions options, IProgress<string> progress)
         {
             var parent = Path.Combine(Path.GetTempPath(), "Recall-Setup-" + Guid.NewGuid().ToString("N"));
             Directory.CreateDirectory(parent);
             try
             {
+                SetupPrerequisites.Provision(parent, Assembly, progress);
+                if (progress != null) progress.Report("Preparing program files…");
                 var zip = Path.Combine(parent, "payload.zip");
                 using (var payload = Assembly.GetManifestResourceStream(Payload))
                 {
