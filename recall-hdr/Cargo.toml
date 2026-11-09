@@ -52,6 +52,7 @@ windows = { version = "0.62", features = [
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 toml = "0.8"
+wasapi = "0.19"
 
 # The entire NvAPI CSC surface is reached through nvapi64.dll's single exported
 # `nvapi_QueryInterface` entry point + magic function IDs. The typed `Csc` struct

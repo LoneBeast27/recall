@@ -25,6 +25,9 @@ impl Root {
     /// Fixed frame for every non-editor page: the same sidebar and the same panel,
     /// so navigation never moves; only the panel content changes.
     pub fn render_shell(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        if self.setup.is_some() {
+            return self.render_setup(window, cx);
+        }
         let content = match self.route {
             Route::Hdr => self.render_hdr(window, cx),
             Route::Audio => self.render_audio(window, cx),

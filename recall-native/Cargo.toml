@@ -6,6 +6,14 @@ description = "Recall native GPUI editor"
 
 [workspace]
 
+[features]
+recall-testing = []
+
+[[bin]]
+name = "RecallTesting"
+path = "src/testing_main.rs"
+required-features = ["recall-testing"]
+
 [dependencies]
 gpui = { version = "=0.2.2", default-features = false, features = ["windows-manifest"] }
 serde = { version = "1", features = ["derive"] }

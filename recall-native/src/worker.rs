@@ -122,6 +122,18 @@ pub struct Workers {
 
 impl Workers {
     pub fn spawn() -> Self {
+        if crate::TESTING {
+            let (open_tx, done) = mpsc::channel();
+            return Self {
+                jobs: Lanes::inert(lane_of),
+                edits: mpsc::channel().0,
+                gate: PathGate::default(),
+                assets: mpsc::channel().0,
+                scrub: mpsc::channel().0,
+                open_tx,
+                done,
+            };
+        }
         let (done_tx, done) = mpsc::channel::<Done>();
         let gate = PathGate::default();
         let (edits, edit_rx) = mpsc::channel::<Job>();

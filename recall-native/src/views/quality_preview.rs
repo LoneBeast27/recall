@@ -104,6 +104,42 @@ impl Preview {
     }
 }
 
+/// The same frame as the detail crops, downscaled uniformly from 1440p.
+fn full_frames() -> &'static [Arc<Image>; 5] {
+    static FRAMES: OnceLock<[Arc<Image>; 5]> = OnceLock::new();
+    FRAMES.get_or_init(|| {
+        let bytes: [&'static [u8]; 5] = [
+            crop!("original-frame"),
+            crop!("bitrate-15-frame"),
+            crop!("bitrate-25-frame"),
+            crop!("bitrate-40-frame"),
+            crop!("bitrate-60-frame"),
+        ];
+        bytes.map(|b| Arc::new(Image::from_bytes(ImageFormat::Png, b.to_vec())))
+    })
+}
+
+/// A real recorded frame comparison. It is an example, independent of the current game.
+pub(crate) fn setup_comparison(bitrate: u64, detail: bool) -> AnyElement {
+    let shown = crate::views::settings_capture::BITRATES.iter().position(|&b| b == bitrate).unwrap_or(1);
+    let choice = &BITRATE[shown];
+    let frames = if detail { images().as_slice() } else { full_frames().as_slice() };
+    let tile = |label: String, image: &Arc<Image>| {
+        div().flex().flex_col().flex_1().min_w_0().gap(px(4.))
+            .child(img(image.clone()).w_full().h(px(150.)).rounded(px(6.)).object_fit(ObjectFit::Contain))
+            .child(div().text_size(px(12.)).text_color(c(theme::MUTED)).child(label))
+    };
+    let scale = if detail { "Matching detail crops" } else { "Full frame, scaled to fit" };
+    div().flex().flex_col().gap(px(8.))
+        .child(div().flex().gap(px(12.)).max_w(px(560.))
+            .child(tile("Source frame".into(), &frames[0]))
+            .child(tile(format!("{} video target", choice.label), &frames[choice.image])))
+        .child(div().text_size(px(12.)).text_color(c(theme::MUTED)).child(
+            format!("{scale} · fast camera pan · 1440p60 H.264 · Balanced effort. {}", choice.note)
+        ))
+        .into_any_element()
+}
+
 impl Root {
     /// The (i) after a setting's title. `current` is the option the setting holds now; the
     /// comparison opens on it.

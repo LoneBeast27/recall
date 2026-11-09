@@ -166,7 +166,7 @@ impl Root {
         .collect()
     }
 
-    fn settings_media(&mut self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(crate) fn settings_media(&mut self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut items = self.render_folder_section(cx);
         items.extend(self.render_storage_limit(cx));
         items.push(section_title("SSD cache"));

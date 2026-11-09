@@ -1,7 +1,7 @@
 //! The recorded sources as the Audio page edits them: the controller's
 //! `recording.audio_sources` (a list of `{id, kind, device, exe, name, enabled, gain_db}` in
-//! track order). Every change writes the whole list back with `set_config`; the recorder
-//! restarts like it does for a format change. Pure: no devices, no UI.
+//! track order). Changes write the whole list back with `set_config`. The controller decides
+//! which changes affect the running recorder. Pure: no devices, no UI.
 use serde_json::{Value, json};
 
 /// Same cap as the controller.
@@ -47,7 +47,7 @@ impl Kind {
     pub fn default_name(self) -> &'static str {
         match self {
             Kind::Game => "Game",
-            Kind::Output => "Desktop audio",
+            Kind::Output => "Output",
             Kind::Input => "Microphone",
             Kind::App => "App",
         }
@@ -78,6 +78,18 @@ pub struct Source {
     /// config written before the flag, the default mic) = muted, as the recorder does.
     /// "+ Add source" writes it. Other kinds ignore it.
     pub mic_mute: Option<bool>,
+    pub communications: bool,
+    pub icon: String,
+}
+
+impl Source {
+    pub fn is_primary(&self) -> bool {
+        matches!((self.kind, self.id.as_str()), (Kind::Input, "mic") | (Kind::Output, "system-output" | "communications-output"))
+    }
+
+    pub fn uses_communications(&self) -> bool {
+        self.kind == Kind::Output && self.device.trim().is_empty() && self.communications
+    }
 }
 
 /// What Alt+M does to `source` now, as the recorder decides it: an input is muted unless it is a
@@ -154,6 +166,8 @@ pub fn from_config(value: Option<&Value>) -> Vec<Source> {
                 enabled: v.get("enabled").and_then(Value::as_bool).unwrap_or(true),
                 gain_db: v.get("gain_db").and_then(Value::as_f64).unwrap_or(0.0) as f32,
                 mic_mute: v.get("mic_mute").and_then(Value::as_bool),
+                communications: v.get("communications").and_then(Value::as_bool).unwrap_or(false),
+                icon: text("icon"),
             })
         })
         .filter(|s| ids.insert(s.id.trim().to_lowercase()))
@@ -170,6 +184,12 @@ pub fn to_config(list: &[Source]) -> Value {
                 }
                 if crate::services::meters::id_ok(&s.device_id) {
                     entry["device_id"] = Value::String(s.device_id.trim().to_owned());
+                }
+                if s.communications {
+                    entry["communications"] = Value::Bool(true);
+                }
+                if !s.icon.is_empty() {
+                    entry["icon"] = Value::String(s.icon.clone());
                 }
                 entry
             })
@@ -206,22 +226,13 @@ pub fn with_new(list: &[Source], kind: Kind, exe: &str, app_name: &str) -> Optio
     if !addable(list).contains(&kind) || (kind == Kind::App && exe.trim().is_empty()) {
         return None;
     }
-    let base = if kind == Kind::App && !app_name.trim().is_empty() { clip_name(app_name) } else { kind.default_name().to_owned() };
+    let base = match kind {
+        Kind::App if !app_name.trim().is_empty() => clip_name(app_name),
+        Kind::Input => "Input".into(),
+        _ => kind.default_name().to_owned(),
+    };
     let mut out = list.to_vec();
-    out.push(Source { id: fresh_id(list, kind), kind, device: String::new(), device_id: String::new(), exe: exe.trim().to_owned(), name: fresh_name(list, &base), enabled: true, gain_db: 0.0, mic_mute: None });
-    Some(out)
-}
-
-/// "+ Add source" → "Microphone" (`mic`) or "Line-in or capture card": a new input that says
-/// whether Alt+M mutes it, whatever its endpoint's form factor. A line-in starts on the Windows
-/// default, so Alt+M still mutes it until its device is picked (`mutes`).
-pub fn with_new_input(list: &[Source], mic: bool) -> Option<Vec<Source>> {
-    let mut out = with_new(list, Kind::Input, "", "")?;
-    let added = out.last_mut().expect("with_new adds one");
-    added.mic_mute = Some(mic);
-    if !mic {
-        added.name = fresh_name(list, "Line-in");
-    }
+    out.push(Source { id: fresh_id(list, kind), kind, device: String::new(), device_id: String::new(), exe: exe.trim().to_owned(), name: fresh_name(list, &base), enabled: true, gain_db: 0.0, mic_mute: None, communications: false, icon: String::new() });
     Some(out)
 }
 

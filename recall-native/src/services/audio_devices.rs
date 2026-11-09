@@ -3,6 +3,9 @@
 //! again each time Settings opens (`stale`). Nothing here runs before first paint.
 use wasapi::{DeviceCollection, Direction};
 
+#[path = "../../../recall/src/communications_audio.rs"]
+pub(crate) mod communications_audio;
+
 /// Active endpoints by friendly name, as Windows shows them (and as the engine matches them).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DeviceLists {
@@ -15,6 +18,7 @@ pub struct DeviceLists {
     pub outputs: Vec<String>,
     pub default_input: Option<String>,
     pub default_output: Option<String>,
+    pub communications_output: Option<String>,
     /// The inputs whose Windows form factor is line-level (`endpoint_form`). Only a hint in the
     /// strip menu: Alt+M follows the strip's flag.
     pub line_inputs: Vec<String>,
@@ -64,6 +68,7 @@ pub fn enumerate_blocking() -> DeviceLists {
             outputs: names(&Direction::Render),
             default_input: default_name(&Direction::Capture),
             default_output: default_name(&Direction::Render),
+            communications_output: communications_audio::distinct_device().and_then(|d| d.get_friendlyname().ok()),
             line_inputs,
             default_input_is_line: wasapi::get_default_device(&Direction::Capture).ok().map(|d| is_line(&d)),
             midi_inputs: crate::services::midi::input_names(),

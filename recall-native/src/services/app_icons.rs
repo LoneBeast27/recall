@@ -13,7 +13,11 @@ use windows::core::HSTRING;
 
 /// The exe's small shell icon as a BGRA image; `None` when Windows has none.
 pub fn icon_for(path: &Path) -> Option<Arc<RenderImage>> {
-    let (width, height, bgra) = small_icon_bgra(path)?;
+    let (width, height, mut bgra) = small_icon_bgra(path)?;
+    for pixel in bgra.chunks_exact_mut(4) {
+        let luma = (54 * u16::from(pixel[2]) + 183 * u16::from(pixel[1]) + 19 * u16::from(pixel[0])) / 256;
+        pixel[..3].fill((64 + luma * 191 / 255) as u8);
+    }
     let buffer = image::RgbaImage::from_raw(width, height, bgra)?;
     Some(Arc::new(RenderImage::new(vec![image::Frame::new(buffer)])))
 }

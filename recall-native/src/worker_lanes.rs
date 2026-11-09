@@ -30,6 +30,10 @@ pub struct Lanes<J> {
 }
 
 impl<J: Send + 'static> Lanes<J> {
+    pub fn inert(route: fn(&J) -> Lane) -> Self {
+        Self { io: mpsc::channel().0, library: mpsc::channel().0, route }
+    }
+
     /// Starts both threads; `io` and `library` each run their lane's jobs one at a time.
     pub fn spawn(route: fn(&J) -> Lane, io: impl FnMut(J) -> bool + Send + 'static, library: impl FnMut(J) -> bool + Send + 'static) -> Self {
         Self { io: start("recall-io", io), library: start("recall-library", library), route }

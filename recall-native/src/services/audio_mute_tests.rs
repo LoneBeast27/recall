@@ -12,7 +12,7 @@ fn lists(inputs: &[(&str, &str, Option<u32>)]) -> DeviceLists {
 }
 
 fn line_in(device: &str, device_id: &str) -> Source {
-    Source { id: "line-in".into(), kind: Kind::Input, device: device.into(), device_id: device_id.into(), exe: String::new(), name: "Line-in".into(), enabled: true, gain_db: 0.0, mic_mute: Some(false) }
+    Source { communications: false, icon: String::new(), id: "line-in".into(), kind: Kind::Input, device: device.into(), device_id: device_id.into(), exe: String::new(), name: "Line-in".into(), enabled: true, gain_db: 0.0, mic_mute: Some(false) }
 }
 
 /// 2026-11-07 audit R5-deep-audio-1: a line-in skips Alt+M only on its own saved endpoint.

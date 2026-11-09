@@ -2,7 +2,7 @@
 use super::*;
 
 fn source(kind: Kind, device: &str, exe: &str) -> Source {
-    Source { id: format!("{}-1", kind.token()), kind, device: device.into(), device_id: String::new(), exe: exe.into(), name: "S".into(), enabled: true, gain_db: 0.0, mic_mute: None }
+    Source { communications: false, icon: String::new(), id: format!("{}-1", kind.token()), kind, device: device.into(), device_id: String::new(), exe: exe.into(), name: "S".into(), enabled: true, gain_db: 0.0, mic_mute: None }
 }
 
 #[test]

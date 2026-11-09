@@ -137,6 +137,7 @@ impl Root {
         }
         self.daemon_rev = self.daemon.revision();
         self.snap = self.daemon.snapshot();
+        self.resolve_setup_resume();
         // Background cache filling pauses while a game is being recorded.
         let busy = self.snap.session.as_ref().is_some_and(|s| s.capturing());
         crate::services::storage::set_recorder_busy(busy);
@@ -146,6 +147,26 @@ impl Root {
             self.on_daemon_event(event);
         }
         self.status_changed()
+    }
+
+    pub(crate) fn finish_setup_recording(&mut self, record_after: bool) {
+        if record_after {
+            self.setup_resume_pending = true;
+            self.resolve_setup_resume();
+        } else {
+            self.controller_check_at = None;
+        }
+    }
+
+    fn resolve_setup_resume(&mut self) {
+        if !self.setup_resume_pending || !self.snap.connected {
+            return;
+        }
+        let Some(session) = self.snap.session.as_ref() else { return };
+        self.setup_resume_pending = false;
+        if session.setup_owner == Some(std::process::id()) {
+            self.send(crate::services::daemon::DaemonCommand::Resume);
+        }
     }
 
     /// Time-outs: the storage-limit dry run, the recorder's first start, the toast. True when
@@ -161,7 +182,10 @@ impl Root {
         // Opening Recall means recording: start the recorder once if it isn't running.
         if self.controller_check_at.is_some_and(|at| Instant::now() >= at) {
             self.controller_check_at = None;
-            if !self.snap.connected {
+            if !self.snap.connected && self.setup.is_some() {
+                self.start_setup_recorder();
+                changed = true;
+            } else if !self.snap.connected {
                 if let Err(error) = crate::services::daemon::start_controller() {
                     self.show_toast(ToastKind::Bad, "Couldn't start the recorder", Some(error));
                     changed = true;

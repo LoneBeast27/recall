@@ -21,6 +21,7 @@ pub const DEFAULT_CACHE_GB: f64 = 2.0;
 /// Cache sizes are binary gigabytes (20 GiB = 21,474,836,480 bytes).
 const GB: f64 = 1_073_741_824.0;
 
+#[derive(Default)]
 pub struct CacheView {
     pub root: PathBuf,
     pub budget_bytes: u64,
@@ -47,6 +48,9 @@ pub struct CacheView {
 
 impl CacheView {
     pub fn new() -> Self {
+        if crate::TESTING {
+            return Self::default();
+        }
         let root = crate::cache::cache_root();
         let ssd_free = crate::services::library::drive_space(&root).map(|(free, _)| free);
         Self {

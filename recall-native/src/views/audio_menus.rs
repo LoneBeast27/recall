@@ -1,5 +1,4 @@
-//! Audio page menus: a strip's device or app picker, and "+ Add source" (Microphone or line-in,
-//! Desktop or output device, Application audio, Game audio). Device lists are the ones read
+//! Audio page menus for source routing and appearance. Device lists are the ones read
 //! when the page opened; "Windows default" comes first and a saved device that is gone shows
 //! as "<name> (not connected)".
 use std::sync::Arc;
@@ -15,7 +14,7 @@ use crate::{
     },
     theme::{self, c},
     ui::{Icon, icon},
-    views::audio_page::StripMenu,
+    views::{audio_page::StripMenu, audio_strip::kind_icon},
 };
 
 /// What a menu row does.
@@ -25,13 +24,27 @@ enum Pick {
     Device(String, String, String),
     App(String, String, String),
     Add(Kind),
-    /// A new input: a microphone (true) or a line-in or capture card (false).
-    AddInput(bool),
+    Icon(String, String),
+    OpenOutputs,
     /// An input's "Muted by the mic hotkey" (the source, the new value).
     MicMute(String, bool),
     OpenApps,
     Browse(Option<String>),
 }
+
+const AUDIO_ICONS: [(&str, &str, Icon); 5] = [
+    ("mic", "Microphone", Icon::Mic),
+    ("volume", "Speaker", Icon::Volume),
+    ("audio-lines", "Waveform", Icon::AudioLines),
+    ("sliders", "Mixer", Icon::Sliders),
+    ("gamepad", "Controller", Icon::Gamepad),
+];
+const APP_ICONS: [(&str, &str, Icon); 4] = [
+    ("discord", "Discord", Icon::Discord),
+    ("spotify", "Spotify", Icon::Spotify),
+    ("steam", "Steam", Icon::Steam),
+    ("obsstudio", "OBS Studio", Icon::ObsStudio),
+];
 
 fn panel(id: SharedString, width: f32) -> Stateful<gpui::Div> {
     div()
@@ -74,6 +87,7 @@ impl Root {
     fn menu_row(&self, (key, i): (&str, usize), leading: Option<AnyElement>, label: String, selected: bool, pick: Pick, cx: &mut Context<Self>) -> AnyElement {
         div()
             .id((SharedString::from(format!("menu-{key}")), i))
+            .child(crate::trace::target(format!("audio-menu-{key}-{i}")))
             .min_h(px(30.))
             .px(px(10.))
             .flex()
@@ -100,7 +114,8 @@ impl Root {
             Pick::App(id, exe, label) if id.is_empty() => self.add_source(Kind::App, &exe, &label),
             Pick::App(id, exe, label) => self.set_source_app(&id, exe, label),
             Pick::Add(kind) => self.add_source(kind, "", ""),
-            Pick::AddInput(mic) => self.add_input(mic),
+            Pick::Icon(id, icon) => self.set_source_icon(&id, icon),
+            Pick::OpenOutputs => self.settings_ui.audio.menu = Some(StripMenu::AddOutput),
             Pick::MicMute(id, on) => self.set_source_mic_mute(&id, on),
             Pick::OpenApps => self.settings_ui.audio.menu = Some(StripMenu::AddApp),
             Pick::Browse(id) => self.browse_for_app(id, cx),
@@ -109,6 +124,9 @@ impl Root {
 
     /// Any exe on disk, for an app that is not playing right now.
     fn browse_for_app(&mut self, id: Option<String>, cx: &mut Context<Self>) {
+        if crate::TESTING {
+            return;
+        }
         let picked = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some(SharedString::from("Record this app")) });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = picked.await else { return };
@@ -128,8 +146,44 @@ impl Root {
     fn app_icon(&self, exe: &str) -> AnyElement {
         match self.settings_ui.audio.icon(exe) {
             Some(image) => img(ImageSource::Render(image as Arc<RenderImage>)).size(px(16.)).flex_none().into_any_element(),
-            None => icon(Icon::AudioLines, 16., theme::MUTED).into_any_element(),
+            None => {
+                let glyph = APP_ICONS.iter()
+                    .find(|(name, _, _)| audio_apps::exe_stem(exe).eq_ignore_ascii_case(name))
+                    .map_or(Icon::AudioLines, |(_, _, glyph)| *glyph);
+                icon(glyph, 16., theme::MUTED).into_any_element()
+            }
         }
+    }
+
+    pub(crate) fn source_icon(&self, source: &Source) -> AnyElement {
+        if !source.is_primary() {
+            if let Some((_, _, glyph)) = AUDIO_ICONS.iter().chain(&APP_ICONS).find(|(key, _, _)| *key == source.icon) {
+                return icon(*glyph, 16., theme::MUTED).into_any_element();
+            }
+            if source.kind == Kind::App {
+                return self.app_icon(&source.exe);
+            }
+        }
+        icon(kind_icon(source.kind), 16., theme::MUTED).into_any_element()
+    }
+
+    pub(crate) fn source_icon_menu(&self, source: &Source, cx: &mut Context<Self>) -> AnyElement {
+        let key = format!("icon-{}", source.id);
+        let mut rows = vec![self.menu_row((&key, 0), None, "Automatic".into(), source.icon.is_empty(), Pick::Icon(source.id.clone(), String::new()), cx)];
+        for (heading, choices) in [("Audio icons", AUDIO_ICONS.as_slice()), ("App logos", APP_ICONS.as_slice())] {
+            rows.push(note(heading));
+            for (value, label, glyph) in choices {
+                rows.push(self.menu_row(
+                    (&key, rows.len()), Some(icon(*glyph, 16., theme::MUTED).into_any_element()),
+                    (*label).into(), *value == source.icon, Pick::Icon(source.id.clone(), (*value).into()), cx,
+                ));
+            }
+        }
+        let menu = panel(key.into(), 192.).left_0().children(rows).on_mouse_down_out(cx.listener(|this, _, _, cx| {
+            this.settings_ui.audio.menu = None;
+            cx.notify();
+        }));
+        deferred(menu).with_priority(1).into_any_element()
     }
 
     /// Rows for the playing apps; `id` = the source they go to, `None` = a new source.
@@ -150,7 +204,9 @@ impl Root {
                 }
             }
         }
-        rows.push(self.menu_row((key, 900), Some(icon(Icon::Folder, 14., theme::MUTED).into_any_element()), "Browse for an app…".into(), false, Pick::Browse(id.map(str::to_owned)), cx));
+        if !crate::TESTING {
+            rows.push(self.menu_row((key, 900), Some(icon(Icon::Folder, 14., theme::MUTED).into_any_element()), "Browse for an app…".into(), false, Pick::Browse(id.map(str::to_owned)), cx));
+        }
         rows
     }
 
@@ -164,6 +220,7 @@ impl Root {
             let lists = self.settings_ui.audio.devices.as_ref();
             let (names, default) = match lists {
                 Some(l) if source.kind.uses_inputs() => (l.inputs.clone(), l.default_input.clone()),
+                Some(l) if source.communications => (l.outputs.clone(), l.communications_output.clone()),
                 Some(l) => (l.outputs.clone(), l.default_output.clone()),
                 None => (Vec::new(), None),
             };
@@ -175,7 +232,12 @@ impl Root {
             }
             let saved = source.device.trim().to_owned();
             // (name, endpoint id, label): an input saves the endpoint id too.
-            let mut entries = vec![(String::new(), String::new(), audio_devices::device_label("", lists.map(|_| names.as_slice()), default.as_deref()))];
+            let default_label = if source.communications {
+                default.map_or_else(|| "Windows communications default".into(), |name| format!("{name} (communications default)"))
+            } else {
+                audio_devices::device_label("", lists.map(|_| names.as_slice()), default.as_deref())
+            };
+            let mut entries = vec![(String::new(), String::new(), default_label)];
             // With the endpoint-id tie-break, as the recorder picks it (`audio_pick`).
             let matched = match crate::services::audio_pick::source_found(source, lists) {
                 audio_devices::Found::Opens(i) if !saved.is_empty() => Some(i),
@@ -237,15 +299,21 @@ impl Root {
     /// `right`: opened from the card header, so the menu hangs left from the button's right edge.
     pub(crate) fn add_menu(&self, list: &[Source], right: bool, cx: &mut Context<Self>) -> AnyElement {
         let mut rows: Vec<AnyElement> = Vec::new();
-        if self.settings_ui.audio.menu == Some(StripMenu::AddApp) {
+        let kinds = crate::services::audio_sources::addable(list);
+        if self.settings_ui.audio.menu == Some(StripMenu::AddOutput) {
+            rows.push(self.menu_row(("output", 0), Some(icon(Icon::Volume, 14., theme::MUTED).into_any_element()), "Windows output device".into(), false, Pick::Add(Kind::Output), cx));
+            if kinds.contains(&Kind::Game) {
+                rows.push(self.menu_row(("output", 1), Some(icon(Icon::Gamepad, 14., theme::MUTED).into_any_element()), "Game audio".into(), false, Pick::Add(Kind::Game), cx));
+            }
+        } else if self.settings_ui.audio.menu == Some(StripMenu::AddApp) {
             rows.push(note("Record one app's sound on its own track:"));
             rows.extend(self.app_rows("add-app", None, "", cx));
         } else {
-            let choices = crate::services::audio_sources::addable(list).into_iter().flat_map(|kind| match kind {
-                Kind::Input => vec![(Icon::Mic, "Microphone", Pick::AddInput(true)), (Icon::Mic, "Line-in or capture card", Pick::AddInput(false))],
-                Kind::Output => vec![(Icon::Volume, "Desktop or output device", Pick::Add(kind))],
-                Kind::App => vec![(Icon::AudioLines, "Application audio", Pick::OpenApps)],
-                Kind::Game => vec![(Icon::Gamepad, "Game audio", Pick::Add(kind))],
+            let choices = kinds.iter().filter_map(|kind| match kind {
+                Kind::Input => Some((Icon::Mic, "Input", Pick::Add(Kind::Input))),
+                Kind::Output => Some((Icon::Volume, "Output", if kinds.contains(&Kind::Game) { Pick::OpenOutputs } else { Pick::Add(Kind::Output) })),
+                Kind::App => Some((Icon::AudioLines, "Application audio", Pick::OpenApps)),
+                Kind::Game => None,
             });
             for (i, (glyph, label, pick)) in choices.enumerate() {
                 rows.push(self.menu_row(("add", i), Some(icon(glyph, 14., theme::MUTED).into_any_element()), label.into(), false, pick, cx));

@@ -134,7 +134,7 @@ impl TrackRing {
     /// A 48 kHz stereo input ring on the Windows default, fed by the test (no WASAPI).
     #[cfg(test)]
     pub(crate) fn input_for_test(name: &'static str) -> Self {
-        let spec = super::SourceSpec { device_id: String::new(), id: name.into(), kind: "input".into(), device: String::new(), exe: String::new(), name: name.into(), gain_db: 0.0, mic_mute: None };
+        let spec = super::SourceSpec { communications: false, device_id: String::new(), id: name.into(), kind: "input".into(), device: String::new(), exe: String::new(), name: name.into(), gain_db: 0.0, mic_mute: None };
         Self::for_source(&spec, "mic", 2, String::new())
     }
 }

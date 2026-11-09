@@ -24,7 +24,7 @@ pub(crate) const EFFORT: [(&str, &str); 3] = [("performance", "Performance"), ("
 use crate::views::storage_limit::{self, CAPS};
 
 impl Root {
-    fn segments<T: Copy + PartialEq + 'static>(
+    pub(crate) fn segments<T: Copy + PartialEq + 'static>(
         &self,
         id: &str,
         width: f32,
@@ -90,7 +90,11 @@ impl Root {
         items.push(
             setting_row("Audio sources", &detail)
                 .child(ui::button("open-audio-page", crate::ui::Variant::Secondary).child("Open Audio page").on_click(cx.listener(|this, _, _, cx| {
-                    this.go(crate::root::Route::Audio);
+                    if crate::TESTING {
+                        this.setup_page(crate::views::setup_runner::SetupStep::Audio);
+                    } else {
+                        this.go(crate::root::Route::Audio);
+                    }
                     cx.notify();
                 })))
                 .into_any_element(),

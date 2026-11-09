@@ -24,6 +24,14 @@ use crate::{
 
 impl Root {
     pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        if crate::TESTING {
+            let mut root = Self::initial(window, cx, Workers::spawn(), DaemonClient::spawn(), Folders::default(), Err("Demo library".into()));
+            root.snap = root.daemon.snapshot();
+            root.begin_setup(false);
+            crate::views::window_frame::solid_backdrop(window, theme::WINDOW);
+            window.focus(&root.focus);
+            return root;
+        }
         use crate::startup::span;
         span("root: ole + drop target", || {
             crate::shell::init_ole();
@@ -55,7 +63,15 @@ impl Root {
         if let Some(path) = std::env::var_os("RECALL_NATIVE_CLIP") {
             root.open_clip(path.to_string_lossy().into_owned());
         }
-        root.open_env_route();
+        if let Some(record_after) = match std::env::var("RECALL_SETUP").as_deref() {
+            Ok("record") => Some(true),
+            Ok("paused") => Some(false),
+            _ => None,
+        } {
+            root.begin_setup(record_after);
+        } else {
+            root.open_env_route();
+        }
         // Alt+Tab mid-drag: the release goes to another window and no later move may come.
         // Save the dragged gain now, as a release would; a move after refocus then finds no drag.
         cx.observe_window_activation(window, |this, window, cx| {
@@ -74,6 +90,8 @@ impl Root {
     fn initial(window: &mut Window, cx: &mut Context<Self>, workers: Workers, daemon: DaemonClient, folders: Folders, preview: Result<NativePreview, String>) -> Self {
         Self {
             route: Route::Library,
+            setup: None,
+            setup_resume_pending: false,
             focus: cx.focus_handle(),
             workers,
             daemon,
@@ -108,7 +126,7 @@ impl Root {
             title_drag: None,
             folders,
             pending_folder: None,
-            controller_check_at: std::env::var_os("RECALL_NO_CONTROLLER").is_none().then(|| Instant::now() + Duration::from_millis(1500)),
+            controller_check_at: (!crate::TESTING && std::env::var_os("RECALL_NO_CONTROLLER").is_none()).then(|| Instant::now() + Duration::from_millis(1500)),
             frame_at: Instant::now(),
             hwnd: parent_hwnd(window).ok(),
             status_stale: false,

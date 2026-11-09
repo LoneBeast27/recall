@@ -8,6 +8,9 @@ use std::time::Duration;
 use wasapi::{DeviceCollection, Direction, SampleType, StreamMode, WaveFormat};
 
 use super::apps::Leveller;
+#[path = "../communications_audio.rs"]
+mod communications_audio;
+
 use super::capture_loop::{silence_to_clock, watch_for, Capture, Clock, Ended, Notices, Watch};
 use super::endpoints::{choose_endpoint_by, opened_own, Pick};
 use super::rebind::{key_for, rebind_for, Key, Rebind, Run};
@@ -145,7 +148,7 @@ fn repick(direction: Direction, (device, device_id): (&str, &str), input: bool) 
 
 /// Open `target`'s process loopback, else the source's endpoint (a named one by its name
 /// only), and start it.
-pub(super) fn open_stream(direction: &Direction, (device, device_id): (&str, &str), ring: &TrackRing, target: &Option<LoopbackTarget>) -> Result<Stream, String> {
+pub(super) fn open_stream(direction: &Direction, (device, device_id): (&str, &str), ring: &TrackRing, target: &Option<LoopbackTarget>, communications: bool) -> Result<Stream, String> {
     let format = WaveFormat::new(32, 32, &SampleType::Float, ring.rate as usize, ring.channels as usize, None);
     let (mut watch, mut own, mut rebind, mut unsure) = (None, false, None, None);
     let (mut client, endpoint, buffer_duration_hns) = match target {
@@ -157,7 +160,13 @@ pub(super) fn open_stream(direction: &Direction, (device, device_id): (&str, &st
             200_000,
         ),
         None => {
-            let Picked { dev, endpoint, on_default, own: is_own, key, unsure: held } = pick_device(direction, (device, device_id), ring.input)?;
+            let Picked { dev, endpoint, on_default, own: is_own, key, unsure: held } = if communications {
+                let dev = communications_audio::distinct_device().ok_or("No separate Windows communications output")?;
+                let endpoint = dev.get_friendlyname().unwrap_or_else(|_| "Windows communications output".into());
+                Picked { dev, key: Key::Name(endpoint.clone()), endpoint, on_default: true, own: false, unsure: None }
+            } else {
+                pick_device(direction, (device, device_id), ring.input)?
+            };
             unsure = held;
             if on_default {
                 watch = watch_for(device, dev.get_id().ok());

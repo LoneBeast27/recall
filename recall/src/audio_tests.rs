@@ -394,7 +394,7 @@ fn a_ring_reserves_its_buffer_and_never_doubles() {
 fn the_mute_hotkey_skips_an_input_marked_as_not_a_microphone() {
     use super::sources::SourceSpec;
     // A line-in skips Alt+M only on a named device (R4-deep-audio-1).
-    let spec = |mic_mute: bool| SourceSpec { device_id: String::new(), id: "in-1".into(), kind: "input".into(), device: "Line (Box One)".into(), exe: String::new(), name: "In".into(), gain_db: 0.0, mic_mute: Some(mic_mute) };
+    let spec = |mic_mute: bool| SourceSpec { communications: false, device_id: String::new(), id: "in-1".into(), kind: "input".into(), device: "Line (Box One)".into(), exe: String::new(), name: "In".into(), gain_db: 0.0, mic_mute: Some(mic_mute) };
     let mic = TrackRing::for_source(&spec(true), "mic", 1, String::new());
     let line = TrackRing::for_source(&spec(false), "mic", 1, String::new());
     // Both opened their own saved device (R5-deep-audio-1: `opened_own`).
@@ -424,7 +424,7 @@ fn the_mute_hotkey_skips_an_input_marked_as_not_a_microphone() {
 #[test]
 fn a_line_in_on_the_windows_default_is_muted_by_the_mic_hotkey() {
     use super::sources::SourceSpec;
-    let spec = |device: &str| SourceSpec { device_id: String::new(), id: "line-in".into(), kind: "input".into(), device: device.into(), exe: String::new(), name: "Line-in".into(), gain_db: 0.0, mic_mute: Some(false) };
+    let spec = |device: &str| SourceSpec { communications: false, device_id: String::new(), id: "line-in".into(), kind: "input".into(), device: device.into(), exe: String::new(), name: "Line-in".into(), gain_db: 0.0, mic_mute: Some(false) };
     let held = |ring: &TrackRing| ring.samples.lock().unwrap().iter().copied().collect::<Vec<f32>>();
     for device in ["", "  "] {
         let ring = TrackRing::for_source(&spec(device), "mic", 1, String::new());
@@ -453,7 +453,7 @@ fn a_line_in_on_the_windows_default_is_muted_by_the_mic_hotkey() {
 #[test]
 fn an_input_without_the_flag_is_muted_whatever_its_form_factor() {
     use super::sources::SourceSpec;
-    let spec = SourceSpec { device_id: String::new(), id: "in-1".into(), kind: "input".into(), device: String::new(), exe: String::new(), name: "In".into(), gain_db: 0.0, mic_mute: None };
+    let spec = SourceSpec { communications: false, device_id: String::new(), id: "in-1".into(), kind: "input".into(), device: String::new(), exe: String::new(), name: "In".into(), gain_db: 0.0, mic_mute: None };
     // The engine reads no form factor (2 LineLevel, 10 Unknown, ...): nothing to inject.
     let ring = TrackRing::for_source(&spec, "mic", 1, String::new());
     ring.push_capture(&[0.5, 0.5], true);

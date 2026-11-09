@@ -81,6 +81,9 @@ Run @('-i', $lossless, '-vf', "select=eq(n\,$frame)", '-frames:v', '1', (Join-Pa
 # Pixel-doubled here (nearest neighbour), so the app shows each crop 1:1 in its 272 px tile and
 # the 2x zoom stays crisp instead of being smoothed by the GPU's linear upscale.
 $crop = "select=eq(n\,$frame),crop=${Size}:${Size}:${CropX}:${CropY},scale=iw*2:ih*2:flags=neighbor"
+# Setup also shows the matching full frame at an ordinary viewing scale.
+$fullFrame = "select=eq(n\,$frame),scale=640:360:flags=lanczos"
+Run @('-i', $lossless, '-vf', $fullFrame, '-frames:v', '1', (Join-Path $Out 'original-frame.png'))
 $original = Join-Path $Out 'original.png'
 Run @('-i', $lossless, '-vf', $crop, '-frames:v', '1', '-compression_level', '9', $original)
 '{0,-20} {1,12} {2,14} {3,12}' -f 'variant', 'Mbps actual', 'clip SSIM', 'crop PSNR'
@@ -92,6 +95,9 @@ foreach ($v in $variants) {
     if ($v.Max) { $enc += @('-multipass', 'qres', '-spatial-aq', '1') }
     Run ($enc + @($clip))
     Run @('-i', $clip, '-vf', $crop, '-frames:v', '1', '-compression_level', '9', $png)
+    if ($v.Name.StartsWith('bitrate-')) {
+        Run @('-i', $clip, '-vf', $fullFrame, '-frames:v', '1', (Join-Path $Out "$($v.Name)-frame.png"))
+    }
     # Whole-clip SSIM against the lossless clip, and PSNR of the shown crop against the original crop.
     $ssim = Get-Metric @('-i', $clip, '-i', $lossless, '-lavfi', '[0:v]setpts=N/60/TB[a];[1:v]setpts=N/60/TB[b];[a][b]ssim', '-f', 'null', '-') 'All:'
     $psnr = Get-Metric @('-i', $png, '-i', $original, '-lavfi', '[0:v][1:v]psnr', '-f', 'null', '-') 'average:'

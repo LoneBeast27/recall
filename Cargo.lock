@@ -1584,6 +1584,7 @@ dependencies = [
  "serde_json",
  "toml",
  "tray-icon",
+ "wasapi",
  "widestring",
  "windows 0.62.2",
  "windows-core 0.62.2",

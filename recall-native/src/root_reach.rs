@@ -48,6 +48,10 @@ impl Root {
 
     /// The Start buttons: start a recorder, or say why one that runs can't be reached.
     pub(crate) fn start_recorder(&mut self) {
+        if self.setup.is_some() {
+            self.start_setup_recorder();
+            return;
+        }
         match daemon::start_controller() {
             Ok(true) => self.show_toast(ToastKind::Info, "Starting the recorder…", None),
             Ok(false) if self.recorder_reach == RecorderReach::Unreachable => {

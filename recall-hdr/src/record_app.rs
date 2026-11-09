@@ -123,6 +123,7 @@ pub struct Controller {
     /// Runtime pause (tray "Stop recording" / pipe `pause`): no engine, game
     /// targets ignored, capture actions refused. A restart resumes.
     pub(crate) paused: bool,
+    pub(crate) setup_owner: Option<u32>,
     /// Saves / long recording in flight (from engine events).
     pub(crate) activity: EngineActivity,
     pub(crate) engine_events: Receiver<serde_json::Value>,
@@ -205,6 +206,8 @@ pub fn run() -> i32 {
 
     let now = Instant::now();
     let can_trace = crate::frame_timing::can_trace();
+    let setup_owner = std::env::var("RECALL_SETUP_OWNER_PID").ok()
+        .and_then(|pid| pid.parse::<u32>().ok()).filter(|&pid| pid != 0);
     let mut ctl = Controller {
         config_stamp: crate::config_watch::FileStamp::of(store.path()),
         config_repairs: crate::config_repairs::ConfigRepairs::after_load(store.path()),
@@ -244,7 +247,8 @@ pub fn run() -> i32 {
         target_monitor,
         primary: crate::record_monitor::PrimaryWatch::new(crate::record_monitor::read_primary(), now),
         quit: None,
-        paused: false,
+        paused: setup_owner.is_some(),
+        setup_owner,
         activity: EngineActivity::default(),
         engine_events,
         pending_restart: None,
@@ -346,7 +350,6 @@ impl Controller {
             self.planner.linger_deadline(),
             self.hdr.next_deadline(),
             self.janitor.next_deadline(),
-            self.overlay.deadline(),
         ]
         .into_iter()
         .flatten()

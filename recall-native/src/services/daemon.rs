@@ -18,6 +18,7 @@ mod controller;
 mod pipe_owner;
 mod protocol;
 mod reach;
+mod testing;
 mod session;
 
 // The examples include this file without the views that use these.
@@ -104,6 +105,8 @@ pub struct HdrStatus {
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]
 #[serde(default)]
 pub struct SessionStatus {
+    #[serde(default)]
+    pub setup_owner: Option<u32>,
     /// "waiting" | "starting" | "recording" | "degraded" | "recovering" | "draining" | "paused" | "error" (empty on old builds)
     pub state: String,
     pub target: Option<Target>,
@@ -391,6 +394,9 @@ impl DaemonClient {
     /// Starts the background connection thread. Never blocks.
     /// `RECALL_CONTROL_PIPE` names another pipe (scripted checks keep off the real recorder).
     pub fn spawn() -> Self {
+        if crate::TESTING {
+            return Self::testing();
+        }
         let pipe = std::env::var("RECALL_CONTROL_PIPE").ok().filter(|p| !p.is_empty());
         // The real recorder's pipe is per Windows session (`session`).
         Self::spawn_on(&pipe.unwrap_or_else(session::current_pipe_name))
@@ -414,6 +420,9 @@ impl DaemonClient {
     }
     /// Queues a command; returns false when not connected (the command is dropped).
     pub fn send(&self, command: DaemonCommand) -> bool {
+        if crate::TESTING {
+            return self.send_testing(command);
+        }
         let line = protocol::command_line(&command);
         let Ok(writer) = self.shared.writer.lock() else { return false };
         writer.as_ref().is_some_and(|tx| tx.send(line).is_ok())
@@ -509,6 +518,11 @@ fn serve(shared: &Shared, stream: Stream) {
 /// when no controller is running. Ok(false) when one is already running.
 pub fn start_controller() -> Result<bool, String> {
     controller::start()
+}
+
+/// Connect the setup runner to a paused recorder without starting capture.
+pub(crate) fn start_controller_for_setup() -> Result<bool, String> {
+    controller::start_for_setup()
 }
 
 /// A recorder process runs in this Windows session (false when the list can't be read).

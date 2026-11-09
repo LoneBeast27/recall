@@ -25,7 +25,7 @@ impl Controller {
             cfg: &self.cfg,
             mic_muted: self.mic_muted,
             overlay_running: self.overlay.running(),
-            fps_source: crate::frame_timing::fps_source(self.cfg.overlay.stats, self.can_trace).as_str(),
+            fps_source: crate::frame_timing::fps_source(self.cfg.overlay.shows_stats(), self.can_trace).as_str(),
             hdr: &hdr,
             paused: self.paused,
             long_recording: self.activity.long_recording_json(),
@@ -35,6 +35,9 @@ impl Controller {
             hotkey_problems: &self.hotkey_problems,
         });
         crate::record_quit_wait::merge_fields(&mut status, finishing);
+        if let Some(owner) = self.setup_owner {
+            status["setup_owner"] = json!(owner);
+        }
         status["other_recorder"] = json!(self.supervisor.slot_held() != crate::engine_slot::SlotHeld::Free);
         status
     }
@@ -77,7 +80,7 @@ impl Controller {
             _ => slot.or_else(|| Situation::of(state, &self.wanted(), gave_up)),
         };
         let Some(notice) = self.notices.observe(next, Instant::now()) else { return };
-        if !self.cfg.overlay.enabled {
+        if !self.cfg.overlay.shows_notices() {
             return;
         }
         log!("record: notice {}: {} {}", notice.kind(), notice.title(), notice.detail());

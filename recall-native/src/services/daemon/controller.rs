@@ -13,11 +13,22 @@ const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
 pub(super) fn start() -> Result<bool, String> {
+    start_with_owner(None)
+}
+
+pub(super) fn start_for_setup() -> Result<bool, String> {
+    start_with_owner(Some(std::process::id()))
+}
+
+fn start_with_owner(setup_owner: Option<u32>) -> Result<bool, String> {
+    if crate::TESTING {
+        return Err("RecallTesting uses demo audio and video settings".into());
+    }
     if process_running(CONTROLLER_EXE)? {
         return Ok(false);
     }
     let executable = locate()?;
-    spawn_detached(&executable)?;
+    spawn_detached(&executable, setup_owner)?;
     Ok(true)
 }
 
@@ -57,10 +68,15 @@ pub(super) fn workspace_lists_controller(manifest: &str) -> bool {
 
 /// Hidden, no console, own process group; escapes our job object when allowed so the
 /// recorder outlives this window.
-fn spawn_detached(executable: &Path) -> Result<(), String> {
+fn spawn_detached(executable: &Path, setup_owner: Option<u32>) -> Result<(), String> {
     let launch = |flags: u32| {
         let mut command = Command::new(executable);
         command.arg(CONTROLLER_ARG).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(flags);
+        if let Some(owner) = setup_owner {
+            command.env("RECALL_SETUP_OWNER_PID", owner.to_string());
+        } else {
+            command.env_remove("RECALL_SETUP_OWNER_PID");
+        }
         if let Some(dir) = executable.parent() {
             command.current_dir(dir);
         }

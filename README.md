@@ -7,7 +7,15 @@ Recall needs an NVIDIA GPU (NVENC). There is no CPU video encoder.
 
 ## Install
 
-Run from PowerShell in this folder:
+Open `dist/recall-current/RecallSetup.exe` for Quick Setup. Choose whether recording starts when setup is complete and whether to set up Windows game detection and FPS. **Change…** opens the SSD install folder picker from Quick Setup. **Advanced** also lets you type a folder or change the Start menu shortcut. After installation, **Continue setup** opens Storage, Audio, and Recording quality. Recording quality compares the same full frame before and after encoding, with a detail crop available. Choose **Open Recall** to reach your library. Updates keep your existing clip folder and recording settings.
+
+Fresh profiles use the Windows default microphone and system output. A distinct Windows communications output gets its own track. Add extra devices or apps from **Input**, **Output**, and **Application audio**. Select the icon on a custom strip to change it.
+
+### RecallTesting
+
+Run `dist/recall-testing/RecallTesting.exe` to rehearse setup with demo drives, audio sources, and a demo library. Changes stay in memory for that session. The testing executable has no connection to the recorder and uses no Recall profile or clip files.
+
+To build and install Recall from source, run this in the repo:
 
 ```powershell
 powershell -NoProfile -File scripts\install.ps1
@@ -84,6 +92,7 @@ powershell -NoProfile -File scripts\install.ps1
   and the recording dot. Each game gets its own spot, measured from your clips so the Island
   stays clear of that game's HUD (`hud-spots.json`); unknown games use the top right.
   The pill uses compact spacing and stacks text upright along a side edge.
+  The overlay shortcut (Alt+O by default) hides or shows notices and live stats together.
 - **Tray menu:** status · Open Recall · (after a "Not recording" notice: Add <exe> as a game) ·
   Stop/Start recording · Quit Recall.
 - **The app** (Start menu → Recall): library grouped by day, hover a tile to scrub, favourite,
@@ -150,7 +159,7 @@ Switching back from HDR to SDR keeps the running capture and the buffer.
 
 | What | Where |
 |---|---|
-| Clips | `V:\ALL RECORDINGS` by default (`recording.output_dir`) |
+| Clips | `<Videos>\Recall` by default (Settings → Media) |
 | Screenshots | `<clips>\screenshots` |
 | Recorder settings | `%APPDATA%\recall-hdr\config.toml` |
 | Favourites, titles, clip folders | `%APPDATA%\Recall\library.json`, `folders.json` |
