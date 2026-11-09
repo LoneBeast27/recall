@@ -117,3 +117,18 @@ fn an_old_engines_held_stop_survives_a_sleep() {
     s.tick();
     assert!(!s.ring_kept_since(mark), "the save landed: the stop applies");
 }
+
+/// P13: a save that expired (no answer for 120 s awake) is still reported when the engine
+/// exits: "Save failed", never zeroed silently. The release ends with the engine.
+#[test]
+fn an_engine_exit_reports_an_expired_save_as_lost() {
+    use crate::record_activity::Trigger;
+    let mut s = released_discord(true);
+    s.now += S(121);
+    let now = s.awake();
+    assert!(!s.activity.retarget_busy(now).saving, "setup: the save expired (counted as lost by the timers)");
+    let exited = serde_json::json!({"type": crate::supervisor::ENGINE_EXITED});
+    assert_eq!(s.activity.on_engine_event(&exited, 0.0, now), Some(Trigger::SavesLost(1)), "reported");
+    assert_eq!(s.activity.release(), None, "the released engine is gone");
+    assert_eq!(s.activity.on_engine_event(&exited, 0.0, now), None, "once");
+}

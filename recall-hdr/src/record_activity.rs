@@ -119,7 +119,7 @@ pub enum Trigger {
     LongRecChanged,
     /// The long recording a retarget stopped ([`AutoStop`]) was saved.
     AutoStopped { game_closed: bool },
-    /// The engine stopped with this many saves in flight: they are lost.
+    /// The engine stopped with this many saves unanswered (in flight or expired): they are lost.
     SavesLost(u32),
 }
 
@@ -219,11 +219,12 @@ impl EngineActivity {
                 self.answered(ev);
                 None
             }
-            // The supervisor's own event: the engine process ended. Its last
-            // events came first, so whatever is still pending is lost.
+            // The supervisor's own event: the engine process ended. Its last events came
+            // first, so every save it was sent and never answered is lost: counted or expired
+            // (design P13: an expired one was zeroed silently before), and a release is over.
             crate::supervisor::ENGINE_EXITED => {
-                (self.expired_saves, self.write) = (0, writing::WriteWatch::default());
-                let lost = std::mem::take(&mut self.pending_saves);
+                let lost = std::mem::take(&mut self.pending_saves) + std::mem::take(&mut self.expired_saves);
+                (self.write, self.released_at) = (writing::WriteWatch::default(), None);
                 (lost > 0).then_some(Trigger::SavesLost(lost))
             }
             "screenshot" | "screenshot_failed" => {
