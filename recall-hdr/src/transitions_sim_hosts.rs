@@ -10,6 +10,7 @@ use crate::record_engine::{EnginePlanner, EngineTarget};
 use crate::record_engine_ctl::switch_engine;
 use crate::record_power::{PowerAction, PowerPlanner};
 use crate::record_power_host::PowerHost;
+use crate::record_plan::PlanHost;
 use crate::record_restart::{restart_engine, RestartHost, RestartReason, Restarted};
 
 impl RestartHost for Sim {
@@ -37,6 +38,31 @@ impl RestartHost for Sim {
     }
     fn restart_log(&mut self, line: &str) {
         self.notes.push(line.into());
+    }
+}
+
+/// As `Controller`'s `PlanHost`: the same planner step, with the effects recorded.
+impl PlanHost for Sim {
+    fn plan_buffered(&self) -> (Option<f32>, u32) {
+        (self.buffered, self.rec.buffer_secs)
+    }
+    fn plan_settle_release(&mut self) {
+        self.settles += 1;
+    }
+    fn plan_apply(&mut self, target: &EngineTarget) {
+        self.applied_engine(target.clone());
+    }
+    fn retarget_held(&mut self) -> &mut bool {
+        &mut self.retarget_held
+    }
+    fn plan_record_stop(&mut self) {
+        self.sent.push(("record_stop".into(), self.engine().clone()));
+    }
+    fn plan_log(&mut self, line: &str) {
+        self.notes.push(line.into());
+    }
+    fn plan_held_tick(&mut self) {
+        self.held_ticks += 1;
     }
 }
 

@@ -155,3 +155,16 @@ fn a_drain_that_blocks_the_next_game_says_so_once_after_30_s() {
     s.run_to(ms(&s, S(200)));
     assert_eq!(told(&s), 1, "the drain ended: no further notice");
 }
+
+/// Review P3-2 (plan_engine's settle, now the shared `PlanHost::plan_tick`): the planner
+/// settles a release once every save is answered, never before, on every tick after.
+#[test]
+fn the_planner_settles_a_release_once_its_saves_are_answered() {
+    let mut s = released_discord(true);
+    let at_release = s.settles; // before the release, nothing in flight: every tick may settle
+    s.run_to(60_000);
+    assert_eq!(s.settles, at_release, "a save still unanswered: no settle on any tick");
+    s.saved();
+    s.run_to(60_100);
+    assert!(s.settles > at_release, "answered: settled on the next tick");
+}

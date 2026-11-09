@@ -35,8 +35,7 @@ use crate::config::Config;
 use crate::record_activity::{EngineActivity, LongRec, PendingPause, Trigger};
 use crate::record_config::RecordingCfg;
 use crate::record_detect::{fed_key, FedKey};
-use crate::record_drain::drain_len;
-use crate::record_engine::{capture_refusal, wanted, EnginePlanner, EngineTarget, Step, EXIT_LINGER};
+use crate::record_engine::{capture_refusal, wanted, EnginePlanner, EngineTarget, EXIT_LINGER};
 use crate::record_notice::{NoticeTracker, Situation};
 use crate::record_restart::{pending_restart_tick, request_settings_restart, restart_engine, restart_for_recovery, RestartReason, Restarted};
 use crate::record_target::{Target, TargetTracker, START_DEBOUNCE, TARGET_DEBOUNCE};
@@ -94,6 +93,9 @@ pub struct Sim {
     pub notices_said: Vec<Situation>,
     /// Ticks the planner answered `Step::Held`.
     pub held_ticks: u32,
+    /// `Controller::retarget_held`, and the releases the planner settled (`release_settled`).
+    pub retarget_held: bool,
+    pub settles: u32,
     /// The client area every focused window reports (`watcher::client_size`).
     pub client: (i32, i32),
     /// The pinned window (`Controller::pinned`).
@@ -151,6 +153,8 @@ impl Sim {
             sent: Vec::new(),
             notices_said: Vec::new(),
             held_ticks: 0,
+            retarget_held: false,
+            settles: 0,
             client: (1920, 1080),
             pinned: None,
             island_said: Vec::new(),
@@ -242,25 +246,7 @@ impl Sim {
         }
         self.feed_drain(now);
         self.poll_with_verdicts(now);
-        self.planner.set_drain_len(drain_len(self.buffered, self.rec.buffer_secs));
-        let busy = self.activity.retarget_busy(awake);
-        let drained = self.running_drain(now);
-        match self.planner.step(&self.wanted(), now, busy) {
-            Step::Apply(target) => {
-                self.note_drain_cut(drained.as_ref(), &target);
-                self.applied_engine(target)
-            }
-            Step::Held => self.held_ticks += 1,
-            // `plan_engine`: one record_stop per recording, the retarget follows its stop.
-            Step::StopLongRec { game_closed } => {
-                let game_closed = self.closed_game(game_closed);
-                if self.activity.auto_stop(awake, game_closed) {
-                    self.sent.push(("record_stop".into(), self.engine().clone()));
-                }
-            }
-            Step::Keep => {}
-        }
-        self.drain_block_notice(); // `plan_engine`
+        crate::record_plan::PlanHost::plan_tick(self, now); // `plan_engine`
         pending_restart_tick(self); // `activity_tick`
         self.announce();
     }
