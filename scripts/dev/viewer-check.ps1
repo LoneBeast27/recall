@@ -12,11 +12,12 @@
       [-MomentsClip <mp4>] [-Exe <recall-native.exe>] [-Only '<name pattern>', ...]
 
   Clips (copied once into .tmp\viewer-check, which must be on the same volume as the repo):
-    base     a clip of at least 60 s; default the newest VALORANT clip over 100 MB in V:\Recall\Raw
+    base     a clip of at least 60 s; default the newest VALORANT clip over 100 MB in paths.clipLibrary
     short    ~10 s with two sound tracks; default the first 10.45 s of base. The 2026-10-30 reports
              used Recall-Test-3 (sound 10.453 s, picture 10.438 s): pass it with -ShortClip.
     moments  a SteelSeries Moments clip (audio stamps 1000/1100 ticks apart); default the smallest
-             2025 VALORANT clip over 60 MB in V:\Recall\Raw
+             2025 VALORANT clip over 60 MB in paths.clipLibrary (.local/machine.json,
+             written by init-machine.ps1 -ClipLibrary)
     derived from short with ffmpeg (once): no sound, 0.8 s long, sound 0.5 s shorter than the
     picture, and an AV1 copy (the player needs a preview copy when Windows cannot decode AV1).
   Needs the engine (recall.exe; RECALL_ENGINE or a built target-dev) and ffmpeg/ffprobe on PATH.
@@ -26,19 +27,20 @@ $ErrorActionPreference = 'Stop'
 $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 . (Join-Path $PSScriptRoot 'viewer-check-lib.ps1')
 Initialize-ViewerCheck $repo $Exe
+. (Join-Path $PSScriptRoot 'dev-paths.ps1')
 $script:only = @($Only | ForEach-Object { if ($_ -like '*|*') { $_ -split '\|' } else { $_ -split ',' } } | Where-Object { $_ })  # '|' between names lets a name hold a comma # -File passes 'a,b' as one string
 Write-Host "player: $script:exe"
 
 $base = Join-Path $script:work 'base.mp4'
 if ($Clip) { Copy-Item $Clip $base -Force }
 elseif (-not (Test-Path $base)) {
-  $src = Get-ChildItem 'V:\Recall\Raw' -Filter 'VALORANT__*.mp4' | Where-Object { $_.Length -gt 100MB } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
+  $src = Get-ChildItem (Get-MachineValue $repo 'paths.clipLibrary') -Filter 'VALORANT__*.mp4' | Where-Object { $_.Length -gt 100MB } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
   Copy-Item $src.FullName $base
 }
 $moments = Join-Path $script:work 'moments.mp4'
 if ($MomentsClip) { Copy-Item $MomentsClip $moments -Force }
 elseif (-not (Test-Path $moments)) {
-  $src = Get-ChildItem 'V:\Recall\Raw' -Filter 'VALORANT__2025-*.mp4' | Where-Object { $_.Length -gt 60MB } | Sort-Object Length | Select-Object -First 1
+  $src = Get-ChildItem (Get-MachineValue $repo 'paths.clipLibrary') -Filter 'VALORANT__2025-*.mp4' | Where-Object { $_.Length -gt 60MB } | Sort-Object Length | Select-Object -First 1
   Copy-Item $src.FullName $moments
 }
 $short = Join-Path $script:work 'short.mp4'

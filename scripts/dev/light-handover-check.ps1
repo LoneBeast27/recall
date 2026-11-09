@@ -22,12 +22,14 @@
     powershell -NoProfile -File scripts\dev\light-handover-check.ps1 [-Clip <mp4>] [-Exe <recall-native.exe>] [-Engine <recall.exe>] [-Only '<pattern>', ...]
 
   -Clip: at least 60 s and 100 MB; default .tmp\viewer-check\base.mp4 (copy one there first).
-  -Engine: an engine stamped recall-engine-caps with FLAC stems (media cache version 6).
+  -Engine: default <main checkout>\target-dev\release\recall.exe (dev-paths.ps1); an engine stamped recall-engine-caps with FLAC stems (media cache version 6).
   Needs ffmpeg.exe with hevc_nvenc on PATH, and an HEVC decoder for Media Foundation.
 #>
-param([string]$Clip = '', [string]$Exe = '', [string]$Engine = 'L:\General\recall\target-dev\release\recall.exe', [string[]]$Only = @())
+param([string]$Clip = '', [string]$Exe = '', [string]$Engine = '', [string[]]$Only = @())
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+. (Join-Path $PSScriptRoot 'dev-paths.ps1')
+if (-not $Engine) { $Engine = Join-Path (Get-MainCheckout $repo) 'target-dev\release\recall.exe' }
 . (Join-Path $PSScriptRoot 'viewer-check-lib.ps1')
 Initialize-ViewerCheck $repo $Exe
 $script:only = @($Only | ForEach-Object { if ($_ -like '*|*') { $_ -split '\|' } else { $_ -split ',' } } | Where-Object { $_ })  # '|' between names lets a name hold a comma

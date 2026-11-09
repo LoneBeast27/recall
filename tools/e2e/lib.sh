@@ -17,7 +17,9 @@ set -u
 # ---------------------------------------------------------------------------
 # Paths (all absolute; harness owns only tools/e2e/)
 # ---------------------------------------------------------------------------
-RECALL_ROOT="L:/Projects/recall"
+# Repo root: two levels above this file (override with RECALL_ROOT). `pwd -W` gives the
+# drive-letter form under Git Bash; plain `pwd` elsewhere.
+RECALL_ROOT="${RECALL_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && (pwd -W 2>/dev/null || pwd))}"
 APP_EXE="$RECALL_ROOT/target/debug/recall-hdr.exe"
 ENGINE_EXE="$RECALL_ROOT/target/release/recall.exe"
 TESTCARD_EXE="$RECALL_ROOT/tools/hdr-testcard/target/debug/hdr-testcard.exe"

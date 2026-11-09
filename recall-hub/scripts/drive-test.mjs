@@ -1,10 +1,17 @@
 // E2E drive of the live hub window over CDP (WebView2 remote debugging).
 // Verifies: live daemon data renders, the REAL Save button produces a clip
 // (toast), the HDR page renders and the profile switch round-trips.
+import { mkdirSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import puppeteer from 'puppeteer-core';
 
+// Screenshots go to RECALL_CAPTURE_DIR, else <repo>/captures/debug (gitignored).
+const captureDir =
+  process.env.RECALL_CAPTURE_DIR ?? fileURLToPath(new URL('../../captures/debug/', import.meta.url));
+mkdirSync(captureDir, { recursive: true });
+
 const shot = (page, name) =>
-  page.screenshot({ path: `L:/Docker Speed Drive/captures/debug/${name}.png` });
+  page.screenshot({ path: `${captureDir}/${name}.png` });
 
 const browser = await puppeteer.connect({
   browserURL: 'http://127.0.0.1:9223',

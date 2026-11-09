@@ -332,19 +332,19 @@ mod tests {
 
     #[test]
     fn recordings_folder_clips_are_never_imported() {
-        let imported = vec![r"V:\".to_owned(), r"D:\Old".to_owned()];
-        assert!(!is_imported(r"V:\Recall\Raw\a.mp4", Path::new(r"V:\Recall\Raw"), &imported, &[]));
-        assert!(is_imported(r"V:\Other\a.mp4", Path::new(r"V:\Recall\Raw"), &imported, &[]));
-        assert!(is_imported(r"D:\Old\Game\a.mp4", Path::new(r"V:\Recall\Raw"), &imported, &[]));
-        assert!(!is_imported(r"E:\a.mp4", Path::new(r"V:\Recall\Raw"), &imported, &[]));
+        let imported = vec![r"G:\".to_owned(), r"D:\Old".to_owned()];
+        assert!(!is_imported(r"G:\Recall\Raw\a.mp4", Path::new(r"G:\Recall\Raw"), &imported, &[]));
+        assert!(is_imported(r"G:\Other\a.mp4", Path::new(r"G:\Recall\Raw"), &imported, &[]));
+        assert!(is_imported(r"D:\Old\Game\a.mp4", Path::new(r"G:\Recall\Raw"), &imported, &[]));
+        assert!(!is_imported(r"E:\a.mp4", Path::new(r"G:\Recall\Raw"), &imported, &[]));
     }
 
     #[test]
     fn a_former_recordings_folder_stays_recall_owned() {
         let imported = vec![r"D:\OldRecall".to_owned(), r"D:\Medal".to_owned()];
         let former = vec![r"d:\oldrecall\".to_owned()];
-        assert!(!is_imported(r"D:\OldRecall\VALORANT__2026-10-01__10-00-00.mp4", Path::new(r"V:\Recall"), &imported, &former));
-        assert!(is_imported(r"D:\OldRecall\sub\x.mp4", Path::new(r"V:\Recall"), &imported, &former), "only its own top level, like the recordings folder");
-        assert!(is_imported(r"D:\Medal\x.mp4", Path::new(r"V:\Recall"), &imported, &former));
+        assert!(!is_imported(r"D:\OldRecall\VALORANT__2026-10-01__10-00-00.mp4", Path::new(r"G:\Recall"), &imported, &former));
+        assert!(is_imported(r"D:\OldRecall\sub\x.mp4", Path::new(r"G:\Recall"), &imported, &former), "only its own top level, like the recordings folder");
+        assert!(is_imported(r"D:\Medal\x.mp4", Path::new(r"G:\Recall"), &imported, &former));
     }
 }

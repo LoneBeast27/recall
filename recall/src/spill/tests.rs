@@ -45,8 +45,8 @@ fn spill_prefers_another_disk_with_room_ssd_first_and_the_games_disk_last() {
     let want = 2 * GB;
     let keep = KEEP_FREE;
     let game_ssd = drive("C:\\", Some(0), Some(true), 100, true);
-    let other_ssd = drive("L:\\", Some(1), Some(true), 50, false);
-    let hdd = drive("V:\\", Some(2), Some(false), 900, false);
+    let other_ssd = drive("E:\\", Some(1), Some(true), 50, false);
+    let hdd = drive("F:\\", Some(2), Some(false), 900, false);
     let all = [game_ssd.clone(), other_ssd.clone(), hdd.clone()];
     assert_eq!(rank(&all, Some(0), want, keep, MIN_FILE), Some((1, want)), "another SSD first");
     assert_eq!(rank(&[game_ssd.clone(), hdd.clone()], Some(0), want, keep, MIN_FILE), Some((1, want)), "then another HDD");
@@ -58,12 +58,12 @@ fn spill_prefers_another_disk_with_room_ssd_first_and_the_games_disk_last() {
 #[test]
 fn spill_never_eats_the_last_free_space() {
     let want = 2 * GB;
-    let tight = drive("L:\\", Some(1), Some(true), 5, false);
-    let roomy = drive("V:\\", Some(2), Some(false), 900, false);
+    let tight = drive("E:\\", Some(1), Some(true), 5, false);
+    let roomy = drive("F:\\", Some(2), Some(false), 900, false);
     // L: has 1 GiB past KEEP_FREE: a partial file there loses to a whole one on V:.
     assert_eq!(rank(&[tight.clone(), roomy], Some(0), want, KEEP_FREE, MIN_FILE), Some((1, want)));
     assert_eq!(rank(&[tight.clone()], Some(0), want, KEEP_FREE, MIN_FILE), Some((0, 1 * GB)), "partial when it is all there is");
-    let full = drive("L:\\", Some(1), Some(true), 4, false);
+    let full = drive("E:\\", Some(1), Some(true), 4, false);
     assert_eq!(rank(&[full], Some(0), want, KEEP_FREE, MIN_FILE), None);
 }
 

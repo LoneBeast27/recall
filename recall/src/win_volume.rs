@@ -1,7 +1,7 @@
 //! Volume questions asked of Windows, never of the path text: which volume a
 //! folder really lives on ([`volume_of`]) and its free space ([`free_bytes`]).
 //! Junctions, symlinks and subst drives resolve to their target first, so a
-//! clip folder `C:\Clips` that is a junction to `V:\Clips` counts as `V:`.
+//! clip folder `C:\Clips` that is a junction to `D:\Clips` counts as `D:`.
 //!
 //! The one copy of these kernel32 calls: the engine uses it for the spill drive
 //! choice, the save free-space check and staging; the controller (`recall-hdr`)

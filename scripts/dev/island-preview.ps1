@@ -14,18 +14,28 @@
 #   frames.png + manifest.json  every frame at 60 fps (--export-frames; straight
 #                               RGBA, deflated by png-recompress.py, stdlib Python)
 #   backdrop-valorant.jpg       one 2560x1440 frame of -Clip at -ClipAt s (ffmpeg, JPEG q85)
+#
+# -Clip defaults to clips.islandBackdrop and -Python to tools.python in .local/machine.json
+# (scripts/dev/init-machine.ps1); without tools.python, the python on PATH.
 param(
     [Parameter(Mandatory = $true)][string]$Exe,
     [string]$Out,
     [double]$Scale = 1.0,
     [string]$WebDir,
-    [string]$Clip = 'V:\Recall\Raw\VALORANT__2026-10-17__22-21-36-788__adaa986dc538484698bbabf313f2fa1e.mp4',
+    [string]$Clip = '',
     [double]$ClipAt = 40,
-    [string]$Python = 'C:\Program Files\Python311\python.exe'
+    [string]$Python = ''
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing
 if (-not $Out -and -not $WebDir) { throw 'give -Out (preview PNGs) and/or -WebDir (web preview frames)' }
+. (Join-Path $PSScriptRoot 'dev-paths.ps1')
+$repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+if ($WebDir -and -not $Clip) { $Clip = Get-MachineValue $repo 'clips.islandBackdrop' }
+if ($WebDir -and -not $Python) {
+    $Python = Find-MachineValue $repo 'tools.python'
+    if (-not $Python) { $Python = (Get-Command python -ErrorAction Stop).Source }
+}
 
 function Export-Web([string]$Dir) {
     New-Item -ItemType Directory -Force $Dir | Out-Null
