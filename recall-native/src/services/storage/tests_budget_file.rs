@@ -59,7 +59,7 @@ fn only_a_missing_storage_file_gets_the_first_run_pick_written() {
 
 #[test]
 fn a_20_gib_budget_on_the_system_drive_stays_20_gib() {
-    // Rohan's real storage.json (cache on C:, budget kept at 20 GiB): the C2 2 GiB first-run
+    // The maintainer's real storage.json (cache on C:, budget kept at 20 GiB): the C2 2 GiB first-run
     // rule never touches it.
     let root = root("twenty");
     assert!(super::drive::on_system_drive(&root), "the test cache sits on the system drive");
@@ -177,7 +177,7 @@ fn leftover_copies_do_not_hold_the_cache_budget_but_show_in_the_usage() {
     let _ = std::fs::remove_dir_all(&base);
 }
 
-/// Rohan's storage.json cut off by a crash mid-write (NULs after the budget).
+/// The maintainer's storage.json cut off by a crash mid-write (NULs after the budget).
 const DAMAGED: &[u8] = b"{\n  \"cache_budget_bytes\": 21474836480,\n  \"first_\0\0\0\0\0\0\0\0";
 
 #[test]

@@ -1,4 +1,4 @@
-//! Official proof for a fullscreen-rule candidate (Rohan 2026-11-07 07:46
+//! Official proof for a fullscreen-rule candidate (the maintainer 2026-11-07 07:46
 //! UTC: "use official proof + support for manual application registering").
 //! A window `classify_event` made a candidate is recorded on its own proof:
 //! a Steam or launcher install, an Xbox / Store game package, an override or

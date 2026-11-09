@@ -1,4 +1,4 @@
-//! Settings → Games: the apps the user registered with the recorder by hand (Rohan
+//! Settings → Games: the apps the user registered with the recorder by hand (the maintainer
 //! 2026-11-07: "use official proof + support for manual application registering"). The
 //! recorder records an unknown fullscreen app only with official proof that it is a game (a
 //! Steam or launcher install, an Xbox / Store game package, a game Recall or the NVIDIA driver
@@ -7,7 +7,7 @@
 //! The list is the controller's config, read from its `config` event, never a copy:
 //! - `[[overrides]]` with a game kind (`hdr_game` / `sdr_game`) = "Record" (any window, windowed
 //!   too), with kind `none` = "Never record" (beats every proof, Steam included);
-//! - `[detect] fullscreen_games` = "Record when fullscreen" (Discord by default, Rohan
+//! - `[detect] fullscreen_games` = "Record when fullscreen" (Discord by default, the maintainer
 //!   2026-11-05).
 //!
 //! Changes go out one app at a time (`register_game`, R8-detect-7): the controller applies

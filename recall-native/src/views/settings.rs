@@ -1,6 +1,6 @@
 //! Settings, split into fixed tabs (user ruling 2026-10-22: "make it general, clip, media
 //! and shortcuts as settings menus"): General · Clip · Media · Shortcuts, plus Games (the apps
-//! registered by hand, Rohan 2026-11-07: "support for manual application registering").
+//! registered by hand, the maintainer 2026-11-07: "support for manual application registering").
 use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px};
 use serde_json::{Value, json};
 

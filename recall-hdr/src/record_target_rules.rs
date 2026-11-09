@@ -149,7 +149,7 @@ pub(crate) use crate::never_recorded::never_recordable;
 ///
 /// Order: Recall's own processes and Windows itself ([`never_recordable`]), then a
 /// `none` override, then a game override (the user's own Settings entry beats the
-/// browser, media-player, launcher, remote-client and private lists: Rohan
+/// browser, media-player, launcher, remote-client and private lists: the maintainer
 /// 2026-11-07 "support for manual application registering"), then
 /// `detect.fullscreen_games` (beats the deny lists), then the deny lists, then
 /// `looks_like_game` unless the stem is a call, chat or office app
