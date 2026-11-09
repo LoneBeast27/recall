@@ -95,8 +95,9 @@ mod tests {
 
     #[test]
     fn the_hello_says_the_engine_takes_it() {
-        let hello = crate::protocol::Outbound::Hello { version: "0".into(), monitors: Vec::new(), live_sources: true, live_source_fields: true, stop_capture: true };
+        let hello = crate::protocol::Outbound::Hello { version: "0".into(), monitors: Vec::new(), live_sources: true, live_source_fields: true, stop_capture: true, drain_heartbeat: true };
         assert_eq!(serde_json::to_value(&hello).unwrap()["stop_capture"], true, "recall-hdr `supervisor_release::STOP_CAPTURE_CAP`");
+        assert_eq!(serde_json::to_value(&hello).unwrap()["drain_heartbeat"], true, "recall-hdr `supervisor_release::DRAIN_HEARTBEAT_CAP`");
         let cmd: crate::protocol::Command = serde_json::from_str(r#"{"cmd":"stop_capture"}"#).unwrap();
         assert!(matches!(cmd, crate::protocol::Command::StopCapture));
     }

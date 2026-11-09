@@ -9,7 +9,7 @@
 //! nothing happens, e.g. the smoke test's synchronous save).
 
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::Arc;
 
 /// One saver's counters, shared with the main thread's status line.
@@ -18,6 +18,9 @@ pub(crate) struct SaveProgress {
     /// Saves handed over and not yet answered (counted up before the hand-over, down
     /// after the answer went out).
     pub jobs: AtomicU32,
+    /// The drain gave up the saves in flight and answered them itself (`saver_stop::give_up`):
+    /// the saver sends no abort answer of its own after it (one answer per save).
+    pub given_up: AtomicBool,
     steps: AtomicU64,
     bytes: AtomicU64,
 }

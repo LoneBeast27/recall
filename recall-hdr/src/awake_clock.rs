@@ -11,6 +11,9 @@
 //! Code takes a [`Clock`]; production passes [`AwakeClock`], tests a `FakeClock` whose awake
 //! and asleep time move separately (`sleep_for` moves only the biased clock).
 
+// Shared by two crates through `#[path]`: each uses a part of it.
+#![allow(dead_code)]
+
 use std::ops::{Add, AddAssign};
 use std::time::{Duration, Instant};
 

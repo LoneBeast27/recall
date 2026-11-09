@@ -325,6 +325,7 @@ impl ApplicationHandler for App {
                 live_sources: true,
                 live_source_fields: true,
                 stop_capture: true,
+                drain_heartbeat: true,
             });
         }
         if let Some(early) = early_stdin {
