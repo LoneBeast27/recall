@@ -33,6 +33,19 @@ fn picture(w: u32, h: u32, rgba: Vec<u8>, content: Option<Rect>) -> (u32, u32, V
 /// Why a screenshot pending at the privacy stop is not saved.
 pub(crate) const STOPPED_SHOT: &str = "capture stopped; not saved";
 
+/// The GPU path's shot from `src` (`latest_gpu` live). R2-detect-r10-p6-3 / design P4: the
+/// frame's number is re-checked after the read (`frame_source::read_admitted`), so a stop that
+/// landed after `screenshot_tick`'s own check still refuses a frame stored after it.
+pub(crate) fn shoot(shots: &crate::screenshot::Screenshots, src: &mut dyn crate::frame_source::FrameSource<(u32, u32, Vec<u8>)>, source: &str) {
+    use crate::frame_source::{read_admitted, FrameRead};
+    match read_admitted(src) {
+        FrameRead::Frame((w, h, rgba)) => shots.submit(w, h, rgba, source),
+        FrameRead::Stopped => shots.fail(STOPPED_SHOT),
+        FrameRead::Failed(e) => shots.fail(&format!("frame readback failed: {e}")),
+        FrameRead::Empty => shots.fail("no captured frame yet"),
+    }
+}
+
 impl App {
     /// Encode each newly uploaded capture once, retaining its native timestamp.
     /// A full ingress queue drops a frame instead of blocking capture or growing RAM.
@@ -87,18 +100,9 @@ impl App {
         }
         #[cfg(feature = "encode")]
         if self.gpu.is_none() {
-            let latest = self.shared.as_ref().and_then(|s| {
-                let slot = s.latest_gpu.lock().ok()?;
-                let seq = s.latest_gpu_seq.load(Relaxed);
-                slot.as_ref().and_then(|(f, c)| Some((f.try_clone()?, *c, seq)))
-            });
-            let seq = latest.as_ref().map_or(0, |l| l.2);
-            match latest.map(|(f, c, _)| crate::gpu_frames::read_rgba(&f).map(|(w, h, rgba)| picture(w, h, rgba, c))) {
-                // R2-detect-r10-p6-3: re-checked after the read, so a stop that landed after the
-                // check above still refuses a frame stored after it.
-                Some(Ok(_)) if !crate::stop_capture::frame_admitted(seq) => shots.fail(STOPPED_SHOT),
-                Some(Ok((w, h, rgba))) => shots.submit(w, h, rgba, &self.source_name),
-                Some(Err(e)) => shots.fail(&format!("frame readback failed: {e}")),
+            let read = |f: &crate::gpu_frames::HwFrame, c| crate::gpu_frames::read_rgba(f).map(|(w, h, rgba)| picture(w, h, rgba, c));
+            match self.shared.as_ref() {
+                Some(shared) => shoot(shots, &mut crate::frame_source::LatestGpu { shared, read }, &self.source_name),
                 None => shots.fail("no captured frame yet"),
             }
             return;
