@@ -206,9 +206,10 @@ namespace Recall.Setup
         }
     }
 
-    /// The %TEMP%\Recall-Uninstall-&lt;guid&gt; copy removes itself: when it ends, a hidden cmd.exe
-    /// retries `rmdir` on that one folder for up to a minute (it can't go while this exe runs), and
-    /// the folder is also queued for removal at the next boot when Windows allows it.
+    /// The %TEMP%\Recall-Uninstall-&lt;guid&gt; copy can't delete itself while it runs. When it ends
+    /// it queues itself and its folder for removal at the next boot (Windows allows that only with
+    /// administrator rights), and the next Setup run sweeps any leftover folder (Sweep). No helper
+    /// process is started.
     internal static class TempCopy
     {
         public const string Prefix = "Recall-Uninstall-";
@@ -225,13 +226,6 @@ namespace Recall.Setup
             return true;
         }
 
-        /// cmd.exe arguments: up to 60 tries, about a second apart, then it gives up.
-        public static string CleanupArguments(string folder)
-        {
-            return "/d /q /c \"for /l %i in (1,1,60) do (rmdir /s /q \"" + folder + "\" 2>nul & if not exist \"" + folder
-                + "\" exit /b 0 & ping -n 2 127.0.0.1 >nul)\"";
-        }
-
         public static void ScheduleRemoval(Action<string> log)
         {
             try
@@ -243,13 +237,40 @@ namespace Recall.Setup
                 // Next-boot removal needs administrator rights; a standard user's request is simply refused.
                 Native.MoveFileExW(exe, null, 0x4);    // MOVEFILE_DELAY_UNTIL_REBOOT
                 Native.MoveFileExW(folder, null, 0x4);
-                var cmd = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "cmd.exe");
-                using (Process.Start(new ProcessStartInfo(cmd, CleanupArguments(folder)) {
-                    UseShellExecute = false, CreateNoWindow = true, WorkingDirectory = temp
-                })) { }
-                log("Temporary copy " + folder + " will be removed once this uninstaller exits.");
+                log("Temporary copy " + folder + " is removed at the next restart or the next Recall Setup run.");
             }
             catch (Exception error) { log("Could not schedule removal of the temporary copy: " + error.Message); }
+        }
+
+        /// Removes leftover uninstaller copies in tempRoot: only folders IsOurFolder accepts, never a
+        /// reparse point, and only when the folder holds plain files alone (no subfolder, no link).
+        /// A folder still in use (the running copy) or anything unexpected is left. Returns the count removed.
+        public static int Sweep(string tempRoot, Action<string> log)
+        {
+            var removed = 0;
+            string[] candidates;
+            try { candidates = Directory.GetDirectories(tempRoot, Prefix + "*", SearchOption.TopDirectoryOnly); }
+            catch (Exception) { return 0; }
+            foreach (var folder in candidates)
+            {
+                try
+                {
+                    if (!IsOurFolder(folder, tempRoot)) continue;
+                    if ((File.GetAttributes(folder) & FileAttributes.ReparsePoint) != 0) continue;
+                    if (Directory.GetDirectories(folder).Length != 0) continue;
+                    var files = Directory.GetFiles(folder);
+                    var plain = true;
+                    foreach (var file in files)
+                        if ((File.GetAttributes(file) & FileAttributes.ReparsePoint) != 0) plain = false;
+                    if (!plain) continue;
+                    foreach (var file in files) File.Delete(file);
+                    Directory.Delete(folder, false);
+                    removed++;
+                    log("Removed the leftover uninstaller copy " + folder);
+                }
+                catch (Exception) { }
+            }
+            return removed;
         }
 
         private static class Native
