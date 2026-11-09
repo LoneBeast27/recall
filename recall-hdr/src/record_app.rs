@@ -124,6 +124,7 @@ pub struct Controller {
     /// targets ignored, capture actions refused. A restart resumes.
     pub(crate) paused: bool,
     pub(crate) setup_owner: Option<u32>,
+    pub(crate) owner_watch: Option<crate::record_setup_owner::OsOwner>,
     /// Saves / long recording in flight (from engine events).
     pub(crate) activity: EngineActivity,
     pub(crate) engine_events: Receiver<serde_json::Value>,
@@ -248,6 +249,7 @@ pub fn run() -> i32 {
         primary: crate::record_monitor::PrimaryWatch::new(crate::record_monitor::read_primary(), now),
         quit: None,
         paused: setup_owner.is_some(),
+        owner_watch: setup_owner.map(crate::record_setup_owner::OsOwner::open),
         setup_owner,
         activity: EngineActivity::default(),
         engine_events,
@@ -395,6 +397,7 @@ impl Controller {
             self.activity.engine_restarted();
             self.reapply_engine_intents();
         }
+        self.setup_owner_tick();
         self.activity_tick(now);
         self.encoder_recover_tick(now);
         self.overlay.sync(&self.cfg.overlay);

@@ -91,7 +91,7 @@ impl Root {
         Self {
             route: Route::Library,
             setup: None,
-            setup_resume_pending: false,
+            setup_resume_pending: None,
             focus: cx.focus_handle(),
             workers,
             daemon,

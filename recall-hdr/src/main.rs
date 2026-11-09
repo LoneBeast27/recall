@@ -108,6 +108,7 @@ mod record_lock;
 mod record_session_end;
 mod record_session_host;
 mod record_session_win;
+mod record_setup_owner;
 mod record_private_watch;
 mod record_quit;
 mod record_quit_wait;
