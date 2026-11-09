@@ -93,7 +93,7 @@ impl Shared {
 /// A quit window's refusal once shutdown runs: a retarget's (a game switch, a planned
 /// restart) promised an engine that will not come, so "isn't responding". A pause's
 /// "Recording is paused" and a stop's "waiting for a game" stay true: they promised none.
-fn at_shutdown(refusal: Sent) -> Sent {
+pub(super) fn at_shutdown(refusal: Sent) -> Sent {
     match refusal {
         Sent::Switching | Sent::Restarting => Sent::NotResponding,
         other => other,
