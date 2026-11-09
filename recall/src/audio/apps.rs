@@ -149,7 +149,7 @@ pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, report
 fn push_silence(ring: &TrackRing, frames: u64) {
     let frames = frames.min(ring.capacity_frames());
     if frames > 0 {
-        ring.push_capture(&vec![0.0; frames as usize * ring.channels as usize], false);
+        super::packet::push_silence(ring, frames as usize * ring.channels as usize); // no allocation
     }
 }
 
@@ -219,12 +219,14 @@ fn capture_events(ring: &TrackRing, client: &mut wasapi::AudioClient, event: &Ev
     let channels = ring.channels as usize;
     let block = channels * 4;
     let mut raw: VecDeque<u8> = VecDeque::new();
+    // Kept across packets: no allocation per packet once they fit (merge-gate P3).
+    let (mut samples, mut leveled) = (Vec::new(), Vec::new());
     let mut last_sound = Instant::now();
     while !process.exited() {
         if event.0.wait_for_event(100).is_ok() && capture.read_from_device_to_deque(&mut raw).is_ok() && raw.len() >= block {
-            let full = raw.len() - raw.len() % block;
-            let samples: Vec<f32> = raw.drain(..full).collect::<Vec<u8>>().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-            ring.push_capture(&level.live(started.elapsed(), &samples, channels), false);
+            super::packet::decode(&mut raw, block, &mut samples);
+            level.live_into(started.elapsed(), &samples, channels, &mut leveled);
+            ring.push_capture(&leveled, false);
             last_sound = Instant::now();
         } else if last_sound.elapsed() >= IDLE {
             // No active stream: the app is quiet, so silence up to the clock cuts nothing.
