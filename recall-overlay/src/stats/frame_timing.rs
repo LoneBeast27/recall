@@ -20,9 +20,6 @@ use super::frame_math::FrameStats;
 
 pub const RETRY_AFTER: Duration = Duration::from_secs(5);
 
-/// The running note's tail when a game refused the PID filter (Apex Legends).
-const UNFILTERED: &str = " (unfiltered: the game refused a PID filter)";
-
 /// The overlay's own frame-timing state (diagnostics; the island's note).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -121,10 +118,11 @@ impl FrameTiming {
             Step::Start(pid) => self.start(pid, now),
             Step::Retarget(pid) => {
                 if let Some(session) = self.session.as_mut() {
-                    let was = session.unfiltered();
+                    let was = session.filter_note();
                     session.retarget(pid);
-                    if session.unfiltered() != was {
-                        self.note = Some(format!("running for pid {pid}{UNFILTERED}"));
+                    let how = session.filter_note();
+                    if how != was {
+                        self.note = Some(format!("running for pid {pid}{how}"));
                     }
                 }
                 self.phase = Phase::Running(pid);
@@ -146,7 +144,7 @@ impl FrameTiming {
         };
         let (phase, note) = match EtwSession::start(pid) {
             Ok(session) => {
-                let how = if session.unfiltered() { UNFILTERED } else { "" };
+                let how = session.filter_note();
                 self.session = Some(session);
                 (Phase::Running(pid), format!("running for pid {pid}{how}"))
             }
