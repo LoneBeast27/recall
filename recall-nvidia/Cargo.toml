@@ -2,6 +2,7 @@
 name = "recall-nvidia"
 version = "0.0.1"
 edition = "2021"
+license = "GPL-3.0-or-later"
 description = "NVIDIA driver knowledge for Recall: is this exe a game NVIDIA has a game profile for (NvAPI DRS, read-only)"
 
 [dependencies]
