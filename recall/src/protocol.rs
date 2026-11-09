@@ -21,6 +21,9 @@ pub enum Outbound {
         /// gain boosted live (P2-a). An engine without it (8111e31 and older) ignores those
         /// fields, so the controller restarts it for them instead of sending them.
         live_source_fields: bool,
+        /// This engine takes `stop_capture` (`stop_capture.rs`); a controller holds a privacy
+        /// stop for a save in flight on an engine that does not say so.
+        stop_capture: bool,
     },
     /// Sent on change (and ~1/s for fps): current live state.
     Status {
@@ -308,6 +311,9 @@ pub enum Command {
     /// The Windows session locked (Win+L) or unlocked: a long recording keeps going and
     /// counts the time (`recording_stopped.locked_seconds`).
     SessionLocked { locked: bool },
+    /// The privacy stop (`stop_capture.rs`): capture stops now, nothing more is read, and the
+    /// engine exits once the saves already asked for are written.
+    StopCapture,
     /// Ask the engine to exit cleanly.
     Quit,
 }
