@@ -43,26 +43,23 @@ impl super::Shared {
     pub(super) fn set_mute_and_send(&self, muted: bool) -> Sent {
         let g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
         self.spawn_mute.set(muted);
-        self.queue_line(&g, &mute_line(muted))
+        self.queue_line(&g, &self.spawn_sources.stamp(&mute_line(muted)))
     }
 
-    /// A spawned engine's stdin; `baked` is the mute its environment was given. An Alt+M from
-    /// the env read to here had no queue to take its line (P1-a: live mic in the ring while the
-    /// tray says muted): when the mute differs now, `set_mic_mute` is the engine's first line.
-    pub(super) fn attach_spawned(&self, w: Option<Box<dyn std::io::Write + Send>>, baked: Option<bool>) {
+    /// A spawned engine's stdin. Its device tracks start held: the whole audio intent is
+    /// restated as its first lines, then `sync` (`restate`, design-audio-mute P8), all under
+    /// the `child_stdin` lock an Alt+M and an Audio-page change also hold, so none of them is
+    /// lost between the spawn's env and here. `_baked`: the mute its env was given (the
+    /// restatement sends the current one whatever it was).
+    pub(super) fn attach_spawned(&self, w: Option<Box<dyn std::io::Write + Send>>, _baked: Option<bool>) {
         let queue = w.map(super::stdin::StdinQueue::start);
         let mut g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
         if queue.is_some() {
             g.quitting = None; // a new engine takes lines
         }
         g.queue = queue; // the old queue closes: its writer ends after its current write
-        let Some(queue) = g.queue.as_ref() else { return };
-        if let Some(now) = self.spawn_mute.get().filter(|&now| baked != Some(now)) {
-            // No press (review R2-audio-r9-3): the Alt+M was made before any stream of this
-            // engine opened, so it must never release a hold (A4: a press after it opened).
-            if !queue.send(&crate::record_dispatch::mic_line(now, false)) {
-                crate::log!("supervisor: the new engine's mic mute could not be queued");
-            }
+        if let Some(queue) = g.queue.as_ref() {
+            self.restate(queue);
         }
     }
 }

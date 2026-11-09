@@ -69,8 +69,14 @@ impl Recorded {
         Recorded { bytes, done, _child: None }
     }
 
-    /// Every line written, once the writer ended (its queue closed: `attach_writer`).
+    /// Every line written but the audio restatement and other audio lines (they carry a `seq`),
+    /// once the writer ended (its queue closed: `attach_writer`).
     pub(crate) fn lines(&self) -> Vec<String> {
+        self.raw_lines().into_iter().filter(|l| !l.contains(r#""seq":"#)).collect()
+    }
+
+    /// Every line written, once the writer ended.
+    pub(crate) fn raw_lines(&self) -> Vec<String> {
         self.done.recv_timeout(Duration::from_secs(5)).expect("the stdin writer never ended");
         String::from_utf8_lossy(&self.bytes.lock().unwrap()).lines().map(str::to_string).collect()
     }
