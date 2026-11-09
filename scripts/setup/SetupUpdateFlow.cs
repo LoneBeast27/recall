@@ -11,8 +11,19 @@ namespace Recall.Setup
     /// long recording again if one was on) and, when the app asked for the update (`--resume`), the
     /// app reopens where it was. A failure after the quit restores the settings and brings back the
     /// OLD pair the same way; the reopened app says the update failed (no retry loop).
+    /// The update failed and Recall was deliberately not reopened (UpdateFlow.NotReopenedText).
+    internal sealed class UpdateNotReopened : InvalidOperationException
+    {
+        public UpdateNotReopened(string message) : base(message) { }
+    }
+
     internal sealed class UpdateFlow
     {
+        public const string ReleasesUrl = "https://github.com/LoneBeast27/recall/releases";
+        /// What Setup says when the folder could not be made consistent, so Recall stays closed.
+        public const string NotReopenedText = "Recall couldn't finish updating and wasn't reopened, to avoid a broken install. "
+            + "Your clips and settings are safe. Run Setup again or download it from " + ReleasesUrl + ".";
+
         /// How long the restarted recorder may take to capture before `record_start` is sent once.
         internal static int CaptureWaitSeconds = 30;
 
@@ -81,7 +92,9 @@ namespace Recall.Setup
             {
                 log("WARNING: the install folder is not consistent yet (" + why + "); Recall is not reopened.");
                 Outcome("failed", error.GetBaseException().Message);
-                return;
+                // Setup stays open with this (SetupWindow shows the message); never a silent close.
+                log(NotReopenedText);
+                throw new UpdateNotReopened(NotReopenedText);
             }
             try
             {

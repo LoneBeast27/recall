@@ -17,6 +17,12 @@ namespace Recall.Setup
             if (resumePath != null && !preview) BeginInvoke(new Action(() => primary.PerformClick()));
         }
 
+        /// The failure text the window shows (an update that left Recall closed says why and what to do).
+        internal static string ResultText(Exception error)
+        {
+            return error is UpdateNotReopened ? error.Message : error.GetBaseException().Message;
+        }
+
         /// After a successful resumed update: close (Recall reopened itself). True = closed.
         private bool ResumedUpdateDone()
         {

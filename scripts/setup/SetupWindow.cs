@@ -379,7 +379,7 @@ namespace Recall.Setup
                 description.Text = "Review the message below, then return to your options.";
                 resultTitle.Text = "Recall could not install";
                 resultTitle.ForeColor = Error;
-                resultDetail.Text = error.GetBaseException().Message;
+                resultDetail.Text = ResultText(error);
                 primary.Text = "Back to options";
                 failed = true;
             }
