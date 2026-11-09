@@ -88,9 +88,11 @@ pub fn edit_file(source: &Path) -> Option<PathBuf> {
     Some(edits_dir()?.join(format!("{:016x}~{name}.recall-edit.json", path_hash(&source.to_string_lossy()))))
 }
 
-/// FNV-1a over the folder key: stable across runs and Rust versions.
+/// FNV-1a over the path as written (separators and case folded, a `\\?\` prefix kept): stable
+/// across runs and Rust versions, so edit files already saved under a verbatim path keep their
+/// name. Not `folder_key`, which drops the prefix for comparisons.
 fn path_hash(path: &str) -> u64 {
-    folder_key(path).bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
+    path.replace('/', "\\").trim_end_matches('\\').to_lowercase().bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
 }
 
 /// The clip file name an edit file belongs to (`<hash>~` removed).
@@ -346,5 +348,29 @@ mod tests {
         assert!(!is_imported(r"D:\OldRecall\VALORANT__2026-10-01__10-00-00.mp4", Path::new(r"G:\Recall"), &imported, &former));
         assert!(is_imported(r"D:\OldRecall\sub\x.mp4", Path::new(r"G:\Recall"), &imported, &former), "only its own top level, like the recordings folder");
         assert!(is_imported(r"D:\Medal\x.mp4", Path::new(r"G:\Recall"), &imported, &former));
+    }
+
+    /// The editor opens a clip by its canonical path (`\\?\L:\...`); the folder list holds plain
+    /// paths. Ownership must not depend on which form either side is in.
+    #[test]
+    fn a_verbatim_path_to_an_owned_clip_is_owned() {
+        let recordings = Path::new(r"L:\Clips\Recall");
+        assert!(is_owned(Path::new(r"\\?\L:\Clips\Recall\a.mp4"), recordings, &[]), "verbatim clip, plain recordings");
+        assert!(is_owned(Path::new(r"l:/clips/recall/a.mp4"), Path::new(r"\\?\L:\Clips\Recall\"), &[]), "plain clip, verbatim recordings");
+        assert!(is_owned(Path::new(r"\\?\D:\Old\a.mp4"), recordings, &[r"d:/old/".to_owned()]), "former folder");
+        assert!(is_owned(Path::new(r"\\?\UNC\nas\clips\a.mp4"), Path::new(r"\\NAS\Clips"), &[]), "network share");
+        assert!(!is_owned(Path::new(r"\\?\L:\Clips\Recall\sub\a.mp4"), recordings, &[]), "still only the top level");
+        assert!(!is_owned(Path::new(r"\\?\L:\Clips\Recall2\a.mp4"), recordings, &[]));
+        let imported = vec![r"L:\Clips".to_owned()];
+        assert!(!is_imported(r"\\?\L:\Clips\Recall\a.mp4", recordings, &imported, &[]), "an owned clip is never imported");
+        assert!(is_imported(r"\\?\L:\Clips\Medal\a.mp4", recordings, &imported, &[]), "inside a linked folder, verbatim");
+    }
+
+    /// Edits of imported clips already saved under the verbatim path's hash keep their name.
+    #[test]
+    fn the_edit_file_name_of_a_verbatim_path_is_unchanged() {
+        let fnv = |text: &str| text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));
+        assert_eq!(path_hash(r"\\?\D:\Medal\a.mp4"), fnv(r"\\?\d:\medal\a.mp4"), "the prefix stays in the hash");
+        assert_eq!(path_hash(r"D:/Medal/A.mp4"), fnv(r"d:\medal\a.mp4"));
     }
 }

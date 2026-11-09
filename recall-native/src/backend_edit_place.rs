@@ -153,6 +153,23 @@ mod tests {
         assert_eq!(std::fs::read_dir(&source).unwrap().count(), 1, "the source folder gained no files");
     }
 
+    /// The editor saves by `info.path`, the canonical `\\?\` form: an owned clip's edits still go
+    /// beside it, not to APPDATA (the viewer check's lib-undone run, 2026-11-10).
+    #[test]
+    fn an_owned_clip_opened_by_its_verbatim_path_keeps_its_edits_beside_it() {
+        let root = crate::test_temp::TempDir::sandbox("edit-beside-verbatim");
+        std::fs::create_dir_all(root.join("lib-undone")).unwrap();
+        // The folder list holds the plain form (the sandbox path has a `..` in it).
+        let recordings = storage::plain_path(&std::fs::canonicalize(root.join("lib-undone")).unwrap());
+        let clip = recordings.join("undone.mp4");
+        std::fs::write(&clip, b"clip").unwrap();
+        let source = std::fs::canonicalize(&clip).unwrap().to_string_lossy().into_owned();
+        assert!(source.starts_with(r"\\?\"), "{source}");
+        let folders = Folders { recordings: Some(recordings.to_string_lossy().into_owned()), ..Folders::default() };
+        let edit = sidecar_in(&source, &folders).unwrap();
+        assert_eq!(storage::plain_path(&edit), recordings.join("undone.mp4.recall-edit.json"));
+    }
+
     #[test]
     fn the_uis_folder_list_places_edits_and_a_released_folders_edits_still_open() {
         let dir = std::env::temp_dir().join(format!("recall-edit-place-{}", std::process::id()));

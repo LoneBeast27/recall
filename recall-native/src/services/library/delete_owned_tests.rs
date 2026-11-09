@@ -39,6 +39,22 @@ fn an_old_folder_list_with_videos_linked_keeps_recalls_clips_its_own() {
 }
 
 #[test]
+fn an_owned_clip_named_by_its_verbatim_path_still_goes_to_the_bin() {
+    // The editor holds a clip by its canonical path (`\\?\L:\...`); the folder list is plain.
+    let root = crate::test_temp::TempDir::sandbox("owned-verbatim");
+    let own = clip(&root.join("Recall"), "undone.mp4");
+    // The folder list holds the plain form (the sandbox path has a `..` in it).
+    let recordings = crate::services::storage::plain_path(&std::fs::canonicalize(root.join("Recall")).unwrap());
+    let verbatim = std::fs::canonicalize(&own).unwrap();
+    assert!(text(&verbatim).starts_with(r"\\?\"), "{verbatim:?}");
+    let folders = Folders { recordings: Some(text(&recordings)), imported: vec![text(&root)], ..Folders::default() };
+    let (imported, owned) = partition_for_delete(std::slice::from_ref(&verbatim), &folders);
+    assert_eq!((imported, owned), (Vec::new(), vec![verbatim.clone()]), "Delete recycles, never only hides");
+    let exports = crate::backend::checked_export_dir(&verbatim, &folders).expect("own clips export");
+    assert_eq!(crate::services::storage::plain_path(&exports), recordings.join("exports"));
+}
+
+#[test]
 fn releasing_a_former_folder_that_holds_the_recordings_folder_is_refused() {
     // Trigger 2: D:\Clips -> D:\Clips\Recall, then remove D:\Clips from Folders Recall manages.
     let root = crate::test_temp::TempDir::sandbox("release-parent");
