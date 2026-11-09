@@ -47,3 +47,29 @@ mod fps_cap_tests {
         assert_eq!(ed.fps, MAX_EXPORT_FPS, "edits saved before the cap open capped");
     }
 }
+
+mod is_open_tests {
+    use super::super::*;
+
+    /// A Library tile names the clip through the recordings folder as configured; the editor holds
+    /// the canonical path. Through a junction (a redirected Videos folder) they differ in text, and
+    /// reopening the clip just left restarted it from 0:00 instead of where it stopped.
+    #[test]
+    fn a_clip_named_through_a_junction_is_the_clip_already_open() {
+        let root = crate::test_temp::TempDir::sandbox("is-open-junction");
+        let real = root.join("real");
+        std::fs::create_dir_all(&real).unwrap();
+        std::fs::write(real.join("a.mp4"), b"clip").unwrap();
+        std::fs::hard_link(real.join("a.mp4"), real.join("b.mp4")).unwrap();
+        let link = root.join("link");
+        let made = std::process::Command::new("cmd").args(["/C", "mklink", "/J"]).arg(&link).arg(&real).output().unwrap();
+        assert!(made.status.success(), "mklink /J: {}", String::from_utf8_lossy(&made.stderr));
+        let mut ed = EditorState::new(Err("no preview".into()));
+        let canonical = std::fs::canonicalize(real.join("a.mp4")).unwrap().to_string_lossy().into_owned();
+        ed.info = Some(ClipInfo { path: canonical, duration: 9.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 4, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() });
+        assert!(ed.is_open(&link.join("a.mp4").to_string_lossy()), "the same file through the junction");
+        assert!(ed.is_open(&real.join("a.mp4").to_string_lossy()));
+        assert!(!ed.is_open(&link.join("b.mp4").to_string_lossy()), "a hard link is another clip");
+        assert!(!ed.is_open(&link.join("missing.mp4").to_string_lossy()));
+    }
+}

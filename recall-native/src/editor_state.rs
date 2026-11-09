@@ -202,7 +202,15 @@ impl EditorState {
 
     /// `info.path` is canonical (`\\?\E:\...`); tiles pass plain paths.
     pub fn is_open(&self, path: &str) -> bool {
-        self.info.as_ref().is_some_and(|info| same_path(&info.path, path)) || self.loading_path.as_deref().is_some_and(|p| same_path(p, path))
+        let open: Vec<&str> = self.info.iter().map(|info| info.path.as_str()).chain(self.loading_path.as_deref()).collect();
+        if open.iter().any(|p| same_path(p, path)) {
+            return true;
+        }
+        // The editor holds the canonical path; a tile names the clip through the folder as
+        // configured. Through a junction or a linked folder only the resolved path matches.
+        let Some(real) = (!open.is_empty()).then(|| std::fs::canonicalize(path).ok()).flatten() else { return false };
+        let real = real.to_string_lossy();
+        open.iter().any(|p| same_path(p, &real))
     }
 
     pub fn open(&mut self, path: String, workers: &Workers) {
