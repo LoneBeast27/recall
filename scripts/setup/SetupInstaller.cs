@@ -64,8 +64,13 @@ namespace Recall.Setup
             // An update may close the app (it asked for the update); a first install refuses while it runs.
             var quitter = new RecorderQuitter(targets, dir, options.Update, log);
             var update = options.Update ? new UpdateFlow(targets, dir, options.Resume, log) : null;
-            if (update != null) update.Begin(quitter);
-            try { Replace(package, work, dir, quitter, update, progress, log); }
+            try
+            {
+                // Inside: the app has already quit itself for the update, so any failure here must
+                // still reopen it and say so (Failed copes with no backup yet).
+                if (update != null) update.Begin(quitter);
+                Replace(package, work, dir, quitter, update, progress, log);
+            }
             catch (Exception error)
             {
                 if (update != null) update.Failed(error, quitter, options);
@@ -73,6 +78,29 @@ namespace Recall.Setup
             }
 
             var notes = new List<string>();
+            try { Register(targets, dir, options, log); }
+            catch (Exception error)
+            {
+                // The new files are in: the update stands, Recall still reopens, and the note says what failed.
+                if (update == null) throw;
+                notes.Add("Recall is updated, but Setup could not finish registering it (" + error.Message + "). Run Setup again to repair the Start menu and Apps & Features entries.");
+                log("WARNING: " + notes[notes.Count - 1]);
+            }
+            if (update != null) update.Succeeded(quitter, options, notes);
+            else if (options.Launch) StartRecorder(targets, dir, options, quitter, log, notes);
+            else if (options.Autostart) notes.Add("Start with Windows was not set (the recorder was not started). Turn it on in Recall > Settings > General.");
+            foreach (var note in notes) log("WARNING: " + note);
+            log("Installed to " + dir + ".");
+            return notes.Count == 0 ? null : string.Join("\n", notes.ToArray());
+        }
+
+        /// Tests only: runs after the swap, before the Start menu and Apps &amp; Features entries.
+        internal static Action AfterSwap = null;
+
+        private static void Register(SetupTargets targets, string dir, InstallOptions options, Action<string> log)
+        {
+            var hook = AfterSwap;
+            if (hook != null) hook();
             if (options.Shortcut && !options.Update)
             {
                 Shortcut.Write(targets.Shortcut, Path.Combine(dir, "recall-native.exe"), dir, Path.Combine(dir, "recall.ico"),
@@ -81,12 +109,6 @@ namespace Recall.Setup
             }
             AppsEntry.Write(targets, dir, AppsEntry.ProgramSizeKb(dir));
             log("Apps & Features entry: HKCU\\" + targets.UninstallKey);
-            if (update != null) update.Succeeded(quitter, options, notes);
-            else if (options.Launch) StartRecorder(targets, dir, options, quitter, log, notes);
-            else if (options.Autostart) notes.Add("Start with Windows was not set (the recorder was not started). Turn it on in Recall > Settings > General.");
-            foreach (var note in notes) log("WARNING: " + note);
-            log("Installed to " + dir + ".");
-            return notes.Count == 0 ? null : string.Join("\n", notes.ToArray());
         }
 
         /// App closed, recorder quit and waited for, then the staged, verified, all-or-nothing swap.

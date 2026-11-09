@@ -34,8 +34,10 @@ namespace Recall.Setup.Tests
                 Env(SetupTargets.PipeVariable, pipe);
                 Env(SetupTargets.LegacyPipeVariable, pipe + "-legacy");
                 Env("FAKE_LOG", Log);
-                foreach (var k in new[] { "FAKE_FINISHING_POLLS", "FAKE_LONG_PATH", "FAKE_FINALIZE", "FAKE_TOUCH", "RECALL_SETUP" }) Env(k, null);
+                foreach (var k in new[] { "FAKE_FINISHING_POLLS", "FAKE_LONG_PATH", "FAKE_FINALIZE", "FAKE_TOUCH", "FAKE_TOUCH_TEXT", "RECALL_SETUP" }) Env(k, null);
                 UpdateFlow.CaptureWaitSeconds = 5;
+                UpdateFlow.BeforeBackup = null;
+                Installer.AfterSwap = null;
                 foreach (var name in Programs) Fake(Path.Combine(Install, name), "OLD");
                 foreach (var name in Others) File.WriteAllText(Path.Combine(Install, Path.GetFileName(name)), "old " + name);
                 FakePackage();
@@ -79,6 +81,9 @@ namespace Recall.Setup.Tests
                 if (!saved.ContainsKey(key)) saved[key] = Environment.GetEnvironmentVariable(key);
                 Environment.SetEnvironmentVariable(key, value);
             }
+
+            /// A config.toml naming the sandbox's recordings folder.
+            public string Config(int buffer) { return "[recording]\noutput_dir = '" + Clips + "'\nbuffer_secs = " + buffer + "\n"; }
 
             public string SetupLog() { var p = Path.Combine(Root, "setup.log"); return File.Exists(p) ? File.ReadAllText(p) : ""; }
 
@@ -143,6 +148,10 @@ namespace Recall.Setup.Tests
                         catch (Exception) { }
                 }
                 foreach (var kv in saved) Environment.SetEnvironmentVariable(kv.Key, kv.Value);
+                UpdateFlow.BeforeBackup = null;
+                Installer.AfterSwap = null;
+                UpdateFlow.BeforeBackup = null;
+                Installer.AfterSwap = null;
                 try { Microsoft.Win32.Registry.CurrentUser.DeleteSubKeyTree(SetupTargets.SandboxRegistryBase + @"\Uninstall\Recall", false); }
                 catch (Exception) { }
                 for (int i = 0; i < 20 && Directory.Exists(Root); i++)
@@ -168,7 +177,7 @@ namespace Recall.Setup.Tests
                 box.Env("FAKE_FINISHING_POLLS", "3");
                 File.WriteAllText(Path.Combine(box.Roaming, "config-marker.txt"), "unrelated");
                 Directory.CreateDirectory(Path.Combine(box.Roaming, "recall-hdr"));
-                File.WriteAllText(Path.Combine(box.Roaming, @"recall-hdr\config.toml"), "[recording]\nbuffer_secs = 60\n");
+                File.WriteAllText(Path.Combine(box.Roaming, @"recall-hdr\config.toml"), box.Config(60));
                 box.StartRecorder();
                 var resume = box.WriteResume(true);
                 var error = box.Run(resume);
@@ -189,7 +198,7 @@ namespace Recall.Setup.Tests
                 Check("updated".Equals(outcome["outcome"]) && outcome["recovered"] == null, "outcome: updated");
                 var backups = ConfigBackup.Backups(Path.Combine(box.Local, @"Recall\updates"));
                 Check(backups.Count == 1 && File.Exists(Path.Combine(backups[0], @"roaming\recall-hdr\config.toml")), "settings backed up in the sandbox");
-                Check(File.ReadAllText(Path.Combine(box.Roaming, @"recall-hdr\config.toml")) == "[recording]\nbuffer_secs = 60\n", "the update never wrote the settings");
+                Check(File.ReadAllText(Path.Combine(box.Roaming, @"recall-hdr\config.toml")) == box.Config(60), "the update never wrote the settings");
             }
         }
 
@@ -205,8 +214,10 @@ namespace Recall.Setup.Tests
                 box.Env("FAKE_FINISHING_POLLS", "1");
                 var config = Path.Combine(box.Roaming, @"recall-hdr\config.toml");
                 Directory.CreateDirectory(Path.GetDirectoryName(config));
-                File.WriteAllText(config, "[recording]\nbuffer_secs = 45\n");
+                File.WriteAllText(config, box.Config(45));
+                // The recorder saves its settings as it quits: newer than anything before the quit.
                 box.Env("FAKE_TOUCH", config);
+                box.Env("FAKE_TOUCH_TEXT", box.Config(90));
                 box.StartRecorder();
                 var resume = box.WriteResume(true);
                 string error;
@@ -215,7 +226,7 @@ namespace Recall.Setup.Tests
                 Check(error != null && error.Contains("rolled back"), "the update failed and rolled back: " + error);
                 var log = string.Join(" | ", box.Lines());
                 Check(Sandbox.Programs.All(p => box.Version(p) == "OLD"), "the old programs stayed: " + log);
-                Check(File.ReadAllText(config) == "[recording]\nbuffer_secs = 45\n", "the settings were restored from the backup");
+                Check(File.ReadAllText(config) == box.Config(90), "the recorder's newer settings stayed (a readable file is never restored over)");
                 Check(File.Exists(recording) && !File.Exists(recording + ".part"), "the cut-short recording was recovered");
                 var outcome = box.Resume(resume);
                 Check("failed".Equals(outcome["outcome"]) && "0.1.0".Equals(outcome["still_on"]), "the app is told it is still on 0.1.0");
@@ -252,7 +263,11 @@ namespace Recall.Setup.Tests
                 Check(all.Count == 3 && all[0] == last, "the 3 newest stay: " + string.Join(",", all.ToArray()));
                 File.WriteAllText(Path.Combine(roots.Roaming, @"Recall\library.json"), "garbage");
                 File.Delete(Path.Combine(install, @"cache\storage.json"));
-                Check(ConfigBackup.Restore(last, roots, install, s => { }) == 2, "both files restored");
+                Check(ConfigBackup.Restore(last, roots, install, s => { }) == 2, "the unreadable and the missing file are restored");
+                File.WriteAllText(Path.Combine(roots.Roaming, @"Recall\library.json"), "{\"newer\":{}}");
+                Check(ConfigBackup.Restore(last, roots, install, s => { }) == 0, "a readable file is never replaced");
+                Check(File.ReadAllText(Path.Combine(roots.Roaming, @"Recall\library.json")) == "{\"newer\":{}}", "the newer file stays");
+                File.WriteAllText(Path.Combine(roots.Roaming, @"Recall\library.json"), "{\"a\":{\"favourite\":true}}");
                 Check(File.ReadAllText(Path.Combine(roots.Roaming, @"Recall\library.json")) == "{\"a\":{\"favourite\":true}}", "library back");
                 Check(File.Exists(Path.Combine(install, @"cache\storage.json")), "storage back");
             }
@@ -266,11 +281,26 @@ namespace Recall.Setup.Tests
             try
             {
                 var rec = Path.Combine(root, "G__rec.mp4");
-                Check(PartRecovery.Recover(rec, s => { }) == null, "no .part: nothing to do");
+                var folders = new List<string> { root };
+                Check(PartRecovery.Recover(rec, folders, s => { }) == null, "no .part: nothing to do");
                 File.WriteAllText(rec + ".part", "x");
                 File.WriteAllText(rec, "taken");
-                Check(PartRecovery.Recover(rec, s => { }) == Path.Combine(root, "G__rec-recovered.mp4"), "a taken name gets -recovered");
-                Check(PartRecovery.Recover(Path.Combine(root, "notes.txt"), s => { }) == null, "only an .mp4 recording");
+                Check(PartRecovery.Recover(rec, new List<string> { Path.Combine(root, "other") }, s => { }) == null && File.Exists(rec + ".part"), "outside the recordings folders: refused");
+                Check(PartRecovery.Recover(rec, folders, s => { }) == Path.Combine(root, "G__rec-recovered.mp4"), "a taken name gets -recovered");
+                var clip = Path.Combine(root, "G__clip.mp4");
+                File.WriteAllText(clip + ".part", "x");
+                Check(PartRecovery.Recover(clip, folders, s => { }) == null && File.Exists(clip + ".part"), "only a long recording's name");
+                Check(PartRecovery.IsLongRecording("G__2026-11-10__12-00-00__rec-2.mp4") && !PartRecovery.IsLongRecording("notes.txt"), "the engine's names");
+                // A junction inside the folder is never followed.
+                var target = Path.Combine(root, "elsewhere");
+                Directory.CreateDirectory(target);
+                var link = Path.Combine(root, "link");
+                var mk = System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo("cmd.exe", "/c mklink /J \"" + link + "\" \"" + target + "\"") { CreateNoWindow = true, UseShellExecute = false });
+                mk.WaitForExit();
+                var linked = Path.Combine(link, "G__rec.mp4");
+                File.WriteAllText(linked + ".part", "x");
+                Check(PartRecovery.Refusal(linked, folders) != null && File.Exists(linked + ".part"), "a junction on the way: refused");
+                Directory.Delete(link);
             }
             finally { Directory.Delete(root, true); }
         }

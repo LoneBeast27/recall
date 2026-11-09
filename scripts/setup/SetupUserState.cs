@@ -80,7 +80,28 @@ namespace Recall.Setup
             return dir;
         }
 
-        /// Puts every backed-up file back (an update that rolled back). Returns the files restored.
+        /// A settings file Recall can read: a .json file holding a JSON object; any other file not
+        /// empty, valid UTF-8 and free of NULs (a power cut leaves them NUL-filled or empty).
+        internal static bool Readable(string path)
+        {
+            if (!File.Exists(path)) return false;
+            byte[] bytes;
+            try { bytes = File.ReadAllBytes(path); }
+            catch (IOException) { return true; } // held by someone: never overwrite it
+            catch (UnauthorizedAccessException) { return true; }
+            if (bytes.Length == 0 || Array.IndexOf(bytes, (byte)0) >= 0) return false;
+            string text;
+            try { text = new UTF8Encoding(false, true).GetString(bytes); }
+            catch (ArgumentException) { return false; }
+            if (!path.EndsWith(".json", StringComparison.OrdinalIgnoreCase)) return true;
+            try { return new System.Web.Script.Serialization.JavaScriptSerializer().DeserializeObject(text) is Dictionary<string, object>; }
+            catch (ArgumentException) { return false; }
+            catch (InvalidOperationException) { return false; }
+        }
+
+        /// Puts back each backed-up file that is now missing or unreadable (an update that rolled
+        /// back). A readable file is never replaced: it may be newer than the backup. Returns the
+        /// files restored.
         public static int Restore(string backup, UserRoots roots, string installDir, Action<string> log)
         {
             int restored = 0;
@@ -91,9 +112,10 @@ namespace Recall.Setup
                 if (parts[0] != "roaming" && parts[0] != "local" && parts[0] != "install") continue;
                 var from = Path.Combine(backup, parts[0], parts[1]);
                 var to = Path.Combine(Root(parts[0], roots, installDir), parts[1]);
-                if (!File.Exists(from)) continue;
+                if (!File.Exists(from) || Readable(to)) continue;
                 Directory.CreateDirectory(Path.GetDirectoryName(to));
                 File.Copy(from, to, true);
+                log("Settings file restored (it was missing or unreadable): " + to);
                 restored++;
             }
             log("Settings restored from " + backup + " (" + restored + " files)");

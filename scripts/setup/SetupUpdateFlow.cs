@@ -60,15 +60,21 @@ namespace Recall.Setup
             longOn = (status != null && status.LongActive) || (resume != null && resume.LongOn);
             longPath = status != null ? status.LongPath : null;
             log("Update: recorder " + (recorderRan ? "running" : "not running") + (longOn ? ", long recording on" + (longPath == null ? "" : " (" + longPath + ")") : ""));
-            backup = ConfigBackup.Create(roots, dir, resume != null && resume.FromVersion != null ? resume.FromVersion : "old", DateTime.Now, log);
             quitter.SaveFirst = true;
         }
 
-        /// The recorder has exited: a long recording its quit gave up on is recovered now.
+        /// Tests only: runs just before the settings backup.
+        internal static Action BeforeBackup = null;
+
+        /// The app and the recorder have exited (their last writes are on disk): the settings are
+        /// backed up now, then a long recording the quit gave up on is recovered.
         public void AfterQuit()
         {
+            var hook = BeforeBackup;
+            if (hook != null) hook();
+            backup = ConfigBackup.Create(roots, dir, resume != null && resume.FromVersion != null ? resume.FromVersion : "old", DateTime.Now, log);
             if (!longOn || longPath == null) return;
-            try { recovered = PartRecovery.Recover(longPath, log); }
+            try { recovered = PartRecovery.Recover(longPath, PartRecovery.RecordingFolders(roots), log); }
             catch (Exception error) { log("WARNING: the cut-short recording could not be recovered: " + error.Message); }
         }
 
@@ -106,15 +112,24 @@ namespace Recall.Setup
         /// The recorder first (when it ran and is gone), then the outcome, then the app, which reads it.
         private void Relaunch(RecorderQuitter quitter, InstallOptions options, List<string> notes, string outcome, string error)
         {
-            if (recorderRan && quitter.OurControllers().Count == 0 && SetupPackage.ExistingInstallPath(dir) != null)
+            // Each step is tried on its own: a recorder that will not start never keeps the app closed.
+            try
             {
-                var answered = Installer.StartRecorder(targets, dir, options, quitter, log, notes);
-                if (answered && longOn) StartLongRecording(quitter);
+                if (recorderRan && quitter.OurControllers().Count == 0 && SetupPackage.ExistingInstallPath(dir) != null)
+                {
+                    var answered = Installer.StartRecorder(targets, dir, options, quitter, log, notes);
+                    if (answered && longOn) StartLongRecording(quitter);
+                }
             }
+            catch (Exception start) { notes.Add("The recorder could not be started again (" + start.Message + "). Start it from Recall."); }
             Outcome(outcome, error);
             if (resume == null || SetupPackage.ExistingInstallPath(dir) == null) return;
-            using (var app = DetachedProcess.Start(Path.Combine(dir, "recall-native.exe"), "--resume \"" + resume.Path + "\"", null))
-                log("Recall reopened: pid " + app.Pid + " --resume " + resume.Path);
+            try
+            {
+                using (var app = DetachedProcess.Start(Path.Combine(dir, "recall-native.exe"), "--resume \"" + resume.Path + "\"", null))
+                    log("Recall reopened: pid " + app.Pid + " --resume " + resume.Path);
+            }
+            catch (Exception open) { notes.Add("Recall could not be reopened (" + open.Message + "). Open it from the Start menu."); }
         }
 
         /// The long recording the update stopped starts again once the recorder captures (a
