@@ -43,6 +43,8 @@ pub struct QuitWait {
     asked_at: Option<Instant>,
     /// A quit asked while a sign-out waits: it goes on if the sign-out is cancelled.
     also: Option<QuitReason>,
+    /// A `save_first` quit already sent its saves (`record_quit_save`): a repeat sends none.
+    saved_first: bool,
 }
 
 /// A 2nd tray Quit forces only this long after the first (a double click just joins).
@@ -116,24 +118,37 @@ impl QuitWait {
     /// This tick's step: go once nothing is written; wait [`QUIT_SAVE_WAIT`] from the
     /// first tick, and on while the save still makes progress; then give up on it.
     pub fn step(&mut self, activity: &mut EngineActivity, now: Instant) -> QuitStep {
-        if !activity.saves_writing(now) {
+        let saving = activity.saves_writing(now);
+        // A `save_first` quit's `record_stop` saves the long recording when
+        // `recording_stopped` comes: that quit waits for it as for a save.
+        if !saving && !(self.saved_first && activity.stop_in_flight()) {
             return QuitStep::Go;
         }
         if self.forced {
-            return QuitStep::Lost(activity.saves_in_flight().max(1));
+            return QuitStep::Lost(if saving { activity.saves_in_flight().max(1) } else { 0 });
         }
         let first = self.started.is_none();
         let started = *self.started.get_or_insert(now);
         if now.saturating_duration_since(started) < QUIT_SAVE_WAIT || activity.save_growing(now) {
             QuitStep::Wait { first }
         } else {
-            QuitStep::Lost(activity.saves_in_flight())
+            QuitStep::Lost(if saving { activity.saves_in_flight() } else { 0 })
         }
     }
 
     /// The quit was called off (a cancelled session end): a later quit waits afresh.
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    /// The first `save_first` of this quit: true once (it sends the saves), false after.
+    pub fn take_save_first(&mut self) -> bool {
+        !std::mem::replace(&mut self.saved_first, true)
+    }
+
+    /// A `save_first` quit waits for its long recording's `recording_stopped`.
+    pub fn holds_for_stop(&self, activity: &EngineActivity) -> bool {
+        self.saved_first && activity.stop_in_flight()
     }
 
     /// A wait for a save is under way (its first tick passed).
@@ -199,7 +214,7 @@ impl crate::record_app::Controller {
 
     /// `finishing_fields` now: a quit was asked and a save is still being written.
     pub(crate) fn finishing_now(&mut self, now: Instant) -> Value {
-        let finishing = self.quit.is_some() && self.activity.saves_writing(now);
+        let finishing = self.quit.is_some() && (self.activity.saves_writing(now) || self.quit_wait.holds_for_stop(&self.activity));
         let a = &self.activity;
         finishing_fields(finishing, a.saves_in_flight(), a.writing_mark(), a.writing_bytes())
     }

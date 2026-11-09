@@ -18,29 +18,43 @@ namespace Recall.Setup
     ///  3. Each installed file moves to `&lt;dir&gt;\.old`, then its new copy moves in (MoveFileEx,
     ///     replace-existing, write-through). A running program can be renamed; a file opened without
     ///     sharing cannot.
-    ///  4. Any failure puts every file back from `.old` (new files that had no old one are removed):
-    ///     the folder is all old or all new. Success empties `.old` (a file still in use stays there).
+    ///  4. A `.swap-journal` (SetupSwapJournal.cs) is on disk before the first move and before each
+    ///     move after it. Any failure puts every moved file back from `.old` (new files that had no old
+    ///     one are removed), going on past a step that fails: the folder is all old or all new. A
+    ///     rollback that could not finish keeps the journal; Setup and the app finish it at their next
+    ///     start (Recover). Success empties `.old` (a file still in use stays there).
+    /// A rollback that could not put every file back (its journal is kept for Recover).
+    internal sealed class SwapIncomplete : InvalidOperationException
+    {
+        public SwapIncomplete(string message) : base(message) { }
+    }
+
     internal static class InstallSwap
     {
+        /// Tests only: called before every move (the swap's and a rollback's) with (from, to).
+        internal static Action<string, string> BeforeMove = null;
+
+        /// User settings never live in the install folder's top level, and a stage never carries them:
+        /// the swap replaces only program files (the cache folder and everything else is not touched).
+        internal static readonly string[] UserFiles = {
+            "config.toml", "config.toml.last-good", "state.json", "storage.json", "library.json", "folders.json",
+            "imports.json", "recorded.json", "open-clips.json", "editor.json", "settings.json", "hub-settings.json"
+        };
+
         public static void Run(string stage, string dir)
         {
             Directory.CreateDirectory(dir);
             var marker = Path.Combine(dir, ".installing");
             var newDir = Path.Combine(dir, ".new");
             var oldDir = Path.Combine(dir, ".old");
-            FileStream swapLock;
-            try
-            {
-                swapLock = new FileStream(Path.Combine(dir, ".install-swap-lock"), FileMode.CreateNew, FileAccess.Write,
-                    FileShare.None, 4096, FileOptions.DeleteOnClose);
-            }
-            catch (IOException)
-            {
+            var swapLock = TakeLock(dir);
+            if (swapLock == null)
                 throw new InvalidOperationException("Another Recall install is swapping files in this folder. Wait for it to finish, then try again.");
-            }
             try
             {
                 File.WriteAllText(marker, MarkerValue());
+                var why = RecoverLocked(dir);
+                if (why != null) throw new InvalidOperationException("An earlier update could not be undone yet (" + why + "). Close Recall, then run Setup again.");
                 TryDeleteTree(newDir);
                 if (Directory.Exists(oldDir)) foreach (var f in Directory.GetFiles(oldDir)) TryDelete(f);
                 Directory.CreateDirectory(newDir);
@@ -49,10 +63,13 @@ namespace Recall.Setup
                 Array.Sort(files, StringComparer.OrdinalIgnoreCase);
                 foreach (var f in files)
                 {
-                    var copy = Path.Combine(newDir, Path.GetFileName(f));
+                    var name = Path.GetFileName(f);
+                    if (Array.Exists(UserFiles, u => u.Equals(name, StringComparison.OrdinalIgnoreCase)))
+                        throw new InvalidOperationException("the setup package carries a user settings file (" + name + "); nothing was replaced");
+                    var copy = Path.Combine(newDir, name);
                     File.Copy(f, copy, true);
                     if (!Sha256(copy).Equals(Sha256(f), StringComparison.Ordinal))
-                        throw new InvalidOperationException("staged copy of " + Path.GetFileName(f) + " does not match the build");
+                        throw new InvalidOperationException("staged copy of " + name + " does not match the build");
                 }
                 Swap(files, dir, newDir, oldDir);
                 foreach (var f in Directory.GetFiles(oldDir)) TryDelete(f);
@@ -66,39 +83,88 @@ namespace Recall.Setup
             }
         }
 
-        private sealed class Moved
+        private static FileStream TakeLock(string dir)
         {
-            public string Target;
-            public string Backup;
-            public bool Had;
+            try
+            {
+                // The lock is the exclusive handle, not the file: a lock file a power cut left behind
+                // opens again (and goes when this handle closes); a held one is a sharing violation.
+                return new FileStream(Path.Combine(dir, ".install-swap-lock"), FileMode.OpenOrCreate, FileAccess.Write,
+                    FileShare.None, 4096, FileOptions.DeleteOnClose);
+            }
+            catch (IOException) { return null; }
+        }
+
+        /// A swap cut off earlier (its journal is still there): put the folder back to all old.
+        /// Run at Setup start and before every swap; the app does the same before it starts
+        /// (recall-native swap_journal.rs). Null when the folder is consistent, else why not (the
+        /// journal is kept for the next try).
+        public static string Recover(string dir)
+        {
+            if (!File.Exists(SwapJournal.PathIn(dir))) return null;
+            var swapLock = TakeLock(dir);
+            if (swapLock == null) return "another Recall install is swapping files in this folder";
+            using (swapLock) return RecoverLocked(dir);
+        }
+
+        private static string RecoverLocked(string dir)
+        {
+            var path = SwapJournal.PathIn(dir);
+            if (!File.Exists(path)) return null;
+            var entries = SwapJournal.Read(path);
+            if (entries == null) return "the swap journal is unreadable";
+            var failures = SwapJournal.RollBack(dir, entries, Move);
+            if (failures.Count > 0) return string.Join("; ", failures.ToArray());
+            File.Delete(path);
+            return null;
         }
 
         private static void Swap(string[] files, string dir, string newDir, string oldDir)
         {
-            var done = new List<Moved>();
+            // On disk before the first move; deleted only when the folder is all new (success) or
+            // all old again (a complete rollback).
+            var journal = SwapJournal.Create(dir);
+            var entries = new List<SwapJournal.Entry>();
             try
             {
                 foreach (var f in files)
                 {
                     var name = Path.GetFileName(f);
-                    var move = new Moved { Target = Path.Combine(dir, name), Backup = Path.Combine(oldDir, name) };
-                    move.Had = File.Exists(move.Target);
-                    if (move.Had) MoveReplace(move.Target, move.Backup);
-                    done.Add(move);
-                    MoveReplace(Path.Combine(newDir, name), move.Target);
+                    var e = new SwapJournal.Entry { Name = name, Had = File.Exists(Path.Combine(dir, name)) };
+                    entries.Add(e);
+                    if (e.Had)
+                    {
+                        journal.Moving(name);
+                        e.Moved = true;
+                        Move(Path.Combine(dir, name), Path.Combine(oldDir, name));
+                    }
+                    journal.Placing(name, e.Had);
+                    e.Placed = true;
+                    Move(Path.Combine(newDir, name), Path.Combine(dir, name));
                 }
             }
             catch (Exception error)
             {
-                if (!(error is IOException || error is UnauthorizedAccessException || error is Win32Exception)) throw;
-                for (int i = done.Count - 1; i >= 0; i--)
+                // Any failure (IO, Win32 or anything else) undoes the swap; a failing step does not stop the rest.
+                journal.Dispose();
+                var failures = SwapJournal.RollBack(dir, entries, Move);
+                if (failures.Count == 0)
                 {
-                    var d = done[i];
-                    if (d.Had) { if (File.Exists(d.Backup)) MoveReplace(d.Backup, d.Target); }
-                    else if (File.Exists(d.Target)) File.Delete(d.Target);
+                    File.Delete(SwapJournal.PathIn(dir));
+                    throw new InvalidOperationException("install rolled back, the previous version is unchanged (" + error.Message + ")");
                 }
-                throw new InvalidOperationException("install rolled back, the previous version is unchanged (" + error.Message + ")");
+                throw new SwapIncomplete("install could not be fully rolled back (" + error.Message + "; "
+                    + string.Join("; ", failures.ToArray()) + "). Setup finishes undoing it the next time it or Recall starts.");
             }
+            journal.Dispose();
+            File.Delete(SwapJournal.PathIn(dir));
+        }
+
+        private static void Move(string from, string to)
+        {
+            var hook = BeforeMove;
+            if (hook != null) hook(from, to);
+            MoveReplace(from, to);
         }
 
         private static void MoveReplace(string from, string to)

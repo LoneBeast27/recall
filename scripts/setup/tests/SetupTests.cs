@@ -15,6 +15,7 @@ namespace Recall.Setup.Tests
         private static int Main(string[] args)
         {
             sourceDir = args.Length > 0 ? args[0] : null;
+            fakeExe = args.Length > 1 ? args[1] : null;
             Run("only its own recorder gets a line", OnlyOwnRecorder);
             Run("the quit wait is bounded and never forces a save", BoundedWait);
             Run("a recorder finishing a clip gets no second quit; a held sign-out gets one plain quit", NoSecondQuit);
@@ -33,6 +34,20 @@ namespace Recall.Setup.Tests
             Run("drive classification", DriveKinds);
             Run("the swap is all new or all old", SwapRollback);
             Run("shipped Setup sources never start PowerShell", NoPowerShell);
+            Run("swap: a locked 3rd file rolls back to all old", SwapThirdFileLocked);
+            Run("swap: a non-IO throw after 2 moves rolls back", SwapNonIoThrow);
+            Run("swap: a failing rollback step is passed over, the journal kept, Recover finishes", SwapRollbackStepFails);
+            Run("swap: Recover on a leftover journal is all old, every time", SwapLeftoverJournal);
+            Run("swap: a stage never carries a user settings file", SwapNeverCarriesUserFiles);
+            Run("settings backups: the 3 newest stay and restore", BackupsKeepThree);
+            Run("a cut-short recording is recovered under a free name", PartRecoveryNames);
+            Run("the resume file must be in the updates folder", ResumeFileGuard);
+            Run("sandbox update while recording: one save_first quit, recorder + record_start + app --resume", UpdateWhileRecording);
+            Run("sandbox update that fails: settings restored, old pair reopened, recording recovered", UpdateRollsBack);
+            Run("an update that cannot be undone yet leaves Recall closed and says so", UpdateNotReopenedSaysSo);
+            Run("a lock file a power cut left is not a lock", StaleLockFileIsNotALock);
+            Run("a failing settings backup still reopens Recall and tells it", BackupFailureStillReopens);
+            Run("a failure after the swap keeps the update and reopens Recall", FailureAfterSwapStillReopens);
             Console.WriteLine(passed + " passed, " + failed + " failed");
             return failed == 0 ? 0 : 1;
         }

@@ -63,8 +63,61 @@ namespace Recall.Setup
             Report(progress, "Waiting for Recall to finish saving…");
             // An update may close the app (it asked for the update); a first install refuses while it runs.
             var quitter = new RecorderQuitter(targets, dir, options.Update, log);
+            var update = options.Update ? new UpdateFlow(targets, dir, options.Resume, log) : null;
+            try
+            {
+                // Inside: the app has already quit itself for the update, so any failure here must
+                // still reopen it and say so (Failed copes with no backup yet).
+                if (update != null) update.Begin(quitter);
+                Replace(package, work, dir, quitter, update, progress, log);
+            }
+            catch (Exception error)
+            {
+                if (update != null) update.Failed(error, quitter, options);
+                throw;
+            }
+
+            var notes = new List<string>();
+            try { Register(targets, dir, options, log); }
+            catch (Exception error)
+            {
+                // The new files are in: the update stands, Recall still reopens, and the note says what failed.
+                if (update == null) throw;
+                notes.Add("Recall is updated, but Setup could not finish registering it (" + error.Message + "). Run Setup again to repair the Start menu and Apps & Features entries.");
+                log("WARNING: " + notes[notes.Count - 1]);
+            }
+            if (update != null) update.Succeeded(quitter, options, notes);
+            else if (options.Launch) StartRecorder(targets, dir, options, quitter, log, notes);
+            else if (options.Autostart) notes.Add("Start with Windows was not set (the recorder was not started). Turn it on in Recall > Settings > General.");
+            foreach (var note in notes) log("WARNING: " + note);
+            log("Installed to " + dir + ".");
+            return notes.Count == 0 ? null : string.Join("\n", notes.ToArray());
+        }
+
+        /// Tests only: runs after the swap, before the Start menu and Apps &amp; Features entries.
+        internal static Action AfterSwap = null;
+
+        private static void Register(SetupTargets targets, string dir, InstallOptions options, Action<string> log)
+        {
+            var hook = AfterSwap;
+            if (hook != null) hook();
+            if (options.Shortcut && !options.Update)
+            {
+                Shortcut.Write(targets.Shortcut, Path.Combine(dir, "recall-native.exe"), dir, Path.Combine(dir, "recall.ico"),
+                    "Recall: game clips, library and editor");
+                log("Start menu shortcut: " + targets.Shortcut);
+            }
+            AppsEntry.Write(targets, dir, AppsEntry.ProgramSizeKb(dir));
+            log("Apps & Features entry: HKCU\\" + targets.UninstallKey);
+        }
+
+        /// App closed, recorder quit and waited for, then the staged, verified, all-or-nothing swap.
+        private static void Replace(string package, string work, string dir, RecorderQuitter quitter, UpdateFlow update,
+            IProgress<string> progress, Action<string> log)
+        {
             quitter.EnsureAppClosed();
             quitter.Stop(QuitWaitMinutes);
+            if (update != null) update.AfterQuit();
 
             Report(progress, "Installing program files…");
             var stage = Path.Combine(work, "stage");
@@ -75,21 +128,6 @@ namespace Recall.Setup
             InstallManifest.Write(dir, InstallManifest.Merge(installed, InstallManifest.Read(dir), e => InstallManifest.Unchanged(dir, e)));
             RemoveOldBin(dir);
             log("Program files swapped in: " + dir);
-
-            var notes = new List<string>();
-            if (options.Shortcut && !options.Update)
-            {
-                Shortcut.Write(targets.Shortcut, Path.Combine(dir, "recall-native.exe"), dir, Path.Combine(dir, "recall.ico"),
-                    "Recall: game clips, library and editor");
-                log("Start menu shortcut: " + targets.Shortcut);
-            }
-            AppsEntry.Write(targets, dir, AppsEntry.ProgramSizeKb(dir));
-            log("Apps & Features entry: HKCU\\" + targets.UninstallKey);
-            if (options.Launch) StartRecorder(targets, dir, options, quitter, log, notes);
-            else if (options.Autostart) notes.Add("Start with Windows was not set (the recorder was not started). Turn it on in Recall > Settings > General.");
-            foreach (var note in notes) log("WARNING: " + note);
-            log("Installed to " + dir + ".");
-            return notes.Count == 0 ? null : string.Join("\n", notes.ToArray());
         }
 
         private static void Report(IProgress<string> progress, string text)
@@ -149,7 +187,7 @@ namespace Recall.Setup
         /// Starts the installed recorder detached (explorer as its parent), then waits up to 10 s
         /// for it to answer on its pipe. Exit 86 (another recorder holds the engine slot) is a note,
         /// not a failure. Start with Windows is sent only when opted in, never on an update.
-        private static void StartRecorder(SetupTargets targets, string dir, InstallOptions options, RecorderQuitter quitter,
+        internal static bool StartRecorder(SetupTargets targets, string dir, InstallOptions options, RecorderQuitter quitter,
             Action<string> log, List<string> notes)
         {
             bool answered = false, exited = false;
@@ -184,6 +222,7 @@ namespace Recall.Setup
             }
             else if (options.Autostart && !options.Update) notes.Add("Start with Windows was not set: the recorder did not answer. Turn it on in Recall > Settings > General.");
             else if (answered) log("Recorder running. Start with Windows is unchanged.");
+            return answered;
         }
     }
 }

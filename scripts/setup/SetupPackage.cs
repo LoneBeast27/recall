@@ -21,6 +21,8 @@ namespace Recall.Setup
         public readonly bool Autostart;
         /// Accept a drive Windows can't classify (a VM disk, USB, RAID); never offered by the window.
         public readonly bool AllowUnknownDrive;
+        /// An update the Recall app asked for: its resume file (`--resume`), else null.
+        public string Resume;
 
         public InstallOptions(string path, bool shortcut, bool launch, bool frameTiming, bool update)
             : this(path, shortcut, launch, frameTiming, update, false) { }

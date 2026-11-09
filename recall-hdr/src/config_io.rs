@@ -24,8 +24,7 @@ use crate::log;
 /// Top-level tables an older build wrote and this one reads only to migrate:
 /// never carried forward (the chord-era `[hotkeys]` would re-run its migration).
 const RETIRED: &[&str] = &["hotkeys"];
-/// Schema keys absent from the serialized form when unset.
-const OPTIONAL: &[(&str, &str)] = &[("display", "target_device_path")];
+
 
 /// Reads of a file that exists but can't be read, and the pause between them.
 const READ_TRIES: u32 = 3;
@@ -78,13 +77,17 @@ pub(super) fn parse_or_recover(path: &Path, bytes: &[u8], now: SystemTime) -> Op
                 log!("config: {} has a bad value ({e}); keeping the rest", path.display());
                 // Copy: the file stays, so a save still carries its unknown keys.
                 durable::quarantine(path, now, Keep::Copy);
-                let repairs = repair_audio_device_id_types(&mut table);
-                Some((salvage(&table), text.to_string(), repairs))
+                let mut repairs = repair_audio_device_id_types(&mut table);
+                // A value that does not read comes from the update's settings backup, not the default.
+                let backup = crate::config_backup::newest();
+                let (cfg, lost) = salvage_over(&table, backup.as_ref().map(|b| &b.table));
+                repairs.extend(crate::config_backup::notes(&lost, backup.as_ref()));
+                Some((cfg, text.to_string(), repairs))
             }
             Err(_) => {
                 log!("config: parse {} failed: {e}; backing it up", path.display());
                 durable::quarantine(path, now, Keep::Move);
-                last_good(path)
+                last_good(path).or_else(crate::config_backup::whole_file)
             }
         },
     }
@@ -94,7 +97,8 @@ fn last_good(path: &Path) -> Option<(Config, String, Vec<String>)> {
     let text = fs::read_to_string(last_good_path(path)).ok()?;
     let cfg = toml::from_str::<Config>(&text).ok()?;
     log!("config: using {}", last_good_path(path).display());
-    Some((cfg, text, Vec::new()))
+    let note = "config.toml could not be read; the last copy that could was used (the damaged file was kept as config.toml.bad-*)".to_string();
+    Some((cfg, text, vec![note]))
 }
 
 /// Keeps `bytes` (a config that parses) as `config.toml.last-good`.
@@ -136,18 +140,32 @@ fn defaults_table() -> Table {
     }
 }
 
-/// The defaults with every part of `disk` that parses on its own laid over them.
-fn salvage(disk: &Table) -> Config {
+/// [`salvage_over`] the bare defaults.
+#[cfg(test)]
+pub(super) fn salvage(disk: &Table) -> Config {
+    salvage_over(disk, None).0
+}
+
+/// The defaults, then every part of `under` (the update's settings backup) and then of `disk`
+/// that parses on its own, laid over them: a key the file has but cannot read keeps the
+/// backup's value. Also returns the keys of `disk` that did not read.
+pub(super) fn salvage_over(disk: &Table, under: Option<&Table>) -> (Config, Vec<String>) {
     let mut merged = defaults_table();
-    for (key, value) in disk {
-        lay(&mut merged, &[key.as_str()], value);
+    let mut ignored = Vec::new();
+    for (key, value) in under.into_iter().flatten() {
+        lay(&mut merged, &[key.as_str()], value, &mut ignored);
     }
-    Value::Table(merged).try_into().unwrap_or_default()
+    let mut lost = Vec::new();
+    for (key, value) in disk {
+        lay(&mut merged, &[key.as_str()], value, &mut lost);
+    }
+    (Value::Table(merged).try_into().unwrap_or_default(), lost)
 }
 
 /// Lays `value` at `at` when the config still parses with it; else, for a table, each
-/// of its keys, and for an array, each element (a bad one drops only itself).
-fn lay(merged: &mut Table, at: &[&str], value: &Value) {
+/// of its keys, and for an array, each element (a bad one drops only itself). Each key
+/// that did not lay goes to `lost`.
+fn lay(merged: &mut Table, at: &[&str], value: &Value, lost: &mut Vec<String>) {
     if try_set(merged, at, value.clone()) {
         return;
     }
@@ -157,7 +175,7 @@ fn lay(merged: &mut Table, at: &[&str], value: &Value) {
             for (leaf, v) in inner {
                 let mut next = at.to_vec();
                 next.push(leaf);
-                lay(merged, &next, v);
+                lay(merged, &next, v, lost);
             }
         }
         Value::Array(items) => {
@@ -169,13 +187,17 @@ fn lay(merged: &mut Table, at: &[&str], value: &Value) {
                     kept.push(item.clone());
                 } else {
                     log!("config: {name}[{i}] has a bad value; dropped");
+                    lost.push(format!("{name}[{i}]"));
                 }
             }
             if kept.is_empty() {
                 log!("config: {name} has no readable entry; reset to the default");
             }
         }
-        _ => log!("config: {name} has a bad value; reset to the default"),
+        _ => {
+            log!("config: {name} has a bad value; reset to the default");
+            lost.push(name);
+        }
     }
 }
 
@@ -210,50 +232,18 @@ fn try_set(merged: &mut Table, at: &[&str], value: Value) -> bool {
     true
 }
 
-/// Keys of `disk` (the file being replaced) this build's schema doesn't have.
-fn unknown_keys(disk: &Table) -> Table {
-    let known = defaults_table();
-    let mut out = Table::new();
-    for (key, value) in disk {
-        if RETIRED.contains(&key.as_str()) {
-            continue;
-        }
-        match (value, known.get(key)) {
-            (_, None) => {
-                out.insert(key.clone(), value.clone());
-            }
-            (Value::Table(inner), Some(Value::Table(schema))) => {
-                let extra: Table = inner
-                    .iter()
-                    .filter(|(leaf, _)| !schema.contains_key(*leaf) && !OPTIONAL.contains(&(key.as_str(), leaf.as_str())))
-                    .map(|(leaf, v)| (leaf.clone(), v.clone()))
-                    .collect();
-                if !extra.is_empty() {
-                    out.insert(key.clone(), Value::Table(extra));
-                }
-            }
-            _ => {}
-        }
-    }
-    out
-}
-
-/// `cfg` as TOML, plus the unknown keys of the file at `path` it replaces.
+/// `cfg` as TOML, plus the keys of the file at `path` it replaces that this build does not
+/// read, at any depth (`config_extra`).
 pub(super) fn serialize_for(cfg: &Config, path: &Path) -> Result<String, String> {
     let text = toml::to_string_pretty(cfg).map_err(|e| format!("serialize config: {e}"))?;
-    let disk = fs::read_to_string(path).ok().and_then(|t| toml::from_str::<Table>(&t).ok());
-    let extra = disk.as_ref().map(unknown_keys).unwrap_or_default();
+    let Some(disk) = fs::read_to_string(path).ok().and_then(|t| toml::from_str::<Table>(&t).ok()) else { return Ok(text) };
+    let extra = super::extra::unknown(&disk, RETIRED);
     if extra.is_empty() {
         return Ok(text);
     }
     let mut out: Table = toml::from_str(&text).map_err(|e| format!("reparse config: {e}"))?;
-    for (key, value) in extra {
-        match (out.get_mut(&key), value) {
-            (Some(Value::Table(section)), Value::Table(leaves)) => section.extend(leaves),
-            (_, value) => {
-                out.insert(key, value);
-            }
-        }
+    if super::extra::merge(&mut out, &disk, extra) == 0 {
+        return Ok(text);
     }
     toml::to_string_pretty(&out).map_err(|e| format!("serialize config: {e}"))
 }

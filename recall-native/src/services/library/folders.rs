@@ -100,7 +100,8 @@ impl Folders {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
         }
-        let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
+        // Keys a newer build wrote stay (`json_keep`).
+        let bytes = crate::services::json_keep::pretty_keeping(path, self, &["recordings", "imported", "former_recordings"])?;
         crate::services::durable::write_durable(path, &bytes).map_err(|e| format!("save folders: {e}"))
     }
 

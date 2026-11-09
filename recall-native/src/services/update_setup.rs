@@ -78,9 +78,18 @@ fn quote(arg: &str) -> String {
     out.push('"');
     out
 }
-/// Open the verified Setup through the shell (`open` verb) with `--update <install>`; the
-/// handle on the file is released only after the shell has started it. Returns the process.
-pub(super) fn launch(setup: Verified, install: &Path) -> Result<(windows::Win32::Foundation::HANDLE, tempfile::TempDir), String> {
+/// Setup's arguments: `--update <install>`, plus `--resume <file>` for the coupled update.
+pub(super) fn arguments(install: &Path, resume: Option<&Path>) -> String {
+    let mut params = format!("--update {}", quote(&install.to_string_lossy()));
+    if let Some(file) = resume {
+        params.push_str(&format!(" --resume {}", quote(&file.to_string_lossy())));
+    }
+    params
+}
+
+/// Open the verified Setup through the shell (`open` verb) with [`arguments`]; the handle on
+/// the file is released only after the shell has started it. Returns the process.
+pub(super) fn launch(setup: Verified, install: &Path, resume: Option<&Path>) -> Result<(windows::Win32::Foundation::HANDLE, tempfile::TempDir), String> {
     use windows::{
         Win32::{
             System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx},
@@ -92,7 +101,7 @@ pub(super) fn launch(setup: Verified, install: &Path) -> Result<(windows::Win32:
         core::{HSTRING, PCWSTR, w},
     };
     let file = HSTRING::from(setup.path.as_os_str());
-    let params = HSTRING::from(format!("--update {}", quote(&install.to_string_lossy())));
+    let params = HSTRING::from(arguments(install, resume));
     let dir = HSTRING::from(setup.folder.path().as_os_str());
     unsafe {
         // ShellExecuteEx wants COM on the calling thread (this is the updater's own thread).
@@ -115,15 +124,11 @@ pub(super) fn launch(setup: Verified, install: &Path) -> Result<(windows::Win32:
     }
 }
 
-/// Wait for the launched Setup to exit, then close its handle.
-pub(super) fn wait(process: windows::Win32::Foundation::HANDLE) {
-    use windows::Win32::{
-        Foundation::CloseHandle,
-        System::Threading::{INFINITE, WaitForSingleObject},
-    };
+/// The launched Setup's handle: the app does not wait for it (it quits itself for the update).
+pub(super) fn close(process: windows::Win32::Foundation::HANDLE) {
+    // SAFETY: the process handle ShellExecuteEx returned, closed once.
     unsafe {
-        WaitForSingleObject(process, INFINITE);
-        let _ = CloseHandle(process);
+        let _ = windows::Win32::Foundation::CloseHandle(process);
     }
 }
 
@@ -179,5 +184,7 @@ mod tests {
         assert_eq!(quote(r"C:\Users\A B\Recall"), r#""C:\Users\A B\Recall""#);
         assert_eq!(quote(r"C:\"), r#""C:\\""#);
         assert_eq!(quote(r#"a"b"#), r#""a\"b""#);
+        assert_eq!(arguments(Path::new(r"C:\R"), None), r#"--update "C:\R""#);
+        assert_eq!(arguments(Path::new(r"C:\R"), Some(Path::new(r"C:\U s\resume.json"))), r#"--update "C:\R" --resume "C:\U s\resume.json""#);
     }
 }

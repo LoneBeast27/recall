@@ -247,6 +247,7 @@ pub fn wait_for_install() {
             }
         }
     }
+    recover_swap();
     let ms = |polls: u32| polls as u64 * INTERVAL.as_millis() as u64;
     match waited {
         Waited::NoMarker => {}
@@ -265,6 +266,39 @@ pub fn wait_for_install() {
             format!("{} still present after {} s; starting anyway", marker.display(), TIMEOUT.as_secs()),
             serde_json::json!({ "marker": marker.display().to_string(), "secs": TIMEOUT.as_secs() }),
         ),
+    }
+}
+
+/// A Setup swap cut off before it finished (`swap_journal`): put the folder back to all old
+/// first; when that cannot finish, refuse to start a mismatched program pair.
+fn recover_swap() {
+    let Some(dir) = crate::swap_journal::program_dir() else { return };
+    match crate::swap_journal::recover(&dir) {
+        Ok(false) => {}
+        Ok(true) => log("install recovered", format!("an unfinished update in {} was undone", dir.display()), serde_json::json!({ "dir": dir.display().to_string() })),
+        Err(why) => {
+            log("install mismatched", format!("an unfinished update in {} could not be undone: {why}", dir.display()), serde_json::json!({ "why": why }));
+            refuse(&refuse_text(&why));
+            std::process::exit(3);
+        }
+    }
+}
+
+/// What Recall says when it cannot start over an unfinished update. Running Setup comes first:
+/// Recall cannot replace its own running program, Setup can.
+pub(crate) fn refuse_text(why: &str) -> String {
+    format!(
+        "An update did not finish, and Recall can't put its own files back while it runs ({why}).\n\nRun Recall Setup again to finish it. If you no longer have Setup, download it from the Releases page:\n{}",
+        crate::repair::RELEASES_URL
+    )
+}
+
+fn refuse(text: &str) {
+    use windows::Win32::UI::WindowsAndMessaging::{MB_ICONERROR, MB_OK, MessageBoxW};
+    use windows::core::{HSTRING, w};
+    // SAFETY: a modal box with owned strings, no owner window.
+    unsafe {
+        MessageBoxW(None, &HSTRING::from(text), w!("Recall"), MB_OK | MB_ICONERROR);
     }
 }
 
