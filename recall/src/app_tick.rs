@@ -279,6 +279,7 @@ impl App {
             encoder_opening: self.encoder_opening(),
             save_writing: self.save_writing(),
             mic_muted: { #[cfg(feature="encode")] { audio::mic_muted() } #[cfg(not(feature="encode"))] { false } },
+            audio_seq: { #[cfg(feature="encode")] { audio::sources::audio_seq() } #[cfg(not(feature="encode"))] { 0 } },
             audio: { #[cfg(feature="encode")] { audio_opened() } #[cfg(not(feature="encode"))] { Vec::new() } },
         });
     }

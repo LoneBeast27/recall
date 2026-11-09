@@ -239,6 +239,19 @@ pub fn sync_read() {
     }
 }
 
+/// The last audio line's sequence number applied (`status.audio_seq`).
+static AUDIO_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A line with sequence number `seq` was applied (lines are applied in order).
+pub fn note_seq(seq: u64) {
+    AUDIO_SEQ.fetch_max(seq, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The last audio sequence number applied (`status.audio_seq`; 0: none yet).
+pub fn audio_seq() -> u64 {
+    AUDIO_SEQ.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /// Whether the startup hold has ended (`sync` read and every track listed).
 pub fn startup_released() -> bool {
     let early = lock_early();

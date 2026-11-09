@@ -56,6 +56,8 @@ pub enum Outbound {
         encoder_opening: bool,
         /// Whether new microphone samples are entering the replay buffer as silence.
         mic_muted: bool,
+        /// The last audio line's sequence number applied (the controller re-sends what is not).
+        audio_seq: u64,
         /// What each recorded source opened, in track order (`audio::sources::opened`).
         #[serde(skip_serializing_if = "Vec::is_empty")]
         audio: Vec<AudioOpened>,
@@ -281,6 +283,9 @@ pub enum Command {
         muted: bool,
         #[serde(default)]
         press: bool,
+        /// The controller's sequence number for audio lines (`status.audio_seq` acks it).
+        #[serde(default)]
+        seq: Option<u64>,
     },
     /// Toggle microphone capture muting for newly captured replay audio.
     ToggleMicMute,
@@ -298,6 +303,12 @@ pub enum Command {
         /// The endpoint id saved with the source's device (P1-B): the track reopens on it.
         #[serde(default)]
         device_id: Option<String>,
+        /// The source is no longer recorded as this track (removed, disabled, re-picked under
+        /// another name): it stores silence from its next packet and closes its stream for good.
+        #[serde(default)]
+        retire: Option<bool>,
+        #[serde(default)]
+        seq: Option<u64>,
     },
     /// Export an existing VFR clip to a separate NVENC CFR file (60 fps default).
     ExportClip {
