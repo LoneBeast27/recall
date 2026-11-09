@@ -248,8 +248,9 @@ fn supervise_child(shared: &Arc<Shared>, child: &mut Child, gen: u64) -> ChildEx
 /// Ordered stop of a still-running child: send `quit` (`release`: `stop_capture`; from
 /// then on every line is refused with `refusal`, `None` = the last retarget's, until the
 /// next engine's stdin), wait up to `grace` polling `try_wait`, then hard-kill any survivor.
-/// A released engine's wait is cut to the stop's grace when the supervisor stops.
-fn finish_shutdown(shared: &Arc<Shared>, mut child: Child, grace: Duration, refusal: Option<Sent>, release: bool) {
+/// A released engine's wait decides on every poll from facts on the awake clock
+/// (`supervisor_release_wait::ReleaseWait`, design P10); a plain quit's grace is awake time too.
+pub(super) fn finish_shutdown(shared: &Arc<Shared>, mut child: Child, grace: Duration, refusal: Option<Sent>, release: bool) {
     let pid = child.id();
     // First, even for a child already gone: no line may go to an engine that is ending.
     match refusal {
@@ -266,12 +267,18 @@ fn finish_shutdown(shared: &Arc<Shared>, mut child: Child, grace: Duration, refu
     } else {
         log!("supervisor: stopping engine (pid {pid}); grace {}ms", grace.as_millis());
     }
-    let mut deadline = Instant::now() + grace;
+    let started = shared.awake();
+    let beats = release && shared.hello_says(super::release::DRAIN_HEARTBEAT_CAP);
+    let mut wait = release.then(|| super::release_wait::ReleaseWait::new(started, beats));
     let release_gen = shared.release_gen.load(std::sync::atomic::Ordering::SeqCst);
-    while Instant::now() < deadline {
-        if release {
-            let stopping = shared.stop_requested().then(|| shared.grace());
-            deadline = super::release::release_deadline(deadline, Instant::now(), shared.release_is_settled(release_gen), stopping);
+    loop {
+        let now = shared.awake();
+        let kill = match wait.as_mut() {
+            Some(w) => w.poll(now, shared.last_beat(), shared.release_is_settled(release_gen), shared.stop_requested().then(|| shared.grace())),
+            None => now.saturating_duration_since(started) >= grace,
+        };
+        if kill {
+            break;
         }
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -316,19 +323,20 @@ fn sleep_unless_change(shared: &Arc<Shared>, total: Duration, gen: u64) -> bool 
     !shared.stop_requested()
 }
 
+/// A fake engine that never exits on its own (cmd.exe, `/D`: no AutoRun; it idles on its piped stdin and takes
+/// `stop_capture` as an unknown command), with no window.
+#[cfg(test)]
+pub(super) fn wedged_engine() -> Child {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    let cmd = std::env::var_os("ComSpec").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+    Command::new(cmd).args(["/D", "/Q"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(super::CREATE_NO_WINDOW).spawn().expect("cmd.exe")
+}
+
 #[cfg(test)]
 mod release_wait_tests {
     use super::*;
     use crate::supervisor::Supervisor;
-    use std::os::windows::process::CommandExt;
-    use std::process::{Command, Stdio};
-
-    /// A fake engine that never exits on its own (cmd.exe, `/D`: no AutoRun; it idles on its piped stdin and takes
-    /// `stop_capture` as an unknown command), with no window.
-    fn wedged_engine() -> Child {
-        let cmd = std::env::var_os("ComSpec").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
-        Command::new(cmd).args(["/D", "/Q"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(super::super::CREATE_NO_WINDOW).spawn().expect("cmd.exe")
-    }
 
     /// Gate p5-4: `finish_shutdown`'s release wait end to end. A released engine that never
     /// exits is kept while its saves are unsettled (no 8 s kill), then killed within the quit
