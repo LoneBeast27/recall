@@ -1,6 +1,6 @@
 [package]
 name = "recall-hdr"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "HDR display-manager companion for Recall: auto HDR toggle + NvAPI sRGB gamut clamp (Windows, RTX 5090)"
@@ -69,3 +69,7 @@ global-hotkey = "0.8.0"
 [dev-dependencies]
 # render_probe's live check presents from a hidden window (never shown).
 windows = { version = "0.62", features = ["Win32_Graphics_Direct3D", "Win32_Graphics_Direct3D11", "Win32_System_ProcessStatus"] }
+
+[build-dependencies]
+# VERSIONINFO + asInvoker manifest (../recall/build_winres.rs); already in recall-native's tree.
+embed-resource = "3"
