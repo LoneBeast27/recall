@@ -19,12 +19,18 @@ namespace Recall.Setup
         public readonly bool Update;
         /// Start with Windows, opt-in; ignored by an update (it never turns it on).
         public readonly bool Autostart;
+        /// Accept a drive Windows can't classify (a VM disk, USB, RAID); never offered by the window.
+        public readonly bool AllowUnknownDrive;
 
         public InstallOptions(string path, bool shortcut, bool launch, bool frameTiming, bool update)
             : this(path, shortcut, launch, frameTiming, update, false) { }
 
         public InstallOptions(string path, bool shortcut, bool launch, bool frameTiming, bool update, bool autostart)
+            : this(path, shortcut, launch, frameTiming, update, autostart, false) { }
+
+        public InstallOptions(string path, bool shortcut, bool launch, bool frameTiming, bool update, bool autostart, bool allowUnknownDrive)
         {
+            AllowUnknownDrive = allowUnknownDrive;
             Path = path;
             Shortcut = shortcut;
             Launch = launch;
