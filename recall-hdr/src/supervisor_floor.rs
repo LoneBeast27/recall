@@ -20,6 +20,8 @@ pub(crate) const PROTOCOL_MARKER: &[u8] = b"RECALL-ENGINE-PROTOCOL:sync-hold:1";
 /// The controller event that raises the notice (`record_inputs_held::notice_for`).
 pub(crate) const ENGINE_OUTDATED: &str = "engine_outdated";
 const GAME_PID_ENV: &str = "RECALL_AUDIO_GAME_PID";
+/// The legacy switch that keeps an old engine's default microphone off.
+const MIC_OFF_ENV: &str = "RECALL_AUDIO_MIC_OFF";
 
 /// A checked file: (path, size, modified time, has the marker).
 type Checked = (PathBuf, u64, Option<SystemTime>, bool);
@@ -91,6 +93,9 @@ impl super::Shared {
         for entry in spec.env.iter_mut().filter(|(k, _)| k == SOURCES_ENV) {
             entry.1 = Some(withhold_value(entry.1.as_deref().unwrap_or("[]"), process_loopback));
         }
+        // An engine older than RECALL_AUDIO_SOURCES reads the legacy vars: no default mic either.
+        spec.env.retain(|(k, _)| k != MIC_OFF_ENV);
+        spec.env.push((MIC_OFF_ENV.to_owned(), Some("1".to_owned())));
         self.spawn_sources.rebake(&spec);
         self.tell_controller(serde_json::json!({ "type": ENGINE_OUTDATED }));
         spec
