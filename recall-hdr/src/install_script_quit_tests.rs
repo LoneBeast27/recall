@@ -31,7 +31,8 @@ fn a_recorder_already_finishing_a_clip_gets_no_second_quit() {
 #[test]
 fn the_long_wait_follows_finishing_clip_with_a_grace_and_an_optional_cap() {
     // R6-startup-2: a live recorder that is not saving (or not answering) no longer holds the run forever.
-    assert!(INSTALL.contains("[switch]$AllowUnknownDrive, [int]$QuitWaitMinutes = 0)"), "the switch, default no cap");
+    let param = INSTALL.lines().find(|l| l.starts_with("param(")).expect("param line");
+    assert!(param.contains(", [int]$QuitWaitMinutes = 0,") || param.contains(", [int]$QuitWaitMinutes = 0)"), "the switch, default no cap: {param}");
     assert!(INSTALL.lines().take(45).any(|l| l.contains("[-QuitWaitMinutes N]")), "usage line");
     assert!(INSTALL.lines().take(45).any(|l| l.contains("-QuitWaitMinutes N caps that wait")), "documented in the header");
     assert!(function_body(INSTALL, "Stop-Recorder").contains("Wait-ForQuit $quit $QuitWaitMinutes"));

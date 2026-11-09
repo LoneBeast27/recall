@@ -124,9 +124,10 @@ Stop-Recorder").expect("Stop-Recorder called");
 }
 
 #[test]
-fn only_a_sandbox_limits_the_quit_to_the_controller_it_names() {
+fn only_an_update_or_a_sandbox_limits_the_quit_to_the_controller_it_names() {
     // R4-startup-1: with RECALL_CONTROLLER_PATH unset (the real install) every recall-hdr.exe in
-    // this session is quit and waited for, wherever it runs from. Only a sandbox filters by path.
+    // this session is quit and waited for, wherever it runs from. Only a sandbox, or Setup's
+    // -UpdateExisting (which updates one install and leaves others running), filters by path.
     let ours = INSTALL.lines().find(|l| l.starts_with("function Test-OurController")).expect("path filter");
     assert!(
         ours.contains("[string]::Equals([RecallInstall.PathId]::Normalize($path), $controllerPath, [StringComparison]::OrdinalIgnoreCase)"),
@@ -136,8 +137,8 @@ fn only_a_sandbox_limits_the_quit_to_the_controller_it_names() {
     let ctl = function_body(INSTALL, "Get-Controller");
     assert!(ctl.contains("$all = @(Get-SessionController)"), "{ctl}");
     assert!(
-        ctl.contains("if ($env:RECALL_CONTROLLER_PATH) { $all | Where-Object { Test-OurController $_ } } else { $all }"),
-        "the path filter applies only in a sandbox: {ctl}"
+        ctl.contains("if ($UpdateExisting -or $env:RECALL_CONTROLLER_PATH) { $all | Where-Object { Test-OurController $_ } } else { $all }"),
+        "the path filter applies only to an update or a sandbox: {ctl}"
     );
     // Stop-Recorder reaches either pipe only behind Get-Controller and waits on it; a recorder
     // that won't quit makes the run throw, naming it.
@@ -151,9 +152,9 @@ fn only_a_sandbox_limits_the_quit_to_the_controller_it_names() {
         "names it: {stop}"
     );
     assert!(function_body(INSTALL, "Format-Recorder($p)").contains("Get-ExePath $p"), "with its path");
-    // The "left running" note is a sandbox note: a real install leaves nothing running.
+    // The "left running" note is an update/sandbox note: a real install leaves nothing running.
     let note = stop.find("Left running").unwrap();
-    assert!(stop[..note].contains("if ($env:RECALL_CONTROLLER_PATH) {"), "{stop}");
+    assert!(stop[..note].contains("if ($UpdateExisting -or $env:RECALL_CONTROLLER_PATH) {"), "{stop}");
     // The unfiltered list is never a send or a wait.
     for line in code_lines(INSTALL).filter(|l| l.contains("Get-SessionController")) {
         assert!(!line.contains("Send-Recorder") && !line.contains("while"), "{line}");
