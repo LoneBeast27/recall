@@ -75,7 +75,7 @@ fn a_path_keyed_favourite_in_a_bad_copy_protects_the_clip_by_name() {
     let dir = temp_dir("path-key");
     let lib = dir.join("library.json");
     let bad = dir.join("library.json.bad-2026-11-07");
-    std::fs::write(&bad, format!(r#"{{"v:\\recall\\{}":{{"favourite":true}},"x":{{"dura"#, FAV.to_lowercase())).unwrap();
+    std::fs::write(&bad, format!(r#"{{"x:\\recall\\{}":{{"favourite":true}},"x":{{"dura"#, FAV.to_lowercase())).unwrap();
     set_mtime(&bad, 1_000);
     std::fs::write(&lib, b"{}").unwrap();
     set_mtime(&lib, 2_000);
