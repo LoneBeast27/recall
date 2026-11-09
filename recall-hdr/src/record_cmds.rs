@@ -193,6 +193,9 @@ impl Controller {
         if let Some(reason) = capture_refusal(self.paused, self.engine_running(), &self.wanted()) {
             return self.refuse_capture("save_clip", reason);
         }
+        if let Some(reason) = self.planner.privacy_refusal() {
+            return self.refuse_capture("save_clip", &reason);
+        }
         let draining = self.planner.drain().is_some();
         log!("record: save last {secs}s{}", if draining { " (game closed: ends at its last frame)" } else { "" });
         // Queued FIRST: only a save the engine will see is marked pending and cued.

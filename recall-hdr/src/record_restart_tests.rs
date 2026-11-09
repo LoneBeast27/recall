@@ -48,7 +48,9 @@ fn the_controllers_restart_apply_passes_the_reasons_refusal_to_the_supervisor_ca
     let host = method_body(include_str!("record_restart_host.rs"), "restart_apply");
     assert!(host.contains("self.apply_engine_target_as(target, reason.refusal());"), "{host}");
     let ctl = include_str!("record_engine_ctl.rs");
-    assert!(method_body(ctl, "retarget").contains("switch_engine(&self.supervisor, spec, refusal);"));
+    let retarget = method_body(ctl, "retarget");
+    assert!(retarget.contains("OldEngine::Quit(refusal) => switch_engine(&self.supervisor, spec, refusal),"), "{retarget}");
+    assert!(method_body(ctl, "apply_engine_target_as").contains("OldEngine::Quit(refusal)"), "a restart quits, never releases");
     assert_eq!(RestartReason::Settings.refusal(), Sent::Restarting);
     assert_eq!(RestartReason::Resume.refusal(), Sent::Restarting);
     assert_eq!(RestartReason::Recovery.refusal(), Sent::NotResponding);

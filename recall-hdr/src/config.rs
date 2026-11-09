@@ -298,12 +298,9 @@ impl Default for Config {
             storage: StorageCfg::default(),
             midi: MidiCfg::default(),
             detect: DetectCfg::default(),
-            // The hdr-testcard entry is our live test target; ship it by default.
-            overrides: vec![Override {
-                exe: "hdr-testcard".into(),
-                kind: RuleKind::HdrGame,
-                clamp: None,
-            }],
+            // No entries: the dev test card (hdr-testcard) showed as "Recorded" in every
+            // install's Games list (final review F-detect-6); tools/e2e writes its own override.
+            overrides: Vec::new(),
         }
     }
 }
@@ -416,11 +413,23 @@ pub(crate) fn load_bytes(path: &std::path::Path, bytes: &[u8], now: std::time::S
     crate::record_audio_sources::migrate_loaded(&mut cfg.recording, &text);
     // Pre-v2 corners were never honoured -> `dynamic`.
     cfg.overlay.migrate_loaded(&text);
+    // The dev test card the defaults once shipped (F-detect-6): gone from installed builds.
+    if !cfg!(debug_assertions) && drop_shipped_testcard(&mut cfg.overrides) {
+        log!("config: removed the hdr-testcard entry older builds shipped (a dev test target)");
+    }
     // Out-of-range values clamp, bad entries go (one log line each), never the whole file.
     // Runs on every parsed load: full parse, per-key salvage and last-good.
     repairs.extend(crate::config_validate::sanitize_loaded(&mut cfg));
     crate::config_repairs::remember(path, repairs);
     cfg
+}
+
+/// Drop the `hdr-testcard` override exactly as older defaults shipped it (`hdr_game`, no
+/// clamp); an entry the user changed stays. `true` = one was dropped.
+pub(crate) fn drop_shipped_testcard(list: &mut Vec<Override>) -> bool {
+    let before = list.len();
+    list.retain(|o| !(o.exe == "hdr-testcard" && o.kind == RuleKind::HdrGame && o.clamp.is_none()));
+    list.len() != before
 }
 
 // ---------------------------------------------------------------------------

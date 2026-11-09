@@ -41,6 +41,8 @@ mod mute;
 mod protocol;
 #[path = "supervisor_refusal.rs"]
 mod refusal;
+#[path = "supervisor_release.rs"]
+mod release;
 #[path = "supervisor_stdin.rs"]
 mod stdin;
 #[path = "supervisor_locate.rs"]
@@ -277,6 +279,10 @@ struct Shared {
     restart_grace_ms: AtomicU64,
     /// `(generation, spec, refusal while the old engine quits)`: every retarget bumps the generation.
     desired: Mutex<(u64, Option<EngineSpec>, Sent)>,
+    /// The generation of the last release (`supervisor_release.rs`); 0 = none.
+    release_gen: AtomicU64,
+    /// The release whose saves the controller saw land (`Supervisor::release_settled`).
+    settled_gen: AtomicU64,
     /// The live child's stdin queue (`supervisor_stdin.rs`): held only to queue a line,
     /// never across a write, so neither the pump nor the kill path blocks on a full pipe.
     child_stdin: Mutex<EngineStdin>,
@@ -309,8 +315,9 @@ pub const ENGINE_EXITED: &str = "engine_exited";
 
 /// Engine event types handed to the controller via `attach_events`. `status`
 /// carries `save_writing`, the save the engine is still writing.
-pub const FORWARDED_EVENTS: [&str; 11] = [
+pub const FORWARDED_EVENTS: [&str; 12] = [
     "status",
+    "save_progress",
     "saved",
     "source_adopted",
     "save_failed",
@@ -331,6 +338,8 @@ impl Shared {
             grace_ms: Mutex::new(0),
             restart_grace_ms: AtomicU64::new(RETARGET_GRACE.as_millis() as u64),
             desired: Mutex::new((0, initial, Sent::NotResponding)),
+            release_gen: AtomicU64::new(0),
+            settled_gen: AtomicU64::new(0),
             child_stdin: Mutex::new(EngineStdin::default()),
             hello_count: AtomicU32::new(0),
             spawn_count: AtomicU32::new(0),

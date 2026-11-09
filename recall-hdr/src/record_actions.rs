@@ -405,6 +405,9 @@ impl Controller {
         self.planner.set_drain_len(crate::record_drain::drain_len(buffered, self.cfg.recording.buffer_secs));
         let wanted = self.wanted();
         let busy = self.activity.retarget_busy(now);
+        if self.activity.release_may_settle(now) {
+            self.supervisor.release_settled(); // R2-detect-r10-1: a released engine's saves landed
+        }
         let drained = self.running_drain(now);
         match self.planner.step(&wanted, now, busy) {
             Step::Apply(target) => {
