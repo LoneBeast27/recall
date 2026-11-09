@@ -143,7 +143,18 @@ impl EngineActivity {
     /// The engine was released at `now` (`Transitions::drop_ring`, design P2); `heartbeats`: its
     /// hello says `drain_heartbeat` (`Supervisor::engine_takes_drain_heartbeat`).
     pub fn released(&mut self, now: Awake, heartbeats: bool) {
-        (self.released_at, self.drain_heartbeats) = (Some(now), heartbeats);
+        (self.released_at, self.drain_heartbeats, self.drain_told) = (Some(now), heartbeats, false);
+    }
+
+    /// Design P17: a game is wanted (`blocking`) while this released engine still drains: true
+    /// once per release, when it has drained [`super::DRAIN_NOTICE_AFTER`] (awake).
+    pub fn drain_notice_due(&mut self, now: Awake, blocking: bool) -> bool {
+        let Some(at) = self.released_at else { return false };
+        if !blocking || self.drain_told || now.saturating_duration_since(at) < super::DRAIN_NOTICE_AFTER {
+            return false;
+        }
+        self.drain_told = true;
+        true
     }
 
     /// When this engine was released, and whether it sends drain heartbeats.

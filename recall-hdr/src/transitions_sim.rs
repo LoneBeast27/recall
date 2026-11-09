@@ -260,6 +260,7 @@ impl Sim {
             }
             Step::Keep => {}
         }
+        self.drain_block_notice(); // `plan_engine`
         pending_restart_tick(self); // `activity_tick`
         self.announce();
     }

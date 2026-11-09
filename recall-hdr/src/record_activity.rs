@@ -34,6 +34,14 @@ pub const SETTLE_NO_HEARTBEAT: Duration = Duration::from_secs(135);
 /// budget for finishing saves (`recall` `ORPHAN_SAVE_BUDGET`). Product rule (2026-11-10): a save
 /// past its 10 min hold cap keeps the hold while it still makes progress.
 pub const RESUME_HOLD_MAX: Duration = Duration::from_secs(30 * 60);
+/// Design P17 (product wording, 2026-11-10): a released engine still draining its save keeps
+/// the next game unrecorded (the slot admits one recorder); after this long the island says so.
+pub const DRAIN_NOTICE_AFTER: Duration = Duration::from_secs(30);
+pub const DRAIN_NOTICE_TITLE: &str = "Finishing the last clip";
+/// The detail: "<Game> starts recording once it is saved".
+pub fn drain_notice_detail(game: &str) -> String {
+    format!("{game} starts recording once it is saved")
+}
 /// How long a pause waits for the long recording to report stopping.
 pub const PAUSE_STOP_WAIT: Duration = Duration::from_secs(10);
 /// The island while a pause waits for the save being written (R5-overlay-1).
@@ -93,6 +101,8 @@ pub struct EngineActivity {
     /// its hello says it sends drain heartbeats (then only it judges a stalled save).
     released_at: Option<Awake>,
     drain_heartbeats: bool,
+    /// The island was told this release blocks the next game (once per release).
+    drain_told: bool,
 }
 
 impl Default for EngineActivity {
@@ -110,6 +120,7 @@ impl Default for EngineActivity {
             save_estimate: 0,
             released_at: None,
             drain_heartbeats: false,
+            drain_told: false,
         }
     }
 }

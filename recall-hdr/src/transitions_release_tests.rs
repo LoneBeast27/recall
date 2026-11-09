@@ -132,3 +132,26 @@ fn an_engine_exit_reports_an_expired_save_as_lost() {
     assert_eq!(s.activity.release(), None, "the released engine is gone");
     assert_eq!(s.activity.on_engine_event(&exited, 0.0, now), None, "once");
 }
+
+/// P17: a release still draining while the next game is wanted: no notice for 29 s, exactly
+/// one at 30 s with the product wording, none after the engine exits.
+#[test]
+fn a_drain_that_blocks_the_next_game_says_so_once_after_30_s() {
+    use crate::transitions_sim::game_ev;
+    let mut s = released_discord(true);
+    let stop = s.now;
+    s.focus(game_ev("Apex", 40, 0x40));
+    let ms = |s: &Sim, d: Duration| (stop + d).duration_since(s.t0).as_millis() as u64;
+    s.run_to(ms(&s, S(29)));
+    let told = |s: &Sim| s.island_said.iter().filter(|(t, _)| t == "Finishing the last clip").count();
+    assert_eq!(told(&s), 0, "not before 30 s");
+    s.run_to(ms(&s, S(31)));
+    assert_eq!(told(&s), 1);
+    assert!(s.island_said.contains(&("Finishing the last clip".into(), "Apex starts recording once it is saved".into())), "{:?}", s.island_said);
+    s.run_to(ms(&s, S(90)));
+    assert_eq!(told(&s), 1, "once per release");
+    s.saved();
+    let _ = s.engine_exited();
+    s.run_to(ms(&s, S(200)));
+    assert_eq!(told(&s), 1, "the drain ended: no further notice");
+}

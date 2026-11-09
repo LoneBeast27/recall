@@ -411,6 +411,7 @@ impl Controller {
             }
             Step::Keep => self.retarget_held = false,
         }
+        self.drain_block_notice();
     }
 
     /// Pending pause + deferred restart + storage schedule, every pump tick.
