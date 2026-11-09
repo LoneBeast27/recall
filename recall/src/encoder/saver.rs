@@ -320,7 +320,11 @@ impl Worker {
     fn process(&mut self, job: &SaveJob) {
         let mut timing = job.timing;
         timing.queue_wait_ms = timing.queued_at.map(|t| ms(t.elapsed())).unwrap_or(0.0);
-        ensure_game_folder(Path::new(&job.path), &self.events);
+        if let Err(reason) = ensure_game_folder(Path::new(&job.path), Path::new(&crate::naming::out_dir()), &self.events) {
+            self.events.save_failed(&reason);
+            self.events.log(&timing.line("failed", job.secs as f32, 0, 0));
+            return;
+        }
         let staged = self.stage.as_ref().and_then(|s| s.target(&job.path, &self.events));
         let (events, need) = (self.events.clone(), space::estimate(job));
         let log = |line: &str| events.log(line);
@@ -372,32 +376,26 @@ impl Worker {
     }
 }
 
-/// "Sort clips into game folders": a clip's `<out>\<Game>` folder is made on the first save
-/// into it (one level only: a missing clip folder still fails the save as before). Here on the
-/// saver thread, so the hotkey path never waits on a sleeping drive; the mover and the
-/// thumbnail write then find it.
-/// Off (every clip straight in the clip folder) this costs nothing: the folder is only looked
-/// at once per run.
-fn ensure_game_folder(clip: &Path, events: &Events) {
-    static SEEN: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
-    let Some(folder) = clip.parent().filter(|f| !f.as_os_str().is_empty()) else { return };
-    let mut seen = SEEN.lock().unwrap_or_else(|p| p.into_inner());
-    if seen.iter().any(|f| f == folder) {
-        return;
-    }
-    if folder.is_dir() {
-        seen.push(folder.to_path_buf());
-        return;
-    }
-    if !folder.parent().is_some_and(Path::is_dir) {
-        return;
-    }
-    match std::fs::create_dir(folder) {
-        Ok(()) => seen.push(folder.to_path_buf()),
-        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => seen.push(folder.to_path_buf()),
-        Err(e) => events.log(&format!("saver: could not make the game folder {}: {e}", folder.display())),
+/// "Sort clips into game folders": before a save into `<clip folder>\<Game>\`, make that
+/// folder again (with its marker) if it went missing, and refuse a game folder that is a link
+/// (`naming::check_game_dir`): the save fails and nothing is written through it. Here on the
+/// saver thread, so the hotkey path never waits on the drive. A clip straight in the clip
+/// folder (the option off) passes unchanged.
+pub(crate) fn ensure_game_folder(clip: &Path, clip_folder: &Path, events: &Events) -> Result<(), String> {
+    let Some(folder) = clip.parent() else { return Ok(()) };
+    match crate::naming::check_game_dir(clip_folder, folder) {
+        Ok(()) => Ok(()),
+        Err(crate::naming::GameDirProblem::Link) => Err(GAME_FOLDER_LINK.to_string()),
+        Err(crate::naming::GameDirProblem::Io(e)) => {
+            // The write itself then fails with the real error.
+            events.log(&format!("saver: could not make the game folder {}: {e}", folder.display()));
+            Ok(())
+        }
     }
 }
+
+/// `save_failed` reason when a game folder is a junction or symlink.
+pub(crate) const GAME_FOLDER_LINK: &str = "The game folder is a link; clip not saved";
 
 /// `<path>.part`: the in-progress name, renamed to `path` only when complete.
 pub(crate) fn part_path(path: &str) -> PathBuf {
@@ -482,21 +480,8 @@ fn lower_thread_priority(events: &Events) {
 /// Build a Moments-convention clip path: `<Game>__<YYYY-MM-DD>__<HH-MM-SS>.mp4`.
 /// Non-filename characters in the source name become dashes.
 pub fn clip_path(out_dir: &str, source: &str) -> String {
-    let mut name: String = source
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim()
-        .replace(' ', "-");
-    if name.is_empty() {
-        name = "Desktop".to_string();
-    }
+    // The `naming::source_slug` rule, at most `naming::SLUG_MAX` characters.
+    let name = crate::naming::source_slug(source);
     let stamp = chrono::Local::now().format("%Y-%m-%d__%H-%M-%S-%3f");
     let suffix = uuid::Uuid::new_v4().simple();
     std::path::Path::new(out_dir)

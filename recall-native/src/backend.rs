@@ -138,9 +138,10 @@ pub fn library_dir_from(folders:&Folders)->PathBuf{
 /// From folders already read (the listing's copy).
 pub fn clip_roots_from(f:&Folders)->Vec<WatchRoot>{
     let recordings=library_dir_from(f);
-    // Game folders ("Sort clips into game folders"), each watched like the recordings folder; a
-    // new one is picked up by the listing after its first save (every save ends in a listing).
-    let games=folders::game_folders(&recordings);
+    // Game folders Recall made ("Sort clips into game folders"), each watched like the recordings
+    // folder; a new one is picked up by the listing after its first save (every save ends in a
+    // listing). A linked one is watched as its link.
+    let games=folders::game_folders(&recordings,&f.imported);
     let mut roots=vec![WatchRoot{path:recordings,recursive:false}];
     roots.extend(games.into_iter().map(|path|WatchRoot{path,recursive:false}));
     roots.extend(f.imported.iter().map(|folder|WatchRoot{path:PathBuf::from(folder),recursive:true}));
@@ -174,8 +175,8 @@ pub(crate) fn list_from(dir:&Path,imported:&[String],former:&[String])->Result<(
             let mtime=m.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
             push(path,m.len(),mtime,None);
         }
-        // Game folders one level down: recorder clips only (`folders::in_game_folder`).
-        for game in folders::game_folders(dir){
+        // Game folders Recall made, one level down: recorder clips only (`folders::in_game_folder`).
+        for game in folders::game_folders(dir,imported){
             let Ok(listing)=std::fs::read_dir(&game)else{complete=false;continue};
             for e in listing{
                 let Ok(e)=e else{complete=false;continue};

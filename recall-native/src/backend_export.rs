@@ -35,8 +35,8 @@ pub(crate) fn export_queued()->impl Drop{ExportQueueGuard}
 pub(crate) fn export_cancelled()->bool{EXPORT_CANCEL.load(Ordering::Acquire)}
 /// Where an export of `info` lands now (`Recall\Edited`, created if missing).
 pub(crate) fn export_target(info:&ClipInfo,fps:u32,export:&ExportSettings)->Result<PathBuf,String>{
-    let source=Path::new(&info.path);let outdir=checked_export_dir(source,&folders_now())?;
-    std::fs::create_dir_all(&outdir).map_err(|e|format!("create export directory: {e}"))?;
+    let source=Path::new(&info.path);let folders=folders_now();let outdir=checked_export_dir(source,&folders)?;
+    let outdir=ready_export_dir(outdir,source,&library_dir_from(&folders))?;
     let stem=source.file_stem().and_then(|v|v.to_str()).unwrap_or("clip");
     let base = if export.mode == ExportMode::Lossless {
         format!("{stem}-trim")
@@ -46,6 +46,21 @@ pub(crate) fn export_target(info:&ClipInfo,fps:u32,export:&ExportSettings)->Resu
         format!("{stem}-edited-{fps}fps")
     };
     free_name(&outdir,&base)
+}
+/// Make the export folder. A game's `Edited\<Game>\` ("Sort clips into game folders") is made
+/// with `create_dir` and Recall's marker, only when missing; one the user made (no marker) or a
+/// link is never written into: the export goes to `Edited` itself.
+fn ready_export_dir(outdir:PathBuf,source:&Path,recordings:&Path)->Result<PathBuf,String>{
+    use crate::services::library::folders::{in_game_folder,rule};
+    let edited=outdir.parent().filter(|p|p.file_name().is_some_and(|n|n.eq_ignore_ascii_case("Edited"))&&in_game_folder(source,recordings)).map(Path::to_path_buf);
+    let made=|dir:&Path|std::fs::create_dir_all(dir).map_err(|e|format!("create export directory: {e}"));
+    let Some(edited)=edited else{made(&outdir)?;return Ok(outdir)};
+    made(&edited)?;
+    match rule::make(&outdir){
+        Ok(())=>Ok(outdir),
+        Err(e) if e.kind()==std::io::ErrorKind::AlreadyExists=>Ok(if rule::is_game_folder(&outdir){outdir}else{edited}),
+        Err(e)=>Err(format!("create export directory: {e}")),
+    }
 }
 /// `<outdir>\<base>-<n>.mp4` with `n` one past the highest taken (short names people drag into
 /// Discord, sorting by age even after one is deleted; the engine and the prepared copy still
