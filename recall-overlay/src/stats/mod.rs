@@ -22,7 +22,7 @@ use frame_timing::{FpsSource, FrameTiming};
 use gpu_watch::{GpuBackoff, GpuWatch};
 use nvml::Nvml;
 
-pub use etw_session::install_cleanup;
+pub use etw_session::{install_cleanup, set_sole_overlay};
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize)]
 pub struct StatsSnapshot {

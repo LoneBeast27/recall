@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use serde::Serialize;
 
-use super::etw_session::{EtwSession, StartError};
+use super::etw_session::{EtwSession, Kind, StartError};
 use super::frame_math::FrameStats;
 
 pub const RETRY_AFTER: Duration = Duration::from_secs(5);
@@ -90,13 +90,22 @@ pub fn source_for(phase: Phase) -> FpsSource {
 pub struct FrameTiming {
     phase: Phase,
     session: Option<EtwSession>,
+    /// The island's session or the probe's (its own session name).
+    kind: Kind,
     /// The last phase change, for the trace log (the overlay's stderr goes nowhere).
     note: Option<String>,
 }
 
 impl FrameTiming {
+    /// The island's frame timing (`RecallFrameTiming`).
     pub fn new() -> Self {
-        Self { phase: Phase::Idle, session: None, note: None }
+        Self { phase: Phase::Idle, session: None, kind: Kind::Overlay, note: None }
+    }
+
+    /// `--frame-timing-probe`'s (`RecallFrameTimingProbe`: never touches a
+    /// running overlay's session).
+    pub fn probe() -> Self {
+        Self { kind: Kind::Probe, ..Self::new() }
     }
 
     /// The last phase change since the previous call ("running for pid 42",
@@ -140,7 +149,7 @@ impl FrameTiming {
             Phase::Failed { tries, .. } => tries + 1,
             _ => 0,
         };
-        let (phase, note) = match EtwSession::start(pid) {
+        let (phase, note) = match EtwSession::start(pid, self.kind) {
             Ok(mut session) => {
                 let note = running_note(pid, &mut session);
                 self.session = Some(session);
