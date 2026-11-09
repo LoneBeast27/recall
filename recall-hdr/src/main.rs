@@ -115,6 +115,7 @@ mod record_session_win;
 mod record_setup_owner;
 mod record_private_watch;
 mod record_quit;
+mod record_quit_save;
 mod record_quit_wait;
 mod record_recover;
 mod record_game_ops;
