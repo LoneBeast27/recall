@@ -45,6 +45,23 @@ struct Inner {
     /// An audio line to the attached engine was dropped by a full queue (F-1): the engine holds
     /// on the gap, and the intent is restated until one restatement is queued whole.
     dirty: bool,
+    /// Privacy-tightening lines the engine has not acked: (seq, unix ms when issued) (F-4 b).
+    pending: Vec<(u64, u64)>,
+    /// The engine exited with some of them unacked: the next spawn mutes its recovered long
+    /// recording from the earliest (`RECALL_LONGREC_MUTE_FROM`).
+    mute_from: Option<u64>,
+}
+
+/// The engine's env var (`recall` `longrec::part_mute::MUTE_FROM_ENV`).
+pub(super) const MUTE_FROM_ENV: &str = "RECALL_LONGREC_MUTE_FROM";
+
+/// A line that makes the engine record less (Alt+M on, a flag on, a retire, a re-picked id).
+fn tightening(line: &str) -> bool {
+    [r#""muted":true"#, r#""mic_mute":true"#, r#""retire":true"#, r#""device_id""#].iter().any(|k| line.contains(k))
+}
+
+fn unix_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 impl SpawnSources {
@@ -124,6 +141,20 @@ impl SpawnSources {
     pub(super) fn dirty(&self) -> bool {
         self.lock().dirty
     }
+
+    /// `status.audio_seq`: every pending privacy line up to it is in force.
+    pub(super) fn acked(&self, seq: u64) {
+        self.lock().pending.retain(|p| p.0 > seq);
+    }
+
+    /// The engine process ended: an unacked privacy line marks the next recovery (F-4 b).
+    pub(super) fn engine_exited(&self) {
+        let mut g = self.lock();
+        if let Some(first) = g.pending.iter().map(|p| p.1).min() {
+            g.mute_from = Some(g.mute_from.map_or(first, |m| m.min(first)));
+        }
+        g.pending.clear();
+    }
 }
 
 impl super::Shared {
@@ -133,6 +164,9 @@ impl super::Shared {
     pub(super) fn queue_audio(&self, g: &super::EngineStdin, line: &str) -> Sent {
         let (line, seq) = self.spawn_sources.stamp(line);
         let attached = g.quitting.is_none() && g.queue.is_some();
+        if g.queue.is_some() && tightening(&line) && !self.spawn_sources.below_floor() {
+            self.spawn_sources.lock().pending.push((seq, unix_ms())); // until acked (F-4 b)
+        }
         if let (Some(refusal), Some(queue)) = (g.quitting, g.queue.as_ref()) {
             // Never refused to the engine (F-4 (a)): written ahead of its `quit`. The caller is
             // still told why (the engine is ending); an unacked one marks its `.part` (F-4 (b)).
@@ -147,6 +181,17 @@ impl super::Shared {
             self.spawn_sources.lock().dirty = true; // the safe state: restate until whole
         }
         sent
+    }
+
+    /// `spec` for the next spawn: when the last engine exited with a privacy line unacked, it
+    /// says from when its recovered long recording's device audio is muted (F-4 b; once).
+    pub(super) fn with_mute_from(&self, mut spec: EngineSpec) -> EngineSpec {
+        if let Some(ms) = self.spawn_sources.lock().mute_from.take() {
+            crate::log!("supervisor: the last engine never applied a privacy change; its long recording is muted from then when recovered");
+            spec.env.retain(|(k, _)| k != MUTE_FROM_ENV);
+            spec.env.push((MUTE_FROM_ENV.to_owned(), Some(ms.to_string())));
+        }
+        spec
     }
 
     /// After a dropped line: queue a whole restatement now (it may drop again; `dirty` stays).

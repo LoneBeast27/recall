@@ -385,7 +385,13 @@ impl SinkFactory for Fmp4Factory {
     type Video = ff::codec::Parameters;
     fn open(&mut self, part: &Path, tracks: &[TrackInfo], video: Option<&ff::codec::Parameters>) -> Result<Fmp4Sink, String> {
         let params = video.ok_or("the video encoder has not started yet")?;
-        Fmp4Sink::create(part, params, tracks)
+        let sink = Fmp4Sink::create(part, params, tracks)?;
+        // Which audio tracks are devices, and when the part started (F-4 b, `part_mute.rs`).
+        let device: Vec<bool> = tracks.iter().map(|t| t.device).collect();
+        if let Err(e) = super::part_mute::write_sidecar(part, &device) {
+            eprintln!("[recall] long recording sidecar not written ({e}): a later privacy mute of this part is refused");
+        }
+        Ok(sink)
     }
     fn stream_of(&self, generation: u64) -> Option<(ff::codec::Parameters, Cause)> {
         tap::stream_of(generation)

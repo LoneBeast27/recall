@@ -89,7 +89,7 @@ fn an_engine_file_with_the_marker_gets_the_whole_list() {
     assert!(!shared.spawn_sources.below_floor());
     assert!(!has_marker(&dir.0.join("missing.exe")), "an unreadable file has none");
     let manager = include_str!("supervisor_manager.rs").split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(manager.contains("let spec = &shared.floor_spec(path, spec);"), "every spawn goes through it");
+    assert!(manager.contains("let spec = &shared.with_mute_from(shared.floor_spec(path, spec));"), "every spawn goes through it");
 }
 
 /// The game captured by its process tree keeps its track even with a named desktop device.
