@@ -44,4 +44,6 @@ fn an_alt_m_after_the_attach_is_queued_directly() {
     assert_eq!(shared.set_mute_and_send(true), Sent::Queued);
     shared.attach_writer(None);
     assert_eq!(rec.lines(), vec![mute_line(true)]);
+    // The user's Alt+M is a press (gate review P2-b; guarded by review R2-audio-r9-4).
+    assert_eq!(mute_line(true), crate::record_dispatch::mic_line(true, true));
 }
