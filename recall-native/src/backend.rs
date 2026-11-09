@@ -183,6 +183,7 @@ pub(crate) fn list_from(dir:&Path,imported:&[String],former:&[String])->Result<(
 pub fn thumbnail(path:&str)->Result<String,String>{storage::ensure_thumb(path)}
 // The editor save: beside the clip, or on C: for a clip in an imported folder (`backend_edit_place.rs`).
 #[path="backend_edit_place.rs"] mod edit_place;
+pub(crate) use edit_place::{checked_export_dir, export_dir_for, folders_now, overlaps_link};
 use edit_place::sidecar;
 #[allow(unused_imports)] // the examples build backend.rs without Root, its only caller
 pub use edit_place::share_folders;

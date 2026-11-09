@@ -149,6 +149,14 @@ impl Folders {
         self.former_recordings.len() != before
     }
 
+    /// Linked sources appear separately from former recordings folders that Recall manages.
+    pub(crate) fn linked(&self) -> impl Iterator<Item = &str> {
+        self.imported.iter().map(String::as_str).filter(|path| {
+            let key = folder_key(path);
+            !self.former_recordings.iter().any(|former| folder_key(former) == key)
+        })
+    }
+
     /// The former recordings folders Settings lists as "Folders Recall manages" (the current
     /// recordings folder has its own row).
     pub fn managed(&self, recordings: &str) -> Vec<String> {

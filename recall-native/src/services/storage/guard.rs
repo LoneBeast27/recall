@@ -12,13 +12,25 @@ static BLOCKED: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 /// Comparable form: the real path when it exists (junctions and links resolved, its real
 /// case), else the absolute path; `\`-separated, no trailing `\`, lowercase.
 fn normalized(path: &Path) -> String {
-    let real = std::fs::canonicalize(path).map(|p| super::plain_path(&p)).unwrap_or_else(|_| std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()));
+    let absolute = std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf());
+    let real = absolute.ancestors().find_map(|ancestor| {
+        let real = super::plain_path(&std::fs::canonicalize(ancestor).ok()?);
+        let tail = absolute.strip_prefix(ancestor).ok()?;
+        Some(real.join(tail))
+    }).unwrap_or(absolute);
     real.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase()
 }
 
 /// `inner` is `outer` or lies inside it (both normalized).
 fn within(inner: &str, outer: &str) -> bool {
     inner == outer || (inner.starts_with(outer) && inner.as_bytes().get(outer.len()) == Some(&b'\\'))
+}
+
+/// Compare both directions, including junctions, aliases and a destination not created yet.
+pub(crate) fn folders_overlap(a: &Path, b: &Path) -> bool {
+    let (a_key, b_key) = (normalized(a), normalized(b));
+    within(&a_key, &b_key) || within(&b_key, &a_key)
+        || crate::file_id::inside(a, b) == Some(true) || crate::file_id::inside(b, a) == Some(true)
 }
 
 /// The first clip folder that overlaps a cache folder, as a sentence for the user; `None`

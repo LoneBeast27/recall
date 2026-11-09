@@ -1,6 +1,6 @@
 //! Settings → Media → Clip folders: the recordings folder plus folders of old clips the user
 //! imported from other recorders. Imported folders are only listed; nothing is moved.
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use gpui::{AnyElement, Context, Div, FontWeight, PathPromptOptions, SharedString, div, prelude::*, px};
 use serde_json::{Value, json};
@@ -100,7 +100,7 @@ impl Root {
             files: false,
             directories: true,
             multiple: true,
-            prompt: Some(SharedString::from("Add folder")),
+            prompt: Some(SharedString::from("Link a recording folder")),
         });
         cx.spawn(async move |this, cx| {
             let Ok(Ok(Some(paths))) = picked.await else { return };
@@ -142,6 +142,10 @@ impl Root {
             self.show_toast_for(ToastKind::Bad, "Can't save clips there", Some(why), 10);
             return;
         }
+        if crate::backend::overlaps_link(&dir, &self.folders) {
+            self.show_toast(ToastKind::Bad, "Choose a separate recordings folder", Some("Folder Mapper keeps linked recordings read-only.".into()));
+            return;
+        }
         let new = dir.to_string_lossy().into_owned();
         let old = self.recordings_folder();
         if same_folder(&new, &old) {
@@ -159,7 +163,16 @@ impl Root {
             return;
         }
         let mut folders = Folders::load();
-        folders.recordings = self.folders.recordings.clone().or_else(|| Some(self.recordings_folder()));
+        let recordings = self.recordings_folder();
+        let managed = std::iter::once(Path::new(&recordings)).chain(folders.former_recordings.iter().map(Path::new));
+        let overlap = crate::services::storage::guard::folders_overlap;
+        if managed.into_iter().any(|own| paths.iter().any(|path| overlap(own, path)))
+            || crate::services::library::imports::base_dir().is_some_and(|root| paths.iter().any(|path| overlap(&root, path)))
+        {
+            self.show_toast(ToastKind::Bad, "Choose an external recording folder", Some("Folder Mapper needs a folder separate from Recall’s recordings and library data.".into()));
+            return;
+        }
+        folders.recordings = self.folders.recordings.clone().or(Some(recordings));
         let new = folders.add_all(&paths);
         let added = new.len();
         // Clips removed from Recall while the folder was listed before come back with it, only
@@ -178,8 +191,8 @@ impl Root {
                 self.recheck_cache_overlap();
                 crate::services::library::folders::forget_scans();
                 self.workers.job(Job::List);
-                let title = if added == 1 { "Folder added".to_owned() } else { format!("{added} folders added") };
-                self.show_toast(ToastKind::Good, title, Some("Its clips appear in your library in a moment.".into()));
+                let title = if added == 1 { "Recording folder linked".to_owned() } else { format!("{added} recording folders linked") };
+                self.show_toast(ToastKind::Good, title, Some("The clips appear in Recall and stay in their original folders.".into()));
             }
             Err(error) => self.show_toast(ToastKind::Bad, "Couldn't add the folder", Some(error)),
         }
@@ -258,11 +271,12 @@ impl Root {
             this.prompt_recordings_folder(cx);
         }));
         list = list.child(folder_row("rec", "Recordings", &recordings, count(&recordings), false, cx).child(change));
-        for (i, folder) in self.folders.imported.clone().into_iter().enumerate() {
-            let name = std::path::Path::new(&folder).file_name().map_or_else(|| folder.clone(), |n| n.to_string_lossy().into_owned());
-            let skipped = crate::services::library::imports::skipped_under(&folder);
-            let label = if skipped == 0 { count(&folder) } else { format!("{} · {skipped} skipped as edited", count(&folder)) };
-            list = list.child(folder_row(("imp", i), &name, &folder, label, true, cx));
+        let mut mapped = div().flex().flex_col().child(div().font_weight(FontWeight::SEMIBOLD).child("Folder Mapper"));
+        for (i, folder) in self.folders.linked().enumerate() {
+            let name = Path::new(folder).file_name().map_or_else(|| folder.to_owned(), |n| n.to_string_lossy().into_owned());
+            let skipped = crate::services::library::imports::skipped_under(folder);
+            let label = if skipped == 0 { count(folder) } else { format!("{} · {skipped} skipped as edited", count(folder)) };
+            mapped = mapped.child(folder_row(("imp", i), &name, folder, label, true, cx));
         }
 
         let add = div()
@@ -270,13 +284,18 @@ impl Root {
             .flex()
             .items_center()
             .gap(px(12.))
-            .child(ui::button("add-folder", Variant::Secondary).child(icon(Icon::Plus, 14., theme::TEXT)).child("Add folder").on_click(cx.listener(|this, _, _, cx| {
-                this.prompt_clip_folders(cx);
-            })))
-            .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(c(theme::TERTIARY)).child("Bring in old clips from ShadowPlay, SteelSeries, Medal or OBS. Files stay as they are; videos made in an editor like Premiere Pro are skipped."));
+            .child(ui::button("add-folder", Variant::Secondary).child(icon(Icon::Plus, 14., theme::TEXT)).child("Link folder")
+                .child(crate::trace::target("folder-map-link")).on_click(cx.listener(|this, _, _, cx| {
+                    this.prompt_clip_folders(cx);
+                })))
+            .child(div().flex_1().min_w_0().text_size(px(12.)).text_color(c(theme::TERTIARY)).child("Show ShadowPlay, Medal, OBS or other recordings in Recall. Links are read-only. Edits and exports go to Recall."));
 
         let managed = self.render_managed_folders(&recordings, cx);
-        vec![section_title("Clip folders"), crate::views::pages::card().child(list).child(add).children(managed).into_any_element()]
+        vec![
+            section_title("Clip folders"),
+            crate::views::pages::card().child(list).children(managed).into_any_element(),
+            crate::views::pages::card().child(mapped).child(add).into_any_element(),
+        ]
     }
 }
 

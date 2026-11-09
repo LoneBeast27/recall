@@ -62,10 +62,10 @@ pub fn export_dir(clip: &Path, recordings: &Path) -> Option<std::path::PathBuf> 
 /// `clip` has a finished export, in its export folder ([`export_dir`]) or in the older
 /// `exports` folder beside it. Exported clips stay protected from the storage limit, so their
 /// sidecar stays when the edits are undone.
-pub fn has_export(clip: &Path, recordings: &Path) -> bool {
+pub fn has_export(clip: &Path, target: Option<std::path::PathBuf>) -> bool {
     let Some(stem) = clip.file_stem().and_then(|s| s.to_str()) else { return false };
     let names = [format!("{stem}-edited-").to_lowercase(), format!("{stem}-trim-").to_lowercase()];
-    let mut folders: Vec<std::path::PathBuf> = export_dir(clip, recordings).into_iter().collect();
+    let mut folders: Vec<std::path::PathBuf> = target.into_iter().collect();
     if let Some(beside) = clip.parent().map(|folder| folder.join("exports")).filter(|beside| !folders.contains(beside)) {
         folders.push(beside);
     }
