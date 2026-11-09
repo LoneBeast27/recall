@@ -44,6 +44,8 @@ const DXGKRNL_PRESENT_KEYWORD: u64 = 0x0000_0000_0800_0001;
 /// How one provider is enabled on the session.
 pub struct ProviderSpec {
     pub guid: GUID,
+    /// For the trace log ("DXGI refused the PID filter").
+    pub name: &'static str,
     pub keyword: u64,
     pub event_ids: &'static [u16],
     /// `EVENT_FILTER_TYPE_PID` applies: user-mode providers only (a PID filter
@@ -54,12 +56,25 @@ pub struct ProviderSpec {
 pub const PROVIDERS: [ProviderSpec; 3] = [
     ProviderSpec {
         guid: DXGI,
+        name: "DXGI",
         keyword: RUNTIME_KEYWORD,
         event_ids: &[DXGI_PRESENT_START, DXGI_PRESENT_MPO_START],
         pid_filter: true,
     },
-    ProviderSpec { guid: D3D9, keyword: RUNTIME_KEYWORD, event_ids: &[D3D9_PRESENT_START], pid_filter: true },
-    ProviderSpec { guid: DXGKRNL, keyword: DXGKRNL_PRESENT_KEYWORD, event_ids: &[DXGKRNL_PRESENT_INFO], pid_filter: false },
+    ProviderSpec {
+        guid: D3D9,
+        name: "D3D9",
+        keyword: RUNTIME_KEYWORD,
+        event_ids: &[D3D9_PRESENT_START],
+        pid_filter: true,
+    },
+    ProviderSpec {
+        guid: DXGKRNL,
+        name: "DxgKrnl",
+        keyword: DXGKRNL_PRESENT_KEYWORD,
+        event_ids: &[DXGKRNL_PRESENT_INFO],
+        pid_filter: false,
+    },
 ];
 
 /// Where a present was seen.

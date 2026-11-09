@@ -4,6 +4,7 @@
 //! on; dropping it stops the ETW session and unloads NVML.
 
 pub mod cpu;
+mod enable_plan;
 mod etw_session;
 mod frame_math;
 pub mod frame_timing;

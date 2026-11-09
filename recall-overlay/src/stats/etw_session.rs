@@ -36,7 +36,8 @@ use windows::Win32::System::Diagnostics::Etw::{
 use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 
 use super::frame_math::{FrameStats, FrameWindow};
-use super::present_events::{classify, FrameMapper, Mapped, ProviderSpec, RawEvent, DXGI, PROVIDERS};
+use super::enable_plan::{self, Aimed, Enabler};
+use super::present_events::{classify, FrameMapper, Mapped, ProviderSpec, RawEvent, PROVIDERS};
 
 /// Also named in `recall-hdr/src/frame_timing.rs` (the controller stops it
 /// after killing the overlay).
@@ -143,8 +144,30 @@ pub struct EtwSession {
     trace: Option<PROCESSTRACE_HANDLE>,
     thread: Option<JoinHandle<()>>,
     shared: Arc<Shared>,
-    /// `EVENT_FILTER_TYPE_PID` was accepted (else the callback filters alone).
-    pid_filter: bool,
+    /// How the providers run for the current target (`enable_plan`).
+    aimed: Aimed,
+    /// `RECALL_ETW_NO_PID_FILTER=1` (dev: filtered vs unfiltered CPU A/B).
+    forced_off: bool,
+    /// Enable problems not yet written to the trace log ([`Self::take_problems`]).
+    problems: Vec<String>,
+}
+
+/// `RECALL_ETW_NO_PID_FILTER=1`: never PID-filter (dev A/B only).
+fn pid_filter_forced_off() -> bool {
+    std::env::var("RECALL_ETW_NO_PID_FILTER").as_deref() == Ok("1")
+}
+
+/// The real provider calls for `enable_plan`.
+struct Calls<'a>(&'a EtwSession);
+
+impl Enabler for Calls<'_> {
+    fn enable(&mut self, spec: &ProviderSpec, pid: Option<u32>) -> WIN32_ERROR {
+        self.0.enable(spec, pid)
+    }
+
+    fn disable(&mut self, spec: &ProviderSpec) {
+        self.0.disable(spec);
+    }
 }
 
 impl EtwSession {
@@ -166,26 +189,44 @@ impl EtwSession {
             track: Mutex::new(Track { mapper: FrameMapper::new(pid, ticks_per_sec), window: FrameWindow::new(ticks_per_sec) }),
         });
         // From here on, dropping `session` stops the trace on any error.
-        let mut session =
-            EtwSession { control, guid: p.props.Wnode.Guid, trace: None, thread: None, shared, pid_filter: true };
+        let forced_off = pid_filter_forced_off();
+        let mut session = EtwSession {
+            control,
+            guid: p.props.Wnode.Guid,
+            trace: None,
+            thread: None,
+            shared,
+            aimed: Aimed::new(!forced_off),
+            forced_off,
+            problems: Vec::new(),
+        };
         session.enable_providers(pid)?;
         session.consume()?;
         Ok(session)
     }
 
-    /// Follow another process: new filter, fresh numbers.
+    /// Follow another process: new filter (asked filtered again, see
+    /// `enable_plan::retarget`), fresh numbers.
     pub fn retarget(&mut self, pid: u32) {
         self.shared.retarget(pid);
-        if !self.pid_filter {
-            return;
+        let providers = PROVIDERS;
+        let specs: Vec<&ProviderSpec> = providers.iter().collect();
+        let aimed = enable_plan::retarget(&specs, pid, self.aimed.filter_ok, &mut Calls(self));
+        if let Some(aimed) = aimed {
+            self.problems.extend(enable_plan::problems(&aimed, pid));
+            self.aimed = Aimed { kernel: self.aimed.kernel, ..aimed };
         }
-        for spec in PROVIDERS.iter().filter(|spec| spec.pid_filter) {
-            self.disable(spec);
-            let status = self.enable(spec, Some(pid));
-            if status != ERROR_SUCCESS {
-                eprintln!("recall-overlay: frame timing re-enable for pid {pid} failed (error {})", status.0);
-            }
-        }
+    }
+
+    /// Enable problems since the last call (lost filter, providers that did
+    /// not come up), for the trace log.
+    pub fn take_problems(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.problems)
+    }
+
+    /// The trace note's tail: empty while PID-filtered, else why not.
+    pub fn filter_note(&self) -> String {
+        enable_plan::filter_note(&self.aimed, self.forced_off)
     }
 
     pub fn stats(&self) -> FrameStats {
@@ -197,24 +238,15 @@ impl EtwSession {
         self.shared.running.load(Ordering::SeqCst)
     }
 
-    /// DXGI is required (every D3D10/11/12 game); D3D9 and the DxgKrnl
-    /// fallback are best effort.
+    /// DXGI (every D3D10/11/12 game) or the DxgKrnl fallback (any API) must
+    /// come up; D3D9 is best effort. Filter fallbacks: `enable_plan`.
     fn enable_providers(&mut self, pid: u32) -> Result<(), StartError> {
-        for spec in &PROVIDERS {
-            let mut status = self.enable(spec, (spec.pid_filter && self.pid_filter).then_some(pid));
-            if status != ERROR_SUCCESS && status != ERROR_ACCESS_DENIED && spec.pid_filter && self.pid_filter {
-                eprintln!("recall-overlay: PID filter refused (error {}); filtering in the callback", status.0);
-                self.pid_filter = false;
-                status = self.enable(spec, None);
-            }
-            match (status, spec.guid == DXGI) {
-                (ERROR_SUCCESS, _) => {}
-                (ERROR_ACCESS_DENIED, true) => return Err(StartError::Denied),
-                (other, true) => return Err(StartError::Failed(format!("EnableTraceEx2 DXGI: error {}", other.0))),
-                (other, false) => eprintln!("recall-overlay: provider {:?} not enabled (error {})", spec.guid, other.0),
-            }
-        }
-        Ok(())
+        let providers = PROVIDERS;
+        let specs: Vec<&ProviderSpec> = providers.iter().collect();
+        let aimed = enable_plan::enable_for(&specs, pid, self.aimed.filter_ok, &mut Calls(self));
+        self.problems.extend(enable_plan::problems(&aimed, pid));
+        self.aimed = aimed;
+        enable_plan::outcome(&self.aimed)
     }
 
     fn enable(&self, spec: &ProviderSpec, pid: Option<u32>) -> WIN32_ERROR {
@@ -297,6 +329,9 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
     let Some(record) = (unsafe { record.as_ref() }) else { return };
     let Some(shared) = (unsafe { (record.UserContext as *const Shared).as_ref() }) else { return };
     let header = &record.EventHeader;
+    if header.ProcessId != shared.target.load(Ordering::Relaxed) {
+        return; // cheapest first: most events are other processes' when unfiltered
+    }
     let payload: &[u8] = if record.UserData.is_null() {
         &[]
     } else {
@@ -305,9 +340,6 @@ unsafe extern "system" fn on_event(record: *mut EVENT_RECORD) {
     let pointer_size = if u32::from(header.Flags) & EVENT_HEADER_FLAG_32_BIT_HEADER != 0 { 4 } else { 8 };
     let event = RawEvent { provider: header.ProviderId, id: header.EventDescriptor.Id, pointer_size, payload };
     let Some(source) = classify(&event) else { return };
-    if header.ProcessId != shared.target.load(Ordering::Relaxed) {
-        return;
-    }
     let mut track = shared.track();
     match track.mapper.map(header.ProcessId, source, header.TimeStamp) {
         Mapped::Ignore => {}
@@ -330,3 +362,4 @@ fn qpc_now() -> i64 {
     let _ = unsafe { QueryPerformanceCounter(&mut now) };
     now
 }
+
