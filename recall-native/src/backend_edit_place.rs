@@ -86,11 +86,21 @@ fn beside(source: &str) -> Result<PathBuf, String> {
     Ok(p.with_file_name(format!("{name}.recall-edit.json")))
 }
 
-/// Read-only: the beside-clip edit file of an imported clip whose own edit file (`sidecar`, on
-/// C:) is not there yet, when one exists (left from when its folder was Recall's).
+/// Read-only: the beside-clip edit file of a clip whose edits are written to C: (`sidecar`),
+/// left from when its folder was Recall's or before the folder overlapped a link, when it is
+/// there and the C: one is missing or older (by modified time). It is never written or removed.
 pub(super) fn beside_fallback(source: &str, sidecar: &Path) -> Option<PathBuf> {
     let old = beside(source).ok()?;
-    (old != sidecar && !sidecar.exists() && old.exists()).then_some(old)
+    if old == sidecar {
+        return None;
+    }
+    let modified = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let beside_time = modified(&old)?;
+    match modified(sidecar) {
+        Some(own) if own >= beside_time => None,
+        Some(_) => Some(old),
+        None => (!sidecar.exists()).then_some(old),
+    }
 }
 
 #[cfg(test)]
@@ -159,5 +169,37 @@ mod tests {
         let blocked = Folders { write_block: Some("folders.json could not be read".into()), ..Folders::default() };
         assert!(sidecar_in(&clip, &blocked).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_newer_edit_file_beside_a_linked_clip_loads_and_stays_byte_unchanged() {
+        let root = crate::test_temp::TempDir::sandbox("edit-beside-newer");
+        let linked = root.join("Videos");
+        std::fs::create_dir_all(&linked).unwrap();
+        let clip = linked.join("old.mp4");
+        std::fs::write(&clip, b"clip").unwrap();
+        let clip = clip.to_string_lossy().into_owned();
+        let folders = Folders { recordings: Some(root.join("Recall").to_string_lossy().into_owned()), imported: vec![linked.to_string_lossy().into_owned()], ..Folders::default() };
+        let own = sidecar_in(&clip, &folders).unwrap();
+        assert_eq!(Some(own.clone()), imports::edit_file(Path::new(&clip)), "new writes stay in APPDATA");
+        let info = ClipInfo { path: clip.clone(), duration: 10.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 4, source_modified_ms: 5678, audio: Vec::new(), keyframes: Vec::new() };
+        let project = |a: f64| super::super::Project { version: 1, source_path: clip.clone(), source_bytes: 4, source_modified_ms: 5678, plan: EditPlan { mix_down: None, ranges: vec![TimeRange::new(a, 9.0)], audio: Vec::new() }, export_fps: 60, export: ExportSettings::default() };
+        // An older APPDATA copy (an hour ago), and the newer edits beside the clip.
+        std::fs::create_dir_all(own.parent().unwrap()).unwrap();
+        std::fs::write(&own, serde_json::to_vec(&project(2.0)).unwrap()).unwrap();
+        let hour_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        std::fs::File::options().write(true).open(&own).unwrap().set_modified(hour_ago).unwrap();
+        let old = beside(&clip).unwrap();
+        let bytes = serde_json::to_vec(&project(1.0)).unwrap();
+        std::fs::write(&old, &bytes).unwrap();
+        let (loaded, _, ours, _) = super::super::load_project(&info);
+        assert_eq!(loaded.map(|p| p.plan.ranges), Some(vec![TimeRange::new(1.0, 9.0)]), "the newer beside-clip edits load");
+        assert!(ours);
+        // A save goes to APPDATA; the beside file is left byte for byte.
+        let saved = serde_json::to_vec(&project(3.0)).unwrap();
+        super::super::sidecar_flush::sidecar_task(&own, Path::new(&clip), &saved, false, ours).unwrap();
+        assert_eq!(std::fs::read(&own).unwrap(), saved);
+        assert_eq!(std::fs::read(&old).unwrap(), bytes, "the beside-clip file is unchanged");
+        let _ = std::fs::remove_file(&own);
     }
 }
