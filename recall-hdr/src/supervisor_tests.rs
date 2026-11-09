@@ -153,18 +153,23 @@ fn a_crash_respawn_starts_with_the_live_audio_sources() {
 fn a_source_change_during_a_spawn_respawns_the_engine_on_it() {
     use crate::record_audio_sources::SOURCES_ENV;
     let shared = Shared::new(None);
+    const A: &str = r#"[{"id":"mic","kind":"input","name":"Mic","device":"Mic (Desk)"}]"#;
+    const A_FLAG: &str = r#"[{"id":"mic","kind":"input","name":"Mic","device":"Mic (Desk)","mic_mute":false}]"#;
+    const B: &str = r#"[{"id":"mic","kind":"input","name":"Mic","device":"Mic (Other)"}]"#;
     let spec = |v: &str| Some(EngineSpec { env: vec![(SOURCES_ENV.into(), Some(v.into()))] });
-    shared.set_desired(spec("[a]"), crate::record_dispatch::Sent::Waiting);
+    shared.set_desired(spec(A), crate::record_dispatch::Sent::Waiting);
     let (gen, _) = shared.desired(); // the manager reads the spec
     assert!(!shared.respawn_if_sources_moved(gen), "no change during the spawn: no respawn");
+    shared.spawn_sources.set(A_FLAG); // a flag only: restated at the attach, no respawn
+    assert!(!shared.respawn_if_sources_moved(gen), "a live change: no respawn");
     assert_eq!(shared.generation(), gen);
     let (gen, _) = shared.desired();
-    shared.spawn_sources.set("[b]"); // the Audio page, while the pid is still 0
+    shared.spawn_sources.set(B); // another device, while the pid is still 0
     assert!(shared.respawn_if_sources_moved(gen), "the change during the spawn respawns");
     assert_eq!(shared.generation(), gen + 1, "a retarget to the same target");
     assert_eq!(shared.desired.lock().unwrap().2, crate::record_dispatch::Sent::Restarting, "a line meanwhile says restarting");
     let (_, respawn) = shared.desired();
-    assert_eq!(respawn.unwrap().env, vec![(SOURCES_ENV.to_string(), Some("[b]".to_string()))], "on the new list");
+    assert_eq!(respawn.unwrap().env, vec![(SOURCES_ENV.to_string(), Some(B.to_string()))], "on the new list");
     assert!(!shared.respawn_if_sources_moved(gen + 1), "once");
     // The manager calls it right after the pid shows (source guard: the loop needs an engine).
     let manager: String = include_str!("supervisor_manager.rs").split_whitespace().collect::<Vec<_>>().join(" ");
@@ -401,11 +406,12 @@ fn a_line_to_a_full_queue_is_reported_not_queued() {
 }
 
 /// Attach a wedged writer, wait until it has taken one line and parked, then fill the queue
-/// until a send says no. The number of lines the fill queued.
+/// until a send says no. The number of lines queued behind the wedged one. The attach's
+/// restatement (`sync`, design-audio-mute P8) is the line it wedges on, so the first line sent
+/// here waits in the queue too.
 pub(crate) fn wedge_and_fill(shared: &Shared) -> usize {
     let (tx, rx) = std::sync::mpsc::channel();
     shared.attach_writer(Some(Box::new(Wedged { parked: Some(tx) })));
-    assert!(shared.send_line("{}").queued(), "the first line was not queued");
     rx.recv_timeout(Duration::from_secs(5)).expect("the wedged writer never took its line");
     let queued = (0..1_000).take_while(|_| shared.send_line("{}").queued()).count();
     assert!(queued < 1_000, "the queue never said it was full");
@@ -443,8 +449,8 @@ fn quit_keeps_a_slot_so_a_busy_engine_behind_a_full_queue_still_finishes_cleanly
     let seen = Arc::new(Mutex::new(Vec::new()));
     let (tx, rx) = std::sync::mpsc::channel();
     shared.attach_writer(Some(Box::new(Gated { open: open.clone(), seen: seen.clone(), entered: Some(tx) })));
-    // The writer is stuck on its first line before the fill, so the fill really ends full.
-    assert!(shared.send_line(r#"{"cmd":"bookmark"}"#).queued());
+    // The writer is stuck on its first line (the attach's `sync`) before the fill, so the fill
+    // really ends full.
     rx.recv_timeout(Duration::from_secs(5)).expect("the writer never took its first line");
     let filled = (0..1_000).take_while(|_| shared.send_line(r#"{"cmd":"bookmark"}"#).queued()).count();
     assert_eq!(filled, stdin::QUEUE, "the queue never said it was full");
