@@ -26,6 +26,9 @@ namespace Recall.Setup.Tests
             Run("uninstall never deletes outside the install folder or in a clip folder", UninstallNeverOutside);
             Run("cache: only provably regenerable files are deleted", CacheClassification);
             Run("the Recycle Bin precheck refuses what Windows would delete for good", RecycleDecide);
+            Run("the app's win_recycle decision table, case for case", RecycleTable);
+            Run("bin settings precedence and subst detection, as win_recycle reads them", RecycleSettingsAndSubst);
+            Run("the uninstaller's temporary copy cleans only its own folder", TempCopyFolder);
             Run("the manifest keeps earlier files still unchanged", ManifestMerge);
             Run("Run values and clip folder settings are read", RunValueAndFolders);
             Run("drive classification", DriveKinds);

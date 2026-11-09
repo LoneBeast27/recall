@@ -56,12 +56,43 @@ namespace Recall.Setup
                 : f.MaxMb.HasValue ? (long?)(f.MaxMb.Value * Mib)
                 : f.TotalBytes.HasValue ? (long?)(DefaultMaxMb(f.TotalBytes.Value) * Mib) : null;
             if (!max.HasValue) return "the Recycle Bin size for " + f.Label + " is unknown";
-            if (bytes > max.Value) return "the files are bigger than the Recycle Bin on " + f.Label + " (" + max.Value / Mib + " MB)";
+            if (bytes > max.Value) return "the clip is bigger than the Recycle Bin on " + f.Label + " (" + max.Value / Mib + " MB)";
             if (!f.BinUsed.HasValue) return "couldn't read how full the Recycle Bin on " + f.Label + " is";
             long room = Math.Max(0, max.Value - f.BinUsed.Value);
-            if (bytes + Margin(max.Value) > room)
-                return "not enough room left in the Recycle Bin on " + f.Label + " (" + room / Mib + " MB free of " + max.Value / Mib + " MB)";
+            long spare = Margin(max.Value);
+            if (bytes + spare > room)
+                return "not enough room left in the Recycle Bin on " + f.Label + ": " + CeilMib(bytes) + " MB needs " + CeilMib(bytes + spare)
+                    + " MB free (" + spare / Mib + " MB spare, so Windows never deletes anything for good), and it has " + room / Mib
+                    + " MB free of " + max.Value / Mib + " MB; empty the Recycle Bin or make it bigger";
             return null;
+        }
+
+        private static long CeilMib(long bytes) { return (bytes + Mib - 1) / Mib; }
+
+        /// A drive letter that is a `subst` onto a folder (its DOS device target is a `\??\` path).
+        public static bool IsSubst(string path, Func<char, string> dosTarget)
+        {
+            if (path == null || path.Length < 2 || path[1] != ':' || !char.IsLetter(path[0])) return false;
+            var target = dosTarget(char.ToUpperInvariant(path[0]));
+            return target != null && target.StartsWith(@"\??\", StringComparison.Ordinal);
+        }
+
+        /// The volume's bin settings: NukeOnDelete and MaxCapacity from HKCU BitBucket\Volume\{GUID};
+        /// the NoRecycleFiles and RecycleBinSize policies from HKLM, else HKCU (a machine policy wins).
+        /// <paramref name="read"/>(machine, key, value) reads one DWORD (tests inject one).
+        public static void ReadSettings(BinFacts f, string guid, Func<bool, string, string, uint?> read)
+        {
+            var key = @"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\" + guid;
+            f.Nuke = read(false, key, "NukeOnDelete");
+            f.MaxMb = read(false, key, "MaxCapacity");
+            f.PolicyOff = (read(true, PolicyKey, "NoRecycleFiles") ?? read(false, PolicyKey, "NoRecycleFiles")) == 1;
+            f.PolicyPercent = read(true, PolicyKey, "RecycleBinSize") ?? read(false, PolicyKey, "RecycleBinSize");
+        }
+
+        private static string DosTarget(char letter)
+        {
+            var target = new StringBuilder(1024);
+            return Native.QueryDosDeviceW(letter + ":", target, 1024) > 0 ? target.ToString() : null;
         }
 
         public static string Check(string folder, long bytes)
@@ -76,15 +107,7 @@ namespace Recall.Setup
         {
             var f = new BinFacts();
             var full = Path.GetFullPath(folder);
-            if (full.Length >= 2 && full[1] == ':')
-            {
-                var target = new StringBuilder(1024);
-                if (Native.QueryDosDeviceW(full.Substring(0, 2), target, 1024) > 0 && target.ToString().StartsWith(@"\??\", StringComparison.Ordinal))
-                {
-                    f.Subst = true;
-                    return f;
-                }
-            }
+            if (IsSubst(full, DosTarget)) { f.Subst = true; return f; }
             if (PathId.Normalize(full).StartsWith(@"\\", StringComparison.Ordinal)) { f.ResolvedUnc = true; return f; }
             var mount = new StringBuilder(1024);
             if (!Native.GetVolumePathNameW(full, mount, 1024)) return f;
@@ -97,15 +120,8 @@ namespace Recall.Setup
             if (Native.GetDiskFreeSpaceExW(root, out free, out total, out totalFree)) f.TotalBytes = (long)total;
             var info = new Native.QueryRbInfo { Size = Marshal.SizeOf(typeof(Native.QueryRbInfo)) };
             if (Native.SHQueryRecycleBinW(root, ref info) == 0) f.BinUsed = info.Bytes;
-            if (f.VolumeId != null)
-            {
-                var guid = f.VolumeId.Substring(@"\\?\Volume".Length).TrimEnd('\\');
-                var key = @"Software\Microsoft\Windows\CurrentVersion\Explorer\BitBucket\Volume\" + guid;
-                f.Nuke = Dword(Registry.CurrentUser, key, "NukeOnDelete");
-                f.MaxMb = Dword(Registry.CurrentUser, key, "MaxCapacity");
-            }
-            f.PolicyOff = (Dword(Registry.LocalMachine, PolicyKey, "NoRecycleFiles") ?? Dword(Registry.CurrentUser, PolicyKey, "NoRecycleFiles")) == 1;
-            f.PolicyPercent = Dword(Registry.LocalMachine, PolicyKey, "RecycleBinSize") ?? Dword(Registry.CurrentUser, PolicyKey, "RecycleBinSize");
+            var guid = f.VolumeId == null ? "" : f.VolumeId.Substring(@"\\?\Volume".Length).TrimEnd('\\');
+            ReadSettings(f, guid, (machine, key, value) => Dword(machine ? Registry.LocalMachine : Registry.CurrentUser, key, value));
             return f;
         }
 
