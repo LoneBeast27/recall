@@ -130,3 +130,23 @@ fn a_screensaver_or_a_windows_path_is_refused() {
         assert!(refused(exe, GameOp::Record).is_some(), "{exe}");
     }
 }
+
+/// R2-detect-r10-p5-3: Remove / Unlist take a hand-edited entry's stored path and drop only
+/// that entry; a path is never added.
+#[test]
+fn remove_takes_a_stored_path_and_record_never_adds_one() {
+    let path = r"C:\Windows\Explorer.EXE";
+    assert_eq!(command_exe(Some(path), GameOp::Remove), Some(path));
+    assert_eq!(command_exe(Some(&format!(" {path} ")), GameOp::Unlist), Some(path));
+    for op in [GameOp::Record, GameOp::Never, GameOp::Fullscreen] {
+        assert_eq!(command_exe(Some(path), op), None, "{op:?}");
+    }
+    assert_eq!(command_exe(Some("  "), GameOp::Remove), None);
+    let mut cfg = config();
+    cfg.overrides.push(Override { exe: path.into(), kind: RuleKind::SdrGame, clamp: None });
+    cfg.overrides.push(Override { exe: "explorer".into(), kind: RuleKind::None, clamp: None });
+    let out = applied(&cfg, path, GameOp::Remove);
+    assert!(entry(&out, path).is_none(), "the path entry went");
+    assert_eq!(entry(&out, "explorer").map(|o| o.kind), Some(RuleKind::None), "the plain one stays");
+    assert_eq!(out.overrides.len(), cfg.overrides.len() - 1);
+}
