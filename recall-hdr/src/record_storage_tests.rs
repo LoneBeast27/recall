@@ -219,6 +219,63 @@ fn scan_lists_top_level_clips_only() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// "Sort clips into game folders": clips one level down count and go with their own
+/// thumbnails and sidecars; Recall's own subfolders and anything deeper never count.
+#[test]
+fn scan_counts_game_folder_clips_one_level_down() {
+    struct Gone(PathBuf);
+    impl Drop for Gone {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let dir = std::env::temp_dir().join(format!("recall-storage-games-{}-{}", std::process::id(), line!()));
+    let _gone = Gone(dir.clone());
+    let game = dir.join("Rocket League");
+    for d in [game.join("thumbs"), game.join("old"), dir.join("screenshots"), dir.join("exports"), dir.join(".hidden")] {
+        std::fs::create_dir_all(d).unwrap();
+    }
+    let top = "Desktop__2026-10-22__14-05-09.mp4";
+    let rl = "Rocket-League__2026-10-22__15-00-00-275__ab12.mp4";
+    std::fs::write(dir.join(top), vec![0u8; 10]).unwrap();
+    std::fs::write(game.join(rl), vec![0u8; 20]).unwrap();
+    std::fs::write(game.join("Rocket-League__2026-10-22__15-00-00-275__ab12.recall-marks.json"), b"{}").unwrap();
+    std::fs::write(game.join("thumbs").join("Rocket-League__2026-10-22__15-00-00-275__ab12-1783463424-thumb.jpg"), b"j").unwrap();
+    std::fs::write(game.join("old").join("G__2026-10-22__16-00-00.mp4"), vec![0u8; 99]).unwrap();
+    std::fs::write(dir.join("screenshots").join("G__2026-10-22__16-00-00.mp4"), vec![0u8; 99]).unwrap();
+    std::fs::write(dir.join("exports").join("G__2026-10-22__16-00-00.mp4"), vec![0u8; 99]).unwrap();
+    std::fs::write(dir.join(".hidden").join("G__2026-10-22__16-00-00.mp4"), vec![0u8; 99]).unwrap();
+    let l = scan(&dir).unwrap();
+    let mut clips: Vec<(String, u64)> = l.clips.iter().map(|c| (c.name.clone(), c.bytes)).collect();
+    clips.sort();
+    assert_eq!(clips, vec![(top.into(), 10), (format!("Rocket League/{rl}"), 20)]);
+    let rel = format!("Rocket League/{rl}");
+    assert_eq!(at(&dir, &rel), game.join(rl));
+    assert_eq!(
+        companions(&dir, &rel, &l),
+        vec![
+            game.join(rl),
+            game.join("Rocket-League__2026-10-22__15-00-00-275__ab12.recall-marks.json"),
+            game.join("thumbs").join("Rocket-League__2026-10-22__15-00-00-275__ab12-1783463424-thumb.jpg"),
+        ]
+    );
+    assert_eq!(companions(&dir, top, &l), vec![dir.join(top)], "a game folder's thumbnails never go with a top-level clip");
+}
+
+#[test]
+fn game_folder_clips_keep_favourites_and_edits() {
+    let l = listing(
+        vec![clip("A/G__2026-10-22__14-05-09.mp4", 3, 100), clip("B/G__2026-10-22__14-05-10.mp4", 3, 200), clip("G__2026-10-22__14-05-11.mp4", 3, 300), clip("G__2026-10-22__14-05-12.mp4", 3, 400)],
+        &["B/G__2026-10-22__14-05-10.mp4.recall-edit.json"],
+        &[],
+    );
+    let favs: HashSet<String> = ["g__2026-10-22__14-05-09.mp4".to_string()].into();
+    let p = plan(&l, &favs, 3 * GIB, NOW);
+    assert_eq!(p.remove, vec!["G__2026-10-22__14-05-11.mp4".to_string()], "A's clip is a favourite, B's has edits, the newest stays");
+    assert!(is_game_folder("Rocket League") && is_game_folder("Desktop"));
+    assert!(!is_game_folder("thumbs") && !is_game_folder("Screenshots") && !is_game_folder("exports") && !is_game_folder(".x") && !is_game_folder("$RECYCLE.BIN"));
+}
+
 #[test]
 fn cleaned_event_shape() {
     let v: Value = serde_json::from_str(&cleaned_event(&Outcome { removed: 3, freed: 7 * GIB, through: Some(1_700_000_000), used: 90 * GIB, cap: 100 * GIB, next: Some(1_700_000_100), stuck: false, refused: None })).unwrap();

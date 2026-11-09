@@ -55,6 +55,10 @@ pub struct RecordingCfg {
     pub auto_record: bool,
     /// Folder the engine writes clips into (`RECALL_OUT_DIR`).
     pub output_dir: String,
+    /// "Sort clips into game folders": new clips and long recordings go into
+    /// `<output_dir>\<Game>\` (`RECALL_GAME_FOLDERS=1`). Off by default; clips already
+    /// saved never move.
+    pub game_folders: bool,
     /// Replay-buffer length in seconds; also the full-buffer save length.
     pub buffer_secs: u32,
     /// Legacy single save accelerator. Mirrors the first full-buffer entry of
@@ -115,6 +119,7 @@ impl Default for RecordingCfg {
         RecordingCfg {
             auto_record: true,
             output_dir: default_output_dir(),
+            game_folders: false,
             buffer_secs: 120,
             save_hotkey: "Alt+N".into(),
             mic_hotkey: "Alt+M".into(),

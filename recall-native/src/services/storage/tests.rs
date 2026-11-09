@@ -269,6 +269,20 @@ fn with_a_raw_folder_exports_go_to_edited_beside_it() {
     assert_eq!(super::export_dir(&flat.join("a.mp4"), flat).as_deref(), Some(Path::new(r"E:\Clips\exports")));
 }
 
+/// "Sort clips into game folders": a clip in `Raw\<Game>\` exports to `Edited\<Game>\`.
+#[test]
+fn a_game_folder_clip_exports_to_the_same_game_folder() {
+    use std::path::Path;
+    let recordings = Path::new(r"E:\Recall\Raw");
+    let clip = recordings.join("Rocket League").join("Rocket-League__2026-11-02__10-00-00-000__ab.mp4");
+    assert_eq!(super::export_dir(&clip, recordings).as_deref(), Some(Path::new(r"E:\Recall\Edited\Rocket League")));
+    let other = recordings.join("Rocket League").join("holiday.mp4");
+    assert_eq!(super::export_dir(&other, recordings).as_deref(), Some(Path::new(r"E:\Recall\Edited")), "not a recorder clip: Edited itself");
+    let flat = Path::new(r"E:\Clips");
+    let clip = flat.join("VALORANT").join("VALORANT__2026-11-02__10-00-00-000.mp4");
+    assert_eq!(super::export_dir(&clip, flat).as_deref(), Some(Path::new(r"E:\Clips\VALORANT\exports")));
+}
+
 #[test]
 fn an_export_in_edited_protects_the_raw_clip() {
     let root = crate::test_temp::TempDir::new(format!("recall-edited-{}", std::process::id()));

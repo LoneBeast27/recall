@@ -289,6 +289,18 @@ impl Root {
             this.prompt_recordings_folder(cx);
         }));
         list = list.child(folder_row("rec", "Recordings", &recordings, count(&recordings), false, cx).child(change));
+        // ShadowPlay-style per-game folders (`recording.game_folders`, off by default).
+        let sorted = self.config_bool("recording", "game_folders");
+        let sort_row = crate::views::pages::setting_row(
+            "Sort clips into game folders",
+            "New clips and recordings go into a folder for each game, like Recordings\\Rocket League. Clips you already have stay where they are.",
+        )
+        .pt(px(8.))
+        .child(ui::switch("game-folders", sorted).on_click(cx.listener(move |this, _, _, cx| {
+            this.set_config("recording", "game_folders", json!(!sorted));
+            cx.notify();
+        })));
+        list = list.child(sort_row);
         let mut mapped = div().flex().flex_col().child(div().font_weight(FontWeight::SEMIBOLD).child("Folder Mapper"));
         for (i, folder) in self.folders.linked().enumerate() {
             let name = Path::new(folder).file_name().map_or_else(|| folder.to_owned(), |n| n.to_string_lossy().into_owned());

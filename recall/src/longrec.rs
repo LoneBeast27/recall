@@ -222,9 +222,11 @@ impl<F: SinkFactory> Writer<F> {
         if self.recorder.is_active() {
             return self.events(vec![Event::Log("record_start ignored: a long recording is already running".into())]);
         }
-        let path = naming::longrec_path(&self.out_dir, source, &chrono::Local::now(), Path::exists);
-        if let Err(e) = std::fs::create_dir_all(&self.out_dir) {
-            return self.events(vec![Event::Failed { reason: format!("output folder {}: {e}", self.out_dir), kept: None }]);
+        // Sort clips into game folders: `<out>\<Game>\` when on.
+        let dir = naming::clip_dir(&self.out_dir, source);
+        let path = naming::longrec_path(&dir, source, &chrono::Local::now(), Path::exists);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return self.events(vec![Event::Failed { reason: format!("output folder {dir}: {e}"), kept: None }]);
         }
         let (generation, video) = self.recorder.factory().newest();
         self.recorder.set_video(video);
@@ -449,12 +451,23 @@ fn recovered_outbound(paths: Vec<String>) -> Option<Outbound> {
     Some(Outbound::RecordingRecovered { path, paths })
 }
 
-/// Every `*__rec.mp4.part` directly in `dir`, renamed (or the error).
+/// Every `*__rec.mp4.part` directly in `dir` or in one of its game folders (one level down,
+/// "Sort clips into game folders"), renamed (or the error).
 fn recover_in(dir: &Path) -> Vec<(PathBuf, std::io::Result<PathBuf>)> {
     let Ok(listing) = std::fs::read_dir(dir) else { return Vec::new() };
-    listing
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+    let (mut files, mut folders) = (Vec::new(), Vec::new());
+    for entry in listing.flatten() {
+        match entry.file_type() {
+            Ok(t) if t.is_file() => files.push(entry),
+            Ok(t) if t.is_dir() => folders.push(entry.path()),
+            _ => {}
+        }
+    }
+    for folder in folders {
+        files.extend(std::fs::read_dir(folder).into_iter().flatten().flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_file())));
+    }
+    files
+        .into_iter()
         .filter(|e| naming::is_longrec_part(&e.file_name().to_string_lossy()))
         .map(|e| {
             let part = e.path();

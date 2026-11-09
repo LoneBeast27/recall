@@ -286,7 +286,8 @@ impl ApplicationHandler for App {
             let save_marks = marks.clone();
             save_hook = Some(Box::new(move |secs: Option<u32>, at_last_frame: bool| {
                 let name = src.lock().map(|s| s.clone()).unwrap_or_default();
-                let path = encoder::clip_path(&out_dir, &name);
+                // Sort clips into game folders: `<out>\<Game>\` (the saver makes the folder).
+                let path = encoder::clip_path(&naming::clip_dir(&out_dir, &name), &name);
                 let end_us = timeline.recording_now_us();
                 if let Some(end) = end_us {
                     save_marks.note_save(&path, end);

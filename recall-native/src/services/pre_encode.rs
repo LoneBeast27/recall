@@ -257,6 +257,11 @@ pub fn sweep_deliveries() {
         let lane = folder.clone();
         storage::submit_io(&lane, Priority::Background, move || {
             remove_deliveries(&folder);
+            // Game folders' exports (`Edited\<Game>\`, "Sort clips into game folders").
+            let games = std::fs::read_dir(&folder).into_iter().flatten().flatten();
+            for game in games.filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && !e.file_name().to_string_lossy().starts_with('.')) {
+                remove_deliveries(&game.path());
+            }
         });
     };
     let _ = std::thread::Builder::new().name("recall-delivery-sweep".into()).spawn(body);

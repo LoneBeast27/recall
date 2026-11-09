@@ -320,6 +320,7 @@ impl Worker {
     fn process(&mut self, job: &SaveJob) {
         let mut timing = job.timing;
         timing.queue_wait_ms = timing.queued_at.map(|t| ms(t.elapsed())).unwrap_or(0.0);
+        ensure_game_folder(Path::new(&job.path), &self.events);
         let staged = self.stage.as_ref().and_then(|s| s.target(&job.path, &self.events));
         let (events, need) = (self.events.clone(), space::estimate(job));
         let log = |line: &str| events.log(line);
@@ -368,6 +369,33 @@ impl Worker {
                 self.events.log(&timing.line("failed", job.secs as f32, 0, 0));
             }
         }
+    }
+}
+
+/// "Sort clips into game folders": a clip's `<out>\<Game>` folder is made on the first save
+/// into it (one level only: a missing clip folder still fails the save as before). Here on the
+/// saver thread, so the hotkey path never waits on a sleeping drive; the mover and the
+/// thumbnail write then find it.
+/// Off (every clip straight in the clip folder) this costs nothing: the folder is only looked
+/// at once per run.
+fn ensure_game_folder(clip: &Path, events: &Events) {
+    static SEEN: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
+    let Some(folder) = clip.parent().filter(|f| !f.as_os_str().is_empty()) else { return };
+    let mut seen = SEEN.lock().unwrap_or_else(|p| p.into_inner());
+    if seen.iter().any(|f| f == folder) {
+        return;
+    }
+    if folder.is_dir() {
+        seen.push(folder.to_path_buf());
+        return;
+    }
+    if !folder.parent().is_some_and(Path::is_dir) {
+        return;
+    }
+    match std::fs::create_dir(folder) {
+        Ok(()) => seen.push(folder.to_path_buf()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => seen.push(folder.to_path_buf()),
+        Err(e) => events.log(&format!("saver: could not make the game folder {}: {e}", folder.display())),
     }
 }
 

@@ -41,6 +41,68 @@ pub fn source_slug(source: &str) -> String {
     }
 }
 
+/// `RECALL_GAME_FOLDERS=1` (Settings → Clip folders → "Sort clips into game folders"; the
+/// controller sets it from `recording.game_folders`): new clips and long recordings go into
+/// `<out_dir>\<Game>\` instead of `<out_dir>` itself. Clips already saved never move.
+pub const GAME_FOLDERS_ENV: &str = "RECALL_GAME_FOLDERS";
+
+/// Whether new recordings go into per-game folders (read at each save: cheap, and a test can set it).
+pub fn game_folders_on() -> bool {
+    std::env::var(GAME_FOLDERS_ENV).is_ok_and(|v| v.trim() == "1")
+}
+
+/// Folder names Recall itself uses inside the clip folder; a game never gets one of these.
+const RESERVED_FOLDERS: &[&str] = &["thumbs", "screenshots", "exports", "edited", "raw", "kept", "staging"];
+/// Longest game folder name, in characters (Windows paths stay short).
+const GAME_FOLDER_MAX: usize = 60;
+
+/// Game name -> a folder name that is safe on Windows and readable: "Rocket League®" ->
+/// "Rocket League". Keeps letters, digits, spaces and a few harmless marks; drops the rest
+/// (`<>:"/\|?*`, control characters, symbols); collapses spaces; no leading or trailing dots
+/// or spaces; at most [`GAME_FOLDER_MAX`] characters; a Windows device name (`CON`, `COM1`, ...)
+/// gets a `_` in front, one of Recall's own folder names a `_` on the end. Empty -> "Desktop".
+pub fn game_folder_name(source: &str) -> String {
+    let kept: String = source
+        .chars()
+        .map(|c| if c.is_whitespace() { ' ' } else { c })
+        .filter(|&c| c.is_alphanumeric() || " -_.,'&()[]!+#=~;".contains(c))
+        .collect();
+    let mut name = kept.split(' ').filter(|w| !w.is_empty()).collect::<Vec<_>>().join(" ");
+    if name.chars().count() > GAME_FOLDER_MAX {
+        name = name.chars().take(GAME_FOLDER_MAX).collect();
+    }
+    let name = name.trim_matches(|c: char| c == '.' || c == ' ').to_string();
+    if name.is_empty() {
+        return "Desktop".to_string();
+    }
+    let lower = name.to_ascii_lowercase();
+    let base = lower.split('.').next().unwrap_or("").trim_end();
+    let device = matches!(base, "con" | "prn" | "aux" | "nul")
+        || ((base.starts_with("com") || base.starts_with("lpt")) && base.len() == 4 && base.as_bytes()[3].is_ascii_digit());
+    if device {
+        return format!("_{name}");
+    }
+    if RESERVED_FOLDERS.contains(&lower.as_str()) {
+        return format!("{name}_");
+    }
+    name
+}
+
+/// The folder a new clip of `source` goes into: `<out_dir>\<Game>` with game folders `on`, else
+/// `out_dir`.
+pub fn clip_dir_with(out_dir: &str, source: &str, on: bool) -> String {
+    if on {
+        Path::new(out_dir).join(game_folder_name(source)).to_string_lossy().into_owned()
+    } else {
+        out_dir.to_string()
+    }
+}
+
+/// [`clip_dir_with`] with the live setting ([`game_folders_on`]).
+pub fn clip_dir(out_dir: &str, source: &str) -> String {
+    clip_dir_with(out_dir, source, game_folders_on())
+}
+
 fn stamp(at: &DateTime<Local>) -> String {
     at.format("%Y-%m-%d__%H-%M-%S").to_string()
 }
@@ -128,6 +190,38 @@ mod tests {
 
     fn at() -> DateTime<Local> {
         Local.with_ymd_and_hms(2026, 10, 22, 14, 5, 9).single().expect("valid local time")
+    }
+
+    #[test]
+    fn game_folder_names_are_safe_and_readable() {
+        assert_eq!(game_folder_name("Rocket League®"), "Rocket League");
+        assert_eq!(game_folder_name("Tom Clancy's Rainbow Six® Siege"), "Tom Clancy's Rainbow Six Siege");
+        assert_eq!(game_folder_name("Counter-Strike 2"), "Counter-Strike 2");
+        assert_eq!(game_folder_name(r#"a<b>c:d"e/f\g|h?i*j"#), "abcdefghij");
+        assert_eq!(game_folder_name("  THE   FINALS \t"), "THE FINALS");
+        assert_eq!(game_folder_name("Game..."), "Game");
+        assert_eq!(game_folder_name("..hidden"), "hidden");
+        assert_eq!(game_folder_name(""), "Desktop");
+        assert_eq!(game_folder_name("™®"), "Desktop");
+        assert_eq!(game_folder_name("..."), "Desktop");
+        assert_eq!(game_folder_name("CON"), "_CON");
+        assert_eq!(game_folder_name("com1"), "_com1");
+        assert_eq!(game_folder_name("nul.txt"), "_nul.txt");
+        assert_eq!(game_folder_name("Console"), "Console");
+        assert_eq!(game_folder_name("Thumbs"), "Thumbs_");
+        assert_eq!(game_folder_name("screenshots"), "screenshots_");
+        assert_eq!(game_folder_name("Line\nBreak\u{7}"), "Line Break");
+        assert_eq!(game_folder_name("原神"), "原神");
+        let long = "x".repeat(200);
+        assert_eq!(game_folder_name(&long).chars().count(), GAME_FOLDER_MAX);
+        assert_eq!(game_folder_name(&format!("{} .end", "y".repeat(59))), "y".repeat(59));
+    }
+
+    #[test]
+    fn clip_dir_is_the_game_folder_only_when_on() {
+        assert_eq!(clip_dir_with(r"E:\Clips", "VALORANT", false), r"E:\Clips");
+        assert_eq!(Path::new(&clip_dir_with(r"E:\Clips", "VALORANT", true)), Path::new(r"E:\Clips").join("VALORANT"));
+        assert_eq!(Path::new(&clip_dir_with(r"E:\Clips", "", true)), Path::new(r"E:\Clips").join("Desktop"));
     }
 
     #[test]

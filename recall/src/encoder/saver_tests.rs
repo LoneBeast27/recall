@@ -486,3 +486,17 @@ fn the_saver_reports_its_steps_before_any_file_exists() {
     assert_eq!(control.shutdown(Duration::from_secs(3)), Shutdown::Drained);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// "Sort clips into game folders": the first save into `<out>\<Game>` makes that folder; a
+/// missing clip folder is not made (the save fails as before).
+#[test]
+fn a_save_makes_its_game_folder_but_never_a_missing_clip_folder() {
+    let dir = temp_dir("gamefolder");
+    let (events, _sink) = Events::capture(true);
+    let game = dir.join("Rocket League");
+    ensure_game_folder(&game.join("Rocket-League__2026-10-22__14-05-09-275__ab.mp4"), &events);
+    assert!(game.is_dir());
+    let lost = dir.join("gone").join("Game");
+    ensure_game_folder(&lost.join("G__2026-10-22__14-05-09-275__ab.mp4"), &events);
+    assert!(!dir.join("gone").exists());
+}

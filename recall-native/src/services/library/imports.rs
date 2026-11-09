@@ -118,6 +118,9 @@ pub(crate) fn is_owned(clip: &Path, recordings: &Path, former: &[String]) -> boo
     let parent = folder_key(&parent.to_string_lossy());
     !parent.is_empty() && (parent == folder_key(&recordings.to_string_lossy())
         || former.iter().any(|folder| folder_key(folder) == parent))
+        // "Sort clips into game folders": `<recordings>\<Game>\<clip>` is Recall's too.
+        || super::folders::in_game_folder(clip, recordings)
+        || former.iter().any(|folder| super::folders::in_game_folder(clip, Path::new(folder)))
         // A clip Recall recorded into a startup `-OutDir` folder: that exact file only.
         || super::recorded::contains(clip)
 }
