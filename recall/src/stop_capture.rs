@@ -5,20 +5,24 @@
 //! (`saver_stop::OrphanHold`, the same bounds) instead of being aborted after 3 s. The hello's
 //! `stop_capture` says the engine takes it; an engine without it gets a held stop instead.
 
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::SeqCst};
+use std::sync::atomic::{AtomicU64, Ordering::SeqCst};
 
 /// The stop and the stored-frame count (R2-detect-r10-p6-3).
 struct Flags {
-    stopped: AtomicBool,
     /// GPU frames stored in `latest_gpu` so far ([`next_frame_seq`]).
     frames: AtomicU64,
-    /// The frame count when the stop landed: a frame numbered after it may be post-stop.
+    /// The stop and its frame count in ONE atomic (R2-detect-r10-p7-4): `NOT_STOPPED` until
+    /// the stop lands, then the frame count at that moment. A frame numbered after it may be
+    /// post-stop. Two atomics let a reader see the stop with the old `u64::MAX` count.
     stop_seq: AtomicU64,
 }
 
+/// [`Flags::stop_seq`] before the stop.
+const NOT_STOPPED: u64 = u64::MAX;
+
 impl Flags {
     const fn new() -> Self {
-        Flags { stopped: AtomicBool::new(false), frames: AtomicU64::new(0), stop_seq: AtomicU64::new(u64::MAX) }
+        Flags { frames: AtomicU64::new(0), stop_seq: AtomicU64::new(NOT_STOPPED) }
     }
 }
 
@@ -43,14 +47,14 @@ fn flags<R>(f: impl FnOnce(&Flags) -> R) -> R {
 /// The controller asked to stop capture: frames and samples are dropped from now on.
 pub fn request() {
     flags(|f| {
-        f.stopped.store(true, SeqCst);
-        f.stop_seq.store(f.frames.load(SeqCst), SeqCst);
+        // Only the first stop counts; `frames` never reaches NOT_STOPPED.
+        let _ = f.stop_seq.compare_exchange(NOT_STOPPED, f.frames.load(SeqCst).min(NOT_STOPPED - 1), SeqCst, SeqCst);
     });
 }
 
 /// Whether `stop_capture` arrived (read for every frame and audio packet).
 pub fn stopped() -> bool {
-    flags(|f| f.stopped.load(SeqCst))
+    flags(|f| f.stop_seq.load(SeqCst) != NOT_STOPPED)
 }
 
 /// The number of a GPU frame being stored in `latest_gpu` (`capture/gpu_path.rs`), taken
@@ -63,16 +67,13 @@ pub fn next_frame_seq() -> u64 {
 /// read back (a screenshot, the HUD probe). Checked AFTER the read, so a stop landing between
 /// a reader's `stopped()` check and its read still refuses the frame.
 pub fn frame_admitted(seq: u64) -> bool {
-    flags(|f| !f.stopped.load(SeqCst) || seq <= f.stop_seq.load(SeqCst))
+    flags(|f| seq <= f.stop_seq.load(SeqCst))
 }
 
 /// Undo [`request`] on this test thread.
 #[cfg(test)]
 pub fn reset_for_test() {
-    flags(|f| {
-        f.stopped.store(false, SeqCst);
-        f.stop_seq.store(u64::MAX, SeqCst);
-    });
+    flags(|f| f.stop_seq.store(NOT_STOPPED, SeqCst));
 }
 
 #[cfg(all(test, feature = "encode"))]
@@ -161,6 +162,28 @@ fn a_frame_stored_after_the_stop_is_refused_after_the_read() {
     assert!(frame_admitted(before), "a frame stored before the stop may be read");
     assert!(!frame_admitted(after), "the frame read after the stop was stored after it: refused");
     reset_for_test();
+}
+
+/// R2-detect-r10-p7-4: the stop and its frame count are one value. Whatever a reader reads, a
+/// stopped engine never admits a frame numbered after the stop: there is no moment where
+/// `stopped()` is true and the count still reads "no stop" (two atomics had one).
+#[cfg(test)]
+#[test]
+fn the_stop_and_its_frame_count_land_as_one_value() {
+    reset_for_test();
+    let mut last = 0;
+    for _ in 0..5 {
+        last = next_frame_seq();
+    }
+    request();
+    let at_stop = flags(|f| f.stop_seq.load(SeqCst));
+    assert_eq!(at_stop, last, "the count at the stop, stored with it");
+    assert!(stopped() && frame_admitted(last) && !frame_admitted(last + 1));
+    next_frame_seq();
+    request(); // a second stop line changes nothing
+    assert_eq!(flags(|f| f.stop_seq.load(SeqCst)), last);
+    reset_for_test();
+    assert!(!stopped() && frame_admitted(u64::MAX - 1), "no stop: every frame may be read");
 }
 
 /// R2-detect-r10-p6-3: where each guard sits. The capture thread stores no frame after the stop
