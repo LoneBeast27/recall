@@ -8,7 +8,12 @@ pub(super) fn sidecar_task(path:&Path,clip:&Path,bytes:&[u8],default:bool,ours:b
     // Deleted while this flush waited (Delete runs on the io thread): no orphan beside nothing.
     if !clip.exists(){return Ok(Flushed::Nothing);}
     let ours=ours&&(existing.is_some()||!path.exists());
-    match storage::sidecar_step(existing.as_deref(),bytes,default&&!storage::has_export(clip,&library_dir()),ours){
+    let folders = folders_now();
+    if path.parent().is_some_and(|directory| overlaps_link(directory, &folders)) {
+        return Err("Recall saves edits outside linked recording folders.".into());
+    }
+    let exported = default && storage::has_export(clip, export_dir_for(clip, &folders));
+    match storage::sidecar_step(existing.as_deref(),bytes,default&&!exported,ours){
         storage::SidecarStep::Keep=>Ok(Flushed::Current(name)),
         storage::SidecarStep::Write=>{storage::write_atomic(path,bytes)?;Ok(Flushed::Current(name))}
         storage::SidecarStep::Remove=>{

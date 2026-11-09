@@ -248,12 +248,12 @@ fn an_export_beside_the_clip_is_found_by_its_name() {
     let dir = std::env::temp_dir().join(format!("recall-has-export-{}", std::process::id()));
     std::fs::create_dir_all(dir.join("exports")).unwrap();
     let clip = dir.join("Clip.mp4");
-    assert!(!super::has_export(&clip, &dir));
+    assert!(!super::has_export(&clip, super::export_dir(&clip, &dir)));
     std::fs::write(dir.join("exports").join("clip-two-edited-60fps-1.mp4"), b"x").unwrap();
     std::fs::write(dir.join("exports").join(".Clip-edited-60fps-1.recall-export-7-1-0.mp4"), b"x").unwrap();
-    assert!(!super::has_export(&clip, &dir), "another clip's export, and a temporary file");
+    assert!(!super::has_export(&clip, super::export_dir(&clip, &dir)), "another clip's export, and a temporary file");
     std::fs::write(dir.join("exports").join("clip-trim-1.mp4"), b"x").unwrap();
-    assert!(super::has_export(&clip, &dir));
+    assert!(super::has_export(&clip, super::export_dir(&clip, &dir)));
     let _ = std::fs::remove_dir_all(&dir);
 }
 
@@ -276,8 +276,8 @@ fn an_export_in_edited_protects_the_raw_clip() {
     std::fs::create_dir_all(&raw).unwrap();
     std::fs::create_dir_all(&edited).unwrap();
     let clip = raw.join("Clip.mp4");
-    assert!(!super::has_export(&clip, &raw));
+    assert!(!super::has_export(&clip, super::export_dir(&clip, &raw)));
     std::fs::write(edited.join("Clip-edited-60fps-1.mp4"), b"x").unwrap();
-    assert!(super::has_export(&clip, &raw));
+    assert!(super::has_export(&clip, super::export_dir(&clip, &raw)));
     let _ = std::fs::remove_dir_all(&root);
 }

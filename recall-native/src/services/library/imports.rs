@@ -60,7 +60,7 @@ pub enum Status {
 
 static TABLE: Mutex<Option<Table>> = Mutex::new(None);
 
-fn base_dir() -> Option<PathBuf> {
+pub(crate) fn base_dir() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("RECALL_IMPORTS_DIR").filter(|d| !d.is_empty()) {
         return Some(PathBuf::from(dir));
     }
@@ -106,9 +106,15 @@ pub fn edit_file_clip_name(edit_name: &str) -> &str {
 /// folder that was the recordings folder before (`former`: those clips stay Recall's own, so
 /// Delete recycles them and their edits stay beside them).
 pub fn is_imported(path: &str, recordings: &Path, imported: &[String], former: &[String]) -> bool {
-    let parent = Path::new(path).parent().map(|p| folder_key(&p.to_string_lossy())).unwrap_or_default();
-    let owned = parent == folder_key(&recordings.to_string_lossy()) || former.iter().any(|folder| folder_key(folder) == parent);
-    !owned && imported.iter().any(|folder| is_inside(path, folder))
+    !is_owned(Path::new(path), recordings, former) && imported.iter().any(|folder| is_inside(path, folder))
+}
+
+/// Only clips saved directly into a current or former recordings folder are managed.
+pub(crate) fn is_owned(clip: &Path, recordings: &Path, former: &[String]) -> bool {
+    let Some(parent) = clip.parent() else { return false };
+    let parent = folder_key(&parent.to_string_lossy());
+    !parent.is_empty() && (parent == folder_key(&recordings.to_string_lossy())
+        || former.iter().any(|folder| folder_key(folder) == parent))
 }
 
 fn with_table<T>(work: impl FnOnce(&mut Table) -> T) -> T {

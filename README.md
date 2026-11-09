@@ -112,9 +112,7 @@ powershell -NoProfile -File scripts\install.ps1
   an export. Cancel export stops
   a running export and leaves nothing behind.
 - For a re-encoded export with a size limit, choose **Motion** to keep the selected FPS or **Detail** to trade frame rate for resolution. Both modes choose the resolution automatically. Switch to **Manual** to edit frame rate and resolution. The finished export shows its actual size, resolution, and FPS.
-- **Old clips:** Settings → Media → Add folder lists clips from ShadowPlay, Medal, OBS or any
-  folder in the library. Nothing is moved. A folder that was the recordings folder before stays
-  Recall's own: Delete still sends its clips to the Recycle Bin and their edits stay beside them.
+- **Folder Mapper:** In Settings → Media or the Storage step in setup, select **Link folder** and choose a recording folder from ShadowPlay, Medal, or OBS. Recall watches for new clips and links them in place. Edits go into Recall’s library data and exports go to Recall’s export folder. Removing a linked clip only hides its entry in Recall. Former Recall recording folders remain listed under **Folders Recall manages**.
 - **Clip folders stay in step:** while the app is open, a clip another program copies, renames or
   deletes in a clip folder shows up within seconds, once the file is finished. A renamed or moved
   clip loses its favourite and title, which are stored by the clip's full path (two clips with the
@@ -185,6 +183,8 @@ drives are detected); thumbnails, hover frames and recently watched clips are ke
 | `recall-hub/` | — | the old Svelte/Tauri window; replaced by `recall-native`, kept for reference |
 
 ## Build and test (developers)
+
+To sign a separate copy of a built installer, run `scripts/setup/sign.ps1` with `-InputPath`, a new `-OutputPath`, the `-CertificateThumbprint` of your trusted code-signing certificate, and its HTTPS `-TimestampUrl`. The script verifies the publisher and timestamp before writing the signed output.
 
 Build the Windows setup screen with `powershell -NoProfile -File scripts/setup/build.ps1 -Preview`. Open `dist/setup/RecallSetupPreview.exe` to rehearse setup. The release setup build takes a verified payload via `-PayloadDirectory` and uses the save-aware installer. Pass `-VCRedistPath` to bundle a local Microsoft-signed x64 Visual C++ package. By default the build uses a copy in the payload directory or downloads it from Microsoft.
 

@@ -43,7 +43,10 @@ pub fn delete_or_hide(clips: &[PathBuf], folders: &folders::Folders) -> DeleteRe
 /// (imported: only removed from Recall, own: to the Recycle Bin), by `folders` alone.
 pub(crate) fn partition_for_delete(clips: &[PathBuf], folders: &folders::Folders) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let recordings = crate::backend::library_dir_from(folders);
-    clips.iter().cloned().partition(|c| imports::is_imported(&c.to_string_lossy(), &recordings, &folders.imported, &folders.former_recordings))
+    clips.iter().cloned().partition(|clip| {
+        !imports::is_owned(clip, &recordings, &folders.former_recordings)
+            || clip.parent().is_some_and(|parent| crate::backend::overlaps_link(parent, folders))
+    })
 }
 
 /// The report from both halves' results and which own clips are still on disk.

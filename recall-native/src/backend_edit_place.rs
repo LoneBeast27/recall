@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use super::library_dir_from;
-use crate::services::library::{folders::Folders, imports};
+use crate::services::{library::{folders::Folders, imports}, storage};
 
 static SHARED: Mutex<Option<Folders>> = Mutex::new(None);
 
@@ -22,7 +22,7 @@ pub fn share_folders(folders: &Folders) {
     *SHARED.lock().unwrap_or_else(|p| p.into_inner()) = Some(folders.clone());
 }
 
-fn folders_now() -> Folders {
+pub(crate) fn folders_now() -> Folders {
     SHARED.lock().unwrap_or_else(|p| p.into_inner()).clone().unwrap_or_else(Folders::load)
 }
 
@@ -35,10 +35,49 @@ pub(super) fn sidecar_in(source: &str, folders: &Folders) -> Result<PathBuf, Str
     if let Some(why) = &folders.write_block {
         return Err(format!("{why}; edits are not saved until Recall restarts"));
     }
-    if imports::is_imported(source, &library_dir_from(folders), &folders.imported, &folders.former_recordings) {
-        return imports::edit_file(Path::new(source)).ok_or_else(|| "APPDATA is not set".into());
+    let clip = Path::new(source);
+    let recordings = library_dir_from(folders);
+    if imports::is_owned(clip, &recordings, &folders.former_recordings)
+        && clip.parent().is_some_and(|parent| !overlaps_link(parent, folders))
+    {
+        return beside(source);
     }
-    beside(source)
+    let sidecar = imports::edit_file(clip).ok_or("APPDATA is not set")?;
+    check_write_dir(sidecar.parent().ok_or("No edit folder")?, clip, folders, false)?;
+    Ok(sidecar)
+}
+
+/// Planned output path for the editor and the export worker. An external clip's export
+/// belongs to Recall's recordings export folder, including when the source was unlinked.
+pub(crate) fn export_dir_for(clip: &Path, folders: &Folders) -> Option<PathBuf> {
+    let recordings = library_dir_from(folders);
+    if imports::is_owned(clip, &recordings, &folders.former_recordings) {
+        storage::export_dir(clip, &recordings)
+    } else {
+        storage::export_dir(&recordings.join("clip.mp4"), &recordings)
+    }
+}
+
+/// Validate the physical destination before creating an output directory or starting a sweep.
+pub(crate) fn checked_export_dir(clip: &Path, folders: &Folders) -> Result<PathBuf, String> {
+    if let Some(why) = &folders.write_block {
+        return Err(format!("{why}. Recall needs its folder list before it can write an export."));
+    }
+    let directory = export_dir_for(clip, folders).ok_or("The export has no destination folder")?;
+    let owned = imports::is_owned(clip, &library_dir_from(folders), &folders.former_recordings);
+    check_write_dir(&directory, clip, folders, owned)?;
+    Ok(directory)
+}
+
+pub(crate) fn overlaps_link(directory: &Path, folders: &Folders) -> bool {
+    folders.linked().any(|link| storage::guard::folders_overlap(directory, Path::new(link)))
+}
+
+fn check_write_dir(directory: &Path, clip: &Path, folders: &Folders, owned: bool) -> Result<(), String> {
+    if overlaps_link(directory, folders) || (!owned && clip.parent().is_some_and(|source| storage::guard::folders_overlap(directory, source))) {
+        return Err("Recall needs a write folder outside the linked recordings. Choose a separate recordings folder in Settings → Media.".into());
+    }
+    Ok(())
 }
 
 fn beside(source: &str) -> Result<PathBuf, String> {
@@ -58,6 +97,41 @@ pub(super) fn beside_fallback(source: &str, sidecar: &Path) -> Option<PathBuf> {
 mod tests {
     use super::*;
     use crate::edit_model::{ClipInfo, EditPlan, ExportSettings, TimeRange};
+
+    #[test]
+    fn linked_clips_keep_their_original_folder_read_only() {
+        let root = crate::test_temp::TempDir::sandbox("folder-mapper");
+        let recordings = root.join("Recall");
+        let source = root.join("ShadowPlay");
+        std::fs::create_dir_all(&recordings).unwrap();
+        std::fs::create_dir_all(&source).unwrap();
+        let clip = source.join("Game.mp4");
+        std::fs::write(&clip, b"original").unwrap();
+        let mut folders = Folders {
+            recordings: Some(recordings.to_string_lossy().into_owned()),
+            imported: vec![source.to_string_lossy().into_owned()],
+            ..Folders::default()
+        };
+
+        let edit = sidecar_in(&clip.to_string_lossy(), &folders).unwrap();
+        assert_eq!(Some(edit), imports::edit_file(&clip));
+        let exports = checked_export_dir(&clip, &folders).unwrap();
+        assert_eq!(exports, recordings.join("exports"));
+        assert!(!source.join("exports").exists());
+
+        let blocked = Folders {
+            recordings: Some(source.join("Recall").to_string_lossy().into_owned()),
+            ..folders.clone()
+        };
+        assert!(checked_export_dir(&clip, &blocked).is_err());
+
+        folders.forget(&source.to_string_lossy());
+        assert_eq!(checked_export_dir(&clip, &folders).unwrap(), exports, "a stale clip remains external");
+        let removed = crate::services::library::delete_or_hide(std::slice::from_ref(&clip), &folders);
+        assert_eq!((removed.hidden, removed.recycled), (1, 0));
+        assert_eq!(std::fs::read(&clip).unwrap(), b"original");
+        assert_eq!(std::fs::read_dir(&source).unwrap().count(), 1, "the source folder gained no files");
+    }
 
     #[test]
     fn the_uis_folder_list_places_edits_and_a_released_folders_edits_still_open() {

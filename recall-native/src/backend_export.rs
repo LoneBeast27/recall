@@ -35,7 +35,7 @@ pub(crate) fn export_queued()->impl Drop{ExportQueueGuard}
 pub(crate) fn export_cancelled()->bool{EXPORT_CANCEL.load(Ordering::Acquire)}
 /// Where an export of `info` lands now (`Recall\Edited`, created if missing).
 pub(crate) fn export_target(info:&ClipInfo,fps:u32,export:&ExportSettings)->Result<PathBuf,String>{
-    let source=Path::new(&info.path);let outdir=storage::export_dir(source,&library_dir()).ok_or("source has no directory")?;
+    let source=Path::new(&info.path);let outdir=checked_export_dir(source,&folders_now())?;
     std::fs::create_dir_all(&outdir).map_err(|e|format!("create export directory: {e}"))?;
     let stem=source.file_stem().and_then(|v|v.to_str()).unwrap_or("clip");
     let base = if export.mode == ExportMode::Lossless {

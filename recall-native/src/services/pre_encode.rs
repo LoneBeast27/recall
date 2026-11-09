@@ -251,7 +251,7 @@ const DELIVERING: &str = ".recall-pre-encode";
 pub fn sweep_deliveries() {
     let body = || {
         let recordings = backend::library_dir();
-        let Some(folder) = storage::export_dir(&recordings.join("clip.mp4"), &recordings) else { return };
+        let Ok(folder) = backend::checked_export_dir(&recordings.join("clip.mp4"), &backend::folders_now()) else { return };
         let lane = folder.clone();
         storage::submit_io(&lane, Priority::Background, move || {
             remove_deliveries(&folder);
