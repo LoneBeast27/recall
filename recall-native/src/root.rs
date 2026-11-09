@@ -176,6 +176,8 @@ mod render;
 mod start;
 #[path = "root_done.rs"]
 mod done;
+#[path = "root_resume.rs"]
+pub(crate) mod resume_start;
 
 impl Root {
     /// The polling task holds this view for a tick after the window goes, and the app can quit

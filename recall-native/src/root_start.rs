@@ -72,6 +72,10 @@ impl Root {
         } else {
             root.open_env_route();
         }
+        // Reopened by Setup after an update: never guided setup; the page and clip it showed.
+        if let Some(file) = crate::update::resume::resume_arg(std::env::args_os().skip(1)) {
+            root.resume_after_update(&file);
+        }
         // Alt+Tab mid-drag: the release goes to another window and no later move may come.
         // Save the dragged gain now, as a release would; a move after refocus then finds no drag.
         cx.observe_window_activation(window, |this, window, cx| {

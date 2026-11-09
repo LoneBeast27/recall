@@ -126,6 +126,12 @@ impl Root {
         changed |= self.cache.editing && !self.cache.painted.get();
         changed |= self.poll_timers();
         changed |= self.update.tick();
+        // Setup has the update (it quits the recorder, saving first): this app closes itself.
+        if self.update.take_quit() {
+            self.flush_on_close();
+            cx.quit();
+            return;
+        }
         if let Some((good, notice)) = self.update.notice.take() {
             self.show_toast(if good { ToastKind::Good } else { ToastKind::Bad }, notice, None);
         }
