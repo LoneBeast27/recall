@@ -143,7 +143,7 @@ fn the_status_says_which_tracks_are_held() {
     assert!(ring.held_now(), "the startup hold");
     ring.release_startup_hold();
     assert!(!ring.held_now());
-    let line = crate::protocol::AudioOpened { id: "mic".into(), name: "Mic".into(), opened: "x".into(), live: true, adopt_id: None, held: true };
+    let line = crate::protocol::AudioOpened { id: "mic".into(), name: "Mic".into(), opened: "x".into(), live: true, adopt_id: None, held: true, mutes: false, retired: false };
     assert_eq!(serde_json::to_value(line).unwrap()["held"], true, "status.audio[].held");
     let tick = include_str!("app_tick.rs").split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(tick.contains("held: o.held"), "the status carries it");

@@ -147,3 +147,24 @@ fn an_applied_line_is_acked_by_its_seq() {
     let tick = include_str!("app_tick.rs").split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(tick.contains("audio_seq: { #[cfg(feature=\"encode\")] { audio::sources::audio_seq() }"), "the status carries it");
 }
+
+/// P4 through the reader: a `retire` read after the listing silences the live track at once;
+/// one read before it (staged) leaves the track held for good, the sync's release included.
+#[test]
+fn a_retire_line_holds_the_track_for_good() {
+    let _restore = restore();
+    let _reopen = Reopen;
+    audio::set_mic_muted(false);
+    let staged = held_listed("retire-staged");
+    read_early(std::io::Cursor::new(format!("{}{SYNC}", "{\"cmd\":\"set_source\",\"id\":\"retire-staged\",\"retire\":true}\n")), |_| {});
+    close_staging();
+    assert!(staged.retired() && staged.startup_held(), "staged retire: held after the sync");
+    let live = held_listed("retire-live");
+    live.release_startup_hold();
+    assert!(!silent(&live), "recording");
+    read_early(std::io::Cursor::new("{\"cmd\":\"set_source\",\"id\":\"retire-live\",\"retire\":true}\n"), |_| {});
+    assert!(live.retired() && silent(&live), "retired live: the next packet is silence");
+    let opened = audio::sources::opened();
+    let me = opened.iter().find(|o| o.id == "retire-live").unwrap();
+    assert!(me.retired && me.held, "the status says so");
+}
