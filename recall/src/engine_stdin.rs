@@ -26,7 +26,7 @@ pub(crate) fn spawn_early(shared: Arc<CaptureShared>) -> Early {
         let end = read_early(stdin.lock(), |cmd| {
             let _ = tx.send(cmd);
         });
-        stdin_reader::finish(end, &shared.quit);
+        reader_end(end, &shared.quit);
     });
     #[cfg(feature = "encode")]
     std::thread::spawn(|| watch_hold(std::thread::sleep, audio::sources::startup_released, protocol::emit));
@@ -56,16 +56,32 @@ pub(crate) fn watch_hold(wait: impl FnOnce(std::time::Duration), released: impl 
 /// Every command of `reader` to `forward`, the mic mute applied first (a toggle goes on as the
 /// state it set, so the later handler sets the same value again and reports it).
 pub(crate) fn read_early<R: BufRead>(reader: R, mut forward: impl FnMut(Command)) -> stdin_reader::ReaderEnd {
-    let end = stdin_reader::read_commands(reader, |cmd| forward(apply_mute(cmd)));
-    // The controller's `quit`: this engine reads no line after it, so a privacy change from
-    // now on could never reach it. Every device track stores silence before `quit` is set (this
-    // thread sets it next, in `stdin_reader::finish`), so the long recording's finalise and
-    // anything else stored until the exit hold no live sample (the safe state).
+    stdin_reader::read_commands(reader, |cmd| forward(apply_mute(cmd)))
+}
+
+/// The engine's stdin has ended (set once, by the reader): reported in `status.stdin_ended`, so
+/// the controller never treats the lines it cannot ack as a hung engine (N2).
+static STDIN_ENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn stdin_ended() -> bool {
+    STDIN_ENDED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The reader ended, whichever way: the controller's `quit`, the end of stdin (the controller is
+/// gone) or a read error (N2). No line reaches this engine any more, so a privacy change from
+/// now on could never apply: every device track stores silence first ([`hold_at_end`]), then
+/// `quit` is set (`stdin_reader::finish`), so the long recording's finalise, an orphan's long
+/// save and anything else stored until the exit hold no live sample (the safe state).
+fn reader_end(end: stdin_reader::ReaderEnd, quit: &std::sync::atomic::AtomicBool) {
+    hold_at_end();
+    stdin_reader::finish(end, quit);
+}
+
+/// The hold of [`reader_end`], and `stdin_ended` for the status.
+pub(crate) fn hold_at_end() {
     #[cfg(feature = "encode")]
-    if end == stdin_reader::ReaderEnd::Quit {
-        audio::sources::hold_for_quit();
-    }
-    end
+    audio::sources::hold_for_quit();
+    STDIN_ENDED.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[cfg(feature = "encode")]

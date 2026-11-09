@@ -215,13 +215,15 @@ fn a_quit_holds_every_device_track_before_the_finalise() {
     let quit = Arc::new(AtomicBool::new(false));
     let end = read_early(std::io::Cursor::new("{\"cmd\":\"quit\"}\n"), |_| {});
     assert_eq!(end, crate::stdin_reader::ReaderEnd::Quit);
+    super::hold_at_end(); // `reader_end`, before `finish`
     crate::stdin_reader::reader_ended(end, &quit, &AtomicBool::new(false)); // what `finish` does next
     assert!(quit.load(std::sync::atomic::Ordering::SeqCst));
     assert!(mic.retired() && silent(&mic), "the mic stores silence for the finalise");
     game.push_live(&[0.5; 960], MuteNow::read());
     assert!(!game.retired() && game.snapshot(0.01).iter().any(|s| *s != 0.0), "the game's process tree records on");
     let src = include_str!("engine_stdin.rs").split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(src.contains("if end == stdin_reader::ReaderEnd::Quit { audio::sources::hold_for_quit(); }"), "read_early holds before it returns (then `finish` sets quit)");
+    assert!(src.contains("fn reader_end(end: stdin_reader::ReaderEnd, quit: &std::sync::atomic::AtomicBool) { hold_at_end(); stdin_reader::finish(end, quit); }"), "the reader holds before `finish` sets quit");
+    assert!(src.contains("reader_end(end, &shared.quit);"), "the engine's reader ends through it");
 }
 
 /// N1: `sync`, then `quit`, both read before `audio::start` has listed the tracks. A track
@@ -239,4 +241,39 @@ fn a_quit_before_the_listing_leaves_later_tracks_silent() {
     assert!(silent(&late), "its first packet is silence");
     let sources = include_str!("audio/sources.rs").split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(sources.contains("if early.synced && !early.quitting { release_startup_holds();"), "the close never releases after it");
+}
+
+/// A stdin that fails mid-read, as a broken pipe would.
+struct Broken(bool);
+
+impl std::io::Read for Broken {
+    fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+        if std::mem::replace(&mut self.0, false) {
+            let line = b"{\"cmd\":\"bookmark\"}\n";
+            out[..line.len()].copy_from_slice(line);
+            return Ok(line.len());
+        }
+        Err(std::io::Error::other("the pipe broke"))
+    }
+}
+
+/// N2: the reader ends on a read error (an orphan that may keep writing a long save). Its device
+/// tracks are held the same way as at a quit, and its status says `stdin_ended`.
+#[test]
+fn a_read_error_or_the_end_of_stdin_holds_like_a_quit() {
+    let _restore = restore();
+    let _reopen = Reopen;
+    audio::set_mic_muted(false);
+    let mic = held_listed("n2-mic");
+    mic.release_startup_hold();
+    assert!(!silent(&mic), "recording");
+    let end = read_early(std::io::BufReader::new(Broken(true)), |_| {});
+    assert_eq!(end, crate::stdin_reader::ReaderEnd::Eof, "a read error ends the reader as an end of stdin");
+    super::hold_at_end(); // `reader_end` on every end
+    assert!(mic.retired() && silent(&mic), "held after a read error");
+    assert!(super::stdin_ended(), "the status says stdin_ended");
+    let tick = include_str!("app_tick.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(tick.contains("stdin_ended: crate::engine_stdin::stdin_ended(),"));
+    let src = include_str!("engine_stdin.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(src.contains("fn reader_end(end: stdin_reader::ReaderEnd, quit: &std::sync::atomic::AtomicBool) { hold_at_end();"), "every end, not only quit");
 }
