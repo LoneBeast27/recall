@@ -162,6 +162,7 @@ fn a_source_change_during_a_spawn_respawns_the_engine_on_it() {
     shared.spawn_sources.set("[b]"); // the Audio page, while the pid is still 0
     assert!(shared.respawn_if_sources_moved(gen), "the change during the spawn respawns");
     assert_eq!(shared.generation(), gen + 1, "a retarget to the same target");
+    assert_eq!(shared.desired.lock().unwrap().2, crate::record_dispatch::Sent::Restarting, "a line meanwhile says restarting");
     let (_, respawn) = shared.desired();
     assert_eq!(respawn.unwrap().env, vec![(SOURCES_ENV.to_string(), Some("[b]".to_string()))], "on the new list");
     assert!(!shared.respawn_if_sources_moved(gen + 1), "once");
