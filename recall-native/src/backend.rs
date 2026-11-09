@@ -187,7 +187,7 @@ pub(crate) use edit_place::{checked_export_dir, export_dir_for, folders_now, ove
 use edit_place::sidecar;
 #[allow(unused_imports)] // the examples build backend.rs without Root, its only caller
 pub use edit_place::share_folders;
-fn validate_info(info:&ClipInfo)->Result<(),String>{
+pub(crate) fn validate_info(info:&ClipInfo)->Result<(),String>{
     let p=std::fs::canonicalize(&info.path).map_err(|e|format!("resolve source: {e}"))?;
     let m=p.metadata().map_err(|e|e.to_string())?;
     let modified=m.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(u64::MAX as u128) as u64;
