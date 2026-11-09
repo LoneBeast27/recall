@@ -201,3 +201,43 @@ device_id = "bad\nid"
     validate(&cfg).unwrap();
     std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
 }
+
+/// Post-hoc item 5: the device_id repairs (load salvage and validation) never drop a source's
+/// mic_mute flag or turn a muted source (None or true) live (false).
+#[test]
+fn device_id_repairs_keep_every_mic_mute_flag() {
+    let path = temp_file("mic-mute-keep", r#"
+[[recording.audio_sources]]
+id = "mic"
+kind = "input"
+name = "Microphone"
+device_id = 123
+
+[[recording.audio_sources]]
+id = "muted"
+kind = "input"
+name = "Headset"
+device_id = 7
+mic_mute = true
+
+[[recording.audio_sources]]
+id = "live"
+kind = "input"
+name = "Line in"
+device_id = "bad\nid"
+mic_mute = false
+"#);
+    let cfg = crate::config::load_from(&path);
+    let flags: Vec<_> = cfg.recording.audio_sources.iter().map(|s| (s.id.as_str(), s.mic_mute)).collect();
+    assert_eq!(flags, [("mic", None), ("muted", Some(true)), ("live", Some(false))]);
+    assert!(cfg.recording.audio_sources.iter().all(|s| s.device_id.is_empty()), "the bad ids are cleared");
+    let mut list = cfg.recording.audio_sources.clone();
+    list[0].device_id = "two\nlines".into();
+    list[1].device_id = "  {0.0.1.00000000}.{x}  ".into();
+    let mut notes = Vec::new();
+    crate::config_validate_lists::audio_sources(&mut list, &mut notes);
+    let after: Vec<_> = list.iter().map(|s| (s.id.as_str(), s.mic_mute)).collect();
+    assert_eq!(after, flags, "validation repairs keep the flags too");
+    std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
+}
+
