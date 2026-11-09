@@ -295,3 +295,24 @@ fn the_privacy_hold_refusal_names_the_app_only() {
     s.run_to(5_500);
     assert_eq!(s.planner.privacy_refusal().as_deref(), Some("Discord.exe is no longer recorded"));
 }
+
+/// Gate p5-1: a save that has written past its cap (>= 10 min) is still in flight: a privacy
+/// stop releases the engine and waits for it, never the plain quit that cuts it.
+#[test]
+fn a_privacy_stop_waits_for_a_save_already_past_its_cap() {
+    use std::time::Duration;
+    let mut s = recording_discord();
+    s.run_to(5_000);
+    assert!(s.save());
+    for k in 1..=132u64 {
+        s.now += Duration::from_secs(5); // 11 min of a save still writing (the engine's status)
+        let ev = serde_json::json!({"type": "status", "save_writing": {"bytes": k, "queued": 0, "step": k}});
+        let now = s.now;
+        s.activity.on_engine_event(&ev, 0.0, now);
+    }
+    s.seen(app_ev("Discord", 30, 0x30, false));
+    let mark = s.now - Duration::from_millis(1);
+    s.tick();
+    assert_eq!(s.released.len(), 1, "released for the save past its cap");
+    assert!(s.ring_kept_since(mark), "no quit under it");
+}

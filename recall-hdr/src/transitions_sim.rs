@@ -436,7 +436,7 @@ impl Transitions for Sim {
         self.engine_releases
     }
     fn saving(&mut self) -> bool {
-        self.activity.retarget_busy(self.now).saving
+        self.activity.save_in_flight() // as `Controller::saving`
     }
     fn now(&self) -> Instant {
         self.now
