@@ -135,6 +135,11 @@ pub enum Outbound {
         source: String,
         reason: String,
     },
+    /// Every device track is held silent and opens no stream: stdin was not drained in time,
+    /// or a read failed (merge-gate F7). The controller tells the user.
+    InputsHeld {
+        reason: String,
+    },
     /// Encoder lifecycle/diagnostic line (machine-readable log).
     EncoderLog {
         message: String,
