@@ -203,6 +203,14 @@ impl TrackRing {
         self.live.retired.load(Ordering::SeqCst)
     }
 
+    /// An app track's packet (`apps.rs`): an app track never starts held (no line changes which
+    /// process it captures), but once retired (the source was removed or disabled) it stores
+    /// silence from the next packet, as a device track does. The hold is loaded per packet.
+    pub(crate) fn push_app_capture(&self, data: &[f32]) {
+        let held = self.live.startup.load(Ordering::SeqCst); // set only by `retire` for an app
+        self.push_samples(data, false, held);
+    }
+
     /// Alt+M silences this track right now (the engine's truth for the meter's "Muted").
     pub(crate) fn mutes_now(&self) -> bool {
         super::mic_muted() && self.mutes()
