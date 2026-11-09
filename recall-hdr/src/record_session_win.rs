@@ -224,6 +224,27 @@ impl SessionHost for Controller {
         self.shutdown_now(grace);
     }
 
+    fn saves_in_progress(&mut self) -> bool {
+        self.activity.saves_writing(Instant::now())
+    }
+
+    /// Still inside `WM_ENDSESSION`: the quit's bounded wait (`quit_ready`: 60 s, on while
+    /// the save grows, its hold cap) runs here, with the reason Windows shows kept up. A save
+    /// it gives up on gets the "Recall was closed during the save" report there.
+    fn finish_saves(&mut self) {
+        self.quit.get_or_insert(QuitReason::SessionEnd);
+        SAVE_BLOCKING.store(true, Ordering::Release); // a save that started after the query
+        update_shutdown_reason();
+        loop {
+            let now = Instant::now();
+            self.drain_engine_events(now);
+            if self.quit_ready(now) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
     fn tell_engine(&mut self, line: &str) {
         let _ = self.supervisor.send_engine_line(line);
     }
