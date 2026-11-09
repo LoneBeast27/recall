@@ -235,8 +235,10 @@ impl Root {
     /// now only removes them from Recall (they count as another recorder's).
     fn release_managed_folder(&mut self, folder: &str) {
         let mut folders = self.folders.clone();
-        if !folders.release(folder) {
-            return;
+        match folders.release(folder) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(why) => return self.show_toast(ToastKind::Bad, "Recall still manages that folder", Some(why)),
         }
         match folders.save() {
             Ok(()) => {

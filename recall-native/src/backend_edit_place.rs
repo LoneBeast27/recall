@@ -37,9 +37,9 @@ pub(super) fn sidecar_in(source: &str, folders: &Folders) -> Result<PathBuf, Str
     }
     let clip = Path::new(source);
     let recordings = library_dir_from(folders);
-    if imports::is_owned(clip, &recordings, &folders.former_recordings)
-        && clip.parent().is_some_and(|parent| !overlaps_link(parent, folders))
-    {
+    // Owned wins over linked: a clip Recall recorded keeps its edits beside it, also under a
+    // linked parent folder (Videos linked, clips in Videos\Recall).
+    if imports::is_owned(clip, &recordings, &folders.former_recordings) {
         return beside(source);
     }
     let sidecar = imports::edit_file(clip).ok_or("APPDATA is not set")?;
@@ -69,12 +69,22 @@ pub(crate) fn checked_export_dir(clip: &Path, folders: &Folders) -> Result<PathB
     Ok(directory)
 }
 
-pub(crate) fn overlaps_link(directory: &Path, folders: &Folders) -> bool {
-    folders.linked().any(|link| storage::guard::folders_overlap(directory, Path::new(link)))
+/// Whether writing files into `directory` would write into a linked folder (read-only to
+/// Recall): it lies in a linked tree outside every owned folder below that link, or it holds a
+/// link without lying in an owned folder. Owned folders are the recordings folder and the former
+/// ones; one under a linked parent stays writable, `<recordings>\exports` included.
+pub(crate) fn link_blocks_write(directory: &Path, folders: &Folders) -> bool {
+    use storage::guard::folder_within as within;
+    let recordings = library_dir_from(folders);
+    let owned: Vec<&Path> = std::iter::once(recordings.as_path()).chain(folders.former_recordings.iter().map(Path::new)).collect();
+    let in_owned = |below: Option<&Path>| owned.iter().any(|own| within(directory, own) && below.is_none_or(|link| within(own, link)));
+    folders.linked().map(Path::new).any(|link| {
+        (within(directory, link) && !in_owned(Some(link))) || (within(link, directory) && !in_owned(None))
+    })
 }
 
 fn check_write_dir(directory: &Path, clip: &Path, folders: &Folders, owned: bool) -> Result<(), String> {
-    if overlaps_link(directory, folders) || (!owned && clip.parent().is_some_and(|source| storage::guard::folders_overlap(directory, source))) {
+    if link_blocks_write(directory, folders) || (!owned && clip.parent().is_some_and(|source| storage::guard::folders_overlap(directory, source))) {
         return Err("Recall needs a write folder outside the linked recordings. Choose a separate recordings folder in Settings → Media.".into());
     }
     Ok(())
