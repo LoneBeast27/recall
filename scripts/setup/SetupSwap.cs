@@ -33,6 +33,8 @@ namespace Recall.Setup
     {
         /// Tests only: called before every move (the swap's and a rollback's) with (from, to).
         internal static Action<string, string> BeforeMove = null;
+        /// Tests only: called when Recover finds a journal, before it takes the lock.
+        internal static Action BeforeRecover = null;
 
         /// User settings never live in the install folder's top level, and a stage never carries them:
         /// the swap replaces only program files (the cache folder and everything else is not touched).
@@ -102,6 +104,8 @@ namespace Recall.Setup
         public static string Recover(string dir)
         {
             if (!File.Exists(SwapJournal.PathIn(dir))) return null;
+            var hook = BeforeRecover;
+            if (hook != null) hook();
             var swapLock = TakeLock(dir);
             if (swapLock == null) return "another Recall install is swapping files in this folder";
             using (swapLock) return RecoverLocked(dir);

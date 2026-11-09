@@ -57,13 +57,24 @@ namespace Recall.Setup
             log("Setup " + SetupBuildInfo.Version + (options.Update ? " update " : " install ") + dir
                 + (targets.IsSandbox ? " (sandbox " + targets.SandboxRoot + ")" : ""));
             targets.CheckInstallDir(dir);
-            InstallDrive.Check(dir, options.AllowUnknownDrive, log);
-            if (options.Update && SetupPackage.ExistingInstallPath(dir) == null)
-                throw new InvalidOperationException("The selected Recall installation is incomplete or unavailable. No files were changed.");
+            RecorderQuitter quitter;
+            UpdateFlow update;
+            try
+            {
+                InstallDrive.Check(dir, options.AllowUnknownDrive, log);
+                if (options.Update && SetupPackage.ExistingInstallPath(dir) == null)
+                    throw new InvalidOperationException("The selected Recall installation is incomplete or unavailable. No files were changed.");
+                // An update may close the app (it asked for the update); a first install refuses while it runs.
+                quitter = new RecorderQuitter(targets, dir, options.Update, log);
+                update = options.Update ? new UpdateFlow(targets, dir, options.Resume, log) : null;
+            }
+            catch (Exception error)
+            {
+                // Nothing was touched yet, but the app quit itself for this update: reopen it and say so.
+                if (options.Update) UpdateFlow.FailedBeforeStart(targets, dir, options, log, error);
+                throw;
+            }
             Report(progress, "Waiting for Recall to finish saving…");
-            // An update may close the app (it asked for the update); a first install refuses while it runs.
-            var quitter = new RecorderQuitter(targets, dir, options.Update, log);
-            var update = options.Update ? new UpdateFlow(targets, dir, options.Resume, log) : null;
             try
             {
                 // Inside: the app has already quit itself for the update, so any failure here must
