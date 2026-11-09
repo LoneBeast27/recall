@@ -103,3 +103,15 @@ fn a_resync_is_not_a_press() {
     assert_eq!(MuteNow::read(), MuteNow { muted: true, presses: presses + 1 }, "the user's change is a press");
 }
 
+/// Review R2-audio-r9-2: a line-in set to "Alt+M mutes it", and a twin re-picked, while the
+/// engine starts: the `set_source` is read before the tracks start and in force at their first
+/// packet, not only once `serve` runs after them.
+#[test]
+fn a_set_source_queued_before_audio_start_is_in_force_at_the_first_packet() {
+    let _restore = restore();
+    read_early(std::io::Cursor::new("{\"cmd\":\"set_source\",\"id\":\"line\",\"mic_mute\":true,\"device_id\":\"{B}\"}\n"), |_| {});
+    let env = r#"[{"id":"line","kind":"input","name":"Line-in","device":"Line (Box)","device_id":"{A}","mic_mute":false}]"#;
+    let list = audio::sources::resolve_for_start(|key| (key == "RECALL_AUDIO_SOURCES").then(|| env.to_owned())).unwrap();
+    assert_eq!(list[0].mic_mute, Some(true), "the line-in starts muted by Alt+M");
+    assert_eq!(list[0].device_id, "{B}", "the twin the user picked");
+}

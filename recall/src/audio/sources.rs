@@ -152,7 +152,41 @@ pub fn resolve(get: impl Fn(&str) -> Option<String>) -> Result<Vec<SourceSpec>, 
 }
 
 pub fn from_env() -> Result<Vec<SourceSpec>, String> {
-    resolve(|key| std::env::var(key).ok())
+    resolve_for_start(|key| std::env::var(key).ok())
+}
+
+/// [`resolve`] with the `set_source` flags and ids read from stdin before the tracks start
+/// ([`stage_early`]) laid over it, so they are in force from the first packet.
+pub fn resolve_for_start(get: impl Fn(&str) -> Option<String>) -> Result<Vec<SourceSpec>, String> {
+    let mut list = resolve(get)?;
+    let staged = std::mem::take(&mut *EARLY.lock().unwrap_or_else(|p| p.into_inner()));
+    for (id, mic_mute, device_id) in staged.into_iter().flatten() {
+        for spec in list.iter_mut().filter(|s| s.id.trim() == id.trim()) {
+            if let Some(on) = mic_mute {
+                spec.mic_mute = Some(on);
+            }
+            if let Some(device_id) = &device_id {
+                spec.device_id = device_id.clone(); // a malformed id is dropped at open, as from the env
+            }
+        }
+    }
+    Ok(list)
+}
+
+/// `set_source` flags and ids read before the tracks start, in order; None once they started.
+type Staged = Vec<(String, Option<bool>, Option<String>)>;
+static EARLY: Mutex<Option<Staged>> = Mutex::new(Some(Vec::new()));
+
+/// A `set_source` read from stdin (review R2-audio-r9-2): before the tracks start, its mic-mute
+/// flag and device id are noted for [`resolve_for_start`]; the live handler applies it again
+/// later (`set_live`, the same values). After the start this does nothing.
+pub fn stage_early(id: &str, mic_mute: Option<bool>, device_id: Option<&str>) {
+    if mic_mute.is_none() && device_id.is_none() {
+        return;
+    }
+    if let Some(staged) = EARLY.lock().unwrap_or_else(|p| p.into_inner()).as_mut() {
+        staged.push((id.to_owned(), mic_mute, device_id.map(str::to_owned)));
+    }
 }
 
 /// A change the Audio page makes to a running source: gain, name, mic-mute flag, and the
