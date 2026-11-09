@@ -149,6 +149,6 @@ fn a_failed_read_is_retried_at_the_next_spawn() {
     let exe = dir.0.join("recall.exe");
     std::fs::write(&exe, PROTOCOL_MARKER).unwrap();
     assert!(!has_marker_with(&exe, |_| Err(std::io::Error::other("sharing violation"))), "this spawn: below the floor");
-    assert!(has_marker_with(&exe, std::fs::read), "the next spawn reads it again");
-    assert!(!has_marker_with(&dir.0.join("none.exe"), std::fs::read));
+    assert!(has_marker_with(&exe, read_file), "the next spawn reads it again");
+    assert!(!has_marker_with(&dir.0.join("none.exe"), read_file));
 }
