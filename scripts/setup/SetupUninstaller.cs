@@ -13,8 +13,9 @@ namespace Recall.Setup
     /// /uninstall-from and exits. That copy quits the recorder (the same validated pipe quit as an
     /// update), removes only the files install-manifest.json lists (and only unchanged ones), the
     /// Start menu shortcut, the Run value and the Apps &amp; Features entry. The cache is kept unless
-    /// the user ticks the box (default off); then only provably regenerable cache files are deleted
-    /// and everything else in it goes to the Recycle Bin when the bin can take it, or stays. Never
+    /// the user ticks the box (default off); then only provably regenerable cache files are deleted.
+    /// Kept clip copies, owned.json copies and anything else are never moved or deleted, ticked or
+    /// not: they stay, and the closing note counts them. Never
     /// a recursive delete of the install folder; never a clip, recordings or linked folder, or the
     /// user's settings. A folder that still holds anything is left in place, and the end says so.
     internal static class Uninstaller
@@ -71,8 +72,8 @@ namespace Recall.Setup
                 var guard = ClipFolders.Read();
                 var notes = new List<string>();
                 int removed = RemoveProgramFiles(dir, manifest, guard, log);
-                if (removeCache) CleanCache(dir, guard, log, notes);
-                else log("Cache kept.");
+                if (!removeCache) log("Cache kept.");
+                CleanCache(dir, removeCache, guard, log, notes);
                 Tidy(targets, dir, log);
                 var left = Leftovers(dir);
                 var message = "Recall was removed (" + removed + " program files). Your clips and settings were kept.";
@@ -133,7 +134,7 @@ namespace Recall.Setup
             }
         }
 
-        private static void CleanCache(string dir, List<string> guard, Action<string> log, List<string> notes)
+        private static void CleanCache(string dir, bool removeRegenerable, List<string> guard, Action<string> log, List<string> notes)
         {
             var cache = Path.Combine(dir, "cache");
             if (!Directory.Exists(cache) || IsReparse(cache)) return;
@@ -143,30 +144,16 @@ namespace Recall.Setup
             var regenerable = new List<string>();
             var others = new List<string>();
             CachePlan.Split(relative, regenerable, others);
-            int deleted = 0;
-            foreach (var r in regenerable) if (Delete(Path.Combine(cache, r), root, guard, log)) deleted++;
-            log("Cache: deleted " + deleted + " regenerable file(s).");
-            var recycle = new List<string>();
-            long bytes = 0;
-            foreach (var r in others)
+            if (removeRegenerable)
             {
-                var path = Path.Combine(cache, r);
-                if (!UninstallPlan.Allowed(PathId.Normalize(path), root, guard)) continue;
-                recycle.Add(path);
-                bytes += new FileInfo(path).Length;
+                int deleted = 0;
+                foreach (var r in regenerable) if (Delete(Path.Combine(cache, r), root, guard, log)) deleted++;
+                log("Cache: deleted " + deleted + " regenerable file(s).");
             }
-            if (recycle.Count > 0)
-            {
-                var why = RecycleBin.Check(cache, bytes) ?? RecycleBin.Move(recycle);
-                if (why == null) log("Cache: moved " + recycle.Count + " file(s) to the Recycle Bin (kept clip copies and other files).");
-                else
-                {
-                    log("Cache: kept " + recycle.Count + " file(s) that are not regenerable: " + why + ".");
-                    notes.Add(recycle.Count + " cache file(s) that can't be recreated (such as kept clip copies) were left in "
-                        + cache + ": " + why + ".");
-                }
-            }
-            RemoveEmptyFolders(cache);
+            // Kept clip copies, owned.json copies and anything else: never moved, never deleted.
+            var note = CachePlan.KeptNote(others, cache);
+            if (note != null) { notes.Add(note); log("Cache: " + note); }
+            if (removeRegenerable) RemoveEmptyFolders(cache);
         }
 
         private static bool IsReparse(string path)
@@ -293,7 +280,7 @@ namespace Recall.Setup
                 form.Controls.Add(cache);
                 form.Controls.Add(new Label {
                     Text = "Deletes previews, thumbnails and audio stems, which Recall can recreate. Kept clip copies and anything else "
-                        + "in the cache go to the Recycle Bin, or stay if the Recycle Bin can't take them.",
+                        + "in the cache stay where they are.",
                     Bounds = new System.Drawing.Rectangle(34, 118, 470, 52), ForeColor = System.Drawing.SystemColors.GrayText
                 });
                 var ok = new Button { Text = "Uninstall", DialogResult = DialogResult.OK, Bounds = new System.Drawing.Rectangle(322, 186, 90, 30) };

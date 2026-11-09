@@ -38,7 +38,7 @@ namespace Recall.Setup
         }
     }
 
-    internal enum CacheFileKind { Regenerable, Recycle }
+    internal enum CacheFileKind { Regenerable, Keep }
 
     /// Which cache files are provably regenerable, by the cache module's own name rules
     /// (recall-native services/storage budget.rs, unit_files.rs, proxy.rs): `thumbs\<id>.jpg`,
@@ -46,7 +46,7 @@ namespace Recall.Setup
     /// (`.flac`, `.wav`, `.json`, `.tmp`) and `proxy\<id>.mp4` preview copies, `<id>` being 16
     /// lowercase hex digits. Everything else (kept clip copies in `staging\kept`, copies listed in
     /// owned.json under `video\` and `light\`, projects, history, settings, heads, temporaries, any
-    /// file someone put there) is never deleted: it goes to the Recycle Bin or stays.
+    /// file someone put there) is never moved or deleted: it stays where it is.
     internal static class CachePlan
     {
         public static bool IsId(string text)
@@ -74,14 +74,32 @@ namespace Recall.Setup
                 && (lower.EndsWith(".flac", StringComparison.Ordinal) || lower.EndsWith(".wav", StringComparison.Ordinal)
                     || lower.EndsWith(".json", StringComparison.Ordinal) || lower.EndsWith(".tmp", StringComparison.Ordinal)))
                 return CacheFileKind.Regenerable;
-            return CacheFileKind.Recycle;
+            return CacheFileKind.Keep;
         }
 
-        /// Splits every file under the cache (paths relative to it) into delete and recycle lists.
-        public static void Split(IEnumerable<string> relativeFiles, List<string> regenerable, List<string> recycle)
+        /// Splits every file under the cache (paths relative to it) into delete and keep lists.
+        public static void Split(IEnumerable<string> relativeFiles, List<string> regenerable, List<string> keep)
         {
             foreach (var r in relativeFiles)
-                (Classify(r) == CacheFileKind.Regenerable ? regenerable : recycle).Add(r);
+                (Classify(r) == CacheFileKind.Regenerable ? regenerable : keep).Add(r);
+        }
+
+        private static readonly string[] ClipExtensions = { ".mp4", ".m4v", ".mov", ".mkv" };
+
+        /// The closing note for what stays: "N clip copies kept in &lt;folder&gt;" (plus any other files),
+        /// or null when nothing stays.
+        public static string KeptNote(IEnumerable<string> kept, string cacheFolder)
+        {
+            int clips = 0, other = 0;
+            foreach (var r in kept)
+            {
+                var lower = r.ToLowerInvariant();
+                if (Array.Exists(ClipExtensions, e => lower.EndsWith(e, StringComparison.Ordinal))) clips++; else other++;
+            }
+            if (clips == 0 && other == 0) return null;
+            var note = clips + (clips == 1 ? " clip copy" : " clip copies") + " kept in " + cacheFolder;
+            if (other > 0) note += ", with " + other + " other file" + (other == 1 ? "" : "s") + " Recall can't recreate";
+            return note + ".";
         }
     }
 
