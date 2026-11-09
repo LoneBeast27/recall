@@ -227,3 +227,25 @@ fn a_junction_tier_folder_is_never_adopted_from_or_deleted_through() {
     let _ = std::fs::remove_dir(root.join("video"));
     let _ = std::fs::remove_dir(root.join("editor").join(HEX_NAME));
 }
+
+#[test]
+fn a_clip_open_in_another_window_keeps_its_editor_stems() {
+    // kept() covered an open clip's video copy, frames and thumbnail, not its stem folders
+    // (editor\<id>): the stems another window's editor plays from could be evicted under it.
+    let (_sandbox, root, clips) = layout("stems-elsewhere");
+    let source = clips.join("G__2026-11-10__11-00-00.mp4");
+    write(&source, 64 << 10);
+    let (id, _, _) = identity_of(&source).unwrap();
+    let stems = root.join("editor").join(HEX_NAME);
+    write(&stems.join("clip.json"), 200);
+    write(&stems.join("audio-0.flac"), 4096);
+    // Another window prepared it (owner recorded, not this process's editor clip).
+    budget::note_editor_media(&root, &id, &[stems.clone()], false);
+    let open = crate::services::library::open_clips::exporting(&source.to_string_lossy());
+    budget::enforce(&root, 0, 0);
+    let _ = budget::room_below(&root, 0, 0, 0, f64::MAX);
+    assert!(stems.join("audio-0.flac").is_file(), "the stems of a clip open in Recall were evicted");
+    drop(open);
+    budget::enforce(&root, 0, 0);
+    assert!(!stems.join("audio-0.flac").exists(), "once it closes, they may go");
+}

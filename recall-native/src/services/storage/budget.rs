@@ -139,7 +139,7 @@ pub(super) fn plan_dry(root: &Path) -> (Vec<String>, Vec<String>) {
         let (free, total) = super::drive_info(root).map_or((0, 0), |info| (info.free, info.total));
         evict::default_budget(free, total, super::drive::on_system_drive(root))
     });
-    let evict = evict::plan(&inventory.units, inventory.projects + inventory.other, budget, budget / 2, 0, &kept());
+    let evict = evict::plan(&inventory.units, inventory.projects + inventory.other, budget, budget / 2, 0, &kept(root));
     (adopt, evict)
 }
 
@@ -298,7 +298,7 @@ pub(super) fn enforce(root: &Path, budget: u64, incoming_video: u64) -> u64 {
     let _guard = INDEX_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let swept = sweep_old_stems_once(root);
     let inventory = inventory(root, &super::prefetch::score_of);
-    let keep = kept();
+    let keep = kept(root);
     // storage.json can't be read (RI2-2): the budget is a guess, so nothing already cached goes.
     let (budget, video_cap) = if super::video::budget_note(root).is_some() {
         let held = budget.max(inventory.total().saturating_add(incoming_video));
@@ -322,7 +322,7 @@ fn sweep_old_stems_once(root: &Path) -> u64 {
     }
     swept.push(root.to_path_buf());
     drop(swept);
-    sweep_old_stems(root, &kept())
+    sweep_old_stems(root, &kept(root))
 }
 
 /// Deletes the engine stem folders of media cache versions before the current one (6, FLAC):
@@ -369,7 +369,7 @@ pub(super) fn room_below(root: &Path, budget: u64, limit: u64, incoming: u64, sc
     let _guard = INDEX_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let inventory = inventory(root, &super::prefetch::score_of);
     let fixed = inventory.projects + inventory.other;
-    match evict::room_below(&inventory.units, fixed, limit, budget / 2, incoming, score, &kept()) {
+    match evict::room_below(&inventory.units, fixed, limit, budget / 2, incoming, score, &kept(root)) {
         Some(evicted) => {
             remove(root, &inventory, &evicted);
             true
@@ -388,7 +388,7 @@ pub(super) fn drop_previews(root: &Path, ids: &std::collections::HashSet<String>
     let _guard = INDEX_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let inventory = inventory(root, &super::prefetch::score_of);
     let media = read_media(root);
-    let keep = kept();
+    let keep = kept(root);
     let names: Vec<String> = inventory
         .units
         .iter()
@@ -480,15 +480,17 @@ fn same_dir(a: &Path, b: &Path) -> bool {
     text(a) == text(b)
 }
 
-/// Units no eviction or sweep may touch: the editor clip's (KEEP) plus the video copy, frames
-/// and thumbnail of every clip open in any Recall window (`open_clips`: editors, players and
-/// exports of every app process). Recall's readers share delete, so an open copy is not
-/// protected by Windows refusing the delete.
-pub(super) fn kept() -> Vec<String> {
+/// Units no eviction or sweep may touch: the editor clip's (KEEP) plus the video copy, frames,
+/// thumbnail and editor stem folders (`media.json` owners) of every clip open in any Recall window
+/// (`open_clips`: editors, players and exports of every app process). Recall's readers share
+/// delete, so an open copy is not protected by Windows refusing the delete.
+pub(super) fn kept(root: &Path) -> Vec<String> {
     let mut keep = KEEP.lock().map(|k| k.clone()).unwrap_or_default();
+    let owners = read_media(root).owners;
     for clip in crate::services::library::open_clips::all_open() {
         let Ok((id, _, _)) = super::identity_of(Path::new(&clip)) else { continue };
-        for unit in [format!("video/{id}.mp4"), format!("visuals/{id}#editor"), format!("visuals/{id}#scrub"), format!("thumbs/{id}.jpg")] {
+        let stems = owners.iter().filter(|(_, owner)| **owner == id).map(|(name, _)| format!("editor/{name}"));
+        for unit in [format!("video/{id}.mp4"), format!("visuals/{id}#editor"), format!("visuals/{id}#scrub"), format!("thumbs/{id}.jpg")].into_iter().chain(stems) {
             if !keep.contains(&unit) {
                 keep.push(unit);
             }
