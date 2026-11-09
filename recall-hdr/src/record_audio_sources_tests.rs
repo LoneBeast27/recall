@@ -1,10 +1,6 @@
 use super::*;
 use crate::record_app_audio::AppAudioSource;
 
-fn json_lines(lines: &[String]) -> Vec<serde_json::Value> {
-    lines.iter().map(|l| serde_json::from_str(l).unwrap()).collect()
-}
-
 fn ids(list: &[AudioSource]) -> Vec<&str> {
     list.iter().map(|s| s.id.as_str()).collect()
 }
@@ -34,7 +30,7 @@ fn fresh_profiles_split_playback_only_for_distinct_windows_roles() {
     let saved: Vec<AudioSource> = serde_json::from_value(serde_json::to_value(&customized).unwrap()).unwrap();
     assert_eq!(saved, customized);
     assert!(!changed(&split, &customized));
-    assert!(live_updates(&split, &customized).is_empty());
+    assert!(crate::audio_intent::change_lines(&split, &customized).is_empty());
     assert_eq!(engine_value(&split), engine_value(&customized));
 }
 
@@ -104,7 +100,7 @@ fn the_engine_gets_enabled_sources_in_order_and_a_disabled_one_changes_tracks() 
     let mut renamed = default_sources();
     renamed[0].name = "Game audio".into();
     assert!(!changed(&default_sources(), &renamed), "a name is applied live, no restart");
-    assert_eq!(json_lines(&live_updates(&default_sources(), &renamed)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","id":"game","name":"Game audio"}"#).unwrap()]);
+    assert_eq!(crate::audio_intent::change_lines(&default_sources(), &renamed), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","id":"game","name":"Game audio"}"#).unwrap()]);
     let mut disabled_twice = list.clone();
     disabled_twice[1].gain_db = 9.0;
     assert!(!changed(&list, &disabled_twice), "a disabled source records nothing either way");
@@ -116,11 +112,11 @@ fn gain_and_names_go_live_and_everything_else_restarts() {
     let mut louder = base.clone();
     louder[1].gain_db = -4.5;
     assert!(!changed(&base, &louder), "a fader move keeps the replay buffer");
-    assert_eq!(json_lines(&live_updates(&base, &louder)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","gain_db":-4.5,"id":"mic"}"#).unwrap()]);
+    assert_eq!(crate::audio_intent::change_lines(&base, &louder), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","gain_db":-4.5,"id":"mic"}"#).unwrap()]);
     let mut both = louder.clone();
     both[1].name = " Voice ".into();
-    assert_eq!(json_lines(&live_updates(&base, &both)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","gain_db":-4.5,"id":"mic","name":"Voice"}"#).unwrap()]);
-    assert!(live_updates(&base, &base).is_empty());
+    assert_eq!(crate::audio_intent::change_lines(&base, &both), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","gain_db":-4.5,"id":"mic","name":"Voice"}"#).unwrap()]);
+    assert!(crate::audio_intent::change_lines(&base, &base).is_empty());
     let mut device = base.clone();
     device[1].device = "Microphone (USB Audio Device)".into();
     assert!(changed(&base, &device), "another device: restart");
@@ -132,13 +128,13 @@ fn gain_and_names_go_live_and_everything_else_restarts() {
     assert!(changed(&base, &off), "a track fewer: restart");
     let mut off_and_louder = off.clone();
     off_and_louder[1].gain_db = 3.0;
-    assert!(live_updates(&off, &off_and_louder).is_empty(), "a disabled source has no live track");
+    assert!(crate::audio_intent::change_lines(&off, &off_and_louder).is_empty(), "a disabled source has no live track");
     // 2026-11-07 audit A3: into boost is live too. Every long-recording track runs the limiter,
     // so a crossing never restarts the engine (that wiped the replay buffer).
     let mut boosted = base.clone();
     boosted[1].gain_db = 2.0;
     assert!(!changed(&base, &boosted), "0 dB -> +2 dB: live, the replay buffer stays");
-    assert_eq!(json_lines(&live_updates(&base, &boosted)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","gain_db":2.0,"id":"mic"}"#).unwrap()]);
+    assert_eq!(crate::audio_intent::change_lines(&base, &boosted), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","gain_db":2.0,"id":"mic"}"#).unwrap()]);
     let mut more = boosted.clone();
     more[1].gain_db = 6.0;
     assert!(!changed(&boosted, &more), "+2 -> +6 dB: live (the track already runs the limiter)");
@@ -158,10 +154,10 @@ fn the_mic_mute_flag_goes_live_and_reaches_the_engine() {
     let mut mic = line.clone();
     mic[1].mic_mute = Some(true);
     assert!(!changed(&line, &mic), "no restart between on and off: the replay buffer stays");
-    assert_eq!(json_lines(&live_updates(&line, &mic)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","id":"mic","mic_mute":true}"#).unwrap()]);
+    assert_eq!(crate::audio_intent::change_lines(&line, &mic), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","id":"mic","mic_mute":true}"#).unwrap()]);
     assert!(!changed(&base, &line), "the first toggle goes live too");
     assert!(!changed(&line, &base), "back to no flag (muted): live, as its effective flag (audio_intent)");
-    assert_eq!(json_lines(&live_updates(&base, &line)), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","id":"mic","mic_mute":false}"#).unwrap()]);
+    assert_eq!(crate::audio_intent::change_lines(&base, &line), vec![serde_json::from_str::<serde_json::Value>(r#"{"cmd":"set_source","id":"mic","mic_mute":false}"#).unwrap()]);
     assert!(engine_value(&line).contains(r#""mic_mute":false"#), "{}", engine_value(&line));
     assert!(!engine_value(&base).contains("mic_mute"), "no flag: the engine mutes it");
     let saved: AudioSource = toml::from_str("id = \"in\"
@@ -184,7 +180,7 @@ fn the_saved_endpoint_id_reaches_the_engine() {
     let mut other = list.clone();
     other[0] = serde_json::from_value(serde_json::json!({"id": "line-in", "kind": "input", "name": "Line-in", "device": "Mic (Box)", "device_id": "{id-two}", "mic_mute": false})).unwrap();
     assert!(!changed(&list, &other), "another endpoint id for the same device name goes live (P1-B)");
-    let lines = json_lines(&live_updates(&list, &other));
+    let lines = crate::audio_intent::change_lines(&list, &other);
     assert_eq!(lines, [serde_json::json!({"cmd": "set_source", "id": "line-in", "device_id": "{id-two}"})]);
     let old: AudioSource = serde_json::from_value(serde_json::json!({"id": "mic", "kind": "input", "name": "Mic", "device": "Mic (Box)"})).unwrap();
     assert!(!engine_value(&[old]).contains("device_id"), "no id saved: none sent");

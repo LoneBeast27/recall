@@ -187,42 +187,13 @@ pub(crate) fn track_shape(list: &[AudioSource]) -> Vec<AudioSource> {
 }
 
 /// Different tracks for the engine (a restart)? Order matters: it is the clip's track order.
-/// A gain, a name or the mic-mute flag alone is not: [`live_updates`] sends those to the running
+/// A gain, a name or the mic-mute flag alone is not: `audio_intent::change_lines` sends those to the running
 /// engine. A gain above 0 dB is live too: a long-recording track runs the -1 dBFS limiter from
 /// its first sample above the ceiling (`longrec::machine`), and a replay save limits a track that
 /// has been boosted.
 pub fn changed(old: &[AudioSource], new: &[AudioSource]) -> bool {
     // A dropped flag goes live as its effective value (`audio_intent::effective_mic_mute`).
     track_shape(old) != track_shape(new)
-}
-
-/// `set_source` lines for the recorded sources whose gain, name or mic-mute flag changed (the
-/// running engine applies them to its tracks; the replay buffer stays). Only meaningful when
-/// [`changed`] is false.
-pub fn live_updates(old: &[AudioSource], new: &[AudioSource]) -> Vec<String> {
-    let old = engine_list(old);
-    engine_list(new)
-        .into_iter()
-        .filter_map(|n| {
-            let o = old.iter().find(|o| o.id == n.id)?;
-            let mut cmd = serde_json::Map::new();
-            cmd.insert("cmd".into(), "set_source".into());
-            cmd.insert("id".into(), n.id.clone().into());
-            if o.gain_db != n.gain_db {
-                cmd.insert("gain_db".into(), serde_json::json!(n.gain_db));
-            }
-            if o.name != n.name {
-                cmd.insert("name".into(), n.name.clone().into());
-            }
-            if let Some(on) = n.mic_mute.filter(|_| o.mic_mute != n.mic_mute) {
-                cmd.insert("mic_mute".into(), on.into());
-            }
-            if o.device_id != n.device_id {
-                cmd.insert("device_id".into(), n.device_id.clone().into());
-            }
-            (cmd.len() > 2).then(|| serde_json::Value::Object(cmd).to_string())
-        })
-        .collect()
 }
 
 /// `RECALL_AUDIO_SOURCES`: the enabled sources as JSON (`[]` when none: no audio tracks).
