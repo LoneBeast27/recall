@@ -346,3 +346,21 @@ fn a_fill_owns_its_part_before_the_file_exists() {
     assert!(!super::in_use(&part), "released with the fill");
 }
 
+
+#[test]
+fn a_direct_fill_never_opens_its_source_for_write() {
+    // A direct fill's part IS the source clip: start() opened it for write and finish() would
+    // set_len it (here 100 bytes short of the file) and stamp it.
+    let dir = scratch("direct-write");
+    let bytes = CHUNK as usize + 5000;
+    let (source, modified) = clip(&dir, bytes);
+    let fill = ClipFill::direct(&source, bytes as u64 - 100, modified, 0);
+    assert!(fill.start(&[0]).is_err(), "start opened the source clip for write");
+    let (input, output) = (std::fs::File::open(&source).unwrap(), std::fs::OpenOptions::new().write(true).open(&source).unwrap());
+    let mut reader = reader::Reader::new(input, output);
+    assert!(fill.finish(&mut reader).is_err(), "finish ran on the source clip");
+    drop(reader);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(std::fs::read(&source).unwrap(), pattern(bytes), "the source clip is untouched");
+    assert_eq!(source.metadata().unwrap().modified().unwrap(), modified);
+}
