@@ -18,8 +18,8 @@ pub(crate) const RELEASED_DETAIL: &str = "The recorder has its settings";
 static HELD_SHOWN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 /// The R1 notice, as decided (merge gate).
-pub(crate) const OUTDATED_TITLE: &str = "Reinstall Recall: this recorder is older than the app; microphones are off";
-pub(crate) const OUTDATED_DETAIL: &str = "Picked devices are off too. Game audio and the default output still record.";
+pub(crate) const OUTDATED_TITLE: &str = "Reinstall Recall: this recorder is older than the app; microphone and picked audio devices are off";
+pub(crate) const OUTDATED_DETAIL: &str = "Game audio and the default output still record.";
 
 /// The session notice for an engine event (shown even with notices off), or None.
 pub(crate) fn notice_for(ev: &Value) -> Option<String> {
@@ -72,7 +72,7 @@ mod tests {
     #[test]
     fn an_outdated_engine_shows_the_reinstall_notice() {
         let notice = shown(serde_json::json!({"type": crate::supervisor::floor::ENGINE_OUTDATED}));
-        assert_eq!(notice["title"].as_str(), Some("Reinstall Recall: this recorder is older than the app; microphones are off"));
+        assert_eq!(notice["title"].as_str(), Some("Reinstall Recall: this recorder is older than the app; microphone and picked audio devices are off"));
         assert_eq!(notice["always"].as_bool(), Some(true), "shown even with notices off");
     }
 }

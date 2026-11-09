@@ -65,6 +65,7 @@ fn an_engine_file_without_the_marker_gets_no_input_or_picked_device_and_the_user
     let spawned = shared.floor_spec(&old, &read);
     assert_eq!(ids(&env_list(&spawned)), vec!["game", "out", "voice"], "no input, no picked device; game, default output and app stay");
     assert!(shared.spawn_sources.below_floor());
+    assert!(spawned.env.iter().any(|(k, v)| k == "RECALL_AUDIO_MIC_OFF" && v.as_deref() == Some("1")), "a very old engine opens no default mic");
     assert_eq!(rx.try_recv().ok(), Some(json!({"type": ENGINE_OUTDATED})), "the notice is raised");
     // Its restatement carries no input or picked device either, and the shape matches (synced).
     let (baked, current) = shared.spawn_sources.baked_and_current();
