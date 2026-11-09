@@ -294,7 +294,9 @@ impl Controller {
         }
         if old.behavior.hdr_auto != new.behavior.hdr_auto {
             if new.behavior.hdr_auto {
-                if let Err(e) = self.hdr.activate(&new) {
+                // A client's set_config is the user's own switch (its label explains); a hand edit is not.
+                let origin = if client.is_some() { crate::system_notice::Origin::UserAction } else { crate::system_notice::Origin::Automatic };
+                if let Err(e) = self.hdr.activate(&new, origin) {
                     log!("record: HDR management could not start: {e}");
                 }
             } else {
