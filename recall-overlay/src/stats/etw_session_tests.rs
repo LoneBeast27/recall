@@ -61,7 +61,7 @@ fn a_session_with_a_live_owner_is_left_alone() {
     }
     // A live owner (another user's lock answers access denied: `Claim::Taken` too).
     let Claim::First(live) = single_instance::claim(&owner_lock(&name)) else { panic!("a fresh lock") };
-    let Err(StartError::Failed(why)) = EtwSession::start_named(process::id(), name.clone()) else {
+    let Err(StartError::Owned(why)) = EtwSession::start_named(process::id(), name.clone()) else {
         panic!("must back off while the owner lives");
     };
     assert!(why.contains("live owner"), "{why}");

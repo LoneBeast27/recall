@@ -105,6 +105,10 @@ fn owned() -> MutexGuard<'static, Option<String>> {
 pub enum StartError {
     /// Not an elevated administrator and not in Performance Log Users.
     Denied,
+    /// The session name is another live process's (another Recall, perhaps
+    /// another signed-in user's), or its owner lock could not be made while a
+    /// session of that name runs: retried later, and the island says so.
+    Owned(String),
     Failed(String),
 }
 
@@ -242,7 +246,7 @@ impl EtwSession {
         let ticks_per_sec = qpc_frequency();
         let owner = match single_instance::claim(&owner_lock(&name)) {
             Claim::First(guard) => Some(guard),
-            Claim::Taken => return Err(StartError::Failed(format!("{name} has a live owner"))),
+            Claim::Taken => return Err(StartError::Owned(format!("{name} has a live owner"))),
             Claim::Unavailable(_) => None, // no lock: never stop an existing session
         };
         let wide_name = wide(&name);
@@ -257,7 +261,9 @@ impl EtwSession {
         match status {
             ERROR_SUCCESS => {}
             ERROR_ACCESS_DENIED => return Err(StartError::Denied),
-            ERROR_ALREADY_EXISTS => return Err(StartError::Failed(format!("{name} already runs (owner unknown)"))),
+            ERROR_ALREADY_EXISTS => {
+                return Err(StartError::Owned(format!("{name} already runs (owner lock unavailable)")));
+            }
             other => return Err(StartError::Failed(format!("StartTrace {name}: error {}", other.0))),
         }
         *owned() = Some(name.clone());
