@@ -43,7 +43,7 @@ impl super::Shared {
     pub(super) fn set_mute_and_send(&self, muted: bool) -> Sent {
         let g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
         self.spawn_mute.set(muted);
-        self.queue_line(&g, &self.spawn_sources.stamp(&mute_line(muted)))
+        self.queue_audio(&g, &mute_line(muted))
     }
 
     /// A spawned engine's stdin. Its device tracks start held: the whole audio intent is
@@ -58,8 +58,8 @@ impl super::Shared {
             g.quitting = None; // a new engine takes lines
         }
         g.queue = queue; // the old queue closes: its writer ends after its current write
-        if let Some(queue) = g.queue.as_ref() {
-            self.restate(queue);
+        if g.queue.is_some() {
+            self.restate(&g);
         }
     }
 }
