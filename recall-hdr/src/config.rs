@@ -22,6 +22,8 @@
 mod autostart;
 #[path = "config_io.rs"]
 mod io;
+#[path = "config_extra.rs"]
+mod extra;
 
 use std::fs;
 use std::path::{Path, PathBuf};
