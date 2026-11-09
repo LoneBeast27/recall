@@ -9,6 +9,7 @@ mod editor_export;
 mod overlay;
 mod midi;
 mod pipe_name;
+mod data_migrate;
 
 use std::io::{BufRead, BufReader, Write};
 use std::sync::Mutex;
@@ -137,6 +138,8 @@ fn pipe_client_loop(app: AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before the window exists: carry data over from the old bundle identifier.
+    data_migrate::migrate_app_data();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(PipeState(Mutex::new(None)))
