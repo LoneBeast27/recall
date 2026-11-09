@@ -174,7 +174,7 @@ fn config_json_has_every_section() {
 #[test]
 fn defaults_for_the_hotkey_features_and_quality() {
     let rec = RecordingCfg::default();
-    // Rohan, 2026-11-05: one direct Alt combo per action, no two-step shortcuts.
+    // The maintainer, 2026-11-05: one direct Alt combo per action, no two-step shortcuts.
     let direct = [&rec.bookmark_hotkey, &rec.screenshot_hotkey, &rec.record_hotkey, &rec.stats_hotkey, &rec.overlay_hotkey, &rec.editor_hotkey];
     assert_eq!(direct.map(String::as_str), ["Alt+B", "Alt+S", "Alt+L", "Alt+P", "Alt+O", "Alt+U"]);
     assert_eq!((rec.codec.as_str(), rec.fps, rec.bitrate_mbps, rec.quality.as_str()), ("h264", 60, 25, "balanced"));

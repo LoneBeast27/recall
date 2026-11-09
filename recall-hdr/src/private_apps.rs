@@ -23,7 +23,7 @@
 //! Matching is by exact exe stem, case-insensitive, `.exe` optional, so a
 //! longer name that only starts the same (`SignalRgb` vs `signal`) is not
 //! caught. Discord is not here: `detect.fullscreen_games` lists it by default
-//! (Rohan, 2026-11-05) and `rules::DENY_STEMS` keeps it out of HDR switching.
+//! (the maintainer, 2026-11-05) and `rules::DENY_STEMS` keeps it out of HDR switching.
 //! The stems live in `private_app_stems`.
 
 pub(crate) use crate::private_app_stems::PRIVATE_APP_STEMS;

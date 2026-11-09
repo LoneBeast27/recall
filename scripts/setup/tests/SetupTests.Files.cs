@@ -151,7 +151,7 @@ namespace Recall.Setup.Tests
         private static void NoPowerShell()
         {
             Check(sourceDir != null && Directory.Exists(sourceDir), "build.ps1 -Test passes the source folder");
-            // No PowerShell, and no code that could send a clip anywhere (Rohan: never a permanent delete).
+            // No PowerShell, and no code that could send a clip anywhere (the maintainer: never a permanent delete).
             var banned = new[] { "powershell", "pwsh", ".ps1", "ExecutionPolicy", "EncodedCommand", "SHFileOperation", "FOF_", "IFileOperation", "recycle" };
             int files = 0;
             foreach (var file in Directory.GetFiles(sourceDir, "*.cs"))

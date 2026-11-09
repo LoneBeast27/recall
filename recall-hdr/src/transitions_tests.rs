@@ -1,4 +1,4 @@
-//! The transition matrix (rival-fixes lane 6, Rohan 2026-11-06: "emphasize on behaviour of
+//! The transition matrix (rival-fixes lane 6, the maintainer 2026-11-06: "emphasize on behaviour of
 //! cases like alt tabbing, transition of games etc"). One test per row of SPEC.md section 6,
 //! driven through `transitions_sim::Sim` (the controller's pure pieces in pump order, with
 //! injected time and window state). Each test states the expected behaviour first; the
