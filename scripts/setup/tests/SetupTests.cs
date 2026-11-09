@@ -45,6 +45,9 @@ namespace Recall.Setup.Tests
             Run("sandbox update while recording: one save_first quit, recorder + record_start + app --resume", UpdateWhileRecording);
             Run("sandbox update that fails: settings restored, old pair reopened, recording recovered", UpdateRollsBack);
             Run("an update that cannot be undone yet leaves Recall closed and says so", UpdateNotReopenedSaysSo);
+            Run("a lock file a power cut left is not a lock", StaleLockFileIsNotALock);
+            Run("a failing settings backup still reopens Recall and tells it", BackupFailureStillReopens);
+            Run("a failure after the swap keeps the update and reopens Recall", FailureAfterSwapStillReopens);
             Console.WriteLine(passed + " passed, " + failed + " failed");
             return failed == 0 ? 0 : 1;
         }

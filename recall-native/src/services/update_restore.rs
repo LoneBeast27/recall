@@ -80,10 +80,25 @@ pub fn on_resume_start(resume_file: &Path) {
     let Some(updates) = crate::update::resume::updates_dir() else { return };
     let Some(state) = crate::update::Resume::read(resume_file, &updates) else { return };
     let (Some(backup), Some(roots)) = (state.config_backup.as_deref(), Roots::here()) else { return };
-    let notes = restore_from(Path::new(backup), &roots, std::time::SystemTime::now());
+    let Some(backup) = backup_in(Path::new(backup), &updates) else {
+        crate::trace::player_log("update restore", serde_json::json!({ "refused": backup }));
+        return;
+    };
+    let notes = restore_from(&backup, &roots, std::time::SystemTime::now());
     if let Ok(mut all) = NOTES.lock() {
         all.extend(notes);
     }
+}
+
+/// The backup the resume file names, only when it is a `config-backup-*` folder directly in the
+/// updates folder (the file is written by Setup, but read here: never a path elsewhere).
+pub fn backup_in(backup: &Path, updates: &Path) -> Option<PathBuf> {
+    let name = backup.file_name()?.to_string_lossy().into_owned();
+    if !name.starts_with("config-backup-") {
+        return None;
+    }
+    let (dir, parent) = (std::fs::canonicalize(backup).ok()?, std::fs::canonicalize(updates).ok()?);
+    (dir.parent() == Some(parent.as_path()) && dir.is_dir()).then_some(dir)
 }
 
 /// The restore notes, once.
@@ -119,5 +134,21 @@ mod tests {
         let kept = std::fs::read_dir(roots.roaming.join("Recall")).unwrap().flatten().any(|e| e.file_name().to_string_lossy().starts_with("library.json.bad-"));
         assert!(kept, "the damaged file is kept");
         assert!(restore_from(&backup, &roots, std::time::SystemTime::now()).is_empty(), "nothing left to restore");
+    }
+
+    #[test]
+    fn only_a_config_backup_in_the_updates_folder_is_used() {
+        let root = tempfile::tempdir().unwrap();
+        let updates = root.path().join("updates");
+        let good = updates.join("config-backup-0.1.0-20261110-120000");
+        let other = root.path().join("config-backup-0.1.0-20261110-120000");
+        let named = updates.join("download");
+        for d in [&good, &other, &named] {
+            std::fs::create_dir_all(d).unwrap();
+        }
+        assert_eq!(backup_in(&good, &updates), Some(std::fs::canonicalize(&good).unwrap()));
+        assert_eq!(backup_in(&other, &updates), None, "outside the updates folder");
+        assert_eq!(backup_in(&named, &updates), None, "not a config backup");
+        assert_eq!(backup_in(&updates.join("config-backup-x").join(".."), &updates), None, "no dot tricks");
     }
 }

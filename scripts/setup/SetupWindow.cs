@@ -360,7 +360,8 @@ namespace Recall.Setup
                 primary.Text = preview ? "Done" : updateMode ? "Open Recall" : "Continue setup";
                 cancel.Hide();
                 complete = true;
-                if (ResumedUpdateDone()) return;
+                // A note (something after the swap failed) stays on screen; a clean update closes.
+                if (warning == null && ResumedUpdateDone()) return;
             }
             catch (SetupRestartRequired error)
             {

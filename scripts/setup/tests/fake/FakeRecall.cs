@@ -79,7 +79,7 @@ namespace Recall.Setup.Fake
         private static void OnQuit(string line, bool longOn, string longPath)
         {
             var touch = Environment.GetEnvironmentVariable("FAKE_TOUCH");
-            if (!string.IsNullOrEmpty(touch)) File.WriteAllText(touch, "written by the recorder after the backup");
+            if (!string.IsNullOrEmpty(touch)) File.WriteAllText(touch, Environment.GetEnvironmentVariable("FAKE_TOUCH_TEXT") ?? "written by the recorder at its quit");
             if (longOn && line.Contains("\"save_first\":true") && Environment.GetEnvironmentVariable("FAKE_FINALIZE") == "1"
                 && File.Exists(longPath + ".part"))
                 File.Move(longPath + ".part", longPath);
