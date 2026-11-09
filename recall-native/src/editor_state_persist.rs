@@ -4,13 +4,13 @@ use super::EditorState;
 use crate::edit_model::EditPlan;
 use crate::{
     backend::ExportSummary,
-    edit_model::ExportMode,
+    edit_model::{ExportMode, ExportPriority},
     worker::{Job, Workers},
 };
 
 /// The Export button's text while an export runs.
-pub(crate) fn export_label(lossless: bool, fps: u32, progress: Option<f32>) -> String {
-    let what = if lossless { "Exporting".to_owned() } else { format!("Exporting at {fps} fps") };
+pub(crate) fn export_label(fps: Option<u32>, progress: Option<f32>) -> String {
+    let what = fps.map_or_else(|| "Exporting".to_owned(), |fps| format!("Exporting at {fps} fps"));
     match progress {
         Some(share) => format!("{what}… {}%", (share * 100.0).floor() as u32),
         None => format!("{what}…"),
@@ -96,6 +96,7 @@ impl EditorState {
         if settings.mode == ExportMode::Lossless {
             settings.max_bytes = None;
             settings.height = None;
+            settings.priority = ExportPriority::Manual;
         }
         settings
     }
@@ -108,13 +109,14 @@ impl EditorState {
     /// The Export button while it runs: the engine's progress when it reports it (frame rate
     /// only for a re-encode; a stream copy keeps the recorded frames).
     pub fn export_label(&self) -> String {
-        export_label(self.lossless(), self.fps, crate::backend::export_progress())
+        let fixed_fps = (!self.lossless() && self.export_settings.active_priority() != ExportPriority::Detail).then_some(self.fps);
+        export_label(fixed_fps, crate::backend::export_progress())
     }
 
     /// The output frame size: the source's for lossless, else after the Resolution choice.
     pub fn export_size(&self) -> Option<(u32, u32)> {
         let info = self.info.as_ref()?;
-        Some(if self.lossless() { (info.width, info.height) } else { crate::services::pre_encode_room::output_dims(info.width, info.height, self.export_settings.height) })
+        Some(if self.lossless() { (info.width, info.height) } else { crate::services::pre_encode_room::output_dims(info.width, info.height, self.export_settings.output_height_limit()) })
     }
 
     /// The plan the engine gets: "Mix tracks" filled in from the remembered default when these
@@ -293,6 +295,13 @@ impl EditorState {
     pub fn set_max_bytes(&mut self, max_bytes: Option<u64>) {
         if self.export_settings.max_bytes != max_bytes {
             self.export_settings.max_bytes = max_bytes;
+            self.touch();
+        }
+    }
+
+    pub fn set_export_priority(&mut self, priority: ExportPriority) {
+        if self.export_settings.priority != priority {
+            self.export_settings.priority = priority;
             self.touch();
         }
     }

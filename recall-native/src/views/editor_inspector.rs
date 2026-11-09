@@ -3,13 +3,13 @@
 //! output summary and the Export footer. The listen-only lane controls left of the timeline
 //! (`timeline_listen.rs`) change the preview only.
 use gpui::{
-    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, Window, canvas, div,
+    AnyElement, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, Window, canvas, div,
     prelude::*, px,
 };
 
 use super::{INSPECTOR_W, PANEL_MIN_H, TWO_COLUMNS_W, track_name};
 use crate::{
-    edit_model::{AudioOutput, ClipInfo, ExportMode},
+    edit_model::{AudioOutput, ClipInfo, ExportMode, ExportPriority},
     editor_state::{Drag, FPS_PRESETS, GAIN_MAX, GAIN_MIN, timecode},
     root::Root,
     services::library,
@@ -205,20 +205,27 @@ impl Root {
         let info = self.ed.info.clone();
         let kept = self.ed.plan.duration();
         let audio_note = info.as_ref().map_or_else(String::new, |i| self.export_audio_note(i));
-        let mut track = ui::segment_track();
+        let priority = self.ed.export_settings.active_priority();
+        let automatic = priority != ExportPriority::Manual;
+        let mut track = ui::segment_track().when(automatic, |d| d.opacity(0.4));
         for preset in FPS_PRESETS {
-            track = track.child(ui::segment(("fps", preset as usize), preset.to_string(), !custom && fps == preset).on_click(cx.listener(move |this, _, _, cx| {
-                this.fps_custom = false;
-                this.ed.set_fps(preset);
-                cx.notify();
-            })));
+            track = track.child(ui::segment(("fps", preset as usize), preset.to_string(), !custom && fps == preset)
+                .child(crate::trace::target(format!("export-fps-{preset}")))
+                .when(automatic, |d| d.cursor(CursorStyle::Arrow))
+                .when(!automatic, |d| d.on_click(cx.listener(move |this, _, _, cx| {
+                    this.fps_custom = false;
+                    this.ed.set_fps(preset);
+                    cx.notify();
+                }))));
         }
-        track = track.child(ui::segment("fps-custom", "Custom", custom).on_click(cx.listener(|this, _, window, cx| {
-            this.fps_custom = true;
-            this.fps_field.set(this.ed.fps.to_string());
-            window.focus(&this.fps_field.focus);
-            cx.notify();
-        })));
+        track = track.child(ui::segment("fps-custom", "Custom", custom)
+            .when(automatic, |d| d.cursor(CursorStyle::Arrow))
+            .when(!automatic, |d| d.on_click(cx.listener(|this, _, window, cx| {
+                this.fps_custom = true;
+                this.fps_field.set(this.ed.fps.to_string());
+                window.focus(&this.fps_field.focus);
+                cx.notify();
+            }))));
         let lossless = self.ed.lossless();
         let height = self.ed.export_settings.height;
         let cap = self.ed.export_settings.max_bytes;
@@ -246,20 +253,42 @@ impl Root {
         } else {
             "Every track is its own track in the file, nothing mixed."
         };
-        let mut sizes = ui::segment_track();
+        let mut sizes = ui::segment_track().when(automatic, |d| d.opacity(0.4));
         for (label, value) in [("Original", None), ("1080p", Some(1080u32)), ("720p", Some(720u32))] {
-            sizes = sizes.child(ui::segment(SharedString::from(format!("h-{label}")), label, height == value).on_click(cx.listener(move |this, _, _, cx| {
-                this.ed.set_height(value);
-                cx.notify();
-            })));
+            sizes = sizes.child(ui::segment(SharedString::from(format!("h-{label}")), label, height == value)
+                .child(crate::trace::target(format!("export-resolution-{label}")))
+                .when(automatic, |d| d.cursor(CursorStyle::Arrow))
+                .when(!automatic, |d| d.on_click(cx.listener(move |this, _, _, cx| {
+                    this.ed.set_height(value);
+                    cx.notify();
+                }))));
         }
         let mut caps = ui::segment_track();
         for (label, value) in [("No limit", None), ("10 MB", Some(10_000_000u64)), ("50 MB", Some(50_000_000u64)), ("500 MB", Some(500_000_000u64))] {
-            caps = caps.child(ui::segment(SharedString::from(format!("cap-{label}")), label, cap == value).on_click(cx.listener(move |this, _, _, cx| {
+            let id = format!("cap-{label}");
+            caps = caps.child(ui::segment(SharedString::from(id.clone()), label, cap == value).child(crate::trace::target(id)).on_click(cx.listener(move |this, _, _, cx| {
                 this.ed.set_max_bytes(value);
                 cx.notify();
             })));
         }
+        let mut priorities = ui::segment_track();
+        for (label, value) in [("Motion", ExportPriority::Motion), ("Detail", ExportPriority::Detail), ("Manual", ExportPriority::Manual)] {
+            let id = format!("fit-{label}");
+            priorities = priorities.child(ui::segment(SharedString::from(id.clone()), label, priority == value)
+                .child(crate::trace::target(id))
+                .on_click(cx.listener(move |this, _, _, cx| {
+                    this.ed.set_export_priority(value);
+                    cx.notify();
+                })));
+        }
+        let fit_note = match priority {
+            ExportPriority::Motion => format!("Auto fit keeps {fps} fps and chooses resolution."),
+            ExportPriority::Detail => format!("Auto fit can step down from {fps} fps to keep more detail."),
+            ExportPriority::Manual => "Keeps the chosen resolution and FPS. The cap controls compression.".into(),
+        };
+        let dimensions = self.ed.export_size().map_or_else(String::new, |(w, h)| {
+            if priority == ExportPriority::Manual { format!("{w} × {h}") } else { format!("Up to {w} × {h}") }
+        });
         let field = |label: &str, control: gpui::AnyElement| {
             div()
                 .flex()
@@ -286,9 +315,11 @@ impl Root {
             }
         } else {
             column = column
+                .child(field("Size limit", caps.into_any_element()))
+                .when(cap.is_some(), |d| d.child(field("Fit priority", priorities.into_any_element()).child(note(fit_note))))
                 .child(
                     field("Frame rate", track.into_any_element())
-                        .when(custom, |d| {
+                        .when(!automatic && custom, |d| {
                             d.child(
                                 div()
                                     .h(px(30.))
@@ -307,10 +338,10 @@ impl Root {
                                     .child(div().text_color(c(theme::TERTIARY)).child("fps")),
                             )
                         })
-                        .child(note(format!("Constant {fps} fps. Gaps hold the last captured frame."))),
+                        .when(!automatic, |d| d.child(note(format!("Constant {fps} fps. Gaps hold the last captured frame.")))),
                 )
-                .child(field("Resolution", sizes.into_any_element()))
-                .child(field("Size limit", caps.into_any_element()));
+                .child(field("Resolution", sizes.into_any_element())
+                    .when(automatic, |d| d.child(note("Choose Manual to change frame rate or resolution.".into()))));
         }
         column
             .child(
@@ -320,7 +351,7 @@ impl Root {
                     .gap(px(6.))
                     .text_size(px(12.))
                     .child(detail_row("Length", format!("{} of {}", timecode(kept), timecode(self.ed.duration())), true))
-                    .child(detail_row("Size", self.ed.export_size().map_or_else(String::new, |(w, h)| format!("{w} × {h}")), false))
+                    .child(detail_row("Resolution", dimensions, false))
                     .child(detail_row("Audio", audio_note, false))
                     .child(detail_row(
                         "Saves to",
@@ -384,7 +415,9 @@ impl Root {
                             .flex()
                             .flex_col()
                             .child(div().font_weight(FontWeight::MEDIUM).child(match summary.fps { Some(fps) => format!("Exported · {fps} fps"), None => "Exported · lossless".to_owned() }))
-                            .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(format!("{} frames · {}", summary.frames, library::format_duration(summary.seconds))))
+                            .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(format!(
+                                "{:.2} MB · {} × {} · {}", summary.bytes as f64 / 1_000_000.0, summary.width, summary.height, library::format_duration(summary.seconds)
+                            )))
                             .child(div().text_size(px(11.)).text_color(c(theme::TERTIARY)).child("Drag into Discord · click to show in folder")),
                     )
                     // A press that moves becomes a file drag of the export (Discord, Explorer, chats);

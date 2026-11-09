@@ -139,9 +139,11 @@ fn lossless_export_drops_the_hidden_reencode_settings() {
     ed.export_settings.max_bytes = Some(10_000_000);
     ed.export_settings.height = Some(720);
     ed.export_settings.mode = ExportMode::Lossless;
+    ed.export_settings.priority = crate::edit_model::ExportPriority::Detail;
     let info = ed.info.clone().unwrap();
     let crate::worker::Job::Export(_, plan, _, settings) = ed.export_job(info) else { panic!("an export job") };
     assert_eq!(settings.validate(&plan), Ok(()), "{settings:?}");
+    assert_eq!(settings.priority, crate::edit_model::ExportPriority::Manual);
     assert_eq!((ed.export_settings.max_bytes, ed.export_settings.height), (Some(10_000_000), Some(720)), "switching back restores them");
 }
 
@@ -150,10 +152,10 @@ fn lossless_export_drops_the_hidden_reencode_settings() {
 #[test]
 fn the_export_button_and_size_describe_the_output() {
     use crate::editor_state::persist::export_label;
-    assert_eq!(export_label(false, 60, None), "Exporting at 60 fps…");
-    assert_eq!(export_label(false, 60, Some(0.427)), "Exporting at 60 fps… 42%");
-    assert_eq!(export_label(true, 60, Some(0.5)), "Exporting… 50%");
-    assert_eq!(export_label(true, 60, None), "Exporting…");
+    assert_eq!(export_label(Some(60), None), "Exporting at 60 fps…");
+    assert_eq!(export_label(Some(60), Some(0.427)), "Exporting at 60 fps… 42%");
+    assert_eq!(export_label(None, Some(0.5)), "Exporting… 50%");
+    assert_eq!(export_label(None, None), "Exporting…");
     let mut ed = editor();
     assert_eq!(ed.export_size(), Some((2560, 1440)));
     ed.export_settings.height = Some(720);
