@@ -19,6 +19,9 @@ mod win_volume;
 #[allow(dead_code)]
 #[path = "../../recall/src/file_id.rs"]
 mod file_id;
+#[allow(dead_code)]
+#[path = "../../recall/src/same_bytes.rs"]
+mod same_bytes;
 #[path = "../src/backend.rs"]
 #[allow(dead_code)]
 mod backend;
