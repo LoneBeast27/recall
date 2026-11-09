@@ -5,6 +5,10 @@ param(
     [Parameter(Mandatory=$true, ParameterSetName='Release')][string]$PayloadDirectory,
     [Parameter(ParameterSetName='Release')][string]$VCRedistPath,
     [Parameter(ParameterSetName='Release')][switch]$OnlineDependencies,
+    # A prebuilt (for a release: signed) RecallUninstall.exe to embed instead of compiling one.
+    [Parameter(ParameterSetName='Release')][string]$UninstallerPath,
+    # Compile only RecallUninstall.exe (the release workflow signs it before Setup embeds it).
+    [Parameter(Mandatory=$true, ParameterSetName='Uninstaller')][switch]$UninstallerOnly,
     [string]$OutputPath,
     # Shown in Apps & Features (DisplayVersion); release.ps1 sets RECALL_VERSION.
     [ValidatePattern('^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$')][string]$DisplayVersion = $(if ($env:RECALL_VERSION) { $env:RECALL_VERSION } else { '0.0.0' })
@@ -16,8 +20,9 @@ $compiler = Join-Path $env:windir 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
 $nice = Join-Path $env:USERPROFILE '.claude\tools\nice-build.ps1'
 $isPreview = $PSCmdlet.ParameterSetName -eq 'Preview'
 $isTest = $PSCmdlet.ParameterSetName -eq 'Test'
+$isUninstaller = $PSCmdlet.ParameterSetName -eq 'Uninstaller'
 if (!$OutputPath) {
-    $name = if ($isTest) { 'RecallSetupTests.exe' } elseif ($isPreview) { 'RecallSetupPreview.exe' } else { 'RecallSetup.exe' }
+    $name = if ($isTest) { 'RecallSetupTests.exe' } elseif ($isPreview) { 'RecallSetupPreview.exe' } elseif ($isUninstaller) { 'RecallUninstall.exe' } else { 'RecallSetup.exe' }
     $OutputPath = Join-Path $repo "dist\setup\$name"
 }
 $OutputPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputPath)
@@ -72,6 +77,11 @@ try {
         if ($LASTEXITCODE -ne 0) { throw "Recall Setup tests failed ($LASTEXITCODE)" }
         return
     }
+    if ($isUninstaller) {
+        Invoke-Compiler ($common + $fonts + @('/target:winexe', '/define:UNINSTALLER', "/out:$OutputPath", "/win32icon:$assets\recall.ico") + $sources)
+        Get-Item -LiteralPath $OutputPath
+        return
+    }
     if ($isPreview) {
         $arguments += '/define:PREVIEW'
     } else {
@@ -104,8 +114,15 @@ try {
         }
         # The install logic is Setup's own C# (Setup*.cs); install.ps1 and its helpers stay dev tools.
         # The small uninstaller Setup copies into the install folder: the same sources, no payload.
-        $uninstaller = Join-Path $work 'RecallUninstall.exe'
-        Invoke-Compiler ($common + $fonts + @('/target:winexe', '/define:UNINSTALLER', "/out:$uninstaller", "/win32icon:$assets\recall.ico") + $sources)
+        if ($UninstallerPath) {
+            $uninstaller = (Resolve-Path -LiteralPath $UninstallerPath).ProviderPath
+            if ((Get-Item -LiteralPath $uninstaller).VersionInfo.FileVersion -ne "$DisplayVersion.0") {
+                throw "The uninstaller $uninstaller is not version $DisplayVersion."
+            }
+        } else {
+            $uninstaller = Join-Path $work 'RecallUninstall.exe'
+            Invoke-Compiler ($common + $fonts + @('/target:winexe', '/define:UNINSTALLER', "/out:$uninstaller", "/win32icon:$assets\recall.ico") + $sources)
+        }
         $arguments += "/resource:$uninstaller,Recall.Uninstaller.exe"
         Copy-PackageFile (Join-Path $source 'recall-native.exe') (Join-Path $package 'target-gpui\release\recall-native.exe')
         foreach ($name in 'recall.exe','recall-hdr.exe','recall-overlay.exe') {

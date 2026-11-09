@@ -1,15 +1,24 @@
-# Release build: the five crates (recall, recall-hdr, recall-nvidia, recall-overlay,
-# recall-native) and the C# Setup, on a GitHub-hosted runner. CPU-only tests run first (tests
-# that need NVENC or a live game are #[ignore]d). The unsigned bundle is always uploaded.
+# Release build: the Recall executables (recall-native, recall, recall-hdr, recall-overlay), the
+# uninstaller and the C# Setup, on a GitHub-hosted runner. CPU-only tests run first (tests that
+# need NVENC, an audio device or a live game are #[ignore]d).
 #
-# Code signing (CODE_SIGNING_POLICY.md) runs only when the SIGNPATH_API_TOKEN secret is set,
-# in a job bound to the `release-signing` environment (configure required reviewers there:
-# that is the manual approval gate). Without the secret the signing job is skipped and the
-# workflow still succeeds. Repository variables used by signing:
+# Code signing (CODE_SIGNING_POLICY.md) runs only when the SIGNPATH_API_TOKEN secret is set.
+# Every shipped executable is signed, not only Setup, in this order:
+#   1. build        tests, release builds, the uninstaller; uploads the unsigned payload
+#   2. sign-payload SignPath signs the five payload exes          (approval: release-signing)
+#   3. setup        Setup is built around the SIGNED payload and uninstaller
+#   4. sign-setup   SignPath signs RecallSetup.exe                (approval: release-signing)
+# Configure required reviewers on the `release-signing` environment: that is the manual approval
+# for each release (one approval per signing job). Without the secret both signing jobs are
+# skipped, Setup is built around the unsigned payload, and the workflow still succeeds.
+# Repository variables used by signing:
 #   SIGNPATH_ORGANIZATION_ID (required), SIGNPATH_PROJECT_SLUG (default "recall"),
-#   SIGNPATH_SIGNING_POLICY_SLUG (default "release-signing").
+#   SIGNPATH_PAYLOAD_POLICY_SLUG / SIGNPATH_SETUP_POLICY_SLUG (default "release-signing"),
+#   SIGNPATH_PAYLOAD_CONFIG_SLUG (default "payload"), SIGNPATH_SETUP_CONFIG_SLUG (default "setup").
+# The SignPath artifact configurations are in .signpath/.
 #
-# Every third-party action is pinned to a full commit SHA.
+# Every executable is checked for ProductName "Recall" and the same version before signing.
+# A tag build must be on main. Every third-party action is pinned to a full commit SHA.
 name: release
 
 on:
@@ -41,8 +50,8 @@ jobs:
     outputs:
       signing: ${{ steps.gate.outputs.configured }}
       version: ${{ steps.version.outputs.version }}
-      bundle: ${{ steps.bundle.outputs.name }}
-      setup-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+      bundle: ${{ steps.version.outputs.bundle }}
+      payload-artifact-id: ${{ steps.payload.outputs.artifact-id }}
     env:
       CARGO_TERM_COLOR: always
       FFMPEG_URL: https://github.com/GyanD/codexffmpeg/releases/download/7.1.1/ffmpeg-7.1.1-full_build-shared.zip
@@ -53,6 +62,8 @@ jobs:
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
+          # The tag check below needs main's history.
+          fetch-depth: 0
 
       - name: Signing gate
         id: gate
@@ -72,8 +83,15 @@ jobs:
           if ($version -and $version -notmatch '^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$') {
             throw "Not a major.minor.patch version: '$version'"
           }
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            # The updater only offers a tag that is on main; refuse to build one that is not.
+            git merge-base --is-ancestor $env:GITHUB_SHA origin/main
+            if ($LASTEXITCODE -ne 0) { throw "Tag $env:GITHUB_REF_NAME ($env:GITHUB_SHA) is not on main." }
+          }
           if ($version) { Add-Content -LiteralPath $env:GITHUB_ENV -Value "RECALL_VERSION=$version" }
+          $suffix = if ($version) { $version } else { "dev-$($env:GITHUB_SHA.Substring(0, 12))" }
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "bundle=recall-release-$suffix"
           "Version: $(if ($version) { $version } else { '(unversioned)' })"
 
       - name: Rust toolchain
@@ -139,22 +157,117 @@ jobs:
           cargo build --release --locked --manifest-path recall-native\Cargo.toml
           if ($LASTEXITCODE -ne 0) { throw "app release build failed ($LASTEXITCODE)" }
 
-      - name: Build Setup
-        id: bundle
+      - name: Assemble and check the payload
+        id: stage
         env:
-          SIGNING: ${{ steps.gate.outputs.configured }}
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          $suffix = if ($env:RECALL_VERSION) { $env:RECALL_VERSION } else { "dev-$($env:GITHUB_SHA.Substring(0, 12))" }
-          $name = "recall-release-$suffix"
-          $out = Join-Path $env:RUNNER_TEMP $name
-          $payload = Join-Path $out 'recall-app'
+          $payload = Join-Path $env:RUNNER_TEMP 'payload'
           New-Item -ItemType Directory -Path $payload | Out-Null
           foreach ($exe in 'target-gpui\release\recall-native.exe', 'target-dev\release\recall-hdr.exe',
                            'target-dev\release\recall.exe', 'target-dev\release\recall-overlay.exe') {
             Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE $exe) -Destination $payload
           }
+          & .\scripts\setup\build.ps1 -UninstallerOnly -OutputPath (Join-Path $payload 'RecallUninstall.exe') | Out-Null
+          & .\scripts\setup\check-versions.ps1 -Directory $payload -Version $env:VERSION -Count 5
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "dir=$payload"
+
+      - name: Upload the payload (unsigned)
+        id: payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: recall-payload-unsigned
+          path: ${{ steps.stage.outputs.dir }}
+          if-no-files-found: error
+          retention-days: 7
+
+  sign-payload:
+    needs: build
+    if: needs.build.outputs.signing == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    # Required reviewers on this environment approve every signing request.
+    environment: release-signing
+    permissions:
+      contents: read
+      # SignPath fetches the unsigned artifact through the Actions API.
+      actions: read
+    steps:
+      - name: Check out (the verification script)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Submit the signing request (the five payload exes)
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
+        with:
+          api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+          organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
+          project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'recall' }}
+          signing-policy-slug: ${{ vars.SIGNPATH_PAYLOAD_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_PAYLOAD_CONFIG_SLUG || 'payload' }}
+          github-artifact-id: ${{ needs.build.outputs.payload-artifact-id }}
+          wait-for-completion: true
+          output-artifact-directory: ${{ runner.temp }}\payload-signed
+
+      - name: Verify every signature and version
+        env:
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          & .\scripts\setup\check-versions.ps1 -Directory (Join-Path $env:RUNNER_TEMP 'payload-signed') -Version $env:VERSION -Count 5 -Signed
+
+      - name: Upload the signed payload
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: recall-payload-signed
+          path: ${{ runner.temp }}\payload-signed
+          if-no-files-found: error
+          retention-days: 7
+
+  setup:
+    needs: [build, sign-payload]
+    # Runs after the payload is signed, or straight after build when signing is not configured.
+    if: >-
+      always() && needs.build.result == 'success' &&
+      (needs.sign-payload.result == 'success' || (needs.sign-payload.result == 'skipped' && needs.build.outputs.signing != 'true'))
+    runs-on: windows-latest
+    timeout-minutes: 30
+    outputs:
+      setup-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
+    env:
+      RECALL_VERSION: ${{ needs.build.outputs.version }}
+      SIGNING: ${{ needs.build.outputs.signing }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Fetch the payload
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: ${{ needs.build.outputs.signing == 'true' && 'recall-payload-signed' || 'recall-payload-unsigned' }}
+          path: ${{ runner.temp }}\payload
+
+      - name: Build Setup around the payload
+        id: bundle
+        env:
+          BUNDLE: ${{ needs.build.outputs.bundle }}
+        run: |
+          $payload = Join-Path $env:RUNNER_TEMP 'payload'
+          $signedArgs = if ($env:SIGNING -eq 'true') { @{ Signed = $true } } else { @{} }
+          & .\scripts\setup\check-versions.ps1 -Directory $payload -Version $env:RECALL_VERSION -Count 5 @signedArgs
+          $out = Join-Path $env:RUNNER_TEMP $env:BUNDLE
+          $app = Join-Path $out 'recall-app'
+          New-Item -ItemType Directory -Path $app | Out-Null
+          Copy-Item -Path (Join-Path $payload '*.exe') -Destination $app
           $setup = Join-Path $out 'RecallSetup.exe'
-          & .\scripts\setup\build.ps1 -PayloadDirectory $payload -OnlineDependencies -OutputPath $setup
+          $uninstaller = Join-Path $payload 'RecallUninstall.exe'
+          & .\scripts\setup\build.ps1 -PayloadDirectory $payload -UninstallerPath $uninstaller -OnlineDependencies -OutputPath $setup | Out-Null
+          $setupOnly = Join-Path $env:RUNNER_TEMP 'setup-unsigned'
+          New-Item -ItemType Directory -Path $setupOnly | Out-Null
+          Copy-Item -LiteralPath $setup -Destination $setupOnly
+          & .\scripts\setup\check-versions.ps1 -Directory $setupOnly -Version $env:RECALL_VERSION -Count 1
           $sha = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
           Set-Content -LiteralPath (Join-Path $out 'SHA256SUMS.txt') -Value "$sha  RecallSetup.exe" -Encoding ascii
           Set-Content -LiteralPath (Join-Path $out 'SOURCE-REVISION.txt') -Value $env:GITHUB_SHA -Encoding ascii
@@ -162,18 +275,14 @@ jobs:
           if ($env:SIGNING -eq 'true') {
             Set-Content -LiteralPath (Join-Path $out 'SIGNPATH_CONFIGURED') -Value 'signing required' -Encoding ascii
           }
-          $setupOnly = Join-Path $env:RUNNER_TEMP 'setup-unsigned'
-          New-Item -ItemType Directory -Path $setupOnly | Out-Null
-          Copy-Item -LiteralPath $setup -Destination $setupOnly
-          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "name=$name"
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "dir=$out"
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "setup-dir=$setupOnly"
-          "Built $name ($sha)"
+          "Built $env:BUNDLE ($sha)"
 
-      - name: Upload the bundle (unsigned)
+      - name: Upload the bundle (Setup unsigned)
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ steps.bundle.outputs.name }}
+          name: ${{ needs.build.outputs.bundle }}
           path: ${{ steps.bundle.outputs.dir }}
           if-no-files-found: error
           retention-days: 30
@@ -187,31 +296,34 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  sign:
-    needs: build
+  sign-setup:
+    needs: [build, setup]
     if: needs.build.outputs.signing == 'true'
     runs-on: windows-latest
     timeout-minutes: 60
-    # Required reviewers on this environment approve every signing request.
     environment: release-signing
     permissions:
       contents: read
-      # SignPath fetches the unsigned artifact through the Actions API.
       actions: read
     steps:
-      - name: Submit the signing request
-        id: signpath
-        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092
+      - name: Check out (the verification script)
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Submit the signing request (Setup)
+        uses: signpath/github-action-submit-signing-request@f6d04783b4569d051e0c80105fe66e82819d0092 # v3.0
         with:
           api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
           organization-id: ${{ vars.SIGNPATH_ORGANIZATION_ID }}
           project-slug: ${{ vars.SIGNPATH_PROJECT_SLUG || 'recall' }}
-          signing-policy-slug: ${{ vars.SIGNPATH_SIGNING_POLICY_SLUG || 'release-signing' }}
-          github-artifact-id: ${{ needs.build.outputs.setup-artifact-id }}
+          signing-policy-slug: ${{ vars.SIGNPATH_SETUP_POLICY_SLUG || 'release-signing' }}
+          artifact-configuration-slug: ${{ vars.SIGNPATH_SETUP_CONFIG_SLUG || 'setup' }}
+          github-artifact-id: ${{ needs.setup.outputs.setup-artifact-id }}
           wait-for-completion: true
           output-artifact-directory: ${{ runner.temp }}\signed
 
-      - name: Fetch the unsigned bundle
+      - name: Fetch the bundle
         uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
         with:
           name: ${{ needs.build.outputs.bundle }}
@@ -219,28 +331,17 @@ jobs:
 
       - name: Verify the signature and assemble the signed bundle
         env:
-          SIGNED: ${{ runner.temp }}\signed
-          BUNDLE: ${{ runner.temp }}\bundle
+          VERSION: ${{ needs.build.outputs.version }}
         run: |
-          $signed = Join-Path $env:SIGNED 'RecallSetup.exe'
-          if (!(Test-Path -LiteralPath $signed -PathType Leaf)) { throw "SignPath returned no RecallSetup.exe in $env:SIGNED" }
-          $signature = Get-AuthenticodeSignature -LiteralPath $signed
-          "Signature: $($signature.Status) | $($signature.SignerCertificate.Subject) | timestamp: $($signature.TimeStamperCertificate.Subject)"
-          if ($signature.Status -ne 'Valid') { throw "The signed Setup does not verify: $($signature.Status) $($signature.StatusMessage)" }
-          if (!$signature.TimeStamperCertificate) { throw 'The signed Setup carries no timestamp.' }
-          if ($signature.SignerCertificate.Subject -notmatch 'SignPath Foundation') {
-            throw "Unexpected signer: $($signature.SignerCertificate.Subject)"
-          }
-          $tool = Get-ChildItem -Path "${env:ProgramFiles(x86)}\Windows Kits\10\bin\*\x64\signtool.exe" -File -ErrorAction SilentlyContinue |
-            Sort-Object { [version]$_.Directory.Parent.Name } -Descending | Select-Object -First 1
-          if ($tool) {
-            & $tool.FullName verify /pa /all /tw $signed
-            if ($LASTEXITCODE -ne 0) { throw "SignTool verification failed ($LASTEXITCODE)." }
-          }
-          Copy-Item -LiteralPath $signed -Destination (Join-Path $env:BUNDLE 'RecallSetup.exe') -Force
+          $signedDir = Join-Path $env:RUNNER_TEMP 'signed'
+          $bundle = Join-Path $env:RUNNER_TEMP 'bundle'
+          & .\scripts\setup\check-versions.ps1 -Directory $signedDir -Version $env:VERSION -Count 1 -Signed
+          & .\scripts\setup\check-versions.ps1 -Directory (Join-Path $bundle 'recall-app') -Version $env:VERSION -Count 5 -Signed
+          $signed = Join-Path $signedDir 'RecallSetup.exe'
+          Copy-Item -LiteralPath $signed -Destination (Join-Path $bundle 'RecallSetup.exe') -Force
           $sha = (Get-FileHash -LiteralPath $signed -Algorithm SHA256).Hash.ToLowerInvariant()
-          Set-Content -LiteralPath (Join-Path $env:BUNDLE 'SHA256SUMS.txt') -Value "$sha  RecallSetup.exe" -Encoding ascii
-          Set-Content -LiteralPath (Join-Path $env:BUNDLE 'SIGNPATH_CONFIGURED') -Value 'signing required' -Encoding ascii
+          Set-Content -LiteralPath (Join-Path $bundle 'SHA256SUMS.txt') -Value "$sha  RecallSetup.exe" -Encoding ascii
+          Set-Content -LiteralPath (Join-Path $bundle 'SIGNPATH_CONFIGURED') -Value 'signing required' -Encoding ascii
           "Signed Setup: $sha"
 
       - name: Upload the signed bundle
