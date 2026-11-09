@@ -35,6 +35,9 @@ impl Controller {
             hotkey_problems: &self.hotkey_problems,
         });
         crate::record_quit_wait::merge_fields(&mut status, finishing);
+        if crate::record_quit_wait::sign_out_only(self.quit, &self.quit_wait) {
+            status["quit_for_sign_out"] = json!(true);
+        }
         if let Some(owner) = self.setup_owner {
             status["setup_owner"] = json!(owner);
         }
