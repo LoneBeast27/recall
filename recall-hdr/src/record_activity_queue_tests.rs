@@ -210,15 +210,15 @@ fn an_engine_rejection_moves_no_window() {
 }
 
 #[test]
-fn a_save_writing_across_a_sleep_gets_a_fresh_window_on_resume() {
+fn a_save_writing_across_a_sleep_keeps_its_window_on_the_awake_clock() {
     let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let mut a = EngineActivity::default();
     a.save_sent(t0);
     a.on_engine_event(&writing(5_000), 0.0, t0 + s(10));
-    // The PC slept at 20 s; it wakes at 20 s + 1 h (the clock ran on).
-    let woke = t0 + s(3620);
-    a.resumed(woke);
+    // The PC slept at 20 s for an hour: the awake clock stood still (it used to need a
+    // `resumed` re-stamp because the clock ran on).
+    let woke = t0 + s(20);
     assert!(a.saves_writing(woke), "a resume restart waits for the save being written");
     a.on_engine_event(&writing(6_000), 0.0, woke + s(5));
     assert!(a.saves_writing(woke + s(100)));
