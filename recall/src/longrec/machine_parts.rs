@@ -200,3 +200,19 @@ impl<F: SinkFactory> Recorder<F> {
 #[cfg(test)]
 #[path = "machine_parts_tests.rs"]
 mod tests;
+
+/// Rename a partial recording into place; `None` when that fails too.
+pub(super) fn keep_partial(part: &Path) -> Option<PathBuf> {
+    let target = crate::naming::recovered_path(part, Path::exists);
+    std::fs::rename(part, &target).ok()?;
+    // No event to carry a failure here: the kept file just stays uncounted.
+    let _ = crate::game_folder_rule::record_saved(&target, Some(part));
+    Some(target)
+}
+
+/// A game-folder marker update for `path` (`record_saved` / `record_writing`): a failure is one
+/// log line (the file stays unowned, never lost).
+pub(super) fn note(result: std::io::Result<()>, path: &Path) -> Option<Event> {
+    let e = result.err()?;
+    Some(Event::Log(format!("long recording {} not recorded in its game folder ({e}); it stays unowned", path.display())))
+}

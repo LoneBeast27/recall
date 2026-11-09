@@ -181,7 +181,16 @@ pub fn check_game_dir(clip_folder: &Path, dir: &Path) -> Result<(), GameDirProbl
 pub fn writable_game_dir(clip_folder: &str, source: &str, log: &dyn Fn(&str)) -> PathBuf {
     let out = Path::new(clip_folder);
     let dir = resolve_game_dir(clip_folder, source);
-    let why = match check_game_dir(out, &dir) {
+    let checked = check_game_dir(out, &dir);
+    for line in rule::take_notes() {
+        log(&line);
+    }
+    // Its marker could not take another clip name this run (said once in the notes): new clips
+    // go to the clip folder rather than grow or retry the marker.
+    if checked.is_ok() && rule::save_refused(&dir) {
+        return out.to_path_buf();
+    }
+    let why = match checked {
         Ok(()) => return dir,
         Err(GameDirProblem::Link) => "is a link".to_string(),
         Err(GameDirProblem::NotOurs) => "is not Recall's game folder now".to_string(),

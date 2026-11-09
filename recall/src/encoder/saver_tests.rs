@@ -545,3 +545,6 @@ fn a_game_folder_replaced_mid_run_sends_the_clip_to_the_clip_folder() {
     assert_eq!(next, text(&dir.join(file)), "the next save resolves again");
     assert!(!rule::has_marker(&game));
 }
+
+#[path = "saver_game_tests.rs"]
+mod game;

@@ -22,7 +22,8 @@ pub fn is_recall_named(name: &str) -> bool {
 }
 
 /// `clip` is Recall's recorder clip in a game folder of `folder` (`<folder>\<Game>\<clip>`): made
-/// by Recall, or saved after the folder was adopted. Looks at the disk (the marker).
+/// by Recall, or saved there by Recall after the folder was adopted (the marker's `saved` list).
+/// Looks at the disk (the marker, parsed once per version: [`marker_of`]).
 pub fn in_game_folder(clip: &Path, folder: &Path) -> bool {
     let Some(game) = clip.parent() else { return false };
     clip.file_name().is_some_and(|n| is_recall_named(&n.to_string_lossy()))
@@ -30,9 +31,37 @@ pub fn in_game_folder(clip: &Path, folder: &Path) -> bool {
             let key = folder_key(&folder.to_string_lossy());
             !key.is_empty() && folder_key(&parent.to_string_lossy()) == key
         })
-        // In an adopted folder ("Use this folder") the files that were there before stay the
-        // user's: not owned, so Delete only hides them and edits go beside, as for links.
-        && rule::game_folder_marker(game).is_some_and(|m| clip.file_name().is_some_and(|n| m.owns(&n.to_string_lossy())))
+        // In an adopted folder ("Use this folder") only the clips Recall saved there are owned;
+        // the user's files are not, so Delete only hides them and edits go beside, as for links.
+        && marker_of(game).is_some_and(|m| clip.file_name().is_some_and(|n| m.owns(&n.to_string_lossy())))
+}
+
+/// What a cached marker was read from: the marker file's size and time, and the folder's ID.
+type Version = (u64, std::time::SystemTime, Option<rule::FileId>);
+type MarkerCache = std::sync::Mutex<std::collections::HashMap<PathBuf, (Version, std::sync::Arc<rule::Marker>)>>;
+
+/// `game`'s marker when it is a game folder ([`rule::game_folder_marker`]: bound to this very
+/// folder), parsed once per version of the marker file and of the folder (a folder swapped in
+/// under the same name has another ID): a listing asks for every clip, and a marker can hold
+/// thousands of names.
+fn marker_of(game: &Path) -> Option<std::sync::Arc<rule::Marker>> {
+    static CACHE: std::sync::OnceLock<MarkerCache> = std::sync::OnceLock::new();
+    let named = game.file_name().is_some_and(|n| !rule::is_reserved(&n.to_string_lossy()));
+    let meta = std::fs::symlink_metadata(game.join(rule::MARKER)).ok()?;
+    if !named || !rule::is_plain_dir(game) || !meta.is_file() {
+        return None;
+    }
+    let version: Version = (meta.len(), meta.modified().ok()?, rule::folder_id(game));
+    let key = PathBuf::from(folder_key(&game.to_string_lossy()));
+    let cache = CACHE.get_or_init(Default::default);
+    if let Some((seen, marker)) = cache.lock().unwrap_or_else(|p| p.into_inner()).get(&key)
+        && *seen == version
+    {
+        return Some(marker.clone());
+    }
+    let marker = std::sync::Arc::new(rule::game_folder_marker(game)?);
+    cache.lock().unwrap_or_else(|p| p.into_inner()).insert(key, (version, marker.clone()));
+    Some(marker)
 }
 
 /// `path` is a linked folder in `linked`, or inside one, where that link is not the recordings
