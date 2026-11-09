@@ -51,10 +51,13 @@ pub fn sidecar_step(existing: Option<&[u8]>, next: &[u8], no_edits: bool, ours: 
 
 /// Where exports of `clip` land. With the Recall layout (recordings in `...\Recall\Raw`) every
 /// export goes to the `Edited` folder beside `Raw`; otherwise to `exports` beside the clip.
+/// A clip in a game folder (`Raw\<Game>\`, "Sort clips into game folders") exports to the same
+/// game's folder there: `Edited\<Game>\` (or `Raw\<Game>\exports\`).
 pub fn export_dir(clip: &Path, recordings: &Path) -> Option<std::path::PathBuf> {
     let raw = recordings.file_name().is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("raw"));
+    let game = clip.parent().filter(|_| crate::services::library::folders::in_game_folder(clip, recordings)).and_then(Path::file_name);
     match recordings.parent() {
-        Some(recall) if raw => Some(recall.join("Edited")),
+        Some(recall) if raw => Some(game.map_or_else(|| recall.join("Edited"), |game| recall.join("Edited").join(game))),
         _ => clip.parent().map(|folder| folder.join("exports")),
     }
 }

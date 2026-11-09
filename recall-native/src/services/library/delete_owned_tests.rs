@@ -82,3 +82,23 @@ fn a_clip_recorded_into_an_override_folder_recycles_and_a_foreign_one_does_not()
     super::super::recorded::forget(std::slice::from_ref(&recorded));
     assert!(!super::super::recorded::contains(&recorded));
 }
+
+/// "Sort clips into game folders": a recorder clip in `<recordings>\<Game>\` is Recall's own (Delete
+/// recycles it, edits sit beside it); another video in that folder stays foreign.
+#[test]
+fn a_game_folder_clip_is_recalls_own() {
+    let root = crate::test_temp::TempDir::sandbox("owned-game-folder");
+    let recordings = root.join("Recall");
+    let own = clip(&recordings.join("Rocket League"), "Rocket-League__2026-11-01__10-00-00-000__ab.mp4");
+    let other = clip(&recordings.join("Rocket League"), "holiday.mp4");
+    let folders = Folders { recordings: Some(text(&recordings)), ..Folders::default() };
+    assert!(imports::is_owned(&own, &recordings, &[]));
+    assert!(!imports::is_owned(&other, &recordings, &[]));
+    let (imported, owned) = partition_for_delete(std::slice::from_ref(&own), &folders);
+    assert_eq!((imported, owned), (Vec::<PathBuf>::new(), vec![own.clone()]));
+    assert_eq!(crate::backend::checked_export_dir(&own, &folders).unwrap(), recordings.join("Rocket League").join("exports"));
+    let listed = crate::backend::list_from(&recordings, &[], &[]).unwrap().0;
+    assert_eq!(listed.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["Rocket-League__2026-11-01__10-00-00-000__ab.mp4"], "the library finds it, and only it");
+    let roots = crate::backend::clip_roots_from(&folders);
+    assert!(roots.iter().any(|r| r.path == recordings.join("Rocket League") && !r.recursive), "its folder is watched");
+}

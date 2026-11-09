@@ -220,6 +220,7 @@ impl EnginePlanner {
 pub fn engine_settings_changed(old: &RecordingCfg, new: &RecordingCfg) -> bool {
     old.buffer_secs != new.buffer_secs
         || old.output_dir != new.output_dir
+        || old.game_folders != new.game_folders
         || old.cpu_mask != new.cpu_mask
         || old.codec != new.codec
         || old.fps != new.fps
@@ -248,6 +249,7 @@ pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&s
     let mut env = vec![
         ("RECALL_BUFFER_SECS".to_string(), Some(rec.buffer_secs.to_string())),
         ("RECALL_OUT_DIR".to_string(), Some(rec.output_dir.clone())),
+        ("RECALL_GAME_FOLDERS".to_string(), Some(if rec.game_folders { "1" } else { "0" }.to_string())),
         ("RECALL_CPU_MASK".to_string(), cpu_mask.map(str::to_owned)),
         // Quality knobs (the engine side owns their meaning).
         ("RECALL_CODEC".to_string(), Some(rec.codec.clone())),

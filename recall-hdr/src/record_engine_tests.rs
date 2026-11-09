@@ -59,6 +59,7 @@ fn only_spawn_time_keys_need_an_engine_restart() {
         RecordingCfg { buffer_secs: 60, ..base.clone() },
         RecordingCfg { audio_sources: crate::record_audio_sources::default_sources()[..1].to_vec(), ..base.clone() },
         RecordingCfg { output_dir: "D:\\c".into(), ..base.clone() },
+        RecordingCfg { game_folders: true, ..base.clone() },
     ] {
         assert!(engine_settings_changed(&base, &changed), "{changed:?}");
     }
@@ -157,6 +158,9 @@ fn engine_env_sets_or_removes_every_target_variable() {
     assert_eq!(get(&win, "RECALL_AUDIO_GAME_PID").as_deref(), Some("42"));
     assert_eq!(get(&win, "RECALL_BUFFER_SECS").as_deref(), Some("120"));
     assert_eq!(get(&win, "RECALL_OUT_DIR"), Some(rec.output_dir.clone()));
+    assert_eq!(get(&win, "RECALL_GAME_FOLDERS").as_deref(), Some("0"), "off by default, set so an inherited value cannot turn it on");
+    let sorted = engine_env(&EngineTarget::Desktop, &RecordingCfg { game_folders: true, ..rec.clone() }, None, false);
+    assert_eq!(get(&sorted, "RECALL_GAME_FOLDERS").as_deref(), Some("1"));
     let desk = engine_env(&EngineTarget::Desktop, &rec, None, false);
     assert_eq!(get(&desk, "RECALL_CPU_MASK"), None, "unapplied mask is not passed (engine would exit)");
     assert_eq!(get(&desk, "RECALL_CAPTURE_HWND"), None, "removed, not inherited");
