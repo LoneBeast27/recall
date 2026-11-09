@@ -474,3 +474,15 @@ fn the_status_says_when_a_quit_is_finishing_a_clip() {
     apply(&mut state, json!({"mod":"session","event":{"type":"status","state":"recording","finishing_clip":false}}));
     assert!(!state.snapshot.session.as_ref().unwrap().finishing_clip);
 }
+
+#[test]
+fn the_recorder_never_inherits_the_guided_setup_flag() {
+    // Setup starts only its first window with RECALL_SETUP; the recorder that window starts
+    // outlives it and opens every later window, so the flag must stop here.
+    let exe = std::path::Path::new(r"C:\Recall\recall-hdr.exe");
+    for owner in [None, Some(42)] {
+        let command = super::controller::controller_command(exe, owner, 0);
+        let removed = command.get_envs().any(|(key, value)| key.eq_ignore_ascii_case("RECALL_SETUP") && value.is_none());
+        assert!(removed, "setup owner {owner:?}");
+    }
+}
