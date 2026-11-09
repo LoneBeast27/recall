@@ -38,10 +38,7 @@ fn default_values_match_frozen_schema() {
     assert_eq!(c.behavior.debounce_ms, 400);
     assert_eq!(c.hotkey.toggle_hdr, "Ctrl+Alt+H");
     assert!(!c.startup.autostart);
-    assert_eq!(c.overrides.len(), 1);
-    assert_eq!(c.overrides[0].exe, "hdr-testcard");
-    assert_eq!(c.overrides[0].kind, RuleKind::HdrGame);
-    assert_eq!(c.overrides[0].clamp, None);
+    assert!(c.overrides.is_empty(), "no shipped entries (F-detect-6)");
 }
 
 #[test]
@@ -50,7 +47,9 @@ fn enum_tokens_match_frozen_design_snake_case() {
     // adapters bridge the frozen PascalCase enums to exactly these tokens, so
     // a user can hand-edit the config per the schema doc without a parse
     // error. Pin the wire surface so it can't silently drift.
-    let s = toml::to_string_pretty(&Config::default()).unwrap();
+    let mut cfg = Config::default();
+    cfg.overrides.push(Override { exe: "fixturegame".into(), kind: RuleKind::HdrGame, clamp: None });
+    let s = toml::to_string_pretty(&cfg).unwrap();
     assert!(
         s.contains("default_game_class = \"sdr_game\""),
         "expected snake_case rule token; got:\n{s}"
@@ -86,9 +85,16 @@ clamp = "off"
     assert_eq!(cfg.overrides[0].clamp, Some(ClampMode::Off));
 }
 
+/// The defaults plus the dev test card's override (the e2e harness's).
+fn with_testcard() -> Config {
+    let mut cfg = Config::default();
+    cfg.overrides.push(Override { exe: "hdr-testcard".into(), kind: RuleKind::HdrGame, clamp: None });
+    cfg
+}
+
 #[test]
 fn rule_for_override_hit_uses_override_kind() {
-    let cfg = Config::default(); // has hdr-testcard -> HdrGame, clamp None
+    let cfg = with_testcard(); // hdr-testcard -> HdrGame, clamp None
     let (kind, clamp) = cfg.rule_for("hdr-testcard");
     assert_eq!(kind, RuleKind::HdrGame);
     // clamp None on the override -> falls back to default_clamp (Punchy).
@@ -97,7 +103,7 @@ fn rule_for_override_hit_uses_override_kind() {
 
 #[test]
 fn rule_for_override_is_case_insensitive() {
-    let cfg = Config::default();
+    let cfg = with_testcard();
     let (kind, _) = cfg.rule_for("HDR-TestCard");
     assert_eq!(kind, RuleKind::HdrGame, "override match must ignore case");
 }
@@ -296,4 +302,23 @@ fn autostart_write_readback_delete_live() {
             Some(String::from_utf16_lossy(&wide[..end]))
         }
     }
+}
+
+/// Final review F-detect-6: the dev test card is no default entry (it showed as "Recorded" in
+/// every install's Games list). The e2e harness writes its own override.
+#[test]
+fn the_default_config_ships_no_dev_override() {
+    assert!(Config::default().overrides.is_empty(), "{:?}", Config::default().overrides);
+}
+
+#[test]
+fn an_installed_config_drops_only_the_shipped_test_card_entry() {
+    let shipped = Override { exe: "hdr-testcard".into(), kind: RuleKind::HdrGame, clamp: None };
+    let mine = Override { exe: "MyGame.exe".into(), kind: RuleKind::SdrGame, clamp: None };
+    let mut list = vec![shipped.clone(), mine.clone()];
+    assert!(super::drop_shipped_testcard(&mut list));
+    assert_eq!(list.len(), 1);
+    assert_eq!(list[0].exe, "MyGame.exe");
+    let mut changed = vec![Override { kind: RuleKind::None, ..shipped }];
+    assert!(!super::drop_shipped_testcard(&mut changed), "an entry the user changed stays");
 }
