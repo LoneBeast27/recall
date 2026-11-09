@@ -74,8 +74,13 @@ impl Handler {
                 if let Ok(mut size) = self.shared.gpu_size.lock() {
                     *size = Some(layout.out);
                 }
-                if let (Some(copy), Ok(mut latest)) = (hw.try_clone(), self.shared.latest_gpu.lock()) {
-                    *latest = Some((copy, layout.content()));
+                // R2-detect-r10-p6-3: no frame is stored for a screenshot or the HUD probe once
+                // `stop_capture` is set; a frame stored is numbered after this check.
+                if !crate::stop_capture::stopped() {
+                    if let (Some(copy), Ok(mut latest)) = (hw.try_clone(), self.shared.latest_gpu.lock()) {
+                        *latest = Some((copy, layout.content()));
+                        self.shared.latest_gpu_seq.store(crate::stop_capture::next_frame_seq(), Relaxed);
+                    }
                 }
                 if !(sink.send)(pts_us, hw, layout.content()) {
                     (sink.log)("capture: encoder takes no GPU frames; using CPU copies".into());

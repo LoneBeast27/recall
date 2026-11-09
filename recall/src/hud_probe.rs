@@ -390,8 +390,14 @@ fn grab(shared: &CaptureShared, reader: &mut Reader) -> Result<Gray, String> {
     let latest = shared.latest_gpu.lock().map_err(|_| "frame lock poisoned".to_string())?;
     let (frame, content) = latest.as_ref().ok_or("no captured frame yet (the zero-copy path is not running)")?;
     let (frame, content) = (frame.try_clone().ok_or("frame clone failed")?, *content);
+    let seq = shared.latest_gpu_seq.load(std::sync::atomic::Ordering::Relaxed);
     drop(latest);
-    reader.read(&frame, content)
+    let gray = reader.read(&frame, content);
+    // R2-detect-r10-p6-3: a frame stored after `stop_capture` is never analysed.
+    if !crate::stop_capture::frame_admitted(seq) {
+        return Err("capture stopped".into());
+    }
+    gray
 }
 
 #[cfg(not(feature = "encode"))]

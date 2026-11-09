@@ -88,9 +88,15 @@ impl App {
         #[cfg(feature = "encode")]
         if self.gpu.is_none() {
             let latest = self.shared.as_ref().and_then(|s| {
-                s.latest_gpu.lock().ok().and_then(|f| f.as_ref().and_then(|(f, c)| Some((f.try_clone()?, *c))))
+                let slot = s.latest_gpu.lock().ok()?;
+                let seq = s.latest_gpu_seq.load(Relaxed);
+                slot.as_ref().and_then(|(f, c)| Some((f.try_clone()?, *c, seq)))
             });
-            match latest.map(|(f, c)| crate::gpu_frames::read_rgba(&f).map(|(w, h, rgba)| picture(w, h, rgba, c))) {
+            let seq = latest.as_ref().map_or(0, |l| l.2);
+            match latest.map(|(f, c, _)| crate::gpu_frames::read_rgba(&f).map(|(w, h, rgba)| picture(w, h, rgba, c))) {
+                // R2-detect-r10-p6-3: re-checked after the read, so a stop that landed after the
+                // check above still refuses a frame stored after it.
+                Some(Ok(_)) if !crate::stop_capture::frame_admitted(seq) => shots.fail(STOPPED_SHOT),
                 Some(Ok((w, h, rgba))) => shots.submit(w, h, rgba, &self.source_name),
                 Some(Err(e)) => shots.fail(&format!("frame readback failed: {e}")),
                 None => shots.fail("no captured frame yet"),
