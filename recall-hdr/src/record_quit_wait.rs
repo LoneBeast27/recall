@@ -167,7 +167,9 @@ impl crate::record_app::Controller {
     /// Pump step once a quit was asked: true = shut down now. While a save is still
     /// written the engine keeps running; a save the wait gave up on is reported once
     /// (the engine's own abort failure is not broadcast after it).
-    pub(crate) fn quit_ready(&mut self) -> bool {
+    /// `_now` is kept for its callers (`pump`, and fix/deep-overlay-r9's `finish_saves`): the
+    /// wait reads the awake-only clock itself.
+    pub(crate) fn quit_ready(&mut self, _now: Instant) -> bool {
         let now = self.awake();
         match self.quit_wait.step(&mut self.activity, now) {
             QuitStep::Go => true,

@@ -340,7 +340,7 @@ impl Controller {
             self.session_end_tick(now);
             // A quit waits for the save being written (`record_quit_wait`), then returns.
             if self.quit.is_some() {
-                if self.quit_ready() {
+                if self.quit_ready(now) {
                     return 0;
                 }
                 self.quitting_tick(now);
