@@ -5,7 +5,7 @@
 //! autosave writes the working project to the SSD and the sidecar beside the clip is only
 //! written by [`flush_project`].
 use crate::edit_model::{ClipInfo, EditPlan, ExportMode, ExportSettings};
-use crate::services::library::{folders::{self, Folders},import_check,watch::WatchRoot};
+use crate::services::library::{folders::{self, Folders},import_check,imports,watch::WatchRoot};
 use crate::services::storage::{self, Priority, ProjectSource};
 use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
@@ -176,13 +176,17 @@ pub(crate) fn list_from(dir:&Path,imported:&[String],former:&[String])->Result<(
             push(path,m.len(),mtime,None);
         }
         // Game folders Recall made, one level down: recorder clips only (`folders::in_game_folder`).
-        for game in folders::game_folders(dir,imported){
+        // A marked folder whose marker no longer binds it (drive letter, moved folder) is listed
+        // too, its clips not owned, so they never vanish; one the user hid stays hidden.
+        let bound=folders::game_folders(dir,imported).into_iter().map(|g|(g,true));
+        for (game,is_bound) in bound.chain(folders::unbound_game_folders(dir,imported).into_iter().map(|g|(g,false))){
             let Ok(listing)=std::fs::read_dir(&game)else{complete=false;continue};
             for e in listing{
                 let Ok(e)=e else{complete=false;continue};
                 let path=e.path();if !folders::is_recall_named(&e.file_name().to_string_lossy()){continue;}
                 let Ok(m)=e.metadata()else{complete=false;continue};if !m.is_file(){continue;}
                 let mtime=m.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                if !is_bound&&matches!(imports::status(&path,m.len(),mtime),imports::Status::Skip){continue;}
                 push(path,m.len(),mtime,None);
             }
         }

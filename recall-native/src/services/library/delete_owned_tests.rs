@@ -248,3 +248,41 @@ fn copies_renames_legacy_markers_and_dropped_clips_are_not_owned() {
     let (_, owned) = partition_for_delete(&[copy.join("G__2026-11-10__04-00-00-000__ab.mp4"), dropped], &folders);
     assert!(owned.is_empty(), "nothing goes to the Recycle Bin");
 }
+
+/// (S1) A marked folder whose marker stops binding it ("G - Copy", "G old": the same as a USB
+/// drive back under another letter or a moved recordings folder) keeps its Recall-named clips in
+/// the library, not owned: Delete only hides them, and a hidden one stays out of the listing.
+/// An unmarked folder's clips are still not listed.
+#[test]
+fn unbound_game_folders_clips_are_listed_not_owned() {
+    use crate::services::library::folders::rule;
+    let root = crate::test_temp::TempDir::sandbox("owned-unbound");
+    let recordings = root.join("Recall");
+    let game = marked(&recordings.join("G"));
+    let name = "G__2026-11-10__04-00-00-000__ab.mp4";
+    let own = saved(&game, name);
+    let copy = recordings.join("G - Copy");
+    std::fs::create_dir_all(&copy).unwrap();
+    for file in [rule::MARKER, name] {
+        std::fs::copy(game.join(file), copy.join(file)).unwrap();
+    }
+    let other = clip(&copy, "holiday.mp4");
+    let keeper = clip(&recordings.join("Keepers"), "VALORANT__2026-11-01__10-00-00-000__ab.mp4");
+    let in_copy = copy.join(name);
+    assert_eq!(listed(&recordings, &[]), vec![text(&in_copy), text(&own)], "the copy's clip is listed, the unmarked folder's is not");
+    let renamed = recordings.join("G old");
+    std::fs::rename(&game, &renamed).unwrap();
+    let in_renamed = renamed.join(name);
+    assert_eq!(listed(&recordings, &[]), vec![text(&in_copy), text(&in_renamed)], "a renamed folder's clip is still listed");
+    let folders = Folders { recordings: Some(text(&recordings)), ..Folders::default() };
+    for path in [&in_copy, &in_renamed] {
+        assert!(!imports::is_owned(path, &recordings, &[], &[]), "not owned: {}", path.display());
+    }
+    let (hidden, owned) = partition_for_delete(&[in_copy.clone(), in_renamed.clone()], &folders);
+    assert!(owned.is_empty(), "never sent to the Recycle Bin");
+    assert_eq!(hidden, vec![in_copy.clone(), in_renamed.clone()], "Delete only hides them");
+    imports::hide(std::slice::from_ref(&in_copy)).unwrap();
+    assert_eq!(listed(&recordings, &[]), vec![text(&in_renamed)], "a hidden clip stays out");
+    assert!(!listed(&recordings, &[]).contains(&text(&other)) && !listed(&recordings, &[]).contains(&text(&keeper)));
+    assert_eq!(crate::backend::export_dir_for(&in_renamed, &folders), Some(recordings.join("exports")), "exports go where linked clips' go");
+}
