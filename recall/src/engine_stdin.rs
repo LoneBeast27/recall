@@ -56,7 +56,16 @@ pub(crate) fn watch_hold(wait: impl FnOnce(std::time::Duration), released: impl 
 /// Every command of `reader` to `forward`, the mic mute applied first (a toggle goes on as the
 /// state it set, so the later handler sets the same value again and reports it).
 pub(crate) fn read_early<R: BufRead>(reader: R, mut forward: impl FnMut(Command)) -> stdin_reader::ReaderEnd {
-    stdin_reader::read_commands(reader, |cmd| forward(apply_mute(cmd)))
+    let end = stdin_reader::read_commands(reader, |cmd| forward(apply_mute(cmd)));
+    // The controller's `quit`: this engine reads no line after it, so a privacy change from
+    // now on could never reach it. Every device track stores silence before `quit` is set (this
+    // thread sets it next, in `stdin_reader::finish`), so the long recording's finalise and
+    // anything else stored until the exit hold no live sample (the safe state).
+    #[cfg(feature = "encode")]
+    if end == stdin_reader::ReaderEnd::Quit {
+        audio::sources::hold_for_quit();
+    }
+    end
 }
 
 #[cfg(feature = "encode")]
