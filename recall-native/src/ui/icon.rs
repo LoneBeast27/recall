@@ -52,6 +52,8 @@ pub enum Icon {
     SquareCheck,
     Star,
     StarFill,
+    /// A gauge in the corner of a screen: the in-game performance-stats overlay.
+    StatsOverlay,
     Steam,
     Sun,
     Trash,
@@ -115,6 +117,7 @@ impl Icon {
             Icon::SquareCheck => "icons/square-check.svg",
             Icon::Star => "icons/star.svg",
             Icon::StarFill => "icons/star-fill.svg",
+            Icon::StatsOverlay => "icons/stats-overlay.svg",
             Icon::Steam => "icons/steam.svg",
             Icon::Sun => "icons/sun.svg",
             Icon::Trash => "icons/trash.svg",
