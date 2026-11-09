@@ -58,15 +58,17 @@ impl super::Shared {
         g.queue = queue; // the old queue closes: its writer ends after its current write
         let Some(queue) = g.queue.as_ref() else { return };
         if let Some(now) = self.spawn_mute.get().filter(|&now| baked != Some(now)) {
-            if !queue.send(&mute_line(now)) {
+            // No press (review R2-audio-r9-3): the Alt+M was made before any stream of this
+            // engine opened, so it must never release a hold (A4: a press after it opened).
+            if !queue.send(&crate::record_dispatch::mic_line(now, false)) {
                 crate::log!("supervisor: the new engine's mic mute could not be queued");
             }
         }
     }
 }
 
-/// The engine command that sets its mic mute: always the user's Alt+M here (`set_mic`, or its
-/// catch-up at attach), so it is sent as a press (gate review P2-b; a resync is not one).
+/// The engine command for the user's Alt+M (`set_mic` through `set_mute_and_send`): a press
+/// (gate review P2-b). A resync and the catch-up at attach send no press.
 pub(super) fn mute_line(muted: bool) -> String {
     crate::record_dispatch::mic_line(muted, true)
 }
