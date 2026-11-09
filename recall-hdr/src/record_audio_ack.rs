@@ -194,7 +194,7 @@ mod tests {
         assert!(src.contains("stdin_ended: ev.get(\"stdin_ended\").and_then(Value::as_bool) == Some(true), busy: ctl.activity.busy(now),"), "the live event feeds both");
         // F-5: the ack recovery takes the encoder path's recovery (record_fail, the end-early wait).
         assert!(src.contains("ctl.recovery_restart(now);"), "the ack watch recovers through it");
-        assert!(!src.contains("ctl.restart_for_recovery()"), "never the bare restart");
+        assert!(!src.contains(concat!("ctl.restart_", "for_recovery()")), "never the bare restart");
         let recover = include_str!("record_recover.rs").split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(recover.contains("Recovery::Restart => { log!(\"record: the encoder failed, its recovery ran past its bound, or the engine hung; restarting the engine (intended)\"); self.recovery_restart(now); }"), "the encoder path uses the same one");
     }

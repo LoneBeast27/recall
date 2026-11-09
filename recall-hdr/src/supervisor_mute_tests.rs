@@ -160,7 +160,7 @@ fn a_withheld_sync_respawns_even_when_the_shape_moves_back() {
     shared.attach_writer(None);
     assert!(restated(&rec).iter().all(|l| !l.contains("\"sync\"")), "that engine got no sync");
     let src = include_str!("supervisor_sources.rs").split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(src.contains("self.spawn_sources.lock().withheld = !same;"), "the attach records it");
+    assert!(src.contains("s.withheld = !same;"), "the attach records it");
 }
 
 /// F-1: a line the full queue drops is not counted as sent, leaves the intent dirty, and a

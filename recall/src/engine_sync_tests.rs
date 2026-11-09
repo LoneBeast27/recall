@@ -314,17 +314,16 @@ fn a_skipped_line_holds_until_the_restatement_and_is_never_acked_past() {
 fn a_twin_re_pick_silences_the_old_streams_next_packet() {
     let _restore = restore();
     let _reopen = Reopen;
-    audio::set_mic_muted(true); // Alt+M is on
+    audio::set_mic_muted(false);
     let mic = held_listed("f2-mic");
     close_staging(); // listed: a set_source goes live
     mic.release_startup_hold();
     mic.push_live_read(&[0.5; 960], MuteNow::read);
-    assert!(mic.snapshot(0.01).iter().all(|s| *s == 0.0), "muted by Alt+M");
+    assert!(mic.snapshot(0.01).iter().any(|s| *s != 0.0), "recording twin A");
     read_early(std::io::Cursor::new("{\"cmd\":\"set_source\",\"id\":\"f2-mic\",\"device_id\":\"{B}\",\"mic_mute\":false}\n"), |_| {});
     mic.push_live_read(&[0.5; 960], MuteNow::read); // the packet the old twin captured in flight
     assert!(mic.snapshot(0.01).iter().all(|s| *s == 0.0), "the un-picked twin is never stored");
     assert!(mic.take_repick_for_test(), "the stream loop ends that stream at its next turn");
-    audio::set_mic_muted(false);
     mic.push_live_read(&[0.5; 960], MuteNow::read);
     assert!(mic.snapshot(0.01).iter().any(|s| *s != 0.0), "the reopened stream records");
 }
