@@ -311,7 +311,7 @@ impl Sim {
 
     /// `save_clip`: `true` when the engine was asked.
     pub fn save(&mut self) -> bool {
-        if capture_refusal(self.paused, self.engine_running(), &self.wanted()).is_some() || self.planner.privacy_refusal().is_some() {
+        if capture_refusal(self.paused, self.engine_running(), &self.wanted()).is_some() || self.planner.privacy_command_refusal("save_clip", self.activity.is_recording()).is_some() {
             return false;
         }
         let now = self.awake();
