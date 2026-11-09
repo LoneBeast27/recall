@@ -117,7 +117,7 @@ namespace Recall.Setup
                 !existing || File.Exists(Path.Combine(startMenu, "Recall.lnk")), 2);
             launch = AddOption("Start recording after guided setup", 149, false, 3);
             frameTiming = AddOption("Set up game detection and FPS", 185, false, 4);
-            AddLabel(options, "Windows may ask for permission. It takes effect after sign-in.",
+            AddLabel(options, "Frame-timing stats: joins Performance Log Users. Windows asks first.",
                 26, 216, 499, 22, fonts.Body, Muted);
             AddLabel(options, prerequisites.Summary(),
                 0, 254, 525, 24, fonts.Body, Muted);
@@ -324,6 +324,15 @@ namespace Recall.Setup
                 {
                     var updates = new Progress<string>(text => { if (busy) resultTitle.Text = text; });
                     warning = await Task.Run(() => SetupPackage.Install(selection, updates));
+                    // Opt-in only, never on an update: Setup itself, elevated through the visible prompt.
+                    if (selection.FrameTiming && !updateMode)
+                    {
+                        resultTitle.Text = "Setting up frame timing…";
+                        var timing = await FrameTiming.Request(Handle);
+                        if (timing != null && !timing.StartsWith("Frame timing: you are", StringComparison.Ordinal)
+                            && !timing.StartsWith("Frame timing: added", StringComparison.Ordinal))
+                            warning = warning == null ? timing : warning + "\n" + timing;
+                    }
                 }
                 SetStep(2);
                 title.Text = preview ? "Preview complete" : updateMode ? "Recall is updated" : "Recall is ready";
