@@ -265,8 +265,13 @@ pub enum Command {
         #[serde(default)]
         at_last_frame: bool,
     },
-    /// Set microphone capture muting for newly captured replay audio.
-    SetMicMute { muted: bool },
+    /// Set microphone capture muting for newly captured replay audio. `press`: the user's Alt+M
+    /// or toggle (the controller's `set_mic`); absent on a resync, which is never a press.
+    SetMicMute {
+        muted: bool,
+        #[serde(default)]
+        press: bool,
+    },
     /// Toggle microphone capture muting for newly captured replay audio.
     ToggleMicMute,
     /// The Audio page changed a recorded source's gain or name: applied to its live track,

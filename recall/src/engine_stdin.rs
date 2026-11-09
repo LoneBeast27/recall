@@ -38,9 +38,9 @@ pub(crate) fn read_early<R: BufRead>(reader: R, mut forward: impl FnMut(Command)
 #[cfg(feature = "encode")]
 fn apply_mute(cmd: Command) -> Command {
     match cmd {
-        Command::ToggleMicMute => Command::SetMicMute { muted: audio::toggle_mic_mute() },
-        Command::SetMicMute { muted } => {
-            audio::set_mic_muted(muted);
+        Command::ToggleMicMute => Command::SetMicMute { muted: audio::toggle_mic_mute(), press: true },
+        Command::SetMicMute { muted, press } => {
+            audio::set_mic_muted_by(muted, press);
             cmd
         }
         cmd => cmd,
