@@ -20,25 +20,6 @@ fn the_unreadable_profile_fallback_records_the_game_and_default_microphone() {
 }
 
 #[test]
-fn fresh_profiles_split_playback_only_for_distinct_windows_roles() {
-    let shared = initial_sources(false);
-    let split = initial_sources(true);
-    assert_eq!(ids(&shared), ["mic", "system-output"]);
-    assert_eq!(ids(&split), ["mic", "system-output", "communications-output"]);
-    assert_eq!(&split[..2], shared.as_slice());
-    assert!(split[2].communications && split[2].device.is_empty());
-    assert!(validate(&split).is_ok());
-
-    let mut customized = split.clone();
-    customized[2].icon = "discord".into();
-    let saved: Vec<AudioSource> = serde_json::from_value(serde_json::to_value(&customized).unwrap()).unwrap();
-    assert_eq!(saved, customized);
-    assert!(!changed(&split, &customized));
-    assert!(live_updates(&split, &customized).is_empty());
-    assert_eq!(engine_value(&split), engine_value(&customized));
-}
-
-#[test]
 fn old_keys_become_sources_without_writing_any_new_names() {
     let rec = RecordingCfg {
         desktop_audio_device: "Speakers (USB Audio Device)".into(),
@@ -188,4 +169,30 @@ fn the_saved_endpoint_id_reaches_the_engine() {
     assert_eq!(lines, [serde_json::json!({"cmd": "set_source", "id": "line-in", "device_id": "{id-two}"})]);
     let old: AudioSource = serde_json::from_value(serde_json::json!({"id": "mic", "kind": "input", "name": "Mic", "device": "Mic (Box)"})).unwrap();
     assert!(!engine_value(&[old]).contains("device_id"), "no id saved: none sent");
+}
+
+/// Item 9 (Rohan: "auto mic and game audio"): the first-run profile records the game and the
+/// Windows default microphone; no System output, and no Communications output in the Mix.
+/// The enumeration is injected: the endpoint below stands for what Windows reports.
+#[test]
+fn the_first_run_profile_records_the_game_and_the_default_mic() {
+    let reported = CaptureEndpoint { id: "{0.0.1.00000000}.{c0ffee00-0000-4000-8000-000000000001}".into(), name: "Headset Microphone (Example)".into() };
+    let list = initial_sources(Some(reported.clone()));
+    assert!(list.iter().any(|s| s.kind == "game"), "Game present: {:?}", ids(&list));
+    assert!(!list.iter().any(|s| s.id == "system-output" || (s.kind == "output" && !s.communications)), "no System output");
+    assert!(!list.iter().any(|s| s.communications), "no Communications track in the Mix");
+    let mic = list.iter().find(|s| s.kind == "input").expect("a microphone");
+    assert_eq!((mic.device_id.as_str(), mic.device.as_str()), (reported.id.as_str(), reported.name.as_str()), "the default capture, by id and name");
+    assert_eq!(mic.mic_mute, None, "Alt+M mutes it");
+    assert!(validate(&list).is_ok());
+    // No capture device reported: the mic follows the Windows default input, nothing invented.
+    let none = initial_sources(None);
+    assert_eq!(ids(&none), ["game", "mic"]);
+    assert!(none[1].device.is_empty() && none[1].device_id.is_empty());
+
+    let mut customized = list.clone();
+    customized[1].icon = "mic".into();
+    let saved: Vec<AudioSource> = serde_json::from_value(serde_json::to_value(&customized).unwrap()).unwrap();
+    assert_eq!(saved, customized);
+    assert!(!changed(&list, &customized));
 }

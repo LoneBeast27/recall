@@ -247,3 +247,17 @@ fn a_full_or_locked_export_folder_keeps_the_prepared_file_for_the_next_try() {
     assert!(!done.path.exists(), "a delivered file leaves the cache");
     slot().ready = None;
 }
+
+/// Post-hoc item 8: a size-fit priority with no size cap in force changes nothing in the
+/// output, so it must not change the key (or the export is prepared again for nothing).
+#[test]
+fn a_priority_without_a_size_cap_keeps_the_key() {
+    use crate::edit_model::ExportPriority;
+    let clip = info("E:/Recall/Raw/a.mp4", 100);
+    let manual = ExportSettings::default();
+    let motion = ExportSettings { priority: ExportPriority::Motion, ..manual.clone() };
+    assert_eq!(key(&clip, &plan(98.0, 120.0), 60, &motion), key(&clip, &plan(98.0, 120.0), 60, &manual), "no cap: no priority");
+    let capped = ExportSettings { max_bytes: Some(10_000_000), ..manual.clone() };
+    let capped_motion = ExportSettings { priority: ExportPriority::Motion, ..capped.clone() };
+    assert_ne!(key(&clip, &plan(98.0, 120.0), 60, &capped_motion), key(&clip, &plan(98.0, 120.0), 60, &capped), "under a cap it shapes the output");
+}

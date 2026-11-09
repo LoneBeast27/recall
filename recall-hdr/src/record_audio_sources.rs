@@ -16,9 +16,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::record_config::RecordingCfg;
 
-#[path = "../../recall/src/communications_audio.rs"]
-mod communications_audio;
-
 pub const SOURCES_ENV: &str = "RECALL_AUDIO_SOURCES";
 /// Most sources a recording carries (each is one capture stream and one track).
 pub const SOURCES_MAX: usize = 8;
@@ -77,22 +74,40 @@ pub fn default_sources() -> Vec<AudioSource> {
     vec![source("game", "game", "Game"), source("mic", "input", "Microphone")]
 }
 
-/// The first profile follows Windows playback rather than a particular game process.
-fn initial_sources(split: bool) -> Vec<AudioSource> {
-    let mut list = vec![source("mic", "input", "Microphone"), source("system-output", "output", "System output")];
-    if split {
-        list.push(AudioSource { communications: true, ..source("communications-output", "output", "Communications output") });
+/// The Windows default capture endpoint at setup time, as Windows reports it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaptureEndpoint {
+    pub id: String,
+    pub name: String,
+}
+
+/// The first-run profile (Rohan: "auto mic and game audio"): the detected game's own audio
+/// and the default microphone, pinned by the endpoint id and name Windows reports now (no
+/// name literals; with no capture device, the Windows default input). No System output, and
+/// no Communications output: a call stays out of the clip and its Mix.
+fn initial_sources(mic: Option<CaptureEndpoint>) -> Vec<AudioSource> {
+    let mut microphone = source("mic", "input", "Microphone");
+    if let Some(endpoint) = mic {
+        microphone.device = endpoint.name;
+        microphone.device_id = endpoint.id;
     }
-    list
+    vec![source("game", "game", "Game"), microphone]
 }
 
 pub fn initialize_sources() -> Vec<AudioSource> {
     let joined = wasapi::initialize_mta().is_ok();
-    let split = communications_audio::distinct_device().is_some();
+    let mic = default_capture();
     if joined {
         wasapi::deinitialize();
     }
-    initial_sources(split)
+    initial_sources(mic)
+}
+
+/// The Windows default capture endpoint (console role), `None` when there is none.
+fn default_capture() -> Option<CaptureEndpoint> {
+    let device = wasapi::get_default_device(&wasapi::Direction::Capture).ok()?;
+    let (id, name) = (device.get_id().ok()?, device.get_friendlyname().ok()?);
+    (!id.trim().is_empty() && !name.trim().is_empty()).then(|| CaptureEndpoint { id, name })
 }
 
 /// The list a config without `audio_sources` stands for, from its old keys.

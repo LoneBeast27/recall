@@ -8,7 +8,7 @@
 //! measured, and [`RateControl`] is tightened for a retry if it came out over.
 
 use super::timeline::{ticks_before, us_to_seconds};
-use super::video_encoder::{output_dims, recommended_bitrate, RateControl, Vbv};
+use super::video_encoder::{output_dims, recommended_bitrate, RateControl, Vbv, HEVC_NVENC_MAX};
 use crate::edit_model::{ExportPriority, ExportSettings, MIN_EXPORT_HEIGHT};
 
 /// Container overhead reserved from the cap (MP4 boxes and sample tables).
@@ -53,6 +53,8 @@ pub(crate) fn plan_video(
     };
 
     let priority = settings.active_priority();
+    // Under Motion/Detail the Resolution control is off: the fit itself stays within NVENC.
+    let bounds = if priority == ExportPriority::Manual { bounds } else { within_encoder(source_dims, bounds) };
     let plan_at = |fps| -> Result<VideoPlan, String> {
         let inputs = CapInputs {
             max_bytes,
@@ -83,6 +85,23 @@ pub(crate) fn plan_video(
         }
     }
     best
+}
+
+/// `bounds` scaled down (aspect kept, even sides) until its long side fits NVENC's largest
+/// frame ([`HEVC_NVENC_MAX`]); unchanged when it already fits.
+fn within_encoder(source: (u32, u32), bounds: (u32, u32)) -> (u32, u32) {
+    let long = bounds.0.max(bounds.1);
+    if long <= HEVC_NVENC_MAX {
+        return bounds;
+    }
+    let mut height = (u64::from(bounds.1) * u64::from(HEVC_NVENC_MAX) / u64::from(long)) as u32 & !1;
+    loop {
+        let dims = output_dims(source.0, source.1, Some(height));
+        if dims.0.max(dims.1) <= HEVC_NVENC_MAX || height <= 2 {
+            return dims;
+        }
+        height -= 2;
+    }
 }
 
 /// A quality heuristic for fast motion: at least 0.06 bits per pixel per frame.
@@ -229,6 +248,24 @@ mod tests {
         assert_eq!(detail.cap.unwrap().video_frames, 900);
         let roomy = plan(ExportPriority::Detail, 500_000_000);
         assert_eq!((roomy.dims, roomy.fps), ((2560, 1440), 60));
+    }
+
+    #[test]
+    fn a_fitted_size_over_the_encoder_limit_is_clamped_not_refused() {
+        // 4fcc5d2 review: under Motion/Detail the Resolution control is greyed out, so a fit
+        // must never hand NVENC more than it takes (8192 px a side).
+        for priority in [ExportPriority::Motion, ExportPriority::Detail] {
+            for source in [(10240, 1440), (1440, 10240), (16384, 4320)] {
+                let plan = plan_video(source, 60, 30_000_000, (1_440_000, 2800),
+                    &ExportSettings { max_bytes: Some(4_000_000_000), priority, ..ExportSettings::default() }).unwrap();
+                let (w, h) = plan.dims;
+                assert!(w.max(h) <= 8192 && w % 2 == 0 && h % 2 == 0, "{priority:?} {source:?} -> {:?}", plan.dims);
+                assert!(super::super::video_encoder::nvenc_codec(w, h).is_ok(), "{priority:?} {source:?}: no error");
+            }
+        }
+        // Any error that remains (Original, no priority) names no control that can be disabled.
+        let error = super::super::video_encoder::nvenc_codec(10240, 1440).unwrap_err();
+        assert!(!error.contains("under Resolution"), "{error}");
     }
 
     #[test]

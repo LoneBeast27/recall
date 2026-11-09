@@ -159,3 +159,16 @@ fn a_quit_asked_during_a_sign_out_wait_survives_a_cancelled_sign_out() {
     let mut q = a_wait_at(t0);
     assert_eq!(resume_after_session_end(&mut q), None);
 }
+
+#[test]
+fn a_held_sign_out_is_reported_until_a_plain_quit_joins_it() {
+    // Item 10: an installer sends its own quit only while the quit is the sign-out's alone.
+    let t0 = Instant::now();
+    let mut q = a_wait_at(t0);
+    assert!(sign_out_only(Some(QuitReason::SessionEnd), &q), "quit_for_sign_out: send a plain quit");
+    let r = on_quit_request(Some(QuitReason::SessionEnd), QuitReason::ControlPipe, false, t0 + Duration::from_secs(1), &mut q);
+    assert!(!q.forced, "a plain quit never forces the save");
+    assert!(!sign_out_only(r, &q), "joined: no further quit needed");
+    assert!(!sign_out_only(Some(QuitReason::ControlPipe), &QuitWait::default()), "an installer's quit is pending, not a sign-out's");
+    assert!(!sign_out_only(None, &QuitWait::default()));
+}

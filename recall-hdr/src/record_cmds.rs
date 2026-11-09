@@ -206,7 +206,7 @@ impl Controller {
             match effect {
                 Effect::Refused(reason) => {
                     log!("record: {cmd} not sent: {reason}");
-                    if self.cfg.overlay.enabled {
+                    if self.cfg.overlay.shows_notices() {
                         self.hub.event("session", &crate::record_notice::shortcut_notice_json(title, reason, true, false));
                     }
                     crate::supervisor::beep_failure();
@@ -259,7 +259,7 @@ impl Controller {
         // The mute stays our intent either way: the next engine gets it (`reapply_engine_intents`).
         if let Some(reason) = refusal(&mic_effects(sent)).filter(|_| self.engine_running()) {
             log!("record: microphone change not sent: {reason}");
-            if self.cfg.overlay.enabled {
+            if self.cfg.overlay.shows_notices() {
                 self.hub.event("session", &crate::record_notice::shortcut_notice_json("Microphone not changed", reason, true, false));
             }
             crate::supervisor::beep_failure();
