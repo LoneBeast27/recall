@@ -358,7 +358,7 @@ impl crate::record_app::Controller {
             Recovery::Recovered => log!("record: recording again after the engine restart"),
             Recovery::GaveUp => {
                 log!("record: the engine hung again right after its restart; no more restarts until the game or the settings change");
-                if self.cfg.overlay.enabled {
+                if self.cfg.overlay.shows_notices() {
                     self.hub.event("session", &gave_up_notice());
                 }
                 crate::cues::failed();
