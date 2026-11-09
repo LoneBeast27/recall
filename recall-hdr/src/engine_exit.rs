@@ -51,6 +51,26 @@ mod tests {
     }
 
     #[test]
+    fn a_busy_engine_slot_is_not_fatal_and_reaches_the_restart_policy() {
+        // F-startup-5: 86 (another recorder still holds the engine slot) must go through the
+        // restart policy's slot-held wait, not stop the supervisor as a broken install.
+        assert_eq!(crate::engine_policy::EXIT_SLOT_BUSY, 86);
+        assert_eq!(fatal_reason(crate::engine_policy::EXIT_SLOT_BUSY), None);
+        // supervisor_manager's Clean arm: the fatal check gives up and `continue`s; every other
+        // code, 86 included, is kept as `code = Some(c)` and handed to `policy.on_exit(code, ..)`.
+        let sup = include_str!("supervisor_manager.rs");
+        let arm = sup.find("ChildExit::Clean(c) => {").expect("the clean-exit arm");
+        let fatal = arm + sup[arm..].find("if let Some(why) = crate::engine_exit::fatal_reason(c) {").expect("fatal check");
+        let kept = arm + sup[arm..].find("code = Some(c);").expect("the code is kept");
+        let busy = arm + sup[arm..].find("if c == EXIT_SLOT_BUSY {").expect("busy logging");
+        let policy = arm + sup[arm..].find("policy.on_exit(code, now, started.elapsed())").expect("policy");
+        assert!(fatal < kept && kept < busy && busy < policy);
+        // Only the fatal branch leaves the arm early.
+        assert_eq!(sup[fatal..kept].matches("continue;").count(), 1, "{}", &sup[fatal..kept]);
+        assert!(!sup[kept..policy].contains("continue;") && !sup[kept..busy].contains("break"));
+    }
+
+    #[test]
     fn the_error_mode_hides_loader_dialogs() {
         quiet_error_dialogs();
         // SAFETY: reads a process-wide flag.
