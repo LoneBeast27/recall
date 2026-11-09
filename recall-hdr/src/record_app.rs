@@ -201,7 +201,7 @@ pub fn run() -> i32 {
     if !crate::hdr_gate::enabled() {
         log!("record: HDR features shelved (experimental); no display setting will change");
     } else if cfg.behavior.hdr_auto {
-        if let Err(e) = hdr.activate(&cfg) {
+        if let Err(e) = hdr.activate(&cfg, crate::system_notice::Origin::Automatic) {
             log!("record: hdr_auto is on but HDR management could not start: {e}");
         }
     } else {
@@ -390,7 +390,7 @@ impl Controller {
             self.note_commit();
         }
         self.plan_engine(now);
-        self.hdr.tick(now);
+        self.hdr_tick(now);
         let hellos = self.supervisor.hello_count();
         if hellos != self.seen_hello {
             self.seen_hello = hellos;

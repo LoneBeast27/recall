@@ -1,7 +1,8 @@
 [package]
 name = "recall-overlay"
-version = "0.0.1"
+version = "0.1.0"
 edition = "2021"
+license = "GPL-3.0-or-later"
 description = "Lightweight native status overlay for Recall (the Recall Island)"
 
 [[bin]]
@@ -38,3 +39,7 @@ windows = { version = "0.62", features = [
     "Win32_Security",
     "Win32_Security_Authorization",
 ] }
+
+[build-dependencies]
+# VERSIONINFO + asInvoker manifest (../recall/build_winres.rs); already in recall-native's tree.
+embed-resource = "3"
