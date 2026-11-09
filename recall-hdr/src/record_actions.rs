@@ -344,6 +344,12 @@ impl Controller {
     /// Engine events forwarded by the supervisor.
     pub(crate) fn drain_engine_events(&mut self, now: Instant) {
         while let Ok(ev) = self.engine_events.try_recv() {
+            if ev.get("type").and_then(|t| t.as_str()) == Some(crate::supervisor::stuck::ENGINE_STUCK) {
+                // F1: the old engine did not end after its kill; the next one may not start.
+                log!("record: the last engine could not be stopped; told the user");
+                self.shortcut_notice(crate::supervisor::stuck::STUCK_TITLE, crate::supervisor::stuck::STUCK_DETAIL);
+                continue;
+            }
             crate::record_audio_live::on_engine_event(self, &ev);
             let awake = self.awake();
             match self.activity.on_engine_event(&ev, unix_now(), awake) {

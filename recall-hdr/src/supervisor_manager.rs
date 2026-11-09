@@ -10,6 +10,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use super::protocol::{drain_stderr, read_protocol};
+use super::stuck::Reap;
 use super::{engine_command, EngineHealth, Shared, SHUTDOWN_POLL, SLEEP_CHUNK};
 use crate::engine_policy::{EngineSpec, Next, RestartPolicy, EXIT_SLOT_BUSY, GIVEUP_WINDOW};
 use crate::record_dispatch::Sent;
@@ -81,14 +82,21 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
                     ChildExit::Retarget => Some((shared.restart_grace(), None)),
                     _ => None,
                 };
-                if let Some((grace, refusal)) = stop {
-                    // Run quit->grace->kill FIRST, while the stdin queue is open (`quit` is queued,
-                    // never written here: a wedged pipe cannot hold the kill back);
-                    // only a dead child closes stdout and unblocks the reader.
-                    finish_shutdown(&shared, child, grace, refusal, release);
-                }
+                // Run quit->grace->kill FIRST, while the stdin queue is open (`quit` is queued,
+                // never written here: a wedged pipe cannot hold the kill back);
+                // only a dead child closes stdout and unblocks the reader.
+                let left = match stop {
+                    Some((grace, refusal)) => finish_shutdown(&shared, Box::new(child), grace, refusal, release),
+                    None => None,
+                };
                 shared.set_child_stdin(None);
-                let _ = reader.join();
+                // F1: both waits are bounded; an engine that did not end is left running and said.
+                if !super::stuck::join_bounded(reader, super::stuck::READER_WAIT) {
+                    log!("supervisor: the engine's output reader did not end within {} s; left running", super::stuck::READER_WAIT.as_secs());
+                }
+                if let Some(child) = left {
+                    shared.abandon(child);
+                }
                 shared.clear_cache();
                 shared.forward_exit();
                 match exit {
@@ -109,6 +117,7 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
                         }
                         code = Some(c);
                         if c == EXIT_SLOT_BUSY {
+                            shared.slot_held_by_stuck(); // F1: the slot may be ours, stuck
                             if !quiet {
                                 let secs = policy.busy_for(Instant::now()).unwrap_or_default().as_secs();
                                 let tries = policy.busy_tries() + 1;
@@ -250,7 +259,8 @@ fn supervise_child(shared: &Arc<Shared>, child: &mut Child, gen: u64) -> ChildEx
 /// next engine's stdin), wait up to `grace` polling `try_wait`, then hard-kill any survivor.
 /// A released engine's wait decides on every poll from facts on the awake clock
 /// (`supervisor_release_wait::ReleaseWait`, design P10); a plain quit's grace is awake time too.
-pub(super) fn finish_shutdown(shared: &Arc<Shared>, mut child: Child, grace: Duration, refusal: Option<Sent>, release: bool) {
+/// Returns the engine when it did not end within `stuck::KILL_WAIT` of the kill (F1).
+pub(super) fn finish_shutdown(shared: &Arc<Shared>, mut child: Box<dyn Reap>, grace: Duration, refusal: Option<Sent>, release: bool) -> Option<Box<dyn Reap>> {
     let pid = child.id();
     // First, even for a child already gone: no line may go to an engine that is ending.
     match refusal {
@@ -260,7 +270,7 @@ pub(super) fn finish_shutdown(shared: &Arc<Shared>, mut child: Child, grace: Dur
     };
     if let Ok(Some(_)) = child.try_wait() {
         log!("supervisor: engine (pid {pid}) already exited before shutdown");
-        return;
+        return None;
     }
     if release {
         log!("supervisor: engine (pid {pid}) told to stop capture; it exits once its saves are written (up to {} min)", grace.as_secs() / 60);
@@ -283,7 +293,7 @@ pub(super) fn finish_shutdown(shared: &Arc<Shared>, mut child: Child, grace: Dur
         match child.try_wait() {
             Ok(Some(status)) => {
                 log!("supervisor: engine exited cleanly on quit (code {})", status.code().unwrap_or(-1));
-                return;
+                return None;
             }
             Ok(None) => thread::sleep(SHUTDOWN_POLL),
             Err(_) => break,
@@ -291,8 +301,8 @@ pub(super) fn finish_shutdown(shared: &Arc<Shared>, mut child: Child, grace: Dur
     }
     // Grace expired -- hard kill and reap so no orphan is left holding the capture.
     log!("supervisor: grace expired; killing engine (pid {pid})");
-    let _ = child.kill();
-    let _ = child.wait();
+    // F1: bounded; a process stuck in a driver wait is handed back, never waited on for ever.
+    (!super::stuck::kill_bounded(child.as_mut(), super::stuck::KILL_WAIT)).then_some(child)
 }
 
 /// Park until the desired generation changes (`true`) or stop (`false`).
@@ -351,7 +361,7 @@ mod release_wait_tests {
         let waiter = shared.clone();
         let started = Instant::now();
         let handle = thread::spawn(move || {
-            finish_shutdown(&waiter, child, super::super::release::RELEASE_GRACE, None, true);
+            let _ = finish_shutdown(&waiter, Box::new(child), super::super::release::RELEASE_GRACE, None, true);
             let _ = tx.send(started.elapsed());
         });
         assert!(rx.recv_timeout(Duration::from_secs(10)).is_err(), "killed while its saves were unsettled");
