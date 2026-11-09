@@ -154,3 +154,28 @@ fn a_suspend_never_cuts_or_settles_a_save() {
     let now = s.awake();
     assert!(s.activity.retarget_busy(now).saving, "the save is still counted as in flight");
 }
+
+/// R2-rel-2: the save stalls after a wake while a closed game's drain defers the resume
+/// restart. Nothing is cut yet, so nothing is reported: the save may still land ("Clip saved"
+/// alone, never after a "Save failed").
+#[test]
+fn a_resume_restart_deferred_by_a_drain_reports_nothing_and_the_save_may_still_land() {
+    let (mut s, _) = saving_game(); // a save at 5 s, never moving
+    s.run_to(100_000);
+    s.exit(40); // the game closed: its drain runs (120 s)
+    s.run_to(101_000);
+    assert!(s.planner.drain().is_some(), "setup: the closed game's drain runs");
+    s.power_notice(PBT_SUSPEND);
+    pump(&mut s);
+    s.sleep_for(S(5));
+    s.power_notice(PBT_RESUME_AUTOMATIC);
+    for _ in 0..30 {
+        s.now += S(1);
+        pump(&mut s); // the save has made no progress for 120 s awake by now: GoLost
+    }
+    assert!(!s.power.held(), "setup: the gate let the restart go");
+    assert!(s.pending_restart.is_some(), "setup: the drain deferred it");
+    assert!(s.hub_events.is_empty(), "reported while nothing was cut: {:?}", s.hub_events);
+    let now = s.awake();
+    assert!(s.activity.retarget_busy(now).saving || s.activity.unanswered() > 0, "the save is still counted");
+}

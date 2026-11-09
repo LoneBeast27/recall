@@ -9,8 +9,8 @@ use crate::record_activity::EngineActivity;
 use crate::record_engine::{EnginePlanner, EngineTarget};
 use crate::record_engine_ctl::switch_engine;
 use crate::record_power::{PowerAction, PowerPlanner};
-use crate::record_power_host::{resume_lost_event, PowerHost};
-use crate::record_restart::{restart_engine, RestartHost, RestartReason};
+use crate::record_power_host::PowerHost;
+use crate::record_restart::{restart_engine, RestartHost, RestartReason, Restarted};
 
 impl RestartHost for Sim {
     fn restart_planner(&mut self) -> &mut EnginePlanner {
@@ -58,15 +58,16 @@ impl PowerHost for Sim {
         match action {
             PowerAction::StopRecording => self.sent.push(("record_stop".into(), self.engine().clone())),
             PowerAction::RestartEngine => {
-                restart_engine(self, RestartReason::Resume);
+                PowerHost::power_restart(self);
             }
             PowerAction::Reprobe => {}
         }
     }
-    fn power_report_lost(&mut self, lost: u32) {
-        for _ in 0..lost {
-            self.hub_events.push(resume_lost_event());
-        }
+    fn power_restart(&mut self) -> bool {
+        restart_engine(self, RestartReason::Resume) == Restarted::Now
+    }
+    fn power_hub_event(&mut self, line: &str) {
+        self.hub_events.push(line.into());
     }
     fn power_log(&mut self, line: &str) {
         self.notes.push(line.into());
