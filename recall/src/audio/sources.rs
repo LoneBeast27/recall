@@ -396,12 +396,13 @@ pub fn set_live(id: &str, change: LiveChange) -> bool {
         if let (Some(db), State::Live(ring)) = (gain_db, &*state) {
             ring.set_gain_db(db);
         }
-        if let (Some(on), State::Live(ring)) = (mic_mute, &*state) {
-            ring.set_mic_mute(on);
-        }
+        // The id first (F-2): the stream on the old device holds before the flag can unmute it.
         if let (Some(device_id), State::Live(ring)) = (device_id, &*state) {
             // A malformed id counts as none (`endpoints::id_ok`), as at spawn.
             ring.live.set_saved_id(if super::endpoints::id_ok(device_id) { device_id } else { "" });
+        }
+        if let (Some(on), State::Live(ring)) = (mic_mute, &*state) {
+            ring.set_mic_mute(on);
         }
         if let (true, State::Live(ring)) = (retire, &*state) {
             ring.retire(); // silence from its next packet, its stream closed
