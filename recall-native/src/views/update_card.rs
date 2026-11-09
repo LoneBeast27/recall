@@ -4,19 +4,38 @@ use gpui::{AnyElement, Context, FontWeight, div, prelude::*, px};
 
 use crate::{
     root::Root,
-    update::{NoteLine, Phase, current, note_lines},
+    update::{CONFIRM_TEXT, NoteLine, Phase, RecorderState, Resume, current, note_lines},
     theme::{self, c, ca},
     ui,
 };
 
 impl Root {
+    /// What the recorder is doing now, for the update hand-off.
+    pub fn recorder_state(&self) -> RecorderState {
+        let session = self.snap.session.as_ref();
+        let capturing = session.is_some_and(|s| s.capturing());
+        RecorderState {
+            running: self.snap.connected,
+            recording: capturing,
+            long_on: session.is_some_and(|s| s.long_recording.active),
+            game: capturing && session.and_then(|s| s.target.as_ref()).is_some_and(|t| !t.exe.is_empty()),
+        }
+    }
+
+    /// The page, the open clip and the recorder's state: what the app reopens to after the update.
+    pub fn update_resume(&self) -> Resume {
+        let clip = (self.route == crate::root::Route::Editor).then(|| self.ed.info.as_ref().map(|i| i.path.clone()).or_else(|| self.ed.loading_path.clone())).flatten();
+        Resume::new(self.route.name(), clip, self.recorder_state())
+    }
+
     pub fn render_update(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
         let (release, busy, error) = match &self.update.phase {
             Phase::Idle => return None,
-            Phase::Offered(r) => (r, false, None),
+            Phase::Offered(r) | Phase::Confirm(r) => (r, false, None),
             Phase::Downloading(r) => (r, true, None),
             Phase::Failed(r, e) => (r, false, Some(e.clone())),
         };
+        let confirming = matches!(self.update.phase, Phase::Confirm(_));
         let size_mb = (release.size as f64 / 1_048_576.0).round() as u64;
         let meta = format!(
             "You have {} · {size_mb} MB",
@@ -55,42 +74,7 @@ impl Root {
         } else {
             error.map(|e| (format!("Update failed: {e}"), theme::ERROR))
         };
-        let actions = div()
-            .flex()
-            .gap(px(8.))
-            .justify_end()
-            .child(
-                ui::button("update-skip", ui::Variant::Ghost)
-                    .child("Skip this version")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.update.skip_version();
-                        cx.notify();
-                    })),
-            )
-            .child(
-                ui::button("update-later", ui::Variant::Secondary)
-                    .child("Later")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.update.later();
-                        cx.notify();
-                    })),
-            )
-            .child(
-                ui::button("update-now", ui::Variant::Primary)
-                    .child(if busy {
-                        "Downloading…"
-                    } else if status.is_some() {
-                        "Try again"
-                    } else {
-                        "Download and open Setup"
-                    })
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        if !busy {
-                            this.update.install();
-                            cx.notify();
-                        }
-                    })),
-            );
+        let actions = if confirming { self.confirm_actions(cx) } else { self.offer_actions(busy, status.is_some(), cx) };
         let card = ui::panel()
             .w(px(480.))
             .p(px(20.))
@@ -131,7 +115,7 @@ impl Root {
                 div()
                     .text_size(px(12.))
                     .text_color(c(theme::TERTIARY))
-                    .child("Setup asks before closing Recall and applying the update."),
+                    .child(if confirming { CONFIRM_TEXT } else { "Recall asks before it closes for the update." }),
             )
             .children(status.map(|(t, col)| div().text_size(px(12.)).text_color(c(col)).child(t)))
             .child(actions);
@@ -149,5 +133,70 @@ impl Root {
                 .child(card)
                 .into_any_element(),
         )
+    }
+
+    /// The offer's buttons: skip, later, and the update (which asks first, `Phase::Confirm`).
+    fn offer_actions(&self, busy: bool, failed: bool, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .flex()
+            .gap(px(8.))
+            .justify_end()
+            .child(
+                ui::button("update-skip", ui::Variant::Ghost)
+                    .child("Skip this version")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.update.skip_version();
+                        cx.notify();
+                    })),
+            )
+            .child(
+                ui::button("update-later", ui::Variant::Secondary)
+                    .child("Later")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.update.later();
+                        cx.notify();
+                    })),
+            )
+            .child(
+                ui::button("update-now", ui::Variant::Primary)
+                    .child(if busy {
+                        "Downloading…"
+                    } else if failed {
+                        "Try again"
+                    } else {
+                        "Download and open Setup"
+                    })
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        if !busy {
+                            this.update.confirm();
+                            cx.notify();
+                        }
+                    })),
+            )
+    }
+
+    /// The confirm step: nothing is downloaded until "Save and update".
+    fn confirm_actions(&self, cx: &mut Context<Self>) -> gpui::Div {
+        div()
+            .flex()
+            .gap(px(8.))
+            .justify_end()
+            .child(
+                ui::button("update-cancel", ui::Variant::Secondary)
+                    .child("Cancel")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        this.update.cancel_confirm();
+                        cx.notify();
+                    })),
+            )
+            .child(
+                ui::button("update-save", ui::Variant::Primary)
+                    .child("Save and update")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let resume = this.update_resume();
+                        this.update.install(resume);
+                        cx.notify();
+                    })),
+            )
     }
 }

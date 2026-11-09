@@ -17,11 +17,17 @@ use serde::Deserialize;
 pub(crate) mod net;
 #[path = "update_prefs.rs"]
 mod prefs;
+#[path = "update_resume.rs"]
+pub mod resume;
 #[path = "update_setup.rs"]
-mod setup;
+pub(crate) mod setup;
+
+pub use resume::{RecorderState, Resume};
 
 pub const REPO: &str = "LoneBeast27/recall";
-const SETUP: &str = "RecallSetup.exe";
+pub(crate) const SETUP: &str = "RecallSetup.exe";
+/// The confirm step's text (the maintainer's rule: an update says what happens to a recording).
+pub const CONFIRM_TEXT: &str = "Updating closes Recall. A recording in progress stops and is saved, with the replay buffer, then Recall reopens.";
 const MAX_SETUP: u64 = 128 * 1024 * 1024;
 const API_LIMIT: u64 = 1024 * 1024;
 /// The first automatic check waits this long after start-up.
@@ -31,7 +37,7 @@ pub fn current() -> Option<&'static str> {
     option_env!("RECALL_VERSION").filter(|v| version(v).is_some())
 }
 
-fn version(text: &str) -> Option<[u64; 3]> {
+pub(crate) fn version(text: &str) -> Option<[u64; 3]> {
     let mut parts = text.split('.');
     let mut number = || {
         let part = parts.next()?;
@@ -56,12 +62,12 @@ struct Asset {
 }
 
 #[derive(Deserialize)]
-struct ReleaseJson {
-    tag_name: String,
+pub(crate) struct ReleaseJson {
+    pub(crate) tag_name: String,
     name: Option<String>,
     body: Option<String>,
-    draft: bool,
-    prerelease: bool,
+    pub(crate) draft: bool,
+    pub(crate) prerelease: bool,
     assets: Vec<Asset>,
 }
 
@@ -71,19 +77,24 @@ pub struct Release {
     pub title: String,
     pub notes: String,
     pub size: u64,
-    digest: String,
+    pub(crate) digest: String,
 }
 
 fn offer(json: &[u8], current: &str) -> Result<Option<Release>, String> {
     let r: ReleaseJson =
         serde_json::from_slice(json).map_err(|e| format!("Invalid GitHub release: {e}"))?;
-    let candidate = r.tag_name.strip_prefix('v').unwrap_or_default();
-    let Some(candidate_version) = version(candidate) else {
+    let candidate = r.tag_name.strip_prefix('v').unwrap_or_default().to_owned();
+    let Some(candidate_version) = version(&candidate) else {
         return Ok(None);
     };
     if r.draft || r.prerelease || version(current).is_none_or(|v| candidate_version <= v) {
         return Ok(None);
     }
+    release_of(r, &candidate).map(Some)
+}
+
+/// The release's verified Setup asset (name, upload state, SHA-256, size).
+pub(crate) fn release_of(r: ReleaseJson, candidate: &str) -> Result<Release, String> {
     let asset = r
         .assets
         .iter()
@@ -98,7 +109,7 @@ fn offer(json: &[u8], current: &str) -> Result<Option<Release>, String> {
     if asset.size == 0 || asset.size > MAX_SETUP {
         return Err("The reported Setup size is invalid.".into());
     }
-    Ok(Some(Release {
+    Ok(Release {
         version: candidate.into(),
         title: r
             .name
@@ -107,7 +118,7 @@ fn offer(json: &[u8], current: &str) -> Result<Option<Release>, String> {
         notes: r.body.unwrap_or_default(),
         size: asset.size,
         digest: digest.to_ascii_lowercase(),
-    }))
+    })
 }
 
 #[derive(Deserialize)]
@@ -116,13 +127,13 @@ struct Comparison {
     behind_by: u64,
 }
 
-fn on_main(json: &[u8]) -> Result<bool, String> {
+pub(crate) fn on_main(json: &[u8]) -> Result<bool, String> {
     let comparison: Comparison =
         serde_json::from_slice(json).map_err(|e| format!("Invalid GitHub comparison: {e}"))?;
     Ok(comparison.behind_by == 0 && matches!(comparison.status.as_str(), "ahead" | "identical"))
 }
 
-fn api(net: &dyn net::Transport, path: &str) -> Result<(u16, Vec<u8>), String> {
+pub(crate) fn api(net: &dyn net::Transport, path: &str) -> Result<(u16, Vec<u8>), String> {
     let mut body = Vec::new();
     let url = format!("https://api.github.com/repos/{REPO}/{path}");
     let status = net::fetch(net, &url, API_LIMIT, Duration::from_secs(20), &mut body)?;
@@ -167,14 +178,25 @@ fn skip(version: &str) {
     }
 }
 
-/// Download Setup to the per-user folder, verify it from a held handle, and open it through
-/// the shell with `--update <install folder>`. Returns the Setup process and its folder.
-fn download_and_open(net: &dyn net::Transport, release: &Release) -> Result<(windows::Win32::Foundation::HANDLE, tempfile::TempDir), String> {
+/// The hand-off: download Setup to the per-user folder and verify it from a held handle, write
+/// the resume file, then open Setup through the shell with `--update <install> --resume <file>`.
+/// Setup quits the recorder (saving first); this app quits itself (`take_quit`).
+pub(crate) fn hand_off(net: &dyn net::Transport, release: &Release, install: &std::path::Path, resume: &Resume) -> Result<(), String> {
+    let updates = resume::updates_dir().ok_or("LOCALAPPDATA is not set.")?;
     let url = format!("https://github.com/{REPO}/releases/download/v{}/{SETUP}", release.version);
     let verified = setup::download(net, &url, release, &setup::download_root()?)?;
+    let file = resume.write_in(&updates)?;
+    let (process, folder) = setup::launch(verified, install, Some(&file))?;
+    // Setup runs from this folder: it stays (removed by a later start, `resume::sweep_downloads`).
+    let _ = folder.keep();
+    setup::close(process);
+    Ok(())
+}
+
+/// The installed program's folder.
+pub(crate) fn install_dir() -> Result<PathBuf, String> {
     let app = std::env::current_exe().map_err(|e| e.to_string())?;
-    let install = app.parent().ok_or("Cannot locate the Recall installation.")?;
-    setup::launch(verified, install)
+    Ok(app.parent().ok_or("Cannot locate the Recall installation.")?.to_path_buf())
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -207,6 +229,8 @@ pub fn note_lines(notes: &str) -> Vec<NoteLine> {
 pub enum Phase {
     Idle,
     Offered(Release),
+    /// "Updating closes Recall…": nothing is downloaded until "Save and update".
+    Confirm(Release),
     Downloading(Release),
     Failed(Release, String),
 }
@@ -222,12 +246,13 @@ pub struct UpdateUi {
     version: Option<&'static str>,
     net: Arc<dyn net::Transport>,
     prefs: Option<PathBuf>,
+    /// Setup has the update: the app quits itself (Root's poll).
+    quit: bool,
 }
 
 enum Msg {
     Checked(Result<Option<Release>, String>, bool),
     Opened(Result<(), String>),
-    Closed,
 }
 
 impl UpdateUi {
@@ -252,7 +277,7 @@ impl UpdateUi {
     /// With automatic checks off, nothing is scheduled: no request at start-up or later.
     fn with(net: Arc<dyn net::Transport>, version: Option<&'static str>, auto: bool, armed: bool, prefs: Option<PathBuf>) -> Self {
         let check_at = (auto && armed && version.is_some()).then(|| Instant::now() + FIRST_CHECK);
-        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, net, prefs }
+        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, net, prefs, quit: false }
     }
 
     pub fn busy(&self) -> bool {
@@ -298,9 +323,7 @@ impl UpdateUi {
         let Some(msg) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) else {
             return false;
         };
-        if !matches!(&msg, Msg::Opened(Ok(()))) {
-            self.rx = None;
-        }
+        self.rx = None;
         match msg {
             Msg::Checked(Ok(Some(release)), _) => self.phase = Phase::Offered(release),
             Msg::Checked(Ok(None), true) => {
@@ -310,41 +333,62 @@ impl UpdateUi {
                 self.notice = Some((false, format!("Couldn't check for updates: {error}")))
             }
             Msg::Checked(_, false) => return false,
-            Msg::Opened(Ok(())) => self.phase = Phase::Idle,
+            Msg::Opened(Ok(())) => {
+                self.phase = Phase::Idle;
+                self.quit = true;
+            }
             Msg::Opened(Err(error)) => {
                 if let Phase::Downloading(release) = &self.phase {
                     self.phase = Phase::Failed(release.clone(), error);
                 }
             }
-            Msg::Closed => {}
+
         }
         true
     }
 
-    pub fn install(&mut self) {
-        if self.rx.is_some() || crate::TESTING || crate::offscreen::enabled() {
+    /// "Download and open Setup" / "Try again": the confirm step first, nothing downloaded yet.
+    pub fn confirm(&mut self) {
+        if let Phase::Offered(r) | Phase::Failed(r, _) = &self.phase {
+            self.phase = Phase::Confirm(r.clone());
+        }
+    }
+
+    /// "Cancel" on the confirm step: back to the offer, nothing downloaded.
+    pub fn cancel_confirm(&mut self) {
+        if let Phase::Confirm(r) = &self.phase {
+            self.phase = Phase::Offered(r.clone());
+        }
+    }
+
+    /// "Save and update": only from the confirm step. `resume` is what the app shows now.
+    pub fn install(&mut self, resume: Resume) {
+        if crate::TESTING || crate::offscreen::enabled() {
             return;
         }
-        let release = match &self.phase {
-            Phase::Offered(r) | Phase::Failed(r, _) => r.clone(),
-            _ => return,
-        };
+        let net = self.net.clone();
+        self.install_with(move |release| hand_off(net.as_ref(), release, &install_dir()?, &resume));
+    }
+
+    /// [`install`](Self::install) with the hand-off given (tests pass their own).
+    pub(crate) fn install_with(&mut self, job: impl FnOnce(&Release) -> Result<(), String> + Send + 'static) {
+        let Phase::Confirm(release) = &self.phase else { return };
+        if self.rx.is_some() {
+            return;
+        }
+        let release = release.clone();
         let (tx, rx) = channel();
         self.rx = Some(rx);
-        let job = release.clone();
-        let net = self.net.clone();
-        std::thread::spawn(move || match download_and_open(net.as_ref(), &job) {
-            Ok((process, folder)) => {
-                let _ = tx.send(Msg::Opened(Ok(())));
-                setup::wait(process);
-                drop(folder);
-                let _ = tx.send(Msg::Closed);
-            }
-            Err(error) => {
-                let _ = tx.send(Msg::Opened(Err(error)));
-            }
+        let task = release.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(Msg::Opened(job(&task)));
         });
         self.phase = Phase::Downloading(release);
+    }
+
+    /// Setup has the update: quit now (true once).
+    pub fn take_quit(&mut self) -> bool {
+        std::mem::take(&mut self.quit)
     }
 
     pub fn later(&mut self) {
@@ -354,7 +398,7 @@ impl UpdateUi {
     }
 
     pub fn skip_version(&mut self) {
-        if let Phase::Offered(r) | Phase::Failed(r, _) = &self.phase {
+        if let Phase::Offered(r) | Phase::Failed(r, _) | Phase::Confirm(r) = &self.phase {
             skip(&r.version);
             self.phase = Phase::Idle;
         }
@@ -362,108 +406,5 @@ impl UpdateUi {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{net::fake::FakeNet, *};
-
-    fn fixture() -> serde_json::Value {
-        serde_json::json!({
-            "tag_name": "v1.10.0", "name": null, "body": null, "draft": false, "prerelease": false,
-            "assets": [{"name": SETUP, "size": 3, "state": "uploaded",
-                "digest": "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"}]
-        })
-    }
-
-    #[test]
-    fn newer_stable_versions_with_verified_assets_are_offered() {
-        let read = |v: serde_json::Value, current| offer(v.to_string().as_bytes(), current);
-        assert_eq!(read(fixture(), "1.9.0").unwrap().unwrap().version, "1.10.0");
-        assert_eq!(read(fixture(), "1.10.0").unwrap(), None);
-        for key in ["draft", "prerelease"] {
-            let mut bad = fixture();
-            bad[key] = true.into();
-            assert_eq!(read(bad, "1.9.0").unwrap(), None);
-        }
-        let mut bad = fixture();
-        bad["tag_name"] = "v1.10.0-rc1".into();
-        assert_eq!(read(bad, "1.9.0").unwrap(), None);
-        let mut bad = fixture();
-        bad["assets"][0]["digest"] = serde_json::Value::Null;
-        assert!(read(bad, "1.9.0").is_err());
-    }
-
-    #[test]
-    fn only_ancestors_of_main_pass_the_comparison() {
-        assert!(on_main(br#"{"status":"ahead","behind_by":0}"#).unwrap());
-        assert!(on_main(br#"{"status":"identical","behind_by":0}"#).unwrap());
-        assert!(!on_main(br#"{"status":"diverged","behind_by":1}"#).unwrap());
-        assert!(!on_main(br#"{"status":"behind","behind_by":1}"#).unwrap());
-    }
-
-    /// The fixture's release: Setup is the 3 bytes "abc".
-    pub(super) fn fixture_release() -> Release {
-        offer(fixture().to_string().as_bytes(), "1.9.0").unwrap().unwrap()
-    }
-
-    const LATEST: &str = "https://api.github.com/repos/LoneBeast27/recall/releases/latest";
-
-    /// An updater on a fake network, armed like a versioned on-screen build.
-    fn ui(net: &Arc<FakeNet>, auto: bool) -> UpdateUi {
-        UpdateUi::with(net.clone(), Some("1.9.0"), auto, true, None)
-    }
-
-    /// Tick until the check thread answers (or 5 s pass).
-    fn settle(ui: &mut UpdateUi) {
-        let end = Instant::now() + Duration::from_secs(5);
-        while ui.busy() && Instant::now() < end {
-            ui.tick();
-            std::thread::sleep(Duration::from_millis(5));
-        }
-    }
-
-    #[test]
-    fn automatic_checks_off_send_nothing_until_check_now() {
-        let net = Arc::new(FakeNet::default());
-        let mut off = ui(&net, false);
-        assert_eq!(off.check_at, None, "nothing is scheduled");
-        for _ in 0..3 {
-            assert!(!off.tick());
-        }
-        assert!(net.calls().is_empty(), "off sends no request: {:?}", net.calls());
-        off.start_check(true); // what "Check now" runs
-        settle(&mut off);
-        assert_eq!(net.calls(), [LATEST], "Check now always works");
-        assert_eq!(off.notice, Some((true, "No newer stable release is available.".into())));
-    }
-
-    #[test]
-    fn automatic_checks_on_run_once_due_and_turning_off_cancels() {
-        let net = Arc::new(FakeNet::default());
-        let mut on = ui(&net, true);
-        assert!(on.check_at.is_some(), "on: a check is scheduled after start-up");
-        on.check_at = Some(Instant::now());
-        assert!(on.tick());
-        settle(&mut on);
-        assert_eq!(net.calls(), [LATEST]);
-        let mut cancelled = ui(&net, true);
-        cancelled.set_auto(false);
-        assert_eq!(cancelled.check_at, None);
-        assert!(!cancelled.auto);
-        assert!(UpdateUi::with(net.clone(), None, true, true, None).check_at.is_none(), "dev builds never check");
-        assert!(UpdateUi::with(net.clone(), Some("1.9.0"), true, false, None).check_at.is_none(), "tests and offscreen never check");
-    }
-
-    #[test]
-    fn a_newer_release_on_main_is_offered_and_an_older_one_is_not() {
-        let compare = "https://api.github.com/repos/LoneBeast27/recall/compare/v1.10.0...main?per_page=1&page=2";
-        let net = FakeNet::default()
-            .reply(LATEST, 200, None, fixture().to_string().as_bytes())
-            .reply(compare, 200, None, br#"{"status":"ahead","behind_by":0}"#);
-        assert_eq!(check(&net, "1.9.0", true).unwrap(), Some(fixture_release()));
-        assert_eq!(check(&net, "1.10.0", true).unwrap(), None, "same version");
-        assert_eq!(check(&net, "2.0.0", true).unwrap(), None, "never a downgrade");
-        let off_main = FakeNet::default()
-            .reply(LATEST, 200, None, fixture().to_string().as_bytes())
-            .reply(compare, 200, None, br#"{"status":"diverged","behind_by":1}"#);
-        assert!(check(&off_main, "1.9.0", true).is_err());
-    }
-}
+#[path = "update_tests.rs"]
+pub(crate) mod tests;
