@@ -119,3 +119,19 @@ fn every_device_track_starts_held_and_process_loopback_does_not() {
     assert!(main_src.contains("let hold = early_stdin.is_some() && engine_stdin::startup_hold();"), "main holds under a controller");
     assert!(main_src.contains("audio::start(buffer_secs, hold,"), "and passes it to the start");
 }
+
+/// R-fresh-4 / F7 (b955512 changed): the notice only after 2 s still held (fake clock), never
+/// for a normal start that synced in time.
+#[test]
+fn inputs_held_is_said_only_after_2_s_still_held() {
+    let waited = std::cell::Cell::new(Duration::ZERO);
+    let mut said = Vec::new();
+    assert!(super::watch_hold(|d| waited.set(d), || false, |o| said.push(serde_json::to_value(o).unwrap())));
+    assert_eq!(waited.get(), Duration::from_secs(2));
+    assert_eq!(said[0]["type"], "inputs_held");
+    assert!(!super::watch_hold(|_| {}, || true, |_| panic!("synced in time: no notice")));
+    let src = include_str!("engine_stdin.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(src.contains("std::thread::spawn(|| watch_hold(std::thread::sleep, audio::sources::startup_released, protocol::emit));"), "spawn_early starts the watch");
+    let sources = include_str!("audio/sources.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(sources.contains("crate::protocol::emit(&crate::protocol::Outbound::InputsReleased);"), "the release says so");
+}

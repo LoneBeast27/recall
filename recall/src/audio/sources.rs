@@ -256,6 +256,7 @@ fn release_startup_holds() {
         }
     }
     eprintln!("[recall] stdin: the controller's settings are applied; the audio tracks record");
+    crate::protocol::emit(&crate::protocol::Outbound::InputsReleased);
 }
 
 /// Tests: [`close_staging_with`], then staging open again (every staging test holds one lock).

@@ -140,6 +140,8 @@ pub enum Outbound {
     InputsHeld {
         reason: String,
     },
+    /// The startup hold ended (`sync` read, every track listed): the device tracks record.
+    InputsReleased,
     /// Encoder lifecycle/diagnostic line (machine-readable log).
     EncoderLog {
         message: String,
