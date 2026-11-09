@@ -147,7 +147,8 @@ fn a_sandbox_never_repoints_the_real_shortcut_or_autostart() {
         .or_else(|| INSTALL.find("if ($env:RECALL_CONTROLLER_PATH) {\n  $Autostart = [switch]$false"))
         .expect("sandbox branch clears -Autostart");
     let note = INSTALL.find("'Sandbox install (RECALL_CONTROLLER_PATH): skipped the Start menu shortcut and Start with Windows; the real ones are unchanged.'").expect("one line");
-    let shortcut = INSTALL.find("} elseif (-not $NoShortcut) {").expect("the shortcut is the else branch");
+    // An update (-UpdateExisting) also leaves the shortcut alone; a sandbox never reaches this branch.
+    let shortcut = INSTALL.find("} elseif (-not $NoShortcut -and -not $UpdateExisting) {").expect("the shortcut is the else branch");
     let lnk = INSTALL.find("$s = $shell.CreateShortcut($lnk)").unwrap();
     assert!(skip < note && note < shortcut && shortcut < lnk);
     assert!(!INSTALL.contains("\nif (-not $NoShortcut) {"), "no unguarded shortcut write");
