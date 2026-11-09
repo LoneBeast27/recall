@@ -129,6 +129,14 @@ impl EngineActivity {
         }
     }
 
+    /// A save (or screenshot) the engine has not answered, or one it reports writing: what a
+    /// privacy stop must not cut (gate p5-1). No timer and no cap: a save past its 10 min
+    /// cap is still written by the engine, and only `saved` / `save_failed`, a `status`
+    /// without `save_writing` or the engine's exit end it.
+    pub fn save_in_flight(&self) -> bool {
+        self.pending_saves + self.expired_saves > 0 || self.write.last.is_some() || self.pending_screenshots > 0
+    }
+
     /// A released engine may be cut to the quit grace (`Supervisor::release_settled`,
     /// R2-detect-r10-p2-1): every save it was sent is answered (`saved` / `save_failed`; an
     /// engine exit answers them all), or none has shown progress for [`SAVE_STALE`] (the

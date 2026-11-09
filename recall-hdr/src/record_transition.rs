@@ -33,7 +33,7 @@ pub(crate) trait Transitions {
     /// The privacy stop: the engine stops capture now, finishes its saves, then `target`
     /// starts (`release_engine_to`). `false`: an older engine without `stop_capture`.
     fn release_now(&mut self, target: &EngineTarget) -> bool;
-    /// A save or screenshot is in flight (`EngineActivity::retarget_busy`).
+    /// A save or screenshot is in flight, past any timer or cap (`EngineActivity::save_in_flight`).
     fn saving(&mut self) -> bool;
     fn now(&self) -> Instant;
     fn pinned(&self) -> Option<&Target>;
@@ -201,7 +201,7 @@ impl Transitions for Controller {
         self.release_engine_to(target)
     }
     fn saving(&mut self) -> bool {
-        self.activity.retarget_busy(Instant::now()).saving
+        self.activity.save_in_flight()
     }
     fn now(&self) -> Instant {
         Instant::now()
