@@ -44,6 +44,7 @@ namespace Recall.Setup.Tests
             Run("the resume file must be in the updates folder", ResumeFileGuard);
             Run("sandbox update while recording: one save_first quit, recorder + record_start + app --resume", UpdateWhileRecording);
             Run("sandbox update that fails: settings restored, old pair reopened, recording recovered", UpdateRollsBack);
+            Run("an update that cannot be undone yet leaves Recall closed and says so", UpdateNotReopenedSaysSo);
             Console.WriteLine(passed + " passed, " + failed + " failed");
             return failed == 0 ? 0 : 1;
         }
