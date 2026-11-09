@@ -24,6 +24,7 @@ use crate::hdr_exec::{self, HdrExecutor};
 use crate::liveness::ProcessWatch;
 use crate::log;
 use crate::rules;
+use crate::system_notice::{self, Origin, Step};
 use crate::state::Reconciler;
 use crate::watcher::WatchEvent;
 
@@ -51,6 +52,10 @@ pub struct HdrManager {
     /// Last read-only HDR probe while inactive.
     live_hdr: bool,
     spine: Option<(RestoreGuard, Arc<OnceRestore>)>,
+    /// The per-machine `system_notice` marker (`None`: shelved, or no LOCALAPPDATA).
+    ack_file: Option<std::path::PathBuf>,
+    /// An automatic start waiting for the first-change notice, since when.
+    notice_due: Option<Instant>,
 }
 
 impl HdrManager {
@@ -74,12 +79,12 @@ impl HdrManager {
             }
         };
         let live_hdr = target.as_ref().and_then(|t| display::get_hdr_state(t).ok()).unwrap_or(false);
-        HdrManager { target, active: None, live_hdr, spine: None }
+        HdrManager { target, active: None, live_hdr, spine: None, ack_file: system_notice::ack_file(), notice_due: None }
     }
 
     /// The manager while HDR is shelved: no managed display, never activates.
     pub(crate) fn shelved() -> Self {
-        HdrManager { target: None, active: None, live_hdr: false, spine: None }
+        HdrManager { target: None, active: None, live_hdr: false, spine: None, ack_file: None, notice_due: None }
     }
 
     pub fn available(&self) -> bool {
@@ -90,8 +95,10 @@ impl HdrManager {
         self.active.is_some()
     }
 
-    /// Start managing HDR (journal repair, spine, reconciler). Idempotent.
-    pub fn activate(&mut self, cfg: &Config) -> Result<(), String> {
+    /// Start managing HDR (journal repair, spine, reconciler). Idempotent. Before the first
+    /// display change on this machine an automatic start only marks the notice due
+    /// ([`system_notice`]); the controller shows it, then calls [`notice_shown`](Self::notice_shown).
+    pub fn activate(&mut self, cfg: &Config, origin: Origin) -> Result<(), String> {
         if self.active.is_some() {
             return Ok(());
         }
@@ -101,6 +108,17 @@ impl HdrManager {
         let Some(target) = self.target.clone() else {
             return Err(format!("managed display '{}' not found", cfg.display.target_friendly_name));
         };
+        let acknowledged = self.ack_file.as_deref().is_some_and(system_notice::acknowledged);
+        match system_notice::decide(acknowledged, origin) {
+            Step::Proceed => {}
+            Step::RememberAndProceed => self.remember(),
+            Step::NoticeFirst => {
+                self.notice_due.get_or_insert_with(Instant::now);
+                log!("record-hdr: the first display change on this machine waits for its notice");
+                return Ok(());
+            }
+        }
+        self.notice_due = None;
         hdr_exec::repair_if_dirty(cfg);
         if self.spine.is_none() {
             self.spine = Some(hdr_exec::install_restore_spine(cfg)?);
@@ -114,8 +132,31 @@ impl HdrManager {
         Ok(())
     }
 
+    fn remember(&self) {
+        if let Some(file) = &self.ack_file {
+            if let Err(e) = system_notice::remember(file) {
+                log!("record-hdr: could not record the display-change notice: {e}");
+            }
+        }
+    }
+
+    /// The first-change notice to show now (title, detail), if one is due and can be seen.
+    pub fn notice_ready(&self, now: Instant, viewers: usize) -> Option<(&'static str, String)> {
+        self.notice_due.filter(|&due| system_notice::notice_ready(due, now, viewers))?;
+        let display = self.target.as_ref().map_or("your display", |t| t.name());
+        Some((system_notice::TITLE, system_notice::detail(display)))
+    }
+
+    /// The notice was shown: remember it for this machine and start managing HDR.
+    pub fn notice_shown(&mut self, cfg: &Config) -> Result<(), String> {
+        self.remember();
+        self.notice_due = None;
+        self.activate(cfg, Origin::UserAction)
+    }
+
     /// Stop managing HDR and put the display back to the journalled baseline.
     pub fn deactivate(&mut self, cfg: &Config) {
+        self.notice_due = None;
         if self.active.take().is_some() {
             hdr_exec::restore_now(cfg);
             self.refresh_live();
@@ -222,6 +263,23 @@ impl HdrManager {
     }
 }
 
+impl crate::record_app::Controller {
+    /// HDR's tick, after the one-time first-change notice when one is due: shown on the
+    /// island (forced, like "Overlay off") once the island runs and is connected.
+    pub(crate) fn hdr_tick(&mut self, now: Instant) {
+        let viewers = if self.overlay.running() { self.hub.client_count() } else { 0 };
+        if let Some((title, detail)) = self.hdr.notice_ready(now, viewers) {
+            self.hub.event("session", &crate::record_notice::shortcut_notice_json(title, &detail, false, true));
+            log!("record-hdr: first display-change notice shown");
+            let cfg = self.cfg.clone();
+            if let Err(e) = self.hdr.notice_shown(&cfg) {
+                log!("record-hdr: HDR management could not start after the notice: {e}");
+            }
+        }
+        self.hdr.tick(now);
+    }
+}
+
 impl HdrSnapshot {
     /// The session status `hdr` object.
     pub fn to_json(&self) -> serde_json::Value {
@@ -262,8 +320,11 @@ mod tests {
         cfg.behavior.hdr_auto = true; // an old config that still asks for switching
         let mut hdr = HdrManager::shelved();
         assert!(!hdr.available());
-        assert_eq!(hdr.activate(&cfg), Err(crate::hdr_gate::SHELVED_MSG.to_string()));
+        assert_eq!(hdr.activate(&cfg, Origin::Automatic), Err(crate::hdr_gate::SHELVED_MSG.to_string()));
         assert!(!hdr.is_active(), "hdr_auto in config does not start HDR management");
+        assert_eq!(hdr.activate(&cfg, Origin::UserAction), Err(crate::hdr_gate::SHELVED_MSG.to_string()));
+        assert_eq!(hdr.notice_ready(Instant::now() + Duration::from_secs(60), 3), None, "shelved: no notice is ever due");
+        assert!(hdr.notice_shown(&cfg).is_err(), "nor does a shown notice start anything");
         assert_eq!(hdr.ready(), Err(crate::hdr_gate::SHELVED_MSG.to_string()));
         assert!(hdr.toggle().is_err(), "the manual HDR toggle is refused");
         let snap = hdr.snapshot(&cfg);
