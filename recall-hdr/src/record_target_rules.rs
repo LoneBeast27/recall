@@ -16,7 +16,7 @@ use crate::watcher::WatchEvent;
 /// absent: a streamed game is recorded as a game.
 const TARGET_DENY_STEMS: &[&str] = &[
     // DWM (the "Not Responding" ghost of a hung game, third audit U3), the shell host and
-    // the lock screen: [`SYSTEM_STEMS`], which no Settings entry overrides.
+    // the lock screen: `never_recorded::SYSTEM_STEMS`, which no Settings entry overrides.
     "recall-native",
     "recall-hub",
     "recall-overlay",
@@ -138,46 +138,9 @@ pub(crate) fn is_remote_client(stem: &str) -> bool {
     REMOTE_CLIENT_STEMS.iter().any(|d| d.eq_ignore_ascii_case(stem))
 }
 
-/// Recall's own processes: never a target, whatever the config lists.
-const OWN_STEMS: &[&str] = &["recall", "recall-hdr", "recall-native", "recall-hub", "recall-overlay"];
-
-/// Windows itself: the compositor, the shell and its surfaces, the lock and sign-in
-/// screens and system processes. Never a target, even with a Settings entry (Rohan
-/// 2026-11-07: a user's own entry beats every other list, not these). Screensavers
-/// (`.scr`) are refused by image name in [`classify_event`].
-const SYSTEM_STEMS: &[&str] = &[
-    // DWM owns the "Not Responding" ghost of a hung game (third audit U3; the watcher
-    // maps a ghost to its hung window first, see `ghost_window`).
-    "dwm",
-    "explorer",
-    "shellhost",
-    "shellexperiencehost",
-    "startmenuexperiencehost",
-    "searchhost",
-    "searchapp",
-    "textinputhost",
-    "applicationframehost",
-    "lockapp",
-    "logonui",
-    "winlogon",
-    "csrss",
-    "sihost",
-    "svchost",
-    "conhost",
-    "ctfmon",
-    "fontdrvhost",
-    "taskhostw",
-    "runtimebroker",
-    "smartscreen",
-    "consent",
-];
-
-/// Recall's own processes and Windows itself ([`SYSTEM_STEMS`]): never recorded, whatever
-/// the config lists (`.exe` optional). Settings refuses a "Record" entry for them.
-pub(crate) fn never_recordable(stem: &str) -> bool {
-    let stem = strip_exe(stem.trim());
-    stem.is_empty() || OWN_STEMS.iter().chain(SYSTEM_STEMS).any(|d| d.eq_ignore_ascii_case(stem))
-}
+/// Recall's own processes and Windows itself: never recorded, whatever the config lists
+/// (`.exe` optional). One list with the native app's "Add app…" (`never_recorded.rs`).
+pub(crate) use crate::never_recorded::never_recordable;
 
 /// Whether an exe stem is a capture target under `cfg`. `looks_like_game` =
 /// fullscreen on its monitor, or the exe lives in a Steam or launcher library;

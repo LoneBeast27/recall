@@ -145,14 +145,10 @@ pub struct Pickable {
     pub in_front: bool,
 }
 
-/// Exes never offered by "Add app…": Recall's own, and shell / frame / system processes whose
-/// windows are not the app itself. The controller never records Recall or Windows itself and
-/// refuses such an entry (recall-hdr `record_target_rules::never_recordable`).
-const NOT_OFFERED: &[&str] = &[
-    "recall", "recall-native", "recall-hdr", "recall-hub", "recall-overlay", "explorer", "applicationframehost", "textinputhost",
-    "shellexperiencehost", "startmenuexperiencehost", "searchhost", "searchapp", "lockapp", "systemsettings", "dwm", "shellhost",
-    "logonui", "winlogon", "csrss", "sihost", "svchost", "conhost", "ctfmon", "taskhostw", "runtimebroker",
-];
+/// Exes never offered by "Add app…": Recall's own and Windows itself, the same list the
+/// controller refuses a "Record" entry for (R2-detect-r10-4).
+#[path = "../../../recall-hdr/src/never_recorded.rs"]
+mod never_recorded;
 
 /// The running apps "Add app…" offers, in z-order: one row per exe, minus Recall and the
 /// shell. The app of `front_pid` (the foreground window when the menu opened) goes first and
@@ -161,7 +157,7 @@ pub fn pickable(found: Vec<(u32, PlayingApp)>, front_pid: Option<u32>) -> Pickab
     let front_exe = found.iter().find(|(pid, _)| Some(*pid) == front_pid).map(|(_, a)| a.exe.clone());
     let mut out: Vec<PlayingApp> = Vec::new();
     for (_, app) in found {
-        let own = NOT_OFFERED.iter().any(|n| same_exe(n, &app.exe));
+        let own = never_recorded::never_recordable(&app.exe);
         if !own && !app.exe.trim().is_empty() && !out.iter().any(|a| same_exe(&a.exe, &app.exe)) {
             out.push(app);
         }
