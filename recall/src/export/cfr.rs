@@ -9,7 +9,7 @@ use ffmpeg_next as ff;
 use super::receive_is_drained;
 use super::timeline::{ticks_before, timeline_duration_us, timeline_origin_us};
 use super::video_encoder::{
-    open_decoder, open_encoder, output_dims, probe_video, recommended_bitrate, scaler,
+    add_video_stream, open_decoder, open_encoder, output_dims, probe_video, recommended_bitrate, scaler,
     EncoderSpec, RateControl, VideoBackend,
 };
 use super::ExportResult;
@@ -34,14 +34,8 @@ pub(super) fn export_to_temp(input: &Path, temp: &Path, fps: u32) -> Result<Expo
 
     let mut octx = ff::format::output(temp)
         .map_err(|e| format!("create temporary output {}: {e}", temp.display()))?;
-    let video_out_index = {
-        let mut stream = octx
-            .add_stream(Some(codec))
-            .map_err(|e| format!("add output video stream: {e}"))?;
-        stream.set_parameters(&encoder);
-        stream.set_time_base(output_tb);
-        stream.index()
-    };
+    // HEVC (frames past H.264 NVENC) is tagged `hvc1`, as in the edited export.
+    let video_out_index = add_video_stream(&mut octx, codec, &encoder, output_tb)?;
 
     let mut stream_map = vec![None; ictx.nb_streams() as usize];
     let mut input_time_bases = vec![ff::Rational(0, 1); ictx.nb_streams() as usize];

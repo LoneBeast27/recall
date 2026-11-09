@@ -40,6 +40,8 @@ pub struct PrefetchClip {
     pub has_thumb: bool,
     /// Cached duration (metadata store), if any.
     pub duration: Option<f64>,
+    /// An earlier probe of this exact file found no length (metadata store): not probed again.
+    pub duration_unknown: bool,
     pub game_key: String,
     pub favourite: bool,
     pub edited: bool,
@@ -128,7 +130,7 @@ pub(super) fn plan(clips: &[PrefetchClip], ranked: &[usize], cached: &dyn Fn(Ste
         if !clip.has_thumb && !cached(Step::Thumb, clip) {
             order.push((Step::Thumb, index));
         }
-        if clip.duration.is_none() {
+        if clip.duration.is_none() && !clip.duration_unknown {
             order.push((Step::Duration, index));
         }
     }
@@ -295,7 +297,7 @@ impl Feed {
         let stop = || recorder_busy() || super::lane::demand_waiting();
         let light = super::light::make_in(&self.root, &id, &read_from, seconds, &stop)?;
         if on_ssd && !top && !budget::kept().contains(&format!("video/{id}.mp4")) {
-            let _ = std::fs::remove_file(&whole);
+            super::owned::remove(&self.root, "video", &format!("{id}.mp4"));
         }
         Ok(light.metadata().map_or(estimate, |m| m.len()))
     }
@@ -322,7 +324,7 @@ impl Feed {
                 // screen do not wait for this; they ask on demand.
                 std::thread::sleep(thumb_rest(started.elapsed()));
             }
-            Step::Duration => sink(PrefetchEvent::Duration(path.clone(), crate::services::library::mp4_duration(Path::new(&path)))),
+            Step::Duration => sink(PrefetchEvent::Duration(path.clone(), crate::services::library::clip_duration(Path::new(&path)))),
             Step::Scrub => {
                 let result = crate::services::library::scrub_frames(&path);
                 match &result {
@@ -465,66 +467,9 @@ fn favoured() -> &'static Mutex<Vec<String>> {
     FAVOURED.get_or_init(|| Mutex::new(Vec::new()))
 }
 
-/// Cheap per-tier totals for Settings, refreshed in the background when stale.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(super) struct Summary {
-    pub thumbs: u64,
-    pub scrub: u64,
-    pub editor: u64,
-    pub video: u64,
-    pub total: u64,
-    /// Clips with more than a thumbnail cached.
-    pub preloaded: usize,
-}
-
-static SUMMARY_STALE: AtomicBool = AtomicBool::new(true);
-static SUMMARY_REFRESHING: AtomicBool = AtomicBool::new(false);
-
-fn summary_cell() -> &'static Mutex<Option<Summary>> {
-    static SUMMARY: OnceLock<Mutex<Option<Summary>>> = OnceLock::new();
-    SUMMARY.get_or_init(|| Mutex::new(None))
-}
-
-pub(super) fn invalidate_usage() {
-    SUMMARY_STALE.store(true, Ordering::Relaxed);
-    super::ssd_usage::bump();
-}
-
-pub(super) fn compute_summary(root: &Path) -> Summary {
-    let inventory = budget::inventory(root, &|_| 0.0);
-    let media = budget::read_media(root);
-    let preloaded: HashSet<&str> =
-        inventory.units.iter().filter(|u| u.tier != Tier::Thumb).filter_map(|u| budget::unit_clip(&u.name, &media)).collect();
-    Summary {
-        thumbs: inventory.tier_bytes(Tier::Thumb),
-        scrub: inventory.tier_bytes(Tier::Scrub),
-        editor: inventory.tier_bytes(Tier::EditorMedia),
-        video: inventory.tier_bytes(Tier::Video),
-        total: inventory.total(),
-        preloaded: preloaded.len(),
-    }
-}
-
-/// Latest totals; the first call walks the cache, later ones never block (a stale snapshot
-/// is refreshed on a background thread).
-pub(super) fn summary() -> Summary {
-    let current = *summary_cell().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let Some(current) = current else {
-        let fresh = compute_summary(&super::cache_root());
-        SUMMARY_STALE.store(false, Ordering::Relaxed);
-        *summary_cell().lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(fresh);
-        return fresh;
-    };
-    if SUMMARY_STALE.load(Ordering::Relaxed) && !SUMMARY_REFRESHING.swap(true, Ordering::AcqRel) {
-        SUMMARY_STALE.store(false, Ordering::Relaxed);
-        let _ = std::thread::Builder::new().name("recall-cache-usage".into()).spawn(|| {
-            let fresh = compute_summary(&super::cache_root());
-            *summary_cell().lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(fresh);
-            SUMMARY_REFRESHING.store(false, Ordering::Release);
-        });
-    }
-    current
-}
+#[path = "prefetch_summary.rs"]
+mod summary_cache;
+pub(super) use summary_cache::{invalidate_usage, summary};
 
 /// One human line for Settings, e.g. "Preloaded 312 clips · VALORANT, Rocket League favoured".
 pub fn smart_status() -> String {

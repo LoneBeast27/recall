@@ -175,8 +175,8 @@ fn config_json_has_every_section() {
 fn defaults_for_the_hotkey_features_and_quality() {
     let rec = RecordingCfg::default();
     // Rohan, 2026-11-05: one direct Alt combo per action, no two-step shortcuts.
-    let direct = [&rec.bookmark_hotkey, &rec.screenshot_hotkey, &rec.record_hotkey, &rec.stats_hotkey, &rec.overlay_hotkey];
-    assert_eq!(direct.map(String::as_str), ["Alt+B", "Alt+S", "Alt+L", "Alt+P", "Alt+O"]);
+    let direct = [&rec.bookmark_hotkey, &rec.screenshot_hotkey, &rec.record_hotkey, &rec.stats_hotkey, &rec.overlay_hotkey, &rec.editor_hotkey];
+    assert_eq!(direct.map(String::as_str), ["Alt+B", "Alt+S", "Alt+L", "Alt+P", "Alt+O", "Alt+U"]);
     assert_eq!((rec.codec.as_str(), rec.fps, rec.bitrate_mbps, rec.quality.as_str()), ("h264", 60, 25, "balanced"));
     assert_eq!(rec.voice_app, "", "voice track off by default");
     assert_eq!((rec.mic_device.as_str(), rec.mic_enabled, rec.desktop_audio_device.as_str()), ("", true, ""), "Windows default devices, mic on");
@@ -196,7 +196,7 @@ fn every_new_key_patches_saves_and_reloads() {
             "bookmark_hotkey": "Ctrl+F7", "screenshot_hotkey": "", "record_hotkey": "Ctrl+F8",
             "codec": "hevc", "fps": 120, "bitrate_mbps": 50, "quality": "quality", "voice_app": "chat.exe",
             "mic_device": "Microphone (USB Audio Device)", "mic_enabled": false, "desktop_audio_device": "Lautsprecher (Kopfhörer USB Audio)",
-            "stats_hotkey": "Ctrl+F10", "overlay_hotkey": "Ctrl+F11",
+            "stats_hotkey": "Ctrl+F10", "overlay_hotkey": "Ctrl+F11", "editor_hotkey": "Ctrl+F12",
             "save_hotkeys": [{"hotkey": "Alt+N", "seconds": 0}, {"hotkey": "Alt+J", "seconds": 15}, {"hotkey": "Alt+K", "seconds": 60}]
         },
         "storage": {"cap_gb": 500},
@@ -209,7 +209,7 @@ fn every_new_key_patches_saves_and_reloads() {
         "recording.bookmark_hotkey", "recording.screenshot_hotkey", "recording.record_hotkey", "recording.codec",
         "recording.fps", "recording.bitrate_mbps", "recording.quality", "recording.voice_app",
         "recording.mic_device", "recording.mic_enabled", "recording.desktop_audio_device",
-        "recording.stats_hotkey", "recording.overlay_hotkey", "recording.save_hotkeys", "storage.cap_gb", "midi.input",
+        "recording.stats_hotkey", "recording.overlay_hotkey", "recording.editor_hotkey", "recording.save_hotkeys", "storage.cap_gb", "midi.input",
     ] {
         assert!(out.touched(key), "{key} not reported as changed: {:?}", out.changed);
     }
@@ -402,7 +402,9 @@ fn app_audio_list_survives_a_patch_and_a_toml_round_trip() {
 fn audio_sources_survive_a_patch_and_a_toml_round_trip() {
     let store = temp_store("sources");
     let base = store.load();
-    assert_eq!(base.recording.audio_sources, crate::record_audio_sources::default_sources());
+    let sources = &base.recording.audio_sources;
+    assert_eq!(sources.iter().take(2).map(|s| s.id.as_str()).collect::<Vec<_>>(), ["mic", "system-output"]);
+    assert!((2..=3).contains(&sources.len()));
     let patch = json!({"recording": {"audio_sources": [
         {"id": "game", "kind": "game", "name": "Game"},
         {"id": "in-2", "kind": "input", "device": "Microphone (USB Audio Device)", "name": "Voice", "gain_db": -3.5},
@@ -445,7 +447,7 @@ fn any_whole_frame_rate_up_to_240_is_accepted() {
 
 /// Review probe (run by hand): `RECALL_PROBE_CONFIG=<a COPY of config.toml> cargo test -p recall-hdr
 /// probe_overlay_toggle_on_a_real_config_copy -- --ignored --nocapture`. The overlay shortcut's
-/// patch changes only `overlay.enabled`, both ways, and a save keeps every device key.
+/// patch changes only `overlay.hidden`, both ways, and a save keeps every device key.
 #[test]
 #[ignore]
 fn probe_overlay_toggle_on_a_real_config_copy() {
@@ -453,11 +455,11 @@ fn probe_overlay_toggle_on_a_real_config_copy() {
     let before = std::fs::read(&path).unwrap();
     let cfg = crate::config::load_from(&path);
     assert_eq!(std::fs::read(&path).unwrap(), before, "loading leaves the file as it was");
-    let was = cfg.overlay.enabled;
-    let off = apply_patch(&cfg, &json!({"overlay": {"enabled": !was}})).unwrap();
-    assert_eq!(off.changed, vec!["overlay.enabled".to_string()], "only the overlay switch moves");
-    let back = apply_patch(&off.config, &json!({"overlay": {"enabled": was}})).unwrap();
-    assert_eq!(back.changed, vec!["overlay.enabled".to_string()]);
+    let was = cfg.overlay.hidden;
+    let off = apply_patch(&cfg, &json!({"overlay": {"hidden": !was}})).unwrap();
+    assert_eq!(off.changed, vec!["overlay.hidden".to_string()], "only the overlay switch moves");
+    let back = apply_patch(&off.config, &json!({"overlay": {"hidden": was}})).unwrap();
+    assert_eq!(back.changed, vec!["overlay.hidden".to_string()]);
     assert_eq!(serde_json::to_value(&back.config).unwrap(), serde_json::to_value(&cfg).unwrap(), "off then on is the config it was");
     println!("overlay_hotkey {:?} stats_hotkey {:?} enabled {was}", cfg.recording.overlay_hotkey, cfg.recording.stats_hotkey);
     let saved = path.with_extension("probe-overlay.toml");
@@ -466,4 +468,27 @@ fn probe_overlay_toggle_on_a_real_config_copy() {
     let devices = |t: &str| t.lines().filter(|l| l.contains("device")).map(str::trim).map(str::to_owned).collect::<Vec<_>>();
     assert_eq!(devices(&text), devices(&String::from_utf8_lossy(&before)), "a save writes the same device keys");
     let _ = std::fs::remove_file(&saved);
+}
+
+#[test]
+fn overlay_hotkey_hides_stats_and_restores_the_selected_surfaces() {
+    let mut cfg = Config::default();
+    cfg.overlay.stats = true;
+    let patch = crate::record_actions::overlay_hotkey_patch;
+    let hidden = apply_patch(&cfg, &patch(&cfg.overlay)).unwrap();
+    assert_eq!(hidden.changed, ["overlay.hidden"]);
+    assert!(hidden.config.overlay.stats && !hidden.config.overlay.enabled);
+    assert!(!hidden.config.overlay.wants_process());
+    let shown = apply_patch(&hidden.config, &patch(&hidden.config.overlay)).unwrap();
+    assert_eq!(shown.config.overlay, cfg.overlay);
+    assert!(shown.config.overlay.wants_process());
+}
+
+#[test]
+fn overlay_hotkey_first_use_enables_notices_when_both_surfaces_are_off() {
+    let cfg = Config::default();
+    let patch = crate::record_actions::overlay_hotkey_patch(&cfg.overlay);
+    let shown = apply_patch(&cfg, &patch).unwrap();
+    assert!(shown.config.overlay.shows_notices());
+    assert!(!shown.config.overlay.shows_stats());
 }

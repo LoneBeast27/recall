@@ -2,21 +2,21 @@
 //! plain inputs so the exact wire shape is unit-tested.
 //!
 //! ```json
-//! {"type":"status","mode":"record","state":"waiting|starting|recording|draining|paused|error",
+//! {"type":"status","mode":"record","state":"waiting|starting|recording|degraded|recovering|draining|paused|error",
 //!  "paused":B,"target":{"name":S,"exe":S|null,"pid":N|null}|null,
 //!  "engine_health":"running|restarting|off|stopped","auto_record":B,
 //!  "save_hotkey":S,"mic_hotkey":S,"save_seconds":N,
 //!  "save_hotkeys":[{"hotkey":S,"seconds":N}],   // seconds 0 = full buffer
-//!  "bookmark_hotkey":S,"screenshot_hotkey":S,"record_hotkey":S,"stats_hotkey":S,"overlay_hotkey":S,  // "" = off
+//!  "bookmark_hotkey":S,"screenshot_hotkey":S,"record_hotkey":S,"stats_hotkey":S,"overlay_hotkey":S,"editor_hotkey":S,  // "" = off
 //!  "hotkey_problems":[S],   // hotkeys that did not register (taken by another app)
 //!  "mic_muted":B,
-//!  "long_recording":{"active":B,"path":S|null,"started_secs":F|null},  // Unix seconds
+//!  "long_recording":{"active":B,"path":S|null,"started_secs":F|null,"elapsed_secs":F},  // Unix seconds; elapsed: monotonic, as of this line
 //!  "pending_restart":B,   // a settings restart / retarget waits for a save / long recording to end
 //!  "overlay":{"enabled":B,"corner":S,"running":B,"stats_style":S},"autostart":B,
 //!  "overlay_stats":B,     // the performance-stats island is on
 //!  "fps_source":"etw|no_permission|off",   // `frame_timing` (off while stats are off)
 //!  "storage":{"cap_gb":N},
-//!  "drain":{"name":S,"total_secs":N,"ends_unix_ms":N}|null,  // `record_drain`: the closed game's last clip
+//!  "drain":{"name":S,"total_secs":N,"ends_unix_ms":N,"remaining_secs":F}|null,  // `record_drain`: the closed game's last clip
 //!  "hdr":{"available":B,"display":S|null,"hdr_on":B,"manual_pin":B,"auto":B}}
 //! ```
 
@@ -54,7 +54,10 @@ pub struct StatusInputs<'a> {
 
 /// `paused` (the user stopped recording), `waiting` (no target), `starting`
 /// (engine spawning / encoder warming up / restarting), `recording` (NVENC
-/// running for this target), `error` (engine gave up or the encoder failed).
+/// running for this target), `degraded` (recording, from CPU copies after the GPU
+/// path was refused), `recovering` (the engine is rebuilding its encoder; the buffer
+/// is kept and saveable), `error` (engine gave up, or its own encoder recovery is
+/// spent: `record_recover` then restarts it).
 pub fn session_state(wanted: &EngineTarget, health: EngineHealth, encoder: Option<&str>, fresh: bool, paused: bool) -> &'static str {
     if paused {
         return "paused";
@@ -68,6 +71,8 @@ pub fn session_state(wanted: &EngineTarget, health: EngineHealth, encoder: Optio
     match health {
         EngineHealth::Running { pid } if pid != 0 && fresh => match encoder {
             Some("failed") => "error",
+            Some("recovering") => "recovering",
+            Some("degraded") => "degraded",
             Some("starting") | Some("off") | None => "starting",
             Some(_) => "recording",
         },
@@ -77,7 +82,8 @@ pub fn session_state(wanted: &EngineTarget, health: EngineHealth, encoder: Optio
 
 pub fn target_json(wanted: &EngineTarget) -> Value {
     match wanted {
-        EngineTarget::Window(t) => json!({"name": t.name, "exe": t.exe, "pid": t.pid}),
+        // `hwnd`: the recorded window, so the island sits on its monitor.
+        EngineTarget::Window(t) => json!({"name": t.name, "exe": t.exe, "pid": t.pid, "hwnd": t.hwnd}),
         EngineTarget::Desktop => json!({"name": DESKTOP_NAME, "exe": null, "pid": null}),
         EngineTarget::Off => Value::Null,
     }
@@ -123,17 +129,18 @@ pub fn status_json(i: &StatusInputs) -> Value {
         "record_hotkey": rec.record_hotkey,
         "stats_hotkey": rec.stats_hotkey,
         "overlay_hotkey": rec.overlay_hotkey,
+        "editor_hotkey": rec.editor_hotkey,
         "hotkey_problems": i.hotkey_problems,
         "mic_muted": i.mic_muted,
         "long_recording": i.long_recording,
         "pending_restart": i.pending_restart,
         "overlay": {
-            "enabled": cfg.overlay.enabled,
+            "enabled": cfg.overlay.shows_notices(),
             "corner": cfg.overlay.corner,
             "running": i.overlay_running,
             "stats_style": cfg.overlay.stats_style,
         },
-        "overlay_stats": cfg.overlay.stats,
+        "overlay_stats": cfg.overlay.shows_stats(),
         "fps_source": i.fps_source,
         "autostart": cfg.startup.autostart,
         "storage": {"cap_gb": cfg.storage.cap_gb},
@@ -142,11 +149,27 @@ pub fn status_json(i: &StatusInputs) -> Value {
     })
 }
 
+/// The status line with its per-tick clocks (`drain.remaining_secs`,
+/// `long_recording.elapsed_secs`) left out: a status is re-broadcast only when
+/// this changes, and each one sent carries fresh clocks.
+pub fn dedup_key(status: &Value) -> String {
+    let mut key = status.clone();
+    if let Some(drain) = key.get_mut("drain").and_then(Value::as_object_mut) {
+        drain.remove("remaining_secs");
+    }
+    if let Some(long) = key.get_mut("long_recording").and_then(Value::as_object_mut) {
+        long.remove("elapsed_secs");
+    }
+    key.to_string()
+}
+
 /// The tray status line for a state.
 pub fn tray_line(state: &str, wanted: &EngineTarget) -> String {
     let name = target_name(wanted);
     match state {
         "recording" => format!("Recording {name}"),
+        "degraded" => format!("Recording {name} (CPU copies)"),
+        "recovering" => format!("Encoder recovering: {name} (the buffer is kept)"),
         "starting" => format!("Starting capture: {name}"),
         "paused" => "Recording paused".into(),
         "draining" => "Game closed: last clip kept".into(),
@@ -157,10 +180,6 @@ pub fn tray_line(state: &str, wanted: &EngineTarget) -> String {
 
 pub fn error_event(message: &str) -> String {
     json!({"type": "error", "message": message}).to_string()
-}
-
-pub fn config_event(cfg: &Config) -> String {
-    json!({"type": "config", "config": crate::record_config::config_json(cfg)}).to_string()
 }
 
 #[cfg(test)]
@@ -194,6 +213,15 @@ mod tests {
     }
 
     #[test]
+    fn an_engine_recovering_or_on_cpu_copies_is_its_own_state_not_recording() {
+        let run = EngineHealth::Running { pid: 9 };
+        assert_eq!(session_state(&game(), run, Some("recovering"), true, false), "recovering");
+        assert_eq!(session_state(&game(), run, Some("degraded"), true, false), "degraded");
+        assert_eq!(tray_line("recovering", &game()), "Encoder recovering: VALORANT (the buffer is kept)");
+        assert_eq!(tray_line("degraded", &game()), "Recording VALORANT (CPU copies)");
+    }
+
+    #[test]
     fn status_json_has_the_exact_wire_shape() {
         let cfg = Config::default();
         let snap = hdr();
@@ -217,11 +245,11 @@ mod tests {
             v,
             json!({
                 "type":"status","mode":"record","state":"recording","paused":false,
-                "target":{"name":"VALORANT","exe":"VALORANT-Win64-Shipping.exe","pid":42},
+                "target":{"name":"VALORANT","exe":"VALORANT-Win64-Shipping.exe","pid":42,"hwnd":7},
                 "engine_health":"running","auto_record":true,
                 "save_hotkey":"Alt+N","mic_hotkey":"Alt+M","save_seconds":120,
                 "save_hotkeys":[{"hotkey":"Alt+N","seconds":0}],
-                "bookmark_hotkey":"Alt+B","screenshot_hotkey":"Alt+S","record_hotkey":"Alt+L","stats_hotkey":"Alt+P","overlay_hotkey":"Alt+O","hotkey_problems":[],
+                "bookmark_hotkey":"Alt+B","screenshot_hotkey":"Alt+S","record_hotkey":"Alt+L","stats_hotkey":"Alt+P","overlay_hotkey":"Alt+O","editor_hotkey":"Alt+U","hotkey_problems":[],
                 "mic_muted":true,
                 "long_recording":{"active":true,"path":"E:\\c\\G__rec.mp4","started_secs":1790000000.5},
                 "pending_restart":true,
@@ -240,7 +268,7 @@ mod tests {
         let mut cfg = Config::default();
         cfg.overlay.stats = true;
         let snap = hdr();
-        let v = status_json(&StatusInputs {
+        let input = StatusInputs {
             wanted: &EngineTarget::Off,
             health: EngineHealth::Stopped,
             encoder: None,
@@ -255,11 +283,18 @@ mod tests {
             pending_restart: false,
             drain: None,
             hotkey_problems: &[],
-        });
+        };
+        let v = status_json(&input);
         assert_eq!(v["overlay_stats"], true);
         assert_eq!(v["fps_source"], "no_permission");
         assert!(v.get("rtss").is_none(), "the RTSS field is gone");
         assert_eq!(v["overlay"], json!({"enabled":false,"corner":"dynamic","running":true,"stats_style":"minimal"}));
+        let mut hidden = cfg.clone();
+        hidden.overlay.hidden = true;
+        hidden.overlay.enabled = true;
+        let v = status_json(&StatusInputs { cfg: &hidden, overlay_running: false, ..input });
+        assert_eq!(v["overlay_stats"], false);
+        assert_eq!(v["overlay"]["enabled"], false);
     }
 
     #[test]
@@ -294,6 +329,11 @@ mod tests {
     }
 
     #[test]
+    fn a_game_target_carries_its_window() {
+        assert_eq!(target_json(&game()), json!({"name":"VALORANT","exe":"VALORANT-Win64-Shipping.exe","pid":42,"hwnd":7}));
+    }
+
+    #[test]
     fn desktop_and_idle_targets_serialize() {
         assert_eq!(target_json(&EngineTarget::Desktop), json!({"name":"Desktop","exe":null,"pid":null}));
         assert_eq!(target_json(&EngineTarget::Off), Value::Null);
@@ -306,8 +346,20 @@ mod tests {
     fn error_and_config_events_are_valid_json() {
         let e: Value = serde_json::from_str(&error_event(r#"bad "quote" \ here"#)).unwrap();
         assert_eq!(e, json!({"type":"error","message":r#"bad "quote" \ here"#}));
-        let c: Value = serde_json::from_str(&config_event(&Config::default())).unwrap();
+        let c: Value = serde_json::from_str(&crate::record_config_event::config_event(&Config::default(), &Default::default(), &Default::default())).unwrap();
         assert_eq!(c["type"], "config");
         assert_eq!(c["config"]["recording"]["buffer_secs"], 120);
+    }
+
+    #[test]
+    fn the_ticking_clocks_do_not_re_broadcast_the_status() {
+        let line = |left: f64, elapsed: f64, name: &str| json!({"type":"status","state":"draining",
+            "drain":{"name":name,"total_secs":120,"ends_unix_ms":5,"remaining_secs":left},
+            "long_recording":{"active":true,"path":"p","started_secs":1.0,"elapsed_secs":elapsed}});
+        assert_eq!(dedup_key(&line(120.0, 3.0, "g")), dedup_key(&line(117.0, 6.0, "g")), "only the clocks moved");
+        assert_ne!(dedup_key(&line(120.0, 3.0, "g")), dedup_key(&line(120.0, 3.0, "h")));
+        assert!(!dedup_key(&line(1.0, 1.0, "g")).contains("remaining_secs"));
+        let idle = json!({"type":"status","drain":null,"long_recording":{"active":false,"path":null,"started_secs":null}});
+        assert_eq!(dedup_key(&idle), idle.to_string());
     }
 }

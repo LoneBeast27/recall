@@ -125,12 +125,16 @@ impl Drop for Hotkey {
 pub struct RecordHotkeys {
     manager: GlobalHotKeyManager,
     bound: Vec<(HotKey, HotkeyAction)>,
+    /// Invalid or duplicate bindings from the last bind (not retried).
+    conflicts: Vec<String>,
+    /// Bindings the OS refused, retried every 10 s.
+    refused: crate::record_hotkey_retry::Refused,
 }
 
 impl RecordHotkeys {
     pub fn new() -> Result<Self, String> {
         let manager = GlobalHotKeyManager::new().map_err(|e| format!("global-hotkey manager init failed: {e}"))?;
-        Ok(RecordHotkeys { manager, bound: Vec::new() })
+        Ok(RecordHotkeys { manager, bound: Vec::new(), conflicts: Vec::new(), refused: Default::default() })
     }
 
     /// Replace every binding with `list`. Returns one warning per accelerator
@@ -140,17 +144,35 @@ impl RecordHotkeys {
         for (hk, _) in self.bound.drain(..) {
             let _ = self.manager.unregister(hk);
         }
-        let (keep, mut warnings) = split_conflicts(list);
+        let (keep, conflicts) = split_conflicts(list);
+        let mut refused = Vec::new();
         for (b, hk) in keep {
             match self.manager.register(hk) {
                 Ok(()) => self.bound.push((hk, b.action)),
-                Err(e) => warnings.push(format!(
-                    "{} hotkey '{}' could not be registered (another app may own it): {e}",
-                    b.label, b.accel
-                )),
+                Err(e) => refused.push((b, hk, e.to_string())),
             }
         }
-        warnings
+        self.conflicts = conflicts;
+        self.refused.set(refused, std::time::Instant::now());
+        self.problems()
+    }
+
+    /// Conflicts, then the accelerators the OS refused.
+    pub fn problems(&self) -> Vec<String> {
+        self.conflicts.iter().cloned().chain(self.refused.warnings()).collect()
+    }
+
+    /// Every 10 s while the OS refused some accelerator: try those again. `None` when no retry
+    /// was due; else the labels that registered now.
+    pub fn retry_refused(&mut self, now: std::time::Instant) -> Option<Vec<String>> {
+        if !self.refused.due(now) {
+            return None;
+        }
+        let manager = &self.manager;
+        let won = self.refused.retry(now, |hk| manager.register(hk).map_err(|e| e.to_string()));
+        let labels = won.iter().map(|(b, _)| b.label.clone()).collect();
+        self.bound.extend(won.into_iter().map(|(b, hk)| (hk, b.action)));
+        Some(labels)
     }
 
     /// The actions now registered (for the log).

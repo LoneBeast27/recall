@@ -13,11 +13,22 @@ const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 const CREATE_BREAKAWAY_FROM_JOB: u32 = 0x0100_0000;
 
 pub(super) fn start() -> Result<bool, String> {
+    start_with_owner(None)
+}
+
+pub(super) fn start_for_setup() -> Result<bool, String> {
+    start_with_owner(Some(std::process::id()))
+}
+
+fn start_with_owner(setup_owner: Option<u32>) -> Result<bool, String> {
+    if crate::TESTING {
+        return Err("RecallTesting uses demo audio and video settings".into());
+    }
     if process_running(CONTROLLER_EXE)? {
         return Ok(false);
     }
     let executable = locate()?;
-    spawn_detached(&executable)?;
+    spawn_detached(&executable, setup_owner)?;
     Ok(true)
 }
 
@@ -57,10 +68,15 @@ pub(super) fn workspace_lists_controller(manifest: &str) -> bool {
 
 /// Hidden, no console, own process group; escapes our job object when allowed so the
 /// recorder outlives this window.
-fn spawn_detached(executable: &Path) -> Result<(), String> {
+fn spawn_detached(executable: &Path, setup_owner: Option<u32>) -> Result<(), String> {
     let launch = |flags: u32| {
         let mut command = Command::new(executable);
         command.arg(CONTROLLER_ARG).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(flags);
+        if let Some(owner) = setup_owner {
+            command.env("RECALL_SETUP_OWNER_PID", owner.to_string());
+        } else {
+            command.env_remove("RECALL_SETUP_OWNER_PID");
+        }
         if let Some(dir) = executable.parent() {
             command.current_dir(dir);
         }
@@ -74,20 +90,25 @@ fn spawn_detached(executable: &Path) -> Result<(), String> {
     }
 }
 
-/// Whether any process with this executable name runs (case-insensitive).
+/// Whether a process with this executable name runs in this Windows session
+/// (case-insensitive). Another account's recorder (fast user switching) does not count:
+/// this user still needs their own (`session::running_in_session`).
 pub(super) fn process_running(exe_name: &str) -> Result<bool, String> {
+    let rows = process_rows()?;
+    Ok(super::session::running_in_session(&rows, exe_name, super::session::current_session(), super::session::session_of))
+}
+
+/// Every process's (exe name, pid).
+fn process_rows() -> Result<Vec<(String, u32)>, String> {
     let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }.map_err(|error| format!("list processes: {error}"))?;
     let mut entry = PROCESSENTRY32W { dwSize: std::mem::size_of::<PROCESSENTRY32W>() as u32, ..Default::default() };
-    let mut found = false;
+    let mut rows = Vec::new();
     let mut more = unsafe { Process32FirstW(snapshot, &mut entry) }.is_ok();
     while more {
         let len = entry.szExeFile.iter().position(|unit| *unit == 0).unwrap_or(entry.szExeFile.len());
-        if String::from_utf16_lossy(&entry.szExeFile[..len]).eq_ignore_ascii_case(exe_name) {
-            found = true;
-            break;
-        }
+        rows.push((String::from_utf16_lossy(&entry.szExeFile[..len]), entry.th32ProcessID));
         more = unsafe { Process32NextW(snapshot, &mut entry) }.is_ok();
     }
     let _ = unsafe { CloseHandle(snapshot) };
-    Ok(found)
+    Ok(rows)
 }

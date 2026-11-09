@@ -24,6 +24,7 @@ use serde::Deserialize;
 use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
 
 use super::sources::SourceSpec;
+use super::stream::Event;
 use super::voice::{snapshot_processes, tree_root, ProcEntry};
 use super::TrackRing;
 
@@ -121,7 +122,7 @@ pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, report
         let source: &'static str = Box::leak(format!("{}{exe}", crate::edit_model::APP_SOURCE_PREFIX).into_boxed_str());
         let is_game = game_exe.as_deref().is_some_and(|g| level::same_exe(g, &exe));
         let id = if app.id.trim().is_empty() { format!("app-{}", n + 1) } else { app.id.trim().to_owned() };
-        let spec = SourceSpec { id, kind: "app".into(), device: String::new(), exe: exe.clone(), name: app.track_name(), gain_db: app.gain_db };
+        let spec = SourceSpec { communications: false, device_id: String::new(), id, kind: "app".into(), device: String::new(), exe: exe.clone(), name: app.track_name(), gain_db: app.gain_db, mic_mute: Some(false) };
         let ring = Arc::new(TrackRing::for_source(&spec, source, buffer_secs, format!("{exe} (not running)")));
         let name = ring.title();
         let (thread_ring, thread_scanner) = (Arc::clone(&ring), Arc::clone(&scanner));
@@ -144,7 +145,9 @@ pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, report
     out
 }
 
+/// At most one ring of silence (the leveller caps it too; this keeps the block small).
 fn push_silence(ring: &TrackRing, frames: u64) {
+    let frames = frames.min(ring.capacity_frames());
     if frames > 0 {
         ring.push_capture(&vec![0.0; frames as usize * ring.channels as usize], false);
     }
@@ -159,7 +162,7 @@ fn set_endpoint(ring: &TrackRing, text: String) {
 /// The game's own exe: the track stays (track count is stable) but holds silence.
 fn keep_silent(ring: &TrackRing) {
     let started = Instant::now();
-    let mut level = Leveller::new(ring.rate);
+    let mut level = Leveller::new(ring.rate).with_cap(ring.capacity_frames());
     loop {
         std::thread::sleep(Duration::from_millis(100));
         push_silence(ring, level.idle(started.elapsed()));
@@ -169,8 +172,9 @@ fn keep_silent(ring: &TrackRing) {
 /// The app's watcher thread: capture while it runs, silence while it does not.
 fn watch(ring: &TrackRing, exe: &str, scanner: &Scanner) {
     let _ = wasapi::initialize_mta();
+    super::stream::join_mmcss_audio(ring.name);
     let started = Instant::now();
-    let mut level = Leveller::new(ring.rate);
+    let mut level = Leveller::new(ring.rate).with_cap(ring.capacity_frames());
     let mut seen = 0;
     scanner.closed.fetch_add(1, Ordering::Relaxed);
     loop {
@@ -200,7 +204,16 @@ fn capture_while_running(ring: &TrackRing, pid: u32, level: &mut Leveller, start
     // Process-loopback clients have no device period; 20 ms as for the voice track.
     let mode = StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: 200_000 };
     client.initialize_client(&format, &Direction::Capture, &mode).map_err(|e| format!("initialize: {e}"))?;
-    let event = client.set_get_eventhandle().map_err(|e| e.to_string())?;
+    // Closed on drop (a bare wasapi `Handle` leaked one per app start), after the client.
+    let event = Event(client.set_get_eventhandle().map_err(|e| e.to_string())?);
+    let result = capture_events(ring, &mut client, &event, &process, level, started);
+    drop(client);
+    drop(event);
+    result
+}
+
+/// Capture `client`'s packets until `process` exits (`capture_while_running`).
+fn capture_events(ring: &TrackRing, client: &mut wasapi::AudioClient, event: &Event, process: &Process, level: &mut Leveller, started: Instant) -> Result<(), String> {
     let capture = client.get_audiocaptureclient().map_err(|e| e.to_string())?;
     client.start_stream().map_err(|e| e.to_string())?;
     let channels = ring.channels as usize;
@@ -208,7 +221,7 @@ fn capture_while_running(ring: &TrackRing, pid: u32, level: &mut Leveller, start
     let mut raw: VecDeque<u8> = VecDeque::new();
     let mut last_sound = Instant::now();
     while !process.exited() {
-        if event.wait_for_event(100).is_ok() && capture.read_from_device_to_deque(&mut raw).is_ok() && raw.len() >= block {
+        if event.0.wait_for_event(100).is_ok() && capture.read_from_device_to_deque(&mut raw).is_ok() && raw.len() >= block {
             let full = raw.len() - raw.len() % block;
             let samples: Vec<f32> = raw.drain(..full).collect::<Vec<u8>>().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
             ring.push_capture(&level.live(started.elapsed(), &samples, channels), false);

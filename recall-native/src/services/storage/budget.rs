@@ -4,6 +4,13 @@
 //! `visuals/<id>#editor` (poster + filmstrip) · `visuals/<id>#scrub` · `thumbs/<id>.jpg`.
 //! Everything else (working projects, settings, indexes, history, temp files) is counted
 //! but never evicted. The clip open in the editor is kept whole.
+//!
+//! Only what Recall made is a unit (`owned.rs`, `guard.rs`): a video or light copy needs its
+//! `<id>.mp4` name and an `owned.json` entry; an editor folder a 16-hex name and the engine's
+//! files (`clip.json`, stems), of which only those are deleted; visuals a 16-hex folder, of
+//! which only the `.jpg` frames are deleted; a thumbnail an `<id>.jpg` name. Anything else in
+//! those folders (a clip someone put there) is counted, never deleted, and a blocked cache
+//! deletes nothing at all.
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -12,6 +19,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use super::evict::{self, Tier, Unit};
+use super::owned::{self, is_id};
+use super::unit_files::{engine_folder, foreign_bytes, is_frame, is_thumb, remove_engine_folder, removed, size_of};
 
 /// Serializes index read-modify-writes and enforcement passes.
 pub(super) static INDEX_LOCK: Mutex<()> = Mutex::new(());
@@ -58,6 +67,9 @@ pub(super) struct Inventory {
     pub heads: u64,
     pub staged: u64,
     pub proxy: u64,
+    /// The recorder's leftover copies (`staging\kept\leaked\`): not cache and not in the
+    /// budget (RI3-4); shown in the SSD row and Settings on their own.
+    pub leaked: u64,
 }
 
 impl Inventory {
@@ -108,47 +120,79 @@ fn entries(dir: &Path) -> Vec<(String, std::fs::Metadata, PathBuf)> {
 
 /// Everything under `root`, each unit scored by `score(clip id)`.
 pub(super) fn inventory(root: &Path, score: &dyn Fn(&str) -> f64) -> Inventory {
+    inventory_with(root, score, &owned::listed(root))
+}
+
+/// What a budget pass would do, writing nothing (no `owned.json`, no first-run budget, no
+/// sweep): (files a first load would adopt, units the budget would evict). Scores come from the
+/// app's loaded library: outside the app (a tool, a test) every clip scores 0, so the evict
+/// order is tier and last use only.
+// Reached through `storage::plan_dry` (tests and tools; no Settings caller yet).
+#[allow(dead_code)]
+pub(super) fn plan_dry(root: &Path) -> (Vec<String>, Vec<String>) {
+    let (listed, adopt) = owned::peek(root);
+    if super::guard::blocked(root).is_some() {
+        return (adopt, Vec::new());
+    }
+    let inventory = inventory_with(root, &super::prefetch::score_of, &listed);
+    let budget = evict::read_settings(root).cache_budget_bytes.unwrap_or_else(|| {
+        let (free, total) = super::drive_info(root).map_or((0, 0), |info| (info.free, info.total));
+        evict::default_budget(free, total, super::drive::on_system_drive(root))
+    });
+    let evict = evict::plan(&inventory.units, inventory.projects + inventory.other, budget, budget / 2, 0, &kept());
+    (adopt, evict)
+}
+
+/// [`inventory`] against an explicit ownership list. Reads only.
+fn inventory_with(root: &Path, score: &dyn Fn(&str) -> f64, listed: &std::collections::BTreeSet<String>) -> Inventory {
     let video_index = evict::read_index(&root.join("video").join("lru.json"));
     let media = read_media(root);
+    let copy = |folder: &str, name: &str| owned::recall_mp4(name).is_some() && owned::owns(listed, folder, name);
     let mut units = Vec::new();
     let mut other = 0u64;
     let mut push = |tier: Tier, name: String, bytes: u64, last_used: u64| {
         let clip_score = unit_clip(&name, &media).map_or(0.0, score);
         units.push(Unit { tier, name, bytes, last_used, score: clip_score });
     };
-    for (name, metadata, _) in entries(&root.join("video")) {
-        if metadata.is_file() && name.ends_with(".mp4") {
+    for (name, metadata, path) in entries(&root.join("video")) {
+        if metadata.is_file() && copy("video", &name) {
             let last_used = video_index.get(&name).copied().unwrap_or_else(|| ms(metadata.created()));
             push(Tier::Video, format!("video/{name}"), metadata.len(), last_used);
-        } else if metadata.is_file() {
-            other += metadata.len();
+        } else {
+            other += size_of(&metadata, &path);
         }
     }
     // Light copies (`light.rs`) are video copies too: same tier, same cap, ranked by score.
-    for (name, metadata, _) in entries(&root.join("light")) {
-        if metadata.is_file() && name.ends_with(".mp4") {
+    for (name, metadata, path) in entries(&root.join("light")) {
+        if metadata.is_file() && copy("light", &name) {
             push(Tier::Video, format!("light/{name}"), metadata.len(), ms(metadata.modified()));
-        } else if metadata.is_file() {
-            other += metadata.len();
+        } else {
+            other += size_of(&metadata, &path);
         }
     }
     for (name, metadata, path) in entries(&root.join("editor")) {
-        if metadata.is_dir() {
+        if metadata.is_dir() && engine_folder(&name, &path) {
             let key = format!("editor/{name}");
             let (bytes, newest) = dir_size(&path);
             let last_used = media.used.get(&key).copied().unwrap_or(0).max(newest);
-            push(Tier::EditorMedia, key, bytes, last_used);
+            let foreign = foreign_bytes(&path);
+            push(Tier::EditorMedia, key, bytes.saturating_sub(foreign), last_used);
+            other += foreign;
         } else {
-            other += metadata.len();
+            other += size_of(&metadata, &path);
         }
     }
     for (id, metadata, path) in entries(&root.join("visuals")) {
-        if !metadata.is_dir() {
-            other += metadata.len();
+        if !metadata.is_dir() || !is_id(&id) {
+            other += size_of(&metadata, &path);
             continue;
         }
         let (mut editor, mut scrub) = ((0u64, 0u64), (0u64, 0u64));
-        for (name, file, _) in entries(&path) {
+        for (name, file, inner) in entries(&path) {
+            if !file.is_file() || !is_frame(&name) {
+                other += size_of(&file, &inner);
+                continue;
+            }
             let slot = if name.starts_with("scrub-") { &mut scrub } else { &mut editor };
             slot.0 += file.len();
             slot.1 = slot.1.max(ms(file.modified()));
@@ -161,9 +205,11 @@ pub(super) fn inventory(root: &Path, score: &dyn Fn(&str) -> f64) -> Inventory {
             push(Tier::Scrub, format!("visuals/{id}#scrub"), scrub.0, scrub.1);
         }
     }
-    for (name, metadata, _) in entries(&root.join("thumbs")) {
-        if metadata.is_file() {
+    for (name, metadata, path) in entries(&root.join("thumbs")) {
+        if metadata.is_file() && is_thumb(&name) {
             push(Tier::Thumb, format!("thumbs/{name}"), metadata.len(), ms(metadata.modified()));
+        } else {
+            other += size_of(&metadata, &path);
         }
     }
     let projects = dir_size(&root.join("projects")).0;
@@ -171,37 +217,39 @@ pub(super) fn inventory(root: &Path, score: &dyn Fn(&str) -> f64) -> Inventory {
     // Clip heads from the filter probe (`head.rs`): at most a few hundred MB, never evicted.
     let heads = dir_size(&root.join("heads")).0;
     // The recorder's kept copies waiting to be adopted (`kept.rs`, up to 2 GiB): they hold SSD
-    // space the budget has to leave room for.
-    let staged = dir_size(&root.join("staging").join("kept")).0;
+    // space the budget has to leave room for. Leftover copies in `kept\leaked\` are the
+    // user's to decide about (Settings), not cache: they don't hold the budget (RI3-4).
+    let kept_dir = root.join("staging").join("kept");
+    let leaked = dir_size(&kept_dir.join("leaked")).0;
+    let staged = dir_size(&kept_dir).0.saturating_sub(leaked);
     // Preview copies (`proxy.rs`: today's failure proxies, light copies after it).
     let proxy = dir_size(&root.join("proxy")).0;
     other += heads + staged + proxy;
-    for file in ["storage.json", "media.json", "interactions.json"] {
+    for file in ["storage.json", "media.json", "interactions.json", "owned.json"] {
         other += root.join(file).metadata().map_or(0, |m| m.len());
     }
-    Inventory { units, projects, other, transient, heads, staged, proxy }
+    Inventory { units, projects, other, transient, heads, staged, proxy, leaked }
 }
 
-/// Deletes one unit; returns the bytes actually freed (files still open are skipped).
+/// Deletes one unit; returns the bytes actually freed (files still open are skipped). Each
+/// kind is checked again here (name, `owned.json`, the guard): nothing else is ever deleted.
 pub(super) fn delete(root: &Path, unit: &Unit) -> u64 {
+    if super::guard::blocked(root).is_some() {
+        return 0;
+    }
     let (folder, rest) = unit.name.split_once('/').unwrap_or(("", &unit.name));
-    let removed = |path: &Path| -> u64 {
-        let bytes = path.metadata().map_or(0, |m| m.len());
-        if std::fs::remove_file(path).is_ok() { bytes } else { 0 }
-    };
     match (folder, rest.split_once('#')) {
-        ("video" | "light" | "thumbs", None) => removed(&root.join(folder).join(rest)),
-        ("editor", None) => {
-            let dir = root.join("editor").join(rest);
-            let before = dir_size(&dir).0;
-            let _ = std::fs::remove_dir_all(&dir);
-            before.saturating_sub(dir_size(&dir).0)
+        ("video" | "light", None) => {
+            let bytes = root.join(folder).join(rest).metadata().map_or(0, |m| m.len());
+            if owned::recall_mp4(rest).is_some() && owned::remove(root, folder, rest) { bytes } else { 0 }
         }
-        ("visuals", Some((id, part))) => {
+        ("thumbs", None) if is_thumb(rest) => removed(&root.join(folder).join(rest)),
+        ("editor", None) if is_id(rest) => remove_engine_folder(&root.join("editor").join(rest)),
+        ("visuals", Some((id, part))) if is_id(id) => {
             let dir = root.join("visuals").join(id);
             let freed = entries(&dir)
                 .iter()
-                .filter(|(name, _, _)| name.starts_with("scrub-") == (part == "scrub"))
+                .filter(|(name, file, _)| file.is_file() && is_frame(name) && name.starts_with("scrub-") == (part == "scrub"))
                 .map(|(_, _, path)| removed(path))
                 .sum();
             let _ = std::fs::remove_dir(&dir); // only succeeds once empty
@@ -221,13 +269,13 @@ pub(super) const ORPHAN_THUMB_AGE: std::time::Duration = std::time::Duration::fr
 /// Deletes `thumbs\<id>.jpg` files whose id is not in `owned` and that are older than `age`.
 /// Does nothing for an empty list (a listing that found no clips proves nothing). Returns bytes freed.
 pub(super) fn sweep_orphan_thumbs(root: &Path, owned: &std::collections::HashSet<String>, age: std::time::Duration) -> u64 {
-    if owned.is_empty() {
+    if owned.is_empty() || super::guard::blocked(root).is_some() {
         return 0;
     }
     let _guard = INDEX_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let mut freed = 0;
     for (name, metadata, path) in entries(&root.join("thumbs")) {
-        let Some(id) = name.strip_suffix(".jpg") else { continue };
+        let Some(id) = name.strip_suffix(".jpg").filter(|id| is_id(id)) else { continue };
         let old = metadata.modified().ok().and_then(|t| t.elapsed().ok()).is_some_and(|elapsed| elapsed >= age);
         if metadata.is_file() && old && !owned.contains(id) && std::fs::remove_file(&path).is_ok() {
             freed += metadata.len();
@@ -240,11 +288,21 @@ pub(super) fn sweep_orphan_thumbs(root: &Path, owned: &std::collections::HashSet
 }
 
 pub(super) fn enforce(root: &Path, budget: u64, incoming_video: u64) -> u64 {
+    if super::guard::blocked(root).is_some() {
+        return 0;
+    }
     let _guard = INDEX_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let swept = sweep_old_stems_once(root);
     let inventory = inventory(root, &super::prefetch::score_of);
     let keep = kept();
-    let evicted = evict::plan(&inventory.units, inventory.projects + inventory.other, budget, budget / 2, incoming_video, &keep);
+    // storage.json can't be read (RI2-2): the budget is a guess, so nothing already cached goes.
+    let (budget, video_cap) = if super::video::budget_note(root).is_some() {
+        let held = budget.max(inventory.total().saturating_add(incoming_video));
+        (held, (held / 2).max(inventory.tier_bytes(Tier::Video).saturating_add(incoming_video)))
+    } else {
+        (budget, budget / 2)
+    };
+    let evicted = evict::plan(&inventory.units, inventory.projects + inventory.other, budget, video_cap, incoming_video, &keep);
     swept + remove(root, &inventory, &evicted)
 }
 
@@ -269,20 +327,23 @@ fn sweep_old_stems_once(root: &Path) -> u64 {
 /// re-prepares when it opens. `keep` (the clip in the editor) is never touched. Returns bytes
 /// freed. Call with [`INDEX_LOCK`] held.
 pub(super) fn sweep_old_stems(root: &Path, keep: &[String]) -> u64 {
+    if super::guard::blocked(root).is_some() {
+        return 0;
+    }
     let editor_root = root.join("editor");
     let mut media = read_media(root);
     let mut freed = 0;
     for (name, metadata, path) in entries(&editor_root) {
         // Only the engine's own stem folders (they hold its clip.json), whatever the cache path.
         let old = metadata.is_dir()
+            && is_id(&name)
             && path.join("clip.json").is_file()
             && std::fs::read_dir(&path).is_ok_and(|listing| listing.flatten().any(|entry| entry.path().extension().is_some_and(|x| x.eq_ignore_ascii_case("wav"))));
         if !old || keep.contains(&format!("editor/{name}")) {
             continue;
         }
-        let bytes = dir_size(&path).0;
-        if std::fs::remove_dir_all(&path).is_ok() {
-            freed += bytes;
+        freed += remove_engine_folder(&path);
+        if !path.exists() {
             media.used.remove(&format!("editor/{name}"));
             media.owners.remove(&name);
         }
@@ -298,6 +359,9 @@ pub(super) fn sweep_old_stems(root: &Path, keep: &[String]) -> u64 {
 /// within `limit` (the budget minus the warm-up margin) and the video cap, by deleting only
 /// video copies scored strictly lower ([`evict::room_below`]). False: nothing deleted.
 pub(super) fn room_below(root: &Path, budget: u64, limit: u64, incoming: u64, score: f64) -> bool {
+    if super::guard::blocked(root).is_some() {
+        return false;
+    }
     let _guard = INDEX_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     let inventory = inventory(root, &super::prefetch::score_of);
     let fixed = inventory.projects + inventory.other;
@@ -314,7 +378,7 @@ pub(super) fn room_below(root: &Path, budget: u64, limit: u64, incoming: u64, sc
 /// nothing opens these again), never their video copies or thumbnails, and nothing of the
 /// clip open in the editor. Returns bytes freed.
 pub(super) fn drop_previews(root: &Path, ids: &std::collections::HashSet<String>) -> u64 {
-    if ids.is_empty() {
+    if ids.is_empty() || super::guard::blocked(root).is_some() {
         return 0;
     }
     let _guard = INDEX_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -400,8 +464,8 @@ fn drop_wav_stems(editor_root: &Path, id: &str, current: &[String], media: &mut 
         return;
     }
     let stale: Vec<String> = media.owners.iter().filter(|(name, owner)| *owner == id && !fresh.contains(&name.as_str()) && holds(name, "wav")).map(|(name, _)| name.clone()).collect();
-    for name in stale {
-        let _ = std::fs::remove_dir_all(editor_root.join(&name));
+    for name in stale.into_iter().filter(|name| is_id(name)) {
+        remove_engine_folder(&editor_root.join(&name));
         media.used.remove(&format!("editor/{name}"));
         media.owners.remove(&name);
     }

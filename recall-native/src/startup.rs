@@ -27,6 +27,9 @@ fn process_created() -> SystemTime {
 }
 
 fn timeline() -> Option<&'static Timeline> {
+    if crate::TESTING {
+        return None;
+    }
     TIMELINE
         .get_or_init(|| {
             let path = std::env::var_os("RECALL_NATIVE_STARTUP")?;

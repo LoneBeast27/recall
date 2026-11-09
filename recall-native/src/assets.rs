@@ -18,6 +18,7 @@ icons!(
     "power", "redo", "refresh", "repeat", "scissors", "search", "set-in", "set-out", "settings",
     "sliders", "square", "square-check", "star", "star-fill", "sun", "trash", "undo", "upload",
     "volume", "volume-x", "win-close", "win-max", "win-min", "win-restore", "x",
+    "discord", "obsstudio", "spotify", "steam",
 );
 
 pub struct Assets;

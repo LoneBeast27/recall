@@ -125,7 +125,7 @@ fn card_for(key: &str) -> (CardLayout, f32, f32, Option<f32>) {
     let (fonts, spots) = (crate::fonts::Fonts::new().unwrap(), Spots::embedded());
     let (spot, hud) = (spots.lookup(key), spots.hud(key));
     let qhd = Rect { left: 0, top: 0, right: 2560, bottom: 1440 };
-    let s = scale(1440, &spot);
+    let s = scale(&Rect { left: 0, top: 0, right: 2560, bottom: 1440 }, &spot);
     let cover = |w: f32, h: f32| card_cover(&spot, hud.as_deref(), &qhd, s, (w, h), (ISLAND_H + GAP) * s);
     let card = choose_card(&hint(), s, &fonts, cover);
     (card.layout, card.w, card.h, cover(card.w, card.h))
@@ -151,7 +151,7 @@ fn every_scanned_game_gets_a_clean_card_or_the_least_covered_one() {
     let qhd = Rect { left: 0, top: 0, right: 2560, bottom: 1440 };
     for key in spots.keys() {
         let (spot, hud) = (spots.lookup(key), spots.hud(key));
-        let s = scale(1440, &spot);
+        let s = scale(&Rect { left: 0, top: 0, right: 2560, bottom: 1440 }, &spot);
         let cover = |card: &CardScene| card_cover(&spot, hud.as_deref(), &qhd, s, (card.w, card.h), (ISLAND_H + GAP) * s).unwrap();
         let all = [CardLayout::Dropdown, CardLayout::TwoColumn, CardLayout::Row].map(|layout| card_scene(&hint(), layout, s, &fonts));
         let chosen = card_for(key);

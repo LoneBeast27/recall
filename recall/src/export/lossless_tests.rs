@@ -184,3 +184,22 @@ fn lossless_export_is_faststart_and_reports_its_bytes() {
     super::test_media::assert_faststart(&path);
     assert_eq!(report.bytes, std::fs::metadata(&path).unwrap().len());
 }
+
+/// An HEVC recording trimmed losslessly keeps the `hvc1` sample entry the recorder writes:
+/// FFmpeg's default `hev1` does not play through Media Foundation (Recall's player, Photos).
+#[test]
+fn lossless_hevc_trim_is_tagged_hvc1_for_media_foundation() {
+    let spec = Spec { codec: "libx265", ..Spec::default() };
+    let Some(clip) = synth("lossless-hevc", &spec) else {
+        eprintln!("libx265 missing in this FFmpeg build; skipped");
+        return;
+    };
+    let plan = EditPlan { mix_down: None, ranges: vec![TimeRange::new(1.0, 3.0)], audio: vec![] };
+    lossless(&clip, "hevc.mp4", &plan).unwrap();
+    let output = ff::format::input(&clip.output("hevc.mp4")).unwrap();
+    let video = output.streams().best(ff::media::Type::Video).unwrap();
+    assert_eq!(video.parameters().id(), ff::codec::Id::HEVC);
+    // SAFETY: reading a plain field of a live stream's codecpar.
+    let tag = unsafe { (*video.parameters().as_ptr()).codec_tag };
+    assert_eq!(&tag.to_le_bytes(), b"hvc1", "video sample entry");
+}

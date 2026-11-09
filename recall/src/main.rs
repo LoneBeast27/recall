@@ -11,6 +11,26 @@
 //! stdin). See `protocol.rs`. The per-redraw [`App`] work lives in
 //! `app_tick.rs`, the export worker in `export_worker.rs`.
 
+/// The engine's `eprintln!`: written if it can be, never a panic (`stderr_log`).
+/// Defined before every module so it shadows std's for the whole crate; the
+/// controller's stderr pipe closes when it dies, and std's would panic then.
+/// Outside tests `quiet_io`'s (below) shadows it everywhere.
+#[cfg(test)]
+macro_rules! eprintln {
+    () => {
+        $crate::stderr_log::line(format_args!(""))
+    };
+    ($($arg:tt)*) => {
+        $crate::stderr_log::line(format_args!($($arg)*))
+    };
+}
+
+#[cfg(test)]
+mod stderr_log;
+// Next: its non-panicking `println!` / `eprintln!` (stdout/stderr failure handling) shadow
+// std's and the one above in every module below; test builds keep the `stderr_log` one.
+#[macro_use]
+mod quiet_io;
 mod app_tick;
 #[cfg(feature = "encode")]
 mod audio;
@@ -19,8 +39,11 @@ mod audio_clock;
 mod bookmarks;
 mod border;
 mod capture;
+mod capture_watchdog;
 mod cpu_mask;
+mod engine_args;
 mod engine_extras;
+mod engine_stdin;
 #[cfg(feature = "encode")]
 mod longrec;
 mod naming;
@@ -42,15 +65,25 @@ mod gpu;
 #[cfg(feature = "encode")]
 mod gpu_frames;
 mod gpu_route;
+#[cfg(test)]
+mod hw_skip;
+mod image_path;
 mod hdr;
 mod hud_probe;
 mod hybrid_gpu;
 mod protocol;
 mod ring;
+mod shutdown_order;
 mod single_instance;
 mod spill;
+mod stdin_reader;
+mod file_id;
+mod win_volume;
 mod thread_qos;
 mod source;
+mod stdin_commands;
+#[cfg(test)]
+mod test_alloc;
 
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::{Arc, Mutex};
@@ -64,6 +97,7 @@ use winit::platform::windows::WindowAttributesExtWindows;
 use winit::window::{Window, WindowId};
 
 use crate::capture::{CaptureControlHandle, CaptureShared};
+use crate::engine_args::{parse_args, Args, Config, USAGE};
 #[cfg(feature = "encode")]
 use crate::export_worker::{run_export, spawn_export_worker};
 use crate::gpu::Gpu;
@@ -77,18 +111,6 @@ const PERIODIC: Duration = Duration::from_secs(1);
 /// Event-loop tick while frames take the GPU path (quit, screenshots, status).
 const IDLE_TICK: Duration = Duration::from_millis(50);
 
-/// Parsed command-line config.
-#[derive(Default, Clone)]
-struct Config {
-    json: bool,
-    monitor: Option<usize>,
-    encoder_smoke: Option<String>,
-    gpu_smoke: Option<String>,
-    export_cfr: Option<(String, String, u32)>,
-    prepare_editor: Option<(String, String)>,
-    export_edit: Option<(String, String, u32, String)>,
-}
-
 /// What this build answers to, for the app to read from the program file without running it
 /// (a build that does not know a command starts as a recorder and never returns). Only `encode`
 /// builds carry it: without encode neither command works.
@@ -96,61 +118,11 @@ struct Config {
 #[used]
 static ENGINE_CAPS: [u8; 46] = *b"recall-engine-caps:prepare-editor,export-edit;";
 
-const USAGE: &str = "usage: recall [--json] [--monitor N]   (records; one engine per user)
-       recall --prepare-editor INPUT CACHE_DIR
-       recall --export-edit INPUT OUTPUT FPS PROJECT.json [--json]
-       recall --export-cfr INPUT OUTPUT [FPS] [--json]
-       recall --encoder-smoke DIR | --gpu-smoke DIR
-       recall --help";
-
-/// What the command line asks for.
-enum Args {
-    Run(Config),
-    Help,
-    Bad(String),
-}
-
-fn parse_args() -> Args {
-    parse_args_from(std::env::args().skip(1))
-}
-
-/// Unknown arguments are refused: an engine that ignored them would start recording.
-fn parse_args_from(args: impl IntoIterator<Item = String>) -> Args {
-    let mut cfg = Config::default();
-    let mut args = args.into_iter();
-    while let Some(a) = args.next() {
-        match a.as_str() {
-            "--json" => cfg.json = true,
-            "--encoder-smoke" => cfg.encoder_smoke = args.next(),
-            "--gpu-smoke" => cfg.gpu_smoke = args.next(),
-            "--prepare-editor" => {
-                cfg.prepare_editor = Some((args.next().unwrap_or_default(), args.next().unwrap_or_default()));
-            }
-            "--export-edit" => {
-                let input = args.next().unwrap_or_default();
-                let output = args.next().unwrap_or_default();
-                let fps = args.next().and_then(|s| s.parse().ok()).unwrap_or(60);
-                let project = args.next().unwrap_or_default();
-                cfg.export_edit = Some((input, output, fps, project));
-            }
-            "--export-cfr" => {
-                let input = args.next().unwrap_or_default();
-                let output = args.next().unwrap_or_default();
-                let fps = args.next().map(|s| s.parse().unwrap_or(0)).unwrap_or(60);
-                cfg.export_cfr = Some((input, output, fps));
-            }
-            "--monitor" => cfg.monitor = args.next().and_then(|v| v.parse().ok()),
-            "--help" | "-h" | "/?" | "-?" => return Args::Help,
-            other => return Args::Bad(format!("unknown argument '{other}'")),
-        }
-    }
-    Args::Run(cfg)
-}
-
 /// How long a new recorder waits for an engine that is still ending (a restart).
 const ENGINE_WAIT: Duration = Duration::from_secs(3);
-/// Exit code when another engine already records.
-const EXIT_ALREADY_RUNNING: i32 = 3;
+/// Exit code when another engine already records (recall-hdr `engine_policy::EXIT_SLOT_BUSY`:
+/// retried, not a crash). 86 collides with nothing common: not abort() (3), not a panic (101).
+const EXIT_ALREADY_RUNNING: i32 = 86;
 
 /// Claims the recorder guard. Only the recorder takes it: one-shot commands (prepare,
 /// export, smoke tests) run beside a recording engine.
@@ -165,6 +137,7 @@ fn claim_recorder(json: bool) -> Option<single_instance::Guard> {
     match single_instance::claim_within(&single_instance::mutex_name(single_instance::ENGINE), ENGINE_WAIT) {
         single_instance::Claim::First(guard) => Some(guard),
         single_instance::Claim::Taken => {
+            // The controller logs this once a minute while it retries (`engine_slot`).
             say("another Recall engine is already recording; exiting".into());
             std::process::exit(EXIT_ALREADY_RUNNING);
         }
@@ -186,6 +159,8 @@ struct App {
     gpu: Option<Gpu>,
     shared: Option<Arc<CaptureShared>>,
     capture: Option<CaptureControlHandle>,
+    /// Retry / restart backoff for a capture that failed or died (`capture_watchdog`).
+    capture_watch: capture_watchdog::Backoff,
     source_name: String,
     /// Source name mirror for the stdin thread's save-path naming.
     source_shared: Arc<Mutex<String>>,
@@ -246,6 +221,11 @@ impl ApplicationHandler for App {
         };
 
         let shared = CaptureShared::new();
+        // Before any audio track opens (merge gate p9): the spawn mute, then stdin, so an Alt+M
+        // sent right after the spawn mutes the first samples (`engine_stdin`).
+        #[cfg(feature = "encode")]
+        audio::apply_spawn_mute();
+        let early_stdin = self.config.json.then(|| engine_stdin::spawn_early(shared.clone()));
 
         // RECALL_MODE back-compat -> mode selector.
         if let Ok(m) = std::env::var("RECALL_MODE") {
@@ -289,7 +269,7 @@ impl ApplicationHandler for App {
             });
             let track_infos = tracks
                 .iter()
-                .map(|t| longrec::TrackInfo { name: t.name, rate: t.rate, channels: t.channels, boosted: t.boosted() })
+                .map(|t| longrec::TrackInfo { name: t.name, rate: t.rate, channels: t.channels })
                 .collect();
             self.longrec = Some(Arc::new(longrec::spawn(out_dir.clone(), json, track_infos)));
             longrec::recover_parts(out_dir.clone(), json);
@@ -340,8 +320,11 @@ impl ApplicationHandler for App {
                 version: env!("CARGO_PKG_VERSION").to_string(),
                 monitors: capture::list_monitors(),
                 live_sources: true,
+                live_source_fields: true,
             });
-            spawn_stdin_reader(shared.clone(), save_hook, export_hook, extras);
+        }
+        if let Some(early) = early_stdin {
+            engine_stdin::serve(early, shared.clone(), (save_hook, export_hook), extras);
         }
 
         self.source_name = std::env::var("RECALL_CAPTURE_NAME").unwrap_or_else(|_| INITIAL_TITLE.trim_end_matches(" SDR").to_string());
@@ -395,76 +378,6 @@ impl ApplicationHandler for App {
     }
 }
 
-/// Read newline-delimited JSON commands from stdin and apply them to shared
-/// state. `save` triggers a replay-buffer save (None when encode is off).
-fn spawn_stdin_reader(
-    shared: Arc<CaptureShared>,
-    save: Option<SaveHook>,
-    export: Option<ExportHook>,
-    extras: engine_extras::Extras,
-) {
-    std::thread::spawn(move || {
-        use std::io::BufRead;
-        let stdin = std::io::stdin();
-        for line in stdin.lock().lines() {
-            let Ok(line) = line else { break };
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            match serde_json::from_str::<protocol::Command>(line) {
-                Ok(protocol::Command::SetMode { value }) => shared.set_select(&value),
-                Ok(protocol::Command::SaveClip { seconds, at_last_frame }) => match &save {
-                    Some(hook) => hook(seconds, at_last_frame),
-                    None => protocol::emit(&protocol::Outbound::SaveFailed {
-                        reason: "engine built without the encode feature".to_string(),
-                    }),
-                },
-                Ok(protocol::Command::ExportClip { path, output, fps, edit }) => match &export {
-                    Some(hook) => hook(path, output, fps, edit),
-                    None => protocol::emit(&protocol::Outbound::ExportFailed {
-                        source: path,
-                        reason: "engine built without export support".into(),
-                    }),
-                },
-                Ok(protocol::Command::ToggleMicMute) => {
-                    #[cfg(feature="encode")]
-                    protocol::emit(&protocol::Outbound::MicMuted { muted: audio::toggle_mic_mute() });
-                }
-                Ok(protocol::Command::SetMicMute { muted }) => {
-                    #[cfg(feature="encode")]
-                    { audio::set_mic_muted(muted); protocol::emit(&protocol::Outbound::MicMuted { muted }); }
-                }
-                Ok(protocol::Command::SetSource { id, gain_db, name }) => {
-                    #[cfg(feature="encode")]
-                    {
-                        if !audio::sources::set_live(&id, gain_db, name.as_deref()) {
-                            eprintln!("[recall] set_source: no live track '{id}'");
-                        }
-                    }
-                    #[cfg(not(feature="encode"))]
-                    let _ = (id, gain_db, name);
-                }
-                Ok(
-                    cmd @ (protocol::Command::Bookmark
-                    | protocol::Command::Screenshot
-                    | protocol::Command::HudProbe
-                    | protocol::Command::RecordStart
-                    | protocol::Command::RecordStop
-                    | protocol::Command::RecordToggle),
-                ) => {
-                    extras.handle(&cmd);
-                }
-                Ok(protocol::Command::Quit) => {
-                    shared.quit.store(true, Relaxed);
-                    break;
-                }
-                Err(_) => {} // ignore malformed lines
-            }
-        }
-    });
-}
-
 fn main() {
     #[cfg(feature = "encode")]
     std::hint::black_box(&ENGINE_CAPS); // survives release linking whatever `#[used]` keeps
@@ -489,7 +402,7 @@ fn main() {
     #[cfg(feature = "encode")]
     if let Some((ref input, ref cache)) = config.prepare_editor {
         match editor_media::prepare_clip(input, cache) {
-            Ok(info) => { println!("{}", serde_json::to_string(&info).expect("serialize media info")); return; }
+            Ok(info) => { use std::io::Write as _; let _ = writeln!(std::io::stdout(), "{}", serde_json::to_string(&info).expect("serialize media info")); return; }
             Err(e) => { eprintln!("prepare editor: {e}"); std::process::exit(1); }
         }
     }
@@ -542,6 +455,8 @@ fn main() {
     }
     // Held until the process ends: Windows frees it then, after a crash too.
     let _instance = claim_recorder(config.json);
+    // Asked to end after the controller at sign-out / shutdown: it holds the session for a save.
+    shutdown_order::apply();
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     let mut app = App {
@@ -551,7 +466,8 @@ fn main() {
     event_loop.run_app(&mut app).expect("run app");
     // Quit: finalize a running long recording first (a kill after this point
     // leaves a `.part` that the next start recovers), then let an in-flight
-    // save finish (or remove its .part) inside the supervisor's grace.
+    // save finish (or remove its .part) inside the supervisor's grace. An engine whose
+    // controller vanished (stdin ended with no `quit`) lets its saves finish instead.
     #[cfg(feature = "encode")]
     if let Some(longrec) = app.longrec.take() {
         longrec.shutdown(std::time::Duration::from_millis(1500));
@@ -565,36 +481,6 @@ fn main() {
     }
     #[cfg(feature = "encode")]
     if let Some(encoder) = app.encoder.take() {
-        encoder.shutdown(std::time::Duration::from_secs(3));
-    }
-}
-
-#[cfg(test)]
-mod args_tests {
-    use super::{parse_args_from, Args};
-
-    fn parse(args: &[&str]) -> Args {
-        parse_args_from(args.iter().map(|a| a.to_string()))
-    }
-
-    #[test]
-    fn the_commands_scripts_and_the_app_send_still_parse() {
-        assert!(matches!(parse(&[]), Args::Run(_)));
-        assert!(matches!(parse(&["--json"]), Args::Run(c) if c.json));
-        assert!(matches!(parse(&["--export-edit", "in.mp4", "out.mp4", "60", "p.json", "--json"]), Args::Run(c) if c.json && c.export_edit.is_some()));
-        assert!(matches!(parse(&["--prepare-editor", "in.mp4", "cache"]), Args::Run(c) if c.prepare_editor.is_some()));
-        assert!(matches!(parse(&["--export-cfr", "in.mp4", "out.mp4", "30"]), Args::Run(c) if c.export_cfr.is_some()));
-        assert!(matches!(parse(&["--gpu-smoke", "dir"]), Args::Run(c) if c.gpu_smoke.is_some()));
-        assert!(matches!(parse(&["--monitor", "1"]), Args::Run(c) if c.monitor == Some(1)));
-    }
-
-    #[test]
-    fn help_and_unknown_arguments_never_reach_the_recorder() {
-        for flag in ["--help", "-h", "/?", "-?"] {
-            assert!(matches!(parse(&[flag]), Args::Help), "{flag}");
-        }
-        assert!(matches!(parse(&["--json", "--help"]), Args::Help));
-        assert!(matches!(parse(&["--recrod"]), Args::Bad(why) if why.contains("--recrod")));
-        assert!(matches!(parse(&["stray"]), Args::Bad(_)));
+        encoder.shutdown(std::time::Duration::from_secs(3), stdin_reader::orphaned());
     }
 }

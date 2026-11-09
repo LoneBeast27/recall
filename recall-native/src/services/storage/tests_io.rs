@@ -289,19 +289,19 @@ fn orphan_thumbnails_go_once_old_and_owned_ones_stay() {
     let thumbs = root.join("thumbs");
     std::fs::create_dir_all(&thumbs).unwrap();
     let month_ago = SystemTime::now() - std::time::Duration::from_secs(40 * 24 * 3600);
-    for (name, old) in [("owned.jpg", true), ("orphan-old.jpg", true), ("orphan-new.jpg", false)] {
+    for (name, old) in [("000000000000000a.jpg", true), ("000000000000000b.jpg", true), ("000000000000000c.jpg", false)] {
         std::fs::write(thumbs.join(name), [0u8; 100]).unwrap();
         if old {
             std::fs::File::options().write(true).open(thumbs.join(name)).unwrap().set_modified(month_ago).unwrap();
         }
     }
-    let owned: std::collections::HashSet<String> = ["owned".to_string()].into();
+    let owned: std::collections::HashSet<String> = ["000000000000000a".to_string()].into();
     assert_eq!(budget::sweep_orphan_thumbs(&root, &owned, budget::ORPHAN_THUMB_AGE), 100);
-    assert!(thumbs.join("owned.jpg").exists(), "a listed clip keeps its thumbnail");
-    assert!(!thumbs.join("orphan-old.jpg").exists(), "an old orphan goes");
-    assert!(thumbs.join("orphan-new.jpg").exists(), "a recent orphan stays (its drive may be offline)");
+    assert!(thumbs.join("000000000000000a.jpg").exists(), "a listed clip keeps its thumbnail");
+    assert!(!thumbs.join("000000000000000b.jpg").exists(), "an old orphan goes");
+    assert!(thumbs.join("000000000000000c.jpg").exists(), "a recent orphan stays (its drive may be offline)");
     assert_eq!(budget::sweep_orphan_thumbs(&root, &Default::default(), std::time::Duration::ZERO), 0, "an empty listing deletes nothing");
-    assert!(thumbs.join("orphan-new.jpg").exists());
+    assert!(thumbs.join("000000000000000c.jpg").exists());
     let _ = std::fs::remove_dir_all(root);
 }
 
@@ -317,11 +317,11 @@ fn a_listing_is_complete_only_when_every_folder_was_read() {
     std::fs::write(imported.join("b.mp4"), b"x").unwrap();
     let text = |p: &std::path::Path| p.to_string_lossy().into_owned();
     crate::services::library::folders::forget_scans();
-    let (clips, complete) = crate::backend::list_from(&recordings, &[text(&imported)]).unwrap();
+    let (clips, complete) = crate::backend::list_from(&recordings, &[text(&imported)], &[]).unwrap();
     assert_eq!((clips.len(), complete), (2, true), "both folders read whole");
-    let (_, complete) = crate::backend::list_from(&root.join("offline-recordings"), &[text(&imported)]).unwrap();
+    let (_, complete) = crate::backend::list_from(&root.join("offline-recordings"), &[text(&imported)], &[]).unwrap();
     assert!(!complete, "a missing recordings folder makes the listing partial");
-    let (clips, complete) = crate::backend::list_from(&recordings, &[text(&root.join("offline-import"))]).unwrap();
+    let (clips, complete) = crate::backend::list_from(&recordings, &[text(&root.join("offline-import"))], &[]).unwrap();
     assert_eq!((clips.len(), complete), (1, false), "a missing imported folder makes the listing partial");
     crate::services::library::folders::forget_scans();
     let _ = std::fs::remove_dir_all(root);

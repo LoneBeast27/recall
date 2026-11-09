@@ -10,8 +10,8 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 const GIB: u64 = 1 << 30;
-/// The first-run budget is at most this (2026-11-02: 20 GiB, so recently opened clips and the
-/// idle warm-up have room)...
+/// The first-run budget off the system drive is at most this (2026-11-02: 20 GiB, so recently
+/// opened clips and the idle warm-up have room)...
 pub const DEFAULT_CACHE_BUDGET: u64 = 20 * GIB;
 /// ...and at most this share of the cache drive's free space...
 pub const DEFAULT_FREE_SHARE_PERCENT: u64 = 25;
@@ -21,10 +21,15 @@ pub const DEFAULT_KEEP_FREE_PERCENT: u64 = 10;
 pub const MIN_CACHE_BUDGET: u64 = 2 * GIB;
 
 /// The budget a first run picks (no `storage.json` yet) on a cache drive with `free` of
-/// `total` bytes: the smallest of [`DEFAULT_CACHE_BUDGET`], [`DEFAULT_FREE_SHARE_PERCENT`] of
-/// `free`, and `free` less [`DEFAULT_KEEP_FREE_PERCENT`] of `total`, in whole GiB, at least
-/// [`MIN_CACHE_BUDGET`].
-pub(super) fn default_budget(free: u64, total: u64) -> u64 {
+/// `total` bytes. On the system drive it is [`MIN_CACHE_BUDGET`] (Rohan 2026-11-03: "keep the
+/// cache on C: at 2 GB"; the engine's `kept\` copies count inside it). Elsewhere: the smallest
+/// of [`DEFAULT_CACHE_BUDGET`], [`DEFAULT_FREE_SHARE_PERCENT`] of `free`, and `free` less
+/// [`DEFAULT_KEEP_FREE_PERCENT`] of `total`, in whole GiB, at least [`MIN_CACHE_BUDGET`].
+/// A budget already in `storage.json` is never replaced by this.
+pub(super) fn default_budget(free: u64, total: u64, system_drive: bool) -> u64 {
+    if system_drive {
+        return MIN_CACHE_BUDGET;
+    }
     let percent = |bytes: u64, share: u64| (u128::from(bytes) * u128::from(share) / 100) as u64;
     let share = percent(free, DEFAULT_FREE_SHARE_PERCENT);
     let spare = free.saturating_sub(percent(total, DEFAULT_KEEP_FREE_PERCENT));
@@ -144,13 +149,55 @@ pub(super) fn write_index(path: &Path, index: &BTreeMap<String, u64>) -> Result<
 pub(super) struct Settings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cache_budget_bytes: Option<u64>,
+    /// `true` beside a budget the first run picked (`video::budget_in`); absent once the user
+    /// sets one in Settings. A budget without it may be the user's and is never changed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_run: Option<bool>,
 }
 
+/// What `storage.json` held when it was read.
+pub(super) enum Stored {
+    /// No file: a first run.
+    Absent,
+    Read(Settings),
+    /// Present but locked, unreadable or not JSON: the user's budget may be in it (a scan or a
+    /// sync client holding it, a write still under way), so nothing writes over it; the caller
+    /// uses the default in memory and the next read tries again. A file that is not JSON is
+    /// copied to a dated `storage.json.bad-*` first (once; never on a lock).
+    Unusable(String),
+    /// Not JSON, and a `.bad` copy of it exists: Settings may offer "Reset cache size".
+    Damaged(String),
+}
+
+pub(super) fn load_settings(root: &Path) -> Stored {
+    let path = root.join("storage.json");
+    match std::fs::read(&path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Stored::Absent,
+        Err(error) => Stored::Unusable(format!("storage.json could not be read ({error})")),
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(settings) => Stored::Read(settings),
+            Err(error) => {
+                match crate::services::durable::quarantine(&path, std::time::SystemTime::now(), crate::services::durable::Keep::Copy) {
+                    Some(kept) => Stored::Damaged(format!("storage.json is damaged ({error}); a copy is kept as {}", kept.display())),
+                    None => Stored::Unusable(format!("storage.json is damaged ({error}) and could not be backed up")),
+                }
+            }
+        },
+    }
+}
+
+/// The settings, or the defaults when there are none or they can't be read ([`load_settings`]).
 pub(super) fn read_settings(root: &Path) -> Settings {
-    std::fs::read(root.join("storage.json")).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok()).unwrap_or_default()
+    match load_settings(root) {
+        Stored::Read(settings) => settings,
+        Stored::Absent | Stored::Unusable(_) | Stored::Damaged(_) => Settings::default(),
+    }
 }
 
+/// Durable (tmp, `sync_all`, rename: `durable::write_durable`): a crash can't leave storage.json
+/// NUL-filled, which made the budget unknown (RI3-1).
 pub(super) fn write_settings(root: &Path, settings: &Settings) -> Result<(), String> {
     let bytes = serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
-    super::projects::write_atomic(&root.join("storage.json"), &bytes)
+    std::fs::create_dir_all(root).map_err(|error| format!("create {}: {error}", root.display()))?;
+    crate::services::durable::write_durable(&root.join("storage.json"), &bytes)
 }

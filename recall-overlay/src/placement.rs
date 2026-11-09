@@ -202,9 +202,11 @@ pub fn fit(free_px: Option<u32>) -> f32 {
     }
 }
 
-/// Physical pixels per 1440p design pixel on this monitor for this spot.
-pub fn scale(monitor_height: i32, spot: &Spot) -> f32 {
-    monitor_height.max(1) as f32 / REF_HEIGHT * fit(spot.free_px)
+/// Physical pixels per 1440p design pixel on this monitor for this spot: by
+/// the monitor's short side, so a portrait panel is not scaled by its height.
+pub fn scale(monitor: &Rect, spot: &Spot) -> f32 {
+    let short = (monitor.right - monitor.left).min(monitor.height());
+    short.max(1) as f32 / REF_HEIGHT * fit(spot.free_px)
 }
 
 /// An action notice's pill height at 1440p (the island grows into it).
@@ -451,18 +453,26 @@ mod tests {
 
     #[test]
     fn scale_follows_monitor_height() {
-        assert_eq!(scale(1440, &DEFAULT_SPOT), 1.0);
-        assert_eq!(scale(2160, &DEFAULT_SPOT), 1.5);
-        assert_eq!(scale(1080, &DEFAULT_SPOT), 0.75);
+        let screen = |w: i32, h: i32| Rect { left: 0, top: 0, right: w, bottom: h };
+        assert_eq!(scale(&screen(2560, 1440), &DEFAULT_SPOT), 1.0);
+        assert_eq!(scale(&screen(3840, 2160), &DEFAULT_SPOT), 1.5);
+        assert_eq!(scale(&screen(1920, 1080), &DEFAULT_SPOT), 0.75);
         let roomy = Spot { anchor: Anchor::TopRight, free_px: Some(288) };
-        assert_eq!(scale(1440, &roomy), 1.0, "plenty of room: full size");
+        assert_eq!(scale(&screen(2560, 1440), &roomy), 1.0, "plenty of room: full size");
+    }
+
+    #[test]
+    fn a_portrait_monitor_scales_by_its_short_side() {
+        let portrait = Rect { left: 0, top: 0, right: 1440, bottom: 2560 };
+        assert_eq!(scale(&portrait, &DEFAULT_SPOT), 1.0, "not 1.78");
+        assert_eq!(scale(&Rect { left: -1080, top: 0, right: 0, bottom: 1920 }, &DEFAULT_SPOT), 0.75);
     }
 
     #[test]
     fn tight_huds_shrink_the_island_to_fit_but_not_below_the_floor() {
         // Overwatch 2: 40 free rows < 12 + 44 → the island's bottom lands on row 40.
         let tight = Spot { anchor: Anchor::TopRight, free_px: Some(40) };
-        let k = scale(1440, &tight);
+        let k = scale(&Rect { left: 0, top: 0, right: 2560, bottom: 1440 }, &tight);
         assert!(((EDGE + ISLAND_H) * k - 40.0).abs() < 1e-3);
         assert_eq!(fit(Some(56)), 1.0);
         assert_eq!(fit(Some(10)), MIN_FIT);
@@ -493,7 +503,7 @@ mod tests {
         for height in [1080, 1440, 2160] {
             let monitor = Rect { left: 0, top: 0, right: height * 16 / 9, bottom: height };
             let tight = Spot { anchor: Anchor::TopRight, free_px: Some(40) };
-            let k = scale(height, &tight);
+            let k = scale(&Rect { left: 0, top: 0, right: height * 16 / 9, bottom: height }, &tight);
             assert!((free_depth(&tight, &monitor, k) - ISLAND_H * k).abs() < 1e-3, "the fitted island fills it at {height}p");
             assert_eq!(free_depth(&DEFAULT_SPOT, &monitor, 1.0), f32::INFINITY);
             let none_free = Spot { anchor: Anchor::TopRight, free_px: Some(0) };

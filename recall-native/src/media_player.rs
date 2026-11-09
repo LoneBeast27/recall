@@ -114,6 +114,7 @@ impl NativePreview {
             media_status: Arc::new(MediaStatus::default()),
             audio,
             has_audio: false,
+            sound: Default::default(),
             com_initialized,
             last_drift_check: Cell::new(Instant::now()),
             drift_seeks: Cell::new(0),
@@ -164,6 +165,7 @@ impl NativePreview {
                 self.has_audio = false;
                 return Err(error);
             }
+            self.sound.opened(Some(super::sound::SoundSpec::Stems(audio.to_vec(), duration)));
         }
         self.keep_player(player, callback);
         Ok(())
@@ -195,7 +197,9 @@ impl NativePreview {
             });
             self.has_audio = !sound.tracks.is_empty();
             if self.has_audio {
-                if let Err(error) = self.audio.open_live(tracks.collect(), duration) {
+                let tracks: Vec<LiveTrack> = tracks.collect();
+                self.sound.opened(Some(super::sound::SoundSpec::Live(tracks.clone(), duration)));
+                if let Err(error) = self.audio.open_live(tracks, duration) {
                     self.has_audio = false;
                     let _ = unsafe { player.Shutdown() };
                     media.shut();
@@ -212,6 +216,7 @@ impl NativePreview {
     /// The stems arrived for a clip whose sound could not be decoded as it loaded.
     pub fn use_stems(&mut self, audio: &[PreviewTrack], duration: f64) -> Result<(), String> {
         self.has_audio = !audio.is_empty();
+        self.sound.opened(self.has_audio.then(|| super::sound::SoundSpec::Stems(audio.to_vec(), duration)));
         if self.has_audio { self.audio.open(audio, duration) } else { Ok(()) }
     }
 
@@ -276,6 +281,7 @@ impl NativePreview {
         self.end_stream();
         self.media_status = Arc::new(MediaStatus::default());
         self.has_audio = false;
+        self.sound.opened(None);
         self.observed_media_ready = false;
         self.observed_ready = false;
         self.observed_error = None;
@@ -344,6 +350,8 @@ impl NativePreview {
     }
 
     pub fn refresh(&mut self) -> Result<bool, String> {
+        // A sound failure leaves the picture playing; only a picture failure is an error.
+        self.settle_sound();
         if let Some(sound) = self.stream.as_ref().and_then(|media| media.sound.as_ref()) {
             sound.set_playhead(if self.has_audio { self.audio.position() } else { 0.0 });
         }

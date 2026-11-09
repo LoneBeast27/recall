@@ -1,5 +1,9 @@
 use super::*;
-use crate::config::Override;
+use crate::config::{Config, Override};
+#[allow(unused_imports)]
+use crate::record_target_rules::*;
+use crate::types::RuleKind;
+use crate::rules;
 
 fn ev(stem: &str, title: &str, pid: u32, hwnd: isize, fullscreen: bool) -> WatchEvent {
     WatchEvent {
@@ -10,6 +14,9 @@ fn ev(stem: &str, title: &str, pid: u32, hwnd: isize, fullscreen: bool) -> Watch
         fullscreen,
         fullscreen_on_target: fullscreen,
         steam_game: false,
+        launcher_game: false,
+        store_game: false,
+        hosted: false,
         hwnd,
     }
 }
@@ -75,11 +82,23 @@ const REMOTE_DESKTOP: &[&str] = &[
     "remotedesktopmanager", "remotedesktopmanager64", "anydesk", "teamviewer", "rustdesk",
     "parsecd", "moonlight", "remoting_desktop", "remoting_host", "vncviewer", "tvnviewer",
     "nomachine", "nxplayer", "splashtop", "strwinclt",
+    // R7-detect-3: Citrix, VMware Horizon, Amazon WorkSpaces, Shadow PC.
+    "wfica32", "cdviewer", "vmware-view", "workspaces", "shadowpc", "shadow pc",
 ];
 const NEW_LAUNCHERS: &[&str] = &[
     "upc", "uplay", "ubisoftconnect", "origin", "xboxpcapp", "xboxapp", "gamingservicesui",
     "amazongames", "amazon games ui", "playnite.fullscreenapp", "playnite.desktopapp",
 ];
+
+/// R7-detect-3: the Shadow PC client is `Shadow.exe`; a game may share that
+/// bare name, so Steam evidence or `known_games` still makes it one.
+#[test]
+fn the_shadow_client_is_remote_unless_steam_says_it_is_a_game() {
+    let cfg = user_cfg();
+    assert!(!is_target("Shadow.exe", true, &cfg), "fullscreen Shadow client");
+    assert!(classify_event(&ev("Shadow", "Shadow", 3, 0x3, true), &cfg).is_none());
+    assert!(classify_event(&steam_ev("Shadow"), &cfg).is_some(), "a Steam game called Shadow.exe");
+}
 
 #[test]
 fn remote_desktop_and_launchers_are_never_targets_even_fullscreen() {
@@ -419,7 +438,7 @@ fn valorant_is_never_left_to_the_render_check() {
     let composed = crate::render_verdict::RenderStats { runtime_presents: 90, kernel_presents: 90, composed_frames: 90, ..Default::default() };
     assert!(matches!(crate::render_verdict::judge(&composed, true), crate::render_verdict::Verdict::NotGame(_)), "what the check would say");
     let windowed = ev("VALORANT-Win64-Shipping", "VALORANT", 10, 0x10, false);
-    assert!(classify_event(&windowed, &cfg).is_none(), "windowed: today's rules (not a target)");
+    assert!(classify_event(&windowed, &cfg).is_some(), "windowed: a known game is a candidate too (G10)");
     let mut off = cfg.clone();
     off.overrides.push(Override { exe: "valorant-win64-shipping".into(), kind: RuleKind::None, clamp: None });
     assert!(classify_event(&v, &off).is_none(), "a none override still wins");
@@ -431,10 +450,14 @@ fn known_games_skip_the_check_only_as_fullscreen_candidates() {
     for (stem, title) in [("FortniteClient-Win64-Shipping", "Fortnite"), ("Overwatch", "Overwatch"), ("League of Legends", "League of Legends (TM) Client"), ("r5apex_dx12", "Apex Legends"), ("javaw", "Minecraft 1.21.1")] {
         let e = ev(stem, title, 3, 0x3, true);
         assert!(classify_event(&e, &cfg).is_some() && skips_render_check(&e, &cfg), "{stem}");
-        assert!(classify_event(&ev(stem, title, 3, 0x3, false), &cfg).is_none(), "{stem} windowed");
+        // G10: a known game is a candidate windowed too (`known_game_windowed_is_a_candidate`).
+        assert!(classify_event(&ev(stem, title, 3, 0x3, false), &cfg).is_some(), "{stem} windowed");
     }
     let ide = ev("javaw", "IntelliJ IDEA", 4, 0x4, true);
     assert!(classify_event(&ide, &cfg).is_some(), "an unknown fullscreen Java app is a candidate");
     assert!(!skips_render_check(&ide, &cfg), "but it must render like a game");
     assert!(!skips_render_check(&ev("notepad", "x", 1, 1, true), &cfg));
 }
+
+#[path = "record_target_class_tests.rs"]
+mod class;

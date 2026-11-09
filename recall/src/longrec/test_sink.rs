@@ -6,13 +6,15 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use super::machine::{Sink, SinkFactory};
+use super::machine::{Cause, Sink, SinkFactory};
 use super::TrackInfo;
 
 pub(crate) const MS: u64 = 1_000;
 
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum Call {
+    /// The encoder generation whose settings a part opened with.
+    Params(u64),
     Open(PathBuf),
     Video { pts: u64, dur: u64, key: bool, tag: u8 },
     Audio { track: usize, frames: usize },
@@ -67,6 +69,7 @@ pub(crate) struct FakeSink {
     fail_video_after: Option<usize>,
     fail_finish: bool,
     videos: usize,
+    no_pcm: bool,
 }
 
 impl Sink for FakeSink {
@@ -80,12 +83,16 @@ impl Sink for FakeSink {
     }
     fn audio(&mut self, track: usize, samples: &[f32]) -> Result<(), String> {
         self.log.push(Call::Audio { track, frames: samples.len() / 2 });
-        self.log.keep(track, samples.iter().copied());
+        if !self.no_pcm {
+            self.log.keep(track, samples.iter().copied());
+        }
         Ok(())
     }
     fn silence(&mut self, track: usize, frames: u64) -> Result<(), String> {
         self.log.push(Call::Silence { track, frames });
-        self.log.keep(track, std::iter::repeat_n(0.0, frames as usize * 2));
+        if !self.no_pcm {
+            self.log.keep(track, std::iter::repeat_n(0.0, frames as usize * 2));
+        }
         Ok(())
     }
     fn finish(&mut self) -> Result<u64, String> {
@@ -106,14 +113,24 @@ pub(crate) struct FakeFactory {
     pub fail_open: bool,
     pub fail_video_after: Option<usize>,
     pub fail_finish: bool,
+    /// Log calls only, not the samples (a minutes-long run would hold hundreds of MB).
+    pub no_pcm: bool,
+    /// The newest live encoder generation (the "video settings" are the generation itself).
+    pub newest: u64,
+    /// Why each generation opened (default: the size changed).
+    pub causes: Vec<(u64, Cause)>,
 }
 
 impl SinkFactory for FakeFactory {
     type Sink = FakeSink;
-    fn open(&mut self, part: &Path, _tracks: &[TrackInfo]) -> Result<FakeSink, String> {
+    type Video = u64;
+    fn open(&mut self, part: &Path, _tracks: &[TrackInfo], video: Option<&u64>) -> Result<FakeSink, String> {
         use std::os::windows::fs::OpenOptionsExt;
         if self.fail_open {
             return Err("no encoder parameters".into());
+        }
+        if let Some(generation) = video {
+            self.log.push(Call::Params(*generation));
         }
         std::fs::write(part, b"fmp4").map_err(|e| e.to_string())?;
         let file = std::fs::OpenOptions::new().append(true).share_mode(0x1).open(part).map_err(|e| e.to_string())?;
@@ -125,12 +142,20 @@ impl SinkFactory for FakeFactory {
             fail_video_after: self.fail_video_after,
             fail_finish: self.fail_finish,
             videos: 0,
+            no_pcm: self.no_pcm,
         })
+    }
+    fn stream_of(&self, generation: u64) -> Option<(u64, Cause)> {
+        let cause = self.causes.iter().find(|(g, _)| *g == generation).map_or(Cause::Size, |(_, c)| *c);
+        Some((generation, cause))
+    }
+    fn newest(&self) -> (u64, Option<u64>) {
+        (self.newest, Some(self.newest))
     }
 }
 
 pub(crate) fn tracks() -> Vec<TrackInfo> {
-    vec![TrackInfo { name: "Game", rate: 48_000, channels: 2, boosted: false }, TrackInfo { name: "Mic", rate: 48_000, channels: 2, boosted: false }]
+    vec![TrackInfo { name: "Game", rate: 48_000, channels: 2 }, TrackInfo { name: "Mic", rate: 48_000, channels: 2 }]
 }
 
 pub(crate) fn pkt(tag: u8) -> Arc<[u8]> {

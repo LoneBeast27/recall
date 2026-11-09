@@ -4,7 +4,7 @@
 use super::test_media::{probe, synth, tone, Clip, Spec, RATE, TRACK_NAMES};
 use super::video_encoder::VideoBackend;
 use super::{export_edited_with, EditedExport, ExportRequest};
-use crate::edit_model::{EditPlan, ExportSettings, TimeRange};
+use crate::edit_model::{EditPlan, ExportPriority, ExportSettings, TimeRange};
 
 fn clip(tag: &str) -> Option<Clip> {
     let clip = synth(tag, &Spec::default());
@@ -70,6 +70,35 @@ fn size_cap_is_obeyed_and_the_budget_is_used() {
         "size cap: uncapped {} B, capped {} B of {cap} B cap, video {} bps, {} attempt(s)",
         uncapped.bytes, on_disk, capped.video_bitrate.unwrap(), capped.attempts
     );
+}
+
+#[test]
+fn fit_priorities_change_the_encoded_shape_and_keep_audio_under_the_cap() {
+    let Some(clip) = synth("cap-priority", &Spec { width: 1280, height: 720, ..Spec::default() }) else {
+        eprintln!("libx264 missing in this FFmpeg build; skipped");
+        return;
+    };
+    let plan = plan(vec![TimeRange::new(0.0, 4.5)]);
+    let cap = 1_500_000;
+    let encode = |name, priority| {
+        let settings = ExportSettings { max_bytes: Some(cap), priority, ..ExportSettings::default() };
+        let report = run(&clip, name, &plan, &settings).unwrap();
+        let file = clip.output(name);
+        let probed = probe(std::path::Path::new(&file));
+        assert_eq!((report.width, report.height), (probed.width, probed.height));
+        assert_eq!(report.frames, probed.video.len() as u64);
+        assert_eq!(probed.audio.len(), 2);
+        assert!(within(report.seconds, 4.5, 0.01));
+        assert_eq!(report.bytes, std::fs::metadata(file).unwrap().len());
+        assert!(report.bytes <= cap, "{report:?}");
+        report
+    };
+    let motion = encode("motion.mp4", ExportPriority::Motion);
+    let detail = encode("detail.mp4", ExportPriority::Detail);
+    assert_eq!((motion.fps, detail.fps), (Some(60), Some(30)));
+    assert!(detail.height > motion.height, "{motion:?} vs {detail:?}");
+    eprintln!("Motion {}×{} at 60 fps, {} bytes. Detail {}×{} at 30 fps, {} bytes.",
+        motion.width, motion.height, motion.bytes, detail.width, detail.height, detail.bytes);
 }
 
 #[test]

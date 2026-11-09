@@ -1,7 +1,9 @@
 # All-or-nothing replacement of the installed files (dot-sourced by install.ps1; tested on a sandbox by
 # scripts/dev/install-swap-check.ps1). A copy straight over the install folder could leave old and new
 # programs mixed when one file is locked (Recall reopened mid-install), which is a broken app.
-#  1. `.installing` marker (this pid) for the whole swap: the app waits while it exists.
+#  1. `.installing` marker for the whole swap: the app waits while it exists. It holds this pid and this
+#     process's start time ("<pid> <FILETIME>"), so a marker left by a killed install is not mistaken
+#     for a running one after the pid is reused (recall-native install_wait.rs).
 #  2. Every staged file is copied into `<dir>\.new` (same volume, so the swap is a rename) and verified.
 #  3. Each installed file moves to `<dir>\.old`, then its new copy moves in (MoveFileEx, replace-existing,
 #     write-through). A running program can be renamed; a file opened without sharing cannot.
@@ -10,6 +12,8 @@
 Add-Type -Namespace InstallSwap -Name Native -MemberDefinition @'
 [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
 public static extern bool MoveFileExW(string from, string to, uint flags);
+[DllImport("kernel32.dll")]
+public static extern bool GetProcessTimes(IntPtr process, out long created, out long exited, out long kernel, out long user);
 '@
 
 function Move-Replace([string]$from, [string]$to) {
@@ -27,7 +31,10 @@ function Get-Sha([string]$f) {
 function Install-Swap([string]$Stage, [string]$Dir) {
   New-Item -ItemType Directory -Force -Path $Dir | Out-Null
   $marker = Join-Path $Dir '.installing'
-  Set-Content -Path $marker -Value $PID -NoNewline
+  $created = 0L; $e = 0L; $k = 0L; $u = 0L
+  $me = [Diagnostics.Process]::GetCurrentProcess()
+  $value = if ([InstallSwap.Native]::GetProcessTimes($me.Handle, [ref]$created, [ref]$e, [ref]$k, [ref]$u)) { "$PID $created" } else { "$PID" }
+  Set-Content -Path $marker -Value $value -NoNewline
   $new = Join-Path $Dir '.new'; $old = Join-Path $Dir '.old'
   try {
     Remove-Item -LiteralPath $new -Recurse -Force -ErrorAction SilentlyContinue

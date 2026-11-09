@@ -66,23 +66,32 @@ impl EditorState {
         }
     }
 
+    /// I trims the part under the playhead (in a cut: the part after it), never the selected
+    /// part elsewhere: keys and playback move the playhead without changing the selection, and
+    /// pulling a far part's edge out to its neighbour brought cut footage back (E3).
     pub fn set_in(&mut self) {
         let at = self.position();
-        if let Some(range) = self.plan.ranges.get(self.selected).cloned() {
-            if at < range.end - MIN_RANGE {
-                self.revise();
-                self.plan.ranges[self.selected].start = at.max(self.prev_end(self.selected));
-            }
+        let ranges = &self.plan.ranges;
+        let Some(index) = ranges.iter().rposition(|r| r.start <= at && at <= r.end).or_else(|| ranges.iter().position(|r| r.start > at)) else { return };
+        let start = at.max(self.prev_end(index));
+        // At a shared edge nothing moves: no undo step, no save.
+        if at < ranges[index].end - MIN_RANGE && start != ranges[index].start {
+            self.revise();
+            self.plan.ranges[index].start = start;
+            self.selected = index;
         }
     }
 
+    /// O trims the part under the playhead (in a cut: the part before it).
     pub fn set_out(&mut self) {
         let at = self.position();
-        if let Some(range) = self.plan.ranges.get(self.selected).cloned() {
-            if at > range.start + MIN_RANGE {
-                self.revise();
-                self.plan.ranges[self.selected].end = at.min(self.next_start(self.selected));
-            }
+        let ranges = &self.plan.ranges;
+        let Some(index) = ranges.iter().position(|r| r.start <= at && at <= r.end).or_else(|| ranges.iter().rposition(|r| r.end < at)) else { return };
+        let end = at.min(self.next_start(index));
+        if at > ranges[index].start + MIN_RANGE && end != ranges[index].end {
+            self.revise();
+            self.plan.ranges[index].end = end;
+            self.selected = index;
         }
     }
 
@@ -153,16 +162,23 @@ impl EditorState {
             }
             Drag::TrimStart(i) => {
                 if let (Some(f), Some(range)) = (self.span_fraction(window_x), self.plan.ranges.get(i).cloned()) {
-                    let t = (f * self.duration()).clamp(self.prev_end(i), range.end - MIN_RANGE);
-                    self.plan.ranges[i].start = t;
-                    self.seek(t);
+                    // A part already shorter than MIN_RANGE (a loaded plan) stays as it is.
+                    let (lo, hi) = (self.prev_end(i), range.end - MIN_RANGE);
+                    if lo <= hi {
+                        let t = (f * self.duration()).clamp(lo, hi);
+                        self.plan.ranges[i].start = t;
+                        self.seek(t);
+                    }
                 }
             }
             Drag::TrimEnd(i) => {
                 if let (Some(f), Some(range)) = (self.span_fraction(window_x), self.plan.ranges.get(i).cloned()) {
-                    let t = (f * self.duration()).clamp(range.start + MIN_RANGE, self.next_start(i));
-                    self.plan.ranges[i].end = t;
-                    self.seek(t);
+                    let (lo, hi) = (range.start + MIN_RANGE, self.next_start(i));
+                    if lo <= hi {
+                        let t = (f * self.duration()).clamp(lo, hi);
+                        self.plan.ranges[i].end = t;
+                        self.seek(t);
+                    }
                 }
             }
             Drag::Gain(track) => {
@@ -382,3 +398,7 @@ mod source_tests {
         assert!(old.plan.audio.iter().all(|s| s.mix), "older clips: today's behaviour");
     }
 }
+
+#[cfg(test)]
+#[path = "editor_state_edits_tests.rs"]
+mod tests;

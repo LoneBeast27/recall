@@ -29,7 +29,8 @@ impl Extras {
             Command::Bookmark => self.bookmark(),
             Command::Screenshot => self.shots.request(),
             Command::HudProbe => self.hud.request(),
-            Command::RecordStart | Command::RecordStop | Command::RecordToggle => self.record(cmd),
+            Command::RecordStart | Command::RecordStop | Command::RecordToggle | Command::RecordFail { .. } => self.record(cmd),
+            Command::SessionLocked { locked } => self.session_locked(*locked),
             _ => return false,
         }
         true
@@ -52,6 +53,16 @@ impl Extras {
         emit_or_log(self.json, &Outbound::Bookmarked { at_secs }, || format!("bookmark at {at_secs:.3}s"));
     }
 
+    /// The session locked or unlocked: the long recording counts the time (`lock_clock`).
+    fn session_locked(&self, locked: bool) {
+        #[cfg(feature = "encode")]
+        if let Some(lr) = &self.longrec {
+            lr.set_locked(locked);
+        }
+        #[cfg(not(feature = "encode"))]
+        let _ = locked;
+    }
+
     #[cfg(feature = "encode")]
     fn record(&self, cmd: &Command) {
         let Some(lr) = &self.longrec else {
@@ -63,6 +74,7 @@ impl Extras {
         match cmd {
             Command::RecordStart => lr.start(&self.source(), start),
             Command::RecordStop => lr.stop(),
+            Command::RecordFail { reason } => lr.fail(reason),
             _ => lr.toggle(&self.source(), start),
         }
     }
@@ -74,7 +86,7 @@ impl Extras {
 
     fn record_unavailable(&self) {
         let reason = "engine built without the encode feature".to_string();
-        emit_or_log(self.json, &Outbound::RecordingFailed { reason: reason.clone(), path: None }, || reason);
+        emit_or_log(self.json, &Outbound::RecordingFailed { reason: reason.clone(), path: None, paths: Vec::new(), gap_seconds: 0.0, frozen_seconds: 0.0 }, || reason);
     }
 
     fn log(&self, message: &str) {
