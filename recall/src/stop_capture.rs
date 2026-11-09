@@ -125,7 +125,7 @@ fn the_screenshot_tick_checks_the_stop_before_reading_a_frame() {
     let body = &src[src.find("fn screenshot_tick").expect("screenshot_tick")..];
     let body = &body[..body.find("\n    }\n").or_else(|| body.find("\r\n    }\r\n")).expect("end")];
     let stop = body.find("crate::stop_capture::stopped()").expect("screenshot_tick checks stop_capture");
-    assert!(stop < body.find("latest_gpu.lock()").expect("GPU path"), "before the GPU path's frame");
+    assert!(stop < body.find("frame_source::LatestGpu").expect("GPU path"), "before the GPU path's frame");
     assert!(stop < body.find(".encode_frame()").expect("CPU path"), "before the CPU path's frame");
 }
 
@@ -199,6 +199,9 @@ fn the_frame_store_and_both_readers_are_guarded_against_the_stop() {
         assert!(at.windows(2).all(|w| w[0] < w[1]), "{from}: {marks:?} at {at:?}");
     };
     order(include_str!("capture/gpu_path.rs"), "match pipe.render(", &["!crate::stop_capture::stopped()", "self.shared.latest_gpu.lock()", "crate::stop_capture::next_frame_seq()"]);
-    order(include_str!("app_tick.rs"), "fn screenshot_tick", &["latest_gpu.lock()", "latest_gpu_seq.load(", "read_rgba(", "frame_admitted(seq)", "shots.submit("]);
-    order(include_str!("hud_probe.rs"), "fn grab(shared: &CaptureShared, reader: &mut Reader)", &["latest_gpu.lock()", "latest_gpu_seq.load(", "reader.read(", "frame_admitted(seq)"]);
+    // Design P4: placement only; the behaviour is driven through the seam (`frame_source` tests).
+    order(include_str!("frame_source.rs"), "fn read_latest(&mut self) -> Option<(u64, Result<T, String>)> {", &["latest_gpu.lock()", "latest_gpu_seq.load(", "(self.read)("]);
+    order(include_str!("frame_source.rs"), "pub(crate) fn read_admitted", &["src.read_latest()", "frame_admitted(seq)", "FrameRead::Frame(frame)"]);
+    order(include_str!("app_tick.rs"), "fn screenshot_tick", &["crate::stop_capture::stopped()", "frame_source::LatestGpu { shared, read }"]);
+    order(include_str!("hud_probe.rs"), "fn grab(shared: &CaptureShared, reader: &mut Reader)", &["grab_from(&mut crate::frame_source::LatestGpu"]);
 }
