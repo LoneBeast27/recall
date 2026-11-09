@@ -43,6 +43,9 @@ fn protocol_line(shared: &Arc<Shared>, line: &str, last: &mut Option<StatusDiges
             shared.on_hello_floor(&val); // P14: no sync_hold -> restarted with no device
         }
         Some("status") => {
+            if let Some(seq) = val.get("audio_seq").and_then(|v| v.as_u64()) {
+                shared.spawn_sources.acked(seq); // these privacy lines are in force (F-4 b)
+            }
             {
                 let mut cache = shared.cache.lock().unwrap_or_else(|p| p.into_inner());
                 cache.status = Some(line.to_string());

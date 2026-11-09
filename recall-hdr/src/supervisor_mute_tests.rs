@@ -193,3 +193,29 @@ fn a_restatement_starts_with_restate() {
     let lines = rec.raw_lines();
     assert_eq!(unseq(&lines[0]), json!({"cmd": "restate"}), "{lines:?}");
 }
+
+/// F-4 (b): an Alt+M the engine never acks (a stuck reader) and then the engine exits: the next
+/// spawn says from when its recovered long recording is muted; an acked one says nothing.
+#[test]
+fn an_unacked_mute_at_exit_marks_the_next_recovery() {
+    let shared = Shared::new(None);
+    let rec = Recorded::attach(&shared);
+    let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    assert_eq!(shared.set_mute_and_send(true), Sent::Queued);
+    shared.spawn_sources.engine_exited(); // no status acked it
+    let spec = shared.with_mute_from(EngineSpec::default());
+    let ms: u64 = spec.env.iter().find(|(k, _)| k == super::super::sources::MUTE_FROM_ENV).and_then(|(_, v)| v.as_deref()?.parse().ok()).expect("the next spawn mutes from it");
+    assert!(ms >= before, "from when the mute was issued");
+    assert!(shared.with_mute_from(EngineSpec::default()).env.is_empty(), "once");
+    assert!(shared.set_mute_and_send(false).queued());
+    assert!(shared.set_mute_and_send(true).queued());
+    shared.spawn_sources.acked(u64::MAX); // the engine applied it
+    shared.spawn_sources.engine_exited();
+    assert!(shared.with_mute_from(EngineSpec::default()).env.is_empty(), "acked: nothing to mute");
+    shared.attach_writer(None);
+    drop(rec);
+    let engine = include_str!("../../recall/src/longrec/part_mute.rs");
+    assert!(engine.contains("pub const MUTE_FROM_ENV: &str = \"RECALL_LONGREC_MUTE_FROM\";"), "the engine reads the same name");
+    let protocol = include_str!("supervisor_protocol.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(protocol.contains("shared.spawn_sources.acked(seq);"), "the status acks them");
+}

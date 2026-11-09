@@ -368,6 +368,7 @@ impl Shared {
     /// Tell the controller an engine process ended ([`ENGINE_EXITED`]); sent
     /// after its stdout reader is joined, so after every event it wrote.
     fn forward_exit(&self) {
+        self.spawn_sources.engine_exited(); // an unacked privacy line marks the next recovery
         if let Ok(g) = self.events.lock() {
             if let Some(tx) = g.as_ref() {
                 let _ = tx.send(serde_json::json!({ "type": ENGINE_EXITED }));
