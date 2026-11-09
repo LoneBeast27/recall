@@ -66,22 +66,28 @@ pub(super) fn workspace_lists_controller(manifest: &str) -> bool {
     members[open + 1..open + close].split(',').any(|member| member.trim().trim_matches('"') == "recall-hdr")
 }
 
+/// The recorder's command line. `RECALL_SETUP` (Setup's guided first run, meant for the one
+/// window Setup opens) is dropped: the recorder outlives that window and starts every later
+/// one from "Open Recall", so an inherited flag reopened Setup on each of them.
+pub(super) fn controller_command(executable: &Path, setup_owner: Option<u32>, flags: u32) -> Command {
+    let mut command = Command::new(executable);
+    command.arg(CONTROLLER_ARG).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(flags);
+    command.env_remove("RECALL_SETUP");
+    if let Some(owner) = setup_owner {
+        command.env("RECALL_SETUP_OWNER_PID", owner.to_string());
+    } else {
+        command.env_remove("RECALL_SETUP_OWNER_PID");
+    }
+    if let Some(dir) = executable.parent() {
+        command.current_dir(dir);
+    }
+    command
+}
+
 /// Hidden, no console, own process group; escapes our job object when allowed so the
 /// recorder outlives this window.
 fn spawn_detached(executable: &Path, setup_owner: Option<u32>) -> Result<(), String> {
-    let launch = |flags: u32| {
-        let mut command = Command::new(executable);
-        command.arg(CONTROLLER_ARG).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(flags);
-        if let Some(owner) = setup_owner {
-            command.env("RECALL_SETUP_OWNER_PID", owner.to_string());
-        } else {
-            command.env_remove("RECALL_SETUP_OWNER_PID");
-        }
-        if let Some(dir) = executable.parent() {
-            command.current_dir(dir);
-        }
-        command.spawn()
-    };
+    let launch = |flags: u32| controller_command(executable, setup_owner, flags).spawn();
     let base = CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP;
     match launch(base | CREATE_BREAKAWAY_FROM_JOB) {
         Ok(_) => Ok(()),
