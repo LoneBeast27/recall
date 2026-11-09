@@ -119,6 +119,11 @@ impl Live {
         }
     }
 
+    /// A re-pick is pending: the open stream is on a device that is no longer picked (F-2).
+    pub(super) fn repick_pending(&self) -> bool {
+        self.repick.load(Ordering::SeqCst)
+    }
+
     /// End the open stream at its next packet turn (it reopens only when not held).
     pub(super) fn request_repick(&self) {
         self.repick.store(true, Ordering::SeqCst);
@@ -143,7 +148,9 @@ impl TrackRing {
     /// line was applied, so the mute read next sees them; read the other way round, a release
     /// between the two reads stored a stale "unmuted" packet live.
     pub(crate) fn push_live_read(&self, data: &[f32], read: impl FnOnce() -> MuteNow) {
-        let startup = self.live.startup.load(Ordering::SeqCst); // the safe state: hold first
+        // A re-pick waiting for this stream to end (F-2): its packets come from a device that is
+        // no longer picked, so they are silence until the reopen (the flag is taken there).
+        let startup = self.live.startup.load(Ordering::SeqCst) || self.live.repick_pending(); // the safe state: hold first
         self.push_live_as(data, read(), startup);
     }
 
@@ -220,6 +227,12 @@ impl TrackRing {
     /// (a line-in until picked included) or the startup hold. Reported in `status.audio[].held`.
     pub(crate) fn held_now(&self) -> bool {
         self.live.held.load(Ordering::SeqCst) || self.startup_held()
+    }
+
+    /// Tests: the stream loop's turn (`stream.rs` takes the re-pick).
+    #[cfg(test)]
+    pub(crate) fn take_repick_for_test(&self) -> bool {
+        self.live.take_repick()
     }
 
     /// Tests: the endpoint id the next open picks with.
