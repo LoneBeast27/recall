@@ -81,6 +81,25 @@ pub fn game_folders(recordings: &Path, linked: &[String]) -> Vec<PathBuf> {
     rule::game_folders(recordings).into_iter().filter(|game| !under_link(game, recordings, linked)).collect()
 }
 
+/// Marked folders directly inside `recordings` whose marker no longer binds them (a USB drive
+/// back under another letter, a moved recordings folder, a mapped drive spelled as UNC, a copy):
+/// a real, unreserved folder holding a [`rule::MARKER`] that [`game_folders`] leaves out. The
+/// library still lists their Recall-named clips, as not owned (Delete only hides them, edits go
+/// to C:), so a broken binding never looks like lost clips. The storage limit never counts them.
+pub fn unbound_game_folders(recordings: &Path, linked: &[String]) -> Vec<PathBuf> {
+    let Ok(listing) = std::fs::read_dir(recordings) else { return Vec::new() };
+    let bound = rule::game_folders(recordings);
+    let mut out: Vec<PathBuf> = listing
+        .flatten()
+        .map(|e| e.path())
+        .filter(|dir| dir.file_name().is_some_and(|n| !rule::is_reserved(&n.to_string_lossy())))
+        .filter(|dir| rule::is_plain_dir(dir) && rule::has_marker(dir) && !bound.contains(dir))
+        .filter(|dir| !under_link(dir, recordings, linked))
+        .collect();
+    out.sort();
+    out
+}
+
 #[cfg(test)]
 #[path = "folders_games_tests.rs"]
 mod tests;
