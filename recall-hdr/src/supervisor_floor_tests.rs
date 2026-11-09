@@ -139,3 +139,15 @@ fn every_spawn_sets_the_sync_env() {
     let engine = include_str!("../../recall/src/engine_stdin.rs");
     assert!(engine.contains("pub(crate) const SYNC_ENV: &str = \"RECALL_STDIN_SYNC\";"));
 }
+
+/// N4: one failed read of the engine file is not cached as "no marker": the next spawn reads
+/// it again and gets the full list.
+#[test]
+fn a_failed_read_is_retried_at_the_next_spawn() {
+    let dir = TempDir::new("retry");
+    let exe = dir.0.join("recall.exe");
+    std::fs::write(&exe, PROTOCOL_MARKER).unwrap();
+    assert!(!has_marker_with(&exe, |_| Err(std::io::Error::other("sharing violation"))), "this spawn: below the floor");
+    assert!(has_marker_with(&exe, std::fs::read), "the next spawn reads it again");
+    assert!(!has_marker_with(&dir.0.join("none.exe"), std::fs::read));
+}

@@ -27,8 +27,14 @@ type Checked = (PathBuf, u64, Option<SystemTime>, bool);
 static CHECKED: Mutex<Option<Checked>> = Mutex::new(None);
 
 /// Whether the engine file at `path` carries the marker, cached by path, size and time. An
-/// unreadable file has none (the safe state).
+/// unreadable file has none for this spawn (the safe state), but that is never cached: the next
+/// spawn reads it again (N4: one failed read must not cost the mic for the whole session).
 pub(crate) fn has_marker(path: &Path) -> bool {
+    has_marker_with(path, std::fs::read)
+}
+
+/// [`has_marker`] with the file read passed in (tests). Only a full read is cached.
+fn has_marker_with(path: &Path, read: impl Fn(&Path) -> std::io::Result<Vec<u8>>) -> bool {
     let Ok(meta) = std::fs::metadata(path) else { return false };
     let key = (path.to_path_buf(), meta.len(), meta.modified().ok());
     let mut g = CHECKED.lock().unwrap_or_else(|p| p.into_inner());
@@ -37,7 +43,11 @@ pub(crate) fn has_marker(path: &Path) -> bool {
             return *found;
         }
     }
-    let found = std::fs::read(path).is_ok_and(|bytes| bytes.windows(PROTOCOL_MARKER.len()).any(|w| w == PROTOCOL_MARKER));
+    let Ok(bytes) = read(path) else {
+        crate::log!("supervisor: could not read {} for its protocol marker; trying again at the next spawn", path.display());
+        return false; // not cached
+    };
+    let found = bytes.windows(PROTOCOL_MARKER.len()).any(|w| w == PROTOCOL_MARKER);
     *g = Some((key.0, key.1, key.2, found));
     found
 }
