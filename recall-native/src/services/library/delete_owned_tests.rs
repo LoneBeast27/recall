@@ -83,22 +83,102 @@ fn a_clip_recorded_into_an_override_folder_recycles_and_a_foreign_one_does_not()
     assert!(!super::super::recorded::contains(&recorded));
 }
 
-/// "Sort clips into game folders": a recorder clip in `<recordings>\<Game>\` is Recall's own (Delete
-/// recycles it, edits sit beside it); another video in that folder stays foreign.
+fn marked(dir: &Path) -> PathBuf {
+    std::fs::create_dir_all(dir).unwrap();
+    crate::services::library::folders::rule::write_marker(dir).unwrap();
+    dir.to_path_buf()
+}
+
+fn listed(recordings: &Path, imported: &[String]) -> Vec<String> {
+    let mut paths: Vec<String> = crate::backend::list_from(recordings, imported, &[]).unwrap().0.into_iter().map(|c| c.path).collect();
+    paths.sort();
+    paths
+}
+
+/// "Sort clips into game folders": a recorder clip in a game folder Recall made is Recall's own
+/// (Delete recycles it, edits sit beside it); another video in that folder stays foreign.
 #[test]
 fn a_game_folder_clip_is_recalls_own() {
     let root = crate::test_temp::TempDir::sandbox("owned-game-folder");
     let recordings = root.join("Recall");
-    let own = clip(&recordings.join("Rocket League"), "Rocket-League__2026-11-01__10-00-00-000__ab.mp4");
-    let other = clip(&recordings.join("Rocket League"), "holiday.mp4");
+    let game = marked(&recordings.join("Rocket League"));
+    let own = clip(&game, "Rocket-League__2026-11-01__10-00-00-000__ab.mp4");
+    let other = clip(&game, "holiday.mp4");
     let folders = Folders { recordings: Some(text(&recordings)), ..Folders::default() };
-    assert!(imports::is_owned(&own, &recordings, &[]));
-    assert!(!imports::is_owned(&other, &recordings, &[]));
+    assert!(imports::is_owned(&own, &recordings, &[], &[]));
+    assert!(!imports::is_owned(&other, &recordings, &[], &[]));
     let (imported, owned) = partition_for_delete(std::slice::from_ref(&own), &folders);
     assert_eq!((imported, owned), (Vec::<PathBuf>::new(), vec![own.clone()]));
-    assert_eq!(crate::backend::checked_export_dir(&own, &folders).unwrap(), recordings.join("Rocket League").join("exports"));
-    let listed = crate::backend::list_from(&recordings, &[], &[]).unwrap().0;
-    assert_eq!(listed.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["Rocket-League__2026-11-01__10-00-00-000__ab.mp4"], "the library finds it, and only it");
+    assert_eq!(crate::backend::checked_export_dir(&own, &folders).unwrap(), game.join("exports"));
+    assert_eq!(listed(&recordings, &[]), vec![text(&own)], "the library finds it, and only it");
     let roots = crate::backend::clip_roots_from(&folders);
-    assert!(roots.iter().any(|r| r.path == recordings.join("Rocket League") && !r.recursive), "its folder is watched");
+    assert!(roots.iter().any(|r| r.path == game && !r.recursive), "its folder is watched");
+}
+
+/// Option off or on: `<recordings>\Keepers\` (the user's folder) holding a Recall-named clip is
+/// not listed, not owned, never recycled as Recall's.
+#[test]
+fn an_unmarked_folder_with_recall_named_clips_stays_the_users() {
+    let root = crate::test_temp::TempDir::sandbox("owned-unmarked");
+    let recordings = root.join("Recall");
+    let keeper = clip(&recordings.join("Keepers"), "VALORANT__2026-11-01__10-00-00-000__ab.mp4");
+    let folders = Folders { recordings: Some(text(&recordings)), ..Folders::default() };
+    assert!(!imports::is_owned(&keeper, &recordings, &[], &[]));
+    assert!(listed(&recordings, &[]).is_empty());
+    assert!(!crate::backend::clip_roots_from(&folders).iter().any(|r| r.path == recordings.join("Keepers")));
+    let (_, owned) = partition_for_delete(std::slice::from_ref(&keeper), &folders);
+    assert!(owned.is_empty(), "never sent to the Recycle Bin as Recall's");
+}
+
+/// Linked beats game folder: a linked `<recordings>\Valorant\` (even with Recall's marker)
+/// holding Recall-named clips is the link's, read-only.
+#[test]
+fn a_linked_game_folder_is_not_owned() {
+    let root = crate::test_temp::TempDir::sandbox("owned-linked-game");
+    let recordings = root.join("Recall");
+    let valorant = marked(&recordings.join("Valorant"));
+    let linked_clip = clip(&valorant, "VALORANT__2026-11-01__10-00-00-000__ab.mp4");
+    let folders = Folders { recordings: Some(text(&recordings)), imported: vec![text(&valorant)], ..Folders::default() };
+    assert!(!imports::is_owned(&linked_clip, &recordings, &[], &folders.imported));
+    assert!(imports::is_imported(&text(&linked_clip), &recordings, &folders.imported, &[]));
+    let (imported, owned) = partition_for_delete(std::slice::from_ref(&linked_clip), &folders);
+    assert_eq!((imported, owned), (vec![linked_clip.clone()], Vec::<PathBuf>::new()), "hidden, never recycled");
+    let roots = crate::backend::clip_roots_from(&folders);
+    assert!(!roots.iter().any(|r| r.path == valorant && !r.recursive), "watched only as its link");
+    // A link above the recordings folder (Videos linked): Recall's game-folder clips stay Recall's.
+    assert!(imports::is_owned(&linked_clip, &recordings, &[], &[text(&root)]));
+}
+
+/// A junction game folder carrying a marker is skipped by the library list and the watch roots.
+#[test]
+fn a_junction_game_folder_is_skipped() {
+    let root = crate::test_temp::TempDir::sandbox("owned-junction");
+    let recordings = root.join("Recall");
+    std::fs::create_dir_all(&recordings).unwrap();
+    let target = marked(&root.join("elsewhere"));
+    clip(&target, "Apex-Legends__2026-11-01__10-00-00-000__ab.mp4");
+    let link = recordings.join("Apex Legends");
+    if !crate::services::library::folders::rule::junction_for_test(&target, &link) {
+        eprintln!("skipped: could not make a junction");
+        return;
+    }
+    let folders = Folders { recordings: Some(text(&recordings)), ..Folders::default() };
+    assert!(listed(&recordings, &[]).is_empty());
+    assert!(!crate::backend::clip_roots_from(&folders).iter().any(|r| r.path == link));
+    assert!(!imports::is_owned(&link.join("Apex-Legends__2026-11-01__10-00-00-000__ab.mp4"), &recordings, &[], &[]));
+}
+
+/// A marked game folder the user hid is skipped by the library, as by the storage limit.
+#[test]
+fn a_hidden_game_folder_is_skipped() {
+    let root = crate::test_temp::TempDir::sandbox("owned-hidden");
+    let recordings = root.join("Recall");
+    let game = marked(&recordings.join("Rocket League"));
+    clip(&game, "Rocket-League__2026-11-01__10-00-00-000__ab.mp4");
+    assert_eq!(listed(&recordings, &[]).len(), 1);
+    if !crate::services::library::folders::rule::hide_for_test(&game) {
+        eprintln!("skipped: could not hide the folder");
+        return;
+    }
+    assert!(listed(&recordings, &[]).is_empty());
 }

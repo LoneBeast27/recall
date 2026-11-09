@@ -228,51 +228,10 @@ pub fn is_inside(path: &str, folder: &str) -> bool {
     path.len() > folder.len() && path.starts_with(&folder) && path.as_bytes()[folder.len()] == b'\\'
 }
 
-/// "Sort clips into game folders": a subfolder of the recordings folder that may hold a game's
-/// clips (`<recordings>\<Game>\`, one level down). Recall's own subfolders (`thumbs`,
-/// `screenshots`, `exports`, ...) and hidden-by-name ones never do. Same rule as the
-/// controller's storage limit (`recall-hdr` `record_storage::is_game_folder`).
-pub fn is_game_folder_name(name: &str) -> bool {
-    let lower = name.to_lowercase();
-    !lower.starts_with('.')
-        && !lower.starts_with('$')
-        && !matches!(lower.as_str(), "thumbs" | "thumbnails" | "screenshots" | "exports" | "edited" | "kept" | "staging" | "system volume information")
-}
-
-/// A recorder clip name, `<GAME>__YYYY-MM-DD__HH-MM-SS[...].mp4` (case-insensitive). Game
-/// folders list only these, so other videos someone keeps in a subfolder stay out.
-pub fn is_recall_named(name: &str) -> bool {
-    const SHAPE: &[u8] = b"__dddd-dd-dd__dd-dd-dd";
-    let lower = name.to_ascii_lowercase();
-    let Some(stem) = lower.strip_suffix(".mp4") else { return false };
-    let b = stem.as_bytes();
-    (1..b.len()).any(|i| b.len() >= i + SHAPE.len() && SHAPE.iter().zip(&b[i..]).all(|(&s, &c)| if s == b'd' { c.is_ascii_digit() } else { s == c }))
-}
-
-/// `clip` is a recorder clip in a game folder of `folder` (`<folder>\<Game>\<clip>`).
-pub fn in_game_folder(clip: &Path, folder: &Path) -> bool {
-    let Some(game) = clip.parent() else { return false };
-    let named = |p: &Path, f: fn(&str) -> bool| p.file_name().is_some_and(|n| f(&n.to_string_lossy()));
-    named(clip, is_recall_named)
-        && named(game, is_game_folder_name)
-        && game.parent().is_some_and(|parent| {
-            let key = folder_key(&folder.to_string_lossy());
-            !key.is_empty() && folder_key(&parent.to_string_lossy()) == key
-        })
-}
-
-/// The game folders inside `recordings` now (sorted; none when it can't be read).
-pub fn game_folders(recordings: &Path) -> Vec<PathBuf> {
-    let Ok(listing) = std::fs::read_dir(recordings) else { return Vec::new() };
-    let mut out: Vec<PathBuf> = listing
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && is_game_folder_name(&e.file_name().to_string_lossy()))
-        .filter(|e| e.metadata().is_ok_and(|m| !hidden(&m)))
-        .map(|e| e.path())
-        .collect();
-    out.sort();
-    out
-}
+// "Sort clips into game folders": which subfolders are Recall's game folders (`folders_games.rs`).
+#[path = "folders_games.rs"]
+mod games;
+pub use games::{game_folders, in_game_folder, is_recall_named, rule, under_link};
 
 pub fn is_clip(path: &Path) -> bool {
     path.extension().and_then(|e| e.to_str()).is_some_and(|e| CLIP_EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
@@ -495,31 +454,6 @@ mod tests {
         folders.forget(r"G:\Third");
         assert!(!folders.imported.iter().any(|f| f == r"G:\Third") && !folders.former_recordings.iter().any(|f| f == r"G:\Third"));
         assert_eq!(folders.managed(r"H:\Fourth"), [r"F:\New".to_owned()]);
-    }
-
-    #[test]
-    fn game_folder_clips_are_recall_named_one_level_down() {
-        let rec = Path::new(r"X:\Recall\Raw");
-        assert!(in_game_folder(&rec.join("Rocket League").join("Rocket-League__2026-10-22__14-05-09-275__ab.mp4"), rec));
-        assert!(in_game_folder(Path::new(r"x:\recall\raw\VALORANT\VALORANT__2026-10-22__14-05-09__rec.MP4"), rec), "case-insensitive");
-        assert!(!in_game_folder(&rec.join("Rocket-League__2026-10-22__14-05-09.mp4"), rec), "top level is not a game folder");
-        assert!(!in_game_folder(&rec.join("Game").join("holiday.mp4"), rec), "other videos stay out");
-        assert!(!in_game_folder(&rec.join("screenshots").join("G__2026-10-22__14-05-09.mp4"), rec));
-        assert!(!in_game_folder(&rec.join("Game").join("old").join("G__2026-10-22__14-05-09.mp4"), rec), "one level only");
-        assert!(!in_game_folder(&rec.join("Game").join("G__2026-10-22__14-05-09.mp4.part"), rec));
-        assert!(!is_game_folder_name("Thumbs") && !is_game_folder_name("exports") && !is_game_folder_name(".cache"));
-    }
-
-    #[test]
-    fn game_folders_lists_only_possible_game_folders() {
-        let guard = crate::test_temp::TempDir::new(format!("recall-folders-games-{}", std::process::id()));
-        let dir = guard.path().to_path_buf();
-        for d in ["Rocket League", "VALORANT", "thumbs", "screenshots", ".x"] {
-            std::fs::create_dir_all(dir.join(d)).unwrap();
-        }
-        std::fs::write(dir.join("a.mp4"), b"x").unwrap();
-        assert_eq!(game_folders(&dir), vec![dir.join("Rocket League"), dir.join("VALORANT")]);
-        assert!(game_folders(&dir.join("missing")).is_empty());
     }
 
     #[test]

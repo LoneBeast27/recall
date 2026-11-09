@@ -257,10 +257,10 @@ pub fn sweep_deliveries() {
         let lane = folder.clone();
         storage::submit_io(&lane, Priority::Background, move || {
             remove_deliveries(&folder);
-            // Game folders' exports (`Edited\<Game>\`, "Sort clips into game folders").
-            let games = std::fs::read_dir(&folder).into_iter().flatten().flatten();
-            for game in games.filter(|e| e.file_type().is_ok_and(|t| t.is_dir()) && !e.file_name().to_string_lossy().starts_with('.')) {
-                remove_deliveries(&game.path());
+            // Game folders' exports (`Edited\<Game>\` with Recall's marker, "Sort clips into
+            // game folders"); other subfolders are the user's.
+            for game in crate::services::library::folders::rule::game_folders(&folder) {
+                remove_deliveries(&game);
             }
         });
     };

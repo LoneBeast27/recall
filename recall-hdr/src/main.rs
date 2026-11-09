@@ -124,6 +124,9 @@ mod record_registry;
 mod record_render;
 mod record_startup;
 mod record_storage;
+// Which subfolders are game folders (shared with the engine and the app).
+#[path = "../../recall/src/game_folder_rule.rs"]
+mod game_folder_rule;
 mod record_free_space;
 mod record_janitor;
 mod record_monitor;

@@ -487,16 +487,29 @@ fn the_saver_reports_its_steps_before_any_file_exists() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// "Sort clips into game folders": the first save into `<out>\<Game>` makes that folder; a
-/// missing clip folder is not made (the save fails as before).
+/// "Sort clips into game folders": a missing game folder is made again with its marker, a
+/// missing clip folder is not made, and a game folder that is a link fails the save.
 #[test]
-fn a_save_makes_its_game_folder_but_never_a_missing_clip_folder() {
+fn a_save_remakes_its_game_folder_and_refuses_a_link() {
+    use crate::game_folder_rule as rule;
     let dir = temp_dir("gamefolder");
     let (events, _sink) = Events::capture(true);
     let game = dir.join("Rocket League");
-    ensure_game_folder(&game.join("Rocket-League__2026-10-22__14-05-09-275__ab.mp4"), &events);
-    assert!(game.is_dir());
-    let lost = dir.join("gone").join("Game");
-    ensure_game_folder(&lost.join("G__2026-10-22__14-05-09-275__ab.mp4"), &events);
-    assert!(!dir.join("gone").exists());
+    ensure_game_folder(&game.join("Rocket-League__2026-10-22__14-05-09-275__ab.mp4"), &dir, &events).unwrap();
+    assert!(rule::is_game_folder(&game));
+    let lost = dir.join("gone");
+    ensure_game_folder(&lost.join("Game").join("G__2026-10-22__14-05-09-275__ab.mp4"), &lost, &events).unwrap();
+    assert!(!lost.exists());
+    ensure_game_folder(&dir.join("G__2026-10-22__14-05-09-275__ab.mp4"), &dir, &events).unwrap();
+    let target = dir.join("elsewhere");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join(rule::MARKER), b"").unwrap();
+    let link = dir.join("Apex Legends");
+    if !rule::junction_for_test(&target, &link) {
+        eprintln!("skipped: could not make a junction");
+        return;
+    }
+    let refused = ensure_game_folder(&link.join("Apex-Legends__2026-10-22__14-05-09-275__ab.mp4"), &dir, &events);
+    assert_eq!(refused.unwrap_err(), GAME_FOLDER_LINK);
+    assert_eq!(std::fs::read_dir(&target).unwrap().count(), 1, "nothing written through the link");
 }

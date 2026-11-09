@@ -269,18 +269,29 @@ fn with_a_raw_folder_exports_go_to_edited_beside_it() {
     assert_eq!(super::export_dir(&flat.join("a.mp4"), flat).as_deref(), Some(Path::new(r"E:\Clips\exports")));
 }
 
-/// "Sort clips into game folders": a clip in `Raw\<Game>\` exports to `Edited\<Game>\`.
+/// "Sort clips into game folders": a clip in a game folder Recall made (`Raw\<Game>\`) exports to
+/// `Edited\<Game>\`; a folder the user made does not count.
 #[test]
 fn a_game_folder_clip_exports_to_the_same_game_folder() {
-    use std::path::Path;
-    let recordings = Path::new(r"E:\Recall\Raw");
-    let clip = recordings.join("Rocket League").join("Rocket-League__2026-11-02__10-00-00-000__ab.mp4");
-    assert_eq!(super::export_dir(&clip, recordings).as_deref(), Some(Path::new(r"E:\Recall\Edited\Rocket League")));
-    let other = recordings.join("Rocket League").join("holiday.mp4");
-    assert_eq!(super::export_dir(&other, recordings).as_deref(), Some(Path::new(r"E:\Recall\Edited")), "not a recorder clip: Edited itself");
-    let flat = Path::new(r"E:\Clips");
-    let clip = flat.join("VALORANT").join("VALORANT__2026-11-02__10-00-00-000.mp4");
-    assert_eq!(super::export_dir(&clip, flat).as_deref(), Some(Path::new(r"E:\Clips\VALORANT\exports")));
+    use crate::services::library::folders::rule;
+    let root = crate::test_temp::TempDir::sandbox("export-game");
+    let recordings = root.join("Recall").join("Raw");
+    let game = recordings.join("Rocket League");
+    std::fs::create_dir_all(&game).unwrap();
+    rule::write_marker(&game).unwrap();
+    std::fs::create_dir_all(recordings.join("Keepers")).unwrap();
+    let edited = root.join("Recall").join("Edited");
+    let clip = game.join("Rocket-League__2026-11-02__10-00-00-000__ab.mp4");
+    assert_eq!(super::export_dir(&clip, &recordings), Some(edited.join("Rocket League")));
+    assert_eq!(super::export_dir(&game.join("holiday.mp4"), &recordings), Some(edited.clone()), "not a recorder clip: Edited itself");
+    let unmarked = recordings.join("Keepers").join("Keepers__2026-11-02__10-00-00-000.mp4");
+    assert_eq!(super::export_dir(&unmarked, &recordings), Some(edited), "a folder Recall did not make");
+    let flat = root.join("Clips");
+    let valorant = flat.join("VALORANT");
+    std::fs::create_dir_all(&valorant).unwrap();
+    rule::write_marker(&valorant).unwrap();
+    let clip = valorant.join("VALORANT__2026-11-02__10-00-00-000.mp4");
+    assert_eq!(super::export_dir(&clip, &flat), Some(valorant.join("exports")));
 }
 
 #[test]

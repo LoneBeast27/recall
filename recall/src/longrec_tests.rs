@@ -250,8 +250,8 @@ fn recovery_renames_only_long_recording_parts_and_skips_open_files() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// "Sort clips into game folders": a recording left in `<out>\<Game>\` is recovered there;
-/// two levels down is not Recall's.
+/// "Sort clips into game folders": a recording left in a marked `<out>\<Game>\` is recovered
+/// there; an unmarked folder and two levels down are not Recall's.
 #[test]
 fn recovery_reaches_game_folders_one_level_down() {
     struct Gone(PathBuf);
@@ -265,10 +265,14 @@ fn recovery_reaches_game_folders_one_level_down() {
     let game = dir.join("Rocket League");
     let deeper = game.join("old");
     std::fs::create_dir_all(&deeper).unwrap();
+    std::fs::write(game.join(crate::game_folder_rule::MARKER), b"").unwrap();
+    let keepers = dir.join("Keepers");
+    std::fs::create_dir_all(&keepers).unwrap();
     let top = dir.join("Desktop__2026-10-22__14-05-09__rec.mp4.part");
     let in_game = game.join("Rocket-League__2026-10-22__15-00-00__rec.mp4.part");
     let too_deep = deeper.join("Rocket-League__2026-10-22__16-00-00__rec.mp4.part");
-    for p in [&top, &in_game, &too_deep] {
+    let unmarked = keepers.join("Rocket-League__2026-10-22__17-00-00__rec.mp4.part");
+    for p in [&top, &in_game, &too_deep, &unmarked] {
         std::fs::write(p, b"x").unwrap();
     }
     let results = recover_in(&dir);
@@ -276,6 +280,7 @@ fn recovery_reaches_game_folders_one_level_down() {
     assert!(dir.join("Desktop__2026-10-22__14-05-09__rec.mp4").is_file());
     assert!(game.join("Rocket-League__2026-10-22__15-00-00__rec.mp4").is_file(), "recovered in its game folder");
     assert!(too_deep.exists());
+    assert!(unmarked.exists(), "a folder Recall did not make is the user's");
 }
 
 /// Merge gate 11-07 (P1): an NVENC hang mid-recording sends no packets and no failure;

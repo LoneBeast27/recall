@@ -104,8 +104,9 @@ fn edited_on(root: &Path, recordings: &Path) -> u64 {
         let Ok(metadata) = entry.metadata() else { continue };
         if metadata.is_file() {
             total += metadata.len();
-        } else if metadata.is_dir() {
-            // A game's exports ("Sort clips into game folders": `Edited\<Game>\`), one level down.
+        } else if metadata.is_dir() && crate::services::library::folders::rule::is_game_folder(&entry.path()) {
+            // A game's exports ("Sort clips into game folders": `Edited\<Game>\`, made by Recall
+            // with its marker), one level down. Other subfolders are the user's.
             total += files_in(&entry.path());
         }
     }

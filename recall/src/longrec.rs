@@ -222,10 +222,15 @@ impl<F: SinkFactory> Writer<F> {
         if self.recorder.is_active() {
             return self.events(vec![Event::Log("record_start ignored: a long recording is already running".into())]);
         }
-        // Sort clips into game folders: `<out>\<Game>\` when on.
+        // Sort clips into game folders: `<out>\<Game>\` when on (`naming::resolve_game_dir`).
         let dir = naming::clip_dir(&self.out_dir, source);
         let path = naming::longrec_path(&dir, source, &chrono::Local::now(), Path::exists);
-        if let Err(e) = std::fs::create_dir_all(&dir) {
+        let ready = match naming::check_game_dir(Path::new(&self.out_dir), Path::new(&dir)) {
+            Err(naming::GameDirProblem::Link) => Err("the game folder is a link; recording not started".to_string()),
+            Err(naming::GameDirProblem::Io(e)) => Err(e.to_string()),
+            Ok(()) => std::fs::create_dir_all(&dir).map_err(|e| e.to_string()),
+        };
+        if let Err(e) = ready {
             return self.events(vec![Event::Failed { reason: format!("output folder {dir}: {e}"), kept: None }]);
         }
         let (generation, video) = self.recorder.factory().newest();
@@ -452,19 +457,14 @@ fn recovered_outbound(paths: Vec<String>) -> Option<Outbound> {
 }
 
 /// Every `*__rec.mp4.part` directly in `dir` or in one of its game folders (one level down,
-/// "Sort clips into game folders"), renamed (or the error).
+/// "Sort clips into game folders": only folders Recall made, `game_folder_rule`), renamed (or
+/// the error).
 fn recover_in(dir: &Path) -> Vec<(PathBuf, std::io::Result<PathBuf>)> {
     let Ok(listing) = std::fs::read_dir(dir) else { return Vec::new() };
-    let (mut files, mut folders) = (Vec::new(), Vec::new());
-    for entry in listing.flatten() {
-        match entry.file_type() {
-            Ok(t) if t.is_file() => files.push(entry),
-            Ok(t) if t.is_dir() => folders.push(entry.path()),
-            _ => {}
-        }
-    }
-    for folder in folders {
-        files.extend(std::fs::read_dir(folder).into_iter().flatten().flatten().filter(|e| e.file_type().is_ok_and(|t| t.is_file())));
+    let is_file = |e: &std::fs::DirEntry| e.file_type().is_ok_and(|t| t.is_file());
+    let mut files: Vec<_> = listing.flatten().filter(is_file).collect();
+    for folder in crate::game_folder_rule::game_folders(dir) {
+        files.extend(std::fs::read_dir(folder).into_iter().flatten().flatten().filter(is_file));
     }
     files
         .into_iter()

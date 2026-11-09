@@ -48,6 +48,8 @@ mod engine_stdin;
 #[cfg(feature = "encode")]
 mod longrec;
 mod naming;
+// Which subfolders are game folders (shared with recall-hdr and recall-native).
+mod game_folder_rule;
 mod screenshot;
 mod debug_dump;
 mod edit_model;
