@@ -86,7 +86,14 @@ pub(crate) fn hold_at_end() {
 
 #[cfg(feature = "encode")]
 fn apply_mute(cmd: Command) -> Command {
+    if let Command::Restate { seq } = cmd {
+        audio::sources::restate_from(seq); // a full restatement starts: the ack counts from here
+        return cmd;
+    }
     let seq = audio_seq(&cmd);
+    if let Some(seq) = seq {
+        audio::sources::check_seq(seq); // a line skipped (a full queue dropped it): hold (F-1)
+    }
     let cmd = apply_audio(cmd);
     if let Some(seq) = seq {
         audio::sources::note_seq(seq); // after the line is applied: an ack means "in force"
@@ -206,7 +213,7 @@ fn apply(cmd: Command, shared: &CaptureShared, (save, export): (&Option<SaveHook
         | Command::SessionLocked { .. }) => {
             extras.handle(&cmd);
         }
-        Command::Sync { .. } => {} // applied by the reader, in order
+        Command::Sync { .. } | Command::Restate { .. } => {} // applied by the reader, in order
         Command::Quit => {} // read_commands sets `quit`
     }
 }

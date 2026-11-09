@@ -44,6 +44,8 @@ pub struct AckState {
     pub stdin_ended: bool,
     /// A save or a long recording is in flight (`EngineActivity::busy`).
     pub busy: bool,
+    /// A line was dropped and no whole restatement is queued since (F-1).
+    pub dirty: bool,
 }
 
 /// The watch on one engine's acks.
@@ -57,7 +59,7 @@ pub struct AudioAck {
 impl AudioAck {
     /// A status at `now`.
     pub fn on_status(&mut self, st: AckState, now: Instant) -> AckStep {
-        let behind = !st.stdin_ended && st.acked.is_some_and(|acked| acked < st.sent);
+        let behind = !st.stdin_ended && st.acked.is_some_and(|acked| acked < st.sent || st.dirty);
         if !behind {
             self.behind_since = None;
             self.restated = false;
@@ -93,6 +95,12 @@ pub(crate) fn on_engine_event(ctl: &mut Controller, ev: &Value, now: Instant) {
     let mut watch = WATCH.lock().unwrap_or_else(|p| p.into_inner());
     match ev.get("type").and_then(Value::as_str) {
         Some("status") => {}
+        Some("audio_gap") => {
+            drop(watch);
+            crate::log!("record: the engine skipped an audio line; restating them");
+            let _ = ctl.supervisor.restate_audio(); // F-1: at once, not after 2 s
+            return;
+        }
         Some(crate::supervisor::ENGINE_EXITED) => return watch.engine_exited(),
         _ => return,
     }
@@ -101,6 +109,7 @@ pub(crate) fn on_engine_event(ctl: &mut Controller, ev: &Value, now: Instant) {
         sent: ctl.supervisor.last_audio_seq(),
         stdin_ended: ev.get("stdin_ended").and_then(Value::as_bool) == Some(true),
         busy: ctl.activity.busy(now),
+        dirty: ctl.supervisor.audio_dirty(),
     };
     let step = watch.on_status(st, now);
     drop(watch);
@@ -142,6 +151,20 @@ mod tests {
         assert_eq!(ok.on_status(AckState { sent: 5, ..AckState::default() }, t0 + Duration::from_secs(20)), AckStep::None, "an engine that does not say");
         let actions = include_str!("record_actions.rs").split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(actions.contains("crate::record_audio_ack::on_engine_event(self, &ev, now);"), "the engine-event loop runs it");
+    }
+
+    /// F-1: line 10 dropped by a full queue, line 11 queued and acked. The ack equals the last
+    /// sent, but the drop leaves the intent dirty: restated after 2 s, never left as is.
+    #[test]
+    fn a_dropped_line_masked_by_a_later_one_is_still_restated() {
+        let t0 = Instant::now();
+        let mut ack = AudioAck::default();
+        let masked = AckState { dirty: true, ..st(11, 11) };
+        assert_eq!(ack.on_status(masked, t0), AckStep::None);
+        assert_eq!(ack.on_status(masked, t0 + BEHIND_FOR), AckStep::Restate, "the gap is not masked");
+        let src = include_str!("record_audio_ack.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(src.contains("dirty: ctl.supervisor.audio_dirty(),"), "the live event feeds it");
+        assert!(crate::supervisor::FORWARDED_EVENTS.contains(&"audio_gap"), "the engine's gap reaches the watch");
     }
 
     /// N2: an orphan whose stdin ended (it holds its tracks and may write a long save) is never

@@ -149,6 +149,9 @@ pub enum Outbound {
     },
     /// The startup hold ended (`sync` read, every track listed): the device tracks record.
     InputsReleased,
+    /// An audio line was skipped (its seq jumped): every device track is held until a full
+    /// restatement and its `sync` (review F-1). The controller restates at once.
+    AudioGap { expected: u64, got: u64 },
     /// Encoder lifecycle/diagnostic line (machine-readable log).
     EncoderLog {
         message: String,
@@ -350,6 +353,9 @@ pub enum Command {
         #[serde(default)]
         seq: u64,
     },
+    /// A full audio restatement starts (its lines follow, then `sync`): the engine's ack counts
+    /// on from `seq`, and a gap before it is healed by what follows (review F-1).
+    Restate { seq: u64 },
     /// Ask the engine to exit cleanly.
     Quit,
 }
