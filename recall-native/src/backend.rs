@@ -234,9 +234,10 @@ fn run_engine_prepare(input:&Path,lowered:bool,stop:&dyn Fn()->bool)->Result<Cli
 }
 fn lost_publish_race(error:&str)->bool{error.contains("publish cache:")}
 fn run_engine_prepare_once(input:&Path,lowered:bool,stop:&dyn Fn()->bool)->Result<ClipInfo,String>{
-    let mut command=engine_command("prepare-editor")?;command.arg(input).arg(cache_dir()?);
+    let editor=cache_dir()?;let mut command=engine_command("prepare-editor")?;command.arg(input).arg(&editor);
     let limit=prepare_limit(input.metadata().map_or(0,|m|m.len()));
-    let output=storage::run_watched(&mut command,lowered,limit,stop).map_err(|e|format!("prepare media: {e}"))?;
+    // A cut-off engine (another clip opened, the limit) leaves no partial stems behind.
+    let output=storage::run_prepare(&mut command,&editor,lowered,limit,stop).map_err(|e|format!("prepare media: {e}"))?;
     if !output.status.success(){return Err(format!("prepare media: {}",String::from_utf8_lossy(&output.stderr).trim()));}
     serde_json::from_slice(&output.stdout).map_err(|e|format!("read prepared media: {e}"))
 }

@@ -309,7 +309,8 @@ pub(super) fn enforce(root: &Path, budget: u64, incoming_video: u64) -> u64 {
 /// Roots whose old stem folders were swept in this process.
 static SWEPT: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());
 
-/// [`sweep_old_stems`] at the first budget pass of each cache root in this process. Call with
+/// [`sweep_old_stems`] and the dead engines' partial folders (`prepare_leftovers.rs`) at the
+/// first budget pass of each cache root in this process. Call with
 /// [`INDEX_LOCK`] held.
 fn sweep_old_stems_once(root: &Path) -> u64 {
     let mut swept = SWEPT.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -318,7 +319,7 @@ fn sweep_old_stems_once(root: &Path) -> u64 {
     }
     swept.push(root.to_path_buf());
     drop(swept);
-    sweep_old_stems(root, &kept())
+    super::prepare_leftovers::sweep_dead_partials(root, super::prepare_leftovers::OWNER) + sweep_old_stems(root, &kept())
 }
 
 /// Deletes the engine stem folders of media cache versions before the current one (6, FLAC):
