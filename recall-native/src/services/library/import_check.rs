@@ -111,7 +111,7 @@ pub(crate) fn check_batch(batch: Vec<(PathBuf, u64, u64)>) -> Vec<PathBuf> {
         let file = path.clone();
         let mut verdict = storage::run_io(&path, Priority::Background, move || edit_marks::inspect(&file)).unwrap_or(edit_marks::Verdict::Unreadable);
         // No index long after the last write: a recording that never finished (6 such files on
-        // Rohan's V:, all `ftyp free mdat` and zeros). It cannot play; stop looking at it. A file
+        // the maintainer's clip drive, all `ftyp free mdat` and zeros). It cannot play; stop looking at it. A file
         // that could not be opened at all (`Unreadable`) is only looked at again.
         if verdict == edit_marks::Verdict::Unready && settled(mtime) && path.metadata().is_ok_and(|m| m.len() == bytes) {
             verdict = edit_marks::Verdict::NoVideo;

@@ -7,7 +7,7 @@
 pub const OWN_STEMS: &[&str] = &["recall", "recall-hdr", "recall-native", "recall-hub", "recall-overlay"];
 
 /// Windows itself: the compositor, the shell and its surfaces, Settings, the lock and sign-in
-/// screens and system processes (Rohan 2026-11-07: a user's own entry beats every other list,
+/// screens and system processes (the maintainer 2026-11-07: a user's own entry beats every other list,
 /// not these). Screensavers (`.scr`) are refused by image name (`classify_event`).
 pub const SYSTEM_STEMS: &[&str] = &[
     // DWM owns the "Not Responding" ghost of a hung game (third audit U3; the watcher

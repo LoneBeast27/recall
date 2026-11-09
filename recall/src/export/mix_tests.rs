@@ -245,7 +245,7 @@ fn every_export_mode_is_faststart_and_keeps_the_sources_tag() {
 
 #[test]
 fn with_mixing_off_every_track_is_exported_on_its_own_with_its_source() {
-    // Rohan, 2026-11-05: "have a toggle for mix or not on export". Off: no mixing, whatever the
+    // The maintainer, 2026-11-05: "have a toggle for mix or not on export". Off: no mixing, whatever the
     // per-track switches say; lossless copies the audio untouched, as before mix-down existed.
     let spec = Spec { sources: Some(r#"["desktop-loopback","app:tone.exe"]"#), ..Spec::default() };
     let Some(clip) = synth("mix-off", &spec) else {

@@ -81,7 +81,7 @@ pub struct CaptureEndpoint {
     pub name: String,
 }
 
-/// The first-run profile (Rohan: "auto mic and game audio"): the detected game's own audio
+/// The first-run profile (the maintainer: "auto mic and game audio"): the detected game's own audio
 /// and the default microphone, pinned by the endpoint id and name Windows reports now (no
 /// name literals; with no capture device, the Windows default input). No System output, and
 /// no Communications output: a call stays out of the clip and its Mix.

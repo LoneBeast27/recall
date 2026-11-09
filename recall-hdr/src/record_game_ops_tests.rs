@@ -91,7 +91,7 @@ fn ops_parse_from_the_wire() {
     assert_eq!(GameOp::parse("game"), None);
 }
 
-/// Final review F-detect-2 (Rohan 07:46, "support for manual application registering"): a
+/// Final review F-detect-2 (the maintainer 07:46, "support for manual application registering"): a
 /// Settings "Record" entry is recorded, browsers and stream clients included.
 #[test]
 fn a_settings_record_entry_is_recorded() {

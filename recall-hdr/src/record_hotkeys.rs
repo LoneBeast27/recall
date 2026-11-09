@@ -6,7 +6,7 @@
 //!   Alt+B bookmark, Alt+S screenshot, Alt+L long recording, Alt+P stats,
 //!   Alt+O overlay (notices) on/off, Alt+U island editor ("UI editor").
 //!   Alt+U was free: no other default, not a [`GAMER_COMBOS`] entry.
-//!   Rohan, 2026-11-05: the two-step chord (Alt+` then a digit) was on Alt
+//!   The maintainer, 2026-11-05: the two-step chord (Alt+` then a digit) was on Alt
 //!   anyway, so it is gone. [`GAMER_COMBOS`] are never defaults. Bookmark,
 //!   screenshot, record and stats can be turned off ("").
 //! - **Chord-era configs.** A file that still has the old `[hotkeys]` table
@@ -256,7 +256,7 @@ pub fn migrate_loaded(rec: &mut RecordingCfg, toml_text: &str) {
     if !has("overlay_hotkey") {
         drop_taken_default(rec, HotkeyAction::Overlay);
     }
-    // Alt+U is on by default (Rohan asked for it), but never over a combo the
+    // Alt+U is on by default (the maintainer asked for it), but never over a combo the
     // user already gave another action, whether or not the file names it.
     drop_taken_default(rec, HotkeyAction::Editor);
 }
