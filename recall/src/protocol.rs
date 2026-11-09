@@ -104,6 +104,10 @@ pub enum Outbound {
         staged_path: String,
         reason: String,
     },
+    /// A released or orphaned engine draining its saves at quit (no `status` lines any more):
+    /// `status.save_writing` once a second, so the controller sees the save still writing
+    /// (R2-detect-r10-p2-1). Its own type: a bare `status` would blank the cached engine view.
+    SaveProgress { save_writing: SaveWriting },
     /// A `save_clip` failed. `rejected`: it failed before it was queued for
     /// writing (the newest request, while older saves may still be writing).
     SaveFailed {
