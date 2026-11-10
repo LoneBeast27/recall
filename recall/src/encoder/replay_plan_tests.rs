@@ -21,6 +21,23 @@ use super::*;
 use crate::ring::EncodedPacket;
 
 /// `frames` frames of `w`x`h` noise-like libx264 (or `codec`) at 60 fps, keyframe every 30.
+/// `buf` with every 4-byte start code made a 3-byte one (still valid Annex B):
+/// the muxer's rewrite then changes sizes, which the plan must predict.
+fn short_start_codes(buf: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(buf.len());
+    let mut i = 0;
+    while i < buf.len() {
+        if buf[i..].starts_with(&[0, 0, 0, 1]) {
+            out.extend_from_slice(&[0, 0, 1]);
+            i += 4;
+        } else {
+            out.push(buf[i]);
+            i += 1;
+        }
+    }
+    out
+}
+
 fn window_of(codec: &str, frames: usize, w: u32, h: u32) -> Option<(Vec<EncodedPacket>, OwnedParams)> {
     ff::init().unwrap();
     let found = ff::encoder::find_by_name(codec)?;
@@ -115,7 +132,20 @@ fn recover(dir: &Path, part: &Path) -> (PathBuf, Vec<String>) {
     (clip, logs)
 }
 
+/// (position, size) of every video sample of a finished file, as FFmpeg reads its `moov`:
+/// independent of the packet index under test.
+fn video_layout(path: &Path) -> Vec<(u64, u64)> {
+    let mut input = ff::format::input(&path).expect("a finished file opens");
+    input.packets().filter(|(s, _)| s.index() == 0).map(|(_, p)| (p.position() as u64, p.size() as u64)).collect()
+}
+
+/// Video samples of `layout` whole within the first `len` bytes.
+fn whole_in(layout: &[(u64, u64)], len: u64) -> usize {
+    layout.iter().filter(|(at, size)| at + size <= len).count()
+}
+
 /// Video records of a full save of the same window that are whole within the first `len` bytes.
+#[allow(dead_code)]
 fn whole_video(records: &[Record], len: u64) -> usize {
     records.iter().filter(|r| r.stream == 0 && r.offset + u64::from(r.size) <= len).count()
 }
@@ -126,12 +156,14 @@ fn whole_video(records: &[Record], len: u64) -> usize {
 fn a_save_killed_mid_mux_loses_no_packet_the_part_holds() {
     let sb = sandbox("kill");
     let Some(window) = window_of("libx264", 300, 320, 240) else { return eprintln!("libx264 missing; skipped") };
+    // The same window saved whole: the same layout, read by FFmpeg from its moov.
     let reference = save(&sb.dir, "R__2026-11-11__15-00-00-000__rr", &window, None);
-    let (_, full) = read(&slot().unwrap()).unwrap();
-    let total = full.len() as u64;
+    let layout = video_layout(&reference);
+    let total = read(&slot().unwrap()).unwrap().0.planned as u64;
     let part = save(&sb.dir, "K__2026-11-11__15-00-00-000__kk", &window, Some(total * 9 / 10));
     let len = std::fs::metadata(&part).unwrap().len();
-    let expected = whole_video(&full, len);
+    let expected = whole_in(&layout, len);
+    assert!(expected > 200, "the kill came late in the save ({expected} whole video samples)");
     let (clip, logs) = recover(&sb.dir, &part);
     assert_eq!(video_in(&clip).len(), expected, "every whole video packet in the killed .part ({len} B): {logs:?}");
     drop(reference);
@@ -144,14 +176,25 @@ fn a_cut_at_a_random_byte_rebuilds_every_whole_packet_before_it() {
     let sb = sandbox("random-cut");
     let Some(window) = window_of("libx264", 240, 320, 240) else { return eprintln!("libx264 missing; skipped") };
     let part = save(&sb.dir, "S__2026-11-11__15-00-00-000__ss", &window, None);
-    let (_, records) = read(&slot().unwrap()).unwrap();
-    let cut = (moov_at(&part) as u64 * 61_803 / 100_000) as usize + 17;
+    let layout = video_layout(&part);
+    // The cut lands inside a video sample that has audio frames ahead of it in the file (from
+    // about 60% in): those whole audio frames come after the last whole video sample.
+    let mut input = ff::format::input(&part).unwrap();
+    let mut all: Vec<(usize, u64, u64)> = input.packets().map(|(st, p)| (st.index(), p.position() as u64, p.size() as u64)).collect();
+    all.sort_by_key(|p| p.1);
+    let from = all.len() * 6 / 10;
+    let next_video = (from..all.len() - 2).find(|&i| all[i].0 == 0 && all[i + 1].0 != 0).and_then(|i| (i + 1..all.len()).find(|&j| all[j].0 == 0)).expect("video, audio, video");
+    let cut = (all[next_video].1 + all[next_video].2 / 2) as usize;
+    drop(input);
     truncate(&part, cut);
     let (clip, logs) = recover(&sb.dir, &part);
     let video = video_in(&clip);
-    assert_eq!(video.len(), whole_video(&records, cut as u64), "{logs:?}");
-    let last_video_end = video.iter().cloned().fold(0.0, f64::max) + 0.0167;
-    assert!(packets_in(&clip).iter().all(|(s, t)| *s == 0 || *t <= last_video_end + 1e-6), "no audio past the last video packet");
+    assert_eq!(video.len(), whole_in(&layout, cut as u64), "{logs:?}");
+    // Audio goes in only ahead of a video sample that checked out: none after the last one.
+    let last_video = video.iter().cloned().fold(0.0, f64::max);
+    let late: Vec<_> = packets_in(&clip).into_iter().filter(|(s, t)| *s != 0 && *t > last_video + 1e-6).collect();
+    eprintln!("RANDOM CUT {cut} B: {} video, last at {last_video}, {} audio after it", video.len(), late.len());
+    assert!(late.is_empty(), "no audio past the last video sample at {last_video}: {late:?}");
 }
 
 /// The plan claims bytes past the real end: zeros (a power cut extended the file). The rebuild
@@ -161,14 +204,14 @@ fn records_past_the_data_end_are_never_taken() {
     let sb = sandbox("zeros-past-end");
     let Some(window) = window_of("libx264", 180, 320, 240) else { return eprintln!("libx264 missing; skipped") };
     let part = save(&sb.dir, "Z__2026-11-11__15-00-00-000__zz", &window, None);
-    let (_, records) = read(&slot().unwrap()).unwrap();
+    let layout = video_layout(&part);
     let cut = moov_at(&part) / 2;
     let mut bytes = std::fs::read(&part).unwrap();
     bytes.truncate(cut);
     bytes.extend(std::iter::repeat_n(0u8, 1 << 20));
     std::fs::write(&part, &bytes).unwrap();
     let (clip, logs) = recover(&sb.dir, &part);
-    assert_eq!(video_in(&clip).len(), whole_video(&records, cut as u64), "{logs:?}");
+    assert_eq!(video_in(&clip).len(), whole_in(&layout, cut as u64), "{logs:?}");
 }
 
 /// A torn tail that is not zeros (garbage where the plan expects packets): the first record
@@ -178,7 +221,7 @@ fn a_torn_non_zero_tail_ends_the_rebuild() {
     let sb = sandbox("torn-tail");
     let Some(window) = window_of("libx264", 180, 320, 240) else { return eprintln!("libx264 missing; skipped") };
     let part = save(&sb.dir, "T__2026-11-11__15-00-00-000__tt", &window, None);
-    let (_, records) = read(&slot().unwrap()).unwrap();
+    let layout = video_layout(&part);
     let cut = moov_at(&part) / 2;
     let mut bytes = std::fs::read(&part).unwrap();
     bytes.truncate(moov_at(&part));
@@ -186,7 +229,8 @@ fn a_torn_non_zero_tail_ends_the_rebuild() {
     std::fs::write(&part, &bytes).unwrap();
     let (clip, logs) = recover(&sb.dir, &part);
     let got = video_in(&clip).len();
-    assert!(got <= whole_video(&records, cut as u64) && got + 2 >= whole_video(&records, cut as u64), "{got} packets: {logs:?}");
+    let whole = whole_in(&layout, cut as u64);
+    assert!(got <= whole && got + 1 >= whole, "{got} packets of {whole} whole before the garbage: {logs:?}");
 }
 
 /// The plan stops holding mid-mux (here forced one byte off at record 40): from there every
@@ -211,8 +255,16 @@ fn a_plan_that_stops_holding_hands_over_to_records_written_through() {
 #[test]
 fn the_plan_predicts_hevc_exactly() {
     let sb = sandbox("hevc");
-    let Some(window) = window_of("libx265", 60, 320, 240) else { return eprintln!("libx265 missing; skipped") };
-    save(&sb.dir, "H__2026-11-11__15-00-00-000__hh", &window, None);
+    let Some((packets, params)) = window_of("libx265", 60, 320, 240) else { return eprintln!("libx265 missing; skipped") };
+    let extra = params.extradata();
+    assert!(extra.starts_with(&[0, 0, 0, 1]) || extra.starts_with(&[0, 0, 1]), "Annex B extradata: the muxer rewrites the packets");
+    let shortened: Vec<EncodedPacket> = packets.iter().map(|p| EncodedPacket { data: crate::ring::Payload::from(short_start_codes(&p.data.to_vec())), ..p.clone() }).collect();
+    assert!(shortened.iter().zip(&packets).any(|(a, b)| a.data.len() != b.data.len()), "some 3-byte start codes");
+    let part = save(&sb.dir, "H__2026-11-11__15-00-00-000__hh", &(shortened, params), None);
+    assert!(video_in(&part).len() == 60, "the HEVC clip plays");
+    // Every planned video record is exactly where FFmpeg finds the sample in the finished file.
+    let planned: Vec<(u64, u64)> = read(&slot().unwrap()).unwrap().1.iter().filter(|r| r.stream == 0).map(|r| (r.offset, u64::from(r.size))).collect();
+    assert_eq!(planned, video_layout(&part), "the plan is the muxer's real layout");
     let raw = raw_records(&slot().unwrap());
     let (head, records) = read(&slot().unwrap()).unwrap();
     assert!(head.planned > 0 && records.len() == head.planned, "planned");
