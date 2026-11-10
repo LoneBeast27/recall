@@ -99,7 +99,7 @@ impl Scanner {
 }
 
 /// One ring and one watcher thread per app, in list order, plus the shared scanner.
-pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, report: &mut impl FnMut(String)) -> Vec<Arc<TrackRing>> {
+pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, hold: bool, report: &mut impl FnMut(String)) -> Vec<Arc<TrackRing>> {
     if apps.is_empty() {
         return Vec::new();
     }
@@ -124,6 +124,9 @@ pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, report
         let id = if app.id.trim().is_empty() { format!("app-{}", n + 1) } else { app.id.trim().to_owned() };
         let spec = SourceSpec { communications: false, device_id: String::new(), id, kind: "app".into(), device: String::new(), exe: exe.clone(), name: app.track_name(), gain_db: app.gain_db, mic_mute: Some(false) };
         let ring = Arc::new(TrackRing::for_source(&spec, source, buffer_secs, format!("{exe} (not running)")));
+        if hold {
+            ring.hold_startup(); // "Hold everything" until the controller's sync (the cut-down)
+        }
         let name = ring.title();
         let (thread_ring, thread_scanner) = (Arc::clone(&ring), Arc::clone(&scanner));
         let thread_exe = exe.clone();
@@ -149,7 +152,7 @@ pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, report
 fn push_silence(ring: &TrackRing, frames: u64) {
     let frames = frames.min(ring.capacity_frames());
     if frames > 0 {
-        ring.push_capture(&vec![0.0; frames as usize * ring.channels as usize], false);
+        super::packet::push_silence(ring, frames as usize * ring.channels as usize); // no allocation
     }
 }
 
@@ -219,12 +222,14 @@ fn capture_events(ring: &TrackRing, client: &mut wasapi::AudioClient, event: &Ev
     let channels = ring.channels as usize;
     let block = channels * 4;
     let mut raw: VecDeque<u8> = VecDeque::new();
+    // Kept across packets: no allocation per packet once they fit (merge-gate P3).
+    let (mut samples, mut leveled) = (Vec::new(), Vec::new());
     let mut last_sound = Instant::now();
     while !process.exited() {
         if event.0.wait_for_event(100).is_ok() && capture.read_from_device_to_deque(&mut raw).is_ok() && raw.len() >= block {
-            let full = raw.len() - raw.len() % block;
-            let samples: Vec<f32> = raw.drain(..full).collect::<Vec<u8>>().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-            ring.push_capture(&level.live(started.elapsed(), &samples, channels), false);
+            super::packet::decode(&mut raw, block, &mut samples);
+            level.live_into(started.elapsed(), &samples, channels, &mut leveled);
+            ring.push_app_capture(&leveled); // a retired app source stores silence at once
             last_sound = Instant::now();
         } else if last_sound.elapsed() >= IDLE {
             // No active stream: the app is quiet, so silence up to the clock cuts nothing.

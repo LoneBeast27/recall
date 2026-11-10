@@ -21,6 +21,8 @@ pub enum Outbound {
         /// gain boosted live (P2-a). An engine without it (8111e31 and older) ignores those
         /// fields, so the controller restarts it for them instead of sending them.
         live_source_fields: bool,
+        /// Device tracks start held until the controller's `sync` (the sync handshake).
+        sync_hold: bool,
         /// This engine takes `stop_capture` (`stop_capture.rs`); a controller holds a privacy
         /// stop for a save in flight on an engine that does not say so.
         stop_capture: bool,
@@ -62,6 +64,9 @@ pub enum Outbound {
         encoder_opening: bool,
         /// Whether new microphone samples are entering the replay buffer as silence.
         mic_muted: bool,
+        /// The engine's stdin ended (quit, end, read error): it reads and acks nothing more, and
+        /// its device tracks are held (the controller never recovers it for an unacked line).
+        stdin_ended: bool,
         /// What each recorded source opened, in track order (`audio::sources::opened`).
         #[serde(skip_serializing_if = "Vec::is_empty")]
         audio: Vec<AudioOpened>,
@@ -160,6 +165,13 @@ pub enum Outbound {
         source: String,
         reason: String,
     },
+    /// Every device track is held silent and opens no stream: stdin was not drained in time,
+    /// or a read failed (merge-gate F7). The controller tells the user.
+    InputsHeld {
+        reason: String,
+    },
+    /// The startup hold ended (`sync` read, every track listed): the device tracks record.
+    InputsReleased,
     /// Encoder lifecycle/diagnostic line (machine-readable log).
     EncoderLog {
         message: String,
@@ -266,6 +278,13 @@ pub struct AudioOpened {
     /// controller to save as the source's own (`audio::hold`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub adopt_id: Option<String>,
+    /// Silence is stored whatever Alt+M says (an unsure sibling held, or the startup hold): the
+    /// Audio page meter shows "Held" from this, not from its own guess (merge-gate P2).
+    pub held: bool,
+    /// Alt+M silences it right now: the meter's "Muted" (design-audio-mute P20).
+    pub mutes: bool,
+    /// Retired (removed, disabled, re-picked): silent until the next engine (P11).
+    pub retired: bool,
 }
 
 #[derive(Serialize)]
@@ -290,8 +309,13 @@ pub enum Command {
         #[serde(default)]
         at_last_frame: bool,
     },
-    /// Set microphone capture muting for newly captured replay audio.
-    SetMicMute { muted: bool },
+    /// Set microphone capture muting for newly captured replay audio. `press`: the user's Alt+M
+    /// or toggle (the controller's `set_mic`); absent on a resync, which is never a press.
+    SetMicMute {
+        muted: bool,
+        #[serde(default)]
+        press: bool,
+    },
     /// The answers to "Use your existing <Game> folder?" changed (`recording.game_folder_choices`):
     /// applied live, no restart.
     SetGameFolderChoices {
@@ -314,6 +338,10 @@ pub enum Command {
         /// The endpoint id saved with the source's device (P1-B): the track reopens on it.
         #[serde(default)]
         device_id: Option<String>,
+        /// The source is no longer recorded as this track (removed, disabled, re-picked under
+        /// another name): it stores silence from its next packet and closes its stream for good.
+        #[serde(default)]
+        retire: Option<bool>,
     },
     /// Export an existing VFR clip to a separate NVENC CFR file (60 fps default).
     ExportClip {
@@ -339,6 +367,10 @@ pub enum Command {
     /// The Windows session locked (Win+L) or unlocked: a long recording keeps going and
     /// counts the time (`recording_stopped.locked_seconds`).
     SessionLocked { locked: bool },
+    /// The controller restated its whole audio intent (mute, every source's flag and id):
+    /// every line before this one was queued first, so once it is read the device tracks may
+    /// record (`audio::sources::sync_read`).
+    Sync {},
     /// The privacy stop (`stop_capture.rs`): capture stops now, nothing more is read, and the
     /// engine exits once the saves already asked for are written.
     StopCapture,
@@ -386,109 +418,8 @@ pub fn emit_or_log(json: bool, msg: &Outbound, human: impl FnOnce() -> String) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::Outbound;
-
-    /// A pipe whose reader is gone (`ERROR_NO_DATA`).
-    struct ClosedPipe;
-    impl std::io::Write for ClosedPipe {
-        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
-            Err(std::io::Error::from_raw_os_error(232))
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    #[test]
-    fn a_line_to_a_closed_pipe_is_dropped_without_a_panic() {
-        // R5-overlay-6: the controller crashed; the engine must not panic on its next line.
-        let wrote = std::panic::catch_unwind(|| super::write_line(&mut ClosedPipe, "{\"type\":\"status\"}"));
-        assert_eq!(wrote.ok(), Some(false), "dropped, reported, no panic");
-        let mut ok = Vec::new();
-        assert!(super::write_line(&mut ok, "x"));
-        assert_eq!(ok, b"x
-");
-    }
-
-    #[test]
-    fn set_source_parses_with_either_field() {
-        use super::Command;
-        let both: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"mic","gain_db":-3.5,"name":"Voice"}"#).unwrap();
-        assert!(matches!(both, Command::SetSource { ref id, gain_db: Some(g), name: Some(ref n), mic_mute: None, device_id: None } if id == "mic" && g == -3.5 && n == "Voice"));
-        let gain: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"game","gain_db":6}"#).unwrap();
-        assert!(matches!(gain, Command::SetSource { gain_db: Some(_), name: None, .. }));
-        let line_in: Command = serde_json::from_str(r#"{"cmd":"set_source","id":"in-1","mic_mute":false}"#).unwrap();
-        assert!(matches!(line_in, Command::SetSource { mic_mute: Some(false), gain_db: None, name: None, .. }));
-    }
-
-    #[test]
-    fn record_fail_parses_with_its_reason() {
-        // The controller ends a running long recording early before restarting a hung engine.
-        let v = serde_json::from_str::<super::Command>(r#"{"cmd":"record_fail","reason":"the encoder isn't responding"}"#);
-        assert!(matches!(v, Ok(super::Command::RecordFail { ref reason }) if reason == "the encoder isn't responding"), "not a record_fail");
-    }
-
-    #[test]
-    fn session_locked_parses() {
-        // The controller says when the Windows session locks / unlocks (audit U8).
-        let v = serde_json::from_str::<super::Command>(r#"{"cmd":"session_locked","locked":true}"#);
-        assert!(matches!(v, Ok(super::Command::SessionLocked { locked: true })), "not a session_locked");
-    }
-
-    fn wire(msg: &Outbound) -> String {
-        serde_json::to_string(msg).unwrap()
-    }
-
-    #[test]
-    fn saved_keeps_its_fields_and_adds_staging() {
-        let staged = Outbound::Saved {
-            path: r"E:\Clips\G__x.mp4".into(),
-            seconds: 120.0,
-            frames: 7200,
-            bytes: 400,
-            elapsed_ms: 812,
-            staged: true,
-            staged_path: Some(r"F:\Recall\cache\staging\G__x.mp4".into()),
-            video_end_us: Some(7),
-        };
-        assert_eq!(
-            wire(&staged),
-            r#"{"type":"saved","path":"E:\\Clips\\G__x.mp4","seconds":120.0,"frames":7200,"bytes":400,"elapsed_ms":812,"staged":true,"staged_path":"F:\\Recall\\cache\\staging\\G__x.mp4"}"#
-        );
-        let direct = Outbound::Saved {
-            path: "a.mp4".into(),
-            seconds: 1.5,
-            frames: 3,
-            bytes: 10,
-            elapsed_ms: 5,
-            staged: false,
-            staged_path: None,
-            video_end_us: None,
-        };
-        assert_eq!(
-            wire(&direct),
-            r#"{"type":"saved","path":"a.mp4","seconds":1.5,"frames":3,"bytes":10,"elapsed_ms":5,"staged":false}"#
-        );
-    }
-
-    #[test]
-    fn clip_move_events_match_the_wire_shape() {
-        let moved = Outbound::ClipMoved { path: r"E:\c\G.mp4".into(), elapsed_ms: 9549, kept_path: None };
-        assert_eq!(wire(&moved), r#"{"type":"clip_moved","path":"E:\\c\\G.mp4","elapsed_ms":9549}"#);
-        let kept = Outbound::ClipMoved { path: r"E:\c\G.mp4".into(), elapsed_ms: 9549, kept_path: Some(r"F:\s\kept\G.mp4".into()) };
-        assert_eq!(wire(&kept), r#"{"type":"clip_moved","path":"E:\\c\\G.mp4","elapsed_ms":9549,"kept_path":"F:\\s\\kept\\G.mp4"}"#);
-        let failed = Outbound::ClipMoveFailed {
-            path: r"E:\c\G.mp4".into(),
-            staged_path: r"F:\s\G.mp4".into(),
-            reason: "disk full".into(),
-        };
-        assert_eq!(
-            wire(&failed),
-            r#"{"type":"clip_move_failed","path":"E:\\c\\G.mp4","staged_path":"F:\\s\\G.mp4","reason":"disk full"}"#
-        );
-    }
-}
+#[path = "protocol_tests.rs"]
+mod tests;
 
 /// Tests: what this thread emitted (`protocol_test_emits.rs`).
 #[cfg(test)]

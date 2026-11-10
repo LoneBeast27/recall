@@ -42,6 +42,10 @@ pub(crate) struct Live {
     repick: AtomicBool,
     /// A re-pick thread of this track runs (`rebind`): at most one at a time.
     pub(super) repick_slot: Arc<AtomicBool>,
+    /// Silence whatever Alt+M says: the controller's `sync` was not read yet (the sync handshake).
+    startup: AtomicBool,
+    /// The source is no longer recorded as this track (`retire`): held for good, no stream.
+    retired: AtomicBool,
 }
 
 /// What a packet does with the hold.
@@ -115,6 +119,16 @@ impl Live {
         }
     }
 
+    /// A re-pick is pending: the open stream is on a device that is no longer picked (F-2).
+    pub(super) fn repick_pending(&self) -> bool {
+        self.repick.load(Ordering::SeqCst)
+    }
+
+    /// End the open stream at its next packet turn (it reopens only when not held).
+    pub(super) fn request_repick(&self) {
+        self.repick.store(true, Ordering::SeqCst);
+    }
+
     /// The saved id changed since the stream opened (taken once).
     pub(super) fn take_repick(&self) -> bool {
         self.repick.swap(false, Ordering::SeqCst)
@@ -124,7 +138,23 @@ impl Live {
 impl TrackRing {
     /// Append a live packet: Alt+M as it is right now (`now`), and silence while the stream is
     /// held (see the module notes).
+    #[cfg(test)]
     pub(crate) fn push_live(&self, data: &[f32], now: MuteNow) {
+        self.push_live_as(data, now, self.live.startup.load(Ordering::SeqCst));
+    }
+
+    /// The capture thread's packet (`stream.rs`): the startup hold is loaded BEFORE Alt+M is
+    /// read (`read`, merge-gate F1). Seen released means the release came after every queued
+    /// line was applied, so the mute read next sees them; read the other way round, a release
+    /// between the two reads stored a stale "unmuted" packet live.
+    pub(crate) fn push_live_read(&self, data: &[f32], read: impl FnOnce() -> MuteNow) {
+        // A re-pick waiting for this stream to end (F-2): its packets come from a device that is
+        // no longer picked, so they are silence until the reopen (the flag is taken there).
+        let startup = self.live.startup.load(Ordering::SeqCst) || self.live.repick_pending(); // the safe state: hold first
+        self.push_live_as(data, read(), startup);
+    }
+
+    fn push_live_as(&self, data: &[f32], now: MuteNow, startup: bool) {
         // A line-in never takes a sibling's id (P1-b): read per packet, as the flag changes live.
         let line_in = !self.mic_mute.load(std::sync::atomic::Ordering::Relaxed);
         let held = match self.live.check(now, line_in) {
@@ -149,11 +179,106 @@ impl TrackRing {
                 true
             }
         };
-        self.push_samples(data, now.muted, held);
+        self.push_samples(data, now.muted, held || startup);
+    }
+
+    /// Held until the controller's `sync` (the sync handshake): this input stores silence
+    /// until [`Self::release_startup_hold`], whatever Alt+M or its flag says.
+    pub(crate) fn hold_startup(&self) {
+        self.live.startup.store(true, Ordering::SeqCst);
+    }
+
+    /// Every line queued before the start was applied: the input records as its flags say.
+    /// Never a retired track ([`Self::retire`]).
+    pub(crate) fn release_startup_hold(&self) {
+        if !self.live.retired.load(Ordering::SeqCst) {
+            self.live.startup.store(false, Ordering::SeqCst);
+        }
+    }
+
+    /// The source was removed, disabled or re-picked under another name (`set_source retire`,
+    /// design-audio-mute P4): its next packet is silence (the startup hold, loaded before each
+    /// packet), its open stream ends at the next packet turn (`take_repick`), and no stream
+    /// opens again while it is held, which is for good.
+    pub(crate) fn retire(&self) {
+        self.live.retired.store(true, Ordering::SeqCst);
+        self.live.startup.store(true, Ordering::SeqCst);
+        self.live.request_repick();
+    }
+
+    pub(crate) fn retired(&self) -> bool {
+        self.live.retired.load(Ordering::SeqCst)
+    }
+
+    /// An app track's packet (`apps.rs`): an app track never starts held (no line changes which
+    /// process it captures), but once retired (the source was removed or disabled) it stores
+    /// silence from the next packet, as a device track does. The hold is loaded per packet.
+    pub(crate) fn push_app_capture(&self, data: &[f32]) {
+        let held = self.live.startup.load(Ordering::SeqCst); // set only by `retire` for an app
+        self.push_samples(data, false, held);
+    }
+
+    /// Alt+M silences this track right now (the engine's truth for the meter's "Muted").
+    pub(crate) fn mutes_now(&self) -> bool {
+        super::mic_muted() && self.mutes()
+    }
+
+    /// Whether this track stores silence whatever Alt+M says right now: an unsure stream held
+    /// (a line-in until picked included) or the startup hold. Reported in `status.audio[].held`.
+    pub(crate) fn held_now(&self) -> bool {
+        self.live.held.load(Ordering::SeqCst) || self.startup_held()
+    }
+
+    /// Tests: the stream loop's turn (`stream.rs` takes the re-pick).
+    #[cfg(test)]
+    pub(crate) fn take_repick_for_test(&self) -> bool {
+        self.live.take_repick()
+    }
+
+    /// Tests: the endpoint id the next open picks with.
+    #[cfg(test)]
+    pub(crate) fn saved_id_for_test(&self) -> String {
+        self.live.saved_id()
+    }
+
+    /// Tests: the source's "Alt+M mutes it" flag as set (live) now.
+    #[cfg(test)]
+    pub(crate) fn mic_mute_flag(&self) -> bool {
+        self.mic_mute.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub(crate) fn startup_held(&self) -> bool {
+        self.live.startup.load(Ordering::SeqCst)
     }
 }
 
+/// Wait for a capture thread's init answer, at most `timeout`. A thread that does not answer in
+/// time keeps running unseen by the controller (no `set_source` reaches an unlisted track):
+/// it is retired, so it stores silence and opens nothing (design-audio-mute P18).
+pub(super) fn await_init(ring: &TrackRing, rx: &std::sync::mpsc::Receiver<Result<(), String>>, timeout: std::time::Duration) -> Result<(), String> {
+    match rx.recv_timeout(timeout) {
+        Ok(answer) => answer,
+        Err(_) => {
+            ring.retire(); // the safe state for a ring nobody lists
+            Err("audio init timed out".into())
+        }
+    }
+}
+
+/// Whether a track starts held (the sync handshake): every track under a controller (`hold`),
+/// the game's process tree included (Rohan 2026-11-09 23:31 UTC, the cut-down: "Hold
+/// everything"); app tracks are held the same way (`apps::start`).
+pub(crate) fn starts_held(hold: bool, _process_loopback: bool) -> bool {
+    hold
+}
+
 impl TrackRing {
+    /// Tests: a ring for `spec` with the saved source tag `source` (no WASAPI).
+    #[cfg(test)]
+    pub(crate) fn for_source_for_test(spec: &super::SourceSpec, source: &'static str) -> Self {
+        Self::for_source(spec, source, 2, String::new())
+    }
+
     /// A 48 kHz stereo input ring on the Windows default, fed by the test (no WASAPI).
     #[cfg(test)]
     pub(crate) fn input_for_test(name: &'static str) -> Self {

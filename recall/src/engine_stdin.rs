@@ -11,6 +11,9 @@
 //! stdin thread. If the serve thread does not take the end within [`SERVE_TAKES_END`] (it
 //! never started, or is stuck in a hook) the stdin thread ends it itself, so a quit is never
 //! held longer than that.
+//!
+//! Every device track starts held and records only after the controller's `sync` line, read in
+//! order after its restatement (the sync handshake, `audio::sources::sync_read`): no timing guess.
 
 use std::io::BufRead;
 use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
@@ -59,7 +62,10 @@ impl Ender {
 
 /// Start reading the process's stdin now; `quit` is set after a `quit` line or the end of stdin.
 pub(crate) fn spawn_early(shared: Arc<CaptureShared>) -> Early {
-    spawn_early_from(|| std::io::stdin().lock(), shared)
+    let early = spawn_early_from(|| std::io::stdin().lock(), shared);
+    #[cfg(feature = "encode")]
+    std::thread::spawn(|| watch_hold(std::thread::sleep, audio::sources::startup_released, protocol::emit));
+    early
 }
 
 /// [`spawn_early`] from the reader `open` gives (tests: a pipe).
@@ -73,9 +79,7 @@ pub(crate) fn spawn_early_from<R: BufRead>(open: impl FnOnce() -> R + Send + 'st
         let end = read_early(open(), |cmd| {
             let _ = forward.send(Item::Cmd(cmd));
         });
-        if end == ReaderEnd::StopCapture {
-            crate::stop_capture::request(); // at once: not one more frame or sample (F-detect-1)
-        }
+        reader_end(end);
         let _ = tx.send(Item::End(end));
         // R2-rel-1: the serve thread sets `quit` after the commands before it; only if it does
         // not within the bound does this thread (a quit never waits longer than that).
@@ -85,23 +89,107 @@ pub(crate) fn spawn_early_from<R: BufRead>(open: impl FnOnce() -> R + Send + 'st
     Early { rx, ends }
 }
 
+/// How long the device tracks may wait for `sync` before the user is told (a normal start takes
+/// a few ms; R-fresh-4: no notice for that).
+pub(crate) const HELD_NOTICE_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Why the device tracks are held (`inputs_held`, merge-gate F7).
+pub(crate) const INPUTS_HELD_LATE: &str = "the recorder is waiting for its settings";
+
+/// Tell the controller (it shows a notice) when the startup hold still holds after
+/// [`HELD_NOTICE_AFTER`] (`wait`: the clock). True when it told. The release says
+/// `inputs_released` (`audio::sources`).
+pub(crate) fn watch_hold(wait: impl FnOnce(std::time::Duration), released: impl Fn() -> bool, emit: impl FnOnce(&protocol::Outbound)) -> bool {
+    wait(HELD_NOTICE_AFTER);
+    if released() {
+        return false;
+    }
+    eprintln!("[recall] stdin: no sync from the controller after {HELD_NOTICE_AFTER:?}; the device audio tracks stay held");
+    emit(&protocol::Outbound::InputsHeld { reason: INPUTS_HELD_LATE.to_owned() });
+    true
+}
+
 /// Every command of `reader` to `forward`, the mic mute applied first (a toggle goes on as the
 /// state it set, so the later handler sets the same value again and reports it).
 pub(crate) fn read_early<R: BufRead>(reader: R, mut forward: impl FnMut(Command)) -> stdin_reader::ReaderEnd {
     stdin_reader::read_commands(reader, |cmd| forward(apply_mute(cmd)))
 }
 
+/// The engine's stdin has ended (set once, by the reader): reported in `status.stdin_ended`, so
+/// the controller never treats the lines it cannot ack as a hung engine (N2).
+static STDIN_ENDED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub(crate) fn stdin_ended() -> bool {
+    STDIN_ENDED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The reader ended, whichever way: the controller's `quit`, `stop_capture`, the end of stdin
+/// (the controller is gone) or a read error (N2). Run on the stdin thread at once, before the
+/// end goes to the serve thread and so before `quit` is set (whichever thread sets it,
+/// [`Ender::end`]). No line reaches this engine any more, so a privacy change from now on could
+/// never apply: every device track stores silence first ([`hold_at_end`]), so the long
+/// recording's finalise, an orphan's long save and anything else stored until the exit hold no
+/// live sample (the safe state). A `stop_capture` also stops capture at once (F-detect-1).
+fn reader_end(end: ReaderEnd) {
+    hold_at_end();
+    if end == ReaderEnd::StopCapture {
+        crate::stop_capture::request(); // at once: not one more frame or sample (F-detect-1)
+    }
+}
+
+/// The hold of [`reader_end`], and `stdin_ended` for the status.
+pub(crate) fn hold_at_end() {
+    #[cfg(feature = "encode")]
+    audio::sources::hold_for_quit();
+    STDIN_ENDED.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 #[cfg(feature = "encode")]
 fn apply_mute(cmd: Command) -> Command {
+    apply_audio(cmd)
+}
+
+#[cfg(feature = "encode")]
+fn apply_audio(cmd: Command) -> Command {
     match cmd {
-        Command::ToggleMicMute => Command::SetMicMute { muted: audio::toggle_mic_mute() },
-        Command::SetMicMute { muted } => {
-            audio::set_mic_muted(muted);
+        Command::ToggleMicMute => Command::SetMicMute { muted: audio::toggle_mic_mute(), press: true },
+        Command::SetMicMute { muted, press, .. } => {
+            audio::set_mic_muted_by(muted, press);
+            cmd
+        }
+        // A line-in's flag, a re-picked id or a retire read before the tracks start is in force
+        // at their first packet (review R2-audio-r9-2), and one read later goes to its live
+        // track now. Applied here once, in order: `serve` gets only gain and name, so it can
+        // never put an older flag or id back after a newer one (merge-gate F3).
+        Command::SetSource { id, gain_db, name, mic_mute, device_id, retire } => {
+            if retire == Some(true) {
+                audio::sources::stage_retire(&id);
+            }
+            audio::sources::stage_early(&id, mic_mute, device_id.as_deref());
+            Command::SetSource { id, gain_db, name, mic_mute: None, device_id: None, retire: None } // the safe state
+        }
+        // The controller's restatement is complete (the sync handshake): the startup hold ends
+        // once every track is listed too (`sources::sync_read`).
+        Command::Sync { .. } => {
+            audio::sources::sync_read();
             cmd
         }
         cmd => cmd,
     }
 }
+
+/// Whether the device tracks start held. Always, when a controller drives this engine: only its
+/// `sync` releases them. A controller that never sends one (it does not set
+/// `RECALL_STDIN_SYNC`: an older build) leaves them held for the run, the safe state.
+pub(crate) fn startup_hold() -> bool {
+    if std::env::var_os(SYNC_ENV).is_none() {
+        eprintln!("[recall] stdin: {SYNC_ENV} is not set (an older controller); the device audio tracks stay held for this run");
+    }
+    true
+}
+
+/// The controller sets this when it will send `sync` after its restatement.
+pub(crate) const SYNC_ENV: &str = "RECALL_STDIN_SYNC";
 
 #[cfg(not(feature = "encode"))]
 fn apply_mute(cmd: Command) -> Command {
@@ -145,10 +233,10 @@ fn apply(cmd: Command, shared: &CaptureShared, (save, export): (&Option<SaveHook
             protocol::emit(&protocol::Outbound::MicMuted { muted: audio::mic_muted() });
         }
         Command::SetGameFolderChoices { choices } => crate::naming::set_choices(choices),
-        Command::SetSource { id, gain_db, name, mic_mute, device_id } => {
+        Command::SetSource { id, gain_db, name, mic_mute, device_id, .. } => {
             #[cfg(feature = "encode")]
             {
-                let change = audio::sources::LiveChange { gain_db, name: name.as_deref(), mic_mute, device_id: device_id.as_deref() };
+                let change = audio::sources::LiveChange { gain_db, name: name.as_deref(), mic_mute, device_id: device_id.as_deref(), ..Default::default() };
                 if !audio::sources::set_live(&id, change) {
                     eprintln!("[recall] set_source: no live track '{id}'");
                 }
@@ -166,6 +254,7 @@ fn apply(cmd: Command, shared: &CaptureShared, (save, export): (&Option<SaveHook
         | Command::SessionLocked { .. }) => {
             extras.handle(&cmd);
         }
+        Command::Sync { .. } => {} // applied by the reader, in order
         Command::Quit | Command::StopCapture => {} // the reader ends on them (`stdin_reader`)
     }
 }
@@ -173,3 +262,7 @@ fn apply(cmd: Command, shared: &CaptureShared, (save, export): (&Option<SaveHook
 #[cfg(all(test, feature = "encode"))]
 #[path = "engine_stdin_tests.rs"]
 mod tests;
+
+#[cfg(all(test, feature = "encode"))]
+#[path = "engine_sync_tests.rs"]
+mod sync_tests;

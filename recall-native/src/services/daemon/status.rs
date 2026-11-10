@@ -46,6 +46,9 @@ pub struct SessionStatus {
     pub mic_hotkey: String,
     pub save_seconds: u32,
     pub mic_muted: bool,
+    /// A repair the recorder asks for (its engine is older than the app): the notice and its
+    /// action, shown with a Reinstall button (`services::repair`).
+    pub repair: Option<RepairNotice>,
     pub overlay: OverlayStatus,
     pub autostart: bool,
     pub hdr: HdrStatus,
@@ -170,6 +173,31 @@ pub struct EngineStatus {
     pub mode: String,
     /// "auto" | "sdr" | "hdr"
     pub select: String,
+    /// What each recorded source captures (`status.audio`); empty from an engine before it.
+    pub audio: Vec<EngineAudio>,
+}
+
+/// What the recorder's `session.repair` asks for: the notice and its action (`repair.rs`).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct RepairNotice {
+    pub title: String,
+    /// "reinstall": the engine is older than the app.
+    pub action: String,
+}
+
+/// One source in `status.audio`. `held`: the engine stores silence for it whatever Alt+M says
+/// (an unsure sibling, or the startup hold); None from an engine that does not say
+/// (merge-gate P2: the meter then guesses from the device lists, as before).
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct EngineAudio {
+    pub id: String,
+    pub held: Option<bool>,
+    /// Alt+M silences it right now (the engine's truth; design-audio-mute P20).
+    pub mutes: Option<bool>,
+    /// Retired: removed, disabled or re-picked; silent until the next recorder (P11).
+    pub retired: Option<bool>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]

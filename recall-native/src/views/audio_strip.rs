@@ -8,7 +8,7 @@ use crate::{
     root::Root,
     services::{
         audio_sources::{self as sources, Kind, Source},
-        audio_mute::shown_level,
+        audio_mute::{held, meter_reading},
         meters::{bar_fraction, with_gain},
     },
     theme::{self, c},
@@ -153,11 +153,15 @@ impl Root {
         let (rms, hold, live) = level.unwrap_or((-90., -90., false));
         // Alt+M on and this source muted by it: flat, as the clip records it (R5-deep-audio-5).
         let session_muted = self.snap.session.as_ref().is_some_and(|s| s.mic_muted) || self.snap.engine.as_ref().is_some_and(|e| e.mic_muted);
-        let mutes = sources::mutes(source, self.settings_ui.audio.devices.as_ref());
-        let muted = session_muted && mutes;
-        // Bar, hold line and number all after the gain, so they move together with the fader.
-        let (rms, hold) = (shown_level(with_gain(rms, gain), session_muted, mutes), shown_level(with_gain(hold, gain), session_muted, mutes));
-        let level_text = if !live { "—".to_owned() } else if muted { "Muted".to_owned() } else if rms <= -89.0 { "-∞".to_owned() } else { format!("{:.0} dB", rms) };
+        let lists = self.settings_ui.audio.devices.as_ref();
+        let mutes = sources::mutes(source, lists);
+        // Bar, hold line and number all after the gain, so they move together with the fader; a
+        // held input (an unsure sibling) is flat whatever Alt+M says (gate review P2-e).
+        // The recorder's own held / mutes / retired win over the page's guess (P11, P20).
+        let engine = self.snap.engine.as_ref().map(|e| crate::services::audio_mute::engine_meter(&e.audio, &source.id)).unwrap_or_default();
+        let (muted_now, mutes) = crate::services::audio_mute::muting(&engine, session_muted, mutes);
+        let (rms, hold, level_text) = meter_reading((with_gain(rms, gain), with_gain(hold, gain), live), muted_now, mutes, held(source, lists, engine.held) || engine.retired);
+        let level_text = crate::services::audio_mute::meter_text(level_text, &engine);
 
         let glyph = self.source_icon(source);
         let type_icon = if source.is_primary() {

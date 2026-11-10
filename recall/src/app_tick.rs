@@ -18,7 +18,7 @@ use crate::{App, IDLE_TICK, PERIODIC};
 fn audio_opened() -> Vec<protocol::AudioOpened> {
     audio::sources::opened()
         .into_iter()
-        .map(|o| protocol::AudioOpened { id: o.id, name: o.name, opened: o.opened, live: o.live, adopt_id: o.adopt_id })
+        .map(|o| protocol::AudioOpened { id: o.id, name: o.name, opened: o.opened, live: o.live, adopt_id: o.adopt_id, held: o.held, mutes: o.mutes, retired: o.retired })
         .collect()
 }
 
@@ -302,6 +302,7 @@ impl App {
             encoder_opening: self.encoder_opening(),
             save_writing: self.save_writing(),
             mic_muted: { #[cfg(feature="encode")] { audio::mic_muted() } #[cfg(not(feature="encode"))] { false } },
+            stdin_ended: crate::engine_stdin::stdin_ended(),
             audio: { #[cfg(feature="encode")] { audio_opened() } #[cfg(not(feature="encode"))] { Vec::new() } },
         });
     }

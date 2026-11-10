@@ -68,11 +68,20 @@ impl Leveller {
     }
 
     /// Live sound (`channels`-interleaved) arriving `elapsed` after the start: what to write.
+    #[cfg(test)]
     pub fn live(&mut self, elapsed: Duration, samples: &[f32], channels: usize) -> Vec<f32> {
+        let mut out = Vec::with_capacity(samples.len() + 4 * channels.max(1));
+        self.live_into(elapsed, samples, channels, &mut out);
+        out
+    }
+
+    /// [`Self::live`] into `out` (cleared first), so a capture thread reuses one buffer and
+    /// allocates nothing per packet once it has grown (gate review P2-c).
+    pub fn live_into(&mut self, elapsed: Duration, samples: &[f32], channels: usize, out: &mut Vec<f32>) {
         let channels = channels.max(1);
         let frames = samples.len() / channels;
         let due = self.due(elapsed);
-        let mut out = Vec::with_capacity(samples.len() + 4 * channels);
+        out.clear();
         let mut lead = 0u64;
         if !self.live {
             // The stream starts: everything before it was silence.
@@ -114,7 +123,6 @@ impl Leveller {
         }
         // The lead is counted already; add the sound frames written.
         self.written += (out.len() / channels) as u64 - lead;
-        out
     }
 }
 

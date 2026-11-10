@@ -51,6 +51,10 @@ pub(crate) mod stuck;
 mod stdin;
 #[path = "supervisor_locate.rs"]
 mod locate;
+#[path = "supervisor_sources.rs"]
+mod sources;
+#[path = "supervisor_floor.rs"]
+pub(crate) mod floor;
 
 use std::path::PathBuf;
 #[cfg(test)]
@@ -297,6 +301,8 @@ struct Shared {
     spawn_count: AtomicU32,
     /// The mic mute each spawn starts with, over the spec's (`supervisor_mute.rs`).
     spawn_mute: mute::SpawnMute,
+    /// The audio sources each spawn starts with, over the spec's (`supervisor_sources.rs`).
+    spawn_sources: sources::SpawnSources,
     cache: Mutex<EngineCache>,
     /// Control-pipe hub: engine protocol lines are re-broadcast to hub clients.
     hub: Mutex<Option<Arc<crate::control::PipeHub>>>,
@@ -326,9 +332,11 @@ pub const ENGINE_EXITED: &str = "engine_exited";
 
 /// Engine event types handed to the controller via `attach_events`. `status`
 /// carries `save_writing`, the save the engine is still writing.
-pub const FORWARDED_EVENTS: [&str; 12] = [
+pub const FORWARDED_EVENTS: [&str; 14] = [
     "status",
     "save_progress",
+    "inputs_held",
+    "inputs_released",
     "saved",
     "source_adopted",
     "save_failed",
@@ -355,6 +363,7 @@ impl Shared {
             hello_count: AtomicU32::new(0),
             spawn_count: AtomicU32::new(0),
             spawn_mute: mute::SpawnMute::new(),
+            spawn_sources: Default::default(),
             cache: Mutex::new(EngineCache::default()),
             hub: Mutex::new(None),
             events: Mutex::new(None),
@@ -433,7 +442,8 @@ impl Shared {
 
     fn desired(&self) -> (u64, Option<EngineSpec>) {
         let g = self.desired.lock().unwrap_or_else(|p| p.into_inner());
-        (g.0, g.1.clone())
+        // A crash respawn reuses the spec: it starts with the live source list, not the spec's.
+        (g.0, self.spawn_sources.apply(g.1.clone()))
     }
 
     fn generation(&self) -> u64 {

@@ -68,6 +68,7 @@ pub(super) fn run_manager(shared: Arc<Shared>, engine_path: Option<PathBuf>) {
             Ok((mut child, reader)) => {
                 let pid = child.id();
                 shared.set_health(EngineHealth::Running { pid });
+                shared.respawn_if_sources_moved(gen); // a source change during the spawn
                 if !quiet {
                     log!("supervisor: engine started (pid {pid})");
                 }
@@ -206,6 +207,7 @@ fn spawn_engine(path: &Path, shared: &Arc<Shared>, spec: &EngineSpec) -> std::io
     // The mute baked into this spawn's env: an Alt+M from here to the stdin attach is
     // re-sent as the engine's first line (`Shared::attach_spawned`).
     let baked = shared.spawn_mute.get();
+    let spec = &shared.floor_spec(path, spec); // P1: an older engine gets no input or picked device
     let mut child = engine_command(path, spec, baked).spawn()?;
     shared.spawn_count.fetch_add(1, Ordering::SeqCst);
     shared.set_child_stdin(child.stdin.take(), baked);

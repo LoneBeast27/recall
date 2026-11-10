@@ -125,6 +125,73 @@ fn a_crash_respawn_starts_with_the_current_mute() {
     sup.shutdown(Duration::from_millis(200));
 }
 
+/// Final audit F-audio-1: a line-in flipped to "Alt+M mutes it" (sent live, the spec untouched),
+/// then the engine crashed. The respawn reads the spec the manager gets (`shared.desired()`,
+/// `supervisor_manager.rs`): it must start with the live list, not the retarget's.
+#[test]
+fn a_crash_respawn_starts_with_the_live_audio_sources() {
+    use crate::record_audio_sources::SOURCES_ENV;
+    let sup = Supervisor::start_with_locator(|| None, None);
+    let old = r#"[{"id":"line","kind":"input","device":"Line (Box)","device_id":"{A}","mic_mute":false}]"#;
+    let live = r#"[{"id":"line","kind":"input","device":"Line (Box)","device_id":"{B}","mic_mute":true}]"#;
+    sup.shared.set_desired(Some(EngineSpec { env: vec![(SOURCES_ENV.into(), Some(old.into()))] }), crate::record_dispatch::Sent::Waiting);
+    let env = |shared: &Shared| -> Option<String> {
+        let (_, spec) = shared.desired();
+        let cmd = engine_command(Path::new("recall.exe"), &spec.expect("a spec"), shared.spawn_mute.get());
+        cmd.get_envs().find(|(k, _)| *k == SOURCES_ENV).and_then(|(_, v)| v).map(|v| v.to_string_lossy().into_owned())
+    };
+    assert_eq!(env(&sup.shared).as_deref(), Some(old), "no live change yet: the spec's");
+    sup.update_audio(Some(live)); // what apply_config_effects calls on the change
+    assert_eq!(env(&sup.shared).as_deref(), Some(live), "the respawn starts with the live flag and the picked twin");
+    sup.shutdown(Duration::from_millis(200));
+}
+
+/// Review R2-audio-r9-1: a source change between the manager's spec read and the spawn's pid
+/// reached neither the env nor the engine (no engine ran to send it to). The manager's check
+/// right after the pid (`supervisor_manager.rs`) retargets once; no change, no respawn.
+#[test]
+fn a_source_change_during_a_spawn_respawns_the_engine_on_it() {
+    use crate::record_audio_sources::SOURCES_ENV;
+    let shared = Shared::new(None);
+    const A: &str = r#"[{"id":"mic","kind":"input","name":"Mic","device":"Mic (Desk)"}]"#;
+    const A_FLAG: &str = r#"[{"id":"mic","kind":"input","name":"Mic","device":"Mic (Desk)","mic_mute":false}]"#;
+    const B: &str = r#"[{"id":"mic","kind":"input","name":"Mic","device":"Mic (Other)"}]"#;
+    let spec = |v: &str| Some(EngineSpec { env: vec![(SOURCES_ENV.into(), Some(v.into()))] });
+    shared.set_desired(spec(A), crate::record_dispatch::Sent::Waiting);
+    let (gen, _) = shared.desired(); // the manager reads the spec
+    shared.attach_writer(Some(Box::new(std::io::sink()))); // the stdin attach restates and syncs
+    assert!(!shared.respawn_if_sources_moved(gen), "no change during the spawn: no respawn");
+    shared.spawn_sources.set(A_FLAG); // a flag only: restated at the attach, no respawn
+    shared.attach_writer(Some(Box::new(std::io::sink())));
+    assert!(!shared.respawn_if_sources_moved(gen), "a live change: no respawn");
+    assert_eq!(shared.generation(), gen);
+    let (gen, _) = shared.desired();
+    shared.spawn_sources.set(B); // another device, while the pid is still 0
+    shared.attach_writer(Some(Box::new(std::io::sink()))); // no sync: withheld
+    assert!(shared.respawn_if_sources_moved(gen), "the change during the spawn respawns");
+    assert_eq!(shared.generation(), gen + 1, "a retarget to the same target");
+    assert_eq!(shared.desired.lock().unwrap().2, crate::record_dispatch::Sent::Restarting, "a line meanwhile says restarting");
+    let (_, respawn) = shared.desired();
+    assert_eq!(respawn.unwrap().env, vec![(SOURCES_ENV.to_string(), Some(B.to_string()))], "on the new list");
+    assert!(!shared.respawn_if_sources_moved(gen + 1), "once");
+    // The manager calls it right after the pid shows (source guard: the loop needs an engine).
+    let manager: String = include_str!("supervisor_manager.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(manager.contains("shared.set_health(EngineHealth::Running { pid }); shared.respawn_if_sources_moved(gen);"), "the manager checks right after the pid");
+}
+
+/// F-audio-1, the controller side: every change of the list, the live-only ones included, gives
+/// the list a later spawn must start with; no change gives none.
+#[test]
+fn every_source_change_reaches_the_spawn_list() {
+    use crate::record_audio_sources::{engine_value, spawn_update, AudioSource};
+    let line: AudioSource = serde_json::from_value(serde_json::json!({"id": "line", "kind": "input", "device": "Line (Box)", "device_id": "{A}", "mic_mute": false})).unwrap();
+    let muted = AudioSource { mic_mute: Some(true), ..line.clone() };
+    let repicked = AudioSource { device_id: "{B}".into(), ..line.clone() };
+    assert_eq!(spawn_update(std::slice::from_ref(&line), std::slice::from_ref(&line)), None);
+    assert_eq!(spawn_update(std::slice::from_ref(&line), std::slice::from_ref(&muted)), Some(engine_value(&[muted])));
+    assert_eq!(spawn_update(std::slice::from_ref(&line), std::slice::from_ref(&repicked)), Some(engine_value(&[repicked])));
+}
+
 // --- intended restarts (fake engine: cmd.exe idles on its piped stdin) --
 
 /// `cmd.exe` stands in for the engine: it ignores `--json`, idles reading
@@ -196,7 +263,8 @@ fn every_engine_exit_reaches_the_controller_after_its_last_event() {
     sup.retarget(Some(EngineSpec { env: vec![("RECALL_CAPTURE_NAME".into(), Some("game-1".into()))] }));
     assert!(wait_for(5, || matches!(sup.health(), EngineHealth::Running { pid } if pid != 0)));
     sup.retarget(Some(EngineSpec { env: vec![("RECALL_CAPTURE_NAME".into(), Some("game-2".into()))] }));
-    let event = rx.recv_timeout(Duration::from_secs(5)).expect("the first engine's exit is reported");
+    // The fake engine has no protocol marker: its spawn also tells the controller so (P1).
+    let event = std::iter::from_fn(|| rx.recv_timeout(Duration::from_secs(5)).ok()).find(|e| e["type"] != crate::supervisor::floor::ENGINE_OUTDATED).expect("the first engine's exit is reported");
     assert_eq!(event["type"], ENGINE_EXITED);
     sup.shutdown(Duration::from_millis(50));
 }
@@ -342,11 +410,12 @@ fn a_line_to_a_full_queue_is_reported_not_queued() {
 }
 
 /// Attach a wedged writer, wait until it has taken one line and parked, then fill the queue
-/// until a send says no. The number of lines the fill queued.
+/// until a send says no. The number of lines queued behind the wedged one. The attach's
+/// restatement (`sync`, design-audio-mute P8) is the line it wedges on, so the first line sent
+/// here waits in the queue too.
 pub(crate) fn wedge_and_fill(shared: &Shared) -> usize {
     let (tx, rx) = std::sync::mpsc::channel();
     shared.attach_writer(Some(Box::new(Wedged { parked: Some(tx) })));
-    assert!(shared.send_line("{}").queued(), "the first line was not queued");
     rx.recv_timeout(Duration::from_secs(5)).expect("the wedged writer never took its line");
     let queued = (0..1_000).take_while(|_| shared.send_line("{}").queued()).count();
     assert!(queued < 1_000, "the queue never said it was full");
@@ -384,8 +453,8 @@ fn quit_keeps_a_slot_so_a_busy_engine_behind_a_full_queue_still_finishes_cleanly
     let seen = Arc::new(Mutex::new(Vec::new()));
     let (tx, rx) = std::sync::mpsc::channel();
     shared.attach_writer(Some(Box::new(Gated { open: open.clone(), seen: seen.clone(), entered: Some(tx) })));
-    // The writer is stuck on its first line before the fill, so the fill really ends full.
-    assert!(shared.send_line(r#"{"cmd":"bookmark"}"#).queued());
+    // The writer is stuck on its first line (the attach's `sync`) before the fill, so the fill
+    // really ends full.
     rx.recv_timeout(Duration::from_secs(5)).expect("the writer never took its first line");
     let filled = (0..1_000).take_while(|_| shared.send_line(r#"{"cmd":"bookmark"}"#).queued()).count();
     assert_eq!(filled, stdin::QUEUE, "the queue never said it was full");
