@@ -74,7 +74,7 @@ static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(
 /// Its outcome, for the app's poll ([`take_outcome`]): Ok = Setup has it (the app quits).
 static OUTCOME: std::sync::Mutex<Option<Result<(), String>>> = std::sync::Mutex::new(None);
 
-/// The Reinstall button of the recorder's old-engine notice (R1; Rohan 2026-11-10 22:00 UTC,
+/// The Reinstall button of the recorder's old-engine notice (R1; the maintainer, 2026-11-10,
 /// verbatim: "for half finished installs, ideal if we were to make user patch it with clicking a
 /// reinstall button,"): [`request_reinstall`] with what the update's install uses (the WinHTTP
 /// transport, `update::install_dir`, the app's resume state), off the UI thread. The text the

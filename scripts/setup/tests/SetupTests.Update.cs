@@ -253,7 +253,7 @@ namespace Recall.Setup.Tests
 
         private static void ResumeFileGuard()
         {
-            var roots = new UserRoots(@"L:\nowhere\Roaming", Path.GetTempPath());
+            var roots = new UserRoots(@"Z:\nowhere\Roaming", Path.GetTempPath());
             Check(ResumeFile.Open(@"C:\Windows\win.ini", roots) == null, "a file outside the updates folder is refused");
             Check(ResumeFile.Open(null, roots) == null, "none given");
         }

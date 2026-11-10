@@ -266,7 +266,7 @@ pub(super) fn await_init(ring: &TrackRing, rx: &std::sync::mpsc::Receiver<Result
 }
 
 /// Whether a track starts held (the sync handshake): every track under a controller (`hold`),
-/// the game's process tree included (Rohan 2026-11-09 23:31 UTC, the cut-down: "Hold
+/// the game's process tree included (the maintainer, 2026-11-09, the cut-down: "Hold
 /// everything"); app tracks are held the same way (`apps::start`).
 pub(crate) fn starts_held(hold: bool, _process_loopback: bool) -> bool {
     hold

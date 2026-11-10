@@ -9,7 +9,7 @@
 //! one that moved the track shape gets no `sync` (its engine stays held) and respawns the engine
 //! once ([`Shared::respawn_if_sources_moved`]).
 //!
-//! The cut-down (Rohan 2026-11-09 23:31 UTC): the audio state goes to the engine as one
+//! The cut-down (the maintainer, 2026-11-09): the audio state goes to the engine as one
 //! coalescing slot of its whole latest state ([`Shared::publish_audio`],
 //! `supervisor_stdin.rs`), never as single lines a full queue could drop, so it needs no
 //! sequence numbers, acks or re-sends.

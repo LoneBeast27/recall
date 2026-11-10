@@ -36,7 +36,7 @@ pub(crate) fn notice_for(ev: &Value) -> Option<String> {
 }
 
 /// The machine-readable action on the R1 notice: the app shows a Reinstall button for it
-/// (Rohan 2026-11-10 22:00 UTC: "for half finished installs, ideal if we were to make user patch
+/// (the maintainer, 2026-11-10: "for half finished installs, ideal if we were to make user patch
 /// it with clicking a reinstall button,").
 pub(crate) const REINSTALL: &str = "reinstall";
 
