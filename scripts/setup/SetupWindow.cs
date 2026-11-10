@@ -52,9 +52,12 @@ namespace Recall.Setup
 
         public SetupWindow() : this(null) { }
 
-        public SetupWindow(string updatePath)
+        public SetupWindow(string updatePath) : this(updatePath, null) { }
+
+        public SetupWindow(string updatePath, string resumePath)
         {
             this.updatePath = updatePath;
+            this.resumePath = updatePath == null ? null : resumePath;
             updateMode = updatePath != null;
             Text = "Recall Setup";
             Icon = Icon.ExtractAssociatedIcon(Assembly.GetExecutingAssembly().Location);
@@ -117,7 +120,7 @@ namespace Recall.Setup
                 !existing || File.Exists(Path.Combine(startMenu, "Recall.lnk")), 2);
             launch = AddOption("Start recording after guided setup", 149, false, 3);
             frameTiming = AddOption("Set up game detection and FPS", 185, false, 4);
-            AddLabel(options, "Windows may ask for permission. It takes effect after sign-in.",
+            AddLabel(options, "Frame-timing stats: joins Performance Log Users. Windows asks first.",
                 26, 216, 499, 22, fonts.Body, Muted);
             AddLabel(options, prerequisites.Summary(),
                 0, 254, 525, 24, fonts.Body, Muted);
@@ -301,6 +304,7 @@ namespace Recall.Setup
             var path = SetupPackage.InstallPath(destination.Text);
             if (path == null || busy) return;
             var selection = new InstallOptions(path, shortcut.Checked, false, frameTiming.Checked, updateMode);
+            selection.Resume = resumePath;
             busy = true;
             options.Hide();
             quick.Hide();
@@ -324,6 +328,15 @@ namespace Recall.Setup
                 {
                     var updates = new Progress<string>(text => { if (busy) resultTitle.Text = text; });
                     warning = await Task.Run(() => SetupPackage.Install(selection, updates));
+                    // Opt-in only, never on an update: Setup itself, elevated through the visible prompt.
+                    if (selection.FrameTiming && !updateMode)
+                    {
+                        resultTitle.Text = "Setting up frame timing…";
+                        var timing = await FrameTiming.Request(Handle);
+                        if (timing != null && !timing.StartsWith("Frame timing: you are", StringComparison.Ordinal)
+                            && !timing.StartsWith("Frame timing: added", StringComparison.Ordinal))
+                            warning = warning == null ? timing : warning + "\n" + timing;
+                    }
                 }
                 SetStep(2);
                 title.Text = preview ? "Preview complete" : updateMode ? "Recall is updated" : "Recall is ready";
@@ -347,6 +360,8 @@ namespace Recall.Setup
                 primary.Text = preview ? "Done" : updateMode ? "Open Recall" : "Continue setup";
                 cancel.Hide();
                 complete = true;
+                // A note (something after the swap failed) stays on screen; a clean update closes.
+                if (warning == null && ResumedUpdateDone()) return;
             }
             catch (SetupRestartRequired error)
             {
@@ -365,7 +380,7 @@ namespace Recall.Setup
                 description.Text = "Review the message below, then return to your options.";
                 resultTitle.Text = "Recall could not install";
                 resultTitle.ForeColor = Error;
-                resultDetail.Text = error.GetBaseException().Message;
+                resultDetail.Text = ResultText(error);
                 primary.Text = "Back to options";
                 failed = true;
             }
@@ -385,129 +400,6 @@ namespace Recall.Setup
             SetStep(0);
             ShowOptions(updateMode ? false : advanced);
             if (updateMode) mode.Hide();
-        }
-
-#if PREVIEW
-        public void SavePreview(string path)
-        {
-            FormBorderStyle = FormBorderStyle.None;
-            ShowInTaskbar = false;
-            Opacity = 0;
-            string originalPath = destination.Text;
-            destination.Text = @"C:\Users\Player\AppData\Local\Programs\Recall";
-            ActiveControl = primary;
-            Show();
-            Application.DoEvents();
-            SaveFrame(path);
-            ShowOptions(true);
-            Application.DoEvents();
-            SaveFrame(Path.ChangeExtension(path, ".advanced.png"));
-            ShowOptions(false);
-            destination.Text = originalPath;
-        }
-
-        private void SaveFrame(string path)
-        {
-            using (var bitmap = new Bitmap(ClientSize.Width, ClientSize.Height))
-            {
-                DrawToBitmap(bitmap, new Rectangle(Point.Empty, ClientSize));
-                bitmap.Save(path, ImageFormat.Png);
-            }
-        }
-
-        public void CheckPreview()
-        {
-            SetupPrerequisites.CheckPolicy();
-            if (!preview || advanced || !quick.Visible || launch.Checked || frameTiming.Checked)
-                throw new InvalidOperationException("Quick setup defaults changed");
-            if (!quickBrowse.Visible || !quickBrowse.Enabled || quickPath.Text != SetupPackage.InstallPath(destination.Text))
-                throw new InvalidOperationException("Quick setup does not show the current folder choice");
-            quickLaunch.Value = true;
-            quickTiming.Value = true;
-            mode.PerformClick();
-            if (!advanced || !options.Visible || !launch.Checked || !frameTiming.Checked)
-                throw new InvalidOperationException("Advanced lost the Yes choices");
-            launch.Checked = false;
-            frameTiming.Checked = false;
-            shortcut.Checked = false;
-            string folder = destination.Text;
-            destination.Text = "relative";
-            if (primary.Enabled) throw new InvalidOperationException("Invalid path did not disable setup");
-            mode.PerformClick();
-            if (primary.Enabled || quickLaunch.Value || quickTiming.Value || !quickBrowse.Visible || !quickBrowse.Enabled)
-                throw new InvalidOperationException("Quick setup lost the Advanced choices or the folder picker");
-            mode.PerformClick();
-            destination.Text = folder;
-            if (!primary.Enabled || shortcut.Checked)
-                throw new InvalidOperationException("Advanced lost the selected shortcut preference");
-            mode.PerformClick();
-            primary.PerformClick();
-            if (!busy || step != 1 || primary.Enabled) throw new InvalidOperationException("Install state was not engaged");
-            var deadline = DateTime.UtcNow.AddSeconds(3);
-            while (busy && DateTime.UtcNow < deadline)
-            {
-                Application.DoEvents();
-                System.Threading.Thread.Sleep(15);
-            }
-            if (busy || !complete || step != 2 || primary.Text != "Done")
-                throw new InvalidOperationException("Preview did not reach its finished state");
-        }
-#endif
-
-        private sealed class Rail : Panel
-        {
-            public int Step;
-            public Rail() { BackColor = Color.FromArgb(3, 3, 3); DoubleBuffered = true; }
-
-            protected override void OnPaint(PaintEventArgs args)
-            {
-                base.OnPaint(args);
-                var g = args.Graphics;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                using (var border = new Pen(Border))
-                using (var ring = new Pen(Ink, 1.5f))
-                using (var muted = new Pen(Muted, 1.3f))
-                using (var red = new SolidBrush(Signal))
-                {
-                    g.DrawLine(border, Width - 1, 0, Width - 1, Height);
-                    g.DrawEllipse(ring, 24, 34, 17, 17);
-                    g.FillEllipse(red, 29, 39, 7, 7);
-                    g.DrawLine(border, 30, 141, 30, 225);
-                    for (int i = 0; i < 3; i++)
-                    {
-                        int y = 135 + i * 43;
-                        g.FillEllipse(Brushes.Black, 24, y, 12, 12);
-                        if (i == Step) g.FillEllipse(red, 25, y + 1, 10, 10);
-                        else g.DrawEllipse(muted, 26, y + 2, 8, 8);
-                    }
-                }
-            }
-        }
-
-        private sealed class StatusPill : Control
-        {
-            public StatusPill(string text, Font font) { Text = text; Font = font; DoubleBuffered = true; }
-
-            protected override void OnPaint(PaintEventArgs args)
-            {
-                var g = args.Graphics;
-                g.SmoothingMode = SmoothingMode.AntiAlias;
-                using (var path = new GraphicsPath())
-                using (var fill = new SolidBrush(Raised))
-                using (var edge = new Pen(Border))
-                using (var dot = new SolidBrush(Muted))
-                using (var textFormat = new StringFormat { LineAlignment = StringAlignment.Center, FormatFlags = StringFormatFlags.NoWrap })
-                {
-                    int h = Height - 1;
-                    path.AddArc(0, 0, h, h, 90, 180);
-                    path.AddArc(Width - h - 1, 0, h, h, 270, 180);
-                    path.CloseFigure();
-                    g.FillPath(fill, path);
-                    g.DrawPath(edge, path);
-                    g.FillEllipse(dot, 12, (Height - 6) / 2f, 6, 6);
-                    g.DrawString(Text, Font, dot, new RectangleF(25, 0, Width - 29, Height), textFormat);
-                }
-            }
         }
     }
 }

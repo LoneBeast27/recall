@@ -17,14 +17,28 @@ namespace Recall.Setup
         public readonly bool Launch;
         public readonly bool FrameTiming;
         public readonly bool Update;
+        /// Start with Windows, opt-in; ignored by an update (it never turns it on).
+        public readonly bool Autostart;
+        /// Accept a drive Windows can't classify (a VM disk, USB, RAID); never offered by the window.
+        public readonly bool AllowUnknownDrive;
+        /// An update the Recall app asked for: its resume file (`--resume`), else null.
+        public string Resume;
 
         public InstallOptions(string path, bool shortcut, bool launch, bool frameTiming, bool update)
+            : this(path, shortcut, launch, frameTiming, update, false) { }
+
+        public InstallOptions(string path, bool shortcut, bool launch, bool frameTiming, bool update, bool autostart)
+            : this(path, shortcut, launch, frameTiming, update, autostart, false) { }
+
+        public InstallOptions(string path, bool shortcut, bool launch, bool frameTiming, bool update, bool autostart, bool allowUnknownDrive)
         {
+            AllowUnknownDrive = allowUnknownDrive;
             Path = path;
             Shortcut = shortcut;
             Launch = launch;
             FrameTiming = frameTiming;
             Update = update;
+            Autostart = autostart;
         }
     }
 
@@ -101,7 +115,7 @@ namespace Recall.Setup
                 ZipFile.ExtractToDirectory(zip, package);
                 if (OnlineDependencies()) AddFfmpeg(package, parent, options, progress);
                 SetupPrerequisites.Provision(parent, Assembly, progress);
-                return RunInstaller(package, options);
+                return Installer.Run(package, parent, options, progress);
             }
             finally
             {
@@ -186,65 +200,18 @@ namespace Recall.Setup
                 input.CopyTo(output);
         }
 
+        /// Recall (and the recorder it starts) is started detached, with explorer.exe as its parent,
+        /// so it is not Setup's child and outlives it.
         public static void OpenGuidedSetup(string path, bool recordAfter)
         {
-            var app = Path.Combine(path, "recall-native.exe");
-            var info = new ProcessStartInfo(app) { WorkingDirectory = path, UseShellExecute = false };
-            info.EnvironmentVariables["RECALL_SETUP"] = recordAfter ? "record" : "paused";
-            using (Process.Start(info)) { }
+            var env = new Dictionary<string, string> { { "RECALL_SETUP", recordAfter ? "record" : "paused" } };
+            using (DetachedProcess.Start(Path.Combine(path, "recall-native.exe"), null, env)) { }
         }
 
         public static void OpenRecall(string path)
         {
-            var app = Path.Combine(path, "recall-native.exe");
-            var info = new ProcessStartInfo(app) { WorkingDirectory = path, UseShellExecute = false };
-            using (Process.Start(info)) { }
-        }
-
-        private static string RunInstaller(string package, InstallOptions options)
-        {
-            var script = Path.Combine(package, "scripts", "install.ps1");
-            var powershell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System),
-                "WindowsPowerShell", "v1.0", "powershell.exe");
-            var info = new ProcessStartInfo(powershell) {
-                WorkingDirectory = package,
-                UseShellExecute = false, CreateNoWindow = true,
-                RedirectStandardOutput = true, RedirectStandardError = true,
-                Arguments = "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File \"" + script
-                    + "\" -NoBuild -NoAutostart -InstallDir \"" + options.Path + "\""
-                    + (options.Shortcut ? "" : " -NoShortcut")
-                    + (options.FrameTiming ? "" : " -NoFrameTiming")
-                    + (options.Launch ? "" : " -NoStart")
-                    + (options.Update ? " -CloseApp -UpdateExisting" : "")
-            };
-            var output = new List<string>();
-            var errors = new List<string>();
-            using (var process = new Process { StartInfo = info })
-            {
-                process.OutputDataReceived += (sender, args) => KeepLast(output, args.Data);
-                process.ErrorDataReceived += (sender, args) => KeepLast(errors, args.Data);
-                process.Start();
-                process.BeginOutputReadLine();
-                process.BeginErrorReadLine();
-                process.WaitForExit();
-                if (process.ExitCode == 0)
-                {
-                    const string prefix = "WARNING:";
-                    var warning = output.Concat(errors).FirstOrDefault(line => line.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
-                    return warning == null ? null : warning.Substring(prefix.Length).Trim();
-                }
-                if (process.ExitCode == 3)
-                    throw new InvalidOperationException("Close the Recall window, then run setup again.");
-                string detail = errors.Concat(output).FirstOrDefault(line => !string.IsNullOrWhiteSpace(line));
-                throw new InvalidOperationException(detail ?? "The installer exited with code " + process.ExitCode + ".");
-            }
-        }
-
-        private static void KeepLast(List<string> lines, string value)
-        {
-            if (string.IsNullOrWhiteSpace(value)) return;
-            if (lines.Count == 18) lines.RemoveAt(0);
-            lines.Add(value.Trim());
+            using (DetachedProcess.Start(Path.Combine(path, "recall-native.exe"), null, null)) { }
         }
     }
+
 }

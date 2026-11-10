@@ -1,0 +1,10 @@
+{
+    "source":  "abandoned_hopper_terminal_04.jpg",
+    "yaw":  110,
+    "pitch":  5,
+    "deg_per_frame":  1.5,
+    "frame":  89,
+    "crop_x":  660,
+    "crop_y":  600,
+    "size":  136
+}

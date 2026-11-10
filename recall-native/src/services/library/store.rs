@@ -28,11 +28,14 @@ pub(super) struct ClipMeta {
     /// next start while the file keeps this size and mtime.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_duration: Option<FileStamp>,
+    /// Fields a newer build wrote for this clip: kept as they are.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, Value>,
 }
 
 impl ClipMeta {
     fn is_empty(&self) -> bool {
-        !self.favourite && self.title.is_none() && self.duration.is_none() && self.played.is_none() && self.no_duration.is_none()
+        !self.favourite && self.title.is_none() && self.duration.is_none() && self.played.is_none() && self.no_duration.is_none() && self.extra.is_empty()
     }
 
     /// Folds an old file-name entry into this path entry: a field set on either side survives
@@ -67,7 +70,7 @@ pub(super) fn meta_path(override_path: Option<OsString>, appdata: Option<OsStrin
     if let Some(path) = override_path.filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    appdata.filter(|p| !p.is_empty()).map(|root| PathBuf::from(root).join("Recall").join("library.json"))
+    appdata.filter(|p| !p.is_empty()).map(|root| crate::user_dirs::checked(PathBuf::from(root).join("Recall").join("library.json")))
 }
 
 /// The store key for a clip: its full path, lowercase, backslashes, no `\?\` prefix. Two
@@ -85,7 +88,7 @@ fn parse_clips(bytes: &[u8]) -> Option<BTreeMap<String, ClipMeta>> {
 
 impl MetaStore {
     pub fn load() -> Self {
-        match meta_path(std::env::var_os("RECALL_LIBRARY_META"), std::env::var_os("APPDATA")) {
+        match meta_path(std::env::var_os("RECALL_LIBRARY_META"), crate::user_dirs::appdata().map(Into::into)) {
             Some(path) => Self::load_from(path),
             None => Self::default(),
         }

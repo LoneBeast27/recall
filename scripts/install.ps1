@@ -478,10 +478,11 @@ while (-not $up -and -not $script:ownerRefused -and (Get-Date) -lt $deadline) { 
 if (-not $up) { Write-Warning 'The recorder did not answer on its control pipe; start Recall from the Start menu.' }
 # Name any other recorder still running in this session, whether or not one answered: it holds
 # the one-controller lock, so the recorder just installed can't take over (R4-startup-1). A
-# sandbox leaves the live recorder alone and names it in Stop-Recorder instead.
+# sandbox or an update (-UpdateExisting) leaves the live recorder alone and names it in Stop-Recorder instead.
 if (-not $env:RECALL_CONTROLLER_PATH) {
   $stray = @(Get-SessionController | Where-Object { -not (Test-OurController $_) })
-  if ($stray) { Write-Warning ("An older recorder is still running (" + (($stray | ForEach-Object { Format-Recorder $_ }) -join ', ') + "). Quit Recall from the tray, then start it again.") }
+  # -UpdateExisting quits only its own controller and names the others in Stop-Recorder (item 12).
+  if ($stray -and -not $UpdateExisting) { Write-Warning ("An older recorder is still running (" + (($stray | ForEach-Object { Format-Recorder $_ }) -join ', ') + "). Quit Recall from the tray, then start it again.") }
 }
 # Start with Windows is opt-in: only -Autostart sends the setting (an update never turns it on).
 if ($up -and $Autostart) {

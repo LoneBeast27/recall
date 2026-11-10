@@ -27,6 +27,18 @@ fn the_ruling_table_matches_the_recorder() {
 }
 
 #[test]
+fn a_short_legacy_name_asks_for_a_fresh_pick_like_the_recorder() {
+    // Gate 2026-11-10: same table as the recorder's `a_short_legacy_name_waits_...`.
+    let steam = [("Speakers (Steam Streaming Speakers)", "{A}"), ("Microphone (Steam Streaming Microphone)", "{B}")];
+    assert_eq!(choose(&names(&steam), "Steam Streaming Speakers", "", |_| None), Choice::CaseOnly);
+    assert_eq!(choose(&names(&steam), "steam streaming microphone", "{B}", |_| None), Choice::CaseOnly);
+    assert_eq!(opens(Choice::CaseOnly, true), None, "nothing opens, not even an input muted");
+    assert_eq!(choose(&names(&[("Speakers (Box)", "{A}"), ("Line (Box)", "{B}")]), "Box", "", |_| None), Choice::CaseOnly);
+    assert_eq!(choose(&names(&steam), "Streaming", "", |_| None), Choice::Missing, "a word inside a bracket is no match");
+    assert_eq!(choose(&names(&steam), "Speakers", "", |_| None), Choice::Missing, "text outside the brackets is no match");
+}
+
+#[test]
 fn an_input_meters_the_unsure_sibling_and_an_output_waits() {
     let list = names(&SUBSTITUTES);
     let id_of = |i: usize| Some(SUBSTITUTES[i].1.to_owned());

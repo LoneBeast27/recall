@@ -77,14 +77,37 @@ fn change(state: &Mutex<Own>, edit: impl FnOnce(&mut Own), write: fn(&[String]))
     write(&own.paths());
 }
 
-fn write_own(paths: &[String]) {
-    if crate::TESTING {
-        return;
+/// The registry file, `None` in tests and the RecallTesting build (they never touch the user's).
+fn registry() -> Option<PathBuf> {
+    if crate::TESTING || cfg!(test) {
+        return None;
     }
-    let Some(library) = super::store::meta_path(std::env::var_os("RECALL_LIBRARY_META"), std::env::var_os("APPDATA")) else { return };
+    super::store::meta_path(std::env::var_os("RECALL_LIBRARY_META"), crate::user_dirs::appdata().map(Into::into)).map(|library| path_beside(&library))
+}
+
+/// Every clip open in any Recall window: this process's own list plus the `paths` every app
+/// process published (the cache's eviction keeps their copies, `storage::budget::kept`).
+pub fn all_open() -> Vec<String> {
+    let mut paths = OWN.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).paths();
+    if let Some(file) = registry() {
+        paths.extend(read_paths(&file));
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+/// The `paths` of the registry at `file` (missing or damaged: none).
+pub(super) fn read_paths(file: &Path) -> Vec<String> {
+    let value: Option<serde_json::Value> = std::fs::read(file).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok());
+    value.and_then(|v| serde_json::from_value(v.get("paths")?.clone()).ok()).unwrap_or_default()
+}
+
+fn write_own(paths: &[String]) {
+    let Some(file) = registry() else { return };
     // Best effort: a lock that cannot be had in 2 s (a stuck process) still lets this write go.
     let _lock = crate::win_fileop::bin_lock::acquire(LOCK, Duration::from_secs(2));
-    if let Err(error) = write_to(&path_beside(&library), std::process::id(), paths, pid_alive) {
+    if let Err(error) = write_to(&file, std::process::id(), paths, pid_alive) {
         eprintln!("open clip not published: {error}");
     }
 }

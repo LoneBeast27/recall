@@ -37,16 +37,22 @@ pub fn delete_or_hide(clips: &[PathBuf], folders: &folders::Folders) -> DeleteRe
     report.already_gone = absent.len();
     report.left.extend(absent);
     report.asked = clips.len();
+    // A clip recorded outside the recordings folders that left: a later file there is not Recall's.
+    super::recorded::forget(&report.left);
     report
 }
 
 /// (imported: only removed from Recall, own: to the Recycle Bin), by `folders` alone.
 pub(crate) fn partition_for_delete(clips: &[PathBuf], folders: &folders::Folders) -> (Vec<PathBuf>, Vec<PathBuf>) {
     let recordings = crate::backend::library_dir_from(folders);
-    clips.iter().cloned().partition(|clip| {
-        !imports::is_owned(clip, &recordings, &folders.former_recordings)
-            || clip.parent().is_some_and(|parent| crate::backend::overlaps_link(parent, folders))
-    })
+    // Owned wins over linked: a recordings folder under a linked parent (Videos linked, clips in
+    // Videos\Recall) keeps Delete-to-Recycle-Bin; only clips Recall does not own are hidden.
+    clips.iter().cloned().partition(|clip| !imports::is_owned(clip, &recordings, &folders.former_recordings))
+}
+
+/// How many of `clips` a delete only hides (the confirm dialog's count).
+pub(crate) fn imported_count(clips: &[PathBuf], folders: &folders::Folders) -> usize {
+    partition_for_delete(clips, folders).0.len()
 }
 
 /// The report from both halves' results and which own clips are still on disk.
@@ -132,9 +138,9 @@ mod tests {
 
     #[test]
     fn a_clip_that_stayed_on_disk_is_not_forgotten() {
-        let own = paths(&[r"V:\R\a.mp4", r"V:\R\b.mp4", r"V:\R\c.mp4"]);
+        let own = paths(&[r"X:\R\a.mp4", r"X:\R\b.mp4", r"X:\R\c.mp4"]);
         let report = settle(&[], Ok(0), &own, Ok(2), |path| path.ends_with("c.mp4"));
-        assert_eq!(report.left, paths(&[r"V:\R\a.mp4", r"V:\R\b.mp4"]));
+        assert_eq!(report.left, paths(&[r"X:\R\a.mp4", r"X:\R\b.mp4"]));
         assert_eq!((report.recycled, report.stayed), (2, 1));
         let (bad, title, detail) = delete_toast(&report);
         assert!(!bad);
@@ -145,7 +151,7 @@ mod tests {
     #[test]
     fn hidden_clips_leave_even_when_the_recycle_half_fails() {
         let imported = paths(&[r"D:\Old\x.mp4"]);
-        let own = paths(&[r"V:\R\a.mp4"]);
+        let own = paths(&[r"X:\R\a.mp4"]);
         let report = settle(&imported, Ok(1), &own, Err("bin is off".into()), |_| true);
         assert_eq!(report.left, imported, "the hidden clip goes, the clip still on disk stays");
         let (bad, _, detail) = delete_toast(&report);
@@ -156,7 +162,7 @@ mod tests {
 
     #[test]
     fn a_whole_delete_reads_as_before() {
-        let own = paths(&[r"V:\R\a.mp4"]);
+        let own = paths(&[r"X:\R\a.mp4"]);
         let report = settle(&paths(&[r"D:\Old\x.mp4"]), Ok(1), &own, Ok(1), |_| false);
         assert_eq!(delete_toast(&report), (false, "Removed 2 clips".into(), Some("1 went to the Recycle Bin. 1 from other folders stay where they are.".into())));
     }
@@ -164,10 +170,10 @@ mod tests {
     #[test]
     fn the_dialogs_folder_list_decides_what_is_only_hidden() {
         // Whatever folders.json on disk says (unreadable, defaults), the dialog's list wins.
-        let folders = folders::Folders { recordings: Some(r"V:\Recall".into()), imported: vec![r"D:\Medal".into()], ..Default::default() };
-        let (imported, own) = partition_for_delete(&paths(&[r"D:\Medal\Game\x.mp4", r"V:\Recall\a.mp4"]), &folders);
+        let folders = folders::Folders { recordings: Some(r"X:\Recall".into()), imported: vec![r"D:\Medal".into()], ..Default::default() };
+        let (imported, own) = partition_for_delete(&paths(&[r"D:\Medal\Game\x.mp4", r"X:\Recall\a.mp4"]), &folders);
         assert_eq!(imported, paths(&[r"D:\Medal\Game\x.mp4"]), "an imported clip is never sent to the Recycle Bin");
-        assert_eq!(own, paths(&[r"V:\Recall\a.mp4"]));
+        assert_eq!(own, paths(&[r"X:\Recall\a.mp4"]));
     }
 
     #[test]
@@ -183,3 +189,7 @@ mod tests {
         assert_eq!(title, "That clip was already gone");
     }
 }
+
+#[cfg(test)]
+#[path = "delete_owned_tests.rs"]
+mod owned_tests;

@@ -81,6 +81,18 @@ fn an_alt_m_sent_within_50_ms_of_the_spawn_mutes_the_first_samples() {
     assert!(held.iter().all(|s| *s == 0.0), "the ring holds no live sample of a muted mic");
     // The later handler gets the state the toggle set (it reports it once `hello` is out).
     assert!(matches!(commands.recv_timeout(Duration::from_secs(2)), Ok(Command::SetMicMute { muted: true, .. })));
+    // Post-hoc item 5: nothing but an explicit mute command moves the mute. A source's own
+    // mic_mute flag, a device change, a mode or a save line leave the mic muted.
+    for line in [
+        r#"{"cmd":"set_source","id":"in-1","mic_mute":false}"#,
+        r#"{"cmd":"set_source","id":"mic","device_id":"{0.0.1.00000000}.{x}","gain_db":3}"#,
+        r#"{"cmd":"set_mode","value":"auto"}"#,
+    ] {
+        lines.send(format!("{line}
+").into_bytes()).unwrap();
+        commands.recv_timeout(Duration::from_secs(2)).expect("forwarded");
+        assert!(audio::mic_muted(), "{line} unmuted the mic");
+    }
     drop(lines);
     let deadline = Instant::now() + Duration::from_secs(2);
     while !quit.load(std::sync::atomic::Ordering::Relaxed) && Instant::now() < deadline {

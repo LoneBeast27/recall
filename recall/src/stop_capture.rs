@@ -1,0 +1,68 @@
+//! `{"cmd":"stop_capture"}` (final review F-detect-1): the controller's privacy stop (fullscreen
+//! Discord after Esc, Never record or Remove on the app being recorded). From that line on no
+//! video frame and no audio sample enters the replay ring, nothing more is read from stdin (so
+//! no save can start), and the engine quits like an orphan: the saves already asked for finish
+//! (`saver_stop::OrphanHold`, the same bounds) instead of being aborted after 3 s. The hello's
+//! `stop_capture` says the engine takes it; an engine without it gets a held stop instead.
+
+#[cfg(not(test))]
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+
+/// Set once, by the stdin thread, when `stop_capture` arrives.
+#[cfg(not(test))]
+static STOPPED: AtomicBool = AtomicBool::new(false);
+
+// Tests run in parallel in one process: a per-thread flag keeps one test's stop from
+// silencing another test's ring.
+#[cfg(test)]
+thread_local! {
+    static STOPPED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// The controller asked to stop capture: frames and samples are dropped from now on.
+pub fn request() {
+    #[cfg(not(test))]
+    STOPPED.store(true, SeqCst);
+    #[cfg(test)]
+    STOPPED.with(|s| s.set(true));
+}
+
+/// Whether `stop_capture` arrived (read for every frame and audio packet).
+pub fn stopped() -> bool {
+    #[cfg(not(test))]
+    return STOPPED.load(SeqCst);
+    #[cfg(test)]
+    STOPPED.with(|s| s.get())
+}
+
+/// Undo [`request`] on this test thread.
+#[cfg(test)]
+pub fn reset_for_test() {
+    STOPPED.with(|s| s.set(false));
+}
+
+#[cfg(all(test, feature = "encode"))]
+mod tests {
+    use super::*;
+    use crate::audio::TrackRing;
+
+    #[test]
+    fn after_stop_capture_no_audio_enters_the_ring() {
+        reset_for_test();
+        let ring = TrackRing::for_test("game", 2);
+        ring.push_for_test(&[0.5; 960]);
+        assert!(ring.snapshot(0.01).iter().all(|s| *s == 0.5), "recorded before the stop");
+        request();
+        ring.push_for_test(&[0.25; 960]);
+        assert!(ring.snapshot(0.01).iter().all(|s| *s == 0.5), "the newest samples are still the old ones: nothing entered after it");
+        reset_for_test();
+    }
+
+    #[test]
+    fn the_hello_says_the_engine_takes_it() {
+        let hello = crate::protocol::Outbound::Hello { version: "0".into(), monitors: Vec::new(), live_sources: true, live_source_fields: true, stop_capture: true, sync_hold: true };
+        assert_eq!(serde_json::to_value(&hello).unwrap()["stop_capture"], true, "recall-hdr `supervisor_release::STOP_CAPTURE_CAP`");
+        let cmd: crate::protocol::Command = serde_json::from_str(r#"{"cmd":"stop_capture"}"#).unwrap();
+        assert!(matches!(cmd, crate::protocol::Command::StopCapture));
+    }
+}

@@ -6,11 +6,13 @@
 
     powershell -NoProfile -File scripts\dev\watch-check.ps1 [-Clip <mp4>] [-Exe <recall-native.exe>]
 
-  -Clip must be on the same volume as the repo (the burst uses hard links).
+  -Clip (default: <main checkout>\.tmp\viewer-check\base.mp4, see dev-paths.ps1) must be on the same volume as the repo (the burst uses hard links).
 #>
-param([string]$Clip = 'L:\General\recall\.tmp\viewer-check\base.mp4', [string]$Exe = '', [int]$BurstFiles = 120)
+param([string]$Clip = '', [string]$Exe = '', [int]$BurstFiles = 120)
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
+. (Join-Path $PSScriptRoot 'dev-paths.ps1')
+if (-not $Clip) { $Clip = Join-Path (Get-MainCheckout $repo) '.tmp\viewer-check\base.mp4' }
 . (Join-Path $PSScriptRoot 'viewer-check-lib.ps1')
 Initialize-ViewerCheck $repo $Exe
 Write-Host "app: $script:exe"

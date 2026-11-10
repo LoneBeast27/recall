@@ -55,7 +55,7 @@ fn a_size_that_may_be_a_guess_is_never_saved() {
         root: PathBuf::new(),
         budget_bytes: 2 * G,
         budget_note: Some("storage.json could not be read".into()),
-        budget_reset: false,
+        budget_reset: None,
         leftovers: None,
         leftovers_busy: false,
         used_bytes: 0,

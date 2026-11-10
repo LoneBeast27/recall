@@ -33,7 +33,7 @@ use std::time::{Duration, Instant};
 
 use crate::config::Config;
 use crate::engine_policy::EngineSpec;
-use crate::record_engine_ctl::{switch_engine, EngineSwitch};
+use crate::record_engine_ctl::switch_engine;
 use crate::record_activity::{EngineActivity, LongRec, PendingPause, Trigger};
 use crate::record_config::RecordingCfg;
 use crate::record_detect::{fed_key, FedKey};
@@ -118,40 +118,11 @@ pub struct Sim {
     pub probe_fails: bool,
     /// The window the render check is asked about (`RenderCheck::wanted`).
     checked: Option<(u32, isize)>,
-}
-
-/// A supervisor call (`record_engine_ctl::switch_engine`); `stop`: to Off (no spec).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Switch {
-    Retarget { stop: bool },
-    Restart { stop: bool, planned: bool },
-    /// `Supervisor::pause`.
-    Pause,
-}
-
-/// Records the calls in place of the supervisor.
-#[derive(Debug, Default)]
-pub struct SwitchLog(pub std::cell::RefCell<Vec<Switch>>);
-
-impl EngineSwitch for SwitchLog {
-    fn switch_to(&self, spec: Option<EngineSpec>) {
-        self.0.borrow_mut().push(Switch::Retarget { stop: spec.is_none() });
-    }
-    fn restart_to(&self, spec: Option<EngineSpec>, planned: bool) {
-        self.0.borrow_mut().push(Switch::Restart { stop: spec.is_none(), planned });
-    }
-    fn pause_to(&self) {
-        self.0.borrow_mut().push(Switch::Pause);
-    }
-}
-
-impl SwitchLog {
-    pub fn last(&self) -> Option<Switch> {
-        self.0.borrow().last().copied()
-    }
-    pub fn count(&self) -> usize {
-        self.0.borrow().len()
-    }
+    /// The engine says `stop_capture` in its hello (an older engine does not).
+    pub engine_releases: bool,
+    /// Privacy stops that released the engine (`release_engine_to`), with the next target:
+    /// capture stopped, saves in flight finish, then that target starts.
+    pub released: Vec<(Instant, EngineTarget)>,
 }
 
 impl Sim {
@@ -185,6 +156,8 @@ impl Sim {
             not_games: Vec::new(),
             probe_fails: false,
             checked: None,
+            engine_releases: true,
+            released: Vec::new(),
         }
     }
 
@@ -299,7 +272,7 @@ impl Sim {
         restart_engine(self, reason)
     }
 
-    /// A recovery restart: `Controller::restart_for_recovery` (the real helper).
+    /// A recovery restart: `record_restart::restart_for_recovery` (the real helper).
     pub fn recover(&mut self) -> Restarted {
         restart_for_recovery(self)
     }
@@ -335,7 +308,7 @@ impl Sim {
 
     /// `save_clip`: `true` when the engine was asked.
     pub fn save(&mut self) -> bool {
-        if capture_refusal(self.paused, self.engine_running(), &self.wanted()).is_some() {
+        if capture_refusal(self.paused, self.engine_running(), &self.wanted()).is_some() || self.planner.privacy_refusal().is_some() {
             return false;
         }
         self.activity.save_sent(self.now);
@@ -404,9 +377,15 @@ impl Sim {
         self.applied.iter().filter(|(at, t)| *at > since && *t != EngineTarget::Off).count()
     }
 
-    /// No engine (re)spawn or stop since `since`: the replay ring is the same one.
+    /// No engine (re)spawn or stop since `since`: the replay ring is the same one, and a save
+    /// in flight was not cut.
     pub fn ring_kept_since(&self, since: Instant) -> bool {
         self.applied.iter().all(|(at, _)| *at <= since)
+    }
+
+    /// The ring stopped capturing since `since`: a stop or respawn, or a release.
+    pub fn ring_dropped_since(&self, since: Instant) -> bool {
+        !self.ring_kept_since(since) || self.released.iter().any(|(at, _)| *at > since)
     }
 
     pub fn current(&self) -> Option<&Target> {
@@ -448,6 +427,19 @@ impl Transitions for Sim {
     }
     fn apply_now(&mut self, target: &EngineTarget) {
         self.applied_engine(target.clone());
+    }
+    fn release_now(&mut self, target: &EngineTarget) -> bool {
+        if self.engine_releases {
+            self.pending_restart = None; // `apply_engine_target_how`
+            self.released.push((self.now, target.clone()));
+        }
+        self.engine_releases
+    }
+    fn saving(&mut self) -> bool {
+        self.activity.retarget_busy(self.now).saving
+    }
+    fn now(&self) -> Instant {
+        self.now
     }
     fn pinned(&self) -> Option<&Target> {
         self.pinned.as_ref()
@@ -493,6 +485,10 @@ impl RestartHost for Sim {
         self.notes.push(line.into());
     }
 }
+
+#[path = "transitions_sim_switch.rs"]
+mod switch;
+pub use switch::{Switch, SwitchLog};
 
 /// The proof rule, the simulated render verdicts and `recheck_registration` (R8-detect-2,
 /// -5, -6), split out for file size.

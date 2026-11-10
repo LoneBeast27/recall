@@ -109,7 +109,7 @@ pub(super) fn clear_in(root: &Path, kind: CacheKind) -> Result<u64, String> {
         return Err(format!("Nothing was cleared. {why}"));
     }
     let _guard = budget::INDEX_LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    let keep = budget::kept();
+    let keep = budget::kept(root);
     let inventory = budget::inventory(root, &|_| 0.0);
     Ok(inventory.units.iter().filter(|u| u.tier == kind.tier() && !keep.contains(&u.name)).map(|u| budget::delete(root, u)).sum())
 }

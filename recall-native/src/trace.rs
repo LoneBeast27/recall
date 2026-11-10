@@ -230,8 +230,8 @@ pub fn player_event(what: &str, detail: serde_json::Value) {
 pub fn player_log(what: &str, detail: serde_json::Value) -> serde_json::Value {
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis());
     let line = serde_json::json!({ "unix_ms": stamp as u64, "event": what, "detail": detail });
-    if !crate::TESTING && let Some(root) = std::env::var_os("APPDATA") {
-        let dir = std::path::PathBuf::from(root).join("Recall");
+    if !crate::TESTING && let Some(root) = crate::user_dirs::appdata() {
+        let dir = crate::user_dirs::checked(root.join("Recall"));
         let path = dir.join("player.log");
         let _ = std::fs::create_dir_all(&dir);
         if path.metadata().is_ok_and(|m| m.len() > 512 * 1024) {

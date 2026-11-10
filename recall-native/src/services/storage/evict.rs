@@ -21,7 +21,7 @@ pub const DEFAULT_KEEP_FREE_PERCENT: u64 = 10;
 pub const MIN_CACHE_BUDGET: u64 = 2 * GIB;
 
 /// The budget a first run picks (no `storage.json` yet) on a cache drive with `free` of
-/// `total` bytes. On the system drive it is [`MIN_CACHE_BUDGET`] (Rohan 2026-11-03: "keep the
+/// `total` bytes. On the system drive it is [`MIN_CACHE_BUDGET`] (the maintainer 2026-11-03: "keep the
 /// cache on C: at 2 GB"; the engine's `kept\` copies count inside it). Elsewhere: the smallest
 /// of [`DEFAULT_CACHE_BUDGET`], [`DEFAULT_FREE_SHARE_PERCENT`] of `free`, and `free` less
 /// [`DEFAULT_KEEP_FREE_PERCENT`] of `total`, in whole GiB, at least [`MIN_CACHE_BUDGET`].
@@ -197,7 +197,9 @@ pub(super) fn read_settings(root: &Path) -> Settings {
 /// Durable (tmp, `sync_all`, rename: `durable::write_durable`): a crash can't leave storage.json
 /// NUL-filled, which made the budget unknown (RI3-1).
 pub(super) fn write_settings(root: &Path, settings: &Settings) -> Result<(), String> {
-    let bytes = serde_json::to_vec_pretty(settings).map_err(|error| error.to_string())?;
+    let path = root.join("storage.json");
+    // Keys a newer build wrote stay (`json_keep`); the two known ones follow `settings`.
+    let bytes = crate::services::json_keep::pretty_keeping(&path, settings, &["cache_budget_bytes", "first_run"])?;
     std::fs::create_dir_all(root).map_err(|error| format!("create {}: {error}", root.display()))?;
-    crate::services::durable::write_durable(&root.join("storage.json"), &bytes)
+    crate::services::durable::write_durable(&path, &bytes)
 }

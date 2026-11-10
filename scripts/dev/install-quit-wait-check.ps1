@@ -58,6 +58,17 @@ Case 'case 1' {
     Say ([bool]($script:printed -like '*already quitting*no second quit sent*')) "it says why no quit was sent"
 }
 
+# 1b. Item 10: a recorder finishing a clip because a sign-out is held (its quit is the sign-out's
+#     alone) gets one plain quit: a cancelled sign-out calls its own quit off, and the plain quit
+#     joins the wait and survives the cancel (record_quit_wait::on_quit_request keeps it).
+Case 'case 1b' {
+    Reset; $script:controllers = @($proc); $script:sids = @{ 100 = 'S-me' }
+    $script:status = { [pscustomobject]@{ finishing_clip = $true; quit_for_sign_out = $true } }
+    $q = Request-RecorderQuit
+    Say ($script:sends.Count -eq 1 -and $script:sends[0] -eq "$pipeName {""cmd"":""quit""}") "a held sign-out gets one plain quit ($($script:sends -join '; '))"
+    Say ($q.pid -eq 200) "the wait follows the recorder that got the quit (pid $($q.pid))"
+}
+
 # 2. Not finishing: one quit, on the session pipe, and the run waits on the recorder that got it.
 Case 'case 2' {
     Reset; $script:controllers = @($proc); $script:sids = @{ 100 = 'S-me' }

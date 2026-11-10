@@ -219,6 +219,10 @@ impl ClipFill {
 
     /// Asks for `chunks` first (the index and the head of the clip) and starts reading.
     pub fn start(&self, first: &[u64]) -> Result<(), String> {
+        // A direct fill's part is the source clip itself: never open it for write or trim it.
+        if self.0.direct {
+            return Err("the clip is read where it lies; a direct fill copies nothing".into());
+        }
         let input = open_unbuffered(&self.0.source).map_err(|error| format!("open clip: {error}"))?;
         let output = open_part(&self.0.part).map_err(|error| format!("open fill: {error}"))?;
         {
@@ -402,6 +406,10 @@ impl ClipFill {
 
     /// Stamps the copy and publishes it. The open readers keep working (shared for delete).
     fn finish(&self, reader: &mut Reader) -> Result<(), String> {
+        // A direct fill's part is the source clip itself: never open it for write or trim it.
+        if self.0.direct {
+            return Err("the clip is read where it lies; a direct fill copies nothing".into());
+        }
         reader.output.set_len(self.0.bytes).map_err(|error| format!("trim fill: {error}"))?;
         reader.output.set_modified(self.0.modified).map_err(|error| format!("stamp fill: {error}"))?;
         let after = self.0.source.metadata().map_err(|error| format!("stat clip: {error}"))?;

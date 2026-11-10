@@ -25,21 +25,8 @@ const SCAN_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 /// The recorder's default clip folder, `<Videos>\Recall` (the controller's
 /// `recording.output_dir` default): the Videos known folder, else `%USERPROFILE%\Videos`.
 pub fn default_recordings_dir() -> PathBuf {
-    videos_folder().unwrap_or_else(|| PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("Videos")).join("Recall")
-}
-
-fn videos_folder() -> Option<PathBuf> {
-    use windows::Win32::{
-        System::Com::CoTaskMemFree,
-        UI::Shell::{FOLDERID_Videos, KF_FLAG_DEFAULT, SHGetKnownFolderPath},
-    };
-    // SAFETY: the returned buffer is copied, then freed with the allocator that made it.
-    unsafe {
-        let raw = SHGetKnownFolderPath(&FOLDERID_Videos, KF_FLAG_DEFAULT, None).ok()?;
-        let path = raw.to_string().ok();
-        CoTaskMemFree(Some(raw.0 as *const _));
-        path.filter(|p| !p.is_empty()).map(PathBuf::from)
-    }
+    let videos = crate::user_dirs::known(crate::user_dirs::Known::Videos);
+    crate::user_dirs::checked(videos.unwrap_or_else(|| PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("Videos")).join("Recall"))
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq)]
@@ -78,7 +65,7 @@ fn folders_path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("RECALL_FOLDERS").filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    std::env::var_os("APPDATA").filter(|p| !p.is_empty()).map(|root| PathBuf::from(root).join("Recall").join("folders.json"))
+    crate::user_dirs::appdata().map(|root| crate::user_dirs::checked(root.join("Recall").join("folders.json")))
 }
 
 impl Folders {
@@ -113,7 +100,8 @@ impl Folders {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
         }
-        let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
+        // Keys a newer build wrote stay (`json_keep`).
+        let bytes = crate::services::json_keep::pretty_keeping(path, self, &["recordings", "imported", "former_recordings"])?;
         crate::services::durable::write_durable(path, &bytes).map_err(|e| format!("save folders: {e}"))
     }
 
@@ -134,19 +122,26 @@ impl Folders {
     }
 
     /// Settings → Clip folders → remove: the folder leaves the library and is no longer one
-    /// Recall manages (re-adding it later lists it as an ordinary imported folder).
+    /// Recall manages (re-adding it later lists it as an ordinary imported folder). A folder that
+    /// overlaps the recordings folder stays managed ([`Folders::release`]).
     pub fn forget(&mut self, folder: &str) {
         self.remove(folder);
-        self.release(folder);
+        let _ = self.release(folder);
     }
 
     /// Settings → Folders Recall manages → remove: its clips stay listed but count as imported
-    /// (Delete only removes them from Recall). True when it was managed.
-    pub fn release(&mut self, folder: &str) -> bool {
+    /// (Delete only removes them from Recall). `Ok(true)` when it was managed. Refused for a
+    /// folder that holds or lies in the recordings folder: it would turn into a link over
+    /// Recall's own clips (D:\Clips released after recording moved to D:\Clips\Recall).
+    pub fn release(&mut self, folder: &str) -> Result<bool, String> {
+        let recordings = crate::backend::library_dir_from(self);
+        if crate::services::storage::guard::folders_overlap(Path::new(folder), &recordings) {
+            return Err(format!("{folder} overlaps the recordings folder {}, so Recall keeps managing it.", recordings.display()));
+        }
         let key = folder_key(folder);
         let before = self.former_recordings.len();
         self.former_recordings.retain(|f| folder_key(f) != key);
-        self.former_recordings.len() != before
+        Ok(self.former_recordings.len() != before)
     }
 
     /// Linked sources appear separately from former recordings folders that Recall manages.
@@ -219,8 +214,13 @@ pub fn check_cache_overlap(folders: &Folders) -> Option<String> {
 }
 
 /// Case-insensitive, separator-normalized, no trailing slash.
+/// The comparable form of a path, used wherever ownership, links and folder membership are
+/// decided: no verbatim prefix (`\\?\Y:\x` is `Y:\x`, `\\?\UNC\nas\x` is `\\nas\x`; the editor
+/// holds a clip by its canonical path, the folder list by the plain one), `\` separators, no
+/// trailing `\`, lowercase.
 pub fn folder_key(folder: &str) -> String {
-    folder.replace('/', "\\").trim_end_matches('\\').to_lowercase()
+    let plain = crate::services::storage::plain_path(Path::new(folder));
+    plain.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase()
 }
 
 /// True when `path` lies inside `folder` (both plain absolute paths).
@@ -442,7 +442,7 @@ mod tests {
         let recordings = Path::new(r"G:\Third");
         let clip = r"E:\Clips\VALORANT__2026-11-01__10-00-00.mp4";
         // Removing it from "Folders Recall manages": still listed, but imported now.
-        assert!(folders.release(r"e:\clips\"));
+        assert!(folders.release(r"e:\clips\").unwrap());
         assert_eq!(folders.imported, [r"E:\Clips".to_owned()]);
         assert!(super::super::imports::is_imported(clip, recordings, &folders.imported, &folders.former_recordings));
         // Removing a folder from Clip folders drops both.

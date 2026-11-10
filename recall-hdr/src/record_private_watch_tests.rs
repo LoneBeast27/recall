@@ -131,3 +131,14 @@ fn the_watch_runs_only_when_it_can_show_something() {
     w.window = Some((1, 2));
     assert!(w.is_watched(1, 2) && !w.is_watched(1, 3));
 }
+
+/// Post-hoc item 7: an overlay hidden by Alt+O shows no notice, so no render check runs for it.
+#[test]
+fn a_hidden_overlay_wants_no_render_check() {
+    use crate::record_config::OverlayCfg;
+    let on = OverlayCfg { enabled: true, ..OverlayCfg::default() };
+    assert!(super::notices_visible(&on));
+    assert!(!super::notices_visible(&OverlayCfg { hidden: true, ..on.clone() }), "hidden: nothing could show the result");
+    assert!(!super::notices_visible(&OverlayCfg { enabled: false, ..on }));
+}
+

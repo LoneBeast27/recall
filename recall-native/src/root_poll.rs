@@ -126,6 +126,12 @@ impl Root {
         changed |= self.cache.editing && !self.cache.painted.get();
         changed |= self.poll_timers();
         changed |= self.update.tick();
+        // Setup has the update (it quits the recorder, saving first): this app closes itself.
+        if self.update.take_quit() {
+            self.flush_on_close();
+            cx.quit();
+            return;
+        }
         if let Some((good, notice)) = self.update.notice.take() {
             self.show_toast(if good { ToastKind::Good } else { ToastKind::Bad }, notice, None);
         }
@@ -154,22 +160,21 @@ impl Root {
     }
 
     pub(crate) fn finish_setup_recording(&mut self, record_after: bool) {
-        if record_after {
-            self.setup_resume_pending = true;
-            self.resolve_setup_resume();
-        } else {
+        // The recorder Setup started stays paused only while Setup runs: finishing resumes it
+        // ("Start recorder") or hands the pause to the user, so its owner's exit cannot resume it.
+        self.setup_resume_pending = Some(record_after);
+        if !record_after {
             self.controller_check_at = None;
         }
+        self.resolve_setup_resume();
     }
 
     fn resolve_setup_resume(&mut self) {
-        if !self.setup_resume_pending || !self.snap.connected {
-            return;
-        }
+        let Some(record_after) = self.setup_resume_pending.filter(|_| self.snap.connected) else { return };
         let Some(session) = self.snap.session.as_ref() else { return };
-        self.setup_resume_pending = false;
-        if session.setup_owner == Some(std::process::id()) {
-            self.send(crate::services::daemon::DaemonCommand::Resume);
+        self.setup_resume_pending = None;
+        if let Some(cmd) = setup_finish_command(session.setup_owner, std::process::id(), record_after) {
+            self.send(cmd);
         }
     }
 
@@ -201,5 +206,27 @@ impl Root {
             changed = true;
         }
         changed
+    }
+}
+
+/// What a finished Setup tells the recorder it started (`setup_owner` = this app's pid):
+/// resume it, or keep it paused as the user's own pause. A recorder this Setup does not own
+/// is left alone.
+pub(crate) fn setup_finish_command(owner: Option<u32>, me: u32, record_after: bool) -> Option<crate::services::daemon::DaemonCommand> {
+    use crate::services::daemon::DaemonCommand;
+    (owner == Some(me)).then_some(if record_after { DaemonCommand::Resume } else { DaemonCommand::Pause })
+}
+
+#[cfg(test)]
+mod setup_finish_tests {
+    use super::setup_finish_command;
+    use crate::services::daemon::DaemonCommand;
+
+    #[test]
+    fn finishing_setup_releases_the_recorder_it_paused() {
+        assert_eq!(setup_finish_command(Some(7), 7, true), Some(DaemonCommand::Resume));
+        assert_eq!(setup_finish_command(Some(7), 7, false), Some(DaemonCommand::Pause), "kept paused, owned by the user now");
+        assert_eq!(setup_finish_command(Some(8), 7, true), None, "another app's recorder");
+        assert_eq!(setup_finish_command(None, 7, true), None, "nothing owned");
     }
 }

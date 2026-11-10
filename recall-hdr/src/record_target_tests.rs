@@ -130,13 +130,25 @@ fn steam_remote_play_and_exe_suffixed_games_stay_targets() {
 }
 
 #[test]
-fn deny_beats_a_game_override_for_new_stems() {
-    // Existing precedence: a denied stem is never a target, even with a game override.
+fn a_settings_entry_beats_the_deny_lists_but_never_windows_or_recall() {
+    // Final review F-detect-2 (the maintainer 2026-11-07, "support for manual application registering"):
+    // the user's own entry beats the remote-client, browser, media-player, launcher, Store-app
+    // and private lists. It never makes Recall itself or a part of Windows a target.
     let mut cfg = user_cfg();
-    cfg.overrides.push(Override { exe: "msrdc".into(), kind: RuleKind::SdrGame, clamp: None });
-    cfg.overrides.push(Override { exe: "parsecd".into(), kind: RuleKind::HdrGame, clamp: None });
-    assert!(!is_target("msrdc", true, &cfg));
-    assert!(!is_target("parsecd", false, &cfg));
+    for exe in ["msrdc", "parsecd", "chrome", "vlc", "steam", "microsoft.media.player", "zoom", "teams"] {
+        assert!(!is_target(exe, true, &cfg), "{exe}: denied without an entry");
+        cfg.overrides.push(Override { exe: exe.into(), kind: RuleKind::SdrGame, clamp: None });
+        assert!(is_target(exe, false, &cfg), "{exe}: the entry records it, windowed too");
+    }
+    for exe in ["recall-native", "Recall.exe", "dwm", "explorer.exe", "LockApp", "logonui", "svchost", "shellhost"] {
+        cfg.overrides.push(Override { exe: exe.into(), kind: RuleKind::HdrGame, clamp: None });
+        assert!(!is_target(exe, true, &cfg), "{exe}: never a target, entry or not");
+    }
+    cfg.detect.fullscreen_games.push("explorer".into());
+    assert!(!is_target("explorer", true, &cfg), "not through fullscreen_games either");
+    let scr = WatchEvent { exe_stem: "mystify".into(), exe_name: "Mystify.scr".into(), fullscreen: true, fullscreen_on_target: true, ..WatchEvent::unknown(7, 0x7) };
+    cfg.overrides.push(Override { exe: "mystify".into(), kind: RuleKind::SdrGame, clamp: None });
+    assert!(classify_event(&scr, &cfg).is_none(), "a screensaver never is");
 }
 
 #[test]
@@ -429,7 +441,7 @@ fn fullscreen_games_yield_to_none_overrides_and_recall_itself() {
 
 #[test]
 fn valorant_is_never_left_to_the_render_check() {
-    // Rohan's main game: even vsynced or DWM-composed (which the render check
+    // The maintainer's main game: even vsynced or DWM-composed (which the render check
     // would reject), its fullscreen window commits on the 300 ms rule.
     let cfg = Config::default();
     let v = ev("VALORANT-Win64-Shipping", "VALORANT  ", 10, 0x10, true);

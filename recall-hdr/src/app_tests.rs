@@ -39,3 +39,13 @@ fn wait_ms_clamps_to_cap_and_floors_at_zero() {
     assert_eq!(wait_ms(Some(Instant::now() - Duration::from_secs(1)), 250), 0);
     assert_eq!(wait_ms(Some(Instant::now() + Duration::from_secs(60)), 250), 250);
 }
+
+#[test]
+fn the_legacy_focused_rule_refuses_windows_and_recall() {
+    use crate::types::RuleKind;
+    assert!(super::focused_rule_refused("explorer", RuleKind::HdrGame));
+    assert!(super::focused_rule_refused("SystemSettings", RuleKind::SdrGame));
+    assert!(super::focused_rule_refused("recall-native", RuleKind::HdrGame));
+    assert!(!super::focused_rule_refused("explorer", RuleKind::None), "a none rule is fine");
+    assert!(!super::focused_rule_refused("discord", RuleKind::HdrGame), "the user's own app: accepted (and recorded)");
+}

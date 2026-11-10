@@ -293,7 +293,7 @@ fn pipe_commands_send_without_the_shortcut_tick() {
     use crate::test_src::method_body;
     let actions = include_str!("record_actions.rs");
     assert!(method_body(actions, "engine_command").contains("self.engine_command_as(cmd, client, false);"));
-    assert!(method_body(actions, "engine_command_as").contains("&mut ControllerCommand { ctl: self, cmd, client }, cmd, hotkey);"));
+    assert!(method_body(actions, "engine_command_as").contains("&mut ControllerCommand { ctl: self, cmd, client }, cmd, hotkey).queued()"));
 }
 
 /// Review R2-audio-r9-4 (acc69a0, updated for design-audio-mute P10): source guards on the

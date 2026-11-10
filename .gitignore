@@ -6,7 +6,9 @@ target/
 # Debug/verification dump output (RECALL_DUMP / RECALL_DUMP_EVERY)
 /captures/
 # Stray planning dir
-/.planning/
+.planning/
+# This PC's machine values (monitor ids, paths): scripts/dev/init-machine.ps1 writes it
+/.local/
 
 # Tauri / node
 node_modules/

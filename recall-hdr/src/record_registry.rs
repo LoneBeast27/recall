@@ -1,5 +1,5 @@
 //! The user's game registrations (Settings -> Games: `[[overrides]]` and
-//! `detect.fullscreen_games`, Rohan 2026-11-07 "support for manual application
+//! `detect.fullscreen_games`, the maintainer 2026-11-07 "support for manual application
 //! registering") changing while a session runs. A new registration applies
 //! from the next foreground observation; this module ends a live session that
 //! the change took away:

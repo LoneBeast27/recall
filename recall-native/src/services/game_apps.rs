@@ -1,4 +1,4 @@
-//! Settings → Games: the apps the user registered with the recorder by hand (Rohan
+//! Settings → Games: the apps the user registered with the recorder by hand (the maintainer
 //! 2026-11-07: "use official proof + support for manual application registering"). The
 //! recorder records an unknown fullscreen app only with official proof that it is a game (a
 //! Steam or launcher install, an Xbox / Store game package, a game Recall or the NVIDIA driver
@@ -7,7 +7,7 @@
 //! The list is the controller's config, read from its `config` event, never a copy:
 //! - `[[overrides]]` with a game kind (`hdr_game` / `sdr_game`) = "Record" (any window, windowed
 //!   too), with kind `none` = "Never record" (beats every proof, Steam included);
-//! - `[detect] fullscreen_games` = "Record when fullscreen" (Discord by default, Rohan
+//! - `[detect] fullscreen_games` = "Record when fullscreen" (Discord by default, the maintainer
 //!   2026-11-05).
 //!
 //! Changes go out one app at a time (`register_game`, R8-detect-7): the controller applies
@@ -145,12 +145,10 @@ pub struct Pickable {
     pub in_front: bool,
 }
 
-/// Exes never offered by "Add app…": Recall's own, and shell / frame processes whose windows
-/// are not the app itself.
-const NOT_OFFERED: &[&str] = &[
-    "recall", "recall-native", "recall-hdr", "recall-hub", "recall-overlay", "explorer", "applicationframehost", "textinputhost",
-    "shellexperiencehost", "startmenuexperiencehost", "searchhost", "searchapp", "lockapp", "systemsettings",
-];
+/// Exes never offered by "Add app…": Recall's own and Windows itself, the same list the
+/// controller refuses a "Record" entry for (R2-detect-r10-4).
+#[path = "../../../recall-hdr/src/never_recorded.rs"]
+mod never_recorded;
 
 /// The running apps "Add app…" offers, in z-order: one row per exe, minus Recall and the
 /// shell. The app of `front_pid` (the foreground window when the menu opened) goes first and
@@ -159,7 +157,7 @@ pub fn pickable(found: Vec<(u32, PlayingApp)>, front_pid: Option<u32>) -> Pickab
     let front_exe = found.iter().find(|(pid, _)| Some(*pid) == front_pid).map(|(_, a)| a.exe.clone());
     let mut out: Vec<PlayingApp> = Vec::new();
     for (_, app) in found {
-        let own = NOT_OFFERED.iter().any(|n| same_exe(n, &app.exe));
+        let own = never_recorded::never_recordable(&app.exe);
         if !own && !app.exe.trim().is_empty() && !out.iter().any(|a| same_exe(&a.exe, &app.exe)) {
             out.push(app);
         }

@@ -49,6 +49,25 @@ pub(crate) fn overlay_hotkey_patch(overlay: &OverlayCfg) -> serde_json::Value {
     }
 }
 
+/// The overlay shortcut's own pop-up when it hides the overlay: forced through (`always`),
+/// since notices are hidden from now on.
+pub(crate) fn overlay_hidden_notice(hotkey: &str) -> String {
+    let detail = if hotkey.is_empty() { "Settings shows it again".to_owned() } else { format!("{hotkey} to show") };
+    shortcut_notice_json("Overlay hidden", &detail, false, true)
+}
+
+/// Turning notices or stats on (Settings, the stats shortcut) also clears the overlay
+/// shortcut's `hidden`, unless the patch names `hidden` itself: an enable must show.
+pub(crate) fn unhide_on_enable(mut patch: serde_json::Value) -> serde_json::Value {
+    if let Some(serde_json::Value::Object(overlay)) = patch.get_mut("overlay") {
+        let enables = ["enabled", "stats"].iter().any(|k| overlay.get(*k) == Some(&serde_json::Value::Bool(true)));
+        if enables && !overlay.contains_key("hidden") {
+            overlay.insert("hidden".into(), serde_json::Value::Bool(false));
+        }
+    }
+    patch
+}
+
 impl Controller {
     /// (Re)register every hotkey from config; conflicts and OS refusals are
     /// `session` error events, never fatal.
@@ -114,7 +133,7 @@ impl Controller {
             HotkeyAction::Bookmark | HotkeyAction::Screenshot | HotkeyAction::Record => {
                 // Queued first: the tick only for a command the engine got (as a save).
                 if let Some((cmd, hotkey)) = hotkey_command(action) {
-                    self.engine_command_as(cmd, None, hotkey);
+                    let _ = self.engine_command_as(cmd, None, hotkey);
                 }
             }
             HotkeyAction::Stats => {
@@ -143,23 +162,30 @@ impl Controller {
         self.engine_command_as(cmd, client, false);
     }
 
+    /// As [`engine_command`](Self::engine_command), from the controller itself: true when
+    /// the engine got the line (not refused, queued).
+    pub(crate) fn engine_command_queued(&mut self, cmd: &'static str) -> bool {
+        self.engine_command_as(cmd, None, false)
+    }
+
     /// As [`engine_command`](Self::engine_command); `hotkey`: a shortcut, which ticks once
-    /// the engine has the command, never on a refusal.
-    fn engine_command_as(&mut self, cmd: &'static str, client: Option<u64>, hotkey: bool) {
+    /// the engine has the command, never on a refusal. True when the line was queued.
+    fn engine_command_as(&mut self, cmd: &'static str, client: Option<u64>, hotkey: bool) -> bool {
         let draining = self.planner.drain().is_some();
         let refused = capture_refusal(self.paused, self.engine_running(), &self.wanted())
             .or_else(|| self.activity.record_refusal(cmd, draining));
         if let Some(reason) = refused {
             if cmd == "bookmark" && client.is_none() {
-                return self.refuse_bookmark(reason); // the hotkey
+                self.refuse_bookmark(reason); // the hotkey
+            } else if cmd == "record_stop" || cmd == "bookmark" {
+                self.reply_error(client, &format!("{cmd}: {reason}"));
+            } else {
+                self.refuse_capture(cmd, reason);
             }
-            if cmd == "record_stop" || cmd == "bookmark" {
-                return self.reply_error(client, &format!("{cmd}: {reason}"));
-            }
-            return self.refuse_capture(cmd, reason);
+            return false;
         }
         // Queued first: only a command the engine will see is marked in flight (and ticked).
-        crate::record_dispatch::command(&mut ControllerCommand { ctl: self, cmd, client }, cmd, hotkey);
+        crate::record_dispatch::command(&mut ControllerCommand { ctl: self, cmd, client }, cmd, hotkey).queued()
     }
 
     /// `record_stop` from the controller itself (pause, retarget, sleep, session end): queued
@@ -220,12 +246,19 @@ impl Controller {
     /// Hide or show the whole overlay immediately. Resume the selected surfaces.
     fn toggle_overlay(&mut self) {
         let patch = overlay_hotkey_patch(&self.cfg.overlay);
+        let hiding = self.cfg.overlay.wants_process();
+        if hiding {
+            self.overlay.linger(); // keep the process up to show the pop-up below
+        }
         if !self.apply_config_patch(&patch, None) {
             return;
         }
         let shown = self.cfg.overlay.wants_process();
         log!("record: overlay {}", if shown { "shown" } else { "hidden" });
         crate::cues::tick();
+        if hiding && !shown {
+            self.hub.event("session", &overlay_hidden_notice(&self.cfg.recording.overlay_hotkey));
+        }
         self.pending_notice = self.cfg.overlay.shows_notices().then(|| {
             let notice = shortcut_notice_json("Overlay on", "Notices show over any app", false, false);
             (notice, Instant::now() + Duration::from_secs(4))
@@ -277,8 +310,9 @@ impl Controller {
     /// engine reports it ended, or after [`PAUSE_STOP_WAIT`]; a save being written
     /// finishes first ("Pausing after the save"). Resume cancels a pause still waiting.
     pub(crate) fn set_paused(&mut self, paused: bool) {
+        // Any explicit pause or resume takes the pause over from Setup (`record_setup_owner`).
+        self.setup_owner = None;
         if !paused {
-            self.setup_owner = None;
             self.pending_pause = None;
         } else if !self.paused && self.engine_running() {
             if self.pending_pause.is_some() {
@@ -383,6 +417,9 @@ impl Controller {
         self.planner.set_drain_len(crate::record_drain::drain_len(buffered, self.cfg.recording.buffer_secs));
         let wanted = self.wanted();
         let busy = self.activity.retarget_busy(now);
+        if self.activity.release_may_settle(now) {
+            self.supervisor.release_settled(); // R2-detect-r10-1: a released engine's saves landed
+        }
         let drained = self.running_drain(now);
         match self.planner.step(&wanted, now, busy) {
             Step::Apply(target) => {
@@ -465,3 +502,7 @@ impl crate::record_dispatch::CommandPort for ControllerCommand<'_> {
         self.ctl.command_not_sent(self.cmd, self.client, reason);
     }
 }
+
+#[cfg(test)]
+#[path = "record_overlay_hidden_tests.rs"]
+mod overlay_hidden_tests;

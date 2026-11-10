@@ -85,7 +85,7 @@ pub enum Field {
 pub struct Root {
     pub route: Route,
     pub(crate) setup: Option<crate::views::setup_runner::SetupRunner>,
-    setup_resume_pending: bool,
+    setup_resume_pending: Option<bool>,
     pub focus: FocusHandle,
     pub workers: Workers,
     pub daemon: DaemonClient,
@@ -176,6 +176,8 @@ mod render;
 mod start;
 #[path = "root_done.rs"]
 mod done;
+#[path = "root_resume.rs"]
+pub(crate) mod resume_start;
 
 impl Root {
     /// The polling task holds this view for a tick after the window goes, and the app can quit

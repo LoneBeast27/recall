@@ -20,15 +20,11 @@ The sRGB colorants are computed in the accurate profile's own PCS(D50)-relative 
 using that profile's 'chad' (D65->D50 Bradford) matrix, so Windows reports exactly
 sRGB xy after inverse-chad, with no negative components.
 
-Usage:  python make-punchy.py
-        (reads  PG27AQDP_sRGB-to-Gamma2.2_MHC2.icm
-         writes PG27AQDP_Punchy-Gamma2.2_MHC2.icm  next to this script)
+Usage:  python make-punchy.py <accurate.icm> <punchy.icm> [--desc "<profile description>"]
+        Both files normally live in this PC's hdrGammaFix.profileDir (.local/machine.json),
+        outside the repo: the profiles are built from one display's own calibration.
 """
-import struct, hashlib, os
-
-HERE = os.path.dirname(os.path.abspath(__file__))
-SRC  = os.path.join(HERE, 'PG27AQDP_sRGB-to-Gamma2.2_MHC2.icm')
-OUT  = os.path.join(HERE, 'PG27AQDP_Punchy-Gamma2.2_MHC2.icm')
+import argparse, struct, hashlib
 
 # sRGB primaries (xy), the target Windows should report for the punchy profile.
 SRGB_XY = [(0.64, 0.33), (0.30, 0.60), (0.15, 0.06)]
@@ -41,7 +37,7 @@ SRGB_PCS_COLORANTS = {
     'gXYZ': (0.360072, 0.720727, 0.103570),
     'bXYZ': (0.151495, 0.063401, 0.773141),
 }
-DESC = 'PG27AQDP Punchy Gamma2.2 (native gamut, MHC2)'
+DEFAULT_DESC = 'Punchy Gamma2.2 (native gamut, MHC2)'
 
 
 def parse_tags(d):
@@ -81,6 +77,12 @@ def compute_srgb_pcs_colorants(d, tags):
 
 
 def main():
+    ap = argparse.ArgumentParser(description='Derive the punchy MHC2 profile from the accurate one.')
+    ap.add_argument('src', help='accurate profile (.icm) to read')
+    ap.add_argument('out', help='punchy profile (.icm) to write')
+    ap.add_argument('--desc', default=DEFAULT_DESC, help='profile description written into desc')
+    args = ap.parse_args()
+    SRC, OUT, DESC = args.src, args.out, args.desc
     with open(SRC, 'rb') as f:
         d = bytearray(f.read())
     tags = parse_tags(d)

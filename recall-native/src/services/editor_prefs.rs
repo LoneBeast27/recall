@@ -41,7 +41,7 @@ fn path() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("RECALL_EDITOR_PREFS").filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(path));
     }
-    std::env::var_os("APPDATA").filter(|p| !p.is_empty()).map(|root| PathBuf::from(root).join("Recall").join("editor.json"))
+    crate::user_dirs::appdata().map(|root| crate::user_dirs::checked(root.join("Recall").join("editor.json")))
 }
 
 impl EditorPrefs {
@@ -54,7 +54,7 @@ impl EditorPrefs {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
         }
-        let bytes = serde_json::to_vec_pretty(self).map_err(|e| e.to_string())?;
+        let bytes = crate::services::json_keep::pretty_keeping(&path, self, &["mix_down"])?;
         crate::services::storage::write_atomic(&path, &bytes)
     }
 }

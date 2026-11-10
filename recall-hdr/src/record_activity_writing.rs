@@ -129,6 +129,19 @@ impl EngineActivity {
         }
     }
 
+    /// A released engine may be cut to the quit grace (`Supervisor::release_settled`,
+    /// R2-detect-r10-p2-1): every save it was sent is answered (`saved` / `save_failed`; an
+    /// engine exit answers them all), or none has shown progress for [`SAVE_STALE`] (the
+    /// engine's own stall rule, `saver_stop::ORPHAN_STALL`). Unlike [`Self::saves_writing`],
+    /// no timer or cap lets go while the drain still reports progress (`save_progress`).
+    pub fn release_may_settle(&mut self, now: Instant) -> bool {
+        if self.pending_saves + self.expired_saves == 0 {
+            return true;
+        }
+        let last = self.save_progress.max(self.write.moved);
+        last.is_none_or(|t| now.saturating_duration_since(t) >= SAVE_STALE)
+    }
+
     /// Saves the engine is still writing: counted, or reported by the engine with
     /// its mark still moving. A restart now aborts them. A save past its cap lets
     /// its queue go (once): restarts go ahead as they did before this hold.

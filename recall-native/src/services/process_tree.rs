@@ -85,6 +85,63 @@ pub fn alive(pid: u32) -> bool {
     }
 }
 
+/// What can be said about a pid: it runs no process, it runs one (start time and image path),
+/// or it can't be told (access denied, a failed query).
+#[derive(Debug, Clone, PartialEq)]
+pub enum ProcessState {
+    Gone,
+    Running { started: std::time::SystemTime, image: String },
+    Unknown,
+}
+
+/// [`ProcessState`] of `pid`, from one query handle.
+pub fn state(pid: u32) -> ProcessState {
+    use windows::Win32::Foundation::ERROR_INVALID_PARAMETER;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    // SAFETY: plain Win32 call; the handle is closed below.
+    match unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) } {
+        Ok(handle) => {
+            let state = state_of(handle);
+            // SAFETY: closed exactly once.
+            let _ = unsafe { CloseHandle(handle) };
+            state
+        }
+        // No such process: the pid runs nothing. Anything else (access denied) can't be told.
+        Err(error) if error.code() == ERROR_INVALID_PARAMETER.to_hresult() => ProcessState::Gone,
+        Err(_) => ProcessState::Unknown,
+    }
+}
+
+fn state_of(handle: HANDLE) -> ProcessState {
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::{GetExitCodeProcess, GetProcessTimes, PROCESS_NAME_WIN32, QueryFullProcessImageNameW};
+    const STILL_ACTIVE: u32 = 259;
+    let mut code = 0u32;
+    // SAFETY: `handle` is open for query; every out-parameter is sized.
+    unsafe {
+        if GetExitCodeProcess(handle, &mut code).is_err() {
+            return ProcessState::Unknown;
+        }
+        if code != STILL_ACTIVE {
+            return ProcessState::Gone;
+        }
+        let (mut created, mut exited, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());
+        if GetProcessTimes(handle, &mut created, &mut exited, &mut kernel, &mut user).is_err() {
+            return ProcessState::Unknown;
+        }
+        let mut wide = vec![0u16; 32_768];
+        let mut len = wide.len() as u32;
+        if QueryFullProcessImageNameW(handle, PROCESS_NAME_WIN32, windows::core::PWSTR(wide.as_mut_ptr()), &mut len).is_err() {
+            return ProcessState::Unknown;
+        }
+        let ticks = (u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime);
+        // FILETIME counts 100 ns from 1601; the Unix epoch is 11 644 473 600 s later.
+        let Some(unix) = ticks.checked_sub(116_444_736_000_000_000) else { return ProcessState::Unknown };
+        let started = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(unix.saturating_mul(100));
+        ProcessState::Running { started, image: String::from_utf16_lossy(&wide[..len as usize]) }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -98,5 +155,18 @@ mod tests {
         assert_eq!(root_in(&procs, "player"), Some(100));
         assert_eq!(root_in(&procs, " PLAYER.exe "), Some(100));
         assert_eq!(root_in(&procs, "missing.exe"), None);
+    }
+
+    #[test]
+    fn this_process_runs_and_a_pid_nobody_holds_is_gone() {
+        match state(std::process::id()) {
+            ProcessState::Running { started, image } => {
+                assert!(started <= std::time::SystemTime::now() && started > std::time::UNIX_EPOCH);
+                assert!(image.to_ascii_lowercase().ends_with(".exe"), "{image}");
+            }
+            other => panic!("this test process: {other:?}"),
+        }
+        // Pids are multiples of 4 on Windows: an odd one is never a process.
+        assert_eq!(state(4_000_000_001), ProcessState::Gone);
     }
 }

@@ -70,6 +70,12 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Args {
 mod args_tests {
     use super::{parse_args_from, Args};
 
+    #[test]
+    fn the_slot_held_exit_code_is_its_own() {
+        // R7-overlay-3: abort() exits 3; the controller must not read a crash as "slot held".
+        assert_eq!(crate::EXIT_ALREADY_RUNNING, 86);
+    }
+
     fn parse(args: &[&str]) -> Args {
         parse_args_from(args.iter().map(|a| a.to_string()))
     }
