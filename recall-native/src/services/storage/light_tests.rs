@@ -71,7 +71,14 @@ fn a_light_copy_of_a_real_clip_is_found_by_its_clip() {
             assert!(size > 100 && size < bytes.max(5_000_000), "{size} bytes");
         }
         Err(error) if error.contains("nvenc") || error.contains("NVENC") || error.contains("cuda") => eprintln!("no NVENC here ({error}); skipped"),
+        // No NVIDIA driver at all (a CI runner): hevc_nvenc fails as "Error opening output files".
+        Err(error) if !nvidia_driver() => eprintln!("HW-SKIP light copy: no NVIDIA driver (nvcuda.dll) ({error}); counted, not a pass"),
         Err(error) => panic!("light copy failed: {error}"),
     }
     let _ = (std::fs::remove_dir_all(&root), std::fs::remove_dir_all(&clips));
+}
+
+/// The NVIDIA driver's CUDA library is installed (System32\nvcuda.dll).
+fn nvidia_driver() -> bool {
+    std::env::var_os("SystemRoot").is_some_and(|root| std::path::Path::new(&root).join("System32").join("nvcuda.dll").is_file())
 }
