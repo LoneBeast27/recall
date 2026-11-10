@@ -18,4 +18,11 @@ const GPUI_MANIFEST: &str = r#"  <asmv3:application>
 
 fn main() {
     embed_version_resource("Recall", "recall-native.exe", Some("assets/recall.ico"), GPUI_MANIFEST);
+    // A release build (RECALL_VERSION set, as release.ps1 and release.yml do) carries no
+    // build-machine paths: the dev FFmpeg fallback above the crate is left out of it.
+    println!("cargo::rustc-check-cfg=cfg(recall_release)");
+    println!("cargo:rerun-if-env-changed=RECALL_VERSION");
+    if std::env::var_os("RECALL_VERSION").is_some_and(|v| !v.is_empty()) {
+        println!("cargo:rustc-cfg=recall_release");
+    }
 }
