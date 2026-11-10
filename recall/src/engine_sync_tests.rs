@@ -77,7 +77,16 @@ fn a_sync_before_the_listing_releases_after_the_staged_lines() {
     assert_eq!(ring.saved_id_for_test(), "{B}");
 }
 
-/// P6/P7: no `sync` ever (an older controller, or the end of stdin first): held for the run.
+/// An older controller (no `RECALL_STDIN_SYNC`) never sends `sync`: the tracks do not start held
+/// (v0.1.0 behaviour), so the game and the mic are not silenced for the whole run. A controller
+/// that promises `sync` gets the hold. Merge-gate review of 38e9d9e, P2.
+#[test]
+fn an_older_controller_without_sync_gets_no_startup_hold() {
+    assert!(!crate::engine_stdin::hold_for_sync_env(false), "no sync promised: no hold");
+    assert!(crate::engine_stdin::hold_for_sync_env(true), "sync promised: held until it comes");
+}
+
+/// P6/P7: a controller that promised `sync`, but stdin ends before it: held for the run.
 #[test]
 fn no_sync_or_an_end_of_stdin_before_it_never_releases() {
     let _restore = restore();
