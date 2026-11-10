@@ -4,7 +4,7 @@ use gpui::{AnyElement, Context, FontWeight, div, prelude::*, px};
 
 use crate::repair;
 use crate::{
-    root::Root,
+    root::{Root, ToastKind},
     theme::{self, c},
     ui::{self, Variant},
     views::pages::card,
@@ -21,10 +21,9 @@ impl Root {
                 .gap(px(12.))
                 .child(ui::dot(theme::WARNING, 8.))
                 .child(div().flex_1().font_weight(FontWeight::MEDIUM).text_color(c(theme::TEXT)).child(notice.title.clone()))
-                .child(ui::button("reinstall-recall", Variant::Primary).child(repair::BUTTON).on_click(cx.listener(|_, _, _, cx| {
-                    if let Some(why) = repair::on_reinstall_click(repair::reinstall_from_notice) {
-                        eprintln!("[recall-native] {why}");
-                    }
+                .child(ui::button("reinstall-recall", Variant::Primary).child(if repair::reinstalling() { repair::RUNNING } else { repair::BUTTON }).on_click(cx.listener(|this, _, _, cx| {
+                    let text = repair::reinstall_from_notice(this.update_resume());
+                    this.show_toast(ToastKind::Info, text, None); // started, or why not
                     cx.notify();
                 })))
                 .into_any_element(),
