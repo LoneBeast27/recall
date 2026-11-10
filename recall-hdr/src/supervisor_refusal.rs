@@ -71,7 +71,7 @@ impl Shared {
     pub(super) fn send_quit(&self, refusal: Sent) -> bool {
         let mut g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
         g.quitting = Some(if self.stop_requested() { at_shutdown(refusal) } else { refusal });
-        g.queue.as_ref().is_some_and(|queue| queue.send_quit(r#"{"cmd":"quit"}"#))
+        g.queue.as_ref().is_some_and(|queue| queue.send_quit(super::stdin::QUIT_LINE))
     }
 
     /// Shutdown, after its stop flag: a retarget's quit window already open ("Switching

@@ -42,6 +42,8 @@ impl Controller {
             status["setup_owner"] = json!(owner);
         }
         status["other_recorder"] = json!(self.supervisor.slot_held() != crate::engine_slot::SlotHeld::Free);
+        // R1 + Rohan 22:00 UTC: an engine file older than the app asks for a Reinstall button.
+        status["repair"] = crate::record_inputs_held::repair_json(self.supervisor.engine_below_floor());
         status
     }
 

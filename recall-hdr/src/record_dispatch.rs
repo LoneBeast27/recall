@@ -111,6 +111,17 @@ pub fn hotkey_effects(sent: Sent) -> Vec<Effect> {
 
 /// Mic mute (to a running engine): not queued shows the refused pop-up + beep (the mute
 /// stays the controller's intent and reaches the next engine).
+/// The engine's `set_mic_mute` line. `press`: the user's Alt+M or toggle (`set_mic`) only; a
+/// resync (a new engine's re-send) is no press, so the engine never counts it as one (an input
+/// held on an unsure sibling is released only by a press: gate review P2-b).
+pub fn mic_line(muted: bool, press: bool) -> String {
+    if press {
+        serde_json::json!({"cmd": "set_mic_mute", "muted": muted, "press": true}).to_string()
+    } else {
+        serde_json::json!({"cmd": "set_mic_mute", "muted": muted}).to_string()
+    }
+}
+
 pub fn mic_effects(sent: Sent) -> Vec<Effect> {
     queued_or(sent, Vec::new(), &[])
 }

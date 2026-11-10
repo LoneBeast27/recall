@@ -17,9 +17,8 @@ pub fn releases_page() -> String {
 }
 
 /// Fetch this version's Setup and hand the reinstall to it. On Ok the app quits itself next
-/// (`UpdateUi::take_quit`'s path: flush, then quit). Blocking network: call it off the UI thread.
-/// No button calls it yet (the repair entry point belongs to the Settings work that asked for it).
-#[allow(dead_code)]
+/// (the update's path: flush, then quit). Blocking network: call it off the UI thread. The
+/// recorder's old-engine notice calls it ([`reinstall_from_notice`]).
 pub fn request_reinstall(net: &dyn Transport, install_dir: &Path, resume: &Resume) -> Result<(), String> {
     request_reinstall_with(net, update::current(), resume, |release| update::hand_off(net, release, install_dir, resume))
 }
@@ -54,6 +53,64 @@ fn this_release(net: &dyn Transport, current: &str) -> Result<Release, String> {
         return Err("The release tag could not be verified on main.".into());
     }
     Ok(release)
+}
+
+pub use crate::services::daemon::RepairNotice;
+
+/// The action that shows the Reinstall button.
+pub const REINSTALL: &str = "reinstall";
+/// The button's label.
+pub const BUTTON: &str = "Reinstall";
+/// What the button says while Setup is fetched.
+pub const RUNNING: &str = "Reinstalling: fetching this version's Setup…";
+
+/// The notice to show with a Reinstall button, if the recorder asks for one.
+pub fn reinstall_notice(repair: Option<&RepairNotice>) -> Option<&RepairNotice> {
+    repair.filter(|r| r.action == REINSTALL)
+}
+
+/// A reinstall is being fetched / handed to Setup (one at a time).
+static BUSY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Its outcome, for the app's poll ([`take_outcome`]): Ok = Setup has it (the app quits).
+static OUTCOME: std::sync::Mutex<Option<Result<(), String>>> = std::sync::Mutex::new(None);
+
+/// The Reinstall button of the recorder's old-engine notice (R1; Rohan 2026-11-10 22:00 UTC,
+/// verbatim: "for half finished installs, ideal if we were to make user patch it with clicking a
+/// reinstall button,"): [`request_reinstall`] with what the update's install uses (the WinHTTP
+/// transport, `update::install_dir`, the app's resume state), off the UI thread. The text the
+/// click shows at once. Never runs Setup in a test or an offscreen build.
+pub fn reinstall_from_notice(resume: Resume) -> String {
+    if crate::TESTING || crate::offscreen::enabled() {
+        return "Reinstall is off in this build.".to_owned();
+    }
+    start_reinstall(move || {
+        let dir = update::install_dir()?;
+        request_reinstall(&update::net::WinHttp, &dir, &resume)
+    })
+}
+
+/// Run `job` (the reinstall) on its own thread unless one runs; the text to show now.
+pub(crate) fn start_reinstall(job: impl FnOnce() -> Result<(), String> + Send + 'static) -> String {
+    use std::sync::atomic::Ordering;
+    if BUSY.swap(true, Ordering::SeqCst) {
+        return RUNNING.to_owned();
+    }
+    std::thread::spawn(move || {
+        let outcome = job();
+        *OUTCOME.lock().unwrap_or_else(|p| p.into_inner()) = Some(outcome);
+        BUSY.store(false, Ordering::SeqCst);
+    });
+    RUNNING.to_owned()
+}
+
+/// A reinstall is running (the button shows it).
+pub fn reinstalling() -> bool {
+    BUSY.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+/// The finished reinstall's outcome, once (`root_poll`: Ok quits the app, Err is shown).
+pub fn take_outcome() -> Option<Result<(), String>> {
+    OUTCOME.lock().unwrap_or_else(|p| p.into_inner()).take()
 }
 
 #[cfg(test)]
@@ -109,5 +166,52 @@ mod tests {
         let other = FakeNet::default().reply(TAG, 200, None, release_json().replace("v1.10.0", "v1.11.0").as_bytes());
         assert!(request_reinstall_with(&other, Some("1.10.0"), &idle(), |_| panic!("no hand-off")).unwrap_err().contains("Releases page"));
         assert!(request_reinstall_with(&none, None, &idle(), |_| panic!("no hand-off")).unwrap_err().contains(RELEASES_URL), "a dev build");
+    }
+
+    /// The button's click runs the reinstall off the UI thread (a fake job here: no Setup runs
+    /// in a test), one at a time, and its outcome reaches the app's poll; the real click goes
+    /// through `request_reinstall` with the update's transport, install dir and resume state.
+    #[test]
+    fn the_click_goes_through_request_reinstall_and_shows_its_outcome() {
+        let (go, wait) = std::sync::mpsc::channel::<()>();
+        assert_eq!(start_reinstall(move || {
+            let _ = wait.recv();
+            Err("Download Setup from the Releases page: x".to_owned())
+        }), RUNNING);
+        assert!(reinstalling());
+        assert_eq!(start_reinstall(|| panic!("a second one never runs")), RUNNING, "one at a time");
+        go.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let outcome = loop {
+            if let Some(o) = take_outcome() {
+                break o;
+            }
+            assert!(std::time::Instant::now() < deadline, "no outcome");
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        };
+        assert_eq!(outcome, Err("Download Setup from the Releases page: x".to_owned()), "an error the user can read");
+        let me = include_str!("repair.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(me.contains("let dir = update::install_dir()?; request_reinstall(&update::net::WinHttp, &dir, &resume)"), "the real transport and install dir");
+        assert!(me.contains("if crate::TESTING || crate::offscreen::enabled() {"), "never Setup from a test build");
+        let banner = include_str!("../views/repair_banner.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(banner.contains("ui::button(\"reinstall-recall\", Variant::Primary)"), "the button is on the notice");
+        assert!(banner.contains("repair::reinstall_from_notice(this.update_resume())"), "its click calls it with the resume state");
+        let poll = include_str!("../root_poll.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(poll.contains("crate::repair::take_outcome()"), "the app shows the outcome");
+        let page = include_str!("../views/audio_page.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(page.contains("body.extend(self.repair_banner(cx));"), "the Audio page shows it");
+    }
+
+    /// The recorder's notice carries the action; only "reinstall" shows the button.
+    #[test]
+    fn the_session_repair_notice_shows_the_button() {
+        let session: crate::services::daemon::SessionStatus = serde_json::from_value(serde_json::json!({
+            "repair": {"title": "Reinstall Recall: this recorder is older than the app; microphone and picked audio devices are off", "action": "reinstall"}
+        }))
+        .unwrap();
+        let notice = reinstall_notice(session.repair.as_ref()).expect("a button");
+        assert!(notice.title.starts_with("Reinstall Recall"));
+        assert_eq!(reinstall_notice(Some(&RepairNotice { title: "x".into(), action: "other".into() })), None);
+        assert_eq!(reinstall_notice(None), None);
     }
 }

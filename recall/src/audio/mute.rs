@@ -1,11 +1,12 @@
-//! The mic-mute hotkey's state (Alt+M) for every input track, and how many times it changed.
-//! A change is a press: `hold` lets an input opened on an unsure sibling unmute only on a press
-//! after it opened (A4 ruling, merge gate p9).
+//! The mic-mute hotkey's state (Alt+M) for every input track, and how many times the user
+//! changed it. Only the user's change is a press (gate review P2-b): `hold` lets an input opened
+//! on an unsure sibling unmute only on a press after it opened (A4 ruling, merge gate p9), and a
+//! resync (the spawn mute, a new engine's re-send) must never pass for one.
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 static MIC_MUTED: AtomicBool = AtomicBool::new(false);
-/// Changes of `MIC_MUTED` so far (a set to the value it already has is not one).
+/// The user's changes of `MIC_MUTED` so far (a set to the value it already has is not one).
 static PRESSES: AtomicU64 = AtomicU64::new(0);
 
 /// The controller's mute at engine spawn (`1` = muted).
@@ -18,9 +19,16 @@ pub(crate) fn initial_mute(get: impl Fn(&str) -> Option<String>) -> bool {
     get(MIC_MUTED_ENV).is_some_and(|v| v.trim() == "1")
 }
 
-/// Set whether newly captured input samples enter the replay buffer as silence.
+/// Set whether newly captured input samples enter the replay buffer as silence: a resync,
+/// never a press.
 pub fn set_mic_muted(muted: bool) {
-    if MIC_MUTED.swap(muted, Ordering::SeqCst) != muted {
+    set_mic_muted_by(muted, false);
+}
+
+/// [`set_mic_muted`]; `press`: the user's Alt+M or toggle (`set_mic_mute` with `press`), which
+/// counts as a press when it changes the state.
+pub fn set_mic_muted_by(muted: bool, press: bool) {
+    if MIC_MUTED.swap(muted, Ordering::SeqCst) != muted && press {
         PRESSES.fetch_add(1, Ordering::SeqCst);
     }
 }

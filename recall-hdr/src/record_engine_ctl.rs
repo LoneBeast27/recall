@@ -129,7 +129,7 @@ impl Controller {
     pub(crate) fn reapply_engine_intents(&mut self) {
         self.reapply_lock();
         // Not a user action: a line the new engine does not take is logged.
-        let mute = serde_json::json!({"cmd": "set_mic_mute", "muted": self.mic_muted}).to_string();
+        let mute = crate::record_dispatch::mic_line(self.mic_muted, false);
         if !crate::record_dispatch::automatic_effects(self.supervisor.send_engine_line(&mute)).is_empty() && self.mic_muted {
             log!("record: the new engine did not take the mic mute ({})", crate::record_dispatch::NOT_RESPONDING);
         }

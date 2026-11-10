@@ -132,6 +132,17 @@ impl Root {
             cx.quit();
             return;
         }
+        // The old-engine notice's Reinstall (`repair::reinstall_from_notice`): Setup has it, so
+        // this app closes as for an update; else the user reads why.
+        match crate::repair::take_outcome() {
+            Some(Ok(())) => {
+                self.flush_on_close();
+                cx.quit();
+                return;
+            }
+            Some(Err(why)) => self.show_toast(ToastKind::Bad, format!("Reinstall didn't start: {why}"), None),
+            None => {}
+        }
         if let Some((good, notice)) = self.update.notice.take() {
             self.show_toast(if good { ToastKind::Good } else { ToastKind::Bad }, notice, None);
         }

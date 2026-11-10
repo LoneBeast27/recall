@@ -121,6 +121,59 @@ pub fn shown_level(db: f32, muted_now: bool, mutes: bool) -> f32 {
     if muted_now && mutes { -90.0 } else { db }
 }
 
+/// The recorder holds this input silent whatever Alt+M says: it opens an unsure same-named
+/// sibling (A4 ruling, `recall` `audio/hold.rs`): a microphone until a press unmutes it and
+/// its id is saved, a line-in until the user picks the device (it never adopts, P1-b).
+/// `engine`: what the recorder says for this source (`status.audio[].held`, merge-gate P2), which
+/// wins over the guess: a release the device lists have not caught up with, or a hold they
+/// cannot see. None (an older recorder, or no status yet): the guess from the device lists.
+pub fn held(source: &Source, lists: Option<&DeviceLists>, engine: Option<bool>) -> bool {
+    engine.unwrap_or_else(|| source.kind.uses_inputs() && matches!(crate::services::audio_pick::source_found(source, lists), Found::Unsure { .. }))
+}
+
+/// What the recorder says for one source (`status.audio[]`): both ids trimmed the same way, as
+/// the engine trims the config's (controller review P3-1).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct EngineMeter {
+    pub held: Option<bool>,
+    pub mutes: Option<bool>,
+    pub retired: bool,
+}
+
+pub fn engine_meter(audio: &[crate::services::daemon::EngineAudio], id: &str) -> EngineMeter {
+    audio.iter().find(|a| a.id.trim() == id.trim()).map_or_else(EngineMeter::default, |a| EngineMeter { held: a.held, mutes: a.mutes, retired: a.retired == Some(true) })
+}
+
+/// The meter's "muted now" and "Alt+M mutes it" (design-audio-mute P20): the recorder's own
+/// `mutes` when it says, so the meter never shows "Muted" for a track it records live; the
+/// page's guess (`session_muted`, `mutes`) only from a recorder that does not say.
+pub fn muting(engine: &EngineMeter, session_muted: bool, mutes: bool) -> (bool, bool) {
+    engine.mutes.map_or((session_muted, mutes), |m| (m, true))
+}
+
+/// A retired source's strip (P11, P16): it records nothing until the recording ends.
+pub const RETIRED: &str = "Off: applies after the recording";
+/// The meter's text once the recorder's state is known: a retired source says when it applies.
+pub fn meter_text(text: String, engine: &EngineMeter) -> String {
+    if engine.retired { RETIRED.to_owned() } else { text }
+}
+
+/// The meter's bar, hold line and number for a strip (levels after the gain): flat while Alt+M
+/// mutes the source, or while the recorder holds it ([`held`], gate review P2-e), as that is
+/// what the clip records. "—" when the meter has no live reading.
+pub fn meter_reading((rms, hold, live): (f32, f32, bool), muted_now: bool, mutes: bool, held: bool) -> (f32, f32, String) {
+    let flat = held || (muted_now && mutes);
+    let (rms, hold) = if held { (-90.0, -90.0) } else { (shown_level(rms, muted_now, mutes), shown_level(hold, muted_now, mutes)) };
+    let text = match () {
+        _ if !live => "—".to_owned(),
+        _ if held => "Held".to_owned(),
+        _ if flat => "Muted".to_owned(),
+        _ if rms <= -89.0 => "-∞".to_owned(),
+        _ => format!("{rms:.0} dB"),
+    };
+    (rms, hold, text)
+}
+
 #[cfg(test)]
 #[path = "audio_mute_tests.rs"]
 mod tests;

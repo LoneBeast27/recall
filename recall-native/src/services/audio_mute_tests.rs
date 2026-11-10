@@ -166,3 +166,70 @@ fn an_unsure_line_in_says_to_pick_the_device_not_to_press_alt_m() {
     let mic = Source { mic_mute: Some(true), ..saved.clone() };
     assert!(strip_note(&mic, Some(&dongles)).is_some_and(|n| n.ends_with("press Alt+M to unmute.")), "a microphone still follows Alt+M");
 }
+
+/// Gate review P2-e: an input on an unsure same-named sibling records silence until a press after
+/// it opened unmutes it; the meter shows that (flat, "Held"), not the live level, with Alt+M off.
+#[test]
+fn a_held_input_meters_flat_and_says_held() {
+    // Saved "Mic (Box)" with id A; present: "Mic (Box)" (id B) and "2- Mic (Box)" (id C).
+    let twins = lists(&[("Mic (Box)", "{B}", Some(4)), ("2- Mic (Box)", "{C}", Some(4))]);
+    let source = line_in("Mic (Box)", "{A}");
+    assert!(held(&source, Some(&twins), None), "an unsure sibling is held");
+    assert_eq!(meter_reading((-12.0, -6.0, true), false, true, held(&source, Some(&twins), None)), (-90.0, -90.0, "Held".to_owned()), "Alt+M off: still flat");
+    let own = lists(&[("Mic (Box)", "{A}", Some(4))]);
+    assert!(!held(&source, Some(&own), None), "its own endpoint: not held");
+    assert_eq!(meter_reading((-12.0, -6.0, true), false, false, false), (-12.0, -6.0, "-12 dB".to_owned()));
+    assert_eq!(meter_reading((-12.0, -6.0, true), true, true, false), (-90.0, -90.0, "Muted".to_owned()));
+    assert_eq!(meter_reading((-12.0, -6.0, false), false, false, true).2, "—", "no reading: a dash");
+}
+
+/// Merge-gate P2: the recorder says what it does. Its `held` wins over the guess from the
+/// device lists (a release they have not caught up with, an adopted id it could not use); an
+/// older recorder that sends no `held` leaves the guess.
+#[test]
+fn the_recorders_held_wins_over_the_device_list_guess() {
+    let twins = lists(&[("Mic (Box)", "{B}", Some(4)), ("2- Mic (Box)", "{C}", Some(4))]);
+    let source = line_in("Mic (Box)", "{A}");
+    assert!(!held(&source, Some(&twins), Some(false)), "the recorder records it live: not Held");
+    let own = lists(&[("Mic (Box)", "{A}", Some(4))]);
+    assert!(held(&source, Some(&own), Some(true)), "the recorder holds it (startup hold): Held");
+    assert!(held(&source, Some(&twins), None), "no word from the recorder: the guess");
+    let status: crate::services::daemon::EngineStatus = serde_json::from_value(serde_json::json!({"audio": [{"id": "line-in", "opened": "x", "live": true, "held": false}]})).unwrap();
+    assert_eq!(status.audio[0].held, Some(false));
+    let old: crate::services::daemon::EngineStatus = serde_json::from_value(serde_json::json!({"audio": [{"id": "line-in", "live": true}]})).unwrap();
+    assert_eq!(old.audio[0].held, None, "an older recorder: no field");
+    let view = include_str!("../views/audio_strip.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(view.contains("held(source, lists, engine.held) || engine.retired"), "the strip passes the recorder's word");
+    assert!(view.contains("crate::services::audio_mute::engine_meter(&e.audio, &source.id)"), "looked up by the trimmed id");
+    // Controller review P3-1: the engine trims the config's id; the page matches it the same way.
+    let audio = vec![crate::services::daemon::EngineAudio { id: "line-in".into(), held: Some(false), ..Default::default() }];
+    assert_eq!(engine_meter(&audio, " line-in ").held, Some(false), "a config id with spaces still finds its track");
+    assert_eq!(engine_meter(&audio, "other"), EngineMeter::default());
+}
+
+/// design-audio-mute P20 (N2): the recorder's `mutes` wins over the page's guess, so the meter
+/// never says "Muted" for a line-in the recorder records live; and the reverse.
+#[test]
+fn the_engines_mutes_wins_over_the_guess() {
+    let live = EngineMeter { held: Some(false), mutes: Some(false), retired: false };
+    assert_eq!(muting(&live, true, true), (false, true), "Alt+M on, the page guesses muted: the recorder says live");
+    let (_, _, text) = meter_reading((-20.0, -20.0, true), muting(&live, true, true).0, muting(&live, true, true).1, false);
+    assert_ne!(text, "Muted", "never Muted while the recorder records it live");
+    let muted = EngineMeter { mutes: Some(true), ..live };
+    assert_eq!(meter_reading((-20.0, -20.0, true), muting(&muted, false, false).0, muting(&muted, false, false).1, false).2, "Muted");
+    assert_eq!(muting(&EngineMeter::default(), true, false), (true, false), "an older recorder: the guess");
+    let status: crate::services::daemon::EngineStatus = serde_json::from_value(serde_json::json!({"audio": [{"id": "line-in", "mutes": false, "retired": true}]})).unwrap();
+    assert_eq!((status.audio[0].mutes, status.audio[0].retired), (Some(false), Some(true)));
+    let view = include_str!("../views/audio_strip.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(view.contains("let (muted_now, mutes) = crate::services::audio_mute::muting(&engine, session_muted, mutes);"), "the strip uses it");
+}
+
+/// P11 / P16: a retired source says when it applies (the cut-down drops "Applying…": no seq).
+#[test]
+fn a_retired_source_says_when_it_applies() {
+    let retired = EngineMeter { retired: true, ..EngineMeter::default() };
+    assert_eq!(meter_text("-20 dB".into(), &retired), "Off: applies after the recording");
+    assert_eq!(meter_text("-20 dB".into(), &EngineMeter::default()), "-20 dB");
+    let view = include_str!("../views/audio_strip.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(view.contains("crate::services::audio_mute::meter_text(level_text, &engine);"), "the strip shows it");
+}

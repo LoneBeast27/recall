@@ -260,10 +260,14 @@ impl<F: SinkFactory> Writer<F> {
                 }
                 events
             }
-            Data::Audio { track, samples, at } => match self.recorder.track_index(track) {
-                Some(i) => self.recorder.audio(i, &samples, at),
-                None => Vec::new(),
-            },
+            Data::Audio { track, samples, at } => {
+                let events = match self.recorder.track_index(track) {
+                    Some(i) => self.recorder.audio(i, &samples, at),
+                    None => Vec::new(),
+                };
+                tap::recycle(samples); // the capture thread reuses it
+                events
+            }
             Data::EncoderReopened { generation, at } => self.encoder_seen(generation, Some(at + self.skew)),
         };
         self.events(events);

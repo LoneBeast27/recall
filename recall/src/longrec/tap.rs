@@ -1,7 +1,7 @@
 //! The three hooks the live pipeline calls for the long recording. Each is one
 //! relaxed atomic load when no recording is running; while one is, a packet
-//! costs an `Arc` clone + `try_send`, and an audio chunk one `Vec` copy +
-//! `try_send`. Nothing blocks: a full queue drops the item (video then resyncs
+//! costs an `Arc` clone + `try_send`, and an audio chunk a copy into a recycled
+//! buffer ([`recycle`]: no allocation once warm, gate review P2-c) + `try_send`. Nothing blocks: a full queue drops the item (video then resyncs
 //! at the next keyframe; audio is re-aligned by wall clock).
 //!
 //! Call sites (the only lines outside this module):
@@ -184,9 +184,37 @@ pub fn tap_audio(track: &'static str, samples: &[f32], silence: bool) {
         return;
     }
     let Some(tx) = SENDER.get() else { return };
-    let samples = tap_part(samples);
-    let samples = if silence { vec![0.0; samples.len()] } else { samples.to_vec() };
-    let _ = tx.try_send(Data::Audio { track, samples, at: Instant::now() });
+    let samples = fill(tap_part(samples), silence);
+    if let Err(e) = tx.try_send(Data::Audio { track, samples, at: Instant::now() }) {
+        let (std::sync::mpsc::TrySendError::Full(item) | std::sync::mpsc::TrySendError::Disconnected(item)) = e;
+        if let Data::Audio { samples, .. } = item {
+            recycle(samples);
+        }
+    }
+}
+
+/// Buffers the writer handed back, for the next chunks (at most [`POOL_MAX`] kept).
+static POOL: Mutex<Vec<Vec<f32>>> = Mutex::new(Vec::new());
+const POOL_MAX: usize = 64;
+
+/// A chunk's copy in a recycled buffer: `samples`, or as many zeros when `silence`.
+pub(crate) fn fill(samples: &[f32], silence: bool) -> Vec<f32> {
+    let mut buf = POOL.lock().unwrap_or_else(|p| p.into_inner()).pop().unwrap_or_default();
+    buf.clear();
+    if silence {
+        buf.resize(samples.len(), 0.0);
+    } else {
+        buf.extend_from_slice(samples);
+    }
+    buf
+}
+
+/// A chunk's buffer back to the pool once written (the writer, or a full queue).
+pub(crate) fn recycle(buf: Vec<f32>) {
+    let mut pool = POOL.lock().unwrap_or_else(|p| p.into_inner());
+    if pool.len() < POOL_MAX {
+        pool.push(buf);
+    }
 }
 
 pub(super) fn install_sender(tx: SyncSender<Data>) {

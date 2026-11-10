@@ -33,8 +33,16 @@ impl Read for Pipe {
     }
 }
 
-/// Puts the global mute back as it was.
-struct Restore(bool);
+/// Tests that move the engine's global mute run one at a time.
+static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Puts the global mute back as it was, then lets the next test in.
+pub(super) struct Restore(bool, #[allow(dead_code)] std::sync::MutexGuard<'static, ()>);
+
+pub(super) fn restore() -> Restore {
+    let lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    Restore(audio::mic_muted(), lock)
+}
 
 impl Drop for Restore {
     fn drop(&mut self) {
@@ -42,7 +50,7 @@ impl Drop for Restore {
     }
 }
 
-fn spawn(quit: Arc<AtomicBool>) -> (Sender<Vec<u8>>, Receiver<Command>) {
+pub(super) fn spawn(quit: Arc<AtomicBool>) -> (Sender<Vec<u8>>, Receiver<Command>) {
     let (line_tx, line_rx) = channel();
     let (tx, rx) = channel();
     std::thread::spawn(move || {
@@ -57,7 +65,7 @@ fn spawn(quit: Arc<AtomicBool>) -> (Sender<Vec<u8>>, Receiver<Command>) {
 
 #[test]
 fn an_alt_m_sent_within_50_ms_of_the_spawn_mutes_the_first_samples() {
-    let _restore = Restore(audio::mic_muted());
+    let _restore = restore();
     audio::set_mic_muted(false);
     let quit = Arc::new(AtomicBool::new(false));
     let spawned = Instant::now();
@@ -72,7 +80,7 @@ fn an_alt_m_sent_within_50_ms_of_the_spawn_mutes_the_first_samples() {
     let held = ring.snapshot(0.01);
     assert!(held.iter().all(|s| *s == 0.0), "the ring holds no live sample of a muted mic");
     // The later handler gets the state the toggle set (it reports it once `hello` is out).
-    assert!(matches!(commands.recv_timeout(Duration::from_secs(2)), Ok(Command::SetMicMute { muted: true })));
+    assert!(matches!(commands.recv_timeout(Duration::from_secs(2)), Ok(Command::SetMicMute { muted: true, .. })));
     // Post-hoc item 5: nothing but an explicit mute command moves the mute. A source's own
     // mic_mute flag, a device change, a mode or a save line leave the mic muted.
     for line in [
@@ -91,6 +99,127 @@ fn an_alt_m_sent_within_50_ms_of_the_spawn_mutes_the_first_samples() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert!(quit.load(std::sync::atomic::Ordering::Relaxed), "the end of stdin still quits");
+}
+
+/// Gate review P2-b: a resync (`set_mic_mute` with no `press`) is not a press, so it never
+/// releases an input held on an unsure sibling; the user's change (`press`) is one.
+#[test]
+fn a_resync_is_not_a_press() {
+    let _restore = restore();
+    audio::set_mic_muted(false);
+    let presses = MuteNow::read().presses;
+    let lines = "{\"cmd\":\"set_mic_mute\",\"muted\":true}\n{\"cmd\":\"set_mic_mute\",\"muted\":false}\n";
+    read_early(std::io::Cursor::new(lines), |_| {});
+    assert_eq!(MuteNow::read().presses, presses, "two resyncs that changed the state: no press");
+    read_early(std::io::Cursor::new("{\"cmd\":\"set_mic_mute\",\"muted\":true,\"press\":true}\n"), |_| {});
+    assert_eq!(MuteNow::read(), MuteNow { muted: true, presses: presses + 1 }, "the user's change is a press");
+}
+
+/// Review R2-audio-r9-2: a line-in set to "Alt+M mutes it", and a twin re-picked, while the
+/// engine starts: the `set_source` is read before the tracks start and in force at their first
+/// packet, not only once `serve` runs after them.
+#[test]
+fn a_set_source_queued_before_audio_start_is_in_force_at_the_first_packet() {
+    let _restore = restore();
+    read_early(std::io::Cursor::new("{\"cmd\":\"set_source\",\"id\":\"line\",\"mic_mute\":true,\"device_id\":\"{B}\"}\n"), |_| {});
+    let env = r#"[{"id":"line","kind":"input","name":"Line-in","device":"Line (Box)","device_id":"{A}","mic_mute":false}]"#;
+    let list = audio::sources::resolve_for_start(|key| (key == "RECALL_AUDIO_SOURCES").then(|| env.to_owned())).unwrap();
+    assert_eq!(list[0].mic_mute, Some(true), "the line-in starts muted by Alt+M");
+    assert_eq!(list[0].device_id, "{B}", "the twin the user picked");
+}
+
+/// Merge-gate P1-1: an input held at the start stores no live sample, whatever Alt+M or its
+/// flag says, until the hold is released.
+#[test]
+fn a_held_input_stores_silence_until_released() {
+    let _restore = restore();
+    audio::set_mic_muted(false);
+    let line_in = Arc::new(TrackRing::input_for_test("line"));
+    line_in.set_mic_mute(false);
+    line_in.hold_startup();
+    line_in.push_live(&[0.5; 960], MuteNow::read());
+    assert!(line_in.snapshot(0.01).iter().all(|s| *s == 0.0), "no live sample while held");
+    line_in.release_startup_hold();
+    assert!(!line_in.startup_held());
+    line_in.push_live(&[0.5; 960], MuteNow::read());
+    assert!(line_in.snapshot(0.01).iter().any(|s| *s != 0.0), "released: it records");
+}
+
+/// Merge-gate P2: the engine says per track whether it stores silence whatever Alt+M says, so
+/// the Audio page meter shows "Held" from the recorder, not from its own guess.
+#[test]
+fn the_status_says_which_tracks_are_held() {
+    let ring = TrackRing::input_for_test("mic");
+    assert!(!ring.held_now(), "a free input");
+    ring.hold_startup();
+    assert!(ring.held_now(), "the startup hold");
+    ring.release_startup_hold();
+    assert!(!ring.held_now());
+    let line = crate::protocol::AudioOpened { id: "mic".into(), name: "Mic".into(), opened: "x".into(), live: true, adopt_id: None, held: true, mutes: false, retired: false };
+    assert_eq!(serde_json::to_value(line).unwrap()["held"], true, "status.audio[].held");
+    let tick = include_str!("app_tick.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(tick.contains("held: o.held"), "the status carries it");
+}
+
+/// Merge-gate F1: the release of the startup hold lands between the capture thread's Alt+M
+/// read and its hold read. The hold is read first, so that packet is still silence.
+#[test]
+fn a_release_between_the_mute_read_and_the_hold_read_stores_no_live_sample() {
+    let _restore = restore();
+    audio::set_mic_muted(false);
+    let mic = TrackRing::input_for_test("mic");
+    mic.hold_startup();
+    mic.push_live_read(&[0.5; 960], || {
+        let stale = MuteNow::read(); // unmuted: the queued Alt+M is not applied yet
+        audio::set_mic_muted(true); // the reader applies it
+        mic.release_startup_hold(); // and the gate opens
+        stale
+    });
+    assert!(mic.snapshot(0.01).iter().all(|s| *s == 0.0), "no live sample of the muted mic");
+    let stream = include_str!("audio/stream.rs");
+    assert!(stream.contains("ring.push_live_read(&leveled, super::MuteNow::read);"), "the capture thread reads the hold first");
+}
+
+/// Staging open again when a test that closed it ends, a panic included.
+pub(super) struct Reopen;
+
+impl Drop for Reopen {
+    fn drop(&mut self) {
+        audio::sources::reopen_staging_for_test();
+    }
+}
+
+/// Merge-gate F2: a newer set_source (B: Alt+M mutes the line-in) is read while the start
+/// applies an older staged one (A: it does not). B must end in force, never A.
+#[test]
+fn a_set_source_read_while_staging_closes_is_not_overwritten_by_an_older_one() {
+    let _restore = restore();
+    let _reopen = Reopen;
+    let ring = Arc::new(TrackRing::input_for_test("f2-line"));
+    audio::sources::register_for_test("f2-line", &ring);
+    audio::sources::stage_early("f2-line", Some(false), None); // A, staged before the start
+    let mut newer = None;
+    audio::sources::close_staging_for_test(|id, change| {
+        newer = Some(std::thread::spawn(|| audio::sources::stage_early("f2-line", Some(true), None))); // B
+        std::thread::sleep(Duration::from_millis(100)); // B would go live here if it could
+        audio::sources::set_live(id, change); // A
+    });
+    newer.unwrap().join().unwrap();
+    assert!(ring.mic_mute_flag(), "the newer line wins: Alt+M mutes the line-in");
+}
+
+/// Merge-gate F3: two set_source lines for one line-in in one read (A: Alt+M does not mute
+/// it, B: it does). The reader applies both in order; `serve` must not apply A again after B.
+#[test]
+fn serve_never_reapplies_an_older_flag_or_id() {
+    let _restore = restore();
+    let lines = "{\"cmd\":\"set_source\",\"id\":\"f3-line\",\"mic_mute\":false,\"device_id\":\"{A}\"}\n{\"cmd\":\"set_source\",\"id\":\"f3-line\",\"mic_mute\":true,\"gain_db\":3}\n";
+    let mut forwarded = Vec::new();
+    read_early(std::io::Cursor::new(lines), |cmd| forwarded.push(cmd));
+    for cmd in &forwarded {
+        assert!(matches!(cmd, Command::SetSource { mic_mute: None, device_id: None, .. }), "serve gets no flag or id: {}", matches!(cmd, Command::SetSource { .. }));
+    }
+    assert!(matches!(forwarded[1], Command::SetSource { gain_db: Some(g), .. } if g == 3.0), "the gain still goes to serve");
 }
 
 /// A pipe already holding `lines`, closed after them only when `close` (else it stays open,
@@ -123,6 +252,7 @@ fn wait_for(flag: &AtomicBool, within: Duration) -> Option<Duration> {
 /// before the save was handed on, so the save reaches the encoder.
 #[test]
 fn a_save_read_just_before_a_stop_is_applied_before_quit_even_when_serve_is_starved() {
+    let (_restore, _reopen) = (restore(), Reopen); // the end holds every device track (`reader_end`)
     let (early, shared, _pipe) = early_from("{\"cmd\":\"save_clip\"}\n{\"cmd\":\"stop_capture\"}\n", false);
     let quit = shared.clone();
     let server = std::thread::spawn(move || {
@@ -143,6 +273,7 @@ fn a_save_read_just_before_a_stop_is_applied_before_quit_even_when_serve_is_star
 /// R2-rel-1, plain quit: the commands before `quit` are applied, then `quit` is set at once.
 #[test]
 fn a_plain_quit_is_set_by_serve_after_the_commands_before_it() {
+    let (_restore, _reopen) = (restore(), Reopen);
     let (early, shared, _pipe) = early_from("{\"cmd\":\"bookmark\"}\n{\"cmd\":\"quit\"}\n", false);
     let seen = Arc::new(AtomicBool::new(false));
     let mark = seen.clone();
@@ -155,6 +286,7 @@ fn a_plain_quit_is_set_by_serve_after_the_commands_before_it() {
 /// quit at most SERVE_TAKES_END; an end of stdin still marks the engine orphaned.
 #[test]
 fn a_quit_is_never_held_past_the_bound_when_serve_does_not_run() {
+    let (_restore, _reopen) = (restore(), Reopen);
     let (_early, shared, _pipe) = early_from("{\"cmd\":\"quit\"}\n", false);
     let took = wait_for(&shared.quit, Duration::from_secs(5)).expect("the fallback quits");
     assert!(took >= super::SERVE_TAKES_END - Duration::from_millis(100) && took < super::SERVE_TAKES_END + Duration::from_secs(1), "{took:?}");

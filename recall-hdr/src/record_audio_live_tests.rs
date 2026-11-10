@@ -3,7 +3,6 @@
 //! ruling's adoption patch. Made-up device names and ids.
 
 use super::*;
-use crate::record_audio_sources::live_updates;
 use crate::record_config::RecordingCfg;
 use crate::record_engine::engine_settings_changed;
 
@@ -29,8 +28,8 @@ fn unmuting_or_repicking_the_same_named_device_restarts_no_engine() {
     // "Pick this device again": the same name with its id.
     let repicked = rec(vec![AudioSource { device_id: "{id-one}".into(), ..legacy() }]);
     assert!(!engine_settings_changed(&old, &repicked), "re-picking the same name keeps the buffer");
-    let lines = live_updates(&old.audio_sources, &unmuted.audio_sources);
-    let sent: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+    let lines = crate::audio_intent::change_lines(&old.audio_sources, &unmuted.audio_sources);
+    let sent = lines[0].clone();
     assert_eq!(sent, serde_json::json!({"cmd": "set_source", "id": "in-1", "mic_mute": false, "device_id": "{id-one}"}));
     // Another device name is another track: that still restarts.
     let moved = rec(vec![AudioSource { device: "Mic (Desk)".into(), ..legacy() }]);

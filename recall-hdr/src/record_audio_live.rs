@@ -17,7 +17,7 @@ use crate::supervisor::Supervisor;
 /// The `hello` capability for the fields in [`needs_fields`].
 pub const LIVE_SOURCE_FIELDS: &str = "live_source_fields";
 
-/// `line` (a `set_source` from `live_updates`) carries a field an older engine ignores: the
+/// `line` (a `set_source` from `audio_intent::change_lines`) carries a field an older engine ignores: the
 /// mic-mute flag, the saved endpoint id, or a gain above 0 dB (it would not limit it).
 pub fn needs_fields(line: &str) -> bool {
     let Ok(cmd) = serde_json::from_str::<Value>(line) else { return true };
