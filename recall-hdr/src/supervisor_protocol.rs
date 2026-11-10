@@ -40,6 +40,7 @@ fn protocol_line(shared: &Arc<Shared>, line: &str, last: &mut Option<StatusDiges
             log!("supervisor: engine hello -- version {version}, {monitors} monitor(s)");
             shared.cache.lock().unwrap_or_else(|p| p.into_inner()).hello = Some(line.to_string());
             shared.hello_count.fetch_add(1, Ordering::SeqCst);
+            shared.on_hello_floor(&val); // P14: no sync_hold -> restarted with no device
         }
         Some("status") => {
             {
@@ -70,6 +71,8 @@ fn protocol_line(shared: &Arc<Shared>, line: &str, last: &mut Option<StatusDiges
                 *last = Some(digest);
             }
         }
+        // A released engine's drain heartbeat (design P11): it keeps the engine (P10).
+        Some("save_progress") => shared.note_beat(),
         Some("mic_muted") => {
             if let Some(m) = val.get("muted").and_then(|v| v.as_bool()) {
                 shared.cache.lock().unwrap_or_else(|p| p.into_inner()).view.mic_muted = Some(m);
@@ -83,7 +86,9 @@ fn protocol_line(shared: &Arc<Shared>, line: &str, last: &mut Option<StatusDiges
                 Some(true) => format!(" (staged at {}, moving in the background)", field(&val, "staged_path")),
                 _ => String::new(),
             };
-            log!("supervisor: clip SAVED ({secs:.1}s, {ms}ms) -> {path}{staged}");
+            // Cut short (a stall, the 30 min budget, a quit): kept with what was written.
+            let partial = val.get("partial").and_then(|v| v.as_str()).map(|why| format!(" PARTIAL ({why})")).unwrap_or_default();
+            log!("supervisor: clip SAVED{partial} ({secs:.1}s, {ms}ms) -> {path}{staged}");
             crate::cues::saved();
         }
         Some("save_failed") => {

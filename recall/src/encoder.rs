@@ -31,6 +31,7 @@ mod mover_flush;
 mod mover_keep;
 mod mover_timing;
 mod mux;
+pub(crate) mod part_recover;
 /// The MP4 sample-entry tag Media Foundation plays, for exports that write video too.
 pub(crate) use mux::mp4_video_tag;
 pub(crate) mod reopen;
@@ -41,6 +42,8 @@ mod recover_tests;
 mod headers_tests;
 #[cfg(test)]
 mod decode_tests;
+#[cfg(test)]
+pub(crate) mod test_scratch;
 mod save_progress;
 mod saver;
 mod saver_stop;
@@ -92,7 +95,11 @@ pub struct PacedFrame {
 
 /// Ask the encoder thread to write the last `seconds` to `path`.
 pub struct SaveRequest {
+    /// The clip's path straight in the clip folder; with `game` set the saver moves it into that
+    /// game's folder (same file name).
     pub path: String,
+    /// "Sort clips into game folders": the game (source) whose folder the saver writes into.
+    pub game: Option<String>,
     pub seconds: u32,
     /// Capture-clock PTS at save request, used to retain a static tail.
     pub end_us: Option<u64>,
@@ -185,7 +192,7 @@ impl EncoderHandle {
 
     /// Quit path: stop the encoder thread (it hands any already-requested saves
     /// to the saver first), then give in-flight saves up to `budget` to finish.
-    /// Past the drain share the saver aborts and removes its `.part` file.
+    /// Past the drain share the saver aborts and keeps what it wrote (`saver_stop`).
     /// Then the clip mover stops (<= `mover::STOP_WAIT`): a background move in
     /// flight is abandoned, never leaving a partial file under the final name;
     /// its staged copy is moved by the next start.

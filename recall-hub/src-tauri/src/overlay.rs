@@ -57,7 +57,7 @@ fn apply(app:&AppHandle,state:&OverlayState,config:Config,persist:bool)->Result<
     if persist {
         let path=settings_path(app)?;
         let temp=path.with_extension(format!("{}.tmp",std::process::id()));
-        std::fs::write(&temp,serde_json::to_vec_pretty(&config).map_err(|e|e.to_string())?).map_err(|e|format!("save overlay settings: {e}"))?;
+        std::fs::write(&temp,keeping_unknown(std::fs::read(&path).ok().as_deref(),&config)?).map_err(|e|format!("save overlay settings: {e}"))?;
         std::fs::rename(&temp,&path).map_err(|e|format!("publish overlay settings: {e}"))?;
     }
     stop_child(&mut runtime.child);runtime.config=config.clone();runtime.error=None;
@@ -69,6 +69,15 @@ fn apply(app:&AppHandle,state:&OverlayState,config:Config,persist:bool)->Result<
             }
     }
     Ok(snapshot(&mut runtime))
+}
+/// The settings file's bytes: `config`, plus every key of the old file (`old`) this build does
+/// not write, so an update never loses a setting a newer build saved.
+fn keeping_unknown(old:Option<&[u8]>,config:&Config)->Result<Vec<u8>,String> {
+    let mut out=match serde_json::to_value(config).map_err(|e|e.to_string())? {serde_json::Value::Object(m)=>m,_=>serde_json::Map::new()};
+    if let Some(serde_json::Value::Object(previous))=old.and_then(|b|serde_json::from_slice(b).ok()) {
+        for (key,value) in previous { out.entry(key).or_insert(value); }
+    }
+    serde_json::to_vec_pretty(&serde_json::Value::Object(out)).map_err(|e|e.to_string())
 }
 pub fn initialize(app:&AppHandle) {
     let loaded=settings_path(app).ok().and_then(|p|std::fs::read(p).ok()).and_then(|v|serde_json::from_slice::<Config>(&v).ok()).unwrap_or_default();
@@ -87,3 +96,16 @@ pub fn overlay_configure(app:AppHandle,state:tauri::State<OverlayState>,enabled:
     apply(&app,&state,Config{enabled,corner},true)
 }
 
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn unknown_keys_survive_a_load_and_save() {
+        let old=br#"{"enabled":true,"corner":"top-left","future_scale":2,"future":{"theme":{"accent":"red"}}}"#;
+        let loaded:Config=serde_json::from_slice(old).unwrap();
+        let saved:serde_json::Value=serde_json::from_slice(&keeping_unknown(Some(old),&Config{enabled:false,..loaded}).unwrap()).unwrap();
+        assert_eq!(saved,serde_json::json!({"enabled":false,"corner":"top-left","future_scale":2,"future":{"theme":{"accent":"red"}}}));
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&keeping_unknown(Some(b"garbage"),&Config::default()).unwrap()).unwrap(),serde_json::json!({"enabled":false,"corner":"top-right"}));
+    }
+}

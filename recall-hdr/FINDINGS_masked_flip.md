@@ -1,6 +1,6 @@
 # Masked HDR-flip experiment (2026-07-08)
 
-**Question:** can the PG27AQDP's HDR-toggle transition (panel blackout + resync flash)
+**Question:** can the test monitor's HDR-toggle transition (panel blackout + resync flash)
 be hidden behind a deliberate full-screen black mask, so recall-hdr's automatic flips
 feel seamless instead of jarring?
 
@@ -21,8 +21,8 @@ Protocol v2 (one-shot masks, below) replaces the continuous rhythm.
   randomly scheduled black window; 6 flips over ~70s, ≥8s apart.
 - Per-trial instrument gate: a trial counts only if `set_hdr_state` appears in
   recall-hdr.log within 4s (catches inert pins — see confounds).
-- Rig: `Docker Speed Drive/.tmp/ab/{flicker,flipper,run-trials}.ps1`; evidence in
-  `trials-log.txt` (00:53–00:55 IST run: 6/6 VALID, phases 161–254ms).
+- Rig: `{flicker,flipper,run-trials}.ps1` (a local rig outside this repo); evidence in
+  `trials-log.txt` (a 3-minute run: 6/6 VALID, phases 161–254ms).
 
 ## Confounds burned into the rig (do not relearn)
 
@@ -68,7 +68,7 @@ the gamma-fix installer used the file-copy + raw-registry fallback because
 1. **Fix profile consumption first** (blocks the punchy verdict AND makes flips
    truly seamless): register + associate the MHC2 profiles via the modern WCS
    API (mscms `WcsAssociateColorProfileWithDevice` / `ColorProfileAddDisplayAssociation`)
-   against the PG27AQDP device key; verify by eye; then re-run the 2-blink quiz —
+   against the test monitor's device key; verify by eye; then re-run the 2-blink quiz —
    success = the user cannot tell HDR state at all.
 2. Then the one-shot mask inside recall-hdr's reconciler transitions: fade in
    ~150ms → EnableHdr/DisableHdr at +0.2s → hold ~0.9s → fade out. Driver-side

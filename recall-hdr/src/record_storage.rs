@@ -17,8 +17,11 @@
 //! `RECALL_LIBRARY_META` overrides the path), clips played in the last ten
 //! minutes or open in the app (`record_storage_keep.rs`; all three are read
 //! again before every Recycle Bin call), clips with an edit sidecar,
-//! anything in a subfolder (`exports\`, `screenshots\`, `thumbs\` except a
-//! removed clip's own thumbnails), and `.part` files. An unreadable or
+//! anything in Recall's own subfolders (`exports\`, `screenshots\`, `thumbs\` except a
+//! removed clip's own thumbnails) or deeper than one level, and `.part` files.
+//! Game folders ("Sort clips into game folders": `<output_dir>\<Game>\`, only folders Recall
+//! made, see `game_folder_rule`) count as part of the folder: their Recall-named clips are listed and may go like top-level ones, with
+//! their own `thumbs\` and sidecars. Listing names are relative (`Game/clip.mp4`), see [`at`]. An unreadable or
 //! corrupt library file -- or a missing one, or one older than the app's
 //! quarantined `library.json.bad*` copy -- cancels the run (favourites
 //! unknown = delete nothing). `FOF_WANTNUKEWARNING` makes Windows ask before it would delete
@@ -54,9 +57,10 @@ pub const RECENT_SECS: u64 = 600;
 pub const AFTER_SAVE: Duration = Duration::from_secs(5);
 pub const HOURLY: Duration = Duration::from_secs(3600);
 
-/// One top-level Recall clip from the listing.
+/// One Recall clip from the listing (top level or in a game folder).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClipFile {
+    /// `clip.mp4`, or `Game/clip.mp4` in a game folder ([`at`]).
     pub name: String,
     pub bytes: u64,
     /// Unix seconds (last write).
@@ -67,9 +71,9 @@ pub struct ClipFile {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Listing {
     pub clips: Vec<ClipFile>,
-    /// Every top-level file name (sidecars included).
+    /// Every top-level file name (sidecars included), and `Game/name` for files in game folders.
     pub names: Vec<String>,
-    /// File names inside `thumbs\`.
+    /// File names inside `thumbs\`, and `Game/name` for those inside `Game\thumbs\`.
     pub thumbs: Vec<String>,
 }
 
@@ -175,10 +179,7 @@ fn thumb_stem(name: &str) -> Option<String> {
 /// Plan a run over `listing` with `favs` protected, at Unix time `now_unix`.
 pub fn plan(listing: &Listing, favs: &HashSet<String>, cap: u64, now_unix: u64) -> Plan {
     let edits = edited(&listing.names);
-    let protected = |c: &ClipFile| {
-        let key = c.name.to_lowercase();
-        favs.contains(&key) || edits.contains(&key)
-    };
+    let protected = |c: &ClipFile| favs.contains(&keep::file_key(&c.name)) || edits.contains(&c.name.to_lowercase());
     let picks = select_oldest(&listing.clips, cap, now_unix, protected);
     let next = candidates(&listing.clips, now_unix, protected).into_iter().find(|i| !picks.contains(i)).map(|i| listing.clips[i].modified);
     Plan {
@@ -246,40 +247,81 @@ impl Warner {
 /// Every file that leaves with `clip`: the clip, its recorder thumbnails and
 /// its sidecars (only those present in the listing).
 pub fn companions(dir: &Path, clip: &str, listing: &Listing) -> Vec<PathBuf> {
-    let stem = Path::new(clip).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let (folder, file) = split(clip);
+    let stem = Path::new(file).file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default();
     let lower = clip.to_lowercase();
+    let prefix = folder.map(|f| format!("{}/", f.to_lowercase())).unwrap_or_default();
     let sidecars: Vec<String> = [".recall-edit.json", ".recall-marks.json"]
         .iter()
-        .flat_map(|sfx| [format!("{lower}{sfx}"), format!("{stem}{sfx}")])
+        .flat_map(|sfx| [format!("{lower}{sfx}"), format!("{prefix}{stem}{sfx}")])
         .collect();
-    let mut out = vec![dir.join(clip)];
-    out.extend(listing.names.iter().filter(|n| sidecars.contains(&n.to_lowercase())).map(|n| dir.join(n)));
-    out.extend(
-        listing.thumbs.iter().filter(|n| thumb_stem(n).as_deref() == Some(stem.as_str())).map(|n| dir.join("thumbs").join(n)),
-    );
+    let mut out = vec![at(dir, clip)];
+    out.extend(listing.names.iter().filter(|n| sidecars.contains(&n.to_lowercase())).map(|n| at(dir, n)));
+    let thumbs = folder.map_or_else(|| dir.join("thumbs"), |f| dir.join(f).join("thumbs"));
+    out.extend(listing.thumbs.iter().filter_map(|n| {
+        let (thumb_folder, thumb) = split(n);
+        let same = thumb_folder.map(str::to_lowercase) == folder.map(str::to_lowercase);
+        (same && thumb_stem(thumb).as_deref() == Some(stem.as_str())).then(|| thumbs.join(thumb))
+    }));
     out
 }
 
-/// One listing of `dir` (top level + `thumbs\` names); only Recall-named
-/// `.mp4`s are clips. Sizes and times come from the directory enumeration.
+/// `Game/clip.mp4` -> (`Some("Game")`, `clip.mp4`); `clip.mp4` -> (`None`, `clip.mp4`).
+fn split(name: &str) -> (Option<&str>, &str) {
+    match name.split_once('/') {
+        Some((folder, file)) => (Some(folder), file),
+        None => (None, name),
+    }
+}
+
+/// The path of a listing name in `dir`: `dir\clip.mp4` or `dir\Game\clip.mp4` (joined part
+/// by part, so the shell never sees a `/`).
+pub fn at(dir: &Path, name: &str) -> PathBuf {
+    match split(name) {
+        (Some(folder), file) => dir.join(folder).join(file),
+        (None, file) => dir.join(file),
+    }
+}
+
+/// One listing of `dir` (top level + `thumbs\` names), plus its game folders one level down
+/// (only folders Recall made: marker, real folder, not hidden or system; `game_folder_rule`).
+/// Only Recall-named `.mp4`s are clips. Sizes and times come from the directory enumeration.
 pub fn scan(dir: &Path) -> std::io::Result<Listing> {
     let mut listing = Listing::default();
-    for entry in std::fs::read_dir(dir)?.flatten() {
+    list_into(&mut listing, std::fs::read_dir(dir)?, "", &|_| true);
+    if let Ok(thumbs) = std::fs::read_dir(dir.join("thumbs")) {
+        listing.thumbs = thumbs.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
+    }
+    // An unreadable game folder is skipped (its clips just don't count).
+    // In an adopted folder ("Use this folder") only the clips Recall saved there are counted or
+    // recycled (`Marker::owns`); the user's files never are. One marker read per folder.
+    for (game, marker) in crate::game_folder_rule::game_folders_marked(dir) {
+        let Ok(entries) = std::fs::read_dir(&game) else { continue };
+        let prefix = format!("{}/", game.file_name().unwrap_or_default().to_string_lossy());
+        list_into(&mut listing, entries, &prefix, &|file| marker.owns(file));
+        if let Ok(thumbs) = std::fs::read_dir(game.join("thumbs")) {
+            listing.thumbs.extend(thumbs.flatten().map(|e| format!("{prefix}{}", e.file_name().to_string_lossy())));
+        }
+    }
+    Ok(listing)
+}
+
+/// Files of one folder into `listing`, names prefixed with `prefix` (`""` or `Game/`). Only
+/// files `ours` accepts can be clips.
+fn list_into(listing: &mut Listing, entries: std::fs::ReadDir, prefix: &str, ours: &dyn Fn(&str) -> bool) {
+    for entry in entries.flatten() {
         let Ok(meta) = entry.metadata() else { continue };
         if !meta.is_file() {
             continue;
         }
-        let name = entry.file_name().to_string_lossy().into_owned();
-        if is_recall_clip(&name) {
+        let file = entry.file_name().to_string_lossy().into_owned();
+        let name = format!("{prefix}{file}");
+        if is_recall_clip(&file) && ours(&file) {
             let modified = meta.modified().ok().and_then(|t| t.duration_since(UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
             listing.clips.push(ClipFile { name: name.clone(), bytes: meta.len(), modified });
         }
         listing.names.push(name);
     }
-    if let Ok(thumbs) = std::fs::read_dir(dir.join("thumbs")) {
-        listing.thumbs = thumbs.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
-    }
-    Ok(listing)
 }
 
 #[path = "record_storage_library.rs"]
@@ -394,7 +436,7 @@ pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: (&dyn Fn()
         let files = companions(dir, name, &listing);
         let clip = listing.clips.iter().find(|c| c.name == *name);
         // The keeps are read under the lock too: a star or open made while it waited counts.
-        let checked = crate::win_fileop::bin_lock::held(|| keep::turn(name, keep, || companions_bytes(&files, clip, size).and_then(|bytes| bin(dir, bytes)), || recycle(&files)));
+        let checked = crate::win_fileop::bin_lock::held(|| keep::turn(split(name).1, keep, || companions_bytes(&files, clip, size).and_then(|bytes| bin(dir, bytes)), || recycle(&files)));
         let moved = match checked.unwrap_or_else(keep::Turn::Refused) {
             keep::Turn::Unknown(e) => {
                 log!("storage: favourites unknown ({e}); stopped after {} clip(s)", out.removed);
@@ -412,7 +454,7 @@ pub(crate) fn run_once(dir: &Path, cap_gb: u32, plan: PlanFn, wanted: (&dyn Fn()
         };
         // A declined or cancelled call moved nothing; otherwise count what left the folder.
         let gone = !matches!(moved, Err(RecycleError::Refused(_)));
-        if let Some(c) = listing.clips.iter().find(|c| c.name == *name).filter(|c| gone && !dir.join(&c.name).exists()) {
+        if let Some(c) = listing.clips.iter().find(|c| c.name == *name).filter(|c| gone && !at(dir, &c.name).exists()) {
             out.removed += 1;
             out.freed += c.bytes;
             out.through = out.through.max(Some(c.modified));
@@ -461,6 +503,9 @@ mod keep;
 #[cfg(test)]
 #[path = "record_storage_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "record_storage_game_tests.rs"]
+mod game_tests;
 
 #[cfg(test)]
 #[path = "record_storage_damage_tests.rs"]

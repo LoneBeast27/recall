@@ -196,6 +196,10 @@ fn load_locked(root: &Path) -> Owned {
 fn legacy(root: &Path) -> BTreeSet<String> {
     let mut files = BTreeSet::new();
     for folder in FOLDERS {
+        if super::unit_files::is_reparse(&root.join(folder)) {
+            eprintln!("cache: {} is a junction or link; nothing adopted from it", root.join(folder).display());
+            continue;
+        }
         let Ok(listing) = std::fs::read_dir(root.join(folder)) else { continue };
         for entry in listing.flatten().filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file())) {
             if let Some(target) = target_of(&entry.file_name().to_string_lossy()) {
@@ -271,6 +275,12 @@ pub(super) fn forget(root: &Path, folder: &str, name: &str) {
 /// Deletes `name` in `folder` if Recall made it and the cache is not blocked; true when gone.
 pub(super) fn remove(root: &Path, folder: &str, name: &str) -> bool {
     if super::guard::blocked(root).is_some() || !owns(&listed(root), folder, name) {
+        return false;
+    }
+    // A tier folder that is a junction or link leads elsewhere: never delete through it.
+    let directory = root.join(folder);
+    if super::unit_files::is_reparse(&directory) || directory.parent().is_some_and(super::unit_files::is_reparse) {
+        eprintln!("cache: {} is a junction or link; {name} not deleted", directory.display());
         return false;
     }
     let removed = std::fs::remove_file(root.join(folder).join(name)).is_ok();

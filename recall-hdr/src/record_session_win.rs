@@ -190,19 +190,23 @@ impl SessionHost for Controller {
     }
 
     fn long_state(&self) -> LongState {
-        LongState::of(self.activity.recording_or_starting(), self.activity.stop_in_flight())
+        LongState::of(self.activity.recording_or_starting(), self.activity.stop_in_flight(), self.activity.stop_is_ours())
     }
 
     fn send_record_stop_now(&mut self) {
-        if !crate::record_dispatch::automatic_effects(self.send_record_stop()).is_empty() {
+        let sent = self.send_record_stop();
+        if sent.queued() {
+            self.activity.claim_stop(); // a cancel may restart this one
+        }
+        if !crate::record_dispatch::automatic_effects(sent).is_empty() {
             log!("record: session end -- record_stop not sent ({})", crate::record_dispatch::NOT_RESPONDING);
         }
     }
 
     fn start_long_recording(&mut self) -> bool {
-        let was_idle = !self.activity.recording_or_starting();
-        self.engine_command("record_start", None);
-        crate::record_session_end::start_went_out(was_idle, self.activity.is_starting())
+        let before = self.long_state();
+        let queued = self.engine_command_queued("record_start");
+        crate::record_session_end::start_went_out(before, queued)
     }
 
     fn drain_engine(&mut self) {
@@ -222,6 +226,27 @@ impl SessionHost for Controller {
     fn session_shutdown(&mut self, grace: Duration) {
         self.quit.get_or_insert(QuitReason::SessionEnd);
         self.shutdown_now(grace);
+    }
+
+    fn saves_in_progress(&mut self) -> bool {
+        self.activity.saves_writing(Instant::now())
+    }
+
+    /// Still inside `WM_ENDSESSION`: the quit's bounded wait (`quit_ready`: 60 s, on while
+    /// the save grows, its hold cap) runs here, with the reason Windows shows kept up. A save
+    /// it gives up on gets the "Recall was closed during the save" report there.
+    fn finish_saves(&mut self) {
+        self.quit.get_or_insert(QuitReason::SessionEnd);
+        SAVE_BLOCKING.store(true, Ordering::Release); // a save that started after the query
+        update_shutdown_reason();
+        loop {
+            let now = Instant::now();
+            self.drain_engine_events(now);
+            if self.quit_ready(now) {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
     }
 
     fn tell_engine(&mut self, line: &str) {
@@ -248,8 +273,8 @@ impl SessionHost for Controller {
 
 impl Controller {
     /// Apply the replay-save hold on the shared session window, even while quitting.
-    pub(crate) fn session_end_tick(&mut self, now: Instant) {
-        let saving = self.activity.saves_writing(now);
+    pub(crate) fn session_end_tick(&mut self, _now: Instant) {
+        let saving = self.activity.saves_writing(self.clock.awake());
         if let Some(on) = self.block_reason.update(saving) {
             SAVE_BLOCKING.store(on, Ordering::Release);
             update_shutdown_reason();

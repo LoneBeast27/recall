@@ -1,8 +1,9 @@
 <#
-    rollback.ps1 — revert the HDR SDR-gamma fix for PG27AQDP (AUS2740)
+    rollback.ps1 — revert the HDR SDR-gamma fix (install.ps1)
 
     Restores the ICMProfileAC (Advanced-Color/HDR) association for the target
-    display to EXACTLY the true pre-fix state captured in rollback-state.json
+    display to EXACTLY the true pre-fix state captured in <StateDir>\rollback-state.json
+    (hdrGammaFix.stateDir in .local/machine.json, or -StateDir)
     (the plain HDR Calibrated profiles, no MHC2), then removes BOTH installed
     MHC2 variants (accurate + punchy) from the color store.
 
@@ -16,16 +17,19 @@
 
 [CmdletBinding()]
 param(
-    [switch]$KeepProfileFiles
+    [switch]$KeepProfileFiles,
+    # Folder holding rollback-state.json; default hdrGammaFix.stateDir in .local/machine.json.
+    [string]$StateDir = ''
 )
 
 $ErrorActionPreference = 'Stop'
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
-$snapPath = Join-Path $here 'rollback-state.json'
+. (Join-Path $PSScriptRoot 'machine.ps1')
+$StateDir = Resolve-HdrSetting $StateDir 'stateDir'
+$snapPath = Join-Path $StateDir 'rollback-state.json'
 
 if (-not (Test-Path $snapPath)) {
-    Write-Host "No rollback-state.json found next to this script — nothing to roll back." -ForegroundColor Yellow
-    Write-Host "(If you installed manually, restore ICMProfileAC from ROLLBACK_SNAPSHOT.txt by hand.)"
+    Write-Host "No rollback-state.json in $StateDir — nothing to roll back." -ForegroundColor Yellow
+    Write-Host "(If you installed manually, restore ICMProfileAC from ROLLBACK_SNAPSHOT.txt in $StateDir by hand.)"
     return
 }
 
@@ -39,7 +43,7 @@ if ($snap.PSObject.Properties.Name -contains 'ManagedProfiles' -and $snap.Manage
     $managed = @($snap.ManagedProfiles | Where-Object { $_ })
 }
 if ($managed.Count -eq 0) {
-    $managed = @('PG27AQDP_sRGB-to-Gamma2.2_MHC2.icm','PG27AQDP_Punchy-Gamma2.2_MHC2.icm')
+    $managed = @((Resolve-HdrSetting '' 'accurateProfile'), (Resolve-HdrSetting '' 'punchyProfile'))
     if ($snap.InstalledProfile -and ($managed -notcontains $snap.InstalledProfile)) {
         $managed += $snap.InstalledProfile
     }

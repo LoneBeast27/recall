@@ -329,7 +329,9 @@ impl EditorState {
         (!info.keyframes.is_empty()).then(|| info.snap_to_keyframe(range.start))
     }
 
+    /// A rate above the largest preset is capped there.
     pub fn set_fps(&mut self, fps: u32) {
+        let fps = fps.min(crate::editor_state::MAX_EXPORT_FPS);
         if fps > 0 && fps != self.fps {
             self.fps = fps;
             self.touch();

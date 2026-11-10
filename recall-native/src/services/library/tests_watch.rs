@@ -10,7 +10,7 @@ use std::{
 use super::{
     folders,
     settle::{Kind, Probe},
-    watch::{ClipChanges, ClipWatcher, LibraryChange, WatchRoot, covering_folder, probe},
+    watch::{ClipChanges, ClipWatcher, LibraryChange, WatchRoot, covering_folder, probe, probe_in},
     watch_win::{Action, parse_notifications},
 };
 
@@ -361,5 +361,24 @@ fn stopping_ends_every_thread_and_later_calls_do_nothing() {
     watcher.set_roots(vec![WatchRoot { path: dir.clone(), recursive: false }]);
     fs::write(dir.join("late.mp4"), [1u8; 100]).unwrap();
     assert!(rx.recv_timeout(Duration::from_secs(1)).is_err(), "the sink went with the settle thread");
+    let _ = fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn a_linked_clip_is_probed_without_shutting_out_its_writer() {
+    // Another recorder (SteelSeries, ShadowPlay) writes its clip sharing read and write: a probe
+    // that shares only read and delete fails against it, and while open it would refuse that
+    // recorder a write open. Linked roots are probed with share mode 7 (read, write, delete).
+    let dir = std::env::temp_dir().join(format!("recall-watch-linked-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("moment.mp4");
+    fs::write(&path, b"moment").unwrap();
+    use std::os::windows::fs::OpenOptionsExt;
+    let writer = OpenOptions::new().write(true).share_mode(1 | 2).open(&path).unwrap();
+    assert!(matches!(probe_in(&path, Kind::Clip, true), Probe::Ready { bytes: 6, .. }), "the linked probe shares write");
+    // And its open leaves the other recorder free to open the clip for write again.
+    assert_eq!(super::watch::probe_share(true), 7);
+    drop(writer);
     let _ = fs::remove_dir_all(&dir);
 }

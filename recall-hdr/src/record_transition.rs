@@ -9,6 +9,9 @@
 
 use std::time::Instant;
 
+use crate::awake_clock::Awake;
+use crate::record_activity::EngineActivity;
+
 use crate::config::Config;
 use crate::log;
 use crate::record_app::Controller;
@@ -30,6 +33,17 @@ pub(crate) trait Transitions {
     fn wanted_now(&self) -> EngineTarget;
     /// Start, restart or stop the engine for `target` now (`apply_engine_target`).
     fn apply_now(&mut self, target: &EngineTarget);
+    /// The privacy stop: the engine stops capture now, finishes its saves, then `target`
+    /// starts (`release_engine_to`). `false`: an older engine without `stop_capture`.
+    fn release_now(&mut self, target: &EngineTarget) -> bool;
+    /// A save or screenshot is in flight, past any timer or cap (`EngineActivity::save_in_flight`).
+    fn saving(&mut self) -> bool;
+    fn activity_mut(&mut self) -> &mut EngineActivity;
+    /// The running engine's hello says `drain_heartbeat`.
+    fn engine_heartbeats(&self) -> bool;
+    /// Now on the awake-only clock (`Controller::awake`).
+    fn awake_now(&self) -> Awake;
+    fn now(&self) -> Instant;
     fn pinned(&self) -> Option<&Target>;
     fn is_paused(&self) -> bool;
     /// The render check's classification (`Controller::classify`).
@@ -79,7 +93,14 @@ pub(crate) trait Transitions {
     /// R8-detect-2: a session that ended for privacy (windowed `fullscreen_games`
     /// app, Never record, a removed registration) stops being captured now: no
     /// drain linger on its still-open window, and its unsaved replay ring goes
-    /// with the engine restart. No clip is made. A pin elsewhere takes over.
+    /// with the engine. No clip is made. A pin elsewhere takes over.
+    ///
+    /// F-detect-1: a save in flight is never cut. The engine is released (only then:
+    /// R2-detect-r10-1, a release can hold the engine slot while it drains): it stops
+    /// capturing at once, takes no new save, and ends after the saves it has; the
+    /// planner already counts the next target, so the app is not "recorded" meanwhile.
+    /// An older engine without `stop_capture` keeps capturing until its save lands
+    /// (the planner holds the stop, no drain linger), then stops.
     fn drop_ring(&mut self, t: &Target) {
         if !matches!(self.planner().applied(), EngineTarget::Window(w) if w.pid == t.pid) {
             return;
@@ -87,6 +108,21 @@ pub(crate) trait Transitions {
         let wanted = self.wanted_now();
         if wanted == *self.planner().applied() {
             return; // the user pinned this very window
+        }
+        // R2-detect-r10-1: only a save in flight is worth a release; otherwise the plain quit.
+        if self.saving() && self.release_now(&wanted) {
+            // Design P2: stamped here, in the shared rule, so the Sim runs this very stamp (p6-2).
+            let (now, heartbeats) = (self.awake_now(), self.engine_heartbeats());
+            self.activity_mut().released(now, heartbeats);
+            log!("record: {}'s replay buffer dropped (not saved); capture stopped now, saves in flight finish", t.exe);
+            self.planner_mut().force(wanted);
+            return;
+        }
+        if self.saving() {
+            log!("record: {}'s session ended during a save; this engine stops when the save lands (no stop_capture)", t.exe);
+            let now = self.now();
+            self.planner_mut().cut_drain(now);
+            return;
         }
         log!("record: {}'s replay buffer dropped (not saved); the engine stops capturing it now", t.exe);
         self.planner_mut().force(wanted.clone());
@@ -142,6 +178,17 @@ pub(crate) trait Transitions {
         self.island("Last clip dropped", &format!("{started} started"));
     }
 
+    /// Design P17, every tick: a privacy release still draining while a game is wanted keeps
+    /// that game unrecorded; after 30 s the island says so, once ("Finishing the last clip").
+    fn drain_block_notice(&mut self) {
+        let EngineTarget::Window(next) = self.wanted_now() else { return };
+        let now = self.awake_now();
+        if self.activity_mut().drain_notice_due(now, true) {
+            log!("record: the released engine is still saving; {} starts recording once it is saved", next.exe);
+            self.island(crate::record_activity::DRAIN_NOTICE_TITLE, &crate::record_activity::drain_notice_detail(&next.name));
+        }
+    }
+
     /// A long recording stopped for a retarget: the game closed when the
     /// planner says so, or when a closed game's drain was running (a window
     /// that waited for the drain commits on the tick it runs out).
@@ -171,6 +218,24 @@ impl Transitions for Controller {
     }
     fn apply_now(&mut self, target: &EngineTarget) {
         self.apply_engine_target(target);
+    }
+    fn release_now(&mut self, target: &EngineTarget) -> bool {
+        self.release_engine_to(target)
+    }
+    fn saving(&mut self) -> bool {
+        self.activity.save_in_flight()
+    }
+    fn activity_mut(&mut self) -> &mut EngineActivity {
+        &mut self.activity
+    }
+    fn engine_heartbeats(&self) -> bool {
+        self.supervisor.engine_takes_drain_heartbeat()
+    }
+    fn awake_now(&self) -> Awake {
+        self.awake()
+    }
+    fn now(&self) -> Instant {
+        Instant::now()
     }
     fn pinned(&self) -> Option<&Target> {
         self.pinned.as_ref()

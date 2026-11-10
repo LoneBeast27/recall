@@ -205,7 +205,7 @@ unsafe extern "system" {
     fn SHQueryRecycleBinW(root: *const u16, info: *mut QueryRbInfo) -> i32;
 }
 
-/// Bytes the Recycle Bin of the volume at `root` (`L:\\`) holds now (read only).
+/// Bytes the Recycle Bin of the volume at `root` (`D:\\`) holds now (read only).
 pub fn bin_used(root: &str) -> Option<u64> {
     let path = wide(root);
     let mut info = QueryRbInfo { size_of: std::mem::size_of::<QueryRbInfo>() as u32, bytes: 0, items: 0 };

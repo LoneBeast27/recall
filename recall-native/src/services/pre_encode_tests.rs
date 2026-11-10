@@ -106,16 +106,29 @@ fn the_start_sweep_removes_only_cut_off_deliveries() {
 
 #[test]
 fn a_moved_or_rewritten_clip_is_a_mismatch() {
-    let folder = std::env::temp_dir().join(format!("recall-pre-encode-src-{}", std::process::id()));
-    std::fs::create_dir_all(&folder).unwrap();
-    let clip = folder.join("clip.mp4");
+    let sandbox = crate::test_temp::TempDir::sandbox("recall-pre-encode-src");
+    let clip = sandbox.join("clip.mp4");
     std::fs::write(&clip, b"12345").unwrap();
     let path = clip.to_string_lossy().into_owned();
-    assert!(source_unchanged(&info(&path, 5)));
-    assert!(!source_unchanged(&info(&path, 6)), "rewritten");
+    let written = |bytes| ClipInfo { source_modified_ms: backend::modified_ms(&clip.metadata().unwrap()), ..info(&path, bytes) };
+    assert!(source_unchanged(&written(5)));
+    assert!(!source_unchanged(&written(6)), "rewritten");
     std::fs::remove_file(&clip).unwrap();
     assert!(!source_unchanged(&info(&path, 5)), "moved away");
-    let _ = std::fs::remove_dir_all(folder);
+}
+
+/// F-editor-export-3: a clip rewritten to the same size (only its write time moved) must not
+/// get the old pre-encode; the normal export refuses it the same way.
+#[test]
+fn a_clip_rewritten_to_the_same_size_is_a_mismatch() {
+    let sandbox = crate::test_temp::TempDir::sandbox("recall-pre-encode-mtime");
+    let clip = sandbox.join("clip.mp4");
+    std::fs::write(&clip, b"12345").unwrap();
+    let path = clip.to_string_lossy().into_owned();
+    let opened = backend::modified_ms(&clip.metadata().unwrap());
+    let stale = ClipInfo { source_modified_ms: opened.saturating_sub(5_000), ..info(&path, 5) };
+    assert!(!source_unchanged(&stale), "same size, other write time");
+    assert!(source_unchanged(&ClipInfo { source_modified_ms: opened, ..info(&path, 5) }));
 }
 
 #[test]
@@ -246,4 +259,18 @@ fn a_full_or_locked_export_folder_keeps_the_prepared_file_for_the_next_try() {
     assert!(matches!(result, Some(Ok(_))));
     assert!(!done.path.exists(), "a delivered file leaves the cache");
     slot().ready = None;
+}
+
+/// Post-hoc item 8: a size-fit priority with no size cap in force changes nothing in the
+/// output, so it must not change the key (or the export is prepared again for nothing).
+#[test]
+fn a_priority_without_a_size_cap_keeps_the_key() {
+    use crate::edit_model::ExportPriority;
+    let clip = info("E:/Recall/Raw/a.mp4", 100);
+    let manual = ExportSettings::default();
+    let motion = ExportSettings { priority: ExportPriority::Motion, ..manual.clone() };
+    assert_eq!(key(&clip, &plan(98.0, 120.0), 60, &motion), key(&clip, &plan(98.0, 120.0), 60, &manual), "no cap: no priority");
+    let capped = ExportSettings { max_bytes: Some(10_000_000), ..manual.clone() };
+    let capped_motion = ExportSettings { priority: ExportPriority::Motion, ..capped.clone() };
+    assert_ne!(key(&clip, &plan(98.0, 120.0), 60, &capped_motion), key(&clip, &plan(98.0, 120.0), 60, &capped), "under a cap it shapes the output");
 }

@@ -28,6 +28,7 @@ mod endpoints;
 mod hold;
 mod mute;
 mod notify;
+mod packet;
 mod rebind;
 pub mod sources;
 mod stream;
@@ -43,7 +44,8 @@ use endpoints::match_endpoint;
 pub(crate) use mute::{initial_mute, MuteNow};
 #[cfg(test)]
 pub(crate) use mute::MIC_MUTED_ENV;
-pub use mute::{mic_muted, set_mic_muted, toggle_mic_mute};
+pub use mute::{mic_muted, set_mic_muted, set_mic_muted_by, toggle_mic_mute};
+pub(crate) use hold::starts_held;
 
 /// The spawn-time mute (`RECALL_MIC_MUTED`), applied before stdin is read and before any track
 /// opens: a muted mic records nothing of this run, and an Alt+M that comes early is kept.
@@ -296,16 +298,27 @@ impl TrackRing {
 
     /// [`Self::push_capture`]; `held` stores silence whatever Alt+M says (`hold.rs`).
     fn push_samples(&self, data: &[f32], mute_inputs: bool, held: bool) {
+        if crate::stop_capture::stopped() {
+            return; // the privacy stop: no sample enters the ring after it
+        }
+        // The gained copy reuses one buffer per capture thread (gate review P2-c).
+        thread_local!(static GAINED: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) });
         let data = &data[data.len().saturating_sub(self.capacity)..];
         let silence = held || (mute_inputs && self.mutes());
         let gain = self.gain();
-        let gained: Vec<f32>;
-        let data = if gain != 1.0 && !silence {
-            gained = data.iter().map(|s| s * gain).collect();
-            &gained[..]
-        } else {
-            data
-        };
+        if gain != 1.0 && !silence {
+            return GAINED.with(|g| {
+                let mut gained = g.borrow_mut();
+                gained.clear();
+                gained.extend(data.iter().map(|s| s * gain));
+                self.store(&gained, false);
+            });
+        }
+        self.store(data, silence);
+    }
+
+    /// `data` (gain applied) into the ring and the long-recording tap; `silence` stores zeros.
+    fn store(&self, data: &[f32], silence: bool) {
         crate::longrec::tap::tap_audio(self.name, data, silence); // long-recording hook
         let mut buf = self.samples.lock().expect("ring lock");
         let over = (buf.len() + data.len()).saturating_sub(self.capacity);
@@ -320,7 +333,9 @@ impl TrackRing {
 
 /// Resolve + start every source in list order. Failures are per-source (a broken input
 /// must not kill game audio); returns whatever started, with a report line each.
-pub fn start(buffer_secs: u32, mut report: impl FnMut(String)) -> Vec<Arc<TrackRing>> {
+/// `hold`: every device track starts held (`TrackRing::hold_startup`) until the controller's
+/// `sync` (`sources::sync_read`); a process-loopback or app track records at once.
+pub fn start(buffer_secs: u32, hold: bool, mut report: impl FnMut(String)) -> Vec<Arc<TrackRing>> {
     // The spawn mute was applied before stdin is read (`apply_spawn_mute`, main.rs).
     report(format!(
         "audio endpoints -- render: {:?} | capture: {:?}",
@@ -346,7 +361,7 @@ pub fn start(buffer_secs: u32, mut report: impl FnMut(String)) -> Vec<Arc<TrackR
             }
             _ => None,
         };
-        match start_track(spec, buffer_secs, target) {
+        match start_track(spec, buffer_secs, target, hold) {
             Ok(ring) => {
                 report(format!("audio track '{}' up: {} ({} Hz, {} ch)", ring.title(), ring.endpoint(), ring.rate, ring.channels));
                 sources::note_live(spec, &ring);
@@ -358,13 +373,14 @@ pub fn start(buffer_secs: u32, mut report: impl FnMut(String)) -> Vec<Arc<TrackR
             }
         }
     }
-    let app_rings = apps::start(&sources::app_sources(&list), buffer_secs, game_pid.clone().ok().flatten(), &mut report);
+    let app_rings = apps::start(&sources::app_sources(&list), buffer_secs, game_pid.clone().ok().flatten(), hold, &mut report);
     for ring in &app_rings {
         if let Some(spec) = list.iter().find(|s| s.id.trim() == ring.name) {
             sources::note_live(spec, ring);
         }
     }
     out.extend(app_rings);
+    sources::close_staging(); // every track is listed: later set_source lines apply at once
     sources::in_list_order(&list, out)
 }
 
@@ -419,8 +435,11 @@ fn source_of(kind: Option<Kind>, process: bool) -> &'static str {
 /// on the capture thread (they are !Send); init success/failure is reported
 /// back over a channel before this returns. `target` selects process loopback
 /// instead of the source's endpoint.
-fn start_track(spec: &SourceSpec, buffer_secs: u32, target: Option<LoopbackTarget>) -> Result<Arc<TrackRing>, String> {
+fn start_track(spec: &SourceSpec, buffer_secs: u32, target: Option<LoopbackTarget>, hold: bool) -> Result<Arc<TrackRing>, String> {
     let ring = Arc::new(TrackRing::for_source(spec, source_of(spec.kind(), target.is_some()), buffer_secs, String::new()));
+    if starts_held(hold, target.is_some()) {
+        ring.hold_startup(); // before its capture thread starts: no stream opens while held (F4)
+    }
     let direction = if spec.kind() == Some(Kind::Input) { Direction::Capture } else { Direction::Render };
     let device = (spec.device.clone(), spec.device_id.clone());
     let communications = spec.uses_communications();
@@ -431,11 +450,7 @@ fn start_track(spec: &SourceSpec, buffer_secs: u32, target: Option<LoopbackTarge
         .spawn(move || capture_thread(direction, device, tring, init_tx, target, communications))
         .map_err(|e| e.to_string())?;
 
-    match init_rx.recv_timeout(std::time::Duration::from_secs(5)) {
-        Ok(Ok(())) => Ok(ring),
-        Ok(Err(e)) => Err(e),
-        Err(_) => Err("audio init timed out".into()),
-    }
+    hold::await_init(&ring, &init_rx, std::time::Duration::from_secs(5)).map(|()| ring)
 }
 
 /// The capture thread of a device or game track (`capture_loop`): open, capture, and when

@@ -22,6 +22,8 @@
 mod autostart;
 #[path = "config_io.rs"]
 mod io;
+#[path = "config_extra.rs"]
+mod extra;
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -93,6 +95,14 @@ pub struct DisplayCfg {
     /// Optional exact device-path pin. Empty/absent -> select by friendly name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_device_path: Option<String>,
+    /// File name of this machine's "Punchy" MHC2 profile in the Windows colour store
+    /// (`set_ac_profile punchy`). Profiles are made per monitor, so nothing is built in:
+    /// absent -> the Desktop colour in HDR row is hidden and the command is refused.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub punchy_profile: Option<String>,
+    /// File name of this machine's "Accurate" MHC2 profile (`set_ac_profile accurate`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accurate_profile: Option<String>,
 }
 
 /// `[behavior]` -- default rule/clamp when no per-exe override matches.
@@ -298,12 +308,9 @@ impl Default for Config {
             storage: StorageCfg::default(),
             midi: MidiCfg::default(),
             detect: DetectCfg::default(),
-            // The hdr-testcard entry is our live test target; ship it by default.
-            overrides: vec![Override {
-                exe: "hdr-testcard".into(),
-                kind: RuleKind::HdrGame,
-                clamp: None,
-            }],
+            // No entries: the dev test card (hdr-testcard) showed as "Recorded" in every
+            // install's Games list (final review F-detect-6); tools/e2e writes its own override.
+            overrides: Vec::new(),
         }
     }
 }
@@ -316,12 +323,12 @@ impl Config {
     /// `%APPDATA%\recall-hdr\config.toml`, creating the directory if missing.
     /// Falls back to the temp dir if `APPDATA` is unset (parity with `logging`).
     pub fn path() -> PathBuf {
-        let base = std::env::var("APPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|_| std::env::temp_dir());
-        let dir = base.join("recall-hdr");
-        let _ = fs::create_dir_all(&dir);
-        dir.join("config.toml")
+        let base = crate::user_dirs::appdata().unwrap_or_else(std::env::temp_dir);
+        let path = crate::user_dirs::checked(base.join("recall-hdr").join("config.toml"));
+        if let Some(dir) = path.parent() {
+            let _ = fs::create_dir_all(dir);
+        }
+        path
     }
 
     /// Load the config, or fall back to [`Config::default`] on any error.
@@ -416,11 +423,23 @@ pub(crate) fn load_bytes(path: &std::path::Path, bytes: &[u8], now: std::time::S
     crate::record_audio_sources::migrate_loaded(&mut cfg.recording, &text);
     // Pre-v2 corners were never honoured -> `dynamic`.
     cfg.overlay.migrate_loaded(&text);
+    // The dev test card the defaults once shipped (F-detect-6): gone from installed builds.
+    if !cfg!(debug_assertions) && drop_shipped_testcard(&mut cfg.overrides) {
+        log!("config: removed the hdr-testcard entry older builds shipped (a dev test target)");
+    }
     // Out-of-range values clamp, bad entries go (one log line each), never the whole file.
     // Runs on every parsed load: full parse, per-key salvage and last-good.
     repairs.extend(crate::config_validate::sanitize_loaded(&mut cfg));
     crate::config_repairs::remember(path, repairs);
     cfg
+}
+
+/// Drop the `hdr-testcard` override exactly as older defaults shipped it (`hdr_game`, no
+/// clamp); an entry the user changed stays. `true` = one was dropped.
+pub(crate) fn drop_shipped_testcard(list: &mut Vec<Override>) -> bool {
+    let before = list.len();
+    list.retain(|o| !(o.exe == "hdr-testcard" && o.kind == RuleKind::HdrGame && o.clamp.is_none()));
+    list.len() != before
 }
 
 // ---------------------------------------------------------------------------

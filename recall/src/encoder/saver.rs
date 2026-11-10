@@ -56,6 +56,9 @@ pub(crate) enum VideoSrc {
 /// Everything one save needs, detached from the live encoder and rings.
 pub(crate) struct SaveJob {
     pub path: String,
+    /// "Sort clips into game folders": the saver places the clip in this game's folder
+    /// ([`place_in_game_folder`]) before writing.
+    pub game: Option<String>,
     pub seconds: u32,
     /// When the save was requested; `elapsed_ms` is measured from here.
     pub requested: Instant,
@@ -75,6 +78,8 @@ pub(crate) struct SaveJob {
 pub(crate) struct Muxed {
     pub frames: u64,
     pub secs: f32,
+    /// Cut short (an abort, a write error) and finished with what was written: why.
+    pub partial: Option<String>,
 }
 
 /// Writes `job` to the given `.part` path (the saver renames it afterwards).
@@ -102,6 +107,8 @@ pub(crate) struct Timing {
     pub mux_ms: f64,
     pub trailer_ms: f64,
     pub rename_ms: f64,
+    /// Packets the mux wrote into the `.part` (0: nothing of the clip is in it).
+    pub part_packets: u64,
     /// Request -> file renamed into place (the `elapsed_ms` of `Saved`).
     pub ready_ms: f64,
     pub gallery_ms: f64,
@@ -178,9 +185,9 @@ impl SaverQueue {
 pub(crate) enum Shutdown {
     /// Every queued save finished (or there was none).
     Drained,
-    /// The in-flight save was aborted at the deadline and cleaned up.
+    /// The in-flight save was aborted at the deadline (and kept what it wrote).
     Aborted,
-    /// The saver did not stop in time; its `.part` removal was attempted.
+    /// The saver did not stop in time; its `.part` stays for the next start's recovery.
     TimedOut,
 }
 
@@ -196,7 +203,7 @@ pub(crate) struct SaverControl {
 impl SaverControl {
     /// Wait for the saver to finish after its queue sender is dropped. Saves
     /// run normally for most of `budget`; for the last share (<= 500 ms) the
-    /// in-flight mux is aborted so its `.part` is removed rather than orphaned.
+    /// in-flight mux is aborted and finishes the file with what it wrote (`saver_stop`).
     /// Then the clip mover stops (up to `mover::STOP_WAIT`): a move in flight
     /// is abandoned, its staged copy kept for the next start.
     pub fn shutdown(self, budget: Duration) -> Shutdown {
@@ -211,7 +218,7 @@ impl SaverControl {
 
     fn stop(self, budget: Duration, orphan: bool) -> Shutdown {
         let SaverControl { done, abort, current, mover, progress } = self;
-        let outcome = stop_saver(&done, &abort, &current, budget, orphan.then_some(&*progress));
+        let outcome = stop_saver(&done, &abort, &current, budget, &progress, orphan);
         if let Some(mover) = mover {
             mover.shutdown(mover::STOP_WAIT);
         }
@@ -308,10 +315,11 @@ struct Worker {
 impl Worker {
     fn run(mut self, rx: Receiver<SaveJob>) {
         lower_thread_priority(&self.events);
-        while let Ok(job) = rx.recv() {
+        while let Ok(mut job) = rx.recv() {
+            job.path = place_in_game_folder(&job.path, job.game.as_deref(), &crate::naming::out_dir(), &self.events);
             self.take(&job);
             // Answered (after its event went out): `status.save_writing` no longer counts it.
-            self.progress.jobs.fetch_sub(1, Relaxed);
+            self.progress.settle();
         }
     }
 
@@ -328,18 +336,30 @@ impl Worker {
         let (target, result) = space::write_with_room(staged, Path::new(&job.path), need, self.free, &log, |target| {
             let part = part_of(target);
             set_current(Some(part.clone()));
-            let result = write_clip_to(&part, target, job, mux, abort, &mut timing);
+            let result = write_clip_to(&part, target, job, mux, abort, &mut timing, &log);
             set_current(None);
             result
         });
         let target = target.as_path();
         match result {
             Ok(muxed) => {
+                // Saved in place into an adopted game folder: that folder owns it now.
+                if let Err(e) = crate::game_folder_rule::record_saved(target, None) {
+                    self.events.log(&format!("saver: {} not recorded in its game folder ({e}); it stays uncounted", target.display()));
+                }
                 let bytes = std::fs::metadata(target).map(|m| m.len()).unwrap_or(0);
                 let elapsed = job.requested.elapsed();
                 timing.ready_ms = ms(elapsed);
                 let staged = (target != Path::new(&job.path)).then(|| target.to_string_lossy().into_owned());
-                self.events.saved(&SavedReport {
+                // Cut short by the drain: kept, with the drain's reason (stall, budget, quit).
+                let partial = muxed.partial.as_deref().map(|r| match self.progress.stop_reason() {
+                    Some(why) if r == ABORTED => why.to_string(),
+                    _ => r.to_string(),
+                });
+                if let Some(why) = &partial {
+                    self.events.log(&format!("saver: {} kept partial ({}s of {}s): {why}", job.path, muxed.secs, job.secs));
+                }
+                let report = SavedReport {
                     path: &job.path,
                     staged_path: staged.as_deref(),
                     seconds: muxed.secs,
@@ -347,7 +367,9 @@ impl Worker {
                     bytes,
                     elapsed_ms: elapsed.as_millis() as u64,
                     video_end_us: job.video_end_us,
-                });
+                    partial: partial.as_deref(),
+                };
+                self.progress.answer(|| self.events.saved(&report));
                 if let (Some(stage), Some(_)) = (&self.stage, &staged) {
                     stage.hand_off(target, &job.path, &self.events);
                 }
@@ -364,76 +386,28 @@ impl Worker {
                 }
             }
             Err(reason) => {
-                self.events.save_failed(&reason);
+                self.fail(&reason);
                 self.events.log(&timing.line("failed", job.secs as f32, 0, 0));
             }
         }
     }
 }
 
+/// "Sort clips into game folders": the path `job` is written to. With a game, its file name
+/// inside that game's folder (`naming::writable_game_dir`: made again with its marker when it
+/// went missing; a link or a folder that is not Recall's now falls back to `clip_folder` with a
+/// log line). Here on the saver thread, so the hotkey never waits on the drive. Without a game
+/// the path is unchanged. The file name never changes (bookmarks match on it).
+pub(crate) fn place_in_game_folder(path: &str, game: Option<&str>, clip_folder: &str, events: &Events) -> String {
+    let Some(game) = game else { return path.to_string() };
+    let Some(file) = Path::new(path).file_name() else { return path.to_string() };
+    let dir = crate::naming::writable_game_dir(clip_folder, game, &|line: &str| events.log(&format!("saver: {line}")));
+    dir.join(file).to_string_lossy().into_owned()
+}
+
 /// `<path>.part`: the in-progress name, renamed to `path` only when complete.
 pub(crate) fn part_path(path: &str) -> PathBuf {
     PathBuf::from(format!("{path}.part"))
-}
-
-/// Mux into `part`, then rename it to the job's path. Any failure removes the
-/// partial file, so a clip path either holds a complete clip or nothing.
-pub(crate) fn write_clip<F>(
-    part: &Path,
-    job: &SaveJob,
-    mux: &mut F,
-    abort: &AtomicBool,
-    timing: &mut Timing,
-) -> Result<Muxed, String>
-where
-    F: FnMut(&Path, &SaveJob, &AtomicBool, &mut Timing) -> Result<Muxed, String> + ?Sized,
-{
-    write_clip_to(part, Path::new(&job.path), job, mux, abort, timing)
-}
-
-/// [`write_clip`] renaming to `target` (the staged file, or the job's path).
-pub(crate) fn write_clip_to<F>(
-    part: &Path,
-    target: &Path,
-    job: &SaveJob,
-    mux: &mut F,
-    abort: &AtomicBool,
-    timing: &mut Timing,
-) -> Result<Muxed, String>
-where
-    F: FnMut(&Path, &SaveJob, &AtomicBool, &mut Timing) -> Result<Muxed, String> + ?Sized,
-{
-    let _ = std::fs::remove_file(part);
-    match mux(part, job, abort, timing) {
-        Ok(muxed) => {
-            let started = Instant::now();
-            let renamed = std::fs::rename(part, target);
-            timing.rename_ms = ms(started.elapsed());
-            match renamed {
-                Ok(()) => Ok(muxed),
-                Err(e) => {
-                    let _ = std::fs::remove_file(part);
-                    Err(format!("finalize {}: {e}", target.display()))
-                }
-            }
-        }
-        Err(reason) => {
-            let _ = std::fs::remove_file(part);
-            Err(reason)
-        }
-    }
-}
-
-/// Synchronous save through the production mux + rename path (smoke test).
-pub(super) fn write_now(job: &SaveJob) -> Result<Muxed, String> {
-    let mut timing = job.timing;
-    write_clip(
-        &part_path(&job.path),
-        job,
-        &mut super::mux::produce,
-        &AtomicBool::new(false),
-        &mut timing,
-    )
 }
 
 /// Keep the writer below `recall-encoder` so a save never competes with
@@ -454,21 +428,8 @@ fn lower_thread_priority(events: &Events) {
 /// Build a Moments-convention clip path: `<Game>__<YYYY-MM-DD>__<HH-MM-SS>.mp4`.
 /// Non-filename characters in the source name become dashes.
 pub fn clip_path(out_dir: &str, source: &str) -> String {
-    let mut name: String = source
-        .chars()
-        .map(|c| {
-            if c.is_alphanumeric() || c == ' ' || c == '-' || c == '_' {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>()
-        .trim()
-        .replace(' ', "-");
-    if name.is_empty() {
-        name = "Desktop".to_string();
-    }
+    // The `naming::source_slug` rule, at most `naming::SLUG_MAX` characters.
+    let name = crate::naming::source_slug(source);
     let stamp = chrono::Local::now().format("%Y-%m-%d__%H-%M-%S-%3f");
     let suffix = uuid::Uuid::new_v4().simple();
     std::path::Path::new(out_dir)
@@ -480,5 +441,11 @@ pub fn clip_path(out_dir: &str, source: &str) -> String {
 #[cfg(test)]
 #[path = "saver_tests.rs"]
 mod tests;
+#[cfg(test)]
+#[path = "saver_giveup_tests.rs"]
+mod giveup_tests;
 #[path = "saver_writing.rs"]
 mod writing;
+#[allow(unused_imports)]
+pub(super) use writing::write_now;
+pub(crate) use writing::{write_clip, write_clip_to};

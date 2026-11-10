@@ -124,6 +124,7 @@ pub struct Controller {
     /// targets ignored, capture actions refused. A restart resumes.
     pub(crate) paused: bool,
     pub(crate) setup_owner: Option<u32>,
+    pub(crate) owner_watch: Option<crate::record_setup_owner::OsOwner>,
     /// Saves / long recording in flight (from engine events).
     pub(crate) activity: EngineActivity,
     pub(crate) engine_events: Receiver<serde_json::Value>,
@@ -164,6 +165,8 @@ pub struct Controller {
     /// The shutdown block reason, held while a save is written (`record_session_end`).
     pub(crate) block_reason: crate::record_session_save::BlockReason,
     pub(crate) session_end: crate::record_session_save::SessionEnd,
+    /// The awake-only clock every save, settle and quit timer reads (`awake_clock`).
+    pub(crate) clock: Box<dyn crate::awake_clock::Clock>,
 }
 
 /// Entry point. Returns the process exit code.
@@ -171,7 +174,10 @@ pub fn run() -> i32 {
     let store = ConfigStore::user();
     let file_cfg = store.load();
     let overrides = EnvOverrides::from_env();
-    let cfg = overrides.apply(&file_cfg);
+    let mut cfg = overrides.apply(&file_cfg);
+    // Never record into a linked folder: logged, and shown to every client that joins in the
+    // first minute (the overlay starts after this).
+    let folder_notice = crate::record_link_guard::guard(&mut cfg, None, &crate::record_link_guard::read_links());
     if !overrides.is_empty() {
         log!("record: startup environment overrides active: {overrides:?}");
     }
@@ -197,7 +203,7 @@ pub fn run() -> i32 {
     if !crate::hdr_gate::enabled() {
         log!("record: HDR features shelved (experimental); no display setting will change");
     } else if cfg.behavior.hdr_auto {
-        if let Err(e) = hdr.activate(&cfg) {
+        if let Err(e) = hdr.activate(&cfg, crate::system_notice::Origin::Automatic) {
             log!("record: hdr_auto is on but HDR management could not start: {e}");
         }
     } else {
@@ -236,7 +242,7 @@ pub fn run() -> i32 {
         last_hdr_event: String::new(),
         last_fired: Default::default(),
         hotkey_problems: Vec::new(),
-        pending_notice: None,
+        pending_notice: folder_notice.map(|n| (crate::record_notice::shortcut_notice_json("Recordings folder", &n, true, true), now + Duration::from_secs(60))),
         last_probe: now,
         last_hdr_refresh: now,
         last_fed: None,
@@ -248,6 +254,7 @@ pub fn run() -> i32 {
         primary: crate::record_monitor::PrimaryWatch::new(crate::record_monitor::read_primary(), now),
         quit: None,
         paused: setup_owner.is_some(),
+        owner_watch: setup_owner.map(crate::record_setup_owner::OsOwner::open),
         setup_owner,
         activity: EngineActivity::default(),
         engine_events,
@@ -268,6 +275,7 @@ pub fn run() -> i32 {
         session_watch: Default::default(),
         shut_down: false,
         quit_wait: Default::default(),
+        clock: Box::new(crate::awake_clock::AwakeClock),
         block_reason: Default::default(),
         session_end: Default::default(),
     };
@@ -298,6 +306,11 @@ pub fn run() -> i32 {
 }
 
 impl Controller {
+    /// Now on the awake-only clock: what the activity's timers read.
+    pub(crate) fn awake(&self) -> crate::awake_clock::Awake {
+        self.clock.awake()
+    }
+
     fn pump(&mut self, watch_rx: &Receiver<WatchEvent>, ctl_rx: &Receiver<Inbound>) -> i32 {
         loop {
             let timeout = crate::record_quit_wait::pump_wait_ms(self.quit.is_some(), self.next_deadline(), Instant::now(), MAX_WAIT_MS);
@@ -306,7 +319,9 @@ impl Controller {
             }
             // Drives the WinEvent hook callback, tray menu, hotkeys and the session window.
             if crate::record_session_win::drain_messages(self) {
-                log!("record: WM_QUIT received");
+                if self.quit.is_none() {
+                    log!("record: WM_QUIT received");
+                }
                 self.quit.get_or_insert(QuitReason::WindowsQuit);
             }
             if self.shut_down {
@@ -338,7 +353,7 @@ impl Controller {
                 self.quitting_tick(now);
                 continue;
             }
-            self.power_tick(now);
+            crate::record_power_host::PowerHost::power_tick(self);
             self.session_tick(now);
             self.tick(now);
         }
@@ -350,6 +365,7 @@ impl Controller {
             self.planner.linger_deadline(),
             self.hdr.next_deadline(),
             self.janitor.next_deadline(),
+            self.overlay.deadline(),
         ]
         .into_iter()
         .flatten()
@@ -382,7 +398,7 @@ impl Controller {
             self.note_commit();
         }
         self.plan_engine(now);
-        self.hdr.tick(now);
+        self.hdr_tick(now);
         let hellos = self.supervisor.hello_count();
         if hellos != self.seen_hello {
             self.seen_hello = hellos;
@@ -392,6 +408,7 @@ impl Controller {
             self.activity.engine_restarted();
             self.reapply_engine_intents();
         }
+        self.setup_owner_tick();
         self.activity_tick(now);
         self.encoder_recover_tick(now);
         self.overlay.sync(&self.cfg.overlay);

@@ -195,9 +195,9 @@ mod tests {
 
     #[test]
     fn an_exe_reads_its_own_display_name() {
-        // The test binary has no version resource; a Windows exe always does.
+        // The test binary carries Recall's version resource (build.rs): FileDescription "Recall".
         let own = std::env::current_exe().unwrap();
-        assert_eq!(app_from_path(&own).label, exe_stem(&own.file_name().unwrap().to_string_lossy()));
+        assert_eq!(app_from_path(&own).label, "Recall");
         let windir = std::env::var("WINDIR").unwrap_or_else(|_| r"C:\Windows".into());
         let notepad = Path::new(&windir).join("System32").join("notepad.exe");
         if notepad.exists() {
@@ -213,6 +213,9 @@ mod tests {
     #[test]
     #[ignore = "live hardware: lists this PC's endpoints and sessions, opens process loopback"]
     fn live_inventory() {
+        if !crate::hw_gate::enabled("live_inventory") {
+            return;
+        }
         let lists = crate::services::audio_devices::enumerate_blocking();
         eprintln!("default output: {:?}\ndefault input: {:?}", lists.default_output, lists.default_input);
         lists.outputs.iter().for_each(|n| eprintln!("output: {n}"));

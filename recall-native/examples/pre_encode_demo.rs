@@ -2,6 +2,12 @@
 //! Set RECALL_FOLDERS (a sandbox folders.json whose recordings folder holds the copy),
 //! RECALL_CACHE_DIR and RECALL_ENGINE first, so nothing lands in the real library.
 //! Usage: pre_encode_demo <clip copy> <start s> <end s> [max MB]
+#[path = "../src/build_flavor.rs"]
+mod build_flavor;
+#[allow(dead_code)]
+#[path = "../src/user_dirs.rs"]
+mod user_dirs;
+pub(crate) use build_flavor::TESTING;
 #[path = "../../recall/src/edit_model.rs"]
 mod edit_model;
 #[allow(dead_code)]
@@ -16,6 +22,9 @@ mod win_volume;
 #[allow(dead_code)]
 #[path = "../../recall/src/file_id.rs"]
 mod file_id;
+#[allow(dead_code)]
+#[path = "../../recall/src/same_bytes.rs"]
+mod same_bytes;
 #[path = "../src/backend.rs"]
 #[allow(dead_code)]
 mod backend;

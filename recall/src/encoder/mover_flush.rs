@@ -45,8 +45,7 @@ mod tests {
 
     #[test]
     fn a_moved_clip_and_its_folder_flush_on_this_machine() {
-        let dir = std::env::temp_dir().join(format!("recall-flush-{}", uuid::Uuid::new_v4().simple()));
-        std::fs::create_dir_all(&dir).unwrap();
+        let dir = crate::encoder::test_scratch::scratch("recall-flush", "dir");
         let clip = dir.join("G.mp4");
         std::fs::write(&clip, b"clip").unwrap();
         assert!(flush_dest(&clip).is_ok(), "{:?}", flush_dest(&clip));

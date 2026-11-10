@@ -236,7 +236,7 @@ Run-Scenario 'editor: a press on a handle or the timeline is no edit' {
   $a = Settle $s 900
   Scrub $s 3 5
   $b = Settle $s 900
-  Verdict @((Ok (-not $a.undo -and $a.saved) "handle press: undo $($a.undo), saved $($a.saved)"), (Ok (-not $b.undo -and $b.saved) "scrub: undo $($b.undo), saved $($b.saved)"), (Ok (-not (Test-Path "$($s.Clip).recall-edit.json")) 'no edit file beside the clip'))
+  Verdict @((Ok (-not $a.undo -and $a.saved) "handle press: undo $($a.undo), saved $($a.saved)"), (Ok (-not $b.undo -and $b.saved) "scrub: undo $($b.undo), saved $($b.saved)"), (Ok (-not (Test-Path (Edit-File $s))) 'no edit file in the sandbox APPDATA'), (Untouched-Beside $s))
 }
 
 Run-Scenario 'editor: Escape during a trim puts it back and stays' {
@@ -282,7 +282,7 @@ Run-Scenario 'editor: the fps field cancels, takes digits only, and leaves with 
 
 Run-Scenario 'editor: Cancel export stops it and leaves nothing behind' {
   $s = $script:current = Start-Viewer 'cancelled' $clips.base
-  $exports = Join-Path (Split-Path $s.Clip) 'exports'
+  $exports = $s.ExportDir # an external clip exports to the recordings folder's exports, never beside it
   Remove-Item $exports -Recurse -Force -ErrorAction SilentlyContinue
   Click $s 'export'
   $on = Wait-Trace $s { param($r) $r.exporting -and $r.targets.'export-cancel' } 3000
@@ -298,7 +298,7 @@ Run-Scenario 'editor: Cancel export stops it and leaves nothing behind' {
   Click $s 'export-cancel'
   $ended = Wait-Trace $s { param($r) -not $r.exporting } 5000
   Verdict @((Ok ([bool]$on) 'the button shows while exporting'), (Ok $writing 'the engine was writing'), (Ok ([bool]$off) 'stopped within 3 s'), (Ok (-not $r.exported -and -not $r.export_error) 'no result and no error'),
-    (Ok ($left.Count -eq 0) "nothing left in exports ($($left.Count) files)"), (Ok ([bool]($again -and $ended)) 'the next export starts and cancels too'))
+    (Ok ($left.Count -eq 0) "nothing left in exports ($($left.Count) files)"), (Ok ([bool]($again -and $ended)) 'the next export starts and cancels too'), (Untouched-Beside $s))
 }
 
 Run-Scenario 'editor: undoing every edit clears Edited' {

@@ -331,19 +331,31 @@ fn tray_icon_rgba() -> (Vec<u8>, u32, u32) {
 // The app layer calls these when it receives `OpenConfig` / `OpenLog`. They live
 // here (not in a shared util) because tray.rs is the only file this agent owns.
 
-/// Open a file with the shell's default handler (`cmd /c start "" <path>`).
-///
-/// Uses an empty title arg (`""`) so a path with spaces isn't mistaken for the
-/// window title by `start`. Best-effort: returns the spawn error as a string.
+/// The ShellExecuteW verb and the NUL-terminated UTF-16 path for [`open_path`].
+fn open_request(path: &std::path::Path) -> (Vec<u16>, Vec<u16>) {
+    use std::os::windows::ffi::OsStrExt;
+    let wide = |s: &std::ffi::OsStr| s.encode_wide().chain(std::iter::once(0)).collect::<Vec<u16>>();
+    (wide(std::ffi::OsStr::new("open")), wide(path.as_os_str()))
+}
+
+/// Open a file with the shell's default handler (ShellExecuteW "open"; no
+/// console helper is started). Best-effort: returns the shell error as a string.
 pub fn open_path(path: &std::path::Path) -> Result<(), String> {
-    use std::{os::windows::process::CommandExt, process::Command};
-    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-    Command::new("cmd")
-        .args(["/C", "start", "", &path.to_string_lossy()])
-        .creation_flags(CREATE_NO_WINDOW)
-        .spawn()
-        .map(|_| ())
-        .map_err(|e| format!("open {}: {e}", path.display()))
+    use windows::core::PCWSTR;
+    use windows::Win32::UI::Shell::ShellExecuteW;
+    use windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let (verb, file) = open_request(path);
+    // SAFETY: both buffers are NUL-terminated and outlive the call.
+    let result = unsafe {
+        ShellExecuteW(None, PCWSTR(verb.as_ptr()), PCWSTR(file.as_ptr()), PCWSTR::null(), PCWSTR::null(), SW_SHOWNORMAL)
+    };
+    // ShellExecuteW reports success as a value greater than 32.
+    let code = result.0 as isize;
+    if code > 32 {
+        Ok(())
+    } else {
+        Err(format!("open {}: shell error {code}", path.display()))
+    }
 }
 
 /// Reveal a file in Explorer with it selected (`explorer /select,<path>`).
@@ -359,6 +371,17 @@ pub fn reveal_in_explorer(path: &std::path::Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_request_is_the_open_verb_and_the_exact_path() {
+        let path = std::path::Path::new(r"C:\Users\a b\AppData\Roaming\recall\config.toml");
+        let (verb, file) = open_request(path);
+        assert_eq!(String::from_utf16(&verb[..verb.len() - 1]).unwrap(), "open");
+        assert_eq!(verb.last(), Some(&0));
+        assert_eq!(String::from_utf16(&file[..file.len() - 1]).unwrap(), path.to_str().unwrap());
+        assert_eq!(file.last(), Some(&0));
+        assert!(!file[..file.len() - 1].contains(&0), "no interior NUL");
+    }
 
     #[test]
     fn icon_rgba_has_correct_byte_length() {

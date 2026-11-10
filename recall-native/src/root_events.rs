@@ -116,17 +116,32 @@ fn cause_text(cause: &str) -> &'static str {
     }
 }
 
+/// A clip the recorder saved: Recall's own. One saved outside the recordings folders (a startup
+/// `-OutDir` override) is listed by exact path so Delete recycles it (`library::recorded`).
+fn note_saved(folders: &crate::services::library::folders::Folders, path: String) {
+    let recordings = crate::backend::library_dir_from(folders);
+    if !crate::services::library::imports::is_owned(std::path::Path::new(&path), &recordings, &folders.former_recordings, &folders.imported) {
+        crate::services::library::recorded::note(&path);
+    }
+    record_interaction(Interaction::Saved(path));
+}
+
 impl Root {
     pub(super) fn on_daemon_event(&mut self, event: DaemonEvent) {
         if let Some((kind, text, detail)) = recording_toast(&event) {
             self.show_toast(kind, text, detail);
         }
         match event {
-            DaemonEvent::Saved { path, seconds, .. } => {
-                record_interaction(Interaction::Saved(path.clone()));
+            DaemonEvent::Saved { path, seconds, partial, .. } => {
+                note_saved(&self.folders, path.clone());
                 let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned());
                 let game = name.as_deref().and_then(|n| n.split("__").next()).map(|g| normalize_game(g).1);
-                self.show_toast(ToastKind::Good, format!("Clip saved · {}", format_duration(seconds as f64)), game);
+                let length = format_duration(seconds as f64);
+                match partial {
+                    // Cut short: never shown as a full save; the clip holds what was written.
+                    Some(why) => self.show_toast(ToastKind::Bad, format!("Clip saved partly · {length}"), Some(why)),
+                    None => self.show_toast(ToastKind::Good, format!("Clip saved · {length}"), game),
+                }
                 self.workers.job(Job::List);
             }
             DaemonEvent::SaveFailed { reason } => self.show_toast(ToastKind::Bad, "Save failed", Some(reason)),
@@ -153,20 +168,21 @@ impl Root {
             | DaemonEvent::RecordingPartlyLocked { .. }
             | DaemonEvent::ShutdownCancelled => {}
             DaemonEvent::RecordingStopped { path, .. } | DaemonEvent::RecordingPartSaved { path } => {
-                record_interaction(Interaction::Saved(path));
+                note_saved(&self.folders, path);
                 self.workers.job(Job::List);
             }
+            DaemonEvent::GameFolderExists { game, folder } => self.on_game_folder_exists(game, folder),
             DaemonEvent::RecordingRecovered { paths, .. } => {
                 // Toast: `recording_toast`. The recovered files reach the library.
                 for path in paths {
-                    record_interaction(Interaction::Saved(path));
+                    note_saved(&self.folders, path);
                 }
                 self.workers.job(Job::List);
             }
             DaemonEvent::RecordingFailed { files, .. } => {
                 // Toast: `recording_toast`. Kept files reach the library.
                 for path in files {
-                    record_interaction(Interaction::Saved(path));
+                    note_saved(&self.folders, path);
                 }
                 self.workers.job(Job::List);
             }

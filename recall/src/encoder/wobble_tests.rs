@@ -125,7 +125,7 @@ impl Loop {
             }
             std::thread::sleep(Duration::from_millis(5));
         }
-        let save = SaveRequest { path: path.to_string_lossy().into_owned(), seconds: 30, end_us: None, at_last_frame: false, requested: Instant::now() };
+        let save = SaveRequest { path: path.to_string_lossy().into_owned(), game: None, seconds: 30, end_us: None, at_last_frame: false, requested: Instant::now() };
         self.saves.send(save).expect("encoder loop is alive");
         // The loop looks at saves between frames, at the latest after its 100 ms wait.
         self.clip_secs.recv_timeout(Duration::from_secs(5)).expect("the save reached the saver")

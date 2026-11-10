@@ -32,15 +32,12 @@
 use std::time::{Duration, Instant};
 
 use crate::config::Config;
-use crate::engine_policy::EngineSpec;
-use crate::record_engine_ctl::{switch_engine, EngineSwitch};
 use crate::record_activity::{EngineActivity, LongRec, PendingPause, Trigger};
 use crate::record_config::RecordingCfg;
 use crate::record_detect::{fed_key, FedKey};
-use crate::record_drain::drain_len;
-use crate::record_engine::{capture_refusal, wanted, EnginePlanner, EngineTarget, Step, EXIT_LINGER};
+use crate::record_engine::{capture_refusal, wanted, EnginePlanner, EngineTarget, EXIT_LINGER};
 use crate::record_notice::{NoticeTracker, Situation};
-use crate::record_restart::{pending_restart_tick, request_settings_restart, restart_engine, restart_for_recovery, RestartHost, RestartReason, Restarted};
+use crate::record_restart::{pending_restart_tick, request_settings_restart, restart_engine, restart_for_recovery, RestartReason, Restarted};
 use crate::record_target::{Target, TargetTracker, START_DEBOUNCE, TARGET_DEBOUNCE};
 use crate::record_transition::Transitions;
 use crate::watcher::WatchEvent;
@@ -96,6 +93,9 @@ pub struct Sim {
     pub notices_said: Vec<Situation>,
     /// Ticks the planner answered `Step::Held`.
     pub held_ticks: u32,
+    /// `Controller::retarget_held`, and the releases the planner settled (`release_settled`).
+    pub retarget_held: bool,
+    pub settles: u32,
     /// The client area every focused window reports (`watcher::client_size`).
     pub client: (i32, i32),
     /// The pinned window (`Controller::pinned`).
@@ -118,40 +118,19 @@ pub struct Sim {
     pub probe_fails: bool,
     /// The window the render check is asked about (`RenderCheck::wanted`).
     checked: Option<(u32, isize)>,
-}
-
-/// A supervisor call (`record_engine_ctl::switch_engine`); `stop`: to Off (no spec).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Switch {
-    Retarget { stop: bool },
-    Restart { stop: bool, planned: bool },
-    /// `Supervisor::pause`.
-    Pause,
-}
-
-/// Records the calls in place of the supervisor.
-#[derive(Debug, Default)]
-pub struct SwitchLog(pub std::cell::RefCell<Vec<Switch>>);
-
-impl EngineSwitch for SwitchLog {
-    fn switch_to(&self, spec: Option<EngineSpec>) {
-        self.0.borrow_mut().push(Switch::Retarget { stop: spec.is_none() });
-    }
-    fn restart_to(&self, spec: Option<EngineSpec>, planned: bool) {
-        self.0.borrow_mut().push(Switch::Restart { stop: spec.is_none(), planned });
-    }
-    fn pause_to(&self) {
-        self.0.borrow_mut().push(Switch::Pause);
-    }
-}
-
-impl SwitchLog {
-    pub fn last(&self) -> Option<Switch> {
-        self.0.borrow().last().copied()
-    }
-    pub fn count(&self) -> usize {
-        self.0.borrow().len()
-    }
+    /// The engine says `stop_capture` / `drain_heartbeat` in its hello (older ones do not).
+    pub engine_releases: bool,
+    pub engine_heartbeats: bool,
+    /// Privacy stops that released the engine (`release_engine_to`), with the next target:
+    /// capture stopped, saves in flight finish, then that target starts.
+    pub released: Vec<(Instant, EngineTarget)>,
+    /// Time the simulated PC slept (`Sim::sleep_for`): it moves `now`, never the awake clock.
+    slept: Duration,
+    /// Sleep and resume (`Controller::power`), the notices queued for the next `power_tick`
+    /// (`Sim::power_notice`), and the `save_failed` lines the controller put on the hub.
+    pub power: crate::record_power::PowerPlanner,
+    pub power_notices: Vec<u32>,
+    pub hub_events: Vec<String>,
 }
 
 impl Sim {
@@ -174,6 +153,8 @@ impl Sim {
             sent: Vec::new(),
             notices_said: Vec::new(),
             held_ticks: 0,
+            retarget_held: false,
+            settles: 0,
             client: (1920, 1080),
             pinned: None,
             island_said: Vec::new(),
@@ -185,6 +166,13 @@ impl Sim {
             not_games: Vec::new(),
             probe_fails: false,
             checked: None,
+            engine_releases: true,
+            engine_heartbeats: true,
+            released: Vec::new(),
+            slept: Duration::ZERO,
+            power: Default::default(),
+            power_notices: Vec::new(),
+            hub_events: Vec::new(),
         }
     }
 
@@ -252,36 +240,24 @@ impl Sim {
 
     pub fn tick(&mut self) {
         let now = self.now;
-        if self.pending_pause.map(|p| p.ready(&mut self.activity, now)) == Some(true) {
+        let awake = self.awake();
+        if self.pending_pause.map(|p| p.ready(&mut self.activity, awake)) == Some(true) {
             self.apply_pause(true);
         }
         self.feed_drain(now);
         self.poll_with_verdicts(now);
-        self.planner.set_drain_len(drain_len(self.buffered, self.rec.buffer_secs));
-        let busy = self.activity.retarget_busy(now);
-        let drained = self.running_drain(now);
-        match self.planner.step(&self.wanted(), now, busy) {
-            Step::Apply(target) => {
-                self.note_drain_cut(drained.as_ref(), &target);
-                self.applied_engine(target)
-            }
-            Step::Held => self.held_ticks += 1,
-            // `plan_engine`: one record_stop per recording, the retarget follows its stop.
-            Step::StopLongRec { game_closed } => {
-                let game_closed = self.closed_game(game_closed);
-                if self.activity.auto_stop(now, game_closed) {
-                    self.sent.push(("record_stop".into(), self.engine().clone()));
-                }
-            }
-            Step::Keep => {}
-        }
+        crate::record_plan::PlanHost::plan_tick(self, now); // `plan_engine`
         pending_restart_tick(self); // `activity_tick`
         self.announce();
     }
 
     fn applied_engine(&mut self, target: EngineTarget) {
-        if target != EngineTarget::Off {
-            // The new engine's hello (`record_app::tick`): nothing of the old one is in flight.
+        // The new engine's hello (`record_app::tick`): nothing of the old one is in flight. A
+        // released engine drains first (the slot admits one recorder): its saves stay counted
+        // until it exits (`Sim::engine_exited`), as on the controller.
+        if target != EngineTarget::Off && self.activity.release().is_none() {
+            let exited = serde_json::json!({"type": crate::supervisor::ENGINE_EXITED});
+            let _ = self.activity.on_event(&exited, 0.0); // the old engine's exit is read first
             self.activity.engine_restarted();
         }
         // `apply_engine_target`: any (re)start or stop picks up the current settings.
@@ -299,7 +275,7 @@ impl Sim {
         restart_engine(self, reason)
     }
 
-    /// A recovery restart: `Controller::restart_for_recovery` (the real helper).
+    /// A recovery restart: `record_restart::restart_for_recovery` (the real helper).
     pub fn recover(&mut self) -> Restarted {
         restart_for_recovery(self)
     }
@@ -335,10 +311,11 @@ impl Sim {
 
     /// `save_clip`: `true` when the engine was asked.
     pub fn save(&mut self) -> bool {
-        if capture_refusal(self.paused, self.engine_running(), &self.wanted()).is_some() {
+        if capture_refusal(self.paused, self.engine_running(), &self.wanted()).is_some() || self.planner.privacy_command_refusal("save_clip", self.activity.is_recording()).is_some() {
             return false;
         }
-        self.activity.save_sent(self.now);
+        let now = self.awake();
+        self.activity.save_sent(now);
         self.sent.push(("save_clip".into(), self.engine().clone()));
         true
     }
@@ -355,7 +332,8 @@ impl Sim {
 
     /// Alt+L on an idle engine, and the engine reporting it started.
     pub fn long_start(&mut self) {
-        self.activity.record_requested(self.now);
+        let now = self.awake();
+        self.activity.record_requested(now);
         self.sent.push(("record_start".into(), self.engine().clone()));
         self.activity.on_event(&serde_json::json!({"type": "recording_started", "path": "r.mp4"}), 1.0);
     }
@@ -370,7 +348,8 @@ impl Sim {
 
     pub fn pause(&mut self) {
         if !self.paused && self.engine_running() {
-            if let Some(wait) = PendingPause::needed(&mut self.activity, self.now) {
+            let now = self.awake();
+            if let Some(wait) = PendingPause::needed(&mut self.activity, now) {
                 if self.activity.long != LongRec::Idle {
                     self.sent.push(("record_stop".into(), self.engine().clone()));
                 }
@@ -397,16 +376,6 @@ impl Sim {
         if self.planner.pause() {
             self.applied_engine(EngineTarget::Off); // `apply_engine_target(Off)`
         }
-    }
-
-    /// Engine spawns (not stops) since `since`.
-    pub fn spawns_since(&self, since: Instant) -> usize {
-        self.applied.iter().filter(|(at, t)| *at > since && *t != EngineTarget::Off).count()
-    }
-
-    /// No engine (re)spawn or stop since `since`: the replay ring is the same one.
-    pub fn ring_kept_since(&self, since: Instant) -> bool {
-        self.applied.iter().all(|(at, _)| *at <= since)
     }
 
     pub fn current(&self) -> Option<&Target> {
@@ -449,6 +418,28 @@ impl Transitions for Sim {
     fn apply_now(&mut self, target: &EngineTarget) {
         self.applied_engine(target.clone());
     }
+    fn release_now(&mut self, target: &EngineTarget) -> bool {
+        if self.engine_releases {
+            self.pending_restart = None; // `apply_engine_target_how`
+            self.released.push((self.now, target.clone()));
+        }
+        self.engine_releases
+    }
+    fn saving(&mut self) -> bool {
+        self.activity.save_in_flight() // as `Controller::saving`
+    }
+    fn activity_mut(&mut self) -> &mut EngineActivity {
+        &mut self.activity
+    }
+    fn engine_heartbeats(&self) -> bool {
+        self.engine_heartbeats
+    }
+    fn awake_now(&self) -> crate::awake_clock::Awake {
+        self.awake()
+    }
+    fn now(&self) -> Instant {
+        self.now
+    }
     fn pinned(&self) -> Option<&Target> {
         self.pinned.as_ref()
     }
@@ -466,33 +457,17 @@ impl Transitions for Sim {
     }
 }
 
-/// The Sim as the controller's restart host: the same planner, activity and flag fields.
-impl RestartHost for Sim {
-    fn restart_planner(&mut self) -> &mut EnginePlanner {
-        &mut self.planner
-    }
-    fn restart_busy(&mut self) -> bool {
-        self.activity.busy(self.now)
-    }
-    fn restart_wanted(&self) -> EngineTarget {
-        self.wanted()
-    }
-    fn restart_pending(&mut self) -> &mut Option<RestartReason> {
-        &mut self.pending_restart
-    }
-    fn restart_apply(&mut self, target: &EngineTarget, reason: RestartReason) {
-        // As `Controller::restart_apply` -> `apply_engine_target_as` -> `switch_engine`.
-        let spec = (*target != EngineTarget::Off).then(EngineSpec::default);
-        switch_engine(&self.switches, spec, reason.refusal());
-        self.applied_engine(target.clone());
-    }
-    fn restart_notice(&mut self, title: &str, detail: &str) {
-        self.island_said.push((title.into(), detail.into()));
-    }
-    fn restart_log(&mut self, line: &str) {
-        self.notes.push(line.into());
-    }
-}
+/// The Sim's awake-only clock and sleep, and the ring checks, split out for file size.
+#[path = "transitions_sim_clock.rs"]
+mod clock;
+
+/// The Sim as the controller's restart and power hosts (`record_restart`, `record_power_host`).
+#[path = "transitions_sim_hosts.rs"]
+mod hosts;
+
+#[path = "transitions_sim_switch.rs"]
+mod switch;
+pub use switch::{Switch, SwitchLog};
 
 /// The proof rule, the simulated render verdicts and `recheck_registration` (R8-detect-2,
 /// -5, -6), split out for file size.

@@ -82,11 +82,21 @@ fn token_sid(pid: u32) -> Result<String, String> {
 fn wts_sid(pid: u32) -> Result<String, String> {
     use windows::Win32::System::RemoteDesktop::{WTSEnumerateProcessesExW, WTSFreeMemoryExW, WTSTypeProcessInfoLevel1, WTS_PROCESS_INFO_EXW};
 
-    let mut level = 1u32;
+    let mut level: u32;
     let mut list = PWSTR::null();
     let mut count = 0u32;
-    // SAFETY: out-parameters; the list is freed with WTSFreeMemoryExW below.
-    unsafe { WTSEnumerateProcessesExW(None, &mut level, WTS_ANY_SESSION, &mut list, &mut count) }.map_err(|e| format!("process list: {e}"))?;
+    // The list can change size while Windows builds it (ERROR_BAD_LENGTH, 0x80070018, seen under
+    // heavy process churn): ask again a few times before giving up.
+    let mut tries = 0;
+    loop {
+        level = 1;
+        // SAFETY: out-parameters; the list is freed with WTSFreeMemoryExW below.
+        match unsafe { WTSEnumerateProcessesExW(None, &mut level, WTS_ANY_SESSION, &mut list, &mut count) } {
+            Ok(()) => break,
+            Err(e) if e.code() == windows::Win32::Foundation::ERROR_BAD_LENGTH.to_hresult() && tries < 4 => tries += 1,
+            Err(e) => return Err(format!("process list: {e}")),
+        }
+    }
     // SAFETY: level 1 returns `count` WTS_PROCESS_INFO_EXW rows at `list`.
     let rows = unsafe { std::slice::from_raw_parts(list.0 as *const WTS_PROCESS_INFO_EXW, count as usize) };
     let sid = match rows.iter().find(|row| row.ProcessId == pid) {

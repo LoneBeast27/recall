@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use serde_json::{json, Value};
 
 use super::*;
+use crate::awake_clock::Awake;
 use crate::record_activity::EngineActivity;
 use crate::record_quit::QuitReason;
 
@@ -26,7 +27,7 @@ fn the_quit_wait_sleeps_even_when_a_deadline_has_passed() {
 #[test]
 fn a_second_quit_during_the_save_wait_quits_at_once_and_reports_the_loss() {
     // R6-overlay-5: a long save holds the quit; a 2nd tray Quit stops waiting.
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
     a.save_sent(t0);
     let reason = on_quit_request(None, QuitReason::TrayMenu, false, t0, &mut q);
@@ -41,7 +42,7 @@ fn a_second_quit_during_the_save_wait_quits_at_once_and_reports_the_loss() {
 
 #[test]
 fn which_repeat_counts_as_quit_now() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let a_wait = || {
         let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
         a.save_sent(t0);
@@ -94,7 +95,7 @@ fn the_pipe_says_whether_a_quit_is_finishing_a_clip() {
 
 #[test]
 fn the_finishing_bytes_come_from_the_engines_save_report() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut a = EngineActivity::default();
     a.save_sent(t0);
     a.on_engine_event(&json!({"type":"status","save_writing":{"bytes":4_000_000,"queued":0,"step":12}}), 0.0, t0);
@@ -106,7 +107,7 @@ fn the_finishing_bytes_come_from_the_engines_save_report() {
 #[test]
 fn a_repeated_plain_pipe_quit_joins_the_wait_and_only_force_stops_now() {
     // R7-overlay-1: "Stop recorder" clicked twice must not throw the clip away.
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
     a.save_sent(t0);
     let r = on_quit_request(None, QuitReason::ControlPipe, false, t0, &mut q);
@@ -126,7 +127,7 @@ fn a_repeated_plain_pipe_quit_joins_the_wait_and_only_force_stops_now() {
     assert!(!quit_force(&json!({"cmd": "quit"})) && !quit_force(&json!({"cmd": "quit", "force": "yes"})));
 }
 
-fn a_wait_at(t0: Instant) -> QuitWait {
+fn a_wait_at(t0: Awake) -> QuitWait {
     let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
     a.save_sent(t0);
     q.step(&mut a, t0);
@@ -135,7 +136,7 @@ fn a_wait_at(t0: Instant) -> QuitWait {
 
 #[test]
 fn a_second_tray_quit_forces_only_a_second_after_the_first() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
     a.save_sent(t0);
     let r = on_quit_request(None, QuitReason::TrayMenu, false, t0, &mut q);
@@ -149,7 +150,7 @@ fn a_second_tray_quit_forces_only_a_second_after_the_first() {
 #[test]
 fn a_quit_asked_during_a_sign_out_wait_survives_a_cancelled_sign_out() {
     // R7-overlay-4: the installer's quit must not vanish with the cancelled sign-out.
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut q = a_wait_at(t0);
     let r = on_quit_request(Some(QuitReason::SessionEnd), QuitReason::ControlPipe, false, t0 + Duration::from_secs(1), &mut q);
     assert_eq!(r, Some(QuitReason::SessionEnd));
@@ -158,4 +159,73 @@ fn a_quit_asked_during_a_sign_out_wait_survives_a_cancelled_sign_out() {
     // A sign-out alone, cancelled: nothing goes on.
     let mut q = a_wait_at(t0);
     assert_eq!(resume_after_session_end(&mut q), None);
+}
+
+#[test]
+fn a_held_sign_out_is_reported_until_a_plain_quit_joins_it() {
+    // Item 10: an installer sends its own quit only while the quit is the sign-out's alone.
+    let t0 = Awake::ZERO;
+    let mut q = a_wait_at(t0);
+    assert!(sign_out_only(Some(QuitReason::SessionEnd), &q), "quit_for_sign_out: send a plain quit");
+    let r = on_quit_request(Some(QuitReason::SessionEnd), QuitReason::ControlPipe, false, t0 + Duration::from_secs(1), &mut q);
+    assert!(!q.forced, "a plain quit never forces the save");
+    assert!(!sign_out_only(r, &q), "joined: no further quit needed");
+    assert!(!sign_out_only(Some(QuitReason::ControlPipe), &QuitWait::default()), "an installer's quit is pending, not a sign-out's");
+    assert!(!sign_out_only(None, &QuitWait::default()));
+}
+
+/// Design P16 (B13), never lose a clip: quit (or sign-out) with a save still being written past
+/// its 10 min cap. The cap let its queue go, so it no longer counts as writing; the quit used to
+/// give it up at once (and the engine was killed 8 s later). Now it waits while the engine
+/// reports progress, up to 30 min awake from the quit, then reports it lost (the engine keeps
+/// what it wrote).
+#[test]
+fn a_quit_with_a_save_past_its_cap_waits_while_it_moves_then_reports_it_lost() {
+    let t0 = Awake::ZERO;
+    let s = Duration::from_secs;
+    let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
+    a.save_sent(t0);
+    let feed = |a: &mut EngineActivity, sec: u64| {
+        let line = json!({"type":"status","save_writing":{"bytes":sec,"queued":0,"step":sec + 1}});
+        a.on_engine_event(&line, 0.0, t0 + s(sec));
+        let _ = a.retarget_busy(t0 + s(sec)); // the pump's reads: the cap runs here
+    };
+    for sec in (0..=660u64).step_by(5) {
+        feed(&mut a, sec);
+    }
+    let quit = t0 + s(661);
+    assert!(!a.saves_writing(quit), "setup: past its cap the save no longer holds restarts");
+    assert_eq!(q.step(&mut a, quit), QuitStep::Wait { first: true }, "still moving: the quit waits");
+    let end = 661 + QUIT_PAST_CAP_WAIT.as_secs();
+    let mut out = Vec::new();
+    for sec in (665..=end + 10).step_by(5) {
+        feed(&mut a, sec);
+        out.push((sec, q.step(&mut a, t0 + s(sec))));
+    }
+    let lost = out.iter().find(|(_, o)| matches!(o, QuitStep::Lost(_))).expect("the wait is bounded");
+    assert_eq!(lost.1, QuitStep::Lost(1));
+    assert!((end..end + 5).contains(&lost.0), "lost at 30 min awake from the quit: {} (quit at 661)", lost.0);
+    assert!(out.iter().take_while(|(sec, _)| *sec < end).all(|(_, o)| matches!(o, QuitStep::Wait { first: false })));
+
+    // Progress stops past the cap: lost once the mark is 10 s old, not 30 min later.
+    let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
+    a.save_sent(t0);
+    for sec in (0..=660u64).step_by(5) {
+        feed(&mut a, sec);
+    }
+    assert!(matches!(q.step(&mut a, t0 + s(661)), QuitStep::Wait { .. }));
+    assert_eq!(q.step(&mut a, t0 + s(670)), QuitStep::Lost(1), "no progress for 10 s: a wedged writer");
+}
+
+/// Design P16: an expired save (no answer for 120 s, no report) is unanswered too.
+#[test]
+fn a_quit_after_a_save_expired_unanswered_reports_it() {
+    let t0 = Awake::ZERO;
+    let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
+    a.save_sent(t0);
+    let quit = t0 + Duration::from_secs(130);
+    assert!(!a.saves_writing(quit), "setup: expired");
+    assert_eq!(q.step(&mut a, quit), QuitStep::Lost(1));
+    a.on_engine_event(&json!({"type":"saved","path":"G__x.mp4"}), 0.0, quit + Duration::from_secs(1));
+    assert_eq!(QuitWait::default().step(&mut a, quit + Duration::from_secs(1)), QuitStep::Go, "answered late: nothing in flight");
 }

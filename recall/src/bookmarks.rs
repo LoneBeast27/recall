@@ -81,12 +81,19 @@ impl Bookmarks {
     /// game closed ends at its last frame, before the request); else the request's end.
     pub fn take_saved(&self, path: &str, seconds: f64, video_end_us: Option<u64>) -> Option<Vec<f64>> {
         let mut s = self.state();
-        let pos = s.pending.iter().position(|(p, _)| p == path)?;
+        // Matched on the file name: the hotkey notes the clip straight in the clip folder and the
+        // saver may move it into a game folder, keeping the (unique) file name.
+        let name = file_name(path);
+        let pos = s.pending.iter().position(|(p, _)| file_name(p) == name)?;
         let (_, requested_end_us) = s.pending.remove(pos)?;
         let end_us = video_end_us.unwrap_or(requested_end_us);
         let span_us = (seconds.max(0.0) * 1_000_000.0).round() as u64;
         Some(window_marks(s.marks.iter().copied(), end_us.saturating_sub(span_us), end_us))
     }
+}
+
+fn file_name(path: &str) -> String {
+    Path::new(path).file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default()
 }
 
 /// Marks inside `[start_us, end_us]`, as seconds from `start_us` rounded to
@@ -171,6 +178,18 @@ mod tests {
         assert_eq!(b.take_saved(r"E:\c\never.mp4", 9.0, None), None, "unknown save");
     }
 
+    /// "Sort clips into game folders": the hotkey notes the clip in the clip folder, the saver
+    /// writes it into the game folder under the same file name; the marks still land on it.
+    #[test]
+    fn marks_follow_a_clip_the_saver_put_in_a_game_folder() {
+        let b = Bookmarks::new(120);
+        b.add(55 * S);
+        b.note_save(r"E:\c\VALORANT__2026-11-10__04-00-00-000__ab.mp4", 60 * S);
+        let placed = r"E:\c\VALORANT\VALORANT__2026-11-10__04-00-00-000__ab.mp4";
+        assert_eq!(b.take_saved(placed, 10.0, None), Some(vec![5.0]));
+        assert_eq!(b.take_saved(placed, 10.0, None), None, "taken once");
+    }
+
     /// The game closed at 60 s and the save came 30 s later (the countdown): the
     /// clip ends at the last frame, so a mark made at 50 s, before the close,
     /// sits 10 s before the clip's end, not 40 s before the request.
@@ -202,6 +221,7 @@ mod tests {
                 staged: false,
                 staged_path: None,
                 video_end_us: Some(60 * S),
+                partial: None,
             },
         );
         let sidecar = std::fs::read_to_string(sidecar_path(Path::new(&path))).unwrap();
@@ -260,6 +280,7 @@ mod tests {
             staged: true,
             staged_path: Some(staging.join("A.mp4").to_string_lossy().into_owned()),
             video_end_us: None,
+            partial: None,
         };
         on_emit(&b, &saved(&with, 15.0)); // [5 s, 20 s] holds the 10 s mark
         on_emit(&b, &saved(&without, 5.0)); // [35 s, 40 s] holds none

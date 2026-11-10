@@ -1,4 +1,4 @@
-//! Sleep and resume (audit T1). Windows' clock runs on through sleep, so an engine that
+//! Sleep and resume (audit T1). The engine's capture clocks run on through sleep, so an engine that
 //! sleeps with the PC wakes up owing the whole sleep: every audio track, and a running long
 //! recording, would get hours of silence and a frozen frame. The controller answers the
 //! power notices instead:
@@ -6,12 +6,13 @@
 //!   the sleep (a fragmented MP4 also plays up to its last fragment if the stop is cut short).
 //! - Resume (`PBT_APMRESUMEAUTOMATIC`, sent once per wake): the engine restarts as an
 //!   intended restart (a fresh replay buffer, not counted against the supervisor's give-up),
-//!   and the foreground is read again as if it were new. While the engine is still writing a
-//!   save (`EngineActivity::saves_writing`), that restart and re-probe wait for it
-//!   ([`PowerPlanner::gate`]): the restart would abort the save. The suspend is never held.
+//!   and the foreground is read again as if it were new. While a save is still in flight and
+//!   making progress (`EngineActivity::resume_gate`, on the awake-only clock), that restart and
+//!   re-probe wait for it ([`PowerPlanner::gate`]): the restart would abort the save. The
+//!   suspend is never held.
 //!
-//! This module only decides; `record_power_win` registers for the notices and applies the
-//! actions on the pump thread.
+//! This module only decides; `record_power_host` runs the rules and `record_power_win`
+//! registers for the notices and applies the actions on the pump thread.
 //!
 //! The suspend stop is best-effort: the system's power callback only queues the notice and
 //! wakes the pump, it never waits, so a PC that sleeps within a pump tick of the notice can
@@ -40,6 +41,21 @@ impl PowerEvent {
     }
 }
 
+use std::time::Duration;
+
+use crate::awake_clock::Awake;
+
+/// Whether a resume's held restart may go now (`EngineActivity::resume_gate`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResumeGate {
+    /// A save in flight still makes progress: wait.
+    Hold,
+    /// Nothing the restart would cut.
+    Go,
+    /// Go, and report this many saves cut (they stopped, or the bound passed).
+    GoLost(u32),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PowerAction {
     /// Send the engine `record_stop`.
@@ -55,8 +71,9 @@ pub enum PowerAction {
 #[derive(Debug, Default)]
 pub struct PowerPlanner {
     restarted_since_suspend: bool,
-    /// A resume's restart waits for the save being written.
+    /// A resume's restart waits for the save being written (since when, awake).
     held: bool,
+    held_since: Option<Awake>,
 }
 
 impl PowerPlanner {
@@ -76,19 +93,29 @@ impl PowerPlanner {
 }
 
 impl PowerPlanner {
-    /// Every pump tick, with what [`on_event`](Self::on_event) asked for now: a resume's
-    /// restart (and its re-probe) is held while `saving`, then goes on the first tick
-    /// without. Everything else passes through at once.
-    pub fn gate(&mut self, mut actions: Vec<PowerAction>, saving: bool) -> Vec<PowerAction> {
+    /// Every pump tick at `now`, with what [`on_event`](Self::on_event) asked for: a resume's
+    /// restart (and its re-probe) is held while `verdict` says [`ResumeGate::Hold`], then goes
+    /// on the first tick it does not; the saves it cuts come back as the count to report.
+    /// Everything else passes through at once.
+    pub fn gate(&mut self, mut actions: Vec<PowerAction>, now: Awake, verdict: ResumeGate) -> (Vec<PowerAction>, u32) {
         if actions.contains(&PowerAction::RestartEngine) {
+            if !self.held {
+                self.held_since = Some(now);
+            }
             self.held = true;
             actions.retain(|a| !matches!(a, PowerAction::RestartEngine | PowerAction::Reprobe));
         }
-        if self.held && !saving {
-            self.held = false;
-            actions.extend([PowerAction::RestartEngine, PowerAction::Reprobe]);
+        if !self.held || verdict == ResumeGate::Hold {
+            return (actions, 0);
         }
-        actions
+        (self.held, self.held_since) = (false, None);
+        actions.extend([PowerAction::RestartEngine, PowerAction::Reprobe]);
+        (actions, if let ResumeGate::GoLost(n) = verdict { n } else { 0 })
+    }
+
+    /// How long the held restart has waited (awake; zero when none is held yet).
+    pub fn held_for(&self, now: Awake) -> Duration {
+        self.held_since.map_or(Duration::ZERO, |t| now.saturating_duration_since(t))
     }
 
     pub fn held(&self) -> bool {
@@ -197,19 +224,22 @@ mod tests {
 
     #[test]
     fn a_resume_restart_waits_for_the_save_being_written() {
+        use super::ResumeGate::{Go, GoLost, Hold};
         use PowerAction::{Reprobe, RestartEngine, StopRecording};
+        let t = |s| crate::awake_clock::Awake::ZERO + std::time::Duration::from_secs(s);
         let mut planner = PowerPlanner::default();
         let asked = planner.on_event(PowerEvent::Suspend, true);
-        assert_eq!(planner.gate(asked, true), vec![StopRecording], "the suspend is never held");
+        assert_eq!(planner.gate(asked, t(0), Hold), (vec![StopRecording], 0), "the suspend is never held");
         let asked = planner.on_event(PowerEvent::Resume, false);
-        assert_eq!(planner.gate(asked, true), vec![], "a save is still being written: the restart would abort it");
+        assert_eq!(planner.gate(asked, t(10), Hold), (vec![], 0), "a save is still being written: the restart would abort it");
         assert!(planner.held());
-        assert_eq!(planner.gate(Vec::new(), true), vec![], "still writing");
-        assert_eq!(planner.gate(Vec::new(), false), vec![RestartEngine, Reprobe], "the save ended: restart now");
-        assert_eq!(planner.gate(Vec::new(), false), vec![], "once");
+        assert_eq!(planner.held_for(t(25)), std::time::Duration::from_secs(15), "held since the resume, awake");
+        assert_eq!(planner.gate(Vec::new(), t(25), Hold), (vec![], 0), "still writing");
+        assert_eq!(planner.gate(Vec::new(), t(30), Go), (vec![RestartEngine, Reprobe], 0), "the save ended: restart now");
+        assert_eq!(planner.gate(Vec::new(), t(31), Go), (vec![], 0), "once");
         planner.on_event(PowerEvent::Suspend, false);
         let asked = planner.on_event(PowerEvent::Resume, false);
-        assert_eq!(planner.gate(asked, false), vec![RestartEngine, Reprobe], "nothing writing: at once");
+        assert_eq!(planner.gate(asked, t(40), GoLost(2)), (vec![RestartEngine, Reprobe], 2), "the cut saves come back to be reported");
     }
 
     #[test]

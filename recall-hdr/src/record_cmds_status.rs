@@ -16,7 +16,7 @@ impl Controller {
         let wanted = self.wanted();
         let view = self.supervisor.engine_view();
         let hdr = self.hdr.snapshot(&self.cfg);
-        let finishing = self.finishing_now(Instant::now());
+        let finishing = self.finishing_now();
         let mut status = status_json(&StatusInputs {
             wanted: &wanted,
             health: self.supervisor.health(),
@@ -35,10 +35,15 @@ impl Controller {
             hotkey_problems: &self.hotkey_problems,
         });
         crate::record_quit_wait::merge_fields(&mut status, finishing);
+        if crate::record_quit_wait::sign_out_only(self.quit, &self.quit_wait) {
+            status["quit_for_sign_out"] = json!(true);
+        }
         if let Some(owner) = self.setup_owner {
             status["setup_owner"] = json!(owner);
         }
         status["other_recorder"] = json!(self.supervisor.slot_held() != crate::engine_slot::SlotHeld::Free);
+        // R1 + the maintainer: an engine file older than the app asks for a Reinstall button.
+        status["repair"] = crate::record_inputs_held::repair_json(self.supervisor.engine_below_floor());
         status
     }
 

@@ -13,18 +13,22 @@ struct Fake {
     recording: bool,
     /// A `record_stop` is on its way (any sender).
     stopping: bool,
+    /// That stop is the session end's own (`EngineActivity::stop_is_ours`).
+    ours: bool,
     /// Engine drains until a sent stop is reported (`None`: never).
     stops_after: Option<u32>,
     drains: u32,
     /// Whether a start is taken.
     starts: bool,
+    /// A replay save is being written.
+    saving: bool,
     calls: Vec<String>,
     state: SessionState,
 }
 
 impl Fake {
     fn new(recording: bool) -> Self {
-        Fake { t0: Instant::now(), clock: Duration::ZERO, recording, stopping: false, stops_after: Some(3), drains: 0, starts: true, calls: Vec::new(), state: SessionState::default() }
+        Fake { t0: Instant::now(), clock: Duration::ZERO, recording, stopping: false, ours: false, stops_after: Some(3), drains: 0, starts: true, saving: false, calls: Vec::new(), state: SessionState::default() }
     }
 
     fn at(&self, d: Duration) -> Instant {
@@ -37,10 +41,11 @@ impl SessionHost for Fake {
         self.recording
     }
     fn long_state(&self) -> LongState {
-        LongState::of(self.recording, self.stopping)
+        LongState::of(self.recording, self.stopping, self.ours)
     }
     fn send_record_stop_now(&mut self) {
         self.stopping = true;
+        self.ours = true;
         self.calls.push("stop".into());
     }
     fn start_long_recording(&mut self) -> bool {
@@ -53,6 +58,7 @@ impl SessionHost for Fake {
         if self.stopping && self.stops_after.is_some_and(|n| self.drains >= n) {
             self.recording = false;
             self.stopping = false;
+            self.ours = false;
         }
     }
     fn block_shutdown(&mut self, reason: &str) {
@@ -63,6 +69,13 @@ impl SessionHost for Fake {
     }
     fn session_shutdown(&mut self, grace: Duration) {
         self.calls.push(format!("shutdown {}s", grace.as_secs()));
+    }
+    fn saves_in_progress(&mut self) -> bool {
+        self.saving
+    }
+    fn finish_saves(&mut self) {
+        self.calls.push("finish saves".into());
+        self.saving = false;
     }
     fn tell_engine(&mut self, line: &str) {
         self.calls.push(format!("engine {line}"));
@@ -255,4 +268,53 @@ fn the_stop_wait_ends_when_the_recording_reports_stopping_or_after_3_s() {
     stuck.send_record_stop_now();
     assert!(!wait_recording_stopped(&mut stuck, STOP_WAIT));
     assert!(stuck.clock >= STOP_WAIT && stuck.clock < STOP_WAIT + Duration::from_millis(40), "{:?}", stuck.clock);
+}
+
+/// F-overlay-1 (P1): "Sign out anyway" or a forced update restart (`WM_ENDSESSION` TRUE) while
+/// a replay save is written waits it out (bounded) before the 3 s shutdown, in the handler.
+#[test]
+fn a_real_session_end_during_a_save_finishes_it_before_the_shutdown() {
+    let (lender, pending) = (Lender::new(), Mutex::new(Vec::new()));
+    let mut host = Fake::new(false);
+    host.saving = true;
+    assert_eq!(proc(&lender, &mut host, WM_ENDSESSION, 1, &pending), Some(0));
+    let finish = host.calls.iter().position(|c| c == "finish saves").expect("the quit wait runs");
+    let shut = host.calls.iter().position(|c| c.starts_with("shutdown")).unwrap();
+    assert!(finish < shut, "{:?}", host.calls);
+    let mut idle = Fake::new(false);
+    end(&mut idle, true);
+    assert_eq!(idle.calls, ["shutdown 3s"], "no save: straight to the shutdown");
+}
+
+/// F-overlay-1: the same for a session end handled late, from the pump (`session_tick`).
+#[test]
+fn a_late_session_end_during_a_save_finishes_it_before_the_shutdown() {
+    let mut host = Fake::new(false);
+    host.saving = true;
+    let now = host.at(Duration::ZERO);
+    session_tick(&mut host, vec![SessionMsg::End { ending: true }], now);
+    assert_eq!(host.calls, ["finish saves", "shutdown 3s"]);
+    let mut cancelled = Fake::new(false);
+    cancelled.saving = true;
+    session_tick(&mut cancelled, vec![SessionMsg::End { ending: false }], now);
+    assert!(cancelled.calls.is_empty(), "a cancel waits for nothing: {:?}", cancelled.calls);
+}
+
+/// SPEC 26 B: the query's wait timed out (its stop still in flight), then the user sent a
+/// stop of their own: a second query finds someone else's stop, and a cancel restarts nothing.
+/// With only our stop still in flight the cancel restarts it.
+#[test]
+fn a_second_query_during_stopping_keeps_the_arm_only_for_our_own_stop() {
+    for (user_stopped, restarts) in [(true, false), (false, true)] {
+        let (lender, pending) = (Lender::new(), Mutex::new(Vec::new()));
+        let mut fake = Fake::new(true);
+        fake.stops_after = None; // the recording never reports in time
+        proc(&lender, &mut fake, WM_QUERYENDSESSION, 0, &pending);
+        assert!(fake.recording && fake.stopping, "setup: the 3 s wait timed out");
+        fake.ours = !user_stopped; // `stop_sent` from the user's record_stop clears ours
+        proc(&lender, &mut fake, WM_QUERYENDSESSION, 0, &pending);
+        let before = fake.calls.len();
+        proc(&lender, &mut fake, WM_ENDSESSION, 0, &pending);
+        assert_eq!(fake.calls[before..].contains(&"start".to_string()), restarts, "user stopped: {user_stopped}: {:?}", fake.calls);
+    }
 }

@@ -18,7 +18,7 @@ use crate::{App, IDLE_TICK, PERIODIC};
 fn audio_opened() -> Vec<protocol::AudioOpened> {
     audio::sources::opened()
         .into_iter()
-        .map(|o| protocol::AudioOpened { id: o.id, name: o.name, opened: o.opened, live: o.live, adopt_id: o.adopt_id })
+        .map(|o| protocol::AudioOpened { id: o.id, name: o.name, opened: o.opened, live: o.live, adopt_id: o.adopt_id, held: o.held, mutes: o.mutes, retired: o.retired })
         .collect()
 }
 
@@ -30,11 +30,32 @@ fn picture(w: u32, h: u32, rgba: Vec<u8>, content: Option<Rect>) -> (u32, u32, V
     }
 }
 
+/// Why a screenshot pending at the privacy stop is not saved.
+pub(crate) const STOPPED_SHOT: &str = "capture stopped; not saved";
+
+/// The GPU path's shot from `src` (`latest_gpu` live). R2-detect-r10-p6-3 / design P4: the
+/// frame's number is re-checked after the read (`frame_source::read_admitted`), so a stop that
+/// landed after `screenshot_tick`'s own check still refuses a frame stored after it.
+pub(crate) fn shoot(shots: &crate::screenshot::Screenshots, src: &mut dyn crate::frame_source::FrameSource<(u32, u32, Vec<u8>)>, source: &str) {
+    use crate::frame_source::{read_admitted, FrameRead};
+    match read_admitted(src) {
+        FrameRead::Frame((w, h, rgba)) => shots.submit(w, h, rgba, source),
+        FrameRead::Stopped => shots.fail(STOPPED_SHOT),
+        FrameRead::Failed(e) => shots.fail(&format!("frame readback failed: {e}")),
+        FrameRead::Empty => shots.fail("no captured frame yet"),
+    }
+}
+
 impl App {
     /// Encode each newly uploaded capture once, retaining its native timestamp.
     /// A full ingress queue drops a frame instead of blocking capture or growing RAM.
     #[cfg(feature = "encode")]
     pub(super) fn encode_tick(&mut self) {
+        // The privacy stop (gate p5-2): the redraw's `quit` check can come a tick late; no
+        // CPU frame is read back or sent to the encoder after `stop_capture`.
+        if crate::stop_capture::stopped() {
+            return;
+        }
         let Some(enc) = &self.encoder else { return };
         let Some(gpu) = &mut self.gpu else { return };
         let Some(pts_us) = gpu.source_pts_us() else {
@@ -72,14 +93,16 @@ impl App {
         if !shots.take_request() {
             return;
         }
+        // The privacy stop (R2-detect-r10-p5-2): a frame read now may have been captured after
+        // `stop_capture` (the CPU upload, `latest_gpu`); the shot fails, both paths.
+        if crate::stop_capture::stopped() {
+            return shots.fail(STOPPED_SHOT);
+        }
         #[cfg(feature = "encode")]
         if self.gpu.is_none() {
-            let latest = self.shared.as_ref().and_then(|s| {
-                s.latest_gpu.lock().ok().and_then(|f| f.as_ref().and_then(|(f, c)| Some((f.try_clone()?, *c))))
-            });
-            match latest.map(|(f, c)| crate::gpu_frames::read_rgba(&f).map(|(w, h, rgba)| picture(w, h, rgba, c))) {
-                Some(Ok((w, h, rgba))) => shots.submit(w, h, rgba, &self.source_name),
-                Some(Err(e)) => shots.fail(&format!("frame readback failed: {e}")),
+            let read = |f: &crate::gpu_frames::HwFrame, c| crate::gpu_frames::read_rgba(f).map(|(w, h, rgba)| picture(w, h, rgba, c));
+            match self.shared.as_ref() {
+                Some(shared) => shoot(shots, &mut crate::frame_source::LatestGpu { shared, read }, &self.source_name),
                 None => shots.fail("no captured frame yet"),
             }
             return;
@@ -279,6 +302,7 @@ impl App {
             encoder_opening: self.encoder_opening(),
             save_writing: self.save_writing(),
             mic_muted: { #[cfg(feature="encode")] { audio::mic_muted() } #[cfg(not(feature="encode"))] { false } },
+            stdin_ended: crate::engine_stdin::stdin_ended(),
             audio: { #[cfg(feature="encode")] { audio_opened() } #[cfg(not(feature="encode"))] { Vec::new() } },
         });
     }

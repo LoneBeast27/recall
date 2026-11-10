@@ -1,4 +1,4 @@
-//! The record mode's notification-area UI (user ruling 2026-10-22, 03:41 IST:
+//! The record mode's notification-area UI (maintainer ruling, 2026-10-22:
 //! "confirm recall system tray utility too. for start record stop record and
 //! quit"). The menu is exactly: status line (disabled: "Recording VALORANT" /
 //! "Waiting for a game" / "Recording paused") · Open Recall (focus or launch
@@ -365,13 +365,7 @@ impl RecallUi {
             return Vec::new();
         }
         if let Some(path) = self.candidates.iter().find(|p| p.is_file()) {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            if let Ok(child) = Command::new(path)
-                .env_remove("RECALL_NATIVE_BACKGROUND")
-                .creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS.0)
-                .spawn()
-            {
+            if let Ok(child) = ui_command(path).spawn() {
                 self.spawned = Some(child);
                 self.launch_not_before = Some(Instant::now() + Duration::from_secs(4));
             }
@@ -390,6 +384,20 @@ impl RecallUi {
             })
             .collect()
     }
+}
+
+/// The command that starts a UI window. It drops the flags meant only for a window this
+/// controller was started beside: `RECALL_NATIVE_BACKGROUND`, and `RECALL_SETUP` (Setup's
+/// guided first run), which otherwise brought Setup back on every "Open Recall".
+fn ui_command(path: &Path) -> Command {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let mut command = Command::new(path);
+    command
+        .env_remove("RECALL_NATIVE_BACKGROUND")
+        .env_remove("RECALL_SETUP")
+        .creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS.0);
+    command
 }
 
 /// The native UI executables "Open Recall" focuses or launches, in order:
@@ -437,6 +445,17 @@ mod tests {
         assert_eq!(map_id("record_save"), None, "Save replay now left the tray");
         assert_eq!(map_id("record_autostart"), None, "Start with Windows left the tray");
         assert_eq!(MENU_ITEMS, "status,open,pause,separator,quit");
+    }
+    #[test]
+    fn a_launched_window_never_inherits_the_guided_setup_flag() {
+        let command = ui_command(Path::new(r"C:\Recall\recall-native.exe"));
+        let removed: Vec<String> = command
+            .get_envs()
+            .filter(|(_, value)| value.is_none())
+            .map(|(key, _)| key.to_string_lossy().to_ascii_uppercase())
+            .collect();
+        assert!(removed.iter().any(|key| key == "RECALL_SETUP"), "{removed:?}");
+        assert!(removed.iter().any(|key| key == "RECALL_NATIVE_BACKGROUND"), "{removed:?}");
     }
     #[test]
     fn pause_toggle_says_what_a_click_does() {

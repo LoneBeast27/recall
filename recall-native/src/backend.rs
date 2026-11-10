@@ -5,7 +5,7 @@
 //! autosave writes the working project to the SSD and the sidecar beside the clip is only
 //! written by [`flush_project`].
 use crate::edit_model::{ClipInfo, EditPlan, ExportMode, ExportSettings};
-use crate::services::library::{folders::{self, Folders},import_check,watch::WatchRoot};
+use crate::services::library::{folders::{self, Folders},import_check,imports,watch::WatchRoot};
 use crate::services::storage::{self, Priority, ProjectSource};
 use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
@@ -137,11 +137,17 @@ pub fn library_dir_from(folders:&Folders)->PathBuf{
 /// The folders [`list_clips`] reads, in its order.
 /// From folders already read (the listing's copy).
 pub fn clip_roots_from(f:&Folders)->Vec<WatchRoot>{
-    let mut roots=vec![WatchRoot{path:library_dir_from(f),recursive:false}];
+    let recordings=library_dir_from(f);
+    // Game folders Recall made ("Sort clips into game folders"), each watched like the recordings
+    // folder; a new one is picked up by the listing after its first save (every save ends in a
+    // listing). A linked one is watched as its link.
+    let games=folders::game_folders(&recordings,&f.imported);
+    let mut roots=vec![WatchRoot{path:recordings,recursive:false}];
+    roots.extend(games.into_iter().map(|path|WatchRoot{path,recursive:false}));
     roots.extend(f.imported.iter().map(|folder|WatchRoot{path:PathBuf::from(folder),recursive:true}));
     roots
 }
-/// The recordings folder (one listing) plus every imported folder (searched a few levels
+/// The recordings folder (one listing, plus one of each game folder in it) plus every imported folder (searched a few levels
 /// deep), and one listing of the SSD thumbnail tier; a clip's `thumb` is set only when its
 /// thumbnail is already on the SSD (misses are filled by `AssetJob::Thumb` and idle prefetch
 /// through the disk lane). A clip reachable from two folders is listed once.
@@ -169,6 +175,21 @@ pub(crate) fn list_from(dir:&Path,imported:&[String],former:&[String])->Result<(
             let mtime=m.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
             push(path,m.len(),mtime,None);
         }
+        // Game folders Recall made, one level down: recorder clips only (`folders::in_game_folder`).
+        // A marked folder whose marker no longer binds it (drive letter, moved folder) is listed
+        // too, its clips not owned, so they never vanish; one the user hid stays hidden.
+        let bound=folders::game_folders(dir,imported).into_iter().map(|g|(g,true));
+        for (game,is_bound) in bound.chain(folders::unbound_game_folders(dir,imported).into_iter().map(|g|(g,false))){
+            let Ok(listing)=std::fs::read_dir(&game)else{complete=false;continue};
+            for e in listing{
+                let Ok(e)=e else{complete=false;continue};
+                let path=e.path();if !folders::is_recall_named(&e.file_name().to_string_lossy()){continue;}
+                let Ok(m)=e.metadata()else{complete=false;continue};if !m.is_file(){continue;}
+                let mtime=m.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+                if !is_bound&&matches!(imports::status(&path,m.len(),mtime),imports::Status::Skip){continue;}
+                push(path,m.len(),mtime,None);
+            }
+        }
     }else{complete=false;}
     let skip=[storage::cache_root()];
     for root in imported{
@@ -183,11 +204,11 @@ pub(crate) fn list_from(dir:&Path,imported:&[String],former:&[String])->Result<(
 pub fn thumbnail(path:&str)->Result<String,String>{storage::ensure_thumb(path)}
 // The editor save: beside the clip, or on C: for a clip in an imported folder (`backend_edit_place.rs`).
 #[path="backend_edit_place.rs"] mod edit_place;
-pub(crate) use edit_place::{checked_export_dir, export_dir_for, folders_now, overlaps_link};
+pub(crate) use edit_place::{checked_export_dir, export_dir_for, folders_now, link_blocks_write};
 use edit_place::sidecar;
 #[allow(unused_imports)] // the examples build backend.rs without Root, its only caller
 pub use edit_place::share_folders;
-fn validate_info(info:&ClipInfo)->Result<(),String>{
+pub(crate) fn validate_info(info:&ClipInfo)->Result<(),String>{
     let p=std::fs::canonicalize(&info.path).map_err(|e|format!("resolve source: {e}"))?;
     let m=p.metadata().map_err(|e|e.to_string())?;
     let modified=m.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(u64::MAX as u128) as u64;
@@ -205,7 +226,7 @@ fn validate_project(project:&Project,info:&ClipInfo,source:ProjectSource)->Resul
     if source==ProjectSource::WorkingCopy&&elsewhere{return Err("Saved edits belong to a copy of this clip.".into());}
     let name=|p:&str|Path::new(p).file_name().map(|n|n.to_string_lossy().to_lowercase());
     if project.version!=1||name(&project.source_path)!=name(&info.path)||project.source_bytes!=info.source_bytes||project.source_modified_ms!=info.source_modified_ms{return Err("Saved edits belong to another source revision.".into());}
-    validate_fps(project.export_fps)?;
+    validate_fps(project.export_fps.min(MAX_EXPORT_FPS))?;
     project.plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())
 }
 pub(crate) fn modified_ms(m:&std::fs::Metadata)->u64{m.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(u64::MAX as u128) as u64}
@@ -234,9 +255,10 @@ fn run_engine_prepare(input:&Path,lowered:bool,stop:&dyn Fn()->bool)->Result<Cli
 }
 fn lost_publish_race(error:&str)->bool{error.contains("publish cache:")}
 fn run_engine_prepare_once(input:&Path,lowered:bool,stop:&dyn Fn()->bool)->Result<ClipInfo,String>{
-    let mut command=engine_command("prepare-editor")?;command.arg(input).arg(cache_dir()?);
+    let editor=cache_dir()?;let mut command=engine_command("prepare-editor")?;command.arg(input).arg(&editor);
     let limit=prepare_limit(input.metadata().map_or(0,|m|m.len()));
-    let output=storage::run_watched(&mut command,lowered,limit,stop).map_err(|e|format!("prepare media: {e}"))?;
+    // A cut-off engine (another clip opened, the limit) leaves no partial stems behind.
+    let output=storage::run_prepare(&mut command,&editor,lowered,limit,stop).map_err(|e|format!("prepare media: {e}"))?;
     if !output.status.success(){return Err(format!("prepare media: {}",String::from_utf8_lossy(&output.stderr).trim()));}
     serde_json::from_slice(&output.stdout).map_err(|e|format!("read prepared media: {e}"))
 }
@@ -369,7 +391,10 @@ fn recall_generated_path(path:&str)->bool{let stem=Path::new(path).file_stem().a
 #[path="backend_project_tests.rs"] mod project_tests;
 #[cfg(test)]
 #[path="backend_tests.rs"] mod tests;
-fn validate_fps(fps:u32)->Result<(),String>{if fps==0||fps>i32::MAX as u32{Err("Export rate must be a positive integer within the supported range.".into())}else{Ok(())}}
+/// The highest export rate: the largest preset (`editor_state::FPS_PRESETS`). Here, not in
+/// editor_state, because the examples include backend.rs without the editor (11-10 gate fix).
+pub(crate) const MAX_EXPORT_FPS: u32 = 960;
+fn validate_fps(fps:u32)->Result<(),String>{let max=MAX_EXPORT_FPS;if fps==0||fps>max{Err(format!("Export rate must be between 1 and {max} fps."))}else{Ok(())}}
 fn project_bytes(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings)->Result<Vec<u8>,String>{
     validate_fps(fps)?;plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())?;
     let project=Project{version:1,source_path:info.path.clone(),source_bytes:info.source_bytes,source_modified_ms:info.source_modified_ms,plan:plan.clone(),export_fps:fps,export:export.clone()};

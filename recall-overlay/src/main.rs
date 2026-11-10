@@ -4,6 +4,7 @@
 //! notices and, while the stats toggle is on, shows FPS / GPU / CPU.
 
 mod anim;
+mod user_dirs;
 mod app;
 mod badge;
 mod cue;

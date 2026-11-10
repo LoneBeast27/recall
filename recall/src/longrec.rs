@@ -222,9 +222,15 @@ impl<F: SinkFactory> Writer<F> {
         if self.recorder.is_active() {
             return self.events(vec![Event::Log("record_start ignored: a long recording is already running".into())]);
         }
-        let path = naming::longrec_path(&self.out_dir, source, &chrono::Local::now(), Path::exists);
-        if let Err(e) = std::fs::create_dir_all(&self.out_dir) {
-            return self.events(vec![Event::Failed { reason: format!("output folder {}: {e}", self.out_dir), kept: None }]);
+        // Sort clips into game folders: `<out>\<Game>\` when on, checked here on the
+        // long-recording thread (never the hotkey); a folder that is not Recall's game folder now
+        // falls back to `<out>` (`naming::writable_game_dir`).
+        let notes = std::cell::RefCell::new(Vec::new());
+        let dir = naming::clip_dir(&self.out_dir, source, &|line: &str| notes.borrow_mut().push(Event::Log(format!("record: {line}"))));
+        self.events(notes.into_inner());
+        let path = naming::longrec_path(&dir, source, &chrono::Local::now(), Path::exists);
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            return self.events(vec![Event::Failed { reason: format!("output folder {dir}: {e}"), kept: None }]);
         }
         let (generation, video) = self.recorder.factory().newest();
         self.recorder.set_video(video);
@@ -254,10 +260,14 @@ impl<F: SinkFactory> Writer<F> {
                 }
                 events
             }
-            Data::Audio { track, samples, at } => match self.recorder.track_index(track) {
-                Some(i) => self.recorder.audio(i, &samples, at),
-                None => Vec::new(),
-            },
+            Data::Audio { track, samples, at } => {
+                let events = match self.recorder.track_index(track) {
+                    Some(i) => self.recorder.audio(i, &samples, at),
+                    None => Vec::new(),
+                };
+                tap::recycle(samples); // the capture thread reuses it
+                events
+            }
             Data::EncoderReopened { generation, at } => self.encoder_seen(generation, Some(at + self.skew)),
         };
         self.events(events);
@@ -431,6 +441,13 @@ fn stopped(json: bool, path: &Path, stop: Stop) {
 pub fn recover_parts(out_dir: String, json: bool) {
     let _ = std::thread::Builder::new().name("recall-longrec-recover".into()).spawn(move || {
         let mut recovered = Vec::new();
+        // Replay saves cut off in the clip folder (never deleted with a packet in them).
+        for found in crate::encoder::part_recover::recover_replay_parts(Path::new(&out_dir)) {
+            report(json, Event::Log(found.line()));
+            if let crate::encoder::part_recover::Found::Adopted { clip, .. } = found {
+                recovered.push(clip.to_string_lossy().into_owned());
+            }
+        }
         for (part, result) in recover_in(Path::new(&out_dir)) {
             match result {
                 Ok(path) => recovered.push(path.to_string_lossy().into_owned()),
@@ -449,17 +466,31 @@ fn recovered_outbound(paths: Vec<String>) -> Option<Outbound> {
     Some(Outbound::RecordingRecovered { path, paths })
 }
 
-/// Every `*__rec.mp4.part` directly in `dir`, renamed (or the error).
+/// Every `*__rec.mp4.part` directly in `dir` or in one of its game folders (one level down,
+/// "Sort clips into game folders": only folders Recall made, `game_folder_rule`), renamed (or
+/// the error).
 fn recover_in(dir: &Path) -> Vec<(PathBuf, std::io::Result<PathBuf>)> {
     let Ok(listing) = std::fs::read_dir(dir) else { return Vec::new() };
-    listing
-        .flatten()
-        .filter(|e| e.file_type().is_ok_and(|t| t.is_file()))
+    let is_file = |e: &std::fs::DirEntry| e.file_type().is_ok_and(|t| t.is_file());
+    let mut files: Vec<_> = listing.flatten().filter(is_file).collect();
+    for (folder, marker) in crate::game_folder_rule::game_folders_marked(dir) {
+        // In a game folder only the parts on the marker's `writing` list are Recall's: the rest
+        // (a copy, a file the user put there) is left alone.
+        let entries = std::fs::read_dir(folder).into_iter().flatten().flatten().filter(is_file);
+        files.extend(entries.filter(|e| marker.is_writing(&e.file_name().to_string_lossy())));
+    }
+    files
+        .into_iter()
         .filter(|e| naming::is_longrec_part(&e.file_name().to_string_lossy()))
         .map(|e| {
             let part = e.path();
             let target = naming::recovered_path(&part, Path::exists);
             let result = std::fs::rename(&part, &target).map(|_| target);
+            // Renamed: the recovered file is Recall's in a game folder (the rename stands even
+            // when the marker can't be updated; the file then stays unowned).
+            if let Ok(target) = &result {
+                let _ = crate::game_folder_rule::record_saved(target, Some(&part));
+            }
             (part, result)
         })
         .collect()

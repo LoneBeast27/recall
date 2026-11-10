@@ -64,8 +64,8 @@ fn the_check_uses_the_max_rule_and_reads_each_volume_once() {
 
 #[test]
 fn unresolved_folders_are_named_from_the_path_and_the_engine_staging_folder() {
-    let named = resolve_drives(&[PathBuf::from(r"v:\Clips"), PathBuf::from(r"\\NAS\Clips\x")], |_| None);
-    assert_eq!(named.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(), vec!["V:", r"\\nas\clips"]);
+    let named = resolve_drives(&[PathBuf::from(r"x:\Clips"), PathBuf::from(r"\\NAS\Clips\x")], |_| None);
+    assert_eq!(named.iter().map(|(l, _)| l.as_str()).collect::<Vec<_>>(), vec!["X:", r"\\nas\clips"]);
     let engine = Path::new(r"F:\Programs\Recall\recall.exe");
     assert_eq!(staging_dir(None, Some(engine)), Some(PathBuf::from(r"F:\Programs\Recall\cache\staging")));
     assert_eq!(staging_dir(Some(r"D:\stage"), Some(engine)), Some(PathBuf::from(r"D:\stage")));
@@ -85,7 +85,7 @@ fn real_free_space_answers_for_a_folder_not_made_yet() {
     assert!(free_bytes(&missing).is_some_and(|b| b > 0), "asks the nearest existing folder");
 }
 
-/// A folder in this checkout (L: here) reached through a junction under %TEMP% (C: here).
+/// A folder in this checkout (a data drive here) reached through a junction under %TEMP% (C: here).
 fn junction_pair() -> (PathBuf, PathBuf) {
     use std::os::windows::process::CommandExt;
     let id = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();

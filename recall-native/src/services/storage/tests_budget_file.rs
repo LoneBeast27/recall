@@ -59,7 +59,7 @@ fn only_a_missing_storage_file_gets_the_first_run_pick_written() {
 
 #[test]
 fn a_20_gib_budget_on_the_system_drive_stays_20_gib() {
-    // Rohan's real storage.json (cache on C:, budget kept at 20 GiB): the C2 2 GiB first-run
+    // The maintainer's real storage.json (cache on C:, budget kept at 20 GiB): the C2 2 GiB first-run
     // rule never touches it.
     let root = root("twenty");
     assert!(super::drive::on_system_drive(&root), "the test cache sits on the system drive");
@@ -129,13 +129,14 @@ fn a_damaged_storage_file_can_be_reset_and_a_locked_one_cannot() {
     std::fs::write(&file, USER).unwrap();
     assert_eq!(super::video::budget_in(&root), 20 << 30, "read once this session");
     let held = std::fs::OpenOptions::new().read(true).share_mode(4).open(&file).unwrap();
-    assert!(!super::video::budget_resettable(&root), "a lock is not damage");
-    assert!(super::video::reset_budget(&root).is_err());
+    assert!(!super::budget_reset::budget_resettable(&root), "a lock is not damage");
+    assert!(super::budget_reset::reset_budget(&root, 20 << 30).is_err());
     drop(held);
     std::fs::write(&file, b"\0\0\0\0").unwrap();
-    assert!(super::video::budget_resettable(&root), "damaged, and the .bad copy exists");
+    assert!(super::budget_reset::budget_resettable(&root), "damaged, and the .bad copy exists");
     assert!(!bads(&root).is_empty());
-    assert_eq!(super::video::reset_budget(&root), Ok(20 << 30), "the budget read earlier");
+    assert_eq!(super::budget_reset::reset_offer(&root).map(|o| (o.bytes, o.from)), Some((20 << 30, super::budget_reset::ResetFrom::LastRead)));
+    assert_eq!(super::budget_reset::reset_budget(&root, 20 << 30), Ok(20 << 30), "the budget read earlier");
     assert!(super::video::budget_note(&root).is_none(), "known again");
     assert_eq!(super::video::budget_in(&root), 20 << 30);
     let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&file).unwrap()).unwrap();
@@ -174,4 +175,60 @@ fn leftover_copies_do_not_hold_the_cache_budget_but_show_in_the_usage() {
     let usage = super::ssd_usage::ssd_usage_in(&cache, &clips);
     assert!(usage.kept >= 9 << 20, "the usage shown still holds the leftovers: {}", usage.kept);
     let _ = std::fs::remove_dir_all(&base);
+}
+
+/// The maintainer's storage.json cut off by a crash mid-write (NULs after the budget).
+const DAMAGED: &[u8] = b"{\n  \"cache_budget_bytes\": 21474836480,\n  \"first_\0\0\0\0\0\0\0\0";
+
+#[test]
+fn a_file_damaged_before_the_first_read_resets_to_the_number_still_in_it() {
+    // F-storage-5: damaged before this session read it, Reset wrote the 2 GiB pick over 20 GiB.
+    let root = root("damaged-first");
+    std::fs::write(root.join("storage.json"), DAMAGED).unwrap();
+    super::video::budget_in(&root);
+    let offer = super::budget_reset::reset_offer(&root).expect("damaged and backed up: Reset is offered");
+    assert_eq!(offer.bytes, 20 << 30, "the user's 20 GiB, not the 2 GiB pick");
+    assert!(matches!(offer.from, super::budget_reset::ResetFrom::Recovered(_)), "{offer:?}");
+    assert!(super::budget_reset::reset_budget(&root, 2 << 30).is_err(), "a size the button did not show is never written");
+    assert_eq!(super::budget_reset::reset_budget(&root, 20 << 30), Ok(20 << 30));
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("storage.json")).unwrap()).unwrap();
+    assert_eq!(saved["cache_budget_bytes"].as_u64(), Some(20 << 30));
+    assert!(saved.get("first_run").is_none(), "the user's budget, not marked as a first-run pick: {saved}");
+}
+
+#[test]
+fn a_bad_copy_gives_the_number_when_the_file_itself_is_all_nuls() {
+    let root = root("damaged-bad-copy");
+    std::fs::write(root.join("storage.json.bad-2026-11-01"), DAMAGED).unwrap();
+    std::fs::write(root.join("storage.json"), [0u8; 64]).unwrap();
+    super::video::budget_in(&root);
+    let offer = super::budget_reset::reset_offer(&root).unwrap();
+    assert_eq!(offer.bytes, 20 << 30);
+    assert!(offer.source_line().contains("storage.json.bad-2026-11-01"), "{}", offer.source_line());
+}
+
+#[test]
+fn with_no_number_left_the_default_is_offered_and_said_to_be_the_default() {
+    let root = root("damaged-nothing");
+    std::fs::write(root.join("storage.json"), b"{ \"cache_budget_bytes\": 2147").unwrap();
+    super::video::budget_in(&root);
+    let offer = super::budget_reset::reset_offer(&root).unwrap();
+    assert_eq!(offer.from, super::budget_reset::ResetFrom::Default);
+    assert!(offer.source_line().contains("No size could be recovered"), "{}", offer.source_line());
+    assert_eq!(super::budget_reset::reset_budget(&root, offer.bytes), Ok(offer.bytes));
+    let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("storage.json")).unwrap()).unwrap();
+    assert_eq!(saved["first_run"].as_bool(), Some(true), "a pick stays marked as one");
+}
+
+#[test]
+fn the_budget_number_is_read_leniently_but_never_from_a_cut_off_number() {
+    use super::budget_reset::salvage;
+    assert_eq!(salvage(DAMAGED), Some((20 << 30, false)));
+    assert_eq!(salvage(b"\0\0{\"cache_budget_bytes\" :\n 5368709120 }"), Some((5 << 30, false)));
+    assert_eq!(salvage(b"{\"cache_budget_bytes\":2147483648,\"first_run\": true}"), Some((2 << 30, true)));
+    assert_eq!(salvage(b"{\"cache_budget_bytes\": 21474"), None, "cut off at the end");
+    assert_eq!(salvage(b"{\"cache_budget_bytes\": 21474\0\0"), None, "cut off by NULs");
+    assert_eq!(salvage(b"{\"cache_budget_bytes\": 0}"), None);
+    assert_eq!(salvage(b"{\"cache_budget_bytes\": 99999999999999999999999}"), None, "not a u64");
+    assert_eq!(salvage(&[0u8; 32]), None);
 }

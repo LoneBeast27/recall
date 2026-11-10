@@ -4,7 +4,7 @@
 //! | cmd | args | effect / reply |
 //! |---|---|---|
 //! | `status` | | session status + cached engine hello/status (+ legacy `hdr` status) to the caller |
-//! | `quit` | `force?` | stop recording and exit (the Recall app stays open). While a save is written the quit waits for it (`record_quit_wait`); a repeated plain `quit` joins that wait, `"force":true` stops now and loses the save. Reply: `session` `quitting{finishing_clip,finishing_progress}` |
+//! | `quit` | `force?` `save_first?` | stop recording and exit (the Recall app stays open). While a save is written the quit waits for it (`record_quit_wait`); a repeated plain `quit` joins that wait, `"force":true` stops now and loses the save. `"save_first":true` (an update) first stops a long recording and saves the replay buffer when recording is allowed (`record_quit_save`), and the wait holds for both. Reply: `session` `quitting{finishing_clip,finishing_progress}` (+ `was_recording,long_was_on,save_first` for `save_first`) |
 //! | `save_clip` | `seconds?` | engine save (default = `recording.buffer_secs`) + `session` `saving{seconds}` broadcast (the island's saving ring); no engine / paused -> `engine` `save_failed` |
 //! | `bookmark` | | engine bookmark (marks land in the next saves' `.recall-marks.json`) |
 //! | `screenshot` | | engine PNG -> `engine` `screenshot{path}`; refused -> `screenshot_failed` |
@@ -26,7 +26,6 @@
 //! the requesting client only. Recording changes also broadcast a `session`
 //! `notice` (`record_notice`) while `overlay.enabled`.
 
-use std::time::Instant;
 
 use serde_json::{json, Value};
 
@@ -60,7 +59,8 @@ impl SavePort for ControllerSave<'_> {
         self.ctl.supervisor.send_engine_line(line)
     }
     fn mark_pending(&mut self) {
-        self.ctl.activity.save_sent(std::time::Instant::now());
+        let now = self.ctl.awake();
+        self.ctl.activity.save_sent(now);
     }
     fn announce(&mut self, seconds: u32) {
         self.ctl.hub.event("session", &saving_event(seconds));
@@ -94,7 +94,12 @@ impl Controller {
                 log!("record: control quit");
                 self.ask_quit(crate::record_quit::QuitReason::ControlPipe, crate::record_quit_wait::quit_force(&val));
                 // The installer reads this to wait only while a clip is being finished.
-                let reply = crate::record_quit_wait::quitting_event(self.finishing_now(Instant::now()));
+                let saved = crate::record_quit_save::wants_save_first(&val).then(|| self.save_before_quit());
+                let mut fields = self.finishing_now();
+                if let Some(saved) = saved {
+                    crate::record_quit_wait::merge_fields(&mut fields, saved);
+                }
+                let reply = crate::record_quit_wait::quitting_event(fields);
                 self.hub.event_to(inbound.client, "session", &reply);
             }
             "save_clip" => match val.get("seconds") {
@@ -193,6 +198,9 @@ impl Controller {
         if let Some(reason) = capture_refusal(self.paused, self.engine_running(), &self.wanted()) {
             return self.refuse_capture("save_clip", reason);
         }
+        if let Some(reason) = self.planner.privacy_command_refusal("save_clip", self.activity.is_recording()) {
+            return self.refuse_capture("save_clip", &reason);
+        }
         let draining = self.planner.drain().is_some();
         log!("record: save last {secs}s{}", if draining { " (game closed: ends at its last frame)" } else { "" });
         // Queued FIRST: only a save the engine will see is marked pending and cued.
@@ -206,7 +214,7 @@ impl Controller {
             match effect {
                 Effect::Refused(reason) => {
                     log!("record: {cmd} not sent: {reason}");
-                    if self.cfg.overlay.enabled {
+                    if self.cfg.overlay.shows_notices() {
                         self.hub.event("session", &crate::record_notice::shortcut_notice_json(title, reason, true, false));
                     }
                     crate::supervisor::beep_failure();
@@ -253,13 +261,13 @@ impl Controller {
     pub(crate) fn set_mic(&mut self, muted: bool) {
         self.mic_muted = muted;
         // A crash respawn reuses the last spec: it must start with this mute, not the spec's.
-        self.supervisor.set_mic_muted(muted);
+        // The spawn mute and the line are one step: no spawn can fall between them.
         log!("record: microphone {}", if muted { "muted" } else { "live" });
-        let sent = self.supervisor.send_engine_line(&json!({"cmd": "set_mic_mute", "muted": muted}).to_string());
+        let sent = self.supervisor.set_mic_muted(muted);
         // The mute stays our intent either way: the next engine gets it (`reapply_engine_intents`).
         if let Some(reason) = refusal(&mic_effects(sent)).filter(|_| self.engine_running()) {
             log!("record: microphone change not sent: {reason}");
-            if self.cfg.overlay.enabled {
+            if self.cfg.overlay.shows_notices() {
                 self.hub.event("session", &crate::record_notice::shortcut_notice_json("Microphone not changed", reason, true, false));
             }
             crate::supervisor::beep_failure();
@@ -272,13 +280,14 @@ impl Controller {
 
     fn set_ac_profile(&mut self, client: Option<u64>, val: &Value) {
         let variant = val.get("variant").and_then(Value::as_str).unwrap_or("");
-        let Some(profile) = hdr_exec::ac_profile_file(variant) else {
-            return self.reply_error(client, &format!("unknown set_ac_profile variant '{variant}' (expected punchy | accurate)"));
+        let profile = match hdr_exec::ac_profile_file(&self.cfg.display, variant) {
+            Ok(profile) => profile,
+            Err(e) => return self.reply_error(client, &e),
         };
         if let Err(e) = self.hdr.ready() {
             return self.reply_error(client, &e);
         }
-        let result = self.hdr.set_ac_profile(&self.cfg, profile);
+        let result = self.hdr.set_ac_profile(&self.cfg, &profile);
         self.hub.event("hdr", &hdr_exec::ac_profile_event(&result));
     }
 
@@ -294,7 +303,9 @@ impl Controller {
         }
         if old.behavior.hdr_auto != new.behavior.hdr_auto {
             if new.behavior.hdr_auto {
-                if let Err(e) = self.hdr.activate(&new) {
+                // A client's set_config is the user's own switch (its label explains); a hand edit is not.
+                let origin = if client.is_some() { crate::system_notice::Origin::UserAction } else { crate::system_notice::Origin::Automatic };
+                if let Err(e) = self.hdr.activate(&new, origin) {
                     log!("record: HDR management could not start: {e}");
                 }
             } else {
@@ -320,23 +331,29 @@ impl Controller {
                 self.applied_mask = apply_affinity(mask);
             }
         }
-        let live_change = crate::record_audio_sources::live_updates(&o.audio_sources, &n.audio_sources);
-        if engine_settings_changed(o, n) {
+        // Every later spawn, a crash respawn included, starts with this list (F-audio-1), and the
+        // running engine gets every privacy-tightening line at once (design-audio-mute P10), in
+        // one step, BEFORE any restart is decided: a restart may wait for a save or the long
+        // recording, a muted line-in or an unpicked device may not.
+        let running = self.engine_running();
+        let below_floor = self.supervisor.engine_below_floor();
+        let change = crate::record_audio_change::plan(&o.audio_sources, &n.audio_sources, engine_settings_changed(o, n), (running, below_floor), |lines| crate::record_audio_live::engine_cannot_take(lines, &self.supervisor));
+        for line in &change.lines {
+            log!("record: audio source {line}");
+        }
+        let sent = self.supervisor.update_audio(change.spawn_value.as_deref());
+        if change.restart {
             self.request_engine_restart();
-        } else if self.engine_running() && crate::record_audio_live::engine_cannot_take(&live_change, &self.supervisor) {
-            // An older engine ignores set_source: restart it so the new gain or name applies.
-            log!("record: the engine cannot change audio sources live; restarting it");
-            self.request_engine_restart();
-        } else if self.engine_running() {
-            // Gain and names reach the running engine's tracks: no restart, the buffer stays.
-            // An engine started later reads them from its environment.
-            let mut all_sent = Sent::Queued;
-            for line in crate::record_audio_sources::live_updates(&o.audio_sources, &n.audio_sources) {
-                log!("record: audio source {line}");
-                all_sent = all_sent.then(self.supervisor.send_engine_line(&line));
-            }
-            // The config is saved either way; an engine started later reads it.
-            self.setting_not_sent(pipe_setting_effects(all_sent), client, "Audio change not applied", "set_source");
+        } else if running && !change.lines.is_empty() {
+            // The config is saved either way; a later spawn restates it (`update_audio`).
+            self.setting_not_sent(pipe_setting_effects(sent), client, "Audio change not applied", "set_source");
+        }
+        // "Use your existing <Game> folder?" answers go live: the replay buffer stays. An engine
+        // started later reads them from its environment.
+        if o.game_folder_choices != n.game_folder_choices && self.engine_running() && !engine_settings_changed(o, n) {
+            log!("record: game folder choices -> {} answered", n.game_folder_choices.len());
+            let sent = self.supervisor.send_engine_line(&crate::record_engine::game_folder_choices_line(&n.game_folder_choices));
+            self.setting_not_sent(pipe_setting_effects(sent), client, "Folder choice not applied", "set_game_folder_choices");
         }
         if old.storage.cap_gb != new.storage.cap_gb || o.output_dir != n.output_dir {
             log!("record: storage cap -> {} GiB", new.storage.cap_gb);

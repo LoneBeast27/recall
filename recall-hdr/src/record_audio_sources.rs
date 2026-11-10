@@ -16,9 +16,6 @@ use serde::{Deserialize, Serialize};
 
 use crate::record_config::RecordingCfg;
 
-#[path = "../../recall/src/communications_audio.rs"]
-mod communications_audio;
-
 pub const SOURCES_ENV: &str = "RECALL_AUDIO_SOURCES";
 /// Most sources a recording carries (each is one capture stream and one track).
 pub const SOURCES_MAX: usize = 8;
@@ -77,22 +74,40 @@ pub fn default_sources() -> Vec<AudioSource> {
     vec![source("game", "game", "Game"), source("mic", "input", "Microphone")]
 }
 
-/// The first profile follows Windows playback rather than a particular game process.
-fn initial_sources(split: bool) -> Vec<AudioSource> {
-    let mut list = vec![source("mic", "input", "Microphone"), source("system-output", "output", "System output")];
-    if split {
-        list.push(AudioSource { communications: true, ..source("communications-output", "output", "Communications output") });
+/// The Windows default capture endpoint at setup time, as Windows reports it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CaptureEndpoint {
+    pub id: String,
+    pub name: String,
+}
+
+/// The first-run profile (the maintainer: "auto mic and game audio"): the detected game's own audio
+/// and the default microphone, pinned by the endpoint id and name Windows reports now (no
+/// name literals; with no capture device, the Windows default input). No System output, and
+/// no Communications output: a call stays out of the clip and its Mix.
+fn initial_sources(mic: Option<CaptureEndpoint>) -> Vec<AudioSource> {
+    let mut microphone = source("mic", "input", "Microphone");
+    if let Some(endpoint) = mic {
+        microphone.device = endpoint.name;
+        microphone.device_id = endpoint.id;
     }
-    list
+    vec![source("game", "game", "Game"), microphone]
 }
 
 pub fn initialize_sources() -> Vec<AudioSource> {
     let joined = wasapi::initialize_mta().is_ok();
-    let split = communications_audio::distinct_device().is_some();
+    let mic = default_capture();
     if joined {
         wasapi::deinitialize();
     }
-    initial_sources(split)
+    initial_sources(mic)
+}
+
+/// The Windows default capture endpoint (console role), `None` when there is none.
+fn default_capture() -> Option<CaptureEndpoint> {
+    let device = wasapi::get_default_device(&wasapi::Direction::Capture).ok()?;
+    let (id, name) = (device.get_id().ok()?, device.get_friendlyname().ok()?);
+    (!id.trim().is_empty() && !name.trim().is_empty()).then(|| CaptureEndpoint { id, name })
 }
 
 /// The list a config without `audio_sources` stands for, from its old keys.
@@ -172,7 +187,7 @@ pub fn validate(list: &[AudioSource]) -> Result<(), String> {
 }
 
 /// What the engine records: the enabled sources, trimmed.
-fn engine_list(list: &[AudioSource]) -> Vec<AudioSource> {
+pub(crate) fn engine_list(list: &[AudioSource]) -> Vec<AudioSource> {
     list.iter()
         .filter(|s| s.enabled)
         .map(|s| AudioSource { id: s.id.trim().into(), device: s.device.trim().into(), device_id: s.device_id.trim().into(), exe: s.exe.trim().into(), name: s.name.trim().into(), icon: String::new(), ..s.clone() })
@@ -182,58 +197,29 @@ fn engine_list(list: &[AudioSource]) -> Vec<AudioSource> {
 /// The engine's tracks without what it can change live (gain, name, mic-mute flag, and the
 /// endpoint id saved with an unchanged device name: P1-B, a new id is sent live and the track
 /// reopens on it, so unmuting a line-in or picking the same device again keeps the buffer).
-fn track_shape(list: &[AudioSource]) -> Vec<AudioSource> {
+pub(crate) fn track_shape(list: &[AudioSource]) -> Vec<AudioSource> {
     engine_list(list).into_iter().map(|s| AudioSource { gain_db: 0.0, name: String::new(), mic_mute: None, device_id: String::new(), ..s }).collect()
 }
 
-/// A recorded source lost its mic-mute flag (back to none, muted): `set_source`
-/// cannot say "no flag", so only a restart applies it. Setting a flag goes live.
-fn flag_dropped(old: &[AudioSource], new: &[AudioSource]) -> bool {
-    let old = engine_list(old);
-    engine_list(new).iter().any(|n| n.mic_mute.is_none() && old.iter().any(|o| o.id == n.id && o.mic_mute.is_some()))
-}
-
 /// Different tracks for the engine (a restart)? Order matters: it is the clip's track order.
-/// A gain, a name or the mic-mute flag alone is not: [`live_updates`] sends those to the running
+/// A gain, a name or the mic-mute flag alone is not: `audio_intent::change_lines` sends those to the running
 /// engine. A gain above 0 dB is live too: a long-recording track runs the -1 dBFS limiter from
 /// its first sample above the ceiling (`longrec::machine`), and a replay save limits a track that
 /// has been boosted.
 pub fn changed(old: &[AudioSource], new: &[AudioSource]) -> bool {
-    track_shape(old) != track_shape(new) || flag_dropped(old, new)
-}
-
-/// `set_source` lines for the recorded sources whose gain, name or mic-mute flag changed (the
-/// running engine applies them to its tracks; the replay buffer stays). Only meaningful when
-/// [`changed`] is false.
-pub fn live_updates(old: &[AudioSource], new: &[AudioSource]) -> Vec<String> {
-    let old = engine_list(old);
-    engine_list(new)
-        .into_iter()
-        .filter_map(|n| {
-            let o = old.iter().find(|o| o.id == n.id)?;
-            let mut cmd = serde_json::Map::new();
-            cmd.insert("cmd".into(), "set_source".into());
-            cmd.insert("id".into(), n.id.clone().into());
-            if o.gain_db != n.gain_db {
-                cmd.insert("gain_db".into(), serde_json::json!(n.gain_db));
-            }
-            if o.name != n.name {
-                cmd.insert("name".into(), n.name.clone().into());
-            }
-            if let Some(on) = n.mic_mute.filter(|_| o.mic_mute != n.mic_mute) {
-                cmd.insert("mic_mute".into(), on.into());
-            }
-            if o.device_id != n.device_id {
-                cmd.insert("device_id".into(), n.device_id.clone().into());
-            }
-            (cmd.len() > 2).then(|| serde_json::Value::Object(cmd).to_string())
-        })
-        .collect()
+    // A dropped flag goes live as its effective value (`audio_intent::effective_mic_mute`).
+    track_shape(old) != track_shape(new)
 }
 
 /// `RECALL_AUDIO_SOURCES`: the enabled sources as JSON (`[]` when none: no audio tracks).
 pub fn engine_value(list: &[AudioSource]) -> String {
     serde_json::to_string(&engine_list(list)).unwrap_or_else(|_| "[]".into())
+}
+
+/// The list a later spawn must start with when it changed (`Supervisor::update_audio`):
+/// any change, the live ones (`set_source`) included, else a crash respawn opens the old list.
+pub fn spawn_update(old: &[AudioSource], new: &[AudioSource]) -> Option<String> {
+    (old != new).then(|| engine_value(new))
 }
 
 fn same_exe(a: &str, b: &str) -> bool {

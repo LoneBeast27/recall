@@ -8,6 +8,7 @@
 //! anything else (including the `overrides` array) replaces. Unknown keys are
 //! rejected so a typo never silently does nothing.
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -31,7 +32,7 @@ pub const QUALITIES: [&str; 3] = ["performance", "balanced", "quality"];
 pub const FPS_MIN: u32 = 15;
 /// The recording rate is also the capture cap (1.1x): above 240 a fast game (VALORANT ~750 fps)
 /// would be copied and encoded nearly every frame it draws, the cost behind the 10-26 freezes.
-/// Exports keep their own higher rates. (Review 11-05; Rohan's call between 240 and 960 pending.)
+/// Exports keep their own higher rates. (Review 11-05; the maintainer's call between 240 and 960 pending.)
 pub const FPS_MAX: u32 = 240;
 pub const BITRATE_MBPS_MIN: u32 = 1;
 pub const BITRATE_MBPS_MAX: u32 = 200;
@@ -55,6 +56,10 @@ pub struct RecordingCfg {
     pub auto_record: bool,
     /// Folder the engine writes clips into (`RECALL_OUT_DIR`).
     pub output_dir: String,
+    /// "Sort clips into game folders": new clips and long recordings go into
+    /// `<output_dir>\<Game>\` (`RECALL_GAME_FOLDERS=1`). Off by default; clips already
+    /// saved never move.
+    pub game_folders: bool,
     /// Replay-buffer length in seconds; also the full-buffer save length.
     pub buffer_secs: u32,
     /// Legacy single save accelerator. Mirrors the first full-buffer entry of
@@ -99,6 +104,12 @@ pub struct RecordingCfg {
     /// Render endpoint recorded as Game in Desktop mode ("" = the Windows
     /// default output; `RECALL_AUDIO_GAME`). Games record their own process.
     pub desktop_audio_device: String,
+    /// "Use your existing <Game> folder?" answers: folder name (lowercase) -> `merge` (adopt the
+    /// user's folder) or `separate` (`<Game> (Recall)`). The engine reads it at spawn
+    /// (`RECALL_GAME_FOLDER_CHOICES`) and live (`set_game_folder_choices`). A patch adds keys;
+    /// a value other than `merge` / `separate` (the app sends "" to reset) removes the key. A
+    /// table: TOML writes it after the plain keys.
+    pub game_folder_choices: BTreeMap<String, String>,
     /// Every recorded source, in track order (`RECALL_AUDIO_SOURCES`; the Audio page).
     /// A table array: TOML writes it after the plain keys. Built from the old audio keys
     /// above when a config has none (`record_audio_sources::migrate_loaded`).
@@ -115,10 +126,12 @@ impl Default for RecordingCfg {
         RecordingCfg {
             auto_record: true,
             output_dir: default_output_dir(),
+            game_folders: false,
+            game_folder_choices: BTreeMap::new(),
             buffer_secs: 120,
             save_hotkey: "Alt+N".into(),
             mic_hotkey: "Alt+M".into(),
-            // One direct Alt combo per action (Rohan, 2026-11-05: the old
+            // One direct Alt combo per action (the maintainer, 2026-11-05: the old
             // two-step chord was Alt too, so it bought nothing).
             bookmark_hotkey: crate::record_hotkeys::DEFAULT_BOOKMARK.into(),
             screenshot_hotkey: crate::record_hotkeys::DEFAULT_SCREENSHOT.into(),
@@ -146,20 +159,8 @@ impl Default for RecordingCfg {
 /// `<Videos>\Recall`: the Videos known folder (follows a moved or OneDrive Videos), else
 /// `%USERPROFILE%\Videos\Recall`.
 pub fn default_output_dir() -> String {
-    let videos = videos_folder().unwrap_or_else(|| PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("Videos"));
-    videos.join("Recall").to_string_lossy().into_owned()
-}
-
-fn videos_folder() -> Option<PathBuf> {
-    use windows::Win32::System::Com::CoTaskMemFree;
-    use windows::Win32::UI::Shell::{FOLDERID_Videos, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
-    // SAFETY: the returned buffer is copied, then freed with the allocator that made it.
-    unsafe {
-        let raw = SHGetKnownFolderPath(&FOLDERID_Videos, KF_FLAG_DEFAULT, None).ok()?;
-        let path = raw.to_string().ok();
-        CoTaskMemFree(Some(raw.0 as *const _));
-        path.filter(|p| !p.is_empty()).map(PathBuf::from)
-    }
+    let videos = crate::user_dirs::known(crate::user_dirs::Known::Videos).unwrap_or_else(|| PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("Videos"));
+    crate::user_dirs::checked(videos.join("Recall")).to_string_lossy().into_owned()
 }
 
 impl RecordingCfg {
@@ -196,7 +197,7 @@ pub struct DetectCfg {
 
 impl Default for DetectCfg {
     fn default() -> Self {
-        // Rohan, 2026-11-05: "discord i dont mind being in there as a personal decision".
+        // The maintainer, 2026-11-05: "discord i dont mind being in there as a personal decision".
         DetectCfg { fullscreen_games: vec!["Discord".into()] }
     }
 }
@@ -392,8 +393,11 @@ pub fn merge_json(base: &mut Value, patch: &Value) {
     }
 }
 
+/// The answers map (`RecordingCfg::game_folder_choices`): its keys are folder names.
+const GAME_FOLDER_CHOICES: &str = "recording.game_folder_choices";
+
 /// Optional schema keys that are absent from the serialized form when unset.
-const OPTIONAL_KEYS: &[&str] = &["display.target_device_path"];
+const OPTIONAL_KEYS: &[&str] = &["display.target_device_path", "display.punchy_profile", "display.accurate_profile"];
 
 /// Reject patch keys the schema does not have (typo guard) and `version`.
 fn check_keys(schema: &Map<String, Value>, patch: &Map<String, Value>, prefix: &str) -> Result<(), String> {
@@ -409,6 +413,8 @@ fn check_keys(schema: &Map<String, Value>, patch: &Map<String, Value>, prefix: &
             },
             Some(_) => {}
             None if OPTIONAL_KEYS.contains(&path.as_str()) => {}
+            // Free-form keys: one per folder name.
+            None if prefix == GAME_FOLDER_CHOICES => {}
             None => return Err(format!("unknown config key '{path}'")),
         }
     }
@@ -462,10 +468,13 @@ pub fn apply_patch(base: &Config, patch: &Value) -> Result<PatchOutcome, String>
     check_keys(schema, patch_map, "")?;
     // A legacy `recording.save_hotkey` moves the full-buffer preset.
     let patch = crate::record_hotkeys::rewrite_legacy_patch(&base.recording, patch);
+    let patch = crate::record_actions::unhide_on_enable(patch);
     let mut merged = before.clone();
     merge_json(&mut merged, &patch);
     let mut config: Config = serde_json::from_value(merged).map_err(|e| format!("invalid config: {e}"))?;
     config.recording.save_hotkey = crate::record_hotkeys::legacy_save_hotkey(&config.recording.save_hotkeys);
+    // A reset ("") or any other value removes the answer: only merge / separate are kept.
+    config.recording.game_folder_choices.retain(|_, v| matches!(v.as_str(), "merge" | "separate"));
     validate(&config)?;
     let after = serde_json::to_value(&config).map_err(|e| format!("serialize config: {e}"))?;
     let mut changed = Vec::new();

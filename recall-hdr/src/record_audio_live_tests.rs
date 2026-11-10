@@ -3,7 +3,6 @@
 //! ruling's adoption patch. Made-up device names and ids.
 
 use super::*;
-use crate::record_audio_sources::live_updates;
 use crate::record_config::RecordingCfg;
 use crate::record_engine::engine_settings_changed;
 
@@ -29,8 +28,8 @@ fn unmuting_or_repicking_the_same_named_device_restarts_no_engine() {
     // "Pick this device again": the same name with its id.
     let repicked = rec(vec![AudioSource { device_id: "{id-one}".into(), ..legacy() }]);
     assert!(!engine_settings_changed(&old, &repicked), "re-picking the same name keeps the buffer");
-    let lines = live_updates(&old.audio_sources, &unmuted.audio_sources);
-    let sent: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+    let lines = crate::audio_intent::change_lines(&old.audio_sources, &unmuted.audio_sources);
+    let sent = lines[0].clone();
     assert_eq!(sent, serde_json::json!({"cmd": "set_source", "id": "in-1", "mic_mute": false, "device_id": "{id-one}"}));
     // Another device name is another track: that still restarts.
     let moved = rec(vec![AudioSource { device: "Mic (Desk)".into(), ..legacy() }]);
@@ -50,6 +49,17 @@ fn an_engine_without_the_fields_capability_is_restarted_for_them() {
     assert!(!cannot_take(&cut, true, false), "a cut gain and a name: any live engine");
     assert!(cannot_take(&cut, false, false), "no live sources at all: restart");
     assert!(!cannot_take(&[], false, false), "nothing to send");
+}
+
+/// P1-b: a line-in (`mic_mute` false) never adopts an endpoint id (it would skip Alt+M from
+/// then on): the user picks the device on the Audio page instead.
+#[test]
+fn a_line_in_never_adopts_an_endpoint_id() {
+    let list = vec![AudioSource { mic_mute: Some(false), device_id: "{A}".into(), ..legacy() }];
+    let ev = serde_json::json!({"type": "source_adopted", "id": "in-1", "device_id": "{B}"});
+    assert_eq!(adopt_patch(&list, &ev), None, "a line-in's id is never adopted");
+    let mic = vec![AudioSource { mic_mute: Some(true), device_id: "{A}".into(), ..legacy() }];
+    assert_eq!(adopt_patch(&mic, &ev).expect("a microphone adopts")["recording"]["audio_sources"][0]["device_id"], "{B}");
 }
 
 #[test]
