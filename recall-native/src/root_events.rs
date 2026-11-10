@@ -132,11 +132,16 @@ impl Root {
             self.show_toast(kind, text, detail);
         }
         match event {
-            DaemonEvent::Saved { path, seconds, .. } => {
+            DaemonEvent::Saved { path, seconds, partial, .. } => {
                 note_saved(&self.folders, path.clone());
                 let name = std::path::Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned());
                 let game = name.as_deref().and_then(|n| n.split("__").next()).map(|g| normalize_game(g).1);
-                self.show_toast(ToastKind::Good, format!("Clip saved · {}", format_duration(seconds as f64)), game);
+                let length = format_duration(seconds as f64);
+                match partial {
+                    // Cut short: never shown as a full save; the clip holds what was written.
+                    Some(why) => self.show_toast(ToastKind::Bad, format!("Clip saved partly · {length}"), Some(why)),
+                    None => self.show_toast(ToastKind::Good, format!("Clip saved · {length}"), game),
+                }
                 self.workers.job(Job::List);
             }
             DaemonEvent::SaveFailed { reason } => self.show_toast(ToastKind::Bad, "Save failed", Some(reason)),

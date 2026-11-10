@@ -69,7 +69,7 @@ fn the_first_heartbeat_is_sent_before_the_first_poll_wait() {
     let progress = SaveProgress::default();
     progress.jobs.store(1, Relaxed);
     let (abort, current) = (AtomicBool::new(false), Mutex::new(None));
-    let outcome = stop_saver_on(&ended(), &abort, &current, Duration::from_millis(20), Some(&progress), &FakeClock::new(), S(30));
+    let outcome = stop_saver_on(&ended(), &abort, &current, Duration::from_millis(20), &progress, true, &FakeClock::new(), S(30));
     assert_eq!(outcome, Shutdown::Drained);
     let beats = crate::protocol::test_emits::of("save_progress");
     assert_eq!(beats.len(), 1, "one beat before the wait: {beats:?}");
@@ -89,7 +89,7 @@ fn stop_saver_emits_save_progress_on_the_protocol_while_it_drains() {
         drop(tx);
     });
     let (abort, current) = (AtomicBool::new(false), Mutex::new(None));
-    let outcome = stop_saver(&done, &abort, &current, Duration::from_millis(20), Some(&progress));
+    let outcome = stop_saver(&done, &abort, &current, Duration::from_millis(20), &progress, true);
     ender.join().unwrap();
     assert_eq!(outcome, Shutdown::Drained);
     let seen = crate::protocol::test_emits::of("save_progress").len();
@@ -110,7 +110,7 @@ fn a_sleep_during_the_drain_never_gives_up_a_healthy_save() {
     });
     let clock = FakeClock::stepping(Duration::from_millis(1), S(3600));
     let (abort, current) = (AtomicBool::new(false), Mutex::new(None));
-    let outcome = stop_saver_on(&done, &abort, &current, Duration::from_millis(4), Some(&progress), &clock, Duration::from_millis(1));
+    let outcome = stop_saver_on(&done, &abort, &current, Duration::from_millis(4), &progress, true, &clock, Duration::from_millis(1));
     ender.join().unwrap();
     assert!(clock.reads() > 20, "polled through the sleep ({} reads)", clock.reads());
     assert_eq!(outcome, Shutdown::Drained, "the save was let finish");
@@ -129,14 +129,14 @@ fn a_stalled_save_is_given_up_by_the_engine_with_its_own_answer() {
     let clock = FakeClock::stepping(S(1), Duration::ZERO);
     let (abort, current) = (AtomicBool::new(false), Mutex::new(None));
     let started = Instant::now();
-    let outcome = stop_saver_on(&done, &abort, &current, Duration::from_millis(4), Some(&progress), &clock, Duration::from_millis(1));
+    let outcome = stop_saver_on(&done, &abort, &current, Duration::from_millis(4), &progress, true, &clock, Duration::from_millis(1));
     assert_eq!(outcome, Shutdown::TimedOut);
     assert!(started.elapsed() < S(15) && abort.load(Relaxed), "let go and aborted");
     assert!((119..=124).contains(&clock.reads()), "let go at 120 s awake ({} reads)", clock.reads());
     let failed = crate::protocol::test_emits::of("save_failed");
     assert_eq!(failed.len(), 2, "one answer per save in the saver: {failed:?}");
     assert!(failed.iter().all(|l| l.contains(STALLED_REASON)), "{failed:?}");
-    assert!(progress.given_up.load(Relaxed), "the saver sends no second answer");
+    assert!(progress.given_up(), "the saver sends no second answer");
     let beats = crate::protocol::test_emits::of("save_progress");
     assert!(beats.len() >= 119 && beats.last().unwrap().contains(r#""stalled_for":120"#), "{:?}", beats.last());
 }

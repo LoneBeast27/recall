@@ -221,6 +221,7 @@ mod tests {
                 staged: false,
                 staged_path: None,
                 video_end_us: Some(60 * S),
+                partial: None,
             },
         );
         let sidecar = std::fs::read_to_string(sidecar_path(Path::new(&path))).unwrap();
@@ -279,6 +280,7 @@ mod tests {
             staged: true,
             staged_path: Some(staging.join("A.mp4").to_string_lossy().into_owned()),
             video_end_us: None,
+            partial: None,
         };
         on_emit(&b, &saved(&with, 15.0)); // [5 s, 20 s] holds the 10 s mark
         on_emit(&b, &saved(&without, 5.0)); // [35 s, 40 s] holds none

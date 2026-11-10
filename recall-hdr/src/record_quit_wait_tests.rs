@@ -174,23 +174,47 @@ fn a_held_sign_out_is_reported_until_a_plain_quit_joins_it() {
     assert!(!sign_out_only(None, &QuitWait::default()));
 }
 
-/// Design P16 (B13): quit (or sign-out) with a save still being written past its 10 min cap.
-/// The cap let its queue go, so the save no longer counts as writing; the quit used to Go and
-/// kill it 8 s later with no report. Now it is reported lost first.
+/// Design P16 (B13), never lose a clip: quit (or sign-out) with a save still being written past
+/// its 10 min cap. The cap let its queue go, so it no longer counts as writing; the quit used to
+/// give it up at once (and the engine was killed 8 s later). Now it waits while the engine
+/// reports progress, up to 30 min awake from the quit, then reports it lost (the engine keeps
+/// what it wrote).
 #[test]
-fn a_quit_with_a_save_past_its_cap_reports_it_lost_not_go() {
+fn a_quit_with_a_save_past_its_cap_waits_while_it_moves_then_reports_it_lost() {
     let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
     a.save_sent(t0);
-    for sec in (0..=660u64).step_by(5) {
+    let feed = |a: &mut EngineActivity, sec: u64| {
         let line = json!({"type":"status","save_writing":{"bytes":sec,"queued":0,"step":sec + 1}});
         a.on_engine_event(&line, 0.0, t0 + s(sec));
         let _ = a.retarget_busy(t0 + s(sec)); // the pump's reads: the cap runs here
+    };
+    for sec in (0..=660u64).step_by(5) {
+        feed(&mut a, sec);
     }
     let quit = t0 + s(661);
     assert!(!a.saves_writing(quit), "setup: past its cap the save no longer holds restarts");
-    assert_eq!(q.step(&mut a, quit), QuitStep::Lost(1), "reported, not a silent go");
+    assert_eq!(q.step(&mut a, quit), QuitStep::Wait { first: true }, "still moving: the quit waits");
+    let end = 661 + QUIT_PAST_CAP_WAIT.as_secs();
+    let mut out = Vec::new();
+    for sec in (665..=end + 10).step_by(5) {
+        feed(&mut a, sec);
+        out.push((sec, q.step(&mut a, t0 + s(sec))));
+    }
+    let lost = out.iter().find(|(_, o)| matches!(o, QuitStep::Lost(_))).expect("the wait is bounded");
+    assert_eq!(lost.1, QuitStep::Lost(1));
+    assert!((end..end + 5).contains(&lost.0), "lost at 30 min awake from the quit: {} (quit at 661)", lost.0);
+    assert!(out.iter().take_while(|(sec, _)| *sec < end).all(|(_, o)| matches!(o, QuitStep::Wait { first: false })));
+
+    // Progress stops past the cap: lost once the mark is 10 s old, not 30 min later.
+    let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
+    a.save_sent(t0);
+    for sec in (0..=660u64).step_by(5) {
+        feed(&mut a, sec);
+    }
+    assert!(matches!(q.step(&mut a, t0 + s(661)), QuitStep::Wait { .. }));
+    assert_eq!(q.step(&mut a, t0 + s(670)), QuitStep::Lost(1), "no progress for 10 s: a wedged writer");
 }
 
 /// Design P16: an expired save (no answer for 120 s, no report) is unanswered too.
