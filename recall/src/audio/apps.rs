@@ -99,7 +99,7 @@ impl Scanner {
 }
 
 /// One ring and one watcher thread per app, in list order, plus the shared scanner.
-pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, report: &mut impl FnMut(String)) -> Vec<Arc<TrackRing>> {
+pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, hold: bool, report: &mut impl FnMut(String)) -> Vec<Arc<TrackRing>> {
     if apps.is_empty() {
         return Vec::new();
     }
@@ -124,6 +124,9 @@ pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, report
         let id = if app.id.trim().is_empty() { format!("app-{}", n + 1) } else { app.id.trim().to_owned() };
         let spec = SourceSpec { communications: false, device_id: String::new(), id, kind: "app".into(), device: String::new(), exe: exe.clone(), name: app.track_name(), gain_db: app.gain_db, mic_mute: Some(false) };
         let ring = Arc::new(TrackRing::for_source(&spec, source, buffer_secs, format!("{exe} (not running)")));
+        if hold {
+            ring.hold_startup(); // "Hold everything" until the controller's sync (the cut-down)
+        }
         let name = ring.title();
         let (thread_ring, thread_scanner) = (Arc::clone(&ring), Arc::clone(&scanner));
         let thread_exe = exe.clone();

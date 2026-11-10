@@ -271,10 +271,11 @@ pub(crate) fn is_device_source(source: &str) -> bool {
     source != crate::edit_model::SOURCE_GAME_PROCESS && !source.starts_with(crate::edit_model::APP_SOURCE_PREFIX)
 }
 
-/// Whether a track starts held (the sync handshake): every device track under a controller
-/// (`hold`); a process-loopback track never, as no line can change what it captures.
-pub(crate) fn starts_held(hold: bool, process_loopback: bool) -> bool {
-    hold && !process_loopback
+/// Whether a track starts held (the sync handshake): every track under a controller (`hold`),
+/// the game's process tree included (Rohan 2026-11-09 23:31 UTC, the cut-down: "Hold
+/// everything"); app tracks are held the same way (`apps::start`).
+pub(crate) fn starts_held(hold: bool, _process_loopback: bool) -> bool {
+    hold
 }
 
 impl TrackRing {

@@ -106,12 +106,18 @@ fn a_set_source_through_the_held_start_is_in_force_before_the_release() {
     assert_eq!(ring.saved_id_for_test(), "{B}", "and the stream opens on the device the user picked");
 }
 
-/// P3: a device track starts held whenever a controller drives the engine; a process-loopback
-/// track (the game's process tree) does not, as no line can change what it captures.
+/// The cut-down ("Hold everything", Rohan 23:31 UTC): every track starts held whenever a
+/// controller drives the engine, the game's process tree and app tracks included.
 #[test]
-fn every_device_track_starts_held_and_process_loopback_does_not() {
+fn every_track_starts_held_the_game_and_apps_included() {
     assert!(audio::starts_held(true, false), "a device track: held");
-    assert!(!audio::starts_held(true, true), "process loopback: free");
+    assert!(audio::starts_held(true, true), "process loopback: held too");
+    let apps = include_str!("audio/apps.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(apps.contains("if hold { ring.hold_startup();"), "app tracks too");
+    let app = TrackRing::for_test("hold-app", 2);
+    app.hold_startup();
+    app.push_app_capture(&[0.5; 960]);
+    assert!(app.snapshot(0.01).iter().all(|s| *s == 0.0), "a held app track stores silence");
     assert!(!audio::starts_held(false, false), "no controller: free");
     let audio_src = include_str!("audio.rs").split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(audio_src.contains("if starts_held(hold, target.is_some()) { ring.hold_startup();"), "start_track holds by it");
