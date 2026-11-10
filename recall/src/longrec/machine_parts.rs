@@ -216,12 +216,17 @@ pub(super) fn keep_partial(part: &Path) -> Option<PathBuf> {
     Some(target)
 }
 
-/// `part` joins the in-progress list (its first frame at capture µs `base_us`); a failure is
-/// one log line (a crash then leaves it to the one-time scan, never lost).
+/// `part` joins the in-progress list (its first frame at capture µs `base_us`). On a failure
+/// the recording still goes on (refusing it would lose it for sure), and the next start runs
+/// the one-time scan again, which finds a crashed part in the clip folder; one log line.
 pub(super) fn list_part(part: &Path, base_us: u64) -> Option<Event> {
     let entry = in_progress::Entry { base_us: Some(base_us), ..in_progress::Entry::long(part) };
     let e = in_progress::add(entry).err()?;
-    Some(Event::Log(format!("long recording {} not listed for recovery ({e})", part.display())))
+    let rescan = match in_progress::request_legacy_scan() {
+        Ok(()) => "the next start scans for it".to_string(),
+        Err(r) => format!("and the next start's scan could not be asked for: {r}"),
+    };
+    Some(Event::Log(format!("long recording {} not listed for recovery ({e}); {rescan}", part.display())))
 }
 
 /// A bookmark at capture µs `at_us`, kept in the list too (a crash keeps it).

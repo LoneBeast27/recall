@@ -101,6 +101,8 @@ pub(crate) fn recover_replay_parts_older(dir: &Path, fresh: Duration) -> Vec<Fou
 fn recover_one(part: &Path) -> Found {
     match layout(part) {
         Err(e) => Found::Error(part.to_path_buf(), format!("not read: {e}")),
+        // A whole `moov` that still does not play is kept, never renamed into the library.
+        Ok(Layout::Finished) if !plays(part) => Found::Kept(part.to_path_buf()),
         Ok(Layout::Finished) => {
             let clip = naming::recovered_path(part, Path::exists);
             match std::fs::rename(part, &clip) {
@@ -122,6 +124,14 @@ pub(crate) enum Layout {
     Unindexed,
     /// Only the header boxes and an empty `mdat` (or none): nothing of the clip in it.
     NoPackets,
+}
+
+/// The file opens and at least one video packet demuxes (a finished file is only adopted then).
+pub(crate) fn plays(path: &Path) -> bool {
+    let _ = ffmpeg_next::init();
+    let Ok(mut input) = ffmpeg_next::format::input(&path) else { return false };
+    let Some(video) = input.streams().best(ffmpeg_next::media::Type::Video).map(|s| s.index()) else { return false };
+    input.packets().any(|(s, _)| s.index() == video)
 }
 
 /// Read the top-level box headers of `path` (seeking past every payload).
@@ -146,7 +156,9 @@ pub(crate) fn layout(path: &Path) -> std::io::Result<Layout> {
             n => (8, n),
         };
         match &kind {
-            b"moov" => return Ok(Layout::Finished),
+            // Finished only with the whole `moov` in the file: a kill during the trailer tears it.
+            b"moov" if size >= header && pos + size <= len => return Ok(Layout::Finished),
+            b"moov" => return Ok(Layout::Unindexed),
             b"mdat" => media |= pos + header < len && size > header,
             b"ftyp" | b"free" | b"wide" | b"skip" => {}
             _ => media = true,

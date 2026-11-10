@@ -4,10 +4,13 @@
 //! - [`rebuild`]: the streams come from the index's header-only MP4 (every sample entry as the
 //!   clip had it); every packet that is whole in the `.part` (and not all zeros) is copied, in
 //!   order, into a fresh MP4 with its own sample tables. Nothing past the cut is played.
-//! - [`recover_entry`]: one save the in-progress list names. Finished (only the rename was lost):
-//!   renamed into place. Cut off with its index: rebuilt into its clip's folder; the cut `.part`
-//!   and the index then go to the Recycle Bin. No packet at all: a diagnostic line and the
-//!   Recycle Bin. Cut off without an index: kept as it is, with a diagnostic line (never recycled).
+//! - [`recover_entry`]: one save the in-progress list names (a path that is not a replay save's
+//!   `.part`, or an index outside Recall's replay-index folder, is never acted on). Finished and
+//!   playing (only the rename was lost): renamed into place. Cut off (a torn `moov` included)
+//!   with its index: rebuilt into its clip's folder and verified; the cut `.part` then goes to
+//!   the Recycle Bin, unless it holds more than its index knew (kept beside the clip). No packet
+//!   at all: a diagnostic line and the Recycle Bin. Cut off without an index: kept, logged. A
+//!   failure that may pass (a folder that cannot be made, a drive not mounted) keeps it listed.
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
@@ -25,6 +28,8 @@ pub(crate) struct Rebuilt {
     pub video_packets: usize,
     /// End of the last video packet.
     pub seconds: f64,
+    /// The `.part` holds data past the last packet taken (its index lagged: a power cut).
+    pub part_holds_more: bool,
 }
 
 /// No whole video packet in the `.part`: nothing to rebuild.
@@ -33,7 +38,7 @@ pub(crate) const NO_VIDEO: &str = "no whole video packet";
 /// Rebuild the save cut off in `part` from the index at `index` into `out` (see the module doc).
 pub(crate) fn rebuild(part: &Path, index: &Path, out: &Path) -> Result<Rebuilt, String> {
     let (head, records) = replay_index::read(index)?;
-    if !head.part.eq_ignore_ascii_case(&part.to_string_lossy()) {
+    if !in_progress::same_path(&head.part, &part.to_string_lossy()) {
         return Err(format!("the index belongs to {}", head.part));
     }
     let _ = ff::init();
@@ -62,7 +67,7 @@ pub(crate) fn rebuild(part: &Path, index: &Path, out: &Path) -> Result<Rebuilt, 
     let out_tbs: Vec<ff::Rational> = octx.streams().map(|s| s.time_base()).collect();
     let mut file = std::fs::File::open(part).map_err(|e| format!("open {}: {e}", part.display()))?;
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
-    let (mut packets, mut video, mut end_us) = (0usize, 0usize, 0i64);
+    let (mut packets, mut video, mut end_us, mut used) = (0usize, 0usize, 0i64, 0u64);
     let mut buf = Vec::new();
     for r in &records {
         if r.offset + u64::from(r.size) > len || r.stream as usize >= out_tbs.len() {
@@ -85,6 +90,7 @@ pub(crate) fn rebuild(part: &Path, index: &Path, out: &Path) -> Result<Rebuilt, 
         pkt.rescale_ts(ff::Rational(num, den), out_tbs[r.stream as usize]);
         pkt.write(&mut octx).map_err(|e| format!("write: {e}"))?;
         packets += 1;
+        used = r.offset + u64::from(r.size);
         if r.stream == 0 {
             video += 1;
             end_us = end_us.max(r.pts + r.dur);
@@ -94,7 +100,10 @@ pub(crate) fn rebuild(part: &Path, index: &Path, out: &Path) -> Result<Rebuilt, 
         return Err(NO_VIDEO.into());
     }
     octx.write_trailer().map_err(|e| format!("write_trailer: {e}"))?;
-    Ok(Rebuilt { packets, video_packets: video, seconds: end_us as f64 / 1e6 })
+    // More than the index knew: data past the end of its last record (not a packet cut short).
+    let indexed_end = records.last().map_or(0, |r| r.offset + u64::from(r.size));
+    let part_holds_more = data_end(&mut file, len) > indexed_end.max(used);
+    Ok(Rebuilt { packets, video_packets: video, seconds: end_us as f64 / 1e6, part_holds_more })
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -103,9 +112,26 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// The index files of `entry` (a claimed copy), to the Recycle Bin.
+/// Where the data in a file of `len` bytes ends: before a trailing run of zero bytes.
+fn data_end(file: &mut std::fs::File, len: u64) -> u64 {
+    let (mut end, mut buf) = (len, vec![0u8; 64 * 1024]);
+    while end > 0 {
+        let n = buf.len().min(end as usize);
+        if file.seek(SeekFrom::Start(end - n as u64)).and_then(|_| file.read_exact(&mut buf[..n])).is_err() {
+            return len;
+        }
+        if let Some(last) = buf[..n].iter().rposition(|b| *b != 0) {
+            return end - n as u64 + last as u64 + 1;
+        }
+        end -= n as u64;
+    }
+    0
+}
+
+/// The index files of a valid `entry` (Recall's own base, `replay_index::is_index_base`), to
+/// the Recycle Bin.
 fn recycle_index(entry: &Entry, logs: &mut Vec<String>) {
-    let Some(base) = entry.index.as_deref().map(PathBuf::from) else { return };
+    let Some(base) = entry.index.as_deref().map(PathBuf::from).filter(|b| replay_index::is_index_base(b)) else { return };
     for file in [replay_index::idx_of(&base), replay_index::hdr_of(&base)] {
         if file.exists() {
             if let Err(e) = recycle(&file) {
@@ -115,77 +141,134 @@ fn recycle_index(entry: &Entry, logs: &mut Vec<String>) {
     }
 }
 
+/// Why `entry` is not a replay save Recall wrote (it is then never acted on).
+fn invalid(entry: &Entry) -> Option<String> {
+    let name = entry.part().file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if !super::part_recover::is_replay_part(&name) {
+        return Some(format!("{} is not a replay save's .part", entry.path));
+    }
+    match entry.index.as_deref().map(Path::new) {
+        Some(base) if !replay_index::is_index_base(base) => Some(format!("its index {} is not in Recall's replay-index folder", base.display())),
+        _ => None,
+    }
+}
+
+/// What became of one listed save: done (unlisted) or to try again at the next start.
+enum Outcome {
+    Done,
+    Retry,
+}
+
 /// Recover the replay save `entry` names (see the module doc): a clip made goes into `clips`.
 pub(crate) fn recover_entry(entry: &Entry, clips: &mut Vec<PathBuf>, logs: &mut Vec<String>) {
     let part = entry.part();
-    let clip = entry.clip.as_deref().map(PathBuf::from).unwrap_or_else(|| PathBuf::from(entry.path.trim_end_matches(naming::PART_EXT)));
-    let done = |logs: &mut Vec<String>| {
+    let outcome = match invalid(entry) {
+        Some(why) => {
+            logs.push(format!("in-progress entry {} not acted on: {why}; dropped from the list", entry.path));
+            Outcome::Done
+        }
+        None => recover_valid(entry, &part, clips, logs),
+    };
+    if let Outcome::Done = outcome {
         if let Err(e) = in_progress::remove(&part) {
             logs.push(format!("replay save {} still listed ({e})", part.display()));
         }
-    };
+    }
+}
+
+fn recover_valid(entry: &Entry, part: &Path, clips: &mut Vec<PathBuf>, logs: &mut Vec<String>) -> Outcome {
+    let clip = entry.clip.as_deref().map(PathBuf::from).unwrap_or_else(|| PathBuf::from(entry.path.trim_end_matches(naming::PART_EXT)));
     if !part.exists() {
+        if !part.parent().is_some_and(Path::is_dir) {
+            // Its folder is gone: a drive not mounted yet. Kept, index and all, for later.
+            logs.push(format!("replay save {}: its folder is not there now; kept listed", part.display()));
+            return Outcome::Retry;
+        }
         if !clip.exists() {
             logs.push(format!("replay save {} was listed but is gone", part.display()));
         }
         recycle_index(entry, logs);
-        return done(logs);
+        return Outcome::Done;
     }
-    match layout(&part) {
-        Ok(Layout::Finished) => {
-            // Whole: only the rename was lost.
-            let target = naming::recovered_path(&part, Path::exists);
-            match std::fs::rename(&part, &target) {
-                Ok(()) => {
-                    let _ = crate::game_folder_rule::record_saved(&target, Some(&part));
-                    logs.push(format!("recovered replay save {} as {}", part.display(), target.display()));
-                    clips.push(target);
-                }
-                Err(e) => logs.push(format!("replay save {} left as it is: not renamed: {e}", part.display())),
+    match layout(part) {
+        // Whole and playing: only the rename was lost.
+        Ok(Layout::Finished) if super::part_recover::plays(part) => {
+            let target = naming::recovered_path(part, Path::exists);
+            if let Err(e) = std::fs::rename(part, &target) {
+                logs.push(format!("replay save {} not renamed now ({e}); kept listed", part.display()));
+                return Outcome::Retry;
             }
+            let _ = crate::game_folder_rule::record_saved(&target, Some(part));
+            logs.push(format!("recovered replay save {} as {}", part.display(), target.display()));
+            clips.push(target);
             recycle_index(entry, logs);
+            Outcome::Done
         }
         Ok(Layout::NoPackets) => {
-            logs.extend(dispose_unrecoverable(&part, "no packet was written"));
+            logs.extend(dispose_unrecoverable(part, "no packet was written"));
             recycle_index(entry, logs);
+            Outcome::Done
         }
-        Ok(Layout::Unindexed) | Err(_) => rebuild_entry(entry, &part, &clip, clips, logs),
+        _ => rebuild_entry(entry, part, &clip, clips, logs),
     }
-    done(logs)
 }
 
-fn rebuild_entry(entry: &Entry, part: &Path, clip: &Path, clips: &mut Vec<PathBuf>, logs: &mut Vec<String>) {
+fn rebuild_entry(entry: &Entry, part: &Path, clip: &Path, clips: &mut Vec<PathBuf>, logs: &mut Vec<String>) -> Outcome {
     let Some(index) = entry.index.as_deref().map(PathBuf::from).filter(|b| replay_index::idx_of(b).exists()) else {
+        // Nothing will change at a later start: kept, logged once.
         logs.push(format!("replay save {} was cut off and has no packet index; kept as it is, not deleted: boxes {}", part.display(), layout_summary(part)));
-        return;
+        return Outcome::Done;
     };
     if let Some(dir) = clip.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
     // Our own temp file: a rebuild cut off is redone over it at the next start.
     let tmp = with_suffix(clip, ".rebuild.tmp");
-    let rebuilt = rebuild(part, &index, &tmp);
+    let rebuilt = rebuild(part, &index, &tmp).and_then(|r| verified(&tmp, r));
     if rebuilt.is_err() && tmp.exists() {
         let _ = recycle(&tmp); // a half-made temp of our own
     }
-    match rebuilt {
-        Ok(r) => {
-            let target = naming::recovered_path(&naming::part_of(clip), Path::exists);
-            if let Err(e) = std::fs::rename(&tmp, &target) {
-                return logs.push(format!("replay save {} rebuilt but not renamed ({e}); the cut-off file is kept", part.display()));
-            }
-            let _ = crate::game_folder_rule::record_saved(&target, None);
-            logs.push(format!("rebuilt replay save {} as {} ({} packets, {:.1} s)", part.display(), target.display(), r.packets, r.seconds));
-            clips.push(target);
-            if let Err(e) = recycle(part) {
-                logs.push(format!("replay save {} left where it is: {e}", part.display()));
-            }
-            recycle_index(entry, logs);
-        }
+    let r = match rebuilt {
+        Ok(r) => r,
         Err(e) if e == NO_VIDEO => {
             logs.extend(dispose_unrecoverable(part, "no whole video packet"));
             recycle_index(entry, logs);
+            return Outcome::Done;
         }
-        Err(e) => logs.push(format!("replay save {} not rebuilt ({e}); kept as it is, not deleted: boxes {}", part.display(), layout_summary(part))),
+        Err(e) => {
+            logs.push(format!("replay save {} not rebuilt now ({e}); kept listed for the next start: boxes {}", part.display(), layout_summary(part)));
+            return Outcome::Retry;
+        }
+    };
+    let target = naming::recovered_path(&naming::part_of(clip), Path::exists);
+    if let Err(e) = std::fs::rename(&tmp, &target) {
+        logs.push(format!("replay save {} rebuilt but not renamed now ({e}); kept listed", part.display()));
+        return Outcome::Retry;
+    }
+    let _ = crate::game_folder_rule::record_saved(&target, None);
+    logs.push(format!("rebuilt replay save {} as {} ({} packets, {:.1} s)", part.display(), target.display(), r.packets, r.seconds));
+    clips.push(target);
+    if r.part_holds_more {
+        // A power cut kept more of the mux than of its index: the cut file stays beside it.
+        logs.push(format!("replay save {} holds more than its index knew; kept as it is beside the clip: boxes {}", part.display(), layout_summary(part)));
+    } else if let Err(e) = recycle(part) {
+        logs.push(format!("replay save {} left where it is: {e}", part.display()));
+    }
+    recycle_index(entry, logs);
+    Outcome::Done
+}
+
+/// The rebuilt clip demuxes with every video packet the rebuild wrote.
+fn verified(clip: &Path, r: Rebuilt) -> Result<Rebuilt, String> {
+    let mut input = ff::format::input(&clip).map_err(|e| format!("the rebuilt clip does not open: {e}"))?;
+    let played = input.packets().filter(|(s, _)| s.index() == 0).count();
+    if played == r.video_packets {
+        Ok(r)
+    } else {
+        Err(format!("the rebuilt clip plays {played} of its {} video packets", r.video_packets))
     }
 }
+
+#[cfg(test)]
+#[path = "replay_review_tests.rs"]
+mod tests;

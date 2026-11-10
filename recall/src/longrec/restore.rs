@@ -47,6 +47,8 @@ pub(crate) enum Repair {
     AsIs(String),
     /// No whole fragment: nothing in it plays (why).
     Unrecoverable(String),
+    /// An earlier repair that cannot be undone (why): left as it is, its record and tail kept.
+    Stuck(String),
     /// A [`Hooks`] stop: the undo record is in place.
     Interrupted,
 }
@@ -198,7 +200,7 @@ fn field(wide: bool, value: u64) -> Vec<u8> {
 pub(crate) fn repair_with(part: &Path, hooks: Hooks) -> Repair {
     if in_progress::get(part).is_some_and(|e| e.undo.is_some()) {
         if let Err(e) = undo(part) {
-            return Repair::AsIs(format!("an earlier repair could not be undone: {e}"));
+            return Repair::Stuck(format!("an earlier repair could not be undone: {e}"));
         }
     }
     let s = match scan(part) {
@@ -217,7 +219,7 @@ pub(crate) fn repair_with(part: &Path, hooks: Hooks) -> Repair {
         Ok(None) => Repair::Interrupted,
         Err(why) => match undo(part) {
             Ok(_) => Repair::AsIs(why),
-            Err(e) => Repair::AsIs(format!("{why}; the undo failed too: {e}")),
+            Err(e) => Repair::Stuck(format!("{why}; the undo failed too: {e}")),
         },
     }
 }
@@ -225,18 +227,20 @@ pub(crate) fn repair_with(part: &Path, hooks: Hooks) -> Repair {
 /// Steps 2-5 (see the module doc). `Ok(None)`: stopped by a hook. `Err`: undo it.
 fn apply(part: &Path, s: &Scan, keep: u64, hooks: Hooks) -> Result<Option<f64>, String> {
     let mut file = std::fs::File::open(part).map_err(|e| e.to_string())?;
-    let mut tail = vec![0u8; (s.len - keep) as usize];
-    read_at(&mut file, keep, &mut tail).map_err(|e| format!("read the tail: {e}"))?;
     let mut old = vec![0u8; if s.wide { 8 } else { 4 }];
     read_at(&mut file, s.mvhd_at, &mut old).map_err(|e| format!("read mvhd: {e}"))?;
-    drop(file);
     let tail_at = tail_path(part);
-    std::fs::File::create(&tail_at).and_then(|mut f| f.write_all(&tail).and_then(|()| f.sync_all())).map_err(|e| format!("save the tail: {e}"))?;
-    let record = Undo { len: s.len, keep, mvhd_at: s.mvhd_at, mvhd_old: hex(&old), tail: tail_at.to_string_lossy().into_owned(), tail_hash: in_progress::fnv_hex(&tail) };
+    // The tail goes through a bounded buffer (it can be up to a whole torn fragment, or a
+    // power cut's long zero run), hashed as it goes.
+    file.seek(SeekFrom::Start(keep)).map_err(|e| format!("read the tail: {e}"))?;
+    let hash = copy_hashed(&mut (&mut file).take(s.len - keep), &tail_at).map_err(|e| format!("save the tail: {e}"))?;
+    let record = Undo { len: s.len, keep, mvhd_at: s.mvhd_at, mvhd_old: hex(&old), tail: tail_at.to_string_lossy().into_owned(), tail_hash: hash };
     if in_progress::get(part).is_none() {
         in_progress::add(Entry::long(part))?;
     }
-    in_progress::update(part, |e| e.undo = Some(record))?;
+    if !in_progress::update(part, |e| e.undo = Some(record))? {
+        return Err("no list entry to hold the undo record".into());
+    }
     OpenOptions::new().write(true).open(part).and_then(|f| f.set_len(keep).and_then(|()| f.sync_all())).map_err(|e| format!("cut: {e}"))?;
     if hooks.stop_after_truncate {
         return Ok(None);
@@ -259,26 +263,57 @@ fn apply(part: &Path, s: &Scan, keep: u64, hooks: Hooks) -> Result<Option<f64>, 
     Ok(Some(seconds))
 }
 
+/// Copy `from` into a new file `to` through a 1 MiB buffer, flushed to disk; its FNV hash (hex).
+fn copy_hashed(from: &mut impl Read, to: &Path) -> std::io::Result<String> {
+    let mut out = std::fs::File::create(to)?;
+    let (mut buf, mut hash) = (vec![0u8; 1 << 20], in_progress::FNV_START);
+    loop {
+        let n = from.read(&mut buf)?;
+        if n == 0 {
+            break;
+        }
+        hash = in_progress::fnv_update(hash, &buf[..n]);
+        out.write_all(&buf[..n])?;
+    }
+    out.sync_all()?;
+    Ok(format!("{hash:016x}"))
+}
+
+/// The FNV hash (hex) and length of the file at `path`, read through a bounded buffer.
+fn hash_file(path: &Path) -> std::io::Result<(String, u64)> {
+    let mut file = std::fs::File::open(path)?;
+    let (mut buf, mut hash, mut len) = (vec![0u8; 1 << 20], in_progress::FNV_START, 0u64);
+    loop {
+        let n = file.read(&mut buf)?;
+        if n == 0 {
+            return Ok((format!("{hash:016x}"), len));
+        }
+        hash = in_progress::fnv_update(hash, &buf[..n]);
+        len += n as u64;
+    }
+}
+
 /// Put back the original bytes of a repair that did not finish (its undo record in the list):
 /// the cut-off tail appended, the old `mvhd` duration written. `Ok(false)`: nothing to undo.
 pub(crate) fn undo(part: &Path) -> Result<bool, String> {
     let Some(u) = in_progress::get(part).and_then(|e| e.undo) else { return Ok(false) };
     let result = (|| -> Result<(), String> {
-        let tail = std::fs::read(&u.tail).map_err(|e| format!("read the saved tail {}: {e}", u.tail))?;
-        if tail.len() as u64 != u.len - u.keep || in_progress::fnv_hex(&tail) != u.tail_hash {
+        let (hash, len) = hash_file(Path::new(&u.tail)).map_err(|e| format!("read the saved tail {}: {e}", u.tail))?;
+        if len != u.len - u.keep || hash != u.tail_hash {
             return Err(format!("the saved tail {} is not the one cut off", u.tail));
         }
         let mut file = OpenOptions::new().write(true).open(part).map_err(|e| e.to_string())?;
         file.set_len(u.keep).map_err(|e| e.to_string())?;
-        file.seek(SeekFrom::End(0)).and_then(|_| file.write_all(&tail)).map_err(|e| format!("append the tail: {e}"))?;
+        let mut tail = std::fs::File::open(&u.tail).map_err(|e| e.to_string())?;
+        file.seek(SeekFrom::End(0)).and_then(|_| std::io::copy(&mut tail, &mut file)).map_err(|e| format!("append the tail: {e}"))?;
         file.seek(SeekFrom::Start(u.mvhd_at)).and_then(|_| file.write_all(&unhex(&u.mvhd_old))).map_err(|e| format!("restore mvhd: {e}"))?;
         file.sync_all().map_err(|e| e.to_string())?;
         let len = file.metadata().map(|m| m.len()).unwrap_or(0);
         (len == u.len).then_some(()).ok_or_else(|| format!("undone to {len} B, not {} B", u.len))
     })();
-    // Cleared either way: a record that cannot be undone is not tried at every start.
-    let _ = in_progress::update(part, |e| e.undo = None);
+    // A failed undo keeps its record and its tail (the original can still be put back by hand).
     result?;
+    in_progress::update(part, |e| e.undo = None)?;
     let _ = crate::encoder::recycle::recycle(Path::new(&u.tail));
     Ok(true)
 }

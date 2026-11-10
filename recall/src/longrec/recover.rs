@@ -52,12 +52,16 @@ pub fn recover_parts(out_dir: String, json: bool) {
 
 /// A replay save whose packet index is still in the slot gets its own copy before the next
 /// save overwrites it (`replay_index::claim`).
-fn claim_replay_slots(entries: Vec<Entry>, logs: &mut Vec<String>) -> Vec<Entry> {
+pub(crate) fn claim_replay_slots(entries: Vec<Entry>, logs: &mut Vec<String>) -> Vec<Entry> {
     use crate::encoder::replay_index;
     entries
         .into_iter()
         .map(|mut entry| {
             let Some(base) = entry.index.clone().map(PathBuf::from).filter(|b| entry.kind == Kind::Replay && replay_index::is_slot(b)) else { return entry };
+            // Only the save whose index the slot holds may take it (a stale entry never does).
+            if !replay_index::belongs_to(&base, &entry.part()) {
+                return entry;
+            }
             match replay_index::claim(&base) {
                 Ok(own) => {
                     entry.index = Some(own.to_string_lossy().into_owned());
@@ -104,8 +108,32 @@ pub(crate) fn recovered_outbound(paths: Vec<String>) -> Option<Outbound> {
     Some(Outbound::RecordingRecovered { path, paths })
 }
 
+/// Why `entry` is not a long recording's part Recall wrote (it is then never acted on).
+fn invalid_long(entry: &Entry) -> Option<String> {
+    let part = entry.part();
+    let name = part.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if !naming::is_longrec_part(&name) {
+        return Some(format!("{} is not a long recording's .part", part.display()));
+    }
+    let tail = restore::tail_path(&part);
+    match &entry.undo {
+        Some(u) if !in_progress::same_path(&u.tail, &tail.to_string_lossy()) => Some(format!("its undo record names {} as its tail", u.tail)),
+        _ => None,
+    }
+}
+
 fn long_from_entry(entry: &Entry, found: &mut Report) {
     let part = entry.part();
+    if let Some(why) = invalid_long(entry) {
+        found.logs.push(format!("in-progress entry {} not acted on: {why}; dropped from the list", entry.path));
+        let _ = in_progress::remove(&part);
+        return;
+    }
+    if !part.exists() && !part.parent().is_some_and(Path::is_dir) {
+        // Its folder is gone: a drive not mounted yet. Kept for the start that sees it again.
+        found.logs.push(format!("long recording {}: its folder is not there now; kept listed", part.display()));
+        return;
+    }
     if !part.exists() {
         // Finished after all (the list was not updated), or gone: nothing to recover.
         let finished = PathBuf::from(entry.path.strip_suffix(naming::PART_EXT).unwrap_or(&entry.path));
@@ -115,13 +143,14 @@ fn long_from_entry(entry: &Entry, found: &mut Report) {
         let _ = in_progress::remove(&part);
         return;
     }
-    if let Err(e) = recover_long(&part, found) {
+    if let Err(e) = recover_long(&part, false, found) {
         found.logs.push(format!("long recording {} not recovered: {e}", part.display()));
     }
 }
 
-/// Repair `part`, rename it into place and write its bookmarks.
-fn recover_long(part: &Path, found: &mut Report) -> std::io::Result<PathBuf> {
+/// Repair `part`, write its bookmarks, rename it into place. `legacy` (the one-time scan): one
+/// with nothing playable is kept and logged, never recycled.
+fn recover_long(part: &Path, legacy: bool, found: &mut Report) -> std::io::Result<PathBuf> {
     if !exclusive(part) {
         return Err(std::io::Error::other("open by a running recorder"));
     }
@@ -135,6 +164,12 @@ fn recover_long(part: &Path, found: &mut Report) -> std::io::Result<PathBuf> {
         }
         // Only a test hook stops a repair midway; recovered as it is.
         Repair::Interrupted => (None, false),
+        // An earlier repair that cannot be undone: left as it is, listed, its tail beside it.
+        Repair::Stuck(why) => return Err(std::io::Error::other(format!("kept listed: {why}"))),
+        Repair::Unrecoverable(why) if legacy => {
+            found.logs.push(format!("long recording {} from an older build has nothing playable ({why}); kept as it is: boxes {}", part.display(), crate::encoder::recycle::layout_summary(part)));
+            return Err(std::io::Error::other(why));
+        }
         Repair::Unrecoverable(why) => {
             found.logs.extend(crate::encoder::recycle::dispose_unrecoverable(part, &why));
             let _ = in_progress::remove(part);
@@ -142,13 +177,14 @@ fn recover_long(part: &Path, found: &mut Report) -> std::io::Result<PathBuf> {
         }
     };
     let target = naming::recovered_path(part, Path::exists);
+    // Bookmarks first: a crash between the rename and the unlisting must not lose them.
+    if let Some(entry) = &entry {
+        write_marks(&target, entry, seconds, &mut found.logs);
+    }
     std::fs::rename(part, &target)?;
     // The rename stands even when the game folder's marker can't be updated (the file then
     // stays unowned).
     let _ = crate::game_folder_rule::record_saved(&target, Some(part));
-    if let Some(entry) = &entry {
-        write_marks(&target, entry, seconds, &mut found.logs);
-    }
     let _ = in_progress::remove(part);
     found.long.push(Recovered { clip: target.clone(), seconds, repaired });
     Ok(target)
@@ -176,6 +212,7 @@ pub(crate) fn write_marks(clip: &Path, entry: &Entry, seconds: Option<f64>, logs
 /// Every `*__rec.mp4.part` directly in `dir` or in one of its game folders (one level down,
 /// "Sort clips into game folders": only folders Recall made, `game_folder_rule`), recovered
 /// (or the error). Parts the in-progress list names are left to it.
+#[cfg(test)]
 pub(crate) fn recover_in(dir: &Path) -> Vec<(PathBuf, std::io::Result<PathBuf>)> {
     recover_in_to(dir, &mut Report::default())
 }
@@ -197,7 +234,7 @@ fn recover_in_to(dir: &Path, found: &mut Report) -> Vec<(PathBuf, std::io::Resul
         .map(|e| e.path())
         .filter(|p| !listed.iter().any(|l| l.part().to_string_lossy().eq_ignore_ascii_case(&p.to_string_lossy())))
         .map(|part| {
-            let result = recover_long(&part, found);
+            let result = recover_long(&part, true, found);
             (part, result)
         })
         .collect()
@@ -232,10 +269,12 @@ pub(crate) fn legacy_scan(out_dir: &Path, staging: Option<&Path>, found: &mut Re
 /// or its folder is gone; the recording then starts as a new one.
 pub(crate) fn next_part_of(recovered: &Path, notes: &mut Vec<Event>) -> Option<PathBuf> {
     let name = recovered.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let is_rec = name.to_ascii_lowercase().contains("__rec") && name.to_ascii_lowercase().ends_with(".mp4");
-    if !is_rec || !recovered.parent().is_some_and(Path::is_dir) {
+    // The recording's own name: `<stem>__rec[-N]`, without a `-recovered[-N]` the recovery added.
+    let lower = name.to_ascii_lowercase();
+    let base = lower.strip_suffix(".mp4").and_then(|stem| stem.rfind("__rec").map(|at| at + "__rec".len())).map(|end| format!("{}.mp4", &name[..end]));
+    let (Some(base), Some(dir)) = (base, recovered.parent().filter(|d| d.is_dir())) else {
         notes.push(Event::Log(format!("record_start: {} cannot be continued; starting a new recording", recovered.display())));
         return None;
-    }
-    Some(naming::longrec_next_part(recovered, Path::exists))
+    };
+    Some(naming::longrec_next_part(&dir.join(base), Path::exists))
 }

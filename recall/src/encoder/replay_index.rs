@@ -100,6 +100,7 @@ pub(crate) fn begin(base: &Path, part: &Path, header: impl FnOnce(&Path) -> Resu
     }
     let (idx, hdr) = (idx_of(base), hdr_of(base));
     header(&hdr)?;
+    let part = std::path::absolute(part).unwrap_or_else(|_| part.to_path_buf());
     let head = serde_json::to_vec(&Head { part: part.to_string_lossy().into_owned(), time_bases: time_bases.to_vec() }).map_err(|e| e.to_string())?;
     let file = std::fs::File::create(&idx).map_err(|e| format!("create {}: {e}", idx.display()))?;
     let mut out = BufWriter::with_capacity(1 << 20, file);
@@ -193,9 +194,23 @@ pub(crate) fn claim(base: &Path) -> Result<PathBuf, String> {
 
 /// Whether `base` is the production slot (not a claimed copy).
 pub(crate) fn is_slot(base: &Path) -> bool {
-    slot().is_some_and(|s| s.to_string_lossy().eq_ignore_ascii_case(&base.to_string_lossy()))
+    slot().is_some_and(|s| super::in_progress::same_path(&s.to_string_lossy(), &base.to_string_lossy()))
+}
+
+/// Whether `base` is one of Recall's own index bases: the slot or a claimed copy of it, in the
+/// replay-index folder. Nothing else is ever read as an index or recycled as one.
+pub(crate) fn is_index_base(base: &Path) -> bool {
+    let (Some(slot), Some(dir)) = (slot(), base.parent()) else { return false };
+    let slot_name = slot.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let name = base.file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+    slot.parent().is_some_and(|s| super::in_progress::same_path(&s.to_string_lossy(), &dir.to_string_lossy())) && name.starts_with(&slot_name)
+}
+
+/// Whether the index at `base` belongs to the save into `part`.
+pub(crate) fn belongs_to(base: &Path, part: &Path) -> bool {
+    read(base).is_ok_and(|(head, _)| super::in_progress::same_path(&head.part, &part.to_string_lossy()))
 }
 
 #[cfg(test)]
 #[path = "replay_restore_tests.rs"]
-mod tests;
+pub(crate) mod tests;

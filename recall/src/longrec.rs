@@ -31,7 +31,7 @@
 mod fmp4;
 mod lock_clock;
 pub(crate) mod machine;
-mod recover;
+pub(crate) mod recover;
 pub(crate) mod restore;
 pub use recover::recover_parts;
 #[cfg(test)]
@@ -465,6 +465,9 @@ mod restore_tests;
 #[cfg(test)]
 #[path = "longrec_journal_tests.rs"]
 mod journal_tests;
+#[cfg(test)]
+#[path = "longrec_review_tests.rs"]
+mod review_tests;
 /// The app's library length reader, the very file (`recall-native`, std only): restore test 6.
 #[cfg(test)]
 #[allow(dead_code)]

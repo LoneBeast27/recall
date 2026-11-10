@@ -85,13 +85,19 @@ fn absolute(path: &Path) -> String {
     std::path::absolute(path).unwrap_or_else(|_| path.to_path_buf()).to_string_lossy().into_owned()
 }
 
-fn key(path: &str) -> String {
-    path.replace('/', "\\").to_lowercase()
+/// A path's comparison key: absolute, backslashes, lowercase (`/` and `\` name the same file).
+pub(crate) fn key(path: &str) -> String {
+    absolute(Path::new(path)).replace('/', "\\").trim_end_matches('\\').to_lowercase()
+}
+
+/// Whether `a` and `b` name the same file (see [`key`]).
+pub(crate) fn same_path(a: &str, b: &str) -> bool {
+    key(a) == key(b)
 }
 
 /// Whether `entry` is the one for `part`.
 fn is(entry: &Entry, part: &Path) -> bool {
-    key(&entry.path) == key(&absolute(part))
+    same_path(&entry.path, &part.to_string_lossy())
 }
 
 /// `%APPDATA%\Recall\in-progress.json`.
@@ -99,16 +105,22 @@ pub(crate) fn path() -> Option<PathBuf> {
     Some(crate::user_dirs::checked(crate::user_dirs::appdata()?.join("Recall").join(FILE)))
 }
 
-fn load(path: &Path) -> List {
-    let Ok(bytes) = std::fs::read(path) else { return List::default() };
+/// The list on disk: none yet is empty; any other read error is an error (never an empty list
+/// that a write would then put over the entries it could not read).
+fn load(path: &Path) -> Result<List, String> {
+    let bytes = match std::fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(List::default()),
+        Err(e) => return Err(format!("read {}: {e}", path.display())),
+    };
     match serde_json::from_slice(&bytes) {
-        Ok(list) => list,
+        Ok(list) => Ok(list),
         Err(e) => {
-            // Never overwrite what could not be read: set it aside, start a fresh list.
+            // Never overwrite what could not be parsed: set it aside first, then start afresh.
             let bad = path.with_extension("json.bad");
-            let _ = std::fs::rename(path, &bad);
-            eprintln!("[recall] in-progress list {} unreadable ({e}); kept as {}", path.display(), bad.display());
-            List::default()
+            std::fs::rename(path, &bad).map_err(|r| format!("{} unparsable ({e}) and not set aside: {r}", path.display()))?;
+            eprintln!("[recall] in-progress list {} unparsable ({e}); kept as {}", path.display(), bad.display());
+            Ok(List::default())
         }
     }
 }
@@ -130,7 +142,7 @@ fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), String> {
 fn edit<R>(change: impl FnOnce(&mut Vec<Entry>) -> (bool, R)) -> Result<R, String> {
     let path = path().ok_or("no app-data folder for the in-progress list")?;
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    let mut list = load(&path);
+    let mut list = load(&path)?;
     let (changed, out) = change(&mut list.files);
     if changed {
         list.version = 1;
@@ -173,19 +185,33 @@ pub(crate) fn get(part: &Path) -> Option<Entry> {
     list().into_iter().find(|e| is(e, part))
 }
 
+/// The entries (none when the list cannot be read now: they stay on disk for the next start).
 pub(crate) fn list() -> Vec<Entry> {
     let Some(path) = path() else { return Vec::new() };
     let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    load(&path).files
+    match load(&path) {
+        Ok(list) => list.files,
+        Err(e) => {
+            eprintln!("[recall] in-progress list not read: {e}");
+            Vec::new()
+        }
+    }
 }
 
 fn legacy_marker() -> Option<PathBuf> {
     Some(crate::user_dirs::checked(crate::user_dirs::appdata()?.join("Recall").join(LEGACY_MARKER)))
 }
 
-/// The one-time scan for pre-list `.part` files has run.
+/// The one-time scan for pre-list `.part` files has run (and no part since asked for it again).
 pub(crate) fn legacy_scanned() -> bool {
-    legacy_marker().is_some_and(|p| p.is_file())
+    legacy_marker().and_then(|p| std::fs::read(p).ok()).is_some_and(|b| b == b"1")
+}
+
+/// A part could not be listed: the next start runs the one-time scan again, so a crash never
+/// leaves it to nobody (the scan finds it in the clip folder).
+pub(crate) fn request_legacy_scan() -> Result<(), String> {
+    let path = legacy_marker().ok_or("no app-data folder")?;
+    write_durable(&path, b"rescan")
 }
 
 pub(crate) fn mark_legacy_scanned() -> Result<(), String> {
@@ -193,8 +219,15 @@ pub(crate) fn mark_legacy_scanned() -> Result<(), String> {
     write_durable(&path, b"1")
 }
 
-/// FNV-1a 64 of `bytes`, as hex (the undo record's check on its saved tail).
+/// FNV-1a 64's start value; [`fnv_update`] folds bytes in (the undo record's check on its tail).
+pub(crate) const FNV_START: u64 = 0xcbf2_9ce4_8422_2325;
+
+pub(crate) fn fnv_update(hash: u64, bytes: &[u8]) -> u64 {
+    bytes.iter().fold(hash, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// FNV-1a 64 of `bytes`, as hex.
+#[cfg(test)]
 pub(crate) fn fnv_hex(bytes: &[u8]) -> String {
-    let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, b| (h ^ u64::from(*b)).wrapping_mul(0x0100_0000_01b3));
-    format!("{hash:016x}")
+    format!("{:016x}", fnv_update(FNV_START, bytes))
 }

@@ -32,7 +32,7 @@ fn sandbox(tag: &str) -> Sandbox {
 }
 
 /// `frames` 64x64 libx264 frames at 60 fps, keyframe every 30, as a save window from 0.
-fn window(frames: usize) -> Option<(Vec<EncodedPacket>, OwnedParams)> {
+pub(crate) fn window(frames: usize) -> Option<(Vec<EncodedPacket>, OwnedParams)> {
     ff::init().unwrap();
     let codec = ff::encoder::find_by_name("libx264")?;
     let mut ctx = ff::codec::context::Context::new_with_codec(codec).encoder().video().ok()?;

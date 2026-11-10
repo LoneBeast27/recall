@@ -8,7 +8,7 @@
 //! - Unit tests never reach the real Recycle Bin: under `cfg(test)` [`recycle`] is [`fake`],
 //!   which moves the file into `.recall-test-bin\` beside it (inside the test's own temp folder).
 use std::io::{Read, Seek, SeekFrom};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// Move `path` to the Recycle Bin. `Err` (why): the file stays where it is.
 pub(crate) fn recycle(path: &Path) -> Result<(), String> {
@@ -20,10 +20,21 @@ pub(crate) fn recycle(path: &Path) -> Result<(), String> {
 
 #[cfg_attr(test, allow(dead_code))]
 fn real(path: &Path) -> Result<(), String> {
+    precheck(path)?;
+    outcome(crate::win_fileop::recycle_files(&[path.to_path_buf()]).outcome)
+}
+
+/// `win_recycle`'s check that `path`'s volume has a Recycle Bin that will take it (reads the
+/// volume and the bin's settings; moves nothing).
+pub(crate) fn precheck(path: &Path) -> Result<(), String> {
     let bytes = std::fs::metadata(path).map_err(|e| format!("read {}: {e}", path.display()))?.len();
     let dir = path.parent().filter(|d| !d.as_os_str().is_empty()).unwrap_or(Path::new("."));
-    crate::win_recycle::can_recycle(dir, bytes)?;
-    match crate::win_fileop::recycle_files(&[path.to_path_buf()]).outcome {
+    crate::win_recycle::can_recycle(dir, bytes)
+}
+
+/// What `win_fileop`'s operation did, as this module's answer: only `Recycled` is done.
+pub(crate) fn outcome(outcome: crate::win_fileop::Outcome) -> Result<(), String> {
+    match outcome {
         crate::win_fileop::Outcome::Recycled => Ok(()),
         crate::win_fileop::Outcome::Refused(why) | crate::win_fileop::Outcome::Failed(why) => Err(why),
     }
@@ -76,6 +87,7 @@ pub(crate) fn dispose_unrecoverable(path: &Path, why: &str) -> Vec<String> {
 pub(crate) mod fake {
     use super::*;
     use std::cell::Cell;
+    use std::path::PathBuf;
     use std::sync::Mutex;
 
     static BINNED: Mutex<Vec<PathBuf>> = Mutex::new(Vec::new());

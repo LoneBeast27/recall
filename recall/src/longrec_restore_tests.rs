@@ -89,6 +89,18 @@ pub(super) fn crashed_recording(dir: &Path) -> Option<Vec<u8>> {
     Some(bytes)
 }
 
+/// What a crash right after a recording's start leaves: the fragmented MP4's header, no fragment.
+pub(super) fn header_only(dir: &Path) -> Option<Vec<u8>> {
+    ff::init().unwrap();
+    let enc = x264()?;
+    let params = ff::codec::Parameters::from(&enc);
+    let part = dir.join("header.mp4.part");
+    drop(Fmp4Sink::create(&part, &params, &tracks()).expect("create sink"));
+    let bytes = std::fs::read(&part).unwrap();
+    std::fs::remove_file(&part).unwrap();
+    Some(bytes)
+}
+
 /// Where the last whole `moof`+`mdat` pair in `bytes` ends (top-level box headers only).
 pub(super) fn last_whole_fragment_end(bytes: &[u8]) -> usize {
     let (mut pos, mut end, mut after_moof) = (0usize, 0usize, false);
