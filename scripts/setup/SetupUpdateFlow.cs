@@ -33,6 +33,18 @@ namespace Recall.Setup
         private readonly UserRoots roots;
         private readonly ResumeFile resume;
         private bool recorderRan;
+        /// A Recall window of this install was open before the update closed it.
+        private bool appWasOpen;
+
+        /// Whether an app process shows a window (tests stand in for it: their fakes have none).
+        internal static Func<SessionProcess, bool> ShowsWindow = HasMainWindow;
+
+        private static bool HasMainWindow(SessionProcess p)
+        {
+            try { using (var process = System.Diagnostics.Process.GetProcessById(p.Pid)) return process.MainWindowHandle != IntPtr.Zero; }
+            catch (ArgumentException) { return false; }
+            catch (InvalidOperationException) { return false; }
+        }
         private bool longOn;
         private string longPath;
         private string backup;
@@ -56,6 +68,9 @@ namespace Recall.Setup
             var why = InstallSwap.Recover(dir);
             if (why != null) throw new InvalidOperationException("An earlier update could not be undone yet (" + why + "). Close Recall, then run Setup again.");
             recorderRan = quitter.OurControllers().Count > 0;
+            // An update reopens what it closed: the app too, also when no --resume came with it
+            // (an older Recall's updater passes only --update).
+            appWasOpen = quitter.InstalledApp().Exists(p => ShowsWindow(p));
             var status = recorderRan ? quitter.ReadOurStatus() : null;
             longOn = (status != null && status.LongActive) || (resume != null && resume.LongOn);
             longPath = status != null ? status.LongPath : null;
@@ -126,8 +141,9 @@ namespace Recall.Setup
             {
                 var flow = new UpdateFlow(targets, dir, options.Resume, log);
                 flow.Outcome("failed", error.GetBaseException().Message);
-                if (!File.Exists(Path.Combine(dir, "recall-native.exe"))) return;
-                var args = flow.resume == null ? null : "--resume \"" + flow.resume.Path + "\"";
+                // Without --resume nothing closed the app yet (an older updater): it is still open.
+                if (flow.resume == null || !File.Exists(Path.Combine(dir, "recall-native.exe"))) return;
+                var args = "--resume \"" + flow.resume.Path + "\"";
                 using (var app = DetachedProcess.Start(Path.Combine(dir, "recall-native.exe"), args, null))
                     log("Recall reopened: pid " + app.Pid + (args == null ? "" : " " + args));
             }
@@ -148,11 +164,12 @@ namespace Recall.Setup
             }
             catch (Exception start) { notes.Add("The recorder could not be started again (" + start.Message + "). Start it from Recall."); }
             Outcome(outcome, error);
-            if (resume == null || SetupPackage.ExistingInstallPath(dir) == null) return;
+            if ((resume == null && !appWasOpen) || SetupPackage.ExistingInstallPath(dir) == null) return;
             try
             {
-                using (var app = DetachedProcess.Start(Path.Combine(dir, "recall-native.exe"), "--resume \"" + resume.Path + "\"", null))
-                    log("Recall reopened: pid " + app.Pid + " --resume " + resume.Path);
+                var args = resume == null ? null : "--resume \"" + resume.Path + "\"";
+                using (var app = DetachedProcess.Start(Path.Combine(dir, "recall-native.exe"), args, null))
+                    log("Recall reopened: pid " + app.Pid + (args == null ? "" : " " + args));
             }
             catch (Exception open) { notes.Add("Recall could not be reopened (" + open.Message + "). Open it from the Start menu."); }
         }

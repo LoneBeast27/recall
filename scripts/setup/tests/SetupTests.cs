@@ -51,6 +51,9 @@ namespace Recall.Setup.Tests
             Run("a resume file Setup cannot read never stops the update", UnreadableResumeFileNeverStopsTheUpdate);
             Run("a guard failing before the update reopens Recall and tells it", GuardFailureReopensRecall);
             Run("a Recover that throws inside Failed leaves Recall closed and says so", ThrowingRecoverInFailedSaysSo);
+            Run("an update without --resume reopens the app that was open, plainly", PlainUpdateReopensAnOpenApp);
+            Run("an update without --resume leaves a closed app closed", PlainUpdateLeavesAClosedAppClosed);
+            Run("an update without --resume never reopens after a failed rollback", PlainUpdateNotReopenedAfterAFailedRollback);
             Console.WriteLine(passed + " passed, " + failed + " failed");
             return failed == 0 ? 0 : 1;
         }

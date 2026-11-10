@@ -31,6 +31,9 @@ namespace Recall.Setup.Fake
             if (me != "recall-hdr.exe")
             {
                 Log("env RECALL_SETUP=" + (Environment.GetEnvironmentVariable("RECALL_SETUP") ?? "-"));
+                // FAKE_APP_SECONDS: stay open that long (an app open when the update starts).
+                int stay;
+                if (int.TryParse(Environment.GetEnvironmentVariable("FAKE_APP_SECONDS"), out stay)) Thread.Sleep(stay * 1000);
                 return 0;
             }
             foreach (var f in Directory.GetFiles(Path.GetDirectoryName(exe))) Siblings[f] = Hash(f);
