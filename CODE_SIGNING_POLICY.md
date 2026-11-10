@@ -27,9 +27,10 @@ this check automatically before it opens Setup.
 
 ## How releases are built
 
-Official releases are built from this repository's public `main` by the
-[release workflow](.github/workflows/release.yml) on a GitHub-hosted runner, never on a
-personal PC. The workflow builds `recall-native.exe`, `recall.exe`, `recall-hdr.exe`,
+From the next release on, official releases are built from this repository's public `main` by
+the [release workflow](.github/workflows/release.yml) on a GitHub-hosted runner. Recall 0.1.1
+was built locally from its tagged source with `scripts/release.ps1`; its `SOURCE-REVISION.txt`
+names that commit. The workflow builds `recall-native.exe`, `recall.exe`, `recall-hdr.exe`,
 `recall-overlay.exe` and `RecallUninstall.exe`, checks that each carries the product name
 "Recall" and the release version, and builds Setup around them. A release tag must be on
 `main`.
