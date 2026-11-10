@@ -224,7 +224,18 @@ pub trait CommandPort {
 /// The command `cmd`, in order: queue first; only a queued one is marked in flight,
 /// announced and, for a shortcut (`hotkey`), ticked. What became of the line.
 pub fn command(port: &mut impl CommandPort, cmd: &str, hotkey: bool) -> Sent {
-    let sent = port.queue(&serde_json::json!({ "cmd": cmd }).to_string());
+    command_line(port, &serde_json::json!({ "cmd": cmd }).to_string(), hotkey)
+}
+
+/// Resume recording: `record_start` continuing the recovered recording `path` (its next part).
+pub fn resume_line(path: &str) -> String {
+    serde_json::json!({"cmd": "record_start", "continues": path}).to_string()
+}
+
+/// [`command`] with the engine line given (a command with arguments: Resume recording's
+/// `record_start{continues}`).
+pub fn command_line(port: &mut impl CommandPort, line: &str, hotkey: bool) -> Sent {
+    let sent = port.queue(line);
     let effects = if hotkey { hotkey_effects(sent) } else { command_effects(sent) };
     for effect in effects {
         match effect {

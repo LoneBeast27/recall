@@ -313,3 +313,16 @@ fn the_source_list_and_the_press_flags_are_wired() {
     assert!(method_body(include_str!("record_cmds.rs"), "set_mic").contains("self.supervisor.set_mic_muted(muted)"), "Alt+M goes through the press line");
     assert!(method_body(include_str!("record_engine_ctl.rs"), "reapply_engine_intents").contains("mic_line(self.mic_muted, false)"), "a resync is no press");
 }
+
+/// Restore policy P2 (controller): the app's Resume recording is a `record_start` that
+/// continues the recovered file, queued and marked in flight like any start (no tick).
+#[test]
+fn resume_recording_is_a_record_start_that_continues_the_recovered_file() {
+    let line = resume_line(r"E:\c\G__2026-11-10__13-00-00__rec.mp4");
+    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(v, serde_json::json!({"cmd": "record_start", "continues": r"E:\c\G__2026-11-10__13-00-00__rec.mp4"}));
+    let ok = TestPipe::healthy();
+    let mut port = CmdShown { pipe: &ok, log: Vec::new() };
+    assert!(command_line(&mut port, &line, false).queued());
+    assert_eq!(port.log, ["queue", "mark_pending", "announce"]);
+}
