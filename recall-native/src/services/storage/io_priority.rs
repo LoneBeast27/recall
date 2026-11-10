@@ -59,6 +59,15 @@ pub(super) fn process_io_priority(child: &Child) -> Option<u32> {
     (status >= 0).then_some(value)
 }
 
+/// The I/O priority of this process (what an unlowered child inherits).
+#[cfg(test)]
+pub(super) fn current_process_io_priority() -> Option<u32> {
+    let mut value = 0u32;
+    let process = unsafe { windows::Win32::System::Threading::GetCurrentProcess() };
+    let status = unsafe { NtQueryInformationProcess(process, PROCESS_IO_PRIORITY, (&mut value as *mut u32).cast(), 4, std::ptr::null_mut()) };
+    (status >= 0).then_some(value)
+}
+
 fn handle(child: &Child) -> HANDLE {
     HANDLE(child.as_raw_handle())
 }

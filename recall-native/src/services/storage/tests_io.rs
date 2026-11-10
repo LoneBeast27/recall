@@ -105,8 +105,11 @@ fn lowered_child_process_starts_at_very_low_io_priority() {
         let _ = child.wait();
         priority
     };
+    // Normal (2) on a desktop; a CI runner's service starts the tests at low (1).
+    let own = io_priority::current_process_io_priority().expect("own I/O priority");
+    assert!(own > IO_VERY_LOW, "the tests run above very low I/O priority, got {own}");
     assert_eq!(ping(true), Some(IO_VERY_LOW));
-    assert_eq!(ping(false), Some(2), "unlowered children stay at normal I/O priority");
+    assert_eq!(ping(false), Some(own), "unlowered children keep the app's own I/O priority");
 }
 
 fn write_pattern(path: &Path, len: usize, seed: u8) {

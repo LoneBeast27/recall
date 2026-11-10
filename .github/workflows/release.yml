@@ -43,6 +43,9 @@ defaults:
   run:
     shell: pwsh
 
+# This workflow builds and signs; it does not publish. Release notes start from
+# .github/RELEASE_NOTES_TEMPLATE.md, which carries the SignPath credit line:
+# "Free code signing provided by SignPath.io, certificate by SignPath Foundation."
 jobs:
   build:
     runs-on: windows-latest
@@ -131,15 +134,40 @@ jobs:
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}\target-dev
         run: |
-          cargo test --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay
-          if ($LASTEXITCODE -ne 0) { throw "recorder tests failed ($LASTEXITCODE)" }
+          # Tests that need a GPU skip on this runner with a counted HW-SKIP line (no NVENC, only
+          # the Basic Render adapter). The count goes in the run summary so a mass skip is visible.
+          $log = Join-Path $env:RUNNER_TEMP 'recorder-tests.log'
+          cargo test --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          $skips = @(Select-String -LiteralPath $log -Pattern 'HW-SKIP #' | ForEach-Object { $_.Line.Trim() })
+          $summary = @("### Recorder tests: $($skips.Count) GPU tests skipped (HW-SKIP)", '')
+          $summary += $skips | ForEach-Object { "- ``$_``" }
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $summary
+          if ($code -ne 0) { throw "recorder tests failed ($code)" }
 
       - name: CPU-only tests (app)
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}\target-gpui
         run: |
-          cargo test --locked --manifest-path recall-native\Cargo.toml
-          if ($LASTEXITCODE -ne 0) { throw "app tests failed ($LASTEXITCODE)" }
+          # Skipped on this runner only, by name, and listed in the run summary; each is a tracked
+          # follow-up, and the desktop gate runs all of them:
+          # - two late-track audio tests: the late track decodes silent on this image's Media Foundation
+          # - paced copying: this runner's disk is too slow for the pacing cap's timing bound
+          $runnerSkips = @(
+            'audio::stream::tests::a_clip_whose_only_track_starts_late_finishes_with_silence_before_it',
+            'audio::stream::tests::a_late_second_track_leaves_the_first_one_whole',
+            'services::storage::fill::tests::paced_copying_keeps_to_its_rate'
+          )
+          $skipArgs = @($runnerSkips | ForEach-Object { '--skip', $_ })
+          $log = Join-Path $env:RUNNER_TEMP 'app-tests.log'
+          cargo test --locked --manifest-path recall-native\Cargo.toml -- @skipArgs 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log
+          $code = $LASTEXITCODE
+          $skips = @(Select-String -LiteralPath $log -Pattern 'HW-SKIP' | ForEach-Object { $_.Line.Trim() })
+          $summary = @("### App tests: $($skips.Count) GPU tests skipped (HW-SKIP), $($runnerSkips.Count) skipped on this runner by name", '')
+          $summary += $skips | ForEach-Object { "- ``$_``" }
+          $summary += $runnerSkips | ForEach-Object { "- runner skip: ``$_``" }
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $summary
+          if ($code -ne 0) { throw "app tests failed ($code)" }
 
       - name: Setup unit tests
         run: |
