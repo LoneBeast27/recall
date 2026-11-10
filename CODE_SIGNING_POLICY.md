@@ -1,23 +1,44 @@
 # Code signing policy
 
-Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+Recall releases are currently **not code-signed**. Recall applied to the free SignPath
+Foundation program for open-source projects, which asked us to reapply once the project is
+more widely known. Until a release is signed, Windows treats `RecallSetup.exe` as coming from
+an unknown publisher.
 
-## What is signed
+## What you will see
 
-Official Recall releases ship `RecallSetup.exe`, built from this repository's public `main` by
-the [release workflow](.github/workflows/release.yml) on a GitHub-hosted runner. Every
-executable Recall installs is signed, not only Setup:
+- **SmartScreen** may show "Windows protected your PC". Choose **More info**, check that the
+  file is `RecallSetup.exe` from this repository's releases, then **Run anyway**.
+- **Microsoft Defender** or another antivirus may flag a new, unsigned release before it has
+  built up reputation. False positives can be reported to Microsoft; if you see one, please
+  open an issue. Download only from [the Releases page](https://github.com/LoneBeast27/recall/releases).
 
-1. The workflow builds `recall-native.exe`, `recall.exe`, `recall-hdr.exe`, `recall-overlay.exe`
-   and `RecallUninstall.exe`, and checks that each carries the product name "Recall" and the
-   release version.
-2. Those five are submitted to SignPath only after a person approves the request in the
-   `release-signing` environment.
-3. Setup is built around the signed files, then submitted to SignPath, again only after approval.
+## Check a download yourself
 
-After each round the workflow checks every Authenticode signature and timestamp before the
-signed files are kept. A release tag must be on `main`. Nothing built outside that workflow is
-signed. The SignPath artifact configurations are in [.signpath](.signpath/artifact-configurations).
+Every release lists the installer's SHA-256 in `SHA256SUMS.txt` and the exact source commit in
+`SOURCE-REVISION.txt`. In PowerShell:
+
+```powershell
+Get-FileHash .\RecallSetup.exe -Algorithm SHA256
+```
+
+The hash must match the `RecallSetup.exe` line in `SHA256SUMS.txt`. Recall's own updater does
+this check automatically before it opens Setup.
+
+## How releases are built
+
+From the next release on, official releases are built from this repository's public `main` by
+the [release workflow](.github/workflows/release.yml) on a GitHub-hosted runner. Recall 0.1.1
+was built locally from its tagged source with `scripts/release.ps1`; its `SOURCE-REVISION.txt`
+names that commit. The workflow builds `recall-native.exe`, `recall.exe`, `recall-hdr.exe`,
+`recall-overlay.exe` and `RecallUninstall.exe`, checks that each carries the product name
+"Recall" and the release version, and builds Setup around them. A release tag must be on
+`main`.
+
+The workflow already contains signing steps (SignPath configurations are in
+[.signpath](.signpath/artifact-configurations)). They stay switched off until a signing
+certificate is in place; when that happens, every executable will be signed, not only Setup,
+each signing request will need a person's approval, and this page will say so.
 
 ## Roles
 
@@ -25,7 +46,7 @@ signed. The SignPath artifact configurations are in [.signpath](.signpath/artifa
 |---|---|
 | Author (committer) | [LoneBeast27](https://github.com/LoneBeast27) |
 | Reviewer | [LoneBeast27](https://github.com/LoneBeast27) |
-| Approver (signing requests) | [LoneBeast27](https://github.com/LoneBeast27) |
+| Approver (releases and future signing requests) | [LoneBeast27](https://github.com/LoneBeast27) |
 
 ## Privacy
 

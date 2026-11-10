@@ -29,11 +29,11 @@ telemetry or analytics. The only network traffic is:
 - **Installing an update** keeps a backup of your settings and a small resume note in
   `%LOCALAPPDATA%\Recall\updates\` on your PC; nothing about them is sent.
 
-Nothing else is sent. Details: [Code signing policy](CODE_SIGNING_POLICY.md).
+Nothing else is sent. Details: [Privacy](CODE_SIGNING_POLICY.md#privacy).
 
 ## Install
 
-Free code signing provided by [SignPath.io](https://signpath.io), certificate by [SignPath Foundation](https://signpath.org). See the [code signing policy](CODE_SIGNING_POLICY.md).
+Recall releases are not code-signed yet, so Windows SmartScreen may say "Windows protected your PC": choose **More info**, then **Run anyway**. Download only from [Releases](https://github.com/LoneBeast27/recall/releases) and check the installer against `SHA256SUMS.txt` with `Get-FileHash RecallSetup.exe`. Details in the [code signing policy](CODE_SIGNING_POLICY.md).
 
 Open `dist/recall-current/RecallSetup.exe` for Quick Setup. Choose whether recording starts when setup is complete and whether to set up Windows game detection and FPS. **Change…** opens the SSD install folder picker from Quick Setup. **Advanced** also lets you type a folder or change the Start menu shortcut. After installation, **Continue setup** opens Storage, Audio, and Recording quality. Recording quality compares the same full frame before and after encoding, with a detail crop available. Choose **Open Recall** to reach your library. Updates keep your existing clip folder and recording settings.
 
@@ -43,7 +43,7 @@ Setup checks the PC before copying Recall. Release Setup downloads the pinned FF
 
 Official versioned builds check [Recall's GitHub Releases](https://github.com/LoneBeast27/recall/releases) after launch. You can also check in **Settings → General → About**. Recall offers a newer stable release once it verifies that the tag is on `main`. It verifies the Setup download against GitHub's SHA-256 before opening Setup for confirmation.
 
-Official releases are built by the [release workflow](.github/workflows/release.yml) on a GitHub-hosted runner and signed under the [code signing policy](CODE_SIGNING_POLICY.md). `scripts\release.ps1 -Version <major.minor.patch> -ArtifactDirectory <extracted CI bundle>` checks a CI bundle (source revision, SHA-256, version) and refuses an unsigned Setup once signing is configured. Run `powershell -NoProfile -File scripts\release.ps1 -Version <major.minor.patch>` from a clean checkout of the current public `main` to build without installing. The output contains `RecallSetup.exe`, `SHA256SUMS.txt`, `SOURCE-REVISION.txt`, and four Recall executables in `recall-app` for individual scans. Use a matching `v<major.minor.patch>` tag on that source revision. A draft can be verified before publishing.
+From the next release on, official releases are built by the [release workflow](.github/workflows/release.yml) on a GitHub-hosted runner, as described in the [code signing policy](CODE_SIGNING_POLICY.md) (releases are currently unsigned). Recall 0.1.1 was built locally from its tagged source with `scriptselease.ps1`; its `SOURCE-REVISION.txt` names that commit. `scripts\release.ps1 -Version <major.minor.patch> -ArtifactDirectory <extracted CI bundle>` checks a CI bundle (source revision, SHA-256, version) and refuses an unsigned Setup once signing is configured. Run `powershell -NoProfile -File scripts\release.ps1 -Version <major.minor.patch>` from a clean checkout of the current public `main` to build without installing. The output contains `RecallSetup.exe`, `SHA256SUMS.txt`, `SOURCE-REVISION.txt`, and four Recall executables in `recall-app` for individual scans. Use a matching `v<major.minor.patch>` tag on that source revision. A draft can be verified before publishing.
 
 Run `Get-Help scripts/dev/scan-release.ps1 -Examples` for a per-file Defender scan of the installer, app binaries, and vendor downloads.
 

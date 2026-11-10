@@ -43,9 +43,9 @@ defaults:
   run:
     shell: pwsh
 
-# This workflow builds and signs; it does not publish. Release notes start from
-# .github/RELEASE_NOTES_TEMPLATE.md, which carries the SignPath credit line:
-# "Free code signing provided by SignPath.io, certificate by SignPath Foundation."
+# This workflow builds (and signs, once configured); it does not publish. Release notes start
+# from .github/RELEASE_NOTES_TEMPLATE.md. Releases are unsigned for now: when signing is turned
+# on, put the signer's credit line back into that template, the README and CODE_SIGNING_POLICY.md.
 jobs:
   build:
     runs-on: windows-latest
