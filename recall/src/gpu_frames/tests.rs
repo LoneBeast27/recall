@@ -5,7 +5,7 @@
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_SAMPLE_DESC};
 
-use super::{hardware_device, read_rgba, target_size, Pipeline};
+use super::{read_rgba, target_size, Pipeline};
 use crate::framing::{Layout, Rect};
 
 #[test]
@@ -72,8 +72,8 @@ const PATCHES: [[f32; 3]; 8] = [
 
 #[test]
 fn gpu_output_matches_the_wgsl_reference_and_pads_black() {
-    let Some((dev, ctx)) = hardware_device().filter(|_| !crate::hw_skip::faked_absent()) else {
-        return crate::hw_skip::skipped("no hardware D3D11 device");
+    let Some((dev, ctx)) = crate::hw_skip::gpu_device() else {
+        return;
     };
     // 8 patches of 4x4 texels in one row: a 32x4 source, rendered into a 36x6 target.
     let (sw, sh) = (32u32, 4u32);
@@ -161,8 +161,8 @@ fn texture(dev: &ID3D11Device, w: u32, h: u32, f: impl Fn(u32, u32) -> [f32; 3])
 
 #[test]
 fn windowed_client_area_lands_on_the_canvas_pixel_exact_with_black_bars() {
-    let Some((dev, ctx)) = hardware_device().filter(|_| !crate::hw_skip::faked_absent()) else {
-        return crate::hw_skip::skipped("no hardware D3D11 device");
+    let Some((dev, ctx)) = crate::hw_skip::gpu_device() else {
+        return;
     };
     // A 16x10 "window": 3 white title-bar rows, red 1 px side borders, and a client area
     // whose texels all differ.
@@ -203,8 +203,8 @@ fn windowed_client_area_lands_on_the_canvas_pixel_exact_with_black_bars() {
 
 #[test]
 fn a_client_area_larger_than_the_canvas_is_scaled_down_without_title_bar_bleed() {
-    let Some((dev, ctx)) = hardware_device().filter(|_| !crate::hw_skip::faked_absent()) else {
-        return crate::hw_skip::skipped("no hardware D3D11 device");
+    let Some((dev, ctx)) = crate::hw_skip::gpu_device() else {
+        return;
     };
     // 32x16 window: 4 white title rows over a client of red (left half) | blue (right).
     let src = texture(&dev, 32, 16, |x, y| match (x, y) {

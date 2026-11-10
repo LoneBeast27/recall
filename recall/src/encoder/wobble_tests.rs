@@ -16,7 +16,7 @@ use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R16G16B16A16_FLOAT, DXG
 use super::super::settings::Codec;
 use super::super::{run, saver, try_open, Config, EncStats, PacedFrame, SaveRequest};
 use crate::framing::{Layout, MIN_ENCODE};
-use crate::gpu_frames::{hardware_device, Pipeline};
+use crate::gpu_frames::Pipeline;
 
 pub(crate) const BIG: (u32, u32) = (640, 360);
 const WOBBLE: (u32, u32) = (640, 358);
@@ -175,8 +175,7 @@ pub(crate) struct Capture {
 
 impl Capture {
     pub fn new() -> Option<Self> {
-        let Some((dev, ctx)) = hardware_device().filter(|_| !crate::hw_skip::faked_absent()) else {
-            crate::hw_skip::skipped("no hardware D3D11 device");
+        let Some((dev, ctx)) = crate::hw_skip::gpu_device() else {
             return None;
         };
         let pipe = Pipeline::new(&dev, &ctx).expect("pipeline");
