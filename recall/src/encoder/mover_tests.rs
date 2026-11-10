@@ -289,16 +289,24 @@ fn shutdown_stops_an_idle_mover_at_once_and_queued_moves_stay_staged() {
 
 #[test]
 fn background_mode_drops_this_threads_io_priority_to_very_low() {
-    let (before, after, cpu) = std::thread::spawn(|| {
+    use windows::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_END};
+    let (before, during, cpu, after) = std::thread::spawn(|| {
         let before = super::super::bg_io::thread_io_priority();
         super::super::bg_io::enter_background().unwrap();
-        (before, super::super::bg_io::thread_io_priority(), super::super::bg_io::thread_priority())
+        let (during, cpu) = (super::super::bg_io::thread_io_priority(), super::super::bg_io::thread_priority());
+        // SAFETY: this thread's own pseudo-handle; only the thread itself may end background mode.
+        unsafe { SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END) }.unwrap();
+        (before, during, cpu, super::super::bg_io::thread_io_priority())
     })
     .join()
     .unwrap();
-    assert_eq!(before, Some(2), "a fresh thread starts at normal I/O priority");
-    assert_eq!(after, Some(0), "background mode = very low I/O priority");
+    // The start is the process's own level: normal (2) on a desktop, low (1) on a CI runner's
+    // service. Whatever it is, background mode takes it to very low and ending it gives it back.
+    let start = before.expect("I/O priority readable");
+    assert!(start > 0, "a fresh thread starts above very low I/O priority, got {start}");
+    assert_eq!(during, Some(0), "background mode = very low I/O priority (from {start})");
     assert!(cpu <= -1, "at or below THREAD_PRIORITY_BELOW_NORMAL, got {cpu}");
+    assert_eq!(after, Some(start), "ending background mode restores the starting I/O priority");
 }
 
 /// `len` patterned bytes with byte `at` flipped.
