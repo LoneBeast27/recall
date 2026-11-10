@@ -121,6 +121,40 @@ namespace Recall.Setup.Tests
             }
         }
 
+        private static void SetAsideNeverOverwrites()
+        {
+            var root = Path.Combine(Path.GetTempPath(), "recall-setup-aside-test-" + Guid.NewGuid().ToString("N"));
+            Directory.CreateDirectory(root);
+            try
+            {
+                var file = Path.Combine(root, "library.json");
+                File.WriteAllBytes(file, new byte[] { 0, 0 });
+                var first = ConfigBackup.SetAside(file);
+                File.WriteAllBytes(file, new byte[] { 0, 1 });
+                var second = ConfigBackup.SetAside(file);
+                Check(first != second && !File.Exists(file), "a second set-aside in the same second gets its own name");
+                Check(File.ReadAllBytes(first).SequenceEqual(new byte[] { 0, 0 }) && File.ReadAllBytes(second).SequenceEqual(new byte[] { 0, 1 }), "both damaged copies kept");
+                // A file that cannot be moved (held open without delete sharing): Restore must skip it.
+                var backup = Path.Combine(root, "backup");
+                Directory.CreateDirectory(Path.Combine(backup, "roaming", "Recall"));
+                File.WriteAllText(Path.Combine(backup, "roaming", @"Recall\folders.json"), "{\"recordings\":\"from-backup\"}");
+                File.WriteAllText(Path.Combine(backup, ConfigBackup.ListName), "roaming\tRecall\\folders.json\n");
+                var live = Path.Combine(root, "Roaming", "Recall", "folders.json");
+                Directory.CreateDirectory(Path.GetDirectoryName(live));
+                File.WriteAllBytes(live, new byte[] { 0 });
+                var lines = new List<string>();
+                int restored;
+                using (new FileStream(live, FileMode.Open, FileAccess.Read, FileShare.Read))
+                    restored = ConfigBackup.Restore(backup, new UserRoots(Path.Combine(root, "Roaming"), Path.Combine(root, "Local")), root, lines.Add);
+                Check(restored == 0 && File.ReadAllBytes(live).SequenceEqual(new byte[] { 0 }), "a file that could not be set aside is left as it was, not copied over");
+                Check(lines.Any(l => l.Contains("could not be set aside")), "and the skip is logged");
+            }
+            finally
+            {
+                try { Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            }
+        }
+
         private static void HandUpdateRestoresUnreadable()
         {
             using (var box = new Sandbox())
@@ -143,6 +177,9 @@ namespace Recall.Setup.Tests
                 Check(error == null, "the update ran: " + error);
                 Check(File.ReadAllText(library) == names, "the damaged library (names, favourites) came back from the backup");
                 Check(File.ReadAllText(folders).Contains("E-New"), "a readable file is never replaced");
+                var aside = Directory.GetFiles(Path.GetDirectoryName(library), "library.json.unreadable-*");
+                Check(aside.Length == 1, "the damaged file was set aside, not overwritten (" + aside.Length + ")");
+                Check(aside.Length == 1 && File.ReadAllBytes(aside[0]).SequenceEqual(new byte[] { 0, 0, 0 }), "the damaged bytes survive in the set-aside file");
             }
         }
     }
