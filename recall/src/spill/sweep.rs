@@ -68,7 +68,7 @@ pub(super) fn spawn(log: std::sync::Arc<dyn Fn(&str) + Send + Sync>) {
 
 /// True when `pid` is a running process named recall.exe.
 #[cfg(windows)]
-fn is_recall(pid: u32) -> bool {
+pub(crate) fn is_recall(pid: u32) -> bool {
     use windows::core::PWSTR;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{
@@ -95,6 +95,6 @@ fn is_recall(pid: u32) -> bool {
 }
 
 #[cfg(not(windows))]
-fn is_recall(_pid: u32) -> bool {
+pub(crate) fn is_recall(_pid: u32) -> bool {
     false
 }

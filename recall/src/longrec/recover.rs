@@ -52,6 +52,7 @@ pub fn recover_parts(out_dir: String, json: bool) {
 
 /// The list as this start found it, with the replay index slot handed to its save first.
 pub(crate) fn start_entries(logs: &mut Vec<String>) -> Vec<Entry> {
+    logs.extend(in_progress::sweep_temps(&crate::spill::is_recall));
     match in_progress::try_list() {
         Ok(entries) => claim_replay_slots(entries, logs),
         Err(e) => {
@@ -156,6 +157,9 @@ fn long_from_entry(entry: &Entry, found: &mut Report) {
     if !part.exists() {
         // Finished after all (the list was not updated), or gone: nothing to recover.
         let finished = PathBuf::from(entry.path.strip_suffix(naming::PART_EXT).unwrap_or(&entry.path));
+        if finished.exists() {
+            found.logs.push(format!("in-progress entry {} dropped: the recording finished as {} before the list was updated", part.display(), finished.display()));
+        }
         if finished.exists() && !has_recovered_sibling(&finished) {
             write_marks(&finished, entry, None, &mut found.logs);
         } else if !finished.exists() {

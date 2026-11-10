@@ -226,7 +226,9 @@ fn recover_valid(entry: &Entry, part: &Path, clips: &mut Vec<PathBuf>, logs: &mu
             logs.push(format!("replay save {}: its folder is not there now; kept listed", part.display()));
             return Outcome::Retry;
         }
-        if !clip.exists() {
+        if clip.exists() {
+            logs.push(format!("in-progress entry {} dropped: the save finished as {} before the list was updated", part.display(), clip.display()));
+        } else {
             logs.push(format!("replay save {} was listed but is gone", part.display()));
         }
         recycle_index(entry, logs);

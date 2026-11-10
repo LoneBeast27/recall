@@ -227,6 +227,35 @@ pub(crate) fn mark_legacy_scanned() -> Result<(), String> {
     write_durable(&path, b"1")
 }
 
+/// The pid in one of this list's own temp files (`in-progress.json.<pid>.tmp`,
+/// `in-progress.legacy-scanned.<pid>.tmp`, [`write_durable`]), when the name is exactly that.
+fn temp_pid(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("in-progress.json.").or_else(|| name.strip_prefix(&format!("{LEGACY_MARKER}.")))?;
+    let pid = rest.strip_suffix(".tmp")?;
+    pid.bytes().all(|b| b.is_ascii_digit()).then(|| pid.parse().ok()).flatten()
+}
+
+/// At start: this list's own temp files left by an engine that died while writing it (its pid
+/// no longer a running recall.exe), removed (they are Recall's temp files, never data). Only in
+/// the list's own folder, only by that exact name. The lines to log.
+pub(crate) fn sweep_temps(alive: &dyn Fn(u32) -> bool) -> Vec<String> {
+    let Some(dir) = path().and_then(|p| p.parent().map(Path::to_path_buf)) else { return Vec::new() };
+    let own = std::process::id();
+    let mut lines = Vec::new();
+    for entry in std::fs::read_dir(&dir).into_iter().flatten().flatten() {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let Some(pid) = temp_pid(&name) else { continue };
+        if pid == own || alive(pid) || !entry.file_type().is_ok_and(|t| t.is_file()) {
+            continue;
+        }
+        lines.push(match std::fs::remove_file(entry.path()) {
+            Ok(()) => format!("removed {}: the in-progress list's temp file from an engine (pid {pid}) that is gone", entry.path().display()),
+            Err(e) => format!("in-progress list temp file {} not removed: {e}", entry.path().display()),
+        });
+    }
+    lines
+}
+
 /// FNV-1a 64's start value; [`fnv_update`] folds bytes in (the undo record's check on its tail).
 pub(crate) const FNV_START: u64 = 0xcbf2_9ce4_8422_2325;
 
