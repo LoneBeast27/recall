@@ -99,7 +99,7 @@ fn pcm(name: &'static str, secs: f64, tone: bool) -> AudioPcm {
 }
 
 /// Encode a VFR libx264 stream into a ring and return its save window.
-fn x264_window() -> Option<(Vec<EncodedPacket>, OwnedParams)> {
+pub(crate) fn x264_window() -> Option<(Vec<EncodedPacket>, OwnedParams)> {
     cpu_window("libx264")
 }
 
@@ -133,7 +133,7 @@ fn cpu_window(name: &str) -> Option<(Vec<EncodedPacket>, OwnedParams)> {
     Some((ring.save_window_at(250_000, 420_000), params))
 }
 
-fn window_job(path: &str, packets: Vec<EncodedPacket>, params: OwnedParams, secs: f64) -> SaveJob {
+pub(crate) fn window_job(path: &str, packets: Vec<EncodedPacket>, params: OwnedParams, secs: f64) -> SaveJob {
     SaveJob {
         path: path.to_string(),
         game: None,
@@ -379,7 +379,7 @@ fn click_lands_at(coder: AacCoder, click: usize) -> Option<usize> {
     let encoded = encode_aac_with(&track, &AtomicBool::new(false), coder).unwrap();
     assert_eq!(encoded.coder, coder);
     let (dir, path) = temp_clip(coder.name());
-    mux_mp4(std::path::Path::new(&path), &params, "libx264", &window, &[encoded], &AtomicBool::new(false)).unwrap();
+    mux_mp4(std::path::Path::new(&path), &params, "libx264", &window, &[encoded], &AtomicBool::new(false), &mut 0).unwrap();
     let mut ictx = ff::format::input(&path).unwrap();
     let stream = ictx.stream(1).unwrap();
     let index = stream.index();

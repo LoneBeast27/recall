@@ -78,6 +78,8 @@ pub(crate) struct SaveJob {
 pub(crate) struct Muxed {
     pub frames: u64,
     pub secs: f32,
+    /// Cut short (an abort, a write error) and finished with what was written: why.
+    pub partial: Option<String>,
 }
 
 /// Writes `job` to the given `.part` path (the saver renames it afterwards).
@@ -105,6 +107,8 @@ pub(crate) struct Timing {
     pub mux_ms: f64,
     pub trailer_ms: f64,
     pub rename_ms: f64,
+    /// Packets the mux wrote into the `.part` (0: nothing of the clip is in it).
+    pub part_packets: u64,
     /// Request -> file renamed into place (the `elapsed_ms` of `Saved`).
     pub ready_ms: f64,
     pub gallery_ms: f64,
@@ -181,9 +185,9 @@ impl SaverQueue {
 pub(crate) enum Shutdown {
     /// Every queued save finished (or there was none).
     Drained,
-    /// The in-flight save was aborted at the deadline and cleaned up.
+    /// The in-flight save was aborted at the deadline (and kept what it wrote).
     Aborted,
-    /// The saver did not stop in time; its `.part` removal was attempted.
+    /// The saver did not stop in time; its `.part` stays for the next start's recovery.
     TimedOut,
 }
 
@@ -199,7 +203,7 @@ pub(crate) struct SaverControl {
 impl SaverControl {
     /// Wait for the saver to finish after its queue sender is dropped. Saves
     /// run normally for most of `budget`; for the last share (<= 500 ms) the
-    /// in-flight mux is aborted so its `.part` is removed rather than orphaned.
+    /// in-flight mux is aborted and finishes the file with what it wrote (`saver_stop`).
     /// Then the clip mover stops (up to `mover::STOP_WAIT`): a move in flight
     /// is abandoned, its staged copy kept for the next start.
     pub fn shutdown(self, budget: Duration) -> Shutdown {
@@ -214,7 +218,7 @@ impl SaverControl {
 
     fn stop(self, budget: Duration, orphan: bool) -> Shutdown {
         let SaverControl { done, abort, current, mover, progress } = self;
-        let outcome = stop_saver(&done, &abort, &current, budget, orphan.then_some(&*progress));
+        let outcome = stop_saver(&done, &abort, &current, budget, &progress, orphan);
         if let Some(mover) = mover {
             mover.shutdown(mover::STOP_WAIT);
         }
@@ -315,7 +319,7 @@ impl Worker {
             job.path = place_in_game_folder(&job.path, job.game.as_deref(), &crate::naming::out_dir(), &self.events);
             self.take(&job);
             // Answered (after its event went out): `status.save_writing` no longer counts it.
-            self.progress.jobs.fetch_sub(1, Relaxed);
+            self.progress.settle();
         }
     }
 
@@ -332,7 +336,7 @@ impl Worker {
         let (target, result) = space::write_with_room(staged, Path::new(&job.path), need, self.free, &log, |target| {
             let part = part_of(target);
             set_current(Some(part.clone()));
-            let result = write_clip_to(&part, target, job, mux, abort, &mut timing);
+            let result = write_clip_to(&part, target, job, mux, abort, &mut timing, &log);
             set_current(None);
             result
         });
@@ -347,7 +351,15 @@ impl Worker {
                 let elapsed = job.requested.elapsed();
                 timing.ready_ms = ms(elapsed);
                 let staged = (target != Path::new(&job.path)).then(|| target.to_string_lossy().into_owned());
-                self.events.saved(&SavedReport {
+                // Cut short by the drain: kept, with the drain's reason (stall, budget, quit).
+                let partial = muxed.partial.as_deref().map(|r| match self.progress.stop_reason() {
+                    Some(why) if r == ABORTED => why.to_string(),
+                    _ => r.to_string(),
+                });
+                if let Some(why) = &partial {
+                    self.events.log(&format!("saver: {} kept partial ({}s of {}s): {why}", job.path, muxed.secs, job.secs));
+                }
+                let report = SavedReport {
                     path: &job.path,
                     staged_path: staged.as_deref(),
                     seconds: muxed.secs,
@@ -355,7 +367,9 @@ impl Worker {
                     bytes,
                     elapsed_ms: elapsed.as_millis() as u64,
                     video_end_us: job.video_end_us,
-                });
+                    partial: partial.as_deref(),
+                };
+                self.progress.answer(|| self.events.saved(&report));
                 if let (Some(stage), Some(_)) = (&self.stage, &staged) {
                     stage.hand_off(target, &job.path, &self.events);
                 }
@@ -396,66 +410,6 @@ pub(crate) fn part_path(path: &str) -> PathBuf {
     PathBuf::from(format!("{path}.part"))
 }
 
-/// Mux into `part`, then rename it to the job's path. Any failure removes the
-/// partial file, so a clip path either holds a complete clip or nothing.
-pub(crate) fn write_clip<F>(
-    part: &Path,
-    job: &SaveJob,
-    mux: &mut F,
-    abort: &AtomicBool,
-    timing: &mut Timing,
-) -> Result<Muxed, String>
-where
-    F: FnMut(&Path, &SaveJob, &AtomicBool, &mut Timing) -> Result<Muxed, String> + ?Sized,
-{
-    write_clip_to(part, Path::new(&job.path), job, mux, abort, timing)
-}
-
-/// [`write_clip`] renaming to `target` (the staged file, or the job's path).
-pub(crate) fn write_clip_to<F>(
-    part: &Path,
-    target: &Path,
-    job: &SaveJob,
-    mux: &mut F,
-    abort: &AtomicBool,
-    timing: &mut Timing,
-) -> Result<Muxed, String>
-where
-    F: FnMut(&Path, &SaveJob, &AtomicBool, &mut Timing) -> Result<Muxed, String> + ?Sized,
-{
-    let _ = std::fs::remove_file(part);
-    match mux(part, job, abort, timing) {
-        Ok(muxed) => {
-            let started = Instant::now();
-            let renamed = std::fs::rename(part, target);
-            timing.rename_ms = ms(started.elapsed());
-            match renamed {
-                Ok(()) => Ok(muxed),
-                Err(e) => {
-                    let _ = std::fs::remove_file(part);
-                    Err(format!("finalize {}: {e}", target.display()))
-                }
-            }
-        }
-        Err(reason) => {
-            let _ = std::fs::remove_file(part);
-            Err(reason)
-        }
-    }
-}
-
-/// Synchronous save through the production mux + rename path (smoke test).
-pub(super) fn write_now(job: &SaveJob) -> Result<Muxed, String> {
-    let mut timing = job.timing;
-    write_clip(
-        &part_path(&job.path),
-        job,
-        &mut super::mux::produce,
-        &AtomicBool::new(false),
-        &mut timing,
-    )
-}
-
 /// Keep the writer below `recall-encoder` so a save never competes with
 /// live encoding for a core.
 fn lower_thread_priority(events: &Events) {
@@ -492,3 +446,6 @@ mod tests;
 mod giveup_tests;
 #[path = "saver_writing.rs"]
 mod writing;
+#[allow(unused_imports)]
+pub(super) use writing::write_now;
+pub(crate) use writing::{write_clip, write_clip_to};

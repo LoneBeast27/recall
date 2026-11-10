@@ -109,13 +109,26 @@ pub(crate) fn produce(
     timing.aac_cpu_ms = tracks.iter().map(|t| t.cpu_ms).sum();
     timing.aac_coder = tracks.first().map_or("", |t| t.coder.name());
 
-    let (mux_ms, trailer_ms) = mux_mp4(part, params, backend, packets, &tracks, abort)?;
-    timing.mux_ms = mux_ms;
-    timing.trailer_ms = trailer_ms;
-    Ok(Muxed {
-        frames: packets.len() as u64,
-        secs: secs as f32,
-    })
+    let wrote = mux_mp4(part, params, backend, packets, &tracks, abort, &mut timing.part_packets)?;
+    timing.mux_ms = wrote.mux_ms;
+    timing.trailer_ms = wrote.trailer_ms;
+    let (frames, secs) = match &wrote.partial {
+        None => (packets.len() as u64, secs),
+        Some(_) => (wrote.video_packets, wrote.video_end_us as f64 / 1_000_000.0),
+    };
+    Ok(Muxed { frames, secs: secs as f32, partial: wrote.partial })
+}
+
+/// What [`mux_mp4`] wrote into a finished file.
+pub(crate) struct Wrote {
+    pub mux_ms: f64,
+    pub trailer_ms: f64,
+    /// Cut short (an abort, a packet that could not be read or written) and finished with
+    /// the packets before it: why.
+    pub partial: Option<String>,
+    pub video_packets: u64,
+    /// End of the last video packet written (its pts + duration, microseconds).
+    pub video_end_us: u64,
 }
 
 /// A packet's bytes while muxing: audio in hand, video possibly in the spill file.
@@ -156,8 +169,14 @@ fn track_metadata(title: &str) -> ff::Dictionary<'static> {
 }
 
 /// Mux a rebased video window (stream copy, 1/1_000_000) plus one AAC stream
-/// per track into `path` as MP4. Returns (header+packets ms, trailer ms).
-/// Codec-agnostic: the codec comes from `params` (H.264, HEVC or AV1).
+/// per track into `path` as MP4. Codec-agnostic: the codec comes from `params`
+/// (H.264, HEVC or AV1). `written` counts the packets in the file as they go in.
+///
+/// Never lose a clip: an abort (the engine quitting, a stalled save given up) or a packet
+/// that cannot be read or written stops the packets there and the trailer is written for
+/// those already in the file (`Wrote::partial`). Err only when no packet went in, or the
+/// trailer itself failed (the `.part` then stays for the next start, `part_recover`).
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn mux_mp4(
     path: &Path,
     params: &OwnedParams,
@@ -165,7 +184,8 @@ pub(crate) fn mux_mp4(
     video: &[EncodedPacket],
     tracks: &[AacTrack],
     abort: &AtomicBool,
-) -> Result<(f64, f64), String> {
+    written: &mut u64,
+) -> Result<Wrote, String> {
     debug_assert!(
         pts_strictly_increase(video),
         "save window PTS must strictly increase (bf=0 stream copy, dts == pts)"
@@ -229,13 +249,21 @@ pub(crate) fn mux_mp4(
 
     // Time bases are final only after write_header; rescale against those.
     let out_tbs: Vec<ff::Rational> = octx.streams().map(|s| s.time_base()).collect();
+    let (mut partial, mut video_packets, mut video_end_us) = (None, 0u64, 0u64);
     for (stream_idx, _, src_tb, pts, duration, data, key) in merged {
-        if abort.load(Relaxed) {
-            return Err(ABORTED.into());
+        if abort.load(Relaxed) || abort_here(*written) {
+            partial = Some(ABORTED.to_string());
+            break;
         }
         let mut pkt = match data {
             Bytes::Audio(bytes) => ff::Packet::copy(bytes),
-            Bytes::Video(payload) => ff::Packet::copy(&payload.read()?),
+            Bytes::Video(payload) => match payload.read() {
+                Ok(bytes) => ff::Packet::copy(&bytes),
+                Err(e) => {
+                    partial = Some(e);
+                    break;
+                }
+            },
         };
         pkt.set_pts(Some(pts));
         pkt.set_dts(Some(pts));
@@ -246,14 +274,29 @@ pub(crate) fn mux_mp4(
         pkt.set_stream(stream_idx);
         pkt.rescale_ts(src_tb, out_tbs[stream_idx]);
         let size = pkt.size() as u64;
-        pkt.write_interleaved(&mut octx)
-            .map_err(|e| e.to_string())?;
+        if let Err(e) = pkt.write_interleaved(&mut octx) {
+            partial = Some(e.to_string());
+            break;
+        }
+        *written += 1;
+        if stream_idx == 0 {
+            video_packets += 1;
+            video_end_us = (pts + duration).max(0) as u64;
+        }
         super::save_progress::wrote(size);
+    }
+    if let Some(reason) = &partial {
+        if *written == 0 {
+            return Err(reason.clone());
+        }
     }
     let mux_ms = ms(started.elapsed());
     let trailer = Instant::now();
-    octx.write_trailer().map_err(|e| e.to_string())?;
-    Ok((mux_ms, ms(trailer.elapsed())))
+    octx.write_trailer().map_err(|e| match &partial {
+        Some(reason) => format!("{reason}; finishing the file with the {written} packets written failed: {e}"),
+        None => e.to_string(),
+    })?;
+    Ok(Wrote { mux_ms, trailer_ms: ms(trailer.elapsed()), partial, video_packets, video_end_us })
 }
 
 /// Production `GalleryFn`: the recorder thumbnail the library and the controller read.
@@ -331,5 +374,19 @@ pub(crate) use aac::{encode_aac, encode_aac_with, silent, AacCoder};
 use aac::encode_tracks;
 
 #[cfg(test)]
+thread_local! {
+    /// Tests: the abort lands once this many packets are in the file (a real mux cut short).
+    pub(crate) static ABORT_AFTER: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+fn abort_here(_written: u64) -> bool {
+    #[cfg(test)]
+    if ABORT_AFTER.with(|a| a.get()) == Some(_written) {
+        return true;
+    }
+    false
+}
+
+#[cfg(test)]
 #[path = "mux_tests.rs"]
-mod tests;
+pub(super) mod tests;

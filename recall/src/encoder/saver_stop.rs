@@ -8,8 +8,14 @@
 //! design-detect-release P5/P6: the drain sends a heartbeat (`save_progress`) at once and on
 //! every poll, alive or stalled, and every hold duration runs on the awake-only clock
 //! (`awake_clock`), so a sleep during the drain ages nothing. The engine is the only judge of
-//! a stalled save: when its hold lets go of one it says so first (`save_failed` with
-//! [`STALLED_REASON`] for every save still in the saver), then aborts.
+//! a stalled save.
+//!
+//! Never lose a clip: when the drain lets go of a save (stalled, past the 30 min budget, or a
+//! plain quit's budget) it records why ([`SaveProgress::set_stop_reason`]) and aborts; the
+//! mux then finishes the file with what it wrote and the saver answers `saved` with that
+//! reason as `partial`. A saver that does not stop within the reserve is answered here
+//! (`save_failed`, one per save still unanswered) and its `.part` stays on disk for the next
+//! start's recovery; nothing here deletes it.
 
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
@@ -31,64 +37,69 @@ const ORPHAN_POLL: Duration = Duration::from_secs(1);
 pub(crate) const STALLED_REASON: &str = "The save stopped making progress";
 /// Why the engine gave up a save still writing at the 30 min budget.
 pub(crate) const BUDGET_REASON: &str = "The save was still writing after 30 minutes";
+/// Why a plain quit cut a save short.
+pub(crate) const QUIT_REASON: &str = "Recall quit before the save finished";
+/// Added to the engine's own answer when the saver did not stop: its file is not deleted.
+pub(crate) const KEPT_FOR_RECOVERY: &str = "what was written is kept for recovery at the next start";
 
 /// Wait for the saver after its queue sender is dropped. Saves run normally for most of
-/// `budget` (an orphan: on while [`OrphanHold`] says so); for the last share (<= 500 ms)
-/// the in-flight mux is aborted so its `.part` is removed rather than orphaned.
+/// `budget` (an `orphan`: on while [`OrphanHold`] says so); for the last share (<= 500 ms)
+/// the in-flight mux is aborted and keeps what it wrote (see the module doc).
 pub(super) fn stop_saver(
     done: &Receiver<()>,
     abort: &AtomicBool,
     current: &Mutex<Option<PathBuf>>,
     budget: Duration,
-    orphan: Option<&SaveProgress>,
+    progress: &SaveProgress,
+    orphan: bool,
 ) -> Shutdown {
-    stop_saver_on(done, abort, current, budget, orphan, &AwakeClock, ORPHAN_POLL)
+    stop_saver_on(done, abort, current, budget, progress, orphan, &AwakeClock, ORPHAN_POLL)
 }
 
 /// [`stop_saver`] on `clock`, polling the orphan's saves every `poll` (tests: a fake clock).
+#[allow(clippy::too_many_arguments)]
 pub(in crate::encoder) fn stop_saver_on(
     done: &Receiver<()>,
     abort: &AtomicBool,
     current: &Mutex<Option<PathBuf>>,
     budget: Duration,
-    orphan: Option<&SaveProgress>,
+    progress: &SaveProgress,
+    orphan: bool,
     clock: &dyn Clock,
     poll: Duration,
 ) -> Shutdown {
     let reserve = (budget / 2).min(Duration::from_millis(500));
-    let drained = match orphan {
-        None => wait_done(done, budget - reserve),
-        Some(progress) => {
-            let beat = |save_writing, stalled_for| crate::protocol::emit(&Outbound::SaveProgress { save_writing, stalled_for });
-            let outcome = wait_orphan(done, progress, budget - reserve, clock, poll, beat);
-            if let Hold::LetGo(Some(reason)) = outcome {
-                give_up(progress, reason);
-            }
-            outcome == Hold::Drained
+    let (drained, reason) = if orphan {
+        let beat = |save_writing, stalled_for| crate::protocol::emit(&Outbound::SaveProgress { save_writing, stalled_for });
+        match wait_orphan(done, progress, budget - reserve, clock, poll, beat) {
+            Hold::Drained => (true, QUIT_REASON),
+            Hold::LetGo(reason) => (false, reason.unwrap_or(QUIT_REASON)),
         }
+    } else {
+        (wait_done(done, budget - reserve), QUIT_REASON)
     };
     if drained {
         return Shutdown::Drained;
     }
+    progress.set_stop_reason(reason);
     abort.store(true, Relaxed);
     if wait_done(done, reserve) {
         return Shutdown::Aborted;
     }
-    if let Some(part) = current.lock().unwrap_or_else(|p| p.into_inner()).take() {
-        let _ = std::fs::remove_file(part);
+    give_up(progress, reason);
+    if let Some(part) = current.lock().unwrap_or_else(|p| p.into_inner()).as_ref() {
+        let message = format!("saver did not stop in time ({reason}); {} is kept for recovery at the next start", part.display());
+        crate::protocol::emit(&Outbound::EncoderLog { message });
     }
     Shutdown::TimedOut
 }
 
-/// The engine ends the saves still in the saver (design P6): each gets its `save_failed`
-/// with `reason` before the abort, and the saver's own abort answers are not sent after it
-/// (`SaveProgress::given_up`), so the controller never sees the engine exit with an
-/// unanswered save, even when the mux ignores the abort (`Shutdown::TimedOut`).
+/// The saver did not stop (design P6): every save still unanswered gets its `save_failed`
+/// here, and the saver sends no answer after it (`SaveProgress::give_up_unanswered`), so the
+/// controller never sees the engine exit with an unanswered save.
 fn give_up(progress: &SaveProgress, reason: &str) {
-    progress.given_up.store(true, Relaxed);
-    for _ in 0..progress.jobs.load(Relaxed) {
-        crate::protocol::emit(&Outbound::SaveFailed { reason: reason.to_string(), rejected: false });
-    }
+    let reason = format!("{reason}; {KEPT_FOR_RECOVERY}");
+    progress.give_up_unanswered(|| crate::protocol::emit(&Outbound::SaveFailed { reason: reason.clone(), rejected: false }));
 }
 
 fn wait_done(done: &Receiver<()>, timeout: Duration) -> bool {

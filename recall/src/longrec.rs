@@ -437,6 +437,13 @@ fn stopped(json: bool, path: &Path, stop: Stop) {
 pub fn recover_parts(out_dir: String, json: bool) {
     let _ = std::thread::Builder::new().name("recall-longrec-recover".into()).spawn(move || {
         let mut recovered = Vec::new();
+        // Replay saves cut off in the clip folder (never deleted with a packet in them).
+        for found in crate::encoder::part_recover::recover_replay_parts(Path::new(&out_dir)) {
+            report(json, Event::Log(found.line()));
+            if let crate::encoder::part_recover::Found::Adopted { clip, .. } = found {
+                recovered.push(clip.to_string_lossy().into_owned());
+            }
+        }
         for (part, result) in recover_in(Path::new(&out_dir)) {
             match result {
                 Ok(path) => recovered.push(path.to_string_lossy().into_owned()),

@@ -23,6 +23,8 @@ pub(crate) struct SavedReport<'a> {
     pub bytes: u64,
     pub elapsed_ms: u64,
     pub video_end_us: Option<u64>,
+    /// Cut short and kept with what was written: why (`saved.partial`).
+    pub partial: Option<&'a str>,
 }
 
 impl Events {
@@ -67,11 +69,13 @@ impl Events {
             staged: r.staged_path.is_some(),
             staged_path: r.staged_path.map(str::to_string),
             video_end_us: r.video_end_us,
+            partial: r.partial.map(str::to_string),
         };
         self.out(msg, || {
             let (path, seconds, frames, bytes, ms) = (r.path, r.seconds, r.frames, r.bytes, r.elapsed_ms);
             let staged = r.staged_path.map(|s| format!(" [staged at {s}]")).unwrap_or_default();
-            format!("[recall] saved {path} ({seconds:.1}s, {frames} frames, {bytes} bytes, {ms}ms){staged}")
+            let partial = r.partial.map(|why| format!(" [PARTIAL: {why}]")).unwrap_or_default();
+            format!("[recall] saved {path} ({seconds:.1}s, {frames} frames, {bytes} bytes, {ms}ms){staged}{partial}")
         });
     }
 

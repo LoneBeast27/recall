@@ -31,6 +31,7 @@ mod mover_flush;
 mod mover_keep;
 mod mover_timing;
 mod mux;
+pub(crate) mod part_recover;
 /// The MP4 sample-entry tag Media Foundation plays, for exports that write video too.
 pub(crate) use mux::mp4_video_tag;
 pub(crate) mod reopen;
@@ -191,7 +192,7 @@ impl EncoderHandle {
 
     /// Quit path: stop the encoder thread (it hands any already-requested saves
     /// to the saver first), then give in-flight saves up to `budget` to finish.
-    /// Past the drain share the saver aborts and removes its `.part` file.
+    /// Past the drain share the saver aborts and keeps what it wrote (`saver_stop`).
     /// Then the clip mover stops (<= `mover::STOP_WAIT`): a background move in
     /// flight is abandoned, never leaving a partial file under the final name;
     /// its staged copy is moved by the next start.
