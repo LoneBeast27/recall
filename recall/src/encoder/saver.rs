@@ -112,6 +112,9 @@ pub(crate) struct Timing {
     /// Request -> file renamed into place (the `elapsed_ms` of `Saved`).
     pub ready_ms: f64,
     pub gallery_ms: f64,
+    /// The packet index (`replay_index`): wall time and bytes (0 bytes: not written).
+    pub index_ms: f64,
+    pub index_bytes: u64,
 }
 
 pub(crate) fn ms(d: Duration) -> f64 {
@@ -124,7 +127,7 @@ impl Timing {
             "save timing ({outcome}): secs={secs:.3} packets={frames} bytes={bytes} | \
              encoder thread: request_wait={:.1}ms window={:.1}ms snapshot={:.1}ms blocked={:.1}ms | \
              saver: queue_wait={:.1}ms still={:.1}ms aac={:.1}ms aac_cpu={:.1}ms aac_coder={} mux={:.1}ms trailer={:.1}ms \
-             rename={:.1}ms ready={:.1}ms gallery={:.1}ms",
+             rename={:.1}ms ready={:.1}ms gallery={:.1}ms index={:.1}ms/{}B",
             self.request_wait_ms,
             self.window_ms,
             self.snapshot_ms,
@@ -139,6 +142,8 @@ impl Timing {
             self.rename_ms,
             self.ready_ms,
             self.gallery_ms,
+            self.index_ms,
+            self.index_bytes,
         )
     }
 }

@@ -237,6 +237,14 @@ pub enum Outbound {
         path: String,
         paths: Vec<String>,
     },
+    /// One long recording recovered on this start (repaired: cut to its last whole fragment,
+    /// its length set; `seconds` None when it could not be repaired). The app asks Resume
+    /// recording / End it here; nothing starts a recording without that click.
+    RecordingRestored {
+        path: String,
+        seconds: Option<f64>,
+        repaired: bool,
+    },
     /// A `hud_probe` finished: where the game's HUD sits over the picture, one
     /// number per grid row (bit c = column c holds HUD). `ok` false: too little
     /// moving play to tell (`grid` empty, `reason` says why). `kind` "game" is
@@ -360,8 +368,12 @@ pub enum Command {
     Screenshot,
     /// Find the game's HUD from a few frames (`hud_scan` answers; the island's Dynamic spot).
     HudProbe,
-    /// Start / stop / toggle the manual long recording.
-    RecordStart,
+    /// Start / stop / toggle the manual long recording. `continues`: a recovered recording
+    /// (`recording_restored`) this one goes on from, as its next part (Resume recording).
+    RecordStart {
+        #[serde(default)]
+        continues: Option<String>,
+    },
     RecordStop,
     RecordToggle,
     /// End a running long recording as failed now, keeping every part (the controller

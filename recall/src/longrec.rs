@@ -19,17 +19,23 @@
 //! and reports `recording_failed` naming the saved file, also when it has
 //! already reopened.
 //!
-//! **Crash recovery.** Fragments are only ever written whole, so a `.part`
-//! left by a crash or a kill plays up to its last flushed fragment (at most a
-//! few seconds short). The next engine start renames every
-//! `*__rec.mp4.part` in `out_dir` to `*__rec.mp4` (or `*-recovered.mp4` if
-//! that name is taken) and emits `recording_recovered{path}`. A file still
-//! open by a running recorder cannot be renamed (it is opened without
-//! delete-sharing), so recovery never touches a live recording.
+//! **Crash recovery** (`recover.rs`). Fragments are only ever written whole, so a `.part`
+//! left by a crash or a kill plays up to its last flushed fragment (at most a few seconds
+//! short). Every part is listed in the in-progress list (`encoder::in_progress`) while it is
+//! written; the next engine start repairs each listed one (`restore.rs`: cut to its last whole
+//! fragment, its length set), renames it to `*__rec.mp4` (or `*-recovered.mp4`), and emits
+//! `recording_restored` per file and `recording_recovered{paths}`. The app then offers
+//! Resume recording (`record_start{continues}`: the next part) or End it here; recovery never
+//! starts a recording. A file still open by a running recorder is never touched.
 
 mod fmp4;
 mod lock_clock;
 pub(crate) mod machine;
+mod recover;
+pub(crate) mod restore;
+pub use recover::recover_parts;
+#[cfg(test)]
+use recover::{recover_in, recovered_outbound};
 pub mod tap;
 #[cfg(test)]
 pub(crate) mod test_sink;
@@ -71,7 +77,8 @@ pub(crate) enum Data {
 pub type StartClock = Option<(u64, Instant)>;
 
 enum Control {
-    Start { source: String, start: StartClock },
+    /// `continues`: a recovered recording this one goes on from (its next part).
+    Start { source: String, start: StartClock, continues: Option<PathBuf> },
     Stop,
     Toggle { source: String, start: StartClock },
     Mark { at_us: u64 },
@@ -106,8 +113,8 @@ pub fn spawn(out_dir: String, json: bool, tracks: Vec<TrackInfo>) -> LongRec {
 }
 
 impl LongRec {
-    pub fn start(&self, source: &str, start: StartClock) {
-        let _ = self.ctl.send(Control::Start { source: source.to_string(), start });
+    pub fn start(&self, source: &str, start: StartClock, continues: Option<&str>) {
+        let _ = self.ctl.send(Control::Start { source: source.to_string(), start, continues: continues.map(PathBuf::from) });
     }
 
     pub fn stop(&self) {
@@ -202,13 +209,13 @@ impl<F: SinkFactory> Writer<F> {
 
     fn control(&mut self, c: Control, data: &Receiver<Data>) {
         match c {
-            Control::Start { source, start } => self.start(&source, start),
+            Control::Start { source, start, continues } => self.start(&source, start, continues.as_deref()),
             Control::Stop => self.stop(data),
             Control::Toggle { source, start } => {
                 if self.recorder.is_active() {
                     self.stop(data);
                 } else {
-                    self.start(&source, start);
+                    self.start(&source, start, None);
                 }
             }
             Control::Mark { at_us } => self.recorder.mark(at_us),
@@ -218,9 +225,15 @@ impl<F: SinkFactory> Writer<F> {
         }
     }
 
-    fn start(&mut self, source: &str, start: StartClock) {
+    fn start(&mut self, source: &str, start: StartClock, continues: Option<&Path>) {
         if self.recorder.is_active() {
             return self.events(vec![Event::Log("record_start ignored: a long recording is already running".into())]);
+        }
+        let mut notes = Vec::new();
+        let next = continues.and_then(|c| recover::next_part_of(c, &mut notes));
+        self.events(notes);
+        if let Some(path) = next {
+            return self.arm(path, start);
         }
         // Sort clips into game folders: `<out>\<Game>\` when on, checked here on the
         // long-recording thread (never the hotkey); a folder that is not Recall's game folder now
@@ -232,6 +245,10 @@ impl<F: SinkFactory> Writer<F> {
         if let Err(e) = std::fs::create_dir_all(&dir) {
             return self.events(vec![Event::Failed { reason: format!("output folder {dir}: {e}"), kept: None }]);
         }
+        self.arm(path, start);
+    }
+
+    fn arm(&mut self, path: PathBuf, start: StartClock) {
         let (generation, video) = self.recorder.factory().newest();
         self.recorder.set_video(video);
         let events = self.recorder.start(path, start, self.now());
@@ -436,66 +453,6 @@ fn stopped(json: bool, path: &Path, stop: Stop) {
     });
 }
 
-/// Rename long recordings a crash left as `.part` (background thread: the
-/// clip folder may be a sleeping HDD). See the module docs.
-pub fn recover_parts(out_dir: String, json: bool) {
-    let _ = std::thread::Builder::new().name("recall-longrec-recover".into()).spawn(move || {
-        let mut recovered = Vec::new();
-        // Replay saves cut off in the clip folder (never deleted with a packet in them).
-        for found in crate::encoder::part_recover::recover_replay_parts(Path::new(&out_dir)) {
-            report(json, Event::Log(found.line()));
-            if let crate::encoder::part_recover::Found::Adopted { clip, .. } = found {
-                recovered.push(clip.to_string_lossy().into_owned());
-            }
-        }
-        for (part, result) in recover_in(Path::new(&out_dir)) {
-            match result {
-                Ok(path) => recovered.push(path.to_string_lossy().into_owned()),
-                Err(e) => report(json, Event::Log(format!("long recording {} not recovered: {e}", part.display()))),
-            }
-        }
-        if let Some(out) = recovered_outbound(recovered) {
-            emit_or_log(json, &out, || "recovered long recordings".into());
-        }
-    });
-}
-
-/// One `recording_recovered` for every file one start recovered (none: nothing to say).
-fn recovered_outbound(paths: Vec<String>) -> Option<Outbound> {
-    let path = paths.first()?.clone();
-    Some(Outbound::RecordingRecovered { path, paths })
-}
-
-/// Every `*__rec.mp4.part` directly in `dir` or in one of its game folders (one level down,
-/// "Sort clips into game folders": only folders Recall made, `game_folder_rule`), renamed (or
-/// the error).
-fn recover_in(dir: &Path) -> Vec<(PathBuf, std::io::Result<PathBuf>)> {
-    let Ok(listing) = std::fs::read_dir(dir) else { return Vec::new() };
-    let is_file = |e: &std::fs::DirEntry| e.file_type().is_ok_and(|t| t.is_file());
-    let mut files: Vec<_> = listing.flatten().filter(is_file).collect();
-    for (folder, marker) in crate::game_folder_rule::game_folders_marked(dir) {
-        // In a game folder only the parts on the marker's `writing` list are Recall's: the rest
-        // (a copy, a file the user put there) is left alone.
-        let entries = std::fs::read_dir(folder).into_iter().flatten().flatten().filter(is_file);
-        files.extend(entries.filter(|e| marker.is_writing(&e.file_name().to_string_lossy())));
-    }
-    files
-        .into_iter()
-        .filter(|e| naming::is_longrec_part(&e.file_name().to_string_lossy()))
-        .map(|e| {
-            let part = e.path();
-            let target = naming::recovered_path(&part, Path::exists);
-            let result = std::fs::rename(&part, &target).map(|_| target);
-            // Renamed: the recovered file is Recall's in a game folder (the rename stands even
-            // when the marker can't be updated; the file then stays unowned).
-            if let Ok(target) = &result {
-                let _ = crate::game_folder_rule::record_saved(target, Some(&part));
-            }
-            (part, result)
-        })
-        .collect()
-}
-
 #[cfg(test)]
 #[path = "longrec_tests.rs"]
 mod tests;
@@ -505,6 +462,9 @@ mod quit_child_tests;
 #[cfg(test)]
 #[path = "longrec_restore_tests.rs"]
 mod restore_tests;
+#[cfg(test)]
+#[path = "longrec_journal_tests.rs"]
+mod journal_tests;
 /// The app's library length reader, the very file (`recall-native`, std only): restore test 6.
 #[cfg(test)]
 #[allow(dead_code)]

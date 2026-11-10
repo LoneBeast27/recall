@@ -1,16 +1,17 @@
 //! Never lose a clip: what happens to a replay save's `<clip>.part` that did not become a clip.
 //!
-//! - At save time ([`after_failed_mux`]): a failed save's `.part` is deleted only when the mux
-//!   wrote no packet into it (logged). Any other `.part` stays on disk.
-//! - At engine start ([`recover_replay_parts`], over the staging folder and the clip folder): a
-//!   `.part` whose MP4 is finished (its `moov` is written: the trailer went out, the rename did
-//!   not) is renamed into a clip, `<name>.mp4` (or `<name>-recovered.mp4` when that is taken).
-//!   One that holds packets but no `moov` (the engine was killed mid-write) cannot be played
-//!   by a rename: it is kept as it is, and logged at every start. One with no packet at all
-//!   (killed right after the header) is deleted, logged.
+//! - At save time ([`after_failed_mux`]): a failed save's `.part` goes to the Recycle Bin only
+//!   when the mux wrote no packet into it (a diagnostic line first). Any other `.part` stays on
+//!   disk, listed for recovery (`in_progress`) with its packet index (`replay_index`).
+//! - At engine start, a listed save is recovered from that list (`replay_rebuild`).
+//! - [`recover_replay_parts`]: the one-time scan for `.part` files from builds before that list
+//!   (`longrec::recover`), over the staging folder, the clip folder and its game folders. It
+//!   never recycles: a `.part` whose MP4 is finished (its `moov` is written: the trailer went
+//!   out, the rename did not) is renamed into a clip, `<name>.mp4` (or `<name>-recovered.mp4`);
+//!   any other is kept as it is, logged once with a diagnostic line (an old save has no index).
 //!
-//! Long recordings' `__rec.mp4.part` files are fragmented and are `longrec::recover_parts`'s,
-//! never touched here.
+//! Long recordings' `__rec.mp4.part` files are fragmented and are `longrec::recover`'s, never
+//! touched here.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -19,19 +20,21 @@ use std::time::{Duration, SystemTime};
 
 use crate::naming::{self, PART_EXT};
 
-/// A failed save's `.part` (`saver::write_clip_to`): deleted when `packets` is 0, else kept.
-pub(crate) fn after_failed_mux(part: &Path, packets: u64, reason: &str, log: &dyn Fn(&str)) {
+/// A failed save's `.part` (`saver::write_clip_to`): with no packet in it, nothing of the clip
+/// is there: a diagnostic line and the Recycle Bin. Any other is kept (true) for the next start.
+pub(crate) fn after_failed_mux(part: &Path, packets: u64, reason: &str, log: &dyn Fn(&str)) -> bool {
     if packets > 0 {
         log(&format!("saver: {} holds {packets} packets after \"{reason}\"; kept for recovery at the next start", part.display()));
-        return;
+        return true;
     }
     if !part.exists() {
-        return;
+        return false;
     }
-    match std::fs::remove_file(part) {
-        Ok(()) => log(&format!("saver: removed {}: no packet was written (\"{reason}\")", part.display())),
-        Err(e) => log(&format!("saver: {} (no packet written) not removed: {e}", part.display())),
+    log(&format!("saver: {}: no packet was written (\"{reason}\")", part.display()));
+    for line in super::recycle::dispose_unrecoverable(part, "no packet was written") {
+        log(&format!("saver: {line}"));
     }
+    false
 }
 
 /// What the start-up scan did with one replay `.part`.
@@ -41,7 +44,7 @@ pub(crate) enum Found {
     Adopted { part: PathBuf, clip: PathBuf },
     /// Packets but no `moov`: kept as it is.
     Kept(PathBuf),
-    /// No packet in it: deleted.
+    /// No packet in it: kept (this scan never recycles), logged.
     Empty(PathBuf),
     /// Could not be renamed / read / deleted (left as it is).
     Error(PathBuf, String),
@@ -52,8 +55,8 @@ impl Found {
     pub(crate) fn line(&self) -> String {
         match self {
             Found::Adopted { part, clip } => format!("recovered replay save {} as {}", part.display(), clip.display()),
-            Found::Kept(part) => format!("replay save {} was cut off mid-write (no index); kept as it is, not deleted", part.display()),
-            Found::Empty(part) => format!("removed {}: an unfinished replay save with no packet in it", part.display()),
+            Found::Kept(part) => format!("replay save {} was cut off mid-write by an older build (no index); kept as it is, not deleted: boxes {}", part.display(), super::recycle::layout_summary(part)),
+            Found::Empty(part) => format!("replay save {} from an older build holds no packet; kept as it is: boxes {}", part.display(), super::recycle::layout_summary(part)),
             Found::Error(part, e) => format!("replay save {} left as it is: {e}", part.display()),
         }
     }
@@ -69,8 +72,9 @@ pub(crate) fn is_replay_part(file_name: &str) -> bool {
 /// next start (the scan runs beside the saver).
 pub(crate) const FRESH: Duration = Duration::from_secs(60);
 
-/// Every replay `.part` directly in `dir` (see the module doc), oldest name first. One
-/// modified within [`FRESH`] is left alone.
+/// Every replay `.part` directly in `dir` or in one of its game folders (only folders Recall
+/// made, `game_folder_rule`), oldest name first, except those the in-progress list names (they
+/// are recovered from it). One modified within [`FRESH`] is left alone.
 pub(crate) fn recover_replay_parts(dir: &Path) -> Vec<Found> {
     recover_replay_parts_older(dir, FRESH)
 }
@@ -81,11 +85,14 @@ pub(crate) fn recover_replay_parts_older(dir: &Path, fresh: Duration) -> Vec<Fou
         let age = e.metadata().and_then(|m| m.modified()).ok().and_then(|t| SystemTime::now().duration_since(t).ok());
         age.is_some_and(|age| age >= fresh)
     };
-    let Ok(listing) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut parts: Vec<PathBuf> = listing
-        .flatten()
+    let listed: Vec<PathBuf> = super::in_progress::list().iter().map(super::in_progress::Entry::part).collect();
+    let is_listed = |p: &Path| listed.iter().any(|l| l.to_string_lossy().eq_ignore_ascii_case(&p.to_string_lossy()));
+    let folders = std::iter::once(dir.to_path_buf()).chain(crate::game_folder_rule::game_folders_marked(dir).into_iter().map(|(folder, _)| folder));
+    let mut parts: Vec<PathBuf> = folders
+        .flat_map(|folder| std::fs::read_dir(folder).into_iter().flatten().flatten())
         .filter(|e| e.file_type().is_ok_and(|t| t.is_file()) && is_replay_part(&e.file_name().to_string_lossy()) && old(e))
         .map(|e| e.path())
+        .filter(|p| !is_listed(p))
         .collect();
     parts.sort();
     parts.into_iter().map(|part| recover_one(&part)).collect()
@@ -102,10 +109,7 @@ fn recover_one(part: &Path) -> Found {
             }
         }
         Ok(Layout::Unindexed) => Found::Kept(part.to_path_buf()),
-        Ok(Layout::NoPackets) => match std::fs::remove_file(part) {
-            Ok(()) => Found::Empty(part.to_path_buf()),
-            Err(e) => Found::Error(part.to_path_buf(), format!("not removed: {e}")),
-        },
+        Ok(Layout::NoPackets) => Found::Empty(part.to_path_buf()),
     }
 }
 

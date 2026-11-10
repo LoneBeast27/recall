@@ -1,12 +1,14 @@
-//! Restore policy, fail-first (`.planning/RESTORE-POLICY.md` (d) tests 1, 2, 6, 7): what the next
-//! start makes of a long recording a kill or a power cut left as `.part`. Real fragmented MP4
-//! through `Fmp4Sink` (libx264 on the CPU, skipped without it) or the fake sink; temp folders
-//! only, no device, no audio, no window.
+//! Restore policy, fail-first (`.planning/RESTORE-POLICY.md` tests 1-7): what the next start
+//! makes of a long recording a kill or a power cut left as `.part`, and the repair's undo record.
+//! Real fragmented MP4 through `Fmp4Sink` (libx264 on the CPU, skipped without it) or the fake
+//! sink; temp folders and a temp app-data root only (`user_dirs::inject`), the fake Recycle Bin;
+//! no device, no audio, no window.
 
 use super::fmp4::Fmp4Sink;
 use super::machine::{Recorder, Sink};
 use super::test_sink::{pkt, temp_dir, tracks, FakeFactory, MS};
 use super::*;
+use crate::encoder::in_progress;
 use ffmpeg_next as ff;
 
 const NAME: &str = "G__2026-11-10__12-00-00__rec.mp4";
@@ -16,6 +18,19 @@ impl Drop for Gone {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
     }
+}
+
+/// A temp folder for one test, with this thread's app data (the in-progress list) inside it.
+pub(super) struct Sandbox {
+    _root: crate::user_dirs::test_root::Injected,
+    _gone: Gone,
+    pub dir: PathBuf,
+}
+
+pub(super) fn sandbox(tag: &str) -> Sandbox {
+    let dir = temp_dir(tag);
+    let root = crate::user_dirs::inject(&dir.join("app-root"));
+    Sandbox { _root: root, _gone: Gone(dir.clone()), dir }
 }
 
 fn x264() -> Option<ff::encoder::Video> {
@@ -39,7 +54,7 @@ fn x264() -> Option<ff::encoder::Video> {
 
 /// The bytes a crash leaves: 300 frames (5 s) streamed into a real `Fmp4Sink`, never finished
 /// (only whole fragments reach the disk). None without libx264.
-fn crashed_recording(dir: &Path) -> Option<Vec<u8>> {
+pub(super) fn crashed_recording(dir: &Path) -> Option<Vec<u8>> {
     ff::init().unwrap();
     let mut enc = x264()?;
     let params = ff::codec::Parameters::from(&enc);
@@ -75,7 +90,7 @@ fn crashed_recording(dir: &Path) -> Option<Vec<u8>> {
 }
 
 /// Where the last whole `moof`+`mdat` pair in `bytes` ends (top-level box headers only).
-fn last_whole_fragment_end(bytes: &[u8]) -> usize {
+pub(super) fn last_whole_fragment_end(bytes: &[u8]) -> usize {
     let (mut pos, mut end, mut after_moof) = (0usize, 0usize, false);
     while pos + 8 <= bytes.len() {
         let size = u32::from_be_bytes(bytes[pos..pos + 4].try_into().unwrap()) as usize;
@@ -98,7 +113,7 @@ fn last_whole_fragment_end(bytes: &[u8]) -> usize {
 }
 
 /// (packets of every stream, packets whose payload is all zero bytes, video end in seconds).
-fn demux(path: &Path) -> (usize, usize, f64) {
+pub(super) fn demux(path: &Path) -> (usize, usize, f64) {
     let mut input = ff::format::input(&path).expect("the recovered recording opens");
     let tb = input.stream(0).unwrap().time_base();
     let (mut all, mut zero, mut end) = (0, 0, 0f64);
@@ -118,8 +133,8 @@ fn demux(path: &Path) -> (usize, usize, f64) {
 /// whole fragment, and nothing past that fragment is played.
 #[test]
 fn a_torn_recording_is_cut_back_to_its_last_whole_fragment() {
-    let dir = temp_dir("restore-torn");
-    let _gone = Gone(dir.clone());
+    let sb = sandbox("restore-torn");
+    let dir = sb.dir.clone();
     let Some(bytes) = crashed_recording(&dir) else { return eprintln!("libx264 missing; skipped") };
     let torn = &bytes[..bytes.len() * 77 / 100];
     let whole = last_whole_fragment_end(torn);
@@ -138,8 +153,8 @@ fn a_torn_recording_is_cut_back_to_its_last_whole_fragment() {
 /// made of those zero bytes (today FFmpeg returns them as garbage frames at the end).
 #[test]
 fn a_zero_filled_tail_is_never_played_as_frames() {
-    let dir = temp_dir("restore-zeros");
-    let _gone = Gone(dir.clone());
+    let sb = sandbox("restore-zeros");
+    let dir = sb.dir.clone();
     let Some(bytes) = crashed_recording(&dir) else { return eprintln!("libx264 missing; skipped") };
     let mut cut = bytes[..bytes.len() / 2].to_vec();
     cut.extend(std::iter::repeat_n(0u8, 200_000));
@@ -154,8 +169,8 @@ fn a_zero_filled_tail_is_never_played_as_frames() {
 /// falls back to an ffprobe scan of every fragment on the hard drive.
 #[test]
 fn the_library_index_read_gives_a_recovered_recording_its_length() {
-    let dir = temp_dir("restore-length");
-    let _gone = Gone(dir.clone());
+    let sb = sandbox("restore-length");
+    let dir = sb.dir.clone();
     let Some(bytes) = crashed_recording(&dir) else { return eprintln!("libx264 missing; skipped") };
     std::fs::write(dir.join(format!("{NAME}.part")), &bytes).unwrap();
     recover_in(&dir);
@@ -172,8 +187,8 @@ fn the_library_index_read_gives_a_recovered_recording_its_length() {
 /// file (today the marks sidecar is written only at Stop).
 #[test]
 fn a_mark_pressed_before_a_crash_is_kept_with_the_recovered_recording() {
-    let dir = temp_dir("restore-marks");
-    let _gone = Gone(dir.clone());
+    let sb = sandbox("restore-marks");
+    let dir = sb.dir.clone();
     let path = dir.join(NAME);
     let mut rec = Recorder::new(FakeFactory::default(), tracks());
     let t0 = Instant::now();
@@ -184,8 +199,9 @@ fn a_mark_pressed_before_a_crash_is_kept_with_the_recovered_recording() {
     rec.video(1_116 * MS, false, pkt(3), false, t0);
     assert!(naming::part_of(&path).is_file() && rec.is_active());
     drop(rec); // the engine is killed: no stop, no finish
-    let results = recover_in(&dir);
-    assert!(matches!(&results[..], [(_, Ok(p))] if *p == path), "{results:?}");
+    // The next start: what the in-progress list names (the part and its marks).
+    let found = super::recover::run(&in_progress::list(), &dir, None);
+    assert!(path.is_file() && found.long.iter().any(|r| r.clip == path), "recovered: {:?}", found.long);
     let sidecar = crate::bookmarks::sidecar_path(&path);
     assert_eq!(
         std::fs::read_to_string(&sidecar).ok().as_deref(),
@@ -193,4 +209,63 @@ fn a_mark_pressed_before_a_crash_is_kept_with_the_recovered_recording() {
         "the mark pressed before the crash is in {}",
         sidecar.display()
     );
+}
+
+/// The torn fixture every undo test starts from: (sandbox, the `.part`, its original bytes,
+/// where its last whole fragment ends). None without libx264.
+fn torn(tag: &str) -> Option<(Sandbox, PathBuf, Vec<u8>, usize)> {
+    let sb = sandbox(tag);
+    let bytes = crashed_recording(&sb.dir)?;
+    let torn = bytes[..bytes.len() * 77 / 100].to_vec();
+    let whole = last_whole_fragment_end(&torn);
+    let part = sb.dir.join(format!("{NAME}.part"));
+    std::fs::write(&part, &torn).unwrap();
+    Some((sb, part, torn, whole))
+}
+
+/// Restore test 3: the repair's undo record round-trips: a repair cut off after its patch,
+/// undone, gives back the original bytes exactly; the saved tail then goes to the Recycle Bin.
+#[test]
+fn an_undone_repair_gives_back_the_original_bytes() {
+    let Some((sb, part, original, _)) = torn("restore-undo") else { return eprintln!("libx264 missing; skipped") };
+    let hooks = restore::Hooks { stop_after_patch: true, ..Default::default() };
+    assert_eq!(restore::repair_with(&part, hooks), restore::Repair::Interrupted, "the hook stops the repair after its patch");
+    assert!(in_progress::get(&part).and_then(|e| e.undo).is_some(), "a repair cut off after its patch leaves its undo record");
+    assert_ne!(std::fs::read(&part).unwrap(), original, "the repair had changed the file");
+    assert_eq!(restore::undo(&part), Ok(true), "there was a repair to undo");
+    assert!(std::fs::read(&part).unwrap() == original, "undone: the original bytes, exactly");
+    assert!(in_progress::get(&part).and_then(|e| e.undo).is_none(), "the undo record is cleared");
+    let tail = restore::tail_path(&part);
+    assert!(!tail.exists() && crate::encoder::recycle::fake::binned_under(&sb.dir).contains(&tail), "the saved tail went to the Recycle Bin");
+}
+
+/// Restore test 4: the engine is killed mid-repair (after the cut, before the length): the next
+/// start undoes it from its record, repairs it again and recovers it whole.
+#[test]
+fn a_repair_killed_midway_is_undone_and_redone_at_the_next_start() {
+    let Some((sb, part, _, whole)) = torn("restore-kill") else { return eprintln!("libx264 missing; skipped") };
+    let hooks = restore::Hooks { stop_after_truncate: true, ..Default::default() };
+    assert_eq!(restore::repair_with(&part, hooks), restore::Repair::Interrupted, "the hook stops the repair after its cut");
+    assert!(in_progress::get(&part).and_then(|e| e.undo).is_some(), "the cut-off repair left its undo record");
+    let found = super::recover::run(&in_progress::list(), &sb.dir, None);
+    let clip = sb.dir.join(NAME);
+    assert!(found.long.iter().any(|r| r.clip == clip && r.repaired), "recovered and repaired: {:?} {:?}", found.long, found.logs);
+    assert_eq!(std::fs::metadata(&clip).unwrap().len() as usize, whole, "cut to its last whole fragment");
+    let (_, _, end) = demux(&clip);
+    assert!(super::library_mp4::duration(&clip).is_some_and(|s| (s - end).abs() < 0.05), "its length is set");
+    assert!(in_progress::list().is_empty(), "nothing is left listed: {:?}", in_progress::list());
+}
+
+/// Restore test 5: a repair whose result does not verify is undone: the recording is recovered
+/// exactly as it was (it still plays to its last whole fragment), nothing deleted.
+#[test]
+fn a_repair_that_does_not_verify_leaves_the_original_bytes() {
+    let Some((sb, part, original, _)) = torn("restore-verify") else { return eprintln!("libx264 missing; skipped") };
+    let hooks = restore::Hooks { fail_verify: true, ..Default::default() };
+    let result = restore::repair_with(&part, hooks);
+    assert!(matches!(&result, restore::Repair::AsIs(why) if why.contains("verify")), "a failed verify leaves it as it is: {result:?}");
+    assert!(std::fs::read(&part).unwrap() == original, "the original bytes, exactly");
+    assert!(in_progress::get(&part).and_then(|e| e.undo).is_none(), "the undo record is cleared");
+    let tail = restore::tail_path(&part);
+    assert!(crate::encoder::recycle::fake::binned_under(&sb.dir).contains(&tail), "the undo really ran: its saved tail went to the Recycle Bin");
 }

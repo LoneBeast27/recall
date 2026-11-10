@@ -86,6 +86,13 @@ mod stdin_reader;
 mod file_id;
 mod same_bytes;
 mod win_volume;
+// The no-nuke Recycle Bin path (shared with recall-hdr and recall-native): `encoder::recycle`.
+#[cfg(feature = "encode")]
+#[allow(dead_code)]
+mod win_recycle;
+#[cfg(feature = "encode")]
+#[allow(dead_code)]
+mod win_fileop;
 mod thread_qos;
 mod source;
 mod stdin_commands;

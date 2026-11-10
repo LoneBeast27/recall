@@ -379,7 +379,7 @@ fn click_lands_at(coder: AacCoder, click: usize) -> Option<usize> {
     let encoded = encode_aac_with(&track, &AtomicBool::new(false), coder).unwrap();
     assert_eq!(encoded.coder, coder);
     let (dir, path) = temp_clip(coder.name());
-    mux_mp4(std::path::Path::new(&path), &params, "libx264", &window, &[encoded], &AtomicBool::new(false), &mut 0).unwrap();
+    mux_mp4(std::path::Path::new(&path), &params, "libx264", &window, &[encoded], &AtomicBool::new(false), &mut 0, None).unwrap();
     let mut ictx = ff::format::input(&path).unwrap();
     let stream = ictx.stream(1).unwrap();
     let index = stream.index();

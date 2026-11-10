@@ -123,13 +123,17 @@ fn a_stalled_save_leaves_its_part_and_the_next_start_keeps_it() {
     let logs = crate::protocol::test_emits::of("encoder_log");
     assert!(logs.iter().any(|l| l.contains("kept for recovery")), "{logs:?}");
 
-    // The next start (the process is gone; nothing holds the file).
+    // The next start (the process is gone; nothing holds the file): the saver listed the part
+    // (`in_progress`), so it is recovered from that list; an older build's unlisted part is
+    // found by the one-time scan.
+    assert!(super::super::in_progress::get(&part).is_some(), "listed for the next start's recovery");
     let finished = dir.join("G__2026-11-10__11-01-00-000__tr.mp4.part");
     std::fs::write(&finished, &whole).unwrap();
     let found = recover_replay_parts_older(&dir, Duration::ZERO);
     let adopted = dir.join("G__2026-11-10__11-01-00-000__tr.mp4");
-    assert_eq!(found, vec![Found::Kept(part.clone()), Found::Adopted { part: finished, clip: adopted.clone() }]);
+    assert_eq!(found, vec![Found::Adopted { part: finished, clip: adopted.clone() }], "the listed part is left to its list");
     assert!(part.exists() && adopted.exists());
+    let _ = super::super::in_progress::remove(&part);
     drop(release_tx);
     assert!(answers(&sink).is_empty(), "the saver adds no second answer");
 }

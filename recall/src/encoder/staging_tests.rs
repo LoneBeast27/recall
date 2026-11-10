@@ -70,8 +70,7 @@ fn recovery_queues_finished_clips_and_keeps_cut_off_mp4_parts() {
         ],
         "oldest first"
     );
-    // Never lose a clip: a mux cut off mid-write is kept as it is, not swept.
-    assert_eq!(found.parts, vec![crate::encoder::part_recover::Found::Kept(part.clone())]);
+    // Never lose a clip: a mux cut off mid-write is left for `longrec::recover`, never swept here.
     assert!(found.errors.is_empty(), "{:?}", found.errors);
     assert!(part.exists(), "an unfinished replay save is kept");
     for kept in ["notes.txt", "other.part", "sub.mp4"] {
@@ -94,7 +93,7 @@ ever-touched"));
     std::fs::write(&part, b"not ours").unwrap();
     let found = recover(&stage, &out);
     assert!(found.moves.is_empty(), "{:?}", found.moves);
-    assert!(found.parts.is_empty() && found.errors.is_empty());
+    assert!(found.errors.is_empty());
     assert!(kept.exists() && part.exists(), "kept copies are the app's to adopt or delete");
     let _ = std::fs::remove_dir_all(&stage);
 }
@@ -151,7 +150,7 @@ fn recovery_leaves_a_crashed_long_recording_part_for_its_own_recovery() {
     std::fs::write(&mux, b"half a mux").unwrap();
     let found = recover(&stage, &stage);
     assert!(part.exists(), "the long recording waits for its recovery");
-    assert_eq!(found.parts, vec![crate::encoder::part_recover::Found::Kept(mux.clone())], "the saver's own unfinished mux is kept");
+    assert!(found.moves.is_empty(), "the saver's own unfinished mux is not a clip to move");
     assert!(mux.exists());
     let _ = std::fs::remove_dir_all(&stage);
 }

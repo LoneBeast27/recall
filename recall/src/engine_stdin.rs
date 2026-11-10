@@ -254,7 +254,7 @@ fn apply(cmd: Command, shared: &CaptureShared, (save, export): (&Option<SaveHook
         cmd @ (Command::Bookmark
         | Command::Screenshot
         | Command::HudProbe
-        | Command::RecordStart
+        | Command::RecordStart { .. }
         | Command::RecordStop
         | Command::RecordToggle
         | Command::RecordFail { .. }

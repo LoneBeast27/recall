@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use super::tests::{cut_before_moov, finished_clip};
+use super::tests::finished_clip;
 use super::super::test_scratch::scratch;
 use super::*;
 
@@ -25,20 +25,5 @@ fn a_replay_part_in_a_game_folder_is_found_at_start() {
     assert!(clip.is_file() && !part.exists());
 }
 
-/// Restore test 9: a replay save cut off mid-write (no index) is kept, and logged once, not at
-/// every start (today the same line comes back at each start).
-#[test]
-fn a_cut_off_replay_part_is_logged_once_and_kept() {
-    let dir = scratch("recall-restore", "replay-once");
-    let Some(whole) = finished_clip(&dir) else { return eprintln!("libx264 missing; skipped") };
-    let part = dir.join("G__2026-11-10__10-01-00-000__bb.mp4.part");
-    let cut = cut_before_moov(&whole);
-    std::fs::write(&part, &cut).unwrap();
-    let name = part.file_name().unwrap().to_string_lossy().into_owned();
-    let lines = |found: Vec<Found>| found.iter().map(Found::line).filter(|l| l.contains(&name)).collect::<Vec<_>>();
-    let first = lines(recover_replay_parts_older(&dir, Duration::ZERO));
-    assert_eq!(first.len(), 1, "the first start says it was cut off: {first:?}");
-    let second = lines(recover_replay_parts_older(&dir, Duration::ZERO));
-    assert!(second.is_empty(), "the second start logs the same cut-off replay save again: {second:?}");
-    assert_eq!(std::fs::read(&part).unwrap(), cut, "kept byte for byte");
-}
+// Restore test 9 (a cut-off replay part logged once) is `longrec::journal_tests::the_legacy_scan_runs_once_and_never_recycles`:
+// the scan that finds an older build's parts now runs once.
