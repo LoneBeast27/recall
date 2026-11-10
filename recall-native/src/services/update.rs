@@ -408,3 +408,7 @@ impl UpdateUi {
 #[cfg(test)]
 #[path = "update_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "update_compatibility_tests.rs"]
+mod compatibility;

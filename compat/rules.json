@@ -1,0 +1,19 @@
+{
+  "_about": "Settings compatibility rules, read by the compatibility tests. Policy and examples: CONTRIBUTING.md, 'Settings compatibility'.",
+  "moved": [],
+  "major": [],
+  "unvaried": {
+    "config.toml": {
+      "version": "the schema version, written by the build, not a setting",
+      "overlay.corner_version": "migration marker: any other value re-runs the corner migration",
+      "overlay.stats_style": "only one style exists (minimal)",
+      "recording.audio_sources[game].id": "a source's identity, the key the source is matched by",
+      "recording.audio_sources[game].kind": "the game source is always kind game",
+      "recording.audio_sources[game].device": "the game source has no device",
+      "recording.audio_sources[game].exe": "the game source follows the detected game, no exe",
+      "recording.audio_sources[mic].id": "a source's identity, the key the source is matched by",
+      "recording.audio_sources[mic].kind": "the microphone is always kind input",
+      "recording.audio_sources[mic].exe": "an input source has no exe"
+    }
+  }
+}

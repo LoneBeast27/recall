@@ -46,6 +46,9 @@ mod tests_damage;
 mod tests_settle;
 #[cfg(test)]
 mod tests_watch;
+#[cfg(test)]
+#[path = "library/compatibility_tests.rs"]
+mod compatibility;
 
 /// Local wall-clock time of a clip start (from the file name, else file mtime).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
