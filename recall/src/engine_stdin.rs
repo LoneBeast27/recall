@@ -178,14 +178,21 @@ fn apply_audio(cmd: Command) -> Command {
     }
 }
 
-/// Whether the device tracks start held. Always, when a controller drives this engine: only its
-/// `sync` releases them. A controller that never sends one (it does not set
-/// `RECALL_STDIN_SYNC`: an older build) leaves them held for the run, the safe state.
+/// Whether the tracks start held. Only when the controller says it will send `sync`
+/// (`RECALL_STDIN_SYNC` set): then only that `sync` releases them. A controller that does not set
+/// it (an older build, v0.1.0) never sends `sync`, so holding would silence every track, the game
+/// included, for the whole run with no notice; the engine then behaves as v0.1.0 did (the env
+/// mute at spawn, re-applied after hello). Merge-gate review of 38e9d9e, P2.
 pub(crate) fn startup_hold() -> bool {
-    if std::env::var_os(SYNC_ENV).is_none() {
-        eprintln!("[recall] stdin: {SYNC_ENV} is not set (an older controller); the device audio tracks stay held for this run");
+    hold_for_sync_env(std::env::var_os(SYNC_ENV).is_some())
+}
+
+/// [`startup_hold`] for a given `RECALL_STDIN_SYNC` presence (testable without touching the env).
+pub(crate) fn hold_for_sync_env(sync_promised: bool) -> bool {
+    if !sync_promised {
+        eprintln!("[recall] stdin: {SYNC_ENV} is not set (an older controller); tracks start unheld, as in v0.1.0 (env mute, re-applied after hello)");
     }
-    true
+    sync_promised
 }
 
 /// The controller sets this when it will send `sync` after its restatement.
