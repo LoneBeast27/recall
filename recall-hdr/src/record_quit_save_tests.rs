@@ -1,6 +1,6 @@
 //! `save_first` quits: what is saved, and the quit waits for every save it sent.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::json;
 
@@ -57,7 +57,7 @@ fn only_the_first_save_first_of_a_quit_sends_saves() {
 /// the buffer's `saved` AND the long recording's `recording_stopped`.
 #[test]
 fn a_save_first_quit_waits_for_both_saves() {
-    let t0 = Instant::now();
+    let t0 = crate::awake_clock::Awake::ZERO;
     let s = Duration::from_secs;
     let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
     a.on_event(&json!({"type":"recording_started","path":"L.mp4"}), 0.0);
@@ -74,7 +74,7 @@ fn a_save_first_quit_waits_for_both_saves() {
 
 #[test]
 fn the_long_recording_stop_gives_up_after_the_quit_wait_without_a_save_failure() {
-    let t0 = Instant::now();
+    let t0 = crate::awake_clock::Awake::ZERO;
     let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
     a.on_event(&json!({"type":"recording_started","path":"L.mp4"}), 0.0);
     q.take_save_first();
@@ -86,7 +86,7 @@ fn the_long_recording_stop_gives_up_after_the_quit_wait_without_a_save_failure()
 
 #[test]
 fn a_plain_quit_does_not_wait_for_a_stop() {
-    let t0 = Instant::now();
+    let t0 = crate::awake_clock::Awake::ZERO;
     let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
     a.on_event(&json!({"type":"recording_started","path":"L.mp4"}), 0.0);
     a.stop_sent();
@@ -95,7 +95,7 @@ fn a_plain_quit_does_not_wait_for_a_stop() {
 
 #[test]
 fn a_privacy_held_save_first_quit_sends_nothing_and_goes_at_once() {
-    let t0 = Instant::now();
+    let t0 = crate::awake_clock::Awake::ZERO;
     let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
     let p = plan(&QuitState { privacy_held: Some("x is no longer recorded".into()), ..recording(false) });
     assert!(q.take_save_first());

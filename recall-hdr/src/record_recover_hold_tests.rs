@@ -8,7 +8,7 @@ use super::*;
 /// target "game-a"; (second, outcome) for every Restart / GaveUp. The engine is not
 /// replaced here, so windows end before a second stall of the same engine would count.
 fn tick(to: u64, at: impl Fn(u64) -> (&'static str, u64, bool, Hold)) -> Vec<(u64, Recovery)> {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut r = EncoderRecovery::default();
     let up = EngineHealth::Running { pid: 9 };
     (0..=to)
@@ -80,7 +80,7 @@ fn a_second_hang_soon_after_the_restart_gives_up_once_until_the_game_changes() {
 
 #[test]
 fn giving_up_ends_with_a_new_game_or_a_settings_change() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let up = EngineHealth::Running { pid: 9 };
     let mut r = EncoderRecovery::default();
     let step = |r: &mut EncoderRecovery, s: u64, state, progress, target| {
@@ -125,7 +125,7 @@ fn a_hang_during_a_long_recording_end_to_end_ends_it_early_and_restarts_once() {
     // reports `recording_failed`: `longrec::tests::record_fail_ends_a_continued_recording_
     // early_and_keeps_every_part`; the app's toast says "Recording ended early"), and the
     // new engine records again with no long recording.
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let up = EngineHealth::Running { pid: 9 };
     let mut r = EncoderRecovery::default();
     let (mut restarts, mut sent, mut long_rec, mut restarted_at) = (0, Vec::new(), true, None);
@@ -155,7 +155,7 @@ fn the_restart_waits_up_to_20_s_for_the_recording_to_end_early() {
     // record_fail went out: the recording thread may need a while to finish the part on a
     // slow HDD. The quit waits for `recording_failed` (the activity leaves recording), at
     // most 20 s; then it quits anyway and the next start recovers the .part.
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let wait = EndingEarly::new(t0, 0);
     assert!(!wait.restart_now(t0 + Duration::from_secs(1), true), "still finishing the part");
     assert!(!wait.restart_now(t0 + Duration::from_secs(19), true));
@@ -165,7 +165,7 @@ fn the_restart_waits_up_to_20_s_for_the_recording_to_end_early() {
 
 #[test]
 fn a_healthy_minute_after_giving_up_lets_a_later_failure_restart_again() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let up = EngineHealth::Running { pid: 9 };
     let mut r = EncoderRecovery::default();
     let mut outs = Vec::new();
@@ -188,7 +188,7 @@ fn a_healthy_minute_after_giving_up_lets_a_later_failure_restart_again() {
 fn a_new_engine_during_the_wait_cancels_the_restart() {
     // The supervisor restarted a crashed engine while record_fail waited: the fresh engine
     // (a new hello) must not be restarted again.
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let wait = EndingEarly::new(t0, 3);
     assert_eq!(wait.decide(t0 + Duration::from_secs(5), true, 3), EndDecision::Wait);
     assert_eq!(wait.decide(t0 + Duration::from_secs(6), false, 4), EndDecision::Cancel, "a fresh engine restarted again");

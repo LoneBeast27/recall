@@ -33,14 +33,16 @@ use crate::watcher::{self, WatchEvent};
 
 /// `exe` (a stem or a file name) is registered by name under `cfg`: a game
 /// override or a `fullscreen_games` entry, whatever its window is now.
+/// Recall and Windows never are (a hand-edited entry, gate p5-3: `never_recorded`).
 fn registered_name(cfg: &Config, exe: &str) -> bool {
-    matches!(override_kind(cfg, exe), Some(RuleKind::HdrGame | RuleKind::SdrGame)) || is_fullscreen_game(cfg, exe)
+    !crate::never_recorded::never_recordable(exe) && (matches!(override_kind(cfg, exe), Some(RuleKind::HdrGame | RuleKind::SdrGame)) || is_fullscreen_game(cfg, exe))
 }
 
 /// `ev` is a target under `cfg` by its registration: a game override, or a
 /// `fullscreen_games` entry for a fullscreen window.
 fn registered(cfg: &Config, ev: &WatchEvent) -> bool {
-    matches!(override_kind(cfg, &ev.exe_stem), Some(RuleKind::HdrGame | RuleKind::SdrGame)) || (ev.fullscreen && is_fullscreen_game(cfg, &ev.exe_stem))
+    !crate::never_recorded::never_recordable(&ev.exe_stem)
+        && (matches!(override_kind(cfg, &ev.exe_stem), Some(RuleKind::HdrGame | RuleKind::SdrGame)) || (ev.fullscreen && is_fullscreen_game(cfg, &ev.exe_stem)))
 }
 
 /// The session on `ev` (the recorded window, as it is now) ends because the
@@ -126,6 +128,17 @@ mod tests {
         let mut cfg = Config::default();
         cfg.overrides.push(Override { exe: exe.into(), kind, clamp: None });
         cfg
+    }
+
+    /// Gate p5-3: a hand-edited Windows entry ("explorer", any case, a path) is no registration:
+    /// it never records, so it neither counts as registered nor retires anything.
+    #[test]
+    fn a_hand_edited_windows_entry_is_not_a_registration() {
+        for exe in ["explorer", "EXPLORER.EXE", r"C:\Windows\explorer.exe", "Mystify.scr"] {
+            let cfg = with(exe, RuleKind::SdrGame);
+            assert!(!registered_name(&cfg, exe), "{exe}");
+            assert!(!registered_name(&cfg, "explorer"), "{exe} vs the stem");
+        }
     }
 
     #[test]

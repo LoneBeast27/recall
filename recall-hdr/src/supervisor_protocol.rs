@@ -70,6 +70,8 @@ fn protocol_line(shared: &Arc<Shared>, line: &str, last: &mut Option<StatusDiges
                 *last = Some(digest);
             }
         }
+        // A released engine's drain heartbeat (design P11): it keeps the engine (P10).
+        Some("save_progress") => shared.note_beat(),
         Some("mic_muted") => {
             if let Some(m) = val.get("muted").and_then(|v| v.as_bool()) {
                 shared.cache.lock().unwrap_or_else(|p| p.into_inner()).view.mic_muted = Some(m);

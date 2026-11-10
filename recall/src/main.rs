@@ -64,6 +64,7 @@ mod export;
 #[cfg(feature = "encode")]
 mod export_worker;
 mod framing;
+mod frame_source;
 mod gpu;
 #[cfg(feature = "encode")]
 mod gpu_frames;
@@ -89,6 +90,8 @@ mod thread_qos;
 mod source;
 mod stdin_commands;
 mod stop_capture;
+#[path = "../../recall-hdr/src/awake_clock.rs"]
+mod awake_clock;
 #[cfg(test)]
 mod test_alloc;
 
@@ -333,6 +336,7 @@ impl ApplicationHandler for App {
                 live_sources: true,
                 live_source_fields: true,
                 stop_capture: true,
+                drain_heartbeat: true,
             });
         }
         if let Some(early) = early_stdin {

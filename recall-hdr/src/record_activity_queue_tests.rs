@@ -1,11 +1,12 @@
 //! Saves queued behind each other, and screenshots in flight, as the
 //! controller counts them before an engine restart.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::json;
 
 use super::*;
+use crate::awake_clock::Awake;
 use crate::record_engine::{EnginePlanner, EngineTarget, Step, EXIT_LINGER};
 use crate::record_target::Target;
 
@@ -19,10 +20,10 @@ fn saved() -> serde_json::Value {
 
 #[test]
 fn queued_saves_that_keep_answering_hold_a_restart_until_the_last_one() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let (mut p, mut a) = (EnginePlanner::new(EXIT_LINGER), EngineActivity::default());
-    assert_eq!(p.step(&win(7, 1), t0, a.retarget_busy(t0)), Step::Apply(win(7, 1)));
+    assert_eq!(p.step(&win(7, 1), (t0).as_test_instant(), a.retarget_busy(t0)), Step::Apply(win(7, 1)));
     for _ in 0..3 {
         a.save_sent(t0);
     }
@@ -30,16 +31,16 @@ fn queued_saves_that_keep_answering_hold_a_restart_until_the_last_one() {
     a.on_engine_event(&saved(), 0.0, t0 + s(90));
     a.on_engine_event(&saved(), 0.0, t0 + s(180));
     assert!(a.busy(t0 + s(200)), "a settings restart at 200 s waits for the save still writing");
-    assert_eq!(p.step(&win(8, 2), t0 + s(200), a.retarget_busy(t0 + s(200))), Step::Held, "a game switch waits too");
+    assert_eq!(p.step(&win(8, 2), (t0 + s(200)).as_test_instant(), a.retarget_busy(t0 + s(200))), Step::Held, "a game switch waits too");
     assert!(a.busy(t0 + s(269)), "the engine answered 89 s ago: still alive");
     a.on_engine_event(&saved(), 0.0, t0 + s(270));
     assert!(!a.busy(t0 + s(270)));
-    assert_eq!(p.step(&win(8, 2), t0 + s(270), a.retarget_busy(t0 + s(270))), Step::Apply(win(8, 2)));
+    assert_eq!(p.step(&win(8, 2), (t0 + s(270)).as_test_instant(), a.retarget_busy(t0 + s(270))), Step::Apply(win(8, 2)));
 }
 
 #[test]
 fn a_wedged_engine_holds_its_queue_one_window_not_one_per_save() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let mut a = EngineActivity::default();
     a.save_sent(t0);
@@ -55,7 +56,7 @@ fn a_wedged_engine_holds_its_queue_one_window_not_one_per_save() {
 
 #[test]
 fn a_failed_save_is_an_answer_too() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let mut a = EngineActivity::default();
     a.save_sent(t0);
@@ -77,17 +78,17 @@ fn a_screenshot_is_refused_while_a_closed_game_drains() {
 fn a_screenshot_in_flight_holds_a_retarget_until_reported_or_stale() {
     use crate::record_engine::{EnginePlanner, EngineTarget, Step, EXIT_LINGER};
     use crate::record_target::Target;
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let win = |pid, hwnd| EngineTarget::Window(Target { hwnd, pid, name: "G".into(), exe: "G.exe".into() });
     let (mut p, mut a) = (EnginePlanner::new(EXIT_LINGER), EngineActivity::default());
-    assert_eq!(p.step(&win(7, 1), t0, a.retarget_busy(t0)), Step::Apply(win(7, 1)));
+    assert_eq!(p.step(&win(7, 1), (t0).as_test_instant(), a.retarget_busy(t0)), Step::Apply(win(7, 1)));
     a.command_sent("screenshot", t0);
     assert!(a.busy(t0), "a settings restart waits for the PNG");
-    assert_eq!(p.step(&win(8, 2), t0 + s(1), a.retarget_busy(t0 + s(1))), Step::Held, "a new game waits for the PNG");
+    assert_eq!(p.step(&win(8, 2), (t0 + s(1)).as_test_instant(), a.retarget_busy(t0 + s(1))), Step::Held, "a new game waits for the PNG");
     a.on_event(&json!({"type":"screenshot","path":"G.png"}), 0.0);
     assert!(!a.busy(t0 + s(1)));
-    assert_eq!(p.step(&win(8, 2), t0 + s(1), a.retarget_busy(t0 + s(1))), Step::Apply(win(8, 2)));
+    assert_eq!(p.step(&win(8, 2), (t0 + s(1)).as_test_instant(), a.retarget_busy(t0 + s(1))), Step::Apply(win(8, 2)));
     a.command_sent("screenshot", t0 + s(2));
     a.on_event(&json!({"type":"screenshot_failed","reason":"r"}), 0.0);
     assert!(!a.busy(t0 + s(2)), "a failed screenshot is over too");
@@ -99,7 +100,7 @@ fn a_screenshot_in_flight_holds_a_retarget_until_reported_or_stale() {
 
 #[test]
 fn screenshots_in_flight_are_counted_and_go_stale_after_60_s() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let mut a = EngineActivity::default();
     a.command_sent("screenshot", t0);
@@ -129,10 +130,10 @@ fn idle_status() -> serde_json::Value {
 
 #[test]
 fn a_save_still_growing_after_120_s_holds_a_settings_restart_until_saved() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let (mut p, mut a) = (EnginePlanner::new(EXIT_LINGER), EngineActivity::default());
-    assert_eq!(p.step(&win(7, 1), t0, a.retarget_busy(t0)), Step::Apply(win(7, 1)));
+    assert_eq!(p.step(&win(7, 1), (t0).as_test_instant(), a.retarget_busy(t0)), Step::Apply(win(7, 1)));
     a.save_sent(t0);
     // 11 GB at 42 MB/s: about 265 s, one status line every 5 s here.
     for tick in 0..=53u64 {
@@ -140,16 +141,16 @@ fn a_save_still_growing_after_120_s_holds_a_settings_restart_until_saved() {
         let now = t0 + s(tick * 5 + 1);
         assert!(a.busy(now), "{} s: a settings restart waits while the bytes grow", tick * 5 + 1);
     }
-    assert_eq!(p.step(&win(8, 2), t0 + s(266), a.retarget_busy(t0 + s(266))), Step::Held, "a game switch waits too");
+    assert_eq!(p.step(&win(8, 2), (t0 + s(266)).as_test_instant(), a.retarget_busy(t0 + s(266))), Step::Held, "a game switch waits too");
     a.on_engine_event(&saved(), 0.0, t0 + s(267));
     a.on_engine_event(&idle_status(), 0.0, t0 + s(268));
     assert!(!a.busy(t0 + s(268)), "saved and the saver is empty: restart now");
-    assert_eq!(p.step(&win(8, 2), t0 + s(268), a.retarget_busy(t0 + s(268))), Step::Apply(win(8, 2)));
+    assert_eq!(p.step(&win(8, 2), (t0 + s(268)).as_test_instant(), a.retarget_busy(t0 + s(268))), Step::Apply(win(8, 2)));
 }
 
 #[test]
 fn bytes_stuck_for_120_s_still_expire() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let mut a = EngineActivity::default();
     a.save_sent(t0);
@@ -167,7 +168,7 @@ fn bytes_stuck_for_120_s_still_expire() {
 
 #[test]
 fn an_engine_without_save_writing_keeps_the_plain_window() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let mut a = EngineActivity::default();
     a.save_sent(t0);
@@ -179,7 +180,7 @@ fn an_engine_without_save_writing_keeps_the_plain_window() {
 
 #[test]
 fn a_late_answer_for_an_expired_queue_does_not_end_the_new_one() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let mut a = EngineActivity::default();
     a.save_sent(t0);
@@ -196,7 +197,7 @@ fn a_late_answer_for_an_expired_queue_does_not_end_the_new_one() {
 
 #[test]
 fn an_engine_rejection_moves_no_window() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let mut a = EngineActivity::default();
     for _ in 0..3 {
@@ -209,15 +210,15 @@ fn an_engine_rejection_moves_no_window() {
 }
 
 #[test]
-fn a_save_writing_across_a_sleep_gets_a_fresh_window_on_resume() {
-    let t0 = Instant::now();
+fn a_save_writing_across_a_sleep_keeps_its_window_on_the_awake_clock() {
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let mut a = EngineActivity::default();
     a.save_sent(t0);
     a.on_engine_event(&writing(5_000), 0.0, t0 + s(10));
-    // The PC slept at 20 s; it wakes at 20 s + 1 h (the clock ran on).
-    let woke = t0 + s(3620);
-    a.resumed(woke);
+    // The PC slept at 20 s for an hour: the awake clock stood still (it used to need a
+    // `resumed` re-stamp because the clock ran on).
+    let woke = t0 + s(20);
     assert!(a.saves_writing(woke), "a resume restart waits for the save being written");
     a.on_engine_event(&writing(6_000), 0.0, woke + s(5));
     assert!(a.saves_writing(woke + s(100)));
@@ -232,7 +233,7 @@ fn stepping(step: u64) -> serde_json::Value {
 
 #[test]
 fn a_pause_waits_for_the_save_being_written() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let mut a = EngineActivity::default();
     a.save_sent(t0);
@@ -249,7 +250,7 @@ fn a_pause_waits_for_the_save_being_written() {
 #[test]
 fn the_aac_phase_counts_as_progress_through_its_steps() {
     // R5-overlay-4: no `.part` yet (bytes 0), the saver's step counter rises.
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let mut a = EngineActivity::default();
     a.save_sent(t0);
@@ -263,7 +264,7 @@ fn the_aac_phase_counts_as_progress_through_its_steps() {
 
 #[test]
 fn a_null_save_writing_is_not_a_save() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut a = EngineActivity::default();
     a.on_engine_event(&json!({"type":"status","save_writing":null}), 0.0, t0);
     assert!(!a.busy(t0 + Duration::from_secs(1)), "null reads as no save in the saver");
@@ -271,7 +272,7 @@ fn a_null_save_writing_is_not_a_save() {
 
 #[test]
 fn a_growing_save_holds_restarts_at_most_10_min_or_its_size_at_5_mb_s() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let mut a = EngineActivity::default();
     a.set_save_estimate(1_000_000_000); // 1 GB: 200 s at 5 MB/s, so the 10 min floor applies
@@ -294,7 +295,7 @@ fn a_growing_save_holds_restarts_at_most_10_min_or_its_size_at_5_mb_s() {
 
 #[test]
 fn a_restart_held_30_s_by_a_save_says_so_once() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let mut a = EngineActivity::default();
     a.save_sent(t0);
@@ -312,7 +313,7 @@ fn a_restart_held_30_s_by_a_save_says_so_once() {
 
 #[test]
 fn a_save_still_growing_is_told_apart_from_one_only_counted() {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let s = Duration::from_secs;
     let mut a = EngineActivity::default();
     a.save_sent(t0);

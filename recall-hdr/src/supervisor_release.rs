@@ -8,7 +8,7 @@
 //! [`STOP_CAPTURE_CAP`] is never sent it (the controller holds the stop instead).
 
 use std::sync::atomic::Ordering;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use super::{Shared, Supervisor, QUIT_GRACE};
 use crate::engine_policy::EngineSpec;
@@ -16,6 +16,9 @@ use crate::record_dispatch::Sent;
 
 /// The engine `hello` capability (`recall` `protocol::Outbound::Hello::stop_capture`).
 pub(super) const STOP_CAPTURE_CAP: &str = "stop_capture";
+/// The engine `hello` capability: a released engine sends `save_progress` at once and on every
+/// drain poll and answers its own give-up (`recall` `Outbound::Hello::drain_heartbeat`).
+pub(super) const DRAIN_HEARTBEAT_CAP: &str = "drain_heartbeat";
 /// The line sent in the quit slot.
 pub(super) const STOP_CAPTURE_LINE: &str = r#"{"cmd":"stop_capture"}"#;
 /// How long a released engine may run on: the engine's own cap for finishing saves
@@ -27,6 +30,12 @@ impl Supervisor {
     /// The running engine said it takes `stop_capture`.
     pub fn engine_takes_stop_capture(&self) -> bool {
         self.hello_says(STOP_CAPTURE_CAP)
+    }
+
+    /// The running engine sends drain heartbeats (design P7): the controller then never settles
+    /// it on a save-stall timer; the engine judges its own saves.
+    pub fn engine_takes_drain_heartbeat(&self) -> bool {
+        self.hello_says(DRAIN_HEARTBEAT_CAP)
     }
 
     /// A game switch whose old engine is released (see the module notes), then `spec` runs
@@ -42,19 +51,6 @@ impl Supervisor {
         let release = self.shared.release_gen.load(Ordering::SeqCst);
         self.shared.settled_gen.store(release, Ordering::SeqCst);
     }
-}
-
-/// A released engine's kill deadline now: its own, cut to [`QUIT_GRACE`] once its saves
-/// landed (`settled`) and to the stop's grace when the supervisor stops (`stopping`).
-pub(super) fn release_deadline(deadline: Instant, now: Instant, settled: bool, stopping: Option<Duration>) -> Instant {
-    let mut cut = deadline;
-    if settled {
-        cut = cut.min(now + QUIT_GRACE);
-    }
-    if let Some(grace) = stopping {
-        cut = cut.min(now + grace);
-    }
-    cut
 }
 
 impl Shared {
@@ -113,13 +109,7 @@ mod tests {
         let sup = Supervisor { shared: Arc::new(shared), handle: None };
         sup.release_settled();
         assert!(sup.shared.release_is_settled(release));
-        let now = Instant::now();
-        let far = now + RELEASE_GRACE;
-        assert_eq!(release_deadline(far, now, false, None), far, "saving: the engine's own bound");
-        assert_eq!(release_deadline(far, now, true, None), now + QUIT_GRACE, "settled: 8 s");
-        let later = now + Duration::from_secs(5);
-        assert_eq!(release_deadline(now + QUIT_GRACE, later, true, None), now + QUIT_GRACE, "the cut does not slide");
-        assert_eq!(release_deadline(far, now, false, Some(Duration::from_secs(1))), now + Duration::from_secs(1), "app quit");
+        // The kill moment itself: `supervisor_release_wait` (design P10).
         sup.shared.set_desired_how(None, Sent::Switching, true);
         assert!(!sup.shared.release_is_settled(sup.shared.release_gen.load(Ordering::SeqCst)), "a newer release waits for its own saves");
     }
@@ -173,7 +163,7 @@ mod tests {
         let shared = Shared::new(None);
         let (tx, rx) = std::sync::mpsc::channel();
         *shared.events.lock().unwrap() = Some(tx);
-        let t0 = Instant::now();
+        let t0 = crate::awake_clock::Awake::ZERO;
         let mut activity = EngineActivity::default();
         activity.save_sent(t0);
         let mut now = t0;
@@ -185,19 +175,7 @@ mod tests {
             let _ = activity.retarget_busy(now); // plan_engine's read: expiry and the cap run here
             assert!(!activity.release_may_settle(now), "settled at {} s while the save moved", step * 5);
         }
-        let _ = activity.retarget_busy(now + Duration::from_secs(120));
-        assert!(activity.release_may_settle(now + Duration::from_secs(120)), "120 s with no progress settles");
-    }
-
-    /// R2-detect-r10-p3-2: `plan_engine` settles a release on `release_may_settle`, never on
-    /// `!busy.saving` (which lets go on the 120 s / 10 min timers while the drain still moves).
-    /// The `Controller` needs a live supervisor, hub and display, so this guards its source.
-    #[test]
-    fn plan_engine_settles_on_release_may_settle_not_on_busy_saving() {
-        let body = crate::test_src::method_body(include_str!("record_actions.rs"), "plan_engine");
-        let settle = body.find("self.supervisor.release_settled()").expect("plan_engine settles releases");
-        let guard = body[..settle].rfind("if ").map(|i| &body[i..settle]).unwrap_or("");
-        assert!(guard.contains("self.activity.release_may_settle(now)"), "guarded by: {guard}");
-        assert!(!guard.contains("busy.saving"), "guarded by: {guard}");
+        let _ = activity.retarget_busy(now + Duration::from_secs(135));
+        assert!(activity.release_may_settle(now + Duration::from_secs(135)), "135 s with no progress settles (no heartbeats, P8)");
     }
 }

@@ -4,12 +4,16 @@
 //! [`QUIT_SAVE_WAIT`], and on while the save keeps making progress (bounded by the save's
 //! own hold cap, `record_activity_writing::hold_cap`). The island says "Finishing the clip
 //! before quitting" meanwhile. A save still in flight when the wait runs out is reported
-//! once as "Save failed: Recall was closed during the save", then the quit goes on.
+//! once as "Save failed: Recall was closed during the save", then the quit goes on. So is a
+//! save the timers already gave up on (past its cap, or no answer in time) but the engine has
+//! not answered: the quit no longer goes on as if nothing were in flight (design P16; it used
+//! to cut such a save 8 s later with no report). All on the awake-only clock.
 
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use crate::awake_clock::Awake;
 use crate::log;
 use crate::record_activity::EngineActivity;
 use crate::record_quit::QuitReason;
@@ -36,11 +40,11 @@ pub enum QuitStep {
 /// The quit's wait, from the first tick a quit was asked.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct QuitWait {
-    started: Option<Instant>,
+    started: Option<Awake>,
     /// The user asked to quit again during the wait: quit now (the save is reported lost).
     forced: bool,
     /// When the first quit was asked through [`on_quit_request`] (else the wait's start).
-    asked_at: Option<Instant>,
+    asked_at: Option<Awake>,
     /// A quit asked while a sign-out waits: it goes on if the sign-out is cancelled.
     also: Option<QuitReason>,
     /// A `save_first` quit already sent its saves (`record_quit_save`): a repeat sends none.
@@ -68,7 +72,7 @@ pub fn pump_wait_ms(quitting: bool, deadline: Option<Instant>, now: Instant, cap
 /// tray Quit during the wait at least [`TRAY_FORCE_GAP`] after the first quit. A repeated
 /// plain pipe quit (an installer re-run, a double click in the app) just joins the wait.
 /// A quit asked while a sign-out waits is kept for [`resume_after_session_end`].
-pub fn on_quit_request(current: Option<QuitReason>, asked: QuitReason, force: bool, now: Instant, wait: &mut QuitWait) -> Option<QuitReason> {
+pub fn on_quit_request(current: Option<QuitReason>, asked: QuitReason, force: bool, now: Awake, wait: &mut QuitWait) -> Option<QuitReason> {
     let Some(current) = current else {
         wait.asked_at = Some(now);
         wait.forced |= force;
@@ -114,25 +118,36 @@ pub fn finishing_fields(finishing: bool, saves: u32, mark: Option<u64>, bytes: O
     json!({"finishing_clip": finishing, "finishing_progress": progress})
 }
 
+/// The saves a quit gives up on: every unanswered one, at least one while a save still writes
+/// (a `save_first` quit held only by its `recording_stopped` loses no save of its own).
+fn lost_at_give_up(activity: &EngineActivity, saving: bool) -> u32 {
+    if saving { activity.unanswered().max(1) } else { activity.unanswered() }
+}
+
 impl QuitWait {
-    /// This tick's step: go once nothing is written; wait [`QUIT_SAVE_WAIT`] from the
-    /// first tick, and on while the save still makes progress; then give up on it.
-    pub fn step(&mut self, activity: &mut EngineActivity, now: Instant) -> QuitStep {
+    /// This tick's step: go once nothing is in flight; wait [`QUIT_SAVE_WAIT`] from the
+    /// first tick, and on while the save still makes progress; then give up on it. A save the
+    /// engine never answered that no longer counts as writing (past its cap, or expired) is
+    /// reported lost at once (design P16), never a silent go.
+    pub fn step(&mut self, activity: &mut EngineActivity, now: Awake) -> QuitStep {
         let saving = activity.saves_writing(now);
         // A `save_first` quit's `record_stop` saves the long recording when
         // `recording_stopped` comes: that quit waits for it as for a save.
         if !saving && !(self.saved_first && activity.stop_in_flight()) {
-            return QuitStep::Go;
+            return match activity.unanswered() {
+                0 => QuitStep::Go,
+                lost => QuitStep::Lost(lost),
+            };
         }
         if self.forced {
-            return QuitStep::Lost(if saving { activity.saves_in_flight().max(1) } else { 0 });
+            return QuitStep::Lost(lost_at_give_up(activity, saving));
         }
         let first = self.started.is_none();
         let started = *self.started.get_or_insert(now);
         if now.saturating_duration_since(started) < QUIT_SAVE_WAIT || activity.save_growing(now) {
             QuitStep::Wait { first }
         } else {
-            QuitStep::Lost(if saving { activity.saves_in_flight() } else { 0 })
+            QuitStep::Lost(lost_at_give_up(activity, saving))
         }
     }
 
@@ -180,7 +195,10 @@ impl crate::record_app::Controller {
     /// Pump step once a quit was asked: true = shut down now. While a save is still
     /// written the engine keeps running; a save the wait gave up on is reported once
     /// (the engine's own abort failure is not broadcast after it).
-    pub(crate) fn quit_ready(&mut self, now: Instant) -> bool {
+    /// `_now` is kept for its callers (`pump`, and fix/deep-overlay-r9's `finish_saves`): the
+    /// wait reads the awake-only clock itself.
+    pub(crate) fn quit_ready(&mut self, _now: Instant) -> bool {
+        let now = self.awake();
         match self.quit_wait.step(&mut self.activity, now) {
             QuitStep::Go => true,
             QuitStep::Wait { first } => {
@@ -204,7 +222,8 @@ impl crate::record_app::Controller {
     /// A quit asked by `asked` (tray, pipe; `force`: the pipe's `"force":true`).
     pub(crate) fn ask_quit(&mut self, asked: QuitReason, force: bool) {
         let (before, was_forced) = (self.quit, self.quit_wait.forced);
-        self.quit = on_quit_request(before, asked, force, Instant::now(), &mut self.quit_wait);
+        let now = self.awake();
+        self.quit = on_quit_request(before, asked, force, now, &mut self.quit_wait);
         if self.quit_wait.forced && !was_forced {
             log!("record: {} {}-- quitting now, a save in flight is lost", asked.label(), if force { "with force " } else { "again during the save wait " });
         } else if before.is_some() {
@@ -213,7 +232,8 @@ impl crate::record_app::Controller {
     }
 
     /// `finishing_fields` now: a quit was asked and a save is still being written.
-    pub(crate) fn finishing_now(&mut self, now: Instant) -> Value {
+    pub(crate) fn finishing_now(&mut self) -> Value {
+        let now = self.awake();
         let finishing = self.quit.is_some() && (self.activity.saves_writing(now) || self.quit_wait.holds_for_stop(&self.activity));
         let a = &self.activity;
         finishing_fields(finishing, a.saves_in_flight(), a.writing_mark(), a.writing_bytes())
@@ -240,7 +260,7 @@ mod tests {
 
     #[test]
     fn a_quit_waits_for_the_save_being_written_then_goes() {
-        let t0 = Instant::now();
+        let t0 = Awake::ZERO;
         let s = Duration::from_secs;
         let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
         assert_eq!(q.step(&mut a, t0), QuitStep::Go, "nothing saving: quit at once");
@@ -254,7 +274,7 @@ mod tests {
 
     #[test]
     fn a_quit_waits_60_s_then_on_while_the_save_grows_and_reports_a_loss_after() {
-        let t0 = Instant::now();
+        let t0 = Awake::ZERO;
         let s = Duration::from_secs;
         let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
         a.save_sent(t0);
@@ -278,7 +298,7 @@ mod tests {
     #[test]
     fn a_save_with_no_progress_report_gives_the_quit_60_s() {
         // An engine without `save_writing`: only the counted save, 60 s.
-        let t0 = Instant::now();
+        let t0 = Awake::ZERO;
         let (mut a, mut q) = (EngineActivity::default(), QuitWait::default());
         a.save_sent(t0);
         let quit = t0 + Duration::from_secs(1); // the quit is asked 1 s after the save

@@ -98,3 +98,22 @@ fn add_app_never_offers_a_part_of_windows() {
     let offered: Vec<String> = pickable(found, None).apps.into_iter().map(|a| a.exe).collect();
     assert_eq!(offered, vec!["Game.exe".to_string()]);
 }
+
+/// Gate p5-3: a screensaver or a hand-edited Windows entry never shows as "Recorded", and a
+/// running screensaver is not offered.
+#[test]
+fn windows_entries_and_screensavers_never_show_as_recorded() {
+    let config = json!({
+        "overrides": [
+            { "exe": "explorer", "kind": "sdr_game" },
+            { "exe": r"C:\Windows\Explorer.EXE", "kind": "hdr_game" },
+            { "exe": "Mystify.scr", "kind": "sdr_game" }
+        ],
+        "detect": { "fullscreen_games": ["Mystify.scr"] }
+    });
+    for entry in entries(Some(&config)) {
+        assert!(!matches!(entry.how, Registration::Record | Registration::Fullscreen), "{entry:?}");
+    }
+    let offered: Vec<String> = pickable(vec![(1, app("Mystify.scr")), (2, app("Game.exe"))], None).apps.into_iter().map(|a| a.exe).collect();
+    assert_eq!(offered, vec!["Game.exe".to_string()]);
+}

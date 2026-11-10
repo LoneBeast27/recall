@@ -82,7 +82,7 @@ impl Root {
 
     fn game_row(&self, i: usize, entry: GameEntry, cx: &mut Context<Self>) -> AnyElement {
         let mut row = setting_row(&entry.exe, entry.how.label());
-        if entry.how != Registration::Fullscreen {
+        if matches!(entry.how, Registration::Record | Registration::Never) {
             let mut track = ui::segment_track().w(px(220.));
             for (j, (how, label)) in [(Registration::Record, "Record"), (Registration::Never, "Never record")].into_iter().enumerate() {
                 // The selected segment sends nothing (R8-detect-4).
