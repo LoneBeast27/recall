@@ -1,0 +1,100 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+
+namespace Recall.Setup.Tests
+{
+    /// Setup opened by hand: the version checks before the window, and an install over an existing
+    /// Recall that must run as an update (settings untouched, no guided setup).
+    internal static partial class TestRunner
+    {
+        private static void LaunchDecisions()
+        {
+            // Same version, nothing newer (online or offline): already at the latest.
+            Check(LaunchChecks.Decide("0.1.2", "0.1.2", "0.1.2") == LaunchCheck.AlreadyLatest, "same, latest known");
+            Check(LaunchChecks.Decide("0.1.2", "0.1.2", null) == LaunchCheck.AlreadyLatest, "same, offline");
+            Check(LaunchChecks.Decide(" 0.1.2 ", "0.1.2", null) == LaunchCheck.AlreadyLatest, "spaces in the registry value");
+            // Same version, but a newer one is published: point to it.
+            Check(LaunchChecks.Decide("0.1.1", "0.1.1", "0.1.2") == LaunchCheck.InstalledButNewerExists, "same, newer published");
+            // An older Setup while online: offered the latest, may continue (a rollback stays possible).
+            Check(LaunchChecks.Decide("0.1.0", "0.1.1", "0.1.2") == LaunchCheck.NewerExists, "setup older than latest");
+            Check(LaunchChecks.Decide(null, "0.1.1", "0.2.0") == LaunchCheck.NewerExists, "no version recorded");
+            // Rollback: an older Setup over a newer install asks first.
+            Check(LaunchChecks.Decide("0.1.2", "0.1.1", null) == LaunchCheck.Older, "rollback, offline");
+            Check(LaunchChecks.Decide("0.1.2", "0.1.1", "0.1.1") == LaunchCheck.Older, "rollback, latest pulled back");
+            Check(LaunchChecks.Decide("0.1.2", "0.1.1", "0.1.2") == LaunchCheck.NewerExists, "rollback while a newer is published: offered first");
+            // A real update.
+            Check(LaunchChecks.Decide("0.1.1", "0.1.2", "0.1.2") == LaunchCheck.Continue, "update to latest");
+            Check(LaunchChecks.Decide("0.1.1", "0.1.2", null) == LaunchCheck.Continue, "update, offline");
+            Check(LaunchChecks.Decide("0.1.1", "0.1.3", "0.1.2") == LaunchCheck.Continue, "Setup newer than the published latest");
+            // A development Setup is never checked.
+            Check(LaunchChecks.Decide("0.0.0", "0.0.0", null) == LaunchCheck.Continue, "dev build");
+            Check(LaunchChecks.Decide("0.1.1", "0.0.0", "0.1.1") == LaunchCheck.Continue, "dev build over a release");
+            Check(LaunchChecks.Decide("garbage", "0.1.1", "nonsense") == LaunchCheck.Continue, "unreadable versions");
+            Check(SetupVersion.Compare("0.10.0", "0.9.9") > 0, "numeric, not text, order");
+            Check(SetupVersion.Parse("1.2") == null && SetupVersion.Parse("1.2.x") == null && SetupVersion.Parse("-1.0.0") == null, "bad versions");
+        }
+
+        private static void LatestReleaseParsing()
+        {
+            const string setup = "{\"name\":\"RecallSetup.exe\",\"state\":\"uploaded\"}";
+            Check(LatestRelease.VersionOf("{\"tag_name\":\"v0.1.2\",\"assets\":[" + setup + "]}") == "0.1.2", "a release with its Setup");
+            Check(LatestRelease.VersionOf("{\"tag_name\":\"v0.1.2\",\"assets\":[{\"name\":\"RecallSetup.exe\",\"state\":\"new\"}]}") == null, "upload not finished");
+            Check(LatestRelease.VersionOf("{\"tag_name\":\"v0.1.2\",\"assets\":[]}") == null, "no Setup asset");
+            Check(LatestRelease.VersionOf("{\"tag_name\":\"v0.1.2\",\"draft\":true,\"assets\":[" + setup + "]}") == null, "draft");
+            Check(LatestRelease.VersionOf("{\"tag_name\":\"v0.1.2\",\"prerelease\":true,\"assets\":[" + setup + "]}") == null, "pre-release");
+            Check(LatestRelease.VersionOf("{\"tag_name\":\"0.1.2\",\"assets\":[" + setup + "]}") == null, "tag without v");
+            Check(LatestRelease.VersionOf("not json") == null && LatestRelease.VersionOf("[]") == null, "garbage");
+            Check(LatestRelease.OnMain("{\"status\":\"ahead\",\"behind_by\":0}"), "ahead of the tag: on main");
+            Check(LatestRelease.OnMain("{\"status\":\"identical\",\"behind_by\":0}"), "main is the tag");
+            Check(!LatestRelease.OnMain("{\"status\":\"diverged\",\"behind_by\":2}"), "a tag off main is never the latest");
+            Check(!LatestRelease.OnMain("{\"status\":\"behind\",\"behind_by\":1}"), "behind");
+            Check(!LatestRelease.OnMain("{}"), "missing fields");
+        }
+
+        private static void OverExistingIsUpdate()
+        {
+            using (var box = new Sandbox())
+            {
+                Check(SetupPackage.RunsAsUpdate(false, box.Install), "opened by hand over a verified install: an update");
+                Check(SetupPackage.RunsAsUpdate(true, box.Install), "the app asked: an update");
+                var empty = Path.Combine(box.Root, @"Programs\Elsewhere");
+                Directory.CreateDirectory(empty);
+                Check(!SetupPackage.RunsAsUpdate(false, empty), "an empty folder: a first install");
+                File.Delete(Path.Combine(box.Install, "recall.exe"));
+                Check(!SetupPackage.RunsAsUpdate(false, box.Install), "an incomplete folder is not a verified install");
+            }
+        }
+
+        private static void OverExistingKeepsSettings()
+        {
+            using (var box = new Sandbox())
+            {
+                // Every settings file Recall writes, including keys a newer build added (a rollback).
+                var seeded = new Dictionary<string, string>();
+                foreach (var file in ConfigBackup.Files)
+                {
+                    var root = file[0] == "roaming" ? box.Roaming : file[0] == "local" ? box.Local : box.Install;
+                    var path = Path.Combine(root, file[1]);
+                    Directory.CreateDirectory(Path.GetDirectoryName(path));
+                    var text = path.EndsWith(".toml", StringComparison.OrdinalIgnoreCase)
+                        ? box.Config(97) + "[from_a_newer_build]\nkey = 1\n"
+                        : "{\"user\":\"" + Path.GetFileName(path) + "\",\"newer_key\":[1,2]}";
+                    File.WriteAllText(path, text);
+                    seeded[path] = InstallSwap.Sha256(path);
+                }
+                var options = new InstallOptions(box.Install, true, false, false, SetupPackage.RunsAsUpdate(false, box.Install), false, true);
+                Exception error = null;
+                try { Installer.Run(box.Package, box.Work, options, null); }
+                catch (Exception e) { error = e; }
+                Check(error == null, "the update ran: " + (error == null ? "" : error.Message));
+                Check(Sandbox.Programs.All(p => box.Version(p) == "NEW"), "the programs were replaced");
+                foreach (var pair in seeded)
+                    Check(File.Exists(pair.Key) && InstallSwap.Sha256(pair.Key) == pair.Value, "unchanged: " + pair.Key);
+                var backups = ConfigBackup.Backups(new UserRoots(box.Roaming, box.Local).Updates);
+                Check(backups.Count == 1, "one settings backup was made first (" + backups.Count + ")");
+            }
+        }
+    }
+}

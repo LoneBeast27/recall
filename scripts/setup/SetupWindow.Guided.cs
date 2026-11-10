@@ -39,11 +39,11 @@ namespace Recall.Setup
         private YesNoChoice AddDecision(Panel panel, int y, string question, string hint,
             string name, Action<bool> change)
         {
-            AddLabel(panel, question, 0, y, 408, 24, fonts.Strong, Ink);
-            AddLabel(panel, hint, 0, y + 25, 408, 36, fonts.Body, Muted);
             var choice = new YesNoChoice(name, fonts.Strong, change)
             {
-                Bounds = new Rectangle(414, y + 2, 111, 33)
+                Bounds = new Rectangle(414, y + 2, 111, 33),
+                Question = AddLabel(panel, question, 0, y, 408, 24, fonts.Strong, Ink),
+                Hint = AddLabel(panel, hint, 0, y + 25, 408, 36, fonts.Body, Muted)
             };
             panel.Controls.Add(choice);
             return choice;
@@ -76,8 +76,10 @@ namespace Recall.Setup
             }
             quickPath.Text = path ?? "Choose a valid install location.";
             quickPath.ForeColor = path == null ? Error : Ink;
-            quickShortcut.Text = shortcut.Checked ? "Setup adds or refreshes a Start menu shortcut."
+            quickShortcut.Text = shortcut.Checked && !update ? "Setup adds or refreshes a Start menu shortcut."
                 : "Setup keeps your existing Start menu shortcuts.";
+            // An update opens Recall as it was, never guided setup: nothing to start after it.
+            if (!updateMode) quickLaunch.Shown = !update;
             quickClips.Text = update ? "Setup keeps your clip folder and recording settings."
                 : @"Clips go to Videos\Recall. Change the folder in Settings → Media.";
         }
@@ -86,6 +88,14 @@ namespace Recall.Setup
         {
             private readonly RadioButton yes;
             private readonly RadioButton no;
+            public Label Question;
+            public Label Hint;
+
+            /// The question, its hint and the buttons together.
+            public bool Shown
+            {
+                set { Visible = value; if (Question != null) Question.Visible = value; if (Hint != null) Hint.Visible = value; }
+            }
 
             public YesNoChoice(string name, Font font, Action<bool> change)
             {
@@ -112,7 +122,7 @@ namespace Recall.Setup
 
             private static RadioButton MakeButton(string text, string name, Font font, int x)
             {
-                var button = new RadioButton
+                var button = new SmoothRadioButton
                 {
                     Text = text, AccessibleName = name + " " + text, Appearance = Appearance.Button,
                     Bounds = new Rectangle(x, 0, 54, 33), FlatStyle = FlatStyle.Flat,

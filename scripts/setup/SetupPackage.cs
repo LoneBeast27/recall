@@ -98,6 +98,14 @@ namespace Recall.Setup
                 && File.Exists(Path.Combine(path, "recall.exe")) ? path : null;
         }
 
+        /// An install is an update when the app asked for one (`--update`) or when the folder already
+        /// holds a verified Recall: then settings are backed up, the recorder is saved and brought
+        /// back, and Recall opens as it was, never guided setup.
+        public static bool RunsAsUpdate(bool appAsked, string path)
+        {
+            return appAsked || (path != null && ExistingInstallPath(path) != null);
+        }
+
         public static string Install(InstallOptions options, IProgress<string> progress)
         {
             var parent = Path.Combine(Path.GetTempPath(), "Recall-Setup-" + Guid.NewGuid().ToString("N"));
