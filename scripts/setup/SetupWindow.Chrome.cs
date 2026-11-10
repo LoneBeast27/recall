@@ -43,13 +43,13 @@ namespace Recall.Setup
         /// Screen pixels per 96-DPI unit (1 at 100 % scaling, 1.5 at 150 %).
         internal static float Scale(Graphics g) { return g.DpiX / 96f; }
 
-        /// Text on the dark page: grayscale antialiasing. GDI+'s default (ClearType grid-fitting)
-        /// draws the private fonts thin and jagged on #0A0A0A, the "pixelated" look; large display
-        /// text skips grid-fitting so its curves stay smooth.
+        /// Text on the dark page: grayscale antialiasing without grid-fitting, at every size.
+        /// ClearType assumes an RGB-stripe LCD; on OLED subpixel layouts (WOLED, QD-OLED) its
+        /// fringes and the thin, snapped stems of grid-fitting look broken. Unsnapped grayscale
+        /// keeps each stem's full weight (with Geist 500 for body text).
         internal static void Smooth(Graphics g, Font font)
         {
-            g.TextRenderingHint = font.SizeInPoints >= 16 ? System.Drawing.Text.TextRenderingHint.AntiAlias
-                : System.Drawing.Text.TextRenderingHint.AntiAliasGridFit;
+            g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.AntiAlias;
         }
 
         private sealed class SmoothLabel : Label

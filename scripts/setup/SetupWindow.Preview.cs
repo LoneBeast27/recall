@@ -27,6 +27,12 @@ namespace Recall.Setup
             Application.DoEvents();
             SaveFrame(Path.ChangeExtension(path, ".advanced.png"));
             ShowOptions(false);
+            quickLaunch.Shown = false;
+            PlaceQuickRows(false);
+            Application.DoEvents();
+            SaveFrame(Path.ChangeExtension(path, ".update.png"));
+            quickLaunch.Shown = true;
+            PlaceQuickRows(true);
             destination.Text = originalPath;
         }
 

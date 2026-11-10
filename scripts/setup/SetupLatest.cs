@@ -13,7 +13,7 @@ namespace Recall.Setup
     internal static class LatestRelease
     {
         private const string Api = "https://api.github.com/repos/LoneBeast27/recall/";
-        private const int TimeoutMs = 4000;
+        private const int TimeoutMs = 2000;
         private const int MaxBytes = 1 << 20;
 
         public static string Fetch()

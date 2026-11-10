@@ -11,6 +11,7 @@ namespace Recall.Setup
         private Button quickBrowse;
         private Label quickShortcut;
         private Label quickClips;
+        private Label quickPrerequisites;
         private YesNoChoice quickLaunch;
         private YesNoChoice quickTiming;
         private bool advanced;
@@ -32,7 +33,7 @@ namespace Recall.Setup
                 "Joins Performance Log Users for frame timing. Windows asks first.",
                 "Set up game detection and FPS", value => frameTiming.Checked = value);
             quickClips = AddLabel(panel, "", 0, 241, 525, 20, fonts.Body, Muted);
-            AddLabel(panel, prerequisites.Summary(), 0, 263, 525, 19, fonts.Body, Muted);
+            quickPrerequisites = AddLabel(panel, prerequisites.Summary(), 0, 263, 525, 19, fonts.Body, Muted);
             return panel;
         }
 
@@ -70,7 +71,7 @@ namespace Recall.Setup
             {
                 title.Text = advanced ? "Advanced setup" : update ? "Update Recall" : "Set up Recall";
                 description.Text = advanced ? "Choose the install folder, shortcut, and Windows permissions."
-                    : updateMode ? "Review the installed folder, then update when you are ready."
+                    : update ? "Review the installed folder, then update when you are ready."
                     : "Quick setup installs Recall for your Windows account.";
                 primary.Text = preview ? "Preview install" : update ? "Update Recall" : "Install Recall";
             }
@@ -79,9 +80,27 @@ namespace Recall.Setup
             quickShortcut.Text = shortcut.Checked && !update ? "Setup adds or refreshes a Start menu shortcut."
                 : "Setup keeps your existing Start menu shortcuts.";
             // An update opens Recall as it was, never guided setup: nothing to start after it.
-            if (!updateMode) quickLaunch.Shown = !update;
+            if (!updateMode)
+            {
+                quickLaunch.Shown = !update;
+                PlaceQuickRows(!update);
+            }
             quickClips.Text = update ? "Setup keeps your clip folder and recording settings."
                 : @"Clips go to Videos\Recall. Change the folder in Settings → Media.";
+        }
+
+        /// The rows under the start-recording question move up into its place while it is hidden,
+        /// so an update shows no gap. Positions in 96-DPI units, scaled like the window
+        /// (YesNoChoice is 33 units tall).
+        private void PlaceQuickRows(bool launchShown)
+        {
+            float s = quickLaunch.Height / 33f;
+            int top = quickLaunch.Question.Top + (launchShown ? (int)Math.Round(70 * s) : 0);
+            quickTiming.Question.Top = top;
+            quickTiming.Hint.Top = top + (int)Math.Round(25 * s);
+            quickTiming.Top = top + (int)Math.Round(2 * s);
+            quickClips.Top = top + (int)Math.Round(70 * s);
+            quickPrerequisites.Top = top + (int)Math.Round(92 * s);
         }
 
         private sealed class YesNoChoice : Panel
