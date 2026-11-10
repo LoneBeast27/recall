@@ -31,10 +31,12 @@ namespace Recall.Setup
             else if (args.Length == 0 && SetupPackage.HasPayload)
             {
                 // Opened by hand: the version already installed against the latest published one.
-                var installed = InstalledRecall.Find(SetupTargets.FromEnvironment());
+                var targets = SetupTargets.FromEnvironment();
+                var installed = InstalledRecall.Find(targets);
                 if (installed != null)
                 {
-                    var latest = LatestRelease.Fetch();
+                    // The app's "Check for updates automatically" off: no GitHub call (compared as offline).
+                    var latest = LatestRelease.ChecksAllowed(UserRoots.For(targets).Local) ? LatestRelease.Fetch() : null;
                     var check = LaunchChecks.Decide(installed.Version, SetupBuildInfo.Version, latest);
                     SetupLog.For(null)("Setup " + SetupBuildInfo.Version + " opened: installed " + (installed.Version ?? "?")
                         + ", latest " + (latest ?? "unknown (offline)") + ": " + check);

@@ -44,6 +44,11 @@ on your computer; Recall has no account, telemetry or analytics. The only networ
   check it against GitHub's SHA-256 digest, and open it. These requests go over HTTPS to those
   GitHub hosts only and carry the user agent `Recall-updater`; GitHub sees your IP address as
   for any download.
+- **Setup opened by hand.** When Setup is opened directly (not by the app's update) over an
+  existing install, it asks the GitHub API for the latest release and compares its tag with
+  `main` (the same two requests as the app's update check, user agent `RecallSetup`) to tell you
+  whether a newer version exists. It skips this when **Check for updates automatically** is off.
+  Nothing about you is sent.
 - **Setup.** The release Setup downloads the pinned FFmpeg 7.1.1 runtime from
   [Gyan's GitHub release](https://github.com/GyanD/codexffmpeg/releases/tag/7.1.1) and checks
   every file's SHA-256 (an update reuses an installed copy that still matches). When the

@@ -19,6 +19,10 @@ telemetry or analytics. The only network traffic is:
   `main`) shortly after the app opens. Turn it off with **Settings → General → Check for updates
   automatically**; nothing is then sent unless you press **Check now**. An update's
   `RecallSetup.exe` is downloaded from the GitHub release only when you choose to install it.
+- **Setup opened by hand** (not by the app's update): over an existing install, it asks the GitHub
+  API for the latest release (the same two requests as the app's update check) to tell you whether
+  a newer version exists. It skips this when **Check for updates automatically** is off. Nothing
+  about you is sent.
 - **Setup:** downloads the pinned FFmpeg runtime from Gyan's GitHub release and, when it is
   missing, the Microsoft Visual C++ x64 runtime from Microsoft; on Windows N it can add the
   Media Feature Pack through Windows Update.

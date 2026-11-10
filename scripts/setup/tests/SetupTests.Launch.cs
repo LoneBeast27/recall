@@ -36,6 +36,30 @@ namespace Recall.Setup.Tests
             Check(SetupVersion.Parse("1.2") == null && SetupVersion.Parse("1.2.x") == null && SetupVersion.Parse("-1.0.0") == null, "bad versions");
         }
 
+        private static void UpdateChecksOffSwitch()
+        {
+            var root = Path.Combine(Path.GetTempPath(), "recall-setup-checks-test-" + Guid.NewGuid().ToString("N"));
+            var dir = Path.Combine(root, "Recall", "updates");
+            var file = Path.Combine(dir, "settings.json");
+            try
+            {
+                Check(LatestRelease.ChecksAllowed(null) && LatestRelease.ChecksAllowed(root), "no settings file: on, as in the app");
+                Directory.CreateDirectory(dir);
+                File.WriteAllText(file, "{\"check_automatically\":false}");
+                Check(!LatestRelease.ChecksAllowed(root), "turned off in the app: Setup never calls GitHub");
+                File.WriteAllText(file, "{\"check_automatically\":true,\"from_a_newer_build\":[1]}");
+                Check(LatestRelease.ChecksAllowed(root), "on");
+                File.WriteAllText(file, "not json");
+                Check(LatestRelease.ChecksAllowed(root), "unreadable: on, as in the app");
+                File.WriteAllText(file, "{\"check_automatically\":\"no\"}");
+                Check(LatestRelease.ChecksAllowed(root), "not a bool: on, as in the app");
+            }
+            finally
+            {
+                try { Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+            }
+        }
+
         private static void LatestReleaseParsing()
         {
             const string setup = "{\"name\":\"RecallSetup.exe\",\"state\":\"uploaded\"}";

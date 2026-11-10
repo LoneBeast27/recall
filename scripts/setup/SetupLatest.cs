@@ -34,6 +34,26 @@ namespace Recall.Setup
             catch (NotSupportedException) { return null; }
         }
 
+        /// The app's "Check for updates automatically" (recall-native update_prefs.rs): on unless
+        /// <localAppData>\Recall\updates\settings.json says "check_automatically": false. Off, Setup
+        /// never calls GitHub before its window.
+        public static bool ChecksAllowed(string localAppData)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(localAppData)) return true;
+                var file = Path.Combine(localAppData, "Recall", "updates", "settings.json");
+                if (!File.Exists(file)) return true;
+                var settings = Parse(File.ReadAllText(file));
+                return !(settings != null && settings.ContainsKey("check_automatically")
+                    && settings["check_automatically"] is bool && !(bool)settings["check_automatically"]);
+            }
+            catch (IOException) { return true; }
+            catch (UnauthorizedAccessException) { return true; }
+            catch (ArgumentException) { return true; }
+            catch (NotSupportedException) { return true; }
+        }
+
         private static string Get(string path)
         {
             var request = (HttpWebRequest)WebRequest.Create(Api + path);
