@@ -1,63 +1,22 @@
-//! The protocol floor (design-audio-mute P1, P14; R1 decided by the merge gate). An engine
-//! binary older than the sync handshake (a partial install: the app was updated, `recall.exe`
-//! was not) starts recording before any line can reach it and cannot retire a track, so a muted
-//! mic or an unpicked device could record. Before every spawn the controller looks for the
-//! engine's protocol marker in the file (it runs nothing). Without it the engine is given no
-//! input and no picked device: game audio, the Windows default output and app tracks still
-//! record, and the user is told, with the reason, by a notice shown even with notices off.
-//! An engine whose `hello` lacks `sync_hold` although its file has the marker is restarted on
-//! the same terms.
+//! The protocol floor, by `hello` (design-audio-mute P14; R1 decided by the merge gate; the
+//! cut-down replaces the binary marker scan with the coupled update's hello check). An engine
+//! older than the sync handshake (a half-finished install: the app was updated, `recall.exe`
+//! was not) records before any line can reach it and cannot retire a track. Its `hello` says no
+//! `sync_hold`: it is restarted, and every later spawn of this controller run is given no input
+//! and no picked device (game audio, the Windows default output and app tracks still record).
+//! The user is told, with the reason, by a notice shown even with notices off, with a Reinstall
+//! button in the app.
 
-use std::path::{Path, PathBuf};
-use std::sync::Mutex;
-use std::time::SystemTime;
+use std::path::Path;
 
 use crate::engine_policy::EngineSpec;
 use crate::record_audio_sources::{AudioSource, SOURCES_ENV};
 
-/// The bytes a sync-handshake engine carries (`recall` `engine_stdin::PROTOCOL_MARKER`).
-pub(crate) const PROTOCOL_MARKER: &[u8] = b"RECALL-ENGINE-PROTOCOL:sync-hold:1";
 /// The controller event that raises the notice (`record_inputs_held::notice_for`).
 pub(crate) const ENGINE_OUTDATED: &str = "engine_outdated";
 const GAME_PID_ENV: &str = "RECALL_AUDIO_GAME_PID";
 /// The legacy switch that keeps an old engine's default microphone off.
 const MIC_OFF_ENV: &str = "RECALL_AUDIO_MIC_OFF";
-
-/// A checked file: (path, size, modified time, has the marker).
-type Checked = (PathBuf, u64, Option<SystemTime>, bool);
-/// The last file checked.
-static CHECKED: Mutex<Option<Checked>> = Mutex::new(None);
-
-/// Whether the engine file at `path` carries the marker, cached by path, size and time. An
-/// unreadable file has none for this spawn (the safe state), but that is never cached: the next
-/// spawn reads it again (N4: one failed read must not cost the mic for the whole session).
-pub(crate) fn has_marker(path: &Path) -> bool {
-    has_marker_with(path, read_file)
-}
-
-/// The engine file's bytes (a plain fn: `std::fs::read` itself is generic over the path).
-pub(crate) fn read_file(path: &Path) -> std::io::Result<Vec<u8>> {
-    std::fs::read(path)
-}
-
-/// [`has_marker`] with the file read passed in (tests). Only a full read is cached.
-fn has_marker_with(path: &Path, read: impl Fn(&Path) -> std::io::Result<Vec<u8>>) -> bool {
-    let Ok(meta) = std::fs::metadata(path) else { return false };
-    let key = (path.to_path_buf(), meta.len(), meta.modified().ok());
-    let mut g = CHECKED.lock().unwrap_or_else(|p| p.into_inner());
-    if let Some((p, len, at, found)) = g.as_ref() {
-        if (p, *len, *at) == (&key.0, key.1, key.2) {
-            return *found;
-        }
-    }
-    let Ok(bytes) = read(path) else {
-        crate::log!("supervisor: could not read {} for its protocol marker; trying again at the next spawn", path.display());
-        return false; // not cached
-    };
-    let found = bytes.windows(PROTOCOL_MARKER.len()).any(|w| w == PROTOCOL_MARKER);
-    *g = Some((key.0, key.1, key.2, found));
-    found
-}
 
 /// `list` without what an engine below the floor may not get: every input, and every source
 /// with a picked device (a named endpoint or a saved id). The game stays when it is captured by
@@ -83,17 +42,17 @@ fn withhold_value(value: &str, process_loopback: bool) -> String {
 }
 
 impl super::Shared {
-    /// The spec a spawn of the engine at `path` gets: unchanged at the floor; else (or after a
-    /// `hello` without `sync_hold`) its sources withheld as [`withhold_devices`] says, and the
+    /// The spec a spawn of the engine at `path` gets: unchanged, until an engine's `hello` said no
+    /// `sync_hold`; from then on its sources withheld as [`withhold_devices`] says, and the
     /// controller told ([`ENGINE_OUTDATED`]).
     pub(super) fn floor_spec(&self, path: &Path, spec: &EngineSpec) -> EngineSpec {
-        let below = self.spawn_sources.forced_below() || !has_marker(path);
+        let below = self.spawn_sources.forced_below();
         let process_loopback = spec.env.iter().any(|(k, v)| k == GAME_PID_ENV && v.is_some());
         self.spawn_sources.set_below_floor(below.then_some(process_loopback));
         if !below {
             return spec.clone();
         }
-        crate::log!("supervisor: {} has no sync-hold protocol marker (an older recorder); it records no input or picked device", path.display());
+        crate::log!("supervisor: {} said no sync_hold (an older recorder); it records no input or picked device", path.display());
         let mut spec = spec.clone();
         for entry in spec.env.iter_mut().filter(|(k, _)| k == SOURCES_ENV) {
             entry.1 = Some(withhold_value(entry.1.as_deref().unwrap_or("[]"), process_loopback));
@@ -106,9 +65,9 @@ impl super::Shared {
         spec
     }
 
-    /// A `hello` without `sync_hold` (P14): that engine records before any line reaches it.
-    /// Unless it was already given no device, every later spawn withholds them and this engine
-    /// is restarted now (a recovery: nothing it holds can be trusted).
+    /// A `hello` without `sync_hold` (P14, the cut-down's mixed-install check): that engine
+    /// recorded before any line reached it. Unless it was already given no device, every later
+    /// spawn withholds them and this engine is restarted now, and the user is told.
     pub(super) fn on_hello_floor(&self, hello: &serde_json::Value) {
         if hello.get("sync_hold").and_then(serde_json::Value::as_bool) == Some(true) || self.spawn_sources.below_floor() {
             return;

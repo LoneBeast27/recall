@@ -1,9 +1,8 @@
-//! design-audio-mute P1/P14 and the R1 conditions (merge gate): an engine file without the
-//! protocol marker next to this controller gets no input and no picked device, keeps its outputs
-//! and game audio, and the user is told. Fake engine files in a temp dir (a drop guard removes
-//! it, a panic included); no engine runs.
+//! design-audio-mute P1/P14 and the R1 conditions (merge gate): an engine without
+//! `sync_hold` in its hello, next to this controller, gets no input and no picked device, keeps
+//! its outputs and game audio, and the user is told. No engine runs.
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::mpsc::channel;
 
 use serde_json::json;
@@ -11,24 +10,6 @@ use serde_json::json;
 use super::super::Shared;
 use super::*;
 use crate::engine_policy::EngineSpec;
-
-/// A temp dir removed when the test ends, a panic included.
-struct TempDir(PathBuf);
-
-impl TempDir {
-    fn new(tag: &str) -> TempDir {
-        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0);
-        let dir = std::env::temp_dir().join(format!("recall-hdr-floor-{tag}-{}-{nanos}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        TempDir(dir)
-    }
-}
-
-impl Drop for TempDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
 
 const LIST: &str = r#"[
   {"id":"game","kind":"game","name":"Game"},
@@ -49,47 +30,6 @@ fn ids(value: &str) -> Vec<String> {
 
 fn env_list(spec: &EngineSpec) -> String {
     spec.env.iter().find(|(k, _)| k == SOURCES_ENV).and_then(|(_, v)| v.clone()).unwrap()
-}
-
-/// The coordinator's R1 test: an old engine (no marker) beside the new controller.
-#[test]
-fn an_engine_file_without_the_marker_gets_no_input_or_picked_device_and_the_user_is_told() {
-    let dir = TempDir::new("old");
-    let old = dir.0.join("recall.exe");
-    std::fs::write(&old, b"MZ an engine built before the sync handshake").unwrap();
-    let shared = Shared::new(None);
-    let (tx, rx) = channel();
-    *shared.events.lock().unwrap() = Some(tx);
-    shared.spawn_sources.set(LIST);
-    let read = shared.spawn_sources.apply(Some(spec())).unwrap();
-    let spawned = shared.floor_spec(&old, &read);
-    assert_eq!(ids(&env_list(&spawned)), vec!["game", "out", "voice"], "no input, no picked device; game, default output and app stay");
-    assert!(shared.spawn_sources.below_floor());
-    assert!(spawned.env.iter().any(|(k, v)| k == "RECALL_AUDIO_MIC_OFF" && v.as_deref() == Some("1")), "a very old engine opens no default mic");
-    assert_eq!(rx.try_recv().ok(), Some(json!({"type": ENGINE_OUTDATED})), "the notice is raised");
-    // Its restatement carries no input or picked device either, and the shape matches (synced).
-    let (baked, current) = shared.spawn_sources.baked_and_current();
-    assert!(crate::audio_intent::same_shape(&baked, &current), "no respawn loop");
-    let restated = crate::audio_intent::restatement(&baked, &current);
-    assert!(restated.iter().all(|l| !matches!(l["id"].as_str(), Some("mic" | "line" | "pod"))), "{restated:?}");
-}
-
-#[test]
-fn an_engine_file_with_the_marker_gets_the_whole_list() {
-    let dir = TempDir::new("new");
-    let new = dir.0.join("recall.exe");
-    let mut bytes = b"MZ ...".to_vec();
-    bytes.extend_from_slice(PROTOCOL_MARKER);
-    bytes.extend_from_slice(b"... rest");
-    std::fs::write(&new, bytes).unwrap();
-    assert!(has_marker(&new));
-    let shared = Shared::new(None);
-    let spawned = shared.floor_spec(&new, &spec());
-    assert_eq!(env_list(&spawned), LIST);
-    assert!(!shared.spawn_sources.below_floor());
-    assert!(!has_marker(&dir.0.join("missing.exe")), "an unreadable file has none");
-    let manager = include_str!("supervisor_manager.rs").split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(manager.contains("let spec = &shared.floor_spec(path, spec);"), "every spawn goes through it");
 }
 
 /// The game captured by its process tree keeps its track even with a named desktop device.
@@ -115,21 +55,11 @@ fn a_hello_without_sync_hold_restarts_inputs_off() {
     assert_eq!(shared.generation(), gen + 1, "restarted");
     assert!(shared.spawn_sources.forced_below());
     assert_eq!(rx.try_recv().ok(), Some(json!({"type": ENGINE_OUTDATED})));
-    let dir = TempDir::new("forced");
-    let new = dir.0.join("recall.exe");
-    std::fs::write(&new, PROTOCOL_MARKER).unwrap();
-    assert_eq!(ids(&env_list(&shared.floor_spec(&new, &spec()))), vec!["game", "out", "voice"], "the respawn withholds them");
+    assert_eq!(ids(&env_list(&shared.floor_spec(Path::new("recall.exe"), &spec()))), vec!["game", "out", "voice"], "the respawn withholds them");
     shared.on_hello_floor(&json!({"type": "hello"}));
     assert_eq!(shared.generation(), gen + 1, "once: it was already given no device");
     let protocol = include_str!("supervisor_protocol.rs").split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(protocol.contains("shared.on_hello_floor(&val);"), "the hello path checks it");
-}
-
-/// The controller's marker is the engine's.
-#[test]
-fn the_marker_matches_the_engine() {
-    let engine = include_str!("../../recall/src/engine_stdin.rs");
-    assert!(engine.contains(std::str::from_utf8(PROTOCOL_MARKER).unwrap()));
 }
 
 /// P2: every spawn tells the engine a `sync` will come (its env), the same name it reads.
@@ -141,14 +71,26 @@ fn every_spawn_sets_the_sync_env() {
     assert!(engine.contains("pub(crate) const SYNC_ENV: &str = \"RECALL_STDIN_SYNC\";"));
 }
 
-/// N4: one failed read of the engine file is not cached as "no marker": the next spawn reads
-/// it again and gets the full list.
+/// The R1 conditions (merge gate) through the hello check: an old engine (no `sync_hold`)
+/// beside this controller: the next spawn gets no input or picked device, keeps its outputs and
+/// game audio (and RECALL_AUDIO_MIC_OFF for a very old one), and the notice is raised; an
+/// engine that says `sync_hold` gets the whole list.
 #[test]
-fn a_failed_read_is_retried_at_the_next_spawn() {
-    let dir = TempDir::new("retry");
-    let exe = dir.0.join("recall.exe");
-    std::fs::write(&exe, PROTOCOL_MARKER).unwrap();
-    assert!(!has_marker_with(&exe, |_| Err(std::io::Error::other("sharing violation"))), "this spawn: below the floor");
-    assert!(has_marker_with(&exe, read_file), "the next spawn reads it again");
-    assert!(!has_marker_with(&dir.0.join("none.exe"), read_file));
+fn an_old_engine_gets_no_input_or_picked_device_and_the_user_is_told() {
+    let shared = Shared::new(None);
+    let (tx, rx) = channel();
+    *shared.events.lock().unwrap() = Some(tx);
+    shared.spawn_sources.set(LIST);
+    let read = shared.spawn_sources.apply(Some(spec())).unwrap();
+    assert_eq!(env_list(&shared.floor_spec(Path::new("recall.exe"), &read)), LIST, "before any hello: the whole list");
+    shared.set_desired(Some(spec()), crate::record_dispatch::Sent::Waiting);
+    shared.on_hello_floor(&json!({"type": "hello", "version": "0.1.0"})); // an old engine: no sync_hold
+    assert_eq!(rx.try_recv().ok(), Some(json!({"type": ENGINE_OUTDATED})), "the notice is raised");
+    let spawned = shared.floor_spec(Path::new("recall.exe"), &shared.spawn_sources.apply(Some(spec())).unwrap());
+    assert_eq!(ids(&env_list(&spawned)), vec!["game", "out", "voice"], "no input, no picked device; game, default output and app stay");
+    assert!(spawned.env.iter().any(|(k, v)| k == "RECALL_AUDIO_MIC_OFF" && v.as_deref() == Some("1")), "a very old engine opens no default mic");
+    let (baked, current) = shared.spawn_sources.baked_and_current();
+    assert!(crate::audio_intent::same_shape(&baked, &current), "no respawn loop");
+    let manager = include_str!("supervisor_manager.rs").split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(manager.contains("let spec = &shared.floor_spec(path, spec);"), "every spawn goes through it");
 }
