@@ -34,12 +34,14 @@ pub(crate) struct Rebuilt {
 
 /// No whole video packet in the `.part`: nothing to rebuild.
 pub(crate) const NO_VIDEO: &str = "no whole video packet";
+/// The index is another save's (a stale entry): nothing here may use or recycle it.
+pub(crate) const NOT_ITS_INDEX: &str = "the index belongs to";
 
 /// Rebuild the save cut off in `part` from the index at `index` into `out` (see the module doc).
 pub(crate) fn rebuild(part: &Path, index: &Path, out: &Path) -> Result<Rebuilt, String> {
     let (head, records) = replay_index::read(index)?;
     if !in_progress::same_path(&head.part, &part.to_string_lossy()) {
-        return Err(format!("the index belongs to {}", head.part));
+        return Err(format!("{NOT_ITS_INDEX} {}", head.part));
     }
     let _ = ff::init();
     let ictx = ff::format::input(&replay_index::hdr_of(index)).map_err(|e| format!("index header: {e}"))?;
@@ -76,7 +78,7 @@ pub(crate) fn rebuild(part: &Path, index: &Path, out: &Path) -> Result<Rebuilt, 
         buf.resize(r.size as usize, 0);
         file.seek(SeekFrom::Start(r.offset)).and_then(|_| file.read_exact(&mut buf)).map_err(|e| format!("read: {e}"))?;
         if buf.iter().all(|b| *b == 0) {
-            break; // a power cut's zero-filled tail
+            continue; // a hole a power cut left (an out-of-order flush): only this packet is lost
         }
         let mut pkt = ff::Packet::copy(&buf);
         pkt.set_pts(Some(r.pts));
@@ -100,9 +102,11 @@ pub(crate) fn rebuild(part: &Path, index: &Path, out: &Path) -> Result<Rebuilt, 
         return Err(NO_VIDEO.into());
     }
     octx.write_trailer().map_err(|e| format!("write_trailer: {e}"))?;
-    // More than the index knew: data past the end of its last record (not a packet cut short).
-    let indexed_end = records.last().map_or(0, |r| r.offset + u64::from(r.size));
-    let part_holds_more = data_end(&mut file, len) > indexed_end.max(used);
+    // More than the clip took: data past the last packet used, unless it is the one packet the
+    // cut tore (the first record not whole in the file).
+    let torn = records.iter().find(|r| r.offset + u64::from(r.size) > len);
+    let end = super::recycle::data_end(&mut file, len);
+    let part_holds_more = end > used && torn.map_or(true, |t| end <= t.offset);
     Ok(Rebuilt { packets, video_packets: video, seconds: end_us as f64 / 1e6, part_holds_more })
 }
 
@@ -110,22 +114,6 @@ fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
     let mut s = path.as_os_str().to_owned();
     s.push(suffix);
     PathBuf::from(s)
-}
-
-/// Where the data in a file of `len` bytes ends: before a trailing run of zero bytes.
-fn data_end(file: &mut std::fs::File, len: u64) -> u64 {
-    let (mut end, mut buf) = (len, vec![0u8; 64 * 1024]);
-    while end > 0 {
-        let n = buf.len().min(end as usize);
-        if file.seek(SeekFrom::Start(end - n as u64)).and_then(|_| file.read_exact(&mut buf[..n])).is_err() {
-            return len;
-        }
-        if let Some(last) = buf[..n].iter().rposition(|b| *b != 0) {
-            return end - n as u64 + last as u64 + 1;
-        }
-        end -= n as u64;
-    }
-    0
 }
 
 /// The index files of a valid `entry` (Recall's own base, `replay_index::is_index_base`), to
@@ -206,7 +194,9 @@ fn recover_valid(entry: &Entry, part: &Path, clips: &mut Vec<PathBuf>, logs: &mu
         }
         Ok(Layout::NoPackets) => {
             logs.extend(dispose_unrecoverable(part, "no packet was written"));
-            recycle_index(entry, logs);
+            if !part.exists() {
+                recycle_index(entry, logs);
+            }
             Outcome::Done
         }
         _ => rebuild_entry(entry, part, &clip, clips, logs),
@@ -231,8 +221,15 @@ fn rebuild_entry(entry: &Entry, part: &Path, clip: &Path, clips: &mut Vec<PathBu
     let r = match rebuilt {
         Ok(r) => r,
         Err(e) if e == NO_VIDEO => {
-            logs.extend(dispose_unrecoverable(part, "no whole video packet"));
-            recycle_index(entry, logs);
+            logs.extend(dispose_unrecoverable(part, "no whole video packet by its index"));
+            if !part.exists() {
+                recycle_index(entry, logs);
+            }
+            return Outcome::Done;
+        }
+        Err(e) if e.starts_with(NOT_ITS_INDEX) => {
+            // Never right at a later start either: kept, logged once, unlisted.
+            logs.push(format!("replay save {} kept as it is: {e}: boxes {}", part.display(), layout_summary(part)));
             return Outcome::Done;
         }
         Err(e) => {
@@ -271,4 +268,7 @@ fn verified(clip: &Path, r: Rebuilt) -> Result<Rebuilt, String> {
 
 #[cfg(test)]
 #[path = "replay_review_tests.rs"]
-mod tests;
+pub(crate) mod replay_review_tests;
+#[cfg(test)]
+#[path = "replay_review2_tests.rs"]
+mod tests2;

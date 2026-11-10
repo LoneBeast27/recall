@@ -185,17 +185,19 @@ pub(crate) fn get(part: &Path) -> Option<Entry> {
     list().into_iter().find(|e| is(e, part))
 }
 
+/// The entries, or why the list cannot be read now (its entries stay on disk).
+pub(crate) fn try_list() -> Result<Vec<Entry>, String> {
+    let path = path().ok_or("no app-data folder for the in-progress list")?;
+    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
+    load(&path).map(|list| list.files)
+}
+
 /// The entries (none when the list cannot be read now: they stay on disk for the next start).
 pub(crate) fn list() -> Vec<Entry> {
-    let Some(path) = path() else { return Vec::new() };
-    let _lock = LOCK.lock().unwrap_or_else(|p| p.into_inner());
-    match load(&path) {
-        Ok(list) => list.files,
-        Err(e) => {
-            eprintln!("[recall] in-progress list not read: {e}");
-            Vec::new()
-        }
-    }
+    try_list().unwrap_or_else(|e| {
+        eprintln!("[recall] in-progress list not read: {e}");
+        Vec::new()
+    })
 }
 
 fn legacy_marker() -> Option<PathBuf> {

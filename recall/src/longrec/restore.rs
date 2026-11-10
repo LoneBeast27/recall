@@ -198,6 +198,14 @@ fn field(wide: bool, value: u64) -> Vec<u8> {
 
 /// [`repair`] with [`Hooks`].
 pub(crate) fn repair_with(part: &Path, hooks: Hooks) -> Repair {
+    // The saved tail is gone for good (nothing can put the original back) and the file plays as
+    // it is now: it ends as a recovered recording at its current length, never a `.part` forever.
+    if let Some(u) = in_progress::get(part).and_then(|e| e.undo) {
+        if !Path::new(&u.tail).exists() && crate::encoder::part_recover::plays(part) {
+            let _ = in_progress::update(part, |e| e.undo = None);
+            return Repair::AsIs(format!("its saved tail {} is gone for good; recovered at its current length", u.tail));
+        }
+    }
     if in_progress::get(part).is_some_and(|e| e.undo.is_some()) {
         if let Err(e) = undo(part) {
             return Repair::Stuck(format!("an earlier repair could not be undone: {e}"));

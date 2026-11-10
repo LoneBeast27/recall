@@ -56,13 +56,38 @@ pub(crate) struct Cost {
     pub ms: f64,
 }
 
-/// The production slot: `%LOCALAPPDATA%\Recall\replay-index\save` (tests: one per thread).
+#[cfg(not(test))]
+static RUN_SLOT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(test)]
+thread_local! { static RUN_SLOT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+
+/// The list could not be read at start, so an unclaimed save may still need the slot: this
+/// run's saves use a slot of their own ([`slot`]).
+pub(crate) fn use_run_slot() {
+    #[cfg(not(test))]
+    RUN_SLOT.store(true, std::sync::atomic::Ordering::Relaxed);
+    #[cfg(test)]
+    RUN_SLOT.with(|r| r.set(true));
+}
+
+fn run_slot() -> bool {
+    #[cfg(not(test))]
+    return RUN_SLOT.load(std::sync::atomic::Ordering::Relaxed);
+    #[cfg(test)]
+    return RUN_SLOT.with(std::cell::Cell::get);
+}
+
+/// The production slot: `%LOCALAPPDATA%\Recall\replay-index\save` (tests: one per thread), or
+/// `save-p<pid>` for a run that could not read the list at start ([`use_run_slot`]).
 pub(crate) fn slot() -> Option<PathBuf> {
     let dir = crate::user_dirs::localappdata()?.join("Recall").join("replay-index");
     #[cfg(test)]
-    let name = format!("save-{:?}", std::thread::current().id()).replace(['(', ')'], "");
+    let mut name = format!("save-{:?}", std::thread::current().id()).replace(['(', ')'], "");
     #[cfg(not(test))]
-    let name = "save".to_string();
+    let mut name = "save".to_string();
+    if run_slot() {
+        name.push_str(&format!("-p{}", std::process::id()));
+    }
     Some(crate::user_dirs::checked(dir.join(name)))
 }
 
@@ -190,6 +215,12 @@ pub(crate) fn claim(base: &Path) -> Result<PathBuf, String> {
         }
     }
     Ok(own)
+}
+
+/// Tests: this thread's saves back on the shared slot.
+#[cfg(test)]
+pub(crate) fn tests_reset_run_slot() {
+    RUN_SLOT.with(|r| r.set(false));
 }
 
 /// Whether `base` is the production slot (not a claimed copy).

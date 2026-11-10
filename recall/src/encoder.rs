@@ -53,7 +53,7 @@ mod saver;
 mod saver_stop;
 mod space;
 pub(crate) mod staging;
-mod staging_guard;
+pub(crate) mod staging_guard;
 mod staging_kept;
 pub mod settings;
 mod smoke;

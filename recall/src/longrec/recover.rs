@@ -40,7 +40,7 @@ pub(crate) struct Report {
 /// opens later is never this recovery's; the replay index slot is handed over first.
 pub fn recover_parts(out_dir: String, json: bool) {
     let mut logs = Vec::new();
-    let entries = claim_replay_slots(in_progress::list(), &mut logs);
+    let entries = start_entries(&mut logs);
     let staging = crate::encoder::staging::recovery_dir(std::env::var(crate::encoder::staging::ENV).ok().as_deref(), std::env::current_exe().ok().as_deref());
     let _ = std::thread::Builder::new().name("recall-longrec-recover".into()).spawn(move || {
         let mut found = run(&entries, Path::new(&out_dir), staging.as_deref());
@@ -48,6 +48,19 @@ pub fn recover_parts(out_dir: String, json: bool) {
         found.logs = logs;
         emit(json, found);
     });
+}
+
+/// The list as this start found it, with the replay index slot handed to its save first.
+pub(crate) fn start_entries(logs: &mut Vec<String>) -> Vec<Entry> {
+    match in_progress::try_list() {
+        Ok(entries) => claim_replay_slots(entries, logs),
+        Err(e) => {
+            // An unclaimed save may still need the slot: this run's saves write elsewhere.
+            crate::encoder::replay_index::use_run_slot();
+            logs.push(format!("in-progress list not read at start ({e}); recovered at a later start; saves use their own index slot"));
+            Vec::new()
+        }
+    }
 }
 
 /// A replay save whose packet index is still in the slot gets its own copy before the next
@@ -137,7 +150,9 @@ fn long_from_entry(entry: &Entry, found: &mut Report) {
     if !part.exists() {
         // Finished after all (the list was not updated), or gone: nothing to recover.
         let finished = PathBuf::from(entry.path.strip_suffix(naming::PART_EXT).unwrap_or(&entry.path));
-        if !finished.exists() {
+        if finished.exists() {
+            write_marks(&finished, entry, None, &mut found.logs);
+        } else {
             found.logs.push(format!("long recording {} was listed but is gone", part.display()));
         }
         let _ = in_progress::remove(&part);
@@ -246,9 +261,15 @@ pub(crate) fn legacy_scan(out_dir: &Path, staging: Option<&Path>, found: &mut Re
     if in_progress::legacy_scanned() {
         return;
     }
-    for (part, result) in recover_in_to(out_dir, found) {
-        if let Err(e) = result {
-            found.logs.push(format!("long recording {} not recovered: {e}", part.display()));
+    // The former clip folders too (the app's `folders.json`): a resumed part beside an old
+    // folder's recording sits there.
+    let former = crate::encoder::staging_guard::former_recordings();
+    let dirs = std::iter::once(out_dir.to_path_buf()).chain(former.into_iter().filter(|f| !in_progress::same_path(&f.to_string_lossy(), &out_dir.to_string_lossy())));
+    for dir in dirs.collect::<Vec<_>>() {
+        for (part, result) in recover_in_to(&dir, found) {
+            if let Err(e) = result {
+                found.logs.push(format!("long recording {} not recovered: {e}", part.display()));
+            }
         }
     }
     for dir in std::iter::once(out_dir).chain(staging) {

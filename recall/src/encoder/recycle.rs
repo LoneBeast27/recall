@@ -70,10 +70,62 @@ pub(crate) fn layout_summary(path: &Path) -> String {
     format!("[{}]", parts.join(", "))
 }
 
-/// `path` holds no decodable packet (`why`): one diagnostic line, then the Recycle Bin. The
-/// lines to log (the second says where the file went, or why it stayed).
+/// Where an MP4's media can start: after its header boxes (`ftyp`, `free`, `wide`, `skip`,
+/// `moov`, `uuid`), at the payload of its first `mdat`, or at anything else (a `moof`, a torn or
+/// unknown box). The file's length when it holds only header boxes.
+fn media_start(file: &mut std::fs::File, len: u64) -> u64 {
+    let mut pos = 0u64;
+    while pos + 8 <= len {
+        let mut head = [0u8; 16];
+        if file.seek(SeekFrom::Start(pos)).and_then(|_| file.read_exact(&mut head[..8])).is_err() {
+            return pos;
+        }
+        let size32 = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as u64;
+        let large = size32 == 1 && pos + 16 <= len && file.read_exact(&mut head[8..16]).is_ok();
+        let (header, size) = if large { (16, u64::from_be_bytes(head[8..16].try_into().unwrap_or_default())) } else { (8, size32) };
+        match &head[4..8] {
+            b"mdat" => return (pos + header).min(len),
+            b"ftyp" | b"free" | b"wide" | b"skip" | b"moov" | b"uuid" if size >= header && pos + size <= len => pos += size,
+            _ => return pos,
+        }
+    }
+    len
+}
+
+/// Where the data in a file of `len` bytes ends: before a trailing run of zero bytes.
+pub(crate) fn data_end(file: &mut std::fs::File, len: u64) -> u64 {
+    let (mut end, mut buf) = (len, vec![0u8; 64 * 1024]);
+    while end > 0 {
+        let n = buf.len().min(end as usize);
+        if file.seek(SeekFrom::Start(end - n as u64)).and_then(|_| file.read_exact(&mut buf[..n])).is_err() {
+            return len;
+        }
+        if let Some(last) = buf[..n].iter().rposition(|b| *b != 0) {
+            return end - n as u64 + last as u64 + 1;
+        }
+        end -= n as u64;
+    }
+    0
+}
+
+/// Whether the file itself holds media data: any non-zero byte past its header boxes. Unreadable
+/// counts as holding media (never recycled on a guess).
+pub(crate) fn holds_media(path: &Path) -> bool {
+    let Ok(mut file) = std::fs::File::open(path) else { return true };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(u64::MAX);
+    let start = media_start(&mut file, len);
+    data_end(&mut file, len) > start
+}
+
+/// `path` holds no decodable packet by its index or its demuxer (`why`): one diagnostic line,
+/// then the Recycle Bin, but only when a scan of the file itself finds no media data in it
+/// ([`holds_media`]); a file with data in it is kept (the same one line says so). The lines to
+/// log (a second says where the file went, or why it stayed).
 pub(crate) fn dispose_unrecoverable(path: &Path, why: &str) -> Vec<String> {
     let size = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
+    if holds_media(path) {
+        return vec![format!("unrecoverable {}: {size} B, boxes {}, why={why}; kept: the file holds media data", path.display(), layout_summary(path))];
+    }
     let mut lines = vec![format!("unrecoverable {}: {size} B, boxes {}, why={why}", path.display(), layout_summary(path))];
     lines.push(match recycle(path) {
         Ok(()) => format!("moved {} to the Recycle Bin", path.display()),

@@ -19,19 +19,19 @@ use super::super::saver::{window_secs, Timing};
 use super::super::test_scratch::{scratch, Scratch};
 use super::*;
 
-struct Sandbox {
+pub(super) struct Sandbox {
     _root: crate::user_dirs::test_root::Injected,
-    dir: Scratch,
+    pub(super) dir: Scratch,
 }
 
-fn sandbox(tag: &str) -> Sandbox {
+pub(super) fn sandbox(tag: &str) -> Sandbox {
     let dir = scratch("recall-replay-review", tag);
     let root = crate::user_dirs::inject(&dir.join("app-root"));
     Sandbox { _root: root, dir }
 }
 
 /// A finished production save (`produce`) into `part`, its index at this thread's slot.
-fn save_into(part: &Path, frames: usize) -> Option<()> {
+pub(super) fn save_into(part: &Path, frames: usize) -> Option<()> {
     let (packets, params) = super::super::replay_index::tests::window(frames)?;
     let secs = window_secs(&packets);
     let clip = part.to_string_lossy().trim_end_matches(".part").to_string();
@@ -39,22 +39,22 @@ fn save_into(part: &Path, frames: usize) -> Option<()> {
     Some(())
 }
 
-fn moov_at(part: &Path) -> usize {
+pub(super) fn moov_at(part: &Path) -> usize {
     let bytes = std::fs::read(part).unwrap();
     bytes.windows(4).rposition(|w| w == b"moov").unwrap() - 4
 }
 
-fn truncate(part: &Path, at: usize) {
+pub(super) fn truncate(part: &Path, at: usize) {
     std::fs::OpenOptions::new().write(true).open(part).unwrap().set_len(at as u64).unwrap();
 }
 
-fn video_packets(path: &Path) -> usize {
+pub(super) fn video_packets(path: &Path) -> usize {
     let Ok(mut input) = ffmpeg_next::format::input(&path) else { return 0 };
     input.packets().filter(|(s, _)| s.index() == 0).count()
 }
 
 /// A cut-off listed save (cut at `fraction` of its mdat) with a claimed index: (part, clip, entry).
-fn listed_cut(sb: &Sandbox, name: &str, fraction: f64) -> Option<(PathBuf, PathBuf, Entry)> {
+pub(super) fn listed_cut(sb: &Sandbox, name: &str, fraction: f64) -> Option<(PathBuf, PathBuf, Entry)> {
     let part = sb.dir.join(format!("{name}.mp4.part"));
     save_into(&part, 120)?;
     truncate(&part, (moov_at(&part) as f64 * fraction) as usize);

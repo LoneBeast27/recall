@@ -206,12 +206,13 @@ mod tests;
 /// `None` when that fails too (it then stays listed, for the next start).
 pub(super) fn keep_partial(part: &Path) -> Option<PathBuf> {
     let target = crate::naming::recovered_path(part, Path::exists);
-    std::fs::rename(part, &target).ok()?;
-    // No event to carry a failure here: the kept file just stays uncounted.
-    let _ = crate::game_folder_rule::record_saved(&target, Some(part));
+    // Bookmarks first: a crash between the rename and the unlisting must not lose them.
     if let Some(entry) = in_progress::get(part) {
         super::super::recover::write_marks(&target, &entry, None, &mut Vec::new());
     }
+    std::fs::rename(part, &target).ok()?;
+    // No event to carry a failure here: the kept file just stays uncounted.
+    let _ = crate::game_folder_rule::record_saved(&target, Some(part));
     unlist_part(part);
     Some(target)
 }

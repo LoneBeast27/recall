@@ -30,6 +30,17 @@ pub(crate) fn library_dirs() -> Vec<PathBuf> {
     file.map(|path| parse(&std::fs::read(path).unwrap_or_default())).unwrap_or_default()
 }
 
+/// The app's former recordings folders (`former_recordings` in the same file): none when unread.
+pub(crate) fn former_recordings() -> Vec<PathBuf> {
+    let file = std::env::var_os("RECALL_FOLDERS")
+        .filter(|p| !p.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| crate::user_dirs::appdata().map(|root| crate::user_dirs::checked(root.join("Recall").join("folders.json"))));
+    let Some(bytes) = file.and_then(|path| std::fs::read(path).ok()) else { return Vec::new() };
+    let Ok(value) = serde_json::from_slice::<serde_json::Value>(&bytes) else { return Vec::new() };
+    value.get("former_recordings").and_then(|v| v.as_array()).into_iter().flatten().filter_map(|v| v.as_str()).map(PathBuf::from).collect()
+}
+
 /// `{"recordings": "...", "imported": ["..."]}` → those folders (anything unreadable: none).
 pub(crate) fn parse(bytes: &[u8]) -> Vec<PathBuf> {
     let Ok(value) = serde_json::from_slice::<serde_json::Value>(bytes) else { return Vec::new() };
