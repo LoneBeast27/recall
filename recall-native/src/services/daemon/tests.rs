@@ -206,20 +206,13 @@ fn a_recovered_recording_is_an_event() {
     );
 }
 
-/// Restore policy: one `recording_restored` per recovered long recording (its question); no
-/// length when it could not be repaired.
 #[test]
 fn a_restored_recording_is_an_event() {
     let mut state = connected();
     apply(&mut state, json!({"mod":"engine","event":{"type":"recording_restored","path":"E:/c/G__rec.mp4","seconds":754.5,"repaired":true}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"recording_restored","path":"E:/c/H__rec.mp4","seconds":null,"repaired":false}}));
-    assert_eq!(
-        state.events,
-        vec![
-            DaemonEvent::RecordingRestored { path: "E:/c/G__rec.mp4".into(), seconds: Some(754.5), repaired: true },
-            DaemonEvent::RecordingRestored { path: "E:/c/H__rec.mp4".into(), seconds: None, repaired: false },
-        ]
-    );
+    let restored = |path: &str, seconds, repaired| DaemonEvent::RecordingRestored { path: path.into(), seconds, repaired };
+    assert_eq!(state.events, vec![restored("E:/c/G__rec.mp4", Some(754.5), true), restored("E:/c/H__rec.mp4", None, false)]);
 }
 
 /// Merge gate 11-07 (P1): `continued` was ignored, so a part change read as
