@@ -58,6 +58,7 @@ namespace Recall.Setup.Tests
             Run("the latest release must have an uploaded Setup and a tag on main", LatestReleaseParsing);
             Run("Setup opened over an existing install runs as an update", OverExistingIsUpdate);
             Run("Setup opened over an existing install keeps every settings file byte for byte", OverExistingKeepsSettings);
+            Run("Setup opened by hand restores a settings file left unreadable after the swap", HandUpdateRestoresUnreadable);
             Console.WriteLine(passed + " passed, " + failed + " failed");
             return failed == 0 ? 0 : 1;
         }

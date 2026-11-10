@@ -96,5 +96,30 @@ namespace Recall.Setup.Tests
                 Check(backups.Count == 1, "one settings backup was made first (" + backups.Count + ")");
             }
         }
+
+        private static void HandUpdateRestoresUnreadable()
+        {
+            using (var box = new Sandbox())
+            {
+                var library = Path.Combine(box.Roaming, @"Recall\library.json");
+                var folders = Path.Combine(box.Roaming, "Recall", "folders.json");
+                Directory.CreateDirectory(Path.GetDirectoryName(library));
+                const string names = "{\"clip-a.mp4\":{\"name\":\"ace\",\"favorite\":true}}";
+                File.WriteAllText(library, names);
+                File.WriteAllText(folders, "{\"recordings\":\"D-Clips\"}");
+                // After the swap, before the app runs: one file damaged, one changed but readable.
+                Installer.AfterSwap = () =>
+                {
+                    File.WriteAllBytes(library, new byte[] { 0, 0, 0 });
+                    File.WriteAllText(folders, "{\"recordings\":\"E-New\"}");
+                };
+                string error;
+                try { error = box.Run(null); }
+                finally { Installer.AfterSwap = null; }
+                Check(error == null, "the update ran: " + error);
+                Check(File.ReadAllText(library) == names, "the damaged library (names, favourites) came back from the backup");
+                Check(File.ReadAllText(folders).Contains("E-New"), "a readable file is never replaced");
+            }
+        }
     }
 }
