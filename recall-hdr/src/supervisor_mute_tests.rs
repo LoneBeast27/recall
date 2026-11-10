@@ -1,6 +1,7 @@
-//! The attach restatement (design-audio-mute P2, P8, P9, P19): a spawned engine's first lines are
-//! the whole audio intent, then `sync`; an Alt+M or an Audio-page change between the spawn's env
-//! and the attach is never lost. A recorder stands in for the engine's stdin.
+//! The attach state (design-audio-mute P2, P8, P9, P19; the cut-down's coalescing state slot): a
+//! spawned engine's first lines are its whole audio state, then `sync`; an Alt+M or an
+//! Audio-page change between the spawn's env and the attach is never lost. A recorder stands in
+//! for the engine's stdin.
 
 use serde_json::{json, Value};
 
@@ -16,20 +17,8 @@ const LINE_IN: &str = r#"[{"id":"line","kind":"input","name":"Line","device":"Li
 const LINE_IN_MUTED: &str = r#"[{"id":"line","kind":"input","name":"Line","device":"Line (Box)"}]"#;
 const OTHER_DEVICE: &str = r#"[{"id":"line","kind":"input","name":"Line","device":"Line (Other)","mic_mute":false}]"#;
 
-/// A line as JSON without its sequence number (asserted apart).
-fn unseq(line: &str) -> Value {
-    let mut v: Value = serde_json::from_str(line).unwrap();
-    assert!(v.get("seq").and_then(Value::as_u64).is_some(), "every audio line has a seq: {line}");
-    v.as_object_mut().unwrap().remove("seq");
-    v
-}
-
-/// The lines after the restatement's opening `restate` (F-1), which every attach sends first.
-fn restated(rec: &Recorded) -> Vec<String> {
-    let mut lines = rec.raw_lines();
-    assert!(lines.first().is_some_and(|l| l.contains(r#""cmd":"restate""#)), "{lines:?}");
-    lines.remove(0);
-    lines
+fn json_lines(rec: &Recorded) -> Vec<Value> {
+    rec.raw_lines().iter().map(|l| serde_json::from_str(l).unwrap()).collect()
 }
 
 /// The manager's spec read for a spawn whose env gets `sources` (`Shared::desired`).
@@ -43,16 +32,17 @@ fn an_alt_m_between_spawn_and_attach_is_restated_before_sync() {
     let shared = Shared::new(None);
     shared.set_mute_and_send(false); // live mic, no engine yet
     let baked = shared.spawn_mute.get(); // spawn_engine: the env gets "live"
-    // Alt+M after the env was read, before the stdin is attached: no queue takes the line.
+    // Alt+M after the env was read, before the stdin is attached: no queue takes the press.
     assert_eq!(shared.set_mute_and_send(true), Sent::NotResponding);
     let rec = Recorded::attach_spawned(&shared, baked);
+    std::thread::sleep(std::time::Duration::from_millis(50)); // the state is written first
     assert_eq!(shared.send_line(SAVE), Sent::Queued);
     shared.attach_writer(None);
-    let lines = restated(&rec);
+    let lines = json_lines(&rec);
     // Not a press (review R2-audio-r9-3): it was made before any stream of this engine opened.
-    assert_eq!(unseq(&lines[0]), json!({"cmd": "set_mic_mute", "muted": true}), "{lines:?}");
-    assert_eq!(unseq(&lines[1]), json!({"cmd": "sync"}), "{lines:?}");
-    assert_eq!(lines[2], SAVE);
+    assert_eq!(lines[0], json!({"cmd": "set_mic_mute", "muted": true}), "{lines:?}");
+    assert_eq!(lines[1], json!({"cmd": "sync"}), "{lines:?}");
+    assert_eq!(lines[2]["cmd"], "save_clip");
 }
 
 /// P8 (083a6d7 changed): the mute is restated even when the env already had it.
@@ -62,20 +52,21 @@ fn a_spawn_with_the_current_mute_is_still_restated() {
     shared.set_mute_and_send(true);
     let rec = Recorded::attach_spawned(&shared, shared.spawn_mute.get());
     shared.attach_writer(None);
-    let lines: Vec<Value> = restated(&rec).iter().map(|l| unseq(l)).collect();
-    assert_eq!(lines, vec![json!({"cmd": "set_mic_mute", "muted": true}), json!({"cmd": "sync"})]);
+    assert_eq!(json_lines(&rec), vec![json!({"cmd": "set_mic_mute", "muted": true}), json!({"cmd": "sync"})]);
 }
 
-/// P9: the user's Alt+M after the attach is a press, with its seq.
+/// P9: the user's Alt+M after the attach is a press, and the state follows it.
 #[test]
-fn an_alt_m_after_the_attach_is_queued_directly() {
+fn an_alt_m_after_the_attach_is_a_press_then_the_state() {
     let shared = Shared::new(None);
     shared.set_mute_and_send(false);
     let rec = Recorded::attach_spawned(&shared, shared.spawn_mute.get());
+    std::thread::sleep(std::time::Duration::from_millis(50));
     assert_eq!(shared.set_mute_and_send(true), Sent::Queued);
     shared.attach_writer(None);
-    let lines = restated(&rec);
-    assert_eq!(unseq(lines.last().unwrap()), json!({"cmd": "set_mic_mute", "muted": true, "press": true}));
+    let lines = json_lines(&rec);
+    let press = lines.iter().position(|l| *l == json!({"cmd": "set_mic_mute", "muted": true, "press": true})).expect("the press");
+    assert!(lines[press + 1..].contains(&json!({"cmd": "set_mic_mute", "muted": true})), "the state after it: {lines:?}");
     // The user's Alt+M is a press (gate review P2-b; guarded by review R2-audio-r9-4).
     assert_eq!(mute_line(true), crate::record_dispatch::mic_line(true, true));
 }
@@ -88,34 +79,35 @@ fn attach_restates_then_syncs() {
     bake(&shared, LINE_IN);
     let rec = Recorded::attach_spawned(&shared, shared.spawn_mute.get());
     shared.attach_writer(None);
-    let lines: Vec<Value> = restated(&rec).iter().map(|l| unseq(l)).collect();
+    let lines = json_lines(&rec);
     assert_eq!(lines.len(), 3, "{lines:?}");
     assert_eq!(lines[0]["cmd"], "set_mic_mute");
     assert_eq!((lines[1]["cmd"].as_str(), lines[1]["id"].as_str(), lines[1]["mic_mute"].as_bool()), (Some("set_source"), Some("line"), Some(false)));
     assert_eq!(lines[2], json!({"cmd": "sync"}));
 }
 
-/// P2/P10: an Audio-page change racing the spawn lands in the env, or in the restatement, or
-/// as a live line after it; never nowhere. Here: after the bake, before the attach.
+/// P2/P10: an Audio-page change racing the spawn lands in the env, or in the first state, or
+/// in a later state; never nowhere. Here: after the bake, before the attach, then after it.
 #[test]
 fn the_baked_state_and_a_change_are_one_step() {
     let shared = Shared::new(None);
     bake(&shared, LINE_IN);
     let sup = super::super::Supervisor { shared: std::sync::Arc::new(shared), handle: None };
     // The line-in's "Alt+M mutes it" is ticked while the pid is still 0 (no queue).
-    sup.update_audio(Some(LINE_IN_MUTED), &[json!({"cmd": "set_source", "id": "line", "mic_mute": true})]);
+    assert_eq!(sup.update_audio(Some(LINE_IN_MUTED)), Sent::NotResponding);
     let rec = Recorded::attach_spawned(&sup.shared, None);
-    // And one after the attach goes live, after the restatement.
-    assert_eq!(sup.update_audio(Some(LINE_IN), &[json!({"cmd": "set_source", "id": "line", "mic_mute": false})]), Sent::Queued);
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert_eq!(sup.update_audio(Some(LINE_IN)), Sent::Queued); // and back after the attach
     sup.shared.attach_writer(None);
-    let lines: Vec<Value> = restated(&rec).iter().map(|l| unseq(l)).collect();
-    assert_eq!(lines[0]["mic_mute"], json!(true), "the restatement has the change: {lines:?}");
+    let lines = json_lines(&rec);
+    assert_eq!(lines[0]["mic_mute"], json!(true), "the first state has the change: {lines:?}");
     assert_eq!(lines[1], json!({"cmd": "sync"}));
-    assert_eq!(lines[2]["mic_mute"], json!(false), "the later one follows it");
+    assert_eq!(lines.last(), Some(&json!({"cmd": "sync"})), "the later state ends with sync too");
+    assert!(lines.iter().any(|l| l["mic_mute"] == json!(false)), "the later one follows it: {lines:?}");
 }
 
-/// B5: a change that moved the track shape during the spawn: the restatement retires the old
-/// track and sends no `sync` (that engine stays held), and the manager respawns it once.
+/// B5: a change that moved the track shape during the spawn: the state retires the old track
+/// and sends no `sync` (that engine stays held), and the manager respawns it once.
 #[test]
 fn a_shape_move_during_spawn_sends_no_sync_and_respawns() {
     let shared = Shared::new(None);
@@ -125,29 +117,15 @@ fn a_shape_move_during_spawn_sends_no_sync_and_respawns() {
     let rec = Recorded::attach_spawned(&shared, None);
     assert!(shared.respawn_if_sources_moved(gen), "the manager respawns it");
     shared.attach_writer(None);
-    let lines: Vec<Value> = restated(&rec).iter().map(|l| unseq(l)).collect();
+    let lines = json_lines(&rec);
     assert!(lines.iter().all(|l| l["cmd"] != "sync"), "no sync: {lines:?}");
     assert!(lines.iter().any(|l| l["retire"] == json!(true) && l["id"] == "line"), "the old device is retired: {lines:?}");
     let _ = shared.desired(); // the respawn reads the spec: baked on the current list
     assert!(!shared.respawn_if_sources_moved(gen + 1), "once");
 }
 
-/// P19: an engine told to quit gets no restatement and no `sync`, and no live change.
-#[test]
-fn no_sync_after_quit() {
-    let shared = Shared::new(None);
-    let rec = Recorded::attach(&shared);
-    assert!(shared.send_quit(Sent::Switching));
-    let sup = super::super::Supervisor { shared: std::sync::Arc::new(shared), handle: None };
-    assert!(!sup.restate_audio(), "nothing restated to a quitting engine");
-    assert_eq!(sup.update_audio(Some(LINE_IN), &[json!({"cmd": "set_source", "id": "line", "retire": true})]), Sent::Switching);
-    sup.shared.attach_writer(None);
-    let lines = restated(&rec);
-    assert!(super::super::quit_tests::after_quit(&lines).is_empty(), "{lines:?}");
-}
-
 /// N3: the shape moves before the attach (no sync) and moves back before the pid shows. The
-/// engine that got no sync must still be respawned, or every device track stays held all run.
+/// engine that got no sync must still be respawned, or every track stays held all run.
 #[test]
 fn a_withheld_sync_respawns_even_when_the_shape_moves_back() {
     let shared = Shared::new(None);
@@ -158,64 +136,21 @@ fn a_withheld_sync_respawns_even_when_the_shape_moves_back() {
     shared.spawn_sources.set(LINE_IN); // and back, before the pid
     assert!(shared.respawn_if_sources_moved(gen), "respawned on the withheld sync");
     shared.attach_writer(None);
-    assert!(restated(&rec).iter().all(|l| !l.contains("\"sync\"")), "that engine got no sync");
+    assert!(rec.raw_lines().iter().all(|l| !l.contains(r#""sync""#)), "that engine got no sync");
     let src = include_str!("supervisor_sources.rs").split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(src.contains("s.withheld = !same;"), "the attach records it");
 }
 
-/// F-1: a line the full queue drops is not counted as sent, leaves the intent dirty, and a
-/// restatement stops at its first dropped line (no `sync` after a drop).
+/// P19 and the cut-down: an Audio-page change for an engine told to quit is not refused to it:
+/// its state goes ahead of the `quit` (the caller is still told why).
 #[test]
-fn a_dropped_line_is_never_counted_and_a_restatement_stops_at_a_drop() {
-    let shared = Shared::new(None);
-    super::super::tests::wedge_and_fill(&shared); // the engine reads nothing; the queue is full
-    let sent = shared.spawn_sources.last_sent();
-    assert!(!shared.set_mute_and_send(true).queued(), "dropped");
-    assert_eq!(shared.spawn_sources.last_sent(), sent, "a dropped line is not sent");
-    assert!(shared.spawn_sources.dirty(), "the intent is dirty until a whole restatement");
-    let mut offered = Vec::new();
-    let lines: Vec<String> = ["restate", "set_mic_mute", "sync"].iter().map(|c| format!("{{\"cmd\":\"{c}\"}}")).collect();
-    assert!(!super::super::sources::queue_all(&lines, |l| {
-        offered.push(l.to_owned());
-        false
-    }));
-    assert_eq!(offered.len(), 1, "stopped at the first drop: no sync after it");
-    let mute = include_str!("supervisor_mute.rs").split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(mute.contains("self.restate_if_dirty(&g);"), "a drop re-queues the whole intent");
-}
-
-/// F-1: every restatement starts with `restate` (the engine's ack baseline).
-#[test]
-fn a_restatement_starts_with_restate() {
-    let shared = Shared::new(None);
-    let rec = Recorded::attach_spawned(&shared, None);
-    shared.attach_writer(None);
-    let lines = rec.raw_lines();
-    assert_eq!(unseq(&lines[0]), json!({"cmd": "restate"}), "{lines:?}");
-}
-
-/// F-4 (b): an Alt+M the engine never acks (a stuck reader) and then the engine exits: the next
-/// spawn says from when its recovered long recording is muted; an acked one says nothing.
-#[test]
-fn an_unacked_mute_at_exit_marks_the_next_recovery() {
+fn a_change_after_quit_goes_ahead_of_the_quit() {
     let shared = Shared::new(None);
     let rec = Recorded::attach(&shared);
-    let before = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
-    assert_eq!(shared.set_mute_and_send(true), Sent::Queued);
-    shared.spawn_sources.engine_exited(); // no status acked it
-    let spec = shared.with_mute_from(EngineSpec::default());
-    let ms: u64 = spec.env.iter().find(|(k, _)| k == super::super::sources::MUTE_FROM_ENV).and_then(|(_, v)| v.as_deref()?.parse().ok()).expect("the next spawn mutes from it");
-    assert!(ms >= before, "from when the mute was issued");
-    assert!(shared.with_mute_from(EngineSpec::default()).env.is_empty(), "once");
-    assert!(shared.set_mute_and_send(false).queued());
-    assert!(shared.set_mute_and_send(true).queued());
-    shared.spawn_sources.acked(u64::MAX); // the engine applied it
-    shared.spawn_sources.engine_exited();
-    assert!(shared.with_mute_from(EngineSpec::default()).env.is_empty(), "acked: nothing to mute");
-    shared.attach_writer(None);
-    drop(rec);
-    let engine = include_str!("../../recall/src/longrec/part_mute.rs");
-    assert!(engine.contains("pub const MUTE_FROM_ENV: &str = \"RECALL_LONGREC_MUTE_FROM\";"), "the engine reads the same name");
-    let protocol = include_str!("supervisor_protocol.rs").split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(protocol.contains("shared.spawn_sources.acked(seq);"), "the status acks them");
+    let sup = super::super::Supervisor { shared: std::sync::Arc::new(shared), handle: None };
+    assert!(sup.shared.send_quit(Sent::Switching));
+    assert_eq!(sup.update_audio(Some(LINE_IN_MUTED)), Sent::Switching, "the caller is told the engine is ending");
+    sup.shared.attach_writer(None);
+    let lines = rec.raw_lines();
+    assert!(super::super::quit_tests::after_quit(&lines).is_empty(), "nothing after the quit: {lines:?}");
 }

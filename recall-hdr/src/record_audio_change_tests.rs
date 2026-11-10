@@ -25,12 +25,13 @@ fn a_privacy_change_during_a_long_recording_goes_live_and_defers_only_the_shape(
     assert!(change.lines.contains(&json!({"cmd": "set_source", "id": "pod", "retire": true})), "{:?}", change.lines);
     // The live path: queued to the engine before its hello (B1), not left to the restart.
     let (sup, rec) = Supervisor::recorded_for_test();
-    assert!(sup.update_audio(change.spawn_value.as_deref(), &change.lines).queued());
+    sup.bake_for_test(&engine_value(&old)); // the running engine was spawned on the old list
+    assert!(sup.update_audio(change.spawn_value.as_deref()).queued());
     let lines = rec.finish(&sup);
     assert!(lines.iter().any(|l| l.contains(r#""retire":true"#)) && lines.iter().any(|l| l.contains(r#""mic_mute":true"#)), "{lines:?}");
     // apply_config_effects sends them before it decides the restart.
     let effects: String = include_str!("record_cmds.rs").split_whitespace().collect::<Vec<_>>().join(" ");
-    let send = effects.find("let sent = self.supervisor.update_audio(change.spawn_value.as_deref(), &change.lines);").expect("the live path sends them");
+    let send = effects.find("let sent = self.supervisor.update_audio(change.spawn_value.as_deref());").expect("the live path sends them");
     let restart = effects.find("if change.restart { self.request_engine_restart();").expect("then the restart");
     assert!(send < restart, "lines first");
 }

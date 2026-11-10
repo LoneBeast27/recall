@@ -341,7 +341,7 @@ impl Controller {
         for line in &change.lines {
             log!("record: audio source {line}");
         }
-        let sent = self.supervisor.update_audio(change.spawn_value.as_deref(), &change.lines);
+        let sent = self.supervisor.update_audio(change.spawn_value.as_deref());
         if change.restart {
             self.request_engine_restart();
         } else if running && !change.lines.is_empty() {

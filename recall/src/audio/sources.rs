@@ -190,11 +190,9 @@ struct Early {
     /// The reader ended (`hold_for_quit`): nothing is released again, and a device track
     /// listed from now on starts retired.
     quitting: bool,
-    /// An audio line was skipped (F-1): nothing is released until a restatement's `sync`.
-    gapped: bool,
 }
 
-static EARLY: Mutex<Early> = Mutex::new(Early { staged: Some(Vec::new()), synced: false, quitting: false, gapped: false });
+static EARLY: Mutex<Early> = Mutex::new(Early { staged: Some(Vec::new()), synced: false, quitting: false });
 
 fn lock_early() -> std::sync::MutexGuard<'static, Early> {
     EARLY.lock().unwrap_or_else(|p| p.into_inner())
@@ -240,7 +238,7 @@ fn close_staging_with(mut apply: impl FnMut(&str, LiveChange)) {
     for (id, mic_mute, device_id, retire) in early.staged.take().into_iter().flatten() {
         apply(&id, LiveChange { mic_mute, device_id: device_id.as_deref(), retire, ..LiveChange::default() });
     }
-    if early.synced && !early.quitting && !early.gapped {
+    if early.synced && !early.quitting {
         release_startup_holds(); // `sync` came first: every line before it is now on its track
     }
 }
@@ -253,56 +251,9 @@ fn close_staging_with(mut apply: impl FnMut(&str, LiveChange)) {
 pub fn sync_read() {
     let mut early = lock_early();
     early.synced = true;
-    if early.staged.is_none() && !early.quitting && !early.gapped {
+    if early.staged.is_none() && !early.quitting {
         release_startup_holds();
     }
-}
-
-/// The last audio line's sequence number applied (`status.audio_seq`).
-static AUDIO_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// A line with sequence number `seq` was applied (lines are applied in order). The ack moves
-/// only by one (F-1): after a gap it stays below the skipped line until a restatement.
-pub fn note_seq(seq: u64) {
-    let _ = AUDIO_SEQ.compare_exchange(seq.wrapping_sub(1), seq, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst);
-}
-
-/// A restatement starts at `seq` (`restate`): the ack counts on from it, and the gap is healed
-/// once its `sync` is read (the release needs that `sync`).
-pub fn restate_from(seq: u64) {
-    let mut early = lock_early();
-    early.gapped = false;
-    AUDIO_SEQ.store(seq, std::sync::atomic::Ordering::SeqCst);
-}
-
-/// Before line `seq` is applied: when it skips one (a line the controller's full queue dropped),
-/// every listed device track is held from its next packet, nothing is released until a
-/// restatement's `sync`, and the controller is asked for one (F-1). True on a gap.
-pub fn check_seq(seq: u64) -> bool {
-    let cur = AUDIO_SEQ.load(std::sync::atomic::Ordering::SeqCst);
-    if seq <= cur + 1 {
-        return false;
-    }
-    let mut early = lock_early(); // lock order EARLY, then STATES
-    if !std::mem::replace(&mut early.gapped, true) {
-        eprintln!("[recall] stdin: audio line {} was skipped (got {seq}); every device track is held until the restatement", cur + 1);
-        crate::protocol::emit(&crate::protocol::Outbound::AudioGap { expected: cur + 1, got: seq });
-    }
-    if let Ok(states) = STATES.lock() {
-        for (_, _, state) in states.iter() {
-            if let State::Live(ring) = state {
-                if is_device(ring) {
-                    ring.hold_startup();
-                }
-            }
-        }
-    }
-    true
-}
-
-/// The last audio sequence number applied (`status.audio_seq`; 0: none yet).
-pub fn audio_seq() -> u64 {
-    AUDIO_SEQ.load(std::sync::atomic::Ordering::SeqCst)
 }
 
 /// Whether the startup hold has ended (`sync` read and every track listed).
@@ -359,8 +310,7 @@ pub(crate) fn close_staging_for_test(apply: impl FnMut(&str, LiveChange)) {
 
 #[cfg(test)]
 pub(crate) fn reopen_staging_for_test() {
-    *lock_early() = Early { staged: Some(Vec::new()), synced: false, quitting: false, gapped: false };
-    AUDIO_SEQ.store(0, std::sync::atomic::Ordering::SeqCst);
+    *lock_early() = Early { staged: Some(Vec::new()), synced: false, quitting: false };
 }
 
 /// Tests: list `ring` as the live track of input source `id` (as `audio::start` does).

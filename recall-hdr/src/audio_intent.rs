@@ -98,18 +98,6 @@ pub fn change_lines(old: &[AudioSource], new: &[AudioSource]) -> Vec<Value> {
     lines
 }
 
-/// `line` with its sequence number (`seq`): the engine reports the last one it applied
-/// (`status.audio_seq`), and the controller re-sends what it has not (`record_audio_ack`).
-pub fn stamped(line: &str, seq: u64) -> String {
-    match serde_json::from_str::<Value>(line) {
-        Ok(Value::Object(mut cmd)) => {
-            cmd.insert("seq".into(), seq.into());
-            Value::Object(cmd).to_string()
-        }
-        _ => line.to_owned(),
-    }
-}
-
 #[cfg(test)]
 #[path = "audio_intent_tests.rs"]
 mod tests;

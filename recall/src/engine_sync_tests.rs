@@ -10,7 +10,7 @@ use super::read_early;
 use super::tests::{restore, spawn, Reopen};
 use crate::audio::{self, MuteNow, TrackRing};
 
-const SYNC: &str = "{\"cmd\":\"sync\",\"seq\":1}\n";
+const SYNC: &str = "{\"cmd\":\"sync\"}\n";
 
 /// An input as `audio::start(.., hold = true, ..)` leaves it: held and listed.
 fn held_listed(id: &'static str) -> Arc<TrackRing> {
@@ -142,20 +142,6 @@ fn inputs_held_is_said_only_after_2_s_still_held() {
     assert!(sources.contains("crate::protocol::emit(&crate::protocol::Outbound::InputsReleased);"), "the release says so");
 }
 
-/// P13: each audio line's `seq` is acked (`status.audio_seq`) once it is applied, in order.
-#[test]
-fn an_applied_line_is_acked_by_its_seq() {
-    let _restore = restore();
-    let _reopen = Reopen;
-    read_early(std::io::Cursor::new("{\"cmd\":\"restate\",\"seq\":999999}
-{\"cmd\":\"set_mic_mute\",\"muted\":true,\"seq\":1000000}
-"), |_| {});
-    assert!(audio::mic_muted());
-    assert_eq!(audio::sources::audio_seq(), 1_000_000, "acked after it was applied");
-    let tick = include_str!("app_tick.rs").split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(tick.contains("audio_seq: { #[cfg(feature=\"encode\")] { audio::sources::audio_seq() }"), "the status carries it");
-}
-
 /// P4 through the reader: a `retire` read after the listing silences the live track at once;
 /// one read before it (staged) leaves the track held for good, the sync's release included.
 #[test]
@@ -201,7 +187,7 @@ fn the_a4_sibling_conditions_hold() {
     let ring = held_listed("a4-mic");
     assert!(audio::sources::opened().iter().any(|o| o.id == "a4-mic" && o.held), "held shows as held");
     let presses = MuteNow::read().presses;
-    read_early(std::io::Cursor::new("{\"cmd\":\"set_mic_mute\",\"muted\":true,\"seq\":5}\n{\"cmd\":\"set_mic_mute\",\"muted\":false,\"seq\":6}\n"), |_| {});
+    read_early(std::io::Cursor::new("{\"cmd\":\"set_mic_mute\",\"muted\":true}\n{\"cmd\":\"set_mic_mute\",\"muted\":false}\n"), |_| {});
     assert_eq!(MuteNow::read().presses, presses, "a restatement is no press: nothing is adopted");
     drop(ring);
 }
@@ -284,33 +270,6 @@ fn a_read_error_or_the_end_of_stdin_holds_like_a_quit() {
     assert!(tick.contains("stdin_ended: crate::engine_stdin::stdin_ended(),"));
     let src = include_str!("engine_stdin.rs").split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(src.contains("fn reader_end(end: stdin_reader::ReaderEnd, quit: &std::sync::atomic::AtomicBool) { hold_at_end();"), "every end, not only quit");
-}
-
-/// F-1: line 13 is dropped by the controller's full queue, line 14 arrives. The ack never
-/// passes 12, every device track is held from line 13 on, and only the restatement (with
-/// the dropped change in it) and its `sync` release it.
-#[test]
-fn a_skipped_line_holds_until_the_restatement_and_is_never_acked_past() {
-    let _restore = restore();
-    let _reopen = Reopen;
-    audio::set_mic_muted(false);
-    let line = held_listed("f1-line");
-    line.set_mic_mute(false);
-    close_staging();
-    let lines = |s: &str| read_early(std::io::Cursor::new(s.to_owned()), |_| {});
-    lines("{\"cmd\":\"restate\",\"seq\":10}\n{\"cmd\":\"set_mic_mute\",\"muted\":false,\"seq\":11}\n{\"cmd\":\"sync\",\"seq\":12}\n");
-    assert!(!line.startup_held() && !silent(&line), "recording");
-    // 13 (`set_source line mic_mute:true`, Alt+M mutes the line-in) was dropped; 14 arrives.
-    lines("{\"cmd\":\"set_source\",\"id\":\"f1-line\",\"gain_db\":1.0,\"seq\":14}\n");
-    assert_eq!(audio::sources::audio_seq(), 12, "never acked past the gap");
-    assert!(line.startup_held() && silent(&line), "held from the gap on");
-    lines("{\"cmd\":\"sync\",\"seq\":15}\n");
-    assert!(line.startup_held(), "a sync without the restatement releases nothing");
-    // The controller re-sends the whole intent: the dropped change is in it.
-    lines("{\"cmd\":\"restate\",\"seq\":20}\n{\"cmd\":\"set_source\",\"id\":\"f1-line\",\"mic_mute\":true,\"seq\":21}\n{\"cmd\":\"sync\",\"seq\":22}\n");
-    assert!(!line.startup_held(), "released by the restatement's sync");
-    assert!(line.mic_mute_flag(), "the dropped change is applied");
-    assert_eq!(audio::sources::audio_seq(), 22);
 }
 
 /// F-2: a same-name twin re-pick (and `mic_mute:false` on the same line) while the old twin

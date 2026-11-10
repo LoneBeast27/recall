@@ -28,10 +28,21 @@ pub(super) struct StdinQueue {
     /// Lines queued and not yet taken by the writer (the reserved quit slot excluded).
     waiting: Arc<AtomicUsize>,
     dropped: AtomicU64,
-    /// Privacy lines sent after the `quit` was queued (F-4 (a)): the writer puts them AHEAD of
-    /// the `quit`, so an engine that still reads gets them before it stops reading.
-    ahead_of_quit: Arc<Mutex<Vec<String>>>,
+    /// The engine's whole latest audio state (the cut-down): one slot, replaced by every newer
+    /// state, never dropped. The writer writes it on its wake line, before a `quit`, and again
+    /// after a press line (so the last thing the engine reads is always the newest state).
+    state: Arc<Mutex<StateSlot>>,
 }
+
+#[derive(Default)]
+struct StateSlot {
+    lines: Vec<String>,
+    /// Not written since it was set.
+    fresh: bool,
+}
+
+/// The line that wakes the writer for a new state (never written to the engine).
+const WAKE: &str = "";
 
 /// The `quit` line (`Shared::send_quit`).
 pub(super) const QUIT_LINE: &str = r#"{"cmd":"quit"}"#;
@@ -42,31 +53,45 @@ impl StdinQueue {
         let (tx, rx) = sync_channel::<String>(QUEUE + 1);
         let waiting = Arc::new(AtomicUsize::new(0));
         let taken = waiting.clone();
-        let ahead_of_quit = Arc::new(Mutex::new(Vec::new()));
-        let ahead = ahead_of_quit.clone();
+        let state = Arc::new(Mutex::new(StateSlot::default()));
+        let slot = state.clone();
         let spawned = std::thread::Builder::new().name("recall-engine-stdin".into()).spawn(move || {
             let mut out = out;
             for line in rx {
                 let _ = taken.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+                let press = line.contains(r#""cmd":"set_mic_mute""#);
                 let mut lines = Vec::new();
-                if line == QUIT_LINE {
-                    lines.append(&mut ahead.lock().unwrap_or_else(|p| p.into_inner())); // F-4 (a)
+                if line == WAKE || line == QUIT_LINE {
+                    lines.extend(take_state(&slot, false)); // the newest state, ahead of a quit
                 }
-                lines.push(line);
-                if !lines.into_iter().all(|l| write_line(&mut out, l)) {
-                    break; // the engine is gone (or killed): nothing more reaches it
+                if line != WAKE {
+                    lines.push(line);
+                }
+                // After any other line, a newer state if one is waiting (its wake may have been
+                // full); after a press, the state again so the engine ends on it.
+                if press || !lines.is_empty() {
+                    lines.extend(take_state(&slot, press));
+                }
+                let quit = lines.iter().any(|l| l == QUIT_LINE);
+                if !lines.into_iter().all(|l| write_line(&mut out, l)) || quit {
+                    break; // the engine is gone (or killed), or reads nothing after its quit
                 }
             }
         });
         if let Err(e) = spawned {
             log!("supervisor: engine stdin writer failed to start: {e}");
         }
-        StdinQueue { tx, waiting, dropped: AtomicU64::new(0), ahead_of_quit }
+        StdinQueue { tx, waiting, dropped: AtomicU64::new(0), state }
     }
 
-    /// A privacy line after the `quit` was queued: written just before the `quit` (F-4 (a)).
-    pub fn send_ahead_of_quit(&self, line: &str) {
-        self.ahead_of_quit.lock().unwrap_or_else(|p| p.into_inner()).push(line.to_owned());
+    /// The engine's whole latest audio state: it replaces any state not yet written (the cut-down).
+    /// Never dropped: when the queue is full the wake is skipped and the writer writes the
+    /// state after the line it is on.
+    pub fn send_state(&self, lines: Vec<String>) {
+        *self.state.lock().unwrap_or_else(|p| p.into_inner()) = StateSlot { lines, fresh: true };
+        if self.waiting.fetch_add(1, Ordering::SeqCst) >= QUEUE || self.tx.try_send(WAKE.to_owned()).is_err() {
+            self.waiting.fetch_sub(1, Ordering::SeqCst); // full: the state rides after the next line
+        }
     }
 
     /// `quit`: may take the slot kept beyond [`QUEUE`]; never blocks.
@@ -100,6 +125,16 @@ impl StdinQueue {
         }
         false
     }
+}
+
+/// The state's lines when fresh (or always, `again`), marked written.
+fn take_state(slot: &Mutex<StateSlot>, again: bool) -> Vec<String> {
+    let mut s = slot.lock().unwrap_or_else(|p| p.into_inner());
+    if !(s.fresh || again) {
+        return Vec::new();
+    }
+    s.fresh = false;
+    s.lines.clone()
 }
 
 /// One line and its newline in one write: the engine never sees half a line (merge-gate P1-2).
@@ -145,34 +180,69 @@ mod tests {
         assert_eq!(*chunks.lock().unwrap(), vec![format!("{line}\n").into_bytes()], "one write, newline included");
     }
 
-    /// F-4 (a): a privacy line sent after the `quit` was queued is written AHEAD of it.
-    #[test]
-    fn a_privacy_line_after_the_quit_is_written_ahead_of_it() {
-        let chunks = Arc::new(Mutex::new(Vec::new()));
-        let gate = Arc::new(Mutex::new(()));
-        let held = gate.lock().unwrap(); // the writer waits on its first line until released
-        struct Slow(Arc<Mutex<Vec<Vec<u8>>>>, Arc<Mutex<()>>);
-        impl Write for Slow {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                let _wait = self.1.lock().unwrap();
-                self.0.lock().unwrap().push(buf.to_vec());
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                Ok(())
-            }
+    /// A writer stuck on its first line (released by the test).
+    struct Slow(Arc<Mutex<Vec<Vec<u8>>>>, Arc<Mutex<()>>);
+
+    impl Write for Slow {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let _wait = self.1.lock().unwrap();
+            self.0.lock().unwrap().push(buf.to_vec());
+            Ok(buf.len())
         }
-        let queue = StdinQueue::start(Box::new(Slow(chunks.clone(), gate.clone())));
-        assert!(queue.send(r#"{"cmd":"bookmark"}"#));
-        assert!(queue.send_quit(QUIT_LINE));
-        queue.send_ahead_of_quit(r#"{"cmd":"set_mic_mute","muted":true,"seq":9}"#);
-        drop(held);
-        drop(queue);
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn written(chunks: &Arc<Mutex<Vec<Vec<u8>>>>, at_least: usize) -> Vec<String> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while chunks.lock().unwrap().len() < 3 && std::time::Instant::now() < deadline {
+        while chunks.lock().unwrap().len() < at_least && std::time::Instant::now() < deadline {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
-        let lines: Vec<String> = chunks.lock().unwrap().iter().map(|c| String::from_utf8_lossy(c).trim().to_owned()).collect();
-        assert_eq!(lines, vec![r#"{"cmd":"bookmark"}"#.to_owned(), r#"{"cmd":"set_mic_mute","muted":true,"seq":9}"#.to_owned(), QUIT_LINE.to_owned()]);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        chunks.lock().unwrap().iter().map(|c| String::from_utf8_lossy(c).trim().to_owned()).collect()
+    }
+
+    /// The cut-down: with the engine not reading and the queue full, every audio state still
+    /// gets through: the newest replaces the older ones (never two old ones, never none), and it
+    /// is written ahead of a queued `quit`.
+    #[test]
+    fn the_state_slot_coalesces_is_never_dropped_and_goes_ahead_of_the_quit() {
+        let chunks = Arc::new(Mutex::new(Vec::new()));
+        let gate = Arc::new(Mutex::new(()));
+        let held = gate.lock().unwrap();
+        let queue = StdinQueue::start(Box::new(Slow(chunks.clone(), gate.clone())));
+        assert!(queue.send(r#"{"cmd":"bookmark"}"#));
+        std::thread::sleep(std::time::Duration::from_millis(50)); // the writer is stuck on it
+        while queue.send(r#"{"cmd":"bookmark"}"#) {}
+        queue.send_state(vec![r#"{"cmd":"set_mic_mute","muted":false}"#.into()]);
+        queue.send_state(vec![r#"{"cmd":"set_mic_mute","muted":true}"#.into(), r#"{"cmd":"sync"}"#.into()]);
+        assert!(queue.send_quit(QUIT_LINE));
+        drop(held);
+        drop(queue);
+        let lines = written(&chunks, QUEUE + 3);
+        assert!(!lines.iter().any(|l| l.contains(r#""muted":false"#)), "the older state is replaced: {lines:?}");
+        let state = lines.iter().position(|l| l.contains(r#""muted":true"#)).expect("the newest state is written");
+        let quit = lines.iter().position(|l| l == QUIT_LINE).expect("the quit");
+        assert!(state < quit, "ahead of the quit");
+        assert_eq!(lines[state + 1], r#"{"cmd":"sync"}"#);
+    }
+
+    /// After a press line the writer writes the newest state again, so a stale press queued
+    /// before a newer state never ends the engine on the wrong mute.
+    #[test]
+    fn a_press_is_followed_by_the_newest_state() {
+        let chunks = Arc::new(Mutex::new(Vec::new()));
+        let gate = Arc::new(Mutex::new(()));
+        let held = gate.lock().unwrap();
+        let queue = StdinQueue::start(Box::new(Slow(chunks.clone(), gate.clone())));
+        assert!(queue.send(r#"{"cmd":"bookmark"}"#));
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        assert!(queue.send(r#"{"cmd":"set_mic_mute","muted":true,"press":true}"#)); // the press
+        queue.send_state(vec![r#"{"cmd":"set_mic_mute","muted":false}"#.into()]); // then unmuted
+        drop(held);
+        drop(queue);
+        let lines = written(&chunks, 3);
+        assert_eq!(lines.last().map(String::as_str), Some(r#"{"cmd":"set_mic_mute","muted":false}"#), "{lines:?}");
     }
 }

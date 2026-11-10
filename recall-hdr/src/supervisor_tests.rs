@@ -141,7 +141,7 @@ fn a_crash_respawn_starts_with_the_live_audio_sources() {
         cmd.get_envs().find(|(k, _)| *k == SOURCES_ENV).and_then(|(_, v)| v).map(|v| v.to_string_lossy().into_owned())
     };
     assert_eq!(env(&sup.shared).as_deref(), Some(old), "no live change yet: the spec's");
-    sup.update_audio(Some(live), &[]); // what apply_config_effects calls on the change
+    sup.update_audio(Some(live)); // what apply_config_effects calls on the change
     assert_eq!(env(&sup.shared).as_deref(), Some(live), "the respawn starts with the live flag and the picked twin");
     sup.shutdown(Duration::from_millis(200));
 }
@@ -419,7 +419,7 @@ pub(crate) fn wedge_and_fill(shared: &Shared) -> usize {
     rx.recv_timeout(Duration::from_secs(5)).expect("the wedged writer never took its line");
     let queued = (0..1_000).take_while(|_| shared.send_line("{}").queued()).count();
     assert!(queued < 1_000, "the queue never said it was full");
-    queued + 1 // + the restatement's `sync`, waiting behind its `restate` (F-1)
+    queued
 }
 
 /// A writer that takes lines only once `open` says so (a healthy engine that is busy). It
@@ -457,7 +457,7 @@ fn quit_keeps_a_slot_so_a_busy_engine_behind_a_full_queue_still_finishes_cleanly
     // really ends full.
     rx.recv_timeout(Duration::from_secs(5)).expect("the writer never took its first line");
     let filled = (0..1_000).take_while(|_| shared.send_line(r#"{"cmd":"bookmark"}"#).queued()).count();
-    assert_eq!(filled + 1, stdin::QUEUE, "the queue never said it was full (+1: the restatement's sync)");
+    assert_eq!(filled, stdin::QUEUE, "the queue never said it was full");
     assert!(shared.send_quit(Sent::Switching), "quit found the queue full");
     open.store(true, Ordering::SeqCst);
     assert!(wait_for(5, || seen.lock().unwrap().iter().any(|l| l.contains("quit"))), "quit never reached the engine");

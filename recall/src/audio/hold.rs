@@ -265,12 +265,6 @@ pub(super) fn await_init(ring: &TrackRing, rx: &std::sync::mpsc::Receiver<Result
     }
 }
 
-/// A track a privacy line applies to: an input or an output endpoint, not the game's process
-/// tree or an app (by its saved source tag).
-pub(crate) fn is_device_source(source: &str) -> bool {
-    source != crate::edit_model::SOURCE_GAME_PROCESS && !source.starts_with(crate::edit_model::APP_SOURCE_PREFIX)
-}
-
 /// Whether a track starts held (the sync handshake): every track under a controller (`hold`),
 /// the game's process tree included (Rohan 2026-11-09 23:31 UTC, the cut-down: "Hold
 /// everything"); app tracks are held the same way (`apps::start`).

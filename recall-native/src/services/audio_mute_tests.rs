@@ -218,23 +218,18 @@ fn the_engines_mutes_wins_over_the_guess() {
     let muted = EngineMeter { mutes: Some(true), ..live };
     assert_eq!(meter_reading((-20.0, -20.0, true), muting(&muted, false, false).0, muting(&muted, false, false).1, false).2, "Muted");
     assert_eq!(muting(&EngineMeter::default(), true, false), (true, false), "an older recorder: the guess");
-    let status: crate::services::daemon::EngineStatus = serde_json::from_value(serde_json::json!({"audio_seq": 7, "audio": [{"id": "line-in", "mutes": false, "retired": true}]})).unwrap();
-    assert_eq!((status.audio_seq, status.audio[0].mutes, status.audio[0].retired), (Some(7), Some(false), Some(true)));
+    let status: crate::services::daemon::EngineStatus = serde_json::from_value(serde_json::json!({"audio": [{"id": "line-in", "mutes": false, "retired": true}]})).unwrap();
+    assert_eq!((status.audio[0].mutes, status.audio[0].retired), (Some(false), Some(true)));
     let view = include_str!("../views/audio_strip.rs").split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(view.contains("let (muted_now, mutes) = crate::services::audio_mute::muting(&engine, session_muted, mutes);"), "the strip uses it");
 }
 
-/// P11 / P16 / P20: a retired source says when it applies; "Applying…" while the recorder is
-/// behind the controller's last audio line.
+/// P11 / P16: a retired source says when it applies (the cut-down drops "Applying…": no seq).
 #[test]
-fn a_retired_source_says_when_it_applies_and_applying_while_seq_behind() {
+fn a_retired_source_says_when_it_applies() {
     let retired = EngineMeter { retired: true, ..EngineMeter::default() };
-    assert_eq!(meter_text("-20 dB".into(), &retired, Some(9), Some(9)), "Off: applies after the recording");
-    assert_eq!(meter_text("-20 dB".into(), &EngineMeter::default(), Some(8), Some(9)), "Applying…");
-    assert_eq!(meter_text("-20 dB".into(), &EngineMeter::default(), Some(9), Some(9)), "-20 dB");
-    assert_eq!(meter_text("-20 dB".into(), &EngineMeter::default(), None, Some(9)), "-20 dB", "an older recorder");
-    let session: crate::services::daemon::SessionStatus = serde_json::from_value(serde_json::json!({"audio_sent_seq": 9})).unwrap();
-    assert_eq!(session.audio_sent_seq, Some(9));
+    assert_eq!(meter_text("-20 dB".into(), &retired), "Off: applies after the recording");
+    assert_eq!(meter_text("-20 dB".into(), &EngineMeter::default()), "-20 dB");
     let view = include_str!("../views/audio_strip.rs").split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(view.contains("crate::services::audio_mute::meter_text(level_text, &engine,"), "the strip shows it");
+    assert!(view.contains("crate::services::audio_mute::meter_text(level_text, &engine);"), "the strip shows it");
 }

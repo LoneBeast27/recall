@@ -46,9 +46,3 @@ fn the_restatement_states_every_source_and_retires_what_moved() {
     let none = restatement(&baked, &[src("mic", "input", "Mic (Desk)", None)]);
     assert_eq!(none[0]["mic_mute"], json!(true), "no flag: muted by Alt+M");
 }
-
-#[test]
-fn a_line_gets_its_seq() {
-    let line: Value = serde_json::from_str(&stamped(r#"{"cmd":"set_mic_mute","muted":true}"#, 7)).unwrap();
-    assert_eq!(line, json!({"cmd": "set_mic_mute", "muted": true, "seq": 7}));
-}

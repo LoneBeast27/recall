@@ -155,7 +155,7 @@ impl SinkFactory for FakeFactory {
 }
 
 pub(crate) fn tracks() -> Vec<TrackInfo> {
-    vec![TrackInfo { name: "Game", rate: 48_000, channels: 2, device: false }, TrackInfo { name: "Mic", rate: 48_000, channels: 2, device: true }]
+    vec![TrackInfo { name: "Game", rate: 48_000, channels: 2 }, TrackInfo { name: "Mic", rate: 48_000, channels: 2 }]
 }
 
 pub(crate) fn pkt(tag: u8) -> Arc<[u8]> {
