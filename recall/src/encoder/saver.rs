@@ -227,6 +227,9 @@ impl SaverControl {
         if let Some(mover) = mover {
             mover.shutdown(mover::STOP_WAIT);
         }
+        if outcome == Shutdown::Drained {
+            super::replay_index::drop_run_slot();
+        }
         outcome
     }
 }

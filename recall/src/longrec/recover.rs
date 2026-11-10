@@ -81,7 +81,11 @@ pub(crate) fn claim_replay_slots(entries: Vec<Entry>, logs: &mut Vec<String>) ->
                     let index = entry.index.clone();
                     let _ = in_progress::update(&entry.part(), |e| e.index = index);
                 }
-                Err(e) => logs.push(format!("replay save {}: packet index not kept ({e})", entry.path)),
+                Err(e) => {
+                    // The slot still holds this save's index: this run's saves write elsewhere.
+                    crate::encoder::replay_index::use_run_slot();
+                    logs.push(format!("replay save {}: packet index not kept ({e}); saves use their own index slot", entry.path));
+                }
             }
             entry
         })
@@ -91,13 +95,15 @@ pub(crate) fn claim_replay_slots(entries: Vec<Entry>, logs: &mut Vec<String>) ->
 /// Recover `entries`, then (once) what older builds left in `out_dir` and `staging`.
 pub(crate) fn run(entries: &[Entry], out_dir: &Path, staging: Option<&Path>) -> Report {
     let mut found = Report::default();
+    // The one-time scan first (it leaves the listed parts alone): a rescan the entries below ask
+    // for then stands for the next start.
+    legacy_scan(out_dir, staging, &mut found);
     for entry in entries {
         match entry.kind {
             Kind::Long => long_from_entry(entry, &mut found),
             Kind::Replay => crate::encoder::replay_rebuild::recover_entry(entry, &mut found.clips, &mut found.logs),
         }
     }
-    legacy_scan(out_dir, staging, &mut found);
     found
 }
 
@@ -150,9 +156,9 @@ fn long_from_entry(entry: &Entry, found: &mut Report) {
     if !part.exists() {
         // Finished after all (the list was not updated), or gone: nothing to recover.
         let finished = PathBuf::from(entry.path.strip_suffix(naming::PART_EXT).unwrap_or(&entry.path));
-        if finished.exists() {
+        if finished.exists() && !has_recovered_sibling(&finished) {
             write_marks(&finished, entry, None, &mut found.logs);
-        } else {
+        } else if !finished.exists() {
             found.logs.push(format!("long recording {} was listed but is gone", part.display()));
         }
         let _ = in_progress::remove(&part);
@@ -187,6 +193,12 @@ fn recover_long(part: &Path, legacy: bool, found: &mut Report) -> std::io::Resul
         }
         Repair::Unrecoverable(why) => {
             found.logs.extend(crate::encoder::recycle::dispose_unrecoverable(part, &why));
+            if part.exists() {
+                // Kept (it holds media but no whole fragment): the next start's scan looks again.
+                if let Err(e) = in_progress::request_legacy_scan() {
+                    found.logs.push(format!("the next start's scan could not be asked for: {e}"));
+                }
+            }
             let _ = in_progress::remove(part);
             return Err(std::io::Error::other(why));
         }
@@ -209,6 +221,14 @@ fn recover_long(part: &Path, legacy: bool, found: &mut Report) -> std::io::Resul
 fn exclusive(part: &Path) -> bool {
     use std::os::windows::fs::OpenOptionsExt;
     std::fs::OpenOptions::new().read(true).write(true).share_mode(0).open(part).is_ok()
+}
+
+/// A `<stem>-recovered[-N].mp4` beside `finished`: its name was taken, so the recording this
+/// entry was for went there (with its bookmarks), and `finished` is another recording.
+fn has_recovered_sibling(finished: &Path) -> bool {
+    let stem = finished.file_stem().map(|s| format!("{}-recovered", s.to_string_lossy().to_lowercase())).unwrap_or_default();
+    let names = finished.parent().and_then(|d| std::fs::read_dir(d).ok()).into_iter().flatten().flatten();
+    names.map(|e| e.file_name().to_string_lossy().to_lowercase()).any(|n| n.starts_with(&stem) && n.ends_with(".mp4"))
 }
 
 /// The bookmarks the list kept for a recording, as its sidecar (`bookmarks`).

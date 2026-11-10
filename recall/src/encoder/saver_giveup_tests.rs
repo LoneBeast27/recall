@@ -38,6 +38,28 @@ fn a_given_up_save_gets_exactly_one_answer() {
     assert_eq!(answers(&sink).len(), 2, "one answer per save: {:?}", answers(&sink));
 }
 
+/// A [`FakeClock`] whose every awake read first waits (real time, bounded) for the save's step
+/// counter to move: awake time never passes without the save moving.
+struct Lockstep {
+    inner: FakeClock,
+    progress: Arc<super::super::save_progress::SaveProgress>,
+    seen: std::sync::atomic::AtomicU64,
+}
+
+impl crate::awake_clock::Clock for Lockstep {
+    fn awake(&self) -> crate::awake_clock::Awake {
+        let until = Instant::now() + Duration::from_secs(5);
+        while self.progress.read().0 == self.seen.load(Relaxed) && Instant::now() < until {
+            std::thread::yield_now();
+        }
+        self.seen.store(self.progress.read().0, Relaxed);
+        self.inner.awake()
+    }
+    fn instant(&self) -> Instant {
+        self.inner.instant()
+    }
+}
+
 fn answers(sink: &Mutex<Vec<String>>) -> Vec<String> {
     sink.lock().unwrap().iter().filter(|l| l.contains(r#""type":"save"#) && !l.contains("save_progress")).cloned().collect()
 }
@@ -69,8 +91,12 @@ fn a_save_still_writing_past_the_30_min_budget_is_kept_with_one_answer() {
     assert!(queue.submit(window_job(&clip.to_string_lossy(), window.clone(), params, secs)));
     drop(queue);
     let SaverControl { done, abort, current, mover: _, progress } = control;
-    let clock = FakeClock::stepping(Duration::from_secs(10), Duration::ZERO);
+    // Each 10 s of awake time passes only once the save has stepped since the last read: the
+    // test's save always moves within the clock, so a busy machine that leaves the saver thread
+    // unscheduled for a few real milliseconds is never judged a stall (13 of 180 reads before).
+    let clock = Lockstep { inner: FakeClock::stepping(Duration::from_secs(10), Duration::ZERO), progress: progress.clone(), seen: std::sync::atomic::AtomicU64::new(progress.read().0) };
     let outcome = stop_saver_on(&done, &abort, &current, Duration::from_secs(2), &progress, true, &clock, Duration::from_millis(1));
+    let clock = clock.inner;
     assert_eq!(outcome, Shutdown::Aborted, "the saver stopped within the reserve");
     assert!(clock.reads() >= 180, "held the full 30 min awake ({} reads of 10 s)", clock.reads());
     let answered = answers(&sink);

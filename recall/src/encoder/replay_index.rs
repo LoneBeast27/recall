@@ -217,6 +217,20 @@ pub(crate) fn claim(base: &Path) -> Result<PathBuf, String> {
     Ok(own)
 }
 
+/// At a clean quit: a run slot (`save-p<pid>`, [`use_run_slot`]) is this run's own temp files
+/// (every save of the run finished or claimed its copy): to the Recycle Bin, as other temp files.
+pub(crate) fn drop_run_slot() {
+    if !run_slot() {
+        return;
+    }
+    let Some(base) = slot() else { return };
+    for file in [idx_of(&base), hdr_of(&base)] {
+        if file.exists() {
+            let _ = super::recycle::recycle(&file);
+        }
+    }
+}
+
 /// Tests: this thread's saves back on the shared slot.
 #[cfg(test)]
 pub(crate) fn tests_reset_run_slot() {

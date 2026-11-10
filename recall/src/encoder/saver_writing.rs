@@ -92,7 +92,9 @@ where
     // Listed before the `.part` exists: a save cut off now is recovered at the next start.
     let index = super::super::replay_index::slot();
     if let Err(e) = in_progress::add(in_progress::Entry::replay(part, Path::new(&job.path), index.as_deref())) {
-        log(&format!("saver: {} not listed for recovery ({e})", part.display()));
+        // A crash now leaves it to the one-time scan, which the next start then runs again.
+        let rescan = in_progress::request_legacy_scan().err().map_or(String::new(), |r| format!("; the next start's scan could not be asked for: {r}"));
+        log(&format!("saver: {} not listed for recovery ({e}){rescan}", part.display()));
     }
     match mux(part, job, abort, timing) {
         Ok(muxed) => {

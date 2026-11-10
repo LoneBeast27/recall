@@ -113,3 +113,41 @@ fn the_real_recycle_bin_precheck_accepts_a_temp_file() {
     assert_eq!(recycle::precheck(&file), Ok(()), "%TEMP% is on a volume with a Recycle Bin");
     assert!(file.exists(), "the precheck moves nothing");
 }
+
+/// Review 3: a replay save that cannot be listed asks the next start to scan again (the scan
+/// then finds it if this run crashes before its rename).
+#[test]
+fn a_save_that_cannot_be_listed_asks_for_the_scan_again() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let sb = sandbox("unlisted-save");
+    let Some((packets, params)) = super::super::replay_index::tests::window(10) else { return eprintln!("libx264 missing; skipped") };
+    in_progress::mark_legacy_scanned().unwrap();
+    in_progress::add(Entry::replay(&sb.dir.join("other.mp4.part"), &sb.dir.join("other.mp4"), None)).unwrap();
+    let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(in_progress::path().unwrap()).unwrap();
+    let clip = sb.dir.join("I__2026-11-11__11-00-00-000__ii.mp4");
+    let secs = super::super::saver::window_secs(&packets);
+    let job = super::super::mux::tests::window_job(&clip.to_string_lossy(), packets, params, secs);
+    let part = crate::naming::part_of(&clip);
+    let mut timing = super::super::saver::Timing::default();
+    let lines = std::cell::RefCell::new(Vec::new());
+    let saved = super::super::saver::write_clip_to(&part, &clip, &job, &mut super::super::mux::produce, &std::sync::atomic::AtomicBool::new(false), &mut timing, &|l: &str| lines.borrow_mut().push(l.to_string()));
+    drop(held);
+    assert!(saved.is_ok() && clip.is_file(), "the save itself goes on: {:?}", lines.borrow());
+    assert!(!in_progress::legacy_scanned(), "the next start scans again: {:?}", lines.borrow());
+}
+
+/// Review 3: a run that used its own slot recycles it at a clean quit (its own temp files).
+#[test]
+fn a_clean_quit_recycles_the_runs_own_slot() {
+    let _sb = sandbox("run-slot");
+    replay_index::use_run_slot();
+    let base = slot().unwrap();
+    std::fs::create_dir_all(base.parent().unwrap()).unwrap();
+    for f in [idx_of(&base), replay_index::hdr_of(&base)] {
+        std::fs::write(&f, b"x").unwrap();
+    }
+    replay_index::drop_run_slot();
+    let gone = !idx_of(&base).exists() && !replay_index::hdr_of(&base).exists();
+    replay_index::tests_reset_run_slot();
+    assert!(gone, "the run's own index files went to the Recycle Bin");
+}
