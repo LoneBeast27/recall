@@ -10,8 +10,8 @@ an unknown publisher.
 - **SmartScreen** may show "Windows protected your PC". Choose **More info**, check that the
   file is `RecallSetup.exe` from this repository's releases, then **Run anyway**.
 - **Microsoft Defender** or another antivirus may flag a new, unsigned release before it has
-  built up reputation. Each release is reported to Microsoft as a false positive when that
-  happens. Download only from [the Releases page](https://github.com/LoneBeast27/recall/releases).
+  built up reputation. False positives can be reported to Microsoft; if you see one, please
+  open an issue. Download only from [the Releases page](https://github.com/LoneBeast27/recall/releases).
 
 ## Check a download yourself
 
