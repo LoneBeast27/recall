@@ -245,6 +245,13 @@ $env:CARGO_TARGET_DIR = "$PWD\target-gpui"
 cargo test --manifest-path recall-native\Cargo.toml --offline
 ```
 
+Settings must survive updates and rollbacks. The `compatibility` tests (part of the runs above)
+load the settings, watched folders, clip names and favourites that each earlier release wrote
+(`compat/settings/`), and the release workflow checks that the previous release reads this build's
+files. A change that cannot keep a setting ships only in a major release (x.0.0) that declares the
+area it resets. The rule and how to follow it: [CONTRIBUTING.md](CONTRIBUTING.md), "Settings
+compatibility".
+
 After any change to the clip folders' handling, run `scripts\dev\watch-check.ps1` (private
 instance, sandbox folders). `RECALL_NATIVE_LAYOUT=<file>` makes the app keep a JSON dump of tile
 and button bounds for external testers; it is a dev format, off unless set.

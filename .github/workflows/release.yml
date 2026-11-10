@@ -173,6 +173,30 @@ jobs:
         run: |
           & .\scripts\setup\build.ps1 -Test -OutputPath (Join-Path $env:RUNNER_TEMP 'RecallSetupTests.exe')
 
+      - name: Compatibility (settings from earlier releases, and rollback)
+        run: |
+          # CONTRIBUTING.md, "Settings compatibility". Forward: every earlier release's settings
+          # load with every value kept, unless a major (x.0.0) release declared the area
+          # (RECALL_VERSION decides which declarations apply). Rollback: the previous release
+          # reads the files this build writes and keeps them.
+          $here = git describe --tags --exact-match HEAD 2>$null
+          $previous = git tag --list 'v*' --sort=-v:refname --merged HEAD | Where-Object { $_ -ne $here } | Select-Object -First 1
+          if (-not $previous) { throw 'no earlier release tag to check against' }
+          if (-not (Test-Path "compat\settings\$previous\config.toml")) { throw "compat/settings/$previous is missing: add it with scripts/dev/compat-fixture.ps1 -Tag $previous" }
+          $env:CARGO_TARGET_DIR = "$env:GITHUB_WORKSPACE\target-dev"
+          cargo test --locked -p recall-hdr compatibility
+          if ($LASTEXITCODE -ne 0) { throw "settings compatibility (recorder) failed ($LASTEXITCODE)" }
+          $env:CARGO_TARGET_DIR = "$env:GITHUB_WORKSPACE\target-gpui"
+          cargo test --locked --manifest-path recall-native\Cargo.toml compatibility
+          if ($LASTEXITCODE -ne 0) { throw "settings compatibility (app) failed ($LASTEXITCODE)" }
+          Remove-Item Env:CARGO_TARGET_DIR
+          & .\scripts\dev\compat-rollback.ps1 -Previous $previous -TargetDir "$env:GITHUB_WORKSPACE\target-compat" -HdrTarget "$env:GITHUB_WORKSPACE\target-dev" -AppTarget "$env:GITHUB_WORKSPACE\target-gpui"
+          if ($LASTEXITCODE -ne 0) { throw "rollback to $previous loses settings" }
+          $majors = (Get-Content -Raw compat\rules.json | ConvertFrom-Json).major | Where-Object { $_.version -eq $env:RECALL_VERSION }
+          $summary = @("### Settings compatibility: rollback to $previous checked", '')
+          $summary += $majors | ForEach-Object { "- resets in $($_.version), $($_.file) ($($_.areas -join ', ')): $($_.note) -- put this in the release notes" }
+          Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $summary
+
       - name: Release build (recorder workspace)
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}\target-dev

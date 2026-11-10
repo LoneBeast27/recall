@@ -453,3 +453,7 @@ mod tests;
 #[cfg(test)]
 #[path = "config_persist_tests.rs"]
 mod persist_tests;
+
+#[cfg(test)]
+#[path = "compatibility_tests.rs"]
+mod compatibility;
