@@ -68,6 +68,8 @@ impl Render for Root {
             .child(backdrop)
             .child(Self::drag_watch(cx))
             .font_family(theme::sans())
+            // Rohan 11-10: one step heavier everywhere (OLED subpixel layouts thin 400 Geist).
+            .font_weight(gpui::FontWeight::MEDIUM)
             .text_size(px(13.))
             .line_height(px(18.))
             .text_color(c(theme::TEXT))

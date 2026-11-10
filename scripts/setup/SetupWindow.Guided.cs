@@ -20,7 +20,7 @@ namespace Recall.Setup
         {
             var panel = new Panel { Bounds = options.Bounds, TabIndex = 0 };
             AddLabel(panel, "Install location", 0, 5, 525, 24, fonts.Strong, Ink);
-            quickPath = AddLabel(panel, "", 0, 34, 418, 26, fonts.SystemText, Ink);
+            quickPath = AddLabel(panel, "", 0, 34, 418, 26, fonts.Body, Ink);
             quickPath.AutoEllipsis = true;
             quickBrowse = AddButton(panel, "Change…", 430, 28, 95, 32, false, 0);
             quickBrowse.AccessibleName = "Change install location";
