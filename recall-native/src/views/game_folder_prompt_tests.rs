@@ -22,9 +22,9 @@ fn the_prompt_text_names_the_game_and_the_folder() {
 
 #[test]
 fn choice_keys_and_answers() {
-    assert_eq!(choice_key(r"V:\Videos\VALORANT").as_deref(), Some("valorant"));
-    assert_eq!(answer_value(r"V:\Videos\Rocket League", true), Some(json!({"rocket league": "merge"})));
-    assert_eq!(answer_value(r"V:\Videos\VALORANT", false), Some(json!({"valorant": "separate"})));
+    assert_eq!(choice_key(r"X:\Videos\VALORANT").as_deref(), Some("valorant"));
+    assert_eq!(answer_value(r"X:\Videos\Rocket League", true), Some(json!({"rocket league": "merge"})));
+    assert_eq!(answer_value(r"X:\Videos\VALORANT", false), Some(json!({"valorant": "separate"})));
     let raw = json!({"valorant": "merge", "apex legends": "separate", "junk": "maybe", "cleared": "", "n": 1});
     let got = choices(Some(&raw));
     assert_eq!(got.keys().collect::<Vec<_>>(), vec!["apex legends", "valorant"]);
@@ -35,9 +35,9 @@ fn choice_keys_and_answers() {
 #[test]
 fn one_question_per_folder() {
     let mut list = Vec::new();
-    assert!(add(&mut list, Pending { game: "VALORANT".into(), folder: r"V:\R\VALORANT".into() }));
-    assert!(!add(&mut list, Pending { game: "Valorant".into(), folder: r"v:\r\valorant".into() }), "same folder");
-    assert!(add(&mut list, Pending { game: "Apex".into(), folder: r"V:\R\Apex".into() }));
+    assert!(add(&mut list, Pending { game: "VALORANT".into(), folder: r"X:\R\VALORANT".into() }));
+    assert!(!add(&mut list, Pending { game: "Valorant".into(), folder: r"x:\r\valorant".into() }), "same folder");
+    assert!(add(&mut list, Pending { game: "Apex".into(), folder: r"X:\R\Apex".into() }));
     assert_eq!(list.len(), 2);
     let (dir, _gone) = temp("persist");
     let path = dir.join("p.json");
@@ -78,16 +78,16 @@ fn only_a_plain_unmarked_unanswered_unlinked_folder_is_asked_about() {
 /// Gate A2: a failed adoption is reported and saves no "merge" answer; "Keep separate" never adopts.
 #[test]
 fn a_failed_adoption_saves_no_answer() {
-    let failed = answer(r"V:\Videos\VALORANT", true, |_| Err(std::io::Error::other("entry unreadable")));
+    let failed = answer(r"X:\Videos\VALORANT", true, |_| Err(std::io::Error::other("entry unreadable")));
     assert_eq!(failed, Err("entry unreadable".to_string()));
     let mut adopted = false;
-    let ok = answer(r"V:\Videos\VALORANT", true, |_| {
+    let ok = answer(r"X:\Videos\VALORANT", true, |_| {
         adopted = true;
         Ok(())
     });
     assert_eq!(ok, Ok(Some(json!({"valorant": "merge"}))));
     assert!(adopted);
-    let separate = answer(r"V:\Videos\VALORANT", false, |_| panic!("not adopted"));
+    let separate = answer(r"X:\Videos\VALORANT", false, |_| panic!("not adopted"));
     assert_eq!(separate, Ok(Some(json!({"valorant": "separate"}))));
 }
 

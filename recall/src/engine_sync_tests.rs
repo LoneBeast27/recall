@@ -115,7 +115,7 @@ fn a_set_source_through_the_held_start_is_in_force_before_the_release() {
     assert_eq!(ring.saved_id_for_test(), "{B}", "and the stream opens on the device the user picked");
 }
 
-/// The cut-down ("Hold everything", Rohan 23:31 UTC): every track starts held whenever a
+/// The cut-down ("Hold everything", the maintainer): every track starts held whenever a
 /// controller drives the engine, the game's process tree and app tracks included.
 #[test]
 fn every_track_starts_held_the_game_and_apps_included() {

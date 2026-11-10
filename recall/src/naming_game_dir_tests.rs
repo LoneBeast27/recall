@@ -210,6 +210,6 @@ fn check_game_dir_refuses_a_folder_that_is_not_ours_now() {
 fn the_engine_reads_the_live_answers_command() {
     let cmd: crate::protocol::Command = serde_json::from_str(r#"{"cmd":"set_game_folder_choices","choices":{"valorant":"merge"}}"#).unwrap();
     assert!(matches!(cmd, crate::protocol::Command::SetGameFolderChoices { choices } if choices.get("valorant").map(String::as_str) == Some("merge")));
-    let event = serde_json::to_value(crate::protocol::Outbound::GameFolderExists { game: "VALORANT".into(), folder: r"V:\R\VALORANT".into() }).unwrap();
-    assert_eq!(event, serde_json::json!({"type": "game_folder_exists", "game": "VALORANT", "folder": r"V:\R\VALORANT"}));
+    let event = serde_json::to_value(crate::protocol::Outbound::GameFolderExists { game: "VALORANT".into(), folder: r"X:\R\VALORANT".into() }).unwrap();
+    assert_eq!(event, serde_json::json!({"type": "game_folder_exists", "game": "VALORANT", "folder": r"X:\R\VALORANT"}));
 }
