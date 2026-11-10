@@ -7,7 +7,9 @@
 //! once as "Save failed: Recall was closed during the save", then the quit goes on. So is a
 //! save the timers already gave up on (past its cap, or no answer in time) but the engine has
 //! not answered: the quit no longer goes on as if nothing were in flight (design P16; it used
-//! to cut such a save 8 s later with no report). All on the awake-only clock.
+//! to cut such a save 8 s later with no report). A save past its cap that the engine still
+//! reports moving is waited for too, up to [`QUIT_PAST_CAP_WAIT`] from the quit (never lose a
+//! clip: before, the quit gave it up at once). All on the awake-only clock.
 
 use std::time::{Duration, Instant};
 
@@ -20,6 +22,8 @@ use crate::record_quit::QuitReason;
 
 /// The least a quit waits for a save still being written.
 pub const QUIT_SAVE_WAIT: Duration = Duration::from_secs(60);
+/// The longest a quit waits for a save past its cap that still makes progress (awake time).
+pub const QUIT_PAST_CAP_WAIT: Duration = Duration::from_secs(30 * 60);
 /// The island notice while a quit waits.
 pub const QUIT_WAIT_TITLE: &str = "Finishing the clip before quitting";
 pub const QUIT_WAIT_DETAIL: &str = "Recall quits once it is saved. Quit again to stop now";
@@ -134,10 +138,19 @@ impl QuitWait {
         // A `save_first` quit's `record_stop` saves the long recording when
         // `recording_stopped` comes: that quit waits for it as for a save.
         if !saving && !(self.saved_first && activity.stop_in_flight()) {
-            return match activity.unanswered() {
-                0 => QuitStep::Go,
-                lost => QuitStep::Lost(lost),
-            };
+            let lost = activity.unanswered();
+            if lost == 0 {
+                return QuitStep::Go;
+            }
+            // Past its cap but still moving: wait on, bounded (the engine keeps what it wrote after).
+            if !self.forced && activity.save_moving(now) {
+                let first = self.started.is_none();
+                let started = *self.started.get_or_insert(now);
+                if now.saturating_duration_since(started) < QUIT_PAST_CAP_WAIT {
+                    return QuitStep::Wait { first };
+                }
+            }
+            return QuitStep::Lost(lost);
         }
         if self.forced {
             return QuitStep::Lost(lost_at_give_up(activity, saving));
