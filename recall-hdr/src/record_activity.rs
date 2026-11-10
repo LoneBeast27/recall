@@ -5,11 +5,15 @@
 //! ([`PendingPause`]); engine events arrive through `Supervisor::attach_events`.
 //! A retarget (game closed past its drain, or a new game) stops the long
 //! recording itself ([`AutoStop`]) instead of waiting on it.
+//!
+//! Every timer here runs on the awake-only clock (`awake_clock`, design-detect-release §0):
+//! a sleep ages no save window, cap or wait.
 
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
 
+use crate::awake_clock::Awake;
 use crate::record_engine::Busy;
 
 /// Saves in flight with no `saved` / `save_failed` this long after the queue
@@ -22,6 +26,22 @@ pub const SAVE_STALE: Duration = Duration::from_secs(120);
 pub const START_STALE: Duration = Duration::from_secs(35);
 /// Why a long recording cannot start while a closed game drains.
 pub const DRAIN_RECORD_REASON: &str = "The game closed; nothing to record";
+/// A released engine without drain heartbeats (design P8) settles once no save showed progress
+/// this long (awake): its own 120 s stall rule + one 1 s report + a 14 s margin (p6-1: the two
+/// clocks start a little apart).
+pub const SETTLE_NO_HEARTBEAT: Duration = Duration::from_secs(135);
+/// The longest a resume's restart holds for a save that keeps moving (awake): the engine's own
+/// budget for finishing saves (`recall` `ORPHAN_SAVE_BUDGET`). Product rule (2026-11-10): a save
+/// past its 10 min hold cap keeps the hold while it still makes progress.
+pub const RESUME_HOLD_MAX: Duration = Duration::from_secs(30 * 60);
+/// Design P17 (product wording, 2026-11-10): a released engine still draining its save keeps
+/// the next game unrecorded (the slot admits one recorder); after this long the island says so.
+pub const DRAIN_NOTICE_AFTER: Duration = Duration::from_secs(30);
+pub const DRAIN_NOTICE_TITLE: &str = "Finishing the last clip";
+/// The detail: "<Game> starts recording once it is saved".
+pub fn drain_notice_detail(game: &str) -> String {
+    format!("{game} starts recording once it is saved")
+}
 /// How long a pause waits for the long recording to report stopping.
 pub const PAUSE_STOP_WAIT: Duration = Duration::from_secs(10);
 /// The island while a pause waits for the save being written (R5-overlay-1).
@@ -40,7 +60,7 @@ pub const SCREENSHOT_STALE: Duration = Duration::from_secs(60);
 #[derive(Debug, Clone, PartialEq)]
 pub enum LongRec {
     Idle,
-    Starting { since: Instant },
+    Starting { since: Awake },
     /// `started_unix`: Unix seconds when the engine reported it running; `since`:
     /// the same moment on the monotonic clock (the status's `elapsed_secs`).
     Active { path: String, started_unix: f64, since: Instant },
@@ -51,7 +71,7 @@ pub enum LongRec {
 /// reports it ended, or after [`PAUSE_STOP_WAIT`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AutoStop {
-    deadline: Instant,
+    deadline: Awake,
     /// The game closed (else a new game is wanted).
     game_closed: bool,
 }
@@ -61,14 +81,14 @@ pub struct EngineActivity {
     pending_saves: u32,
     /// When the queue of saves started, or the engine last answered one of it
     /// (or reported its bytes growing).
-    save_progress: Option<Instant>,
+    save_progress: Option<Awake>,
     /// Saves of a queue that expired unanswered: their late answers land here.
     expired_saves: u32,
     /// The engine's own report of the save it is writing.
     write: writing::WriteWatch,
     /// Screenshots sent and not yet reported (their PNGs are still being written).
     pending_screenshots: u32,
-    last_screenshot_sent: Option<Instant>,
+    last_screenshot_sent: Option<Awake>,
     pub long: LongRec,
     auto_stop: Option<AutoStop>,
     /// A `record_stop` (any sender: the user, a pause, a retarget, sleep, a session end) went
@@ -79,6 +99,12 @@ pub struct EngineActivity {
     /// The clip size a save is expected to reach: sets how long a growing save
     /// may hold restarts (`writing::hold_cap`). Kept across engine instances.
     save_estimate: u64,
+    /// When this engine was released for a privacy stop (`Transitions::drop_ring`), and whether
+    /// its hello says it sends drain heartbeats (then only it judges a stalled save).
+    released_at: Option<Awake>,
+    drain_heartbeats: bool,
+    /// The island was told this release blocks the next game (once per release).
+    drain_told: bool,
 }
 
 impl Default for EngineActivity {
@@ -95,7 +121,30 @@ impl Default for EngineActivity {
             stop_requested: false,
             stop_ours: false,
             save_estimate: 0,
+            released_at: None,
+            drain_heartbeats: false,
+            drain_told: false,
         }
+    }
+}
+
+/// A moment the activity's timers read: an awake time; or, for callers written before the awake
+/// clock (fix/deep-overlay-r9's `saves_in_progress` passes `Instant::now()`), an `Instant` that
+/// must be now, read as the awake clock now.
+pub trait ActivityNow {
+    fn awake(self) -> Awake;
+}
+
+impl ActivityNow for Awake {
+    fn awake(self) -> Awake {
+        self
+    }
+}
+
+impl ActivityNow for Instant {
+    fn awake(self) -> Awake {
+        debug_assert!(self.elapsed() < Duration::from_secs(1), "only Instant::now() may stand for the awake clock");
+        crate::awake_clock::awake_now()
     }
 }
 
@@ -108,7 +157,7 @@ pub enum Trigger {
     LongRecChanged,
     /// The long recording a retarget stopped ([`AutoStop`]) was saved.
     AutoStopped { game_closed: bool },
-    /// The engine stopped with this many saves in flight: they are lost.
+    /// The engine stopped with this many saves unanswered (in flight or expired): they are lost.
     SavesLost(u32),
 }
 
@@ -124,7 +173,7 @@ pub fn lost_save_event() -> String {
 impl EngineActivity {
     /// A save went to the engine. A save queued behind others waits in their
     /// window: only a new queue (or an answer) starts one.
-    pub fn save_sent(&mut self, now: Instant) {
+    pub fn save_sent(&mut self, now: Awake) {
         self.expire_saves(now);
         if self.pending_saves == 0 {
             self.save_progress = Some(now);
@@ -134,7 +183,7 @@ impl EngineActivity {
 
     /// Saves whose window ran out are lost: an engine that keeps answering
     /// never gets here while saves still write.
-    fn expire_saves(&mut self, now: Instant) {
+    fn expire_saves(&mut self, now: Awake) {
         if self.save_progress.is_some_and(|t| now.duration_since(t) >= SAVE_STALE) {
             self.expired_saves += std::mem::take(&mut self.pending_saves);
         }
@@ -142,7 +191,7 @@ impl EngineActivity {
 
     /// `cmd` (`engine_command`) went to the engine: a long-recording start or
     /// a screenshot is now in flight.
-    pub fn command_sent(&mut self, cmd: &str, now: Instant) {
+    pub fn command_sent(&mut self, cmd: &str, now: Awake) {
         let starts = cmd == "record_start" || (cmd == "record_toggle" && !self.toggle_stops());
         if cmd == "record_stop" || (cmd == "record_toggle" && self.toggle_stops()) {
             self.stop_sent();
@@ -156,7 +205,7 @@ impl EngineActivity {
     }
 
     /// A `record_start` / `record_toggle` went to an idle engine.
-    pub fn record_requested(&mut self, now: Instant) {
+    pub fn record_requested(&mut self, now: Awake) {
         if self.long == LongRec::Idle {
             self.long = LongRec::Starting { since: now };
         }
@@ -206,9 +255,21 @@ impl EngineActivity {
     }
 
     /// A new engine instance: nothing of the old one is in flight any more.
+    /// F2: the old engine's saves were settled by its exit (`ENGINE_EXITED`, read first:
+    /// `record_app::tick`), so a save or screenshot still counted here was sent to THIS engine
+    /// between its spawn and its hello: it is kept, never wiped unanswered.
     pub fn engine_restarted(&mut self) {
-        let save_estimate = self.save_estimate;
-        *self = EngineActivity { save_estimate, ..EngineActivity::default() };
+        let kept = EngineActivity {
+            save_estimate: self.save_estimate,
+            pending_saves: self.pending_saves,
+            save_progress: self.save_progress,
+            expired_saves: self.expired_saves,
+            write: self.write.clone(),
+            pending_screenshots: self.pending_screenshots,
+            last_screenshot_sent: self.last_screenshot_sent,
+            ..EngineActivity::default()
+        };
+        *self = kept;
     }
 
     /// Track one engine event; `unix_now` stamps a recording start.
@@ -225,11 +286,14 @@ impl EngineActivity {
                 self.answered(ev);
                 None
             }
-            // The supervisor's own event: the engine process ended. Its last
-            // events came first, so whatever is still pending is lost.
+            // The supervisor's own event: the engine process ended. Its last events came
+            // first, so every save it was sent and never answered is lost: counted or expired
+            // (design P13: an expired one was zeroed silently before), and a release is over.
             crate::supervisor::ENGINE_EXITED => {
-                (self.expired_saves, self.write) = (0, writing::WriteWatch::default());
-                let lost = std::mem::take(&mut self.pending_saves);
+                // F2: the same "in flight" as the release and the settle (`unanswered`).
+                let lost = self.unanswered();
+                (self.pending_saves, self.expired_saves, self.save_progress, self.write, self.released_at) = (0, 0, None, writing::WriteWatch::default(), None);
+                (self.pending_screenshots, self.last_screenshot_sent) = (0, None);
                 (lost > 0).then_some(Trigger::SavesLost(lost))
             }
             "screenshot" | "screenshot_failed" => {
@@ -263,7 +327,7 @@ impl EngineActivity {
     /// answer shows the engine alive, so the saves still queued get a new window,
     /// and so does a `status` whose `save_writing` bytes grew. A rejection only
     /// shows the main loop alive, not the writer: it moves no window.
-    pub fn on_engine_event(&mut self, ev: &Value, unix_now: f64, now: Instant) -> Option<Trigger> {
+    pub fn on_engine_event(&mut self, ev: &Value, unix_now: f64, now: Awake) -> Option<Trigger> {
         let kind = ev.get("type").and_then(Value::as_str);
         // A released engine's drain reports `save_writing` alone (`save_progress`).
         if matches!(kind, Some("status" | "save_progress")) {
@@ -284,7 +348,7 @@ impl EngineActivity {
 
     /// Saves or a screenshot in flight, or a long recording starting / running: an engine
     /// restart now would lose work.
-    pub fn busy(&mut self, now: Instant) -> bool {
+    pub fn busy(&mut self, now: Awake) -> bool {
         self.expire_saves(now);
         if let LongRec::Starting { since } = self.long {
             if now.duration_since(since) >= START_STALE {
@@ -302,7 +366,7 @@ impl EngineActivity {
     /// screenshot in flight, and an active long recording whose stop has not timed out. A
     /// recording still starting has nothing to save: the retarget's engine
     /// restart drops it.
-    pub fn retarget_busy(&mut self, now: Instant) -> Busy {
+    pub fn retarget_busy(&mut self, now: Awake) -> Busy {
         self.busy(now); // expire stale saves / starts
         let given_up = self.auto_stop.is_some_and(|s| now >= s.deadline);
         let saving = self.saves_writing(now) || self.pending_screenshots > 0;
@@ -311,7 +375,7 @@ impl EngineActivity {
 
     /// A retarget needs the active long recording stopped. `true` = send
     /// `record_stop` now; once per recording, later calls only wait.
-    pub fn auto_stop(&mut self, now: Instant, game_closed: bool) -> bool {
+    pub fn auto_stop(&mut self, now: Awake, game_closed: bool) -> bool {
         if !self.is_recording() || self.auto_stop.is_some() {
             return false;
         }
@@ -354,20 +418,20 @@ impl EngineActivity {
 /// more (bounded by the save's own window and cap, `writing`).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct PendingPause {
-    deadline: Instant,
+    deadline: Awake,
 }
 
 impl PendingPause {
     /// `Some` when a pause asked at `now` must wait: the long recording (starting
     /// or running) is stopped first, a save being written finishes first.
-    pub fn needed(activity: &mut EngineActivity, now: Instant) -> Option<PendingPause> {
+    pub fn needed(activity: &mut EngineActivity, now: Awake) -> Option<PendingPause> {
         let wait = activity.long != LongRec::Idle || activity.saves_writing(now);
         wait.then(|| PendingPause { deadline: now + PAUSE_STOP_WAIT })
     }
 
     /// The recording reported its end (or its wait ran out), and no save is
     /// still being written.
-    pub fn ready(&self, activity: &mut EngineActivity, now: Instant) -> bool {
+    pub fn ready(&self, activity: &mut EngineActivity, now: Awake) -> bool {
         (activity.long == LongRec::Idle || now >= self.deadline) && !activity.saves_writing(now)
     }
 }

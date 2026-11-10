@@ -165,6 +165,8 @@ pub struct Controller {
     /// The shutdown block reason, held while a save is written (`record_session_end`).
     pub(crate) block_reason: crate::record_session_save::BlockReason,
     pub(crate) session_end: crate::record_session_save::SessionEnd,
+    /// The awake-only clock every save, settle and quit timer reads (`awake_clock`).
+    pub(crate) clock: Box<dyn crate::awake_clock::Clock>,
 }
 
 /// Entry point. Returns the process exit code.
@@ -273,6 +275,7 @@ pub fn run() -> i32 {
         session_watch: Default::default(),
         shut_down: false,
         quit_wait: Default::default(),
+        clock: Box::new(crate::awake_clock::AwakeClock),
         block_reason: Default::default(),
         session_end: Default::default(),
     };
@@ -303,6 +306,11 @@ pub fn run() -> i32 {
 }
 
 impl Controller {
+    /// Now on the awake-only clock: what the activity's timers read.
+    pub(crate) fn awake(&self) -> crate::awake_clock::Awake {
+        self.clock.awake()
+    }
+
     fn pump(&mut self, watch_rx: &Receiver<WatchEvent>, ctl_rx: &Receiver<Inbound>) -> i32 {
         loop {
             let timeout = crate::record_quit_wait::pump_wait_ms(self.quit.is_some(), self.next_deadline(), Instant::now(), MAX_WAIT_MS);
@@ -345,7 +353,7 @@ impl Controller {
                 self.quitting_tick(now);
                 continue;
             }
-            self.power_tick(now);
+            crate::record_power_host::PowerHost::power_tick(self);
             self.session_tick(now);
             self.tick(now);
         }

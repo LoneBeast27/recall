@@ -260,10 +260,11 @@ fn a_released_save_that_keeps_moving_is_never_settled_a_stalled_one_is() {
     use std::time::Duration;
     let progress = |s: &mut Sim, step: u64| {
         let ev = serde_json::json!({"type": "save_progress", "save_writing": {"bytes": step, "queued": 0, "step": step}});
-        let now = s.now;
+        let now = s.awake();
         s.activity.on_engine_event(&ev, 0.0, now);
     };
     let mut s = recording_discord();
+    s.engine_heartbeats = false; // an older engine: the controller judges the stall (P8)
     s.run_to(5_000);
     assert!(s.save());
     s.seen(app_ev("Discord", 30, 0x30, false));
@@ -272,16 +273,18 @@ fn a_released_save_that_keeps_moving_is_never_settled_a_stalled_one_is() {
     for k in 1..=180u64 {
         s.now += Duration::from_secs(5); // 15 min of a save still writing
         progress(&mut s, k);
-        let now = s.now;
+        let now = s.awake();
         assert!(!s.activity.release_may_settle(now), "settled at {} s while the save moved", k * 5);
     }
-    let now = s.now + Duration::from_secs(119);
-    assert!(!s.activity.release_may_settle(now), "a 119 s pause is no stall");
-    let now = s.now + Duration::from_secs(120);
-    assert!(s.activity.release_may_settle(now), "120 s with no progress: the engine's own stall rule");
+    let now = s.awake() + Duration::from_secs(134);
+    assert!(!s.activity.release_may_settle(now), "a 134 s pause is no stall");
+    let now = s.awake() + Duration::from_secs(135);
+    assert!(s.activity.release_may_settle(now), "135 s with no progress: the engine's 120 s rule + margin");
     s.saved();
-    let now = s.now;
-    assert!(s.activity.release_may_settle(now), "answered: settles at once");
+    let idle = serde_json::json!({"type": "save_progress", "stalled_for": 0}); // the saver is empty now
+    let now = s.awake();
+    s.activity.on_engine_event(&idle, 0.0, now);
+    assert!(s.activity.release_may_settle(now), "answered (and the saver empty): settles at once");
 }
 
 /// R2-detect-r10-p2-2: the old-engine refusal reads like the other refusals (under "Save failed").
@@ -294,4 +297,25 @@ fn the_privacy_hold_refusal_names_the_app_only() {
     s.seen(app_ev("Discord", 30, 0x30, false));
     s.run_to(5_500);
     assert_eq!(s.planner.privacy_refusal().as_deref(), Some("Discord.exe is no longer recorded"));
+}
+
+/// Gate p5-1: a save that has written past its cap (>= 10 min) is still in flight: a privacy
+/// stop releases the engine and waits for it, never the plain quit that cuts it.
+#[test]
+fn a_privacy_stop_waits_for_a_save_already_past_its_cap() {
+    use std::time::Duration;
+    let mut s = recording_discord();
+    s.run_to(5_000);
+    assert!(s.save());
+    for k in 1..=132u64 {
+        s.now += Duration::from_secs(5); // 11 min of a save still writing (the engine's status)
+        let ev = serde_json::json!({"type": "status", "save_writing": {"bytes": k, "queued": 0, "step": k}});
+        let now = s.awake();
+        s.activity.on_engine_event(&ev, 0.0, now);
+    }
+    s.seen(app_ev("Discord", 30, 0x30, false));
+    let mark = s.now - Duration::from_millis(1);
+    s.tick();
+    assert_eq!(s.released.len(), 1, "released for the save past its cap");
+    assert!(s.ring_kept_since(mark), "no quit under it");
 }

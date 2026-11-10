@@ -273,8 +273,8 @@ impl SessionHost for Controller {
 
 impl Controller {
     /// Apply the replay-save hold on the shared session window, even while quitting.
-    pub(crate) fn session_end_tick(&mut self, now: Instant) {
-        let saving = self.activity.saves_writing(now);
+    pub(crate) fn session_end_tick(&mut self, _now: Instant) {
+        let saving = self.activity.saves_writing(self.clock.awake());
         if let Some(on) = self.block_reason.update(saving) {
             SAVE_BLOCKING.store(on, Ordering::Release);
             update_shutdown_reason();

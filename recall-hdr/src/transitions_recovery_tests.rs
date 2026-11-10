@@ -70,7 +70,7 @@ fn recovered_once(spy: &Spy, what: &str) {
 
 /// `encoder_recover_tick`'s inputs once a second from `t0`: (encoder state, heartbeat) per
 /// second; the second its `Recovery::Restart` came, if one did by `to`.
-fn first_restart(r: &mut EncoderRecovery, spy: &Spy, t0: Instant, to: u64, hold: Hold, at: impl Fn(u64) -> (&'static str, u64)) -> Option<u64> {
+fn first_restart(r: &mut EncoderRecovery, spy: &Spy, t0: crate::awake_clock::Awake, to: u64, hold: Hold, at: impl Fn(u64) -> (&'static str, u64)) -> Option<u64> {
     let wanted = spy.sim.wanted();
     (0..=to).find(|&s| {
         let (encoder, beat) = at(s);
@@ -84,7 +84,7 @@ fn first_restart(r: &mut EncoderRecovery, spy: &Spy, t0: Instant, to: u64, hold:
 #[test]
 fn a_hung_engine_during_a_long_recording_restarts_as_a_recovery() {
     let mut spy = in_game();
-    let (t0, mut r) = (spy.sim.now, EncoderRecovery::default());
+    let (t0, mut r) = (spy.sim.awake(), EncoderRecovery::default());
     let hold = Hold { long_rec: true, ..Hold::default() };
     let hung = first_restart(&mut r, &spy, t0, 120, hold, |s| ("recording", s.min(20))).expect("the hang is seen");
     let lines = recovery_restart(&mut spy, true);
@@ -101,7 +101,7 @@ fn a_hung_engine_during_a_long_recording_restarts_as_a_recovery() {
 #[test]
 fn a_lasting_encoder_failure_restarts_as_a_recovery() {
     let mut spy = in_game();
-    let (t0, mut r) = (spy.sim.now, EncoderRecovery::default());
+    let (t0, mut r) = (spy.sim.awake(), EncoderRecovery::default());
     let failed = first_restart(&mut r, &spy, t0, 60, Hold::default(), |s| ("failed", s * 10));
     assert!(failed.is_some_and(|s| s > 15), "restart after the 15 s grace: {failed:?}");
     assert_eq!(recovery_restart(&mut spy, false), Vec::<String>::new());

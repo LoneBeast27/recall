@@ -26,7 +26,6 @@
 //! the requesting client only. Recording changes also broadcast a `session`
 //! `notice` (`record_notice`) while `overlay.enabled`.
 
-use std::time::Instant;
 
 use serde_json::{json, Value};
 
@@ -60,7 +59,8 @@ impl SavePort for ControllerSave<'_> {
         self.ctl.supervisor.send_engine_line(line)
     }
     fn mark_pending(&mut self) {
-        self.ctl.activity.save_sent(std::time::Instant::now());
+        let now = self.ctl.awake();
+        self.ctl.activity.save_sent(now);
     }
     fn announce(&mut self, seconds: u32) {
         self.ctl.hub.event("session", &saving_event(seconds));
@@ -95,7 +95,7 @@ impl Controller {
                 self.ask_quit(crate::record_quit::QuitReason::ControlPipe, crate::record_quit_wait::quit_force(&val));
                 // The installer reads this to wait only while a clip is being finished.
                 let saved = crate::record_quit_save::wants_save_first(&val).then(|| self.save_before_quit());
-                let mut fields = self.finishing_now(Instant::now());
+                let mut fields = self.finishing_now();
                 if let Some(saved) = saved {
                     crate::record_quit_wait::merge_fields(&mut fields, saved);
                 }
@@ -198,7 +198,7 @@ impl Controller {
         if let Some(reason) = capture_refusal(self.paused, self.engine_running(), &self.wanted()) {
             return self.refuse_capture("save_clip", reason);
         }
-        if let Some(reason) = self.planner.privacy_refusal() {
+        if let Some(reason) = self.planner.privacy_command_refusal("save_clip", self.activity.is_recording()) {
             return self.refuse_capture("save_clip", &reason);
         }
         let draining = self.planner.drain().is_some();

@@ -28,7 +28,7 @@ impl Worker {
     /// One job: failed at once after a quit, else written (a panicking stage fails it).
     pub(super) fn take(&mut self, job: &SaveJob) {
         if self.abort.load(Relaxed) {
-            self.events.save_failed(QUIT_BEFORE_START);
+            self.fail(QUIT_BEFORE_START);
             return;
         }
         self.progress.new_job();
@@ -39,7 +39,15 @@ impl Worker {
             if let Some(part) = self.current.lock().unwrap_or_else(|p| p.into_inner()).take() {
                 let _ = std::fs::remove_file(part);
             }
-            self.events.save_failed("internal error while writing the clip");
+            self.fail("internal error while writing the clip");
+        }
+    }
+
+    /// A save failed: answered, unless the drain already answered every save in flight
+    /// when it gave them up (`SaveProgress::given_up`, design-detect-release P6).
+    pub(super) fn fail(&self, reason: &str) {
+        if !self.progress.given_up.load(Relaxed) {
+            self.events.save_failed(reason);
         }
     }
 }

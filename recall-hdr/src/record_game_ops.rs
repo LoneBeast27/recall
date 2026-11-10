@@ -128,11 +128,21 @@ pub(crate) fn offer_retired(cfg: &Config, offered: &str) -> bool {
     override_kind(cfg, offered).is_some() || is_fullscreen_game(cfg, offered)
 }
 
+/// The exe a `register_game` names, trimmed and non-empty. An exe name only, no folders,
+/// except for Remove / Unlist (R2-detect-r10-p5-3): they take an existing entry's stored
+/// string as it is (a hand-edited path) and drop only an entry that matches it; a path can
+/// never be added.
+pub(crate) fn command_exe(exe: Option<&str>, op: GameOp) -> Option<&str> {
+    let exe = exe.map(str::trim).filter(|e| !e.is_empty())?;
+    let clears = matches!(op, GameOp::Remove | GameOp::Unlist);
+    (clears || !exe.contains(['\\', '/'])).then_some(exe)
+}
+
 impl Controller {
     /// `register_game` from the pipe: one app's op against the current file config.
     pub(crate) fn register_game(&mut self, val: &Value, client: Option<u64>) {
-        let exe = val.get("exe").and_then(Value::as_str).map(str::trim).filter(|e| !e.is_empty() && !e.contains(['\\', '/']));
         let op = val.get("how").and_then(Value::as_str).and_then(GameOp::parse);
+        let exe = op.and_then(|op| command_exe(val.get("exe").and_then(Value::as_str), op));
         let (Some(exe), Some(op)) = (exe, op) else {
             return self.reply_error(client, "register_game needs \"exe\" (an exe name, no folders) and \"how\": record|never|fullscreen|remove|unlist");
         };

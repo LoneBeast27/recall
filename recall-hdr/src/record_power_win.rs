@@ -17,7 +17,10 @@ use windows::Win32::UI::WindowsAndMessaging::{PostThreadMessageW, WM_NULL};
 
 use crate::log;
 use crate::record_app::Controller;
-use crate::record_power::{enqueue, PowerAction, PowerEvent, Registration};
+use crate::awake_clock::Awake;
+use crate::record_activity::EngineActivity;
+use crate::record_power::{enqueue, PowerAction, PowerPlanner, Registration};
+use crate::record_power_host::PowerHost;
 
 /// `DEVICE_NOTIFY_CALLBACK`: the recipient is a `DEVICE_NOTIFY_SUBSCRIBE_PARAMETERS`.
 const DEVICE_NOTIFY_CALLBACK: u32 = 2;
@@ -97,30 +100,37 @@ fn take() -> Vec<u32> {
     std::mem::take(&mut *lock(&PENDING))
 }
 
-impl Controller {
-    /// Pump step: act on the sleep/resume notices that arrived since the last tick.
-    /// A resume's restart waits while the engine is still writing a save (it would abort it).
-    pub(crate) fn power_tick(&mut self, now: std::time::Instant) {
-        let mut asked = Vec::new();
-        for event in take().into_iter().filter_map(PowerEvent::from_pbt) {
-            let recording = self.activity.is_recording();
-            log!("record: power notice {event:?} (long recording running: {recording})");
-            if event == PowerEvent::Resume {
-                self.activity.resumed(now);
-            }
-            asked.extend(self.power.on_event(event, recording));
-        }
-        let was_held = self.power.held();
-        let saving = self.activity.saves_writing(now);
-        let actions = self.power.gate(asked, saving);
-        if self.power.held() && !was_held {
-            log!("record: resumed from sleep -- engine restart deferred until the save being written ends");
-        }
-        for action in actions {
-            self.apply_power_action(action, now);
-        }
+/// The controller as the host of the sleep/resume rules (`record_power_host::power_tick`,
+/// run by the pump before `tick`).
+impl PowerHost for Controller {
+    fn power_notices(&mut self) -> Vec<u32> {
+        take()
     }
+    fn power_planner(&mut self) -> &mut PowerPlanner {
+        &mut self.power
+    }
+    fn power_activity(&mut self) -> &mut EngineActivity {
+        &mut self.activity
+    }
+    fn power_awake(&self) -> Awake {
+        self.awake()
+    }
+    fn power_apply(&mut self, action: PowerAction) {
+        self.apply_power_action(action, std::time::Instant::now());
+    }
+    fn power_restart(&mut self) -> bool {
+        log!("record: resumed from sleep -- restarting the engine (fresh replay buffer)");
+        self.restart_engine(crate::record_restart::RestartReason::Resume) == crate::record_restart::Restarted::Now
+    }
+    fn power_hub_event(&mut self, line: &str) {
+        self.hub.event("engine", line);
+    }
+    fn power_log(&mut self, line: &str) {
+        log!("{line}");
+    }
+}
 
+impl Controller {
     fn apply_power_action(&mut self, action: PowerAction, now: std::time::Instant) {
         match action {
             PowerAction::StopRecording => {
@@ -131,8 +141,7 @@ impl Controller {
                 }
             }
             PowerAction::RestartEngine => {
-                log!("record: resumed from sleep -- restarting the engine (fresh replay buffer)");
-                self.restart_engine(crate::record_restart::RestartReason::Resume); // waits for a drain
+                PowerHost::power_restart(self); // waits for a drain
             }
             PowerAction::Reprobe => {
                 self.last_fed = None;

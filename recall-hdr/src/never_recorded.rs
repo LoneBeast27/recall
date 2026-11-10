@@ -37,12 +37,14 @@ pub const SYSTEM_STEMS: &[&str] = &[
     "consent",
 ];
 
-/// `exe` (`Game.exe` or `game`, any case) is Recall or a part of Windows; an empty name too.
+/// `exe` (`Game.exe`, `game` or a full path, any case) is Recall or a part of Windows, or a
+/// screensaver (`*.scr`, gate p5-3); an empty name too.
 pub fn never_recordable(exe: &str) -> bool {
-    let exe = exe.trim();
-    let stem = match exe.len().checked_sub(4) {
-        Some(i) if exe.is_char_boundary(i) && exe[i..].eq_ignore_ascii_case(".exe") => &exe[..i],
-        _ => exe,
-    };
+    let name = exe.trim().rsplit(['\\', '/']).next().unwrap_or("").trim();
+    let ext = |e: &str| name.len().checked_sub(e.len()).filter(|&i| name.is_char_boundary(i) && name[i..].eq_ignore_ascii_case(e));
+    if ext(".scr").is_some() {
+        return true;
+    }
+    let stem = ext(".exe").map_or(name, |i| &name[..i]);
     stem.is_empty() || OWN_STEMS.iter().chain(SYSTEM_STEMS).any(|d| d.eq_ignore_ascii_case(stem))
 }

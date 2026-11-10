@@ -38,6 +38,7 @@
 mod hw_gate;
 mod cues;
 mod app;
+mod awake_clock;
 mod clamp;
 mod config;
 mod config_backup;
@@ -115,7 +116,9 @@ mod record_session;
 mod record_session_save;
 mod record_status;
 mod record_notice;
+mod record_plan;
 mod record_power;
+mod record_power_host;
 mod record_power_win;
 mod record_lock;
 mod record_session_end;
@@ -189,6 +192,10 @@ mod hub_pipe_tests;
 mod transitions_gate_tests;
 #[cfg(test)]
 mod transitions_privacy_tests;
+#[cfg(test)]
+mod transitions_release_tests;
+#[cfg(test)]
+mod transitions_power_tests;
 #[cfg(test)]
 mod transitions_scope_tests;
 #[cfg(test)]

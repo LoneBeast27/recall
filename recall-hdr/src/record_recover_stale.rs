@@ -22,7 +22,9 @@
 //! game, a locked session or a display that is off gets neither rule. The capture
 //! watchdog's own rule stays evidence-only (thread ended, start failed, restart asked).
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use crate::awake_clock::Awake;
 
 /// No heartbeat (or, on an older engine, no status line) this long: the engine hung.
 pub const HUNG_AFTER: Duration = Duration::from_secs(10);
@@ -46,23 +48,23 @@ pub enum Verdict {
 #[derive(Debug, Default)]
 pub struct EngineWatch {
     /// The last progress value and when it last changed (seen time).
-    progress: Option<(u64, Instant)>,
+    progress: Option<(u64, Awake)>,
     /// Since when the engine has been beating without a stall.
-    beating_since: Option<Instant>,
+    beating_since: Option<Awake>,
     /// This hang has had its restart.
     hang_restarted: bool,
     /// [`Verdict::HungAgain`] was said for it.
     again_said: bool,
     /// Visible time in "recovering", and the last visible look at it.
     recovering_seen: Duration,
-    last_look: Option<Instant>,
+    last_look: Option<Awake>,
 }
 
 impl EngineWatch {
     /// `state`: `record_status::session_state`; `progress`: the encoder heartbeat (or the
     /// status line count); `opening`: an NVENC open is in progress; `shown`: the game can
     /// be seen (`Sight::shown`).
-    pub fn observe(&mut self, state: &str, progress: u64, opening: bool, shown: bool, now: Instant) -> Option<Verdict> {
+    pub fn observe(&mut self, state: &str, progress: u64, opening: bool, shown: bool, now: Awake) -> Option<Verdict> {
         self.bound_clock(state, shown, now);
         if !matches!(state, "recording" | "degraded" | "recovering") || !shown {
             self.progress = None;
@@ -91,7 +93,7 @@ impl EngineWatch {
     }
 
     /// The engine has beaten without a stall for [`HEALTHY_AFTER`] (it works again).
-    pub fn healthy(&self, now: Instant) -> bool {
+    pub fn healthy(&self, now: Awake) -> bool {
         self.beating_since.is_some_and(|since| now.duration_since(since) >= HEALTHY_AFTER)
     }
 
@@ -107,7 +109,7 @@ impl EngineWatch {
         self.progress = None;
     }
 
-    fn bound_clock(&mut self, state: &str, shown: bool, now: Instant) {
+    fn bound_clock(&mut self, state: &str, shown: bool, now: Awake) {
         if state != "recovering" {
             self.recovering_seen = Duration::ZERO;
             self.last_look = None;
@@ -130,7 +132,7 @@ mod tests {
 
     /// One look per second `0..=to`: (state, progress, shown); the verdicts by second.
     fn run(to: u64, at: impl Fn(u64) -> (&'static str, u64, bool)) -> Vec<(u64, Verdict)> {
-        let t0 = Instant::now();
+        let t0 = Awake::ZERO;
         let mut w = EngineWatch::default();
         (0..=to)
             .filter_map(|s| {
@@ -156,7 +158,7 @@ mod tests {
         assert_eq!(run(200, |_| ("recovering", 7, false)), []);
         assert_eq!(run(200, |_| ("starting", 7, true)), []);
         assert_eq!(run(25, |s| ("recording", 7, s >= 10)), [(20, Verdict::Hung)], "counts from the return");
-        let t0 = Instant::now();
+        let t0 = Awake::ZERO;
         let mut w = EngineWatch::default();
         let opening: Vec<u64> = (0..=30).filter(|&s| w.observe("recovering", 7, true, true, t0 + Duration::from_secs(s)).is_some()).collect();
         assert_eq!(opening.first(), Some(&20), "an open in progress gets 20 s");
