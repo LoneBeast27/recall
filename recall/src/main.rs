@@ -37,6 +37,7 @@ mod audio;
 #[cfg(feature = "encode")]
 mod audio_clock;
 mod bookmarks;
+mod user_dirs;
 mod border;
 mod capture;
 mod capture_watchdog;
@@ -80,10 +81,12 @@ mod single_instance;
 mod spill;
 mod stdin_reader;
 mod file_id;
+mod same_bytes;
 mod win_volume;
 mod thread_qos;
 mod source;
 mod stdin_commands;
+mod stop_capture;
 #[cfg(test)]
 mod test_alloc;
 
@@ -325,6 +328,7 @@ impl ApplicationHandler for App {
                 live_sources: true,
                 live_source_fields: true,
                 sync_hold: true,
+                stop_capture: true,
             });
         }
         if let Some(early) = early_stdin {
@@ -485,6 +489,6 @@ fn main() {
     }
     #[cfg(feature = "encode")]
     if let Some(encoder) = app.encoder.take() {
-        encoder.shutdown(std::time::Duration::from_secs(3), stdin_reader::orphaned());
+        encoder.shutdown(std::time::Duration::from_secs(3), stdin_reader::saves_finish());
     }
 }

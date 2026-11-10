@@ -2,33 +2,11 @@
 
 use super::*;
 
-/// `%TEMP%\recall-staging-<tag>-<uuid>`, removed when the guard drops, also when the test
-/// panics (a failing run left 3-6 MB folders behind).
-struct Scratch(PathBuf);
+use crate::encoder::test_scratch::Scratch;
 
-impl Drop for Scratch {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-impl std::ops::Deref for Scratch {
-    type Target = PathBuf;
-    fn deref(&self) -> &PathBuf {
-        &self.0
-    }
-}
-
-impl AsRef<Path> for Scratch {
-    fn as_ref(&self) -> &Path {
-        &self.0
-    }
-}
-
+/// `%TEMP%\recall-staging-<tag>-<uuid>`, removed when the guard drops, also on a panic.
 fn temp_dir(tag: &str) -> Scratch {
-    let dir = std::env::temp_dir().join(format!("recall-staging-{tag}-{}", uuid::Uuid::new_v4().simple()));
-    std::fs::create_dir_all(&dir).unwrap();
-    Scratch(dir)
+    crate::encoder::test_scratch::scratch("recall-staging", tag)
 }
 
 #[test]
@@ -333,6 +311,26 @@ fn a_full_length_clip_with_other_bytes_keeps_its_copy_and_a_busy_clip_is_asked_a
     assert_eq!(hand_back(&stage, &out).deleted, 1);
     assert!(!busy.exists());
     let _ = (std::fs::remove_dir_all(&stage), std::fs::remove_dir_all(&out));
+}
+
+#[test]
+fn a_clip_whose_middle_differs_keeps_its_copy() {
+    // Head (64 KiB) and tail (1 MiB) match, one byte in the middle does not: the copy may be the
+    // only whole version, so it is set aside, never deleted.
+    use super::super::staging_kept::{hand_back, LEAKED_DIR};
+    let (stage, out) = (temp_dir("kept-middle"), temp_dir("kept-middle-out"));
+    let kept_dir = stage.join(super::mover::KEPT_DIR);
+    std::fs::create_dir_all(&kept_dir).unwrap();
+    let name = "M__2026-11-07__12-00-00-000__mm.mp4";
+    let kept = kept_dir.join(name);
+    std::fs::write(&kept, vec![7u8; 3 << 20]).unwrap();
+    std::fs::write(format!("{}:{}", kept.display(), super::mover::KEPT_MARK), b"").unwrap();
+    let mut clip = vec![7u8; 3 << 20];
+    clip[3 << 19] = 0;
+    std::fs::write(out.join(name), &clip).unwrap();
+    let done = hand_back(&stage, &out);
+    assert_eq!(done.deleted, 0, "the only whole copy was deleted");
+    assert!(kept_dir.join(LEAKED_DIR).join(name).is_file(), "set aside, not deleted");
 }
 
 #[test]

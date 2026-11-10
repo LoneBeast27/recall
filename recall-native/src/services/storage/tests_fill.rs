@@ -60,22 +60,24 @@ fn the_copy_arrives_whole_and_lands_under_its_cache_name() {
 #[test]
 fn a_read_past_the_copy_moves_it_and_gets_real_bytes() {
     let dir = scratch("jump");
-    let bytes = 40 * CHUNK as usize;
+    let chunks = 40u64;
+    let bytes = (chunks * CHUNK) as usize;
     let (source, modified) = clip(&dir, bytes);
-    // 40 MiB/s: 4 MiB takes 100 ms, so the far end is seconds away in file order.
+    // 40 MiB/s: 4 MiB takes 100 ms, so the last chunk is ~4 s away in file order.
     let fill = fill(&dir, &source, bytes as u64, modified, 40 << 20);
     fill.start(&[0]).unwrap();
     assert!(fill.wait_for(0, 1, true));
-    let far = 30 * CHUNK + 1000;
-    let started = std::time::Instant::now();
+    // Read in the last chunk. Copying in file order, it lands last of all, with no hole left;
+    // jumped to, it lands while the chunks before it are still missing. Judged on the copy's
+    // own progress, not the wall clock, so a loaded machine cannot fail it.
+    let far = (chunks - 1) * CHUNK + 1000;
     assert!(fill.wait_for(far, far + 5000, true));
-    assert!(started.elapsed() < Duration::from_secs(1), "took {:?}", started.elapsed());
+    let holes = fill.holes();
+    assert!(holes.first().is_some_and(|hole| hole.0 < far), "the copy reached the far read in file order: {holes:?}");
     assert_eq!(read_all(&fill, far, 5000), pattern(bytes)[far as usize..far as usize + 5000]);
     assert!(fill.has(far, far + 1));
-    assert!(!fill.has(10 * CHUNK, 11 * CHUNK), "the copy jumped over this part");
-    let holes = fill.holes();
-    assert!(holes.first().is_some_and(|hole| hole.0 < far), "{holes:?}");
     assert!(fill.wait_done(), "the copy wraps round to what it skipped");
+    assert!(fill.holes().is_empty());
 }
 
 #[test]
@@ -206,9 +208,12 @@ fn paced_copying_never_stops_and_a_stopped_reader_is_served_at_once() {
     fill.pace(true);
     fill.start(&[0]).unwrap();
     assert!(fill.wait_for(0, 1, true));
-    let asked = Instant::now();
-    assert!(fill.wait_for(10 * CHUNK, 10 * CHUNK + 1, true), "a stopped reader gets its part");
-    assert!(asked.elapsed() < Duration::from_millis(600), "its part is not paced: {:?}", asked.elapsed());
+    // The last chunk: paced in file order it lands last, with nothing missing; served at once
+    // it lands while the paced copy is still far behind. Judged on progress, not the clock.
+    let last = 11 * CHUNK;
+    assert!(fill.wait_for(last, last + 1, true), "a stopped reader gets its part");
+    let holes = fill.holes();
+    assert!(holes.first().is_some_and(|hole| hole.0 < last), "its part waited for the paced copy: {holes:?}");
     assert!(fill.wait_done(), "a paced fill finishes on its own");
     assert_eq!(fill.outcome(), Outcome::Done);
     assert_eq!(std::fs::read(fill.target()).unwrap(), pattern(bytes));
@@ -346,3 +351,21 @@ fn a_fill_owns_its_part_before_the_file_exists() {
     assert!(!super::in_use(&part), "released with the fill");
 }
 
+
+#[test]
+fn a_direct_fill_never_opens_its_source_for_write() {
+    // A direct fill's part IS the source clip: start() opened it for write and finish() would
+    // set_len it (here 100 bytes short of the file) and stamp it.
+    let dir = scratch("direct-write");
+    let bytes = CHUNK as usize + 5000;
+    let (source, modified) = clip(&dir, bytes);
+    let fill = ClipFill::direct(&source, bytes as u64 - 100, modified, 0);
+    assert!(fill.start(&[0]).is_err(), "start opened the source clip for write");
+    let (input, output) = (std::fs::File::open(&source).unwrap(), std::fs::OpenOptions::new().write(true).open(&source).unwrap());
+    let mut reader = reader::Reader::new(input, output);
+    assert!(fill.finish(&mut reader).is_err(), "finish ran on the source clip");
+    drop(reader);
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(std::fs::read(&source).unwrap(), pattern(bytes), "the source clip is untouched");
+    assert_eq!(source.metadata().unwrap().modified().unwrap(), modified);
+}

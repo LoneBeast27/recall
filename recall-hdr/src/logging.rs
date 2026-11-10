@@ -127,12 +127,12 @@ static LOGGER: OnceLock<Logger> = OnceLock::new();
 
 /// Resolve `%APPDATA%\recall-hdr\recall-hdr.log`, creating the directory.
 fn log_path() -> PathBuf {
-    let base = std::env::var("APPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    let dir = base.join("recall-hdr");
-    let _ = fs::create_dir_all(&dir);
-    dir.join("recall-hdr.log")
+    let base = crate::user_dirs::appdata().unwrap_or_else(std::env::temp_dir);
+    let path = crate::user_dirs::checked(base.join("recall-hdr").join("recall-hdr.log"));
+    if let Some(dir) = path.parent() {
+        let _ = fs::create_dir_all(dir);
+    }
+    path
 }
 
 /// Initialize the global logger. Safe to call more than once (subsequent calls

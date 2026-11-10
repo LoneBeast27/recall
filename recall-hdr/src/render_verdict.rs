@@ -5,7 +5,7 @@
 //! Evidence (2026-11-05, `.planning/DETECT_RENDER.md`):
 //! - VALORANT with Recall's island up, PresentMon 2026-11-01 (336 s): 244,629
 //!   frames `Hardware: Independent Flip`, 12 `Hardware Composed`, and 39,652
-//!   `Composed: Flip` in the stretches where Rohan had left the game window;
+//!   `Composed: Flip` in the stretches where the tester had left the game window;
 //!   every one of its 284,293 DXGI presents had `DXGI_PRESENT_ALLOW_TEARING`.
 //! - Every app on the desktop in a 10 s system-wide trace (Recall's UI,
 //!   DWM, steady-mic, Brave, Discord): DWM-composed only, 0 independent-flip

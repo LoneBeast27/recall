@@ -114,7 +114,13 @@ pub(super) fn run_pinned(command: &mut Command, limit: Duration, stop: &dyn Fn()
     watch(io_priority::spawn_pinned(command)?, limit, stop)
 }
 
-fn watch(mut child: std::process::Child, limit: Duration, stop: &dyn Fn() -> bool) -> io::Result<Output> {
+fn watch(child: std::process::Child, limit: Duration, stop: &dyn Fn() -> bool) -> io::Result<Output> {
+    watch_then(child, limit, stop, &|_| {})
+}
+
+/// [`watch`] that calls `killed` with the pid of a process it had to kill, after the kill and
+/// while its handle is still open (the pid can't be reused yet).
+pub(super) fn watch_then(mut child: std::process::Child, limit: Duration, stop: &dyn Fn() -> bool, killed: &dyn Fn(u32)) -> io::Result<Output> {
     let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
         return Err(io::Error::other("helper process has no pipes"));
     };
@@ -137,6 +143,7 @@ fn watch(mut child: std::process::Child, limit: Duration, stop: &dyn Fn() -> boo
         if late || stop() {
             let _ = child.kill();
             let _ = child.wait();
+            killed(child.id());
             break Err(io::Error::new(if late { io::ErrorKind::TimedOut } else { io::ErrorKind::Interrupted }, if late { "took too long" } else { "no longer needed" }));
         }
         std::thread::sleep(Duration::from_millis(50));

@@ -255,7 +255,7 @@ impl Root {
     /// Quick toggle for the in-game performance-stats island; pressed while it is on.
     fn render_stats_button(&self, cx: &mut Context<Self>) -> AnyElement {
         let on = self.stats_on();
-        ui::icon_button("stats-toggle", Icon::Sliders, 30., if on { theme::TEXT } else { theme::MUTED }, on)
+        ui::icon_button("stats-toggle", Icon::StatsOverlay, 30., if on { theme::TEXT } else { theme::MUTED }, on)
             .when(!on, |b| b.border_1().border_color(c(theme::BORDER)).bg(c(theme::RAISED)))
             .on_click(cx.listener(|this, _, _, cx| {
                 this.send(DaemonCommand::ToggleStats);

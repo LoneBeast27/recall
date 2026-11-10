@@ -253,7 +253,7 @@ pub struct HudCache {
 impl HudCache {
     /// `%APPDATA%\Recall\island-hud.json`.
     pub fn default_path() -> Option<PathBuf> {
-        std::env::var_os("APPDATA").map(|dir| PathBuf::from(dir).join("Recall").join("island-hud.json"))
+        crate::user_dirs::appdata().map(|dir| crate::user_dirs::checked(dir.join("Recall").join("island-hud.json")))
     }
 
     pub fn load(path: Option<PathBuf>) -> Self {

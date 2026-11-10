@@ -4,7 +4,7 @@
 //! | cmd | args | effect / reply |
 //! |---|---|---|
 //! | `status` | | session status + cached engine hello/status (+ legacy `hdr` status) to the caller |
-//! | `quit` | `force?` | stop recording and exit (the Recall app stays open). While a save is written the quit waits for it (`record_quit_wait`); a repeated plain `quit` joins that wait, `"force":true` stops now and loses the save. Reply: `session` `quitting{finishing_clip,finishing_progress}` |
+//! | `quit` | `force?` `save_first?` | stop recording and exit (the Recall app stays open). While a save is written the quit waits for it (`record_quit_wait`); a repeated plain `quit` joins that wait, `"force":true` stops now and loses the save. `"save_first":true` (an update) first stops a long recording and saves the replay buffer when recording is allowed (`record_quit_save`), and the wait holds for both. Reply: `session` `quitting{finishing_clip,finishing_progress}` (+ `was_recording,long_was_on,save_first` for `save_first`) |
 //! | `save_clip` | `seconds?` | engine save (default = `recording.buffer_secs`) + `session` `saving{seconds}` broadcast (the island's saving ring); no engine / paused -> `engine` `save_failed` |
 //! | `bookmark` | | engine bookmark (marks land in the next saves' `.recall-marks.json`) |
 //! | `screenshot` | | engine PNG -> `engine` `screenshot{path}`; refused -> `screenshot_failed` |
@@ -94,7 +94,12 @@ impl Controller {
                 log!("record: control quit");
                 self.ask_quit(crate::record_quit::QuitReason::ControlPipe, crate::record_quit_wait::quit_force(&val));
                 // The installer reads this to wait only while a clip is being finished.
-                let reply = crate::record_quit_wait::quitting_event(self.finishing_now(Instant::now()));
+                let saved = crate::record_quit_save::wants_save_first(&val).then(|| self.save_before_quit());
+                let mut fields = self.finishing_now(Instant::now());
+                if let Some(saved) = saved {
+                    crate::record_quit_wait::merge_fields(&mut fields, saved);
+                }
+                let reply = crate::record_quit_wait::quitting_event(fields);
                 self.hub.event_to(inbound.client, "session", &reply);
             }
             "save_clip" => match val.get("seconds") {
@@ -193,6 +198,9 @@ impl Controller {
         if let Some(reason) = capture_refusal(self.paused, self.engine_running(), &self.wanted()) {
             return self.refuse_capture("save_clip", reason);
         }
+        if let Some(reason) = self.planner.privacy_refusal() {
+            return self.refuse_capture("save_clip", &reason);
+        }
         let draining = self.planner.drain().is_some();
         log!("record: save last {secs}s{}", if draining { " (game closed: ends at its last frame)" } else { "" });
         // Queued FIRST: only a save the engine will see is marked pending and cued.
@@ -206,7 +214,7 @@ impl Controller {
             match effect {
                 Effect::Refused(reason) => {
                     log!("record: {cmd} not sent: {reason}");
-                    if self.cfg.overlay.enabled {
+                    if self.cfg.overlay.shows_notices() {
                         self.hub.event("session", &crate::record_notice::shortcut_notice_json(title, reason, true, false));
                     }
                     crate::supervisor::beep_failure();
@@ -259,7 +267,7 @@ impl Controller {
         // The mute stays our intent either way: the next engine gets it (`reapply_engine_intents`).
         if let Some(reason) = refusal(&mic_effects(sent)).filter(|_| self.engine_running()) {
             log!("record: microphone change not sent: {reason}");
-            if self.cfg.overlay.enabled {
+            if self.cfg.overlay.shows_notices() {
                 self.hub.event("session", &crate::record_notice::shortcut_notice_json("Microphone not changed", reason, true, false));
             }
             crate::supervisor::beep_failure();
@@ -272,13 +280,14 @@ impl Controller {
 
     fn set_ac_profile(&mut self, client: Option<u64>, val: &Value) {
         let variant = val.get("variant").and_then(Value::as_str).unwrap_or("");
-        let Some(profile) = hdr_exec::ac_profile_file(variant) else {
-            return self.reply_error(client, &format!("unknown set_ac_profile variant '{variant}' (expected punchy | accurate)"));
+        let profile = match hdr_exec::ac_profile_file(&self.cfg.display, variant) {
+            Ok(profile) => profile,
+            Err(e) => return self.reply_error(client, &e),
         };
         if let Err(e) = self.hdr.ready() {
             return self.reply_error(client, &e);
         }
-        let result = self.hdr.set_ac_profile(&self.cfg, profile);
+        let result = self.hdr.set_ac_profile(&self.cfg, &profile);
         self.hub.event("hdr", &hdr_exec::ac_profile_event(&result));
     }
 
@@ -294,7 +303,9 @@ impl Controller {
         }
         if old.behavior.hdr_auto != new.behavior.hdr_auto {
             if new.behavior.hdr_auto {
-                if let Err(e) = self.hdr.activate(&new) {
+                // A client's set_config is the user's own switch (its label explains); a hand edit is not.
+                let origin = if client.is_some() { crate::system_notice::Origin::UserAction } else { crate::system_notice::Origin::Automatic };
+                if let Err(e) = self.hdr.activate(&new, origin) {
                     log!("record: HDR management could not start: {e}");
                 }
             } else {

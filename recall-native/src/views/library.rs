@@ -343,12 +343,11 @@ impl Root {
 }
 
 impl Root {
-    /// Selected clips that live in an imported folder (Delete only removes them from Recall).
+    /// Selected clips Delete only removes from Recall: the delete's own partition, so the
+    /// question never promises the Recycle Bin for a clip that would only be hidden.
     fn imported_in_selection(&self) -> usize {
-        let recordings = crate::backend::library_dir_from(&self.folders);
-        self.lib.selection.iter().filter(|p| !crate::services::library::imports::is_owned(
-            std::path::Path::new(p), &recordings, &self.folders.former_recordings
-        )).count()
+        let clips: Vec<std::path::PathBuf> = self.lib.selection.iter().map(std::path::PathBuf::from).collect();
+        crate::services::library::imported_count(&clips, &self.folders)
     }
 }
 

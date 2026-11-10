@@ -6,7 +6,9 @@
 //!   [`STOP_WAIT`] for `recording_stopped` before answering. The session window holds a query while a replay save is writing.
 //! - `WM_ENDSESSION` (the session really ends): the controller's clean shutdown runs before
 //!   the handler returns, the engine quit capped at [`SESSION_END_GRACE`] (Windows may end the
-//!   process as soon as the handler returns).
+//!   process as soon as the handler returns). With a replay save still being written, the
+//!   handler first waits it out with the quit's bounded wait (`record_quit_wait`): a save that
+//!   is still not saved when the wait gives up is reported "Recall was closed during the save".
 //!
 //! - `WM_ENDSESSION` with `fEnding` FALSE (another app cancelled the shutdown): a long
 //!   recording the query stopped (or one still starting then) starts again in a new file,
@@ -81,6 +83,9 @@ pub enum EndAction {
     Shutdown(Duration),
     /// The shutdown was cancelled: start the long recording again, with the notice.
     Restart,
+    /// The session really ends while a replay save is written: wait for it with the quit's
+    /// bounded wait (60 s, on while it grows, its hold cap), reporting it lost if it gives up.
+    FinishSaves,
 }
 
 /// The long recording as a session-end query finds it.
@@ -90,25 +95,32 @@ pub enum LongState {
     Idle,
     /// Running or starting, no stop sent.
     Running,
-    /// A `record_stop` is on its way (the user's, a pause, a retarget, sleep, or ours).
+    /// Someone else's `record_stop` is on its way (the user's, a pause, a retarget, sleep).
     Stopping,
+    /// The `record_stop` on its way is the one a session-end query sent (an earlier query's,
+    /// its wait timed out): a cancel still restarts that recording.
+    OurStop,
 }
 
 impl LongState {
-    /// From the controller's activity: a recording running or starting, a stop on its way.
-    pub fn of(recording_or_starting: bool, stop_in_flight: bool) -> Self {
-        match (recording_or_starting, stop_in_flight) {
-            (false, _) => LongState::Idle,
-            (true, false) => LongState::Running,
-            (true, true) => LongState::Stopping,
+    /// From the controller's activity: a recording running or starting, a stop on its way,
+    /// and whether that stop is the session end's own (`EngineActivity::stop_is_ours`).
+    pub fn of(recording_or_starting: bool, stop_in_flight: bool, ours: bool) -> Self {
+        match (recording_or_starting, stop_in_flight, ours) {
+            (false, _, _) => LongState::Idle,
+            (true, false, _) => LongState::Running,
+            (true, true, false) => LongState::Stopping,
+            (true, true, true) => LongState::OurStop,
         }
     }
 }
 
-/// A cancel's restart went out: the engine was idle before it and is starting now (a refused
-/// start, one the engine is not reading, or one sent to a recording still running is not).
-pub fn start_went_out(was_idle: bool, starting_now: bool) -> bool {
-    was_idle && starting_now
+/// A cancel's restart went out: the engine got the `record_start` (`queued`), and nothing it
+/// would ignore it for ran before (`before`: a recording running with no stop on its way).
+/// A stop still in flight (the query's wait timed out) is no reason: the engine takes the
+/// stop, then this start. A refused start, or one the engine is not reading, is not out.
+pub fn start_went_out(before: LongState, queued: bool) -> bool {
+    queued && before != LongState::Running
 }
 
 /// What a session end has done so far.
@@ -121,14 +133,18 @@ pub struct SessionEnd {
 impl SessionEnd {
     /// `WM_QUERYENDSESSION`: a long recording running or starting is stopped and saved before
     /// the answer, and only that one is restarted on a cancel. One already stopping (a stop
-    /// the user or Recall sent) is waited for but never restarted; with none, nothing.
+    /// the user or Recall sent) is waited for but never restarted; with none, nothing. Our
+    /// own stop still on its way (an earlier query's) is waited for and keeps its restart.
     pub fn on_query_end(&mut self, long: LongState) -> Vec<EndAction> {
         match long {
             LongState::Idle => {
                 self.stopped_at_query = false; // a stale arm (the recording ended since) restarts nothing
                 Vec::new()
             }
-            LongState::Stopping => vec![EndAction::Block(BLOCK_REASON), EndAction::WaitStopped(STOP_WAIT), EndAction::Unblock],
+            LongState::Stopping | LongState::OurStop => {
+                self.stopped_at_query &= long == LongState::OurStop; // someone else's stop: never undone
+                vec![EndAction::Block(BLOCK_REASON), EndAction::WaitStopped(STOP_WAIT), EndAction::Unblock]
+            }
             LongState::Running => {
                 self.stopped_at_query = true;
                 vec![EndAction::Block(BLOCK_REASON), EndAction::StopRecording, EndAction::WaitStopped(STOP_WAIT), EndAction::Unblock]
@@ -143,7 +159,10 @@ impl SessionEnd {
                 self.stopped_at_query = false;
                 Vec::new()
             }
-            LongState::Stopping => Vec::new(),
+            LongState::Stopping | LongState::OurStop => {
+                self.stopped_at_query &= long == LongState::OurStop;
+                Vec::new()
+            }
             LongState::Running => {
                 self.stopped_at_query = true;
                 vec![EndAction::StopRecording]
@@ -151,11 +170,13 @@ impl SessionEnd {
         }
     }
 
-    /// `WM_ENDSESSION`: shut down cleanly when the session really ends; when it was
-    /// cancelled, restart a recording the query stopped.
-    pub fn on_end(&mut self, ending: bool) -> Vec<EndAction> {
+    /// `WM_ENDSESSION`: shut down cleanly when the session really ends, after a replay save
+    /// being written (`saving`) is finished; when it was cancelled, restart a recording the
+    /// query stopped.
+    pub fn on_end(&mut self, ending: bool, saving: bool) -> Vec<EndAction> {
         let stopped = std::mem::take(&mut self.stopped_at_query);
         match (ending, stopped) {
+            (true, _) if saving => vec![EndAction::FinishSaves, EndAction::Shutdown(SESSION_END_GRACE)],
             (true, _) => vec![EndAction::Shutdown(SESSION_END_GRACE)],
             (false, true) => vec![EndAction::Restart],
             (false, false) => Vec::new(),
@@ -224,8 +245,20 @@ mod tests {
     fn a_shutdown_with_no_recording_does_nothing_until_the_session_ends() {
         let mut end = SessionEnd::default();
         assert_eq!(end.on_query_end(LongState::Idle), vec![]);
-        assert_eq!(end.on_end(false), vec![], "a cancelled shutdown with nothing stopped");
-        assert_eq!(end.on_end(true), vec![EndAction::Shutdown(SESSION_END_GRACE)]);
+        assert_eq!(end.on_end(false, false), vec![], "a cancelled shutdown with nothing stopped");
+        assert_eq!(end.on_end(true, false), vec![EndAction::Shutdown(SESSION_END_GRACE)]);
+    }
+
+    /// F-overlay-1 (P1): a real session end while a replay save is written finishes the save
+    /// (bounded) before the 3 s shutdown; a cancel while saving changes nothing.
+    #[test]
+    fn a_real_session_end_during_a_save_finishes_it_first() {
+        assert_eq!(SessionEnd::default().on_end(true, true), vec![EndAction::FinishSaves, EndAction::Shutdown(SESSION_END_GRACE)]);
+        assert_eq!(SessionEnd::default().on_end(true, false), vec![EndAction::Shutdown(SESSION_END_GRACE)]);
+        assert_eq!(SessionEnd::default().on_end(false, true), vec![], "cancelled: nothing to finish");
+        let mut end = SessionEnd::default();
+        end.on_query_end(LongState::Running);
+        assert_eq!(end.on_end(false, true), vec![EndAction::Restart], "a cancel still restarts the stopped recording");
     }
 
     /// Gate 20b P1: a shutdown another app cancels restarts the recording the query stopped.
@@ -233,12 +266,12 @@ mod tests {
     fn a_cancelled_shutdown_restarts_the_recording_the_query_stopped_once() {
         let mut end = SessionEnd::default();
         assert!(end.on_query_end(LongState::Running).contains(&EndAction::StopRecording));
-        assert!(!end.on_query_end(LongState::Stopping).contains(&EndAction::StopRecording), "a second query while our stop runs");
-        assert_eq!(end.on_end(false), vec![EndAction::Restart]);
-        assert_eq!(end.on_end(false), vec![], "one restart per stop");
+        assert!(!end.on_query_end(LongState::OurStop).contains(&EndAction::StopRecording), "a second query while our stop runs");
+        assert_eq!(end.on_end(false, false), vec![EndAction::Restart]);
+        assert_eq!(end.on_end(false, false), vec![], "one restart per stop");
         end.on_late_query_end(LongState::Running);
-        assert_eq!(end.on_end(true), vec![EndAction::Shutdown(SESSION_END_GRACE)], "a real end never restarts");
-        assert_eq!(end.on_end(false), vec![]);
+        assert_eq!(end.on_end(true, false), vec![EndAction::Shutdown(SESSION_END_GRACE)], "a real end never restarts");
+        assert_eq!(end.on_end(false, false), vec![]);
     }
 
     /// Gate 20b v3 P1: a stop the user (or a pause / retarget / sleep) sent before the query
@@ -247,9 +280,9 @@ mod tests {
     fn a_stop_already_in_flight_at_the_query_is_saved_but_never_restarted() {
         let mut end = SessionEnd::default();
         assert_eq!(end.on_query_end(LongState::Stopping), vec![EndAction::Block(BLOCK_REASON), EndAction::WaitStopped(STOP_WAIT), EndAction::Unblock]);
-        assert_eq!(end.on_end(false), vec![]);
+        assert_eq!(end.on_end(false, false), vec![]);
         assert_eq!(end.on_late_query_end(LongState::Stopping), vec![]);
-        assert_eq!(end.on_end(false), vec![]);
+        assert_eq!(end.on_end(false, false), vec![]);
     }
 
     /// Gate 20b v3 P2-1: a query that finds nothing recording clears an earlier arm.
@@ -258,22 +291,49 @@ mod tests {
         let mut end = SessionEnd::default();
         end.on_query_end(LongState::Running);
         end.on_query_end(LongState::Idle);
-        assert_eq!(end.on_end(false), vec![]);
+        assert_eq!(end.on_end(false, false), vec![]);
         end.on_late_query_end(LongState::Running);
         end.on_late_query_end(LongState::Idle);
-        assert_eq!(end.on_end(false), vec![]);
+        assert_eq!(end.on_end(false, false), vec![]);
     }
 
     /// Gate 20b v3 P2-2/P2-5 (the controller host's pieces): a stop in flight is Stopping, only
     /// an idle-to-starting change counts as the restart going out.
     #[test]
     fn the_controller_state_maps_and_only_a_real_start_counts() {
-        assert_eq!(LongState::of(false, true), LongState::Idle);
-        assert_eq!(LongState::of(true, false), LongState::Running);
-        assert_eq!(LongState::of(true, true), LongState::Stopping);
-        assert!(start_went_out(true, true));
-        assert!(!start_went_out(true, false), "refused / not read: no notice next to the failure beep");
-        assert!(!start_went_out(false, true), "already running or starting before");
+        assert_eq!(LongState::of(false, true, true), LongState::Idle);
+        assert_eq!(LongState::of(true, false, true), LongState::Running, "no stop in flight: nothing is ours");
+        assert_eq!(LongState::of(true, true, false), LongState::Stopping);
+        assert_eq!(LongState::of(true, true, true), LongState::OurStop);
+        assert!(start_went_out(LongState::Idle, true));
+        assert!(!start_went_out(LongState::Idle, false), "refused / not read: no notice next to the failure beep");
+        assert!(!start_went_out(LongState::Running, true), "already running or starting, no stop: the engine ignores it");
+    }
+
+    /// SPEC 26 A: the restart is reported from the send. After the query's 3 s wait timed out
+    /// (our stop still in flight) or after a respawn (a fresh engine, idle), a queued start
+    /// went out: the "continues" notice shows, no "could not start again".
+    #[test]
+    fn a_queued_restart_after_a_timed_out_wait_or_a_respawn_went_out() {
+        assert!(start_went_out(LongState::OurStop, true), "the wait timed out: the engine takes the stop, then this start");
+        assert!(start_went_out(LongState::Idle, true), "a respawned engine");
+        assert!(!start_went_out(LongState::OurStop, false), "not queued");
+    }
+
+    /// SPEC 26 B: an arm from an earlier query stays only while that query's own stop is in
+    /// flight; someone else's stop found by a later query (in the drain or late) clears it.
+    #[test]
+    fn a_later_query_finding_someone_elses_stop_clears_the_arm() {
+        let mut end = SessionEnd::default();
+        end.on_query_end(LongState::Running);
+        end.on_query_end(LongState::Stopping);
+        assert_eq!(end.on_end(false, false), vec![], "the user's stop is never undone");
+        end.on_query_end(LongState::Running);
+        end.on_late_query_end(LongState::Stopping);
+        assert_eq!(end.on_end(false, false), vec![], "late");
+        end.on_query_end(LongState::Running);
+        end.on_late_query_end(LongState::OurStop);
+        assert_eq!(end.on_end(false, false), vec![EndAction::Restart], "our own stop keeps its restart");
     }
 
     #[test]

@@ -54,7 +54,10 @@ impl Root {
     fn follow_recordings_folder(&mut self, dir: &str) {
         let before = crate::backend::library_dir();
         let old = self.folders.recordings.clone();
-        let kept_old = folders_sync::retarget(&mut self.folders, dir, None);
+        let kept_old = match folders_sync::retarget(&mut self.folders, dir, None) {
+            Ok(kept_old) => kept_old,
+            Err(why) => return self.refuse_linked_output(why),
+        };
         crate::backend::share_folders(&self.folders);
         let _ = self.folders.save();
         // A recorder pointed into the cache (by hand, or before this check existed) blocks it.
@@ -72,7 +75,10 @@ impl Root {
     /// The recorder took the folder the Change button asked for: update the library folders.
     fn commit_recordings_folder(&mut self, new: &str, old: Option<String>) {
         let mut folders = Folders::load();
-        let kept_old = folders_sync::retarget(&mut folders, new, old.as_deref());
+        let kept_old = match folders_sync::retarget(&mut folders, new, old.as_deref()) {
+            Ok(kept_old) => kept_old,
+            Err(why) => return self.refuse_linked_output(why),
+        };
         match folders.save() {
             Ok(()) => {
                 self.folders = folders;
@@ -85,6 +91,14 @@ impl Root {
             }
             Err(error) => self.show_toast(ToastKind::Bad, "Couldn't update the library folders", Some(error)),
         }
+    }
+
+    /// The recorder reported a linked folder as its output: folders.json keeps the old
+    /// recordings folder and the link (the recorder falls back on its side, `record_link_guard`).
+    fn refuse_linked_output(&mut self, why: String) {
+        eprintln!("folders: {why}");
+        let detail = format!("{why}. {} stays the recordings folder.", self.folders.recordings.clone().unwrap_or_default());
+        self.show_toast_for(ToastKind::Bad, "Linked folders stay read-only", Some(detail), 15);
     }
 
     /// After any clip-folder change: blocks the cache if a folder now overlaps it, releases a
@@ -142,11 +156,11 @@ impl Root {
             self.show_toast_for(ToastKind::Bad, "Can't save clips there", Some(why), 10);
             return;
         }
-        if crate::backend::overlaps_link(&dir, &self.folders) {
-            self.show_toast(ToastKind::Bad, "Choose a separate recordings folder", Some("Folder Mapper keeps linked recordings read-only.".into()));
+        let new = dir.to_string_lossy().into_owned();
+        if let Some(why) = folders_sync::link_refusal(&new, &self.folders) {
+            self.show_toast(ToastKind::Bad, "Choose a separate recordings folder", Some(format!("{why}. Folder Mapper keeps linked recordings read-only.")));
             return;
         }
-        let new = dir.to_string_lossy().into_owned();
         let old = self.recordings_folder();
         if same_folder(&new, &old) {
             self.show_toast(ToastKind::Info, "Already your recordings folder", None);
@@ -165,8 +179,10 @@ impl Root {
         let mut folders = Folders::load();
         let recordings = self.recordings_folder();
         let managed = std::iter::once(Path::new(&recordings)).chain(folders.former_recordings.iter().map(Path::new));
-        let overlap = crate::services::storage::guard::folders_overlap;
-        if managed.into_iter().any(|own| paths.iter().any(|path| overlap(own, path)))
+        // A parent of a recordings folder may be linked (Videos, with clips in Videos\Recall): the
+        // recordings folder stays Recall's. The folder itself or one inside it may not.
+        let (overlap, within) = (crate::services::storage::guard::folders_overlap, crate::services::storage::guard::folder_within);
+        if managed.into_iter().any(|own| paths.iter().any(|path| within(path, own)))
             || crate::services::library::imports::base_dir().is_some_and(|root| paths.iter().any(|path| overlap(&root, path)))
         {
             self.show_toast(ToastKind::Bad, "Choose an external recording folder", Some("Folder Mapper needs a folder separate from Recall’s recordings and library data.".into()));
@@ -219,8 +235,10 @@ impl Root {
     /// now only removes them from Recall (they count as another recorder's).
     fn release_managed_folder(&mut self, folder: &str) {
         let mut folders = self.folders.clone();
-        if !folders.release(folder) {
-            return;
+        match folders.release(folder) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(why) => return self.show_toast(ToastKind::Bad, "Recall still manages that folder", Some(why)),
         }
         match folders.save() {
             Ok(()) => {

@@ -37,10 +37,20 @@ impl Controller {
                 return false;
             }
         };
+        // Linked folders are read-only to Recall: a patch into one is refused, and a hand edit
+        // into one falls back to the last good folder (`record_link_guard`).
+        let links = crate::record_link_guard::read_links();
+        if let Some(why) = patch.pointer("/recording/output_dir").and_then(Value::as_str).and_then(|dir| crate::record_link_guard::refusal(dir, &links)) {
+            self.reply_error(client, &why);
+            return false;
+        }
         // A patched key also retires its startup env override.
         let mut overrides = self.overrides.clone();
         overrides.forget(&patch);
-        let effective = overrides.apply(&out.config);
+        let mut effective = overrides.apply(&out.config);
+        if let Some(notice) = crate::record_link_guard::guard(&mut effective, Some(&self.cfg.recording.output_dir), &links) {
+            self.hub.event("session", &crate::record_notice::shortcut_notice_json("Recording folder kept", &notice, true, false));
+        }
         if out.changed.is_empty() && effective == self.cfg {
             // Nothing to persist (keeps the user's hand-written file untouched).
             if let Some(line) = crate::config_watch::patch_notice(broken_edit.as_deref(), false) {

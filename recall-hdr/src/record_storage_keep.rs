@@ -35,7 +35,7 @@ pub fn played_recently(json_bytes: &[u8], now_unix: u64) -> HashSet<String> {
 
 /// `<folder of library.json>\open-clips.json`.
 pub fn open_clips_path(library: &Path) -> PathBuf {
-    library.with_file_name("open-clips.json")
+    crate::user_dirs::checked(library.with_file_name("open-clips.json"))
 }
 
 /// Clips the app has open (`{"paths": [...]}`). Missing = none; unreadable or corrupt =

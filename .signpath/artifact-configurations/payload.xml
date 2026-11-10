@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SignPath artifact configuration "payload" (release.yml sign-payload): the GitHub artifact
+     recall-payload-unsigned, a zip of the five Recall executables. Each is Authenticode-signed
+     and must carry ProductName "Recall". Paste into the SignPath project's artifact configuration. -->
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file-set>
+      <include path="recall-native.exe" product-name="Recall" />
+      <include path="recall.exe" product-name="Recall" />
+      <include path="recall-hdr.exe" product-name="Recall" />
+      <include path="recall-overlay.exe" product-name="Recall" />
+      <include path="RecallUninstall.exe" product-name="Recall" />
+      <for-each>
+        <authenticode-sign />
+      </for-each>
+    </pe-file-set>
+  </zip-file>
+</artifact-configuration>

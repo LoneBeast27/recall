@@ -18,7 +18,8 @@ fn normalized(path: &Path) -> String {
         let tail = absolute.strip_prefix(ancestor).ok()?;
         Some(real.join(tail))
     }).unwrap_or(absolute);
-    real.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase()
+    // A path that does not exist yet keeps the form it was given: drop a `\\?\` prefix too.
+    super::plain_path(&real).to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase()
 }
 
 /// `inner` is `outer` or lies inside it (both normalized).
@@ -31,6 +32,11 @@ pub(crate) fn folders_overlap(a: &Path, b: &Path) -> bool {
     let (a_key, b_key) = (normalized(a), normalized(b));
     within(&a_key, &b_key) || within(&b_key, &a_key)
         || crate::file_id::inside(a, b) == Some(true) || crate::file_id::inside(b, a) == Some(true)
+}
+
+/// `inner` is the folder `outer` or lies inside it (text, junctions and aliases).
+pub(crate) fn folder_within(inner: &Path, outer: &Path) -> bool {
+    within(&normalized(inner), &normalized(outer)) || crate::file_id::inside(inner, outer) == Some(true)
 }
 
 /// The first clip folder that overlaps a cache folder, as a sentence for the user; `None`

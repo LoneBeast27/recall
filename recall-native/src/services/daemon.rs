@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use interprocess::local_socket::traits::Stream as _;
 use interprocess::local_socket::{GenericNamespaced, Stream, ToNsName};
-use serde::Deserialize;
 use serde_json::Value;
 
 mod controller;
@@ -22,11 +21,10 @@ mod testing;
 mod session;
 mod status;
 
-pub use status::{unix_ms, Arrival, Drain, EngineAudio, EngineStatus, LongRecording};
-
 // The examples include this file without the views that use these.
 #[allow(unused_imports)]
 pub use reach::{reach, reach_or_refused, unreachable_detail, RecorderReach};
+pub use status::*;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -76,135 +74,6 @@ pub enum DaemonCommand {
     /// What `storage.cap_gb` = this would move to the Recycle Bin now (answered by a
     /// `StoragePreview` event; nothing moves).
     StoragePreview(u32),
-}
-
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct Target {
-    pub name: String,
-    pub exe: String,
-    pub pid: u32,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct OverlayStatus {
-    pub enabled: bool,
-    pub corner: String,
-    pub running: bool,
-}
-
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct HdrStatus {
-    pub available: bool,
-    pub display: Option<String>,
-    pub hdr_on: bool,
-    pub manual_pin: bool,
-    pub auto: bool,
-}
-
-/// `session` status from the controller. Lenient: older record-only builds send a subset.
-#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
-#[serde(default)]
-pub struct SessionStatus {
-    #[serde(default)]
-    pub setup_owner: Option<u32>,
-    /// "waiting" | "starting" | "recording" | "degraded" | "recovering" | "draining" | "paused" | "error" (empty on old builds)
-    pub state: String,
-    pub target: Option<Target>,
-    pub engine_health: String,
-    pub auto_record: bool,
-    pub save_hotkey: String,
-    pub mic_hotkey: String,
-    pub save_seconds: u32,
-    pub mic_muted: bool,
-    /// The last audio line the controller sent the recorder (the meter says "Applying…" until
-    /// `engine.audio_seq` reaches it; None on older builds).
-    pub audio_sent_seq: Option<u64>,
-    /// A repair the recorder asks for (its engine file is older than the app): the notice and
-    /// its action, shown with a Reinstall button (`services::repair`).
-    pub repair: Option<crate::services::repair::RepairNotice>,
-    pub overlay: OverlayStatus,
-    pub autostart: bool,
-    pub hdr: HdrStatus,
-    pub paused: bool,
-    pub bookmark_hotkey: String,
-    pub screenshot_hotkey: String,
-    pub record_hotkey: String,
-    /// Shows / hides the performance-stats island ("" = off).
-    pub stats_hotkey: String,
-    /// Turns the overlay's notices on or off ("" = off).
-    pub overlay_hotkey: String,
-    /// Starts / saves the island editor (place the island per game; "" = off).
-    pub editor_hotkey: String,
-    /// Hotkeys the recorder could not register, one line each (empty on older builds).
-    pub hotkey_problems: Vec<String>,
-    pub long_recording: LongRecording,
-    /// A setting change waits for a save or long recording to finish.
-    pub pending_restart: bool,
-    /// The in-game performance-stats island is on.
-    pub overlay_stats: bool,
-    /// Where the stats island's FPS comes from: "etw" (Windows frame timing) |
-    /// "no_permission" (not in Performance Log Users) | "off" (stats off); empty
-    /// on builds without it.
-    pub fps_source: String,
-    /// The closed game's last clip is still saveable until `ends_unix_ms` (state "draining").
-    pub drain: Option<Drain>,
-    /// When this status arrived (the pipe reader stamps it): `remaining_secs` /
-    /// `elapsed_secs` count from here, so a wall-clock jump does not move them.
-    #[serde(skip)]
-    pub received: Arrival,
-    /// A quit waits for a clip still being saved (false on builds without it).
-    pub finishing_clip: bool,
-}
-
-
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct DaemonSnapshot {
-    pub connected: bool,
-    pub session: Option<SessionStatus>,
-    pub engine: Option<EngineStatus>,
-    /// Full config object from the last `config` event.
-    pub config: Option<Value>,
-    /// Config keys a startup env override sets (`recording.output_dir` from
-    /// `Start-Recall.ps1 -OutDir`), from the same event.
-    pub config_overridden: Vec<String>,
-    /// Shortcuts on a combo games and overlays often use (a warning, they stay bound).
-    pub hotkey_warnings: Vec<String>,
-    /// Counts `config` events (each one is a fresh answer, even when the config is unchanged).
-    pub config_seq: u64,
-    /// The last connect was refused: the pipe's server runs as another account (`pipe_owner`).
-    pub refused: Option<String>,
-}
-
-impl SessionStatus {
-    /// Time since this status arrived (`None` for a snapshot built by hand).
-    pub fn since_status(&self, now: std::time::Instant) -> Option<Duration> {
-        self.received.0.map(|at| now.saturating_duration_since(at))
-    }
-
-    /// Drain seconds left now (`Drain::left`).
-    pub fn drain_left(&self, now_unix_ms: u64, now: std::time::Instant) -> Option<u64> {
-        self.drain.as_ref().map(|d| d.left(now_unix_ms, self.since_status(now)))
-    }
-
-    /// A game (or the desktop) is being captured: background cache filling pauses.
-    pub fn capturing(&self) -> bool {
-        // `degraded`: CPU copies; `recovering`: the engine rebuilds its encoder, buffer kept.
-        matches!(self.state.as_str(), "recording" | "starting" | "degraded" | "recovering")
-    }
-}
-
-impl DaemonSnapshot {
-    /// Replay is ready when the buffer holds footage and NVENC runs (also from CPU
-    /// copies), or while the engine rebuilds its encoder: the buffer is kept and saveable.
-    pub fn replay_ready(&self) -> bool {
-        self.engine.as_ref().is_some_and(|e| {
-            let running = matches!(e.encoder.as_str(), "h264_nvenc" | "degraded") && e.encoder_error.is_none();
-            (running || e.encoder == "recovering") && e.buffer_secs > 0.0
-        })
-    }
 }
 
 #[derive(Debug, Clone, PartialEq)]

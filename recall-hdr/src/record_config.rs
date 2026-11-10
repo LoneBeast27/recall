@@ -31,7 +31,7 @@ pub const QUALITIES: [&str; 3] = ["performance", "balanced", "quality"];
 pub const FPS_MIN: u32 = 15;
 /// The recording rate is also the capture cap (1.1x): above 240 a fast game (VALORANT ~750 fps)
 /// would be copied and encoded nearly every frame it draws, the cost behind the 10-26 freezes.
-/// Exports keep their own higher rates. (Review 11-05; Rohan's call between 240 and 960 pending.)
+/// Exports keep their own higher rates. (Review 11-05; the maintainer's call between 240 and 960 pending.)
 pub const FPS_MAX: u32 = 240;
 pub const BITRATE_MBPS_MIN: u32 = 1;
 pub const BITRATE_MBPS_MAX: u32 = 200;
@@ -118,7 +118,7 @@ impl Default for RecordingCfg {
             buffer_secs: 120,
             save_hotkey: "Alt+N".into(),
             mic_hotkey: "Alt+M".into(),
-            // One direct Alt combo per action (Rohan, 2026-11-05: the old
+            // One direct Alt combo per action (the maintainer, 2026-11-05: the old
             // two-step chord was Alt too, so it bought nothing).
             bookmark_hotkey: crate::record_hotkeys::DEFAULT_BOOKMARK.into(),
             screenshot_hotkey: crate::record_hotkeys::DEFAULT_SCREENSHOT.into(),
@@ -146,20 +146,8 @@ impl Default for RecordingCfg {
 /// `<Videos>\Recall`: the Videos known folder (follows a moved or OneDrive Videos), else
 /// `%USERPROFILE%\Videos\Recall`.
 pub fn default_output_dir() -> String {
-    let videos = videos_folder().unwrap_or_else(|| PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("Videos"));
-    videos.join("Recall").to_string_lossy().into_owned()
-}
-
-fn videos_folder() -> Option<PathBuf> {
-    use windows::Win32::System::Com::CoTaskMemFree;
-    use windows::Win32::UI::Shell::{FOLDERID_Videos, SHGetKnownFolderPath, KF_FLAG_DEFAULT};
-    // SAFETY: the returned buffer is copied, then freed with the allocator that made it.
-    unsafe {
-        let raw = SHGetKnownFolderPath(&FOLDERID_Videos, KF_FLAG_DEFAULT, None).ok()?;
-        let path = raw.to_string().ok();
-        CoTaskMemFree(Some(raw.0 as *const _));
-        path.filter(|p| !p.is_empty()).map(PathBuf::from)
-    }
+    let videos = crate::user_dirs::known(crate::user_dirs::Known::Videos).unwrap_or_else(|| PathBuf::from(std::env::var_os("USERPROFILE").unwrap_or_default()).join("Videos"));
+    crate::user_dirs::checked(videos.join("Recall")).to_string_lossy().into_owned()
 }
 
 impl RecordingCfg {
@@ -196,7 +184,7 @@ pub struct DetectCfg {
 
 impl Default for DetectCfg {
     fn default() -> Self {
-        // Rohan, 2026-11-05: "discord i dont mind being in there as a personal decision".
+        // The maintainer, 2026-11-05: "discord i dont mind being in there as a personal decision".
         DetectCfg { fullscreen_games: vec!["Discord".into()] }
     }
 }
@@ -393,7 +381,7 @@ pub fn merge_json(base: &mut Value, patch: &Value) {
 }
 
 /// Optional schema keys that are absent from the serialized form when unset.
-const OPTIONAL_KEYS: &[&str] = &["display.target_device_path"];
+const OPTIONAL_KEYS: &[&str] = &["display.target_device_path", "display.punchy_profile", "display.accurate_profile"];
 
 /// Reject patch keys the schema does not have (typo guard) and `version`.
 fn check_keys(schema: &Map<String, Value>, patch: &Map<String, Value>, prefix: &str) -> Result<(), String> {
@@ -462,6 +450,7 @@ pub fn apply_patch(base: &Config, patch: &Value) -> Result<PatchOutcome, String>
     check_keys(schema, patch_map, "")?;
     // A legacy `recording.save_hotkey` moves the full-buffer preset.
     let patch = crate::record_hotkeys::rewrite_legacy_patch(&base.recording, patch);
+    let patch = crate::record_actions::unhide_on_enable(patch);
     let mut merged = before.clone();
     merge_json(&mut merged, &patch);
     let mut config: Config = serde_json::from_value(merged).map_err(|e| format!("invalid config: {e}"))?;

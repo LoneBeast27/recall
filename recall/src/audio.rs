@@ -298,6 +298,9 @@ impl TrackRing {
 
     /// [`Self::push_capture`]; `held` stores silence whatever Alt+M says (`hold.rs`).
     fn push_samples(&self, data: &[f32], mute_inputs: bool, held: bool) {
+        if crate::stop_capture::stopped() {
+            return; // the privacy stop: no sample enters the ring after it
+        }
         // The gained copy reuses one buffer per capture thread (gate review P2-c).
         thread_local!(static GAINED: std::cell::RefCell<Vec<f32>> = const { std::cell::RefCell::new(Vec::new()) });
         let data = &data[data.len().saturating_sub(self.capacity)..];

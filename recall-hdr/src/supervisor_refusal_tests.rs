@@ -150,21 +150,32 @@ fn the_retarget_quit_takes_the_latest_refusal() {
 /// retarget that read the flag before shutdown but takes the lock after must not replace it.
 #[test]
 fn a_retarget_racing_shutdown_keeps_isnt_responding() {
-    let shared = Shared::new(None);
+    let shared = Arc::new(Shared::new(None));
     shared.attach_writer(Some(Box::new(std::io::sink())));
     shared.send_quit(Sent::Switching); // a quit window is open
-    thread::scope(|s| {
-        let mut stdin = shared.child_stdin.lock().unwrap();
-        let late = s.spawn(|| shared.set_desired(Some(EngineSpec::default()), Sent::Switching));
-        while shared.desired.try_lock().is_ok() {
-            thread::yield_now(); // until the retarget holds `desired` (it waits on stdin next)
-        }
-        thread::sleep(Duration::from_millis(50));
-        shared.request_stop(Duration::ZERO);
-        stdin.quitting = Some(Sent::NotResponding); // `finish_shutdown`'s `send_quit`
-        drop(stdin);
-        late.join().unwrap();
-    });
+    let (done, finished) = std::sync::mpsc::channel();
+    let mut stdin = shared.child_stdin.lock().unwrap();
+    let late = {
+        let shared = Arc::clone(&shared);
+        thread::spawn(move || {
+            shared.set_desired(Some(EngineSpec::default()), Sent::Switching);
+            let _ = done.send(());
+        })
+    };
+    // Bounded: a panic here drops `stdin`, so the retarget thread is never left blocked.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while shared.desired.try_lock().is_ok() {
+        assert!(Instant::now() < deadline, "the retarget never took `desired` in 5 s");
+        thread::yield_now(); // until the retarget holds `desired` (it waits on stdin next)
+    }
+    thread::sleep(Duration::from_millis(50));
+    // `request_stop`'s flag only: its `shutdown_refusal` takes the stdin lock held here
+    // (calling it would block this thread on its own lock); the line below is that step.
+    shared.stop.store(true, Ordering::SeqCst);
+    stdin.quitting = Some(Sent::NotResponding);
+    drop(stdin);
+    finished.recv_timeout(Duration::from_secs(5)).expect("the retarget did not finish in 5 s");
+    late.join().expect("the retarget thread panicked");
     assert_eq!(shared.send_line(SAVE), Sent::NotResponding, "shutdown is no game switch");
 }
 
@@ -214,4 +225,65 @@ fn a_resume_before_the_pauses_quit_says_waiting() {
     shared.unpause();
     assert!(shared.send_retarget_quit());
     assert_eq!(shared.send_line(SAVE), Sent::Waiting);
+}
+
+/// SPEC 26d: a shutdown during a retarget's grace (its quit already out, "Switching games")
+/// is no game switch: from the stop on a line says "isn't responding".
+#[test]
+fn a_shutdown_inside_a_retarget_grace_says_isnt_responding() {
+    let sup = running_fake_engine(3_000);
+    switch_engine(&sup, Some(EngineSpec::default()), Sent::Switching);
+    assert_eq!(refused_in_quit_window(&sup, SAVE).reason(), Some(SWITCHING), "setup: the retarget's quit window");
+    sup.shared.request_stop(Duration::from_millis(50)); // `Supervisor::stop`'s first step
+    assert_eq!(refused_now(&sup, SAVE), Sent::NotResponding, "shutdown is no game switch");
+    sup.shutdown(Duration::from_millis(50));
+}
+
+/// The same when the stop lands before the retarget's quit goes out (`finish_shutdown`'s
+/// `send_retarget_quit` after the flag).
+#[test]
+fn a_retarget_quit_after_the_shutdown_flag_says_isnt_responding() {
+    let shared = Shared::new(None);
+    shared.attach_writer(Some(Box::new(std::io::sink())));
+    shared.set_desired(Some(EngineSpec::default()), Sent::Switching);
+    shared.request_stop(Duration::ZERO);
+    assert!(shared.send_retarget_quit());
+    assert_eq!(shared.send_line(SAVE), Sent::NotResponding);
+}
+
+/// Gate (v0.1.1): a shutdown during a pause's grace keeps "Recording is paused" (only a
+/// retarget's refusal becomes "isn't responding"), whether the stop lands while the quit
+/// window is open (`shutdown_refusal`) or before the pause's quit goes out (`send_quit`).
+#[test]
+fn a_shutdown_inside_a_pause_grace_still_says_paused() {
+    let sup = running_fake_engine(3_000);
+    switch_engine(&sup, None, Sent::Paused);
+    assert_eq!(refused_in_quit_window(&sup, SAVE).reason(), Some(PAUSED), "setup: the pause's quit window");
+    sup.shared.request_stop(Duration::from_millis(50));
+    assert_eq!(refused_now(&sup, SAVE), Sent::Paused, "shutdown_refusal path");
+    sup.shutdown(Duration::from_millis(50));
+    let shared = Shared::new(None);
+    shared.attach_writer(Some(Box::new(std::io::sink())));
+    shared.set_desired(None, Sent::Paused);
+    shared.request_stop(Duration::ZERO);
+    assert!(shared.send_retarget_quit());
+    assert_eq!(shared.send_line(SAVE), Sent::Paused, "send_quit path");
+}
+
+/// A planned restart's quit window ("Recorder is restarting") is a retarget's too: a
+/// shutdown makes it "isn't responding", in both paths.
+#[test]
+fn a_shutdown_inside_a_planned_restart_says_isnt_responding() {
+    let shared = Shared::new(None);
+    shared.attach_writer(Some(Box::new(std::io::sink())));
+    shared.set_desired(Some(EngineSpec::default()), Sent::Restarting);
+    assert!(shared.send_retarget_quit());
+    shared.request_stop(Duration::ZERO);
+    assert_eq!(shared.send_line(SAVE), Sent::NotResponding, "shutdown_refusal path");
+    let shared = Shared::new(None);
+    shared.attach_writer(Some(Box::new(std::io::sink())));
+    shared.set_desired(Some(EngineSpec::default()), Sent::Restarting);
+    shared.request_stop(Duration::ZERO);
+    assert!(shared.send_retarget_quit());
+    assert_eq!(shared.send_line(SAVE), Sent::NotResponding, "send_quit path");
 }

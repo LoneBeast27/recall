@@ -110,8 +110,7 @@ mod tests {
 
     #[test]
     fn leftovers_are_listed_and_only_go_through_the_library_recycle_path() {
-        let dir = std::env::temp_dir().join(format!("recall-leftovers-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
+        let dir = crate::test_temp::TempDir::new(format!("recall-leftovers-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("A.mp4"), vec![1u8; 300]).unwrap();
         std::fs::write(dir.join("B.mp4"), vec![1u8; 200]).unwrap();

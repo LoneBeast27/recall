@@ -315,13 +315,20 @@ impl HdrExecutor {
     }
 }
 
-/// The MHC2 profile file for a `set_ac_profile` variant.
-pub(crate) fn ac_profile_file(variant: &str) -> Option<&'static str> {
-    match variant {
-        "punchy" => Some("PG27AQDP_Punchy-Gamma2.2_MHC2.icm"),
-        "accurate" => Some("PG27AQDP_sRGB-to-Gamma2.2_MHC2.icm"),
-        _ => None,
+/// The MHC2 profile file for a `set_ac_profile` variant, from this machine's `[display]`
+/// config. Err names what is missing: an unknown variant, or no profile set for it.
+pub(crate) fn ac_profile_file(display: &crate::config::DisplayCfg, variant: &str) -> Result<String, String> {
+    let file = match variant {
+        "punchy" => &display.punchy_profile,
+        "accurate" => &display.accurate_profile,
+        _ => return Err(format!("unknown set_ac_profile variant '{variant}' (expected punchy | accurate)")),
+    };
+    let file = file.as_deref().map(str::trim).filter(|f| !f.is_empty()).ok_or_else(|| format!("no {variant} colour profile is set in [display] {variant}_profile"))?;
+    // A plain file name in the Windows colour store, as the app's row checks: no folder, drive or `..`.
+    if std::path::Path::new(file).file_name() != Some(std::ffi::OsStr::new(file)) {
+        return Err(format!("[display] {variant}_profile must be a file name in the Windows colour store, not a path: '{file}'"));
     }
+    Ok(file.to_owned())
 }
 
 /// The `hdr` module's `ac_profile` result event, escaped by serde_json.
@@ -371,10 +378,16 @@ mod tests {
         assert_eq!(v["error"], r#"WCS said "no" at C:\x"#);
         let ok: serde_json::Value = serde_json::from_str(&ac_profile_event(&Ok("p.icm"))).unwrap();
         assert_eq!(ok["profile"], "p.icm");
-        for (variant, word) in [("punchy", "Punchy"), ("accurate", "sRGB")] {
-            let file = ac_profile_file(variant).expect(variant);
-            assert!(file.contains(word) && file.ends_with("_MHC2.icm"), "{file}");
+        let mut display = crate::config::DisplayCfg::default();
+        assert!(ac_profile_file(&display, "punchy").unwrap_err().contains("punchy_profile"), "nothing built in");
+        display.punchy_profile = Some("Panel_Punchy_MHC2.icm".into());
+        display.accurate_profile = Some("  ".into());
+        assert_eq!(ac_profile_file(&display, "punchy").unwrap(), "Panel_Punchy_MHC2.icm");
+        assert!(ac_profile_file(&display, "accurate").is_err(), "a blank name counts as unset");
+        for path in [r"..\x.icm", r"C:\x.icm", "C:x.icm", "a/x.icm", ".."] {
+            display.accurate_profile = Some(path.into());
+            assert!(ac_profile_file(&display, "accurate").unwrap_err().contains("not a path"), "{path}");
         }
-        assert_eq!(ac_profile_file("vivid"), None);
+        assert!(ac_profile_file(&display, "vivid").unwrap_err().contains("unknown"));
     }
 }

@@ -12,11 +12,12 @@ use crate::{
     ui,
     views::{
         pages::{section_title, setting_row, setting_row_with},
-        quality_preview::Preview,
+        quality_preview::{Preview, Recipe},
     },
 };
 
-const CODECS: [(&str, &str); 3] = [("h264", "H.264"), ("hevc", "HEVC"), ("av1", "AV1")];
+/// `quality_preview` has one comparison image per entry, in this order.
+pub(crate) const CODECS: [(&str, &str); 3] = [("h264", "H.264"), ("hevc", "HEVC"), ("av1", "AV1")];
 /// Mbps. `quality_preview` has one comparison image per entry, in this order.
 pub(crate) const BITRATES: [u64; 4] = [15, 25, 40, 60];
 /// `quality_preview` has one comparison image per entry, in this order.
@@ -62,6 +63,8 @@ impl Root {
         let bitrates: Vec<(u64, String)> = BITRATES.iter().map(|b| (*b, format!("{b} Mbps"))).collect();
         let effort_index = EFFORT.iter().position(|(v, _)| *v == effort).unwrap_or(1);
         let efforts: Vec<(usize, String)> = EFFORT.iter().enumerate().map(|(i, (_, l))| (i, (*l).to_owned())).collect();
+        // The comparisons show what is recorded: the fallback format when the chosen one can't open.
+        let recipe = Recipe::current(if fallback { running.as_deref().unwrap_or("h264") } else { &codec }, bitrate, &effort);
 
         let format_detail = if fallback {
             format!("This GPU can't record {}; recording {} instead.", CODECS[codec_index].1, running.as_deref().unwrap_or("H.264").to_uppercase().replace("H264", "H.264"))
@@ -74,10 +77,10 @@ impl Root {
                 .child(self.segments("codec", 240., &codecs, codec_index, "recording", "codec", |i| json!(CODECS[i].0), cx))
                 .into_any_element(),
             setting_row("Frame rate", &self.fps_detail()).child(self.render_fps_control(window, cx)).into_any_element(),
-            setting_row_with("Bitrate", Some(self.quality_info(Preview::Bitrate, BITRATES.iter().position(|b| *b == bitrate).unwrap_or(1), cx)), "Higher looks sharper and makes bigger files.")
+            setting_row_with("Bitrate", Some(self.quality_info(Preview::Bitrate, recipe, cx)), "Higher looks sharper and makes bigger files.")
                 .child(self.segments("bitrate", 320., &bitrates, bitrate, "recording", "bitrate_mbps", |v| json!(v), cx))
                 .into_any_element(),
-            setting_row_with("Encoder effort", Some(self.quality_info(Preview::Effort, effort_index, cx)), "Quality uses a little more GPU time.")
+            setting_row_with("Encoder effort", Some(self.quality_info(Preview::Effort, recipe, cx)), "Quality uses a little more GPU time.")
                 .child(self.segments("effort", 300., &efforts, effort_index, "recording", "quality", |i| json!(EFFORT[i].0), cx))
                 .into_any_element(),
         ];

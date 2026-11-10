@@ -1,7 +1,7 @@
 # HDR Testcard — a digital-colourimeter reference source for the Recall test rig.
 #
 # Standalone crate: the empty [workspace] table below detaches it from the root
-# `L:\Projects\recall\Cargo.toml` workspace (whose members list is owned by a
+# `Cargo.toml` workspace at the repo root (whose members list is owned by a
 # different session). Without this, cargo would try to fold this crate into the
 # root workspace and fail because it is not listed there. Do NOT remove it.
 [workspace]

@@ -1,20 +1,20 @@
 <#
-    install.ps1 — HDR SDR-gamma fix for ASUS PG27AQDP (AUS2740), two-variant
+    install.ps1 — HDR SDR-gamma fix for one display, two-variant
 
     Installs BOTH MHC2 gamma-2.2 ICC profiles into the Windows color store and
     associates the CHOSEN one as the active Advanced-Color (HDR) profile for the
-    PG27AQDP. In HDR mode Windows then decodes SDR-composited content with a pure
+    target display. In HDR mode Windows then decodes SDR-composited content with a pure
     gamma-2.2 EOTF instead of the sRGB piecewise curve (which lifts shadows / washes
     SDR). Both variants keep the SAME pure gamma-2.2 transfer fix and an identity
     MHC2 matrix (HDR/PQ-native content is untouched). They differ ONLY in the gamut
     Windows ACM believes the panel has:
 
-      accurate  (PG27AQDP_sRGB-to-Gamma2.2_MHC2.icm)
+      accurate  (hdrGammaFix.accurateProfile)
                 colorants = panel NATIVE wide gamut. ACM gamut-maps sRGB content to
                 the native primaries -> colorimetrically correct sRGB (true, but
                 reads as less saturated to someone used to the native stretch).
 
-      punchy    (PG27AQDP_Punchy-Gamma2.2_MHC2.icm)   [DEFAULT]
+      punchy    (hdrGammaFix.punchyProfile)   [DEFAULT]
                 colorants = sRGB primaries. ACM sees "sRGB display" -> NO gamut
                 compression -> sRGB code values land directly on the panel's native
                 wide primaries = the familiar punchy native-gamut stretch.
@@ -25,7 +25,8 @@
     Both profiles stay in the store; only the active association changes.
 
     REVERSIBLE. The FIRST run snapshots the true pre-fix ICMProfileAC association
-    (the plain HDR Calibrated profiles, no MHC2) to rollback-state.json. Subsequent
+    (the plain HDR Calibrated profiles, no MHC2) to <StateDir>\rollback-state.json
+    (outside the repo; hdrGammaFix.stateDir in .local/machine.json). Subsequent
     runs (including variant switches) NEVER overwrite a good pre-fix snapshot, and
     the installer refuses to let any MHC2 profile leak into the rollback target, so
     rollback.ps1 always restores the genuine pre-fix state.
@@ -39,15 +40,26 @@
 param(
     [ValidateSet('punchy','accurate')]
     [string]$Variant = 'punchy',
-    [string]$AccurateProfile = 'PG27AQDP_sRGB-to-Gamma2.2_MHC2.icm',
-    [string]$PunchyProfile   = 'PG27AQDP_Punchy-Gamma2.2_MHC2.icm',
-    # Target display device-instance key under ICM\ProfileAssociations. 0011 = PG27AQDP/AUS2740 on this machine.
-    [string]$TargetInstance = '0011',
-    [string]$TargetDisplayId = 'DISPLAY\AUS2740\5&14c483c&0&UID4357_0'
+    # Every machine value below defaults to this PC's .local/machine.json (hdrGammaFix.*),
+    # written by scripts\dev\init-machine.ps1. A parameter overrides it. Nothing is hard-coded.
+    [string]$AccurateProfile = '',   # hdrGammaFix.accurateProfile (file name in ProfileDir)
+    [string]$PunchyProfile   = '',   # hdrGammaFix.punchyProfile
+    [string]$ProfileDir      = '',   # hdrGammaFix.profileDir: folder holding both .icm files
+    [string]$StateDir        = '',   # hdrGammaFix.stateDir: folder for rollback-state.json
+    # Target display device-instance key under ICM\ProfileAssociations (hdrGammaFix.targetInstance).
+    [string]$TargetInstance  = '',
+    [string]$TargetDisplayId = ''    # hdrGammaFix.targetDisplayId (for the log and the snapshot)
 )
 
 $ErrorActionPreference = 'Stop'
-$here = Split-Path -Parent $MyInvocation.MyCommand.Path
+. (Join-Path $PSScriptRoot 'machine.ps1')
+$AccurateProfile = Resolve-HdrSetting $AccurateProfile 'accurateProfile'
+$PunchyProfile   = Resolve-HdrSetting $PunchyProfile 'punchyProfile'
+$ProfileDir      = Resolve-HdrSetting $ProfileDir 'profileDir'
+$StateDir        = Resolve-HdrSetting $StateDir 'stateDir'
+$TargetInstance  = Resolve-HdrSetting $TargetInstance 'targetInstance'
+$TargetDisplayId = Resolve-HdrSetting $TargetDisplayId 'targetDisplayId'
+New-Item -ItemType Directory -Force -Path $StateDir | Out-Null
 
 # both profiles this installer manages (so rollback / snapshotting can recognize them)
 $managedProfiles = @($AccurateProfile, $PunchyProfile)
@@ -60,13 +72,13 @@ Write-Host "== HDR gamma-2.2 fix installer (two-variant) ==" -ForegroundColor Cy
 Write-Host "Target display : $TargetDisplayId (instance $TargetInstance)"
 Write-Host "Variant        : $Variant  ->  $activeProfile"
 
-# --- 0. sanity: both profile files present next to script; target key exists ---
+# --- 0. sanity: both profile files present in ProfileDir; target key exists ---
 foreach ($p in $managedProfiles) {
-    $src = Join-Path $here $p
-    if (-not (Test-Path $src)) { throw "Profile not found next to script: $src" }
+    $src = Join-Path $ProfileDir $p
+    if (-not (Test-Path $src)) { throw "Profile not found in ProfileDir: $src" }
 }
 if (-not (Test-Path $acmKey)) {
-    throw "ACM association key not found: $acmKey`nThe PG27AQDP HDR profile slot does not exist. Re-run Windows HDR Calibration first, or pass the correct -TargetInstance."
+    throw "ACM association key not found: $acmKey`nThe display's HDR profile slot does not exist. Re-run Windows HDR Calibration first, or pass the correct -TargetInstance."
 }
 
 # --- 1. snapshot the TRUE pre-fix AC association (once) ---
@@ -74,7 +86,7 @@ if (-not (Test-Path $acmKey)) {
 # overwrite a good pre-fix snapshot on a variant switch. Also strip any managed MHC2
 # profile from a freshly-captured list so the rollback target can never contain one.
 $before = (Get-ItemProperty -Path $acmKey -Name 'ICMProfileAC' -ErrorAction SilentlyContinue).ICMProfileAC
-$snapPath = Join-Path $here 'rollback-state.json'
+$snapPath = Join-Path $StateDir 'rollback-state.json'
 
 $haveGoodSnapshot = $false
 if (Test-Path $snapPath) {
@@ -115,7 +127,7 @@ public static extern bool InstallColorProfileW(string pMachineName, string pProf
 '@ -ErrorAction SilentlyContinue
 
 foreach ($p in $managedProfiles) {
-    $src  = Join-Path $here $p
+    $src  = Join-Path $ProfileDir $p
     $dest = Join-Path $colorDir $p
     if (Test-Path $dest) {
         Copy-Item -Path $src -Destination $dest -Force   # refresh bytes

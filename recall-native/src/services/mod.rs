@@ -9,6 +9,7 @@ pub mod endpoint_choice;
 pub mod endpoint_form;
 pub mod daemon;
 pub mod durable;
+pub mod json_keep;
 pub mod lenient_json;
 pub mod ordered_write;
 pub mod editor_prefs;
@@ -17,9 +18,9 @@ pub mod game_apps_win;
 pub mod library;
 pub mod meters;
 pub mod process_tree;
-pub mod repair;
 pub mod midi;
 pub mod pre_encode;
 pub mod pre_encode_room;
 mod pre_encode_copy;
 pub mod storage;
+

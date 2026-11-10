@@ -1,4 +1,4 @@
-//! Official proof only (Rohan 2026-11-07 07:46 UTC: "use official proof +
+//! Official proof only (the maintainer 2026-11-07 07:46 UTC: "use official proof +
 //! support for manual application registering"): an unknown fullscreen exe
 //! is recorded only with proof that it is a game, or after the user registers
 //! it. Names here are made up (no real device or app data).
@@ -76,7 +76,7 @@ fn a_never_record_entry_blocks_even_steam_evidence() {
 
 #[test]
 fn fullscreen_discord_is_a_game_only_through_fullscreen_games() {
-    // Rohan 2026-11-05: fullscreen Discord stays a game via [detect] fullscreen_games = ["Discord"].
+    // The maintainer 2026-11-05: fullscreen Discord stays a game via [detect] fullscreen_games = ["Discord"].
     let cfg = Config::default();
     assert_eq!(cfg.detect.fullscreen_games, vec!["Discord".to_string()]);
     let fs = classify_checked(&window("Discord", true), &cfg, false, false, || Some(false)).expect("fullscreen Discord, no trace rights");

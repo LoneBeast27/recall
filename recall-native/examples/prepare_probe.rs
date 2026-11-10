@@ -1,6 +1,9 @@
 //! Exercise the native editor's actual read-only media preparation and visual cache.
 #[path = "../src/build_flavor.rs"]
 mod build_flavor;
+#[allow(dead_code)]
+#[path = "../src/user_dirs.rs"]
+mod user_dirs;
 pub(crate) use build_flavor::TESTING;
 #[path = "../../recall/src/edit_model.rs"]
 mod edit_model;
@@ -16,6 +19,9 @@ mod win_volume;
 #[allow(dead_code)]
 #[path = "../../recall/src/file_id.rs"]
 mod file_id;
+#[allow(dead_code)]
+#[path = "../../recall/src/same_bytes.rs"]
+mod same_bytes;
 #[path = "../src/backend.rs"]
 mod backend;
 #[path = "../src/services/mod.rs"]

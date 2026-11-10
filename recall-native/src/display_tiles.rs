@@ -1,7 +1,7 @@
 //! The widest library tile any connected monitor can show, in physical pixels: thumbnails are
 //! cached that wide, so they stay sharp on every monitor, portrait or landscape, at any window
 //! size up to maximized, and the size does not change as the window moves or resizes
-//! (Rohan, 2026-11-05: "take max res of both monitors and default to it").
+//! (the maintainer, 2026-11-05: "take max res of both monitors and default to it").
 use windows::Win32::Foundation::{LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, HMONITOR, MONITORINFO};
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};

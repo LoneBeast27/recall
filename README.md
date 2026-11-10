@@ -9,6 +9,24 @@ Recall needs an NVIDIA GPU (NVENC). There is no CPU video encoder.
 
 Recall was created by **LoneBeast27**. Official Recall downloads are free. Recall’s own code is released under [GPL-3.0-or-later](LICENSE), which allows commercial use and redistribution. If you distribute a modified build, keep the copyright and license notices and clearly mark your changes and their dates. The [upstream Recall repository](https://github.com/LoneBeast27/recall) is the reference for the original source. See [NOTICE.md](NOTICE.md) for credits and third-party terms.
 
+## Privacy
+
+Clips, screenshots, edits, the library and settings stay on your PC; Recall has no account,
+telemetry or analytics. The only network traffic is:
+
+- **Update check:** official versioned builds ask the GitHub API for the latest release
+  (`api.github.com/repos/LoneBeast27/recall/releases/latest`, then a compare of its tag with
+  `main`) shortly after the app opens. Turn it off with **Settings → General → Check for updates
+  automatically**; nothing is then sent unless you press **Check now**. An update's
+  `RecallSetup.exe` is downloaded from the GitHub release only when you choose to install it.
+- **Setup:** downloads the pinned FFmpeg runtime from Gyan's GitHub release and, when it is
+  missing, the Microsoft Visual C++ x64 runtime from Microsoft; on Windows N it can add the
+  Media Feature Pack through Windows Update.
+- **Installing an update** keeps a backup of your settings and a small resume note in
+  `%LOCALAPPDATA%\Recall\updates\` on your PC; nothing about them is sent.
+
+Nothing else is sent. Details: [Code signing policy](CODE_SIGNING_POLICY.md).
+
 ## Install
 
 Open `dist/recall-current/RecallSetup.exe` for Quick Setup. Choose whether recording starts when setup is complete and whether to set up Windows game detection and FPS. **Change…** opens the SSD install folder picker from Quick Setup. **Advanced** also lets you type a folder or change the Start menu shortcut. After installation, **Continue setup** opens Storage, Audio, and Recording quality. Recording quality compares the same full frame before and after encoding, with a detail crop available. Choose **Open Recall** to reach your library. Updates keep your existing clip folder and recording settings.
@@ -19,7 +37,7 @@ Setup checks the PC before copying Recall. Release Setup downloads the pinned FF
 
 Official versioned builds check [Recall's GitHub Releases](https://github.com/LoneBeast27/recall/releases) after launch. You can also check in **Settings → General → About**. Recall offers a newer stable release once it verifies that the tag is on `main`. It verifies the Setup download against GitHub's SHA-256 before opening Setup for confirmation.
 
-Run `powershell -NoProfile -File scripts\release.ps1 -Version <major.minor.patch>` from a clean checkout of the current public `main` to build without installing. The output contains `RecallSetup.exe`, `SHA256SUMS.txt`, `SOURCE-REVISION.txt`, and four Recall executables in `recall-app` for individual scans. Use a matching `v<major.minor.patch>` tag on that source revision. A draft can be verified before publishing.
+Official releases are built by the [release workflow](.github/workflows/release.yml) on a GitHub-hosted runner and signed under the [code signing policy](CODE_SIGNING_POLICY.md). `scripts\release.ps1 -Version <major.minor.patch> -ArtifactDirectory <extracted CI bundle>` checks a CI bundle (source revision, SHA-256, version) and refuses an unsigned Setup once signing is configured. Run `powershell -NoProfile -File scripts\release.ps1 -Version <major.minor.patch>` from a clean checkout of the current public `main` to build without installing. The output contains `RecallSetup.exe`, `SHA256SUMS.txt`, `SOURCE-REVISION.txt`, and four Recall executables in `recall-app` for individual scans. Use a matching `v<major.minor.patch>` tag on that source revision. A draft can be verified before publishing.
 
 Run `Get-Help scripts/dev/scan-release.ps1 -Examples` for a per-file Defender scan of the installer, app binaries, and vendor downloads.
 
@@ -69,9 +87,14 @@ powershell -NoProfile -File scripts\install.ps1
   as a game in Settings" (once per exe per run), and the tray menu gets "Add <exe> as a game".
 - **Settings → Games** lists the apps you registered. **Add app…** picks a running app (the one
   that was in front comes first, borderless games included) or browses to an exe; it is then
-  recorded in any window. Each entry can be set to **Never record** (never recorded, even from a
-  Steam library) or removed. Never record or Remove on the app being recorded stops recording it
-  at once and throws away its unsaved replay buffer (saved clips are never touched).
+  recorded in any window. Your own entry beats every list below: a browser, a media player, a
+  launcher, a remote-desktop or game-streaming client (Parsec, Moonlight) or a call or chat app
+  you add is recorded. Recall itself and parts of Windows (the desktop and taskbar, the lock and
+  sign-in screens, screensavers, system processes) are never recorded and cannot be added. Each
+  entry can be set to **Never record** (never recorded, even from a Steam library) or removed.
+  Never record or Remove on the app being recorded stops recording it at once and throws away
+  its unsaved replay buffer; a clip already being saved still finishes (saved clips are never
+  touched).
   In config.toml these are `[[overrides]]` entries (`exe = "Game.exe"` or `"game"`, `kind =
   "sdr_game"` / `"hdr_game"` / `"none"`).
 - **Call, chat, mail, office, media-player and music apps** (Zoom, Teams, WhatsApp, Kodi,
@@ -81,7 +104,7 @@ powershell -NoProfile -File scripts\install.ps1
   window, a fullscreen call or stream view included, is recorded by default (config.toml
   `[detect] fullscreen_games = ["Discord"]`, shown in Settings → Games as "Recorded when
   fullscreen"; remove it there to stop). Windowed Discord is never recorded: pressing Esc
-  (or restoring the window) ends its recording at once; alt-tab away from a still-fullscreen
+  (or restoring the window) ends its recording at once (a clip being saved still finishes); alt-tab away from a still-fullscreen
   Discord keeps it, like a game. Adding an exe to
   `fullscreen_games` records it only while it is fullscreen; a Settings → Games entry records
   every window of that exe, windowed ones too (a meeting toolbar or a chat window). When a
@@ -154,6 +177,13 @@ hook loaded crashed VALORANT, so it was removed on 2026-10-26.)
 
 The Audio page shows live meters for every source.
 
+> **Warning:** the experimental HDR features below change Windows display settings for the
+> whole system: the monitor's HDR mode, the SDR content brightness, the desktop colour profile,
+> and the NVIDIA (NvAPI) colour gamut clamp. Recall puts them back when it exits, and the next
+> recorder start repairs what a crash left switched; until then they stay changed for every
+> app (reset them in Windows Settings → Display or the NVIDIA Control Panel, or run
+> `recall-hdr.exe --restore`). They are off unless you opt in.
+
 HDR switching (turning the monitor's HDR on for HDR games, the manual HDR toggle and its
 hotkey, the desktop colour profile, the NvAPI clamp test and the Display & HDR page) is
 experimental and shelved since 2026-11-04: the recorder never changes a display setting
@@ -198,7 +228,7 @@ drives are detected); thumbnails, hover frames and recently watched clips are ke
 
 To sign a separate copy of a built installer, run `scripts/setup/sign.ps1` with `-InputPath`, a new `-OutputPath`, the `-CertificateThumbprint` of your trusted code-signing certificate, and its HTTPS `-TimestampUrl`. The script verifies the publisher and timestamp before writing the signed output.
 
-Build the Windows setup screen with `powershell -NoProfile -File scripts/setup/build.ps1 -Preview`. Open `dist/setup/RecallSetupPreview.exe` to rehearse setup. The release setup build takes a verified payload via `-PayloadDirectory` and uses the save-aware installer. Pass `-VCRedistPath` to bundle a local Microsoft-signed x64 Visual C++ package. By default the build uses a copy in the payload directory or downloads it from Microsoft.
+Build the Windows setup screen with `powershell -NoProfile -File scripts/setup/build.ps1 -Preview`. Open `dist/setup/RecallSetupPreview.exe` to rehearse setup. The release setup build takes a verified payload via `-PayloadDirectory`. Setup installs, updates and uninstalls in its own C# (`scripts/setup/Setup*.cs`) and never starts PowerShell; `scripts/install.ps1` and its helpers remain developer tools. Setup registers Recall in Apps & Features; `RecallSetup.exe /uninstall` removes only the files its `install-manifest.json` lists and keeps the cache unless asked. Run the Setup unit tests with `scripts/setup/build.ps1 -Test`. Pass `-VCRedistPath` to bundle a local Microsoft-signed x64 Visual C++ package. By default the build uses a copy in the payload directory or downloads it from Microsoft.
 
 ```powershell
 $env:FFMPEG_DIR    = "$PWD\tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared"   # has av1_nvenc
@@ -261,6 +291,9 @@ powershell -NoProfile -File scripts\dev\engine-cost.ps1 [-Seconds 30] [-MaxMsPer
 ```
 
 The app uses its own target folder (`target-gpui`) because GPUI pins different dependency
-versions. Tests that need NVENC or a live game are `#[ignore]`d. Status, verification and
-open items: [.planning/STATE.md](.planning/STATE.md); the scope and every ruling:
-[.planning/FINISH_SPEC.md](.planning/FINISH_SPEC.md).
+versions. Tests that need NVENC or a live game are `#[ignore]`d; the release workflow runs
+the rest on a GitHub-hosted runner.
+
+Dev scripts that need this PC's values (monitor ids, clip folders, profile paths) read them from
+`.local/machine.json` (gitignored): run `scripts\dev\init-machine.ps1 -List`, then
+`init-machine.ps1` with the values; the template is `.local.example\machine.example.json`.

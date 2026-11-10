@@ -17,7 +17,7 @@ pub(crate) enum VideoBackend {
 
 /// NVENC's H.264 encoder takes frames up to 4096 px a side; HEVC goes to 8192.
 const H264_NVENC_MAX: u32 = 4096;
-const HEVC_NVENC_MAX: u32 = 8192;
+pub(crate) const HEVC_NVENC_MAX: u32 = 8192;
 
 /// The NVENC encoder for a `width` x `height` export: H.264 (plays everywhere) when it fits,
 /// else HEVC (32:9 5120x1440 and 8K sources), else an error that says what to pick.
@@ -29,7 +29,7 @@ pub(crate) fn nvenc_codec(width: u32, height: u32) -> Result<&'static str, Strin
         Ok("hevc_nvenc")
     } else {
         Err(format!(
-            "this clip is {width}x{height}; NVIDIA encoders take at most {HEVC_NVENC_MAX} px a side, so pick 1080p (or 720p) under Resolution"
+            "this clip is {width}x{height}; NVIDIA encoders take at most {HEVC_NVENC_MAX} px a side, so export it at a lower resolution such as 1080p"
         ))
     }
 }
@@ -221,7 +221,7 @@ pub(crate) fn open_encoder(spec: &EncoderSpec) -> Result<(ff::encoder::Video, ff
     }
     let encoder = context.open_with(options).map_err(|e| match spec.backend {
         VideoBackend::Nvenc => format!(
-            "open NVIDIA NVENC encoder {name} at {}x{}: {e}; no CPU fallback is permitted (a smaller Resolution such as 1080p may work)",
+            "open NVIDIA NVENC encoder {name} at {}x{}: {e}; no CPU fallback is permitted (a lower output resolution such as 1080p may work)",
             spec.width, spec.height
         ),
         #[cfg(test)]
@@ -289,7 +289,7 @@ mod tests {
         assert_eq!(nvenc_codec(7680, 4320), Ok("hevc_nvenc"));
         assert_eq!(nvenc_codec(1440, 5120), Ok("hevc_nvenc"), "portrait counts the long side");
         let error = nvenc_codec(10240, 1440).unwrap_err();
-        assert!(error.contains("pick 1080p"), "{error}");
+        assert!(error.contains("such as 1080p"), "{error}");
     }
 
     #[test]

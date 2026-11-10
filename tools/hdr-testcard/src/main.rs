@@ -8,7 +8,7 @@
 //!      borderless-fullscreen "game" that also fills the capture.
 //!   2. **Colourimeter reference.** It paints KNOWN linear scRGB values on
 //!      screen. The Recall capture engine (`RECALL_DUMP=out.png`, in
-//!      `L:\Projects\recall\recall`) reads the screen back as scRGB-linear
+//!      the repo's `recall/` crate) reads the screen back as scRGB-linear
 //!      Rgba16F and prints per-channel min/max/mean + %pixels above 1.0. Known
 //!      commanded input + measured captured output = closed-loop verification of
 //!      HDR flips and gamut-clamp effects with no human eyes.

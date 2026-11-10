@@ -214,7 +214,7 @@ fn apply(cmd: Command, shared: &CaptureShared, (save, export): (&Option<SaveHook
             extras.handle(&cmd);
         }
         Command::Sync { .. } | Command::Restate { .. } => {} // applied by the reader, in order
-        Command::Quit => {} // read_commands sets `quit`
+        Command::Quit | Command::StopCapture => {} // the reader ends on them (`stdin_reader`)
     }
 }
 

@@ -17,6 +17,9 @@ use crate::{
 
 pub const MIN_RANGE: f64 = 0.05;
 pub const FPS_PRESETS: [u32; 5] = [60, 120, 240, 480, 960];
+/// The highest export rate: the largest preset. A typed rate above it is a typo (9999999 fps
+/// started a background pre-encode of millions of duplicate frames).
+pub const MAX_EXPORT_FPS: u32 = crate::backend::MAX_EXPORT_FPS;
 const AUTOSAVE_AFTER: Duration = Duration::from_millis(700);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -199,7 +202,15 @@ impl EditorState {
 
     /// `info.path` is canonical (`\\?\E:\...`); tiles pass plain paths.
     pub fn is_open(&self, path: &str) -> bool {
-        self.info.as_ref().is_some_and(|info| same_path(&info.path, path)) || self.loading_path.as_deref().is_some_and(|p| same_path(p, path))
+        let open: Vec<&str> = self.info.iter().map(|info| info.path.as_str()).chain(self.loading_path.as_deref()).collect();
+        if open.iter().any(|p| same_path(p, path)) {
+            return true;
+        }
+        // The editor holds the canonical path; a tile names the clip through the folder as
+        // configured. Through a junction or a linked folder only the resolved path matches.
+        let Some(real) = (!open.is_empty()).then(|| std::fs::canonicalize(path).ok()).flatten() else { return false };
+        let real = real.to_string_lossy();
+        open.iter().any(|p| same_path(p, &real))
     }
 
     pub fn open(&mut self, path: String, workers: &Workers) {
@@ -280,7 +291,7 @@ impl EditorState {
     fn adopt(&mut self, info: ClipInfo, project: Option<crate::backend::Project>, warning: Option<String>) {
         self.plan = match project {
             Some(project) => {
-                self.fps = project.export_fps.max(1);
+                self.fps = project.export_fps.clamp(1, MAX_EXPORT_FPS);
                 self.export_settings = project.export.clone();
                 project.plan
             }

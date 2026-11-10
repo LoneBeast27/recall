@@ -53,6 +53,11 @@ pub fn read_until_end<R: BufRead>(mut reader: R, mut apply: impl FnMut(Command))
         }
         match serde_json::from_str::<Command>(line) {
             Ok(Command::Quit) => return true,
+            // The privacy stop ends the stream too; `apply` sees it first (`stdin_reader`).
+            Ok(Command::StopCapture) => {
+                apply(Command::StopCapture);
+                return true;
+            }
             Ok(cmd) => apply(cmd),
             Err(_) => {} // ignore malformed lines
         }
