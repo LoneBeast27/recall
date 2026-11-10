@@ -114,12 +114,33 @@ namespace Recall.Setup
                 var to = Path.Combine(Root(parts[0], roots, installDir), parts[1]);
                 if (!File.Exists(from) || Readable(to)) continue;
                 Directory.CreateDirectory(Path.GetDirectoryName(to));
-                File.Copy(from, to, true);
+                // An unreadable file is set aside, never overwritten: its bytes may still matter.
+                // A file that cannot be set aside is left alone and not restored.
+                if (File.Exists(to))
+                {
+                    string aside;
+                    try { aside = SetAside(to); }
+                    catch (IOException e) { log("WARNING: " + to + " could not be set aside (" + e.Message + "); not restored"); continue; }
+                    catch (UnauthorizedAccessException e) { log("WARNING: " + to + " could not be set aside (" + e.Message + "); not restored"); continue; }
+                    log("Unreadable settings file kept as " + aside);
+                }
+                File.Copy(from, to, false);
                 log("Settings file restored (it was missing or unreadable): " + to);
                 restored++;
             }
             log("Settings restored from " + backup + " (" + restored + " files)");
             return restored;
+        }
+
+        /// Renames <paramref name="path"/> to "<name>.unreadable-yyyyMMdd-HHmmss[-n]" beside it and
+        /// returns the new path. Throws when the rename fails.
+        internal static string SetAside(string path)
+        {
+            var stamp = DateTime.Now.ToString("yyyyMMdd-HHmmss", CultureInfo.InvariantCulture);
+            var aside = path + ".unreadable-" + stamp;
+            for (int n = 2; File.Exists(aside) || Directory.Exists(aside); n++) aside = path + ".unreadable-" + stamp + "-" + n;
+            File.Move(path, aside);
+            return aside;
         }
 
         /// The backups, newest first (by the time in their names).

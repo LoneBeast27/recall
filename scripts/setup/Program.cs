@@ -11,15 +11,38 @@ namespace Recall.Setup
 {
     internal static class Program
     {
+        [DllImport("user32.dll")]
+        private static extern bool SetProcessDPIAware();
+
         [STAThread]
         private static int Main(string[] args)
         {
+            // Before any window: Windows then hands Setup real pixels instead of stretching a 96-DPI
+            // bitmap (the blurry text at 125-200 % scaling). The window scales itself (AutoScaleMode.Dpi).
+            SetProcessDPIAware();
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             // Leftover %TEMP%\Recall-Uninstall-<hex> copies from an earlier uninstall (best-effort).
             TempCopy.Sweep(Path.GetTempPath(), line => { });
             int handled;
             if (SetupModes.TryRun(args, out handled)) return handled;
+            bool repair = args.Length == 1 && args[0].Equals(LaunchChecks.RepairArgument, StringComparison.OrdinalIgnoreCase);
+            if (repair) args = new string[0];
+            else if (args.Length == 0 && SetupPackage.HasPayload)
+            {
+                // Opened by hand: the version already installed against the latest published one.
+                var targets = SetupTargets.FromEnvironment();
+                var installed = InstalledRecall.Find(targets);
+                if (installed != null)
+                {
+                    // The app's "Check for updates automatically" off: no GitHub call (compared as offline).
+                    var latest = LatestRelease.ChecksAllowed(UserRoots.For(targets).Local) ? LatestRelease.Fetch() : null;
+                    var check = LaunchChecks.Decide(installed.Version, SetupBuildInfo.Version, latest);
+                    SetupLog.For(null)("Setup " + SetupBuildInfo.Version + " opened: installed " + (installed.Version ?? "?")
+                        + ", latest " + (latest ?? "unknown (offline)") + ": " + check);
+                    if (!LaunchChecks.Confirm(check, installed, SetupBuildInfo.Version, latest)) return 0;
+                }
+            }
             string updatePath = null, resumePath = null;
             bool update = (args.Length == 2 || (args.Length == 4 && args[2].Equals("--resume", StringComparison.OrdinalIgnoreCase)))
                 && args[0].Equals("--update", StringComparison.OrdinalIgnoreCase);

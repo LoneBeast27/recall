@@ -96,6 +96,18 @@ namespace Recall.Setup
         /// The new files are in: bring the recorder (and the app) back.
         public void Succeeded(RecorderQuitter quitter, InstallOptions options, List<string> notes)
         {
+            // An update the app asked for (--resume): the reopened app restores an unreadable file
+            // itself (recall-native update_restore.rs). Setup opened by hand (an update or a
+            // rollback) reopens the app without one, so Setup does it here, before anything runs.
+            if (resume == null && backup != null)
+            {
+                try
+                {
+                    if (ConfigBackup.Restore(backup, roots, dir, log) > 0)
+                        notes.Add("A settings file could not be read after the update and was restored from the backup made before it.");
+                }
+                catch (Exception restore) { log("WARNING: settings check after the update failed: " + restore.Message); }
+            }
             Relaunch(quitter, options, notes, "updated", null);
         }
 

@@ -11,6 +11,7 @@ namespace Recall.Setup
         private Button quickBrowse;
         private Label quickShortcut;
         private Label quickClips;
+        private Label quickPrerequisites;
         private YesNoChoice quickLaunch;
         private YesNoChoice quickTiming;
         private bool advanced;
@@ -19,7 +20,7 @@ namespace Recall.Setup
         {
             var panel = new Panel { Bounds = options.Bounds, TabIndex = 0 };
             AddLabel(panel, "Install location", 0, 5, 525, 24, fonts.Strong, Ink);
-            quickPath = AddLabel(panel, "", 0, 34, 418, 26, fonts.SystemText, Ink);
+            quickPath = AddLabel(panel, "", 0, 34, 418, 26, fonts.Body, Ink);
             quickPath.AutoEllipsis = true;
             quickBrowse = AddButton(panel, "Change…", 430, 28, 95, 32, false, 0);
             quickBrowse.AccessibleName = "Change install location";
@@ -32,18 +33,18 @@ namespace Recall.Setup
                 "Joins Performance Log Users for frame timing. Windows asks first.",
                 "Set up game detection and FPS", value => frameTiming.Checked = value);
             quickClips = AddLabel(panel, "", 0, 241, 525, 20, fonts.Body, Muted);
-            AddLabel(panel, prerequisites.Summary(), 0, 263, 525, 19, fonts.Body, Muted);
+            quickPrerequisites = AddLabel(panel, prerequisites.Summary(), 0, 263, 525, 19, fonts.Body, Muted);
             return panel;
         }
 
         private YesNoChoice AddDecision(Panel panel, int y, string question, string hint,
             string name, Action<bool> change)
         {
-            AddLabel(panel, question, 0, y, 408, 24, fonts.Strong, Ink);
-            AddLabel(panel, hint, 0, y + 25, 408, 36, fonts.Body, Muted);
             var choice = new YesNoChoice(name, fonts.Strong, change)
             {
-                Bounds = new Rectangle(414, y + 2, 111, 33)
+                Bounds = new Rectangle(414, y + 2, 111, 33),
+                Question = AddLabel(panel, question, 0, y, 408, 24, fonts.Strong, Ink),
+                Hint = AddLabel(panel, hint, 0, y + 25, 408, 36, fonts.Body, Muted)
             };
             panel.Controls.Add(choice);
             return choice;
@@ -70,22 +71,50 @@ namespace Recall.Setup
             {
                 title.Text = advanced ? "Advanced setup" : update ? "Update Recall" : "Set up Recall";
                 description.Text = advanced ? "Choose the install folder, shortcut, and Windows permissions."
-                    : updateMode ? "Review the installed folder, then update when you are ready."
+                    : update ? "Review the installed folder, then update when you are ready."
                     : "Quick setup installs Recall for your Windows account.";
                 primary.Text = preview ? "Preview install" : update ? "Update Recall" : "Install Recall";
             }
             quickPath.Text = path ?? "Choose a valid install location.";
             quickPath.ForeColor = path == null ? Error : Ink;
-            quickShortcut.Text = shortcut.Checked ? "Setup adds or refreshes a Start menu shortcut."
+            quickShortcut.Text = shortcut.Checked && !update ? "Setup adds or refreshes a Start menu shortcut."
                 : "Setup keeps your existing Start menu shortcuts.";
+            // An update opens Recall as it was, never guided setup: nothing to start after it.
+            if (!updateMode)
+            {
+                quickLaunch.Shown = !update;
+                PlaceQuickRows(!update);
+            }
             quickClips.Text = update ? "Setup keeps your clip folder and recording settings."
                 : @"Clips go to Videos\Recall. Change the folder in Settings → Media.";
+        }
+
+        /// The rows under the start-recording question move up into its place while it is hidden,
+        /// so an update shows no gap. Positions in 96-DPI units, scaled like the window
+        /// (YesNoChoice is 33 units tall).
+        private void PlaceQuickRows(bool launchShown)
+        {
+            float s = quickLaunch.Height / 33f;
+            int top = quickLaunch.Question.Top + (launchShown ? (int)Math.Round(70 * s) : 0);
+            quickTiming.Question.Top = top;
+            quickTiming.Hint.Top = top + (int)Math.Round(25 * s);
+            quickTiming.Top = top + (int)Math.Round(2 * s);
+            quickClips.Top = top + (int)Math.Round(70 * s);
+            quickPrerequisites.Top = top + (int)Math.Round(92 * s);
         }
 
         private sealed class YesNoChoice : Panel
         {
             private readonly RadioButton yes;
             private readonly RadioButton no;
+            public Label Question;
+            public Label Hint;
+
+            /// The question, its hint and the buttons together.
+            public bool Shown
+            {
+                set { Visible = value; if (Question != null) Question.Visible = value; if (Hint != null) Hint.Visible = value; }
+            }
 
             public YesNoChoice(string name, Font font, Action<bool> change)
             {
@@ -112,7 +141,7 @@ namespace Recall.Setup
 
             private static RadioButton MakeButton(string text, string name, Font font, int x)
             {
-                var button = new RadioButton
+                var button = new SmoothRadioButton
                 {
                     Text = text, AccessibleName = name + " " + text, Appearance = Appearance.Button,
                     Bounds = new Rectangle(x, 0, 54, 33), FlatStyle = FlatStyle.Flat,

@@ -63,11 +63,8 @@ impl Root {
         if let Some(path) = std::env::var_os("RECALL_NATIVE_CLIP") {
             root.open_clip(path.to_string_lossy().into_owned());
         }
-        if let Some(record_after) = match std::env::var("RECALL_SETUP").as_deref() {
-            Ok("record") => Some(true),
-            Ok("paused") => Some(false),
-            _ => None,
-        } {
+        let asked = std::env::var("RECALL_SETUP").ok();
+        if let Some(record_after) = guided_setup(asked.as_deref(), already_set_up()) {
             root.begin_setup(record_after);
         } else {
             root.open_env_route();
@@ -166,5 +163,37 @@ impl Root {
             }
             _ => {}
         }
+    }
+}
+
+/// Guided setup only for someone who has never set Recall up: Setup asks for it after a first
+/// install (`RECALL_SETUP`), but an older Setup run over an install asks too, and the recorder's
+/// settings file already holds that person's choices. `Some(record_after)` runs it.
+pub(crate) fn guided_setup(asked: Option<&str>, already_set_up: bool) -> Option<bool> {
+    let record_after = match asked {
+        Some("record") => true,
+        Some("paused") => false,
+        _ => return None,
+    };
+    (!already_set_up).then_some(record_after)
+}
+
+/// The recorder has saved settings for this Windows account (`%APPDATA%\recall-hdr\config.toml`).
+fn already_set_up() -> bool {
+    crate::user_dirs::appdata().is_some_and(|dir| dir.join("recall-hdr").join("config.toml").is_file())
+}
+
+#[cfg(test)]
+mod guided_setup_tests {
+    use super::guided_setup;
+
+    #[test]
+    fn guided_setup_runs_only_for_a_first_install() {
+        assert_eq!(guided_setup(Some("record"), false), Some(true));
+        assert_eq!(guided_setup(Some("paused"), false), Some(false));
+        assert_eq!(guided_setup(Some("paused"), true), None, "settings exist: an update, never set up again");
+        assert_eq!(guided_setup(Some("record"), true), None);
+        assert_eq!(guided_setup(None, false), None, "a plain start");
+        assert_eq!(guided_setup(Some("other"), false), None);
     }
 }

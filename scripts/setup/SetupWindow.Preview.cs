@@ -9,8 +9,11 @@ namespace Recall.Setup
     internal sealed partial class SetupWindow
     {
 #if PREVIEW
+        private string previewPath;
+
         public void SavePreview(string path)
         {
+            previewPath = path;
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             Opacity = 0;
@@ -24,6 +27,12 @@ namespace Recall.Setup
             Application.DoEvents();
             SaveFrame(Path.ChangeExtension(path, ".advanced.png"));
             ShowOptions(false);
+            quickLaunch.Shown = false;
+            PlaceQuickRows(false);
+            Application.DoEvents();
+            SaveFrame(Path.ChangeExtension(path, ".update.png"));
+            quickLaunch.Shown = true;
+            PlaceQuickRows(true);
             destination.Text = originalPath;
         }
 
@@ -64,6 +73,9 @@ namespace Recall.Setup
             mode.PerformClick();
             primary.PerformClick();
             if (!busy || step != 1 || primary.Enabled) throw new InvalidOperationException("Install state was not engaged");
+            resultTitle.Text = "Downloading verified FFmpeg components…";
+            Application.DoEvents();
+            if (previewPath != null) SaveFrame(Path.ChangeExtension(previewPath, ".installing.png"));
             var deadline = DateTime.UtcNow.AddSeconds(3);
             while (busy && DateTime.UtcNow < deadline)
             {

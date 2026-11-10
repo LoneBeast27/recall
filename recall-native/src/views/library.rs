@@ -264,7 +264,7 @@ pub fn nav_row(id: &'static str, kind: Icon, label: &str, count: Option<String>,
         .when(active, |d| d.bg(c(theme::OVERLAY)))
         .when(!active, |d| d.hover(|s| s.bg(c(theme::RAISED)).text_color(c(theme::TEXT))))
         .child(icon(kind, 16., if active { theme::TEXT } else { theme::MUTED }))
-        .child(div().flex_1().font_weight(if active { FontWeight::MEDIUM } else { FontWeight::NORMAL }).child(label.to_owned()))
+        .child(div().flex_1().font_weight(if active { FontWeight::SEMIBOLD } else { FontWeight::MEDIUM }).child(label.to_owned()))
         .children(count.map(|n| div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(n)))
 }
 
