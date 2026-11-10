@@ -232,11 +232,13 @@ pub(crate) fn mux_mp4(
     }
     merged.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
     // The packet index (head + planned records) goes to disk before the first packet goes in.
+    let planning = Instant::now();
     let mut index_writer = index_at.map(|base| {
         let start = index::tell(&mut octx);
         let planned = index::plan(params, start, merged.iter().map(|m| (m.0, m.6, &m.5, m.3, m.4)));
         index::begin(base, path, params, backend, tracks, planned.as_deref())
     });
+    let planning_ms = ms(planning.elapsed());
 
     // Time bases are final only after write_header; rescale against those.
     let out_tbs: Vec<ff::Rational> = octx.streams().map(|s| s.time_base()).collect();
@@ -299,7 +301,7 @@ pub(crate) fn mux_mp4(
             return Err(reason.clone());
         }
     }
-    let index_cost = index_writer.map(|w| w.and_then(super::replay_index::Writer::finish));
+    let index_cost = index_writer.map(|w| w.and_then(super::replay_index::Writer::finish).map(|c| super::replay_index::Cost { plan_ms: planning_ms, ms: c.ms - c.plan_ms + planning_ms, ..c }));
     let mux_ms = ms(started.elapsed());
     let trailer = Instant::now();
     octx.write_trailer().map_err(|e| match &partial {

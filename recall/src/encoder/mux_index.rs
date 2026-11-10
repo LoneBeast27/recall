@@ -70,8 +70,31 @@ fn video_rewrite(params: &OwnedParams) -> Option<bool> {
 /// The first `00 00 01` at or after `from` (one zero earlier when it is a 4-byte code), else the
 /// end: `ff_nal_find_startcode`.
 fn find_startcode(buf: &[u8], from: usize) -> usize {
-    let at = buf[from.min(buf.len())..].windows(3).position(|w| w == [0, 0, 1]).map_or(buf.len(), |i| from + i);
+    let mut i = from;
+    let at = loop {
+        let Some(zero) = next_zero(buf, i) else { break buf.len() };
+        if buf.get(zero + 1) == Some(&0) && buf.get(zero + 2) == Some(&1) {
+            break zero;
+        }
+        i = zero + 1;
+    };
     if at < buf.len() && at > from && buf[at - 1] == 0 { at - 1 } else { at }
+}
+
+/// The first zero byte at or after `from`, eight bytes at a time (compressed video holds few
+/// zeros: this is what keeps planning a long save cheap).
+fn next_zero(buf: &[u8], from: usize) -> Option<usize> {
+    const LO: u64 = 0x0101_0101_0101_0101;
+    const HI: u64 = 0x8080_8080_8080_8080;
+    let mut i = from;
+    while i + 8 <= buf.len() {
+        let word = u64::from_le_bytes(buf[i..i + 8].try_into().unwrap_or_default());
+        if word.wrapping_sub(LO) & !word & HI != 0 {
+            break;
+        }
+        i += 8;
+    }
+    buf.get(i..)?.iter().position(|b| *b == 0).map(|j| i + j)
 }
 
 /// What `ff_avc_parse_nal_units` writes for `buf`: each NAL as a 4-byte length and its bytes.

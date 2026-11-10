@@ -280,16 +280,20 @@ fn plan_cost_of_a_120s_save() {
     let Some(window) = window_of("libx264", 7200, 64, 64) else { return eprintln!("libx264 missing; skipped") };
     let job = |name: &str| window_job(&sb.dir.join(format!("{name}.mp4")).to_string_lossy(), window.0.clone(), window.1.clone(), window_secs(&window.0));
     let cpu = || crate::thread_qos::thread_cpu_ms();
-    let mut with = Timing::default();
-    let c0 = cpu();
-    produce(&sb.dir.join("W.mp4.part"), &job("W"), &AtomicBool::new(false), &mut with).unwrap();
-    let with_cpu = cpu() - c0;
-    let (_, records) = read(&slot().unwrap()).unwrap();
-    let c1 = cpu();
-    super::super::mux::NO_INDEX.with(|n| n.set(true));
-    produce(&sb.dir.join("N.mp4.part"), &job("N"), &AtomicBool::new(false), &mut Timing::default()).unwrap();
+    // Alternated after a warm-up pair: the median of 4 runs each way counts.
+    let mut runs = Vec::new();
+    for (k, index) in [false, true].repeat(5).into_iter().enumerate() {
+        super::super::mux::NO_INDEX.with(|n| n.set(!index));
+        let mut timing = Timing::default();
+        let c = cpu();
+        produce(&sb.dir.join(format!("{k}.mp4.part")), &job(&k.to_string()), &AtomicBool::new(false), &mut timing).unwrap();
+        runs.push((cpu() - c, timing));
+    }
     super::super::mux::NO_INDEX.with(|n| n.set(false));
-    let without_cpu = cpu() - c1;
+    let median = |odd: usize| { let mut v: Vec<f64> = runs.iter().skip(2).skip(odd).step_by(2).map(|r| r.0).collect(); v.sort_by(f64::total_cmp); (v[1] + v[2]) / 2.0 };
+    let (without_cpu, with_cpu, with) = (median(0), median(1), runs[runs.len() - 1].1);
+    eprintln!("PLAN COST runs (cpu ms, without/with alternating): {:?}", runs.iter().map(|r| r.0.round()).collect::<Vec<_>>());
+    let (_, records) = read(&slot().unwrap()).unwrap();
     eprintln!(
         "PLAN COST 120 s: {} records, index {} B, plan {:.2} ms of index {:.2} ms; saver CPU {:.1} ms with / {:.1} ms without = {:.4} / {:.4} ms per frame",
         records.len(), with.index_bytes, with.index_plan_ms, with.index_ms, with_cpu, without_cpu, with_cpu / 7200.0, without_cpu / 7200.0
