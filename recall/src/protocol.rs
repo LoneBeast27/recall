@@ -87,6 +87,9 @@ pub enum Outbound {
         /// In-process only (bookmark placement): the clip's video end on the capture clock.
         #[serde(skip)]
         video_end_us: Option<u64>,
+        /// Cut short (a stall, the 30 min budget, a quit), holding what was written: why.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        partial: Option<String>,
     },
     /// A staged clip is now at its final `path`. `elapsed_ms`: this move's
     /// copy + flush + rename time. After a copy across volumes the staged
@@ -445,12 +448,10 @@ mod tests {
         let staged = Outbound::Saved {
             path: r"E:\Clips\G__x.mp4".into(),
             seconds: 120.0,
-            frames: 7200,
-            bytes: 400,
-            elapsed_ms: 812,
+            frames: 7200, bytes: 400, elapsed_ms: 812,
             staged: true,
             staged_path: Some(r"F:\Recall\cache\staging\G__x.mp4".into()),
-            video_end_us: Some(7),
+            video_end_us: Some(7), partial: None,
         };
         assert_eq!(
             wire(&staged),
@@ -465,10 +466,12 @@ mod tests {
             staged: false,
             staged_path: None,
             video_end_us: None,
+            partial: Some("stalled".into()),
         };
         assert_eq!(
             wire(&direct),
-            r#"{"type":"saved","path":"a.mp4","seconds":1.5,"frames":3,"bytes":10,"elapsed_ms":5,"staged":false}"#
+            r#"{"type":"saved","path":"a.mp4","seconds":1.5,"frames":3,"bytes":10,"elapsed_ms":5,"staged":false,"partial":"stalled"}"#
+
         );
     }
 

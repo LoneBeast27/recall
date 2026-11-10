@@ -173,6 +173,7 @@ impl State {
                 seconds: f64_of(event, "seconds") as f32,
                 bytes: u64_of(event, "bytes"),
                 elapsed_ms: u64_of(event, "elapsed_ms"),
+                partial: string_of(event, "partial"),
             },
             "save_failed" => DaemonEvent::SaveFailed { reason: string_of(event, "reason").unwrap_or_else(|| "Save failed.".into()) },
             "export_started" => DaemonEvent::ExportStarted { source: source(), path: path(), fps: fps() },

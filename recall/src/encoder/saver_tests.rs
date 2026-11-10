@@ -69,7 +69,7 @@ fn kinds(lines: &[String]) -> Vec<&'static str> {
 }
 
 fn report<'a>(path: &'a str, staged_path: Option<&'a str>, secs: f32, frames: u64, bytes: u64, ms: u64) -> SavedReport<'a> {
-    SavedReport { path, staged_path, seconds: secs, frames, bytes, elapsed_ms: ms, video_end_us: None }
+    SavedReport { path, staged_path, seconds: secs, frames, bytes, elapsed_ms: ms, video_end_us: None, partial: None }
 }
 
 #[test]
@@ -124,10 +124,7 @@ fn queue_is_fifo_one_at_a_time_and_rejects_when_full() {
         gate_rx.recv().unwrap();
         std::fs::write(part, job.path.as_bytes()).unwrap();
         busy.fetch_sub(1, SeqCst);
-        Ok(Muxed {
-            frames: 3,
-            secs: 1.5,
-        })
+        Ok(Muxed { frames: 3, secs: 1.5, partial: None })
     });
     let galleries = Arc::new(Mutex::new(Vec::new()));
     let seen = galleries.clone();
@@ -192,7 +189,7 @@ fn queue_is_fifo_one_at_a_time_and_rejects_when_full() {
 }
 
 #[test]
-fn failed_or_panicking_mux_leaves_neither_part_nor_clip() {
+fn a_failed_mux_leaves_no_clip_and_a_panic_keeps_its_part() {
     let dir = temp_dir("fail");
     let (events, sink) = Events::capture(true);
     let mut calls = 0;
@@ -202,10 +199,7 @@ fn failed_or_panicking_mux_leaves_neither_part_nor_clip() {
         match calls {
             1 => Err("mux exploded".into()),
             2 => panic!("injected mux panic"),
-            _ => Ok(Muxed {
-                frames: 1,
-                secs: 1.5,
-            }),
+            _ => Ok(Muxed { frames: 1, secs: 1.5, partial: None }),
         }
     });
     let (queue, control) = spawn(events, mux, no_gallery());
@@ -217,7 +211,7 @@ fn failed_or_panicking_mux_leaves_neither_part_nor_clip() {
         assert!(queue.submit(job(p)));
         // One at a time so the bounded queue never rejects in this test.
         let deadline = Instant::now() + Duration::from_secs(5);
-        while lines(&sink).iter().filter(|l| !l.contains("save timing")).count()
+        while lines(&sink).iter().filter(|l| l.contains(r#""type":"save"#)).count()
             < paths.iter().position(|q| q == p).unwrap() + 1
         {
             assert!(Instant::now() < deadline, "saver stalled");
@@ -228,8 +222,12 @@ fn failed_or_panicking_mux_leaves_neither_part_nor_clip() {
     assert_eq!(control.shutdown(Duration::from_secs(3)), Shutdown::Drained);
     for p in &paths[..2] {
         assert!(!p.exists(), "{p:?} left behind");
-        assert!(!part_path(&text(p)).exists(), "{p:?}.part left behind");
     }
+    // No packet went in (the fake reports none): the failed save's .part is deleted, logged.
+    assert!(!part_path(&text(&paths[0])).exists(), "zero-packet .part left behind");
+    assert!(lines(&sink).iter().any(|l| l.contains("no packet was written")), "the delete is logged");
+    // A panic never deletes (never lose a clip): the next start's recovery sees the .part.
+    assert!(part_path(&text(&paths[1])).exists(), "a panicking save's .part is kept");
     assert!(paths[2].exists(), "the saver must survive a panicking job");
     assert_eq!(
         of_type(&lines(&sink), "save_failed"),
@@ -333,7 +331,7 @@ fn json(line: &str) -> serde_json::Value {
 fn fixed_mux(bytes: usize) -> MuxFn {
     Box::new(move |part, _job, _abort, _timing| {
         std::fs::write(part, vec![7u8; bytes]).unwrap();
-        Ok(Muxed { frames: 3, secs: 1.5 })
+        Ok(Muxed { frames: 3, secs: 1.5, partial: None })
     })
 }
 
@@ -388,7 +386,8 @@ fn same_volume_saves_in_place_and_start_recovers_leftovers_even_with_staging_off
     let old = out.join("Old__2026-10-22__09-00-00-000__cd34.mp4");
     assert_eq!(json(&moved[0])["path"], text(&old));
     assert_eq!(std::fs::read(&old).unwrap(), b"finished earlier");
-    assert_eq!(std::fs::read_dir(&stage).unwrap().count(), 0, "leftover moved, stale .part deleted");
+    let left: Vec<_> = std::fs::read_dir(&stage).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert_eq!(left, vec!["Cut__2026-10-22__09-01-00-000__ef56.mp4.part"], "leftover moved; a cut-off .part is kept, never swept");
 
     let final_path = out.join(CLIP);
     assert!(queue.submit(job(&final_path)));
@@ -426,7 +425,7 @@ fn the_save_being_written_reports_its_growing_part_and_the_queue_behind_it() {
             wrote_tx.send(()).unwrap();
             gate_rx.recv().unwrap();
         }
-        Ok(Muxed { frames: 1, secs: 1.5 })
+        Ok(Muxed { frames: 1, secs: 1.5, partial: None })
     });
     let (queue, control) = spawn(events, mux, no_gallery());
     let wait = Duration::from_secs(5);
