@@ -373,7 +373,7 @@ pub fn start(buffer_secs: u32, hold: bool, mut report: impl FnMut(String)) -> Ve
             }
         }
     }
-    let app_rings = apps::start(&sources::app_sources(&list), buffer_secs, game_pid.clone().ok().flatten(), &mut report);
+    let app_rings = apps::start(&sources::app_sources(&list), buffer_secs, game_pid.clone().ok().flatten(), hold, &mut report);
     for ring in &app_rings {
         if let Some(spec) = list.iter().find(|s| s.id.trim() == ring.name) {
             sources::note_live(spec, ring);
