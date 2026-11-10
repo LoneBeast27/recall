@@ -213,7 +213,7 @@ impl EngineActivity {
 
     /// A `record_toggle` now stops: the engine's recorder is active from its start, the
     /// keyframe wait included, not only once it reports running.
-    fn toggle_stops(&self) -> bool {
+    pub fn toggle_stops(&self) -> bool {
         self.long != LongRec::Idle
     }
 

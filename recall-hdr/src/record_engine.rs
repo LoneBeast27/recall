@@ -210,7 +210,7 @@ impl EnginePlanner {
 
     /// F3: while that hold runs, every command that captures the held app is refused like a
     /// save: a screenshot (the latest frame, written to disk) and a long-recording start (the
-    /// live capture, written to disk). `recording`: a long recording runs (a toggle stops it).
+    /// live capture, written to disk). `recording`: a long recording runs or starts (a toggle stops it, SPEC 26 C).
     pub fn privacy_command_refusal(&self, cmd: &str, recording: bool) -> Option<String> {
         let captures = matches!(cmd, "screenshot" | "record_start" | "save_clip") || (cmd == "record_toggle" && !recording);
         if captures { self.privacy_refusal() } else { None }
