@@ -38,7 +38,8 @@ fn video_packets(path: &Path) -> usize {
 fn a_part_killed_mid_save_is_recovered_at_the_next_start() {
     // (e) A sign-out / shutdown force-kills the engine mid-save: what it leaves is found at the
     // next start. Killed after the trailer (rename lost): adopted as a playable clip. Killed
-    // before it: kept byte for byte, never swept. Killed right after the header: deleted.
+    // before it: kept byte for byte, never swept. Killed right after the header: kept too (this
+    // is the one-time scan of an older build's parts, which never recycles; restore policy (d)).
     let dir = scratch("recall-part-recover", "kill");
     let Some(whole) = finished_clip(&dir) else { return eprintln!("libx264 missing; skipped") };
     let after_trailer = dir.join("A__2026-11-10__10-00-00-000__aa.mp4.part");
@@ -68,7 +69,8 @@ fn a_part_killed_mid_save_is_recovered_at_the_next_start() {
     );
     assert!(video_packets(&clip) > 0, "the adopted clip plays");
     assert_eq!(std::fs::read(&mid_write).unwrap(), cut, "kept byte for byte");
-    assert!(!after_header.exists() && longrec.exists(), "a long recording's part is longrec's");
+    assert!(after_header.exists(), "the one-time scan never recycles");
+    assert!(longrec.exists(), "a long recording's part is longrec's");
     for f in &found {
         eprintln!("{}", f.line());
     }

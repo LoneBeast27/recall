@@ -293,7 +293,11 @@ fn pipe_commands_send_without_the_shortcut_tick() {
     use crate::test_src::method_body;
     let actions = include_str!("record_actions.rs");
     assert!(method_body(actions, "engine_command").contains("self.engine_command_as(cmd, client, false);"));
-    assert!(method_body(actions, "engine_command_as").contains("&mut ControllerCommand { ctl: self, cmd, client }, cmd, hotkey).queued()"));
+    assert!(method_body(actions, "engine_command_as").contains("self.engine_command_line(cmd, None, client, hotkey)"));
+    let line = method_body(actions, "engine_command_line");
+    assert!(line.contains("let port = &mut ControllerCommand { ctl: self, cmd, client };"));
+    assert!(line.contains("crate::record_dispatch::command(port, cmd, hotkey).queued()") && line.contains("crate::record_dispatch::command_line(port, &line, hotkey).queued()"));
+    assert!(method_body(actions, "engine_resume").contains("Some(crate::record_dispatch::resume_line(path)), client, false)"), "Resume is a pipe command: no tick");
 }
 
 /// Review R2-audio-r9-4 (acc69a0, updated for design-audio-mute P10): source guards on the
@@ -312,4 +316,17 @@ fn the_source_list_and_the_press_flags_are_wired() {
     assert!(include_str!("record_audio_change.rs").contains("spawn_value: spawn_update(old, new)"), "the spawn list on any change");
     assert!(method_body(include_str!("record_cmds.rs"), "set_mic").contains("self.supervisor.set_mic_muted(muted)"), "Alt+M goes through the press line");
     assert!(method_body(include_str!("record_engine_ctl.rs"), "reapply_engine_intents").contains("mic_line(self.mic_muted, false)"), "a resync is no press");
+}
+
+/// Restore policy P2 (controller): the app's Resume recording is a `record_start` that
+/// continues the recovered file, queued and marked in flight like any start (no tick).
+#[test]
+fn resume_recording_is_a_record_start_that_continues_the_recovered_file() {
+    let line = resume_line(r"E:\c\G__2026-11-10__13-00-00__rec.mp4");
+    let v: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(v, serde_json::json!({"cmd": "record_start", "continues": r"E:\c\G__2026-11-10__13-00-00__rec.mp4"}));
+    let ok = TestPipe::healthy();
+    let mut port = CmdShown { pipe: &ok, log: Vec::new() };
+    assert!(command_line(&mut port, &line, false).queued());
+    assert_eq!(port.log, ["queue", "mark_pending", "announce"]);
 }

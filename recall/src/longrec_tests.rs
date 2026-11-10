@@ -34,7 +34,7 @@ fn finished(dir: &Path) -> Vec<String> {
 fn a_reopened_encoders_first_packet_continues_the_recording_without_the_notice() {
     let (mut w, dir) = writer("reopen", 0);
     let (_tx, rx) = sync_channel::<Data>(4);
-    w.start("G", Some((0, Instant::now())));
+    w.start("G", Some((0, Instant::now())), None);
     w.generation = G + 3; // the encoder generation the recording started on
     w.data(video(0, true, G + 3));
     w.data(video(16, false, G + 3));
@@ -64,7 +64,7 @@ fn a_failed_encoder_ends_the_recording_after_its_queued_packets() {
     let _failures = tap::FAILED_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (mut w, dir) = writer("encfail", generation);
     let (tx, rx) = sync_channel::<Data>(4);
-    w.start("G", Some((0, Instant::now())));
+    w.start("G", Some((0, Instant::now())), None);
     w.generation = generation;
     w.data(video(0, true, generation));
     tx.send(video(16, false, generation)).unwrap();
@@ -86,7 +86,7 @@ fn a_part_opens_with_its_own_encoders_settings_not_a_newer_ones() {
     let log = Log::default();
     w.recorder = Recorder::new(FakeFactory { log: log.clone(), newest: G + 5, ..Default::default() }, tracks());
     let (_tx, rx) = sync_channel::<Data>(4);
-    w.start("G", Some((0, Instant::now())));
+    w.start("G", Some((0, Instant::now())), None);
     assert_eq!(w.generation, G + 5, "the start reads the newest generation with its settings");
     // As if the recording had started on generation 3 (its settings: 3).
     w.recorder.set_video(Some(G + 3));
@@ -110,7 +110,7 @@ fn a_failed_encoder_that_already_reopened_ends_the_recording() {
     let generation = u64::MAX - 20;
     let _failures = tap::FAILED_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (mut w, dir) = writer("failreopen", generation);
-    w.start("G", Some((0, Instant::now())));
+    w.start("G", Some((0, Instant::now())), None);
     w.generation = generation;
     w.data(video(0, true, generation));
     w.data(video(16, false, generation));
@@ -131,7 +131,7 @@ fn a_failure_after_a_continued_part_names_every_file() {
     let _failures = tap::FAILED_TEST_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let (mut w, dir) = writer("failparts", generation);
     let (_tx, rx) = sync_channel::<Data>(4);
-    w.start("G", Some((0, Instant::now())));
+    w.start("G", Some((0, Instant::now())), None);
     w.generation = generation;
     w.data(video(0, true, generation));
     w.data(video(16, false, generation));
@@ -160,7 +160,7 @@ fn a_failure_after_a_continued_part_names_every_file() {
 fn a_failure_between_parts_names_the_finished_part_once() {
     let generation = u64::MAX - 60;
     let (mut w, dir) = writer("failbetween", generation);
-    w.start("G", Some((0, Instant::now())));
+    w.start("G", Some((0, Instant::now())), None);
     w.generation = generation;
     w.data(video(0, true, generation));
     w.data(video(16, false, generation));
@@ -186,7 +186,7 @@ fn a_failure_reports_the_seconds_frozen_before_it() {
     let recorder = Recorder::new(factory, tracks());
     let mut w = Writer { out_dir: dir.to_string_lossy().into_owned(), json: false, recorder, generation, skew: Duration::ZERO, parts_so_far: Vec::new(), missed: (0.0, 0.0), lock: LockClock::default() };
     let t0 = Instant::now();
-    w.start("G", Some((0, t0)));
+    w.start("G", Some((0, t0)), None);
     w.generation = generation;
     w.data(video(0, true, generation));
     w.data(video(1_000, false, generation)); // the last packet before an encode error
@@ -212,7 +212,7 @@ fn the_writer_counts_a_freeze_from_the_encode_error() {
     let recorder = Recorder::new(factory, tracks());
     let mut w = Writer { out_dir: dir.to_string_lossy().into_owned(), json: false, recorder, generation, skew: Duration::ZERO, parts_so_far: Vec::new(), missed: (0.0, 0.0), lock: LockClock::default() };
     let t0 = Instant::now();
-    w.start("G", Some((0, t0)));
+    w.start("G", Some((0, t0)), None);
     w.generation = generation;
     w.data(video(0, true, generation));
     w.data(video(1_000, false, generation)); // then a static screen: no packets
@@ -292,7 +292,7 @@ fn record_fail_ends_a_continued_recording_early_and_keeps_every_part() {
     let generation = u64::MAX - 60;
     let (mut w, dir) = writer("recordfail", generation);
     let (tx, rx) = sync_channel::<Data>(4);
-    w.start("G", Some((0, Instant::now())));
+    w.start("G", Some((0, Instant::now())), None);
     w.generation = generation;
     w.data(video(0, true, generation));
     w.data(video(16, false, generation));
@@ -344,7 +344,7 @@ fn a_long_recording_finished_in_an_adopted_folder_is_recalls() {
     let _gone = scopeguard_dir(&dir);
     crate::game_folder_rule::adopt(&dir).unwrap();
     let (_tx, rx) = sync_channel::<Data>(4);
-    w.start("G", Some((0, Instant::now())));
+    w.start("G", Some((0, Instant::now())), None);
     w.generation = G + 90;
     w.data(video(0, true, G + 90));
     w.data(video(16, false, G + 90));
@@ -384,7 +384,7 @@ fn several_recovered_parts_are_one_event_that_lists_them() {
 fn a_twelve_minute_lock_during_a_recording_is_counted_and_reset_by_the_stop() {
     let (mut w, dir) = writer("locked", G + 50);
     let (_tx, rx) = sync_channel::<Data>(4);
-    w.start("G", Some((0, Instant::now())));
+    w.start("G", Some((0, Instant::now())), None);
     w.generation = G + 50;
     w.data(video(0, true, G + 50));
     w.control(Control::Locked(true), &rx);
@@ -404,7 +404,7 @@ fn a_twelve_minute_lock_during_a_recording_is_counted_and_reset_by_the_stop() {
 fn the_writers_stop_message_carries_the_locked_seconds() {
     let (mut w, dir) = writer("locked-stop", G + 51);
     let (_tx, rx) = sync_channel::<Data>(4);
-    w.start("G", Some((0, Instant::now())));
+    w.start("G", Some((0, Instant::now())), None);
     w.generation = G + 51;
     w.data(video(0, true, G + 51));
     w.control(Control::Locked(true), &rx);

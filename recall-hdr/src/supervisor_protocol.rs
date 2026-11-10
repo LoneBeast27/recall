@@ -133,6 +133,7 @@ fn protocol_line(shared: &Arc<Shared>, line: &str, last: &mut Option<StatusDiges
             field(&val, "reason")
         ),
         Some("recording_recovered") => log!("supervisor: engine recovered a crashed long recording -> {}", field(&val, "path")),
+        Some("recording_restored") => log!("supervisor: engine restored {} (repaired: {})", field(&val, "path"), val.get("repaired").and_then(|v| v.as_bool()).unwrap_or(false)),
         Some(kind @ ("screenshot_failed" | "recording_failed")) => {
             log!("supervisor: engine {kind} -- {}", field(&val, "reason"));
             beep_failure();

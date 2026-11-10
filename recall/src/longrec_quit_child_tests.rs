@@ -39,7 +39,7 @@ fn closed_stderr_child() {
     let dir = temp_dir("quit-child");
     let generation = u64::MAX - 101;
     let mut w = Writer { out_dir: dir.to_string_lossy().into_owned(), json: false, recorder: Recorder::new(FakeFactory::default(), tracks()), generation, skew: Duration::ZERO, parts_so_far: Vec::new(), missed: (0.0, 0.0), lock: LockClock::default() };
-    w.start("G", Some((0, Instant::now())));
+    w.start("G", Some((0, Instant::now())), None);
     w.generation = generation;
     w.data(Data::Video { pts_us: 0, keyframe: true, data: pkt(1), generation });
     w.data(Data::Video { pts_us: 16 * MS, keyframe: false, data: pkt(2), generation });

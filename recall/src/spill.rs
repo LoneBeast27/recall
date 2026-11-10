@@ -23,6 +23,7 @@
 
 mod drives;
 mod sweep;
+pub(crate) use sweep::is_recall;
 
 use std::fs::File;
 use std::path::PathBuf;

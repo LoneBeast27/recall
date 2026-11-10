@@ -57,6 +57,9 @@ pub enum DaemonCommand {
     Screenshot,
     /// Starts or stops the manual long recording.
     RecordToggle,
+    /// Resume recording (the recovered-recording prompt): a new long recording that continues
+    /// the recovered file `path` as its next part. Only ever sent on the user's click.
+    RecordResume { path: String },
     ToggleHdr,
     /// Shows or hides the in-game performance-stats island (`overlay.stats`, saved).
     ToggleStats,
@@ -115,6 +118,10 @@ pub enum DaemonEvent {
     /// Long recordings a crash or a kill left as `.part`, renamed into place on the next
     /// engine start (`paths`, one event for all); gap / frozen seconds when known (else 0).
     RecordingRecovered { paths: Vec<String>, gap_seconds: f64, frozen_seconds: f64 },
+    /// One long recording recovered at the recorder's start (`seconds`: its length after the
+    /// repair; None when it could not be repaired): ask Resume recording / End it here
+    /// (`views::recovered_prompt`).
+    RecordingRestored { path: String, seconds: Option<f64>, repaired: bool },
     /// "Sort clips into game folders" found the user's own folder with the game's name in
     /// Recordings, not answered yet (the clip went straight into Recordings): ask "Use your
     /// existing <Game> folder?" (`views::game_folder_prompt`).

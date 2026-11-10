@@ -181,6 +181,7 @@ impl<F: SinkFactory> Recorder<F> {
     pub fn mark(&mut self, at_us: u64) {
         if let Phase::Recording(a) = &mut self.phase {
             a.marks.push(at_us);
+            list_mark(&a.part, at_us);
         }
     }
 
@@ -233,11 +234,14 @@ impl<F: SinkFactory> Recorder<F> {
             None => now,
         };
         let part = naming::part_of(&path);
+        // Listed before the file exists (`in_progress`): a crash leaves a part the next start recovers.
+        let listed = list_part(&part, pts_us);
         let sink = match self.factory.open(&part, &self.tracks, self.video.as_ref()) {
             Ok(s) => s,
             Err(reason) => {
-                let _ = std::fs::remove_file(&part);
-                return vec![Event::Failed { reason, kept: previous.map(|p| p.path) }];
+                let mut events = dispose_empty_part(&part);
+                events.push(Event::Failed { reason, kept: previous.map(|p| p.path) });
+                return events;
             }
         };
         // In a game folder the `.part` goes on the marker's `writing` list, so a crash leaves a
@@ -284,7 +288,7 @@ impl<F: SinkFactory> Recorder<F> {
             None => Event::Started { path },
         };
         self.phase = Phase::Recording(active);
-        std::iter::once(started).chain(noted).collect()
+        std::iter::once(started).chain(noted).chain(listed).collect()
     }
 
     fn fail(&mut self, reason: String) -> Vec<Event> {
@@ -294,13 +298,12 @@ impl<F: SinkFactory> Recorder<F> {
         let Active { mut sink, part, video_packets, .. } = *active;
         sink.abandon();
         drop(sink);
-        let kept = if video_packets > 0 {
-            keep_partial(&part)
-        } else {
-            let _ = std::fs::remove_file(&part);
-            None
-        };
-        vec![Event::Failed { reason, kept }]
+        if video_packets == 0 {
+            let mut events = dispose_empty_part(&part);
+            events.push(Event::Failed { reason, kept: None });
+            return events;
+        }
+        vec![Event::Failed { reason, kept: keep_partial(&part) }]
     }
 }
 
@@ -448,7 +451,10 @@ fn finish<S: Sink>(mut a: Active<S>) -> Vec<Event> {
     };
     drop(a.sink);
     let path = match std::fs::rename(&a.part, &a.path) {
-        Ok(()) => a.path.clone(),
+        Ok(()) => {
+            unlist_part(&a.part);
+            a.path.clone()
+        }
         Err(e) => return vec![Event::Failed { reason: format!("finalize {}: {e}", a.path.display()), kept: None }],
     };
     let rel = crate::bookmarks::window_marks(a.marks.iter().copied(), a.base_us, a.base_us + (seconds * 1e6) as u64);
@@ -473,11 +479,11 @@ fn abandon_and_keep<S: Sink>(mut sink: S, part: &Path) -> Option<PathBuf> {
 }
 
 #[path = "machine_parts.rs"]
-mod parts;
+pub(crate) mod parts;
 pub use parts::Cause;
 #[cfg(test)]
 pub use parts::PART_GAP;
-use parts::{arm_wait_from, keep_partial, note, Series};
+use parts::{arm_wait_from, dispose_empty_part, keep_partial, list_mark, list_part, note, unlist_part, Series};
 
 #[cfg(test)]
 #[path = "machine_tests.rs"]

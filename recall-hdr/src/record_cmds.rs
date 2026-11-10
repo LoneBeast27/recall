@@ -129,6 +129,10 @@ impl Controller {
             "record_start" => self.engine_command("record_start", client),
             "record_stop" => self.engine_command("record_stop", client),
             "record_toggle" => self.engine_command("record_toggle", client),
+            "record_resume" => match val.get("path").and_then(Value::as_str) {
+                Some(path) => self.engine_resume(path, client),
+                None => self.reply_error(client, "record_resume: no path"),
+            },
             "pause" => self.set_paused(true),
             "resume" => self.set_paused(false),
             "toggle_pause" => self.set_paused(!self.paused),

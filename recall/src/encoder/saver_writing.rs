@@ -14,6 +14,8 @@ use std::time::Instant;
 
 use crate::protocol::SaveWriting;
 
+use super::super::in_progress;
+
 use super::{ms, part_path, Muxed, SaveJob, SaverControl, Timing, Worker, QUIT_BEFORE_START};
 
 impl SaverControl {
@@ -57,8 +59,9 @@ impl Worker {
 
 /// Mux into `part`, then rename it to the job's path. A clip path only ever holds a
 /// finished file (one cut short is finished with what was written, `Muxed::partial`).
-/// Never lose a clip: a failed save's `.part` is deleted only when the mux wrote no packet
-/// into it (logged); otherwise it stays for the next start's recovery (`part_recover`).
+/// Never lose a clip: the save is listed for recovery (`in_progress`) before its `.part` exists.
+/// A failed save's `.part` goes to the Recycle Bin only when the mux wrote no packet into it
+/// (logged); otherwise it stays, with its packet index, for the next start's recovery.
 pub(crate) fn write_clip<F>(
     part: &Path,
     job: &SaveJob,
@@ -86,24 +89,56 @@ where
     F: FnMut(&Path, &SaveJob, &AtomicBool, &mut Timing) -> Result<Muxed, String> + ?Sized,
 {
     timing.part_packets = 0;
+    // Listed before the `.part` exists: a save cut off now is recovered at the next start.
+    let index = super::super::replay_index::slot();
+    if let Err(e) = in_progress::add(in_progress::Entry::replay(part, Path::new(&job.path), index.as_deref())) {
+        // A crash now leaves it to the one-time scan, which the next start then runs again.
+        let rescan = in_progress::request_legacy_scan().err().map_or(String::new(), |r| format!("; the next start's scan could not be asked for: {r}"));
+        log(&format!("saver: {} not listed for recovery ({e}){rescan}", part.display()));
+    }
     match mux(part, job, abort, timing) {
         Ok(muxed) => {
             let started = Instant::now();
             let renamed = std::fs::rename(part, target);
             timing.rename_ms = ms(started.elapsed());
             match renamed {
-                Ok(()) => Ok(muxed),
-                // Finished but not renamed: the file is whole, the next start adopts it.
+                Ok(()) => {
+                    unlist(part, log);
+                    Ok(muxed)
+                }
+                // Finished but not renamed: the file is whole, the next start adopts it (no index needed).
                 Err(e) => {
                     log(&format!("saver: {} is finished but could not be renamed ({e}); kept for recovery at the next start", part.display()));
+                    let _ = in_progress::update(part, |entry| entry.index = None);
                     Err(format!("finalize {}: {e}", target.display()))
                 }
             }
         }
         Err(reason) => {
-            super::super::part_recover::after_failed_mux(part, timing.part_packets, &reason, log);
+            if super::super::part_recover::after_failed_mux(part, timing.part_packets, &reason, log) {
+                keep_index(part, index.as_deref(), log);
+            } else {
+                unlist(part, log);
+            }
             Err(reason)
         }
+    }
+}
+
+fn unlist(part: &Path, log: &dyn Fn(&str)) {
+    if let Err(e) = in_progress::remove(part) {
+        log(&format!("saver: {} still listed for recovery ({e})", part.display()));
+    }
+}
+
+/// A save kept for recovery keeps its packet index: out of the slot the next save overwrites.
+fn keep_index(part: &Path, slot: Option<&Path>, log: &dyn Fn(&str)) {
+    let Some(slot) = slot.filter(|s| super::super::replay_index::idx_of(s).exists()) else { return };
+    match super::super::replay_index::claim(slot) {
+        Ok(own) => {
+            let _ = in_progress::update(part, |entry| entry.index = Some(own.to_string_lossy().into_owned()));
+        }
+        Err(e) => log(&format!("saver: packet index for {} not kept ({e})", part.display())),
     }
 }
 

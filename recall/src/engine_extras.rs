@@ -29,7 +29,7 @@ impl Extras {
             Command::Bookmark => self.bookmark(),
             Command::Screenshot => self.shots.request(),
             Command::HudProbe => self.hud.request(),
-            Command::RecordStart | Command::RecordStop | Command::RecordToggle | Command::RecordFail { .. } => self.record(cmd),
+            Command::RecordStart { .. } | Command::RecordStop | Command::RecordToggle | Command::RecordFail { .. } => self.record(cmd),
             Command::SessionLocked { locked } => self.session_locked(*locked),
             _ => return false,
         }
@@ -72,7 +72,7 @@ impl Extras {
         // writer thread may pick the command up much later (HDD spin-up).
         let start = self.shared.recording_now();
         match cmd {
-            Command::RecordStart => lr.start(&self.source(), start),
+            Command::RecordStart { continues } => lr.start(&self.source(), start, continues.as_deref()),
             Command::RecordStop => lr.stop(),
             Command::RecordFail { reason } => lr.fail(reason),
             _ => lr.toggle(&self.source(), start),

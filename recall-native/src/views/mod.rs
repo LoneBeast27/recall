@@ -27,5 +27,6 @@ pub mod tile_menu;
 pub mod timeline;
 pub mod titlebar;
 pub mod game_folder_prompt;
+pub mod recovered_prompt;
 mod update_card;
 pub mod window_frame;

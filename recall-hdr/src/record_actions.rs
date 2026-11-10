@@ -170,6 +170,16 @@ impl Controller {
     /// As [`engine_command`](Self::engine_command); `hotkey`: a shortcut, which ticks once
     /// the engine has the command, never on a refusal. True when the line was queued.
     fn engine_command_as(&mut self, cmd: &'static str, client: Option<u64>, hotkey: bool) -> bool {
+        self.engine_command_line(cmd, None, client, hotkey)
+    }
+
+    /// Resume recording (the app's prompt after a recovered recording): `record_start` that
+    /// continues `path` as its next part, refused exactly as a plain start would be.
+    pub(crate) fn engine_resume(&mut self, path: &str, client: Option<u64>) {
+        self.engine_command_line("record_start", Some(crate::record_dispatch::resume_line(path)), client, false);
+    }
+
+    fn engine_command_line(&mut self, cmd: &'static str, line: Option<String>, client: Option<u64>, hotkey: bool) -> bool {
         let draining = self.planner.drain().is_some();
         // F3: the privacy hold refuses captures before anything else is checked.
         let privacy = self.planner.privacy_command_refusal(cmd, self.activity.toggle_stops());
@@ -186,7 +196,11 @@ impl Controller {
             return false;
         }
         // Queued first: only a command the engine will see is marked in flight (and ticked).
-        crate::record_dispatch::command(&mut ControllerCommand { ctl: self, cmd, client }, cmd, hotkey).queued()
+        let port = &mut ControllerCommand { ctl: self, cmd, client };
+        match line {
+            Some(line) => crate::record_dispatch::command_line(port, &line, hotkey).queued(),
+            None => crate::record_dispatch::command(port, cmd, hotkey).queued(),
+        }
     }
 
     /// `record_stop` from the controller itself (pause, retarget, sleep, session end): queued

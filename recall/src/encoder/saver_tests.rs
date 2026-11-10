@@ -223,9 +223,10 @@ fn a_failed_mux_leaves_no_clip_and_a_panic_keeps_its_part() {
     for p in &paths[..2] {
         assert!(!p.exists(), "{p:?} left behind");
     }
-    // No packet went in (the fake reports none): the failed save's .part is deleted, logged.
-    assert!(!part_path(&text(&paths[0])).exists(), "zero-packet .part left behind");
-    assert!(lines(&sink).iter().any(|l| l.contains("no packet was written")), "the delete is logged");
+    // The fake reports no packet but wrote bytes: the file itself holds data, so it is kept
+    // (restore policy: recycled only when a scan of the file finds no media), logged.
+    assert!(part_path(&text(&paths[0])).exists(), "a .part with data in it is never recycled");
+    assert!(lines(&sink).iter().any(|l| l.contains("no packet was written") && l.contains("kept")), "logged");
     // A panic never deletes (never lose a clip): the next start's recovery sees the .part.
     assert!(part_path(&text(&paths[1])).exists(), "a panicking save's .part is kept");
     assert!(paths[2].exists(), "the saver must survive a panicking job");

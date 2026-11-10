@@ -38,6 +38,28 @@ fn a_given_up_save_gets_exactly_one_answer() {
     assert_eq!(answers(&sink).len(), 2, "one answer per save: {:?}", answers(&sink));
 }
 
+/// A [`FakeClock`] whose every awake read first waits (real time, bounded) for the save's step
+/// counter to move: awake time never passes without the save moving.
+struct Lockstep {
+    inner: FakeClock,
+    progress: Arc<super::super::save_progress::SaveProgress>,
+    seen: std::sync::atomic::AtomicU64,
+}
+
+impl crate::awake_clock::Clock for Lockstep {
+    fn awake(&self) -> crate::awake_clock::Awake {
+        let until = Instant::now() + Duration::from_secs(5);
+        while self.progress.read().0 == self.seen.load(Relaxed) && Instant::now() < until {
+            std::thread::yield_now();
+        }
+        self.seen.store(self.progress.read().0, Relaxed);
+        self.inner.awake()
+    }
+    fn instant(&self) -> Instant {
+        self.inner.instant()
+    }
+}
+
 fn answers(sink: &Mutex<Vec<String>>) -> Vec<String> {
     sink.lock().unwrap().iter().filter(|l| l.contains(r#""type":"save"#) && !l.contains("save_progress")).cloned().collect()
 }
@@ -69,8 +91,12 @@ fn a_save_still_writing_past_the_30_min_budget_is_kept_with_one_answer() {
     assert!(queue.submit(window_job(&clip.to_string_lossy(), window.clone(), params, secs)));
     drop(queue);
     let SaverControl { done, abort, current, mover: _, progress } = control;
-    let clock = FakeClock::stepping(Duration::from_secs(10), Duration::ZERO);
+    // Each 10 s of awake time passes only once the save has stepped since the last read: the
+    // test's save always moves within the clock, so a busy machine that leaves the saver thread
+    // unscheduled for a few real milliseconds is never judged a stall (13 of 180 reads before).
+    let clock = Lockstep { inner: FakeClock::stepping(Duration::from_secs(10), Duration::ZERO), progress: progress.clone(), seen: std::sync::atomic::AtomicU64::new(progress.read().0) };
     let outcome = stop_saver_on(&done, &abort, &current, Duration::from_secs(2), &progress, true, &clock, Duration::from_millis(1));
+    let clock = clock.inner;
     assert_eq!(outcome, Shutdown::Aborted, "the saver stopped within the reserve");
     assert!(clock.reads() >= 180, "held the full 30 min awake ({} reads of 10 s)", clock.reads());
     let answered = answers(&sink);
@@ -123,13 +149,17 @@ fn a_stalled_save_leaves_its_part_and_the_next_start_keeps_it() {
     let logs = crate::protocol::test_emits::of("encoder_log");
     assert!(logs.iter().any(|l| l.contains("kept for recovery")), "{logs:?}");
 
-    // The next start (the process is gone; nothing holds the file).
+    // The next start (the process is gone; nothing holds the file): the saver listed the part
+    // (`in_progress`), so it is recovered from that list; an older build's unlisted part is
+    // found by the one-time scan.
+    assert!(super::super::in_progress::get(&part).is_some(), "listed for the next start's recovery");
     let finished = dir.join("G__2026-11-10__11-01-00-000__tr.mp4.part");
     std::fs::write(&finished, &whole).unwrap();
     let found = recover_replay_parts_older(&dir, Duration::ZERO);
     let adopted = dir.join("G__2026-11-10__11-01-00-000__tr.mp4");
-    assert_eq!(found, vec![Found::Kept(part.clone()), Found::Adopted { part: finished, clip: adopted.clone() }]);
+    assert_eq!(found, vec![Found::Adopted { part: finished, clip: adopted.clone() }], "the listed part is left to its list");
     assert!(part.exists() && adopted.exists());
+    let _ = super::super::in_progress::remove(&part);
     drop(release_tx);
     assert!(answers(&sink).is_empty(), "the saver adds no second answer");
 }

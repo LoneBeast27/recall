@@ -21,10 +21,9 @@
 //!   travels through staging.
 //! - Crash recovery ([`recover`], at engine start, before the first save): every
 //!   finished `*.mp4` in the staging folder is queued for moving to the current
-//!   clip folder; an unfinished `*.mp4.part` mux file there is never deleted with a packet in
-//!   it (`part_recover`: a finished one becomes a clip and is queued too, one cut off
-//!   mid-write is kept, one with no packet is deleted). With
-//!   staging off the default folder is still scanned, so nothing is stranded.
+//!   clip folder; an unfinished `*.mp4.part` mux file there is left alone (a save cut off is
+//!   recovered from the in-progress list, `longrec::recover`; an older build's once, by the
+//!   one-time scan). With staging off the default folder is still scanned, so nothing is stranded.
 //!   Its `kept\` subfolder (copies of clips already moved, kept for the app's
 //!   SSD video cache, `mover.rs`) is not scanned: the app adopts or deletes them. The one
 //!   exception: a kept copy whose clip is only a same-length `.part` in the clip folder (a
@@ -121,15 +120,13 @@ pub(crate) fn refused(dir: &Path, clip_dirs: &[PathBuf]) -> Option<String> {
 pub(crate) struct Recovery {
     /// (staged clip, destination in the clip folder), oldest first.
     pub moves: Vec<(PathBuf, PathBuf)>,
-    /// The unfinished `.part` mux files found, and what was done with each (`part_recover`).
-    pub parts: Vec<super::part_recover::Found>,
     pub errors: Vec<String>,
 }
 
 /// Scan `dir` once (see the module doc). Only `*.mp4` and `*.mp4.part` names
 /// are touched, so an override pointing at a shared folder moves nothing else.
 pub(crate) fn recover(dir: &Path, out_dir: &Path) -> Recovery {
-    let mut found = Recovery { parts: super::part_recover::recover_replay_parts_older(dir, std::time::Duration::ZERO), ..Recovery::default() };
+    let mut found = Recovery::default();
     let Ok(listing) = std::fs::read_dir(dir) else { return found };
     let mut clips = Vec::new();
     for entry in listing.flatten() {
@@ -139,8 +136,7 @@ pub(crate) fn recover(dir: &Path, out_dir: &Path) -> Recovery {
         let name = entry.file_name();
         let lower = name.to_string_lossy().to_ascii_lowercase();
         let path = entry.path();
-        // `.part` files were handled above (before the first save: none is in progress), a long
-        // recording's is `longrec::recover_parts`'s.
+        // `.part` files are `longrec::recover`'s (the in-progress list, the one-time scan).
         if lower.ends_with(".mp4") {
             let modified = entry.metadata().and_then(|m| m.modified()).ok();
             clips.push((modified, path, out_dir.join(&name)));
@@ -236,9 +232,6 @@ pub(crate) fn start(events: &Events, setup: Setup) -> (Option<Stage>, Option<Mov
     }
     if let Some(dir) = &setup.recover {
         let found = recover(dir, &setup.out_dir);
-        for part in &found.parts {
-            events.log(&format!("staging: {}", part.line()));
-        }
         for error in &found.errors {
             events.log(&format!("staging: {error}"));
         }

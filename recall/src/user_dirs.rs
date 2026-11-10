@@ -16,6 +16,14 @@ pub(crate) fn appdata() -> Option<PathBuf> {
     std::env::var_os("APPDATA").filter(|p| !p.is_empty()).map(PathBuf::from)
 }
 
+/// `%LOCALAPPDATA%`.
+pub(crate) fn localappdata() -> Option<PathBuf> {
+    #[cfg(test)]
+    return Some(test_root::get().join(r"AppData\Local"));
+    #[allow(unreachable_code)]
+    std::env::var_os("LOCALAPPDATA").filter(|p| !p.is_empty()).map(PathBuf::from)
+}
+
 /// `%USERPROFILE%` (empty when unset, as before).
 pub(crate) fn profile() -> PathBuf {
     #[cfg(test)]

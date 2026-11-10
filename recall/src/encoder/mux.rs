@@ -109,8 +109,17 @@ pub(crate) fn produce(
     timing.aac_cpu_ms = tracks.iter().map(|t| t.cpu_ms).sum();
     timing.aac_coder = tracks.first().map_or("", |t| t.coder.name());
 
-    let wrote = mux_mp4(part, params, backend, packets, &tracks, abort, &mut timing.part_packets)?;
+    #[cfg(test)]
+    let index_at = if NO_INDEX.with(std::cell::Cell::get) { None } else { super::replay_index::slot() };
+    #[cfg(not(test))]
+    let index_at = super::replay_index::slot();
+    let wrote = mux_mp4(part, params, backend, packets, &tracks, abort, &mut timing.part_packets, index_at.as_deref())?;
     timing.mux_ms = wrote.mux_ms;
+    match &wrote.index {
+        Some(Ok(cost)) => (timing.index_ms, timing.index_plan_ms, timing.index_bytes) = (cost.ms, cost.plan_ms, cost.bytes),
+        Some(Err(e)) => eprintln!("[recall] saver: packet index not written ({e}); a save cut off now could not be rebuilt"),
+        None => {}
+    }
     timing.trailer_ms = wrote.trailer_ms;
     let (frames, secs) = match &wrote.partial {
         None => (packets.len() as u64, secs),
@@ -129,13 +138,17 @@ pub(crate) struct Wrote {
     pub video_packets: u64,
     /// End of the last video packet written (its pts + duration, microseconds).
     pub video_end_us: u64,
+    /// The packet index (`replay_index`): what writing it cost, or why it was not written.
+    pub index: Option<Result<super::replay_index::Cost, String>>,
 }
 
 /// A packet's bytes while muxing: audio in hand, video possibly in the spill file.
-enum Bytes<'a> {
+pub(crate) enum Bytes<'a> {
     Audio(&'a [u8]),
     Video(&'a crate::ring::Payload),
 }
+
+
 
 /// True when every PTS is strictly greater than the one before. The ring is
 /// stream-copied with dts == pts, which is only valid without B-frames (bf=0).
@@ -185,42 +198,14 @@ pub(crate) fn mux_mp4(
     tracks: &[AacTrack],
     abort: &AtomicBool,
     written: &mut u64,
+    index_at: Option<&Path>,
 ) -> Result<Wrote, String> {
     debug_assert!(
         pts_strictly_increase(video),
         "save window PTS must strictly increase (bf=0 stream copy, dts == pts)"
     );
     let started = Instant::now();
-    // Explicit format: the in-progress `.part` name has no usable extension.
-    let mut octx = ff::format::output_as(path, "mp4")
-        .map_err(|e| format!("open {}: {e}", path.display()))?;
-    let vcodec = ff::encoder::find_by_name(backend);
-    let mut ost = octx.add_stream(vcodec).map_err(|e| e.to_string())?;
-    ost.set_parameters(params.0.clone());
-    ost.set_time_base(ff::Rational(1, 1_000_000));
-    if let Some(tag) = mp4_video_tag(params.0.id()) {
-        // SAFETY: `ost` is a live stream of `octx`; avformat_new_stream
-        // allocated its codecpar, which set_parameters just filled.
-        unsafe { (*(*ost.as_mut_ptr()).codecpar).codec_tag = tag };
-    }
-    for t in tracks {
-        let mut ast = octx
-            .add_stream(ff::encoder::find(ff::codec::Id::AAC))
-            .map_err(|e| e.to_string())?;
-        ast.set_parameters(&t.encoder);
-        ast.set_time_base(ff::Rational(1, t.rate as i32));
-        ast.set_metadata(track_metadata(t.title));
-    }
-    // Each track's source, for the editor (app tracks start out of the mix). MP4 keeps custom
-    // tags only at file level, and only with use_metadata_tags.
-    let mut file_tags = ff::Dictionary::new();
-    let sources: Vec<&str> = tracks.iter().map(|t| t.source).collect();
-    file_tags.set(crate::edit_model::AUDIO_SOURCES_TAG, &serde_json::to_string(&sources).unwrap_or_default());
-    octx.set_metadata(file_tags);
-    let mut options = ff::Dictionary::new();
-    options.set("movflags", "use_metadata_tags");
-    octx.write_header_with(options)
-        .map_err(|e| format!("write_header: {e}"))?;
+    let mut octx = index::open_output(path, params, backend, tracks, "use_metadata_tags")?;
 
     // Merge all packets in presentation-time order so the interleaver
     // never buffers a whole stream. (stream_idx, seconds, src_tb, pts, data, key)
@@ -246,11 +231,27 @@ pub(crate) fn mux_mp4(
         }
     }
     merged.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+    // The packet index (head + planned records) goes to disk before the first packet goes in.
+    let planning = Instant::now();
+    let mut index_writer = index_at.map(|base| {
+        let start = index::tell(&mut octx);
+        let planned = index::plan(params, start, merged.iter().map(|m| (m.0, m.6, &m.5, m.3, m.4)));
+        index::begin(base, path, params, backend, tracks, planned.as_deref())
+    });
+    let planning_ms = ms(planning.elapsed());
 
     // Time bases are final only after write_header; rescale against those.
     let out_tbs: Vec<ff::Rational> = octx.streams().map(|s| s.time_base()).collect();
     let (mut partial, mut video_packets, mut video_end_us) = (None, 0u64, 0u64);
-    for (stream_idx, _, src_tb, pts, duration, data, key) in merged {
+    for (i, (stream_idx, _, src_tb, pts, duration, data, key)) in merged.into_iter().enumerate() {
+        #[cfg(test)]
+        if KILL_AFTER.with(std::cell::Cell::get) == Some(*written) {
+            // A process kill: nothing more reaches Windows (the muxer's buffer and the index
+            // writer are dropped without a flush).
+            std::mem::forget(octx);
+            std::mem::forget(index_writer);
+            return Err("killed (test)".into());
+        }
         if abort.load(Relaxed) || abort_here(*written) {
             partial = Some(ABORTED.to_string());
             break;
@@ -274,11 +275,21 @@ pub(crate) fn mux_mp4(
         pkt.set_stream(stream_idx);
         pkt.rescale_ts(src_tb, out_tbs[stream_idx]);
         let size = pkt.size() as u64;
-        if let Err(e) = pkt.write_interleaved(&mut octx) {
+        // `write_frame`, not `write_interleaved`: the packets are already in time order, and the
+        // file then holds them exactly in this order (what the packet index records).
+        let at = index::tell(&mut octx);
+        if let Err(e) = index::write_packet(&pkt, &mut octx) {
             partial = Some(e.to_string());
             break;
         }
         *written += 1;
+        if let Some(Ok(w)) = &mut index_writer {
+            let record = index::record(stream_idx, key, at, index::tell(&mut octx), pts, duration);
+            if w.needs_record(i, &record) {
+                index::hand_over(&mut octx); // the packet reaches Windows before its record
+            }
+            w.push(i, record);
+        }
         if stream_idx == 0 {
             video_packets += 1;
             video_end_us = (pts + duration).max(0) as u64;
@@ -290,13 +301,14 @@ pub(crate) fn mux_mp4(
             return Err(reason.clone());
         }
     }
+    let index_cost = index_writer.map(|w| w.and_then(super::replay_index::Writer::finish).map(|c| super::replay_index::Cost { plan_ms: planning_ms, ms: c.ms - c.plan_ms + planning_ms, ..c }));
     let mux_ms = ms(started.elapsed());
     let trailer = Instant::now();
     octx.write_trailer().map_err(|e| match &partial {
         Some(reason) => format!("{reason}; finishing the file with the {written} packets written failed: {e}"),
         None => e.to_string(),
     })?;
-    Ok(Wrote { mux_ms, trailer_ms: ms(trailer.elapsed()), partial, video_packets, video_end_us })
+    Ok(Wrote { mux_ms, trailer_ms: ms(trailer.elapsed()), partial, video_packets, video_end_us, index: index_cost })
 }
 
 /// Production `GalleryFn`: the recorder thumbnail the library and the controller read.
@@ -366,6 +378,8 @@ fn write_thumbnail(clip_path: &str, frame: &RawFrame) -> Result<String, String> 
     Ok(thumb.to_string_lossy().into_owned())
 }
 
+#[path = "mux_index.rs"]
+pub(crate) mod index;
 #[path = "mux_aac.rs"]
 mod aac;
 pub(crate) use aac::AacTrack;
@@ -377,6 +391,10 @@ use aac::encode_tracks;
 thread_local! {
     /// Tests: the abort lands once this many packets are in the file (a real mux cut short).
     pub(crate) static ABORT_AFTER: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    /// Tests: the process is killed once this many packets were written.
+    pub(crate) static KILL_AFTER: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    /// Tests: save without a packet index (the cost comparison).
+    pub(crate) static NO_INDEX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn abort_here(_written: u64) -> bool {

@@ -17,6 +17,7 @@
 //! from the old encoder's last packet. Gaps between packets with no reopen are
 //! not counted: the encoder is VFR and a static screen sends nothing.
 
+use crate::encoder::in_progress;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -201,13 +202,56 @@ impl<F: SinkFactory> Recorder<F> {
 #[path = "machine_parts_tests.rs"]
 mod tests;
 
-/// Rename a partial recording into place; `None` when that fails too.
+/// Rename a partial recording into place (its bookmarks from the in-progress list beside it);
+/// `None` when that fails too (it then stays listed, for the next start).
 pub(super) fn keep_partial(part: &Path) -> Option<PathBuf> {
     let target = crate::naming::recovered_path(part, Path::exists);
+    // Bookmarks first: a crash between the rename and the unlisting must not lose them.
+    if let Some(entry) = in_progress::get(part) {
+        super::super::recover::write_marks(&target, &entry, None, &mut Vec::new());
+    }
     std::fs::rename(part, &target).ok()?;
     // No event to carry a failure here: the kept file just stays uncounted.
     let _ = crate::game_folder_rule::record_saved(&target, Some(part));
+    unlist_part(part);
     Some(target)
+}
+
+/// `part` joins the in-progress list (its first frame at capture µs `base_us`). On a failure
+/// the recording still goes on (refusing it would lose it for sure), and the next start runs
+/// the one-time scan again, which finds a crashed part in the clip folder; one log line.
+pub(super) fn list_part(part: &Path, base_us: u64) -> Option<Event> {
+    let entry = in_progress::Entry { base_us: Some(base_us), ..in_progress::Entry::long(part) };
+    let e = in_progress::add(entry).err()?;
+    let rescan = match in_progress::request_legacy_scan() {
+        Ok(()) => "the next start scans for it".to_string(),
+        Err(r) => format!("and the next start's scan could not be asked for: {r}"),
+    };
+    Some(Event::Log(format!("long recording {} not listed for recovery ({e}); {rescan}", part.display())))
+}
+
+/// A bookmark at capture µs `at_us`, kept in the list too (a crash keeps it).
+pub(super) fn list_mark(part: &Path, at_us: u64) {
+    let _ = in_progress::update(part, |e| e.marks.push(at_us));
+}
+
+pub(super) fn unlist_part(part: &Path) {
+    let _ = in_progress::remove(part);
+}
+
+/// A part that never got a video packet: when its file holds nothing of the recording, a
+/// diagnostic line and the Recycle Bin (never a permanent delete); anything else stays.
+pub(crate) fn dispose_empty_part(part: &Path) -> Vec<Event> {
+    unlist_part(part);
+    if !part.exists() {
+        return Vec::new();
+    }
+    match crate::encoder::part_recover::layout(part) {
+        Ok(crate::encoder::part_recover::Layout::NoPackets) => {
+            crate::encoder::recycle::dispose_unrecoverable(part, "no video packet was written").into_iter().map(Event::Log).collect()
+        }
+        _ => vec![Event::Log(format!("long recording {} holds data but no video packet went in; kept as it is", part.display()))],
+    }
 }
 
 /// A game-folder marker update for `path` (`record_saved` / `record_writing`): a failure is one
